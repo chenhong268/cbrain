@@ -101,7 +101,7 @@ GBrain's most valuable feature:
 
 ## Embedding Provider Plugin System
 
-Abstract interface for multiple providers:
+Abstract interface for multiple providers (only 智谱 implemented in v1):
 
 ```typescript
 interface EmbeddingProvider {
@@ -112,9 +112,9 @@ interface EmbeddingProvider {
 ```
 
 Built-in providers:
-- **zhipu**: 智谱 embedding-3 (2048d) — default, best Chinese quality
-- **openai**: text-embedding-3-small/large
-- **ollama**: Local models via Ollama API
+- **zhipu**: 智谱 embedding-3 (2048d) — v1 唯一实现，中文最强
+
+**Future**: OpenAI, Ollama 等留到后续迭代，接口已预留。
 
 ## Skills (SKILL.md Files)
 
@@ -267,9 +267,7 @@ cbrain/
 │   │   └── lancedb.ts          # LanceDB operations
 │   ├── embedding/
 │   │   ├── provider.ts         # EmbeddingProvider interface
-│   │   ├── zhipu.ts            # 智谱 embedding-3
-│   │   ├── openai.ts           # OpenAI embeddings
-│   │   └── ollama.ts           # Ollama local embeddings
+│   │   └── zhipu.ts            # 智谱 embedding-3 (v1 唯一实现)
 │   ├── skills/                 # Skill implementations
 │   │   ├── signal-detector.ts
 │   │   ├── ingest.ts
