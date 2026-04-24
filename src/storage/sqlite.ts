@@ -1,0 +1,112 @@
+import { Database } from "bun:sqlite";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+
+export class CBrainDB {
+  private db: Database;
+
+  constructor(dbPath: string) {
+    if (!existsSync(dirname(dbPath))) {
+      mkdirSync(dirname(dbPath), { recursive: true });
+    }
+    this.db = new Database(dbPath);
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA foreign_keys = ON");
+    this.migrate();
+  }
+
+  private migrate(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS pages (
+        slug TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'event', 'record', 'source')),
+        title TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        content_hash TEXT,
+        tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
+        mention_count INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_slug TEXT NOT NULL,
+        to_slug TEXT NOT NULL,
+        relation TEXT NOT NULL DEFAULT 'mentions',
+        context TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (from_slug) REFERENCES pages(slug) ON DELETE CASCADE,
+        FOREIGN KEY (to_slug) REFERENCES pages(slug) ON DELETE CASCADE,
+        UNIQUE(from_slug, to_slug, relation)
+      );
+
+      CREATE TABLE IF NOT EXISTS tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        page_slug TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE,
+        UNIQUE(page_slug, tag)
+      );
+
+      CREATE TABLE IF NOT EXISTS timeline (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        page_slug TEXT NOT NULL,
+        event_date TEXT NOT NULL,
+        source TEXT,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        page_slug TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE,
+        UNIQUE(page_slug, chunk_index)
+      );
+
+      CREATE TABLE IF NOT EXISTS ingest_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_type TEXT NOT NULL,
+        action TEXT NOT NULL,
+        page_slug TEXT,
+        details TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type);
+      CREATE INDEX IF NOT EXISTS idx_pages_tier ON pages(tier);
+      CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_slug);
+      CREATE INDEX IF NOT EXISTS idx_links_to ON links(to_slug);
+      CREATE INDEX IF NOT EXISTS idx_links_relation ON links(relation);
+      CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+      CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline(event_date);
+      CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_slug);
+    `);
+  }
+
+  prepare(sql: string) {
+    return this.db.prepare(sql);
+  }
+
+  run(sql: string) {
+    return this.db.exec(sql);
+  }
+
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  close(): void {
+    this.db.close();
+  }
+}

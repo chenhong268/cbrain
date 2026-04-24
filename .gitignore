@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.lance/
+.env
+.DS_Store
+cbrain.config.local.yaml
