@@ -122,9 +122,22 @@ export class CBrainDB {
 
   ftsSearch(query: string, limit: number = 10): Array<{ page_slug: string; content: string; rank: number }> {
     if (query.length < 3) return [];
+    const ftsQuery = this.buildTrigramQuery(query);
     return this.db.prepare(
       "SELECT page_slug, content, rank FROM chunks_fts WHERE chunks_fts MATCH $query ORDER BY rank LIMIT $limit"
-    ).all({ $query: query, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
+    ).all({ $query: ftsQuery, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
+  }
+
+  private buildTrigramQuery(query: string): string {
+    // For short queries (3-6 chars), use as-is — likely a precise substring search
+    if (query.length <= 6) return query;
+    // For longer queries, extract overlapping trigrams and OR them
+    // e.g. "张三负责什么项目" → "张三负 OR 三负责 OR 负责什 OR 责什么 OR 什么项 OR 么项目"
+    const trigrams: string[] = [];
+    for (let i = 0; i <= query.length - 3; i++) {
+      trigrams.push(query.slice(i, i + 3));
+    }
+    return trigrams.join(" OR ");
   }
 
   close(): void {
