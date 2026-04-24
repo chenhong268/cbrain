@@ -17,7 +17,7 @@ export function parseFrontmatter(content: string): {
   body: string;
 } {
   const { data, content: body } = matter(content);
-  return { frontmatter: data as PageFrontmatter, body };
+  return { frontmatter: data as PageFrontmatter, body: body.trimEnd() };
 }
 
 export function stringifyFrontmatter(

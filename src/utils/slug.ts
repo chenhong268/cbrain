@@ -1,19 +1,28 @@
 const CJK_RANGE = /[一-鿿㐀-䶿]/;
 
-export function generateSlug(title: string, type: string): string {
-  // If title has CJK characters, use pinyin approximation + hash fallback
-  const hasChinese = CJK_RANGE.test(title);
+const PLURALS: Record<string, string> = {
+  entity: "entities",
+  concept: "concepts",
+  event: "events",
+  record: "records",
+  source: "sources",
+};
 
+function pluralize(type: string): string {
+  return PLURALS[type] ?? `${type}s`;
+}
+
+export function generateSlug(title: string, type: string): string {
+  const dir = pluralize(type);
+
+  const hasChinese = CJK_RANGE.test(title);
   if (hasChinese) {
-    // For Chinese: transliterate to simplified form
-    // Keep Chinese chars but remove special chars, use as-is
-    // This preserves readability for Chinese users
     const cleaned = title
       .replace(/[^一-鿿㐀-䶿a-zA-Z0-9\s-]/g, "")
       .trim()
       .replace(/\s+/g, "-")
       .toLowerCase();
-    return `${type}s/${cleaned}`;
+    return `${dir}/${cleaned}`;
   }
 
   const cleaned = title
@@ -22,7 +31,7 @@ export function generateSlug(title: string, type: string): string {
     .trim()
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-");
-  return `${type}s/${cleaned}`;
+  return `${dir}/${cleaned}`;
 }
 
 export function extractSlugFromWikiLink(link: string): string {
