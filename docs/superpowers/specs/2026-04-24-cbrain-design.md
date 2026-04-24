@@ -21,7 +21,7 @@ Build an open-source personal knowledge brain for AI Agents. Inspired by Karpath
 ├─────────────────────────────────────────┤
 │  CBrain Core (CLI + MCP Server)         │  ← File I/O, indexing, search
 ├─────────────────────────────────────────┤
-│  Storage (SQLite + LanceDB)             │  ← Structured data + vector/FTS search
+│  Storage (SQLite + LanceDB)             │  ← Structured data + FTS (SQLite FTS5) + vector (LanceDB)
 └─────────────────────────────────────────┘
     ↕ bidirectional sync
 ┌─────────────────────────────────────────┐
@@ -31,7 +31,7 @@ Build an open-source personal knowledge brain for AI Agents. Inspired by Karpath
 
 ### Key Principle: Obsidian is Single Source of Truth
 
-CBrain never hoards data. All compiled artifacts are written as Obsidian-readable markdown. SQLite/LanceDB are index layers — delete and rebuild anytime.
+CBrain never hoards data. All compiled artifacts are written as Obsidian-readable markdown. SQLite (structured data + FTS) and LanceDB (vectors) are index layers — delete and rebuild anytime.
 
 ## Tech Stack
 
@@ -39,7 +39,7 @@ CBrain never hoards data. All compiled artifacts are written as Obsidian-readabl
 |:----------|:-------|:-------|
 | Runtime | Bun | Fast, native TS, consistent with Hermes ecosystem |
 | Structured Storage | SQLite (bun:sqlite) | Zero config, fast enough, relational queries |
-| Search Layer | LanceDB | Vector + Chinese FTS (tantivy/lindera) in one engine, native Bun support |
+| Search Layer | LanceDB + SQLite FTS5 | LanceDB for vector ANN, SQLite FTS5 (trigram) for Chinese full-text search |
 | Embedding | Pluggable providers | Default: 智谱 embedding-3 (2048d). Also supports OpenAI, Ollama |
 | Interface | MCP Server | Hermes Agent native support |
 | Human UI | Obsidian | Graph view, backlinks, Dataview |
@@ -75,7 +75,7 @@ All paths converge: Obsidian markdown files + SQLite/LanceDB indexes.
 Three-layer hybrid search:
 
 1. **Vector search** (LanceDB, configurable embedding provider)
-2. **Chinese full-text search** (LanceDB built-in tantivy + lindera tokenizer)
+2. **Chinese full-text search** (SQLite FTS5 with trigram tokenizer — handles CJK natively)
 3. **Graph traversal** (SQLite stores relationship edges)
 
 Fusion strategy: RRF (Reciprocal Rank Fusion). Simple, effective.

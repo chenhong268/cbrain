@@ -4,7 +4,7 @@
 
 **Goal:** Build a personal knowledge brain for AI Agents — human inputs, Agent compiles, knowledge compounds.
 
-**Architecture:** Three-layer (Skills → Core → Storage) with Obsidian vault as SSOT. SQLite for structured data, LanceDB for vector + Chinese FTS. 智谱 embedding-3 for vectors.
+**Architecture:** Three-layer (Skills → Core → Storage) with Obsidian vault as SSOT. SQLite for structured data + FTS (FTS5 trigram), LanceDB for vector search. 智谱 embedding-3 for vectors.
 
 **Tech Stack:** Bun + TypeScript, SQLite (bun:sqlite), LanceDB, 智谱 embedding-3, MCP Server (@modelcontextprotocol/sdk), MIT license.
 
@@ -54,7 +54,7 @@
 
 - [ ] Create src/core/search.ts — HybridSearch class
   - vector_search: LanceDB ANN
-  - fts_search: LanceDB fullText index (Chinese tokenizer)
+  - fts_search: SQLite FTS5 trigram (Chinese-compatible)
   - graph_search: SQLite link traversal
   - RRF fusion: score = Σ(1/(60 + rank)) across all results
 - [ ] Create src/core/sync.ts — sync vault files → SQLite + LanceDB indexes

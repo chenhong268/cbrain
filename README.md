@@ -123,7 +123,7 @@ Add to your Agent's MCP config:
 Three search strategies, fused with Reciprocal Rank Fusion (RRF):
 
 1. **Vector search** — Semantic similarity via embedding (default: 智谱 embedding-3, 2048d)
-2. **Chinese FTS** — Full-text search with lindera Chinese tokenizer
+2. **Chinese FTS** — Full-text search via SQLite FTS5 trigram tokenizer
 3. **Graph traversal** — Relationship-based discovery through the knowledge graph
 
 ```bash
@@ -192,8 +192,8 @@ Set `CBRAIN_ZHIPU_API_KEY` environment variable as an alternative to config file
 | Component | Choice | Why |
 |:----------|:-------|:----|
 | Runtime | Bun | Fast, native TypeScript |
-| Structured Storage | SQLite (bun:sqlite) | Zero config, relational queries |
-| Vector + FTS | LanceDB | Vector + Chinese FTS in one engine |
+| Structured Storage + FTS | SQLite (bun:sqlite + FTS5 trigram) | Zero config, relational queries, Chinese full-text search |
+| Vector Search | LanceDB | High-performance ANN vector search |
 | Embedding | 智谱 embedding-3 | Best Chinese embeddings, 2048d |
 | Agent Interface | MCP Server | Standard protocol for Agent tools |
 | Human Interface | Obsidian | Graph view, backlinks, Dataview |
