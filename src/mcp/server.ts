@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -48,16 +50,17 @@ export function createServer(deps: CBrainDeps): McpServer {
 
   // ─── ingest ──────────────────────────────────────────────
   server.registerTool("ingest", {
-    description: "Ingest content into the brain. Supports markdown (with frontmatter) and plain text.",
+    description: "Ingest content into the brain. Supports markdown (with frontmatter) and plain text. IMPORTANT: always provide title and pageType.",
     inputSchema: {
       content: z.string().describe("Content to ingest"),
       type: z.enum(["markdown", "text"]).optional().default("text").describe("Content type"),
-      title: z.string().optional().describe("Title (for text type)"),
+      title: z.string().optional().describe("Title for this page — derive from content if not obvious"),
       tags: z.array(z.string()).optional().describe("Tags to apply"),
-      pageType: z.enum(["entity", "concept", "event", "record", "source"]).optional().describe("Page type (for text)"),
+      pageType: z.enum(["entity", "concept", "event", "record", "source"]).optional().default("record").describe("Page type: entity (person/company), concept, event, record (doc/report), source"),
     },
   }, async ({ content, type, title, tags, pageType }) => {
-    const result = await ingest.ingest({ content, type: type ?? "text", title, tags, pageType });
+    const effectiveTitle = title || content.split("\n").find(l => l.trim())?.trim().slice(0, 50) || "Untitled";
+    const result = await ingest.ingest({ content, type: type ?? "text", title: effectiveTitle, tags, pageType });
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
@@ -70,12 +73,21 @@ export function createServer(deps: CBrainDeps): McpServer {
       slug: z.string().describe("Page slug (e.g. entities/zhangsan)"),
     },
   }, async ({ slug }) => {
-    const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get(slug) as any;
+    const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get(slug) as Record<string, unknown> | undefined;
     if (!row) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }] };
     }
+
+    const filePath = row.file_path as string | undefined;
+    const fullPath = filePath ? join(vaultPath, filePath) : undefined;
+
+    let body: string | null = null;
+    if (fullPath && existsSync(fullPath)) {
+      body = readFileSync(fullPath, "utf-8");
+    }
+
     return {
-      content: [{ type: "text", text: JSON.stringify(row, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ ...row, body }, null, 2) }],
     };
   });
 
@@ -158,8 +170,20 @@ export function createServer(deps: CBrainDeps): McpServer {
       };
     }
     const report = await sync.syncAll(vaultPath);
+    const orphans = await sync.removeOrphans(vaultPath);
     return {
-      content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ ...report, orphansRemoved: orphans.length, orphanSlugs: orphans }, null, 2) }],
+    };
+  });
+
+  // ─── remove_orphans ──────────────────────────────────────
+  server.registerTool("remove_orphans", {
+    description: "Remove database entries that have no corresponding vault file. Run this after manually deleting files from the vault.",
+    inputSchema: {},
+  }, async () => {
+    const orphans = await sync.removeOrphans(vaultPath);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ removed: orphans.length, slugs: orphans }, null, 2) }],
     };
   });
 

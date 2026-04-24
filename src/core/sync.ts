@@ -56,12 +56,8 @@ export class SyncManager {
         const content = readFileSync(filePath, "utf-8");
         const parsed = parseFrontmatter(content);
 
-        const slug = parsed.frontmatter.slug;
-        if (!slug) {
-          report.errors++;
-          report.errorDetails!.push(`Missing slug in ${filePath}`);
-          continue;
-        }
+        const relPath = relative(vaultPath, filePath);
+        const slug = parsed.frontmatter.slug ?? relPath.replace(/\.md$/, "");
 
         const contentHash = this.hashContent(content);
 
@@ -76,9 +72,13 @@ export class SyncManager {
         }
 
         // Upsert page in SQLite
-        const relPath = relative(vaultPath, filePath);
-        const title = parsed.frontmatter.title ?? slug;
-        const type = parsed.frontmatter.type ?? "record";
+        const title = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
+        const dirName = relPath.split("/")[0];
+        const typeFromDir: Record<string, string> = {
+          entities: "entity", concepts: "concept", events: "event",
+          records: "record", sources: "source",
+        };
+        const type = parsed.frontmatter.type ?? typeFromDir[dirName] ?? "record";
 
         this.db.prepare(
           `INSERT INTO pages (slug, type, title, file_path, content_hash, created_at, updated_at)

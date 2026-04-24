@@ -46,22 +46,22 @@ export class IngestManager {
 
   async ingest(input: IngestInput): Promise<IngestResult> {
     if (input.type === "markdown") {
-      return this.ingestMarkdown(input.content, input.tags);
+      return this.ingestMarkdown(input.content, { title: input.title, pageType: input.pageType, tags: input.tags });
     }
     return this.ingestText(input);
   }
 
   private async ingestMarkdown(
     content: string,
-    tags?: string[]
+    overrides?: { title?: string; pageType?: string; tags?: string[] }
   ): Promise<IngestResult> {
     const parsed = parseFrontmatter(content);
 
-    const title = parsed.frontmatter.title ?? "Untitled";
-    const type = parsed.frontmatter.type ?? "record";
+    const title = parsed.frontmatter.title ?? overrides?.title ?? "Untitled";
+    const type = parsed.frontmatter.type ?? overrides?.pageType ?? "record";
     const slug = parsed.frontmatter.slug ?? generateSlug(title, type);
     const body = parsed.body;
-    const effectiveTags = parsed.frontmatter.tags ?? tags ?? [];
+    const effectiveTags = parsed.frontmatter.tags ?? overrides?.tags ?? [];
 
     // Embed first — fail fast before writing anything
     const { chunks, embedResults } = await this.embedChunks(body);
@@ -92,7 +92,7 @@ export class IngestManager {
   }
 
   private async ingestText(input: IngestInput): Promise<IngestResult> {
-    const title = input.title ?? "Untitled";
+    const title = input.title ?? input.content.split("\n").find(l => l.trim())?.trim().slice(0, 50) ?? "Untitled";
     const type = input.pageType ?? "record";
     const slug = generateSlug(title, type);
     const body = input.content;

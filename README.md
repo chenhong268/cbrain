@@ -12,7 +12,7 @@ LLMs forget everything between conversations. CBrain gives your Agent a persiste
 
 - **Obsidian-native** — All pages are markdown files you can read, edit, and browse in Obsidian
 - **Three-layer search** — Vector + Chinese FTS + Graph traversal, fused with RRF
-- **Knowledge graph** — Auto-extracted relationships between entities
+- **Knowledge graph** — Wiki-link based relationships between entities (auto NER in roadmap)
 - **Entity enrichment** — People and companies auto-promote through tiers as you mention them
 - **MCP Server** — Plug into any MCP-compatible Agent (Claude, Hermes, etc.)
 - **Runs locally** — No cloud dependency, your data stays on your machine
@@ -21,7 +21,7 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 
 - **Obsidian 原生** — 所有页面都是 Obsidian 可读的 Markdown 文件
 - **三层搜索** — 向量 + 中文全文 + 图遍历，RRF 融合排序
-- **知识图谱** — 自动提取实体间关系
+- **知识图谱** — 基于 Wiki Link 的实体关系（自动 NER 在路线图中）
 - **实体丰富** — 人物和组织随提及次数自动升级
 - **MCP 服务器** — 接入任何兼容 MCP 的 Agent
 - **本地运行** — 无云依赖，数据留在你的机器上
@@ -213,6 +213,17 @@ bun run lint
 # Run CLI in dev mode
 bun run dev init
 ```
+
+## Roadmap
+
+See [CHANGELOG.md](./CHANGELOG.md) for detailed version history.
+
+| Version | Focus | Status |
+|:--------|:------|:-------|
+| v0.1 | Core pipeline — storage, search, MCP, CLI | ✅ Done |
+| v0.2 | NER + auto relationship extraction | Planned |
+| v0.3 | Auto entity enrichment (web data) | Planned |
+| v0.4 | Automation — file watcher, signal detector, nightly maintenance | Planned |
 
 ## License
 

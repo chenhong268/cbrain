@@ -21,11 +21,12 @@ interface CBrainConfig {
 }
 
 function findConfig(startDir?: string): CBrainConfig | null {
-  const dir = startDir ?? process.cwd();
+  const dir = startDir ?? process.env.CBRAIN_DIR ?? process.cwd();
   const configPath = join(dir, CONFIG_FILE);
   if (existsSync(configPath)) {
     return JSON.parse(readFileSync(configPath, "utf-8"));
   }
+  if (process.env.CBRAIN_DIR) return null;
   const parent = resolve(dir, "..");
   if (parent === dir) return null;
   return findConfig(parent);

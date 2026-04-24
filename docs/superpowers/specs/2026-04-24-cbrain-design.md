@@ -1,6 +1,8 @@
 # CBrain Design Spec
 
 > **CBrain — Your Agent's Memory, Compounding. Agent 的记忆，复利生长。**
+>
+> **Implementation status as of v0.1.1 (2025-04-25)**: ✅ = done, ❌ = not yet, 🔶 = partial
 
 ## Goal
 
@@ -60,6 +62,8 @@ Each page uses unified frontmatter format for Dataview compatibility.
 
 ## Entry Points and Data Flow
 
+> **Status**: 🔶 Entry 1 (file watcher) not implemented, Entry 2 (signal detector) manual only
+
 ```
 Entry 1: Human writes in Obsidian → CBrain file watcher → auto-index
 Entry 2: Chat with Agent → signal-detector extracts → CBrain compiles → write Obsidian + index
@@ -72,6 +76,8 @@ All paths converge: Obsidian markdown files + SQLite/LanceDB indexes.
 
 ## Search System
 
+> **Status**: ✅ Complete
+
 Three-layer hybrid search:
 
 1. **Vector search** (LanceDB, configurable embedding provider)
@@ -82,22 +88,26 @@ Fusion strategy: RRF (Reciprocal Rank Fusion). Simple, effective.
 
 ## Knowledge Graph
 
+> **Status**: 🔶 Partial — wiki links work, auto NER not yet
+
 Borrowed from GBrain, optimized for Chinese:
 
-- **Link extraction**: Agent adds `[[name]]` links + frontmatter relationship annotations
-- **Relationship types**: `knows`, `works_at`, `invested_in`, `founded`, `attended`, `mentions` (configurable)
-- **Chinese relationship inference**: Not just regex — LLM-assisted judgment ("张三是诺华的经理" → `works_at`)
-- **Backlinks**: Auto-completed to maintain graph connectivity
+- **Link extraction**: Agent adds `[[name]]` links + frontmatter relationship annotations (✅ done)
+- **Relationship types**: `knows`, `works_at`, `invested_in`, `founded`, `attended`, `mentions` (configurable) (❌ only `mentions` implemented)
+- **Chinese relationship inference**: Not just regex — LLM-assisted judgment ("张三是诺华的经理" → `works_at`) (❌ not yet)
+- **Backlinks**: Auto-completed to maintain graph connectivity (✅ done)
 
 ## Person Auto-Enrichment (CRM Core)
 
+> **Status**: 🔶 Partial — tier promotion works, web auto-enrichment not yet
+
 GBrain's most valuable feature:
 
-| Tier | Trigger | Processing |
-|:-----|:--------|:-----------|
-| Tier 3 (stub) | Mentioned 1 time | Create stub page |
-| Tier 2 (medium) | 3+ times across different sources | Auto-enrich with web data |
-| Tier 1 (full) | Meeting/8+ mentions | Full profile + timeline + relationship network |
+| Tier | Trigger | Processing | Status |
+|:-----|:--------|:-----------|:-------|
+| Tier 3 (stub) | Mentioned 1 time | Create stub page | ✅ |
+| Tier 2 (medium) | 3+ times across different sources | Auto-enrich with web data | ❌ |
+| Tier 1 (full) | Meeting/8+ mentions | Full profile + timeline + relationship network | ❌ |
 
 ## Embedding Provider Plugin System
 
@@ -122,13 +132,13 @@ Prioritized from GBrain's 26 skills:
 
 ### P0 (MVP)
 
-| Skill | Function |
-|:------|:---------|
-| signal-detector | Extract entities + ideas from every message |
-| ingest | Content router, dispatch by type |
-| query | Three-layer hybrid search + synthesis |
-| enrich | Person/company tiered enrichment |
-| brain-ops | Check brain before answering, 5-step protocol |
+| Skill | Function | Status |
+|:------|:---------|:-------|
+| signal-detector | Extract entities + ideas from every message | ✅ SKILL.md only, no auto-trigger |
+| ingest | Content router, dispatch by type | ✅ |
+| query | Three-layer hybrid search + synthesis | ✅ |
+| enrich | Person/company tiered enrichment | ✅ tier promotion only |
+| brain-ops | Check brain before answering, 5-step protocol | ✅ |
 
 ### P1 (Post-MVP)
 

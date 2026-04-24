@@ -37,8 +37,12 @@ const DEFAULT_CONFIG: CBrainConfig = {
 };
 
 export function loadConfig(configPath?: string): CBrainConfig {
+  const envDir = process.env.CBRAIN_DIR;
   const paths = [
     configPath,
+    envDir && resolve(envDir, "cbrain.json"),
+    envDir && resolve(envDir, "cbrain.config.yaml"),
+    "cbrain.json",
     "cbrain.config.local.yaml",
     "cbrain.config.yaml",
   ].filter(Boolean) as string[];
@@ -46,12 +50,22 @@ export function loadConfig(configPath?: string): CBrainConfig {
   for (const p of paths) {
     if (existsSync(p)) {
       const raw = readFileSync(p, "utf-8");
-      const parsed = parseYaml(raw) as Partial<CBrainConfig>;
-      return mergeConfig(DEFAULT_CONFIG, parsed);
+      const parsed = (p.endsWith(".json") ? JSON.parse(raw) : parseYaml(raw)) as Partial<CBrainConfig>;
+      return mergeConfig(DEFAULT_CONFIG, normalizeJsonConfig(parsed));
     }
   }
 
   return { ...DEFAULT_CONFIG };
+}
+
+function normalizeJsonConfig(raw: Record<string, unknown>): Partial<CBrainConfig> {
+  return {
+    vault_path: (raw.vaultPath ?? raw.vault_path) as string | undefined,
+    db_path: (raw.dbPath ?? raw.db_path) as string | undefined,
+    lancedb_path: (raw.lancePath ?? raw.lancedb_path ?? raw.lancedbPath) as string | undefined,
+    embedding: raw.embedding as Partial<CBrainConfig["embedding"]> | undefined,
+    search: raw.search as Partial<CBrainConfig["search"]> | undefined,
+  };
 }
 
 function mergeConfig(
