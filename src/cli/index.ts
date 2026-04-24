@@ -40,14 +40,16 @@ function loadConfig(): CBrainConfig {
   return config;
 }
 
-function createDeps(config: CBrainConfig): CBrainDeps {
+function createDeps(config: CBrainConfig, requireEmbedding = true): CBrainDeps {
   const db = new CBrainDB(config.dbPath);
   const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
-  if (!apiKey) {
+  if (!apiKey && requireEmbedding) {
     console.error("Error: ZHIPU_API_KEY not set (env or cbrain.json).");
     process.exit(1);
   }
-  const embedding = new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl);
+  const embedding = apiKey
+    ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
+    : (undefined as unknown as ZhipuEmbeddingProvider);
   const lance = new LanceDBManager();
   return { db, embedding, lance, vaultPath: config.vaultPath };
 }
@@ -192,8 +194,11 @@ program
   .argument("<query>", "Search query")
   .action(async (query, opts) => {
     const config = loadConfig();
-    const deps = createDeps(config);
-    await deps.lance.connect(config.lancePath);
+    const needsEmbedding = opts.strategy === "vector" || opts.strategy === "all";
+    const deps = createDeps(config, needsEmbedding);
+    if (needsEmbedding) {
+      await deps.lance.connect(config.lancePath);
+    }
 
     const { HybridSearch } = await import("../core/search.js");
     const search = new HybridSearch(deps.db, deps.embedding, deps.lance);

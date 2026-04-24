@@ -86,34 +86,9 @@ export class LanceDBManager {
     }));
   }
 
-  async fullTextSearch(query: string, limit: number = 10): Promise<SearchResult[]> {
-    const table = await this.getOrCreateTable();
-
-    const results = await table
-      .search(query)
-      .limit(limit)
-      .select(["pageSlug", "chunkIndex", "content", "_score"])
-      .fullTextSearch(query)
-      .toArray();
-
-    return results.map((row: Record<string, unknown>) => ({
-      pageSlug: row.pageSlug as string,
-      chunkIndex: row.chunkIndex as number,
-      content: row.content as string,
-      _distance: row._distance as number | undefined,
-    }));
-  }
-
   async deleteByPageSlug(pageSlug: string): Promise<void> {
     const table = await this.getOrCreateTable();
     await table.delete(`pageSlug = '${pageSlug.replace(/'/g, "''")}'`);
-  }
-
-  async createFTSIndex(): Promise<void> {
-    const table = await this.getOrCreateTable();
-    await table.createIndex("content", {
-      config: lancedb.Index.fts(),
-    });
   }
 
   async close(): Promise<void> {

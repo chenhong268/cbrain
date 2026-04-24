@@ -117,12 +117,17 @@ export class SyncManager {
         this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({
           $slug: slug,
         });
+        this.db.ftsDeleteByPage(slug);
         const insertChunk = this.db.prepare(
           "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
         );
         for (const chunk of chunks) {
           insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
         }
+
+        // Populate FTS index (concatenate all chunk content for the page)
+        const fullContent = chunks.map((c) => c.content).join("\n\n");
+        this.db.ftsInsert(slug, fullContent);
 
         // Log to ingest_log
         this.db.prepare(
@@ -223,12 +228,16 @@ export class SyncManager {
     this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({
       $slug: effectiveSlug,
     });
+    this.db.ftsDeleteByPage(effectiveSlug);
     const insertChunk = this.db.prepare(
       "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
     );
     for (const chunk of chunks) {
       insertChunk.run({ $slug: effectiveSlug, $idx: chunk.index, $content: chunk.content });
     }
+
+    const fullContent = chunks.map((c) => c.content).join("\n\n");
+    this.db.ftsInsert(effectiveSlug, fullContent);
 
     this.db.prepare(
       `INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)`

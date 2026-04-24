@@ -63,6 +63,9 @@ export class IngestManager {
     const body = parsed.body;
     const effectiveTags = parsed.frontmatter.tags ?? tags ?? [];
 
+    // Embed first — fail fast before writing anything
+    const { chunks, embedResults } = await this.embedChunks(body);
+
     const existing = this.pages.getBySlug(slug);
     if (existing) {
       this.pages.update(slug, { body, tags: effectiveTags });
@@ -79,7 +82,7 @@ export class IngestManager {
     const links = this.extractWikiLinks(body);
     this.upsertLinks(slug, links);
 
-    await this.indexToLanceDB(slug, body);
+    await this.writeIndexes(slug, chunks, embedResults);
 
     return {
       slug,
@@ -92,8 +95,11 @@ export class IngestManager {
     const title = input.title ?? "Untitled";
     const type = input.pageType ?? "record";
     const slug = generateSlug(title, type);
-
     const body = input.content;
+
+    // Embed first — fail fast before writing anything
+    const { chunks, embedResults } = await this.embedChunks(body);
+
     this.pages.create({
       title,
       type,
@@ -105,7 +111,7 @@ export class IngestManager {
     const links = this.extractWikiLinks(body);
     this.upsertLinks(slug, links);
 
-    await this.indexToLanceDB(slug, body);
+    await this.writeIndexes(slug, chunks, embedResults);
 
     return {
       slug,
@@ -114,13 +120,25 @@ export class IngestManager {
     };
   }
 
-  private async indexToLanceDB(slug: string, body: string): Promise<void> {
+  private async embedChunks(
+    body: string
+  ): Promise<{ chunks: Array<{ index: number; content: string }>; embedResults: Array<{ embedding: number[]; tokenCount: number }> }> {
     const chunks = this.chunkContent(body);
-    if (chunks.length === 0) return;
-
+    if (chunks.length === 0) {
+      return { chunks: [], embedResults: [] };
+    }
     const embedResults = await this.embedding.embedBatch(
       chunks.map((c) => c.content)
     );
+    return { chunks, embedResults };
+  }
+
+  private async writeIndexes(
+    slug: string,
+    chunks: Array<{ index: number; content: string }>,
+    embedResults: Array<{ embedding: number[]; tokenCount: number }>
+  ): Promise<void> {
+    if (chunks.length === 0) return;
 
     await this.lance.deleteByPageSlug(slug);
     await this.lance.addChunks(
@@ -135,12 +153,16 @@ export class IngestManager {
     this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({
       $slug: slug,
     });
+    this.db.ftsDeleteByPage(slug);
     const insertChunk = this.db.prepare(
       "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
     );
     for (const chunk of chunks) {
       insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
     }
+
+    const fullContent = chunks.map((c) => c.content).join("\n\n");
+    this.db.ftsInsert(slug, fullContent);
 
     this.db.prepare(
       `INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)`

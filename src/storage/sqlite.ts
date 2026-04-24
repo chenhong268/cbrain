@@ -91,6 +91,8 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
       CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline(event_date);
       CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_slug);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(page_slug, content, tokenize='trigram');
     `);
   }
 
@@ -104,6 +106,25 @@ export class CBrainDB {
 
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  ftsInsert(pageSlug: string, content: string): void {
+    this.db.prepare(
+      "INSERT INTO chunks_fts(page_slug, content) VALUES ($slug, $content)"
+    ).run({ $slug: pageSlug, $content: content });
+  }
+
+  ftsDeleteByPage(pageSlug: string): void {
+    this.db.prepare(
+      "DELETE FROM chunks_fts WHERE page_slug = $slug"
+    ).run({ $slug: pageSlug });
+  }
+
+  ftsSearch(query: string, limit: number = 10): Array<{ page_slug: string; content: string; rank: number }> {
+    if (query.length < 3) return [];
+    return this.db.prepare(
+      "SELECT page_slug, content, rank FROM chunks_fts WHERE chunks_fts MATCH $query ORDER BY rank LIMIT $limit"
+    ).all({ $query: query, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
   }
 
   close(): void {

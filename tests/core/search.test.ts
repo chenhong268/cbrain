@@ -322,13 +322,11 @@ describe("HybridSearch", () => {
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/f1", "entity", "F1", "f1.md", "h1");
 
-      const { embedding } = await provider.embed("full text search example");
-      await lance.addChunks([
-        { pageSlug: "entities/f1", chunkIndex: 0, content: "full text search example", vector: embedding },
-      ]);
+      // Insert into SQLite FTS table (trigram tokenizer requires 3+ char queries)
+      db.ftsInsert("entities/f1", "full text search example document");
 
       const hs = new HybridSearch(db, provider, lance as any, { rrf_k: 60 });
-      const results = await hs.search("full text", { strategy: "fts", limit: 10 });
+      const results = await hs.search("full text search", { strategy: "fts", limit: 10 });
 
       expect(results.length).toBeGreaterThan(0);
       expect(results.every((r) => r.source === "fts")).toBe(true);

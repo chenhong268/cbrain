@@ -105,7 +105,7 @@ export class HybridSearch {
 
     const [vectorResults, ftsResults, graphResults] = await Promise.all([
       this.vectorSearch(query, limit).catch(() => [] as SearchResult[]),
-      this.ftsSearch(query, limit).catch(() => [] as SearchResult[]),
+      Promise.resolve(this.ftsSearch(query, limit)),
       this.graphSearch(query, limit).catch(() => [] as SearchResult[]),
     ]);
 
@@ -128,11 +128,11 @@ export class HybridSearch {
     }));
   }
 
-  private async ftsSearch(query: string, limit: number): Promise<SearchResult[]> {
-    const results = await this.lance.fullTextSearch(query, limit);
+  private ftsSearch(query: string, limit: number): SearchResult[] {
+    const results = this.db.ftsSearch(query, limit);
     return results.map((r) => ({
-      slug: r.pageSlug,
-      score: 1,
+      slug: r.page_slug,
+      score: 1 / (1 - r.rank),
       snippet: r.content.slice(0, 200),
       source: "fts" as const,
     }));

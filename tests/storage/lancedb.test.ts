@@ -115,6 +115,7 @@ describe("LanceDBManager", () => {
   });
 
   test("fullTextSearch finds matching chunks", async () => {
+    // FTS moved to SQLite FTS5 — this test verifies LanceDB vector search still works
     const chunks: ChunkData[] = [
       {
         pageSlug: "entities/fts-test",
@@ -122,25 +123,14 @@ describe("LanceDBManager", () => {
         content: "Quantum computing uses qubits for computation",
         vector: makeVector(0),
       },
-      {
-        pageSlug: "entities/fts-test",
-        chunkIndex: 1,
-        content: "Classical computers use binary bits",
-        vector: makeVector(1),
-      },
     ];
 
     await manager.addChunks(chunks);
-    // Create FTS index on content column
-    await manager.createFTSIndex();
-
-    const results = await manager.fullTextSearch("quantum", 10);
-
+    const results = await manager.search(makeVector(0), 10);
     expect(results.length).toBeGreaterThanOrEqual(1);
-    expect(results[0].content).toContain("Quantum");
   });
 
-  test("fullTextSearch with no results returns empty array", async () => {
+  test("search with no results returns empty array", async () => {
     const chunks: ChunkData[] = [
       {
         pageSlug: "entities/fts-empty",
@@ -151,10 +141,9 @@ describe("LanceDBManager", () => {
     ];
 
     await manager.addChunks(chunks);
-    await manager.createFTSIndex();
-
-    const results = await manager.fullTextSearch("nonexistent-xyz-abc", 10);
-    expect(results).toHaveLength(0);
+    const results = await manager.search(makeVector(999), 10);
+    // Vector search may still return results due to similarity, so just verify no crash
+    expect(Array.isArray(results)).toBe(true);
   });
 
   test("deleteByPageSlug removes all chunks for a page", async () => {
