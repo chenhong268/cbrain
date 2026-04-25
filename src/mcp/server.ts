@@ -439,8 +439,34 @@ export function createServer(deps: CBrainDeps): McpServer {
     },
   }, async ({ slug }) => {
     const entries = db.getTimeline(slug);
+    const page = pages.getBySlug(slug);
+    const body = page?.body ?? "";
+
+    // Build a unified events list — structured entries + body date lines
+    const events: Array<{ date?: string; summary: string; source: string }> = [];
+    for (const e of entries) {
+      events.push({ date: e.event_date ?? undefined, summary: e.summary, source: e.source ?? "unknown" });
+    }
+
+    const datePattern = /\b\d{4}[.\-/年]\d{1,2}/;
+    for (const line of body.split("\n")) {
+      if (datePattern.test(line)) {
+        const cleaned = line.replace(/^\|?\s*|\s*\|?$/g, "").trim();
+        if (!entries.some(e => cleaned.includes(e.summary.slice(0, 10)))) {
+          events.push({ summary: cleaned, source: "body" });
+        }
+      }
+    }
+
     return {
-      content: [{ type: "text", text: JSON.stringify(entries, null, 2) }],
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          slug,
+          title: page?.title ?? slug,
+          events,
+        }, null, 2),
+      }],
     };
   });
 
@@ -455,6 +481,21 @@ export function createServer(deps: CBrainDeps): McpServer {
     },
   }, async ({ slug, summary, eventDate, source }) => {
     const id = db.addTimelineEntry(slug, summary, eventDate, source);
+
+    // Append to page body for brain/ pages so timeline content is searchable
+    if (!slug.startsWith("raw/")) {
+      const page = pages.getBySlug(slug);
+      if (page) {
+        const dateStr = eventDate ?? new Date().toISOString().slice(0, 10);
+        const srcNote = source ? ` [来源: ${source}]` : "";
+        const entry = `\n- **${dateStr}**: ${summary}${srcNote}`;
+
+        versions.createVersion(slug);
+        pages.update(slug, { body: page.body + entry });
+        await indexPageContent(slug, page.body + entry);
+      }
+    }
+
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, id, slug }) }],
     };

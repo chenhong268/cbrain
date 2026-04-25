@@ -7,7 +7,7 @@ export interface SearchResult {
   slug: string;
   score: number;
   snippet: string;
-  source: "vector" | "fts" | "graph" | "hybrid";
+  source: "vector" | "fts" | "graph" | "hybrid" | "temporal";
 }
 
 export interface SearchOptions {
@@ -116,14 +116,16 @@ export class HybridSearch {
     const allLists: SearchResult[][] = [];
 
     for (const q of queries) {
-      const [vec, fts, graph] = await Promise.all([
+      const [vec, fts, graph, temporal] = await Promise.all([
         this.vectorSearch(q, limit).catch(() => [] as SearchResult[]),
         Promise.resolve(this.ftsSearch(q, limit)),
         this.graphSearch(q, limit).catch(() => [] as SearchResult[]),
+        Promise.resolve(this.temporalSearch(q, limit)),
       ]);
       if (vec.length > 0) allLists.push(vec);
       if (fts.length > 0) allLists.push(fts);
       if (graph.length > 0) allLists.push(graph);
+      if (temporal.length > 0) allLists.push(temporal);
     }
 
     return mergeRankedResults(allLists, this.rrfK, limit);
@@ -169,6 +171,16 @@ export class HybridSearch {
       score: 1 / (1 - r.rank),
       snippet: r.content.slice(0, 200),
       source: "fts" as const,
+    }));
+  }
+
+  private temporalSearch(query: string, limit: number): SearchResult[] {
+    const results = this.db.searchTimeline(query, undefined, limit);
+    return results.map((r) => ({
+      slug: r.page_slug,
+      score: 0.5,
+      snippet: `${r.event_date ?? "?"}: ${r.summary}${r.source ? ` [${r.source}]` : ""}`,
+      source: "temporal" as const,
     }));
   }
 

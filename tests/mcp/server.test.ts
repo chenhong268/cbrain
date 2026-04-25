@@ -566,9 +566,11 @@ describe("MCP Server", () => {
 
   describe("get_timeline tool", () => {
     test("returns timeline events for a page", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      writeFileSync(join(vaultPath, "entities", "tl2.md"), "---\ntitle: TL2\ntype: entity\n---\n| 2026.01 | Event |");
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
-      ).run("entities/tl2", "TL2", "tl2.md", "h1");
+      ).run("entities/tl2", "TL2", "entities/tl2.md", "h1");
       db.prepare(
         "INSERT INTO timeline (page_slug, summary, event_date) VALUES (?, ?, ?)"
       ).run("entities/tl2", "Event 1", "2026-01-01");
@@ -576,8 +578,9 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).get_timeline.handler({ slug: "entities/tl2" });
       const data = JSON.parse(result.content[0].text);
-      expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(1);
+      expect(data.slug).toBe("entities/tl2");
+      expect(Array.isArray(data.events)).toBe(true);
+      expect(data.events.length).toBeGreaterThanOrEqual(1);
     });
   });
 

@@ -194,6 +194,22 @@ export class CBrainDB {
     return Number(result.lastInsertRowid);
   }
 
+  searchTimeline(keyword?: string, dateFrom?: string, limit = 10): Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string }> {
+    let sql = "SELECT page_slug, event_date, source, summary FROM timeline WHERE 1=1";
+    const params: Record<string, string | number> = { $limit: limit };
+
+    if (keyword) {
+      sql += " AND summary LIKE $keyword";
+      params.$keyword = `%${keyword}%`;
+    }
+    if (dateFrom) {
+      sql += " AND event_date >= $dateFrom";
+      params.$dateFrom = dateFrom;
+    }
+    sql += " ORDER BY event_date DESC, id DESC LIMIT $limit";
+    return this.db.prepare(sql).all(params) as any[];
+  }
+
   // ─── Chunk operations ────────────────────────────────────────
 
   getChunksByPage(pageSlug: string): Array<{ id: number; chunk_index: number; content: string; created_at: string }> {

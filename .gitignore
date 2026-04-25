@@ -4,6 +4,12 @@ dist/
 *.sqlite-wal
 *.sqlite-shm
 .lance/
+lancedb/
 .env
 .DS_Store
 cbrain.config.local.yaml
+cbrain.json
+vault/
+3_outputs/
+outputs/
+task_plan.md
