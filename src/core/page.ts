@@ -6,7 +6,6 @@ import {
   unlinkSync,
 } from "node:fs";
 import { join, dirname, relative } from "node:path";
-import { createHash } from "node:crypto";
 import { CBrainDB } from "../storage/sqlite.js";
 import {
   PageFrontmatter,
@@ -14,6 +13,7 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath } from "../utils/slug.js";
+import { hashContent } from "./shared.js";
 
 export interface CreatePageInput {
   title: string;
@@ -68,7 +68,7 @@ export class PageManager {
     mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, content, "utf-8");
 
-    const contentHash = this.hashContent(content);
+    const contentHash = hashContent(content);
 
     const insertPage = this.db.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at)
@@ -162,6 +162,9 @@ export class PageManager {
       extra?: Record<string, unknown>;
     }
   ): Page | null {
+    if (slug.startsWith("raw/")) {
+      return null; // raw/ is human domain — read-only for CBrain
+    }
     const page = this.getBySlug(slug);
     if (!page) return null;
 
@@ -181,7 +184,7 @@ export class PageManager {
     const content = stringifyFrontmatter(frontmatter, body);
     writeFileSync(filePath, content, "utf-8");
 
-    const contentHash = this.hashContent(content);
+    const contentHash = hashContent(content);
     this.db.prepare(
       `UPDATE pages SET content_hash = $hash, updated_at = $now WHERE slug = $slug`
     ).run({ $hash: contentHash, $now: now, $slug: slug });
@@ -226,7 +229,4 @@ export class PageManager {
       .run({ $slug: slug });
   }
 
-  private hashContent(content: string): string {
-    return createHash("sha256").update(content).digest("hex").slice(0, 16);
-  }
 }

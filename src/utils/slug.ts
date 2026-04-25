@@ -8,12 +8,17 @@ const PLURALS: Record<string, string> = {
   source: "sources",
 };
 
+const GENERATED_TYPES = new Set(["entity", "concept"]);
+const GENERATED_PREFIX = "brain/";
+const RAW_PREFIX = "raw/";
+
 function pluralize(type: string): string {
   return PLURALS[type] ?? `${type}s`;
 }
 
 export function generateSlug(title: string, type: string): string {
   const dir = pluralize(type);
+  const prefix = GENERATED_TYPES.has(type) ? GENERATED_PREFIX : RAW_PREFIX;
 
   const hasChinese = CJK_RANGE.test(title);
   if (hasChinese) {
@@ -22,7 +27,7 @@ export function generateSlug(title: string, type: string): string {
       .trim()
       .replace(/\s+/g, "-")
       .toLowerCase();
-    return `${dir}/${cleaned}`;
+    return `${prefix}${dir}/${cleaned}`;
   }
 
   const cleaned = title
@@ -31,7 +36,7 @@ export function generateSlug(title: string, type: string): string {
     .trim()
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-");
-  return `${dir}/${cleaned}`;
+  return `${prefix}${dir}/${cleaned}`;
 }
 
 export function extractSlugFromWikiLink(link: string): string {

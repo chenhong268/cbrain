@@ -2,7 +2,7 @@
 
 > **CBrain — Your Agent's Memory, Compounding. Agent 的记忆，复利生长。**
 >
-> **Implementation status as of v0.1.1 (2025-04-25)**: ✅ = done, ❌ = not yet, 🔶 = partial
+> **Implementation status as of v0.2.0 (2025-04-25)**: ✅ = done, ❌ = not yet, 🔶 = partial
 
 ## Goal
 
@@ -88,14 +88,14 @@ Fusion strategy: RRF (Reciprocal Rank Fusion). Simple, effective.
 
 ## Knowledge Graph
 
-> **Status**: 🔶 Partial — wiki links work, auto NER not yet
+> **Status**: ✅ Done — wiki links + auto NER + relationship inference
 
 Borrowed from GBrain, optimized for Chinese:
 
 - **Link extraction**: Agent adds `[[name]]` links + frontmatter relationship annotations (✅ done)
-- **Relationship types**: `knows`, `works_at`, `invested_in`, `founded`, `attended`, `mentions` (configurable) (❌ only `mentions` implemented)
-- **Chinese relationship inference**: Not just regex — LLM-assisted judgment ("张三是诺华的经理" → `works_at`) (❌ not yet)
-- **Backlinks**: Auto-completed to maintain graph connectivity (✅ done)
+- **Relationship types**: `knows`, `works_at`, `invested_in`, `founded`, `attended`, `mentions` (configurable) (✅ done)
+- **Chinese relationship inference**: Not just regex — LLM-assisted judgment ("张三是诺华的经理" → `works_at`) (✅ done via GLM-4-flash NER)
+- **Backlinks**: Auto-computed to maintain graph connectivity (✅ done)
 
 ## Person Auto-Enrichment (CRM Core)
 

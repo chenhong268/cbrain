@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, basename, extname } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { ZhipuEmbeddingProvider } from "../embedding/zhipu.js";
+import { ZhipuLLMProvider } from "../llm/zhipu.js";
 import { createServer, type CBrainDeps } from "../mcp/server.js";
 
 const CONFIG_FILE = "cbrain.json";
@@ -17,6 +18,13 @@ interface CBrainConfig {
     provider: string;
     apiKey?: string;
     baseUrl?: string;
+  };
+  ner?: {
+    enabled?: boolean;
+    llm_provider?: string;
+    llm_model?: string;
+    llm_api_key?: string;
+    llm_base_url?: string;
   };
 }
 
@@ -52,13 +60,20 @@ function createDeps(config: CBrainConfig, requireEmbedding = true): CBrainDeps {
     ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
     : (undefined as unknown as ZhipuEmbeddingProvider);
   const lance = new LanceDBManager();
-  return { db, embedding, lance, vaultPath: config.vaultPath };
+
+  const nerEnabled = config.ner?.enabled !== false;
+  const nerApiKey = config.ner?.llm_api_key ?? apiKey ?? process.env.ZHIPU_API_KEY;
+  const llm = (nerEnabled && nerApiKey)
+    ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model)
+    : undefined;
+
+  return { db, embedding, lance, vaultPath: config.vaultPath, llm };
 }
 
 const program = new Command()
   .name("cbrain")
   .description("Your Agent's Memory, Compounding. Agent 的记忆，复利生长。")
-  .version("0.1.0");
+  .version("0.2.0");
 
 // ─── init ────────────────────────────────────────────────────
 program
@@ -77,11 +92,11 @@ program
       process.exit(1);
     }
 
-    mkdirSync(join(vaultPath, "entities"), { recursive: true });
-    mkdirSync(join(vaultPath, "concepts"), { recursive: true });
-    mkdirSync(join(vaultPath, "events"), { recursive: true });
-    mkdirSync(join(vaultPath, "records"), { recursive: true });
-    mkdirSync(join(vaultPath, "sources"), { recursive: true });
+    mkdirSync(join(vaultPath, "raw"), { recursive: true });
+    for (const sub of ["entities", "concepts", "events", "records", "sources"]) {
+      mkdirSync(join(vaultPath, "brain", sub), { recursive: true });
+    }
+    mkdirSync(join(dir, "outputs"), { recursive: true });
 
     const config: CBrainConfig = {
       vaultPath,
@@ -141,6 +156,26 @@ program
       ok = false;
     }
 
+    // NER/LLM
+    const nerEnabled = config.ner?.enabled !== false;
+    if (nerEnabled) {
+      const nerApiKey = config.ner?.llm_api_key ?? apiKey ?? process.env.ZHIPU_API_KEY;
+      if (nerApiKey) {
+        try {
+          const llm = new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model);
+          const model = config.ner?.llm_model ?? "glm-4-flash";
+          console.log(`  NER:     ${model} ✓`);
+        } catch (e) {
+          console.error(`  NER:     FAIL — ${(e as Error).message}`);
+          ok = false;
+        }
+      } else {
+        console.log(`  NER:     disabled (no API key)`);
+      }
+    } else {
+      console.log(`  NER:     disabled`);
+    }
+
     console.log(ok ? "\n  All checks passed ✓" : "\n  Some checks failed ✗");
     process.exit(ok ? 0 : 1);
   });
@@ -160,10 +195,11 @@ program
     await deps.lance.connect(config.lancePath);
 
     const { IngestManager } = await import("../core/ingest.js");
-    const ingest = new IngestManager(deps.db, deps.embedding, deps.lance, config.vaultPath);
+    const ingest = new IngestManager(deps.db, deps.embedding, deps.lance, config.vaultPath, deps.llm);
 
     // Support @file syntax
     let input = content;
+    let fileTitle: string | undefined;
     if (input.startsWith("@")) {
       const filePath = input.slice(1);
       if (!existsSync(filePath)) {
@@ -171,18 +207,43 @@ program
         process.exit(1);
       }
       input = readFileSync(filePath, "utf-8");
+      fileTitle = basename(filePath, extname(filePath));
     }
 
     const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined;
     const result = await ingest.ingest({
       content: input,
       type: opts.type ?? "text",
-      title: opts.title,
+      title: opts.title ?? fileTitle,
       tags,
       pageType: opts.pageType,
     });
 
-    console.log(JSON.stringify(result, null, 2));
+    // Human-readable output
+    console.log(result.created ? `✓ Created: ${result.slug}` : `✓ Updated: ${result.slug}`);
+    console.log(`  Links:   ${result.linksExtracted} wiki links extracted`);
+    if (result.ner) {
+      const ner = result.ner;
+      console.log(`  NER:`);
+      console.log(`    Entities:  ${ner.entities} extracted${ner.stubsCreated.length > 0 ? ` (${ner.stubsCreated.length} new stubs)` : ""}`);
+      if (ner.details.entities.length > 0) {
+        for (const e of ner.details.entities) {
+          console.log(`      - ${e.name} (${e.type})`);
+        }
+      }
+      if (ner.relations > 0) {
+        console.log(`    Relations: ${ner.relations}`);
+        for (const r of ner.details.relations) {
+          console.log(`      - ${r.from} —[${r.relation}]→ ${r.to}`);
+        }
+      }
+      if (ner.events > 0) {
+        console.log(`    Events:    ${ner.events}`);
+        for (const ev of ner.details.events) {
+          console.log(`      - ${ev.date ?? "no date"}: ${ev.description}`);
+        }
+      }
+    }
     deps.db.close();
   });
 
@@ -223,14 +284,31 @@ program
     await deps.lance.connect(config.lancePath);
 
     const { SyncManager } = await import("../core/sync.js");
-    const sync = new SyncManager(deps.db, deps.embedding, deps.lance);
+    const { NerEngine } = await import("../core/ner.js");
+    const { PageManager } = await import("../core/page.js");
+    const pages = new PageManager(deps.db, config.vaultPath);
+    const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
+    const sync = new SyncManager(deps.db, deps.embedding, deps.lance, {
+      nerEngine,
+      pages,
+    });
 
     if (opts.slug) {
       const result = await sync.syncPage(opts.slug, config.vaultPath);
       console.log(JSON.stringify(result, null, 2));
     } else {
       const report = await sync.syncAll(config.vaultPath);
-      console.log(JSON.stringify(report, null, 2));
+      console.log(`Synced:  ${report.synced}`);
+      console.log(`Skipped: ${report.skipped} (unchanged)`);
+      if (report.errors > 0) {
+        console.log(`Errors:  ${report.errors}`);
+        for (const detail of report.errorDetails ?? []) {
+          console.log(`  - ${detail}`);
+        }
+      }
+      if (report.nerEntities) {
+        console.log(`NER:     ${report.nerEntities} entities, ${report.nerRelations} relations, ${report.nerEvents} events extracted`);
+      }
     }
     deps.db.close();
   });
@@ -284,16 +362,73 @@ program
 // ─── enrich ──────────────────────────────────────────────────
 program
   .command("enrich")
-  .description("Run entity enrichment")
+  .description("Run entity enrichment (tier promotion + content generation)")
   .option("--slug <slug>", "Specific entity slug (omit for all)")
+  .option("--content", "Generate LLM summaries for stubs", false)
   .action(async (opts) => {
     const config = loadConfig();
     const db = new CBrainDB(config.dbPath);
-    const { EnrichManager } = await import("../core/enrich.js");
-    const enrich = new EnrichManager(db);
 
-    const result = opts.slug ? [enrich.enrichEntity(opts.slug)] : enrich.enrichAll();
-    console.log(JSON.stringify(result, null, 2));
+    const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
+    const nerApiKey = config.ner?.llm_api_key ?? apiKey;
+    const llm = nerApiKey
+      ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model)
+      : undefined;
+
+    const { EnrichManager } = await import("../core/enrich.js");
+    const enrich = new EnrichManager(db, undefined, llm, config.vaultPath);
+
+    if (opts.content) {
+      const result = opts.slug
+        ? [await enrich.enrichWithContent(opts.slug)]
+        : await enrich.enrichAllWithContent();
+      const enriched = result.filter((r) => r.enriched);
+      console.log(`Enriched ${enriched.length}/${result.length} stubs with content`);
+      for (const r of enriched) {
+        console.log(`  ✓ ${r.slug}`);
+      }
+    } else {
+      const result = opts.slug ? [enrich.enrichEntity(opts.slug)] : enrich.enrichAll();
+      console.log(JSON.stringify(result, null, 2));
+    }
+    db.close();
+  });
+
+// ─── health ──────────────────────────────────────────────────
+program
+  .command("health")
+  .description("Run 8-dimension health check and write report")
+  .action(async () => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+    const { HealthChecker } = await import("../core/health.js");
+    const checker = new HealthChecker(db, outputsDir);
+    const report = await checker.checkAll();
+
+    const icon = (s: string) => s === "pass" ? "✅" : s === "warn" ? "⚠️" : "❌";
+    console.log(`\n  Health Check — ${report.timestamp.slice(0, 10)}`);
+    console.log(`  Overall: ${icon(report.overallStatus)} ${report.overallStatus.toUpperCase()}\n`);
+    for (const dim of report.dimensions) {
+      console.log(`  ${icon(dim.status)} ${dim.name} — ${dim.issues.length} issue(s)`);
+    }
+    console.log(`\n  Report: ${join(outputsDir, "health", `health-${report.timestamp.slice(0, 10)}.md`)}`);
+    db.close();
+  });
+
+// ─── index ───────────────────────────────────────────────────
+program
+  .command("index")
+  .description("Generate Obsidian index files (All-Entities, All-Concepts, All-Sources, Dashboard)")
+  .action(() => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+    const { IndexGenerator } = require("../core/indexes.js");
+    const gen = new IndexGenerator(db, outputsDir);
+    const files = gen.generateAll();
+    console.log(`  Generated ${files.length} index files:`);
+    for (const f of files) console.log(`    - ${f}`);
     db.close();
   });
 

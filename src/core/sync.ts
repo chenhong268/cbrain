@@ -1,19 +1,33 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, extname, relative } from "node:path";
-import { createHash } from "node:crypto";
 import { CBrainDB } from "../storage/sqlite.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
+import { NerEngine } from "./ner.js";
+import { PageManager } from "./page.js";
+import { AuditLogger } from "./audit.js";
+import {
+  chunkContent,
+  hashContent,
+  mapEntityType,
+  buildStubBody,
+  findEntitySlug,
+  resolveEntityName,
+} from "./shared.js";
 
 export interface SyncConfig {
-  chunkSize?: number; // max chars per chunk, default 500
+  chunkSize?: number;
+  outputsDir?: string;
 }
 
 export interface SyncReport {
   synced: number;
   skipped: number;
   errors: number;
+  nerEntities?: number;
+  nerRelations?: number;
+  nerEvents?: number;
   errorDetails?: string[];
 }
 
@@ -28,25 +42,25 @@ export class SyncManager {
   private embedding: EmbeddingProvider;
   private lance: LanceDBManager;
   private chunkSize: number;
+  private nerEngine: NerEngine | null;
+  private pages: PageManager | null;
+  private audit: AuditLogger | null;
 
   constructor(
     db: CBrainDB,
     embedding: EmbeddingProvider,
     lance: LanceDBManager,
-    config?: SyncConfig
+    config?: SyncConfig & { nerEngine?: NerEngine; pages?: PageManager }
   ) {
     this.db = db;
     this.embedding = embedding;
     this.lance = lance;
     this.chunkSize = config?.chunkSize ?? 500;
+    this.nerEngine = config?.nerEngine ?? null;
+    this.pages = config?.pages ?? null;
+    this.audit = config?.outputsDir ? new AuditLogger(config.outputsDir) : null;
   }
 
-  /**
-   * Scan vault directory and sync all .md files to SQLite + LanceDB.
-   * - Skip files whose content hash hasn't changed.
-   * - Chunk content, embed, and upsert to LanceDB.
-   * - Log each sync to ingest_log.
-   */
   async syncAll(vaultPath: string): Promise<SyncReport> {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [] };
     const mdFiles = this.collectMarkdownFiles(vaultPath);
@@ -59,9 +73,8 @@ export class SyncManager {
         const relPath = relative(vaultPath, filePath);
         const slug = parsed.frontmatter.slug ?? relPath.replace(/\.md$/, "");
 
-        const contentHash = this.hashContent(content);
+        const contentHash = hashContent(content);
 
-        // Check if unchanged
         const existing = this.db
           .prepare("SELECT content_hash FROM pages WHERE slug = $slug")
           .get({ $slug: slug }) as { content_hash: string } | null;
@@ -71,14 +84,16 @@ export class SyncManager {
           continue;
         }
 
-        // Upsert page in SQLite
+        // Create version snapshot before updating
+        if (existing) {
+          try {
+            this.db.createVersion(slug, parsed.body,
+              parsed.frontmatter ? JSON.stringify(parsed.frontmatter) : undefined);
+          } catch { /* version snapshot best-effort */ }
+        }
+
         const title = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
-        const dirName = relPath.split("/")[0];
-        const typeFromDir: Record<string, string> = {
-          entities: "entity", concepts: "concept", events: "event",
-          records: "record", sources: "source",
-        };
-        const type = parsed.frontmatter.type ?? typeFromDir[dirName] ?? "record";
+        const type = parsed.frontmatter.type ?? this.inferTypeFromPath(relPath);
 
         this.db.prepare(
           `INSERT INTO pages (slug, type, title, file_path, content_hash, created_at, updated_at)
@@ -97,63 +112,48 @@ export class SyncManager {
           $contentHash: contentHash,
         });
 
-        // Chunk, embed, and upsert to LanceDB
-        const chunks = this.chunkContent(parsed.body);
-        const embedResults = await this.embedding.embedBatch(
-          chunks.map((c) => c.content)
-        );
+        await this.writeIndexes(slug, parsed.body);
 
-        await this.lance.deleteByPageSlug(slug);
-        await this.lance.addChunks(
-          chunks.map((c, i) => ({
-            pageSlug: slug,
-            chunkIndex: c.index,
-            content: c.content,
-            vector: new Float32Array(embedResults[i].embedding),
-          }))
-        );
-
-        // Update chunks table in SQLite for reference
-        this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({
-          $slug: slug,
-        });
-        this.db.ftsDeleteByPage(slug);
-        const insertChunk = this.db.prepare(
-          "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
-        );
-        for (const chunk of chunks) {
-          insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
-        }
-
-        // Populate FTS index (concatenate all chunk content for the page)
-        const fullContent = chunks.map((c) => c.content).join("\n\n");
-        this.db.ftsInsert(slug, fullContent);
-
-        // Log to ingest_log
         this.db.prepare(
           `INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)`
         ).run({
           $source: "vault",
           $action: "sync",
           $slug: slug,
-          $details: JSON.stringify({ chunks: chunks.length, hash: contentHash }),
+          $details: JSON.stringify({ hash: contentHash }),
         });
 
         report.synced++;
+
+        this.audit?.log(AuditLogger.entry("sync_page", "success", {
+          pageSlug: slug,
+          details: { chunks: chunkContent(parsed.body, this.chunkSize).length },
+        }));
+
+        if (this.nerEngine && parsed.body.trim()) {
+          try {
+            const nerResult = await this.runNer(slug, parsed.body);
+            report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
+            report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
+            report.nerEvents = (report.nerEvents ?? 0) + nerResult.events;
+          } catch {
+            // NER failure should not block sync
+          }
+        }
       } catch (err) {
         report.errors++;
         const msg = err instanceof Error ? err.message : String(err);
         report.errorDetails!.push(`${filePath}: ${msg}`);
+        this.audit?.log(AuditLogger.entry("sync_page", "error", {
+          pageSlug: relative(vaultPath, filePath),
+          details: { error: msg },
+        }));
       }
     }
 
     return report;
   }
 
-  /**
-   * Sync a single page by slug.
-   * Reads the vault file, checks hash, and syncs if changed.
-   */
   async syncPage(slug: string, vaultPath: string): Promise<SyncPageResult> {
     const page = this.db
       .prepare("SELECT file_path FROM pages WHERE slug = $slug")
@@ -161,7 +161,7 @@ export class SyncManager {
 
     const filePath = page
       ? join(vaultPath, page.file_path)
-      : this.slugToFilePath(slug, vaultPath);
+      : join(vaultPath, `${slug}.md`);
 
     let content: string;
     try {
@@ -176,9 +176,8 @@ export class SyncManager {
     }
 
     const effectiveSlug = parsed.frontmatter.slug ?? slug;
-    const contentHash = this.hashContent(content);
+    const contentHash = hashContent(content);
 
-    // Check if unchanged
     const existing = this.db
       .prepare("SELECT content_hash FROM pages WHERE slug = $slug")
       .get({ $slug: effectiveSlug }) as { content_hash: string } | null;
@@ -187,8 +186,14 @@ export class SyncManager {
       return { success: true, skipped: true };
     }
 
-    // Delegate to syncAll with just this file
-    // (but we use inline logic to avoid scanning the whole vault)
+    // Create version snapshot before updating
+    if (existing) {
+      try {
+        this.db.createVersion(effectiveSlug, parsed.body,
+          parsed.frontmatter ? JSON.stringify(parsed.frontmatter) : undefined);
+      } catch { /* version best-effort */ }
+    }
+
     const relPath = relative(vaultPath, filePath);
     const title = parsed.frontmatter.title ?? effectiveSlug;
     const type = parsed.frontmatter.type ?? "record";
@@ -210,34 +215,7 @@ export class SyncManager {
       $contentHash: contentHash,
     });
 
-    const chunks = this.chunkContent(parsed.body);
-    const embedResults = await this.embedding.embedBatch(
-      chunks.map((c) => c.content)
-    );
-
-    await this.lance.deleteByPageSlug(effectiveSlug);
-    await this.lance.addChunks(
-      chunks.map((c, i) => ({
-        pageSlug: effectiveSlug,
-        chunkIndex: c.index,
-        content: c.content,
-        vector: new Float32Array(embedResults[i].embedding),
-      }))
-    );
-
-    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({
-      $slug: effectiveSlug,
-    });
-    this.db.ftsDeleteByPage(effectiveSlug);
-    const insertChunk = this.db.prepare(
-      "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
-    );
-    for (const chunk of chunks) {
-      insertChunk.run({ $slug: effectiveSlug, $idx: chunk.index, $content: chunk.content });
-    }
-
-    const fullContent = chunks.map((c) => c.content).join("\n\n");
-    this.db.ftsInsert(effectiveSlug, fullContent);
+    await this.writeIndexes(effectiveSlug, parsed.body);
 
     this.db.prepare(
       `INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)`
@@ -245,16 +223,20 @@ export class SyncManager {
       $source: "vault",
       $action: "sync",
       $slug: effectiveSlug,
-      $details: JSON.stringify({ chunks: chunks.length, hash: contentHash }),
+      $details: JSON.stringify({ hash: contentHash }),
     });
+
+    if (this.nerEngine && parsed.body.trim()) {
+      try {
+        await this.runNer(effectiveSlug, parsed.body);
+      } catch {
+        // NER failure should not block sync
+      }
+    }
 
     return { success: true };
   }
 
-  /**
-   * Find pages in SQLite that have no corresponding vault file,
-   * remove them from both SQLite and LanceDB.
-   */
   async removeOrphans(vaultPath: string): Promise<string[]> {
     const pages = this.db
       .prepare("SELECT slug, file_path FROM pages")
@@ -267,7 +249,6 @@ export class SyncManager {
       try {
         statSync(fullPath);
       } catch {
-        // File doesn't exist — it's an orphan
         orphans.push(page.slug);
         this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({
           $slug: page.slug,
@@ -279,11 +260,119 @@ export class SyncManager {
     return orphans;
   }
 
-  // ─── Private Helpers ──────────────────────────────────────
+  // ─── Private ────────────────────────────────────────────────
 
-  /**
-   * Recursively collect all .md files in a directory.
-   */
+  private async writeIndexes(slug: string, body: string): Promise<void> {
+    const chunks = chunkContent(body, this.chunkSize);
+    if (chunks.length === 0) return;
+
+    const embedResults = await this.embedding.embedBatch(
+      chunks.map((c) => c.content)
+    );
+
+    await this.lance.deleteByPageSlug(slug);
+    await this.lance.addChunks(
+      chunks.map((c, i) => ({
+        pageSlug: slug,
+        chunkIndex: c.index,
+        content: c.content,
+        vector: new Float32Array(embedResults[i].embedding),
+      }))
+    );
+
+    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({
+      $slug: slug,
+    });
+    this.db.ftsDeleteByPage(slug);
+    const insertChunk = this.db.prepare(
+      "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
+    );
+    for (const chunk of chunks) {
+      insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
+    }
+
+    const fullContent = chunks.map((c) => c.content).join("\n\n");
+    this.db.ftsInsert(slug, fullContent);
+  }
+
+  private async runNer(
+    fromSlug: string,
+    text: string
+  ): Promise<{ entities: number; relations: number; events: number }> {
+    if (!this.nerEngine) return { entities: 0, relations: 0, events: 0 };
+
+    const extraction = await this.nerEngine.extract(text);
+    if (extraction.entities.length === 0 && extraction.relations.length === 0) {
+      return { entities: 0, relations: 0, events: 0 };
+    }
+
+    const entitySlugMap = new Map<string, string>();
+    const stubsCreated: string[] = [];
+
+    for (const entity of extraction.entities) {
+      const existingSlug = findEntitySlug(this.db, entity.name);
+      if (existingSlug) {
+        entitySlugMap.set(entity.name, existingSlug);
+        this.db.prepare(
+          "UPDATE pages SET mention_count = mention_count + 1 WHERE slug = $slug"
+        ).run({ $slug: existingSlug });
+      } else if (this.pages) {
+        const entityType = mapEntityType(entity.type);
+        const stub = this.pages.create({
+          title: entity.name,
+          type: entityType,
+          body: `> Auto-extracted from [[${fromSlug}]]`,
+          tags: ["auto-extracted"],
+        });
+        entitySlugMap.set(entity.name, stub.slug);
+        stubsCreated.push(stub.slug);
+      }
+    }
+
+    const writtenRelations: Array<{ from: string; to: string; relation: string }> = [];
+    for (const rel of extraction.relations) {
+      const fromSlugResolved = resolveEntityName(rel.from, entitySlugMap, this.db);
+      const toSlugResolved = resolveEntityName(rel.to, entitySlugMap, this.db);
+      if (fromSlugResolved && toSlugResolved && fromSlugResolved !== toSlugResolved) {
+        this.db.prepare(
+          `INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)`
+        ).run({ $from: fromSlugResolved, $to: toSlugResolved, $rel: rel.relation, $ctx: rel.context });
+
+        const fromTitle = this.pages?.getBySlug(fromSlugResolved)?.title ?? rel.from;
+        const toTitle = this.pages?.getBySlug(toSlugResolved)?.title ?? rel.to;
+        writtenRelations.push({ from: fromTitle, to: toTitle, relation: rel.relation });
+      }
+    }
+
+    if (this.pages) {
+      for (const [name, slug] of entitySlugMap) {
+        if (!stubsCreated.includes(slug)) continue;
+        const rels = writtenRelations.filter(r => r.from === name || r.to === name);
+        if (rels.length > 0) {
+          const body = buildStubBody(name, rels, fromSlug);
+          this.pages.update(slug, { body });
+        }
+      }
+    }
+
+    for (const event of extraction.events) {
+      this.db.prepare(
+        `INSERT INTO timeline (page_slug, event_date, source, summary) VALUES ($slug, $date, $source, $summary)`
+      ).run({
+        $slug: fromSlug,
+        $date: event.date ?? null,
+        $source: "ner",
+        $summary: event.description,
+      });
+    }
+
+    return {
+      entities: extraction.entities.length,
+      relations: extraction.relations.length,
+      events: extraction.events.length,
+    };
+  }
+
   private collectMarkdownFiles(dir: string): string[] {
     const results: string[] = [];
 
@@ -303,45 +392,25 @@ export class SyncManager {
     return results;
   }
 
-  /**
-   * Split content into chunks by paragraphs, respecting chunkSize.
-   * Each paragraph is kept intact; chunks accumulate paragraphs up to chunkSize.
-   */
-  private chunkContent(body: string): Array<{ index: number; content: string }> {
-    if (!body.trim()) {
-      return [{ index: 0, content: "" }];
+  private inferTypeFromPath(relPath: string): string {
+    const typeFromDir: Record<string, string> = {
+      entities: "entity", concepts: "concept", events: "event",
+      records: "record", sources: "source",
+    };
+    const parts = relPath.split("/");
+    // brain/<type>/<file>.md → <type>
+    if (parts.length >= 3 && parts[0] === "brain") {
+      return typeFromDir[parts[1]] ?? "record";
     }
-
-    const paragraphs = body.split(/\n\n+/).filter((p) => p.trim().length > 0);
-    const chunks: Array<{ index: number; content: string }> = [];
-    let current = "";
-    let index = 0;
-
-    for (const para of paragraphs) {
-      if (current.length + para.length > this.chunkSize && current.length > 0) {
-        chunks.push({ index, content: current.trim() });
-        index++;
-        current = para;
-      } else {
-        current = current.length > 0 ? current + "\n\n" + para : para;
-      }
+    // raw/<type>/<file>.md → <type>
+    if (parts.length >= 3 && parts[0] === "raw") {
+      return typeFromDir[parts[1]] ?? "record";
     }
-
-    if (current.trim()) {
-      chunks.push({ index, content: current.trim() });
+    // raw/<file>.md → record (flat raw root, no type dir)
+    if (parts.length === 2 && parts[0] === "raw") {
+      return "record";
     }
-
-    return chunks;
-  }
-
-  private hashContent(content: string): string {
-    return createHash("sha256").update(content).digest("hex").slice(0, 16);
-  }
-
-  /**
-   * Attempt to resolve a slug to a file path in the vault.
-   */
-  private slugToFilePath(slug: string, vaultPath: string): string {
-    return join(vaultPath, `${slug}.md`);
+    // vault root .md files → record
+    return "record";
   }
 }

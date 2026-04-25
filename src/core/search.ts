@@ -1,5 +1,6 @@
 import { CBrainDB } from "../storage/sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
+import type { LLMProvider } from "../llm/provider.js";
 import { LanceDBManager as LanceDBStorage } from "../storage/lancedb.js";
 
 export interface SearchResult {
@@ -12,10 +13,12 @@ export interface SearchResult {
 export interface SearchOptions {
   limit?: number;
   strategy?: "vector" | "fts" | "graph" | "all";
+  multiQuery?: boolean;
 }
 
 export interface HybridSearchConfig {
   rrf_k?: number;
+  multiQuery?: boolean;
 }
 
 export function rrfScore(ranks: number[], k: number): number {
@@ -74,17 +77,21 @@ export class HybridSearch {
   private embedding: EmbeddingProvider;
   private lance: LanceDBStorage;
   private rrfK: number;
+  private llm?: LLMProvider;
+  private multiQueryEnabled: boolean;
 
   constructor(
     db: CBrainDB,
     embedding: EmbeddingProvider,
     lance: LanceDBStorage,
-    config?: HybridSearchConfig
+    config?: HybridSearchConfig & { llm?: LLMProvider }
   ) {
     this.db = db;
     this.embedding = embedding;
     this.lance = lance;
     this.rrfK = config?.rrf_k ?? 60;
+    this.llm = config?.llm;
+    this.multiQueryEnabled = config?.multiQuery ?? true;
   }
 
   async search(query: string, options?: SearchOptions): Promise<SearchResult[]> {
@@ -103,18 +110,45 @@ export class HybridSearch {
       return this.graphSearch(query, limit);
     }
 
-    const [vectorResults, ftsResults, graphResults] = await Promise.all([
-      this.vectorSearch(query, limit).catch(() => [] as SearchResult[]),
-      Promise.resolve(this.ftsSearch(query, limit)),
-      this.graphSearch(query, limit).catch(() => [] as SearchResult[]),
-    ]);
+    const useMultiQuery = (options?.multiQuery ?? this.multiQueryEnabled) && !!this.llm;
+    const queries = useMultiQuery ? await this.expandQuery(query) : [query];
 
-    const lists: SearchResult[][] = [];
-    if (vectorResults.length > 0) lists.push(vectorResults);
-    if (ftsResults.length > 0) lists.push(ftsResults);
-    if (graphResults.length > 0) lists.push(graphResults);
+    const allLists: SearchResult[][] = [];
 
-    return mergeRankedResults(lists, this.rrfK, limit);
+    for (const q of queries) {
+      const [vec, fts, graph] = await Promise.all([
+        this.vectorSearch(q, limit).catch(() => [] as SearchResult[]),
+        Promise.resolve(this.ftsSearch(q, limit)),
+        this.graphSearch(q, limit).catch(() => [] as SearchResult[]),
+      ]);
+      if (vec.length > 0) allLists.push(vec);
+      if (fts.length > 0) allLists.push(fts);
+      if (graph.length > 0) allLists.push(graph);
+    }
+
+    return mergeRankedResults(allLists, this.rrfK, limit);
+  }
+
+  private async expandQuery(query: string): Promise<string[]> {
+    if (!this.llm) return [query];
+
+    try {
+      const resp = await this.llm.chat([
+        {
+          role: "system",
+          content:
+            "你是一个搜索查询扩展助手。给定一个查询，生成2-3个语义相近但角度不同的查询变体，" +
+            "帮助提高搜索召回率。只返回JSON数组，不要其他内容。示例：[\"变体1\",\"变体2\",\"变体3\"]",
+        },
+        { role: "user", content: query },
+      ]);
+
+      const variants = JSON.parse(resp) as string[];
+      if (!Array.isArray(variants) || variants.length === 0) return [query];
+      return [query, ...variants.filter((v) => typeof v === "string" && v.trim())];
+    } catch {
+      return [query];
+    }
   }
 
   private async vectorSearch(query: string, limit: number): Promise<SearchResult[]> {

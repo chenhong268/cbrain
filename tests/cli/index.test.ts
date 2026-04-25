@@ -25,11 +25,13 @@ describe("CLI", () => {
       execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
 
       expect(existsSync(join(brainDir, "cbrain.json"))).toBe(true);
-      expect(existsSync(join(brainDir, "vault/entities"))).toBe(true);
-      expect(existsSync(join(brainDir, "vault/concepts"))).toBe(true);
-      expect(existsSync(join(brainDir, "vault/events"))).toBe(true);
-      expect(existsSync(join(brainDir, "vault/records"))).toBe(true);
-      expect(existsSync(join(brainDir, "vault/sources"))).toBe(true);
+      expect(existsSync(join(brainDir, "vault/raw"))).toBe(true);
+      expect(existsSync(join(brainDir, "vault/brain/entities"))).toBe(true);
+      expect(existsSync(join(brainDir, "vault/brain/concepts"))).toBe(true);
+      expect(existsSync(join(brainDir, "vault/brain/events"))).toBe(true);
+      expect(existsSync(join(brainDir, "vault/brain/records"))).toBe(true);
+      expect(existsSync(join(brainDir, "vault/brain/sources"))).toBe(true);
+      expect(existsSync(join(brainDir, "outputs"))).toBe(true);
       expect(existsSync(join(brainDir, "brain.sqlite"))).toBe(true);
     });
 
@@ -57,7 +59,7 @@ describe("CLI", () => {
   describe("help", () => {
     test("shows version", () => {
       const output = execSync(`${BIN} --version`, { encoding: "utf-8" });
-      expect(output.trim()).toBe("0.1.0");
+      expect(output.trim()).toBe("0.2.0");
     });
 
     test("shows help text", () => {

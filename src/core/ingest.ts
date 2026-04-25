@@ -5,6 +5,15 @@ import { generateSlug } from "../utils/slug.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
+import { NerEngine } from "./ner.js";
+import type { LLMProvider } from "../llm/provider.js";
+import {
+  chunkContent,
+  mapEntityType,
+  buildStubBody,
+  findEntitySlug,
+  resolveEntityName,
+} from "./shared.js";
 
 export interface IngestInput {
   content: string;
@@ -14,10 +23,23 @@ export interface IngestInput {
   pageType?: "entity" | "concept" | "event" | "record" | "source";
 }
 
+export interface NerResult {
+  entities: number;
+  relations: number;
+  events: number;
+  stubsCreated: string[];
+  details: {
+    entities: Array<{ name: string; type: string }>;
+    relations: Array<{ from: string; to: string; relation: string }>;
+    events: Array<{ date: string | null; description: string }>;
+  };
+}
+
 export interface IngestResult {
   slug: string;
   created: boolean;
   linksExtracted: number;
+  ner?: NerResult;
 }
 
 const WIKI_LINK_RE = /\[\[([^\]]+)\]\]/g;
@@ -29,12 +51,14 @@ export class IngestManager {
   private embedding: EmbeddingProvider;
   private lance: LanceDBManager;
   private vaultPath: string;
+  private nerEngine: NerEngine | null;
 
   constructor(
     db: CBrainDB,
     embedding: EmbeddingProvider,
     lance: LanceDBManager,
-    vaultPath: string
+    vaultPath: string,
+    llmProvider?: LLMProvider
   ) {
     this.db = db;
     this.vaultPath = vaultPath;
@@ -42,6 +66,7 @@ export class IngestManager {
     this.sync = new SyncManager(db, embedding, lance);
     this.embedding = embedding;
     this.lance = lance;
+    this.nerEngine = llmProvider ? new NerEngine(llmProvider) : null;
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
@@ -63,7 +88,6 @@ export class IngestManager {
     const body = parsed.body;
     const effectiveTags = parsed.frontmatter.tags ?? overrides?.tags ?? [];
 
-    // Embed first — fail fast before writing anything
     const { chunks, embedResults } = await this.embedChunks(body);
 
     const existing = this.pages.getBySlug(slug);
@@ -84,10 +108,13 @@ export class IngestManager {
 
     await this.writeIndexes(slug, chunks, embedResults);
 
+    const nerResult = await this.runNer(slug, body);
+
     return {
       slug,
       created: !existing,
       linksExtracted: links.length,
+      ner: nerResult,
     };
   }
 
@@ -97,7 +124,6 @@ export class IngestManager {
     const slug = generateSlug(title, type);
     const body = input.content;
 
-    // Embed first — fail fast before writing anything
     const { chunks, embedResults } = await this.embedChunks(body);
 
     this.pages.create({
@@ -113,17 +139,20 @@ export class IngestManager {
 
     await this.writeIndexes(slug, chunks, embedResults);
 
+    const nerResult = await this.runNer(slug, body);
+
     return {
       slug,
       created: true,
       linksExtracted: links.length,
+      ner: nerResult,
     };
   }
 
   private async embedChunks(
     body: string
   ): Promise<{ chunks: Array<{ index: number; content: string }>; embedResults: Array<{ embedding: number[]; tokenCount: number }> }> {
-    const chunks = this.chunkContent(body);
+    const chunks = chunkContent(body);
     if (chunks.length === 0) {
       return { chunks: [], embedResults: [] };
     }
@@ -174,31 +203,6 @@ export class IngestManager {
     });
   }
 
-  private chunkContent(body: string): Array<{ index: number; content: string }> {
-    if (!body.trim()) return [];
-
-    const paragraphs = body.split(/\n\n+/).filter((p) => p.trim().length > 0);
-    const chunks: Array<{ index: number; content: string }> = [];
-    let current = "";
-    let index = 0;
-
-    for (const para of paragraphs) {
-      if (current.length + para.length > 500 && current.length > 0) {
-        chunks.push({ index, content: current.trim() });
-        index++;
-        current = para;
-      } else {
-        current = current.length > 0 ? current + "\n\n" + para : para;
-      }
-    }
-
-    if (current.trim()) {
-      chunks.push({ index, content: current.trim() });
-    }
-
-    return chunks;
-  }
-
   extractWikiLinks(text: string): string[] {
     const links = new Set<string>();
     let match: RegExpExecArray | null;
@@ -241,5 +245,89 @@ export class IngestManager {
     if (byTitle) return byTitle.slug;
 
     return null;
+  }
+
+  private async runNer(
+    fromSlug: string,
+    text: string
+  ): Promise<IngestResult["ner"]> {
+    if (!this.nerEngine) return undefined;
+
+    const extraction = await this.nerEngine.extract(text);
+    if (extraction.entities.length === 0 && extraction.relations.length === 0) {
+      return {
+        entities: 0, relations: 0, events: 0, stubsCreated: [],
+        details: { entities: [], relations: [], events: [] },
+      };
+    }
+
+    const stubsCreated: string[] = [];
+    const entitySlugMap = new Map<string, string>();
+
+    for (const entity of extraction.entities) {
+      const existingSlug = findEntitySlug(this.db, entity.name);
+      if (existingSlug) {
+        entitySlugMap.set(entity.name, existingSlug);
+        this.pages.incrementMention(existingSlug);
+      } else {
+        const entityType = mapEntityType(entity.type);
+        const stub = this.pages.create({
+          title: entity.name,
+          type: entityType,
+          body: `> Auto-extracted from [[${fromSlug}]]`,
+          tags: ["auto-extracted"],
+        });
+        entitySlugMap.set(entity.name, stub.slug);
+        stubsCreated.push(stub.slug);
+      }
+    }
+
+    const writtenRelations: Array<{ from: string; to: string; relation: string }> = [];
+    for (const rel of extraction.relations) {
+      const fromSlugResolved = resolveEntityName(rel.from, entitySlugMap, this.db);
+      const toSlugResolved = resolveEntityName(rel.to, entitySlugMap, this.db);
+      if (fromSlugResolved && toSlugResolved && fromSlugResolved !== toSlugResolved) {
+        this.db.prepare(
+          `INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)`
+        ).run({ $from: fromSlugResolved, $to: toSlugResolved, $rel: rel.relation, $ctx: rel.context });
+
+        const fromTitle = this.pages.getBySlug(fromSlugResolved)?.title ?? rel.from;
+        const toTitle = this.pages.getBySlug(toSlugResolved)?.title ?? rel.to;
+        writtenRelations.push({ from: fromTitle, to: toTitle, relation: rel.relation });
+      }
+    }
+
+    for (const [name, slug] of entitySlugMap) {
+      if (!stubsCreated.includes(slug)) continue;
+      const rels = writtenRelations.filter(r => r.from === name || r.to === name);
+      if (rels.length > 0) {
+        const body = buildStubBody(name, rels, fromSlug);
+        this.pages.update(slug, { body });
+      }
+    }
+
+    for (const event of extraction.events) {
+      if (!event.date) continue;
+      this.db.prepare(
+        `INSERT INTO timeline (page_slug, event_date, source, summary) VALUES ($slug, $date, $source, $summary)`
+      ).run({
+        $slug: fromSlug,
+        $date: event.date,
+        $source: "ner",
+        $summary: event.description,
+      });
+    }
+
+    return {
+      entities: extraction.entities.length,
+      relations: extraction.relations.length,
+      events: extraction.events.length,
+      stubsCreated,
+      details: {
+        entities: extraction.entities.map(e => ({ name: e.name, type: e.type })),
+        relations: writtenRelations,
+        events: extraction.events.map(e => ({ date: e.date, description: e.description })),
+      },
+    };
   }
 }

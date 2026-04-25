@@ -12,16 +12,19 @@ LLMs forget everything between conversations. CBrain gives your Agent a persiste
 
 - **Obsidian-native** — All pages are markdown files you can read, edit, and browse in Obsidian
 - **Three-layer search** — Vector + Chinese FTS + Graph traversal, fused with RRF
-- **Knowledge graph** — Wiki-link based relationships between entities (auto NER in roadmap)
+- **Knowledge graph** — Wiki-link based relationships + auto NER entity/relationship extraction
 - **Entity enrichment** — People and companies auto-promote through tiers as you mention them
-- **MCP Server** — Plug into any MCP-compatible Agent (Claude, Hermes, etc.)
-- **Runs locally** — No cloud dependency, your data stays on your machine
+- **37 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, raw data, config, and observability
+- **Version history** — Every page version snapshotted, with revert support
+- **Multi-query expansion** — LLM generates search query variants for better recall, fused with RRF
+- **Job queue** — SQLite-backed async job system with priority, retry, and status tracking
+- **Raw data storage** — Binary BLOB storage attached to pages (images, PDFs, etc.)
 
 LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、复利增长的记忆。
 
 - **Obsidian 原生** — 所有页面都是 Obsidian 可读的 Markdown 文件
 - **三层搜索** — 向量 + 中文全文 + 图遍历，RRF 融合排序
-- **知识图谱** — 基于 Wiki Link 的实体关系（自动 NER 在路线图中）
+- **知识图谱** — 基于 Wiki Link 的实体关系 + 自动 NER 实体/关系提取
 - **实体丰富** — 人物和组织随提及次数自动升级
 - **MCP 服务器** — 接入任何兼容 MCP 的 Agent
 - **本地运行** — 无云依赖，数据留在你的机器上
@@ -105,26 +108,89 @@ Add to your Agent's MCP config:
 }
 ```
 
-### MCP Tools
+### MCP Tools (37 total)
 
+**Core:**
 | Tool | Description |
 |:-----|:------------|
-| `query` | Hybrid search (vector + FTS + graph) |
+| `query` | Hybrid search (vector + FTS + graph + multi-query expansion) |
 | `ingest` | Ingest content into the brain |
-| `get_page` | Retrieve a page by slug |
-| `list_pages` | List pages with optional type filter |
-| `graph_query` | Graph traversal and backlinks |
-| `enrich` | Entity tier enrichment |
+| `status` | Brain statistics (pages, links, chunks) |
+| `health` | Health check |
 | `sync` | Re-index vault files |
-| `status` | Brain statistics |
+| `remove_orphans` | Remove DB entries with no vault file |
+| `generate_indexes` | Generate index pages (dashboard, entities, concepts, sources) |
+| `enrich` | Entity tier enrichment |
+
+**Pages:**
+| Tool | Description |
+|:-----|:------------|
+| `get_page` | Retrieve a page by slug |
+| `list_pages` | List pages with type filter, limit, offset |
+| `put_page` | Create or update a page |
+| `delete_page` | Delete a page |
+| `resolve_slugs` | Resolve title/slug queries to exact slugs |
+| `writeback` | Write page changes back to vault |
+
+**Tags:**
+| Tool | Description |
+|:-----|:------------|
+| `get_tags` | List tags for a page |
+| `add_tag` | Add a tag to a page |
+| `remove_tag` | Remove a tag from a page |
+
+**Links:**
+| Tool | Description |
+|:-----|:------------|
+| `get_links` | Get links from/to a page |
+| `remove_link` | Remove a link between pages |
+| `graph_query` | Graph traversal (forward, backlinks, related) |
+
+**Timeline:**
+| Tool | Description |
+|:-----|:------------|
+| `get_timeline` | Get timeline events for a page |
+| `add_timeline_entry` | Add a timeline event |
+
+**Version History:**
+| Tool | Description |
+|:-----|:------------|
+| `get_versions` | List all versions of a page |
+| `revert_version` | Revert page to a specific version |
+
+**Job Queue:**
+| Tool | Description |
+|:-----|:------------|
+| `job_submit` | Submit a job to the queue |
+| `job_list` | List jobs with optional status filter |
+| `job_status` | Get detailed job status |
+| `job_cancel` | Cancel a pending/running job |
+| `job_retry` | Retry a failed job |
+
+**Raw Data:**
+| Tool | Description |
+|:-----|:------------|
+| `put_raw_data` | Store binary data (base64) attached to a page |
+| `get_raw_data` | Retrieve raw data by slug + key |
+| `list_raw_data` | List raw data keys for a page |
+| `delete_raw_data` | Delete raw data by slug + key |
+
+**Observability:**
+| Tool | Description |
+|:-----|:------------|
+| `get_chunks` | Get chunks for a page |
+| `get_ingest_log` | View ingest log |
+| `get_config` | Get a config value |
+| `set_config` | Set a config value |
 
 ## Search System
 
-Three search strategies, fused with Reciprocal Rank Fusion (RRF):
+Four search strategies, fused with Reciprocal Rank Fusion (RRF):
 
-1. **Vector search** — Semantic similarity via embedding (default: 智谱 embedding-3, 2048d)
-2. **Chinese FTS** — Full-text search via SQLite FTS5 trigram tokenizer
-3. **Graph traversal** — Relationship-based discovery through the knowledge graph
+1. **Multi-query expansion** — LLM generates 2-3 query variants for wider recall (default on)
+2. **Vector search** — Semantic similarity via embedding (default: 智谱 embedding-3, 2048d)
+3. **Chinese FTS** — Full-text search via SQLite FTS5 trigram tokenizer
+4. **Graph traversal** — Relationship-based discovery through the knowledge graph
 
 ```bash
 # Default: all three combined
@@ -181,6 +247,12 @@ CBrain uses `cbrain.json` in your project directory:
     "model": "embedding-3",
     "dimensions": 2048,
     "api_key": "your-api-key"
+  },
+  "ner": {
+    "enabled": true,
+    "llm_provider": "zhipu",
+    "llm_model": "glm-4-flash",
+    "llm_api_key": "your-api-key"
   }
 }
 ```
@@ -221,8 +293,8 @@ See [CHANGELOG.md](./CHANGELOG.md) for detailed version history.
 | Version | Focus | Status |
 |:--------|:------|:-------|
 | v0.1 | Core pipeline — storage, search, MCP, CLI | ✅ Done |
-| v0.2 | NER + auto relationship extraction | Planned |
-| v0.3 | Auto entity enrichment (web data) | Planned |
+| v0.2 | NER + auto relationship extraction | ✅ Done |
+| v0.3 | Full MCP coverage + version history + multi-query + job queue + raw data | ✅ Done |
 | v0.4 | Automation — file watcher, signal detector, nightly maintenance | Planned |
 
 ## License

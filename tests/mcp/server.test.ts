@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
@@ -67,13 +67,21 @@ describe("MCP Server", () => {
       expect(typeof server.connect).toBe("function");
     });
 
-    test("registers all 8 tools", () => {
+    test("registers all 37 tools", () => {
       const server = createServer(deps);
       const tools = getTools(server);
       const names = Object.keys(tools);
       expect(names.sort()).toEqual([
-        "enrich", "get_page", "graph_query", "ingest",
-        "list_pages", "query", "status", "sync",
+        "add_tag", "add_timeline_entry", "delete_page",
+        "delete_raw_data", "enrich", "generate_indexes",
+        "get_chunks", "get_config", "get_ingest_log", "get_links",
+        "get_page", "get_raw_data", "get_tags", "get_timeline",
+        "get_versions", "graph_query", "health", "ingest",
+        "job_cancel", "job_list", "job_retry", "job_status",
+        "job_submit", "list_pages", "list_raw_data", "put_page",
+        "put_raw_data", "query", "remove_link", "remove_orphans",
+        "remove_tag", "resolve_slugs", "revert_version",
+        "set_config", "status", "sync", "writeback",
       ]);
     });
   });
@@ -276,6 +284,599 @@ describe("MCP Server", () => {
       const result = await getTools(server).query.handler({ query: "test" });
       const data = JSON.parse(result.content[0].text);
       expect(Array.isArray(data)).toBe(true);
+    });
+  });
+
+  // ─── Page tools ───────────────────────────────
+
+  describe("put_page tool", () => {
+    test("creates a new page", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "entities/test",
+        content: "Hello world",
+        title: "Test",
+        type: "entity",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("created");
+      expect(data.page.slug).toBe("entities/test");
+      expect(data.page.title).toBe("Test");
+    });
+
+    test("returns error without title for new page", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "entities/new",
+        content: "Content without title",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.error).toBeDefined();
+    });
+  });
+
+  describe("delete_page tool", () => {
+    test("deletes a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/todel", "Del", "del.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).delete_page.handler({ slug: "entities/todel" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+
+      const page = db.prepare("SELECT * FROM pages WHERE slug = ?").get("entities/todel");
+      expect(page).toBeNull();
+    });
+
+    test("returns false for missing page", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).delete_page.handler({ slug: "entities/ghost" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(false);
+    });
+  });
+
+  describe("resolve_slugs tool", () => {
+    test("resolves title to slugs", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/zhangsan", "张三", "zhangsan.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).resolve_slugs.handler({ queries: ["张三"] });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe("writeback tool", () => {
+    test("appends content to existing page", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      writeFileSync(join(vaultPath, "entities", "test.md"), "---\ntitle: Test\ntype: entity\n---\noriginal content", "utf-8");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/test", "Test", "entities/test.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).writeback.handler({
+        action: "append",
+        targetSlug: "entities/test",
+        content: " appended note",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+
+    test("creates a concept via writeback", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).writeback.handler({
+        action: "create_concept",
+        content: "A new concept",
+        conceptTitle: "New Concept",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+  });
+
+  describe("generate_indexes tool", () => {
+    test("generates index pages", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/a", "A", "a.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).generate_indexes.handler({});
+      const data = JSON.parse(result.content[0].text);
+      expect(data.generated).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe("remove_orphans tool", () => {
+    test("removes orphaned DB entries", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/orphan", "Orphan", "nonexistent.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).remove_orphans.handler({});
+      const data = JSON.parse(result.content[0].text);
+      expect(typeof data.removed).toBe("number");
+    });
+  });
+
+  describe("health tool", () => {
+    test("returns health report", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count) VALUES (?, 'entity', ?, ?, ?, ?)`
+      ).run("entities/h1", "H1", "h1.md", "h1", 3);
+
+      const server = createServer(deps);
+      const result = await getTools(server).health.handler({});
+      const data = JSON.parse(result.content[0].text);
+      expect(data.overallStatus).toBeDefined();
+      expect(data.dimensions).toBeDefined();
+      expect(data.metrics).toBeDefined();
+    });
+  });
+
+  describe("sync tool", () => {
+    test("runs full sync without error", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).sync.handler({});
+      const data = JSON.parse(result.content[0].text);
+      expect(typeof data).toBe("object");
+    });
+  });
+
+  // ─── Tag tools ─────────────────────────────────
+
+  describe("get_tags tool", () => {
+    test("returns tags for a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tagged", "Tagged", "tagged.md", "h1");
+      db.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tagged", "ai");
+      db.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tagged", "product");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_tags.handler({ slug: "entities/tagged" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.slug).toBe("entities/tagged");
+      expect(Array.isArray(data.tags)).toBe(true);
+      expect(data.tags.length).toBe(2);
+    });
+  });
+
+  describe("add_tag tool", () => {
+    test("adds a tag to a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/t1", "T1", "t1.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).add_tag.handler({ slug: "entities/t1", tag: "new-tag" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+
+      const cnt = db.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ?").get("entities/t1") as { c: number };
+      expect(cnt.c).toBe(1);
+    });
+  });
+
+  describe("remove_tag tool", () => {
+    test("removes a tag from a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/t2", "T2", "t2.md", "h1");
+      db.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/t2", "old-tag");
+
+      const server = createServer(deps);
+      const result = await getTools(server).remove_tag.handler({ slug: "entities/t2", tag: "old-tag" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+
+      const cnt = db.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ?").get("entities/t2") as { c: number };
+      expect(cnt.c).toBe(0);
+    });
+  });
+
+  // ─── Link tools ────────────────────────────────
+
+  describe("get_links tool", () => {
+    test("returns links for a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/from", "From", "from.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/to", "To", "to.md", "h2");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
+      ).run("entities/from", "entities/to", "mentions");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_links.handler({ slug: "entities/from" });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("returns backlinks when direction is 'to'", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/lfrom", "LFrom", "lfrom.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/lto", "LTo", "lto.md", "h2");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
+      ).run("entities/lfrom", "entities/lto", "mentions");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_links.handler({ slug: "entities/lto", direction: "to" });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+    });
+  });
+
+  describe("remove_link tool", () => {
+    test("removes a link between pages", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rl1", "RL1", "rl1.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rl2", "RL2", "rl2.md", "h2");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
+      ).run("entities/rl1", "entities/rl2", "mentions");
+
+      const server = createServer(deps);
+      const result = await getTools(server).remove_link.handler({
+        from: "entities/rl1",
+        to: "entities/rl2",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+  });
+
+  // ─── Timeline tools ────────────────────────────
+
+  describe("add_timeline_entry tool", () => {
+    test("adds a timeline event for a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tl", "TL", "tl.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).add_timeline_entry.handler({
+        slug: "entities/tl",
+        summary: "Test event",
+        eventDate: "2026-04-25",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+  });
+
+  describe("get_timeline tool", () => {
+    test("returns timeline events for a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tl2", "TL2", "tl2.md", "h1");
+      db.prepare(
+        "INSERT INTO timeline (page_slug, summary, event_date) VALUES (?, ?, ?)"
+      ).run("entities/tl2", "Event 1", "2026-01-01");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_timeline.handler({ slug: "entities/tl2" });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(1);
+    });
+  });
+
+  // ─── Chunks & Log tools ────────────────────────
+
+  describe("get_chunks tool", () => {
+    test("returns chunks for a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/chunked", "Chunked", "chunked.md", "h1");
+      db.prepare(
+        "INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)"
+      ).run("entities/chunked", 0, "Hello world");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_chunks.handler({ slug: "entities/chunked" });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(1);
+    });
+  });
+
+  describe("get_ingest_log tool", () => {
+    test("returns ingest log entries", async () => {
+      db.prepare(
+        "INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES (?, ?, ?, ?)"
+      ).run("text", "ingest", "entities/logtest", "Test entry");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_ingest_log.handler({ limit: 5 });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // ─── Config tools ──────────────────────────────
+
+  describe("set_config tool", () => {
+    test("sets a config value", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).set_config.handler({
+        key: "test_key",
+        value: "test_value",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+  });
+
+  describe("get_config tool", () => {
+    test("returns a config value", async () => {
+      db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)").run("existing_key", "42");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_config.handler({ key: "existing_key" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.key).toBe("existing_key");
+      expect(data.value).toBe("42");
+    });
+
+    test("returns null for missing key", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).get_config.handler({ key: "nope" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.key).toBe("nope");
+      expect(data.value).toBeNull();
+    });
+  });
+
+  // ─── Version tools ─────────────────────────────
+
+  describe("get_versions tool", () => {
+    test("returns versions for a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/ver", "Ver", "ver.md", "h1");
+      db.prepare(
+        "INSERT INTO versions (page_slug, version, content) VALUES (?, ?, ?)"
+      ).run("entities/ver", 1, "v1 content");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_versions.handler({ slug: "entities/ver" });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(1);
+      expect(data[0].version).toBe(1);
+    });
+  });
+
+  describe("revert_version tool", () => {
+    test("reverts to a specific version", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      writeFileSync(join(vaultPath, "entities", "rev.md"), "---\ntitle: Rev\ntype: entity\n---\noriginal", "utf-8");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rev", "Rev", "entities/rev.md", "h1");
+      db.prepare(
+        "INSERT INTO versions (page_slug, version, content) VALUES (?, ?, ?)"
+      ).run("entities/rev", 1, "original content");
+
+      const server = createServer(deps);
+      const result = await getTools(server).revert_version.handler({
+        slug: "entities/rev",
+        version: 1,
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+
+    test("returns error for missing version", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rev2", "Rev2", "entities/rev2.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).revert_version.handler({
+        slug: "entities/rev2",
+        version: 999,
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(false);
+    });
+  });
+
+  // ─── Job tools ─────────────────────────────────
+
+  describe("job_submit tool", () => {
+    test("submits a job", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).job_submit.handler({
+        name: "test-job",
+        data: "{}",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.id).toBeGreaterThan(0);
+      expect(data.status).toBe("pending");
+    });
+  });
+
+  describe("job_list tool", () => {
+    test("lists jobs", async () => {
+      db.prepare(
+        "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
+      ).run("test-job", "pending", 0);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job_list.handler({});
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+    });
+
+    test("filters by status", async () => {
+      db.prepare(
+        "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
+      ).run("done-job", "done", 0);
+      db.prepare(
+        "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
+      ).run("pending-job", "pending", 0);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job_list.handler({ status: "done" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe("job_status tool", () => {
+    test("returns job details", async () => {
+      const info = db.prepare(
+        "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
+      ).run("status-job", "pending", 0);
+      const id = Number(info.lastInsertRowid);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job_status.handler({ id });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.name).toBe("status-job");
+    });
+
+    test("returns error for missing job", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).job_status.handler({ id: 99999 });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.error).toBeDefined();
+    });
+  });
+
+  describe("job_cancel tool", () => {
+    test("cancels a pending job", async () => {
+      const info = db.prepare(
+        "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
+      ).run("cancel-job", "pending", 0);
+      const id = Number(info.lastInsertRowid);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job_cancel.handler({ id });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+  });
+
+  describe("job_retry tool", () => {
+    test("retries a failed job", async () => {
+      const info = db.prepare(
+        "INSERT INTO jobs (name, status, priority, attempts, max_attempts) VALUES (?, ?, ?, ?, ?)"
+      ).run("retry-job", "failed", 0, 1, 3);
+      const id = Number(info.lastInsertRowid);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job_retry.handler({ id });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+  });
+
+  // ─── Raw data tools ────────────────────────────
+
+  describe("put_raw_data tool", () => {
+    test("stores raw data for a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rd", "RD", "rd.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_raw_data.handler({
+        slug: "entities/rd",
+        key: "test.bin",
+        data_base64: "aGVsbG8=",
+        mime_type: "application/octet-stream",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+    });
+  });
+
+  describe("list_raw_data tool", () => {
+    test("lists raw data keys for a page", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rd2", "RD2", "rd2.md", "h1");
+      db.prepare(
+        "INSERT INTO raw_data (page_slug, key, mime_type, data) VALUES (?, ?, ?, ?)"
+      ).run("entities/rd2", "file1.bin", "application/octet-stream", Buffer.from("data"));
+
+      const server = createServer(deps);
+      const result = await getTools(server).list_raw_data.handler({ slug: "entities/rd2" });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(1);
+    });
+  });
+
+  describe("get_raw_data tool", () => {
+    test("retrieves raw data", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rd3", "RD3", "rd3.md", "h1");
+      db.prepare(
+        "INSERT INTO raw_data (page_slug, key, mime_type, data) VALUES (?, ?, ?, ?)"
+      ).run("entities/rd3", "test.bin", "text/plain", Buffer.from("hello"));
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_raw_data.handler({
+        slug: "entities/rd3",
+        key: "test.bin",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.key).toBe("test.bin");
+      expect(data.mime_type).toBe("text/plain");
+    });
+
+    test("returns error for missing raw data", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).get_raw_data.handler({
+        slug: "entities/ghost",
+        key: "nope",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.error).toBeDefined();
+    });
+  });
+
+  describe("delete_raw_data tool", () => {
+    test("deletes raw data", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rd4", "RD4", "rd4.md", "h1");
+      db.prepare(
+        "INSERT INTO raw_data (page_slug, key, mime_type, data) VALUES (?, ?, ?, ?)"
+      ).run("entities/rd4", "delete_me", "text/plain", Buffer.from("x"));
+
+      const server = createServer(deps);
+      const result = await getTools(server).delete_raw_data.handler({
+        slug: "entities/rd4",
+        key: "delete_me",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
     });
   });
 });

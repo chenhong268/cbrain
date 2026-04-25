@@ -31,12 +31,12 @@ describe("PageManager", () => {
       tags: ["人物", "诺华"],
     });
 
-    expect(page.slug).toBe("entities/张三");
+    expect(page.slug).toBe("brain/entities/张三");
     expect(page.title).toBe("张三");
     expect(page.type).toBe("entity");
     expect(page.tier).toBe(3);
 
-    const filePath = join(vaultPath, "entities/张三.md");
+    const filePath = join(vaultPath, "brain/entities/张三.md");
     expect(existsSync(filePath)).toBe(true);
 
     const fileContent = await Bun.file(filePath).text();
@@ -52,7 +52,7 @@ describe("PageManager", () => {
       tags: ["方法论"],
     });
 
-    const page = pm.getBySlug("concepts/第一性原理");
+    const page = pm.getBySlug("brain/concepts/第一性原理");
     expect(page).not.toBeNull();
     expect(page!.title).toBe("第一性原理");
     expect(page!.body).toContain("从最基本的事实出发推理");
@@ -71,9 +71,12 @@ describe("PageManager", () => {
   });
 
   test("update page modifies vault file and index", async () => {
-    pm.create({ title: "测试", type: "record", body: "原始内容" });
+    // Use brain/ path — raw/ pages are read-only
+    pm.create({ title: "测试", type: "concept", body: "原始内容" });
+    const created = pm.getBySlug("brain/concepts/测试");
+    expect(created).not.toBeNull();
 
-    const updated = pm.update("records/测试", {
+    const updated = pm.update(created!.slug, {
       body: "更新内容",
       tags: ["更新标签"],
     });
@@ -81,28 +84,35 @@ describe("PageManager", () => {
     expect(updated).not.toBeNull();
     expect(updated!.body).toBe("更新内容");
 
-    const filePath = join(vaultPath, "records/测试.md");
+    const filePath = join(vaultPath, "brain/concepts/测试.md");
     const fileContent = await Bun.file(filePath).text();
     expect(fileContent).toContain("更新内容");
   });
 
-  test("delete page removes file and index", () => {
-    pm.create({ title: "临时", type: "record", body: "要删的" });
+  test("raw update returns null (read-only)", () => {
+    pm.create({ title: "原始", type: "record", body: "不要动" });
+    const result = pm.update("raw/records/原始", { body: "动了" });
+    expect(result).toBeNull();
+  });
 
-    const filePath = join(vaultPath, "records/临时.md");
+  test("delete page removes file and index", () => {
+    pm.create({ title: "临时", type: "concept", body: "要删的" });
+    const slug = "brain/concepts/临时";
+
+    const filePath = join(vaultPath, "brain/concepts/临时.md");
     expect(existsSync(filePath)).toBe(true);
 
-    const result = pm.delete("records/临时");
+    const result = pm.delete(slug);
     expect(result).toBe(true);
     expect(existsSync(filePath)).toBe(false);
-    expect(pm.getBySlug("records/临时")).toBeNull();
+    expect(pm.getBySlug(slug)).toBeNull();
   });
 
   test("increment mention count", () => {
     pm.create({ title: "某公司", type: "entity", body: "被提到的公司" });
-    pm.incrementMention("entities/某公司");
+    pm.incrementMention("brain/entities/某公司");
 
-    const page = pm.getBySlug("entities/某公司");
+    const page = pm.getBySlug("brain/entities/某公司");
     expect(page!.mention_count).toBe(1);
   });
 });

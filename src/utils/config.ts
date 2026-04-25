@@ -13,6 +13,13 @@ export interface CBrainConfig {
     api_key: string;
     base_url: string;
   };
+  ner: {
+    enabled: boolean;
+    llm_provider: string;
+    llm_model: string;
+    llm_api_key: string;
+    llm_base_url: string;
+  };
   search: {
     default_limit: number;
     rrf_k: number;
@@ -29,6 +36,13 @@ const DEFAULT_CONFIG: CBrainConfig = {
     dimensions: 2048,
     api_key: "",
     base_url: "https://open.bigmodel.cn/api/paas/v4",
+  },
+  ner: {
+    enabled: true,
+    llm_provider: "zhipu",
+    llm_model: "glm-4-flash",
+    llm_api_key: "",
+    llm_base_url: "https://open.bigmodel.cn/api/paas/v4",
   },
   search: {
     default_limit: 10,
@@ -58,19 +72,29 @@ export function loadConfig(configPath?: string): CBrainConfig {
   return { ...DEFAULT_CONFIG };
 }
 
-function normalizeJsonConfig(raw: Record<string, unknown>): Partial<CBrainConfig> {
+interface NormalizedConfig {
+  vault_path?: string;
+  db_path?: string;
+  lancedb_path?: string;
+  embedding?: Partial<CBrainConfig["embedding"]>;
+  ner?: Partial<CBrainConfig["ner"]>;
+  search?: Partial<CBrainConfig["search"]>;
+}
+
+function normalizeJsonConfig(raw: Record<string, unknown>): NormalizedConfig {
   return {
     vault_path: (raw.vaultPath ?? raw.vault_path) as string | undefined,
     db_path: (raw.dbPath ?? raw.db_path) as string | undefined,
     lancedb_path: (raw.lancePath ?? raw.lancedb_path ?? raw.lancedbPath) as string | undefined,
-    embedding: raw.embedding as Partial<CBrainConfig["embedding"]> | undefined,
-    search: raw.search as Partial<CBrainConfig["search"]> | undefined,
+    embedding: raw.embedding as NormalizedConfig["embedding"],
+    ner: raw.ner as NormalizedConfig["ner"],
+    search: raw.search as NormalizedConfig["search"],
   };
 }
 
 function mergeConfig(
   base: CBrainConfig,
-  override: Partial<CBrainConfig>,
+  override: NormalizedConfig,
 ): CBrainConfig {
   return {
     ...base,
@@ -83,6 +107,7 @@ function mergeConfig(
       ? resolve(override.lancedb_path)
       : base.lancedb_path,
     embedding: { ...base.embedding, ...override.embedding },
+    ner: { ...base.ner, ...override.ner },
     search: { ...base.search, ...override.search },
   };
 }
@@ -92,6 +117,7 @@ export function applyEnvOverrides(config: CBrainConfig): CBrainConfig {
     process.env.CBRAIN_ZHIPU_API_KEY || process.env.ZHIPU_API_KEY;
   if (envApiKey) {
     config.embedding.api_key = envApiKey;
+    config.ner.llm_api_key = envApiKey;
   }
   const envVault = process.env.CBRAIN_VAULT_PATH;
   if (envVault) {

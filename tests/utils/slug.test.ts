@@ -5,19 +5,31 @@ import {
 } from "../../src/utils/slug.js";
 
 describe("slug", () => {
-  test("generates Chinese slug", () => {
-    expect(generateSlug("张三", "entity")).toBe("entities/张三");
+  test("generates Chinese entity slug with brain prefix", () => {
+    expect(generateSlug("张三", "entity")).toBe("brain/entities/张三");
   });
 
-  test("generates English slug", () => {
+  test("generates English concept slug with brain prefix", () => {
     expect(generateSlug("First Principles", "concept")).toBe(
-      "concepts/first-principles"
+      "brain/concepts/first-principles"
     );
   });
 
-  test("handles mixed content", () => {
+  test("generates event slug with raw prefix", () => {
+    expect(generateSlug("Weekly Sync", "event")).toBe(
+      "raw/events/weekly-sync"
+    );
+  });
+
+  test("generates record slug with raw prefix", () => {
+    expect(generateSlug("Meeting Notes", "record")).toBe(
+      "raw/records/meeting-notes"
+    );
+  });
+
+  test("handles mixed content entity", () => {
     const slug = generateSlug("OpenAI GPT-4o", "entity");
-    expect(slug).toMatch(/^entities\//);
+    expect(slug).toMatch(/^brain\/entities\//);
   });
 
   test("extracts slug from wiki link", () => {

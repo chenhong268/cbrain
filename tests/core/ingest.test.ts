@@ -5,6 +5,15 @@ import { CBrainDB } from "../../src/storage/sqlite.js";
 import { IngestManager } from "../../src/core/ingest.js";
 import { SyncManager } from "../../src/core/sync.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
+import type { LLMProvider } from "../../src/llm/provider.js";
+
+function createMockLLM(responses: string[]): LLMProvider {
+  let callIndex = 0;
+  return {
+    name: "mock",
+    chat: async () => responses[callIndex++] ?? '{"entities":[],"relations":[],"events":[]}',
+  };
+}
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
   return {
@@ -88,11 +97,11 @@ describe("IngestManager", () => {
       });
 
       expect(result.created).toBe(true);
-      expect(result.slug).toBe("entities/张三");
+      expect(result.slug).toBe("brain/entities/张三");
 
       const row = db
         .prepare("SELECT * FROM pages WHERE slug = ?")
-        .get("entities/张三") as any;
+        .get("brain/entities/张三") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("张三");
       expect(row.type).toBe("entity");
@@ -106,7 +115,7 @@ describe("IngestManager", () => {
         tags: ["test"],
       });
 
-      const filePath = join(vaultPath, "records/test-note.md");
+      const filePath = join(vaultPath, "raw/records/test-note.md");
       expect(existsSync(filePath)).toBe(true);
     });
 
@@ -120,7 +129,7 @@ describe("IngestManager", () => {
 
       const tags = db
         .prepare("SELECT tag FROM tags WHERE page_slug = ?")
-        .all("records/tagged") as any[];
+        .all("raw/records/tagged") as any[];
       const tagValues = tags.map((t) => t.tag);
       expect(tagValues).toContain("人物");
       expect(tagValues).toContain("商务");
@@ -197,7 +206,7 @@ describe("IngestManager", () => {
       ].join("\n");
 
       const result = await ingest.ingest({ content: md, type: "markdown" });
-      expect(result.slug).toBe("entities/autoslug");
+      expect(result.slug).toBe("brain/entities/autoslug");
     });
 
     test("uses tags from frontmatter over input tags", async () => {
@@ -249,7 +258,6 @@ describe("IngestManager", () => {
     });
 
     test("creates graph edges for resolved links", async () => {
-      // Pre-create target pages
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/lisi", "entity", "李四", "entities/lisi.md", "h1");
@@ -323,7 +331,6 @@ describe("IngestManager", () => {
     });
 
     test("does not create self-referencing link", async () => {
-      // Pre-create with vault file so getBySlug finds it
       mkdirSync(join(vaultPath, "entities"), { recursive: true });
       const preMd = [
         "---",
@@ -385,6 +392,208 @@ describe("IngestManager", () => {
         .all("%logged%") as any[];
       expect(logs.length).toBeGreaterThan(0);
       expect(logs[0].action).toBe("sync");
+    });
+  });
+
+  describe("NER integration", () => {
+    test("runs NER when LLM provider is available", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "张三", type: "person", context: "张三是诺华的商务经理" },
+            { name: "诺华", type: "company", context: "张三是诺华的商务经理" },
+          ],
+          relations: [
+            { from: "张三", to: "诺华", relation: "works_at", context: "张三是诺华的商务经理" },
+          ],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const nerIngest = new IngestManager(db, embedding, lance as any, vaultPath, llm);
+
+      const result = await nerIngest.ingest({
+        content: "张三是诺华的商务经理",
+        type: "text",
+        title: "张三简介",
+        pageType: "entity",
+      });
+
+      expect(result.ner).toBeDefined();
+      expect(result.ner!.entities).toBe(2);
+      expect(result.ner!.relations).toBe(1);
+      expect(result.ner!.stubsCreated.length).toBe(2);
+    });
+
+    test("creates entity stubs for discovered entities", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "李四", type: "person", context: "李四创办了XYZ公司" },
+            { name: "XYZ公司", type: "company", context: "李四创办了XYZ公司" },
+          ],
+          relations: [
+            { from: "李四", to: "XYZ公司", relation: "founded", context: "李四创办了XYZ公司" },
+          ],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const nerIngest = new IngestManager(db, embedding, lance as any, vaultPath, llm);
+
+      await nerIngest.ingest({
+        content: "李四创办了XYZ公司",
+        type: "text",
+        title: "创业故事",
+        pageType: "record",
+      });
+
+      const lisi = db.prepare("SELECT * FROM pages WHERE title = ?").get("李四") as any;
+      expect(lisi).not.toBeNull();
+      expect(lisi.type).toBe("entity");
+
+      const xyz = db.prepare("SELECT * FROM pages WHERE title = ?").get("XYZ公司") as any;
+      expect(xyz).not.toBeNull();
+      expect(xyz.type).toBe("entity");
+    });
+
+    test("writes relations to links table", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "王五", type: "person", context: "王五在ABC公司工作" },
+            { name: "ABC公司", type: "company", context: "王五在ABC公司工作" },
+          ],
+          relations: [
+            { from: "王五", to: "ABC公司", relation: "works_at", context: "王五在ABC公司工作" },
+          ],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const nerIngest = new IngestManager(db, embedding, lance as any, vaultPath, llm);
+
+      await nerIngest.ingest({
+        content: "王五在ABC公司工作",
+        type: "text",
+        title: "王五介绍",
+        pageType: "record",
+      });
+
+      const links = db.prepare("SELECT * FROM links WHERE relation = 'works_at'").all() as any[];
+      expect(links.length).toBe(1);
+      expect(links[0].relation).toBe("works_at");
+    });
+
+    test("writes events to timeline", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "赵六", type: "person", context: "赵六2023年创办了DEF科技" },
+            { name: "DEF科技", type: "company", context: "赵六2023年创办了DEF科技" },
+          ],
+          relations: [],
+          events: [
+            { date: "2023-06-01", description: "赵六创办了DEF科技", participants: ["赵六"] },
+          ],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const nerIngest = new IngestManager(db, embedding, lance as any, vaultPath, llm);
+
+      await nerIngest.ingest({
+        content: "赵六2023年创办了DEF科技",
+        type: "text",
+        title: "DEF科技故事",
+        pageType: "record",
+      });
+
+      const events = db.prepare("SELECT * FROM timeline").all() as any[];
+      expect(events.length).toBe(1);
+      expect(events[0].summary).toBe("赵六创办了DEF科技");
+      expect(events[0].source).toBe("ner");
+    });
+
+    test("skips NER when no LLM provider", async () => {
+      const embedding = createMockEmbeddingProvider();
+      const noNerIngest = new IngestManager(db, embedding, lance as any, vaultPath);
+
+      const result = await noNerIngest.ingest({
+        content: "一些没有NER的文本",
+        type: "text",
+        title: "无NER",
+        pageType: "record",
+      });
+
+      expect(result.ner).toBeUndefined();
+    });
+
+    test("NER stubs are queryable via FTS", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "测试人物", type: "person", context: "测试人物是某公司高管" },
+          ],
+          relations: [],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const nerIngest = new IngestManager(db, embedding, lance as any, vaultPath, llm);
+
+      await nerIngest.ingest({
+        content: "测试人物是某公司高管",
+        type: "text",
+        title: "人物介绍",
+        pageType: "record",
+      });
+
+      const stub = db.prepare("SELECT * FROM pages WHERE title = '测试人物'").get() as any;
+      expect(stub).not.toBeNull();
+      expect(stub.slug).toContain("测试人物");
+
+      const ftsResults = db.ftsSearch("测试人物", 5);
+      expect(ftsResults.length).toBeGreaterThan(0);
+    });
+
+    test("reuses existing entity instead of creating duplicate stub", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("brain/entities/zhangsan", "entity", "张三", "brain/entities/zhangsan.md", "h1");
+
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "张三", type: "person", context: "张三是CEO" },
+            { name: "XYZ科技", type: "company", context: "张三是XYZ科技的CEO" },
+          ],
+          relations: [
+            { from: "张三", to: "XYZ科技", relation: "works_at", context: "张三是XYZ科技的CEO" },
+          ],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const nerIngest = new IngestManager(db, embedding, lance as any, vaultPath, llm);
+
+      const result = await nerIngest.ingest({
+        content: "张三是XYZ科技的CEO",
+        type: "text",
+        title: "CEO信息",
+        pageType: "record",
+      });
+
+      expect(result.ner!.stubsCreated).not.toContain("brain/entities/zhangsan");
+      expect(result.ner!.stubsCreated.length).toBe(1);
+
+      const pages = db.prepare("SELECT * FROM pages WHERE title = '张三'").all() as any[];
+      expect(pages.length).toBe(1);
     });
   });
 });
