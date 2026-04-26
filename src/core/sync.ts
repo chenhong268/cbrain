@@ -7,6 +7,7 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import { PageManager } from "./page.js";
 import { AuditLogger } from "./audit.js";
+import { extractAll } from "./extract.js";
 import {
   chunkContent,
   hashContent,
@@ -138,6 +139,71 @@ export class SyncManager {
             report.nerEvents = (report.nerEvents ?? 0) + nerResult.events;
           } catch {
             // NER failure should not block sync
+          }
+        }
+
+        // Zero-LLM regex extraction: catch wiki-links, English terms, Chinese relations
+        if (this.pages && parsed.body.trim()) {
+          try {
+            const rx = extractAll(parsed.body);
+
+            // English tech terms → concept stubs (NER often misses these)
+            for (const term of rx.englishTerms) {
+              const existingSlug = findEntitySlug(this.db, term);
+              if (!existingSlug) {
+                this.pages.create({
+                  title: term,
+                  type: "concept",
+                  body: `> Auto-extracted from [[${slug}]]`,
+                  tags: ["auto-extracted", "regex"],
+                });
+              }
+            }
+
+            // Wiki-links → entity stubs + links
+            const writtenRelations: string[] = [];
+            for (const link of rx.wikiLinks) {
+              const targetName = link.display ?? link.target;
+              const targetSlug = findEntitySlug(this.db, targetName);
+              if (!targetSlug && link.target.length >= 2) {
+                this.pages.create({
+                  title: targetName,
+                  type: "entity",
+                  body: `> Auto-extracted from [[${slug}]]`,
+                  tags: ["auto-extracted", "regex"],
+                });
+                const newSlug = findEntitySlug(this.db, targetName);
+                if (newSlug) {
+                  const key = `${slug}\x00${newSlug}`;
+                  if (!writtenRelations.includes(key)) {
+                    writtenRelations.push(key);
+                    this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+                      .run(slug, newSlug, "提及");
+                  }
+                }
+              } else if (targetSlug) {
+                const key = `${slug}\x00${targetSlug}`;
+                if (!writtenRelations.includes(key)) {
+                  writtenRelations.push(key);
+                  this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+                    .run(slug, targetSlug, "提及");
+                }
+              }
+            }
+
+            // Chinese regex relations → write to links table
+            for (const rel of rx.chineseRelations) {
+              const fromSlug = findEntitySlug(this.db, rel.from);
+              const toSlug = findEntitySlug(this.db, rel.to);
+              if (fromSlug && toSlug && fromSlug !== toSlug) {
+                this.db.prepare(
+                  "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES (?, ?, ?, ?)"
+                ).run(fromSlug, toSlug, rel.relation, rel.context);
+                report.nerRelations = (report.nerRelations ?? 0) + 1;
+              }
+            }
+          } catch {
+            // Regex extraction failure should not block sync
           }
         }
       } catch (err) {
