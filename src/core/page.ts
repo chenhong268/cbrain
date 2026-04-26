@@ -221,6 +221,55 @@ export class PageManager {
     return true;
   }
 
+  /**
+   * Merge source page into target. All links, timeline entries, tags and raw data
+   * are moved from source to target. Source body is appended to target body.
+   * Source page is deleted after merge. Returns the merged page or null.
+   */
+  merge(sourceSlug: string, targetSlug: string): Page | null {
+    const source = this.getBySlug(sourceSlug);
+    const target = this.getBySlug(targetSlug);
+    if (!source || !target) return null;
+    if (sourceSlug === targetSlug) return null;
+
+    // Create version snapshot of target before merge
+    try {
+      const targetContent = readFileSync(join(this.vaultPath, target.file_path), "utf-8");
+      this.db.createVersion(targetSlug, targetContent);
+    } catch { /* best-effort */ }
+
+    const mergeNote = `\n\n> 合并自 [[${sourceSlug}]] — ${new Date().toISOString().slice(0, 10)}`;
+    const mergedBody = target.body + mergeNote + "\n\n" + source.body;
+
+    // Move links: update all references from source → target
+    this.db.prepare(
+      "UPDATE links SET from_slug = $target WHERE from_slug = $source"
+    ).run({ $source: sourceSlug, $target: targetSlug });
+
+    this.db.prepare(
+      "UPDATE links SET to_slug = $target WHERE to_slug = $source"
+    ).run({ $source: sourceSlug, $target: targetSlug });
+
+    // Move timeline entries
+    this.db.prepare(
+      "UPDATE timeline SET page_slug = $target WHERE page_slug = $source"
+    ).run({ $source: sourceSlug, $target: targetSlug });
+
+    // Merge tags
+    const sourceTags = this.db.getTags(sourceSlug);
+    for (const tag of sourceTags) {
+      this.db.addTag(targetSlug, tag);
+    }
+
+    // Update target body
+    this.update(targetSlug, { body: mergedBody, tags: this.db.getTags(targetSlug) });
+
+    // Delete source
+    this.delete(sourceSlug);
+
+    return this.getBySlug(targetSlug);
+  }
+
   incrementMention(slug: string): void {
     this.db
       .prepare(

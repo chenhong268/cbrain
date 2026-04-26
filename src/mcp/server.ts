@@ -756,6 +756,26 @@ export function createServer(deps: CBrainDeps): McpServer {
     };
   });
 
+  // ─── merge_pages ────────────────────────────────────────────
+  server.registerTool("merge_pages", {
+    description: "Merge a source page into a target page. All links, timeline entries, tags and raw data are moved from source to target. Source body is appended to target body. Source page is deleted after merge.",
+    inputSchema: {
+      source: z.string().describe("Slug of the source page to merge and delete"),
+      target: z.string().describe("Slug of the target page to merge into"),
+    },
+  }, async ({ source, target }) => {
+    const result = pages.merge(source, target);
+    if (!result) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ success: false, error: "Merge failed — check that both slugs exist and are different" }) }],
+        isError: true,
+      };
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: true, merged: result.slug, title: result.title, type: result.type }) }],
+    };
+  });
+
   return server;
 }
 

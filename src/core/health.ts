@@ -45,6 +45,7 @@ export class HealthChecker {
     const metrics = this.collectMetrics();
     const dimensions = [
       this.checkSemanticDedup(),
+      this.checkSlugCollisions(),
       this.checkConsistency(),
       this.checkCompleteness(),
       this.checkIslands(),
@@ -131,6 +132,45 @@ export class HealthChecker {
     return {
       name: "语义去重",
       status: issues.some(i => i.severity === "high") ? "fail" : issues.length > 0 ? "warn" : "pass",
+      issues,
+    };
+  }
+
+  // ─── Dimension 1b: Slug Collision Detection ─────────────────
+
+  private checkSlugCollisions(): HealthDimension {
+    const issues: HealthIssue[] = [];
+
+    const entities = this.db.prepare(
+      `SELECT slug, title FROM pages WHERE type = 'entity' ORDER BY slug`
+    ).all() as Array<{ slug: string; title: string }>;
+
+    // Group slugs by base name (strip numbered suffix like -1, -2)
+    const groups = new Map<string, Array<{ slug: string; title: string }>>();
+    for (const row of entities) {
+      const base = row.slug.replace(/-\d+$/, "");
+      const list = groups.get(base) || [];
+      list.push(row);
+      groups.set(base, list);
+    }
+
+    for (const [base, items] of groups) {
+      if (items.length <= 1) continue;
+      for (const item of items) {
+        const others = items.filter(i => i.slug !== item.slug).map(i => `[[${i.slug}]]`).join(", ");
+        issues.push({
+          severity: "high",
+          slug: item.slug,
+          title: item.title,
+          description: `Potential duplicate — same base slug as ${others}`,
+          suggestion: `Use merge_pages to merge duplicates into the canonical page, or verify they are different entities`,
+        });
+      }
+    }
+
+    return {
+      name: "疑似重复",
+      status: issues.length > 0 ? "warn" : "pass",
       issues,
     };
   }

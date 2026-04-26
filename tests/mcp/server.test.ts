@@ -3,6 +3,7 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
+import { PageManager } from "../../src/core/page.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 function createMockEmbedding(): EmbeddingProvider {
@@ -67,7 +68,7 @@ describe("MCP Server", () => {
       expect(typeof server.connect).toBe("function");
     });
 
-    test("registers all 38 tools", () => {
+    test("registers all 39 tools", () => {
       const server = createServer(deps);
       const tools = getTools(server);
       const names = Object.keys(tools);
@@ -79,7 +80,7 @@ describe("MCP Server", () => {
         "get_versions", "graph_query", "health", "ingest",
         "job_cancel", "job_list", "job_retry", "job_status",
         "job_submit", "list_pages", "list_raw_data", "maintain",
-        "put_page", "put_raw_data", "query", "remove_link",
+        "merge_pages", "put_page", "put_raw_data", "query", "remove_link",
         "remove_orphans", "remove_tag", "resolve_slugs",
         "revert_version", "set_config", "status", "sync",
         "writeback",
@@ -881,6 +882,53 @@ describe("MCP Server", () => {
       });
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(true);
+    });
+  });
+
+  // ─── merge_pages ─────────────────────────────────
+  describe("merge_pages tool", () => {
+    test("merges source into target", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/merge_src", "MergeSrc", "brain/entities/MergeSrc.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/merge_tgt", "MergeTgt", "brain/entities/MergeTgt.md", "h2");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/other", "Other", "brain/entities/Other.md", "h3");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
+      ).run("entities/merge_src", "entities/other", "认识");
+
+      mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+      writeFileSync(join(vaultPath, "brain/entities/MergeSrc.md"), "---\ntitle: MergeSrc\ntype: entity\nslug: entities/merge_src\n---\n# MergeSrc\n\nSource body.");
+      writeFileSync(join(vaultPath, "brain/entities/MergeTgt.md"), "---\ntitle: MergeTgt\ntype: entity\nslug: entities/merge_tgt\n---\n# MergeTgt\n\nTarget body.");
+      const pageMgr = new PageManager(db, vaultPath);
+
+      const server = createServer({ ...deps, pages: pageMgr });
+      const result = await getTools(server).merge_pages.handler({
+        source: "entities/merge_src",
+        target: "entities/merge_tgt",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+      expect(data.merged).toBe("entities/merge_tgt");
+      // Source should be deleted
+      expect(db.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/merge_src")).toBeNull();
+      // Link should have been moved
+      const link = db.prepare("SELECT from_slug, to_slug FROM links WHERE from_slug = ?").get("entities/merge_tgt");
+      expect(link).toBeDefined();
+    });
+
+    test("returns error for missing slugs", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).merge_pages.handler({
+        source: "entities/noexist1",
+        target: "entities/noexist2",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(false);
     });
   });
 });

@@ -115,4 +115,35 @@ describe("PageManager", () => {
     const page = pm.getBySlug("brain/entities/某公司");
     expect(page!.mention_count).toBe(1);
   });
+
+  test("merge source into target deletes source, moves links, appends body", () => {
+    pm.create({ title: "王强", type: "entity", body: "Source body content." });
+    pm.create({ title: "王强-1", type: "entity", body: "Target body content." });
+
+    const sourceSlug = "brain/entities/王强";
+    const targetSlug = "brain/entities/王强-1";
+
+    // Add a link from source
+    pm.create({ title: "某公司", type: "entity", body: "..." });
+    db.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+      .run(sourceSlug, "brain/entities/某公司", "认识");
+
+    const merged = pm.merge(sourceSlug, targetSlug);
+    expect(merged).not.toBeNull();
+    expect(merged!.slug).toBe(targetSlug);
+
+    // Source deleted
+    expect(pm.getBySlug(sourceSlug)).toBeNull();
+
+    // Target exists with merged body
+    expect(merged!.body).toContain("Target body content.");
+    expect(merged!.body).toContain("Source body content.");
+    expect(merged!.body).toContain("合并自");
+
+    // Link moved from source to target
+    const link = db.prepare(
+      "SELECT from_slug FROM links WHERE from_slug = ? AND to_slug = ?"
+    ).get(targetSlug, "brain/entities/某公司");
+    expect(link).toBeDefined();
+  });
 });
