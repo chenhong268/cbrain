@@ -145,15 +145,15 @@
 - [x] SQLite Job Queue — jobs table, JobQueue class, 5 MCP tools
 - [x] Raw Data Storage — raw_data table, 4 MCP tools (base64 BLOB)
 
-### v0.4 — Automation
-- [ ] File watcher: auto-index on Obsidian file changes
-- [ ] Signal detector: auto-extract entities from conversations
-- [ ] Dream: nightly maintenance pipeline
-- [ ] Daily briefing with person context
+### v0.4 — Automation ✅
+- [x] File watcher: auto-index on Obsidian file changes
+- [x] Signal detector: auto-extract entities from conversations
+- [x] Dream: nightly maintenance pipeline
+- [x] Daily briefing with person context
 
-### v0.5 — Quality of Life
+### v0.5 — Quality of Life (current)
 - [ ] Auto entity enrichment (web data) for Tier 1 entities
-- [ ] Content hash change detection in sync
-- [ ] Deduplication / merge detection
+- [x] Content hash change detection in sync
+- [x] Deduplication / merge detection
 - [ ] Additional embedding providers (OpenAI, Ollama)
 - [ ] CI pipeline (lint + test)
