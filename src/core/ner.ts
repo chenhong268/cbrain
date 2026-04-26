@@ -33,17 +33,17 @@ export interface ExtractionResult {
 
 /** Entities that match these patterns are noise and should not create pages */
 function isNoiseEntity(name: string, type: EntityType): boolean {
-  // Phone numbers: pure digits ≥8
+  // Phone numbers: pure digits >= 8
   if (/^\d{8,}$/.test(name)) return true;
   // Email addresses
   if (/@/.test(name)) return true;
   // WeChat IDs / email usernames: all-lowercase, >10 chars, no CJK
   if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return true;
-  // Bare city/province names: 1-3 chars, single location word
+  // Bare city/province names
   if (type === "location" && /^[一-鿿]{2,3}[市县区]?$/.test(name)) return true;
-  // Abbreviations: 2-char uppercase (CM, AD — 3+ chars likely real terms like LLM, GPU)
+  // 2-char uppercase abbreviations (CM, AD) — 3+ chars likely real terms (LLM, GPU)
   if (/^[A-Z]{2}$/.test(name)) return true;
-  // Job titles: contains job-related keywords
+  // Job titles
   if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问/.test(name)) return true;
   // Date patterns
   if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return true;
@@ -51,31 +51,25 @@ function isNoiseEntity(name: string, type: EntityType): boolean {
 }
 
 const GENERIC_TERMS = new Set([
-  // Common abstract nouns
   "现实", "个体", "未来", "痛苦", "梦想", "成功", "失败", "优秀", "勇气", "自由",
   "幸福", "希望", "命运", "真理", "价值", "意义", "智慧", "经验", "能力", "力量",
-  // General qualities
   "领导力", "沟通", "学习", "思考", "创新", "责任", "成长", "进步", "改变", "发展",
-  // Ordinary categories
   "历史", "经济", "文化", "教育", "科学", "社会", "政治", "技术", "环境", "市场",
   "艺术", "哲学", "宗教", "法律", "道德",
-  // Ultra-generic
   "人类", "世界", "问题", "方法", "人", "生活", "时间", "工作", "中国", "美国",
   "公司", "团队", "国家", "政府", "组织", "系统", "数据", "信息", "知识", "机器",
   "人工智能", "历史学家",
-  // Emotions/states
   "快乐", "焦虑", "爱", "恨", "恐惧", "信任", "尊重",
 ]);
 
-const MAX_CONCEPTS = 3;
-const MAX_TOTAL_ENTITIES = 8;
+const MAX_CONCEPTS = 5;
+const MAX_TOTAL_ENTITIES = 12;
 
 function filterResult(result: ExtractionResult): ExtractionResult {
   const validEntities = result.entities.filter(
     (e) => !GENERIC_TERMS.has(e.name) && e.name.length >= 2 && !isNoiseEntity(e.name, e.type)
   );
 
-  // Count concepts vs non-concepts
   const concepts = validEntities.filter((e) => e.type === "concept");
   const nonConcepts = validEntities.filter((e) => e.type !== "concept");
 
@@ -106,33 +100,35 @@ const SYSTEM_PROMPT = `You are a precision entity/relation/event extractor for C
 ## Entity Extraction Rules
 
 ### DO extract:
-- Named people with full names (张三, 李明) — NOT generic roles (经理, 历史学家, 优秀的人)
+- Named people with full names (张三, 李明) — NOT generic roles (经理, 历史学家)
 - Named organizations/companies (鲲鹏医院, 红杉资本) — NOT generic orgs (公司, 团队)
-- Named products/projects with clear identity (iPhone, 阿波罗计划) — NOT generic products
+- Named products/projects with clear identity (iPhone, 阿波罗计划)
 - Named locations (北京, 中关村) — NOT generic places (城市, 办公室)
+- Technical terms, abbreviations, and acronyms widely recognized in the field — see below
 
-### Concept extraction — STRICT criteria (type: "concept"):
-ONLY extract concepts that meet ALL of these conditions:
-1. Has a clear, specific definition or framework in the text
-2. Is a named methodology, theory, or intellectual framework (e.g. 第一性原理, PDCA循环, 奥卡姆剃刀)
-3. Would warrant its own encyclopedia entry
+### Concept extraction (type: "concept"):
+Extract as concept if ANY of:
+1. Named methodology, theory, or intellectual framework (e.g. 第一性原理, PDCA)
+2. Benchmark, evaluation metric, or standard dataset (e.g. MMLU, C-Eval, BLEU)
+3. Well-known technical term or architectural pattern (e.g. RAG, LoRA, transformer, LLM)
+4. Abbreviation or acronym that is a proper noun (e.g. GPU, API, GPT — NOT generic short words)
 
 DO NOT extract as concepts:
-- Common abstract nouns: 现实, 个体, 未来, 痛苦, 梦想, 成功, 失败, 优秀, 勇气, 自由, 幸福
+- Common abstract nouns: 现实, 个体, 未来, 痛苦, 梦想, 成功, 失败
 - General qualities: 领导力, 沟通, 学习, 思考, 创新, 责任
-- Ordinary categories: 历史, 经济, 文化, 教育, 科学
-- Text themes or topics that lack a specific framework definition
+- Ordinary categories: 历史, 经济, 文化, 教育
+- Text themes or topics that lack a specific technical definition
 
 ### Max limits per extraction:
-- entities (person/company/product/location): ≤ 8
-- concepts: ≤ 3
-- Total entities: ≤ 10
+- entities (person/company/product/location): <= 12
+- concepts: <= 5
+- Total entities: <= 15
 If the text mentions many entities, keep only the most important ones.
 
 ### Skip entirely:
 - Generic nouns that could appear in any text (人类, 社会, 世界, 问题, 方法)
 - Emotions and states (快乐, 焦虑, 成长, 进步)
-- Adjectives used as nouns (优秀的人 → skip, 管理者 → skip unless named)
+- Adjectives used as nouns (优秀的人, 管理者 unless named)
 
 ## Relation Types (Chinese ONLY)
 
@@ -179,7 +175,6 @@ export class NerEngine {
       return { entities: [], relations: [], events: [] };
     }
 
-    // Truncate to ~3000 chars to stay within token limits
     const truncated = text.length > 3000 ? text.slice(0, 3000) + "…" : text;
 
     const response = await this.llm.chat([
