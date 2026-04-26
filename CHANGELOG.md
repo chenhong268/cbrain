@@ -1,8 +1,42 @@
 # Changelog
 
-> Current: `0.x.x` — active development. Version bumps will resume at v0.3.0 for the first stable release.
+> Current: `0.1.0-dev` — active development. Version bumps will resume at v0.3.0 for the first stable release.
 
-## [Dev] — Current (2026-04-25)
+## [Dev] — 2026-04-26
+
+### Added
+- **Zero-LLM regex extraction engine** (`src/core/extract.ts`) — GBrain-inspired deterministic fallback
+  - `extractWikiLinks()`: `[[target]]` wikilink extraction
+  - `extractEnglishTerms()`: 3+ uppercase acronyms with known-term whitelist (RAG, LLM, MMLU...)
+  - `extractChineseRelations()`: 任职于/创立了/投资了/认识/指导/成员 patterns
+  - `stripCodeBlocks()`: no false positives from code samples
+  - Runs alongside LLM NER in sync pipeline; creates stubs for missed entities
+- **File Watcher as standalone daemon** — `cbrain watch` command + launchd plist
+  - Auto-sync on file change (debounce 2s)
+  - Auto-clean orphans on file delete
+- **Stale stub auto-cleanup** — auto-extracted stubs whose source no longer references them are removed on sync
+- **38 MCP tools** — added `maintain` tool (sync → enrich → health → brief)
+
+### Changed
+- **NER prompt**: relation types English→Chinese (任职于/认识/创业了...)
+- **NER prompt**: expanded to extract English tech terms (benchmarks, acronyms, architectural patterns)
+- **NER limits**: concepts 3→5, entities 8→12
+- **Health check whitelist**: synced to Chinese relation types
+- **Outputs fully Chinese**: 健康检查, 操作日志, 指标快照
+- **`mcp_cbrain_query`**: strategy hidden from agents, always uses optimal hybrid
+
+### Fixed
+- NER noise filter: phone numbers, email/WeChat, bare locations, abbreviations, job titles, dates
+- 2-char abbreviation filter narrowed to avoid killing LLM/GPU/RAG etc
+- English terms now extracted: MMLU, C-Eval, GPT, Claude, CBrain, API, RAG...
+- `put_page` now indexes content (chunks, vector, FTS) after create/update
+- `inferTypeFromPath` updated for `raw/` / `brain/` dir naming
+- `get_timeline` returns unified events list (structured + body date lines)
+- `add_timeline_entry` appends to page body + auto-reindex
+- Date regex fixed: single-separator dates (2007.12) now matched
+- `cbrain sync` auto-runs removeOrphans + cleanStaleStubs
+
+## [Dev] — 2026-04-25
 
 ### Added
 - **Hermes Agent integration** — brain-ops skill (37-tool reference), signal-detector skill (SCAN→CLASSIFY→QUERY→INGEST)
