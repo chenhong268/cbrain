@@ -9,6 +9,10 @@
 - **`PageManager.merge(sourceSlug, targetSlug)`** — core merge logic with version snapshot, body append, link/timeline migration
 - **Slug collision detection** in health check — new "疑似重复" dimension detects `王强` vs `王强-1` patterns with `merge_pages` suggestion
 - **Content hash change detection** — verified working; unchanged files skip re-index on sync
+- **System Logger** (`src/core/logger.ts`) — info/warn/error levels, daily markdown log files, wired into PageManager, SyncManager, MCP server, CLI
+- **Error detection in health check** — new "系统错误" dimension (10 dimensions now), reads recent 7-day error log
+- **Health check relation whitelist** expanded — added 下级, 汇报给, 负责, 职位, 就读于, 毕业于, 专业, 专业为, 配偶关系, 条线
+- **CBrain 技术全景** + **CBrain vs GBrain 横向对比** + **CBrain 使用指南** — three technical docs saved to Obsidian
 
 ### Added (morning)
 - **Zero-LLM regex extraction engine** (`src/core/extract.ts`) — GBrain-inspired deterministic fallback
