@@ -37,12 +37,12 @@ function isNoiseEntity(name: string, type: EntityType): boolean {
   if (/^\d{8,}$/.test(name)) return true;
   // Email addresses
   if (/@/.test(name)) return true;
-  // WeChat IDs: pure alphanumeric without CJK, ≥4 chars (but not Chinese names)
-  if (/^[a-zA-Z][a-zA-Z0-9]{3,}$/.test(name) && !/[一-鿿]/.test(name)) return true;
+  // WeChat IDs / email usernames: all-lowercase, >10 chars, no CJK
+  if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return true;
   // Bare city/province names: 1-3 chars, single location word
   if (type === "location" && /^[一-鿿]{2,3}[市县区]?$/.test(name)) return true;
-  // Abbreviations: all-uppercase <6 chars
-  if (/^[A-Z]{2,3}$/.test(name)) return true;
+  // Abbreviations: 2-char uppercase (CM, AD — 3+ chars likely real terms like LLM, GPU)
+  if (/^[A-Z]{2}$/.test(name)) return true;
   // Job titles: contains job-related keywords
   if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问/.test(name)) return true;
   // Date patterns
