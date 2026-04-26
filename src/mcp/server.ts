@@ -326,6 +326,26 @@ export function createServer(deps: CBrainDeps): McpServer {
         content: [{ type: "text", text: JSON.stringify({ action: "updated", page: updated ? { slug: updated.slug, title: updated.title } : null }, null, 2) }],
       };
     }
+    // Check for same-title-different-person before creating
+    if (title) {
+      const dup = db.prepare(
+        "SELECT slug, type, title FROM pages WHERE title = $title AND slug != $slug LIMIT 1"
+      ).get({ $title: title, $slug: slug }) as { slug: string; type: string; title: string } | null;
+      if (dup) {
+        // Suggest a disambiguated slug based on type or tags
+        const context = tags?.join("-") || type || "entity";
+        const suggestedSlug = slug.replace(/\/[^/]+$/, `/${title}-${context}`);
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            action: "duplicate_title",
+            title,
+            message: `同名人物警告: "${title}" 已存在 (${dup.slug})。如果这是不同的人，请用不同的 slug，例如 "${suggestedSlug}"。如果是同一个人，直接用现有 slug "${dup.slug}" 更新。`,
+            existingSlug: dup.slug,
+            suggestedSlug,
+          }) }],
+        };
+      }
+    }
     if (!title) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "title is required for new pages" }) }] };
     }
