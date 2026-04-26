@@ -185,6 +185,13 @@ export class HealthChecker {
       "任职于", "认识", "投资了", "创立了", "参加了",
       "提及", "竞争对手", "合作伙伴", "子公司",
       "成员", "指导", "创建者", "影响", "其他",
+      // Employment & education
+      "下级", "汇报给", "负责", "职位",
+      "就读于", "毕业于", "专业", "专业为",
+      // Family
+      "配偶关系",
+      // Organization
+      "条线",
     ]);
 
     const links = this.db.prepare(
