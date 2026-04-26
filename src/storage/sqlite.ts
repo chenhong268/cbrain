@@ -309,11 +309,23 @@ export class CBrainDB {
   }
 
   ftsSearch(query: string, limit: number = 10): Array<{ page_slug: string; content: string; rank: number }> {
-    // Short queries (<3 chars) fall back to LIKE — trigram tokenizer needs ≥3 chars
+    // Short queries (<3 chars) fall back to LIKE with TF-weighted rank.
+    // rank = tf / (1 + tf): more occurrences → higher rank → higher score.
     if (query.length < 3) {
-      return this.db.prepare(
-        "SELECT DISTINCT page_slug, content, 0.8 as rank FROM chunks WHERE content LIKE $pattern LIMIT $limit"
-      ).all({ $pattern: `%${query}%`, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
+      const pattern = `%${query}%`;
+      return this.db.prepare(`
+        SELECT page_slug, content,
+          CAST(tf AS REAL) / (1.0 + CAST(tf AS REAL)) AS rank
+        FROM (
+          SELECT page_slug, content,
+            (LENGTH(content) - LENGTH(REPLACE(content, $query, ''))) * 1.0 / LENGTH($query) AS tf
+          FROM chunks
+          WHERE content LIKE $pattern
+        )
+        GROUP BY page_slug
+        ORDER BY rank DESC
+        LIMIT $limit
+      `).all({ $query: query, $pattern: pattern, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
     }
     const ftsQuery = this.buildTrigramQuery(query);
     return this.db.prepare(
