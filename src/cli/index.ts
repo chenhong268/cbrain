@@ -313,15 +313,36 @@ program
     deps.db.close();
   });
 
+// ─── watch ───────────────────────────────────────────────────
+program
+  .command("watch")
+  .description("Watch vault for changes and auto-sync (daemon)")
+  .action(async () => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
+    if (!apiKey) {
+      console.error("Error: ZHIPU_API_KEY not set.");
+      process.exit(1);
+    }
+    const embedding = new (await import("../embedding/zhipu.js")).ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl);
+    const lance = new LanceDBManager();
+    await lance.connect(config.lancePath);
+    const { SyncManager } = await import("../core/sync.js");
+    const sync = new SyncManager(db, embedding, lance);
+    const { FileWatcher } = await import("../core/watcher.js");
+    const watcher = new FileWatcher(sync, config.vaultPath);
+    watcher.start();
+    console.log(`Watching ${config.vaultPath}`);
+  });
+
 // ─── serve ───────────────────────────────────────────────────
 program
   .command("serve")
   .description("Start MCP server (stdio transport)")
-  .option("--watch", "Watch vault for changes and auto-sync")
-  .action(async (opts) => {
+  .action(async () => {
     const config = loadConfig();
     const deps = createDeps(config);
-    if (opts.watch) (deps as any).watch = true;
     await deps.lance.connect(config.lancePath);
     await createServer(deps).connect(
       new (await import("@modelcontextprotocol/sdk/server/stdio.js")).StdioServerTransport()

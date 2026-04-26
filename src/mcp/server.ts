@@ -19,7 +19,6 @@ import { chunkContent } from "../core/shared.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
 import { runMaintenance } from "../core/maintain.js";
-import { FileWatcher } from "../core/watcher.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 
@@ -29,7 +28,6 @@ export interface CBrainDeps {
   lance: LanceDBManager;
   vaultPath: string;
   llm?: LLMProvider;
-  watch?: boolean;
 }
 
 export function createServer(deps: CBrainDeps): McpServer {
@@ -51,12 +49,6 @@ export function createServer(deps: CBrainDeps): McpServer {
     name: "cbrain",
     version: "0.3.0",
   });
-
-  // Start file watcher if enabled — auto-sync on Obsidian edits
-  if (deps.watch) {
-    const watcher = new FileWatcher(sync, vaultPath);
-    watcher.start();
-  }
 
   // ─── query ───────────────────────────────────────────────
   server.registerTool("query", {

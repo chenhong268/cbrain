@@ -1,5 +1,4 @@
 import { watch } from "node:fs";
-import { relative } from "node:path";
 import type { SyncManager } from "./sync.js";
 
 export class FileWatcher {
@@ -27,7 +26,7 @@ export class FileWatcher {
           filename,
           setTimeout(async () => {
             this.timers.delete(filename);
-            const slug = relative(this.vaultPath, filename).replace(/\.md$/, "");
+            const slug = filename.replace(/\.md$/, ""); // filename is already relative to vaultPath
             try {
               await this.sync.syncPage(slug, this.vaultPath);
             } catch {
