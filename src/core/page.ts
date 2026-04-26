@@ -234,12 +234,22 @@ export class PageManager {
 
     // Create version snapshot of target before merge
     try {
-      const targetContent = readFileSync(join(this.vaultPath, target.file_path), "utf-8");
-      this.db.createVersion(targetSlug, targetContent);
+      const targetFilePath = join(this.vaultPath, target.file_path);
+      if (existsSync(targetFilePath)) {
+        const targetContent = readFileSync(targetFilePath, "utf-8");
+        this.db.createVersion(targetSlug, targetContent);
+      }
     } catch { /* best-effort */ }
 
-    const mergeNote = `\n\n> 合并自 [[${sourceSlug}]] — ${new Date().toISOString().slice(0, 10)}`;
-    const mergedBody = target.body + mergeNote + "\n\n" + source.body;
+    // Collect everything BEFORE modifying DB
+    const sourceBody = source.body || "";
+    const targetBody = target.body || "";
+    const sourceTags = this.db.getTags(sourceSlug);
+    const targetTags = this.db.getTags(targetSlug);
+
+    const mergeDate = new Date().toISOString().slice(0, 10);
+    const mergeNote = `\n\n> 合并自 [[${sourceSlug}]] — ${mergeDate}`;
+    const mergedBody = targetBody + mergeNote + "\n\n" + sourceBody;
 
     // Move links: update all references from source → target
     this.db.prepare(
@@ -255,16 +265,27 @@ export class PageManager {
       "UPDATE timeline SET page_slug = $target WHERE page_slug = $source"
     ).run({ $source: sourceSlug, $target: targetSlug });
 
-    // Merge tags
-    const sourceTags = this.db.getTags(sourceSlug);
-    for (const tag of sourceTags) {
+    // Merge tags (dedup)
+    const allTags = [...new Set([...targetTags, ...sourceTags])];
+    // Clear and rewrite tags to avoid stale records
+    this.db.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: targetSlug });
+    for (const tag of allTags) {
       this.db.addTag(targetSlug, tag);
     }
 
-    // Update target body
-    this.update(targetSlug, { body: mergedBody, tags: this.db.getTags(targetSlug) });
+    // Write merged body directly (bypass update's re-read of file)
+    const targetFilePath = join(this.vaultPath, target.file_path);
+    const now = new Date().toISOString();
+    const frontmatter = { ...target.frontmatter, updated_at: now, tags: allTags };
+    const content = stringifyFrontmatter(frontmatter, mergedBody);
+    writeFileSync(targetFilePath, content, "utf-8");
 
-    // Delete source
+    const contentHash = hashContent(content);
+    this.db.prepare(
+      "UPDATE pages SET content_hash = $hash, updated_at = $now WHERE slug = $slug"
+    ).run({ $hash: contentHash, $now: now, $slug: targetSlug });
+
+    // Delete source page (file + index)
     this.delete(sourceSlug);
 
     return this.getBySlug(targetSlug);
