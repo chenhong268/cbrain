@@ -1,4 +1,5 @@
-import { watch } from "node:fs";
+import { watch, existsSync } from "node:fs";
+import { join } from "node:path";
 import type { SyncManager } from "./sync.js";
 
 export class FileWatcher {
@@ -26,11 +27,17 @@ export class FileWatcher {
           filename,
           setTimeout(async () => {
             this.timers.delete(filename);
-            const slug = filename.replace(/\.md$/, ""); // filename is already relative to vaultPath
+            const slug = filename.replace(/\.md$/, "");
+            const fullPath = join(this.vaultPath, filename);
             try {
-              await this.sync.syncPage(slug, this.vaultPath);
+              if (existsSync(fullPath)) {
+                await this.sync.syncPage(slug, this.vaultPath);
+              } else {
+                // File deleted — clean up orphaned DB entries
+                await this.sync.removeOrphans(this.vaultPath);
+              }
             } catch {
-              // best-effort: next full sync will catch up
+              // best-effort
             }
           }, 2000),
         );

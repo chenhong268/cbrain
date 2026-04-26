@@ -300,6 +300,10 @@ program
       const report = await sync.syncAll(config.vaultPath);
       console.log(`Synced:  ${report.synced}`);
       console.log(`Skipped: ${report.skipped} (unchanged)`);
+      const orphans = await sync.removeOrphans(config.vaultPath);
+      if (orphans.length > 0) console.log(`Orphans: ${orphans.length} removed`);
+      const stale = await sync.cleanStaleStubs(config.vaultPath);
+      if (stale.length > 0) console.log(`Stale stubs: ${stale.length} removed`);
       if (report.errors > 0) {
         console.log(`Errors:  ${report.errors}`);
         for (const detail of report.errorDetails ?? []) {

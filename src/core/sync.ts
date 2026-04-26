@@ -239,6 +239,35 @@ export class SyncManager {
     return report;
   }
 
+  /** Clean auto-extracted stubs whose source no longer references them. */
+  async cleanStaleStubs(vaultPath: string): Promise<string[]> {
+    const removed: string[] = [];
+    const stubs = this.db.prepare(
+      `SELECT slug, title, file_path FROM pages
+       WHERE (SELECT COUNT(*) FROM tags WHERE tags.page_slug = pages.slug AND tags.tag = 'auto-extracted') > 0`
+    ).all() as Array<{ slug: string; title: string; file_path: string }>;
+
+    for (const stub of stubs) {
+      const page = this.pages?.getBySlug(stub.slug);
+      if (!page || !page.body) continue;
+
+      // Extract source slug from "> Auto-extracted from [[source]]"
+      const srcMatch = page.body.match(/Auto-extracted from \[\[([^\]]+)\]\]/);
+      if (!srcMatch) continue;
+
+      const sourceSlug = srcMatch[1];
+      const sourcePage = this.pages?.getBySlug(sourceSlug);
+      if (!sourcePage) continue;
+
+      // Check if stub's title still appears in source body
+      if (!sourcePage.body.includes(stub.title)) {
+        this.pages?.delete(stub.slug);
+        removed.push(stub.slug);
+      }
+    }
+    return removed;
+  }
+
   async syncPage(slug: string, vaultPath: string): Promise<SyncPageResult> {
     const page = this.db
       .prepare("SELECT file_path FROM pages WHERE slug = $slug")
