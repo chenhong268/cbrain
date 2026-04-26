@@ -31,6 +31,25 @@ export interface ExtractionResult {
 
 // ─── Post-extraction filter ─────────────────────────────────
 
+/** Entities that match these patterns are noise and should not create pages */
+function isNoiseEntity(name: string, type: EntityType): boolean {
+  // Phone numbers: pure digits ≥8
+  if (/^\d{8,}$/.test(name)) return true;
+  // Email addresses
+  if (/@/.test(name)) return true;
+  // WeChat IDs: pure alphanumeric without CJK, ≥4 chars (but not Chinese names)
+  if (/^[a-zA-Z][a-zA-Z0-9]{3,}$/.test(name) && !/[一-鿿]/.test(name)) return true;
+  // Bare city/province names: 1-3 chars, single location word
+  if (type === "location" && /^[一-鿿]{2,3}[市县区]?$/.test(name)) return true;
+  // Abbreviations: all-uppercase <6 chars
+  if (/^[A-Z]{2,3}$/.test(name)) return true;
+  // Job titles: contains job-related keywords
+  if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问/.test(name)) return true;
+  // Date patterns
+  if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return true;
+  return false;
+}
+
 const GENERIC_TERMS = new Set([
   // Common abstract nouns
   "现实", "个体", "未来", "痛苦", "梦想", "成功", "失败", "优秀", "勇气", "自由",
@@ -53,7 +72,7 @@ const MAX_TOTAL_ENTITIES = 8;
 
 function filterResult(result: ExtractionResult): ExtractionResult {
   const validEntities = result.entities.filter(
-    (e) => !GENERIC_TERMS.has(e.name) && e.name.length >= 2
+    (e) => !GENERIC_TERMS.has(e.name) && e.name.length >= 2 && !isNoiseEntity(e.name, e.type)
   );
 
   // Count concepts vs non-concepts
@@ -115,24 +134,24 @@ If the text mentions many entities, keep only the most important ones.
 - Emotions and states (快乐, 焦虑, 成长, 进步)
 - Adjectives used as nouns (优秀的人 → skip, 管理者 → skip unless named)
 
-## Relation Types (English ONLY)
+## Relation Types (Chinese ONLY)
 
-Use these standard types when applicable. If none fits, use "other":
-- works_at: A works at B
-- knows: A knows B personally
-- invested_in: A invested in B
-- founded: A founded B
-- attended: A attended event/B
-- mentions: A mentions B
-- competitor_of: A competes with B
-- partner_of: A partners with B
-- subsidiary_of: A is subsidiary of B
-- member_of: A is member of B
-- mentors: A mentors B
-- created_by: A created B
-- influences: A influences B
+Use these standard Chinese types. If none fits, use "其他":
+- 任职于: A在B工作
+- 认识: A认识B
+- 投资了: A投资了B
+- 创立了: A创立了B
+- 参加了: A参加了B
+- 提及: A提及B
+- 竞争对手: A与B竞争
+- 合作伙伴: A与B合作
+- 子公司: A是B的子公司
+- 成员: A是B的成员
+- 指导: A指导B
+- 创建者: B创建了A
+- 影响: A影响B
 
-NEVER use Chinese relation types. "A投资了B" → invested_in, NOT "投资了".
+DO NOT use English relation types.
 
 ## Event Rules
 - Only extract events with specific time references or clear factual claims

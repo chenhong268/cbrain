@@ -142,9 +142,9 @@ export class HealthChecker {
 
     // Check for relation types that are not in the standard English list
     const standardRelations = new Set([
-      "works_at", "knows", "invested_in", "founded", "attended",
-      "mentions", "competitor_of", "partner_of", "subsidiary_of",
-      "member_of", "mentors", "created_by", "influences", "other",
+      "任职于", "认识", "投资了", "创立了", "参加了",
+      "提及", "竞争对手", "合作伙伴", "子公司",
+      "成员", "指导", "创建者", "影响", "其他",
     ]);
 
     const links = this.db.prepare(

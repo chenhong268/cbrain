@@ -35,7 +35,7 @@ describe("HealthChecker", () => {
     );
   }
 
-  function insertLink(from: string, to: string, relation = "mentions") {
+  function insertLink(from: string, to: string, relation = "提及") {
     db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run(from, to, relation);
   }
