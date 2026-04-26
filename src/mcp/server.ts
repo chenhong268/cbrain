@@ -18,6 +18,8 @@ import { PageManager } from "../core/page.js";
 import { chunkContent } from "../core/shared.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
+import { runMaintenance } from "../core/maintain.js";
+import { FileWatcher } from "../core/watcher.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 
@@ -27,6 +29,7 @@ export interface CBrainDeps {
   lance: LanceDBManager;
   vaultPath: string;
   llm?: LLMProvider;
+  watch?: boolean;
 }
 
 export function createServer(deps: CBrainDeps): McpServer {
@@ -48,6 +51,12 @@ export function createServer(deps: CBrainDeps): McpServer {
     name: "cbrain",
     version: "0.3.0",
   });
+
+  // Start file watcher if enabled — auto-sync on Obsidian edits
+  if (deps.watch) {
+    const watcher = new FileWatcher(sync, vaultPath);
+    watcher.start();
+  }
 
   // ─── query ───────────────────────────────────────────────
   server.registerTool("query", {
@@ -715,6 +724,23 @@ export function createServer(deps: CBrainDeps): McpServer {
     const ok = db.deleteRawData(slug, key);
     return {
       content: [{ type: "text", text: JSON.stringify({ success: ok, slug, key }) }],
+    };
+  });
+
+  // ─── maintain ───────────────────────────────────────────────
+  server.registerTool("maintain", {
+    description: "Run full maintenance pipeline: sync → enrich → health check. Use this for nightly or scheduled upkeep.",
+    inputSchema: {},
+  }, async () => {
+    const report = await runMaintenance(vaultPath, sync, enrich, new HealthChecker(db, outputsDir));
+    const brief = [
+      `同步: ${report.sync.synced} 更新, ${report.sync.skipped} 跳过`,
+      report.sync.nerEntities ? `NER: ${report.sync.nerEntities} 实体, ${report.sync.nerRelations} 关系` : "",
+      `实体: ${report.enrich.total} 总计, ${report.enrich.upgraded} 升级`,
+      `健康: ${report.health.overallStatus === "pass" ? "✅" : "⚠️"} ${report.health.dimensions.length} 维度, ${report.health.dimensions.reduce((s, d) => s + d.issues.length, 0)} 问题`,
+    ].filter(Boolean).join("\n");
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: true, brief, report }, null, 2) }],
     };
   });
 

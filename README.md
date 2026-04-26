@@ -121,6 +121,7 @@ Add to your Agent's MCP config:
 | `remove_orphans` | Remove DB entries with no vault file |
 | `generate_indexes` | Generate index pages (dashboard, entities, concepts, sources) |
 | `enrich` | Entity tier enrichment |
+| `maintain` | Full maintenance pipeline (sync → enrich → health) |
 
 **Pages:**
 | Tool | Description |

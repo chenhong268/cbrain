@@ -317,9 +317,11 @@ program
 program
   .command("serve")
   .description("Start MCP server (stdio transport)")
-  .action(async () => {
+  .option("--watch", "Watch vault for changes and auto-sync")
+  .action(async (opts) => {
     const config = loadConfig();
     const deps = createDeps(config);
+    if (opts.watch) (deps as any).watch = true;
     await deps.lance.connect(config.lancePath);
     await createServer(deps).connect(
       new (await import("@modelcontextprotocol/sdk/server/stdio.js")).StdioServerTransport()

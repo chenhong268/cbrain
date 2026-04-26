@@ -67,7 +67,7 @@ describe("MCP Server", () => {
       expect(typeof server.connect).toBe("function");
     });
 
-    test("registers all 37 tools", () => {
+    test("registers all 38 tools", () => {
       const server = createServer(deps);
       const tools = getTools(server);
       const names = Object.keys(tools);
@@ -78,10 +78,11 @@ describe("MCP Server", () => {
         "get_page", "get_raw_data", "get_tags", "get_timeline",
         "get_versions", "graph_query", "health", "ingest",
         "job_cancel", "job_list", "job_retry", "job_status",
-        "job_submit", "list_pages", "list_raw_data", "put_page",
-        "put_raw_data", "query", "remove_link", "remove_orphans",
-        "remove_tag", "resolve_slugs", "revert_version",
-        "set_config", "status", "sync", "writeback",
+        "job_submit", "list_pages", "list_raw_data", "maintain",
+        "put_page", "put_raw_data", "query", "remove_link",
+        "remove_orphans", "remove_tag", "resolve_slugs",
+        "revert_version", "set_config", "status", "sync",
+        "writeback",
       ]);
     });
   });
