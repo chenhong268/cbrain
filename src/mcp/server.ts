@@ -19,6 +19,7 @@ import { chunkContent } from "../core/shared.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
 import { runMaintenance } from "../core/maintain.js";
+import { Logger } from "../core/logger.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 
@@ -33,16 +34,17 @@ export interface CBrainDeps {
 export function createServer(deps: CBrainDeps): McpServer {
   const { db, embedding, lance, vaultPath, llm } = deps;
 
+  const outputsDir = join(vaultPath, "..", "outputs");
+  const logger = new Logger(outputsDir);
+  const pages = new PageManager(db, vaultPath, logger);
   const search = new HybridSearch(db, embedding, lance, { llm });
-  const pages = new PageManager(db, vaultPath);
   const nerEngine = llm ? new NerEngine(llm) : undefined;
-  const sync = new SyncManager(db, embedding, lance, { nerEngine, pages });
+  const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger });
   const ingest = new IngestManager(db, embedding, lance, vaultPath, llm);
   const graph = new GraphManager(db);
   const enrich = new EnrichManager(db);
   const versions = new VersionManager(db, pages, vaultPath);
   const jobs = new JobQueue(db);
-  const outputsDir = join(vaultPath, "..", "outputs");
   const writeback = new WritebackManager(pages, db, outputsDir);
 
   const server = new McpServer({
@@ -194,11 +196,10 @@ export function createServer(deps: CBrainDeps): McpServer {
 
   // ─── health ────────────────────────────────────────────
   server.registerTool("health", {
-    description: "Run an 8-dimension health check (dedup, consistency, completeness, islands, suggestions, attention, data readiness, source quality). Returns issues and writes a report file.",
+    description: "Run a 10-dimension health check (errors, dedup, slug collisions, consistency, completeness, islands, suggestions, attention, data readiness, source quality). Returns issues and writes a report file.",
     inputSchema: {},
   }, async () => {
-    const outputsDir = join(vaultPath, "..", "outputs");
-    const checker = new HealthChecker(db, outputsDir);
+    const checker = new HealthChecker(db, outputsDir, logger);
     const report = await checker.checkAll();
     return {
       content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
@@ -744,7 +745,7 @@ export function createServer(deps: CBrainDeps): McpServer {
     description: "Run full maintenance pipeline: sync → enrich → health check. Use this for nightly or scheduled upkeep.",
     inputSchema: {},
   }, async () => {
-    const report = await runMaintenance(vaultPath, sync, enrich, new HealthChecker(db, outputsDir));
+    const report = await runMaintenance(vaultPath, sync, enrich, new HealthChecker(db, outputsDir, logger));
     const brief = [
       `同步: ${report.sync.synced} 更新, ${report.sync.skipped} 跳过`,
       report.sync.nerEntities ? `NER: ${report.sync.nerEntities} 实体, ${report.sync.nerRelations} 关系` : "",

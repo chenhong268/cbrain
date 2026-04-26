@@ -424,13 +424,15 @@ program
 // ─── health ──────────────────────────────────────────────────
 program
   .command("health")
-  .description("Run 8-dimension health check and write report")
+  .description("Run 10-dimension health check and write report")
   .action(async () => {
     const config = loadConfig();
     const db = new CBrainDB(config.dbPath);
     const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
     const { HealthChecker } = await import("../core/health.js");
-    const checker = new HealthChecker(db, outputsDir);
+    const { Logger } = await import("../core/logger.js");
+    const logger = new Logger(outputsDir);
+    const checker = new HealthChecker(db, outputsDir, logger);
     const report = await checker.checkAll();
 
     const icon = (s: string) => s === "pass" ? "✅" : s === "warn" ? "⚠️" : "❌";

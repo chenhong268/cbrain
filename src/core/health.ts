@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 import { AuditLogger, type MetricsSnapshot } from "./audit.js";
+import type { Logger } from "./logger.js";
 
 export interface HealthDimension {
   name: string;
@@ -28,11 +29,13 @@ export class HealthChecker {
   private db: CBrainDB;
   private outputsDir: string;
   private audit: AuditLogger;
+  private logger: Logger | null;
 
-  constructor(db: CBrainDB, outputsDir: string) {
+  constructor(db: CBrainDB, outputsDir: string, logger?: Logger) {
     this.db = db;
     this.outputsDir = outputsDir;
     this.audit = new AuditLogger(outputsDir);
+    this.logger = logger ?? null;
   }
 
   /**
@@ -44,6 +47,7 @@ export class HealthChecker {
 
     const metrics = this.collectMetrics();
     const dimensions = [
+      this.checkErrors(),
       this.checkSemanticDedup(),
       this.checkSlugCollisions(),
       this.checkConsistency(),
@@ -79,6 +83,32 @@ export class HealthChecker {
     }));
 
     return report;
+  }
+
+  // ─── Dimension 0: Error Log Check ─────────────────────────
+
+  private checkErrors(): HealthDimension {
+    const issues: HealthIssue[] = [];
+    if (!this.logger) {
+      return { name: "系统错误", status: "pass", issues: [] };
+    }
+
+    const recentErrors = this.logger.getRecentErrors(7);
+    if (recentErrors.length > 0) {
+      issues.push({
+        severity: "high",
+        slug: "-",
+        title: `${recentErrors.length} 个系统错误`,
+        description: `最近 7 天发现 ${recentErrors.length} 个错误，涉及模块：${[...new Set(recentErrors.map(e => e.module))].join("、")}`,
+        suggestion: "检查 outputs/logs/系统日志-*.md 查看详情",
+      });
+    }
+
+    return {
+      name: "系统错误",
+      status: recentErrors.length > 0 ? "fail" : "pass",
+      issues,
+    };
   }
 
   // ─── Dimension 1: Semantic Dedup ──────────────────────────

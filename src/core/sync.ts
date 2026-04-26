@@ -8,6 +8,7 @@ import { NerEngine } from "./ner.js";
 import { PageManager } from "./page.js";
 import { AuditLogger } from "./audit.js";
 import { extractAll } from "./extract.js";
+import type { Logger } from "./logger.js";
 import {
   chunkContent,
   hashContent,
@@ -46,12 +47,13 @@ export class SyncManager {
   private nerEngine: NerEngine | null;
   private pages: PageManager | null;
   private audit: AuditLogger | null;
+  private logger: Logger | null;
 
   constructor(
     db: CBrainDB,
     embedding: EmbeddingProvider,
     lance: LanceDBManager,
-    config?: SyncConfig & { nerEngine?: NerEngine; pages?: PageManager }
+    config?: SyncConfig & { nerEngine?: NerEngine; pages?: PageManager; logger?: Logger }
   ) {
     this.db = db;
     this.embedding = embedding;
@@ -59,6 +61,7 @@ export class SyncManager {
     this.chunkSize = config?.chunkSize ?? 500;
     this.nerEngine = config?.nerEngine ?? null;
     this.pages = config?.pages ?? null;
+    this.logger = config?.logger ?? null;
     this.audit = config?.outputsDir ? new AuditLogger(config.outputsDir) : null;
   }
 
@@ -228,9 +231,11 @@ export class SyncManager {
       } catch (err) {
         report.errors++;
         const msg = err instanceof Error ? err.message : String(err);
+        const slug = relative(vaultPath, filePath);
         report.errorDetails!.push(`${filePath}: ${msg}`);
+        this.logger?.error("sync", `同步失败: ${slug}`, { error: msg });
         this.audit?.log(AuditLogger.entry("sync_page", "error", {
-          pageSlug: relative(vaultPath, filePath),
+          pageSlug: slug,
           details: { error: msg },
         }));
       }

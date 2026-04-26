@@ -14,6 +14,7 @@ import {
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath } from "../utils/slug.js";
 import { hashContent } from "./shared.js";
+import type { Logger } from "./logger.js";
 
 export interface CreatePageInput {
   title: string;
@@ -41,10 +42,12 @@ export interface Page {
 export class PageManager {
   private db: CBrainDB;
   private vaultPath: string;
+  private logger: Logger | null;
 
-  constructor(db: CBrainDB, vaultPath: string) {
+  constructor(db: CBrainDB, vaultPath: string, logger?: Logger) {
     this.db = db;
     this.vaultPath = vaultPath;
+    this.logger = logger ?? null;
   }
 
   create(input: CreatePageInput): Page {
@@ -94,6 +97,7 @@ export class PageManager {
       }
     }
 
+    this.logger?.info("page", "页面已创建", { slug, title: input.title, type: input.type });
     return this.getBySlug(slug)!;
   }
 
@@ -163,10 +167,11 @@ export class PageManager {
     }
   ): Page | null {
     if (slug.startsWith("raw/")) {
-      return null; // raw/ is human domain — read-only for CBrain
+      this.logger?.warn("page", "拒绝写入 raw/ 目录", { slug });
+      return null;
     }
     const page = this.getBySlug(slug);
-    if (!page) return null;
+    if (!page) { this.logger?.error("page", "更新失败：页面不存在", { slug }); return null; }
 
     const now = new Date().toISOString();
     const body = updates.body ?? page.body;
@@ -201,6 +206,7 @@ export class PageManager {
       }
     }
 
+    this.logger?.info("page", "页面已更新", { slug });
     return this.getBySlug(slug);
   }
 
@@ -218,6 +224,7 @@ export class PageManager {
     this.db
       .prepare("DELETE FROM pages WHERE slug = $slug")
       .run({ $slug: slug });
+    this.logger?.info("page", "页面已删除", { slug });
     return true;
   }
 
@@ -229,7 +236,7 @@ export class PageManager {
   merge(sourceSlug: string, targetSlug: string): Page | null {
     const source = this.getBySlug(sourceSlug);
     const target = this.getBySlug(targetSlug);
-    if (!source || !target) return null;
+    if (!source || !target) { this.logger?.error("page", "合并失败：页面不存在", { source: sourceSlug, target: targetSlug }); return null; }
     if (sourceSlug === targetSlug) return null;
 
     // Create version snapshot of target before merge
@@ -288,6 +295,7 @@ export class PageManager {
     // Delete source page (file + index)
     this.delete(sourceSlug);
 
+    this.logger?.info("page", "页面已合并", { source: sourceSlug, target: targetSlug });
     return this.getBySlug(targetSlug);
   }
 
