@@ -191,10 +191,29 @@ export class SyncManager {
               }
             }
 
-            // Chinese regex relations → write to links table
+            // Chinese regex relations → auto-create stubs + write to links table
             for (const rel of rx.chineseRelations) {
-              const fromSlug = findEntitySlug(this.db, rel.from);
-              const toSlug = findEntitySlug(this.db, rel.to);
+              let fromSlug = findEntitySlug(this.db, rel.from);
+              let toSlug = findEntitySlug(this.db, rel.to);
+
+              // Auto-create stubs for missing entities
+              if (!fromSlug) {
+                this.pages.create({
+                  title: rel.from, type: "entity",
+                  body: `> Auto-extracted from [[${slug}]]`,
+                  tags: ["auto-extracted", "regex"],
+                });
+                fromSlug = findEntitySlug(this.db, rel.from);
+              }
+              if (!toSlug) {
+                this.pages.create({
+                  title: rel.to, type: "entity",
+                  body: `> Auto-extracted from [[${slug}]]`,
+                  tags: ["auto-extracted", "regex"],
+                });
+                toSlug = findEntitySlug(this.db, rel.to);
+              }
+
               if (fromSlug && toSlug && fromSlug !== toSlug) {
                 this.db.prepare(
                   "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES (?, ?, ?, ?)"
