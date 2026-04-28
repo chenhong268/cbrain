@@ -5,7 +5,7 @@
 ## [Dev] — 2026-04-28
 
 ### Added (afternoon)
-- **8 new CLI commands**: `show`, `list`, `delete`, `status`, `versions`, `revert`, `config`, `maintain` — now 20 total
+- **10 new CLI commands**: `show`, `list`, `delete`, `status`, `versions`, `revert`, `config`, `maintain`, `tags`, `timeline` — now 22 total
 - **`show <slug>`** — display a page's full content
 - **`list`** — list all pages, filterable by type
 - **`delete <slug>`** — remove a page
@@ -14,6 +14,8 @@
 - **`revert <slug> <v>`** — roll back to a previous version
 - **`config`** — view or update brain config (e.g. `--set ner.enabled=false`)
 - **`maintain`** — one-click full maintenance (sync → enrich → health)
+- **`tags <slug>`** — view tags; `tags <slug> add/remove <tag>` to manage
+- **`timeline <slug>`** — view timeline events; `timeline <slug> add --date ... --summary ...` to add
 
 ### Added (morning)
 - **`skills/RESOLVER.md`** — 18 intent→skill routing rules across 7 categories, covering all 7 skills

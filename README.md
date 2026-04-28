@@ -80,7 +80,7 @@ npx cbrain doctor
 | record | `records/` | Reading notes, article summaries |
 | source | `sources/` | Compiled artifacts from raw content |
 
-## CLI Commands (20 total)
+## CLI Commands (22 total)
 
 ### 大脑管理
 ```bash
@@ -104,6 +104,15 @@ cbrain ingest <内容>                     # 录入新内容（--type, --title, 
 ```bash
 cbrain query "搜索内容"                  # 混合搜索（向量 + 全文 + 图谱）
 cbrain graph-query <slug>                # 图谱遍历（--mode traverse|backlinks|related）
+```
+
+### 标签与时间线
+```bash
+cbrain tags <slug>                       # 查看页面的所有标签
+cbrain tags <slug> add "重要"            # 打标签
+cbrain tags <slug> remove "重要"         # 去标签
+cbrain timeline <slug>                   # 查看页面的时间线
+cbrain timeline <slug> add --date 2024-03-01 --summary "张三加入ABC科技"
 ```
 
 ### 版本管理
