@@ -1,6 +1,6 @@
 # Changelog
 
-> Current: `v0.3.0` — first stable release. 23 CLI commands, 38 MCP tools, 11 skills.
+> Current: `v0.3.0` — first stable release. 23 CLI commands, 40 MCP tools, 11 skills.
 
 ## [Dev] — 2026-04-28
 

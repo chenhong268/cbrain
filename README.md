@@ -158,7 +158,7 @@ Add to your Agent's MCP config:
 }
 ```
 
-### MCP Tools (38 total)
+### MCP Tools (40 total)
 
 **Core:**
 | Tool | Description |
