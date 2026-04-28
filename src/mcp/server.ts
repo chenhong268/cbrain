@@ -757,6 +757,32 @@ export function createServer(deps: CBrainDeps): McpServer {
     };
   });
 
+  // ─── dream ──────────────────────────────────────────────────
+  server.registerTool("dream", {
+    description: "Run full nightly pipeline: sync → enrich → cleanup → health → report. Use for scheduled daily maintenance. Has cycle lock to prevent overlapping runs.",
+    inputSchema: {},
+  }, async () => {
+    const { runDream } = await import("../core/dream.js");
+    const report = await runDream(vaultPath, db, sync, enrich, new HealthChecker(db, outputsDir, logger), outputsDir, logger);
+    const brief = [
+      `同步: ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`,
+      `实体: ${report.stages.enrich.total} 总计, ${report.stages.enrich.upgraded} 升级`,
+      `清理: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期`,
+      `健康: ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题)`,
+      `⏱ ${(report.duration_ms / 1000).toFixed(1)}s`,
+    ].join("\n");
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        success: report.locked,
+        brief,
+        locked: report.locked,
+        stages: report.stages,
+        timestamp: report.timestamp,
+        duration_ms: report.duration_ms,
+      }, null, 2) }],
+    };
+  });
+
   // ─── merge_pages ────────────────────────────────────────────
   server.registerTool("merge_pages", {
     description: "Merge a source page into a target page. All links, timeline entries, tags and raw data are moved from source to target. Source body is appended to target body. Source page is deleted after merge.",
