@@ -19,7 +19,8 @@
 - **`skills/review.md`** — deep topic review: broad search → gather context → map relationships → timeline → synthesize coherent summary
 - **`skills/connect.md`** — relationship analysis: resolve both entities → shortest path → shared connections → timeline intersection → explain
 - **`skills/cleanup.md`** — guided cleanup wizard: scan → find duplicates/orphans/stubs → list for confirmation → execute
-- **RESOLVER.md** — updated to 24 rules / 10 categories / 10 skills
+- **`skills/write.md`** — knowledge-based writing: clarify needs → gather from CBrain → map gaps → generate → offer to save
+- **RESOLVER.md** — updated to 26 rules / 11 categories / 11 skills
 
 ### Added (morning)
 - **`skills/RESOLVER.md`** — 18 intent→skill routing rules across 7 categories, covering all 7 skills

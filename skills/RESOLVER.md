@@ -19,6 +19,10 @@
 - 什么关系、有什么关系、怎么认识的、关联、connect → connect.md
 - A和B、之间、联系、关联分析 → connect.md
 
+### Writing
+- 帮我写、写一段、写个、写篇、写周报、写介绍 → write.md
+- 朋友圈、生成文案、写报告 → write.md
+
 ### Content Ingestion
 - 导入、录入、记一下、保存、收录 → ingest.md
 - 添加新、新增、创建 → ingest.md
@@ -62,7 +66,8 @@
 | 7 | cleanup.md | Guided cleanup — find duplicates, orphans, stale stubs | On-demand: user wants to clean up |
 | 8 | dream.md | Nightly full pipeline (sync→enrich→doctor→report) | Scheduled: cron / timer |
 | 9 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
-| 10 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
+| 10 | write.md | Knowledge-based writing — gather from brain, produce polished output | On-demand: user wants to write something |
+| 11 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
 | 9 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
 
 ## Resolution Logic

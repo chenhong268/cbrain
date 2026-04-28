@@ -277,6 +277,7 @@ CBrain includes Agent-facing skill files that teach your Agent how to use the br
 | `enrich` | Tiered entity enrichment |
 | `maintain` | Sync and health check (one-shot) |
 | `cleanup` | Guided cleanup — find duplicates, orphans, stale stubs |
+| `write` | Knowledge-based writing — gather from brain, produce polished output |
 | `dream` | Nightly auto-maintenance pipeline |
 | `signal-detector` | Extract entities and ideas from messages |
 | `RESOLVER.md` | Intent→Skill routing table (21 rules, 8 categories) |
