@@ -15,15 +15,15 @@ describe("slug", () => {
     );
   });
 
-  test("generates event slug with raw prefix", () => {
+  test("generates event slug with brain prefix", () => {
     expect(generateSlug("Weekly Sync", "event")).toBe(
-      "raw/events/weekly-sync"
+      "brain/events/weekly-sync"
     );
   });
 
-  test("generates record slug with raw prefix", () => {
+  test("generates record slug with brain prefix", () => {
     expect(generateSlug("Meeting Notes", "record")).toBe(
-      "raw/records/meeting-notes"
+      "brain/records/meeting-notes"
     );
   });
 

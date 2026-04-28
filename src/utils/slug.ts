@@ -8,7 +8,7 @@ const PLURALS: Record<string, string> = {
   source: "sources",
 };
 
-const GENERATED_TYPES = new Set(["entity", "concept"]);
+const GENERATED_TYPES = new Set(["entity", "concept", "record", "event", "source"]);
 const GENERATED_PREFIX = "brain/";
 const RAW_PREFIX = "raw/";
 

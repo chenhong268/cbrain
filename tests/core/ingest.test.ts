@@ -115,7 +115,7 @@ describe("IngestManager", () => {
         tags: ["test"],
       });
 
-      const filePath = join(vaultPath, "raw/records/test-note.md");
+      const filePath = join(vaultPath, "brain/records/test-note.md");
       expect(existsSync(filePath)).toBe(true);
     });
 
@@ -129,7 +129,7 @@ describe("IngestManager", () => {
 
       const tags = db
         .prepare("SELECT tag FROM tags WHERE page_slug = ?")
-        .all("raw/records/tagged") as any[];
+        .all("brain/records/tagged") as any[];
       const tagValues = tags.map((t) => t.tag);
       expect(tagValues).toContain("人物");
       expect(tagValues).toContain("商务");
