@@ -5,26 +5,26 @@
 
 ## Routing Rules
 
+### Relationship Analysis
+- 什么关系、有什么关系、怎么认识的、关联、connect → connect.md
+- A和B、之间、联系、关联分析 → connect.md
+
+### Deep Review
+- 总结、全面了解、梳理、汇总、复盘、review → review.md
+- 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
+- 深度了解、知识总览、全景 → review.md
+
 ### Query & Search
 - 查询、搜索、查找、查一下、找一下 → query.md
 - 谁、是谁、什么是、是什么、介绍一下 → query.md
 - 图谱、链接到 → query.md
-
-### Deep Review
-- 总结、全面了解、梳理、汇总、review → review.md
-- 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
-- 深度了解、知识总览、全景 → review.md
-
-### Relationship Analysis
-- 什么关系、有什么关系、怎么认识的、关联、connect → connect.md
-- A和B、之间、联系、关联分析 → connect.md
 
 ### Writing
 - 帮我写、写一段、写个、写篇、写周报、写介绍 → write.md
 - 朋友圈、生成文案、写报告 → write.md
 
 ### Content Ingestion
-- 导入、录入、记一下、保存、收录 → ingest.md
+- 导入、录入、记一下、保存、收录、存入 → ingest.md
 - 添加新、新增、创建 → ingest.md
 - 这篇文章、这段内容、记录下来 → ingest.md
 - signal-detector 输出待入库内容 → ingest.md
@@ -43,7 +43,7 @@
 - 大脑整理、清理一下 → cleanup.md
 
 ### Nightly Full Pipeline
-- 夜间维护、每日维护、全量同步 → dream.md [scheduled]
+- 夜间维护、每日维护、全量同步、做个梦、做梦 → dream.md [scheduled]
 - 定时任务、cron、daily → dream.md [scheduled]
 
 ### Signal Detection

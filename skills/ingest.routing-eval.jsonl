@@ -1,2 +1,3 @@
 {"intent": "把这段内容存下来", "expected_skill": "ingest.md"}
 {"intent": "记一下，王磊是北区经理", "expected_skill": "ingest.md"}
+{"intent": "把这段内容存入大脑", "expected_skill": "ingest.md"}
