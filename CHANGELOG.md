@@ -1,6 +1,6 @@
 # Changelog
 
-> Current: `0.1.0-dev` — active development. Version bumps will resume at v0.3.0 for the first stable release.
+> Current: `v0.3.0` — first stable release. 22 CLI commands, 38 MCP tools, 11 skills.
 
 ## [Dev] — 2026-04-28
 

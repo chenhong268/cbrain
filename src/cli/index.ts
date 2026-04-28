@@ -73,7 +73,7 @@ function createDeps(config: CBrainConfig, requireEmbedding = true): CBrainDeps {
 const program = new Command()
   .name("cbrain")
   .description("Your Agent's Memory, Compounding. Agent 的记忆，复利生长。")
-  .version("0.2.0");
+  .version("0.3.0");
 
 // ─── init ────────────────────────────────────────────────────
 program
