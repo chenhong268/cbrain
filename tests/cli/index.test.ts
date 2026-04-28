@@ -59,7 +59,7 @@ describe("CLI", () => {
   describe("help", () => {
     test("shows version", () => {
       const output = execSync(`${BIN} --version`, { encoding: "utf-8" });
-      expect(output.trim()).toBe("0.2.0");
+      expect(output.trim()).toBe("0.3.0");
     });
 
     test("shows help text", () => {
