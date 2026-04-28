@@ -41,8 +41,8 @@ function isNoiseEntity(name: string, type: EntityType): boolean {
   if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return true;
   // Bare city/province names
   if (type === "location" && /^[一-鿿]{2,3}[市县区]?$/.test(name)) return true;
-  // 2-char uppercase abbreviations (CM, AD) — 3+ chars likely real terms (LLM, GPU)
-  if (/^[A-Z]{2}$/.test(name)) return true;
+  // 2-char Chinese abbreviations (CM=区域市场, AD=区域总监) — NOT real entities
+  if (/^[A-Z]{2}$/.test(name) && type !== "concept") return true;
   // Job titles
   if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问/.test(name)) return true;
   // Date patterns
@@ -88,7 +88,7 @@ function filterResult(result: ExtractionResult): ExtractionResult {
 
 // ─── Prompt ─────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a precision entity/relation/event extractor for Chinese text.
+const SYSTEM_PROMPT = `You are a precision entity/relation/event extractor for Chinese and English text. Extract from both languages equally well.
 
 ## Output Schema (strict JSON)
 {
@@ -100,24 +100,30 @@ const SYSTEM_PROMPT = `You are a precision entity/relation/event extractor for C
 ## Entity Extraction Rules
 
 ### DO extract:
-- Named people with full names (张三, 李明) — NOT generic roles (经理, 历史学家)
-- Named organizations/companies (鲲鹏医院, 红杉资本) — NOT generic orgs (公司, 团队)
-- Named products/projects with clear identity (iPhone, 阿波罗计划)
-- Named locations (北京, 中关村) — NOT generic places (城市, 办公室)
-- Technical terms, abbreviations, and acronyms widely recognized in the field — see below
+- Named people with full names — Chinese (张三, 李明) and English (John Smith, Dr. Chen) — NOT generic roles
+- Named organizations/companies — Chinese (鲲鹏医院, 红杉资本) and English (Novartis, FDA, Goldman Sachs) — NOT generic orgs
+- Named products/projects — Chinese (灵境系统) and English (Cosentyx, iPhone, ChatGPT)
+- Drug/pharmaceutical names (Fabhalta, Rhapsido, Kisqali, Entresto) — type: "product"
+- Medical/regulatory bodies (FDA, EMA, CHMP, NMPA) — type: "company"
+- Named locations — Chinese (北京) and English (Basel, Switzerland, Silicon Valley)
+- Financial/business terms used as proper entities (NYSE: NVS, S&P 500)
+- Numbers with clear entity identity (Q1 2026, Phase III, FY2025)
 
 ### Concept extraction (type: "concept"):
 Extract as concept if ANY of:
-1. Named methodology, theory, or intellectual framework (e.g. 第一性原理, PDCA)
-2. Benchmark, evaluation metric, or standard dataset (e.g. MMLU, C-Eval, BLEU)
-3. Well-known technical term or architectural pattern (e.g. RAG, LoRA, transformer, LLM)
-4. Abbreviation or acronym that is a proper noun (e.g. GPU, API, GPT — NOT generic short words)
+1. Named methodology, theory, or intellectual framework (第一性原理, PDCA, Six Sigma)
+2. Benchmark, evaluation metric, or standard dataset (MMLU, C-Eval, BLEU)
+3. Well-known technical term or architectural pattern (RAG, LoRA, transformer, LLM)
+4. Abbreviation or acronym that is a proper noun (GPU, API, GPT, IgAN, HS, CKM)
+5. Medical/pharmaceutical terms (IgA nephropathy, hidradenitis suppurativa, CKM syndrome)
+6. Financial metrics as concepts (net sales, core operating income, free cash flow, cc growth, USD growth)
+7. Business terms with specific meaning (M&A, acquisition, licensing deal, regulatory approval)
 
 DO NOT extract as concepts:
-- Common abstract nouns: 现实, 个体, 未来, 痛苦, 梦想, 成功, 失败
-- General qualities: 领导力, 沟通, 学习, 思考, 创新, 责任
-- Ordinary categories: 历史, 经济, 文化, 教育
-- Text themes or topics that lack a specific technical definition
+- Common abstract nouns (现实, 个体, 未来, leadership, innovation, growth)
+- General qualities (领导力, 沟通, efficiency, quality)
+- Ordinary categories (历史, 经济, market, industry)
+- Generic financial terms (revenue, profit, cost — unless part of a named metric like "core operating income")
 
 ### Max limits per extraction:
 - entities (person/company/product/location): <= 12
@@ -126,33 +132,33 @@ DO NOT extract as concepts:
 If the text mentions many entities, keep only the most important ones.
 
 ### Skip entirely:
-- Generic nouns that could appear in any text (人类, 社会, 世界, 问题, 方法)
-- Emotions and states (快乐, 焦虑, 成长, 进步)
-- Adjectives used as nouns (优秀的人, 管理者 unless named)
+- Generic nouns that could appear in any text (人类, 社会, 世界, 问题, method, data, report)
+- Emotions and states (快乐, 焦虑, growth as abstract concept)
+- Adjectives used as nouns (优秀的人, leaders unless named)
+- Common financial terms without entity identity (million, billion, percent, quarter)
 
-## Relation Types (Chinese ONLY)
+## Relation Types
 
-Use these standard Chinese types. If none fits, use "其他":
-- 任职于: A在B工作
-- 认识: A认识B
-- 投资了: A投资了B
-- 创立了: A创立了B
-- 参加了: A参加了B
-- 提及: A提及B
-- 竞争对手: A与B竞争
-- 合作伙伴: A与B合作
-- 子公司: A是B的子公司
-- 成员: A是B的成员
-- 指导: A指导B
-- 创建者: B创建了A
-- 影响: A影响B
-
-DO NOT use English relation types.
+Use Chinese types for Chinese relations, English types for English relations. If none fits, use "mentions":
+- 任职于 / works_at: A works at B
+- 认识 / knows: A knows B
+- 投资了 / invested_in: A invested in B
+- 创立了 / founded: A founded B
+- 收购了 / acquired: A acquired B
+- 合作 / partnered_with: A partners with B
+- 竞争对手 / competitor: A competes with B
+- 子公司 / subsidiary_of: A is subsidiary of B
+- 批准了 / approved: A approved B (e.g. FDA approved a drug)
+- 发布了 / announced: A announced B (e.g. company announced results)
+- mentions: general reference
 
 ## Event Rules
-- Only extract events with specific time references or clear factual claims
-- Skip vague statements ("近年来", "一直以来")
+- Extract events with specific dates (YYYY-MM-DD, Q1 2026, 2024) or clear time references
+- Include regulatory events (FDA approval, CHMP opinion, NMPA filing)
+- Include financial events (earnings release, acquisition close, investment round)
+- Skip vague statements ("近年来", "over the years", "recently")
 - participants must be named entities from the text
+- description can be in Chinese or English, matching the source
 
 ## General Rules
 1. Only extract information explicitly stated in the text — no inference
