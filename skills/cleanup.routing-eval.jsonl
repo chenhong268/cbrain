@@ -1,0 +1,3 @@
+{"intent": "帮我清理一下大脑", "expected_skill": "cleanup.md"}
+{"intent": "有什么该删的", "expected_skill": "cleanup.md"}
+{"intent": "去重", "expected_skill": "cleanup.md"}

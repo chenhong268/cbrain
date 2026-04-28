@@ -862,4 +862,57 @@ program
     db.close();
   });
 
+// ─── routing-eval ─────────────────────────────────────────────
+program
+  .command("routing-eval")
+  .description("Test skill routing accuracy against fixtures (routing-eval.jsonl)")
+  .action(async () => {
+    const { existsSync: exists } = await import("node:fs");
+    const { resolve: res } = await import("node:path");
+    const { runEval } = await import("../core/routing-eval.js");
+
+    let resolverPath = res(process.cwd(), "skills", "RESOLVER.md");
+    if (!exists(resolverPath)) {
+      let dir = process.cwd();
+      for (let i = 0; i < 5; i++) {
+        if (exists(res(dir, "package.json"))) {
+          resolverPath = res(dir, "skills", "RESOLVER.md");
+          break;
+        }
+        const parent = res(dir, "..");
+        if (parent === dir) break;
+        dir = parent;
+      }
+    }
+
+    if (!exists(resolverPath)) {
+      console.error("Error: skills/RESOLVER.md not found.");
+      process.exit(1);
+    }
+
+    const report = runEval(resolverPath);
+
+    if (report.total === 0) {
+      console.log("No routing-eval fixtures found. Create skills/<name>.routing-eval.jsonl files to add tests.");
+      process.exit(0);
+    }
+
+    console.log(`\n  Routing Eval — ${report.total} fixtures\n`);
+    for (const r of report.results) {
+      const icon = r.pass ? "✅" : "❌";
+      const amb = r.ambiguous ? " ⚠️ 歧义" : "";
+      console.log(`  ${icon} "${r.intent}"`);
+      console.log(`     期望: ${r.expected}  →  匹配: ${r.matched ?? "(无)"}${amb}`);
+      if (r.ambiguous_with && !r.pass) {
+        console.log(`     歧义备选: ${r.ambiguous_with.join(", ")}`);
+      }
+    }
+
+    console.log(`\n  ${report.pass}/${report.total} passed`);
+    if (report.fail > 0) {
+      console.log(`  ${report.fail} failed — check RESOLVER.md routing rules`);
+      process.exit(1);
+    }
+  });
+
 program.parse();

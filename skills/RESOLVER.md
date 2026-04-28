@@ -7,11 +7,11 @@
 
 ### Query & Search
 - 查询、搜索、查找、查一下、找一下 → query.md
-- 谁、是谁、什么是、介绍一下 → query.md
+- 谁、是谁、什么是、是什么、介绍一下 → query.md
 - 图谱、链接到 → query.md
 
 ### Deep Review
-- 总结、全面了解、汇总、review → review.md
+- 总结、全面了解、梳理、汇总、review → review.md
 - 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
 - 深度了解、知识总览、全景 → review.md
 

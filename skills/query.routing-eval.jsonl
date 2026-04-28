@@ -1,0 +1,3 @@
+{"intent": "诺华是什么", "expected_skill": "query.md"}
+{"intent": "查一下王磊", "expected_skill": "query.md"}
+{"intent": "搜索灵境项目", "expected_skill": "query.md"}

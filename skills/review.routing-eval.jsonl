@@ -1,0 +1,4 @@
+{"intent": "帮我总结诺华的情况", "expected_skill": "review.md"}
+{"intent": "全面了解王磊", "expected_skill": "review.md"}
+{"intent": "review 灵境项目", "expected_skill": "review.md"}
+{"intent": "梳理一下东区的组织架构", "expected_skill": "review.md"}
