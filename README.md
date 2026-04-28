@@ -14,7 +14,7 @@ LLMs forget everything between conversations. CBrain gives your Agent a persiste
 - **Three-layer search** — Vector + Chinese FTS + Graph traversal, fused with RRF
 - **Knowledge graph** — Wiki-link based relationships + auto NER entity/relationship extraction
 - **Entity enrichment** — People and companies auto-promote through tiers as you mention them
-- **37 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, raw data, config, and observability
+- **38 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, raw data, config, and observability
 - **Version history** — Every page version snapshotted, with revert support
 - **Multi-query expansion** — LLM generates search query variants for better recall, fused with RRF
 - **Job queue** — SQLite-backed async job system with priority, retry, and status tracking
@@ -32,23 +32,28 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 ## Quick Start
 
 ```bash
-# Install
-bun add cbrain
-# or
-npm install cbrain
+# Clone
+git clone https://github.com/chenhong/cbrain.git
+cd cbrain
+bun install
 
 # Initialize (creates vault + DB + config)
-npx cbrain init
+bun run src/cli/index.ts init
 
-# Ingest content
-npx cbrain ingest --type markdown --title "张三" "张三是产品经理，负责AI产品线"
+# Ingest your first content
+bun run src/cli/index.ts ingest --type text --title "张三" --page-type entity "产品经理，负责AI产品线"
 
 # Search
-npx cbrain query "张三的项目"
+bun run src/cli/index.ts query "张三"
 
-# Health check
-npx cbrain doctor
+# Check brain status
+bun run src/cli/index.ts status
+
+# Start MCP server for AI Agents
+bun run src/cli/index.ts serve
 ```
+
+> 完整文档：[使用指南](docs/usage.md) | [MCP 工具参考](docs/mcp-tools.md) | [已知问题](docs/known-issues.md)
 
 ## Architecture
 
