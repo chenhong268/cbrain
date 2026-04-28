@@ -80,17 +80,51 @@ npx cbrain doctor
 | record | `records/` | Reading notes, article summaries |
 | source | `sources/` | Compiled artifacts from raw content |
 
-## CLI Commands
+## CLI Commands (20 total)
 
+### 大脑管理
 ```bash
-cbrain init                    # Initialize vault + DB + config
-cbrain doctor                  # Health check
-cbrain ingest <content>        # Ingest content (--type, --title, --slug)
-cbrain query "search text"     # Three-layer hybrid search
-cbrain sync                    # Re-sync all vault files → indexes
-cbrain enrich                  # Run entity tier enrichment
-cbrain graph-query <entity>    # Graph traversal (--mode, --depth)
-cbrain serve                   # Start MCP server (stdio)
+cbrain init                              # 新建一个大脑（配置 + 目录 + 数据库）
+cbrain status                            # 看一眼：多少页、多少关系、按类型分布
+cbrain maintain                          # 一键维护：同步 → 补充 → 体检 → 报告
+cbrain config                            # 查看当前配置
+cbrain config --set ner.enabled=false    # 修改配置
+```
+
+### 内容操作
+```bash
+cbrain list                              # 列出所有页面
+cbrain list -t entity -l 20              # 只看实体，最多 20 条
+cbrain show <slug>                       # 查看一个页面的完整内容
+cbrain delete <slug>                     # 删除一个页面
+cbrain ingest <内容>                     # 录入新内容（--type, --title, --page-type）
+```
+
+### 搜索与图谱
+```bash
+cbrain query "搜索内容"                  # 混合搜索（向量 + 全文 + 图谱）
+cbrain graph-query <slug>                # 图谱遍历（--mode traverse|backlinks|related）
+```
+
+### 版本管理
+```bash
+cbrain versions <slug>                   # 查看一个页面的修改历史
+cbrain revert <slug> <版本号>            # 回滚到某个历史版本
+```
+
+### 维护与诊断
+```bash
+cbrain sync                              # 把 vault 文件同步到索引
+cbrain enrich                            # 实体重要性升级
+cbrain health                            # 10 维度健康检查，输出报告
+cbrain doctor                            # 快速诊断：数据库、文件、API 是否正常
+cbrain check-resolvable                  # 检查 Skills 路由是否完整、有无冲突
+cbrain watch                             # 监听文件变化，自动同步（后台守护进程）
+```
+
+### 服务
+```bash
+cbrain serve                             # 启动 MCP Server，供 AI Agent 调用
 ```
 
 ## MCP Integration
@@ -108,7 +142,7 @@ Add to your Agent's MCP config:
 }
 ```
 
-### MCP Tools (37 total)
+### MCP Tools (38 total)
 
 **Core:**
 | Tool | Description |
