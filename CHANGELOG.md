@@ -4,7 +4,18 @@
 
 ## [Dev] — 2026-04-28
 
-### Added
+### Added (afternoon)
+- **8 new CLI commands**: `show`, `list`, `delete`, `status`, `versions`, `revert`, `config`, `maintain` — now 20 total
+- **`show <slug>`** — display a page's full content
+- **`list`** — list all pages, filterable by type
+- **`delete <slug>`** — remove a page
+- **`status`** — brain stats at a glance (pages, relations, chunks, by-type breakdown)
+- **`versions <slug>`** — version history of a page
+- **`revert <slug> <v>`** — roll back to a previous version
+- **`config`** — view or update brain config (e.g. `--set ner.enabled=false`)
+- **`maintain`** — one-click full maintenance (sync → enrich → health)
+
+### Added (morning)
 - **`skills/RESOLVER.md`** — 18 intent→skill routing rules across 7 categories, covering all 7 skills
 - **`src/core/resolver.ts`** — `ResolverChecker` parses RESOLVER.md and validates coverage, overlap, orphan detection
 - **`cbrain check-resolvable` CLI command** — validates RESOLVER.md completeness at any time

@@ -535,4 +535,220 @@ program
     process.exit(report.valid ? 0 : 1);
   });
 
+// ─── show ────────────────────────────────────────────────────
+program
+  .command("show")
+  .description("Display a page's full content")
+  .argument("<slug>", "Page slug to show")
+  .action(async (slug) => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const pages = new (await import("../core/page.js")).PageManager(db, config.vaultPath);
+    const page = pages.getBySlug(slug);
+    if (!page) {
+      console.error(`Page not found: ${slug}`);
+      process.exit(1);
+    }
+    console.log(`slug:       ${page.slug}`);
+    console.log(`type:       ${page.type}`);
+    console.log(`title:      ${page.title}`);
+    console.log(`tier:       ${page.tier}`);
+    console.log(`mentions:   ${page.mention_count}`);
+    console.log(`updated:    ${page.updated_at}`);
+    console.log(`---`);
+    console.log(page.body);
+    db.close();
+  });
+
+// ─── list ────────────────────────────────────────────────────
+program
+  .command("list")
+  .description("List all pages in the brain")
+  .option("-t, --type <type>", "Filter by type: entity|concept|event|record|source")
+  .option("-l, --limit <number>", "Max results", "50")
+  .action(async (opts) => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const pages = new (await import("../core/page.js")).PageManager(db, config.vaultPath);
+    const results = pages.list({ type: opts.type, limit: parseInt(opts.limit, 10) });
+    if (results.length === 0) {
+      console.log("No pages found.");
+    } else {
+      for (const p of results) {
+        console.log(`[${p.type}] ${p.slug} — ${p.title} (tier ${p.tier})`);
+      }
+      console.log(`\n${results.length} pages total`);
+    }
+    db.close();
+  });
+
+// ─── delete ──────────────────────────────────────────────────
+program
+  .command("delete")
+  .description("Delete a page from the brain")
+  .argument("<slug>", "Page slug to delete")
+  .action(async (slug) => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const pages = new (await import("../core/page.js")).PageManager(db, config.vaultPath);
+    if (pages.delete(slug)) {
+      console.log(`Deleted: ${slug}`);
+    } else {
+      console.error(`Page not found: ${slug}`);
+      process.exit(1);
+    }
+    db.close();
+  });
+
+// ─── status ──────────────────────────────────────────────────
+program
+  .command("status")
+  .description("Show brain statistics at a glance")
+  .action(async () => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const totalPages = (db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as any).cnt;
+    const totalLinks = (db.prepare("SELECT COUNT(*) as cnt FROM links").get() as any).cnt;
+    const totalChunks = (db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as any).cnt;
+    const errors = db.prepare(
+      "SELECT COUNT(*) as cnt FROM pages WHERE title LIKE '⚠%'"
+    ).get() as any;
+    const byType = db.prepare(
+      "SELECT type, COUNT(*) as cnt FROM pages GROUP BY type ORDER BY cnt DESC"
+    ).all() as any[];
+    const typeName: Record<string, string> = {
+      entity: "实体", concept: "概念", event: "事件", record: "记录", source: "来源",
+    };
+
+    console.log(`  总页数： ${totalPages}`);
+    console.log(`  关系数： ${totalLinks}`);
+    console.log(`  检索块： ${totalChunks}`);
+    if (errors.cnt > 0) console.log(`  异常页： ${errors.cnt}`);
+    console.log(`\n  按类型：`);
+    for (const t of byType) {
+      console.log(`    ${typeName[t.type] ?? t.type}: ${t.cnt}`);
+    }
+    if (totalPages > 0) {
+      console.log(`\n  DB:    ${config.dbPath}`);
+    }
+    db.close();
+  });
+
+// ─── versions ────────────────────────────────────────────────
+program
+  .command("versions")
+  .description("Show version history of a page")
+  .argument("<slug>", "Page slug")
+  .action(async (slug) => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const pages = new (await import("../core/page.js")).PageManager(db, config.vaultPath);
+    const vm = new (await import("../core/version.js")).VersionManager(db, pages, config.vaultPath);
+    const versions = vm.getVersions(slug);
+    if (versions.length === 0) {
+      console.log("No versions found.");
+    } else {
+      console.log(`Version history for ${slug}:\n`);
+      for (const v of versions) {
+        console.log(`  v${v.version} — ${v.created_at}`);
+      }
+      console.log(`\n  Tip: use "cbrain show ${slug}" to see current content`);
+      console.log(`       use "cbrain revert ${slug} <version>" to roll back`);
+    }
+    db.close();
+  });
+
+// ─── revert ──────────────────────────────────────────────────
+program
+  .command("revert")
+  .description("Revert a page to a previous version")
+  .argument("<slug>", "Page slug")
+  .argument("<version>", "Version number to revert to")
+  .action(async (slug, version) => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+    const pages = new (await import("../core/page.js")).PageManager(db, config.vaultPath);
+    const vm = new (await import("../core/version.js")).VersionManager(db, pages, config.vaultPath);
+    const vn = parseInt(version, 10);
+    if (isNaN(vn)) {
+      console.error("Version must be a number.");
+      process.exit(1);
+    }
+    if (vm.revertToVersion(slug, vn)) {
+      console.log(`Reverted ${slug} to version ${vn}`);
+    } else {
+      console.error(`Revert failed. Check that ${slug} and version ${vn} exist.`);
+      process.exit(1);
+    }
+    db.close();
+  });
+
+// ─── config ──────────────────────────────────────────────────
+program
+  .command("config")
+  .description("View or update brain configuration")
+  .option("--set <key=value>", "Set a config value (e.g. --set ner.enabled=false)")
+  .action(async (opts) => {
+    const config = loadConfig();
+    const db = new CBrainDB(config.dbPath);
+
+    if (opts.set) {
+      const [key, value] = opts.set.split("=");
+      if (!key || value === undefined) {
+        console.error("Use --set key=value format. Example: --set ner.enabled=false");
+        process.exit(1);
+      }
+      // Parse value: try JSON, fall back to string
+      let parsed: any = value;
+      try { parsed = JSON.parse(value); } catch {}
+      db.prepare(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ($key, $value)"
+      ).run({ $key: key, $value: String(parsed) });
+      console.log(`Set ${key} = ${parsed}`);
+    } else {
+      const rows = db.prepare("SELECT key, value FROM config ORDER BY key").all() as any[];
+      if (rows.length === 0) {
+        console.log("No config values set.");
+      } else {
+        for (const r of rows) {
+          console.log(`  ${r.key}: ${r.value}`);
+        }
+      }
+    }
+    db.close();
+  });
+
+// ─── maintain ────────────────────────────────────────────────
+program
+  .command("maintain")
+  .description("Run full maintenance: sync → enrich → health → report")
+  .action(async () => {
+    const config = loadConfig();
+    const deps = createDeps(config);
+    await deps.lance.connect(config.lancePath);
+    const { runMaintenance } = await import("../core/maintain.js");
+    const { SyncManager } = await import("../core/sync.js");
+    const { EnrichManager } = await import("../core/enrich.js");
+    const { HealthChecker } = await import("../core/health.js");
+    const { Logger } = await import("../core/logger.js");
+    const { PageManager } = await import("../core/page.js");
+    const { NerEngine } = await import("../core/ner.js");
+    const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+    const logger = new Logger(outputsDir);
+    const pages = new PageManager(deps.db, config.vaultPath, logger);
+    const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
+    const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
+    const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath);
+    const health = new HealthChecker(deps.db, outputsDir, logger);
+    const report = await runMaintenance(config.vaultPath, syncMgr, enrichMgr, health);
+    const lines = [
+      `同步: ${report.sync.synced} 更新, ${report.sync.skipped} 跳过`,
+      report.sync.nerEntities ? `NER: ${report.sync.nerEntities} 实体, ${report.sync.nerRelations} 关系` : "",
+      `实体: ${report.enrich.total} 总计, ${report.enrich.upgraded} 升级`,
+      `健康: ${report.health.overallStatus} (${report.health.dimensions.length} 维度)`,
+    ];
+    console.log(lines.filter(Boolean).join("\n"));
+    deps.db.close();
+  });
+
 program.parse();
