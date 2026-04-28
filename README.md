@@ -275,7 +275,8 @@ CBrain includes Agent-facing skill files that teach your Agent how to use the br
 | `connect` | Relationship analysis — find and explain connections between entities |
 | `ingest` | Content routing and compilation |
 | `enrich` | Tiered entity enrichment |
-| `maintain` | Health check and cleanup |
+| `maintain` | Sync and health check (one-shot) |
+| `cleanup` | Guided cleanup — find duplicates, orphans, stale stubs |
 | `dream` | Nightly auto-maintenance pipeline |
 | `signal-detector` | Extract entities and ideas from messages |
 | `RESOLVER.md` | Intent→Skill routing table (21 rules, 8 categories) |

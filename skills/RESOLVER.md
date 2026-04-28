@@ -11,7 +11,7 @@
 - 图谱、链接到 → query.md
 
 ### Deep Review
-- 总结、整理、全面了解、汇总、review → review.md
+- 总结、全面了解、汇总、review → review.md
 - 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
 - 深度了解、知识总览、全景 → review.md
 
@@ -32,8 +32,11 @@
 ### Maintenance (One-Shot)
 - 同步、sync、重新索引 → maintain.md
 - 体检、健康检查、doctor、健康 → maintain.md
-- 清理、删除孤立、去重 → maintain.md
-- 合并重复、merge → maintain.md
+
+### Cleanup
+- 清理、删除孤立、去重、整理 → cleanup.md
+- 有什么该删的、合并重复、merge → cleanup.md
+- 大脑整理、清理一下 → cleanup.md
 
 ### Nightly Full Pipeline
 - 夜间维护、每日维护、全量同步 → dream.md [scheduled]
@@ -55,9 +58,11 @@
 | 3 | connect.md | Relationship analysis — find and explain connections between entities | On-demand: user asks how A and B relate |
 | 4 | ingest.md | Route incoming content to correct type + index | On-demand: user wants to save content |
 | 5 | enrich.md | Tier promotion + entity enrichment | On-demand / batch: after sync |
-| 6 | maintain.md | Sync, health check, orphan cleanup (one-shot) | On-demand: user runs maintenance |
-| 7 | dream.md | Nightly full pipeline (sync→enrich→doctor→report) | Scheduled: cron / timer |
-| 8 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
+| 6 | maintain.md | Sync, health check (one-shot maintenance) | On-demand: user runs maintenance |
+| 7 | cleanup.md | Guided cleanup — find duplicates, orphans, stale stubs | On-demand: user wants to clean up |
+| 8 | dream.md | Nightly full pipeline (sync→enrich→doctor→report) | Scheduled: cron / timer |
+| 9 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
+| 10 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
 | 9 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
 
 ## Resolution Logic

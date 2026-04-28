@@ -18,7 +18,8 @@
 - **`timeline <slug>`** — view timeline events; `timeline <slug> add --date ... --summary ...` to add
 - **`skills/review.md`** — deep topic review: broad search → gather context → map relationships → timeline → synthesize coherent summary
 - **`skills/connect.md`** — relationship analysis: resolve both entities → shortest path → shared connections → timeline intersection → explain
-- **RESOLVER.md** — updated to 23 rules / 9 categories / 9 skills
+- **`skills/cleanup.md`** — guided cleanup wizard: scan → find duplicates/orphans/stubs → list for confirmation → execute
+- **RESOLVER.md** — updated to 24 rules / 10 categories / 10 skills
 
 ### Added (morning)
 - **`skills/RESOLVER.md`** — 18 intent→skill routing rules across 7 categories, covering all 7 skills
