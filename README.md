@@ -128,6 +128,8 @@ cbrain revert <slug> <版本号>            # 回滚到某个历史版本
 
 ### 维护与诊断
 ```bash
+cbrain dream                             # 夜间全量维护：sync → enrich → cleanup → health → report
+cbrain maintain                          # 一键维护：sync → enrich → health
 cbrain sync                              # 把 vault 文件同步到索引
 cbrain enrich                            # 实体重要性升级
 cbrain health                            # 10 维度健康检查，输出报告

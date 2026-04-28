@@ -718,6 +718,41 @@ program
     db.close();
   });
 
+// ─── dream ───────────────────────────────────────────────────
+program
+  .command("dream")
+  .description("Nightly full pipeline: sync → enrich → cleanup → health → report")
+  .action(async () => {
+    const config = loadConfig();
+    const deps = createDeps(config);
+    await deps.lance.connect(config.lancePath);
+    const { runDream } = await import("../core/dream.js");
+    const { SyncManager } = await import("../core/sync.js");
+    const { EnrichManager } = await import("../core/enrich.js");
+    const { HealthChecker } = await import("../core/health.js");
+    const { Logger } = await import("../core/logger.js");
+    const { PageManager } = await import("../core/page.js");
+    const { NerEngine } = await import("../core/ner.js");
+    const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+    const logger = new Logger(outputsDir);
+    const pages = new PageManager(deps.db, config.vaultPath, logger);
+    const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
+    const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
+    const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath);
+    const health = new HealthChecker(deps.db, outputsDir, logger);
+    const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger);
+    const icon = report.locked ? "🌙" : "⚠️";
+    console.log(`${icon} Dream — ${report.timestamp.slice(0, 10)}`);
+    console.log(`  Sync:    ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`);
+    console.log(`  Enrich:  ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级`);
+    console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub`);
+    console.log(`  Health:  ${report.stages.health.overallStatus}`);
+    console.log(`  ⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
+    if (!report.locked) console.log(`  ⚠️ 上次 dream 仍在执行中，本次跳过`);
+    deps.db.close();
+    process.exit(report.locked ? 0 : 1);
+  });
+
 // ─── maintain ────────────────────────────────────────────────
 program
   .command("maintain")

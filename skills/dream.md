@@ -1,87 +1,60 @@
 # Dream Skill
 
-> Nightly auto-maintenance pipeline.
+> Nightly auto-maintenance pipeline — one command runs it all.
 
 ## Purpose
 
-While you sleep, the brain consolidates. Dream runs the full maintenance pipeline to keep indexes fresh and enrichment current.
+While you sleep, the brain consolidates. Dream runs the full 5-stage maintenance pipeline with cycle locking so two dreams never overlap.
+
+## Quick Start
+
+```bash
+cbrain dream
+```
 
 ## Pipeline
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Sync All  │ ──→ │  Enrich All  │ ──→ │  Doctor      │ ──→ │   Report    │
-│             │     │              │     │  Check       │     │             │
-└─────────────┘     └──────────────┘     └──────────────┘     └─────────────┘
+┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+│  Sync    │ ─→ │  Enrich  │ ─→ │ Cleanup  │ ─→ │  Health  │ ─→ │  Report  │
+│          │    │          │    │          │    │          │    │          │
+└──────────┘    └──────────┘    └──────────┘    └──────────┘    └──────────┘
 ```
 
-### Step 1: Sync All
+### Stage 1: Sync
+Re-index all vault files. Updates content hashes, LanceDB vectors, FTS, and chunks.
 
-Re-index all vault files to catch any changes:
+### Stage 2: Enrich
+Promote entities through tiers based on mention counts. Tier 1 (core) ← Tier 2 (active) ← Tier 3 (observed).
 
-```
-cbrain sync
-```
+### Stage 3: Cleanup
+Auto-remove orphaned DB entries (no vault file) and stale stubs (source no longer references them).
 
-Updates:
-- Content hashes
-- LanceDB vector/FTS indexes
-- Chunk records
+### Stage 4: Health
+10-dimension health check: duplicates, orphans, broken links, stale stubs, content quality.
 
-### Step 2: Enrich All
+### Stage 5: Report
+Write daily report to `outputs/dream/dream-YYYY-MM-DD.md`.
 
-Run tier enrichment on all entities:
+## Cycle Lock
 
-```
-cbrain enrich
-```
-
-Updates:
-- Entity tiers based on mention counts
-- Tier upgrades logged
-
-### Step 3: Health Check
-
-Verify brain health:
-
-```
-cbrain doctor
-```
-
-### Step 4: Report
-
-Generate a brief status report:
-
-```
-cbrain status
-```
-
-Output example:
-```json
-{
-  "totalPages": 42,
-  "byType": [
-    { "type": "entity", "cnt": 25 },
-    { "type": "concept", "cnt": 10 },
-    { "type": "record", "cnt": 7 }
-  ],
-  "totalLinks": 67,
-  "totalChunks": 156
-}
-```
+Dream acquires a lock in the config table. If a dream is still running (or crashed within 30 min), the next dream skips. Prevents overlapping maintenance.
 
 ## Scheduling
 
-Dream should run nightly via cron or scheduled task:
-
 ```bash
-# Cron example: 3 AM daily
-0 3 * * * cd /path/to/brain && cbrain sync && cbrain enrich && cbrain doctor
+# Cron: 3 AM daily
+0 3 * * * cd /path/to/brain && cbrain dream
+```
+
+Or via Hermes:
+```
+对 Agent 说：每天早上 3 点跑一次 cbrain dream
 ```
 
 ## Guidelines
 
 - Dream is idempotent — safe to run multiple times
-- If dream fails at one step, other steps are still valid
-- Dream should not modify vault files — only indexes and metadata
-- Keep dream output in logs for debugging
+- Failed stage doesn't block subsequent stages
+- Dream only touches indexes and metadata, never vault files
+- Report written to outputs/dream/ for auditing

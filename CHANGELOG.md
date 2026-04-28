@@ -1,34 +1,23 @@
 # Changelog
 
-> Current: `v0.3.0` — first stable release. 22 CLI commands, 38 MCP tools, 11 skills.
+> Current: `v0.3.0` — first stable release. 23 CLI commands, 38 MCP tools, 11 skills.
 
 ## [Dev] — 2026-04-28
 
-### Added (afternoon)
-- **10 new CLI commands**: `show`, `list`, `delete`, `status`, `versions`, `revert`, `config`, `maintain`, `tags`, `timeline` — now 22 total
-- **`show <slug>`** — display a page's full content
-- **`list`** — list all pages, filterable by type
-- **`delete <slug>`** — remove a page
-- **`status`** — brain stats at a glance (pages, relations, chunks, by-type breakdown)
-- **`versions <slug>`** — version history of a page
-- **`revert <slug> <v>`** — roll back to a previous version
-- **`config`** — view or update brain config (e.g. `--set ner.enabled=false`)
-- **`maintain`** — one-click full maintenance (sync → enrich → health)
-- **`tags <slug>`** — view tags; `tags <slug> add/remove <tag>` to manage
-- **`timeline <slug>`** — view timeline events; `timeline <slug> add --date ... --summary ...` to add
-- **`skills/review.md`** — deep topic review: broad search → gather context → map relationships → timeline → synthesize coherent summary
-- **`skills/connect.md`** — relationship analysis: resolve both entities → shortest path → shared connections → timeline intersection → explain
-- **`skills/cleanup.md`** — guided cleanup wizard: scan → find duplicates/orphans/stubs → list for confirmation → execute
-- **`skills/write.md`** — knowledge-based writing: clarify needs → gather from CBrain → map gaps → generate → offer to save
-- **RESOLVER.md** — updated to 26 rules / 11 categories / 11 skills
+### Added
+- **`cbrain dream` CLI command** — 5-stage nightly pipeline (sync→enrich→cleanup→health→report) with cycle lock
+- **`src/core/dream.ts`** — `runDream()` with 30-min cycle lock, stage-level error isolation, daily markdown report
+- **NER English entity extraction** — now extracts drugs, regulators, medical terms (Cosentyx, FDA, CHMP, IgAN...)
 
-### Added (morning)
-- **`skills/RESOLVER.md`** — 18 intent→skill routing rules across 7 categories, covering all 7 skills
-- **`src/core/resolver.ts`** — `ResolverChecker` parses RESOLVER.md and validates coverage, overlap, orphan detection
-- **`cbrain check-resolvable` CLI command** — validates RESOLVER.md completeness at any time
+### Fixed
+- **ingest path** — all types (record/event/source) now go to `brain/` instead of `raw/`
+- **broken references** — all 26 auto-extracted stubs updated from `raw/records/` to `brain/records/`
+- **NER now extracts English** — drugs, regulators, medical terms (Cosentyx, FDA, CHMP, IgAN)
 
-### Changed
-- **task_plan.md** — updated to reflect completed Phases 1-5, feature comparison table synced to current state
+### Earlier today
+- **10 new CLI commands**: `show`, `list`, `delete`, `status`, `versions`, `revert`, `config`, `maintain`, `tags`, `timeline` — now 23 total
+- **4 new skills**: `review.md`, `connect.md`, `cleanup.md`, `write.md` — 11 total
+- **`skills/RESOLVER.md`** + `cbrain check-resolvable` — 26 rules, 11 categories, skill routing validation
 
 ## [Dev] — 2026-04-26
 
