@@ -461,4 +461,78 @@ program
     db.close();
   });
 
+// ─── check-resolvable ─────────────────────────────────────────
+program
+  .command("check-resolvable")
+  .description("Validate skills/RESOLVER.md for coverage, overlap, orphan detection")
+  .action(async () => {
+    const { existsSync: exists } = await import("node:fs");
+    const { resolve: res, dirname } = await import("node:path");
+    const { ResolverChecker } = await import("../core/resolver.js");
+
+    // Find RESOLVER.md: check cwd first, then walk up
+    let resolverPath = res(process.cwd(), "skills", "RESOLVER.md");
+    let skillsDir = res(process.cwd(), "skills");
+    if (!exists(resolverPath)) {
+      // Try project root alongside package.json
+      let dir = process.cwd();
+      for (let i = 0; i < 5; i++) {
+        if (exists(res(dir, "package.json"))) {
+          resolverPath = res(dir, "skills", "RESOLVER.md");
+          skillsDir = res(dir, "skills");
+          break;
+        }
+        const parent = res(dir, "..");
+        if (parent === dir) break;
+        dir = parent;
+      }
+    }
+
+    if (!exists(resolverPath)) {
+      console.error("Error: skills/RESOLVER.md not found. Create one in your brain's skills/ directory.");
+      process.exit(1);
+    }
+
+    const checker = new ResolverChecker(resolverPath);
+    const report = checker.check();
+
+    console.log("\n  Skills Resolver Check\n");
+    console.log(`  Rules:        ${report.rules}`);
+    console.log(`  Categories:   ${report.coverage.length}`);
+    console.log(`  Skills ref'd: ${report.skillsReferenced.length} (on disk: ${report.skillsOnDisk.length})`);
+
+    if (report.orphans.length > 0) {
+      console.log(`\n  Orphan skills (not routed):`);
+      for (const o of report.orphans) console.log(`    ❌ skills/${o}`);
+    }
+
+    if (report.missingFiles.length > 0) {
+      console.log(`\n  Missing files (routed but not on disk):`);
+      for (const m of report.missingFiles) console.log(`    ❌ skills/${m}`);
+    }
+
+    if (report.overlaps.length > 0) {
+      console.log(`\n  Overlapping patterns:`);
+      for (const o of report.overlaps) {
+        console.log(`    ⚠️  "${o.pattern}" → ${o.skills.join(", ")}`);
+      }
+    }
+
+    console.log(`\n  Categories:`);
+    for (const c of report.coverage) {
+      console.log(`    ${c.rules} rules → ${c.category}`);
+    }
+
+    if (report.valid) {
+      console.log(`\n  ✅ All checks passed — 7/7 skills routed, no overlaps, no orphans`);
+    } else {
+      console.log(`\n  ❌ ${report.issues.length} issue(s) found`);
+      for (const issue of report.issues) {
+        console.log(`    - ${issue}`);
+      }
+    }
+
+    process.exit(report.valid ? 0 : 1);
+  });
+
 program.parse();

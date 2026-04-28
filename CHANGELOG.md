@@ -2,6 +2,16 @@
 
 > Current: `0.1.0-dev` — active development. Version bumps will resume at v0.3.0 for the first stable release.
 
+## [Dev] — 2026-04-28
+
+### Added
+- **`skills/RESOLVER.md`** — 18 intent→skill routing rules across 7 categories, covering all 7 skills
+- **`src/core/resolver.ts`** — `ResolverChecker` parses RESOLVER.md and validates coverage, overlap, orphan detection
+- **`cbrain check-resolvable` CLI command** — validates RESOLVER.md completeness at any time
+
+### Changed
+- **task_plan.md** — updated to reflect completed Phases 1-5, feature comparison table synced to current state
+
 ## [Dev] — 2026-04-26
 
 ### Added (afternoon)
