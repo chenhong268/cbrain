@@ -269,13 +269,15 @@ CBrain includes Agent-facing skill files that teach your Agent how to use the br
 
 | Skill | Purpose |
 |:------|:--------|
-| `brain-ops` | 5-step protocol: CHECK → GET → INTEGRATE → LEARN → UPDATE |
-| `signal-detector` | Extract entities and ideas from messages |
+| `brain-ops` | 5-step protocol + 38-tool reference (default skill) |
+| `query` | Hybrid search: vector + FTS + graph |
+| `review` | Deep topic review — gather everything, synthesize coherent picture |
 | `ingest` | Content routing and compilation |
-| `query` | Hybrid search + synthesis protocol |
 | `enrich` | Tiered entity enrichment |
 | `maintain` | Health check and cleanup |
 | `dream` | Nightly auto-maintenance pipeline |
+| `signal-detector` | Extract entities and ideas from messages |
+| `RESOLVER.md` | Intent→Skill routing table (21 rules, 8 categories) |
 
 ## Configuration
 

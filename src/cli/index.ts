@@ -524,7 +524,7 @@ program
     }
 
     if (report.valid) {
-      console.log(`\n  ✅ All checks passed — 7/7 skills routed, no overlaps, no orphans`);
+      console.log(`\n  ✅ All checks passed — ${report.skillsReferenced.length} skills routed, no overlaps, no orphans`);
     } else {
       console.log(`\n  ❌ ${report.issues.length} issue(s) found`);
       for (const issue of report.issues) {
