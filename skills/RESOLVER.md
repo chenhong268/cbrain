@@ -8,12 +8,16 @@
 ### Query & Search
 - 查询、搜索、查找、查一下、找一下 → query.md
 - 谁、是谁、什么是、介绍一下 → query.md
-- 有什么关系、关联、图谱、链接到 → query.md
+- 图谱、链接到 → query.md
 
 ### Deep Review
 - 总结、整理、全面了解、汇总、review → review.md
 - 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
 - 深度了解、知识总览、全景 → review.md
+
+### Relationship Analysis
+- 什么关系、有什么关系、怎么认识的、关联、connect → connect.md
+- A和B、之间、联系、关联分析 → connect.md
 
 ### Content Ingestion
 - 导入、录入、记一下、保存、收录 → ingest.md
@@ -48,12 +52,13 @@
 |---|-------|---------|---------|
 | 1 | query.md | Hybrid search (vector+FTS+graph) + synthesis | On-demand: user asks about something |
 | 2 | review.md | Deep topic review — gather everything, synthesize coherent picture | On-demand: user wants full understanding |
-| 3 | ingest.md | Route incoming content to correct type + index | On-demand: user wants to save content |
-| 4 | enrich.md | Tier promotion + entity enrichment | On-demand / batch: after sync |
-| 5 | maintain.md | Sync, health check, orphan cleanup (one-shot) | On-demand: user runs maintenance |
-| 6 | dream.md | Nightly full pipeline (sync→enrich→doctor→report) | Scheduled: cron / timer |
-| 7 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
-| 8 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
+| 3 | connect.md | Relationship analysis — find and explain connections between entities | On-demand: user asks how A and B relate |
+| 4 | ingest.md | Route incoming content to correct type + index | On-demand: user wants to save content |
+| 5 | enrich.md | Tier promotion + entity enrichment | On-demand / batch: after sync |
+| 6 | maintain.md | Sync, health check, orphan cleanup (one-shot) | On-demand: user runs maintenance |
+| 7 | dream.md | Nightly full pipeline (sync→enrich→doctor→report) | Scheduled: cron / timer |
+| 8 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
+| 9 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
 
 ## Resolution Logic
 

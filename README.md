@@ -272,6 +272,7 @@ CBrain includes Agent-facing skill files that teach your Agent how to use the br
 | `brain-ops` | 5-step protocol + 38-tool reference (default skill) |
 | `query` | Hybrid search: vector + FTS + graph |
 | `review` | Deep topic review — gather everything, synthesize coherent picture |
+| `connect` | Relationship analysis — find and explain connections between entities |
 | `ingest` | Content routing and compilation |
 | `enrich` | Tiered entity enrichment |
 | `maintain` | Health check and cleanup |
