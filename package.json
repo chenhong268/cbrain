@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "bun run src/cli/index.ts",
     "test": "bun test",
+    "test:coverage": "bun test --coverage",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

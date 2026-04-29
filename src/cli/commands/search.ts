@@ -6,7 +6,7 @@ export function register(program: Command) {
   program
     .command("query")
     .description("Search the brain")
-    .option("-s, --strategy <strategy>", "Search strategy: vector|fts|graph|all", "all")
+    .option("-s, --strategy <strategy>", "搜索方式（默认 all 即可，一般不需要改）", "all")
     .option("-l, --limit <number>", "Max results", "10")
     .argument("<query>", "Search query")
     .action(async (query, opts) => {

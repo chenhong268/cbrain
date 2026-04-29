@@ -39,6 +39,9 @@ export interface SyncPageResult {
   error?: string;
 }
 
+// Module-level cache for batch-embedded chunks
+const chunkEmbedCache = new Map<string, { embedding: number[]; tokenCount: number }>();
+
 export class SyncManager {
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
@@ -69,14 +72,16 @@ export class SyncManager {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [] };
     const mdFiles = this.collectMarkdownFiles(vaultPath);
 
+    // Phase 1: detect changed files + batch embed all chunks
+    const changed: Array<{ filePath: string; slug: string; title: string; type: string; relPath: string; body: string; contentHash: string; frontmatter: Record<string, unknown> }> = [];
+    const allChunks: Array<{ slug: string; index: number; content: string }> = [];
+
     for (const filePath of mdFiles) {
       try {
         const content = readFileSync(filePath, "utf-8");
         const parsed = parseFrontmatter(content);
-
         const relPath = relative(vaultPath, filePath);
         const slug = parsed.frontmatter.slug ?? relPath.replace(/\.md$/, "");
-
         const contentHash = hashContent(content);
 
         const existing = this.db
@@ -88,16 +93,44 @@ export class SyncManager {
           continue;
         }
 
+        const title = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
+        const type = parsed.frontmatter.type ?? this.inferTypeFromPath(relPath);
+        const chunks = chunkContent(parsed.body, this.chunkSize);
+        for (const c of chunks) allChunks.push({ slug, index: c.index, content: c.content });
+        changed.push({ filePath, slug, title, type, relPath, body: parsed.body, contentHash, frontmatter: parsed.frontmatter });
+      } catch (e) {
+        report.errors++;
+        report.errorDetails?.push(`${filePath}: ${(e as Error).message}`);
+      }
+    }
+
+    // Batch embed all chunks at once (avoids N sequential API calls)
+    if (allChunks.length > 0 && this.embedding) {
+      try {
+        const texts = allChunks.map(c => c.content);
+        const embedResults = await this.embedding.embedBatch(texts);
+        for (let i = 0; i < allChunks.length; i++) {
+          chunkEmbedCache.set(`${allChunks[i].slug}:${allChunks[i].index}`, embedResults[i]);
+        }
+      } catch (e) {
+        this.logger?.warn("sync", "批量 embedding 失败，回退到逐条处理");
+      }
+    }
+
+    // Phase 2: write to DB + LanceDB (sequential, SQLite-safe)
+    for (const file of changed) {
+      try {
+        const existing = this.db
+          .prepare("SELECT content_hash FROM pages WHERE slug = $slug")
+          .get({ $slug: file.slug }) as { content_hash: string } | null;
+
         // Create version snapshot before updating
         if (existing) {
           try {
-            this.db.createVersion(slug, parsed.body,
-              parsed.frontmatter ? JSON.stringify(parsed.frontmatter) : undefined);
+            this.db.createVersion(file.slug, file.body,
+              file.frontmatter ? JSON.stringify(file.frontmatter) : undefined);
           } catch { /* version snapshot best-effort */ }
         }
-
-        const title = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
-        const type = parsed.frontmatter.type ?? this.inferTypeFromPath(relPath);
 
         this.db.prepare(
           `INSERT INTO pages (slug, type, title, file_path, content_hash, created_at, updated_at)
@@ -109,34 +142,34 @@ export class SyncManager {
              content_hash = $contentHash,
              updated_at = datetime('now')`
         ).run({
-          $slug: slug,
-          $type: type,
-          $title: title,
-          $filePath: relPath,
-          $contentHash: contentHash,
+          $slug: file.slug,
+          $type: file.type,
+          $title: file.title,
+          $filePath: file.relPath,
+          $contentHash: file.contentHash,
         });
 
-        await this.writeIndexes(slug, parsed.body);
+        await this.writeIndexes(file.slug, file.body);
 
         this.db.prepare(
           `INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)`
         ).run({
           $source: "vault",
           $action: "sync",
-          $slug: slug,
-          $details: JSON.stringify({ hash: contentHash }),
+          $slug: file.slug,
+          $details: JSON.stringify({ hash: file.contentHash }),
         });
 
         report.synced++;
 
         this.audit?.log(AuditLogger.entry("sync_page", "success", {
-          pageSlug: slug,
-          details: { chunks: chunkContent(parsed.body, this.chunkSize).length },
+          pageSlug: file.slug,
+          details: { chunks: chunkContent(file.body, this.chunkSize).length },
         }));
 
-        if (this.nerEngine && parsed.body.trim()) {
+        if (this.nerEngine && file.body.trim()) {
           try {
-            const nerResult = await this.runNer(slug, parsed.body);
+            const nerResult = await this.runNer(file.slug, file.body);
             report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
             report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
             report.nerEvents = (report.nerEvents ?? 0) + nerResult.events;
@@ -145,10 +178,10 @@ export class SyncManager {
           }
         }
 
-        // Zero-LLM regex extraction: catch wiki-links, English terms, Chinese relations
-        if (this.pages && parsed.body.trim()) {
+        // Zero-LLM regex extraction
+        if (this.pages && file.body.trim()) {
           try {
-            const rx = extractAll(parsed.body);
+            const rx = extractAll(file.body);
 
             // English tech terms → concept stubs (NER often misses these)
             for (const term of rx.englishTerms) {
@@ -157,7 +190,7 @@ export class SyncManager {
                 this.pages.create({
                   title: term,
                   type: "concept",
-                  body: `> Auto-extracted from [[${slug}]]`,
+                  body: `> Auto-extracted from [[${file.slug}]]`,
                   tags: ["auto-extracted", "regex"],
                 });
               }
@@ -172,24 +205,24 @@ export class SyncManager {
                 this.pages.create({
                   title: targetName,
                   type: "entity",
-                  body: `> Auto-extracted from [[${slug}]]`,
+                  body: `> Auto-extracted from [[${file.slug}]]`,
                   tags: ["auto-extracted", "regex"],
                 });
                 const newSlug = findEntitySlug(this.db, targetName);
                 if (newSlug) {
-                  const key = `${slug}\x00${newSlug}`;
+                  const key = `${file.slug}\x00${newSlug}`;
                   if (!writtenRelations.includes(key)) {
                     writtenRelations.push(key);
                     this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-                      .run(slug, newSlug, "提及");
+                      .run(file.slug, newSlug, "提及");
                   }
                 }
               } else if (targetSlug) {
-                const key = `${slug}\x00${targetSlug}`;
+                const key = `${file.slug}\x00${targetSlug}`;
                 if (!writtenRelations.includes(key)) {
                   writtenRelations.push(key);
                   this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-                    .run(slug, targetSlug, "提及");
+                    .run(file.slug, targetSlug, "提及");
                 }
               }
             }
@@ -203,7 +236,7 @@ export class SyncManager {
               if (!fromSlug) {
                 this.pages.create({
                   title: rel.from, type: "entity",
-                  body: `> Auto-extracted from [[${slug}]]`,
+                  body: `> Auto-extracted from [[${file.slug}]]`,
                   tags: ["auto-extracted", "regex"],
                 });
                 fromSlug = findEntitySlug(this.db, rel.from);
@@ -211,7 +244,7 @@ export class SyncManager {
               if (!toSlug) {
                 this.pages.create({
                   title: rel.to, type: "entity",
-                  body: `> Auto-extracted from [[${slug}]]`,
+                  body: `> Auto-extracted from [[${file.slug}]]`,
                   tags: ["auto-extracted", "regex"],
                 });
                 toSlug = findEntitySlug(this.db, rel.to);
@@ -231,8 +264,8 @@ export class SyncManager {
       } catch (err) {
         report.errors++;
         const msg = err instanceof Error ? err.message : String(err);
-        const slug = relative(vaultPath, filePath);
-        report.errorDetails!.push(`${filePath}: ${msg}`);
+        const slug = relative(vaultPath, file.filePath);
+        report.errorDetails!.push(`${file.filePath}: ${msg}`);
         this.logger?.error("sync", `同步失败: ${slug}`, { error: msg });
         this.audit?.log(AuditLogger.entry("sync_page", "error", {
           pageSlug: slug,
@@ -241,6 +274,7 @@ export class SyncManager {
       }
     }
 
+    chunkEmbedCache.clear();
     return report;
   }
 
@@ -385,9 +419,15 @@ export class SyncManager {
     const chunks = chunkContent(body, this.chunkSize);
     if (chunks.length === 0) return;
 
-    const embedResults = await this.embedding.embedBatch(
-      chunks.map((c) => c.content)
-    );
+    // Use cached embeddings from batch phase if available
+    const texts = chunks.map((c) => c.content);
+    let embedResults: Array<{ embedding: number[]; tokenCount: number }>;
+    const cached = texts.map((_, i) => chunkEmbedCache.get(`${slug}:${chunks[i].index}`));
+    if (cached.every(c => c)) {
+      embedResults = cached as Array<{ embedding: number[]; tokenCount: number }>;
+    } else {
+      embedResults = await this.embedding.embedBatch(texts);
+    }
 
     await this.lance.deleteByPageSlug(slug);
     await this.lance.addChunks(
