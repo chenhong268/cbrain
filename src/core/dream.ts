@@ -76,7 +76,7 @@ export async function runDream(
   let backupPath: string | null = null;
   let backupSize = "0";
   try {
-    const backupDir = join(outputsDir, "..", "backups");
+    const backupDir = join(outputsDir, "backups");
     if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
     backupPath = join(backupDir, `auto-${ts}.zip`);
