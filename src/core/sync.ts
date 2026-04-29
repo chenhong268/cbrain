@@ -218,6 +218,7 @@ export class SyncManager {
                   }
                 }
               } else if (targetSlug) {
+                this.pages.incrementMention(targetSlug);
                 const key = `${file.slug}\x00${targetSlug}`;
                 if (!writtenRelations.includes(key)) {
                   writtenRelations.push(key);
@@ -240,6 +241,8 @@ export class SyncManager {
                   tags: ["auto-extracted", "regex"],
                 });
                 fromSlug = findEntitySlug(this.db, rel.from);
+              } else {
+                this.pages.incrementMention(fromSlug);
               }
               if (!toSlug) {
                 this.pages.create({
@@ -248,6 +251,8 @@ export class SyncManager {
                   tags: ["auto-extracted", "regex"],
                 });
                 toSlug = findEntitySlug(this.db, rel.to);
+              } else {
+                this.pages.incrementMention(toSlug);
               }
 
               if (fromSlug && toSlug && fromSlug !== toSlug) {
