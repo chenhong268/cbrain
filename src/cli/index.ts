@@ -786,6 +786,7 @@ program
     const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger);
     const icon = report.locked ? "🌙" : "⚠️";
     console.log(`${icon} Dream — ${report.timestamp.slice(0, 10)}`);
+    if (report.stages.backup.path) console.log(`  Backup:  ${report.stages.backup.size_mb}MB → ${report.stages.backup.path}`);
     console.log(`  Sync:    ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`);
     console.log(`  Enrich:  ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级`);
     console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub`);

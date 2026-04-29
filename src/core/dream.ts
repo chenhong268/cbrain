@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, unlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { execSync } from "node:child_process";
 import { CBrainDB } from "../storage/sqlite.js";
 import type { SyncManager } from "./sync.js";
 import type { EnrichManager } from "./enrich.js";
@@ -9,6 +10,7 @@ import type { Logger } from "./logger.js";
 export interface DreamReport {
   timestamp: string;
   stages: {
+    backup: { path: string | null; size_mb: string };
     sync: { synced: number; skipped: number; errors: number };
     enrich: { total: number; upgraded: number };
     cleanup: { orphans: number; staleStubs: number };
@@ -55,6 +57,7 @@ export async function runDream(
     return {
       timestamp: new Date().toISOString(),
       stages: {
+        backup: { path: null, size_mb: "0" },
         sync: { synced: 0, skipped: 0, errors: 0 },
         enrich: { total: 0, upgraded: 0 },
         cleanup: { orphans: 0, staleStubs: 0 },
@@ -67,6 +70,31 @@ export async function runDream(
 
   const started = Date.now();
   logger.info("dream", "夜间维护开始");
+
+  // Stage 0: Pre-backup
+  logger.info("dream", "Stage 0/5: backup");
+  let backupPath: string | null = null;
+  let backupSize = "0";
+  try {
+    const backupDir = join(outputsDir, "..", "backups");
+    if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+    backupPath = join(backupDir, `auto-${ts}.zip`);
+    const dbPath = (db as any).filename ?? join(vaultPath, "..", "brain.sqlite");
+    const lancePath = join(vaultPath, "..", "lancedb");
+    execSync(`cd "${join(vaultPath, "..")}" && zip -rq "${backupPath}" brain.sqlite vault/. ${existsSync(lancePath) ? "lancedb/." : ""}`, { encoding: "utf-8" });
+    const { statSync } = await import("node:fs");
+    backupSize = (statSync(backupPath).size / 1024 / 1024).toFixed(1);
+    logger.info("dream", `备份完成：${backupPath} (${backupSize}MB)`);
+
+    // Keep last 7 backups
+    const backups = readdirSync(backupDir).filter(f => f.startsWith("auto-") && f.endsWith(".zip")).sort();
+    while (backups.length > 7) {
+      unlinkSync(join(backupDir, backups.shift()!));
+    }
+  } catch (e) {
+    logger.warn("dream", `备份失败，继续执行：${(e as Error).message}`);
+  }
 
   // Stage 1: Sync
   logger.info("dream", "Stage 1/5: sync");
@@ -91,6 +119,7 @@ export async function runDream(
   const report: DreamReport = {
     timestamp: new Date().toISOString(),
     stages: {
+      backup: { path: backupPath, size_mb: backupSize },
       sync: { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors },
       enrich: { total: enrichResults.length, upgraded },
       cleanup: { orphans: orphans.length, staleStubs: staleStubs.length },
