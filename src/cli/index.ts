@@ -107,10 +107,14 @@ program
 
     writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
     new CBrainDB(dbPath); // runs migrations
-    console.log(`Brain initialized at ${dir}`);
-    console.log(`  vault:  ${vaultPath}`);
-    console.log(`  db:     ${dbPath}`);
-    console.log(`  lance:  ${lancePath}`);
+    console.log(`\n  大脑已创建！\n`);
+    console.log(`  目录：${dir}`);
+    console.log(`\n  下一步：`);
+    console.log(`    1. 录入内容   cbrain ingest --type text --title "标题" "内容"`);
+    console.log(`    2. 开始搜索   cbrain query "关键词"`);
+    console.log(`    3. 连接 Agent  cbrain serve`);
+    console.log(`    4. 查看状态   cbrain status`);
+    console.log();
   });
 
 // ─── doctor ──────────────────────────────────────────────────
@@ -269,7 +273,16 @@ program
       limit: parseInt(opts.limit, 10),
     });
 
-    console.log(JSON.stringify(results, null, 2));
+    if (results.length === 0) {
+      console.log("没有找到相关内容。");
+    } else {
+      for (const r of results) {
+        const slug = r.slug.replace(/^brain\//, "").replace(/^raw\//, "");
+        console.log(`${slug}`);
+        if (r.snippet) console.log(`  ${r.snippet.slice(0, 120)}`);
+        console.log();
+      }
+    }
     deps.db.close();
   });
 
@@ -348,6 +361,18 @@ program
     const config = loadConfig();
     const deps = createDeps(config);
     await deps.lance.connect(config.lancePath);
+    console.error("> CBrain MCP Server 已启动\n");
+    console.error("> Agent 配置（添加到你的 Agent MCP 配置中）：");
+    console.error(JSON.stringify({
+      mcpServers: {
+        cbrain: {
+          command: "cbrain",
+          args: ["serve"],
+          cwd: resolve(config.vaultPath, ".."),
+        },
+      },
+    }, null, 2));
+    console.error("");
     await createServer(deps).connect(
       new (await import("@modelcontextprotocol/sdk/server/stdio.js")).StdioServerTransport()
     );
