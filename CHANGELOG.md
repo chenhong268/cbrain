@@ -2,6 +2,25 @@
 
 > Current: `v0.3.0` — first stable release. 23 CLI commands, 40 MCP tools, 11 skills.
 
+## [Dev] — 2026-04-29
+
+### Added
+- **`cbrain backup` / `cbrain restore`** — zip backup of vault + DB + LanceDB
+- **Auto-backup before dream** — `cbrain dream` creates pre-maintenance backup, keeps last 7
+- **`AGENTS.md`** — agent protocols for open source users (review/connect/cleanup/write)
+- **UX improvements**: human-readable `query` output, `init` shows next steps, `health` uses plain language, `serve` prints MCP config
+
+### Fixed
+- **Cascade cleanup** — `PageManager.delete()` now cleans links/tags/timeline/chunks/FTS/ingest_log/raw_data
+- **NER async** — ingest no longer blocks on LLM extraction, fixing timeout on long documents
+- **Backup path** — auto-backups now go to `outputs/backups/` not vault root
+- **TypeScript** — `tsc --noEmit` now zero errors
+
+### Changed
+- **maintain merged into dream** — `cbrain dream` is the single maintenance command
+- **小爱 MEMORY.md 精简** — four verbose protocol rules replaced by pointer to AGENTS.md
+- **cli/index.ts split** — 997-line file → 8 command modules + thin registry
+
 ## [Dev] — 2026-04-28
 
 ### Added
