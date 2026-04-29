@@ -46,7 +46,7 @@ export class Logger {
       const lines = require("node:fs").readFileSync(logFile, "utf-8").split("\n");
       for (const line of lines) {
         if (line.includes("| ❌ |")) {
-          const parts = line.split("|").map(s => s.trim());
+          const parts = line.split("|").map((s: string) => s.trim());
           if (parts.length >= 6) {
             errors.push({
               timestamp: `${date}T${parts[1]}`,
