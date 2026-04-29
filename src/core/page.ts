@@ -221,9 +221,16 @@ export class PageManager {
       unlinkSync(filePath);
     }
 
-    this.db
-      .prepare("DELETE FROM pages WHERE slug = $slug")
-      .run({ $slug: slug });
+    // Cascade cleanup
+    this.db.prepare("DELETE FROM links WHERE from_slug = $slug OR to_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM raw_data WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+
     this.logger?.info("page", "页面已删除", { slug });
     return true;
   }
