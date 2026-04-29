@@ -108,13 +108,13 @@ export class IngestManager {
 
     await this.writeIndexes(slug, chunks, embedResults);
 
-    const nerResult = await this.runNer(slug, body);
+    // NER runs async — don't block ingest on LLM extraction
+    this.runNer(slug, body).catch(() => {});
 
     return {
       slug,
       created: !existing,
       linksExtracted: links.length,
-      ner: nerResult,
     };
   }
 
@@ -139,13 +139,13 @@ export class IngestManager {
 
     await this.writeIndexes(slug, chunks, embedResults);
 
-    const nerResult = await this.runNer(slug, body);
+    // NER runs async — don't block ingest on LLM extraction
+    this.runNer(slug, body).catch(() => {});
 
     return {
       slug,
       created: true,
       linksExtracted: links.length,
-      ner: nerResult,
     };
   }
 
