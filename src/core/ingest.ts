@@ -21,6 +21,7 @@ export interface IngestInput {
   title?: string;
   tags?: string[];
   pageType?: "entity" | "concept" | "event" | "record" | "source";
+  skipNer?: boolean;
 }
 
 export interface NerResult {
@@ -71,14 +72,14 @@ export class IngestManager {
 
   async ingest(input: IngestInput): Promise<IngestResult> {
     if (input.type === "markdown") {
-      return this.ingestMarkdown(input.content, { title: input.title, pageType: input.pageType, tags: input.tags });
+      return this.ingestMarkdown(input.content, { title: input.title, pageType: input.pageType, tags: input.tags, skipNer: input.skipNer });
     }
     return this.ingestText(input);
   }
 
   private async ingestMarkdown(
     content: string,
-    overrides?: { title?: string; pageType?: string; tags?: string[] }
+    overrides?: { title?: string; pageType?: string; tags?: string[]; skipNer?: boolean }
   ): Promise<IngestResult> {
     const parsed = parseFrontmatter(content);
 
@@ -109,7 +110,7 @@ export class IngestManager {
     await this.writeIndexes(slug, chunks, embedResults);
 
     // NER runs async — don't block ingest on LLM extraction
-    this.runNer(slug, body).catch(() => {});
+    if (!overrides?.skipNer) this.runNer(slug, body).catch(() => {});
 
     return {
       slug,
@@ -140,7 +141,7 @@ export class IngestManager {
     await this.writeIndexes(slug, chunks, embedResults);
 
     // NER runs async — don't block ingest on LLM extraction
-    this.runNer(slug, body).catch(() => {});
+    if (!input.skipNer) this.runNer(slug, body).catch(() => {});
 
     return {
       slug,

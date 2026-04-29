@@ -75,10 +75,11 @@ export function createServer(deps: CBrainDeps): McpServer {
       title: z.string().optional().describe("Title for this page — derive from content if not obvious"),
       tags: z.array(z.string()).optional().describe("Tags to apply"),
       pageType: z.enum(["entity", "concept", "event", "record", "source"]).optional().default("record").describe("Page type: entity (person/company), concept, event, record (doc/report), source"),
+      skipNer: z.boolean().optional().default(false).describe("Skip LLM entity extraction — use for simple entries"),
     },
-  }, async ({ content, type, title, tags, pageType }) => {
+  }, async ({ content, type, title, tags, pageType, skipNer }) => {
     const effectiveTitle = title || content.split("\n").find(l => l.trim())?.trim().slice(0, 50) || "Untitled";
-    const result = await ingest.ingest({ content, type: type ?? "text", title: effectiveTitle, tags, pageType });
+    const result = await ingest.ingest({ content, type: type ?? "text", title: effectiveTitle, tags, pageType, skipNer });
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };

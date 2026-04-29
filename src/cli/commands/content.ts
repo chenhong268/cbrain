@@ -12,6 +12,7 @@ export function register(program: Command) {
     .option("--title <title>", "Title (for text type)")
     .option("--tags <tags>", "Comma-separated tags")
     .option("--page-type <type>", "Page type: entity|concept|event|record|source")
+    .option("--no-ner", "Skip NER entity extraction")
     .argument("<content>", "Content to ingest (use @file to read from file)")
     .action(async (content, opts) => {
       const config = loadConfig();
@@ -28,7 +29,7 @@ export function register(program: Command) {
         fileTitle = basename(filePath, extname(filePath));
       }
       const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined;
-      const result = await ingest.ingest({ content: input, type: opts.type ?? "text", title: opts.title ?? fileTitle, tags, pageType: opts.pageType });
+      const result = await ingest.ingest({ content: input, type: opts.type ?? "text", title: opts.title ?? fileTitle, tags, pageType: opts.pageType, skipNer: opts.ner === false });
       console.log(result.created ? `✓ Created: ${result.slug}` : `✓ Updated: ${result.slug}`);
       console.log(`  Links:   ${result.linksExtracted} wiki links extracted`);
       deps.db.close();
