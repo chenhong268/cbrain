@@ -91,7 +91,7 @@ bun run src/cli/index.ts serve
 ```bash
 cbrain init                              # 新建一个大脑（配置 + 目录 + 数据库）
 cbrain status                            # 看一眼：多少页、多少关系、按类型分布
-cbrain maintain                          # 一键维护：同步 → 补充 → 体检 → 报告
+cbrain dream                             # 全量维护：sync → enrich → cleanup → health → report（带锁）
 cbrain config                            # 查看当前配置
 cbrain config --set ner.enabled=false    # 修改配置
 ```
@@ -282,7 +282,6 @@ CBrain includes Agent-facing skill files that teach your Agent how to use the br
 | `connect` | Relationship analysis — find and explain connections between entities |
 | `ingest` | Content routing and compilation |
 | `enrich` | Tiered entity enrichment |
-| `maintain` | Sync and health check (one-shot) |
 | `cleanup` | Guided cleanup — find duplicates, orphans, stale stubs |
 | `write` | Knowledge-based writing — gather from brain, produce polished output |
 | `dream` | Nightly auto-maintenance pipeline |

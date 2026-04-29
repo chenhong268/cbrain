@@ -18,7 +18,7 @@ import { PageManager } from "../core/page.js";
 import { chunkContent } from "../core/shared.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
-import { runMaintenance } from "../core/maintain.js";
+
 import { Logger } from "../core/logger.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
@@ -740,20 +740,20 @@ export function createServer(deps: CBrainDeps): McpServer {
     };
   });
 
-  // ─── maintain ───────────────────────────────────────────────
+  // ─── maintain (delegates to dream) ──────────────────────────
   server.registerTool("maintain", {
-    description: "Run full maintenance pipeline: sync → enrich → health check. Use this for nightly or scheduled upkeep.",
+    description: "Run full nightly pipeline (delegates to dream).",
     inputSchema: {},
   }, async () => {
-    const report = await runMaintenance(vaultPath, sync, enrich, new HealthChecker(db, outputsDir, logger));
-    const brief = [
-      `同步: ${report.sync.synced} 更新, ${report.sync.skipped} 跳过`,
-      report.sync.nerEntities ? `NER: ${report.sync.nerEntities} 实体, ${report.sync.nerRelations} 关系` : "",
-      `实体: ${report.enrich.total} 总计, ${report.enrich.upgraded} 升级`,
-      `健康: ${report.health.overallStatus === "pass" ? "✅" : "⚠️"} ${report.health.dimensions.length} 维度, ${report.health.dimensions.reduce((s, d) => s + d.issues.length, 0)} 问题`,
-    ].filter(Boolean).join("\n");
+    const { runDream } = await import("../core/dream.js");
+    const report = await runDream(vaultPath, db, sync, enrich, new HealthChecker(db, outputsDir, logger), outputsDir, logger);
     return {
-      content: [{ type: "text", text: JSON.stringify({ success: true, brief, report }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ success: report.locked, brief: [
+        `同步: ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`,
+        `实体: ${report.stages.enrich.total} 总计, ${report.stages.enrich.upgraded} 升级`,
+        `清理: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期`,
+        `健康: ${report.stages.health.overallStatus}`,
+      ].join("\n"), report }, null, 2) }],
     };
   });
 

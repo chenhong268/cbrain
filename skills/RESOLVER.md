@@ -33,9 +33,9 @@
 - 补充、丰富、完善、扩展 → enrich.md
 - 增强实体、提升 → enrich.md
 
-### Maintenance (One-Shot)
-- 同步、sync、重新索引 → maintain.md
-- 体检、健康检查、doctor、健康 → maintain.md
+### Maintenance
+- 同步、sync、重新索引 → dream.md
+- 体检、健康检查、doctor、健康 → dream.md
 
 ### Cleanup
 - 清理、删除孤立、去重、整理 → cleanup.md
@@ -62,12 +62,11 @@
 | 3 | connect.md | Relationship analysis — find and explain connections between entities | On-demand: user asks how A and B relate |
 | 4 | ingest.md | Route incoming content to correct type + index | On-demand: user wants to save content |
 | 5 | enrich.md | Tier promotion + entity enrichment | On-demand / batch: after sync |
-| 6 | maintain.md | Sync, health check (one-shot maintenance) | On-demand: user runs maintenance |
-| 7 | cleanup.md | Guided cleanup — find duplicates, orphans, stale stubs | On-demand: user wants to clean up |
-| 8 | dream.md | Nightly full pipeline (sync→enrich→doctor→report) | Scheduled: cron / timer |
-| 9 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
-| 10 | write.md | Knowledge-based writing — gather from brain, produce polished output | On-demand: user wants to write something |
-| 11 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
+| 6 | cleanup.md | Guided cleanup — find duplicates, orphans, stale stubs | On-demand: user wants to clean up |
+| 7 | dream.md | Full maintenance pipeline (sync→enrich→cleanup→health→report) with cycle lock | Scheduled / on-demand |
+| 8 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
+| 9 | write.md | Knowledge-based writing — gather from brain, produce polished output | On-demand: user wants to write something |
+| 10 | brain-ops.md | 5-step protocol + 40-tool reference | Default: agent startup / tool lookup |
 | 9 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
 
 ## Resolution Logic

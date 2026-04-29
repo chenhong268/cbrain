@@ -753,39 +753,6 @@ program
     process.exit(report.locked ? 0 : 1);
   });
 
-// ─── maintain ────────────────────────────────────────────────
-program
-  .command("maintain")
-  .description("Run full maintenance: sync → enrich → health → report")
-  .action(async () => {
-    const config = loadConfig();
-    const deps = createDeps(config);
-    await deps.lance.connect(config.lancePath);
-    const { runMaintenance } = await import("../core/maintain.js");
-    const { SyncManager } = await import("../core/sync.js");
-    const { EnrichManager } = await import("../core/enrich.js");
-    const { HealthChecker } = await import("../core/health.js");
-    const { Logger } = await import("../core/logger.js");
-    const { PageManager } = await import("../core/page.js");
-    const { NerEngine } = await import("../core/ner.js");
-    const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
-    const logger = new Logger(outputsDir);
-    const pages = new PageManager(deps.db, config.vaultPath, logger);
-    const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
-    const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
-    const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath);
-    const health = new HealthChecker(deps.db, outputsDir, logger);
-    const report = await runMaintenance(config.vaultPath, syncMgr, enrichMgr, health);
-    const lines = [
-      `同步: ${report.sync.synced} 更新, ${report.sync.skipped} 跳过`,
-      report.sync.nerEntities ? `NER: ${report.sync.nerEntities} 实体, ${report.sync.nerRelations} 关系` : "",
-      `实体: ${report.enrich.total} 总计, ${report.enrich.upgraded} 升级`,
-      `健康: ${report.health.overallStatus} (${report.health.dimensions.length} 维度)`,
-    ];
-    console.log(lines.filter(Boolean).join("\n"));
-    deps.db.close();
-  });
-
 // ─── tags ────────────────────────────────────────────────────
 program
   .command("tags")
