@@ -461,12 +461,29 @@ program
     const report = await checker.checkAll();
 
     const icon = (s: string) => s === "pass" ? "✅" : s === "warn" ? "⚠️" : "❌";
-    console.log(`\n  Health Check — ${report.timestamp.slice(0, 10)}`);
-    console.log(`  Overall: ${icon(report.overallStatus)} ${report.overallStatus.toUpperCase()}\n`);
+    const whatItMeans: Record<string, string> = {
+      "系统错误": "系统运行有没有报错",
+      "语义去重": "有没有重复的页面",
+      "疑似重复": "标题相似、可能是同一个东西",
+      "一致性": "数据和文件是否一致",
+      "完整性": "自动生成的页面内容是否充实",
+      "孤岛检测": "有没有没人引用的孤立页面",
+      "新增建议": "缺少哪些核心页面",
+      "关注度分析": "哪些高频提及的实体内容太少",
+      "数据就绪度": "数据是否已就绪可用",
+      "原材料质量": "raw 目录的文件是否规范",
+    };
+
+    console.log(`\n  大脑体检 — ${report.timestamp.slice(0, 10)}\n`);
     for (const dim of report.dimensions) {
-      console.log(`  ${icon(dim.status)} ${dim.name} — ${dim.issues.length} issue(s)`);
+      const meaning = whatItMeans[dim.name] ?? "";
+      if (dim.status === "pass") {
+        console.log(`  ${icon(dim.status)} ${dim.name}：正常`);
+      } else {
+        console.log(`  ${icon(dim.status)} ${dim.name}（${meaning}）：${dim.issues.length} 个问题`);
+      }
     }
-    console.log(`\n  Report: ${join(outputsDir, "health", `health-${report.timestamp.slice(0, 10)}.md`)}`);
+    console.log(`\n  详细报告：outputs/health/health-${report.timestamp.slice(0, 10)}.md`);
     db.close();
   });
 
