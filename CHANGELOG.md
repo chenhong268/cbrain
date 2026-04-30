@@ -4,6 +4,16 @@
 
 ## [Dev] — 2026-04-30
 
+### NER Quality Overhaul
+- **Prompt philosophy reversed** — from "cast a wide net" to "precision first". Explicit skip rules for daily items, roles, departments, abstract qualities, generic business terms.
+- **New `isGenericConcept()` filter** — pattern-based rejection of generic compound Chinese terms (管理/策略/能力/思维 suffixes, 大众/消费者/市场 prefixes).
+- **Expanded noise detection** — job titles (经理/总监/人员/管理员/作家), departments (团队/部门/小组/中心), 30+ new `GENERIC_TERMS` entries.
+- **Extraction limits tightened** — 12 entities + 5 concepts → 8 entities + 3 concepts (MAX_TOTAL_ENTITIES=8, MAX_CONCEPTS=3).
+- **Strict concept rules** — only recognized methodologies, theories, effects, laws, models pass. Examples: 奥卡姆剃刀 ✅, 注意力管理 ❌.
+- **Relevance-aware capping** — entities sorted by relevance before slicing; low-relevance dropped first.
+- **Production cleanup** — deleted 75 garbage entities (41 concepts + 36 daily items/roles/departments) from DB + vault.
+- **5 new tests** — generic concepts, daily items, job titles, type preservation, limit enforcement.
+
 ### Architecture
 - **entities + concepts → `brain/nodes/`** — merged into single directory. Type field distinguishes entity vs concept, no more classification guesswork.
 - **`ContentPipeline`** — extracted unified write pipeline. `writeIndexes`, wikilink processing, and NER application now have one implementation shared by sync, ingest, and MCP server. Removed 508 lines of duplicated code across sync.ts (617→406), ingest.ts (324→143), shared.ts.
@@ -25,6 +35,10 @@
 - Image embeds (`![[img.png]]`) no longer treated as wikilinks.
 - `removeOrphans` uses `PageManager.delete()` for cascade cleanup.
 - `enrich.ts` reads `type` from DB directly (was broken by nodes/ migration).
+
+### Added
+- **`DialogueIngest`** (`src/core/dialogue.ts`) — conversation-aware ingestion with incremental entity matching, avoids re-creating known entities
+- **`dialogue` MCP tool** — agents can ingest conversation snippets directly
 
 ### Removed
 - **`cbrain watch` command** — `cbrain serve` already includes watcher. Having both caused double-watcher conflict and MCP disconnection.

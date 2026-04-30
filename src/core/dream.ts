@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, appendFileSync, unlinkSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { join, basename } from "node:path";
+import { execFileSync } from "node:child_process";
 import { CBrainDB } from "../storage/sqlite.js";
 import type { SyncManager } from "./sync.js";
 import type { EnrichManager } from "./enrich.js";
@@ -22,6 +22,7 @@ export interface DreamReport {
 
 const LOCK_KEY = "dream.lock";
 const LOCK_TTL_MS = 30 * 60 * 1000; // 30 min — if dream crashes, lock auto-expires
+const MAX_BACKUPS = 7;
 
 function acquireLock(db: CBrainDB): boolean {
   const row = db
@@ -81,15 +82,18 @@ export async function runDream(
     const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
     backupPath = join(backupDir, `auto-${ts}.zip`);
     const dbPath = (db as any).filename ?? join(vaultPath, "..", "brain.sqlite");
-    const lancePath = join(vaultPath, "..", "lancedb");
-    execSync(`cd "${join(vaultPath, "..")}" && zip -rq "${backupPath}" brain.sqlite vault/. ${existsSync(lancePath) ? "lancedb/." : ""}`, { encoding: "utf-8" });
+    const dbDir = join(vaultPath, "..");
+    const lancePath = join(dbDir, "lancedb");
+    const zipArgs = ["-rq", backupPath, basename(dbPath), "vault/."];
+    if (existsSync(lancePath)) zipArgs.push("lancedb/.");
+    execFileSync("zip", zipArgs, { cwd: dbDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
     const { statSync } = await import("node:fs");
     backupSize = (statSync(backupPath).size / 1024 / 1024).toFixed(1);
     logger.info("dream", `备份完成：${backupPath} (${backupSize}MB)`);
 
     // Keep last 7 backups
     const backups = readdirSync(backupDir).filter(f => f.startsWith("auto-") && f.endsWith(".zip")).sort();
-    while (backups.length > 7) {
+    while (backups.length > MAX_BACKUPS) {
       unlinkSync(join(backupDir, backups.shift()!));
     }
   } catch (e) {

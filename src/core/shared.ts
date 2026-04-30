@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readdirSync } from "node:fs";
+import { join, extname } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 
 /**
@@ -6,17 +8,39 @@ import type { CBrainDB } from "../storage/sqlite.js";
  * Single source of truth for chunking, hashing, NER helpers, etc.
  */
 
+// ─── Constants ───────────────────────────────────────────────
+
+export const DEFAULT_CHUNK_SIZE = 500;
+
 // ─── Content Hashing ─────────────────────────────────────────
 
 export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
+// ─── File Collection ─────────────────────────────────────────
+
+export function collectMarkdownFiles(dir: string): string[] {
+  const results: string[] = [];
+  const walk = (d: string) => {
+    let entries;
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
+      const p = join(d, e.name);
+      if (e.isDirectory()) { walk(p); }
+      else if (extname(e.name).toLowerCase() === ".md") { results.push(p); }
+    }
+  };
+  walk(dir);
+  return results;
+}
+
 // ─── Chunking ────────────────────────────────────────────────
 
 export function chunkContent(
   body: string,
-  chunkSize: number = 500
+  chunkSize: number = DEFAULT_CHUNK_SIZE
 ): Array<{ index: number; content: string }> {
   if (!body.trim()) return [];
 

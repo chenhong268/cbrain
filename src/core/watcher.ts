@@ -1,11 +1,7 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join, relative, extname } from "node:path";
-import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { relative } from "node:path";
 import type { SyncManager } from "./sync.js";
-
-function hashContent(content: string): string {
-  return createHash("sha256").update(content).digest("hex").slice(0, 16);
-}
+import { hashContent, collectMarkdownFiles } from "./shared.js";
 
 /**
  * Polling vault watcher. Scans every 3s, hashes each .md file, compares
@@ -38,7 +34,7 @@ export class FileWatcher {
   }
 
   private scan(): void {
-    const files = this.collectMarkdownFiles(this.vaultPath);
+    const files = collectMarkdownFiles(this.vaultPath);
     const seen = new Set<string>();
 
     for (const fullPath of files) {
@@ -63,21 +59,5 @@ export class FileWatcher {
     for (const path of this.hashes.keys()) {
       if (!seen.has(path)) this.hashes.delete(path);
     }
-  }
-
-  private collectMarkdownFiles(dir: string): string[] {
-    const results: string[] = [];
-    const walk = (d: string) => {
-      let entries;
-      try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
-      for (const e of entries) {
-        if (e.name.startsWith(".")) continue;
-        const p = join(d, e.name);
-        if (e.isDirectory()) { walk(p); }
-        else if (extname(e.name).toLowerCase() === ".md") { results.push(p); }
-      }
-    };
-    walk(dir);
-    return results;
   }
 }

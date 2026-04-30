@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, relative } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -16,8 +16,10 @@ import { IndexGenerator } from "../core/indexes.js";
 import { NerEngine } from "../core/ner.js";
 import { PageManager } from "../core/page.js";
 import { ContentPipeline } from "../core/pipeline.js";
+import { findEntitySlug } from "../core/shared.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
+import { DialogueIngest } from "../core/dialogue.js";
 
 import { Logger } from "../core/logger.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
@@ -52,6 +54,22 @@ export function createServer(deps: CBrainDeps): McpServer {
     name: "cbrain",
     version: "0.3.0",
   });
+
+  // Unified error wrapper — every tool handler gets try-catch automatically
+  const origRegister = server.registerTool.bind(server);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server as any).registerTool = (name: string, def: any, handler: (...a: any[]) => Promise<any>) =>
+    origRegister(name, def, async (...a: any[]) => {
+      try {
+        return await handler(...a);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }],
+          isError: true,
+        };
+      }
+    });
 
   // ─── query ───────────────────────────────────────────────
   server.registerTool("query", {
@@ -101,9 +119,14 @@ export function createServer(deps: CBrainDeps): McpServer {
     const filePath = row.file_path as string | undefined;
     const fullPath = filePath ? join(vaultPath, filePath) : undefined;
 
+    // Prevent path traversal — only read files inside vault
     let body: string | null = null;
-    if (fullPath && existsSync(fullPath)) {
-      body = readFileSync(fullPath, "utf-8");
+    if (fullPath) {
+      const resolved = resolve(fullPath);
+      const rel = relative(vaultPath, resolved);
+      if (!rel.startsWith("..") && !resolved.startsWith("..")) {
+        if (existsSync(resolved)) body = readFileSync(resolved, "utf-8");
+      }
     }
 
     return {
@@ -137,27 +160,33 @@ export function createServer(deps: CBrainDeps): McpServer {
 
   // ─── graph_query ─────────────────────────────────────────
   server.registerTool("graph_query", {
-    description: "Query the knowledge graph. Traverse from a seed entity or get backlinks.",
+    description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved).",
     inputSchema: {
-      slug: z.string().describe("Seed entity slug"),
+      slug: z.string().describe("Seed entity slug or name (auto-resolved if not an exact slug)"),
       mode: z.enum(["traverse", "backlinks", "related"]).optional().default("traverse").describe("Query mode"),
       depth: z.number().optional().default(2).describe("Max traversal depth"),
       limit: z.number().optional().default(20).describe("Max results"),
     },
   }, async ({ slug, mode, depth, limit }) => {
+    let resolvedSlug = slug;
+    if (!pages.getBySlug(slug)) {
+      const found = findEntitySlug(db, slug);
+      if (found) resolvedSlug = found;
+    }
+
     let result;
     switch (mode) {
       case "backlinks":
-        result = graph.getBacklinks(slug);
+        result = graph.getBacklinks(resolvedSlug);
         break;
       case "related":
-        result = graph.getRelatedEntities(slug, limit);
+        result = graph.getRelatedEntities(resolvedSlug, limit);
         break;
       default:
-        result = graph.traverse(slug, { maxDepth: depth, limit });
+        result = graph.traverse(resolvedSlug, { maxDepth: depth, limit });
     }
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ resolvedSlug, result }, null, 2) }],
     };
   });
 
@@ -260,11 +289,14 @@ export function createServer(deps: CBrainDeps): McpServer {
     const byType = db.prepare("SELECT type, COUNT(*) as cnt FROM pages GROUP BY type").all();
     const totalLinks = (db.prepare("SELECT COUNT(*) as cnt FROM links").get() as any).cnt;
     const totalChunks = (db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as any).cnt;
+    const recentNerErrors = (db.prepare(
+      "SELECT COUNT(*) as cnt FROM ingest_log WHERE details LIKE '%nerError%' AND created_at > datetime('now', '-24 hours')"
+    ).get() as any).cnt;
 
     return {
       content: [{
         type: "text",
-        text: JSON.stringify({ totalPages, byType, totalLinks, totalChunks, vaultPath }, null, 2),
+        text: JSON.stringify({ totalPages, byType, totalLinks, totalChunks, recentNerErrors, vaultPath }, null, 2),
       }],
     };
   });
@@ -412,6 +444,30 @@ export function createServer(deps: CBrainDeps): McpServer {
     const links = graph.getLinks(slug, direction);
     return {
       content: [{ type: "text", text: JSON.stringify(links, null, 2) }],
+    };
+  });
+
+  // ─── add_link ────────────────────────────────────────────────
+  server.registerTool("add_link", {
+    description: "Create a link between two pages.",
+    inputSchema: {
+      from: z.string().describe("Source page slug"),
+      to: z.string().describe("Target page slug"),
+      relation: z.string().default("提及").describe("Relation type (e.g. '提及', 'works_at')"),
+      context: z.string().optional().describe("Optional context for the relation"),
+    },
+  }, async ({ from, to, relation, context }) => {
+    if (!pages.getBySlug(from)) return { content: [{ type: "text", text: JSON.stringify({ error: `Source page not found: ${from}` }) }], isError: true };
+    if (!pages.getBySlug(to)) return { content: [{ type: "text", text: JSON.stringify({ error: `Target page not found: ${to}` }) }], isError: true };
+    if (from === to) return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot create self-referencing link" }) }], isError: true };
+
+    db.prepare(
+      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)"
+    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null });
+    pages.incrementMention(to);
+
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: true, from, to, relation }) }],
     };
   });
 
@@ -717,23 +773,6 @@ export function createServer(deps: CBrainDeps): McpServer {
     };
   });
 
-  // ─── maintain (delegates to dream) ──────────────────────────
-  server.registerTool("maintain", {
-    description: "Run full nightly pipeline (delegates to dream).",
-    inputSchema: {},
-  }, async () => {
-    const { runDream } = await import("../core/dream.js");
-    const report = await runDream(vaultPath, db, sync, enrich, new HealthChecker(db, outputsDir, logger), outputsDir, logger);
-    return {
-      content: [{ type: "text", text: JSON.stringify({ success: report.locked, brief: [
-        `同步: ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`,
-        `实体: ${report.stages.enrich.total} 总计, ${report.stages.enrich.upgraded} 升级`,
-        `清理: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期`,
-        `健康: ${report.stages.health.overallStatus}`,
-      ].join("\n"), report }, null, 2) }],
-    };
-  });
-
   // ─── dream ──────────────────────────────────────────────────
   server.registerTool("dream", {
     description: "Run full nightly pipeline: sync → enrich → cleanup → health → report. Use for scheduled daily maintenance. Has cycle lock to prevent overlapping runs.",
@@ -762,12 +801,50 @@ export function createServer(deps: CBrainDeps): McpServer {
 
   // ─── merge_pages ────────────────────────────────────────────
   server.registerTool("merge_pages", {
-    description: "Merge a source page into a target page. All links, timeline entries, tags and raw data are moved from source to target. Source body is appended to target body. Source page is deleted after merge.",
+    description: "Merge a source page into a target page. All links, timeline entries, tags and raw data are moved from source to target. Source body is appended to target body. Source page is deleted after merge. Use dryRun=true to preview without executing.",
     inputSchema: {
       source: z.string().describe("Slug of the source page to merge and delete"),
       target: z.string().describe("Slug of the target page to merge into"),
+      dryRun: z.boolean().optional().default(false).describe("Preview merge without executing"),
     },
-  }, async ({ source, target }) => {
+  }, async ({ source, target, dryRun }) => {
+    const sourcePage = pages.getBySlug(source);
+    const targetPage = pages.getBySlug(target);
+    if (!sourcePage || !targetPage) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ success: false, error: `Page not found: ${!sourcePage ? source : target}` }) }],
+        isError: true,
+      };
+    }
+    if (source === target) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ success: false, error: "Cannot merge page into itself" }) }],
+        isError: true,
+      };
+    }
+
+    if (dryRun) {
+      const sourceTags = db.getTags(source);
+      const targetTags = db.getTags(target);
+      const mergedTags = [...new Set([...targetTags, ...sourceTags])];
+      const sourceLinks = (db.prepare("SELECT COUNT(*) as cnt FROM links WHERE from_slug = $slug OR to_slug = $slug").get({ $slug: source }) as any).cnt;
+      const timelineEntries = (db.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE page_slug = $slug").get({ $slug: source }) as any).cnt;
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          dryRun: true,
+          source: { slug: source, title: sourcePage.title, type: sourcePage.type, tags: sourceTags },
+          target: { slug: target, title: targetPage.title, type: targetPage.type, tags: targetTags },
+          preview: {
+            mergedTags,
+            linksToMove: sourceLinks,
+            timelineToMove: timelineEntries,
+            sourceDeleted: true,
+          },
+        }, null, 2) }],
+      };
+    }
+
     const result = pages.merge(source, target);
     if (!result) {
       return {
@@ -777,6 +854,20 @@ export function createServer(deps: CBrainDeps): McpServer {
     }
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, merged: result.slug, title: result.title, type: result.type }) }],
+    };
+  });
+
+  // ─── ingest_dialogue ───────────────────────────────────────
+  server.registerTool("ingest_dialogue", {
+    description: "Ingest a dialogue/conversation into the brain. Extracts new entities, relations, and events via LLM, skipping already-known knowledge. Use for capturing key facts from conversations.",
+    inputSchema: {
+      text: z.string().describe("Dialogue text to ingest (conversation content)"),
+    },
+  }, async ({ text }) => {
+    const dialogue = new DialogueIngest(db, embedding, lance, vaultPath, llm);
+    const result = await dialogue.ingest(text);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
   });
 

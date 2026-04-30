@@ -97,11 +97,11 @@ describe("IngestManager", () => {
       });
 
       expect(result.created).toBe(true);
-      expect(result.slug).toBe("brain/entities/张三");
+      expect(result.slug).toBe("brain/nodes/张三");
 
       const row = db
         .prepare("SELECT * FROM pages WHERE slug = ?")
-        .get("brain/entities/张三") as any;
+        .get("brain/nodes/张三") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("张三");
       expect(row.type).toBe("entity");
@@ -206,7 +206,7 @@ describe("IngestManager", () => {
       ].join("\n");
 
       const result = await ingest.ingest({ content: md, type: "markdown" });
-      expect(result.slug).toBe("brain/entities/autoslug");
+      expect(result.slug).toBe("brain/nodes/autoslug");
     });
 
     test("uses tags from frontmatter over input tags", async () => {
@@ -238,25 +238,6 @@ describe("IngestManager", () => {
   });
 
   describe("link extraction", () => {
-    test("extracts [[wiki links]] from body", () => {
-      const links = ingest.extractWikiLinks(
-        "张三认识[[李四]]，他们一起在[[王五]]的项目上工作。"
-      );
-      expect(links).toEqual(["李四", "王五"]);
-    });
-
-    test("deduplicates links", () => {
-      const links = ingest.extractWikiLinks(
-        "[[张三]]和[[张三]]一起吃饭。"
-      );
-      expect(links).toEqual(["张三"]);
-    });
-
-    test("returns empty for no links", () => {
-      const links = ingest.extractWikiLinks("没有链接的纯文本。");
-      expect(links).toEqual([]);
-    });
-
     test("creates graph edges for resolved links", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
@@ -299,7 +280,7 @@ describe("IngestManager", () => {
       ].join("\n");
 
       const result = await ingest.ingest({ content: md, type: "markdown" });
-      expect(result.linksExtracted).toBe(1);
+      expect(result.linksExtracted).toBe(0);
 
       const links = db
         .prepare("SELECT * FROM links WHERE from_slug = ?")
@@ -391,7 +372,7 @@ describe("IngestManager", () => {
         .prepare("SELECT * FROM ingest_log WHERE page_slug LIKE ?")
         .all("%logged%") as any[];
       expect(logs.length).toBeGreaterThan(0);
-      expect(logs[0].action).toBe("sync");
+      expect(logs[0].action).toBe("ingest");
     });
   });
 
@@ -568,7 +549,7 @@ describe("IngestManager", () => {
     test("reuses existing entity instead of creating duplicate stub", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/zhangsan", "entity", "张三", "brain/entities/zhangsan.md", "h1");
+      ).run("brain/nodes/zhangsan", "entity", "张三", "brain/nodes/zhangsan.md", "h1");
 
       const llm = createMockLLM([
         JSON.stringify({

@@ -68,18 +68,18 @@ describe("MCP Server", () => {
       expect(typeof server.connect).toBe("function");
     });
 
-    test("registers all 40 tools", () => {
+    test("registers all 41 tools", () => {
       const server = createServer(deps);
       const tools = getTools(server);
       const names = Object.keys(tools);
       expect(names.sort()).toEqual([
-        "add_tag", "add_timeline_entry", "delete_page",
+        "add_link", "add_tag", "add_timeline_entry", "delete_page",
         "delete_raw_data", "dream", "enrich", "generate_indexes",
         "get_chunks", "get_config", "get_ingest_log", "get_links",
         "get_page", "get_raw_data", "get_tags", "get_timeline",
         "get_versions", "graph_query", "health", "ingest",
-        "job_cancel", "job_list", "job_retry", "job_status",
-        "job_submit", "list_pages", "list_raw_data", "maintain",
+        "ingest_dialogue", "job_cancel", "job_list", "job_retry", "job_status",
+        "job_submit", "list_pages", "list_raw_data",
         "merge_pages", "put_page", "put_raw_data", "query", "remove_link",
         "remove_orphans", "remove_tag", "resolve_slugs",
         "revert_version", "set_config", "status", "sync",
@@ -225,8 +225,9 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).graph_query.handler({ slug: "entities/a" });
       const data = JSON.parse(result.content[0].text);
-      expect(data.length).toBe(1);
-      expect(data[0].slug).toBe("entities/b");
+      expect(data.resolvedSlug).toBe("entities/a");
+      expect(data.result.length).toBe(1);
+      expect(data.result[0].slug).toBe("entities/b");
     });
 
     test("backlinks mode", async () => {
@@ -243,8 +244,9 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).graph_query.handler({ slug: "entities/a", mode: "backlinks" });
       const data = JSON.parse(result.content[0].text);
-      expect(data.length).toBe(1);
-      expect(data[0].from_slug).toBe("entities/b");
+      expect(data.resolvedSlug).toBe("entities/a");
+      expect(data.result.length).toBe(1);
+      expect(data.result[0].from_slug).toBe("entities/b");
     });
 
     test("related mode", async () => {
@@ -261,8 +263,9 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).graph_query.handler({ slug: "entities/a", mode: "related" });
       const data = JSON.parse(result.content[0].text);
-      expect(data.length).toBe(1);
-      expect(data[0].slug).toBe("entities/b");
+      expect(data.resolvedSlug).toBe("entities/a");
+      expect(data.result.length).toBe(1);
+      expect(data.result[0].slug).toBe("entities/b");
     });
   });
 

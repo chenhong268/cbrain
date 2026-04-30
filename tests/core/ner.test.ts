@@ -126,4 +126,120 @@ describe("NerEngine", () => {
     // Should not throw — just return empty result
     expect(result.entities).toEqual([]);
   });
+
+  // ─── New filter tests ────────────────────────────────────
+
+  test("filters out generic concept names", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [
+          { name: "深度思考", type: "concept", relevance: "high", context: "需要深度思考" },
+          { name: "注意力管理", type: "concept", relevance: "medium", context: "注意力管理很重要" },
+          { name: "时间管理", type: "concept", relevance: "high", context: "做好时间管理" },
+          { name: "奥卡姆剃刀", type: "concept", relevance: "high", context: "奥卡姆剃刀原理" },
+        ],
+        relations: [],
+        events: [],
+      }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("some text");
+    const names = result.entities.map((e) => e.name);
+
+    expect(names).not.toContain("深度思考");
+    expect(names).not.toContain("注意力管理");
+    expect(names).not.toContain("时间管理");
+    expect(names).toContain("奥卡姆剃刀");
+  });
+
+  test("filters out daily items and generic nouns", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [
+          { name: "柠檬汁", type: "product", relevance: "medium", context: "喝了一杯柠檬汁" },
+          { name: "保险丝", type: "product", relevance: "medium", context: "换了个保险丝" },
+          { name: "邮件", type: "concept", relevance: "medium", context: "发了一封邮件" },
+          { name: "咖啡", type: "product", relevance: "low", context: "喝咖啡" },
+          { name: "张三", type: "person", relevance: "high", context: "张三是工程师" },
+        ],
+        relations: [],
+        events: [],
+      }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("some text");
+    const names = result.entities.map((e) => e.name);
+
+    expect(names).not.toContain("柠檬汁");
+    expect(names).not.toContain("保险丝");
+    expect(names).not.toContain("邮件");
+    expect(names).not.toContain("咖啡");
+    expect(names).toContain("张三");
+  });
+
+  test("filters out job titles and departments", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [
+          { name: "销售经理", type: "person", relevance: "medium", context: "销售经理说" },
+          { name: "品牌团队", type: "concept", relevance: "medium", context: "品牌团队负责" },
+          { name: "财务部门", type: "concept", relevance: "low", context: "财务部门审批" },
+          { name: "市场营销人员", type: "person", relevance: "low", context: "市场营销人员需要" },
+        ],
+        relations: [],
+        events: [],
+      }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("some text");
+
+    expect(result.entities.length).toBe(0);
+  });
+
+  test("keeps person/company/product types regardless of obscurity", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [
+          { name: "凌娅", type: "person", relevance: "medium", context: "凌娅参与了项目" },
+          { name: "南京医药集团", type: "company", relevance: "medium", context: "南京医药集团是分销商" },
+          { name: "Cosentyx", type: "product", relevance: "high", context: "Cosentyx是免疫药物" },
+        ],
+        relations: [],
+        events: [],
+      }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("some text");
+    const names = result.entities.map((e) => e.name);
+
+    expect(names).toContain("凌娅");
+    expect(names).toContain("南京医药集团");
+    expect(names).toContain("Cosentyx");
+  });
+
+  test("respects new limits: max 8 entities + 3 concepts", async () => {
+    const entities = Array.from({ length: 12 }, (_, i) => ({
+      name: `Person${i}`, type: "person" as const, relevance: "high" as const, context: `Person${i} is here`,
+    }));
+    const concepts = Array.from({ length: 6 }, (_, i) => ({
+      name: `Theory${i}`, type: "concept" as const, relevance: "high" as const, context: `Theory${i} is known`,
+    }));
+
+    const llm = createMockLLM([
+      JSON.stringify({ entities: [...entities, ...concepts], relations: [], events: [] }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("some text");
+
+    const entityCount = result.entities.filter((e) => e.type !== "concept").length;
+    const conceptCount = result.entities.filter((e) => e.type === "concept").length;
+    expect(entityCount).toBeLessThanOrEqual(8);
+    expect(conceptCount).toBeLessThanOrEqual(3);
+    expect(result.entities.length).toBeLessThanOrEqual(11);
+  });
 });

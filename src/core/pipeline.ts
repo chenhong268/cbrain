@@ -12,6 +12,7 @@ import {
   buildStubBody,
   findEntitySlug,
   resolveEntityName,
+  DEFAULT_CHUNK_SIZE,
 } from "./shared.js";
 
 export interface PipelineInput {
@@ -68,7 +69,7 @@ export class ContentPipeline {
     this.pages = opts?.pages ?? null;
     this.nerEngine = opts?.nerEngine ?? null;
     this.logger = opts?.logger ?? null;
-    this.chunkSize = opts?.chunkSize ?? 500;
+    this.chunkSize = opts?.chunkSize ?? DEFAULT_CHUNK_SIZE;
   }
 
   /** Embed a body into chunks + vectors. Used before calling write() or writeIndexes(). */
@@ -188,13 +189,14 @@ export class ContentPipeline {
     fromSlug: string,
     body: string,
     type: string,
-    skipDatelessEvents: boolean
+    skipDatelessEvents: boolean,
+    precomputed?: ExtractionResult
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
     if (type === "entity" || type === "concept") return null;
 
-    const extraction = await this.nerEngine.extract(body);
+    const extraction = precomputed ?? await this.nerEngine.extract(body);
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {
       return null;
     }

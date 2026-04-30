@@ -14,7 +14,7 @@ LLMs forget everything between conversations. CBrain gives your Agent a persiste
 - **Three-layer search** — Vector + Chinese FTS + Graph traversal, fused with RRF
 - **Knowledge graph** — Wiki-link based relationships + auto NER entity/relationship extraction
 - **Entity enrichment** — People and companies auto-promote through tiers as you mention them
-- **38 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, raw data, config, and observability
+- **41 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, raw data, config, and observability
 - **Version history** — Every page version snapshotted, with revert support
 - **Multi-query expansion** — LLM generates search query variants for better recall, fused with RRF
 - **Job queue** — SQLite-backed async job system with priority, retry, and status tracking
@@ -85,7 +85,7 @@ bun run src/cli/index.ts serve
 | record | `records/` | Reading notes, article summaries |
 | source | `sources/` | Compiled artifacts from raw content |
 
-## CLI Commands (22 total)
+## CLI Commands (24 total)
 
 ### 大脑管理
 ```bash
@@ -129,7 +129,6 @@ cbrain revert <slug> <版本号>            # 回滚到某个历史版本
 ### 维护与诊断
 ```bash
 cbrain dream                             # 夜间全量维护：sync → enrich → cleanup → health → report
-cbrain maintain                          # 一键维护：sync → enrich → health
 cbrain sync                              # 把 vault 文件同步到索引
 cbrain enrich                            # 实体重要性升级
 cbrain health                            # 10 维度健康检查，输出报告
@@ -158,20 +157,20 @@ Add to your Agent's MCP config:
 }
 ```
 
-### MCP Tools (40 total)
+### MCP Tools (41 total)
 
 **Core:**
 | Tool | Description |
 |:-----|:------------|
 | `query` | Hybrid search (vector + FTS + graph + multi-query expansion) |
 | `ingest` | Ingest content into the brain |
+| `dialogue` | Ingest conversation snippets with incremental entity matching |
 | `status` | Brain statistics (pages, links, chunks) |
 | `health` | Health check |
 | `sync` | Re-index vault files |
 | `remove_orphans` | Remove DB entries with no vault file |
 | `generate_indexes` | Generate index pages (dashboard, entities, concepts, sources) |
 | `enrich` | Entity tier enrichment |
-| `maintain` | Full maintenance pipeline (sync → enrich → health) |
 
 **Pages:**
 | Tool | Description |

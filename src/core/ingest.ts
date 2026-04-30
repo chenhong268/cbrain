@@ -106,7 +106,10 @@ export class IngestManager {
     // NER runs async — skip entity/concept pages
     const shouldNer = !overrides?.skipNer && type !== "entity" && type !== "concept";
     if (shouldNer) {
-      this.pipeline.processNer(slug, body, type, true).catch(() => {});
+      this.pipeline.processNer(slug, body, type, true).catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
+      });
     }
 
     return { slug, created: !existing, linksExtracted };
@@ -135,7 +138,10 @@ export class IngestManager {
 
     const shouldNer = !input.skipNer && type !== "entity" && type !== "concept";
     if (shouldNer) {
-      this.pipeline.processNer(slug, body, type, true).catch(() => {});
+      this.pipeline.processNer(slug, body, type, true).catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
+      });
     }
 
     return { slug, created: true, linksExtracted };

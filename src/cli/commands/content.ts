@@ -23,10 +23,11 @@ export function register(program: Command) {
       let input = content;
       let fileTitle: string | undefined;
       if (input.startsWith("@")) {
-        const filePath = input.slice(1);
-        if (!existsSync(filePath)) { console.error(`Error: File not found: ${filePath}`); process.exit(1); }
-        input = readFileSync(filePath, "utf-8");
-        fileTitle = basename(filePath, extname(filePath));
+        const rawPath = input.slice(1);
+        if (rawPath.includes("..")) { console.error("Error: 路径不允许包含 .."); process.exit(1); }
+        if (!existsSync(rawPath)) { console.error(`Error: File not found: ${rawPath}`); process.exit(1); }
+        input = readFileSync(rawPath, "utf-8");
+        fileTitle = basename(rawPath, extname(rawPath));
       }
       const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined;
       const result = await ingest.ingest({ content: input, type: opts.type ?? "text", title: opts.title ?? fileTitle, tags, pageType: opts.pageType, skipNer: opts.ner === false });

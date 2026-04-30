@@ -1,5 +1,5 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, extname, relative } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
@@ -11,6 +11,8 @@ import type { Logger } from "./logger.js";
 import {
   chunkContent,
   hashContent,
+  collectMarkdownFiles,
+  DEFAULT_CHUNK_SIZE,
 } from "./shared.js";
 import { ContentPipeline } from "./pipeline.js";
 import type { NerPipelineResult } from "./pipeline.js";
@@ -37,9 +39,6 @@ export interface SyncPageResult {
   error?: string;
 }
 
-// Module-level cache for batch-embedded chunks in syncAll
-const chunkEmbedCache = new Map<string, { embedding: number[]; tokenCount: number }>();
-
 export class SyncManager {
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
@@ -50,6 +49,7 @@ export class SyncManager {
   private pages: PageManager | null;
   private audit: AuditLogger | null;
   private logger: Logger | null;
+  private chunkEmbedCache = new Map<string, { embedding: number[]; tokenCount: number }>();
 
   constructor(
     db: CBrainDB,
@@ -60,7 +60,7 @@ export class SyncManager {
     this.db = db;
     this.embedding = embedding;
     this.lance = lance;
-    this.chunkSize = config?.chunkSize ?? 500;
+    this.chunkSize = config?.chunkSize ?? DEFAULT_CHUNK_SIZE;
     this.nerEngine = config?.nerEngine ?? null;
     this.pages = config?.pages ?? null;
     this.logger = config?.logger ?? null;
@@ -75,7 +75,8 @@ export class SyncManager {
 
   async syncAll(vaultPath: string): Promise<SyncReport> {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [] };
-    const mdFiles = this.collectMarkdownFiles(vaultPath);
+    try {
+    const mdFiles = collectMarkdownFiles(vaultPath);
 
     // Phase 1: detect changed files + batch embed all chunks
     const changed: Array<{ filePath: string; slug: string; title: string; type: string; relPath: string; body: string; contentHash: string; frontmatter: Record<string, unknown> }> = [];
@@ -115,7 +116,7 @@ export class SyncManager {
         const texts = allChunks.map(c => c.content);
         const embedResults = await this.embedding.embedBatch(texts);
         for (let i = 0; i < allChunks.length; i++) {
-          chunkEmbedCache.set(`${allChunks[i].slug}:${allChunks[i].index}`, embedResults[i]);
+          this.chunkEmbedCache.set(`${allChunks[i].slug}:${allChunks[i].index}`, embedResults[i]);
         }
       } catch (e) {
         this.logger?.warn("sync", "批量 embedding 失败，回退到逐条处理");
@@ -157,7 +158,7 @@ export class SyncManager {
 
         // Build chunks + embedResults from cache, fall back to fresh embed
         const chunks = chunkContent(file.body, this.chunkSize);
-        const embedResults = chunks.map(c => chunkEmbedCache.get(`${file.slug}:${c.index}`));
+        const embedResults = chunks.map(c => this.chunkEmbedCache.get(`${file.slug}:${c.index}`));
         if (embedResults.every(r => r)) {
           this.pipeline.writeIndexes(file.slug, chunks, embedResults as Array<{ embedding: number[]; tokenCount: number }>);
         } else {
@@ -208,7 +209,7 @@ export class SyncManager {
           const extraction = extractions[j];
           if (!extraction) continue;
           try {
-            const nerResult = await this.pipeline.processNer(batch[j].slug, batch[j].text, "record", false);
+            const nerResult = await this.pipeline.processNer(batch[j].slug, batch[j].text, "record", false, extraction);
             if (nerResult) {
               report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
               report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
@@ -222,8 +223,9 @@ export class SyncManager {
       }
     }
 
-    chunkEmbedCache.clear();
+    this.chunkEmbedCache.clear();
     return report;
+    } finally { this.chunkEmbedCache.clear(); }
   }
 
   async cleanStaleStubs(vaultPath: string): Promise<string[]> {
@@ -366,25 +368,6 @@ export class SyncManager {
   }
 
   // ─── Private ────────────────────────────────────────────────
-
-  private collectMarkdownFiles(dir: string): string[] {
-    const results: string[] = [];
-
-    const walk = (currentDir: string) => {
-      const entries = readdirSync(currentDir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = join(currentDir, entry.name);
-        if (entry.isDirectory()) {
-          walk(fullPath);
-        } else if (extname(entry.name).toLowerCase() === ".md") {
-          results.push(fullPath);
-        }
-      }
-    };
-
-    walk(dir);
-    return results;
-  }
 
   private inferTypeFromPath(relPath: string): string {
     const typeFromDir: Record<string, string> = {
