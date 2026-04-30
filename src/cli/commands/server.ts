@@ -36,22 +36,4 @@ export function register(program: Command) {
       await createServer(deps).connect(new (await import("@modelcontextprotocol/sdk/server/stdio.js")).StdioServerTransport());
     });
 
-  program
-    .command("watch")
-    .description("Watch vault for changes and auto-sync (daemon)")
-    .action(async () => {
-      const config = loadConfig();
-      const db = new CBrainDB(config.dbPath);
-      const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
-      if (!apiKey) { console.error("Error: ZHIPU_API_KEY not set."); process.exit(1); }
-      const embedding = new (await import("../../embedding/zhipu.js")).ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl);
-      const lance = new LanceDBManager();
-      await lance.connect(config.lancePath);
-      const { SyncManager } = await import("../../core/sync.js");
-      const sync = new SyncManager(db, embedding, lance);
-      const { FileWatcher } = await import("../../core/watcher.js");
-      const watcher = new FileWatcher(sync, config.vaultPath);
-      watcher.start();
-      console.log(`Watching ${config.vaultPath}`);
-    });
 }
