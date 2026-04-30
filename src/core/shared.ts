@@ -113,10 +113,7 @@ export function findEntitySlug(
   db: CBrainDB,
   name: string
 ): string | null {
-  const byTitle = db
-    .prepare("SELECT slug FROM pages WHERE title = $name AND type IN ('entity', 'concept')")
-    .get({ $name: name }) as { slug: string } | null;
-  return byTitle?.slug ?? null;
+  return db.getEntitySlugByTitle(name);
 }
 
 /**

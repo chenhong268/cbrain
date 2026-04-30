@@ -90,11 +90,9 @@ export class SyncManager {
         const slug = parsed.frontmatter.slug ?? relPath.replace(/\.md$/, "");
         const contentHash = hashContent(content);
 
-        const existing = this.db
-          .prepare("SELECT content_hash FROM pages WHERE slug = $slug")
-          .get({ $slug: slug }) as { content_hash: string } | null;
+        const existing = this.db.getPageContentHash(slug);
 
-        if (existing && existing.content_hash === contentHash) {
+        if (existing && existing === contentHash) {
           report.skipped++;
           continue;
         }
@@ -128,9 +126,7 @@ export class SyncManager {
 
     for (const file of changed) {
       try {
-        const existing = this.db
-          .prepare("SELECT content_hash FROM pages WHERE slug = $slug")
-          .get({ $slug: file.slug }) as { content_hash: string } | null;
+        const existing = this.db.getPageContentHash(file.slug);
 
         if (existing) {
           try {
@@ -139,21 +135,12 @@ export class SyncManager {
           } catch { /* version snapshot best-effort */ }
         }
 
-        this.db.prepare(
-          `INSERT INTO pages (slug, type, title, file_path, content_hash, created_at, updated_at)
-           VALUES ($slug, $type, $title, $filePath, $contentHash, datetime('now'), datetime('now'))
-           ON CONFLICT(slug) DO UPDATE SET
-             type = $type,
-             title = $title,
-             file_path = $filePath,
-             content_hash = $contentHash,
-             updated_at = datetime('now')`
-        ).run({
-          $slug: file.slug,
-          $type: file.type,
-          $title: file.title,
-          $filePath: file.relPath,
-          $contentHash: file.contentHash,
+        this.db.upsertPage({
+          slug: file.slug,
+          type: file.type,
+          title: file.title,
+          filePath: file.relPath,
+          contentHash: file.contentHash,
         });
 
         // Build chunks + embedResults from cache, fall back to fresh embed
@@ -230,10 +217,7 @@ export class SyncManager {
 
   async cleanStaleStubs(vaultPath: string): Promise<string[]> {
     const removed: string[] = [];
-    const stubs = this.db.prepare(
-      `SELECT slug, title, file_path FROM pages
-       WHERE (SELECT COUNT(*) FROM tags WHERE tags.page_slug = pages.slug AND tags.tag = 'auto-extracted') > 0`
-    ).all() as Array<{ slug: string; title: string; file_path: string }>;
+    const stubs = this.db.getAutoExtractedPages();
 
     for (const stub of stubs) {
       const page = this.pages?.getBySlug(stub.slug);
@@ -255,34 +239,29 @@ export class SyncManager {
   }
 
   async syncPage(slug: string, vaultPath: string): Promise<SyncPageResult> {
-    const page = this.db
-      .prepare("SELECT file_path FROM pages WHERE slug = $slug")
-      .get({ $slug: slug }) as { file_path: string } | null;
-
-    const filePath = page
-      ? join(vaultPath, page.file_path)
+    const filePath = this.db.getPageFilePath(slug);
+    const fullPath = filePath
+      ? join(vaultPath, filePath)
       : join(vaultPath, `${slug}.md`);
 
     let content: string;
     try {
-      content = readFileSync(filePath, "utf-8");
+      content = readFileSync(fullPath, "utf-8");
     } catch {
-      return { success: false, error: `File not found: ${filePath}` };
+      return { success: false, error: `File not found: ${fullPath}` };
     }
     const parsed = parseFrontmatter(content);
 
     const effectiveSlug = parsed.frontmatter.slug ?? slug;
 
-    if (!effectiveSlug && !page) {
-      return { success: false, error: `No slug found and page not indexed: ${filePath}` };
+    if (!effectiveSlug && !filePath) {
+      return { success: false, error: `No slug found and page not indexed: ${fullPath}` };
     }
     const contentHash = hashContent(content);
 
-    const existing = this.db
-      .prepare("SELECT content_hash FROM pages WHERE slug = $slug")
-      .get({ $slug: effectiveSlug }) as { content_hash: string } | null;
+    const existing = this.db.getPageContentHash(effectiveSlug);
 
-    if (existing && existing.content_hash === contentHash) {
+    if (existing && existing === contentHash) {
       return { success: true, skipped: true };
     }
 
@@ -293,25 +272,16 @@ export class SyncManager {
       } catch { /* version best-effort */ }
     }
 
-    const relPath = relative(vaultPath, filePath);
+    const relPath = relative(vaultPath, fullPath);
     const title = parsed.frontmatter.title ?? effectiveSlug;
     const type = parsed.frontmatter.type ?? "record";
 
-    this.db.prepare(
-      `INSERT INTO pages (slug, type, title, file_path, content_hash, created_at, updated_at)
-       VALUES ($slug, $type, $title, $filePath, $contentHash, datetime('now'), datetime('now'))
-       ON CONFLICT(slug) DO UPDATE SET
-         type = $type,
-         title = $title,
-         file_path = $filePath,
-         content_hash = $contentHash,
-         updated_at = datetime('now')`
-    ).run({
-      $slug: effectiveSlug,
-      $type: type,
-      $title: title,
-      $filePath: relPath,
-      $contentHash: contentHash,
+    this.db.upsertPage({
+      slug: effectiveSlug,
+      type,
+      title,
+      filePath: relPath,
+      contentHash,
     });
 
     const { chunks, embedResults } = await this.pipeline.embed(parsed.body);
@@ -343,9 +313,7 @@ export class SyncManager {
   }
 
   async removeOrphans(vaultPath: string): Promise<string[]> {
-    const pages = this.db
-      .prepare("SELECT slug, file_path FROM pages")
-      .all() as Array<{ slug: string; file_path: string }>;
+    const pages = this.db.getAllPageSlugsWithPaths();
 
     const orphans: string[] = [];
 
@@ -358,7 +326,7 @@ export class SyncManager {
         if (this.pages) {
           this.pages.delete(page.slug);
         } else {
-          this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: page.slug });
+          this.db.deletePage(page.slug);
         }
         await this.lance.deleteByPageSlug(page.slug);
       }

@@ -123,14 +123,7 @@ export class WritebackManager {
       return { success: false, action: input.action, error: `Target page not found: ${toSlug}` };
     }
 
-    this.db.prepare(
-      `INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)`
-    ).run({
-      $from: fromSlug,
-      $to: toSlug,
-      $rel: relation,
-      $ctx: input.source ?? "agent-writeback",
-    });
+    this.db.insertLink(fromSlug, toSlug, relation, input.source ?? "agent-writeback");
 
     this.audit?.log(AuditLogger.entry("writeback_create_link", "success", {
       pageSlug: fromSlug,

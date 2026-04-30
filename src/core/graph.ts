@@ -30,33 +30,22 @@ export class GraphManager {
   }
 
   addLink(from: string, to: string, relation: string = "mentions", context?: string): void {
-    this.db.prepare(
-      `INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)`
-    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null });
+    this.db.insertLink(from, to, relation, context ?? null);
   }
 
   removeLink(from: string, to: string, relation: string = "mentions"): boolean {
-    const result = this.db.prepare(
-      `DELETE FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel`
-    ).run({ $from: from, $to: to, $rel: relation });
-    return result.changes > 0;
+    return this.db.deleteLink(from, to, relation);
   }
 
   getLinks(slug: string, direction: "outgoing" | "incoming" | "both" = "both"): Link[] {
     const results: Link[] = [];
 
     if (direction === "outgoing" || direction === "both") {
-      const out = this.db.prepare(
-        "SELECT * FROM links WHERE from_slug = $slug"
-      ).all({ $slug: slug }) as Link[];
-      results.push(...out);
+      results.push(...this.db.getOutgoingLinks(slug) as Link[]);
     }
 
     if (direction === "incoming" || direction === "both") {
-      const inc = this.db.prepare(
-        "SELECT * FROM links WHERE to_slug = $slug"
-      ).all({ $slug: slug }) as Link[];
-      results.push(...inc);
+      results.push(...this.db.getIncomingLinks(slug) as Link[]);
     }
 
     return results;
@@ -89,9 +78,7 @@ export class GraphManager {
             visited.add(neighbor);
             nextFrontier.push(neighbor);
 
-            const page = this.db
-              .prepare("SELECT title, type FROM pages WHERE slug = $slug")
-              .get({ $slug: neighbor }) as { title: string; type: string } | null;
+            const page = this.db.getPageTitleAndType(neighbor);
 
             if (page) {
               results.push({
@@ -126,9 +113,7 @@ export class GraphManager {
       if (visited.has(neighbor)) continue;
       visited.add(neighbor);
 
-      const page = this.db
-        .prepare("SELECT title, type FROM pages WHERE slug = $slug")
-        .get({ $slug: neighbor }) as { title: string; type: string } | null;
+      const page = this.db.getPageTitleAndType(neighbor);
 
       if (page) {
         results.push({ slug: neighbor, title: page.title, type: page.type, depth: 1 });
@@ -143,26 +128,14 @@ export class GraphManager {
     const neighbors = new Set<string>();
 
     if (direction === "outgoing" || direction === "both") {
-      let sql = "SELECT to_slug FROM links WHERE from_slug = $slug";
-      const params: any = { $slug: slug };
-      if (relation) {
-        sql += " AND relation = $rel";
-        params.$rel = relation;
-      }
-      for (const row of this.db.prepare(sql).all(params) as Array<{ to_slug: string }>) {
-        neighbors.add(row.to_slug);
+      for (const s of this.db.getLinkedSlugs(slug, "from", relation)) {
+        neighbors.add(s);
       }
     }
 
     if (direction === "incoming" || direction === "both") {
-      let sql = "SELECT from_slug FROM links WHERE to_slug = $slug";
-      const params: any = { $slug: slug };
-      if (relation) {
-        sql += " AND relation = $rel";
-        params.$rel = relation;
-      }
-      for (const row of this.db.prepare(sql).all(params) as Array<{ from_slug: string }>) {
-        neighbors.add(row.from_slug);
+      for (const s of this.db.getLinkedSlugs(slug, "to", relation)) {
+        neighbors.add(s);
       }
     }
 
@@ -172,10 +145,7 @@ export class GraphManager {
   private sortSlugsByMentionCount(slugs: string[]): string[] {
     if (slugs.length === 0) return [];
 
-    const placeholders = slugs.map(() => "?").join(",");
-    const rows = this.db.prepare(
-      `SELECT slug FROM pages WHERE slug IN (${placeholders}) ORDER BY mention_count DESC`
-    ).all(...slugs) as Array<{ slug: string }>;
+    const rows = this.db.getPagesBySlugsOrdered(slugs);
 
     const ordered = new Set(rows.map((r) => r.slug));
     return [...ordered, ...slugs.filter((s) => !ordered.has(s))];

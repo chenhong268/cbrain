@@ -44,9 +44,8 @@ export function register(program: Command) {
 
   program
     .command("enrich")
-    .description("Run entity enrichment (tier promotion + content generation)")
+    .description("Run entity enrichment (tier promotion)")
     .option("--slug <slug>", "Specific entity slug (omit for all)")
-    .option("--content", "Generate LLM summaries for stubs", false)
     .action(async (opts) => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
@@ -54,16 +53,9 @@ export function register(program: Command) {
       const nerApiKey = config.ner?.llm_api_key ?? apiKey;
       const llm = nerApiKey ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model) : undefined;
       const { EnrichManager } = await import("../../core/enrich.js");
-      const enrich = new EnrichManager(db, undefined, llm, config.vaultPath);
-      if (opts.content) {
-        const result = opts.slug ? [await enrich.enrichWithContent(opts.slug)] : await enrich.enrichAllWithContent();
-        const enriched = result.filter((r: any) => r.enriched);
-        console.log(`Enriched ${enriched.length}/${result.length} stubs with content`);
-        for (const r of enriched) console.log(`  ✓ ${r.slug}`);
-      } else {
-        const result = opts.slug ? [enrich.enrichEntity(opts.slug)] : enrich.enrichAll();
-        console.log(JSON.stringify(result, null, 2));
-      }
+      const enrich = new EnrichManager(db, undefined, llm);
+      const result = opts.slug ? [enrich.enrichEntity(opts.slug)] : enrich.enrichAll();
+      console.log(JSON.stringify(result, null, 2));
       db.close();
     });
 
@@ -103,7 +95,7 @@ export function register(program: Command) {
       let ok = true;
       try {
         const db = new CBrainDB(config.dbPath);
-        const cnt = (db.prepare("SELECT COUNT(*) as c FROM pages").get() as any).c;
+        const cnt = db.getPageCount();
         db.close();
         console.log(`  DB:      ${config.dbPath} (${cnt} pages)`);
       } catch (e) { console.error(`  DB:      FAIL — ${(e as Error).message}`); ok = false; }
@@ -150,7 +142,7 @@ export function register(program: Command) {
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
       const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
-      const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath);
+      const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm);
       const health = new HealthChecker(deps.db, outputsDir, logger);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger);
       const icon = report.locked ? "🌙" : "⚠️";

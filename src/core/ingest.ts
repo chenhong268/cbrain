@@ -96,8 +96,7 @@ export class IngestManager {
     }
 
     // Clear old wikilink mentions then re-extract (ingest replaces links)
-    this.db.prepare("DELETE FROM links WHERE from_slug = $slug AND relation = 'mentions'")
-      .run({ $slug: slug });
+    this.db.deleteLinksByRelation(slug, 'mentions');
     const linksExtracted = this.pipeline.processWikilinks(slug, body, false);
 
     this.pipeline.writeIndexes(slug, chunks, embedResults);

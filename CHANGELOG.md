@@ -1,6 +1,20 @@
 # Changelog
 
-> Current: `v0.3.0` — first stable release. 23 CLI commands, 40 MCP tools, 11 skills.
+> Current: `v0.3.0` — first stable release. 23 CLI commands, 41 MCP tools, 11 skills.
+
+## [Dev] — 2026-05-01
+
+### Repository Layer — 消灭 131 处 SQL 泄漏
+
+- **CBrainDB 成为唯一 SQL 入口** — 18 个消费者文件中的 131 处 `db.prepare("SQL")` 全部替换为 CBrainDB 方法调用。
+- **`prepare()` 改为 `private`** — 从外部无法再直接写 raw SQL，改表结构只需改 `sqlite.ts` 一处。
+- **新增 ~50 个 typed 方法** — pages (25+), links (12+), chunks (3), config (3), ingest log (2), timeline (3), tags (2), FTS (1)。
+- **MCP server 拆分为 12 个 per-domain tool 文件** — server.ts 从 866→83 行，每个 tool 独立文件：`pages.ts`, `graph.ts`, `search.ts`, `ops.ts`, `tags.ts`, `timeline.ts`, `versions.ts`, `jobs.ts`, `raw-data.ts`, `sync.ts`, `config.ts`, `ingest.ts`。
+
+### Bug Fixes
+- **maintenance.ts 死代码清理** — 删除引用已不存在的 `enrichWithContent`/`enrichAllWithContent`。
+- **EnrichManager 构造函数修复** — maintenance.ts 多传了 `vaultPath` 参数。
+- **pipeline.ts addTimelineEntry 参数顺序** — 与 CBrainDB 原始签名对齐。
 
 ## [Dev] — 2026-04-30
 

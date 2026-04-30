@@ -73,28 +73,16 @@ export class PageManager {
 
     const contentHash = hashContent(content);
 
-    const insertPage = this.db.prepare(
-      `INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at)
-       VALUES ($slug, $type, $title, $filePath, $contentHash, $tier, $createdAt, $updatedAt)`
-    );
-    insertPage.run({
-      $slug: slug,
-      $type: input.type,
-      $title: input.title,
-      $filePath: relative(this.vaultPath, filePath),
-      $contentHash: contentHash,
-      $tier: 3,
-      $createdAt: now,
-      $updatedAt: now,
+    this.db.insertPage({
+      slug,
+      type: input.type,
+      title: input.title,
+      filePath: relative(this.vaultPath, filePath),
+      contentHash,
     });
 
     if (input.tags && input.tags.length > 0) {
-      const insertTag = this.db.prepare(
-        "INSERT OR IGNORE INTO tags (page_slug, tag) VALUES ($slug, $tag)"
-      );
-      for (const tag of input.tags) {
-        insertTag.run({ $slug: slug, $tag: tag });
-      }
+      this.db.addTags(slug, input.tags);
     }
 
     this.logger?.info("page", "页面已创建", { slug, title: input.title, type: input.type });
@@ -102,9 +90,7 @@ export class PageManager {
   }
 
   getBySlug(slug: string): Page | null {
-    const row = this.db
-      .prepare("SELECT * FROM pages WHERE slug = $slug")
-      .get({ $slug: slug }) as any;
+    const row = this.db.getPage(slug);
 
     if (!row) return null;
 
@@ -120,7 +106,7 @@ export class PageManager {
       type: row.type,
       title: row.title,
       file_path: row.file_path,
-      content_hash: row.content_hash,
+      content_hash: row.content_hash ?? "",
       tier: row.tier,
       mention_count: row.mention_count,
       frontmatter,
@@ -135,27 +121,13 @@ export class PageManager {
     limit?: number;
     offset?: number;
   }): Page[] {
-    let sql = "SELECT slug FROM pages";
-    const params: any = {};
-
-    if (options?.type) {
-      sql += " WHERE type = $type";
-      params.$type = options.type;
-    }
-
-    sql += " ORDER BY updated_at DESC";
-
-    if (options?.limit) {
-      sql += " LIMIT $limit";
-      params.$limit = options.limit;
-    }
-    if (options?.offset) {
-      sql += " OFFSET $offset";
-      params.$offset = options.offset;
-    }
-
-    const rows = this.db.prepare(sql).all(params) as any[];
-    return rows.map((r) => this.getBySlug(r.slug)).filter(Boolean) as Page[];
+    const slugs = this.db.listPageSlugs({
+      type: options?.type,
+      orderBy: "updated_at DESC",
+      limit: options?.limit,
+      offset: options?.offset,
+    });
+    return slugs.map((s) => this.getBySlug(s)).filter(Boolean) as Page[];
   }
 
   update(
@@ -190,20 +162,11 @@ export class PageManager {
     writeFileSync(filePath, content, "utf-8");
 
     const contentHash = hashContent(content);
-    this.db.prepare(
-      `UPDATE pages SET content_hash = $hash, updated_at = $now WHERE slug = $slug`
-    ).run({ $hash: contentHash, $now: now, $slug: slug });
+    this.db.updatePageHash(slug, contentHash);
 
     if (updates.tags) {
-      this.db
-        .prepare("DELETE FROM tags WHERE page_slug = $slug")
-        .run({ $slug: slug });
-      const insertTag = this.db.prepare(
-        "INSERT OR IGNORE INTO tags (page_slug, tag) VALUES ($slug, $tag)"
-      );
-      for (const tag of updates.tags) {
-        insertTag.run({ $slug: slug, $tag: tag });
-      }
+      this.db.deleteTagsByPage(slug);
+      this.db.addTags(slug, updates.tags);
     }
 
     this.logger?.info("page", "页面已更新", { slug });
@@ -211,25 +174,15 @@ export class PageManager {
   }
 
   delete(slug: string): boolean {
-    const row = this.db
-      .prepare("SELECT file_path FROM pages WHERE slug = $slug")
-      .get({ $slug: slug }) as any;
-    if (!row) return false;
+    const filePath = this.db.getPageFilePath(slug);
+    if (filePath === null) return false;
 
-    const filePath = join(this.vaultPath, row.file_path);
-    if (existsSync(filePath)) {
-      unlinkSync(filePath);
+    const absPath = join(this.vaultPath, filePath);
+    if (existsSync(absPath)) {
+      unlinkSync(absPath);
     }
 
-    // Cascade cleanup
-    this.db.prepare("DELETE FROM links WHERE from_slug = $slug OR to_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM raw_data WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+    this.db.deletePageCascaded(slug);
 
     this.logger?.info("page", "页面已删除", { slug });
     return true;
@@ -266,23 +219,14 @@ export class PageManager {
     const mergedBody = targetBody + mergeNote + "\n\n" + sourceBody;
 
     // Move links: update all references from source → target
-    this.db.prepare(
-      "UPDATE links SET from_slug = $target WHERE from_slug = $source"
-    ).run({ $source: sourceSlug, $target: targetSlug });
-
-    this.db.prepare(
-      "UPDATE links SET to_slug = $target WHERE to_slug = $source"
-    ).run({ $source: sourceSlug, $target: targetSlug });
+    this.db.rewireLinks(sourceSlug, targetSlug);
 
     // Move timeline entries
-    this.db.prepare(
-      "UPDATE timeline SET page_slug = $target WHERE page_slug = $source"
-    ).run({ $source: sourceSlug, $target: targetSlug });
+    this.db.rewireTimeline(sourceSlug, targetSlug);
 
     // Merge tags (dedup)
     const allTags = [...new Set([...targetTags, ...sourceTags])];
-    // Clear and rewrite tags to avoid stale records
-    this.db.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: targetSlug });
+    this.db.deleteTagsByPage(targetSlug);
     for (const tag of allTags) {
       this.db.addTag(targetSlug, tag);
     }
@@ -295,9 +239,7 @@ export class PageManager {
     writeFileSync(targetFilePath, content, "utf-8");
 
     const contentHash = hashContent(content);
-    this.db.prepare(
-      "UPDATE pages SET content_hash = $hash, updated_at = $now WHERE slug = $slug"
-    ).run({ $hash: contentHash, $now: now, $slug: targetSlug });
+    this.db.updatePageHash(targetSlug, contentHash);
 
     // Delete source page (file + index)
     this.delete(sourceSlug);
@@ -307,11 +249,7 @@ export class PageManager {
   }
 
   incrementMention(slug: string): void {
-    this.db
-      .prepare(
-        "UPDATE pages SET mention_count = mention_count + 1, updated_at = datetime('now') WHERE slug = $slug"
-      )
-      .run({ $slug: slug });
+    this.db.incrementMentionCount(slug);
   }
 
 }

@@ -131,9 +131,7 @@ export class DialogueIngest {
       const existing = findEntitySlug(this.db, entity.name);
       if (existing) {
         // Already known — increment mention count
-        this.db.prepare(
-          "UPDATE pages SET mention_count = mention_count + 1, updated_at = datetime('now') WHERE slug = $slug"
-        ).run({ $slug: existing });
+        this.db.incrementMentionCount(existing);
         entitySlugMap.set(entity.name, existing);
         skipped++;
         continue;
@@ -160,18 +158,13 @@ export class DialogueIngest {
       writeFileSync(filePath, stringifyFrontmatter(frontmatter, body), "utf-8");
 
       const contentHash = hashContent(stringifyFrontmatter(frontmatter, body));
-      this.db.prepare(
-        `INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at)
-         VALUES ($slug, $type, $title, $filePath, $contentHash, $tier, $createdAt, $updatedAt)`
-      ).run({
-        $slug: slug,
-        $type: pageType,
-        $title: entity.name,
-        $filePath: relative(this.vaultPath, filePath),
-        $contentHash: contentHash,
-        $tier: 3,
-        $createdAt: now,
-        $updatedAt: now,
+      this.db.insertPage({
+        slug,
+        type: pageType,
+        title: entity.name,
+        filePath: relative(this.vaultPath, filePath),
+        contentHash,
+        tier: 3,
       });
 
       entitySlugMap.set(entity.name, slug);
@@ -185,15 +178,9 @@ export class DialogueIngest {
       if (!fromSlug || !toSlug) continue;
 
       // Check if relation already exists
-      const existing = this.db.prepare(
-        "SELECT 1 FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
-      ).get({ $from: fromSlug, $to: toSlug, $rel: rel.relation });
+      if (this.db.linkExists(fromSlug, toSlug, rel.relation)) continue;
 
-      if (existing) continue;
-
-      this.db.prepare(
-        "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)"
-      ).run({ $from: fromSlug, $to: toSlug, $rel: rel.relation, $ctx: rel.context ?? null });
+      this.db.insertLink(fromSlug, toSlug, rel.relation, rel.context ?? null);
 
       newRelations++;
     }
@@ -226,14 +213,9 @@ export class DialogueIngest {
     newEvents: number,
     skipped: number
   ): void {
-    this.db.prepare(
-      `INSERT INTO ingest_log (source_type, action, page_slug, details, created_at)
-       VALUES ($sourceType, $action, $slug, $details, datetime('now'))`
-    ).run({
-      $sourceType: "dialogue",
-      $action: "dialogue",
-      $slug: "dialogue",
-      $details: JSON.stringify({ newEntities, newRelations, newEvents, skipped }),
-    });
+    this.db.addIngestLog(
+      "dialogue", "dialogue", "dialogue",
+      JSON.stringify({ newEntities, newRelations, newEvents, skipped })
+    );
   }
 }

@@ -1,0 +1,89 @@
+import { z } from "zod";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolContext } from "../context.js";
+import { findEntitySlug } from "../../core/shared.js";
+
+export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
+  // ─── graph_query ─────────────────────────────────────────
+  server.registerTool("graph_query", {
+    description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved).",
+    inputSchema: {
+      slug: z.string().describe("Seed entity slug or name (auto-resolved if not an exact slug)"),
+      mode: z.enum(["traverse", "backlinks", "related"]).optional().default("traverse").describe("Query mode"),
+      depth: z.number().optional().default(2).describe("Max traversal depth"),
+      limit: z.number().optional().default(20).describe("Max results"),
+    },
+  }, async ({ slug, mode, depth, limit }) => {
+    let resolvedSlug = slug;
+    if (!ctx.pages.getBySlug(slug)) {
+      const found = findEntitySlug(ctx.db, slug);
+      if (found) resolvedSlug = found;
+    }
+
+    let result;
+    switch (mode) {
+      case "backlinks":
+        result = ctx.graph.getBacklinks(resolvedSlug);
+        break;
+      case "related":
+        result = ctx.graph.getRelatedEntities(resolvedSlug, limit);
+        break;
+      default:
+        result = ctx.graph.traverse(resolvedSlug, { maxDepth: depth, limit });
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify({ resolvedSlug, result }, null, 2) }],
+    };
+  });
+
+  // ─── get_links ───────────────────────────────────────────────
+  server.registerTool("get_links", {
+    description: "Get links for a page. Returns outgoing, incoming, or both directions.",
+    inputSchema: {
+      slug: z.string().describe("Page slug"),
+      direction: z.enum(["outgoing", "incoming", "both"]).optional().default("both").describe("Link direction"),
+    },
+  }, async ({ slug, direction }) => {
+    const links = ctx.graph.getLinks(slug, direction);
+    return {
+      content: [{ type: "text", text: JSON.stringify(links, null, 2) }],
+    };
+  });
+
+  // ─── add_link ────────────────────────────────────────────────
+  server.registerTool("add_link", {
+    description: "Create a link between two pages.",
+    inputSchema: {
+      from: z.string().describe("Source page slug"),
+      to: z.string().describe("Target page slug"),
+      relation: z.string().default("提及").describe("Relation type (e.g. '提及', 'works_at')"),
+      context: z.string().optional().describe("Optional context for the relation"),
+    },
+  }, async ({ from, to, relation, context }) => {
+    if (!ctx.pages.getBySlug(from)) return { content: [{ type: "text", text: JSON.stringify({ error: `Source page not found: ${from}` }) }], isError: true };
+    if (!ctx.pages.getBySlug(to)) return { content: [{ type: "text", text: JSON.stringify({ error: `Target page not found: ${to}` }) }], isError: true };
+    if (from === to) return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot create self-referencing link" }) }], isError: true };
+
+    ctx.db.insertLink(from, to, relation, context ?? null);
+    ctx.pages.incrementMention(to);
+
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: true, from, to, relation }) }],
+    };
+  });
+
+  // ─── remove_link ─────────────────────────────────────────────
+  server.registerTool("remove_link", {
+    description: "Remove a link between two pages.",
+    inputSchema: {
+      from: z.string().describe("Source page slug"),
+      to: z.string().describe("Target page slug"),
+      relation: z.string().optional().describe("Relation type (omit to remove all relations between the two)"),
+    },
+  }, async ({ from, to, relation }) => {
+    const ok = ctx.graph.removeLink(from, to, relation);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: ok, from, to, relation }) }],
+    };
+  });
+}

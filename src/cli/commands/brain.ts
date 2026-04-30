@@ -40,10 +40,10 @@ export function register(program: Command) {
     .action(async () => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
-      const totalPages = (db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as any).cnt;
-      const totalLinks = (db.prepare("SELECT COUNT(*) as cnt FROM links").get() as any).cnt;
-      const totalChunks = (db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as any).cnt;
-      const byType = db.prepare("SELECT type, COUNT(*) as cnt FROM pages GROUP BY type ORDER BY cnt DESC").all() as any[];
+      const totalPages = db.getPageCount();
+      const totalLinks = db.getLinkCount();
+      const totalChunks = db.getChunkCount();
+      const byType = db.getPageTypeCounts();
       const typeName: Record<string, string> = { entity: "实体", concept: "概念", event: "事件", record: "记录", source: "来源" };
       console.log(`  总页数： ${totalPages}`);
       console.log(`  关系数： ${totalLinks}`);
@@ -66,10 +66,10 @@ export function register(program: Command) {
         if (!key || value === undefined) { console.error("Use --set key=value format. Example: --set ner.enabled=false"); process.exit(1); }
         let parsed: any = value;
         try { parsed = JSON.parse(value); } catch {}
-        db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ($key, $value)").run({ $key: key, $value: String(parsed) });
+        db.setConfig(key, String(parsed));
         console.log(`Set ${key} = ${parsed}`);
       } else {
-        const rows = db.prepare("SELECT key, value FROM config ORDER BY key").all() as any[];
+        const rows = db.getAllConfig();
         if (rows.length === 0) { console.log("No config values set."); } else {
           for (const r of rows) console.log(`  ${r.key}: ${r.value}`);
         }

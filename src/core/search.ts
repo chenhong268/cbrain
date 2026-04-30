@@ -195,32 +195,22 @@ export class HybridSearch {
       const nextFrontier: string[] = [];
 
       for (const slug of frontier) {
-        const outLinks = this.db
-          .prepare("SELECT to_slug FROM links WHERE from_slug = $slug")
-          .all({ $slug: slug }) as Array<{ to_slug: string }>;
+        const outSlugs = this.db.getOutgoingSlugs(slug);
+        const inSlugs = this.db.getIncomingSlugs(slug);
 
-        const inLinks = this.db
-          .prepare("SELECT from_slug FROM links WHERE to_slug = $slug")
-          .all({ $slug: slug }) as Array<{ from_slug: string }>;
-
-        const neighbors = [
-          ...outLinks.map((l) => l.to_slug),
-          ...inLinks.map((l) => l.from_slug),
-        ];
+        const neighbors = [...outSlugs, ...inSlugs];
 
         for (const neighbor of neighbors) {
           if (!visited.has(neighbor)) {
             visited.add(neighbor);
             nextFrontier.push(neighbor);
 
-            const page = this.db
-              .prepare("SELECT title FROM pages WHERE slug = $slug")
-              .get({ $slug: neighbor }) as { title: string } | null;
+            const pageTitle = this.db.getPageTitle(neighbor);
 
             results.push({
               slug: neighbor,
               score: 1 / (depth + 1),
-              snippet: page?.title ?? neighbor,
+              snippet: pageTitle ?? neighbor,
               source: "graph",
             });
 

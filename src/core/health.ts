@@ -38,9 +38,6 @@ export class HealthChecker {
     this.logger = logger ?? null;
   }
 
-  /**
-   * Run all 6 health dimensions and write report to outputs/health/.
-   */
   async checkAll(): Promise<HealthReport> {
     const start = Date.now();
     const timestamp = new Date().toISOString();
@@ -116,10 +113,7 @@ export class HealthChecker {
   private checkSemanticDedup(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    // Find entities with identical or very similar titles (case-insensitive)
-    const rows = this.db.prepare(
-      `SELECT slug, title, type FROM pages WHERE type IN ('entity', 'concept') ORDER BY title`
-    ).all() as Array<{ slug: string; title: string; type: string }>;
+    const rows = this.db.getEntityConceptPages();
 
     const seen = new Map<string, { slug: string; title: string }>();
     for (const row of rows) {
@@ -171,9 +165,7 @@ export class HealthChecker {
   private checkSlugCollisions(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    const entities = this.db.prepare(
-      `SELECT slug, title FROM pages WHERE type = 'entity' ORDER BY slug`
-    ).all() as Array<{ slug: string; title: string }>;
+    const entities = this.db.getEntities();
 
     // Group slugs by base name (strip numbered suffix like -1, -2)
     const groups = new Map<string, Array<{ slug: string; title: string }>>();
@@ -224,9 +216,7 @@ export class HealthChecker {
       "条线",
     ]);
 
-    const links = this.db.prepare(
-      `SELECT from_slug, to_slug, relation FROM links`
-    ).all() as Array<{ from_slug: string; to_slug: string; relation: string }>;
+    const links = this.db.getAllLinks();
 
     const nonStandardRels = new Set<string>();
     for (const link of links) {
@@ -246,9 +236,7 @@ export class HealthChecker {
     }
 
     // Check for pages missing frontmatter fields
-    const pagesMissingType = this.db.prepare(
-      `SELECT slug, title FROM pages WHERE type IS NULL OR type = ''`
-    ).all() as Array<{ slug: string; title: string }>;
+    const pagesMissingType = this.db.getPagesWithEmptyType();
 
     for (const p of pagesMissingType) {
       issues.push({
@@ -272,14 +260,7 @@ export class HealthChecker {
   private checkCompleteness(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    // Bare stubs: pages with only auto-extracted body and no additional content
-    const bareStubs = this.db.prepare(
-      `SELECT p.slug, p.title, p.type
-       FROM pages p
-       WHERE p.type IN ('entity', 'concept')
-         AND p.mention_count <= 1
-         AND (SELECT COUNT(*) FROM links l WHERE l.from_slug = p.slug OR l.to_slug = p.slug) <= 1`
-    ).all() as Array<{ slug: string; title: string; type: string }>;
+    const bareStubs = this.db.getBareStubs();
 
     for (const stub of bareStubs) {
       issues.push({
@@ -303,14 +284,7 @@ export class HealthChecker {
   private checkIslands(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    // Pages with no incoming or outgoing links (islands)
-    const islands = this.db.prepare(
-      `SELECT p.slug, p.title, p.type
-       FROM pages p
-       WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug)
-         AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug)
-         AND p.type IN ('entity', 'concept')`
-    ).all() as Array<{ slug: string; title: string; type: string }>;
+    const islands = this.db.getIslandPages();
 
     for (const island of islands) {
       issues.push({
@@ -334,23 +308,17 @@ export class HealthChecker {
   private checkNewSuggestions(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    // Detect concept inflation: too many concepts relative to sources
-    const sourceCount = this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM pages WHERE type IN ('record', 'source', 'event')`
-    ).get() as { cnt: number };
+    const sourceCount = this.db.getPageCountByTypes(["record", "source", "event"]);
+    const conceptCount = this.db.getPageCountByType("concept");
 
-    const conceptCount = this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM pages WHERE type = 'concept'`
-    ).get() as { cnt: number };
-
-    const ratio = sourceCount.cnt > 0 ? conceptCount.cnt / sourceCount.cnt : 0;
+    const ratio = sourceCount > 0 ? conceptCount / sourceCount : 0;
 
     if (ratio > 5) {
       issues.push({
         severity: "high",
         slug: "-",
         title: "Concept inflation",
-        description: `${conceptCount.cnt} concepts from ${sourceCount.cnt} sources (ratio: ${ratio.toFixed(1)}:1). Threshold is ~3:1.`,
+        description: `${conceptCount} concepts from ${sourceCount} sources (ratio: ${ratio.toFixed(1)}:1). Threshold is ~3:1.`,
         suggestion: "Review and prune low-value concepts. Focus on named frameworks and methodologies.",
       });
     } else if (ratio > 3) {
@@ -358,7 +326,7 @@ export class HealthChecker {
         severity: "medium",
         slug: "-",
         title: "High concept ratio",
-        description: `${conceptCount.cnt} concepts from ${sourceCount.cnt} sources (ratio: ${ratio.toFixed(1)}:1).`,
+        description: `${conceptCount} concepts from ${sourceCount} sources (ratio: ${ratio.toFixed(1)}:1).`,
         suggestion: "Consider reviewing concepts for relevance.",
       });
     }
@@ -375,15 +343,7 @@ export class HealthChecker {
   private checkAttention(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    // High-value pages (tier 1-2) with no recent updates
-    const stale = this.db.prepare(
-      `SELECT slug, title, type, updated_at
-       FROM pages
-       WHERE tier <= 2
-         AND updated_at < datetime('now', '-30 days')
-       ORDER BY updated_at ASC
-       LIMIT 20`
-    ).all() as Array<{ slug: string; title: string; type: string; updated_at: string }>;
+    const stale = this.db.getStaleHighValuePages(30);
 
     for (const page of stale) {
       issues.push({
@@ -396,27 +356,17 @@ export class HealthChecker {
     }
 
     // Pages with high mention count but low content (popular but thin)
-    const popularThin = this.db.prepare(
-      `SELECT slug, title, mention_count, type
-       FROM pages
-       WHERE mention_count >= 3
-         AND type IN ('entity', 'concept')
-       ORDER BY mention_count DESC
-       LIMIT 20`
-    ).all() as Array<{ slug: string; title: string; mention_count: number; type: string }>;
+    const popularThin = this.db.getPopularThinPages(3);
 
     for (const page of popularThin) {
-      // Check if it has substantial content (more than just auto-extracted stub)
-      const chunkCount = this.db.prepare(
-        `SELECT COUNT(*) as cnt FROM chunks WHERE page_slug = $slug`
-      ).get({ $slug: page.slug }) as { cnt: number };
+      const chunkCount = this.db.getChunkCountByPage(page.slug);
 
-      if (chunkCount.cnt <= 1) {
+      if (chunkCount <= 1) {
         issues.push({
           severity: "medium",
           slug: page.slug,
           title: page.title,
-          description: `Highly mentioned (${page.mention_count}x) but thin content (${chunkCount.cnt} chunk)`,
+          description: `Highly mentioned (${page.mention_count}x) but thin content (${chunkCount} chunk)`,
           suggestion: "Enrich this popular page with more content",
         });
       }
@@ -434,35 +384,35 @@ export class HealthChecker {
   private checkDataReadiness(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    const totalPages = this.db.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
-    if (totalPages.c < 10) {
+    const totalPages = this.db.getPageCount();
+    if (totalPages < 10) {
       issues.push({
         severity: "high",
         slug: "-",
         title: "Insufficient data",
-        description: `Only ${totalPages.c} pages indexed. Need at least 10 for meaningful knowledge retrieval.`,
+        description: `Only ${totalPages} pages indexed. Need at least 10 for meaningful knowledge retrieval.`,
         suggestion: "Ingest more content before expecting quality results. Use `cbrain ingest` or `cbrain sync`.",
       });
     }
 
-    const entityCount = this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type = 'entity'").get() as { c: number };
-    if (entityCount.c < 3 && totalPages.c >= 10) {
+    const entityCount = this.db.getPageCountByType("entity");
+    if (entityCount < 3 && totalPages >= 10) {
       issues.push({
         severity: "medium",
         slug: "-",
         title: "Few entities",
-        description: `Only ${entityCount.c} entities from ${totalPages.c} pages. NER may not be extracting enough.`,
+        description: `Only ${entityCount} entities from ${totalPages} pages. NER may not be extracting enough.`,
         suggestion: "Check NER configuration and run `cbrain sync` with NER enabled.",
       });
     }
 
-    const linkCount = this.db.prepare("SELECT COUNT(*) as c FROM links").get() as { c: number };
-    if (linkCount.c < 5 && totalPages.c >= 10) {
+    const linkCount = this.db.getLinkCount();
+    if (linkCount < 5 && totalPages >= 10) {
       issues.push({
         severity: "medium",
         slug: "-",
         title: "Sparse graph",
-        description: `Only ${linkCount.c} links between ${totalPages.c} pages. Knowledge graph is under-connected.`,
+        description: `Only ${linkCount} links between ${totalPages} pages. Knowledge graph is under-connected.`,
         suggestion: "Run `cbrain enrich` to extract more relations, or ingest richer source material.",
       });
     }
@@ -479,13 +429,7 @@ export class HealthChecker {
   private checkSourceQuality(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    // Check for pages with very short content (likely poor quality)
-    const thinPages = this.db.prepare(
-      `SELECT p.slug, p.title, p.type
-       FROM pages p
-       WHERE p.type IN ('record', 'source')
-         AND (SELECT COUNT(*) FROM chunks c WHERE c.page_slug = p.slug) = 0`
-    ).all() as Array<{ slug: string; title: string; type: string }>;
+    const thinPages = this.db.getPagesWithoutChunks();
 
     for (const page of thinPages) {
       issues.push({
@@ -497,10 +441,7 @@ export class HealthChecker {
       });
     }
 
-    // Check for pages with missing essential frontmatter
-    const missingTitle = this.db.prepare(
-      `SELECT slug, title FROM pages WHERE title IS NULL OR title = '' OR title = slug`
-    ).all() as Array<{ slug: string; title: string }>;
+    const missingTitle = this.db.getPagesWithMissingTitle();
 
     for (const page of missingTitle) {
       issues.push({
@@ -522,44 +463,33 @@ export class HealthChecker {
   // ─── Metrics ───────────────────────────────────────────────
 
   private collectMetrics(): MetricsSnapshot {
-    const totalPages = this.db.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
-    const entities = this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type = 'entity'").get() as { c: number };
-    const concepts = this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type = 'concept'").get() as { c: number };
-    const events = this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type = 'event'").get() as { c: number };
-    const records = this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type = 'record'").get() as { c: number };
-    const sources = this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type = 'source'").get() as { c: number };
-    const totalLinks = this.db.prepare("SELECT COUNT(*) as c FROM links").get() as { c: number };
-    const avgMentions = this.db.prepare("SELECT AVG(mention_count) as a FROM pages").get() as { a: number };
+    const totalPages = this.db.getPageCount();
+    const entities = this.db.getPageCountByType("entity");
+    const concepts = this.db.getPageCountByType("concept");
+    const events = this.db.getPageCountByType("event");
+    const records = this.db.getPageCountByType("record");
+    const sources = this.db.getPageCountByType("source");
+    const totalLinks = this.db.getLinkCount();
+    const avgMentions = this.db.getAvgMentionCount();
 
-    const orphans = this.db.prepare(
-      `SELECT COUNT(*) as c FROM pages p
-       WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug)
-         AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug)
-         AND p.type IN ('entity', 'concept')`
-    ).get() as { c: number };
+    const orphans = this.db.getIslandPages().length;
+    const bareStubs = this.db.getBareStubs().length;
 
-    const bareStubs = this.db.prepare(
-      `SELECT COUNT(*) as c FROM pages p
-       WHERE p.type IN ('entity', 'concept')
-         AND p.mention_count <= 1
-         AND (SELECT COUNT(*) FROM links l WHERE l.from_slug = p.slug OR l.to_slug = p.slug) <= 1`
-    ).get() as { c: number };
-
-    const sourceCount = records.c + sources.c + events.c;
-    const conceptsPerSource = sourceCount > 0 ? concepts.c / sourceCount : 0;
+    const sourceCount = records + sources + events;
+    const conceptsPerSource = sourceCount > 0 ? concepts / sourceCount : 0;
 
     return {
       timestamp: new Date().toISOString(),
-      totalPages: totalPages.c,
-      entities: entities.c,
-      concepts: concepts.c,
-      events: events.c,
-      records: records.c,
-      sources: sources.c,
-      totalLinks: totalLinks.c,
-      avgMentionsPerPage: avgMentions.a ?? 0,
-      orphans: orphans.c,
-      bareStubs: bareStubs.c,
+      totalPages,
+      entities,
+      concepts,
+      events,
+      records,
+      sources,
+      totalLinks,
+      avgMentionsPerPage: avgMentions,
+      orphans,
+      bareStubs,
       conceptsPerSource,
       indexSizeKB: 0,
     };

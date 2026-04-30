@@ -2,6 +2,37 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
+// ─── Row types ──────────────────────────────────────────────
+
+export interface PageRow {
+  slug: string;
+  type: string;
+  title: string;
+  file_path: string;
+  content_hash: string | null;
+  tier: number;
+  mention_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LinkRow {
+  id: number;
+  from_slug: string;
+  to_slug: string;
+  relation: string;
+  context: string | null;
+  created_at: string;
+}
+
+export interface UpsertPageData {
+  slug: string;
+  type: string;
+  title: string;
+  filePath: string;
+  contentHash: string;
+}
+
 export class CBrainDB {
   private db: Database;
 
@@ -140,7 +171,7 @@ export class CBrainDB {
     `);
   }
 
-  prepare(sql: string) {
+  private prepare(sql: string) {
     return this.db.prepare(sql);
   }
 
@@ -447,6 +478,498 @@ export class CBrainDB {
       "DELETE FROM raw_data WHERE page_slug = $slug AND key = $key"
     ).run({ $slug: pageSlug, $key: key });
     return r.changes > 0;
+  }
+
+  // ─── Page operations ──────────────────────────────────────────
+
+  getPage(slug: string): PageRow | null {
+    return this.db.prepare(
+      "SELECT * FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as PageRow | null;
+  }
+
+  getPageByTitle(title: string): { slug: string; type: string; title: string } | null {
+    return this.db.prepare(
+      "SELECT slug, type, title FROM pages WHERE title = $title LIMIT 1"
+    ).get({ $title: title }) as { slug: string; type: string; title: string } | null;
+  }
+
+  getPageByTitleExcluding(title: string, excludeSlug: string): { slug: string; type: string; title: string } | null {
+    return this.db.prepare(
+      "SELECT slug, type, title FROM pages WHERE title = $title AND slug != $slug LIMIT 1"
+    ).get({ $title: title, $slug: excludeSlug }) as { slug: string; type: string; title: string } | null;
+  }
+
+  getPageTitle(slug: string): string | null {
+    const row = this.db.prepare(
+      "SELECT title FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { title: string } | undefined;
+    return row?.title ?? null;
+  }
+
+  getPageTitleAndType(slug: string): { title: string; type: string } | null {
+    return this.db.prepare(
+      "SELECT title, type FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { title: string; type: string } | null;
+  }
+
+  getPageFilePath(slug: string): string | null {
+    const row = this.db.prepare(
+      "SELECT file_path FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { file_path: string } | undefined;
+    return row?.file_path ?? null;
+  }
+
+  getPageContentHash(slug: string): string | null {
+    const row = this.db.prepare(
+      "SELECT content_hash FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { content_hash: string | null } | undefined;
+    return row?.content_hash ?? null;
+  }
+
+  getPageTierAndMentions(slug: string): { tier: number; mention_count: number } | null {
+    return this.db.prepare(
+      "SELECT tier, mention_count FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { tier: number; mention_count: number } | null;
+  }
+
+  insertPage(data: { slug: string; type: string; title: string; filePath: string; contentHash: string; tier?: number }): void {
+    this.db.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at) VALUES ($slug, $type, $title, $path, $hash, $tier, datetime('now'), datetime('now'))"
+    ).run({
+      $slug: data.slug,
+      $type: data.type,
+      $title: data.title,
+      $path: data.filePath,
+      $hash: data.contentHash,
+      $tier: data.tier ?? 3,
+    });
+  }
+
+  upsertPage(data: UpsertPageData): void {
+    this.db.prepare(`
+      INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at)
+      VALUES ($slug, $type, $title, $path, $hash, 3, datetime('now'), datetime('now'))
+      ON CONFLICT(slug) DO UPDATE SET
+        type = excluded.type,
+        title = excluded.title,
+        content_hash = excluded.content_hash,
+        updated_at = datetime('now')
+    `).run({
+      $slug: data.slug,
+      $type: data.type,
+      $title: data.title,
+      $path: data.filePath,
+      $hash: data.contentHash,
+    });
+  }
+
+  updatePageHash(slug: string, hash: string): void {
+    this.db.prepare(
+      "UPDATE pages SET content_hash = $hash, updated_at = datetime('now') WHERE slug = $slug"
+    ).run({ $slug: slug, $hash: hash });
+  }
+
+  updatePageTier(slug: string, tier: number): void {
+    this.db.prepare(
+      "UPDATE pages SET tier = $tier, updated_at = datetime('now') WHERE slug = $slug"
+    ).run({ $slug: slug, $tier: tier });
+  }
+
+  incrementMentionCount(slug: string): void {
+    this.db.prepare(
+      "UPDATE pages SET mention_count = mention_count + 1, updated_at = datetime('now') WHERE slug = $slug"
+    ).run({ $slug: slug });
+  }
+
+  deletePage(slug: string): boolean {
+    const r = this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+    return r.changes > 0;
+  }
+
+  deletePageCascaded(slug: string): void {
+    this.db.prepare("DELETE FROM links WHERE from_slug = $slug OR to_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM raw_data WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+  }
+
+  rewireLinks(oldSlug: string, newSlug: string): void {
+    this.db.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old").run({ $old: oldSlug, $new: newSlug });
+    this.db.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old").run({ $old: oldSlug, $new: newSlug });
+  }
+
+  // ─── Page list/query operations ──────────────────────────────
+
+  listPages(opts?: { type?: string; types?: string[]; limit?: number; offset?: number; orderBy?: string }): PageRow[] {
+    let sql = "SELECT * FROM pages WHERE 1=1";
+    const params: Record<string, string | number> = {};
+    if (opts?.type) {
+      sql += " AND type = $type";
+      params.$type = opts.type;
+    }
+    if (opts?.types && opts.types.length > 0) {
+      const placeholders = opts.types.map((_, i) => `$t${i}`).join(",");
+      opts.types.forEach((t, i) => { params[`$t${i}`] = t; });
+      sql += ` AND type IN (${placeholders})`;
+    }
+    sql += ` ORDER BY ${opts?.orderBy ?? "title ASC"}`;
+    if (opts?.limit !== undefined) {
+      sql += " LIMIT $limit";
+      params.$limit = opts.limit;
+    }
+    if (opts?.offset !== undefined) {
+      sql += " OFFSET $offset";
+      params.$offset = opts.offset;
+    }
+    return this.db.prepare(sql).all(params) as PageRow[];
+  }
+
+  listPageSlugs(opts?: { type?: string; limit?: number; offset?: number; orderBy?: string }): string[] {
+    let sql = "SELECT slug FROM pages WHERE 1=1";
+    const params: Record<string, string | number> = {};
+    if (opts?.type) {
+      sql += " AND type = $type";
+      params.$type = opts.type;
+    }
+    sql += ` ORDER BY ${opts?.orderBy ?? "slug ASC"}`;
+    if (opts?.limit !== undefined) {
+      sql += " LIMIT $limit";
+      params.$limit = opts.limit;
+    }
+    if (opts?.offset !== undefined) {
+      sql += " OFFSET $offset";
+      params.$offset = opts.offset;
+    }
+    const rows = this.db.prepare(sql).all(params) as Array<{ slug: string }>;
+    return rows.map(r => r.slug);
+  }
+
+  getPageCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number };
+    return row.cnt;
+  }
+
+  getPageCountByType(type: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) as cnt FROM pages WHERE type = $type"
+    ).get({ $type: type }) as { cnt: number };
+    return row.cnt;
+  }
+
+  getPageCountByTypes(types: string[]): number {
+    if (types.length === 0) return 0;
+    const placeholders = types.map((_, i) => `$t${i}`).join(",");
+    const params: Record<string, string> = {};
+    types.forEach((t, i) => { params[`$t${i}`] = t; });
+    const row = this.db.prepare(
+      `SELECT COUNT(*) as cnt FROM pages WHERE type IN (${placeholders})`
+    ).get(params) as { cnt: number };
+    return row.cnt;
+  }
+
+  getPageTypeCounts(): Array<{ type: string; cnt: number }> {
+    return this.db.prepare(
+      "SELECT type, COUNT(*) as cnt FROM pages GROUP BY type ORDER BY cnt DESC"
+    ).all() as Array<{ type: string; cnt: number }>;
+  }
+
+  getEntities(): Array<{ slug: string; title: string }> {
+    return this.db.prepare(
+      "SELECT slug, title FROM pages WHERE type = 'entity' ORDER BY slug"
+    ).all() as Array<{ slug: string; title: string }>;
+  }
+
+  getEntityConceptPages(): Array<{ slug: string; title: string; type: string }> {
+    return this.db.prepare(
+      "SELECT slug, title, type FROM pages WHERE type IN ('entity', 'concept') ORDER BY title"
+    ).all() as Array<{ slug: string; title: string; type: string }>;
+  }
+
+  getAutoExtractedPages(): Array<{ slug: string; title: string; file_path: string }> {
+    return this.db.prepare(
+      "SELECT slug, title, file_path FROM pages WHERE slug IN (SELECT page_slug FROM tags WHERE tag = 'auto-extracted')"
+    ).all() as Array<{ slug: string; title: string; file_path: string }>;
+  }
+
+  getAllPageSlugsWithPaths(): Array<{ slug: string; file_path: string }> {
+    return this.db.prepare(
+      "SELECT slug, file_path FROM pages"
+    ).all() as Array<{ slug: string; file_path: string }>;
+  }
+
+  getPagesBySlugs(slugs: string[]): PageRow[] {
+    if (slugs.length === 0) return [];
+    const placeholders = slugs.map((_, i) => `$s${i}`).join(",");
+    const params: Record<string, string> = {};
+    slugs.forEach((s, i) => { params[`$s${i}`] = s; });
+    return this.db.prepare(
+      `SELECT * FROM pages WHERE slug IN (${placeholders})`
+    ).all(params) as PageRow[];
+  }
+
+  getPagesBySlugsOrdered(slugs: string[]): Array<{ slug: string }> {
+    if (slugs.length === 0) return [];
+    const placeholders = slugs.map((_, i) => `$s${i}`).join(",");
+    const params: Record<string, string> = {};
+    slugs.forEach((s, i) => { params[`$s${i}`] = s; });
+    return this.db.prepare(
+      `SELECT slug FROM pages WHERE slug IN (${placeholders}) ORDER BY mention_count DESC`
+    ).all(params) as Array<{ slug: string }>;
+  }
+
+  getPagesWithoutChunks(): Array<{ slug: string; title: string; type: string }> {
+    return this.db.prepare(
+      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN chunks c ON p.slug = c.page_slug WHERE c.id IS NULL AND p.type IN ('record', 'source')"
+    ).all() as Array<{ slug: string; title: string; type: string }>;
+  }
+
+  getPagesWithMissingTitle(): Array<{ slug: string; title: string }> {
+    return this.db.prepare(
+      "SELECT slug, title FROM pages WHERE title IS NULL OR title = '' OR title = slug"
+    ).all() as Array<{ slug: string; title: string }>;
+  }
+
+  getPagesWithEmptyType(): Array<{ slug: string; title: string }> {
+    return this.db.prepare(
+      "SELECT slug, title FROM pages WHERE type IS NULL OR type = ''"
+    ).all() as Array<{ slug: string; title: string }>;
+  }
+
+  getBareStubs(): Array<{ slug: string; title: string; type: string }> {
+    return this.db.prepare(
+      "SELECT p.slug, p.title, p.type FROM pages p WHERE p.type IN ('entity', 'concept') AND p.mention_count <= 1 AND (SELECT COUNT(*) FROM links l WHERE l.from_slug = p.slug OR l.to_slug = p.slug) <= 1"
+    ).all() as Array<{ slug: string; title: string; type: string }>;
+  }
+
+  getIslandPages(): Array<{ slug: string; title: string; type: string }> {
+    return this.db.prepare(
+      "SELECT p.slug, p.title, p.type FROM pages p WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug) AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug) AND p.type IN ('entity', 'concept')"
+    ).all() as Array<{ slug: string; title: string; type: string }>;
+  }
+
+  getStaleHighValuePages(days: number = 30): Array<{ slug: string; title: string; type: string; updated_at: string }> {
+    return this.db.prepare(
+      "SELECT slug, title, type, updated_at FROM pages WHERE tier <= 2 AND updated_at < datetime('now', '-' || $days || ' days') ORDER BY updated_at ASC"
+    ).all({ $days: days }) as Array<{ slug: string; title: string; type: string; updated_at: string }>;
+  }
+
+  getPopularThinPages(threshold: number = 3): Array<{ slug: string; title: string; mention_count: number; type: string }> {
+    return this.db.prepare(
+      "SELECT slug, title, mention_count, type FROM pages WHERE mention_count >= $threshold AND type IN ('entity', 'concept') AND (SELECT COUNT(*) FROM chunks WHERE page_slug = pages.slug) <= 1 ORDER BY mention_count DESC"
+    ).all({ $threshold: threshold }) as Array<{ slug: string; title: string; mention_count: number; type: string }>;
+  }
+
+  getPagesWithLinkCount(types: string[], orderBy?: string): Array<{ slug: string; title: string; type: string; link_count: number }> {
+    const placeholders = types.map((_, i) => `$t${i}`).join(",");
+    const params: Record<string, string> = {};
+    types.forEach((t, i) => { params[`$t${i}`] = t; });
+    const order = orderBy ?? "title ASC";
+    return this.db.prepare(
+      `SELECT p.slug, p.title, p.type, (SELECT COUNT(*) FROM links WHERE from_slug = p.slug OR to_slug = p.slug) as link_count FROM pages p WHERE p.type IN (${placeholders}) ORDER BY ${order}`
+    ).all(params) as Array<{ slug: string; title: string; type: string; link_count: number }>;
+  }
+
+  getAvgMentionCount(): number {
+    const row = this.db.prepare("SELECT AVG(mention_count) as avg FROM pages").get() as { avg: number | null };
+    return row.avg ?? 0;
+  }
+
+  getRecentUpdatedPages(days: number = 7, limit: number = 10): PageRow[] {
+    return this.db.prepare(
+      "SELECT * FROM pages WHERE updated_at >= datetime('now', $days) ORDER BY updated_at DESC LIMIT $limit"
+    ).all({ $days: `-${days} days`, $limit: limit }) as PageRow[];
+  }
+
+  getTopMentionedEntities(limit: number = 10): PageRow[] {
+    return this.db.prepare(
+      "SELECT * FROM pages WHERE type = 'entity' ORDER BY mention_count DESC LIMIT $limit"
+    ).all({ $limit: limit }) as PageRow[];
+  }
+
+  // ─── Link operations ──────────────────────────────────────────
+
+  insertLink(from: string, to: string, relation: string, context?: string | null): void {
+    this.db.prepare(
+      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)"
+    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null });
+  }
+
+  deleteLink(from: string, to: string, relation: string): boolean {
+    const r = this.db.prepare(
+      "DELETE FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
+    ).run({ $from: from, $to: to, $rel: relation });
+    return r.changes > 0;
+  }
+
+  deleteLinksBySlug(slug: string): void {
+    this.db.prepare(
+      "DELETE FROM links WHERE from_slug = $slug OR to_slug = $slug"
+    ).run({ $slug: slug });
+  }
+
+  deleteLinksByRelation(slug: string, relation: string): void {
+    this.db.prepare(
+      "DELETE FROM links WHERE from_slug = $slug AND relation = $rel"
+    ).run({ $slug: slug, $rel: relation });
+  }
+
+  getOutgoingLinks(slug: string): LinkRow[] {
+    return this.db.prepare(
+      "SELECT id, from_slug, to_slug, relation, context, created_at FROM links WHERE from_slug = $slug"
+    ).all({ $slug: slug }) as LinkRow[];
+  }
+
+  getIncomingLinks(slug: string): LinkRow[] {
+    return this.db.prepare(
+      "SELECT id, from_slug, to_slug, relation, context, created_at FROM links WHERE to_slug = $slug"
+    ).all({ $slug: slug }) as LinkRow[];
+  }
+
+  getOutgoingSlugs(slug: string): string[] {
+    const rows = this.db.prepare(
+      "SELECT to_slug FROM links WHERE from_slug = $slug"
+    ).all({ $slug: slug }) as Array<{ to_slug: string }>;
+    return rows.map(r => r.to_slug);
+  }
+
+  getIncomingSlugs(slug: string): string[] {
+    const rows = this.db.prepare(
+      "SELECT from_slug FROM links WHERE to_slug = $slug"
+    ).all({ $slug: slug }) as Array<{ from_slug: string }>;
+    return rows.map(r => r.from_slug);
+  }
+
+  getLinkedSlugs(slug: string, direction: "from" | "to", relation?: string): string[] {
+    const col = direction === "from" ? "to_slug" : "from_slug";
+    const where = direction === "from" ? "from_slug" : "to_slug";
+    let sql = `SELECT ${col} as slug FROM links WHERE ${where} = $slug`;
+    const params: Record<string, string> = { $slug: slug };
+    if (relation) {
+      sql += " AND relation = $rel";
+      params.$rel = relation;
+    }
+    const rows = this.db.prepare(sql).all(params) as Array<{ slug: string }>;
+    return rows.map(r => r.slug);
+  }
+
+  getAllLinks(): Array<{ from_slug: string; to_slug: string; relation: string }> {
+    return this.db.prepare(
+      "SELECT from_slug, to_slug, relation FROM links"
+    ).all() as Array<{ from_slug: string; to_slug: string; relation: string }>;
+  }
+
+  getLinkCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM links").get() as { cnt: number };
+    return row.cnt;
+  }
+
+  getLinkCountBySlug(slug: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) as cnt FROM links WHERE from_slug = $slug OR to_slug = $slug"
+    ).get({ $slug: slug }) as { cnt: number };
+    return row.cnt;
+  }
+
+  linkExists(from: string, to: string, relation: string): boolean {
+    const row = this.db.prepare(
+      "SELECT 1 FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
+    ).get({ $from: from, $to: to, $rel: relation });
+    return row != null;
+  }
+
+  // ─── Chunk write operations ──────────────────────────────────
+
+  deleteChunksByPage(slug: string): void {
+    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+  }
+
+  insertChunk(slug: string, index: number, content: string): void {
+    this.db.prepare(
+      "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
+    ).run({ $slug: slug, $idx: index, $content: content });
+  }
+
+  getChunkCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as { cnt: number };
+    return row.cnt;
+  }
+
+  getChunkCountByPage(slug: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) as cnt FROM chunks WHERE page_slug = $slug"
+    ).get({ $slug: slug }) as { cnt: number };
+    return row.cnt;
+  }
+
+  // ─── Ingest log write ──────────────────────────────────────
+
+  addIngestLog(sourceType: string, action: string, slug?: string | null, details?: string | null): void {
+    this.db.prepare(
+      "INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($src, $action, $slug, $details)"
+    ).run({ $src: sourceType, $action: action, $slug: slug ?? null, $details: details ?? null });
+  }
+
+  getRecentNerErrorCount(): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) as cnt FROM ingest_log WHERE details LIKE '%nerError%' AND created_at > datetime('now', '-24 hours')"
+    ).get() as { cnt: number };
+    return row.cnt;
+  }
+
+  // ─── Timeline write operations ──────────────────────────────
+
+  deleteTimelineByPage(slug: string): void {
+    this.db.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
+  }
+
+  getTimelineCountByPage(slug: string): number {
+    const row = this.db.prepare(
+      "SELECT COUNT(*) as cnt FROM timeline WHERE page_slug = $slug"
+    ).get({ $slug: slug }) as { cnt: number };
+    return row.cnt;
+  }
+
+  rewireTimeline(oldSlug: string, newSlug: string): void {
+    this.db.prepare(
+      "UPDATE timeline SET page_slug = $new WHERE page_slug = $old"
+    ).run({ $old: oldSlug, $new: newSlug });
+  }
+
+  // ─── Tag bulk operations ─────────────────────────────────────
+
+  deleteTagsByPage(slug: string): void {
+    this.db.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
+  }
+
+  addTags(slug: string, tags: string[]): void {
+    const stmt = this.db.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES ($slug, $tag)");
+    for (const tag of tags) {
+      stmt.run({ $slug: slug, $tag: tag });
+    }
+  }
+
+  // ─── Config operations ───────────────────────────────────────
+
+  getAllConfig(): Array<{ key: string; value: string }> {
+    return this.db.prepare("SELECT key, value FROM config ORDER BY key").all() as Array<{ key: string; value: string }>;
+  }
+
+  deleteConfig(key: string): void {
+    this.db.prepare("DELETE FROM config WHERE key = $key").run({ $key: key });
+  }
+
+  // ─── Entity lookup ─────────────────────────────────────────────
+
+  getEntitySlugByTitle(name: string): string | null {
+    const row = this.db.prepare(
+      "SELECT slug FROM pages WHERE title = $name AND type IN ('entity', 'concept')"
+    ).get({ $name: name }) as { slug: string } | null;
+    return row?.slug ?? null;
   }
 
   close(): void {

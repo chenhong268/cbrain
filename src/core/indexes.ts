@@ -35,22 +35,27 @@ export class IndexGenerator {
   }
 
   private generateAllEntities(dir: string): string {
-    const rows = this.db.prepare(
-      `SELECT p.slug, p.title, p.type, p.tier, p.mention_count, p.updated_at,
-              (SELECT COUNT(*) FROM links l WHERE l.from_slug = p.slug OR l.to_slug = p.slug) as link_count
-       FROM pages p
-       WHERE p.type IN ('entity')
-       ORDER BY p.tier ASC, p.mention_count DESC`
-    ).all() as Array<IndexPageRow & { link_count: number }>;
+    const rows = this.db.getPagesWithLinkCount(
+      ["entity"],
+      "tier ASC, mention_count DESC"
+    );
 
     const filePath = join(dir, "All-Entities.md");
     let md = `# All Entities\n\n`;
     md += `> Auto-generated index. Last updated: ${new Date().toISOString().slice(0, 10)}\n\n`;
     md += `| Tier | Entity | Mentions | Links | Updated |\n|:-----|:-------|:---------|:------|:--------|\n`;
 
+    // Need tier/mention_count/updated_at — fetch full page rows
+    const slugs = rows.map(r => r.slug);
+    const pageMap = new Map(this.db.getPagesBySlugs(slugs).map(p => [p.slug, p]));
+
     for (const row of rows) {
-      const tierLabel = row.tier <= 1 ? "⭐" : row.tier === 2 ? "📌" : "·";
-      md += `| ${tierLabel} | [[${row.slug}\\|${row.title}]] | ${row.mention_count} | ${row.link_count} | ${row.updated_at.slice(0, 10)} |\n`;
+      const page = pageMap.get(row.slug);
+      const tier = page?.tier ?? 3;
+      const mentions = page?.mention_count ?? 0;
+      const updated = page?.updated_at?.slice(0, 10) ?? "-";
+      const tierLabel = tier <= 1 ? "⭐" : tier === 2 ? "📌" : "·";
+      md += `| ${tierLabel} | [[${row.slug}\\|${row.title}]] | ${mentions} | ${row.link_count} | ${updated} |\n`;
     }
 
     md += `\n> ${rows.length} entities total\n`;
@@ -59,21 +64,24 @@ export class IndexGenerator {
   }
 
   private generateAllConcepts(dir: string): string {
-    const rows = this.db.prepare(
-      `SELECT p.slug, p.title, p.mention_count, p.updated_at,
-              (SELECT COUNT(*) FROM links l WHERE l.from_slug = p.slug OR l.to_slug = p.slug) as link_count
-       FROM pages p
-       WHERE p.type = 'concept'
-       ORDER BY p.mention_count DESC`
-    ).all() as Array<IndexPageRow & { link_count: number }>;
+    const rows = this.db.getPagesWithLinkCount(
+      ["concept"],
+      "mention_count DESC"
+    );
 
     const filePath = join(dir, "All-Concepts.md");
     let md = `# All Concepts\n\n`;
     md += `> Auto-generated index. Last updated: ${new Date().toISOString().slice(0, 10)}\n\n`;
     md += `| Concept | Mentions | Links | Updated |\n|:--------|:---------|:------|:--------|\n`;
 
+    const slugs = rows.map(r => r.slug);
+    const pageMap = new Map(this.db.getPagesBySlugs(slugs).map(p => [p.slug, p]));
+
     for (const row of rows) {
-      md += `| [[${row.slug}\\|${row.title}]] | ${row.mention_count} | ${row.link_count} | ${row.updated_at.slice(0, 10)} |\n`;
+      const page = pageMap.get(row.slug);
+      const mentions = page?.mention_count ?? 0;
+      const updated = page?.updated_at?.slice(0, 10) ?? "-";
+      md += `| [[${row.slug}\\|${row.title}]] | ${mentions} | ${row.link_count} | ${updated} |\n`;
     }
 
     md += `\n> ${rows.length} concepts total\n`;
@@ -82,12 +90,10 @@ export class IndexGenerator {
   }
 
   private generateAllSources(dir: string): string {
-    const rows = this.db.prepare(
-      `SELECT slug, title, type, updated_at
-       FROM pages
-       WHERE type IN ('record', 'source', 'event')
-       ORDER BY updated_at DESC`
-    ).all() as Array<IndexPageRow>;
+    const rows = this.db.listPages({
+      types: ["record", "source", "event"],
+      orderBy: "updated_at DESC",
+    });
 
     const filePath = join(dir, "All-Sources.md");
     let md = `# All Sources\n\n`;
@@ -105,19 +111,18 @@ export class IndexGenerator {
   }
 
   private generateDashboard(dir: string): string {
-    const totalPages = (this.db.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number }).c;
-    const entities = (this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type = 'entity'").get() as { c: number }).c;
-    const concepts = (this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type = 'concept'").get() as { c: number }).c;
-    const sources = (this.db.prepare("SELECT COUNT(*) as c FROM pages WHERE type IN ('record', 'source', 'event')").get() as { c: number }).c;
-    const links = (this.db.prepare("SELECT COUNT(*) as c FROM links").get() as { c: number }).c;
+    const totalPages = this.db.getPageCount();
+    const entities = this.db.getPageCountByType("entity");
+    const concepts = this.db.getPageCountByType("concept");
+    const sources = this.db.getPageCountByTypes(["record", "source", "event"]);
+    const links = this.db.getLinkCount();
 
-    const topEntities = this.db.prepare(
-      `SELECT slug, title, mention_count FROM pages WHERE type = 'entity' ORDER BY mention_count DESC LIMIT 10`
-    ).all() as Array<{ slug: string; title: string; mention_count: number }>;
+    const topEntities = this.db.getTopMentionedEntities(10);
 
-    const recentPages = this.db.prepare(
-      `SELECT slug, title, type, updated_at FROM pages ORDER BY updated_at DESC LIMIT 10`
-    ).all() as Array<{ slug: string; title: string; type: string; updated_at: string }>;
+    const recentPages = this.db.listPages({
+      orderBy: "updated_at DESC",
+      limit: 10,
+    });
 
     const filePath = join(dir, "Dashboard.md");
     let md = `# CBrain Dashboard\n\n`;

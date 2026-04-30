@@ -104,13 +104,10 @@ export class ContentPipeline {
       }))
     );
 
-    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+    this.db.deleteChunksByPage(slug);
     this.db.ftsDeleteByPage(slug);
-    const insertChunk = this.db.prepare(
-      "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
-    );
     for (const chunk of chunks) {
-      insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
+      this.db.insertChunk(slug, chunk.index, chunk.content);
     }
 
     const fullContent = chunks.map(c => c.content).join("\n\n");
@@ -119,14 +116,12 @@ export class ContentPipeline {
 
   /** Write ingest_log entry for sync/ingest audit trail. */
   writeIngestLog(slug: string, source: "vault" | "api", details: Record<string, unknown>): void {
-    this.db.prepare(
-      "INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)"
-    ).run({
-      $source: source,
-      $action: source === "vault" ? "sync" : "ingest",
-      $slug: slug,
-      $details: JSON.stringify(details),
-    });
+    this.db.addIngestLog(
+      source,
+      source === "vault" ? "sync" : "ingest",
+      slug,
+      JSON.stringify(details)
+    );
   }
 
   /**
@@ -159,8 +154,7 @@ export class ContentPipeline {
           const key = `${fromSlug}\x00${newSlug}`;
           if (!writtenRelations.includes(key)) {
             writtenRelations.push(key);
-            this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-              .run(fromSlug, newSlug, "提及");
+            this.db.insertLink(fromSlug, newSlug, "提及");
             count++;
           }
         }
@@ -169,8 +163,7 @@ export class ContentPipeline {
         const key = `${fromSlug}\x00${targetSlug}`;
         if (!writtenRelations.includes(key)) {
           writtenRelations.push(key);
-          this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-            .run(fromSlug, targetSlug, "提及");
+          this.db.insertLink(fromSlug, targetSlug, "提及");
           count++;
         }
       }
@@ -219,9 +212,7 @@ export class ContentPipeline {
       const existingSlug = findEntitySlug(this.db, entity.name);
       if (existingSlug) {
         entitySlugMap.set(entity.name, existingSlug);
-        this.db.prepare(
-          "UPDATE pages SET mention_count = mention_count + 1 WHERE slug = $slug"
-        ).run({ $slug: existingSlug });
+        this.db.incrementMentionCount(existingSlug);
       } else if (this.pages && entity.relevance !== "low" && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({
@@ -242,9 +233,7 @@ export class ContentPipeline {
       const from = resolveEntityName(rel.from, entitySlugMap, this.db);
       const to = resolveEntityName(rel.to, entitySlugMap, this.db);
       if (from && to && from !== to) {
-        this.db.prepare(
-          "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)"
-        ).run({ $from: from, $to: to, $rel: rel.relation, $ctx: rel.context });
+        this.db.insertLink(from, to, rel.relation, rel.context);
 
         const fromTitle = this.pages?.getBySlug(from)?.title ?? rel.from;
         const toTitle = this.pages?.getBySlug(to)?.title ?? rel.to;
@@ -265,14 +254,7 @@ export class ContentPipeline {
 
     for (const event of extraction.events) {
       if (skipDatelessEvents && !event.date) continue;
-      this.db.prepare(
-        "INSERT INTO timeline (page_slug, event_date, source, summary) VALUES ($slug, $date, $source, $summary)"
-      ).run({
-        $slug: fromSlug,
-        $date: event.date ?? null,
-        $source: "ner",
-        $summary: event.description,
-      });
+      this.db.addTimelineEntry(fromSlug, event.description, event.date ?? undefined, "ner");
     }
 
     return {

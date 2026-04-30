@@ -25,23 +25,19 @@ const LOCK_TTL_MS = 30 * 60 * 1000; // 30 min — if dream crashes, lock auto-ex
 const MAX_BACKUPS = 7;
 
 function acquireLock(db: CBrainDB): boolean {
-  const row = db
-    .prepare("SELECT value FROM config WHERE key = ?")
-    .get(LOCK_KEY) as { value: string } | undefined;
+  const lockValue = db.getConfig(LOCK_KEY);
 
-  if (row) {
-    const lockedAt = parseInt(row.value, 10);
+  if (lockValue) {
+    const lockedAt = parseInt(lockValue, 10);
     if (Date.now() - lockedAt < LOCK_TTL_MS) return false;
   }
 
-  db.prepare(
-    "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)"
-  ).run(LOCK_KEY, String(Date.now()));
+  db.setConfig(LOCK_KEY, String(Date.now()));
   return true;
 }
 
 function releaseLock(db: CBrainDB): void {
-  db.prepare("DELETE FROM config WHERE key = ?").run(LOCK_KEY);
+  db.deleteConfig(LOCK_KEY);
 }
 
 export async function runDream(
