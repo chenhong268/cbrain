@@ -6,6 +6,7 @@
 
 ### Architecture
 - **entities + concepts → `brain/nodes/`** — merged into single directory. Type field distinguishes entity vs concept, no more classification guesswork.
+- **`ContentPipeline`** — extracted unified write pipeline. `writeIndexes`, wikilink processing, and NER application now have one implementation shared by sync, ingest, and MCP server. Removed 508 lines of duplicated code across sync.ts (617→406), ingest.ts (324→143), shared.ts.
 
 ### NER Prompt
 - **"Broad extraction" philosophy** — LLM casts wide net, downstream filters decide what to keep. Removed 65 lines of DO/DON'T rules, replaced with simple Golden Rule.
@@ -26,6 +27,8 @@
 - `enrich.ts` reads `type` from DB directly (was broken by nodes/ migration).
 
 ### Removed
+- **`cbrain watch` command** — `cbrain serve` already includes watcher. Having both caused double-watcher conflict and MCP disconnection.
+- **API key plaintext warning** — `console.error` nag on every command removed. Key-in-config is the expected default.
 - `extractEnglishTerms` — regex-based English acronym extraction (LLM does this better).
 - `extractChineseRelations` — regex-based Chinese relation extraction (sentence fragment source).
 - `extractMarkdownLinks` — unused.
