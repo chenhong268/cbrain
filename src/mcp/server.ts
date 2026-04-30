@@ -15,7 +15,7 @@ import { WritebackManager } from "../core/writeback.js";
 import { IndexGenerator } from "../core/indexes.js";
 import { NerEngine } from "../core/ner.js";
 import { PageManager } from "../core/page.js";
-import { indexPageContent as indexPageContentImpl } from "../core/shared.js";
+import { ContentPipeline } from "../core/pipeline.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
 
@@ -46,6 +46,7 @@ export function createServer(deps: CBrainDeps): McpServer {
   const versions = new VersionManager(db, pages, vaultPath);
   const jobs = new JobQueue(db);
   const writeback = new WritebackManager(pages, db, outputsDir);
+  const pipeline = new ContentPipeline(db, embedding, lance, { pages, nerEngine, logger });
 
   const server = new McpServer({
     name: "cbrain",
@@ -270,10 +271,14 @@ export function createServer(deps: CBrainDeps): McpServer {
 
   // ─── put_page ──────────────────────────────────────────────
 
-  const indexPageContent = (slug: string, body: string) =>
-    indexPageContentImpl(db, embedding, lance, slug, body).catch(err => {
+  const indexPage = async (slug: string, body: string) => {
+    try {
+      const { chunks, embedResults } = await pipeline.embed(body);
+      pipeline.writeIndexes(slug, chunks, embedResults);
+    } catch (err) {
       console.error(`indexPageContent failed for ${slug}:`, err);
-    });
+    }
+  };
 
   server.registerTool("put_page", {
     description: "Create or update a page. If the slug exists, updates it; otherwise creates a new page.",
@@ -294,7 +299,7 @@ export function createServer(deps: CBrainDeps): McpServer {
     if (existing) {
       versions.createVersion(slug); // snapshot before update
       const updated = pages.update(slug, { body: content, tags });
-      if (updated) await indexPageContent(slug, content);
+      if (updated) await indexPage(slug, content);
       return {
         content: [{ type: "text", text: JSON.stringify({ action: "updated", page: updated ? { slug: updated.slug, title: updated.title } : null }, null, 2) }],
       };
@@ -323,7 +328,7 @@ export function createServer(deps: CBrainDeps): McpServer {
       return { content: [{ type: "text", text: JSON.stringify({ error: "title is required for new pages" }) }] };
     }
     const created = pages.create({ slug, title, type: type ?? "record", body: content, tags });
-    await indexPageContent(created.slug, content);
+    await indexPage(created.slug, content);
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "created", page: { slug: created.slug, title: created.title } }, null, 2) }],
     };
@@ -486,7 +491,7 @@ export function createServer(deps: CBrainDeps): McpServer {
 
         versions.createVersion(slug);
         pages.update(slug, { body: page.body + entry });
-        await indexPageContent(slug, page.body + entry);
+        await indexPage(slug, page.body + entry);
       }
     }
 

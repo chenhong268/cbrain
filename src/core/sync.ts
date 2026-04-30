@@ -7,16 +7,13 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import { PageManager } from "./page.js";
 import { AuditLogger } from "./audit.js";
-import { extractWikiLinks, isValidEntityName } from "./extract.js";
 import type { Logger } from "./logger.js";
 import {
   chunkContent,
   hashContent,
-  mapEntityType,
-  buildStubBody,
-  findEntitySlug,
-  resolveEntityName,
 } from "./shared.js";
+import { ContentPipeline } from "./pipeline.js";
+import type { NerPipelineResult } from "./pipeline.js";
 
 export interface SyncConfig {
   chunkSize?: number;
@@ -40,13 +37,14 @@ export interface SyncPageResult {
   error?: string;
 }
 
-// Module-level cache for batch-embedded chunks
+// Module-level cache for batch-embedded chunks in syncAll
 const chunkEmbedCache = new Map<string, { embedding: number[]; tokenCount: number }>();
 
 export class SyncManager {
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
   private lance: LanceDBManager;
+  private pipeline: ContentPipeline;
   private chunkSize: number;
   private nerEngine: NerEngine | null;
   private pages: PageManager | null;
@@ -67,6 +65,12 @@ export class SyncManager {
     this.pages = config?.pages ?? null;
     this.logger = config?.logger ?? null;
     this.audit = config?.outputsDir ? new AuditLogger(config.outputsDir) : null;
+    this.pipeline = new ContentPipeline(db, embedding, lance, {
+      pages: this.pages ?? undefined,
+      nerEngine: this.nerEngine ?? undefined,
+      logger: this.logger ?? undefined,
+      chunkSize: this.chunkSize,
+    });
   }
 
   async syncAll(vaultPath: string): Promise<SyncReport> {
@@ -105,7 +109,7 @@ export class SyncManager {
       }
     }
 
-    // Batch embed all chunks at once (avoids N sequential API calls)
+    // Batch embed all chunks at once
     if (allChunks.length > 0 && this.embedding) {
       try {
         const texts = allChunks.map(c => c.content);
@@ -118,7 +122,7 @@ export class SyncManager {
       }
     }
 
-    // Phase 2: write to DB + LanceDB (sequential, SQLite-safe), collect NER jobs
+    // Phase 2: write to DB + LanceDB + wikilinks (sequential), collect NER jobs
     const nerJobs: Array<{ slug: string; text: string }> = [];
 
     for (const file of changed) {
@@ -127,7 +131,6 @@ export class SyncManager {
           .prepare("SELECT content_hash FROM pages WHERE slug = $slug")
           .get({ $slug: file.slug }) as { content_hash: string } | null;
 
-        // Create version snapshot before updating
         if (existing) {
           try {
             this.db.createVersion(file.slug, file.body,
@@ -152,68 +155,31 @@ export class SyncManager {
           $contentHash: file.contentHash,
         });
 
-        await this.writeIndexes(file.slug, file.body);
+        // Build chunks + embedResults from cache, fall back to fresh embed
+        const chunks = chunkContent(file.body, this.chunkSize);
+        const embedResults = chunks.map(c => chunkEmbedCache.get(`${file.slug}:${c.index}`));
+        if (embedResults.every(r => r)) {
+          this.pipeline.writeIndexes(file.slug, chunks, embedResults as Array<{ embedding: number[]; tokenCount: number }>);
+        } else {
+          const fresh = await this.pipeline.embed(file.body);
+          this.pipeline.writeIndexes(file.slug, fresh.chunks, fresh.embedResults);
+        }
 
-        this.db.prepare(
-          `INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)`
-        ).run({
-          $source: "vault",
-          $action: "sync",
-          $slug: file.slug,
-          $details: JSON.stringify({ hash: file.contentHash }),
-        });
-
+        this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
         report.synced++;
 
         this.audit?.log(AuditLogger.entry("sync_page", "success", {
           pageSlug: file.slug,
-          details: { chunks: chunkContent(file.body, this.chunkSize).length },
+          details: { chunks: chunks.length },
         }));
 
-        // Collect NER jobs — run in parallel after Phase 2
-        // Skip entity/concept pages: re-NERing them creates cascade noise (entity → entity → ...)
         if (this.nerEngine && file.body.trim() && file.type !== "entity" && file.type !== "concept") {
           nerJobs.push({ slug: file.slug, text: file.body });
         }
 
-        // Wiki-link extraction — deterministic parse of [[...]] syntax
         if (this.pages && file.body.trim()) {
           try {
-            const wikiLinks = extractWikiLinks(file.body);
-            const writtenRelations: string[] = [];
-
-            for (const link of wikiLinks) {
-              const targetName = link.display ?? link.target;
-              // Skip path references ([[brain/nodes/xxx]]) — these are page refs, not entity refs
-              if (link.target.includes("/")) continue;
-              if (!isValidEntityName(targetName)) continue;
-              const targetSlug = findEntitySlug(this.db, targetName);
-              if (!targetSlug && link.target.length >= 2) {
-                this.pages.create({
-                  title: targetName,
-                  type: "entity",
-                  body: `> Auto-extracted from [[${file.slug}]]`,
-                  tags: ["auto-extracted", "wikilink"],
-                });
-                const newSlug = findEntitySlug(this.db, targetName);
-                if (newSlug) {
-                  const key = `${file.slug}\x00${newSlug}`;
-                  if (!writtenRelations.includes(key)) {
-                    writtenRelations.push(key);
-                    this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-                      .run(file.slug, newSlug, "提及");
-                  }
-                }
-              } else if (targetSlug) {
-                this.pages.incrementMention(targetSlug);
-                const key = `${file.slug}\x00${targetSlug}`;
-                if (!writtenRelations.includes(key)) {
-                  writtenRelations.push(key);
-                  this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-                    .run(file.slug, targetSlug, "提及");
-                }
-              }
-            }
+            this.pipeline.processWikilinks(file.slug, file.body, true);
           } catch {
             // Wiki-link extraction failure should not block sync
           }
@@ -221,35 +187,34 @@ export class SyncManager {
       } catch (err) {
         report.errors++;
         const msg = err instanceof Error ? err.message : String(err);
-        const slug = relative(vaultPath, file.filePath);
         report.errorDetails!.push(`${file.filePath}: ${msg}`);
-        this.logger?.error("sync", `同步失败: ${slug}`, { error: msg });
+        this.logger?.error("sync", `同步失败: ${file.slug}`, { error: msg });
         this.audit?.log(AuditLogger.entry("sync_page", "error", {
-          pageSlug: slug,
+          pageSlug: file.slug,
           details: { error: msg },
         }));
       }
     }
 
-    // Phase 3: parallel NER batch (LLM calls in parallel, DB writes sequential)
+    // Phase 3: parallel NER batch
     if (nerJobs.length > 0 && this.nerEngine) {
       const CONCURRENCY = 5;
       for (let i = 0; i < nerJobs.length; i += CONCURRENCY) {
         const batch = nerJobs.slice(i, i + CONCURRENCY);
-        // Parallel LLM calls
         const extractions = await Promise.all(
           batch.map(job => this.nerEngine!.extract(job.text).catch(() => null))
         );
-        // Sequential DB writes
         for (let j = 0; j < batch.length; j++) {
           const extraction = extractions[j];
           if (!extraction) continue;
           try {
-            const nerResult = this.applyExtraction(batch[j].slug, extraction);
-            report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
-            report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
-            report.nerEvents = (report.nerEvents ?? 0) + nerResult.events;
-            report.nerLowRelevanceSkipped = (report.nerLowRelevanceSkipped ?? 0) + nerResult.lowRelevanceSkipped;
+            const nerResult = await this.pipeline.processNer(batch[j].slug, batch[j].text, "record", false);
+            if (nerResult) {
+              report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
+              report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
+              report.nerEvents = (report.nerEvents ?? 0) + nerResult.events;
+              report.nerLowRelevanceSkipped = (report.nerLowRelevanceSkipped ?? 0) + nerResult.lowRelevanceSkipped;
+            }
           } catch {
             // NER failure should not block sync
           }
@@ -261,7 +226,6 @@ export class SyncManager {
     return report;
   }
 
-  /** Clean auto-extracted stubs whose source no longer references them. */
   async cleanStaleStubs(vaultPath: string): Promise<string[]> {
     const removed: string[] = [];
     const stubs = this.db.prepare(
@@ -273,7 +237,6 @@ export class SyncManager {
       const page = this.pages?.getBySlug(stub.slug);
       if (!page || !page.body) continue;
 
-      // Extract source slug from "> Auto-extracted from [[source]]"
       const srcMatch = page.body.match(/Auto-extracted from \[\[([^\]]+)\]\]/);
       if (!srcMatch) continue;
 
@@ -281,7 +244,6 @@ export class SyncManager {
       const sourcePage = this.pages?.getBySlug(sourceSlug);
       if (!sourcePage) continue;
 
-      // Check if stub's title still appears in source body
       if (!sourcePage.body.includes(stub.title)) {
         this.pages?.delete(stub.slug);
         removed.push(stub.slug);
@@ -322,7 +284,6 @@ export class SyncManager {
       return { success: true, skipped: true };
     }
 
-    // Create version snapshot before updating
     if (existing) {
       try {
         this.db.createVersion(effectiveSlug, parsed.body,
@@ -351,22 +312,15 @@ export class SyncManager {
       $contentHash: contentHash,
     });
 
-    await this.writeIndexes(effectiveSlug, parsed.body);
+    const { chunks, embedResults } = await this.pipeline.embed(parsed.body);
+    this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);
+    this.pipeline.writeIngestLog(effectiveSlug, "vault", { hash: contentHash });
 
-    this.db.prepare(
-      `INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)`
-    ).run({
-      $source: "vault",
-      $action: "sync",
-      $slug: effectiveSlug,
-      $details: JSON.stringify({ hash: contentHash }),
-    });
-
-    // Skip NER on entity/concept pages — re-NERing them creates cascade noise
+    // NER — skip entity/concept pages
     if (this.nerEngine && parsed.body.trim() && type !== "entity" && type !== "concept") {
       try {
-        const nerResult = await this.runNer(effectiveSlug, parsed.body);
-        if (nerResult.entities > 0) {
+        const nerResult = await this.pipeline.processNer(effectiveSlug, parsed.body, type, false);
+        if (nerResult && nerResult.entities > 0) {
           this.logger?.info("sync", `NER: ${nerResult.entities} entities from ${effectiveSlug}`);
         }
       } catch (e) {
@@ -374,42 +328,10 @@ export class SyncManager {
       }
     }
 
-    // Wiki-link extraction — must run for ALL page types including entities
+    // Wikilink extraction
     if (this.pages && parsed.body.trim()) {
       try {
-        const wikiLinks = extractWikiLinks(parsed.body);
-        const writtenRelations: string[] = [];
-        for (const link of wikiLinks) {
-          const targetName = link.display ?? link.target;
-          if (link.target.includes("/")) continue;
-          if (!isValidEntityName(targetName)) continue;
-          const targetSlug = findEntitySlug(this.db, targetName);
-          if (!targetSlug && link.target.length >= 2) {
-            this.pages.create({
-              title: targetName,
-              type: "entity",
-              body: `> Auto-extracted from [[${effectiveSlug}]]`,
-              tags: ["auto-extracted", "wikilink"],
-            });
-            const newSlug = findEntitySlug(this.db, targetName);
-            if (newSlug) {
-              const key = `${effectiveSlug}\x00${newSlug}`;
-              if (!writtenRelations.includes(key)) {
-                writtenRelations.push(key);
-                this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-                  .run(effectiveSlug, newSlug, "提及");
-              }
-            }
-          } else if (targetSlug) {
-            this.pages.incrementMention(targetSlug);
-            const key = `${effectiveSlug}\x00${targetSlug}`;
-            if (!writtenRelations.includes(key)) {
-              writtenRelations.push(key);
-              this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-                .run(effectiveSlug, targetSlug, "提及");
-            }
-          }
-        }
+        this.pipeline.processWikilinks(effectiveSlug, parsed.body, true);
       } catch {
         // Wiki-link extraction failure should not block sync
       }
@@ -445,134 +367,6 @@ export class SyncManager {
 
   // ─── Private ────────────────────────────────────────────────
 
-  private async writeIndexes(slug: string, body: string): Promise<void> {
-    const chunks = chunkContent(body, this.chunkSize);
-    if (chunks.length === 0) return;
-
-    // Use cached embeddings from batch phase if available
-    const texts = chunks.map((c) => c.content);
-    let embedResults: Array<{ embedding: number[]; tokenCount: number }>;
-    const cached = texts.map((_, i) => chunkEmbedCache.get(`${slug}:${chunks[i].index}`));
-    if (cached.every(c => c)) {
-      embedResults = cached as Array<{ embedding: number[]; tokenCount: number }>;
-    } else {
-      embedResults = await this.embedding.embedBatch(texts);
-    }
-
-    await this.lance.deleteByPageSlug(slug);
-    await this.lance.addChunks(
-      chunks.map((c, i) => ({
-        pageSlug: slug,
-        chunkIndex: c.index,
-        content: c.content,
-        vector: new Float32Array(embedResults[i].embedding),
-      }))
-    );
-
-    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({
-      $slug: slug,
-    });
-    this.db.ftsDeleteByPage(slug);
-    const insertChunk = this.db.prepare(
-      "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
-    );
-    for (const chunk of chunks) {
-      insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
-    }
-
-    const fullContent = chunks.map((c) => c.content).join("\n\n");
-    this.db.ftsInsert(slug, fullContent);
-  }
-
-  private async runNer(
-    fromSlug: string,
-    text: string
-  ): Promise<{ entities: number; relations: number; events: number; lowRelevanceSkipped: number }> {
-    if (!this.nerEngine) return { entities: 0, relations: 0, events: 0, lowRelevanceSkipped: 0 };
-
-    const extraction = await this.nerEngine.extract(text);
-    return this.applyExtraction(fromSlug, extraction);
-  }
-
-  private applyExtraction(
-    fromSlug: string,
-    extraction: import("./ner.js").ExtractionResult
-  ): { entities: number; relations: number; events: number; lowRelevanceSkipped: number } {
-    if (extraction.entities.length === 0 && extraction.relations.length === 0) {
-      return { entities: 0, relations: 0, events: 0, lowRelevanceSkipped: 0 };
-    }
-
-    const entitySlugMap = new Map<string, string>();
-    const stubsCreated: string[] = [];
-    let lowRelevanceSkipped = 0;
-
-    for (const entity of extraction.entities) {
-      const existingSlug = findEntitySlug(this.db, entity.name);
-      if (existingSlug) {
-        entitySlugMap.set(entity.name, existingSlug);
-        this.db.prepare(
-          "UPDATE pages SET mention_count = mention_count + 1 WHERE slug = $slug"
-        ).run({ $slug: existingSlug });
-      } else if (this.pages && entity.relevance !== "low" && entity.name.length <= 20) {
-        const entityType = mapEntityType(entity.type);
-        const stub = this.pages.create({
-          title: entity.name,
-          type: entityType,
-          body: `> Auto-extracted from [[${fromSlug}]]`,
-          tags: ["auto-extracted"],
-        });
-        entitySlugMap.set(entity.name, stub.slug);
-        stubsCreated.push(stub.slug);
-      } else if (entity.relevance === "low") {
-        lowRelevanceSkipped++;
-      }
-    }
-
-    const writtenRelations: Array<{ from: string; to: string; relation: string }> = [];
-    for (const rel of extraction.relations) {
-      const fromSlugResolved = resolveEntityName(rel.from, entitySlugMap, this.db);
-      const toSlugResolved = resolveEntityName(rel.to, entitySlugMap, this.db);
-      if (fromSlugResolved && toSlugResolved && fromSlugResolved !== toSlugResolved) {
-        this.db.prepare(
-          `INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)`
-        ).run({ $from: fromSlugResolved, $to: toSlugResolved, $rel: rel.relation, $ctx: rel.context });
-
-        const fromTitle = this.pages?.getBySlug(fromSlugResolved)?.title ?? rel.from;
-        const toTitle = this.pages?.getBySlug(toSlugResolved)?.title ?? rel.to;
-        writtenRelations.push({ from: fromTitle, to: toTitle, relation: rel.relation });
-      }
-    }
-
-    if (this.pages) {
-      for (const [name, slug] of entitySlugMap) {
-        if (!stubsCreated.includes(slug)) continue;
-        const rels = writtenRelations.filter(r => r.from === name || r.to === name);
-        if (rels.length > 0) {
-          const body = buildStubBody(name, rels, fromSlug);
-          this.pages.update(slug, { body });
-        }
-      }
-    }
-
-    for (const event of extraction.events) {
-      this.db.prepare(
-        `INSERT INTO timeline (page_slug, event_date, source, summary) VALUES ($slug, $date, $source, $summary)`
-      ).run({
-        $slug: fromSlug,
-        $date: event.date ?? null,
-        $source: "ner",
-        $summary: event.description,
-      });
-    }
-
-    return {
-      entities: extraction.entities.length,
-      relations: extraction.relations.length,
-      events: extraction.events.length,
-      lowRelevanceSkipped,
-    };
-  }
-
   private collectMarkdownFiles(dir: string): string[] {
     const results: string[] = [];
 
@@ -598,19 +392,15 @@ export class SyncManager {
       records: "record", sources: "source",
     };
     const parts = relPath.split("/");
-    // brain/<type>/<file>.md → <type>
     if (parts.length >= 3 && parts[0] === "brain") {
       return typeFromDir[parts[1]] ?? "record";
     }
-    // raw/<type>/<file>.md → <type>
     if (parts.length >= 3 && parts[0] === "raw") {
       return typeFromDir[parts[1]] ?? "record";
     }
-    // raw/<file>.md → record (flat raw root, no type dir)
     if (parts.length === 2 && parts[0] === "raw") {
       return "record";
     }
-    // vault root .md files → record
     return "record";
   }
 }

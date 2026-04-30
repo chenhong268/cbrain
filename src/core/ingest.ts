@@ -1,20 +1,12 @@
 import { CBrainDB } from "../storage/sqlite.js";
 import { PageManager } from "./page.js";
-import { SyncManager } from "./sync.js";
 import { generateSlug } from "../utils/slug.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { LLMProvider } from "../llm/provider.js";
-import { extractWikiLinks, isValidEntityName } from "./extract.js";
-import {
-  chunkContent,
-  mapEntityType,
-  buildStubBody,
-  findEntitySlug,
-  resolveEntityName,
-} from "./shared.js";
+import { ContentPipeline } from "./pipeline.js";
 
 export interface IngestInput {
   content: string;
@@ -48,11 +40,9 @@ export interface IngestResult {
 export class IngestManager {
   private db: CBrainDB;
   private pages: PageManager;
-  private sync: SyncManager;
-  private embedding: EmbeddingProvider;
-  private lance: LanceDBManager;
   private vaultPath: string;
   private nerEngine: NerEngine | null;
+  private pipeline: ContentPipeline;
 
   constructor(
     db: CBrainDB,
@@ -64,10 +54,11 @@ export class IngestManager {
     this.db = db;
     this.vaultPath = vaultPath;
     this.pages = new PageManager(db, vaultPath);
-    this.sync = new SyncManager(db, embedding, lance);
-    this.embedding = embedding;
-    this.lance = lance;
     this.nerEngine = llmProvider ? new NerEngine(llmProvider) : null;
+    this.pipeline = new ContentPipeline(db, embedding, lance, {
+      pages: this.pages,
+      nerEngine: this.nerEngine ?? undefined,
+    });
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
@@ -89,7 +80,7 @@ export class IngestManager {
     const body = parsed.body;
     const effectiveTags = parsed.frontmatter.tags ?? overrides?.tags ?? [];
 
-    const { chunks, embedResults } = await this.embedChunks(body);
+    const { chunks, embedResults } = await this.pipeline.embed(body);
 
     const existing = this.pages.getBySlug(slug);
     if (existing) {
@@ -104,20 +95,21 @@ export class IngestManager {
       });
     }
 
-    const wikiLinks = extractWikiLinks(body);
-    this.upsertLinks(slug, wikiLinks);
+    // Clear old wikilink mentions then re-extract (ingest replaces links)
+    this.db.prepare("DELETE FROM links WHERE from_slug = $slug AND relation = 'mentions'")
+      .run({ $slug: slug });
+    const linksExtracted = this.pipeline.processWikilinks(slug, body, false);
 
-    await this.writeIndexes(slug, chunks, embedResults);
+    this.pipeline.writeIndexes(slug, chunks, embedResults);
+    this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
-    // NER runs async — skip on entity/concept pages (would create cascade noise)
+    // NER runs async — skip entity/concept pages
     const shouldNer = !overrides?.skipNer && type !== "entity" && type !== "concept";
-    if (shouldNer) this.runNer(slug, body).catch(() => {});
+    if (shouldNer) {
+      this.pipeline.processNer(slug, body, type, true).catch(() => {});
+    }
 
-    return {
-      slug,
-      created: !existing,
-      linksExtracted: wikiLinks.length,
-    };
+    return { slug, created: !existing, linksExtracted };
   }
 
   private async ingestText(input: IngestInput): Promise<IngestResult> {
@@ -126,7 +118,7 @@ export class IngestManager {
     const slug = generateSlug(title, type);
     const body = input.content;
 
-    const { chunks, embedResults } = await this.embedChunks(body);
+    const { chunks, embedResults } = await this.pipeline.embed(body);
 
     this.pages.create({
       title,
@@ -136,189 +128,16 @@ export class IngestManager {
       slug,
     });
 
-    const wikiLinks = extractWikiLinks(body);
-    this.upsertLinks(slug, wikiLinks);
+    const linksExtracted = this.pipeline.processWikilinks(slug, body, false);
 
-    await this.writeIndexes(slug, chunks, embedResults);
+    this.pipeline.writeIndexes(slug, chunks, embedResults);
+    this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
-    // NER runs async — skip on entity/concept pages (would create cascade noise)
     const shouldNer = !input.skipNer && type !== "entity" && type !== "concept";
-    if (shouldNer) this.runNer(slug, body).catch(() => {});
-
-    return {
-      slug,
-      created: true,
-      linksExtracted: wikiLinks.length,
-    };
-  }
-
-  private async embedChunks(
-    body: string
-  ): Promise<{ chunks: Array<{ index: number; content: string }>; embedResults: Array<{ embedding: number[]; tokenCount: number }> }> {
-    const chunks = chunkContent(body);
-    if (chunks.length === 0) {
-      return { chunks: [], embedResults: [] };
-    }
-    const embedResults = await this.embedding.embedBatch(
-      chunks.map((c) => c.content)
-    );
-    return { chunks, embedResults };
-  }
-
-  private async writeIndexes(
-    slug: string,
-    chunks: Array<{ index: number; content: string }>,
-    embedResults: Array<{ embedding: number[]; tokenCount: number }>
-  ): Promise<void> {
-    if (chunks.length === 0) return;
-
-    await this.lance.deleteByPageSlug(slug);
-    await this.lance.addChunks(
-      chunks.map((c, i) => ({
-        pageSlug: slug,
-        chunkIndex: c.index,
-        content: c.content,
-        vector: new Float32Array(embedResults[i].embedding),
-      }))
-    );
-
-    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({
-      $slug: slug,
-    });
-    this.db.ftsDeleteByPage(slug);
-    const insertChunk = this.db.prepare(
-      "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
-    );
-    for (const chunk of chunks) {
-      insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
+    if (shouldNer) {
+      this.pipeline.processNer(slug, body, type, true).catch(() => {});
     }
 
-    const fullContent = chunks.map((c) => c.content).join("\n\n");
-    this.db.ftsInsert(slug, fullContent);
-
-    this.db.prepare(
-      `INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($source, $action, $slug, $details)`
-    ).run({
-      $source: "vault",
-      $action: "sync",
-      $slug: slug,
-      $details: JSON.stringify({ chunks: chunks.length }),
-    });
-  }
-
-  private upsertLinks(fromSlug: string, wikiLinks: import("./extract.js").WikiLink[]): void {
-    // Only remove wikilink-based "mentions" links — NER-created relations are preserved
-    this.db
-      .prepare("DELETE FROM links WHERE from_slug = $slug AND relation = 'mentions'")
-      .run({ $slug: fromSlug });
-
-    const insertLink = this.db.prepare(
-      `INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES ($from, $to, $rel)`
-    );
-
-    for (const link of wikiLinks) {
-      const targetName = link.display ?? link.target;
-      if (link.target.includes("/")) continue;
-      if (!isValidEntityName(targetName)) continue;
-      const toSlug = this.resolveLinkTarget(targetName);
-      if (toSlug && toSlug !== fromSlug) {
-        insertLink.run({ $from: fromSlug, $to: toSlug, $rel: "mentions" });
-        this.pages.incrementMention(toSlug);
-      }
-    }
-  }
-
-  private resolveLinkTarget(linkText: string): string | null {
-    // Use findEntitySlug which only matches entity/concept types —
-    // raw/ records and events are source material, not wikilink targets.
-    return findEntitySlug(this.db, linkText);
-  }
-
-  private async runNer(
-    fromSlug: string,
-    text: string
-  ): Promise<IngestResult["ner"]> {
-    if (!this.nerEngine) return undefined;
-
-    const extraction = await this.nerEngine.extract(text);
-    if (extraction.entities.length === 0 && extraction.relations.length === 0) {
-      return {
-        entities: 0, relations: 0, events: 0, stubsCreated: [],
-        details: { entities: [], relations: [], events: [], lowRelevanceSkipped: 0 },
-      };
-    }
-
-    const stubsCreated: string[] = [];
-    const entitySlugMap = new Map<string, string>();
-    let lowRelevanceSkipped = 0;
-
-    for (const entity of extraction.entities) {
-      const existingSlug = findEntitySlug(this.db, entity.name);
-      if (existingSlug) {
-        entitySlugMap.set(entity.name, existingSlug);
-        this.pages.incrementMention(existingSlug);
-      } else if (entity.relevance !== "low" && entity.name.length <= 20) {
-        const entityType = mapEntityType(entity.type);
-        const stub = this.pages.create({
-          title: entity.name,
-          type: entityType,
-          body: `> Auto-extracted from [[${fromSlug}]]`,
-          tags: ["auto-extracted"],
-        });
-        entitySlugMap.set(entity.name, stub.slug);
-        stubsCreated.push(stub.slug);
-      } else {
-        lowRelevanceSkipped++;
-      }
-    }
-
-    const writtenRelations: Array<{ from: string; to: string; relation: string }> = [];
-    for (const rel of extraction.relations) {
-      const fromSlugResolved = resolveEntityName(rel.from, entitySlugMap, this.db);
-      const toSlugResolved = resolveEntityName(rel.to, entitySlugMap, this.db);
-      if (fromSlugResolved && toSlugResolved && fromSlugResolved !== toSlugResolved) {
-        this.db.prepare(
-          `INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)`
-        ).run({ $from: fromSlugResolved, $to: toSlugResolved, $rel: rel.relation, $ctx: rel.context });
-
-        const fromTitle = this.pages.getBySlug(fromSlugResolved)?.title ?? rel.from;
-        const toTitle = this.pages.getBySlug(toSlugResolved)?.title ?? rel.to;
-        writtenRelations.push({ from: fromTitle, to: toTitle, relation: rel.relation });
-      }
-    }
-
-    for (const [name, slug] of entitySlugMap) {
-      if (!stubsCreated.includes(slug)) continue;
-      const rels = writtenRelations.filter(r => r.from === name || r.to === name);
-      if (rels.length > 0) {
-        const body = buildStubBody(name, rels, fromSlug);
-        this.pages.update(slug, { body });
-      }
-    }
-
-    for (const event of extraction.events) {
-      if (!event.date) continue;
-      this.db.prepare(
-        `INSERT INTO timeline (page_slug, event_date, source, summary) VALUES ($slug, $date, $source, $summary)`
-      ).run({
-        $slug: fromSlug,
-        $date: event.date,
-        $source: "ner",
-        $summary: event.description,
-      });
-    }
-
-    return {
-      entities: extraction.entities.length,
-      relations: extraction.relations.length,
-      events: extraction.events.length,
-      stubsCreated,
-      details: {
-        entities: extraction.entities.map(e => ({ name: e.name, type: e.type, relevance: e.relevance })),
-        relations: writtenRelations,
-        events: extraction.events.map(e => ({ date: e.date, description: e.description })),
-        lowRelevanceSkipped,
-      },
-    };
+    return { slug, created: true, linksExtracted };
   }
 }
