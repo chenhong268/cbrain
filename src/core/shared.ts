@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CBrainDB } from "../storage/sqlite.js";
+import type { EmbeddingProvider } from "../embedding/provider.js";
+import type { LanceDBManager } from "../storage/lancedb.js";
 
 /**
  * Shared utilities used by SyncManager, IngestManager, and PageManager.
@@ -82,13 +84,15 @@ export function buildStubBody(
 
 /**
  * Look up an entity slug by exact title match in DB.
+ * Only matches entity/concept pages — raw files and records are source material,
+ * not valid targets for wikilinks.
  */
 export function findEntitySlug(
   db: CBrainDB,
   name: string
 ): string | null {
   const byTitle = db
-    .prepare("SELECT slug FROM pages WHERE title = $name")
+    .prepare("SELECT slug FROM pages WHERE title = $name AND type IN ('entity', 'concept')")
     .get({ $name: name }) as { slug: string } | null;
   return byTitle?.slug ?? null;
 }
@@ -131,4 +135,46 @@ export function resolveEntityName(
 
   // 4. DB fallback
   return findEntitySlug(db, name) ?? findEntitySlug(db, stripped);
+}
+
+// ─── Page Indexing ─────────────────────────────────────────────
+
+/**
+ * Write chunks + embeddings + FTS for a page.
+ * Single implementation used by sync, ingest, and MCP server.
+ */
+export async function indexPageContent(
+  db: CBrainDB,
+  embedding: EmbeddingProvider,
+  lance: LanceDBManager,
+  slug: string,
+  body: string,
+  chunkSize: number = 500
+): Promise<void> {
+  const chunks = chunkContent(body, chunkSize);
+  if (chunks.length === 0) return;
+
+  const embedResults = await embedding.embedBatch(chunks.map((c) => c.content));
+
+  await lance.deleteByPageSlug(slug);
+  await lance.addChunks(
+    chunks.map((c, i) => ({
+      pageSlug: slug,
+      chunkIndex: c.index,
+      content: c.content,
+      vector: new Float32Array(embedResults[i].embedding),
+    }))
+  );
+
+  db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+  db.ftsDeleteByPage(slug);
+  const insertChunk = db.prepare(
+    "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
+  );
+  for (const chunk of chunks) {
+    insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
+  }
+
+  const fullContent = chunks.map((c) => c.content).join("\n\n");
+  db.ftsInsert(slug, fullContent);
 }

@@ -4,9 +4,12 @@ import type { LLMProvider } from "../llm/provider.js";
 
 export type EntityType = "person" | "company" | "location" | "concept" | "product";
 
+export type Relevance = "high" | "medium" | "low";
+
 export interface ExtractedEntity {
   name: string;
   type: EntityType;
+  relevance: Relevance;
   context: string;
 }
 
@@ -60,6 +63,18 @@ const GENERIC_TERMS = new Set([
   "公司", "团队", "国家", "政府", "组织", "系统", "数据", "信息", "知识", "机器",
   "人工智能", "历史学家",
   "快乐", "焦虑", "爱", "恨", "恐惧", "信任", "尊重",
+  // Business generic terms
+  "经销商", "零售商", "批发商", "供应商", "制造商", "代理商", "客户", "用户",
+  // Common objects / daily items (too trivial to be knowledge nodes)
+  "邮件", "银行", "咖啡", "代码", "方案", "警察", "保险丝", "柠檬汁",
+  "金属屑", "轴承", "润滑油", "监控录像", "微信",
+  // Generic qualities / activities
+  "资源", "大脑", "效率", "品牌", "消费者", "电商", "专业",
+  "学习能力", "沟通能力", "个人习惯", "项目经验", "通勤时间",
+  "身体锻炼", "英语学习", "上班焦虑", "职业选择", "时间管理",
+  "投资策略", "职业发展方向", "深度思考",
+  "关键项目", "注意力管理", "问题分析", "问题解决",
+  "因果链", "切换成本", "组合式创新", "效率培训",
 ]);
 
 const MAX_CONCEPTS = 5;
@@ -88,54 +103,45 @@ function filterResult(result: ExtractionResult): ExtractionResult {
 
 // ─── Prompt ─────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a precision entity/relation/event extractor for Chinese and English text. Extract from both languages equally well.
+const SYSTEM_PROMPT = `You are a broad entity extractor for a knowledge graph. Your job is to cast a wide net — find as many potential entities, concepts, and named things as possible. A downstream filter system will decide which ones to keep.
+
+## Extraction Rule
+
+Better to extract too many than too few. When in doubt, extract it. The downstream system handles deduplication, noise filtering, and quality decisions.
+
+DO extract:
+- Named people, companies, products, locations
+- Methodologies, frameworks, theories, effects, biases, phenomena
+- Anything that looks like a named entity or defined concept
+
+Skip ONLY obvious noise:
+- Pure numbers/amounts (93亿美元, Q1 2026)
+- Truly generic words that are never proper nouns (的, 了, 是, 在)
+- Pronouns and common verbs
 
 ## Output Schema (strict JSON)
 {
-  "entities": [{ "name": "实体名", "type": "person|company|location|concept|product", "context": "原文片段" }],
+  "entities": [{ "name": "实体名", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文片段" }],
   "relations": [{ "from": "实体A", "to": "实体B", "relation": "RELATION_TYPE", "context": "原文依据" }],
   "events": [{ "date": "YYYY-MM-DD or null", "description": "事件描述", "participants": ["参与人/组织"] }]
 }
 
-## Entity Extraction Rules
+## Relevance Scoring (CRITICAL — score every entity)
 
-### DO extract:
-- Named people with full names — Chinese (张三, 李明) and English (John Smith, Dr. Chen) — NOT generic roles
-- Named organizations/companies — Chinese (鲲鹏医院, 红杉资本) and English (Novartis, FDA, Goldman Sachs) — NOT generic orgs
-- Named products/projects — Chinese (灵境系统) and English (Cosentyx, iPhone, ChatGPT)
-- Drug/pharmaceutical names (Fabhalta, Rhapsido, Kisqali, Entresto) — type: "product"
-- Medical/regulatory bodies (FDA, EMA, CHMP, NMPA) — type: "company"
-- Named locations — Chinese (北京) and English (Basel, Switzerland, Silicon Valley)
-- Financial/business terms used as proper entities (NYSE: NVS, S&P 500)
-- Numbers with clear entity identity (Q1 2026, Phase III, FY2025)
+"high" — Core to understanding this text. The main subject, key actors, primary organizations. Remove this entity and the text's meaning changes materially.
+"medium" — Supporting role. Mentioned with meaningful context, contributes to the narrative, but not the main subject.
+"low" — Incidental mention. Passing reference, background color, one-off name drop. The text is fully understandable without this entity.
 
-### Concept extraction (type: "concept"):
-Extract as concept if ANY of:
-1. Named methodology, theory, or intellectual framework (第一性原理, PDCA, Six Sigma)
-2. Benchmark, evaluation metric, or standard dataset (MMLU, C-Eval, BLEU)
-3. Well-known technical term or architectural pattern (RAG, LoRA, transformer, LLM)
-4. Abbreviation or acronym that is a proper noun (GPU, API, GPT, IgAN, HS, CKM)
-5. Medical/pharmaceutical terms (IgA nephropathy, hidradenitis suppurativa, CKM syndrome)
-6. Financial metrics as concepts (net sales, core operating income, free cash flow, cc growth, USD growth)
-7. Business terms with specific meaning (M&A, acquisition, licensing deal, regulatory approval)
+Scoring examples:
+- Drug approval article: the drug name = "high", the FDA = "high", a competitor drug mentioned once = "low"
+- Company profile: the company = "high", its CEO = "high", a client mentioned once = "medium", the city of a branch office = "low"
+- Methodology article: the method name = "high", the original paper author = "medium", an example scenario = "low"
 
-DO NOT extract as concepts:
-- Common abstract nouns (现实, 个体, 未来, leadership, innovation, growth)
-- General qualities (领导力, 沟通, efficiency, quality)
-- Ordinary categories (历史, 经济, market, industry)
-- Generic financial terms (revenue, profit, cost — unless part of a named metric like "core operating income")
+DO NOT extract entities that would be scored "low" AND are common/generic. If it's low relevance AND a generic term (政府部门, 医院名称, 常见地名), skip it entirely.
 
-### Max limits per extraction:
-- entities (person/company/product/location): <= 12
-- concepts: <= 5
-- Total entities: <= 15
-If the text mentions many entities, keep only the most important ones.
-
-### Skip entirely:
-- Generic nouns that could appear in any text (人类, 社会, 世界, 问题, method, data, report)
-- Emotions and states (快乐, 焦虑, growth as abstract concept)
-- Adjectives used as nouns (优秀的人, leaders unless named)
-- Common financial terms without entity identity (million, billion, percent, quarter)
+## Limits
+- Max 12 entities + 5 concepts (15 total)
+- Prefer high/medium relevance. Low relevance + generic term = skip
 
 ## Relation Types
 
@@ -198,8 +204,15 @@ export class NerEngine {
       const cleaned = raw.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "");
       const parsed = JSON.parse(cleaned);
 
+      const entities = Array.isArray(parsed.entities)
+        ? parsed.entities.map((e: Record<string, unknown>) => ({
+            ...e,
+            relevance: e.relevance ?? "medium",
+          }))
+        : [];
+
       return {
-        entities: Array.isArray(parsed.entities) ? parsed.entities : [],
+        entities,
         relations: Array.isArray(parsed.relations) ? parsed.relations : [],
         events: Array.isArray(parsed.events) ? parsed.events : [],
       };

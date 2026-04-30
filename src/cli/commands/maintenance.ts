@@ -33,7 +33,11 @@ export function register(program: Command) {
         const stale = await sync.cleanStaleStubs(config.vaultPath);
         if (stale.length > 0) console.log(`Stale stubs: ${stale.length} removed`);
         if (report.errors > 0) { console.log(`Errors:  ${report.errors}`); for (const d of report.errorDetails ?? []) console.log(`  - ${d}`); }
-        if (report.nerEntities) console.log(`NER:     ${report.nerEntities} entities, ${report.nerRelations} relations, ${report.nerEvents} events extracted`);
+        if (report.nerEntities) {
+          const parts = [`NER:     ${report.nerEntities} entities, ${report.nerRelations} relations, ${report.nerEvents} events extracted`];
+          if (report.nerLowRelevanceSkipped) parts.push(`${report.nerLowRelevanceSkipped} low-relevance skipped`);
+          console.log(parts.join(", "));
+        }
       }
       deps.db.close();
     });

@@ -98,8 +98,8 @@ export class EnrichManager {
     if (!this.llm) return { slug, enriched: false };
 
     const page = this.db
-      .prepare("SELECT title, body, tier FROM pages WHERE slug = $slug")
-      .get({ $slug: slug }) as { title: string; body: string; tier: number } | null;
+      .prepare("SELECT title, body, tier, type FROM pages WHERE slug = $slug")
+      .get({ $slug: slug }) as { title: string; body: string; tier: number; type: string } | null;
     if (!page) return { slug, enriched: false };
 
     // Only enrich stubs (auto-extracted, short body)
@@ -150,7 +150,7 @@ export class EnrichManager {
         const frontmatter = [
           "---",
           `title: "${page.title}"`,
-          `type: ${slug.includes("/entities/") ? "entity" : "concept"}`,
+          `type: ${page.type}`,
           `slug: "${slug}"`,
           `tags: [auto-extracted]`,
           `tier: ${page.tier}`,

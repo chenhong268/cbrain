@@ -1,9 +1,6 @@
-// ─── Zero-LLM entity/term extraction (regex engine) ───────────
-// Inspired by GBrain's link-extraction.ts. Runs alongside NER as a deterministic
-// fallback — catches wiki-links, English abbreviations, and Chinese relation
-// patterns that LLM-based extraction may miss.
-
-// ─── Code block stripping ───────────────────────────────────────
+// ─── Wiki-link extraction (deterministic) ───────────────────────
+// Only regex-based extraction in CBrain. wikilinks are explicit user intent,
+// not machine guesswork — they must be parsed deterministically.
 
 function stripCodeBlocks(content: string): string {
   let out = "";
@@ -30,13 +27,12 @@ function stripCodeBlocks(content: string): string {
   return out;
 }
 
-// ─── Wiki-link extraction ───────────────────────────────────────
-
-const WIKILINK_RE = /\[\[([^\]|#]+?)(?:#[^\]]*?)?(?:\|([^\]]+?))?\]\]/g;
+// (?<!!) prevents matching image/attachment embeds (![[...]])
+const WIKILINK_RE = /(?<!!)\[\[([^\]|#]+?)(?:#[^\]]*?)?(?:\|([^\]]+?))?\]\]/g;
 
 export interface WikiLink {
-  target: string;     // raw slug text, e.g. "brain/entities/王强" or "王强"
-  display?: string;   // display text after pipe
+  target: string;
+  display?: string;
 }
 
 export function extractWikiLinks(content: string): WikiLink[] {
@@ -48,6 +44,7 @@ export function extractWikiLinks(content: string): WikiLink[] {
   while ((m = re.exec(stripped)) !== null) {
     const target = m[1].trim();
     if (!target || target.includes("://")) continue;
+    if (/\.(png|jpe?g|gif|svg|webp|mp4|mov|pdf|mp3|wav|zip)$/i.test(target)) continue;
     if (seen.has(target)) continue;
     seen.add(target);
     links.push({ target, display: m[2]?.trim() });
@@ -55,134 +52,49 @@ export function extractWikiLinks(content: string): WikiLink[] {
   return links;
 }
 
-// ─── Markdown link extraction ───────────────────────────────────
+// ─── Entity name quality validation ─────────────────────────────
 
-const MD_LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/g;
+const FRAGMENT_ENDINGS = /(?:下个|上个|这个|那个|什么|如何|怎么|怎样|的话|的人|的事)$/;
+const PARTICLE_ENDINGS = /[的了就完或吧吗呢啊嘛及与把会被]$/;
+const VERB_STARTS = /^(?:用|把|被|让|从|在|对|跟|和|考虑|想着|假定|需要|应该|可以|能够|不会|不要|别|就不要|不能|可能|已经|还是|只是|就是|都是|还要|也要|就会|就能|才能|还会|还能|也可|也可|也不|也没|都|就|也|还|又|再|才|只|没)$/;
+const GENERIC_STARTS = /^(?:一家|某个|某些|那些|这些|自己的|别人的|所有|每个|任何|什么|怎么|某种|各种|一些|全部|整个)$/;
+const PURE_FUNCTION = /^(?:必须|一定|当然|确实|真的|非常|很|太|更|最|比较|有些|一点|一下|一会|一直|经常|总是|从来|从不|已经|将要|正在|暂时|永久|永远|马上|立刻|突然|终于|最后|还是|还|也|都)$/;
 
-export interface MdLink {
-  display: string;
-  target: string;
-}
+/**
+ * Filter out sentence fragments and function words that regex extraction
+ * might capture as entity names. Returns true if the name looks like a
+ * plausible entity (person, org, location, product, concept, etc.).
+ */
+export function isValidEntityName(name: string): boolean {
+  const n = name.trim();
+  if (n.length < 2 || n.length > 30) return false;
 
-export function extractMarkdownLinks(content: string): MdLink[] {
-  const seen = new Set<string>();
-  const links: MdLink[] = [];
-  const stripped = stripCodeBlocks(content);
-  const re = new RegExp(MD_LINK_RE.source, "g");
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(stripped)) !== null) {
-    const target = m[2].trim();
-    if (target.includes("://") || target.endsWith(".md")) continue;
-    if (seen.has(target)) continue;
-    seen.add(target);
-    links.push({ display: m[1].trim(), target });
-  }
-  return links;
-}
+  // Pure ASCII short strings (1-2 chars) are rarely entities
+  if (/^[A-Za-z]{1,2}$/.test(n)) return false;
 
-// ─── English tech term extraction (3+ uppercase, known patterns) ─
+  // Sentence fragments
+  if (FRAGMENT_ENDINGS.test(n)) return false;
+  if (PARTICLE_ENDINGS.test(n)) return false;
 
-const KNOWN_TERMS = new Set([
-  // AI / ML
-  "AI", "ML", "DL", "NLP", "CV", "RL", "GAN",
-  "LLM", "RAG", "LoRA", "GPU", "TPU", "API", "SDK", "CLI",
-  "BERT", "GPT", "LSTM", "CNN", "RNN", "MoE", "RLHF", "SFT",
-  // Benchmarks
-  "MMLU", "BLEU", "ROUGE", "GLUE", "SuperGLUE",
-  // Protocols / formats
-  "HTTP", "HTTPS", "REST", "gRPC", "SQL", "JSON", "YAML", "CSV", "XML",
-  "MCP", "SSE", "OAuth", "JWT", "CORS", "CQRS",
-  // Infrastructure
-  "AWS", "GCP", "CDN", "DNS", "CI", "CD", "K8s",
-  // Tech patterns: 3+ uppercase letters that are real acronyms
-]);
+  // Verb/conjunction starts
+  if (VERB_STARTS.test(n)) return false;
 
-const TECH_TERM_RE = /\b([A-Z]{3,}(?:-[A-Za-z0-9]+)?)\b/g;
+  // Generic quantity/pronoun starts
+  if (GENERIC_STARTS.test(n)) return false;
 
-export function extractEnglishTerms(content: string): string[] {
-  const seen = new Set<string>();
-  const terms: string[] = [];
-  const stripped = stripCodeBlocks(content);
-  const re = new RegExp(TECH_TERM_RE.source, "g");
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(stripped)) !== null) {
-    const term = m[1];
-    if (seen.has(term)) continue;
-    // Filter: must be a known term OR look like a real acronym (not all-vowels, not generic)
-    if (KNOWN_TERMS.has(term) || (term.length >= 3 && /[^AEIOU]/.test(term))) {
-      seen.add(term);
-      terms.push(term);
-    }
-  }
-  return terms;
-}
+  // Pure function words (2-3 chars, no noun content)
+  if (PURE_FUNCTION.test(n)) return false;
 
-// ─── Chinese relation extraction ─────────────────────────────────
+  // Looks like a Chinese question or command fragment
+  if (/^(?:如何|怎么|怎样|什么|哪个|哪里|为什么|是否|能否|可否|要不要|能不能|是不是)/.test(n)) return false;
+  if (/^(?:不要|别|请|必须|应该|需要)../.test(n)) return false; // commands
 
-export interface ChineseRelation {
-  from: string;
-  to: string;
-  relation: string;
-  context: string;
-}
+  // Ends abruptly — likely a truncated phrase
+  if (/[把被让给对跟和与]$/.test(n)) return false;
 
-const RELATION_PATTERNS: Array<{ pattern: RegExp; relation: string }> = [
-  // 任职于: X在Y工作 / X任职于Y / X是Y的(职位)
-  { pattern: /([^\s，。,.]{2,6})\s*在\s*([^\s，。,.]{2,20})\s*(?:工作|任职|上班)/g, relation: "任职于" },
-  { pattern: /([^\s，。,.]{2,6})\s*(?:任职于|就职于)\s*([^\s，。,.]{2,20})/g, relation: "任职于" },
-  { pattern: /([^\s，。,.]{2,6})\s*是\s*([^\s，。,.]{2,20})\s*的\s*(?:CEO|CTO|CFO|CMO|总裁|总监|经理|工程师|负责人|代表|主管)/g, relation: "任职于" },
-  // 创立了: X创立了Y / X创办了Y
-  { pattern: /([^\s，。,.]{2,6})\s*(?:创立了|创办了|创建了|建立了|成立了)\s*([^\s，。,.]{2,20})/g, relation: "创立了" },
-  // 投资了: X投资了Y
-  { pattern: /([^\s，。,.]{2,20})\s*(?:投资了|参投了|领投了|投了)\s*([^\s，。,.]{2,20})/g, relation: "投资了" },
-  // 认识: X认识Y
-  { pattern: /([^\s，。,.]{2,6})\s*认识\s*([^\s，。,.]{2,6})/g, relation: "认识" },
-  // 指导: X指导Y / X是Y的导师
-  { pattern: /([^\s，。,.]{2,6})\s*(?:指导|带了)\s*([^\s，。,.]{2,6})/g, relation: "指导" },
-  { pattern: /([^\s，。,.]{2,6})\s*是\s*([^\s，。,.]{2,6})\s*的\s*(?:导师|师傅|mentor)/g, relation: "指导" },
-  // 成员: X是Y的成员 / X属于Y
-  { pattern: /([^\s，。,.]{2,6})\s*是\s*([^\s，。,.]{2,10}(?:团队|部门|组|公司))\s*的\s*(?:成员|一员)/g, relation: "成员" },
-  { pattern: /([^\s，。,.]{2,6})\s*(?:属于|归属于)\s*([^\s，。,.]{2,20})/g, relation: "成员" },
-];
+  // Article titles (contain Chinese colon, or very long)
+  if (/[：]/.test(n)) return false;
+  if (n.length > 18) return false;
 
-export function extractChineseRelations(content: string): ChineseRelation[] {
-  const seen = new Set<string>();
-  const relations: ChineseRelation[] = [];
-  const stripped = stripCodeBlocks(content);
-
-  for (const { pattern, relation } of RELATION_PATTERNS) {
-    const re = new RegExp(pattern.source, "g");
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(stripped)) !== null) {
-      const from = m[1].trim();
-      const to = m[2].trim();
-      if (from === to) continue;
-      const key = `${from}\x00${to}\x00${relation}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const start = Math.max(0, m.index - 10);
-      const end = Math.min(stripped.length, m.index + m[0].length + 20);
-      relations.push({
-        from, to, relation,
-        context: stripped.slice(start, end).replace(/\s+/g, " ").trim(),
-      });
-    }
-  }
-  return relations;
-}
-
-// ─── Combined extraction ────────────────────────────────────────
-
-export interface ExtractionResult {
-  wikiLinks: WikiLink[];
-  englishTerms: string[];
-  chineseRelations: ChineseRelation[];
-}
-
-export function extractAll(content: string): ExtractionResult {
-  return {
-    wikiLinks: extractWikiLinks(content),
-    englishTerms: extractEnglishTerms(content),
-    chineseRelations: extractChineseRelations(content),
-  };
+  return true;
 }

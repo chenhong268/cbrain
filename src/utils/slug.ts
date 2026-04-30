@@ -1,8 +1,8 @@
 const CJK_RANGE = /[一-鿿㐀-䶿]/;
 
 const PLURALS: Record<string, string> = {
-  entity: "entities",
-  concept: "concepts",
+  entity: "nodes",
+  concept: "nodes",
   event: "events",
   record: "records",
   source: "sources",

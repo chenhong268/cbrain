@@ -15,7 +15,7 @@ import { WritebackManager } from "../core/writeback.js";
 import { IndexGenerator } from "../core/indexes.js";
 import { NerEngine } from "../core/ner.js";
 import { PageManager } from "../core/page.js";
-import { chunkContent } from "../core/shared.js";
+import { indexPageContent as indexPageContentImpl } from "../core/shared.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
 
@@ -270,39 +270,10 @@ export function createServer(deps: CBrainDeps): McpServer {
 
   // ─── put_page ──────────────────────────────────────────────
 
-  /** Index page content into chunks, vector, and FTS. Best-effort: errors logged, not thrown. */
-  async function indexPageContent(slug: string, body: string) {
-    try {
-      const chunks = chunkContent(body, 500);
-      if (chunks.length === 0) return;
-
-      const embedResults = await embedding.embedBatch(chunks.map((c) => c.content));
-      await lance.deleteByPageSlug(slug);
-      await lance.addChunks(
-        chunks.map((c, i) => ({
-          pageSlug: slug,
-          chunkIndex: c.index,
-          content: c.content,
-          vector: new Float32Array(embedResults[i].embedding),
-        }))
-      );
-
-      db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
-      db.ftsDeleteByPage(slug);
-      const insertChunk = db.prepare(
-        "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
-      );
-      for (const chunk of chunks) {
-        insertChunk.run({ $slug: slug, $idx: chunk.index, $content: chunk.content });
-      }
-
-      const fullContent = chunks.map((c) => c.content).join("\n\n");
-      db.ftsInsert(slug, fullContent);
-    } catch (err) {
-      // Indexing failure should not block page creation
+  const indexPageContent = (slug: string, body: string) =>
+    indexPageContentImpl(db, embedding, lance, slug, body).catch(err => {
       console.error(`indexPageContent failed for ${slug}:`, err);
-    }
-  }
+    });
 
   server.registerTool("put_page", {
     description: "Create or update a page. If the slug exists, updates it; otherwise creates a new page.",

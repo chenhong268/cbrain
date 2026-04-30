@@ -2,7 +2,43 @@
 
 > Current: `v0.3.0` — first stable release. 23 CLI commands, 40 MCP tools, 11 skills.
 
-## [Dev] — 2026-04-29
+## [Dev] — 2026-04-30
+
+### Architecture
+- **entities + concepts → `brain/nodes/`** — merged into single directory. Type field distinguishes entity vs concept, no more classification guesswork.
+
+### NER Prompt
+- **"Broad extraction" philosophy** — LLM casts wide net, downstream filters decide what to keep. Removed 65 lines of DO/DON'T rules, replaced with simple Golden Rule.
+- **Six-filter pipeline**: `findEntitySlug` (known entities) → `relevance` (low = skip) → `length` (≤20 chars) → `GENERIC_TERMS` (blacklist) → `isNoiseEntity` (phones/emails/titles) → `isValidEntityName` (fragments).
+
+### Watcher
+- **Polling mode** — replaced `fs.watch` (broken on iCloud Drive) with 3-second content-hash polling.
+- **Full pipeline** — watcher now runs wikilink extraction + NER (previously only synced file metadata).
+- **Reuses deps** — watcher shares embedding/lance instances with MCP server, no duplicate API connections.
+
+### Bug Fixes
+- `syncPage` now runs wikilink extraction (was missing — watcher-triggered syncs ignored `[[...]]`).
+- `isValidEntityName` no longer rejects names ending in 着 (was blocking 功能固着).
+- `resolveLinkTarget` in ingest uses `findEntitySlug` (was matching raw/ records as wikilink targets).
+- `upsertLinks` only deletes "mentions" links, preserving NER-created relations.
+- Image embeds (`![[img.png]]`) no longer treated as wikilinks.
+- `removeOrphans` uses `PageManager.delete()` for cascade cleanup.
+- `enrich.ts` reads `type` from DB directly (was broken by nodes/ migration).
+
+### Removed
+- `extractEnglishTerms` — regex-based English acronym extraction (LLM does this better).
+- `extractChineseRelations` — regex-based Chinese relation extraction (sentence fragment source).
+- `extractMarkdownLinks` — unused.
+- Duplicate `extractWikiLinks` in ingest.ts — unified with extract.ts.
+- Duplicate `indexPageContent` in MCP server — unified with shared.ts.
+- Dead `parallelBatch` method in sync.ts.
+- **Relevance scoring** — LLM rates each entity high/medium/low. Low-relevance entities don't create stubs.
+- **Prompt-level noise filter** — Skip generic gov bodies (国务院), political titles (中共党员), common locations.
+- **Regex extraction filter** — `isValidEntityName()` blocks sentence fragments (24小时内或下个, 色的管理者就) and wiki-link path entities (brainentities夏震宇).
+- **Entity/concept NER skip** — No more re-extracting entities from entity pages (cascade noise amplifier). Speed 4.8x, noise -79%.
+- **Parallel NER batching** — 5 concurrent LLM calls instead of sequential.
+- **Dollar amounts & time periods** — Explicitly excluded from extraction (93亿美元, Q1 2026).
+- **Sync time**: ~12min → 2.5min. **Auto-extracted noise**: 264 → 80 (-70%).
 
 ### Added
 - **`cbrain backup` / `cbrain restore`** — zip backup of vault + DB + LanceDB

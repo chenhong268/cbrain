@@ -7,7 +7,7 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import { PageManager } from "./page.js";
 import { AuditLogger } from "./audit.js";
-import { extractAll } from "./extract.js";
+import { extractWikiLinks, isValidEntityName } from "./extract.js";
 import type { Logger } from "./logger.js";
 import {
   chunkContent,
@@ -30,6 +30,7 @@ export interface SyncReport {
   nerEntities?: number;
   nerRelations?: number;
   nerEvents?: number;
+  nerLowRelevanceSkipped?: number;
   errorDetails?: string[];
 }
 
@@ -117,7 +118,9 @@ export class SyncManager {
       }
     }
 
-    // Phase 2: write to DB + LanceDB (sequential, SQLite-safe)
+    // Phase 2: write to DB + LanceDB (sequential, SQLite-safe), collect NER jobs
+    const nerJobs: Array<{ slug: string; text: string }> = [];
+
     for (const file of changed) {
       try {
         const existing = this.db
@@ -167,46 +170,30 @@ export class SyncManager {
           details: { chunks: chunkContent(file.body, this.chunkSize).length },
         }));
 
-        if (this.nerEngine && file.body.trim()) {
-          try {
-            const nerResult = await this.runNer(file.slug, file.body);
-            report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
-            report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
-            report.nerEvents = (report.nerEvents ?? 0) + nerResult.events;
-          } catch {
-            // NER failure should not block sync
-          }
+        // Collect NER jobs — run in parallel after Phase 2
+        // Skip entity/concept pages: re-NERing them creates cascade noise (entity → entity → ...)
+        if (this.nerEngine && file.body.trim() && file.type !== "entity" && file.type !== "concept") {
+          nerJobs.push({ slug: file.slug, text: file.body });
         }
 
-        // Zero-LLM regex extraction
+        // Wiki-link extraction — deterministic parse of [[...]] syntax
         if (this.pages && file.body.trim()) {
           try {
-            const rx = extractAll(file.body);
-
-            // English tech terms → concept stubs (NER often misses these)
-            for (const term of rx.englishTerms) {
-              const existingSlug = findEntitySlug(this.db, term);
-              if (!existingSlug) {
-                this.pages.create({
-                  title: term,
-                  type: "concept",
-                  body: `> Auto-extracted from [[${file.slug}]]`,
-                  tags: ["auto-extracted", "regex"],
-                });
-              }
-            }
-
-            // Wiki-links → entity stubs + links
+            const wikiLinks = extractWikiLinks(file.body);
             const writtenRelations: string[] = [];
-            for (const link of rx.wikiLinks) {
+
+            for (const link of wikiLinks) {
               const targetName = link.display ?? link.target;
+              // Skip path references ([[brain/nodes/xxx]]) — these are page refs, not entity refs
+              if (link.target.includes("/")) continue;
+              if (!isValidEntityName(targetName)) continue;
               const targetSlug = findEntitySlug(this.db, targetName);
               if (!targetSlug && link.target.length >= 2) {
                 this.pages.create({
                   title: targetName,
                   type: "entity",
                   body: `> Auto-extracted from [[${file.slug}]]`,
-                  tags: ["auto-extracted", "regex"],
+                  tags: ["auto-extracted", "wikilink"],
                 });
                 const newSlug = findEntitySlug(this.db, targetName);
                 if (newSlug) {
@@ -227,43 +214,8 @@ export class SyncManager {
                 }
               }
             }
-
-            // Chinese regex relations → auto-create stubs + write to links table
-            for (const rel of rx.chineseRelations) {
-              let fromSlug = findEntitySlug(this.db, rel.from);
-              let toSlug = findEntitySlug(this.db, rel.to);
-
-              // Auto-create stubs for missing entities
-              if (!fromSlug) {
-                this.pages.create({
-                  title: rel.from, type: "entity",
-                  body: `> Auto-extracted from [[${file.slug}]]`,
-                  tags: ["auto-extracted", "regex"],
-                });
-                fromSlug = findEntitySlug(this.db, rel.from);
-              } else {
-                this.pages.incrementMention(fromSlug);
-              }
-              if (!toSlug) {
-                this.pages.create({
-                  title: rel.to, type: "entity",
-                  body: `> Auto-extracted from [[${file.slug}]]`,
-                  tags: ["auto-extracted", "regex"],
-                });
-                toSlug = findEntitySlug(this.db, rel.to);
-              } else {
-                this.pages.incrementMention(toSlug);
-              }
-
-              if (fromSlug && toSlug && fromSlug !== toSlug) {
-                this.db.prepare(
-                  "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES (?, ?, ?, ?)"
-                ).run(fromSlug, toSlug, rel.relation, rel.context);
-                report.nerRelations = (report.nerRelations ?? 0) + 1;
-              }
-            }
           } catch {
-            // Regex extraction failure should not block sync
+            // Wiki-link extraction failure should not block sync
           }
         }
       } catch (err) {
@@ -276,6 +228,32 @@ export class SyncManager {
           pageSlug: slug,
           details: { error: msg },
         }));
+      }
+    }
+
+    // Phase 3: parallel NER batch (LLM calls in parallel, DB writes sequential)
+    if (nerJobs.length > 0 && this.nerEngine) {
+      const CONCURRENCY = 5;
+      for (let i = 0; i < nerJobs.length; i += CONCURRENCY) {
+        const batch = nerJobs.slice(i, i + CONCURRENCY);
+        // Parallel LLM calls
+        const extractions = await Promise.all(
+          batch.map(job => this.nerEngine!.extract(job.text).catch(() => null))
+        );
+        // Sequential DB writes
+        for (let j = 0; j < batch.length; j++) {
+          const extraction = extractions[j];
+          if (!extraction) continue;
+          try {
+            const nerResult = this.applyExtraction(batch[j].slug, extraction);
+            report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
+            report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
+            report.nerEvents = (report.nerEvents ?? 0) + nerResult.events;
+            report.nerLowRelevanceSkipped = (report.nerLowRelevanceSkipped ?? 0) + nerResult.lowRelevanceSkipped;
+          } catch {
+            // NER failure should not block sync
+          }
+        }
       }
     }
 
@@ -329,11 +307,11 @@ export class SyncManager {
     }
     const parsed = parseFrontmatter(content);
 
-    if (!parsed.frontmatter.slug && !page) {
+    const effectiveSlug = parsed.frontmatter.slug ?? slug;
+
+    if (!effectiveSlug && !page) {
       return { success: false, error: `No slug found and page not indexed: ${filePath}` };
     }
-
-    const effectiveSlug = parsed.frontmatter.slug ?? slug;
     const contentHash = hashContent(content);
 
     const existing = this.db
@@ -384,11 +362,56 @@ export class SyncManager {
       $details: JSON.stringify({ hash: contentHash }),
     });
 
-    if (this.nerEngine && parsed.body.trim()) {
+    // Skip NER on entity/concept pages — re-NERing them creates cascade noise
+    if (this.nerEngine && parsed.body.trim() && type !== "entity" && type !== "concept") {
       try {
-        await this.runNer(effectiveSlug, parsed.body);
+        const nerResult = await this.runNer(effectiveSlug, parsed.body);
+        if (nerResult.entities > 0) {
+          this.logger?.info("sync", `NER: ${nerResult.entities} entities from ${effectiveSlug}`);
+        }
+      } catch (e) {
+        this.logger?.warn("sync", `NER failed for ${effectiveSlug}: ${(e as Error).message}`);
+      }
+    }
+
+    // Wiki-link extraction — must run for ALL page types including entities
+    if (this.pages && parsed.body.trim()) {
+      try {
+        const wikiLinks = extractWikiLinks(parsed.body);
+        const writtenRelations: string[] = [];
+        for (const link of wikiLinks) {
+          const targetName = link.display ?? link.target;
+          if (link.target.includes("/")) continue;
+          if (!isValidEntityName(targetName)) continue;
+          const targetSlug = findEntitySlug(this.db, targetName);
+          if (!targetSlug && link.target.length >= 2) {
+            this.pages.create({
+              title: targetName,
+              type: "entity",
+              body: `> Auto-extracted from [[${effectiveSlug}]]`,
+              tags: ["auto-extracted", "wikilink"],
+            });
+            const newSlug = findEntitySlug(this.db, targetName);
+            if (newSlug) {
+              const key = `${effectiveSlug}\x00${newSlug}`;
+              if (!writtenRelations.includes(key)) {
+                writtenRelations.push(key);
+                this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+                  .run(effectiveSlug, newSlug, "提及");
+              }
+            }
+          } else if (targetSlug) {
+            this.pages.incrementMention(targetSlug);
+            const key = `${effectiveSlug}\x00${targetSlug}`;
+            if (!writtenRelations.includes(key)) {
+              writtenRelations.push(key);
+              this.db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+                .run(effectiveSlug, targetSlug, "提及");
+            }
+          }
+        }
       } catch {
-        // NER failure should not block sync
+        // Wiki-link extraction failure should not block sync
       }
     }
 
@@ -408,9 +431,11 @@ export class SyncManager {
         statSync(fullPath);
       } catch {
         orphans.push(page.slug);
-        this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({
-          $slug: page.slug,
-        });
+        if (this.pages) {
+          this.pages.delete(page.slug);
+        } else {
+          this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: page.slug });
+        }
         await this.lance.deleteByPageSlug(page.slug);
       }
     }
@@ -462,16 +487,24 @@ export class SyncManager {
   private async runNer(
     fromSlug: string,
     text: string
-  ): Promise<{ entities: number; relations: number; events: number }> {
-    if (!this.nerEngine) return { entities: 0, relations: 0, events: 0 };
+  ): Promise<{ entities: number; relations: number; events: number; lowRelevanceSkipped: number }> {
+    if (!this.nerEngine) return { entities: 0, relations: 0, events: 0, lowRelevanceSkipped: 0 };
 
     const extraction = await this.nerEngine.extract(text);
+    return this.applyExtraction(fromSlug, extraction);
+  }
+
+  private applyExtraction(
+    fromSlug: string,
+    extraction: import("./ner.js").ExtractionResult
+  ): { entities: number; relations: number; events: number; lowRelevanceSkipped: number } {
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {
-      return { entities: 0, relations: 0, events: 0 };
+      return { entities: 0, relations: 0, events: 0, lowRelevanceSkipped: 0 };
     }
 
     const entitySlugMap = new Map<string, string>();
     const stubsCreated: string[] = [];
+    let lowRelevanceSkipped = 0;
 
     for (const entity of extraction.entities) {
       const existingSlug = findEntitySlug(this.db, entity.name);
@@ -480,7 +513,7 @@ export class SyncManager {
         this.db.prepare(
           "UPDATE pages SET mention_count = mention_count + 1 WHERE slug = $slug"
         ).run({ $slug: existingSlug });
-      } else if (this.pages) {
+      } else if (this.pages && entity.relevance !== "low" && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({
           title: entity.name,
@@ -490,6 +523,8 @@ export class SyncManager {
         });
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.push(stub.slug);
+      } else if (entity.relevance === "low") {
+        lowRelevanceSkipped++;
       }
     }
 
@@ -534,6 +569,7 @@ export class SyncManager {
       entities: extraction.entities.length,
       relations: extraction.relations.length,
       events: extraction.events.length,
+      lowRelevanceSkipped,
     };
   }
 
@@ -558,7 +594,7 @@ export class SyncManager {
 
   private inferTypeFromPath(relPath: string): string {
     const typeFromDir: Record<string, string> = {
-      entities: "entity", concepts: "concept", events: "event",
+      nodes: "entity", events: "event",
       records: "record", sources: "source",
     };
     const parts = relPath.split("/");

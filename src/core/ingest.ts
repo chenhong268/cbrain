@@ -7,6 +7,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { LLMProvider } from "../llm/provider.js";
+import { extractWikiLinks, isValidEntityName } from "./extract.js";
 import {
   chunkContent,
   mapEntityType,
@@ -30,9 +31,10 @@ export interface NerResult {
   events: number;
   stubsCreated: string[];
   details: {
-    entities: Array<{ name: string; type: string }>;
+    entities: Array<{ name: string; type: string; relevance: string }>;
     relations: Array<{ from: string; to: string; relation: string }>;
     events: Array<{ date: string | null; description: string }>;
+    lowRelevanceSkipped: number;
   };
 }
 
@@ -42,8 +44,6 @@ export interface IngestResult {
   linksExtracted: number;
   ner?: NerResult;
 }
-
-const WIKI_LINK_RE = /\[\[([^\]]+)\]\]/g;
 
 export class IngestManager {
   private db: CBrainDB;
@@ -104,18 +104,19 @@ export class IngestManager {
       });
     }
 
-    const links = this.extractWikiLinks(body);
-    this.upsertLinks(slug, links);
+    const wikiLinks = extractWikiLinks(body);
+    this.upsertLinks(slug, wikiLinks);
 
     await this.writeIndexes(slug, chunks, embedResults);
 
-    // NER runs async — don't block ingest on LLM extraction
-    if (!overrides?.skipNer) this.runNer(slug, body).catch(() => {});
+    // NER runs async — skip on entity/concept pages (would create cascade noise)
+    const shouldNer = !overrides?.skipNer && type !== "entity" && type !== "concept";
+    if (shouldNer) this.runNer(slug, body).catch(() => {});
 
     return {
       slug,
       created: !existing,
-      linksExtracted: links.length,
+      linksExtracted: wikiLinks.length,
     };
   }
 
@@ -135,18 +136,19 @@ export class IngestManager {
       slug,
     });
 
-    const links = this.extractWikiLinks(body);
-    this.upsertLinks(slug, links);
+    const wikiLinks = extractWikiLinks(body);
+    this.upsertLinks(slug, wikiLinks);
 
     await this.writeIndexes(slug, chunks, embedResults);
 
-    // NER runs async — don't block ingest on LLM extraction
-    if (!input.skipNer) this.runNer(slug, body).catch(() => {});
+    // NER runs async — skip on entity/concept pages (would create cascade noise)
+    const shouldNer = !input.skipNer && type !== "entity" && type !== "concept";
+    if (shouldNer) this.runNer(slug, body).catch(() => {});
 
     return {
       slug,
       created: true,
-      linksExtracted: links.length,
+      linksExtracted: wikiLinks.length,
     };
   }
 
@@ -204,29 +206,21 @@ export class IngestManager {
     });
   }
 
-  extractWikiLinks(text: string): string[] {
-    const links = new Set<string>();
-    let match: RegExpExecArray | null;
-    const re = new RegExp(WIKI_LINK_RE.source, WIKI_LINK_RE.flags);
-
-    while ((match = re.exec(text)) !== null) {
-      links.add(match[1]);
-    }
-
-    return Array.from(links);
-  }
-
-  private upsertLinks(fromSlug: string, linkTargets: string[]): void {
+  private upsertLinks(fromSlug: string, wikiLinks: import("./extract.js").WikiLink[]): void {
+    // Only remove wikilink-based "mentions" links — NER-created relations are preserved
     this.db
-      .prepare("DELETE FROM links WHERE from_slug = $slug")
+      .prepare("DELETE FROM links WHERE from_slug = $slug AND relation = 'mentions'")
       .run({ $slug: fromSlug });
 
     const insertLink = this.db.prepare(
       `INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES ($from, $to, $rel)`
     );
 
-    for (const target of linkTargets) {
-      const toSlug = this.resolveLinkTarget(target);
+    for (const link of wikiLinks) {
+      const targetName = link.display ?? link.target;
+      if (link.target.includes("/")) continue;
+      if (!isValidEntityName(targetName)) continue;
+      const toSlug = this.resolveLinkTarget(targetName);
       if (toSlug && toSlug !== fromSlug) {
         insertLink.run({ $from: fromSlug, $to: toSlug, $rel: "mentions" });
         this.pages.incrementMention(toSlug);
@@ -235,17 +229,9 @@ export class IngestManager {
   }
 
   private resolveLinkTarget(linkText: string): string | null {
-    const bySlug = this.db
-      .prepare("SELECT slug FROM pages WHERE slug = $text")
-      .get({ $text: linkText }) as { slug: string } | null;
-    if (bySlug) return bySlug.slug;
-
-    const byTitle = this.db
-      .prepare("SELECT slug FROM pages WHERE title = $text")
-      .get({ $text: linkText }) as { slug: string } | null;
-    if (byTitle) return byTitle.slug;
-
-    return null;
+    // Use findEntitySlug which only matches entity/concept types —
+    // raw/ records and events are source material, not wikilink targets.
+    return findEntitySlug(this.db, linkText);
   }
 
   private async runNer(
@@ -258,19 +244,20 @@ export class IngestManager {
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {
       return {
         entities: 0, relations: 0, events: 0, stubsCreated: [],
-        details: { entities: [], relations: [], events: [] },
+        details: { entities: [], relations: [], events: [], lowRelevanceSkipped: 0 },
       };
     }
 
     const stubsCreated: string[] = [];
     const entitySlugMap = new Map<string, string>();
+    let lowRelevanceSkipped = 0;
 
     for (const entity of extraction.entities) {
       const existingSlug = findEntitySlug(this.db, entity.name);
       if (existingSlug) {
         entitySlugMap.set(entity.name, existingSlug);
         this.pages.incrementMention(existingSlug);
-      } else {
+      } else if (entity.relevance !== "low" && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({
           title: entity.name,
@@ -280,6 +267,8 @@ export class IngestManager {
         });
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.push(stub.slug);
+      } else {
+        lowRelevanceSkipped++;
       }
     }
 
@@ -325,9 +314,10 @@ export class IngestManager {
       events: extraction.events.length,
       stubsCreated,
       details: {
-        entities: extraction.entities.map(e => ({ name: e.name, type: e.type })),
+        entities: extraction.entities.map(e => ({ name: e.name, type: e.type, relevance: e.relevance })),
         relations: writtenRelations,
         events: extraction.events.map(e => ({ date: e.date, description: e.description })),
+        lowRelevanceSkipped,
       },
     };
   }
