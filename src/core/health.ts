@@ -1,8 +1,10 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 import { AuditLogger, type MetricsSnapshot } from "./audit.js";
 import type { Logger } from "./logger.js";
+
+// ─── Types ────────────────────────────────────────────────────
 
 export interface HealthDimension {
   name: string;
@@ -23,8 +25,51 @@ export interface HealthReport {
   overallStatus: "pass" | "warn" | "fail";
   dimensions: HealthDimension[];
   metrics: MetricsSnapshot;
-  reportPath?: string;
+  delta?: HealthDelta;
+  reportPaths?: ReportPaths;
 }
+
+export interface ReportPaths {
+  summary: string;
+  actions: string;
+  detail: string;
+}
+
+// ─── Delta Types ──────────────────────────────────────────────
+
+interface HealthState {
+  timestamp: string;
+  slugRunCounts: Record<string, number>;
+  dimensions: Array<{
+    name: string;
+    status: "pass" | "warn" | "fail";
+    issueSlugs: string[];
+    issueCount: number;
+  }>;
+}
+
+export interface DimensionDelta {
+  name: string;
+  newIssues: HealthIssue[];
+  resolvedSlugs: string[];
+  chronicSlugs: string[];
+  unchangedCount: number;
+  previousCount: number;
+  currentCount: number;
+}
+
+export interface HealthDelta {
+  previousTimestamp: string;
+  dimensions: DimensionDelta[];
+  totalNew: number;
+  totalResolved: number;
+  totalChronic: number;
+}
+
+// ─── HealthChecker ────────────────────────────────────────────
+
+const CHRONIC_THRESHOLD = 3;
+const RETENTION_DAYS = 7;
 
 export class HealthChecker {
   private db: CBrainDB;
@@ -70,30 +115,338 @@ export class HealthChecker {
       metrics,
     };
 
-    const reportPath = this.writeReport(report);
+    // Delta computation
+    const prevState = this.loadState();
+    const delta = this.computeDeltas(dimensions, prevState);
+    report.delta = delta;
+
+    // Save new state
+    this.saveState(dimensions, prevState, timestamp);
+
+    // Write three-layer output
+    const reportPaths = this.writeReports(report);
+    report.reportPaths = reportPaths;
+
     this.audit.writeMetrics(metrics);
     this.audit.log(AuditLogger.entry("health_check", overallStatus === "fail" ? "error" : "success", {
       details: {
         dimensions: dimensions.length,
         issues: dimensions.reduce((sum, d) => sum + d.issues.length, 0),
+        newIssues: delta.totalNew,
+        resolvedIssues: delta.totalResolved,
+        chronicIssues: delta.totalChronic,
         durationMs: Date.now() - start,
       },
     }));
 
-    return { ...report, reportPath };
-    this.audit.writeMetrics(metrics);
-    this.audit.log(AuditLogger.entry("health_check", overallStatus === "fail" ? "error" : "success", {
-      details: {
-        dimensions: dimensions.length,
-        issues: dimensions.reduce((sum, d) => sum + d.issues.length, 0),
-        durationMs: Date.now() - start,
-      },
-    }));
+    this.cleanupOldReports();
 
     return report;
   }
 
-  // ─── Dimension 0: Error Log Check ─────────────────────────
+  // ─── State Persistence ────────────────────────────────────
+
+  private statePath(): string {
+    return join(this.outputsDir, "health", "state.json");
+  }
+
+  private loadState(): HealthState | null {
+    const path = this.statePath();
+    if (!existsSync(path)) return null;
+    try {
+      return JSON.parse(readFileSync(path, "utf-8")) as HealthState;
+    } catch {
+      return null;
+    }
+  }
+
+  private saveState(dimensions: HealthDimension[], prevState: HealthState | null, timestamp: string): void {
+    const prevCounts = prevState?.slugRunCounts ?? {};
+    const currentCounts: Record<string, number> = {};
+
+    for (const dim of dimensions) {
+      for (const issue of dim.issues) {
+        currentCounts[issue.slug] = (prevCounts[issue.slug] ?? 0) + 1;
+      }
+    }
+
+    const state: HealthState = {
+      timestamp,
+      slugRunCounts: currentCounts,
+      dimensions: dimensions.map(d => ({
+        name: d.name,
+        status: d.status,
+        issueSlugs: d.issues.map(i => i.slug),
+        issueCount: d.issues.length,
+      })),
+    };
+
+    mkdirSync(join(this.outputsDir, "health"), { recursive: true });
+    writeFileSync(this.statePath(), JSON.stringify(state, null, 2), "utf-8");
+  }
+
+  // ─── Delta Computation ────────────────────────────────────
+
+  private computeDeltas(dimensions: HealthDimension[], prevState: HealthState | null): HealthDelta {
+    if (!prevState) {
+      return {
+        previousTimestamp: "",
+        dimensions: dimensions.map(d => ({
+          name: d.name,
+          newIssues: d.issues,
+          resolvedSlugs: [],
+          chronicSlugs: [],
+          unchangedCount: 0,
+          previousCount: 0,
+          currentCount: d.issues.length,
+        })),
+        totalNew: dimensions.reduce((s, d) => s + d.issues.length, 0),
+        totalResolved: 0,
+        totalChronic: 0,
+      };
+    }
+
+    const prevDimMap = new Map(prevState.dimensions.map(d => [d.name, d]));
+    const prevSlugs = new Set(prevState.slugRunCounts ? Object.keys(prevState.slugRunCounts) : []);
+    const dimDeltas: DimensionDelta[] = [];
+
+    for (const dim of dimensions) {
+      const prevDim = prevDimMap.get(dim.name);
+      const prevSlugSet = new Set(prevDim?.issueSlugs ?? []);
+      const curSlugSet = new Set(dim.issues.map(i => i.slug));
+
+      const newIssues = dim.issues.filter(i => !prevSlugSet.has(i.slug));
+      const resolvedSlugs = [...prevSlugSet].filter(s => !curSlugSet.has(s));
+      const chronicSlugs = dim.issues
+        .filter(i => (prevState.slugRunCounts?.[i.slug] ?? 0) >= CHRONIC_THRESHOLD)
+        .map(i => i.slug);
+      const unchangedCount = dim.issues.filter(i => prevSlugSet.has(i.slug)).length;
+
+      dimDeltas.push({
+        name: dim.name,
+        newIssues,
+        resolvedSlugs,
+        chronicSlugs,
+        unchangedCount,
+        previousCount: prevDim?.issueCount ?? 0,
+        currentCount: dim.issues.length,
+      });
+    }
+
+    return {
+      previousTimestamp: prevState.timestamp,
+      dimensions: dimDeltas,
+      totalNew: dimDeltas.reduce((s, d) => s + d.newIssues.length, 0),
+      totalResolved: dimDeltas.reduce((s, d) => s + d.resolvedSlugs.length, 0),
+      totalChronic: dimDeltas.reduce((s, d) => s + d.chronicSlugs.length, 0),
+    };
+  }
+
+  // ─── Three-Layer Report Writing ───────────────────────────
+
+  private writeReports(report: HealthReport): ReportPaths {
+    const healthDir = join(this.outputsDir, "health");
+    mkdirSync(healthDir, { recursive: true });
+
+    const date = report.timestamp.slice(0, 10);
+    const summaryPath = join(healthDir, `summary-${date}.md`);
+    const actionsPath = join(healthDir, `actions-${date}.md`);
+    const detailPath = join(healthDir, `detail-${date}.json`);
+
+    this.writeSummary(report, summaryPath);
+    this.writeActions(report, actionsPath);
+    this.writeDetail(report, detailPath);
+
+    return { summary: summaryPath, actions: actionsPath, detail: detailPath };
+  }
+
+  private writeSummary(report: HealthReport, filePath: string): void {
+    const date = report.timestamp.slice(0, 10);
+    const icon = (s: string) => s === "pass" ? "✅" : s === "warn" ? "⚠️" : "❌";
+    const delta = report.delta;
+
+    let md = `# 健康检查 — ${date}\n\n`;
+    md += `**总体状态**: ${icon(report.overallStatus)} ${report.overallStatus === "pass" ? "通过" : report.overallStatus === "warn" ? "警告" : "失败"}\n\n`;
+
+    // Metrics overview
+    md += `## 指标总览\n\n`;
+    md += `| 指标 | 数值 |\n|------|------|\n`;
+    md += `| 总页面 | ${report.metrics.totalPages} |\n`;
+    md += `| 实体 / 概念 | ${report.metrics.entities} / ${report.metrics.concepts} |\n`;
+    md += `| 链接 | ${report.metrics.totalLinks} |\n`;
+    md += `| 孤岛 / 空壳 | ${report.metrics.orphans} / ${report.metrics.bareStubs} |\n\n`;
+
+    // Delta section
+    if (delta && delta.previousTimestamp) {
+      const prevDate = delta.previousTimestamp.slice(0, 10);
+      md += `## 变化（vs ${prevDate}）\n\n`;
+
+      const changes: string[] = [];
+      if (delta.totalNew > 0) changes.push(`🆕 新增 ${delta.totalNew} 个问题`);
+      if (delta.totalResolved > 0) changes.push(`✅ 消失 ${delta.totalResolved} 个`);
+      if (delta.totalChronic > 0) changes.push(`🔁 慢性 ${delta.totalChronic} 个`);
+
+      for (const dd of delta.dimensions) {
+        if (dd.currentCount === dd.previousCount || dd.currentCount === 0) continue;
+        const diff = dd.currentCount - dd.previousCount;
+        const arrow = diff > 0 ? `↑${diff}` : diff < 0 ? `↓${Math.abs(diff)}` : "→";
+        if (diff !== 0) {
+          changes.push(`${dd.name} ${dd.previousCount}→${dd.currentCount}（${arrow}）`);
+        }
+      }
+
+      if (changes.length > 0) {
+        md += changes.map(c => `- ${c}`).join("\n") + "\n\n";
+      } else {
+        md += "无变化。\n\n";
+      }
+    } else {
+      md += `## 变化\n\n首次健康检查，无历史对比数据。\n\n`;
+    }
+
+    // Per-dimension overview table
+    md += `## 各维度一览\n\n`;
+    md += `| 维度 | 状态 | 问题数 | 变化 |\n|------|------|--------|------|\n`;
+    for (const dim of report.dimensions) {
+      const dd = delta?.dimensions.find(d => d.name === dim.name);
+      let change = "";
+      if (dd) {
+        if (dd.previousCount === 0 && dd.currentCount === 0) change = "—";
+        else if (dd.previousCount === 0) change = `+${dd.currentCount}`;
+        else {
+          const diff = dd.currentCount - dd.previousCount;
+          change = diff > 0 ? `↑${diff}` : diff < 0 ? `↓${Math.abs(diff)}` : "→";
+        }
+      }
+      md += `| ${dim.name} | ${icon(dim.status)} | ${dim.issues.length} | ${change} |\n`;
+    }
+
+    writeFileSync(filePath, md, "utf-8");
+  }
+
+  private writeActions(report: HealthReport, filePath: string): void {
+    const date = report.timestamp.slice(0, 10);
+    const delta = report.delta;
+
+    let md = `# 行动清单 — ${date}\n\n`;
+
+    if (!delta || delta.totalNew === 0) {
+      md += "无新增问题，知识库状态稳定。\n";
+      writeFileSync(filePath, md, "utf-8");
+      return;
+    }
+
+    const allNew = delta.dimensions.flatMap(d =>
+      d.newIssues.map(i => ({ ...i, dimension: d.name }))
+    );
+
+    // Sort by severity: high > medium > low
+    const severityOrder = { high: 0, medium: 1, low: 2 };
+    allNew.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+
+    // Severity folding
+    const high = allNew.filter(i => i.severity === "high");
+    const medium = allNew.filter(i => i.severity === "medium");
+    const low = allNew.filter(i => i.severity === "low");
+
+    if (high.length > 0) {
+      md += `## 🔴 高优先级\n\n`;
+      for (const issue of high) {
+        md += `- **${issue.dimension}**: [[${issue.slug}]] ${issue.description}\n`;
+      }
+      md += "\n";
+    }
+
+    if (medium.length > 0) {
+      md += `## 🟡 中优先级\n\n`;
+      const shown = medium.slice(0, 10);
+      for (const issue of shown) {
+        md += `- **${issue.dimension}**: [[${issue.slug}]] ${issue.description}\n`;
+      }
+      if (medium.length > 10) {
+        md += `- …还有 ${medium.length - 10} 个\n`;
+      }
+      md += "\n";
+    }
+
+    if (low.length > 0) {
+      md += `## 🟢 低优先级\n\n`;
+      md += `${low.length} 个低优先级问题（用 \`cbrain health --full\` 查看详情）\n\n`;
+    }
+
+    writeFileSync(filePath, md, "utf-8");
+  }
+
+  private writeDetail(report: HealthReport, filePath: string): void {
+    // Strip delta from detail to avoid circular history
+    const { delta: _, ...reportData } = report;
+    writeFileSync(filePath, JSON.stringify(reportData, null, 2), "utf-8");
+  }
+
+  // ─── Full Markdown Report (for --full) ────────────────────
+
+  writeFullReport(report: HealthReport): string {
+    const statusIcon = (s: string) =>
+      s === "pass" ? "✅" : s === "warn" ? "⚠️" : "❌";
+
+    let md = `# 健康检查（完整） — ${report.timestamp.slice(0, 10)}\n\n`;
+    md += `**总体状态**: ${statusIcon(report.overallStatus)}\n\n`;
+
+    md += `## 指标总览\n\n`;
+    md += `| 指标 | 数值 |\n|------|------|\n`;
+    md += `| 总页面数 | ${report.metrics.totalPages} |\n`;
+    md += `| 实体 | ${report.metrics.entities} |\n`;
+    md += `| 概念 | ${report.metrics.concepts} |\n`;
+    md += `| 事件 / 记录 / 来源 | ${report.metrics.events} / ${report.metrics.records} / ${report.metrics.sources} |\n`;
+    md += `| 总链接数 | ${report.metrics.totalLinks} |\n`;
+    md += `| 平均提及次数 | ${report.metrics.avgMentionsPerPage.toFixed(1)} |\n`;
+    md += `| 孤岛页面 | ${report.metrics.orphans} |\n`;
+    md += `| 空壳 stub | ${report.metrics.bareStubs} |\n`;
+    md += `| 概念/来源比 | ${report.metrics.conceptsPerSource.toFixed(2)} |\n\n`;
+
+    for (const dim of report.dimensions) {
+      md += `## ${dim.name} ${statusIcon(dim.status)}\n\n`;
+      if (dim.issues.length === 0) {
+        md += `未发现问题。\n\n`;
+        continue;
+      }
+      md += `| 严重程度 | 页面 | 问题 | 建议 |\n|----------|------|------|------|\n`;
+      for (const issue of dim.issues) {
+        const pageRef = issue.slug === "-" ? "-" : `[[${issue.slug}]]`;
+        md += `| ${issue.severity} | ${pageRef} | ${issue.description} | ${issue.suggestion ?? "-"} |\n`;
+      }
+      md += `\n`;
+    }
+
+    return md;
+  }
+
+  // ─── Rolling Cleanup ──────────────────────────────────────
+
+  private cleanupOldReports(): void {
+    const healthDir = join(this.outputsDir, "health");
+    if (!existsSync(healthDir)) return;
+
+    const now = Date.now();
+    const maxAge = RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+    const files = readdirSync(healthDir);
+    for (const file of files) {
+      if (file === "state.json") continue;
+
+      const filePath = join(healthDir, file);
+      try {
+        const stat = statSync(filePath);
+        if (now - stat.mtimeMs > maxAge) {
+          rmSync(filePath, { force: true });
+        }
+      } catch {
+        // Skip files we can't stat
+      }
+    }
+  }
+
+  // ─── Dimension Checks (unchanged logic) ───────────────────
 
   private checkErrors(): HealthDimension {
     const issues: HealthIssue[] = [];
@@ -119,8 +472,6 @@ export class HealthChecker {
     };
   }
 
-  // ─── Dimension 1: Semantic Dedup ──────────────────────────
-
   private checkSemanticDedup(): HealthDimension {
     const issues: HealthIssue[] = [];
 
@@ -143,7 +494,6 @@ export class HealthChecker {
       }
     }
 
-    // Also check for titles that differ only by punctuation/whitespace
     const strippedMap = new Map<string, { slug: string; title: string }>();
     for (const row of rows) {
       const stripped = row.title.replace(/[\s\-_·.]/g, "").toLowerCase();
@@ -171,14 +521,11 @@ export class HealthChecker {
     };
   }
 
-  // ─── Dimension 1b: Slug Collision Detection ─────────────────
-
   private checkSlugCollisions(): HealthDimension {
     const issues: HealthIssue[] = [];
 
     const entities = this.db.getEntities();
 
-    // Group slugs by base name (strip numbered suffix like -1, -2)
     const groups = new Map<string, Array<{ slug: string; title: string }>>();
     for (const row of entities) {
       const base = row.slug.replace(/-\d+$/, "");
@@ -187,7 +534,7 @@ export class HealthChecker {
       groups.set(base, list);
     }
 
-    for (const [base, items] of groups) {
+    for (const [, items] of groups) {
       if (items.length <= 1) continue;
       for (const item of items) {
         const others = items.filter(i => i.slug !== item.slug).map(i => `[[${i.slug}]]`).join(", ");
@@ -208,23 +555,16 @@ export class HealthChecker {
     };
   }
 
-  // ─── Dimension 2: Consistency ─────────────────────────────
-
   private checkConsistency(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    // Check for relation types that are not in the standard English list
     const standardRelations = new Set([
       "任职于", "认识", "投资了", "创立了", "参加了",
       "提及", "竞争对手", "合作伙伴", "子公司",
       "成员", "指导", "创建者", "影响", "其他",
-      // Employment & education
       "下级", "汇报给", "负责", "职位",
       "就读于", "毕业于", "专业", "专业为",
-      // Family
-      "配偶关系",
-      // Organization
-      "条线",
+      "配偶关系", "条线",
     ]);
 
     const links = this.db.getAllLinks();
@@ -246,7 +586,6 @@ export class HealthChecker {
       });
     }
 
-    // Check for pages missing frontmatter fields
     const pagesMissingType = this.db.getPagesWithEmptyType();
 
     for (const p of pagesMissingType) {
@@ -265,8 +604,6 @@ export class HealthChecker {
       issues,
     };
   }
-
-  // ─── Dimension 3: Completeness ────────────────────────────
 
   private checkCompleteness(): HealthDimension {
     const issues: HealthIssue[] = [];
@@ -290,8 +627,6 @@ export class HealthChecker {
     };
   }
 
-  // ─── Dimension 4: Island Detection ────────────────────────
-
   private checkIslands(): HealthDimension {
     const issues: HealthIssue[] = [];
 
@@ -313,8 +648,6 @@ export class HealthChecker {
       issues,
     };
   }
-
-  // ─── Dimension 5: New Entity Suggestions ──────────────────
 
   private checkNewSuggestions(): HealthDimension {
     const issues: HealthIssue[] = [];
@@ -349,8 +682,6 @@ export class HealthChecker {
     };
   }
 
-  // ─── Dimension 6: Attention Analysis ─────────────────────
-
   private checkAttention(): HealthDimension {
     const issues: HealthIssue[] = [];
 
@@ -366,7 +697,6 @@ export class HealthChecker {
       });
     }
 
-    // Pages with high mention count but low content (popular but thin)
     const popularThin = this.db.getPopularThinPages(3);
 
     for (const page of popularThin) {
@@ -389,8 +719,6 @@ export class HealthChecker {
       issues,
     };
   }
-
-  // ─── Dimension 7: Data Readiness ────────────────────────
 
   private checkDataReadiness(): HealthDimension {
     const issues: HealthIssue[] = [];
@@ -434,8 +762,6 @@ export class HealthChecker {
       issues,
     };
   }
-
-  // ─── Dimension 8: Source Quality ────────────────────────
 
   private checkSourceQuality(): HealthDimension {
     const issues: HealthIssue[] = [];
@@ -504,52 +830,5 @@ export class HealthChecker {
       conceptsPerSource,
       indexSizeKB: 0,
     };
-  }
-
-  // ─── Report Writer ────────────────────────────────────────
-
-  private writeReport(report: HealthReport): string {
-    const healthDir = join(this.outputsDir, "health");
-    mkdirSync(healthDir, { recursive: true });
-
-    const date = report.timestamp.slice(0, 10);
-    const filePath = join(healthDir, `健康检查-${date}.md`);
-
-    const statusIcon = (s: string) =>
-      s === "pass" ? "✅" : s === "warn" ? "⚠️" : "❌";
-
-    const STATUS_CN: Record<string, string> = { pass: "通过", warn: "警告", fail: "失败" };
-
-    let md = `# 健康检查 — ${date}\n\n`;
-    md += `**总体状态**: ${statusIcon(report.overallStatus)} ${STATUS_CN[report.overallStatus] ?? report.overallStatus}\n\n`;
-
-    md += `## 指标总览\n\n`;
-    md += `| 指标 | 数值 |\n|------|------|\n`;
-    md += `| 总页面数 | ${report.metrics.totalPages} |\n`;
-    md += `| 实体 | ${report.metrics.entities} |\n`;
-    md += `| 概念 | ${report.metrics.concepts} |\n`;
-    md += `| 事件 / 记录 / 来源 | ${report.metrics.events} / ${report.metrics.records} / ${report.metrics.sources} |\n`;
-    md += `| 总链接数 | ${report.metrics.totalLinks} |\n`;
-    md += `| 平均提及次数 | ${report.metrics.avgMentionsPerPage.toFixed(1)} |\n`;
-    md += `| 孤岛页面 | ${report.metrics.orphans} |\n`;
-    md += `| 空壳 stub | ${report.metrics.bareStubs} |\n`;
-    md += `| 概念/来源比 | ${report.metrics.conceptsPerSource.toFixed(2)} |\n\n`;
-
-    for (const dim of report.dimensions) {
-      md += `## ${dim.name} ${statusIcon(dim.status)}\n\n`;
-      if (dim.issues.length === 0) {
-        md += `未发现问题。\n\n`;
-        continue;
-      }
-      md += `| 严重程度 | 页面 | 问题 | 建议 |\n|----------|------|------|------|\n`;
-      for (const issue of dim.issues) {
-        const pageRef = issue.slug === "-" ? "-" : `[[${issue.slug}]]`;
-        md += `| ${issue.severity} | ${pageRef} | ${issue.description} | ${issue.suggestion ?? "-"} |\n`;
-      }
-      md += `\n`;
-    }
-
-    writeFileSync(filePath, md, "utf-8");
-    return filePath;
   }
 }

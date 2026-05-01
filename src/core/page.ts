@@ -41,7 +41,7 @@ export interface Page {
 
 export class PageManager {
   private db: CBrainDB;
-  private vaultPath: string;
+  readonly vaultPath: string;
   private logger: Logger | null;
 
   constructor(db: CBrainDB, vaultPath: string, logger?: Logger) {

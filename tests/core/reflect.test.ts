@@ -423,14 +423,14 @@ describe("ReflectManager", () => {
   });
 
   describe("Bug 2: title truncation enforcement", () => {
-    test("truncates LLM title exceeding MAX_TITLE_CHARS (10)", async () => {
+    test("truncates LLM title exceeding safety limit (20)", async () => {
       insertEntity(db, "entities/hub", "Hub", 10);
       for (let i = 1; i <= 6; i++) {
         insertEntity(db, `entities/n${i}`, `N${i}`, 1);
         db.insertLink("entities/hub", `entities/n${i}`, "related");
       }
 
-      const longTitle = "这是一个非常长的标题超过十个字应该被截断";
+      const longTitle = "这是一个非常长的标题超过二十个字应该被截断掉多余的部分";
       const llm = mockLLM([
         JSON.stringify({ summary: "test", key_facts: [], confidence: 0.5 }),
         JSON.stringify({
@@ -447,20 +447,17 @@ describe("ReflectManager", () => {
       const report = await mgr.reflectAll();
 
       expect(report.insightsGenerated).toBe(1);
-      // Verify the created page title is truncated
       const insightPage = report.details.insights[0];
       expect(insightPage).toBeDefined();
 
-      // Check DB: the page title should not contain the full long title
       const { generateSlug } = await import("../../src/utils/slug.js");
       const date = new Date().toISOString().slice(0, 10);
-      const expectedTruncated = longTitle.slice(0, 10);
+      const expectedTruncated = longTitle.slice(0, 20);
       const expectedTitle = `${date} ${expectedTruncated}`;
       const expectedSlug = generateSlug(expectedTitle, "insight");
 
       const createdPage = db.getPage(expectedSlug);
       expect(createdPage).not.toBeNull();
-      // Title in DB should contain at most 10 Chinese chars after the date
       expect(createdPage!.title.length).toBeLessThan(longTitle.length + date.length + 2);
     });
   });

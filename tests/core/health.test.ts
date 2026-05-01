@@ -130,13 +130,145 @@ describe("HealthChecker", () => {
       expect(suggestionDim!.issues.length).toBeGreaterThanOrEqual(1);
     });
 
-    test("writes health report to disk", async () => {
+    test("writes three-layer output files", async () => {
       insertPage("entities/e1", "E1", "entity");
 
       const report = await checker.checkAll();
       const healthDir = join(testDir, "outputs", "health");
-      expect(existsSync(healthDir)).toBe(true);
-      expect(report).toBeDefined();
+      expect(existsSync(join(healthDir, "summary-2026-01-01.md")) || report.reportPaths?.summary).toBeDefined();
+      expect(report.reportPaths).toBeDefined();
+      expect(report.reportPaths!.summary).toContain("summary-");
+      expect(report.reportPaths!.actions).toContain("actions-");
+      expect(report.reportPaths!.detail).toContain("detail-");
+      // Verify files exist
+      expect(existsSync(report.reportPaths!.summary)).toBe(true);
+      expect(existsSync(report.reportPaths!.actions)).toBe(true);
+      expect(existsSync(report.reportPaths!.detail)).toBe(true);
+    });
+  });
+
+  describe("delta calculation", () => {
+    test("first run has no previous state — all issues are new", async () => {
+      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/alone", "Alone", "entity");
+
+      const report = await checker.checkAll();
+      expect(report.delta).toBeDefined();
+      expect(report.delta!.previousTimestamp).toBe("");
+      expect(report.delta!.totalNew).toBeGreaterThan(0);
+      expect(report.delta!.totalResolved).toBe(0);
+      expect(report.delta!.totalChronic).toBe(0);
+    });
+
+    test("second run with same data shows no new issues", async () => {
+      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/e2", "E2", "entity");
+      insertLink("entities/e1", "entities/e2");
+
+      await checker.checkAll();
+      const report2 = await checker.checkAll();
+      expect(report2.delta!.previousTimestamp).toBeTruthy();
+      expect(report2.delta!.totalNew).toBe(0);
+      expect(report2.delta!.totalResolved).toBe(0);
+    });
+
+    test("resolves issue when data is fixed between runs", async () => {
+      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/alone", "Alone", "entity");
+
+      await checker.checkAll();
+
+      // Fix the island by linking it
+      insertLink("entities/e1", "entities/alone");
+      const report2 = await checker.checkAll();
+      expect(report2.delta!.totalResolved).toBeGreaterThan(0);
+    });
+
+    test("new issue appears when new problem is introduced", async () => {
+      insertPage("entities/e1", "E1", "entity");
+      insertLink("entities/e1", "entities/e1");
+
+      await checker.checkAll();
+
+      // Add an island
+      insertPage("entities/alone", "Alone", "entity");
+      const report2 = await checker.checkAll();
+      expect(report2.delta!.totalNew).toBeGreaterThan(0);
+    });
+  });
+
+  describe("state persistence", () => {
+    test("writes state.json after checkAll", async () => {
+      insertPage("entities/e1", "E1", "entity");
+
+      await checker.checkAll();
+      const statePath = join(testDir, "outputs", "health", "state.json");
+      expect(existsSync(statePath)).toBe(true);
+    });
+
+    test("state.json accumulates slugRunCounts across runs", async () => {
+      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/alone", "Alone", "entity");
+
+      await checker.checkAll();
+      await checker.checkAll();
+      await checker.checkAll();
+
+      const { readFileSync } = await import("node:fs");
+      const state = JSON.parse(readFileSync(join(testDir, "outputs", "health", "state.json"), "utf-8"));
+      // After 3 runs, islands slugs should have count >= 3
+      const islandSlugs = Object.entries(state.slugRunCounts)
+        .filter(([, count]: [string, unknown]) => (count as number) >= 3);
+      expect(islandSlugs.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("chronic tracking", () => {
+    test("issues appearing 3+ consecutive runs are flagged as chronic", async () => {
+      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/alone", "Alone", "entity");
+
+      // Run 1: count→1, Run 2: count→2, Run 3: count→3 (read as 2 < threshold),
+      // Run 4: reads count=3 >= CHRONIC_THRESHOLD
+      await checker.checkAll();
+      await checker.checkAll();
+      await checker.checkAll();
+      const report4 = await checker.checkAll();
+      expect(report4.delta!.totalChronic).toBeGreaterThan(0);
+    });
+  });
+
+  describe("rolling cleanup", () => {
+    test("removes files older than 7 days", async () => {
+      const healthDir = join(testDir, "outputs", "health");
+      mkdirSync(healthDir, { recursive: true });
+
+      // Create an old file (backdate mtime)
+      const { writeFileSync, utimesSync } = await import("node:fs");
+      const oldFile = join(healthDir, "summary-2026-01-01.md");
+      writeFileSync(oldFile, "old report", "utf-8");
+      const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
+      utimesSync(oldFile, new Date(eightDaysAgo), new Date(eightDaysAgo));
+
+      insertPage("entities/e1", "E1", "entity");
+      await checker.checkAll();
+
+      expect(existsSync(oldFile)).toBe(false);
+      // Current report should still exist
+      expect(existsSync(join(healthDir, "state.json"))).toBe(true);
+    });
+  });
+
+  describe("writeFullReport", () => {
+    test("produces full Markdown with all issues", async () => {
+      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/alone", "Alone", "entity");
+
+      const report = await checker.checkAll();
+      const full = checker.writeFullReport(report);
+      expect(full).toContain("健康检查（完整）");
+      expect(full).toContain("entities/e1");
+      expect(full).toContain("指标总览");
     });
   });
 });

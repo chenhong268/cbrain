@@ -4,30 +4,27 @@
 
 ## [Dev] — 2026-05-01
 
-### ReflectManager — Dream Pipeline Stage 3
+### ReflectManager — 洞察质量 + 速度优化
 
-- **Entity Synthesis** — 对 mention_count ≥ 3 的实体，LLM 生成综合描述写回 page body。
-- **Relation Inference** — 找 2-hop 间接相连的实体对，LLM 推理隐含直接关系，confidence ≥ 0.7 才写入。
-- **Insight Generation** — 对高连接度实体簇（≥ 5 邻居），LLM 生成跨实体洞察，写为独立 insight page。
-- **`cbrain reflect` CLI 命令** — 可独立运行，也可通过 `cbrain dream` 自动触发。
-- **Dream pipeline 集成** — Stage 3: sync → enrich → **reflect** → cleanup。
+- **去AI化 prompt 重写** — INSIGHT_SYSTEM 全部重写：短句、口语化、有节奏、不铺垫。给出好坏范例对比，禁止"不仅...而且""揭示""表明"等 AI 套路句式。要求洞察是推理结论，不是摘要复述。
+- **glm-5-turbo 模型** — 通过 coding plan 端点调用，质量远超 glm-4-flash。
+- **串行阶段执行** — reflectAll() 从 Promise.all 并行改为串行，避免三阶段同时打 API 导致 429。
+- **Retry + 指数退避** — callLLM 加 3 次重试，退避 3s/6s/9s。
+- **CONCURRENCY=2** — 从 5 降到 2，稳定跑完不触发限流。
 
-### Bug Fixes (ReflectManager)
-- `pageMgr.create()` 失败时 catch 跳过，不中断整个循环。
-- 标题强制截断 ≤ 10 字（code-side，不只靠 prompt）。
-- fallback 标题提取：按标点分句取首句，不是 raw slice。
-- 跨次 dedup：slug 查 DB + Set 追踪，避免重复 insight。
-- `related_entities` 通过 `db.resolveSlugs()` 解析为合法 slug。
-- `buildClusterContext()` 加 MAX_CONTEXT_CHARS=4000 硬上限。
+### Health Check — 从数据 dump 变成诊断工具
 
-### DB 新增方法
-- `getHighMentionEntities()` — 查高引用实体。
-- `getHighConnectivityEntities()` — 查高连接度实体。
-- `getIncomingSlugs()` / `getOutgoingSlugs()` — 轻量 slug-only 查询。
-- `resolveSlugs()` — 精确 + 模糊 slug 解析。
+- **状态持久化** — `outputs/health/state.json` 存 issue 快照 + 慢性计数器。
+- **Delta 计算** — 每次运行对比上次：新增、消失、慢性（连续 3+ 次）、不变。
+- **三层输出** — summary（<50 行给人看）、actions（只有新增/恶化）、detail（JSON 给工具消费）。
+- **Severity 折叠** — high 全列、medium 前 10、low 只报数量。
+- **滚动清理** — 自动删除 7 天前的报告文件。
+- **CLI 增强** — `--full` 完整 Markdown、`--json` 输出 JSON、`--dimension <name>` 单维度检查。
+- **终端 delta 展示** — 显示 vs 上次变化：新增/消失/慢性数量。
 
-### Tests
-- **29 个 reflect 测试** — 覆盖 3 个核心操作 + 6 个 bug fix。
+### Bug Fixes
+- **health.ts dead code 删除** — lines 83-93 unreachable 重复代码块。
+- **page.ts 类型修复** — 参数类型对齐。
 
 ### Repository Layer — 消灭 131 处 SQL 泄漏
 

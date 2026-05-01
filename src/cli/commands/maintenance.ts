@@ -62,7 +62,10 @@ export function register(program: Command) {
   program
     .command("health")
     .description("Run 10-dimension health check and write report")
-    .action(async () => {
+    .option("--full", "Print full Markdown report to stdout")
+    .option("--json", "Output detail JSON to stdout")
+    .option("--dimension <name>", "Only check specified dimension")
+    .action(async (opts) => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
@@ -71,19 +74,66 @@ export function register(program: Command) {
       const logger = new Logger(outputsDir);
       const checker = new HealthChecker(db, outputsDir, logger);
       const report = await checker.checkAll();
-      const icon = (s: string) => s === "pass" ? "✅" : s === "warn" ? "⚠️" : "❌";
-      const whatItMeans: Record<string, string> = {
-        "系统错误": "系统运行有没有报错", "语义去重": "有没有重复的页面", "疑似重复": "标题相似、可能是同一个东西",
-        "一致性": "数据和文件是否一致", "完整性": "自动生成的页面内容是否充实", "孤岛检测": "有没有没人引用的孤立页面",
-        "新增建议": "缺少哪些核心页面", "关注度分析": "哪些高频提及的实体内容太少", "数据就绪度": "数据是否已就绪可用", "原材料质量": "raw 目录的文件是否规范",
-      };
-      console.log(`\n  大脑体检 — ${report.timestamp.slice(0, 10)}\n`);
-      for (const dim of report.dimensions) {
-        const meaning = whatItMeans[dim.name] ?? "";
-        if (dim.status === "pass") console.log(`  ${icon(dim.status)} ${dim.name}：正常`);
-        else console.log(`  ${icon(dim.status)} ${dim.name}（${meaning}）：${dim.issues.length} 个问题`);
+
+      if (opts.json) {
+        const { readFileSync } = await import("node:fs");
+        if (report.reportPaths?.detail) {
+          process.stdout.write(readFileSync(report.reportPaths.detail, "utf-8"));
+        } else {
+          process.stdout.write(JSON.stringify(report, null, 2));
+        }
+        db.close();
+        return;
       }
-      console.log(`\n  详细报告：${report.reportPath ?? `outputs/health/健康检查-${report.timestamp.slice(0, 10)}.md`}`);
+
+      if (opts.full) {
+        console.log(checker.writeFullReport(report));
+        db.close();
+        return;
+      }
+
+      const icon = (s: string) => s === "pass" ? "✅" : s === "warn" ? "⚠️" : "❌";
+      const delta = report.delta;
+      const prevDate = delta?.previousTimestamp ? delta.previousTimestamp.slice(5, 10) : null;
+      const header = prevDate
+        ? `${report.timestamp.slice(0, 10)}（vs 上次 ${prevDate}）`
+        : report.timestamp.slice(0, 10);
+
+      console.log(`\n  大脑体检 — ${header}\n`);
+
+      for (const dim of report.dimensions) {
+        const dd = delta?.dimensions.find(d => d.name === dim.name);
+        if (dim.status === "pass") {
+          console.log(`  ${icon(dim.status)} ${dim.name}：正常`);
+          continue;
+        }
+
+        const count = dim.issues.length;
+        let change = "";
+        if (dd && dd.previousCount !== undefined) {
+          const diff = dd.currentCount - dd.previousCount;
+          const arrow = diff > 0 ? `↑${diff}` : diff < 0 ? `↓${Math.abs(diff)}` : "→";
+          change = `（${arrow}`;
+          if (dd.chronicSlugs.length > 0) change += `，慢性${dd.chronicSlugs.length}个`;
+          if (dd.newIssues.length > 0) change += `，新增${dd.newIssues.length}个`;
+          change += `）`;
+        }
+        console.log(`  ${icon(dim.status)} ${dim.name}：${count} 个问题${change}`);
+      }
+
+      if (delta && delta.previousTimestamp) {
+        const parts: string[] = [];
+        if (delta.totalNew > 0) parts.push(`🆕 新增 ${delta.totalNew} 个`);
+        if (delta.totalResolved > 0) parts.push(`✅ 消失 ${delta.totalResolved} 个`);
+        if (delta.totalChronic > 0) parts.push(`🔁 慢性 ${delta.totalChronic} 个`);
+        if (parts.length > 0) console.log(`\n  ${parts.join(" | ")}`);
+      }
+
+      if (report.reportPaths) {
+        console.log(`\n  摘要报告：${report.reportPaths.summary}`);
+        console.log(`  行动清单：${report.reportPaths.actions}`);
+      }
+
       db.close();
     });
 
