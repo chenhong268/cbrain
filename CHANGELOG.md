@@ -4,6 +4,31 @@
 
 ## [Dev] — 2026-05-01
 
+### ReflectManager — Dream Pipeline Stage 3
+
+- **Entity Synthesis** — 对 mention_count ≥ 3 的实体，LLM 生成综合描述写回 page body。
+- **Relation Inference** — 找 2-hop 间接相连的实体对，LLM 推理隐含直接关系，confidence ≥ 0.7 才写入。
+- **Insight Generation** — 对高连接度实体簇（≥ 5 邻居），LLM 生成跨实体洞察，写为独立 insight page。
+- **`cbrain reflect` CLI 命令** — 可独立运行，也可通过 `cbrain dream` 自动触发。
+- **Dream pipeline 集成** — Stage 3: sync → enrich → **reflect** → cleanup。
+
+### Bug Fixes (ReflectManager)
+- `pageMgr.create()` 失败时 catch 跳过，不中断整个循环。
+- 标题强制截断 ≤ 10 字（code-side，不只靠 prompt）。
+- fallback 标题提取：按标点分句取首句，不是 raw slice。
+- 跨次 dedup：slug 查 DB + Set 追踪，避免重复 insight。
+- `related_entities` 通过 `db.resolveSlugs()` 解析为合法 slug。
+- `buildClusterContext()` 加 MAX_CONTEXT_CHARS=4000 硬上限。
+
+### DB 新增方法
+- `getHighMentionEntities()` — 查高引用实体。
+- `getHighConnectivityEntities()` — 查高连接度实体。
+- `getIncomingSlugs()` / `getOutgoingSlugs()` — 轻量 slug-only 查询。
+- `resolveSlugs()` — 精确 + 模糊 slug 解析。
+
+### Tests
+- **29 个 reflect 测试** — 覆盖 3 个核心操作 + 6 个 bug fix。
+
 ### Repository Layer — 消灭 131 处 SQL 泄漏
 
 - **CBrainDB 成为唯一 SQL 入口** — 18 个消费者文件中的 131 处 `db.prepare("SQL")` 全部替换为 CBrainDB 方法调用。
