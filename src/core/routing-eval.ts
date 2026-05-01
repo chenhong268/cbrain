@@ -59,7 +59,9 @@ export function loadFixtures(skillsDir: string): EvalFixture[] {
             ambiguous_with: f.ambiguous_with,
           });
         }
-      } catch {}
+      } catch (e) {
+        console.error("[routing-eval] fixture 行解析失败", { line, error: String(e) });
+      }
     }
   }
   return fixtures;

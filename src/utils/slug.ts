@@ -6,9 +6,10 @@ const PLURALS: Record<string, string> = {
   event: "events",
   record: "records",
   source: "sources",
+  insight: "insights",
 };
 
-const GENERATED_TYPES = new Set(["entity", "concept", "record", "event", "source"]);
+const GENERATED_TYPES = new Set(["entity", "concept", "record", "event", "source", "insight"]);
 const GENERATED_PREFIX = "brain/";
 const RAW_PREFIX = "raw/";
 

@@ -117,9 +117,15 @@ export class HybridSearch {
 
     for (const q of queries) {
       const [vec, fts, graph, temporal] = await Promise.all([
-        this.vectorSearch(q, limit).catch(() => [] as SearchResult[]),
+        this.vectorSearch(q, limit).catch((e) => {
+          console.error("[search] vectorSearch 失败:", e);
+          return [] as SearchResult[];
+        }),
         Promise.resolve(this.ftsSearch(q, limit)),
-        this.graphSearch(q, limit).catch(() => [] as SearchResult[]),
+        this.graphSearch(q, limit).catch((e) => {
+          console.error("[search] graphSearch 失败:", e);
+          return [] as SearchResult[];
+        }),
         Promise.resolve(this.temporalSearch(q, limit)),
       ]);
       if (vec.length > 0) allLists.push(vec);
@@ -148,7 +154,8 @@ export class HybridSearch {
       const variants = JSON.parse(resp) as string[];
       if (!Array.isArray(variants) || variants.length === 0) return [query];
       return [query, ...variants.filter((v) => typeof v === "string" && v.trim())];
-    } catch {
+    } catch (e) {
+      console.error("[search] 查询扩展失败:", e);
       return [query];
     }
   }

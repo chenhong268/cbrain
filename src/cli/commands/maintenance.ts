@@ -83,7 +83,7 @@ export function register(program: Command) {
         if (dim.status === "pass") console.log(`  ${icon(dim.status)} ${dim.name}：正常`);
         else console.log(`  ${icon(dim.status)} ${dim.name}（${meaning}）：${dim.issues.length} 个问题`);
       }
-      console.log(`\n  详细报告：outputs/health/health-${report.timestamp.slice(0, 10)}.md`);
+      console.log(`\n  详细报告：${report.reportPath ?? `outputs/health/健康检查-${report.timestamp.slice(0, 10)}.md`}`);
       db.close();
     });
 
@@ -125,7 +125,7 @@ export function register(program: Command) {
 
   program
     .command("dream")
-    .description("Nightly full pipeline: sync → enrich → cleanup → health → report")
+    .description("Nightly full pipeline: sync → enrich → reflect → cleanup → health → report")
     .action(async () => {
       const config = loadConfig();
       const deps = createDeps(config);
@@ -133,6 +133,7 @@ export function register(program: Command) {
       const { runDream } = await import("../../core/dream.js");
       const { SyncManager } = await import("../../core/sync.js");
       const { EnrichManager } = await import("../../core/enrich.js");
+      const { ReflectManager } = await import("../../core/reflect.js");
       const { HealthChecker } = await import("../../core/health.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
@@ -143,19 +144,71 @@ export function register(program: Command) {
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
       const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm);
+      const reflectMgr = new ReflectManager(deps.db, pages, deps.llm);
       const health = new HealthChecker(deps.db, outputsDir, logger);
-      const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger);
+      const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, reflectMgr);
       const icon = report.locked ? "🌙" : "⚠️";
       console.log(`${icon} Dream — ${report.timestamp.slice(0, 10)}`);
       if (report.stages.backup.path) console.log(`  Backup:  ${report.stages.backup.size_mb}MB`);
       console.log(`  Sync:    ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`);
       console.log(`  Enrich:  ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级`);
+      console.log(`  Reflect: ${report.stages.reflect.entitiesSynthesized} 综合, ${report.stages.reflect.relationsInferred} 推理, ${report.stages.reflect.insightsGenerated} 洞察`);
       console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub`);
       console.log(`  Health:  ${report.stages.health.overallStatus}`);
       console.log(`  ⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
       if (!report.locked) console.log(`  ⚠️ 上次 dream 仍在执行中，本次跳过`);
       deps.db.close();
       process.exit(report.locked ? 0 : 1);
+    });
+
+  program
+    .command("reflect")
+    .description("Run reflect stage: synthesize entities, infer relations, generate insights")
+    .action(async () => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      const { ReflectManager } = await import("../../core/reflect.js");
+      const { Logger } = await import("../../core/logger.js");
+      const { PageManager } = await import("../../core/page.js");
+      const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+      const logger = new Logger(outputsDir);
+      const pages = new PageManager(deps.db, config.vaultPath, logger);
+
+      if (!deps.llm) {
+        console.log("  ⚠️ 未配置 LLM，reflect 需要 API key");
+        deps.db.close();
+        process.exit(1);
+      }
+
+      const mgr = new ReflectManager(deps.db, pages, deps.llm);
+      console.log("🧠 Reflecting...");
+      const report = await mgr.reflectAll();
+
+      console.log(`  Entity Synthesis:  ${report.entitiesSynthesized} 实体综合`);
+      console.log(`  Relation Inference: ${report.relationsInferred} 关系推理`);
+      console.log(`  Insight Generation: ${report.insightsGenerated} 洞察生成`);
+
+      if (report.details.syntheses.length > 0) {
+        console.log("\n  综合摘要：");
+        for (const s of report.details.syntheses) {
+          console.log(`    ${s.slug}: ${s.summary.slice(0, 60)}...`);
+        }
+      }
+      if (report.details.relations.length > 0) {
+        console.log("\n  推理关系：");
+        for (const r of report.details.relations) {
+          console.log(`    ${r.from} → ${r.to} [${r.relation}]`);
+        }
+      }
+      if (report.details.insights.length > 0) {
+        console.log("\n  洞察：");
+        for (const i of report.details.insights) {
+          console.log(`    ${i.content.slice(0, 60)}...`);
+        }
+      }
+
+      deps.db.close();
+      process.exit(0);
     });
 
   program

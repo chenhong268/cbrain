@@ -105,6 +105,7 @@ export class SyncManager {
       } catch (e) {
         report.errors++;
         report.errorDetails?.push(`${filePath}: ${(e as Error).message}`);
+        this.logger?.warn("sync", "文件解析失败", { file: filePath, error: String(e) });
       }
     }
 
@@ -132,7 +133,9 @@ export class SyncManager {
           try {
             this.db.createVersion(file.slug, file.body,
               file.frontmatter ? JSON.stringify(file.frontmatter) : undefined);
-          } catch { /* version snapshot best-effort */ }
+          } catch (e) {
+            this.logger?.warn("sync", "版本快照写入失败", { slug: file.slug, error: String(e) });
+          }
         }
 
         this.db.upsertPage({
@@ -168,8 +171,8 @@ export class SyncManager {
         if (this.pages && file.body.trim()) {
           try {
             this.pipeline.processWikilinks(file.slug, file.body, true);
-          } catch {
-            // Wiki-link extraction failure should not block sync
+          } catch (e) {
+            this.logger?.warn("sync", "Wikilink 提取失败", { slug: file.slug, error: String(e) });
           }
         }
       } catch (err) {
@@ -190,7 +193,10 @@ export class SyncManager {
       for (let i = 0; i < nerJobs.length; i += CONCURRENCY) {
         const batch = nerJobs.slice(i, i + CONCURRENCY);
         const extractions = await Promise.all(
-          batch.map(job => this.nerEngine!.extract(job.text).catch(() => null))
+          batch.map(job => this.nerEngine!.extract(job.text).catch((e) => {
+              this.logger?.warn("sync", "NER extract 失败", { slug: job.slug, error: String(e) });
+              return null;
+            }))
         );
         for (let j = 0; j < batch.length; j++) {
           const extraction = extractions[j];
@@ -203,8 +209,8 @@ export class SyncManager {
               report.nerEvents = (report.nerEvents ?? 0) + nerResult.events;
               report.nerLowRelevanceSkipped = (report.nerLowRelevanceSkipped ?? 0) + nerResult.lowRelevanceSkipped;
             }
-          } catch {
-            // NER failure should not block sync
+          } catch (e) {
+            this.logger?.warn("sync", "NER 处理失败", { slug: batch[j].slug, error: String(e) });
           }
         }
       }
@@ -247,7 +253,8 @@ export class SyncManager {
     let content: string;
     try {
       content = readFileSync(fullPath, "utf-8");
-    } catch {
+    } catch (e) {
+      this.logger?.warn("sync", "文件读取失败", { path: fullPath, error: String(e) });
       return { success: false, error: `File not found: ${fullPath}` };
     }
     const parsed = parseFrontmatter(content);
@@ -269,7 +276,9 @@ export class SyncManager {
       try {
         this.db.createVersion(effectiveSlug, parsed.body,
           parsed.frontmatter ? JSON.stringify(parsed.frontmatter) : undefined);
-      } catch { /* version best-effort */ }
+      } catch (e) {
+        this.logger?.warn("sync", "版本快照写入失败", { slug: effectiveSlug, error: String(e) });
+      }
     }
 
     const relPath = relative(vaultPath, fullPath);
@@ -304,8 +313,8 @@ export class SyncManager {
     if (this.pages && parsed.body.trim()) {
       try {
         this.pipeline.processWikilinks(effectiveSlug, parsed.body, true);
-      } catch {
-        // Wiki-link extraction failure should not block sync
+      } catch (e) {
+        this.logger?.warn("sync", "Wikilink 提取失败", { slug: effectiveSlug, error: String(e) });
       }
     }
 

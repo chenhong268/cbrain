@@ -260,7 +260,8 @@ export class NerEngine {
         relations: Array.isArray(parsed.relations) ? parsed.relations : [],
         events: Array.isArray(parsed.events) ? parsed.events : [],
       };
-    } catch {
+    } catch (e) {
+      console.error("[ner] LLM 响应 JSON 解析失败", e);
       return empty;
     }
   }

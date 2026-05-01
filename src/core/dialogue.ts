@@ -82,7 +82,8 @@ export class DialogueIngest {
         { role: "system", content: DIALOGUE_PROMPT },
         { role: "user", content: truncated },
       ]);
-    } catch {
+    } catch (e) {
+      console.error("[dialogue] LLM 调用失败", e);
       return empty;
     }
 
@@ -107,7 +108,8 @@ export class DialogueIngest {
         relations: Array.isArray(parsed.relations) ? parsed.relations : [],
         events: Array.isArray(parsed.events) ? parsed.events : [],
       };
-    } catch {
+    } catch (e) {
+      console.error("[dialogue] LLM 响应 JSON 解析失败", e);
       return null;
     }
   }

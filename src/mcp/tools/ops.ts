@@ -98,14 +98,17 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── dream ──────────────────────────────────────────────────
   server.registerTool("dream", {
-    description: "Run full nightly pipeline: sync → enrich → cleanup → health → report. Use for scheduled daily maintenance. Has cycle lock to prevent overlapping runs.",
+    description: "Run full nightly pipeline: sync → enrich → reflect → cleanup → health → report. Use for scheduled daily maintenance. Has cycle lock to prevent overlapping runs.",
     inputSchema: {},
   }, async () => {
     const { runDream } = await import("../../core/dream.js");
-    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger);
+    const { ReflectManager } = await import("../../core/reflect.js");
+    const reflectMgr = new ReflectManager(ctx.db, ctx.pages, ctx.llm);
+    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger, reflectMgr);
     const brief = [
       `同步: ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`,
       `实体: ${report.stages.enrich.total} 总计, ${report.stages.enrich.upgraded} 升级`,
+      `反思: ${report.stages.reflect.entitiesSynthesized} 综合, ${report.stages.reflect.relationsInferred} 推理, ${report.stages.reflect.insightsGenerated} 洞察`,
       `清理: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期`,
       `健康: ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题)`,
       `⏱ ${(report.duration_ms / 1000).toFixed(1)}s`,

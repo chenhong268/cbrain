@@ -223,6 +223,8 @@ export class ContentPipeline {
         });
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.push(stub.slug);
+        this.db.incrementMentionCount(stub.slug);
+        this.db.insertLink(fromSlug, stub.slug, "提及");
       } else if (entity.relevance === "low") {
         lowRelevanceSkipped++;
       }

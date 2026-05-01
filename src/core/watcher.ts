@@ -49,9 +49,13 @@ export class FileWatcher {
 
         const relPath = relative(this.vaultPath, fullPath);
         const slug = relPath.replace(/\.md$/, "");
-        this.sync.syncPage(slug, this.vaultPath).catch(() => {});
-      } catch {
-        // file may have been deleted mid-scan
+        this.sync.syncPage(slug, this.vaultPath).catch((e) => {
+          console.error(`[watcher] syncPage 失败: ${slug}`, e);
+        });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+          console.error(`[watcher] 文件读取失败: ${fullPath}`, e);
+        }
       }
     }
 

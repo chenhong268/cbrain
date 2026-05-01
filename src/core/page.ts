@@ -18,7 +18,7 @@ import type { Logger } from "./logger.js";
 
 export interface CreatePageInput {
   title: string;
-  type: "entity" | "concept" | "event" | "record" | "source";
+  type: "entity" | "concept" | "event" | "record" | "source" | "insight";
   body: string;
   tags?: string[];
   slug?: string;
@@ -206,7 +206,9 @@ export class PageManager {
         const targetContent = readFileSync(targetFilePath, "utf-8");
         this.db.createVersion(targetSlug, targetContent);
       }
-    } catch { /* best-effort */ }
+    } catch (e) {
+      this.logger?.warn("page", "版本快照写入失败", { slug: targetSlug, error: String(e) });
+    }
 
     // Collect everything BEFORE modifying DB
     const sourceBody = source.body || "";

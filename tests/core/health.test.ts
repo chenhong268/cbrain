@@ -43,10 +43,9 @@ describe("HealthChecker", () => {
   describe("checkAll", () => {
     test("returns pass status with sufficient well-connected data", async () => {
       for (let i = 0; i < 15; i++) {
-        // Keep mention_count=0 to avoid "popular thin content" warnings
-        insertPage(`entities/e${i}`, `Entity${i}`, "entity", { mention_count: 0, tier: 3 });
+        insertPage(`entities/e${i}`, `Entity${i}`, "entity", { mention_count: 2, tier: 3 });
       }
-      insertPage("concepts/c1", "Concept1", "concept", { mention_count: 0, tier: 3 });
+      insertPage("concepts/c1", "Concept1", "concept", { mention_count: 2, tier: 3 });
       insertPage("records/r1", "Record1", "record");
       // Link them so no orphans
       for (let i = 1; i < 15; i++) {

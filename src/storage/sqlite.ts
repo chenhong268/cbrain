@@ -50,7 +50,7 @@ export class CBrainDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pages (
         slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'event', 'record', 'source')),
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'event', 'record', 'source', 'insight')),
         title TEXT NOT NULL,
         file_path TEXT NOT NULL,
         content_hash TEXT,
@@ -169,6 +169,36 @@ export class CBrainDB {
 
       CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(page_slug, content, tokenize='trigram');
     `);
+
+    this.migratePagesConstraint();
+  }
+
+  private migratePagesConstraint(): void {
+    const check = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").get() as { sql: string } | undefined;
+    if (check?.sql?.includes("'insight'")) return;
+
+    this.db.exec("PRAGMA foreign_keys = OFF");
+
+    this.db.exec(`
+      CREATE TABLE pages_new (
+        slug TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'event', 'record', 'source', 'insight')),
+        title TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        content_hash TEXT,
+        tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
+        mention_count INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO pages_new SELECT * FROM pages;
+      DROP TABLE pages;
+      ALTER TABLE pages_new RENAME TO pages;
+    `);
+
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_tier ON pages(tier)");
+    this.db.exec("PRAGMA foreign_keys = ON");
   }
 
   private prepare(sql: string) {
@@ -789,6 +819,24 @@ export class CBrainDB {
     return this.db.prepare(
       "SELECT * FROM pages WHERE type = 'entity' ORDER BY mention_count DESC LIMIT $limit"
     ).all({ $limit: limit }) as PageRow[];
+  }
+
+  getHighMentionEntities(minMentions: number): Array<{ slug: string; title: string; mention_count: number }> {
+    return this.db.prepare(
+      "SELECT slug, title, mention_count FROM pages WHERE type = 'entity' AND mention_count >= $min ORDER BY mention_count DESC"
+    ).all({ $min: minMentions }) as Array<{ slug: string; title: string; mention_count: number }>;
+  }
+
+  getHighConnectivityEntities(minNeighbors: number): Array<{ slug: string; title: string }> {
+    return this.db.prepare(
+      `SELECT p.slug, p.title FROM pages p
+       WHERE p.type = 'entity'
+       AND (
+         (SELECT COUNT(DISTINCT to_slug) FROM links WHERE from_slug = p.slug) +
+         (SELECT COUNT(DISTINCT from_slug) FROM links WHERE to_slug = p.slug)
+       ) >= $min
+       ORDER BY p.mention_count DESC`
+    ).all({ $min: minNeighbors }) as Array<{ slug: string; title: string }>;
   }
 
   // ─── Link operations ──────────────────────────────────────────

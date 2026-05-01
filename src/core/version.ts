@@ -61,8 +61,8 @@ export class VersionManager {
     if (ver.frontmatter) {
       try {
         fm = JSON.parse(ver.frontmatter);
-      } catch {
-        // keep existing frontmatter
+      } catch (e) {
+        console.error("[version] frontmatter JSON 解析失败，保留现有值", { slug, error: String(e) });
       }
     }
     fm = { ...fm, updated_at: new Date().toISOString() };

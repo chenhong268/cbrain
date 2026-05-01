@@ -23,6 +23,7 @@ export interface HealthReport {
   overallStatus: "pass" | "warn" | "fail";
   dimensions: HealthDimension[];
   metrics: MetricsSnapshot;
+  reportPath?: string;
 }
 
 export class HealthChecker {
@@ -69,7 +70,17 @@ export class HealthChecker {
       metrics,
     };
 
-    this.writeReport(report);
+    const reportPath = this.writeReport(report);
+    this.audit.writeMetrics(metrics);
+    this.audit.log(AuditLogger.entry("health_check", overallStatus === "fail" ? "error" : "success", {
+      details: {
+        dimensions: dimensions.length,
+        issues: dimensions.reduce((sum, d) => sum + d.issues.length, 0),
+        durationMs: Date.now() - start,
+      },
+    }));
+
+    return { ...report, reportPath };
     this.audit.writeMetrics(metrics);
     this.audit.log(AuditLogger.entry("health_check", overallStatus === "fail" ? "error" : "success", {
       details: {
@@ -274,7 +285,7 @@ export class HealthChecker {
 
     return {
       name: "完整性",
-      status: bareStubs.length > 20 ? "warn" : bareStubs.length > 0 ? "pass" : "pass",
+      status: bareStubs.length > 20 ? "warn" : bareStubs.length > 0 ? "warn" : "pass",
       issues,
     };
   }
@@ -497,7 +508,7 @@ export class HealthChecker {
 
   // ─── Report Writer ────────────────────────────────────────
 
-  private writeReport(report: HealthReport): void {
+  private writeReport(report: HealthReport): string {
     const healthDir = join(this.outputsDir, "health");
     mkdirSync(healthDir, { recursive: true });
 
@@ -539,5 +550,6 @@ export class HealthChecker {
     }
 
     writeFileSync(filePath, md, "utf-8");
+    return filePath;
   }
 }

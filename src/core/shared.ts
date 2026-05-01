@@ -24,7 +24,12 @@ export function collectMarkdownFiles(dir: string): string[] {
   const results: string[] = [];
   const walk = (d: string) => {
     let entries;
-    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "EACCES") {
+        console.error(`[shared] readdirSync 失败: ${d}`, e);
+      }
+      return;
+    }
     for (const e of entries) {
       if (e.name.startsWith(".")) continue;
       const p = join(d, e.name);
