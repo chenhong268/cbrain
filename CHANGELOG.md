@@ -2,6 +2,26 @@
 
 > Current: `v0.3.1` — first stable release. 23 CLI commands, 41 MCP tools, 11 skills.
 
+## [Dev] — 2026-05-02 (下午)
+
+### 关系类型规范化
+
+46 种中英混杂关系 → 10 种 MECE 规范类型（认识/提及/任职/创立/归属/合作/竞争/资本/制造/间接关联）。`CANONICAL_RELATIONS` + `normalizeRelation()` 在 shared.ts，NER/reflect/health 三处同步。963 条 link 已迁移，health check 一致性维度 ✅。
+
+### Insight Agent 访问
+
+- type enum 补全 insight，list_pages/ingest/sync/pipeline 全部支持
+- ReflectManager 注入 pipeline，insight 创建后立刻 embed+FTS，不等 sync
+- dream_reset MCP 工具
+
+### Dream Sub-Agent 方案
+
+dream 不再受 MCP 30s 超时限制——Hermes sub-agent（`child_timeout_seconds: 600`）执行，锁冲突时人性化提示。
+
+### Agent 记忆更新
+
+小爱 MEMORY.md/SOUL.md/SKILL.md 全面更新：CBrain 数据路径、关系类型、insight 查询协议、dream sub-agent 协议。
+
 ## [Dev] — 2026-05-02
 
 ### 系统大扫除
