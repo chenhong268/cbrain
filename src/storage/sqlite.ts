@@ -50,7 +50,7 @@ export class CBrainDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pages (
         slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'event', 'record', 'source', 'insight')),
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
         title TEXT NOT NULL,
         file_path TEXT NOT NULL,
         content_hash TEXT,
@@ -154,19 +154,6 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_name ON jobs(name);
 
-      CREATE TABLE IF NOT EXISTS raw_data (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        page_slug TEXT NOT NULL,
-        key TEXT NOT NULL,
-        mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
-        data BLOB,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE,
-        UNIQUE(page_slug, key)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_raw_data_page ON raw_data(page_slug);
-
       CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(page_slug, content, tokenize='trigram');
     `);
 
@@ -182,7 +169,7 @@ export class CBrainDB {
     this.db.exec(`
       CREATE TABLE pages_new (
         slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'event', 'record', 'source', 'insight')),
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
         title TEXT NOT NULL,
         file_path TEXT NOT NULL,
         content_hash TEXT,
@@ -482,34 +469,6 @@ export class CBrainDB {
     return r.changes > 0;
   }
 
-  // ─── Raw data operations ─────────────────────────────────────
-
-  putRawData(pageSlug: string, key: string, data: Buffer, mimeType?: string): void {
-    this.db.prepare(
-      "INSERT OR REPLACE INTO raw_data (page_slug, key, mime_type, data) VALUES ($slug, $key, $mime, $data)"
-    ).run({ $slug: pageSlug, $key: key, $mime: mimeType ?? "application/octet-stream", $data: data });
-  }
-
-  getRawData(pageSlug: string, key: string): { mime_type: string; data: Buffer; created_at: string } | null {
-    return this.db.prepare(
-      "SELECT mime_type, data, created_at FROM raw_data WHERE page_slug = $slug AND key = $key"
-    ).get({ $slug: pageSlug, $key: key }) as any ?? null;
-  }
-
-  listRawDataKeys(pageSlug: string): string[] {
-    const rows = this.db.prepare(
-      "SELECT key FROM raw_data WHERE page_slug = $slug ORDER BY key"
-    ).all({ $slug: pageSlug }) as Array<{ key: string }>;
-    return rows.map(r => r.key);
-  }
-
-  deleteRawData(pageSlug: string, key: string): boolean {
-    const r = this.db.prepare(
-      "DELETE FROM raw_data WHERE page_slug = $slug AND key = $key"
-    ).run({ $slug: pageSlug, $key: key });
-    return r.changes > 0;
-  }
-
   // ─── Page operations ──────────────────────────────────────────
 
   getPage(slug: string): PageRow | null {
@@ -624,7 +583,6 @@ export class CBrainDB {
     this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
     this.db.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
     this.db.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM raw_data WHERE page_slug = $slug").run({ $slug: slug });
     this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
   }
 
@@ -754,7 +712,7 @@ export class CBrainDB {
 
   getPagesWithoutChunks(): Array<{ slug: string; title: string; type: string }> {
     return this.db.prepare(
-      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN chunks c ON p.slug = c.page_slug WHERE c.id IS NULL AND p.type IN ('record', 'source')"
+      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN chunks c ON p.slug = c.page_slug WHERE c.id IS NULL AND p.type = 'record'"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 

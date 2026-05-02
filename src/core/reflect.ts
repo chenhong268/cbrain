@@ -3,6 +3,7 @@ import type { LLMProvider } from "../llm/provider.js";
 import type { PageManager } from "./page.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readPageFile } from "../utils/frontmatter.js";
 import { generateSlug } from "../utils/slug.js";
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -75,9 +76,9 @@ const MIN_MENTIONS = 3;
 const MIN_NEIGHBORS = 5;
 const MIN_CONFIDENCE = 0.7;
 const BATCH_SIZE = 15;
-const TITLE_SAFETY_LIMIT = 20;
+const TITLE_SAFETY_LIMIT = 10;
 const MAX_CONTEXT_CHARS = 12000;
-const CONCURRENCY = 2;
+const CONCURRENCY = 3;
 
 // ─── Prompts ───────────────────────────────────────────────────
 
@@ -89,30 +90,30 @@ const RELATION_SYSTEM = `你是一个知识图谱分析师。根据已知关系�
 只输出有把握的推理，confidence低于0.6的不输出。
 输出JSON：{"inferred_relations": [{"from": "slug", "to": "slug", "relation": "关系", "reasoning": "依据", "confidence": 0.0到1.0}]}`;
 
-const INSIGHT_SYSTEM = `你是一个犀利的商业和知识分析师。从给定素材中提炼出非显而易见的洞察。
+const INSIGHT_SYSTEM = `你是一个知识图谱分析师。你的任务是从素材中判断是否存在值得记录的洞察。
 
-严格要求（违反任何一条就不要输出该洞察）：
-1. 不要复述素材中已明确说出的观点或事实——那不叫洞察，那叫摘要
-2. 洞察必须是一个推理结论：从 A 和 B 推导出素材中没人直接说过的 C
-3. 必须引用素材中的具体细节作为论据，不能泛泛而谈
-4. 如果找不到有说服力的推理结论，输出空数组 {"insights": []}
+核心原则：好的洞察是稀有的。找不到有力的洞察是正常的——输出空数组，不要硬编。
 
-写作风格（去AI化）：
-写出来的东西要像朋友之间聊天时突然冒出的那个发现。用短句，别超过20字一句。说话要有节奏，快慢交替。别怕语气随意，怕的是端着。不要"不仅...而且""揭示""表明""这说明"，直接说人话。把最尖锐的判断放在最前面，别铺垫。可以口语化，可以不完整，可以带点主观偏见。别总结，别升华，别收尾。像是喝咖啡时随口说的一句话，不是发在公众号上的分析文章。
+洞察的定义：
+从素材中 A 和 B 两个事实，推导出素材中没人直接说过的结论 C。
+- A 和 B 必须来自素材中的具体细节，不是泛化印象
+- C 必须是 A+B 的逻辑推论，不是感受、不是评价、不是换个说法
+- C 必须让人产生"我之前没想到"的反应
 
-好的洞察范例：
-- "苏宁780亿砸向体育、地产、文创，全军覆没。巴菲特六十年只碰看得懂的东西。两个极端说同一件事：认知边界就是投资边界。"
-- "保供率98%，退货率才2%。这俩数放一块才有点意思。高保供不是堆库存堆出来的，是供应链精准的副产品。"
-- "大众在北美跟Google硬刚，在中国拉小鹏当队友。同一辆车，两副面孔。说白了就是没想清楚，走一步看一步。"
-
-差的洞察（绝对不要输出）：
-- "XXX揭示了认知局限性" → 摘要
-- "这种模式值得深思" → 废话
+反例（这些不是洞察，不要输出）：
+- 复述素材已有观点 → 那是摘要
 - "A和B有相似之处" → 太浅
-- "不仅...而且...因此..." → AI套路句式
+- "XXX揭示了某种趋势" → 没有说清楚是什么趋势
+- "这种模式值得深思" → 废话
+- 素材中只有 A，你自己补了个 B → 编造
 
-输出JSON：{"insights": [{"title": "标题", "content": "洞察全文（100-200字，必须含具体引用）", "related_entities": ["slug1", "slug2"], "type": "trend|pattern|contrast|connection", "confidence": 0.0到1.0}]}
-title规则：根据内容自拟标题，言简意赅，突出核心本质，10字以内。`;
+confidence 标准：
+- 0.9+：A和B来自两个不同素材，C是跨域推理且逻辑链清晰
+- 0.8-0.9：A和B来自同一素材的不同部分，C有明确证据支撑
+- 0.7-0.8：推理合理但存在其他解释
+- <0.7：不确定，不输出
+
+输出JSON：{"insights": [{"title": "标题（10字以内，点出核心）", "content": "洞察全文（100-200字，必须引用具体细节）", "related_entities": ["slug1", "slug2"], "type": "trend|pattern|contrast|connection", "confidence": 0.0到1.0}]}`;
 
 // ─── ReflectManager ────────────────────────────────────────────
 
@@ -130,9 +131,12 @@ export class ReflectManager {
   async reflectAll(): Promise<ReflectReport> {
     if (!this.llm) return emptyReport();
 
-    const syntheses = await this.synthesizeEntities();
-    const relations = await this.inferRelations();
-    const insights = await this.generateInsights();
+    // All three phases are independent — run in parallel
+    const [syntheses, relations, insights] = await Promise.all([
+      this.synthesizeEntities(),
+      this.inferRelations(),
+      this.generateInsights(),
+    ]);
 
     return {
       entitiesSynthesized: syntheses.length,
@@ -243,6 +247,9 @@ export class ReflectManager {
     const allInsights: GeneratedInsight[] = [];
     const createdSlugs = new Set<string>();
 
+    // Build dedup set from existing insights — same source entity combo won't re-fire
+    const existingSigs = this.buildExistingInsightSigs();
+
     const tasks = hubs.slice(0, limit).map((h) => ({ slug: h.slug, context: this.buildClusterContext(h.slug) }));
     const valid = tasks.filter((t) => t.context !== null);
     const batches = this.chunk(valid, CONCURRENCY);
@@ -262,11 +269,22 @@ export class ReflectManager {
           if (!ins.content) continue;
 
           const resolvedEntities = this.resolveRelatedEntities(ins.related_entities ?? []);
+          const confidence = ins.confidence ?? 0.5;
+
+          // Confidence gate — below threshold, skip
+          if (confidence < 0.8) continue;
+
+          // Dedup — >50% source entity overlap with an existing insight
+          if (resolvedEntities.length > 0) {
+            if (this.hasOverlap(resolvedEntities, existingSigs)) continue;
+            existingSigs.push(new Set(resolvedEntities));
+          }
+
           const insight: GeneratedInsight = {
             content: ins.content,
             relatedEntities: resolvedEntities,
             type: ins.type ?? "pattern",
-            confidence: ins.confidence ?? 0.5,
+            confidence,
           };
 
           const rawTitle = ins.title?.trim() || this.extractTitleFallback(ins.content);
@@ -414,6 +432,41 @@ export class ReflectManager {
     }
 
     return lines.length > 0 ? lines.join("\n") : "（无已知关系）";
+  }
+
+  // ─── Dedup ──────────────────────────────────────────────────
+
+  private buildExistingInsightSigs(): Array<Set<string>> {
+    const sigs: Array<Set<string>> = [];
+    const insights = this.db.listPages({ type: "insight" });
+    for (const page of insights) {
+      try {
+        const filePath = join(this.pageMgr.vaultPath, page.file_path);
+        if (!existsSync(filePath)) continue;
+        const { frontmatter } = readPageFile(filePath);
+        const entities: string[] = (frontmatter.source_entities as string[]) ?? [];
+        if (entities.length > 0) {
+          sigs.push(new Set(entities));
+        }
+      } catch {
+        // Corrupted file, skip
+      }
+    }
+    return sigs;
+  }
+
+  private hasOverlap(entities: string[], existing: Array<Set<string>>): boolean {
+    if (entities.length === 0) return false;
+    const set = new Set(entities);
+    for (const existingSet of existing) {
+      let overlap = 0;
+      for (const e of existingSet) {
+        if (set.has(e)) overlap++;
+      }
+      const minSize = Math.min(set.size, existingSet.size);
+      if (minSize > 0 && overlap / minSize > 0.5) return true;
+    }
+    return false;
   }
 
   // ─── Graph Queries ─────────────────────────────────────────

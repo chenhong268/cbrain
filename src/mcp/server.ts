@@ -13,9 +13,7 @@ import { registerTagTools } from "./tools/tags.js";
 import { registerTimelineTools } from "./tools/timeline.js";
 import { registerVersionTools } from "./tools/versions.js";
 import { registerJobTools } from "./tools/jobs.js";
-import { registerRawDataTools } from "./tools/raw-data.js";
 import { registerSyncTools } from "./tools/sync.js";
-import { registerConfigTools } from "./tools/config.js";
 import { registerOpsTools } from "./tools/ops.js";
 
 export interface CBrainDeps {
@@ -58,9 +56,7 @@ export function createServer(deps: CBrainDeps): McpServer {
   registerTimelineTools(server, ctx);
   registerVersionTools(server, ctx);
   registerJobTools(server, ctx);
-  registerRawDataTools(server, ctx);
   registerSyncTools(server, ctx);
-  registerConfigTools(server, ctx);
   registerOpsTools(server, ctx);
 
   return server;

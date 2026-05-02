@@ -44,7 +44,7 @@ export function register(program: Command) {
       const totalLinks = db.getLinkCount();
       const totalChunks = db.getChunkCount();
       const byType = db.getPageTypeCounts();
-      const typeName: Record<string, string> = { entity: "实体", concept: "概念", event: "事件", record: "记录", source: "来源" };
+      const typeName: Record<string, string> = { entity: "实体", concept: "概念", record: "记录", insight: "洞察" };
       console.log(`  总页数： ${totalPages}`);
       console.log(`  关系数： ${totalLinks}`);
       console.log(`  检索块： ${totalChunks}`);

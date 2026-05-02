@@ -22,7 +22,7 @@ export class Logger {
   }
 
   info(module: string, message: string, details?: Record<string, unknown>): void {
-    this.write({ timestamp: new Date().toISOString(), level: "info", module, message, details });
+    // info only stays in memory, not persisted — keeps logs lean
   }
 
   warn(module: string, message: string, details?: Record<string, unknown>): void {

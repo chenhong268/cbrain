@@ -5,6 +5,7 @@ import { CBrainDB } from "../../storage/sqlite.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
 import { ZhipuEmbeddingProvider } from "../../embedding/zhipu.js";
 import { ZhipuLLMProvider } from "../../llm/zhipu.js";
+import { DeepSeekLLMProvider } from "../../llm/deepseek.js";
 import { loadConfig, createDeps } from "../context.js";
 
 export function register(program: Command) {
@@ -193,8 +194,11 @@ export function register(program: Command) {
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
       const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
+      const reflectLlm = config.reflect?.llm_api_key
+        ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model)
+        : deps.llm;
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm);
-      const reflectMgr = new ReflectManager(deps.db, pages, deps.llm);
+      const reflectMgr = new ReflectManager(deps.db, pages, reflectLlm);
       const health = new HealthChecker(deps.db, outputsDir, logger);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, reflectMgr);
       const icon = report.locked ? "🌙" : "⚠️";
@@ -224,13 +228,17 @@ export function register(program: Command) {
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
 
-      if (!deps.llm) {
-        console.log("  ⚠️ 未配置 LLM，reflect 需要 API key");
+      const reflectLlm = config.reflect?.llm_api_key
+        ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model)
+        : deps.llm;
+
+      if (!reflectLlm) {
+        console.log("  ⚠️ 未配置 reflect LLM，需要 API key");
         deps.db.close();
         process.exit(1);
       }
 
-      const mgr = new ReflectManager(deps.db, pages, deps.llm);
+      const mgr = new ReflectManager(deps.db, pages, reflectLlm);
       console.log("🧠 Reflecting...");
       const report = await mgr.reflectAll();
 

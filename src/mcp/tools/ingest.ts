@@ -12,7 +12,7 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
       type: z.enum(["markdown", "text"]).optional().default("text").describe("Content type"),
       title: z.string().optional().describe("Title for this page — derive from content if not obvious"),
       tags: z.array(z.string()).optional().describe("Tags to apply"),
-      pageType: z.enum(["entity", "concept", "event", "record", "source"]).optional().default("record").describe("Page type: entity (person/company), concept, event, record (doc/report), source"),
+      pageType: z.enum(["entity", "concept", "record"]).optional().default("record").describe("Page type: entity (person/company), concept, record (doc/report)"),
       skipNer: z.boolean().optional().default(false).describe("Skip LLM entity extraction — use for simple entries"),
     },
   }, async ({ content, type, title, tags, pageType, skipNer }) => {

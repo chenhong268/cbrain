@@ -24,6 +24,12 @@ export interface CBrainConfig {
     llm_api_key?: string;
     llm_base_url?: string;
   };
+  reflect?: {
+    llm_provider?: string;
+    llm_model?: string;
+    llm_api_key?: string;
+    llm_base_url?: string;
+  };
 }
 
 export function findConfig(startDir?: string): CBrainConfig | null {

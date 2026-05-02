@@ -13,7 +13,7 @@ export interface IngestInput {
   type: "markdown" | "text";
   title?: string;
   tags?: string[];
-  pageType?: "entity" | "concept" | "event" | "record" | "source";
+  pageType?: "entity" | "concept" | "record";
   skipNer?: boolean;
 }
 

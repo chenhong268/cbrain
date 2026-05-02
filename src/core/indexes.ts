@@ -91,21 +91,20 @@ export class IndexGenerator {
 
   private generateAllSources(dir: string): string {
     const rows = this.db.listPages({
-      types: ["record", "source", "event"],
+      types: ["record"],
       orderBy: "updated_at DESC",
     });
 
-    const filePath = join(dir, "All-Sources.md");
-    let md = `# All Sources\n\n`;
+    const filePath = join(dir, "All-Records.md");
+    let md = `# All Records\n\n`;
     md += `> Auto-generated index. Last updated: ${new Date().toISOString().slice(0, 10)}\n\n`;
-    md += `| Type | Title | Updated |\n|:-----|:------|:--------|\n`;
+    md += `| Title | Updated |\n|:------|:--------|\n`;
 
     for (const row of rows) {
-      const typeLabel = row.type === "event" ? "📅" : row.type === "source" ? "📄" : "📝";
-      md += `| ${typeLabel} ${row.type} | [[${row.slug}\\|${row.title}]] | ${row.updated_at.slice(0, 10)} |\n`;
+      md += `| [[${row.slug}\\|${row.title}]] | ${row.updated_at.slice(0, 10)} |\n`;
     }
 
-    md += `\n> ${rows.length} sources total\n`;
+    md += `\n> ${rows.length} records total\n`;
     writeFileSync(filePath, md, "utf-8");
     return filePath;
   }
@@ -114,7 +113,7 @@ export class IndexGenerator {
     const totalPages = this.db.getPageCount();
     const entities = this.db.getPageCountByType("entity");
     const concepts = this.db.getPageCountByType("concept");
-    const sources = this.db.getPageCountByTypes(["record", "source", "event"]);
+    const records = this.db.getPageCountByType("record");
     const links = this.db.getLinkCount();
 
     const topEntities = this.db.getTopMentionedEntities(10);
@@ -133,7 +132,7 @@ export class IndexGenerator {
     md += `| Total Pages | ${totalPages} |\n`;
     md += `| Entities | ${entities} |\n`;
     md += `| Concepts | ${concepts} |\n`;
-    md += `| Sources | ${sources} |\n`;
+    md += `| Records | ${records} |\n`;
     md += `| Links | ${links} |\n\n`;
 
     md += `## Top Entities\n\n`;
@@ -150,7 +149,7 @@ export class IndexGenerator {
     md += `## Indexes\n\n`;
     md += `- [[All-Entities]]\n`;
     md += `- [[All-Concepts]]\n`;
-    md += `- [[All-Sources]]\n`;
+    md += `- [[All-Records]]\n`;
 
     writeFileSync(filePath, md, "utf-8");
     return filePath;

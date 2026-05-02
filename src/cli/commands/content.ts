@@ -11,7 +11,7 @@ export function register(program: Command) {
     .option("-t, --type <type>", "Content type: text or markdown", "text")
     .option("--title <title>", "Title (for text type)")
     .option("--tags <tags>", "Comma-separated tags")
-    .option("--page-type <type>", "Page type: entity|concept|event|record|source")
+    .option("--page-type <type>", "Page type: entity|concept|record")
     .option("--no-ner", "Skip NER entity extraction")
     .argument("<content>", "Content to ingest (use @file to read from file)")
     .action(async (content, opts) => {
@@ -60,7 +60,7 @@ export function register(program: Command) {
   program
     .command("list")
     .description("List all pages in the brain")
-    .option("-t, --type <type>", "Filter by type: entity|concept|event|record|source")
+    .option("-t, --type <type>", "Filter by type: entity|concept|record")
     .option("-l, --limit <number>", "Max results", "50")
     .action(async (opts) => {
       const config = loadConfig();

@@ -13,12 +13,12 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath } from "../utils/slug.js";
-import { hashContent } from "./shared.js";
+import { hashContent, normalizePageType } from "./shared.js";
 import type { Logger } from "./logger.js";
 
 export interface CreatePageInput {
   title: string;
-  type: "entity" | "concept" | "event" | "record" | "source" | "insight";
+  type: "entity" | "concept" | "record" | "insight";
   body: string;
   tags?: string[];
   slug?: string;
@@ -51,14 +51,15 @@ export class PageManager {
   }
 
   create(input: CreatePageInput): Page {
-    const slug = input.slug || generateSlug(input.title, input.type);
+    const normalizedType = normalizePageType(input.type);
+    const slug = input.slug || generateSlug(input.title, normalizedType);
     const fileName = slugToFilePath(slug);
     const filePath = join(this.vaultPath, fileName);
 
     const now = new Date().toISOString();
     const frontmatter: PageFrontmatter = {
       title: input.title,
-      type: input.type,
+      type: normalizedType,
       slug,
       tags: input.tags || [],
       tier: 3,
@@ -75,7 +76,7 @@ export class PageManager {
 
     this.db.insertPage({
       slug,
-      type: input.type,
+      type: normalizedType,
       title: input.title,
       filePath: relative(this.vaultPath, filePath),
       contentHash,

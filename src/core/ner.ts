@@ -100,18 +100,17 @@ const GENERIC_TERMS = new Set([
 const MAX_CONCEPTS = 3;
 const MAX_TOTAL_ENTITIES = 8;
 
-function filterResult(result: ExtractionResult): ExtractionResult {
-  const validEntities = result.entities.filter((e) => {
+function filterEntities(entities: ExtractedEntity[]): ExtractedEntity[] {
+  const valid = entities.filter((e) => {
     if (GENERIC_TERMS.has(e.name) || e.name.length < 2 || isNoiseEntity(e.name, e.type)) return false;
-    // Strict concept filter: only allow recognized named concepts
     if (e.type === "concept" && isGenericConcept(e.name)) return false;
     return true;
   });
 
   // Prioritize high-relevance, then medium. Drop low.
-  const ranked = validEntities.sort((a, b) => {
-    const order = { high: 0, medium: 1, low: 2 };
-    return order[a.relevance] - order[b.relevance];
+  const ranked = valid.sort((a, b) => {
+    const order: Record<string, number> = { high: 0, medium: 1, low: 2 };
+    return (order[a.relevance] ?? 2) - (order[b.relevance] ?? 2);
   });
 
   const concepts = ranked.filter((e) => e.type === "concept");
@@ -120,102 +119,97 @@ function filterResult(result: ExtractionResult): ExtractionResult {
   const keptConcepts = concepts.slice(0, MAX_CONCEPTS);
   const keptNonConcepts = nonConcepts.slice(0, MAX_TOTAL_ENTITIES - keptConcepts.length);
 
-  const entities = [...keptNonConcepts, ...keptConcepts];
-  const entityNames = new Set(entities.map((e) => e.name));
-
-  const relations = result.relations.filter(
-    (r) => entityNames.has(r.from) && entityNames.has(r.to)
-  );
-
-  return { entities, relations, events: result.events };
+  return [...keptNonConcepts, ...keptConcepts];
 }
 
-// ─── Prompt ─────────────────────────────────────────────────
+function filterRelations(
+  relations: ExtractedRelation[],
+  validEntityNames: Set<string>
+): ExtractedRelation[] {
+  return relations.filter(
+    (r) => validEntityNames.has(r.from) && validEntityNames.has(r.to)
+  );
+}
 
-const SYSTEM_PROMPT = `You are a precision entity extractor for a personal knowledge graph. Extract ONLY entities that are worth remembering long-term. When in doubt, skip it.
+// ─── Prompt: Schema (WHAT) ───────────────────────────────────
 
-## Core Rule
+const ENTITY_SCHEMA = `{
+  "entities": [{ "name": "实体名", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文片段" }],
+  "events": [{ "date": "YYYY-MM-DD or null", "description": "事件描述", "participants": ["参与人/组织"] }]
+}`;
 
-Quality over quantity. A knowledge graph with 30 precise nodes is better than one with 300 noisy ones.
+const RELATION_SCHEMA = `{
+  "relations": [{ "from": "实体名A", "to": "实体名B", "relation": "关系类型", "context": "原文依据" }]
+}`;
+
+// ─── Prompt: Guideline (HOW) — Entity ────────────────────────
+
+const ENTITY_GUIDELINE = `You are a precision entity extractor for a personal knowledge graph. Extract ONLY entities worth remembering long-term. When in doubt, skip it.
+
+Quality over quantity. 30 precise nodes > 300 noisy ones.
 
 DO extract:
-- Named people (specific individuals with real context in the text)
-- Named companies and organizations (specific, not generic like "the company")
-- Named products (specific product names, not categories like "insurance")
-- Established methodologies, theories, effects, laws, and models (must be recognized, named concepts — e.g. "飞轮效应", "第一性原理", "奥卡姆剃刀")
+- Named people (specific individuals with real context)
+- Named companies and organizations
+- Named products (specific names, not categories)
+- Established methodologies, theories, effects, laws, models (must have proper names — e.g. "飞轮效应", "第一性原理", "奥卡姆剃刀")
 
-Skip ALL of these:
-- Pure numbers/amounts (93亿美元, Q1 2026)
-- Pronouns, common verbs, function words
+Skip ALL:
+- Numbers/amounts (93亿美元, Q1 2026), pronouns, function words
 - Daily items (coffee, tools, household objects)
-- Generic nouns that could appear in any context (email, bank, code, police, brand)
-- Job titles and roles (经理, 总监, 销售人员, engineer, manager)
-- Departments and teams (品牌团队, 财务部门, sales team)
-- Abstract qualities or activities (深度思考, 注意力管理, 时间管理, learning, efficiency)
-- Generic business terms (消费者, 市场策略, 切换成本, cost structure)
-- Bare place names without specific significance
-- Vague "concepts" that are just common words repackaged (问题解决, 沟通方法, 因果链)
+- Generic nouns (email, bank, code, police, brand)
+- Job titles (经理, 总监, engineer, manager)
+- Departments/teams (品牌团队, sales team)
+- Abstract qualities/activities (深度思考, 注意力管理, 时间管理, learning)
+- Generic business terms (消费者, 市场策略, 切换成本)
+- Bare place names without significance
+- Vague "concepts" that are common words repackaged (问题解决, 沟通方法)
 
-## Output Schema (strict JSON)
-{
-  "entities": [{ "name": "实体名", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文片段" }],
-  "relations": [{ "from": "实体A", "to": "实体B", "relation": "RELATION_TYPE", "context": "原文依据" }],
-  "events": [{ "date": "YYYY-MM-DD or null", "description": "事件描述", "participants": ["参与人/组织"] }]
-}
+Relevance: "high"=main subject, "medium"=supporting role, "low"=incidental (skip).
+Context must be a verbatim excerpt from source.
 
-## Relevance Scoring (CRITICAL — score every entity)
+Concept rule (STRICT): only extract if ALL: (1) has proper name (2) recognized methodology/theory/framework/effect/law/model (3) established literature (4) NOT compound of common words.
+Valid: 飞轮效应, 第一性原理, 奥卡姆剃刀, 达克效应, 幸存者偏差
+Invalid: 深度思考, 注意力管理, 时间管理, 问题分析, 沟通方法, 效率培训
 
-"high" — Core to understanding this text. The main subject, key actors, primary organizations.
-"medium" — Supporting role with meaningful context. Contributes to the narrative.
-"low" — Incidental mention. Passing reference. DO NOT extract low-relevance entities.
+Event rule: specific dates (YYYY-MM-DD, Q1 2026) or clear time references. Include regulatory/financial events. Skip vague ("近年来", "recently"). Participants must be named entities.
 
-Scoring examples:
-- Drug approval article: the drug name = "high", the FDA = "high", a competitor drug mentioned once = skip
-- Company profile: the company = "high", its CEO = "high", a client mentioned once = "medium"
-- Methodology article: the method name = "high", the original paper author = "medium", an example scenario = skip
+## Output format (MUST follow exactly — concepts go INSIDE entities array with type="concept"):
 
-## Concept Rules (STRICT)
-For type="concept" entities, ONLY extract if the item meets ALL criteria:
-1. It has a proper name (not just a common word or phrase)
-2. It is a recognized methodology, theory, framework, effect, law, or model
-3. It has established literature or widespread recognition
-4. It is NOT just a compound of common words (e.g. "注意力管理" = skip, "奥卡姆剃刀" = keep)
+{"entities": [{"name": "名称", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文引用"}], "events": [{"date": "YYYY-MM-DD或null", "description": "事件描述", "participants": ["参与实体名"]}]}
 
-Examples of VALID concepts: 飞轮效应, 第一性原理, 奥卡姆剃刀, 邓巴数, 达克效应, 幸存者偏差
-Examples of INVALID concepts: 深度思考, 注意力管理, 时间管理, 问题分析, 沟通方法, 学习能力, 效率培训
+Limits: max 8 regular entities + 3 concepts = 11 total entities. Return ONLY valid JSON, no markdown wrap.`;
 
-## Limits
-- Max 8 entities + 3 concepts (11 total)
+// ─── Prompt: Guideline (HOW) — Relation ──────────────────────
+
+const RELATION_GUIDELINE = (entityNames: string[]) => `You are a relation extractor. Identify relationships between the entities listed below, based on the source text.
+
+## Extracted Entities (use exact names)
+
+${entityNames.map(n => `- ${n}`).join("\n")}
 
 ## Relation Types
 
-Use Chinese types for Chinese relations, English types for English relations. If none fits, use "mentions":
-- 任职于 / works_at: A works at B
-- 认识 / knows: A knows B
-- 投资了 / invested_in: A invested in B
-- 创立了 / founded: A founded B
-- 收购了 / acquired: A acquired B
-- 合作 / partnered_with: A partners with B
-- 竞争对手 / competitor: A competes with B
-- 子公司 / subsidiary_of: A is subsidiary of B
-- 批准了 / approved: A approved B (e.g. FDA approved a drug)
-- 发布了 / announced: A announced B (e.g. company announced results)
-- mentions: general reference
+Use these types only. If none fits, use "mentions":
+- 任职于 — A works at B
+- 认识 — A knows B
+- 投资了 — A invested in B
+- 创立了 — A founded B
+- 收购了 — A acquired B
+- 合作伙伴 — A partners with B
+- 竞争对手 — A competes with B
+- 子公司 — A is subsidiary of B
+- 发布了 — A announced B
+- mentions — general reference
 
-## Event Rules
-- Extract events with specific dates (YYYY-MM-DD, Q1 2026, 2024) or clear time references
-- Include regulatory events (FDA approval, CHMP opinion, NMPA filing)
-- Include financial events (earnings release, acquisition close, investment round)
-- Skip vague statements ("近年来", "over the years", "recently")
-- participants must be named entities from the text
-- description can be in Chinese or English, matching the source
+## Rules
+1. Both from and to MUST be in the entity list above — do not invent entity names
+2. Relation must be explicitly stated or clearly implied in the source text
+3. context must be a verbatim excerpt from the source
+4. If no clear relation exists, return empty array {"relations": []}
+5. Return ONLY JSON`;
 
-## General Rules
-1. Only extract information explicitly stated in the text — no inference
-2. Deduplicate: same person/company appears only once
-3. context must be a verbatim excerpt from the source text
-4. Return empty arrays for fields with nothing to extract
-5. Return ONLY JSON, no explanation`;
+// ─── Prompt (legacy, replaced by two-stage) ───────────────────
 
 // ─── NER Engine ─────────────────────────────────────────────
 
@@ -233,36 +227,66 @@ export class NerEngine {
 
     const truncated = text.length > 3000 ? text.slice(0, 3000) + "…" : text;
 
-    const response = await this.llm.chat([
-      { role: "system", content: SYSTEM_PROMPT },
+    // Stage 1: Extract entities + events
+    const stage1 = await this.llm.chat([
+      { role: "system", content: ENTITY_GUIDELINE },
       { role: "user", content: truncated },
     ]);
+    const { entities, events } = this.parseEntityResponse(stage1);
+    const filtered = filterEntities(entities);
+    if (filtered.length === 0) {
+      return { entities: [], relations: [], events };
+    }
 
-    return filterResult(this.parseResponse(response));
+    // Stage 2: Extract relations — feed extracted entity names as context
+    const entityNames = filtered.map(e => e.name);
+    const stage2 = await this.llm.chat([
+      { role: "system", content: RELATION_GUIDELINE(entityNames) },
+      { role: "user", content: truncated },
+    ]);
+    const relations = this.parseRelationResponse(stage2, new Set(entityNames));
+
+    return { entities: filtered, relations, events };
   }
 
-  private parseResponse(raw: string): ExtractionResult {
-    const empty: ExtractionResult = { entities: [], relations: [], events: [] };
-
+  private parseEntityResponse(raw: string): { entities: ExtractedEntity[]; events: ExtractedEvent[] } {
     try {
       const cleaned = raw.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "");
       const parsed = JSON.parse(cleaned);
 
-      const entities = Array.isArray(parsed.entities)
-        ? parsed.entities.map((e: Record<string, unknown>) => ({
-            ...e,
-            relevance: e.relevance ?? "medium",
-          }))
-        : [];
+      // Main entities array (with type field)
+      const entities: ExtractedEntity[] = (Array.isArray(parsed.entities) ? parsed.entities : []).map(
+        (e: Record<string, unknown>) => ({ ...e, relevance: e.relevance ?? "medium", type: e.type ?? "entity" })
+      );
+
+      // Handle LLM outputting concepts as separate array — merge into entities
+      if (Array.isArray(parsed.concepts)) {
+        for (const c of parsed.concepts as Record<string, unknown>[]) {
+          if (c.name && typeof c.name === "string") {
+            entities.push({ name: c.name, type: "concept", relevance: (c.relevance as Relevance) ?? "medium", context: (c.context as string) ?? "" });
+          }
+        }
+      }
 
       return {
         entities,
-        relations: Array.isArray(parsed.relations) ? parsed.relations : [],
         events: Array.isArray(parsed.events) ? parsed.events : [],
       };
     } catch (e) {
-      console.error("[ner] LLM 响应 JSON 解析失败", e);
-      return empty;
+      console.error("[ner] stage1 JSON 解析失败", e);
+      return { entities: [], events: [] };
+    }
+  }
+
+  private parseRelationResponse(raw: string, validNames: Set<string>): ExtractedRelation[] {
+    try {
+      const cleaned = raw.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "");
+      const parsed = JSON.parse(cleaned);
+      const relations: ExtractedRelation[] = Array.isArray(parsed.relations) ? parsed.relations : [];
+      return relations.filter(r => validNames.has(r.from) && validNames.has(r.to));
+    } catch (e) {
+      console.error("[ner] stage2 JSON 解析失败", e);
+      return [];
     }
   }
 }

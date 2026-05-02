@@ -13,6 +13,7 @@ import {
   hashContent,
   collectMarkdownFiles,
   DEFAULT_CHUNK_SIZE,
+  normalizePageType,
 } from "./shared.js";
 import { ContentPipeline } from "./pipeline.js";
 import type { NerPipelineResult } from "./pipeline.js";
@@ -98,7 +99,7 @@ export class SyncManager {
         }
 
         const title = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
-        const type = parsed.frontmatter.type ?? this.inferTypeFromPath(relPath);
+        const type = normalizePageType(parsed.frontmatter.type ?? this.inferTypeFromPath(relPath));
         const chunks = chunkContent(parsed.body, this.chunkSize);
         for (const c of chunks) allChunks.push({ slug, index: c.index, content: c.content });
         changed.push({ filePath, slug, title, type, relPath, body: parsed.body, contentHash, frontmatter: parsed.frontmatter });
@@ -283,7 +284,7 @@ export class SyncManager {
 
     const relPath = relative(vaultPath, fullPath);
     const title = parsed.frontmatter.title ?? effectiveSlug;
-    const type = parsed.frontmatter.type ?? "record";
+    const type = normalizePageType(parsed.frontmatter.type ?? "record");
 
     this.db.upsertPage({
       slug: effectiveSlug,
@@ -348,8 +349,8 @@ export class SyncManager {
 
   private inferTypeFromPath(relPath: string): string {
     const typeFromDir: Record<string, string> = {
-      nodes: "entity", events: "event",
-      records: "record", sources: "source",
+      nodes: "entity",
+      records: "record",
     };
     const parts = relPath.split("/");
     if (parts.length >= 3 && parts[0] === "brain") {

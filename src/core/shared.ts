@@ -75,7 +75,7 @@ export function chunkContent(
 
 export function mapEntityType(
   type: string
-): "entity" | "concept" | "event" | "record" | "source" {
+): "entity" | "concept" {
   switch (type) {
     case "person":
     case "company":
@@ -86,6 +86,12 @@ export function mapEntityType(
     default:
       return "entity";
   }
+}
+
+const VALID_PAGE_TYPES = new Set(["entity", "concept", "record", "insight"]);
+
+export function normalizePageType(type: string): "entity" | "concept" | "record" | "insight" {
+  return (VALID_PAGE_TYPES.has(type) ? type : "record") as "entity" | "concept" | "record" | "insight";
 }
 
 export function buildStubBody(
