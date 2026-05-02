@@ -197,8 +197,10 @@ export function register(program: Command) {
       const reflectLlm = config.reflect?.llm_api_key
         ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model)
         : deps.llm;
+      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const dreamPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm);
-      const reflectMgr = new ReflectManager(deps.db, pages, reflectLlm);
+      const reflectMgr = new ReflectManager(deps.db, pages, reflectLlm, dreamPipeline);
       const health = new HealthChecker(deps.db, outputsDir, logger);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, reflectMgr);
       const icon = report.locked ? "🌙" : "⚠️";
@@ -238,7 +240,9 @@ export function register(program: Command) {
         process.exit(1);
       }
 
-      const mgr = new ReflectManager(deps.db, pages, reflectLlm);
+      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
+      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline);
       console.log("🧠 Reflecting...");
       const report = await mgr.reflectAll();
 

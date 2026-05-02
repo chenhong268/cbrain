@@ -13,6 +13,7 @@ import {
   findEntitySlug,
   resolveEntityName,
   DEFAULT_CHUNK_SIZE,
+  normalizeRelation,
 } from "./shared.js";
 
 export interface PipelineInput {
@@ -187,7 +188,7 @@ export class ContentPipeline {
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
-    if (type === "entity" || type === "concept") return null;
+    if (type === "entity" || type === "concept" || type === "insight") return null;
 
     const extraction = precomputed ?? await this.nerEngine.extract(body);
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {
@@ -235,7 +236,7 @@ export class ContentPipeline {
       const from = resolveEntityName(rel.from, entitySlugMap, this.db);
       const to = resolveEntityName(rel.to, entitySlugMap, this.db);
       if (from && to && from !== to) {
-        this.db.insertLink(from, to, rel.relation, rel.context);
+        this.db.insertLink(from, to, normalizeRelation(rel.relation), rel.context);
 
         const fromTitle = this.pages?.getBySlug(from)?.title ?? rel.from;
         const toTitle = this.pages?.getBySlug(to)?.title ?? rel.to;

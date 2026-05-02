@@ -103,7 +103,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   }, async () => {
     const { runDream } = await import("../../core/dream.js");
     const { ReflectManager } = await import("../../core/reflect.js");
-    const reflectMgr = new ReflectManager(ctx.db, ctx.pages, ctx.llm);
+    const reflectMgr = new ReflectManager(ctx.db, ctx.pages, ctx.llm, ctx.pipeline);
     const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger, reflectMgr);
     const brief = [
       `同步: ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`,
@@ -122,6 +122,17 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
         timestamp: report.timestamp,
         duration_ms: report.duration_ms,
       }, null, 2) }],
+    };
+  });
+
+  // ─── dream_reset ────────────────────────────────────────────
+  server.registerTool("dream_reset", {
+    description: "Clear the dream cycle lock. Use when a previous dream didn't finish and you need to force a new one.",
+    inputSchema: {},
+  }, async () => {
+    ctx.db.deleteConfig("dream.lock");
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: true, message: "Dream lock cleared. Ready to run again." }) }],
     };
   });
 }

@@ -4,6 +4,8 @@ import type { PageManager } from "./page.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readPageFile } from "../utils/frontmatter.js";
+import { normalizeRelation } from "./shared.js";
+import type { ContentPipeline } from "./pipeline.js";
 import { generateSlug } from "../utils/slug.js";
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -88,6 +90,10 @@ const SYNTHESIS_SYSTEM = `你是一个知识图谱分析师。根据给定信息
 
 const RELATION_SYSTEM = `你是一个知识图谱分析师。根据已知关系，判断实体对之间是否存在未标注的直接关系。
 只输出有把握的推理，confidence低于0.6的不输出。
+
+关系类型（必须用以下之一）：
+- 认识 / 提及 / 任职 / 创立 / 归属 / 合作 / 竞争 / 资本 / 制造 / 间接关联
+
 输出JSON：{"inferred_relations": [{"from": "slug", "to": "slug", "relation": "关系", "reasoning": "依据", "confidence": 0.0到1.0}]}`;
 
 const INSIGHT_SYSTEM = `你是一个知识图谱分析师。你的任务是从素材中判断是否存在值得记录的洞察。
@@ -121,11 +127,13 @@ export class ReflectManager {
   private db: CBrainDB;
   private llm: LLMProvider | null;
   private pageMgr: PageManager;
+  private pipeline: ContentPipeline | null;
 
-  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider) {
+  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider, pipeline?: ContentPipeline) {
     this.db = db;
     this.pageMgr = pageMgr;
     this.llm = llm ?? null;
+    this.pipeline = pipeline ?? null;
   }
 
   async reflectAll(): Promise<ReflectReport> {
@@ -224,7 +232,7 @@ export class ReflectManager {
           if (!r.from || !r.to || !r.relation) continue;
           if (!this.db.getPage(r.from) || !this.db.getPage(r.to)) continue;
 
-          this.db.insertLink(r.from, r.to, r.relation, `[inferred] ${r.reasoning ?? ""}`);
+          this.db.insertLink(r.from, r.to, normalizeRelation(r.relation), `[inferred] ${r.reasoning ?? ""}`);
           allRelations.push({
             from: r.from,
             to: r.to,
@@ -305,6 +313,17 @@ export class ReflectManager {
               slug: insightSlug,
               extra: { source_entities: resolvedEntities, confidence: ins.confidence },
             });
+
+            // Index immediately — insight is searchable without waiting for sync
+            if (this.pipeline) {
+              try {
+                const { chunks, embedResults } = await this.pipeline.embed(ins.content);
+                this.pipeline.writeIndexes(insightSlug, chunks, embedResults);
+              } catch {
+                // Index failure is non-blocking
+              }
+            }
+
             allInsights.push(insight);
           } catch {
             // Skip on failure

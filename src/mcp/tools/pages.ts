@@ -40,7 +40,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("list_pages", {
     description: "List pages in the brain. Optional type filter.",
     inputSchema: {
-      type: z.enum(["entity", "concept", "record"]).optional().describe("Filter by type"),
+      type: z.enum(["entity", "concept", "record", "insight"]).optional().describe("Filter by type"),
       limit: z.number().optional().default(20).describe("Max results"),
       offset: z.number().optional().default(0).describe("Offset for pagination"),
     },
@@ -58,7 +58,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       slug: z.string().describe("Page slug (e.g. entities/zhangsan)"),
       content: z.string().describe("Page body content (markdown)"),
       title: z.string().optional().describe("Page title (required for new pages)"),
-      type: z.enum(["entity", "concept", "record"]).optional().default("record").describe("Page type (required for new pages)"),
+      type: z.enum(["entity", "concept", "record", "insight"]).optional().default("record").describe("Page type (required for new pages)"),
       tags: z.array(z.string()).optional().describe("Tags to apply"),
     },
   }, async ({ slug, content, title, type, tags }) => {

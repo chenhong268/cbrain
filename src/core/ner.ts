@@ -190,17 +190,17 @@ ${entityNames.map(n => `- ${n}`).join("\n")}
 
 ## Relation Types
 
-Use these types only. If none fits, use "mentions":
-- 任职于 — A works at B
-- 认识 — A knows B
-- 投资了 — A invested in B
-- 创立了 — A founded B
-- 收购了 — A acquired B
-- 合作伙伴 — A partners with B
-- 竞争对手 — A competes with B
-- 子公司 — A is subsidiary of B
-- 发布了 — A announced B
-- mentions — general reference
+Use these types exactly. If none fits, use "提及":
+- 认识 — A knows B（人与人）
+- 提及 — general reference（默认）
+- 任职 — A works at B（人→组织）
+- 创立 — A founded B（人→组织）
+- 归属 — A belongs to B（组织→组织）
+- 合作 — A partners with B
+- 竞争 — A competes with B
+- 资本 — A invested in / acquired B
+- 制造 — A developed / produced B
+- 间接关联 — inferred connection
 
 ## Rules
 1. Both from and to MUST be in the entity list above — do not invent entity names

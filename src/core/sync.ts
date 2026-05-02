@@ -299,7 +299,7 @@ export class SyncManager {
     this.pipeline.writeIngestLog(effectiveSlug, "vault", { hash: contentHash });
 
     // NER — skip entity/concept pages
-    if (this.nerEngine && parsed.body.trim() && type !== "entity" && type !== "concept") {
+    if (this.nerEngine && parsed.body.trim() && type !== "entity" && type !== "concept" && type !== "insight") {
       try {
         const nerResult = await this.pipeline.processNer(effectiveSlug, parsed.body, type, false);
         if (nerResult && nerResult.entities > 0) {

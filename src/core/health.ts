@@ -559,12 +559,8 @@ export class HealthChecker {
     const issues: HealthIssue[] = [];
 
     const standardRelations = new Set([
-      "任职于", "认识", "投资了", "创立了", "参加了",
-      "提及", "竞争对手", "合作伙伴", "子公司",
-      "成员", "指导", "创建者", "影响", "其他",
-      "下级", "汇报给", "负责", "职位",
-      "就读于", "毕业于", "专业", "专业为",
-      "配偶关系", "条线",
+      "认识", "提及", "任职", "创立", "归属",
+      "合作", "竞争", "资本", "制造", "间接关联",
     ]);
 
     const links = this.db.getAllLinks();

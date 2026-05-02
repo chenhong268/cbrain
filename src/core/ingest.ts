@@ -13,7 +13,7 @@ export interface IngestInput {
   type: "markdown" | "text";
   title?: string;
   tags?: string[];
-  pageType?: "entity" | "concept" | "record";
+  pageType?: "entity" | "concept" | "record" | "insight";
   skipNer?: boolean;
 }
 
@@ -103,7 +103,7 @@ export class IngestManager {
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
     // NER runs async — skip entity/concept pages
-    const shouldNer = !overrides?.skipNer && type !== "entity" && type !== "concept";
+    const shouldNer = !overrides?.skipNer && type !== "entity" && type !== "concept" && type !== "insight";
     if (shouldNer) {
       this.pipeline.processNer(slug, body, type, true).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
@@ -135,7 +135,7 @@ export class IngestManager {
     this.pipeline.writeIndexes(slug, chunks, embedResults);
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
-    const shouldNer = !input.skipNer && type !== "entity" && type !== "concept";
+    const shouldNer = !input.skipNer && type !== "entity" && type !== "concept" && type !== "insight";
     if (shouldNer) {
       this.pipeline.processNer(slug, body, type, true).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);

@@ -94,6 +94,44 @@ export function normalizePageType(type: string): "entity" | "concept" | "record"
   return (VALID_PAGE_TYPES.has(type) ? type : "record") as "entity" | "concept" | "record" | "insight";
 }
 
+// ─── Canonical relation types ──────────────────────────────
+
+const CANONICAL_RELATIONS: Record<string, string> = {
+  // 1. 认识
+  "knows": "认识", "认识": "认识",
+  // 2. 提及
+  "提及": "提及", "mentions": "提及", "announced": "提及", "发布了": "提及",
+  // 3. 任职
+  "works_at": "任职", "joined": "任职", "任职于": "任职", "works_on": "任职",
+  // 4. 创立
+  "founded": "创立", "founded_by": "创立", "founder_of": "创立", "创立了": "创立",
+  // 5. 归属
+  "subsidiary_of": "归属", "part_of": "归属", "same_company": "归属", "company": "归属",
+  "子公司": "归属", "同属诺华公司": "归属", "同公司": "归属", "公司": "归属",
+  // 6. 合作
+  "partnered_with": "合作", "合作": "合作",
+  // 7. 竞争
+  "competitor": "竞争", "竞争对手": "竞争",
+  // 8. 资本
+  "invested_in": "资本", "投资了": "资本", "acquired": "资本", "收购了": "资本",
+  // 9. 制造
+  "manufactured_by": "制造", "developed_by": "制造", "contains": "制造",
+  "contained_in": "制造", "成分": "制造", "uses": "制造", "implemented_by": "制造",
+  // 10. 间接关联
+  "间接关系": "间接关联", "间接连接": "间接关联",
+  // Singletons → nearest semantic match or 提及
+  "targets": "竞争", "requires": "制造",
+  "evolves_to": "间接关联", "has": "归属",
+  "wrote": "制造", "applies_to": "提及",
+  "characterized_by": "提及", "focus_of": "提及",
+  "methodology": "提及", "studied_in": "提及",
+  "triggered_by": "间接关联", "implemented": "制造",
+};
+
+export function normalizeRelation(rel: string): string {
+  return CANONICAL_RELATIONS[rel] ?? "提及";
+}
+
 export function buildStubBody(
   name: string,
   rels: Array<{ from: string; to: string; relation: string }>,
