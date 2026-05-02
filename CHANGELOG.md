@@ -1,6 +1,34 @@
 # Changelog
 
-> Current: `v0.3.0` — first stable release. 23 CLI commands, 41 MCP tools, 11 skills.
+> Current: `v0.3.1` — first stable release. 23 CLI commands, 41 MCP tools, 11 skills.
+
+## [Dev] — 2026-05-02
+
+### 系统大扫除
+
+- **死功能清理** — 删 raw_data 全链路（0 行数据）、ResolverChecker + RoutingEval（无关代码）、config MCP 工具（无人使用）。AuditLogger 空壳化，Logger 只写 warn/error，info 不进磁盘。共计 **-666 行**。
+- **页面类型合并** — event + source → record，从 6 种减为 4 种（entity/concept/record/insight）。brain/ 目录从 5 个减为 3 个（nodes/insights/records）。`normalizePageType()` 在 PageManager 入口把关，raw/ 文件的非标类型自动归一化。
+
+### 两阶段 NER 提取（借鉴 Hyper-Extract）
+
+- **阶段 1** — 只抽实体 + 事件，过滤后产出精确 entity list。
+- **阶段 2** — 用 entity list 作为 context 只抽关系，LLM 只能引用列表里的名字，彻底杜绝 dangling reference。
+- **Schema-Guideline 分离** — ENTITY_SCHEMA/GUIDELINE + RELATION_SCHEMA/GUIDELINE，为领域定制铺路。
+
+### DeepSeek 迁移
+
+- 新增 `DeepSeekLLMProvider`（deepseek-v4-flash），reflect 走 DeepSeek，NER 继续走智谱 glm-4-flash。
+- 并发 2 → 3。
+
+### Insight 质量优化
+
+- 置信度门槛 >= 0.8，source_entities 重叠度 >50% 去重，标题限 10 字。
+- prompt 去风格化——强调"好的洞察是稀有的"，默认为空。
+- 三阶段 `Promise.all` 并行。产出从 87 个降至 11 个精选。
+
+### Bug Fixes
+
+- 修复 22 个实体文件的 wikilink 双链接错误（brain/sources/ → brain/records/）。
 
 ## [Dev] — 2026-05-01
 
