@@ -797,6 +797,30 @@ export class CBrainDB {
     ).all({ $min: minNeighbors }) as Array<{ slug: string; title: string }>;
   }
 
+  // ─── Brief & Cross-ref queries ────────────────────────────────
+
+  countNewPagesSince(hours: number): { entities: number; concepts: number } {
+    const entities = (this.db.prepare(
+      "SELECT COUNT(*) as c FROM pages WHERE type = 'entity' AND created_at > datetime('now', '-' || $h || ' hours')"
+    ).get({ $h: hours }) as { c: number }).c;
+    const concepts = (this.db.prepare(
+      "SELECT COUNT(*) as c FROM pages WHERE type = 'concept' AND created_at > datetime('now', '-' || $h || ' hours')"
+    ).get({ $h: hours }) as { c: number }).c;
+    return { entities, concepts };
+  }
+
+  getRecentUpdatesBySlugs(slugs: string[], days: number): Array<{ slug: string; title: string; type: string; updated_at: string }> {
+    if (slugs.length === 0) return [];
+    const placeholders = slugs.map(() => "?").join(",");
+    return this.db.prepare(
+      `SELECT slug, title, type, updated_at FROM pages
+       WHERE slug IN (${placeholders})
+       AND updated_at > datetime('now', '-${days} days')
+       ORDER BY updated_at DESC
+       LIMIT 10`
+    ).all(...slugs) as Array<{ slug: string; title: string; type: string; updated_at: string }>;
+  }
+
   // ─── Link operations ──────────────────────────────────────────
 
   insertLink(from: string, to: string, relation: string, context?: string | null): void {

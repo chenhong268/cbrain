@@ -89,6 +89,28 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const totalTimeline = entities.reduce((n, e) => n + e.timeline.length, 0);
     const lowQuality = entities.filter((e) => e.quality === "low").length;
 
+    // Phase 3: cross-references — which related entities have recent activity?
+    const crossRefs: { subject: string; related: string; type: string; updated_at: string }[] = [];
+    for (const entity of entities) {
+      const relatedSlugs = new Set([
+        ...entity.links.outgoing.map((l: Record<string, unknown>) => l.to_slug as string),
+        ...entity.links.incoming.map((l: Record<string, unknown>) => l.from_slug as string),
+        ...entity.related.map((r: { slug: string }) => r.slug),
+      ]);
+      const recent = ctx.db.getRecentUpdatesBySlugs([...relatedSlugs], 7);
+      for (const r of recent) {
+        crossRefs.push({ subject: entity.title, related: r.title, type: r.type, updated_at: r.updated_at });
+      }
+    }
+    // Deduplicate and limit
+    const seen = new Set<string>();
+    const uniqueRefs = crossRefs.filter(r => {
+      const key = `${r.subject}↔${r.related}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 10);
+
     return {
       content: [{
         type: "text" as const,
@@ -96,7 +118,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
           {
             query,
             entities,
-            summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件`,
+            cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
+            summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` + (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 个关联更新` : ""),
           },
           null,
           2,

@@ -10,6 +10,7 @@ import type { Logger } from "./logger.js";
 
 export interface DreamReport {
   timestamp: string;
+  brief: string;
   stages: {
     backup: { path: string | null; size_mb: string };
     sync: { synced: number; skipped: number; errors: number };
@@ -66,6 +67,7 @@ export async function runDream(
       },
       duration_ms: 0,
       locked: false,
+      brief: "上次 dream 尚未完成（30 分钟锁未释放），已跳过。如需强制执行，请先 dream_reset。",
     };
   }
 
@@ -149,7 +151,9 @@ export async function runDream(
     },
     duration_ms: Date.now() - started,
     locked: true,
+    brief: "",
   };
+  report.brief = buildBrief(report, db);
 
   // Write report
   const dreamDir = join(outputsDir, "dream");
@@ -179,4 +183,38 @@ export async function runDream(
   releaseLock(db);
   logger.info("dream", `夜间维护完成 (${(report.duration_ms / 1000).toFixed(1)}s)`);
   return report;
+}
+
+function buildBrief(report: DreamReport, db: CBrainDB): string {
+  const date = report.timestamp.slice(0, 10);
+  const lines = [`CBrain 日报 ${date}`, ""];
+
+  const fresh = db.countNewPagesSince(24);
+  if (fresh.entities > 0 || fresh.concepts > 0) {
+    const parts: string[] = [];
+    if (fresh.entities > 0) parts.push(`${fresh.entities} 个实体`);
+    if (fresh.concepts > 0) parts.push(`${fresh.concepts} 个概念`);
+    lines.push(`新增 ${parts.join("，")}`);
+  }
+
+  const top5 = db.getTopMentionedEntities(5);
+  if (top5.length > 0) {
+    lines.push(`本周活跃: ${top5.map(e => `${e.title}(${e.mention_count})`).join(", ")}`);
+  }
+
+  if (report.stages.sync.synced > 0) {
+    lines.push(`${report.stages.sync.synced} 个页面更新`);
+  }
+  if (report.stages.enrich.upgraded > 0) {
+    lines.push(`${report.stages.enrich.upgraded} 个实体升级`);
+  }
+  if (report.stages.reflect.insightsGenerated > 0) {
+    lines.push(`新发现 ${report.stages.reflect.insightsGenerated} 个洞察`);
+  }
+
+  const icon = report.stages.health.overallStatus === "pass" ? "✅" : "⚠️";
+  lines.push(`健康: ${icon} ${report.stages.health.issues} 个问题`);
+
+  lines.push("", `⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
+  return lines.join("\n");
 }

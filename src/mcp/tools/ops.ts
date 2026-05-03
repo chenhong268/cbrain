@@ -105,18 +105,10 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     const { ReflectManager } = await import("../../core/reflect.js");
     const reflectMgr = new ReflectManager(ctx.db, ctx.pages, ctx.llm, ctx.pipeline);
     const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger, reflectMgr);
-    const brief = [
-      `同步: ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`,
-      `实体: ${report.stages.enrich.total} 总计, ${report.stages.enrich.upgraded} 升级`,
-      `反思: ${report.stages.reflect.entitiesSynthesized} 综合, ${report.stages.reflect.relationsInferred} 推理, ${report.stages.reflect.insightsGenerated} 洞察`,
-      `清理: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期`,
-      `健康: ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题)`,
-      `⏱ ${(report.duration_ms / 1000).toFixed(1)}s`,
-    ].join("\n");
     return {
       content: [{ type: "text", text: JSON.stringify({
         success: report.locked,
-        brief,
+        brief: report.brief,
         locked: report.locked,
         stages: report.stages,
         timestamp: report.timestamp,
