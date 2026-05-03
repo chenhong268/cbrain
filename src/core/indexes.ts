@@ -28,7 +28,6 @@ export class IndexGenerator {
 
     files.push(this.generateAllEntities(indexDir));
     files.push(this.generateAllConcepts(indexDir));
-    files.push(this.generateAllRecords(indexDir));
     files.push(this.generateDashboard(indexDir));
 
     return files;
@@ -89,31 +88,11 @@ export class IndexGenerator {
     return filePath;
   }
 
-  private generateAllRecords(dir: string): string {
-    const rows = this.db.listPages({
-      types: ["record"],
-      orderBy: "updated_at DESC",
-    });
-
-    const filePath = join(dir, "All-Records.md");
-    let md = `# All Records\n\n`;
-    md += `> Auto-generated index. Last updated: ${new Date().toISOString().slice(0, 10)}\n\n`;
-    md += `| Title | Updated |\n|:------|:--------|\n`;
-
-    for (const row of rows) {
-      md += `| [[${row.slug}\\|${row.title}]] | ${row.updated_at.slice(0, 10)} |\n`;
-    }
-
-    md += `\n> ${rows.length} records total\n`;
-    writeFileSync(filePath, md, "utf-8");
-    return filePath;
-  }
-
   private generateDashboard(dir: string): string {
     const totalPages = this.db.getPageCount();
     const entities = this.db.getPageCountByType("entity");
     const concepts = this.db.getPageCountByType("concept");
-    const records = this.db.getPageCountByType("record");
+    const insights = this.db.getPageCountByType("insight");
     const links = this.db.getLinkCount();
 
     const topEntities = this.db.getTopMentionedEntities(10);
@@ -132,7 +111,7 @@ export class IndexGenerator {
     md += `| Total Pages | ${totalPages} |\n`;
     md += `| Entities | ${entities} |\n`;
     md += `| Concepts | ${concepts} |\n`;
-    md += `| Records | ${records} |\n`;
+    md += `| Insights | ${insights} |\n`;
     md += `| Links | ${links} |\n\n`;
 
     md += `## Top Entities\n\n`;
@@ -149,7 +128,6 @@ export class IndexGenerator {
     md += `## Indexes\n\n`;
     md += `- [[All-Entities]]\n`;
     md += `- [[All-Concepts]]\n`;
-    md += `- [[All-Records]]\n`;
 
     writeFileSync(filePath, md, "utf-8");
     return filePath;
