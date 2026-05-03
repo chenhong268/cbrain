@@ -79,6 +79,7 @@ Analyze and return JSON:
 }
 
 Rules:
+- All output MUST be in Chinese (the user's knowledge graph is Chinese, all titles and content must be Chinese)
 - If knowledge is insufficient, findings can be empty. That's OK.
 - gaps must be specific — not "missing info" but "missing: team's current AI tool usage"
 - cross_domain_insights: only include if you genuinely discovered a new connection between different knowledge domains. confidence < 0.7 should not be included. If none, return empty array.
