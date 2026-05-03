@@ -69,7 +69,7 @@ export function register(program: Command) {
     .action(async (opts) => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
-      const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+      const outputsDir = join(config.vaultPath, "outputs");
       const { HealthChecker } = await import("../../core/health.js");
       const { Logger } = await import("../../core/logger.js");
       const logger = new Logger(outputsDir);
@@ -189,7 +189,7 @@ export function register(program: Command) {
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
       const { NerEngine } = await import("../../core/ner.js");
-      const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+      const outputsDir = join(config.vaultPath, "outputs");
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
@@ -226,7 +226,7 @@ export function register(program: Command) {
       const { ReflectManager } = await import("../../core/reflect.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
-      const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+      const outputsDir = join(config.vaultPath, "outputs");
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
 
@@ -279,7 +279,7 @@ export function register(program: Command) {
     .action(() => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
-      const outputsDir = join(resolve(config.vaultPath, ".."), "outputs");
+      const outputsDir = join(config.vaultPath, "outputs");
       const { IndexGenerator } = require("../../core/indexes.js");
       const gen = new IndexGenerator(db, outputsDir);
       const files = gen.generateAll();
