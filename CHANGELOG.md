@@ -38,6 +38,22 @@ ReflectManager 的 LLM 推断关系质量太差（746 条垃圾链接，方向�
 
 overall status 从"任一维度有 high issue → fail"改为"high issue > 5 个 → fail"，避免 3 个疑似重复就把 715 页的健康检查拉红。
 
+### 每日简报推送
+
+Dream 报告新增 `buildBrief()`：人类可读的日报替代枯燥计数。`DreamReport` 加 `brief` 字段，MCP dream handler 返回 brief。
+
+### deep_recall 跨域关联
+
+`deep_recall` 新增 Phase 3 `cross_refs`：查询实体时列出关联实体中最近 7 天有更新的，Agent 能主动说"对了，XX 3天前更新了笔记"。
+
+### brain_storm：大脑思考模式
+
+新增 MCP tool `brain_storm`，实现感知 → 推理+自省 → 发现（写回CBrain）→ 呈现+提问 的完整循环。当内部知识不足时返回 `search_queries` 建议外部搜索。与 `deep_recall` 分工：查实体用 deep_recall，需要分析/出主意用 brain_storm。
+
+### outputs/ 移入 vault
+
+`outputs/` 从 vault 外侧移到 `vault/outputs/`，和 `brain/` 平级。Obsidian 可以直接看到备份、健康报告、索引。清理了残留的 `outputs/records/` 目录，移除无用的 `All-Records.md`。
+
 
 
 ### 关系类型规范化
