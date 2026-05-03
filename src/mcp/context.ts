@@ -47,7 +47,7 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
 
 export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; llm?: LLMProvider }): ToolContext {
   const { db, embedding, lance, vaultPath, llm } = deps;
-  const outputsDir = join(vaultPath, "..", "outputs");
+  const outputsDir = join(vaultPath, "outputs");
   const logger = new Logger(outputsDir);
   const pages = new PageManager(db, vaultPath, logger);
   const search = new HybridSearch(db, embedding, lance, { llm });
