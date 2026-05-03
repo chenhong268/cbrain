@@ -5,8 +5,9 @@ import type { ToolContext } from "../context.js";
 export function registerBrainstormTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("brain_storm", {
     description:
-      "Think deeply about a question using the knowledge graph. Returns findings, identified knowledge gaps, " +
-      "newly discovered cross-domain connections (stored back to the brain), and follow-up questions. " +
+      "Think deeply about a question using the knowledge graph. Returns findings, knowledge gaps, " +
+      "search queries for external reference, cross-domain insights (stored back to the brain), and follow-up questions. " +
+      "When internal knowledge is insufficient, search_queries tells you what to search externally. " +
       "Use this when you need to analyze, brainstorm, or synthesize — not for simple entity lookup.",
     inputSchema: {
       query: z.string().describe("The question or topic to think about"),
@@ -19,12 +20,14 @@ export function registerBrainstormTools(server: McpServer, ctx: ToolContext): vo
       discovered: { type: string; title: string; content: string }[];
       questions: string[];
       suggestions: string[];
+      search_queries: string[];
     } = {
       findings: [],
       gaps: [],
       discovered: [],
       questions: [],
       suggestions: [],
+      search_queries: [],
     };
 
     if (!ctx.llm) {
@@ -75,7 +78,8 @@ Analyze and return JSON:
   "suggestions": ["actionable suggestions based on available knowledge, if any"],
   "cross_domain_insights": [
     {"title": "short insight title", "content": "synthesis connecting different domains (1-2 sentences)", "confidence": 0.0-1.0}
-  ]
+  ],
+  "search_queries": ["suggested web search queries to fill knowledge gaps"]
 }
 
 Rules:
@@ -99,6 +103,7 @@ Rules:
     results.gaps = analysis.gaps || [];
     results.questions = analysis.questions || [];
     results.suggestions = analysis.suggestions || [];
+    results.search_queries = analysis.search_queries || [];
 
     // ── Stage 3: 发现 — store cross-domain insights back to CBrain ──
     const insights = (analysis.cross_domain_insights || []) as Array<{
