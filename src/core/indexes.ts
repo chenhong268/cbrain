@@ -28,7 +28,7 @@ export class IndexGenerator {
 
     files.push(this.generateAllEntities(indexDir));
     files.push(this.generateAllConcepts(indexDir));
-    files.push(this.generateAllSources(indexDir));
+    files.push(this.generateAllRecords(indexDir));
     files.push(this.generateDashboard(indexDir));
 
     return files;
@@ -89,7 +89,7 @@ export class IndexGenerator {
     return filePath;
   }
 
-  private generateAllSources(dir: string): string {
+  private generateAllRecords(dir: string): string {
     const rows = this.db.listPages({
       types: ["record"],
       orderBy: "updated_at DESC",
