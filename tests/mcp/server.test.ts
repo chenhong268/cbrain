@@ -68,13 +68,13 @@ describe("MCP Server", () => {
       expect(typeof server.connect).toBe("function");
     });
 
-    test("registers all 41 tools", () => {
+    test("registers all tools", () => {
       const server = createServer(deps);
       const tools = getTools(server);
       const names = Object.keys(tools);
       expect(names.sort()).toEqual([
-        "add_link", "add_tag", "add_timeline_entry", "delete_page",
-        "delete_raw_data", "dream", "enrich", "generate_indexes",
+        "add_link", "add_tag", "add_timeline_entry", "deep_recall", "delete_page",
+        "delete_raw_data", "dream", "dream_reset", "enrich", "generate_indexes",
         "get_chunks", "get_config", "get_ingest_log", "get_links",
         "get_page", "get_raw_data", "get_tags", "get_timeline",
         "get_versions", "graph_query", "health", "ingest",

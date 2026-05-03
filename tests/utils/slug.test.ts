@@ -6,12 +6,12 @@ import {
 
 describe("slug", () => {
   test("generates Chinese entity slug with brain prefix", () => {
-    expect(generateSlug("张三", "entity")).toBe("brain/nodes/张三");
+    expect(generateSlug("张三", "entity")).toBe("brain/entities/张三");
   });
 
   test("generates English concept slug with brain prefix", () => {
     expect(generateSlug("First Principles", "concept")).toBe(
-      "brain/nodes/first-principles"
+      "brain/concepts/first-principles"
     );
   });
 
@@ -29,7 +29,7 @@ describe("slug", () => {
 
   test("handles mixed content entity", () => {
     const slug = generateSlug("OpenAI GPT-4o", "entity");
-    expect(slug).toMatch(/^brain\/nodes\//);
+    expect(slug).toMatch(/^brain\/(entities|concepts)\//);
   });
 
   test("extracts slug from wiki link", () => {

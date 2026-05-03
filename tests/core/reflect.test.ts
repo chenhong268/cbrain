@@ -175,15 +175,7 @@ describe("ReflectManager", () => {
       const mgr = new ReflectManager(db, pages, llm);
       const report = await mgr.reflectAll();
 
-      expect(report.relationsInferred).toBe(1);
-      expect(report.details.relations[0].from).toBe("entities/a");
-      expect(report.details.relations[0].to).toBe("entities/c");
-      expect(report.details.relations[0].relation).toBe("reports_to");
-
-      const links = db.getOutgoingLinks("entities/a");
-      const inferred = links.find(l => l.to_slug === "entities/c");
-      expect(inferred).toBeDefined();
-      expect(inferred!.context).toContain("[inferred]");
+      expect(report.relationsInferred).toBe(0); // disabled — quality too low
     });
 
     test("filters out low-confidence inferences", async () => {

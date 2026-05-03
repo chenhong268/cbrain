@@ -10,7 +10,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("get_page", {
     description: "Get a page by slug. Returns frontmatter + body.",
     inputSchema: {
-      slug: z.string().describe("Page slug (e.g. entities/zhangsan)"),
+      slug: z.string().describe("Page slug (e.g. brain/entities/zhangsan)"),
     },
   }, async ({ slug }) => {
     const row = ctx.db.getPage(slug);
@@ -55,7 +55,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("put_page", {
     description: "Create or update a page. If the slug exists, updates it; otherwise creates a new page.",
     inputSchema: {
-      slug: z.string().describe("Page slug (e.g. entities/zhangsan)"),
+      slug: z.string().describe("Page slug (e.g. brain/entities/zhangsan)"),
       content: z.string().describe("Page body content (markdown)"),
       title: z.string().optional().describe("Page title (required for new pages)"),
       type: z.enum(["entity", "concept", "record", "insight"]).optional().default("record").describe("Page type (required for new pages)"),
@@ -71,7 +71,15 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (existing) {
       ctx.versions.createVersion(slug); // snapshot before update
       const updated = ctx.pages.update(slug, { body: content, tags });
-      if (updated) await indexPage(ctx.pipeline, slug, content);
+      if (updated) {
+        await indexPage(ctx.pipeline, slug, content);
+        // NER + wikilink extraction — same as watcher sync path
+        const pageType = existing.type;
+        if (pageType !== "entity" && pageType !== "concept" && pageType !== "insight") {
+          ctx.pipeline.processNer(slug, content, pageType, false).catch(() => {});
+        }
+        ctx.pipeline.processWikilinks(slug, content, true);
+      }
       return {
         content: [{ type: "text", text: JSON.stringify({ action: "updated", page: updated ? { slug: updated.slug, title: updated.title } : null }, null, 2) }],
       };
@@ -99,6 +107,12 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     }
     const created = ctx.pages.create({ slug, title, type: type ?? "record", body: content, tags });
     await indexPage(ctx.pipeline, created.slug, content);
+    // NER + wikilink extraction
+    const pageType = created.type;
+    if (pageType !== "entity" && pageType !== "concept" && pageType !== "insight") {
+      ctx.pipeline.processNer(created.slug, content, pageType, false).catch(() => {});
+    }
+    ctx.pipeline.processWikilinks(created.slug, content, true);
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "created", page: { slug: created.slug, title: created.title } }, null, 2) }],
     };

@@ -15,6 +15,7 @@ import { registerVersionTools } from "./tools/versions.js";
 import { registerJobTools } from "./tools/jobs.js";
 import { registerSyncTools } from "./tools/sync.js";
 import { registerOpsTools } from "./tools/ops.js";
+import { registerRecallTools } from "./tools/recall.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -27,7 +28,7 @@ export interface CBrainDeps {
 export function createServer(deps: CBrainDeps): McpServer {
   const server = new McpServer({
     name: "cbrain",
-    version: "0.3.1",
+    version: "0.4.0",
   });
 
   // Unified error wrapper — every tool handler gets try-catch automatically
@@ -58,6 +59,7 @@ export function createServer(deps: CBrainDeps): McpServer {
   registerJobTools(server, ctx);
   registerSyncTools(server, ctx);
   registerOpsTools(server, ctx);
+  registerRecallTools(server, ctx);
 
   return server;
 }

@@ -26,7 +26,7 @@ describe("CLI", () => {
 
       expect(existsSync(join(brainDir, "cbrain.json"))).toBe(true);
       expect(existsSync(join(brainDir, "vault/raw"))).toBe(true);
-      expect(existsSync(join(brainDir, "vault/brain/nodes"))).toBe(true);
+      expect(existsSync(join(brainDir, "vault/brain/entities"))).toBe(true);
       expect(existsSync(join(brainDir, "vault/brain/events"))).toBe(true);
       expect(existsSync(join(brainDir, "vault/brain/records"))).toBe(true);
       expect(existsSync(join(brainDir, "vault/brain/sources"))).toBe(true);
@@ -58,7 +58,7 @@ describe("CLI", () => {
   describe("help", () => {
     test("shows version", () => {
       const output = execSync(`${BIN} --version`, { encoding: "utf-8" });
-      expect(output.trim()).toBe("0.3.0");
+      expect(output.trim()).toBe("0.3.1");
     });
 
     test("shows help text", () => {

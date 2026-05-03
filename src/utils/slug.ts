@@ -1,8 +1,8 @@
 const CJK_RANGE = /[一-鿿㐀-䶿]/;
 
 const PLURALS: Record<string, string> = {
-  entity: "nodes",
-  concept: "nodes",
+  entity: "entities",
+  concept: "concepts",
   event: "events",
   record: "records",
   source: "sources",
@@ -13,8 +13,14 @@ const GENERATED_TYPES = new Set(["entity", "concept", "record", "event", "source
 const GENERATED_PREFIX = "brain/";
 const RAW_PREFIX = "raw/";
 
-function pluralize(type: string): string {
+export function pluralize(type: string): string {
   return PLURALS[type] ?? `${type}s`;
+}
+
+/** Correct the directory prefix of a slug to match its type (e.g. brain/entities/X with type=concept → brain/concepts/X). */
+export function canonicalSlug(slug: string, type: string): string {
+  const dir = pluralize(type);
+  return slug.replace(/^([^/]+)\/[^/]+/, `$1/${dir}`);
 }
 
 export function generateSlug(title: string, type: string): string {

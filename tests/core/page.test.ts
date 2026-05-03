@@ -31,12 +31,12 @@ describe("PageManager", () => {
       tags: ["人物", "诺华"],
     });
 
-    expect(page.slug).toBe("brain/nodes/张三");
+    expect(page.slug).toBe("brain/entities/张三");
     expect(page.title).toBe("张三");
     expect(page.type).toBe("entity");
     expect(page.tier).toBe(3);
 
-    const filePath = join(vaultPath, "brain/nodes/张三.md");
+    const filePath = join(vaultPath, "brain/entities/张三.md");
     expect(existsSync(filePath)).toBe(true);
 
     const fileContent = await Bun.file(filePath).text();
@@ -52,7 +52,7 @@ describe("PageManager", () => {
       tags: ["方法论"],
     });
 
-    const page = pm.getBySlug("brain/nodes/第一性原理");
+    const page = pm.getBySlug("brain/concepts/第一性原理");
     expect(page).not.toBeNull();
     expect(page!.title).toBe("第一性原理");
     expect(page!.body).toContain("从最基本的事实出发推理");
@@ -73,7 +73,7 @@ describe("PageManager", () => {
   test("update page modifies vault file and index", async () => {
     // Use brain/ path — raw/ pages are read-only
     pm.create({ title: "测试", type: "concept", body: "原始内容" });
-    const created = pm.getBySlug("brain/nodes/测试");
+    const created = pm.getBySlug("brain/concepts/测试");
     expect(created).not.toBeNull();
 
     const updated = pm.update(created!.slug, {
@@ -84,7 +84,7 @@ describe("PageManager", () => {
     expect(updated).not.toBeNull();
     expect(updated!.body).toBe("更新内容");
 
-    const filePath = join(vaultPath, "brain/nodes/测试.md");
+    const filePath = join(vaultPath, "brain/concepts/测试.md");
     const fileContent = await Bun.file(filePath).text();
     expect(fileContent).toContain("更新内容");
   });
@@ -97,9 +97,9 @@ describe("PageManager", () => {
 
   test("delete page removes file and index", () => {
     pm.create({ title: "临时", type: "concept", body: "要删的" });
-    const slug = "brain/nodes/临时";
+    const slug = "brain/concepts/临时";
 
-    const filePath = join(vaultPath, "brain/nodes/临时.md");
+    const filePath = join(vaultPath, "brain/concepts/临时.md");
     expect(existsSync(filePath)).toBe(true);
 
     const result = pm.delete(slug);
@@ -110,9 +110,9 @@ describe("PageManager", () => {
 
   test("increment mention count", () => {
     pm.create({ title: "某公司", type: "entity", body: "被提到的公司" });
-    pm.incrementMention("brain/nodes/某公司");
+    pm.incrementMention("brain/entities/某公司");
 
-    const page = pm.getBySlug("brain/nodes/某公司");
+    const page = pm.getBySlug("brain/entities/某公司");
     expect(page!.mention_count).toBe(1);
   });
 
@@ -120,13 +120,13 @@ describe("PageManager", () => {
     pm.create({ title: "王强", type: "entity", body: "Source body content." });
     pm.create({ title: "王强-1", type: "entity", body: "Target body content." });
 
-    const sourceSlug = "brain/nodes/王强";
-    const targetSlug = "brain/nodes/王强-1";
+    const sourceSlug = "brain/entities/王强";
+    const targetSlug = "brain/entities/王强-1";
 
     // Add a link from source
     pm.create({ title: "某公司", type: "entity", body: "..." });
     db.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
-      .run(sourceSlug, "brain/nodes/某公司", "认识");
+      .run(sourceSlug, "brain/entities/某公司", "认识");
 
     const merged = pm.merge(sourceSlug, targetSlug);
     expect(merged).not.toBeNull();
@@ -143,7 +143,7 @@ describe("PageManager", () => {
     // Link moved from source to target
     const link = db.prepare(
       "SELECT from_slug FROM links WHERE from_slug = ? AND to_slug = ?"
-    ).get(targetSlug, "brain/nodes/某公司");
+    ).get(targetSlug, "brain/entities/某公司");
     expect(link).toBeDefined();
   });
 });

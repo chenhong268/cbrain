@@ -32,37 +32,10 @@ export interface ExtractionResult {
   events: ExtractedEvent[];
 }
 
-// ─── Post-extraction filter ─────────────────────────────────
-
-/** Entities that match these patterns are noise and should not create pages */
-function isNoiseEntity(name: string, type: EntityType): boolean {
-  // Phone numbers: pure digits >= 8
-  if (/^\d{8,}$/.test(name)) return true;
-  // Email addresses
-  if (/@/.test(name)) return true;
-  // WeChat IDs / email usernames: all-lowercase, >10 chars, no CJK
-  if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return true;
-  // Bare city/province names
-  if (type === "location" && /^[一-鿿]{2,3}[市县区]?$/.test(name)) return true;
-  // 2-char Chinese abbreviations (CM=区域市场, AD=区域总监) — NOT real entities
-  if (/^[A-Z]{2}$/.test(name) && type !== "concept") return true;
-  // Job titles
-  if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问|人员|管理员|作家/.test(name)) return true;
-  // Department/team names
-  if (/团队|部门|小组|中心$/.test(name) && type === "concept") return true;
-  // Date patterns
-  if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return true;
-  return false;
-}
-
-/** Concept names that match these patterns are NOT recognized named concepts */
-function isGenericConcept(name: string): boolean {
-  // Ends with common activity/quality suffixes — not a named concept
-  if (/管理|培训|策略|能力|方法|思维|分析|解决|习惯|练习|锻炼|学习|培训$/.test(name)) return true;
-  // Generic compound terms (XX + common noun)
-  if (/^(大众|消费者|用户|客户|市场|产品|项目|数据|系统|资源|效率|品牌|服务|方案|问题)/.test(name)) return true;
-  return false;
-}
+// ─── Post-extraction classification ───────────────────────
+// Every extracted entity runs through one classifier: entity / concept / skip.
+// LLM type is a hint, not the final answer. Rules handle the clear cases;
+// LLM judgment only trusted for the ambiguous middle.
 
 const GENERIC_TERMS = new Set([
   // Abstract qualities / emotions
@@ -94,32 +67,70 @@ const GENERIC_TERMS = new Set([
   // Generic business constructs
   "业务目标", "成本结构", "全球销售额", "核心运营利润", "新兴增长市场",
   "广告效果", "品牌投放", "品类新客", "营销投放", "大数据能力",
-  "决策效率", "超能员工",
+  "决策效率", "超能员工", "准确性", "完整性", "反应效率",
 ]);
+
+type EntityClass = "entity" | "concept" | null;
+
+function classifyEntity(name: string, llmType: string): EntityClass {
+  // ── Layer 1: BLACKLIST ──
+  if (GENERIC_TERMS.has(name)) return null;
+  if (name.length < 2) return null;
+  if (/^\d{8,}$/.test(name) || /@/.test(name)) return null;
+  if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return null;
+  if (llmType === "location" && /^[一-鿿]{2,3}[市县区]?$/.test(name)) return null;
+  if (/^[A-Z]{2}$/.test(name) && llmType !== "concept") return null;
+  if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问|人员|管理员|作家/.test(name)) return null;
+  if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return null;
+
+  // ── Layer 2: STRONG concept ──
+  if (/主义|学派|理论$|定律$|原理$|定理$|悖论$|效应$/.test(name)) return "concept";
+  if (/学$/.test(name) && name.length >= 3 && !/大学$|中学$|小学$/.test(name)) return "concept";
+  if (/^.{2,4}(论|法|模型|假说|定理|方程)$/.test(name) && name.length >= 3) return "concept";
+  if (/[性化]$/.test(name)) return "concept";
+  if (/(策略|方法|模式|机制|体系|框架)$/.test(name) && name.length >= 4) return "concept";
+
+  // Generic-concept traps → skip
+  if (/管理|培训|能力|思维|分析|解决|习惯|练习|锻炼|学习|培训$/.test(name)) return null;
+  if (/^(大众|消费者|用户|客户|市场|产品|项目|数据|系统|资源|效率|品牌|服务|方案|问题)/.test(name)) return null;
+  if (/团队|部门|小组|中心$/.test(name)) return null;
+
+  // ── Layer 3: STRONG entity ──
+  if (/公司|集团|制药|药企|银行|保险|基金$|医院|大学$|学院$|研究所/.test(name)) return "entity";
+  if (/^[一-鿿]{2,3}$/.test(name) && !/[性度力率化]$/.test(name)) return "entity";
+
+  // ── Layer 4: Generic quality → skip ──
+  if (/[性度力率]$/.test(name) && name.length <= 4 && !/[a-zA-Z]/.test(name)) return null;
+
+  // ── Layer 5: TRUST LLM ──
+  if (llmType === "concept") return "concept";
+  if (["person", "company", "product", "location"].includes(llmType)) return "entity";
+  return null;
+}
 
 const MAX_CONCEPTS = 3;
 const MAX_TOTAL_ENTITIES = 8;
 
 function filterEntities(entities: ExtractedEntity[]): ExtractedEntity[] {
-  const valid = entities.filter((e) => {
-    if (GENERIC_TERMS.has(e.name) || e.name.length < 2 || isNoiseEntity(e.name, e.type)) return false;
-    if (e.type === "concept" && isGenericConcept(e.name)) return false;
-    return true;
-  });
+  // Classify every entity: entity / concept / skip
+  const classified = entities
+    .map((e) => ({ ...e, class: classifyEntity(e.name, e.type) }))
+    .filter((e) => e.class !== null);
 
-  // Prioritize high-relevance, then medium. Drop low.
-  const ranked = valid.sort((a, b) => {
+  // Sort by relevance: high > medium. Drop low.
+  const ranked = classified.sort((a, b) => {
     const order: Record<string, number> = { high: 0, medium: 1, low: 2 };
     return (order[a.relevance] ?? 2) - (order[b.relevance] ?? 2);
   });
 
-  const concepts = ranked.filter((e) => e.type === "concept");
-  const nonConcepts = ranked.filter((e) => e.type !== "concept");
+  const concepts = ranked.filter((e) => e.class === "concept");
+  const nonConcepts = ranked.filter((e) => e.class === "entity");
 
   const keptConcepts = concepts.slice(0, MAX_CONCEPTS);
   const keptNonConcepts = nonConcepts.slice(0, MAX_TOTAL_ENTITIES - keptConcepts.length);
 
-  return [...keptNonConcepts, ...keptConcepts];
+  // Override LLM type with classified type
+  return [...keptNonConcepts, ...keptConcepts].map((e) => ({ ...e, type: e.class! as EntityType }));
 }
 
 function filterRelations(
@@ -153,6 +164,24 @@ DO extract:
 - Named companies and organizations
 - Named products (specific names, not categories)
 - Established methodologies, theories, effects, laws, models (must have proper names — e.g. "飞轮效应", "第一性原理", "奥卡姆剃刀")
+
+## Classification decision tree — apply to EVERY candidate:
+
+Step 1: Is this a specific real-world thing (person/company/product/location)?
+  → EXTRACT as entity. Examples: 张三 (person), 诺华制药 (company), 格列卫 (product)
+Step 2: Is this a recognized abstract idea with a proper name (methodology/theory/effect/field)?
+  → EXTRACT as concept. Examples: 进化论, 幸存者偏差, 敏捷开发, 认知科学
+Step 3: Otherwise → SKIP (do not extract at all)
+
+Entity vs concept self-test: "Can I point to a specific instance?"
+  YES → entity.  NO → concept.
+
+Common pitfalls:
+- Academic fields (认知科学, 经济学) → concept, NOT company/location
+- Philosophical views (现象主义, 斯多葛主义) → concept
+- Named effects/laws/theories → concept
+- Generic qualities (准确性, 深度思考, 注意力管理) → SKIP, not concept
+- Job titles, departments, daily items → SKIP
 
 Skip ALL:
 - Numbers/amounts (93亿美元, Q1 2026), pronouns, function words

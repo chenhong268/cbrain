@@ -204,6 +204,8 @@ export class ReflectManager {
   // ─── Relation Inference ────────────────────────────────────
 
   private async inferRelations(): Promise<InferredRelation[]> {
+    return []; // disabled — inferred relation quality too low
+    /*
     const pairs = this.findIndirectPairs();
     if (pairs.length === 0) return [];
 
@@ -245,6 +247,7 @@ export class ReflectManager {
     }
 
     return allRelations;
+    */
   }
 
   // ─── Insight Generation ────────────────────────────────────

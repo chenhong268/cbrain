@@ -1,11 +1,12 @@
-import { readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { readFileSync, statSync, renameSync, mkdirSync, existsSync } from "node:fs";
+import { join, relative, dirname } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import { PageManager } from "./page.js";
+import { canonicalSlug, slugToFilePath } from "../utils/slug.js";
 import { AuditLogger } from "./audit.js";
 import type { Logger } from "./logger.js";
 import {
@@ -260,7 +261,7 @@ export class SyncManager {
     }
     const parsed = parseFrontmatter(content);
 
-    const effectiveSlug = parsed.frontmatter.slug ?? slug;
+    let effectiveSlug = parsed.frontmatter.slug ?? slug;
 
     if (!effectiveSlug && !filePath) {
       return { success: false, error: `No slug found and page not indexed: ${fullPath}` };
@@ -282,9 +283,27 @@ export class SyncManager {
       }
     }
 
-    const relPath = relative(vaultPath, fullPath);
     const title = parsed.frontmatter.title ?? effectiveSlug;
     const type = normalizePageType(parsed.frontmatter.type ?? "record");
+
+    // Canonicalize slug + migrate mislaid files
+    const canonical = canonicalSlug(effectiveSlug, type);
+    if (canonical !== effectiveSlug) {
+      const newRelPath = slugToFilePath(canonical);
+      const newFullPath = join(vaultPath, newRelPath);
+      if (!existsSync(newFullPath)) {
+        try {
+          mkdirSync(dirname(newFullPath), { recursive: true });
+          renameSync(fullPath, newFullPath);
+          this.logger?.info("sync", `文件已迁移: ${relative(vaultPath, fullPath)} → ${newRelPath}`);
+        } catch (e) {
+          this.logger?.warn("sync", `文件迁移失败: ${(e as Error).message}`);
+        }
+      }
+      effectiveSlug = canonical;
+    }
+
+    const relPath = slugToFilePath(effectiveSlug);
 
     this.db.upsertPage({
       slug: effectiveSlug,
@@ -349,7 +368,9 @@ export class SyncManager {
 
   private inferTypeFromPath(relPath: string): string {
     const typeFromDir: Record<string, string> = {
-      nodes: "entity",
+      entities: "entity",
+      concepts: "concept",
+      nodes: "entity",        // legacy
       records: "record",
     };
     const parts = relPath.split("/");

@@ -102,9 +102,10 @@ export class HealthChecker {
       this.checkSourceQuality(),
     ];
 
-    const overallStatus = dimensions.some(d => d.status === "fail")
+    const highCount = dimensions.reduce((n, d) => n + d.issues.filter(i => i.severity === "high").length, 0);
+    const overallStatus = highCount > 5
       ? "fail"
-      : dimensions.some(d => d.status === "warn")
+      : dimensions.some(d => d.status === "warn") || highCount > 0
         ? "warn"
         : "pass";
 

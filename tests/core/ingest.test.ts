@@ -97,11 +97,11 @@ describe("IngestManager", () => {
       });
 
       expect(result.created).toBe(true);
-      expect(result.slug).toBe("brain/nodes/张三");
+      expect(result.slug).toBe("brain/entities/张三");
 
       const row = db
         .prepare("SELECT * FROM pages WHERE slug = ?")
-        .get("brain/nodes/张三") as any;
+        .get("brain/entities/张三") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("张三");
       expect(row.type).toBe("entity");
@@ -206,7 +206,7 @@ describe("IngestManager", () => {
       ].join("\n");
 
       const result = await ingest.ingest({ content: md, type: "markdown" });
-      expect(result.slug).toBe("brain/nodes/autoslug");
+      expect(result.slug).toBe("brain/entities/autoslug");
     });
 
     test("uses tags from frontmatter over input tags", async () => {
@@ -549,7 +549,7 @@ describe("IngestManager", () => {
     test("reuses existing entity instead of creating duplicate stub", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/nodes/zhangsan", "entity", "张三", "brain/nodes/zhangsan.md", "h1");
+      ).run("brain/entities/zhangsan", "entity", "张三", "brain/entities/zhangsan.md", "h1");
 
       const llm = createMockLLM([
         JSON.stringify({

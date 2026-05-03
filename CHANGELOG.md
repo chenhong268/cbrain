@@ -1,8 +1,44 @@
 # Changelog
 
-> Current: `v0.3.1` — first stable release. 23 CLI commands, 41 MCP tools, 11 skills.
+> Current: `v0.4.0` — 23 CLI commands, 43 MCP tools, 11 skills.
 
-## [Dev] — 2026-05-02 (下午)
+## [v0.4.0] — 2026-05-03
+
+### 目录结构重构：entities/ + concepts/ 恢复独立
+
+`brain/nodes/` 是历史妥协，统一目录模糊了 entity（人/公司/产品）和 concept（方法论/理论/效应）的边界。恢复为 `brain/entities/` + `brain/concepts/`，581 个文件按 type 迁移，DB 全量更新。
+
+### Slug 规范化：`canonicalSlug()`
+
+所有页面创建路径（put_page、NER stub、wikilink stub、ingest、writeback）强制校验 slug 目录前缀。`syncPage` 发现错放文件自动迁移。不再产生 `brain/nodes/` 或路径错误。
+
+### NER 分类器重构：统一三路分流
+
+三个碎片函数（`isNoiseEntity`、`isGenericConcept`、`correctEntityType`）合并为单一 `classifyEntity(name, llmType) → entity | concept | null`。五层优先级：黑名单 → 强 concept 信号 → 强 entity 信号 → 泛化词过滤 → LLM 信任。Prompt 从平铺列表改为决策树。
+
+中英文实体全量人工审查：22 个泛化词删除，30 个 entity→concept，1 个 concept→entity，9 个重复合并。最终 315 entities + 227 concepts。
+
+### 新增 `deep_recall` MCP 工具
+
+一次 MCP 调用替代之前 5-7 次串行查询（query→get_page→graph_query→get_links→get_timeline）。内部 `Promise.all` 并行获取搜索结果 + 每个实体的 page/links/timeline/tags/related，返回结构化 bundle + quality/tier 评估。
+
+### put_page 补全 NER + wikilink
+
+`put_page` 创建/更新页面时同步执行 NER 实体提取和 wikilink 解析。之前只更新了索引，NER 靠 watcher 补跑但被 hash 检查跳过。
+
+### Tags 同步写文件
+
+`add_tag` / `remove_tag` 改为通过 `PageManager.update()` 同时写 DB 和 vault 文件 frontmatter，不再出现"标签只在 DB 不在文件"的问题。`get_tags` 合并两处来源。
+
+### 禁用 inferred relations
+
+ReflectManager 的 LLM 推断关系质量太差（746 条垃圾链接，方向搞反、间接关联当直接关系）。`inferRelations()` 改为直接 return []，保留 entity synthesis 和 insight generation。
+
+### 健康检查阈值调整
+
+overall status 从"任一维度有 high issue → fail"改为"high issue > 5 个 → fail"，避免 3 个疑似重复就把 715 页的健康检查拉红。
+
+
 
 ### 关系类型规范化
 
