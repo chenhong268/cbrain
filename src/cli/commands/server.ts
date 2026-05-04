@@ -1,10 +1,36 @@
 import type { Command } from "commander";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, writeFileSync, unlinkSync, readFileSync } from "node:fs";
+import { resolve, dirname, join } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
 import { loadConfig, createDeps } from "../context.js";
 import { createServer } from "../../mcp/server.js";
+
+function acquireServeLock(dbDir: string): string {
+  const pidFile = join(dbDir, "cbrain.pid");
+
+  if (existsSync(pidFile)) {
+    const raw = readFileSync(pidFile, "utf-8").trim();
+    const existingPid = parseInt(raw, 10);
+    if (!isNaN(existingPid)) {
+      try {
+        process.kill(existingPid, 0);
+        console.error(`cbrain serve 已在运行 (PID ${existingPid})。`);
+        console.error(`如需重启，请先执行 kill ${existingPid}。`);
+        process.exit(1);
+      } catch {
+        // PID not alive — stale file, overwrite
+      }
+    }
+  }
+
+  writeFileSync(pidFile, String(process.pid), "utf-8");
+  return pidFile;
+}
+
+function releaseServeLock(pidFile: string): void {
+  try { unlinkSync(pidFile); } catch { /* ignore */ }
+}
 
 export function register(program: Command) {
   program
@@ -12,6 +38,13 @@ export function register(program: Command) {
     .description("Start MCP server (stdio transport)")
     .action(async () => {
       const config = loadConfig();
+      const dbDir = dirname(config.dbPath);
+      const pidFile = acquireServeLock(dbDir);
+
+      process.on("exit", () => releaseServeLock(pidFile));
+      process.on("SIGINT", () => { releaseServeLock(pidFile); process.exit(0); });
+      process.on("SIGTERM", () => { releaseServeLock(pidFile); process.exit(0); });
+
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
       console.error("> CBrain MCP Server 已启动\n");

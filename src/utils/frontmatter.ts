@@ -7,6 +7,8 @@ export interface PageFrontmatter {
   slug: string;
   tags?: string[];
   tier?: number;
+  expires_at?: string;
+  confidence_decay?: number;
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;

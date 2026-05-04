@@ -1,5 +1,6 @@
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
+import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { PageManager } from "./page.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -7,8 +8,6 @@ import { readPageFile } from "../utils/frontmatter.js";
 import { normalizeRelation } from "./shared.js";
 import type { ContentPipeline } from "./pipeline.js";
 import { generateSlug } from "../utils/slug.js";
-
-// ─── Types ─────────────────────────────────────────────────────
 
 export interface SynthesisResult {
   slug: string;
@@ -43,8 +42,6 @@ export interface ReflectReport {
   };
 }
 
-// ─── Payload types for LLM JSON parsing ────────────────────────
-
 interface SynthesisPayload {
   summary?: string;
   key_facts?: string[];
@@ -71,8 +68,6 @@ interface InsightPayload {
   }>;
 }
 
-// ─── Constants ─────────────────────────────────────────────────
-
 const MAX_LLM_CALLS = 50;
 const MIN_MENTIONS = 3;
 const MIN_NEIGHBORS = 5;
@@ -82,7 +77,13 @@ const TITLE_SAFETY_LIMIT = 10;
 const MAX_CONTEXT_CHARS = 12000;
 const CONCURRENCY = 3;
 
-// ─── Prompts ───────────────────────────────────────────────────
+const W_PATH = 0.35;
+const W_SOURCE = 0.25;
+const W_TYPE = 0.20;
+const W_CONTENT = 0.10;
+const W_SEMANTIC = 0.10;
+
+const BULLSHIT_PATTERNS = /值得深思|揭示了.{0,5}趋势|具有重要意义|我们认识到|可以推断|值得关注|无疑|显而易见|不言而喻|众所周知/;
 
 const SYNTHESIS_SYSTEM = `你是一个知识图谱分析师。根据给定信息，生成实体的综合描述。
 只陈述可从信息推导的事实，不编造。不确定时confidence设低。
@@ -128,18 +129,19 @@ export class ReflectManager {
   private llm: LLMProvider | null;
   private pageMgr: PageManager;
   private pipeline: ContentPipeline | null;
+  private embedding: EmbeddingProvider | null;
 
-  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider, pipeline?: ContentPipeline) {
+  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider, pipeline?: ContentPipeline, embedding?: EmbeddingProvider) {
     this.db = db;
     this.pageMgr = pageMgr;
     this.llm = llm ?? null;
     this.pipeline = pipeline ?? null;
+    this.embedding = embedding ?? null;
   }
 
   async reflectAll(): Promise<ReflectReport> {
     if (!this.llm) return emptyReport();
 
-    // All three phases are independent — run in parallel
     const [syntheses, relations, insights] = await Promise.all([
       this.synthesizeEntities(),
       this.inferRelations(),
@@ -164,8 +166,6 @@ export class ReflectManager {
       },
     };
   }
-
-  // ─── Entity Synthesis ──────────────────────────────────────
 
   private async synthesizeEntities(): Promise<SynthesisResult[]> {
     const candidates = this.db.getHighMentionEntities(MIN_MENTIONS);
@@ -201,144 +201,13 @@ export class ReflectManager {
     return results;
   }
 
-  // ─── Relation Inference ────────────────────────────────────
-
   private async inferRelations(): Promise<InferredRelation[]> {
     return []; // disabled — inferred relation quality too low
-    /*
-    const pairs = this.findIndirectPairs();
-    if (pairs.length === 0) return [];
-
-    const allRelations: InferredRelation[] = [];
-    const batches = this.chunk(pairs, BATCH_SIZE);
-    const limit = Math.min(batches.length, MAX_LLM_CALLS);
-    const llmBatches = this.chunk(batches.slice(0, limit), CONCURRENCY);
-
-    for (const concurrentBatch of llmBatches) {
-      const responses = await Promise.all(
-        concurrentBatch.map(async (batch) => {
-          const pairContext = batch
-            .map(([a, b]) => `${a} ↔ ${b}（间接连接，无直接关系）`)
-            .join("\n");
-          const existingContext = this.buildRelationContext(batch);
-          const userContent = `已知关系：\n${existingContext}\n\n待判断的实体对：\n${pairContext}`;
-          const raw = await this.callLLM(RELATION_SYSTEM, userContent);
-          return this.parseJSON<RelationPayload>(raw, null);
-        })
-      );
-
-      for (const parsed of responses) {
-        if (!parsed?.inferred_relations) continue;
-        for (const r of parsed.inferred_relations) {
-          if ((r.confidence ?? 0) < MIN_CONFIDENCE) continue;
-          if (!r.from || !r.to || !r.relation) continue;
-          if (!this.db.getPage(r.from) || !this.db.getPage(r.to)) continue;
-
-          this.db.insertLink(r.from, r.to, normalizeRelation(r.relation), `[inferred] ${r.reasoning ?? ""}`);
-          allRelations.push({
-            from: r.from,
-            to: r.to,
-            relation: r.relation,
-            reasoning: r.reasoning ?? "",
-            confidence: r.confidence,
-          });
-        }
-      }
-    }
-
-    return allRelations;
-    */
   }
-
-  // ─── Insight Generation ────────────────────────────────────
 
   private async generateInsights(): Promise<GeneratedInsight[]> {
-    const hubs = this.db.getHighConnectivityEntities(MIN_NEIGHBORS);
-    const limit = Math.min(hubs.length, MAX_LLM_CALLS);
-    const allInsights: GeneratedInsight[] = [];
-    const createdSlugs = new Set<string>();
-
-    // Build dedup set from existing insights — same source entity combo won't re-fire
-    const existingSigs = this.buildExistingInsightSigs();
-
-    const tasks = hubs.slice(0, limit).map((h) => ({ slug: h.slug, context: this.buildClusterContext(h.slug) }));
-    const valid = tasks.filter((t) => t.context !== null);
-    const batches = this.chunk(valid, CONCURRENCY);
-
-    for (const batch of batches) {
-      const responses = await Promise.all(
-        batch.map(async (t) => {
-          const raw = await this.callLLM(INSIGHT_SYSTEM, t.context!);
-          return { slug: t.slug, parsed: this.parseJSON<InsightPayload>(raw, null) };
-        })
-      );
-
-      for (const { parsed } of responses) {
-        if (!parsed?.insights) continue;
-
-        for (const ins of parsed.insights) {
-          if (!ins.content) continue;
-
-          const resolvedEntities = this.resolveRelatedEntities(ins.related_entities ?? []);
-          const confidence = ins.confidence ?? 0.5;
-
-          // Confidence gate — below threshold, skip
-          if (confidence < 0.8) continue;
-
-          // Dedup — >50% source entity overlap with an existing insight
-          if (resolvedEntities.length > 0) {
-            if (this.hasOverlap(resolvedEntities, existingSigs)) continue;
-            existingSigs.push(new Set(resolvedEntities));
-          }
-
-          const insight: GeneratedInsight = {
-            content: ins.content,
-            relatedEntities: resolvedEntities,
-            type: ins.type ?? "pattern",
-            confidence,
-          };
-
-          const rawTitle = ins.title?.trim() || this.extractTitleFallback(ins.content);
-          const truncatedTitle = rawTitle.slice(0, TITLE_SAFETY_LIMIT);
-          const date = new Date().toISOString().slice(0, 10);
-          const title = `${date} ${truncatedTitle}`;
-          const insightSlug = generateSlug(title, "insight");
-
-          if (this.db.getPage(insightSlug) || createdSlugs.has(insightSlug)) continue;
-          createdSlugs.add(insightSlug);
-
-          try {
-            this.pageMgr.create({
-              title,
-              type: "insight",
-              body: ins.content,
-              tags: ["insight/auto", ...(ins.type ? [`insight/${ins.type}`] : [])],
-              slug: insightSlug,
-              extra: { source_entities: resolvedEntities, confidence: ins.confidence },
-            });
-
-            // Index immediately — insight is searchable without waiting for sync
-            if (this.pipeline) {
-              try {
-                const { chunks, embedResults } = await this.pipeline.embed(ins.content);
-                this.pipeline.writeIndexes(insightSlug, chunks, embedResults);
-              } catch {
-                // Index failure is non-blocking
-              }
-            }
-
-            allInsights.push(insight);
-          } catch {
-            // Skip on failure
-          }
-        }
-      }
-    }
-
-    return allInsights;
+    return []; // disabled — replaced by runDiscovery() + Agent reasoning
   }
-
-  // ─── Context Builders ──────────────────────────────────────
 
   private buildEntityContext(slug: string): string | null {
     const page = this.db.getPage(slug);
@@ -359,18 +228,14 @@ export class ReflectManager {
     if (inLinks.length > 0) {
       lines.push("被引用：");
       for (const l of inLinks.slice(0, 20)) {
-        lines.push(
-          `  - ${l.from_slug} [${l.relation}]${l.context ? ` — ${l.context}` : ""}`
-        );
+        lines.push(`  - ${l.from_slug} [${l.relation}]${l.context ? ` — ${l.context}` : ""}`);
       }
     }
 
     if (outLinks.length > 0) {
       lines.push("关联到：");
       for (const l of outLinks.slice(0, 20)) {
-        lines.push(
-          `  - ${l.to_slug} [${l.relation}]${l.context ? ` — ${l.context}` : ""}`
-        );
+        lines.push(`  - ${l.to_slug} [${l.relation}]${l.context ? ` — ${l.context}` : ""}`);
       }
     }
 
@@ -384,80 +249,6 @@ export class ReflectManager {
     return lines.join("\n");
   }
 
-  private buildClusterContext(hubSlug: string): string | null {
-    const hubPage = this.db.getPage(hubSlug);
-    if (!hubPage) return null;
-
-    const neighbors = new Set<string>([
-      ...this.db.getOutgoingSlugs(hubSlug),
-      ...this.db.getIncomingSlugs(hubSlug),
-    ]);
-
-    const lines: string[] = [
-      "=== 核心实体 ===",
-      this.buildPageContent(hubSlug, hubPage),
-      "",
-      "=== 关联素材 ===",
-    ];
-
-    let totalChars = lines.join("\n").length;
-    let count = 0;
-    for (const n of neighbors) {
-      if (count >= 10) break;
-      if (totalChars >= MAX_CONTEXT_CHARS) break;
-      const nPage = this.db.getPage(n);
-      if (!nPage) continue;
-      const content = this.buildPageContent(n, nPage);
-      lines.push(content);
-      lines.push("");
-      totalChars += content.length + 1;
-      count++;
-    }
-
-    const result = lines.join("\n");
-    return result.length > MAX_CONTEXT_CHARS
-      ? result.slice(0, MAX_CONTEXT_CHARS)
-      : result;
-  }
-
-  private buildPageContent(slug: string, page: { title: string; type: string; tier: number; file_path: string }): string {
-    const header = `【${page.title}】（${page.type}，层级${page.tier}）`;
-
-    const filePath = join(this.pageMgr.vaultPath, page.file_path);
-    if (!existsSync(filePath)) return header;
-
-    const raw = readFileSync(filePath, "utf-8");
-    const bodyStart = raw.indexOf("---", raw.indexOf("---") + 3);
-    const body = bodyStart >= 0 ? raw.slice(bodyStart + 3).trim() : raw;
-
-    if (!body) return header;
-    return `${header}\n${body}`;
-  }
-
-  private buildRelationContext(
-    pairs: Array<[string, string]>
-  ): string {
-    const slugs = new Set<string>();
-    for (const [a, b] of pairs) {
-      slugs.add(a);
-      slugs.add(b);
-    }
-
-    const lines: string[] = [];
-    for (const slug of slugs) {
-      const out = this.db.getOutgoingLinks(slug);
-      if (out.length === 0) continue;
-      lines.push(`${slug} 的关系：`);
-      for (const l of out.slice(0, 10)) {
-        lines.push(`  → ${l.to_slug} [${l.relation}]`);
-      }
-    }
-
-    return lines.length > 0 ? lines.join("\n") : "（无已知关系）";
-  }
-
-  // ─── Dedup ──────────────────────────────────────────────────
-
   private buildExistingInsightSigs(): Array<Set<string>> {
     const sigs: Array<Set<string>> = [];
     const insights = this.db.listPages({ type: "insight" });
@@ -467,57 +258,29 @@ export class ReflectManager {
         if (!existsSync(filePath)) continue;
         const { frontmatter } = readPageFile(filePath);
         const entities: string[] = (frontmatter.source_entities as string[]) ?? [];
-        if (entities.length > 0) {
-          sigs.push(new Set(entities));
-        }
-      } catch {
-        // Corrupted file, skip
-      }
+        if (entities.length > 0) sigs.push(new Set(entities));
+      } catch (e) { console.error(`[reflect] 文件读取失败，跳过: ${page.file_path}`, e); }
     }
     return sigs;
   }
 
-  private hasOverlap(entities: string[], existing: Array<Set<string>>): boolean {
-    if (entities.length === 0) return false;
-    const set = new Set(entities);
-    for (const existingSet of existing) {
-      let overlap = 0;
-      for (const e of existingSet) {
-        if (set.has(e)) overlap++;
-      }
-      const minSize = Math.min(set.size, existingSet.size);
-      if (minSize > 0 && overlap / minSize > 0.5) return true;
-    }
-    return false;
-  }
-
-  // ─── Graph Queries ─────────────────────────────────────────
-
   private findIndirectPairs(): Array<[string, string]> {
     const allLinks = this.db.getAllLinks();
-
     const adj = new Map<string, Set<string>>();
     for (const { from_slug, to_slug } of allLinks) {
       let neighbors = adj.get(from_slug);
-      if (!neighbors) {
-        neighbors = new Set();
-        adj.set(from_slug, neighbors);
-      }
+      if (!neighbors) { neighbors = new Set(); adj.set(from_slug, neighbors); }
       neighbors.add(to_slug);
     }
-
     const seen = new Set<string>();
     const result: Array<[string, string]> = [];
-
     for (const [a, aNeighbors] of adj) {
       for (const b of aNeighbors) {
         const bNeighbors = adj.get(b);
         if (!bNeighbors) continue;
-
         for (const c of bNeighbors) {
           if (c === a) continue;
           if (aNeighbors.has(c)) continue;
-
           const key = [a, c].sort().join("→");
           if (seen.has(key)) continue;
           seen.add(key);
@@ -525,16 +288,229 @@ export class ReflectManager {
         }
       }
     }
-
     return result;
+  }
+
+  // ─── Discovery Pipeline ──────────────────────────────────────
+
+  async runDiscovery(dreamRun?: string): Promise<number> {
+    const pool = await this.buildCandidatePool();
+    const bodyCache = new Map<string, string>();
+    for (const [a, b] of pool) {
+      for (const slug of [a, b]) {
+        if (!bodyCache.has(slug)) {
+          try { bodyCache.set(slug, this.pageMgr.getBySlug(slug)?.body ?? ""); }
+          catch { bodyCache.set(slug, ""); }
+        }
+      }
+    }
+    const scored: Array<{ pair: [string, string]; score: number }> = [];
+    for (const pair of pool) {
+      const s = await this.scoreCandidate(pair[0], pair[1], bodyCache);
+      if (s > 0.3) scored.push({ pair, score: s });
+    }
+    scored.sort((a, b) => b.score - a.score);
+
+    let count = 0;
+    for (let i = 0; i < Math.min(scored.length, 20); i++) {
+      const { pair, score } = scored[i];
+      const dist = this.bfsDistance(pair[0], pair[1]);
+      if (dist === Infinity) continue;
+      const sourcesA = this.getSourcePages(pair[0]);
+      const sourcesB = this.getSourcePages(pair[1]);
+      const jaccard = this.jaccardDistance(sourcesA, sourcesB);
+      const type = dist >= 4 ? "bridge" : dist >= 2 ? "community_crossing" : "structural_hole";
+      this.db.addDiscovery(type, pair, Math.round(score * 100) / 100, {
+        distance: dist,
+        sourceJaccard: Math.round(jaccard * 100) / 100,
+      }, dreamRun);
+      count++;
+    }
+    return count;
+  }
+
+  private bfsDistance(a: string, b: string): number {
+    if (a === b) return 0;
+    const allLinks = this.db.getAllLinks();
+    const adj = new Map<string, Set<string>>();
+    for (const { from_slug, to_slug } of allLinks) {
+      if (!adj.has(from_slug)) adj.set(from_slug, new Set());
+      if (!adj.has(to_slug)) adj.set(to_slug, new Set());
+      adj.get(from_slug)!.add(to_slug);
+      adj.get(to_slug)!.add(from_slug);
+    }
+    const visited = new Set<string>([a]);
+    let frontier = new Set<string>([a]);
+    let dist = 0;
+    while (frontier.size > 0) {
+      dist++;
+      const next = new Set<string>();
+      for (const node of frontier) {
+        for (const neighbor of adj.get(node) ?? []) {
+          if (neighbor === b) return dist;
+          if (!visited.has(neighbor)) { visited.add(neighbor); next.add(neighbor); }
+        }
+      }
+      frontier = next;
+    }
+    return Infinity;
+  }
+
+  private labelPropagation(): Map<string, number> {
+    const allLinks = this.db.getAllLinks();
+    const nodes = new Set<string>();
+    const adj = new Map<string, Set<string>>();
+    for (const { from_slug, to_slug } of allLinks) {
+      nodes.add(from_slug); nodes.add(to_slug);
+      if (!adj.has(from_slug)) adj.set(from_slug, new Set());
+      if (!adj.has(to_slug)) adj.set(to_slug, new Set());
+      adj.get(from_slug)!.add(to_slug);
+      adj.get(to_slug)!.add(from_slug);
+    }
+    const nodeList = [...nodes];
+    const labels = new Map<string, number>();
+    nodeList.forEach((n, i) => labels.set(n, i));
+    for (let iter = 0; iter < 20; iter++) {
+      let changed = false;
+      for (const node of nodeList) {
+        const neighbors = adj.get(node);
+        if (!neighbors || neighbors.size === 0) continue;
+        const counts = new Map<number, number>();
+        for (const nb of neighbors) counts.set(labels.get(nb)!, (counts.get(labels.get(nb)!) ?? 0) + 1);
+        let best = labels.get(node)!, bestCount = 0;
+        for (const [lbl, cnt] of counts) { if (cnt > bestCount) { best = lbl; bestCount = cnt; } }
+        if (best !== labels.get(node)) { labels.set(node, best); changed = true; }
+      }
+      if (!changed) break;
+    }
+    return labels;
+  }
+
+  private cosineSimilarity(a: number[], b: number[]): number {
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+    return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-10);
+  }
+
+  private getSourcePages(slug: string): Set<string> {
+    const sources = new Set<string>();
+    for (const l of this.db.getIncomingLinks(slug)) {
+      if (l.from_slug.startsWith("raw/")) sources.add(l.from_slug);
+    }
+    return sources;
+  }
+
+  private jaccardDistance(a: Set<string>, b: Set<string>): number {
+    if (a.size === 0 && b.size === 0) return 0.5;
+    const intersection = [...a].filter(x => b.has(x)).length;
+    return 1 - intersection / new Set([...a, ...b]).size;
+  }
+
+  private async scoreCandidate(a: string, b: string, bodies: Map<string, string>): Promise<number> {
+    const dist = this.bfsDistance(a, b);
+    if (dist === Infinity) return 0;
+    const pathScore = dist >= 6 ? 1.0 : dist <= 1 ? 0 : (dist - 1) / 5;
+    const sourceScore = this.jaccardDistance(this.getSourcePages(a), this.getSourcePages(b));
+    const pa = this.db.getPage(a), pb = this.db.getPage(b);
+    const ta = pa?.type ?? "", tb = pb?.type ?? "";
+    const typeScore = (ta === "entity" && tb === "concept") || (ta === "concept" && tb === "entity") ? 1.0 : ta === "concept" && tb === "concept" ? 0.5 : 0.3;
+    const bodyA = bodies.get(a) ?? "", bodyB = bodies.get(b) ?? "";
+    const contentScore = Math.min(Math.min(bodyA.length, bodyB.length) / 2000, 1.0);
+    let semanticScore = 0.3;
+    if (this.embedding && bodyA && bodyB) {
+      try {
+        const [eA, eB] = await Promise.all([this.embedding.embed(bodyA.slice(0, 2000)), this.embedding.embed(bodyB.slice(0, 2000))]);
+        semanticScore = 1 - this.cosineSimilarity(eA.embedding, eB.embedding);
+      } catch { /* use default */ }
+    }
+    return W_PATH * pathScore + W_SOURCE * sourceScore + W_TYPE * typeScore + W_CONTENT * contentScore + W_SEMANTIC * semanticScore;
+  }
+
+  private async buildCandidatePool(): Promise<Array<[string, string]>> {
+    const seen = new Set<string>();
+    const key = (a: string, b: string) => [a, b].sort().join("|||");
+    for (const [a, c] of this.findIndirectPairs()) seen.add(key(a, c));
+    const communities = this.labelPropagation();
+    const groups = new Map<number, string[]>();
+    for (const [slug, lbl] of communities) groups.set(lbl, [...(groups.get(lbl) ?? []), slug]);
+    const groupList = [...groups.values()].filter(g => g.length >= 2);
+    if (groupList.length >= 2) {
+      for (let i = 0; i < groupList.length - 1; i++) {
+        for (let j = i + 1; j < Math.min(groupList.length, i + 5); j++) {
+          seen.add(key(groupList[i][Math.floor(Math.random() * groupList[i].length)], groupList[j][Math.floor(Math.random() * groupList[j].length)]));
+        }
+      }
+    }
+    const entities = this.db.getEntityConceptPages();
+    if (entities.length >= 10) {
+      for (let i = 0; i < 30; i++) {
+        const a = entities[Math.floor(Math.random() * entities.length)].slug;
+        const b = entities[Math.floor(Math.random() * entities.length)].slug;
+        if (a !== b) seen.add(key(a, b));
+      }
+    }
+    return [...seen].map(k => k.split("|||") as [string, string]);
+  }
+
+  async diagnoseCandidates(): Promise<{
+    poolSize: number; bySource: { indirect: number; crossCommunity: number; randomDistant: number };
+    topCandidates: Array<{ rank: number; score: number; dist: number; sourceJaccard: number; typeMix: string; entityA: string; entityB: string }>;
+    scoreDistribution: Array<{ bucket: string; count: number }>;
+  }> {
+    const pool = await this.buildCandidatePool();
+    const bodyCache = new Map<string, string>();
+    for (const [a, b] of pool) {
+      for (const slug of [a, b]) {
+        if (!bodyCache.has(slug)) {
+          try { bodyCache.set(slug, this.pageMgr.getBySlug(slug)?.body ?? ""); }
+          catch { bodyCache.set(slug, ""); }
+        }
+      }
+    }
+    const scored: Array<{ pair: [string, string]; score: number }> = [];
+    for (const pair of pool) {
+      scored.push({ pair, score: await this.scoreCandidate(pair[0], pair[1], bodyCache) });
+    }
+    scored.sort((a, b) => b.score - a.score);
+
+    const indirectSet = new Set(this.findIndirectPairs().map(([a, b]) => [a, b].sort().join("|||")));
+    const labels = this.labelPropagation();
+    let byIndirect = 0, byCross = 0, byRandom = 0;
+    for (const { pair } of scored) {
+      const k = pair[0] < pair[1] ? `${pair[0]}|||${pair[1]}` : `${pair[1]}|||${pair[0]}`;
+      if (indirectSet.has(k)) { byIndirect++; continue; }
+      const aL = labels.get(pair[0]), bL = labels.get(pair[1]);
+      if (aL !== undefined && bL !== undefined && aL !== bL) byCross++;
+      else byRandom++;
+    }
+
+    const top10 = scored.slice(0, 10).map(({ pair, score }, i) => {
+      const dist = this.bfsDistance(pair[0], pair[1]);
+      const pa = this.db.getPage(pair[0]), pb = this.db.getPage(pair[1]);
+      const sourcesA = this.getSourcePages(pair[0]), sourcesB = this.getSourcePages(pair[1]);
+      return {
+        rank: i + 1,
+        score: Math.round(score * 100) / 100,
+        dist: dist === Infinity ? -1 : dist,
+        sourceJaccard: Math.round(this.jaccardDistance(sourcesA, sourcesB) * 100) / 100,
+        typeMix: `${pa?.type ?? "-"}-${pb?.type ?? "-"}`,
+        entityA: pa?.title ?? pair[0],
+        entityB: pb?.title ?? pair[1],
+      };
+    });
+
+    const buckets = [{ bucket: "0.0-0.2", min: 0, max: 0.2 }, { bucket: "0.2-0.4", min: 0.2, max: 0.4 }, { bucket: "0.4-0.6", min: 0.4, max: 0.6 }, { bucket: "0.6-0.8", min: 0.6, max: 0.8 }, { bucket: "0.8-1.0", min: 0.8, max: 1.0 }];
+    return {
+      poolSize: pool.length,
+      bySource: { indirect: byIndirect, crossCommunity: byCross, randomDistant: byRandom },
+      topCandidates: top10,
+      scoreDistribution: buckets.map(b => ({ bucket: b.bucket, count: scored.filter(s => s.score >= b.min && s.score < b.max).length })),
+    };
   }
 
   // ─── LLM Helpers ───────────────────────────────────────────
 
-  private async callLLM(
-    systemPrompt: string,
-    userContent: string
-  ): Promise<string> {
+  private async callLLM(systemPrompt: string, userContent: string): Promise<string> {
     if (!this.llm) return "";
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -551,34 +527,15 @@ export class ReflectManager {
   }
 
   private parseJSON<T>(raw: string, fallback: T | null): T | null {
-    try {
-      return JSON.parse(raw) as T;
-    } catch {
-      return fallback;
-    }
+    try { return JSON.parse(raw) as T; } catch { return fallback; }
   }
 
   private chunk<T>(arr: T[], size: number): T[][] {
     const chunks: T[][] = [];
-    for (let i = 0; i < arr.length; i += size) {
-      chunks.push(arr.slice(i, i + size));
-    }
+    for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
     return chunks;
   }
-
-  private resolveRelatedEntities(entities: string[]): string[] {
-    if (entities.length === 0) return [];
-    const resolved = this.db.resolveSlugs(entities);
-    return resolved.filter(r => r.slug !== null).map(r => r.slug!);
-  }
-
-  private extractTitleFallback(content: string): string {
-    const firstPhrase = content.split(/[。，！？\n.!?]/)[0] ?? content;
-    return firstPhrase.trim().slice(0, TITLE_SAFETY_LIMIT) || "未命名洞察";
-  }
 }
-
-// ─── Helpers ───────────────────────────────────────────────────
 
 function emptyReport(): ReflectReport {
   return {

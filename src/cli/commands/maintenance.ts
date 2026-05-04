@@ -200,7 +200,7 @@ export function register(program: Command) {
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const dreamPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm);
-      const reflectMgr = new ReflectManager(deps.db, pages, reflectLlm, dreamPipeline);
+      const reflectMgr = new ReflectManager(deps.db, pages, reflectLlm, dreamPipeline, deps.embedding);
       const health = new HealthChecker(deps.db, outputsDir, logger);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, reflectMgr);
       const icon = report.locked ? "🌙" : "⚠️";
@@ -211,6 +211,7 @@ export function register(program: Command) {
       console.log(`  Reflect: ${report.stages.reflect.entitiesSynthesized} 综合, ${report.stages.reflect.relationsInferred} 推理, ${report.stages.reflect.insightsGenerated} 洞察`);
       console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub`);
       console.log(`  Health:  ${report.stages.health.overallStatus}`);
+      console.log(`  Discovery: ${report.stages.discovery.discovered} 个结构化发现`);
       console.log(`  ⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
       if (!report.locked) console.log(`  ⚠️ 上次 dream 仍在执行中，本次跳过`);
       deps.db.close();
@@ -242,7 +243,7 @@ export function register(program: Command) {
 
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
-      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline);
+      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding);
       console.log("🧠 Reflecting...");
       const report = await mgr.reflectAll();
 
@@ -286,5 +287,56 @@ export function register(program: Command) {
       console.log(`  Generated ${files.length} index files:`);
       for (const f of files) console.log(`    - ${f}`);
       db.close();
+    });
+
+  program
+    .command("diagnose-insight")
+    .description("Diagnose insight candidate pool and scoring (no LLM calls)")
+    .action(async () => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      await deps.lance.connect(config.lancePath);
+      const { PageManager } = await import("../../core/page.js");
+      const { Logger } = await import("../../core/logger.js");
+      const outputsDir = join(config.vaultPath, "outputs");
+      const logger = new Logger(outputsDir);
+      const pages = new PageManager(deps.db, config.vaultPath, logger);
+      const { ReflectManager } = await import("../../core/reflect.js");
+      const mgr = new ReflectManager(deps.db, pages, undefined, undefined, deps.embedding);
+      const report = await mgr.diagnoseCandidates();
+
+      console.log("\n=== 候选池诊断 ===\n");
+      console.log(`候选池大小: ${report.poolSize}`);
+      console.log(`  间接对: ${report.bySource.indirect}`);
+      console.log(`  跨社区: ${report.bySource.crossCommunity}`);
+      console.log(`  随机远距: ${report.bySource.randomDistant}\n`);
+
+      if (report.topCandidates.length > 0) {
+        console.log("Top-10 候选:");
+        console.log("排名  分数    距离    Jaccard 类型                    实体 A              实体 B");
+        console.log("------ ------- ------- ------- ---------------------- ------------------- -------------------");
+        for (const c of report.topCandidates) {
+          const distStr = c.dist === -1 ? "∞" : `${c.dist}跳`;
+          console.log(`${String(c.rank).padEnd(6)} ${String(c.score).padEnd(7)} ${distStr.padEnd(7)} ${String(c.sourceJaccard).padEnd(7)} ${c.typeMix.padEnd(22)} ${c.entityA.slice(0, 18).padEnd(19)} ${c.entityB.slice(0, 18)}`);
+        }
+        console.log();
+      }
+
+      console.log("分数分布:");
+      for (const b of report.scoreDistribution) {
+        const bar = "█".repeat(Math.round(b.count / Math.max(1, report.poolSize) * 40));
+        console.log(`  ${b.bucket}: ${String(b.count).padEnd(4)} ${bar}`);
+      }
+
+      const avgDist = report.topCandidates.reduce((s, c) => s + (c.dist > 0 ? c.dist : 0), 0) / Math.max(1, report.topCandidates.filter(c => c.dist > 0).length);
+      console.log(`\nTop-10 平均距离: ${avgDist.toFixed(1)} 跳`);
+      const highScore = report.topCandidates.filter(c => c.score >= 0.8).length;
+      console.log(`0.8+ 高分候选: ${highScore} 个`);
+      console.log(`\n通过标准:`);
+      console.log(`  候选池 ≥ 50: ${report.poolSize >= 50 ? "✅" : "❌"}`);
+      console.log(`  Top-10 平均距离 ≥ 3: ${avgDist >= 3 ? "✅" : "❌"}`);
+      console.log(`  0.8+ 至少 1 对: ${highScore > 0 ? "✅" : "❌"}`);
+
+      deps.db.close();
     });
 }

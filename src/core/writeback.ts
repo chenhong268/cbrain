@@ -1,6 +1,5 @@
 import type { CBrainDB } from "../storage/sqlite.js";
 import { PageManager, type Page } from "./page.js";
-import { AuditLogger } from "./audit.js";
 
 export type WritebackAction = "append" | "create_concept" | "create_link";
 
@@ -30,12 +29,10 @@ export interface WritebackResult {
 export class WritebackManager {
   private pages: PageManager;
   private db: CBrainDB;
-  private audit: AuditLogger | null;
 
-  constructor(pages: PageManager, db: CBrainDB, outputsDir?: string) {
+  constructor(pages: PageManager, db: CBrainDB, _outputsDir?: string) {
     this.pages = pages;
     this.db = db;
-    this.audit = outputsDir ? new AuditLogger(outputsDir) : null;
   }
 
   async execute(input: WritebackInput): Promise<WritebackResult> {
@@ -79,11 +76,6 @@ export class WritebackManager {
       return { success: false, action: input.action, error: `Failed to update: ${slug}` };
     }
 
-    this.audit?.log(AuditLogger.entry("writeback_append", "success", {
-      pageSlug: slug,
-      details: { source: input.source },
-    }));
-
     return { success: true, action: input.action, slug };
   }
 
@@ -99,11 +91,6 @@ export class WritebackManager {
       body: input.content,
       tags: ["agent-derived"],
     });
-
-    this.audit?.log(AuditLogger.entry("writeback_create_concept", "success", {
-      pageSlug: page.slug,
-      details: { title, source: input.source },
-    }));
 
     return { success: true, action: input.action, slug: page.slug };
   }
@@ -124,11 +111,6 @@ export class WritebackManager {
     }
 
     this.db.insertLink(fromSlug, toSlug, relation, input.source ?? "agent-writeback");
-
-    this.audit?.log(AuditLogger.entry("writeback_create_link", "success", {
-      pageSlug: fromSlug,
-      details: { to: toSlug, relation, source: input.source },
-    }));
 
     return { success: true, action: input.action, slug: fromSlug };
   }

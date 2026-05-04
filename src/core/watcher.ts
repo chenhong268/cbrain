@@ -34,7 +34,7 @@ export class FileWatcher {
   }
 
   private scan(): void {
-    const files = collectMarkdownFiles(this.vaultPath);
+    const files = collectMarkdownFiles(this.vaultPath, new Set(["outputs"]));
     const seen = new Set<string>();
 
     for (const fullPath of files) {

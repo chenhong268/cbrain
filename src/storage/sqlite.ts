@@ -12,6 +12,8 @@ export interface PageRow {
   content_hash: string | null;
   tier: number;
   mention_count: number;
+  expires_at: string | null;
+  confidence_decay: number;
   created_at: string;
   updated_at: string;
 }
@@ -21,6 +23,8 @@ export interface LinkRow {
   from_slug: string;
   to_slug: string;
   relation: string;
+  weight: number;
+  strength: string;
   context: string | null;
   created_at: string;
 }
@@ -56,6 +60,8 @@ export class CBrainDB {
         content_hash TEXT,
         tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
         mention_count INTEGER DEFAULT 0,
+        expires_at TEXT,
+        confidence_decay REAL DEFAULT 1.0,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
@@ -65,6 +71,8 @@ export class CBrainDB {
         from_slug TEXT NOT NULL,
         to_slug TEXT NOT NULL,
         relation TEXT NOT NULL DEFAULT 'mentions',
+        weight REAL DEFAULT 1.0,
+        strength TEXT DEFAULT 'medium' CHECK(strength IN ('strong','medium','weak')),
         context TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         FOREIGN KEY (from_slug) REFERENCES pages(slug) ON DELETE CASCADE,
@@ -151,6 +159,17 @@ export class CBrainDB {
         finished_at TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS discoveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        entities TEXT NOT NULL,
+        score REAL NOT NULL,
+        detail TEXT,
+        detected_at TEXT NOT NULL,
+        dream_run TEXT,
+        seen INTEGER DEFAULT 0
+      );
+
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_name ON jobs(name);
 
@@ -158,13 +177,40 @@ export class CBrainDB {
     `);
 
     this.migratePagesConstraint();
+    this.migratePagesExpiry();
+    this.migrateLinksStrength();
+  }
+
+  private migrateLinksStrength(): void {
+    const cols = this.db.prepare("PRAGMA table_info(links)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("weight")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN weight REAL DEFAULT 1.0");
+    }
+    if (!names.has("strength")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN strength TEXT DEFAULT 'medium'");
+    }
+  }
+
+  private migratePagesExpiry(): void {
+    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("expires_at")) {
+      this.db.exec("ALTER TABLE pages ADD COLUMN expires_at TEXT");
+    }
+    if (!names.has("confidence_decay")) {
+      this.db.exec("ALTER TABLE pages ADD COLUMN confidence_decay REAL DEFAULT 1.0");
+    }
   }
 
   private migratePagesConstraint(): void {
     const check = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").get() as { sql: string } | undefined;
-    if (check?.sql?.includes("'insight'")) return;
+    if (check?.sql?.includes("'insight'") && !check.sql.includes("'source'") && !check.sql.includes("'event'")) return;
 
     this.db.exec("PRAGMA foreign_keys = OFF");
+
+    // Convert legacy event pages to record before migration
+    this.db.prepare("UPDATE pages SET type = 'record' WHERE type = 'event'").run();
 
     this.db.exec(`
       CREATE TABLE pages_new (
@@ -215,7 +261,8 @@ export class CBrainDB {
         "INSERT OR IGNORE INTO tags (page_slug, tag) VALUES ($slug, $tag)"
       ).run({ $slug: pageSlug, $tag: tag });
       return true;
-    } catch {
+    } catch (e) {
+      console.error(`[db] addTag 失败: ${pageSlug}/${tag}`, e);
       return false;
     }
   }
@@ -522,9 +569,9 @@ export class CBrainDB {
     ).get({ $slug: slug }) as { tier: number; mention_count: number } | null;
   }
 
-  insertPage(data: { slug: string; type: string; title: string; filePath: string; contentHash: string; tier?: number }): void {
+  insertPage(data: { slug: string; type: string; title: string; filePath: string; contentHash: string; tier?: number; expiresAt?: string | null; confidenceDecay?: number }): void {
     this.db.prepare(
-      "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at) VALUES ($slug, $type, $title, $path, $hash, $tier, datetime('now'), datetime('now'))"
+      "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, expires_at, confidence_decay, created_at, updated_at) VALUES ($slug, $type, $title, $path, $hash, $tier, $expires, $decay, datetime('now'), datetime('now'))"
     ).run({
       $slug: data.slug,
       $type: data.type,
@@ -532,6 +579,8 @@ export class CBrainDB {
       $path: data.filePath,
       $hash: data.contentHash,
       $tier: data.tier ?? 3,
+      $expires: data.expiresAt ?? null,
+      $decay: data.confidenceDecay ?? 1.0,
     });
   }
 
@@ -821,12 +870,41 @@ export class CBrainDB {
     ).all(...slugs) as Array<{ slug: string; title: string; type: string; updated_at: string }>;
   }
 
+  getExpiredPages(now: string): Array<{ slug: string; title: string; expires_at: string }> {
+    return this.db.prepare(
+      "SELECT slug, title, expires_at FROM pages WHERE expires_at IS NOT NULL AND expires_at < $now"
+    ).all({ $now: now }) as Array<{ slug: string; title: string; expires_at: string }>;
+  }
+
+  getLowConfidenceDecayPages(threshold: number): Array<{ slug: string; title: string; confidence_decay: number }> {
+    return this.db.prepare(
+      "SELECT slug, title, confidence_decay FROM pages WHERE confidence_decay < $t"
+    ).all({ $t: threshold }) as Array<{ slug: string; title: string; confidence_decay: number }>;
+  }
+
+  cleanDanglingLinks(): number {
+    const r = this.db.prepare(
+      "DELETE FROM links WHERE from_slug NOT IN (SELECT slug FROM pages) OR to_slug NOT IN (SELECT slug FROM pages)"
+    ).run();
+    return r.changes;
+  }
+
+  getLinksContextForSlugs(slugs: string[]): string[] {
+    if (slugs.length === 0) return [];
+    const placeholders = slugs.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT DISTINCT context FROM links WHERE context IS NOT NULL AND context != ''
+         AND (from_slug IN (${placeholders}) OR to_slug IN (${placeholders}))`
+    ).all(...slugs) as Array<{ context: string }>;
+    return rows.map(r => r.context);
+  }
+
   // ─── Link operations ──────────────────────────────────────────
 
-  insertLink(from: string, to: string, relation: string, context?: string | null): void {
+  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string): void {
     this.db.prepare(
-      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context) VALUES ($from, $to, $rel, $ctx)"
-    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null });
+      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength) VALUES ($from, $to, $rel, $ctx, $w, $s)"
+    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: weight ?? 1.0, $s: strength ?? 'medium' });
   }
 
   deleteLink(from: string, to: string, relation: string): boolean {
@@ -850,13 +928,13 @@ export class CBrainDB {
 
   getOutgoingLinks(slug: string): LinkRow[] {
     return this.db.prepare(
-      "SELECT id, from_slug, to_slug, relation, context, created_at FROM links WHERE from_slug = $slug"
+      "SELECT id, from_slug, to_slug, relation, weight, strength, context, created_at FROM links WHERE from_slug = $slug"
     ).all({ $slug: slug }) as LinkRow[];
   }
 
   getIncomingLinks(slug: string): LinkRow[] {
     return this.db.prepare(
-      "SELECT id, from_slug, to_slug, relation, context, created_at FROM links WHERE to_slug = $slug"
+      "SELECT id, from_slug, to_slug, relation, weight, strength, context, created_at FROM links WHERE to_slug = $slug"
     ).all({ $slug: slug }) as LinkRow[];
   }
 
@@ -887,10 +965,10 @@ export class CBrainDB {
     return rows.map(r => r.slug);
   }
 
-  getAllLinks(): Array<{ from_slug: string; to_slug: string; relation: string }> {
+  getAllLinks(): Array<{ from_slug: string; to_slug: string; relation: string; weight: number }> {
     return this.db.prepare(
-      "SELECT from_slug, to_slug, relation FROM links"
-    ).all() as Array<{ from_slug: string; to_slug: string; relation: string }>;
+      "SELECT from_slug, to_slug, relation, weight FROM links"
+    ).all() as Array<{ from_slug: string; to_slug: string; relation: string; weight: number }>;
   }
 
   getLinkCount(): number {
@@ -1000,6 +1078,38 @@ export class CBrainDB {
       "SELECT slug FROM pages WHERE title = $name AND type IN ('entity', 'concept')"
     ).get({ $name: name }) as { slug: string } | null;
     return row?.slug ?? null;
+  }
+
+  // ─── Discoveries ──────────────────────────────────────────────
+
+  addDiscovery(type: string, entities: string[], score: number, detail?: Record<string, unknown>, dreamRun?: string): number {
+    const r = this.db.prepare(
+      "INSERT INTO discoveries (type, entities, score, detail, detected_at, dream_run) VALUES ($type, $entities, $score, $detail, datetime('now'), $run)"
+    ).run({
+      $type: type,
+      $entities: JSON.stringify(entities),
+      $score: score,
+      $detail: detail ? JSON.stringify(detail) : null,
+      $run: dreamRun ?? null,
+    });
+    return Number(r.lastInsertRowid);
+  }
+
+  getUnseenDiscoveries(limit: number = 10): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null }> {
+    return this.db.prepare(
+      "SELECT id, type, entities, score, detail, detected_at, dream_run FROM discoveries WHERE seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
+    ).all({ $limit: limit }) as any[];
+  }
+
+  markDiscoverySeen(id: number): void {
+    this.db.prepare("UPDATE discoveries SET seen = 1 WHERE id = $id").run({ $id: id });
+  }
+
+  cleanupOldDiscoveries(days: number = 90): number {
+    const r = this.db.prepare(
+      "DELETE FROM discoveries WHERE seen = 0 AND detected_at < datetime('now', '-' || $days || ' days')"
+    ).run({ $days: days });
+    return r.changes;
   }
 
   close(): void {

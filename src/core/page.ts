@@ -22,6 +22,8 @@ export interface CreatePageInput {
   body: string;
   tags?: string[];
   slug?: string;
+  expiresAt?: string | null;
+  confidenceDecay?: number;
   extra?: Record<string, unknown>;
 }
 
@@ -33,6 +35,8 @@ export interface Page {
   content_hash: string;
   tier: number;
   mention_count: number;
+  expires_at: string | null;
+  confidence_decay: number;
   frontmatter: PageFrontmatter;
   body: string;
   created_at: string;
@@ -81,6 +85,8 @@ export class PageManager {
       title: input.title,
       filePath: relative(this.vaultPath, filePath),
       contentHash,
+      expiresAt: input.expiresAt ?? null,
+      confidenceDecay: input.confidenceDecay ?? 1.0,
     });
 
     if (input.tags && input.tags.length > 0) {
@@ -111,6 +117,8 @@ export class PageManager {
       content_hash: row.content_hash ?? "",
       tier: row.tier,
       mention_count: row.mention_count,
+      expires_at: row.expires_at ?? null,
+      confidence_decay: row.confidence_decay ?? 1.0,
       frontmatter,
       body,
       created_at: row.created_at,

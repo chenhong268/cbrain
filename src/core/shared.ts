@@ -20,7 +20,7 @@ export function hashContent(content: string): string {
 
 // ─── File Collection ─────────────────────────────────────────
 
-export function collectMarkdownFiles(dir: string): string[] {
+export function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>): string[] {
   const results: string[] = [];
   const walk = (d: string) => {
     let entries;
@@ -32,6 +32,7 @@ export function collectMarkdownFiles(dir: string): string[] {
     }
     for (const e of entries) {
       if (e.name.startsWith(".")) continue;
+      if (excludeDirs?.has(e.name)) continue;
       const p = join(d, e.name);
       if (e.isDirectory()) { walk(p); }
       else if (extname(e.name).toLowerCase() === ".md") { results.push(p); }
@@ -130,6 +131,23 @@ const CANONICAL_RELATIONS: Record<string, string> = {
 
 export function normalizeRelation(rel: string): string {
   return CANONICAL_RELATIONS[rel] ?? "提及";
+}
+
+const DEFAULT_WEIGHTS: Record<string, { strength: string; weight: number }> = {
+  "任职": { strength: "strong", weight: 1.0 },
+  "创立": { strength: "strong", weight: 1.0 },
+  "归属": { strength: "strong", weight: 1.0 },
+  "合作": { strength: "medium", weight: 0.7 },
+  "竞争": { strength: "medium", weight: 0.7 },
+  "资本": { strength: "medium", weight: 0.7 },
+  "制造": { strength: "medium", weight: 0.7 },
+  "认识": { strength: "weak", weight: 0.3 },
+  "提及": { strength: "weak", weight: 0.3 },
+  "间接关联": { strength: "weak", weight: 0.2 },
+};
+
+export function getRelationStrength(relation: string): { strength: string; weight: number } {
+  return DEFAULT_WEIGHTS[relation] ?? { strength: "medium", weight: 0.5 };
 }
 
 export function buildStubBody(

@@ -14,6 +14,7 @@ import {
   resolveEntityName,
   DEFAULT_CHUNK_SIZE,
   normalizeRelation,
+  getRelationStrength,
 } from "./shared.js";
 
 export interface PipelineInput {
@@ -155,7 +156,7 @@ export class ContentPipeline {
           const key = `${fromSlug}\x00${newSlug}`;
           if (!writtenRelations.includes(key)) {
             writtenRelations.push(key);
-            this.db.insertLink(fromSlug, newSlug, "提及");
+            this.db.insertLink(fromSlug, newSlug, "提及", null, 0.3, "weak");
             count++;
           }
         }
@@ -164,7 +165,7 @@ export class ContentPipeline {
         const key = `${fromSlug}\x00${targetSlug}`;
         if (!writtenRelations.includes(key)) {
           writtenRelations.push(key);
-          this.db.insertLink(fromSlug, targetSlug, "提及");
+          this.db.insertLink(fromSlug, targetSlug, "提及", null, 0.3, "weak");
           count++;
         }
       }
@@ -225,7 +226,7 @@ export class ContentPipeline {
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.push(stub.slug);
         this.db.incrementMentionCount(stub.slug);
-        this.db.insertLink(fromSlug, stub.slug, "提及");
+        this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak");
       } else if (entity.relevance === "low") {
         lowRelevanceSkipped++;
       }
@@ -236,7 +237,9 @@ export class ContentPipeline {
       const from = resolveEntityName(rel.from, entitySlugMap, this.db);
       const to = resolveEntityName(rel.to, entitySlugMap, this.db);
       if (from && to && from !== to) {
-        this.db.insertLink(from, to, normalizeRelation(rel.relation), rel.context);
+        const normRel = normalizeRelation(rel.relation);
+        const rw = getRelationStrength(normRel);
+        this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength);
 
         const fromTitle = this.pages?.getBySlug(from)?.title ?? rel.from;
         const toTitle = this.pages?.getBySlug(to)?.title ?? rel.to;

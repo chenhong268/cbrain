@@ -5,10 +5,14 @@ import type { ToolContext } from "../context.js";
 export function registerBrainstormTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("brain_storm", {
     description:
-      "Think deeply about a question using the knowledge graph. Returns findings, knowledge gaps, " +
-      "search queries for external reference, cross-domain insights (stored back to the brain), and follow-up questions. " +
-      "When internal knowledge is insufficient, search_queries tells you what to search externally. " +
-      "Use this when you need to analyze, brainstorm, or synthesize — not for simple entity lookup.",
+      "Deep reasoning and knowledge gap analysis. Unlike search/query which finds existing facts, " +
+      "brain_storm SYNTHESIZES and IDENTIFIES WHAT'S MISSING. " +
+      "Returns: findings (what the graph knows), gaps (what's missing — the most valuable output), " +
+      "connections (cross-domain structural links), search_queries (what to search externally), " +
+      "and follow-up questions. " +
+      "Use this for: analysis, diagnosis, strategy questions, identifying blind spots, " +
+      "cross-domain synthesis. " +
+      "Do NOT use for: simple entity lookup, fact retrieval, listing related items (use search/query for those).",
     inputSchema: {
       query: z.string().describe("The question or topic to think about"),
       context: z.string().optional().describe("Additional context (role, situation, background)"),
@@ -17,14 +21,14 @@ export function registerBrainstormTools(server: McpServer, ctx: ToolContext): vo
     const results: {
       findings: string[];
       gaps: string[];
-      discovered: { type: string; title: string; content: string }[];
+      connections: { type: string; title: string; content: string }[];
       questions: string[];
       suggestions: string[];
       search_queries: string[];
     } = {
       findings: [],
       gaps: [],
-      discovered: [],
+      connections: [],
       questions: [],
       suggestions: [],
       search_queries: [],
@@ -76,7 +80,7 @@ Analyze and return JSON:
   "gaps": ["what important information is MISSING — be specific"],
   "questions": ["follow-up questions to ask the user to fill the gaps"],
   "suggestions": ["actionable suggestions based on available knowledge, if any"],
-  "cross_domain_insights": [
+  "connections": [
     {"title": "short insight title", "content": "synthesis connecting different domains (1-2 sentences)", "confidence": 0.0-1.0}
   ],
   "search_queries": ["suggested web search queries to fill knowledge gaps"]
@@ -86,7 +90,7 @@ Rules:
 - All output MUST be in Chinese (the user's knowledge graph is Chinese, all titles and content must be Chinese)
 - If knowledge is insufficient, findings can be empty. That's OK.
 - gaps must be specific — not "missing info" but "missing: team's current AI tool usage"
-- cross_domain_insights: only include if you genuinely discovered a new connection between different knowledge domains. confidence < 0.7 should not be included. If none, return empty array.
+- connections: only include if you genuinely discovered a structural connection between different knowledge domains. confidence < 0.7 should not be included. If none, return empty array.
 - Do NOT make up facts not in the provided fragments.`;
 
     let analysis: any;
@@ -105,19 +109,21 @@ Rules:
     results.suggestions = analysis.suggestions || [];
     results.search_queries = analysis.search_queries || [];
 
-    // ── Stage 3: 发现 — store cross-domain insights back to CBrain ──
-    const insights = (analysis.cross_domain_insights || []) as Array<{
+    // ── Stage 3: connections — store structural connections back to CBrain ──
+    const connections = (analysis.connections || []) as Array<{
       title: string; content: string; confidence: number;
     }>;
 
-    for (const ins of insights) {
+    for (const ins of connections) {
       if ((ins.confidence || 0) < 0.7) continue;
       if (!ins.title || !ins.content) continue;
 
       try {
         const date = new Date().toISOString().slice(0, 10);
         const fullTitle = `${date} ${ins.title.slice(0, 50)}`;
-        const slug = `brain/insights/${fullTitle.replace(/[^一-鿿a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase()}`;
+        const pathPart = fullTitle.replace(/[^一-鿿a-zA-Z0-9\s-]/g, "").replace(/\s+/g, "-").toLowerCase();
+        if (pathPart.replace(/-/g, "").length < 3) continue;
+        const slug = `brain/insights/${pathPart}`;
 
         // Avoid duplicates
         if (ctx.db.getPage(slug)) continue;
@@ -129,7 +135,7 @@ Rules:
           tags: ["insight/cross-domain", "insight/auto"],
           slug,
         });
-        results.discovered.push({ type: "insight", title: fullTitle, content: ins.content });
+        results.connections.push({ type: "connection", title: fullTitle, content: ins.content });
       } catch {
         // Non-blocking
       }

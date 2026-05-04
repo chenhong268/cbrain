@@ -3,13 +3,11 @@ const CJK_RANGE = /[一-鿿㐀-䶿]/;
 const PLURALS: Record<string, string> = {
   entity: "entities",
   concept: "concepts",
-  event: "events",
   record: "records",
-  source: "sources",
   insight: "insights",
 };
 
-const GENERATED_TYPES = new Set(["entity", "concept", "record", "event", "source", "insight"]);
+const GENERATED_TYPES = new Set(["entity", "concept", "record", "insight"]);
 const GENERATED_PREFIX = "brain/";
 const RAW_PREFIX = "raw/";
 

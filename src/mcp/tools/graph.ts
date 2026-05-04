@@ -12,8 +12,9 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       mode: z.enum(["traverse", "backlinks", "related"]).optional().default("traverse").describe("Query mode"),
       depth: z.number().optional().default(2).describe("Max traversal depth"),
       limit: z.number().optional().default(20).describe("Max results"),
+      minWeight: z.number().optional().describe("Minimum link weight (0-1). Higher = stronger links only."),
     },
-  }, async ({ slug, mode, depth, limit }) => {
+  }, async ({ slug, mode, depth, limit, minWeight }) => {
     let resolvedSlug = slug;
     if (!ctx.pages.getBySlug(slug)) {
       const found = findEntitySlug(ctx.db, slug);
@@ -29,7 +30,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
         result = ctx.graph.getRelatedEntities(resolvedSlug, limit);
         break;
       default:
-        result = ctx.graph.traverse(resolvedSlug, { maxDepth: depth, limit });
+        result = ctx.graph.traverse(resolvedSlug, { maxDepth: depth, limit, minWeight });
     }
     return {
       content: [{ type: "text", text: JSON.stringify({ resolvedSlug, result }, null, 2) }],
@@ -58,13 +59,15 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       to: z.string().describe("Target page slug"),
       relation: z.string().default("提及").describe("Relation type (e.g. '提及', 'works_at')"),
       context: z.string().optional().describe("Optional context for the relation"),
+      weight: z.number().optional().describe("Link weight 0-1. Auto-assigned if omitted."),
+      strength: z.enum(["strong", "medium", "weak"]).optional().describe("Link strength. Auto-assigned if omitted."),
     },
-  }, async ({ from, to, relation, context }) => {
+  }, async ({ from, to, relation, context, weight, strength }) => {
     if (!ctx.pages.getBySlug(from)) return { content: [{ type: "text", text: JSON.stringify({ error: `Source page not found: ${from}` }) }], isError: true };
     if (!ctx.pages.getBySlug(to)) return { content: [{ type: "text", text: JSON.stringify({ error: `Target page not found: ${to}` }) }], isError: true };
     if (from === to) return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot create self-referencing link" }) }], isError: true };
 
-    ctx.db.insertLink(from, to, relation, context ?? null);
+    ctx.db.insertLink(from, to, relation, context ?? null, weight, strength);
     ctx.pages.incrementMention(to);
 
     return {

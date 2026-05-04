@@ -5,6 +5,8 @@ export interface Link {
   from_slug: string;
   to_slug: string;
   relation: string;
+  weight: number;
+  strength: string;
   context?: string;
 }
 
@@ -18,6 +20,7 @@ export interface GraphNode {
 export interface TraverseOptions {
   direction?: "outgoing" | "incoming" | "both";
   relation?: string;
+  minWeight?: number;
   maxDepth?: number;
   limit?: number;
 }
@@ -29,8 +32,8 @@ export class GraphManager {
     this.db = db;
   }
 
-  addLink(from: string, to: string, relation: string = "mentions", context?: string): void {
-    this.db.insertLink(from, to, relation, context ?? null);
+  addLink(from: string, to: string, relation: string = "mentions", context?: string, weight?: number, strength?: string): void {
+    this.db.insertLink(from, to, relation, context ?? null, weight, strength);
   }
 
   removeLink(from: string, to: string, relation: string = "mentions"): boolean {
@@ -58,6 +61,7 @@ export class GraphManager {
   traverse(seedSlug: string, options?: TraverseOptions): GraphNode[] {
     const direction = options?.direction ?? "both";
     const relation = options?.relation;
+    const minWeight = options?.minWeight;
     const maxDepth = options?.maxDepth ?? 2;
     const limit = options?.limit ?? 50;
 
@@ -71,9 +75,22 @@ export class GraphManager {
       const nextFrontier: string[] = [];
 
       for (const slug of frontier) {
-        const neighbors = this.getNeighbors(slug, direction, relation);
+        let slugs: string[];
+        if (minWeight !== undefined) {
+          const links = [
+            ...(direction === "outgoing" || direction === "both" ? this.db.getOutgoingLinks(slug) : []),
+            ...(direction === "incoming" || direction === "both" ? this.db.getIncomingLinks(slug) : []),
+          ];
+          slugs = [...new Set(
+            links
+              .filter(l => (!relation || l.relation === relation) && l.weight >= minWeight)
+              .map(l => l.from_slug === slug ? l.to_slug : l.from_slug)
+          )];
+        } else {
+          slugs = this.getNeighbors(slug, direction, relation);
+        }
 
-        for (const neighbor of neighbors) {
+        for (const neighbor of slugs) {
           if (!visited.has(neighbor)) {
             visited.add(neighbor);
             nextFrontier.push(neighbor);

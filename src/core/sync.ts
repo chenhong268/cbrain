@@ -7,7 +7,6 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import { PageManager } from "./page.js";
 import { canonicalSlug, slugToFilePath } from "../utils/slug.js";
-import { AuditLogger } from "./audit.js";
 import type { Logger } from "./logger.js";
 import {
   chunkContent,
@@ -49,7 +48,6 @@ export class SyncManager {
   private chunkSize: number;
   private nerEngine: NerEngine | null;
   private pages: PageManager | null;
-  private audit: AuditLogger | null;
   private logger: Logger | null;
   private chunkEmbedCache = new Map<string, { embedding: number[]; tokenCount: number }>();
 
@@ -66,7 +64,6 @@ export class SyncManager {
     this.nerEngine = config?.nerEngine ?? null;
     this.pages = config?.pages ?? null;
     this.logger = config?.logger ?? null;
-    this.audit = config?.outputsDir ? new AuditLogger(config.outputsDir) : null;
     this.pipeline = new ContentPipeline(db, embedding, lance, {
       pages: this.pages ?? undefined,
       nerEngine: this.nerEngine ?? undefined,
@@ -78,7 +75,7 @@ export class SyncManager {
   async syncAll(vaultPath: string): Promise<SyncReport> {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [] };
     try {
-    const mdFiles = collectMarkdownFiles(vaultPath);
+    const mdFiles = collectMarkdownFiles(vaultPath, new Set(["outputs"]));
 
     // Phase 1: detect changed files + batch embed all chunks
     const changed: Array<{ filePath: string; slug: string; title: string; type: string; relPath: string; body: string; contentHash: string; frontmatter: Record<string, unknown> }> = [];
@@ -161,11 +158,6 @@ export class SyncManager {
         this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
         report.synced++;
 
-        this.audit?.log(AuditLogger.entry("sync_page", "success", {
-          pageSlug: file.slug,
-          details: { chunks: chunks.length },
-        }));
-
         if (this.nerEngine && file.body.trim() && file.type !== "entity" && file.type !== "concept") {
           nerJobs.push({ slug: file.slug, text: file.body });
         }
@@ -182,10 +174,6 @@ export class SyncManager {
         const msg = err instanceof Error ? err.message : String(err);
         report.errorDetails!.push(`${file.filePath}: ${msg}`);
         this.logger?.error("sync", `同步失败: ${file.slug}`, { error: msg });
-        this.audit?.log(AuditLogger.entry("sync_page", "error", {
-          pageSlug: file.slug,
-          details: { error: msg },
-        }));
       }
     }
 
@@ -342,6 +330,9 @@ export class SyncManager {
   }
 
   async removeOrphans(vaultPath: string): Promise<string[]> {
+    const cleaned = this.db.cleanDanglingLinks();
+    if (cleaned > 0 && this.logger) this.logger.info("sync", `清理 ${cleaned} 条悬空链接`);
+
     const pages = this.db.getAllPageSlugsWithPaths();
 
     const orphans: string[] = [];

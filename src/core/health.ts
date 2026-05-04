@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
-import { AuditLogger, type MetricsSnapshot } from "./audit.js";
+import type { MetricsSnapshot } from "./audit.js";
 import type { Logger } from "./logger.js";
 
 // ─── Types ────────────────────────────────────────────────────
@@ -74,13 +74,11 @@ const RETENTION_DAYS = 7;
 export class HealthChecker {
   private db: CBrainDB;
   private outputsDir: string;
-  private audit: AuditLogger;
   private logger: Logger | null;
 
   constructor(db: CBrainDB, outputsDir: string, logger?: Logger) {
     this.db = db;
     this.outputsDir = outputsDir;
-    this.audit = new AuditLogger(outputsDir);
     this.logger = logger ?? null;
   }
 
@@ -100,6 +98,8 @@ export class HealthChecker {
       this.checkAttention(),
       this.checkDataReadiness(),
       this.checkSourceQuality(),
+      this.checkStaleContent(),
+      this.checkContradictions(),
     ];
 
     const highCount = dimensions.reduce((n, d) => n + d.issues.filter(i => i.severity === "high").length, 0);
@@ -127,18 +127,6 @@ export class HealthChecker {
     // Write three-layer output
     const reportPaths = this.writeReports(report);
     report.reportPaths = reportPaths;
-
-    this.audit.writeMetrics(metrics);
-    this.audit.log(AuditLogger.entry("health_check", overallStatus === "fail" ? "error" : "success", {
-      details: {
-        dimensions: dimensions.length,
-        issues: dimensions.reduce((sum, d) => sum + d.issues.length, 0),
-        newIssues: delta.totalNew,
-        resolvedIssues: delta.totalResolved,
-        chronicIssues: delta.totalChronic,
-        durationMs: Date.now() - start,
-      },
-    }));
 
     this.cleanupOldReports();
 
@@ -398,7 +386,7 @@ export class HealthChecker {
     md += `| 总页面数 | ${report.metrics.totalPages} |\n`;
     md += `| 实体 | ${report.metrics.entities} |\n`;
     md += `| 概念 | ${report.metrics.concepts} |\n`;
-    md += `| 事件 / 记录 / 来源 | ${report.metrics.events} / ${report.metrics.records} / ${report.metrics.sources} |\n`;
+    md += `| 事件 / 记录 | ${report.metrics.events} / ${report.metrics.records} |\n`;
     md += `| 总链接数 | ${report.metrics.totalLinks} |\n`;
     md += `| 平均提及次数 | ${report.metrics.avgMentionsPerPage.toFixed(1)} |\n`;
     md += `| 孤岛页面 | ${report.metrics.orphans} |\n`;
@@ -649,7 +637,7 @@ export class HealthChecker {
   private checkNewSuggestions(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    const sourceCount = this.db.getPageCountByTypes(["record", "source", "event"]);
+    const sourceCount = this.db.getPageCountByTypes(["record", "event"]);
     const conceptCount = this.db.getPageCountByType("concept");
 
     const ratio = sourceCount > 0 ? conceptCount / sourceCount : 0;
@@ -794,6 +782,84 @@ export class HealthChecker {
     };
   }
 
+  private checkStaleContent(): HealthDimension {
+    const issues: HealthIssue[] = [];
+    const now = new Date().toISOString();
+
+    // Expired pages
+    const expired = this.db.getExpiredPages(now);
+    for (const page of expired) {
+      issues.push({
+        severity: "high",
+        slug: page.slug,
+        title: page.title,
+        description: `内容已过期 (expires_at: ${page.expires_at})`,
+        suggestion: "确认此信息是否仍有效，或更新 expires_at",
+      });
+    }
+
+    // Low confidence decay pages
+    const decayed = this.db.getLowConfidenceDecayPages(0.3);
+    for (const page of decayed) {
+      if (expired.some(e => e.slug === page.slug)) continue;
+      issues.push({
+        severity: "medium",
+        slug: page.slug,
+        title: page.title,
+        description: `置信度衰减至 ${page.confidence_decay}，可能已过时`,
+        suggestion: "确认此信息是否仍准确",
+      });
+    }
+
+    return {
+      name: "时效性",
+      status: issues.length > 5 ? "warn" : issues.length > 0 ? "warn" : "pass",
+      issues,
+    };
+  }
+
+  private checkContradictions(): HealthDimension {
+    const issues: HealthIssue[] = [];
+
+    const entities = this.db.getEntityConceptPages();
+    for (const entity of entities) {
+      const incoming = this.db.getIncomingLinks(entity.slug);
+      const rawSources = incoming.filter(l => l.from_slug.startsWith("raw/") && l.context);
+      if (rawSources.length < 2) continue;
+
+      const contexts = rawSources.map(l => l.context!);
+      let minOverlap = 1.0;
+      let bestPair: [string, string] = ["", ""];
+
+      for (let i = 0; i < contexts.length; i++) {
+        const wordsA = new Set(contexts[i].split(/[\s，。、；：！？\n]+/).filter(w => w.length > 0));
+        for (let j = i + 1; j < contexts.length; j++) {
+          const wordsB = new Set(contexts[j].split(/[\s，。、；：！？\n]+/).filter(w => w.length > 0));
+          if (wordsA.size === 0 && wordsB.size === 0) continue;
+          const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
+          const overlap = intersection / Math.min(wordsA.size, wordsB.size);
+          if (overlap < minOverlap) { minOverlap = overlap; bestPair = [rawSources[i].from_slug, rawSources[j].from_slug]; }
+        }
+      }
+
+      if (minOverlap < 0.3) {
+        issues.push({
+          severity: "medium",
+          slug: entity.slug,
+          title: entity.title,
+          description: `来自不同来源的描述差异较大 (词重叠度 ${minOverlap.toFixed(2)})，可能存在矛盾：${bestPair[0]} vs ${bestPair[1]}`,
+          suggestion: "人工核实两个来源的信息是否一致",
+        });
+      }
+    }
+
+    return {
+      name: "矛盾检测",
+      status: issues.length > 0 ? "warn" : "pass",
+      issues,
+    };
+  }
+
   // ─── Metrics ───────────────────────────────────────────────
 
   private collectMetrics(): MetricsSnapshot {
@@ -802,14 +868,13 @@ export class HealthChecker {
     const concepts = this.db.getPageCountByType("concept");
     const events = this.db.getPageCountByType("event");
     const records = this.db.getPageCountByType("record");
-    const sources = this.db.getPageCountByType("source");
     const totalLinks = this.db.getLinkCount();
     const avgMentions = this.db.getAvgMentionCount();
 
     const orphans = this.db.getIslandPages().length;
     const bareStubs = this.db.getBareStubs().length;
 
-    const sourceCount = records + sources + events;
+    const sourceCount = records + events;
     const conceptsPerSource = sourceCount > 0 ? concepts / sourceCount : 0;
 
     return {
@@ -819,7 +884,6 @@ export class HealthChecker {
       concepts,
       events,
       records,
-      sources,
       totalLinks,
       avgMentionsPerPage: avgMentions,
       orphans,

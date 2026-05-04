@@ -18,6 +18,7 @@ export interface DreamReport {
     reflect: { entitiesSynthesized: number; relationsInferred: number; insightsGenerated: number };
     cleanup: { orphans: number; staleStubs: number };
     health: { overallStatus: string; dimensions: number; issues: number };
+    discovery: { discovered: number };
   };
   duration_ms: number;
   locked: boolean;
@@ -64,6 +65,7 @@ export async function runDream(
         reflect: { entitiesSynthesized: 0, relationsInferred: 0, insightsGenerated: 0 },
         cleanup: { orphans: 0, staleStubs: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
+        discovery: { discovered: 0 },
       },
       duration_ms: 0,
       locked: false,
@@ -130,11 +132,24 @@ export async function runDream(
   const staleStubs = await syncMgr.cleanStaleStubs(vaultPath);
 
   // Stage 5: Health
-  logger.info("dream", "Stage 5/6: health");
+  logger.info("dream", "Stage 5/7: health");
   const healthReport = await healthChecker.checkAll();
 
-  // Stage 6: Report
-  logger.info("dream", "Stage 6/6: report");
+  // Stage 6: Discovery
+  logger.info("dream", "Stage 6/7: discovery");
+  let discovered = 0;
+  const runId = new Date().toISOString().slice(0, 10);
+  if (reflectMgr) {
+    try {
+      discovered = await reflectMgr.runDiscovery(runId);
+      logger.info("dream", `Discovery: ${discovered} 个结构化发现`);
+    } catch (e) {
+      logger.warn("dream", `Discovery 失败: ${(e as Error).message}`);
+    }
+  }
+
+  // Stage 7: Report
+  logger.info("dream", "Stage 7/7: report");
   const report: DreamReport = {
     timestamp: new Date().toISOString(),
     stages: {
@@ -148,6 +163,7 @@ export async function runDream(
         dimensions: healthReport.dimensions.length,
         issues: healthReport.dimensions.reduce((s, d) => s + d.issues.length, 0),
       },
+      discovery: { discovered },
     },
     duration_ms: Date.now() - started,
     locked: true,
@@ -170,6 +186,7 @@ export async function runDream(
     `| Reflect | ${report.stages.reflect.entitiesSynthesized} 综合, ${report.stages.reflect.relationsInferred} 推理, ${report.stages.reflect.insightsGenerated} 洞察 |`,
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
+    `| Discovery | ${report.stages.discovery.discovered} 个结构化发现 |`,
     ``,
     `⏱ ${(report.duration_ms / 1000).toFixed(1)}s`,
   ];

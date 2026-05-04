@@ -1,6 +1,43 @@
 # Changelog
 
-> Current: `v0.4.0` — 23 CLI commands, 43 MCP tools, 11 skills.
+> Current: `v0.4.1` — 23 CLI commands, 46 MCP tools, 11 skills.
+
+## [v0.4.1] — 2026-05-04
+
+### P1: 数据质量基础设施
+
+- **时效性标记：** pages 表新增 `expires_at` + `confidence_decay` 字段。health 新增"时效性"维度，自动检测过期和低置信度内容。
+- **关系强度：** links 表新增 `weight` (0-1) + `strength` (strong/medium/weak) 字段。关系自动推导（任职→strong/1.0，提及→weak/0.3）。`graph_query` 支持 `minWeight` 过滤。
+- **矛盾检测：** health 新增"矛盾检测"维度。同一 entity 被多个 raw/ 源引用时，Jaccard 词重叠检测潜在矛盾。
+
+### P2: 上下文动态摘要
+
+- **新增 `summarize` MCP tool：** 搜索 + 图遍历 + 权重过滤 + 上下文聚合，一次调用给出领域全貌（正文、关系链、时间线、标签、邻居、近期动态）。
+
+### Insight 功能重构
+
+- **`generateInsights` 禁用。** 旧系统 65 条 auto insight 全部归档删除。auto insight 替换为新架构。
+- **discoveries 表：** 新表，存图算法发现的结构化异常（bridge/community_crossing/structural_hole）。
+- **dream 新增 discovery stage：** 每次 dream 跑 5 维打分 + 社区检测 + BFS，产出 top-20 结构化发现（0 LLM 调用）。
+- **MCP tools：** `read_discoveries` + `mark_discovery_seen`。Agent 读取发现 → 呈现给用户 → 用户判断 → 确认后写成 `brain/insights/` 笔记。
+- **brain_storm：** `cross_domain_insights` 改名为 `connections`。description 重写，明确"推理找空白用 brain_storm，查事实用 search/query"。
+- **诊断工具：** `diagnose-insight` CLI 命令 + `tests/insight-sim.ts` 模拟脚本。
+
+### Bug 修复（8 个）
+
+- **悬空链接清理：** 新增 `cleanDanglingLinks()`，sync 时自动清理引用不存在页面的 link（修复 `brain/nodes/` 迁移残留 8 条）。
+- **`audit.ts` 死代码：** AuditLogger 类及 14 处调用全部删除。只保留 `MetricsSnapshot` 接口。
+- **多 serve 进程保护：** PID 文件锁（`cbrain.pid`），重复启动自动拒绝。
+- **`source`/`event` 类型残留：** slug.ts、audit.ts、health.ts、brain.ts 中死代码清理。DB CHECK 约束修复。3 条 event 页面转为 record。
+- **空 catch 日志：** 3 处静默吞错的 catch 块加 `console.error`。
+- **brain_storm slug 空路径：** 加长度检查，无效 slug 跳过。
+- **`outputs/` 文件误入图谱：** `collectMarkdownFiles` 加 `excludeDirs`。清理 19 条误同步的 outputs 页面。
+- **关系强度 SELECT 漏列：** `getOutgoingLinks`/`getIncomingLinks` 补上 weight/strength 列。
+
+### 运维
+
+- **`cbrain-restart` alias：** `~/.zshrc` 新增快捷命令，一键杀旧 serve + 重启 gateway。
+- **团队数据入库：** 29 人团队全量结构化（鲲鹏条线 8 人 + 商务 CM 4 区域 16 人 + VP），47 条汇报关系 link。
 
 ## [v0.4.0] — 2026-05-03
 
