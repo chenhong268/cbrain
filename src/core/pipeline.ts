@@ -243,7 +243,7 @@ export class ContentPipeline {
 
         const fromTitle = this.pages?.getBySlug(from)?.title ?? rel.from;
         const toTitle = this.pages?.getBySlug(to)?.title ?? rel.to;
-        writtenRelations.push({ from: fromTitle, to: toTitle, relation: rel.relation });
+        writtenRelations.push({ from: fromTitle, to: toTitle, relation: normRel });
       }
     }
 
