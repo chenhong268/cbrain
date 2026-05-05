@@ -33,18 +33,25 @@ export interface CBrainConfig {
 }
 
 export function findConfig(startDir?: string): CBrainConfig | null {
-  const dir = startDir ?? process.env.CBRAIN_DIR ?? process.cwd();
+  const dir = startDir ?? process.cwd();
   const configPath = join(dir, CONFIG_FILE);
   if (existsSync(configPath)) {
     return JSON.parse(readFileSync(configPath, "utf-8"));
   }
-  if (process.env.CBRAIN_DIR) return null;
   const parent = resolve(dir, "..");
   if (parent === dir) return null;
   return findConfig(parent);
 }
 
 export function loadConfig(): CBrainConfig {
+  // 1. CBRAIN_CONFIG: explicit path to config file (no search)
+  if (process.env.CBRAIN_CONFIG) {
+    const p = process.env.CBRAIN_CONFIG;
+    if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8"));
+    console.error(`Error: CBRAIN_CONFIG=${p} not found.`);
+    process.exit(1);
+  }
+  // 2. Search upward from cwd
   const config = findConfig();
   if (!config) {
     console.error("Error: No cbrain.json found. Run `cbrain init` first.");
