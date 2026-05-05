@@ -26,7 +26,7 @@
 混合搜索，自动融合向量 + 全文 + 图谱 + 多查询扩展。
 
 ```json
-{ "query": "诺华项目进展", "strategy": "all", "limit": 10 }
+{ "query": "星辰科技项目进展", "strategy": "all", "limit": 10 }
 ```
 
 | 参数 | 类型 | 必填 | 说明 |
@@ -46,7 +46,7 @@
   "type": "text",
   "title": "文档标题",
   "pageType": "record",
-  "tags": ["重要", "诺华"]
+  "tags": ["重要", "星辰科技"]
 }
 ```
 
@@ -175,7 +175,7 @@
 批量确认名称在 CBrain 中的存在。
 
 ```json
-{ "queries": ["王磊", "张伟", "诺华"] }
+{ "queries": ["王磊", "张伟", "星辰科技"] }
 ```
 
 ### writeback
@@ -225,7 +225,7 @@ direction: "out"（出链）、"in"（入链）、不传则双向。
 ### remove_link
 
 ```json
-{ "from": "brain/entities/王强", "to": "brain/entities/诺华", "relation": "works_at" }
+{ "from": "brain/entities/王强", "to": "brain/entities/星辰科技", "relation": "works_at" }
 ```
 
 ### graph_query
@@ -245,14 +245,14 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 ### get_timeline
 
 ```json
-{ "slug": "brain/entities/诺华" }
+{ "slug": "brain/entities/星辰科技" }
 ```
 
 ### add_timeline_entry
 
 ```json
 {
-  "slug": "brain/entities/诺华",
+  "slug": "brain/entities/星辰科技",
   "summary": "进入第二轮谈判",
   "eventDate": "2026-04-15",
   "source": "brain/records/会议纪要0415"

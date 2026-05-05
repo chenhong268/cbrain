@@ -158,7 +158,7 @@ export class SyncManager {
         this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
         report.synced++;
 
-        if (this.nerEngine && file.body.trim() && file.type !== "entity" && file.type !== "concept") {
+        if (this.nerEngine && file.body.trim() && file.type !== "entity" && file.type !== "concept" && file.type !== "insight") {
           nerJobs.push({ slug: file.slug, text: file.body });
         }
 
@@ -235,6 +235,9 @@ export class SyncManager {
   }
 
   async syncPage(slug: string, vaultPath: string): Promise<SyncPageResult> {
+    if (slug.includes("..") || slug.startsWith("/")) {
+      return { success: false, error: "Invalid slug" };
+    }
     const filePath = this.db.getPageFilePath(slug);
     const fullPath = filePath
       ? join(vaultPath, filePath)
@@ -361,7 +364,6 @@ export class SyncManager {
     const typeFromDir: Record<string, string> = {
       entities: "entity",
       concepts: "concept",
-      nodes: "entity",        // legacy
       records: "record",
     };
     const parts = relPath.split("/");

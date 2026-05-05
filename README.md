@@ -1,6 +1,12 @@
-# CBrain
+<div align="center">
+  <img src="docs/logo.svg" width="160" alt="CBrain Logo" />
+</div>
 
-> Your Agent's Memory, Compounding. Agent 的记忆，复利生长。
+<h1 align="center">CBrain</h1>
+
+<p align="center">
+  <em>Your Agent's Memory, Compounding. Agent 的记忆，复利生长。</em>
+</p>
 
 CBrain is an open-source personal knowledge brain for AI Agents. Inspired by [Karpathy's LLM Wiki pattern](https://x.com/karpathy) — human inputs, Agent compiles, knowledge compounds with every interaction.
 
@@ -31,29 +37,30 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 
 ## Quick Start
 
+### Binary (recommended)
+
+Download the latest binary from [Releases](https://github.com/chenhong/cbrain/releases):
+
 ```bash
-# Clone
+./cbrain init
+./cbrain ingest --type text --title "张三" --page-type entity "产品经理"
+./cbrain query "张三"
+./cbrain serve --http    # HTTP API on localhost:3399
+```
+
+### From source
+
+```bash
 git clone https://github.com/chenhong/cbrain.git
 cd cbrain
 bun install
-
-# Initialize (creates vault + DB + config)
 bun run src/cli/index.ts init
-
-# Ingest your first content
-bun run src/cli/index.ts ingest --type text --title "张三" --page-type entity "产品经理，负责AI产品线"
-
-# Search
+bun run src/cli/index.ts ingest --type text --title "张三" "产品经理"
 bun run src/cli/index.ts query "张三"
-
-# Check brain status
-bun run src/cli/index.ts status
-
-# Start MCP server for AI Agents
-bun run src/cli/index.ts serve
+bun run src/cli/index.ts serve --http
 ```
 
-> 完整文档：[使用指南](docs/usage.md) | [MCP 工具参考](docs/mcp-tools.md) | [已知问题](docs/known-issues.md)
+> 完整文档：[使用指南](docs/usage.md) | [MCP 工具参考](docs/mcp-tools.md)
 
 ## Architecture
 
@@ -79,11 +86,10 @@ bun run src/cli/index.ts serve
 
 | Type | Directory | For |
 |:-----|:----------|:----|
-| entity | `entities/` | People, companies, products, projects |
-| concept | `concepts/` | Methods, terms, frameworks, principles |
-| event | `events/` | Meetings, trips, milestones |
-| record | `records/` | Reading notes, article summaries |
-| source | `sources/` | Compiled artifacts from raw content |
+| entity | `entities/` | People, companies, organizations, products |
+| concept | `concepts/` | Methods, theories, frameworks, principles |
+| record | `records/` | Reading notes, articles, meeting notes, transcripts |
+| insight | `insights/` | Auto-generated cross-domain connections and discoveries |
 
 ## CLI Commands (24 total)
 
@@ -142,7 +148,24 @@ cbrain watch                             # 监听文件变化，自动同步（�
 cbrain serve                             # 启动 MCP Server，供 AI Agent 调用
 ```
 
-## MCP Integration
+## Agent Integration
+
+### HTTP (recommended)
+
+Start as a persistent HTTP server:
+
+```bash
+cbrain serve --http    # → http://127.0.0.1:3399
+```
+
+Your Agent calls tools via HTTP:
+
+```bash
+curl -s http://127.0.0.1:3399/tools/query -d '{"query":"张三"}'
+curl -s http://127.0.0.1:3399/tools/status -d '{}'
+```
+
+### MCP (stdio)
 
 Add to your Agent's MCP config:
 
@@ -305,7 +328,7 @@ CBrain uses `cbrain.json` in your project directory:
   "ner": {
     "enabled": true,
     "llm_provider": "zhipu",
-    "llm_model": "glm-4-flash",
+    "llm_model": "glm-5-turbo",
     "llm_api_key": "your-api-key"
   }
 }
@@ -346,10 +369,44 @@ See [CHANGELOG.md](./CHANGELOG.md) for detailed version history.
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v0.1 | Core pipeline — storage, search, MCP, CLI | ✅ Done |
-| v0.2 | NER + auto relationship extraction | ✅ Done |
-| v0.3 | Full MCP coverage + version history + multi-query + job queue + raw data | ✅ Done |
-| v0.4 | Automation — file watcher, signal detector, nightly maintenance | Planned |
+| v1.0 | HTTP API, NER (glm-5-turbo), 41 MCP tools, binary distribution | ✅ Current |
+| v1.1 | Web UI, faster embedding, multi-user | Planned |
+
+## About This Project
+
+这不是大厂项目，也不是技术大牛的作品。我从事医药行业，不是专业程序员。
+
+做 CBrain 纯粹是因为被一个痛点折磨太久了——**Agent 很强，但它不会变聪明。**
+
+每次对话都是一张白纸。你跟它说过的人、讨论过的方案、做过的决策，下次全忘了。更致命的是，它永远不会从这些经验中学习、归纳、进化。每天几十次交互积累的信息，散落在无数对话记录里——没有沉淀，没有连接，没有成长。Agent 用了三个月和用了三天，没区别。
+
+[Andrej Karpathy](https://x.com/karpathy) 提过一个思路：让 LLM 维护自己的 wiki——人输入，Agent 编译，知识复利增长。这直接启发了 CBrain 的核心设计。[Garry Tan](https://x.com/garrytan) 的 "builders build" 哲学也给了我一脚——别等完美的工具，自己动手做一个。
+
+**CBrain = Compounding Brain。** C 是复利（Compounding）——知识不是线性堆叠，而是像复利一样，越积累连接越多，价值增长越快。它不只是 Agent 的记忆层，也是我自己的第二大脑。每天的人、事、洞察，Agent 帮我记录、连接、沉淀，时间越久，它比我更了解我的工作。
+
+这是我的第一个开源项目。五一假期一周时间，从零到 v1.0。代码肯定有很多问题——测试覆盖不完美，架构有打磨空间，文档还能更好。但它确实解决了我的问题，而且我想把它分享出来，希望能帮到有同样痛点的人。
+
+后续会不定期更新。Issue 和 PR 都欢迎。
+
+如果你也希望你的 Agent 能越用越聪明——fork 它，改它，把它变成你自己的第二大脑。
+
+---
+
+This isn't a Big Tech project, nor is it the work of a career engineer. I work in the pharmaceutical industry, not software.
+
+I built CBrain because I was tired of one pain: **Agents are powerful, but they never get smarter.**
+
+Every conversation starts from scratch. People you mentioned, plans you discussed, decisions you made — gone next time. Worse, they never learn from these experiences — no reflection, no pattern recognition, no evolution. Dozens of interactions per day, and all that knowledge scatters across chat logs. No accumulation. No connections. No growth. An Agent used for three months is no wiser than one used for three days.
+
+[Andrej Karpathy](https://x.com/karpathy) once described the idea of an LLM maintaining its own wiki — human inputs, Agent compiles, knowledge compounds. That directly inspired CBrain's core design. [Garry Tan](https://x.com/garrytan)'s "builders build" philosophy gave me the final push — don't wait for the perfect tool, build one yourself.
+
+**CBrain = Compounding Brain.** The "C" stands for Compounding — knowledge doesn't just pile up linearly. Like compound interest, the more you accumulate, the more connections form, and the faster the value grows. It's not just a memory layer for Agents — it's my own second brain. Every day's people, events, and insights get recorded, connected, and compounded by my Agent. Over time, it understands my work better than I do.
+
+This is my first open-source project. Built over the May Day holiday week, from zero to v1.0. The code definitely has issues — test coverage isn't perfect, architecture needs polishing, docs can be better. But it solves my problem, and I'm sharing it in case it solves yours too.
+
+I'll continue updating periodically. Issues and PRs welcome.
+
+If you want your Agent to get smarter over time too — fork it, hack it, make it your own second brain.
 
 ## License
 

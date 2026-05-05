@@ -27,8 +27,8 @@ describe("PageManager", () => {
     const page = pm.create({
       title: "张三",
       type: "entity",
-      body: "# 张三\n\n诺华制药东区商务经理。",
-      tags: ["人物", "诺华"],
+      body: "# 张三\n\n星辰科技东区商务经理。",
+      tags: ["人物", "星辰"],
     });
 
     expect(page.slug).toBe("brain/entities/张三");
@@ -41,7 +41,7 @@ describe("PageManager", () => {
 
     const fileContent = await Bun.file(filePath).text();
     expect(fileContent).toContain("title: 张三");
-    expect(fileContent).toContain("诺华制药东区商务经理");
+    expect(fileContent).toContain("星辰科技东区商务经理");
   });
 
   test("get page by slug reads from vault", () => {

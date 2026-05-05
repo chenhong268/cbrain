@@ -11,28 +11,32 @@ function createMockLLM(responses: string[]): LLMProvider {
 }
 
 describe("NerEngine", () => {
+  // ─── Core pipeline ───────────────────────────────
+
   test("extracts entities from LLM response", async () => {
     const llm = createMockLLM([
       JSON.stringify({
         entities: [
-          { name: "张三", type: "person", context: "张三是诺华制药的商务经理" },
-          { name: "诺华制药", type: "company", context: "张三是诺华制药的商务经理" },
-        ],
-        relations: [
-          { from: "张三", to: "诺华制药", relation: "works_at", context: "张三是诺华制药的商务经理" },
+          { name: "张三", type: "person", context: "张三是星辰科技的商务经理" },
+          { name: "星辰科技", type: "company", context: "张三是星辰科技的商务经理" },
         ],
         events: [],
+      }),
+      JSON.stringify({
+        relations: [
+          { from: "张三", to: "星辰科技", relation: "works_at", context: "张三是星辰科技的商务经理" },
+        ],
       }),
     ]);
 
     const engine = new NerEngine(llm);
-    const result = await engine.extract("张三是诺华制药的商务经理");
+    const result = await engine.extract("张三是星辰科技的商务经理");
 
     expect(result.entities.length).toBe(2);
     expect(result.entities[0].name).toBe("张三");
-    expect(result.entities[0].type).toBe("person");
-    expect(result.entities[1].name).toBe("诺华制药");
-    expect(result.entities[1].type).toBe("company");
+    expect(result.entities[0].type).toBe("entity");
+    expect(result.entities[1].name).toBe("星辰科技");
+    expect(result.entities[1].type).toBe("entity");
     expect(result.relations.length).toBe(1);
     expect(result.relations[0].relation).toBe("works_at");
   });
@@ -44,11 +48,13 @@ describe("NerEngine", () => {
           { name: "张三", type: "person", context: "2024年张三创立了ABC科技" },
           { name: "ABC科技", type: "company", context: "2024年张三创立了ABC科技" },
         ],
-        relations: [
-          { from: "张三", to: "ABC科技", relation: "founded", context: "张三创立了ABC科技" },
-        ],
         events: [
           { date: "2024-01-01", description: "张三创立了ABC科技", participants: ["张三", "ABC科技"] },
+        ],
+      }),
+      JSON.stringify({
+        relations: [
+          { from: "张三", to: "ABC科技", relation: "founded", context: "张三创立了ABC科技" },
         ],
       }),
     ]);
@@ -62,9 +68,7 @@ describe("NerEngine", () => {
   });
 
   test("returns empty result for empty text", async () => {
-    const llm = createMockLLM([]);
-    const engine = new NerEngine(llm);
-
+    const engine = new NerEngine(createMockLLM([]));
     const result = await engine.extract("");
     expect(result.entities).toEqual([]);
     expect(result.relations).toEqual([]);
@@ -72,21 +76,18 @@ describe("NerEngine", () => {
   });
 
   test("returns empty result for whitespace-only text", async () => {
-    const llm = createMockLLM([]);
-    const engine = new NerEngine(llm);
-
+    const engine = new NerEngine(createMockLLM([]));
     const result = await engine.extract("   \n  \t  ");
     expect(result.entities).toEqual([]);
   });
 
   test("handles LLM response with markdown fences", async () => {
     const llm = createMockLLM([
-      '```json\n{"entities":[{"name":"李四","type":"person","context":"李四是工程师"}],"relations":[],"events":[]}\n```',
+      '```json\n{"entities":[{"name":"李四","type":"person","context":"李四是工程师"}],"events":[]}\n```',
+      JSON.stringify({ relations: [] }),
     ]);
-
     const engine = new NerEngine(llm);
     const result = await engine.extract("李四是工程师");
-
     expect(result.entities.length).toBe(1);
     expect(result.entities[0].name).toBe("李四");
   });
@@ -94,7 +95,6 @@ describe("NerEngine", () => {
   test("handles malformed LLM response gracefully", async () => {
     const llm = createMockLLM(["This is not JSON at all"]);
     const engine = new NerEngine(llm);
-
     const result = await engine.extract("一些文本内容");
     expect(result.entities).toEqual([]);
     expect(result.relations).toEqual([]);
@@ -104,102 +104,174 @@ describe("NerEngine", () => {
   test("handles partial LLM response with missing fields", async () => {
     const llm = createMockLLM([
       JSON.stringify({ entities: [{ name: "王五", type: "person" }] }),
+      JSON.stringify({ relations: [] }),
     ]);
-
     const engine = new NerEngine(llm);
     const result = await engine.extract("王五是CEO");
-
     expect(result.entities.length).toBe(1);
     expect(result.relations).toEqual([]);
     expect(result.events).toEqual([]);
   });
 
-  test("truncates long text to ~3000 chars", async () => {
-    const longText = "这是一段很长的文本。".repeat(500); // ~4500 chars
+  // ─── Text chunking ───────────────────────────────
+
+  test("chunks long text and merges entities from all chunks", async () => {
+    const longText = "第一段介绍张三。第二段提到李四。".repeat(200);
     const llm = createMockLLM([
-      JSON.stringify({ entities: [], relations: [], events: [] }),
+      JSON.stringify({
+        entities: [{ name: "张三", type: "person", relevance: "high", context: "第一段介绍张三" }],
+        events: [],
+      }),
+      JSON.stringify({
+        entities: [{ name: "李四", type: "person", relevance: "high", context: "第二段提到李四" }],
+        events: [],
+      }),
+      JSON.stringify({
+        relations: [{ from: "张三", to: "李四", relation: "认识", context: "张三认识李四" }],
+      }),
     ]);
 
     const engine = new NerEngine(llm);
     const result = await engine.extract(longText);
 
-    // Should not throw — just return empty result
-    expect(result.entities).toEqual([]);
-  });
-
-  // ─── New filter tests ────────────────────────────────────
-
-  test("filters out generic concept names", async () => {
-    const llm = createMockLLM([
-      JSON.stringify({
-        entities: [
-          { name: "深度思考", type: "concept", relevance: "high", context: "需要深度思考" },
-          { name: "注意力管理", type: "concept", relevance: "medium", context: "注意力管理很重要" },
-          { name: "时间管理", type: "concept", relevance: "high", context: "做好时间管理" },
-          { name: "奥卡姆剃刀", type: "concept", relevance: "high", context: "奥卡姆剃刀原理" },
-        ],
-        relations: [],
-        events: [],
-      }),
-    ]);
-
-    const engine = new NerEngine(llm);
-    const result = await engine.extract("some text");
-    const names = result.entities.map((e) => e.name);
-
-    expect(names).not.toContain("深度思考");
-    expect(names).not.toContain("注意力管理");
-    expect(names).not.toContain("时间管理");
-    expect(names).toContain("奥卡姆剃刀");
-  });
-
-  test("filters out daily items and generic nouns", async () => {
-    const llm = createMockLLM([
-      JSON.stringify({
-        entities: [
-          { name: "柠檬汁", type: "product", relevance: "medium", context: "喝了一杯柠檬汁" },
-          { name: "保险丝", type: "product", relevance: "medium", context: "换了个保险丝" },
-          { name: "邮件", type: "concept", relevance: "medium", context: "发了一封邮件" },
-          { name: "咖啡", type: "product", relevance: "low", context: "喝咖啡" },
-          { name: "张三", type: "person", relevance: "high", context: "张三是工程师" },
-        ],
-        relations: [],
-        events: [],
-      }),
-    ]);
-
-    const engine = new NerEngine(llm);
-    const result = await engine.extract("some text");
-    const names = result.entities.map((e) => e.name);
-
-    expect(names).not.toContain("柠檬汁");
-    expect(names).not.toContain("保险丝");
-    expect(names).not.toContain("邮件");
-    expect(names).not.toContain("咖啡");
+    const names = result.entities.map(e => e.name);
     expect(names).toContain("张三");
+    expect(names).toContain("李四");
+    expect(result.relations.length).toBe(1);
   });
 
-  test("filters out job titles and departments", async () => {
+  test("deduplicates identical entities from multiple chunks", async () => {
+    const longText = "张三在A公司工作。张三负责研发。".repeat(200);
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [{ name: "张三", type: "person", relevance: "high", context: "张三在A公司工作" }],
+        events: [],
+      }),
+      JSON.stringify({
+        entities: [{ name: "张三", type: "person", relevance: "high", context: "张三负责研发" }],
+        events: [],
+      }),
+      JSON.stringify({ relations: [] }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract(longText);
+
+    expect(result.entities.length).toBe(1);
+    expect(result.entities[0].name).toBe("张三");
+  });
+
+  test("deduplicates identical events from multiple chunks", async () => {
+    const longText = "2024年张三创立了A公司。".repeat(200);
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [],
+        events: [{ date: "2024-01-01", description: "张三创立了A公司", participants: ["张三"] }],
+      }),
+      JSON.stringify({
+        entities: [],
+        events: [{ date: "2024-01-01", description: "张三创立了A公司", participants: ["张三"] }],
+      }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract(longText);
+
+    expect(result.events.length).toBe(1);
+    expect(result.events[0].description).toBe("张三创立了A公司");
+  });
+
+  test("short text single chunk — no extra LLM calls", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [{ name: "特斯拉", type: "company", relevance: "high", context: "特斯拉发布FSD" }],
+        events: [],
+      }),
+      JSON.stringify({
+        relations: [{ from: "特斯拉", to: "FSD", relation: "制造", context: "特斯拉发布FSD" }],
+      }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("特斯拉发布了FSD");
+
+    expect(result.entities.length).toBe(1);
+    expect(result.entities[0].name).toBe("特斯拉");
+  });
+
+  // ─── Safety net (rules layer) ────────────────────
+
+  test("safety net catches job titles via regex", async () => {
     const llm = createMockLLM([
       JSON.stringify({
         entities: [
           { name: "销售经理", type: "person", relevance: "medium", context: "销售经理说" },
-          { name: "品牌团队", type: "concept", relevance: "medium", context: "品牌团队负责" },
-          { name: "财务部门", type: "concept", relevance: "low", context: "财务部门审批" },
-          { name: "市场营销人员", type: "person", relevance: "low", context: "市场营销人员需要" },
+          { name: "技术总监", type: "person", relevance: "medium", context: "技术总监负责" },
+          { name: "张三", type: "person", relevance: "high", context: "张三是工程师" },
         ],
-        relations: [],
         events: [],
       }),
+      JSON.stringify({ relations: [] }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("some text");
+    const names = result.entities.map(e => e.name);
+
+    expect(names).not.toContain("销售经理");
+    expect(names).not.toContain("技术总监");
+    expect(names).toContain("张三");
+  });
+
+  test("safety net keeps organizational keywords as entity", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [
+          { name: "星辰科技集团", type: "concept", relevance: "high", context: "星辰科技" },
+          { name: "北京大学", type: "concept", relevance: "medium", context: "北京大学研究" },
+        ],
+        events: [],
+      }),
+      JSON.stringify({ relations: [] }),
     ]);
 
     const engine = new NerEngine(llm);
     const result = await engine.extract("some text");
 
-    expect(result.entities.length).toBe(0);
+    // Even though LLM said "concept", company/university suffix overrides to entity
+    expect(result.entities.every(e => e.type === "entity")).toBe(true);
+    expect(result.entities.map(e => e.name)).toContain("星辰科技集团");
+    expect(result.entities.map(e => e.name)).toContain("北京大学");
   });
 
-  test("keeps person/company/product types regardless of obscurity", async () => {
+  // ─── LLM trust path ──────────────────────────────
+
+  test("passes through valid 2-3 char Chinese entities", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [
+          { name: "特斯拉", type: "company", relevance: "high", context: "特斯拉发布FSD" },
+          { name: "比亚迪", type: "company", relevance: "high", context: "比亚迪推出刀片电池" },
+          { name: "王传福", type: "person", relevance: "high", context: "王传福是创始人" },
+        ],
+        events: [],
+      }),
+      JSON.stringify({
+        relations: [{ from: "王传福", to: "比亚迪", relation: "founder", context: "王传福是创始人" }],
+      }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("some text");
+    const names = result.entities.map(e => e.name);
+
+    expect(names).toContain("特斯拉");
+    expect(names).toContain("比亚迪");
+    expect(names).toContain("王传福");
+    expect(result.relations.length).toBe(1);
+  });
+
+  test("keeps person/company/product types from LLM", async () => {
     const llm = createMockLLM([
       JSON.stringify({
         entities: [
@@ -207,21 +279,23 @@ describe("NerEngine", () => {
           { name: "南京医药集团", type: "company", relevance: "medium", context: "南京医药集团是分销商" },
           { name: "Cosentyx", type: "product", relevance: "high", context: "Cosentyx是免疫药物" },
         ],
-        relations: [],
         events: [],
       }),
+      JSON.stringify({ relations: [] }),
     ]);
 
     const engine = new NerEngine(llm);
     const result = await engine.extract("some text");
-    const names = result.entities.map((e) => e.name);
+    const names = result.entities.map(e => e.name);
 
     expect(names).toContain("凌娅");
     expect(names).toContain("南京医药集团");
     expect(names).toContain("Cosentyx");
   });
 
-  test("respects new limits: max 8 entities + 3 concepts", async () => {
+  // ─── Limits ──────────────────────────────────────
+
+  test("respects limits: max 8 entities + 3 concepts", async () => {
     const entities = Array.from({ length: 12 }, (_, i) => ({
       name: `Person${i}`, type: "person" as const, relevance: "high" as const, context: `Person${i} is here`,
     }));
@@ -230,7 +304,8 @@ describe("NerEngine", () => {
     }));
 
     const llm = createMockLLM([
-      JSON.stringify({ entities: [...entities, ...concepts], relations: [], events: [] }),
+      JSON.stringify({ entities: [...entities, ...concepts], events: [] }),
+      JSON.stringify({ relations: [] }),
     ]);
 
     const engine = new NerEngine(llm);

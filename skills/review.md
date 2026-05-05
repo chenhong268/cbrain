@@ -8,7 +8,7 @@ Search returns fragments. Review returns understanding. When you need to know ev
 
 ## When to Use
 
-- "帮我总结一下诺华的情况"
+- "帮我总结一下星辰科技的情况"
 - "关于 RAG 我们知道什么"
 - "review 张三"
 - "整理一下 ABC 项目的所有信息"

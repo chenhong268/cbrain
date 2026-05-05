@@ -39,11 +39,11 @@ CBrain never hoards data. All compiled artifacts are written as Obsidian-readabl
 
 | Component | Choice | Reason |
 |:----------|:-------|:-------|
-| Runtime | Bun | Fast, native TS, consistent with Hermes ecosystem |
+| Runtime | Bun | Fast, native TS, single-binary compilation |
 | Structured Storage | SQLite (bun:sqlite) | Zero config, fast enough, relational queries |
 | Search Layer | LanceDB + SQLite FTS5 | LanceDB for vector ANN, SQLite FTS5 (trigram) for Chinese full-text search |
 | Embedding | Pluggable providers | Default: 智谱 embedding-3 (2048d). Also supports OpenAI, Ollama |
-| Interface | MCP Server | Hermes Agent native support |
+| Interface | MCP Server | Works with any MCP-compatible agent |
 | Human UI | Obsidian | Graph view, backlinks, Dataview |
 
 ## Page Types
@@ -94,7 +94,7 @@ Borrowed from GBrain, optimized for Chinese:
 
 - **Link extraction**: Agent adds `[[name]]` links + frontmatter relationship annotations (✅ done)
 - **Relationship types**: `knows`, `works_at`, `invested_in`, `founded`, `attended`, `mentions` (configurable) (✅ done)
-- **Chinese relationship inference**: Not just regex — LLM-assisted judgment ("张三是诺华的经理" → `works_at`) (✅ done via GLM-4-flash NER)
+- **Chinese relationship inference**: Not just regex — LLM-assisted judgment ("张三是某公司的经理" → `works_at`) (✅ done via GLM-4-flash NER)
 - **Backlinks**: Auto-computed to maintain graph connectivity (✅ done)
 
 ## Person Auto-Enrichment (CRM Core)

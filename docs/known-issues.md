@@ -2,8 +2,8 @@
 
 ## v0.3.0
 
-### Hermes SKILL.md 修改不生效
+### SKILL.md modifications not taking effect
 
-- **现象**：修改 `~/.hermes/skills/brain-ops/cbrain/SKILL.md` 后重启 gateway，小爱不按新规则执行。
-- **影响**：协议更新需要写 MEMORY.md 才生效。
-- **临时方案**：关键规则写 MEMORY.md，SKILL.md 保留作为参考文档。
+- **Symptom**: After modifying the skill file and restarting the agent, the agent does not follow the new rules.
+- **Impact**: Protocol updates need to be written to the agent's primary memory file to take effect.
+- **Workaround**: Write key rules to the agent's memory file; keep SKILL.md as reference documentation.

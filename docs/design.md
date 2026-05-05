@@ -280,7 +280,7 @@ Skills follow GBrain's "fat skills, thin harness" philosophy: intelligence lives
 | Storage | SQLite + LanceDB | PGLite/Postgres + pgvector | Zero-dependency for personal use; Chinese FTS requires trigram tokenizer |
 | Embedding | 智谱 embedding-3 (2048d) | OpenAI (1536d) | Better Chinese semantic understanding |
 | MCP tools | 37 | ~30 | Fuller CRUD coverage for agents |
-| Agent integration | Hermes skill files | OpenClaw plugin system | Hermes is 宏哥's primary Agent runtime |
+| Agent integration | Skill files for any agent framework | Plugin system | Designed as MCP-first, works with any agent |
 | NER | LLM-based (GLM-4-flash) | Regex + LLM hybrid | Chinese entity extraction needs LLM for name boundaries |
 | Deployment | `bun add cbrain` + `cbrain init` | `git clone + bun install + bun link` | npm package is simpler for end users |
 

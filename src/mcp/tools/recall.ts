@@ -16,7 +16,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   }, async ({ query, limit }) => {
     const cap = Math.min(limit ?? 5, 10);
 
-    const searchResults = await ctx.search.search(query, { strategy: "all", limit: cap });
+    const searchResults = await ctx.search.search(query, { strategy: "fts", limit: cap });
 
     if (searchResults.length === 0) {
       return {

@@ -27,9 +27,9 @@ vault/
 
 | type | 目录 | 前缀 | 谁创建 | 示例 |
 |:-----|:-----|:-----|:-------|:-----|
-| entity | `brain/entities/` | `brain/` | CBrain NER 自动抽取，或人工创建 | 张三.md、诺华制药.md |
+| entity | `brain/entities/` | `brain/` | CBrain NER 自动抽取，或人工创建 | 张三.md、星辰科技.md |
 | concept | `brain/concepts/` | `brain/` | CBrain 从内容中提取，或人工创建 | 第一性原理.md、MVP.md |
-| event | `raw/events/` | `raw/` | 人工创建 | 2026-02-02 鲲鹏医院准入会议纪要.md |
+| event | `raw/events/` | `raw/` | 人工创建 | 2026-02-02 季度复盘会议纪要.md |
 | record | `raw/records/` | `raw/` | 人工创建 | 达利欧的工作原则.md |
 | source | `raw/sources/` | `raw/` | 人工创建 | NKP客户报备制度.md |
 
@@ -40,7 +40,7 @@ Slug = 文件在 vault 内的相对路径（去掉 `.md` 后缀）。
 **自动生成规则**：
 - 中文标题：保留原文，去掉特殊符号
   - `"张三"` → `brain/entities/张三`
-  - `"鲲鹏医院准入会议纪要"` → `raw/events/鲲鹏医院准入会议纪要`
+  - `"季度复盘会议纪要"` → `raw/events/季度复盘会议纪要`
 - 英文标题：小写 + 短横线
   - `"First Principles"` → `brain/concepts/first-principles`
   - `"Weekly Sync"` → `raw/events/weekly-sync`
@@ -103,7 +103,7 @@ CBrain 使用 Obsidian `[[双链]]` 语法。
 
 CBrain 生成的链接使用完整 slug：
 - `[[brain/entities/张三]]`
-- `[[raw/events/2026-02-02 鲲鹏医院准入会议纪要]]`
+- `[[raw/events/2026-02-02 季度复盘会议纪要]]`
 
 ### 自引用禁止
 
@@ -147,7 +147,7 @@ NER 从 `raw/` 内容中自动提取实体时：
 | 方式 | 引擎 | 适用场景 |
 |:-----|:-----|:---------|
 | 语义搜索 | LanceDB (向量 ANN) | "找跟创新方法相关的内容" |
-| 全文搜索 | SQLite FTS5 (trigram) | "找包含'鲲鹏医院'的页面" |
+| 全文搜索 | SQLite FTS5 (trigram) | "找包含'项目管理'的页面" |
 | 图谱查询 | SQLite links 表 | "张三关联了哪些实体" |
 
 ## 版本控制

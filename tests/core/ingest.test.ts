@@ -90,7 +90,7 @@ describe("IngestManager", () => {
   describe("ingest text", () => {
     test("creates page from plain text input", async () => {
       const result = await ingest.ingest({
-        content: "张三是诺华制药的商务经理",
+        content: "张三是星辰科技的商务经理",
         type: "text",
         title: "张三",
         pageType: "entity",
@@ -381,11 +381,11 @@ describe("IngestManager", () => {
       const llm = createMockLLM([
         JSON.stringify({
           entities: [
-            { name: "张三", type: "person", context: "张三是诺华的商务经理" },
-            { name: "诺华", type: "company", context: "张三是诺华的商务经理" },
+            { name: "张三", type: "person", context: "张三是星辰的商务经理" },
+            { name: "星辰", type: "company", context: "张三是星辰的商务经理" },
           ],
           relations: [
-            { from: "张三", to: "诺华", relation: "works_at", context: "张三是诺华的商务经理" },
+            { from: "张三", to: "星辰", relation: "works_at", context: "张三是星辰的商务经理" },
           ],
           events: [],
         }),
@@ -395,7 +395,7 @@ describe("IngestManager", () => {
       const nerIngest = new IngestManager(db, embedding, lance as any, vaultPath, llm);
 
       const result = await nerIngest.ingest({
-        content: "张三是诺华的商务经理",
+        content: "张三是星辰的商务经理",
         type: "text",
         title: "张三简介",
         pageType: "entity",

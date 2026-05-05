@@ -8,10 +8,10 @@ Review tells you what the brain knows. Write turns that knowledge into something
 
 ## When to Use
 
-- "帮我写一段诺华的介绍"
+- "帮我写一段星辰科技的介绍"
 - "写个周报"
 - "写个朋友圈，关于今天见的客户"
-- "根据大脑资料，写一份灵境项目进展"
+- "根据大脑资料，写一份星河项目进展"
 
 ## Protocol
 

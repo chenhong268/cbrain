@@ -108,7 +108,7 @@ const CANONICAL_RELATIONS: Record<string, string> = {
   "founded": "创立", "founded_by": "创立", "founder_of": "创立", "创立了": "创立",
   // 5. 归属
   "subsidiary_of": "归属", "part_of": "归属", "same_company": "归属", "company": "归属",
-  "子公司": "归属", "同属诺华公司": "归属", "同公司": "归属", "公司": "归属",
+  "子公司": "归属", "同属一家公司": "归属", "同公司": "归属", "公司": "归属",
   // 6. 合作
   "partnered_with": "合作", "合作": "合作",
   // 7. 竞争

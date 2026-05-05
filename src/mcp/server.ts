@@ -31,7 +31,7 @@ export interface CBrainDeps {
 export function createServer(deps: CBrainDeps): McpServer {
   const server = new McpServer({
     name: "cbrain",
-    version: "0.4.0",
+    version: "1.0.0",
   });
 
   // Unified error wrapper — every tool handler gets try-catch automatically

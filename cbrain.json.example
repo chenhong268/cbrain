@@ -1,0 +1,21 @@
+{
+  "vaultPath": "/path/to/your/vault",
+  "dbPath": "/path/to/your/brain.sqlite",
+  "lancePath": "/path/to/your/lancedb",
+  "embedding": {
+    "provider": "zhipu",
+    "apiKey": "your-zhipu-api-key"
+  },
+  "ner": {
+    "enabled": true,
+    "llm_model": "glm-4-flash",
+    "llm_api_key": "your-zhipu-api-key",
+    "llm_base_url": "https://open.bigmodel.cn/api/paas/v4"
+  },
+  "reflect": {
+    "llm_provider": "deepseek",
+    "llm_model": "deepseek-v4-flash",
+    "llm_api_key": "your-deepseek-api-key",
+    "llm_base_url": "https://api.deepseek.com"
+  }
+}

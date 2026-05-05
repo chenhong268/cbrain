@@ -32,10 +32,12 @@ export interface ExtractionResult {
   events: ExtractedEvent[];
 }
 
-// ─── Post-extraction classification ───────────────────────
-// Every extracted entity runs through one classifier: entity / concept / skip.
-// LLM type is a hint, not the final answer. Rules handle the clear cases;
-// LLM judgment only trusted for the ambiguous middle.
+// ─── Post-extraction classification (safety net) ──────────
+// With glm-5-turbo as primary classifier, rules here are a minimal safety net.
+// GENERIC_TERMS catches universal noise, company suffixes catch overrides,
+// job-title regex catches structured roles. All other classification is
+// delegated to the LLM via ENTITY_GUIDELINE and prompted edge rules for
+// 2-3 char Chinese ambiguity.
 
 const GENERIC_TERMS = new Set([
   // Abstract qualities / emotions
@@ -48,26 +50,11 @@ const GENERIC_TERMS = new Set([
   // Generic nouns
   "人类", "世界", "问题", "方法", "人", "生活", "时间", "工作", "中国", "美国",
   "公司", "团队", "国家", "政府", "组织", "系统", "数据", "信息", "知识", "机器",
-  "人工智能", "历史学家", "企业", "大学生",
+  "人工智能", "企业",
   // Leadership / business generic
   "领导力", "沟通", "学习", "思考", "创新", "责任", "成长", "进步", "改变", "发展",
-  "经销商", "零售商", "批发商", "供应商", "制造商", "代理商", "客户", "用户",
-  // Common objects / daily items
-  "邮件", "银行", "咖啡", "代码", "方案", "警察", "保险丝", "柠檬汁",
-  "金属屑", "轴承", "润滑油", "监控录像", "微信", "瓷制茶壶", "肌肉", "播客",
-  // Generic qualities / activities
-  "资源", "大脑", "效率", "品牌", "消费者", "电商", "专业", "共享单车",
-  "学习能力", "沟通能力", "个人习惯", "项目经验", "通勤时间",
-  "身体锻炼", "英语学习", "上班焦虑", "职业选择", "时间管理",
-  "投资策略", "职业发展方向", "深度思考",
-  "关键项目", "注意力管理", "问题分析", "问题解决",
-  "因果链", "切换成本", "组合式创新", "效率培训",
-  // Roles / occupations
-  "公务员", "销售人员", "客服人员", "市场营销人员", "客服", "管理员",
-  // Generic business constructs
-  "业务目标", "成本结构", "全球销售额", "核心运营利润", "新兴增长市场",
-  "广告效果", "品牌投放", "品类新客", "营销投放", "大数据能力",
-  "决策效率", "超能员工", "准确性", "完整性", "反应效率",
+  // Generic qualities
+  "资源", "效率", "品牌", "专业",
 ]);
 
 type EntityClass = "entity" | "concept" | null;
@@ -78,31 +65,14 @@ function classifyEntity(name: string, llmType: string): EntityClass {
   if (name.length < 2) return null;
   if (/^\d{8,}$/.test(name) || /@/.test(name)) return null;
   if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return null;
-  if (llmType === "location" && /^[一-鿿]{2,3}[市县区]?$/.test(name)) return null;
   if (/^[A-Z]{2}$/.test(name) && llmType !== "concept") return null;
   if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问|人员|管理员|作家/.test(name)) return null;
   if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return null;
 
-  // ── Layer 2: STRONG concept ──
-  if (/主义|学派|理论$|定律$|原理$|定理$|悖论$|效应$/.test(name)) return "concept";
-  if (/学$/.test(name) && name.length >= 3 && !/大学$|中学$|小学$/.test(name)) return "concept";
-  if (/^.{2,4}(论|法|模型|假说|定理|方程)$/.test(name) && name.length >= 3) return "concept";
-  if (/[性化]$/.test(name)) return "concept";
-  if (/(策略|方法|模式|机制|体系|框架)$/.test(name) && name.length >= 4) return "concept";
-
-  // Generic-concept traps → skip
-  if (/管理|培训|能力|思维|分析|解决|习惯|练习|锻炼|学习|培训$/.test(name)) return null;
-  if (/^(大众|消费者|用户|客户|市场|产品|项目|数据|系统|资源|效率|品牌|服务|方案|问题)/.test(name)) return null;
-  if (/团队|部门|小组|中心$/.test(name)) return null;
-
-  // ── Layer 3: STRONG entity ──
+  // ── Layer 2: SAFETY NET — clear organizational keywords override LLM ──
   if (/公司|集团|制药|药企|银行|保险|基金$|医院|大学$|学院$|研究所/.test(name)) return "entity";
-  if (/^[一-鿿]{2,3}$/.test(name) && !/[性度力率化]$/.test(name)) return "entity";
 
-  // ── Layer 4: Generic quality → skip ──
-  if (/[性度力率]$/.test(name) && name.length <= 4 && !/[a-zA-Z]/.test(name)) return null;
-
-  // ── Layer 5: TRUST LLM ──
+  // ── Layer 3: TRUST LLM — primary classifier ──
   if (llmType === "concept") return "concept";
   if (["person", "company", "product", "location"].includes(llmType)) return "entity";
   return null;
@@ -142,72 +112,58 @@ function filterRelations(
   );
 }
 
-// ─── Prompt: Schema (WHAT) ───────────────────────────────────
-
-const ENTITY_SCHEMA = `{
-  "entities": [{ "name": "实体名", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文片段" }],
-  "events": [{ "date": "YYYY-MM-DD or null", "description": "事件描述", "participants": ["参与人/组织"] }]
-}`;
-
-const RELATION_SCHEMA = `{
-  "relations": [{ "from": "实体名A", "to": "实体名B", "relation": "关系类型", "context": "原文依据" }]
-}`;
-
 // ─── Prompt: Guideline (HOW) — Entity ────────────────────────
 
-const ENTITY_GUIDELINE = `You are a precision entity extractor for a personal knowledge graph. Extract ONLY entities worth remembering long-term. When in doubt, skip it.
+const ENTITY_GUIDELINE = `You are a precision entity extractor for a personal knowledge graph. Extract entities worth remembering long-term — named people, companies, products, locations, and established concepts (theories, methodologies, effects, models). When in doubt, skip it.
 
-Quality over quantity. 30 precise nodes > 300 noisy ones.
+## Trust your judgment
+For each candidate, determine:
 
-DO extract:
-- Named people (specific individuals with real context)
-- Named companies and organizations
-- Named products (specific names, not categories)
-- Established methodologies, theories, effects, laws, models (must have proper names — e.g. "飞轮效应", "第一性原理", "奥卡姆剃刀")
+- **entity**: specific named thing (person, company, product, location)
+- **concept**: recognized abstract idea with a proper name (e.g. 飞轮效应, 第一性原理, 奥卡姆剃刀, 认知科学)
+- **skip**: generic nouns, common qualities, daily items, abstract states
 
-## Classification decision tree — apply to EVERY candidate:
+## Edge case: 2-3 character Chinese terms
+These are inherently ambiguous — they could be real names or generic nouns.
+- VALID (extract): 特斯拉 (company), 马斯克 (person), 比亚迪 (company), 王传福 (person)
+- INVALID (skip): 汽车 (common noun), 钢铁 (material), 火箭 (object), 燃料 (substance), 能力 (abstract quality)
+Decision: Does this short term refer to a specific real-world entity? If yes, extract. If it is a common noun or abstract quality, SKIP.
 
-Step 1: Is this a specific real-world thing (person/company/product/location)?
-  → EXTRACT as entity. Examples: 张三 (person), 诺华制药 (company), 格列卫 (product)
-Step 2: Is this a recognized abstract idea with a proper name (methodology/theory/effect/field)?
-  → EXTRACT as concept. Examples: 进化论, 幸存者偏差, 敏捷开发, 认知科学
-Step 3: Otherwise → SKIP (do not extract at all)
+## Entity vs concept self-test
+"Can I point to a specific real-world instance?"
+- YES → entity (or concept if named theory/methodology)
+- NO → skip
 
-Entity vs concept self-test: "Can I point to a specific instance?"
-  YES → entity.  NO → concept.
-
-Common pitfalls:
-- Academic fields (认知科学, 经济学) → concept, NOT company/location
-- Philosophical views (现象主义, 斯多葛主义) → concept
-- Named effects/laws/theories → concept
-- Generic qualities (准确性, 深度思考, 注意力管理) → SKIP, not concept
-- Job titles, departments, daily items → SKIP
-
-Skip ALL:
-- Numbers/amounts (93亿美元, Q1 2026), pronouns, function words
-- Daily items (coffee, tools, household objects)
-- Generic nouns (email, bank, code, police, brand)
-- Job titles (经理, 总监, engineer, manager)
-- Departments/teams (品牌团队, sales team)
-- Abstract qualities/activities (深度思考, 注意力管理, 时间管理, learning)
+## Skip ALL
+- Numbers, amounts (93亿美元, Q1 2026), pronouns, function words
+- Daily items, household objects, tools
+- Generic nouns (email, bank, code, brand)
+- Job titles (经理, 总监, engineer)
+- Departments and teams (品牌团队, sales team)
+- Abstract qualities and activities (深度思考, 注意力管理, 时间管理)
 - Generic business terms (消费者, 市场策略, 切换成本)
 - Bare place names without significance
-- Vague "concepts" that are common words repackaged (问题解决, 沟通方法)
 
-Relevance: "high"=main subject, "medium"=supporting role, "low"=incidental (skip).
-Context must be a verbatim excerpt from source.
+## Relevance
+- "high" = main subject of the text
+- "medium" = supporting role
+- "low" = incidental mention (try to avoid)
 
-Concept rule (STRICT): only extract if ALL: (1) has proper name (2) recognized methodology/theory/framework/effect/law/model (3) established literature (4) NOT compound of common words.
-Valid: 飞轮效应, 第一性原理, 奥卡姆剃刀, 达克效应, 幸存者偏差
-Invalid: 深度思考, 注意力管理, 时间管理, 问题分析, 沟通方法, 效率培训
+## Context
+Must be a verbatim excerpt from the source.
 
-Event rule: specific dates (YYYY-MM-DD, Q1 2026) or clear time references. Include regulatory/financial events. Skip vague ("近年来", "recently"). Participants must be named entities.
+## Concepts
+Only extract if the term is a named methodology/theory/framework/effect/law/model with recognized usage. NOT a compound of common words.
+- Valid: 飞轮效应, 第一性原理, 奥卡姆剃刀, 达克效应, 幸存者偏差
+- Invalid: 深度思考, 注意力管理, 时间管理, 问题分析, 沟通方法, 效率培训
 
-## Output format (MUST follow exactly — concepts go INSIDE entities array with type="concept"):
+## Events
+Include specific dates (YYYY-MM-DD, Q1 2026) or clear time references. Skip vague ("近年来", "recently"). Participants must be named entities.
 
-{"entities": [{"name": "名称", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文引用"}], "events": [{"date": "YYYY-MM-DD或null", "description": "事件描述", "participants": ["参与实体名"]}]}
+## Output format (JSON only, no markdown wrap):
+{"entities": [{"name": "...", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "..."}], "events": [{"date": "YYYY-MM-DD|null", "description": "...", "participants": ["..."]}]}
 
-Limits: max 8 regular entities + 3 concepts = 11 total entities. Return ONLY valid JSON, no markdown wrap.`;
+Limits: max 8 entities + 3 concepts = 11 total. Return ONLY valid JSON.`;
 
 // ─── Prompt: Guideline (HOW) — Relation ──────────────────────
 
@@ -238,7 +194,67 @@ Use these types exactly. If none fits, use "提及":
 4. If no clear relation exists, return empty array {"relations": []}
 5. Return ONLY JSON`;
 
-// ─── Prompt (legacy, replaced by two-stage) ───────────────────
+// ─── Helpers ──────────────────────────────────────────────
+
+function chunkBySentences(text: string, maxSize: number): string[] {
+  if (text.length <= maxSize) return [text];
+
+  const segments = text.split(/(?<=[。！？.!?\n])\s*/)
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+
+  if (segments.length === 0) return [text.slice(0, maxSize)];
+
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const seg of segments) {
+    if (seg.length > maxSize) {
+      if (current) { chunks.push(current); current = ""; }
+      for (let i = 0; i < seg.length; i += maxSize) {
+        chunks.push(seg.slice(i, i + maxSize));
+      }
+      continue;
+    }
+    if (current.length + seg.length > maxSize && current.length > 0) {
+      chunks.push(current);
+      current = seg;
+    } else {
+      current = current ? current + seg : seg;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function mergeEntities(chunks: ExtractedEntity[][]): ExtractedEntity[] {
+  const seen = new Set<string>();
+  const merged: ExtractedEntity[] = [];
+  for (const chunk of chunks) {
+    for (const e of chunk) {
+      if (!seen.has(e.name)) {
+        seen.add(e.name);
+        merged.push(e);
+      }
+    }
+  }
+  return merged;
+}
+
+function mergeEvents(chunks: ExtractedEvent[][]): ExtractedEvent[] {
+  const seen = new Set<string>();
+  const merged: ExtractedEvent[] = [];
+  for (const chunk of chunks) {
+    for (const ev of chunk) {
+      const key = `${ev.date ?? ""}|${ev.description}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(ev);
+      }
+    }
+  }
+  return merged;
+}
 
 // ─── NER Engine ─────────────────────────────────────────────
 
@@ -254,28 +270,41 @@ export class NerEngine {
       return { entities: [], relations: [], events: [] };
     }
 
-    const truncated = text.length > 3000 ? text.slice(0, 3000) + "…" : text;
+    const CHUNK_SIZE = 2500;
 
-    // Stage 1: Extract entities + events
-    const stage1 = await this.llm.chat([
-      { role: "system", content: ENTITY_GUIDELINE },
-      { role: "user", content: truncated },
-    ]);
-    const { entities, events } = this.parseEntityResponse(stage1);
-    const filtered = filterEntities(entities);
+    const chunks = chunkBySentences(text, CHUNK_SIZE);
+
+    // Stage 1: Extract entities + events per chunk, then merge
+    const allEntityChunks: ExtractedEntity[][] = [];
+    const allEventChunks: ExtractedEvent[][] = [];
+
+    for (const chunk of chunks) {
+      const stage1 = await this.llm.chat([
+        { role: "system", content: ENTITY_GUIDELINE },
+        { role: "user", content: chunk },
+      ]);
+      const { entities, events } = this.parseEntityResponse(stage1);
+      allEntityChunks.push(entities);
+      allEventChunks.push(events);
+    }
+
+    const allEntities = mergeEntities(allEntityChunks);
+    const allEvents = mergeEvents(allEventChunks);
+    const filtered = filterEntities(allEntities);
     if (filtered.length === 0) {
-      return { entities: [], relations: [], events };
+      return { entities: [], relations: [], events: allEvents };
     }
 
     // Stage 2: Extract relations — feed extracted entity names as context
     const entityNames = filtered.map(e => e.name);
+    const stage2Text = text.length > 3000 ? text.slice(0, 3000) + "…" : text;
     const stage2 = await this.llm.chat([
       { role: "system", content: RELATION_GUIDELINE(entityNames) },
-      { role: "user", content: truncated },
+      { role: "user", content: stage2Text },
     ]);
     const relations = this.parseRelationResponse(stage2, new Set(entityNames));
 
-    return { entities: filtered, relations, events };
+    return { entities: filtered, relations, events: allEvents };
   }
 
   private parseEntityResponse(raw: string): { entities: ExtractedEntity[]; events: ExtractedEvent[] } {

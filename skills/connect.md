@@ -9,7 +9,7 @@ When you need to understand how two people, companies, or concepts are related. 
 ## When to Use
 
 - "王磊和张伟什么关系"
-- "诺华和灵境有什么关联"
+- "星辰科技和星河项目有什么关联"
 - "A 和 B 怎么认识的"
 - "这两个项目之间有什么交叉"
 - "connect 王磊 张伟"

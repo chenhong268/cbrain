@@ -21,7 +21,7 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
     const minW = minWeight ?? 0;
 
     // Step 1: Search
-    const searchResults = await ctx.search.search(topic, { strategy: "all", limit: cap * 2 });
+    const searchResults = await ctx.search.search(topic, { strategy: "fts", limit: cap * 2 });
 
     if (searchResults.length === 0) {
       return {

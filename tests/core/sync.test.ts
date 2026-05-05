@@ -105,7 +105,7 @@ describe("SyncManager", () => {
         vaultPath,
         "entities/zhangsan.md",
         { title: "张三", type: "entity", slug: "entities/zhangsan", tags: ["人物"] },
-        "张三是诺华制药的商务经理。\n\n他负责东区业务。"
+        "张三是星辰科技的商务经理。\n\n他负责东区业务。"
       );
 
       const report = await sync.syncAll(vaultPath);

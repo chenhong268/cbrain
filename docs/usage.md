@@ -160,28 +160,28 @@ cbrain health
 ### 深入了解一个主题
 
 ```
-# 对 AI Agent 说"帮我全面了解诺华"（Agent 会走 review 协议）
+# 对 AI Agent 说"帮我全面了解星辰科技"（Agent 会走 review 协议）
 # 或手动：
-cbrain query "诺华" --strategy all
-cbrain show brain/entities/诺华
-cbrain graph-query brain/entities/诺华 --mode traverse
-cbrain timeline brain/entities/诺华
+cbrain query "星辰科技" --strategy all
+cbrain show brain/entities/星辰科技
+cbrain graph-query brain/entities/星辰科技 --mode traverse
+cbrain timeline brain/entities/星辰科技
 ```
 
 ### 了解两个人/公司的关系
 
 ```
-# 对 AI Agent 说"王磊和诺华什么关系"
+# 对 AI Agent 说"王磊和星辰科技什么关系"
 # 或手动：
 cbrain graph-query brain/entities/王磊 --mode traverse
-cbrain graph-query brain/entities/诺华 --mode traverse
+cbrain graph-query brain/entities/星辰科技 --mode traverse
 # 交叉比对共同关联
 ```
 
 ### 基于知识库写作
 
 ```
-# 对 AI Agent 说"帮我写一段诺华的介绍"
+# 对 AI Agent 说"帮我写一段星辰科技的介绍"
 # Agent 会先搜 CBrain 素材，再写，最后问你要不要存档
 ```
 

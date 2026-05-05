@@ -1,6 +1,33 @@
 # Changelog
 
-> Current: `v0.4.1` — 23 CLI commands, 46 MCP tools, 11 skills.
+> Current: `v1.0.0` — 41 tools, HTTP API, binary distribution.
+
+## [v1.0.0] — 2026-05-05
+
+### HTTP API
+
+- **`cbrain serve --http`:** New HTTP transport on `127.0.0.1:3399`. All 41 MCP tools exposed as `POST /tools/:name`. Persistent via launchd.
+- **Binary build:** `bun build --compile` produces self-contained 152MB binary. Zero dependencies at runtime.
+
+### NER Refactoring
+
+- **Model upgrade:** glm-4-flash → glm-5-turbo. Dramatically improved entity classification accuracy.
+- **Classifier simplified:** 5-layer ~50 rules → 3-layer ~10 rules. LLM as primary classifier, rules as safety net.
+- **Text chunking:** Long texts split at sentence boundaries, merged with dedup. Replaces blunt 3000-char truncation.
+
+### Vault Cleanup
+
+- entities 492→309, removed 200+ misclassified concept stubs
+- concepts 582→553, removed 29 empty stubs
+- Legacy `brain/nodes/` directory removed
+
+### Fixes
+
+- summarize/deep_recall: use `fts` strategy instead of vector search (1000x faster, avoids embedding timeout)
+- sync: insight pages excluded from NER (both batch and single-page paths)
+- PID lock removed for multi-Agent support
+- classifyEntity: 2-3 char Chinese no longer blindly classified as entity
+- MCP server version → 1.0.0
 
 ## [v0.4.1] — 2026-05-04
 
@@ -36,8 +63,8 @@
 
 ### 运维
 
-- **`cbrain-restart` alias：** `~/.zshrc` 新增快捷命令，一键杀旧 serve + 重启 gateway。
-- **团队数据入库：** 29 人团队全量结构化（鲲鹏条线 8 人 + 商务 CM 4 区域 16 人 + VP），47 条汇报关系 link。
+- **`cbrain-restart` alias:** shell alias for quick serve restart.
+- **团队数据入库:** batch entity structuring with relation links.
 
 ## [v0.4.0] — 2026-05-03
 
@@ -105,11 +132,11 @@ Dream 报告新增 `buildBrief()`：人类可读的日报替代枯燥计数。`D
 
 ### Dream Sub-Agent 方案
 
-dream 不再受 MCP 30s 超时限制——Hermes sub-agent（`child_timeout_seconds: 600`）执行，锁冲突时人性化提示。
+dream no longer limited by MCP 30s timeout — sub-agent mode with extended timeout, user-friendly message on lock conflict.
 
 ### Agent 记忆更新
 
-小爱 MEMORY.md/SOUL.md/SKILL.md 全面更新：CBrain 数据路径、关系类型、insight 查询协议、dream sub-agent 协议。
+Agent protocol files updated: CBrain data paths, relation types, insight query protocol, dream sub-agent protocol.
 
 ## [Dev] — 2026-05-02
 
@@ -224,7 +251,7 @@ dream 不再受 MCP 30s 超时限制——Hermes sub-agent（`child_timeout_seco
 - Dead `parallelBatch` method in sync.ts.
 - **Relevance scoring** — LLM rates each entity high/medium/low. Low-relevance entities don't create stubs.
 - **Prompt-level noise filter** — Skip generic gov bodies (国务院), political titles (中共党员), common locations.
-- **Regex extraction filter** — `isValidEntityName()` blocks sentence fragments (24小时内或下个, 色的管理者就) and wiki-link path entities (brainentities夏震宇).
+- **Regex extraction filter** — `isValidEntityName()` blocks sentence fragments (24小时内或下个, 色的管理者就) and wiki-link path entities (e.g. brainentities某实体名).
 - **Entity/concept NER skip** — No more re-extracting entities from entity pages (cascade noise amplifier). Speed 4.8x, noise -79%.
 - **Parallel NER batching** — 5 concurrent LLM calls instead of sequential.
 - **Dollar amounts & time periods** — Explicitly excluded from extraction (93亿美元, Q1 2026).
@@ -244,7 +271,7 @@ dream 不再受 MCP 30s 超时限制——Hermes sub-agent（`child_timeout_seco
 
 ### Changed
 - **maintain merged into dream** — `cbrain dream` is the single maintenance command
-- **小爱 MEMORY.md 精简** — four verbose protocol rules replaced by pointer to AGENTS.md
+- **Agent memory streamlined** — verbose protocol rules replaced by pointer to AGENTS.md
 - **cli/index.ts split** — 997-line file → 8 command modules + thin registry
 
 ## [Dev] — 2026-04-28
@@ -311,11 +338,11 @@ dream 不再受 MCP 30s 超时限制——Hermes sub-agent（`child_timeout_seco
 ## [Dev] — 2026-04-25
 
 ### Added
-- **Hermes Agent integration** — brain-ops skill (37-tool reference), signal-detector skill (SCAN→CLASSIFY→QUERY→INGEST)
+- **Agent integration** — brain-ops skill (37-tool reference), signal-detector skill (SCAN→CLASSIFY→QUERY→INGEST)
 - **Vault directory standardization** — `1_raw`→`raw`, `2_Cbrain`→`brain`, `3_outputs`→`outputs`
 - **raw/ read-only boundary** — `PageManager.update()`, `writeback`, `put_page` all block writes to raw/ files
 - **Auto version snapshot** — `put_page` and `sync` create version before every overwrite
-- **2-char FTS fallback** — short CJK queries (e.g. "诺华") use LIKE search when trigram tokenizer lacks data
+- **2-char FTS fallback** — short CJK queries (e.g. "星辰") use LIKE search when trigram tokenizer lacks data
 - **Design doc** — `docs/design.md` covering architecture, search pipeline, storage rationale, GBrain comparison
 - **Known issues** — `docs/known-issues.md`
 

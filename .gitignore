@@ -7,3 +7,24 @@ node_modules/
 outputs/
 cbrain.json
 task_plan.md
+dist/
+docs/.*.bkp
+
+# Secrets
+.env
+.env.*
+*.secret
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Coverage & logs
+coverage/
+logs/
+*.log
+
+# Claude Code
+.claude/
