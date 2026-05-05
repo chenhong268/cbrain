@@ -39,26 +39,60 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 
 ### Binary (recommended)
 
-Download the latest binary from [Releases](https://github.com/chenhong/cbrain/releases):
+1. Install [Bun](https://bun.sh) (required runtime):
 
 ```bash
-./cbrain init
+curl -fsSL https://bun.sh/install | bash
+```
+
+2. Download the latest binary from [Releases](https://github.com/chenhong/cbrain/releases)
+
+3. Run:
+
+```bash
+./cbrain init                              # 创建配置文件和目录
+./cbrain config --set embedding.apiKey=your-zhipu-api-key
+./cbrain config --set ner.llm_apiKey=your-zhipu-api-key
 ./cbrain ingest --type text --title "张三" --page-type entity "产品经理"
 ./cbrain query "张三"
-./cbrain serve --http    # HTTP API on localhost:3399
+./cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 ```
 
 ### From source
 
+1. Install [Bun](https://bun.sh):
+
 ```bash
-git clone https://github.com/chenhong/cbrain.git
+curl -fsSL https://bun.sh/install | bash
+```
+
+2. Clone and setup:
+
+```bash
+git clone https://github.com/chenhong268/cbrain.git
 cd cbrain
 bun install
+cp cbrain.json.example cbrain.json         # 复制配置模板
+# 编辑 cbrain.json，填入你的 API key
+```
+
+3. Run:
+
+```bash
 bun run src/cli/index.ts init
 bun run src/cli/index.ts ingest --type text --title "张三" "产品经理"
 bun run src/cli/index.ts query "张三"
 bun run src/cli/index.ts serve --http
 ```
+
+### API Keys
+
+CBrain 需要以下 API key：
+
+| 服务 | 用途 | 获取地址 |
+|:-----|:-----|:---------|
+| 智谱（Zhipu） | 向量嵌入 + NER 实体提取 | [open.bigmodel.cn](https://open.bigmodel.cn) |
+| DeepSeek（可选） | 洞察生成（reflect） | [platform.deepseek.com](https://platform.deepseek.com) |
 
 > 完整文档：[使用指南](docs/usage.md) | [MCP 工具参考](docs/mcp-tools.md)
 
