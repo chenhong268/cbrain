@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/logo.svg" width="160" alt="CBrain Logo" />
+  <img src="docs/logo.png" width="320" alt="CBrain Logo" />
 </div>
 
 <h1 align="center">CBrain</h1>
