@@ -1,6 +1,14 @@
 # Changelog
 
-> Current: `v1.0.0` — 41 tools, HTTP API, binary distribution.
+> Current: `v1.0.1` — Config loading fix, relation type fix.
+
+## [v1.0.1] — 2026-05-05
+
+### Fixes
+
+- **Config loading: dual cbrain.json architecture fix** — `CBRAIN_DIR` env var removed (caused stale config reads from iCloud vault). New `CBRAIN_CONFIG` env var points directly to config file. Eliminates dual-config drift risk. (`src/cli/context.ts`)
+- **NER UNIQUE constraint fix** — `upsertPage()` in dialogue.ts now uses INSERT OR REPLACE instead of raw INSERT, preventing crash on duplicate entity names during dialogue ingestion. (`src/core/dialogue.ts`)
+- **Undefined relation type in stub bodies** — `pipeline.ts` stored raw `rel.relation` (could be undefined) instead of `normalizeRelation()` result in stub body generation. Now uses `normRel` consistently. (`src/core/pipeline.ts`)
 
 ## [v1.0.0] — 2026-05-05
 
