@@ -160,13 +160,12 @@ export class DialogueIngest {
       writeFileSync(filePath, stringifyFrontmatter(frontmatter, body), "utf-8");
 
       const contentHash = hashContent(stringifyFrontmatter(frontmatter, body));
-      this.db.insertPage({
+      this.db.upsertPage({
         slug,
         type: pageType,
         title: entity.name,
         filePath: relative(this.vaultPath, filePath),
         contentHash,
-        tier: 3,
       });
 
       entitySlugMap.set(entity.name, slug);
