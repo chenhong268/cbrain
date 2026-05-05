@@ -10,7 +10,7 @@ import {
   ExtractedRelation,
   ExtractedEvent,
 } from "./ner.js";
-import { findEntitySlug, mapEntityType, buildStubBody, hashContent } from "./shared.js";
+import { findEntitySlug, mapEntityType, buildStubBody, hashContent, normalizeRelation } from "./shared.js";
 import { generateSlug, slugToFilePath } from "../utils/slug.js";
 import { stringifyFrontmatter } from "../utils/frontmatter.js";
 
@@ -178,10 +178,12 @@ export class DialogueIngest {
       const toSlug = entitySlugMap.get(rel.to) ?? findEntitySlug(this.db, rel.to);
       if (!fromSlug || !toSlug) continue;
 
-      // Check if relation already exists
-      if (this.db.linkExists(fromSlug, toSlug, rel.relation)) continue;
+      const normRel = normalizeRelation(rel.relation);
 
-      this.db.insertLink(fromSlug, toSlug, rel.relation, rel.context ?? null);
+      // Check if relation already exists
+      if (this.db.linkExists(fromSlug, toSlug, normRel)) continue;
+
+      this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null);
 
       newRelations++;
     }

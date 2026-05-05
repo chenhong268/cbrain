@@ -341,7 +341,7 @@ export class NerEngine {
       const cleaned = raw.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "");
       const parsed = JSON.parse(cleaned);
       const relations: ExtractedRelation[] = Array.isArray(parsed.relations) ? parsed.relations : [];
-      return relations.filter(r => validNames.has(r.from) && validNames.has(r.to));
+      return relations.filter(r => r.relation && validNames.has(r.from) && validNames.has(r.to));
     } catch (e) {
       console.error("[ner] stage2 JSON 解析失败", e);
       return [];
