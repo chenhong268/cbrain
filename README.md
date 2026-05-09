@@ -184,6 +184,33 @@ cbrain serve                             # 启动 MCP Server，供 AI Agent 调�
 
 ## Agent Integration
 
+> **Compatibility**: CBrain is developed and tested with [Hermes Agent](https://github.com/anthropics/hermes). It uses the standard MCP protocol — any MCP-compatible Agent should work in theory, but others haven't been tested yet. If you try it with a different Agent, feedback is welcome.
+>
+> **兼容性**：CBrain 以 Hermes Agent 为开发对象，使用标准 MCP 协议。理论上任何兼容 MCP 的 Agent 都能用，但除 Hermes 外尚未实际测试。欢迎反馈其他 Agent 的使用情况。
+
+### Feature Categories
+
+Not all features work the same way. Some are CLI one-liners, some need an Agent to call on demand, and some need the Agent to set up **periodic tasks** to truly deliver value.
+
+| Category | Features | How it works |
+|:---------|:---------|:-------------|
+| **Standalone CLI** | `query`, `ingest`, `list`, `show`, `delete`, `tags`, `timeline`, `versions`, `health`, `doctor`, `sync` | 直接用，不需要 Agent |
+| **Agent on-demand** | `get_page`, `put_page`, `dialogue`, `resolve_slugs`, `graph_query`, `job_submit`, `status`, `get_config` | Agent 在对话中按需调用 |
+| **Agent periodic tasks** | `dream` (nightly), `discover` (every 3 days), `enrich` (weekly), `reflect` (after conversations), `cleanup` (weekly) | 需要 Agent 配置定时任务，自动运行 |
+
+The third category is where CBrain truly compounds. Without periodic tasks, you still get a working knowledge base. **With them, the brain maintains itself** — entity enrichment, structural discoveries, insights, and cleanup happen automatically.
+
+第三类功能是 CBrain 复利增长的关键。没有定时任务，你得到的是一个可用的知识库。**有了定时任务，大脑自己维护自己** —— 实体升级、结构发现、洞察生成、自动清理，全部自动化。
+
+To set up periodic tasks with Hermes:
+
+```bash
+# In your Agent's skill config (SKILL.md), add scheduled tasks:
+# - Every day:  cbrain dream
+# - Every 3 days: cbrain discover
+# - Weekly: cbrain enrich && cbrain cleanup
+```
+
 ### HTTP (recommended)
 
 Start as a persistent HTTP server:
