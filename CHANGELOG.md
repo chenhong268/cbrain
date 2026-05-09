@@ -1,6 +1,30 @@
 # Changelog
 
-> Current: `v1.0.1` — Config loading fix, relation type fix.
+> Current: `v1.1.0` — Insight 系统 + Discovery 闭环 + Agent 功能分类。
+
+## [v1.1.0] — 2026-05-09
+
+### Insight 系统 (P0-1)
+
+- **insights 表 + InsightManager** — 新表存储 LLM 生成的跨域洞察，独立于 discoveries
+- **6 个 Insight MCP 工具** — `create_insight`, `read_insights`, `get_insight`, `promote_discovery`, `mark_insight_read`, `read_unread_insights`
+- **reflect 从 dream 拆出独立** — `cbrain reflect` CLI 命令，reflect 不再阻塞 dream 流程
+- **insight 页面类型全面支持** — list_pages/ingest/sync/pipeline 全部识别 insight 类型
+
+### Discovery 闭环 (P0-2)
+
+- **discoveries 表扩展** — 新增 `actionable`(high/medium/low)、`suggestion`(LLM 建议)、`proposed_actions`(JSON)、`auto_applicable` 四列
+- **发现分级** — `classifyActionable()` 基于 score+type+entityTypes 自动分级
+- **LLM 建议生成** — 对 actionable != low 的发现自动生成中文建议和操作建议
+- **`run_discovery` MCP 工具** — Agent 可按需触发发现管线
+- **`read_discoveries` 人类可读** — 返回中文格式化输出，不再是原始 JSON
+- **`cbrain discover` CLI 命令** — 手动/cron 触发发现管线
+- **embedding 缓存** — `scoreCandidate()` 加 `embCache`，O(N²) embedding 调用降为 O(N)
+
+### 文档
+
+- **Agent 兼容性说明** — README 明确 CBrain 以 Hermes Agent 为开发对象
+- **功能分类表** — 三类：独立 CLI / Agent 按需 / Agent 定时任务
 
 ## [v1.0.1] — 2026-05-05
 

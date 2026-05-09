@@ -430,8 +430,9 @@ See [CHANGELOG.md](./CHANGELOG.md) for detailed version history.
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v1.0 | HTTP API, NER (glm-5-turbo), 41 MCP tools, binary distribution | ✅ Current |
-| v1.1 | Web UI, faster embedding, multi-user | Planned |
+| v1.0 | HTTP API, NER (glm-5-turbo), 41 MCP tools, binary distribution | ✅ |
+| v1.1 | Insight 系统, Discovery 闭环, Agent 功能分类 | ✅ Current |
+| v1.2 | Web UI, faster embedding, multi-user | Planned |
 
 ## About This Project
 
