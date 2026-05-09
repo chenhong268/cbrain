@@ -127,15 +127,24 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
       ? Math.round(entities.reduce((s, e) => s + (e.tier as number), 0) / entities.length * 10) / 10
       : 0;
 
+    // Related insights
+    const entitySlugs = entities.map(e => e.slug as string);
+    const relatedInsights = ctx.insights.getInsightsForEntities(entitySlugs, 5).map(i => ({
+      id: i.id, type: i.type,
+      content: i.content.length > 150 ? i.content.slice(0, 150) + "..." : i.content,
+      confidence: i.confidence,
+    }));
+
     return {
       content: [{
         type: "text" as const,
         text: JSON.stringify({
           topic,
           entities,
+          insights: relatedInsights.length > 0 ? relatedInsights : undefined,
           neighbors: neighbors.length > 0 ? neighbors : undefined,
           crossRefs: crossRefs.length > 0 ? crossRefs : undefined,
-          stats: { totalEntities: entities.length, totalLinks, totalEvents, avgTier, totalNeighbors: neighbors.length },
+          stats: { totalEntities: entities.length, totalLinks, totalEvents, avgTier, totalNeighbors: neighbors.length, totalInsights: relatedInsights.length },
         }, null, 2),
       }],
     };

@@ -8,6 +8,7 @@ import { readPageFile } from "../utils/frontmatter.js";
 import { normalizeRelation } from "./shared.js";
 import type { ContentPipeline } from "./pipeline.js";
 import { generateSlug } from "../utils/slug.js";
+import type { InsightManager } from "./insight.js";
 
 export interface SynthesisResult {
   slug: string;
@@ -82,6 +83,22 @@ const W_SOURCE = 0.25;
 const W_TYPE = 0.20;
 const W_CONTENT = 0.10;
 const W_SEMANTIC = 0.10;
+const MAX_SUGGESTION_LLM = 20;
+
+export interface DiscoveryReport {
+  total: number;
+  byType: Record<string, number>;
+  byActionable: Record<string, number>;
+  autoApplicable: number;
+}
+
+const DISCOVERY_SUGGESTION_SYSTEM = `你是一个知识图谱分析师。根据两个实体之间的结构发现，生成简洁中文建议。
+要求：1-2句话，说清楚为什么值得关注。如果有明确可操作建议，说出来。
+不要废话。输出JSON：{"suggestion": "你的建议"}`;
+
+const DISCOVERY_ACTION_SYSTEM = `你是一个知识图谱分析师。根据结构发现，判断可以采取什么操作。
+输出JSON：{"actions": [{"type": "create_link|investigate", "target": "slug", "reason": "理由"}]}
+只输出有明确依据的操作，不确定的用 investigate。`;
 
 const BULLSHIT_PATTERNS = /值得深思|揭示了.{0,5}趋势|具有重要意义|我们认识到|可以推断|值得关注|无疑|显而易见|不言而喻|众所周知/;
 
@@ -130,13 +147,15 @@ export class ReflectManager {
   private pageMgr: PageManager;
   private pipeline: ContentPipeline | null;
   private embedding: EmbeddingProvider | null;
+  private insightMgr: InsightManager | null;
 
-  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider, pipeline?: ContentPipeline, embedding?: EmbeddingProvider) {
+  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider, pipeline?: ContentPipeline, embedding?: EmbeddingProvider, insightMgr?: InsightManager) {
     this.db = db;
     this.pageMgr = pageMgr;
     this.llm = llm ?? null;
     this.pipeline = pipeline ?? null;
     this.embedding = embedding ?? null;
+    this.insightMgr = insightMgr ?? null;
   }
 
   async reflectAll(): Promise<ReflectReport> {
@@ -206,7 +225,175 @@ export class ReflectManager {
   }
 
   private async generateInsights(): Promise<GeneratedInsight[]> {
-    return []; // disabled — replaced by runDiscovery() + Agent reasoning
+    if (!this.llm) return [];
+
+    const candidates = this.db.getHighMentionEntities(MIN_MENTIONS);
+    const limit = Math.min(candidates.length, MAX_LLM_CALLS);
+    const tasks = candidates.slice(0, limit).map((c) => ({ slug: c.slug, context: this.buildEntityContext(c.slug) }));
+    const valid = tasks.filter((t) => t.context !== null);
+    const results: GeneratedInsight[] = [];
+
+    const batches = this.chunk(valid, CONCURRENCY);
+    for (const batch of batches) {
+      const responses = await Promise.all(
+        batch.map(async (t) => {
+          const raw = await this.callLLM(INSIGHT_SYSTEM, t.context!);
+          const parsed = this.parseJSON<InsightPayload>(raw, null);
+          return { slug: t.slug, parsed };
+        })
+      );
+
+      for (const r of responses) {
+        if (!r.parsed?.insights) continue;
+        for (const item of r.parsed.insights) {
+          if (BULLSHIT_PATTERNS.test(item.content)) continue;
+          const confidence = item.confidence ?? 0.5;
+          if (confidence < MIN_CONFIDENCE) continue;
+
+          const insight: GeneratedInsight = {
+            content: item.content,
+            relatedEntities: item.related_entities ?? [r.slug],
+            type: item.type ?? "pattern",
+            confidence,
+          };
+          results.push(insight);
+
+          if (this.insightMgr) {
+            try {
+              await this.insightMgr.createInsight({
+                content: insight.content,
+                type: mapInsightType(insight.type),
+                confidence: insight.confidence,
+                sourceEntities: insight.relatedEntities,
+                sourceType: "reflect",
+              });
+            } catch (e) {
+              console.error(`[reflect] insight 写入失败:`, e);
+            }
+          }
+        }
+      }
+    }
+
+    return results;
+  }
+
+  private async generateInsightsForSlugs(slugs: string[]): Promise<GeneratedInsight[]> {
+    if (!this.llm || slugs.length === 0) return [];
+
+    const tasks = slugs.map((slug) => ({ slug, context: this.buildEntityContext(slug) })).filter((t) => t.context !== null);
+    const results: GeneratedInsight[] = [];
+
+    const batches = this.chunk(tasks, CONCURRENCY);
+    for (const batch of batches) {
+      const responses = await Promise.all(
+        batch.map(async (t) => {
+          const raw = await this.callLLM(INSIGHT_SYSTEM, t.context!);
+          const parsed = this.parseJSON<InsightPayload>(raw, null);
+          return { slug: t.slug, parsed };
+        })
+      );
+
+      for (const r of responses) {
+        if (!r.parsed?.insights) continue;
+        for (const item of r.parsed.insights) {
+          if (BULLSHIT_PATTERNS.test(item.content)) continue;
+          const confidence = item.confidence ?? 0.5;
+          if (confidence < MIN_CONFIDENCE) continue;
+
+          const insight: GeneratedInsight = {
+            content: item.content,
+            relatedEntities: item.related_entities ?? [r.slug],
+            type: item.type ?? "pattern",
+            confidence,
+          };
+          results.push(insight);
+
+          if (this.insightMgr) {
+            try {
+              await this.insightMgr.createInsight({
+                content: insight.content,
+                type: mapInsightType(insight.type),
+                confidence: insight.confidence,
+                sourceEntities: insight.relatedEntities,
+                sourceType: "reflect",
+              });
+            } catch (e) {
+              console.error(`[reflect] insight 写入失败:`, e);
+            }
+          }
+        }
+      }
+    }
+
+    return results;
+  }
+
+  async reflectIncremental(): Promise<ReflectReport> {
+    if (!this.llm) return emptyReport();
+
+    const lastRun = this.db.getConfig("reflect.last_run_at");
+    const since = lastRun ?? new Date(0).toISOString();
+
+    const changed = this.db.getEntityConceptPagesUpdatedSince(since);
+    if (changed.length === 0) {
+      return emptyReport();
+    }
+
+    const slugs = changed.map((p) => p.slug).slice(0, MAX_LLM_CALLS);
+
+    const [syntheses, insights] = await Promise.all([
+      this.synthesizeEntitiesForSlugs(slugs),
+      this.generateInsightsForSlugs(slugs),
+    ]);
+
+    const now = new Date().toISOString();
+    this.db.setConfig("reflect.last_run_at", now);
+
+    return {
+      entitiesSynthesized: syntheses.length,
+      relationsInferred: 0,
+      insightsGenerated: insights.length,
+      details: {
+        syntheses: syntheses.map((s) => ({ slug: s.slug, summary: s.summary })),
+        relations: [],
+        insights: insights.map((i) => ({
+          content: i.content,
+          related: i.relatedEntities,
+        })),
+      },
+    };
+  }
+
+  private async synthesizeEntitiesForSlugs(slugs: string[]): Promise<SynthesisResult[]> {
+    const tasks = slugs.map((slug) => ({ slug, context: this.buildEntityContext(slug) })).filter((t) => t.context !== null);
+    const results: SynthesisResult[] = [];
+
+    const batches = this.chunk(tasks, CONCURRENCY);
+    for (const batch of batches) {
+      const responses = await Promise.all(
+        batch.map(async (t) => {
+          const raw = await this.callLLM(SYNTHESIS_SYSTEM, t.context!);
+          const parsed = this.parseJSON<SynthesisPayload>(raw, null);
+          if (!parsed?.summary) return null;
+          return { slug: t.slug, parsed: { summary: parsed.summary, key_facts: parsed.key_facts, confidence: parsed.confidence } };
+        })
+      );
+
+      for (const r of responses) {
+        if (!r) continue;
+        results.push({
+          slug: r.slug,
+          summary: r.parsed.summary!,
+          keyFacts: r.parsed.key_facts ?? [],
+          confidence: r.parsed.confidence ?? 0.5,
+        });
+        const body = [r.parsed.summary!, "", ...(r.parsed.key_facts ?? []).map((f) => `- ${f}`)].join("\n");
+        this.pageMgr.update(r.slug, { body });
+      }
+    }
+
+    return results;
   }
 
   private buildEntityContext(slug: string): string | null {
@@ -293,9 +480,10 @@ export class ReflectManager {
 
   // ─── Discovery Pipeline ──────────────────────────────────────
 
-  async runDiscovery(dreamRun?: string): Promise<number> {
+  async runDiscovery(dreamRun?: string): Promise<DiscoveryReport> {
     const pool = await this.buildCandidatePool();
     const bodyCache = new Map<string, string>();
+    const embCache = new Map<string, number[]>();
     for (const [a, b] of pool) {
       for (const slug of [a, b]) {
         if (!bodyCache.has(slug)) {
@@ -306,12 +494,17 @@ export class ReflectManager {
     }
     const scored: Array<{ pair: [string, string]; score: number }> = [];
     for (const pair of pool) {
-      const s = await this.scoreCandidate(pair[0], pair[1], bodyCache);
+      const s = await this.scoreCandidate(pair[0], pair[1], bodyCache, embCache);
       if (s > 0.3) scored.push({ pair, score: s });
     }
     scored.sort((a, b) => b.score - a.score);
 
-    let count = 0;
+    const byType: Record<string, number> = {};
+    const byActionable: Record<string, number> = { high: 0, medium: 0, low: 0 };
+    let autoApplicable = 0;
+    let total = 0;
+    let suggestionCount = 0;
+
     for (let i = 0; i < Math.min(scored.length, 20); i++) {
       const { pair, score } = scored[i];
       const dist = this.bfsDistance(pair[0], pair[1]);
@@ -320,13 +513,64 @@ export class ReflectManager {
       const sourcesB = this.getSourcePages(pair[1]);
       const jaccard = this.jaccardDistance(sourcesA, sourcesB);
       const type = dist >= 4 ? "bridge" : dist >= 2 ? "community_crossing" : "structural_hole";
-      this.db.addDiscovery(type, pair, Math.round(score * 100) / 100, {
+
+      const pageA = this.db.getPage(pair[0]);
+      const pageB = this.db.getPage(pair[1]);
+      const typeA = pageA?.type ?? "unknown";
+      const typeB = pageB?.type ?? "unknown";
+      const actionable = this.classifyActionable(score, type, typeA, typeB);
+
+      const isAutoApplicable = score >= 0.8 && !!pageA && !!pageB;
+      const id = this.db.addDiscovery(type, pair, Math.round(score * 100) / 100, {
         distance: dist,
         sourceJaccard: Math.round(jaccard * 100) / 100,
-      }, dreamRun);
-      count++;
+      }, dreamRun, actionable, isAutoApplicable);
+
+      if (isAutoApplicable) autoApplicable++;
+
+      byType[type] = (byType[type] ?? 0) + 1;
+      byActionable[actionable]++;
+
+      // LLM suggestion for actionable != low, budget limited
+      if (actionable !== "low" && this.llm && suggestionCount < MAX_SUGGESTION_LLM) {
+        suggestionCount++;
+        try {
+          const titleA = pageA?.title ?? pair[0];
+          const titleB = pageB?.title ?? pair[1];
+          const suggestionRaw = await this.callLLM(
+            DISCOVERY_SUGGESTION_SYSTEM,
+            `发现类型：${type}，距离：${dist}跳，Jaccard：${jaccard.toFixed(2)}\n实体A：${titleA}（${typeA}）\n实体B：${titleB}（${typeB}）\n得分：${score.toFixed(2)}`
+          );
+          const parsed = this.parseJSON<{ suggestion: string }>(suggestionRaw, null);
+          const suggestion = parsed?.suggestion ?? suggestionRaw;
+          if (suggestion) this.db.updateDiscoverySuggestion(id, suggestion);
+
+          if (actionable === "high") {
+            const actionRaw = await this.callLLM(
+              DISCOVERY_ACTION_SYSTEM,
+              `实体A：${titleA}（${pair[0]}）\n实体B：${titleB}（${pair[1]}）\n发现类型：${type}，得分：${score.toFixed(2)}`
+            );
+            const parsed = this.parseJSON<{ actions: Array<{ type: string; target: string; reason: string }> }>(actionRaw, null);
+            if (parsed?.actions?.length) this.db.updateDiscoveryActions(id, parsed.actions);
+          }
+        } catch {
+          // LLM failure is non-fatal, suggestion stays null
+        }
+      }
+
+      total++;
     }
-    return count;
+
+    this.db.setConfig("discovery.last_run_at", new Date().toISOString());
+
+    return { total, byType, byActionable, autoApplicable };
+  }
+
+  private classifyActionable(score: number, type: string, typeA: string, typeB: string): string {
+    const mixedTypes = (typeA === "entity" && typeB === "concept") || (typeA === "concept" && typeB === "entity");
+    if (score >= 0.7 && (mixedTypes || type === "bridge")) return "high";
+    if (score >= 0.5) return "medium";
+    return "low";
   }
 
   private bfsDistance(a: string, b: string): number {
@@ -406,7 +650,7 @@ export class ReflectManager {
     return 1 - intersection / new Set([...a, ...b]).size;
   }
 
-  private async scoreCandidate(a: string, b: string, bodies: Map<string, string>): Promise<number> {
+  private async scoreCandidate(a: string, b: string, bodies: Map<string, string>, embCache?: Map<string, number[]>): Promise<number> {
     const dist = this.bfsDistance(a, b);
     if (dist === Infinity) return 0;
     const pathScore = dist >= 6 ? 1.0 : dist <= 1 ? 0 : (dist - 1) / 5;
@@ -419,8 +663,15 @@ export class ReflectManager {
     let semanticScore = 0.3;
     if (this.embedding && bodyA && bodyB) {
       try {
-        const [eA, eB] = await Promise.all([this.embedding.embed(bodyA.slice(0, 2000)), this.embedding.embed(bodyB.slice(0, 2000))]);
-        semanticScore = 1 - this.cosineSimilarity(eA.embedding, eB.embedding);
+        let eA: number[], eB: number[];
+        if (embCache) {
+          if (!embCache.has(a)) embCache.set(a, (await this.embedding.embed(bodyA.slice(0, 2000))).embedding);
+          if (!embCache.has(b)) embCache.set(b, (await this.embedding.embed(bodyB.slice(0, 2000))).embedding);
+          eA = embCache.get(a)!; eB = embCache.get(b)!;
+        } else {
+          [eA, eB] = (await Promise.all([this.embedding.embed(bodyA.slice(0, 2000)), this.embedding.embed(bodyB.slice(0, 2000))])).map(r => r.embedding);
+        }
+        semanticScore = 1 - this.cosineSimilarity(eA, eB);
       } catch { /* use default */ }
     }
     return W_PATH * pathScore + W_SOURCE * sourceScore + W_TYPE * typeScore + W_CONTENT * contentScore + W_SEMANTIC * semanticScore;
@@ -459,6 +710,7 @@ export class ReflectManager {
   }> {
     const pool = await this.buildCandidatePool();
     const bodyCache = new Map<string, string>();
+    const embCache = new Map<string, number[]>();
     for (const [a, b] of pool) {
       for (const slug of [a, b]) {
         if (!bodyCache.has(slug)) {
@@ -469,7 +721,7 @@ export class ReflectManager {
     }
     const scored: Array<{ pair: [string, string]; score: number }> = [];
     for (const pair of pool) {
-      scored.push({ pair, score: await this.scoreCandidate(pair[0], pair[1], bodyCache) });
+      scored.push({ pair, score: await this.scoreCandidate(pair[0], pair[1], bodyCache, embCache) });
     }
     scored.sort((a, b) => b.score - a.score);
 
@@ -534,6 +786,15 @@ export class ReflectManager {
     const chunks: T[][] = [];
     for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
     return chunks;
+  }
+}
+
+function mapInsightType(llmType: string): "synthesis" | "pattern" | "anomaly" | "bridge" {
+  switch (llmType) {
+    case "trend": return "pattern";
+    case "contrast": return "anomaly";
+    case "connection": return "bridge";
+    default: return "pattern";
   }
 }
 

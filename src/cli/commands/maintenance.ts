@@ -176,7 +176,7 @@ export function register(program: Command) {
 
   program
     .command("dream")
-    .description("Nightly full pipeline: sync → enrich → reflect → cleanup → health → report")
+    .description("Nightly full pipeline: sync → enrich → cleanup → health → insight archive")
     .action(async () => {
       const config = loadConfig();
       const deps = createDeps(config);
@@ -184,7 +184,7 @@ export function register(program: Command) {
       const { runDream } = await import("../../core/dream.js");
       const { SyncManager } = await import("../../core/sync.js");
       const { EnrichManager } = await import("../../core/enrich.js");
-      const { ReflectManager } = await import("../../core/reflect.js");
+      const { InsightManager } = await import("../../core/insight.js");
       const { HealthChecker } = await import("../../core/health.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
@@ -194,24 +194,18 @@ export function register(program: Command) {
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
       const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
-      const reflectLlm = config.reflect?.llm_api_key
-        ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model)
-        : deps.llm;
-      const { ContentPipeline } = await import("../../core/pipeline.js");
-      const dreamPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm);
-      const reflectMgr = new ReflectManager(deps.db, pages, reflectLlm, dreamPipeline, deps.embedding);
+      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
       const health = new HealthChecker(deps.db, outputsDir, logger);
-      const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, reflectMgr);
+      const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr);
       const icon = report.locked ? "🌙" : "⚠️";
       console.log(`${icon} Dream — ${report.timestamp.slice(0, 10)}`);
       if (report.stages.backup.path) console.log(`  Backup:  ${report.stages.backup.size_mb}MB`);
       console.log(`  Sync:    ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`);
       console.log(`  Enrich:  ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级`);
-      console.log(`  Reflect: ${report.stages.reflect.entitiesSynthesized} 综合, ${report.stages.reflect.relationsInferred} 推理, ${report.stages.reflect.insightsGenerated} 洞察`);
       console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub`);
       console.log(`  Health:  ${report.stages.health.overallStatus}`);
-      console.log(`  Discovery: ${report.stages.discovery.discovered} 个结构化发现`);
+      console.log(`  Insight: ${report.stages.insight_archive.archived} 条过期归档`);
       console.log(`  ⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
       if (!report.locked) console.log(`  ⚠️ 上次 dream 仍在执行中，本次跳过`);
       deps.db.close();
@@ -224,7 +218,9 @@ export function register(program: Command) {
     .action(async () => {
       const config = loadConfig();
       const deps = createDeps(config);
+      await deps.lance.connect(config.lancePath);
       const { ReflectManager } = await import("../../core/reflect.js");
+      const { InsightManager } = await import("../../core/insight.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
       const outputsDir = join(config.vaultPath, "outputs");
@@ -243,7 +239,8 @@ export function register(program: Command) {
 
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
-      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding);
+      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
+      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr);
       console.log("🧠 Reflecting...");
       const report = await mgr.reflectAll();
 
@@ -269,6 +266,44 @@ export function register(program: Command) {
           console.log(`    ${i.content.slice(0, 60)}...`);
         }
       }
+
+      deps.db.close();
+      process.exit(0);
+    });
+
+  program
+    .command("discover")
+    .description("Run discovery pipeline to detect structural anomalies in knowledge graph")
+    .action(async () => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      await deps.lance.connect(config.lancePath);
+      const { ReflectManager } = await import("../../core/reflect.js");
+      const { InsightManager } = await import("../../core/insight.js");
+      const { Logger } = await import("../../core/logger.js");
+      const { PageManager } = await import("../../core/page.js");
+      const outputsDir = join(config.vaultPath, "outputs");
+      const logger = new Logger(outputsDir);
+      const pages = new PageManager(deps.db, config.vaultPath, logger);
+
+      const reflectLlm = config.reflect?.llm_api_key
+        ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model)
+        : deps.llm;
+
+      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
+      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
+      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr);
+      console.log("🔍 Running discovery...");
+      const report = await mgr.runDiscovery();
+
+      const typeParts = Object.entries(report.byType).map(([k, v]) => `${k}: ${v}`).join(", ");
+      const actionParts = Object.entries(report.byActionable).map(([k, v]) => `${k}: ${v}`).join(", ");
+
+      console.log(`  发现总数: ${report.total}`);
+      console.log(`  类型分布: ${typeParts}`);
+      console.log(`  重要程度: ${actionParts}`);
+      console.log(`  可自动应用: ${report.autoApplicable}`);
 
       deps.db.close();
       process.exit(0);

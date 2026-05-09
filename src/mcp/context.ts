@@ -13,6 +13,7 @@ import { ContentPipeline } from "../core/pipeline.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
 import { Logger } from "../core/logger.js";
+import { InsightManager } from "../core/insight.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 
@@ -34,6 +35,7 @@ export interface ToolContext {
   lance: LanceDBManager;
   llm?: LLMProvider;
   logger: Logger;
+  insights: InsightManager;
 }
 
 export async function indexPage(pipeline: ContentPipeline, slug: string, body: string): Promise<void> {
@@ -60,6 +62,7 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const jobs = new JobQueue(db);
   const writeback = new WritebackManager(pages, db, outputsDir);
   const pipeline = new ContentPipeline(db, embedding, lance, { pages, nerEngine, logger });
+  const insights = new InsightManager(db, embedding, lance);
 
-  return { db, vaultPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger };
+  return { db, vaultPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights };
 }

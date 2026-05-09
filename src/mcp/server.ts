@@ -19,6 +19,7 @@ import { registerRecallTools } from "./tools/recall.js";
 import { registerBrainstormTools } from "./tools/brainstorm.js";
 import { registerSummarizeTools } from "./tools/summarize.js";
 import { registerDiscoveryTools } from "./tools/discoveries.js";
+import { registerInsightTools } from "./tools/insights.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -66,6 +67,7 @@ export function createServer(deps: CBrainDeps): McpServer {
   registerBrainstormTools(server, ctx);
   registerSummarizeTools(server, ctx);
   registerDiscoveryTools(server, ctx);
+  registerInsightTools(server, ctx);
 
   return server;
 }

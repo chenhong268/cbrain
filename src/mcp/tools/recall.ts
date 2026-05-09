@@ -111,6 +111,14 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       return true;
     }).slice(0, 10);
 
+    // Related insights
+    const allSlugs = entities.map(e => e.slug);
+    const relatedInsights = ctx.insights.getInsightsForEntities(allSlugs, 5).map(i => ({
+      id: i.id, type: i.type,
+      content: i.content.length > 150 ? i.content.slice(0, 150) + "..." : i.content,
+      confidence: i.confidence,
+    }));
+
     return {
       content: [{
         type: "text" as const,
@@ -118,8 +126,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
           {
             query,
             entities,
+            insights: relatedInsights.length > 0 ? relatedInsights : undefined,
             cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
-            summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` + (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 个关联更新` : ""),
+            summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` + (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") + (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 个关联更新` : ""),
           },
           null,
           2,

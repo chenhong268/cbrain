@@ -37,6 +37,28 @@ export interface UpsertPageData {
   contentHash: string;
 }
 
+export interface InsightRow {
+  id: number;
+  content: string;
+  type: string;
+  confidence: number;
+  source_entities: string | null;
+  source_type: string;
+  status: string;
+  created_at: string;
+  expires_at: string | null;
+  seen: number;
+}
+
+export interface CreateInsightInput {
+  content: string;
+  type: "synthesis" | "pattern" | "anomaly" | "bridge";
+  confidence?: number;
+  sourceEntities?: string[];
+  sourceType: "reflect" | "discovery" | "manual";
+  expiresAt?: string | null;
+}
+
 export class CBrainDB {
   private db: Database;
 
@@ -173,12 +195,30 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_name ON jobs(name);
 
+      CREATE TABLE IF NOT EXISTS insights (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('synthesis','pattern','anomaly','bridge')),
+        confidence REAL DEFAULT 0.5,
+        source_entities TEXT,
+        source_type TEXT NOT NULL CHECK(source_type IN ('reflect','discovery','manual')),
+        status TEXT DEFAULT 'active' CHECK(status IN ('active','archived','dismissed')),
+        created_at TEXT DEFAULT (datetime('now')),
+        expires_at TEXT,
+        seen INTEGER DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_insights_type ON insights(type);
+      CREATE INDEX IF NOT EXISTS idx_insights_status ON insights(status);
+      CREATE INDEX IF NOT EXISTS idx_insights_source_type ON insights(source_type);
+
       CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(page_slug, content, tokenize='trigram');
     `);
 
     this.migratePagesConstraint();
     this.migratePagesExpiry();
     this.migrateLinksStrength();
+    this.migrateDiscoveries();
   }
 
   private migrateLinksStrength(): void {
@@ -190,6 +230,25 @@ export class CBrainDB {
     if (!names.has("strength")) {
       this.db.exec("ALTER TABLE links ADD COLUMN strength TEXT DEFAULT 'medium'");
     }
+  }
+
+  private migrateDiscoveries(): void {
+    const cols = this.db.prepare("PRAGMA table_info(discoveries)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("actionable")) {
+      this.db.exec("ALTER TABLE discoveries ADD COLUMN actionable TEXT DEFAULT 'low'");
+    }
+    if (!names.has("suggestion")) {
+      this.db.exec("ALTER TABLE discoveries ADD COLUMN suggestion TEXT");
+    }
+    if (!names.has("proposed_actions")) {
+      this.db.exec("ALTER TABLE discoveries ADD COLUMN proposed_actions TEXT");
+    }
+    if (!names.has("auto_applicable")) {
+      this.db.exec("ALTER TABLE discoveries ADD COLUMN auto_applicable INTEGER DEFAULT 0");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_discoveries_actionable ON discoveries(actionable)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_discoveries_score ON discoveries(score)");
   }
 
   private migratePagesExpiry(): void {
@@ -822,6 +881,12 @@ export class CBrainDB {
     ).all({ $days: `-${days} days`, $limit: limit }) as PageRow[];
   }
 
+  getEntityConceptPagesUpdatedSince(since: string): Array<{ slug: string; title: string; type: string }> {
+    return this.db.prepare(
+      "SELECT slug, title, type FROM pages WHERE updated_at > $since AND type IN ('entity', 'concept') ORDER BY updated_at DESC"
+    ).all({ $since: since }) as Array<{ slug: string; title: string; type: string }>;
+  }
+
   getTopMentionedEntities(limit: number = 10): PageRow[] {
     return this.db.prepare(
       "SELECT * FROM pages WHERE type = 'entity' ORDER BY mention_count DESC LIMIT $limit"
@@ -1082,22 +1147,24 @@ export class CBrainDB {
 
   // ─── Discoveries ──────────────────────────────────────────────
 
-  addDiscovery(type: string, entities: string[], score: number, detail?: Record<string, unknown>, dreamRun?: string): number {
+  addDiscovery(type: string, entities: string[], score: number, detail?: Record<string, unknown>, dreamRun?: string, actionable?: string, autoApplicable?: boolean): number {
     const r = this.db.prepare(
-      "INSERT INTO discoveries (type, entities, score, detail, detected_at, dream_run) VALUES ($type, $entities, $score, $detail, datetime('now'), $run)"
+      "INSERT INTO discoveries (type, entities, score, detail, detected_at, dream_run, actionable, auto_applicable) VALUES ($type, $entities, $score, $detail, datetime('now'), $run, $actionable, $auto)"
     ).run({
       $type: type,
       $entities: JSON.stringify(entities),
       $score: score,
       $detail: detail ? JSON.stringify(detail) : null,
       $run: dreamRun ?? null,
+      $actionable: actionable ?? "low",
+      $auto: autoApplicable ? 1 : 0,
     });
     return Number(r.lastInsertRowid);
   }
 
-  getUnseenDiscoveries(limit: number = 10): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null }> {
+  getUnseenDiscoveries(limit: number = 10): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number }> {
     return this.db.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, dream_run FROM discoveries WHERE seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
+      "SELECT id, type, entities, score, detail, detected_at, dream_run, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
     ).all({ $limit: limit }) as any[];
   }
 
@@ -1110,6 +1177,125 @@ export class CBrainDB {
       "DELETE FROM discoveries WHERE seen = 0 AND detected_at < datetime('now', '-' || $days || ' days')"
     ).run({ $days: days });
     return r.changes;
+  }
+
+  updateDiscoverySuggestion(id: number, suggestion: string): void {
+    this.db.prepare("UPDATE discoveries SET suggestion = $suggestion WHERE id = $id").run({ $id: id, $suggestion: suggestion });
+  }
+
+  updateDiscoveryActions(id: number, actions: { type: string; target: string; reason: string }[]): void {
+    this.db.prepare("UPDATE discoveries SET proposed_actions = $actions WHERE id = $id").run({ $id: id, $actions: JSON.stringify(actions) });
+  }
+
+  getDiscoveriesByActionable(actionable: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number }> {
+    return this.db.prepare(
+      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE actionable = $actionable AND seen = 0 ORDER BY score DESC LIMIT $limit"
+    ).all({ $actionable: actionable, $limit: limit }) as any[];
+  }
+
+  countDiscoveriesByActionable(): Record<string, number> {
+    const rows = this.db.prepare(
+      "SELECT actionable, COUNT(*) as cnt FROM discoveries WHERE seen = 0 GROUP BY actionable"
+    ).all() as Array<{ actionable: string; cnt: number }>;
+    const result: Record<string, number> = { high: 0, medium: 0, low: 0 };
+    for (const row of rows) result[row.actionable] = row.cnt;
+    return result;
+  }
+
+  // ─── Insights ──────────────────────────────────────────────────
+
+  createInsight(data: CreateInsightInput): number {
+    const r = this.db.prepare(
+      "INSERT INTO insights (content, type, confidence, source_entities, source_type, expires_at) VALUES ($content, $type, $confidence, $entities, $sourceType, $expiresAt)"
+    ).run({
+      $content: data.content,
+      $type: data.type,
+      $confidence: data.confidence ?? 0.5,
+      $entities: data.sourceEntities ? JSON.stringify(data.sourceEntities) : null,
+      $sourceType: data.sourceType,
+      $expiresAt: data.expiresAt ?? null,
+    });
+    return Number(r.lastInsertRowid);
+  }
+
+  getInsight(id: number): InsightRow | null {
+    return this.db.prepare(
+      "SELECT * FROM insights WHERE id = $id"
+    ).get({ $id: id }) as InsightRow | null;
+  }
+
+  listInsights(opts?: { type?: string; status?: string; sourceType?: string; limit?: number; offset?: number }): InsightRow[] {
+    let sql = "SELECT * FROM insights WHERE 1=1";
+    const params: Record<string, string | number> = {};
+    if (opts?.type) {
+      sql += " AND type = $type";
+      params.$type = opts.type;
+    }
+    if (opts?.status) {
+      sql += " AND status = $status";
+      params.$status = opts.status;
+    } else {
+      sql += " AND status = 'active'";
+    }
+    if (opts?.sourceType) {
+      sql += " AND source_type = $sourceType";
+      params.$sourceType = opts.sourceType;
+    }
+    sql += " ORDER BY created_at DESC";
+    if (opts?.limit !== undefined) {
+      sql += " LIMIT $limit";
+      params.$limit = opts.limit;
+    }
+    if (opts?.offset !== undefined) {
+      sql += " OFFSET $offset";
+      params.$offset = opts.offset;
+    }
+    return this.db.prepare(sql).all(params) as InsightRow[];
+  }
+
+  getInsightsBySourceEntities(slugs: string[], limit: number = 10): InsightRow[] {
+    if (slugs.length === 0) return [];
+    const conditions = slugs.map((_, i) => `source_entities LIKE $s${i}`).join(" OR ");
+    const params: Record<string, string | number> = { $limit: limit };
+    slugs.forEach((s, i) => { params[`$s${i}`] = `%"${s}"%`; });
+    return this.db.prepare(
+      `SELECT * FROM insights WHERE status = 'active' AND (${conditions}) ORDER BY created_at DESC LIMIT $limit`
+    ).all(params) as InsightRow[];
+  }
+
+  updateInsightStatus(id: number, status: "active" | "archived" | "dismissed"): boolean {
+    const r = this.db.prepare(
+      "UPDATE insights SET status = $status WHERE id = $id"
+    ).run({ $id: id, $status: status });
+    return r.changes > 0;
+  }
+
+  markInsightSeen(id: number): void {
+    this.db.prepare("UPDATE insights SET seen = 1 WHERE id = $id").run({ $id: id });
+  }
+
+  countInsights(status?: string): number {
+    if (status) {
+      const row = this.db.prepare(
+        "SELECT COUNT(*) as cnt FROM insights WHERE status = $status"
+      ).get({ $status: status }) as { cnt: number };
+      return row.cnt;
+    }
+    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM insights").get() as { cnt: number };
+    return row.cnt;
+  }
+
+  archiveExpiredInsights(): number {
+    const r = this.db.prepare(
+      "UPDATE insights SET status = 'archived' WHERE expires_at IS NOT NULL AND expires_at < datetime('now') AND status = 'active'"
+    ).run();
+    return r.changes;
+  }
+
+  getDiscoveryById(id: number): { id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number } | null {
+    return this.db.prepare(
+      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE id = $id"
+    ).get({ $id: id }) as any ?? null;
   }
 
   close(): void {

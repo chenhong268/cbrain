@@ -4,9 +4,9 @@ import { execFileSync } from "node:child_process";
 import { CBrainDB } from "../storage/sqlite.js";
 import type { SyncManager } from "./sync.js";
 import type { EnrichManager } from "./enrich.js";
-import type { ReflectManager } from "./reflect.js";
 import type { HealthChecker } from "./health.js";
 import type { Logger } from "./logger.js";
+import type { InsightManager } from "./insight.js";
 
 export interface DreamReport {
   timestamp: string;
@@ -15,10 +15,9 @@ export interface DreamReport {
     backup: { path: string | null; size_mb: string };
     sync: { synced: number; skipped: number; errors: number };
     enrich: { total: number; upgraded: number };
-    reflect: { entitiesSynthesized: number; relationsInferred: number; insightsGenerated: number };
     cleanup: { orphans: number; staleStubs: number };
     health: { overallStatus: string; dimensions: number; issues: number };
-    discovery: { discovered: number };
+    insight_archive: { archived: number };
   };
   duration_ms: number;
   locked: boolean;
@@ -52,7 +51,7 @@ export async function runDream(
   healthChecker: HealthChecker,
   outputsDir: string,
   logger: Logger,
-  reflectMgr?: ReflectManager
+  insightMgr?: InsightManager
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
     logger.warn("dream", "上次 dream 仍在执行中（或锁未释放），跳过");
@@ -62,10 +61,9 @@ export async function runDream(
         backup: { path: null, size_mb: "0" },
         sync: { synced: 0, skipped: 0, errors: 0 },
         enrich: { total: 0, upgraded: 0 },
-        reflect: { entitiesSynthesized: 0, relationsInferred: 0, insightsGenerated: 0 },
         cleanup: { orphans: 0, staleStubs: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
-        discovery: { discovered: 0 },
+        insight_archive: { archived: 0 },
       },
       duration_ms: 0,
       locked: false,
@@ -105,65 +103,50 @@ export async function runDream(
   }
 
   // Stage 1: Sync
-  logger.info("dream", "Stage 1/6: sync");
+  logger.info("dream", "Stage 1/5: sync");
   const syncReport = await syncMgr.syncAll(vaultPath);
 
   // Stage 2: Enrich
-  logger.info("dream", "Stage 2/6: enrich");
+  logger.info("dream", "Stage 2/5: enrich");
   const enrichResults = enrichMgr.enrichAll();
   const upgraded = enrichResults.filter((r) => r.upgraded).length;
 
-  // Stage 3: Reflect
-  logger.info("dream", "Stage 3/6: reflect");
-  let reflectResult = { entitiesSynthesized: 0, relationsInferred: 0, insightsGenerated: 0 };
-  if (reflectMgr) {
-    try {
-      const rr = await reflectMgr.reflectAll();
-      reflectResult = { entitiesSynthesized: rr.entitiesSynthesized, relationsInferred: rr.relationsInferred, insightsGenerated: rr.insightsGenerated };
-      logger.info("dream", `Reflect 完成：${rr.entitiesSynthesized} 综合, ${rr.relationsInferred} 推理, ${rr.insightsGenerated} 洞察`);
-    } catch (e) {
-      logger.warn("dream", `Reflect 失败，继续执行：${(e as Error).message}`);
-    }
-  }
-
-  // Stage 4: Cleanup (orphans + stale stubs)
-  logger.info("dream", "Stage 4/6: cleanup");
+  // Stage 3: Cleanup (orphans + stale stubs)
+  logger.info("dream", "Stage 3/5: cleanup");
   const orphans = await syncMgr.removeOrphans(vaultPath);
   const staleStubs = await syncMgr.cleanStaleStubs(vaultPath);
 
-  // Stage 5: Health
-  logger.info("dream", "Stage 5/7: health");
+  // Stage 4: Health
+  logger.info("dream", "Stage 4/5: health");
   const healthReport = await healthChecker.checkAll();
 
-  // Stage 6: Discovery
-  logger.info("dream", "Stage 6/7: discovery");
-  let discovered = 0;
-  const runId = new Date().toISOString().slice(0, 10);
-  if (reflectMgr) {
+  // Stage 5: Insight expiry
+  logger.info("dream", "Stage 5/5: insight archive");
+  let archived = 0;
+  if (insightMgr) {
     try {
-      discovered = await reflectMgr.runDiscovery(runId);
-      logger.info("dream", `Discovery: ${discovered} 个结构化发现`);
+      archived = insightMgr.archiveExpired();
+      if (archived > 0) logger.info("dream", `归档 ${archived} 条过期 insight`);
     } catch (e) {
-      logger.warn("dream", `Discovery 失败: ${(e as Error).message}`);
+      logger.warn("dream", `Insight 归档失败: ${(e as Error).message}`);
     }
   }
 
-  // Stage 7: Report
-  logger.info("dream", "Stage 7/7: report");
+  // Report
+  logger.info("dream", "building report");
   const report: DreamReport = {
     timestamp: new Date().toISOString(),
     stages: {
       backup: { path: backupPath, size_mb: backupSize },
       sync: { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors },
       enrich: { total: enrichResults.length, upgraded },
-      reflect: reflectResult,
       cleanup: { orphans: orphans.length, staleStubs: staleStubs.length },
       health: {
         overallStatus: healthReport.overallStatus,
         dimensions: healthReport.dimensions.length,
         issues: healthReport.dimensions.reduce((s, d) => s + d.issues.length, 0),
       },
-      discovery: { discovered },
+      insight_archive: { archived },
     },
     duration_ms: Date.now() - started,
     locked: true,
@@ -183,10 +166,9 @@ export async function runDream(
     `|-------|--------|`,
     `| Sync | ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过, ${report.stages.sync.errors} 错误 |`,
     `| Enrich | ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级 |`,
-    `| Reflect | ${report.stages.reflect.entitiesSynthesized} 综合, ${report.stages.reflect.relationsInferred} 推理, ${report.stages.reflect.insightsGenerated} 洞察 |`,
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
-    `| Discovery | ${report.stages.discovery.discovered} 个结构化发现 |`,
+    `| Insight Archive | ${report.stages.insight_archive.archived} 条过期归档 |`,
     ``,
     `⏱ ${(report.duration_ms / 1000).toFixed(1)}s`,
   ];
@@ -225,8 +207,8 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   if (report.stages.enrich.upgraded > 0) {
     lines.push(`${report.stages.enrich.upgraded} 个实体升级`);
   }
-  if (report.stages.reflect.insightsGenerated > 0) {
-    lines.push(`新发现 ${report.stages.reflect.insightsGenerated} 个洞察`);
+  if (report.stages.insight_archive.archived > 0) {
+    lines.push(`${report.stages.insight_archive.archived} 条洞察归档`);
   }
 
   const icon = report.stages.health.overallStatus === "pass" ? "✅" : "⚠️";

@@ -98,13 +98,11 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── dream ──────────────────────────────────────────────────
   server.registerTool("dream", {
-    description: "Run full nightly pipeline: sync → enrich → reflect → cleanup → health → report. Use for scheduled daily maintenance. Has cycle lock to prevent overlapping runs.",
+    description: "Run full nightly pipeline: sync → enrich → cleanup → health → insight archive. Reflect and discovery run independently. Use for scheduled daily maintenance. Has cycle lock to prevent overlapping runs.",
     inputSchema: {},
   }, async () => {
     const { runDream } = await import("../../core/dream.js");
-    const { ReflectManager } = await import("../../core/reflect.js");
-    const reflectMgr = new ReflectManager(ctx.db, ctx.pages, ctx.llm, ctx.pipeline);
-    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger, reflectMgr);
+    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger);
     return {
       content: [{ type: "text", text: JSON.stringify({
         success: report.locked,
