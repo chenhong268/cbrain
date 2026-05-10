@@ -16,40 +16,25 @@ Search returns fragments. Review returns understanding. When you need to know ev
 
 ## Protocol
 
-### Step 1: Broad Search
-
-Search the topic with hybrid strategy to catch everything:
+### ⚡ 优先用 deep_recall（一步搞定）
 
 ```
-cbrain query "<topic>" --strategy all --limit 10
+cbrain deep_recall "<topic>"
 ```
 
-Also check for name variants (中文/English, full/abbreviated, 别名).
+`deep_recall` 一次调用返回 body + links + timeline + tags + related + insights，等价于下面 4 步连调：
+- query（搜索）+ get_page（取全文）+ graph-query（关系）+ timeline（时间线）
 
-### Step 2: Gather Full Context
+**只在 deep_recall 不可用时才退回以下步骤。**
 
-For the top 3-5 results, pull complete pages:
+### Fallback: 手动 4 步
 
-```
-cbrain show <slug>        # Full body + frontmatter
-cbrain tags <slug>         # What tags are on this
-cbrain versions <slug>     # How many times it's been updated
-```
+1. `cbrain query "<topic>" --strategy all --limit 10` — 搜索 + 别名变体
+2. `cbrain show <slug>` — 取 top 3-5 结果全文
+3. `cbrain graph-query <slug> --mode traverse --depth 1` — 关系网络
+4. `cbrain timeline <slug>` — 时间线
 
-### Step 3: Map Relationships
-
-```
-cbrain graph-query <slug> --mode traverse --depth 1   # Who/what is connected
-cbrain graph-query <slug> --mode backlinks             # Who references this
-```
-
-### Step 4: Check Timeline
-
-```
-cbrain timeline <slug>     # Key events in chronological order
-```
-
-### Step 5: Synthesize
+### Synthesize
 
 Combine everything into the output format below. **Do not fabricate.** If a section has no data, skip it.
 
@@ -93,6 +78,7 @@ YYYY-MM-DD  事件描述 [Source: slug]
 
 ## Anti-Patterns
 
+- ❌ deep_recall 可用却手动 query+get_page+graph+timeline 连调 — deep_recall 一步搞定
 - ❌ 只搜一次就下结论 — 可能遗漏别名、关联实体
 - ❌ 编造关系 — "可能与 Y 有合作" 改成 "目前未记录与 Y 的关联"
 - ❌ 把查询结果当正文 — 需要用自己的话重新组织，不是复制粘贴

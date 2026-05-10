@@ -1,0 +1,20 @@
+{"intent": "帮我回忆一下星辰科技的情况", "expected_tool": "deep_recall", "category": "recall"}
+{"intent": "详细了解王磊的背景", "expected_tool": "deep_recall", "category": "recall"}
+{"intent": "关于张三你有什么上下文", "expected_tool": "deep_recall", "category": "recall"}
+{"intent": "某制药公司怎么样", "expected_tool": "deep_recall", "category": "recall"}
+{"intent": "东区什么来头", "expected_tool": "deep_recall", "category": "recall"}
+{"intent": "帮我总结一下上周的会议", "expected_tool": "summarize", "category": "overview"}
+{"intent": "全面了解一下AI行业趋势", "expected_tool": "summarize", "category": "overview"}
+{"intent": "梳理一下组织架构", "expected_tool": "summarize", "category": "overview"}
+{"intent": "概览一下Q1的业绩", "expected_tool": "summarize", "category": "overview"}
+{"intent": "分析一下RAG和知识图谱有什么联系", "expected_tool": "brain_storm", "category": "reasoning"}
+{"intent": "这个领域的知识缺口在哪里", "expected_tool": "brain_storm", "category": "reasoning"}
+{"intent": "搜一下有没有关于某公司的记录", "expected_tool": "query", "category": "search"}
+{"intent": "查一下张三在哪个公司", "expected_tool": "query", "category": "search"}
+{"intent": "有没有关于某岗位的资料", "expected_tool": "query", "category": "search"}
+{"intent": "找一下上次讨论的内容", "expected_tool": "query", "category": "search"}
+{"intent": "多说说王磊的细节", "expected_tool": "expand_entity", "category": "drilldown", "requires_slug": true}
+{"intent": "展开讲讲星辰科技", "expected_tool": "expand_entity", "category": "drilldown", "requires_slug": true}
+{"intent": "query后连调get_page+get_links+get_timeline", "expected_tool": "deep_recall", "category": "anti_pattern", "note": "应该一次 deep_recall 而不是 4 次调用"}
+{"intent": "总结类请求却用了query", "expected_tool": "summarize", "category": "anti_pattern", "note": "总结/概览必须走 summarize"}
+{"intent": "没有slug就调expand_entity", "expected_tool": "FORBIDDEN", "category": "anti_pattern", "note": "expand_entity 必须先从其他工具拿到 slug"}
