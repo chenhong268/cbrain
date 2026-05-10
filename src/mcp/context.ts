@@ -14,6 +14,7 @@ import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
 import { Logger } from "../core/logger.js";
 import { InsightManager } from "../core/insight.js";
+import { ProfileManager } from "../profile/manager.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 
@@ -36,6 +37,7 @@ export interface ToolContext {
   llm?: LLMProvider;
   logger: Logger;
   insights: InsightManager;
+  profile: ProfileManager;
 }
 
 export async function indexPage(pipeline: ContentPipeline, slug: string, body: string): Promise<void> {
@@ -47,8 +49,8 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; llm?: LLMProvider }): ToolContext {
-  const { db, embedding, lance, vaultPath, llm } = deps;
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; llm?: LLMProvider; profileDir?: string }): ToolContext {
+  const { db, embedding, lance, vaultPath, llm, profileDir } = deps;
   const outputsDir = join(vaultPath, "outputs");
   const logger = new Logger(outputsDir);
   const pages = new PageManager(db, vaultPath, logger);
@@ -63,6 +65,8 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const writeback = new WritebackManager(pages, db, outputsDir);
   const pipeline = new ContentPipeline(db, embedding, lance, { pages, nerEngine, logger });
   const insights = new InsightManager(db, embedding, lance);
+  const profile = new ProfileManager(profileDir ?? join(vaultPath, ".."));
+  profile.load();
 
-  return { db, vaultPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights };
+  return { db, vaultPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, profile };
 }

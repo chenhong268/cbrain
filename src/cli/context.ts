@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { ZhipuEmbeddingProvider } from "../embedding/zhipu.js";
@@ -78,5 +78,7 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
     ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model)
     : undefined;
 
-  return { db, embedding, lance, vaultPath: config.vaultPath, llm };
+  const profileDir = dirname(resolve(config.dbPath));
+
+  return { db, embedding, lance, vaultPath: config.vaultPath, llm, profileDir };
 }

@@ -1,0 +1,61 @@
+import type { Link } from "../../core/graph.js";
+import type { PageFrontmatter } from "../../utils/frontmatter.js";
+import type { Page } from "../../core/page.js";
+import type { SearchResult } from "../../core/search.js";
+
+const KNOWN_FM_KEYS = new Set([
+  "title", "type", "slug", "tags", "tier",
+  "expires_at", "confidence_decay", "created_at", "updated_at",
+]);
+
+export function truncate(str: string | null | undefined, maxLen: number): string {
+  if (!str) return "";
+  return str.length > maxLen ? str.slice(0, maxLen) + "..." : str;
+}
+
+export function safeFrontmatter(fm: PageFrontmatter | null | undefined): Record<string, unknown> {
+  if (!fm) return {};
+  const out: Record<string, unknown> = {};
+  for (const key of KNOWN_FM_KEYS) {
+    if (fm[key] !== undefined) out[key] = fm[key];
+  }
+  return out;
+}
+
+export function trimLink(link: Link): Record<string, unknown> | null {
+  if (link.weight === 0) return null;
+  return {
+    from_slug: link.from_slug,
+    to_slug: link.to_slug,
+    relation: link.relation,
+    weight: link.weight,
+    strength: link.strength,
+    context: truncate(link.context, 100),
+  };
+}
+
+export function trimTimeline(
+  entries: Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>,
+  max: number = 3,
+): Array<Record<string, unknown>> {
+  return entries.slice(0, max).map(e => ({
+    id: e.id,
+    event_date: e.event_date,
+    summary: truncate(e.summary, 100),
+    created_at: e.created_at,
+  }));
+}
+
+export function stubEntity(
+  sr: SearchResult,
+  page?: Page | null,
+): Record<string, unknown> {
+  return {
+    slug: sr.slug,
+    title: page?.title ?? sr.slug,
+    type: page?.type ?? "unknown",
+    relevance: sr.score,
+    snippet: sr.snippet,
+    _stub: true,
+  };
+}

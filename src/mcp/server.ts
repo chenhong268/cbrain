@@ -20,6 +20,8 @@ import { registerBrainstormTools } from "./tools/brainstorm.js";
 import { registerSummarizeTools } from "./tools/summarize.js";
 import { registerDiscoveryTools } from "./tools/discoveries.js";
 import { registerInsightTools } from "./tools/insights.js";
+import { registerExpandTools } from "./tools/expand.js";
+import { registerProfileTools } from "./tools/profile.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -27,6 +29,7 @@ export interface CBrainDeps {
   lance: LanceDBManager;
   vaultPath: string;
   llm?: LLMProvider;
+  profileDir?: string;
 }
 
 export function createServer(deps: CBrainDeps): McpServer {
@@ -68,6 +71,8 @@ export function createServer(deps: CBrainDeps): McpServer {
   registerSummarizeTools(server, ctx);
   registerDiscoveryTools(server, ctx);
   registerInsightTools(server, ctx);
+  registerExpandTools(server, ctx);
+  registerProfileTools(server, ctx);
 
   return server;
 }

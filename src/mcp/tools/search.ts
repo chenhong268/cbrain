@@ -11,7 +11,10 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       limit: z.number().optional().default(10).describe("Max results"),
     },
   }, async ({ query, limit }) => {
+    const start = Date.now();
     const results = await ctx.search.search(query, { strategy: "all", limit });
+    const latencyMs = Date.now() - start;
+    try { ctx.db.logSearch(query, "hybrid", latencyMs, results.length, latencyMs > 2000); } catch { /* non-critical */ }
     return {
       content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
     };

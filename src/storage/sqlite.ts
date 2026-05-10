@@ -219,6 +219,7 @@ export class CBrainDB {
     this.migratePagesExpiry();
     this.migrateLinksStrength();
     this.migrateDiscoveries();
+    this.migrateSearchLog();
   }
 
   private migrateLinksStrength(): void {
@@ -1296,6 +1297,33 @@ export class CBrainDB {
     return this.db.prepare(
       "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE id = $id"
     ).get({ $id: id }) as any ?? null;
+  }
+
+  private migrateSearchLog(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS search_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query TEXT NOT NULL,
+        strategy TEXT NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        hit_count INTEGER NOT NULL,
+        degraded INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_search_log_created ON search_log(created_at)");
+  }
+
+  logSearch(query: string, strategy: string, latencyMs: number, hitCount: number, degraded: boolean): void {
+    this.db.prepare(
+      "INSERT INTO search_log (query, strategy, latency_ms, hit_count, degraded) VALUES ($query, $strategy, $latency, $hits, $degraded)"
+    ).run({ $query: query, $strategy: strategy, $latency: latencyMs, $hits: hitCount, $degraded: degraded ? 1 : 0 });
+  }
+
+  getSearchLog(limit: number = 50): Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; created_at: string }> {
+    return this.db.prepare(
+      "SELECT id, query, strategy, latency_ms, hit_count, degraded, created_at FROM search_log ORDER BY id DESC LIMIT $limit"
+    ).all({ $limit: limit }) as Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; created_at: string }>;
   }
 
   close(): void {

@@ -1,6 +1,9 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
+import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity } from "./trim.js";
+
+const TOP_N = 3;
 
 export function registerSummarizeTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("summarize", {
@@ -21,7 +24,11 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
     const minW = minWeight ?? 0;
 
     // Step 1: Search
-    const searchResults = await ctx.search.search(topic, { strategy: "fts", limit: cap * 2 });
+    const searchStart = Date.now();
+    const searchResults = await ctx.search.search(topic, { limit: cap * 2 });
+    const searchLatencyMs = Date.now() - searchStart;
+
+    try { ctx.db.logSearch(topic, "hybrid", searchLatencyMs, searchResults.length, searchLatencyMs > 2000); } catch { /* non-critical */ }
 
     if (searchResults.length === 0) {
       return {
@@ -32,30 +39,35 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
       };
     }
 
-    // Step 2: For each matching entity, gather full context
+    // Step 2: For each matching entity, gather context (trimmed or stub)
     const allSlugs = new Set<string>();
     const entities: Record<string, unknown>[] = [];
 
-    for (const sr of searchResults.slice(0, cap)) {
+    for (let i = 0; i < searchResults.slice(0, cap).length; i++) {
+      const sr = searchResults[i];
       const slug = sr.slug;
       allSlugs.add(slug);
 
       const page = ctx.pages.getBySlug(slug);
       if (!page) continue;
 
-      // Links with weight filtering
+      // Stubs for entities beyond TOP_N
+      if (i >= TOP_N) {
+        entities.push(stubEntity(sr, page));
+        allSlugs.add(slug);
+        continue;
+      }
+
+      // Links — trimmed
       const rawLinks = ctx.graph.getLinks(slug, "both");
       const links = {
-        outgoing: rawLinks.filter(l => l.from_slug === slug).filter(l => minW === 0 || l.weight >= minW).map(l => ({
-          to: l.to_slug, relation: l.relation, weight: l.weight, strength: l.strength, context: l.context,
-        })),
-        incoming: rawLinks.filter(l => l.to_slug === slug).filter(l => minW === 0 || l.weight >= minW).map(l => ({
-          from: l.from_slug, relation: l.relation, weight: l.weight, strength: l.strength, context: l.context,
-        })),
+        outgoing: rawLinks.filter(l => l.from_slug === slug).map(trimLink).filter(Boolean),
+        incoming: rawLinks.filter(l => l.to_slug === slug).map(trimLink).filter(Boolean),
       };
 
-      // Timeline
-      const timeline = ctx.db.getTimeline(slug);
+      // Timeline — trimmed
+      const rawTimeline = ctx.db.getTimeline(slug) as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>;
+      const timeline = trimTimeline(rawTimeline, 3);
 
       // Tags
       const fmTags = (page.frontmatter.tags as string[]) ?? [];
@@ -70,7 +82,8 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
         tier: page.tier,
         relevance: sr.score,
         snippet: sr.snippet,
-        body: page.body ? page.body.slice(0, 2000) : "",
+        body: truncate(page.body, 500),
+        frontmatter: safeFrontmatter(page.frontmatter),
         links,
         timeline,
         tags,
@@ -90,7 +103,7 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
     const neighbors: Record<string, unknown>[] = [];
     if (traverseDepth > 0) {
       const seenNeighbors = new Set(allSlugs);
-      for (const entity of entities) {
+      for (const entity of entities.slice(0, TOP_N)) {
         const nodes = ctx.graph.traverse(entity.slug as string, {
           maxDepth: traverseDepth,
           limit: 10,
@@ -111,7 +124,7 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
       }
     }
 
-    // Step 4: Cross-references — recent updates among all discovered slugs
+    // Step 4: Cross-references
     const recent = ctx.db.getRecentUpdatesBySlugs([...allSlugs], 7);
     const crossRefs = recent.filter(r => !entities.some(e => e.slug === r.slug)).map(r => ({
       slug: r.slug, title: r.title, type: r.type, updated_at: r.updated_at,
@@ -120,15 +133,16 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
     // Stats
     const totalLinks = entities.reduce((n, e) => {
       const l = e.links as { outgoing: unknown[]; incoming: unknown[] };
-      return n + l.outgoing.length + l.incoming.length;
+      return n + (l?.outgoing?.length ?? 0) + (l?.incoming?.length ?? 0);
     }, 0);
     const totalEvents = entities.reduce((n, e) => n + ((e.timeline as unknown[])?.length ?? 0), 0);
     const avgTier = entities.length > 0
       ? Math.round(entities.reduce((s, e) => s + (e.tier as number), 0) / entities.length * 10) / 10
       : 0;
+    const stubCount = entities.filter(e => (e as { _stub?: boolean })._stub).length;
 
     // Related insights
-    const entitySlugs = entities.map(e => e.slug as string);
+    const entitySlugs = entities.slice(0, TOP_N).map(e => e.slug as string);
     const relatedInsights = ctx.insights.getInsightsForEntities(entitySlugs, 5).map(i => ({
       id: i.id, type: i.type,
       content: i.content.length > 150 ? i.content.slice(0, 150) + "..." : i.content,
@@ -140,11 +154,12 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
         type: "text" as const,
         text: JSON.stringify({
           topic,
+          search_meta: { strategy: "hybrid", latency_ms: searchLatencyMs, degraded: searchLatencyMs > 2000 },
           entities,
           insights: relatedInsights.length > 0 ? relatedInsights : undefined,
           neighbors: neighbors.length > 0 ? neighbors : undefined,
           crossRefs: crossRefs.length > 0 ? crossRefs : undefined,
-          stats: { totalEntities: entities.length, totalLinks, totalEvents, avgTier, totalNeighbors: neighbors.length, totalInsights: relatedInsights.length },
+          stats: { totalEntities: entities.length, detailEntities: entities.length - stubCount, stubEntities: stubCount, totalLinks, totalEvents, avgTier, totalNeighbors: neighbors.length, totalInsights: relatedInsights.length },
         }, null, 2),
       }],
     };
