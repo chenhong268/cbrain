@@ -121,11 +121,14 @@ fi
 # MEMORY.md filing 规则一致性
 memory_file="$HOME/.hermes/memories/MEMORY.md"
 if [[ -f "$memory_file" ]]; then
-  has_filing=$(grep -c "entity.*concept.*record\|record.*concept.*entity" "$memory_file" 2>/dev/null) || has_filing=0
-  if (( has_filing > 0 )); then
-    pass "MEMORY.md 有 filing 路由规则"
+  filing_hits=0
+  for pt in "→ entity" "→ concept" "→ record" "→ insight"; do
+    grep -q "$pt" "$memory_file" 2>/dev/null && (( filing_hits++ )) || true
+  done
+  if (( filing_hits >= 4 )); then
+    pass "MEMORY.md filing 规则与 filing-rules.md 一致"
   else
-    warn "MEMORY.md 缺 filing 路由规则——Phase 2 尚未部署？"
+    warn "MEMORY.md filing 规则不完整（找到 $filing_hits/4 种 pageType）"
   fi
 fi
 

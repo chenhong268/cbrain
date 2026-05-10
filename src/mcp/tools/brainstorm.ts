@@ -41,27 +41,30 @@ export function registerBrainstormTools(server: McpServer, ctx: ToolContext): vo
 
     // ── Stage 1: 感知 — multi-path embedding search ──
     const queryText = context ? `${query} ${context}` : query;
-    const results1 = await ctx.search.search(queryText, { strategy: "all", limit: 8 });
-    const results2 = await ctx.search.search(query, { strategy: "all", limit: 5 });
-
-    // Deduplicate and collect page bodies
     const seen = new Set<string>();
     const fragments: { title: string; type: string; body: string }[] = [];
 
-    for (const r of [...results1, ...results2]) {
-      if (seen.has(r.slug)) continue;
-      seen.add(r.slug);
+    try {
+      const results1 = await ctx.search.search(queryText, { strategy: "all", limit: 8 });
+      const results2 = await ctx.search.search(query, { strategy: "all", limit: 5 });
 
-      const page = ctx.pages.getBySlug(r.slug);
-      if (!page || !page.body || page.body.length < 50) continue;
+      for (const r of [...results1, ...results2]) {
+        if (seen.has(r.slug)) continue;
+        seen.add(r.slug);
 
-      fragments.push({
-        title: page.title,
-        type: page.type,
-        body: page.body.substring(0, 600),
-      });
+        const page = ctx.pages.getBySlug(r.slug);
+        if (!page || !page.body || page.body.length < 50) continue;
 
-      if (fragments.length >= 10) break;
+        fragments.push({
+          title: page.title,
+          type: page.type,
+          body: page.body.substring(0, 600),
+        });
+
+        if (fragments.length >= 10) break;
+      }
+    } catch (e) {
+      results.gaps.push(`搜索失败: ${e instanceof Error ? e.message : String(e)}，跳过感知阶段直接推理`);
     }
 
     // ── Stage 2: 推理+自省 — LLM synthesizes ──
