@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import {
@@ -19,6 +19,7 @@ export class ProfileManager {
   private modulesDir: string;
   private modules: { name: string; enabled: boolean; count: number }[] = [];
   private user: { id: string; display_name?: string } = { id: "default" };
+  private fileMtimes = new Map<string, number>(); // path → mtime ms
 
   constructor(dataDir: string) {
     this.mainPath = join(dataDir, MAIN_FILE);
@@ -28,6 +29,7 @@ export class ProfileManager {
   load(): void {
     this.entries.clear();
     this.entrySource.clear();
+    this.fileMtimes.clear();
     this.modules = [];
 
     // Load main profile
@@ -37,6 +39,7 @@ export class ProfileManager {
         this.user = file.user ?? { id: "default" };
         this.ingestEntries(file.entries, this.mainPath);
       }
+      this.recordMtime(this.mainPath);
     }
 
     // Load modules
@@ -53,6 +56,7 @@ export class ProfileManager {
         });
         if (mod.enabled === false) continue;
         this.ingestEntries(mod.entries, path);
+        this.recordMtime(path);
       }
     }
   }
@@ -62,6 +66,7 @@ export class ProfileManager {
   }
 
   getEntries(filter?: ProfileFilter): ProfileEntry[] {
+    this.checkStale();
     let result = Array.from(this.entries.values());
     if (!filter) return result;
 
@@ -76,6 +81,7 @@ export class ProfileManager {
   }
 
   getEntry(id: string): ProfileEntry | undefined {
+    this.checkStale();
     return this.entries.get(id);
   }
 
@@ -118,14 +124,17 @@ export class ProfileManager {
   }
 
   getModules(): { name: string; enabled: boolean; count: number }[] {
+    this.checkStale();
     return [...this.modules];
   }
 
   getUser(): { id: string; display_name?: string } {
+    this.checkStale();
     return this.user;
   }
 
   getStats(): { total: number; byScope: Record<string, number>; byType: Record<string, number>; modules: number } {
+    this.checkStale();
     const byScope: Record<string, number> = {};
     const byType: Record<string, number> = {};
     for (const e of Array.from(this.entries.values())) {
@@ -191,6 +200,30 @@ export class ProfileManager {
       entries,
     };
     return yamlStringify(data as unknown as Record<string, unknown>, { lineWidth: 0 });
+  }
+
+  private recordMtime(path: string): void {
+    try {
+      const mtime = statSync(path).mtimeMs;
+      this.fileMtimes.set(path, mtime);
+    } catch {
+      // file gone — will be caught on next full load
+    }
+  }
+
+  private checkStale(): void {
+    for (const [path, oldMtime] of this.fileMtimes) {
+      try {
+        const current = statSync(path).mtimeMs;
+        if (current !== oldMtime) {
+          this.load();
+          return;
+        }
+      } catch {
+        this.load();
+        return;
+      }
+    }
   }
 
   private buildModuleContent(path: string, entries: ProfileEntry[]): string {
