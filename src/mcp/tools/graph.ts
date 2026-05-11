@@ -69,6 +69,8 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
 
     ctx.db.insertLink(from, to, relation, context ?? null, weight, strength);
     ctx.pages.incrementMention(to);
+    ctx.pages.syncLinksToMarkdown(from);
+    ctx.pages.syncLinksToMarkdown(to);
 
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, from, to, relation }) }],
@@ -85,6 +87,10 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     },
   }, async ({ from, to, relation }) => {
     const ok = ctx.graph.removeLink(from, to, relation);
+    if (ok) {
+      ctx.pages.syncLinksToMarkdown(from);
+      ctx.pages.syncLinksToMarkdown(to);
+    }
     return {
       content: [{ type: "text", text: JSON.stringify({ success: ok, from, to, relation }) }],
     };

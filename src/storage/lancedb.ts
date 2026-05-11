@@ -148,6 +148,27 @@ export class LanceDBManager {
     await table.delete(`id = ${id}`);
   }
 
+  // ─── Maintenance ───────────────────────────────────────────────
+
+  async compact(): Promise<{ tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; filesRemoved: number }> {
+    if (!this.db) throw new Error("LanceDB not connected");
+    const tableNames = await this.db.tableNames();
+    let fragmentsRemoved = 0;
+    let fragmentsAdded = 0;
+    let filesRemoved = 0;
+
+    for (const name of tableNames) {
+      const tbl = await this.db.openTable(name);
+      const stats = await tbl.optimize({ cleanupOlderThan: new Date(), deleteUnverified: true });
+      fragmentsRemoved += stats.compaction.fragmentsRemoved;
+      fragmentsAdded += stats.compaction.fragmentsAdded;
+      filesRemoved += stats.prune?.bytesRemoved ?? stats.compaction.filesRemoved;
+      this.tables.set(name, tbl);
+    }
+
+    return { tables: tableNames, fragmentsRemoved, fragmentsAdded, filesRemoved };
+  }
+
   // ─── Lifecycle ─────────────────────────────────────────────────
 
   async close(): Promise<void> {

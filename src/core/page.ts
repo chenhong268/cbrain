@@ -198,6 +198,61 @@ export class PageManager {
     return true;
   }
 
+  syncLinksToMarkdown(slug: string): void {
+    const page = this.getBySlug(slug);
+    if (!page) return;
+
+    const outgoing = this.db.getOutgoingLinks(slug);
+    const incoming = this.db.getIncomingLinks(slug);
+
+    const linkLines: string[] = [];
+    for (const l of outgoing) linkLines.push(`- ${l.relation} → [[${l.to_slug}]]`);
+    for (const l of incoming) linkLines.push(`- ← ${l.relation} from [[${l.from_slug}]]`);
+
+    const filePath = join(this.vaultPath, page.file_path);
+    if (!existsSync(filePath)) return;
+
+    const raw = readFileSync(filePath, "utf-8");
+    const { frontmatter, body } = parseFrontmatter(raw);
+
+    // Remove 'links' from frontmatter (legacy)
+    const { links: _, ...cleanFm } = frontmatter;
+    const updatedFm = { ...cleanFm, updated_at: new Date().toISOString() } as PageFrontmatter;
+
+    // Remove any existing auto-generated link sections
+    let cleanBody = body;
+    // 1) Remove legacy <!-- cbrain-links --> ... <!-- /cbrain-links --> block
+    const LEGACY_OPEN = "<!-- cbrain-links -->";
+    const LEGACY_CLOSE = "<!-- /cbrain-links -->";
+    let legacyOpenIdx = cleanBody.indexOf(LEGACY_OPEN);
+    while (legacyOpenIdx !== -1) {
+      const legacyCloseIdx = cleanBody.indexOf(LEGACY_CLOSE, legacyOpenIdx);
+      if (legacyCloseIdx !== -1) {
+        cleanBody = cleanBody.substring(0, legacyOpenIdx) + cleanBody.substring(legacyCloseIdx + LEGACY_CLOSE.length);
+      } else {
+        break;
+      }
+      legacyOpenIdx = cleanBody.indexOf(LEGACY_OPEN);
+    }
+    // 2) Remove ## Known Relations section (to end of body)
+    const SECTION_HEADER = "## Known Relations";
+    const sectionIdx = cleanBody.indexOf(SECTION_HEADER);
+    if (sectionIdx !== -1) {
+      cleanBody = cleanBody.substring(0, sectionIdx);
+    }
+    // 3) Remove any stray "**关联**" line left from legacy
+    cleanBody = cleanBody.replace(/\n\*\*关联\*\*\n/g, "\n");
+    cleanBody = cleanBody.trimEnd();
+
+    const newBody = linkLines.length > 0
+      ? `${cleanBody}\n\n${SECTION_HEADER}\n\n${linkLines.join("\n")}\n`
+      : cleanBody;
+
+    const content = stringifyFrontmatter(updatedFm, newBody);
+    writeFileSync(filePath, content, "utf-8");
+    this.db.updatePageHash(slug, hashContent(content));
+  }
+
   /**
    * Merge source page into target. All links, timeline entries, tags and raw data
    * are moved from source to target. Source body is appended to target body.

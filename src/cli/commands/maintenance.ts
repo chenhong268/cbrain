@@ -175,6 +175,71 @@ export function register(program: Command) {
     });
 
   program
+    .command("compact")
+    .description("Compact LanceDB files and reclaim disk space")
+    .action(async () => {
+      const config = loadConfig();
+      const lance = new LanceDBManager();
+      const beforeBytes = await import("node:fs").then(m => {
+        const { statSync } = m;
+        try {
+          const { readdirSync } = require("node:fs");
+          let total = 0;
+          function walkDir(dir: string) {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              const p = require("node:path").join(dir, entry.name);
+              if (entry.isDirectory()) walkDir(p);
+              else total += statSync(p).size;
+            }
+          }
+          walkDir(config.lancePath);
+          return total;
+        } catch { return 0; }
+      });
+
+      await lance.connect(config.lancePath);
+      console.log("Compacting...");
+      const result = await lance.compact();
+      await lance.close();
+
+      const afterBytes = await import("node:fs").then(m => {
+        const { statSync, readdirSync } = m;
+        try {
+          let total = 0;
+          function walkDir(dir: string) {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              const p = require("node:path").join(dir, entry.name);
+              if (entry.isDirectory()) walkDir(p);
+              else total += statSync(p).size;
+            }
+          }
+          walkDir(config.lancePath);
+          return total;
+        } catch { return 0; }
+      });
+
+      const beforeMB = (beforeBytes / 1024 / 1024).toFixed(1);
+      const afterMB = (afterBytes / 1024 / 1024).toFixed(1);
+      const savedMB = ((beforeBytes - afterBytes) / 1024 / 1024).toFixed(1);
+
+      console.log(`  Tables:     ${result.tables.join(", ")}`);
+      console.log(`  Fragments:  ${result.fragmentsRemoved} removed, ${result.fragmentsAdded} created`);
+      console.log(`  Disk:       ${beforeMB}MB → ${afterMB}MB (saved ${savedMB}MB)`);
+
+      // Restart running serve processes to pick up new LanceDB files
+      const { execSync } = await import("node:child_process");
+      try {
+        const pids = execSync("pgrep -f 'cbrain.*serve'", { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+        if (pids.length > 0) {
+          execSync(`kill ${pids.join(" ")}`);
+          console.log(`  Restart:    killed ${pids.length} stale serve process(es) (launchd will restart)`);
+        }
+      } catch {
+        // No serve processes running, nothing to restart
+      }
+    });
+
+  program
     .command("dream")
     .description("Nightly full pipeline: sync → enrich → cleanup → health → insight archive")
     .action(async () => {
