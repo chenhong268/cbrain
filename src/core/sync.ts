@@ -122,7 +122,7 @@ export class SyncManager {
     }
 
     // Phase 2: write to DB + LanceDB + wikilinks (sequential), collect NER jobs
-    const nerJobs: Array<{ slug: string; text: string }> = [];
+    const nerJobs: Array<{ slug: string; text: string; type: string }> = [];
 
     for (const file of changed) {
       try {
@@ -159,7 +159,7 @@ export class SyncManager {
         report.synced++;
 
         if (this.nerEngine && file.body.trim() && file.type !== "entity" && file.type !== "concept" && file.type !== "insight") {
-          nerJobs.push({ slug: file.slug, text: file.body });
+          nerJobs.push({ slug: file.slug, text: file.body, type: file.type });
         }
 
         if (this.pages && file.body.trim()) {
@@ -192,7 +192,7 @@ export class SyncManager {
           const extraction = extractions[j];
           if (!extraction) continue;
           try {
-            const nerResult = await this.pipeline.processNer(batch[j].slug, batch[j].text, "record", false, extraction);
+            const nerResult = await this.pipeline.processNer(batch[j].slug, batch[j].text, batch[j].type, false, extraction);
             if (nerResult) {
               report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
               report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
@@ -370,11 +370,8 @@ export class SyncManager {
     if (parts.length >= 3 && parts[0] === "brain") {
       return typeFromDir[parts[1]] ?? "record";
     }
-    if (parts.length >= 3 && parts[0] === "raw") {
-      return typeFromDir[parts[1]] ?? "record";
-    }
-    if (parts.length === 2 && parts[0] === "raw") {
-      return "record";
+    if (parts[0] === "raw") {
+      return "raw";
     }
     return "record";
   }

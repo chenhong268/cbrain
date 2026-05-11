@@ -89,10 +89,22 @@ export function mapEntityType(
   }
 }
 
-const VALID_PAGE_TYPES = new Set(["entity", "concept", "record", "insight"]);
+export type PageType = "entity" | "concept" | "record" | "insight" | "raw";
+export type PageLayer = "source" | "derived";
 
-export function normalizePageType(type: string): "entity" | "concept" | "record" | "insight" {
-  return (VALID_PAGE_TYPES.has(type) ? type : "record") as "entity" | "concept" | "record" | "insight";
+const VALID_PAGE_TYPES = new Set<string>(["entity", "concept", "record", "insight", "raw"]);
+
+export function normalizePageType(type: string): PageType {
+  return (VALID_PAGE_TYPES.has(type) ? type : "record") as PageType;
+}
+
+export function getLayer(type: string): PageLayer {
+  if (type === "raw" || type === "record") return "source";
+  return "derived";
+}
+
+export function canMerge(typeA: string, typeB: string): boolean {
+  return getLayer(typeA) === getLayer(typeB);
 }
 
 // ─── Canonical relation types ──────────────────────────────

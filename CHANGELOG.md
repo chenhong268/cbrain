@@ -1,6 +1,17 @@
 # Changelog
 
-> Current: `v1.1.0` — Insight 系统 + Discovery 闭环 + Agent 功能分类。
+> Current: `v1.3.1` — Raw 类型 + 合并层级隔离。
+
+## [v1.3.1] — 2026-05-11
+
+### Raw 类型 + 合并层级隔离
+
+- **`raw` 页面类型** — 新增 raw 类型，`raw/` 目录文件不再被错误标记为 record
+- **层级系统** — `getLayer()` + `canMerge()` 抽象，source 层（raw/record）与 derived 层（entity/concept/insight）隔离
+- **合并防护三重机制** — MCP tool、核心 merge 方法、canonicalSlug 均强制层级隔离
+- **sync 路径映射修复** — `raw/xxx` 正确推断为 raw 类型（之前错误返回 record）
+- **DB schema 迁移** — pages 表 CHECK 约束增加 raw，存量 92 条 raw 路径记录批量修正
+- **slug 工具兼容** — canonicalSlug 对 raw 类型跳过目录重写，避免 `raw/raws/` 错误路径
 
 ## [v1.1.0] — 2026-05-09
 

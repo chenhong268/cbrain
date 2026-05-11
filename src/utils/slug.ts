@@ -15,8 +15,9 @@ export function pluralize(type: string): string {
   return PLURALS[type] ?? `${type}s`;
 }
 
-/** Correct the directory prefix of a slug to match its type (e.g. brain/entities/X with type=concept → brain/concepts/X). */
+/** Correct the directory prefix of a slug to match its type (e.g. brain/entities/X with type=concept → brain/concepts/X). Raw slugs are kept as-is. */
 export function canonicalSlug(slug: string, type: string): string {
+  if (type === "raw") return slug;
   const dir = pluralize(type);
   return slug.replace(/^([^/]+)\/[^/]+/, `$1/${dir}`);
 }

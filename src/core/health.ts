@@ -637,7 +637,7 @@ export class HealthChecker {
   private checkNewSuggestions(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    const sourceCount = this.db.getPageCountByTypes(["record", "event"]);
+    const sourceCount = this.db.getPageCountByTypes(["record", "raw", "event"]);
     const conceptCount = this.db.getPageCountByType("concept");
 
     const ratio = sourceCount > 0 ? conceptCount / sourceCount : 0;
@@ -868,13 +868,14 @@ export class HealthChecker {
     const concepts = this.db.getPageCountByType("concept");
     const events = this.db.getPageCountByType("event");
     const records = this.db.getPageCountByType("record");
+    const rawPages = this.db.getPageCountByType("raw");
     const totalLinks = this.db.getLinkCount();
     const avgMentions = this.db.getAvgMentionCount();
 
     const orphans = this.db.getIslandPages().length;
     const bareStubs = this.db.getBareStubs().length;
 
-    const sourceCount = records + events;
+    const sourceCount = records + rawPages + events;
     const conceptsPerSource = sourceCount > 0 ? concepts / sourceCount : 0;
 
     return {

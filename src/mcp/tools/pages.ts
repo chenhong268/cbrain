@@ -3,6 +3,7 @@ import { join, resolve, relative } from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
+import { canMerge, getLayer } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 
 export function registerPageTools(server: McpServer, ctx: ToolContext): void {
@@ -40,7 +41,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("list_pages", {
     description: "List pages in the brain. Optional type filter.",
     inputSchema: {
-      type: z.enum(["entity", "concept", "record", "insight"]).optional().describe("Filter by type"),
+      type: z.enum(["entity", "concept", "record", "insight", "raw"]).optional().describe("Filter by type"),
       limit: z.number().optional().default(20).describe("Max results"),
       offset: z.number().optional().default(0).describe("Offset for pagination"),
     },
@@ -58,7 +59,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       slug: z.string().describe("Page slug (e.g. brain/entities/zhangsan)"),
       content: z.string().describe("Page body content (markdown)"),
       title: z.string().optional().describe("Page title (required for new pages)"),
-      type: z.enum(["entity", "concept", "record", "insight"]).optional().default("record").describe("Page type (required for new pages)"),
+      type: z.enum(["entity", "concept", "record", "insight", "raw"]).optional().default("record").describe("Page type (required for new pages)"),
       tags: z.array(z.string()).optional().describe("Tags to apply"),
     },
   }, async ({ slug, content, title, type, tags }) => {
@@ -164,6 +165,16 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (source === target) {
       return {
         content: [{ type: "text", text: JSON.stringify({ success: false, error: "Cannot merge page into itself" }) }],
+        isError: true,
+      };
+    }
+
+    if (!canMerge(sourcePage.type, targetPage.type)) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          success: false,
+          error: `Cannot merge across layers: source is "${sourcePage.type}" (${getLayer(sourcePage.type)}) and target is "${targetPage.type}" (${getLayer(targetPage.type)}). Source layer (raw, record) cannot merge with derived layer (entity, concept, insight).`,
+        }) }],
         isError: true,
       };
     }

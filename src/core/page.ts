@@ -13,12 +13,12 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug } from "../utils/slug.js";
-import { hashContent, normalizePageType } from "./shared.js";
+import { hashContent, normalizePageType, canMerge, getLayer } from "./shared.js";
 import type { Logger } from "./logger.js";
 
 export interface CreatePageInput {
   title: string;
-  type: "entity" | "concept" | "record" | "insight";
+  type: "entity" | "concept" | "record" | "insight" | "raw";
   body: string;
   tags?: string[];
   slug?: string;
@@ -208,6 +208,10 @@ export class PageManager {
     const target = this.getBySlug(targetSlug);
     if (!source || !target) { this.logger?.error("page", "合并失败：页面不存在", { source: sourceSlug, target: targetSlug }); return null; }
     if (sourceSlug === targetSlug) return null;
+    if (!canMerge(source.type, target.type)) {
+      this.logger?.error("page", "合并失败：跨层级不允许", { source: sourceSlug, sourceType: source.type, target: targetSlug, targetType: target.type });
+      return null;
+    }
 
     // Create version snapshot of target before merge
     try {
