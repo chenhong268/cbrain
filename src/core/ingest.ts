@@ -122,13 +122,18 @@ export class IngestManager {
 
     const { chunks, embedResults } = await this.pipeline.embed(body);
 
-    this.pages.create({
-      title,
-      type,
-      body,
-      tags: input.tags ?? [],
-      slug,
-    });
+    const existing = this.pages.getBySlug(slug);
+    if (existing) {
+      this.pages.update(slug, { body, tags: input.tags ?? [] });
+    } else {
+      this.pages.create({
+        title,
+        type,
+        body,
+        tags: input.tags ?? [],
+        slug,
+      });
+    }
 
     const linksExtracted = this.pipeline.processWikilinks(slug, body, false);
 
@@ -143,6 +148,6 @@ export class IngestManager {
       });
     }
 
-    return { slug, created: true, linksExtracted };
+    return { slug, created: !existing, linksExtracted };
   }
 }

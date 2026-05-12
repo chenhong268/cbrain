@@ -16,10 +16,10 @@ beforeEach(() => {
 });
 
 describe("IndexGenerator", () => {
-  test("generates 4 index files", () => {
+  test("generates 3 index files", () => {
     const gen = new IndexGenerator(db, outputsDir);
     const files = gen.generateAll();
-    expect(files.length).toBe(4);
+    expect(files.length).toBe(3);
     for (const f of files) {
       expect(existsSync(f)).toBe(true);
     }
@@ -63,30 +63,6 @@ describe("IndexGenerator", () => {
     expect(content).toContain("2 concepts total");
   });
 
-  test("All-Sources includes records, sources, events", () => {
-    db.prepare(
-      `INSERT INTO pages (slug, type, title, file_path, content_hash)
-       VALUES (?, 'record', ?, ?, ?)`
-    ).run("records/r1", "Meeting Notes", "r1.md", "h1");
-    db.prepare(
-      `INSERT INTO pages (slug, type, title, file_path, content_hash)
-       VALUES (?, 'source', ?, ?, ?)`
-    ).run("sources/s1", "Article", "s1.md", "h2");
-    db.prepare(
-      `INSERT INTO pages (slug, type, title, file_path, content_hash)
-       VALUES (?, 'event', ?, ?, ?)`
-    ).run("events/e1", "Conference", "e1.md", "h3");
-
-    const gen = new IndexGenerator(db, outputsDir);
-    gen.generateAll();
-
-    const content = readFileSync(join(outputsDir, "indexes", "All-Sources.md"), "utf-8");
-    expect(content).toContain("Meeting Notes");
-    expect(content).toContain("Article");
-    expect(content).toContain("Conference");
-    expect(content).toContain("3 sources total");
-  });
-
   test("Dashboard has overview stats", () => {
     db.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count)
@@ -110,13 +86,13 @@ describe("IndexGenerator", () => {
     expect(content).toContain("Links");
     expect(content).toContain("All-Entities");
     expect(content).toContain("All-Concepts");
-    expect(content).toContain("All-Sources");
+
   });
 
   test("handles empty brain gracefully", () => {
     const gen = new IndexGenerator(db, outputsDir);
     const files = gen.generateAll();
-    expect(files.length).toBe(4);
+    expect(files.length).toBe(3);
 
     const dash = readFileSync(join(outputsDir, "indexes", "Dashboard.md"), "utf-8");
     expect(dash).toContain("Total Pages | 0");

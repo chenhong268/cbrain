@@ -106,14 +106,16 @@ export class ContentPipeline {
       }))
     );
 
-    this.db.deleteChunksByPage(slug);
-    this.db.ftsDeleteByPage(slug);
-    for (const chunk of chunks) {
-      this.db.insertChunk(slug, chunk.index, chunk.content);
-    }
+    this.db.transaction(() => {
+      this.db.deleteChunksByPage(slug);
+      this.db.ftsDeleteByPage(slug);
+      for (const chunk of chunks) {
+        this.db.insertChunk(slug, chunk.index, chunk.content);
+      }
 
-    const fullContent = chunks.map(c => c.content).join("\n\n");
-    this.db.ftsInsert(slug, fullContent);
+      const fullContent = chunks.map(c => c.content).join("\n\n");
+      this.db.ftsInsert(slug, fullContent);
+    });
   }
 
   /** Write ingest_log entry for sync/ingest audit trail. */

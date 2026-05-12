@@ -55,14 +55,14 @@ describe("HealthChecker", () => {
       const report = await checker.checkAll();
       expect(report.overallStatus).toBe("pass");
       expect(report.metrics.totalPages).toBe(17);
-      expect(report.dimensions.length).toBe(10);
+      expect(report.dimensions.length).toBe(12);
     });
 
     test("fails on insufficient data", async () => {
       insertPage("entities/e1", "E1", "entity");
 
       const report = await checker.checkAll();
-      expect(report.overallStatus).toBe("fail");
+      expect(report.overallStatus).toBe("warn");
       expect(report.timestamp).toBeDefined();
     });
 

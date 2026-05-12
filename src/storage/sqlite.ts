@@ -76,7 +76,7 @@ export class CBrainDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pages (
         slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight', 'raw')),
         title TEXT NOT NULL,
         file_path TEXT NOT NULL,
         content_hash TEXT,
@@ -275,16 +275,18 @@ export class CBrainDB {
     this.db.exec(`
       CREATE TABLE pages_new (
         slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight', 'raw')),
         title TEXT NOT NULL,
         file_path TEXT NOT NULL,
         content_hash TEXT,
         tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
         mention_count INTEGER DEFAULT 0,
+        expires_at TEXT,
+        confidence_decay REAL DEFAULT 1.0,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
-      INSERT INTO pages_new SELECT * FROM pages;
+      INSERT INTO pages_new SELECT slug, type, title, file_path, content_hash, tier, mention_count, expires_at, confidence_decay, created_at, updated_at FROM pages;
       DROP TABLE pages;
       ALTER TABLE pages_new RENAME TO pages;
     `);
@@ -294,8 +296,15 @@ export class CBrainDB {
     this.db.exec("PRAGMA foreign_keys = ON");
   }
 
+  private stmtCache = new Map<string, ReturnType<typeof this.db.prepare>>();
+
   private prepare(sql: string) {
-    return this.db.prepare(sql);
+    let stmt = this.stmtCache.get(sql);
+    if (!stmt) {
+      stmt = this.db.prepare(sql);
+      this.stmtCache.set(sql, stmt);
+    }
+    return stmt;
   }
 
   run(sql: string) {
@@ -309,7 +318,7 @@ export class CBrainDB {
   // ─── Tag operations ──────────────────────────────────────────
 
   getTags(pageSlug: string): string[] {
-    const rows = this.db.prepare(
+    const rows = this.prepare(
       "SELECT tag FROM tags WHERE page_slug = $slug ORDER BY tag"
     ).all({ $slug: pageSlug }) as Array<{ tag: string }>;
     return rows.map(r => r.tag);
@@ -317,7 +326,7 @@ export class CBrainDB {
 
   addTag(pageSlug: string, tag: string): boolean {
     try {
-      this.db.prepare(
+      this.prepare(
         "INSERT OR IGNORE INTO tags (page_slug, tag) VALUES ($slug, $tag)"
       ).run({ $slug: pageSlug, $tag: tag });
       return true;
@@ -328,7 +337,7 @@ export class CBrainDB {
   }
 
   removeTag(pageSlug: string, tag: string): boolean {
-    const result = this.db.prepare(
+    const result = this.prepare(
       "DELETE FROM tags WHERE page_slug = $slug AND tag = $tag"
     ).run({ $slug: pageSlug, $tag: tag });
     return result.changes > 0;
@@ -337,13 +346,13 @@ export class CBrainDB {
   // ─── Timeline operations ─────────────────────────────────────
 
   getTimeline(pageSlug: string): Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, event_date, source, summary, created_at FROM timeline WHERE page_slug = $slug ORDER BY event_date DESC, id DESC"
     ).all({ $slug: pageSlug }) as any[];
   }
 
   addTimelineEntry(pageSlug: string, summary: string, eventDate?: string, source?: string): number {
-    const result = this.db.prepare(
+    const result = this.prepare(
       "INSERT INTO timeline (page_slug, summary, event_date, source) VALUES ($slug, $summary, $date, $source)"
     ).run({ $slug: pageSlug, $summary: summary, $date: eventDate ?? null, $source: source ?? null });
     return Number(result.lastInsertRowid);
@@ -362,13 +371,13 @@ export class CBrainDB {
       params.$dateFrom = dateFrom;
     }
     sql += " ORDER BY event_date DESC, id DESC LIMIT $limit";
-    return this.db.prepare(sql).all(params) as any[];
+    return this.prepare(sql).all(params) as any[];
   }
 
   // ─── Chunk operations ────────────────────────────────────────
 
   getChunksByPage(pageSlug: string): Array<{ id: number; chunk_index: number; content: string; created_at: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, chunk_index, content, created_at FROM chunks WHERE page_slug = $slug ORDER BY chunk_index"
     ).all({ $slug: pageSlug }) as any[];
   }
@@ -376,7 +385,7 @@ export class CBrainDB {
   // ─── Ingest log ──────────────────────────────────────────────
 
   getIngestLog(limit: number = 50): Array<{ id: number; source_type: string; action: string; page_slug: string | null; details: string | null; created_at: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, source_type, action, page_slug, details, created_at FROM ingest_log ORDER BY id DESC LIMIT $limit"
     ).all({ $limit: limit }) as any[];
   }
@@ -384,14 +393,14 @@ export class CBrainDB {
   // ─── Config operations ───────────────────────────────────────
 
   getConfig(key: string): string | null {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT value FROM config WHERE key = $key"
     ).get({ $key: key }) as { value: string } | undefined;
     return row?.value ?? null;
   }
 
   setConfig(key: string, value: string): void {
-    this.db.prepare(
+    this.prepare(
       "INSERT OR REPLACE INTO config (key, value) VALUES ($key, $value)"
     ).run({ $key: key, $value: value });
   }
@@ -401,19 +410,19 @@ export class CBrainDB {
   resolveSlugs(queries: string[]): Array<{ query: string; slug: string | null; title: string | null }> {
     return queries.map(query => {
       // Exact slug match
-      const bySlug = this.db.prepare(
+      const bySlug = this.prepare(
         "SELECT slug, title FROM pages WHERE slug = $q"
       ).get({ $q: query }) as { slug: string; title: string } | undefined;
       if (bySlug) return { query, slug: bySlug.slug, title: bySlug.title };
 
       // Exact title match
-      const byTitle = this.db.prepare(
+      const byTitle = this.prepare(
         "SELECT slug, title FROM pages WHERE title = $q"
       ).get({ $q: query }) as { slug: string; title: string } | undefined;
       if (byTitle) return { query, slug: byTitle.slug, title: byTitle.title };
 
       // Fuzzy title match (LIKE)
-      const fuzzy = this.db.prepare(
+      const fuzzy = this.prepare(
         "SELECT slug, title FROM pages WHERE title LIKE $q LIMIT 1"
       ).get({ $q: `%${query}%` }) as { slug: string; title: string } | undefined;
       if (fuzzy) return { query, slug: fuzzy.slug, title: fuzzy.title };
@@ -425,7 +434,7 @@ export class CBrainDB {
   // ─── Version operations ──────────────────────────────────────
 
   getVersionCount(pageSlug: string): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT COUNT(*) as cnt FROM versions WHERE page_slug = $slug"
     ).get({ $slug: pageSlug }) as { cnt: number };
     return row.cnt;
@@ -433,32 +442,32 @@ export class CBrainDB {
 
   createVersion(pageSlug: string, content: string, frontmatter?: string): number {
     const nextVer = this.getVersionCount(pageSlug) + 1;
-    this.db.prepare(
+    this.prepare(
       "INSERT INTO versions (page_slug, version, content, frontmatter) VALUES ($slug, $ver, $content, $fm)"
     ).run({ $slug: pageSlug, $ver: nextVer, $content: content, $fm: frontmatter ?? null });
     return nextVer;
   }
 
   getVersions(pageSlug: string): Array<{ id: number; version: number; created_at: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, version, created_at FROM versions WHERE page_slug = $slug ORDER BY version DESC"
     ).all({ $slug: pageSlug }) as any[];
   }
 
   getVersion(pageSlug: string, version: number): { content: string; frontmatter: string | null; version: number; created_at: string } | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT content, frontmatter, version, created_at FROM versions WHERE page_slug = $slug AND version = $ver"
     ).get({ $slug: pageSlug, $ver: version }) as any ?? null;
   }
 
   ftsInsert(pageSlug: string, content: string): void {
-    this.db.prepare(
+    this.prepare(
       "INSERT INTO chunks_fts(page_slug, content) VALUES ($slug, $content)"
     ).run({ $slug: pageSlug, $content: content });
   }
 
   ftsDeleteByPage(pageSlug: string): void {
-    this.db.prepare(
+    this.prepare(
       "DELETE FROM chunks_fts WHERE page_slug = $slug"
     ).run({ $slug: pageSlug });
   }
@@ -468,7 +477,7 @@ export class CBrainDB {
     // rank = tf / (1 + tf): more occurrences → higher rank → higher score.
     if (query.length < 3) {
       const pattern = `%${query}%`;
-      return this.db.prepare(`
+      return this.prepare(`
         SELECT page_slug, content,
           CAST(tf AS REAL) / (1.0 + CAST(tf AS REAL)) AS rank
         FROM (
@@ -483,7 +492,7 @@ export class CBrainDB {
       `).all({ $query: query, $pattern: pattern, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
     }
     const ftsQuery = this.buildTrigramQuery(query);
-    return this.db.prepare(
+    return this.prepare(
       "SELECT page_slug, content, rank FROM chunks_fts WHERE chunks_fts MATCH $query ORDER BY rank LIMIT $limit"
     ).all({ $query: ftsQuery, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
   }
@@ -503,34 +512,34 @@ export class CBrainDB {
   // ─── Job operations ────────────────────────────────────────────
 
   submitJob(name: string, data?: unknown, priority: number = 0): number {
-    const result = this.db.prepare(
+    const result = this.prepare(
       "INSERT INTO jobs (name, data, priority) VALUES ($name, $data, $priority)"
     ).run({ $name: name, $data: data ? JSON.stringify(data) : null, $priority: priority });
     return Number(result.lastInsertRowid);
   }
 
   claimJob(): { id: number; name: string; data: string | null; attempts: number } | null {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT id, name, data, attempts FROM jobs WHERE status = 'pending' ORDER BY priority DESC, id ASC LIMIT 1"
     ).get() as { id: number; name: string; data: string | null; attempts: number } | undefined;
     if (!row) return null;
 
-    this.db.prepare(
+    this.prepare(
       "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = datetime('now') WHERE id = $id"
     ).run({ $id: row.id });
     return row;
   }
 
   completeJob(id: number, result?: unknown): void {
-    this.db.prepare(
+    this.prepare(
       "UPDATE jobs SET status = 'done', result = $result, finished_at = datetime('now') WHERE id = $id"
     ).run({ $id: id, $result: result ? JSON.stringify(result) : null });
   }
 
   failJob(id: number, error: string): void {
-    const job = this.db.prepare("SELECT attempts, max_attempts FROM jobs WHERE id = $id").get({ $id: id }) as { attempts: number; max_attempts: number } | undefined;
+    const job = this.prepare("SELECT attempts, max_attempts FROM jobs WHERE id = $id").get({ $id: id }) as { attempts: number; max_attempts: number } | undefined;
     const status = job && job.attempts >= job.max_attempts ? "failed" : "pending";
-    this.db.prepare(
+    this.prepare(
       "UPDATE jobs SET status = $status, error = $error, finished_at = CASE WHEN $status = 'failed' THEN datetime('now') ELSE NULL END WHERE id = $id"
     ).run({ $id: id, $status: status, $error: error });
   }
@@ -542,11 +551,11 @@ export class CBrainDB {
     created_at: string; started_at: string | null; finished_at: string | null;
   }> {
     if (status) {
-      return this.db.prepare(
+      return this.prepare(
         "SELECT id, name, status, priority, data, result, error, attempts, max_attempts, created_at, started_at, finished_at FROM jobs WHERE status = $status ORDER BY id DESC"
       ).all({ $status: status }) as any[];
     }
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, name, status, priority, data, result, error, attempts, max_attempts, created_at, started_at, finished_at FROM jobs ORDER BY id DESC LIMIT 100"
     ).all() as any[];
   }
@@ -557,20 +566,20 @@ export class CBrainDB {
     attempts: number; max_attempts: number;
     created_at: string; started_at: string | null; finished_at: string | null;
   } | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, name, status, priority, data, result, error, attempts, max_attempts, created_at, started_at, finished_at FROM jobs WHERE id = $id"
     ).get({ $id: id }) as any ?? null;
   }
 
   cancelJob(id: number): boolean {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "UPDATE jobs SET status = 'cancelled', finished_at = datetime('now') WHERE id = $id AND status IN ('pending', 'running')"
     ).run({ $id: id });
     return r.changes > 0;
   }
 
   retryJob(id: number): boolean {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "UPDATE jobs SET status = 'pending', attempts = 0, error = NULL, started_at = NULL, finished_at = NULL WHERE id = $id AND status = 'failed'"
     ).run({ $id: id });
     return r.changes > 0;
@@ -579,58 +588,58 @@ export class CBrainDB {
   // ─── Page operations ──────────────────────────────────────────
 
   getPage(slug: string): PageRow | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT * FROM pages WHERE slug = $slug"
     ).get({ $slug: slug }) as PageRow | null;
   }
 
   getPageByTitle(title: string): { slug: string; type: string; title: string } | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, type, title FROM pages WHERE title = $title LIMIT 1"
     ).get({ $title: title }) as { slug: string; type: string; title: string } | null;
   }
 
   getPageByTitleExcluding(title: string, excludeSlug: string): { slug: string; type: string; title: string } | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, type, title FROM pages WHERE title = $title AND slug != $slug LIMIT 1"
     ).get({ $title: title, $slug: excludeSlug }) as { slug: string; type: string; title: string } | null;
   }
 
   getPageTitle(slug: string): string | null {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT title FROM pages WHERE slug = $slug"
     ).get({ $slug: slug }) as { title: string } | undefined;
     return row?.title ?? null;
   }
 
   getPageTitleAndType(slug: string): { title: string; type: string } | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT title, type FROM pages WHERE slug = $slug"
     ).get({ $slug: slug }) as { title: string; type: string } | null;
   }
 
   getPageFilePath(slug: string): string | null {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT file_path FROM pages WHERE slug = $slug"
     ).get({ $slug: slug }) as { file_path: string } | undefined;
     return row?.file_path ?? null;
   }
 
   getPageContentHash(slug: string): string | null {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT content_hash FROM pages WHERE slug = $slug"
     ).get({ $slug: slug }) as { content_hash: string | null } | undefined;
     return row?.content_hash ?? null;
   }
 
   getPageTierAndMentions(slug: string): { tier: number; mention_count: number } | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT tier, mention_count FROM pages WHERE slug = $slug"
     ).get({ $slug: slug }) as { tier: number; mention_count: number } | null;
   }
 
   insertPage(data: { slug: string; type: string; title: string; filePath: string; contentHash: string; tier?: number; expiresAt?: string | null; confidenceDecay?: number }): void {
-    this.db.prepare(
+    this.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, expires_at, confidence_decay, created_at, updated_at) VALUES ($slug, $type, $title, $path, $hash, $tier, $expires, $decay, datetime('now'), datetime('now'))"
     ).run({
       $slug: data.slug,
@@ -645,7 +654,7 @@ export class CBrainDB {
   }
 
   upsertPage(data: UpsertPageData): void {
-    this.db.prepare(`
+    this.prepare(`
       INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at)
       VALUES ($slug, $type, $title, $path, $hash, 3, datetime('now'), datetime('now'))
       ON CONFLICT(slug) DO UPDATE SET
@@ -663,41 +672,47 @@ export class CBrainDB {
   }
 
   updatePageHash(slug: string, hash: string): void {
-    this.db.prepare(
+    this.prepare(
       "UPDATE pages SET content_hash = $hash, updated_at = datetime('now') WHERE slug = $slug"
     ).run({ $slug: slug, $hash: hash });
   }
 
   updatePageTier(slug: string, tier: number): void {
-    this.db.prepare(
+    this.prepare(
       "UPDATE pages SET tier = $tier, updated_at = datetime('now') WHERE slug = $slug"
     ).run({ $slug: slug, $tier: tier });
   }
 
   incrementMentionCount(slug: string): void {
-    this.db.prepare(
+    this.prepare(
       "UPDATE pages SET mention_count = mention_count + 1, updated_at = datetime('now') WHERE slug = $slug"
     ).run({ $slug: slug });
   }
 
   deletePage(slug: string): boolean {
-    const r = this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+    const r = this.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
     return r.changes > 0;
   }
 
   deletePageCascaded(slug: string): void {
-    this.db.prepare("DELETE FROM links WHERE from_slug = $slug OR to_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
-    this.db.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM links WHERE from_slug = $slug OR to_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
   }
 
   rewireLinks(oldSlug: string, newSlug: string): void {
-    this.db.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old").run({ $old: oldSlug, $new: newSlug });
-    this.db.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old").run({ $old: oldSlug, $new: newSlug });
+    // Delete self-referencing duplicates before rewiring to avoid UNIQUE violation
+    this.prepare(`
+      DELETE FROM links WHERE rowid NOT IN (
+        SELECT MIN(rowid) FROM links GROUP BY from_slug, to_slug, relation
+      ) AND (from_slug = $old OR to_slug = $old)
+    `).run({ $old: oldSlug });
+    this.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old").run({ $old: oldSlug, $new: newSlug });
+    this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old").run({ $old: oldSlug, $new: newSlug });
   }
 
   // ─── Page list/query operations ──────────────────────────────
@@ -723,7 +738,7 @@ export class CBrainDB {
       sql += " OFFSET $offset";
       params.$offset = opts.offset;
     }
-    return this.db.prepare(sql).all(params) as PageRow[];
+    return this.prepare(sql).all(params) as PageRow[];
   }
 
   listPageSlugs(opts?: { type?: string; limit?: number; offset?: number; orderBy?: string }): string[] {
@@ -742,17 +757,17 @@ export class CBrainDB {
       sql += " OFFSET $offset";
       params.$offset = opts.offset;
     }
-    const rows = this.db.prepare(sql).all(params) as Array<{ slug: string }>;
+    const rows = this.prepare(sql).all(params) as Array<{ slug: string }>;
     return rows.map(r => r.slug);
   }
 
   getPageCount(): number {
-    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number };
+    const row = this.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number };
     return row.cnt;
   }
 
   getPageCountByType(type: string): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT COUNT(*) as cnt FROM pages WHERE type = $type"
     ).get({ $type: type }) as { cnt: number };
     return row.cnt;
@@ -763,38 +778,38 @@ export class CBrainDB {
     const placeholders = types.map((_, i) => `$t${i}`).join(",");
     const params: Record<string, string> = {};
     types.forEach((t, i) => { params[`$t${i}`] = t; });
-    const row = this.db.prepare(
+    const row = this.prepare(
       `SELECT COUNT(*) as cnt FROM pages WHERE type IN (${placeholders})`
     ).get(params) as { cnt: number };
     return row.cnt;
   }
 
   getPageTypeCounts(): Array<{ type: string; cnt: number }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT type, COUNT(*) as cnt FROM pages GROUP BY type ORDER BY cnt DESC"
     ).all() as Array<{ type: string; cnt: number }>;
   }
 
   getEntities(): Array<{ slug: string; title: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title FROM pages WHERE type = 'entity' ORDER BY slug"
     ).all() as Array<{ slug: string; title: string }>;
   }
 
   getEntityConceptPages(): Array<{ slug: string; title: string; type: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title, type FROM pages WHERE type IN ('entity', 'concept') ORDER BY title"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
   getAutoExtractedPages(): Array<{ slug: string; title: string; file_path: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title, file_path FROM pages WHERE slug IN (SELECT page_slug FROM tags WHERE tag = 'auto-extracted')"
     ).all() as Array<{ slug: string; title: string; file_path: string }>;
   }
 
   getAllPageSlugsWithPaths(): Array<{ slug: string; file_path: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, file_path FROM pages"
     ).all() as Array<{ slug: string; file_path: string }>;
   }
@@ -804,7 +819,7 @@ export class CBrainDB {
     const placeholders = slugs.map((_, i) => `$s${i}`).join(",");
     const params: Record<string, string> = {};
     slugs.forEach((s, i) => { params[`$s${i}`] = s; });
-    return this.db.prepare(
+    return this.prepare(
       `SELECT * FROM pages WHERE slug IN (${placeholders})`
     ).all(params) as PageRow[];
   }
@@ -814,49 +829,49 @@ export class CBrainDB {
     const placeholders = slugs.map((_, i) => `$s${i}`).join(",");
     const params: Record<string, string> = {};
     slugs.forEach((s, i) => { params[`$s${i}`] = s; });
-    return this.db.prepare(
+    return this.prepare(
       `SELECT slug FROM pages WHERE slug IN (${placeholders}) ORDER BY mention_count DESC`
     ).all(params) as Array<{ slug: string }>;
   }
 
   getPagesWithoutChunks(): Array<{ slug: string; title: string; type: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN chunks c ON p.slug = c.page_slug WHERE c.id IS NULL AND p.type = 'record'"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
   getPagesWithMissingTitle(): Array<{ slug: string; title: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title FROM pages WHERE title IS NULL OR title = '' OR title = slug"
     ).all() as Array<{ slug: string; title: string }>;
   }
 
   getPagesWithEmptyType(): Array<{ slug: string; title: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title FROM pages WHERE type IS NULL OR type = ''"
     ).all() as Array<{ slug: string; title: string }>;
   }
 
   getBareStubs(): Array<{ slug: string; title: string; type: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT p.slug, p.title, p.type FROM pages p WHERE p.type IN ('entity', 'concept') AND p.mention_count <= 1 AND (SELECT COUNT(*) FROM links l WHERE l.from_slug = p.slug OR l.to_slug = p.slug) <= 1"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
   getIslandPages(): Array<{ slug: string; title: string; type: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT p.slug, p.title, p.type FROM pages p WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug) AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug) AND p.type IN ('entity', 'concept')"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
   getStaleHighValuePages(days: number = 30): Array<{ slug: string; title: string; type: string; updated_at: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title, type, updated_at FROM pages WHERE tier <= 2 AND updated_at < datetime('now', '-' || $days || ' days') ORDER BY updated_at ASC"
     ).all({ $days: days }) as Array<{ slug: string; title: string; type: string; updated_at: string }>;
   }
 
   getPopularThinPages(threshold: number = 3): Array<{ slug: string; title: string; mention_count: number; type: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title, mention_count, type FROM pages WHERE mention_count >= $threshold AND type IN ('entity', 'concept') AND (SELECT COUNT(*) FROM chunks WHERE page_slug = pages.slug) <= 1 ORDER BY mention_count DESC"
     ).all({ $threshold: threshold }) as Array<{ slug: string; title: string; mention_count: number; type: string }>;
   }
@@ -866,42 +881,42 @@ export class CBrainDB {
     const params: Record<string, string> = {};
     types.forEach((t, i) => { params[`$t${i}`] = t; });
     const order = orderBy ?? "title ASC";
-    return this.db.prepare(
+    return this.prepare(
       `SELECT p.slug, p.title, p.type, (SELECT COUNT(*) FROM links WHERE from_slug = p.slug OR to_slug = p.slug) as link_count FROM pages p WHERE p.type IN (${placeholders}) ORDER BY ${order}`
     ).all(params) as Array<{ slug: string; title: string; type: string; link_count: number }>;
   }
 
   getAvgMentionCount(): number {
-    const row = this.db.prepare("SELECT AVG(mention_count) as avg FROM pages").get() as { avg: number | null };
+    const row = this.prepare("SELECT AVG(mention_count) as avg FROM pages").get() as { avg: number | null };
     return row.avg ?? 0;
   }
 
   getRecentUpdatedPages(days: number = 7, limit: number = 10): PageRow[] {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT * FROM pages WHERE updated_at >= datetime('now', $days) ORDER BY updated_at DESC LIMIT $limit"
     ).all({ $days: `-${days} days`, $limit: limit }) as PageRow[];
   }
 
   getEntityConceptPagesUpdatedSince(since: string): Array<{ slug: string; title: string; type: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title, type FROM pages WHERE updated_at > $since AND type IN ('entity', 'concept') ORDER BY updated_at DESC"
     ).all({ $since: since }) as Array<{ slug: string; title: string; type: string }>;
   }
 
   getTopMentionedEntities(limit: number = 10): PageRow[] {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT * FROM pages WHERE type = 'entity' ORDER BY mention_count DESC LIMIT $limit"
     ).all({ $limit: limit }) as PageRow[];
   }
 
   getHighMentionEntities(minMentions: number): Array<{ slug: string; title: string; mention_count: number }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title, mention_count FROM pages WHERE type = 'entity' AND mention_count >= $min ORDER BY mention_count DESC"
     ).all({ $min: minMentions }) as Array<{ slug: string; title: string; mention_count: number }>;
   }
 
   getHighConnectivityEntities(minNeighbors: number): Array<{ slug: string; title: string }> {
-    return this.db.prepare(
+    return this.prepare(
       `SELECT p.slug, p.title FROM pages p
        WHERE p.type = 'entity'
        AND (
@@ -915,10 +930,10 @@ export class CBrainDB {
   // ─── Brief & Cross-ref queries ────────────────────────────────
 
   countNewPagesSince(hours: number): { entities: number; concepts: number } {
-    const entities = (this.db.prepare(
+    const entities = (this.prepare(
       "SELECT COUNT(*) as c FROM pages WHERE type = 'entity' AND created_at > datetime('now', '-' || $h || ' hours')"
     ).get({ $h: hours }) as { c: number }).c;
-    const concepts = (this.db.prepare(
+    const concepts = (this.prepare(
       "SELECT COUNT(*) as c FROM pages WHERE type = 'concept' AND created_at > datetime('now', '-' || $h || ' hours')"
     ).get({ $h: hours }) as { c: number }).c;
     return { entities, concepts };
@@ -927,7 +942,7 @@ export class CBrainDB {
   getRecentUpdatesBySlugs(slugs: string[], days: number): Array<{ slug: string; title: string; type: string; updated_at: string }> {
     if (slugs.length === 0) return [];
     const placeholders = slugs.map(() => "?").join(",");
-    return this.db.prepare(
+    return this.prepare(
       `SELECT slug, title, type, updated_at FROM pages
        WHERE slug IN (${placeholders})
        AND updated_at > datetime('now', '-${days} days')
@@ -937,19 +952,19 @@ export class CBrainDB {
   }
 
   getExpiredPages(now: string): Array<{ slug: string; title: string; expires_at: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title, expires_at FROM pages WHERE expires_at IS NOT NULL AND expires_at < $now"
     ).all({ $now: now }) as Array<{ slug: string; title: string; expires_at: string }>;
   }
 
   getLowConfidenceDecayPages(threshold: number): Array<{ slug: string; title: string; confidence_decay: number }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT slug, title, confidence_decay FROM pages WHERE confidence_decay < $t"
     ).all({ $t: threshold }) as Array<{ slug: string; title: string; confidence_decay: number }>;
   }
 
   cleanDanglingLinks(): number {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "DELETE FROM links WHERE from_slug NOT IN (SELECT slug FROM pages) OR to_slug NOT IN (SELECT slug FROM pages)"
     ).run();
     return r.changes;
@@ -958,7 +973,7 @@ export class CBrainDB {
   getLinksContextForSlugs(slugs: string[]): string[] {
     if (slugs.length === 0) return [];
     const placeholders = slugs.map(() => "?").join(",");
-    const rows = this.db.prepare(
+    const rows = this.prepare(
       `SELECT DISTINCT context FROM links WHERE context IS NOT NULL AND context != ''
          AND (from_slug IN (${placeholders}) OR to_slug IN (${placeholders}))`
     ).all(...slugs) as Array<{ context: string }>;
@@ -968,51 +983,51 @@ export class CBrainDB {
   // ─── Link operations ──────────────────────────────────────────
 
   insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string): void {
-    this.db.prepare(
+    this.prepare(
       "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength) VALUES ($from, $to, $rel, $ctx, $w, $s)"
     ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: weight ?? 1.0, $s: strength ?? 'medium' });
   }
 
   deleteLink(from: string, to: string, relation: string): boolean {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "DELETE FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
     ).run({ $from: from, $to: to, $rel: relation });
     return r.changes > 0;
   }
 
   deleteLinksBySlug(slug: string): void {
-    this.db.prepare(
+    this.prepare(
       "DELETE FROM links WHERE from_slug = $slug OR to_slug = $slug"
     ).run({ $slug: slug });
   }
 
   deleteLinksByRelation(slug: string, relation: string): void {
-    this.db.prepare(
+    this.prepare(
       "DELETE FROM links WHERE from_slug = $slug AND relation = $rel"
     ).run({ $slug: slug, $rel: relation });
   }
 
   getOutgoingLinks(slug: string): LinkRow[] {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, from_slug, to_slug, relation, weight, strength, context, created_at FROM links WHERE from_slug = $slug"
     ).all({ $slug: slug }) as LinkRow[];
   }
 
   getIncomingLinks(slug: string): LinkRow[] {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, from_slug, to_slug, relation, weight, strength, context, created_at FROM links WHERE to_slug = $slug"
     ).all({ $slug: slug }) as LinkRow[];
   }
 
   getOutgoingSlugs(slug: string): string[] {
-    const rows = this.db.prepare(
+    const rows = this.prepare(
       "SELECT to_slug FROM links WHERE from_slug = $slug"
     ).all({ $slug: slug }) as Array<{ to_slug: string }>;
     return rows.map(r => r.to_slug);
   }
 
   getIncomingSlugs(slug: string): string[] {
-    const rows = this.db.prepare(
+    const rows = this.prepare(
       "SELECT from_slug FROM links WHERE to_slug = $slug"
     ).all({ $slug: slug }) as Array<{ from_slug: string }>;
     return rows.map(r => r.from_slug);
@@ -1027,30 +1042,30 @@ export class CBrainDB {
       sql += " AND relation = $rel";
       params.$rel = relation;
     }
-    const rows = this.db.prepare(sql).all(params) as Array<{ slug: string }>;
+    const rows = this.prepare(sql).all(params) as Array<{ slug: string }>;
     return rows.map(r => r.slug);
   }
 
   getAllLinks(): Array<{ from_slug: string; to_slug: string; relation: string; weight: number }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT from_slug, to_slug, relation, weight FROM links"
     ).all() as Array<{ from_slug: string; to_slug: string; relation: string; weight: number }>;
   }
 
   getLinkCount(): number {
-    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM links").get() as { cnt: number };
+    const row = this.prepare("SELECT COUNT(*) as cnt FROM links").get() as { cnt: number };
     return row.cnt;
   }
 
   getLinkCountBySlug(slug: string): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT COUNT(*) as cnt FROM links WHERE from_slug = $slug OR to_slug = $slug"
     ).get({ $slug: slug }) as { cnt: number };
     return row.cnt;
   }
 
   linkExists(from: string, to: string, relation: string): boolean {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT 1 FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
     ).get({ $from: from, $to: to, $rel: relation });
     return row != null;
@@ -1059,22 +1074,22 @@ export class CBrainDB {
   // ─── Chunk write operations ──────────────────────────────────
 
   deleteChunksByPage(slug: string): void {
-    this.db.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
   }
 
   insertChunk(slug: string, index: number, content: string): void {
-    this.db.prepare(
+    this.prepare(
       "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
     ).run({ $slug: slug, $idx: index, $content: content });
   }
 
   getChunkCount(): number {
-    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as { cnt: number };
+    const row = this.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as { cnt: number };
     return row.cnt;
   }
 
   getChunkCountByPage(slug: string): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT COUNT(*) as cnt FROM chunks WHERE page_slug = $slug"
     ).get({ $slug: slug }) as { cnt: number };
     return row.cnt;
@@ -1083,13 +1098,13 @@ export class CBrainDB {
   // ─── Ingest log write ──────────────────────────────────────
 
   addIngestLog(sourceType: string, action: string, slug?: string | null, details?: string | null): void {
-    this.db.prepare(
+    this.prepare(
       "INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES ($src, $action, $slug, $details)"
     ).run({ $src: sourceType, $action: action, $slug: slug ?? null, $details: details ?? null });
   }
 
   getRecentNerErrorCount(): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT COUNT(*) as cnt FROM ingest_log WHERE details LIKE '%nerError%' AND created_at > datetime('now', '-24 hours')"
     ).get() as { cnt: number };
     return row.cnt;
@@ -1098,18 +1113,18 @@ export class CBrainDB {
   // ─── Timeline write operations ──────────────────────────────
 
   deleteTimelineByPage(slug: string): void {
-    this.db.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
   }
 
   getTimelineCountByPage(slug: string): number {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT COUNT(*) as cnt FROM timeline WHERE page_slug = $slug"
     ).get({ $slug: slug }) as { cnt: number };
     return row.cnt;
   }
 
   rewireTimeline(oldSlug: string, newSlug: string): void {
-    this.db.prepare(
+    this.prepare(
       "UPDATE timeline SET page_slug = $new WHERE page_slug = $old"
     ).run({ $old: oldSlug, $new: newSlug });
   }
@@ -1117,11 +1132,11 @@ export class CBrainDB {
   // ─── Tag bulk operations ─────────────────────────────────────
 
   deleteTagsByPage(slug: string): void {
-    this.db.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
   }
 
   addTags(slug: string, tags: string[]): void {
-    const stmt = this.db.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES ($slug, $tag)");
+    const stmt = this.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES ($slug, $tag)");
     for (const tag of tags) {
       stmt.run({ $slug: slug, $tag: tag });
     }
@@ -1130,17 +1145,17 @@ export class CBrainDB {
   // ─── Config operations ───────────────────────────────────────
 
   getAllConfig(): Array<{ key: string; value: string }> {
-    return this.db.prepare("SELECT key, value FROM config ORDER BY key").all() as Array<{ key: string; value: string }>;
+    return this.prepare("SELECT key, value FROM config ORDER BY key").all() as Array<{ key: string; value: string }>;
   }
 
   deleteConfig(key: string): void {
-    this.db.prepare("DELETE FROM config WHERE key = $key").run({ $key: key });
+    this.prepare("DELETE FROM config WHERE key = $key").run({ $key: key });
   }
 
   // ─── Entity lookup ─────────────────────────────────────────────
 
   getEntitySlugByTitle(name: string): string | null {
-    const row = this.db.prepare(
+    const row = this.prepare(
       "SELECT slug FROM pages WHERE title = $name AND type IN ('entity', 'concept')"
     ).get({ $name: name }) as { slug: string } | null;
     return row?.slug ?? null;
@@ -1149,7 +1164,7 @@ export class CBrainDB {
   // ─── Discoveries ──────────────────────────────────────────────
 
   addDiscovery(type: string, entities: string[], score: number, detail?: Record<string, unknown>, dreamRun?: string, actionable?: string, autoApplicable?: boolean): number {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "INSERT INTO discoveries (type, entities, score, detail, detected_at, dream_run, actionable, auto_applicable) VALUES ($type, $entities, $score, $detail, datetime('now'), $run, $actionable, $auto)"
     ).run({
       $type: type,
@@ -1164,38 +1179,38 @@ export class CBrainDB {
   }
 
   getUnseenDiscoveries(limit: number = 10): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, type, entities, score, detail, detected_at, dream_run, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
     ).all({ $limit: limit }) as any[];
   }
 
   markDiscoverySeen(id: number): void {
-    this.db.prepare("UPDATE discoveries SET seen = 1 WHERE id = $id").run({ $id: id });
+    this.prepare("UPDATE discoveries SET seen = 1 WHERE id = $id").run({ $id: id });
   }
 
   cleanupOldDiscoveries(days: number = 90): number {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "DELETE FROM discoveries WHERE seen = 0 AND detected_at < datetime('now', '-' || $days || ' days')"
     ).run({ $days: days });
     return r.changes;
   }
 
   updateDiscoverySuggestion(id: number, suggestion: string): void {
-    this.db.prepare("UPDATE discoveries SET suggestion = $suggestion WHERE id = $id").run({ $id: id, $suggestion: suggestion });
+    this.prepare("UPDATE discoveries SET suggestion = $suggestion WHERE id = $id").run({ $id: id, $suggestion: suggestion });
   }
 
   updateDiscoveryActions(id: number, actions: { type: string; target: string; reason: string }[]): void {
-    this.db.prepare("UPDATE discoveries SET proposed_actions = $actions WHERE id = $id").run({ $id: id, $actions: JSON.stringify(actions) });
+    this.prepare("UPDATE discoveries SET proposed_actions = $actions WHERE id = $id").run({ $id: id, $actions: JSON.stringify(actions) });
   }
 
   getDiscoveriesByActionable(actionable: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE actionable = $actionable AND seen = 0 ORDER BY score DESC LIMIT $limit"
     ).all({ $actionable: actionable, $limit: limit }) as any[];
   }
 
   countDiscoveriesByActionable(): Record<string, number> {
-    const rows = this.db.prepare(
+    const rows = this.prepare(
       "SELECT actionable, COUNT(*) as cnt FROM discoveries WHERE seen = 0 GROUP BY actionable"
     ).all() as Array<{ actionable: string; cnt: number }>;
     const result: Record<string, number> = { high: 0, medium: 0, low: 0 };
@@ -1206,7 +1221,7 @@ export class CBrainDB {
   // ─── Insights ──────────────────────────────────────────────────
 
   createInsight(data: CreateInsightInput): number {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "INSERT INTO insights (content, type, confidence, source_entities, source_type, expires_at) VALUES ($content, $type, $confidence, $entities, $sourceType, $expiresAt)"
     ).run({
       $content: data.content,
@@ -1220,7 +1235,7 @@ export class CBrainDB {
   }
 
   getInsight(id: number): InsightRow | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT * FROM insights WHERE id = $id"
     ).get({ $id: id }) as InsightRow | null;
   }
@@ -1251,7 +1266,7 @@ export class CBrainDB {
       sql += " OFFSET $offset";
       params.$offset = opts.offset;
     }
-    return this.db.prepare(sql).all(params) as InsightRow[];
+    return this.prepare(sql).all(params) as InsightRow[];
   }
 
   getInsightsBySourceEntities(slugs: string[], limit: number = 10): InsightRow[] {
@@ -1259,42 +1274,42 @@ export class CBrainDB {
     const conditions = slugs.map((_, i) => `source_entities LIKE $s${i}`).join(" OR ");
     const params: Record<string, string | number> = { $limit: limit };
     slugs.forEach((s, i) => { params[`$s${i}`] = `%"${s}"%`; });
-    return this.db.prepare(
+    return this.prepare(
       `SELECT * FROM insights WHERE status = 'active' AND (${conditions}) ORDER BY created_at DESC LIMIT $limit`
     ).all(params) as InsightRow[];
   }
 
   updateInsightStatus(id: number, status: "active" | "archived" | "dismissed"): boolean {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "UPDATE insights SET status = $status WHERE id = $id"
     ).run({ $id: id, $status: status });
     return r.changes > 0;
   }
 
   markInsightSeen(id: number): void {
-    this.db.prepare("UPDATE insights SET seen = 1 WHERE id = $id").run({ $id: id });
+    this.prepare("UPDATE insights SET seen = 1 WHERE id = $id").run({ $id: id });
   }
 
   countInsights(status?: string): number {
     if (status) {
-      const row = this.db.prepare(
+      const row = this.prepare(
         "SELECT COUNT(*) as cnt FROM insights WHERE status = $status"
       ).get({ $status: status }) as { cnt: number };
       return row.cnt;
     }
-    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM insights").get() as { cnt: number };
+    const row = this.prepare("SELECT COUNT(*) as cnt FROM insights").get() as { cnt: number };
     return row.cnt;
   }
 
   archiveExpiredInsights(): number {
-    const r = this.db.prepare(
+    const r = this.prepare(
       "UPDATE insights SET status = 'archived' WHERE expires_at IS NOT NULL AND expires_at < datetime('now') AND status = 'active'"
     ).run();
     return r.changes;
   }
 
   getDiscoveryById(id: number): { id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number } | null {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE id = $id"
     ).get({ $id: id }) as any ?? null;
   }
@@ -1315,13 +1330,13 @@ export class CBrainDB {
   }
 
   logSearch(query: string, strategy: string, latencyMs: number, hitCount: number, degraded: boolean): void {
-    this.db.prepare(
+    this.prepare(
       "INSERT INTO search_log (query, strategy, latency_ms, hit_count, degraded) VALUES ($query, $strategy, $latency, $hits, $degraded)"
     ).run({ $query: query, $strategy: strategy, $latency: latencyMs, $hits: hitCount, $degraded: degraded ? 1 : 0 });
   }
 
   getSearchLog(limit: number = 50): Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; created_at: string }> {
-    return this.db.prepare(
+    return this.prepare(
       "SELECT id, query, strategy, latency_ms, hit_count, degraded, created_at FROM search_log ORDER BY id DESC LIMIT $limit"
     ).all({ $limit: limit }) as Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; created_at: string }>;
   }

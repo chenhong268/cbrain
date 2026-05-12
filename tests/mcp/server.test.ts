@@ -73,17 +73,20 @@ describe("MCP Server", () => {
       const tools = getTools(server);
       const names = Object.keys(tools);
       expect(names.sort()).toEqual([
-        "add_link", "add_tag", "add_timeline_entry", "deep_recall", "delete_page",
-        "delete_raw_data", "dream", "dream_reset", "enrich", "generate_indexes",
-        "get_chunks", "get_config", "get_ingest_log", "get_links",
-        "get_page", "get_raw_data", "get_tags", "get_timeline",
-        "get_versions", "graph_query", "health", "ingest",
-        "ingest_dialogue", "job_cancel", "job_list", "job_retry", "job_status",
-        "job_submit", "list_pages", "list_raw_data",
-        "merge_pages", "put_page", "put_raw_data", "query", "remove_link",
-        "remove_orphans", "remove_tag", "resolve_slugs",
-        "revert_version", "set_config", "status", "sync",
-        "writeback",
+        "add_link", "add_tag", "add_timeline_entry", "archive_insight",
+        "brain_storm", "deep_recall", "delete_page", "dismiss_insight",
+        "dream", "dream_reset", "enrich", "expand_entity",
+        "generate_indexes", "get_chunks", "get_ingest_log", "get_insight",
+        "get_links", "get_page", "get_profile", "get_tags",
+        "get_timeline", "get_versions", "graph_query", "health",
+        "ingest", "ingest_dialogue", "job_cancel", "job_list",
+        "job_retry", "job_status", "job_submit", "list_insights",
+        "list_pages", "mark_discovery_seen", "merge_pages",
+        "promote_discovery", "put_page", "query", "query_insights",
+        "read_discoveries", "reload_profile", "remove_link",
+        "remove_orphans", "remove_profile", "remove_tag",
+        "resolve_slugs", "revert_version", "run_discovery", "status",
+        "summarize", "sync", "update_profile", "writeback",
       ]);
     });
   });
@@ -298,14 +301,14 @@ describe("MCP Server", () => {
     test("creates a new page", async () => {
       const server = createServer(deps);
       const result = await getTools(server).put_page.handler({
-        slug: "entities/test",
+        slug: "brain/entities/test",
         content: "Hello world",
         title: "Test",
         type: "entity",
       });
       const data = JSON.parse(result.content[0].text);
       expect(data.action).toBe("created");
-      expect(data.page.slug).toBe("entities/test");
+      expect(data.page.slug).toBe("brain/entities/test");
       expect(data.page.title).toBe("Test");
     });
 
@@ -622,40 +625,6 @@ describe("MCP Server", () => {
     });
   });
 
-  // ─── Config tools ──────────────────────────────
-
-  describe("set_config tool", () => {
-    test("sets a config value", async () => {
-      const server = createServer(deps);
-      const result = await getTools(server).set_config.handler({
-        key: "test_key",
-        value: "test_value",
-      });
-      const data = JSON.parse(result.content[0].text);
-      expect(data.success).toBe(true);
-    });
-  });
-
-  describe("get_config tool", () => {
-    test("returns a config value", async () => {
-      db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)").run("existing_key", "42");
-
-      const server = createServer(deps);
-      const result = await getTools(server).get_config.handler({ key: "existing_key" });
-      const data = JSON.parse(result.content[0].text);
-      expect(data.key).toBe("existing_key");
-      expect(data.value).toBe("42");
-    });
-
-    test("returns null for missing key", async () => {
-      const server = createServer(deps);
-      const result = await getTools(server).get_config.handler({ key: "nope" });
-      const data = JSON.parse(result.content[0].text);
-      expect(data.key).toBe("nope");
-      expect(data.value).toBeNull();
-    });
-  });
-
   // ─── Version tools ─────────────────────────────
 
   describe("get_versions tool", () => {
@@ -797,92 +766,6 @@ describe("MCP Server", () => {
 
       const server = createServer(deps);
       const result = await getTools(server).job_retry.handler({ id });
-      const data = JSON.parse(result.content[0].text);
-      expect(data.success).toBe(true);
-    });
-  });
-
-  // ─── Raw data tools ────────────────────────────
-
-  describe("put_raw_data tool", () => {
-    test("stores raw data for a page", async () => {
-      db.prepare(
-        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
-      ).run("entities/rd", "RD", "rd.md", "h1");
-
-      const server = createServer(deps);
-      const result = await getTools(server).put_raw_data.handler({
-        slug: "entities/rd",
-        key: "test.bin",
-        data_base64: "aGVsbG8=",
-        mime_type: "application/octet-stream",
-      });
-      const data = JSON.parse(result.content[0].text);
-      expect(data.success).toBe(true);
-    });
-  });
-
-  describe("list_raw_data tool", () => {
-    test("lists raw data keys for a page", async () => {
-      db.prepare(
-        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
-      ).run("entities/rd2", "RD2", "rd2.md", "h1");
-      db.prepare(
-        "INSERT INTO raw_data (page_slug, key, mime_type, data) VALUES (?, ?, ?, ?)"
-      ).run("entities/rd2", "file1.bin", "application/octet-stream", Buffer.from("data"));
-
-      const server = createServer(deps);
-      const result = await getTools(server).list_raw_data.handler({ slug: "entities/rd2" });
-      const data = JSON.parse(result.content[0].text);
-      expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(1);
-    });
-  });
-
-  describe("get_raw_data tool", () => {
-    test("retrieves raw data", async () => {
-      db.prepare(
-        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
-      ).run("entities/rd3", "RD3", "rd3.md", "h1");
-      db.prepare(
-        "INSERT INTO raw_data (page_slug, key, mime_type, data) VALUES (?, ?, ?, ?)"
-      ).run("entities/rd3", "test.bin", "text/plain", Buffer.from("hello"));
-
-      const server = createServer(deps);
-      const result = await getTools(server).get_raw_data.handler({
-        slug: "entities/rd3",
-        key: "test.bin",
-      });
-      const data = JSON.parse(result.content[0].text);
-      expect(data.key).toBe("test.bin");
-      expect(data.mime_type).toBe("text/plain");
-    });
-
-    test("returns error for missing raw data", async () => {
-      const server = createServer(deps);
-      const result = await getTools(server).get_raw_data.handler({
-        slug: "entities/ghost",
-        key: "nope",
-      });
-      const data = JSON.parse(result.content[0].text);
-      expect(data.error).toBeDefined();
-    });
-  });
-
-  describe("delete_raw_data tool", () => {
-    test("deletes raw data", async () => {
-      db.prepare(
-        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
-      ).run("entities/rd4", "RD4", "rd4.md", "h1");
-      db.prepare(
-        "INSERT INTO raw_data (page_slug, key, mime_type, data) VALUES (?, ?, ?, ?)"
-      ).run("entities/rd4", "delete_me", "text/plain", Buffer.from("x"));
-
-      const server = createServer(deps);
-      const result = await getTools(server).delete_raw_data.handler({
-        slug: "entities/rd4",
-        key: "delete_me",
-      });
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(true);
     });

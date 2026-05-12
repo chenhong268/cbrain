@@ -142,7 +142,7 @@ describe("IngestManager", () => {
         "---",
         "title: 李四",
         "type: entity",
-        "slug: entities/lisi",
+        "slug: brain/entities/lisi",
         "tags:",
         "  - 人物",
         "  - 工程师",
@@ -156,12 +156,12 @@ describe("IngestManager", () => {
         type: "markdown",
       });
 
-      expect(result.slug).toBe("entities/lisi");
+      expect(result.slug).toBe("brain/entities/lisi");
       expect(result.created).toBe(true);
 
       const row = db
         .prepare("SELECT * FROM pages WHERE slug = ?")
-        .get("entities/lisi") as any;
+        .get("brain/entities/lisi") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("李四");
     });
@@ -171,7 +171,7 @@ describe("IngestManager", () => {
         "---",
         "title: 王五",
         "type: entity",
-        "slug: entities/wangwu",
+        "slug: brain/entities/wangwu",
         "---",
         "",
         "原始内容",
@@ -184,7 +184,7 @@ describe("IngestManager", () => {
         "---",
         "title: 王五",
         "type: entity",
-        "slug: entities/wangwu",
+        "slug: brain/entities/wangwu",
         "---",
         "",
         "更新后的内容",
@@ -192,7 +192,7 @@ describe("IngestManager", () => {
 
       const result = await ingest.ingest({ content: md2, type: "markdown" });
       expect(result.created).toBe(false);
-      expect(result.slug).toBe("entities/wangwu");
+      expect(result.slug).toBe("brain/entities/wangwu");
     });
 
     test("auto-generates slug when missing from frontmatter", async () => {
@@ -214,7 +214,7 @@ describe("IngestManager", () => {
         "---",
         "title: TagPriority",
         "type: record",
-        "slug: records/tag-priority",
+        "slug: brain/records/tag-priority",
         "tags:",
         "  - fm-tag",
         "---",
@@ -230,7 +230,7 @@ describe("IngestManager", () => {
 
       const tags = db
         .prepare("SELECT tag FROM tags WHERE page_slug = ?")
-        .all("records/tag-priority") as any[];
+        .all("brain/records/tag-priority") as any[];
       const tagValues = tags.map((t) => t.tag);
       expect(tagValues).toContain("fm-tag");
       expect(tagValues).not.toContain("input-tag");
@@ -241,17 +241,17 @@ describe("IngestManager", () => {
     test("creates graph edges for resolved links", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/lisi", "entity", "李四", "entities/lisi.md", "h1");
+      ).run("brain/entities/lisi", "entity", "李四", "brain/entities/lisi.md", "h1");
 
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/wangwu", "entity", "王五", "entities/wangwu.md", "h2");
+      ).run("brain/entities/wangwu", "entity", "王五", "brain/entities/wangwu.md", "h2");
 
       const md = [
         "---",
         "title: 链接测试",
         "type: record",
-        "slug: records/link-test",
+        "slug: brain/records/link-test",
         "---",
         "",
         "提到了[[李四]]和[[王五]]。",
@@ -262,10 +262,10 @@ describe("IngestManager", () => {
 
       const links = db
         .prepare("SELECT to_slug FROM links WHERE from_slug = ?")
-        .all("records/link-test") as any[];
+        .all("brain/records/link-test") as any[];
       const targets = links.map((l) => l.to_slug);
-      expect(targets).toContain("entities/lisi");
-      expect(targets).toContain("entities/wangwu");
+      expect(targets).toContain("brain/entities/lisi");
+      expect(targets).toContain("brain/entities/wangwu");
     });
 
     test("skips unresolved links", async () => {
@@ -273,7 +273,7 @@ describe("IngestManager", () => {
         "---",
         "title: Unresolved",
         "type: record",
-        "slug: records/unresolved",
+        "slug: brain/records/unresolved",
         "---",
         "",
         "提到了[[不存在的人]]。",
@@ -284,20 +284,20 @@ describe("IngestManager", () => {
 
       const links = db
         .prepare("SELECT * FROM links WHERE from_slug = ?")
-        .all("records/unresolved") as any[];
+        .all("brain/records/unresolved") as any[];
       expect(links.length).toBe(0);
     });
 
     test("increments mention count on linked pages", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/mentioned", "entity", "被提及者", "entities/mentioned.md", "h1");
+      ).run("brain/entities/mentioned", "entity", "被提及者", "brain/entities/mentioned.md", "h1");
 
       const md = [
         "---",
         "title: Mention Test",
         "type: record",
-        "slug: records/mention-test",
+        "slug: brain/records/mention-test",
         "---",
         "",
         "提到了[[被提及者]]。",
@@ -307,31 +307,31 @@ describe("IngestManager", () => {
 
       const row = db
         .prepare("SELECT mention_count FROM pages WHERE slug = ?")
-        .get("entities/mentioned") as any;
+        .get("brain/entities/mentioned") as any;
       expect(row.mention_count).toBe(1);
     });
 
     test("does not create self-referencing link", async () => {
-      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
       const preMd = [
         "---",
         "title: SelfRef",
         "type: entity",
-        "slug: entities/self-ref",
+        "slug: brain/entities/self-ref",
         "---",
         "",
         "Original",
       ].join("\n");
-      writeFileSync(join(vaultPath, "entities/self-ref.md"), preMd, "utf-8");
+      writeFileSync(join(vaultPath, "brain/entities/self-ref.md"), preMd, "utf-8");
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/self-ref", "entity", "SelfRef", "entities/self-ref.md", "h1");
+      ).run("brain/entities/self-ref", "entity", "SelfRef", "brain/entities/self-ref.md", "h1");
 
       const md = [
         "---",
         "title: SelfRef",
         "type: entity",
-        "slug: entities/self-ref",
+        "slug: brain/entities/self-ref",
         "---",
         "",
         "自我引用[[SelfRef]]。",
@@ -341,7 +341,7 @@ describe("IngestManager", () => {
 
       const links = db
         .prepare("SELECT * FROM links WHERE from_slug = ? AND to_slug = ?")
-        .all("entities/self-ref", "entities/self-ref") as any[];
+        .all("brain/entities/self-ref", "brain/entities/self-ref") as any[];
       expect(links.length).toBe(0);
     });
   });
@@ -435,6 +435,9 @@ describe("IngestManager", () => {
         pageType: "record",
       });
 
+      // Wait for async NER to complete
+      await new Promise(r => setTimeout(r, 200));
+
       const lisi = db.prepare("SELECT * FROM pages WHERE title = ?").get("李四") as any;
       expect(lisi).not.toBeNull();
       expect(lisi.type).toBe("entity");
@@ -446,15 +449,19 @@ describe("IngestManager", () => {
 
     test("writes relations to links table", async () => {
       const llm = createMockLLM([
+        // Stage 1: entities + events
         JSON.stringify({
           entities: [
             { name: "王五", type: "person", context: "王五在ABC公司工作" },
             { name: "ABC公司", type: "company", context: "王五在ABC公司工作" },
           ],
+          events: [],
+        }),
+        // Stage 2: relations
+        JSON.stringify({
           relations: [
             { from: "王五", to: "ABC公司", relation: "works_at", context: "王五在ABC公司工作" },
           ],
-          events: [],
         }),
       ]);
 
@@ -468,9 +475,12 @@ describe("IngestManager", () => {
         pageType: "record",
       });
 
-      const links = db.prepare("SELECT * FROM links WHERE relation = 'works_at'").all() as any[];
+      // Wait for async NER to complete
+      await new Promise(r => setTimeout(r, 200));
+
+      const links = db.prepare("SELECT * FROM links WHERE relation = '任职'").all() as any[];
       expect(links.length).toBe(1);
-      expect(links[0].relation).toBe("works_at");
+      expect(links[0].relation).toBe("任职");
     });
 
     test("writes events to timeline", async () => {
@@ -496,6 +506,9 @@ describe("IngestManager", () => {
         title: "DEF科技故事",
         pageType: "record",
       });
+
+      // Wait for async NER to complete
+      await new Promise(r => setTimeout(r, 200));
 
       const events = db.prepare("SELECT * FROM timeline").all() as any[];
       expect(events.length).toBe(1);
@@ -537,6 +550,9 @@ describe("IngestManager", () => {
         title: "人物介绍",
         pageType: "record",
       });
+
+      // Wait for async NER to complete
+      await new Promise(r => setTimeout(r, 200));
 
       const stub = db.prepare("SELECT * FROM pages WHERE title = '测试人物'").get() as any;
       expect(stub).not.toBeNull();

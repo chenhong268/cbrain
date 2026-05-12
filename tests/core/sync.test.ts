@@ -207,12 +207,12 @@ describe("SyncManager", () => {
 
   describe("syncPage", () => {
     test("syncs a single page by slug", async () => {
-      writeMdFile(vaultPath, "entities/single.md", { title: "Single", type: "entity", slug: "entities/single" }, "Single page content");
+      writeMdFile(vaultPath, "brain/entities/single.md", { title: "Single", type: "entity", slug: "brain/entities/single" }, "Single page content");
 
-      const result = await sync.syncPage("entities/single", vaultPath);
+      const result = await sync.syncPage("brain/entities/single", vaultPath);
       expect(result.success).toBe(true);
 
-      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("entities/single") as any;
+      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("brain/entities/single") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("Single");
     });
@@ -224,12 +224,12 @@ describe("SyncManager", () => {
     });
 
     test("skips if content unchanged", async () => {
-      writeMdFile(vaultPath, "entities/cached.md", { title: "Cached", type: "entity", slug: "entities/cached" }, "Stable content");
+      writeMdFile(vaultPath, "brain/entities/cached.md", { title: "Cached", type: "entity", slug: "brain/entities/cached" }, "Stable content");
 
-      await sync.syncPage("entities/cached", vaultPath);
+      await sync.syncPage("brain/entities/cached", vaultPath);
       lance.added.length = 0;
 
-      const result = await sync.syncPage("entities/cached", vaultPath);
+      const result = await sync.syncPage("brain/entities/cached", vaultPath);
       expect(result.success).toBe(true);
       expect(result.skipped).toBe(true);
       expect(lance.added.length).toBe(0);

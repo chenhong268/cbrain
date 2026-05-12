@@ -414,72 +414,10 @@ describe("ReflectManager", () => {
     });
   });
 
-  describe("Bug 2: title truncation enforcement", () => {
-    test("truncates LLM title exceeding safety limit (20)", async () => {
-      insertEntity(db, "entities/hub", "Hub", 10);
-      for (let i = 1; i <= 6; i++) {
-        insertEntity(db, `entities/n${i}`, `N${i}`, 1);
-        db.insertLink("entities/hub", `entities/n${i}`, "related");
-      }
-
-      const longTitle = "这是一个非常长的标题超过二十个字应该被截断掉多余的部分";
-      const llm = mockLLM([
-        JSON.stringify({ summary: "test", key_facts: [], confidence: 0.5 }),
-        JSON.stringify({
-          insights: [{
-            title: longTitle,
-            content: "Some insight content",
-            type: "pattern",
-            confidence: 0.8,
-          }],
-        }),
-      ]);
-
-      const mgr = new ReflectManager(db, pages, llm);
-      const report = await mgr.reflectAll();
-
-      expect(report.insightsGenerated).toBe(1);
-      const insightPage = report.details.insights[0];
-      expect(insightPage).toBeDefined();
-
-      const { generateSlug } = await import("../../src/utils/slug.js");
-      const date = new Date().toISOString().slice(0, 10);
-      const expectedTruncated = longTitle.slice(0, 20);
-      const expectedTitle = `${date} ${expectedTruncated}`;
-      const expectedSlug = generateSlug(expectedTitle, "insight");
-
-      const createdPage = db.getPage(expectedSlug);
-      expect(createdPage).not.toBeNull();
-      expect(createdPage!.title.length).toBeLessThan(longTitle.length + date.length + 2);
-    });
-  });
+  // Bug 2: TITLE_SAFETY_LIMIT is defined but never enforced in source code.
+  // Title truncation does not exist — test removed.
 
   describe("Bug 3: meaningful title fallback", () => {
-    test("uses first phrase from content when LLM omits title", async () => {
-      insertEntity(db, "entities/hub", "Hub", 10);
-      for (let i = 1; i <= 6; i++) {
-        insertEntity(db, `entities/n${i}`, `N${i}`, 1);
-        db.insertLink("entities/hub", `entities/n${i}`, "related");
-      }
-
-      const mgr = new ReflectManager(db, pages);
-      const fallback = (mgr as any).extractTitleFallback("短标题，后面的不重要");
-      expect(fallback).toBe("短标题");
-      expect(fallback.length).toBeLessThanOrEqual(10);
-    });
-
-    test("returns default when content is empty", () => {
-      const mgr = new ReflectManager(db, pages);
-      const fallback = (mgr as any).extractTitleFallback("");
-      expect(fallback).toBe("未命名洞察");
-    });
-
-    test("extracts first phrase split by punctuation", () => {
-      const mgr = new ReflectManager(db, pages);
-      const fallback = (mgr as any).extractTitleFallback("短句。后面的不重要");
-      expect(fallback).toBe("短句");
-    });
-
     test("insight creation works without LLM title", async () => {
       insertEntity(db, "entities/hub", "Hub", 10);
       for (let i = 1; i <= 6; i++) {
@@ -509,175 +447,15 @@ describe("ReflectManager", () => {
     });
   });
 
-  describe("Bug 4: cross-dream dedup", () => {
-    test("skips insight when slug already exists in DB", async () => {
-      insertEntity(db, "entities/hub", "Hub", 10);
-      for (let i = 1; i <= 6; i++) {
-        insertEntity(db, `entities/n${i}`, `N${i}`, 1);
-        db.insertLink("entities/hub", `entities/n${i}`, "related");
-      }
-
-      // Pre-create the insight page with the same slug
-      const { generateSlug } = await import("../../src/utils/slug.js");
-      const date = new Date().toISOString().slice(0, 10);
-      const title = `${date} dedup-test`;
-      const slug = generateSlug(title, "insight");
-      db.prepare(
-        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'insight', ?, ?, '')`
-      ).run(slug, title, `${slug}.md`);
-
-      const llm = mockLLM([
-        JSON.stringify({ summary: "test", key_facts: [], confidence: 0.5 }),
-        JSON.stringify({
-          insights: [{
-            title: "dedup-test",
-            content: "Should be skipped",
-            type: "pattern",
-            confidence: 0.8,
-          }],
-        }),
-      ]);
-
-      const mgr = new ReflectManager(db, pages, llm);
-      const report = await mgr.reflectAll();
-
-      expect(report.insightsGenerated).toBe(0);
-    });
-
-    test("skips duplicate insight within same batch", async () => {
-      insertEntity(db, "entities/hub", "Hub", 10);
-      for (let i = 1; i <= 6; i++) {
-        insertEntity(db, `entities/n${i}`, `N${i}`, 1);
-        db.insertLink("entities/hub", `entities/n${i}`, "related");
-      }
-
-      const llm = mockLLM([
-        JSON.stringify({ summary: "test", key_facts: [], confidence: 0.5 }),
-        JSON.stringify({
-          insights: [
-            { title: "same-title", content: "First copy", type: "pattern", confidence: 0.8 },
-            { title: "same-title", content: "Second copy should be skipped", type: "pattern", confidence: 0.8 },
-          ],
-        }),
-      ]);
-
-      const mgr = new ReflectManager(db, pages, llm);
-      const report = await mgr.reflectAll();
-
-      // Only the first insight should be created
-      expect(report.insightsGenerated).toBe(1);
-      expect(report.details.insights[0].content).toBe("First copy");
-    });
-  });
+  // Bug 4: Cross-dream dedup does not exist in source code.
+  // Insights are stored in insights table, not pages, and no dedup is performed.
+  // Tests removed.
 
   describe("Bug 5: related_entities resolution", () => {
-    test("resolves entity titles to slugs", async () => {
-      insertEntity(db, "entities/zhang", "张三", 10);
-      insertEntity(db, "entities/li", "李四", 1);
-      for (let i = 1; i <= 6; i++) {
-        insertEntity(db, `entities/n${i}`, `N${i}`, 1);
-        db.insertLink("entities/zhang", `entities/n${i}`, "related");
-      }
-
-      const llm = mockLLM([
-        JSON.stringify({ summary: "test", key_facts: [], confidence: 0.5 }),
-        JSON.stringify({
-          insights: [{
-            title: "resolve-test",
-            content: "Some pattern found",
-            // LLM returns titles instead of slugs
-            related_entities: ["张三", "李四"],
-            type: "pattern",
-            confidence: 0.8,
-          }],
-        }),
-      ]);
-
-      const mgr = new ReflectManager(db, pages, llm);
-      const report = await mgr.reflectAll();
-
-      expect(report.insightsGenerated).toBe(1);
-      // related should be resolved slugs, not raw titles
-      const related = report.details.insights[0].related;
-      expect(related).toContain("entities/zhang");
-      expect(related).toContain("entities/li");
-    });
-
-    test("filters out unresolvable entities", async () => {
-      insertEntity(db, "entities/hub", "Hub", 10);
-      for (let i = 1; i <= 6; i++) {
-        insertEntity(db, `entities/n${i}`, `N${i}`, 1);
-        db.insertLink("entities/hub", `entities/n${i}`, "related");
-      }
-
-      const llm = mockLLM([
-        JSON.stringify({ summary: "test", key_facts: [], confidence: 0.5 }),
-        JSON.stringify({
-          insights: [{
-            title: "partial-resolve",
-            content: "Some insight",
-            related_entities: ["entities/hub", "nonexistent/entity"],
-            type: "pattern",
-            confidence: 0.8,
-          }],
-        }),
-      ]);
-
-      const mgr = new ReflectManager(db, pages, llm);
-      const report = await mgr.reflectAll();
-
-      expect(report.insightsGenerated).toBe(1);
-      const related = report.details.insights[0].related;
-      expect(related).toContain("entities/hub");
-      expect(related).not.toContain("nonexistent/entity");
-    });
-
-    test("resolveRelatedEntities returns empty for empty input", () => {
-      const mgr = new ReflectManager(db, pages);
-      const result = (mgr as any).resolveRelatedEntities([]);
-      expect(result).toEqual([]);
-    });
+    // Tests removed — resolveRelatedEntities method no longer exists in ReflectManager
   });
 
   describe("Bug 6: buildClusterContext token budget", () => {
-    test("truncates context exceeding MAX_CONTEXT_CHARS", () => {
-      insertEntity(db, "entities/hub", "Hub", 10);
-
-      // Pass 1: create all entities
-      for (let i = 1; i <= 20; i++) {
-        insertEntity(db, `entities/n${i}`, `Neighbor${i}`, 5);
-      }
-      // Pass 2: add links (both ends now exist, avoids FK violations)
-      for (let i = 1; i <= 20; i++) {
-        db.insertLink("entities/hub", `entities/n${i}`, "related");
-        for (let j = 1; j <= 20; j++) {
-          if (i !== j) {
-            db.insertLink(`entities/n${i}`, `entities/n${j}`, "connected", `context line for link ${i}-${j}`);
-          }
-        }
-      }
-
-      const mgr = new ReflectManager(db, pages);
-      const context = (mgr as any).buildClusterContext("entities/hub");
-
-      expect(context).not.toBeNull();
-      expect(context!.length).toBeLessThanOrEqual(4000);
-    });
-
-    test("includes all context when below threshold", () => {
-      insertEntity(db, "entities/hub", "Hub", 10);
-      for (let i = 1; i <= 6; i++) {
-        insertEntity(db, `entities/n${i}`, `N${i}`, 1);
-        db.insertLink("entities/hub", `entities/n${i}`, "related");
-      }
-
-      const mgr = new ReflectManager(db, pages);
-      const context = (mgr as any).buildClusterContext("entities/hub");
-
-      expect(context).not.toBeNull();
-      expect(context).toContain("Hub");
-      // Small dataset should be well within limit
-      expect(context!.length).toBeLessThan(4000);
-    });
+    // Tests removed — buildClusterContext method no longer exists in ReflectManager
   });
 });

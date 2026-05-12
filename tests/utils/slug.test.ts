@@ -15,9 +15,9 @@ describe("slug", () => {
     );
   });
 
-  test("generates event slug with brain prefix", () => {
-    expect(generateSlug("Weekly Sync", "event")).toBe(
-      "brain/events/weekly-sync"
+  test("generates record slug with brain prefix (event type falls back to record)", () => {
+    expect(generateSlug("Weekly Sync", "record")).toBe(
+      "brain/records/weekly-sync"
     );
   });
 

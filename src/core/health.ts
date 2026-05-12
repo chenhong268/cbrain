@@ -607,7 +607,7 @@ export class HealthChecker {
 
     return {
       name: "完整性",
-      status: bareStubs.length > 20 ? "warn" : bareStubs.length > 0 ? "warn" : "pass",
+      status: bareStubs.length > 20 ? "fail" : bareStubs.length > 0 ? "warn" : "pass",
       issues,
     };
   }
@@ -637,7 +637,7 @@ export class HealthChecker {
   private checkNewSuggestions(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    const sourceCount = this.db.getPageCountByTypes(["record", "raw", "event"]);
+    const sourceCount = this.db.getPageCountByTypes(["record", "raw"]);
     const conceptCount = this.db.getPageCountByType("concept");
 
     const ratio = sourceCount > 0 ? conceptCount / sourceCount : 0;
@@ -835,7 +835,7 @@ export class HealthChecker {
         const wordsA = new Set(contexts[i].split(/[\s，。、；：！？\n]+/).filter(w => w.length > 0));
         for (let j = i + 1; j < contexts.length; j++) {
           const wordsB = new Set(contexts[j].split(/[\s，。、；：！？\n]+/).filter(w => w.length > 0));
-          if (wordsA.size === 0 && wordsB.size === 0) continue;
+          if (wordsA.size === 0 || wordsB.size === 0) continue;
           const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
           const overlap = intersection / Math.min(wordsA.size, wordsB.size);
           if (overlap < minOverlap) { minOverlap = overlap; bestPair = [rawSources[i].from_slug, rawSources[j].from_slug]; }
@@ -866,7 +866,7 @@ export class HealthChecker {
     const totalPages = this.db.getPageCount();
     const entities = this.db.getPageCountByType("entity");
     const concepts = this.db.getPageCountByType("concept");
-    const events = this.db.getPageCountByType("event");
+    const events = 0; // deprecated: event type no longer used
     const records = this.db.getPageCountByType("record");
     const rawPages = this.db.getPageCountByType("raw");
     const totalLinks = this.db.getLinkCount();
@@ -875,7 +875,7 @@ export class HealthChecker {
     const orphans = this.db.getIslandPages().length;
     const bareStubs = this.db.getBareStubs().length;
 
-    const sourceCount = records + rawPages + events;
+    const sourceCount = records + rawPages;
     const conceptsPerSource = sourceCount > 0 ? concepts / sourceCount : 0;
 
     return {

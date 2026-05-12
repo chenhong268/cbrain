@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { relative } from "node:path";
 import type { SyncManager } from "./sync.js";
 import { hashContent, collectMarkdownFiles } from "./shared.js";
@@ -6,7 +6,7 @@ import { hashContent, collectMarkdownFiles } from "./shared.js";
 /**
  * Polling vault watcher. Scans every 3s, hashes each .md file, compares
  * against content_hash in DB. Only syncs files whose content changed.
- * Uses hash (not mtime) — handles copied files, iCloud sync, etc.
+ * Uses mtime+size pre-filter to skip unchanged files without hashing.
  */
 export class FileWatcher {
   private sync: SyncManager;
@@ -15,6 +15,7 @@ export class FileWatcher {
   private running = false;
   private readonly POLL_MS = 3000;
   private hashes = new Map<string, string>();  // path → content_hash
+  private mtimes = new Map<string, { mtime: number; size: number }>();
 
   constructor(sync: SyncManager, vaultPath: string) {
     this.sync = sync;
@@ -40,12 +41,21 @@ export class FileWatcher {
     for (const fullPath of files) {
       seen.add(fullPath);
       try {
+        // Pre-filter: skip files whose mtime and size haven't changed
+        const stat = statSync(fullPath);
+        const meta = { mtime: stat.mtimeMs, size: stat.size };
+        const prevMeta = this.mtimes.get(fullPath);
+        this.mtimes.set(fullPath, meta);
+        if (prevMeta && prevMeta.mtime === meta.mtime && prevMeta.size === meta.size) {
+          continue; // definitely unchanged — skip hashing entirely
+        }
+
         const content = readFileSync(fullPath, "utf-8");
         const h = hashContent(content);
         const prev = this.hashes.get(fullPath);
         this.hashes.set(fullPath, h);
 
-        if (prev === h) continue; // unchanged
+        if (prev === h) continue; // content unchanged
 
         const relPath = relative(this.vaultPath, fullPath);
         const slug = relPath.replace(/\.md$/, "");
@@ -59,9 +69,12 @@ export class FileWatcher {
       }
     }
 
-    // Clean up hashes for deleted files
+    // Clean up hashes/mtimes for deleted files
     for (const path of this.hashes.keys()) {
       if (!seen.has(path)) this.hashes.delete(path);
+    }
+    for (const path of this.mtimes.keys()) {
+      if (!seen.has(path)) this.mtimes.delete(path);
     }
   }
 }

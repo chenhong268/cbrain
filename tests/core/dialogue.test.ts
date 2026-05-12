@@ -219,7 +219,7 @@ describe("DialogueIngest", () => {
       ).run("brain/entities/张三", "entity", "张三", "brain/entities/张三.md", "h1");
       db.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
-      ).run("brain/entities/张三", "brain/entities/甲公司", "works_at");
+      ).run("brain/entities/张三", "brain/entities/甲公司", "任职");
 
       const llm = createMockLLM([
         JSON.stringify({
@@ -277,7 +277,7 @@ describe("DialogueIngest", () => {
       expect(result.newEntities).toBe(0);
       expect(result.newRelations).toBe(1);
 
-      const links = db.prepare("SELECT * FROM links WHERE relation = 'works_at'").all() as any[];
+      const links = db.prepare("SELECT * FROM links WHERE relation = '任职'").all() as any[];
       expect(links.length).toBe(1);
     });
   });
