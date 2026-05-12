@@ -1,6 +1,12 @@
 # Changelog
 
-> Current: `v1.4.0` — Wiki-link lifecycle + raw type removed.
+> Current: `v1.4.1` — Dream 自动生成索引。
+
+## [v1.4.1] — 2026-05-12
+
+### Dream 索引生成
+
+- **Stage 6: indexes** — dream 维护流程末尾自动调用 `IndexGenerator.generateAll()`，刷新 All-Entities、All-Concepts、Dashboard 索引文件，不再需要手动 `cbrain index`
 
 ## [v1.4.0] — 2026-05-12
 
