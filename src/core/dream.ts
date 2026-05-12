@@ -7,6 +7,7 @@ import type { EnrichManager } from "./enrich.js";
 import type { HealthChecker } from "./health.js";
 import type { Logger } from "./logger.js";
 import type { InsightManager } from "./insight.js";
+import { IndexGenerator } from "./indexes.js";
 
 export interface DreamReport {
   timestamp: string;
@@ -18,6 +19,7 @@ export interface DreamReport {
     cleanup: { orphans: number; staleStubs: number };
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
+    indexes: { files: number };
   };
   duration_ms: number;
   locked: boolean;
@@ -64,6 +66,7 @@ export async function runDream(
         cleanup: { orphans: 0, staleStubs: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
         insight_archive: { archived: 0 },
+        indexes: { files: 0 },
       },
       duration_ms: 0,
       locked: false,
@@ -132,6 +135,18 @@ export async function runDream(
     }
   }
 
+  // Stage 6: Index generation
+  logger.info("dream", "Stage 6/6: indexes");
+  let indexFiles = 0;
+  try {
+    const generator = new IndexGenerator(db, outputsDir);
+    const generated = generator.generateAll();
+    indexFiles = generated.length;
+    if (indexFiles > 0) logger.info("dream", `生成 ${indexFiles} 个索引文件`);
+  } catch (e) {
+    logger.warn("dream", `索引生成失败: ${(e as Error).message}`);
+  }
+
   // Report
   logger.info("dream", "building report");
   const report: DreamReport = {
@@ -147,6 +162,7 @@ export async function runDream(
         issues: healthReport.dimensions.reduce((s, d) => s + d.issues.length, 0),
       },
       insight_archive: { archived },
+      indexes: { files: indexFiles },
     },
     duration_ms: Date.now() - started,
     locked: true,
@@ -169,6 +185,7 @@ export async function runDream(
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
     `| Insight Archive | ${report.stages.insight_archive.archived} 条过期归档 |`,
+    `| Indexes | ${report.stages.indexes.files} 个索引更新 |`,
     ``,
     `⏱ ${(report.duration_ms / 1000).toFixed(1)}s`,
   ];
@@ -209,6 +226,9 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.insight_archive.archived > 0) {
     lines.push(`${report.stages.insight_archive.archived} 条洞察归档`);
+  }
+  if (report.stages.indexes.files > 0) {
+    lines.push(`${report.stages.indexes.files} 个索引更新`);
   }
 
   const icon = report.stages.health.overallStatus === "pass" ? "✅" : "⚠️";
