@@ -1,6 +1,31 @@
 # Changelog
 
-> Current: `v1.3.1` — Raw 类型 + 合并层级隔离。
+> Current: `v1.4.0` — Wiki-link lifecycle + raw type removed.
+
+## [v1.4.0] — 2026-05-12
+
+### Wiki-link 全生命周期
+
+- **delete 死链清理** — 删除页面时自动扫描 vault，将 `[[slug]]` 还原为纯文本
+- **merge 链接重写** — 合并页面时自动将 `[[source]]` → `[[target]]` 全 vault 替换
+- **rewriteVaultLinks 共享函数** — merge（替换）和 delete（移除）共用一套 vault 扫描逻辑
+
+### Raw 类型移除
+
+- **raw→record 统一** — 去掉 raw 页面类型，所有 raw/* 迁移为 records/*
+- **slug 路径简化** — TYPE_PREFIX map 替代 pluralize+prefix 双层逻辑
+- **DB v5 迁移** — 自动将 raw/* 和 brain/records/* 统一为 records/*，覆盖 pages/links/chunks/tags/timeline/versions/ingest_log 全部表
+- **vault 目录结构** — 不再创建 raw/ 目录，init 只建 records/
+- **sync inferTypeFromPath** — 路径类型推断去掉 raw 分支，records/ → record
+- **health check 适配** — health 检查中 raw 引用全部改为 record
+
+### Profile 热重载
+
+- **mtime stale 检测** — Profile 文件修改后自动重新加载，无需重启
+
+### Auto-link 撤回
+
+- **移除 autoLink 功能** — CJK 正则匹配不成熟，撤回待后续重做
 
 ## [v1.3.1] — 2026-05-11
 
