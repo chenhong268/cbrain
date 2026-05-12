@@ -56,7 +56,8 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
     const id = ctx.db.addTimelineEntry(slug, summary, eventDate, source);
 
     // Append to page body for brain/ pages so timeline content is searchable
-    if (!slug.startsWith("raw/")) {
+    // Append timeline content to page body for searchability
+    {
       const page = ctx.pages.getBySlug(slug);
       if (page) {
         const dateStr = eventDate ?? new Date().toISOString().slice(0, 10);

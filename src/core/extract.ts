@@ -2,7 +2,7 @@
 // Only regex-based extraction in CBrain. wikilinks are explicit user intent,
 // not machine guesswork — they must be parsed deterministically.
 
-function stripCodeBlocks(content: string): string {
+export function stripCodeBlocks(content: string): string {
   let out = "";
   let i = 0;
   while (i < content.length) {

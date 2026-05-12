@@ -637,7 +637,7 @@ export class HealthChecker {
   private checkNewSuggestions(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    const sourceCount = this.db.getPageCountByTypes(["record", "raw"]);
+    const sourceCount = this.db.getPageCountByType("record");
     const conceptCount = this.db.getPageCountByType("concept");
 
     const ratio = sourceCount > 0 ? conceptCount / sourceCount : 0;
@@ -824,10 +824,10 @@ export class HealthChecker {
     const entities = this.db.getEntityConceptPages();
     for (const entity of entities) {
       const incoming = this.db.getIncomingLinks(entity.slug);
-      const rawSources = incoming.filter(l => l.from_slug.startsWith("raw/") && l.context);
-      if (rawSources.length < 2) continue;
+      const recordSources = incoming.filter(l => l.from_slug.startsWith("records/") && l.context);
+      if (recordSources.length < 2) continue;
 
-      const contexts = rawSources.map(l => l.context!);
+      const contexts = recordSources.map(l => l.context!);
       let minOverlap = 1.0;
       let bestPair: [string, string] = ["", ""];
 
@@ -838,7 +838,7 @@ export class HealthChecker {
           if (wordsA.size === 0 || wordsB.size === 0) continue;
           const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
           const overlap = intersection / Math.min(wordsA.size, wordsB.size);
-          if (overlap < minOverlap) { minOverlap = overlap; bestPair = [rawSources[i].from_slug, rawSources[j].from_slug]; }
+          if (overlap < minOverlap) { minOverlap = overlap; bestPair = [recordSources[i].from_slug, recordSources[j].from_slug]; }
         }
       }
 
@@ -868,15 +868,13 @@ export class HealthChecker {
     const concepts = this.db.getPageCountByType("concept");
     const events = 0; // deprecated: event type no longer used
     const records = this.db.getPageCountByType("record");
-    const rawPages = this.db.getPageCountByType("raw");
     const totalLinks = this.db.getLinkCount();
     const avgMentions = this.db.getAvgMentionCount();
 
     const orphans = this.db.getIslandPages().length;
     const bareStubs = this.db.getBareStubs().length;
 
-    const sourceCount = records + rawPages;
-    const conceptsPerSource = sourceCount > 0 ? concepts / sourceCount : 0;
+    const conceptsPerSource = records > 0 ? concepts / records : 0;
 
     return {
       timestamp: new Date().toISOString(),

@@ -7,24 +7,26 @@ const PLURALS: Record<string, string> = {
   insight: "insights",
 };
 
-const GENERATED_TYPES = new Set(["entity", "concept", "record", "insight"]);
-const GENERATED_PREFIX = "brain/";
-const RAW_PREFIX = "raw/";
+const TYPE_PREFIX: Record<string, string> = {
+  entity: "brain/entities",
+  concept: "brain/concepts",
+  record: "records",
+  insight: "brain/insights",
+};
 
 export function pluralize(type: string): string {
   return PLURALS[type] ?? `${type}s`;
 }
 
-/** Correct the directory prefix of a slug to match its type (e.g. brain/entities/X with type=concept → brain/concepts/X). Raw slugs are kept as-is. */
 export function canonicalSlug(slug: string, type: string): string {
-  if (type === "raw") return slug;
-  const dir = pluralize(type);
-  return slug.replace(/^([^/]+)\/[^/]+/, `$1/${dir}`);
+  const prefix = TYPE_PREFIX[type];
+  if (!prefix) return slug;
+  const name = slug.split("/").pop()!;
+  return `${prefix}/${name}`;
 }
 
 export function generateSlug(title: string, type: string): string {
-  const dir = pluralize(type);
-  const prefix = GENERATED_TYPES.has(type) ? GENERATED_PREFIX : RAW_PREFIX;
+  const prefix = TYPE_PREFIX[type] ?? "records";
 
   const hasChinese = CJK_RANGE.test(title);
   if (hasChinese) {
@@ -33,7 +35,7 @@ export function generateSlug(title: string, type: string): string {
       .trim()
       .replace(/\s+/g, "-")
       .toLowerCase();
-    return `${prefix}${dir}/${cleaned}`;
+    return `${prefix}/${cleaned}`;
   }
 
   const cleaned = title
@@ -42,7 +44,7 @@ export function generateSlug(title: string, type: string): string {
     .trim()
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-");
-  return `${prefix}${dir}/${cleaned}`;
+  return `${prefix}/${cleaned}`;
 }
 
 export function extractSlugFromWikiLink(link: string): string {

@@ -115,7 +115,7 @@ describe("IngestManager", () => {
         tags: ["test"],
       });
 
-      const filePath = join(vaultPath, "brain/records/test-note.md");
+      const filePath = join(vaultPath, "records/test-note.md");
       expect(existsSync(filePath)).toBe(true);
     });
 
@@ -129,7 +129,7 @@ describe("IngestManager", () => {
 
       const tags = db
         .prepare("SELECT tag FROM tags WHERE page_slug = ?")
-        .all("brain/records/tagged") as any[];
+        .all("records/tagged") as any[];
       const tagValues = tags.map((t) => t.tag);
       expect(tagValues).toContain("人物");
       expect(tagValues).toContain("商务");
@@ -214,7 +214,7 @@ describe("IngestManager", () => {
         "---",
         "title: TagPriority",
         "type: record",
-        "slug: brain/records/tag-priority",
+        "slug: records/tag-priority",
         "tags:",
         "  - fm-tag",
         "---",
@@ -230,7 +230,7 @@ describe("IngestManager", () => {
 
       const tags = db
         .prepare("SELECT tag FROM tags WHERE page_slug = ?")
-        .all("brain/records/tag-priority") as any[];
+        .all("records/tag-priority") as any[];
       const tagValues = tags.map((t) => t.tag);
       expect(tagValues).toContain("fm-tag");
       expect(tagValues).not.toContain("input-tag");
@@ -251,7 +251,7 @@ describe("IngestManager", () => {
         "---",
         "title: 链接测试",
         "type: record",
-        "slug: brain/records/link-test",
+        "slug: records/link-test",
         "---",
         "",
         "提到了[[李四]]和[[王五]]。",
@@ -262,7 +262,7 @@ describe("IngestManager", () => {
 
       const links = db
         .prepare("SELECT to_slug FROM links WHERE from_slug = ?")
-        .all("brain/records/link-test") as any[];
+        .all("records/link-test") as any[];
       const targets = links.map((l) => l.to_slug);
       expect(targets).toContain("brain/entities/lisi");
       expect(targets).toContain("brain/entities/wangwu");
@@ -273,7 +273,7 @@ describe("IngestManager", () => {
         "---",
         "title: Unresolved",
         "type: record",
-        "slug: brain/records/unresolved",
+        "slug: records/unresolved",
         "---",
         "",
         "提到了[[不存在的人]]。",
@@ -284,7 +284,7 @@ describe("IngestManager", () => {
 
       const links = db
         .prepare("SELECT * FROM links WHERE from_slug = ?")
-        .all("brain/records/unresolved") as any[];
+        .all("records/unresolved") as any[];
       expect(links.length).toBe(0);
     });
 
@@ -297,7 +297,7 @@ describe("IngestManager", () => {
         "---",
         "title: Mention Test",
         "type: record",
-        "slug: brain/records/mention-test",
+        "slug: records/mention-test",
         "---",
         "",
         "提到了[[被提及者]]。",

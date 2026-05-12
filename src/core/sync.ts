@@ -320,7 +320,7 @@ export class SyncManager {
       }
     }
 
-    // Wikilink extraction
+    // Wikilink extraction + auto-link
     if (this.pages && parsed.body.trim()) {
       try {
         this.pipeline.processWikilinks(effectiveSlug, parsed.body, true);
@@ -364,14 +364,14 @@ export class SyncManager {
     const typeFromDir: Record<string, string> = {
       entities: "entity",
       concepts: "concept",
-      records: "record",
+      insights: "insight",
     };
     const parts = relPath.split("/");
+    // records/X.md at root level
+    if (parts[0] === "records") return "record";
+    // brain/entities/X.md, brain/concepts/X.md, brain/insights/X.md
     if (parts.length >= 3 && parts[0] === "brain") {
       return typeFromDir[parts[1]] ?? "record";
-    }
-    if (parts[0] === "raw") {
-      return "raw";
     }
     return "record";
   }

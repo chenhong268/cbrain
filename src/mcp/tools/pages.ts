@@ -41,7 +41,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("list_pages", {
     description: "List pages in the brain. Optional type filter.",
     inputSchema: {
-      type: z.enum(["entity", "concept", "record", "insight", "raw"]).optional().describe("Filter by type"),
+      type: z.enum(["entity", "concept", "record", "insight"]).optional().describe("Filter by type"),
       limit: z.number().optional().default(20).describe("Max results"),
       offset: z.number().optional().default(0).describe("Offset for pagination"),
     },
@@ -59,15 +59,10 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       slug: z.string().describe("Page slug (e.g. brain/entities/zhangsan)"),
       content: z.string().describe("Page body content (markdown)"),
       title: z.string().optional().describe("Page title (required for new pages)"),
-      type: z.enum(["entity", "concept", "record", "insight", "raw"]).optional().default("record").describe("Page type (required for new pages)"),
+      type: z.enum(["entity", "concept", "record", "insight"]).optional().default("record").describe("Page type (required for new pages)"),
       tags: z.array(z.string()).optional().describe("Tags to apply"),
     },
   }, async ({ slug, content, title, type, tags }) => {
-    if (slug.startsWith("raw/")) {
-      return {
-        content: [{ type: "text", text: JSON.stringify({ error: `Cannot write to raw/ slug. Raw files are human domain. Create a brain/ page instead (e.g. brain/entities/name).` }) }],
-      };
-    }
     const existing = ctx.pages.getBySlug(slug);
     if (existing) {
       ctx.versions.createVersion(slug); // snapshot before update
@@ -173,7 +168,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       return {
         content: [{ type: "text", text: JSON.stringify({
           success: false,
-          error: `Cannot merge across layers: source is "${sourcePage.type}" (${getLayer(sourcePage.type)}) and target is "${targetPage.type}" (${getLayer(targetPage.type)}). Source layer (raw, record) cannot merge with derived layer (entity, concept, insight).`,
+          error: `Cannot merge across layers: source is "${sourcePage.type}" (${getLayer(sourcePage.type)}) and target is "${targetPage.type}" (${getLayer(targetPage.type)}). Source layer (record) cannot merge with derived layer (entity, concept, insight).`,
         }) }],
         isError: true,
       };

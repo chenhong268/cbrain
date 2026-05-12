@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, extname } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 
@@ -89,22 +89,89 @@ export function mapEntityType(
   }
 }
 
-export type PageType = "entity" | "concept" | "record" | "insight" | "raw";
+export type PageType = "entity" | "concept" | "record" | "insight";
 export type PageLayer = "source" | "derived";
 
-const VALID_PAGE_TYPES = new Set<string>(["entity", "concept", "record", "insight", "raw"]);
+const VALID_PAGE_TYPES = new Set<string>(["entity", "concept", "record", "insight"]);
 
 export function normalizePageType(type: string): PageType {
   return (VALID_PAGE_TYPES.has(type) ? type : "record") as PageType;
 }
 
 export function getLayer(type: string): PageLayer {
-  if (type === "raw" || type === "record") return "source";
+  if (type === "record") return "source";
   return "derived";
 }
 
 export function canMerge(typeA: string, typeB: string): boolean {
   return getLayer(typeA) === getLayer(typeB);
+}
+
+// ─── Vault Wiki-Link Rewriting ───────────────────────────────
+
+const VAULT_DIRS = ["records", "brain/entities", "brain/concepts", "brain/insights"];
+
+export interface VaultLinkOp {
+  oldSlug: string;
+  newSlug?: string;
+}
+
+/**
+ * Rewrite wiki-links across vault files.
+ * - newSlug present → replace `[[old]]` → `[[new]]`  (merge)
+ * - newSlug absent  → strip `[[]]`, keep plain text   (delete)
+ *
+ * Handles both full-slug (`[[brain/entities/陈宏]]`) and short-name (`[[陈宏]]`) forms.
+ * Returns number of files modified.
+ */
+export function rewriteVaultLinks(vaultPath: string, operations: VaultLinkOp[]): number {
+  type Replacement = { from: string; to: string };
+  const replacements: Replacement[] = [];
+
+  for (const op of operations) {
+    const oldShort = op.oldSlug.split("/").pop()!;
+    if (op.newSlug) {
+      const newShort = op.newSlug.split("/").pop()!;
+      replacements.push({ from: `[[${op.oldSlug}]]`, to: `[[${newShort}]]` });
+      if (oldShort !== op.oldSlug) {
+        replacements.push({ from: `[[${oldShort}]]`, to: `[[${newShort}]]` });
+      }
+    } else {
+      replacements.push({ from: `[[${op.oldSlug}]]`, to: oldShort });
+      if (oldShort !== op.oldSlug) {
+        replacements.push({ from: `[[${oldShort}]]`, to: oldShort });
+      }
+    }
+  }
+
+  let totalRewritten = 0;
+
+  for (const dir of VAULT_DIRS) {
+    const absDir = join(vaultPath, dir);
+    if (!existsSync(absDir)) continue;
+    for (const file of readdirSync(absDir)) {
+      if (!file.endsWith(".md")) continue;
+      const filePath = join(absDir, file);
+      let content: string;
+      try { content = readFileSync(filePath, "utf-8"); } catch { continue; }
+
+      let updated = content;
+      let changed = false;
+      for (const { from, to } of replacements) {
+        if (updated.includes(from)) {
+          updated = updated.replaceAll(from, to);
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        writeFileSync(filePath, updated, "utf-8");
+        totalRewritten++;
+      }
+    }
+  }
+
+  return totalRewritten;
 }
 
 // ─── Canonical relation types ──────────────────────────────

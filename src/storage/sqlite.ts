@@ -76,7 +76,7 @@ export class CBrainDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pages (
         slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight', 'raw')),
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
         title TEXT NOT NULL,
         file_path TEXT NOT NULL,
         content_hash TEXT,
@@ -220,6 +220,7 @@ export class CBrainDB {
     this.migrateLinksStrength();
     this.migrateDiscoveries();
     this.migrateSearchLog();
+    this.migrateRawToRecords();
   }
 
   private migrateLinksStrength(): void {
@@ -265,17 +266,18 @@ export class CBrainDB {
 
   private migratePagesConstraint(): void {
     const check = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").get() as { sql: string } | undefined;
-    if (check?.sql?.includes("'insight'") && !check.sql.includes("'source'") && !check.sql.includes("'event'")) return;
+    if (check?.sql?.includes("'insight'") && !check.sql.includes("'source'") && !check.sql.includes("'event'") && !check.sql.includes("'raw'")) return;
 
     this.db.exec("PRAGMA foreign_keys = OFF");
 
-    // Convert legacy event pages to record before migration
+    // Convert legacy event and raw pages to record before migration
     this.db.prepare("UPDATE pages SET type = 'record' WHERE type = 'event'").run();
+    this.db.prepare("UPDATE pages SET type = 'record' WHERE type = 'raw'").run();
 
     this.db.exec(`
       CREATE TABLE pages_new (
         slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight', 'raw')),
+        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
         title TEXT NOT NULL,
         file_path TEXT NOT NULL,
         content_hash TEXT,
@@ -293,6 +295,57 @@ export class CBrainDB {
 
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_tier ON pages(tier)");
+    this.db.exec("PRAGMA foreign_keys = ON");
+  }
+
+  /**
+   * v5 migration: raw→record type merge + path unification.
+   * - Converts raw/* slugs to records/*
+   * - Converts brain/records/* slugs to records/*
+   * - Updates links, chunks, tags, timeline, versions tables accordingly
+   */
+  private migrateRawToRecords(): void {
+    // Check if migration already ran
+    const done = this.db.prepare("SELECT value FROM config WHERE key = 'migration_v5_raw_to_records'").get() as { value: string } | undefined;
+    if (done?.value === "1") return;
+
+    this.db.exec("PRAGMA foreign_keys = OFF");
+
+    // 1. Update raw/* slugs → records/* in pages
+    this.db.prepare("UPDATE pages SET slug = REPLACE(slug, 'raw/', 'records/'), file_path = REPLACE(file_path, 'raw/', 'records/') WHERE slug LIKE 'raw/%'").run();
+
+    // 2. Update brain/records/* slugs → records/* in pages
+    this.db.prepare("UPDATE pages SET slug = REPLACE(slug, 'brain/records/', 'records/'), file_path = REPLACE(file_path, 'brain/records/', 'records/') WHERE slug LIKE 'brain/records/%'").run();
+
+    // 3. Update links table (from_slug and to_slug)
+    this.db.prepare("UPDATE links SET from_slug = REPLACE(from_slug, 'raw/', 'records/') WHERE from_slug LIKE 'raw/%'").run();
+    this.db.prepare("UPDATE links SET to_slug = REPLACE(to_slug, 'raw/', 'records/') WHERE to_slug LIKE 'raw/%'").run();
+    this.db.prepare("UPDATE links SET from_slug = REPLACE(from_slug, 'brain/records/', 'records/') WHERE from_slug LIKE 'brain/records/%'").run();
+    this.db.prepare("UPDATE links SET to_slug = REPLACE(to_slug, 'brain/records/', 'records/') WHERE to_slug LIKE 'brain/records/%'").run();
+
+    // 4. Update chunks table
+    this.db.prepare("UPDATE chunks SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+    this.db.prepare("UPDATE chunks SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+
+    // 5. Update tags table
+    this.db.prepare("UPDATE tags SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+    this.db.prepare("UPDATE tags SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+
+    // 6. Update timeline table
+    this.db.prepare("UPDATE timeline SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+    this.db.prepare("UPDATE timeline SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+
+    // 7. Update versions table
+    this.db.prepare("UPDATE versions SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+    this.db.prepare("UPDATE versions SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+
+    // 8. Update ingest_log table
+    this.db.prepare("UPDATE ingest_log SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+    this.db.prepare("UPDATE ingest_log SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+
+    // 9. Mark migration as done
+    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v5_raw_to_records', '1')").run();
+
     this.db.exec("PRAGMA foreign_keys = ON");
   }
 

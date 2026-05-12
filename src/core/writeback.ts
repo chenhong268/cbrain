@@ -54,9 +54,8 @@ export class WritebackManager {
       return { success: false, action: input.action, error: "targetSlug required for append" };
     }
 
-    if (slug.startsWith("raw/")) {
-      return { success: false, action: input.action, error: `Cannot append to raw/ page "${slug}". Raw files are human domain — create a brain/ page instead.` };
-    }
+    // records/ pages are human domain — writeback should target brain/ pages
+    // But we allow append to records for timeline events, so no guard needed here
 
     const page = this.pages.getBySlug(slug);
     if (!page) {

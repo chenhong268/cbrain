@@ -4,6 +4,8 @@ import {
   readFileSync,
   writeFileSync,
   unlinkSync,
+  readdirSync,
+  statSync,
 } from "node:fs";
 import { join, dirname, relative } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
@@ -13,12 +15,12 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug } from "../utils/slug.js";
-import { hashContent, normalizePageType, canMerge, getLayer } from "./shared.js";
+import { hashContent, normalizePageType, canMerge, getLayer, rewriteVaultLinks } from "./shared.js";
 import type { Logger } from "./logger.js";
 
 export interface CreatePageInput {
   title: string;
-  type: "entity" | "concept" | "record" | "insight" | "raw";
+  type: "entity" | "concept" | "record" | "insight";
   body: string;
   tags?: string[];
   slug?: string;
@@ -148,10 +150,6 @@ export class PageManager {
       extra?: Record<string, unknown>;
     }
   ): Page | null {
-    if (slug.startsWith("raw/")) {
-      this.logger?.warn("page", "拒绝写入 raw/ 目录", { slug });
-      return null;
-    }
     const page = this.getBySlug(slug);
     if (!page) { this.logger?.error("page", "更新失败：页面不存在", { slug }); return null; }
 
@@ -186,6 +184,12 @@ export class PageManager {
   delete(slug: string): boolean {
     const filePath = this.db.getPageFilePath(slug);
     if (filePath === null) return false;
+
+    // Strip [[slug]] dead links in other vault files before deleting
+    const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: slug }]);
+    if (rewritten > 0) {
+      this.logger?.info("page", "死链已清理", { slug, files: rewritten });
+    }
 
     const absPath = join(this.vaultPath, filePath);
     if (existsSync(absPath)) {
@@ -311,6 +315,12 @@ export class PageManager {
 
     const contentHash = hashContent(content);
     this.db.updatePageHash(targetSlug, contentHash);
+
+    // Rewrite [[sourceSlug]] → [[targetSlug]] in all vault .md files
+    const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: sourceSlug, newSlug: targetSlug }]);
+    if (rewritten > 0) {
+      this.logger?.info("page", "wiki-link 已重写", { oldSlug: sourceSlug, newSlug: targetSlug, files: rewritten });
+    }
 
     // Delete source page (file + index)
     this.delete(sourceSlug);

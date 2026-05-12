@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 export interface PageFrontmatter {
   title: string;
-  type: "entity" | "concept" | "record" | "insight" | "raw";
+  type: "entity" | "concept" | "record" | "insight";
   slug: string;
   tags?: string[];
   tier?: number;

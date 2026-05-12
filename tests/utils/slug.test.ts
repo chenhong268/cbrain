@@ -15,15 +15,15 @@ describe("slug", () => {
     );
   });
 
-  test("generates record slug with brain prefix (event type falls back to record)", () => {
+  test("generates record slug at root level", () => {
     expect(generateSlug("Weekly Sync", "record")).toBe(
-      "brain/records/weekly-sync"
+      "records/weekly-sync"
     );
   });
 
-  test("generates record slug with brain prefix", () => {
+  test("generates record slug with records prefix", () => {
     expect(generateSlug("Meeting Notes", "record")).toBe(
-      "brain/records/meeting-notes"
+      "records/meeting-notes"
     );
   });
 

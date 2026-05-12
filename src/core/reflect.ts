@@ -639,7 +639,7 @@ export class ReflectManager {
   private getSourcePages(slug: string): Set<string> {
     const sources = new Set<string>();
     for (const l of this.db.getIncomingLinks(slug)) {
-      if (l.from_slug.startsWith("raw/")) sources.add(l.from_slug);
+      if (l.from_slug.startsWith("records/")) sources.add(l.from_slug);
     }
     return sources;
   }
