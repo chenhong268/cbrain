@@ -73,7 +73,7 @@ describe("MCP Server", () => {
       const tools = getTools(server);
       const names = Object.keys(tools);
       expect(names.sort()).toEqual([
-        "add_link", "add_tag", "add_timeline_entry", "archive_insight",
+        "add_alias", "add_link", "add_tag", "add_timeline_entry", "archive_insight",
         "brain_storm", "deep_recall", "delete_page", "dismiss_insight",
         "dream", "dream_reset", "enrich", "expand_entity",
         "generate_indexes", "get_chunks", "get_ingest_log", "get_insight",
@@ -83,8 +83,8 @@ describe("MCP Server", () => {
         "job_retry", "job_status", "job_submit", "list_insights",
         "list_pages", "mark_discovery_seen", "merge_pages",
         "promote_discovery", "put_page", "query", "query_insights",
-        "read_discoveries", "reload_profile", "remove_link",
-        "remove_orphans", "remove_profile", "remove_tag",
+        "read_discoveries", "reload_profile", "remove_alias",
+        "remove_link", "remove_orphans", "remove_profile", "remove_tag",
         "resolve_slugs", "revert_version", "run_discovery", "status",
         "summarize", "sync", "update_profile", "writeback",
       ]);

@@ -213,6 +213,17 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_insights_source_type ON insights(source_type);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(page_slug, content, tokenize='trigram');
+
+      CREATE TABLE IF NOT EXISTS aliases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        page_slug TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE,
+        UNIQUE(page_slug, alias)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias);
+      CREATE INDEX IF NOT EXISTS idx_aliases_page ON aliases(page_slug);
     `);
 
     this.migratePagesConstraint();
@@ -1212,6 +1223,32 @@ export class CBrainDB {
       "SELECT slug FROM pages WHERE title = $name AND type IN ('entity', 'concept')"
     ).get({ $name: name }) as { slug: string } | null;
     return row?.slug ?? null;
+  }
+
+  addAlias(pageSlug: string, alias: string): void {
+    this.prepare(
+      "INSERT OR IGNORE INTO aliases (page_slug, alias) VALUES ($slug, $alias)"
+    ).run({ $slug: pageSlug, $alias: alias });
+  }
+
+  removeAlias(pageSlug: string, alias: string): void {
+    this.prepare(
+      "DELETE FROM aliases WHERE page_slug = $slug AND alias = $alias"
+    ).run({ $slug: pageSlug, $alias: alias });
+  }
+
+  getSlugByAlias(alias: string): string | null {
+    const row = this.prepare(
+      "SELECT page_slug FROM aliases WHERE alias = $alias"
+    ).get({ $alias: alias }) as { page_slug: string } | null;
+    return row?.page_slug ?? null;
+  }
+
+  listAliases(pageSlug: string): string[] {
+    const rows = this.prepare(
+      "SELECT alias FROM aliases WHERE page_slug = $slug ORDER BY id"
+    ).all({ $slug: pageSlug }) as Array<{ alias: string }>;
+    return rows.map(r => r.alias);
   }
 
   // ─── Discoveries ──────────────────────────────────────────────

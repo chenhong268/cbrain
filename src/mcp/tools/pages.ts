@@ -207,4 +207,32 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       content: [{ type: "text", text: JSON.stringify({ success: true, merged: result.slug, title: result.title, type: result.type }) }],
     };
   });
+
+  // ─── add_alias ────────────────────────────────────────────
+  server.registerTool("add_alias", {
+    description: "Add an alias to a page. NER will resolve the alias to this page instead of creating a new entity.",
+    inputSchema: {
+      slug: z.string().describe("Page slug to add alias to"),
+      alias: z.string().describe("Alias name (e.g. a person's alternative name)"),
+    },
+  }, async ({ slug, alias }) => {
+    const page = ctx.db.getPage(slug);
+    if (!page) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }], isError: true };
+    }
+    ctx.db.addAlias(slug, alias);
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, slug, alias }) }] };
+  });
+
+  // ─── remove_alias ─────────────────────────────────────────
+  server.registerTool("remove_alias", {
+    description: "Remove an alias from a page.",
+    inputSchema: {
+      slug: z.string().describe("Page slug"),
+      alias: z.string().describe("Alias to remove"),
+    },
+  }, async ({ slug, alias }) => {
+    ctx.db.removeAlias(slug, alias);
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, slug, aliasRemoved: alias }) }] };
+  });
 }

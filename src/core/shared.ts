@@ -259,7 +259,7 @@ export function findEntitySlug(
   db: CBrainDB,
   name: string
 ): string | null {
-  return db.getEntitySlugByTitle(name);
+  return db.getEntitySlugByTitle(name) ?? db.getSlugByAlias(name);
 }
 
 /**

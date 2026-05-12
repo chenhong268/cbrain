@@ -322,6 +322,11 @@ export class PageManager {
       this.logger?.info("page", "wiki-link 已重写", { oldSlug: sourceSlug, newSlug: targetSlug, files: rewritten });
     }
 
+    // Store source title as alias so NER can still resolve it
+    if (source.title !== target.title) {
+      this.db.addAlias(targetSlug, source.title);
+    }
+
     // Delete source page (file + index)
     this.delete(sourceSlug);
 
