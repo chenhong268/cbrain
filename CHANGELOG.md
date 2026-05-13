@@ -1,6 +1,12 @@
 # Changelog
 
-> Current: `v1.4.1` — Dream 自动生成索引。
+> Current: `v1.5.2` — 索引时间戳修复。
+
+## [v1.5.2] — 2026-05-13
+
+### 索引时间戳
+
+- **时间戳格式** — All-Entities、All-Concepts、Dashboard 的 updated 列从纯日期 `YYYY-MM-DD` 改为完整时间 `YYYY-MM-DDTHH:MM:SS`
 
 ## [v1.4.1] — 2026-05-12
 

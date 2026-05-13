@@ -41,7 +41,7 @@ export class IndexGenerator {
 
     const filePath = join(dir, "All-Entities.md");
     let md = `# All Entities\n\n`;
-    md += `> Auto-generated index. Last updated: ${new Date().toISOString().slice(0, 10)}\n\n`;
+    md += `> Auto-generated index. Last updated: ${new Date().toISOString().slice(0, 19)}\n\n`;
     md += `| Tier | Entity | Mentions | Links | Updated |\n|:-----|:-------|:---------|:------|:--------|\n`;
 
     // Need tier/mention_count/updated_at — fetch full page rows
@@ -52,7 +52,7 @@ export class IndexGenerator {
       const page = pageMap.get(row.slug);
       const tier = page?.tier ?? 3;
       const mentions = page?.mention_count ?? 0;
-      const updated = page?.updated_at?.slice(0, 10) ?? "-";
+      const updated = page?.updated_at?.slice(0, 19) ?? "-";
       const tierLabel = tier <= 1 ? "⭐" : tier === 2 ? "📌" : "·";
       md += `| ${tierLabel} | [[${row.slug}\\|${row.title}]] | ${mentions} | ${row.link_count} | ${updated} |\n`;
     }
@@ -70,7 +70,7 @@ export class IndexGenerator {
 
     const filePath = join(dir, "All-Concepts.md");
     let md = `# All Concepts\n\n`;
-    md += `> Auto-generated index. Last updated: ${new Date().toISOString().slice(0, 10)}\n\n`;
+    md += `> Auto-generated index. Last updated: ${new Date().toISOString().slice(0, 19)}\n\n`;
     md += `| Concept | Mentions | Links | Updated |\n|:--------|:---------|:------|:--------|\n`;
 
     const slugs = rows.map(r => r.slug);
@@ -79,7 +79,7 @@ export class IndexGenerator {
     for (const row of rows) {
       const page = pageMap.get(row.slug);
       const mentions = page?.mention_count ?? 0;
-      const updated = page?.updated_at?.slice(0, 10) ?? "-";
+      const updated = page?.updated_at?.slice(0, 19) ?? "-";
       md += `| [[${row.slug}\\|${row.title}]] | ${mentions} | ${row.link_count} | ${updated} |\n`;
     }
 
@@ -104,7 +104,7 @@ export class IndexGenerator {
 
     const filePath = join(dir, "Dashboard.md");
     let md = `# CBrain Dashboard\n\n`;
-    md += `> Auto-generated. Last updated: ${new Date().toISOString().slice(0, 10)}\n\n`;
+    md += `> Auto-generated. Last updated: ${new Date().toISOString().slice(0, 19)}\n\n`;
 
     md += `## Overview\n\n`;
     md += `| Metric | Count |\n|:-------|:------|\n`;
@@ -121,7 +121,7 @@ export class IndexGenerator {
 
     md += `\n## Recent Updates\n\n`;
     for (const p of recentPages) {
-      md += `- [[${p.slug}\\|${p.title}]] — ${p.type} — ${p.updated_at.slice(0, 10)}\n`;
+      md += `- [[${p.slug}\\|${p.title}]] — ${p.type} — ${p.updated_at.slice(0, 19)}\n`;
     }
 
     md += `\n---\n\n`;
