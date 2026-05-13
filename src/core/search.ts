@@ -7,7 +7,7 @@ export interface SearchResult {
   slug: string;
   score: number;
   snippet: string;
-  source: "vector" | "fts" | "graph" | "hybrid" | "temporal";
+  source: "vector" | "fts" | "graph" | "hybrid" | "temporal" | "exact";
 }
 
 export interface SearchOptions {

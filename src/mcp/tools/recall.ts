@@ -14,15 +14,51 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     inputSchema: {
       query: z.string().describe("Search query"),
       limit: z.number().optional().default(5).describe("Max entities to recall (capped at 10)"),
+      strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
+        .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
     },
-  }, async ({ query, limit }) => {
+  }, async ({ query, limit, strategy }) => {
     const cap = Math.min(limit ?? 5, 10);
 
     const searchStart = Date.now();
-    const searchResults = await ctx.search.search(query, { limit: cap });
+    let searchResults: Awaited<ReturnType<typeof ctx.search.search>>;
+    let usedStrategy: string = strategy;
+
+    if (strategy === "smart") {
+      // Exact slug/title match fast path
+      const resolved = ctx.db.resolveSlugs([query])[0];
+      const exactSlug = resolved?.slug ?? null;
+
+      const ftsRaw = ctx.db.ftsSearch(query, cap);
+      if (ftsRaw.length > 0) {
+        searchResults = ftsRaw.map(r => ({ slug: r.page_slug, score: 1 / (1 + r.rank), snippet: r.content.slice(0, 200), source: "fts" as const }));
+        usedStrategy = "smart-fts";
+      } else {
+        searchResults = await ctx.search.search(query, { limit: cap });
+        usedStrategy = "smart-hybrid";
+      }
+
+      // Promote exact match to top
+      if (exactSlug) {
+        const existingIdx = searchResults.findIndex(r => r.slug === exactSlug);
+        if (existingIdx > 0) {
+          const [match] = searchResults.splice(existingIdx, 1);
+          searchResults.unshift({ ...match, score: 1.0 });
+        } else if (existingIdx === -1) {
+          searchResults.unshift({ slug: exactSlug, score: 1.0, snippet: resolved.title ?? query, source: "exact" as const });
+        }
+      }
+    } else if (strategy === "fts") {
+      searchResults = await ctx.search.search(query, { strategy: "fts", limit: cap });
+    } else if (strategy === "vector") {
+      searchResults = await ctx.search.search(query, { strategy: "vector", limit: cap });
+    } else {
+      searchResults = await ctx.search.search(query, { limit: cap });
+    }
+
     const searchLatencyMs = Date.now() - searchStart;
 
-    try { ctx.db.logSearch(query, "hybrid", searchLatencyMs, searchResults.length, searchLatencyMs > 2000); } catch { /* non-critical */ }
+    try { ctx.db.logSearch(query, usedStrategy, searchLatencyMs, searchResults.length, searchLatencyMs > 2000); } catch { /* non-critical */ }
 
     if (searchResults.length === 0) {
       return {
@@ -33,52 +69,60 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       };
     }
 
-    const entities = searchResults.map((sr, idx) => {
-      const slug = sr.slug;
+    // ── Batch enrichment for top-N entities ──────────────────────
+    // Pre-fetch pages for all results (stubs need them too)
+    const pagesBySlug = new Map<string, ReturnType<typeof ctx.pages.getBySlug>>();
+    for (const sr of searchResults) {
+      const p = ctx.pages.getBySlug(sr.slug);
+      if (p) pagesBySlug.set(sr.slug, p);
+    }
 
-      // Stubs for entities beyond TOP_N
-      if (idx >= TOP_N) {
-        const p = ctx.pages.getBySlug(slug);
-        return stubEntity(sr, p);
-      }
+    // Batch enrichment: collect all slugs for top-N, then batch-fetch links/timeline/tags
+    const topSlugs = searchResults.slice(0, TOP_N).map(r => r.slug);
 
-      // Top N entities get trimmed detail
-      let links = { outgoing: [] as Record<string, unknown>[], incoming: [] as Record<string, unknown>[] };
-      let timeline: Record<string, unknown>[] = [];
-      let tags: string[] = [];
-      let related: { slug: string; title: string; type: string }[] = [];
-      let tier: number | undefined;
-      let quality: string;
+    const linksBySlug = new Map<string, { outgoing: Record<string, unknown>[]; incoming: Record<string, unknown>[] }>();
+    const timelineBySlug = new Map<string, Record<string, unknown>[]>();
+    const tagsBySlug = new Map<string, string[]>();
+    const relatedBySlug = new Map<string, { slug: string; title: string; type: string }[]>();
 
-      const page = ctx.pages.getBySlug(slug);
-
-      // Links — trimmed
+    for (const slug of topSlugs) {
       try {
         const raw = ctx.graph.getLinks(slug, "both");
         const outgoing = raw.filter(l => l.from_slug === slug).map(trimLink).filter(Boolean) as Record<string, unknown>[];
         const incoming = raw.filter(l => l.to_slug === slug).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-        links = { outgoing, incoming };
-      } catch { /* keep empty */ }
+        linksBySlug.set(slug, { outgoing, incoming });
+      } catch { linksBySlug.set(slug, { outgoing: [], incoming: [] }); }
 
-      // Timeline — trimmed
       try {
         const rawTimeline = ctx.db.getTimeline(slug) as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>;
-        timeline = trimTimeline(rawTimeline, 3);
-      } catch { /* keep empty */ }
+        timelineBySlug.set(slug, trimTimeline(rawTimeline, 3));
+      } catch { timelineBySlug.set(slug, []); }
 
-      // Tags
       try {
+        const page = pagesBySlug.get(slug);
         const dbTags = ctx.db.getTags(slug);
-        const fmTags = page?.frontmatter?.tags ?? [];
-        tags = [...new Set([...dbTags, ...fmTags])];
-      } catch { /* keep empty */ }
+        const fmTags = (page as { frontmatter?: { tags?: string[] } } | undefined)?.frontmatter?.tags ?? [];
+        tagsBySlug.set(slug, [...new Set([...dbTags, ...fmTags])]);
+      } catch { tagsBySlug.set(slug, []); }
 
-      // Related entities
-      try { related = ctx.graph.getRelatedEntities(slug, 5); } catch { /* keep empty */ }
+      try { relatedBySlug.set(slug, ctx.graph.getRelatedEntities(slug, 5)); } catch { relatedBySlug.set(slug, []); }
+    }
 
-      // Quality
-      tier = page?.frontmatter?.tier ?? page?.tier;
-      quality = tier != null
+    // Build entity objects
+    const entities = searchResults.map((sr, idx) => {
+      const slug = sr.slug;
+
+      if (idx >= TOP_N) {
+        return stubEntity(sr, pagesBySlug.get(slug) ?? null);
+      }
+
+      const page = pagesBySlug.get(slug);
+      const links = linksBySlug.get(slug) ?? { outgoing: [], incoming: [] };
+      const timeline = timelineBySlug.get(slug) ?? [];
+      const tags = tagsBySlug.get(slug) ?? [];
+      const related = relatedBySlug.get(slug) ?? [];
+      const tier = page?.frontmatter?.tier ?? page?.tier;
+      const quality = tier != null
         ? (tier >= 3 ? "high" : tier === 2 ? "ok" : "low")
         : "unknown";
 
@@ -100,29 +144,41 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     });
 
     const totalLinks = entities.reduce(
-      (n, e) => n + ((e.links as { outgoing: unknown[]; incoming: unknown[] })?.outgoing?.length ?? 0) +
-        ((e.links as { outgoing: unknown[]; incoming: unknown[] })?.incoming?.length ?? 0),
+      (n, e) => n + ((e as { links: { outgoing: unknown[]; incoming: unknown[] } }).links?.outgoing?.length ?? 0) +
+        ((e as { links: { outgoing: unknown[]; incoming: unknown[] } }).links?.incoming?.length ?? 0),
       0,
     );
-    const totalTimeline = entities.reduce((n, e) => n + ((e.timeline as unknown[])?.length ?? 0), 0);
+    const totalTimeline = entities.reduce((n, e) => n + ((e as { timeline: unknown[] }).timeline?.length ?? 0), 0);
     const lowQuality = entities.filter((e) => (e as { quality?: string }).quality === "low").length;
     const stubCount = entities.filter(e => (e as { _stub?: boolean })._stub).length;
 
-    // Cross-references — recent activity among linked entities
+    // Cross-references — single batch query across all top-N entities
+    const allRelatedSlugs = new Set<string>();
+    for (const slug of topSlugs) {
+      const links = linksBySlug.get(slug);
+      const related = relatedBySlug.get(slug);
+      if (links) {
+        for (const l of links.outgoing) allRelatedSlugs.add(l.to_slug as string);
+        for (const l of links.incoming) allRelatedSlugs.add(l.from_slug as string);
+      }
+      if (related) for (const r of related) allRelatedSlugs.add(r.slug);
+    }
+    const allRecent = allRelatedSlugs.size > 0 ? ctx.db.getRecentUpdatesBySlugs([...allRelatedSlugs], 7) : [];
     const crossRefs: { subject: string; related: string; type: string; updated_at: string }[] = [];
-    for (const entity of entities.slice(0, TOP_N)) {
-      const eLinks = (entity as { links?: { outgoing: Record<string, unknown>[]; incoming: Record<string, unknown>[] } }).links;
-      const eRelated = (entity as { related?: { slug: string }[] }).related;
-      if (!eLinks && !eRelated) continue;
-
-      const relatedSlugs = new Set([
-        ...(eLinks?.outgoing ?? []).map((l: Record<string, unknown>) => l.to_slug as string),
-        ...(eLinks?.incoming ?? []).map((l: Record<string, unknown>) => l.from_slug as string),
-        ...(eRelated ?? []).map((r: { slug: string }) => r.slug),
-      ]);
-      const recent = ctx.db.getRecentUpdatesBySlugs([...relatedSlugs], 7);
-      for (const r of recent) {
-        crossRefs.push({ subject: (entity as { title: string }).title, related: r.title, type: r.type, updated_at: r.updated_at });
+    for (const slug of topSlugs) {
+      const entityTitle = (pagesBySlug.get(slug) as { title?: string } | undefined)?.title ?? slug;
+      const links = linksBySlug.get(slug);
+      const related = relatedBySlug.get(slug);
+      const entityRelatedSlugs = new Set<string>();
+      if (links) {
+        for (const l of links.outgoing) entityRelatedSlugs.add(l.to_slug as string);
+        for (const l of links.incoming) entityRelatedSlugs.add(l.from_slug as string);
+      }
+      if (related) for (const r of related) entityRelatedSlugs.add(r.slug);
+      for (const r of allRecent) {
+        if (entityRelatedSlugs.has(r.slug)) {
+          crossRefs.push({ subject: entityTitle, related: r.title, type: r.type, updated_at: r.updated_at });
+        }
       }
     }
     const seen = new Set<string>();
@@ -133,9 +189,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       return true;
     }).slice(0, 10);
 
-    // Related insights
-    const allSlugs = entities.slice(0, TOP_N).map(e => (e as { slug: string }).slug);
-    const relatedInsights = ctx.insights.getInsightsForEntities(allSlugs, 5).map(i => ({
+    // Related insights — single batch call
+    const relatedInsights = ctx.insights.getInsightsForEntities(topSlugs, 5).map(i => ({
       id: i.id, type: i.type,
       content: i.content.length > 150 ? i.content.slice(0, 150) + "..." : i.content,
       confidence: i.confidence,
@@ -147,7 +202,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         text: JSON.stringify(
           {
             query,
-            search_meta: { strategy: "hybrid", latency_ms: searchLatencyMs, degraded: searchLatencyMs > 2000 },
+            search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs, degraded: searchLatencyMs > 2000 },
             entities,
             insights: relatedInsights.length > 0 ? relatedInsights : undefined,
             cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
