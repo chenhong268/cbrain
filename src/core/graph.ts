@@ -8,6 +8,8 @@ export interface Link {
   weight: number;
   strength: string;
   context?: string;
+  source_type?: string;
+  confidence?: number;
 }
 
 export interface GraphNode {
@@ -32,8 +34,8 @@ export class GraphManager {
     this.db = db;
   }
 
-  addLink(from: string, to: string, relation: string = "mentions", context?: string, weight?: number, strength?: string): void {
-    this.db.insertLink(from, to, relation, context ?? null, weight, strength);
+  addLink(from: string, to: string, relation: string = "mentions", context?: string, weight?: number, strength?: string, sourceType?: string, confidence?: number): void {
+    this.db.insertLink(from, to, relation, context ?? null, weight, strength, sourceType, confidence);
   }
 
   removeLink(from: string, to: string, relation: string = "mentions"): boolean {

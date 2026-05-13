@@ -109,7 +109,7 @@ export class WritebackManager {
       return { success: false, action: input.action, error: `Target page not found: ${toSlug}` };
     }
 
-    this.db.insertLink(fromSlug, toSlug, relation, input.source ?? "agent-writeback");
+    this.db.insertLink(fromSlug, toSlug, relation, input.source ?? "agent-writeback", undefined, undefined, "writeback", 0.6);
 
     return { success: true, action: input.action, slug: fromSlug };
   }

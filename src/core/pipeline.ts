@@ -158,7 +158,7 @@ export class ContentPipeline {
           const key = `${fromSlug}\x00${newSlug}`;
           if (!writtenRelations.includes(key)) {
             writtenRelations.push(key);
-            this.db.insertLink(fromSlug, newSlug, "提及", null, 0.3, "weak");
+            this.db.insertLink(fromSlug, newSlug, "提及", null, 0.3, "weak", "wikilink", 0.9);
             count++;
           }
         }
@@ -167,7 +167,7 @@ export class ContentPipeline {
         const key = `${fromSlug}\x00${targetSlug}`;
         if (!writtenRelations.includes(key)) {
           writtenRelations.push(key);
-          this.db.insertLink(fromSlug, targetSlug, "提及", null, 0.3, "weak");
+          this.db.insertLink(fromSlug, targetSlug, "提及", null, 0.3, "weak", "wikilink", 0.9);
           count++;
         }
       }
@@ -228,7 +228,7 @@ export class ContentPipeline {
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.push(stub.slug);
         this.db.incrementMentionCount(stub.slug);
-        this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak");
+        this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5);
       } else if (entity.relevance === "low") {
         lowRelevanceSkipped++;
       }
@@ -241,7 +241,7 @@ export class ContentPipeline {
       if (from && to && from !== to) {
         const normRel = normalizeRelation(rel.relation);
         const rw = getRelationStrength(normRel);
-        this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength);
+        this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength, "ner", 0.5);
 
         const fromTitle = this.pages?.getBySlug(from)?.title ?? rel.from;
         const toTitle = this.pages?.getBySlug(to)?.title ?? rel.to;

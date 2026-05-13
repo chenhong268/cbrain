@@ -26,6 +26,8 @@ export interface LinkRow {
   weight: number;
   strength: string;
   context: string | null;
+  source_type: string;
+  confidence: number;
   created_at: string;
 }
 
@@ -229,6 +231,7 @@ export class CBrainDB {
     this.migratePagesConstraint();
     this.migratePagesExpiry();
     this.migrateLinksStrength();
+    this.migrateLinksCredibility();
     this.migrateDiscoveries();
     this.migrateSearchLog();
     this.migrateRawToRecords();
@@ -242,6 +245,17 @@ export class CBrainDB {
     }
     if (!names.has("strength")) {
       this.db.exec("ALTER TABLE links ADD COLUMN strength TEXT DEFAULT 'medium'");
+    }
+  }
+
+  private migrateLinksCredibility(): void {
+    const cols = this.db.prepare("PRAGMA table_info(links)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("source_type")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN source_type TEXT DEFAULT 'unknown'");
+    }
+    if (!names.has("confidence")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN confidence REAL DEFAULT 0.5");
     }
   }
 
@@ -1046,10 +1060,10 @@ export class CBrainDB {
 
   // ─── Link operations ──────────────────────────────────────────
 
-  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string): void {
+  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number): void {
     this.prepare(
-      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength) VALUES ($from, $to, $rel, $ctx, $w, $s)"
-    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: weight ?? 1.0, $s: strength ?? 'medium' });
+      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence) VALUES ($from, $to, $rel, $ctx, $w, $s, $st, $c)"
+    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: weight ?? 1.0, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5 });
   }
 
   deleteLink(from: string, to: string, relation: string): boolean {
@@ -1073,13 +1087,13 @@ export class CBrainDB {
 
   getOutgoingLinks(slug: string): LinkRow[] {
     return this.prepare(
-      "SELECT id, from_slug, to_slug, relation, weight, strength, context, created_at FROM links WHERE from_slug = $slug"
+      "SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at FROM links WHERE from_slug = $slug"
     ).all({ $slug: slug }) as LinkRow[];
   }
 
   getIncomingLinks(slug: string): LinkRow[] {
     return this.prepare(
-      "SELECT id, from_slug, to_slug, relation, weight, strength, context, created_at FROM links WHERE to_slug = $slug"
+      "SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at FROM links WHERE to_slug = $slug"
     ).all({ $slug: slug }) as LinkRow[];
   }
 

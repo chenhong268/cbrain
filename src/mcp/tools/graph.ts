@@ -6,15 +6,16 @@ import { findEntitySlug } from "../../core/shared.js";
 export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   // ─── graph_query ─────────────────────────────────────────
   server.registerTool("graph_query", {
-    description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved).",
+    description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved). Links include source_type (wikilink=human, manual=agent, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
     inputSchema: {
       slug: z.string().describe("Seed entity slug or name (auto-resolved if not an exact slug)"),
       mode: z.enum(["traverse", "backlinks", "related"]).optional().default("traverse").describe("Query mode"),
       depth: z.number().optional().default(2).describe("Max traversal depth"),
       limit: z.number().optional().default(20).describe("Max results"),
       minWeight: z.number().optional().describe("Minimum link weight (0-1). Higher = stronger links only."),
+      source_type: z.string().optional().describe("Filter links by source type: wikilink, manual, ner, dialogue, writeback, unknown"),
     },
-  }, async ({ slug, mode, depth, limit, minWeight }) => {
+  }, async ({ slug, mode, depth, limit, minWeight, source_type }) => {
     let resolvedSlug = slug;
     if (!ctx.pages.getBySlug(slug)) {
       const found = findEntitySlug(ctx.db, slug);
@@ -25,6 +26,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     switch (mode) {
       case "backlinks":
         result = ctx.graph.getBacklinks(resolvedSlug);
+        if (source_type) result = result.filter(l => l.source_type === source_type);
         break;
       case "related":
         result = ctx.graph.getRelatedEntities(resolvedSlug, limit);
@@ -39,7 +41,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── get_links ───────────────────────────────────────────────
   server.registerTool("get_links", {
-    description: "Get links for a page. Returns outgoing, incoming, or both directions.",
+    description: "Get links for a page. Returns outgoing, incoming, or both directions. Links include source_type (wikilink=human, manual=agent, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
     inputSchema: {
       slug: z.string().describe("Page slug"),
       direction: z.enum(["outgoing", "incoming", "both"]).optional().default("both").describe("Link direction"),
@@ -53,7 +55,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── add_link ────────────────────────────────────────────────
   server.registerTool("add_link", {
-    description: "Create a link between two pages.",
+    description: "Create a link between two pages. Links created via this tool are marked as source_type=manual with confidence=0.9.",
     inputSchema: {
       from: z.string().describe("Source page slug"),
       to: z.string().describe("Target page slug"),
@@ -67,7 +69,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     if (!ctx.pages.getBySlug(to)) return { content: [{ type: "text", text: JSON.stringify({ error: `Target page not found: ${to}` }) }], isError: true };
     if (from === to) return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot create self-referencing link" }) }], isError: true };
 
-    ctx.db.insertLink(from, to, relation, context ?? null, weight, strength);
+    ctx.db.insertLink(from, to, relation, context ?? null, weight, strength, "manual", 0.9);
     ctx.pages.incrementMention(to);
     ctx.pages.syncLinksToMarkdown(from);
     ctx.pages.syncLinksToMarkdown(to);

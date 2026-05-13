@@ -183,7 +183,7 @@ export class DialogueIngest {
       // Check if relation already exists
       if (this.db.linkExists(fromSlug, toSlug, normRel)) continue;
 
-      this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null);
+      this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null, undefined, undefined, "dialogue", 0.4);
 
       newRelations++;
     }

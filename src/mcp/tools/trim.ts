@@ -31,6 +31,8 @@ export function trimLink(link: Link): Record<string, unknown> | null {
     weight: link.weight,
     strength: link.strength,
     context: truncate(link.context, 100),
+    source_type: link.source_type ?? "unknown",
+    confidence: link.confidence ?? 0.5,
   };
 }
 
