@@ -527,7 +527,7 @@ describe("IngestManager", () => {
         pageType: "record",
       });
 
-      expect(result.ner).toBeUndefined();
+      expect(result.ner).toBeNull();
     });
 
     test("NER stubs are queryable via FTS", async () => {

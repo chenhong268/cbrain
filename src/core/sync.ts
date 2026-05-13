@@ -143,7 +143,6 @@ export class SyncManager {
           title: file.title,
           filePath: file.relPath,
           contentHash: file.contentHash,
-          personCard: file.frontmatter?.person_card as import("../storage/sqlite.js").PersonCard | undefined,
         });
 
         // Build chunks + embedResults from cache, fall back to fresh embed
@@ -303,7 +302,6 @@ export class SyncManager {
       title,
       filePath: relPath,
       contentHash,
-      personCard: parsed.frontmatter.person_card as import("../storage/sqlite.js").PersonCard | undefined,
     });
 
     const { chunks, embedResults } = await this.pipeline.embed(parsed.body);

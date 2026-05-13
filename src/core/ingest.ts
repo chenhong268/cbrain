@@ -6,7 +6,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { LLMProvider } from "../llm/provider.js";
-import { ContentPipeline } from "./pipeline.js";
+import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
 
 export interface IngestInput {
   content: string;
@@ -17,24 +17,11 @@ export interface IngestInput {
   skipNer?: boolean;
 }
 
-export interface NerResult {
-  entities: number;
-  relations: number;
-  events: number;
-  stubsCreated: string[];
-  details: {
-    entities: Array<{ name: string; type: string; relevance: string }>;
-    relations: Array<{ from: string; to: string; relation: string }>;
-    events: Array<{ date: string | null; description: string }>;
-    lowRelevanceSkipped: number;
-  };
-}
-
 export interface IngestResult {
   slug: string;
   created: boolean;
   linksExtracted: number;
-  ner?: NerResult;
+  ner?: NerPipelineResult | null;
 }
 
 export class IngestManager {
@@ -102,16 +89,19 @@ export class IngestManager {
     this.pipeline.writeIndexes(slug, chunks, embedResults);
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
-    // NER runs async — skip entity/concept pages
+    // NER — skip entity/concept pages
     const shouldNer = !overrides?.skipNer && type !== "entity" && type !== "concept" && type !== "insight";
+    let nerResult: NerPipelineResult | null | undefined;
     if (shouldNer) {
-      this.pipeline.processNer(slug, body, type, true).catch((e) => {
+      try {
+        nerResult = await this.pipeline.processNer(slug, body, type, true);
+      } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
-      });
+      }
     }
 
-    return { slug, created: !existing, linksExtracted };
+    return { slug, created: !existing, linksExtracted, ner: nerResult };
   }
 
   private async ingestText(input: IngestInput): Promise<IngestResult> {
@@ -141,13 +131,16 @@ export class IngestManager {
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
     const shouldNer = !input.skipNer && type !== "entity" && type !== "concept" && type !== "insight";
+    let nerResult: NerPipelineResult | null | undefined;
     if (shouldNer) {
-      this.pipeline.processNer(slug, body, type, true).catch((e) => {
+      try {
+        nerResult = await this.pipeline.processNer(slug, body, type, true);
+      } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
-      });
+      }
     }
 
-    return { slug, created: !existing, linksExtracted };
+    return { slug, created: !existing, linksExtracted, ner: nerResult };
   }
 }

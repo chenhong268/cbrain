@@ -18,6 +18,7 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
   }, async ({ content, type, title, tags, pageType, skipNer }) => {
     const effectiveTitle = title || content.split("\n").find(l => l.trim())?.trim().slice(0, 50) || "Untitled";
     const result = await ctx.ingest.ingest({ content, type: type ?? "text", title: effectiveTitle, tags, pageType, skipNer });
+
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };

@@ -75,9 +75,9 @@ describe("MCP Server", () => {
       expect(names.sort()).toEqual([
         "add_alias", "add_link", "add_tag", "add_timeline_entry", "archive_insight",
         "brain_storm", "deep_recall", "delete_page", "dismiss_insight",
-        "dream", "dream_reset", "enrich", "expand_entity", "find_persons_by_topic",
+        "dream", "dream_reset", "enrich", "expand_entity",
         "generate_indexes", "get_chunks", "get_ingest_log", "get_insight",
-        "get_links", "get_page", "get_person_card", "get_profile", "get_tags",
+        "get_links", "get_page", "get_profile", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",
         "ingest", "ingest_dialogue", "job_cancel", "job_list",
         "job_retry", "job_status", "job_submit", "list_insights",
@@ -86,7 +86,7 @@ describe("MCP Server", () => {
         "read_discoveries", "reload_profile", "remove_alias",
         "remove_link", "remove_orphans", "remove_profile", "remove_tag",
         "resolve_slugs", "revert_version", "run_discovery", "status",
-        "summarize", "sync", "update_person_card", "update_profile", "writeback",
+        "summarize", "sync", "update_profile", "writeback",
       ]);
     });
   });

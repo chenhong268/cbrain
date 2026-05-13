@@ -1,13 +1,6 @@
 import matter from "gray-matter";
 import { readFileSync, writeFileSync } from "node:fs";
 
-export interface PersonCard {
-  ask_for: string[];
-  handles: Record<string, string>;
-  relationships: Array<{ slug: string; relation: string }>;
-  summary?: string;
-}
-
 export interface PageFrontmatter {
   title: string;
   type: "entity" | "concept" | "record" | "insight";
@@ -18,7 +11,6 @@ export interface PageFrontmatter {
   confidence_decay?: number;
   created_at?: string;
   updated_at?: string;
-  person_card?: PersonCard;
   [key: string]: unknown;
 }
 
