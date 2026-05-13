@@ -132,6 +132,9 @@ export class HybridSearch {
       if (fts.length > 0) allLists.push(fts);
       if (graph.length > 0) allLists.push(graph);
       if (temporal.length > 0) allLists.push(temporal);
+
+      const askFor = this.askForSearch(q, limit);
+      if (askFor.length > 0) allLists.push(askFor);
     }
 
     return mergeRankedResults(allLists, this.rrfK, limit);
@@ -189,6 +192,29 @@ export class HybridSearch {
       snippet: `${r.event_date ?? "?"}: ${r.summary}${r.source ? ` [${r.source}]` : ""}`,
       source: "temporal" as const,
     }));
+  }
+
+  private askForSearch(query: string, limit: number): SearchResult[] {
+    const allCards = this.db.getAllPersonCards();
+    const q = query.toLowerCase();
+    const results: SearchResult[] = [];
+
+    for (const { slug, person_card } of allCards) {
+      const matched = person_card.ask_for.filter(a =>
+        a.toLowerCase().includes(q) || q.includes(a.toLowerCase())
+      );
+      if (matched.length > 0) {
+        results.push({
+          slug,
+          score: 0.6 + matched.length * 0.1,
+          snippet: `ask_for: ${matched.join(", ")}${person_card.summary ? ` — ${person_card.summary}` : ""}`,
+          source: "fts",
+        });
+        if (results.length >= limit) break;
+      }
+    }
+
+    return results;
   }
 
   async graphSearch(seedSlug: string, limit: number): Promise<SearchResult[]> {

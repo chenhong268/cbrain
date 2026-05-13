@@ -1,10 +1,12 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, relative } from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { canMerge, getLayer } from "../../core/shared.js";
 import { indexPage } from "../context.js";
+import { parseFrontmatter, stringifyFrontmatter } from "../../utils/frontmatter.js";
+import type { PersonCard } from "../../storage/sqlite.js";
 
 export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   // ─── get_page ────────────────────────────────────────────
@@ -234,5 +236,88 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   }, async ({ slug, alias }) => {
     ctx.db.removeAlias(slug, alias);
     return { content: [{ type: "text", text: JSON.stringify({ success: true, slug, aliasRemoved: alias }) }] };
+  });
+
+  // ─── get_person_card ─────────────────────────────────────────
+  server.registerTool("get_person_card", {
+    description: "Get the personCard for a person entity. Returns ask_for (expertise topics), handles (social accounts), and summary.",
+    inputSchema: {
+      slug: z.string().describe("Page slug of the person entity"),
+    },
+  }, async ({ slug }) => {
+    const card = ctx.db.getPersonCard(slug);
+    if (!card) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: "No personCard found for this slug. Either the page doesn't exist or it has no person_card data." }) }] };
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ slug, person_card: card }, null, 2) }] };
+  });
+
+  // ─── update_person_card ──────────────────────────────────────
+  server.registerTool("update_person_card", {
+    description: "Create or update a personCard for a person entity. Updates both the database and the vault file's frontmatter.",
+    inputSchema: {
+      slug: z.string().describe("Page slug of the person entity"),
+      person_card: z.object({
+        ask_for: z.array(z.string()).describe("Topics this person is knowledgeable about"),
+        handles: z.record(z.string()).describe("Social handles (e.g. { wechat: 'xxx', twitter: '@xxx' })"),
+        relationships: z.array(z.object({
+          slug: z.string().describe("Slug of the related person entity"),
+          relation: z.string().describe("Relationship description (e.g. '合伙人', '大学同学')"),
+        })).optional().describe("Social/professional relationships"),
+        summary: z.string().optional().describe("One-line summary of this person"),
+      }).describe("PersonCard data"),
+    },
+  }, async ({ slug, person_card }) => {
+    const page = ctx.db.getPage(slug);
+    if (!page) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }], isError: true };
+    }
+
+    const card: PersonCard = {
+      ask_for: person_card.ask_for,
+      handles: person_card.handles,
+      relationships: person_card.relationships ?? [],
+      summary: person_card.summary,
+    };
+
+    // Update DB
+    const updated = ctx.db.updatePersonCard(slug, card);
+
+    // Write back to vault file
+    const filePath = page.file_path as string | undefined;
+    if (filePath) {
+      const fullPath = join(ctx.vaultPath, filePath);
+      const resolved = resolve(fullPath);
+      const rel = relative(ctx.vaultPath, resolved);
+      if (!rel.startsWith("..") && !resolved.startsWith("..") && existsSync(resolved)) {
+        const raw = readFileSync(resolved, "utf-8");
+        const { frontmatter, body } = parseFrontmatter(raw);
+        frontmatter.person_card = card;
+        writeFileSync(resolved, stringifyFrontmatter(frontmatter, body), "utf-8");
+      }
+    }
+
+    return { content: [{ type: "text", text: JSON.stringify({ success: updated, slug, person_card: card }, null, 2) }] };
+  });
+
+  // ─── find_persons_by_topic ───────────────────────────────────
+  server.registerTool("find_persons_by_topic", {
+    description: "Find person entities whose ask_for matches the given topics. Returns ranked results.",
+    inputSchema: {
+      topics: z.array(z.string()).describe("Topics to search for"),
+    },
+  }, async ({ topics }) => {
+    const allCards = ctx.db.getAllPersonCards();
+    const results = allCards
+      .map(({ slug, person_card }) => {
+        const matchedTopics = topics.filter(t =>
+          person_card.ask_for.some(a => a.toLowerCase().includes(t.toLowerCase()) || t.toLowerCase().includes(a.toLowerCase()))
+        );
+        return { slug, matchedTopics, score: matchedTopics.length, person_card };
+      })
+      .filter(r => r.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
   });
 }

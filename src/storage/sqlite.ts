@@ -29,12 +29,20 @@ export interface LinkRow {
   created_at: string;
 }
 
+export interface PersonCard {
+  ask_for: string[];
+  handles: Record<string, string>;
+  relationships: Array<{ slug: string; relation: string }>;
+  summary?: string;
+}
+
 export interface UpsertPageData {
   slug: string;
   type: string;
   title: string;
   filePath: string;
   contentHash: string;
+  personCard?: PersonCard;
 }
 
 export interface InsightRow {
@@ -232,6 +240,7 @@ export class CBrainDB {
     this.migrateDiscoveries();
     this.migrateSearchLog();
     this.migrateRawToRecords();
+    this.migratePagesPersonCard();
   }
 
   private migrateLinksStrength(): void {
@@ -272,6 +281,14 @@ export class CBrainDB {
     }
     if (!names.has("confidence_decay")) {
       this.db.exec("ALTER TABLE pages ADD COLUMN confidence_decay REAL DEFAULT 1.0");
+    }
+  }
+
+  private migratePagesPersonCard(): void {
+    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("person_card")) {
+      this.db.exec("ALTER TABLE pages ADD COLUMN person_card TEXT");
     }
   }
 
@@ -719,12 +736,13 @@ export class CBrainDB {
 
   upsertPage(data: UpsertPageData): void {
     this.prepare(`
-      INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at)
-      VALUES ($slug, $type, $title, $path, $hash, 3, datetime('now'), datetime('now'))
+      INSERT INTO pages (slug, type, title, file_path, content_hash, person_card, tier, created_at, updated_at)
+      VALUES ($slug, $type, $title, $path, $hash, $card, 3, datetime('now'), datetime('now'))
       ON CONFLICT(slug) DO UPDATE SET
         type = excluded.type,
         title = excluded.title,
         content_hash = excluded.content_hash,
+        person_card = excluded.person_card,
         updated_at = datetime('now')
     `).run({
       $slug: data.slug,
@@ -732,6 +750,7 @@ export class CBrainDB {
       $title: data.title,
       $path: data.filePath,
       $hash: data.contentHash,
+      $card: data.personCard ? JSON.stringify(data.personCard) : null,
     });
   }
 
@@ -766,6 +785,40 @@ export class CBrainDB {
     this.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
     this.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
     this.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+  }
+
+  getPersonCard(slug: string): PersonCard | null {
+    const row = this.prepare(
+      "SELECT person_card FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { person_card: string | null } | undefined;
+    if (!row?.person_card) return null;
+    try {
+      return JSON.parse(row.person_card) as PersonCard;
+    } catch {
+      return null;
+    }
+  }
+
+  updatePersonCard(slug: string, card: PersonCard): boolean {
+    const r = this.prepare(
+      "UPDATE pages SET person_card = $card, updated_at = datetime('now') WHERE slug = $slug"
+    ).run({ $slug: slug, $card: JSON.stringify(card) });
+    return r.changes > 0;
+  }
+
+  getAllPersonCards(): Array<{ slug: string; person_card: PersonCard }> {
+    const rows = this.prepare(
+      "SELECT slug, person_card FROM pages WHERE person_card IS NOT NULL"
+    ).all() as Array<{ slug: string; person_card: string }>;
+    return rows
+      .map(r => {
+        try {
+          return { slug: r.slug, person_card: JSON.parse(r.person_card) as PersonCard };
+        } catch {
+          return null;
+        }
+      })
+      .filter((r): r is { slug: string; person_card: PersonCard } => r !== null);
   }
 
   rewireLinks(oldSlug: string, newSlug: string): void {
