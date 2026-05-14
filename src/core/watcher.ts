@@ -13,7 +13,7 @@ export class FileWatcher {
   private vaultPath: string;
   private interval: ReturnType<typeof setInterval> | null = null;
   private running = false;
-  private readonly POLL_MS = 3000;
+  private readonly POLL_MS = 30_000;
   private hashes = new Map<string, string>();  // path → content_hash
   private mtimes = new Map<string, { mtime: number; size: number }>();
 
