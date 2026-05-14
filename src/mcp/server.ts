@@ -22,6 +22,8 @@ import { registerDiscoveryTools } from "./tools/discoveries.js";
 import { registerInsightTools } from "./tools/insights.js";
 import { registerExpandTools } from "./tools/expand.js";
 import { registerProfileTools } from "./tools/profile.js";
+import { registerDossierTools } from "./tools/dossier.js";
+import { registerHierarchyTools } from "./tools/hierarchy.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -73,6 +75,8 @@ export function createServer(deps: CBrainDeps): McpServer {
   registerInsightTools(server, ctx);
   registerExpandTools(server, ctx);
   registerProfileTools(server, ctx);
+  registerDossierTools(server, ctx);
+  registerHierarchyTools(server, ctx);
 
   return server;
 }

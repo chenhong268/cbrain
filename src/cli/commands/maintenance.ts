@@ -439,4 +439,171 @@ export function register(program: Command) {
 
       deps.db.close();
     });
+
+  program
+    .command("dossier")
+    .description("Generate or update a structured dossier for an entity")
+    .argument("<slug>", "Entity slug (e.g. entity/zhang-san)")
+    .option("--force", "Force regeneration even if cached")
+    .option("--list", "List all entities with dossiers")
+    .action(async (slug, opts) => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      await deps.lance.connect(config.lancePath);
+
+      if (opts.list) {
+        const { PageManager: PM } = await import("../../core/page.js");
+        const { Logger: L } = await import("../../core/logger.js");
+        const pagesList = new PM(deps.db, config.vaultPath, new L(join(config.vaultPath, "outputs")));
+        const allPages = deps.db.listPages({ limit: 10000 });
+        const withDossier: Array<{ slug: string; title: string; ts: string }> = [];
+        for (const p of allPages) {
+          const full = pagesList.getBySlug(p.slug);
+          const ts = (full?.frontmatter as Record<string, unknown> | undefined)?.dossier_updated as string | undefined;
+          if (ts) withDossier.push({ slug: p.slug, title: p.title, ts });
+        }
+        if (withDossier.length === 0) {
+          console.log("  No entities with dossiers found.");
+        } else {
+          console.log(`  ${withDossier.length} entities with dossiers:\n`);
+          for (const p of withDossier) {
+            const age = ((Date.now() - new Date(p.ts).getTime()) / 86_400_000).toFixed(1);
+            console.log(`    ${p.slug.padEnd(35)} ${p.title.padEnd(20)} ${age}d ago`);
+          }
+        }
+        deps.db.close();
+        return;
+      }
+
+      if (!deps.llm) {
+        console.error("  ⚠️ 未配置 LLM，无法生成档案");
+        deps.db.close();
+        process.exit(1);
+      }
+
+      const { generateDossier, isDossierFresh } = await import("../../core/dossier.js");
+      const { PageManager } = await import("../../core/page.js");
+      const { GraphManager } = await import("../../core/graph.js");
+      const { Logger } = await import("../../core/logger.js");
+      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const outputsDir = join(config.vaultPath, "outputs");
+      const logger = new Logger(outputsDir);
+      const pages = new PageManager(deps.db, config.vaultPath, logger);
+      const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
+      const graph = new GraphManager(deps.db);
+
+      if (!opts.force) {
+        const page = pages.getBySlug(slug);
+        if (page) {
+          const freshness = isDossierFresh(page.frontmatter);
+          if (freshness.fresh) {
+            const age = ((Date.now() - new Date(freshness.updatedAt!).getTime()) / 86_400_000).toFixed(1);
+            console.log(`  ✓ ${page.title} 的档案已是最新（${age} 天前生成）`);
+            console.log(`    使用 --force 强制重新生成`);
+            deps.db.close();
+            return;
+          }
+        }
+      }
+
+      console.log(`  Generating dossier for ${slug}...`);
+      const result = await generateDossier(slug, {
+        db: deps.db,
+        pages,
+        graph,
+        llm: deps.llm,
+        pipeline,
+        logger,
+      });
+
+      console.log(`  ✓ ${result.title}`);
+      console.log(`    Generated: ${result.generated_at}`);
+      console.log(`\n${result.dossier}`);
+      deps.db.close();
+    });
+
+  program
+    .command("hierarchy")
+    .description("Manage entity hierarchy (reports_to)")
+    .argument("[slug]", "Entity slug (e.g. entity/zhang-san)")
+    .option("--reports-to <managerSlug>", "Set direct manager")
+    .option("--remove", "Remove hierarchy relationship")
+    .option("--list", "List all entities with hierarchy")
+    .action(async (slug, opts) => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      const { PageManager } = await import("../../core/page.js");
+      const { GraphManager } = await import("../../core/graph.js");
+      const pages = new PageManager(deps.db, config.vaultPath);
+      const graph = new GraphManager(deps.db);
+
+      if (opts.list) {
+        const allPages = deps.db.listPages({ limit: 10000 });
+        const withHierarchy: Array<{ slug: string; title: string; reports_to: string; reports_to_title: string }> = [];
+        for (const p of allPages) {
+          const full = pages.getBySlug(p.slug);
+          const rt = (full?.frontmatter as Record<string, unknown> | undefined)?.reports_to as string | undefined;
+          if (rt) {
+            const manager = pages.getBySlug(rt);
+            withHierarchy.push({ slug: p.slug, title: p.title, reports_to: rt, reports_to_title: manager?.title ?? rt });
+          }
+        }
+        if (withHierarchy.length === 0) {
+          console.log("  No entities with hierarchy set.");
+        } else {
+          console.log(`  ${withHierarchy.length} entities with hierarchy:\n`);
+          for (const e of withHierarchy) {
+            console.log(`    ${e.slug.padEnd(40)} ${e.title.padEnd(15)} → ${e.reports_to_title}`);
+          }
+        }
+        deps.db.close();
+        return;
+      }
+
+      if (!slug) {
+        console.error("  ⚠️ 需要指定 slug，或使用 --list");
+        deps.db.close();
+        process.exit(1);
+      }
+
+      if (opts.remove) {
+        const { removeHierarchy } = await import("../../core/hierarchy.js");
+        const removed = removeHierarchy(slug, { pages, graph });
+        if (!removed) {
+          console.log(`  ${slug} 未设置 reports_to`);
+        } else {
+          const manager = pages.getBySlug(removed);
+          console.log(`  ✓ 已移除 ${slug} 的上级关系 (${manager?.title ?? removed})`);
+        }
+        deps.db.close();
+        return;
+      }
+
+      if (opts.reportsTo) {
+        const { setHierarchy } = await import("../../core/hierarchy.js");
+        setHierarchy(slug, opts.reportsTo, { pages, graph });
+        const manager = pages.getBySlug(opts.reportsTo);
+        console.log(`  ✓ ${slug} 的直线领导设为 ${manager?.title ?? opts.reportsTo}`);
+        deps.db.close();
+        return;
+      }
+
+      // Show hierarchy context
+      const { getHierarchyContext } = await import("../../core/hierarchy.js");
+      const ctx = getHierarchyContext(slug, { pages, graph });
+      const entity = pages.getBySlug(slug);
+      console.log(`  ${entity?.title ?? slug} 的组织层级\n`);
+      if (ctx.reports_to) {
+        console.log(`  直属上级: ${ctx.reports_to_title ?? ctx.reports_to}`);
+      } else {
+        console.log(`  直属上级: (未设置)`);
+      }
+      if (ctx.subordinates.length > 0) {
+        console.log(`  直属下级: ${ctx.subordinates.map(s => s.title).join(", ")}`);
+      }
+      if (ctx.peers.length > 0) {
+        console.log(`  同级:     ${ctx.peers.map(s => s.title).join(", ")}`);
+      }
+      deps.db.close();
+    });
 }

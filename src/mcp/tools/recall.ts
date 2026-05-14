@@ -2,6 +2,8 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity } from "./trim.js";
+import { extractDossier } from "../../core/dossier.js";
+import { getHierarchyContext } from "../../core/hierarchy.js";
 
 const TOP_N = 3;
 
@@ -84,6 +86,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const timelineBySlug = new Map<string, Record<string, unknown>[]>();
     const tagsBySlug = new Map<string, string[]>();
     const relatedBySlug = new Map<string, { slug: string; title: string; type: string }[]>();
+    const hierarchyBySlug = new Map<string, ReturnType<typeof getHierarchyContext>>();
 
     for (const slug of topSlugs) {
       try {
@@ -106,6 +109,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       } catch { tagsBySlug.set(slug, []); }
 
       try { relatedBySlug.set(slug, ctx.graph.getRelatedEntities(slug, 5)); } catch { relatedBySlug.set(slug, []); }
+
+      try { hierarchyBySlug.set(slug, getHierarchyContext(slug, { pages: ctx.pages, graph: ctx.graph })); } catch { /* non-critical */ }
     }
 
     // Build entity objects
@@ -126,6 +131,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         ? (tier >= 3 ? "high" : tier === 2 ? "ok" : "low")
         : "unknown";
 
+      const dossier = page ? extractDossier(page.body) : undefined;
+      const hierarchy = hierarchyBySlug.get(slug);
+
       return {
         slug,
         title: page?.title ?? slug,
@@ -136,10 +144,16 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         snippet: sr.snippet,
         body: truncate(page?.body, 500),
         frontmatter: safeFrontmatter(page?.frontmatter ?? null),
+        dossier: dossier ?? undefined,
+        dossier_updated: (page?.frontmatter as Record<string, unknown> | undefined)?.dossier_updated as string | undefined,
         links,
         timeline,
         tags,
         related,
+        reports_to: hierarchy?.reports_to ?? undefined,
+        reports_to_title: hierarchy?.reports_to_title ?? undefined,
+        subordinates: hierarchy?.subordinates.length ? hierarchy.subordinates : undefined,
+        peers: hierarchy?.peers.length ? hierarchy.peers : undefined,
       };
     });
 

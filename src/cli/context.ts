@@ -75,7 +75,14 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
   const nerEnabled = config.ner?.enabled !== false;
   const nerApiKey = config.ner?.llm_api_key ?? apiKey ?? process.env.ZHIPU_API_KEY;
   const llm = (nerEnabled && nerApiKey)
-    ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model)
+    ? (() => {
+        const provider = config.ner?.llm_provider;
+        if (provider === "deepseek") {
+          const { DeepSeekLLMProvider } = require("../llm/deepseek.js");
+          return new DeepSeekLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model);
+        }
+        return new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model);
+      })()
     : undefined;
 
   const profileDir = dirname(resolve(config.dbPath));

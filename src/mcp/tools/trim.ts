@@ -6,6 +6,7 @@ import type { SearchResult } from "../../core/search.js";
 const KNOWN_FM_KEYS = new Set([
   "title", "type", "slug", "tags", "tier",
   "expires_at", "confidence_decay", "created_at", "updated_at",
+  "reports_to", "dossier_updated",
 ]);
 
 export function truncate(str: string | null | undefined, maxLen: number): string {
