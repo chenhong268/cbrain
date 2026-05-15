@@ -229,15 +229,22 @@ ${relatedText}
 
   // 4. Call LLM
   const raw = await llm.chat([{ role: "user", content: prompt }]);
-  let dossier: string;
-  try {
-    const parsed = JSON.parse(raw);
-    dossier = (typeof parsed === "string" ? parsed : parsed.dossier ?? raw).trim();
-  } catch {
-    dossier = raw.replace(/^```(?:markdown|md)?\n?/m, "").replace(/\n?```\s*$/m, "").trim();
+  let dossier = parseDossierResponse(raw);
+
+  // 5. Validate + retry once if needed
+  const validation = validateDossier(dossier, { chunkCount: rawChunks.length, linkCount: outgoing.length + incoming.length });
+  if (!validation.ok) {
+    logger?.warn("dossier", "首次生成未通过质量检查，重试", { slug, issues: validation.issues });
+    const retryPrompt = `${prompt}\n\n⚠️ 上次输出未通过质量检查：${validation.issues.join("；")}。必须严格按结构要求输出，每段都要有实质内容。`;
+    const retryRaw = await llm.chat([{ role: "user", content: retryPrompt }]);
+    const retryDossier = parseDossierResponse(retryRaw);
+    const retryValidation = validateDossier(retryDossier, { chunkCount: rawChunks.length, linkCount: outgoing.length + incoming.length });
+    if (retryValidation.ok) {
+      dossier = retryDossier;
+    }
   }
 
-  // 5. Write back to page
+  // 6. Write back to page
   const now = new Date().toISOString();
   const strippedBody = stripDossier(page.body ?? "");
   const newBody = injectDossier(strippedBody, dossier, page.title, now.slice(0, 10));
@@ -247,7 +254,7 @@ ${relatedText}
     extra: { dossier_updated: now },
   });
 
-  // 6. Re-index chunks (body changed)
+  // 7. Re-index chunks (body changed)
   try {
     const { chunks: newChunks, embedResults } = await pipeline.embed(newBody);
     pipeline.writeIndexes(slug, newChunks, embedResults);
@@ -258,6 +265,52 @@ ${relatedText}
   logger?.info("dossier", "档案已生成", { slug, title: page.title });
 
   return { slug, title: page.title, dossier, generated_at: now };
+}
+
+function parseDossierResponse(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw);
+    return (typeof parsed === "string" ? parsed : parsed.dossier ?? raw).trim();
+  } catch {
+    return raw.replace(/^```(?:markdown|md)?\n?/m, "").replace(/\n?```\s*$/m, "").trim();
+  }
+}
+
+const REQUIRED_SECTIONS = [
+  "### 核心定位",
+  "### 关键能力",
+  "### 信息矛盾",
+  "### 关键关系",
+  "### 数据充分度",
+];
+
+function validateDossier(
+  dossier: string,
+  data: { chunkCount: number; linkCount: number },
+): { ok: boolean; issues: string[] } {
+  const issues: string[] = [];
+
+  const lines = dossier.split("\n");
+  const headings = new Set(lines.filter(l => l.startsWith("### ")).map(l => l.trim()));
+  for (const required of REQUIRED_SECTIONS) {
+    if (![...headings].some(h => h.startsWith(required))) {
+      issues.push(`缺少段落"${required}"`);
+    }
+  }
+
+  const textOnly = dossier.replace(/[^\p{L}\p{N}]/gu, "");
+  if (textOnly.length < 500) {
+    issues.push(`内容过短（${textOnly.length} 字，要求 >= 500）`);
+  }
+
+  if (data.chunkCount > 5) {
+    const citations = (dossier.match(/\[\[/g) ?? []).length;
+    if (citations < 3) {
+      issues.push(`来源引用不足（${citations} 个 [[ 引用，要求 >= 3）`);
+    }
+  }
+
+  return { ok: issues.length === 0, issues };
 }
 
 function stripDossier(body: string): string {
