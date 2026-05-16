@@ -1,6 +1,37 @@
 # Changelog
 
-> Current: `v1.5.2` — 索引时间戳修复。
+> Current: `v1.6.0` — 性能优化：19 处热路径加速。
+
+## [v1.6.0] — 2026-05-16
+
+### 性能优化（19 fixes，4 Sprints）
+
+**Sprint 1 — 独立高影响：**
+- reflect 图邻接缓存 — BFS/label propagation 不再每次重建邻接表
+- NER Stage 1 并发 — 串行 LLM 调用改为 CONCURRENCY=5 batch
+- getBySlug LRU 缓存 — 200 上限，30s TTL，list/update 自动 invalidat
+- resolveEntityName 预构建小写索引 — 消除 O(n) 线性扫描
+- pipeline Set 去重 — Array.includes → Set.has
+- deletePageCascaded 去冗余 DELETE — 依赖 ON DELETE CASCADE
+- stripCodeBlocks O(n^2) → O(n) — 逐字符拼接 → parts.join
+
+**Sprint 2 — 批查询 + 缓存：**
+- recall 批量查询 — N+1 → batchGetLinks/Timeline/Tags
+- graph traverse 批量 — 逐节点查询 → 按层批量取
+- search 查询扩展缓存 — 5 分钟 TTL
+- countNewPagesSince — 两条 COUNT → GROUP BY 一条
+- insight TTL 配置缓存 — 1 分钟 TTL
+- insight 签名从 SQLite 取 — 不再读磁盘
+
+**Sprint 3 — 异步 I/O + SQL 优化：**
+- sync/dream/watcher/shared 全部同步 I/O → async
+- dream 并行阶段 — cleanup+health+insight archive Promise.all
+- rewriteVaultLinks 按需扫描 — chunks_fts LIKE 定位候选文件
+- resolveSlugs 批量 — 逐条查询 → 3 条批量 SQL
+- 关联子查询 → LEFT JOIN
+
+**Sprint 4 — 清理：**
+- ingest 代码去重 — ingestMarkdown/ingestText 提取 ingestCore
 
 ## [v1.5.2] — 2026-05-13
 

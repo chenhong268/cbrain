@@ -76,41 +76,81 @@ export class GraphManager {
     for (let depth = 1; depth <= maxDepth; depth++) {
       const nextFrontier: string[] = [];
 
-      for (const slug of frontier) {
-        let slugs: string[];
-        if (minWeight !== undefined) {
-          const links = [
-            ...(direction === "outgoing" || direction === "both" ? this.db.getOutgoingLinks(slug) : []),
-            ...(direction === "incoming" || direction === "both" ? this.db.getIncomingLinks(slug) : []),
+      // Batch-fetch links for entire frontier
+      if (minWeight !== undefined) {
+        const batchLinks = this.db.batchGetLinksForSlugs(frontier);
+        const neighborSlugs = new Set<string>();
+        for (const slug of frontier) {
+          const links = batchLinks.get(slug);
+          if (!links) continue;
+          const all = [
+            ...(direction === "outgoing" || direction === "both" ? links.outgoing : []),
+            ...(direction === "incoming" || direction === "both" ? links.incoming : []),
           ];
-          slugs = [...new Set(
-            links
-              .filter(l => (!relation || l.relation === relation) && l.weight >= minWeight)
-              .map(l => l.from_slug === slug ? l.to_slug : l.from_slug)
-          )];
-        } else {
-          slugs = this.getNeighbors(slug, direction, relation);
-        }
-
-        for (const neighbor of slugs) {
-          if (!visited.has(neighbor)) {
-            visited.add(neighbor);
-            nextFrontier.push(neighbor);
-
-            const page = this.db.getPageTitleAndType(neighbor);
-
-            if (page) {
-              results.push({
-                slug: neighbor,
-                title: page.title,
-                type: page.type,
-                depth,
-              });
-
-              if (results.length >= limit) {
-                return results;
+          for (const l of all) {
+            if ((!relation || l.relation === relation) && l.weight >= minWeight) {
+              const neighbor = l.from_slug === slug ? l.to_slug : l.from_slug;
+              if (!visited.has(neighbor)) {
+                visited.add(neighbor);
+                nextFrontier.push(neighbor);
+                neighborSlugs.add(neighbor);
               }
             }
+          }
+        }
+        // Batch-fetch titles for all new neighbors
+        const titles = this.db.getPageTitlesAndTypes([...neighborSlugs]);
+        for (const neighbor of nextFrontier) {
+          const page = titles.get(neighbor);
+          if (page) {
+            results.push({ slug: neighbor, title: page.title, type: page.type, depth });
+            if (results.length >= limit) return results;
+          }
+        }
+      } else if (relation !== undefined) {
+        // relation filter needs getLinkedSlugs per slug (no batch for filtered)
+        for (const slug of frontier) {
+          const slugs = this.getNeighbors(slug, direction, relation);
+          for (const neighbor of slugs) {
+            if (!visited.has(neighbor)) {
+              visited.add(neighbor);
+              nextFrontier.push(neighbor);
+            }
+          }
+        }
+        const titles = this.db.getPageTitlesAndTypes(nextFrontier);
+        for (const neighbor of nextFrontier) {
+          const page = titles.get(neighbor);
+          if (page) {
+            results.push({ slug: neighbor, title: page.title, type: page.type, depth });
+            if (results.length >= limit) return results;
+          }
+        }
+      } else {
+        // No relation filter — use lightweight batch neighbor fetch
+        const batchNeighbors = this.db.getLinksForSlugs(frontier);
+        const neighborSlugs: string[] = [];
+        for (const slug of frontier) {
+          const entry = batchNeighbors.get(slug);
+          if (!entry) continue;
+          const candidates = [
+            ...(direction === "outgoing" || direction === "both" ? entry.outgoing : []),
+            ...(direction === "incoming" || direction === "both" ? entry.incoming : []),
+          ];
+          for (const neighbor of candidates) {
+            if (!visited.has(neighbor)) {
+              visited.add(neighbor);
+              nextFrontier.push(neighbor);
+              neighborSlugs.push(neighbor);
+            }
+          }
+        }
+        const titles = this.db.getPageTitlesAndTypes(neighborSlugs);
+        for (const neighbor of nextFrontier) {
+          const page = titles.get(neighbor);
+          if (page) {
+            results.push({ slug: neighbor, title: page.title, type: page.type, depth });
+            if (results.length >= limit) return results;
           }
         }
       }

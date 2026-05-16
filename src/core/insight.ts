@@ -13,16 +13,28 @@ export interface InsightFilters {
 }
 
 const DEFAULT_TTL_DAYS = 90;
+const CONFIG_CACHE_TTL = 60_000;
 
 export class InsightManager {
+  private _ttlCache: { value: number; expires: number } | null = null;
+
   constructor(
     private db: CBrainDB,
     private embedding: EmbeddingProvider,
     private lance: LanceDBManager,
   ) {}
 
+  private getTtlDays(): number {
+    if (this._ttlCache && Date.now() < this._ttlCache.expires) {
+      return this._ttlCache.value;
+    }
+    const value = parseInt(this.db.getConfig("insight.ttl_days") ?? String(DEFAULT_TTL_DAYS), 10);
+    this._ttlCache = { value, expires: Date.now() + CONFIG_CACHE_TTL };
+    return value;
+  }
+
   async createInsight(data: CreateInsightInput): Promise<InsightRow> {
-    const ttlDays = parseInt(this.db.getConfig("insight.ttl_days") ?? String(DEFAULT_TTL_DAYS), 10);
+    const ttlDays = this.getTtlDays();
     const expiresAt = data.expiresAt !== undefined
       ? data.expiresAt
       : new Date(Date.now() + ttlDays * 86_400_000).toISOString();

@@ -3,28 +3,28 @@
 // not machine guesswork — they must be parsed deterministically.
 
 export function stripCodeBlocks(content: string): string {
-  let out = "";
+  const parts: string[] = [];
   let i = 0;
   while (i < content.length) {
     if (content.startsWith("```", i)) {
       const end = content.indexOf("```", i + 3);
-      if (end === -1) { out += " ".repeat(content.length - i); break; }
-      out += " ".repeat(end + 3 - i);
+      if (end === -1) { parts.push(" ".repeat(content.length - i)); break; }
+      parts.push(" ".repeat(end + 3 - i));
       i = end + 3;
       continue;
     }
     if (content[i] === "`") {
       const end = content.indexOf("`", i + 1);
       if (end === -1 || content.slice(i + 1, end).includes("\n")) {
-        out += content[i]; i++; continue;
+        parts.push(content[i]); i++; continue;
       }
-      out += " ".repeat(end + 1 - i);
+      parts.push(" ".repeat(end + 1 - i));
       i = end + 1;
       continue;
     }
-    out += content[i]; i++;
+    parts.push(content[i]); i++;
   }
-  return out;
+  return parts.join("");
 }
 
 // (?<!!) prevents matching image/attachment embeds (![[...]])

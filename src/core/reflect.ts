@@ -2,9 +2,6 @@ import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { PageManager } from "./page.js";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { readPageFile } from "../utils/frontmatter.js";
 import { normalizeRelation } from "./shared.js";
 import type { ContentPipeline } from "./pipeline.js";
 import { generateSlug } from "../utils/slug.js";
@@ -438,40 +435,45 @@ export class ReflectManager {
 
   private buildExistingInsightSigs(): Array<Set<string>> {
     const sigs: Array<Set<string>> = [];
-    const insights = this.db.listPages({ type: "insight" });
-    for (const page of insights) {
+    const insights = this.db.listInsights({ status: "active" });
+    for (const insight of insights) {
       try {
-        const filePath = join(this.pageMgr.vaultPath, page.file_path);
-        if (!existsSync(filePath)) continue;
-        const { frontmatter } = readPageFile(filePath);
-        const entities: string[] = (frontmatter.source_entities as string[]) ?? [];
+        const entities: string[] = insight.source_entities
+          ? JSON.parse(insight.source_entities)
+          : [];
         if (entities.length > 0) sigs.push(new Set(entities));
-      } catch (e) { console.error(`[reflect] 文件读取失败，跳过: ${page.file_path}`, e); }
+      } catch { /* skip malformed */ }
     }
     return sigs;
   }
 
-  private findIndirectPairs(): Array<[string, string]> {
+  private buildAdjacency(): Map<string, Set<string>> {
     const allLinks = this.db.getAllLinks();
     const adj = new Map<string, Set<string>>();
     for (const { from_slug, to_slug } of allLinks) {
-      let neighbors = adj.get(from_slug);
-      if (!neighbors) { neighbors = new Set(); adj.set(from_slug, neighbors); }
-      neighbors.add(to_slug);
+      if (!adj.has(from_slug)) adj.set(from_slug, new Set());
+      if (!adj.has(to_slug)) adj.set(to_slug, new Set());
+      adj.get(from_slug)!.add(to_slug);
+      adj.get(to_slug)!.add(from_slug);
     }
+    return adj;
+  }
+
+  private findIndirectPairs(adj?: Map<string, Set<string>>): Array<[string, string]> {
+    const a = adj ?? this.buildAdjacency();
     const seen = new Set<string>();
     const result: Array<[string, string]> = [];
-    for (const [a, aNeighbors] of adj) {
-      for (const b of aNeighbors) {
-        const bNeighbors = adj.get(b);
+    for (const [node, nodeNeighbors] of a) {
+      for (const b of nodeNeighbors) {
+        const bNeighbors = a.get(b);
         if (!bNeighbors) continue;
         for (const c of bNeighbors) {
-          if (c === a) continue;
-          if (aNeighbors.has(c)) continue;
-          const key = [a, c].sort().join("→");
+          if (c === node) continue;
+          if (nodeNeighbors.has(c)) continue;
+          const key = [node, c].sort().join("→");
           if (seen.has(key)) continue;
           seen.add(key);
-          result.push([a, c]);
+          result.push([node, c]);
         }
       }
     }
@@ -481,7 +483,8 @@ export class ReflectManager {
   // ─── Discovery Pipeline ──────────────────────────────────────
 
   async runDiscovery(dreamRun?: string): Promise<DiscoveryReport> {
-    const pool = await this.buildCandidatePool();
+    const adj = this.buildAdjacency();
+    const pool = await this.buildCandidatePool(adj);
     const bodyCache = new Map<string, string>();
     const embCache = new Map<string, number[]>();
     for (const [a, b] of pool) {
@@ -494,7 +497,7 @@ export class ReflectManager {
     }
     const scored: Array<{ pair: [string, string]; score: number }> = [];
     for (const pair of pool) {
-      const s = await this.scoreCandidate(pair[0], pair[1], bodyCache, embCache);
+      const s = await this.scoreCandidate(pair[0], pair[1], bodyCache, embCache, adj);
       if (s > 0.3) scored.push({ pair, score: s });
     }
     scored.sort((a, b) => b.score - a.score);
@@ -507,7 +510,7 @@ export class ReflectManager {
 
     for (let i = 0; i < Math.min(scored.length, 20); i++) {
       const { pair, score } = scored[i];
-      const dist = this.bfsDistance(pair[0], pair[1]);
+      const dist = this.bfsDistance(pair[0], pair[1], adj);
       if (dist === Infinity) continue;
       const sourcesA = this.getSourcePages(pair[0]);
       const sourcesB = this.getSourcePages(pair[1]);
@@ -573,16 +576,9 @@ export class ReflectManager {
     return "low";
   }
 
-  private bfsDistance(a: string, b: string): number {
+  private bfsDistance(a: string, b: string, adj?: Map<string, Set<string>>): number {
     if (a === b) return 0;
-    const allLinks = this.db.getAllLinks();
-    const adj = new Map<string, Set<string>>();
-    for (const { from_slug, to_slug } of allLinks) {
-      if (!adj.has(from_slug)) adj.set(from_slug, new Set());
-      if (!adj.has(to_slug)) adj.set(to_slug, new Set());
-      adj.get(from_slug)!.add(to_slug);
-      adj.get(to_slug)!.add(from_slug);
-    }
+    const g = adj ?? this.buildAdjacency();
     const visited = new Set<string>([a]);
     let frontier = new Set<string>([a]);
     let dist = 0;
@@ -590,7 +586,7 @@ export class ReflectManager {
       dist++;
       const next = new Set<string>();
       for (const node of frontier) {
-        for (const neighbor of adj.get(node) ?? []) {
+        for (const neighbor of g.get(node) ?? []) {
           if (neighbor === b) return dist;
           if (!visited.has(neighbor)) { visited.add(neighbor); next.add(neighbor); }
         }
@@ -600,24 +596,15 @@ export class ReflectManager {
     return Infinity;
   }
 
-  private labelPropagation(): Map<string, number> {
-    const allLinks = this.db.getAllLinks();
-    const nodes = new Set<string>();
-    const adj = new Map<string, Set<string>>();
-    for (const { from_slug, to_slug } of allLinks) {
-      nodes.add(from_slug); nodes.add(to_slug);
-      if (!adj.has(from_slug)) adj.set(from_slug, new Set());
-      if (!adj.has(to_slug)) adj.set(to_slug, new Set());
-      adj.get(from_slug)!.add(to_slug);
-      adj.get(to_slug)!.add(from_slug);
-    }
-    const nodeList = [...nodes];
+  private labelPropagation(adj?: Map<string, Set<string>>): Map<string, number> {
+    const g = adj ?? this.buildAdjacency();
+    const nodeList = [...g.keys()];
     const labels = new Map<string, number>();
     nodeList.forEach((n, i) => labels.set(n, i));
     for (let iter = 0; iter < 20; iter++) {
       let changed = false;
       for (const node of nodeList) {
-        const neighbors = adj.get(node);
+        const neighbors = g.get(node);
         if (!neighbors || neighbors.size === 0) continue;
         const counts = new Map<number, number>();
         for (const nb of neighbors) counts.set(labels.get(nb)!, (counts.get(labels.get(nb)!) ?? 0) + 1);
@@ -650,8 +637,8 @@ export class ReflectManager {
     return 1 - intersection / new Set([...a, ...b]).size;
   }
 
-  private async scoreCandidate(a: string, b: string, bodies: Map<string, string>, embCache?: Map<string, number[]>): Promise<number> {
-    const dist = this.bfsDistance(a, b);
+  private async scoreCandidate(a: string, b: string, bodies: Map<string, string>, embCache?: Map<string, number[]>, adj?: Map<string, Set<string>>): Promise<number> {
+    const dist = this.bfsDistance(a, b, adj);
     if (dist === Infinity) return 0;
     const pathScore = dist >= 6 ? 1.0 : dist <= 1 ? 0 : (dist - 1) / 5;
     const sourceScore = this.jaccardDistance(this.getSourcePages(a), this.getSourcePages(b));
@@ -677,11 +664,11 @@ export class ReflectManager {
     return W_PATH * pathScore + W_SOURCE * sourceScore + W_TYPE * typeScore + W_CONTENT * contentScore + W_SEMANTIC * semanticScore;
   }
 
-  private async buildCandidatePool(): Promise<Array<[string, string]>> {
+  private async buildCandidatePool(adj?: Map<string, Set<string>>): Promise<Array<[string, string]>> {
     const seen = new Set<string>();
     const key = (a: string, b: string) => [a, b].sort().join("|||");
-    for (const [a, c] of this.findIndirectPairs()) seen.add(key(a, c));
-    const communities = this.labelPropagation();
+    for (const [a, c] of this.findIndirectPairs(adj)) seen.add(key(a, c));
+    const communities = this.labelPropagation(adj);
     const groups = new Map<number, string[]>();
     for (const [slug, lbl] of communities) groups.set(lbl, [...(groups.get(lbl) ?? []), slug]);
     const groupList = [...groups.values()].filter(g => g.length >= 2);
@@ -708,7 +695,8 @@ export class ReflectManager {
     topCandidates: Array<{ rank: number; score: number; dist: number; sourceJaccard: number; typeMix: string; entityA: string; entityB: string }>;
     scoreDistribution: Array<{ bucket: string; count: number }>;
   }> {
-    const pool = await this.buildCandidatePool();
+    const adj = this.buildAdjacency();
+    const pool = await this.buildCandidatePool(adj);
     const bodyCache = new Map<string, string>();
     const embCache = new Map<string, number[]>();
     for (const [a, b] of pool) {
@@ -721,12 +709,12 @@ export class ReflectManager {
     }
     const scored: Array<{ pair: [string, string]; score: number }> = [];
     for (const pair of pool) {
-      scored.push({ pair, score: await this.scoreCandidate(pair[0], pair[1], bodyCache, embCache) });
+      scored.push({ pair, score: await this.scoreCandidate(pair[0], pair[1], bodyCache, embCache, adj) });
     }
     scored.sort((a, b) => b.score - a.score);
 
-    const indirectSet = new Set(this.findIndirectPairs().map(([a, b]) => [a, b].sort().join("|||")));
-    const labels = this.labelPropagation();
+    const indirectSet = new Set(this.findIndirectPairs(adj).map(([a, b]) => [a, b].sort().join("|||")));
+    const labels = this.labelPropagation(adj);
     let byIndirect = 0, byCross = 0, byRandom = 0;
     for (const { pair } of scored) {
       const k = pair[0] < pair[1] ? `${pair[0]}|||${pair[1]}` : `${pair[1]}|||${pair[0]}`;
@@ -737,7 +725,7 @@ export class ReflectManager {
     }
 
     const top10 = scored.slice(0, 10).map(({ pair, score }, i) => {
-      const dist = this.bfsDistance(pair[0], pair[1]);
+      const dist = this.bfsDistance(pair[0], pair[1], adj);
       const pa = this.db.getPage(pair[0]), pb = this.db.getPage(pair[1]);
       const sourcesA = this.getSourcePages(pair[0]), sourcesB = this.getSourcePages(pair[1]);
       return {

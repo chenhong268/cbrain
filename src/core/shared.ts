@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { join, extname } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 
@@ -20,13 +21,13 @@ export function hashContent(content: string): string {
 
 // ─── File Collection ─────────────────────────────────────────
 
-export function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>): string[] {
+export async function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>): Promise<string[]> {
   const results: string[] = [];
-  const walk = (d: string) => {
+  const walk = async (d: string) => {
     let entries;
-    try { entries = readdirSync(d, { withFileTypes: true }); } catch (e) {
+    try { entries = await readdir(d, { withFileTypes: true }); } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "EACCES") {
-        console.error(`[shared] readdirSync 失败: ${d}`, e);
+        console.error(`[shared] readdir 失败: ${d}`, e);
       }
       return;
     }
@@ -34,11 +35,11 @@ export function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>): st
       if (e.name.startsWith(".")) continue;
       if (excludeDirs?.has(e.name)) continue;
       const p = join(d, e.name);
-      if (e.isDirectory()) { walk(p); }
+      if (e.isDirectory()) { await walk(p); }
       else if (extname(e.name).toLowerCase() === ".md") { results.push(p); }
     }
   };
-  walk(dir);
+  await walk(dir);
   return results;
 }
 
@@ -121,15 +122,17 @@ export interface VaultLinkOp {
  * - newSlug present → replace `[[old]]` → `[[new]]`  (merge)
  * - newSlug absent  → strip `[[]]`, keep plain text   (delete)
  *
- * Handles both full-slug (`[[brain/entities/陈宏]]`) and short-name (`[[陈宏]]`) forms.
- * Returns number of files modified.
+ * When `db` is provided, uses chunks_fts to find only candidate files.
+ * Falls back to full vault scan when `db` is omitted.
  */
-export function rewriteVaultLinks(vaultPath: string, operations: VaultLinkOp[]): number {
+export function rewriteVaultLinks(vaultPath: string, operations: VaultLinkOp[], db?: CBrainDB): number {
   type Replacement = { from: string; to: string };
   const replacements: Replacement[] = [];
+  const searchPatterns: string[] = [];
 
   for (const op of operations) {
     const oldShort = op.oldSlug.split("/").pop()!;
+    searchPatterns.push(`[[${op.oldSlug}]]`, `[[${oldShort}]]`);
     if (op.newSlug) {
       const newShort = op.newSlug.split("/").pop()!;
       replacements.push({ from: `[[${op.oldSlug}]]`, to: `[[${newShort}]]` });
@@ -146,28 +149,42 @@ export function rewriteVaultLinks(vaultPath: string, operations: VaultLinkOp[]):
 
   let totalRewritten = 0;
 
-  for (const dir of VAULT_DIRS) {
-    const absDir = join(vaultPath, dir);
-    if (!existsSync(absDir)) continue;
-    for (const file of readdirSync(absDir)) {
-      if (!file.endsWith(".md")) continue;
-      const filePath = join(absDir, file);
-      let content: string;
-      try { content = readFileSync(filePath, "utf-8"); } catch { continue; }
+  // Collect candidate file paths
+  const candidateFiles = new Set<string>();
 
-      let updated = content;
-      let changed = false;
-      for (const { from, to } of replacements) {
-        if (updated.includes(from)) {
-          updated = updated.replaceAll(from, to);
-          changed = true;
-        }
+  if (db) {
+    const slugs = db.findSlugsByText(searchPatterns);
+    for (const slug of slugs) {
+      const fp = db.getPageFilePath(slug);
+      if (fp) candidateFiles.add(join(vaultPath, fp));
+    }
+  } else {
+    for (const dir of VAULT_DIRS) {
+      const absDir = join(vaultPath, dir);
+      if (!existsSync(absDir)) continue;
+      for (const file of readdirSync(absDir)) {
+        if (!file.endsWith(".md")) continue;
+        candidateFiles.add(join(absDir, file));
       }
+    }
+  }
 
-      if (changed) {
-        writeFileSync(filePath, updated, "utf-8");
-        totalRewritten++;
+  for (const filePath of candidateFiles) {
+    let content: string;
+    try { content = readFileSync(filePath, "utf-8"); } catch { continue; }
+
+    let updated = content;
+    let changed = false;
+    for (const { from, to } of replacements) {
+      if (updated.includes(from)) {
+        updated = updated.replaceAll(from, to);
+        changed = true;
       }
+    }
+
+    if (changed) {
+      writeFileSync(filePath, updated, "utf-8");
+      totalRewritten++;
     }
   }
 
@@ -270,19 +287,32 @@ export function findEntitySlug(
  * 3. Strip parenthetical suffix (e.g. "赵磊（投资总监）" → "赵磊")
  * 4. DB lookup by title
  */
+export function buildLowercaseIndex(entitySlugMap: Map<string, string>): Map<string, string> {
+  const idx = new Map<string, string>();
+  for (const [key, slug] of entitySlugMap) {
+    idx.set(key.toLowerCase(), slug);
+  }
+  return idx;
+}
+
 export function resolveEntityName(
   name: string,
   entitySlugMap: Map<string, string>,
-  db: CBrainDB
+  db: CBrainDB,
+  lowerIndex?: Map<string, string>
 ): string | null {
   // 1. Exact
   const exact = entitySlugMap.get(name);
   if (exact) return exact;
 
-  // 2. Case-insensitive
+  // 2. Case-insensitive (O(1) with prebuilt index)
   const lower = name.toLowerCase();
-  for (const [key, slug] of entitySlugMap) {
-    if (key.toLowerCase() === lower) return slug;
+  const ciResult = lowerIndex?.get(lower);
+  if (ciResult) return ciResult;
+  if (!lowerIndex) {
+    for (const [key, slug] of entitySlugMap) {
+      if (key.toLowerCase() === lower) return slug;
+    }
   }
 
   // 3. Strip parenthetical suffix
@@ -290,8 +320,13 @@ export function resolveEntityName(
   if (stripped !== name) {
     const s = entitySlugMap.get(stripped);
     if (s) return s;
-    for (const [key, slug] of entitySlugMap) {
-      if (key.toLowerCase() === stripped.toLowerCase()) return slug;
+    const strippedLower = stripped.toLowerCase();
+    const ciStripped = lowerIndex?.get(strippedLower);
+    if (ciStripped) return ciStripped;
+    if (!lowerIndex) {
+      for (const [key, slug] of entitySlugMap) {
+        if (key.toLowerCase() === strippedLower) return slug;
+      }
     }
     for (const [key, slug] of entitySlugMap) {
       if (key.startsWith(stripped) || stripped.startsWith(key)) return slug;

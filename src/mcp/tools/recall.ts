@@ -2,6 +2,8 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity } from "./trim.js";
+import type { Link } from "../../core/graph.js";
+import type { LinkRow } from "../../storage/sqlite.js";
 import { extractDossier } from "../../core/dossier.js";
 import { getHierarchyContext } from "../../core/hierarchy.js";
 
@@ -88,25 +90,27 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const relatedBySlug = new Map<string, { slug: string; title: string; type: string }[]>();
     const hierarchyBySlug = new Map<string, ReturnType<typeof getHierarchyContext>>();
 
+    // Batch-fetch links, timeline, tags for all top-N slugs
+    const batchLinks = ctx.db.batchGetLinksForSlugs(topSlugs);
+    const batchTimeline = ctx.db.batchGetTimelineForSlugs(topSlugs);
+    const batchTags = ctx.db.batchGetTagsForSlugs(topSlugs);
+
     for (const slug of topSlugs) {
-      try {
-        const raw = ctx.graph.getLinks(slug, "both");
-        const outgoing = raw.filter(l => l.from_slug === slug).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-        const incoming = raw.filter(l => l.to_slug === slug).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-        linksBySlug.set(slug, { outgoing, incoming });
-      } catch { linksBySlug.set(slug, { outgoing: [], incoming: [] }); }
+      const rawLinks = batchLinks.get(slug) ?? { outgoing: [], incoming: [] };
+      const toLink = (l: LinkRow): Link => ({
+        ...l, context: l.context ?? undefined, source_type: l.source_type ?? undefined, confidence: l.confidence ?? undefined,
+      });
+      const outgoing = rawLinks.outgoing.map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
+      const incoming = rawLinks.incoming.map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
+      linksBySlug.set(slug, { outgoing, incoming });
 
-      try {
-        const rawTimeline = ctx.db.getTimeline(slug) as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>;
-        timelineBySlug.set(slug, trimTimeline(rawTimeline, 3));
-      } catch { timelineBySlug.set(slug, []); }
+      const rawTimeline = batchTimeline.get(slug) ?? [];
+      timelineBySlug.set(slug, trimTimeline(rawTimeline as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>, 3));
 
-      try {
-        const page = pagesBySlug.get(slug);
-        const dbTags = ctx.db.getTags(slug);
-        const fmTags = (page as { frontmatter?: { tags?: string[] } } | undefined)?.frontmatter?.tags ?? [];
-        tagsBySlug.set(slug, [...new Set([...dbTags, ...fmTags])]);
-      } catch { tagsBySlug.set(slug, []); }
+      const page = pagesBySlug.get(slug);
+      const dbTags = batchTags.get(slug) ?? [];
+      const fmTags = (page as { frontmatter?: { tags?: string[] } } | undefined)?.frontmatter?.tags ?? [];
+      tagsBySlug.set(slug, [...new Set([...dbTags, ...fmTags])]);
 
       try { relatedBySlug.set(slug, ctx.graph.getRelatedEntities(slug, 5)); } catch { relatedBySlug.set(slug, []); }
 

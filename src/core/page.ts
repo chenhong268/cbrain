@@ -49,11 +49,33 @@ export class PageManager {
   private db: CBrainDB;
   readonly vaultPath: string;
   private logger: Logger | null;
+  private cache = new Map<string, { page: Page; expires: number }>();
+  private static CACHE_MAX = 200;
+  private static CACHE_TTL = 30_000;
 
   constructor(db: CBrainDB, vaultPath: string, logger?: Logger) {
     this.db = db;
     this.vaultPath = vaultPath;
     this.logger = logger ?? null;
+  }
+
+  private cacheGet(slug: string): Page | null {
+    const entry = this.cache.get(slug);
+    if (!entry) return null;
+    if (Date.now() > entry.expires) { this.cache.delete(slug); return null; }
+    return entry.page;
+  }
+
+  private cacheSet(slug: string, page: Page): void {
+    if (this.cache.size >= PageManager.CACHE_MAX) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
+    this.cache.set(slug, { page, expires: Date.now() + PageManager.CACHE_TTL });
+  }
+
+  private cacheDelete(slug: string): void {
+    this.cache.delete(slug);
   }
 
   create(input: CreatePageInput): Page {
@@ -96,10 +118,14 @@ export class PageManager {
     }
 
     this.logger?.info("page", "页面已创建", { slug, title: input.title, type: input.type });
+    this.cacheDelete(slug);
     return this.getBySlug(slug)!;
   }
 
   getBySlug(slug: string): Page | null {
+    const cached = this.cacheGet(slug);
+    if (cached) return cached;
+
     const row = this.db.getPage(slug);
 
     if (!row) return null;
@@ -111,7 +137,7 @@ export class PageManager {
       readFileSync(filePath, "utf-8")
     );
 
-    return {
+    const page: Page = {
       slug: row.slug,
       type: row.type,
       title: row.title,
@@ -126,6 +152,8 @@ export class PageManager {
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
+    this.cacheSet(slug, page);
+    return page;
   }
 
   list(options?: {
@@ -178,6 +206,7 @@ export class PageManager {
     }
 
     this.logger?.info("page", "页面已更新", { slug });
+    this.cacheDelete(slug);
     return this.getBySlug(slug);
   }
 
@@ -186,7 +215,7 @@ export class PageManager {
     if (filePath === null) return false;
 
     // Strip [[slug]] dead links in other vault files before deleting
-    const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: slug }]);
+    const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: slug }], this.db);
     if (rewritten > 0) {
       this.logger?.info("page", "死链已清理", { slug, files: rewritten });
     }
@@ -197,6 +226,7 @@ export class PageManager {
     }
 
     this.db.deletePageCascaded(slug);
+    this.cacheDelete(slug);
 
     this.logger?.info("page", "页面已删除", { slug });
     return true;
@@ -255,6 +285,7 @@ export class PageManager {
     const content = stringifyFrontmatter(updatedFm, newBody);
     writeFileSync(filePath, content, "utf-8");
     this.db.updatePageHash(slug, hashContent(content));
+    this.cacheDelete(slug);
   }
 
   /**
@@ -317,7 +348,7 @@ export class PageManager {
     this.db.updatePageHash(targetSlug, contentHash);
 
     // Rewrite [[sourceSlug]] → [[targetSlug]] in all vault .md files
-    const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: sourceSlug, newSlug: targetSlug }]);
+    const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: sourceSlug, newSlug: targetSlug }], this.db);
     if (rewritten > 0) {
       this.logger?.info("page", "wiki-link 已重写", { oldSlug: sourceSlug, newSlug: targetSlug, files: rewritten });
     }

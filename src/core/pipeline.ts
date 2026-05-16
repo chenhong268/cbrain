@@ -12,6 +12,7 @@ import {
   buildStubBody,
   findEntitySlug,
   resolveEntityName,
+  buildLowercaseIndex,
   DEFAULT_CHUNK_SIZE,
   normalizeRelation,
   getRelationStrength,
@@ -136,7 +137,7 @@ export class ContentPipeline {
     if (!this.pages || !body.trim()) return 0;
 
     const wikiLinks = extractWikiLinks(body);
-    const writtenRelations: string[] = [];
+    const writtenRelations = new Set<string>();
     let count = 0;
 
     for (const link of wikiLinks) {
@@ -156,8 +157,8 @@ export class ContentPipeline {
         const newSlug = findEntitySlug(this.db, targetName);
         if (newSlug) {
           const key = `${fromSlug}\x00${newSlug}`;
-          if (!writtenRelations.includes(key)) {
-            writtenRelations.push(key);
+          if (!writtenRelations.has(key)) {
+            writtenRelations.add(key);
             this.db.insertLink(fromSlug, newSlug, "提及", null, 0.3, "weak", "wikilink", 0.9);
             count++;
           }
@@ -165,8 +166,8 @@ export class ContentPipeline {
       } else if (targetSlug && targetSlug !== fromSlug) {
         this.pages.incrementMention(targetSlug);
         const key = `${fromSlug}\x00${targetSlug}`;
-        if (!writtenRelations.includes(key)) {
-          writtenRelations.push(key);
+        if (!writtenRelations.has(key)) {
+          writtenRelations.add(key);
           this.db.insertLink(fromSlug, targetSlug, "提及", null, 0.3, "weak", "wikilink", 0.9);
           count++;
         }
@@ -209,7 +210,7 @@ export class ContentPipeline {
     skipDatelessEvents: boolean
   ): NerPipelineResult {
     const entitySlugMap = new Map<string, string>();
-    const stubsCreated: string[] = [];
+    const stubsCreated = new Set<string>();
     let lowRelevanceSkipped = 0;
 
     for (const entity of extraction.entities) {
@@ -226,7 +227,7 @@ export class ContentPipeline {
           tags: ["auto-extracted"],
         });
         entitySlugMap.set(entity.name, stub.slug);
-        stubsCreated.push(stub.slug);
+        stubsCreated.add(stub.slug);
         this.db.incrementMentionCount(stub.slug);
         this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5);
       } else if (entity.relevance === "low") {
@@ -235,9 +236,10 @@ export class ContentPipeline {
     }
 
     const writtenRelations: Array<{ from: string; to: string; relation: string }> = [];
+    const lowerIndex = buildLowercaseIndex(entitySlugMap);
     for (const rel of extraction.relations) {
-      const from = resolveEntityName(rel.from, entitySlugMap, this.db);
-      const to = resolveEntityName(rel.to, entitySlugMap, this.db);
+      const from = resolveEntityName(rel.from, entitySlugMap, this.db, lowerIndex);
+      const to = resolveEntityName(rel.to, entitySlugMap, this.db, lowerIndex);
       if (from && to && from !== to) {
         const normRel = normalizeRelation(rel.relation);
         const rw = getRelationStrength(normRel);
@@ -251,7 +253,7 @@ export class ContentPipeline {
 
     if (this.pages) {
       for (const [name, slug] of entitySlugMap) {
-        if (!stubsCreated.includes(slug)) continue;
+        if (!stubsCreated.has(slug)) continue;
         const rels = writtenRelations.filter(r => r.from === name || r.to === name);
         if (rels.length > 0) {
           const body = buildStubBody(name, rels, fromSlug);
@@ -269,7 +271,7 @@ export class ContentPipeline {
       entities: extraction.entities.length,
       relations: extraction.relations.length,
       events: extraction.events.length,
-      stubsCreated,
+      stubsCreated: [...stubsCreated],
       lowRelevanceSkipped,
       details: {
         entities: extraction.entities.map(e => ({ name: e.name, type: e.type, relevance: e.relevance })),

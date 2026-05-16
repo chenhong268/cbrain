@@ -486,26 +486,51 @@ export class CBrainDB {
   // ─── Slug resolution ─────────────────────────────────────────
 
   resolveSlugs(queries: string[]): Array<{ query: string; slug: string | null; title: string | null }> {
+    if (queries.length === 0) return [];
+
+    const result = new Map<string, { slug: string; title: string }>();
+    const remaining = new Set(queries);
+
+    // Pass 1: Exact slug match (batch)
+    const ph = queries.map(() => "?").join(",");
+    const slugRows = this.prepare(
+      `SELECT slug, title FROM pages WHERE slug IN (${ph})`
+    ).all(...queries) as Array<{ slug: string; title: string }>;
+    for (const row of slugRows) {
+      if (remaining.has(row.slug)) {
+        result.set(row.slug, row);
+        remaining.delete(row.slug);
+      }
+    }
+
+    // Pass 2: Exact title match (batch)
+    if (remaining.size > 0) {
+      const left = [...remaining];
+      const ph2 = left.map(() => "?").join(",");
+      const titleRows = this.prepare(
+        `SELECT slug, title FROM pages WHERE title IN (${ph2})`
+      ).all(...left) as Array<{ slug: string; title: string }>;
+      for (const row of titleRows) {
+        if (remaining.has(row.title)) {
+          result.set(row.title, row);
+          remaining.delete(row.title);
+        }
+      }
+    }
+
+    // Pass 3: Fuzzy LIKE for remaining
+    if (remaining.size > 0) {
+      for (const query of remaining) {
+        const fuzzy = this.prepare(
+          "SELECT slug, title FROM pages WHERE title LIKE $q LIMIT 1"
+        ).get({ $q: `%${query}%` }) as { slug: string; title: string } | undefined;
+        if (fuzzy) result.set(query, fuzzy);
+      }
+    }
+
     return queries.map(query => {
-      // Exact slug match
-      const bySlug = this.prepare(
-        "SELECT slug, title FROM pages WHERE slug = $q"
-      ).get({ $q: query }) as { slug: string; title: string } | undefined;
-      if (bySlug) return { query, slug: bySlug.slug, title: bySlug.title };
-
-      // Exact title match
-      const byTitle = this.prepare(
-        "SELECT slug, title FROM pages WHERE title = $q"
-      ).get({ $q: query }) as { slug: string; title: string } | undefined;
-      if (byTitle) return { query, slug: byTitle.slug, title: byTitle.title };
-
-      // Fuzzy title match (LIKE)
-      const fuzzy = this.prepare(
-        "SELECT slug, title FROM pages WHERE title LIKE $q LIMIT 1"
-      ).get({ $q: `%${query}%` }) as { slug: string; title: string } | undefined;
-      if (fuzzy) return { query, slug: fuzzy.slug, title: fuzzy.title };
-
-      return { query, slug: null, title: null };
+      const found = result.get(query);
+      return { query, slug: found?.slug ?? null, title: found?.title ?? null };
     });
   }
 
@@ -773,10 +798,8 @@ export class CBrainDB {
   }
 
   deletePageCascaded(slug: string): void {
-    this.prepare("DELETE FROM links WHERE from_slug = $slug OR to_slug = $slug").run({ $slug: slug });
-    this.prepare("DELETE FROM tags WHERE page_slug = $slug").run({ $slug: slug });
-    this.prepare("DELETE FROM timeline WHERE page_slug = $slug").run({ $slug: slug });
-    this.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+    // chunks_fts (virtual table) and ingest_log have no FK → delete explicitly
+    // links, tags, timeline, chunks are cleaned by ON DELETE CASCADE on pages DELETE
     this.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
     this.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
     this.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
@@ -932,13 +955,13 @@ export class CBrainDB {
 
   getBareStubs(): Array<{ slug: string; title: string; type: string }> {
     return this.prepare(
-      "SELECT p.slug, p.title, p.type FROM pages p WHERE p.type IN ('entity', 'concept') AND p.mention_count <= 1 AND (SELECT COUNT(*) FROM links l WHERE l.from_slug = p.slug OR l.to_slug = p.slug) <= 1"
+      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type IN ('entity', 'concept') AND p.mention_count <= 1 GROUP BY p.slug HAVING COUNT(l.id) <= 1"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
   getIslandPages(): Array<{ slug: string; title: string; type: string }> {
     return this.prepare(
-      "SELECT p.slug, p.title, p.type FROM pages p WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug) AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug) AND p.type IN ('entity', 'concept')"
+      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type IN ('entity', 'concept') GROUP BY p.slug HAVING COUNT(l.id) = 0"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
@@ -960,7 +983,7 @@ export class CBrainDB {
     types.forEach((t, i) => { params[`$t${i}`] = t; });
     const order = orderBy ?? "title ASC";
     return this.prepare(
-      `SELECT p.slug, p.title, p.type, (SELECT COUNT(*) FROM links WHERE from_slug = p.slug OR to_slug = p.slug) as link_count FROM pages p WHERE p.type IN (${placeholders}) ORDER BY ${order}`
+      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type IN (${placeholders}) GROUP BY p.slug ORDER BY ${order}`
     ).all(params) as Array<{ slug: string; title: string; type: string; link_count: number }>;
   }
 
@@ -1008,13 +1031,15 @@ export class CBrainDB {
   // ─── Brief & Cross-ref queries ────────────────────────────────
 
   countNewPagesSince(hours: number): { entities: number; concepts: number } {
-    const entities = (this.prepare(
-      "SELECT COUNT(*) as c FROM pages WHERE type = 'entity' AND created_at > datetime('now', '-' || $h || ' hours')"
-    ).get({ $h: hours }) as { c: number }).c;
-    const concepts = (this.prepare(
-      "SELECT COUNT(*) as c FROM pages WHERE type = 'concept' AND created_at > datetime('now', '-' || $h || ' hours')"
-    ).get({ $h: hours }) as { c: number }).c;
-    return { entities, concepts };
+    const rows = this.prepare(
+      "SELECT type, COUNT(*) as c FROM pages WHERE type IN ('entity', 'concept') AND created_at > datetime('now', '-' || $h || ' hours') GROUP BY type"
+    ).all({ $h: hours }) as Array<{ type: string; c: number }>;
+    const result = { entities: 0, concepts: 0 };
+    for (const row of rows) {
+      if (row.type === "entity") result.entities = row.c;
+      else if (row.type === "concept") result.concepts = row.c;
+    }
+    return result;
   }
 
   getRecentUpdatesBySlugs(slugs: string[], days: number): Array<{ slug: string; title: string; type: string; updated_at: string }> {
@@ -1128,6 +1153,84 @@ export class CBrainDB {
     return this.prepare(
       "SELECT from_slug, to_slug, relation, weight FROM links"
     ).all() as Array<{ from_slug: string; to_slug: string; relation: string; weight: number }>;
+  }
+
+  batchGetLinksForSlugs(slugs: string[]): Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }> {
+    const result = new Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }>();
+    if (slugs.length === 0) return result;
+    for (const slug of slugs) result.set(slug, { outgoing: [], incoming: [] });
+    const placeholders = slugs.map(() => "?").join(",");
+    const outgoing = this.prepare(
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at FROM links WHERE from_slug IN (${placeholders})`
+    ).all(...slugs) as LinkRow[];
+    const incoming = this.prepare(
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at FROM links WHERE to_slug IN (${placeholders})`
+    ).all(...slugs) as LinkRow[];
+    for (const l of outgoing) result.get(l.from_slug)!.outgoing.push(l);
+    for (const l of incoming) result.get(l.to_slug)!.incoming.push(l);
+    return result;
+  }
+
+  batchGetTimelineForSlugs(slugs: string[]): Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string }>> {
+    const result = new Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string }>>();
+    if (slugs.length === 0) return result;
+    for (const slug of slugs) result.set(slug, []);
+    const placeholders = slugs.map(() => "?").join(",");
+    const rows = this.prepare(
+      `SELECT page_slug, id, event_date, source, summary, created_at FROM timeline WHERE page_slug IN (${placeholders}) ORDER BY event_date DESC, id DESC`
+    ).all(...slugs) as Array<{ page_slug: string; id: number; event_date: string | null; source: string | null; summary: string; created_at: string }>;
+    for (const r of rows) result.get(r.page_slug)!.push(r);
+    return result;
+  }
+
+  batchGetTagsForSlugs(slugs: string[]): Map<string, string[]> {
+    const result = new Map<string, string[]>();
+    if (slugs.length === 0) return result;
+    for (const slug of slugs) result.set(slug, []);
+    const placeholders = slugs.map(() => "?").join(",");
+    const rows = this.prepare(
+      `SELECT page_slug, tag FROM tags WHERE page_slug IN (${placeholders}) ORDER BY tag`
+    ).all(...slugs) as Array<{ page_slug: string; tag: string }>;
+    for (const r of rows) result.get(r.page_slug)!.push(r.tag);
+    return result;
+  }
+
+  getPageTitlesAndTypes(slugs: string[]): Map<string, { title: string; type: string }> {
+    const result = new Map<string, { title: string; type: string }>();
+    if (slugs.length === 0) return result;
+    const placeholders = slugs.map(() => "?").join(",");
+    const rows = this.prepare(
+      `SELECT slug, title, type FROM pages WHERE slug IN (${placeholders})`
+    ).all(...slugs) as Array<{ slug: string; title: string; type: string }>;
+    for (const r of rows) result.set(r.slug, { title: r.title, type: r.type });
+    return result;
+  }
+
+  getLinksForSlugs(slugs: string[]): Map<string, { outgoing: string[]; incoming: string[] }> {
+    const result = new Map<string, { outgoing: string[]; incoming: string[] }>();
+    if (slugs.length === 0) return result;
+    for (const slug of slugs) result.set(slug, { outgoing: [], incoming: [] });
+    const placeholders = slugs.map(() => "?").join(",");
+    const outRows = this.prepare(
+      `SELECT from_slug, to_slug FROM links WHERE from_slug IN (${placeholders})`
+    ).all(...slugs) as Array<{ from_slug: string; to_slug: string }>;
+    const inRows = this.prepare(
+      `SELECT to_slug, from_slug FROM links WHERE to_slug IN (${placeholders})`
+    ).all(...slugs) as Array<{ to_slug: string; from_slug: string }>;
+    for (const r of outRows) result.get(r.from_slug)!.outgoing.push(r.to_slug);
+    for (const r of inRows) result.get(r.to_slug)!.incoming.push(r.from_slug);
+    return result;
+  }
+
+  /** Find distinct page_slugs whose chunks_fts content matches any LIKE pattern. */
+  findSlugsByText(patterns: string[]): string[] {
+    if (patterns.length === 0) return [];
+    const clauses = patterns.map(() => "content LIKE ?").join(" OR ");
+    const params = patterns.map(p => `%${p}%`);
+    const rows = this.prepare(
+      `SELECT DISTINCT page_slug FROM chunks_fts WHERE ${clauses}`
+    ).all(...params) as Array<{ page_slug: string }>;
+    return rows.map(r => r.page_slug);
   }
 
   getLinkCount(): number {

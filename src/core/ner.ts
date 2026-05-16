@@ -277,15 +277,22 @@ export class NerEngine {
     // Stage 1: Extract entities + events per chunk, then merge
     const allEntityChunks: ExtractedEntity[][] = [];
     const allEventChunks: ExtractedEvent[][] = [];
+    const CONCURRENCY = 5;
 
-    for (const chunk of chunks) {
-      const stage1 = await this.llm.chat([
-        { role: "system", content: ENTITY_GUIDELINE },
-        { role: "user", content: chunk },
-      ]);
-      const { entities, events } = this.parseEntityResponse(stage1);
-      allEntityChunks.push(entities);
-      allEventChunks.push(events);
+    for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+      const batch = chunks.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(chunk =>
+          this.llm.chat([
+            { role: "system", content: ENTITY_GUIDELINE },
+            { role: "user", content: chunk },
+          ]).then(raw => this.parseEntityResponse(raw))
+        )
+      );
+      for (const { entities, events } of results) {
+        allEntityChunks.push(entities);
+        allEventChunks.push(events);
+      }
     }
 
     const allEntities = mergeEntities(allEntityChunks);

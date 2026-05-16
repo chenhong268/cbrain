@@ -1,6 +1,8 @@
-import { existsSync, mkdirSync, appendFileSync, unlinkSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, readdirSync } from "node:fs";
+import { appendFile, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { CBrainDB } from "../storage/sqlite.js";
 import type { SyncManager } from "./sync.js";
 import type { EnrichManager } from "./enrich.js";
@@ -28,6 +30,7 @@ export interface DreamReport {
 const LOCK_KEY = "dream.lock";
 const LOCK_TTL_MS = 30 * 60 * 1000; // 30 min — if dream crashes, lock auto-expires
 const MAX_BACKUPS = 7;
+const execFileAsync = promisify(execFile);
 
 function acquireLock(db: CBrainDB): boolean {
   const lockValue = db.getConfig(LOCK_KEY);
@@ -91,9 +94,9 @@ export async function runDream(
     const lancePath = join(dbDir, "lancedb");
     const zipArgs = ["-rq", backupPath, basename(dbPath), "vault/."];
     if (existsSync(lancePath)) zipArgs.push("lancedb/.");
-    execFileSync("zip", zipArgs, { cwd: dbDir, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
-    const { statSync } = await import("node:fs");
-    backupSize = (statSync(backupPath).size / 1024 / 1024).toFixed(1);
+    await execFileAsync("zip", zipArgs, { cwd: dbDir, encoding: "utf-8" });
+    const info = await stat(backupPath);
+    backupSize = (info.size / 1024 / 1024).toFixed(1);
     logger.info("dream", `备份完成：${backupPath} (${backupSize}MB)`);
 
     // Keep last 7 backups
@@ -114,26 +117,21 @@ export async function runDream(
   const enrichResults = enrichMgr.enrichAll();
   const upgraded = enrichResults.filter((r) => r.upgraded).length;
 
-  // Stage 3: Cleanup (orphans + stale stubs)
-  logger.info("dream", "Stage 3/5: cleanup");
-  const orphans = await syncMgr.removeOrphans(vaultPath);
-  const staleStubs = await syncMgr.cleanStaleStubs(vaultPath);
-
-  // Stage 4: Health
-  logger.info("dream", "Stage 4/5: health");
-  const healthReport = await healthChecker.checkAll();
-
-  // Stage 5: Insight expiry
-  logger.info("dream", "Stage 5/5: insight archive");
-  let archived = 0;
-  if (insightMgr) {
-    try {
-      archived = insightMgr.archiveExpired();
-      if (archived > 0) logger.info("dream", `归档 ${archived} 条过期 insight`);
-    } catch (e) {
-      logger.warn("dream", `Insight 归档失败: ${(e as Error).message}`);
-    }
-  }
+  // Stage 3-5: Cleanup + Health + Insight archive (independent, run in parallel)
+  logger.info("dream", "Stage 3-5/6: cleanup + health + insight archive (parallel)");
+  const [orphans, staleStubs, healthReport, archived] = await Promise.all([
+    syncMgr.removeOrphans(vaultPath).catch(e => { logger.warn("dream", `Cleanup orphans 失败: ${(e as Error).message}`); return []; }),
+    syncMgr.cleanStaleStubs(vaultPath).catch(e => { logger.warn("dream", `Cleanup stale stubs 失败: ${(e as Error).message}`); return []; }),
+    healthChecker.checkAll(),
+    (async () => {
+      if (!insightMgr) return 0;
+      try {
+        const n = insightMgr.archiveExpired();
+        if (n > 0) logger.info("dream", `归档 ${n} 条过期 insight`);
+        return n;
+      } catch (e) { logger.warn("dream", `Insight 归档失败: ${(e as Error).message}`); return 0; }
+    })(),
+  ]);
 
   // Stage 6: Index generation
   logger.info("dream", "Stage 6/6: indexes");
@@ -190,7 +188,7 @@ export async function runDream(
     `⏱ ${(report.duration_ms / 1000).toFixed(1)}s`,
   ];
   try {
-    appendFileSync(reportPath, lines.join("\n") + "\n", "utf-8");
+    await appendFile(reportPath, lines.join("\n") + "\n", "utf-8");
   } catch (e) {
     logger.warn("dream", "报告文件写入失败", { path: reportPath, error: String(e) });
   }

@@ -1,6 +1,7 @@
 import { CBrainDB } from "../storage/sqlite.js";
 import { PageManager } from "./page.js";
 import { generateSlug } from "../utils/slug.js";
+import { normalizePageType, type PageType } from "./shared.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
@@ -62,76 +63,44 @@ export class IngestManager {
     const parsed = parseFrontmatter(content);
 
     const title = parsed.frontmatter.title ?? overrides?.title ?? "Untitled";
-    const type = parsed.frontmatter.type ?? overrides?.pageType ?? "record";
+    const type = normalizePageType(parsed.frontmatter.type ?? overrides?.pageType ?? "record");
     const slug = parsed.frontmatter.slug ?? generateSlug(title, type);
     const body = parsed.body;
     const effectiveTags = parsed.frontmatter.tags ?? overrides?.tags ?? [];
 
+    return this.ingestCore(slug, title, type, body, effectiveTags, !overrides?.skipNer);
+  }
+
+  private async ingestText(input: IngestInput): Promise<IngestResult> {
+    const title = input.title ?? input.content.split("\n").find(l => l.trim())?.trim().slice(0, 50) ?? "Untitled";
+    const type = normalizePageType(input.pageType ?? "record");
+    const slug = generateSlug(title, type);
+    const body = input.content;
+    const tags = input.tags ?? [];
+
+    return this.ingestCore(slug, title, type, body, tags, !input.skipNer);
+  }
+
+  private async ingestCore(
+    slug: string, title: string, type: PageType, body: string, tags: string[], doNer: boolean
+  ): Promise<IngestResult> {
     const { chunks, embedResults } = await this.pipeline.embed(body);
 
     const existing = this.pages.getBySlug(slug);
     if (existing) {
-      this.pages.update(slug, { body, tags: effectiveTags });
+      this.pages.update(slug, { body, tags });
     } else {
-      this.pages.create({
-        title,
-        type,
-        body,
-        tags: effectiveTags,
-        slug,
-      });
+      this.pages.create({ title, type, body, tags, slug });
     }
 
-    // Clear old wikilink mentions then re-extract (ingest replaces links)
     this.db.deleteLinksByRelation(slug, 'mentions');
     const linksExtracted = this.pipeline.processWikilinks(slug, body, false);
 
     this.pipeline.writeIndexes(slug, chunks, embedResults);
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
-    // NER — skip entity/concept pages
-    const shouldNer = !overrides?.skipNer && type !== "entity" && type !== "concept" && type !== "insight";
     let nerResult: NerPipelineResult | null | undefined;
-    if (shouldNer) {
-      try {
-        nerResult = await this.pipeline.processNer(slug, body, type, true);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
-      }
-    }
-
-    return { slug, created: !existing, linksExtracted, ner: nerResult };
-  }
-
-  private async ingestText(input: IngestInput): Promise<IngestResult> {
-    const title = input.title ?? input.content.split("\n").find(l => l.trim())?.trim().slice(0, 50) ?? "Untitled";
-    const type = input.pageType ?? "record";
-    const slug = generateSlug(title, type);
-    const body = input.content;
-
-    const { chunks, embedResults } = await this.pipeline.embed(body);
-
-    const existing = this.pages.getBySlug(slug);
-    if (existing) {
-      this.pages.update(slug, { body, tags: input.tags ?? [] });
-    } else {
-      this.pages.create({
-        title,
-        type,
-        body,
-        tags: input.tags ?? [],
-        slug,
-      });
-    }
-
-    const linksExtracted = this.pipeline.processWikilinks(slug, body, false);
-
-    this.pipeline.writeIndexes(slug, chunks, embedResults);
-    this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
-
-    const shouldNer = !input.skipNer && type !== "entity" && type !== "concept" && type !== "insight";
-    let nerResult: NerPipelineResult | null | undefined;
+    const shouldNer = doNer && type !== "entity" && type !== "concept" && type !== "insight";
     if (shouldNer) {
       try {
         nerResult = await this.pipeline.processNer(slug, body, type, true);

@@ -1,4 +1,5 @@
-import { readFileSync, statSync, renameSync, mkdirSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { readFile, access, rename, mkdir } from "node:fs/promises";
 import { join, relative, dirname } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
@@ -75,7 +76,7 @@ export class SyncManager {
   async syncAll(vaultPath: string): Promise<SyncReport> {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [] };
     try {
-    const mdFiles = collectMarkdownFiles(vaultPath, new Set(["outputs"]));
+    const mdFiles = await collectMarkdownFiles(vaultPath, new Set(["outputs"]));
 
     // Phase 1: detect changed files + batch embed all chunks
     const changed: Array<{ filePath: string; slug: string; title: string; type: string; relPath: string; body: string; contentHash: string; frontmatter: Record<string, unknown> }> = [];
@@ -83,7 +84,7 @@ export class SyncManager {
 
     for (const filePath of mdFiles) {
       try {
-        const content = readFileSync(filePath, "utf-8");
+        const content = await readFile(filePath, "utf-8");
         const parsed = parseFrontmatter(content);
         const relPath = relative(vaultPath, filePath);
         const slug = parsed.frontmatter.slug ?? relPath.replace(/\.md$/, "");
@@ -245,7 +246,7 @@ export class SyncManager {
 
     let content: string;
     try {
-      content = readFileSync(fullPath, "utf-8");
+      content = await readFile(fullPath, "utf-8");
     } catch (e) {
       this.logger?.warn("sync", "文件读取失败", { path: fullPath, error: String(e) });
       return { success: false, error: `File not found: ${fullPath}` };
@@ -284,8 +285,8 @@ export class SyncManager {
       const newFullPath = join(vaultPath, newRelPath);
       if (!existsSync(newFullPath)) {
         try {
-          mkdirSync(dirname(newFullPath), { recursive: true });
-          renameSync(fullPath, newFullPath);
+          await mkdir(dirname(newFullPath), { recursive: true });
+          await rename(fullPath, newFullPath);
           this.logger?.info("sync", `文件已迁移: ${relative(vaultPath, fullPath)} → ${newRelPath}`);
         } catch (e) {
           this.logger?.warn("sync", `文件迁移失败: ${(e as Error).message}`);
@@ -343,7 +344,7 @@ export class SyncManager {
     for (const page of pages) {
       const fullPath = join(vaultPath, page.file_path);
       try {
-        statSync(fullPath);
+        await access(fullPath);
       } catch {
         orphans.push(page.slug);
         if (this.pages) {

@@ -79,6 +79,8 @@ export class HybridSearch {
   private rrfK: number;
   private llm?: LLMProvider;
   private multiQueryEnabled: boolean;
+  private queryCache = new Map<string, { queries: string[]; expires: number }>();
+  private static QUERY_CACHE_TTL = 300_000; // 5 minutes
 
   constructor(
     db: CBrainDB,
@@ -140,6 +142,9 @@ export class HybridSearch {
   private async expandQuery(query: string): Promise<string[]> {
     if (!this.llm) return [query];
 
+    const cached = this.queryCache.get(query);
+    if (cached && Date.now() < cached.expires) return cached.queries;
+
     try {
       const resp = await this.llm.chat([
         {
@@ -153,7 +158,13 @@ export class HybridSearch {
 
       const variants = JSON.parse(resp) as string[];
       if (!Array.isArray(variants) || variants.length === 0) return [query];
-      return [query, ...variants.filter((v) => typeof v === "string" && v.trim())];
+      const queries = [query, ...variants.filter((v) => typeof v === "string" && v.trim())];
+      this.queryCache.set(query, { queries, expires: Date.now() + HybridSearch.QUERY_CACHE_TTL });
+      if (this.queryCache.size > 100) {
+        const oldest = this.queryCache.keys().next().value;
+        if (oldest !== undefined) this.queryCache.delete(oldest);
+      }
+      return queries;
     } catch (e) {
       console.error("[search] 查询扩展失败:", e);
       return [query];
