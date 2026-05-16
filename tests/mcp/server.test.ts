@@ -292,7 +292,8 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).query.handler({ query: "test" });
       const data = JSON.parse(result.content[0].text);
-      expect(Array.isArray(data)).toBe(true);
+      expect(data.results).toBeDefined();
+      expect(Array.isArray(data.results)).toBe(true);
     });
   });
 

@@ -1,6 +1,24 @@
 # Changelog
 
-> Current: `v1.6.4` — 过期信息闭环：auto expires_at + 查询标注 + Agent 行为指引。
+> Current: `v1.7.0` — 主动提示引擎 + 小爱查询行为优化。
+
+## [v1.7.0] — 2026-05-16
+
+### 主动提示引擎（Proactive Hints）
+- 新增 `src/core/proactive.ts` — 基于规则引擎的上下文感知主动推送
+- 3 条规则：网络动态（邻居近期事件）、共同联系（结果实体间的隐藏关联）、过期提醒
+- `deep_recall` 和 `query` 返回结果新增 `proactive_hints` 字段
+- 工具描述强制 AI 展示 hints（💡 主动提示：开头，不省略）
+- 新增 `getPageTitlesAndTypes()` DB 方法支持 slug→title 转换
+- 垃圾 slug 过滤（records/templates/attachments 前缀不进 hints）
+
+### 小爱行为优化
+- SKILL.md 新增「查询构建规则」：query 参数必须用核心实体名，禁止改写成描述性短语
+- 解决"陈宏最近在忙啥"被改写为"陈宏最近动态"导致搜索失败的问题
+
+### 测试
+- 新增 `tests/core/proactive.test.ts` — 4 个测试用例覆盖 3 条规则 + 错误隔离
+
 
 ## [v1.6.4] — 2026-05-16
 

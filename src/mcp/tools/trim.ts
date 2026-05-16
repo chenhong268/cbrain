@@ -1,4 +1,5 @@
 import type { Link } from "../../core/graph.js";
+import type { ProactiveHint } from "../../core/proactive.js";
 import type { PageFrontmatter } from "../../utils/frontmatter.js";
 import type { Page } from "../../core/page.js";
 import type { SearchResult } from "../../core/search.js";
@@ -77,5 +78,14 @@ export function stubEntity(
     snippet: sr.snippet,
     _stub: true,
     expiry_warning: getExpiryWarning((page as { expires_at?: string } | undefined)?.expires_at),
+  };
+}
+
+const VALID_RULES = new Set(["network_timeline", "shared_connection", "expiry_alert"]);
+
+export function trimHint(hint: ProactiveHint): { rule: string; text: string } {
+  return {
+    rule: VALID_RULES.has(hint.rule) ? hint.rule : "unknown",
+    text: truncate(hint.text, 120),
   };
 }

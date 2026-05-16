@@ -1754,6 +1754,50 @@ export class CBrainDB {
     `).all({ $since: since }) as Array<{ slug: string; signal: string; cnt: number }>;
   }
 
+  // ─── Proactive hints support ──────────────────────────────────
+
+  getRecentEventsInNetwork(
+    slugs: string[],
+    days: number,
+    limit: number
+  ): Array<{ slug: string; title: string; event_date: string | null; summary: string }> {
+    if (slugs.length === 0) return [];
+    const ph = slugs.map(() => "?").join(",");
+
+    // Find 1-hop neighbor slugs
+    const neighborRows = this.prepare(
+      `SELECT DISTINCT to_slug AS neighbor FROM links WHERE from_slug IN (${ph})
+       UNION
+       SELECT DISTINCT from_slug AS neighbor FROM links WHERE to_slug IN (${ph})`
+    ).all(...slugs, ...slugs) as Array<{ neighbor: string }>;
+    const neighbors = neighborRows.map(r => r.neighbor).filter(n => !slugs.includes(n));
+    if (neighbors.length === 0) return [];
+
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    const ph2 = neighbors.map(() => "?").join(",");
+    const rows = this.prepare(
+      `SELECT t.page_slug AS slug, p.title, t.event_date, t.summary
+       FROM timeline t JOIN pages p ON p.slug = t.page_slug
+       WHERE t.page_slug IN (${ph2}) AND t.event_date >= ?
+       ORDER BY t.event_date DESC LIMIT ?`
+    ).all(...neighbors, cutoff, limit) as Array<{ slug: string; title: string; event_date: string | null; summary: string }>;
+    return rows;
+  }
+
+  getExpiringSlugsInSet(
+    slugs: string[],
+    withinDays: number
+  ): Array<{ slug: string; title: string; expires_at: string }> {
+    if (slugs.length === 0) return [];
+    const ph = slugs.map(() => "?").join(",");
+    const cutoff = new Date(Date.now() + withinDays * 86_400_000).toISOString().slice(0, 10);
+    return this.prepare(
+      `SELECT slug, title, expires_at FROM pages
+       WHERE slug IN (${ph}) AND expires_at IS NOT NULL AND expires_at <= ?
+       ORDER BY expires_at ASC`
+    ).all(...slugs, cutoff) as Array<{ slug: string; title: string; expires_at: string }>;
+  }
+
   close(): void {
     this.db.close();
   }

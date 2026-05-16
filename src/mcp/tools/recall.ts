@@ -1,11 +1,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity, getExpiryWarning } from "./trim.js";
+import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity, getExpiryWarning, trimHint } from "./trim.js";
 import type { Link } from "../../core/graph.js";
 import type { LinkRow } from "../../storage/sqlite.js";
 import { extractDossier } from "../../core/dossier.js";
 import { getHierarchyContext } from "../../core/hierarchy.js";
+import { generateProactiveHints } from "../../core/proactive.js";
 
 const TOP_N = 3;
 
@@ -14,7 +15,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     description:
       "【默认查询工具】查找人物、公司、概念等实体，返回完整上下文（简介、关系、时间线、标签、档案）。" +
       "适用：'陈宏是谁'、'最近聊了什么投资的事'、'XX公司的信息'。" +
-      "不要用 search + get_page + graph_query 拼凑，直接用这个一步到位。",
+      "不要用 search + get_page + graph_query 拼凑，直接用这个一步到位。" +
+      "⚠️ 返回中的 proactive_hints 是系统主动发现的你可能不知道的重要信息（过期提醒、关联人动态、隐藏联系等）。你必须把每一条 hint 原样展示给用户，用 '💡 主动提示：' 开头，逐条列出。不要省略任何一条。",
     inputSchema: {
       query: z.string().describe("Search query"),
       limit: z.number().optional().default(5).describe("Max entities to recall (capped at 10)"),
@@ -224,6 +226,14 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       confidence: i.confidence,
     }));
 
+    // Proactive hints — context-aware suggestions
+    const proactiveHints = await generateProactiveHints(ctx, {
+      resultSlugs: searchResults.map(r => r.slug),
+      linksBySlug: batchLinks,
+      pagesBySlug: pagesBySlug as Map<string, { slug: string; expires_at: string | null }>,
+      maxHints: 3,
+    });
+
     return {
       content: [{
         type: "text" as const,
@@ -234,6 +244,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
             entities,
             insights: relatedInsights.length > 0 ? relatedInsights : undefined,
             cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
+            proactive_hints: proactiveHints.length > 0 ? proactiveHints.map(trimHint) : undefined,
             summary: `找到 ${entities.length} 个实体（${stubCount} 个摘要，${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` +
               (expiredCount > 0 ? `，${expiredCount} 个已过期` : "") +
               (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +

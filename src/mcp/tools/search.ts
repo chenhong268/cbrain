@@ -1,13 +1,16 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
+import { generateProactiveHints } from "../../core/proactive.js";
+import { trimHint } from "./trim.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
   // ─── query ───────────────────────────────────────────────
   server.registerTool("query", {
     description:
       "原始搜索，只返回匹配的文本片段，不附带关系、时间线等额外信息。" +
-      "仅用于快速定位某个关键词出现的位置。大多数查询应该用 deep_recall 代替。",
+      "仅用于快速定位某个关键词出现的位置。大多数查询应该用 deep_recall 代替。" +
+      "⚠️ 返回中的 proactive_hints 是系统主动发现的你可能不知道的重要信息。你必须把每一条 hint 原样展示给用户，用 '💡 主动提示：' 开头，逐条列出。不要省略任何一条。",
     inputSchema: {
       query: z.string().describe("Search query"),
       limit: z.number().optional().default(10).describe("Max results"),
@@ -62,8 +65,17 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       try { ctx.learn.bumpOnQuery(results[i].slug, i, "query"); } catch { /* non-critical */ }
     }
 
+    // Proactive hints
+    const hints = await generateProactiveHints(ctx, {
+      resultSlugs,
+      maxHints: 2,
+    });
+
     return {
-      content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({
+        results,
+        proactive_hints: hints.length > 0 ? hints.map(trimHint) : undefined,
+      }, null, 2) }],
     };
   });
 
