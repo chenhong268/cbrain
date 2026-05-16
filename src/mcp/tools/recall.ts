@@ -7,6 +7,7 @@ import type { LinkRow } from "../../storage/sqlite.js";
 import { extractDossier } from "../../core/dossier.js";
 import { getHierarchyContext } from "../../core/hierarchy.js";
 import { generateProactiveHints } from "../../core/proactive.js";
+import { extractBirthday } from "../../core/birthday.js";
 
 const TOP_N = 3;
 
@@ -147,6 +148,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
       const dossier = page ? extractDossier(page.body) : undefined;
       const hierarchy = hierarchyBySlug.get(slug);
+      const entityType = page?.frontmatter?.type ?? page?.type;
+      const birthdayInfo = entityType === "entity" ? extractBirthday(page?.body ?? "") : null;
 
       return {
         slug,
@@ -169,6 +172,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         subordinates: hierarchy?.subordinates.length ? hierarchy.subordinates : undefined,
         peers: hierarchy?.peers.length ? hierarchy.peers : undefined,
         expiry_warning: getExpiryWarning(page?.expires_at),
+        birthday: birthdayInfo?.birthday ?? undefined,
+        age: birthdayInfo?.age ?? undefined,
+        zodiac: birthdayInfo?.zodiac ?? undefined,
       };
     });
 
