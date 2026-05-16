@@ -20,8 +20,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       limit: z.number().optional().default(5).describe("Max entities to recall (capped at 10)"),
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
+      session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
     },
-  }, async ({ query, limit, strategy }) => {
+  }, async ({ query, limit, strategy, session_id }) => {
     const cap = Math.min(limit ?? 5, 10);
 
     const searchStart = Date.now();
@@ -63,6 +64,13 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const searchLatencyMs = Date.now() - searchStart;
 
     try { ctx.db.logSearch(query, usedStrategy, searchLatencyMs, searchResults.length, searchLatencyMs > 2000); } catch { /* non-critical */ }
+
+    // Learning loop: log query + bump activity weights
+    const resultSlugs = searchResults.map(r => r.slug);
+    try { ctx.db.logQuery("recall", query, resultSlugs, searchLatencyMs, session_id); } catch { /* non-critical */ }
+    for (let i = 0; i < searchResults.length; i++) {
+      try { ctx.learn.bumpOnQuery(searchResults[i].slug, i, "recall"); } catch { /* non-critical */ }
+    }
 
     if (searchResults.length === 0) {
       return {
@@ -132,7 +140,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const related = relatedBySlug.get(slug) ?? [];
       const tier = page?.frontmatter?.tier ?? page?.tier;
       const quality = tier != null
-        ? (tier >= 3 ? "high" : tier === 2 ? "ok" : "low")
+        ? (tier <= 1 ? "high" : tier === 2 ? "ok" : "low")
         : "unknown";
 
       const dossier = page ? extractDossier(page.body) : undefined;

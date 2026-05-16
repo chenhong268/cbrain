@@ -238,6 +238,9 @@ export class CBrainDB {
     this.migrateDiscoveries();
     this.migrateSearchLog();
     this.migrateRawToRecords();
+    this.migrateQueryLog();
+    this.migrateActivityWeight();
+    this.migrateQueryFeedback();
   }
 
   private migrateLinksStrength(): void {
@@ -738,10 +741,10 @@ export class CBrainDB {
     return row?.content_hash ?? null;
   }
 
-  getPageTierAndMentions(slug: string): { tier: number; mention_count: number } | null {
+  getPageTierAndMentions(slug: string): { tier: number; mention_count: number; activity_weight: number } | null {
     return this.prepare(
-      "SELECT tier, mention_count FROM pages WHERE slug = $slug"
-    ).get({ $slug: slug }) as { tier: number; mention_count: number } | null;
+      "SELECT tier, mention_count, COALESCE(activity_weight, 0) AS activity_weight FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { tier: number; mention_count: number; activity_weight: number } | null;
   }
 
   insertPage(data: { slug: string; type: string; title: string; filePath: string; contentHash: string; tier?: number; expiresAt?: string | null; confidenceDecay?: number }): void {
@@ -934,7 +937,7 @@ export class CBrainDB {
     const params: Record<string, string> = {};
     slugs.forEach((s, i) => { params[`$s${i}`] = s; });
     return this.prepare(
-      `SELECT slug FROM pages WHERE slug IN (${placeholders}) ORDER BY mention_count DESC`
+      `SELECT slug FROM pages WHERE slug IN (${placeholders}) ORDER BY (COALESCE(activity_weight, 0) + LOG(COALESCE(mention_count, 0) + 1)) DESC`
     ).all(params) as Array<{ slug: string }>;
   }
 
@@ -1549,6 +1552,173 @@ export class CBrainDB {
     return this.prepare(
       "SELECT id, query, strategy, latency_ms, hit_count, degraded, created_at FROM search_log ORDER BY id DESC LIMIT $limit"
     ).all({ $limit: limit }) as Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; created_at: string }>;
+  }
+
+  // ─── Query log (Phase 1) ────────────────────────────────────
+
+  private migrateQueryLog(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS query_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tool TEXT NOT NULL,
+        query TEXT NOT NULL,
+        result_slugs TEXT NOT NULL,
+        result_count INTEGER NOT NULL,
+        latency_ms INTEGER,
+        session_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_query_log_created ON query_log(created_at)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_query_log_session ON query_log(session_id)");
+  }
+
+  logQuery(tool: string, query: string, resultSlugs: string[], latencyMs: number, sessionId?: string): void {
+    this.prepare(
+      "INSERT INTO query_log (tool, query, result_slugs, result_count, latency_ms, session_id) VALUES ($tool, $query, $slugs, $count, $latency, $session)"
+    ).run({
+      $tool: tool, $query: query, $slugs: JSON.stringify(resultSlugs),
+      $count: resultSlugs.length, $latency: latencyMs, $session: sessionId ?? null,
+    });
+  }
+
+  getQueryStatsSince(since: string): Array<{ slug: string; query_count: number; avg_position: number; tools: string; last_seen: string }> {
+    return this.db.prepare(`
+      WITH exploded AS (
+        SELECT ql.tool, ql.created_at, j.value AS slug, j.rank AS position
+        FROM query_log ql, json_each(ql.result_slugs) AS j
+        WHERE ql.created_at >= $since
+      )
+      SELECT slug,
+             COUNT(*) AS query_count,
+             CAST(AVG(position + 1) AS REAL) AS avg_position,
+             GROUP_CONCAT(DISTINCT tool) AS tools,
+             MAX(created_at) AS last_seen
+      FROM exploded
+      GROUP BY slug
+      ORDER BY query_count DESC
+    `).all({ $since: since }) as Array<{ slug: string; query_count: number; avg_position: number; tools: string; last_seen: string }>;
+  }
+
+  cleanOldQueryLogs(olderThanDays: number): number {
+    const r = this.prepare(
+      "DELETE FROM query_log WHERE created_at < datetime('now', '-' || $days || ' days')"
+    ).run({ $days: olderThanDays });
+    return r.changes;
+  }
+
+  getSessionCoOccurrences(sessionId: string): Array<{ slug_a: string; slug_b: string; count: number }> {
+    const rows = this.db.prepare(`
+      WITH session_slugs AS (
+        SELECT j.value AS slug
+        FROM query_log ql, json_each(ql.result_slugs) AS j
+        WHERE ql.session_id = $session
+      ),
+      slug_pairs AS (
+        SELECT a.slug AS slug_a, b.slug AS slug_b
+        FROM session_slugs a, session_slugs b
+        WHERE a.slug < b.slug
+      )
+      SELECT slug_a, slug_b, COUNT(*) AS count
+      FROM slug_pairs
+      GROUP BY slug_a, slug_b
+    `).all({ $session: sessionId }) as Array<{ slug_a: string; slug_b: string; count: number }>;
+    return rows;
+  }
+
+  getDistinctSessionsSince(since: string): string[] {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT session_id FROM query_log WHERE session_id IS NOT NULL AND created_at >= $since"
+    ).all({ $since: since }) as Array<{ session_id: string }>;
+    return rows.map(r => r.session_id);
+  }
+
+  // ─── Activity weight (Phase 2) ──────────────────────────────
+
+  private migrateActivityWeight(): void {
+    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("activity_weight")) {
+      this.db.exec("ALTER TABLE pages ADD COLUMN activity_weight REAL DEFAULT 0.0");
+    }
+    if (!names.has("last_queried_at")) {
+      this.db.exec("ALTER TABLE pages ADD COLUMN last_queried_at TEXT");
+    }
+  }
+
+  batchUpdateActivityWeights(weights: Map<string, { weight: number; lastQueriedAt: string }>): number {
+    if (weights.size === 0) return 0;
+    const stmt = this.prepare(
+      "UPDATE pages SET activity_weight = $w, last_queried_at = $t WHERE slug = $slug"
+    );
+    let updated = 0;
+    for (const [slug, data] of weights) {
+      const r = stmt.run({ $w: data.weight, $t: data.lastQueriedAt, $slug: slug });
+      if (r.changes > 0) updated++;
+    }
+    return updated;
+  }
+
+  getActivityWeights(slugs: string[]): Map<string, number> {
+    const result = new Map<string, number>();
+    if (slugs.length === 0) return result;
+    const placeholders = slugs.map((_, i) => `$s${i}`).join(",");
+    const params: Record<string, string> = {};
+    slugs.forEach((s, i) => { params[`$s${i}`] = s; });
+    const rows = this.prepare(
+      `SELECT slug, activity_weight FROM pages WHERE slug IN (${placeholders}) AND activity_weight > 0`
+    ).all(params) as Array<{ slug: string; activity_weight: number }>;
+    for (const row of rows) result.set(row.slug, row.activity_weight);
+    return result;
+  }
+
+  bumpActivityWeight(slug: string, delta: number): void {
+    this.prepare(
+      "UPDATE pages SET activity_weight = COALESCE(activity_weight, 0) + $delta, last_queried_at = datetime('now') WHERE slug = $slug"
+    ).run({ $delta: delta, $slug: slug });
+  }
+
+  getTopActivityEntities(limit: number = 10): Array<{ slug: string; title: string; activity_weight: number }> {
+    return this.prepare(
+      "SELECT slug, title, activity_weight FROM pages WHERE activity_weight > 0 ORDER BY activity_weight DESC LIMIT $limit"
+    ).all({ $limit: limit }) as Array<{ slug: string; title: string; activity_weight: number }>;
+  }
+
+  boostLinkWeight(slugA: string, slugB: string, boost: number): void {
+    this.prepare(
+      "UPDATE links SET weight = MIN(weight + $boost, 10.0) WHERE (from_slug = $a AND to_slug = $b) OR (from_slug = $b AND to_slug = $a)"
+    ).run({ $a: slugA, $b: slugB, $boost: boost });
+  }
+
+  // ─── Query feedback (Phase 4) ───────────────────────────────
+
+  private migrateQueryFeedback(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS query_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query_id INTEGER REFERENCES query_log(id),
+        slug TEXT NOT NULL,
+        signal TEXT NOT NULL CHECK(signal IN ('relevant', 'irrelevant', 'corrected', 'expanded')),
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_feedback_slug ON query_feedback(slug)");
+  }
+
+  insertFeedback(queryId: number | null, slug: string, signal: "relevant" | "irrelevant" | "corrected" | "expanded", note?: string): void {
+    this.prepare(
+      "INSERT INTO query_feedback (query_id, slug, signal, note) VALUES ($qid, $slug, $signal, $note)"
+    ).run({ $qid: queryId ?? null, $slug: slug, $signal: signal, $note: note ?? null });
+  }
+
+  getFeedbackSince(since: string): Array<{ slug: string; signal: string; cnt: number }> {
+    return this.db.prepare(`
+      SELECT slug, signal, COUNT(*) AS cnt
+      FROM query_feedback
+      WHERE created_at >= $since
+      GROUP BY slug, signal
+    `).all({ $since: since }) as Array<{ slug: string; signal: string; cnt: number }>;
   }
 
   close(): void {

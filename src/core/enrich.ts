@@ -32,9 +32,10 @@ export class EnrichManager {
     this.llm = llm;
   }
 
-  computeTier(mentionCount: number): number {
-    if (mentionCount >= this.thresholds.tier1) return 1;
-    if (mentionCount >= this.thresholds.tier2) return 2;
+  computeTier(mentionCount: number, activityWeight: number = 0): number {
+    const combined = mentionCount * 0.4 + activityWeight * 0.6;
+    if (combined >= this.thresholds.tier1 || mentionCount >= this.thresholds.tier1) return 1;
+    if (combined >= this.thresholds.tier2 || mentionCount >= this.thresholds.tier2) return 2;
     return 3;
   }
 
@@ -45,7 +46,7 @@ export class EnrichManager {
       return { slug, previousTier: 0, newTier: 0, upgraded: false };
     }
 
-    const newTier = this.computeTier(page.mention_count);
+    const newTier = this.computeTier(page.mention_count, page.activity_weight);
 
     if (newTier < page.tier) {
       this.db.updatePageTier(slug, newTier);

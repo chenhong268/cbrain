@@ -9,6 +9,7 @@ import type { EnrichManager } from "./enrich.js";
 import type { HealthChecker } from "./health.js";
 import type { Logger } from "./logger.js";
 import type { InsightManager } from "./insight.js";
+import { LearnManager } from "./learn.js";
 import { IndexGenerator } from "./indexes.js";
 
 export interface DreamReport {
@@ -18,6 +19,7 @@ export interface DreamReport {
     backup: { path: string | null; size_mb: string };
     sync: { synced: number; skipped: number; errors: number };
     enrich: { total: number; upgraded: number };
+    learn: { updated: number; topActive: string[] };
     cleanup: { orphans: number; staleStubs: number };
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
@@ -56,7 +58,8 @@ export async function runDream(
   healthChecker: HealthChecker,
   outputsDir: string,
   logger: Logger,
-  insightMgr?: InsightManager
+  insightMgr?: InsightManager,
+  dbPath?: string,
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
     logger.warn("dream", "上次 dream 仍在执行中（或锁未释放），跳过");
@@ -66,6 +69,7 @@ export async function runDream(
         backup: { path: null, size_mb: "0" },
         sync: { synced: 0, skipped: 0, errors: 0 },
         enrich: { total: 0, upgraded: 0 },
+        learn: { updated: 0, topActive: [] },
         cleanup: { orphans: 0, staleStubs: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
         insight_archive: { archived: 0 },
@@ -89,10 +93,10 @@ export async function runDream(
     if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
     backupPath = join(backupDir, `auto-${ts}.zip`);
-    const dbPath = (db as any).filename ?? join(vaultPath, "..", "brain.sqlite");
-    const dbDir = join(vaultPath, "..");
+    const resolvedDbPath = dbPath ?? join(vaultPath, "..", "brain.sqlite");
+    const dbDir = join(resolvedDbPath, "..");
     const lancePath = join(dbDir, "lancedb");
-    const zipArgs = ["-rq", backupPath, basename(dbPath), "vault/."];
+    const zipArgs = ["-rq", backupPath, basename(resolvedDbPath)];
     if (existsSync(lancePath)) zipArgs.push("lancedb/.");
     await execFileAsync("zip", zipArgs, { cwd: dbDir, encoding: "utf-8" });
     const info = await stat(backupPath);
@@ -113,12 +117,23 @@ export async function runDream(
   const syncReport = await syncMgr.syncAll(vaultPath);
 
   // Stage 2: Enrich
-  logger.info("dream", "Stage 2/5: enrich");
+  logger.info("dream", "Stage 2/7: enrich");
   const enrichResults = enrichMgr.enrichAll();
   const upgraded = enrichResults.filter((r) => r.upgraded).length;
 
-  // Stage 3-5: Cleanup + Health + Insight archive (independent, run in parallel)
-  logger.info("dream", "Stage 3-5/6: cleanup + health + insight archive (parallel)");
+  // Stage 2.5: Learn
+  logger.info("dream", "Stage 3/7: learn");
+  let learnReport = { updated: 0, topActive: [] as string[] };
+  try {
+    const learnMgr = new LearnManager(db);
+    learnReport = learnMgr.recomputeAll();
+    if (learnReport.updated > 0) logger.info("dream", `学习更新 ${learnReport.updated} 个实体权重，活跃: ${learnReport.topActive.join(", ")}`);
+  } catch (e) {
+    logger.warn("dream", `学习计算失败: ${(e as Error).message}`);
+  }
+
+  // Stage 4-6: Cleanup + Health + Insight archive (independent, run in parallel)
+  logger.info("dream", "Stage 4-6/7: cleanup + health + insight archive (parallel)");
   const [orphans, staleStubs, healthReport, archived] = await Promise.all([
     syncMgr.removeOrphans(vaultPath).catch(e => { logger.warn("dream", `Cleanup orphans 失败: ${(e as Error).message}`); return []; }),
     syncMgr.cleanStaleStubs(vaultPath).catch(e => { logger.warn("dream", `Cleanup stale stubs 失败: ${(e as Error).message}`); return []; }),
@@ -133,8 +148,8 @@ export async function runDream(
     })(),
   ]);
 
-  // Stage 6: Index generation
-  logger.info("dream", "Stage 6/6: indexes");
+  // Stage 7: Index generation
+  logger.info("dream", "Stage 7/7: indexes");
   let indexFiles = 0;
   try {
     const generator = new IndexGenerator(db, outputsDir);
@@ -153,6 +168,7 @@ export async function runDream(
       backup: { path: backupPath, size_mb: backupSize },
       sync: { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors },
       enrich: { total: enrichResults.length, upgraded },
+      learn: learnReport,
       cleanup: { orphans: orphans.length, staleStubs: staleStubs.length },
       health: {
         overallStatus: healthReport.overallStatus,
@@ -180,6 +196,7 @@ export async function runDream(
     `|-------|--------|`,
     `| Sync | ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过, ${report.stages.sync.errors} 错误 |`,
     `| Enrich | ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级 |`,
+    `| Learn | ${report.stages.learn.updated} 实体权重更新, 活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")} |`,
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
     `| Insight Archive | ${report.stages.insight_archive.archived} 条过期归档 |`,
@@ -221,6 +238,9 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.enrich.upgraded > 0) {
     lines.push(`${report.stages.enrich.upgraded} 个实体升级`);
+  }
+  if (report.stages.learn.updated > 0) {
+    lines.push(`学习: ${report.stages.learn.updated} 个权重更新，最活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")}`);
   }
   if (report.stages.insight_archive.archived > 0) {
     lines.push(`${report.stages.insight_archive.archived} 条洞察归档`);

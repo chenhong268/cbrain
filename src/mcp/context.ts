@@ -14,6 +14,7 @@ import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
 import { Logger } from "../core/logger.js";
 import { InsightManager } from "../core/insight.js";
+import { LearnManager } from "../core/learn.js";
 import { ProfileManager } from "../profile/manager.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
@@ -37,6 +38,7 @@ export interface ToolContext {
   llm?: LLMProvider;
   logger: Logger;
   insights: InsightManager;
+  learn: LearnManager;
   profile: ProfileManager;
 }
 
@@ -65,8 +67,9 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const writeback = new WritebackManager(pages, db, outputsDir);
   const pipeline = new ContentPipeline(db, embedding, lance, { pages, nerEngine, logger });
   const insights = new InsightManager(db, embedding, lance);
+  const learn = new LearnManager(db);
   const profile = new ProfileManager(profileDir ?? join(vaultPath, ".."));
   profile.load();
 
-  return { db, vaultPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, profile };
+  return { db, vaultPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile };
 }

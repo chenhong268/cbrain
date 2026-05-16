@@ -262,7 +262,7 @@ export function register(program: Command) {
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
       const health = new HealthChecker(deps.db, outputsDir, logger);
-      const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr);
+      const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath);
       const icon = report.locked ? "🌙" : "⚠️";
       console.log(`${icon} Dream — ${report.timestamp.slice(0, 10)}`);
       if (report.stages.backup.path) console.log(`  Backup:  ${report.stages.backup.size_mb}MB`);

@@ -24,6 +24,7 @@ import { registerExpandTools } from "./tools/expand.js";
 import { registerProfileTools } from "./tools/profile.js";
 import { registerDossierTools } from "./tools/dossier.js";
 import { registerHierarchyTools } from "./tools/hierarchy.js";
+import { registerFeedbackTools } from "./tools/feedback.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -77,6 +78,7 @@ export function createServer(deps: CBrainDeps): McpServer {
   registerProfileTools(server, ctx);
   registerDossierTools(server, ctx);
   registerHierarchyTools(server, ctx);
+  registerFeedbackTools(server, ctx);
 
   return server;
 }

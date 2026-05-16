@@ -26,10 +26,13 @@ export function rrfScore(ranks: number[], k: number): number {
   return ranks.reduce((sum, rank) => sum + 1 / (k + rank), 0);
 }
 
+const W_ACTIVITY = 0.15;
+
 export function mergeRankedResults(
   lists: SearchResult[][],
   k: number,
-  limit: number
+  limit: number,
+  activityWeights?: Map<string, number>
 ): SearchResult[] {
   if (lists.length === 0) return [];
 
@@ -60,9 +63,10 @@ export function mergeRankedResults(
 
   const results: SearchResult[] = [];
   for (const [slug, data] of slugData) {
+    const activityBonus = activityWeights ? W_ACTIVITY * (activityWeights.get(slug) ?? 0) : 0;
     results.push({
       slug,
-      score: rrfScore(data.ranks, k),
+      score: rrfScore(data.ranks, k) + activityBonus,
       snippet: data.bestSnippet,
       source: "hybrid",
     });
@@ -136,7 +140,12 @@ export class HybridSearch {
       if (temporal.length > 0) allLists.push(temporal);
     }
 
-    return mergeRankedResults(allLists, this.rrfK, limit);
+    // Fetch activity weights for all candidate slugs
+    const allSlugs = new Set<string>();
+    for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
+    const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
+
+    return mergeRankedResults(allLists, this.rrfK, limit, activityWeights);
   }
 
   private async expandQuery(query: string): Promise<string[]> {

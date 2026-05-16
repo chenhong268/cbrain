@@ -11,8 +11,9 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       limit: z.number().optional().default(10).describe("Max results"),
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
+      session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
     },
-  }, async ({ query, limit, strategy }) => {
+  }, async ({ query, limit, strategy, session_id }) => {
     const start = Date.now();
     let results: Awaited<ReturnType<typeof ctx.search.search>>;
     let usedStrategy: string = strategy;
@@ -51,6 +52,14 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
 
     const latencyMs = Date.now() - start;
     try { ctx.db.logSearch(query, usedStrategy, latencyMs, results.length, latencyMs > 2000); } catch { /* non-critical */ }
+
+    // Learning loop: log query + bump activity weights
+    const resultSlugs = results.map((r: { slug: string }) => r.slug);
+    try { ctx.db.logQuery("query", query, resultSlugs, latencyMs, session_id); } catch { /* non-critical */ }
+    for (let i = 0; i < results.length; i++) {
+      try { ctx.learn.bumpOnQuery(results[i].slug, i, "query"); } catch { /* non-critical */ }
+    }
+
     return {
       content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
     };

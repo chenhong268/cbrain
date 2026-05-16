@@ -1,6 +1,41 @@
 # Changelog
 
-> Current: `v1.6.0` — 性能优化：19 处热路径加速。
+> Current: `v1.6.1` — 学习闭环：从使用模式中动态调整实体权重。
+
+## [v1.6.1] — 2026-05-16
+
+### 学习闭环（5 Phases）
+
+**Phase 1 — 查询日志：**
+- `query_log` 表：记录所有 MCP 查询（recall/search/graph），含 tool、query、result_slugs、latency、session_id
+- recall.ts / search.ts / graph.ts 三个工具在返回结果前自动记录
+
+**Phase 2 — 活动权重：**
+- `pages` 表新增 `activity_weight` + `last_queried_at` 列
+- `LearnManager`（`src/core/learn.ts`）：recomputeAll（dream 调用）+ bumpOnQuery（实时微增）
+- 权重公式：`Σ(query_value × position_weight × time_decay)`，14 天半衰期
+- Dream 管线新增 Stage 3: Learn，自动重算权重
+
+**Phase 3 — 排序集成：**
+- Search RRF 加 activity_weight bonus（W_ACTIVITY = 0.15）
+- Graph 排序改为复合排序：`activity_weight + LOG(mention_count + 1)`
+- Enrich tier 计算改为：`mention_count × 0.4 + activity_weight × 0.6`
+- Recall quality label 修正：tier ≤ 1 = "high"，不再反转
+
+**Phase 4 — 反馈机制：**
+- `query_feedback` 表 + `record_feedback` MCP 工具
+- 小爱可回报 relevant/irrelevant/expanded 信号
+- LearnManager.recomputeAll 中反馈影响权重
+
+**Phase 5 — 会话共现：**
+- query_log 含 session_id，共现信号增强已有 link weight
+- 只增强已有关系，不凭空发明新关系
+
+### 备份优化
+- Dream backup 不再包含 vault（有 iCloud 备份），只备份 DB + LanceDB（1.3GB → 143MB）
+- 修复 dbPath 解析错误导致备份静默失败（0MB）
+
+## [v1.6.0] — 2026-05-16
 
 ## [v1.6.0] — 2026-05-16
 

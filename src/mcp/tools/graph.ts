@@ -14,8 +14,10 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       limit: z.number().optional().default(20).describe("Max results"),
       minWeight: z.number().optional().describe("Minimum link weight (0-1). Higher = stronger links only."),
       source_type: z.string().optional().describe("Filter links by source type: wikilink, manual, ner, dialogue, writeback, unknown"),
+      session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
     },
-  }, async ({ slug, mode, depth, limit, minWeight, source_type }) => {
+  }, async ({ slug, mode, depth, limit, minWeight, source_type, session_id }) => {
+    const graphStart = Date.now();
     let resolvedSlug = slug;
     if (!ctx.pages.getBySlug(slug)) {
       const found = findEntitySlug(ctx.db, slug);
@@ -34,6 +36,25 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       default:
         result = ctx.graph.traverse(resolvedSlug, { maxDepth: depth, limit, minWeight });
     }
+
+    // Learning loop: extract slugs from result, log + bump
+    const graphSlugs: string[] = [];
+    if (Array.isArray(result)) {
+      for (const item of result) {
+        if ("slug" in item) graphSlugs.push((item as { slug: string }).slug);
+        else if ("from_slug" in item && "to_slug" in item) {
+          const link = item as { from_slug: string; to_slug: string };
+          if (link.from_slug !== resolvedSlug) graphSlugs.push(link.from_slug);
+          if (link.to_slug !== resolvedSlug) graphSlugs.push(link.to_slug);
+        }
+      }
+    }
+    const graphLatency = Date.now() - graphStart;
+    try { ctx.db.logQuery("graph", resolvedSlug, graphSlugs, graphLatency, session_id); } catch { /* non-critical */ }
+    for (let i = 0; i < graphSlugs.length; i++) {
+      try { ctx.learn.bumpOnQuery(graphSlugs[i], i, "graph"); } catch { /* non-critical */ }
+    }
+
     return {
       content: [{ type: "text", text: JSON.stringify({ resolvedSlug, result }, null, 2) }],
     };
