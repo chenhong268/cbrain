@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity } from "./trim.js";
+import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity, getExpiryWarning } from "./trim.js";
 import type { Link } from "../../core/graph.js";
 import type { LinkRow } from "../../storage/sqlite.js";
 import { extractDossier } from "../../core/dossier.js";
@@ -166,6 +166,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         reports_to_title: hierarchy?.reports_to_title ?? undefined,
         subordinates: hierarchy?.subordinates.length ? hierarchy.subordinates : undefined,
         peers: hierarchy?.peers.length ? hierarchy.peers : undefined,
+        expiry_warning: getExpiryWarning(page?.expires_at),
       };
     });
 
@@ -177,6 +178,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const totalTimeline = entities.reduce((n, e) => n + ((e as { timeline: unknown[] }).timeline?.length ?? 0), 0);
     const lowQuality = entities.filter((e) => (e as { quality?: string }).quality === "low").length;
     const stubCount = entities.filter(e => (e as { _stub?: boolean })._stub).length;
+    const expiredCount = entities.filter(e => (e as { expiry_warning?: string }).expiry_warning?.startsWith("⚠️")).length;
 
     // Cross-references — single batch query across all top-N entities
     const allRelatedSlugs = new Set<string>();
@@ -233,6 +235,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
             insights: relatedInsights.length > 0 ? relatedInsights : undefined,
             cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
             summary: `找到 ${entities.length} 个实体（${stubCount} 个摘要，${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` +
+              (expiredCount > 0 ? `，${expiredCount} 个已过期` : "") +
               (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +
               (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 个关联更新` : ""),
           },

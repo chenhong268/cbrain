@@ -49,6 +49,22 @@ export function trimTimeline(
   }));
 }
 
+export function getExpiryWarning(expiresAt?: string | null): string | undefined {
+  if (!expiresAt) return undefined;
+  const expires = new Date(expiresAt);
+  if (isNaN(expires.getTime())) return undefined;
+
+  const now = new Date();
+  const dateStr = expires.toISOString().slice(0, 10);
+
+  if (expires <= now) return `⚠️ 已过期（${dateStr}）`;
+
+  const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+  if (expires.getTime() - now.getTime() <= thirtyDays) return `⏰ 即将过期（${dateStr}）`;
+
+  return undefined;
+}
+
 export function stubEntity(
   sr: SearchResult,
   page?: Page | null,
@@ -60,5 +76,6 @@ export function stubEntity(
     relevance: sr.score,
     snippet: sr.snippet,
     _stub: true,
+    expiry_warning: getExpiryWarning((page as { expires_at?: string } | undefined)?.expires_at),
   };
 }

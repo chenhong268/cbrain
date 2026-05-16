@@ -1,6 +1,20 @@
 # Changelog
 
-> Current: `v1.6.2` — 自动反馈闭环 + 数据库索引补全。
+> Current: `v1.6.3` — Batch 操作 API + 过期内容标注 + 短查询优化。
+
+## [v1.6.3] — 2026-05-16
+
+### Batch 操作
+- 新增 `batch_delete_pages` — 一次调用删除最多 100 个页面
+- 新增 `batch_add_links` — 批量创建链接，自动校验 + markdown 同步去重
+- 新增 `batch_merge_pages` — 批量合并页面对，检测级联删除冲突
+
+### 过期内容标注
+- `deep_recall` 返回的实体新增 `expiry_warning` 字段：已过期（⚠️）、即将过期（⏰ 30天内）
+- summary 统计过期实体数量
+
+### 搜索优化
+- 短查询（<4 字符）走 FTS 优先路径，跳过向量搜索，中文名搜索准确度提升
 
 ## [v1.6.2] — 2026-05-16
 

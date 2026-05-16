@@ -362,4 +362,65 @@ describe("HybridSearch", () => {
       expect(results).toEqual([]);
     });
   });
+
+  describe("short query fast path", () => {
+    function setupSearch(): HybridSearch {
+      return new HybridSearch(db, createMockEmbeddingProvider(), createMockLanceDB() as any, { rrf_k: 60 });
+    }
+
+    test("exact title match returns immediately with source=exact", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("entities/luodan", "entity", "罗丹", "luodan.md", "h1");
+
+      const hs = setupSearch();
+      const results = await hs.search("罗丹");
+      expect(results.length).toBe(1);
+      expect(results[0].slug).toBe("entities/luodan");
+      expect(results[0].source).toBe("exact");
+      expect(results[0].score).toBe(1.0);
+    });
+
+    test("no exact match falls back to FTS", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("entities/luodan", "entity", "罗丹", "luodan.md", "h1");
+      db.ftsInsert("entities/luodan", "罗丹是法国著名雕塑家，创作了思想者等作品");
+
+      const hs = setupSearch();
+      const results = await hs.search("思想者");
+      expect(results.length).toBeGreaterThan(0);
+      expect(results.every((r) => r.source === "fts" || r.source === "hybrid")).toBe(true);
+    });
+
+    test("3-char query still uses short path", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("entities/xukai", "entity", "徐凯文", "xukai.md", "h1");
+
+      const hs = setupSearch();
+      const results = await hs.search("徐凯文");
+      expect(results.length).toBe(1);
+      expect(results[0].slug).toBe("entities/xukai");
+      expect(results[0].source).toBe("exact");
+    });
+
+    test("4+ char query uses normal hybrid path", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("entities/p1", "entity", "机器学习入门", "p1.md", "h1");
+
+      const hs = setupSearch();
+      const results = await hs.search("机器学习入门");
+      // 4+ chars goes through normal hybrid, not short path
+      // No exact match source for 4+ char queries
+      expect(results.every((r) => r.source !== "exact")).toBe(true);
+    });
+
+    test("short query with no results returns empty", async () => {
+      const hs = setupSearch();
+      const results = await hs.search("无名");
+      expect(results).toEqual([]);
+    });
+  });
 });

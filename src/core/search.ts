@@ -76,6 +76,8 @@ export function mergeRankedResults(
   return results.slice(0, limit);
 }
 
+const SHORT_QUERY_THRESHOLD = 4;
+
 export class HybridSearch {
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
@@ -116,6 +118,11 @@ export class HybridSearch {
       return this.graphSearch(query, limit);
     }
 
+    const trimmed = query.trim();
+    if (trimmed.length < SHORT_QUERY_THRESHOLD) {
+      return this.shortQuerySearch(trimmed, limit);
+    }
+
     const useMultiQuery = (options?.multiQuery ?? this.multiQueryEnabled) && !!this.llm;
     const queries = useMultiQuery ? await this.expandQuery(query) : [query];
 
@@ -141,6 +148,28 @@ export class HybridSearch {
     }
 
     // Fetch activity weights for all candidate slugs
+    const allSlugs = new Set<string>();
+    for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
+    const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
+
+    return mergeRankedResults(allLists, this.rrfK, limit, activityWeights);
+  }
+
+  private async shortQuerySearch(query: string, limit: number): Promise<SearchResult[]> {
+    const exact = this.db.getPageByTitle(query);
+    if (exact) {
+      return [{ slug: exact.slug, score: 1.0, snippet: exact.title, source: "exact" }];
+    }
+
+    const fts = this.ftsSearch(query, limit);
+    const temporal = this.temporalSearch(query, limit);
+
+    const allLists: SearchResult[][] = [];
+    if (fts.length > 0) allLists.push(fts);
+    if (temporal.length > 0) allLists.push(temporal);
+
+    if (allLists.length === 0) return [];
+
     const allSlugs = new Set<string>();
     for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
     const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
