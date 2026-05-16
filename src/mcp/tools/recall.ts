@@ -14,7 +14,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
     description:
       "【默认查询工具】查找人物、公司、概念等实体，返回完整上下文（简介、关系、时间线、标签、档案）。" +
-      "适用：'陈宏是谁'、'最近聊了什么投资的事'、'XX公司的信息'。" +
+      "适用：'张三是谁'、'最近聊了什么投资的事'、'XX公司的信息'。" +
       "不要用 search + get_page + graph_query 拼凑，直接用这个一步到位。" +
       "⚠️ 返回中的 proactive_hints 是系统主动发现的你可能不知道的重要信息（过期提醒、关联人动态、隐藏联系等）。你必须把每一条 hint 原样展示给用户，用 '💡 主动提示：' 开头，逐条列出。不要省略任何一条。",
     inputSchema: {
