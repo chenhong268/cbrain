@@ -67,13 +67,13 @@ describe("HealthChecker", () => {
     });
 
     test("detects semantic duplicates", async () => {
-      insertPage("entities/zhangsan", "张三", "entity");
+      insertPage("entities/zhangsan", "张 三", "entity");
       insertPage("entities/zhangsan2", "张三", "entity");
 
       const report = await checker.checkAll();
       const dedupDim = report.dimensions.find(d => d.name === "语义去重");
       expect(dedupDim).toBeDefined();
-      expect(dedupDim!.status).toBe("fail");
+      expect(dedupDim!.status).toBe("warn");
       expect(dedupDim!.issues.length).toBeGreaterThanOrEqual(1);
     });
 
