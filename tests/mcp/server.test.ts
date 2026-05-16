@@ -75,8 +75,8 @@ describe("MCP Server", () => {
       expect(names.sort()).toEqual([
         "add_alias", "add_link", "add_tag", "add_timeline_entry", "archive_insight",
         "brain_storm", "deep_recall", "delete_page", "dismiss_insight",
-        "dream", "dream_reset", "enrich", "expand_entity",
-        "generate_indexes", "get_chunks", "get_ingest_log", "get_insight",
+        "dossier", "dream", "dream_reset", "enrich", "expand_entity",
+        "generate_indexes", "get_chunks", "get_hierarchy", "get_ingest_log", "get_insight",
         "get_links", "get_page", "get_profile", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",
         "ingest", "ingest_dialogue", "job_cancel", "job_list",
@@ -84,8 +84,8 @@ describe("MCP Server", () => {
         "list_pages", "mark_discovery_seen", "merge_pages",
         "promote_discovery", "put_page", "query", "query_insights",
         "read_discoveries", "reload_profile", "remove_alias",
-        "remove_link", "remove_orphans", "remove_profile", "remove_tag",
-        "resolve_slugs", "revert_version", "run_discovery", "status",
+        "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
+        "resolve_slugs", "revert_version", "run_discovery", "set_hierarchy", "status",
         "summarize", "sync", "update_profile", "writeback",
       ]);
     });

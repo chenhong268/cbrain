@@ -358,6 +358,8 @@ export class PageManager {
       this.db.addAlias(targetSlug, source.title);
     }
 
+    this.cacheDelete(targetSlug);
+
     // Delete source page (file + index)
     this.delete(sourceSlug);
 
@@ -367,6 +369,7 @@ export class PageManager {
 
   incrementMention(slug: string): void {
     this.db.incrementMentionCount(slug);
+    this.cacheDelete(slug);
   }
 
 }
