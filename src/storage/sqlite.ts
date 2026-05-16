@@ -71,6 +71,9 @@ export class CBrainDB {
     this.db = new Database(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
+    this.db.exec("PRAGMA cache_size = -64000");
+    this.db.exec("PRAGMA mmap_size = 268435456");
+    this.db.exec("PRAGMA synchronous = NORMAL");
     this.migrate();
   }
 
