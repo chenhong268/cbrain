@@ -1,6 +1,14 @@
 # Changelog
 
-> Current: `v1.6.3` — Batch 操作 API + 过期内容标注 + 短查询优化。
+> Current: `v1.6.4` — 过期信息闭环：auto expires_at + 查询标注 + Agent 行为指引。
+
+## [v1.6.4] — 2026-05-16
+
+### 过期信息闭环
+- `upsertPage()` / `insertPage()` 对 entity 类型自动设置 90 天有效期
+- DB 初始化时自动回填已有 entity 的 `expires_at`
+- 小爱 SKILL.md 添加过期信息处理规则：主动告知过期、提议更新、不过滤不丢弃
+
 
 ## [v1.6.3] — 2026-05-16
 

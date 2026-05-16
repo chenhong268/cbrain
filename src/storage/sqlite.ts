@@ -292,6 +292,10 @@ export class CBrainDB {
     if (!names.has("expires_at")) {
       this.db.exec("ALTER TABLE pages ADD COLUMN expires_at TEXT");
     }
+    // Backfill: entity pages without expires_at get now + 90d
+    this.db.exec(
+      "UPDATE pages SET expires_at = datetime('now', '+90 days') WHERE type = 'entity' AND expires_at IS NULL"
+    );
     if (!names.has("confidence_decay")) {
       this.db.exec("ALTER TABLE pages ADD COLUMN confidence_decay REAL DEFAULT 1.0");
     }
@@ -750,6 +754,9 @@ export class CBrainDB {
   }
 
   insertPage(data: { slug: string; type: string; title: string; filePath: string; contentHash: string; tier?: number; expiresAt?: string | null; confidenceDecay?: number }): void {
+    const autoExpires = data.type === "entity" && !data.expiresAt
+      ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ")
+      : data.expiresAt ?? null;
     this.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, expires_at, confidence_decay, created_at, updated_at) VALUES ($slug, $type, $title, $path, $hash, $tier, $expires, $decay, datetime('now'), datetime('now'))"
     ).run({
@@ -759,20 +766,22 @@ export class CBrainDB {
       $path: data.filePath,
       $hash: data.contentHash,
       $tier: data.tier ?? 3,
-      $expires: data.expiresAt ?? null,
+      $expires: autoExpires,
       $decay: data.confidenceDecay ?? 1.0,
     });
   }
 
   upsertPage(data: UpsertPageData): void {
+    const isEntity = data.type === "entity";
+    const expiresAt = isEntity ? `datetime('now', '+90 days')` : null;
     this.prepare(`
-      INSERT INTO pages (slug, type, title, file_path, content_hash, tier, created_at, updated_at)
-      VALUES ($slug, $type, $title, $path, $hash, 3, datetime('now'), datetime('now'))
+      INSERT INTO pages (slug, type, title, file_path, content_hash, tier, expires_at, created_at, updated_at)
+      VALUES ($slug, $type, $title, $path, $hash, 3, ${expiresAt ? expiresAt : 'NULL'}, datetime('now'), datetime('now'))
       ON CONFLICT(slug) DO UPDATE SET
         type = excluded.type,
         title = excluded.title,
         content_hash = excluded.content_hash,
-        updated_at = datetime('now')
+        updated_at = datetime('now')${expiresAt ? `, expires_at = ${expiresAt}` : ''}
     `).run({
       $slug: data.slug,
       $type: data.type,
