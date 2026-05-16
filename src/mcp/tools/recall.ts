@@ -12,9 +12,9 @@ const TOP_N = 3;
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
     description:
-      "Deep entity recall — searches the knowledge graph and returns a rich, pre-merged context bundle " +
-      "(page content, links, timeline, tags, related entities) for each matched entity. " +
-      "Use this instead of calling query + get_page + graph_query + get_links + get_timeline separately.",
+      "【默认查询工具】查找人物、公司、概念等实体，返回完整上下文（简介、关系、时间线、标签、档案）。" +
+      "适用：'陈宏是谁'、'最近聊了什么投资的事'、'XX公司的信息'。" +
+      "不要用 search + get_page + graph_query 拼凑，直接用这个一步到位。",
     inputSchema: {
       query: z.string().describe("Search query"),
       limit: z.number().optional().default(5).describe("Max entities to recall (capped at 10)"),

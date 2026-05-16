@@ -8,10 +8,10 @@ const TOP_N = 3;
 export function registerSummarizeTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("summarize", {
     description:
-      "Get a rich, structured overview of a topic from the knowledge graph. " +
-      "Searches for related entities, traverses their graph neighborhood, and returns a context bundle " +
-      "(page content, links, timeline, tags, neighbors, cross-references). " +
-      "Use this when you need to quickly understand a domain or topic area.",
+      "探索一个领域或主题的全貌。搜索相关实体后沿图做 1-2 跳遍历，发现实体间的关联和邻居节点。" +
+      "适用：'帮我了解 XX 生态'、'这个领域有哪些关键玩家'、" +
+      "'XX 和 YY 之间有没有我没注意到的联系'。" +
+      "与 deep_recall 的区别：recall 查具体实体，explore_topic 发现领域的拓扑结构。",
     inputSchema: {
       topic: z.string().describe("Topic or keyword to summarize"),
       limit: z.number().optional().default(5).describe("Max entities to include (capped at 10)"),

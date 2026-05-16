@@ -4,6 +4,7 @@ const LAMBDA = 0.05; // time decay — half-life ~14 days
 const QUERY_VALUES: Record<string, number> = {
   recall: 1.0,
   query: 1.0,
+  expand: 1.5,
   graph: 0.5,
 };
 const POSITION_WEIGHTS = [1.0, 0.7, 0.5]; // rank 1, 2, 3; 4+ = 0.2
@@ -48,6 +49,20 @@ export class LearnManager {
 
     const topActive = this.db.getTopActivityEntities(5).map(e => `${e.title}(${e.activity_weight.toFixed(2)})`);
     return { updated, topActive };
+  }
+
+  bumpOnExpand(slug: string): void {
+    try {
+      this.db.insertFeedback(null, slug, "expanded");
+      this.db.bumpActivityWeight(slug, 0.15);
+    } catch { /* non-critical */ }
+  }
+
+  bumpOnWriteback(slug: string): void {
+    try {
+      this.db.insertFeedback(null, slug, "relevant");
+      this.db.bumpActivityWeight(slug, 0.2);
+    } catch { /* non-critical */ }
   }
 
   bumpOnQuery(slug: string, position: number, tool: string): void {

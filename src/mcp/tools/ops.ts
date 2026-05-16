@@ -47,6 +47,15 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     },
   }, async (params) => {
     const result = await ctx.writeback.execute(params);
+
+    // Auto-feedback: successful writeback = strong engagement signal
+    if (result.success) {
+      if (result.slug) ctx.learn.bumpOnWriteback(result.slug);
+      if (params.action === "create_link" && params.toSlug) {
+        ctx.learn.bumpOnWriteback(params.toSlug);
+      }
+    }
+
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };

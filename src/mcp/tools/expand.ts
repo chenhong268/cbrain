@@ -57,6 +57,9 @@ export function registerExpandTools(server: McpServer, ctx: ToolContext): void {
       confidence: i.confidence,
     }));
 
+    // Auto-feedback: user expanded this entity = strong positive signal
+    ctx.learn.bumpOnExpand(slug);
+
     return {
       content: [{
         type: "text" as const,

@@ -1,6 +1,27 @@
 # Changelog
 
-> Current: `v1.6.1` — 学习闭环：从使用模式中动态调整实体权重。
+> Current: `v1.6.2` — 自动反馈闭环 + 数据库索引补全。
+
+## [v1.6.2] — 2026-05-16
+
+### 自动反馈闭环
+- `expand_entity` 展开实体时自动记录 "expanded" feedback + 0.15 activity bump
+- `writeback` 写入成功时自动记录 "relevant" feedback + 0.2 activity bump
+- `create_link` 时两端实体都记录正向信号
+- `LearnManager` 新增 `bumpOnExpand()` + `bumpOnWriteback()` 方法
+- `QUERY_VALUES` 新增 `expand: 1.5`（展开 = 比搜索更强的兴趣信号）
+
+### 数据库索引补全（9 个新索引）
+- `idx_pages_title` / `idx_pages_updated_at` / `idx_pages_created_at`
+- `idx_pages_activity_wt`（partial，WHERE > 0）/ `idx_pages_expires_at`（partial，WHERE NOT NULL）
+- `idx_tags_page_slug` / `idx_timeline_page_slug`
+- `idx_ingest_log_created` / `idx_feedback_created`
+
+### Bug 修复
+- `pages.title` 加 UNIQUE 索引（防重复，已有重复数据只 warn 不中断启动）
+- `discoveries.seen` 改为 `NOT NULL DEFAULT 0` + 修存量 NULL 数据
+- `query_feedback` FK 改为 `ON DELETE CASCADE`，新数据库直接正确
+- `cleanOldQueryLogs()` 改为先删 feedback 再删 log，避免孤儿记录
 
 ## [v1.6.1] — 2026-05-16
 

@@ -5,7 +5,9 @@ import type { ToolContext } from "../context.js";
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
   // ─── query ───────────────────────────────────────────────
   server.registerTool("query", {
-    description: "Search the knowledge brain with hybrid search (vector + FTS + graph, automatically fused).",
+    description:
+      "原始搜索，只返回匹配的文本片段，不附带关系、时间线等额外信息。" +
+      "仅用于快速定位某个关键词出现的位置。大多数查询应该用 deep_recall 代替。",
     inputSchema: {
       query: z.string().describe("Search query"),
       limit: z.number().optional().default(10).describe("Max results"),

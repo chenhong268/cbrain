@@ -194,7 +194,7 @@ export class CBrainDB {
         detail TEXT,
         detected_at TEXT NOT NULL,
         dream_run TEXT,
-        seen INTEGER DEFAULT 0
+        seen INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -241,6 +241,7 @@ export class CBrainDB {
     this.migrateQueryLog();
     this.migrateActivityWeight();
     this.migrateQueryFeedback();
+    this.migrateMissingIndexes();
   }
 
   private migrateLinksStrength(): void {
@@ -282,6 +283,7 @@ export class CBrainDB {
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_discoveries_actionable ON discoveries(actionable)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_discoveries_score ON discoveries(score)");
+    this.db.exec("UPDATE discoveries SET seen = 0 WHERE seen IS NULL");
   }
 
   private migratePagesExpiry(): void {
@@ -1601,6 +1603,9 @@ export class CBrainDB {
   }
 
   cleanOldQueryLogs(olderThanDays: number): number {
+    this.prepare(
+      "DELETE FROM query_feedback WHERE query_id IN (SELECT id FROM query_log WHERE created_at < datetime('now', '-' || $days || ' days'))"
+    ).run({ $days: olderThanDays });
     const r = this.prepare(
       "DELETE FROM query_log WHERE created_at < datetime('now', '-' || $days || ' days')"
     ).run({ $days: olderThanDays });
@@ -1696,7 +1701,7 @@ export class CBrainDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS query_feedback (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query_id INTEGER REFERENCES query_log(id),
+        query_id INTEGER REFERENCES query_log(id) ON DELETE CASCADE,
         slug TEXT NOT NULL,
         signal TEXT NOT NULL CHECK(signal IN ('relevant', 'irrelevant', 'corrected', 'expanded')),
         note TEXT,
@@ -1704,6 +1709,25 @@ export class CBrainDB {
       );
     `);
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_feedback_slug ON query_feedback(slug)");
+  }
+
+  private migrateMissingIndexes(): void {
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pages_title ON pages(title);
+      CREATE INDEX IF NOT EXISTS idx_pages_updated_at ON pages(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_pages_created_at ON pages(created_at);
+      CREATE INDEX IF NOT EXISTS idx_pages_activity_wt ON pages(activity_weight) WHERE activity_weight > 0;
+      CREATE INDEX IF NOT EXISTS idx_pages_expires_at ON pages(expires_at) WHERE expires_at IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_tags_page_slug ON tags(page_slug);
+      CREATE INDEX IF NOT EXISTS idx_timeline_page_slug ON timeline(page_slug);
+      CREATE INDEX IF NOT EXISTS idx_ingest_log_created ON ingest_log(created_at);
+      CREATE INDEX IF NOT EXISTS idx_feedback_created ON query_feedback(created_at);
+    `);
+    try {
+      this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_title_uniq ON pages(title)");
+    } catch {
+      console.warn("[migrate] pages has duplicate titles — unique index skipped, run dedup first");
+    }
   }
 
   insertFeedback(queryId: number | null, slug: string, signal: "relevant" | "irrelevant" | "corrected" | "expanded", note?: string): void {
