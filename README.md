@@ -211,6 +211,81 @@ To set up periodic tasks with Hermes:
 # - Weekly: cbrain enrich && cbrain cleanup
 ```
 
+### Agent Memory Rules
+
+To get the most out of CBrain, your Agent needs judgment rules stored in its memory — these teach it *when* and *how* to use each tool. Below are recommended rules distilled from real-world usage. Copy them into your Agent's memory system (e.g., MEMORY.md, system prompt, or equivalent).
+
+让你的 Agent 充分发挥 CBrain 的价值，需要在记忆中写入判断规则——教它**何时**、**如何**使用每个工具。以下是从实际使用中提炼的推荐规则。
+
+**1. Search Routing（搜索路由）**
+
+Route to the right tool based on user intent:
+
+| User intent | Tool | Why |
+|:------------|:-----|:----|
+| Recall / deep understanding / what is / tell me about | `deep_recall` | One call: page + links + timeline |
+| Summarize / overview / big picture | `summarize` | Aggregated cross-page view |
+| Analyze / brainstorm / cross-domain | `brain_storm` | Cross-domain pattern finding |
+| Quick search / find / look up | `query` | Fast — returns slug + title + snippet |
+| Expand / more details | `expand_entity` | Requires slug first |
+
+Anti-patterns:
+- ❌ Chaining `query` + `get_page` + `get_links` + `get_timeline` → `deep_recall` does it in one call
+- ❌ Routing summarize requests to `query` → wrong tool
+- ❌ Calling `expand_entity` without a slug → query first
+- ❌ Skipping query tools because you "know" the slug → query tools handle session tracking and weight learning
+
+**2. Storage Routing（存储路由）**
+
+When saving content, route to the correct page type:
+
+| Content | Page type |
+|:--------|:----------|
+| People / companies / products / organizations | `entity` |
+| Recognized methodologies / theories / models | `concept` |
+| Events / articles / notes / meetings | `record` |
+| System-generated analysis / discoveries | `insight` |
+
+- Unsure between entity vs concept → pick `entity` (easier to reclassify later)
+- ❌ Don't treat generic business jargon as concepts
+- ❌ Don't skip NER — content like poetry, philosophy often contains extractable names
+
+**3. Session Tracking（会话追踪）**
+
+Generate a unique `session_id` per conversation (format: `YYYYMMDD-random`, e.g., `20260516-a3f7k`). Pass it to every `deep_recall` / `query` / `graph_query` call. This enables **co-occurrence learning** — entities queried together get associated, so CBrain learns context-sensitive activation (e.g., "Jung" activates "Freud" in a psychology context).
+
+If results help the user, call `record_feedback` to reinforce quality.
+
+**4. Search Pitfalls（搜索注意事项）**
+
+Two common mistakes:
+
+1. **Short Chinese names** — `query` and `resolve_slugs` may not match on first try. Don't conclude "doesn't exist" from a single miss.
+2. **Organization hierarchies** — Always use `graph_query(depth=2)` to traverse the subgraph. Don't rely on page-level explicit links alone — relationships often live in the graph, not the page body.
+
+**5. Entity Page Structure（实体页面规范）**
+
+For people or team entities, always include a structured "Organization" section: superior / peers / subordinates / reporting chain. Don't scatter descriptions loosely. After generating a dossier, check if existing record data was missed and supplement the page body before regenerating.
+
+**6. Expiry Warning Handling（过期信息处理）**
+
+`deep_recall` / `query` / `expand_entity` may return an `expiry_warning` field (`"⚠️ expired"` or `"⏰ expiring soon"`). When present:
+
+1. Tell the user: "This information is expired / expiring soon and may not be current"
+2. Still show the information — just note the staleness
+3. Offer: "Would you like to update this information?"
+
+Don't suppress results because of an expiry warning.
+
+**7. Proactive Dual-Save（主动双存）**
+
+When the user provides business information (meeting notes, client updates, team feedback), always save to **both**:
+
+1. The user's reminder / task system
+2. CBrain (knowledge retention)
+
+Don't wait for the user to explicitly say "save to brain" — proactively judge.
+
 ### HTTP (recommended)
 
 Start as a persistent HTTP server:
