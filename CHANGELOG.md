@@ -1,5 +1,12 @@
 # Changelog
 
+> Current: `v1.7.1` — Agent 协作分工文档。
+
+## [v1.7.1] — 2026-05-17
+
+### 文档
+- 新增 `docs/agent-collaboration.md` — 小爱与 Claude Code 的协作分工协议
+
 > Current: `v1.7.0` — 主动提示引擎 + 小爱查询行为优化。
 
 ## [v1.7.0] — 2026-05-16
