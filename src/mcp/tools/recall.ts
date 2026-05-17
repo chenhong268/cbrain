@@ -175,6 +175,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         birthday: birthdayInfo?.birthday ?? undefined,
         age: birthdayInfo?.age ?? undefined,
         zodiac: birthdayInfo?.zodiac ?? undefined,
+        shengxiao: birthdayInfo?.shengxiao ?? undefined,
       };
     });
 

@@ -2,6 +2,7 @@ export interface BirthdayInfo {
   birthday: string;
   age: number;
   zodiac?: string;
+  shengxiao?: string;
 }
 
 const ZODIAC: { sign: string; end: [number, number] }[] = [
@@ -19,6 +20,12 @@ const ZODIAC: { sign: string; end: [number, number] }[] = [
   { sign: "♐️ 射手座", end: [12, 21] },
   { sign: "♑️ 摩羯座", end: [12, 31] },
 ];
+
+const SHENGXIAO = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"];
+
+export function getShengxiao(year: number): string {
+  return SHENGXIAO[(year - 4) % 12];
+}
 
 export function getZodiac(month: number, day: number): string {
   for (const z of ZODIAC) {
@@ -54,7 +61,7 @@ export function extractBirthday(body: string): BirthdayInfo | null {
     if (m) {
       const [, ys, ms, ds] = m;
       const year = +ys, month = +ms, day = +ds;
-      return { birthday: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`, age: calcAge(year, month, day), zodiac: getZodiac(month, day) };
+      return { birthday: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`, age: calcAge(year, month, day), zodiac: getZodiac(month, day), shengxiao: getShengxiao(year) };
     }
 
     // Format 2: Chinese year+month — 1960年4月
@@ -62,14 +69,14 @@ export function extractBirthday(body: string): BirthdayInfo | null {
     if (m) {
       const [, ys, ms] = m;
       const year = +ys, month = +ms;
-      return { birthday: `${year}年${month}月`, age: calcAge(year, month), zodiac: getZodiac(month, 15) };
+      return { birthday: `${year}年${month}月`, age: calcAge(year, month), zodiac: getZodiac(month, 15), shengxiao: getShengxiao(year) };
     }
 
     // Format 3: Chinese year only — 1976年
     m = line.match(/\*{0,2}(?:生日|出生)\*{0,2}\s*[：:]\s*(\d{4})年/);
     if (m) {
       const year = +m[1];
-      return { birthday: `${year}年`, age: calcAge(year) };
+      return { birthday: `${year}年`, age: calcAge(year), shengxiao: getShengxiao(year) };
     }
   }
 
@@ -77,7 +84,7 @@ export function extractBirthday(body: string): BirthdayInfo | null {
   const tableMatch = body.match(/\|\s*(\d{4})\s*\|\s*出生/);
   if (tableMatch) {
     const year = +tableMatch[1];
-    return { birthday: `${year}年`, age: calcAge(year) };
+    return { birthday: `${year}年`, age: calcAge(year), shengxiao: getShengxiao(year) };
   }
 
   return null;

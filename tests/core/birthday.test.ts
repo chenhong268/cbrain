@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { extractBirthday, getZodiac } from "../../src/core/birthday.js";
+import { extractBirthday, getZodiac, getShengxiao } from "../../src/core/birthday.js";
 
 describe("getZodiac", () => {
   test("9/22 = 处女座", () => expect(getZodiac(9, 22)).toBe("♍️ 处女座"));
@@ -9,12 +9,22 @@ describe("getZodiac", () => {
   test("3/21 = 白羊座", () => expect(getZodiac(3, 21)).toBe("♈️ 白羊座"));
 });
 
+describe("getShengxiao", () => {
+  test("1977 = 蛇", () => expect(getShengxiao(1977)).toBe("蛇"));
+  test("1984 = 鼠", () => expect(getShengxiao(1984)).toBe("鼠"));
+  test("2000 = 龙", () => expect(getShengxiao(2000)).toBe("龙"));
+  test("1960 = 鼠", () => expect(getShengxiao(1960)).toBe("鼠"));
+  test("1976 = 龙", () => expect(getShengxiao(1976)).toBe("龙"));
+  test("1905 = 蛇", () => expect(getShengxiao(1905)).toBe("蛇"));
+});
+
 describe("extractBirthday", () => {
   test("ISO date — 生日：1984-09-25", () => {
     const result = extractBirthday("- 生日：1984-09-25");
     expect(result).not.toBeNull();
     expect(result!.birthday).toBe("1984-09-25");
     expect(result!.zodiac).toBe("♎️ 天秤座");
+    expect(result!.shengxiao).toBe("鼠");
     expect(result!.age).toBeGreaterThan(0);
   });
 
@@ -22,7 +32,8 @@ describe("extractBirthday", () => {
     const result = extractBirthday("- **出生**：1960年4月");
     expect(result).not.toBeNull();
     expect(result!.birthday).toBe("1960年4月");
-    expect(result!.zodiac).toBe("♈️ 白羊座"); // 4月15日 = 白羊座（3/21-4/19）
+    expect(result!.zodiac).toBe("♈️ 白羊座");
+    expect(result!.shengxiao).toBe("鼠");
     expect(result!.age).toBeGreaterThan(0);
   });
 
@@ -31,6 +42,7 @@ describe("extractBirthday", () => {
     expect(result).not.toBeNull();
     expect(result!.birthday).toBe("1976年");
     expect(result!.zodiac).toBeUndefined();
+    expect(result!.shengxiao).toBe("龙");
     expect(result!.age).toBe(new Date().getFullYear() - 1976);
   });
 
@@ -43,6 +55,7 @@ describe("extractBirthday", () => {
     expect(result).not.toBeNull();
     expect(result!.birthday).toBe("1905年");
     expect(result!.zodiac).toBeUndefined();
+    expect(result!.shengxiao).toBe("蛇");
   });
 
   test("bold markers compatibility", () => {
@@ -50,6 +63,7 @@ describe("extractBirthday", () => {
     expect(result).not.toBeNull();
     expect(result!.birthday).toBe("2000-06-15");
     expect(result!.zodiac).toBe("♊️ 双子座");
+    expect(result!.shengxiao).toBe("龙");
   });
 
   test("zodiac boundary — Sep 22 vs Sep 23", () => {
