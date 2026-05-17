@@ -89,6 +89,15 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       if (p) pagesBySlug.set(sr.slug, p);
     }
 
+    // Type demotion: record-type results rank lower
+    const RECORD_SCORE_FACTOR = 0.5;
+    for (const sr of searchResults) {
+      const page = pagesBySlug.get(sr.slug);
+      const type = page?.frontmatter?.type ?? page?.type;
+      if (type === "record") sr.score *= RECORD_SCORE_FACTOR;
+    }
+    searchResults.sort((a, b) => b.score - a.score);
+
     // Batch enrichment: collect all slugs, then batch-fetch links/timeline/tags
     const topSlugs = searchResults.map(r => r.slug);
 
