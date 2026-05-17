@@ -1,15 +1,13 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity, getExpiryWarning, trimHint } from "./trim.js";
+import { truncate, safeFrontmatter, trimLink, trimTimeline, getExpiryWarning, trimHint } from "./trim.js";
 import type { Link } from "../../core/graph.js";
 import type { LinkRow } from "../../storage/sqlite.js";
 import { extractDossier } from "../../core/dossier.js";
 import { getHierarchyContext } from "../../core/hierarchy.js";
 import { generateProactiveHints } from "../../core/proactive.js";
 import { extractBirthday } from "../../core/birthday.js";
-
-const TOP_N = 3;
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -20,13 +18,13 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       "⚠️ 返回中的 proactive_hints 是系统主动发现的你可能不知道的重要信息（过期提醒、关联人动态、隐藏联系等）。你必须把每一条 hint 原样展示给用户，用 '💡 主动提示：' 开头，逐条列出。不要省略任何一条。",
     inputSchema: {
       query: z.string().describe("Search query"),
-      limit: z.number().optional().default(5).describe("Max entities to recall (capped at 10)"),
+      limit: z.number().optional().default(5).describe("Max entities to recall (capped at 5, only top results are fully enriched)"),
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
       session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
     },
   }, async ({ query, limit, strategy, session_id }) => {
-    const cap = Math.min(limit ?? 5, 10);
+    const cap = Math.min(limit ?? 5, 5);
 
     const searchStart = Date.now();
     let searchResults: Awaited<ReturnType<typeof ctx.search.search>>;
@@ -84,16 +82,15 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       };
     }
 
-    // ── Batch enrichment for top-N entities ──────────────────────
-    // Pre-fetch pages for all results (stubs need them too)
+    // ── Batch enrichment for all result entities ─────────────────
     const pagesBySlug = new Map<string, ReturnType<typeof ctx.pages.getBySlug>>();
     for (const sr of searchResults) {
       const p = ctx.pages.getBySlug(sr.slug);
       if (p) pagesBySlug.set(sr.slug, p);
     }
 
-    // Batch enrichment: collect all slugs for top-N, then batch-fetch links/timeline/tags
-    const topSlugs = searchResults.slice(0, TOP_N).map(r => r.slug);
+    // Batch enrichment: collect all slugs, then batch-fetch links/timeline/tags
+    const topSlugs = searchResults.map(r => r.slug);
 
     const linksBySlug = new Map<string, { outgoing: Record<string, unknown>[]; incoming: Record<string, unknown>[] }>();
     const timelineBySlug = new Map<string, Record<string, unknown>[]>();
@@ -101,7 +98,6 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const relatedBySlug = new Map<string, { slug: string; title: string; type: string }[]>();
     const hierarchyBySlug = new Map<string, ReturnType<typeof getHierarchyContext>>();
 
-    // Batch-fetch links, timeline, tags for all top-N slugs
     const batchLinks = ctx.db.batchGetLinksForSlugs(topSlugs);
     const batchTimeline = ctx.db.batchGetTimelineForSlugs(topSlugs);
     const batchTags = ctx.db.batchGetTagsForSlugs(topSlugs);
@@ -128,14 +124,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       try { hierarchyBySlug.set(slug, getHierarchyContext(slug, { pages: ctx.pages, graph: ctx.graph })); } catch { /* non-critical */ }
     }
 
-    // Build entity objects
-    const entities = searchResults.map((sr, idx) => {
+    // Build entity objects — all fully enriched (no stubs)
+    const entities = searchResults.map((sr) => {
       const slug = sr.slug;
-
-      if (idx >= TOP_N) {
-        return stubEntity(sr, pagesBySlug.get(slug) ?? null);
-      }
-
       const page = pagesBySlug.get(slug);
       const links = linksBySlug.get(slug) ?? { outgoing: [], incoming: [] };
       const timeline = timelineBySlug.get(slug) ?? [];
@@ -186,7 +177,6 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     );
     const totalTimeline = entities.reduce((n, e) => n + ((e as { timeline: unknown[] }).timeline?.length ?? 0), 0);
     const lowQuality = entities.filter((e) => (e as { quality?: string }).quality === "low").length;
-    const stubCount = entities.filter(e => (e as { _stub?: boolean })._stub).length;
     const expiredCount = entities.filter(e => (e as { expiry_warning?: string }).expiry_warning?.startsWith("⚠️")).length;
 
     // Cross-references — single batch query across all top-N entities
@@ -252,7 +242,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
             insights: relatedInsights.length > 0 ? relatedInsights : undefined,
             cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
             proactive_hints: proactiveHints.length > 0 ? proactiveHints.map(trimHint) : undefined,
-            summary: `找到 ${entities.length} 个实体（${stubCount} 个摘要，${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` +
+            summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` +
               (expiredCount > 0 ? `，${expiredCount} 个已过期` : "") +
               (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +
               (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 个关联更新` : ""),
