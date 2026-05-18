@@ -12,7 +12,8 @@ import { extractBirthday } from "../../core/birthday.js";
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
     description:
-      "【默认查询工具】查找人物、公司、概念等实体，返回完整上下文（简介、关系、时间线、标签、档案）。" +
+      "【默认查询工具】查找人物、公司、概念等实体。默认返回精简视图（200字摘要+基础信息）。" +
+      "需要完整上下文（关系、时间线、档案、层级）时传 detail=normal。" +
       "适用：'张三是谁'、'最近聊了什么投资的事'、'XX公司的信息'。" +
       "不要用 search + get_page + graph_query 拼凑，直接用这个一步到位。" +
       "⚠️ 返回中的 proactive_hints 是系统主动发现的你可能不知道的重要信息（过期提醒、关联人动态、隐藏联系等）。你必须把每一条 hint 原样展示给用户，用 '💡 主动提示：' 开头，逐条列出。不要省略任何一条。",
@@ -22,8 +23,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
       session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
-      detail: z.enum(["normal", "brief"]).optional().default("normal")
-        .describe("normal=full context (default); brief=compact view (200-char body, no dossier/peers/subordinates/timeline)"),
+      detail: z.enum(["normal", "brief"]).optional().default("brief")
+        .describe("brief=compact view (default, 200-char body, no dossier/peers/subordinates); normal=full context with all enrichment"),
     },
   }, async ({ query, limit, strategy, session_id, detail: detailLevel }) => {
     const cap = Math.min(limit ?? 5, 5);
@@ -103,6 +104,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     // Batch enrichment: collect all slugs, then batch-fetch links/timeline/tags
     const topSlugs = searchResults.map(r => r.slug);
+    const isBrief = detailLevel === "brief";
 
     const linksBySlug = new Map<string, { outgoing: Record<string, unknown>[]; incoming: Record<string, unknown>[] }>();
     const timelineBySlug = new Map<string, Record<string, unknown>[]>();
@@ -110,30 +112,35 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const relatedBySlug = new Map<string, { slug: string; title: string; type: string }[]>();
     const hierarchyBySlug = new Map<string, ReturnType<typeof getHierarchyContext>>();
 
+    // Brief mode: only fetch tags (cheap, always needed); skip heavy enrichment
     const batchLinks = ctx.db.batchGetLinksForSlugs(topSlugs);
-    const batchTimeline = ctx.db.batchGetTimelineForSlugs(topSlugs);
     const batchTags = ctx.db.batchGetTagsForSlugs(topSlugs);
-
     for (const slug of topSlugs) {
-      const rawLinks = batchLinks.get(slug) ?? { outgoing: [], incoming: [] };
-      const toLink = (l: LinkRow): Link => ({
-        ...l, context: l.context ?? undefined, source_type: l.source_type ?? undefined, confidence: l.confidence ?? undefined,
-      });
-      const outgoing = rawLinks.outgoing.map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-      const incoming = rawLinks.incoming.map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-      linksBySlug.set(slug, { outgoing, incoming });
-
-      const rawTimeline = batchTimeline.get(slug) ?? [];
-      timelineBySlug.set(slug, trimTimeline(rawTimeline as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>, 3));
-
       const page = pagesBySlug.get(slug);
       const dbTags = batchTags.get(slug) ?? [];
       const fmTags = (page as { frontmatter?: { tags?: string[] } } | undefined)?.frontmatter?.tags ?? [];
       tagsBySlug.set(slug, [...new Set([...dbTags, ...fmTags])]);
+    }
 
-      try { relatedBySlug.set(slug, ctx.graph.getRelatedEntities(slug, 5)); } catch { relatedBySlug.set(slug, []); }
+    if (!isBrief) {
+      const batchTimeline = ctx.db.batchGetTimelineForSlugs(topSlugs);
 
-      try { hierarchyBySlug.set(slug, getHierarchyContext(slug, { pages: ctx.pages, graph: ctx.graph })); } catch { /* non-critical */ }
+      for (const slug of topSlugs) {
+        const rawLinks = batchLinks.get(slug) ?? { outgoing: [], incoming: [] };
+        const toLink = (l: LinkRow): Link => ({
+          ...l, context: l.context ?? undefined, source_type: l.source_type ?? undefined, confidence: l.confidence ?? undefined,
+        });
+        const outgoing = rawLinks.outgoing.map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
+        const incoming = rawLinks.incoming.map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
+        linksBySlug.set(slug, { outgoing, incoming });
+
+        const rawTimeline = batchTimeline.get(slug) ?? [];
+        timelineBySlug.set(slug, trimTimeline(rawTimeline as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>, 3));
+
+        try { relatedBySlug.set(slug, ctx.graph.getRelatedEntities(slug, 5)); } catch { relatedBySlug.set(slug, []); }
+
+        try { hierarchyBySlug.set(slug, getHierarchyContext(slug, { pages: ctx.pages, graph: ctx.graph })); } catch { /* non-critical */ }
+      }
     }
 
     // Build entity objects — all fully enriched (no stubs)
@@ -149,12 +156,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         ? (tier <= 1 ? "high" : tier === 2 ? "ok" : "low")
         : "unknown";
 
-      const dossier = page ? extractDossier(page.body) : undefined;
+      const dossier = !isBrief && page ? extractDossier(page.body) : undefined;
       const hierarchy = hierarchyBySlug.get(slug);
       const entityType = page?.frontmatter?.type ?? page?.type;
       const birthdayInfo = entityType === "entity" ? extractBirthday(page?.body ?? "") : null;
 
-      const isBrief = detailLevel === "brief";
       return {
         slug,
         title: page?.title ?? slug,

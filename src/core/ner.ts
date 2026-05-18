@@ -57,6 +57,18 @@ const GENERIC_TERMS = new Set([
   "资源", "效率", "品牌", "专业",
 ]);
 
+const STRUCTURAL_TERMS = new Set([
+  // Document headings / structural labels
+  "组织架构", "人员汇总", "时间线", "概述", "总结", "目录", "备注",
+  "摘要", "简介", "附录", "参考资料", "相关链接", "标签", "分类",
+  "基本信息", "详细内容", "背景", "目的", "范围", "方法", "结论",
+  "数据", "统计", "分析", "对比", "趋势", "报告", "详情",
+  // Section headers commonly mis-extracted as entities
+  "工作经历", "教育经历", "项目经验", "技能专长", "自我评价",
+  "联系方式", "个人简介", "人物简介", "公司简介", "产品介绍",
+  "核心业务", "主营业务", "发展历程", "企业愿景", "使命愿景",
+]);
+
 type EntityClass = "entity" | "concept" | null;
 
 function classifyEntity(name: string, llmType: string): EntityClass {
@@ -68,6 +80,7 @@ function classifyEntity(name: string, llmType: string): EntityClass {
   if (/^[A-Z]{2}$/.test(name) && llmType !== "concept") return null;
   if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问|人员|管理员|作家/.test(name)) return null;
   if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return null;
+  if (STRUCTURAL_TERMS.has(name)) return null;
 
   // ── Layer 2: SAFETY NET — clear organizational keywords override LLM ──
   if (/公司|集团|制药|药企|银行|保险|基金$|医院|大学$|学院$|研究所/.test(name)) return "entity";
@@ -143,6 +156,7 @@ Decision: Does this short term refer to a specific real-world entity? If yes, ex
 - Abstract qualities and activities (深度思考, 注意力管理, 时间管理)
 - Generic business terms (消费者, 市场策略, 切换成本)
 - Bare place names without significance
+- Document structure words and section headings (组织架构, 人员汇总, 时间线, 工作经历, 发展历程, etc.)
 
 ## Relevance
 - "high" = main subject of the text

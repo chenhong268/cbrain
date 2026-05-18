@@ -124,6 +124,35 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     };
   });
 
+  // ─── append_page ─────────────────────────────────────────────
+  server.registerTool("append_page", {
+    description: "Append content to an existing page's body. Does NOT overwrite existing content. Triggers re-index and NER/wikilink extraction.",
+    inputSchema: {
+      slug: z.string().describe("Page slug to append to"),
+      content: z.string().describe("Content to append"),
+      separator: z.string().optional().default("\n\n").describe("Separator between existing body and new content (default: double newline)"),
+    },
+  }, async ({ slug, content, separator }) => {
+    const page = ctx.pages.getBySlug(slug);
+    if (!page) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }] };
+    }
+    ctx.versions.createVersion(slug);
+    const newBody = page.body + (separator ?? "\n\n") + content;
+    const updated = ctx.pages.update(slug, { body: newBody });
+    if (updated) {
+      await indexPage(ctx.pipeline, slug, newBody);
+      const pageType = updated.type;
+      if (pageType !== "entity" && pageType !== "concept" && pageType !== "insight") {
+        ctx.pipeline.processNer(slug, newBody, pageType, false).catch(() => {});
+      }
+      ctx.pipeline.processWikilinks(slug, newBody, true);
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify({ action: "appended", slug, new_length: newBody.length }) }],
+    };
+  });
+
   // ─── delete_page ─────────────────────────────────────────────
   server.registerTool("delete_page", {
     description: "Delete a page by slug. Removes both the vault file and database entry.",
