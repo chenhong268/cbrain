@@ -607,14 +607,22 @@ export class CBrainDB {
       `).all({ $query: query, $pattern: pattern, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
     }
     const ftsQuery = this.buildTrigramQuery(query);
-    return this.prepare(
-      "SELECT page_slug, content, rank FROM chunks_fts WHERE chunks_fts MATCH $query ORDER BY rank LIMIT $limit"
-    ).all({ $query: ftsQuery, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
+    try {
+      return this.prepare(
+        "SELECT page_slug, content, rank FROM chunks_fts WHERE chunks_fts MATCH $query ORDER BY rank LIMIT $limit"
+      ).all({ $query: ftsQuery, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
+    } catch (e) {
+      console.warn("[ftsSearch] MATCH query failed, returning empty:", { query: ftsQuery, error: String(e) });
+      return [];
+    }
   }
 
   private buildTrigramQuery(query: string): string {
-    // For short queries (3-6 chars), use as-is — likely a precise substring search
-    if (query.length <= 6) return query;
+    // For short queries (3-6 chars), wrap in double quotes to avoid FTS5 syntax errors
+    // from reserved words (AND, OR, NOT) or special chars (-, ")
+    if (query.length <= 6) {
+      return `"${query.replace(/"/g, '""')}"`;
+    }
     // For longer queries, extract overlapping trigrams and OR them
     // e.g. "张三负责什么项目" → "张三负 OR 三负责 OR 负责什 OR 责什么 OR 什么项 OR 么项目"
     const trigrams: string[] = [];

@@ -18,11 +18,7 @@ Search returns fragments. Review returns understanding. When you need to know ev
 
 ### ⚡ 优先用 deep_recall（一步搞定）
 
-```
-cbrain deep_recall "<topic>"
-```
-
-`deep_recall` 一次调用返回 body + links + timeline + tags + related + insights，等价于下面 4 步连调：
+`deep_recall` 是 MCP tool（不是 CLI 命令），Agent 通过 `deep_recall` tool 调用。一次返回 body + links + timeline + tags + related + insights，等价于下面 4 步连调：
 - query（搜索）+ get_page（取全文）+ graph-query（关系）+ timeline（时间线）
 
 **只在 deep_recall 不可用时才退回以下步骤。**
@@ -30,7 +26,7 @@ cbrain deep_recall "<topic>"
 ### Fallback: 手动 4 步
 
 1. `cbrain query "<topic>" --strategy all --limit 10` — 搜索 + 别名变体
-2. `cbrain show <slug>` — 取 top 3-5 结果全文
+2. `cbrain show <slug>` — 取 top 3-5 结果全文（MCP tool: `get_page`）
 3. `cbrain graph-query <slug> --mode traverse --depth 1` — 关系网络
 4. `cbrain timeline <slug>` — 时间线
 

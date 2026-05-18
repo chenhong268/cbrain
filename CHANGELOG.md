@@ -1,6 +1,18 @@
 # Changelog
 
-> Current: `v1.7.4` — 搜索人名时 record 类型结果自动降权，人物实体优先展示。
+> Current: `v1.7.5` — Codex 审计修复：版本号统一、文档准确性、HTTP/MCP 工具注册对齐。
+
+## [v1.7.5] — 2026-05-18
+
+### 修复
+- 版本号统一：CLI/MCP/HTTP 三处改为共用 `src/version.ts`（单一事实来源），不再各自硬编码
+- HTTP/MCP 工具注册对齐：提取 `src/mcp/register.ts` 共享注册函数，HTTP 模式从 14 个工具补齐到 21 个
+- 文档准确性：标记 `cbrain check-resolvable` 为未实现，`deep_recall` 说明为 MCP 工具而非 CLI 命令
+- CLI 版本号测试改为动态读取 package.json，不再硬编码
+
+### 架构
+- 新增 `src/version.ts` — 版本号单一来源
+- 新增 `src/mcp/register.ts` — `registerAllTools()` 共享注册
 
 ## [v1.7.4] — 2026-05-17
 

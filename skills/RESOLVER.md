@@ -80,7 +80,7 @@
 
 ## Validation
 
-Run `cbrain check-resolvable` to verify:
+Manual checklist:
 - **Coverage**: all intent categories mapped to at least one skill
 - **No overlaps**: no two skills claim the same intent (unless chained)
 - **No orphans**: every skill in the inventory is reachable via a route

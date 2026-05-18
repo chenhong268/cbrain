@@ -134,7 +134,10 @@ export class HybridSearch {
           console.error("[search] vectorSearch 失败:", e);
           return [] as SearchResult[];
         }),
-        Promise.resolve(this.ftsSearch(q, limit)),
+        Promise.resolve(this.ftsSearch(q, limit)).catch((e) => {
+          console.error("[search] ftsSearch 失败:", e);
+          return [] as SearchResult[];
+        }),
         this.graphSearch(q, limit).catch((e) => {
           console.error("[search] graphSearch 失败:", e);
           return [] as SearchResult[];
@@ -161,7 +164,8 @@ export class HybridSearch {
       return [{ slug: exact.slug, score: 1.0, snippet: exact.title, source: "exact" }];
     }
 
-    const fts = this.ftsSearch(query, limit);
+    let fts: SearchResult[] = [];
+    try { fts = this.ftsSearch(query, limit); } catch { /* fts failure is non-fatal */ }
     const temporal = this.temporalSearch(query, limit);
 
     const allLists: SearchResult[][] = [];

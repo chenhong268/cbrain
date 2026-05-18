@@ -66,6 +66,11 @@ export function getExpiryWarning(expiresAt?: string | null): string | undefined 
   return undefined;
 }
 
+export function trimPageBody(body: string, maxChars: number = 1500): { body: string; has_more: boolean } {
+  if (body.length <= maxChars) return { body, has_more: false };
+  return { body: body.slice(0, maxChars) + "...", has_more: true };
+}
+
 export function stubEntity(
   sr: SearchResult,
   page?: Page | null,
@@ -83,9 +88,10 @@ export function stubEntity(
 
 const VALID_RULES = new Set(["network_timeline", "shared_connection", "expiry_alert"]);
 
-export function trimHint(hint: ProactiveHint): { rule: string; text: string } {
+export function trimHint(hint: ProactiveHint): { rule: string; text: string; score: number } {
   return {
     rule: VALID_RULES.has(hint.rule) ? hint.rule : "unknown",
     text: truncate(hint.text, 120),
+    score: Math.round(hint.score * 100) / 100,
   };
 }

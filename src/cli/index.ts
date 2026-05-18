@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
+import { version } from "../version.js";
 
 const program = new Command()
   .name("cbrain")
   .description("Your Agent's Memory, Compounding. Agent 的记忆，复利生长。")
-  .version("0.3.1");
+  .version(version);
 
 // Register all command modules
 import { register as brainCmds } from "./commands/brain.js";

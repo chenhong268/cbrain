@@ -6,6 +6,7 @@ import type { ToolContext } from "../mcp/context.js";
 export interface ProactiveHint {
   rule: "network_timeline" | "shared_connection" | "expiry_alert";
   text: string;
+  score: number;
 }
 
 const JUNK_PREFIXES = ["records/", "templates/", "attachments/"];
@@ -33,6 +34,7 @@ export async function generateProactiveHints(
 
     const alreadyInResults = new Set(resultSlugs);
     const candidates: ProactiveHint[] = [];
+    const MIN_SCORE = 0.5;
 
     // Ensure we have links data
     const linksMap = options.linksBySlug ?? ctx.db.batchGetLinksForSlugs(resultSlugs);
@@ -49,7 +51,10 @@ export async function generateProactiveHints(
     const sharedHint = buildSharedConnectionHint(ctx.db, linksMap, alreadyInResults, resultSlugs);
     if (sharedHint) candidates.push(sharedHint);
 
-    return candidates.slice(0, maxHints);
+    return candidates
+      .filter(h => h.score >= MIN_SCORE)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, maxHints);
   } catch {
     // Never block the main response
     return [];
@@ -71,7 +76,12 @@ function buildTimelineHint(
   const evt = filtered[0];
   const date = evt.event_date ? `（${evt.event_date.slice(0, 10)}）` : "";
   const text = `🔗 ${evt.title} 近期动态：${evt.summary}${date}`;
-  return { rule: "network_timeline", text: truncateText(text, 120) };
+  // Score: recency-based, 1.0 for today, 0 for 180+ days old
+  const daysSince = evt.event_date
+    ? (Date.now() - new Date(evt.event_date).getTime()) / (1000 * 60 * 60 * 24)
+    : 90; // no date = low score
+  const score = Math.max(0, 1.0 - daysSince / 180);
+  return { rule: "network_timeline", text: truncateText(text, 120), score };
 }
 
 // ─── Rule 2: Shared Connections ────────────────────────────
@@ -120,7 +130,10 @@ function buildSharedConnectionHint(
   const sharedTitle = titles.get(sharedSlug)?.title ?? slugToDisplayName(sharedSlug);
   const ownerTitles = owners.slice(0, 2).map(s => titles.get(s)?.title ?? slugToDisplayName(s));
   const text = `🕸️ ${ownerTitles.join(" 和 ")} 都关联了 ${sharedTitle}`;
-  return { rule: "shared_connection", text: truncateText(text, 120) };
+  // Score: 1.0 for 1 unique owner (concentrated), 0 for 10+ unique owners (diffuse)
+  const uniqueOwners = neighborOwners.get(sharedSlug)?.length ?? 1;
+  const score = Math.max(0, 1.0 - uniqueOwners / 10);
+  return { rule: "shared_connection", text: truncateText(text, 120), score };
 }
 
 // ─── Rule 3: Expiry Alert ──────────────────────────────────
@@ -147,7 +160,7 @@ function buildExpiryHint(
   const isExpired = new Date(exp.expires_at) <= new Date();
   const status = isExpired ? "已过期" : "即将过期";
   const text = `⏰ ${exp.title} ${status}（${exp.expires_at.slice(0, 10)}），信息可能不是最新的`;
-  return { rule: "expiry_alert", text: truncateText(text, 120) };
+  return { rule: "expiry_alert", text: truncateText(text, 120), score: 1.0 };
 }
 
 // ─── Helpers ────────────────────────────────────────────────

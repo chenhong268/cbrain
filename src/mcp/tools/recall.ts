@@ -22,8 +22,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
       session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
+      detail: z.enum(["normal", "brief"]).optional().default("normal")
+        .describe("normal=full context (default); brief=compact view (200-char body, no dossier/peers/subordinates/timeline)"),
     },
-  }, async ({ query, limit, strategy, session_id }) => {
+  }, async ({ query, limit, strategy, session_id, detail: detailLevel }) => {
     const cap = Math.min(limit ?? 5, 5);
 
     const searchStart = Date.now();
@@ -35,7 +37,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const resolved = ctx.db.resolveSlugs([query])[0];
       const exactSlug = resolved?.slug ?? null;
 
-      const ftsRaw = ctx.db.ftsSearch(query, cap);
+      let ftsRaw: Awaited<ReturnType<typeof ctx.db.ftsSearch>> = [];
+      try { ftsRaw = ctx.db.ftsSearch(query, cap); } catch { /* fts failure is non-fatal */ }
       if (ftsRaw.length > 0) {
         searchResults = ftsRaw.map(r => ({ slug: r.page_slug, score: 1 / (1 + r.rank), snippet: r.content.slice(0, 200), source: "fts" as const }));
         usedStrategy = "smart-fts";
@@ -151,6 +154,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const entityType = page?.frontmatter?.type ?? page?.type;
       const birthdayInfo = entityType === "entity" ? extractBirthday(page?.body ?? "") : null;
 
+      const isBrief = detailLevel === "brief";
       return {
         slug,
         title: page?.title ?? slug,
@@ -159,23 +163,27 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         quality,
         tier,
         snippet: sr.snippet,
-        body: truncate(page?.body, 500),
+        body: truncate(page?.body, isBrief ? 200 : 500),
         frontmatter: safeFrontmatter(page?.frontmatter ?? null),
-        dossier: dossier ?? undefined,
-        dossier_updated: (page?.frontmatter as Record<string, unknown> | undefined)?.dossier_updated as string | undefined,
-        links,
-        timeline,
+        ...(isBrief ? {} : {
+          dossier: dossier ?? undefined,
+          dossier_updated: (page?.frontmatter as Record<string, unknown> | undefined)?.dossier_updated as string | undefined,
+          links,
+          timeline,
+          related,
+          reports_to: hierarchy?.reports_to ?? undefined,
+          reports_to_title: hierarchy?.reports_to_title ?? undefined,
+          subordinates: hierarchy?.subordinates.length ? hierarchy.subordinates : undefined,
+          peers: hierarchy?.peers.length ? hierarchy.peers : undefined,
+        }),
         tags,
-        related,
-        reports_to: hierarchy?.reports_to ?? undefined,
-        reports_to_title: hierarchy?.reports_to_title ?? undefined,
-        subordinates: hierarchy?.subordinates.length ? hierarchy.subordinates : undefined,
-        peers: hierarchy?.peers.length ? hierarchy.peers : undefined,
         expiry_warning: getExpiryWarning(page?.expires_at),
         birthday: birthdayInfo?.birthday ?? undefined,
-        age: birthdayInfo?.age ?? undefined,
-        zodiac: birthdayInfo?.zodiac ?? undefined,
-        shengxiao: birthdayInfo?.shengxiao ?? undefined,
+        ...(isBrief ? {} : {
+          age: birthdayInfo?.age ?? undefined,
+          zodiac: birthdayInfo?.zodiac ?? undefined,
+          shengxiao: birthdayInfo?.shengxiao ?? undefined,
+        }),
       };
     });
 

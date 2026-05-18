@@ -6,6 +6,7 @@ import { CBrainDB } from "../../src/storage/sqlite.js";
 
 const PROJECT_DIR = join(import.meta.dir, "..", "..");
 const BIN = `bun run ${join(PROJECT_DIR, "src/cli/index.ts")}`;
+const PKG = JSON.parse(readFileSync(join(PROJECT_DIR, "package.json"), "utf-8"));
 
 describe("CLI", () => {
   const testDir = "/tmp/cbrain-test-cli";
@@ -57,7 +58,7 @@ describe("CLI", () => {
   describe("help", () => {
     test("shows version", () => {
       const output = execSync(`${BIN} --version`, { encoding: "utf-8" });
-      expect(output.trim()).toBe("0.3.1");
+      expect(output.trim()).toBe(PKG.version);
     });
 
     test("shows help text", () => {

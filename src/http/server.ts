@@ -1,18 +1,5 @@
 import type { ToolContext } from "../mcp/context.js";
-import { registerSearchTools } from "../mcp/tools/search.js";
-import { registerIngestTools } from "../mcp/tools/ingest.js";
-import { registerPageTools } from "../mcp/tools/pages.js";
-import { registerGraphTools } from "../mcp/tools/graph.js";
-import { registerTagTools } from "../mcp/tools/tags.js";
-import { registerTimelineTools } from "../mcp/tools/timeline.js";
-import { registerVersionTools } from "../mcp/tools/versions.js";
-import { registerJobTools } from "../mcp/tools/jobs.js";
-import { registerSyncTools } from "../mcp/tools/sync.js";
-import { registerOpsTools } from "../mcp/tools/ops.js";
-import { registerRecallTools } from "../mcp/tools/recall.js";
-import { registerBrainstormTools } from "../mcp/tools/brainstorm.js";
-import { registerSummarizeTools } from "../mcp/tools/summarize.js";
-import { registerDiscoveryTools } from "../mcp/tools/discoveries.js";
+import { registerAllTools } from "../mcp/register.js";
 
 interface ToolDef {
   name: string;
@@ -34,20 +21,7 @@ function createToolRegistry(ctx: ToolContext): Map<string, ToolDef> {
     },
   };
 
-  registerSearchTools(collector as never, ctx);
-  registerIngestTools(collector as never, ctx);
-  registerPageTools(collector as never, ctx);
-  registerGraphTools(collector as never, ctx);
-  registerTagTools(collector as never, ctx);
-  registerTimelineTools(collector as never, ctx);
-  registerVersionTools(collector as never, ctx);
-  registerJobTools(collector as never, ctx);
-  registerSyncTools(collector as never, ctx);
-  registerOpsTools(collector as never, ctx);
-  registerRecallTools(collector as never, ctx);
-  registerBrainstormTools(collector as never, ctx);
-  registerSummarizeTools(collector as never, ctx);
-  registerDiscoveryTools(collector as never, ctx);
+  registerAllTools(collector as never, ctx);
 
   return tools;
 }

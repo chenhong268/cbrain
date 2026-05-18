@@ -28,7 +28,8 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       const resolved = ctx.db.resolveSlugs([query])[0];
       const exactSlug = resolved?.slug ?? null;
 
-      const ftsRaw = ctx.db.ftsSearch(query, limit);
+      let ftsRaw: Awaited<ReturnType<typeof ctx.db.ftsSearch>> = [];
+      try { ftsRaw = ctx.db.ftsSearch(query, limit); } catch { /* fts failure is non-fatal */ }
       if (ftsRaw.length > 0) {
         results = ftsRaw.map(r => ({ slug: r.page_slug, score: 1 / (1 + r.rank), snippet: r.content.slice(0, 200), source: "fts" as const }));
         usedStrategy = "smart-fts";

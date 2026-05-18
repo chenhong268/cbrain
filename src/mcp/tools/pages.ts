@@ -5,6 +5,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { canMerge, getLayer } from "../../core/shared.js";
 import { indexPage } from "../context.js";
+import { trimPageBody } from "./trim.js";
 
 export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   // ─── get_page ────────────────────────────────────────────
@@ -12,8 +13,9 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     description: "Get a page by slug. Returns frontmatter + body.",
     inputSchema: {
       slug: z.string().describe("Page slug (e.g. brain/entities/zhangsan)"),
+      include_full_body: z.boolean().optional().default(false).describe("Return full body instead of truncated (default: truncated to 1500 chars)"),
     },
-  }, async ({ slug }) => {
+  }, async ({ slug, include_full_body }) => {
     const row = ctx.db.getPage(slug);
     if (!row) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }] };
@@ -32,8 +34,16 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       }
     }
 
+    const bodyLength = body?.length ?? 0;
+    if (include_full_body || bodyLength === 0) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ ...row, body, body_length: bodyLength, has_more: false }, null, 2) }],
+      };
+    }
+
+    const { body: trimmedBody, has_more } = trimPageBody(body ?? "");
     return {
-      content: [{ type: "text", text: JSON.stringify({ ...row, body }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ ...row, body: trimmedBody, body_length: bodyLength, has_more }, null, 2) }],
     };
   });
 
