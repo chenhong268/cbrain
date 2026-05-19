@@ -1,6 +1,20 @@
 # Changelog
 
-> Current: `v1.7.6` — 下属/上级自动双向 link + 历史数据补齐。
+> Current: `v1.7.7` — LLM 超时保护 + NER 并行优化 + 对话式自动写入。
+
+## [v1.7.7] — 2026-05-19
+
+### 新功能
+- 对话式自动写入（#9）：`ingest_dialogue` 加 `mode: "auto"` — Hermes 每 3-5 轮对话自动捕获高置信事实写入知识图谱，中置信进候选，低置信直接跳过，返回 `decision` 字段
+- LLM 超时保护（#8）：`ZhipuLLMProvider` 加 AbortController 超时机制，默认 30s，可配置
+- NER 短文快速路径（#8）：短文本（<2500 字）跳过 `Promise.all` 并行拆分开销，直接单次 LLM 调用
+
+### 改进
+- `DialogueIngest` 新增 `DialogueMode` 类型（auto/manual）、`AUTO_DIALOGUE_PROMPT`（更严格的提取标准 + `should_ingest` 预判）
+- `signal-detector` skill 更新：Agent 知道何时用 auto mode 自动捕获对话事实
+- `writeLog` 记录 mode 字段到 ingest_log，便于审计
+
+## [v1.7.6] — 2026-05-19
 
 ## [v1.7.6] — 2026-05-19
 
