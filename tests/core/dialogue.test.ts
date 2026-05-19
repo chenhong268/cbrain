@@ -298,10 +298,136 @@ describe("DialogueIngest", () => {
 
       await dialogue.ingest("用户：新人物出现了");
 
-      const logs = db.prepare("SELECT * FROM ingest_log WHERE action = 'dialogue'").all() as any[];
+      const logs = db.prepare("SELECT * FROM ingest_log WHERE action = 'manual'").all() as any[];
       expect(logs.length).toBe(1);
       const details = JSON.parse(logs[0].details);
       expect(details.newEntities).toBe(1);
+      expect(details.mode).toBe("manual");
+    });
+  });
+
+  describe("auto mode", () => {
+    test("skips chit-chat with should_ingest: false", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({ should_ingest: false, entities: [], relations: [], events: [] }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const dialogue = new DialogueIngest(db, embedding, lance as any, vaultPath, llm);
+
+      const result = await dialogue.ingest("好的，谢谢\n不客气", "auto");
+
+      expect(result.decision).toBe("skipped");
+      expect(result.reason).toBe("no actionable facts");
+      expect(result.newEntities).toBe(0);
+
+      const logs = db.prepare("SELECT * FROM ingest_log WHERE action = 'auto'").all() as any[];
+      expect(logs.length).toBe(1);
+    });
+
+    test("records concrete facts with decision: recorded", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          should_ingest: true,
+          entities: [
+            { name: "周七", type: "person", relevance: "high", context: "周七加入了腾讯担任CTO" },
+            { name: "腾讯", type: "company", relevance: "high", context: "周七加入了腾讯担任CTO" },
+          ],
+          relations: [
+            { from: "周七", to: "腾讯", relation: "works_at", context: "周七加入了腾讯担任CTO" },
+          ],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const dialogue = new DialogueIngest(db, embedding, lance as any, vaultPath, llm);
+
+      const result = await dialogue.ingest("周七加入了腾讯担任CTO", "auto");
+
+      expect(result.decision).toBe("recorded");
+      expect(result.newEntities).toBe(2);
+      expect(result.newRelations).toBe(1);
+    });
+
+    test("medium relevance entities go to candidate log only, no stub file", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          should_ingest: true,
+          entities: [
+            { name: "孙八", type: "person", relevance: "medium", context: "孙八可能在创业" },
+          ],
+          relations: [],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const dialogue = new DialogueIngest(db, embedding, lance as any, vaultPath, llm);
+
+      const result = await dialogue.ingest("听说孙八可能在创业", "auto");
+
+      expect(result.decision).toBe("skipped");
+      expect(result.newEntities).toBe(0);
+      expect(result.skipped).toBe(1);
+
+      // Candidate log should exist
+      const candidateLogs = db.prepare("SELECT * FROM ingest_log WHERE action = 'candidate'").all() as any[];
+      expect(candidateLogs.length).toBe(1);
+      const details = JSON.parse(candidateLogs[0].details);
+      expect(details.name).toBe("孙八");
+
+      // No stub file created
+      const page = db.prepare("SELECT * FROM pages WHERE title = '孙八'").get() as any;
+      expect(page).toBeNull();
+    });
+
+    test("manual mode still works unchanged", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "吴九", type: "person", relevance: "medium", context: "吴九是工程师" },
+          ],
+          relations: [],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const dialogue = new DialogueIngest(db, embedding, lance as any, vaultPath, llm);
+
+      const result = await dialogue.ingest("吴九是工程师", "manual");
+
+      // Manual mode: medium relevance still creates stub
+      expect(result.newEntities).toBe(1);
+      expect(result.decision).toBe("recorded");
+    });
+
+    test("empty input returns decision: skipped", async () => {
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const dialogue = new DialogueIngest(db, embedding, lance as any, vaultPath);
+
+      const result = await dialogue.ingest("", "auto");
+
+      expect(result.decision).toBe("skipped");
+      expect(result.reason).toBe("empty input");
+    });
+
+    test("malformed JSON returns decision: skipped", async () => {
+      const llm = createMockLLM(["not valid json"]);
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const dialogue = new DialogueIngest(db, embedding, lance as any, vaultPath, llm);
+
+      const result = await dialogue.ingest("一些文本", "auto");
+
+      expect(result.decision).toBe("skipped");
+      expect(result.reason).toBe("parse failed");
     });
   });
 });

@@ -33,7 +33,15 @@ For each signal, classify:
 
 ### Step 3: Route
 
-- New signals → `cbrain ingest` (text or markdown)
+- **每 3-5 轮对话**，自动调用 `ingest_dialogue` 并传 `mode: "auto"`：
+  ```
+  ingest_dialogue({ text: "最近几轮对话内容", mode: "auto" })
+  ```
+  检查返回的 `decision` 字段：
+  - `"recorded"` → 可以简短告知用户"已记录"（可选，别每次都说）
+  - `"skipped"` → 静默忽略
+- **用户明确要求记录** → 用 `mode: "manual"`（行为更宽松）
+- New entities → `cbrain ingest` (text or markdown)
 - Relationship updates → `cbrain graph_query` to verify, then add via ingest with `[[wiki-links]]`
 - Duplicate signals → Skip (check existing pages first via `cbrain query`)
 
@@ -43,6 +51,8 @@ For each signal, classify:
 1. query("张三") — check if already known
 2. ingest({ content, type: "text", title: "张三", pageType: "entity" }) — create if new
 3. ingest({ content: "张三[[腾讯]]工作...", type: "markdown" }) — add relationships
+4. ingest_dialogue({ text: "对话内容", mode: "auto" }) — background auto-capture every 3-5 turns
+5. ingest_dialogue({ text: "对话内容", mode: "manual" }) — user-triggered explicit capture
 ```
 
 ## Guidelines

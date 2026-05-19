@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { DialogueIngest } from "../../core/dialogue.js";
+import { DialogueIngest, DialogueMode } from "../../core/dialogue.js";
 
 export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
   // ─── ingest ──────────────────────────────────────────────
@@ -26,13 +26,14 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── ingest_dialogue ───────────────────────────────────────
   server.registerTool("ingest_dialogue", {
-    description: "Ingest a dialogue/conversation into the brain. Extracts new entities, relations, and events via LLM, skipping already-known knowledge. Use for capturing key facts from conversations.",
+    description: "Ingest a dialogue/conversation into the brain. Use mode='auto' for automatic background capture (stricter filtering, only high-confidence facts). Use mode='manual' for explicit user-triggered ingestion.",
     inputSchema: {
       text: z.string().describe("Dialogue text to ingest (conversation content)"),
+      mode: z.enum(["auto", "manual"]).optional().default("manual").describe("Ingest mode: auto (background, strict) or manual (user-triggered, normal)"),
     },
-  }, async ({ text }) => {
+  }, async ({ text, mode }) => {
     const dialogue = new DialogueIngest(ctx.db, ctx.embedding, ctx.lance, ctx.vaultPath, ctx.llm);
-    const result = await dialogue.ingest(text);
+    const result = await dialogue.ingest(text, (mode ?? "manual") as DialogueMode);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
