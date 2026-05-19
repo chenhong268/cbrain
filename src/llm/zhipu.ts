@@ -11,16 +11,22 @@ interface ZhipuChatResponse {
   usage?: { total_tokens: number };
 }
 
+export interface ZhipuLLMOptions {
+  timeoutMs?: number;
+}
+
 export class ZhipuLLMProvider implements LLMProvider {
   readonly name = "zhipu";
   private apiKey: string;
   private baseUrl: string;
   private model: string;
+  private timeoutMs: number;
 
-  constructor(apiKey: string, baseUrl?: string, model?: string) {
+  constructor(apiKey: string, baseUrl?: string, model?: string, opts?: ZhipuLLMOptions) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl ?? DEFAULT_BASE_URL;
     this.model = model ?? DEFAULT_MODEL;
+    this.timeoutMs = opts?.timeoutMs ?? 30_000;
   }
 
   async chat(messages: ChatMessage[]): Promise<string> {
@@ -32,21 +38,33 @@ export class ZhipuLLMProvider implements LLMProvider {
       response_format: { type: "json_object" },
     });
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body,
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Zhipu LLM API error: ${response.status} ${text}`);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Zhipu LLM API error: ${response.status} ${text}`);
+      }
+
+      const json = (await response.json()) as ZhipuChatResponse;
+      return json.choices[0]?.message?.content ?? "";
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        throw new Error(`Zhipu LLM request timed out after ${this.timeoutMs}ms`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-
-    const json = (await response.json()) as ZhipuChatResponse;
-    return json.choices[0]?.message?.content ?? "";
   }
 }

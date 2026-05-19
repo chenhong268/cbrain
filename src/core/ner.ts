@@ -300,29 +300,42 @@ export class NerEngine {
 
     const chunks = chunkBySentences(text, CHUNK_SIZE);
 
-    // Stage 1: Extract entities + events per chunk, then merge
-    const allEntityChunks: ExtractedEntity[][] = [];
-    const allEventChunks: ExtractedEvent[][] = [];
-    const CONCURRENCY = 5;
+    let allEntities: ExtractedEntity[];
+    let allEvents: ExtractedEvent[];
 
-    for (let i = 0; i < chunks.length; i += CONCURRENCY) {
-      const batch = chunks.slice(i, i + CONCURRENCY);
-      const results = await Promise.all(
-        batch.map(chunk =>
-          this.llm.chat([
-            { role: "system", content: ENTITY_GUIDELINE },
-            { role: "user", content: chunk },
-          ]).then(raw => this.parseEntityResponse(raw))
-        )
-      );
-      for (const { entities, events } of results) {
-        allEntityChunks.push(entities);
-        allEventChunks.push(events);
+    if (chunks.length === 1) {
+      // Short text fast path — single chunk, no parallelism overhead
+      const { entities, events } = await this.llm.chat([
+        { role: "system", content: ENTITY_GUIDELINE },
+        { role: "user", content: chunks[0] },
+      ]).then(raw => this.parseEntityResponse(raw));
+      allEntities = entities;
+      allEvents = events;
+    } else {
+      // Multi-chunk: batch parallel extraction
+      const allEntityChunks: ExtractedEntity[][] = [];
+      const allEventChunks: ExtractedEvent[][] = [];
+      const CONCURRENCY = 5;
+
+      for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+        const batch = chunks.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(
+          batch.map(chunk =>
+            this.llm.chat([
+              { role: "system", content: ENTITY_GUIDELINE },
+              { role: "user", content: chunk },
+            ]).then(raw => this.parseEntityResponse(raw))
+          )
+        );
+        for (const { entities, events } of results) {
+          allEntityChunks.push(entities);
+          allEventChunks.push(events);
+        }
       }
+      allEntities = mergeEntities(allEntityChunks);
+      allEvents = mergeEvents(allEventChunks);
     }
 
-    const allEntities = mergeEntities(allEntityChunks);
-    const allEvents = mergeEvents(allEventChunks);
     const filtered = filterEntities(allEntities);
     if (filtered.length === 0) {
       return { entities: [], relations: [], events: allEvents };

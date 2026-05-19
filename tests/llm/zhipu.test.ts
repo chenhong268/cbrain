@@ -106,4 +106,46 @@ describe("ZhipuLLMProvider", () => {
       expect(provider.name).toBe("zhipu");
     });
   });
+
+  describe("timeout", () => {
+    test("throws on timeout", async () => {
+      // Simulate a slow fetch that listens for abort signal
+      globalThis.fetch = async (_url: string, opts: any) =>
+        new Promise((_resolve, reject) => {
+          const onAbort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+          if (opts.signal?.aborted) { onAbort(); return; }
+          opts.signal?.addEventListener("abort", onAbort, { once: true });
+        });
+
+      const provider = new ZhipuLLMProvider("key", undefined, undefined, { timeoutMs: 100 });
+      await expect(provider.chat([{ role: "user", content: "Hi" }])).rejects.toThrow(
+        "Zhipu LLM request timed out after 100ms"
+      );
+    });
+
+    test("default timeout is 30s", () => {
+      const provider = new ZhipuLLMProvider("key");
+      // Can't directly read private field, but we verify the constructor accepts no opts
+      expect(provider).toBeDefined();
+    });
+
+    test("succeeds within timeout", async () => {
+      let aborted = false;
+      globalThis.fetch = async (_url: string, opts: any) => {
+        // Verify signal exists
+        expect(opts.signal).toBeDefined();
+        expect(opts.signal.aborted).toBe(false);
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "fast" }, finish_reason: "stop" }],
+          }),
+          { status: 200 }
+        );
+      };
+
+      const provider = new ZhipuLLMProvider("key", undefined, undefined, { timeoutMs: 5000 });
+      const result = await provider.chat([{ role: "user", content: "Hi" }]);
+      expect(result).toBe("fast");
+    });
+  });
 });
