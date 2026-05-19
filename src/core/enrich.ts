@@ -1,5 +1,14 @@
 import { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
+import { statSync } from "node:fs";
+
+const HOTNESS_WEIGHTS = {
+  mention: 0.25,
+  link: 0.20,
+  activity: 0.30,
+  tier: 0.15,
+  body: 0.10,
+} as const;
 
 export interface TierThresholds {
   tier2: number; // mentions to reach tier 2
@@ -39,6 +48,39 @@ export class EnrichManager {
     return 3;
   }
 
+  private normalize(value: number, max: number): number {
+    if (max <= 0) return 0;
+    return Math.min(value / max, 1.0);
+  }
+
+  computeHotness(slug: string, tier: number): number {
+    const page = this.db.getPage(slug);
+    const tierData = this.db.getPageTierAndMentions(slug);
+    if (!page || !tierData) return 0;
+
+    const stats = this.db.getHotnessStats();
+    const linkCount = this.db.getLinkCountForSlug(slug);
+
+    let bodyLength = 0;
+    try {
+      bodyLength = statSync(page.file_path).size;
+    } catch {
+      // file may not exist yet
+    }
+    const bodyRichness = Math.min(Math.max(bodyLength - 200, 0) / 1800, 1.0);
+
+    const tierScore = tier === 1 ? 1.0 : tier === 2 ? 0.5 : 0.1;
+
+    const hotness =
+      this.normalize(tierData.mention_count, stats.mentionP95) * HOTNESS_WEIGHTS.mention +
+      this.normalize(linkCount, stats.linkP95) * HOTNESS_WEIGHTS.link +
+      this.normalize(tierData.activity_weight, stats.activityP95) * HOTNESS_WEIGHTS.activity +
+      tierScore * HOTNESS_WEIGHTS.tier +
+      bodyRichness * HOTNESS_WEIGHTS.body;
+
+    return Math.round(hotness * 1000) / 1000;
+  }
+
   enrichEntity(slug: string): EnrichResult {
     const page = this.db.getPageTierAndMentions(slug);
 
@@ -50,20 +92,17 @@ export class EnrichManager {
 
     if (newTier < page.tier) {
       this.db.updatePageTier(slug, newTier);
-
-      return {
-        slug,
-        previousTier: page.tier,
-        newTier,
-        upgraded: true,
-      };
     }
+
+    const effectiveTier = newTier < page.tier ? newTier : page.tier;
+    const hotness = this.computeHotness(slug, effectiveTier);
+    this.db.updateHotnessScore(slug, hotness);
 
     return {
       slug,
       previousTier: page.tier,
-      newTier: page.tier,
-      upgraded: false,
+      newTier: effectiveTier,
+      upgraded: newTier < page.tier,
     };
   }
 

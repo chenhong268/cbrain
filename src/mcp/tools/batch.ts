@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
+import { normalizeRelation } from "../../core/shared.js";
 
 export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
   // ─── batch_delete_pages ────────────────────────────────────
@@ -72,7 +73,7 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
           continue;
         }
 
-        ctx.db.insertLink(from, to, relation, context ?? null, weight, strength, "manual", 0.9);
+        ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "manual", 0.9);
         ctx.pages.incrementMention(to);
         syncedSlugs.add(from);
         syncedSlugs.add(to);

@@ -1,6 +1,19 @@
 # Changelog
 
-> Current: `v1.7.5` — Codex 审计修复：版本号统一、文档准确性、HTTP/MCP 工具注册对齐。
+> Current: `v1.7.6` — 下属/上级自动双向 link + 历史数据补齐。
+
+## [v1.7.6] — 2026-05-19
+
+### 修复
+- 下属/上级关系自动双向：`insertLink` 写入下属时自动创建反向上级（反之亦然），删除时联动删除（closes #4）
+- `deleteLink`/`deleteLinkById` 同步删除反向 link，避免孤儿关系
+- NER 提取 prompt 新增上级关系类型
+- `relation_audit fix` 新增双向补齐：检测并修复缺失的反向 link
+- 历史数据修复：57 条下属 link 补齐 57 条上级反向 link
+
+### 架构
+- `REVERSE_RELATIONS` — 非对称关系双向映射表（shared.ts）
+- `insertLink` `_skipReverse` 参数防止递归
 
 ## [v1.7.5] — 2026-05-18
 

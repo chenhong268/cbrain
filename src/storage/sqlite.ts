@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { REVERSE_RELATIONS } from "../core/shared.js";
 
 // ─── Row types ──────────────────────────────────────────────
 
@@ -14,6 +15,7 @@ export interface PageRow {
   mention_count: number;
   expires_at: string | null;
   confidence_decay: number;
+  hotness_score: number;
   created_at: string;
   updated_at: string;
 }
@@ -240,6 +242,7 @@ export class CBrainDB {
     this.migrateRawToRecords();
     this.migrateQueryLog();
     this.migrateActivityWeight();
+    this.migrateHotnessScore();
     this.migrateQueryFeedback();
     this.migrateMissingIndexes();
   }
@@ -1110,16 +1113,29 @@ export class CBrainDB {
 
   // ─── Link operations ──────────────────────────────────────────
 
-  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number): void {
+  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number, _skipReverse?: boolean): void {
     this.prepare(
       "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence) VALUES ($from, $to, $rel, $ctx, $w, $s, $st, $c)"
     ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: weight ?? 1.0, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5 });
+
+    if (!_skipReverse) {
+      const reverse = REVERSE_RELATIONS[relation];
+      if (reverse) {
+        this.insertLink(to, from, reverse, context, weight, strength, sourceType, confidence, true);
+      }
+    }
   }
 
   deleteLink(from: string, to: string, relation: string): boolean {
     const r = this.prepare(
       "DELETE FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
     ).run({ $from: from, $to: to, $rel: relation });
+    const reverse = REVERSE_RELATIONS[relation];
+    if (reverse) {
+      this.prepare(
+        "DELETE FROM links WHERE from_slug = $to AND to_slug = $from AND relation = $rel"
+      ).run({ $to: to, $from: from, $rel: reverse });
+    }
     return r.changes > 0;
   }
 
@@ -1706,6 +1722,65 @@ export class CBrainDB {
     ).all({ $limit: limit }) as Array<{ slug: string; title: string; activity_weight: number }>;
   }
 
+  // ─── Hotness score ───────────────────────────────────────────
+
+  private migrateHotnessScore(): void {
+    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("hotness_score")) {
+      this.db.exec("ALTER TABLE pages ADD COLUMN hotness_score REAL NOT NULL DEFAULT 0.0");
+    }
+  }
+
+  updateHotnessScore(slug: string, score: number): void {
+    this.prepare(
+      "UPDATE pages SET hotness_score = $score WHERE slug = $slug"
+    ).run({ $score: score, $slug: slug });
+  }
+
+  getLinkCountForSlug(slug: string): number {
+    const row = this.prepare(
+      "SELECT count(*) as cnt FROM links WHERE from_slug = $slug OR to_slug = $slug"
+    ).get({ $slug: slug }) as { cnt: number } | null;
+    return row?.cnt ?? 0;
+  }
+
+  getHotnessStats(): { mentionP95: number; linkP95: number; activityP95: number } {
+    const p95 = (col: string, table: string) => {
+      const row = this.prepare(
+        `SELECT ${col} as val FROM ${table} WHERE ${col} > 0 ORDER BY ${col} DESC LIMIT 1 OFFSET (SELECT CAST(COUNT(*) * 0.05 AS INTEGER) FROM ${table} WHERE ${col} > 0)`
+      ).get() as { val: number } | null;
+      return row?.val ?? 1;
+    };
+    const linkRow = this.prepare(
+      "SELECT MAX(cnt) as cnt FROM (SELECT count(*) as cnt FROM (SELECT from_slug as slug FROM links UNION ALL SELECT to_slug as slug FROM links) GROUP BY slug)"
+    ).get() as { cnt: number } | null;
+    return {
+      mentionP95: p95("mention_count", "pages"),
+      linkP95: linkRow?.cnt ?? 1,
+      activityP95: p95("activity_weight", "pages"),
+    };
+  }
+
+  getHotnessWeights(slugs: string[]): Map<string, number> {
+    const result = new Map<string, number>();
+    if (slugs.length === 0) return result;
+    const placeholders = slugs.map((_, i) => `$s${i}`).join(",");
+    const params: Record<string, string> = {};
+    slugs.forEach((s, i) => { params[`$s${i}`] = s; });
+    const rows = this.prepare(
+      `SELECT slug, hotness_score FROM pages WHERE slug IN (${placeholders}) AND hotness_score > 0`
+    ).all(params) as Array<{ slug: string; hotness_score: number }>;
+    for (const row of rows) result.set(row.slug, row.hotness_score);
+    return result;
+  }
+
+  getTopHotnessEntities(limit: number = 10): Array<{ slug: string; title: string; hotness_score: number }> {
+    return this.prepare(
+      "SELECT slug, title, hotness_score FROM pages WHERE hotness_score > 0 ORDER BY hotness_score DESC LIMIT $limit"
+    ).all({ $limit: limit }) as Array<{ slug: string; title: string; hotness_score: number }>;
+  }
+
   boostLinkWeight(slugA: string, slugB: string, boost: number): void {
     this.prepare(
       "UPDATE links SET weight = MIN(weight + $boost, 10.0) WHERE (from_slug = $a AND to_slug = $b) OR (from_slug = $b AND to_slug = $a)"
@@ -1804,6 +1879,39 @@ export class CBrainDB {
        WHERE slug IN (${ph}) AND expires_at IS NOT NULL AND expires_at <= ?
        ORDER BY expires_at ASC`
     ).all(...slugs, cutoff) as Array<{ slug: string; title: string; expires_at: string }>;
+  }
+
+  // ─── Relation audit helpers ─────────────────────────────────
+
+  getRelationDistribution(): Array<{ relation: string; count: number }> {
+    return this.db.query(
+      `SELECT relation, COUNT(*) as count FROM links GROUP BY relation ORDER BY count DESC`
+    ).all() as Array<{ relation: string; count: number }>;
+  }
+
+  getAllLinksByRelation(relation: string): LinkRow[] {
+    return this.db.query(
+      `SELECT * FROM links WHERE relation = ?`
+    ).all(relation) as LinkRow[];
+  }
+
+  updateLinkRelation(id: number, newRelation: string): void {
+    this.db.query(
+      `UPDATE links SET relation = ? WHERE id = ?`
+    ).run(newRelation, id);
+  }
+
+  deleteLinkById(id: number): void {
+    const link = this.db.query(`SELECT from_slug, to_slug, relation FROM links WHERE id = ?`).get(id) as { from_slug: string; to_slug: string; relation: string } | null;
+    this.db.query(`DELETE FROM links WHERE id = ?`).run(id);
+    if (link) {
+      const reverse = REVERSE_RELATIONS[link.relation];
+      if (reverse) {
+        this.prepare(
+          "DELETE FROM links WHERE from_slug = $to AND to_slug = $from AND relation = $rel"
+        ).run({ $to: link.to_slug, $from: link.from_slug, $rel: reverse });
+      }
+    }
   }
 
   close(): void {

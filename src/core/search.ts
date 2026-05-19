@@ -27,12 +27,14 @@ export function rrfScore(ranks: number[], k: number): number {
 }
 
 const W_ACTIVITY = 0.15;
+const W_HOTNESS = 0.12;
 
 export function mergeRankedResults(
   lists: SearchResult[][],
   k: number,
   limit: number,
-  activityWeights?: Map<string, number>
+  activityWeights?: Map<string, number>,
+  hotnessWeights?: Map<string, number>
 ): SearchResult[] {
   if (lists.length === 0) return [];
 
@@ -64,9 +66,10 @@ export function mergeRankedResults(
   const results: SearchResult[] = [];
   for (const [slug, data] of slugData) {
     const activityBonus = activityWeights ? W_ACTIVITY * (activityWeights.get(slug) ?? 0) : 0;
+    const hotnessBonus = hotnessWeights ? W_HOTNESS * (hotnessWeights.get(slug) ?? 0) : 0;
     results.push({
       slug,
-      score: rrfScore(data.ranks, k) + activityBonus,
+      score: rrfScore(data.ranks, k) + activityBonus + hotnessBonus,
       snippet: data.bestSnippet,
       source: "hybrid",
     });
@@ -154,8 +157,9 @@ export class HybridSearch {
     const allSlugs = new Set<string>();
     for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
     const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
+    const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
 
-    return mergeRankedResults(allLists, this.rrfK, limit, activityWeights);
+    return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
   }
 
   private async shortQuerySearch(query: string, limit: number): Promise<SearchResult[]> {
@@ -177,8 +181,9 @@ export class HybridSearch {
     const allSlugs = new Set<string>();
     for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
     const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
+    const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
 
-    return mergeRankedResults(allLists, this.rrfK, limit, activityWeights);
+    return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
   }
 
   private async expandQuery(query: string): Promise<string[]> {

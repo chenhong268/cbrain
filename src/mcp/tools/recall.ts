@@ -193,6 +193,20 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       };
     });
 
+    // Hotness-based stub: low-hotness entities get trimmed to snippet only
+    const hotnessWeights = topSlugs.length > 0 ? ctx.db.getHotnessWeights(topSlugs) : new Map<string, number>();
+    for (const e of entities) {
+      const slug = (e as { slug: string }).slug;
+      const tier = (e as { tier?: number }).tier;
+      const hotness = hotnessWeights.get(slug) ?? 0;
+      if (hotness < 0.3 && (tier == null || tier >= 3)) {
+        (e as Record<string, unknown>)._stub = true;
+        if ((e as { body?: string }).body) {
+          (e as { body: string }).body = ((e as { snippet?: string }).snippet ?? "").slice(0, 200);
+        }
+      }
+    }
+
     const totalLinks = entities.reduce(
       (n, e) => n + ((e as { links: { outgoing: unknown[]; incoming: unknown[] } }).links?.outgoing?.length ?? 0) +
         ((e as { links: { outgoing: unknown[]; incoming: unknown[] } }).links?.incoming?.length ?? 0),

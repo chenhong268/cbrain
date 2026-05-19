@@ -190,8 +190,10 @@ ${entityNames.map(n => `- ${n}`).join("\n")}
 ## Relation Types
 
 Use these types exactly. If none fits, use "提及":
+
+Entity relations (person/organization/product):
 - 认识 — A knows B（人与人）
-- 提及 — general reference（默认）
+- 提及 — general reference（默认 fallback）
 - 任职 — A works at B（人→组织）
 - 创立 — A founded B（人→组织）
 - 归属 — A belongs to B（组织→组织）
@@ -199,7 +201,17 @@ Use these types exactly. If none fits, use "提及":
 - 竞争 — A competes with B
 - 资本 — A invested in / acquired B
 - 制造 — A developed / produced B
-- 间接关联 — inferred connection
+- 下属 — A reports to / is subordinate of B（人→人）
+- 上级 — A is the superior/manager of B（人→人，下属的反向）
+- 参会 — A attended the same event/meeting as B（人→人，事件关联）
+
+Concept relations (knowledge/ideas):
+- 关联 — general semantic connection
+- 互补 — complementary perspectives/methodologies
+- 延伸 — A extends/elaborates on B
+- 基础 — A is the theoretical foundation/source of B
+- 对比 — A contrasts with / opposes B
+- 应用 — A applied to B / B is an instance of A
 
 ## Rules
 1. Both from and to MUST be in the entity list above — do not invent entity names

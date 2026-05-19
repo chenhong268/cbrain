@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { MetricsSnapshot } from "./audit.js";
 import type { Logger } from "./logger.js";
+import { isValidRelation } from "./shared.js";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -547,16 +548,11 @@ export class HealthChecker {
   private checkConsistency(): HealthDimension {
     const issues: HealthIssue[] = [];
 
-    const standardRelations = new Set([
-      "认识", "提及", "任职", "创立", "归属",
-      "合作", "竞争", "资本", "制造", "间接关联",
-    ]);
-
     const links = this.db.getAllLinks();
 
     const nonStandardRels = new Set<string>();
     for (const link of links) {
-      if (!standardRelations.has(link.relation)) {
+      if (!isValidRelation(link.relation)) {
         nonStandardRels.add(link.relation);
       }
     }
@@ -567,7 +563,7 @@ export class HealthChecker {
         slug: "-",
         title: "Non-standard relation types",
         description: `Found ${nonStandardRels.size} non-standard relation types: ${[...nonStandardRels].slice(0, 10).join(", ")}`,
-        suggestion: "Map to standard English relation types",
+        suggestion: "Run relation_audit(mode='fix', dry_run=true) to preview migration",
       });
     }
 

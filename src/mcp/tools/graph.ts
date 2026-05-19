@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { findEntitySlug } from "../../core/shared.js";
+import { findEntitySlug, normalizeRelation } from "../../core/shared.js";
 
 export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   // ─── graph_query ─────────────────────────────────────────
@@ -90,7 +90,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     if (!ctx.pages.getBySlug(to)) return { content: [{ type: "text", text: JSON.stringify({ error: `Target page not found: ${to}` }) }], isError: true };
     if (from === to) return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot create self-referencing link" }) }], isError: true };
 
-    ctx.db.insertLink(from, to, relation, context ?? null, weight, strength, "manual", 0.9);
+    ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "manual", 0.9);
     ctx.pages.incrementMention(to);
     ctx.pages.syncLinksToMarkdown(from);
     ctx.pages.syncLinksToMarkdown(to);

@@ -116,7 +116,7 @@ describe("WritebackManager", () => {
 
     const links = db.prepare("SELECT * FROM links WHERE from_slug = ? AND to_slug = ?").all(pageA.slug, pageB.slug);
     expect(links.length).toBe(1);
-    expect((links[0] as any).relation).toBe("works_at");
+    expect((links[0] as any).relation).toBe("任职");
   });
 
   test("create_link fails with missing params", async () => {
