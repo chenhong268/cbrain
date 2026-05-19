@@ -333,6 +333,11 @@ export class SyncManager {
     return { success: true };
   }
 
+  removePage(slug: string): void {
+    this.db.deletePageCascaded(slug);
+    this.lance.deleteByPageSlug(slug);
+  }
+
   async removeOrphans(vaultPath: string): Promise<string[]> {
     const cleaned = this.db.cleanDanglingLinks();
     if (cleaned > 0 && this.logger) this.logger.info("sync", `清理 ${cleaned} 条悬空链接`);

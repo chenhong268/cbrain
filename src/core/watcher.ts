@@ -2,30 +2,33 @@ import { stat, readFile } from "node:fs/promises";
 import { relative } from "node:path";
 import type { SyncManager } from "./sync.js";
 import { hashContent, collectMarkdownFiles } from "./shared.js";
+import type { Logger } from "./logger.js";
 
-/**
- * Polling vault watcher. Scans every 30s, hashes each .md file, compares
- * against content_hash in DB. Only syncs files whose content changed.
- * Uses mtime+size pre-filter to skip unchanged files without hashing.
- */
+export interface FileWatcherOpts {
+  logger?: Logger;
+}
+
 export class FileWatcher {
   private sync: SyncManager;
   private vaultPath: string;
+  private logger?: Logger;
   private interval: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private scanning = false;
   private readonly POLL_MS = 30_000;
-  private hashes = new Map<string, string>();  // path → content_hash
+  private hashes = new Map<string, string>();
   private mtimes = new Map<string, { mtime: number; size: number }>();
 
-  constructor(sync: SyncManager, vaultPath: string) {
+  constructor(sync: SyncManager, vaultPath: string, opts?: FileWatcherOpts) {
     this.sync = sync;
     this.vaultPath = vaultPath;
+    this.logger = opts?.logger;
   }
 
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.logger?.info("watcher", "启动", { vaultPath: this.vaultPath, pollMs: this.POLL_MS });
     this.scan();
     this.interval = setInterval(() => { this.scan(); }, this.POLL_MS);
   }
@@ -65,21 +68,38 @@ export class FileWatcher {
 
         const relPath = relative(this.vaultPath, fullPath);
         const slug = relPath.replace(/\.md$/, "");
-        this.sync.syncPage(slug, this.vaultPath).catch((e) => {
-          console.error(`[watcher] syncPage 失败: ${slug}`, e);
-        });
+        this.logger?.info("watcher", "检测到变更", { slug });
+        this.sync.syncPage(slug, this.vaultPath).then(
+          () => { this.logger?.info("watcher", "同步完成", { slug }); },
+          (e) => { this.logger?.warn("watcher", `同步失败: ${slug}`, { error: String(e) }); }
+        );
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-          console.error(`[watcher] 文件读取失败: ${fullPath}`, e);
+          this.logger?.warn("watcher", `文件读取失败: ${fullPath}`, { error: String(e) });
         }
       }
     }
 
-    for (const path of this.hashes.keys()) {
-      if (!seen.has(path)) this.hashes.delete(path);
+    // Deletion detection: files that disappeared since last scan
+    const deleted: string[] = [];
+    for (const path of [...this.hashes.keys()]) {
+      if (!seen.has(path)) {
+        const relPath = relative(this.vaultPath, path);
+        const slug = relPath.replace(/\.md$/, "");
+        deleted.push(slug);
+        this.hashes.delete(path);
+        this.mtimes.delete(path);
+      }
     }
-    for (const path of this.mtimes.keys()) {
-      if (!seen.has(path)) this.mtimes.delete(path);
+    if (deleted.length > 0) {
+      for (const slug of deleted) {
+        try {
+          this.sync.removePage(slug);
+        } catch (e) {
+          this.logger?.warn("watcher", `删除清理失败: ${slug}`, { error: String(e) });
+        }
+      }
+      this.logger?.info("watcher", "删除检测", { slugs: deleted });
     }
   }
 }
