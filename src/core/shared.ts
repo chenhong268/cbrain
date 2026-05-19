@@ -425,14 +425,7 @@ export function findEntitySlug(
   return db.getEntitySlugByTitle(name) ?? db.getSlugByAlias(name);
 }
 
-/**
- * Resolve a NER-extracted name to a known entity slug.
- * Strategy:
- * 1. Exact match in entitySlugMap
- * 2. Case-insensitive match in entitySlugMap
- * 3. Strip parenthetical suffix (e.g. "赵磊（投资总监）" → "赵磊")
- * 4. DB lookup by title
- */
+/** @deprecated Use EntityResolver.resolveAll() instead */
 export function buildLowercaseIndex(entitySlugMap: Map<string, string>): Map<string, string> {
   const idx = new Map<string, string>();
   for (const [key, slug] of entitySlugMap) {
@@ -441,6 +434,7 @@ export function buildLowercaseIndex(entitySlugMap: Map<string, string>): Map<str
   return idx;
 }
 
+/** @deprecated Use EntityResolver.resolveAll() instead */
 export function resolveEntityName(
   name: string,
   entitySlugMap: Map<string, string>,

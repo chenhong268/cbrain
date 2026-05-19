@@ -245,6 +245,7 @@ export class CBrainDB {
     this.migrateHotnessScore();
     this.migrateQueryFeedback();
     this.migrateMissingIndexes();
+    this.migrateAliasesSource();
   }
 
   private migrateLinksStrength(): void {
@@ -1383,10 +1384,30 @@ export class CBrainDB {
     return row?.slug ?? null;
   }
 
+  getEntitySlugByTitleLower(name: string): string | null {
+    const row = this.prepare(
+      "SELECT slug FROM pages WHERE LOWER(title) = LOWER($name) AND type IN ('entity', 'concept')"
+    ).get({ $name: name }) as { slug: string } | null;
+    return row?.slug ?? null;
+  }
+
+  getEntityType(slug: string): string | null {
+    const row = this.prepare(
+      "SELECT type FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { type: string } | null;
+    return row?.type ?? null;
+  }
+
   addAlias(pageSlug: string, alias: string): void {
     this.prepare(
       "INSERT OR IGNORE INTO aliases (page_slug, alias) VALUES ($slug, $alias)"
     ).run({ $slug: pageSlug, $alias: alias });
+  }
+
+  addAliasWithSource(pageSlug: string, alias: string, source: string): void {
+    this.prepare(
+      "INSERT OR IGNORE INTO aliases (page_slug, alias, source) VALUES ($slug, $alias, $source)"
+    ).run({ $slug: pageSlug, $alias: alias, $source: source });
   }
 
   removeAlias(pageSlug: string, alias: string): void {
@@ -1819,6 +1840,14 @@ export class CBrainDB {
       this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_title_uniq ON pages(title)");
     } catch {
       console.warn("[migrate] pages has duplicate titles — unique index skipped, run dedup first");
+    }
+  }
+
+  private migrateAliasesSource(): void {
+    const cols = this.db.prepare("PRAGMA table_info(aliases)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("source")) {
+      this.db.exec("ALTER TABLE aliases ADD COLUMN source TEXT DEFAULT 'manual'");
     }
   }
 

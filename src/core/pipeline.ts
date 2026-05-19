@@ -6,13 +6,12 @@ import type { ExtractionResult } from "./ner.js";
 import { PageManager } from "./page.js";
 import { extractWikiLinks, isValidEntityName } from "./extract.js";
 import type { Logger } from "./logger.js";
+import { EntityResolver } from "./entity-resolver.js";
 import {
   chunkContent,
   mapEntityType,
   buildStubBody,
   findEntitySlug,
-  resolveEntityName,
-  buildLowercaseIndex,
   DEFAULT_CHUNK_SIZE,
   normalizeRelation,
   getRelationStrength,
@@ -213,12 +212,39 @@ export class ContentPipeline {
     const stubsCreated = new Set<string>();
     let lowRelevanceSkipped = 0;
 
+    const resolver = new EntityResolver(this.db);
+    const candidates = extraction.entities
+      .filter(e => {
+        if (e.relevance === "low") { lowRelevanceSkipped++; return false; }
+        return true;
+      })
+      .map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
+    const resolutionMap = resolver.resolveAll(candidates);
+
     for (const entity of extraction.entities) {
-      const existingSlug = findEntitySlug(this.db, entity.name);
-      if (existingSlug) {
-        entitySlugMap.set(entity.name, existingSlug);
-        this.db.incrementMentionCount(existingSlug);
-      } else if (this.pages && entity.relevance !== "low" && entity.name.length <= 20) {
+      if (entity.relevance === "low") continue;
+
+      const result = resolutionMap.get(entity.name);
+      if (!result) continue;
+
+      if (result.action === "resolved_to_existing" || result.action === "alias_added") {
+        entitySlugMap.set(entity.name, result.slug);
+        this.db.incrementMentionCount(result.slug);
+      } else if (result.action === "duplicate_candidate") {
+        if (this.pages && entity.name.length <= 20) {
+          const entityType = mapEntityType(entity.type);
+          const stub = this.pages.create({
+            title: entity.name,
+            type: entityType,
+            body: `> Auto-extracted from [[${fromSlug}]]`,
+            tags: ["auto-extracted", "duplicate-candidate"],
+          });
+          entitySlugMap.set(entity.name, stub.slug);
+          stubsCreated.add(stub.slug);
+          this.db.incrementMentionCount(stub.slug);
+          this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5);
+        }
+      } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({
           title: entity.name,
@@ -230,16 +256,13 @@ export class ContentPipeline {
         stubsCreated.add(stub.slug);
         this.db.incrementMentionCount(stub.slug);
         this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5);
-      } else if (entity.relevance === "low") {
-        lowRelevanceSkipped++;
       }
     }
 
     const writtenRelations: Array<{ from: string; to: string; relation: string }> = [];
-    const lowerIndex = buildLowercaseIndex(entitySlugMap);
     for (const rel of extraction.relations) {
-      const from = resolveEntityName(rel.from, entitySlugMap, this.db, lowerIndex);
-      const to = resolveEntityName(rel.to, entitySlugMap, this.db, lowerIndex);
+      const from = entitySlugMap.get(rel.from) ?? findEntitySlug(this.db, rel.from);
+      const to = entitySlugMap.get(rel.to) ?? findEntitySlug(this.db, rel.to);
       if (from && to && from !== to) {
         const normRel = normalizeRelation(rel.relation);
         const rw = getRelationStrength(normRel);

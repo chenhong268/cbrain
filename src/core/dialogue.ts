@@ -11,6 +11,7 @@ import {
   ExtractedEvent,
 } from "./ner.js";
 import { findEntitySlug, mapEntityType, buildStubBody, hashContent, normalizeRelation } from "./shared.js";
+import { EntityResolver } from "./entity-resolver.js";
 import { generateSlug, slugToFilePath } from "../utils/slug.js";
 import { stringifyFrontmatter } from "../utils/frontmatter.js";
 
@@ -125,51 +126,65 @@ export class DialogueIngest {
     let newEvents = 0;
     let skipped = 0;
 
-    // Track which entities are new (name → slug) so relations can reference them
     const entitySlugMap = new Map<string, string>();
 
-    // Entities
+    // Resolve all entities through EntityResolver
+    const resolver = new EntityResolver(this.db);
+    const candidates = result.entities
+      .filter(e => {
+        if (e.relevance === "low") { skipped++; return false; }
+        return true;
+      })
+      .map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
+    const resolutionMap = resolver.resolveAll(candidates);
+
     for (const entity of result.entities) {
-      const existing = findEntitySlug(this.db, entity.name);
-      if (existing) {
-        // Already known — increment mention count
-        this.db.incrementMentionCount(existing);
-        entitySlugMap.set(entity.name, existing);
+      if (entity.relevance === "low") continue;
+
+      const resolution = resolutionMap.get(entity.name);
+      if (!resolution) continue;
+
+      if (resolution.action === "resolved_to_existing" || resolution.action === "alias_added") {
+        entitySlugMap.set(entity.name, resolution.slug);
+        this.db.incrementMentionCount(resolution.slug);
         skipped++;
-        continue;
+      } else if (resolution.action === "duplicate_candidate" || resolution.action === "stub_created") {
+        // Create stub file + DB entry
+        const pageType = mapEntityType(entity.type);
+        const slug = generateSlug(entity.name, pageType);
+        const fileName = slugToFilePath(slug);
+        const filePath = join(this.vaultPath, fileName);
+        const now = new Date().toISOString();
+        const body = `> Extracted from dialogue\n\n## Context\n\n${entity.context}`;
+        const tags = resolution.action === "duplicate_candidate"
+          ? ["auto-extracted", "duplicate-candidate"]
+          : ["auto-extracted"];
+        const frontmatter = {
+          title: entity.name,
+          type: pageType,
+          slug,
+          tags,
+          tier: 3,
+          created_at: now,
+          updated_at: now,
+        };
+
+        mkdirSync(dirname(filePath), { recursive: true });
+        writeFileSync(filePath, stringifyFrontmatter(frontmatter, body), "utf-8");
+
+        const contentHash = hashContent(stringifyFrontmatter(frontmatter, body));
+        this.db.upsertPage({
+          slug,
+          type: pageType,
+          title: entity.name,
+          filePath: relative(this.vaultPath, filePath),
+          contentHash,
+        });
+
+        entitySlugMap.set(entity.name, slug);
+        this.db.incrementMentionCount(slug);
+        newEntities++;
       }
-
-      // New entity — create stub
-      const pageType = mapEntityType(entity.type);
-      const slug = generateSlug(entity.name, pageType);
-      const fileName = slugToFilePath(slug);
-      const filePath = join(this.vaultPath, fileName);
-      const now = new Date().toISOString();
-      const body = `> Extracted from dialogue\n\n## Context\n\n${entity.context}`;
-      const frontmatter = {
-        title: entity.name,
-        type: pageType,
-        slug,
-        tags: [] as string[],
-        tier: 3,
-        created_at: now,
-        updated_at: now,
-      };
-
-      mkdirSync(dirname(filePath), { recursive: true });
-      writeFileSync(filePath, stringifyFrontmatter(frontmatter, body), "utf-8");
-
-      const contentHash = hashContent(stringifyFrontmatter(frontmatter, body));
-      this.db.upsertPage({
-        slug,
-        type: pageType,
-        title: entity.name,
-        filePath: relative(this.vaultPath, filePath),
-        contentHash,
-      });
-
-      entitySlugMap.set(entity.name, slug);
-      newEntities++;
     }
 
     // Relations
@@ -180,7 +195,6 @@ export class DialogueIngest {
 
       const normRel = normalizeRelation(rel.relation);
 
-      // Check if relation already exists
       if (this.db.linkExists(fromSlug, toSlug, normRel)) continue;
 
       this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null, undefined, undefined, "dialogue", 0.4);
@@ -192,7 +206,6 @@ export class DialogueIngest {
     for (const event of result.events) {
       if (!event.date) continue;
 
-      // Find a participant slug to attach the event to
       const participantSlug = event.participants
         .map((p) => entitySlugMap.get(p) ?? findEntitySlug(this.db, p))
         .find(Boolean);
@@ -200,7 +213,6 @@ export class DialogueIngest {
       if (participantSlug) {
         this.db.addTimelineEntry(participantSlug, event.description, event.date, "dialogue");
       } else {
-        // No known participant — write to a generic dialogue log
         this.db.addTimelineEntry("brain/dialogue-events", event.description, event.date, "dialogue");
       }
 
