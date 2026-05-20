@@ -113,7 +113,8 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     inputSchema: {},
   }, async () => {
     const { runDream } = await import("../../core/dream.js");
-    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger, undefined, ctx.dbPath);
+    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger, undefined, ctx.dbPath,
+      ctx.llm ? { llm: ctx.llm, embedding: ctx.embedding, lance: ctx.lance } : undefined);
     return {
       content: [{ type: "text", text: JSON.stringify({
         success: !report.locked,

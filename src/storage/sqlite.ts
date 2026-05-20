@@ -260,6 +260,7 @@ export class CBrainDB {
     this.migrateQueryFeedback();
     this.migrateMissingIndexes();
     this.migrateAliasesSource();
+    this.migrateChunksSummaryLevel();
   }
 
   private migrateLinksStrength(): void {
@@ -484,7 +485,12 @@ export class CBrainDB {
 
   // ─── Chunk operations ────────────────────────────────────────
 
-  getChunksByPage(pageSlug: string): Array<{ id: number; chunk_index: number; content: string; created_at: string }> {
+  getChunksByPage(pageSlug: string, opts?: { summaryLevel?: number }): Array<{ id: number; chunk_index: number; content: string; created_at: string }> {
+    if (opts?.summaryLevel != null) {
+      return this.prepare(
+        "SELECT id, chunk_index, content, created_at FROM chunks WHERE page_slug = $slug AND summary_level = $level ORDER BY chunk_index"
+      ).all({ $slug: pageSlug, $level: opts.summaryLevel }) as any[];
+    }
     return this.prepare(
       "SELECT id, chunk_index, content, created_at FROM chunks WHERE page_slug = $slug ORDER BY chunk_index"
     ).all({ $slug: pageSlug }) as any[];
@@ -1311,13 +1317,60 @@ export class CBrainDB {
   // ─── Chunk write operations ──────────────────────────────────
 
   deleteChunksByPage(slug: string): void {
-    this.prepare("DELETE FROM chunks WHERE page_slug = $slug").run({ $slug: slug });
+    this.prepare("DELETE FROM chunks WHERE page_slug = $slug AND summary_level = 0").run({ $slug: slug });
   }
 
   insertChunk(slug: string, index: number, content: string): void {
     this.prepare(
-      "INSERT INTO chunks (page_slug, chunk_index, content) VALUES ($slug, $idx, $content)"
+      "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES ($slug, $idx, $content, 0)"
     ).run({ $slug: slug, $idx: index, $content: content });
+  }
+
+  insertChunkWithLevel(slug: string, index: number, content: string, summaryLevel: number, contentHash: string | null): void {
+    this.prepare(
+      "INSERT INTO chunks (page_slug, chunk_index, content, summary_level, content_hash) VALUES ($slug, $idx, $content, $level, $hash)"
+    ).run({ $slug: slug, $idx: index, $content: content, $level: summaryLevel, $hash: contentHash });
+  }
+
+  getL1Summary(slug: string): { id: number; content: string; content_hash: string | null } | null {
+    return this.prepare(
+      "SELECT id, content, content_hash FROM chunks WHERE page_slug = $slug AND summary_level = 1"
+    ).get({ $slug: slug }) as { id: number; content: string; content_hash: string | null } | null;
+  }
+
+  deleteL1Summary(slug: string): void {
+    this.prepare("DELETE FROM chunks WHERE page_slug = $slug AND summary_level = 1").run({ $slug: slug });
+  }
+
+  getPagesNeedingSeal(): string[] {
+    const rows = this.prepare(
+      `SELECT DISTINCT c1.page_slug FROM chunks c1
+       WHERE c1.summary_level = 0
+       AND NOT EXISTS (
+         SELECT 1 FROM chunks c2 WHERE c2.page_slug = c1.page_slug AND c2.summary_level = 1
+       )`
+    ).all() as Array<{ page_slug: string }>;
+    return rows.map(r => r.page_slug);
+  }
+
+  getPagesWithChangedChunks(): string[] {
+    const l1Rows = this.prepare(
+      "SELECT page_slug, content_hash FROM chunks WHERE summary_level = 1 AND content_hash IS NOT NULL"
+    ).all() as Array<{ page_slug: string; content_hash: string }>;
+    const changed: string[] = [];
+    for (const row of l1Rows) {
+      const currentHash = this.getRawChunkContentHash(row.page_slug);
+      if (currentHash !== row.content_hash) changed.push(row.page_slug);
+    }
+    return changed;
+  }
+
+  getRawChunkContentHash(slug: string): string {
+    const rows = this.prepare(
+      "SELECT content FROM chunks WHERE page_slug = $slug AND summary_level = 0 ORDER BY chunk_index"
+    ).all({ $slug: slug }) as Array<{ content: string }>;
+    const combined = rows.map(r => r.content).join("\n");
+    return Bun.hash(combined).toString();
   }
 
   getChunkCount(): number {
@@ -1863,6 +1916,32 @@ export class CBrainDB {
     if (!names.has("source")) {
       this.db.exec("ALTER TABLE aliases ADD COLUMN source TEXT DEFAULT 'manual'");
     }
+  }
+
+  private migrateChunksSummaryLevel(): void {
+    const cols = this.db.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (names.has("summary_level")) return;
+
+    this.db.exec("PRAGMA foreign_keys = OFF");
+    this.db.exec(`
+      CREATE TABLE chunks_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        page_slug TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        summary_level INTEGER NOT NULL DEFAULT 0,
+        content_hash TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE,
+        UNIQUE(page_slug, summary_level, chunk_index)
+      );
+      INSERT INTO chunks_new (id, page_slug, chunk_index, content, summary_level, content_hash, created_at)
+        SELECT id, page_slug, chunk_index, content, 0, NULL, created_at FROM chunks;
+      DROP TABLE chunks;
+      ALTER TABLE chunks_new RENAME TO chunks;
+    `);
+    this.db.exec("PRAGMA foreign_keys = ON");
   }
 
   insertFeedback(queryId: number | null, slug: string, signal: "relevant" | "irrelevant" | "corrected" | "expanded", note?: string): void {

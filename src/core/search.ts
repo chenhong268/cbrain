@@ -220,11 +220,23 @@ export class HybridSearch {
 
   private async vectorSearch(query: string, limit: number): Promise<SearchResult[]> {
     const { embedding } = await this.embedding.embed(query);
-    const results = await this.lance.search(embedding, limit);
-    return results.map((r) => ({
-      slug: r.pageSlug,
-      score: r._distance != null ? 1 - r._distance : 0,
-      snippet: r.content.slice(0, 200),
+    const results = await this.lance.search(embedding, limit * 3);
+
+    const bySlug = new Map<string, { content: string; score: number }>();
+    for (const r of results) {
+      const existing = bySlug.get(r.pageSlug);
+      if (!existing || r.chunkIndex === -1) {
+        bySlug.set(r.pageSlug, {
+          content: r.content,
+          score: r._distance != null ? 1 - r._distance : 0,
+        });
+      }
+    }
+
+    return [...bySlug.entries()].slice(0, limit).map(([slug, v]) => ({
+      slug,
+      score: v.score,
+      snippet: v.content.slice(0, 200),
       source: "vector" as const,
     }));
   }

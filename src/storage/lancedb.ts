@@ -59,19 +59,30 @@ export class LanceDBManager {
     this.db = await lancedb.connect(path);
   }
 
+  private tableInits = new Map<string, Promise<lancedb.Table>>();
+
   private async getOrCreateTable(name: string, schema: Schema): Promise<lancedb.Table> {
     const cached = this.tables.get(name);
     if (cached) return cached;
+
+    let pending = this.tableInits.get(name);
+    if (!pending) {
+      pending = this.initTable(name, schema);
+      this.tableInits.set(name, pending);
+    }
+    return pending;
+  }
+
+  private async initTable(name: string, schema: Schema): Promise<lancedb.Table> {
     if (!this.db) throw new Error("LanceDB not connected. Call connect() first.");
 
     const tableNames = await this.db.tableNames();
+    let table: lancedb.Table;
     if (tableNames.includes(name)) {
-      const table = await this.db.openTable(name);
-      this.tables.set(name, table);
-      return table;
+      table = await this.db.openTable(name);
+    } else {
+      table = await this.db.createTable(name, [], { schema, mode: "create" });
     }
-
-    const table = await this.db.createTable(name, [], { schema, mode: "create" });
     this.tables.set(name, table);
     return table;
   }
@@ -138,6 +149,18 @@ export class LanceDBManager {
   async deleteByPageSlug(pageSlug: string): Promise<void> {
     const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
     await table.delete(`pageSlug = '${pageSlug.replace(/'/g, "''")}'`);
+  }
+
+  async deleteRawChunksByPageSlug(pageSlug: string): Promise<void> {
+    const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const escaped = pageSlug.replace(/'/g, "''");
+    await table.delete(`pageSlug = '${escaped}' AND chunkIndex >= 0`);
+  }
+
+  async deleteL1VectorByPageSlug(pageSlug: string): Promise<void> {
+    const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const escaped = pageSlug.replace(/'/g, "''");
+    await table.delete(`pageSlug = '${escaped}' AND chunkIndex = -1`);
   }
 
   // ─── Insights table ────────────────────────────────────────────

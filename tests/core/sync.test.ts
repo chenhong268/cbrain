@@ -50,6 +50,7 @@ function createMockLanceDB() {
     deleteByPageSlug: async (pageSlug: string) => {
       deleted.push(pageSlug);
     },
+    deleteRawChunksByPageSlug: async () => {},
     close: async () => {},
     createFTSIndex: async () => {},
   };

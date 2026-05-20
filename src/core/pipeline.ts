@@ -99,7 +99,7 @@ export class ContentPipeline {
       throw new Error(`writeIndexes: chunks(${chunks.length}) and embeddings(${embedResults.length}) count mismatch for ${slug}`);
     }
 
-    this.lance.deleteByPageSlug(slug);
+    this.lance.deleteRawChunksByPageSlug(slug);
     this.lance.addChunks(
       chunks.map((c, i) => ({
         pageSlug: slug,
@@ -118,6 +118,9 @@ export class ContentPipeline {
 
       const fullContent = chunks.map(c => c.content).join("\n\n");
       this.db.ftsInsert(slug, fullContent);
+
+      const l1 = this.db.getL1Summary(slug);
+      if (l1) this.db.ftsInsert(slug, l1.content);
     });
   }
 

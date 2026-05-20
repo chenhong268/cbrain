@@ -11,6 +11,10 @@ import type { Logger } from "./logger.js";
 import type { InsightManager } from "./insight.js";
 import { LearnManager } from "./learn.js";
 import { IndexGenerator } from "./indexes.js";
+import type { LLMProvider } from "../llm/provider.js";
+import type { EmbeddingProvider } from "../embedding/provider.js";
+import type { LanceDBManager } from "../storage/lancedb.js";
+import { SealManager } from "./seal.js";
 
 export interface DreamReport {
   timestamp: string;
@@ -20,6 +24,7 @@ export interface DreamReport {
     sync: { synced: number; skipped: number; errors: number };
     enrich: { total: number; upgraded: number };
     learn: { updated: number; topActive: string[] };
+    seal: { sealed: number; skipped: number; errors: number };
     cleanup: { orphans: number; staleStubs: number };
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
@@ -60,6 +65,7 @@ export async function runDream(
   logger: Logger,
   insightMgr?: InsightManager,
   dbPath?: string,
+  sealDeps?: { llm: LLMProvider; embedding: EmbeddingProvider; lance: LanceDBManager },
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
     logger.warn("dream", "上次 dream 仍在执行中（或锁未释放），跳过");
@@ -70,6 +76,7 @@ export async function runDream(
         sync: { synced: 0, skipped: 0, errors: 0 },
         enrich: { total: 0, upgraded: 0 },
         learn: { updated: 0, topActive: [] },
+        seal: { sealed: 0, skipped: 0, errors: 0 },
         cleanup: { orphans: 0, staleStubs: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
         insight_archive: { archived: 0 },
@@ -132,6 +139,19 @@ export async function runDream(
     logger.warn("dream", `学习计算失败: ${(e as Error).message}`);
   }
 
+  // Stage 3.5: Seal
+  logger.info("dream", "Stage 3.5/8: seal");
+  let sealReport = { sealed: 0, skipped: 0, errors: 0 };
+  if (sealDeps) {
+    try {
+      const sealMgr = new SealManager(db, sealDeps.llm, sealDeps.embedding, sealDeps.lance, logger);
+      sealReport = await sealMgr.sealAll();
+      if (sealReport.sealed > 0) logger.info("dream", `Seal 完成: ${sealReport.sealed} 页压缩`);
+    } catch (e) {
+      logger.warn("dream", `Seal 失败: ${(e as Error).message}`);
+    }
+  }
+
   // Stage 4-6: Cleanup + Health + Insight archive (independent, run in parallel)
   logger.info("dream", "Stage 4-6/7: cleanup + health + insight archive (parallel)");
   const [orphans, staleStubs, healthReport, archived] = await Promise.all([
@@ -169,6 +189,7 @@ export async function runDream(
       sync: { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors },
       enrich: { total: enrichResults.length, upgraded },
       learn: learnReport,
+      seal: sealReport,
       cleanup: { orphans: orphans.length, staleStubs: staleStubs.length },
       health: {
         overallStatus: healthReport.overallStatus,
@@ -197,6 +218,7 @@ export async function runDream(
     `| Sync | ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过, ${report.stages.sync.errors} 错误 |`,
     `| Enrich | ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级 |`,
     `| Learn | ${report.stages.learn.updated} 实体权重更新, 活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")} |`,
+    `| Seal | ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过 |`,
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
     `| Insight Archive | ${report.stages.insight_archive.archived} 条过期归档 |`,
@@ -241,6 +263,9 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.learn.updated > 0) {
     lines.push(`学习: ${report.stages.learn.updated} 个权重更新，最活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")}`);
+  }
+  if (report.stages.seal.sealed > 0) {
+    lines.push(`Seal: ${report.stages.seal.sealed} 页摘要压缩`);
   }
   if (report.stages.insight_archive.archived > 0) {
     lines.push(`${report.stages.insight_archive.archived} 条洞察归档`);

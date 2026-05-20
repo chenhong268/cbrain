@@ -27,6 +27,7 @@ function createMockLanceDB() {
     search: async () => [],
     fullTextSearch: async () => [],
     deleteByPageSlug: async () => {},
+    deleteRawChunksByPageSlug: async () => {},
     close: async () => {},
     createFTSIndex: async () => {},
   };
