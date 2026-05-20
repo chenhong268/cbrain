@@ -54,7 +54,7 @@ export function register(program: Command) {
       const nerApiKey = config.ner?.llm_api_key ?? apiKey;
       const llm = nerApiKey ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model) : undefined;
       const { EnrichManager } = await import("../../core/enrich.js");
-      const enrich = new EnrichManager(db, undefined, llm);
+      const enrich = new EnrichManager(db, undefined, llm, config.vaultPath);
       const result = opts.slug ? [enrich.enrichEntity(opts.slug)] : enrich.enrichAll();
       console.log(JSON.stringify(result, null, 2));
       db.close();
@@ -259,7 +259,7 @@ export function register(program: Command) {
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
       const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
-      const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm);
+      const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
       const health = new HealthChecker(deps.db, outputsDir, logger);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath);

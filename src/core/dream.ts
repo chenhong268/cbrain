@@ -179,7 +179,7 @@ export async function runDream(
       indexes: { files: indexFiles },
     },
     duration_ms: Date.now() - started,
-    locked: true,
+    locked: false,
     brief: "",
   };
   report.brief = buildBrief(report, db);

@@ -3,6 +3,20 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { REVERSE_RELATIONS } from "../core/shared.js";
 
+const ALLOWED_ORDER_COLUMNS = new Set([
+  "slug", "title", "type", "created_at", "updated_at", "mention_count", "tier",
+]);
+const ALLOWED_DIRECTIONS = new Set(["ASC", "DESC"]);
+
+function sanitizeOrderBy(input: string | undefined, fallback: string): string {
+  if (!input) return fallback;
+  const parts = input.trim().split(/\s+/);
+  if (parts.length < 1 || parts.length > 2) return fallback;
+  if (!ALLOWED_ORDER_COLUMNS.has(parts[0])) return fallback;
+  if (parts.length === 2 && !ALLOWED_DIRECTIONS.has(parts[1].toUpperCase())) return fallback;
+  return `${parts[0]} ${parts.length === 2 ? parts[1].toUpperCase() : "ASC"}`;
+}
+
 // ─── Row types ──────────────────────────────────────────────
 
 export interface PageRow {
@@ -793,7 +807,7 @@ export class CBrainDB {
         type = excluded.type,
         title = excluded.title,
         content_hash = excluded.content_hash,
-        updated_at = datetime('now')${expiresAt ? `, expires_at = ${expiresAt}` : ''}
+        updated_at = datetime('now')
     `).run({
       $slug: data.slug,
       $type: data.type,
@@ -859,7 +873,7 @@ export class CBrainDB {
       opts.types.forEach((t, i) => { params[`$t${i}`] = t; });
       sql += ` AND type IN (${placeholders})`;
     }
-    sql += ` ORDER BY ${opts?.orderBy ?? "title ASC"}`;
+    sql += ` ORDER BY ${sanitizeOrderBy(opts?.orderBy, "title ASC")}`;
     if (opts?.limit !== undefined) {
       sql += " LIMIT $limit";
       params.$limit = opts.limit;
@@ -878,7 +892,7 @@ export class CBrainDB {
       sql += " AND type = $type";
       params.$type = opts.type;
     }
-    sql += ` ORDER BY ${opts?.orderBy ?? "slug ASC"}`;
+    sql += ` ORDER BY ${sanitizeOrderBy(opts?.orderBy, "slug ASC")}`;
     if (opts?.limit !== undefined) {
       sql += " LIMIT $limit";
       params.$limit = opts.limit;
@@ -1010,7 +1024,7 @@ export class CBrainDB {
     const placeholders = types.map((_, i) => `$t${i}`).join(",");
     const params: Record<string, string> = {};
     types.forEach((t, i) => { params[`$t${i}`] = t; });
-    const order = orderBy ?? "title ASC";
+    const order = sanitizeOrderBy(orderBy, "title ASC");
     return this.prepare(
       `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type IN (${placeholders}) GROUP BY p.slug ORDER BY ${order}`
     ).all(params) as Array<{ slug: string; title: string; type: string; link_count: number }>;

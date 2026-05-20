@@ -116,7 +116,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger, undefined, ctx.dbPath);
     return {
       content: [{ type: "text", text: JSON.stringify({
-        success: report.locked,
+        success: !report.locked,
         brief: report.brief,
         locked: report.locked,
         stages: report.stages,

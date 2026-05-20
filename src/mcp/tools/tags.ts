@@ -38,6 +38,7 @@ export function registerTagTools(server: McpServer, ctx: ToolContext): void {
         return { content: [{ type: "text", text: JSON.stringify({ success: true, slug, tag, note: "tag already exists" }) }] };
       }
       ctx.pages.update(slug, { tags: [...currentTags, tag] });
+      ctx.db.addTag(slug, tag);
     } else {
       // file missing — DB-only fallback
       ctx.db.addTag(slug, tag);
@@ -63,6 +64,7 @@ export function registerTagTools(server: McpServer, ctx: ToolContext): void {
     if (page) {
       const currentTags = page.frontmatter.tags ?? [];
       ctx.pages.update(slug, { tags: currentTags.filter((t) => t !== tag) });
+      ctx.db.removeTag(slug, tag);
     } else {
       // file missing — DB-only fallback
       ctx.db.removeTag(slug, tag);

@@ -1,6 +1,7 @@
 import { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { statSync } from "node:fs";
+import { join } from "node:path";
 
 const HOTNESS_WEIGHTS = {
   mention: 0.25,
@@ -34,11 +35,13 @@ export class EnrichManager {
   private db: CBrainDB;
   private thresholds: TierThresholds;
   private llm?: LLMProvider;
+  private vaultPath: string;
 
-  constructor(db: CBrainDB, thresholds?: Partial<TierThresholds>, llm?: LLMProvider) {
+  constructor(db: CBrainDB, thresholds?: Partial<TierThresholds>, llm?: LLMProvider, vaultPath?: string) {
     this.db = db;
     this.thresholds = { ...DEFAULT_THRESHOLDS, ...thresholds };
     this.llm = llm;
+    this.vaultPath = vaultPath ?? "";
   }
 
   computeTier(mentionCount: number, activityWeight: number = 0): number {
@@ -63,7 +66,8 @@ export class EnrichManager {
 
     let bodyLength = 0;
     try {
-      bodyLength = statSync(page.file_path).size;
+      const absPath = page.file_path.startsWith("/") ? page.file_path : join(this.vaultPath, page.file_path);
+      bodyLength = statSync(absPath).size;
     } catch {
       // file may not exist yet
     }

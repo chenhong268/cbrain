@@ -1,21 +1,23 @@
+import { z } from "zod";
 import type { ToolContext } from "../mcp/context.js";
 import { registerAllTools } from "../mcp/register.js";
 
 interface ToolDef {
   name: string;
   description: string;
+  inputSchema?: z.ZodType;
   handler: (args: unknown) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
 }
 
 function createToolRegistry(ctx: ToolContext): Map<string, ToolDef> {
   const tools = new Map<string, ToolDef>();
 
-  // Fake McpServer that captures tool registrations
   const collector = {
     registerTool(name: string, config: { description?: string; inputSchema?: unknown }, handler: (args: unknown) => Promise<unknown>) {
       tools.set(name, {
         name,
         description: config.description ?? "",
+        inputSchema: config.inputSchema instanceof z.ZodType ? config.inputSchema : undefined,
         handler: handler as ToolDef["handler"],
       });
     },
@@ -63,10 +65,18 @@ export function createHttpServer(ctx: ToolContext) {
               return Response.json({ error: "Invalid JSON body" }, { status: 400 });
             }
 
+            if (tool.inputSchema) {
+              const parsed = tool.inputSchema.safeParse(args);
+              if (!parsed.success) {
+                return Response.json({ error: "Validation failed", details: parsed.error.issues }, { status: 400 });
+              }
+              args = parsed.data;
+            }
+
             try {
               const result = await tool.handler(args);
               return Response.json(result, { status: result.isError ? 400 : 200 });
-            } catch (e) {
+            } catch {
               return Response.json({ error: "Internal server error" }, { status: 500 });
             }
           }
