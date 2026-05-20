@@ -1,6 +1,16 @@
 # Changelog
 
-> Current: `v1.7.7` — LLM 超时保护 + NER 并行优化 + 对话式自动写入。
+> Current: `v1.7.8` — 6 个 bug 修复：enrich 丰富度、dream 锁语义、标签同步、实体过期、SQL 注入防护、HTTP 参数校验。
+
+## [v1.7.8] — 2026-05-20
+
+### Bug 修复
+- enrich 实体丰富度永远为 0（`statSync` 用了相对路径）— #18
+- dream 返回 `success` 语义反转（`locked` 字段赋值错误）— #18
+- 标签添加/删除只改 frontmatter 不改 DB（tags 表和 markdown 不同步）— #18
+- `upsertPage` 每次同步重置 `expires_at`（实体永不过期）— #18
+- ORDER BY 参数无白名单校验（SQL 注入风险）— #19
+- HTTP 端点跳过 Zod schema 校验（任意参数直达 handler）— #19
 
 ## [v1.7.7] — 2026-05-19
 
