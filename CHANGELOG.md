@@ -1,6 +1,20 @@
 # Changelog
 
-> Current: `v1.7.8` — 6 个 bug 修复：enrich 丰富度、dream 锁语义、标签同步、实体过期、SQL 注入防护、HTTP 参数校验。
+> Current: `v1.8.0` — 页级摘要压缩 Seal：将碎片化 raw chunks 自动压缩为 L1 摘要，搜索优先返回摘要。
+
+## [v1.8.0] — 2026-05-20
+
+### 新功能
+- **Seal 页级摘要压缩**（#5）：每页的 raw chunks 自动压缩成一条 L1 摘要，搜索优先返回摘要，减少碎片化结果
+- Schema migration：chunks 表新增 `summary_level` + `content_hash` 列，UNIQUE 约束重建
+- `SealManager`：LLM 驱动的摘要生成，支持批量 sealAll / 增量 sealChanged
+- Dream Stage 3.5：seal 自动在 dream 管线中执行
+- Search 去重：vector search 同一页有 L1 时只返回 L1
+
+### Bug 修复
+- LanceDB `getOrCreateTable` 并发竞态修复（重复建表报错）
+- Pipeline `writeIndexes` 保留 L1 摘要不被覆盖
+- 生产 vault 清理 434 条孤儿 chunks（FK constraint 修复）
 
 ## [v1.7.8] — 2026-05-20
 
