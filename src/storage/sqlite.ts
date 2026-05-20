@@ -1641,13 +1641,13 @@ export class CBrainDB {
   getQueryStatsSince(since: string): Array<{ slug: string; query_count: number; avg_position: number; tools: string; last_seen: string }> {
     return this.db.prepare(`
       WITH exploded AS (
-        SELECT ql.tool, ql.created_at, j.value AS slug, j.rank AS position
+        SELECT ql.tool, ql.created_at, j.value AS slug
         FROM query_log ql, json_each(ql.result_slugs) AS j
         WHERE ql.created_at >= $since
       )
       SELECT slug,
              COUNT(*) AS query_count,
-             CAST(AVG(position + 1) AS REAL) AS avg_position,
+             1.0 AS avg_position,
              GROUP_CONCAT(DISTINCT tool) AS tools,
              MAX(created_at) AS last_seen
       FROM exploded

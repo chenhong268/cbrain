@@ -13,6 +13,7 @@ export interface CBrainDeps {
   embedding: EmbeddingProvider;
   lance: LanceDBManager;
   vaultPath: string;
+  dbPath?: string;
   llm?: LLMProvider;
   profileDir?: string;
 }

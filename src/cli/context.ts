@@ -87,5 +87,5 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
 
   const profileDir = dirname(resolve(config.dbPath));
 
-  return { db, embedding, lance, vaultPath: config.vaultPath, llm, profileDir };
+  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir };
 }

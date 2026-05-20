@@ -22,6 +22,7 @@ import type { LLMProvider } from "../llm/provider.js";
 export interface ToolContext {
   db: CBrainDB;
   vaultPath: string;
+  dbPath?: string;
   outputsDir: string;
   pages: PageManager;
   search: HybridSearch;
@@ -51,8 +52,8 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; llm?: LLMProvider; profileDir?: string }): ToolContext {
-  const { db, embedding, lance, vaultPath, llm, profileDir } = deps;
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string }): ToolContext {
+  const { db, embedding, lance, vaultPath, dbPath, llm, profileDir } = deps;
   const outputsDir = join(vaultPath, "outputs");
   const logger = new Logger(outputsDir);
   const pages = new PageManager(db, vaultPath, logger);
@@ -71,5 +72,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const profile = new ProfileManager(profileDir ?? join(vaultPath, ".."));
   profile.load();
 
-  return { db, vaultPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile };
+  return { db, vaultPath, dbPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile };
 }
