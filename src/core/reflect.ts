@@ -209,8 +209,6 @@ export class ReflectManager {
           keyFacts: r.parsed.key_facts ?? [],
           confidence: r.parsed.confidence ?? 0.5,
         });
-        const body = [r.parsed.summary!, "", ...(r.parsed.key_facts ?? []).map((f) => `- ${f}`)].join("\n");
-        this.pageMgr.update(r.slug, { body });
       }
     }
 
@@ -385,8 +383,6 @@ export class ReflectManager {
           keyFacts: r.parsed.key_facts ?? [],
           confidence: r.parsed.confidence ?? 0.5,
         });
-        const body = [r.parsed.summary!, "", ...(r.parsed.key_facts ?? []).map((f) => `- ${f}`)].join("\n");
-        this.pageMgr.update(r.slug, { body });
       }
     }
 

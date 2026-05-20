@@ -184,4 +184,38 @@ describe("LanceDBManager", () => {
     const results = await manager.search(makeVector(0), 10);
     expect(results).toHaveLength(0);
   });
+
+  // ─── Warmup ─────────────────────────────────────────────────────
+
+  test("warmup pre-loads chunks table", async () => {
+    const result = await manager.warmup();
+
+    expect(result.tables).toContain("chunks");
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test("warmup on empty database does not throw", async () => {
+    const result = await manager.warmup();
+    expect(result.tables).toContain("chunks");
+  });
+
+  test("warmup caches tables — subsequent getOrCreateTable is instant", async () => {
+    await manager.warmup();
+
+    // Second access should hit the Map cache (no disk I/O)
+    const before = Date.now();
+    // Access private method via type assertion for cache verification
+    const table = await (manager as unknown as { getOrCreateTable: (n: string, s: unknown) => Promise<unknown> })
+      .getOrCreateTable("chunks", undefined as unknown);
+    expect(table).toBeDefined();
+    const elapsed = Date.now() - before;
+    expect(elapsed).toBeLessThan(50);
+  });
+
+  test("warmup after adding data does not throw", async () => {
+    await manager.addChunks(makeChunks(5, "entities/warmup-test"));
+    const result = await manager.warmup();
+
+    expect(result.tables).toContain("chunks");
+  });
 });

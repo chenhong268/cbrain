@@ -67,12 +67,12 @@ export class VersionManager {
     }
     fm = { ...fm, updated_at: new Date().toISOString() };
 
+    // Snapshot current content BEFORE overwriting
+    this.createVersion(slug);
+
     const filePath = join(this.vaultPath, page.file_path);
     const content = stringifyFrontmatter(fm, ver.content);
     writeFileSync(filePath, content, "utf-8");
-
-    // Create a version snapshot before reverting
-    this.createVersion(slug);
 
     // Re-sync the page in DB
     this.pages.update(slug, { body: ver.content });

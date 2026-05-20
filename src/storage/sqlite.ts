@@ -1108,7 +1108,7 @@ export class CBrainDB {
     const rows = this.prepare(
       `SELECT DISTINCT context FROM links WHERE context IS NOT NULL AND context != ''
          AND (from_slug IN (${placeholders}) OR to_slug IN (${placeholders}))`
-    ).all(...slugs) as Array<{ context: string }>;
+    ).all(...slugs, ...slugs) as Array<{ context: string }>;
     return rows.map(r => r.context);
   }
 

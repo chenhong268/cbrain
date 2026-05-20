@@ -95,6 +95,9 @@ export class ContentPipeline {
     embedResults: Array<{ embedding: number[]; tokenCount: number }>
   ): void {
     if (chunks.length === 0) return;
+    if (chunks.length !== embedResults.length) {
+      throw new Error(`writeIndexes: chunks(${chunks.length}) and embeddings(${embedResults.length}) count mismatch for ${slug}`);
+    }
 
     this.lance.deleteByPageSlug(slug);
     this.lance.addChunks(

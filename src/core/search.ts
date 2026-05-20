@@ -233,7 +233,7 @@ export class HybridSearch {
     const results = this.db.ftsSearch(query, limit);
     return results.map((r) => ({
       slug: r.page_slug,
-      score: 1 / (1 - r.rank),
+      score: 1 / (1 - Math.min(r.rank, 0.999)),
       snippet: r.content.slice(0, 200),
       source: "fts" as const,
     }));

@@ -76,6 +76,31 @@ export class LanceDBManager {
     return table;
   }
 
+  // ─── Warmup ────────────────────────────────────────────────────
+
+  async warmup(): Promise<{ tables: string[]; elapsedMs: number }> {
+    const start = Date.now();
+    const loaded: string[] = [];
+
+    const chunksTable = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    loaded.push("chunks");
+
+    try {
+      await this.getOrCreateTable("insights", INSIGHTS_SCHEMA);
+      loaded.push("insights");
+    } catch {
+      // insights table may not exist yet — not critical
+    }
+
+    try {
+      await chunksTable.search(new Float32Array(VECTOR_DIMENSIONS)).limit(1).toArray();
+    } catch {
+      // Empty table — search fails, that's fine
+    }
+
+    return { tables: loaded, elapsedMs: Date.now() - start };
+  }
+
   // ─── Chunks table ──────────────────────────────────────────────
 
   async addChunks(chunks: ChunkData[]): Promise<void> {

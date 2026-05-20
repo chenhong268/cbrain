@@ -35,6 +35,8 @@ export function register(program: Command) {
 
       if (opts.http) {
         await deps.lance.connect(config.lancePath);
+        const warmupResult = await deps.lance.warmup();
+        console.error(`> LanceDB warmed up (${warmupResult.elapsedMs}ms, tables: ${warmupResult.tables.join(", ")})`);
         const ctx = buildContext(deps);
         await initWatcher(config, deps);
         const server = createHttpServer(ctx);
@@ -44,15 +46,14 @@ export function register(program: Command) {
         return;
       }
 
-      // Start MCP server immediately — LanceDB loads in background
+      // Load LanceDB + warmup before MCP server starts
       const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+      await deps.lance.connect(config.lancePath);
+      const warmupResult = await deps.lance.warmup();
+      console.error(`> LanceDB warmed up (${warmupResult.elapsedMs}ms, tables: ${warmupResult.tables.join(", ")})`);
+
       const mcpServer = createServer(deps);
       const mcpReady = mcpServer.connect(new StdioServerTransport());
-
-      // Load LanceDB and watcher in background during MCP handshake
-      deps.lance.connect(config.lancePath).then(() => {
-        console.error("> LanceDB connected");
-      });
       await initWatcher(config, deps);
       console.error("");
       await mcpReady;
