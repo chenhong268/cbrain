@@ -4,6 +4,7 @@ import { loadConfig, createDeps } from "../context.js";
 import { createServer } from "../../mcp/server.js";
 import { buildContext } from "../../mcp/context.js";
 import { createHttpServer } from "../../http/server.js";
+import { PidLock } from "../../utils/pid-lock.js";
 
 async function initWatcher(config: ReturnType<typeof loadConfig>, deps: ReturnType<typeof createDeps>): Promise<void> {
   const { PageManager } = await import("../../core/page.js");
@@ -29,9 +30,17 @@ export function register(program: Command) {
     .description("Start MCP server (stdio transport)")
     .option("--http", "Start as HTTP server instead of stdio MCP")
     .option("--port <port>", "HTTP port", "3399")
+    .option("--force", "Skip PID lock check")
     .action(async (opts) => {
       const config = loadConfig();
       const deps = createDeps(config);
+
+      const lock = new PidLock(deps.profileDir!, opts.http ? "http" : "stdio");
+      lock.acquire(opts.force);
+      const cleanup = () => lock.release();
+      process.on("SIGTERM", cleanup);
+      process.on("SIGINT", cleanup);
+      process.on("exit", cleanup);
 
       if (opts.http) {
         await deps.lance.connect(config.lancePath);
