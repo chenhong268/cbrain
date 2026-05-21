@@ -26,10 +26,27 @@ export interface ExtractedEvent {
   participants: string[];
 }
 
+export interface StructuredFact {
+  entity: string;
+  field: string;
+  value: string;
+  confidence: number;
+  evidence: string;
+}
+
+export const FACT_FIELD_WHITELIST: Record<EntityType, string[]> = {
+  person: ["birthday", "birthplace", "english_name", "current_title", "organization", "reports_to"],
+  company: ["location", "industry", "founded_year"],
+  product: ["generic_name", "brand_name"],
+  location: [],
+  concept: [],
+};
+
 export interface ExtractionResult {
   entities: ExtractedEntity[];
   relations: ExtractedRelation[];
   events: ExtractedEvent[];
+  facts: StructuredFact[];
 }
 
 // ─── Post-extraction classification (safety net) ──────────
@@ -174,8 +191,22 @@ Only extract if the term is a named methodology/theory/framework/effect/law/mode
 ## Events
 Include specific dates (YYYY-MM-DD, Q1 2026) or clear time references. Skip vague ("近年来", "recently"). Participants must be named entities.
 
+## Structured Facts
+Extract concrete, verifiable facts about entities as key-value pairs. Only extract fields listed below — skip anything not in the whitelist.
+
+Field whitelist by entity type:
+- person: birthday, birthplace, english_name, current_title, organization, reports_to
+- company: location, industry, founded_year
+- product: generic_name, brand_name
+
+Rules:
+- Every fact MUST have an evidence field: a verbatim quote from the source text
+- Do NOT infer or fabricate — only extract explicitly stated facts
+- Skip vague or uninformative values
+- confidence: 0.0-1.0, how certain the fact is based on the evidence
+
 ## Output format (JSON only, no markdown wrap):
-{"entities": [{"name": "...", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "..."}], "events": [{"date": "YYYY-MM-DD|null", "description": "...", "participants": ["..."]}]}
+{"entities": [{"name": "...", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "..."}], "events": [{"date": "YYYY-MM-DD|null", "description": "...", "participants": ["..."]}], "facts": [{"entity": "...", "field": "...", "value": "...", "confidence": 0.9, "evidence": "verbatim quote"}]}
 
 Limits: max 8 entities + 3 concepts = 11 total. Return ONLY valid JSON.`;
 
@@ -282,6 +313,20 @@ function mergeEvents(chunks: ExtractedEvent[][]): ExtractedEvent[] {
   return merged;
 }
 
+function mergeFacts(chunks: StructuredFact[][]): StructuredFact[] {
+  const best = new Map<string, StructuredFact>();
+  for (const chunk of chunks) {
+    for (const f of chunk) {
+      const key = `${f.entity}|${f.field}`;
+      const existing = best.get(key);
+      if (!existing || f.confidence > existing.confidence) {
+        best.set(key, f);
+      }
+    }
+  }
+  return [...best.values()];
+}
+
 // ─── NER Engine ─────────────────────────────────────────────
 
 export class NerEngine {
@@ -293,7 +338,7 @@ export class NerEngine {
 
   async extract(text: string): Promise<ExtractionResult> {
     if (!text.trim()) {
-      return { entities: [], relations: [], events: [] };
+      return { entities: [], relations: [], events: [], facts: [] };
     }
 
     const CHUNK_SIZE = 2500;
@@ -302,19 +347,22 @@ export class NerEngine {
 
     let allEntities: ExtractedEntity[];
     let allEvents: ExtractedEvent[];
+    let allFacts: StructuredFact[];
 
     if (chunks.length === 1) {
       // Short text fast path — single chunk, no parallelism overhead
-      const { entities, events } = await this.llm.chat([
+      const { entities, events, facts } = await this.llm.chat([
         { role: "system", content: ENTITY_GUIDELINE },
         { role: "user", content: chunks[0] },
       ]).then(raw => this.parseEntityResponse(raw));
       allEntities = entities;
       allEvents = events;
+      allFacts = facts;
     } else {
       // Multi-chunk: batch parallel extraction
       const allEntityChunks: ExtractedEntity[][] = [];
       const allEventChunks: ExtractedEvent[][] = [];
+      const allFactChunks: StructuredFact[][] = [];
       const CONCURRENCY = 5;
 
       for (let i = 0; i < chunks.length; i += CONCURRENCY) {
@@ -327,18 +375,20 @@ export class NerEngine {
             ]).then(raw => this.parseEntityResponse(raw))
           )
         );
-        for (const { entities, events } of results) {
+        for (const { entities, events, facts } of results) {
           allEntityChunks.push(entities);
           allEventChunks.push(events);
+          allFactChunks.push(facts);
         }
       }
       allEntities = mergeEntities(allEntityChunks);
       allEvents = mergeEvents(allEventChunks);
+      allFacts = mergeFacts(allFactChunks);
     }
 
     const filtered = filterEntities(allEntities);
     if (filtered.length === 0) {
-      return { entities: [], relations: [], events: allEvents };
+      return { entities: [], relations: [], events: allEvents, facts: [] };
     }
 
     // Stage 2: Extract relations — feed extracted entity names as context
@@ -350,10 +400,10 @@ export class NerEngine {
     ]);
     const relations = this.parseRelationResponse(stage2, new Set(entityNames));
 
-    return { entities: filtered, relations, events: allEvents };
+    return { entities: filtered, relations, events: allEvents, facts: allFacts };
   }
 
-  private parseEntityResponse(raw: string): { entities: ExtractedEntity[]; events: ExtractedEvent[] } {
+  private parseEntityResponse(raw: string): { entities: ExtractedEntity[]; events: ExtractedEvent[]; facts: StructuredFact[] } {
     try {
       const cleaned = raw.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "");
       const parsed = JSON.parse(cleaned);
@@ -372,13 +422,24 @@ export class NerEngine {
         }
       }
 
+      const facts: StructuredFact[] = (Array.isArray(parsed.facts) ? parsed.facts : [])
+        .filter((f: Record<string, unknown>) => f.entity && f.field && f.value && f.evidence)
+        .map((f: Record<string, unknown>) => ({
+          entity: String(f.entity),
+          field: String(f.field),
+          value: String(f.value),
+          confidence: typeof f.confidence === "number" ? f.confidence : 0.5,
+          evidence: String(f.evidence),
+        }));
+
       return {
         entities,
         events: Array.isArray(parsed.events) ? parsed.events : [],
+        facts,
       };
     } catch (e) {
       console.error("[ner] stage1 JSON 解析失败", e);
-      return { entities: [], events: [] };
+      return { entities: [], events: [], facts: [] };
     }
   }
 

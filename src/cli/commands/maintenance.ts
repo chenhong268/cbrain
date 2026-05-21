@@ -608,4 +608,44 @@ export function register(program: Command) {
       }
       deps.db.close();
     });
+
+  program
+    .command("backfill")
+    .description("Backfill structured facts for existing entities (dry-run by default)")
+    .option("--apply", "Actually write to frontmatter (default is dry-run)")
+    .option("--limit <n>", "Max entities to scan", "50")
+    .option("--slug <slug>", "Target a single entity by slug")
+    .option("--fields <list>", "Comma-separated field names to backfill")
+    .action(async (opts) => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      if (!deps.llm) {
+        console.error("No LLM configured — backfill requires an LLM provider");
+        process.exit(1);
+      }
+
+      const { structuredFactsBackfill } = await import("../../core/structured-facts-backfill.js");
+      const report = await structuredFactsBackfill(deps.db, config.vaultPath, deps.llm, {
+        apply: opts.apply === true,
+        limit: parseInt(opts.limit, 10) || 50,
+        slug: opts.slug,
+        onlyFields: opts.fields ? opts.fields.split(",").map((f: string) => f.trim()) : undefined,
+      });
+
+      console.log(`Scanned:    ${report.scanned}`);
+      console.log(`Would apply: ${report.wouldApply}`);
+      console.log(`Conflicts:  ${report.conflicts}`);
+      console.log(`Skipped:    ${report.skipped}`);
+
+      if (report.examples.length > 0) {
+        console.log("\nExamples:");
+        for (const ex of report.examples.slice(0, 10)) {
+          const cur = ex.current ? ` (current: ${ex.current})` : " (empty)";
+          console.log(`  ${ex.slug}.${ex.field} = ${ex.proposed}${cur}`);
+          console.log(`    evidence: ${ex.evidence}`);
+        }
+      }
+
+      deps.db.close();
+    });
 }

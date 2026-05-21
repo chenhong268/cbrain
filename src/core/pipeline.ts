@@ -3,6 +3,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { ExtractionResult } from "./ner.js";
+import { validateFacts, applyFacts } from "./structured-facts.js";
 import { PageManager } from "./page.js";
 import { extractWikiLinks, isValidEntityName } from "./extract.js";
 import type { Logger } from "./logger.js";
@@ -32,6 +33,7 @@ export interface NerPipelineResult {
   entities: number;
   relations: number;
   events: number;
+  factsWritten: number;
   stubsCreated: string[];
   lowRelevanceSkipped: number;
   details: {
@@ -265,6 +267,26 @@ export class ContentPipeline {
       }
     }
 
+    // Structured facts: validate and write to frontmatter
+    let factsWritten = 0;
+    if (extraction.facts.length > 0 && this.pages) {
+      const validEntityNames = new Set(extraction.entities.map(e => e.name));
+      const entityTypeMap = new Map(extraction.entities.map(e => [e.name, e.type]));
+      const resolvedForFacts = new Map<string, string>();
+      for (const entity of extraction.entities) {
+        const result = resolutionMap.get(entity.name);
+        if (result && (result.action === "resolved_to_existing" || result.action === "alias_added")) {
+          resolvedForFacts.set(entity.name, result.slug);
+        }
+      }
+      const valid = validateFacts(extraction.facts, validEntityNames, entityTypeMap);
+      const factResult = applyFacts(valid, resolvedForFacts, this.pages, this.db);
+      factsWritten = factResult.written;
+      if (factResult.conflicts.length > 0) {
+        this.logger?.info("pipeline", "facts skipped (fields already set)", { conflicts: factResult.conflicts });
+      }
+    }
+
     const writtenRelations: Array<{ from: string; to: string; relation: string }> = [];
     for (const rel of extraction.relations) {
       const from = entitySlugMap.get(rel.from) ?? findEntitySlug(this.db, rel.from);
@@ -300,6 +322,7 @@ export class ContentPipeline {
       entities: extraction.entities.length,
       relations: extraction.relations.length,
       events: extraction.events.length,
+      factsWritten,
       stubsCreated: [...stubsCreated],
       lowRelevanceSkipped,
       details: {

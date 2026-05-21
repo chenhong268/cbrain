@@ -317,4 +317,82 @@ describe("NerEngine", () => {
     expect(conceptCount).toBeLessThanOrEqual(3);
     expect(result.entities.length).toBeLessThanOrEqual(11);
   });
+
+  // ─── Structured Facts ───────────────────────────
+
+  test("extracts structured facts from LLM response", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [
+          { name: "张三", type: "person", relevance: "high", context: "张三是上海人，1985年出生" },
+        ],
+        events: [],
+        facts: [
+          { entity: "张三", field: "birthplace", value: "上海", confidence: 0.9, evidence: "张三是上海人" },
+          { entity: "张三", field: "birthday", value: "1985", confidence: 0.8, evidence: "1985年出生" },
+        ],
+      }),
+      JSON.stringify({ relations: [] }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("张三是上海人，1985年出生");
+
+    expect(result.facts).toHaveLength(2);
+    expect(result.facts[0].field).toBe("birthplace");
+    expect(result.facts[0].value).toBe("上海");
+    expect(result.facts[1].field).toBe("birthday");
+  });
+
+  test("filters facts missing required fields", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [{ name: "张三", type: "person", relevance: "high", context: "张三" }],
+        events: [],
+        facts: [
+          { entity: "张三", field: "birthday", value: "1985", confidence: 0.9 },
+          { entity: "张三", field: "birthplace", value: "", confidence: 0.8, evidence: "上海人" },
+        ],
+      }),
+      JSON.stringify({ relations: [] }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("张三");
+
+    expect(result.facts).toHaveLength(0);
+  });
+
+  test("returns empty facts array for empty text", async () => {
+    const engine = new NerEngine(createMockLLM([]));
+    const result = await engine.extract("");
+    expect(result.facts).toEqual([]);
+  });
+
+  test("deduplicates facts across chunks keeping highest confidence", async () => {
+    const longText = "张三是上海人。张三来自上海。".repeat(200);
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [{ name: "张三", type: "person", relevance: "high", context: "张三" }],
+        events: [],
+        facts: [
+          { entity: "张三", field: "birthplace", value: "上海", confidence: 0.7, evidence: "张三是上海人" },
+        ],
+      }),
+      JSON.stringify({
+        entities: [{ name: "张三", type: "person", relevance: "high", context: "张三" }],
+        events: [],
+        facts: [
+          { entity: "张三", field: "birthplace", value: "上海", confidence: 0.9, evidence: "张三来自上海" },
+        ],
+      }),
+      JSON.stringify({ relations: [] }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract(longText);
+
+    expect(result.facts).toHaveLength(1);
+    expect(result.facts[0].confidence).toBe(0.9);
+  });
 });

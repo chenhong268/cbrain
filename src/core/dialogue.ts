@@ -9,11 +9,14 @@ import {
   ExtractedEntity,
   ExtractedRelation,
   ExtractedEvent,
+  StructuredFact,
+  FACT_FIELD_WHITELIST,
+  type EntityType,
 } from "./ner.js";
 import { findEntitySlug, mapEntityType, buildStubBody, hashContent, normalizeRelation } from "./shared.js";
 import { EntityResolver } from "./entity-resolver.js";
 import { generateSlug, slugToFilePath } from "../utils/slug.js";
-import { stringifyFrontmatter } from "../utils/frontmatter.js";
+import { stringifyFrontmatter, readPageFile, writePageFile } from "../utils/frontmatter.js";
 
 export type DialogueMode = "auto" | "manual";
 
@@ -43,8 +46,16 @@ const DIALOGUE_PROMPT = `You are extracting knowledge from a conversation (dialo
 {
   "entities": [{ "name": "实体名", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文片段" }],
   "relations": [{ "from": "实体A", "to": "实体B", "relation": "RELATION_TYPE", "context": "原文依据" }],
-  "events": [{ "date": "YYYY-MM-DD or null", "description": "事件描述", "participants": ["参与人/组织"] }]
+  "events": [{ "date": "YYYY-MM-DD or null", "description": "事件描述", "participants": ["参与人/组织"] }],
+  "facts": [{ "entity": "实体名", "field": "字段名", "value": "值", "confidence": 0.9, "evidence": "原文引用" }]
 }
+
+## Structured Facts
+Extract concrete key-value facts about entities. Field whitelist by entity type:
+- person: birthday, birthplace, english_name, current_title, organization, reports_to
+- company: location, industry, founded_year
+- product: generic_name, brand_name
+Every fact MUST have an evidence field (verbatim quote). No inference.
 
 ## Rules
 1. Only extract information explicitly stated — no inference
@@ -77,7 +88,14 @@ If the text is chit-chat, greetings, commands, code debugging, opinions without 
 - "low" = incidental mention → ALWAYS skipped in auto mode
 
 ## Output Schema (strict JSON):
-{"should_ingest": boolean, "entities": [{"name": "实体名", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文片段"}], "relations": [{"from": "实体A", "to": "实体B", "relation": "RELATION_TYPE", "context": "原文依据"}], "events": [{"date": "YYYY-MM-DD or null", "description": "事件描述", "participants": ["参与人/组织"]}]}
+{"should_ingest": boolean, "entities": [{"name": "实体名", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "原文片段"}], "relations": [{"from": "实体A", "to": "实体B", "relation": "RELATION_TYPE", "context": "原文依据"}], "events": [{"date": "YYYY-MM-DD or null", "description": "事件描述", "participants": ["参与人/组织"]}], "facts": [{"entity": "实体名", "field": "字段名", "value": "值", "confidence": 0.9, "evidence": "原文引用"}]}
+
+## Structured Facts
+Extract concrete key-value facts about entities. Field whitelist by entity type:
+- person: birthday, birthplace, english_name, current_title, organization, reports_to
+- company: location, industry, founded_year
+- product: generic_name, brand_name
+Every fact MUST have an evidence field (verbatim quote). No inference.
 
 ## Rules
 1. Only extract information explicitly stated — no inference
@@ -155,6 +173,7 @@ export class DialogueIngest {
         entities: Array.isArray(parsed.entities) ? parsed.entities : [],
         relations: Array.isArray(parsed.relations) ? parsed.relations : [],
         events: Array.isArray(parsed.events) ? parsed.events : [],
+        facts: Array.isArray(parsed.facts) ? parsed.facts : [],
       };
     } catch (e) {
       console.error("[dialogue] LLM 响应 JSON 解析失败", e);
@@ -238,6 +257,62 @@ export class DialogueIngest {
         entitySlugMap.set(entity.name, slug);
         this.db.incrementMentionCount(slug);
         newEntities++;
+      }
+    }
+
+    // Structured facts — only for resolved entities, fill empty fields only
+    if (result.facts.length > 0) {
+      const validEntityNames = new Set(result.entities.map(e => e.name));
+      const entityTypeMap = new Map<string, EntityType>(
+        result.entities.map(e => [e.name, e.type])
+      );
+      const resolvedForFacts = new Map<string, string>();
+      for (const entity of result.entities) {
+        const r = resolutionMap.get(entity.name);
+        if (r && (r.action === "resolved_to_existing" || r.action === "alias_added")) {
+          resolvedForFacts.set(entity.name, r.slug);
+        }
+      }
+
+      const validFacts = result.facts
+        .filter(f => f.entity && f.field && f.value && f.evidence)
+        .filter(f => validEntityNames.has(f.entity))
+        .filter(f => {
+          const et = entityTypeMap.get(f.entity);
+          if (!et) return false;
+          const allowed = FACT_FIELD_WHITELIST[et];
+          return allowed && allowed.includes(f.field);
+        });
+
+      // Deduplicate by entity|field, keep highest confidence
+      const bestFacts = new Map<string, StructuredFact>();
+      for (const f of validFacts) {
+        const key = `${f.entity}|${f.field}`;
+        const existing = bestFacts.get(key);
+        if (!existing || f.confidence > existing.confidence) {
+          bestFacts.set(key, f);
+        }
+      }
+
+      for (const fact of bestFacts.values()) {
+        const slug = resolvedForFacts.get(fact.entity);
+        if (!slug) continue;
+
+        const page = this.db.getPage(slug);
+        if (!page) continue;
+
+        const filePath = join(this.vaultPath, page.file_path);
+        try {
+          const { frontmatter, body } = readPageFile(filePath);
+          const current = frontmatter[fact.field];
+          if (current !== undefined && current !== null && current !== "") continue;
+
+          frontmatter[fact.field] = fact.value;
+          frontmatter.updated_at = new Date().toISOString();
+          writePageFile(filePath, frontmatter, body);
+        } catch {
+          // File read/write error — skip silently
+        }
       }
     }
 
