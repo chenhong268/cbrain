@@ -72,7 +72,6 @@ const MIN_NEIGHBORS = 5;
 const MIN_CONFIDENCE = 0.7;
 const BATCH_SIZE = 15;
 const TITLE_SAFETY_LIMIT = 10;
-const MAX_CONTEXT_CHARS = 12000;
 const CONCURRENCY = 3;
 
 const W_PATH = 0.35;
@@ -222,6 +221,7 @@ export class ReflectManager {
   private async generateInsights(): Promise<GeneratedInsight[]> {
     if (!this.llm) return [];
 
+    const existingSigs = this.buildExistingInsightSigs();
     const candidates = this.db.getHighMentionEntities(MIN_MENTIONS);
     const limit = Math.min(candidates.length, MAX_LLM_CALLS);
     const tasks = candidates.slice(0, limit).map((c) => ({ slug: c.slug, context: this.buildEntityContext(c.slug) }));
@@ -245,9 +245,13 @@ export class ReflectManager {
           const confidence = item.confidence ?? 0.5;
           if (confidence < MIN_CONFIDENCE) continue;
 
+          const entities = item.related_entities ?? [r.slug];
+          const sig = new Set(entities);
+          if (existingSigs.some((s) => s.size === sig.size && [...s].every((e) => sig.has(e)))) continue;
+
           const insight: GeneratedInsight = {
             content: item.content,
-            relatedEntities: item.related_entities ?? [r.slug],
+            relatedEntities: entities,
             type: item.type ?? "pattern",
             confidence,
           };
@@ -276,6 +280,7 @@ export class ReflectManager {
   private async generateInsightsForSlugs(slugs: string[]): Promise<GeneratedInsight[]> {
     if (!this.llm || slugs.length === 0) return [];
 
+    const existingSigs = this.buildExistingInsightSigs();
     const tasks = slugs.map((slug) => ({ slug, context: this.buildEntityContext(slug) })).filter((t) => t.context !== null);
     const results: GeneratedInsight[] = [];
 
@@ -296,9 +301,13 @@ export class ReflectManager {
           const confidence = item.confidence ?? 0.5;
           if (confidence < MIN_CONFIDENCE) continue;
 
+          const entities = item.related_entities ?? [r.slug];
+          const sig = new Set(entities);
+          if (existingSigs.some((s) => s.size === sig.size && [...s].every((e) => sig.has(e)))) continue;
+
           const insight: GeneratedInsight = {
             content: item.content,
-            relatedEntities: item.related_entities ?? [r.slug],
+            relatedEntities: entities,
             type: item.type ?? "pattern",
             confidence,
           };
