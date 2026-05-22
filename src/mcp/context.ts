@@ -56,7 +56,7 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const { db, embedding, lance, vaultPath, dbPath, llm, profileDir } = deps;
   const outputsDir = join(vaultPath, "outputs");
   const logger = new Logger(outputsDir);
-  const pages = new PageManager(db, vaultPath, logger);
+  const pages = new PageManager(db, vaultPath, logger, lance);
   const search = new HybridSearch(db, embedding, lance, { llm });
   const nerEngine = llm ? new NerEngine(llm) : undefined;
   const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger });

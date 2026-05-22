@@ -1,8 +1,9 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { PageManager } from "../../src/core/page.js";
+import type { LanceDBManager } from "../../src/storage/lancedb.js";
 
 describe("PageManager", () => {
   const testDir = "/tmp/cbrain-test-pages";
@@ -95,17 +96,32 @@ describe("PageManager", () => {
     expect(result).toBeNull();
   });
 
-  test("delete page removes file and index", () => {
+  test("delete page removes file and index", async () => {
     pm.create({ title: "临时", type: "concept", body: "要删的" });
     const slug = "brain/concepts/临时";
 
     const filePath = join(vaultPath, "brain/concepts/临时.md");
     expect(existsSync(filePath)).toBe(true);
 
-    const result = pm.delete(slug);
+    const result = await pm.delete(slug);
     expect(result).toBe(true);
     expect(existsSync(filePath)).toBe(false);
     expect(pm.getBySlug(slug)).toBeNull();
+  });
+
+  test("delete cleans up LanceDB vectors", async () => {
+    const deletedSlugs: string[] = [];
+    const lanceMock = {
+      deleteByPageSlug: mock(async (slug: string) => { deletedSlugs.push(slug); }),
+    } as unknown as LanceDBManager;
+    const pmWithLance = new PageManager(db, vaultPath, undefined, lanceMock);
+    pmWithLance.create({ title: "临时", type: "concept", body: "要删的" });
+    const slug = "brain/concepts/临时";
+
+    const result = await pmWithLance.delete(slug);
+
+    expect(result).toBe(true);
+    expect(deletedSlugs).toEqual([slug]);
   });
 
   test("increment mention count", () => {
@@ -116,7 +132,7 @@ describe("PageManager", () => {
     expect(page!.mention_count).toBe(1);
   });
 
-  test("merge source into target deletes source, moves links, appends body", () => {
+  test("merge source into target deletes source, moves links, appends body", async () => {
     pm.create({ title: "王强", type: "entity", body: "Source body content." });
     pm.create({ title: "王强-1", type: "entity", body: "Target body content." });
 
@@ -128,7 +144,7 @@ describe("PageManager", () => {
     db.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run(sourceSlug, "brain/entities/某公司", "认识");
 
-    const merged = pm.merge(sourceSlug, targetSlug);
+    const merged = await pm.merge(sourceSlug, targetSlug);
     expect(merged).not.toBeNull();
     expect(merged!.slug).toBe(targetSlug);
 
@@ -145,5 +161,24 @@ describe("PageManager", () => {
       "SELECT from_slug FROM links WHERE from_slug = ? AND to_slug = ?"
     ).get(targetSlug, "brain/entities/某公司");
     expect(link).toBeDefined();
+  });
+
+  test("merge cleans up source LanceDB vectors", async () => {
+    const deletedSlugs: string[] = [];
+    const lanceMock = {
+      deleteByPageSlug: mock(async (slug: string) => { deletedSlugs.push(slug); }),
+    } as unknown as LanceDBManager;
+    const pmWithLance = new PageManager(db, vaultPath, undefined, lanceMock);
+    pmWithLance.create({ title: "源", type: "entity", body: "Source." });
+    pmWithLance.create({ title: "目标", type: "entity", body: "Target." });
+
+    const sourceSlug = "brain/entities/源";
+    const targetSlug = "brain/entities/目标";
+
+    const merged = await pmWithLance.merge(sourceSlug, targetSlug);
+
+    expect(merged).not.toBeNull();
+    expect(merged!.slug).toBe(targetSlug);
+    expect(deletedSlugs).toEqual([sourceSlug]);
   });
 });

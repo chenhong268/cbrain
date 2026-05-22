@@ -353,7 +353,7 @@ export class SyncManager {
       } catch {
         orphans.push(page.slug);
         if (this.pages) {
-          this.pages.delete(page.slug);
+          await this.pages.delete(page.slug);
         } else {
           this.db.deletePage(page.slug);
         }

@@ -82,7 +82,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const pages = new (await import("../../core/page.js")).PageManager(db, config.vaultPath);
-      if (pages.delete(slug)) { console.log(`Deleted: ${slug}`); }
+      if (await pages.delete(slug)) { console.log(`Deleted: ${slug}`); }
       else { console.error(`Page not found: ${slug}`); process.exit(1); }
       db.close();
     });

@@ -17,6 +17,7 @@ import {
 import { generateSlug, slugToFilePath, canonicalSlug } from "../utils/slug.js";
 import { hashContent, normalizePageType, canMerge, getLayer, rewriteVaultLinks } from "./shared.js";
 import type { Logger } from "./logger.js";
+import type { LanceDBManager } from "../storage/lancedb.js";
 
 export interface CreatePageInput {
   title: string;
@@ -49,14 +50,16 @@ export class PageManager {
   private db: CBrainDB;
   readonly vaultPath: string;
   private logger: Logger | null;
+  private lance: LanceDBManager | null;
   private cache = new Map<string, { page: Page; expires: number }>();
   private static CACHE_MAX = 200;
   private static CACHE_TTL = 30_000;
 
-  constructor(db: CBrainDB, vaultPath: string, logger?: Logger) {
+  constructor(db: CBrainDB, vaultPath: string, logger?: Logger, lance?: LanceDBManager) {
     this.db = db;
     this.vaultPath = vaultPath;
     this.logger = logger ?? null;
+    this.lance = lance ?? null;
   }
 
   private cacheGet(slug: string): Page | null {
@@ -210,7 +213,7 @@ export class PageManager {
     return this.getBySlug(slug);
   }
 
-  delete(slug: string): boolean {
+  async delete(slug: string): Promise<boolean> {
     const filePath = this.db.getPageFilePath(slug);
     if (filePath === null) return false;
 
@@ -226,6 +229,9 @@ export class PageManager {
     }
 
     this.db.deletePageCascaded(slug);
+    if (this.lance) {
+      await this.lance.deleteByPageSlug(slug);
+    }
     this.cacheDelete(slug);
 
     this.logger?.info("page", "页面已删除", { slug });
@@ -293,7 +299,7 @@ export class PageManager {
    * are moved from source to target. Source body is appended to target body.
    * Source page is deleted after merge. Returns the merged page or null.
    */
-  merge(sourceSlug: string, targetSlug: string): Page | null {
+  async merge(sourceSlug: string, targetSlug: string): Promise<Page | null> {
     const source = this.getBySlug(sourceSlug);
     const target = this.getBySlug(targetSlug);
     if (!source || !target) { this.logger?.error("page", "合并失败：页面不存在", { source: sourceSlug, target: targetSlug }); return null; }
@@ -361,7 +367,7 @@ export class PageManager {
     this.cacheDelete(targetSlug);
 
     // Delete source page (file + index)
-    this.delete(sourceSlug);
+    await this.delete(sourceSlug);
 
     this.logger?.info("page", "页面已合并", { source: sourceSlug, target: targetSlug });
     return this.getBySlug(targetSlug);

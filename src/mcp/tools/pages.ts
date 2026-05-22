@@ -160,7 +160,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       slug: z.string().describe("Page slug to delete"),
     },
   }, async ({ slug }) => {
-    const success = ctx.pages.delete(slug);
+    const success = await ctx.pages.delete(slug);
     return {
       content: [{ type: "text", text: JSON.stringify({ success, slug }) }],
     };
@@ -235,7 +235,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       };
     }
 
-    const result = ctx.pages.merge(source, target);
+    const result = await ctx.pages.merge(source, target);
     if (!result) {
       return {
         content: [{ type: "text", text: JSON.stringify({ success: false, error: "Merge failed — check that both slugs exist and are different" }) }],
