@@ -1,6 +1,13 @@
 # Changelog
 
-> Current: `v1.8.0` — 页级摘要压缩 Seal：将碎片化 raw chunks 自动压缩为 L1 摘要，搜索优先返回摘要。
+> Current: `v1.8.1` — 搜索管道三大 bug 修复：smart 短路、短查询跳向量、graph 通道失效。
+
+## [v1.8.1] — 2026-05-22
+
+### Bug 修复
+- **Smart 模式不再走 FTS 捷径**（#30）：recall.ts smart 策略有 FTS 结果就短路返回，跳过 vector/graph/temporal/RRF。现在始终走完整 hybrid pipeline
+- **短查询不再跳过向量搜索**（#30）：查询 < 4 字符时只用 FTS+temporal，中文人名/公司名 2-3 字全中招。现在所有查询走完整 hybrid，保留精确标题匹配快路径
+- **Graph 通道不再形同虚设**（#30）：`graphSearch` 接收原始 query 做 BFS 但需要 slug 匹配，自然语言永远匹配不到。现在调用前先 resolveSlugs 转换
 
 ## [v1.8.0] — 2026-05-20
 
