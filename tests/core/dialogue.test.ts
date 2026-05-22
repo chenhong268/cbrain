@@ -353,7 +353,7 @@ describe("DialogueIngest", () => {
       expect(result.newRelations).toBe(1);
     });
 
-    test("medium relevance entities go to candidate log only, no stub file", async () => {
+    test("medium relevance entities filtered in auto mode, no stub file", async () => {
       const llm = createMockLLM([
         JSON.stringify({
           should_ingest: true,
@@ -375,11 +375,10 @@ describe("DialogueIngest", () => {
       expect(result.newEntities).toBe(0);
       expect(result.skipped).toBe(1);
 
-      // Candidate log should exist
-      const candidateLogs = db.prepare("SELECT * FROM ingest_log WHERE action = 'candidate'").all() as any[];
-      expect(candidateLogs.length).toBe(1);
-      const details = JSON.parse(candidateLogs[0].details);
-      expect(details.name).toBe("孙八");
+      // Filtered report should contain the medium entity
+      expect(result.filtered.length).toBe(1);
+      expect(result.filtered[0].name).toBe("孙八");
+      expect(result.filtered[0].reason).toContain("auto_medium_skipped");
 
       // No stub file created
       const page = db.prepare("SELECT * FROM pages WHERE title = '孙八'").get() as any;

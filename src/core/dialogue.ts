@@ -12,6 +12,9 @@ import {
   StructuredFact,
   FACT_FIELD_WHITELIST,
   type EntityType,
+  filterExtractedEntities,
+  filterRelations,
+  type FilterOutcome,
 } from "./ner.js";
 import { findEntitySlug, mapEntityType, buildStubBody, hashContent, normalizeRelation } from "./shared.js";
 import { EntityResolver } from "./entity-resolver.js";
@@ -27,6 +30,7 @@ export interface DialogueIngestResult {
   newRelations: number;
   newEvents: number;
   skipped: number;
+  filtered: Array<{ name: string; type: string; relevance: string; reason: string }>;
 }
 
 const DIALOGUE_PROMPT = `You are extracting knowledge from a conversation (dialogue between user and assistant). Extract ONLY concrete, verifiable facts that are worth remembering long-term.
@@ -124,7 +128,7 @@ export class DialogueIngest {
   }
 
   async ingest(text: string, mode: DialogueMode = "manual"): Promise<DialogueIngestResult> {
-    const empty: DialogueIngestResult = { decision: "skipped", reason: "empty input", newEntities: 0, newRelations: 0, newEvents: 0, skipped: 0 };
+    const empty: DialogueIngestResult = { decision: "skipped", reason: "empty input", newEntities: 0, newRelations: 0, newEvents: 0, skipped: 0, filtered: [] };
 
     if (!this.llm || !text.trim()) return empty;
 
@@ -151,8 +155,14 @@ export class DialogueIngest {
       return { ...empty, reason: "no actionable facts" };
     }
 
+    // Auto mode: check should_ingest flag
+    if (mode === "auto" && result.shouldIngest === false) {
+      this.writeLog(mode, 0, 0, 0, 0);
+      return { ...empty, reason: "no actionable facts" };
+    }
+
     // Step 2: Incremental filter + write
-    const { newEntities, newRelations, newEvents, skipped } = this.applyIncremental(result, mode);
+    const { newEntities, newRelations, newEvents, skipped, filtered } = this.applyIncremental(result, mode);
 
     // Step 3: Determine decision
     const hasNew = (newEntities + newRelations + newEvents) > 0;
@@ -161,7 +171,7 @@ export class DialogueIngest {
     // Step 4: Write ingest_log
     this.writeLog(mode, newEntities, newRelations, newEvents, skipped);
 
-    return { decision, newEntities, newRelations, newEvents, skipped };
+    return { decision, newEntities, newRelations, newEvents, skipped, filtered };
   }
 
   private parseResponse(raw: string): (ExtractionResult & { shouldIngest?: boolean }) | null {
@@ -187,6 +197,7 @@ export class DialogueIngest {
     newRelations: number;
     newEvents: number;
     skipped: number;
+    filtered: Array<{ name: string; type: string; relevance: string; reason: string }>;
   } {
     let newEntities = 0;
     let newRelations = 0;
@@ -195,26 +206,22 @@ export class DialogueIngest {
 
     const entitySlugMap = new Map<string, string>();
 
-    // Resolve all entities through EntityResolver
+    // Step 1: Apply shared entity filter (blacklist, suffix patterns, generics, length, cap)
+    const { kept, filtered } = filterExtractedEntities(result.entities, { mode });
+    const filteredReport = filtered.map(f => ({
+      name: f.entity.name,
+      type: f.entity.type,
+      relevance: f.entity.relevance,
+      reason: f.reason,
+    }));
+    skipped += filtered.length;
+
+    // Step 2: Resolve kept entities through EntityResolver
     const resolver = new EntityResolver(this.db);
-    const candidates = result.entities
-      .filter(e => {
-        if (e.relevance === "low") { skipped++; return false; }
-        return true;
-      })
-      .map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
+    const candidates = kept.map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
     const resolutionMap = resolver.resolveAll(candidates);
 
-    for (const entity of result.entities) {
-      if (entity.relevance === "low") continue;
-
-      // Auto mode: medium relevance → candidate log only, no stub file
-      if (mode === "auto" && entity.relevance === "medium") {
-        this.db.addIngestLog("dialogue", "candidate", "", JSON.stringify({ name: entity.name, type: entity.type }));
-        skipped++;
-        continue;
-      }
-
+    for (const entity of kept) {
       const resolution = resolutionMap.get(entity.name);
       if (!resolution) continue;
 
@@ -223,7 +230,6 @@ export class DialogueIngest {
         this.db.incrementMentionCount(resolution.slug);
         skipped++;
       } else if (resolution.action === "duplicate_candidate" || resolution.action === "stub_created") {
-        // Create stub file + DB entry
         const pageType = mapEntityType(entity.type);
         const slug = generateSlug(entity.name, pageType);
         const fileName = slugToFilePath(slug);
@@ -261,14 +267,14 @@ export class DialogueIngest {
       }
     }
 
-    // Structured facts — only for resolved entities, fill empty fields only
+    // Step 3: Structured facts — only for resolved entities, fill empty fields only
+    const keptNames = new Set(kept.map(e => e.name));
     if (result.facts.length > 0) {
-      const validEntityNames = new Set(result.entities.map(e => e.name));
       const entityTypeMap = new Map<string, EntityType>(
-        result.entities.map(e => [e.name, e.type])
+        kept.map(e => [e.name, e.type])
       );
       const resolvedForFacts = new Map<string, string>();
-      for (const entity of result.entities) {
+      for (const entity of kept) {
         const r = resolutionMap.get(entity.name);
         if (r && (r.action === "resolved_to_existing" || r.action === "alias_added")) {
           resolvedForFacts.set(entity.name, r.slug);
@@ -277,7 +283,7 @@ export class DialogueIngest {
 
       const validFacts = result.facts
         .filter(f => f.entity && f.field && f.value && f.evidence)
-        .filter(f => validEntityNames.has(f.entity))
+        .filter(f => keptNames.has(f.entity))
         .filter(f => {
           const et = entityTypeMap.get(f.entity);
           if (!et) return false;
@@ -285,7 +291,6 @@ export class DialogueIngest {
           return allowed && allowed.includes(f.field);
         });
 
-      // Deduplicate by entity|field, keep highest confidence
       const bestFacts = new Map<string, StructuredFact>();
       for (const f of validFacts) {
         const key = `${f.entity}|${f.field}`;
@@ -317,8 +322,9 @@ export class DialogueIngest {
       }
     }
 
-    // Relations
-    for (const rel of result.relations) {
+    // Step 4: Relations — filtered by kept entity names
+    const validRelations = filterRelations(result.relations, keptNames);
+    for (const rel of validRelations) {
       const fromSlug = entitySlugMap.get(rel.from) ?? findEntitySlug(this.db, rel.from);
       const toSlug = entitySlugMap.get(rel.to) ?? findEntitySlug(this.db, rel.to);
       if (!fromSlug || !toSlug) continue;
@@ -332,7 +338,7 @@ export class DialogueIngest {
       newRelations++;
     }
 
-    // Events — only those with dates
+    // Step 5: Events — only those with dates
     for (const event of result.events) {
       if (!event.date) continue;
 
@@ -349,7 +355,7 @@ export class DialogueIngest {
       newEvents++;
     }
 
-    return { newEntities, newRelations, newEvents, skipped };
+    return { newEntities, newRelations, newEvents, skipped, filtered: filteredReport };
   }
 
   private writeLog(

@@ -124,7 +124,7 @@ function classifyEntity(name: string, llmType: string): EntityClass {
 const MAX_CONCEPTS = 3;
 const MAX_TOTAL_ENTITIES = 8;
 
-interface FilterResult {
+export interface FilterOutcome {
   kept: ExtractedEntity[];
   filtered: Array<{ entity: ExtractedEntity; reason: string }>;
 }
@@ -142,7 +142,11 @@ function getFilterReason(name: string, llmType: string): string {
   return "unclassified_type";
 }
 
-function filterEntities(entities: ExtractedEntity[]): FilterResult {
+export function filterExtractedEntities(
+  entities: ExtractedEntity[],
+  opts?: { mode?: "auto" | "manual" }
+): FilterOutcome {
+  const mode = opts?.mode ?? "manual";
   const filtered: Array<{ entity: ExtractedEntity; reason: string }> = [];
 
   // Classify: entity / concept / null (filtered)
@@ -156,7 +160,7 @@ function filterEntities(entities: ExtractedEntity[]): FilterResult {
     })
     .filter((e) => e.class !== null);
 
-  // Sort by relevance: high > medium. Drop low into filtered.
+  // Sort by relevance: high > medium > low. Drop low into filtered.
   const ranked = classified.sort((a, b) => {
     const order: Record<string, number> = { high: 0, medium: 1, low: 2 };
     return (order[a.relevance] ?? 2) - (order[b.relevance] ?? 2);
@@ -169,7 +173,18 @@ function filterEntities(entities: ExtractedEntity[]): FilterResult {
     }
   }
 
-  const rankedNonLow = ranked.filter((e) => e.relevance !== "low");
+  let rankedNonLow = ranked.filter((e) => e.relevance !== "low");
+
+  // Auto mode: medium relevance → filtered
+  if (mode === "auto") {
+    for (const e of rankedNonLow) {
+      if (e.relevance === "medium") {
+        filtered.push({ entity: e, reason: "auto_medium_skipped" });
+      }
+    }
+    rankedNonLow = rankedNonLow.filter((e) => e.relevance !== "medium");
+  }
+
   const concepts = rankedNonLow.filter((e) => e.class === "concept");
   const nonConcepts = rankedNonLow.filter((e) => e.class === "entity");
 
@@ -188,7 +203,7 @@ function filterEntities(entities: ExtractedEntity[]): FilterResult {
   return { kept, filtered };
 }
 
-function filterRelations(
+export function filterRelations(
   relations: ExtractedRelation[],
   validEntityNames: Set<string>
 ): ExtractedRelation[] {
@@ -441,7 +456,7 @@ export class NerEngine {
       allFacts = mergeFacts(allFactChunks);
     }
 
-    const { kept: filtered, filtered: filteredOut } = filterEntities(allEntities);
+    const { kept: filtered, filtered: filteredOut } = filterExtractedEntities(allEntities);
     const nerFiltered = filteredOut.map(f => ({ name: f.entity.name, reason: f.reason }));
     if (filtered.length === 0) {
       return { entities: [], relations: [], events: allEvents, facts: [], filtered: nerFiltered };
