@@ -1,5 +1,6 @@
 import { stat, readFile } from "node:fs/promises";
 import { relative } from "node:path";
+import pLimit from "p-limit";
 import type { SyncManager } from "./sync.js";
 import { hashContent, collectMarkdownFiles } from "./shared.js";
 import type { Logger } from "./logger.js";
@@ -7,6 +8,10 @@ import type { Logger } from "./logger.js";
 export interface FileWatcherOpts {
   logger?: Logger;
 }
+
+const SYNC_CONCURRENCY = 3;
+const FIRST_SCAN_BATCH_SIZE = 10;
+const BATCH_DELAY_MS = 500;
 
 export class FileWatcher {
   private sync: SyncManager;
@@ -18,6 +23,9 @@ export class FileWatcher {
   private readonly POLL_MS = 30_000;
   private hashes = new Map<string, string>();
   private mtimes = new Map<string, { mtime: number; size: number }>();
+  private limit = pLimit(SYNC_CONCURRENCY);
+  private inFlight = new Set<string>();
+  private isFirstScan = true;
 
   constructor(sync: SyncManager, vaultPath: string, opts?: FileWatcherOpts) {
     this.sync = sync;
@@ -44,9 +52,26 @@ export class FileWatcher {
     try { await this.doScan(); } finally { this.scanning = false; }
   }
 
+  private enqueueSync(slug: string): void {
+    if (this.inFlight.has(slug)) {
+      this.logger?.info("watcher", "跳过：正在同步", { slug });
+      return;
+    }
+    this.inFlight.add(slug);
+    this.limit(() => this.sync.syncPage(slug, this.vaultPath))
+      .then(() => { this.logger?.info("watcher", "同步完成", { slug }); })
+      .catch((e) => { this.logger?.warn("watcher", `同步失败: ${slug}`, { error: String(e) }); })
+      .finally(() => { this.inFlight.delete(slug); });
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
   private async doScan(): Promise<void> {
     const files = await collectMarkdownFiles(this.vaultPath, new Set(["outputs"]));
     const seen = new Set<string>();
+    const changed: string[] = [];
 
     for (const fullPath of files) {
       seen.add(fullPath);
@@ -69,16 +94,31 @@ export class FileWatcher {
         const relPath = relative(this.vaultPath, fullPath);
         const slug = relPath.replace(/\.md$/, "");
         this.logger?.info("watcher", "检测到变更", { slug });
-        this.sync.syncPage(slug, this.vaultPath).then(
-          () => { this.logger?.info("watcher", "同步完成", { slug }); },
-          (e) => { this.logger?.warn("watcher", `同步失败: ${slug}`, { error: String(e) }); }
-        );
+        changed.push(slug);
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
           this.logger?.warn("watcher", `文件读取失败: ${fullPath}`, { error: String(e) });
         }
       }
     }
+
+    if (this.isFirstScan && changed.length > FIRST_SCAN_BATCH_SIZE) {
+      for (let i = 0; i < changed.length; i += FIRST_SCAN_BATCH_SIZE) {
+        const batch = changed.slice(i, i + FIRST_SCAN_BATCH_SIZE);
+        for (const slug of batch) {
+          this.enqueueSync(slug);
+        }
+        if (i + FIRST_SCAN_BATCH_SIZE < changed.length) {
+          await this.sleep(BATCH_DELAY_MS);
+        }
+      }
+      this.logger?.info("watcher", "首次扫描分批完成", { total: changed.length, batchSize: FIRST_SCAN_BATCH_SIZE });
+    } else {
+      for (const slug of changed) {
+        this.enqueueSync(slug);
+      }
+    }
+    this.isFirstScan = false;
 
     // Deletion detection: files that disappeared since last scan
     const deleted: string[] = [];

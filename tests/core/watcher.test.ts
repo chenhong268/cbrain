@@ -171,4 +171,81 @@ describe("FileWatcher", () => {
     );
     expect(deletedSlugs.sort()).toEqual(["a", "b", "c"]);
   });
+
+  // ─── Concurrency limit ──────────────────────────────
+
+  test("concurrency limited to 3 syncs at a time", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const resolvers: Array<() => void> = [];
+
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise<void>((r) => resolvers.push(r));
+      inFlight--;
+    });
+
+    for (let i = 0; i < 8; i++) {
+      writeFileSync(join(testDir, `file${i}.md`), `---\ntitle: F${i}\n---\nContent ${i}`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+
+    // Give p-limit a tick to start tasks
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Resolve all syncs
+    for (const r of resolvers) r();
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+  });
+
+  // ─── Per-slug debounce ──────────────────────────────
+
+  test("same slug is not synced concurrently", async () => {
+    let syncCount = 0;
+    let resolveSync: () => void = () => {};
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async () => {
+      syncCount++;
+      await new Promise<void>((r) => { resolveSync = r; });
+    });
+
+    writeFileSync(join(testDir, "debounce.md"), "---\ntitle: Debounce\n---\nV1", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+
+    // Modify same file while first sync is still in-flight
+    writeFileSync(join(testDir, "debounce.md"), "---\ntitle: Debounce\n---\nV2", "utf-8");
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+
+    // Only one sync dispatched (second skipped due to in-flight)
+    expect(syncCount).toBe(1);
+
+    resolveSync();
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  // ─── Startup batching ──────────────────────────────
+
+  test("first scan syncs all changed files", async () => {
+    const syncOrder: string[] = [];
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async (slug: string) => {
+      syncOrder.push(slug);
+    });
+
+    for (let i = 0; i < 15; i++) {
+      writeFileSync(join(testDir, `batch${i}.md`), `---\ntitle: B${i}\n---\nContent`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+
+    // Give p-limit time to process all queued tasks
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(syncOrder.length).toBe(15);
+  });
 });
