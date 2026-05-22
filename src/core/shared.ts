@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, extname } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
+import { getOntology } from "../ontology/loader.js";
 
 /**
  * Shared utilities used by SyncManager, IngestManager, and PageManager.
@@ -75,28 +76,19 @@ export function chunkContent(
 
 // ─── NER Helpers ─────────────────────────────────────────────
 
-export function mapEntityType(
-  type: string
-): "entity" | "concept" {
-  switch (type) {
-    case "person":
-    case "company":
-    case "product":
-      return "entity";
-    case "concept":
-      return "concept";
-    default:
-      return "entity";
-  }
+export function mapEntityType(type: string): string {
+  return getOntology().resolvePageType(type);
 }
 
-export type PageType = "entity" | "concept" | "record" | "insight";
+export type PageType = string;
 export type PageLayer = "source" | "derived";
 
-const VALID_PAGE_TYPES = new Set<string>(["entity", "concept", "record", "insight"]);
-
 export function normalizePageType(type: string): PageType {
-  return (VALID_PAGE_TYPES.has(type) ? type : "record") as PageType;
+  const ontology = getOntology();
+  if (ontology.getEntityType(type) && !ontology.isAbstract(type)) return type;
+  // 兼容旧格式: abstract type → return as-is
+  if (ontology.getEntityType(type)) return type;
+  return "record";
 }
 
 export function getLayer(type: string): PageLayer {
@@ -110,7 +102,14 @@ export function canMerge(typeA: string, typeB: string): boolean {
 
 // ─── Vault Wiki-Link Rewriting ───────────────────────────────
 
-const VAULT_DIRS = ["records", "brain/entities", "brain/concepts", "brain/insights"];
+function getVaultDirs(): string[] {
+  const ontology = getOntology();
+  const dirs = new Set<string>();
+  for (const type of ontology.getConcreteEntityTypes()) {
+    dirs.add(ontology.getVaultDir(type));
+  }
+  return [...dirs];
+}
 
 export interface VaultLinkOp {
   oldSlug: string;
@@ -159,7 +158,7 @@ export function rewriteVaultLinks(vaultPath: string, operations: VaultLinkOp[], 
       if (fp) candidateFiles.add(join(vaultPath, fp));
     }
   } else {
-    for (const dir of VAULT_DIRS) {
+    for (const dir of getVaultDirs()) {
       const absDir = join(vaultPath, dir);
       if (!existsSync(absDir)) continue;
       for (const file of readdirSync(absDir)) {
@@ -344,52 +343,53 @@ const CANONICAL_RELATIONS: Record<string, string> = {
 };
 
 export function normalizeRelation(rel: string): string {
+  const ontology = getOntology();
+  if (ontology.isValidRelation(rel)) return rel;
+  // 保留原有 alias 映射作为 fallback
   return CANONICAL_RELATIONS[rel] ?? "提及";
 }
 
-export const CANONICAL_RELATION_TYPES = new Set([
-  // Entity (12)
-  "认识", "提及", "任职", "创立", "归属", "合作", "竞争", "资本", "制造", "下属", "参会", "上级",
-  // Concept (6)
-  "关联", "互补", "延伸", "基础", "对比", "应用",
-]);
+export function getCanonicalRelationTypes(): Set<string> {
+  return new Set(Object.keys(getOntology().getAllRelationTypes()));
+}
 
-export const REVERSE_RELATIONS: Record<string, string> = {
-  "下属": "上级",
-  "上级": "下属",
-};
+/** @deprecated Use getCanonicalRelationTypes() instead */
+export const CANONICAL_RELATION_TYPES = new Set<string>([]);
+
+// 初始化时填充 CANONICAL_RELATION_TYPES 以兼容旧代码
+try {
+  for (const r of Object.keys(getOntology().getAllRelationTypes())) {
+    CANONICAL_RELATION_TYPES.add(r);
+  }
+} catch {}
+
+export function getReverseRelation(rel: string): string | undefined {
+  return getOntology().getReverseRelation(rel);
+}
+
+/** @deprecated Use getReverseRelation() instead */
+export const REVERSE_RELATIONS: Record<string, string> = {};
+
+// 初始化时填充 REVERSE_RELATIONS 以兼容旧代码（sqlite.ts 等直接索引此对象）
+try {
+  for (const [name, def] of Object.entries(getOntology().getAllRelationTypes())) {
+    if (def.reverse) {
+      REVERSE_RELATIONS[name] = def.reverse;
+    }
+  }
+} catch {}
 
 export const HIERARCHY_RELATIONS = new Set(["reports_to"]);
 
 export function isValidRelation(r: string): boolean {
-  return CANONICAL_RELATION_TYPES.has(r) || HIERARCHY_RELATIONS.has(r);
+  return getOntology().isValidRelation(r) || HIERARCHY_RELATIONS.has(r);
 }
 
-const DEFAULT_WEIGHTS: Record<string, { strength: string; weight: number }> = {
-  // Entity
-  "任职": { strength: "strong", weight: 1.0 },
-  "创立": { strength: "strong", weight: 1.0 },
-  "归属": { strength: "strong", weight: 1.0 },
-  "合作": { strength: "medium", weight: 0.7 },
-  "竞争": { strength: "medium", weight: 0.7 },
-  "资本": { strength: "medium", weight: 0.7 },
-  "制造": { strength: "medium", weight: 0.7 },
-  "认识": { strength: "weak", weight: 0.3 },
-  "提及": { strength: "weak", weight: 0.3 },
-  "下属": { strength: "strong", weight: 1.0 },
-  "参会": { strength: "medium", weight: 0.5 },
-  "上级": { strength: "strong", weight: 1.0 },
-  // Concept
-  "基础": { strength: "strong", weight: 0.8 },
-  "互补": { strength: "medium", weight: 0.6 },
-  "延伸": { strength: "medium", weight: 0.6 },
-  "对比": { strength: "medium", weight: 0.6 },
-  "应用": { strength: "medium", weight: 0.6 },
-  "关联": { strength: "weak", weight: 0.3 },
-};
+/** @deprecated Use getRelationStrength() which delegates to ontology */
+const DEFAULT_WEIGHTS: Record<string, { strength: string; weight: number }> = {};
 
 export function getRelationStrength(relation: string): { strength: string; weight: number } {
-  return DEFAULT_WEIGHTS[relation] ?? { strength: "medium", weight: 0.5 };
+  return getOntology().getRelationStrength(relation);
 }
 
 export function buildStubBody(
