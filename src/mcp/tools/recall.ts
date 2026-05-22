@@ -38,15 +38,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const resolved = ctx.db.resolveSlugs([query])[0];
       const exactSlug = resolved?.slug ?? null;
 
-      let ftsRaw: Awaited<ReturnType<typeof ctx.db.ftsSearch>> = [];
-      try { ftsRaw = ctx.db.ftsSearch(query, cap); } catch { /* fts failure is non-fatal */ }
-      if (ftsRaw.length > 0) {
-        searchResults = ftsRaw.map(r => ({ slug: r.page_slug, score: 1 / (1 + r.rank), snippet: r.content.slice(0, 200), source: "fts" as const }));
-        usedStrategy = "smart-fts";
-      } else {
-        searchResults = await ctx.search.search(query, { limit: cap });
-        usedStrategy = "smart-hybrid";
-      }
+      // Always run full hybrid — FTS alone skips vector/graph/temporal signals
+      searchResults = await ctx.search.search(query, { limit: cap });
+      usedStrategy = "smart-hybrid";
 
       // Promote exact match to top
       if (exactSlug) {
