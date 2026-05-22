@@ -36,6 +36,7 @@ export interface NerPipelineResult {
   factsWritten: number;
   stubsCreated: string[];
   lowRelevanceSkipped: number;
+  filtered: Array<{ name: string; reason: string }>;
   details: {
     entities: Array<{ name: string; type: string; relevance: string }>;
     relations: Array<{ from: string; to: string; relation: string }>;
@@ -325,6 +326,7 @@ export class ContentPipeline {
       factsWritten,
       stubsCreated: [...stubsCreated],
       lowRelevanceSkipped,
+      filtered: extraction.filtered ?? [],
       details: {
         entities: extraction.entities.map(e => ({ name: e.name, type: e.type, relevance: e.relevance })),
         relations: writtenRelations,

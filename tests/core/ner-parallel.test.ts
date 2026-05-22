@@ -134,3 +134,65 @@ describe("NerEngine parallelization", () => {
     expect(result.relations).toEqual([]);
   });
 });
+
+describe("classifyEntity suffix filtering", () => {
+  test("blocks XX化 suffix entities", async () => {
+    const llm = createMockLLM([
+      '{"entities":[{"name":"数字化转型","type":"concept","relevance":"high","context":"讨论了数字化转型"},{"name":"特斯拉","type":"company","relevance":"high","context":"特斯拉是电动车公司"}],"events":[]}',
+      '{"relations":[]}',
+    ]);
+    const ner = new NerEngine(llm);
+    const result = await ner.extract("讨论了数字化转型，特斯拉是电动车公司。");
+    expect(result.entities.map(e => e.name)).not.toContain("数字化转型");
+    expect(result.entities.map(e => e.name)).toContain("特斯拉");
+  });
+
+  test("blocks XX模式 suffix", async () => {
+    const llm = createMockLLM([
+      '{"entities":[{"name":"商业模式","type":"concept","relevance":"medium","context":"讨论商业模式"},{"name":"马斯克","type":"person","relevance":"high","context":"马斯克发言"}],"events":[]}',
+      '{"relations":[]}',
+    ]);
+    const ner = new NerEngine(llm);
+    const result = await ner.extract("讨论商业模式，马斯克发言。");
+    expect(result.entities.map(e => e.name)).not.toContain("商业模式");
+    expect(result.entities.map(e => e.name)).toContain("马斯克");
+  });
+
+  test("preserves company even if name ends with bank suffix", async () => {
+    const llm = createMockLLM([
+      '{"entities":[{"name":"招商银行","type":"company","relevance":"high","context":"招商银行是股份制银行"}],"events":[]}',
+      '{"relations":[]}',
+    ]);
+    const ner = new NerEngine(llm);
+    const result = await ner.extract("招商银行是股份制银行。");
+    expect(result.entities.map(e => e.name)).toContain("招商银行");
+  });
+
+  test("blocks AI generic terms", async () => {
+    const llm = createMockLLM([
+      '{"entities":[{"name":"AI","type":"concept","relevance":"medium","context":"讨论AI技术"},{"name":"AI工具","type":"product","relevance":"low","context":"使用AI工具"},{"name":"Claude","type":"product","relevance":"high","context":"Claude是AI助手"}],"events":[]}',
+      '{"relations":[]}',
+    ]);
+    const ner = new NerEngine(llm);
+    const result = await ner.extract("讨论AI技术，使用AI工具，Claude是AI助手。");
+    expect(result.entities.map(e => e.name)).not.toContain("AI");
+    expect(result.entities.map(e => e.name)).not.toContain("AI工具");
+    expect(result.entities.map(e => e.name)).toContain("Claude");
+  });
+});
+
+describe("filterEntities FilterResult", () => {
+  test("extraction result includes filtered entities with reasons", async () => {
+    const llm = createMockLLM([
+      '{"entities":[{"name":"AI","type":"concept","relevance":"medium","context":"讨论AI"},{"name":"马斯克","type":"person","relevance":"high","context":"马斯克是CEO"},{"name":"数字化转型","type":"concept","relevance":"medium","context":"数字化转型很重要"}],"events":[]}',
+      '{"relations":[]}',
+    ]);
+    const ner = new NerEngine(llm);
+    const result = await ner.extract("讨论AI，马斯克是CEO，数字化转型很重要。");
+    expect(result.entities.map(e => e.name)).toEqual(["马斯克"]);
+    expect(result.filtered.length).toBe(2);
+    const filteredNames = result.filtered.map(f => f.name);
+    expect(filteredNames).toContain("AI");
+    expect(filteredNames).toContain("数字化转型");
+  });
+});

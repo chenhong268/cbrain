@@ -203,4 +203,63 @@ describe("EntityResolver", () => {
     const slug = db.getSlugByAlias("老张");
     expect(slug).toBe("entity/zhangsan");
   });
+
+  // ─── getAllEntityTitles ────────────────────────────────────
+
+  test("getAllEntityTitles returns entity and concept titles only", () => {
+    seedEntity("张三", "entity", "entity/zhangsan");
+    seedEntity("AI Agents", "concept", "concept/ai-agents");
+    db.upsertPage({ slug: "record/note1", type: "record", title: "Some Note", filePath: "record/note1.md", contentHash: "abc" });
+
+    const titles = db.getAllEntityTitles();
+    expect(titles).toContain("张三");
+    expect(titles).toContain("AI Agents");
+    expect(titles).not.toContain("Some Note");
+  });
+
+  // ─── Layer 2c: Substring dedup ────────────────────────────
+
+  describe("substring dedup", () => {
+    test("new entity is substring of existing → resolved_to_existing", () => {
+      seedEntity("AI Agents", "entity", "entity/ai-agents");
+
+      const result = resolver.resolveSingle(candidate("AI", "product"));
+      expect(result.action).toBe("resolved_to_existing");
+      expect(result.matchedBy).toBe("substring_dedup");
+      expect(result.slug).toBe("entity/ai-agents");
+      expect(result.score).toBe(0.7);
+    });
+
+    test("existing entity is substring of new entity → resolved_to_existing", () => {
+      seedEntity("Claude", "entity", "entity/claude");
+
+      const result = resolver.resolveSingle(candidate("Claude Code"));
+      expect(result.action).toBe("resolved_to_existing");
+      expect(result.matchedBy).toBe("substring_dedup");
+      expect(result.slug).toBe("entity/claude");
+    });
+
+    test("length diff < 2 → no substring match", () => {
+      seedEntity("市场营销", "entity", "entity/marketing");
+
+      const result = resolver.resolveSingle(candidate("市场策略"));
+      expect(result.action).toBe("stub_created");
+    });
+
+    test("substring length ≤ 1 → no match", () => {
+      seedEntity("C++", "entity", "entity/cpp");
+
+      const result = resolver.resolveSingle(candidate("C"));
+      expect(result.action).toBe("stub_created");
+    });
+
+    test("exact substring: 数字化 → 数字化转型", () => {
+      seedEntity("数字化转型", "entity", "entity/digital-transformation");
+
+      const result = resolver.resolveSingle(candidate("数字化"));
+      expect(result.action).toBe("resolved_to_existing");
+      expect(result.matchedBy).toBe("substring_dedup");
+      expect(result.slug).toBe("entity/digital-transformation");
+    });
+  });
 });

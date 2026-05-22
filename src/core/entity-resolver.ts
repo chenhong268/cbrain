@@ -136,12 +136,38 @@ export class EntityResolver {
       }
     }
 
+    // Layer 2c: substring dedup
+    const subMatch = findSubstringMatch(name, this.db);
+    if (subMatch) {
+      if (checkTypeGate(this.db, subMatch.slug, entityType)) {
+        return { slug: subMatch.slug, action: "resolved_to_existing", score: 0.7, matchedBy: "substring_dedup" };
+      }
+      return { slug: subMatch.slug, action: "duplicate_candidate", score: 0.7, matchedBy: "substring_dedup" };
+    }
+
     // No match found — new entity
     return { slug: "", action: "stub_created", score: 0, matchedBy: "new" };
   }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
+
+function findSubstringMatch(name: string, db: CBrainDB): { slug: string; title: string } | null {
+  const allTitles = db.getAllEntityTitles();
+  for (const existing of allTitles) {
+    // New entity is substring of existing (e.g. "AI" ⊂ "AI Agents")
+    if (existing.includes(name) && name.length > 1 && existing.length - name.length >= 2) {
+      const slug = db.getEntitySlugByTitle(existing);
+      if (slug) return { slug, title: existing };
+    }
+    // Existing is substring of new (e.g. "Claude" ⊂ "Claude Code")
+    if (name.includes(existing) && existing.length > 1 && name.length - existing.length >= 2) {
+      const slug = db.getEntitySlugByTitle(existing);
+      if (slug) return { slug, title: existing };
+    }
+  }
+  return null;
+}
 
 function normalizeForComparison(name: string): string {
   return name

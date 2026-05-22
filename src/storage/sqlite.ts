@@ -1465,6 +1465,13 @@ export class CBrainDB {
     return row?.type ?? null;
   }
 
+  getAllEntityTitles(): string[] {
+    const rows = this.prepare(
+      "SELECT title FROM pages WHERE type IN ('entity', 'concept')"
+    ).all() as Array<{ title: string }>;
+    return rows.map(r => r.title);
+  }
+
   addAlias(pageSlug: string, alias: string): void {
     this.prepare(
       "INSERT OR IGNORE INTO aliases (page_slug, alias) VALUES ($slug, $alias)"

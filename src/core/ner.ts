@@ -47,6 +47,12 @@ export interface ExtractionResult {
   relations: ExtractedRelation[];
   events: ExtractedEvent[];
   facts: StructuredFact[];
+  filtered: FilteredEntity[];
+}
+
+export interface FilteredEntity {
+  name: string;
+  reason: string;
 }
 
 // ─── Post-extraction classification (safety net) ──────────
@@ -68,6 +74,10 @@ const GENERIC_TERMS = new Set([
   "人类", "世界", "问题", "方法", "人", "生活", "时间", "工作", "中国", "美国",
   "公司", "团队", "国家", "政府", "组织", "系统", "数据", "信息", "知识", "机器",
   "人工智能", "企业",
+  // Overly broad tech terms
+  "AI", "AI工具", "AI技术", "AI应用",
+  // Generic transformation compounds (backup for suffix filter)
+  "数字化转型", "智能化转型", "供应链数字化",
   // Leadership / business generic
   "领导力", "沟通", "学习", "思考", "创新", "责任", "成长", "进步", "改变", "发展",
   // Generic qualities
@@ -92,12 +102,15 @@ function classifyEntity(name: string, llmType: string): EntityClass {
   // ── Layer 1: BLACKLIST ──
   if (GENERIC_TERMS.has(name)) return null;
   if (name.length < 2) return null;
-  if (/^\d{8,}$/.test(name) || /@/.test(name)) return null;
+  if (/^\d+$/.test(name) || /^#\d+$/.test(name) || /^v\d+$/i.test(name) || /@/.test(name)) return null;
   if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return null;
   if (/^[A-Z]{2}$/.test(name) && llmType !== "concept") return null;
   if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问|人员|管理员|作家/.test(name)) return null;
   if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return null;
   if (STRUCTURAL_TERMS.has(name)) return null;
+
+  // Suffix pattern: generic compound words (XX化, XX模式, etc.)
+  if (!["person", "company"].includes(llmType) && /化$|型$|式$|制$|主义$|体系$|模式$|战略$|策略$|趋势$|生态$|矩阵$|框架$|架构$/.test(name)) return null;
 
   // ── Layer 2: SAFETY NET — clear organizational keywords override LLM ──
   if (/公司|集团|制药|药企|银行|保险|基金$|医院|大学$|学院$|研究所/.test(name)) return "entity";
@@ -111,26 +124,68 @@ function classifyEntity(name: string, llmType: string): EntityClass {
 const MAX_CONCEPTS = 3;
 const MAX_TOTAL_ENTITIES = 8;
 
-function filterEntities(entities: ExtractedEntity[]): ExtractedEntity[] {
-  // Classify every entity: entity / concept / skip
+interface FilterResult {
+  kept: ExtractedEntity[];
+  filtered: Array<{ entity: ExtractedEntity; reason: string }>;
+}
+
+function getFilterReason(name: string, llmType: string): string {
+  if (GENERIC_TERMS.has(name)) return "blacklisted";
+  if (name.length < 2) return "too_short";
+  if (/^\d+$/.test(name) || /^#\d+$/.test(name) || /^v\d+$/i.test(name)) return "numeric";
+  if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return "hash_like";
+  if (/^[A-Z]{2}$/.test(name) && llmType !== "concept") return "two_letter_code";
+  if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问|人员|管理员|作家/.test(name)) return "job_title";
+  if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return "date_pattern";
+  if (STRUCTURAL_TERMS.has(name)) return "structural_term";
+  if (!["person", "company"].includes(llmType) && /化$|型$|式$|制$|主义$|体系$|模式$|战略$|策略$|趋势$|生态$|矩阵$|框架$|架构$/.test(name)) return "generic_suffix";
+  return "unclassified_type";
+}
+
+function filterEntities(entities: ExtractedEntity[]): FilterResult {
+  const filtered: Array<{ entity: ExtractedEntity; reason: string }> = [];
+
+  // Classify: entity / concept / null (filtered)
   const classified = entities
-    .map((e) => ({ ...e, class: classifyEntity(e.name, e.type) }))
+    .map((e) => {
+      const cls = classifyEntity(e.name, e.type);
+      if (cls === null) {
+        filtered.push({ entity: e, reason: getFilterReason(e.name, e.type) });
+      }
+      return { ...e, class: cls };
+    })
     .filter((e) => e.class !== null);
 
-  // Sort by relevance: high > medium. Drop low.
+  // Sort by relevance: high > medium. Drop low into filtered.
   const ranked = classified.sort((a, b) => {
     const order: Record<string, number> = { high: 0, medium: 1, low: 2 };
     return (order[a.relevance] ?? 2) - (order[b.relevance] ?? 2);
   });
 
-  const concepts = ranked.filter((e) => e.class === "concept");
-  const nonConcepts = ranked.filter((e) => e.class === "entity");
+  // Low relevance → filtered
+  for (const e of ranked) {
+    if (e.relevance === "low") {
+      filtered.push({ entity: e, reason: "low_relevance" });
+    }
+  }
+
+  const rankedNonLow = ranked.filter((e) => e.relevance !== "low");
+  const concepts = rankedNonLow.filter((e) => e.class === "concept");
+  const nonConcepts = rankedNonLow.filter((e) => e.class === "entity");
 
   const keptConcepts = concepts.slice(0, MAX_CONCEPTS);
   const keptNonConcepts = nonConcepts.slice(0, MAX_TOTAL_ENTITIES - keptConcepts.length);
 
-  // Override LLM type with classified type
-  return [...keptNonConcepts, ...keptConcepts].map((e) => ({ ...e, type: e.class! as EntityType }));
+  // Cap overflow → filtered
+  for (const e of concepts.slice(MAX_CONCEPTS)) {
+    filtered.push({ entity: e, reason: "concept_cap" });
+  }
+  for (const e of nonConcepts.slice(MAX_TOTAL_ENTITIES - keptConcepts.length)) {
+    filtered.push({ entity: e, reason: "entity_cap" });
+  }
+
+  const kept = [...keptNonConcepts, ...keptConcepts].map((e) => ({ ...e, type: e.class! as EntityType }));
+  return { kept, filtered };
 }
 
 function filterRelations(
@@ -338,7 +393,7 @@ export class NerEngine {
 
   async extract(text: string): Promise<ExtractionResult> {
     if (!text.trim()) {
-      return { entities: [], relations: [], events: [], facts: [] };
+      return { entities: [], relations: [], events: [], facts: [], filtered: [] };
     }
 
     const CHUNK_SIZE = 2500;
@@ -386,9 +441,10 @@ export class NerEngine {
       allFacts = mergeFacts(allFactChunks);
     }
 
-    const filtered = filterEntities(allEntities);
+    const { kept: filtered, filtered: filteredOut } = filterEntities(allEntities);
+    const nerFiltered = filteredOut.map(f => ({ name: f.entity.name, reason: f.reason }));
     if (filtered.length === 0) {
-      return { entities: [], relations: [], events: allEvents, facts: [] };
+      return { entities: [], relations: [], events: allEvents, facts: [], filtered: nerFiltered };
     }
 
     // Stage 2: Extract relations — feed extracted entity names as context
@@ -400,7 +456,7 @@ export class NerEngine {
     ]);
     const relations = this.parseRelationResponse(stage2, new Set(entityNames));
 
-    return { entities: filtered, relations, events: allEvents, facts: allFacts };
+    return { entities: filtered, relations, events: allEvents, facts: allFacts, filtered: nerFiltered };
   }
 
   private parseEntityResponse(raw: string): { entities: ExtractedEntity[]; events: ExtractedEvent[]; facts: StructuredFact[] } {

@@ -174,6 +174,7 @@ export class DialogueIngest {
         relations: Array.isArray(parsed.relations) ? parsed.relations : [],
         events: Array.isArray(parsed.events) ? parsed.events : [],
         facts: Array.isArray(parsed.facts) ? parsed.facts : [],
+        filtered: [],
       };
     } catch (e) {
       console.error("[dialogue] LLM 响应 JSON 解析失败", e);
