@@ -46,6 +46,40 @@
 - 夜间维护、每日维护、全量同步、做个梦、做梦 → dream.md [scheduled]
 - 定时任务、cron、daily → dream.md [scheduled]
 
+### Dossier
+- 完整档案、全貌、dossier、RAGmap、详细档案、个人信息表 → review.md
+- 结构化、档案页、信息表 → review.md
+
+### Brainstorm
+- 分析一下、联想、知识缺口、cross-domain、有什么盲点、帮我想想 → query.md
+- 推理、背后逻辑、深层原因、为什么、思维链 → query.md
+
+### Merge & Dedup
+- 这两个重复了、合并、一样的、重复页面 → cleanup.md
+- merge、合并页面 → cleanup.md
+
+### Insights & Discoveries
+- 最近有什么发现、有什么我漏掉的、有什么关联没注意到的 → query.md
+- 洞察、insight、discovery、发现 → query.md
+
+### Timeline
+- 时间线、事件、发生了什么、历史记录、什么时候 → review.md
+- 按时间排列、事件流、回顾 → review.md
+
+### Tags
+- 打个标签、加标签、标签管理、按标签找 → ingest.md
+- 批量打标、tag → ingest.md
+
+### Hierarchy
+- 分类、层级、上下级、属于哪个、子分类 → query.md
+- 组织结构、归属、parent/child → query.md
+
+### Feedback
+- 这个信息不对、纠正、反馈、投诉、错了 → query.md
+
+### Config
+- 改一下配置、调整参数、配置 → dream.md
+
 ### Signal Detection
 - 信号检测、扫描信号、检测 → signal-detector.md
 - 这条消息有什么值得记的、提取信号 → signal-detector.md
@@ -66,8 +100,7 @@
 | 7 | dream.md | Full maintenance pipeline (sync→enrich→cleanup→health→report) with cycle lock | Scheduled / on-demand |
 | 8 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
 | 9 | write.md | Knowledge-based writing — gather from brain, produce polished output | On-demand: user wants to write something |
-| 10 | brain-ops.md | 5-step protocol + 40-tool reference | Default: agent startup / tool lookup |
-| 9 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
+| 10 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
 
 ## Resolution Logic
 
