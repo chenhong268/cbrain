@@ -1,0 +1,518 @@
+# CBrain Ontology - 唯一真相源
+# 修改此文件即可扩展类型系统，无需改代码
+
+version: 1
+
+# ─── 实体类型 ───────────────────────────────────────────────
+entity_types:
+  # 抽象父类型（abstract: true 表示不会直接创建此类型的页面）
+  entity:
+    label: 实体
+    abstract: true
+    vault_dir: brain/entities
+    structured_fields: []
+
+  entity/person:
+    label: 人物
+    parent: entity
+    vault_dir: brain/entities/person
+    structured_fields:
+      - birthday
+      - birthplace
+      - english_name
+      - current_title
+      - organization
+      - reports_to
+
+  entity/company:
+    label: 公司
+    parent: entity
+    vault_dir: brain/entities/company
+    structured_fields:
+      - location
+      - industry
+      - founded_year
+
+  entity/organization:
+    label: 组织机构
+    parent: entity
+    vault_dir: brain/entities/organization
+    structured_fields:
+      - location
+      - founded_year
+
+  entity/location:
+    label: 地点
+    parent: entity
+    vault_dir: brain/entities/location
+    structured_fields: []
+
+  entity/place:
+    label: 餐厅/场所
+    parent: entity
+    vault_dir: brain/entities/place
+    structured_fields:
+      - location
+      - category
+
+  entity/product:
+    label: 产品
+    parent: entity
+    vault_dir: brain/entities/product
+    structured_fields:
+      - generic_name
+      - brand_name
+
+  entity/drug:
+    label: 药品
+    parent: entity
+    vault_dir: brain/entities/drug
+    structured_fields:
+      - generic_name
+      - brand_name
+      - approval_status
+
+  entity/book:
+    label: 书籍
+    parent: entity
+    vault_dir: brain/entities/book
+    structured_fields:
+      - author
+      - published_year
+      - isbn
+
+  concept:
+    label: 概念
+    abstract: true
+    vault_dir: brain/concepts
+    structured_fields: []
+
+  concept/framework:
+    label: 框架
+    parent: concept
+    vault_dir: brain/concepts/framework
+    structured_fields: []
+
+  concept/technology:
+    label: 技术
+    parent: concept
+    vault_dir: brain/concepts/technology
+    structured_fields: []
+
+  concept/theory:
+    label: 理论
+    parent: concept
+    vault_dir: brain/concepts/theory
+    structured_fields: []
+
+  concept/concept:
+    label: 概念
+    parent: concept
+    vault_dir: brain/concepts/concept
+    structured_fields: []
+
+  record:
+    label: 记录
+    vault_dir: records
+    structured_fields: []
+
+  insight:
+    label: 洞察
+    vault_dir: brain/insights
+    structured_fields: []
+
+# ─── 关系类型 ───────────────────────────────────────────────
+relation_types:
+  # ── 人物关系 ──────────────────────────────────────────
+  认识:
+    label: 认识
+    domain: [entity/person]
+    range: [entity/person]
+    symmetric: true
+    transitive: false
+    strength: weak
+    weight: 0.3
+
+  下属:
+    label: 下属
+    domain: [entity/person]
+    range: [entity/person]
+    symmetric: false
+    transitive: true
+    strength: strong
+    weight: 1.0
+    reverse: 上级
+
+  上级:
+    label: 上级
+    domain: [entity/person]
+    range: [entity/person]
+    symmetric: false
+    transitive: true
+    strength: strong
+    weight: 1.0
+    reverse: 下属
+
+  同学:
+    label: 同学
+    domain: [entity/person]
+    range: [entity/person]
+    symmetric: true
+    transitive: false
+    strength: medium
+    weight: 0.5
+
+  同事:
+    label: 同事
+    domain: [entity/person]
+    range: [entity/person]
+    symmetric: true
+    transitive: false
+    strength: medium
+    weight: 0.5
+
+  亲属:
+    label: 亲属
+    domain: [entity/person]
+    range: [entity/person]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 0.8
+    children: []
+
+  导师:
+    label: 导师
+    domain: [entity/person]
+    range: [entity/person]
+    symmetric: false
+    transitive: true
+    strength: strong
+    weight: 0.8
+
+  出生:
+    label: 出生于
+    domain: [entity/person]
+    range: [entity/location]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 1.0
+
+  家庭:
+    label: 家庭住址
+    domain: [entity/person]
+    range: [entity/location]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.5
+
+  # ── 组织关系 ──────────────────────────────────────────
+  任职:
+    label: 任职于
+    domain: [entity/person]
+    range: [entity/company, entity/organization]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 1.0
+
+  创立:
+    label: 创立
+    domain: [entity/person]
+    range: [entity/company, entity/organization]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 1.0
+
+  归属:
+    label: 归属
+    domain: [entity/company, entity/organization]
+    range: [entity/company, entity/organization]
+    symmetric: false
+    transitive: true
+    strength: strong
+    weight: 1.0
+
+  合作:
+    label: 合作
+    domain: [entity/company, entity/organization, entity/person]
+    range: [entity/company, entity/organization, entity/person]
+    symmetric: true
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  竞争:
+    label: 竞争
+    domain: [entity/company, entity/organization, entity/product]
+    range: [entity/company, entity/organization, entity/product]
+    symmetric: true
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  客户:
+    label: 客户
+    domain: [entity/company, entity/organization]
+    range: [entity/company, entity/organization]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  投资:
+    label: 投资
+    domain: [entity/company, entity/organization, entity/person]
+    range: [entity/company, entity/organization]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  收购:
+    label: 收购
+    domain: [entity/company]
+    range: [entity/company]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 1.0
+
+  供应:
+    label: 供应
+    domain: [entity/company]
+    range: [entity/company, entity/product]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  法人:
+    label: 法人
+    domain: [entity/person]
+    range: [entity/company]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 1.0
+
+  # ── 产品关系 ──────────────────────────────────────────
+  制造:
+    label: 制造/开发
+    domain: [entity/company, entity/organization]
+    range: [entity/product, entity/drug]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  经销:
+    label: 经销
+    domain: [entity/company]
+    range: [entity/product]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  替代:
+    label: 替代
+    domain: [entity/product, entity/drug]
+    range: [entity/product, entity/drug]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  联用:
+    label: 联用
+    domain: [entity/drug]
+    range: [entity/drug]
+    symmetric: true
+    transitive: false
+    strength: medium
+    weight: 0.7
+
+  审批:
+    label: 审批
+    domain: [entity/drug]
+    range: [entity/organization]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 1.0
+
+  # ── 书籍/知识 ─────────────────────────────────────────
+  作者:
+    label: 作者
+    domain: [entity/person]
+    range: [entity/book]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 1.0
+
+  常去:
+    label: 常去
+    domain: [entity/person]
+    range: [entity/place]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.5
+
+  参会:
+    label: 参会
+    domain: [entity/person]
+    range: [entity/person]
+    symmetric: true
+    transitive: false
+    strength: medium
+    weight: 0.5
+
+  毕业:
+    label: 毕业于
+    domain: [entity/person]
+    range: [entity/organization]
+    symmetric: false
+    transitive: false
+    strength: strong
+    weight: 0.8
+
+  居住:
+    label: 居住
+    domain: [entity/person]
+    range: [entity/location]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.5
+
+  # ── 通用 fallback ─────────────────────────────────────
+  提及:
+    label: 提及
+    domain: []
+    range: []
+    symmetric: false
+    transitive: false
+    strength: weak
+    weight: 0.3
+
+  # ── 概念关系 ──────────────────────────────────────────
+  关联:
+    label: 关联
+    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
+    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    symmetric: true
+    transitive: false
+    strength: weak
+    weight: 0.3
+
+  互补:
+    label: 互补
+    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
+    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    symmetric: true
+    transitive: false
+    strength: medium
+    weight: 0.6
+
+  延伸:
+    label: 延伸
+    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
+    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.6
+
+  基础:
+    label: 基础
+    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
+    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    symmetric: false
+    transitive: true
+    strength: strong
+    weight: 0.8
+
+  对比:
+    label: 对比
+    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
+    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    symmetric: true
+    transitive: false
+    strength: medium
+    weight: 0.6
+
+  应用:
+    label: 应用
+    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
+    range: [concept/framework, concept/technology, concept/theory, concept/concept, entity/product]
+    symmetric: false
+    transitive: false
+    strength: medium
+    weight: 0.6
+
+# ─── NER 提示词模板 ───────────────────────────────────────
+ner_config:
+  entity_types_prompt:
+    person: "人物 — 具名的人（包括中文全名、英文名）"
+    company: "公司 — 具名的企业（如 红杉资本, 腾讯）"
+    organization: "组织机构 — 非企业的组织（如 高校, 政府, 协会）"
+    location: "地点 — 地理位置（如 北京, 硅谷）"
+    place: "餐厅/场所 — 具名的好去处（如 某某餐厅, 某某咖啡馆）"
+    product: "产品 — 具名产品（如 iPhone, 微信）"
+    drug: "药品 — 具名药物（如 阿司匹林, 某某注射液）"
+    book: "书籍 — 具名书籍（如《原则》, Good to Great）"
+    framework: "框架 — 具名管理/商业/技术框架（如 OKR, SWOT, BCG矩阵）"
+    technology: "技术 — 具名技术（如 Transformer, Kubernetes）"
+    theory: "理论 — 具名理论/效应/定律（如 达克效应, 幸存者偏差）"
+    concept: "概念 — 具名概念（不在上述分类中的抽象概念）"
+
+  relation_prompt_order:
+    - 认识
+    - 任职
+    - 创立
+    - 归属
+    - 合作
+    - 竞争
+    - 投资
+    - 制造
+    - 下属
+    - 同学
+    - 同事
+    - 亲属
+    - 导师
+    - 作者
+    - 毕业
+    - 出生
+    - 居住
+    - 客户
+    - 收购
+    - 供应
+    - 经销
+    - 替代
+    - 联用
+    - 审批
+    - 常去
+    - 参会
+    - 法人
+    - 家庭
+    - 提及
+    - 关联
+    - 互补
+    - 延伸
+    - 基础
+    - 对比
+    - 应用
+
+  concept_relations:
+    - 关联
+    - 互补
+    - 延伸
+    - 基础
+    - 对比
+    - 应用
