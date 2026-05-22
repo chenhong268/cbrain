@@ -1,5 +1,3 @@
-import type { EntityType as NerEntityType } from "../core/ner.js";
-
 export interface EntityTypeDef {
   label: string;
   parent?: string;
