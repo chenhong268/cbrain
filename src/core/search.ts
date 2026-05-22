@@ -79,8 +79,6 @@ export function mergeRankedResults(
   return results.slice(0, limit);
 }
 
-const SHORT_QUERY_THRESHOLD = 4;
-
 export class HybridSearch {
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
@@ -121,9 +119,10 @@ export class HybridSearch {
       return this.graphSearch(query, limit);
     }
 
-    const trimmed = query.trim();
-    if (trimmed.length < SHORT_QUERY_THRESHOLD) {
-      return this.shortQuerySearch(trimmed, limit);
+    // Exact title match fast path
+    const exact = this.db.getPageByTitle(query.trim());
+    if (exact) {
+      return [{ slug: exact.slug, score: 1.0, snippet: exact.title, source: "exact" as const }];
     }
 
     const useMultiQuery = (options?.multiQuery ?? this.multiQueryEnabled) && !!this.llm;
@@ -132,6 +131,15 @@ export class HybridSearch {
     const allLists: SearchResult[][] = [];
 
     for (const q of queries) {
+      // Resolve query to slug for graph traversal
+      const resolved = this.db.resolveSlugs([q])[0];
+      const graphPromise = resolved?.slug
+        ? this.graphSearch(resolved.slug, limit).catch((e) => {
+            console.error("[search] graphSearch 失败:", e);
+            return [] as SearchResult[];
+          })
+        : Promise.resolve([] as SearchResult[]);
+
       const [vec, fts, graph, temporal] = await Promise.all([
         this.vectorSearch(q, limit).catch((e) => {
           console.error("[search] vectorSearch 失败:", e);
@@ -141,10 +149,7 @@ export class HybridSearch {
           console.error("[search] ftsSearch 失败:", e);
           return [] as SearchResult[];
         }),
-        this.graphSearch(q, limit).catch((e) => {
-          console.error("[search] graphSearch 失败:", e);
-          return [] as SearchResult[];
-        }),
+        graphPromise,
         Promise.resolve(this.temporalSearch(q, limit)),
       ]);
       if (vec.length > 0) allLists.push(vec);
@@ -154,30 +159,6 @@ export class HybridSearch {
     }
 
     // Fetch activity weights for all candidate slugs
-    const allSlugs = new Set<string>();
-    for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
-    const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
-    const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
-
-    return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
-  }
-
-  private async shortQuerySearch(query: string, limit: number): Promise<SearchResult[]> {
-    const exact = this.db.getPageByTitle(query);
-    if (exact) {
-      return [{ slug: exact.slug, score: 1.0, snippet: exact.title, source: "exact" }];
-    }
-
-    let fts: SearchResult[] = [];
-    try { fts = this.ftsSearch(query, limit); } catch { /* fts failure is non-fatal */ }
-    const temporal = this.temporalSearch(query, limit);
-
-    const allLists: SearchResult[][] = [];
-    if (fts.length > 0) allLists.push(fts);
-    if (temporal.length > 0) allLists.push(temporal);
-
-    if (allLists.length === 0) return [];
-
     const allSlugs = new Set<string>();
     for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
     const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;

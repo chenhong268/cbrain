@@ -406,16 +406,17 @@ describe("HybridSearch", () => {
       expect(results[0].source).toBe("exact");
     });
 
-    test("4+ char query uses normal hybrid path", async () => {
+    test("4+ char query with exact title match returns exact", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/p1", "entity", "机器学习入门", "p1.md", "h1");
 
       const hs = setupSearch();
       const results = await hs.search("机器学习入门");
-      // 4+ chars goes through normal hybrid, not short path
-      // No exact match source for 4+ char queries
-      expect(results.every((r) => r.source !== "exact")).toBe(true);
+      // Exact title match is now a fast path for all queries regardless of length
+      expect(results.length).toBe(1);
+      expect(results[0].slug).toBe("entities/p1");
+      expect(results[0].source).toBe("exact");
     });
 
     test("short query with no results returns empty", async () => {
