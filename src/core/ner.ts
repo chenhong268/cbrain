@@ -406,6 +406,10 @@ export class NerEngine {
     this.llm = llm;
   }
 
+  get provider(): LLMProvider {
+    return this.llm;
+  }
+
   async extract(text: string): Promise<ExtractionResult> {
     if (!text.trim()) {
       return { entities: [], relations: [], events: [], facts: [], filtered: [] };

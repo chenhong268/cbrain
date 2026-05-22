@@ -162,7 +162,7 @@ export class DialogueIngest {
     }
 
     // Step 2: Incremental filter + write
-    const { newEntities, newRelations, newEvents, skipped, filtered } = this.applyIncremental(result, mode);
+    const { newEntities, newRelations, newEvents, skipped, filtered } = await this.applyIncremental(result, mode);
 
     // Step 3: Determine decision
     const hasNew = (newEntities + newRelations + newEvents) > 0;
@@ -192,13 +192,13 @@ export class DialogueIngest {
     }
   }
 
-  private applyIncremental(result: ExtractionResult, mode: DialogueMode = "manual"): {
+  private async applyIncremental(result: ExtractionResult, mode: DialogueMode = "manual"): Promise<{
     newEntities: number;
     newRelations: number;
     newEvents: number;
     skipped: number;
     filtered: Array<{ name: string; type: string; relevance: string; reason: string }>;
-  } {
+  }> {
     let newEntities = 0;
     let newRelations = 0;
     let newEvents = 0;
@@ -217,9 +217,10 @@ export class DialogueIngest {
     skipped += filtered.length;
 
     // Step 2: Resolve kept entities through EntityResolver
-    const resolver = new EntityResolver(this.db);
+    const resolver = new EntityResolver(this.db, this.llm);
     const candidates = kept.map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
     const resolutionMap = resolver.resolveAll(candidates);
+    await resolver.semanticResolve(resolutionMap, candidates);
 
     for (const entity of kept) {
       const resolution = resolutionMap.get(entity.name);

@@ -212,16 +212,16 @@ export class ContentPipeline {
 
   // ─── Private ────────────────────────────────────────────────
 
-  private applyExtraction(
+  private async applyExtraction(
     fromSlug: string,
     extraction: ExtractionResult,
     skipDatelessEvents: boolean
-  ): NerPipelineResult {
+  ): Promise<NerPipelineResult> {
     const entitySlugMap = new Map<string, string>();
     const stubsCreated = new Set<string>();
     let lowRelevanceSkipped = 0;
 
-    const resolver = new EntityResolver(this.db);
+    const resolver = new EntityResolver(this.db, this.nerEngine?.provider);
     const candidates = extraction.entities
       .filter(e => {
         if (e.relevance === "low") { lowRelevanceSkipped++; return false; }
@@ -229,6 +229,7 @@ export class ContentPipeline {
       })
       .map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
     const resolutionMap = resolver.resolveAll(candidates);
+    await resolver.semanticResolve(resolutionMap, candidates);
 
     for (const entity of extraction.entities) {
       if (entity.relevance === "low") continue;

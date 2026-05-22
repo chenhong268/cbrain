@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { EntityResolver } from "../../src/core/entity-resolver.js";
 import type { EntityCandidate } from "../../src/core/entity-resolver.js";
+import type { LLMProvider } from "../../src/llm/provider.js";
 
 describe("EntityResolver", () => {
   const testDir = "/tmp/cbrain-test-resolver";
@@ -260,6 +261,109 @@ describe("EntityResolver", () => {
       expect(result.action).toBe("resolved_to_existing");
       expect(result.matchedBy).toBe("substring_dedup");
       expect(result.slug).toBe("entity/digital-transformation");
+    });
+  });
+
+  // ─── Mock LLM ──────────────────────────────────────────────
+
+  function createMockLlm(response: string): LLMProvider {
+    return {
+      name: "mock",
+      chat: async () => response,
+    };
+  }
+
+  // ─── Layer 3: LLM semantic resolution ────────────────────
+
+  describe("semantic resolution", () => {
+    test("abbreviation match: 南药 → 南京医药集团股份有限公司", async () => {
+      seedEntity("南京医药集团股份有限公司", "entity", "entity/nanjing-pharma");
+
+      const mockLlm = createMockLlm(
+        JSON.stringify({
+          matches: [
+            { candidate: "南药", entity: "南京医药集团股份有限公司", confidence: 0.9 },
+          ],
+        })
+      );
+
+      const resolver = new EntityResolver(db, mockLlm);
+      const results = resolver.resolveAll([candidate("南药", "company")]);
+      expect(results.get("南药")?.action).toBe("stub_created");
+
+      await resolver.semanticResolve(results, [candidate("南药", "company")]);
+
+      const resolved = results.get("南药")!;
+      expect(resolved.action).toBe("alias_added");
+      expect(resolved.slug).toBe("entity/nanjing-pharma");
+      expect(resolved.matchedBy).toBe("llm_semantic");
+      expect(resolved.aliasAdded).toBe("南药");
+
+      // Verify alias persisted in DB
+      expect(db.getSlugByAlias("南药")).toBe("entity/nanjing-pharma");
+    });
+
+    test("no match → stays stub_created", async () => {
+      seedEntity("南京医药集团股份有限公司", "entity", "entity/nanjing-pharma");
+
+      const mockLlm = createMockLlm(JSON.stringify({ matches: [] }));
+
+      const resolver = new EntityResolver(db, mockLlm);
+      const results = resolver.resolveAll([candidate("全新公司", "company")]);
+
+      await resolver.semanticResolve(results, [candidate("全新公司", "company")]);
+
+      expect(results.get("全新公司")?.action).toBe("stub_created");
+    });
+
+    test("no LLM → semantic resolve is no-op", async () => {
+      const resolver = new EntityResolver(db);
+      const results = resolver.resolveAll([candidate("南药", "company")]);
+
+      await resolver.semanticResolve(results, [candidate("南药", "company")]);
+
+      expect(results.get("南药")?.action).toBe("stub_created");
+    });
+
+    test("already resolved entities are not sent to LLM", async () => {
+      seedEntity("张三", "entity", "entity/zhangsan");
+
+      let capturedPrompt = "";
+      const mockLlm: LLMProvider = {
+        name: "mock",
+        chat: async (msgs) => {
+          capturedPrompt = msgs[1].content;
+          return JSON.stringify({ matches: [] });
+        },
+      };
+
+      const resolver = new EntityResolver(db, mockLlm);
+      const results = resolver.resolveAll([
+        candidate("张三"),     // exact match, should NOT go to LLM
+        candidate("南药", "company"),  // stub, should go to LLM
+      ]);
+
+      await resolver.semanticResolve(results, [
+        candidate("张三"),
+        candidate("南药", "company"),
+      ]);
+
+      // Only 南药 should appear in the prompt, not 张三
+      expect(capturedPrompt).toContain("南药");
+      expect(capturedPrompt).not.toContain("张三");
+    });
+
+    test("LLM returns invalid JSON → graceful fallback to stub_created", async () => {
+      seedEntity("南京医药集团股份有限公司", "entity", "entity/nanjing-pharma");
+
+      const mockLlm = createMockLlm("not valid json {{{");
+
+      const resolver = new EntityResolver(db, mockLlm);
+      const results = resolver.resolveAll([candidate("南药", "company")]);
+
+      await resolver.semanticResolve(results, [candidate("南药", "company")]);
+
+      expect(results.get("南药")?.action).toBe("stub_created");
     });
   });
 });
