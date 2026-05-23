@@ -1,6 +1,17 @@
 # Changelog
 
-> Current: `v1.8.1` — 搜索管道三大 bug 修复：smart 短路、短查询跳向量、graph 通道失效。
+> Current: `v1.8.2` — 消除所有硬编码 NER 类型映射，全部从 ontology.yaml 动态生成。
+
+## [v1.8.2] — 2026-05-23
+
+### 重构
+- **NER 类型映射去硬编码**（#34）：删除 6 处硬编码类型/关系映射，全部改为从 ontology.yaml 动态生成
+  - `loader.ts`：删除 16 条 `NER_TO_PAGE_TYPE`，改为动态构建 Map
+  - `ner-prompt.ts`：删除硬编码类型列表，改为动态 type union
+  - `pipeline.ts`：删除字符串前缀检查，新增 `isDerivedPageType()`
+  - `shared.ts`：删除废弃的 `CANONICAL_RELATION_TYPES` 和 `REVERSE_RELATIONS` 常量
+  - `sqlite.ts` / `ops.ts`：3+3 处改为函数调用
+- **NER 上限放宽**：概念 3→8，实体总数 8→10
 
 ## [v1.8.1] — 2026-05-22
 
