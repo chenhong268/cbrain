@@ -857,14 +857,19 @@ export class CBrainDB {
   }
 
   rewireLinks(oldSlug: string, newSlug: string): void {
+    // Delete old-slug links that would collide with existing new-slug links after UPDATE
+    this.prepare(`
+      DELETE FROM links WHERE from_slug = $old AND EXISTS (
+        SELECT 1 FROM links l2 WHERE l2.from_slug = $new AND l2.to_slug = links.to_slug AND l2.relation = links.relation
+      )
+    `).run({ $old: oldSlug, $new: newSlug });
+    this.prepare(`
+      DELETE FROM links WHERE to_slug = $old AND EXISTS (
+        SELECT 1 FROM links l2 WHERE l2.to_slug = $new AND l2.from_slug = links.from_slug AND l2.relation = links.relation
+      )
+    `).run({ $old: oldSlug, $new: newSlug });
     this.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old").run({ $old: oldSlug, $new: newSlug });
     this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old").run({ $old: oldSlug, $new: newSlug });
-    // After rewiring, dedup any collisions (old and new both linked to same target)
-    this.prepare(`
-      DELETE FROM links WHERE rowid NOT IN (
-        SELECT MIN(rowid) FROM links GROUP BY from_slug, to_slug, relation
-      ) AND (from_slug = $new OR to_slug = $new)
-    `).run({ $new: newSlug });
   }
 
   // ─── Page list/query operations ──────────────────────────────
