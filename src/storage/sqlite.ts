@@ -870,10 +870,13 @@ export class CBrainDB {
 
   // ─── Page list/query operations ──────────────────────────────
 
-  listPages(opts?: { type?: string; types?: string[]; limit?: number; offset?: number; orderBy?: string }): PageRow[] {
+  listPages(opts?: { type?: string; types?: string[]; typePrefix?: string; limit?: number; offset?: number; orderBy?: string }): PageRow[] {
     let sql = "SELECT * FROM pages WHERE 1=1";
     const params: Record<string, string | number> = {};
-    if (opts?.type) {
+    if (opts?.typePrefix) {
+      sql += " AND type LIKE $typePrefix";
+      params.$typePrefix = `${opts.typePrefix}%`;
+    } else if (opts?.type) {
       sql += " AND type = $type";
       params.$type = opts.type;
     }
@@ -1044,6 +1047,13 @@ export class CBrainDB {
     return this.prepare(
       `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type IN (${placeholders}) GROUP BY p.slug ORDER BY ${order}`
     ).all(params) as Array<{ slug: string; title: string; type: string; link_count: number }>;
+  }
+
+  getPagesWithLinkCountByPrefix(prefix: string, orderBy?: string): Array<{ slug: string; title: string; type: string; link_count: number }> {
+    const order = sanitizeOrderBy(orderBy, "title ASC");
+    return this.prepare(
+      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type LIKE $prefix GROUP BY p.slug ORDER BY ${order}`
+    ).all({ $prefix: `${prefix}%` }) as Array<{ slug: string; title: string; type: string; link_count: number }>;
   }
 
   getAvgMentionCount(): number {

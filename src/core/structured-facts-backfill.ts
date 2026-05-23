@@ -109,7 +109,8 @@ export async function structuredFactsBackfill(
     }
 
     // Filter by whitelist
-    const entityType = target.type === "entity" ? "person" as EntityType : target.type as EntityType;
+    const shortType = target.type.includes("/") ? target.type.split("/").pop()! : target.type;
+    const entityType = shortType as EntityType;
     const allowedFields = FACT_FIELD_WHITELIST[entityType] ?? [];
     const filtered = facts.filter(f => {
       if (options.onlyFields && !options.onlyFields.includes(f.field)) return false;
@@ -183,8 +184,8 @@ function getBackfillTargets(
     return page ? [page] : [];
   }
 
-  // Top entities by mention_count, type=entity only
-  const pages = db.listPages({ type: "entity", orderBy: "mention_count DESC" });
+  // Top entities by mention_count, entity prefix only
+  const pages = db.listPages({ typePrefix: "entity/", orderBy: "mention_count DESC" });
   return pages.filter(p => {
     // listPages doesn't have tag info, so we check by reading frontmatter is unnecessary
     // duplicate-candidate entities have lower tier; skip those with tier >= 5

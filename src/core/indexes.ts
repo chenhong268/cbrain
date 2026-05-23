@@ -34,8 +34,8 @@ export class IndexGenerator {
   }
 
   private generateAllEntities(dir: string): string {
-    const rows = this.db.getPagesWithLinkCount(
-      ["entity"],
+    const rows = this.db.getPagesWithLinkCountByPrefix(
+      "entity/",
       "tier ASC, mention_count DESC"
     );
 
@@ -63,8 +63,8 @@ export class IndexGenerator {
   }
 
   private generateAllConcepts(dir: string): string {
-    const rows = this.db.getPagesWithLinkCount(
-      ["concept"],
+    const rows = this.db.getPagesWithLinkCountByPrefix(
+      "concept/",
       "mention_count DESC"
     );
 
@@ -90,9 +90,9 @@ export class IndexGenerator {
 
   private generateDashboard(dir: string): string {
     const totalPages = this.db.getPageCount();
-    const entities = this.db.getPageCountByType("entity");
-    const concepts = this.db.getPageCountByType("concept");
-    const insights = this.db.getPageCountByType("insight");
+    const entities = this.db.getPageCountByTypePrefix("entity/");
+    const concepts = this.db.getPageCountByTypePrefix("concept/");
+    const insights = this.db.getPageCountByTypePrefix("insight/");
     const links = this.db.getLinkCount();
 
     const topEntities = this.db.getTopMentionedEntities(10);

@@ -10,9 +10,10 @@ function createMockDB(pages: PageRow[]): CBrainDB {
   const pageMap = new Map(pages.map(p => [p.slug, p]));
   return {
     getPage: (slug: string) => pageMap.get(slug) ?? null,
-    listPages: (opts?: { type?: string; orderBy?: string }) => {
+    listPages: (opts?: { type?: string; typePrefix?: string; orderBy?: string }) => {
       let result = pages;
-      if (opts?.type) result = result.filter(p => p.type === opts.type);
+      if (opts?.typePrefix) result = result.filter(p => p.type.startsWith(opts.typePrefix!));
+      else if (opts?.type) result = result.filter(p => p.type === opts.type);
       return result;
     },
   } as unknown as CBrainDB;
@@ -29,7 +30,7 @@ function createMockLLM(responses: string[]): LLMProvider {
 function makePage(overrides: Partial<PageRow> = {}): PageRow {
   return {
     slug: "brain/entities/test-entity",
-    type: "entity",
+    type: "entity/person",
     title: "张三",
     file_path: "brain/entities/test-entity.md",
     content_hash: null,

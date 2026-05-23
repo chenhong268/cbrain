@@ -159,7 +159,7 @@ export class SyncManager {
         this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
         report.synced++;
 
-        if (this.nerEngine && file.body.trim() && file.type !== "entity" && file.type !== "concept" && file.type !== "insight") {
+        if (this.nerEngine && file.body.trim() && !file.type.startsWith("entity/") && !file.type.startsWith("concept/") && !file.type.startsWith("insight/")) {
           nerJobs.push({ slug: file.slug, text: file.body, type: file.type });
         }
 
@@ -310,7 +310,7 @@ export class SyncManager {
     this.pipeline.writeIngestLog(effectiveSlug, "vault", { hash: contentHash });
 
     // NER — skip entity/concept pages
-    if (this.nerEngine && parsed.body.trim() && type !== "entity" && type !== "concept" && type !== "insight") {
+    if (this.nerEngine && parsed.body.trim() && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/")) {
       try {
         const nerResult = await this.pipeline.processNer(effectiveSlug, parsed.body, type, false);
         if (nerResult && nerResult.entities > 0) {

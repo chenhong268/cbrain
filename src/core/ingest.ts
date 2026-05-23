@@ -164,7 +164,7 @@ export class IngestManager {
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
     let nerResult: NerPipelineResult | null | undefined;
-    const shouldNer = doNer && type !== "entity" && type !== "concept" && type !== "insight";
+    const shouldNer = doNer && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
     if (shouldNer) {
       try {
         nerResult = await this.pipeline.processNer(slug, body, type, true);
@@ -175,7 +175,7 @@ export class IngestManager {
     }
 
     // Entity type: extract structured facts from body into frontmatter
-    if (type === "entity" && doNer && this.llmProvider && body.trim()) {
+    if (type.startsWith("entity/") && doNer && this.llmProvider && body.trim()) {
       try {
         await this.extractEntityFacts(slug, title, body);
       } catch {

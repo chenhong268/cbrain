@@ -575,7 +575,7 @@ export class ReflectManager {
   }
 
   private classifyActionable(score: number, type: string, typeA: string, typeB: string): string {
-    const mixedTypes = (typeA === "entity" && typeB === "concept") || (typeA === "concept" && typeB === "entity");
+    const mixedTypes = (typeA.startsWith("entity/") && typeB.startsWith("concept/")) || (typeA.startsWith("concept/") && typeB.startsWith("entity/"));
     if (score >= 0.7 && (mixedTypes || type === "bridge")) return "high";
     if (score >= 0.5) return "medium";
     return "low";
@@ -649,7 +649,7 @@ export class ReflectManager {
     const sourceScore = this.jaccardDistance(this.getSourcePages(a), this.getSourcePages(b));
     const pa = this.db.getPage(a), pb = this.db.getPage(b);
     const ta = pa?.type ?? "", tb = pb?.type ?? "";
-    const typeScore = (ta === "entity" && tb === "concept") || (ta === "concept" && tb === "entity") ? 1.0 : ta === "concept" && tb === "concept" ? 0.5 : 0.3;
+    const typeScore = (ta.startsWith("entity/") && tb.startsWith("concept/")) || (ta.startsWith("concept/") && tb.startsWith("entity/")) ? 1.0 : ta.startsWith("concept/") && tb.startsWith("concept/") ? 0.5 : 0.3;
     const bodyA = bodies.get(a) ?? "", bodyB = bodies.get(b) ?? "";
     const contentScore = Math.min(Math.min(bodyA.length, bodyB.length) / 2000, 1.0);
     let semanticScore = 0.3;

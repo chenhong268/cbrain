@@ -21,7 +21,7 @@ import type { LanceDBManager } from "../storage/lancedb.js";
 
 export interface CreatePageInput {
   title: string;
-  type: "entity" | "concept" | "record" | "insight";
+  type: string;
   body: string;
   tags?: string[];
   slug?: string;

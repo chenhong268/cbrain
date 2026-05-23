@@ -200,7 +200,7 @@ export class ContentPipeline {
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
-    if (type === "entity" || type === "concept" || type === "insight") return null;
+    if (type.startsWith("entity/") || type.startsWith("concept/") || type.startsWith("insight/")) return null;
 
     const extraction = precomputed ?? await this.nerEngine.extract(body);
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {

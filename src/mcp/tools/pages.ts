@@ -51,7 +51,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("list_pages", {
     description: "List pages in the brain. Optional type filter.",
     inputSchema: {
-      type: z.enum(["entity", "concept", "record", "insight"]).optional().describe("Filter by type"),
+      type: z.string().optional().describe("Filter by type"),
       limit: z.number().optional().default(20).describe("Max results"),
       offset: z.number().optional().default(0).describe("Offset for pagination"),
     },
@@ -69,7 +69,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       slug: z.string().describe("Page slug (e.g. brain/entities/zhangsan)"),
       content: z.string().describe("Page body content (markdown)"),
       title: z.string().optional().describe("Page title (required for new pages)"),
-      type: z.enum(["entity", "concept", "record", "insight"]).optional().default("record").describe("Page type (required for new pages)"),
+      type: z.string().optional().default("record").describe("Page type (required for new pages)"),
       tags: z.array(z.string()).optional().describe("Tags to apply"),
     },
   }, async ({ slug, content, title, type, tags }) => {
@@ -81,7 +81,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
         await indexPage(ctx.pipeline, slug, content);
         // NER + wikilink extraction — same as watcher sync path
         const pageType = existing.type;
-        if (pageType !== "entity" && pageType !== "concept" && pageType !== "insight") {
+        if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
           ctx.pipeline.processNer(slug, content, pageType, false).catch(() => {});
         }
         ctx.pipeline.processWikilinks(slug, content, true);
@@ -115,7 +115,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     await indexPage(ctx.pipeline, created.slug, content);
     // NER + wikilink extraction
     const pageType = created.type;
-    if (pageType !== "entity" && pageType !== "concept" && pageType !== "insight") {
+    if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
       ctx.pipeline.processNer(created.slug, content, pageType, false).catch(() => {});
     }
     ctx.pipeline.processWikilinks(created.slug, content, true);
@@ -143,7 +143,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (updated) {
       await indexPage(ctx.pipeline, slug, newBody);
       const pageType = updated.type;
-      if (pageType !== "entity" && pageType !== "concept" && pageType !== "insight") {
+      if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
         ctx.pipeline.processNer(slug, newBody, pageType, false).catch(() => {});
       }
       ctx.pipeline.processWikilinks(slug, newBody, true);

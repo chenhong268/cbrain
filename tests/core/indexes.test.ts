@@ -28,11 +28,11 @@ describe("IndexGenerator", () => {
   test("All-Entities includes tiered entities", () => {
     db.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count)
-       VALUES (?, 'entity', ?, ?, ?, ?, ?)`
+       VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
     ).run("entities/a", "Alice", "a.md", "h1", 1, 8);
     db.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count)
-       VALUES (?, 'entity', ?, ?, ?, ?, ?)`
+       VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
     ).run("entities/b", "Bob", "b.md", "h2", 3, 1);
 
     const gen = new IndexGenerator(db, outputsDir);
@@ -47,11 +47,11 @@ describe("IndexGenerator", () => {
   test("All-Concepts lists concepts by mention count", () => {
     db.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count)
-       VALUES (?, 'concept', ?, ?, ?, ?)`
+       VALUES (?, 'concept/concept', ?, ?, ?, ?)`
     ).run("concepts/x", "AI", "x.md", "h1", 5);
     db.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count)
-       VALUES (?, 'concept', ?, ?, ?, ?)`
+       VALUES (?, 'concept/concept', ?, ?, ?, ?)`
     ).run("concepts/y", "ML", "y.md", "h2", 2);
 
     const gen = new IndexGenerator(db, outputsDir);
@@ -66,11 +66,11 @@ describe("IndexGenerator", () => {
   test("Dashboard has overview stats", () => {
     db.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count)
-       VALUES (?, 'entity', ?, ?, ?, ?)`
+       VALUES (?, 'entity/person', ?, ?, ?, ?)`
     ).run("entities/a", "Alice", "a.md", "h1", 3);
     db.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash)
-       VALUES (?, 'entity', ?, ?, ?)`
+       VALUES (?, 'entity/person', ?, ?, ?)`
     ).run("entities/b", "Bob", "b.md", "h2");
     db.prepare(
       "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"

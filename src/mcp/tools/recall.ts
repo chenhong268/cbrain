@@ -153,7 +153,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const dossier = !isBrief && page ? extractDossier(page.body) : undefined;
       const hierarchy = hierarchyBySlug.get(slug);
       const entityType = page?.frontmatter?.type ?? page?.type;
-      const birthdayInfo = entityType === "entity" ? extractBirthday(page?.body ?? "") : null;
+      const birthdayInfo = entityType?.startsWith("entity/") ? extractBirthday(page?.body ?? "") : null;
 
       return {
         slug,
