@@ -313,9 +313,9 @@ describe("NerEngine", () => {
 
     const entityCount = result.entities.filter((e) => e.type !== "concept").length;
     const conceptCount = result.entities.filter((e) => e.type === "concept").length;
-    expect(entityCount).toBeLessThanOrEqual(8);
+    expect(entityCount).toBeLessThanOrEqual(10);
     expect(conceptCount).toBeLessThanOrEqual(8);
-    expect(result.entities.length).toBeLessThanOrEqual(10);
+    expect(result.entities.length).toBeLessThanOrEqual(18);
   });
 
   // ─── Structured Facts ───────────────────────────

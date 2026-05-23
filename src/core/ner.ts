@@ -140,8 +140,8 @@ function classifyEntity(name: string, llmType: string): EntityClass {
   return null;
 }
 
+const MAX_ENTITIES = 10;
 const MAX_CONCEPTS = 8;
-const MAX_TOTAL_ENTITIES = 10;
 
 export interface FilterOutcome {
   kept: ExtractedEntity[];
@@ -209,13 +209,13 @@ export function filterExtractedEntities(
   const nonConcepts = rankedNonLow.filter((e) => e.class === "entity");
 
   const keptConcepts = concepts.slice(0, MAX_CONCEPTS);
-  const keptNonConcepts = nonConcepts.slice(0, MAX_TOTAL_ENTITIES - keptConcepts.length);
+  const keptNonConcepts = nonConcepts.slice(0, MAX_ENTITIES);
 
   // Cap overflow → filtered
   for (const e of concepts.slice(MAX_CONCEPTS)) {
     filtered.push({ entity: e, reason: "concept_cap" });
   }
-  for (const e of nonConcepts.slice(MAX_TOTAL_ENTITIES - keptConcepts.length)) {
+  for (const e of nonConcepts.slice(MAX_ENTITIES)) {
     filtered.push({ entity: e, reason: "entity_cap" });
   }
 

@@ -25,7 +25,14 @@ export class OntologyLoader implements Ontology {
     for (const type of this.getConcreteEntityTypes()) {
       if (type.includes("/")) {
         const shortName = type.split("/").pop()!;
-        this.nerToPageType.set(shortName, type);
+        const existing = this.nerToPageType.get(shortName);
+        if (existing && existing !== type) {
+          const preferred = existing.startsWith("entity/") ? existing : type;
+          console.warn(`[ontology] nerToPageType collision: "${shortName}" → "${existing}" and "${type}", using "${preferred}"`);
+          this.nerToPageType.set(shortName, preferred);
+        } else {
+          this.nerToPageType.set(shortName, type);
+        }
       }
     }
     for (const [canonical, def] of Object.entries(this.data.relation_types)) {
