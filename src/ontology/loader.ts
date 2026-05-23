@@ -110,7 +110,7 @@ export class OntologyLoader implements Ontology {
   }
 
   resolvePageType(nerType: string): string {
-    return this.nerToPageType.get(nerType) ?? "record";
+    return this.nerToPageType.get(nerType) ?? "concept/concept";
   }
 
   isDerivedPageType(type: string): boolean {

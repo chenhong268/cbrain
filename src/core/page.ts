@@ -4,6 +4,7 @@ import {
   readFileSync,
   writeFileSync,
   unlinkSync,
+  renameSync,
   readdirSync,
   statSync,
 } from "node:fs";
@@ -173,25 +174,43 @@ export class PageManager {
     return slugs.map((s) => this.getBySlug(s)).filter(Boolean) as Page[];
   }
 
-  /** Update a page's type in both DB and vault file frontmatter. */
+  /** Update a page's type. Moves file to correct directory if needed. */
   updateType(slug: string, newType: string): void {
+    const normalizedType = normalizePageType(newType);
     const page = this.getBySlug(slug);
     if (!page) return;
 
+    const newSlug = canonicalSlug(slug, normalizedType);
+    const oldFilePath = join(this.vaultPath, page.file_path);
+
     const frontmatter: PageFrontmatter = {
       ...page.frontmatter,
-      type: newType,
+      type: normalizedType,
+      slug: newSlug,
       updated_at: new Date().toISOString(),
     };
 
-    const filePath = join(this.vaultPath, page.file_path);
-    const content = stringifyFrontmatter(frontmatter, page.body);
-    writeFileSync(filePath, content, "utf-8");
-
-    const contentHash = hashContent(content);
-    this.db.updateType(slug, newType);
-    this.db.updatePageHash(slug, contentHash);
-    this.cacheDelete(slug);
+    if (newSlug !== slug) {
+      const newFileName = slugToFilePath(newSlug);
+      const newFilePath = join(this.vaultPath, newFileName);
+      mkdirSync(dirname(newFilePath), { recursive: true });
+      const content = stringifyFrontmatter(frontmatter, page.body);
+      writeFileSync(newFilePath, content, "utf-8");
+      unlinkSync(oldFilePath);
+      const contentHash = hashContent(content);
+      this.db.movePage(slug, newSlug, normalizedType, relative(this.vaultPath, newFilePath));
+      this.db.updatePageHash(newSlug, contentHash);
+      this.cacheDelete(slug);
+      this.cacheDelete(newSlug);
+      this.logger?.info("page", "类型更新并移动文件", { oldSlug: slug, newSlug, type: normalizedType });
+    } else {
+      const content = stringifyFrontmatter(frontmatter, page.body);
+      writeFileSync(oldFilePath, content, "utf-8");
+      const contentHash = hashContent(content);
+      this.db.updateType(slug, normalizedType);
+      this.db.updatePageHash(slug, contentHash);
+      this.cacheDelete(slug);
+    }
   }
 
   update(

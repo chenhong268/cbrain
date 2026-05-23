@@ -857,14 +857,14 @@ export class CBrainDB {
   }
 
   rewireLinks(oldSlug: string, newSlug: string): void {
-    // Delete self-referencing duplicates before rewiring to avoid UNIQUE violation
+    this.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old").run({ $old: oldSlug, $new: newSlug });
+    this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old").run({ $old: oldSlug, $new: newSlug });
+    // After rewiring, dedup any collisions (old and new both linked to same target)
     this.prepare(`
       DELETE FROM links WHERE rowid NOT IN (
         SELECT MIN(rowid) FROM links GROUP BY from_slug, to_slug, relation
-      ) AND (from_slug = $old OR to_slug = $old)
-    `).run({ $old: oldSlug });
-    this.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old").run({ $old: oldSlug, $new: newSlug });
-    this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old").run({ $old: oldSlug, $new: newSlug });
+      ) AND (from_slug = $new OR to_slug = $new)
+    `).run({ $new: newSlug });
   }
 
   // ─── Page list/query operations ──────────────────────────────
@@ -1490,11 +1490,40 @@ export class CBrainDB {
     ).run({ $slug: slug, $type: newType });
   }
 
+  movePage(oldSlug: string, newSlug: string, newType: string, newFilePath: string): void {
+    const tx = this.db.transaction(() => {
+      this.db.exec("PRAGMA foreign_keys = OFF");
+      this.prepare("UPDATE pages SET slug = $new, type = $type, file_path = $fp, updated_at = CURRENT_TIMESTAMP WHERE slug = $old")
+        .run({ $old: oldSlug, $new: newSlug, $type: newType, $fp: newFilePath });
+      this.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE tags SET page_slug = $new WHERE page_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE chunks SET page_slug = $new WHERE page_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE versions SET page_slug = $new WHERE page_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE aliases SET page_slug = $new WHERE page_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+      this.db.exec("PRAGMA foreign_keys = ON");
+    });
+    tx();
+  }
+
   getAllEntityTitles(): string[] {
     const rows = this.prepare(
       "SELECT title FROM pages WHERE type LIKE 'entity/%' OR type LIKE 'concept/%'"
     ).all() as Array<{ title: string }>;
     return rows.map(r => r.title);
+  }
+
+  getAllEntitiesInfo(type?: string): Array<{ slug: string; title: string; type: string; mention_count: number }> {
+    const sql = type
+      ? "SELECT slug, title, type, mention_count FROM pages WHERE type = $type ORDER BY mention_count DESC"
+      : "SELECT slug, title, type, mention_count FROM pages WHERE type LIKE 'entity/%' OR type LIKE 'concept/%' ORDER BY mention_count DESC";
+    return this.prepare(sql).all(type ? { $type: type } : {}) as Array<{ slug: string; title: string; type: string; mention_count: number }>;
   }
 
   addAlias(pageSlug: string, alias: string): void {

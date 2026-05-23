@@ -648,4 +648,479 @@ export function register(program: Command) {
 
       deps.db.close();
     });
+
+  program
+    .command("relocate")
+    .description("Fix misplaced pages in records/ by scanning file frontmatter and moving to correct directories")
+    .option("--dry-run", "Show what would change without modifying anything")
+    .option("--type <type>", "Only process pages with this frontmatter type")
+    .action(async (opts) => {
+      const config = loadConfig();
+      const db = new CBrainDB(config.dbPath);
+      const { join, dirname } = await import("node:path");
+      const { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, readdirSync } = await import("node:fs");
+      const { parseFrontmatter, stringifyFrontmatter } = await import("../../utils/frontmatter.js");
+      const { getOntology } = await import("../../ontology/loader.js");
+      const { relative } = await import("node:path");
+      const ontology = getOntology();
+      const concreteTypes = new Set(ontology.getConcreteEntityTypes());
+
+      const recordsDir = join(config.vaultPath, "records");
+      if (!existsSync(recordsDir)) { console.log("No records/ directory found."); return; }
+
+      const INVALID_TYPE_FIX: Record<string, string> = {
+        "entity/concept": "concept/concept",
+        "entity/technology": "concept/technology",
+        "entity/theory": "record",
+        "entity/framework": "record",
+        "concept/theory": "record",
+        "event": "record",
+      };
+
+      type MisplacedFile = { name: string; path: string; frontmatterType: string; targetType: string; action: "move" | "fix-frontmatter" | "delete" | "skip" };
+      const files: MisplacedFile[] = [];
+
+      for (const f of readdirSync(recordsDir).filter(f => f.endsWith(".md"))) {
+        const content = readFileSync(join(recordsDir, f), "utf-8");
+        const { frontmatter } = parseFrontmatter(content);
+        const fmType = (frontmatter as Record<string, unknown>).type as string;
+        if (!fmType || fmType === "record") continue;
+        if (opts.type && fmType !== opts.type) continue;
+
+        let targetType = fmType;
+        let action: MisplacedFile["action"] = "move";
+
+        if (concreteTypes.has(fmType)) {
+          const vaultDir = ontology.getVaultDir(fmType);
+          const targetPath = join(config.vaultPath, vaultDir, f);
+          if (existsSync(targetPath)) {
+            action = "delete";
+          } else {
+            action = "move";
+          }
+        } else {
+          const fix = INVALID_TYPE_FIX[fmType];
+          targetType = fix ?? "record";
+          if (targetType === "record") {
+            action = "fix-frontmatter";
+          } else if (concreteTypes.has(targetType)) {
+            const vaultDir = ontology.getVaultDir(targetType);
+            const targetPath = join(config.vaultPath, vaultDir, f);
+            action = existsSync(targetPath) ? "delete" : "move";
+          } else {
+            action = "fix-frontmatter";
+          }
+        }
+
+        files.push({ name: f.replace(/\.md$/, ""), path: join(recordsDir, f), frontmatterType: fmType, targetType, action });
+      }
+
+      if (files.length === 0) {
+        console.log("No misplaced pages found in records/.");
+        return;
+      }
+
+      let moved = 0, fixed = 0, deleted = 0, errors = 0;
+      const byAction: Record<string, string[]> = {};
+
+      for (const file of files) {
+        const label = file.action === "move"
+          ? `${file.frontmatterType} → move to ${ontology.getVaultDir(file.targetType)}/`
+          : file.action === "delete"
+          ? `${file.frontmatterType} → remove duplicate (exists in ${ontology.getVaultDir(file.frontmatterType)}/)`
+          : `${file.frontmatterType} → fix frontmatter to record`;
+        (byAction[label] ??= []).push(file.name);
+
+        if (opts.dryRun) {
+          if (file.action === "move") moved++;
+          else if (file.action === "fix-frontmatter") fixed++;
+          else if (file.action === "delete") deleted++;
+          continue;
+        }
+
+        try {
+          const content = readFileSync(file.path, "utf-8");
+          const { frontmatter, body } = parseFrontmatter(content);
+
+          if (file.action === "move") {
+            const vaultDir = ontology.getVaultDir(file.targetType);
+            const destDir = join(config.vaultPath, vaultDir);
+            mkdirSync(destDir, { recursive: true });
+            const newSlug = `${vaultDir}/${file.name}`;
+            const newFilePath = `${vaultDir}/${file.name}.md`;
+            const fm = { ...frontmatter, type: file.targetType, slug: newSlug, updated_at: new Date().toISOString() };
+            writeFileSync(join(destDir, `${file.name}.md`), stringifyFrontmatter(fm, body), "utf-8");
+            unlinkSync(file.path);
+            const oldSlug = (frontmatter as Record<string, unknown>).slug as string ?? `records/${file.name}`;
+            if (oldSlug !== newSlug) {
+              db.movePage(oldSlug, newSlug, file.targetType, newFilePath);
+            } else {
+              db.updateType(newSlug, file.targetType);
+            }
+            moved++;
+          } else if (file.action === "delete") {
+            unlinkSync(file.path);
+            const oldSlug = (frontmatter as Record<string, unknown>).slug as string ?? `records/${file.name}`;
+            db.deletePageCascaded(oldSlug);
+            deleted++;
+          } else {
+            const fm = { ...frontmatter, type: "record", updated_at: new Date().toISOString() };
+            writeFileSync(file.path, stringifyFrontmatter(fm, body), "utf-8");
+            const oldSlug = (frontmatter as Record<string, unknown>).slug as string ?? `records/${file.name}`;
+            db.updateType(oldSlug, "record");
+            fixed++;
+          }
+        } catch (err) {
+          console.error(`  ERROR: ${file.name}: ${err}`);
+          errors++;
+        }
+      }
+
+      console.log(`\nMisplaced pages in records/: ${files.length}`);
+      console.log(`  Moved to correct dir:      ${moved}`);
+      console.log(`  Fixed frontmatter to record: ${fixed}`);
+      console.log(`  Removed duplicates:         ${deleted}`);
+      if (errors) console.log(`  Errors:                     ${errors}`);
+
+      for (const [action, names] of Object.entries(byAction)) {
+        console.log(`\n  ${action} (${names.length}):`);
+        for (const n of names.slice(0, 10)) console.log(`    - ${n}`);
+        if (names.length > 10) console.log(`    ... and ${names.length - 10} more`);
+      }
+
+      if (opts.dryRun) console.log("\n  (DRY RUN)");
+      db.close();
+    });
+
+  // ─── dedup: entity deduplication via LLM ─────────────────────
+  program
+    .command("dedup")
+    .description("Find and merge duplicate entities using LLM")
+    .option("--type <type>", "Only scan a specific entity type (e.g. entity/company)")
+    .option("--dry-run", "Show plan without executing merges")
+    .option("--execute", "Actually merge duplicates (default is dry-run)")
+    .option("--exclude <titles>", "Comma-separated target titles to skip")
+    .action(async (opts) => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      const db = deps.db;
+      const llm = deps.llm;
+
+      if (!llm) {
+        console.error("Error: LLM not configured. Set ner.llm_api_key in cbrain.json.");
+        db.close();
+        return;
+      }
+
+      const dryRun = !opts.execute;
+
+      // Phase 1: Collect entities by type
+      const typeFilter = opts.type ?? undefined;
+      const rows = db.getAllEntitiesInfo(typeFilter);
+
+      const byType = new Map<string, Array<{ slug: string; title: string; mention_count: number }>>();
+      for (const row of rows) {
+        const group = byType.get(row.type) ?? [];
+        group.push(row);
+        byType.set(row.type, group);
+      }
+
+      console.log(`Scanning ${rows.length} entities across ${byType.size} types...`);
+
+      // Phase 2: Find candidate pairs via substring overlap
+      interface CandidatePair {
+        a: { slug: string; title: string; mention_count: number };
+        b: { slug: string; title: string; mention_count: number };
+        overlap: string;
+      }
+
+      const candidates: CandidatePair[] = [];
+
+      for (const [type, entities] of byType) {
+        // Skip types with too few entities
+        if (entities.length < 2) continue;
+
+        for (let i = 0; i < entities.length; i++) {
+          for (let j = i + 1; j < entities.length; j++) {
+            const a = entities[i];
+            const b = entities[j];
+            const normA = normalize(a.title);
+            const normB = normalize(b.title);
+
+            // Check substring containment (at least 2 chars shared, difference >= 2)
+            if (normA.length > 1 && normB.length > 1) {
+              if (normA.includes(normB) || normB.includes(normA)) {
+                const minLen = Math.min(normA.length, normB.length);
+                const maxLen = Math.max(normA.length, normB.length);
+                if (maxLen - minLen >= 2) {
+                  candidates.push({
+                    a: { slug: a.slug, title: a.title, mention_count: a.mention_count },
+                    b: { slug: b.slug, title: b.title, mention_count: b.mention_count },
+                    overlap: normA.length < normB.length ? normA : normB,
+                  });
+                }
+              }
+            }
+
+            // Also check shared core: at least 3 consecutive matching chars
+            if (!candidates.some(c => (c.a.slug === a.slug && c.b.slug === b.slug) || (c.a.slug === b.slug && c.b.slug === a.slug))) {
+              const shared = longestCommonSubstring(normA, normB);
+              if (shared.length >= 3 && shared.length < normA.length && shared.length < normB.length) {
+                candidates.push({
+                  a: { slug: a.slug, title: a.title, mention_count: a.mention_count },
+                  b: { slug: b.slug, title: b.title, mention_count: b.mention_count },
+                  overlap: shared,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      if (candidates.length === 0) {
+        console.log("No duplicate candidates found.");
+        db.close();
+        return;
+      }
+
+      console.log(`Found ${candidates.length} candidate pairs to evaluate.`);
+
+      // Phase 3: LLM classification in batches
+      const BATCH_SIZE = 30;
+      const verdicts: Array<{
+        a: CandidatePair["a"];
+        b: CandidatePair["b"];
+        verdict: string;
+        reason: string;
+      }> = [];
+
+      for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+        const batch = candidates.slice(i, i + BATCH_SIZE);
+        const pairLines = batch.map((p, idx) =>
+          `${idx + 1}. "${p.a.title}" (mentions: ${p.a.mention_count}) vs "${p.b.title}" (mentions: ${p.b.mention_count})`
+        ).join("\n");
+
+        const prompt = `You are an entity deduplication assistant for a Chinese knowledge graph.
+Given pairs of entity names that share overlapping characters, classify each pair:
+
+- "same": Both names refer to the SAME real-world entity (abbreviation, full name vs short name, alias)
+- "related": They are related but DIFFERENT entities (parent company vs subsidiary, brand vs product line)
+- "different": Completely different entities that happen to share characters
+
+Rules:
+- 国控南通 = 国药控股南通 = 国药控股南通有限公司 → same (same company, abbreviation)
+- 康缘 ≠ 江苏康缘药业 (if one is brand shorthand and the other is a specific subsidiary) → evaluate carefully
+- 南京医药 ≠ 南京医药南通健桥有限公司 → related (parent vs subsidiary)
+- When uncertain, classify as "different"
+
+## Pairs
+${pairLines}
+
+## Output
+Return JSON only, no markdown:
+{"results": [{"index": 1, "verdict": "same|related|different", "reason": "brief explanation"}]}`;
+
+        try {
+          const raw = await llm.chat([
+            { role: "system", content: "Return valid JSON only. No markdown wrapping." },
+            { role: "user", content: prompt },
+          ]);
+          const cleaned = raw.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "");
+          const parsed = JSON.parse(cleaned) as {
+            results: Array<{ index: number; verdict: string; reason: string }>;
+          };
+
+          if (parsed.results && Array.isArray(parsed.results)) {
+            for (const r of parsed.results) {
+              const pair = batch[r.index - 1];
+              if (pair && ["same", "related", "different"].includes(r.verdict)) {
+                verdicts.push({ a: pair.a, b: pair.b, verdict: r.verdict, reason: r.reason });
+              }
+            }
+          }
+        } catch (err) {
+          console.error(`  LLM batch ${Math.floor(i / BATCH_SIZE) + 1} failed: ${err}`);
+        }
+      }
+
+      // Phase 4: Group "same" pairs into merge clusters
+      const samePairs = verdicts.filter(v => v.verdict === "same");
+      const relatedPairs = verdicts.filter(v => v.verdict === "related");
+      const differentPairs = verdicts.filter(v => v.verdict === "different");
+
+      // Build merge groups using union-find
+      const slugToGroup = new Map<string, Set<string>>();
+      for (const pair of samePairs) {
+        const existingA = slugToGroup.get(pair.a.slug);
+        const existingB = slugToGroup.get(pair.b.slug);
+
+        if (existingA && existingB) {
+          // Merge groups
+          if (existingA !== existingB) {
+            for (const s of existingB) {
+              existingA.add(s);
+              slugToGroup.set(s, existingA);
+            }
+          }
+        } else if (existingA) {
+          existingA.add(pair.b.slug);
+          slugToGroup.set(pair.b.slug, existingA);
+        } else if (existingB) {
+          existingB.add(pair.a.slug);
+          slugToGroup.set(pair.a.slug, existingB);
+        } else {
+          const group = new Set([pair.a.slug, pair.b.slug]);
+          slugToGroup.set(pair.a.slug, group);
+          slugToGroup.set(pair.b.slug, group);
+        }
+      }
+
+      // Deduplicate groups
+      const seenGroups = new Set<Set<string>>();
+      const mergeGroups: Array<{ slugs: string[]; survivors: Array<{ slug: string; title: string; mention_count: number }> }> = [];
+
+      for (const group of new Set(slugToGroup.values())) {
+        if (seenGroups.has(group)) continue;
+        seenGroups.add(group);
+
+        const slugs = [...group];
+        const survivors = slugs
+          .map(slug => {
+            const title = db.getPageTitle(slug) ?? slug.split("/").pop()!;
+            const info = db.getPageTierAndMentions(slug);
+            return { slug, title, mention_count: info?.mention_count ?? 0 };
+          })
+          .sort((a, b) => b.mention_count - a.mention_count);
+
+        if (survivors.length >= 2) {
+          mergeGroups.push({ slugs, survivors });
+        }
+      }
+
+      // Report
+      console.log(`\nResults: ${verdicts.length} pairs classified`);
+      console.log(`  Same (merge candidates):    ${samePairs.length}`);
+      console.log(`  Related (parent/subsidiary): ${relatedPairs.length}`);
+      console.log(`  Different:                   ${differentPairs.length}`);
+      console.log(`  Merge groups:                ${mergeGroups.length}`);
+
+      if (relatedPairs.length > 0) {
+        console.log("\nRelated (NOT merged — parent/subsidiary):");
+        for (const p of relatedPairs.slice(0, 20)) {
+          console.log(`  "${p.a.title}" ↔ "${p.b.title}" — ${p.reason}`);
+        }
+        if (relatedPairs.length > 20) console.log(`  ... and ${relatedPairs.length - 20} more`);
+      }
+
+      if (mergeGroups.length === 0) {
+        console.log("\nNo merge groups found.");
+        db.close();
+        return;
+      }
+
+      // For each group, determine the target (highest mentions) and sources
+      interface MergePlan {
+        target: { slug: string; title: string; mention_count: number };
+        sources: Array<{ slug: string; title: string; mention_count: number }>;
+      }
+
+      const plans: MergePlan[] = [];
+      for (const group of mergeGroups) {
+        const target = group.survivors[0]; // highest mentions
+        const seen = new Set<string>();
+        const sources = group.survivors.slice(1).filter(s => {
+          if (seen.has(s.slug)) return false;
+          seen.add(s.slug);
+          return true;
+        });
+        plans.push({ target, sources });
+      }
+
+      // Apply exclusions
+      const excludeTitles = new Set((opts.exclude ?? "").split(",").map((s: string) => s.trim()).filter(Boolean));
+      if (excludeTitles.size > 0) {
+        const before = plans.length;
+        for (let i = plans.length - 1; i >= 0; i--) {
+          if (excludeTitles.has(plans[i].target.title)) {
+            console.log(`  Skipping excluded: "${plans[i].target.title}"`);
+            plans.splice(i, 1);
+          }
+        }
+        console.log(`  Excluded ${before - plans.length} groups.`);
+      }
+
+      console.log("\nMerge plan:");
+      for (const plan of plans) {
+        console.log(`  Target: "${plan.target.title}" (${plan.target.mention_count} mentions)`);
+        for (const src of plan.sources) {
+          console.log(`    ← merge "${src.title}" (${src.mention_count} mentions)`);
+        }
+      }
+
+      if (dryRun) {
+        console.log("\n(DRY RUN — use --execute to merge)");
+        db.close();
+        return;
+      }
+
+      // Phase 5: Execute merges
+      const { PageManager } = await import("../../core/page.js");
+      const pages = new PageManager(db, config.vaultPath);
+
+      let merged = 0, failed = 0;
+      for (const plan of plans) {
+        for (const src of plan.sources) {
+          try {
+            const result = await pages.merge(src.slug, plan.target.slug);
+            if (result) {
+              merged++;
+              console.log(`  ✓ Merged "${src.title}" → "${plan.target.title}"`);
+            } else {
+              failed++;
+              console.error(`  ✗ Merge failed: "${src.title}" → "${plan.target.title}"`);
+            }
+          } catch (err) {
+            failed++;
+            console.error(`  ✗ Merge error: "${src.title}" → "${plan.target.title}": ${err}`);
+          }
+        }
+      }
+
+      console.log(`\nDone: ${merged} merged, ${failed} failed.`);
+      db.close();
+    });
+}
+
+// ─── Dedup helpers ──────────────────────────────────────────────
+
+function normalize(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[\s\-_\.]+/g, "")
+    .replace(/[（(].+?[）)]/g, "")
+    .replace(/有限公司$/g, "")
+    .replace(/股份有限公司$/g, "")
+    .replace(/集团$/g, "")
+    .replace(/公司$/g, "")
+    .replace(/[^\p{L}\p{N}]/gu, "")
+    .trim();
+}
+
+function longestCommonSubstring(a: string, b: string): string {
+  if (a.length === 0 || b.length === 0) return "";
+  let longest = "";
+  const matrix: number[][] = Array.from({ length: a.length }, () => Array(b.length).fill(0));
+
+  for (let i = 0; i < a.length; i++) {
+    for (let j = 0; j < b.length; j++) {
+      if (a[i] === b[j]) {
+        matrix[i][j] = (i > 0 && j > 0 ? matrix[i - 1][j - 1] : 0) + 1;
+        if (matrix[i][j] > longest.length) {
+          longest = a.substring(i - matrix[i][j] + 1, i + 1);
+        }
+      }
+    }
+  }
+
+  return longest;
 }
