@@ -1508,6 +1508,8 @@ export class CBrainDB {
         .run({ $old: oldSlug, $new: newSlug });
       this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE links SET context = REPLACE(context, $old, $new) WHERE context LIKE '%' || $old || '%'")
+        .run({ $old: oldSlug, $new: newSlug });
       this.prepare("UPDATE tags SET page_slug = $new WHERE page_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
       this.prepare("UPDATE chunks SET page_slug = $new WHERE page_slug = $old")

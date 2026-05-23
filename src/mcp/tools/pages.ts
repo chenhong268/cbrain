@@ -79,12 +79,11 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       const updated = ctx.pages.update(slug, { body: content, tags });
       if (updated) {
         await indexPage(ctx.pipeline, slug, content);
-        // NER + wikilink extraction — same as watcher sync path
         const pageType = existing.type;
+        const wlResult = ctx.pipeline.processWikilinks(slug, content);
         if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
-          ctx.pipeline.processNer(slug, content, pageType, false).catch(() => {});
+          ctx.pipeline.processNer(slug, content, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
         }
-        ctx.pipeline.processWikilinks(slug, content);
       }
       return {
         content: [{ type: "text", text: JSON.stringify({ action: "updated", page: updated ? { slug: updated.slug, title: updated.title } : null }, null, 2) }],
@@ -113,12 +112,11 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     }
     const created = ctx.pages.create({ slug, title, type: type ?? "record", body: content, tags });
     await indexPage(ctx.pipeline, created.slug, content);
-    // NER + wikilink extraction
     const pageType = created.type;
+    const wlResult = ctx.pipeline.processWikilinks(created.slug, content);
     if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
-      ctx.pipeline.processNer(created.slug, content, pageType, false).catch(() => {});
+      ctx.pipeline.processNer(created.slug, content, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
     }
-    ctx.pipeline.processWikilinks(created.slug, content);
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "created", page: { slug: created.slug, title: created.title } }, null, 2) }],
     };
@@ -143,10 +141,10 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (updated) {
       await indexPage(ctx.pipeline, slug, newBody);
       const pageType = updated.type;
+      const wlResult = ctx.pipeline.processWikilinks(slug, newBody);
       if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
-        ctx.pipeline.processNer(slug, newBody, pageType, false).catch(() => {});
+        ctx.pipeline.processNer(slug, newBody, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
       }
-      ctx.pipeline.processWikilinks(slug, newBody);
     }
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "appended", slug, new_length: newBody.length }) }],

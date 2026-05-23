@@ -123,7 +123,7 @@ export class SyncManager {
     }
 
     // Phase 2: write to DB + LanceDB + wikilinks (sequential), collect NER jobs
-    const nerJobs: Array<{ slug: string; text: string; type: string }> = [];
+    const nerJobs: Array<{ slug: string; text: string; type: string; mentionedSlugs: Set<string> }> = [];
 
     for (const file of changed) {
       try {
@@ -160,12 +160,16 @@ export class SyncManager {
         report.synced++;
 
         if (this.nerEngine && file.body.trim() && !file.type.startsWith("entity/") && !file.type.startsWith("concept/") && !file.type.startsWith("insight/")) {
-          nerJobs.push({ slug: file.slug, text: file.body, type: file.type });
+          nerJobs.push({ slug: file.slug, text: file.body, type: file.type, mentionedSlugs: new Set() });
         }
 
         if (this.pages && file.body.trim()) {
           try {
-            this.pipeline.processWikilinks(file.slug, file.body);
+            const wlResult = this.pipeline.processWikilinks(file.slug, file.body);
+            const lastJob = nerJobs[nerJobs.length - 1];
+            if (lastJob && lastJob.slug === file.slug) {
+              lastJob.mentionedSlugs = wlResult.mentionedSlugs;
+            }
           } catch (e) {
             this.logger?.warn("sync", "Wikilink 提取失败", { slug: file.slug, error: String(e) });
           }
@@ -193,7 +197,7 @@ export class SyncManager {
           const extraction = extractions[j];
           if (!extraction) continue;
           try {
-            const nerResult = await this.pipeline.processNer(batch[j].slug, batch[j].text, batch[j].type, false, extraction);
+            const nerResult = await this.pipeline.processNer(batch[j].slug, batch[j].text, batch[j].type, false, extraction, batch[j].mentionedSlugs);
             if (nerResult) {
               report.nerEntities = (report.nerEntities ?? 0) + nerResult.entities;
               report.nerRelations = (report.nerRelations ?? 0) + nerResult.relations;
@@ -309,24 +313,26 @@ export class SyncManager {
     this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);
     this.pipeline.writeIngestLog(effectiveSlug, "vault", { hash: contentHash });
 
+    // Wikilink extraction first — produces mentionedSlugs for NER dedup
+    let mentionedSlugs = new Set<string>();
+    if (this.pages && parsed.body.trim()) {
+      try {
+        const wlResult = this.pipeline.processWikilinks(effectiveSlug, parsed.body);
+        mentionedSlugs = wlResult.mentionedSlugs;
+      } catch (e) {
+        this.logger?.warn("sync", "Wikilink 提取失败", { slug: effectiveSlug, error: String(e) });
+      }
+    }
+
     // NER — skip entity/concept pages
     if (this.nerEngine && parsed.body.trim() && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/")) {
       try {
-        const nerResult = await this.pipeline.processNer(effectiveSlug, parsed.body, type, false);
+        const nerResult = await this.pipeline.processNer(effectiveSlug, parsed.body, type, false, undefined, mentionedSlugs);
         if (nerResult && nerResult.entities > 0) {
           this.logger?.info("sync", `NER: ${nerResult.entities} entities from ${effectiveSlug}`);
         }
       } catch (e) {
         this.logger?.warn("sync", `NER failed for ${effectiveSlug}: ${(e as Error).message}`);
-      }
-    }
-
-    // Wikilink extraction + auto-link
-    if (this.pages && parsed.body.trim()) {
-      try {
-        this.pipeline.processWikilinks(effectiveSlug, parsed.body);
-      } catch (e) {
-        this.logger?.warn("sync", "Wikilink 提取失败", { slug: effectiveSlug, error: String(e) });
       }
     }
 

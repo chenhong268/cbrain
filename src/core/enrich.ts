@@ -98,8 +98,8 @@ export class EnrichManager {
     const newTier = this.computeTier(page.mention_count, page.activity_weight);
 
     if (newTier < page.tier) {
-      this.db.updatePageTier(slug, newTier);
       this.pages?.update(slug, { extra: { tier: newTier } });
+      this.db.updatePageTier(slug, newTier);
     }
 
     const effectiveTier = newTier < page.tier ? newTier : page.tier;
