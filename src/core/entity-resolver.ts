@@ -282,17 +282,26 @@ function findSubstringMatch(name: string, db: CBrainDB): { slug: string; title: 
   const allTitles = db.getAllEntityTitles();
   for (const existing of allTitles) {
     // New entity is substring of existing (e.g. "AI" ⊂ "AI Agents")
-    if (existing.includes(name) && name.length > 1 && existing.length - name.length >= 2) {
+    if (existing.includes(name) && name.length > 1 && isSignificantSubstring(name, existing)) {
       const slug = db.getEntitySlugByTitle(existing);
       if (slug) return { slug, title: existing };
     }
     // Existing is substring of new (e.g. "Claude" ⊂ "Claude Code")
-    if (name.includes(existing) && existing.length > 1 && name.length - existing.length >= 2) {
+    if (name.includes(existing) && existing.length > 1 && isSignificantSubstring(existing, name)) {
       const slug = db.getEntitySlugByTitle(existing);
       if (slug) return { slug, title: existing };
     }
   }
   return null;
+}
+
+function isSignificantSubstring(shorter: string, longer: string): boolean {
+  const diff = longer.length - shorter.length;
+  // Absolute diff >= 3 (e.g. "Claude" ⊂ "Claude Code" = 5)
+  if (diff >= 3) return true;
+  // Or shorter occupies >= 60% of longer (e.g. "数字化" 3/5 = 60%)
+  if (shorter.length >= longer.length * 0.6) return true;
+  return false;
 }
 
 function normalizeForComparison(name: string): string {
@@ -312,6 +321,7 @@ function checkTypeGate(db: CBrainDB, existingSlug: string, nerType: EntityType):
   const dbType = db.getEntityType(existingSlug);
   if (!dbType) return true;
   const mappedNerType = mapEntityType(nerType);
+  if (mappedNerType === "record") return true;
   if (dbType === mappedNerType) return true;
   return getOntology().areTypesAffine(dbType, mappedNerType);
 }

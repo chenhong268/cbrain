@@ -193,6 +193,10 @@ export class PageManager {
     if (newSlug !== slug) {
       const newFileName = slugToFilePath(newSlug);
       const newFilePath = join(this.vaultPath, newFileName);
+      if (existsSync(newFilePath)) {
+        this.logger?.warn("page", "类型更新中止：目标文件已存在（同名实体冲突）", { oldSlug: slug, newSlug, targetFile: newFilePath });
+        return;
+      }
       mkdirSync(dirname(newFilePath), { recursive: true });
       const content = stringifyFrontmatter(frontmatter, page.body);
       writeFileSync(newFilePath, content, "utf-8");

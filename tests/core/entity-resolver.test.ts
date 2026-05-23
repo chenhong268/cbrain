@@ -262,6 +262,13 @@ describe("EntityResolver", () => {
       expect(result.matchedBy).toBe("substring_dedup");
       expect(result.slug).toBe("entity/digital-transformation");
     });
+
+    test("no match: 京东 → 京东集团 (too short relative to target)", () => {
+      seedEntity("京东集团", "entity/company", "entity/jd-group");
+
+      const result = resolver.resolveSingle(candidate("京东", "company"));
+      expect(result.action).toBe("stub_created");
+    });
   });
 
   // ─── Mock LLM ──────────────────────────────────────────────

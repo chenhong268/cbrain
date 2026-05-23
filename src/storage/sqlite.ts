@@ -262,6 +262,7 @@ export class CBrainDB {
     this.migrateAliasesSource();
     this.migrateChunksSummaryLevel();
     this.migrateOntologyTypes();
+    this.repairDirtyData();
   }
 
   private migrateLinksStrength(): void {
@@ -1159,9 +1160,10 @@ export class CBrainDB {
   // ─── Link operations ──────────────────────────────────────────
 
   insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number, _skipReverse?: boolean): void {
+    const clampedWeight = Math.min(1.0, Math.max(0.0, weight ?? 1.0));
     this.prepare(
       "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence) VALUES ($from, $to, $rel, $ctx, $w, $s, $st, $c)"
-    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: weight ?? 1.0, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5 });
+    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: clampedWeight, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5 });
 
     if (!_skipReverse) {
       const reverse = getReverseRelation(relation);
@@ -2063,6 +2065,22 @@ export class CBrainDB {
     this.db.exec("PRAGMA foreign_keys = ON");
 
     this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v6_ontology_types', '1')").run();
+  }
+
+  private repairDirtyData(): void {
+    const done = this.db.prepare("SELECT value FROM config WHERE key = 'repair_v1_dirty_data'").get() as { value: string } | undefined;
+    if (done?.value === "1") return;
+
+    // Clamp links.weight to [0, 1]
+    this.db.prepare("UPDATE links SET weight = 1.0 WHERE weight > 1.0").run();
+    this.db.prepare("UPDATE links SET weight = 0.0 WHERE weight < 0.0").run();
+
+    // Delete orphaned records in child tables where page doesn't exist
+    this.db.prepare("DELETE FROM timeline WHERE page_slug NOT IN (SELECT slug FROM pages)").run();
+    this.db.prepare("DELETE FROM chunks WHERE page_slug NOT IN (SELECT slug FROM pages)").run();
+    this.db.prepare("DELETE FROM tags WHERE page_slug NOT IN (SELECT slug FROM pages)").run();
+
+    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('repair_v1_dirty_data', '1')").run();
   }
 
   insertFeedback(queryId: number | null, slug: string, signal: "relevant" | "irrelevant" | "corrected" | "expanded", note?: string): void {

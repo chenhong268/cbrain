@@ -355,7 +355,7 @@ export class SyncManager {
         if (this.pages) {
           await this.pages.delete(page.slug);
         } else {
-          this.db.deletePage(page.slug);
+          this.db.deletePageCascaded(page.slug);
         }
         await this.lance.deleteByPageSlug(page.slug);
       }
