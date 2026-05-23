@@ -186,7 +186,7 @@ export class EntityResolver {
       .slice(0, MAX_ENTITIES_IN_PROMPT)
       .map(title => {
         const slug = this.db.getEntitySlugByTitle(title) ?? "";
-        const type = this.db.getEntityType(slug) ?? "entity";
+        const type = this.db.getEntityType(slug) ?? "entity/person";
         return { title, type };
       });
     // Call LLM

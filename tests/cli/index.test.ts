@@ -94,7 +94,7 @@ describe("CLI", () => {
       const db = new CBrainDB(join(brainDir, "brain.sqlite"));
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
-         VALUES (?, 'entity', ?, ?, ?, ?, ?)`
+         VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
       ).run("entities/test", "Test", "test.md", "h1", 5, 3);
       db.close();
 

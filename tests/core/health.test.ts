@@ -43,9 +43,9 @@ describe("HealthChecker", () => {
   describe("checkAll", () => {
     test("returns pass status with sufficient well-connected data", async () => {
       for (let i = 0; i < 15; i++) {
-        insertPage(`entities/e${i}`, `Entity${i}`, "entity", { mention_count: 2, tier: 3 });
+        insertPage(`entities/e${i}`, `Entity${i}`, "entity/person", { mention_count: 2, tier: 3 });
       }
-      insertPage("concepts/c1", "Concept1", "concept", { mention_count: 2, tier: 3 });
+      insertPage("concepts/c1", "Concept1", "concept/concept", { mention_count: 2, tier: 3 });
       insertPage("records/r1", "Record1", "record");
       // Link them so no orphans
       for (let i = 1; i < 15; i++) {
@@ -59,7 +59,7 @@ describe("HealthChecker", () => {
     });
 
     test("fails on insufficient data", async () => {
-      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
 
       const report = await checker.checkAll();
       expect(report.overallStatus).toBe("warn");
@@ -67,8 +67,8 @@ describe("HealthChecker", () => {
     });
 
     test("detects semantic duplicates", async () => {
-      insertPage("entities/zhangsan", "张 三", "entity");
-      insertPage("entities/zhangsan2", "张三", "entity");
+      insertPage("entities/zhangsan", "张 三", "entity/person");
+      insertPage("entities/zhangsan2", "张三", "entity/person");
 
       const report = await checker.checkAll();
       const dedupDim = report.dimensions.find(d => d.name === "语义去重");
@@ -78,8 +78,8 @@ describe("HealthChecker", () => {
     });
 
     test("detects near-duplicate titles", async () => {
-      insertPage("entities/foo", "Foo-Bar", "entity");
-      insertPage("entities/foobar", "Foo Bar", "entity");
+      insertPage("entities/foo", "Foo-Bar", "entity/person");
+      insertPage("entities/foobar", "Foo Bar", "entity/person");
 
       const report = await checker.checkAll();
       const dedupDim = report.dimensions.find(d => d.name === "语义去重");
@@ -89,8 +89,8 @@ describe("HealthChecker", () => {
     });
 
     test("detects non-standard relation types", async () => {
-      insertPage("entities/e1", "E1", "entity");
-      insertPage("entities/e2", "E2", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
+      insertPage("entities/e2", "E2", "entity/person");
       insertLink("entities/e1", "entities/e2", "bogus_relation_type");
 
       const report = await checker.checkAll();
@@ -104,9 +104,9 @@ describe("HealthChecker", () => {
     });
 
     test("detects islands (disconnected pages)", async () => {
-      insertPage("entities/alone", "Alone", "entity");
-      insertPage("entities/connected", "Connected", "entity");
-      insertPage("entities/friend", "Friend", "entity");
+      insertPage("entities/alone", "Alone", "entity/person");
+      insertPage("entities/connected", "Connected", "entity/person");
+      insertPage("entities/friend", "Friend", "entity/person");
       insertLink("entities/connected", "entities/friend");
 
       const report = await checker.checkAll();
@@ -119,7 +119,7 @@ describe("HealthChecker", () => {
     test("detects concept inflation", async () => {
       insertPage("records/r1", "R1", "record");
       for (let i = 0; i < 20; i++) {
-        insertPage(`concepts/c${i}`, `Concept${i}`, "concept");
+        insertPage(`concepts/c${i}`, `Concept${i}`, "concept/concept");
       }
 
       const report = await checker.checkAll();
@@ -131,7 +131,7 @@ describe("HealthChecker", () => {
     });
 
     test("writes three-layer output files", async () => {
-      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
 
       const report = await checker.checkAll();
       const healthDir = join(testDir, "outputs", "health");
@@ -149,8 +149,8 @@ describe("HealthChecker", () => {
 
   describe("delta calculation", () => {
     test("first run has no previous state — all issues are new", async () => {
-      insertPage("entities/e1", "E1", "entity");
-      insertPage("entities/alone", "Alone", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
+      insertPage("entities/alone", "Alone", "entity/person");
 
       const report = await checker.checkAll();
       expect(report.delta).toBeDefined();
@@ -161,8 +161,8 @@ describe("HealthChecker", () => {
     });
 
     test("second run with same data shows no new issues", async () => {
-      insertPage("entities/e1", "E1", "entity");
-      insertPage("entities/e2", "E2", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
+      insertPage("entities/e2", "E2", "entity/person");
       insertLink("entities/e1", "entities/e2");
 
       await checker.checkAll();
@@ -173,8 +173,8 @@ describe("HealthChecker", () => {
     });
 
     test("resolves issue when data is fixed between runs", async () => {
-      insertPage("entities/e1", "E1", "entity");
-      insertPage("entities/alone", "Alone", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
+      insertPage("entities/alone", "Alone", "entity/person");
 
       await checker.checkAll();
 
@@ -185,13 +185,13 @@ describe("HealthChecker", () => {
     });
 
     test("new issue appears when new problem is introduced", async () => {
-      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
       insertLink("entities/e1", "entities/e1");
 
       await checker.checkAll();
 
       // Add an island
-      insertPage("entities/alone", "Alone", "entity");
+      insertPage("entities/alone", "Alone", "entity/person");
       const report2 = await checker.checkAll();
       expect(report2.delta!.totalNew).toBeGreaterThan(0);
     });
@@ -199,7 +199,7 @@ describe("HealthChecker", () => {
 
   describe("state persistence", () => {
     test("writes state.json after checkAll", async () => {
-      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
 
       await checker.checkAll();
       const statePath = join(testDir, "outputs", "health", "state.json");
@@ -207,8 +207,8 @@ describe("HealthChecker", () => {
     });
 
     test("state.json accumulates slugRunCounts across runs", async () => {
-      insertPage("entities/e1", "E1", "entity");
-      insertPage("entities/alone", "Alone", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
+      insertPage("entities/alone", "Alone", "entity/person");
 
       await checker.checkAll();
       await checker.checkAll();
@@ -225,8 +225,8 @@ describe("HealthChecker", () => {
 
   describe("chronic tracking", () => {
     test("issues appearing 3+ consecutive runs are flagged as chronic", async () => {
-      insertPage("entities/e1", "E1", "entity");
-      insertPage("entities/alone", "Alone", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
+      insertPage("entities/alone", "Alone", "entity/person");
 
       // Run 1: count→1, Run 2: count→2, Run 3: count→3 (read as 2 < threshold),
       // Run 4: reads count=3 >= CHRONIC_THRESHOLD
@@ -250,7 +250,7 @@ describe("HealthChecker", () => {
       const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000;
       utimesSync(oldFile, new Date(eightDaysAgo), new Date(eightDaysAgo));
 
-      insertPage("entities/e1", "E1", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
       await checker.checkAll();
 
       expect(existsSync(oldFile)).toBe(false);
@@ -261,8 +261,8 @@ describe("HealthChecker", () => {
 
   describe("writeFullReport", () => {
     test("produces full Markdown with all issues", async () => {
-      insertPage("entities/e1", "E1", "entity");
-      insertPage("entities/alone", "Alone", "entity");
+      insertPage("entities/e1", "E1", "entity/person");
+      insertPage("entities/alone", "Alone", "entity/person");
 
       const report = await checker.checkAll();
       const full = checker.writeFullReport(report);

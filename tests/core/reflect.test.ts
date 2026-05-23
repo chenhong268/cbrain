@@ -15,7 +15,7 @@ function insertEntity(
 ) {
   db.prepare(
     `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
-     VALUES (?, 'entity', ?, ?, ?, ?, ?)`
+     VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
   ).run(slug, title, `${slug}.md`, `h-${slug}`, mentionCount, tier);
 }
 

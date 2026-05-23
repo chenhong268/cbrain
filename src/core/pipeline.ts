@@ -158,7 +158,7 @@ export class ContentPipeline {
       if (!targetSlug && createStubs && link.target.length >= 2) {
         this.pages.create({
           title: targetName,
-          type: "entity",
+          type: "entity/person",
           body: `> Auto-extracted from [[${fromSlug}]]`,
           tags: ["auto-extracted", "wikilink"],
         });

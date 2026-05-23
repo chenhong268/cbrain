@@ -40,7 +40,7 @@ describe("EntityResolver", () => {
   // ─── Layer 1a: Exact title match ────────────────────────
 
   test("exact title match → resolved_to_existing, score=1.0", () => {
-    seedEntity("张三", "entity", "entity/zhangsan");
+    seedEntity("张三", "entity/person", "entity/zhangsan");
 
     const result = resolver.resolveSingle(candidate("张三"));
     expect(result.action).toBe("resolved_to_existing");
@@ -52,7 +52,7 @@ describe("EntityResolver", () => {
   // ─── Layer 1b: Exact alias match ────────────────────────
 
   test("alias match → alias_added, score=0.95", () => {
-    seedEntity("张三", "entity", "entity/zhangsan");
+    seedEntity("张三", "entity/person", "entity/zhangsan");
     seedAlias("entity/zhangsan", "老张");
 
     const result = resolver.resolveSingle(candidate("老张"));
@@ -66,7 +66,7 @@ describe("EntityResolver", () => {
   // ─── Layer 2a: Case-normalized match ────────────────────
 
   test("case-insensitive match → alias_added, score=0.9", () => {
-    seedEntity("AI Workshop", "entity", "entity/ai-workshop");
+    seedEntity("AI Workshop", "entity/person", "entity/ai-workshop");
 
     const result = resolver.resolveSingle(candidate("AI workshop"));
     expect(result.action).toBe("alias_added");
@@ -78,7 +78,7 @@ describe("EntityResolver", () => {
   // ─── Layer 2b: Parenthetical stripping ──────────────────
 
   test("parenthetical stripping → alias_added, score=0.8", () => {
-    seedEntity("张三", "entity", "entity/zhangsan");
+    seedEntity("张三", "entity/person", "entity/zhangsan");
 
     const result = resolver.resolveSingle(candidate("张三（销售）"));
     expect(result.action).toBe("alias_added");
@@ -90,7 +90,7 @@ describe("EntityResolver", () => {
   // ─── Type gate ──────────────────────────────────────────
 
   test("type mismatch → duplicate_candidate, score=0.75", () => {
-    seedEntity("AI Workshop", "concept", "concept/ai-workshop");
+    seedEntity("AI Workshop", "concept/concept", "concept/ai-workshop");
 
     const result = resolver.resolveSingle(candidate("AI Workshop", "company"));
     expect(result.action).toBe("duplicate_candidate");
@@ -127,7 +127,7 @@ describe("EntityResolver", () => {
   });
 
   test("resolveAll with existing entity deduplicates to it", () => {
-    seedEntity("AI Workshop", "entity", "entity/ai-workshop");
+    seedEntity("AI Workshop", "entity/person", "entity/ai-workshop");
 
     const results = resolver.resolveAll([
       candidate("AI Workshop"),
@@ -153,7 +153,7 @@ describe("EntityResolver", () => {
   // ─── resolveSingle string overload ──────────────────────
 
   test("resolveSingle string overload works", () => {
-    seedEntity("张三", "entity", "entity/zhangsan");
+    seedEntity("张三", "entity/person", "entity/zhangsan");
 
     const result = resolver.resolveSingle("张三", "person");
     expect(result.action).toBe("resolved_to_existing");
@@ -163,7 +163,7 @@ describe("EntityResolver", () => {
   // ─── Concept type gate ──────────────────────────────────
 
   test("concept entity resolves to concept type", () => {
-    seedEntity("区块链", "concept", "concept/blockchain");
+    seedEntity("区块链", "concept/concept", "concept/blockchain");
 
     const result = resolver.resolveSingle(candidate("区块链", "concept"));
     expect(result.action).toBe("resolved_to_existing");
@@ -173,7 +173,7 @@ describe("EntityResolver", () => {
   // ─── Full-width parenthetical ───────────────────────────
 
   test("full-width parenthetical stripping works", () => {
-    seedEntity("李四", "entity", "entity/lisi");
+    seedEntity("李四", "entity/person", "entity/lisi");
 
     const result = resolver.resolveSingle(candidate("李四（投资总监）"));
     expect(result.action).toBe("alias_added");
@@ -184,7 +184,7 @@ describe("EntityResolver", () => {
   // ─── Normalized stripped + parenthetical ────────────────
 
   test("normalized stripped match after parenthetical removal", () => {
-    seedEntity("Wang Wu", "entity", "entity/wang-wu");
+    seedEntity("Wang Wu", "entity/person", "entity/wang-wu");
 
     const result = resolver.resolveSingle(candidate("Wang Wu（CTO）"));
     expect(result.action).toBe("alias_added");
@@ -194,7 +194,7 @@ describe("EntityResolver", () => {
   // ─── Alias on alias creates new alias ───────────────────
 
   test("resolving via alias adds new alias", () => {
-    seedEntity("张三", "entity", "entity/zhangsan");
+    seedEntity("张三", "entity/person", "entity/zhangsan");
     seedAlias("entity/zhangsan", "老张");
 
     const result = resolver.resolveSingle(candidate("老张"));
@@ -208,8 +208,8 @@ describe("EntityResolver", () => {
   // ─── getAllEntityTitles ────────────────────────────────────
 
   test("getAllEntityTitles returns entity and concept titles only", () => {
-    seedEntity("张三", "entity", "entity/zhangsan");
-    seedEntity("AI Agents", "concept", "concept/ai-agents");
+    seedEntity("张三", "entity/person", "entity/zhangsan");
+    seedEntity("AI Agents", "concept/concept", "concept/ai-agents");
     db.upsertPage({ slug: "record/note1", type: "record", title: "Some Note", filePath: "record/note1.md", contentHash: "abc" });
 
     const titles = db.getAllEntityTitles();
@@ -222,7 +222,7 @@ describe("EntityResolver", () => {
 
   describe("substring dedup", () => {
     test("new entity is substring of existing → resolved_to_existing", () => {
-      seedEntity("AI Agents", "entity", "entity/ai-agents");
+      seedEntity("AI Agents", "entity/product", "entity/ai-agents");
 
       const result = resolver.resolveSingle(candidate("AI", "product"));
       expect(result.action).toBe("resolved_to_existing");
@@ -232,7 +232,7 @@ describe("EntityResolver", () => {
     });
 
     test("existing entity is substring of new entity → resolved_to_existing", () => {
-      seedEntity("Claude", "entity", "entity/claude");
+      seedEntity("Claude", "entity/person", "entity/claude");
 
       const result = resolver.resolveSingle(candidate("Claude Code"));
       expect(result.action).toBe("resolved_to_existing");
@@ -241,21 +241,21 @@ describe("EntityResolver", () => {
     });
 
     test("length diff < 2 → no substring match", () => {
-      seedEntity("市场营销", "entity", "entity/marketing");
+      seedEntity("市场营销", "entity/person", "entity/marketing");
 
       const result = resolver.resolveSingle(candidate("市场策略"));
       expect(result.action).toBe("stub_created");
     });
 
     test("substring length ≤ 1 → no match", () => {
-      seedEntity("C++", "entity", "entity/cpp");
+      seedEntity("C++", "entity/person", "entity/cpp");
 
       const result = resolver.resolveSingle(candidate("C"));
       expect(result.action).toBe("stub_created");
     });
 
     test("exact substring: 数字化 → 数字化转型", () => {
-      seedEntity("数字化转型", "entity", "entity/digital-transformation");
+      seedEntity("数字化转型", "entity/person", "entity/digital-transformation");
 
       const result = resolver.resolveSingle(candidate("数字化"));
       expect(result.action).toBe("resolved_to_existing");
@@ -277,7 +277,7 @@ describe("EntityResolver", () => {
 
   describe("semantic resolution", () => {
     test("abbreviation match: 南药 → 南京医药集团股份有限公司", async () => {
-      seedEntity("南京医药集团股份有限公司", "entity", "entity/nanjing-pharma");
+      seedEntity("南京医药集团股份有限公司", "entity/person", "entity/nanjing-pharma");
 
       const mockLlm = createMockLlm(
         JSON.stringify({
@@ -304,7 +304,7 @@ describe("EntityResolver", () => {
     });
 
     test("no match → stays stub_created", async () => {
-      seedEntity("南京医药集团股份有限公司", "entity", "entity/nanjing-pharma");
+      seedEntity("南京医药集团股份有限公司", "entity/person", "entity/nanjing-pharma");
 
       const mockLlm = createMockLlm(JSON.stringify({ matches: [] }));
 
@@ -326,7 +326,7 @@ describe("EntityResolver", () => {
     });
 
     test("already resolved entities are not sent to LLM", async () => {
-      seedEntity("张三", "entity", "entity/zhangsan");
+      seedEntity("张三", "entity/person", "entity/zhangsan");
 
       let capturedPrompt = "";
       const mockLlm: LLMProvider = {
@@ -354,7 +354,7 @@ describe("EntityResolver", () => {
     });
 
     test("LLM returns invalid JSON → graceful fallback to stub_created", async () => {
-      seedEntity("南京医药集团股份有限公司", "entity", "entity/nanjing-pharma");
+      seedEntity("南京医药集团股份有限公司", "entity/person", "entity/nanjing-pharma");
 
       const mockLlm = createMockLlm("not valid json {{{");
 

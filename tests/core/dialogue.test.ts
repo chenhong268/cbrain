@@ -93,18 +93,18 @@ describe("DialogueIngest", () => {
       // Verify entities created
       const chen = db.prepare("SELECT * FROM pages WHERE title = '陈博士'").get() as any;
       expect(chen).not.toBeNull();
-      expect(chen.type).toBe("entity");
+      expect(chen.type).toBe("entity/person");
 
       const xyz = db.prepare("SELECT * FROM pages WHERE title = 'XYZ研究所'").get() as any;
       expect(xyz).not.toBeNull();
-      expect(xyz.type).toBe("entity");
+      expect(xyz.type).toBe("entity/company");
     });
 
     test("skips entities that already exist", async () => {
       // Pre-create an entity
       db.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
-      ).run("brain/entities/张三", "entity", "张三", "brain/entities/张三.md", "h1");
+      ).run("brain/entities/张三", "entity/person", "张三", "brain/entities/张三.md", "h1");
 
       const llm = createMockLLM([
         JSON.stringify({
@@ -214,10 +214,10 @@ describe("DialogueIngest", () => {
       // Pre-create two entities with a relation
       db.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
-      ).run("brain/entities/甲公司", "entity", "甲公司", "brain/entities/甲公司.md", "h1");
+      ).run("brain/entities/甲公司", "entity/company", "甲公司", "brain/entities/甲公司.md", "h1");
       db.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
-      ).run("brain/entities/张三", "entity", "张三", "brain/entities/张三.md", "h1");
+      ).run("brain/entities/张三", "entity/person", "张三", "brain/entities/张三.md", "h1");
       db.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("brain/entities/张三", "brain/entities/甲公司", "任职");
@@ -251,10 +251,10 @@ describe("DialogueIngest", () => {
       // Pre-create two entities without relation
       db.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
-      ).run("brain/entities/李四", "entity", "李四", "brain/entities/李四.md", "h1");
+      ).run("brain/entities/李四", "entity/person", "李四", "brain/entities/李四.md", "h1");
       db.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
-      ).run("brain/entities/乙公司", "entity", "乙公司", "brain/entities/乙公司.md", "h1");
+      ).run("brain/entities/乙公司", "entity/company", "乙公司", "brain/entities/乙公司.md", "h1");
 
       const llm = createMockLLM([
         JSON.stringify({

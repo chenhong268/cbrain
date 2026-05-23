@@ -634,7 +634,7 @@ export class HealthChecker {
     const issues: HealthIssue[] = [];
 
     const sourceCount = this.db.getPageCountByType("record");
-    const conceptCount = this.db.getPageCountByType("concept");
+    const conceptCount = this.db.getPageCountByTypePrefix("concept/");
 
     const ratio = sourceCount > 0 ? conceptCount / sourceCount : 0;
 
@@ -715,7 +715,7 @@ export class HealthChecker {
       });
     }
 
-    const entityCount = this.db.getPageCountByType("entity");
+    const entityCount = this.db.getPageCountByTypePrefix("entity/");
     if (entityCount < 3 && totalPages >= 10) {
       issues.push({
         severity: "medium",
@@ -860,8 +860,8 @@ export class HealthChecker {
 
   private collectMetrics(): MetricsSnapshot {
     const totalPages = this.db.getPageCount();
-    const entities = this.db.getPageCountByType("entity");
-    const concepts = this.db.getPageCountByType("concept");
+    const entities = this.db.getPageCountByTypePrefix("entity/");
+    const concepts = this.db.getPageCountByTypePrefix("concept/");
     const events = 0; // deprecated: event type no longer used
     const records = this.db.getPageCountByType("record");
     const totalLinks = this.db.getLinkCount();

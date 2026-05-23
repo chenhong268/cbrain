@@ -201,11 +201,11 @@ describe("MCP Server", () => {
     test("enriches all entities", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
-         VALUES (?, 'entity', ?, ?, ?, ?, ?)`
+         VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1", 2, 3);
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
-         VALUES (?, 'entity', ?, ?, ?, ?, ?)`
+         VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
       ).run("entities/b", "B", "b.md", "h2", 10, 3);
 
       const server = createServer(deps);

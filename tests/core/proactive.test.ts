@@ -21,16 +21,16 @@ describe("generateProactiveHints", () => {
     // Seed pages
     db.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run("entities/a", "entity", "EntityA", "a.md", "h1", 1, 3);
+    ).run("entities/a", "entity/person", "EntityA", "a.md", "h1", 1, 3);
     db.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run("entities/b", "entity", "EntityB", "b.md", "h2", 1, 3);
+    ).run("entities/b", "entity/person", "EntityB", "b.md", "h2", 1, 3);
     db.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run("entities/c", "entity", "EntityC", "c.md", "h3", 1, 3);
+    ).run("entities/c", "entity/person", "EntityC", "c.md", "h3", 1, 3);
     db.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run("entities/exp", "entity", "ExpiringOne", "exp.md", "h4", 1, 3, "2020-01-01");
+    ).run("entities/exp", "entity/person", "ExpiringOne", "exp.md", "h4", 1, 3, "2020-01-01");
   });
 
   afterEach(() => {

@@ -34,9 +34,9 @@ describe("NerEngine", () => {
 
     expect(result.entities.length).toBe(2);
     expect(result.entities[0].name).toBe("张三");
-    expect(result.entities[0].type).toBe("entity");
+    expect(result.entities[0].type).toBe("person");
     expect(result.entities[1].name).toBe("星辰科技");
-    expect(result.entities[1].type).toBe("entity");
+    expect(result.entities[1].type).toBe("company");
     expect(result.relations.length).toBe(1);
     expect(result.relations[0].relation).toBe("works_at");
   });
@@ -238,8 +238,8 @@ describe("NerEngine", () => {
     const engine = new NerEngine(llm);
     const result = await engine.extract("some text");
 
-    // Even though LLM said "concept", company/university suffix overrides to entity
-    expect(result.entities.every(e => e.type === "entity")).toBe(true);
+    // Even though LLM said "concept", company/university suffix overrides class to entity
+    expect(result.entities.every(e => (e as any).class === "entity")).toBe(true);
     expect(result.entities.map(e => e.name)).toContain("星辰科技集团");
     expect(result.entities.map(e => e.name)).toContain("北京大学");
   });

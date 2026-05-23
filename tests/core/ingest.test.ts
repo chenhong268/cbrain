@@ -242,11 +242,11 @@ describe("IngestManager", () => {
     test("creates graph edges for resolved links", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/lisi", "entity", "李四", "brain/entities/lisi.md", "h1");
+      ).run("brain/entities/lisi", "entity/person", "李四", "brain/entities/lisi.md", "h1");
 
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/wangwu", "entity", "王五", "brain/entities/wangwu.md", "h2");
+      ).run("brain/entities/wangwu", "entity/person", "王五", "brain/entities/wangwu.md", "h2");
 
       const md = [
         "---",
@@ -292,7 +292,7 @@ describe("IngestManager", () => {
     test("increments mention count on linked pages", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/mentioned", "entity", "被提及者", "brain/entities/mentioned.md", "h1");
+      ).run("brain/entities/mentioned", "entity/person", "被提及者", "brain/entities/mentioned.md", "h1");
 
       const md = [
         "---",
@@ -326,7 +326,7 @@ describe("IngestManager", () => {
       writeFileSync(join(vaultPath, "brain/entities/self-ref.md"), preMd, "utf-8");
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/self-ref", "entity", "SelfRef", "brain/entities/self-ref.md", "h1");
+      ).run("brain/entities/self-ref", "entity/person", "SelfRef", "brain/entities/self-ref.md", "h1");
 
       const md = [
         "---",
@@ -441,11 +441,11 @@ describe("IngestManager", () => {
 
       const lisi = db.prepare("SELECT * FROM pages WHERE title = ?").get("李四") as any;
       expect(lisi).not.toBeNull();
-      expect(lisi.type).toBe("entity");
+      expect(lisi.type).toBe("entity/person");
 
       const xyz = db.prepare("SELECT * FROM pages WHERE title = ?").get("XYZ公司") as any;
       expect(xyz).not.toBeNull();
-      expect(xyz.type).toBe("entity");
+      expect(xyz.type).toBe("entity/company");
     });
 
     test("writes relations to links table", async () => {
@@ -566,7 +566,7 @@ describe("IngestManager", () => {
     test("reuses existing entity instead of creating duplicate stub", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/zhangsan", "entity", "张三", "brain/entities/zhangsan.md", "h1");
+      ).run("brain/entities/zhangsan", "entity/person", "张三", "brain/entities/zhangsan.md", "h1");
 
       const llm = createMockLLM([
         JSON.stringify({

@@ -314,7 +314,7 @@ export class CBrainDB {
     }
     // Backfill: entity pages without expires_at get now + 90d
     this.db.exec(
-      "UPDATE pages SET expires_at = datetime('now', '+90 days') WHERE type = 'entity' AND expires_at IS NULL"
+      "UPDATE pages SET expires_at = datetime('now', '+90 days') WHERE type LIKE 'entity/%' AND expires_at IS NULL"
     );
     if (!names.has("confidence_decay")) {
       this.db.exec("ALTER TABLE pages ADD COLUMN confidence_decay REAL DEFAULT 1.0");
@@ -789,7 +789,7 @@ export class CBrainDB {
   }
 
   insertPage(data: { slug: string; type: string; title: string; filePath: string; contentHash: string; tier?: number; expiresAt?: string | null; confidenceDecay?: number }): void {
-    const autoExpires = data.type === "entity" && !data.expiresAt
+    const autoExpires = data.type.startsWith("entity/") && !data.expiresAt
       ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ")
       : data.expiresAt ?? null;
     this.prepare(
@@ -807,7 +807,7 @@ export class CBrainDB {
   }
 
   upsertPage(data: UpsertPageData): void {
-    const isEntity = data.type === "entity";
+    const isEntity = data.type.startsWith("entity/");
     const expiresAt = isEntity ? `datetime('now', '+90 days')` : null;
     this.prepare(`
       INSERT INTO pages (slug, type, title, file_path, content_hash, tier, expires_at, created_at, updated_at)
@@ -937,6 +937,13 @@ export class CBrainDB {
     return row.cnt;
   }
 
+  getPageCountByTypePrefix(prefix: string): number {
+    const row = this.prepare(
+      "SELECT COUNT(*) as cnt FROM pages WHERE type LIKE $prefix"
+    ).get({ $prefix: `${prefix}%` }) as { cnt: number };
+    return row.cnt;
+  }
+
   getPageTypeCounts(): Array<{ type: string; cnt: number }> {
     return this.prepare(
       "SELECT type, COUNT(*) as cnt FROM pages GROUP BY type ORDER BY cnt DESC"
@@ -945,13 +952,13 @@ export class CBrainDB {
 
   getEntities(): Array<{ slug: string; title: string }> {
     return this.prepare(
-      "SELECT slug, title FROM pages WHERE type = 'entity' ORDER BY slug"
+      "SELECT slug, title FROM pages WHERE type LIKE 'entity/%' ORDER BY slug"
     ).all() as Array<{ slug: string; title: string }>;
   }
 
   getEntityConceptPages(): Array<{ slug: string; title: string; type: string }> {
     return this.prepare(
-      "SELECT slug, title, type FROM pages WHERE type IN ('entity', 'concept') ORDER BY title"
+      "SELECT slug, title, type FROM pages WHERE type LIKE 'entity/%' OR type LIKE 'concept/%' ORDER BY title"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
@@ -1007,13 +1014,13 @@ export class CBrainDB {
 
   getBareStubs(): Array<{ slug: string; title: string; type: string }> {
     return this.prepare(
-      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type IN ('entity', 'concept') AND p.mention_count <= 1 GROUP BY p.slug HAVING COUNT(l.id) <= 1"
+      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE (p.type LIKE 'entity/%' OR p.type LIKE 'concept/%') AND p.mention_count <= 1 GROUP BY p.slug HAVING COUNT(l.id) <= 1"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
   getIslandPages(): Array<{ slug: string; title: string; type: string }> {
     return this.prepare(
-      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type IN ('entity', 'concept') GROUP BY p.slug HAVING COUNT(l.id) = 0"
+      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE (p.type LIKE 'entity/%' OR p.type LIKE 'concept/%') GROUP BY p.slug HAVING COUNT(l.id) = 0"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
@@ -1025,7 +1032,7 @@ export class CBrainDB {
 
   getPopularThinPages(threshold: number = 3): Array<{ slug: string; title: string; mention_count: number; type: string }> {
     return this.prepare(
-      "SELECT slug, title, mention_count, type FROM pages WHERE mention_count >= $threshold AND type IN ('entity', 'concept') AND (SELECT COUNT(*) FROM chunks WHERE page_slug = pages.slug) <= 1 ORDER BY mention_count DESC"
+      "SELECT slug, title, mention_count, type FROM pages WHERE mention_count >= $threshold AND (type LIKE 'entity/%' OR type LIKE 'concept/%') AND (SELECT COUNT(*) FROM chunks WHERE page_slug = pages.slug) <= 1 ORDER BY mention_count DESC"
     ).all({ $threshold: threshold }) as Array<{ slug: string; title: string; mention_count: number; type: string }>;
   }
 
@@ -1052,26 +1059,26 @@ export class CBrainDB {
 
   getEntityConceptPagesUpdatedSince(since: string): Array<{ slug: string; title: string; type: string }> {
     return this.prepare(
-      "SELECT slug, title, type FROM pages WHERE updated_at > $since AND type IN ('entity', 'concept') ORDER BY updated_at DESC"
+      "SELECT slug, title, type FROM pages WHERE updated_at > $since AND (type LIKE 'entity/%' OR type LIKE 'concept/%') ORDER BY updated_at DESC"
     ).all({ $since: since }) as Array<{ slug: string; title: string; type: string }>;
   }
 
   getTopMentionedEntities(limit: number = 10): PageRow[] {
     return this.prepare(
-      "SELECT * FROM pages WHERE type = 'entity' ORDER BY mention_count DESC LIMIT $limit"
+      "SELECT * FROM pages WHERE type LIKE 'entity/%' ORDER BY mention_count DESC LIMIT $limit"
     ).all({ $limit: limit }) as PageRow[];
   }
 
   getHighMentionEntities(minMentions: number): Array<{ slug: string; title: string; mention_count: number }> {
     return this.prepare(
-      "SELECT slug, title, mention_count FROM pages WHERE type = 'entity' AND mention_count >= $min ORDER BY mention_count DESC"
+      "SELECT slug, title, mention_count FROM pages WHERE type LIKE 'entity/%' AND mention_count >= $min ORDER BY mention_count DESC"
     ).all({ $min: minMentions }) as Array<{ slug: string; title: string; mention_count: number }>;
   }
 
   getHighConnectivityEntities(minNeighbors: number): Array<{ slug: string; title: string }> {
     return this.prepare(
       `SELECT p.slug, p.title FROM pages p
-       WHERE p.type = 'entity'
+       WHERE p.type LIKE 'entity/%'
        AND (
          (SELECT COUNT(DISTINCT to_slug) FROM links WHERE from_slug = p.slug) +
          (SELECT COUNT(DISTINCT from_slug) FROM links WHERE to_slug = p.slug)
@@ -1084,12 +1091,12 @@ export class CBrainDB {
 
   countNewPagesSince(hours: number): { entities: number; concepts: number } {
     const rows = this.prepare(
-      "SELECT type, COUNT(*) as c FROM pages WHERE type IN ('entity', 'concept') AND created_at > datetime('now', '-' || $h || ' hours') GROUP BY type"
+      "SELECT type, COUNT(*) as c FROM pages WHERE (type LIKE 'entity/%' OR type LIKE 'concept/%') AND created_at > datetime('now', '-' || $h || ' hours') GROUP BY type"
     ).all({ $h: hours }) as Array<{ type: string; c: number }>;
     const result = { entities: 0, concepts: 0 };
     for (const row of rows) {
-      if (row.type === "entity") result.entities = row.c;
-      else if (row.type === "concept") result.concepts = row.c;
+      if (row.type.startsWith("entity/")) result.entities += row.c;
+      else if (row.type.startsWith("concept/")) result.concepts += row.c;
     }
     return result;
   }
@@ -1449,14 +1456,14 @@ export class CBrainDB {
 
   getEntitySlugByTitle(name: string): string | null {
     const row = this.prepare(
-      "SELECT slug FROM pages WHERE title = $name AND type IN ('entity', 'concept')"
+      "SELECT slug FROM pages WHERE title = $name AND (type LIKE 'entity/%' OR type LIKE 'concept/%')"
     ).get({ $name: name }) as { slug: string } | null;
     return row?.slug ?? null;
   }
 
   getEntitySlugByTitleLower(name: string): string | null {
     const row = this.prepare(
-      "SELECT slug FROM pages WHERE LOWER(title) = LOWER($name) AND type IN ('entity', 'concept')"
+      "SELECT slug FROM pages WHERE LOWER(title) = LOWER($name) AND (type LIKE 'entity/%' OR type LIKE 'concept/%')"
     ).get({ $name: name }) as { slug: string } | null;
     return row?.slug ?? null;
   }
@@ -1470,7 +1477,7 @@ export class CBrainDB {
 
   getAllEntityTitles(): string[] {
     const rows = this.prepare(
-      "SELECT title FROM pages WHERE type IN ('entity', 'concept')"
+      "SELECT title FROM pages WHERE type LIKE 'entity/%' OR type LIKE 'concept/%'"
     ).all() as Array<{ title: string }>;
     return rows.map(r => r.title);
   }

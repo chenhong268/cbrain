@@ -218,7 +218,7 @@ export function filterExtractedEntities(
     filtered.push({ entity: e, reason: "entity_cap" });
   }
 
-  const kept = [...keptNonConcepts, ...keptConcepts].map((e) => ({ ...e, type: e.class! as EntityType }));
+  const kept = [...keptNonConcepts, ...keptConcepts].map((e) => ({ ...e, class: e.class! as EntityType }));
   return { kept, filtered };
 }
 
