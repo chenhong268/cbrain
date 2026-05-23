@@ -8,6 +8,7 @@ import type {
   NerConfig,
   OntologyYaml,
   Ontology,
+  TypeAffinityGroup,
 } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -109,8 +110,8 @@ export class OntologyLoader implements Ontology {
     return this.data.ner_config;
   }
 
-  resolvePageType(nerType: string): string {
-    return this.nerToPageType.get(nerType) ?? "concept/concept";
+  resolvePageType(nerType: string): string | null {
+    return this.nerToPageType.get(nerType) ?? null;
   }
 
   isDerivedPageType(type: string): boolean {
@@ -138,6 +139,24 @@ export class OntologyLoader implements Ontology {
     const resolved = this.aliasMap.get(input);
     if (!resolved) return "提及";
     return resolved;
+  }
+
+  getTypeAffinity(type: string): TypeAffinityGroup | undefined {
+    return this.data.type_affinity?.find((g) => g.types.includes(type));
+  }
+
+  areTypesAffine(a: string, b: string): boolean {
+    if (a === b) return true;
+    return this.data.type_affinity?.some((g) => g.types.includes(a) && g.types.includes(b)) ?? false;
+  }
+
+  resolveTypePriority(a: string, b: string): string {
+    if (a === b) return a;
+    const group = this.data.type_affinity?.find((g) => g.types.includes(a) && g.types.includes(b));
+    if (!group) return a;
+    const idxA = group.priority.indexOf(a);
+    const idxB = group.priority.indexOf(b);
+    return idxA <= idxB ? a : b;
   }
 }
 

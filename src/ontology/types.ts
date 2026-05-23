@@ -25,10 +25,16 @@ export interface NerConfig {
   concept_relations: string[];
 }
 
+export interface TypeAffinityGroup {
+  types: string[];
+  priority: string[];
+}
+
 export interface OntologyYaml {
   version: number;
   entity_types: Record<string, EntityTypeDef>;
   relation_types: Record<string, RelationTypeDef>;
+  type_affinity?: TypeAffinityGroup[];
   ner_config: NerConfig;
 }
 
@@ -48,8 +54,11 @@ export interface Ontology {
   getReverseRelation(name: string): string | undefined;
   getRelationStrength(name: string): { strength: string; weight: number };
   getNerConfig(): NerConfig;
-  resolvePageType(nerType: string): string;
+  resolvePageType(nerType: string): string | null;
   isDerivedPageType(type: string): boolean;
   validateRelationDomain(relation: string, fromType: string, toType: string): boolean;
   resolveAlias(input: string): string;
+  getTypeAffinity(type: string): TypeAffinityGroup | undefined;
+  areTypesAffine(a: string, b: string): boolean;
+  resolveTypePriority(a: string, b: string): string;
 }

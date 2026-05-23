@@ -77,7 +77,7 @@ export function chunkContent(
 // ─── NER Helpers ─────────────────────────────────────────────
 
 export function mapEntityType(type: string): string {
-  return getOntology().resolvePageType(type);
+  return getOntology().resolvePageType(type) ?? "record";
 }
 
 export type PageType = string;

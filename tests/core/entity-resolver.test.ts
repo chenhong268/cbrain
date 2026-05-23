@@ -277,7 +277,7 @@ describe("EntityResolver", () => {
 
   describe("semantic resolution", () => {
     test("abbreviation match: 南药 → 南京医药集团股份有限公司", async () => {
-      seedEntity("南京医药集团股份有限公司", "entity/person", "entity/nanjing-pharma");
+      seedEntity("南京医药集团股份有限公司", "entity/company", "entity/nanjing-pharma");
 
       const mockLlm = createMockLlm(
         JSON.stringify({

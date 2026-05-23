@@ -2,6 +2,7 @@ import type { EntityType, Relevance } from "./ner.js";
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { mapEntityType } from "./shared.js";
+import { getOntology } from "../ontology/loader.js";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -52,10 +53,10 @@ export class EntityResolver {
       }
     }
 
-    // Resolve canonical candidates (first in each group)
+    // Resolve canonical candidates (best type priority in each group)
     const canonicalResults = new Map<string, ResolutionResult>();
     for (const [, group] of normalizedGroups) {
-      const canonical = group[0];
+      const canonical = pickBestCandidate(group);
       const result = this.resolveSingle(canonical);
       canonicalResults.set(canonical.name, result);
 
@@ -211,6 +212,7 @@ export class EntityResolver {
     );
 
     // Apply matches
+    const candidateMap = new Map(candidates.map(c => [c.name, c]));
     for (const match of validMatches) {
       if (match.confidence < 0.7) continue;
 
@@ -219,6 +221,9 @@ export class EntityResolver {
 
       const entitySlug = this.db.getEntitySlugByTitle(match.entity);
       if (!entitySlug) continue;
+
+      const candidate = candidateMap.get(match.candidate);
+      if (candidate && !checkTypeGate(this.db, entitySlug, candidate.type)) continue;
 
       // Upgrade resolution from stub_created → alias_added
       this.db.addAliasWithSource(entitySlug, match.candidate, "llm-semantic");
@@ -307,5 +312,21 @@ function checkTypeGate(db: CBrainDB, existingSlug: string, nerType: EntityType):
   const dbType = db.getEntityType(existingSlug);
   if (!dbType) return true;
   const mappedNerType = mapEntityType(nerType);
-  return dbType === mappedNerType;
+  if (dbType === mappedNerType) return true;
+  return getOntology().areTypesAffine(dbType, mappedNerType);
+}
+
+function pickBestCandidate(group: EntityCandidate[]): EntityCandidate {
+  if (group.length === 1) return group[0];
+  let best = group[0];
+  let bestPageType = mapEntityType(best.type);
+  for (let i = 1; i < group.length; i++) {
+    const currentPageType = mapEntityType(group[i].type);
+    const winner = getOntology().resolveTypePriority(bestPageType, currentPageType);
+    if (winner !== bestPageType) {
+      best = group[i];
+      bestPageType = currentPageType;
+    }
+  }
+  return best;
 }

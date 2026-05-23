@@ -1531,6 +1531,17 @@ export class CBrainDB {
     return this.prepare(sql).all(type ? { $type: type } : {}) as Array<{ slug: string; title: string; type: string; mention_count: number }>;
   }
 
+  findCrossTypeDuplicates(): Array<{ title: string; slug_a: string; type_a: string; slug_b: string; type_b: string }> {
+    return this.prepare(`
+      SELECT p1.title, p1.slug AS slug_a, p1.type AS type_a, p2.slug AS slug_b, p2.type AS type_b
+      FROM pages p1
+      JOIN pages p2 ON LOWER(REPLACE(REPLACE(REPLACE(p1.title,' ',''),'-',''),'.','')) = LOWER(REPLACE(REPLACE(REPLACE(p2.title,' ',''),'-',''),'.',''))
+                   AND p1.rowid < p2.rowid
+      WHERE p1.type != p2.type
+      ORDER BY p1.title
+    `).all() as Array<{ title: string; slug_a: string; type_a: string; slug_b: string; type_b: string }>;
+  }
+
   addAlias(pageSlug: string, alias: string): void {
     this.prepare(
       "INSERT OR IGNORE INTO aliases (page_slug, alias) VALUES ($slug, $alias)"

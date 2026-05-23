@@ -617,6 +617,18 @@ relation_types:
     weight: 0.6
     aliases: [应用思维模型, 应用场景, 应用案例, 案例, 实践方法, 实践验证, 实践框架, 操作方法, 操作落地, 工具实践, 组织层面应用, 认知层面应用, 认知偏差实例, 认知偏差体现, 实操案例, 管理实践, 管理方法论, 管理框架, 管理映射, 管理智慧, 行为经济学解释, 应用验证, 科学验证, 方法验证, 概念实现, 正向实践]
 
+# ─── 类型亲和组 ─────────────────────────────────────────────
+# 同组内的类型允许跨类型合并，priority 决定合并时保留哪个类型（前面的优先）
+type_affinity:
+  - types: [entity/drug, entity/product]
+    priority: [entity/drug, entity/product]
+  - types: [entity/company, entity/organization]
+    priority: [entity/company, entity/organization]
+  - types: [entity/place, entity/organization]
+    priority: [entity/organization, entity/place]
+  - types: [concept/concept, concept/psychology, concept/technology, concept/pharma, concept/model]
+    priority: [concept/pharma, concept/technology, concept/psychology, concept/model, concept/concept]
+
 # ─── NER 提示词模板 ───────────────────────────────────────
 ner_config:
   entity_types_prompt:
@@ -625,8 +637,8 @@ ner_config:
     organization: "组织机构 — 非企业的组织（如 高校, 政府, 协会）"
     location: "地点 — 地理位置（如 北京, 硅谷）"
     place: "餐厅/场所 — 具名的好去处（如 某某餐厅, 某某咖啡馆）"
-    product: "产品 — 具名产品（如 iPhone, 微信）"
-    drug: "药品 — 具名药物（如 阿司匹林, 某某注射液）"
+    product: "产品 — 具名产品（如 iPhone, 微信）。注意：药品/药物绝不可归类为product，必须用drug"
+    drug: "药品 — 具名药物（如 阿司匹林, 某某注射液, 可善挺, 瑞普多, 诺欣妥, Keytruda）。任何药品品牌名、通用名、商品名都归此类，不要归为product"
     book: "书籍 — 具名书籍（如《原则》, Good to Great）"
     disease: "疾病 — 具名疾病（如 前列腺癌, 糖尿病, 阿尔茨海默病）"
     model: "模型/框架 — 具名框架（OKR, SWOT）或作者构建的隐性框架（如'五大核心框架'中的每个框架点）。如果文本呈现结构化论证体系，每个论点都是独立model"

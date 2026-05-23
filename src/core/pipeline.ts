@@ -207,21 +207,14 @@ export class ContentPipeline {
   ): Promise<NerPipelineResult> {
     const entitySlugMap = new Map<string, string>();
     const stubsCreated = new Set<string>();
-    let lowRelevanceSkipped = 0;
 
     const resolver = new EntityResolver(this.db, this.nerEngine?.provider);
     const candidates = extraction.entities
-      .filter(e => {
-        if (e.relevance === "low") { lowRelevanceSkipped++; return false; }
-        return true;
-      })
       .map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
     const resolutionMap = resolver.resolveAll(candidates);
     await resolver.semanticResolve(resolutionMap, candidates);
 
     for (const entity of extraction.entities) {
-      if (entity.relevance === "low") continue;
-
       const result = resolutionMap.get(entity.name);
       if (!result) continue;
 
@@ -232,25 +225,16 @@ export class ContentPipeline {
         const nerType = mapEntityType(entity.type);
         const existingType = this.db.getEntityType(result.slug);
         if (existingType && existingType !== nerType && this.pages) {
-          const normalized = normalizePageType(nerType);
-          if (normalized !== existingType) {
-            this.pages.updateType(result.slug, normalized);
+          const ontology = getOntology();
+          const winner = ontology.resolveTypePriority(existingType, normalizePageType(nerType));
+          if (winner !== existingType) {
+            this.pages.updateType(result.slug, winner);
           }
         }
       } else if (result.action === "duplicate_candidate") {
-        if (this.pages && entity.name.length <= 20) {
-          const entityType = mapEntityType(entity.type);
-          const stub = this.pages.create({
-            title: entity.name,
-            type: entityType,
-            body: `> Auto-extracted from [[${fromSlug}]]`,
-            tags: ["auto-extracted", "duplicate-candidate"],
-          });
-          entitySlugMap.set(entity.name, stub.slug);
-          stubsCreated.add(stub.slug);
-          this.db.incrementMentionCount(stub.slug);
-          this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5);
-        }
+        entitySlugMap.set(entity.name, result.slug);
+        this.db.incrementMentionCount(result.slug);
+        this.db.insertLink(fromSlug, result.slug, "提及", null, 0.3, "weak", "ner", 0.5);
       } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({
@@ -323,7 +307,7 @@ export class ContentPipeline {
       events: extraction.events.length,
       factsWritten,
       stubsCreated: [...stubsCreated],
-      lowRelevanceSkipped,
+      lowRelevanceSkipped: 0,
       filtered: extraction.filtered ?? [],
       details: {
         entities: extraction.entities.map(e => ({ name: e.name, type: e.type, relevance: e.relevance })),

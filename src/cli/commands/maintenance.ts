@@ -792,6 +792,164 @@ export function register(program: Command) {
       db.close();
     });
 
+  // ─── dedup-types: cross-type entity dedup ──────────────────────
+  program
+    .command("dedup-types")
+    .description("Find and merge same-name entities that exist under different types")
+    .option("--dry-run", "Show plan without executing merges (default)")
+    .option("--execute", "Actually merge duplicates")
+    .option("--all", "Merge all cross-type pairs, not just affinity groups")
+    .action(async (opts) => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      const db = deps.db;
+      const { getOntology } = await import("../../ontology/loader.js");
+      const ontology = getOntology();
+      const affinityOnly = !opts.all;
+
+      // Find all cross-type exact-name duplicates
+      const pairs = db.findCrossTypeDuplicates() as Array<{
+        title: string;
+        slug_a: string;
+        type_a: string;
+        slug_b: string;
+        type_b: string;
+      }>;
+
+      if (pairs.length === 0) {
+        console.log("No cross-type duplicates found.");
+        db.close();
+        return;
+      }
+
+      console.log(`Found ${pairs.length} cross-type duplicate pairs.\n`);
+
+      // Group by normalized title → all slugs/types with that name
+      const byTitle = new Map<string, Array<{ slug: string; type: string }>>();
+      for (const p of pairs) {
+        const norm = normalize(p.title);
+        let group = byTitle.get(norm);
+        if (!group) {
+          group = [];
+          byTitle.set(norm, group);
+        }
+        // Add both sides (dedup by slug)
+        if (!group.some(g => g.slug === p.slug_a)) group.push({ slug: p.slug_a, type: p.type_a });
+        if (!group.some(g => g.slug === p.slug_b)) group.push({ slug: p.slug_b, type: p.type_b });
+      }
+
+      // For each group, determine winner via type priority
+      interface MergePlan {
+        title: string;
+        target: { slug: string; type: string };
+        sources: Array<{ slug: string; type: string }>;
+        reason: string;
+      }
+
+      const plans: MergePlan[] = [];
+      const skipped: Array<{ title: string; reason: string }> = [];
+
+      for (const [norm, group] of byTitle) {
+        if (group.length < 2) continue;
+
+        // Check if any pair in group has affinity
+        const hasAffinity = affinityOnly
+          ? group.some((a, i) => group.some((b, j) => i !== j && ontology.areTypesAffine(a.type, b.type)))
+          : true;
+
+        if (affinityOnly && !hasAffinity) {
+          skipped.push({ title: group[0].slug, reason: "no affinity" });
+          continue;
+        }
+
+        // Sort by type priority: use resolveTypePriority to find the best type
+        let winner = group[0];
+        for (let i = 1; i < group.length; i++) {
+          const preferred = ontology.resolveTypePriority(winner.type, group[i].type);
+          if (preferred === group[i].type) {
+            winner = group[i];
+          }
+        }
+
+        // If types are equal priority or not affine, pick the one with more mentions
+        const sources = group.filter(g => g.slug !== winner.slug);
+
+        // Check all are affine to winner
+        const allAffine = sources.every(s => ontology.areTypesAffine(s.type, winner.type));
+        if (!allAffine && affinityOnly) {
+          skipped.push({ title: winner.slug, reason: "not all affine" });
+          continue;
+        }
+
+        const targetInfo = db.getPageTierAndMentions(winner.slug);
+        plans.push({
+          title: db.getPageTitle(winner.slug) ?? winner.slug,
+          target: winner,
+          sources,
+          reason: allAffine
+            ? `${winner.type} (highest priority in affinity group)`
+            : `${winner.type} (first encountered)`,
+        });
+      }
+
+      // Print plans
+      console.log(`Merge plans: ${plans.length}`);
+      if (skipped.length > 0) {
+        console.log(`Skipped: ${skipped.length} (no affinity or mixed types)\n`);
+      }
+
+      // Group by category for clearer output
+      const byCategory = new Map<string, MergePlan[]>();
+      for (const plan of plans) {
+        const types = [plan.target.type, ...plan.sources.map(s => s.type)].sort().join(" ↔ ");
+        const cat = byCategory.get(types) ?? [];
+        cat.push(plan);
+        byCategory.set(types, cat);
+      }
+
+      for (const [category, categoryPlans] of byCategory) {
+        console.log(`\n  ${category} (${categoryPlans.length}):`);
+        for (const plan of categoryPlans) {
+          console.log(`    "${plan.title}" → keep ${plan.target.type}`);
+          for (const src of plan.sources) {
+            console.log(`      ← merge ${src.type} (${src.slug})`);
+          }
+        }
+      }
+
+      if (!opts.execute) {
+        console.log("\n(DRY RUN — use --execute to merge)");
+        db.close();
+        return;
+      }
+
+      // Execute merges
+      const { PageManager } = await import("../../core/page.js");
+      const pages = new PageManager(db, config.vaultPath);
+
+      let merged = 0, failed = 0;
+      for (const plan of plans) {
+        for (const src of plan.sources) {
+          try {
+            const result = await pages.merge(src.slug, plan.target.slug);
+            if (result) {
+              merged++;
+              console.log(`  ✓ "${plan.title}": ${src.type} → ${plan.target.type}`);
+            } else {
+              failed++;
+              console.error(`  ✗ Merge rejected: "${plan.title}" ${src.slug} → ${plan.target.slug}`);
+            }
+          } catch (err) {
+            failed++;
+            console.error(`  ✗ Merge error: "${plan.title}" ${src.slug}: ${err}`);
+          }
+        }
+      }
+
+      console.log(`\nDone: ${merged} merged, ${failed} failed.`);
+      db.close();
+    });
+
   // ─── dedup: entity deduplication via LLM ─────────────────────
   program
     .command("dedup")
