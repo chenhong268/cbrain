@@ -16,6 +16,7 @@ export interface RelationTypeDef {
   weight: number;
   reverse?: string;
   children?: string[];
+  aliases?: string[];
 }
 
 export interface NerConfig {
@@ -49,4 +50,5 @@ export interface Ontology {
   getNerConfig(): NerConfig;
   resolvePageType(nerType: string): string;
   validateRelationDomain(relation: string, fromType: string, toType: string): boolean;
+  resolveAlias(input: string): string;
 }

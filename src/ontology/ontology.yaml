@@ -132,6 +132,7 @@ relation_types:
     transitive: false
     strength: weak
     weight: 0.3
+    aliases: [knows, 同行, 师承, 前同事, 参赛, 同行旅行, 同行参赛, 师徒, 同学/好友, 师生后决裂, 妻子, 父子, 师承与发展, 聚会, 聚餐]
 
   下属:
     label: 下属
@@ -152,6 +153,7 @@ relation_types:
     strength: strong
     weight: 1.0
     reverse: 下属
+    aliases: [汇报给, 领导, 直属领导, 直属上级, boss]
 
   同学:
     label: 同学
@@ -217,6 +219,7 @@ relation_types:
     transitive: false
     strength: strong
     weight: 1.0
+    aliases: [works_at, joined, 任职于, works_on, 负责T1, 负责产品, 董事长, 员工, 前雇主, 曾任, 曾任总经理, 现任总经理, 副总经理, 助理, 升职到, 党委书记、常务副总经理, 副总经理（江苏康缘医药有限公司）, 鲲鹏项目总对接人, 主导开发, 负责核药, 负责区域]
 
   创立:
     label: 创立
@@ -226,6 +229,7 @@ relation_types:
     transitive: false
     strength: strong
     weight: 1.0
+    aliases: [founded, founded_by, founder_of, 创立了, 创始人]
 
   归属:
     label: 归属
@@ -235,6 +239,7 @@ relation_types:
     transitive: true
     strength: strong
     weight: 1.0
+    aliases: [subsidiary_of, part_of, same_company, company, 子公司, 同属一家公司, 同公司, 公司, belongs_to, 归属于, 总部位于, belongs_to_bu, 开发并所有, has]
 
   合作:
     label: 合作
@@ -244,6 +249,7 @@ relation_types:
     transitive: false
     strength: medium
     weight: 0.7
+    aliases: [partnered_with, 业务合作, 战略合作]
 
   竞争:
     label: 竞争
@@ -253,6 +259,7 @@ relation_types:
     transitive: false
     strength: medium
     weight: 0.7
+    aliases: [competitor, 竞争对手, 竞品, targets]
 
   客户:
     label: 客户
@@ -271,6 +278,7 @@ relation_types:
     transitive: false
     strength: medium
     weight: 0.7
+    aliases: [invested_in, 投资了]
 
   收购:
     label: 收购
@@ -280,6 +288,7 @@ relation_types:
     transitive: false
     strength: strong
     weight: 1.0
+    aliases: [acquired, 收购了]
 
   供应:
     label: 供应
@@ -308,6 +317,7 @@ relation_types:
     transitive: false
     strength: medium
     weight: 0.7
+    aliases: [manufactured_by, developed_by, contains, contained_in, 成分, uses, implemented_by, requires, wrote, implemented]
 
   经销:
     label: 经销
@@ -400,6 +410,75 @@ relation_types:
     transitive: false
     strength: weak
     weight: 0.3
+    aliases:
+      - mentions
+      - announced
+      - 发布了
+      - about
+      - 涉及
+      - 收录
+      - 参考
+      - 引用
+      - 金句
+      - 主讲人
+      - 主题演讲
+      - 分析对象
+      - 机制解释
+      - 影响
+      - 心理机制
+      - 提出者
+      - 补充说明
+      - 解决方案参考
+      - 诊断对象
+      - 药理靶点
+      - Harness实例
+      - Memory外化实现
+      - 产品获批
+      - 人才标准
+      - 会议讨论
+      - 决策补充
+      - 分析依据
+      - 分类框架
+      - 参考工作原则
+      - 详细定义
+      - 详细说明
+      - 认知方法参考
+      - 跟进
+      - 收录于
+      - 政策文件
+      - 数据平台
+      - 技术基础设施
+      - 框架整合
+      - 映射
+      - 方法论
+      - 微观机制
+      - 认知机制
+      - 配套政策
+      - 著作
+      - 条件拆解
+      - 经济背景
+      - 环境丰容极致
+      - 整合
+      - 方法补充
+      - 理论解释
+      - 差距分析基于
+      - 思维补充
+      - 拮抗系统
+      - 术语参照
+      - 类型参照
+      - 认知丰容实践
+      - 演示者
+      - 演讲
+      - applies_to
+      - characterized_by
+      - focus_of
+      - methodology
+      - studied_in
+      - 间接关系
+      - 间接连接
+      - 间接关联
+      - evolves_to
+      - triggered_by
 
   # ── 概念关系 ──────────────────────────────────────────
   关联:
@@ -410,6 +489,46 @@ relation_types:
     transitive: false
     strength: weak
     weight: 0.3
+    aliases:
+      - 呼应
+      - 桥接
+      - 同源
+      - 并提
+      - 并立
+      - 主题关联
+      - 理论关联
+      - 方法论关联
+      - 方法关联
+      - 同义互证
+      - 同源分流
+      - 同源呼应
+      - 跨体系呼应
+      - 相关概念
+      - 相关知识
+      - 关联案例
+      - 关联分析
+      - 同一体系
+      - 领航者对话访谈
+      - 理论呼应
+      - 共鸣
+      - 跨时空共鸣
+      - 互为因果
+      - 互相验证
+      - 案例对应
+      - 层次对应
+      - 素材支撑
+      - 条件递进
+      - 解决方案关联
+      - 支撑
+      - 类比
+      - 参考桥接
+      - 交叉——"事前剖析"与反脆弱的试错逻辑一致
+      - 对应——"我愿意被视为无知吗"直指达克效应的解药
+      - 思想共鸣：自性化与意义追寻
+      - 陷阱1"现状的吸引"就是损失厌恶——韩焱书里详述
+      - 陷阱3"对自己预测过于自信"就是达克效应的表现
+      - 哲学共鸣——提问的本质是改变看法，而非改变事物
+      - 底层概念交叉——元无知、防御式大脑、自我验证理论
 
   互补:
     label: 互补
@@ -419,6 +538,21 @@ relation_types:
     transitive: false
     strength: medium
     weight: 0.6
+    aliases:
+      - 互补视角
+      - 互补解释
+      - 方法论互补
+      - 方法论共鸣
+      - 方法论参照
+      - 视角互补
+      - 对比互补
+      - 互补维度
+      - 认知框架互补
+      - 同源互补
+      - 互补——前者约束认知，后者解释为何需要约束
+      - 互补——提问清单是实操工具，好问题价值是理论支撑
+      - 理论补充——解释提问清单为何有效
+      - 方法论互补——拆解整合与约束排除
 
   延伸:
     label: 延伸
@@ -428,6 +562,7 @@ relation_types:
     transitive: false
     strength: medium
     weight: 0.6
+    aliases: [展开论述, 续接, 细化, 衍生, 方法论延伸, 理论延伸为MBTI, 延伸补充, 后续衔接, 系列文章, 同系列文章, 同系列模型, 更新版本, 哲学版]
 
   基础:
     label: 基础
@@ -437,6 +572,7 @@ relation_types:
     transitive: true
     strength: strong
     weight: 0.8
+    aliases: [底层逻辑一致, 底层逻辑, 哲学基础, 思想源头, 理论基础, 理论基础源自, 理论源自, 出处, 来源, 来源记录, 核心思想, 思想来源, 思想基础, 思维框架来源, 底层原理, 底层心法, 语言学根源, 素材来源, 数据来源, 心理基础, 生物学基础, 社会丰容基础, 沟通基础, 提炼自, 基于]
 
   对比:
     label: 对比
@@ -446,6 +582,29 @@ relation_types:
     transitive: false
     strength: medium
     weight: 0.6
+    aliases:
+      - 反面论证
+      - 反面案例
+      - 反面注脚
+      - 反面画像
+      - 对抗工具
+      - 对治
+      - 对治方法
+      - 正反对比
+      - 对比模型
+      - 反熵策略
+      - 反熵方法
+      - 反面思考应用
+      - 范式转移案例
+      - 范式转移起点
+      - 范式共存案例
+      - 预警案例
+      - 证伪思维
+      - 微妙对照
+      - 反熵最优路径
+      - 范式案例
+      - 学派对比：意义意志 vs 快乐意志
+      - 学派对比：意义意志 vs 权力意志
 
   应用:
     label: 应用
@@ -455,6 +614,7 @@ relation_types:
     transitive: false
     strength: medium
     weight: 0.6
+    aliases: [应用思维模型, 应用场景, 应用案例, 案例, 实践方法, 实践验证, 实践框架, 操作方法, 操作落地, 工具实践, 组织层面应用, 认知层面应用, 认知偏差实例, 认知偏差体现, 实操案例, 管理实践, 管理方法论, 管理框架, 管理映射, 管理智慧, 行为经济学解释, 应用验证, 科学验证, 方法验证, 概念实现, 正向实践]
 
 # ─── NER 提示词模板 ───────────────────────────────────────
 ner_config:

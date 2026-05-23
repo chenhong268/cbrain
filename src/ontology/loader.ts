@@ -29,10 +29,17 @@ const NER_TO_PAGE_TYPE: Record<string, string> = {
 
 export class OntologyLoader implements Ontology {
   private data: OntologyYaml;
+  private aliasMap: Map<string, string>;
 
   constructor(yamlPath?: string) {
     const path = yamlPath ?? join(__dirname, "ontology.yaml");
     this.data = parse(readFileSync(path, "utf-8")) as OntologyYaml;
+    this.aliasMap = new Map();
+    for (const [canonical, def] of Object.entries(this.data.relation_types)) {
+      for (const alias of def.aliases ?? []) {
+        this.aliasMap.set(alias, canonical);
+      }
+    }
   }
 
   getEntityType(name: string): EntityTypeDef | undefined {
@@ -113,6 +120,11 @@ export class OntologyLoader implements Ontology {
       def.range.length === 0 ||
       def.range.some((r) => toType === r || toType.startsWith(r));
     return domainOk && rangeOk;
+  }
+
+  resolveAlias(input: string): string {
+    if (this.isValidRelation(input)) return input;
+    return this.aliasMap.get(input) ?? "提及";
   }
 }
 
