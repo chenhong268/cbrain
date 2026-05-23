@@ -1,8 +1,13 @@
 import type { LLMProvider } from "../llm/provider.js";
+import { getOntology } from "../ontology/loader.js";
+import { buildEntityPrompt, buildRelationPrompt } from "../ontology/ner-prompt.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
-export type EntityType = "person" | "company" | "location" | "concept" | "product";
+export type EntityType =
+  | "person" | "company" | "organization" | "location" | "place"
+  | "product" | "drug" | "book"
+  | "framework" | "technology" | "theory" | "concept";
 
 export type Relevance = "high" | "medium" | "low";
 
@@ -34,13 +39,18 @@ export interface StructuredFact {
   evidence: string;
 }
 
-export const FACT_FIELD_WHITELIST: Record<EntityType, string[]> = {
-  person: ["birthday", "birthplace", "english_name", "current_title", "organization", "reports_to"],
-  company: ["location", "industry", "founded_year"],
-  product: ["generic_name", "brand_name"],
-  location: [],
-  concept: [],
-};
+export function getFactFieldWhitelist(): Record<string, string[]> {
+  const ontology = getOntology();
+  const result: Record<string, string[]> = {};
+  for (const type of ontology.getConcreteEntityTypes()) {
+    const shortName = type.split("/").pop()!;
+    if (["record", "insight"].includes(type)) continue;
+    result[shortName] = ontology.getStructuredFields(type);
+  }
+  return result;
+}
+
+export const FACT_FIELD_WHITELIST: Record<string, string[]> = getFactFieldWhitelist();
 
 export interface ExtractionResult {
   entities: ExtractedEntity[];
@@ -110,14 +120,23 @@ function classifyEntity(name: string, llmType: string): EntityClass {
   if (STRUCTURAL_TERMS.has(name)) return null;
 
   // Suffix pattern: generic compound words (XX化, XX模式, etc.)
-  if (!["person", "company"].includes(llmType) && /化$|型$|式$|制$|主义$|体系$|模式$|战略$|策略$|趋势$|生态$|矩阵$|框架$|架构$/.test(name)) return null;
+  // Skip suffix filter for concrete entity types (person, company, etc.)
+  const isConcreteEntity = !!getOntology().getEntityType(`entity/${llmType}`);
+  if (!isConcreteEntity && /化$|型$|式$|制$|主义$|体系$|模式$|战略$|策略$|趋势$|生态$|矩阵$|框架$|架构$/.test(name)) return null;
 
   // ── Layer 2: SAFETY NET — clear organizational keywords override LLM ──
   if (/公司|集团|制药|药企|银行|保险|基金$|医院|大学$|学院$|研究所/.test(name)) return "entity";
 
   // ── Layer 3: TRUST LLM — primary classifier ──
+  const ontology = getOntology();
+  // Concept types: framework, technology, theory, concept
+  const conceptType = ontology.getEntityType(`concept/${llmType}`);
+  if (conceptType) return "concept";
+  // Entity types: person, company, organization, location, place, product, drug, book
+  const entityType = ontology.getEntityType(`entity/${llmType}`);
+  if (entityType) return "entity";
+  // Legacy: direct match as concept (e.g. LLM returns "concept")
   if (llmType === "concept") return "concept";
-  if (["person", "company", "product", "location"].includes(llmType)) return "entity";
   return null;
 }
 
@@ -138,7 +157,7 @@ function getFilterReason(name: string, llmType: string): string {
   if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问|人员|管理员|作家/.test(name)) return "job_title";
   if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return "date_pattern";
   if (STRUCTURAL_TERMS.has(name)) return "structural_term";
-  if (!["person", "company"].includes(llmType) && /化$|型$|式$|制$|主义$|体系$|模式$|战略$|策略$|趋势$|生态$|矩阵$|框架$|架构$/.test(name)) return "generic_suffix";
+  if (!getOntology().getEntityType(`entity/${llmType}`) && /化$|型$|式$|制$|主义$|体系$|模式$|战略$|策略$|趋势$|生态$|矩阵$|框架$|架构$/.test(name)) return "generic_suffix";
   return "unclassified_type";
 }
 
@@ -213,113 +232,10 @@ export function filterRelations(
 }
 
 // ─── Prompt: Guideline (HOW) — Entity ────────────────────────
-
-const ENTITY_GUIDELINE = `You are a precision entity extractor for a personal knowledge graph. Extract entities worth remembering long-term — named people, companies, products, locations, and established concepts (theories, methodologies, effects, models). When in doubt, skip it.
-
-## Trust your judgment
-For each candidate, determine:
-
-- **entity**: specific named thing (person, company, product, location)
-- **concept**: recognized abstract idea with a proper name (e.g. 飞轮效应, 第一性原理, 奥卡姆剃刀, 认知科学)
-- **skip**: generic nouns, common qualities, daily items, abstract states
-
-## Edge case: 2-3 character Chinese terms
-These are inherently ambiguous — they could be real names or generic nouns.
-- VALID (extract): 特斯拉 (company), 马斯克 (person), 比亚迪 (company), 王传福 (person)
-- INVALID (skip): 汽车 (common noun), 钢铁 (material), 火箭 (object), 燃料 (substance), 能力 (abstract quality)
-Decision: Does this short term refer to a specific real-world entity? If yes, extract. If it is a common noun or abstract quality, SKIP.
-
-## Entity vs concept self-test
-"Can I point to a specific real-world instance?"
-- YES → entity (or concept if named theory/methodology)
-- NO → skip
-
-## Skip ALL
-- Numbers, amounts (93亿美元, Q1 2026), pronouns, function words
-- Daily items, household objects, tools
-- Generic nouns (email, bank, code, brand)
-- Job titles (经理, 总监, engineer)
-- Departments and teams (品牌团队, sales team)
-- Abstract qualities and activities (深度思考, 注意力管理, 时间管理)
-- Generic business terms (消费者, 市场策略, 切换成本)
-- Bare place names without significance
-- Document structure words and section headings (组织架构, 人员汇总, 时间线, 工作经历, 发展历程, etc.)
-
-## Relevance
-- "high" = main subject of the text
-- "medium" = supporting role
-- "low" = incidental mention (try to avoid)
-
-## Context
-Must be a verbatim excerpt from the source.
-
-## Concepts
-Only extract if the term is a named methodology/theory/framework/effect/law/model with recognized usage. NOT a compound of common words.
-- Valid: 飞轮效应, 第一性原理, 奥卡姆剃刀, 达克效应, 幸存者偏差
-- Invalid: 深度思考, 注意力管理, 时间管理, 问题分析, 沟通方法, 效率培训
-
-## Events
-Include specific dates (YYYY-MM-DD, Q1 2026) or clear time references. Skip vague ("近年来", "recently"). Participants must be named entities.
-
-## Structured Facts
-Extract concrete, verifiable facts about entities as key-value pairs. Only extract fields listed below — skip anything not in the whitelist.
-
-Field whitelist by entity type:
-- person: birthday, birthplace, english_name, current_title, organization, reports_to
-- company: location, industry, founded_year
-- product: generic_name, brand_name
-
-Rules:
-- Every fact MUST have an evidence field: a verbatim quote from the source text
-- Do NOT infer or fabricate — only extract explicitly stated facts
-- Skip vague or uninformative values
-- confidence: 0.0-1.0, how certain the fact is based on the evidence
-
-## Output format (JSON only, no markdown wrap):
-{"entities": [{"name": "...", "type": "person|company|location|concept|product", "relevance": "high|medium|low", "context": "..."}], "events": [{"date": "YYYY-MM-DD|null", "description": "...", "participants": ["..."]}], "facts": [{"entity": "...", "field": "...", "value": "...", "confidence": 0.9, "evidence": "verbatim quote"}]}
-
-Limits: max 8 entities + 3 concepts = 11 total. Return ONLY valid JSON.`;
+// Now dynamically generated from ontology via buildEntityPrompt()
 
 // ─── Prompt: Guideline (HOW) — Relation ──────────────────────
-
-const RELATION_GUIDELINE = (entityNames: string[]) => `You are a relation extractor. Identify relationships between the entities listed below, based on the source text.
-
-## Extracted Entities (use exact names)
-
-${entityNames.map(n => `- ${n}`).join("\n")}
-
-## Relation Types
-
-Use these types exactly. If none fits, use "提及":
-
-Entity relations (person/organization/product):
-- 认识 — A knows B（人与人）
-- 提及 — general reference（默认 fallback）
-- 任职 — A works at B（人→组织）
-- 创立 — A founded B（人→组织）
-- 归属 — A belongs to B（组织→组织）
-- 合作 — A partners with B
-- 竞争 — A competes with B
-- 资本 — A invested in / acquired B
-- 制造 — A developed / produced B
-- 下属 — A reports to / is subordinate of B（人→人）
-- 上级 — A is the superior/manager of B（人→人，下属的反向）
-- 参会 — A attended the same event/meeting as B（人→人，事件关联）
-
-Concept relations (knowledge/ideas):
-- 关联 — general semantic connection
-- 互补 — complementary perspectives/methodologies
-- 延伸 — A extends/elaborates on B
-- 基础 — A is the theoretical foundation/source of B
-- 对比 — A contrasts with / opposes B
-- 应用 — A applied to B / B is an instance of A
-
-## Rules
-1. Both from and to MUST be in the entity list above — do not invent entity names
-2. Relation must be explicitly stated or clearly implied in the source text
-3. context must be a verbatim excerpt from the source
-4. If no clear relation exists, return empty array {"relations": []}
-5. Return ONLY JSON`;
+// Now dynamically generated from ontology via buildRelationPrompt()
 
 // ─── Helpers ──────────────────────────────────────────────
 
@@ -423,10 +339,12 @@ export class NerEngine {
     let allEvents: ExtractedEvent[];
     let allFacts: StructuredFact[];
 
+    const entityPrompt = buildEntityPrompt(getOntology());
+
     if (chunks.length === 1) {
       // Short text fast path — single chunk, no parallelism overhead
       const { entities, events, facts } = await this.llm.chat([
-        { role: "system", content: ENTITY_GUIDELINE },
+        { role: "system", content: entityPrompt },
         { role: "user", content: chunks[0] },
       ]).then(raw => this.parseEntityResponse(raw));
       allEntities = entities;
@@ -444,7 +362,7 @@ export class NerEngine {
         const results = await Promise.all(
           batch.map(chunk =>
             this.llm.chat([
-              { role: "system", content: ENTITY_GUIDELINE },
+              { role: "system", content: entityPrompt },
               { role: "user", content: chunk },
             ]).then(raw => this.parseEntityResponse(raw))
           )
@@ -470,7 +388,7 @@ export class NerEngine {
     const entityNames = filtered.map(e => e.name);
     const stage2Text = text.length > 3000 ? text.slice(0, 3000) + "…" : text;
     const stage2 = await this.llm.chat([
-      { role: "system", content: RELATION_GUIDELINE(entityNames) },
+      { role: "system", content: buildRelationPrompt(getOntology(), entityNames) },
       { role: "user", content: stage2Text },
     ]);
     const relations = this.parseRelationResponse(stage2, new Set(entityNames));
