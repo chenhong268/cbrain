@@ -105,7 +105,7 @@ describe("SyncManager", () => {
       writeMdFile(
         vaultPath,
         "entities/zhangsan.md",
-        { title: "张三", type: "entity", slug: "entities/zhangsan", tags: ["人物"] },
+        { title: "张三", type: "entity/person", slug: "entities/zhangsan", tags: ["人物"] },
         "张三是星辰科技的商务经理。\n\n他负责东区业务。"
       );
 
@@ -120,20 +120,20 @@ describe("SyncManager", () => {
         .get("entities/zhangsan") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("张三");
-      expect(row.type).toBe("entity");
+      expect(row.type).toBe("entity/person");
     });
 
     test("syncs multiple files", async () => {
-      writeMdFile(vaultPath, "entities/a.md", { title: "A", type: "entity", slug: "entities/a" }, "Content A");
-      writeMdFile(vaultPath, "concepts/b.md", { title: "B", type: "concept", slug: "concepts/b" }, "Content B");
-      writeMdFile(vaultPath, "events/c.md", { title: "C", type: "event", slug: "events/c" }, "Content C");
+      writeMdFile(vaultPath, "entities/a.md", { title: "A", type: "entity/person", slug: "entities/a" }, "Content A");
+      writeMdFile(vaultPath, "concepts/b.md", { title: "B", type: "concept/concept", slug: "concepts/b" }, "Content B");
+      writeMdFile(vaultPath, "events/c.md", { title: "C", type: "record", slug: "events/c" }, "Content C");
 
       const report = await sync.syncAll(vaultPath);
       expect(report.synced).toBe(3);
     });
 
     test("skips unchanged files on second sync", async () => {
-      writeMdFile(vaultPath, "entities/unchanged.md", { title: "Unchanged", type: "entity", slug: "entities/unchanged" }, "Same content");
+      writeMdFile(vaultPath, "entities/unchanged.md", { title: "Unchanged", type: "entity/person", slug: "entities/unchanged" }, "Same content");
 
       await sync.syncAll(vaultPath);
       lance.added.length = 0;
@@ -145,10 +145,10 @@ describe("SyncManager", () => {
     });
 
     test("re-syncs when file content changes", async () => {
-      writeMdFile(vaultPath, "entities/changed.md", { title: "Changed", type: "entity", slug: "entities/changed" }, "Original");
+      writeMdFile(vaultPath, "entities/changed.md", { title: "Changed", type: "entity/person", slug: "entities/changed" }, "Original");
       await sync.syncAll(vaultPath);
 
-      writeMdFile(vaultPath, "entities/changed.md", { title: "Changed", type: "entity", slug: "entities/changed" }, "Updated content");
+      writeMdFile(vaultPath, "entities/changed.md", { title: "Changed", type: "entity/person", slug: "entities/changed" }, "Updated content");
 
       lance.added.length = 0;
       const report = await sync.syncAll(vaultPath);
@@ -158,7 +158,7 @@ describe("SyncManager", () => {
 
     test("chunks content and adds to LanceDB", async () => {
       const longBody = Array.from({ length: 10 }, (_, i) => `Paragraph ${i + 1}: `.repeat(20)).join("\n\n");
-      writeMdFile(vaultPath, "entities/chunky.md", { title: "Chunky", type: "entity", slug: "entities/chunky" }, longBody);
+      writeMdFile(vaultPath, "entities/chunky.md", { title: "Chunky", type: "entity/person", slug: "entities/chunky" }, longBody);
 
       await sync.syncAll(vaultPath);
 
@@ -169,7 +169,7 @@ describe("SyncManager", () => {
     });
 
     test("records sync in ingest_log", async () => {
-      writeMdFile(vaultPath, "entities/logged.md", { title: "Logged", type: "entity", slug: "entities/logged" }, "Content");
+      writeMdFile(vaultPath, "entities/logged.md", { title: "Logged", type: "entity/person", slug: "entities/logged" }, "Content");
 
       await sync.syncAll(vaultPath);
 
@@ -208,12 +208,12 @@ describe("SyncManager", () => {
 
   describe("syncPage", () => {
     test("syncs a single page by slug", async () => {
-      writeMdFile(vaultPath, "brain/entities/single.md", { title: "Single", type: "entity", slug: "brain/entities/single" }, "Single page content");
+      writeMdFile(vaultPath, "brain/entities/person/single.md", { title: "Single", type: "entity/person", slug: "brain/entities/person/single" }, "Single page content");
 
-      const result = await sync.syncPage("brain/entities/single", vaultPath);
+      const result = await sync.syncPage("brain/entities/person/single", vaultPath);
       expect(result.success).toBe(true);
 
-      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("brain/entities/single") as any;
+      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("brain/entities/person/single") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("Single");
     });
@@ -225,12 +225,12 @@ describe("SyncManager", () => {
     });
 
     test("skips if content unchanged", async () => {
-      writeMdFile(vaultPath, "brain/entities/cached.md", { title: "Cached", type: "entity", slug: "brain/entities/cached" }, "Stable content");
+      writeMdFile(vaultPath, "brain/entities/person/cached.md", { title: "Cached", type: "entity/person", slug: "brain/entities/person/cached" }, "Stable content");
 
-      await sync.syncPage("brain/entities/cached", vaultPath);
+      await sync.syncPage("brain/entities/person/cached", vaultPath);
       lance.added.length = 0;
 
-      const result = await sync.syncPage("brain/entities/cached", vaultPath);
+      const result = await sync.syncPage("brain/entities/person/cached", vaultPath);
       expect(result.success).toBe(true);
       expect(result.skipped).toBe(true);
       expect(lance.added.length).toBe(0);
@@ -241,12 +241,12 @@ describe("SyncManager", () => {
     test("removes pages in SQLite but not in vault", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/orphan", "entity", "Orphan", "entities/orphan.md", "hash1");
+      ).run("entities/orphan", "entity/person", "Orphan", "entities/orphan.md", "hash1");
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/real", "entity", "Real", "entities/real.md", "hash2");
+      ).run("entities/real", "entity/person", "Real", "entities/real.md", "hash2");
 
-      writeMdFile(vaultPath, "entities/real.md", { title: "Real", type: "entity", slug: "entities/real" }, "Real content");
+      writeMdFile(vaultPath, "entities/real.md", { title: "Real", type: "entity/person", slug: "entities/real" }, "Real content");
 
       const removed = await sync.removeOrphans(vaultPath);
 
@@ -260,11 +260,11 @@ describe("SyncManager", () => {
     });
 
     test("returns empty when no orphans", async () => {
-      writeMdFile(vaultPath, "entities/only-real.md", { title: "OnlyReal", type: "entity", slug: "entities/only-real" }, "Content");
+      writeMdFile(vaultPath, "entities/only-real.md", { title: "OnlyReal", type: "entity/person", slug: "entities/only-real" }, "Content");
 
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/only-real", "entity", "OnlyReal", "entities/only-real.md", "hash1");
+      ).run("entities/only-real", "entity/person", "OnlyReal", "entities/only-real.md", "hash1");
 
       const removed = await sync.removeOrphans(vaultPath);
       expect(removed).toEqual([]);
@@ -273,10 +273,10 @@ describe("SyncManager", () => {
     test("removes multiple orphans", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/orphan1", "entity", "O1", "o1.md", "h1");
+      ).run("entities/orphan1", "entity/person", "O1", "o1.md", "h1");
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("entities/orphan2", "entity", "O2", "o2.md", "h2");
+      ).run("entities/orphan2", "entity/person", "O2", "o2.md", "h2");
 
       const removed = await sync.removeOrphans(vaultPath);
       expect(removed.length).toBe(2);

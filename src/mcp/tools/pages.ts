@@ -84,7 +84,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
         if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
           ctx.pipeline.processNer(slug, content, pageType, false).catch(() => {});
         }
-        ctx.pipeline.processWikilinks(slug, content, true);
+        ctx.pipeline.processWikilinks(slug, content);
       }
       return {
         content: [{ type: "text", text: JSON.stringify({ action: "updated", page: updated ? { slug: updated.slug, title: updated.title } : null }, null, 2) }],
@@ -118,7 +118,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
       ctx.pipeline.processNer(created.slug, content, pageType, false).catch(() => {});
     }
-    ctx.pipeline.processWikilinks(created.slug, content, true);
+    ctx.pipeline.processWikilinks(created.slug, content);
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "created", page: { slug: created.slug, title: created.title } }, null, 2) }],
     };
@@ -146,7 +146,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
         ctx.pipeline.processNer(slug, newBody, pageType, false).catch(() => {});
       }
-      ctx.pipeline.processWikilinks(slug, newBody, true);
+      ctx.pipeline.processWikilinks(slug, newBody);
     }
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "appended", slug, new_length: newBody.length }) }],

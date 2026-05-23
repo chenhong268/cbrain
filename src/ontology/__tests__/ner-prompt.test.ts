@@ -9,7 +9,9 @@ describe("NER Prompt Generation", () => {
     const prompt = buildEntityPrompt(loader);
     expect(prompt).toContain("person");
     expect(prompt).toContain("company");
-    expect(prompt).toContain("framework");
+    expect(prompt).toContain("model");
+    expect(prompt).toContain("pharma");
+    expect(prompt).toContain("psychology");
     expect(prompt).toContain("technology");
     expect(prompt).toContain("drug");
     expect(prompt).toContain("book");
@@ -47,7 +49,7 @@ describe("NER Prompt Generation", () => {
   it("prompts are under 3000 chars to avoid token waste", () => {
     const ep = buildEntityPrompt(loader);
     const rp = buildRelationPrompt(loader, ["张三", "李四", "公司A"]);
-    expect(ep.length).toBeLessThan(3000);
+    expect(ep.length).toBeLessThan(3500);
     expect(rp.length).toBeLessThan(3000);
   });
 });

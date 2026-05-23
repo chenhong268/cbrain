@@ -79,7 +79,7 @@ describe("WritebackManager", () => {
     const page = pages.getBySlug(result.slug!);
     expect(page).not.toBeNull();
     expect(page!.title).toBe("First Principles Thinking");
-    expect(page!.type).toBe("concept");
+    expect(page!.type).toBe("concept/concept");
     expect(page!.frontmatter.tags).toContain("agent-derived");
   });
 

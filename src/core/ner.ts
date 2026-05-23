@@ -7,7 +7,7 @@ import { buildEntityPrompt, buildRelationPrompt } from "../ontology/ner-prompt.j
 export type EntityType =
   | "person" | "company" | "organization" | "location" | "place"
   | "product" | "drug" | "book"
-  | "framework" | "technology" | "theory" | "concept";
+  | "model" | "pharma" | "psychology" | "technology" | "concept";
 
 export type Relevance = "high" | "medium" | "low";
 
@@ -129,7 +129,7 @@ function classifyEntity(name: string, llmType: string): EntityClass {
 
   // ── Layer 3: TRUST LLM — primary classifier ──
   const ontology = getOntology();
-  // Concept types: framework, technology, theory, concept
+  // Concept types: model, pharma, psychology, technology, concept
   const conceptType = ontology.getEntityType(`concept/${llmType}`);
   if (conceptType) return "concept";
   // Entity types: person, company, organization, location, place, product, drug, book
@@ -151,8 +151,9 @@ export interface FilterOutcome {
 function getFilterReason(name: string, llmType: string): string {
   if (GENERIC_TERMS.has(name)) return "blacklisted";
   if (name.length < 2) return "too_short";
-  if (/^\d+$/.test(name) || /^#\d+$/.test(name) || /^v\d+$/i.test(name)) return "numeric";
-  if (/^[a-z][a-z0-9]{10,}$/.test(name) && !/[一-鿿]/.test(name)) return "hash_like";
+  if (/^\d+$/.test(name) || /^#\d+$/.test(name) || /^v\d+/i.test(name)) return "numeric";
+  if (/^[0-9a-f]{6,}$/i.test(name)) return "hash_like";
+  if (/^[a-z][a-z0-9-]{6,}$/.test(name) && !/[一-鿿]/.test(name) && llmType !== "concept") return "hash_like";
   if (/^[A-Z]{2}$/.test(name) && llmType !== "concept") return "two_letter_code";
   if (/经理|总监|代表|主管|专员|主任|总裁|负责人|工程师|顾问|人员|管理员|作家/.test(name)) return "job_title";
   if (/\d{4}[年.\-/]\d{1,2}[月日]?/.test(name)) return "date_pattern";

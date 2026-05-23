@@ -21,9 +21,12 @@ const NER_TO_PAGE_TYPE: Record<string, string> = {
   product: "entity/product",
   drug: "entity/drug",
   book: "entity/book",
-  framework: "concept/framework",
+  disease: "entity/disease",
+  model: "concept/model",
+  pharma: "concept/pharma",
+  psychology: "concept/psychology",
   technology: "concept/technology",
-  theory: "concept/theory",
+  framework: "concept/framework",
   concept: "concept/concept",
 };
 
@@ -110,7 +113,7 @@ export class OntologyLoader implements Ontology {
   }
 
   resolvePageType(nerType: string): string {
-    return NER_TO_PAGE_TYPE[nerType] ?? `entity/${nerType}`;
+    return NER_TO_PAGE_TYPE[nerType] ?? "record";
   }
 
   validateRelationDomain(relation: string, fromType: string, toType: string): boolean {

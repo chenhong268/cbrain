@@ -11,6 +11,7 @@ import { EntityResolver } from "./entity-resolver.js";
 import {
   chunkContent,
   mapEntityType,
+  normalizePageType,
   buildStubBody,
   findEntitySlug,
   DEFAULT_CHUNK_SIZE,
@@ -138,10 +139,12 @@ export class ContentPipeline {
   }
 
   /**
-   * Extract wikilinks from body and create links. Auto-creates stubs when createStubs=true (sync).
+   * Extract wikilinks from body and create links to existing entities.
+   * Does NOT create stubs — wikilinks carry no type information, so entity
+   * creation is left to NER which classifies properly.
    * Returns the number of links created.
    */
-  processWikilinks(fromSlug: string, body: string, createStubs: boolean): number {
+  processWikilinks(fromSlug: string, body: string): number {
     if (!this.pages || !body.trim()) return 0;
 
     const wikiLinks = extractWikiLinks(body);
@@ -155,23 +158,7 @@ export class ContentPipeline {
 
       const targetSlug = findEntitySlug(this.db, targetName);
 
-      if (!targetSlug && createStubs && link.target.length >= 2) {
-        this.pages.create({
-          title: targetName,
-          type: "entity/person",
-          body: `> Auto-extracted from [[${fromSlug}]]`,
-          tags: ["auto-extracted", "wikilink"],
-        });
-        const newSlug = findEntitySlug(this.db, targetName);
-        if (newSlug) {
-          const key = `${fromSlug}\x00${newSlug}`;
-          if (!writtenRelations.has(key)) {
-            writtenRelations.add(key);
-            this.db.insertLink(fromSlug, newSlug, "提及", null, 0.3, "weak", "wikilink", 0.9);
-            count++;
-          }
-        }
-      } else if (targetSlug && targetSlug !== fromSlug) {
+      if (targetSlug && targetSlug !== fromSlug) {
         this.pages.incrementMention(targetSlug);
         const key = `${fromSlug}\x00${targetSlug}`;
         if (!writtenRelations.has(key)) {
@@ -240,6 +227,15 @@ export class ContentPipeline {
       if (result.action === "resolved_to_existing" || result.action === "alias_added") {
         entitySlugMap.set(entity.name, result.slug);
         this.db.incrementMentionCount(result.slug);
+        // Correct type if NER classification differs from existing stub
+        const nerType = mapEntityType(entity.type);
+        const existingType = this.db.getEntityType(result.slug);
+        if (existingType && existingType !== nerType && this.pages) {
+          const normalized = normalizePageType(nerType);
+          if (normalized !== existingType) {
+            this.pages.updateType(result.slug, normalized);
+          }
+        }
       } else if (result.action === "duplicate_candidate") {
         if (this.pages && entity.name.length <= 20) {
           const entityType = mapEntityType(entity.type);

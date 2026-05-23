@@ -8,7 +8,7 @@ describe("OntologyLoader", () => {
     const types = loader.getAllEntityTypes();
     expect(Object.keys(types).length).toBeGreaterThanOrEqual(16);
     expect(types["entity/person"]).toBeDefined();
-    expect(types["concept/framework"]).toBeDefined();
+    expect(types["concept/model"]).toBeDefined();
   });
 
   it("identifies abstract types", () => {
@@ -19,7 +19,7 @@ describe("OntologyLoader", () => {
 
   it("resolves parent types", () => {
     expect(loader.getParentType("entity/person")).toBe("entity");
-    expect(loader.getParentType("concept/framework")).toBe("concept");
+    expect(loader.getParentType("concept/model")).toBe("concept");
     expect(loader.getParentType("entity")).toBeUndefined();
   });
 
@@ -28,21 +28,23 @@ describe("OntologyLoader", () => {
     expect(concrete).not.toContain("entity");
     expect(concrete).not.toContain("concept");
     expect(concrete).toContain("entity/person");
-    expect(concrete).toContain("concept/framework");
+    expect(concrete).toContain("concept/model");
     expect(concrete).toContain("record");
     expect(concrete).toContain("insight");
   });
 
   it("resolves vault_dir with parent inheritance", () => {
     expect(loader.getVaultDir("entity/person")).toBe("brain/entities/person");
-    expect(loader.getVaultDir("concept/framework")).toBe("brain/concepts/framework");
+    expect(loader.getVaultDir("concept/model")).toBe("brain/concepts/model");
     expect(loader.getVaultDir("record")).toBe("records");
   });
 
   it("resolves NER type to page type", () => {
     expect(loader.resolvePageType("person")).toBe("entity/person");
     expect(loader.resolvePageType("company")).toBe("entity/company");
-    expect(loader.resolvePageType("framework")).toBe("concept/framework");
+    expect(loader.resolvePageType("model")).toBe("concept/model");
+    expect(loader.resolvePageType("pharma")).toBe("concept/pharma");
+    expect(loader.resolvePageType("psychology")).toBe("concept/psychology");
     expect(loader.resolvePageType("technology")).toBe("concept/technology");
   });
 
@@ -83,12 +85,12 @@ describe("OntologyLoader", () => {
     expect(loader.validateRelationDomain("任职", "entity/person", "entity/company")).toBe(true);
     expect(loader.validateRelationDomain("认识", "entity/person", "entity/person")).toBe(true);
     // 提及 has empty domain/range = any
-    expect(loader.validateRelationDomain("提及", "entity/person", "concept/framework")).toBe(true);
+    expect(loader.validateRelationDomain("提及", "entity/person", "concept/model")).toBe(true);
   });
 
   it("provides NER config", () => {
     const config = loader.getNerConfig();
-    expect(Object.keys(config.entity_types_prompt).length).toBe(12);
+    expect(Object.keys(config.entity_types_prompt).length).toBe(14);
     expect(config.relation_prompt_order.length).toBeGreaterThanOrEqual(35);
     expect(config.concept_relations).toContain("关联");
   });

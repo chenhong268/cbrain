@@ -86,8 +86,6 @@ export type PageLayer = "source" | "derived";
 export function normalizePageType(type: string): PageType {
   const ontology = getOntology();
   if (ontology.getEntityType(type) && !ontology.isAbstract(type)) return type;
-  // 兼容旧格式: abstract type → return as-is
-  if (ontology.getEntityType(type)) return type;
   return "record";
 }
 

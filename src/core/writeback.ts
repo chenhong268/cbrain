@@ -87,7 +87,7 @@ export class WritebackManager {
 
     const page = this.pages.create({
       title,
-      type: "concept",
+      type: "concept/concept",
       body: input.content,
       tags: ["agent-derived"],
     });

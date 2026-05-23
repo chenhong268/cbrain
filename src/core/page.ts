@@ -173,6 +173,27 @@ export class PageManager {
     return slugs.map((s) => this.getBySlug(s)).filter(Boolean) as Page[];
   }
 
+  /** Update a page's type in both DB and vault file frontmatter. */
+  updateType(slug: string, newType: string): void {
+    const page = this.getBySlug(slug);
+    if (!page) return;
+
+    const frontmatter: PageFrontmatter = {
+      ...page.frontmatter,
+      type: newType,
+      updated_at: new Date().toISOString(),
+    };
+
+    const filePath = join(this.vaultPath, page.file_path);
+    const content = stringifyFrontmatter(frontmatter, page.body);
+    writeFileSync(filePath, content, "utf-8");
+
+    const contentHash = hashContent(content);
+    this.db.updateType(slug, newType);
+    this.db.updatePageHash(slug, contentHash);
+    this.cacheDelete(slug);
+  }
+
   update(
     slug: string,
     updates: {

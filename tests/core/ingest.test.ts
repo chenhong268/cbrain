@@ -94,18 +94,17 @@ describe("IngestManager", () => {
         content: "张三是星辰科技的商务经理",
         type: "text",
         title: "张三",
-        pageType: "entity",
       });
 
       expect(result.created).toBe(true);
-      expect(result.slug).toBe("brain/entities/张三");
+      expect(result.slug).toBe("records/张三");
 
       const row = db
         .prepare("SELECT * FROM pages WHERE slug = ?")
-        .get("brain/entities/张三") as any;
+        .get("records/张三") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("张三");
-      expect(row.type).toBe("entity");
+      expect(row.type).toBe("record");
     });
 
     test("writes vault file for text input", async () => {
@@ -142,8 +141,8 @@ describe("IngestManager", () => {
       const md = [
         "---",
         "title: 李四",
-        "type: entity",
-        "slug: brain/entities/lisi",
+        "type: entity/person",
+        "slug: brain/entities/person/lisi",
         "tags:",
         "  - 人物",
         "  - 工程师",
@@ -157,12 +156,12 @@ describe("IngestManager", () => {
         type: "markdown",
       });
 
-      expect(result.slug).toBe("brain/entities/lisi");
+      expect(result.slug).toBe("brain/entities/person/lisi");
       expect(result.created).toBe(true);
 
       const row = db
         .prepare("SELECT * FROM pages WHERE slug = ?")
-        .get("brain/entities/lisi") as any;
+        .get("brain/entities/person/lisi") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("李四");
     });
@@ -171,8 +170,8 @@ describe("IngestManager", () => {
       const md1 = [
         "---",
         "title: 王五",
-        "type: entity",
-        "slug: brain/entities/wangwu",
+        "type: entity/person",
+        "slug: brain/entities/person/wangwu",
         "---",
         "",
         "原始内容",
@@ -184,8 +183,8 @@ describe("IngestManager", () => {
       const md2 = [
         "---",
         "title: 王五",
-        "type: entity",
-        "slug: brain/entities/wangwu",
+        "type: entity/person",
+        "slug: brain/entities/person/wangwu",
         "---",
         "",
         "更新后的内容",
@@ -193,21 +192,21 @@ describe("IngestManager", () => {
 
       const result = await ingest.ingest({ content: md2, type: "markdown" });
       expect(result.created).toBe(false);
-      expect(result.slug).toBe("brain/entities/wangwu");
+      expect(result.slug).toBe("brain/entities/person/wangwu");
     });
 
     test("auto-generates slug when missing from frontmatter", async () => {
       const md = [
         "---",
         "title: AutoSlug",
-        "type: entity",
+        "type: entity/person",
         "---",
         "",
         "No slug provided",
       ].join("\n");
 
       const result = await ingest.ingest({ content: md, type: "markdown" });
-      expect(result.slug).toBe("brain/entities/autoslug");
+      expect(result.slug).toBe("brain/entities/person/autoslug");
     });
 
     test("uses tags from frontmatter over input tags", async () => {
@@ -242,11 +241,11 @@ describe("IngestManager", () => {
     test("creates graph edges for resolved links", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/lisi", "entity/person", "李四", "brain/entities/lisi.md", "h1");
+      ).run("brain/entities/person/lisi", "entity/person", "李四", "brain/entities/person/lisi.md", "h1");
 
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/wangwu", "entity/person", "王五", "brain/entities/wangwu.md", "h2");
+      ).run("brain/entities/person/wangwu", "entity/person", "王五", "brain/entities/person/wangwu.md", "h2");
 
       const md = [
         "---",
@@ -265,8 +264,8 @@ describe("IngestManager", () => {
         .prepare("SELECT to_slug FROM links WHERE from_slug = ?")
         .all("records/link-test") as any[];
       const targets = links.map((l) => l.to_slug);
-      expect(targets).toContain("brain/entities/lisi");
-      expect(targets).toContain("brain/entities/wangwu");
+      expect(targets).toContain("brain/entities/person/lisi");
+      expect(targets).toContain("brain/entities/person/wangwu");
     });
 
     test("skips unresolved links", async () => {
@@ -292,7 +291,7 @@ describe("IngestManager", () => {
     test("increments mention count on linked pages", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/mentioned", "entity/person", "被提及者", "brain/entities/mentioned.md", "h1");
+      ).run("brain/entities/person/mentioned", "entity/person", "被提及者", "brain/entities/person/mentioned.md", "h1");
 
       const md = [
         "---",
@@ -308,31 +307,31 @@ describe("IngestManager", () => {
 
       const row = db
         .prepare("SELECT mention_count FROM pages WHERE slug = ?")
-        .get("brain/entities/mentioned") as any;
+        .get("brain/entities/person/mentioned") as any;
       expect(row.mention_count).toBe(1);
     });
 
     test("does not create self-referencing link", async () => {
-      mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+      mkdirSync(join(vaultPath, "brain/entities/person"), { recursive: true });
       const preMd = [
         "---",
         "title: SelfRef",
-        "type: entity",
-        "slug: brain/entities/self-ref",
+        "type: entity/person",
+        "slug: brain/entities/person/self-ref",
         "---",
         "",
         "Original",
       ].join("\n");
-      writeFileSync(join(vaultPath, "brain/entities/self-ref.md"), preMd, "utf-8");
+      writeFileSync(join(vaultPath, "brain/entities/person/self-ref.md"), preMd, "utf-8");
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/self-ref", "entity/person", "SelfRef", "brain/entities/self-ref.md", "h1");
+      ).run("brain/entities/person/self-ref", "entity/person", "SelfRef", "brain/entities/person/self-ref.md", "h1");
 
       const md = [
         "---",
         "title: SelfRef",
-        "type: entity",
-        "slug: brain/entities/self-ref",
+        "type: entity/person",
+        "slug: brain/entities/person/self-ref",
         "---",
         "",
         "自我引用[[SelfRef]]。",
@@ -342,7 +341,7 @@ describe("IngestManager", () => {
 
       const links = db
         .prepare("SELECT * FROM links WHERE from_slug = ? AND to_slug = ?")
-        .all("brain/entities/self-ref", "brain/entities/self-ref") as any[];
+        .all("brain/entities/person/self-ref", "brain/entities/person/self-ref") as any[];
       expect(links.length).toBe(0);
     });
   });
@@ -399,7 +398,7 @@ describe("IngestManager", () => {
         content: "张三是星辰的商务经理",
         type: "text",
         title: "张三简介",
-        pageType: "entity",
+        pageType: "record",
       });
 
       // NER is now async — ingest returns immediately without NER result
@@ -566,7 +565,7 @@ describe("IngestManager", () => {
     test("reuses existing entity instead of creating duplicate stub", async () => {
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/zhangsan", "entity/person", "张三", "brain/entities/zhangsan.md", "h1");
+      ).run("brain/entities/person/zhangsan", "entity/person", "张三", "brain/entities/person/zhangsan.md", "h1");
 
       const llm = createMockLLM([
         JSON.stringify({

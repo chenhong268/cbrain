@@ -81,28 +81,42 @@ entity_types:
       - published_year
       - isbn
 
+  entity/disease:
+    label: 疾病
+    parent: entity
+    vault_dir: brain/entities/disease
+    structured_fields:
+      - icd_code
+      - category
+
   concept:
     label: 概念
     abstract: true
     vault_dir: brain/concepts
     structured_fields: []
 
-  concept/framework:
-    label: 框架
+  concept/model:
+    label: 模型/框架
     parent: concept
-    vault_dir: brain/concepts/framework
+    vault_dir: brain/concepts/model
+    structured_fields: []
+
+  concept/pharma:
+    label: 医药行业
+    parent: concept
+    vault_dir: brain/concepts/pharma
+    structured_fields: []
+
+  concept/psychology:
+    label: 心理/认知
+    parent: concept
+    vault_dir: brain/concepts/psychology
     structured_fields: []
 
   concept/technology:
     label: 技术
     parent: concept
     vault_dir: brain/concepts/technology
-    structured_fields: []
-
-  concept/theory:
-    label: 理论
-    parent: concept
-    vault_dir: brain/concepts/theory
     structured_fields: []
 
   concept/concept:
@@ -483,8 +497,8 @@ relation_types:
   # ── 概念关系 ──────────────────────────────────────────
   关联:
     label: 关联
-    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
-    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    domain: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
+    range: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
     symmetric: true
     transitive: false
     strength: weak
@@ -525,8 +539,8 @@ relation_types:
 
   互补:
     label: 互补
-    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
-    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    domain: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
+    range: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
     symmetric: true
     transitive: false
     strength: medium
@@ -545,8 +559,8 @@ relation_types:
 
   延伸:
     label: 延伸
-    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
-    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    domain: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
+    range: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
     symmetric: false
     transitive: false
     strength: medium
@@ -555,8 +569,8 @@ relation_types:
 
   基础:
     label: 基础
-    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
-    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    domain: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
+    range: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
     symmetric: false
     transitive: true
     strength: strong
@@ -565,8 +579,8 @@ relation_types:
 
   对比:
     label: 对比
-    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
-    range: [concept/framework, concept/technology, concept/theory, concept/concept]
+    domain: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
+    range: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
     symmetric: true
     transitive: false
     strength: medium
@@ -595,8 +609,8 @@ relation_types:
 
   应用:
     label: 应用
-    domain: [concept/framework, concept/technology, concept/theory, concept/concept]
-    range: [concept/framework, concept/technology, concept/theory, concept/concept, entity/product]
+    domain: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept]
+    range: [concept/model, concept/technology, concept/pharma, concept/psychology, concept/concept, entity/product]
     symmetric: false
     transitive: false
     strength: medium
@@ -606,7 +620,7 @@ relation_types:
 # ─── NER 提示词模板 ───────────────────────────────────────
 ner_config:
   entity_types_prompt:
-    person: "人物 — 具名的人（包括中文全名、英文名）"
+    person: "人物 — 仅指具名的人类个体，有完整姓名（如 张三、Elon Musk）。组织、产品、概念、疾病、药物等一律不是person。2-4字的中文词如果不是明确的姓名，归类为concept或对应的具体类型"
     company: "公司 — 具名的企业（如 红杉资本, 腾讯）"
     organization: "组织机构 — 非企业的组织（如 高校, 政府, 协会）"
     location: "地点 — 地理位置（如 北京, 硅谷）"
@@ -614,9 +628,11 @@ ner_config:
     product: "产品 — 具名产品（如 iPhone, 微信）"
     drug: "药品 — 具名药物（如 阿司匹林, 某某注射液）"
     book: "书籍 — 具名书籍（如《原则》, Good to Great）"
-    framework: "框架 — 具名管理/商业/技术框架（如 OKR, SWOT, BCG矩阵）"
+    disease: "疾病 — 具名疾病（如 前列腺癌, 糖尿病, 阿尔茨海默病）"
+    model: "模型/框架 — 管理框架、商业模型、理论模型（如 OKR, SWOT, 达克效应, 幸存者偏差）"
+    pharma: "医药行业 — 医药政策、药品监管、集采、医保相关术语"
+    psychology: "心理/认知 — 心理学、认知科学、行为经济学相关概念"
     technology: "技术 — 具名技术（如 Transformer, Kubernetes）"
-    theory: "理论 — 具名理论/效应/定律（如 达克效应, 幸存者偏差）"
     concept: "概念 — 具名概念（不在上述分类中的抽象概念）"
 
   relation_prompt_order:

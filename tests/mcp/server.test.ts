@@ -304,14 +304,14 @@ describe("MCP Server", () => {
     test("creates a new page", async () => {
       const server = createServer(deps);
       const result = await getTools(server).put_page.handler({
-        slug: "brain/entities/test",
+        slug: "brain/entities/person/test",
         content: "Hello world",
         title: "Test",
-        type: "entity",
+        type: "entity/person",
       });
       const data = JSON.parse(result.content[0].text);
       expect(data.action).toBe("created");
-      expect(data.page.slug).toBe("brain/entities/test");
+      expect(data.page.slug).toBe("brain/entities/person/test");
       expect(data.page.title).toBe("Test");
     });
 

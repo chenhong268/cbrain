@@ -813,7 +813,6 @@ export class CBrainDB {
       INSERT INTO pages (slug, type, title, file_path, content_hash, tier, expires_at, created_at, updated_at)
       VALUES ($slug, $type, $title, $path, $hash, 3, ${expiresAt ? expiresAt : 'NULL'}, datetime('now'), datetime('now'))
       ON CONFLICT(slug) DO UPDATE SET
-        type = excluded.type,
         title = excluded.title,
         content_hash = excluded.content_hash,
         updated_at = datetime('now')
@@ -1483,6 +1482,12 @@ export class CBrainDB {
       "SELECT type FROM pages WHERE slug = $slug"
     ).get({ $slug: slug }) as { type: string } | null;
     return row?.type ?? null;
+  }
+
+  updateType(slug: string, newType: string): void {
+    this.prepare(
+      "UPDATE pages SET type = $type, updated_at = CURRENT_TIMESTAMP WHERE slug = $slug"
+    ).run({ $slug: slug, $type: newType });
   }
 
   getAllEntityTitles(): string[] {

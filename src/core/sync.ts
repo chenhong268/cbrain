@@ -165,7 +165,7 @@ export class SyncManager {
 
         if (this.pages && file.body.trim()) {
           try {
-            this.pipeline.processWikilinks(file.slug, file.body, true);
+            this.pipeline.processWikilinks(file.slug, file.body);
           } catch (e) {
             this.logger?.warn("sync", "Wikilink 提取失败", { slug: file.slug, error: String(e) });
           }
@@ -324,7 +324,7 @@ export class SyncManager {
     // Wikilink extraction + auto-link
     if (this.pages && parsed.body.trim()) {
       try {
-        this.pipeline.processWikilinks(effectiveSlug, parsed.body, true);
+        this.pipeline.processWikilinks(effectiveSlug, parsed.body);
       } catch (e) {
         this.logger?.warn("sync", "Wikilink 提取失败", { slug: effectiveSlug, error: String(e) });
       }
@@ -367,17 +367,22 @@ export class SyncManager {
   // ─── Private ────────────────────────────────────────────────
 
   private inferTypeFromPath(relPath: string): string {
-    const typeFromDir: Record<string, string> = {
-      entities: "entity",
-      concepts: "concept",
-      insights: "insight",
-    };
     const parts = relPath.split("/");
     // records/X.md at root level
     if (parts[0] === "records") return "record";
-    // brain/entities/X.md, brain/concepts/X.md, brain/insights/X.md
+    // brain/entities/person/X.md → entity/person (concrete sub-type from subdir)
+    if (parts.length >= 4 && parts[0] === "brain") {
+      const parentDir = parts[1]; // entities, concepts, insights
+      const subDir = parts[2];    // person, company, etc.
+      if (parentDir === "entities") return `entity/${subDir}`;
+      if (parentDir === "concepts") return `concept/${subDir}`;
+      if (parentDir === "insights") return "insight";
+    }
+    // brain/entities/X.md (old flat structure — can't infer concrete type)
     if (parts.length >= 3 && parts[0] === "brain") {
-      return typeFromDir[parts[1]] ?? "record";
+      const parentDir = parts[1];
+      if (parentDir === "entities" || parentDir === "concepts") return "record";
+      if (parentDir === "insights") return "insight";
     }
     return "record";
   }

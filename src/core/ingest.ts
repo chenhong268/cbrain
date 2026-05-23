@@ -33,7 +33,7 @@ export interface IngestInput {
   type: "markdown" | "text";
   title?: string;
   tags?: string[];
-  pageType?: "entity" | "concept" | "record" | "insight";
+  pageType?: "record" | "insight";
   skipNer?: boolean;
 }
 
@@ -158,7 +158,7 @@ export class IngestManager {
     }
 
     this.db.deleteLinksByRelation(slug, 'mentions');
-    const linksExtracted = this.pipeline.processWikilinks(slug, body, false);
+    const linksExtracted = this.pipeline.processWikilinks(slug, body);
 
     this.pipeline.writeIndexes(slug, chunks, embedResults);
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
