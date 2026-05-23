@@ -92,4 +92,51 @@ describe("OntologyLoader", () => {
     expect(config.relation_prompt_order.length).toBeGreaterThanOrEqual(35);
     expect(config.concept_relations).toContain("关联");
   });
+
+  describe("resolveAlias", () => {
+    it("returns canonical name for valid relation", () => {
+      expect(loader.resolveAlias("任职")).toBe("任职");
+      expect(loader.resolveAlias("认识")).toBe("认识");
+      expect(loader.resolveAlias("提及")).toBe("提及");
+    });
+
+    it("resolves English aliases", () => {
+      expect(loader.resolveAlias("works_at")).toBe("任职");
+      expect(loader.resolveAlias("knows")).toBe("认识");
+      expect(loader.resolveAlias("founded")).toBe("创立");
+      expect(loader.resolveAlias("mentions")).toBe("提及");
+    });
+
+    it("resolves Chinese aliases", () => {
+      expect(loader.resolveAlias("创始人")).toBe("创立");
+      expect(loader.resolveAlias("董事长")).toBe("任职");
+      expect(loader.resolveAlias("子公司")).toBe("归属");
+      expect(loader.resolveAlias("竞争对手")).toBe("竞争");
+    });
+
+    it("resolves concept relation aliases", () => {
+      expect(loader.resolveAlias("底层逻辑")).toBe("基础");
+      expect(loader.resolveAlias("展开论述")).toBe("延伸");
+      expect(loader.resolveAlias("反面论证")).toBe("对比");
+      expect(loader.resolveAlias("案例")).toBe("应用");
+    });
+
+    it("resolves 上级 aliases", () => {
+      expect(loader.resolveAlias("领导")).toBe("上级");
+      expect(loader.resolveAlias("boss")).toBe("上级");
+      expect(loader.resolveAlias("直属上级")).toBe("上级");
+    });
+
+    it("splits capital aliases to 投资/收购", () => {
+      expect(loader.resolveAlias("invested_in")).toBe("投资");
+      expect(loader.resolveAlias("投资了")).toBe("投资");
+      expect(loader.resolveAlias("acquired")).toBe("收购");
+      expect(loader.resolveAlias("收购了")).toBe("收购");
+    });
+
+    it("falls back to 提及 for unknown input", () => {
+      expect(loader.resolveAlias("不存在的关系")).toBe("提及");
+      expect(loader.resolveAlias("xyz")).toBe("提及");
+    });
+  });
 });

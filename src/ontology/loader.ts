@@ -37,6 +37,10 @@ export class OntologyLoader implements Ontology {
     this.aliasMap = new Map();
     for (const [canonical, def] of Object.entries(this.data.relation_types)) {
       for (const alias of def.aliases ?? []) {
+        const existing = this.aliasMap.get(alias);
+        if (existing && existing !== canonical) {
+          console.warn(`[ontology] alias collision: "${alias}" → "${existing}" and "${canonical}"`);
+        }
         this.aliasMap.set(alias, canonical);
       }
     }
@@ -124,7 +128,9 @@ export class OntologyLoader implements Ontology {
 
   resolveAlias(input: string): string {
     if (this.isValidRelation(input)) return input;
-    return this.aliasMap.get(input) ?? "提及";
+    const resolved = this.aliasMap.get(input);
+    if (!resolved) return "提及";
+    return resolved;
   }
 }
 
