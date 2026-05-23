@@ -145,11 +145,12 @@ export class ContentPipeline {
    * creation is left to NER which classifies properly.
    * Returns the number of links created.
    */
-  processWikilinks(fromSlug: string, body: string): number {
-    if (!this.pages || !body.trim()) return 0;
+  processWikilinks(fromSlug: string, body: string): { count: number; mentionedSlugs: Set<string> } {
+    if (!this.pages || !body.trim()) return { count: 0, mentionedSlugs: new Set() };
 
     const wikiLinks = extractWikiLinks(body);
     const writtenRelations = new Set<string>();
+    const mentionedSlugs = new Set<string>();
     let count = 0;
 
     for (const link of wikiLinks) {
@@ -161,6 +162,7 @@ export class ContentPipeline {
 
       if (targetSlug && targetSlug !== fromSlug) {
         this.pages.incrementMention(targetSlug);
+        mentionedSlugs.add(targetSlug);
         const key = `${fromSlug}\x00${targetSlug}`;
         if (!writtenRelations.has(key)) {
           writtenRelations.add(key);
@@ -170,7 +172,7 @@ export class ContentPipeline {
       }
     }
 
-    return count;
+    return { count, mentionedSlugs };
   }
 
   /**
@@ -184,7 +186,8 @@ export class ContentPipeline {
     body: string,
     type: string,
     skipDatelessEvents: boolean,
-    precomputed?: ExtractionResult
+    precomputed?: ExtractionResult,
+    skipMentionSlugs?: Set<string>
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
@@ -195,7 +198,7 @@ export class ContentPipeline {
       return null;
     }
 
-    return this.applyExtraction(fromSlug, extraction, skipDatelessEvents);
+    return this.applyExtraction(fromSlug, extraction, skipDatelessEvents, skipMentionSlugs);
   }
 
   // ─── Private ────────────────────────────────────────────────
@@ -203,7 +206,8 @@ export class ContentPipeline {
   private async applyExtraction(
     fromSlug: string,
     extraction: ExtractionResult,
-    skipDatelessEvents: boolean
+    skipDatelessEvents: boolean,
+    skipMentionSlugs?: Set<string>
   ): Promise<NerPipelineResult> {
     const entitySlugMap = new Map<string, string>();
     const stubsCreated = new Set<string>();
@@ -220,7 +224,9 @@ export class ContentPipeline {
 
       if (result.action === "resolved_to_existing" || result.action === "alias_added") {
         entitySlugMap.set(entity.name, result.slug);
-        this.db.incrementMentionCount(result.slug);
+        if (!skipMentionSlugs?.has(result.slug)) {
+          this.db.incrementMentionCount(result.slug);
+        }
         // Correct type if NER classification differs from existing stub
         const nerType = mapEntityType(entity.type);
         const existingType = this.db.getEntityType(result.slug);
@@ -233,7 +239,9 @@ export class ContentPipeline {
         }
       } else if (result.action === "duplicate_candidate") {
         entitySlugMap.set(entity.name, result.slug);
-        this.db.incrementMentionCount(result.slug);
+        if (!skipMentionSlugs?.has(result.slug)) {
+          this.db.incrementMentionCount(result.slug);
+        }
         this.db.insertLink(fromSlug, result.slug, "提及", null, 0.3, "weak", "ner", 0.5);
       } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
@@ -245,7 +253,9 @@ export class ContentPipeline {
         });
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.add(stub.slug);
-        this.db.incrementMentionCount(stub.slug);
+        if (!skipMentionSlugs?.has(stub.slug)) {
+          this.db.incrementMentionCount(stub.slug);
+        }
         this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5);
       }
     }

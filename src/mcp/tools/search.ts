@@ -31,7 +31,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       let ftsRaw: Awaited<ReturnType<typeof ctx.db.ftsSearch>> = [];
       try { ftsRaw = ctx.db.ftsSearch(query, limit); } catch { /* fts failure is non-fatal */ }
       if (ftsRaw.length > 0) {
-        results = ftsRaw.map(r => ({ slug: r.page_slug, score: 1 / (1 + r.rank), snippet: r.content.slice(0, 200), source: "fts" as const }));
+        results = ftsRaw.map(r => ({ slug: r.page_slug, score: 1 / (1 - Math.min(r.rank, 0.999)), snippet: r.content.slice(0, 200), source: "fts" as const }));
         usedStrategy = "smart-fts";
       } else {
         results = await ctx.search.search(query, { strategy: "all", limit });

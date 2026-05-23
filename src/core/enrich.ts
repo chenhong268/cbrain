@@ -1,5 +1,6 @@
 import { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
+import type { PageManager } from "./page.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -36,12 +37,14 @@ export class EnrichManager {
   private thresholds: TierThresholds;
   private llm?: LLMProvider;
   private vaultPath: string;
+  private pages?: PageManager;
 
-  constructor(db: CBrainDB, thresholds?: Partial<TierThresholds>, llm?: LLMProvider, vaultPath?: string) {
+  constructor(db: CBrainDB, thresholds?: Partial<TierThresholds>, llm?: LLMProvider, vaultPath?: string, pages?: PageManager) {
     this.db = db;
     this.thresholds = { ...DEFAULT_THRESHOLDS, ...thresholds };
     this.llm = llm;
     this.vaultPath = vaultPath ?? "";
+    this.pages = pages;
   }
 
   computeTier(mentionCount: number, activityWeight: number = 0): number {
@@ -96,6 +99,7 @@ export class EnrichManager {
 
     if (newTier < page.tier) {
       this.db.updatePageTier(slug, newTier);
+      this.pages?.update(slug, { extra: { tier: newTier } });
     }
 
     const effectiveTier = newTier < page.tier ? newTier : page.tier;

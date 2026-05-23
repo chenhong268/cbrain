@@ -62,7 +62,7 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger });
   const ingest = new IngestManager(db, embedding, lance, vaultPath, llm);
   const graph = new GraphManager(db);
-  const enrich = new EnrichManager(db, undefined, undefined, vaultPath);
+  const enrich = new EnrichManager(db, undefined, undefined, vaultPath, pages);
   const versions = new VersionManager(db, pages, vaultPath);
   const jobs = new JobQueue(db);
   const writeback = new WritebackManager(pages, db, outputsDir);

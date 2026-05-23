@@ -157,8 +157,8 @@ export class IngestManager {
       this.pages.create({ title, type, body, tags, slug });
     }
 
-    this.db.deleteLinksByRelation(slug, 'mentions');
-    const linksExtracted = this.pipeline.processWikilinks(slug, body);
+    this.db.deleteLinksByRelation(slug, '提及');
+    const { count: linksExtracted, mentionedSlugs } = this.pipeline.processWikilinks(slug, body);
 
     this.pipeline.writeIndexes(slug, chunks, embedResults);
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
@@ -167,7 +167,7 @@ export class IngestManager {
     const shouldNer = doNer && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
     if (shouldNer) {
       try {
-        nerResult = await this.pipeline.processNer(slug, body, type, true);
+        nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
