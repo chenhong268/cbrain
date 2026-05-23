@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { HealthChecker } from "../../core/health.js";
 import { IndexGenerator } from "../../core/indexes.js";
-import { normalizeRelation, CANONICAL_RELATION_TYPES, REVERSE_RELATIONS } from "../../core/shared.js";
+import { normalizeRelation, getCanonicalRelationTypes, getReverseRelation } from "../../core/shared.js";
 
 export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   // ─── health ────────────────────────────────────────────
@@ -152,7 +152,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
       const canonical: Record<string, number> = {};
       const nonStandard: Array<{ relation: string; count: number; mapsTo: string }> = [];
       for (const row of dist) {
-        if (CANONICAL_RELATION_TYPES.has(row.relation)) {
+        if (getCanonicalRelationTypes().has(row.relation)) {
           canonical[row.relation] = row.count;
         } else if (row.relation === "reports_to") {
           canonical["reports_to"] = row.count;
@@ -172,7 +172,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     }
 
     // mode === "fix"
-    const nonStandard = dist.filter(r => !CANONICAL_RELATION_TYPES.has(r.relation) && r.relation !== "reports_to");
+    const nonStandard = dist.filter(r => !getCanonicalRelationTypes().has(r.relation) && r.relation !== "reports_to");
     if (nonStandard.length === 0) {
       return {
         content: [{ type: "text", text: JSON.stringify({ success: true, message: "All relations are canonical. Nothing to fix." }) }],
@@ -220,9 +220,13 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     let bidirFixed = 0;
     const bidirSlugs = new Set<string>();
 
-    for (const [fwd, rev] of Object.entries(REVERSE_RELATIONS)) {
-      // Only process each pair once (skip the second direction)
-      if (fwd > rev) continue;
+    const processedPairs = new Set<string>();
+    for (const fwd of getCanonicalRelationTypes()) {
+      const rev = getReverseRelation(fwd);
+      if (!rev) continue;
+      const pairKey = [fwd, rev].sort().join("|");
+      if (processedPairs.has(pairKey)) continue;
+      processedPairs.add(pairKey);
       const links = ctx.db.getAllLinksByRelation(fwd);
       for (const link of links) {
         const hasReverse = ctx.db.linkExists(link.to_slug, link.from_slug, rev);

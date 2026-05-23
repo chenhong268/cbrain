@@ -44,7 +44,7 @@ export function getFactFieldWhitelist(): Record<string, string[]> {
   const result: Record<string, string[]> = {};
   for (const type of ontology.getConcreteEntityTypes()) {
     const shortName = type.split("/").pop()!;
-    if (["record", "insight"].includes(type)) continue;
+    if (!type.includes("/")) continue;
     result[shortName] = ontology.getStructuredFields(type);
   }
   return result;
@@ -140,8 +140,8 @@ function classifyEntity(name: string, llmType: string): EntityClass {
   return null;
 }
 
-const MAX_CONCEPTS = 3;
-const MAX_TOTAL_ENTITIES = 8;
+const MAX_CONCEPTS = 8;
+const MAX_TOTAL_ENTITIES = 10;
 
 export interface FilterOutcome {
   kept: ExtractedEntity[];

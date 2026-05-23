@@ -198,31 +198,9 @@ export function getCanonicalRelationTypes(): Set<string> {
   return new Set(Object.keys(getOntology().getAllRelationTypes()));
 }
 
-/** @deprecated Use getCanonicalRelationTypes() instead */
-export const CANONICAL_RELATION_TYPES = new Set<string>([]);
-
-// 初始化时填充 CANONICAL_RELATION_TYPES 以兼容旧代码
-try {
-  for (const r of Object.keys(getOntology().getAllRelationTypes())) {
-    CANONICAL_RELATION_TYPES.add(r);
-  }
-} catch {}
-
 export function getReverseRelation(rel: string): string | undefined {
   return getOntology().getReverseRelation(rel);
 }
-
-/** @deprecated Use getReverseRelation() instead */
-export const REVERSE_RELATIONS: Record<string, string> = {};
-
-// 初始化时填充 REVERSE_RELATIONS 以兼容旧代码（sqlite.ts 等直接索引此对象）
-try {
-  for (const [name, def] of Object.entries(getOntology().getAllRelationTypes())) {
-    if (def.reverse) {
-      REVERSE_RELATIONS[name] = def.reverse;
-    }
-  }
-} catch {}
 
 export const HIERARCHY_RELATIONS = new Set(["reports_to"]);
 

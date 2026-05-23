@@ -8,7 +8,9 @@ export function buildEntityPrompt(ontology: Ontology): string {
 
   const concreteTypes = ontology
     .getConcreteEntityTypes()
-    .filter((t) => !["record", "insight"].includes(t));
+    .filter((t) => t.includes("/"));
+
+  const typeUnion = concreteTypes.map((t) => t.split("/").pop()).join("|");
 
   const fieldWhitelist: string[] = [];
   for (const type of concreteTypes) {
@@ -19,10 +21,19 @@ export function buildEntityPrompt(ontology: Ontology): string {
     }
   }
 
-  return `You are a precision entity extractor for a personal knowledge graph. Extract entities worth remembering long-term.
+  return `You are a precision entity extractor for a personal knowledge graph. Extract entities AND key concepts worth remembering long-term.
 
 ## Entity Types
 ${typeLines}
+
+## CRITICAL: concept extraction rules
+Extract core ideas, mental models, frameworks, and reusable abstractions from the text:
+- model/framework: named frameworks (SWOT, OKR) OR implicit frameworks the author constructs (e.g. "情绪稳定是输出不是性格" → extract "情绪稳定作为输出" as model)
+- psychology: cognitive patterns, behavioral insights (e.g. "内在市场噪音", "情绪放大器")
+- concept: reusable abstractions the reader should remember (e.g. "复利中断成本", "噪音vs信号")
+- Be generous with concepts — every substantial article has 3-8 extractable ideas
+- Extract the idea, not the wording. "让情绪退居二线，让现实走到前台" → concept "理性前置"
+- If the text presents a numbered/structured argument system, each point is likely a separate concept
 
 ## CRITICAL: person classification rules
 "person" is ONLY for real human individuals with actual names. This is the most common misclassification — be strict:
@@ -60,9 +71,9 @@ ${fieldWhitelist.join("\n")}
 Rules: Every fact MUST have an evidence field (verbatim quote). No inference. confidence: 0.0-1.0.
 
 ## Output format (JSON only, no markdown wrap):
-{"entities": [{"name": "...", "type": "person|company|organization|location|place|product|drug|book|model|pharma|psychology|technology|concept", "relevance": "high|medium|low", "context": "..."}], "events": [{"date": "YYYY-MM-DD|null", "description": "...", "participants": ["..."]}], "facts": [{"entity": "...", "field": "...", "value": "...", "confidence": 0.9, "evidence": "verbatim quote"}]}
+{"entities": [{"name": "...", "type": "${typeUnion}", "relevance": "high|medium|low", "context": "..."}], "events": [{"date": "YYYY-MM-DD|null", "description": "...", "participants": ["..."]}], "facts": [{"entity": "...", "field": "...", "value": "...", "confidence": 0.9, "evidence": "verbatim quote"}]}
 
-Limits: max 8 entities + 3 concepts = 11 total. Return ONLY valid JSON.`;
+Limits: max 10 entities + 8 concepts = 18 total. Return ONLY valid JSON.`;
 }
 
 export function buildRelationPrompt(

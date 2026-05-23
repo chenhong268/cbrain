@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { REVERSE_RELATIONS } from "../core/shared.js";
+import { getReverseRelation } from "../core/shared.js";
 
 const ALLOWED_ORDER_COLUMNS = new Set([
   "slug", "title", "type", "created_at", "updated_at", "mention_count", "tier",
@@ -1159,7 +1159,7 @@ export class CBrainDB {
     ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: weight ?? 1.0, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5 });
 
     if (!_skipReverse) {
-      const reverse = REVERSE_RELATIONS[relation];
+      const reverse = getReverseRelation(relation);
       if (reverse) {
         this.insertLink(to, from, reverse, context, weight, strength, sourceType, confidence, true);
       }
@@ -1170,7 +1170,7 @@ export class CBrainDB {
     const r = this.prepare(
       "DELETE FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
     ).run({ $from: from, $to: to, $rel: relation });
-    const reverse = REVERSE_RELATIONS[relation];
+    const reverse = getReverseRelation(relation);
     if (reverse) {
       this.prepare(
         "DELETE FROM links WHERE from_slug = $to AND to_slug = $from AND relation = $rel"
@@ -2103,7 +2103,7 @@ export class CBrainDB {
     const link = this.db.query(`SELECT from_slug, to_slug, relation FROM links WHERE id = ?`).get(id) as { from_slug: string; to_slug: string; relation: string } | null;
     this.db.query(`DELETE FROM links WHERE id = ?`).run(id);
     if (link) {
-      const reverse = REVERSE_RELATIONS[link.relation];
+      const reverse = getReverseRelation(link.relation);
       if (reverse) {
         this.prepare(
           "DELETE FROM links WHERE from_slug = $to AND to_slug = $from AND relation = $rel"

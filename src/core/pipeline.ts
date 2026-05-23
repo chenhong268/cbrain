@@ -8,6 +8,7 @@ import { PageManager } from "./page.js";
 import { extractWikiLinks, isValidEntityName } from "./extract.js";
 import type { Logger } from "./logger.js";
 import { EntityResolver } from "./entity-resolver.js";
+import { getOntology } from "../ontology/loader.js";
 import {
   chunkContent,
   mapEntityType,
@@ -187,7 +188,7 @@ export class ContentPipeline {
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
-    if (type.startsWith("entity/") || type.startsWith("concept/") || type.startsWith("insight/")) return null;
+    if (getOntology().isDerivedPageType(type)) return null;
 
     const extraction = precomputed ?? await this.nerEngine.extract(body);
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {

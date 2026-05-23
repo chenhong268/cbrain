@@ -12,32 +12,22 @@ import type {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const NER_TO_PAGE_TYPE: Record<string, string> = {
-  person: "entity/person",
-  company: "entity/company",
-  organization: "entity/organization",
-  location: "entity/location",
-  place: "entity/place",
-  product: "entity/product",
-  drug: "entity/drug",
-  book: "entity/book",
-  disease: "entity/disease",
-  model: "concept/model",
-  pharma: "concept/pharma",
-  psychology: "concept/psychology",
-  technology: "concept/technology",
-  framework: "concept/framework",
-  concept: "concept/concept",
-};
-
 export class OntologyLoader implements Ontology {
   private data: OntologyYaml;
   private aliasMap: Map<string, string>;
+  private nerToPageType: Map<string, string>;
 
   constructor(yamlPath?: string) {
     const path = yamlPath ?? join(__dirname, "ontology.yaml");
     this.data = parse(readFileSync(path, "utf-8")) as OntologyYaml;
     this.aliasMap = new Map();
+    this.nerToPageType = new Map();
+    for (const type of this.getConcreteEntityTypes()) {
+      if (type.includes("/")) {
+        const shortName = type.split("/").pop()!;
+        this.nerToPageType.set(shortName, type);
+      }
+    }
     for (const [canonical, def] of Object.entries(this.data.relation_types)) {
       for (const alias of def.aliases ?? []) {
         const existing = this.aliasMap.get(alias);
@@ -113,7 +103,14 @@ export class OntologyLoader implements Ontology {
   }
 
   resolvePageType(nerType: string): string {
-    return NER_TO_PAGE_TYPE[nerType] ?? "record";
+    return this.nerToPageType.get(nerType) ?? "record";
+  }
+
+  isDerivedPageType(type: string): boolean {
+    if (type.startsWith("insight/")) return true;
+    const def = this.data.entity_types[type];
+    if (!def) return false;
+    return def.parent === "entity" || def.parent === "concept";
   }
 
   validateRelationDomain(relation: string, fromType: string, toType: string): boolean {

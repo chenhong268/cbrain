@@ -49,6 +49,7 @@ export interface Ontology {
   getRelationStrength(name: string): { strength: string; weight: number };
   getNerConfig(): NerConfig;
   resolvePageType(nerType: string): string;
+  isDerivedPageType(type: string): boolean;
   validateRelationDomain(relation: string, fromType: string, toType: string): boolean;
   resolveAlias(input: string): string;
 }
