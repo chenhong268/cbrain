@@ -97,7 +97,7 @@ export class CBrainDB {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS pages (
         slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
+        type TEXT NOT NULL,
         title TEXT NOT NULL,
         file_path TEXT NOT NULL,
         content_hash TEXT,
@@ -261,6 +261,7 @@ export class CBrainDB {
     this.migrateMissingIndexes();
     this.migrateAliasesSource();
     this.migrateChunksSummaryLevel();
+    this.migrateOntologyTypes();
   }
 
   private migrateLinksStrength(): void {
@@ -322,7 +323,9 @@ export class CBrainDB {
 
   private migratePagesConstraint(): void {
     const check = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").get() as { sql: string } | undefined;
+    // Already has the correct constraint (v4) or no constraint at all (v6+) — skip
     if (check?.sql?.includes("'insight'") && !check.sql.includes("'source'") && !check.sql.includes("'event'") && !check.sql.includes("'raw'")) return;
+    if (check?.sql && !check.sql.includes("CHECK(type IN")) return;
 
     this.db.exec("PRAGMA foreign_keys = OFF");
 
@@ -1949,6 +1952,50 @@ export class CBrainDB {
       ALTER TABLE chunks_new RENAME TO chunks;
     `);
     this.db.exec("PRAGMA foreign_keys = ON");
+  }
+
+  /**
+   * v6 migration: Remove type CHECK constraint from pages table to support
+   * ontology type paths (e.g., entity/person, concept/concept).
+   * Migrates existing flat types to path-based types.
+   */
+  private migrateOntologyTypes(): void {
+    const done = this.db.prepare("SELECT value FROM config WHERE key = 'migration_v6_ontology_types'").get() as { value: string } | undefined;
+    if (done?.value === "1") return;
+
+    this.db.exec("PRAGMA foreign_keys = OFF");
+
+    this.db.exec(`
+      CREATE TABLE pages_new (
+        slug TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        content_hash TEXT,
+        tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
+        mention_count INTEGER DEFAULT 0,
+        expires_at TEXT,
+        confidence_decay REAL DEFAULT 1.0,
+        activity_weight REAL DEFAULT 0.0,
+        last_queried_at TEXT,
+        hotness_score REAL NOT NULL DEFAULT 0.0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO pages_new SELECT slug, type, title, file_path, content_hash, tier, mention_count, expires_at, confidence_decay, COALESCE(activity_weight, 0.0), last_queried_at, COALESCE(hotness_score, 0.0), created_at, updated_at FROM pages;
+      DROP TABLE pages;
+      ALTER TABLE pages_new RENAME TO pages;
+    `);
+
+    // Migrate old flat types → new type paths
+    this.db.prepare("UPDATE pages SET type = 'entity/person' WHERE type = 'entity' AND slug LIKE 'brain/entities/%'").run();
+    this.db.prepare("UPDATE pages SET type = 'concept/concept' WHERE type = 'concept' AND slug LIKE 'brain/concepts/%'").run();
+
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_tier ON pages(tier)");
+    this.db.exec("PRAGMA foreign_keys = ON");
+
+    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v6_ontology_types', '1')").run();
   }
 
   insertFeedback(queryId: number | null, slug: string, signal: "relevant" | "irrelevant" | "corrected" | "expanded", note?: string): void {
