@@ -46,9 +46,9 @@ export class DiscoveryManager {
     const graph = this.buildAdjacency();
     const results: DetectionResult[] = [];
 
-    if (run("bridge")) results.push(...this.detectBridges(graph));
-    if (run("trend")) results.push(...this.detectTrends());
-    if (run("gap")) results.push(...this.detectGaps(graph));
+    if (run("bridge")) { for (const r of this.detectBridges(graph)) results.push(r); }
+    if (run("trend")) { for (const r of this.detectTrends()) results.push(r); }
+    if (run("gap")) { for (const r of this.detectGaps(graph)) results.push(r); }
     if (run("contradiction")) results.push(...await this.detectContradictions());
 
     // Deduplicate by entity pair key
@@ -83,28 +83,30 @@ export class DiscoveryManager {
   detectBridges(adj?: Map<string, Set<string>>): DetectionResult[] {
     const graph = adj ?? this.buildAdjacency();
     const results: DetectionResult[] = [];
-    const entities = this.db.getEntityConceptPages();
+    const entities = this.db.getEntityConceptPages().slice(0, 200);
 
     for (let i = 0; i < entities.length; i++) {
       for (let j = i + 1; j < entities.length; j++) {
         const a = entities[i].slug, b = entities[j].slug;
         const dist = this.bfsDistance(a, b, graph);
-        if (dist >= 4) {
-          const neighborsA = graph.get(a) ?? new Set<string>();
-          const neighborsB = graph.get(b) ?? new Set<string>();
-          const shared = [...neighborsA].filter(n => neighborsB.has(n)).length;
-          results.push({
-            type: "bridge",
-            entities: [a, b],
-            score: Math.min(dist / 6, 1.0),
-            metadata: { distance: dist, shared_neighbors: shared },
-            actionable: "high",
-          });
-        }
+        if (dist < 4 || !isFinite(dist)) continue;
+
+        const neighborsA = graph.get(a) ?? new Set<string>();
+        const neighborsB = graph.get(b) ?? new Set<string>();
+        const shared = [...neighborsA].filter(n => neighborsB.has(n)).length;
+
+        results.push({
+          type: "bridge",
+          entities: [a, b],
+          score: Math.min(dist / 6, 1.0),
+          metadata: { distance: dist, shared_neighbors: shared },
+          actionable: shared > 0 ? "high" : "medium",
+        });
       }
     }
 
-    return results;
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, 50);
   }
 
   detectTrends(): DetectionResult[] {
