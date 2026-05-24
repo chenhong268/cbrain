@@ -2,11 +2,16 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { ReflectManager } from "../../core/reflect.js";
+import { DiscoveryManager } from "../../core/discovery.js";
+import type { DiscoveryType } from "../../core/discovery.js";
 
 const TYPE_LABELS: Record<string, string> = {
   bridge: "桥接",
   community_crossing: "跨社区",
   structural_hole: "结构洞",
+  trend: "趋势",
+  gap: "缺口",
+  contradiction: "矛盾",
 };
 
 const ACTIONABLE_LABELS: Record<string, string> = {
@@ -15,12 +20,19 @@ const ACTIONABLE_LABELS: Record<string, string> = {
   low: "低",
 };
 
+const STATUS_LABELS: Record<string, string> = {
+  pending: "待处理",
+  resolved: "已解决",
+  dismissed: "已忽略",
+};
+
 function buildDiscoveryText(
   r: {
     id: number; type: string; entities: string; score: number;
     detail: string | null; detected_at: string;
     actionable: string; suggestion: string | null;
     proposed_actions: string | null; auto_applicable: number;
+    metadata?: string | null;
   },
   ctx: ToolContext,
 ): { display: string; data: Record<string, unknown> } {
@@ -37,8 +49,17 @@ function buildDiscoveryText(
 
   const lines = [
     `🔍 发现 #${r.id} [${typeLabel}]${star} ${actionLabel}`,
-    `📊 ${entitySummaries}（score: ${r.score}，距离: ${(detail as { distance?: number }).distance ?? "?"}跳）`,
+    `📊 ${entitySummaries}（score: ${r.score}）`,
   ];
+
+  if (r.metadata) {
+    try {
+      const m = JSON.parse(r.metadata) as Record<string, unknown>;
+      if (m.direction) lines.push(`📈 趋势: ${m.direction}`);
+      if (m.distance) lines.push(`🔗 距离: ${m.distance}跳`);
+      if (m.explanation) lines.push(`⚡ ${m.explanation}`);
+    } catch { /* skip */ }
+  }
 
   if (r.suggestion) lines.push(`💡 ${r.suggestion}`);
 
@@ -73,10 +94,10 @@ function buildDiscoveryText(
 export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("read_discoveries", {
     description:
-      "读取知识图谱的结构发现（桥接、跨社区、结构洞）。" +
+      "读取知识图谱的结构发现（桥接、跨社区、结构洞、趋势、缺口、矛盾）。" +
       "返回未读发现，按重要程度分级（high/medium/low）。" +
       "high 级发现带有 LLM 生成的中文建议和可操作项。" +
-      "用 mark_discovery_seen 标记已读，用 promote_discovery 升级为 insight。",
+      "用 update_discovery_status 标记处理状态，用 promote_discovery 升级为 insight。",
     inputSchema: {
       limit: z.number().optional().default(10).describe("Max discoveries to return"),
       actionableFilter: z.enum(["high", "medium", "low"]).optional().describe("Filter by actionable level"),
@@ -103,16 +124,32 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
 
   server.registerTool("run_discovery", {
     description:
-      "运行发现管线，检测知识图谱中的结构异常（桥接、跨社区、结构洞）。" +
-      "返回检测报告：总数、按类型统计、按重要程度统计。建议每 3 天运行一次。",
-  }, async () => {
+      "运行发现管线，检测知识图谱中的结构异常（桥接、趋势、缺口、矛盾）。" +
+      "返回检测报告：总数、按类型统计、按重要程度统计。" +
+      "可指定检测类型或默认全部。建议每天运行一次。",
+    inputSchema: {
+      types: z.array(z.enum(["bridge", "trend", "gap", "contradiction"])).optional()
+        .describe("Detection types to run. Default: all."),
+    },
+  }, async ({ types }) => {
     const reflect = new ReflectManager(ctx.db, ctx.pages, ctx.llm, ctx.pipeline, ctx.embedding, ctx.insights);
-    const report = await reflect.runDiscovery();
+    const reflectReport = await reflect.runDiscovery();
 
-    const typeLabels = Object.entries(report.byType)
+    const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
+    const newReport = await discoveryMgr.runDiscovery(types as DiscoveryType[] | undefined);
+
+    const mergedByType = { ...reflectReport.byType, ...newReport.byType };
+    const mergedByActionable = {
+      high: (reflectReport.byActionable.high ?? 0) + (newReport.byActionable.high ?? 0),
+      medium: (reflectReport.byActionable.medium ?? 0) + (newReport.byActionable.medium ?? 0),
+      low: (reflectReport.byActionable.low ?? 0) + (newReport.byActionable.low ?? 0),
+    };
+    const total = reflectReport.total + newReport.total;
+
+    const typeLabels = Object.entries(mergedByType)
       .map(([k, v]) => `${TYPE_LABELS[k] ?? k}: ${v}`)
       .join("，");
-    const actionLabels = Object.entries(report.byActionable)
+    const actionLabels = Object.entries(mergedByActionable)
       .map(([k, v]) => `${ACTIONABLE_LABELS[k] ?? k}: ${v}`)
       .join("，");
 
@@ -120,21 +157,43 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       content: [{
         type: "text" as const,
         text: JSON.stringify({
-          summary: `检测完成：${report.total} 个发现（${typeLabels}），重要程度：${actionLabels}，可自动应用：${report.autoApplicable}`,
-          report,
+          summary: `检测完成：${total} 个发现（${typeLabels}），重要程度：${actionLabels}`,
+          report: {
+            total,
+            byType: mergedByType,
+            byActionable: mergedByActionable,
+            highActionable: newReport.highActionable,
+          },
         }, null, 2),
       }],
     };
   });
 
+  server.registerTool("update_discovery_status", {
+    description: "更新发现的处理状态。支持标记已读(seen)、已解决(resolved)、已忽略(dismissed)。",
+    inputSchema: {
+      ids: z.array(z.number()).describe("Discovery IDs to update"),
+      status: z.enum(["seen", "resolved", "dismissed"]).describe("New status"),
+    },
+  }, async ({ ids, status }) => {
+    for (const id of ids) {
+      ctx.db.updateDiscoveryStatus(id, status);
+      if (status === "seen") ctx.db.markDiscoverySeen(id);
+    }
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify({ updated: ids.length, status, status_label: STATUS_LABELS[status] }) }],
+    };
+  });
+
   server.registerTool("mark_discovery_seen", {
-    description: "标记发现为已读。标记后不再出现在 read_discoveries 中。",
+    description: "标记发现为已读。建议使用 update_discovery_status 替代。",
     inputSchema: {
       ids: z.array(z.number()).describe("Discovery IDs to mark as seen"),
     },
   }, async ({ ids }) => {
     for (const id of ids) {
       ctx.db.markDiscoverySeen(id);
+      ctx.db.updateDiscoveryStatus(id, "seen");
     }
     return {
       content: [{ type: "text" as const, text: JSON.stringify({ marked: ids.length }) }],

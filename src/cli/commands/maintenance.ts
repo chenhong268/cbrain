@@ -362,17 +362,30 @@ export function register(program: Command) {
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
-      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr);
-      console.log("🔍 Running discovery...");
-      const report = await mgr.runDiscovery();
+      const reflect = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr);
+      console.log("🔍 Running discovery (structural)...");
+      const reflectReport = await reflect.runDiscovery();
 
-      const typeParts = Object.entries(report.byType).map(([k, v]) => `${k}: ${v}`).join(", ");
-      const actionParts = Object.entries(report.byActionable).map(([k, v]) => `${k}: ${v}`).join(", ");
+      const { DiscoveryManager } = await import("../../core/discovery.js");
+      const discoveryMgr = new DiscoveryManager(deps.db, reflectLlm, logger);
+      console.log("🔍 Running discovery (trend/gap/contradiction)...");
+      const discoveryReport = await discoveryMgr.runDiscovery();
 
-      console.log(`  发现总数: ${report.total}`);
+      const mergedByType = { ...reflectReport.byType, ...discoveryReport.byType };
+      const mergedByActionable = {
+        high: (reflectReport.byActionable.high ?? 0) + (discoveryReport.byActionable.high ?? 0),
+        medium: (reflectReport.byActionable.medium ?? 0) + (discoveryReport.byActionable.medium ?? 0),
+        low: (reflectReport.byActionable.low ?? 0) + (discoveryReport.byActionable.low ?? 0),
+      };
+      const total = reflectReport.total + discoveryReport.total;
+
+      const typeParts = Object.entries(mergedByType).map(([k, v]) => `${k}: ${v}`).join(", ");
+      const actionParts = Object.entries(mergedByActionable).map(([k, v]) => `${k}: ${v}`).join(", ");
+
+      console.log(`  发现总数: ${total}`);
       console.log(`  类型分布: ${typeParts}`);
       console.log(`  重要程度: ${actionParts}`);
-      console.log(`  可自动应用: ${report.autoApplicable}`);
+      console.log(`  可自动应用: ${reflectReport.autoApplicable ?? 0}`);
 
       deps.db.close();
       process.exit(0);

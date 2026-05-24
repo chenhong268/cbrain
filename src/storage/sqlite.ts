@@ -1667,9 +1667,9 @@ export class CBrainDB {
     return Number(r.lastInsertRowid);
   }
 
-  getUnseenDiscoveries(limit: number = 10): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number }> {
+  getUnseenDiscoveries(limit: number = 10): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
     return this.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, dream_run, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
+      "SELECT id, type, entities, score, detail, detected_at, dream_run, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
     ).all({ $limit: limit }) as any[];
   }
 
@@ -1717,9 +1717,9 @@ export class CBrainDB {
     this.prepare("UPDATE discoveries SET proposed_actions = $actions WHERE id = $id").run({ $id: id, $actions: JSON.stringify(actions) });
   }
 
-  getDiscoveriesByActionable(actionable: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number }> {
+  getDiscoveriesByActionable(actionable: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
     return this.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE actionable = $actionable AND seen = 0 ORDER BY score DESC LIMIT $limit"
+      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE actionable = $actionable AND seen = 0 ORDER BY score DESC LIMIT $limit"
     ).all({ $actionable: actionable, $limit: limit }) as any[];
   }
 
