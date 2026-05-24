@@ -396,3 +396,64 @@ describe("DiscoveryManager - detectContradictions", () => {
     expect(results.length).toBe(0);
   });
 });
+
+describe("DiscoveryManager - runDiscovery orchestration", () => {
+  const testDir = "/tmp/cbrain-test-discovery-orchestration";
+  const dbPath = join(testDir, "test.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("runDiscovery with type filter only runs specified types", async () => {
+    seedPage(db, "entity/a", "entity/person", "A", 10);
+    db.upsertMentionSnapshot("entity/a", daysAgo(3), 3);
+    db.upsertMentionSnapshot("entity/a", daysAgo(2), 5);
+    db.upsertMentionSnapshot("entity/a", daysAgo(1), 7);
+    db.upsertMentionSnapshot("entity/a", daysAgo(0), 9);
+
+    const mgr = new DiscoveryManager(db);
+    const report = await mgr.runDiscovery(["trend"]);
+
+    expect(report.total).toBeGreaterThanOrEqual(1);
+    expect(Object.keys(report.byType)).toEqual(["trend"]);
+  });
+
+  test("runDiscovery with no filter runs all types", async () => {
+    seedPage(db, "entity/a", "entity/person", "A", 10);
+    seedPage(db, "entity/b", "entity/person", "B", 3);
+    db.insertLink("entity/a", "entity/b", "提及", 0.5, "ner");
+    db.upsertMentionSnapshot("entity/a", daysAgo(3), 3);
+    db.upsertMentionSnapshot("entity/a", daysAgo(2), 5);
+    db.upsertMentionSnapshot("entity/a", daysAgo(1), 7);
+    db.upsertMentionSnapshot("entity/a", daysAgo(0), 9);
+
+    const mgr = new DiscoveryManager(db);
+    const report = await mgr.runDiscovery();
+
+    expect(report.total).toBeGreaterThanOrEqual(1);
+    expect(report.byType.trend ?? 0).toBeGreaterThanOrEqual(1);
+  });
+
+  test("runDiscovery returns different types for same entity", async () => {
+    seedPage(db, "entity/island", "entity/person", "Island", 10);
+    db.upsertMentionSnapshot("entity/island", daysAgo(3), 3);
+    db.upsertMentionSnapshot("entity/island", daysAgo(2), 5);
+    db.upsertMentionSnapshot("entity/island", daysAgo(1), 7);
+    db.upsertMentionSnapshot("entity/island", daysAgo(0), 9);
+
+    const mgr = new DiscoveryManager(db);
+    const report = await mgr.runDiscovery();
+
+    // Both trend and gap for same entity — different types, both kept
+    expect(report.total).toBeGreaterThanOrEqual(2);
+  });
+});
