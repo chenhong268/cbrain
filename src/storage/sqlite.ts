@@ -1667,9 +1667,9 @@ export class CBrainDB {
     return Number(r.lastInsertRowid);
   }
 
-  getUnseenDiscoveries(limit: number = 10): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
+  getUnseenDiscoveries(limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
     return this.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, dream_run, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
+      "SELECT id, type, entities, score, detail, detected_at, dream_run, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE seen = 0 ORDER BY CASE actionable WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, score DESC, id DESC LIMIT $limit"
     ).all({ $limit: limit }) as any[];
   }
 
@@ -1681,6 +1681,11 @@ export class CBrainDB {
     const r = this.prepare(
       "DELETE FROM discoveries WHERE seen = 0 AND detected_at < datetime('now', '-' || $days || ' days')"
     ).run({ $days: days });
+    return r.changes;
+  }
+
+  clearPendingDiscoveries(): number {
+    const r = this.prepare("DELETE FROM discoveries WHERE seen = 0 AND status = 'pending'").run();
     return r.changes;
   }
 
@@ -1719,8 +1724,14 @@ export class CBrainDB {
 
   getDiscoveriesByActionable(actionable: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
     return this.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE actionable = $actionable AND seen = 0 ORDER BY score DESC LIMIT $limit"
+      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE actionable = $actionable AND seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
     ).all({ $actionable: actionable, $limit: limit }) as any[];
+  }
+
+  getDiscoveriesByType(type: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
+    return this.prepare(
+      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE type = $type AND seen = 0 ORDER BY CASE actionable WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, score DESC, id DESC LIMIT $limit"
+    ).all({ $type: type, $limit: limit }) as any[];
   }
 
   countDiscoveriesByActionable(): Record<string, number> {

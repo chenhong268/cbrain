@@ -10,6 +10,17 @@ export interface DetectionResult {
   score: number;
   metadata: Record<string, unknown>;
   actionable: "high" | "medium" | "low";
+  suggestion?: string;
+  _dbId?: number;
+}
+
+export interface EnrichmentDiag {
+  skipped: boolean;
+  reason?: string;
+  llmAvailable: boolean;
+  attempted: number;
+  saved: number;
+  errors: number;
 }
 
 export interface DiscoveryReport {
@@ -17,15 +28,40 @@ export interface DiscoveryReport {
   byType: Record<string, number>;
   byActionable: Record<string, number>;
   highActionable: DetectionResult[];
+  enrichment: EnrichmentDiag;
 }
 
-const MAX_LLM_BUDGET = 20;
+const MAX_LLM_BUDGET = 50;
 const TREND_WINDOW_DAYS = 7;
 const TREND_MIN_CONSECUTIVE = 3;
 const TREND_SPIKE_DELTA = 5;
-const GAP_MIN_MENTIONS = 5;
-const GAP_MAX_LINKS = 2;
+const GAP_MIN_MENTIONS = 8;
+const GAP_MIN_MENTIONS_CONCEPT = 30;
+const GAP_MAX_LINKS_ENTITY = 1;
+const GAP_MAX_LINKS_CONCEPT = 0;
+const GAP_MIN_TITLE_LEN = 3;
 const BRIDGE_MIN_DEGREE = 2;
+const BRIDGE_MAX_PER_ENTITY = 3;
+const ENRICH_PER_TYPE = 25;
+
+const GAP_ENTITY_TYPES = new Set([
+  "entity/person", "entity/company", "entity/organization",
+  "entity/location", "entity/place", "entity/book", "entity/drug",
+  "entity/product",
+]);
+
+function stripJsonFence(raw: string): string {
+  return raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+}
+
+const TYPE_LABELS: Record<string, string> = {
+  bridge: "桥接",
+  community_crossing: "跨社区",
+  structural_hole: "结构洞",
+  trend: "趋势",
+  gap: "缺口",
+  contradiction: "矛盾",
+};
 
 export class DiscoveryManager {
   private db: CBrainDB;
@@ -43,6 +79,8 @@ export class DiscoveryManager {
   async runDiscovery(types?: DiscoveryType[]): Promise<DiscoveryReport> {
     const run = (t: DiscoveryType) => !types || types.includes(t);
     this.llmBudget = MAX_LLM_BUDGET;
+
+    this.db.clearPendingDiscoveries();
 
     const graph = this.buildAdjacency();
     const results: DetectionResult[] = [];
@@ -67,18 +105,23 @@ export class DiscoveryManager {
     const highActionable: DetectionResult[] = [];
 
     for (const r of deduped) {
-      this.db.addDiscovery(
+      const id = this.db.addDiscovery(
         r.type, r.entities, r.score,
         undefined, undefined, r.actionable,
         false, r.metadata,
       );
       byType[r.type] = (byType[r.type] ?? 0) + 1;
       byActionable[r.actionable]++;
-      if (r.actionable === "high") highActionable.push(r);
+      if (r.actionable === "high") {
+        highActionable.push(r);
+        r._dbId = id;
+      }
     }
 
+    const enrichment = await this.enrichHighActionable(highActionable);
+
     this.logger?.info("discovery", `检测完成: ${deduped.length} 个发现`);
-    return { total: deduped.length, byType, byActionable, highActionable };
+    return { total: deduped.length, byType, byActionable, highActionable, enrichment };
   }
 
   detectBridges(adj?: Map<string, Set<string>>): DetectionResult[] {
@@ -98,18 +141,33 @@ export class DiscoveryManager {
 
         const shared = [...neighborsA].filter(n => neighborsB.has(n)).length;
 
+        const score = Math.min(dist / 6, 1.0);
+
         results.push({
           type: "bridge",
           entities: [a, b],
-          score: Math.min(dist / 6, 1.0),
+          score,
           metadata: { distance: dist, shared_neighbors: shared },
-          actionable: shared > 0 ? "high" : "medium",
+          actionable: dist >= 8 ? "high" : "medium",
         });
       }
     }
 
     results.sort((a, b) => b.score - a.score);
-    return results.slice(0, 50);
+
+    // Suppress super-nodes: limit each entity to at most BRIDGE_MAX_PER_ENTITY bridges
+    const entityCount = new Map<string, number>();
+    const filtered: DetectionResult[] = [];
+    for (const r of results) {
+      const [a, b] = r.entities;
+      if ((entityCount.get(a) ?? 0) >= BRIDGE_MAX_PER_ENTITY) continue;
+      if ((entityCount.get(b) ?? 0) >= BRIDGE_MAX_PER_ENTITY) continue;
+      entityCount.set(a, (entityCount.get(a) ?? 0) + 1);
+      entityCount.set(b, (entityCount.get(b) ?? 0) + 1);
+      filtered.push(r);
+      if (filtered.length >= 50) break;
+    }
+    return filtered;
   }
 
   detectTrends(): DetectionResult[] {
@@ -169,28 +227,93 @@ export class DiscoveryManager {
     const results: DetectionResult[] = [];
     const entities = this.db.getEntityConceptPages();
 
-    for (const { slug } of entities) {
+    for (const { slug, type } of entities) {
       const page = this.db.getPage(slug);
-      if (!page || page.mention_count < GAP_MIN_MENTIONS) continue;
+      if (!page) continue;
+
+      const isEntity = type.startsWith("entity/");
+      const isConcept = type.startsWith("concept/");
+
+      if (isEntity && !GAP_ENTITY_TYPES.has(type)) continue;
+      if (!isEntity && !isConcept) continue;
+
+      const minMentions = isConcept ? GAP_MIN_MENTIONS_CONCEPT : GAP_MIN_MENTIONS;
+      if (page.mention_count < minMentions) continue;
+      if (page.title.length < GAP_MIN_TITLE_LEN) continue;
 
       const neighbors = graph.get(slug);
       const linkCount = neighbors ? neighbors.size : 0;
-      if (linkCount >= GAP_MAX_LINKS) continue;
+      const maxLinks = isConcept ? GAP_MAX_LINKS_CONCEPT : GAP_MAX_LINKS_ENTITY;
+      if (linkCount > maxLinks) continue;
+
+      const mentionScore = Math.min(Math.log2(page.mention_count) / Math.log2(50), 1.0);
+      const isolationScore = linkCount === 0 ? 1.0 : 1.0 / (1.0 + linkCount);
+      const score = mentionScore * 0.6 + isolationScore * 0.4;
 
       results.push({
         type: "gap",
         entities: [slug],
-        score: Math.min(page.mention_count / 20, 1.0),
+        score: Math.min(score, 1.0),
         metadata: {
           mention_count: page.mention_count,
           link_count: linkCount,
           neighbor_slugs: neighbors ? [...neighbors] : [],
         },
-        actionable: page.mention_count >= 10 ? "high" : "medium",
+        actionable: score >= 0.7 ? "high" : "medium",
       });
     }
 
     return results;
+  }
+
+  private async enrichHighActionable(items: DetectionResult[]): Promise<EnrichmentDiag> {
+    if (!this.llm) {
+      return { skipped: true, reason: "llm_not_available", llmAvailable: false, attempted: 0, saved: 0, errors: 0 };
+    }
+    if (items.length === 0) {
+      return { skipped: true, reason: "no_high_actionable", llmAvailable: true, attempted: 0, saved: 0, errors: 0 };
+    }
+
+    const byType = new Map<string, DetectionResult[]>();
+    for (const item of items) {
+      const arr = byType.get(item.type) ?? [];
+      arr.push(item);
+      byType.set(item.type, arr);
+    }
+    const toEnrich: DetectionResult[] = [];
+    for (const [, arr] of byType) {
+      toEnrich.push(...arr.slice(0, ENRICH_PER_TYPE));
+    }
+
+    let saved = 0;
+    let errors = 0;
+    for (const item of toEnrich) {
+      if (this.llmBudget <= 0) break;
+
+      const titles = item.entities
+        .map(s => this.db.getPage(s)?.title ?? s)
+        .join("、");
+      const typeLabel = TYPE_LABELS[item.type] ?? item.type;
+
+      try {
+        const raw = await this.llm.chat([
+          { role: "system", content: "你是知识图谱分析专家。用中文回复，只返回 JSON，不要其他内容。" },
+          { role: "user", content: `知识图谱发现了一个${typeLabel}：涉及 ${titles}（score: ${item.score.toFixed(2)}）。\n元数据：${JSON.stringify(item.metadata)}\n\n用一句话建议该如何处理这个发现。返回JSON：{"suggestion": "..."}` },
+        ]);
+        this.llmBudget--;
+        const parsed = JSON.parse(stripJsonFence(raw));
+        if (parsed.suggestion && item._dbId) {
+          this.db.updateDiscoverySuggestion(item._dbId, parsed.suggestion);
+          item.suggestion = parsed.suggestion;
+          saved++;
+        }
+      } catch {
+        this.llmBudget--;
+        errors++;
+      }
+    }
+
+    return { skipped: false, llmAvailable: true, attempted: toEnrich.length, saved, errors };
   }
 
   async detectContradictions(): Promise<DetectionResult[]> {
@@ -228,7 +351,7 @@ export class DiscoveryManager {
           { role: "user", content: prompt },
         ]);
 
-        const parsed = JSON.parse(raw);
+        const parsed = JSON.parse(stripJsonFence(raw));
         if (parsed.has_contradiction && parsed.confidence >= 0.7) {
           results.push({
             type: "contradiction",

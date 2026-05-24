@@ -310,6 +310,84 @@ describe("DiscoveryManager - detectGaps", () => {
     const gap = results.find(r => r.entities.includes("entity/low"));
     expect(gap).toBeUndefined();
   });
+
+  test("no gap for short-title generic entity", () => {
+    seedPage(db, "entity/generic", "entity/person", "银行", 15);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("entity/generic"));
+    expect(gap).toBeUndefined();
+  });
+
+  test("no gap for generic concept below high threshold", () => {
+    // concept/ requires 20 mentions (not 8) to avoid NER noise
+    seedPage(db, "concept/fintech", "concept/concept", "金融科技", 12);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("concept/fintech"));
+    expect(gap).toBeUndefined();
+  });
+
+  test("gap detected for concept above high threshold", () => {
+    seedPage(db, "concept/blockchain", "concept/concept", "区块链", 35);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("concept/blockchain"));
+    expect(gap).toBeDefined();
+    expect(gap!.metadata?.mention_count).toBe(35);
+  });
+
+  test("entity gap at normal threshold still works", () => {
+    seedPage(db, "entity/person", "entity/person", "黄仁勋", 10);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("entity/person"));
+    expect(gap).toBeDefined();
+  });
+
+  test("non-whitelisted entity type filtered out of gaps", () => {
+    seedPage(db, "entity/noise", "entity/disease", "银行转账", 15);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("entity/noise"));
+    expect(gap).toBeUndefined();
+  });
+
+  test("gap actionable=high only when mention_count >= 20 and link_count === 0", () => {
+    seedPage(db, "entity/big", "entity/person", "重要人物", 25);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("entity/big"));
+    expect(gap).toBeDefined();
+    expect(gap!.actionable).toBe("high");
+  });
+
+  test("gap actionable=medium when score < 0.7", () => {
+    // mention_count=10 gives mentionScore≈0.6, with 1 link isolationScore≈0.5
+    // score = 0.6*0.6 + 0.5*0.4 = 0.56 < 0.7 → medium
+    seedPage(db, "entity/low", "entity/person", "低分人物", 10);
+    seedPage(db, "record/src", "record", "来源", 1);
+    db.insertLink("record/src", "entity/low", "提及", 0.5);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("entity/low"));
+    expect(gap).toBeDefined();
+    expect(gap!.actionable).toBe("medium");
+  });
 });
 
 describe("DiscoveryManager - detectContradictions", () => {
@@ -400,6 +478,22 @@ describe("DiscoveryManager - detectContradictions", () => {
 
     expect(results.length).toBe(0);
   });
+
+  test("LLM returns markdown-fenced JSON → still parsed correctly", async () => {
+    seedPage(db, "entity/person", "entity/person", "某公司", 5);
+    seedPage(db, "record/note1", "record", "会议记录1", 0);
+    seedPage(db, "record/note2", "record", "会议记录2", 0);
+    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+
+    const mockLlm = createMockLlm("```json\n{\"has_contradiction\": true, \"confidence\": 0.9, \"explanation\": \"矛盾\", \"suggested_resolution\": \"核实\"}\n```");
+
+    const mgr = new DiscoveryManager(db, mockLlm);
+    const results = await mgr.detectContradictions();
+
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results[0]!.metadata?.explanation).toBe("矛盾");
+  });
 });
 
 describe("DiscoveryManager - runDiscovery orchestration", () => {
@@ -460,5 +554,53 @@ describe("DiscoveryManager - runDiscovery orchestration", () => {
 
     // Both trend and gap for same entity — different types, both kept
     expect(report.total).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("Discovery ordering — actionable + score priority", () => {
+  const testDir = "/tmp/cbrain-test-discovery-ordering";
+  const dbPath = join(testDir, "test.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("getUnseenDiscoveries returns high actionable first, then by score DESC", () => {
+    seedPage(db, "entity/a", "entity/person", "A", 3);
+    seedPage(db, "entity/b", "entity/person", "B", 3);
+    seedPage(db, "entity/c", "entity/person", "C", 3);
+
+    // medium inserted first, high inserted after
+    db.addDiscovery("gap", ["entity/a"], 0.5, undefined, undefined, "medium");
+    db.addDiscovery("bridge", ["entity/b"], 1.0, undefined, undefined, "high");
+    db.addDiscovery("gap", ["entity/c"], 0.3, undefined, undefined, "high");
+
+    const results = db.getUnseenDiscoveries(10);
+    expect(results.length).toBe(3);
+    // high actionable first (score DESC), then medium
+    expect(results[0].type).toBe("bridge");
+    expect(results[1].type).toBe("gap");
+    expect(results[2].actionable).toBe("medium");
+  });
+
+  test("getDiscoveriesByActionable returns by score DESC within same actionable level", () => {
+    seedPage(db, "entity/a", "entity/person", "A", 3);
+    seedPage(db, "entity/b", "entity/person", "B", 3);
+
+    db.addDiscovery("bridge", ["entity/a"], 1.0, undefined, undefined, "high");
+    db.addDiscovery("gap", ["entity/b"], 0.5, undefined, undefined, "high");
+
+    const results = db.getDiscoveriesByActionable("high", 10);
+    expect(results.length).toBe(2);
+    expect(results[0].score).toBe(1.0);
+    expect(results[1].score).toBe(0.5);
   });
 });

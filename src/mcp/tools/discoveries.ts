@@ -100,16 +100,46 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     inputSchema: {
       limit: z.number().optional().default(10).describe("Max discoveries to return"),
       actionableFilter: z.enum(["high", "medium", "low"]).optional().describe("Filter by actionable level"),
+      typeFilter: z.enum(["bridge", "trend", "gap", "contradiction"]).optional().describe("Filter by discovery type"),
     },
-  }, async ({ limit, actionableFilter }) => {
-    const rows = actionableFilter
-      ? ctx.db.getDiscoveriesByActionable(actionableFilter, limit ?? 10)
-      : ctx.db.getUnseenDiscoveries(limit ?? 10);
+  }, async ({ limit, actionableFilter, typeFilter }) => {
+    const effectiveLimit = limit ?? 10;
+    let rows;
+
+    if (typeFilter) {
+      rows = ctx.db.getDiscoveriesByType(typeFilter, effectiveLimit);
+    } else {
+      // Type-diverse round-robin: prevent high-score bridges from crowding out gaps
+      const activeTypes = ["bridge", "trend", "gap", "contradiction"] as const;
+      const typeBuckets = new Map<string, ReturnType<typeof ctx.db.getDiscoveriesByType>>();
+
+      for (const t of activeTypes) {
+        const typeRows = ctx.db.getDiscoveriesByType(t, effectiveLimit);
+        if (actionableFilter) {
+          typeBuckets.set(t, typeRows.filter(r => r.actionable === actionableFilter));
+        } else {
+          typeBuckets.set(t, typeRows);
+        }
+      }
+
+      const nonEmpty = [...typeBuckets.entries()].filter(([, v]) => v.length > 0);
+      const merged: ReturnType<typeof ctx.db.getDiscoveriesByType> = [];
+      let roundIdx = 0;
+      while (merged.length < effectiveLimit && nonEmpty.some(([, v]) => v.length > 0)) {
+        const bucket = nonEmpty[roundIdx % nonEmpty.length];
+        if (bucket[1].length > 0) {
+          merged.push(bucket[1].shift()!);
+        }
+        roundIdx++;
+      }
+      rows = merged;
+    }
 
     const results = rows.map(r => buildDiscoveryText(r, ctx));
 
     const displays = results.map(r => r.display).join("\n\n---\n\n");
     const summary = `共 ${results.length} 个发现` +
+      (typeFilter ? `（${TYPE_LABELS[typeFilter] ?? typeFilter}类）` : "") +
       (actionableFilter ? `（${ACTIONABLE_LABELS[actionableFilter] ?? actionableFilter}级）` : "") +
       `。high 级发现可 promote_discovery 升级为 insight。`;
 
@@ -150,6 +180,11 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       .map(([k, v]) => `${ACTIONABLE_LABELS[k] ?? k}: ${v}`)
       .join("，");
 
+    const enrich = report.enrichment;
+    const enrichLabel = enrich.skipped
+      ? `enrichment 跳过（${enrich.reason}）`
+      : `enrichment: 尝试 ${enrich.attempted} 个，成功 ${enrich.saved} 个，失败 ${enrich.errors} 个`;
+
     const skipped: string[] = [];
     if (!runContradiction) skipped.push("contradiction（用 CLI 或指定 types 运行）");
     skipped.push("reflect（社区/结构洞检测，用 CLI 运行）");
@@ -158,7 +193,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       content: [{
         type: "text" as const,
         text: JSON.stringify({
-          summary: `检测完成：${report.total} 个发现（${typeLabels}），重要程度：${actionLabels}`,
+          summary: `检测完成：${report.total} 个发现（${typeLabels}），重要程度：${actionLabels}。${enrichLabel}`,
           report,
           skipped,
         }, null, 2),
