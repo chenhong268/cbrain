@@ -1,6 +1,5 @@
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { PageManager } from "./page.js";
 import { normalizeRelation } from "./shared.js";
 import type { ContentPipeline } from "./pipeline.js";
@@ -79,7 +78,8 @@ const W_SOURCE = 0.25;
 const W_TYPE = 0.20;
 const W_CONTENT = 0.10;
 const W_SEMANTIC = 0.10;
-const MAX_SUGGESTION_LLM = 20;
+const MAX_SUGGESTION_LLM = 8;
+const MAX_CANDIDATE_POOL = 100;
 
 export interface DiscoveryReport {
   total: number;
@@ -142,15 +142,13 @@ export class ReflectManager {
   private llm: LLMProvider | null;
   private pageMgr: PageManager;
   private pipeline: ContentPipeline | null;
-  private embedding: EmbeddingProvider | null;
   private insightMgr: InsightManager | null;
 
-  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider, pipeline?: ContentPipeline, embedding?: EmbeddingProvider, insightMgr?: InsightManager) {
+  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider, pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager) {
     this.db = db;
     this.pageMgr = pageMgr;
     this.llm = llm ?? null;
     this.pipeline = pipeline ?? null;
-    this.embedding = embedding ?? null;
     this.insightMgr = insightMgr ?? null;
   }
 
@@ -490,19 +488,9 @@ export class ReflectManager {
   async runDiscovery(dreamRun?: string): Promise<DiscoveryReport> {
     const adj = this.buildAdjacency();
     const pool = await this.buildCandidatePool(adj);
-    const bodyCache = new Map<string, string>();
-    const embCache = new Map<string, number[]>();
-    for (const [a, b] of pool) {
-      for (const slug of [a, b]) {
-        if (!bodyCache.has(slug)) {
-          try { bodyCache.set(slug, this.pageMgr.getBySlug(slug)?.body ?? ""); }
-          catch { bodyCache.set(slug, ""); }
-        }
-      }
-    }
     const scored: Array<{ pair: [string, string]; score: number }> = [];
     for (const pair of pool) {
-      const s = await this.scoreCandidate(pair[0], pair[1], bodyCache, embCache, adj);
+      const s = await this.scoreCandidate(pair[0], pair[1], adj);
       if (s > 0.3) scored.push({ pair, score: s });
     }
     scored.sort((a, b) => b.score - a.score);
@@ -622,12 +610,6 @@ export class ReflectManager {
     return labels;
   }
 
-  private cosineSimilarity(a: number[], b: number[]): number {
-    let dot = 0, na = 0, nb = 0;
-    for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-    return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-10);
-  }
-
   private getSourcePages(slug: string): Set<string> {
     const sources = new Set<string>();
     for (const l of this.db.getIncomingLinks(slug)) {
@@ -642,7 +624,7 @@ export class ReflectManager {
     return 1 - intersection / new Set([...a, ...b]).size;
   }
 
-  private async scoreCandidate(a: string, b: string, bodies: Map<string, string>, embCache?: Map<string, number[]>, adj?: Map<string, Set<string>>): Promise<number> {
+  private async scoreCandidate(a: string, b: string, adj?: Map<string, Set<string>>): Promise<number> {
     const dist = this.bfsDistance(a, b, adj);
     if (dist === Infinity) return 0;
     const pathScore = dist >= 6 ? 1.0 : dist <= 1 ? 0 : (dist - 1) / 5;
@@ -650,23 +632,7 @@ export class ReflectManager {
     const pa = this.db.getPage(a), pb = this.db.getPage(b);
     const ta = pa?.type ?? "", tb = pb?.type ?? "";
     const typeScore = (ta.startsWith("entity/") && tb.startsWith("concept/")) || (ta.startsWith("concept/") && tb.startsWith("entity/")) ? 1.0 : ta.startsWith("concept/") && tb.startsWith("concept/") ? 0.5 : 0.3;
-    const bodyA = bodies.get(a) ?? "", bodyB = bodies.get(b) ?? "";
-    const contentScore = Math.min(Math.min(bodyA.length, bodyB.length) / 2000, 1.0);
-    let semanticScore = 0.3;
-    if (this.embedding && bodyA && bodyB) {
-      try {
-        let eA: number[], eB: number[];
-        if (embCache) {
-          if (!embCache.has(a)) embCache.set(a, (await this.embedding.embed(bodyA.slice(0, 2000))).embedding);
-          if (!embCache.has(b)) embCache.set(b, (await this.embedding.embed(bodyB.slice(0, 2000))).embedding);
-          eA = embCache.get(a)!; eB = embCache.get(b)!;
-        } else {
-          [eA, eB] = (await Promise.all([this.embedding.embed(bodyA.slice(0, 2000)), this.embedding.embed(bodyB.slice(0, 2000))])).map(r => r.embedding);
-        }
-        semanticScore = 1 - this.cosineSimilarity(eA, eB);
-      } catch { /* use default */ }
-    }
-    return W_PATH * pathScore + W_SOURCE * sourceScore + W_TYPE * typeScore + W_CONTENT * contentScore + W_SEMANTIC * semanticScore;
+    return W_PATH * pathScore + W_SOURCE * sourceScore + W_TYPE * typeScore + W_CONTENT * 0.5 + W_SEMANTIC * 0.3;
   }
 
   private async buildCandidatePool(adj?: Map<string, Set<string>>): Promise<Array<[string, string]>> {
@@ -692,7 +658,10 @@ export class ReflectManager {
         if (a !== b) seen.add(key(a, b));
       }
     }
-    return [...seen].map(k => k.split("|||") as [string, string]);
+    const all = [...seen].map(k => k.split("|||") as [string, string]);
+    if (all.length <= MAX_CANDIDATE_POOL) return all;
+    const shuffled = all.sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, MAX_CANDIDATE_POOL);
   }
 
   async diagnoseCandidates(): Promise<{
@@ -702,19 +671,9 @@ export class ReflectManager {
   }> {
     const adj = this.buildAdjacency();
     const pool = await this.buildCandidatePool(adj);
-    const bodyCache = new Map<string, string>();
-    const embCache = new Map<string, number[]>();
-    for (const [a, b] of pool) {
-      for (const slug of [a, b]) {
-        if (!bodyCache.has(slug)) {
-          try { bodyCache.set(slug, this.pageMgr.getBySlug(slug)?.body ?? ""); }
-          catch { bodyCache.set(slug, ""); }
-        }
-      }
-    }
     const scored: Array<{ pair: [string, string]; score: number }> = [];
     for (const pair of pool) {
-      scored.push({ pair, score: await this.scoreCandidate(pair[0], pair[1], bodyCache, embCache, adj) });
+      scored.push({ pair, score: await this.scoreCandidate(pair[0], pair[1], adj) });
     }
     scored.sort((a, b) => b.score - a.score);
 
