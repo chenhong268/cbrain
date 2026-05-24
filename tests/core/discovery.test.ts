@@ -11,6 +11,18 @@ function daysAgo(n: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+function seedPage(db: CBrainDB, slug: string, type: string, title: string, mentionCount = 0): void {
+  db.upsertPage({
+    slug, type, title,
+    filePath: `${slug}.md`,
+    contentHash: "abc",
+  });
+  if (mentionCount > 0) {
+    db.prepare("UPDATE pages SET mention_count = $mc WHERE slug = $slug")
+      .run({ $mc: mentionCount, $slug: slug });
+  }
+}
+
 describe("DiscoveryManager - data layer", () => {
   const testDir = "/tmp/cbrain-test-discovery";
   const dbPath = join(testDir, "test.sqlite");
@@ -27,25 +39,13 @@ describe("DiscoveryManager - data layer", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  function seedPage(slug: string, type: string, title: string, mentionCount = 0): void {
-    db.upsertPage({
-      slug, type, title,
-      filePath: `${slug}.md`,
-      contentHash: "abc",
-    });
-    if (mentionCount > 0) {
-      db.prepare("UPDATE pages SET mention_count = $mc WHERE slug = $slug")
-        .run({ $mc: mentionCount, $slug: slug });
-    }
-  }
-
   // ─── mention_snapshots ────────────────────────────────────────
 
   test("upsertMentionSnapshot inserts and queries correctly", () => {
-    seedPage("entity/test", "entity/person", "Test");
+    seedPage(db, "entity/test", "entity/person", "Test");
 
-    db.upsertMentionSnapshot("entity/test", "2026-05-20", 5);
-    db.upsertMentionSnapshot("entity/test", "2026-05-21", 8);
+    db.upsertMentionSnapshot("entity/test", daysAgo(1), 5);
+    db.upsertMentionSnapshot("entity/test", daysAgo(0), 8);
 
     const snapshots = db.getMentionSnapshots("entity/test", 7);
     expect(snapshots.length).toBe(2);
@@ -54,10 +54,10 @@ describe("DiscoveryManager - data layer", () => {
   });
 
   test("upsertMentionSnapshot is idempotent (same date overwrites)", () => {
-    seedPage("entity/test", "entity/person", "Test");
+    seedPage(db, "entity/test", "entity/person", "Test");
 
-    db.upsertMentionSnapshot("entity/test", "2026-05-20", 5);
-    db.upsertMentionSnapshot("entity/test", "2026-05-20", 7);
+    db.upsertMentionSnapshot("entity/test", daysAgo(0), 5);
+    db.upsertMentionSnapshot("entity/test", daysAgo(0), 7);
 
     const snapshots = db.getMentionSnapshots("entity/test", 7);
     expect(snapshots.length).toBe(1);
@@ -65,10 +65,10 @@ describe("DiscoveryManager - data layer", () => {
   });
 
   test("cleanMentionSnapshots removes old entries", () => {
-    seedPage("entity/test", "entity/person", "Test");
+    seedPage(db, "entity/test", "entity/person", "Test");
 
-    db.upsertMentionSnapshot("entity/test", "2026-04-01", 3);
-    db.upsertMentionSnapshot("entity/test", "2026-05-20", 5);
+    db.upsertMentionSnapshot("entity/test", daysAgo(60), 3);
+    db.upsertMentionSnapshot("entity/test", daysAgo(1), 5);
 
     const removed = db.cleanMentionSnapshots(30);
     expect(removed).toBe(1);
@@ -80,8 +80,8 @@ describe("DiscoveryManager - data layer", () => {
   // ─── discoveries status/metadata ─────────────────────────────
 
   test("discoveries table has status column", () => {
-    seedPage("entity/test", "entity/person", "Test");
-    const id = db.addDiscovery("trend", ["entity/test"], 0.8, undefined, undefined, "low", false, { direction: "rising" });
+    seedPage(db, "entity/test", "entity/person", "Test");
+    const id = db.addDiscovery("trend", ["entity/test"], 0.8, undefined, undefined, "low", false, { direction: "trend_rising" });
     db.updateDiscoveryStatus(id, "resolved");
 
     const d = db.getDiscoveryById(id);
@@ -90,18 +90,18 @@ describe("DiscoveryManager - data layer", () => {
   });
 
   test("discoveries table stores metadata", () => {
-    seedPage("entity/test", "entity/person", "Test");
-    const id = db.addDiscovery("trend", ["entity/test"], 0.8, undefined, undefined, "low", false, { direction: "rising", delta: 5 });
+    seedPage(db, "entity/test", "entity/person", "Test");
+    const id = db.addDiscovery("trend", ["entity/test"], 0.8, undefined, undefined, "low", false, { direction: "trend_rising", delta: 5 });
 
     const d = db.getDiscoveryById(id);
     expect(d).not.toBeNull();
     const meta = JSON.parse(d!.metadata);
-    expect(meta.direction).toBe("rising");
+    expect(meta.direction).toBe("trend_rising");
     expect(meta.delta).toBe(5);
   });
 
   test("discoveries default status is pending", () => {
-    seedPage("entity/test", "entity/person", "Test");
+    seedPage(db, "entity/test", "entity/person", "Test");
     const id = db.addDiscovery("trend", ["entity/test"], 0.8);
 
     const d = db.getDiscoveryById(id);
@@ -111,7 +111,7 @@ describe("DiscoveryManager - data layer", () => {
   });
 
   test("addDiscovery without metadata still works (backward compat)", () => {
-    seedPage("entity/foo", "entity/person", "Foo");
+    seedPage(db, "entity/foo", "entity/person", "Foo");
     const id = db.addDiscovery("bridge", ["entity/foo"], 0.5, { note: "test" });
     const d = db.getDiscoveryById(id);
     expect(d).not.toBeNull();
@@ -136,25 +136,13 @@ describe("DiscoveryManager - detectBridges", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  function seedPage(slug: string, type: string, title: string, mentionCount = 0): void {
-    db.upsertPage({
-      slug, type, title,
-      filePath: `${slug}.md`,
-      contentHash: "abc",
-    });
-    if (mentionCount > 0) {
-      db.prepare("UPDATE pages SET mention_count = $mc WHERE slug = $slug")
-        .run({ $mc: mentionCount, $slug: slug });
-    }
-  }
-
   test("detects bridge between distant entities (dist >= 4)", () => {
     // A → B → C → D → E, A-E is bridge (dist 4)
-    seedPage("entity/a", "entity/person", "A", 3);
-    seedPage("entity/b", "entity/person", "B", 3);
-    seedPage("entity/c", "entity/person", "C", 3);
-    seedPage("entity/d", "entity/person", "D", 3);
-    seedPage("entity/e", "entity/person", "E", 3);
+    seedPage(db, "entity/a", "entity/person", "A", 3);
+    seedPage(db, "entity/b", "entity/person", "B", 3);
+    seedPage(db, "entity/c", "entity/person", "C", 3);
+    seedPage(db, "entity/d", "entity/person", "D", 3);
+    seedPage(db, "entity/e", "entity/person", "E", 3);
     db.insertLink("entity/a", "entity/b", "提及", 0.5, "ner");
     db.insertLink("entity/b", "entity/c", "提及", 0.5, "ner");
     db.insertLink("entity/c", "entity/d", "提及", 0.5, "ner");
@@ -170,9 +158,9 @@ describe("DiscoveryManager - detectBridges", () => {
   });
 
   test("no bridge when graph is fully connected", () => {
-    seedPage("entity/a", "entity/person", "A", 3);
-    seedPage("entity/b", "entity/person", "B", 3);
-    seedPage("entity/c", "entity/person", "C", 3);
+    seedPage(db, "entity/a", "entity/person", "A", 3);
+    seedPage(db, "entity/b", "entity/person", "B", 3);
+    seedPage(db, "entity/c", "entity/person", "C", 3);
     db.insertLink("entity/a", "entity/b", "提及", 0.5, "ner");
     db.insertLink("entity/b", "entity/c", "提及", 0.5, "ner");
     db.insertLink("entity/a", "entity/c", "提及", 0.5, "ner");
@@ -201,20 +189,8 @@ describe("DiscoveryManager - detectTrends", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  function seedPage(slug: string, type: string, title: string, mentionCount = 0): void {
-    db.upsertPage({
-      slug, type, title,
-      filePath: `${slug}.md`,
-      contentHash: "abc",
-    });
-    if (mentionCount > 0) {
-      db.prepare("UPDATE pages SET mention_count = $mc WHERE slug = $slug")
-        .run({ $mc: mentionCount, $slug: slug });
-    }
-  }
-
   test("detects rising trend (3+ consecutive increases)", () => {
-    seedPage("entity/test", "entity/person", "Test", 10);
+    seedPage(db, "entity/test", "entity/person", "Test", 10);
     db.upsertMentionSnapshot("entity/test", daysAgo(3), 3);
     db.upsertMentionSnapshot("entity/test", daysAgo(2), 5);
     db.upsertMentionSnapshot("entity/test", daysAgo(1), 7);
@@ -227,23 +203,38 @@ describe("DiscoveryManager - detectTrends", () => {
     const trend = results.find(r => r.entities.includes("entity/test"));
     expect(trend).toBeDefined();
     expect(trend!.type).toBe("trend");
-    expect(trend!.metadata?.direction).toBe("rising");
+    expect(trend!.metadata?.direction).toBe("trend_rising");
+  });
+
+  test("detects declining trend (3+ consecutive decreases)", () => {
+    seedPage(db, "entity/test", "entity/person", "Test", 10);
+    db.upsertMentionSnapshot("entity/test", daysAgo(3), 12);
+    db.upsertMentionSnapshot("entity/test", daysAgo(2), 9);
+    db.upsertMentionSnapshot("entity/test", daysAgo(1), 6);
+    db.upsertMentionSnapshot("entity/test", daysAgo(0), 3);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectTrends();
+
+    const trend = results.find(r => r.entities.includes("entity/test"));
+    expect(trend).toBeDefined();
+    expect(trend!.metadata?.direction).toBe("trend_declining");
   });
 
   test("detects spike (delta >= 5 in 7 days)", () => {
-    seedPage("entity/test", "entity/person", "Test", 15);
+    seedPage(db, "entity/test", "entity/person", "Test", 15);
     db.upsertMentionSnapshot("entity/test", daysAgo(1), 3);
     db.upsertMentionSnapshot("entity/test", daysAgo(0), 15);
 
     const mgr = new DiscoveryManager(db);
     const results = mgr.detectTrends();
 
-    const spike = results.find(r => r.entities.includes("entity/test") && r.metadata?.direction === "spike");
+    const spike = results.find(r => r.entities.includes("entity/test") && r.metadata?.direction === "trend_spike");
     expect(spike).toBeDefined();
   });
 
   test("no trend for stable entity", () => {
-    seedPage("entity/stable", "entity/person", "Stable", 5);
+    seedPage(db, "entity/stable", "entity/person", "Stable", 5);
     db.upsertMentionSnapshot("entity/stable", daysAgo(2), 5);
     db.upsertMentionSnapshot("entity/stable", daysAgo(1), 5);
     db.upsertMentionSnapshot("entity/stable", daysAgo(0), 5);

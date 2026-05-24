@@ -88,11 +88,14 @@ export class DiscoveryManager {
         const a = entities[i].slug, b = entities[j].slug;
         const dist = this.bfsDistance(a, b, graph);
         if (dist >= 4) {
+          const neighborsA = graph.get(a) ?? new Set<string>();
+          const neighborsB = graph.get(b) ?? new Set<string>();
+          const shared = [...neighborsA].filter(n => neighborsB.has(n)).length;
           results.push({
             type: "bridge",
             entities: [a, b],
             score: Math.min(dist / 6, 1.0),
-            metadata: { distance: dist },
+            metadata: { distance: dist, shared_neighbors: shared },
             actionable: "high",
           });
         }
@@ -112,31 +115,40 @@ export class DiscoveryManager {
 
       const counts = snapshots.map(s => s.mention_count);
 
-      // Check consecutive increases
-      let consecutiveUp = 0;
+      // Track max consecutive up/down streaks
+      let maxUp = 0, curUp = 0;
+      let maxDown = 0, curDown = 0;
       for (let i = 1; i < counts.length; i++) {
-        if (counts[i] > counts[i - 1]) consecutiveUp++;
-        else consecutiveUp = 0;
+        if (counts[i] > counts[i - 1]) { curUp++; curDown = 0; maxUp = Math.max(maxUp, curUp); }
+        else if (counts[i] < counts[i - 1]) { curDown++; curUp = 0; maxDown = Math.max(maxDown, curDown); }
+        else { curUp = 0; curDown = 0; }
       }
 
-      // Check spike
       const first = counts[0], last = counts[counts.length - 1];
       const delta = last - first;
 
-      if (consecutiveUp >= TREND_MIN_CONSECUTIVE) {
+      if (maxUp >= TREND_MIN_CONSECUTIVE) {
         results.push({
           type: "trend",
           entities: [slug],
-          score: Math.min(consecutiveUp / TREND_WINDOW_DAYS, 1.0),
-          metadata: { direction: "rising", delta, daily_counts: counts },
+          score: Math.min(maxUp / TREND_WINDOW_DAYS, 1.0),
+          metadata: { direction: "trend_rising", delta, daily_counts: counts },
           actionable: delta >= 10 ? "high" : "medium",
+        });
+      } else if (maxDown >= TREND_MIN_CONSECUTIVE) {
+        results.push({
+          type: "trend",
+          entities: [slug],
+          score: Math.min(maxDown / TREND_WINDOW_DAYS, 1.0),
+          metadata: { direction: "trend_declining", delta, daily_counts: counts },
+          actionable: Math.abs(delta) >= 10 ? "high" : "medium",
         });
       } else if (Math.abs(delta) >= TREND_SPIKE_DELTA) {
         results.push({
           type: "trend",
           entities: [slug],
           score: Math.min(Math.abs(delta) / 20, 1.0),
-          metadata: { direction: delta > 0 ? "spike" : "declining", delta, daily_counts: counts },
+          metadata: { direction: delta > 0 ? "trend_spike" : "trend_declining", delta, daily_counts: counts },
           actionable: Math.abs(delta) >= 10 ? "high" : "medium",
         });
       }
