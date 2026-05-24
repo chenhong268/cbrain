@@ -289,6 +289,12 @@ export class SyncManager {
           this.pipeline.processWikilinks(effectiveSlug, parsed.body);
         } catch { /* non-critical */ }
       }
+      // Write mention snapshot for trend detection
+      try {
+        const mc = this.db.getPage(effectiveSlug)?.mention_count ?? 0;
+        this.db.upsertMentionSnapshot(effectiveSlug, new Date().toISOString().slice(0, 10), mc);
+      } catch { /* non-critical */ }
+
       return { success: true, skipped: true };
     }
 
@@ -361,6 +367,12 @@ export class SyncManager {
         this.logger?.warn("sync", `NER failed for ${effectiveSlug}: ${(e as Error).message}`);
       }
     }
+
+    // Write mention snapshot for trend detection
+    try {
+      const mc = this.db.getPage(effectiveSlug)?.mention_count ?? 0;
+      this.db.upsertMentionSnapshot(effectiveSlug, new Date().toISOString().slice(0, 10), mc);
+    } catch { /* non-critical */ }
 
     return { success: true };
   }

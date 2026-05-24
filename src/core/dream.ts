@@ -166,6 +166,12 @@ export async function runDream(
         return n;
       } catch (e) { logger.warn("dream", `Insight 归档失败: ${(e as Error).message}`); return 0; }
     })(),
+    (async () => {
+      try {
+        const removed = db.cleanMentionSnapshots(30);
+        if (removed > 0) logger.info("dream", `清理 ${removed} 条过期 mention snapshots`);
+      } catch (e) { logger.warn("dream", `Snapshot 清理失败: ${(e as Error).message}`); }
+    })(),
   ]);
 
   // Stage 7: Index generation
