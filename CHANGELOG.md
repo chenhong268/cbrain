@@ -1,6 +1,19 @@
 # Changelog
 
-> Current: `v1.8.2` — 消除所有硬编码 NER 类型映射，全部从 ontology.yaml 动态生成。
+> Current: `v1.8.3` — Discovery engine: round-robin type diversity, enrichment coverage, ordering fixes.
+
+## [v1.8.3] — 2026-05-24
+
+### Bug 修复
+- **read_discoveries gap 被 bridge 挤出**：无 typeFilter 时改用 round-robin 类型交替，防止高分 bridge 挤掉 gap
+- **gap suggestion 不回传**：根因是 gap 排名太低读不出来，排序修复后解决
+- **enrichment 截断**：ENRICH_PER_TYPE 15→25，high-actionable gap 覆盖率从 30/35 提升到 44/44
+
+### 新功能
+- **typeFilter 参数**：read_discoveries 支持按类型筛选（bridge/trend/gap/contradiction）
+- **getDiscoveriesByType**：DB 层新增按类型查询方法
+- **enrichment 诊断**：DiscoveryReport 新增 enrichment 统计（attempted/saved/errors）
+- **clearPendingDiscoveries**：每次 runDiscovery 前清除未读 pending 记录
 
 ## [v1.8.2] — 2026-05-23
 
