@@ -978,6 +978,19 @@ export class CBrainDB {
     ).all() as Array<{ slug: string; title: string; file_path: string }>;
   }
 
+  findEmptyShells(): Array<{ slug: string; type: string; title: string; file_path: string }> {
+    return this.prepare(`
+      SELECT p.slug, p.type, p.title, p.file_path
+      FROM pages p
+      WHERE p.type != 'record'
+        AND p.mention_count = 0
+        AND NOT EXISTS (SELECT 1 FROM links WHERE from_slug = p.slug OR to_slug = p.slug)
+        AND NOT EXISTS (SELECT 1 FROM aliases WHERE page_slug = p.slug)
+        AND NOT EXISTS (SELECT 1 FROM tags WHERE page_slug = p.slug)
+      ORDER BY p.type, p.title
+    `).all() as Array<{ slug: string; type: string; title: string; file_path: string }>;
+  }
+
   getAllPageSlugsWithPaths(): Array<{ slug: string; file_path: string }> {
     return this.prepare(
       "SELECT slug, file_path FROM pages"
@@ -1445,6 +1458,31 @@ export class CBrainDB {
     this.prepare(
       "UPDATE timeline SET page_slug = $new WHERE page_slug = $old"
     ).run({ $old: oldSlug, $new: newSlug });
+  }
+
+  getAllTimelineRaw(): Array<{ id: number; page_slug: string; event_date: string | null; summary: string }> {
+    return this.prepare("SELECT id, page_slug, event_date, summary FROM timeline").all() as Array<{ id: number; page_slug: string; event_date: string | null; summary: string }>;
+  }
+
+  deleteTimelineByIds(ids: number[]): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map((_, i) => `$id${i}`).join(",");
+    const params: Record<string, number> = {};
+    for (let i = 0; i < ids.length; i++) params[`$id${i}`] = ids[i];
+    this.prepare(`DELETE FROM timeline WHERE id IN (${placeholders})`).run(params);
+  }
+
+  updateTimelineDate(id: number, newDate: string): void {
+    this.prepare("UPDATE timeline SET event_date = $date WHERE id = $id").run({ $id: id, $date: newDate });
+  }
+
+  getDuplicateTimelineIds(): number[] {
+    const rows = this.prepare(`
+      SELECT id FROM timeline WHERE id NOT IN (
+        SELECT MIN(id) FROM timeline GROUP BY page_slug, COALESCE(event_date, ''), summary
+      )
+    `).all() as Array<{ id: number }>;
+    return rows.map((r) => r.id);
   }
 
   // ─── Tag bulk operations ─────────────────────────────────────

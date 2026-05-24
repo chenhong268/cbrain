@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
@@ -803,7 +803,7 @@ export function register(program: Command) {
     .option("--all", "Merge all cross-type pairs, not just affinity groups")
     .action(async (opts) => {
       const config = loadConfig();
-      const deps = createDeps(config);
+      const deps = createDeps(config, false);
       const db = deps.db;
       const { getOntology } = await import("../../ontology/loader.js");
       const ontology = getOntology();
@@ -864,16 +864,26 @@ export function register(program: Command) {
           continue;
         }
 
-        // Sort by type priority: use resolveTypePriority to find the best type
+        // Find winner: prefer highest type priority within affinity groups,
+        // break ties with mention_count (cross-affinity-group comparison)
         let winner = group[0];
+        const winnerMentions = () => db.getPageTierAndMentions(winner.slug)?.mention_count ?? 0;
         for (let i = 1; i < group.length; i++) {
-          const preferred = ontology.resolveTypePriority(winner.type, group[i].type);
-          if (preferred === group[i].type) {
-            winner = group[i];
+          if (ontology.areTypesAffine(winner.type, group[i].type)) {
+            // Same affinity group → use type priority
+            const preferred = ontology.resolveTypePriority(winner.type, group[i].type);
+            if (preferred === group[i].type) {
+              winner = group[i];
+            }
+          } else {
+            // Cross affinity group → compare mention counts
+            const curMentions = db.getPageTierAndMentions(group[i].slug)?.mention_count ?? 0;
+            if (curMentions > winnerMentions()) {
+              winner = group[i];
+            }
           }
         }
 
-        // If types are equal priority or not affine, pick the one with more mentions
         const sources = group.filter(g => g.slug !== winner.slug);
 
         // Check all are affine to winner
@@ -883,14 +893,13 @@ export function register(program: Command) {
           continue;
         }
 
-        const targetInfo = db.getPageTierAndMentions(winner.slug);
         plans.push({
           title: db.getPageTitle(winner.slug) ?? winner.slug,
           target: winner,
           sources,
           reason: allAffine
             ? `${winner.type} (highest priority in affinity group)`
-            : `${winner.type} (first encountered)`,
+            : `${winner.type} (most mentions: ${winnerMentions()})`,
         });
       }
 
@@ -949,6 +958,180 @@ export function register(program: Command) {
       }
 
       console.log(`\nDone: ${merged} merged, ${failed} failed.`);
+      db.close();
+    });
+
+  // ─── clean-shells: remove empty shell entities ─────────────────
+  program
+    .command("clean-shells")
+    .description("Remove entity/concept pages with 0 mentions, 0 links, and 0 aliases")
+    .option("--dry-run", "Show what would be deleted (default)")
+    .option("--execute", "Actually delete empty shells")
+    .option("--type <type>", "Only clean a specific type (e.g. entity/person)")
+    .action(async (opts) => {
+      const config = loadConfig();
+      const db = new CBrainDB(config.dbPath);
+      const vaultPath = config.vaultPath;
+
+      const shells = db.findEmptyShells();
+      const filtered = opts.type ? shells.filter((s) => s.type === opts.type) : shells;
+
+      if (filtered.length === 0) {
+        console.log("No empty shell entities found.");
+        db.close();
+        return;
+      }
+
+      // Group by type for summary
+      const byType = new Map<string, number>();
+      for (const s of filtered) {
+        byType.set(s.type, (byType.get(s.type) ?? 0) + 1);
+      }
+
+      console.log(`\nEmpty shell entities: ${filtered.length}\n`);
+      for (const [type, count] of byType) {
+        console.log(`  ${type}: ${count}`);
+      }
+
+      if (opts.dryRun || !opts.execute) {
+        console.log("\n  Sample:");
+        const sample = filtered.slice(0, 10);
+        for (const s of sample) {
+          console.log(`    ${s.title} (${s.type})`);
+        }
+        if (filtered.length > 10) console.log(`    ... and ${filtered.length - 10} more`);
+        console.log("\n  (DRY RUN — use --execute to delete)");
+        db.close();
+        return;
+      }
+
+      let deleted = 0;
+      let failed = 0;
+      for (const shell of filtered) {
+        try {
+          // Delete vault file
+          const absPath = resolve(vaultPath, shell.file_path);
+          if (!absPath.startsWith(resolve(vaultPath))) {
+            throw new Error(`Path traversal: ${shell.file_path}`);
+          }
+          if (existsSync(absPath)) unlinkSync(absPath);
+
+          // Cascade delete from DB (chunks, links, tags, timeline, aliases)
+          db.deletePageCascaded(shell.slug);
+          deleted++;
+        } catch (err) {
+          failed++;
+          console.error(`  ✗ Failed: ${shell.slug}: ${err}`);
+        }
+      }
+
+      console.log(`\nDone: ${deleted} deleted, ${failed} failed.`);
+      db.close();
+    });
+
+  // ─── clean-timeline: fix dirty timeline entries ────────────────
+  program
+    .command("clean-timeline")
+    .description("Fix timeline entries with NULL, partial, or malformed dates; deduplicate")
+    .option("--dry-run", "Show what would be fixed (default)")
+    .option("--execute", "Actually fix timeline entries")
+    .action(async (opts) => {
+      const config = loadConfig();
+      const db = new CBrainDB(config.dbPath);
+
+      const all = db.getAllTimelineRaw();
+
+      const toDelete = new Set<number>();
+      const toNormalize = new Map<number, string>(); // id → new date
+      let nullDates = 0;
+      let unparseable = 0;
+      let normalizedCount = 0;
+
+      const isoDateRe = /^\d{4}-\d{2}-\d{2}$/;
+      const yearOnlyRe = /^\d{4}$/;
+      const monthOnlyRe = /^(\d{4})-(\d{2})$/;
+      const chineseYearRe = /^(\d{4})年$/;
+      const bceYearRe = /^公元前(\d+)/;
+
+      for (const row of all) {
+        if (row.event_date === null) {
+          toDelete.add(row.id);
+          nullDates++;
+          continue;
+        }
+
+        // Already valid ISO date
+        if (isoDateRe.test(row.event_date)) continue;
+
+        // Year only → YYYY-01-01
+        if (yearOnlyRe.test(row.event_date)) {
+          toNormalize.set(row.id, `${row.event_date}-01-01`);
+          normalizedCount++;
+          continue;
+        }
+
+        // Month only → YYYY-MM-01
+        const monthMatch = monthOnlyRe.exec(row.event_date);
+        if (monthMatch) {
+          toNormalize.set(row.id, `${row.event_date}-01`);
+          normalizedCount++;
+          continue;
+        }
+
+        // Chinese year → YYYY-01-01
+        const cnMatch = chineseYearRe.exec(row.event_date);
+        if (cnMatch) {
+          toNormalize.set(row.id, `${cnMatch[1]}-01-01`);
+          normalizedCount++;
+          continue;
+        }
+
+        // BCE year → -YYYY-01-01 (zero-padded to 4 digits)
+        const bceMatch = bceYearRe.exec(row.event_date);
+        if (bceMatch) {
+          const year = bceMatch[1].padStart(4, "0");
+          toNormalize.set(row.id, `-${year}-01-01`);
+          normalizedCount++;
+          continue;
+        }
+
+        // Everything else: unparseable
+        toDelete.add(row.id);
+        unparseable++;
+      }
+
+      // Dedup: find duplicate (page_slug, event_date, summary) keeping min id
+      const dupIds = db.getDuplicateTimelineIds();
+      let dupCount = 0;
+      for (const id of dupIds) {
+        if (!toDelete.has(id)) {
+          toDelete.add(id);
+          dupCount++;
+        }
+      }
+
+      console.log(`\nTimeline cleanup report:`);
+      console.log(`  Total entries:    ${all.length}`);
+      console.log(`  NULL dates:       ${nullDates}`);
+      console.log(`  Unparseable:      ${unparseable}`);
+      console.log(`  Normalizable:     ${normalizedCount}`);
+      console.log(`  Duplicates:       ${dupCount}`);
+
+      if (opts.dryRun || !opts.execute) {
+        console.log("\n  (DRY RUN — use --execute to apply)");
+        db.close();
+        return;
+      }
+
+      // Apply deletes
+      if (toDelete.size > 0) db.deleteTimelineByIds([...toDelete]);
+
+      // Apply normalizations
+      for (const [id, newDate] of toNormalize) {
+        db.updateTimelineDate(id, newDate);
+      }
+
+      console.log(`\nDone: ${toDelete.size} deleted, ${normalizedCount} normalized.`);
       db.close();
     });
 
