@@ -280,6 +280,15 @@ export class SyncManager {
     const existing = this.db.getPageContentHash(effectiveSlug);
 
     if (existing && existing === contentHash) {
+      // Backfill tags + wikilinks even when content unchanged
+      if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
+        this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
+      }
+      if (this.pages && parsed.body.trim()) {
+        try {
+          this.pipeline.processWikilinks(effectiveSlug, parsed.body);
+        } catch { /* non-critical */ }
+      }
       return { success: true, skipped: true };
     }
 
