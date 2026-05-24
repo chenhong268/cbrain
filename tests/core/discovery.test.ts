@@ -246,3 +246,58 @@ describe("DiscoveryManager - detectTrends", () => {
     expect(trend).toBeUndefined();
   });
 });
+
+describe("DiscoveryManager - detectGaps", () => {
+  const testDir = "/tmp/cbrain-test-discovery-gap";
+  const dbPath = join(testDir, "test.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("detects gap: high mentions, low links", () => {
+    seedPage(db, "entity/island", "entity/person", "Island", 10);
+    seedPage(db, "entity/other", "entity/person", "Other", 3);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("entity/island"));
+    expect(gap).toBeDefined();
+    expect(gap!.type).toBe("gap");
+    expect(gap!.metadata?.mention_count).toBe(10);
+    expect(gap!.metadata?.link_count).toBe(0);
+  });
+
+  test("no gap when entity has enough links", () => {
+    seedPage(db, "entity/connected", "entity/person", "Connected", 10);
+    seedPage(db, "entity/b", "entity/person", "B", 3);
+    seedPage(db, "entity/c", "entity/person", "C", 3);
+    db.insertLink("entity/connected", "entity/b", "提及", 0.5, "ner");
+    db.insertLink("entity/c", "entity/connected", "提及", 0.5, "ner");
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("entity/connected"));
+    expect(gap).toBeUndefined();
+  });
+
+  test("no gap for low-mention entity", () => {
+    seedPage(db, "entity/low", "entity/person", "Low", 2);
+
+    const mgr = new DiscoveryManager(db);
+    const results = mgr.detectGaps();
+
+    const gap = results.find(r => r.entities.includes("entity/low"));
+    expect(gap).toBeUndefined();
+  });
+});

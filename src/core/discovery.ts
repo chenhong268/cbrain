@@ -23,6 +23,8 @@ const MAX_LLM_BUDGET = 20;
 const TREND_WINDOW_DAYS = 7;
 const TREND_MIN_CONSECUTIVE = 3;
 const TREND_SPIKE_DELTA = 5;
+const GAP_MIN_MENTIONS = 5;
+const GAP_MAX_LINKS = 2;
 
 export class DiscoveryManager {
   private db: CBrainDB;
@@ -157,8 +159,34 @@ export class DiscoveryManager {
     return results;
   }
 
-  // Placeholder — implemented in Task 3
-  detectGaps(_adj?: Map<string, Set<string>>): DetectionResult[] { return []; }
+  detectGaps(adj?: Map<string, Set<string>>): DetectionResult[] {
+    const graph = adj ?? this.buildAdjacency();
+    const results: DetectionResult[] = [];
+    const entities = this.db.getEntityConceptPages();
+
+    for (const { slug } of entities) {
+      const page = this.db.getPage(slug);
+      if (!page || page.mention_count < GAP_MIN_MENTIONS) continue;
+
+      const neighbors = graph.get(slug);
+      const linkCount = neighbors ? neighbors.size : 0;
+      if (linkCount >= GAP_MAX_LINKS) continue;
+
+      results.push({
+        type: "gap",
+        entities: [slug],
+        score: Math.min(page.mention_count / 20, 1.0),
+        metadata: {
+          mention_count: page.mention_count,
+          link_count: linkCount,
+          neighbor_slugs: neighbors ? [...neighbors] : [],
+        },
+        actionable: page.mention_count >= 10 ? "high" : "medium",
+      });
+    }
+
+    return results;
+  }
 
   // Placeholder — implemented in Task 4
   async detectContradictions(): Promise<DetectionResult[]> { return []; }
