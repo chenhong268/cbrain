@@ -1,14 +1,12 @@
 import { writeFileSync, readFileSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
 
 export class PidLock {
   private pidFile: string;
-  private transport: "stdio" | "http";
 
-  constructor(dataDir: string, transport: "stdio" | "http") {
-    this.pidFile = join(dataDir, `cbrain-${transport}.pid`);
-    this.transport = transport;
+  constructor(dataDir: string, transport: "stdio" | "http", lockId?: string) {
+    const suffix = lockId ? `-${lockId}` : "";
+    this.pidFile = join(dataDir, `cbrain-${transport}${suffix}.pid`);
   }
 
   acquire(force = false): void {
@@ -36,30 +34,14 @@ export class PidLock {
     }
   }
 
-  /** Collect stale PIDs: the one in the PID file + any from `ps` matching cbrain serve. */
+  /** Collect stale PIDs from the PID file. */
   private findStalePids(): number[] {
     const myPid = process.pid;
-    const found = new Set<number>();
+    if (!existsSync(this.pidFile)) return [];
 
-    // 1. PID file
-    if (existsSync(this.pidFile)) {
-      const oldPid = this.readPid();
-      if (oldPid && oldPid !== myPid && this.isRunning(oldPid)) found.add(oldPid);
-    }
-
-    // 2. Scan for matching processes via pgrep
-    try {
-      const pattern = this.transport === "http" ? "cbrain.*serve.*--http" : "cbrain.*serve";
-      const out = execSync(`pgrep -f '${pattern}'`, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-      if (out) {
-        for (const line of out.split("\n")) {
-          const pid = parseInt(line.trim(), 10);
-          if (pid && pid !== myPid && this.isRunning(pid)) found.add(pid);
-        }
-      }
-    } catch { /* pgrep returns 1 when no matches */ }
-
-    return [...found];
+    const oldPid = this.readPid();
+    if (oldPid && oldPid !== myPid && this.isRunning(oldPid)) return [oldPid];
+    return [];
   }
 
   release(): void {

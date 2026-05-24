@@ -35,7 +35,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const deps = createDeps(config);
 
-      const lock = new PidLock(deps.profileDir!, opts.http ? "http" : "stdio");
+      const lock = new PidLock(deps.profileDir!, opts.http ? "http" : "stdio", process.env.CBRAIN_LOCK_ID);
       lock.acquire(opts.force);
       const cleanup = () => lock.release();
       process.on("SIGTERM", cleanup);

@@ -1,3 +1,4 @@
 #!/bin/bash
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-exec "$DIR/dist/cbrain" serve "$@"
+cd "$DIR"
+exec bun run --smol "$DIR/src/cli/index.ts" serve "$@"
