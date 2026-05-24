@@ -245,6 +245,14 @@ export class CBrainDB {
 
       CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias);
       CREATE INDEX IF NOT EXISTS idx_aliases_page ON aliases(page_slug);
+
+      CREATE TABLE IF NOT EXISTS mention_snapshots (
+        slug TEXT NOT NULL,
+        snapshot_date TEXT NOT NULL,
+        mention_count INTEGER NOT NULL,
+        PRIMARY KEY (slug, snapshot_date),
+        FOREIGN KEY (slug) REFERENCES pages(slug) ON DELETE CASCADE
+      );
     `);
 
     this.migratePagesConstraint();
@@ -262,6 +270,7 @@ export class CBrainDB {
     this.migrateAliasesSource();
     this.migrateChunksSummaryLevel();
     this.migrateOntologyTypes();
+    this.migrateDiscoveriesStatus();
     this.repairDirtyData();
   }
 
@@ -305,6 +314,17 @@ export class CBrainDB {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_discoveries_actionable ON discoveries(actionable)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_discoveries_score ON discoveries(score)");
     this.db.exec("UPDATE discoveries SET seen = 0 WHERE seen IS NULL");
+  }
+
+  private migrateDiscoveriesStatus(): void {
+    const cols = this.db.prepare("PRAGMA table_info(discoveries)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("status")) {
+      this.db.exec("ALTER TABLE discoveries ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'");
+    }
+    if (!names.has("metadata")) {
+      this.db.exec("ALTER TABLE discoveries ADD COLUMN metadata TEXT");
+    }
   }
 
   private migratePagesExpiry(): void {
@@ -1631,9 +1651,9 @@ export class CBrainDB {
 
   // ─── Discoveries ──────────────────────────────────────────────
 
-  addDiscovery(type: string, entities: string[], score: number, detail?: Record<string, unknown>, dreamRun?: string, actionable?: string, autoApplicable?: boolean): number {
+  addDiscovery(type: string, entities: string[], score: number, detail?: Record<string, unknown>, dreamRun?: string, actionable?: string, autoApplicable?: boolean, metadata?: Record<string, unknown>): number {
     const r = this.prepare(
-      "INSERT INTO discoveries (type, entities, score, detail, detected_at, dream_run, actionable, auto_applicable) VALUES ($type, $entities, $score, $detail, datetime('now'), $run, $actionable, $auto)"
+      "INSERT INTO discoveries (type, entities, score, detail, detected_at, dream_run, actionable, auto_applicable, metadata) VALUES ($type, $entities, $score, $detail, datetime('now'), $run, $actionable, $auto, $metadata)"
     ).run({
       $type: type,
       $entities: JSON.stringify(entities),
@@ -1642,6 +1662,7 @@ export class CBrainDB {
       $run: dreamRun ?? null,
       $actionable: actionable ?? "low",
       $auto: autoApplicable ? 1 : 0,
+      $metadata: metadata ? JSON.stringify(metadata) : null,
     });
     return Number(r.lastInsertRowid);
   }
@@ -1660,6 +1681,31 @@ export class CBrainDB {
     const r = this.prepare(
       "DELETE FROM discoveries WHERE seen = 0 AND detected_at < datetime('now', '-' || $days || ' days')"
     ).run({ $days: days });
+    return r.changes;
+  }
+
+  updateDiscoveryStatus(id: number, status: string): void {
+    this.prepare("UPDATE discoveries SET status = $status WHERE id = $id").run({ $id: id, $status: status });
+  }
+
+  // ─── Mention Snapshots ─────────────────────────────────────────
+
+  upsertMentionSnapshot(slug: string, date: string, count: number): void {
+    this.prepare(
+      "INSERT OR REPLACE INTO mention_snapshots (slug, snapshot_date, mention_count) VALUES ($slug, $date, $count)"
+    ).run({ $slug: slug, $date: date, $count: count });
+  }
+
+  getMentionSnapshots(slug: string, days: number): Array<{ snapshot_date: string; mention_count: number }> {
+    return this.prepare(
+      "SELECT snapshot_date, mention_count FROM mention_snapshots WHERE slug = $slug AND snapshot_date >= date('now', '-' || $days || ' days') ORDER BY snapshot_date ASC"
+    ).all({ $slug: slug, $days: days }) as any[];
+  }
+
+  cleanMentionSnapshots(olderThanDays: number): number {
+    const r = this.prepare(
+      "DELETE FROM mention_snapshots WHERE snapshot_date < date('now', '-' || $days || ' days')"
+    ).run({ $days: olderThanDays });
     return r.changes;
   }
 
@@ -1776,9 +1822,9 @@ export class CBrainDB {
     return r.changes;
   }
 
-  getDiscoveryById(id: number): { id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number } | null {
+  getDiscoveryById(id: number): { id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; status: string; metadata: string | null } | null {
     return this.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable FROM discoveries WHERE id = $id"
+      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, status, metadata FROM discoveries WHERE id = $id"
     ).get({ $id: id }) as any ?? null;
   }
 
