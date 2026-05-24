@@ -1498,6 +1498,11 @@ export class CBrainDB {
     }
   }
 
+  replaceTags(slug: string, tags: string[]): void {
+    this.deleteTagsByPage(slug);
+    this.addTags(slug, tags);
+  }
+
   // ─── Config operations ───────────────────────────────────────
 
   getAllConfig(): Array<{ key: string; value: string }> {

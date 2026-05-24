@@ -5,7 +5,7 @@ import { NerEngine } from "./ner.js";
 import type { ExtractionResult } from "./ner.js";
 import { validateFacts, applyFacts } from "./structured-facts.js";
 import { PageManager } from "./page.js";
-import { extractWikiLinks, isValidEntityName } from "./extract.js";
+import { extractWikiLinks, isValidEntityName, stripKnownRelationsSection } from "./extract.js";
 import type { Logger } from "./logger.js";
 import { EntityResolver } from "./entity-resolver.js";
 import { getOntology } from "../ontology/loader.js";
@@ -148,17 +148,22 @@ export class ContentPipeline {
   processWikilinks(fromSlug: string, body: string): { count: number; mentionedSlugs: Set<string> } {
     if (!this.pages || !body.trim()) return { count: 0, mentionedSlugs: new Set() };
 
-    const wikiLinks = extractWikiLinks(body);
+    // Strip KR section — it's generated FROM links, parsing it back would create circular writes
+    const wikiLinks = extractWikiLinks(stripKnownRelationsSection(body));
     const writtenRelations = new Set<string>();
     const mentionedSlugs = new Set<string>();
     let count = 0;
 
     for (const link of wikiLinks) {
-      const targetName = link.display ?? link.target;
-      if (link.target.includes("/")) continue;
+      // Resolve path-style wikilinks: [[entity/company/xxx]] → leaf name "xxx"
+      let lookupName = link.target;
+      if (link.target.includes("/")) {
+        lookupName = link.target.split("/").pop()!;
+      }
+      const targetName = link.display ?? lookupName;
       if (!isValidEntityName(targetName)) continue;
 
-      const targetSlug = findEntitySlug(this.db, targetName);
+      const targetSlug = findEntitySlug(this.db, lookupName);
 
       if (targetSlug && targetSlug !== fromSlug) {
         this.pages.incrementMention(targetSlug);

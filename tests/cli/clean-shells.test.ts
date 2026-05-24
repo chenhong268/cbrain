@@ -27,12 +27,12 @@ function makeConfig(testDir: string): string {
   return configPath;
 }
 
-function seedPage(db: CBrainDB, testDir: string, slug: string, type: string, title: string) {
+function seedPage(db: CBrainDB, testDir: string, slug: string, type: string, title: string, body?: string) {
   const vaultPath = join(testDir, "vault");
   const relPath = `${slug}.md`;
   const absPath = join(vaultPath, relPath);
   mkdirSync(dirname(absPath), { recursive: true });
-  writeFileSync(absPath, `---\ntitle: "${title}"\ntype: "${type}"\n---\n\nContent about ${title}.`);
+  writeFileSync(absPath, `---\ntitle: "${title}"\ntype: "${type}"\n---\n${body ? `\n${body}` : ""}`);
   db.insertPage({ slug, type, title, filePath: relPath, contentHash: `hash-${slug}` });
 }
 
@@ -59,15 +59,15 @@ describe("clean-shells", () => {
     const configPath = makeConfig(testDir);
     const db = makeDB(testDir);
 
-    // Empty shell: 0 mentions, 0 links, 0 aliases
+    // Empty shell: 0 mentions, 0 links, 0 aliases, no body
     seedPage(db, testDir, "brain/entities/person/ghost", "entity/person", "Ghost");
-    // Non-empty: has mention
-    seedPage(db, testDir, "brain/entities/company/novartis", "entity/company", "Novartis");
+    // Non-empty: has mention + body
+    seedPage(db, testDir, "brain/entities/company/novartis", "entity/company", "Novartis", "A pharmaceutical company.");
     db.incrementMentionCount("brain/entities/company/novartis");
     db.close();
 
     const result = runCleanShells(configPath, "--dry-run");
-    expect(result).toContain("Empty shell entities: 1");
+    expect(result).toContain("True empty shell entities: 1");
     expect(result).toContain("entity/person: 1");
     expect(result).toContain("Ghost");
     expect(result).not.toContain("Novartis");
@@ -77,8 +77,8 @@ describe("clean-shells", () => {
     const configPath = makeConfig(testDir);
     const db = makeDB(testDir);
 
-    seedPage(db, testDir, "brain/entities/person/ghost", "entity/person", "Ghost");
-    seedPage(db, testDir, "brain/entities/company/alive", "entity/company", "Alive");
+    seedPage(db, testDir, "brain/entities/person/ghost", "entity/person", "Ghost", "Some content.");
+    seedPage(db, testDir, "brain/entities/company/alive", "entity/company", "Alive", "Some content.");
     db.insertLink("brain/entities/company/alive", "brain/entities/person/ghost", "提及", 0.5);
     db.close();
 
@@ -91,7 +91,7 @@ describe("clean-shells", () => {
     expect(existsSync(join(vaultPath, "brain/concepts/concept/dust.md"))).toBe(true);
 
     const result = runCleanShells(configPath, "--execute");
-    expect(result).toContain("1 deleted");
+    expect(result).toContain("Done: 1 deleted");
     expect(existsSync(join(vaultPath, "brain/concepts/concept/dust.md"))).toBe(false);
   });
 
@@ -129,7 +129,7 @@ describe("clean-shells", () => {
     db.close();
 
     const result = runCleanShells(configPath, "--dry-run --type entity/person");
-    expect(result).toContain("Empty shell entities: 1");
+    expect(result).toContain("True empty shell entities: 1");
     expect(result).toContain("entity/person: 1");
     expect(result).not.toContain("concept");
   });

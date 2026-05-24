@@ -93,6 +93,15 @@ export class SyncManager {
         const existing = this.db.getPageContentHash(slug);
 
         if (existing && existing === contentHash) {
+          // Backfill tags + wikilinks even when content unchanged
+          if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
+            this.db.replaceTags(slug, parsed.frontmatter.tags as string[]);
+          }
+          if (this.pages && parsed.body.trim()) {
+            try {
+              this.pipeline.processWikilinks(slug, parsed.body);
+            } catch { /* non-critical */ }
+          }
           report.skipped++;
           continue;
         }
@@ -145,6 +154,10 @@ export class SyncManager {
           filePath: file.relPath,
           contentHash: file.contentHash,
         });
+
+        if (file.frontmatter?.tags && Array.isArray(file.frontmatter.tags)) {
+          this.db.replaceTags(file.slug, file.frontmatter.tags as string[]);
+        }
 
         // Build chunks + embedResults from cache, fall back to fresh embed
         const chunks = chunkContent(file.body, this.chunkSize);
@@ -308,6 +321,10 @@ export class SyncManager {
       filePath: relPath,
       contentHash,
     });
+
+    if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
+      this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
+    }
 
     const { chunks, embedResults } = await this.pipeline.embed(parsed.body);
     this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);

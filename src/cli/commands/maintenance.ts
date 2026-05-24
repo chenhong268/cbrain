@@ -968,16 +968,59 @@ export function register(program: Command) {
     .option("--dry-run", "Show what would be deleted (default)")
     .option("--execute", "Actually delete empty shells")
     .option("--type <type>", "Only clean a specific type (e.g. entity/person)")
+    .option("--force", "Skip vault content check (delete even if vault has tags/body)")
     .action(async (opts) => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const vaultPath = config.vaultPath;
+      const { parseFrontmatter } = await import("../../utils/frontmatter.js");
 
       const shells = db.findEmptyShells();
-      const filtered = opts.type ? shells.filter((s) => s.type === opts.type) : shells;
+      let filtered = opts.type ? shells.filter((s) => s.type === opts.type) : shells;
 
       if (filtered.length === 0) {
         console.log("No empty shell entities found.");
+        db.close();
+        return;
+      }
+
+      // Vault-aware guard: check vault file content before treating as shell
+      const trueShells: typeof filtered = [];
+      const syncGaps: typeof filtered = [];
+      if (!opts.force) {
+        for (const shell of filtered) {
+          const absPath = resolve(vaultPath, shell.file_path);
+          if (!existsSync(absPath)) { trueShells.push(shell); continue; }
+          try {
+            const { readFileSync } = await import("node:fs");
+            const content = readFileSync(absPath, "utf-8");
+            const { frontmatter, body } = parseFrontmatter(content);
+            const hasTags = frontmatter.tags && Array.isArray(frontmatter.tags) && frontmatter.tags.length > 0;
+            const hasBody = body.trim().length > 0 && !/^>\s*Auto-extracted from\s/.test(body.trim());
+            if (hasTags || hasBody) {
+              syncGaps.push(shell);
+            } else {
+              trueShells.push(shell);
+            }
+          } catch {
+            trueShells.push(shell);
+          }
+        }
+
+        if (syncGaps.length > 0) {
+          console.log(`\n${syncGaps.length} entities have vault content (tags/body) but DB is empty — sync gap, not shell:`);
+          for (const s of syncGaps.slice(0, 10)) {
+            console.log(`    ${s.title} (${s.type}) → run 'cbrain sync --slug ${s.slug}' to fix`);
+          }
+          if (syncGaps.length > 10) console.log(`    ... and ${syncGaps.length - 10} more`);
+          console.log();
+        }
+
+        filtered = trueShells;
+      }
+
+      if (filtered.length === 0) {
+        console.log("No true empty shells remaining (all were sync gaps).");
         db.close();
         return;
       }
@@ -988,7 +1031,7 @@ export function register(program: Command) {
         byType.set(s.type, (byType.get(s.type) ?? 0) + 1);
       }
 
-      console.log(`\nEmpty shell entities: ${filtered.length}\n`);
+      console.log(`\nTrue empty shell entities: ${filtered.length}\n`);
       for (const [type, count] of byType) {
         console.log(`  ${type}: ${count}`);
       }
@@ -1430,6 +1473,67 @@ Return JSON only, no markdown:
       }
 
       console.log(`\nDone: ${merged} merged, ${failed} failed.`);
+      db.close();
+    });
+
+  // ─── batch-delete: delete entities by slug list ────────────────
+  program
+    .command("batch-delete")
+    .description("Delete entities from a file of slugs (one per line)")
+    .argument("<file>", "File with one slug per line")
+    .option("--dry-run", "Show what would be deleted (default)")
+    .option("--execute", "Actually delete")
+    .action(async (file: string, opts) => {
+      const config = loadConfig();
+      const db = new CBrainDB(config.dbPath);
+      const vaultPath = config.vaultPath;
+      const { readFileSync } = await import("node:fs");
+
+      const slugs = readFileSync(file, "utf-8")
+        .split("\n")
+        .map((l: string) => l.trim())
+        .filter((l: string) => l && !l.startsWith("#"));
+
+      if (slugs.length === 0) {
+        console.log("No slugs in file.");
+        db.close();
+        return;
+      }
+
+      console.log(`\nSlugs to delete: ${slugs.length}\n`);
+
+      if (opts.dryRun || !opts.execute) {
+        for (const slug of slugs) {
+          const page = db.getPage(slug);
+          if (page) {
+            console.log(`  ${page.title} (${page.type}) → ${page.file_path}`);
+          } else {
+            console.log(`  ${slug} — NOT FOUND in DB`);
+          }
+        }
+        console.log("\n  (DRY RUN — use --execute to delete)");
+        db.close();
+        return;
+      }
+
+      let deleted = 0;
+      let notFound = 0;
+      for (const slug of slugs) {
+        const page = db.getPage(slug);
+        if (!page) { notFound++; continue; }
+        try {
+          const absPath = resolve(vaultPath, page.file_path);
+          if (absPath.startsWith(resolve(vaultPath)) && existsSync(absPath)) {
+            unlinkSync(absPath);
+          }
+          db.deletePageCascaded(slug);
+          deleted++;
+        } catch (err) {
+          console.error(`  ✗ Failed: ${slug}: ${err}`);
+        }
+      }
+
+      console.log(`\nDone: ${deleted} deleted, ${notFound} not found.`);
       db.close();
     });
 }

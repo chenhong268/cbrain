@@ -1,3 +1,12 @@
+// ─── Section stripping ─────────────────────────────────────────
+
+/** Remove `## Known Relations` section (and everything after it) from body.
+ *  KR is generated FROM the links table by syncLinksToMarkdown — parsing it
+ *  back would create circular writes. */
+export function stripKnownRelationsSection(body: string): string {
+  return body.replace(/\n## Known Relations\n[\s\S]*$/, "");
+}
+
 // ─── Wiki-link extraction (deterministic) ───────────────────────
 // Only regex-based extraction in CBrain. wikilinks are explicit user intent,
 // not machine guesswork — they must be parsed deterministically.
