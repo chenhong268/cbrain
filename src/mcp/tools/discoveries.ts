@@ -132,39 +132,44 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
         .describe("Detection types to run. Default: all."),
     },
   }, async ({ types }) => {
-    const reflect = new ReflectManager(ctx.db, ctx.pages, ctx.llm, ctx.pipeline, ctx.embedding, ctx.insights);
-    const reflectReport = await reflect.runDiscovery();
+    const jobId = ctx.db.submitJob("discovery", { types });
 
-    const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
-    const newReport = await discoveryMgr.runDiscovery(types as DiscoveryType[] | undefined);
+    // Fire-and-forget background execution
+    const discoveryTypes = types as DiscoveryType[] | undefined;
+    Promise.resolve().then(async () => {
+      try {
+        const reflect = new ReflectManager(ctx.db, ctx.pages, ctx.llm, ctx.pipeline, ctx.embedding, ctx.insights);
+        const reflectReport = await reflect.runDiscovery();
 
-    const mergedByType = { ...reflectReport.byType, ...newReport.byType };
-    const mergedByActionable = {
-      high: (reflectReport.byActionable.high ?? 0) + (newReport.byActionable.high ?? 0),
-      medium: (reflectReport.byActionable.medium ?? 0) + (newReport.byActionable.medium ?? 0),
-      low: (reflectReport.byActionable.low ?? 0) + (newReport.byActionable.low ?? 0),
-    };
-    const total = reflectReport.total + newReport.total;
+        const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
+        const newReport = await discoveryMgr.runDiscovery(discoveryTypes);
 
-    const typeLabels = Object.entries(mergedByType)
-      .map(([k, v]) => `${TYPE_LABELS[k] ?? k}: ${v}`)
-      .join("，");
-    const actionLabels = Object.entries(mergedByActionable)
-      .map(([k, v]) => `${ACTIONABLE_LABELS[k] ?? k}: ${v}`)
-      .join("，");
+        ctx.db.completeJob(jobId, {
+          reflect: reflectReport,
+          discovery: newReport,
+          merged: {
+            total: reflectReport.total + newReport.total,
+            byType: { ...reflectReport.byType, ...newReport.byType },
+            byActionable: {
+              high: (reflectReport.byActionable.high ?? 0) + (newReport.byActionable.high ?? 0),
+              medium: (reflectReport.byActionable.medium ?? 0) + (newReport.byActionable.medium ?? 0),
+              low: (reflectReport.byActionable.low ?? 0) + (newReport.byActionable.low ?? 0),
+            },
+          },
+        });
+      } catch (err) {
+        ctx.db.failJob(jobId, err instanceof Error ? err.message : String(err));
+      }
+    });
 
     return {
       content: [{
         type: "text" as const,
         text: JSON.stringify({
-          summary: `检测完成：${total} 个发现（${typeLabels}），重要程度：${actionLabels}`,
-          report: {
-            total,
-            byType: mergedByType,
-            byActionable: mergedByActionable,
-            highActionable: newReport.highActionable,
-          },
-        }, null, 2),
+          summary: `发现管线已提交，后台执行中。用 job_status 查询进度。`,
+          job_id: jobId,
+          status: "running",
+        }),
       }],
     };
   });
