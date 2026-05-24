@@ -188,8 +188,62 @@ export class DiscoveryManager {
     return results;
   }
 
-  // Placeholder — implemented in Task 4
-  async detectContradictions(): Promise<DetectionResult[]> { return []; }
+  async detectContradictions(): Promise<DetectionResult[]> {
+    if (!this.llm) return [];
+
+    const results: DetectionResult[] = [];
+    const entities = this.db.getEntityConceptPages();
+
+    for (const { slug } of entities) {
+      if (this.llmBudget <= 0) break;
+
+      const incoming = this.db.getIncomingLinks(slug);
+      const sources = incoming.filter(l => l.from_slug.startsWith("record/"));
+      if (sources.length < 2) continue;
+
+      const sourceInfos = sources.slice(0, 5).map(s => {
+        const p = this.db.getPage(s.from_slug);
+        return {
+          slug: s.from_slug,
+          title: p?.title ?? s.from_slug,
+          context: s.context ?? "",
+        };
+      });
+
+      if (this.llmBudget <= 0) break;
+      this.llmBudget--;
+
+      try {
+        const prompt = `以下是关于"${this.db.getPage(slug)?.title ?? slug}"的多个来源信息：\n\n` +
+          sourceInfos.map((s, i) => `来源${i + 1}（${s.title}）：${s.context || "（无上下文）"}`).join("\n\n") +
+          `\n\n请判断这些来源之间是否存在信息矛盾。返回JSON：{"has_contradiction": boolean, "confidence": number, "explanation": string, "suggested_resolution": string}`;
+
+        const raw = await this.llm.chat([
+          { role: "system", content: "你是信息一致性分析专家。只返回JSON，不要其他内容。" },
+          { role: "user", content: prompt },
+        ]);
+
+        const parsed = JSON.parse(raw);
+        if (parsed.has_contradiction && parsed.confidence >= 0.7) {
+          results.push({
+            type: "contradiction",
+            entities: [slug, ...sourceInfos.map(s => s.slug)],
+            score: parsed.confidence,
+            metadata: {
+              explanation: parsed.explanation,
+              suggested_resolution: parsed.suggested_resolution,
+              source_count: sources.length,
+            },
+            actionable: "high",
+          });
+        }
+      } catch {
+        // Invalid JSON or LLM error — skip
+      }
+    }
+
+    return results;
+  }
 
   private buildAdjacency(): Map<string, Set<string>> {
     const adj = new Map<string, Set<string>>();

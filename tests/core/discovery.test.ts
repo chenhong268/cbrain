@@ -3,6 +3,7 @@ import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { DiscoveryManager } from "../../src/core/discovery.js";
+import type { LLMProvider } from "../../src/llm/provider.js";
 
 /** Days offset from today — formats as YYYY-MM-DD */
 function daysAgo(n: number): string {
@@ -21,6 +22,10 @@ function seedPage(db: CBrainDB, slug: string, type: string, title: string, menti
     db.prepare("UPDATE pages SET mention_count = $mc WHERE slug = $slug")
       .run({ $mc: mentionCount, $slug: slug });
   }
+}
+
+function createMockLlm(response: string): LLMProvider {
+  return { name: "mock", chat: async () => response };
 }
 
 describe("DiscoveryManager - data layer", () => {
@@ -299,5 +304,95 @@ describe("DiscoveryManager - detectGaps", () => {
 
     const gap = results.find(r => r.entities.includes("entity/low"));
     expect(gap).toBeUndefined();
+  });
+});
+
+describe("DiscoveryManager - detectContradictions", () => {
+  const testDir = "/tmp/cbrain-test-discovery-contradiction";
+  const dbPath = join(testDir, "test.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("detects contradiction between two sources", async () => {
+    seedPage(db, "entity/person", "entity/person", "某公司", 5);
+    seedPage(db, "record/note1", "record", "会议记录1", 0);
+    seedPage(db, "record/note2", "record", "会议记录2", 0);
+    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+
+    const mockLlm = createMockLlm(JSON.stringify({
+      has_contradiction: true,
+      confidence: 0.85,
+      explanation: "两个来源对该公司业务方向描述矛盾",
+      suggested_resolution: "核实后保留最新来源",
+    }));
+
+    const mgr = new DiscoveryManager(db, mockLlm);
+    const results = await mgr.detectContradictions();
+
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    const c = results.find(r => r.entities.includes("entity/person"));
+    expect(c).toBeDefined();
+    expect(c!.type).toBe("contradiction");
+    expect(c!.metadata?.explanation).toContain("矛盾");
+    expect(c!.actionable).toBe("high");
+  });
+
+  test("no contradiction when LLM says no", async () => {
+    seedPage(db, "entity/person", "entity/person", "某公司", 5);
+    seedPage(db, "record/note1", "record", "会议记录1", 0);
+    seedPage(db, "record/note2", "record", "会议记录2", 0);
+    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+
+    const mockLlm = createMockLlm(JSON.stringify({
+      has_contradiction: false,
+      confidence: 0.3,
+      explanation: "来源一致",
+      suggested_resolution: "",
+    }));
+
+    const mgr = new DiscoveryManager(db, mockLlm);
+    const results = await mgr.detectContradictions();
+
+    expect(results.length).toBe(0);
+  });
+
+  test("no LLM → no contradictions detected", async () => {
+    seedPage(db, "entity/person", "entity/person", "某公司", 5);
+    seedPage(db, "record/note1", "record", "会议记录1", 0);
+    seedPage(db, "record/note2", "record", "会议记录2", 0);
+    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+
+    const mgr = new DiscoveryManager(db);
+    const results = await mgr.detectContradictions();
+
+    expect(results.length).toBe(0);
+  });
+
+  test("invalid LLM JSON → graceful fallback", async () => {
+    seedPage(db, "entity/person", "entity/person", "某公司", 5);
+    seedPage(db, "record/note1", "record", "会议记录1", 0);
+    seedPage(db, "record/note2", "record", "会议记录2", 0);
+    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+
+    const mockLlm = createMockLlm("not valid json {{{");
+
+    const mgr = new DiscoveryManager(db, mockLlm);
+    const results = await mgr.detectContradictions();
+
+    expect(results.length).toBe(0);
   });
 });
