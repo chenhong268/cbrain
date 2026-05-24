@@ -98,6 +98,40 @@ describe("EntityResolver", () => {
     expect(result.matchedBy).toBe("type-gate");
   });
 
+  // ─── Type affinity expansion (issue #47) ──────────────────
+
+  test("person ↔ company affinity: NER says person, DB has company → resolved_to_existing", () => {
+    seedEntity("南京医药", "entity/company", "entity/nanjing-pharma");
+
+    const result = resolver.resolveSingle(candidate("南京医药", "person"));
+    expect(result.action).toBe("resolved_to_existing");
+    expect(result.slug).toBe("entity/nanjing-pharma");
+  });
+
+  test("person ↔ organization affinity: NER says person, DB has org → resolved_to_existing", () => {
+    seedEntity("红会", "entity/organization", "entity/red-cross");
+
+    const result = resolver.resolveSingle(candidate("红会", "person"));
+    expect(result.action).toBe("resolved_to_existing");
+    expect(result.slug).toBe("entity/red-cross");
+  });
+
+  test("organization ↔ concept affinity: NER says organization, DB has concept → resolved_to_existing", () => {
+    seedEntity("数字化转型", "concept/concept", "concept/digital-transformation");
+
+    const result = resolver.resolveSingle(candidate("数字化转型", "organization"));
+    expect(result.action).toBe("resolved_to_existing");
+    expect(result.slug).toBe("concept/digital-transformation");
+  });
+
+  test("person ↔ concept affinity: NER says person, DB has concept → resolved_to_existing", () => {
+    seedEntity("内观", "concept/concept", "concept/vipassana");
+
+    const result = resolver.resolveSingle(candidate("内观", "person"));
+    expect(result.action).toBe("resolved_to_existing");
+    expect(result.slug).toBe("concept/vipassana");
+  });
+
   // ─── New entity ─────────────────────────────────────────
 
   test("no match → stub_created, score=0", () => {

@@ -628,6 +628,14 @@ type_affinity:
     priority: [entity/organization, entity/place]
   - types: [concept/concept, concept/psychology, concept/technology, concept/pharma, concept/model]
     priority: [concept/pharma, concept/technology, concept/psychology, concept/model, concept/concept]
+  - types: [entity/person, entity/company]
+    priority: [entity/company, entity/person]
+  - types: [entity/person, entity/organization]
+    priority: [entity/organization, entity/person]
+  - types: [entity/organization, concept/concept]
+    priority: [concept/concept, entity/organization]
+  - types: [entity/person, concept/concept]
+    priority: [entity/person, concept/concept]
 
 # ─── NER 提示词模板 ───────────────────────────────────────
 ner_config:
