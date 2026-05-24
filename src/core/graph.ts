@@ -162,18 +162,13 @@ export class GraphManager {
   }
 
   getRelatedEntities(slug: string, limit: number = 10): GraphNode[] {
-    // Depth-1 neighbors, sorted by mention count
     const neighbors = this.getNeighbors(slug, "both");
-    const visited = new Set<string>([slug]);
+    const sorted = this.sortSlugsByMentionCount(neighbors.filter(n => n !== slug));
+
+    const batch = this.db.getPageTitlesAndTypes(sorted);
     const results: GraphNode[] = [];
-
-    const sorted = this.sortSlugsByMentionCount(neighbors.filter((n) => !visited.has(n)));
     for (const neighbor of sorted) {
-      if (visited.has(neighbor)) continue;
-      visited.add(neighbor);
-
-      const page = this.db.getPageTitleAndType(neighbor);
-
+      const page = batch.get(neighbor);
       if (page) {
         results.push({ slug: neighbor, title: page.title, type: page.type, depth: 1 });
         if (results.length >= limit) break;
