@@ -143,15 +143,20 @@ describe("DiscoveryManager - detectBridges", () => {
 
   test("detects bridge between distant entities (dist >= 4)", () => {
     // A → B → C → D → E, A-E is bridge (dist 4)
+    // Extra neighbors on A and E to meet BRIDGE_MIN_DEGREE=2
     seedPage(db, "entity/a", "entity/person", "A", 3);
     seedPage(db, "entity/b", "entity/person", "B", 3);
     seedPage(db, "entity/c", "entity/person", "C", 3);
     seedPage(db, "entity/d", "entity/person", "D", 3);
     seedPage(db, "entity/e", "entity/person", "E", 3);
+    seedPage(db, "entity/a1", "entity/person", "A1", 3);
+    seedPage(db, "entity/e1", "entity/person", "E1", 3);
     db.insertLink("entity/a", "entity/b", "提及", 0.5, "ner");
+    db.insertLink("entity/a", "entity/a1", "提及", 0.5, "ner");
     db.insertLink("entity/b", "entity/c", "提及", 0.5, "ner");
     db.insertLink("entity/c", "entity/d", "提及", 0.5, "ner");
     db.insertLink("entity/d", "entity/e", "提及", 0.5, "ner");
+    db.insertLink("entity/e", "entity/e1", "提及", 0.5, "ner");
 
     const mgr = new DiscoveryManager(db);
     const results = mgr.detectBridges();

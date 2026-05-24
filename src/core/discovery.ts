@@ -25,6 +25,7 @@ const TREND_MIN_CONSECUTIVE = 3;
 const TREND_SPIKE_DELTA = 5;
 const GAP_MIN_MENTIONS = 5;
 const GAP_MAX_LINKS = 2;
+const BRIDGE_MIN_DEGREE = 2;
 
 export class DiscoveryManager {
   private db: CBrainDB;
@@ -88,11 +89,13 @@ export class DiscoveryManager {
     for (let i = 0; i < entities.length; i++) {
       for (let j = i + 1; j < entities.length; j++) {
         const a = entities[i].slug, b = entities[j].slug;
+        const neighborsA = graph.get(a) ?? new Set<string>();
+        const neighborsB = graph.get(b) ?? new Set<string>();
+        if (neighborsA.size < BRIDGE_MIN_DEGREE || neighborsB.size < BRIDGE_MIN_DEGREE) continue;
+
         const dist = this.bfsDistance(a, b, graph);
         if (dist < 4 || !isFinite(dist)) continue;
 
-        const neighborsA = graph.get(a) ?? new Set<string>();
-        const neighborsB = graph.get(b) ?? new Set<string>();
         const shared = [...neighborsA].filter(n => neighborsB.has(n)).length;
 
         results.push({
