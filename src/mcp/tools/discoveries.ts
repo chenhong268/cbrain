@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { ReflectManager } from "../../core/reflect.js";
 import { DiscoveryManager } from "../../core/discovery.js";
 import type { DiscoveryType } from "../../core/discovery.js";
 
@@ -132,44 +131,37 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
         .describe("Detection types to run. Default: all."),
     },
   }, async ({ types }) => {
-    const jobId = ctx.db.submitJob("discovery", { types });
+    // Run only DiscoveryManager (pure graph math, no LLM, completes in seconds).
+    // ReflectManager is slower (BFS + LLM suggestions) and overlaps with bridge detection.
+    // Contradiction detection is LLM-heavy — skip unless explicitly requested.
+    const requested = types as DiscoveryType[] | undefined;
+    const fastTypes: DiscoveryType[] = requested
+      ? requested.filter(t => t !== "contradiction")
+      : ["bridge", "trend", "gap"];
+    const runContradiction = requested?.includes("contradiction") ?? false;
 
-    // Fire-and-forget background execution
-    const discoveryTypes = types as DiscoveryType[] | undefined;
-    Promise.resolve().then(async () => {
-      try {
-        const reflect = new ReflectManager(ctx.db, ctx.pages, ctx.llm, ctx.pipeline, ctx.embedding, ctx.insights);
-        const reflectReport = await reflect.runDiscovery();
+    const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
+    const report = await discoveryMgr.runDiscovery(runContradiction ? undefined : fastTypes);
 
-        const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
-        const newReport = await discoveryMgr.runDiscovery(discoveryTypes);
+    const typeLabels = Object.entries(report.byType)
+      .map(([k, v]) => `${TYPE_LABELS[k] ?? k}: ${v}`)
+      .join("，");
+    const actionLabels = Object.entries(report.byActionable)
+      .map(([k, v]) => `${ACTIONABLE_LABELS[k] ?? k}: ${v}`)
+      .join("，");
 
-        ctx.db.completeJob(jobId, {
-          reflect: reflectReport,
-          discovery: newReport,
-          merged: {
-            total: reflectReport.total + newReport.total,
-            byType: { ...reflectReport.byType, ...newReport.byType },
-            byActionable: {
-              high: (reflectReport.byActionable.high ?? 0) + (newReport.byActionable.high ?? 0),
-              medium: (reflectReport.byActionable.medium ?? 0) + (newReport.byActionable.medium ?? 0),
-              low: (reflectReport.byActionable.low ?? 0) + (newReport.byActionable.low ?? 0),
-            },
-          },
-        });
-      } catch (err) {
-        ctx.db.failJob(jobId, err instanceof Error ? err.message : String(err));
-      }
-    });
+    const skipped: string[] = [];
+    if (!runContradiction) skipped.push("contradiction（用 CLI 或指定 types 运行）");
+    skipped.push("reflect（社区/结构洞检测，用 CLI 运行）");
 
     return {
       content: [{
         type: "text" as const,
         text: JSON.stringify({
-          summary: `发现管线已提交，后台执行中。用 job_status 查询进度。`,
-          job_id: jobId,
-          status: "running",
-        }),
+          summary: `检测完成：${report.total} 个发现（${typeLabels}），重要程度：${actionLabels}`,
+          report,
+          skipped,
+        }, null, 2),
       }],
     };
   });
