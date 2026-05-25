@@ -2,6 +2,7 @@ import { CBrainDB } from "../storage/sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { LanceDBManager as LanceDBStorage } from "../storage/lancedb.js";
+import { ResearchManager } from "./research.js";
 
 export interface SearchResult {
   slug: string;
@@ -273,115 +274,12 @@ export class HybridSearch {
     return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
   }
 
-  // ─── multiStep: sufficiency check + retry + rerank ─────────────
-
-  private static readonly SUFFICIENCY_MAX_RETRIES = 2;
+  // ─── multiStep: delegates to ResearchManager (ReAct loop) ───────
 
   private async searchMultiStep(query: string, options: SearchOptions): Promise<SearchResult[]> {
-    const limit = options.limit ?? 10;
-    let bestResults: SearchResult[] = [];
-    let lastCount = -1;
-
-    for (let attempt = 0; attempt <= HybridSearch.SUFFICIENCY_MAX_RETRIES; attempt++) {
-      const attemptOptions: SearchOptions = { ...options };
-      if (attempt === 1) {
-        attemptOptions.multiQuery = true;
-        delete attemptOptions.strategy;
-      } else if (attempt === 2) {
-        attemptOptions.multiQuery = true;
-        attemptOptions._skipDecompose = true;
-        delete attemptOptions.strategy;
-      }
-
-      const results = await this.searchCore(query, attemptOptions);
-      if (results.length > bestResults.length) bestResults = results;
-
-      // Empty results — no point retrying, vault simply doesn't have it
-      if (results.length === 0) break;
-
-      // No improvement over last attempt — stop spinning
-      if (results.length === lastCount) break;
-      lastCount = results.length;
-
-      const sufficient = await this.checkSufficiency(query, results);
-      if (sufficient) { bestResults = results; break; }
-
-      console.error(`[search] multiStep attempt ${attempt + 1} insufficient, retrying...`);
-    }
-
-    if (this.llm && bestResults.length > 1) {
-      bestResults = await this.rerankResults(query, bestResults);
-    }
-
-    return bestResults.slice(0, limit);
-  }
-
-  private async checkSufficiency(query: string, results: SearchResult[]): Promise<boolean> {
-    if (!this.llm || results.length === 0) return results.length > 0;
-
-    const summaries = results.slice(0, 10).map(
-      (r, i) => `${i + 1}. [${r.slug}] ${r.snippet.slice(0, 100)}`
-    ).join("\n");
-
-    try {
-      const resp = await this.llm.chat([
-        {
-          role: "system",
-          content:
-            "你是搜索结果充分性评估器。判断搜索结果是否足以回答用户的查询。\n" +
-            "只考虑信息覆盖度和相关性，忽略结果数量本身。\n" +
-            '输出JSON: {"sufficient": true/false, "reason": "简短说明"}',
-        },
-        { role: "user", content: `查询: ${query}\n\n搜索结果:\n${summaries}` },
-      ]);
-
-      const parsed = JSON.parse(resp) as { sufficient: boolean; reason: string };
-      console.error(`[search] sufficiency: ${parsed.sufficient} — ${parsed.reason}`);
-      return parsed.sufficient === true;
-    } catch {
-      console.error("[search] sufficiency check failed, assuming sufficient");
-      return true;
-    }
-  }
-
-  private async rerankResults(query: string, results: SearchResult[]): Promise<SearchResult[]> {
-    if (!this.llm || results.length <= 1) return results;
-
-    const info = results.map(
-      (r, i) => `${i + 1}. slug="${r.slug}" snippet="${r.snippet.slice(0, 80)}"`
-    ).join("\n");
-
-    try {
-      const resp = await this.llm.chat([
-        {
-          role: "system",
-          content:
-            "你是搜索结果排序器。根据与查询的相关性，对搜索结果重新排序。\n" +
-            "最相关的排最前。只返回排序后的编号数组。\n" +
-            '输出JSON: {"order": [3, 1, 2, ...]}，编号从1开始，对应输入顺序。',
-        },
-        { role: "user", content: `查询: ${query}\n\n结果:\n${info}` },
-      ]);
-
-      const parsed = JSON.parse(resp) as { order: number[] };
-      if (!Array.isArray(parsed.order) || parsed.order.length === 0) return results;
-
-      const reordered: SearchResult[] = [];
-      const seen = new Set<number>();
-      for (const idx of parsed.order) {
-        if (idx >= 1 && idx <= results.length && !seen.has(idx)) {
-          seen.add(idx);
-          reordered.push(results[idx - 1]);
-        }
-      }
-      for (let i = 0; i < results.length; i++) {
-        if (!seen.has(i + 1)) reordered.push(results[i]);
-      }
-      return reordered;
-    } catch {
-      console.error("[search] reranking failed, returning original order");
-      return results;
-    }
+    if (!this.llm) return this.searchCore(query, options);
+    const researcher = new ResearchManager(this, this.db, this.llm);
+    return researcher.research(query, options);
   }
 
   async graphPrefetch(query: string): Promise<GraphContext> {
