@@ -326,7 +326,7 @@ export class DiscoveryManager {
       if (this.llmBudget <= 0) break;
 
       const incoming = this.db.getIncomingLinks(slug);
-      const sources = incoming.filter(l => l.from_slug.startsWith("record/"));
+      const sources = incoming.filter(l => l.from_slug.startsWith("records/"));
       if (sources.length < 2) continue;
 
       const sourceInfos = sources.slice(0, 5).map(s => {
