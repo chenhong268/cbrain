@@ -14,11 +14,59 @@ export interface SearchOptions {
   limit?: number;
   strategy?: "vector" | "fts" | "graph" | "all";
   multiQuery?: boolean;
+  /** @internal Skip decomposition for sub-queries (prevents recursion) */
+  _skipDecompose?: boolean;
 }
 
 export interface HybridSearchConfig {
   rrf_k?: number;
   multiQuery?: boolean;
+}
+
+export interface GraphContext {
+  entities: Array<{
+    slug: string;
+    title: string;
+    type: string;
+    neighbors: Array<{ slug: string; title: string; relation: string }>;
+  }>;
+  chains: string[];
+}
+
+const COMPLEXITY_CONJUNCTIONS = ["和", "与", "跟", "以及"];
+const QUESTION_WORDS = ["什么", "哪些", "怎么", "如何"];
+const MIN_TOKENS_FOR_COMPLEXITY = 3;
+const MAX_GRAPH_CONTEXT_CHARS = 2000;
+const MAX_NEIGHBORS_PER_ENTITY = 5;
+const MAX_CHAINS_PER_ENTITY = 3;
+
+export function isComplexQuery(
+  query: string,
+  knownSlugs: string[],
+  candidates?: string[]
+): boolean {
+  if (!query.trim()) return false;
+
+  // 2+ known entities → complex
+  if (knownSlugs.length >= 2) return true;
+
+  // Conjunction words → complex
+  for (const conj of COMPLEXITY_CONJUNCTIONS) {
+    if (query.includes(conj)) return true;
+  }
+
+  // Multiple question words → complex
+  let questionCount = 0;
+  for (const qw of QUESTION_WORDS) {
+    if (query.includes(qw)) questionCount++;
+  }
+  if (questionCount >= 2) return true;
+
+  // Agent-rewritten queries: space-separated tokens >= 3 → complex
+  const tokens = candidates ?? query.split(/[\s,，、；;]+/).filter((w) => w.length >= 2);
+  if (tokens.length >= MIN_TOKENS_FOR_COMPLEXITY) return true;
+
+  return false;
 }
 
 export function rrfScore(ranks: number[], k: number): number {
@@ -125,13 +173,50 @@ export class HybridSearch {
       return [{ slug: exact.slug, score: 1.0, snippet: exact.title, source: "exact" as const }];
     }
 
-    const useMultiQuery = (options?.multiQuery ?? this.multiQueryEnabled) && !!this.llm;
+    // Decomposition path for complex queries
+    if (this.llm && !options?._skipDecompose) {
+      const candidates = query.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
+      const resolved = this.db.resolveSlugs(candidates);
+      const knownSlugs = resolved.filter((r) => r.slug !== null).map((r) => r.slug!);
+
+      if (isComplexQuery(query, knownSlugs, candidates)) {
+        try {
+          const graphContext = await this.graphPrefetch(query);
+          const subQueries = await this.decomposeQuery(query, graphContext);
+
+          console.error(`[search] decomposition: "${query}" → ${subQueries.length} sub-queries: ${subQueries.join(" | ")}`);
+          if (subQueries.length >= 2) {
+            const subResults = await Promise.all(
+              subQueries.map((sq) =>
+                this.search(sq, { ...(options ?? {}), _skipDecompose: true }).catch(() => [] as SearchResult[])
+              )
+            );
+
+            const allSubLists = subResults.filter((r) => r.length > 0);
+            if (allSubLists.length > 0) {
+              const allSlugs = new Set<string>();
+              for (const list of allSubLists) for (const item of list) allSlugs.add(item.slug);
+              const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
+              const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
+              return mergeRankedResults(allSubLists, this.rrfK, limit, activityWeights, hotnessWeights);
+            }
+          }
+        } catch (e) {
+          console.error("[search] decomposition 路径失败，fallback 到 expandQuery:", e);
+        }
+      }
+    }
+
+    return this.searchWithExpansion(query, limit, options?.multiQuery);
+  }
+
+  private async searchWithExpansion(query: string, limit: number, multiQuery?: boolean): Promise<SearchResult[]> {
+    const useMultiQuery = (multiQuery ?? this.multiQueryEnabled) && !!this.llm;
     const queries = useMultiQuery ? await this.expandQuery(query) : [query];
 
     const allLists: SearchResult[][] = [];
 
     for (const q of queries) {
-      // Resolve query to slug for graph traversal
       const resolved = this.db.resolveSlugs([q])[0];
       const graphPromise = resolved?.slug
         ? this.graphSearch(resolved.slug, limit).catch((e) => {
@@ -158,13 +243,154 @@ export class HybridSearch {
       if (temporal.length > 0) allLists.push(temporal);
     }
 
-    // Fetch activity weights for all candidate slugs
     const allSlugs = new Set<string>();
     for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
     const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
     const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
 
     return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
+  }
+
+  async graphPrefetch(query: string): Promise<GraphContext> {
+    const context: GraphContext = { entities: [], chains: [] };
+
+    const candidates = query
+      .split(/[\s,，、；;和与跟以及]+/)
+      .filter((w) => w.length >= 2);
+    if (candidates.length === 0) return context;
+
+    try {
+      const resolved = this.db.resolveSlugs(candidates);
+      const known = resolved.filter((r) => r.slug !== null);
+
+      for (const r of known) {
+        const outgoing = this.db.getOutgoingLinks(r.slug!);
+        const incoming = this.db.getIncomingLinks(r.slug!);
+
+        // Map to { slug, relation }, dedup by slug (keep first occurrence)
+        const seen = new Set<string>();
+        const neighborEntries: Array<{ slug: string; relation: string }> = [];
+        for (const link of outgoing) {
+          if (!seen.has(link.to_slug)) {
+            seen.add(link.to_slug);
+            neighborEntries.push({ slug: link.to_slug, relation: link.relation });
+          }
+        }
+        for (const link of incoming) {
+          if (!seen.has(link.from_slug)) {
+            seen.add(link.from_slug);
+            neighborEntries.push({ slug: link.from_slug, relation: link.relation });
+          }
+        }
+
+        const neighborData: Array<{
+          slug: string;
+          title: string;
+          relation: string;
+        }> = [];
+        for (const entry of neighborEntries.slice(0, MAX_NEIGHBORS_PER_ENTITY)) {
+          const info = this.db.getPageTitleAndType(entry.slug);
+          if (info) {
+            neighborData.push({ slug: entry.slug, title: info.title, relation: entry.relation });
+          }
+        }
+
+        const pageType = this.db.getPageTitleAndType(r.slug!);
+        context.entities.push({
+          slug: r.slug!,
+          title: r.title ?? r.slug!,
+          type: pageType?.type ?? "unknown",
+          neighbors: neighborData,
+        });
+      }
+
+      for (const entity of context.entities) {
+        for (const neighbor of entity.neighbors.slice(0, MAX_CHAINS_PER_ENTITY)) {
+          context.chains.push(
+            `${entity.title} --${neighbor.relation}--> ${neighbor.title}`
+          );
+        }
+      }
+
+      const chainsStr = context.chains.join("\n");
+      if (chainsStr.length > MAX_GRAPH_CONTEXT_CHARS) {
+        let total = 0;
+        const trimmed: string[] = [];
+        for (const chain of context.chains) {
+          if (total + chain.length > MAX_GRAPH_CONTEXT_CHARS) break;
+          trimmed.push(chain);
+          total += chain.length;
+        }
+        context.chains = trimmed;
+      }
+    } catch (e) {
+      console.error("[search] graphPrefetch 失败:", e);
+    }
+
+    return context;
+  }
+
+  private static MAX_SUB_QUERIES = 5;
+
+  async decomposeQuery(
+    query: string,
+    graphContext: GraphContext
+  ): Promise<string[]> {
+    if (!this.llm) return [query];
+
+    const contextParts: string[] = [];
+    if (graphContext.entities.length > 0) {
+      contextParts.push("已知实体:");
+      for (const e of graphContext.entities) {
+        const neighborStr =
+          e.neighbors.length > 0
+            ? e.neighbors.map((n) => `${n.title}(${n.relation})`).join(", ")
+            : "无邻居";
+        contextParts.push(`- ${e.title} (${e.type}) → 邻居: ${neighborStr}`);
+      }
+    }
+    if (graphContext.chains.length > 0) {
+      contextParts.push("关系链:");
+      for (const chain of graphContext.chains) {
+        contextParts.push(`- ${chain}`);
+      }
+    }
+    const contextStr =
+      contextParts.length > 0 ? contextParts.join("\n") : "无图谱信息";
+
+    try {
+      const resp = await this.llm.chat([
+        {
+          role: "system",
+          content:
+            "你是查询分解器。把复杂查询拆成2-5个独立的子查询。\n\n" +
+            "规则:\n" +
+            "- 每个子查询必须能独立检索，不依赖其他子查询的结果\n" +
+            "- 利用图谱中的已知关系指导拆分方向\n" +
+            "- 如果两个实体有直接关系，可以合并为一个子查询\n" +
+            '- 输出JSON: {"sub_queries":[{"sub_query":"...","intent":"..."}]}\n\n' +
+            `图谱上下文:\n${contextStr}`,
+        },
+        { role: "user", content: `查询: ${query}` },
+      ]);
+
+      const parsed = JSON.parse(resp) as {
+        sub_queries: Array<{ sub_query: string; intent: string }>;
+      };
+      if (
+        !Array.isArray(parsed.sub_queries) ||
+        parsed.sub_queries.length === 0
+      )
+        return [query];
+
+      return parsed.sub_queries
+        .slice(0, HybridSearch.MAX_SUB_QUERIES)
+        .map((sq) => sq.sub_query)
+        .filter((q) => typeof q === "string" && q.trim());
+    } catch (e) {
+      console.error("[search] decomposeQuery 失败:", e);
+      return [query];
+    }
   }
 
   private async expandQuery(query: string): Promise<string[]> {
