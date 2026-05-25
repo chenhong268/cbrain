@@ -18,8 +18,10 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
       session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
+      multiStep: z.boolean().optional().default(false)
+        .describe("Enable sufficiency check + retry loop + LLM reranking for deeper search (slower)"),
     },
-  }, async ({ query, limit, strategy, session_id }) => {
+  }, async ({ query, limit, strategy, session_id, multiStep }) => {
     const start = Date.now();
     let results: Awaited<ReturnType<typeof ctx.search.search>>;
     let usedStrategy: string = strategy;
@@ -38,13 +40,13 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       const complex = isComplexQuery(query, knownSlugs, candidates);
 
       if (complex) {
-        results = await ctx.search.search(query, { strategy: "all", limit });
+        results = await ctx.search.search(query, { strategy: "all", limit, multiStep });
         usedStrategy = "smart-decompose";
       } else if (ftsSlugs.length >= Math.min(limit, 3)) {
         results = ftsSlugs.map(r => ({ slug: r.page_slug, score: Math.abs(r.rank), snippet: r.content.slice(0, 200), source: "fts" as const }));
         usedStrategy = "smart-fts";
       } else {
-        results = await ctx.search.search(query, { strategy: "all", limit });
+        results = await ctx.search.search(query, { strategy: "all", limit, multiStep });
         usedStrategy = ftsSlugs.length > 0 ? "smart-hybrid-boost" : "smart-hybrid";
       }
 
@@ -63,7 +65,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     } else if (strategy === "vector") {
       results = await ctx.search.search(query, { strategy: "vector", limit });
     } else {
-      results = await ctx.search.search(query, { strategy: "all", limit });
+      results = await ctx.search.search(query, { strategy: "all", limit, multiStep });
     }
 
     const latencyMs = Date.now() - start;

@@ -25,8 +25,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
       detail: z.enum(["normal", "brief"]).optional().default("brief")
         .describe("brief=compact view (default, 200-char body, no dossier/peers/subordinates); normal=full context with all enrichment"),
+      multiStep: z.boolean().optional().default(false)
+        .describe("Enable sufficiency check + retry loop + LLM reranking for deeper recall (slower)"),
     },
-  }, async ({ query, limit, strategy, session_id, detail: detailLevel }) => {
+  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep }) => {
     const cap = Math.min(limit ?? 5, 5);
 
     const searchStart = Date.now();
@@ -39,7 +41,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const exactSlug = resolved?.slug ?? null;
 
       // Always run full hybrid — FTS alone skips vector/graph/temporal signals
-      searchResults = await ctx.search.search(query, { limit: cap });
+      searchResults = await ctx.search.search(query, { limit: cap, multiStep });
       usedStrategy = "smart-hybrid";
 
       // Promote exact match to top
@@ -57,7 +59,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     } else if (strategy === "vector") {
       searchResults = await ctx.search.search(query, { strategy: "vector", limit: cap });
     } else {
-      searchResults = await ctx.search.search(query, { limit: cap });
+      searchResults = await ctx.search.search(query, { limit: cap, multiStep });
     }
 
     const searchLatencyMs = Date.now() - searchStart;
