@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { generateProactiveHints } from "../../core/proactive.js";
+import { isComplexQuery } from "../../core/search.js";
 import { trimHint } from "./trim.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
@@ -28,14 +29,23 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       const resolved = ctx.db.resolveSlugs([query])[0];
       const exactSlug = resolved?.slug ?? null;
 
-      let ftsRaw: Awaited<ReturnType<typeof ctx.db.ftsSearch>> = [];
-      try { ftsRaw = ctx.db.ftsSearch(query, limit); } catch { /* fts failure is non-fatal */ }
-      if (ftsRaw.length > 0) {
-        results = ftsRaw.map(r => ({ slug: r.page_slug, score: 1 / (1 - Math.min(r.rank, 0.999)), snippet: r.content.slice(0, 200), source: "fts" as const }));
+      // Detect complex queries before FTS — routes to decomposition in ctx.search.search().
+      // This check is needed here (not just inside HybridSearch) because the smart strategy
+      // can short-circuit on FTS results, bypassing HybridSearch.search() entirely.
+      const candidates = query.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
+      const ftsSlugs = (() => { try { return ctx.db.ftsSearch(query, limit); } catch { return []; } })();
+      const knownSlugs = ctx.db.resolveSlugs(candidates).filter((r) => r.slug !== null).map((r) => r.slug!);
+      const complex = isComplexQuery(query, knownSlugs, candidates);
+
+      if (complex) {
+        results = await ctx.search.search(query, { strategy: "all", limit });
+        usedStrategy = "smart-decompose";
+      } else if (ftsSlugs.length >= Math.min(limit, 3)) {
+        results = ftsSlugs.map(r => ({ slug: r.page_slug, score: 1 / (1 - Math.min(r.rank, 0.999)), snippet: r.content.slice(0, 200), source: "fts" as const }));
         usedStrategy = "smart-fts";
       } else {
         results = await ctx.search.search(query, { strategy: "all", limit });
-        usedStrategy = "smart-hybrid";
+        usedStrategy = ftsSlugs.length > 0 ? "smart-hybrid-boost" : "smart-hybrid";
       }
 
       // Promote exact match to top
