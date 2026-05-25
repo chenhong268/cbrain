@@ -59,9 +59,20 @@ export class FileWatcher {
     }
     this.inFlight.add(slug);
     this.limit(() => this.sync.syncPage(slug, this.vaultPath))
-      .then(() => { this.logger?.info("watcher", "同步完成", { slug }); })
-      .catch((e) => { this.logger?.warn("watcher", `同步失败: ${slug}`, { error: String(e) }); })
-      .finally(() => { this.inFlight.delete(slug); });
+      .then(() => { this.logger?.info("watcher", "同步完成", { slug }); this.inFlight.delete(slug); })
+      .catch((e) => {
+        if (isDatabaseLocked(e)) {
+          this.logger?.warn("watcher", `database locked, retrying: ${slug}`);
+          this.sleep(5000)
+            .then(() => this.sync.syncPage(slug, this.vaultPath))
+            .then(() => { this.logger?.info("watcher", "重试同步完成", { slug }); })
+            .catch((e2) => { this.logger?.warn("watcher", `重试同步失败: ${slug}`, { error: String(e2) }); })
+            .finally(() => { this.inFlight.delete(slug); });
+          return;
+        }
+        this.logger?.warn("watcher", `同步失败: ${slug}`, { error: String(e) });
+        this.inFlight.delete(slug);
+      });
   }
 
   private sleep(ms: number): Promise<void> {
@@ -134,7 +145,7 @@ export class FileWatcher {
     if (deleted.length > 0) {
       for (const slug of deleted) {
         try {
-          this.sync.removePage(slug);
+          await this.sync.removePage(slug);
         } catch (e) {
           this.logger?.warn("watcher", `删除清理失败: ${slug}`, { error: String(e) });
         }
@@ -142,4 +153,8 @@ export class FileWatcher {
       this.logger?.info("watcher", "删除检测", { slugs: deleted });
     }
   }
+}
+
+function isDatabaseLocked(e: unknown): boolean {
+  return e instanceof Error && e.message.includes("database is locked");
 }

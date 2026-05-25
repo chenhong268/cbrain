@@ -187,11 +187,26 @@ export class SyncManager {
             this.logger?.warn("sync", "Wikilink 提取失败", { slug: file.slug, error: String(e) });
           }
         }
+
       } catch (err) {
         report.errors++;
         const msg = err instanceof Error ? err.message : String(err);
         report.errorDetails!.push(`${file.filePath}: ${msg}`);
         this.logger?.error("sync", `同步失败: ${file.slug}`, { error: msg });
+      }
+    }
+
+    // Phase 2.5: reconcile reports_to (must run after all pages are upserted)
+    for (const file of changed) {
+      const reportsTo = file.frontmatter?.reports_to;
+      if (reportsTo && typeof reportsTo === "string" && this.db.getPage(reportsTo)) {
+        try {
+          const outgoing = this.db.getOutgoingLinks(file.slug)
+            .filter(l => l.relation === "reports_to");
+          if (!outgoing.some(l => l.to_slug === reportsTo)) {
+            this.db.insertLink(file.slug, reportsTo, "reports_to", null, 1.0, "strong", "sync", 0.95);
+          }
+        } catch { /* non-critical */ }
       }
     }
 
@@ -253,6 +268,25 @@ export class SyncManager {
   }
 
   async syncPage(slug: string, vaultPath: string): Promise<SyncPageResult> {
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY_MS = 3000;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await this._syncPageInner(slug, vaultPath);
+      } catch (e) {
+        if (attempt < MAX_RETRIES && isDatabaseLocked(e)) {
+          this.logger?.warn("sync", `database locked, retrying (${attempt + 1}/${MAX_RETRIES})`, { slug });
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw new Error("unreachable");
+  }
+
+  private async _syncPageInner(slug: string, vaultPath: string): Promise<SyncPageResult> {
     if (slug.includes("..") || slug.startsWith("/")) {
       return { success: false, error: "Invalid slug" };
     }
@@ -356,6 +390,19 @@ export class SyncManager {
       }
     }
 
+    // Reconcile reports_to from frontmatter → graph link
+    const reportsTo = parsed.frontmatter?.reports_to;
+    if (reportsTo && typeof reportsTo === "string" && this.db.getPage(reportsTo)) {
+      try {
+        const outgoing = this.db.getOutgoingLinks(effectiveSlug)
+          .filter(l => l.relation === "reports_to");
+        if (!outgoing.some(l => l.to_slug === reportsTo)) {
+          this.db.insertLink(effectiveSlug, reportsTo, "reports_to", null, 1.0, "strong", "sync", 0.95);
+          this.logger?.info("sync", `reconciled reports_to: ${effectiveSlug} → ${reportsTo}`);
+        }
+      } catch { /* non-critical */ }
+    }
+
     // NER — skip entity/concept pages
     if (this.nerEngine && parsed.body.trim() && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/")) {
       try {
@@ -377,9 +424,9 @@ export class SyncManager {
     return { success: true };
   }
 
-  removePage(slug: string): void {
+  async removePage(slug: string): Promise<void> {
     this.db.deletePageCascaded(slug);
-    this.lance.deleteByPageSlug(slug);
+    await this.lance.deleteByPageSlug(slug);
   }
 
   async removeOrphans(vaultPath: string): Promise<string[]> {
@@ -430,4 +477,8 @@ export class SyncManager {
     }
     return "record";
   }
+}
+
+function isDatabaseLocked(e: unknown): boolean {
+  return e instanceof Error && e.message.includes("database is locked");
 }

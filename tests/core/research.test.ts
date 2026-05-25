@@ -427,6 +427,30 @@ describe("ResearchManager", () => {
     expect(results.map((r) => r.slug).sort()).toEqual(["entity/a", "entity/b", "entity/c"]);
   });
 
+  test("stagnant detection: breaks when no new slugs discovered", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["test", [makeResult("entity/a", 0.9)]],
+      ["follow1", [makeResult("entity/a", 0.8)]], // same slug, no growth
+    ]);
+
+    const llm = createMockLLM([
+      '{"reasoning":"需要更多","sufficient":false,"follow_up_queries":[{"query":"follow1","intent":"test"}]}',
+      '{"reasoning":"还是不够","sufficient":false,"follow_up_queries":[{"query":"follow2","intent":"test"}]}',
+      '{"order": [1]}',
+    ]);
+
+    const researcher = new ResearchManager(
+      createMockSearch(searchResponses), db, llm,
+      { maxIterations: 3 },
+    );
+    const results = await researcher.research("test");
+
+    // Iteration 1: follow1 returns same slug "entity/a" → no growth → stagnant break
+    // Only 1 reasoning call; rerank skipped because only 1 result
+    expect(llm.calls.length).toBe(1);
+    expect(results.length).toBe(1);
+  });
+
   test("maxFollowUpQueries limits follow-up count", async () => {
     const searchResponses = new Map<string, SearchResult[]>([
       ["test", [makeResult("entity/a", 0.9)]],

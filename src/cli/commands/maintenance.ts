@@ -546,6 +546,7 @@ export function register(program: Command) {
     .option("--reports-to <managerSlug>", "Set direct manager")
     .option("--remove", "Remove hierarchy relationship")
     .option("--list", "List all entities with hierarchy")
+    .option("--reconcile", "Fix missing graph links for frontmatter reports_to")
     .action(async (slug, opts) => {
       const config = loadConfig();
       const deps = createDeps(config);
@@ -573,6 +574,25 @@ export function register(program: Command) {
             console.log(`    ${e.slug.padEnd(40)} ${e.title.padEnd(15)} → ${e.reports_to_title}`);
           }
         }
+        deps.db.close();
+        return;
+      }
+
+      if (opts.reconcile) {
+        const allPages = deps.db.listPages({ limit: 10000 });
+        let fixed = 0;
+        for (const p of allPages) {
+          const full = pages.getBySlug(p.slug);
+          const rt = (full?.frontmatter as Record<string, unknown> | undefined)?.reports_to as string | undefined;
+          if (!rt) continue;
+          const outgoing = deps.db.getOutgoingLinks(p.slug).filter(l => l.relation === "reports_to");
+          if (!outgoing.some(l => l.to_slug === rt)) {
+            deps.db.insertLink(p.slug, rt, "reports_to", null, 1.0, "strong", "reconcile", 0.95);
+            fixed++;
+            console.log(`  + ${p.slug} → ${rt}`);
+          }
+        }
+        console.log(`\n  Reconciled ${fixed} missing reports_to links.`);
         deps.db.close();
         return;
       }

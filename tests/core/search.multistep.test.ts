@@ -189,6 +189,66 @@ describe("HybridSearch multiStep", () => {
     expect(results).toEqual([]);
   });
 
+  test("multiStep=undefined (not passed) with complex query triggers multiStep", async () => {
+    insertPage(db, "entity/zhangsan", "张三", "entity/person");
+    insertPage(db, "entity/lisi", "李四", "entity/person");
+    // Insert chunks whose content matches the query trigrams so FTS finds them
+    const sharedContent = "张三和李四的投资哲学对比分析";
+    db.prepare("INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, ?, ?, ?)")
+      .run("entity/zhangsan", 0, sharedContent, 0);
+    db.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)")
+      .run("entity/zhangsan", sharedContent);
+
+    const llmCalls: string[] = [];
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async (messages) => {
+        const sysMsg = messages.find((m) => m.role === "system")!.content;
+        llmCalls.push(sysMsg);
+        return '{"sufficient": true, "reason": "ok"}';
+      },
+    };
+
+    const search = new HybridSearch(
+      db, createMockEmbeddingProvider(), createMockLance() as any,
+      { rrf_k: 60, llm }
+    );
+
+    // Not passing multiStep at all — should auto-trigger for query containing "和"
+    const results = await search.search("张三和李四的关系", { limit: 5 });
+    expect(Array.isArray(results)).toBe(true);
+    // If auto-trigger works, the reasoning LLM call happens
+    expect(llmCalls.some((c) => c.includes("搜索推理引擎") || c.includes("充分性"))).toBe(true);
+  });
+
+  test("multiStep=undefined with simple single-entity query does NOT trigger multiStep", async () => {
+    insertPage(db, "entity/zhangsan", "张三", "entity/person");
+    db.prepare("INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, ?, ?, ?)")
+      .run("entity/zhangsan", 0, "张三是一位投资人", 0);
+    db.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)")
+      .run("entity/zhangsan", "张三是一位投资人");
+
+    const llmCalls: string[] = [];
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async (messages) => {
+        const sysMsg = messages.find((m) => m.role === "system")!.content;
+        llmCalls.push(sysMsg);
+        return '{"sufficient": true}';
+      },
+    };
+
+    const search = new HybridSearch(
+      db, createMockEmbeddingProvider(), createMockLance() as any,
+      { rrf_k: 60, llm }
+    );
+
+    // Single entity name — should NOT auto-trigger
+    const results = await search.search("张三", { limit: 5 });
+    expect(Array.isArray(results)).toBe(true);
+    expect(llmCalls.length).toBe(0);
+  });
+
   test("malformed LLM response → safe degradation", async () => {
     insertPage(db, "entity/zhangsan", "张三", "entity/person");
 

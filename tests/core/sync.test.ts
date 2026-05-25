@@ -237,6 +237,47 @@ describe("SyncManager", () => {
     });
   });
 
+  describe("reports_to reconciliation", () => {
+    test("syncPage creates graph link from frontmatter reports_to", async () => {
+      // Target page must exist (FK constraint)
+      writeMdFile(vaultPath, "brain/entities/person/boss.md", { title: "老板", type: "entity/person", slug: "brain/entities/person/boss" }, "老板内容");
+      writeMdFile(vaultPath, "brain/entities/person/emp.md", { title: "员工", type: "entity/person", slug: "brain/entities/person/emp", reports_to: "brain/entities/person/boss" }, "员工内容");
+
+      await sync.syncPage("brain/entities/person/boss", vaultPath);
+      await sync.syncPage("brain/entities/person/emp", vaultPath);
+
+      const links = db.getOutgoingLinks("brain/entities/person/emp").filter(l => l.relation === "reports_to");
+      expect(links.length).toBe(1);
+      expect(links[0].to_slug).toBe("brain/entities/person/boss");
+    });
+
+    test("syncPage skips if graph link already exists", async () => {
+      writeMdFile(vaultPath, "brain/entities/person/boss2.md", { title: "老板2", type: "entity/person", slug: "brain/entities/person/boss2" }, "老板内容2");
+      writeMdFile(vaultPath, "brain/entities/person/emp2.md", { title: "员工2", type: "entity/person", slug: "brain/entities/person/emp2", reports_to: "brain/entities/person/boss2" }, "员工内容2");
+
+      await sync.syncPage("brain/entities/person/boss2", vaultPath);
+      await sync.syncPage("brain/entities/person/emp2", vaultPath);
+
+      // Sync again — should not duplicate
+      await sync.syncPage("brain/entities/person/emp2", vaultPath);
+
+      const links = db.getOutgoingLinks("brain/entities/person/emp2").filter(l => l.relation === "reports_to");
+      expect(links.length).toBe(1);
+    });
+
+    test("syncAll reconciles reports_to from frontmatter", async () => {
+      writeMdFile(vaultPath, "brain/entities/person/manager.md", { title: "经理", type: "entity/person", slug: "brain/entities/person/manager" }, "经理内容");
+      writeMdFile(vaultPath, "brain/entities/person/sub.md", { title: "下属", type: "entity/person", slug: "brain/entities/person/sub", reports_to: "brain/entities/person/manager" }, "下属内容");
+
+      const report = await sync.syncAll(vaultPath);
+      expect(report.synced).toBe(2);
+
+      const links = db.getOutgoingLinks("brain/entities/person/sub").filter(l => l.relation === "reports_to");
+      expect(links.length).toBe(1);
+      expect(links[0].to_slug).toBe("brain/entities/person/manager");
+    });
+  });
+
   describe("removeOrphans", () => {
     test("removes pages in SQLite but not in vault", async () => {
       db.prepare(

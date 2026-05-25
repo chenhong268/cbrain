@@ -21,12 +21,12 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       query: z.string().describe("Search query"),
       limit: z.number().optional().default(5).describe("Max entities to recall (capped at 5, only top results are fully enriched)"),
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
-        .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
+        .describe("smart=always full hybrid (FTS alone skips vector/graph/temporal signals); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
       session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
       detail: z.enum(["normal", "brief"]).optional().default("brief")
         .describe("brief=compact view (default, 200-char body, no dossier/peers/subordinates); normal=full context with all enrichment"),
-      multiStep: z.boolean().optional().default(false)
-        .describe("多轮深度搜索：自动判断结果充分性、换策略重试、LLM重排序。开启条件：查询模糊/跨领域（如'心理学和投资的关系'）、首次结果不满意、需要全面覆盖时。精确查单个实体（如'阿德勒'）不需要开。"),
+      multiStep: z.boolean().optional()
+        .describe("多轮深度搜索：不传时由系统自动判断是否需要。显式传true强制开启（查询模糊/跨领域/需要全面覆盖），传false禁用。精确查单个实体不需要开。"),
     },
   }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep }) => {
     const cap = Math.min(limit ?? 5, 5);

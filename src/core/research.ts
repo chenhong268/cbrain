@@ -76,7 +76,9 @@ export class ResearchManager {
         newResults = this.mergeResults(newResults, subResults);
       }
 
+      const prevSize = session.discoveredSlugs.size;
       session = this.updateSession(session, newResults, i + 1);
+      if (session.discoveredSlugs.size === prevSize) break;
     }
 
     const reranked = await this.rerankResults(query, session.allResults);
