@@ -1,6 +1,16 @@
 # Changelog
 
-> Current: `v1.8.4` — Agentic search phase 1: graph-aware query decomposition + bug fixes.
+> Current: `v1.8.5` — Agentic search multiStep: sufficiency check + auto-trigger + LLM rerank.
+
+## [v1.8.5] — 2026-05-25
+
+### 新功能
+- **Agentic search multiStep**：检索后自动判断结果充分性，不够则换策略重试（最多 3 轮），最后 LLM rerank
+- **Auto-trigger**：复杂查询自动启用 multiStep，无需手动传参。精确查单个实体走快路径
+- **Early exit**：空结果 / 结果停滞时立即终止，防止 58s 死循环
+
+### Bug 修复
+- **SQLite 锁竞争**：添加 `busy_timeout=5000ms`，减少并发写入冲突
 
 ## [v1.8.4] — 2026-05-25
 
