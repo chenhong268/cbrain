@@ -408,10 +408,10 @@ describe("DiscoveryManager - detectContradictions", () => {
 
   test("detects contradiction between two sources", async () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
-    seedPage(db, "record/note1", "record", "会议记录1", 0);
-    seedPage(db, "record/note2", "record", "会议记录2", 0);
-    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+    seedPage(db, "records/note1", "record", "会议记录1", 0);
+    seedPage(db, "records/note2", "record", "会议记录2", 0);
+    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
 
     const mockLlm = createMockLlm(JSON.stringify({
       has_contradiction: true,
@@ -433,10 +433,10 @@ describe("DiscoveryManager - detectContradictions", () => {
 
   test("no contradiction when LLM says no", async () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
-    seedPage(db, "record/note1", "record", "会议记录1", 0);
-    seedPage(db, "record/note2", "record", "会议记录2", 0);
-    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+    seedPage(db, "records/note1", "record", "会议记录1", 0);
+    seedPage(db, "records/note2", "record", "会议记录2", 0);
+    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
 
     const mockLlm = createMockLlm(JSON.stringify({
       has_contradiction: false,
@@ -453,10 +453,10 @@ describe("DiscoveryManager - detectContradictions", () => {
 
   test("no LLM → no contradictions detected", async () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
-    seedPage(db, "record/note1", "record", "会议记录1", 0);
-    seedPage(db, "record/note2", "record", "会议记录2", 0);
-    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+    seedPage(db, "records/note1", "record", "会议记录1", 0);
+    seedPage(db, "records/note2", "record", "会议记录2", 0);
+    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
 
     const mgr = new DiscoveryManager(db);
     const results = await mgr.detectContradictions();
@@ -466,10 +466,10 @@ describe("DiscoveryManager - detectContradictions", () => {
 
   test("invalid LLM JSON → graceful fallback", async () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
-    seedPage(db, "record/note1", "record", "会议记录1", 0);
-    seedPage(db, "record/note2", "record", "会议记录2", 0);
-    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+    seedPage(db, "records/note1", "record", "会议记录1", 0);
+    seedPage(db, "records/note2", "record", "会议记录2", 0);
+    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
 
     const mockLlm = createMockLlm("not valid json {{{");
 
@@ -481,10 +481,10 @@ describe("DiscoveryManager - detectContradictions", () => {
 
   test("LLM returns markdown-fenced JSON → still parsed correctly", async () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
-    seedPage(db, "record/note1", "record", "会议记录1", 0);
-    seedPage(db, "record/note2", "record", "会议记录2", 0);
-    db.insertLink("record/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("record/note2", "entity/person", "提及", 0.8, "ner");
+    seedPage(db, "records/note1", "record", "会议记录1", 0);
+    seedPage(db, "records/note2", "record", "会议记录2", 0);
+    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
 
     const mockLlm = createMockLlm("```json\n{\"has_contradiction\": true, \"confidence\": 0.9, \"explanation\": \"矛盾\", \"suggested_resolution\": \"核实\"}\n```");
 
