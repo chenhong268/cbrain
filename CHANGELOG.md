@@ -1,6 +1,18 @@
 # Changelog
 
-> Current: `v1.8.3` — Discovery engine: round-robin type diversity, enrichment coverage, ordering fixes.
+> Current: `v1.8.4` — Agentic search phase 1: graph-aware query decomposition + bug fixes.
+
+## [v1.8.4] — 2026-05-25
+
+### 新功能
+- **Graph-aware query decomposition**：复杂查询自动拆解为子查询，结合知识图谱上下文提升搜索精度（agentic search phase 1）
+- **双层路由**：`isComplexQuery` 规则检测 + LLM 拆解，简单查询走快路径不浪费 token
+
+### Bug 修复
+- **Discovery contradiction detection 从未执行**：路由路径 `record/` → `records/` 拼写错误
+- **FTS5 排序翻转**：rank 是负数，取 `Math.abs(rank)` 修正
+- **Dream locked 语义错误**：locked 实体不应参与 dream 循环
+- **Zhipu tokenCount 批量膨胀**：批量 embedding 时 token 计数重复累加
 
 ## [v1.8.3] — 2026-05-24
 
