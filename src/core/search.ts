@@ -155,10 +155,22 @@ export class HybridSearch {
 
   async search(query: string, options?: SearchOptions): Promise<SearchResult[]> {
     if (!query.trim()) return [];
-    if (options?.multiStep && this.llm) {
-      return this.searchMultiStep(query, options);
+
+    // Auto-enable multiStep for complex queries when LLM is available
+    const shouldMultiStep = options?.multiStep === true ||
+      (options?.multiStep === undefined && this.llm && this.isMultiStepCandidate(query));
+
+    if (shouldMultiStep && this.llm) {
+      return this.searchMultiStep(query, options ?? {});
     }
     return this.searchCore(query, options);
+  }
+
+  private isMultiStepCandidate(query: string): boolean {
+    const candidates = query.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
+    const resolved = this.db.resolveSlugs(candidates);
+    const knownSlugs = resolved.filter((r) => r.slug !== null).map((r) => r.slug!);
+    return isComplexQuery(query, knownSlugs, candidates);
   }
 
   private async searchCore(query: string, options?: SearchOptions): Promise<SearchResult[]> {

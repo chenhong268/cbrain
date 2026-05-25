@@ -19,7 +19,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
       session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
       multiStep: z.boolean().optional().default(false)
-        .describe("Enable sufficiency check + retry loop + LLM reranking for deeper search (slower)"),
+        .describe("多轮深度搜索：自动判断结果充分性、换策略重试、LLM重排序。开启条件：查询模糊/跨领域、首次结果不满意、需要全面覆盖时。精确查单个关键词不需要开。"),
     },
   }, async ({ query, limit, strategy, session_id, multiStep }) => {
     const start = Date.now();

@@ -26,7 +26,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       detail: z.enum(["normal", "brief"]).optional().default("brief")
         .describe("brief=compact view (default, 200-char body, no dossier/peers/subordinates); normal=full context with all enrichment"),
       multiStep: z.boolean().optional().default(false)
-        .describe("Enable sufficiency check + retry loop + LLM reranking for deeper recall (slower)"),
+        .describe("多轮深度搜索：自动判断结果充分性、换策略重试、LLM重排序。开启条件：查询模糊/跨领域（如'心理学和投资的关系'）、首次结果不满意、需要全面覆盖时。精确查单个实体（如'阿德勒'）不需要开。"),
     },
   }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep }) => {
     const cap = Math.min(limit ?? 5, 5);
