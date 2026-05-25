@@ -83,7 +83,7 @@ export async function runDream(
         indexes: { files: 0 },
       },
       duration_ms: 0,
-      locked: false,
+      locked: true,
       brief: "上次 dream 尚未完成（30 分钟锁未释放），已跳过。如需强制执行，请先 dream_reset。",
     };
   }
