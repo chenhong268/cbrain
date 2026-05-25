@@ -64,13 +64,15 @@ export class ResearchManager {
         .filter(q => !session.issuedQueries.has(q));
       if (newQueries.length === 0) break;
 
-      let newResults: SearchResult[] = [];
-      for (const fq of newQueries) {
-        const subResults = await this.search.search(fq, {
+      const subResultsList = await Promise.all(
+        newQueries.map(fq => this.search.search(fq, {
           limit: 10,
           multiStep: false,
           _skipDecompose: true,
-        });
+        })),
+      );
+      let newResults: SearchResult[] = [];
+      for (const subResults of subResultsList) {
         newResults = this.mergeResults(newResults, subResults);
       }
 
