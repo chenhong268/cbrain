@@ -268,6 +268,7 @@ export class HybridSearch {
   private async searchMultiStep(query: string, options: SearchOptions): Promise<SearchResult[]> {
     const limit = options.limit ?? 10;
     let bestResults: SearchResult[] = [];
+    let lastCount = -1;
 
     for (let attempt = 0; attempt <= HybridSearch.SUFFICIENCY_MAX_RETRIES; attempt++) {
       const attemptOptions: SearchOptions = { ...options };
@@ -282,6 +283,13 @@ export class HybridSearch {
 
       const results = await this.searchCore(query, attemptOptions);
       if (results.length > bestResults.length) bestResults = results;
+
+      // Empty results — no point retrying, vault simply doesn't have it
+      if (results.length === 0) break;
+
+      // No improvement over last attempt — stop spinning
+      if (results.length === lastCount) break;
+      lastCount = results.length;
 
       const sufficient = await this.checkSufficiency(query, results);
       if (sufficient) { bestResults = results; break; }
