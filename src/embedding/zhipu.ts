@@ -53,7 +53,7 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
 
     return sorted.map((item) => ({
       embedding: item.embedding,
-      tokenCount: json.usage?.total_tokens ?? 0,
+      tokenCount: Math.round((json.usage?.total_tokens ?? 0) / texts.length),
     }));
   }
 }
