@@ -152,7 +152,6 @@ export class SyncManager {
           type: file.type,
           title: file.title,
           filePath: file.relPath,
-          contentHash: file.contentHash,
         });
 
         if (file.frontmatter?.tags && Array.isArray(file.frontmatter.tags)) {
@@ -168,6 +167,9 @@ export class SyncManager {
           const fresh = await this.pipeline.embed(file.body);
           await this.pipeline.writeIndexes(file.slug, fresh.chunks, fresh.embedResults);
         }
+
+        // Persist content hash only after indexes are written — ensures next sync retries on failure
+        this.db.updatePageHash(file.slug, file.contentHash);
 
         this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
         report.synced++;
@@ -334,7 +336,6 @@ export class SyncManager {
       type,
       title,
       filePath: relPath,
-      contentHash,
     });
 
     if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
@@ -343,6 +344,9 @@ export class SyncManager {
 
     const { chunks, embedResults } = await this.pipeline.embed(parsed.body);
     await this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);
+
+    // Persist content hash only after indexes are written
+    this.db.updatePageHash(effectiveSlug, contentHash);
     this.pipeline.writeIngestLog(effectiveSlug, "vault", { hash: contentHash });
 
     // Wikilink extraction first — produces mentionedSlugs for NER dedup
@@ -378,8 +382,8 @@ export class SyncManager {
   }
 
   async removePage(slug: string): Promise<void> {
-    this.db.deletePageCascaded(slug);
     await this.lance.deleteByPageSlug(slug);
+    this.db.deletePageCascaded(slug);
   }
 
   async removeOrphans(vaultPath: string): Promise<string[]> {
@@ -396,12 +400,12 @@ export class SyncManager {
         await access(fullPath);
       } catch {
         orphans.push(page.slug);
+        await this.lance.deleteByPageSlug(page.slug);
         if (this.pages) {
           await this.pages.delete(page.slug);
         } else {
           this.db.deletePageCascaded(page.slug);
         }
-        await this.lance.deleteByPageSlug(page.slug);
       }
     }
 

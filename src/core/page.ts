@@ -272,10 +272,10 @@ export class PageManager {
       unlinkSync(absPath);
     }
 
-    this.db.deletePageCascaded(slug);
     if (this.lance) {
       await this.lance.deleteByPageSlug(slug);
     }
+    this.db.deletePageCascaded(slug);
     this.cacheDelete(slug);
 
     this.logger?.info("page", "页面已删除", { slug });

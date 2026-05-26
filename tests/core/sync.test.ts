@@ -282,4 +282,112 @@ describe("SyncManager", () => {
       expect(removed.length).toBe(2);
     });
   });
+
+  describe("fault injection", () => {
+    function createFailingLanceDB(opts: { failAddChunks?: boolean; failDelete?: boolean }) {
+      const base = createMockLanceDB();
+      if (opts.failAddChunks) {
+        base.addChunks = async () => { throw new Error("LanceDB write failure"); };
+      }
+      if (opts.failDelete) {
+        base.deleteByPageSlug = async () => { throw new Error("LanceDB delete failure"); };
+      }
+      return base;
+    }
+
+    test("syncAll: LanceDB write failure does not persist content_hash", async () => {
+      const failLance = createFailingLanceDB({ failAddChunks: true });
+      const failSync = new SyncManager(db, createMockEmbeddingProvider(), failLance as any, { chunkSize: 500 });
+
+      writeMdFile(vaultPath, "records/fail-sync.md", { title: "FailSync", type: "record", slug: "records/fail-sync" }, "Content that should not get hash persisted");
+
+      const report = await failSync.syncAll(vaultPath);
+      expect(report.errors).toBeGreaterThan(0);
+
+      // content_hash must NOT be persisted — next sync should retry
+      const hash = db.getPageContentHash("records/fail-sync");
+      expect(hash).toBeNull();
+    });
+
+    test("syncAll: content_hash stays null, next sync retries successfully", async () => {
+      // First sync with failing LanceDB
+      const failLance = createFailingLanceDB({ failAddChunks: true });
+      const failSync = new SyncManager(db, createMockEmbeddingProvider(), failLance as any, { chunkSize: 500 });
+
+      writeMdFile(vaultPath, "records/retry.md", { title: "RetryTest", type: "record", slug: "records/retry" }, "Initial content");
+
+      const failReport = await failSync.syncAll(vaultPath);
+      expect(failReport.errors).toBe(1);
+
+      // Second sync with working LanceDB — should succeed
+      const okLance = createMockLanceDB();
+      const okSync = new SyncManager(db, createMockEmbeddingProvider(), okLance as any, { chunkSize: 500 });
+
+      const okReport = await okSync.syncAll(vaultPath);
+      expect(okReport.synced).toBe(1);
+      expect(okReport.errors).toBe(0);
+
+      const hash = db.getPageContentHash("records/retry");
+      expect(hash).not.toBeNull();
+    });
+
+    test("syncPage: LanceDB write failure does not persist content_hash", async () => {
+      const failLance = createFailingLanceDB({ failAddChunks: true });
+      const failSync = new SyncManager(db, createMockEmbeddingProvider(), failLance as any, { chunkSize: 500 });
+
+      writeMdFile(vaultPath, "records/fail-page.md", { title: "FailPage", type: "record", slug: "records/fail-page" }, "Content");
+
+      await expect(failSync.syncPage("records/fail-page", vaultPath)).rejects.toThrow("LanceDB write failure");
+
+      const hash = db.getPageContentHash("records/fail-page");
+      expect(hash).toBeNull();
+    });
+
+    test("removePage: LanceDB delete failure preserves SQLite page", async () => {
+      // First, sync a page successfully
+      writeMdFile(vaultPath, "records/del-test.md", { title: "DelTest", type: "record", slug: "records/del-test" }, "Content");
+      await sync.syncAll(vaultPath);
+      expect(db.getPageContentHash("records/del-test")).not.toBeNull();
+
+      // Now try to remove with failing LanceDB
+      const failLance = createFailingLanceDB({ failDelete: true });
+      const failSync = new SyncManager(db, createMockEmbeddingProvider(), failLance as any, { chunkSize: 500 });
+
+      await expect(failSync.removePage("records/del-test")).rejects.toThrow("LanceDB delete failure");
+
+      // SQLite page must still exist for retry
+      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("records/del-test") as any;
+      expect(row).not.toBeNull();
+      expect(row.title).toBe("DelTest");
+    });
+
+    test("removeOrphans: LanceDB delete failure preserves SQLite page", async () => {
+      // Seed an orphan (in DB but not in vault)
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("records/orphan-del", "record", "OrphanDel", "records/orphan-del.md", "hash1");
+
+      const failLance = createFailingLanceDB({ failDelete: true });
+      const failSync = new SyncManager(db, createMockEmbeddingProvider(), failLance as any, { chunkSize: 500 });
+
+      await expect(failSync.removeOrphans(vaultPath)).rejects.toThrow("LanceDB delete failure");
+
+      // SQLite page must still exist
+      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("records/orphan-del") as any;
+      expect(row).not.toBeNull();
+    });
+
+    test("syncAll: one file fails, others still sync", async () => {
+      writeMdFile(vaultPath, "records/good-a.md", { title: "GoodA", type: "record", slug: "records/good-a" }, "Good content A");
+      writeMdFile(vaultPath, "records/good-b.md", { title: "GoodB", type: "record", slug: "records/good-b" }, "Good content B");
+
+      const report = await sync.syncAll(vaultPath);
+      expect(report.synced).toBe(2);
+      expect(report.errors).toBe(0);
+
+      // Both should have hashes
+      expect(db.getPageContentHash("records/good-a")).not.toBeNull();
+      expect(db.getPageContentHash("records/good-b")).not.toBeNull();
+    });
+  });
 });

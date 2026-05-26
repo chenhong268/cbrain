@@ -54,7 +54,7 @@ export interface UpsertPageData {
   type: string;
   title: string;
   filePath: string;
-  contentHash: string;
+  contentHash?: string;
 }
 
 export interface InsightRow {
@@ -853,14 +853,14 @@ export class CBrainDB {
       VALUES ($slug, $type, $title, $path, $hash, 3, ${expiresAt ? expiresAt : 'NULL'}, datetime('now'), datetime('now'))
       ON CONFLICT(slug) DO UPDATE SET
         title = excluded.title,
-        content_hash = excluded.content_hash,
+        ${data.contentHash !== undefined ? 'content_hash = excluded.content_hash,' : ''}
         updated_at = datetime('now')
     `).run({
       $slug: data.slug,
       $type: data.type,
       $title: data.title,
       $path: data.filePath,
-      $hash: data.contentHash,
+      $hash: data.contentHash ?? null,
     });
   }
 

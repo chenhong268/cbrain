@@ -13,6 +13,13 @@ const SYNC_CONCURRENCY = 3;
 const FIRST_SCAN_BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 500;
 
+interface PendingSync {
+  slug: string;
+  fullPath: string;
+  hash: string;
+  mtime: { mtime: number; size: number };
+}
+
 export class FileWatcher {
   private sync: SyncManager;
   private vaultPath: string;
@@ -52,16 +59,20 @@ export class FileWatcher {
     try { await this.doScan(); } finally { this.scanning = false; }
   }
 
-  private enqueueSync(slug: string): void {
-    if (this.inFlight.has(slug)) {
-      this.logger?.info("watcher", "跳过：正在同步", { slug });
+  private enqueueSync(pending: PendingSync): void {
+    if (this.inFlight.has(pending.slug)) {
+      this.logger?.info("watcher", "跳过：正在同步", { slug: pending.slug });
       return;
     }
-    this.inFlight.add(slug);
-    this.limit(() => this.sync.syncPage(slug, this.vaultPath))
-      .then(() => { this.logger?.info("watcher", "同步完成", { slug }); })
-      .catch((e) => { this.logger?.warn("watcher", `同步失败: ${slug}`, { error: String(e) }); })
-      .finally(() => { this.inFlight.delete(slug); });
+    this.inFlight.add(pending.slug);
+    this.limit(() => this.sync.syncPage(pending.slug, this.vaultPath))
+      .then(() => {
+        this.hashes.set(pending.fullPath, pending.hash);
+        this.mtimes.set(pending.fullPath, pending.mtime);
+        this.logger?.info("watcher", "同步完成", { slug: pending.slug });
+      })
+      .catch((e) => { this.logger?.warn("watcher", `同步失败: ${pending.slug}`, { error: String(e) }); })
+      .finally(() => { this.inFlight.delete(pending.slug); });
   }
 
   private sleep(ms: number): Promise<void> {
@@ -71,7 +82,7 @@ export class FileWatcher {
   private async doScan(): Promise<void> {
     const files = await collectMarkdownFiles(this.vaultPath, new Set(["outputs"]));
     const seen = new Set<string>();
-    const changed: string[] = [];
+    const changed: PendingSync[] = [];
 
     for (const fullPath of files) {
       seen.add(fullPath);
@@ -79,7 +90,6 @@ export class FileWatcher {
         const s = await stat(fullPath);
         const meta = { mtime: s.mtimeMs, size: s.size };
         const prevMeta = this.mtimes.get(fullPath);
-        this.mtimes.set(fullPath, meta);
         if (prevMeta && prevMeta.mtime === meta.mtime && prevMeta.size === meta.size) {
           continue;
         }
@@ -87,14 +97,13 @@ export class FileWatcher {
         const content = await readFile(fullPath, "utf-8");
         const h = hashContent(content);
         const prev = this.hashes.get(fullPath);
-        this.hashes.set(fullPath, h);
 
         if (prev === h) continue;
 
         const relPath = relative(this.vaultPath, fullPath);
         const slug = relPath.replace(/\.md$/, "");
         this.logger?.info("watcher", "检测到变更", { slug });
-        changed.push(slug);
+        changed.push({ slug, fullPath, hash: h, mtime: meta });
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
           this.logger?.warn("watcher", `文件读取失败: ${fullPath}`, { error: String(e) });
@@ -105,8 +114,8 @@ export class FileWatcher {
     if (this.isFirstScan && changed.length > FIRST_SCAN_BATCH_SIZE) {
       for (let i = 0; i < changed.length; i += FIRST_SCAN_BATCH_SIZE) {
         const batch = changed.slice(i, i + FIRST_SCAN_BATCH_SIZE);
-        for (const slug of batch) {
-          this.enqueueSync(slug);
+        for (const pending of batch) {
+          this.enqueueSync(pending);
         }
         if (i + FIRST_SCAN_BATCH_SIZE < changed.length) {
           await this.sleep(BATCH_DELAY_MS);
@@ -114,32 +123,32 @@ export class FileWatcher {
       }
       this.logger?.info("watcher", "首次扫描分批完成", { total: changed.length, batchSize: FIRST_SCAN_BATCH_SIZE });
     } else {
-      for (const slug of changed) {
-        this.enqueueSync(slug);
+      for (const pending of changed) {
+        this.enqueueSync(pending);
       }
     }
     this.isFirstScan = false;
 
     // Deletion detection: files that disappeared since last scan
-    const deleted: string[] = [];
+    const vanished: Array<{ slug: string; path: string }> = [];
     for (const path of [...this.hashes.keys()]) {
       if (!seen.has(path)) {
         const relPath = relative(this.vaultPath, path);
         const slug = relPath.replace(/\.md$/, "");
-        deleted.push(slug);
-        this.hashes.delete(path);
-        this.mtimes.delete(path);
+        vanished.push({ slug, path });
       }
     }
-    if (deleted.length > 0) {
-      for (const slug of deleted) {
+    if (vanished.length > 0) {
+      for (const { slug, path } of vanished) {
         try {
           await this.sync.removePage(slug);
+          this.hashes.delete(path);
+          this.mtimes.delete(path);
         } catch (e) {
           this.logger?.warn("watcher", `删除清理失败: ${slug}`, { error: String(e) });
         }
       }
-      this.logger?.info("watcher", "删除检测", { slugs: deleted });
+      this.logger?.info("watcher", "删除检测", { slugs: vanished.map(v => v.slug) });
     }
   }
 }
