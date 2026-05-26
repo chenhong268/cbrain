@@ -45,6 +45,8 @@ export interface LinkRow {
   source_type: string;
   confidence: number;
   created_at: string;
+  last_validated_at: string | null;
+  effective_weight: number;
 }
 
 export interface UpsertPageData {
@@ -260,6 +262,7 @@ export class CBrainDB {
     this.migratePagesExpiry();
     this.migrateLinksStrength();
     this.migrateLinksCredibility();
+    this.migrateLinkDecayFields();
     this.migrateDiscoveries();
     this.migrateSearchLog();
     this.migrateRawToRecords();
@@ -295,6 +298,20 @@ export class CBrainDB {
     if (!names.has("confidence")) {
       this.db.exec("ALTER TABLE links ADD COLUMN confidence REAL DEFAULT 0.5");
     }
+  }
+
+  private migrateLinkDecayFields(): void {
+    const cols = this.db.prepare("PRAGMA table_info(links)").all() as Array<{ name: string }>;
+    const names = new Set(cols.map(c => c.name));
+    if (!names.has("last_validated_at")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN last_validated_at TEXT");
+      this.db.exec("UPDATE links SET last_validated_at = created_at");
+    }
+    if (!names.has("effective_weight")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN effective_weight REAL DEFAULT 1.0");
+      this.db.exec("UPDATE links SET effective_weight = weight * confidence");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_links_last_validated ON links(last_validated_at)");
   }
 
   private migrateDiscoveries(): void {
@@ -2063,6 +2080,32 @@ export class CBrainDB {
     this.prepare(
       "UPDATE links SET weight = MIN(weight + $boost, 10.0) WHERE (from_slug = $a AND to_slug = $b) OR (from_slug = $b AND to_slug = $a)"
     ).run({ $a: slugA, $b: slugB, $boost: boost });
+  }
+
+  applyLinkDecay(): number {
+    const result = this.prepare(`
+      UPDATE links SET
+        effective_weight = CASE
+          WHEN source_type IN ('manual', 'wikilink') THEN weight * confidence
+          ELSE weight * confidence * POW(0.95, (julianday('now') - julianday(last_validated_at)) / 30.0)
+        END
+      WHERE last_validated_at < datetime('now', '-7 days')
+    `).run();
+    return result.changes;
+  }
+
+  validateLinksForSlugs(slugs: string[]): void {
+    if (slugs.length === 0) return;
+    const placeholders = slugs.map(() => "?").join(",");
+    this.prepare(
+      `UPDATE links SET last_validated_at = datetime('now') WHERE from_slug IN (${placeholders}) OR to_slug IN (${placeholders})`
+    ).run(...slugs, ...slugs);
+  }
+
+  boostLinkConfidence(from: string, to: string, relation: string, delta: number): void {
+    this.prepare(
+      "UPDATE links SET confidence = MIN(1.0, confidence + $delta), last_validated_at = datetime('now') WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
+    ).run({ $from: from, $to: to, $rel: relation, $delta: delta });
   }
 
   // ─── Query feedback (Phase 4) ───────────────────────────────

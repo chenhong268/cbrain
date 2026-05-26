@@ -34,6 +34,11 @@ export function registerFeedbackTools(server: McpServer, ctx: ToolContext): void
       recorded++;
     }
 
+    const validatedSlugs = [...(relevant_slugs ?? []), ...(expanded_slugs ?? [])];
+    if (validatedSlugs.length > 0) {
+      try { ctx.db.validateLinksForSlugs(validatedSlugs); } catch { /* non-critical */ }
+    }
+
     return {
       content: [{
         type: "text" as const,

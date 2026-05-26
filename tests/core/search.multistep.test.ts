@@ -159,8 +159,8 @@ describe("HybridSearch multiStep", () => {
 
     const results = await search.search("实体A", { multiStep: true, limit: 5 });
     expect(Array.isArray(results)).toBe(true);
-    // Verify sufficiency check was called (proves multiStep path ran)
-    expect(llmCalls.some((c) => c.includes("充分性评估器"))).toBe(true);
+    // Verify reasoning or rerank was called (proves multiStep path ran)
+    expect(llmCalls.some((c) => c.includes("搜索推理引擎") || c.includes("排序器"))).toBe(true);
   });
 
   test("no LLM → multiStep degrades to searchCore", async () => {

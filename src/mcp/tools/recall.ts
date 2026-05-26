@@ -264,6 +264,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       maxHints: 3,
     });
 
+    try { ctx.db.validateLinksForSlugs(topSlugs); } catch { /* non-critical */ }
+
     return {
       content: [{
         type: "text" as const,

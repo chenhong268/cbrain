@@ -88,7 +88,7 @@ export class GraphManager {
             ...(direction === "incoming" || direction === "both" ? links.incoming : []),
           ];
           for (const l of all) {
-            if ((!relation || l.relation === relation) && l.weight >= minWeight) {
+            if ((!relation || l.relation === relation) && (l.effective_weight ?? l.weight * l.confidence) >= minWeight) {
               const neighbor = l.from_slug === slug ? l.to_slug : l.from_slug;
               if (!visited.has(neighbor)) {
                 visited.add(neighbor);
