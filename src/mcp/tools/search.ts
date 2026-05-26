@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { generateProactiveHints } from "../../core/proactive.js";
-import { isComplexQuery } from "../../core/search.js";
+import { isComplexQuery, type SearchTrace } from "../../core/search.js";
 import { trimHint } from "./trim.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
@@ -25,6 +25,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     const start = Date.now();
     let results: Awaited<ReturnType<typeof ctx.search.search>>;
     let usedStrategy: string = strategy;
+    const trace: SearchTrace = {};
 
     if (strategy === "smart") {
       // Exact slug/title match fast path
@@ -40,13 +41,13 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       const complex = isComplexQuery(query, knownSlugs, candidates);
 
       if (complex) {
-        results = await ctx.search.search(query, { strategy: "all", limit, multiStep, _hints: { knownSlugs, isComplex: complex } });
+        results = await ctx.search.search(query, { strategy: "all", limit, multiStep, _hints: { knownSlugs, isComplex: complex }, _trace: trace });
         usedStrategy = "smart-decompose";
       } else if (ftsSlugs.length >= Math.min(limit, 3)) {
         results = ftsSlugs.map(r => ({ slug: r.page_slug, score: Math.abs(r.rank), snippet: r.content.slice(0, 200), source: "fts" as const }));
         usedStrategy = "smart-fts";
       } else {
-        results = await ctx.search.search(query, { strategy: "all", limit, multiStep, _hints: { knownSlugs, isComplex: complex } });
+        results = await ctx.search.search(query, { strategy: "all", limit, multiStep, _hints: { knownSlugs, isComplex: complex }, _trace: trace });
         usedStrategy = ftsSlugs.length > 0 ? "smart-hybrid-boost" : "smart-hybrid";
       }
 
@@ -61,11 +62,11 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     } else if (strategy === "fts") {
-      results = await ctx.search.search(query, { strategy: "fts", limit });
+      results = await ctx.search.search(query, { strategy: "fts", limit, _trace: trace });
     } else if (strategy === "vector") {
-      results = await ctx.search.search(query, { strategy: "vector", limit });
+      results = await ctx.search.search(query, { strategy: "vector", limit, _trace: trace });
     } else {
-      results = await ctx.search.search(query, { strategy: "all", limit, multiStep });
+      results = await ctx.search.search(query, { strategy: "all", limit, multiStep, _trace: trace });
     }
 
     const latencyMs = Date.now() - start;
@@ -73,7 +74,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       const sourceCounts: Record<string, number> = {};
       for (const r of results) { sourceCounts[r.source ?? "unknown"] = (sourceCounts[r.source ?? "unknown"] ?? 0) + 1; }
       ctx.db.logSearch(query, usedStrategy, latencyMs, results.length, latencyMs > 2000, {
-        strategy_path: usedStrategy, result_sources: sourceCounts, requested_limit: limit, multistep: !!multiStep,
+        strategy_path: usedStrategy, ...trace, result_sources: sourceCounts, requested_limit: limit, multistep: !!multiStep,
       });
     } catch { /* non-critical */ }
 

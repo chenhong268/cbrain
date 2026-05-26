@@ -16,6 +16,17 @@ export interface SearchHints {
   isComplex: boolean;
 }
 
+export interface SearchTrace {
+  expand_ms?: number;
+  vector_ms?: number;
+  fts_ms?: number;
+  graph_ms?: number;
+  temporal_ms?: number;
+  decompose_ms?: number;
+  llm_calls?: number;
+  query_variants?: string[];
+}
+
 export interface SearchOptions {
   limit?: number;
   strategy?: "vector" | "fts" | "graph" | "all";
@@ -26,6 +37,8 @@ export interface SearchOptions {
   multiStep?: boolean;
   /** @internal Pre-computed hints to avoid redundant resolveSlugs/isComplexQuery calls */
   _hints?: SearchHints;
+  /** @internal Trace accumulator for per-stage timing diagnostics */
+  _trace?: SearchTrace;
 }
 
 export interface HybridSearchConfig {
@@ -189,15 +202,16 @@ export class HybridSearch {
 
     const limit = options?.limit ?? 10;
     const strategy = options?.strategy ?? "all";
+    const trace = options?._trace;
 
     if (strategy === "vector") {
-      return this.vectorSearch(query, limit);
+      return this.timedCall(() => this.vectorSearch(query, limit), trace, "vector_ms");
     }
     if (strategy === "fts") {
-      return this.ftsSearch(query, limit);
+      return this.timedCall(() => Promise.resolve(this.ftsSearch(query, limit)), trace, "fts_ms");
     }
     if (strategy === "graph") {
-      return this.graphSearch(query, limit);
+      return this.timedCall(() => this.graphSearch(query, limit), trace, "graph_ms");
     }
 
     // Exact title match fast path
@@ -225,13 +239,16 @@ export class HybridSearch {
       if (complex) {
         try {
           const graphContext = await this.graphPrefetch(query);
-          const subQueries = await this.decomposeQuery(query, graphContext);
+          const subQueries = await this.timedCall(
+            () => this.decomposeQuery(query, graphContext), trace, "decompose_ms",
+          );
+          if (trace) trace.llm_calls = (trace.llm_calls ?? 0) + 1;
 
           console.error(`[search] decomposition: "${query}" → ${subQueries.length} sub-queries: ${subQueries.join(" | ")}`);
           if (subQueries.length >= 2) {
             const subResults = await Promise.all(
               subQueries.map((sq) =>
-                this.search(sq, { ...(options ?? {}), _skipDecompose: true }).catch(() => [] as SearchResult[])
+                this.search(sq, { ...(options ?? {}), _skipDecompose: true, _trace: trace }).catch(() => [] as SearchResult[])
               )
             );
 
@@ -250,29 +267,28 @@ export class HybridSearch {
       }
     }
 
-    return this.searchWithExpansion(query, limit, options?.multiQuery);
+    return this.searchWithExpansion(query, limit, options?.multiQuery, trace);
   }
 
-  private async searchSingleQuery(q: string, limit: number): Promise<SearchResult[][]> {
+  private async searchSingleQuery(q: string, limit: number, trace?: SearchTrace): Promise<SearchResult[][]> {
     const resolved = this.db.resolveSlugs([q])[0];
-    const graphPromise = resolved?.slug
-      ? this.graphSearch(resolved.slug, limit).catch((e) => {
-          console.error("[search] graphSearch 失败:", e);
-          return [] as SearchResult[];
-        })
-      : Promise.resolve([] as SearchResult[]);
 
     const [vec, fts, graph, temporal] = await Promise.all([
-      this.vectorSearch(q, limit).catch((e) => {
+      this.timedCall(() => this.vectorSearch(q, limit), trace, "vector_ms").catch((e) => {
         console.error("[search] vectorSearch 失败:", e);
         return [] as SearchResult[];
       }),
-      Promise.resolve(this.ftsSearch(q, limit)).catch((e) => {
+      this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit)), trace, "fts_ms").catch((e) => {
         console.error("[search] ftsSearch 失败:", e);
         return [] as SearchResult[];
       }),
-      graphPromise,
-      Promise.resolve(this.temporalSearch(q, limit)).catch((e) => {
+      resolved?.slug
+        ? this.timedCall(() => this.graphSearch(resolved.slug!, limit), trace, "graph_ms").catch((e) => {
+            console.error("[search] graphSearch 失败:", e);
+            return [] as SearchResult[];
+          })
+        : Promise.resolve([] as SearchResult[]),
+      this.timedCall(() => Promise.resolve(this.temporalSearch(q, limit)), trace, "temporal_ms").catch((e) => {
         console.error("[search] temporalSearch 失败:", e);
         return [] as SearchResult[];
       }),
@@ -286,14 +302,20 @@ export class HybridSearch {
     return lists;
   }
 
-  private async searchWithExpansion(query: string, limit: number, multiQuery?: boolean): Promise<SearchResult[]> {
+  private async searchWithExpansion(query: string, limit: number, multiQuery?: boolean, trace?: SearchTrace): Promise<SearchResult[]> {
     const t0 = Date.now();
     const useMultiQuery = (multiQuery ?? this.multiQueryEnabled) && !!this.llm;
-    const queries = useMultiQuery ? await this.expandQuery(query) : [query];
-    const expandMs = Date.now() - t0;
+    const queries = useMultiQuery
+      ? await this.timedCall(() => this.expandQuery(query), trace, "expand_ms")
+      : [query];
+
+    if (trace && useMultiQuery) {
+      trace.query_variants = queries;
+      trace.llm_calls = (trace.llm_calls ?? 0) + 1;
+    }
 
     const queryResults = await Promise.all(
-      queries.map((q) => this.searchSingleQuery(q, limit))
+      queries.map((q) => this.searchSingleQuery(q, limit, trace))
     );
     const allLists = queryResults.flat();
 
@@ -303,9 +325,23 @@ export class HybridSearch {
     const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
 
     const totalMs = Date.now() - t0;
-    console.error(`[search] expansion: ${queries.length} queries, expand=${expandMs}ms, total=${totalMs}ms, slugs=${allSlugs.size}`);
+    console.error(`[search] expansion: ${queries.length} queries, expand=${trace?.expand_ms ?? 0}ms, total=${totalMs}ms, slugs=${allSlugs.size}`);
 
     return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
+  }
+
+  private async timedCall<T>(
+    fn: () => Promise<T>,
+    trace: SearchTrace | undefined,
+    key: "vector_ms" | "fts_ms" | "graph_ms" | "temporal_ms" | "expand_ms" | "decompose_ms",
+  ): Promise<T> {
+    if (!trace) return fn();
+    const start = Date.now();
+    try {
+      return await fn();
+    } finally {
+      trace[key] = (trace[key] ?? 0) + (Date.now() - start);
+    }
   }
 
   // ─── multiStep: delegates to ResearchManager (ReAct loop) ───────

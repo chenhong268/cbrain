@@ -8,6 +8,7 @@ import { extractDossier } from "../../core/dossier.js";
 import { getHierarchyContext } from "../../core/hierarchy.js";
 import { generateProactiveHints } from "../../core/proactive.js";
 import { extractBirthday } from "../../core/birthday.js";
+import { type SearchTrace } from "../../core/search.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -30,21 +31,19 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     },
   }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep }) => {
     const cap = Math.min(limit ?? 5, 5);
+    const trace: SearchTrace = {};
 
     const searchStart = Date.now();
     let searchResults: Awaited<ReturnType<typeof ctx.search.search>>;
     let usedStrategy: string = strategy;
 
     if (strategy === "smart") {
-      // Exact slug/title match fast path
       const resolved = ctx.db.resolveSlugs([query])[0];
       const exactSlug = resolved?.slug ?? null;
 
-      // Always run full hybrid — FTS alone skips vector/graph/temporal signals
-      searchResults = await ctx.search.search(query, { limit: cap, multiStep });
+      searchResults = await ctx.search.search(query, { limit: cap, multiStep, _trace: trace });
       usedStrategy = "smart-hybrid";
 
-      // Promote exact match to top
       if (exactSlug) {
         const existingIdx = searchResults.findIndex(r => r.slug === exactSlug);
         if (existingIdx > 0) {
@@ -55,11 +54,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     } else if (strategy === "fts") {
-      searchResults = await ctx.search.search(query, { strategy: "fts", limit: cap });
+      searchResults = await ctx.search.search(query, { strategy: "fts", limit: cap, _trace: trace });
     } else if (strategy === "vector") {
-      searchResults = await ctx.search.search(query, { strategy: "vector", limit: cap });
+      searchResults = await ctx.search.search(query, { strategy: "vector", limit: cap, _trace: trace });
     } else {
-      searchResults = await ctx.search.search(query, { limit: cap, multiStep });
+      searchResults = await ctx.search.search(query, { limit: cap, multiStep, _trace: trace });
     }
 
     const searchLatencyMs = Date.now() - searchStart;
@@ -68,7 +67,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const sourceCounts: Record<string, number> = {};
       for (const r of searchResults) { sourceCounts[r.source ?? "unknown"] = (sourceCounts[r.source ?? "unknown"] ?? 0) + 1; }
       ctx.db.logSearch(query, usedStrategy, searchLatencyMs, searchResults.length, searchLatencyMs > 2000, {
-        strategy_path: usedStrategy, result_sources: sourceCounts, requested_limit: cap, multistep: !!multiStep, detail_level: detailLevel ?? "brief",
+        strategy_path: usedStrategy, ...trace, result_sources: sourceCounts, requested_limit: cap, multistep: !!multiStep, detail_level: detailLevel ?? "brief",
       });
     } catch { /* non-critical */ }
 

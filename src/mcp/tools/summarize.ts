@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity } from "./trim.js";
+import { type SearchTrace } from "../../core/search.js";
 
 const TOP_N = 3;
 
@@ -24,12 +25,13 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
     const minW = minWeight ?? 0;
 
     // Step 1: Search
+    const trace: SearchTrace = {};
     const searchStart = Date.now();
-    const searchResults = await ctx.search.search(topic, { limit: cap * 2 });
+    const searchResults = await ctx.search.search(topic, { limit: cap * 2, _trace: trace });
     const searchLatencyMs = Date.now() - searchStart;
 
     try { ctx.db.logSearch(topic, "hybrid", searchLatencyMs, searchResults.length, searchLatencyMs > 2000, {
-      strategy_path: "explore_topic", requested_limit: cap * 2, traverse_depth: traverseDepth, min_weight: minW,
+      strategy_path: "explore_topic", ...trace, requested_limit: cap * 2, traverse_depth: traverseDepth, min_weight: minW,
     }); } catch { /* non-critical */ }
 
     if (searchResults.length === 0) {
