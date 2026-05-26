@@ -1,6 +1,18 @@
 # Changelog
 
-> Current: `v1.8.6` — 搜索延迟优化：并行化 + embedding 缓存 + hints 去重。
+> Current: `v1.8.7` — 搜索 trace 透传、空 body L1 残留清理、dream 竞态消除、QueryRouter 意图路由。
+
+## [v1.8.7] — 2026-05-26
+
+### 新功能
+- **QueryRouter**：规则引擎按意图（关系/复盘/实体详情）自动选 fast/hybrid/agentic 路径，明确意图不浪费 LLM
+
+### Bug 修复
+- **L1 残留清理**：空 body 的 `writeIndexes` 现在同时删除 L1 sealed summary（SQLite + LanceDB vector），搜索不再命中已删除内容
+- **LanceDB 孤儿报告**：`cleanLanceOrphans()` 只返回成功删除的 slug，不再把失败项计为成功
+- **Dream 竞态消除**：`removeOrphans` 完成后才跑 `cleanLanceOrphans`，不再漏掉新孤儿
+- **Research trace 透传**：follow-up 子查询现在共享 `_trace`，MCP 调用方能看到完整计时
+- **Follow-up query 去重**：同一轮 LLM 返回的重复查询在归一化后过滤，不浪费搜索
 
 ## [v1.8.6] — 2026-05-26
 
