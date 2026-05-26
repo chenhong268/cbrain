@@ -64,7 +64,13 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     const searchLatencyMs = Date.now() - searchStart;
 
-    try { ctx.db.logSearch(query, usedStrategy, searchLatencyMs, searchResults.length, searchLatencyMs > 2000); } catch { /* non-critical */ }
+    try {
+      const sourceCounts: Record<string, number> = {};
+      for (const r of searchResults) { sourceCounts[r.source ?? "unknown"] = (sourceCounts[r.source ?? "unknown"] ?? 0) + 1; }
+      ctx.db.logSearch(query, usedStrategy, searchLatencyMs, searchResults.length, searchLatencyMs > 2000, {
+        strategy_path: usedStrategy, result_sources: sourceCounts, requested_limit: cap, multistep: !!multiStep, detail_level: detailLevel ?? "brief",
+      });
+    } catch { /* non-critical */ }
 
     // Learning loop: log query + bump activity weights
     const resultSlugs = searchResults.map(r => r.slug);

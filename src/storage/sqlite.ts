@@ -1866,22 +1866,28 @@ export class CBrainDB {
         latency_ms INTEGER NOT NULL,
         hit_count INTEGER NOT NULL,
         degraded INTEGER NOT NULL DEFAULT 0,
+        details_json TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_search_log_created ON search_log(created_at)");
+
+    // Backfill details_json column on existing tables
+    try {
+      this.db.exec("ALTER TABLE search_log ADD COLUMN details_json TEXT");
+    } catch { /* column already exists */ }
   }
 
-  logSearch(query: string, strategy: string, latencyMs: number, hitCount: number, degraded: boolean): void {
+  logSearch(query: string, strategy: string, latencyMs: number, hitCount: number, degraded: boolean, details?: Record<string, unknown>): void {
     this.prepare(
-      "INSERT INTO search_log (query, strategy, latency_ms, hit_count, degraded) VALUES ($query, $strategy, $latency, $hits, $degraded)"
-    ).run({ $query: query, $strategy: strategy, $latency: latencyMs, $hits: hitCount, $degraded: degraded ? 1 : 0 });
+      "INSERT INTO search_log (query, strategy, latency_ms, hit_count, degraded, details_json) VALUES ($query, $strategy, $latency, $hits, $degraded, $details)"
+    ).run({ $query: query, $strategy: strategy, $latency: latencyMs, $hits: hitCount, $degraded: degraded ? 1 : 0, $details: details ? JSON.stringify(details) : null });
   }
 
-  getSearchLog(limit: number = 50): Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; created_at: string }> {
+  getSearchLog(limit: number = 50): Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; details_json: string | null; created_at: string }> {
     return this.prepare(
-      "SELECT id, query, strategy, latency_ms, hit_count, degraded, created_at FROM search_log ORDER BY id DESC LIMIT $limit"
-    ).all({ $limit: limit }) as Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; created_at: string }>;
+      "SELECT id, query, strategy, latency_ms, hit_count, degraded, details_json, created_at FROM search_log ORDER BY id DESC LIMIT $limit"
+    ).all({ $limit: limit }) as Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; details_json: string | null; created_at: string }>;
   }
 
   // ─── Query log (Phase 1) ────────────────────────────────────

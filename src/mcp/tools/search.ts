@@ -69,7 +69,13 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     }
 
     const latencyMs = Date.now() - start;
-    try { ctx.db.logSearch(query, usedStrategy, latencyMs, results.length, latencyMs > 2000); } catch { /* non-critical */ }
+    try {
+      const sourceCounts: Record<string, number> = {};
+      for (const r of results) { sourceCounts[r.source ?? "unknown"] = (sourceCounts[r.source ?? "unknown"] ?? 0) + 1; }
+      ctx.db.logSearch(query, usedStrategy, latencyMs, results.length, latencyMs > 2000, {
+        strategy_path: usedStrategy, result_sources: sourceCounts, requested_limit: limit, multistep: !!multiStep,
+      });
+    } catch { /* non-critical */ }
 
     // Learning loop: log query + bump activity weights
     const resultSlugs = results.map((r: { slug: string }) => r.slug);

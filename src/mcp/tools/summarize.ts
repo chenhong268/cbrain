@@ -28,7 +28,9 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
     const searchResults = await ctx.search.search(topic, { limit: cap * 2 });
     const searchLatencyMs = Date.now() - searchStart;
 
-    try { ctx.db.logSearch(topic, "hybrid", searchLatencyMs, searchResults.length, searchLatencyMs > 2000); } catch { /* non-critical */ }
+    try { ctx.db.logSearch(topic, "hybrid", searchLatencyMs, searchResults.length, searchLatencyMs > 2000, {
+      strategy_path: "explore_topic", requested_limit: cap * 2, traverse_depth: traverseDepth, min_weight: minW,
+    }); } catch { /* non-critical */ }
 
     if (searchResults.length === 0) {
       return {

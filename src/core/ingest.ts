@@ -106,7 +106,7 @@ export class IngestManager {
    * For entity pages: extract structured facts from body into frontmatter.
    * Uses a targeted LLM call (like backfill), not the full NER pipeline.
    */
-  private async extractEntityFacts(slug: string, title: string, body: string): Promise<void> {
+  private async extractEntityFacts(slug: string, title: string, type: string, body: string): Promise<void> {
     const page = this.pages.getBySlug(slug);
     if (!page) return;
 
@@ -115,7 +115,7 @@ export class IngestManager {
 
     const raw = await llm.chat([
       { role: "system", content: ENTITY_FACTS_PROMPT },
-      { role: "user", content: `Entity: ${title}\nType: person\n\nContent:\n${body.slice(0, 3000)}` },
+      { role: "user", content: `Entity: ${title}\nType: ${type}\n\nContent:\n${body.slice(0, 3000)}` },
     ]);
 
     interface RawFact { field: string; value: string; confidence: number; evidence: string }
@@ -129,7 +129,7 @@ export class IngestManager {
       return;
     }
 
-    const allowedFields = FACT_FIELD_WHITELIST["person" as EntityType] ?? [];
+    const allowedFields = FACT_FIELD_WHITELIST[type as EntityType] ?? [];
     const pageData = page.frontmatter ?? {};
     const extra: Record<string, string> = {};
 
@@ -177,7 +177,7 @@ export class IngestManager {
     // Entity type: extract structured facts from body into frontmatter
     if (type.startsWith("entity/") && doNer && this.llmProvider && body.trim()) {
       try {
-        await this.extractEntityFacts(slug, title, body);
+        await this.extractEntityFacts(slug, title, type, body);
       } catch {
         // Non-critical — skip silently
       }
