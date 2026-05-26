@@ -18,6 +18,7 @@ export interface SearchHints {
 
 export interface SearchTrace {
   expand_ms?: number;
+  research_ms?: number;
   vector_ms?: number;
   fts_ms?: number;
   graph_ms?: number;
@@ -355,7 +356,7 @@ export class HybridSearch {
     const researcher = new ResearchManager(this, this.db, this.llm);
     const results = await researcher.research(query, options);
     if (trace) {
-      trace.expand_ms = (trace.expand_ms ?? 0) + (Date.now() - start);
+      trace.research_ms = Date.now() - start;
       trace.llm_calls = (trace.llm_calls ?? 0) + researcher.getLLMCallCount();
     }
     return results;

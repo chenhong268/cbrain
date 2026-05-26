@@ -9,7 +9,7 @@ export interface RouteResult {
 
 type Intent = RouteResult["intent"];
 
-const TEMPORAL_KEYWORDS = ["最近", "什么时候", "什么时候的", "上次", "下次", "上周", "这周", "上周"];
+const TEMPORAL_KEYWORDS = ["最近", "什么时候", "什么时候的", "上次", "下次", "上周", "这周", "时间线"];
 const RELATIONSHIP_KEYWORDS = ["关系", "联系", "之间", "关联"];
 const COMPARISON_KEYWORDS = ["比较", "对比", "区别", "哪个好", "vs", "VS"];
 const REVIEW_KEYWORDS = ["复盘", "总结", "回顾", "变化", "进展"];
@@ -24,18 +24,24 @@ export class QueryRouter {
       return { mode: "hybrid", intent: "keyword", reasons: ["空查询"] };
     }
 
+    // 1. Exact full-query title/slug match → fast (highest priority)
+    const exactResolved = this.db.resolveSlugs([trimmed])[0];
+    if (exactResolved?.slug) {
+      return { mode: "fast", intent: "entity_lookup", reasons: [`精确匹配: ${exactResolved.slug}`] };
+    }
+
+    // Tokenize + resolve for downstream routing
     const candidates = trimmed.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
     const resolved = this.db.resolveSlugs(candidates);
     const knownSlugs = resolved.filter((r) => r.slug !== null).map((r) => r.slug!);
 
-    // Detect intent signals before fast path — explicit intent overrides entity count
+    // 2. Intent signals (only for non-exact queries)
     const hasComparison = COMPARISON_KEYWORDS.some((kw) => trimmed.includes(kw));
     const hasGap = GAP_KEYWORDS.some((kw) => trimmed.includes(kw));
     const hasRelationship = RELATIONSHIP_KEYWORDS.some((kw) => trimmed.includes(kw));
     const hasReview = REVIEW_KEYWORDS.some((kw) => trimmed.includes(kw));
     const hasTemporal = TEMPORAL_KEYWORDS.some((kw) => trimmed.includes(kw));
 
-    // 1. Explicit intent signals → agentic or hybrid (skip fast path)
     if (hasComparison) {
       return { mode: "agentic", intent: "comparison", reasons: ["比较意图"] };
     }
@@ -48,14 +54,12 @@ export class QueryRouter {
     if (hasReview) {
       return { mode: "agentic", intent: "review", reasons: ["复盘/回顾意图"] };
     }
+    // Timeline: entity-specific → agentic, generic → hybrid
     if (hasTemporal) {
+      if (knownSlugs.length >= 1) {
+        return { mode: "agentic", intent: "timeline", reasons: [`实体+时间线: ${knownSlugs.join(", ")}`] };
+      }
       return { mode: "hybrid", intent: "timeline", reasons: ["时间相关查询"] };
-    }
-
-    // 2. Exact match → fast
-    const exactResolved = this.db.resolveSlugs([trimmed])[0];
-    if (exactResolved?.slug) {
-      return { mode: "fast", intent: "entity_lookup", reasons: [`精确匹配: ${exactResolved.slug}`] };
     }
 
     // 3. Single known entity + not complex → fast

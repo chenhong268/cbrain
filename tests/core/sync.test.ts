@@ -29,10 +29,12 @@ function createMockEmbeddingProvider(): EmbeddingProvider {
 function createMockLanceDB() {
   const added: Array<{ pageSlug: string; chunks: Array<{ content: string; chunkIndex: number }> }> = [];
   const deleted: string[] = [];
+  const rawDeleted: string[] = [];
 
   return {
     added,
     deleted,
+    rawDeleted,
 
     connect: async () => {},
     addChunks: async (chunks: Array<{ pageSlug: string; chunkIndex: number; content: string; vector?: Float32Array }>) => {
@@ -50,7 +52,9 @@ function createMockLanceDB() {
     deleteByPageSlug: async (pageSlug: string) => {
       deleted.push(pageSlug);
     },
-    deleteRawChunksByPageSlug: async () => {},
+    deleteRawChunksByPageSlug: async (pageSlug: string) => {
+      rawDeleted.push(pageSlug);
+    },
     getIndexedPageSlugs: async () => {
       return added.map(a => a.pageSlug).filter(s => !deleted.includes(s));
     },
@@ -426,6 +430,25 @@ describe("SyncManager", () => {
       // Both should have hashes
       expect(db.getPageContentHash("records/good-a")).not.toBeNull();
       expect(db.getPageContentHash("records/good-b")).not.toBeNull();
+    });
+  });
+
+  describe("empty content index cleanup (#63)", () => {
+    test("writeIndexes cleans old indexes when content becomes empty", async () => {
+      // First sync with content → creates chunks
+      writeMdFile(vaultPath, "records/empty-test.md", { title: "EmptyTest", type: "record", slug: "records/empty-test" }, "Some real content here");
+      await sync.syncAll(vaultPath);
+      expect(lance.added.length).toBeGreaterThan(0);
+      expect(db.getPageContentHash("records/empty-test")).not.toBeNull();
+
+      // Now rewrite with empty body
+      lance.added.length = 0;
+      writeMdFile(vaultPath, "records/empty-test.md", { title: "EmptyTest", type: "record", slug: "records/empty-test" }, "");
+
+      await sync.syncAll(vaultPath);
+
+      // LanceDB raw chunks should be deleted for the now-empty page
+      expect(lance.rawDeleted).toContain("records/empty-test");
     });
   });
 });

@@ -683,4 +683,53 @@ describe("ResearchManager", () => {
     // Original + 2 follow-ups = 3 searches
     expect(searchedQueries).toEqual(["主题B", "方向X", "方向Y"]);
   });
+
+  // ─── Same-round dedup tests (#64) ───────────────────────────────────
+
+  test("same-round duplicate follow-up is deduplicated", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["root", [makeResult("entity/a", 0.9)]],
+      ["方向X", [makeResult("entity/b", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      // LLM returns same query twice in one response
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"方向X","intent":"方向1"},{"query":"方向X","intent":"方向2(重复)"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const results = await researcher.research("root");
+
+    // "方向X" should only be searched once despite appearing twice in one LLM response
+    expect(results.length).toBe(2);
+    expect(llm.calls.length).toBe(3); // reasoning + reasoning + rerank
+  });
+
+  test("slice preserves valid queries after filtering duplicates (#64)", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["root", [makeResult("entity/a", 0.9)]],
+      ["fresh1", [makeResult("entity/b", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      // Mix of: historical dupe, same-round dupe, fresh queries
+      // maxFollowUpQueries = 2
+      // After same-round dedup: [root(deduped), root(deduped), fresh1, fresh2] → [fresh1, fresh2]
+      // After history filter: [root removed] → [fresh1, fresh2]
+      // Slice(0,2): [fresh1, fresh2]
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"root","intent":"重复原查询"},{"query":"root","intent":"再次重复"},{"query":"fresh1","intent":"新方向1"},{"query":"fresh2","intent":"新方向2"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(
+      createMockSearch(searchResponses), db, llm,
+      { maxFollowUpQueries: 2 },
+    );
+    const results = await researcher.research("root");
+
+    // fresh1 was searched, fresh2 was searched (not lost to premature slice)
+    expect(results.length).toBe(2);
+    expect(llm.calls.length).toBe(3);
+  });
 });

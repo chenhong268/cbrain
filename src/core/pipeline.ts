@@ -99,7 +99,15 @@ export class ContentPipeline {
     chunks: Array<{ index: number; content: string }>,
     embedResults: Array<{ embedding: number[]; tokenCount: number }>
   ): Promise<void> {
-    if (chunks.length === 0) return;
+    if (chunks.length === 0) {
+      // Clean stale indexes even when no new content — prevents orphan chunks/FTS/vectors
+      await this.lance.deleteRawChunksByPageSlug(slug);
+      this.db.transaction(() => {
+        this.db.deleteChunksByPage(slug);
+        this.db.ftsDeleteByPage(slug);
+      });
+      return;
+    }
     if (chunks.length !== embedResults.length) {
       throw new Error(`writeIndexes: chunks(${chunks.length}) and embeddings(${embedResults.length}) count mismatch for ${slug}`);
     }

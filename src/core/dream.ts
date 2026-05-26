@@ -26,7 +26,7 @@ export interface DreamReport {
     learn: { updated: number; topActive: string[] };
     decay: { linksUpdated: number };
     seal: { sealed: number; skipped: number; errors: number };
-    cleanup: { orphans: number; staleStubs: number };
+    cleanup: { orphans: number; staleStubs: number; lanceOrphans: number };
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
     indexes: { files: number };
@@ -79,7 +79,7 @@ export async function runDream(
         learn: { updated: 0, topActive: [] },
         decay: { linksUpdated: 0 },
         seal: { sealed: 0, skipped: 0, errors: 0 },
-        cleanup: { orphans: 0, staleStubs: 0 },
+        cleanup: { orphans: 0, staleStubs: 0, lanceOrphans: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
         insight_archive: { archived: 0 },
         indexes: { files: 0 },
@@ -166,9 +166,10 @@ export async function runDream(
 
   // Stage 4-6: Cleanup + Health + Insight archive (independent, run in parallel)
   logger.info("dream", "Stage 4-6/7: cleanup + health + insight archive (parallel)");
-  const [orphans, staleStubs, healthReport, archived] = await Promise.all([
+  const [orphans, staleStubs, lanceOrphans, healthReport, archived] = await Promise.all([
     syncMgr.removeOrphans(vaultPath).catch(e => { logger.warn("dream", `Cleanup orphans 失败: ${(e as Error).message}`); return []; }),
     syncMgr.cleanStaleStubs(vaultPath).catch(e => { logger.warn("dream", `Cleanup stale stubs 失败: ${(e as Error).message}`); return []; }),
+    syncMgr.cleanLanceOrphans().catch(e => { logger.warn("dream", `Cleanup LanceDB orphans 失败: ${(e as Error).message}`); return []; }),
     healthChecker.checkAll(),
     (async () => {
       if (!insightMgr) return 0;
@@ -209,7 +210,7 @@ export async function runDream(
       learn: learnReport,
       decay: { linksUpdated: decayUpdated },
       seal: sealReport,
-      cleanup: { orphans: orphans.length, staleStubs: staleStubs.length },
+      cleanup: { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length },
       health: {
         overallStatus: healthReport.overallStatus,
         dimensions: healthReport.dimensions.length,

@@ -405,14 +405,16 @@ export class SyncManager {
       } catch {
         orphans.push(page.slug);
         if (this.pages) {
+          // PageManager.delete() handles both SQLite + LanceDB internally
           await this.pages.delete(page.slug);
         } else {
+          // SyncManager-only path: SQLite-first, LanceDB best-effort
           this.db.deletePageCascaded(page.slug);
-        }
-        try {
-          await this.lance.deleteByPageSlug(page.slug);
-        } catch (e) {
-          this.logger?.warn("sync", `LanceDB orphan cleanup failed for ${page.slug}: ${(e as Error).message}`);
+          try {
+            await this.lance.deleteByPageSlug(page.slug);
+          } catch (e) {
+            this.logger?.warn("sync", `LanceDB orphan cleanup failed for ${page.slug}: ${(e as Error).message}`);
+          }
         }
       }
     }

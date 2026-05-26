@@ -73,11 +73,21 @@ export class ResearchManager {
         break;
       }
 
+      // Same-round dedup: normalize + deduplicate within this LLM response first
+      const seenThisRound = new Set<string>();
+      const uniqueQueries = (reasoning.follow_up_queries ?? []).filter(q => {
+        const n = normalizeQuery(q.query);
+        if (seenThisRound.has(n)) return false;
+        seenThisRound.add(n);
+        return true;
+      });
+
+      // Filter history, then slice — valid queries after dupes are preserved
       const issuedNormalized = new Set([...session.issuedQueries].map(normalizeQuery));
-      const newQueries = reasoning.follow_up_queries
-        .slice(0, this.maxFollowUpQueries)
+      const newQueries = uniqueQueries
         .map(q => q.query)
-        .filter(q => !issuedNormalized.has(normalizeQuery(q)));
+        .filter(q => !issuedNormalized.has(normalizeQuery(q)))
+        .slice(0, this.maxFollowUpQueries);
       if (newQueries.length === 0) break;
 
       if (trace) {
@@ -263,14 +273,10 @@ export class ResearchManager {
       const parsed = JSON.parse(resp) as ResearchReasoning;
       if (typeof parsed.sufficient !== "boolean") return null;
 
-      const issuedNormalized = new Set([...session.issuedQueries].map(normalizeQuery));
-      const filteredQueries = (parsed.follow_up_queries ?? [])
-        .filter(q => !issuedNormalized.has(normalizeQuery(q.query)));
-
       return {
         reasoning: parsed.reasoning ?? "",
         sufficient: parsed.sufficient,
-        follow_up_queries: filteredQueries,
+        follow_up_queries: parsed.follow_up_queries ?? [],
       };
     } catch {
       console.error("[research] reasoning failed, assuming sufficient");

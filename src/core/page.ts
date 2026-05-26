@@ -272,11 +272,16 @@ export class PageManager {
       unlinkSync(absPath);
     }
 
-    if (this.lance) {
-      await this.lance.deleteByPageSlug(slug);
-    }
+    // SQLite-first: source of truth deleted before LanceDB best-effort cleanup
     this.db.deletePageCascaded(slug);
     this.cacheDelete(slug);
+    if (this.lance) {
+      try {
+        await this.lance.deleteByPageSlug(slug);
+      } catch (e) {
+        this.logger?.warn("page", `LanceDB cleanup failed for ${slug}: ${(e as Error).message}`);
+      }
+    }
 
     this.logger?.info("page", "页面已删除", { slug });
     return true;

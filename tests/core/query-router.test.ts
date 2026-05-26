@@ -134,9 +134,9 @@ describe("QueryRouter", () => {
     expect(r.intent).toBe("review");
   });
 
-  test("single entity + temporal keyword → hybrid/timeline, not fast", () => {
+  test("single entity + temporal keyword → agentic/timeline (entity-specific)", () => {
     const r = router.route("实体A 最近");
-    expect(r.mode).toBe("hybrid");
+    expect(r.mode).toBe("agentic");
     expect(r.intent).toBe("timeline");
   });
 
@@ -156,5 +156,29 @@ describe("QueryRouter", () => {
     const r = router.route("实体A 的信息");
     expect(r.mode).toBe("fast");
     expect(r.intent).toBe("entity_lookup");
+  });
+
+  // ── exact title match has highest priority (#66) ─────────
+
+  test("exact title containing relationship keyword → fast, not agentic", () => {
+    // "关系模型" is an exact title match — must NOT match "关系" intent keyword
+    insertPage(db, "concepts/guanxi-moxing", "关系模型");
+    const r = router.route("关系模型");
+    expect(r.mode).toBe("fast");
+    expect(r.intent).toBe("entity_lookup");
+  });
+
+  // ── timeline routing (#66) ───────────────────────────────
+
+  test("entity + 时间线 keyword → agentic/timeline", () => {
+    const r = router.route("实体A 时间线");
+    expect(r.mode).toBe("agentic");
+    expect(r.intent).toBe("timeline");
+  });
+
+  test("generic temporal query (no entity) → hybrid/timeline", () => {
+    const r = router.route("最近有什么新动态");
+    expect(r.mode).toBe("hybrid");
+    expect(r.intent).toBe("timeline");
   });
 });
