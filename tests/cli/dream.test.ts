@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 
@@ -8,13 +9,12 @@ const PROJECT_DIR = join(import.meta.dir, "..", "..");
 const BIN = `bun run ${join(PROJECT_DIR, "src/cli/index.ts")}`;
 
 describe("CLI dream", () => {
-  const testDir = "/tmp/cbrain-test-dream-cli";
+  let testDir: string;
   let brainDir: string;
   let dbPath: string;
 
   beforeEach(() => {
-    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
-    mkdirSync(testDir, { recursive: true });
+    testDir = mkdtempSync(join(tmpdir(), "cbrain-test-dream-cli-"));
     brainDir = join(testDir, "mybrain");
     dbPath = join(brainDir, "brain.sqlite");
     execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
