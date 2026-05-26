@@ -1,6 +1,15 @@
 # Changelog
 
-> Current: `v1.8.5` — Agentic search multiStep: sufficiency check + auto-trigger + LLM rerank.
+> Current: `v1.8.6` — 搜索延迟优化：并行化 + embedding 缓存 + hints 去重。
+
+## [v1.8.6] — 2026-05-26
+
+### 性能优化
+- **查询变体并行化**：`searchWithExpansion` 多查询变体从串行改为 `Promise.all`，simple/medium 查询延迟降 49-59%
+- **Embedding 缓存**：LRU 100、TTL 5 分钟，重复查询缓存命中延迟从 647ms → 7ms（99%）
+- **MCP hints 去重**：smart 策略预计算的 `resolveSlugs`/`isComplexQuery` 通过 `_hints` 传入 HybridSearch，避免重复计算
+- **Research 并行**：后续查询从串行改为 `Promise.all`
+- **分阶段延迟日志**：expand_ms / total_ms / slugs 数写入 search_log
 
 ## [v1.8.5] — 2026-05-25
 
