@@ -100,11 +100,12 @@ export class ContentPipeline {
     embedResults: Array<{ embedding: number[]; tokenCount: number }>
   ): Promise<void> {
     if (chunks.length === 0) {
-      // Clean stale indexes even when no new content — prevents orphan chunks/FTS/vectors
       await this.lance.deleteRawChunksByPageSlug(slug);
+      await this.lance.deleteL1VectorByPageSlug(slug);
       this.db.transaction(() => {
         this.db.deleteChunksByPage(slug);
         this.db.ftsDeleteByPage(slug);
+        this.db.deleteL1Summary(slug);
       });
       return;
     }

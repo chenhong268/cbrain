@@ -101,6 +101,7 @@ export class ResearchManager {
             limit: 10,
             multiStep: false,
             _skipDecompose: true,
+            _trace: trace,
           }).catch((e) => {
             console.error("[research] sub-query failed:", e);
             return [] as SearchResult[];

@@ -30,11 +30,13 @@ function createMockLanceDB() {
   const added: Array<{ pageSlug: string; chunks: Array<{ content: string; chunkIndex: number }> }> = [];
   const deleted: string[] = [];
   const rawDeleted: string[] = [];
+  const l1Deleted: string[] = [];
 
   return {
     added,
     deleted,
     rawDeleted,
+    l1Deleted,
 
     connect: async () => {},
     addChunks: async (chunks: Array<{ pageSlug: string; chunkIndex: number; content: string; vector?: Float32Array }>) => {
@@ -54,6 +56,9 @@ function createMockLanceDB() {
     },
     deleteRawChunksByPageSlug: async (pageSlug: string) => {
       rawDeleted.push(pageSlug);
+    },
+    deleteL1VectorByPageSlug: async (pageSlug: string) => {
+      l1Deleted.push(pageSlug);
     },
     getIndexedPageSlugs: async () => {
       return added.map(a => a.pageSlug).filter(s => !deleted.includes(s));
@@ -449,6 +454,50 @@ describe("SyncManager", () => {
 
       // LanceDB raw chunks should be deleted for the now-empty page
       expect(lance.rawDeleted).toContain("records/empty-test");
+    });
+
+    test("empty body also cleans L1 sealed summary + vector", async () => {
+      // Seed: sync with content first
+      writeMdFile(vaultPath, "records/l1-test.md", { title: "L1Test", type: "record", slug: "records/l1-test" }, "Initial content for L1 test");
+      await sync.syncAll(vaultPath);
+
+      // Manually insert an L1 sealed summary (simulating seal output)
+      db.insertChunkWithLevel("records/l1-test", -1, "Sealed L1 summary", 1, null);
+      expect(db.getL1Summary("records/l1-test")).not.toBeNull();
+
+      // Now rewrite with empty body
+      writeMdFile(vaultPath, "records/l1-test.md", { title: "L1Test", type: "record", slug: "records/l1-test" }, "");
+      await sync.syncAll(vaultPath);
+
+      // L1 summary should be deleted from SQLite
+      expect(db.getL1Summary("records/l1-test")).toBeNull();
+      // L1 vector should be deleted from LanceDB
+      expect(lance.l1Deleted).toContain("records/l1-test");
+    });
+  });
+
+  describe("cleanLanceOrphans error reporting (#63)", () => {
+    test("only returns successfully deleted slugs", async () => {
+      // Seed two pages in LanceDB + SQLite
+      writeMdFile(vaultPath, "records/orphan-ok.md", { title: "OrphanOK", type: "record", slug: "records/orphan-ok" }, "Content");
+      writeMdFile(vaultPath, "records/orphan-fail.md", { title: "OrphanFail", type: "record", slug: "records/orphan-fail" }, "Content");
+      await sync.syncAll(vaultPath);
+
+      // Remove both from SQLite to make them orphans
+      db.deletePageCascaded("records/orphan-ok");
+      db.deletePageCascaded("records/orphan-fail");
+
+      // Make deleteByPageSlug throw for one slug
+      const originalDelete = lance.deleteByPageSlug.bind(lance);
+      lance.deleteByPageSlug = async (slug: string) => {
+        if (slug === "records/orphan-fail") throw new Error("LanceDB error");
+        return originalDelete(slug);
+      };
+
+      const cleaned = await sync.cleanLanceOrphans();
+
+      expect(cleaned).toContain("records/orphan-ok");
+      expect(cleaned).not.toContain("records/orphan-fail");
     });
   });
 });

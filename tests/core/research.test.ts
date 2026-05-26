@@ -732,4 +732,38 @@ describe("ResearchManager", () => {
     expect(results.length).toBe(2);
     expect(llm.calls.length).toBe(3);
   });
+
+  // ─── Follow-up trace propagation tests (#62) ─────────────────────────
+
+  test("follow-up searches receive _trace and can write timing data", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["traceRoot", [makeResult("entity/a", 0.9)]],
+      ["traceFollow", [makeResult("entity/b", 0.8)]],
+    ]);
+
+    // Custom mock that writes to _trace when called
+    const mockSearch: HybridSearch = {
+      search: async (query: string, options?: unknown) => {
+        const opts = options as import("../../src/core/search.js").SearchOptions | undefined;
+        if (opts?._trace && query === "traceFollow") {
+          // Simulate search writing vector_ms to trace
+          opts._trace.vector_ms = (opts._trace.vector_ms ?? 0) + 42;
+        }
+        return searchResponses.get(query) ?? [];
+      },
+    } as unknown as HybridSearch;
+
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"traceFollow","intent":"扩展"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(mockSearch, db, llm);
+    const trace: import("../../src/core/search.js").SearchTrace = {};
+    await researcher.research("traceRoot", { _trace: trace });
+
+    // Follow-up search wrote vector_ms through the propagated _trace
+    expect(trace.vector_ms).toBe(42);
+  });
 });

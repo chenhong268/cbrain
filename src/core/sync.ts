@@ -433,15 +433,16 @@ export class SyncManager {
     const sqliteSlugs = new Set(this.db.getAllPageSlugsWithPaths().map(p => p.slug));
     const orphans = lanceSlugs.filter(s => !sqliteSlugs.has(s));
 
+    const cleaned: string[] = [];
     for (const slug of orphans) {
       try {
         await this.lance.deleteByPageSlug(slug);
+        cleaned.push(slug);
       } catch (e) {
         this.logger?.warn("sync", `Failed to clean LanceDB orphan ${slug}: ${(e as Error).message}`);
       }
     }
-
-    return orphans;
+    return cleaned;
   }
 
   // ─── Private ────────────────────────────────────────────────

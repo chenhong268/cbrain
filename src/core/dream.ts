@@ -164,12 +164,21 @@ export async function runDream(
     }
   }
 
-  // Stage 4-6: Cleanup + Health + Insight archive (independent, run in parallel)
-  logger.info("dream", "Stage 4-6/7: cleanup + health + insight archive (parallel)");
-  const [orphans, staleStubs, lanceOrphans, healthReport, archived] = await Promise.all([
+  // Stage 4: Page-level cleanup (independent of each other)
+  logger.info("dream", "Stage 4/7: page cleanup (orphans + stale stubs)");
+  const [orphans, staleStubs] = await Promise.all([
     syncMgr.removeOrphans(vaultPath).catch(e => { logger.warn("dream", `Cleanup orphans 失败: ${(e as Error).message}`); return []; }),
     syncMgr.cleanStaleStubs(vaultPath).catch(e => { logger.warn("dream", `Cleanup stale stubs 失败: ${(e as Error).message}`); return []; }),
-    syncMgr.cleanLanceOrphans().catch(e => { logger.warn("dream", `Cleanup LanceDB orphans 失败: ${(e as Error).message}`); return []; }),
+  ]);
+
+  // Stage 4.5: Lance orphan cleanup — must run AFTER removeOrphans
+  // so vectors newly orphaned by page deletion are caught in the same cycle
+  logger.info("dream", "Stage 4.5/7: LanceDB orphan cleanup");
+  const lanceOrphans = await syncMgr.cleanLanceOrphans().catch(e => { logger.warn("dream", `Cleanup LanceDB orphans 失败: ${(e as Error).message}`); return []; });
+
+  // Stage 5-6: Health + Insight archive (independent, run in parallel)
+  logger.info("dream", "Stage 5-6/7: health + insight archive");
+  const [healthReport, archived] = await Promise.all([
     healthChecker.checkAll(),
     (async () => {
       if (!insightMgr) return 0;
@@ -179,13 +188,11 @@ export async function runDream(
         return n;
       } catch (e) { logger.warn("dream", `Insight 归档失败: ${(e as Error).message}`); return 0; }
     })(),
-    (async () => {
-      try {
-        const removed = db.cleanMentionSnapshots(30);
-        if (removed > 0) logger.info("dream", `清理 ${removed} 条过期 mention snapshots`);
-      } catch (e) { logger.warn("dream", `Snapshot 清理失败: ${(e as Error).message}`); }
-    })(),
   ]);
+  try {
+    const removed = db.cleanMentionSnapshots(30);
+    if (removed > 0) logger.info("dream", `清理 ${removed} 条过期 mention snapshots`);
+  } catch (e) { logger.warn("dream", `Snapshot 清理失败: ${(e as Error).message}`); }
 
   // Stage 7: Index generation
   logger.info("dream", "Stage 7/7: indexes");
