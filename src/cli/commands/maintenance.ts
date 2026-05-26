@@ -169,7 +169,7 @@ export function register(program: Command) {
         const nerApiKey = config.ner?.llm_api_key ?? apiKey ?? process.env.ZHIPU_API_KEY;
         if (nerApiKey) {
           try {
-            const llm = new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model);
+            const _llm = new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model);
             console.log(`  NER:     ${config.ner?.llm_model ?? "glm-4-flash"} ✓`);
           } catch (e) { console.error(`  NER:     FAIL — ${(e as Error).message}`); ok = false; }
         } else { console.log(`  NER:     disabled (no API key)`); }
@@ -678,11 +678,10 @@ export function register(program: Command) {
     .action(async (opts) => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
-      const { join, dirname } = await import("node:path");
+      const { join } = await import("node:path");
       const { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, readdirSync } = await import("node:fs");
       const { parseFrontmatter, stringifyFrontmatter } = await import("../../utils/frontmatter.js");
       const { getOntology } = await import("../../ontology/loader.js");
-      const { relative } = await import("node:path");
       const ontology = getOntology();
       const concreteTypes = new Set(ontology.getConcreteEntityTypes());
 
@@ -750,6 +749,7 @@ export function register(program: Command) {
           : file.action === "delete"
           ? `${file.frontmatterType} → remove duplicate (exists in ${ontology.getVaultDir(file.frontmatterType)}/)`
           : `${file.frontmatterType} → fix frontmatter to record`;
+        // biome-ignore lint/suspicious/noAssignInExpressions: intentional map grouping
         (byAction[label] ??= []).push(file.name);
 
         if (opts.dryRun) {
@@ -870,7 +870,7 @@ export function register(program: Command) {
       const plans: MergePlan[] = [];
       const skipped: Array<{ title: string; reason: string }> = [];
 
-      for (const [norm, group] of byTitle) {
+      for (const [_norm, group] of byTitle) {
         if (group.length < 2) continue;
 
         // Check if any pair in group has affinity
@@ -1241,7 +1241,7 @@ export function register(program: Command) {
 
       const candidates: CandidatePair[] = [];
 
-      for (const [type, entities] of byType) {
+      for (const [_type, entities] of byType) {
         // Skip types with too few entities
         if (entities.length < 2) continue;
 
@@ -1562,7 +1562,7 @@ Return JSON only, no markdown:
 function normalize(s: string): string {
   return s
     .toLowerCase()
-    .replace(/[\s\-_\.]+/g, "")
+    .replace(/[\s\-_.]+/g, "")
     .replace(/[（(].+?[）)]/g, "")
     .replace(/有限公司$/g, "")
     .replace(/股份有限公司$/g, "")

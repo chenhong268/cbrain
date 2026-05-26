@@ -26,11 +26,6 @@ export interface EntityCandidate {
   relevance: Relevance;
 }
 
-// ─── Constants ────────────────────────────────────────────────
-
-const THRESHOLD_REUSE = 0.9;
-const THRESHOLD_CANDIDATE = 0.7;
-
 // ─── Resolver ─────────────────────────────────────────────────
 
 export class EntityResolver {
@@ -307,7 +302,7 @@ function isSignificantSubstring(shorter: string, longer: string): boolean {
 function normalizeForComparison(name: string): string {
   return name
     .toLowerCase()
-    .replace(/[\s\-_\.]+/g, "")
+    .replace(/[\s\-_.]+/g, "")
     .replace(/[（(].+?[）)]/g, "")
     .replace(/[^\p{L}\p{N}]/gu, "")
     .trim();

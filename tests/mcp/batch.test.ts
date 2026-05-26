@@ -3,7 +3,6 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
-import { PageManager } from "../../src/core/page.js";
 
 function createMockEmbedding() {
   return {

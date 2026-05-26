@@ -50,6 +50,7 @@ export function extractWikiLinks(content: string): WikiLink[] {
   const stripped = stripCodeBlocks(content);
   const re = new RegExp(WIKILINK_RE.source, "g");
   let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: regex iteration pattern
   while ((m = re.exec(stripped)) !== null) {
     const target = m[1].trim();
     if (!target || target.includes("://")) continue;

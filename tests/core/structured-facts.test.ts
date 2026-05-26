@@ -157,7 +157,7 @@ describe("applyFacts", () => {
   });
 
   test("skips fact with no slug mapping", () => {
-    const { mock: pages, updates } = createMockPages({});
+    const { mock: pages } = createMockPages({});
     const slugMap = new Map<string, string>();
     const facts = [makeFact()];
 

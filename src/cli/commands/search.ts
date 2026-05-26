@@ -40,7 +40,7 @@ export function register(program: Command) {
       const db = new CBrainDB(config.dbPath);
       const { GraphManager } = await import("../../core/graph.js");
       const graph = new GraphManager(db);
-      let result;
+      let result: unknown;
       switch (opts.mode) {
         case "backlinks": result = graph.getBacklinks(slug); break;
         case "related": result = graph.getRelatedEntities(slug, parseInt(opts.limit, 10)); break;

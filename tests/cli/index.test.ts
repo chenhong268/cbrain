@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, readFileSync, } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";

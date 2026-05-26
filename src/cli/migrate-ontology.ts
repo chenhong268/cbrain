@@ -11,14 +11,13 @@
  *   bun run src/cli/migrate-ontology.ts --help
  */
 
-import { getOntology } from "../ontology/loader.js";
 import {
   readdirSync,
   existsSync,
   unlinkSync,
   mkdirSync,
 } from "node:fs";
-import { join, dirname, relative } from "node:path";
+import { join, dirname } from "node:path";
 import { readFileSync } from "node:fs";
 import { readPageFile, writePageFile } from "../utils/frontmatter.js";
 import { slugToFilePath, generateSlug } from "../utils/slug.js";
@@ -342,8 +341,6 @@ async function migrateVault(
         slug: newSlug,
       };
 
-      const oldRelative = relative(vaultPath, file.filePath);
-      const newRelative = relative(vaultPath, newFullPath);
       const needsMove = file.filePath !== newFullPath;
 
       if (dryRun) {

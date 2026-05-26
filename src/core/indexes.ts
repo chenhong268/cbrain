@@ -2,15 +2,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 
-interface IndexPageRow {
-  slug: string;
-  title: string;
-  type: string;
-  tier: number;
-  mention_count: number;
-  updated_at: string;
-}
-
 export class IndexGenerator {
   private db: CBrainDB;
   private outputsDir: string;

@@ -68,9 +68,7 @@ export function removeHierarchy(
   // Remove from graph
   graph.removeLink(slug, oldReportsTo, REPORTS_TO_RELATION);
 
-  // Remove from frontmatter by rebuilding without reports_to
-  const { reports_to: _, ...rest } = page.frontmatter as Record<string, unknown>;
-  // Use extra with undefined to strip the key
+  // Remove from frontmatter by setting reports_to to undefined
   pages.update(slug, {
     body: page.body ?? "",
     extra: { reports_to: undefined },

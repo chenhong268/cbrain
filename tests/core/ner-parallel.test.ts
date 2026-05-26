@@ -69,7 +69,7 @@ describe("NerEngine parallelization", () => {
     ]);
     const ner = new NerEngine(llm);
 
-    const result = await ner.extract(longText);
+    await ner.extract(longText);
 
     // Should have multiple stage-1 calls (one per chunk) + 1 stage-2 call
     expect(llm.calls.length).toBeGreaterThanOrEqual(3);

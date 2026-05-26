@@ -492,8 +492,11 @@ bun install
 # Run tests
 bun test
 
-# Type check
+# Lint (tsc + biome)
 bun run lint
+
+# Full gate (lint + tests)
+bun run check
 
 # Run CLI in dev mode
 bun run dev init

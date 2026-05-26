@@ -12,16 +12,14 @@ export interface LogEntry {
 }
 
 export class Logger {
-  private outputsDir: string;
   private logDir: string;
 
   constructor(outputsDir: string) {
-    this.outputsDir = outputsDir;
     this.logDir = join(outputsDir, "logs");
     mkdirSync(this.logDir, { recursive: true });
   }
 
-  info(module: string, message: string, details?: Record<string, unknown>): void {
+  info(_module: string, _message: string, _details?: Record<string, unknown>): void {
     // info only stays in memory, not persisted — keeps logs lean
   }
 

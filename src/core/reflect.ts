@@ -1,9 +1,7 @@
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { PageManager } from "./page.js";
-import { normalizeRelation } from "./shared.js";
 import type { ContentPipeline } from "./pipeline.js";
-import { generateSlug } from "../utils/slug.js";
 import type { InsightManager } from "./insight.js";
 
 export interface SynthesisResult {
@@ -45,16 +43,6 @@ interface SynthesisPayload {
   confidence?: number;
 }
 
-interface RelationPayload {
-  inferred_relations?: Array<{
-    from: string;
-    to: string;
-    relation: string;
-    reasoning: string;
-    confidence: number;
-  }>;
-}
-
 interface InsightPayload {
   insights?: Array<{
     title?: string;
@@ -67,10 +55,7 @@ interface InsightPayload {
 
 const MAX_LLM_CALLS = 50;
 const MIN_MENTIONS = 3;
-const MIN_NEIGHBORS = 5;
 const MIN_CONFIDENCE = 0.7;
-const BATCH_SIZE = 15;
-const TITLE_SAFETY_LIMIT = 10;
 const CONCURRENCY = 3;
 
 const W_PATH = 0.35;
@@ -102,14 +87,6 @@ const SYNTHESIS_SYSTEM = `你是一个知识图谱分析师。根据给定信息
 只陈述可从信息推导的事实，不编造。不确定时confidence设低。
 输出JSON：{"summary": "2-3句话的综合描述", "key_facts": ["事实1", "事实2"], "confidence": 0.0到1.0}`;
 
-const RELATION_SYSTEM = `你是一个知识图谱分析师。根据已知关系，判断实体对之间是否存在未标注的直接关系。
-只输出有把握的推理，confidence低于0.6的不输出。
-
-关系类型（必须用以下之一）：
-- 认识 / 提及 / 任职 / 创立 / 归属 / 合作 / 竞争 / 资本 / 制造 / 间接关联
-
-输出JSON：{"inferred_relations": [{"from": "slug", "to": "slug", "relation": "关系", "reasoning": "依据", "confidence": 0.0到1.0}]}`;
-
 const INSIGHT_SYSTEM = `你是一个知识图谱分析师。你的任务是从素材中判断是否存在值得记录的洞察。
 
 核心原则：好的洞察是稀有的。找不到有力的洞察是正常的——输出空数组，不要硬编。
@@ -140,15 +117,11 @@ confidence 标准：
 export class ReflectManager {
   private db: CBrainDB;
   private llm: LLMProvider | null;
-  private pageMgr: PageManager;
-  private pipeline: ContentPipeline | null;
   private insightMgr: InsightManager | null;
 
-  constructor(db: CBrainDB, pageMgr: PageManager, llm?: LLMProvider, pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager) {
+  constructor(db: CBrainDB, _pageMgr: PageManager, llm?: LLMProvider, _pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager) {
     this.db = db;
-    this.pageMgr = pageMgr;
     this.llm = llm ?? null;
-    this.pipeline = pipeline ?? null;
     this.insightMgr = insightMgr ?? null;
   }
 
@@ -593,7 +566,7 @@ export class ReflectManager {
     const g = adj ?? this.buildAdjacency();
     const nodeList = [...g.keys()];
     const labels = new Map<string, number>();
-    nodeList.forEach((n, i) => labels.set(n, i));
+    for (let i = 0; i < nodeList.length; i++) labels.set(nodeList[i], i);
     for (let iter = 0; iter < 20; iter++) {
       let changed = false;
       for (const node of nodeList) {

@@ -66,7 +66,7 @@ export async function generateProactiveHints(
 function buildTimelineHint(
   db: CBrainDB,
   resultSlugs: string[],
-  linksMap: Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }>,
+  _linksMap: Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }>,
   alreadyInResults: Set<string>
 ): ProactiveHint | null {
   const events = db.getRecentEventsInNetwork(resultSlugs, 30, 5);

@@ -9,6 +9,5 @@ Brief description of what this PR does and why.
 
 ## Test Plan
 
-- [ ] Unit tests pass (`bun test`)
-- [ ] Type check passes (`bun run lint`)
+- [ ] Full gate passes (`bun run check` — tsc + biome lint + tests)
 - [ ] Manual testing performed (describe what you tested)

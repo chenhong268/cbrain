@@ -49,7 +49,7 @@ export function register(program: Command) {
         const ctx = buildContext(deps);
         await initWatcher(config, deps);
         const server = createHttpServer(ctx);
-        const port = parseInt(opts.port) || 3399;
+        const port = parseInt(opts.port, 10) || 3399;
         server.start(port);
         console.error("> CBrain HTTP Server → http://127.0.0.1:" + port);
         return;

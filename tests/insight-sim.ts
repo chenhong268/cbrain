@@ -6,8 +6,6 @@
  */
 
 import { join } from "node:path";
-import { CBrainDB } from "../src/storage/sqlite.js";
-import { LanceDBManager } from "../src/storage/lancedb.js";
 import { PageManager } from "../src/core/page.js";
 import { Logger } from "../src/core/logger.js";
 import { ReflectManager } from "../src/core/reflect.js";

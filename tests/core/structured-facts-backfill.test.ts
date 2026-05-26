@@ -1,8 +1,8 @@
-import { describe, test, expect, beforeEach, mock } from "bun:test";
+import { describe, test, expect, beforeEach, } from "bun:test";
 import { structuredFactsBackfill } from "../../src/core/structured-facts-backfill.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 import type { CBrainDB, PageRow } from "../../src/storage/sqlite.js";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 

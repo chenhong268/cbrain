@@ -39,7 +39,7 @@ export function applyFacts(
   facts: StructuredFact[],
   resolvedSlugMap: Map<string, string>,
   pages: PageManager,
-  db: CBrainDB
+  _db: CBrainDB
 ): FactWriteResult {
   let written = 0;
   let skipped = 0;

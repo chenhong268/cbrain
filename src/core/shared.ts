@@ -25,6 +25,7 @@ export function hashContent(content: string): string {
 export async function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>): Promise<string[]> {
   const results: string[] = [];
   const walk = async (d: string) => {
+    // biome-ignore lint/suspicious/noImplicitAnyLet: readdir return type varies by runtime
     let entries;
     try { entries = await readdir(d, { withFileTypes: true }); } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "EACCES") {
@@ -207,9 +208,6 @@ export const HIERARCHY_RELATIONS = new Set(["reports_to"]);
 export function isValidRelation(r: string): boolean {
   return getOntology().isValidRelation(r) || HIERARCHY_RELATIONS.has(r);
 }
-
-/** @deprecated Use getRelationStrength() which delegates to ontology */
-const DEFAULT_WEIGHTS: Record<string, { strength: string; weight: number }> = {};
 
 export function getRelationStrength(relation: string): { strength: string; weight: number } {
   return getOntology().getRelationStrength(relation);

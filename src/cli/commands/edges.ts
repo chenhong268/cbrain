@@ -87,7 +87,7 @@ export function register(program: Command) {
       const pages = new (await import("../../core/page.js")).PageManager(db, config.vaultPath);
       const vm = new (await import("../../core/version.js")).VersionManager(db, pages, config.vaultPath);
       const vn = parseInt(version, 10);
-      if (isNaN(vn)) { console.error("Version must be a number."); process.exit(1); }
+      if (Number.isNaN(vn)) { console.error("Version must be a number."); process.exit(1); }
       if (vm.revertToVersion(slug, vn)) { console.log(`Reverted ${slug} to version ${vn}`); }
       else { console.error(`Revert failed.`); process.exit(1); }
       db.close();

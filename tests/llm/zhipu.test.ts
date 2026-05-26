@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, afterEach } from "bun:test";
 import { ZhipuLLMProvider } from "../../src/llm/zhipu.js";
 
 describe("ZhipuLLMProvider", () => {
@@ -28,7 +28,7 @@ describe("ZhipuLLMProvider", () => {
 
     test("sends correct request body", async () => {
       let capturedBody: string | undefined;
-      globalThis.fetch = async (url: string, opts: any) => {
+      globalThis.fetch = async (_url: string, opts: any) => {
         capturedBody = opts.body;
         return new Response(
           JSON.stringify({
@@ -130,7 +130,6 @@ describe("ZhipuLLMProvider", () => {
     });
 
     test("succeeds within timeout", async () => {
-      let aborted = false;
       globalThis.fetch = async (_url: string, opts: any) => {
         // Verify signal exists
         expect(opts.signal).toBeDefined();

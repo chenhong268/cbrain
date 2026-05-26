@@ -17,7 +17,6 @@ import {
   normalizePageType,
 } from "./shared.js";
 import { ContentPipeline } from "./pipeline.js";
-import type { NerPipelineResult } from "./pipeline.js";
 
 export interface SyncConfig {
   chunkSize?: number;
@@ -126,7 +125,7 @@ export class SyncManager {
         for (let i = 0; i < allChunks.length; i++) {
           this.chunkEmbedCache.set(`${allChunks[i].slug}:${allChunks[i].index}`, embedResults[i]);
         }
-      } catch (e) {
+      } catch (_e) {
         this.logger?.warn("sync", "批量 embedding 失败，回退到逐条处理");
       }
     }
@@ -231,7 +230,7 @@ export class SyncManager {
     } finally { this.chunkEmbedCache.clear(); }
   }
 
-  async cleanStaleStubs(vaultPath: string): Promise<string[]> {
+  async cleanStaleStubs(_vaultPath: string): Promise<string[]> {
     const removed: string[] = [];
     const stubs = this.db.getAutoExtractedPages();
 

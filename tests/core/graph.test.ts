@@ -10,12 +10,6 @@ function insertPage(db: CBrainDB, slug: string, title: string, type: string, men
   ).run(slug, type, title, `${slug}.md`, `h-${slug}`, mentionCount);
 }
 
-function insertLink(db: CBrainDB, from: string, to: string, relation = "mentions") {
-  db.prepare(
-    `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
-  ).run(from, to, relation);
-}
-
 describe("GraphManager", () => {
   const testDir = "/tmp/cbrain-test-graph";
   const dbPath = join(testDir, "test.sqlite");

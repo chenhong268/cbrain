@@ -1,6 +1,6 @@
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
-import type { HybridSearch, SearchResult, SearchOptions, SearchTrace, GraphContext } from "./search.js";
+import type { HybridSearch, SearchResult, SearchOptions, GraphContext } from "./search.js";
 
 const MAX_NEIGHBORS_PER_ENTITY = 5;
 

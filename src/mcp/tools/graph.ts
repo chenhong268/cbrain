@@ -24,7 +24,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       if (found) resolvedSlug = found;
     }
 
-    let result;
+    let result: ReturnType<typeof ctx.graph.getBacklinks> | ReturnType<typeof ctx.graph.traverse>;
     switch (mode) {
       case "backlinks":
         result = ctx.graph.getBacklinks(resolvedSlug);

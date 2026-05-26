@@ -8,7 +8,7 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
-import { FACT_FIELD_WHITELIST, type EntityType } from "./ner.js";
+import { FACT_FIELD_WHITELIST, } from "./ner.js";
 
 const ENTITY_FACTS_PROMPT = `You are a structured fact extractor. Given an entity's page content, extract concrete, verifiable facts as key-value pairs.
 
@@ -47,7 +47,6 @@ export interface IngestResult {
 export class IngestManager {
   private db: CBrainDB;
   private pages: PageManager;
-  private vaultPath: string;
   private nerEngine: NerEngine | null;
   private llmProvider: LLMProvider | undefined;
   private pipeline: ContentPipeline;
@@ -60,7 +59,6 @@ export class IngestManager {
     llmProvider?: LLMProvider
   ) {
     this.db = db;
-    this.vaultPath = vaultPath;
     this.pages = new PageManager(db, vaultPath);
     this.nerEngine = llmProvider ? new NerEngine(llmProvider) : null;
     this.llmProvider = llmProvider;

@@ -6,17 +6,13 @@ import type { LLMProvider } from "../llm/provider.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 import {
   ExtractionResult,
-  ExtractedEntity,
-  ExtractedRelation,
-  ExtractedEvent,
   StructuredFact,
   FACT_FIELD_WHITELIST,
   type EntityType,
   filterExtractedEntities,
   filterRelations,
-  type FilterOutcome,
 } from "./ner.js";
-import { findEntitySlug, mapEntityType, buildStubBody, hashContent, normalizeRelation } from "./shared.js";
+import { findEntitySlug, mapEntityType, hashContent, normalizeRelation } from "./shared.js";
 import { EntityResolver } from "./entity-resolver.js";
 import { generateSlug, slugToFilePath } from "../utils/slug.js";
 import { stringifyFrontmatter, readPageFile, writePageFile } from "../utils/frontmatter.js";
@@ -108,21 +104,17 @@ Every fact MUST have an evidence field (verbatim quote). No inference.
 
 export class DialogueIngest {
   private db: CBrainDB;
-  private embedding: EmbeddingProvider;
-  private lance: LanceDBManager;
   private vaultPath: string;
   private llm?: LLMProvider;
 
   constructor(
     db: CBrainDB,
-    embedding: EmbeddingProvider,
-    lance: LanceDBManager,
+    _embedding: EmbeddingProvider,
+    _lance: LanceDBManager,
     vaultPath: string,
     llm?: LLMProvider
   ) {
     this.db = db;
-    this.embedding = embedding;
-    this.lance = lance;
     this.vaultPath = vaultPath;
     this.llm = llm;
   }

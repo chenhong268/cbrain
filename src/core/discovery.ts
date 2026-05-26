@@ -137,7 +137,7 @@ export class DiscoveryManager {
         if (neighborsA.size < BRIDGE_MIN_DEGREE || neighborsB.size < BRIDGE_MIN_DEGREE) continue;
 
         const dist = this.bfsDistance(a, b, graph);
-        if (dist < 4 || !isFinite(dist)) continue;
+        if (dist < 4 || !Number.isFinite(dist)) continue;
 
         const shared = [...neighborsA].filter(n => neighborsB.has(n)).length;
 

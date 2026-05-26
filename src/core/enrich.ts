@@ -29,20 +29,15 @@ export interface EnrichResult {
   upgraded: boolean;
 }
 
-const ENRICH_PROMPT = `根据已知关联信息，用2-3句话简洁描述这个实体。只陈述可从关联推导的事实，不编造。
-	输出格式：纯文本，不要标题、不要列表、不要markdown。`;
-
 export class EnrichManager {
   private db: CBrainDB;
   private thresholds: TierThresholds;
-  private llm?: LLMProvider;
   private vaultPath: string;
   private pages?: PageManager;
 
-  constructor(db: CBrainDB, thresholds?: Partial<TierThresholds>, llm?: LLMProvider, vaultPath?: string, pages?: PageManager) {
+  constructor(db: CBrainDB, thresholds?: Partial<TierThresholds>, _llm?: LLMProvider, vaultPath?: string, pages?: PageManager) {
     this.db = db;
     this.thresholds = { ...DEFAULT_THRESHOLDS, ...thresholds };
-    this.llm = llm;
     this.vaultPath = vaultPath ?? "";
     this.pages = pages;
   }

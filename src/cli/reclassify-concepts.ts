@@ -116,7 +116,6 @@ for (const [title, files] of byTitle) {
 
 // ── Report ────────────────────────────────────────────────────
 
-const total = [...byTitle.values()].reduce((s, arr) => s + (arr.length > 1 ? 1 : arr[0].dir !== "concept" || classify(arr[0].dir === "concept" ? "" : "", arr.some((f) => f.dir !== "concept")) !== "concept" ? 1 : 0), 0);
 console.log(`\n=== Result ===`);
 console.log(`  pharma:     ${counts.pharma}`);
 console.log(`  psychology: ${counts.psychology}`);

@@ -4,9 +4,6 @@ import {
   readFileSync,
   writeFileSync,
   unlinkSync,
-  renameSync,
-  readdirSync,
-  statSync,
 } from "node:fs";
 import { join, dirname, relative } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
@@ -16,7 +13,7 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug } from "../utils/slug.js";
-import { hashContent, normalizePageType, canMerge, getLayer, rewriteVaultLinks } from "./shared.js";
+import { hashContent, normalizePageType, canMerge, rewriteVaultLinks } from "./shared.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 

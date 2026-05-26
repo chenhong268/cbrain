@@ -14,7 +14,7 @@ import {
   unlinkSync,
   mkdirSync,
 } from "node:fs";
-import { join, dirname, relative } from "node:path";
+import { join, dirname, } from "node:path";
 import { readFileSync } from "node:fs";
 import { readPageFile, writePageFile } from "../utils/frontmatter.js";
 import { slugToFilePath, generateSlug } from "../utils/slug.js";
@@ -23,7 +23,6 @@ import { slugToFilePath, generateSlug } from "../utils/slug.js";
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
 const RED = "\x1b[31m";
-const CYAN = "\x1b[36m";
 const GRAY = "\x1b[90m";
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
@@ -31,7 +30,6 @@ const RESET = "\x1b[0m";
 function green(s: string) { return `${GREEN}${s}${RESET}`; }
 function yellow(s: string) { return `${YELLOW}${s}${RESET}`; }
 function red(s: string) { return `${RED}${s}${RESET}`; }
-function cyan(s: string) { return `${CYAN}${s}${RESET}`; }
 function gray(s: string) { return `${GRAY}${s}${RESET}`; }
 function bold(s: string) { return `${BOLD}${s}${RESET}`; }
 

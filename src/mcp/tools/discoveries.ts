@@ -104,7 +104,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     },
   }, async ({ limit, actionableFilter, typeFilter }) => {
     const effectiveLimit = limit ?? 10;
-    let rows;
+    let rows: ReturnType<typeof ctx.db.getDiscoveriesByType>;
 
     if (typeFilter) {
       rows = ctx.db.getDiscoveriesByType(typeFilter, effectiveLimit);

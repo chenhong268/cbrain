@@ -3,7 +3,6 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { IngestManager } from "../../src/core/ingest.js";
-import { SyncManager } from "../../src/core/sync.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 

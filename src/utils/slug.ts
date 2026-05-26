@@ -2,15 +2,6 @@ import { getOntology } from "../ontology/loader.js";
 
 const CJK_RANGE = /[一-鿿㐀-䶿]/;
 
-function getTypePrefixMap(): Record<string, string> {
-  const ontology = getOntology();
-  const map: Record<string, string> = {};
-  for (const type of ontology.getConcreteEntityTypes()) {
-    map[type] = ontology.getVaultDir(type);
-  }
-  return map;
-}
-
 export function pluralize(type: string): string {
   const prefix = getOntology().getVaultDir(type);
   return prefix.split("/").pop() ?? `${type}s`;

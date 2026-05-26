@@ -84,7 +84,6 @@ export class HealthChecker {
   }
 
   async checkAll(): Promise<HealthReport> {
-    const start = Date.now();
     const timestamp = new Date().toISOString();
 
     const metrics = this.collectMetrics();
@@ -197,7 +196,6 @@ export class HealthChecker {
     }
 
     const prevDimMap = new Map(prevState.dimensions.map(d => [d.name, d]));
-    const prevSlugs = new Set(prevState.slugRunCounts ? Object.keys(prevState.slugRunCounts) : []);
     const dimDeltas: DimensionDelta[] = [];
 
     for (const dim of dimensions) {

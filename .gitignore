@@ -26,6 +26,17 @@ coverage/
 logs/
 *.log
 
+# Database
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+lancedb/
+
 # Claude Code
 .claude/
 CLAUDE.md

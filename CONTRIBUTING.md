@@ -10,11 +10,8 @@ git clone https://github.com/user/cbrain.git
 cd cbrain
 bun install
 
-# Run tests
-bun test
-
-# Type check
-bun run lint
+# Run full gate (tsc + biome lint + tests)
+bun run check
 ```
 
 ## How to Contribute
@@ -40,10 +37,9 @@ Open an issue describing:
 2. Create a feature branch: `git checkout -b feat/my-feature`
 3. Write tests first (TDD)
 4. Implement your changes
-5. Ensure all tests pass: `bun test`
-6. Ensure type check passes: `bun run lint`
-7. Commit with conventional format: `feat: add X`, `fix: Y`, etc.
-8. Open a PR against `main`
+5. Ensure full gate passes: `bun run check`
+6. Commit with conventional format: `feat: add X`, `fix: Y`, etc.
+7. Open a PR against `main`
 
 ## Code Style
 

@@ -53,7 +53,7 @@ export function trimTimeline(
 export function getExpiryWarning(expiresAt?: string | null): string | undefined {
   if (!expiresAt) return undefined;
   const expires = new Date(expiresAt);
-  if (isNaN(expires.getTime())) return undefined;
+  if (Number.isNaN(expires.getTime())) return undefined;
 
   const now = new Date();
   const dateStr = expires.toISOString().slice(0, 10);
