@@ -268,19 +268,23 @@ export function register(program: Command) {
       const health = new HealthChecker(deps.db, outputsDir, logger);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
         deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined);
-      const icon = report.locked ? "🌙" : "⚠️";
-      console.log(`${icon} Dream — ${report.timestamp.slice(0, 10)}`);
+      if (report.locked) {
+        console.log(`⚠️ Dream — ${report.timestamp.slice(0, 10)} 已跳过`);
+        console.log(`  上次 dream 仍在执行中（30 分钟锁未释放），本次跳过`);
+        deps.db.close();
+        process.exit(1);
+      }
+      console.log(`🌙 Dream — ${report.timestamp.slice(0, 10)}`);
       if (report.stages.backup.path) console.log(`  Backup:  ${report.stages.backup.size_mb}MB`);
       console.log(`  Sync:    ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`);
       console.log(`  Enrich:  ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级`);
       console.log(`  Seal:    ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过`);
-      console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub`);
+      console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿`);
       console.log(`  Health:  ${report.stages.health.overallStatus}`);
       console.log(`  Insight: ${report.stages.insight_archive.archived} 条过期归档`);
       console.log(`  ⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
-      if (!report.locked) console.log(`  ⚠️ 上次 dream 仍在执行中，本次跳过`);
       deps.db.close();
-      process.exit(report.locked ? 0 : 1);
+      process.exit(0);
     });
 
   program
