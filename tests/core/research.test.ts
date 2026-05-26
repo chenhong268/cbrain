@@ -496,6 +496,167 @@ describe("ResearchManager", () => {
     expect(llm.calls.length).toBe(4); // 3 reasoning + 1 rerank
   });
 
+  // ─── Trace propagation tests ─────────────────────────────────────
+
+  test("trace captures rerank_ms from research", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["X", [makeResult("entity/a", 0.9), makeResult("entity/b", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const trace: import("../../src/core/search.js").SearchTrace = {};
+    await researcher.research("X", { _trace: trace });
+
+    expect(typeof trace.rerank_ms).toBe("number");
+    expect(trace.rerank_ms!).toBeGreaterThanOrEqual(0);
+  });
+
+  test("trace captures follow_up_queries across iterations", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["root", [makeResult("entity/a", 0.9)]],
+      ["branch1", [makeResult("entity/b", 0.8)]],
+      ["branch2", [makeResult("entity/c", 0.7)]],
+    ]);
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"branch1","intent":"方向1"},{"query":"branch2","intent":"方向2"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2, 3]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const trace: import("../../src/core/search.js").SearchTrace = {};
+    await researcher.research("root", { _trace: trace });
+
+    expect(trace.follow_up_queries).toBeDefined();
+    expect(trace.follow_up_queries!).toEqual(["branch1", "branch2"]);
+  });
+
+  test("trace sets degraded_reason on malformed LLM response", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["bad", [makeResult("entity/a", 0.9)]],
+    ]);
+    const llm = createMockLLM([
+      "not json",
+      '{"order": [1]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const trace: import("../../src/core/search.js").SearchTrace = {};
+    await researcher.research("bad", { _trace: trace });
+
+    expect(trace.degraded_reason).toBe("reasoning_parse_failed");
+  });
+
+  test("llmCallCount tracks reasoning + rerank calls", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["count", [makeResult("entity/a", 0.9)]],
+      ["more", [makeResult("entity/b", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"more","intent":"test"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    await researcher.research("count");
+
+    // 2 reasoning + 1 rerank = 3 LLM calls
+    expect(researcher.getLLMCallCount()).toBe(3);
+  });
+
+  test("trace captures rerank_ms and follow_up_queries together", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["combo", [makeResult("entity/a", 0.9)]],
+      ["extra", [makeResult("entity/b", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"extra","intent":"more"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const trace: import("../../src/core/search.js").SearchTrace = {};
+    await researcher.research("combo", { _trace: trace });
+
+    expect(typeof trace.rerank_ms).toBe("number");
+    expect(trace.follow_up_queries).toEqual(["extra"]);
+  });
+
+  // ─── Normalized dedup tests (#64) ──────────────────────────────────
+
+  test("follow-up dedup normalizes whitespace", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["方向A", [makeResult("entity/a", 0.9), makeResult("entity/b", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"方向A ","intent":"重复(尾空格)"}]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const results = await researcher.research("方向A");
+
+    // "方向A " (with trailing space) should be deduped against original "方向A"
+    expect(llm.calls.length).toBe(2); // reasoning + rerank, no second iteration
+    expect(results.length).toBe(2);
+  });
+
+  test("follow-up dedup normalizes punctuation", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["主题X", [makeResult("entity/a", 0.9), makeResult("entity/b", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"主题X。","intent":"重复(句号)"}]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const results = await researcher.research("主题X");
+
+    expect(llm.calls.length).toBe(2);
+    expect(results.length).toBe(2);
+  });
+
+  test("follow-up dedup normalizes case", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["React hooks", [makeResult("concept/react-hooks", 0.9), makeResult("entity/a", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"react HOOKS","intent":"重复(大小写)"}]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const results = await researcher.research("React hooks");
+
+    expect(llm.calls.length).toBe(2);
+    expect(results.length).toBe(2);
+  });
+
+  test("follow-up with genuinely different query passes through", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["主题Y", [makeResult("entity/a", 0.9)]],
+      ["方向Z", [makeResult("entity/b", 0.8)]],
+    ]);
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"方向Z","intent":"新方向"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
+    const results = await researcher.research("主题Y");
+
+    expect(results.length).toBe(2);
+    expect(llm.calls.length).toBe(3); // reasoning + reasoning + rerank
+  });
+
   test("all follow-up queries are recorded in issuedQueries", async () => {
     const searchedQueries: string[] = [];
     const searchResponses = new Map<string, SearchResult[]>([

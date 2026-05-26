@@ -51,6 +51,9 @@ function createMockLanceDB() {
       deleted.push(pageSlug);
     },
     deleteRawChunksByPageSlug: async () => {},
+    getIndexedPageSlugs: async () => {
+      return added.map(a => a.pageSlug).filter(s => !deleted.includes(s));
+    },
     close: async () => {},
     createFTSIndex: async () => {},
   };
@@ -343,25 +346,25 @@ describe("SyncManager", () => {
       expect(hash).toBeNull();
     });
 
-    test("removePage: LanceDB delete failure preserves SQLite page", async () => {
+    test("removePage: SQLite deleted first, LanceDB failure tolerated", async () => {
       // First, sync a page successfully
       writeMdFile(vaultPath, "records/del-test.md", { title: "DelTest", type: "record", slug: "records/del-test" }, "Content");
       await sync.syncAll(vaultPath);
       expect(db.getPageContentHash("records/del-test")).not.toBeNull();
 
-      // Now try to remove with failing LanceDB
+      // Now try to remove with failing LanceDB — SQLite delete should succeed first
       const failLance = createFailingLanceDB({ failDelete: true });
       const failSync = new SyncManager(db, createMockEmbeddingProvider(), failLance as any, { chunkSize: 500 });
 
-      await expect(failSync.removePage("records/del-test")).rejects.toThrow("LanceDB delete failure");
+      // Should NOT throw — LanceDB failure is swallowed after SQLite succeeds
+      await failSync.removePage("records/del-test");
 
-      // SQLite page must still exist for retry
+      // SQLite page is gone (source of truth deleted)
       const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("records/del-test") as any;
-      expect(row).not.toBeNull();
-      expect(row.title).toBe("DelTest");
+      expect(row).toBeNull();
     });
 
-    test("removeOrphans: LanceDB delete failure preserves SQLite page", async () => {
+    test("removeOrphans: SQLite deleted first, LanceDB failure tolerated", async () => {
       // Seed an orphan (in DB but not in vault)
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
@@ -370,11 +373,46 @@ describe("SyncManager", () => {
       const failLance = createFailingLanceDB({ failDelete: true });
       const failSync = new SyncManager(db, createMockEmbeddingProvider(), failLance as any, { chunkSize: 500 });
 
-      await expect(failSync.removeOrphans(vaultPath)).rejects.toThrow("LanceDB delete failure");
+      // Should NOT throw — LanceDB failure is swallowed
+      const orphans = await failSync.removeOrphans(vaultPath);
 
-      // SQLite page must still exist
+      expect(orphans).toContain("records/orphan-del");
+      // SQLite page is gone
       const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("records/orphan-del") as any;
-      expect(row).not.toBeNull();
+      expect(row).toBeNull();
+    });
+
+    test("cleanLanceOrphans: removes LanceDB vectors for pages not in SQLite", async () => {
+      // Sync two pages
+      writeMdFile(vaultPath, "records/keep.md", { title: "Keep", type: "record", slug: "records/keep" }, "Keep content");
+      writeMdFile(vaultPath, "records/lose.md", { title: "Lose", type: "record", slug: "records/lose" }, "Lose content");
+      await sync.syncAll(vaultPath);
+
+      // Verify both are in LanceDB
+      const slugsBefore = await lance.getIndexedPageSlugs();
+      expect(slugsBefore).toContain("records/keep");
+      expect(slugsBefore).toContain("records/lose");
+
+      // Delete one page from SQLite only (simulate crash after SQLite delete, before LanceDB cleanup)
+      db.deletePageCascaded("records/lose");
+
+      // cleanLanceOrphans should detect and remove the orphan
+      const orphans = await sync.cleanLanceOrphans();
+      expect(orphans).toContain("records/lose");
+      expect(orphans).not.toContain("records/keep");
+
+      // Verify orphan is cleaned from LanceDB
+      const slugsAfter = await lance.getIndexedPageSlugs();
+      expect(slugsAfter).not.toContain("records/lose");
+      expect(slugsAfter).toContain("records/keep");
+    });
+
+    test("cleanLanceOrphans: no orphans returns empty", async () => {
+      writeMdFile(vaultPath, "records/no-orphans.md", { title: "NoOrphans", type: "record", slug: "records/no-orphans" }, "Content");
+      await sync.syncAll(vaultPath);
+
+      const orphans = await sync.cleanLanceOrphans();
+      expect(orphans).toEqual([]);
     });
 
     test("syncAll: one file fails, others still sync", async () => {

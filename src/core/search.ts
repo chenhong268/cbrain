@@ -23,7 +23,10 @@ export interface SearchTrace {
   graph_ms?: number;
   temporal_ms?: number;
   decompose_ms?: number;
+  rerank_ms?: number;
   llm_calls?: number;
+  degraded_reason?: string;
+  follow_up_queries?: string[];
   query_variants?: string[];
 }
 
@@ -180,7 +183,6 @@ export class HybridSearch {
   async search(query: string, options?: SearchOptions): Promise<SearchResult[]> {
     if (!query.trim()) return [];
 
-    // Auto-enable multiStep for complex queries when LLM is available
     const shouldMultiStep = options?.multiStep === true ||
       (options?.multiStep === undefined && this.llm && this.isMultiStepCandidate(query));
 
@@ -348,8 +350,15 @@ export class HybridSearch {
 
   private async searchMultiStep(query: string, options: SearchOptions): Promise<SearchResult[]> {
     if (!this.llm) return this.searchCore(query, options);
+    const trace = options._trace;
+    const start = Date.now();
     const researcher = new ResearchManager(this, this.db, this.llm);
-    return researcher.research(query, options);
+    const results = await researcher.research(query, options);
+    if (trace) {
+      trace.expand_ms = (trace.expand_ms ?? 0) + (Date.now() - start);
+      trace.llm_calls = (trace.llm_calls ?? 0) + researcher.getLLMCallCount();
+    }
+    return results;
   }
 
   async graphPrefetch(query: string): Promise<GraphContext> {

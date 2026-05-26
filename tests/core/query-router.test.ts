@@ -119,4 +119,42 @@ describe("QueryRouter", () => {
       expect(r.reasons.length).toBeGreaterThan(0);
     }
   });
+
+  // ── intent priority overrides fast path (#66) ───────────────
+
+  test("single entity + relationship keyword → agentic, not fast", () => {
+    const r = router.route("实体A 的关系");
+    expect(r.mode).toBe("agentic");
+    expect(r.intent).toBe("relationship");
+  });
+
+  test("single entity + review keyword → agentic, not fast", () => {
+    const r = router.route("实体A 的总结");
+    expect(r.mode).toBe("agentic");
+    expect(r.intent).toBe("review");
+  });
+
+  test("single entity + temporal keyword → hybrid/timeline, not fast", () => {
+    const r = router.route("实体A 最近");
+    expect(r.mode).toBe("hybrid");
+    expect(r.intent).toBe("timeline");
+  });
+
+  test("single entity + comparison keyword → agentic/comparison, not fast", () => {
+    const r = router.route("实体A 对比");
+    expect(r.mode).toBe("agentic");
+    expect(r.intent).toBe("comparison");
+  });
+
+  test("single entity + gap keyword → agentic/gap_analysis, not fast", () => {
+    const r = router.route("实体A 还有没有");
+    expect(r.mode).toBe("agentic");
+    expect(r.intent).toBe("gap_analysis");
+  });
+
+  test("entity without intent keywords still routes fast", () => {
+    const r = router.route("实体A 的信息");
+    expect(r.mode).toBe("fast");
+    expect(r.intent).toBe("entity_lookup");
+  });
 });

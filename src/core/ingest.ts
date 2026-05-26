@@ -129,7 +129,8 @@ export class IngestManager {
       return;
     }
 
-    const allowedFields = FACT_FIELD_WHITELIST[type as EntityType] ?? [];
+    const shortType = type.split("/").pop() ?? type;
+    const allowedFields = FACT_FIELD_WHITELIST[shortType] ?? [];
     const pageData = page.frontmatter ?? {};
     const extra: Record<string, string> = {};
 

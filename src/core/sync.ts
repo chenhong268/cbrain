@@ -382,8 +382,12 @@ export class SyncManager {
   }
 
   async removePage(slug: string): Promise<void> {
-    await this.lance.deleteByPageSlug(slug);
     this.db.deletePageCascaded(slug);
+    try {
+      await this.lance.deleteByPageSlug(slug);
+    } catch (e) {
+      this.logger?.warn("sync", `LanceDB cleanup failed for ${slug}: ${(e as Error).message}`);
+    }
   }
 
   async removeOrphans(vaultPath: string): Promise<string[]> {
@@ -400,12 +404,38 @@ export class SyncManager {
         await access(fullPath);
       } catch {
         orphans.push(page.slug);
-        await this.lance.deleteByPageSlug(page.slug);
         if (this.pages) {
           await this.pages.delete(page.slug);
         } else {
           this.db.deletePageCascaded(page.slug);
         }
+        try {
+          await this.lance.deleteByPageSlug(page.slug);
+        } catch (e) {
+          this.logger?.warn("sync", `LanceDB orphan cleanup failed for ${page.slug}: ${(e as Error).message}`);
+        }
+      }
+    }
+
+    return orphans;
+  }
+
+  /**
+   * Clean orphan vectors in LanceDB: vectors whose pageSlug no longer exists in SQLite.
+   * Returns the list of cleaned slugs.
+   */
+  async cleanLanceOrphans(): Promise<string[]> {
+    const lanceSlugs = await this.lance.getIndexedPageSlugs();
+    if (lanceSlugs.length === 0) return [];
+
+    const sqliteSlugs = new Set(this.db.getAllPageSlugsWithPaths().map(p => p.slug));
+    const orphans = lanceSlugs.filter(s => !sqliteSlugs.has(s));
+
+    for (const slug of orphans) {
+      try {
+        await this.lance.deleteByPageSlug(slug);
+      } catch (e) {
+        this.logger?.warn("sync", `Failed to clean LanceDB orphan ${slug}: ${(e as Error).message}`);
       }
     }
 

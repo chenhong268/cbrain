@@ -151,6 +151,16 @@ export class LanceDBManager {
     await table.delete(`pageSlug = '${pageSlug.replace(/'/g, "''")}'`);
   }
 
+  async getIndexedPageSlugs(): Promise<string[]> {
+    try {
+      const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+      const rows = await table.query().select(["pageSlug"]).toArray();
+      return [...new Set(rows.map((r: Record<string, unknown>) => r.pageSlug as string))];
+    } catch {
+      return [];
+    }
+  }
+
   async deleteRawChunksByPageSlug(pageSlug: string): Promise<void> {
     const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
     const escaped = pageSlug.replace(/'/g, "''");

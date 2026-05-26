@@ -28,26 +28,43 @@ export class QueryRouter {
     const resolved = this.db.resolveSlugs(candidates);
     const knownSlugs = resolved.filter((r) => r.slug !== null).map((r) => r.slug!);
 
-    // 1. Exact match → fast
+    // Detect intent signals before fast path — explicit intent overrides entity count
+    const hasComparison = COMPARISON_KEYWORDS.some((kw) => trimmed.includes(kw));
+    const hasGap = GAP_KEYWORDS.some((kw) => trimmed.includes(kw));
+    const hasRelationship = RELATIONSHIP_KEYWORDS.some((kw) => trimmed.includes(kw));
+    const hasReview = REVIEW_KEYWORDS.some((kw) => trimmed.includes(kw));
+    const hasTemporal = TEMPORAL_KEYWORDS.some((kw) => trimmed.includes(kw));
+
+    // 1. Explicit intent signals → agentic or hybrid (skip fast path)
+    if (hasComparison) {
+      return { mode: "agentic", intent: "comparison", reasons: ["比较意图"] };
+    }
+    if (hasGap) {
+      return { mode: "agentic", intent: "gap_analysis", reasons: ["盲区分析意图"] };
+    }
+    if (hasRelationship) {
+      return { mode: "agentic", intent: "relationship", reasons: ["关系查询意图"] };
+    }
+    if (hasReview) {
+      return { mode: "agentic", intent: "review", reasons: ["复盘/回顾意图"] };
+    }
+    if (hasTemporal) {
+      return { mode: "hybrid", intent: "timeline", reasons: ["时间相关查询"] };
+    }
+
+    // 2. Exact match → fast
     const exactResolved = this.db.resolveSlugs([trimmed])[0];
     if (exactResolved?.slug) {
       return { mode: "fast", intent: "entity_lookup", reasons: [`精确匹配: ${exactResolved.slug}`] };
     }
 
-    // 2. Single known entity + not complex → fast
+    // 3. Single known entity + not complex → fast
     if (knownSlugs.length === 1 && !isComplexQuery(trimmed, knownSlugs, candidates)) {
       return { mode: "fast", intent: "entity_lookup", reasons: [`单实体: ${knownSlugs[0]}`] };
     }
 
-    // 3. Temporal keywords (without complex signals) → hybrid/timeline
-    const hasTemporal = TEMPORAL_KEYWORDS.some((kw) => trimmed.includes(kw));
-    const complex = isComplexQuery(trimmed, knownSlugs, candidates);
-
-    if (hasTemporal && !complex) {
-      return { mode: "hybrid", intent: "timeline", reasons: ["时间相关查询"] };
-    }
-
     // 4. Complex → agentic with intent classification
+    const complex = isComplexQuery(trimmed, knownSlugs, candidates);
     if (complex) {
       return { mode: "agentic", intent: classifyComplexIntent(trimmed), reasons: [`复杂查询 (${reasonSuffix(trimmed, knownSlugs)})`] };
     }

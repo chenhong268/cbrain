@@ -1,8 +1,12 @@
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
-import type { HybridSearch, SearchResult, SearchOptions, GraphContext } from "./search.js";
+import type { HybridSearch, SearchResult, SearchOptions, SearchTrace, GraphContext } from "./search.js";
 
 const MAX_NEIGHBORS_PER_ENTITY = 5;
+
+function normalizeQuery(q: string): string {
+  return q.toLowerCase().replace(/[\s。，、；：！？,.:;!?]+/g, "");
+}
 
 interface ResearchSession {
   readonly originalQuery: string;
@@ -28,6 +32,7 @@ export interface ResearchConfig {
 export class ResearchManager {
   private readonly maxIterations: number;
   private readonly maxFollowUpQueries: number;
+  private llmCallCount = 0;
 
   constructor(
     private readonly search: HybridSearch,
@@ -39,8 +44,13 @@ export class ResearchManager {
     this.maxFollowUpQueries = config?.maxFollowUpQueries ?? 3;
   }
 
+  getLLMCallCount(): number {
+    return this.llmCallCount;
+  }
+
   async research(query: string, options?: SearchOptions): Promise<SearchResult[]> {
     const limit = options?.limit ?? 10;
+    const trace = options?._trace;
 
     if (!this.llm) return this.search.search(query, { ...options, multiStep: false });
 
@@ -56,13 +66,23 @@ export class ResearchManager {
 
     for (let i = 0; i < this.maxIterations; i++) {
       const reasoning = await this.reasonAboutResults(session);
-      if (!reasoning || reasoning.sufficient) break;
+      if (!reasoning || reasoning.sufficient) {
+        if (trace && !reasoning) {
+          trace.degraded_reason = "reasoning_parse_failed";
+        }
+        break;
+      }
 
+      const issuedNormalized = new Set([...session.issuedQueries].map(normalizeQuery));
       const newQueries = reasoning.follow_up_queries
         .slice(0, this.maxFollowUpQueries)
         .map(q => q.query)
-        .filter(q => !session.issuedQueries.has(q));
+        .filter(q => !issuedNormalized.has(normalizeQuery(q)));
       if (newQueries.length === 0) break;
+
+      if (trace) {
+        trace.follow_up_queries = [...(trace.follow_up_queries ?? []), ...newQueries];
+      }
 
       let newResults: SearchResult[] = [];
       const allSubResults = await Promise.all(
@@ -84,7 +104,11 @@ export class ResearchManager {
       session = this.updateSession(session, newResults, i + 1, newQueries);
     }
 
+    const rerankStart = Date.now();
     const reranked = await this.rerankResults(query, session.allResults);
+    if (trace) {
+      trace.rerank_ms = Date.now() - rerankStart;
+    }
     return reranked.slice(0, limit);
   }
 
@@ -210,6 +234,7 @@ export class ResearchManager {
     const issuedList = [...session.issuedQueries].join("、");
 
     try {
+      this.llmCallCount++;
       const resp = await this.llm.chat([
         {
           role: "system",
@@ -238,8 +263,9 @@ export class ResearchManager {
       const parsed = JSON.parse(resp) as ResearchReasoning;
       if (typeof parsed.sufficient !== "boolean") return null;
 
+      const issuedNormalized = new Set([...session.issuedQueries].map(normalizeQuery));
       const filteredQueries = (parsed.follow_up_queries ?? [])
-        .filter(q => !session.issuedQueries.has(q.query));
+        .filter(q => !issuedNormalized.has(normalizeQuery(q.query)));
 
       return {
         reasoning: parsed.reasoning ?? "",
@@ -248,7 +274,7 @@ export class ResearchManager {
       };
     } catch {
       console.error("[research] reasoning failed, assuming sufficient");
-      return { reasoning: "推理失败", sufficient: true, follow_up_queries: [] };
+      return null;
     }
   }
 
@@ -263,6 +289,7 @@ export class ResearchManager {
     ).join("\n");
 
     try {
+      this.llmCallCount++;
       const resp = await this.llm.chat([
         {
           role: "system",
