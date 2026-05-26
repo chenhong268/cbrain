@@ -65,12 +65,19 @@ export class ResearchManager {
       if (newQueries.length === 0) break;
 
       let newResults: SearchResult[] = [];
-      for (const fq of newQueries) {
-        const subResults = await this.search.search(fq, {
-          limit: 10,
-          multiStep: false,
-          _skipDecompose: true,
-        });
+      const allSubResults = await Promise.all(
+        newQueries.map(fq =>
+          this.search.search(fq, {
+            limit: 10,
+            multiStep: false,
+            _skipDecompose: true,
+          }).catch((e) => {
+            console.error("[research] sub-query failed:", e);
+            return [] as SearchResult[];
+          })
+        )
+      );
+      for (const subResults of allSubResults) {
         newResults = this.mergeResults(newResults, subResults);
       }
 

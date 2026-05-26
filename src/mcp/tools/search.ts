@@ -40,13 +40,13 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       const complex = isComplexQuery(query, knownSlugs, candidates);
 
       if (complex) {
-        results = await ctx.search.search(query, { strategy: "all", limit, multiStep });
+        results = await ctx.search.search(query, { strategy: "all", limit, multiStep, _hints: { knownSlugs, isComplex: complex } });
         usedStrategy = "smart-decompose";
       } else if (ftsSlugs.length >= Math.min(limit, 3)) {
         results = ftsSlugs.map(r => ({ slug: r.page_slug, score: Math.abs(r.rank), snippet: r.content.slice(0, 200), source: "fts" as const }));
         usedStrategy = "smart-fts";
       } else {
-        results = await ctx.search.search(query, { strategy: "all", limit, multiStep });
+        results = await ctx.search.search(query, { strategy: "all", limit, multiStep, _hints: { knownSlugs, isComplex: complex } });
         usedStrategy = ftsSlugs.length > 0 ? "smart-hybrid-boost" : "smart-hybrid";
       }
 
