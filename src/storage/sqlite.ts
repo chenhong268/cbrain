@@ -2089,7 +2089,7 @@ export class CBrainDB {
           WHEN source_type IN ('manual', 'wikilink') THEN weight * confidence
           ELSE weight * confidence * POW(0.95, (julianday('now') - julianday(last_validated_at)) / 30.0)
         END
-      WHERE 1=1
+      WHERE last_validated_at < datetime('now', '-7 days')
     `).run();
     return result.changes;
   }
