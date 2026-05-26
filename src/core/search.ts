@@ -11,6 +11,11 @@ export interface SearchResult {
   source: "vector" | "fts" | "graph" | "hybrid" | "temporal" | "exact";
 }
 
+export interface SearchHints {
+  knownSlugs: string[];
+  isComplex: boolean;
+}
+
 export interface SearchOptions {
   limit?: number;
   strategy?: "vector" | "fts" | "graph" | "all";
@@ -19,6 +24,8 @@ export interface SearchOptions {
   _skipDecompose?: boolean;
   /** Enable sufficiency check + retry loop + LLM reranking for deeper search */
   multiStep?: boolean;
+  /** @internal Pre-computed hints to avoid redundant resolveSlugs/isComplexQuery calls */
+  _hints?: SearchHints;
 }
 
 export interface HybridSearchConfig {
@@ -138,7 +145,10 @@ export class HybridSearch {
   private llm?: LLMProvider;
   private multiQueryEnabled: boolean;
   private queryCache = new Map<string, { queries: string[]; expires: number }>();
+  private embeddingCache = new Map<string, { embedding: number[]; expires: number }>();
   private static QUERY_CACHE_TTL = 300_000; // 5 minutes
+  private static EMBEDDING_CACHE_TTL = 300_000;
+  private static CACHE_MAX_SIZE = 100;
 
   constructor(
     db: CBrainDB,
@@ -198,11 +208,21 @@ export class HybridSearch {
 
     // Decomposition path for complex queries
     if (this.llm && !options?._skipDecompose) {
-      const candidates = query.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
-      const resolved = this.db.resolveSlugs(candidates);
-      const knownSlugs = resolved.filter((r) => r.slug !== null).map((r) => r.slug!);
+      const hints = options?._hints;
+      let knownSlugs: string[];
+      let complex: boolean;
 
-      if (isComplexQuery(query, knownSlugs, candidates)) {
+      if (hints) {
+        knownSlugs = hints.knownSlugs;
+        complex = hints.isComplex;
+      } else {
+        const candidates = query.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
+        const resolved = this.db.resolveSlugs(candidates);
+        knownSlugs = resolved.filter((r) => r.slug !== null).map((r) => r.slug!);
+        complex = isComplexQuery(query, knownSlugs, candidates);
+      }
+
+      if (complex) {
         try {
           const graphContext = await this.graphPrefetch(query);
           const subQueries = await this.decomposeQuery(query, graphContext);
@@ -233,43 +253,57 @@ export class HybridSearch {
     return this.searchWithExpansion(query, limit, options?.multiQuery);
   }
 
+  private async searchSingleQuery(q: string, limit: number): Promise<SearchResult[][]> {
+    const resolved = this.db.resolveSlugs([q])[0];
+    const graphPromise = resolved?.slug
+      ? this.graphSearch(resolved.slug, limit).catch((e) => {
+          console.error("[search] graphSearch 失败:", e);
+          return [] as SearchResult[];
+        })
+      : Promise.resolve([] as SearchResult[]);
+
+    const [vec, fts, graph, temporal] = await Promise.all([
+      this.vectorSearch(q, limit).catch((e) => {
+        console.error("[search] vectorSearch 失败:", e);
+        return [] as SearchResult[];
+      }),
+      Promise.resolve(this.ftsSearch(q, limit)).catch((e) => {
+        console.error("[search] ftsSearch 失败:", e);
+        return [] as SearchResult[];
+      }),
+      graphPromise,
+      Promise.resolve(this.temporalSearch(q, limit)).catch((e) => {
+        console.error("[search] temporalSearch 失败:", e);
+        return [] as SearchResult[];
+      }),
+    ]);
+
+    const lists: SearchResult[][] = [];
+    if (vec.length > 0) lists.push(vec);
+    if (fts.length > 0) lists.push(fts);
+    if (graph.length > 0) lists.push(graph);
+    if (temporal.length > 0) lists.push(temporal);
+    return lists;
+  }
+
   private async searchWithExpansion(query: string, limit: number, multiQuery?: boolean): Promise<SearchResult[]> {
+    const t0 = Date.now();
     const useMultiQuery = (multiQuery ?? this.multiQueryEnabled) && !!this.llm;
     const queries = useMultiQuery ? await this.expandQuery(query) : [query];
+    const expandMs = Date.now() - t0;
 
-    const allLists: SearchResult[][] = [];
-
-    for (const q of queries) {
-      const resolved = this.db.resolveSlugs([q])[0];
-      const graphPromise = resolved?.slug
-        ? this.graphSearch(resolved.slug, limit).catch((e) => {
-            console.error("[search] graphSearch 失败:", e);
-            return [] as SearchResult[];
-          })
-        : Promise.resolve([] as SearchResult[]);
-
-      const [vec, fts, graph, temporal] = await Promise.all([
-        this.vectorSearch(q, limit).catch((e) => {
-          console.error("[search] vectorSearch 失败:", e);
-          return [] as SearchResult[];
-        }),
-        Promise.resolve(this.ftsSearch(q, limit)).catch((e) => {
-          console.error("[search] ftsSearch 失败:", e);
-          return [] as SearchResult[];
-        }),
-        graphPromise,
-        Promise.resolve(this.temporalSearch(q, limit)),
-      ]);
-      if (vec.length > 0) allLists.push(vec);
-      if (fts.length > 0) allLists.push(fts);
-      if (graph.length > 0) allLists.push(graph);
-      if (temporal.length > 0) allLists.push(temporal);
-    }
+    const queryResults = await Promise.all(
+      queries.map((q) => this.searchSingleQuery(q, limit))
+    );
+    const allLists = queryResults.flat();
 
     const allSlugs = new Set<string>();
     for (const list of allLists) for (const item of list) allSlugs.add(item.slug);
     const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
     const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
+
+    const totalMs = Date.now() - t0;
+    console.error(`[search] expansion: ${queries.length} queries, expand=${expandMs}ms, total=${totalMs}ms, slugs=${allSlugs.size}`);
 
     return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
   }
@@ -458,7 +492,19 @@ export class HybridSearch {
   }
 
   private async vectorSearch(query: string, limit: number): Promise<SearchResult[]> {
-    const { embedding } = await this.embedding.embed(query);
+    const cached = this.embeddingCache.get(query);
+    let embedding: number[];
+    if (cached && Date.now() < cached.expires) {
+      embedding = cached.embedding;
+    } else {
+      const result = await this.embedding.embed(query);
+      embedding = result.embedding;
+      this.embeddingCache.set(query, { embedding, expires: Date.now() + HybridSearch.EMBEDDING_CACHE_TTL });
+      if (this.embeddingCache.size > HybridSearch.CACHE_MAX_SIZE) {
+        const oldest = this.embeddingCache.keys().next().value;
+        if (oldest !== undefined) this.embeddingCache.delete(oldest);
+      }
+    }
     const results = await this.lance.search(embedding, limit * 3);
 
     const bySlug = new Map<string, { content: string; score: number }>();
