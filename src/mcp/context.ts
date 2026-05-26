@@ -16,6 +16,8 @@ import { Logger } from "../core/logger.js";
 import { InsightManager } from "../core/insight.js";
 import { LearnManager } from "../core/learn.js";
 import { ProfileManager } from "../profile/manager.js";
+import { ProvenanceManager } from "../core/provenance.js";
+import { SqliteProvenanceStore } from "../storage/provenance-store.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 
@@ -41,6 +43,7 @@ export interface ToolContext {
   insights: InsightManager;
   learn: LearnManager;
   profile: ProfileManager;
+  provenance: ProvenanceManager;
 }
 
 export async function indexPage(pipeline: ContentPipeline, slug: string, body: string): Promise<void> {
@@ -70,7 +73,9 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const insights = new InsightManager(db, embedding, lance);
   const learn = new LearnManager(db);
   const profile = new ProfileManager(profileDir ?? join(vaultPath, ".."));
+  const provStore = new SqliteProvenanceStore(db.rawDb);
+  const provenance = new ProvenanceManager(provStore);
   profile.load();
 
-  return { db, vaultPath, dbPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile };
+  return { db, vaultPath, dbPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance };
 }

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { indexPage } from "../context.js";
+import { mapSourceType } from "../../core/provenance.js";
 
 export function registerTimelineTools(server: McpServer, ctx: ToolContext): void {
   // ─── get_timeline ────────────────────────────────────────────
@@ -16,9 +17,18 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
     const body = page?.body ?? "";
 
     // Build a unified events list — structured entries + body date lines
-    const events: Array<{ date?: string; summary: string; source: string }> = [];
+    const events: Array<Record<string, unknown>> = [];
     for (const e of entries) {
-      events.push({ date: e.event_date ?? undefined, summary: e.summary, source: e.source ?? "unknown" });
+      events.push({
+        id: e.id,
+        date: e.event_date ?? undefined,
+        summary: e.summary,
+        source: e.source ?? "unknown",
+        source_category: mapSourceType(e.source ?? undefined),
+        trust_state: e.trust_state ?? "candidate",
+        source_page_slug: e.source_page_slug,
+        evidence: e.evidence,
+      });
     }
 
     const datePattern = /\b\d{4}[.\-/年]\d{1,2}/;
@@ -26,7 +36,7 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
       if (datePattern.test(line)) {
         const cleaned = line.replace(/^\|?\s*|\s*\|?$/g, "").trim();
         if (!entries.some(e => cleaned.includes(e.summary.slice(0, 10)))) {
-          events.push({ summary: cleaned, source: "body" });
+          events.push({ summary: cleaned, source: "body", source_category: "agent_inference" as const, trust_state: "candidate" as const, source_type: "body-parse", source_page_slug: slug, evidence: cleaned.slice(0, 100) });
         }
       }
     }

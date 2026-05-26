@@ -21,6 +21,7 @@ import { registerDossierTools } from "./tools/dossier.js";
 import { registerHierarchyTools } from "./tools/hierarchy.js";
 import { registerFeedbackTools } from "./tools/feedback.js";
 import { registerBatchTools } from "./tools/batch.js";
+import { registerProvenanceTools } from "./tools/provenance.js";
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerSearchTools(server, ctx);
@@ -44,4 +45,5 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerHierarchyTools(server, ctx);
   registerFeedbackTools(server, ctx);
   registerBatchTools(server, ctx);
+  registerProvenanceTools(server, ctx);
 }

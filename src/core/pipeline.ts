@@ -180,7 +180,7 @@ export class ContentPipeline {
         const key = `${fromSlug}\x00${targetSlug}`;
         if (!writtenRelations.has(key)) {
           writtenRelations.add(key);
-          this.db.insertLink(fromSlug, targetSlug, "提及", null, 0.3, "weak", "wikilink", 0.9);
+          this.db.insertLink(fromSlug, targetSlug, "提及", null, 0.3, "weak", "wikilink", 0.9, undefined, { source_page_slug: fromSlug });
           count++;
         }
       }
@@ -256,7 +256,7 @@ export class ContentPipeline {
         if (!skipMentionSlugs?.has(result.slug)) {
           this.db.incrementMentionCount(result.slug);
         }
-        this.db.insertLink(fromSlug, result.slug, "提及", null, 0.3, "weak", "ner", 0.5);
+        this.db.insertLink(fromSlug, result.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
       } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({
@@ -270,7 +270,7 @@ export class ContentPipeline {
         if (!skipMentionSlugs?.has(stub.slug)) {
           this.db.incrementMentionCount(stub.slug);
         }
-        this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5);
+        this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
       }
     }
 
@@ -301,7 +301,7 @@ export class ContentPipeline {
       if (from && to && from !== to) {
         const normRel = normalizeRelation(rel.relation);
         const rw = getRelationStrength(normRel);
-        this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength, "ner", 0.5);
+        this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength, "ner", 0.5, undefined, { source_page_slug: fromSlug, evidence: rel.context });
 
         const fromTitle = this.pages?.getBySlug(from)?.title ?? rel.from;
         const toTitle = this.pages?.getBySlug(to)?.title ?? rel.to;
@@ -322,7 +322,7 @@ export class ContentPipeline {
 
     for (const event of extraction.events) {
       if (skipDatelessEvents && !event.date) continue;
-      this.db.addTimelineEntry(fromSlug, event.description, event.date ?? undefined, "ner");
+      this.db.addTimelineEntry(fromSlug, event.description, event.date ?? undefined, "ner", { source_page_slug: fromSlug });
     }
 
     return {

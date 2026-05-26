@@ -42,7 +42,7 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("batch_add_links", {
     description:
       "Create multiple links in one call. Each link is validated (both pages must exist, no self-reference). " +
-      "Links are marked source_type=manual with confidence=0.9.",
+      "Links are marked source_type=agent (agent_inference) with confidence=0.9. To mark links as user-confirmed, use confirm_evidence.",
     inputSchema: {
       links: z.array(z.object({
         from: z.string().describe("Source page slug"),
@@ -73,7 +73,7 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
           continue;
         }
 
-        ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "manual", 0.9);
+        ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "agent", 0.9);
         ctx.pages.incrementMention(to);
         syncedSlugs.add(from);
         syncedSlugs.add(to);

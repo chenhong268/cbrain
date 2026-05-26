@@ -136,7 +136,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         linksBySlug.set(slug, { outgoing, incoming });
 
         const rawTimeline = batchTimeline.get(slug) ?? [];
-        timelineBySlug.set(slug, trimTimeline(rawTimeline as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>, 3));
+        timelineBySlug.set(slug, trimTimeline(rawTimeline as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number; trust_state?: string; source_page_slug?: string; evidence?: string; source_type?: string }>, 3));
 
         try { relatedBySlug.set(slug, ctx.graph.getRelatedEntities(slug, 5)); } catch { relatedBySlug.set(slug, []); }
 

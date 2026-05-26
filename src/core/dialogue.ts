@@ -119,7 +119,7 @@ export class DialogueIngest {
     this.llm = llm;
   }
 
-  async ingest(text: string, mode: DialogueMode = "manual"): Promise<DialogueIngestResult> {
+  async ingest(text: string, mode: DialogueMode = "manual", sessionId?: string): Promise<DialogueIngestResult> {
     const empty: DialogueIngestResult = { decision: "skipped", reason: "empty input", newEntities: 0, newRelations: 0, newEvents: 0, skipped: 0, filtered: [] };
 
     if (!this.llm || !text.trim()) return empty;
@@ -147,14 +147,9 @@ export class DialogueIngest {
       return { ...empty, reason: "no actionable facts" };
     }
 
-    // Auto mode: check should_ingest flag
-    if (mode === "auto" && result.shouldIngest === false) {
-      this.writeLog(mode, 0, 0, 0, 0);
-      return { ...empty, reason: "no actionable facts" };
-    }
-
     // Step 2: Incremental filter + write
-    const { newEntities, newRelations, newEvents, skipped, filtered } = await this.applyIncremental(result, mode);
+    const dialogueSource = sessionId ?? `dialogue/${mode}/untraced`;
+    const { newEntities, newRelations, newEvents, skipped, filtered } = await this.applyIncremental(result, mode, dialogueSource);
 
     // Step 3: Determine decision
     const hasNew = (newEntities + newRelations + newEvents) > 0;
@@ -184,7 +179,7 @@ export class DialogueIngest {
     }
   }
 
-  private async applyIncremental(result: ExtractionResult, mode: DialogueMode = "manual"): Promise<{
+  private async applyIncremental(result: ExtractionResult, mode: DialogueMode = "manual", dialogueSource?: string): Promise<{
     newEntities: number;
     newRelations: number;
     newEvents: number;
@@ -326,7 +321,7 @@ export class DialogueIngest {
 
       if (this.db.linkExists(fromSlug, toSlug, normRel)) continue;
 
-      this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null, undefined, undefined, "dialogue", 0.4);
+      this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null, undefined, undefined, "dialogue", 0.4, undefined, { source_page_slug: dialogueSource, evidence: rel.context ?? undefined });
 
       newRelations++;
     }
@@ -339,10 +334,12 @@ export class DialogueIngest {
         .map((p) => entitySlugMap.get(p) ?? findEntitySlug(this.db, p))
         .find(Boolean);
 
+      const provOpts = { source_page_slug: dialogueSource, evidence: event.description };
+
       if (participantSlug) {
-        this.db.addTimelineEntry(participantSlug, event.description, event.date, "dialogue");
+        this.db.addTimelineEntry(participantSlug, event.description, event.date, "dialogue", provOpts);
       } else {
-        this.db.addTimelineEntry("brain/dialogue-events", event.description, event.date, "dialogue");
+        this.db.addTimelineEntry("brain/dialogue-events", event.description, event.date, "dialogue", provOpts);
       }
 
       newEvents++;

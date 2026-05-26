@@ -1,4 +1,5 @@
 import type { Link } from "../../core/graph.js";
+import { mapSourceType } from "../../core/provenance.js";
 import type { ProactiveHint } from "../../core/proactive.js";
 import type { PageFrontmatter } from "../../utils/frontmatter.js";
 import type { Page } from "../../core/page.js";
@@ -27,6 +28,7 @@ export function safeFrontmatter(fm: PageFrontmatter | null | undefined): Record<
 export function trimLink(link: Link): Record<string, unknown> | null {
   if (link.weight === 0) return null;
   return {
+    id: link.id,
     from_slug: link.from_slug,
     to_slug: link.to_slug,
     relation: link.relation,
@@ -34,12 +36,16 @@ export function trimLink(link: Link): Record<string, unknown> | null {
     strength: link.strength,
     context: truncate(link.context, 100),
     source_type: link.source_type ?? "unknown",
+    source_category: mapSourceType(link.source_type),
     confidence: link.confidence ?? 0.5,
+    trust_state: link.trust_state ?? "candidate",
+    source_page_slug: link.source_page_slug,
+    evidence: link.evidence,
   };
 }
 
 export function trimTimeline(
-  entries: Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number }>,
+  entries: Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number; trust_state?: string; source_page_slug?: string; evidence?: string; source_type?: string }>,
   max: number = 3,
 ): Array<Record<string, unknown>> {
   return entries.slice(0, max).map(e => ({
@@ -47,6 +53,11 @@ export function trimTimeline(
     event_date: e.event_date,
     summary: truncate(e.summary, 100),
     created_at: e.created_at,
+    source: e.source ?? "unknown",
+    source_category: mapSourceType(e.source_type ?? e.source ?? undefined),
+    trust_state: e.trust_state ?? "candidate",
+    source_page_slug: e.source_page_slug,
+    evidence: e.evidence,
   }));
 }
 

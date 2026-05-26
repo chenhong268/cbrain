@@ -10,6 +10,9 @@ export interface Link {
   context?: string;
   source_type?: string;
   confidence?: number;
+  trust_state?: string;
+  source_page_slug?: string;
+  evidence?: string;
 }
 
 export interface GraphNode {

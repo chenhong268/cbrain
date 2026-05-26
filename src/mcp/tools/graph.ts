@@ -6,7 +6,7 @@ import { findEntitySlug, normalizeRelation } from "../../core/shared.js";
 export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   // ─── graph_query ─────────────────────────────────────────
   server.registerTool("graph_query", {
-    description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved). Links include source_type (wikilink=human, manual=agent, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
+    description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved). Links include source_type (wikilink=human, manual=human explicit input, agent=agent inference, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
     inputSchema: {
       slug: z.string().describe("Seed entity slug or name (auto-resolved if not an exact slug)"),
       mode: z.enum(["traverse", "backlinks", "related"]).optional().default("traverse").describe("Query mode"),
@@ -67,7 +67,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── get_links ───────────────────────────────────────────────
   server.registerTool("get_links", {
-    description: "Get links for a page. Returns outgoing, incoming, or both directions. Links include source_type (wikilink=human, manual=agent, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
+    description: "Get links for a page. Returns outgoing, incoming, or both directions. Links include source_type (wikilink=human, manual=human explicit input, agent=agent inference, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
     inputSchema: {
       slug: z.string().describe("Page slug"),
       direction: z.enum(["outgoing", "incoming", "both"]).optional().default("both").describe("Link direction"),
@@ -81,7 +81,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── add_link ────────────────────────────────────────────────
   server.registerTool("add_link", {
-    description: "Create a link between two pages. Links created via this tool are marked as source_type=manual with confidence=0.9.",
+    description: "Create a link between two pages. Links created via this tool are marked as source_type=agent (agent_inference) with confidence=0.9. To mark a link as user-confirmed, use confirm_evidence after creation.",
     inputSchema: {
       from: z.string().describe("Source page slug"),
       to: z.string().describe("Target page slug"),
@@ -95,7 +95,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     if (!ctx.pages.getBySlug(to)) return { content: [{ type: "text", text: JSON.stringify({ error: `Target page not found: ${to}` }) }], isError: true };
     if (from === to) return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot create self-referencing link" }) }], isError: true };
 
-    ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "manual", 0.9);
+    ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "agent", 0.9);
     ctx.pages.incrementMention(to);
     ctx.pages.syncLinksToMarkdown(from);
     ctx.pages.syncLinksToMarkdown(to);

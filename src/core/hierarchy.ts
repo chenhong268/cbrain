@@ -46,7 +46,7 @@ export function setHierarchy(
   pages.update(slug, { extra: { reports_to: reportsToSlug } });
 
   // Write graph link (skip if already exists — INSERT OR IGNORE)
-  graph.addLink(slug, reportsToSlug, REPORTS_TO_RELATION, undefined, 1.0, "strong", "manual", 0.95);
+  graph.addLink(slug, reportsToSlug, REPORTS_TO_RELATION, undefined, 1.0, "strong", "agent", 0.95);
 }
 
 /**

@@ -47,6 +47,14 @@ export interface LinkRow {
   created_at: string;
   last_validated_at: string | null;
   effective_weight: number;
+  source_page_slug?: string;
+  trust_state?: string;
+  evidence?: string;
+}
+
+export interface ProvenanceInput {
+  source_page_slug?: string;
+  evidence?: string;
 }
 
 export interface UpsertPageData {
@@ -81,6 +89,11 @@ export interface CreateInsightInput {
 
 export class CBrainDB {
   private db: Database;
+
+  /** Expose raw Database for bounded stores that share the same connection. */
+  get rawDb(): Database {
+    return this.db;
+  }
 
   constructor(dbPath: string) {
     if (!existsSync(dirname(dbPath))) {
@@ -275,6 +288,7 @@ export class CBrainDB {
     this.migrateChunksSummaryLevel();
     this.migrateOntologyTypes();
     this.migrateDiscoveriesStatus();
+    this.migrateProvenance();
     this.repairDirtyData();
   }
 
@@ -342,6 +356,33 @@ export class CBrainDB {
     }
     if (!names.has("metadata")) {
       this.db.exec("ALTER TABLE discoveries ADD COLUMN metadata TEXT");
+    }
+  }
+
+  private migrateProvenance(): void {
+    const linkCols = this.db.prepare("PRAGMA table_info(links)").all() as Array<{ name: string }>;
+    const linkNames = new Set(linkCols.map(c => c.name));
+    if (!linkNames.has("source_page_slug")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN source_page_slug TEXT");
+    }
+    if (!linkNames.has("trust_state")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN trust_state TEXT DEFAULT 'candidate' CHECK(trust_state IN ('trusted','user_thought','candidate','rejected','superseded'))");
+      this.db.exec("UPDATE links SET trust_state = 'trusted' WHERE source_type IN ('wikilink','manual')");
+    }
+    if (!linkNames.has("evidence")) {
+      this.db.exec("ALTER TABLE links ADD COLUMN evidence TEXT");
+    }
+
+    const tlCols = this.db.prepare("PRAGMA table_info(timeline)").all() as Array<{ name: string }>;
+    const tlNames = new Set(tlCols.map(c => c.name));
+    if (!tlNames.has("source_page_slug")) {
+      this.db.exec("ALTER TABLE timeline ADD COLUMN source_page_slug TEXT");
+    }
+    if (!tlNames.has("trust_state")) {
+      this.db.exec("ALTER TABLE timeline ADD COLUMN trust_state TEXT DEFAULT 'candidate'");
+    }
+    if (!tlNames.has("evidence")) {
+      this.db.exec("ALTER TABLE timeline ADD COLUMN evidence TEXT");
     }
   }
 
@@ -496,21 +537,22 @@ export class CBrainDB {
 
   // ─── Timeline operations ─────────────────────────────────────
 
-  getTimeline(pageSlug: string): Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string }> {
+  getTimeline(pageSlug: string, includeInactive = false): Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }> {
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     return this.prepare(
-      "SELECT id, event_date, source, summary, created_at FROM timeline WHERE page_slug = $slug ORDER BY event_date DESC, id DESC"
+      `SELECT id, event_date, source, summary, created_at, trust_state, source_page_slug, evidence FROM timeline WHERE page_slug = $slug${activeFilter} ORDER BY event_date DESC, id DESC`
     ).all({ $slug: pageSlug }) as any[];
   }
 
-  addTimelineEntry(pageSlug: string, summary: string, eventDate?: string, source?: string): number {
+  addTimelineEntry(pageSlug: string, summary: string, eventDate?: string, source?: string, provenance?: ProvenanceInput): number {
     const result = this.prepare(
-      "INSERT INTO timeline (page_slug, summary, event_date, source) VALUES ($slug, $summary, $date, $source)"
-    ).run({ $slug: pageSlug, $summary: summary, $date: eventDate ?? null, $source: source ?? null });
+      "INSERT INTO timeline (page_slug, summary, event_date, source, source_page_slug, trust_state, evidence) VALUES ($slug, $summary, $date, $source, $sps, $ts, $ev)"
+    ).run({ $slug: pageSlug, $summary: summary, $date: eventDate ?? null, $source: source ?? null, $sps: provenance?.source_page_slug ?? null, $ts: "candidate", $ev: provenance?.evidence ?? null });
     return Number(result.lastInsertRowid);
   }
 
   searchTimeline(keyword?: string, dateFrom?: string, limit = 10): Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string }> {
-    let sql = "SELECT page_slug, event_date, source, summary FROM timeline WHERE 1=1";
+    let sql = "SELECT page_slug, event_date, source, summary FROM timeline WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const params: Record<string, string | number> = { $limit: limit };
 
     if (keyword) {
@@ -1212,16 +1254,17 @@ export class CBrainDB {
 
   // ─── Link operations ──────────────────────────────────────────
 
-  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number, _skipReverse?: boolean): void {
+  insertLink(from: string, to: string, relation: string, context?: string | null, weight?: number, strength?: string, sourceType?: string, confidence?: number, _skipReverse?: boolean, provenance?: ProvenanceInput): void {
     const clampedWeight = Math.min(1.0, Math.max(0.0, weight ?? 1.0));
+    const trustState = sourceType && ["wikilink", "manual"].includes(sourceType) ? "trusted" : "candidate";
     this.prepare(
-      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence) VALUES ($from, $to, $rel, $ctx, $w, $s, $st, $c)"
-    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: clampedWeight, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5 });
+      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence, source_page_slug, trust_state, evidence) VALUES ($from, $to, $rel, $ctx, $w, $s, $st, $c, $sps, $ts, $ev)"
+    ).run({ $from: from, $to: to, $rel: relation, $ctx: context ?? null, $w: clampedWeight, $s: strength ?? 'medium', $st: sourceType ?? 'unknown', $c: confidence ?? 0.5, $sps: provenance?.source_page_slug ?? null, $ts: trustState, $ev: provenance?.evidence ?? null });
 
     if (!_skipReverse) {
       const reverse = getReverseRelation(relation);
       if (reverse) {
-        this.insertLink(to, from, reverse, context, weight, strength, sourceType, confidence, true);
+        this.insertLink(to, from, reverse, context, weight, strength, sourceType, confidence, true, provenance);
       }
     }
   }
@@ -1251,33 +1294,37 @@ export class CBrainDB {
     ).run({ $slug: slug, $rel: relation });
   }
 
-  getOutgoingLinks(slug: string): LinkRow[] {
+  getOutgoingLinks(slug: string, includeInactive = false): LinkRow[] {
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     return this.prepare(
-      "SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at FROM links WHERE from_slug = $slug"
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence FROM links WHERE from_slug = $slug${activeFilter}`
     ).all({ $slug: slug }) as LinkRow[];
   }
 
-  getIncomingLinks(slug: string): LinkRow[] {
+  getIncomingLinks(slug: string, includeInactive = false): LinkRow[] {
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     return this.prepare(
-      "SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at FROM links WHERE to_slug = $slug"
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence FROM links WHERE to_slug = $slug${activeFilter}`
     ).all({ $slug: slug }) as LinkRow[];
   }
 
-  getOutgoingSlugs(slug: string): string[] {
+  getOutgoingSlugs(slug: string, includeInactive = false): string[] {
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const rows = this.prepare(
-      "SELECT to_slug FROM links WHERE from_slug = $slug"
+      `SELECT to_slug FROM links WHERE from_slug = $slug${activeFilter}`
     ).all({ $slug: slug }) as Array<{ to_slug: string }>;
     return rows.map(r => r.to_slug);
   }
 
-  getIncomingSlugs(slug: string): string[] {
+  getIncomingSlugs(slug: string, includeInactive = false): string[] {
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const rows = this.prepare(
-      "SELECT from_slug FROM links WHERE to_slug = $slug"
+      `SELECT from_slug FROM links WHERE to_slug = $slug${activeFilter}`
     ).all({ $slug: slug }) as Array<{ from_slug: string }>;
     return rows.map(r => r.from_slug);
   }
 
-  getLinkedSlugs(slug: string, direction: "from" | "to", relation?: string): string[] {
+  getLinkedSlugs(slug: string, direction: "from" | "to", relation?: string, includeInactive = false): string[] {
     const col = direction === "from" ? "to_slug" : "from_slug";
     const where = direction === "from" ? "from_slug" : "to_slug";
     let sql = `SELECT ${col} as slug FROM links WHERE ${where} = $slug`;
@@ -1286,40 +1333,46 @@ export class CBrainDB {
       sql += " AND relation = $rel";
       params.$rel = relation;
     }
+    if (!includeInactive) {
+      sql += " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
+    }
     const rows = this.prepare(sql).all(params) as Array<{ slug: string }>;
     return rows.map(r => r.slug);
   }
 
-  getAllLinks(): Array<{ from_slug: string; to_slug: string; relation: string; weight: number }> {
+  getAllLinks(includeInactive = false): Array<{ from_slug: string; to_slug: string; relation: string; weight: number }> {
+    const activeFilter = includeInactive ? "" : " WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     return this.prepare(
-      "SELECT from_slug, to_slug, relation, weight FROM links"
+      `SELECT from_slug, to_slug, relation, weight FROM links${activeFilter}`
     ).all() as Array<{ from_slug: string; to_slug: string; relation: string; weight: number }>;
   }
 
-  batchGetLinksForSlugs(slugs: string[]): Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }> {
+  batchGetLinksForSlugs(slugs: string[], includeInactive = false): Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }> {
     const result = new Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }>();
     if (slugs.length === 0) return result;
     for (const slug of slugs) result.set(slug, { outgoing: [], incoming: [] });
     const placeholders = slugs.map(() => "?").join(",");
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const outgoing = this.prepare(
-      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at FROM links WHERE from_slug IN (${placeholders})`
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence FROM links WHERE from_slug IN (${placeholders})${activeFilter}`
     ).all(...slugs) as LinkRow[];
     const incoming = this.prepare(
-      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at FROM links WHERE to_slug IN (${placeholders})`
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence FROM links WHERE to_slug IN (${placeholders})${activeFilter}`
     ).all(...slugs) as LinkRow[];
     for (const l of outgoing) result.get(l.from_slug)!.outgoing.push(l);
     for (const l of incoming) result.get(l.to_slug)!.incoming.push(l);
     return result;
   }
 
-  batchGetTimelineForSlugs(slugs: string[]): Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string }>> {
-    const result = new Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string }>>();
+  batchGetTimelineForSlugs(slugs: string[], includeInactive = false): Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>> {
+    const result = new Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>>();
     if (slugs.length === 0) return result;
     for (const slug of slugs) result.set(slug, []);
     const placeholders = slugs.map(() => "?").join(",");
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const rows = this.prepare(
-      `SELECT page_slug, id, event_date, source, summary, created_at FROM timeline WHERE page_slug IN (${placeholders}) ORDER BY event_date DESC, id DESC`
-    ).all(...slugs) as Array<{ page_slug: string; id: number; event_date: string | null; source: string | null; summary: string; created_at: string }>;
+      `SELECT page_slug, id, event_date, source, summary, created_at, trust_state, source_page_slug, evidence FROM timeline WHERE page_slug IN (${placeholders})${activeFilter} ORDER BY event_date DESC, id DESC`
+    ).all(...slugs) as Array<{ page_slug: string; id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>;
     for (const r of rows) result.get(r.page_slug)!.push(r);
     return result;
   }
@@ -1347,16 +1400,17 @@ export class CBrainDB {
     return result;
   }
 
-  getLinksForSlugs(slugs: string[]): Map<string, { outgoing: string[]; incoming: string[] }> {
+  getLinksForSlugs(slugs: string[], includeInactive = false): Map<string, { outgoing: string[]; incoming: string[] }> {
     const result = new Map<string, { outgoing: string[]; incoming: string[] }>();
     if (slugs.length === 0) return result;
     for (const slug of slugs) result.set(slug, { outgoing: [], incoming: [] });
     const placeholders = slugs.map(() => "?").join(",");
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const outRows = this.prepare(
-      `SELECT from_slug, to_slug FROM links WHERE from_slug IN (${placeholders})`
+      `SELECT from_slug, to_slug FROM links WHERE from_slug IN (${placeholders})${activeFilter}`
     ).all(...slugs) as Array<{ from_slug: string; to_slug: string }>;
     const inRows = this.prepare(
-      `SELECT to_slug, from_slug FROM links WHERE to_slug IN (${placeholders})`
+      `SELECT to_slug, from_slug FROM links WHERE to_slug IN (${placeholders})${activeFilter}`
     ).all(...slugs) as Array<{ to_slug: string; from_slug: string }>;
     for (const r of outRows) result.get(r.from_slug)!.outgoing.push(r.to_slug);
     for (const r of inRows) result.get(r.to_slug)!.incoming.push(r.from_slug);
@@ -2267,22 +2321,23 @@ export class CBrainDB {
   ): Array<{ slug: string; title: string; event_date: string | null; summary: string }> {
     if (slugs.length === 0) return [];
     const ph = slugs.map(() => "?").join(",");
+    const activeLinkFilter = " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
 
-    // Find 1-hop neighbor slugs
     const neighborRows = this.prepare(
-      `SELECT DISTINCT to_slug AS neighbor FROM links WHERE from_slug IN (${ph})
+      `SELECT DISTINCT to_slug AS neighbor FROM links WHERE from_slug IN (${ph})${activeLinkFilter}
        UNION
-       SELECT DISTINCT from_slug AS neighbor FROM links WHERE to_slug IN (${ph})`
+       SELECT DISTINCT from_slug AS neighbor FROM links WHERE to_slug IN (${ph})${activeLinkFilter}`
     ).all(...slugs, ...slugs) as Array<{ neighbor: string }>;
     const neighbors = neighborRows.map(r => r.neighbor).filter(n => !slugs.includes(n));
     if (neighbors.length === 0) return [];
 
     const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
     const ph2 = neighbors.map(() => "?").join(",");
+    const activeTlFilter = " AND (t.trust_state IS NULL OR t.trust_state NOT IN ('rejected','superseded'))";
     const rows = this.prepare(
       `SELECT t.page_slug AS slug, p.title, t.event_date, t.summary
        FROM timeline t JOIN pages p ON p.slug = t.page_slug
-       WHERE t.page_slug IN (${ph2}) AND t.event_date >= ?
+       WHERE t.page_slug IN (${ph2}) AND t.event_date >= ?${activeTlFilter}
        ORDER BY t.event_date DESC LIMIT ?`
     ).all(...neighbors, cutoff, limit) as Array<{ slug: string; title: string; event_date: string | null; summary: string }>;
     return rows;
@@ -2310,9 +2365,10 @@ export class CBrainDB {
     ).all() as Array<{ relation: string; count: number }>;
   }
 
-  getAllLinksByRelation(relation: string): LinkRow[] {
+  getAllLinksByRelation(relation: string, includeInactive = false): LinkRow[] {
+    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     return this.db.query(
-      `SELECT * FROM links WHERE relation = ?`
+      `SELECT * FROM links WHERE relation = ?${activeFilter}`
     ).all(relation) as LinkRow[];
   }
 

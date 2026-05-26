@@ -30,10 +30,11 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
     inputSchema: {
       text: z.string().describe("Dialogue text to ingest (conversation content)"),
       mode: z.enum(["auto", "manual"]).optional().default("manual").describe("Ingest mode: auto (background, strict) or manual (user-triggered, normal)"),
+      sessionId: z.string().describe("Session/conversation identifier for provenance tracking (required: channel/thread ID or unique conversation ID)"),
     },
-  }, async ({ text, mode }) => {
+  }, async ({ text, mode, sessionId }) => {
     const dialogue = new DialogueIngest(ctx.db, ctx.embedding, ctx.lance, ctx.vaultPath, ctx.llm);
-    const result = await dialogue.ingest(text, (mode ?? "manual") as DialogueMode);
+    const result = await dialogue.ingest(text, (mode ?? "manual") as DialogueMode, sessionId);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };

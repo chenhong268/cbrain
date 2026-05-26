@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
 import { PageManager } from "../../src/core/page.js";
+import { ProvenanceManager } from "../../src/core/provenance.js";
+import { SqliteProvenanceStore } from "../../src/storage/provenance-store.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 function createMockEmbedding(): EmbeddingProvider {
@@ -76,10 +78,10 @@ describe("MCP Server", () => {
       expect(names.sort()).toEqual([
         "add_alias", "add_link", "add_tag", "add_timeline_entry", "append_page", "archive_insight",
         "batch_add_links", "batch_delete_pages", "batch_merge_pages",
-        "brain_storm", "deep_recall", "delete_page", "dismiss_insight",
+        "brain_storm", "confirm_evidence", "deep_recall", "delete_page", "dismiss_insight",
         "dossier", "dream", "dream_reset", "enrich", "expand_entity",
         "generate_indexes", "get_chunks", "get_hierarchy", "get_ingest_log", "get_insight",
-        "get_links", "get_page", "get_profile", "get_tags",
+        "get_links", "get_page", "get_profile", "get_provenance", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",
         "ingest", "ingest_dialogue", "job_cancel", "job_list",
         "job_retry", "job_status", "job_submit", "list_insights",
@@ -87,8 +89,8 @@ describe("MCP Server", () => {
         "promote_discovery", "put_page", "query", "query_insights",
         "read_discoveries", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
         "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
-        "resolve_slugs", "revert_version", "run_discovery", "set_hierarchy", "status",
-        "summarize", "sync", "update_discovery_status", "update_profile", "writeback",
+        "resolve_slugs", "revert_version", "run_discovery", "set_hierarchy", "set_trust_state",
+        "status", "summarize", "sync", "update_discovery_status", "update_profile", "writeback",
       ]);
     });
   });
@@ -818,6 +820,135 @@ describe("MCP Server", () => {
       });
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(false);
+    });
+  });
+
+  describe("confirm_evidence tool", () => {
+    // Helper: seed DB row + write vault markdown so getBySlug returns body
+    function seedPageWithBody(slug: string, title: string, body: string) {
+      const type = "entity";
+      const filePath = `brain/entities/${title}.md`;
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run(slug, type, title, filePath, "hash");
+      mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+      writeFileSync(join(vaultPath, filePath),
+        `---\ntitle: ${title}\ntype: ${type}\nslug: ${slug}\n---\n${body}`);
+    }
+
+    function seedLink(from: string, to: string, relation: string, sourceType: string) {
+      db.insertLink(from, to, relation, null, 0.5, "medium", sourceType, 0.5);
+    }
+
+    test("upgrades to trusted when excerpt matches page body", async () => {
+      seedPageWithBody("entities/a", "A", "Body text");
+      seedPageWithBody("entities/b", "B", "Other text");
+      seedPageWithBody("records/chat", "Chat", "今天聊天中用户明确说A和B是同事关系，共事三年了。");
+      seedLink("entities/a", "entities/b", "knows", "ner");
+
+      const linkId = db.getOutgoingLinks("entities/a")[0].id;
+      expect(db.getOutgoingLinks("entities/a")[0].trust_state).toBe("candidate");
+
+      const server = createServer(deps);
+      const result = await getTools(server).confirm_evidence.handler({
+        target_type: "link",
+        target_id: linkId,
+        confirmation_record_slug: "records/chat",
+        excerpt: "用户明确说A和B是同事关系",
+        new_state: "trusted",
+      });
+
+      expect(result.content[0].text).toContain("已确认为 trusted");
+      expect(db.getOutgoingLinks("entities/a")[0].trust_state).toBe("trusted");
+    });
+
+    test("rejects when confirmation page does not exist", async () => {
+      seedPageWithBody("entities/c", "C", "Body");
+      seedPageWithBody("entities/d", "D", "Body");
+      seedLink("entities/c", "entities/d", "knows", "ner");
+      const linkId = db.getOutgoingLinks("entities/c")[0].id;
+
+      const server = createServer(deps);
+      const result = await getTools(server).confirm_evidence.handler({
+        target_type: "link",
+        target_id: linkId,
+        confirmation_record_slug: "records/nonexistent",
+        excerpt: "用户确认了这段关系",
+        new_state: "trusted",
+      });
+
+      expect(result.content[0].text).toContain("不存在");
+      expect(db.getOutgoingLinks("entities/c")[0].trust_state).toBe("candidate");
+    });
+
+    test("rejects when excerpt not in page body", async () => {
+      seedPageWithBody("entities/e", "E", "Body");
+      seedPageWithBody("entities/f", "F", "Body");
+      seedPageWithBody("records/note", "Note", "此页不包含任何关系确认信息。");
+      seedLink("entities/e", "entities/f", "knows", "ner");
+      const linkId = db.getOutgoingLinks("entities/e")[0].id;
+
+      const server = createServer(deps);
+      const result = await getTools(server).confirm_evidence.handler({
+        target_type: "link",
+        target_id: linkId,
+        confirmation_record_slug: "records/note",
+        excerpt: "用户确认E和F是同事关系这是伪造的确认内容",
+        new_state: "trusted",
+      });
+
+      expect(result.content[0].text).toContain("未出现");
+      expect(db.getOutgoingLinks("entities/e")[0].trust_state).toBe("candidate");
+
+      // No provenance history written
+      const prov = new ProvenanceManager(new SqliteProvenanceStore(db.rawDb));
+      expect(prov.getCorrectionHistory("link", linkId).length).toBe(0);
+    });
+
+    test("rejects punctuation-only excerpt", async () => {
+      seedPageWithBody("entities/g", "G", "Body");
+      seedPageWithBody("entities/h", "H", "Body");
+      seedPageWithBody("records/log", "Log", "一些无关的内容。");
+      seedLink("entities/g", "entities/h", "knows", "ner");
+      const linkId = db.getOutgoingLinks("entities/g")[0].id;
+
+      const server = createServer(deps);
+      const result = await getTools(server).confirm_evidence.handler({
+        target_type: "link",
+        target_id: linkId,
+        confirmation_record_slug: "records/log",
+        excerpt: "..........",
+        new_state: "trusted",
+      });
+
+      expect(result.content[0].text).toContain("未出现");
+      expect(db.getOutgoingLinks("entities/g")[0].trust_state).toBe("candidate");
+
+      const prov = new ProvenanceManager(new SqliteProvenanceStore(db.rawDb));
+      expect(prov.getCorrectionHistory("link", linkId).length).toBe(0);
+    });
+
+    test("rejects short text padded with punctuation", async () => {
+      seedPageWithBody("entities/i", "I", "Body");
+      seedPageWithBody("entities/j", "J", "Body");
+      seedPageWithBody("records/memo", "Memo", "待确认的内容在此页面中。");
+      seedLink("entities/i", "entities/j", "knows", "ner");
+      const linkId = db.getOutgoingLinks("entities/i")[0].id;
+
+      const server = createServer(deps);
+      const result = await getTools(server).confirm_evidence.handler({
+        target_type: "link",
+        target_id: linkId,
+        confirmation_record_slug: "records/memo",
+        excerpt: "确认..........",
+        new_state: "trusted",
+      });
+
+      expect(result.content[0].text).toContain("未出现");
+      expect(db.getOutgoingLinks("entities/i")[0].trust_state).toBe("candidate");
+
+      const prov = new ProvenanceManager(new SqliteProvenanceStore(db.rawDb));
+      expect(prov.getCorrectionHistory("link", linkId).length).toBe(0);
     });
   });
 });
