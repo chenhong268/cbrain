@@ -54,6 +54,11 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     for (let i = 0; i < graphSlugs.length; i++) {
       try { ctx.learn.bumpOnQuery(graphSlugs[i], i, "graph"); } catch { /* non-critical */ }
     }
+    if (mode !== "backlinks" && graphSlugs.length > 0) {
+      for (const s of graphSlugs) {
+        try { ctx.db.boostLinkConfidence(resolvedSlug, s, "mentions", 0.02); } catch { /* non-critical */ }
+      }
+    }
 
     return {
       content: [{ type: "text", text: JSON.stringify({ resolvedSlug, result }, null, 2) }],

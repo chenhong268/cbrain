@@ -24,6 +24,7 @@ export interface DreamReport {
     sync: { synced: number; skipped: number; errors: number };
     enrich: { total: number; upgraded: number };
     learn: { updated: number; topActive: string[] };
+    decay: { linksUpdated: number };
     seal: { sealed: number; skipped: number; errors: number };
     cleanup: { orphans: number; staleStubs: number };
     health: { overallStatus: string; dimensions: number; issues: number };
@@ -76,6 +77,7 @@ export async function runDream(
         sync: { synced: 0, skipped: 0, errors: 0 },
         enrich: { total: 0, upgraded: 0 },
         learn: { updated: 0, topActive: [] },
+        decay: { linksUpdated: 0 },
         seal: { sealed: 0, skipped: 0, errors: 0 },
         cleanup: { orphans: 0, staleStubs: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
@@ -139,6 +141,16 @@ export async function runDream(
     logger.warn("dream", `学习计算失败: ${(e as Error).message}`);
   }
 
+  // Stage 3.1: Decay
+  logger.info("dream", "Stage 3.1/7: decay");
+  let decayUpdated = 0;
+  try {
+    decayUpdated = db.applyLinkDecay();
+    if (decayUpdated > 0) logger.info("dream", `衰减更新 ${decayUpdated} 条 link 的 effective_weight`);
+  } catch (e) {
+    logger.warn("dream", `衰减计算失败: ${(e as Error).message}`);
+  }
+
   // Stage 3.5: Seal
   logger.info("dream", "Stage 3.5/8: seal");
   let sealReport = { sealed: 0, skipped: 0, errors: 0 };
@@ -195,6 +207,7 @@ export async function runDream(
       sync: { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors },
       enrich: { total: enrichResults.length, upgraded },
       learn: learnReport,
+      decay: { linksUpdated: decayUpdated },
       seal: sealReport,
       cleanup: { orphans: orphans.length, staleStubs: staleStubs.length },
       health: {
@@ -269,6 +282,9 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.learn.updated > 0) {
     lines.push(`学习: ${report.stages.learn.updated} 个权重更新，最活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")}`);
+  }
+  if (report.stages.decay.linksUpdated > 0) {
+    lines.push(`衰减: ${report.stages.decay.linksUpdated} 条关系降权`);
   }
   if (report.stages.seal.sealed > 0) {
     lines.push(`Seal: ${report.stages.seal.sealed} 页摘要压缩`);
