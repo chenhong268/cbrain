@@ -469,4 +469,57 @@ describe("ResearchManager", () => {
 
     expect(results.length).toBe(3);
   });
+
+  test("duplicate follow-up across iterations is skipped", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["主题A", [makeResult("entity/a", 0.9)]],
+      ["方向B", [makeResult("entity/b", 0.8)]],
+    ]);
+
+    const llm = createMockLLM([
+      // Round 1: insufficient → suggest "方向B"
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"方向B","intent":"扩展"}]}',
+      // Round 2: LLM returns "方向B" again (duplicate), plus new "方向C"
+      '{"reasoning":"再试试","sufficient":false,"follow_up_queries":[{"query":"方向B","intent":"重复"},{"query":"方向C","intent":"新方向"}]}',
+      // Round 3: sufficient (or newQueries empty since "方向C" not in mock → empty results → still loops once more then stops)
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2]}',
+    ]);
+
+    const researcher = new ResearchManager(
+      createMockSearch(searchResponses), db, llm,
+    );
+    const results = await researcher.research("主题A");
+
+    // "方向B" should only be searched once (round 1). Round 2's duplicate is filtered.
+    expect(results.length).toBe(2);
+    expect(llm.calls.length).toBe(4); // 3 reasoning + 1 rerank
+  });
+
+  test("all follow-up queries are recorded in issuedQueries", async () => {
+    const searchedQueries: string[] = [];
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["主题B", [makeResult("entity/a", 0.9)]],
+      ["方向X", [makeResult("entity/b", 0.8)]],
+      ["方向Y", [makeResult("entity/c", 0.7)]],
+    ]);
+    const mockSearch: HybridSearch = {
+      search: async (query: string, _options?: unknown) => {
+        searchedQueries.push(query);
+        return searchResponses.get(query) ?? [];
+      },
+    } as unknown as HybridSearch;
+
+    const llm = createMockLLM([
+      '{"reasoning":"两个方向","sufficient":false,"follow_up_queries":[{"query":"方向X","intent":"扩展X"},{"query":"方向Y","intent":"扩展Y"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order": [1, 2, 3]}',
+    ]);
+
+    const researcher = new ResearchManager(mockSearch, db, llm);
+    await researcher.research("主题B");
+
+    // Original + 2 follow-ups = 3 searches
+    expect(searchedQueries).toEqual(["主题B", "方向X", "方向Y"]);
+  });
 });

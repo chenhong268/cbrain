@@ -81,7 +81,7 @@ export class ResearchManager {
         newResults = this.mergeResults(newResults, subResults);
       }
 
-      session = this.updateSession(session, newResults, i + 1);
+      session = this.updateSession(session, newResults, i + 1, newQueries);
     }
 
     const reranked = await this.rerankResults(query, session.allResults);
@@ -104,6 +104,7 @@ export class ResearchManager {
     session: ResearchSession,
     newResults: readonly SearchResult[],
     iteration: number,
+    newQueries: readonly string[] = [],
   ): ResearchSession {
     const merged = this.mergeResults(session.allResults, newResults);
     const newSlugs = merged
@@ -111,13 +112,14 @@ export class ResearchManager {
       .filter(s => !session.discoveredSlugs.has(s));
     const expandedGraph = this.expandGraphContext(session.graphContext, newSlugs);
     const allSlugs = new Set([...session.discoveredSlugs, ...newSlugs]);
+    const allQueries = new Set([...session.issuedQueries, ...newQueries]);
 
     return {
       originalQuery: session.originalQuery,
       iteration,
       maxIterations: session.maxIterations,
       discoveredSlugs: allSlugs,
-      issuedQueries: session.issuedQueries,
+      issuedQueries: allQueries,
       allResults: merged,
       graphContext: expandedGraph,
     };
