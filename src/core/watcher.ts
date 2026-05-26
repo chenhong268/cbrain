@@ -134,7 +134,7 @@ export class FileWatcher {
     if (deleted.length > 0) {
       for (const slug of deleted) {
         try {
-          this.sync.removePage(slug);
+          await this.sync.removePage(slug);
         } catch (e) {
           this.logger?.warn("watcher", `删除清理失败: ${slug}`, { error: String(e) });
         }

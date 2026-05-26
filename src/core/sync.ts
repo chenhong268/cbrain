@@ -163,10 +163,10 @@ export class SyncManager {
         const chunks = chunkContent(file.body, this.chunkSize);
         const embedResults = chunks.map(c => this.chunkEmbedCache.get(`${file.slug}:${c.index}`));
         if (embedResults.every(r => r)) {
-          this.pipeline.writeIndexes(file.slug, chunks, embedResults as Array<{ embedding: number[]; tokenCount: number }>);
+          await this.pipeline.writeIndexes(file.slug, chunks, embedResults as Array<{ embedding: number[]; tokenCount: number }>);
         } else {
           const fresh = await this.pipeline.embed(file.body);
-          this.pipeline.writeIndexes(file.slug, fresh.chunks, fresh.embedResults);
+          await this.pipeline.writeIndexes(file.slug, fresh.chunks, fresh.embedResults);
         }
 
         this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
@@ -342,7 +342,7 @@ export class SyncManager {
     }
 
     const { chunks, embedResults } = await this.pipeline.embed(parsed.body);
-    this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);
+    await this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);
     this.pipeline.writeIngestLog(effectiveSlug, "vault", { hash: contentHash });
 
     // Wikilink extraction first — produces mentionedSlugs for NER dedup
@@ -377,9 +377,9 @@ export class SyncManager {
     return { success: true };
   }
 
-  removePage(slug: string): void {
+  async removePage(slug: string): Promise<void> {
     this.db.deletePageCascaded(slug);
-    this.lance.deleteByPageSlug(slug);
+    await this.lance.deleteByPageSlug(slug);
   }
 
   async removeOrphans(vaultPath: string): Promise<string[]> {

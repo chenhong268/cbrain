@@ -257,7 +257,7 @@ ${relatedText}
   // 7. Re-index chunks (body changed)
   try {
     const { chunks: newChunks, embedResults } = await pipeline.embed(newBody);
-    pipeline.writeIndexes(slug, newChunks, embedResults);
+    await pipeline.writeIndexes(slug, newChunks, embedResults);
   } catch (e) {
     logger?.warn("dossier", "重新索引失败", { slug, error: String(e) });
   }

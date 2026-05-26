@@ -94,18 +94,18 @@ export class ContentPipeline {
    * Write indexes for a page. Pre-embedded chunks must be provided.
    * This is the ONE place LanceDB + chunks table + FTS are written.
    */
-  writeIndexes(
+  async writeIndexes(
     slug: string,
     chunks: Array<{ index: number; content: string }>,
     embedResults: Array<{ embedding: number[]; tokenCount: number }>
-  ): void {
+  ): Promise<void> {
     if (chunks.length === 0) return;
     if (chunks.length !== embedResults.length) {
       throw new Error(`writeIndexes: chunks(${chunks.length}) and embeddings(${embedResults.length}) count mismatch for ${slug}`);
     }
 
-    this.lance.deleteRawChunksByPageSlug(slug);
-    this.lance.addChunks(
+    await this.lance.deleteRawChunksByPageSlug(slug);
+    await this.lance.addChunks(
       chunks.map((c, i) => ({
         pageSlug: slug,
         chunkIndex: c.index,

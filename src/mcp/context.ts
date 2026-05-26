@@ -46,7 +46,7 @@ export interface ToolContext {
 export async function indexPage(pipeline: ContentPipeline, slug: string, body: string): Promise<void> {
   try {
     const { chunks, embedResults } = await pipeline.embed(body);
-    pipeline.writeIndexes(slug, chunks, embedResults);
+    await pipeline.writeIndexes(slug, chunks, embedResults);
   } catch (err) {
     console.error(`indexPageContent failed for ${slug}:`, err);
   }

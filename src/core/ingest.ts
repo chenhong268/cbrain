@@ -160,7 +160,7 @@ export class IngestManager {
     this.db.deleteLinksByRelation(slug, '提及');
     const { count: linksExtracted, mentionedSlugs } = this.pipeline.processWikilinks(slug, body);
 
-    this.pipeline.writeIndexes(slug, chunks, embedResults);
+    await this.pipeline.writeIndexes(slug, chunks, embedResults);
     this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
 
     let nerResult: NerPipelineResult | null | undefined;
