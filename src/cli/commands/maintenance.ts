@@ -1564,7 +1564,7 @@ Return JSON only, no markdown:
     .option("--execute", "Actually move files")
     .action((opts) => {
       const config = loadConfig();
-      const { cpSync, rmSync, renameSync, existsSync: exists, readdirSync, statSync, mkdirSync } = require("node:fs");
+      const { cpSync, rmSync, existsSync: exists, readdirSync, statSync, mkdirSync } = require("node:fs");
       const { join: pathJoin } = require("node:path");
 
       const sourceDir = pathJoin(config.vaultPath, "outputs");
@@ -1608,17 +1608,21 @@ Return JSON only, no markdown:
       console.log(`  文件数:   ${fileCount}`);
       console.log(`  总大小:   ${(sourceSize / 1024 / 1024).toFixed(1)}MB`);
 
-      // When target already has files, archive conflicting entries instead of aborting
-      if (exists(targetDir)) {
-        const targetFiles = countFiles(targetDir);
-        if (targetFiles > 0) {
-          const archiveDir = `${targetDir}.pre-migrate-${Date.now()}`;
-          if (opts.execute) {
-            console.log(`  目标已有 ${targetFiles} 个文件，归档到 ${archiveDir}`);
-            renameSync(targetDir, archiveDir);
-          } else {
-            console.log(`  目标已有 ${targetFiles} 个文件，执行时将归档到 ${archiveDir}`);
-          }
+      const targetFiles = exists(targetDir) ? countFiles(targetDir) : 0;
+      if (targetFiles > 0) {
+        console.log(`\n  ⚠  目标目录已有 ${targetFiles} 个文件。`);
+        console.log(`  建议在迁移前停止运行中的服务（server/dream），以避免并发写入问题。`);
+      }
+
+      // Legacy data merges into a timestamped subdirectory — never replaces the authoritative runtime
+      const legacyStamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+      const legacyDir = pathJoin(targetDir, `legacy-outputs-${legacyStamp}`);
+
+      if (targetFiles > 0) {
+        if (opts.execute) {
+          console.log(`  Legacy 数据将迁移到 ${legacyDir}（不覆盖当前 runtime 文件）`);
+        } else {
+          console.log(`  Legacy 数据将迁移到 ${legacyDir}（不覆盖当前 runtime 文件）`);
         }
       }
 
@@ -1627,16 +1631,35 @@ Return JSON only, no markdown:
         return;
       }
 
-      try {
-        mkdirSync(targetDir, { recursive: true });
-        cpSync(sourceDir, targetDir, { recursive: true });
-      } catch (err) {
-        console.error(`\n  ✗ 复制失败: ${err instanceof Error ? err.message : err}`);
-        console.error(`  目标目录可能不完整，请手动检查: ${targetDir}`);
-        process.exit(1);
+      if (targetFiles > 0) {
+        try {
+          mkdirSync(legacyDir, { recursive: true });
+          // Copy legacy source contents into the legacy subdirectory
+          const entries = readdirSync(sourceDir, { withFileTypes: true });
+          for (const entry of entries) {
+            const src = pathJoin(sourceDir, entry.name);
+            const dest = pathJoin(legacyDir, entry.name);
+            cpSync(src, dest, { recursive: true });
+          }
+        } catch (err) {
+          console.error(`\n  ✗ 复制 legacy 数据失败: ${err instanceof Error ? err.message : err}`);
+          process.exit(1);
+        }
+      } else {
+        // Target is empty — copy directly into runtime root
+        try {
+          mkdirSync(targetDir, { recursive: true });
+          cpSync(sourceDir, targetDir, { recursive: true });
+        } catch (err) {
+          console.error(`\n  ✗ 复制失败: ${err instanceof Error ? err.message : err}`);
+          console.error(`  目标目录可能不完整，请手动检查: ${targetDir}`);
+          process.exit(1);
+        }
       }
+
       rmSync(sourceDir, { recursive: true });
-      console.log(`\n  ✓ 已迁移到 ${targetDir}（源目录已删除）`);
+      const destination = targetFiles > 0 ? legacyDir : targetDir;
+      console.log(`\n  ✓ 已迁移到 ${destination}（源目录已删除）`);
     });
 }
 

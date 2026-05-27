@@ -66,7 +66,7 @@ export async function runDream(
   outputsDir: string,
   logger: Logger,
   insightMgr?: InsightManager,
-  dbPath?: string,
+  _dbPath?: string,
   sealDeps?: { llm: LLMProvider; embedding: EmbeddingProvider; lance: LanceDBManager },
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
@@ -99,18 +99,26 @@ export async function runDream(
   let backupPath: string | null = null;
   let backupSize = "0";
   try {
-    // Checkpoint WAL so the zip captures all committed writes
-    db.checkpoint();
+    // Use VACUUM INTO to create a WAL-consistent snapshot without disrupting live connections
     const backupDir = join(outputsDir, "backups");
     if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+    const snapshotPath = join(backupDir, `.snapshot-${ts}.sqlite`);
+    const snapshotBasename = basename(snapshotPath);
+
+    // VACUUM INTO produces a self-contained, consistent copy including all committed WAL data
+    db.rawDb.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
+
     backupPath = join(backupDir, `auto-${ts}.zip`);
-    const resolvedDbPath = dbPath ?? join(vaultPath, "..", "brain.sqlite");
-    const dbDir = join(resolvedDbPath, "..");
-    await execFileAsync("zip", ["-rq", backupPath, basename(resolvedDbPath)], { cwd: dbDir, encoding: "utf-8" });
+    try {
+      await execFileAsync("zip", ["-rq", backupPath, snapshotBasename], { cwd: backupDir, encoding: "utf-8" });
+    } finally {
+      // Always clean up the temp snapshot
+      try { unlinkSync(snapshotPath); } catch { /* already gone */ }
+    }
     const info = await stat(backupPath);
     backupSize = (info.size / 1024 / 1024).toFixed(1);
-    logger.info("dream", `备份完成：${backupPath} (${backupSize}MB, SQLite only)`);
+    logger.info("dream", `备份完成：${backupPath} (${backupSize}MB, SQLite snapshot via VACUUM INTO)`);
 
     // Retention: count limit + byte budget, oldest first
     const backups = readdirSync(backupDir).filter(f => f.startsWith("auto-") && f.endsWith(".zip")).sort();

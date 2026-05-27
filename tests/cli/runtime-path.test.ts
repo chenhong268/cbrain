@@ -110,7 +110,7 @@ describe("migrate-runtime CLI", () => {
     expect(existsSync(outputsDir)).toBe(false);
   });
 
-  test("archives conflicting target files instead of aborting", () => {
+  test("merges legacy data into legacy-outputs subdirectory when target has files", () => {
     initBrain();
     const outputsDir = join(brainDir, "vault", "outputs");
     mkdirSync(join(outputsDir, "logs"), { recursive: true });
@@ -118,22 +118,27 @@ describe("migrate-runtime CLI", () => {
 
     // Simulate new version already having created runtime files
     const runtimeDir = join(brainDir, "runtime");
-    mkdirSync(join(runtimeDir, "existing"), { recursive: true });
-    writeFileSync(join(runtimeDir, "existing", "data.txt"), "exists");
+    mkdirSync(join(runtimeDir, "health"), { recursive: true });
+    writeFileSync(join(runtimeDir, "health", "report.json"), '{"status":"pass"}');
 
     const output = exec("migrate-runtime --execute");
-    expect(output).toContain("归档");
+    expect(output).toContain("已迁移");
 
     // Source removed
     expect(existsSync(outputsDir)).toBe(false);
 
-    // Migrated files present
-    expect(existsSync(join(runtimeDir, "logs", "old.log"))).toBe(true);
+    // Current runtime files stay in place — NOT archived
+    expect(existsSync(join(runtimeDir, "health", "report.json"))).toBe(true);
+    expect(readFileSync(join(runtimeDir, "health", "report.json"), "utf-8")).toBe('{"status":"pass"}');
 
-    // Old target was archived (directory renamed)
-    const entries = readdirSync(brainDir).filter(e => e.startsWith("runtime.pre-migrate-"));
-    expect(entries.length).toBe(1);
-    expect(existsSync(join(brainDir, entries[0], "existing", "data.txt"))).toBe(true);
+    // No archive of the runtime directory
+    const archiveEntries = readdirSync(brainDir).filter(e => e.startsWith("runtime.pre-migrate-"));
+    expect(archiveEntries.length).toBe(0);
+
+    // Legacy data merged into legacy-outputs-* subdirectory
+    const legacyEntries = readdirSync(runtimeDir).filter(e => e.startsWith("legacy-outputs-"));
+    expect(legacyEntries.length).toBe(1);
+    expect(existsSync(join(runtimeDir, legacyEntries[0], "logs", "old.log"))).toBe(true);
   });
 
   test("handles new runtime files present before migration (dry-run)", () => {
@@ -147,8 +152,8 @@ describe("migrate-runtime CLI", () => {
     writeFileSync(join(runtimeDir, "health", "report.json"), "{}");
 
     const output = exec("migrate-runtime --dry-run");
-    expect(output).toContain("目标已有");
-    expect(output).toContain("归档");
+    expect(output).toContain("已有");
+    expect(output).toContain("不覆盖");
     // Nothing actually moved
     expect(existsSync(join(outputsDir, "logs", "legacy.log"))).toBe(true);
     expect(existsSync(join(runtimeDir, "health", "report.json"))).toBe(true);

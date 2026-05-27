@@ -62,7 +62,7 @@ describe("dream backup retention", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  test("creates SQLite-only backup (no LanceDB)", async () => {
+  test("creates SQLite-only backup via VACUUM INTO snapshot", async () => {
     const report = await runDream(
       vaultPath, db, makeMockSync(), makeMockEnrich(),
       makeMockHealth(), outputsDir, logger,
@@ -77,7 +77,12 @@ describe("dream backup retention", () => {
 
     const listing = execSync(`zipinfo -1 ${join(backupDir, files[0])}`, { encoding: "utf-8" });
     expect(listing).not.toContain("lancedb");
-    expect(listing).toContain("brain.sqlite");
+    // Snapshot files are named .snapshot-*.sqlite, not brain.sqlite
+    expect(listing).toMatch(/\.snapshot-.*\.sqlite/);
+
+    // No temp snapshot should be left on disk
+    const tempFiles = readdirSync(backupDir).filter(f => f.startsWith(".snapshot-") && f.endsWith(".sqlite"));
+    expect(tempFiles.length).toBe(0);
   });
 
   test("WAL backup includes uncheckpointed writes", async () => {
@@ -100,7 +105,11 @@ describe("dream backup retention", () => {
     mkdirSync(restoreDir, { recursive: true });
     execSync(`unzip -o ${join(backupDir, zipFile)} -d ${restoreDir}`, { encoding: "utf-8" });
 
-    const restoredDb = new CBrainDB(join(restoreDir, "brain.sqlite"));
+    // Snapshot file is named .snapshot-*.sqlite
+    const snapshotFiles = readdirSync(restoreDir).filter(f => f.endsWith(".sqlite"));
+    expect(snapshotFiles.length).toBe(1);
+
+    const restoredDb = new CBrainDB(join(restoreDir, snapshotFiles[0]));
     const row = restoredDb.rawDb.prepare("SELECT slug, title FROM pages WHERE slug = ?").get("test/wal-entity");
     expect(row).toBeDefined();
     expect((row as any).title).toBe("WAL Entity");
@@ -174,5 +183,46 @@ describe("dream backup retention", () => {
     // The 600MB one should have been cleaned by count/byte logic
     expect(remaining).not.toContain("auto-2026-01-01-00-00.zip");
     expect(remaining.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("concurrent connection write captured in VACUUM INTO snapshot", async () => {
+    // Connection B: open a second connection and commit new data via a separate process
+    // This simulates a writer committing data that lives in the WAL but hasn't been checkpointed
+    const { Database: BunDatabase } = require("bun:sqlite") as typeof import("bun:sqlite");
+    const conn2 = new BunDatabase(dbPath);
+    conn2.exec("PRAGMA journal_mode = WAL");
+    conn2.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)"
+    ).run("test/concurrent-entity", "Concurrent Entity", "test/concurrent-entity.md", "hash-concurrent");
+    // Don't checkpoint — data is in the WAL
+    conn2.close();
+
+    // Verify data is visible through the main connection (WAL read semantics)
+    const beforeRow = db.rawDb.prepare("SELECT slug FROM pages WHERE slug = ?").get("test/concurrent-entity");
+    expect(beforeRow).toBeDefined();
+
+    // Run dream backup (uses VACUUM INTO — must capture conn2's committed write from WAL)
+    const report = await runDream(
+      vaultPath, db, makeMockSync(), makeMockEnrich(),
+      makeMockHealth(), outputsDir, logger,
+      undefined, dbPath,
+    );
+    expect(report.stages.backup.path).not.toBeNull();
+
+    // Restore and verify
+    const backupDir = join(outputsDir, "backups");
+    const zipFile = readdirSync(backupDir).find(f => f.endsWith(".zip"))!;
+    const restoreDir = join(testDir, "restore");
+    mkdirSync(restoreDir, { recursive: true });
+    execSync(`unzip -o ${join(backupDir, zipFile)} -d ${restoreDir}`, { encoding: "utf-8" });
+
+    const snapshotFiles = readdirSync(restoreDir).filter(f => f.endsWith(".sqlite"));
+    expect(snapshotFiles.length).toBe(1);
+
+    const restoredDb = new CBrainDB(join(restoreDir, snapshotFiles[0]));
+    const row = restoredDb.rawDb.prepare("SELECT slug, title FROM pages WHERE slug = ?").get("test/concurrent-entity");
+    expect(row).toBeDefined();
+    expect((row as any).title).toBe("Concurrent Entity");
+    restoredDb.close();
   });
 });
