@@ -62,7 +62,7 @@ describe("dream backup retention", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  test("creates SQLite-only backup via VACUUM INTO snapshot", async () => {
+  test("creates SQLite-only backup via VACUUM INTO with DB-compatible filename", async () => {
     const report = await runDream(
       vaultPath, db, makeMockSync(), makeMockEnrich(),
       makeMockHealth(), outputsDir, logger,
@@ -77,11 +77,11 @@ describe("dream backup retention", () => {
 
     const listing = execSync(`zipinfo -1 ${join(backupDir, files[0])}`, { encoding: "utf-8" });
     expect(listing).not.toContain("lancedb");
-    // Snapshot files are named .snapshot-*.sqlite, not brain.sqlite
-    expect(listing).toMatch(/\.snapshot-.*\.sqlite/);
+    // Zip contains brain.sqlite (renamed from snapshot) so restore can install directly
+    expect(listing.trim()).toBe("brain.sqlite");
 
-    // No temp snapshot should be left on disk
-    const tempFiles = readdirSync(backupDir).filter(f => f.startsWith(".snapshot-") && f.endsWith(".sqlite"));
+    // No temp files left on disk
+    const tempFiles = readdirSync(backupDir).filter(f => f.startsWith(".snapshot-") || f.startsWith("brain.sqlite"));
     expect(tempFiles.length).toBe(0);
   });
 
@@ -105,15 +105,40 @@ describe("dream backup retention", () => {
     mkdirSync(restoreDir, { recursive: true });
     execSync(`unzip -o ${join(backupDir, zipFile)} -d ${restoreDir}`, { encoding: "utf-8" });
 
-    // Snapshot file is named .snapshot-*.sqlite
-    const snapshotFiles = readdirSync(restoreDir).filter(f => f.endsWith(".sqlite"));
-    expect(snapshotFiles.length).toBe(1);
+    // Zip contains brain.sqlite
+    expect(existsSync(join(restoreDir, "brain.sqlite"))).toBe(true);
 
-    const restoredDb = new CBrainDB(join(restoreDir, snapshotFiles[0]));
+    const restoredDb = new CBrainDB(join(restoreDir, "brain.sqlite"));
     const row = restoredDb.rawDb.prepare("SELECT slug, title FROM pages WHERE slug = ?").get("test/wal-entity");
     expect(row).toBeDefined();
     expect((row as any).title).toBe("WAL Entity");
     restoredDb.close();
+  });
+
+  test("cleans up stale .snapshot-*.sqlite before creating new backup", async () => {
+    const backupDir = join(outputsDir, "backups");
+    mkdirSync(backupDir, { recursive: true });
+
+    // Simulate stale snapshots from a previously interrupted backup
+    writeFileSync(join(backupDir, ".snapshot-2026-01-01-00-00.sqlite"), "stale");
+    writeFileSync(join(backupDir, ".snapshot-2026-01-02-12-30-45.sqlite"), "stale2");
+
+    const staleBefore = readdirSync(backupDir).filter(f => f.startsWith(".snapshot-"));
+    expect(staleBefore.length).toBe(2);
+
+    await runDream(
+      vaultPath, db, makeMockSync(), makeMockEnrich(),
+      makeMockHealth(), outputsDir, logger,
+      undefined, dbPath,
+    );
+
+    // Stale snapshots should be gone
+    const staleAfter = readdirSync(backupDir).filter(f => f.startsWith(".snapshot-"));
+    expect(staleAfter.length).toBe(0);
+
+    // New backup zip exists
+    const zips = readdirSync(backupDir).filter(f => f.endsWith(".zip"));
+    expect(zips.length).toBe(1);
   });
 
   test("enforces count limit and removes oldest", async () => {
@@ -216,13 +241,56 @@ describe("dream backup retention", () => {
     mkdirSync(restoreDir, { recursive: true });
     execSync(`unzip -o ${join(backupDir, zipFile)} -d ${restoreDir}`, { encoding: "utf-8" });
 
-    const snapshotFiles = readdirSync(restoreDir).filter(f => f.endsWith(".sqlite"));
-    expect(snapshotFiles.length).toBe(1);
+    expect(existsSync(join(restoreDir, "brain.sqlite"))).toBe(true);
 
-    const restoredDb = new CBrainDB(join(restoreDir, snapshotFiles[0]));
+    const restoredDb = new CBrainDB(join(restoreDir, "brain.sqlite"));
     const row = restoredDb.rawDb.prepare("SELECT slug, title FROM pages WHERE slug = ?").get("test/concurrent-entity");
     expect(row).toBeDefined();
     expect((row as any).title).toBe("Concurrent Entity");
     restoredDb.close();
+  });
+
+  test("end-to-end: backup → modify → restore recovers backup state", async () => {
+    // Insert data before backup
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)"
+    ).run("test/keep-me", "Keep Me", "test/keep-me.md", "hash-keep");
+
+    // Run dream to create backup
+    const report = await runDream(
+      vaultPath, db, makeMockSync(), makeMockEnrich(),
+      makeMockHealth(), outputsDir, logger,
+      undefined, dbPath,
+    );
+    expect(report.stages.backup.path).not.toBeNull();
+
+    // Modify the database after backup
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)"
+    ).run("test/after-backup", "After Backup", "test/after-backup.md", "hash-after");
+
+    // Verify both rows exist in the live DB
+    expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as any).toEqual({ c: 2 });
+
+    // Close DB and clean up WAL/SHM so restore overwrites cleanly
+    db.close();
+    try { rmSync(dbPath + "-wal"); } catch { /* no WAL */ }
+    try { rmSync(dbPath + "-shm"); } catch { /* no SHM */ }
+
+    // Restore from backup (simulate what `cbrain restore` does)
+    const backupDir = join(outputsDir, "backups");
+    const zipFile = readdirSync(backupDir).find(f => f.endsWith(".zip"))!;
+    execSync(`unzip -o ${join(backupDir, zipFile)}`, { cwd: testDir, encoding: "utf-8" });
+
+    // Reopen restored database
+    db = new CBrainDB(dbPath);
+
+    // Pre-backup data should be present
+    const kept = db.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/keep-me") as any;
+    expect(kept.title).toBe("Keep Me");
+
+    // Post-backup data should be gone (restored to backup state)
+    const afterRow = db.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("test/after-backup");
+    expect(afterRow).toBeNull();
   });
 });

@@ -173,7 +173,7 @@ runtime/
 
 1. **vault 只放内容** — `raw/` 和 `brain/` 是用户可见的知识内容，运行产物不应污染
 2. **LanceDB 不备份** — 向量索引可从 vault 完全重建，备份只含 SQLite
-3. **WAL 一致性** — 备份前执行 `PRAGMA wal_checkpoint(TRUNCATE)`，确保 zip 内的 `.sqlite` 文件包含所有已提交写入
+3. **WAL 一致性** — 使用 `VACUUM INTO` 生成一致性快照数据库，包含所有已提交的 WAL 数据（含其他连接的并发写入），不影响活跃连接。快照在 zip 内以正式 DB 文件名（如 `brain.sqlite`）存储，`cbrain restore` 可直接恢复
 4. **保留双限制** — 最多 7 份 + 总大小不超过 500MB；单份超预算时保留最新并输出告警
 5. **可随时清除** — 删除整个 `runtime/` 不影响知识库功能
 
@@ -183,4 +183,28 @@ runtime/
 - 有 `config.runtimePath` → 使用显式配置
 - 默认 → `dirname(resolve(config.dbPath)) + "/runtime"`
 
-旧版 `vault/outputs/` 不再写入。已有数据可通过 `cbrain migrate-runtime` 迁移到新位置。迁移冲突时，已有的目标目录会被重命名为 `runtime.pre-migrate-<timestamp>` 归档。
+旧版 `vault/outputs/` 不再写入。已有数据可通过 `cbrain migrate-runtime` 迁移到新位置。
+
+### 迁移策略
+
+`cbrain migrate-runtime` 将 `vault/outputs/` 的旧数据迁入 `<runtimePath>/`：
+
+- **目标为空** — 直接复制到 runtime 根目录
+- **目标已有文件** — 当前 runtime 文件保留不动，旧数据迁入 `runtime/legacy-outputs-<timestamp>/` 子目录，不覆盖当前运行状态
+- 迁移前建议停止运行中的服务（server/dream），避免并发写入问题
+
+### 自动备份恢复
+
+`cbrain restore <backup.zip>` 从自动备份恢复 SQLite 数据库：
+
+1. 备份 zip 内含以正式 DB 文件名存储的一致性快照（如 `brain.sqlite`）
+2. `restore` 命令在 profileDir 下解压，直接覆盖当前数据库文件
+3. 恢复后运行 `cbrain sync` 重建向量索引
+
+典型流程：
+```
+cbrain dream              # 自动创建备份
+# ... 数据库出了问题 ...
+cbrain restore runtime/backups/auto-2026-05-28-00-00.zip --force
+cbrain sync               # 重建 LanceDB 索引
+```
