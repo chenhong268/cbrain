@@ -1,6 +1,24 @@
 # Changelog
 
-> Current: `v1.8.7` — 搜索 trace 透传、空 body L1 残留清理、dream 竞态消除、QueryRouter 意图路由。
+> Current: `v1.8.8` — 运行时产物迁出 vault、备份恢复链路加固、Obsidian 索引风险消除。
+
+## [v1.8.8] — 2026-05-28
+
+### 稳定性
+- **运行时产物迁出 vault（#77）**：日志、health、indexes、dream 报告、自动备份统一迁移到 `<profileDir>/runtime/`，不再写入 Obsidian 内容 vault
+- **migrate-runtime**：新增安全迁移旧 `vault/outputs/` 的 CLI，目标已有文件时迁入 `legacy-outputs-<timestamp>`，避免覆盖当前 runtime 状态
+- **Watcher/Obsidian 风险收口**：运行时写入与内容 vault 解耦，降低 Obsidian 索引风暴和挂起风险
+
+### 备份与恢复
+- **自动备份 DB-only**：`dream` 自动备份只保存 SQLite，一致性快照使用 `VACUUM INTO`，不再备份可重建的 LanceDB
+- **手动全量备份**：`cbrain backup` 支持 DB + vault full backup，并兼容自定义 `dbPath` / `vaultPath`
+- **restore 安全门控**：恢复前检测活跃 CBrain 服务、数据库锁、`.rollback` / `vault.pre-restore` 残留文件
+- **原子数据库安装**：恢复数据库先写入 `.restoring` 临时文件并验证，再原子 `rename` 到正式路径，避免半写入 DB
+- **WAL 一致回滚**：full restore 前用 `VACUUM INTO` 保存 `.rollback` 快照，vault 替换失败时可恢复包含 WAL 已提交数据的原数据库
+
+### 验证
+- `bun run check`：782 pass / 0 fail / 1882 expect() calls
+- 真实部署验证：单 HTTP 进程、单 watcher owner、`vault/outputs/` 已清理，Obsidian 重启后无新增 runtime 写入
 
 ## [v1.8.7] — 2026-05-26
 
