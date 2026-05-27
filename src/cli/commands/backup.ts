@@ -33,12 +33,10 @@ export function register(program: Command): void {
       const vaultPath = resolve(config.vaultPath);
       const dbBasename = basename(dbPath);
 
-      // Use staging directory with VACUUM INTO snapshot + symlinks
       const stagingDir = mkdtempSync(join(tmpdir(), "cbrain-backup-"));
       try {
         console.log("正在备份...");
 
-        // WAL-consistent DB snapshot via VACUUM INTO
         const snapshotPath = join(stagingDir, dbBasename);
         const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
         const db = new Database(dbPath, { readonly: true });
@@ -47,11 +45,9 @@ export function register(program: Command): void {
         );
         db.close();
 
-        // Symlink vault so zip follows it (zip without -y stores content)
         symlinkSync(vaultPath, join(stagingDir, "vault"));
 
         const zipArgs = ["-rq", zipPath, dbBasename, "vault/."];
-        // Include lance if it exists
         if (existsSync(config.lancePath)) {
           symlinkSync(resolve(config.lancePath), join(stagingDir, "lancedb"));
           zipArgs.push("lancedb/.");
@@ -124,7 +120,20 @@ export function register(program: Command): void {
         process.exit(1);
       }
 
-      // ── Step 3: Extract to temp directory ──────────────────────────
+      // ── Step 3: Pre-check residual state from previous failed restore
+      const rollbackPath = `${dbPath}.rollback`;
+      const vaultBackup = `${vaultPath}.pre-restore`;
+      const residualPaths: string[] = [];
+      if (existsSync(rollbackPath)) residualPaths.push(rollbackPath);
+      if (existsSync(vaultBackup)) residualPaths.push(vaultBackup);
+      if (residualPaths.length > 0) {
+        console.error("❌ 发现上一轮恢复的残留文件，可能包含需要保留的数据：");
+        for (const p of residualPaths) console.error(`  ${p}`);
+        console.error("请检查这些文件，确认无需保留后手动删除，再重新执行恢复。");
+        process.exit(1);
+      }
+
+      // ── Step 4: Extract to temp directory ──────────────────────────
       const tmpDir = mkdtempSync(join(tmpdir(), "cbrain-restore-"));
       try {
         console.log("正在恢复...");
@@ -132,7 +141,7 @@ export function register(program: Command): void {
           encoding: "utf-8",
         });
 
-        // ── Step 4: Locate and validate database file ────────────────
+        // ── Step 5: Locate and validate database file ────────────────
         const extractedDbPath = findFile(tmpDir, dbBasename);
         if (!extractedDbPath) {
           console.error(`❌ 备份中未找到 ${dbBasename}。可恢复文件：`);
@@ -145,38 +154,22 @@ export function register(program: Command): void {
           process.exit(1);
         }
 
-        // ── Step 5: Pre-check vault.pre-restore path ─────────────────
-        const extractedVault = findDirectory(tmpDir, "vault");
-        const vaultBackup = `${vaultPath}.pre-restore`;
-        if (extractedVault && existsSync(vaultPath) && existsSync(vaultBackup)) {
-          // Stale .pre-restore from a previous failed restore — try cleanup
-          try {
-            rmSync(vaultBackup, { recursive: true });
-          } catch {
-            console.error(
-              `❌ 无法清除残留的 ${vaultBackup}，请手动删除后重试。`,
-            );
-            process.exit(1);
-          }
-        }
-
         // ── Step 6: Atomic DB+vault restore ──────────────────────────
+        const extractedVault = findDirectory(tmpDir, "vault");
         const hasVault = extractedVault !== null;
-        const rollbackPath = `${dbPath}.rollback`;
 
         if (!installDatabase(extractedDbPath, dbPath, hasVault)) {
           console.error("❌ 数据库安装失败，原数据库未受影响。");
           process.exit(1);
         }
 
-        // Restore vault (DB rollback kept until vault succeeds)
+        // Restore vault (DB rollback snapshot kept until vault succeeds)
         if (hasVault) {
           let vaultRestored = false;
           if (existsSync(vaultPath)) {
             try {
               renameSync(vaultPath, vaultBackup);
             } catch {
-              // DB already swapped — rollback
               rollbackDatabase(dbPath, rollbackPath);
               console.error("❌ 无法备份当前 vault，已回滚数据库。");
               process.exit(1);
@@ -206,7 +199,6 @@ export function register(program: Command): void {
               process.exit(1);
             }
           } else {
-            // No existing vault — just move
             try {
               mkdirSync(dirname(vaultPath), { recursive: true });
               renameSync(extractedVault, vaultPath);
@@ -219,22 +211,15 @@ export function register(program: Command): void {
           }
 
           if (vaultRestored) {
-            // Both succeeded — clean up rollback
-            try {
-              unlinkSync(rollbackPath);
-            } catch {
-              /* keep rollback as safety net */
-            }
+            // Both DB and vault succeeded — final cleanup
+            try { unlinkSync(rollbackPath); } catch {}
+            cleanWalShm(dbPath);
             console.log(`✅ 数据库已恢复到 ${dbPath}`);
             console.log(`✅ Vault 已恢复到 ${vaultPath}`);
           }
         } else {
-          // No vault in backup — clean up rollback immediately
-          try {
-            unlinkSync(rollbackPath);
-          } catch {
-            /* keep rollback as safety net */
-          }
+          // DB-only restore
+          cleanWalShm(dbPath);
           console.log(`✅ 数据库已恢复到 ${dbPath}`);
         }
 
@@ -376,75 +361,69 @@ function installDatabase(
   const targetDir = dirname(targetPath);
   if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
 
-  const tmpTarget = `${targetPath}.restoring`;
   const rollbackPath = `${targetPath}.rollback`;
 
   try {
-    copyFileSync(sourcePath, tmpTarget);
-
-    if (!validateDatabase(tmpTarget)) {
-      try {
-        unlinkSync(tmpTarget);
-      } catch {
-        /* cleanup */
-      }
-      return false;
-    }
-
-    if (existsSync(targetPath)) {
+    if (keepRollback && existsSync(targetPath)) {
+      // Full restore path: VACUUM INTO captures all WAL-committed data
+      const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+      const db = new Database(targetPath);
+      db.exec(`VACUUM INTO '${rollbackPath.replace(/'/g, "''")}'`);
+      db.close();
+      copyFileSync(sourcePath, targetPath);
+    } else if (existsSync(targetPath)) {
       renameSync(targetPath, rollbackPath);
+      copyFileSync(sourcePath, targetPath);
+    } else {
+      copyFileSync(sourcePath, targetPath);
     }
 
-    try {
-      renameSync(tmpTarget, targetPath);
-    } catch {
-      if (existsSync(rollbackPath)) {
-        renameSync(rollbackPath, targetPath);
-      }
+    // WAL/SHM are stale (belong to previous DB) — clean before validation
+    cleanWalShm(targetPath);
+
+    if (!validateDatabase(targetPath)) {
+      restoreRollback(targetPath, rollbackPath, keepRollback);
       return false;
     }
 
-    // Clean up WAL/SHM
-    for (const ext of ["-wal", "-shm"]) {
-      try {
-        unlinkSync(targetPath + ext);
-      } catch {
-        /* not present */
-      }
-    }
-
-    // Only delete rollback if caller says it's safe
     if (!keepRollback) {
-      try {
-        unlinkSync(rollbackPath);
-      } catch {
-        /* keep rollback as safety net */
-      }
+      try { unlinkSync(rollbackPath); } catch {}
     }
 
     return true;
   } catch {
-    try {
-      unlinkSync(tmpTarget);
-    } catch {
-      /* nothing */
-    }
+    restoreRollback(targetPath, rollbackPath, keepRollback);
     return false;
   }
 }
 
-function rollbackDatabase(targetPath: string, rollbackPath: string): void {
+function restoreRollback(
+  targetPath: string,
+  rollbackPath: string,
+  isVacuum: boolean,
+): void {
+  if (!existsSync(rollbackPath)) return;
   try {
-    unlinkSync(targetPath);
-  } catch {
-    /* nothing */
-  }
-  if (existsSync(rollbackPath)) {
-    try {
+    if (isVacuum) {
+      copyFileSync(rollbackPath, targetPath);
+    } else {
+      try { unlinkSync(targetPath); } catch {}
       renameSync(rollbackPath, targetPath);
-    } catch {
-      /* best effort */
     }
+    try { unlinkSync(rollbackPath); } catch {}
+  } catch { /* best effort */ }
+}
+
+function rollbackDatabase(targetPath: string, rollbackPath: string): void {
+  if (!existsSync(rollbackPath)) return;
+  try { copyFileSync(rollbackPath, targetPath); } catch {}
+  try { unlinkSync(rollbackPath); } catch {}
+  cleanWalShm(targetPath);
+}
+
+function cleanWalShm(dbPath: string): void {
+  for (const ext of ["-wal", "-shm"]) {
+    try { unlinkSync(dbPath + ext); } catch {}
   }
 }
 
@@ -522,4 +501,4 @@ function listFiles(root: string): string[] {
 
 // ── Exported for testing ─────────────────────────────────────────────
 
-export { detectActiveServices, validateDatabase, installDatabase };
+export { detectActiveServices, validateDatabase, installDatabase, rollbackDatabase };

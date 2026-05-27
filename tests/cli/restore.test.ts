@@ -1,9 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";
+import { installDatabase, rollbackDatabase } from "../../src/cli/commands/backup.js";
 
 const BIN = `bun run ${join(import.meta.dir, "..", "..", "src", "cli", "index.ts")}`;
 
@@ -24,9 +25,6 @@ describe("cbrain restore", () => {
   });
 
   afterEach(() => {
-    // Ensure permissions are restored before cleanup
-    try { chmodSync(join(brainDir, "vault.pre-restore"), 0o755); } catch { /* ok */ }
-    try { chmodSync(join(brainDir, "vault"), 0o755); } catch { /* ok */ }
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
@@ -348,29 +346,19 @@ describe("cbrain restore", () => {
     db2.close();
   });
 
-  // ── P0: vault restore failure preserves pre-restore DB state ────────
+  // ── P0: residual .pre-restore refuses restore and preserves files ────
 
-  test("vault switch failure rolls back database to pre-restore state", async () => {
+  test("residual vault.pre-restore refuses restore and preserves files", async () => {
     const db = new CBrainDB(dbPath);
     insertPage(db, "test/pre-restore", "Pre Restore Data");
-
-    // Create vault content that will be in the backup
     writeFileSync(join(vaultPath, "original.md"), "# Original");
-
-    // Build a full backup zip with vault — db must be open for VACUUM INTO
     const zipPath = createFullBackupZip(db);
     db.close();
 
-    // Add data after backup was created — this should survive the failed restore
-    const db2 = new CBrainDB(dbPath);
-    insertPage(db2, "test/post-backup", "Post Backup Data");
-    db2.close();
-
-    // Block vault rename by creating an undeletable directory at vault.pre-restore
-    const preRestoreBlocker = join(`${vaultPath}.pre-restore`);
-    mkdirSync(preRestoreBlocker, { recursive: true });
-    writeFileSync(join(preRestoreBlocker, "blocker.txt"), "can't touch this");
-    chmodSync(preRestoreBlocker, 0o555);
+    // Simulate residual from a previous failed restore
+    const preRestoreDir = `${vaultPath}.pre-restore`;
+    mkdirSync(preRestoreDir, { recursive: true });
+    writeFileSync(join(preRestoreDir, "precious.md"), "# Precious Old Data");
 
     let restoreError: string | null = null;
     try {
@@ -383,23 +371,163 @@ describe("cbrain restore", () => {
       restoreError = e.stderr?.toString() ?? e.message;
     }
 
-    // Clean up blocker
-    chmodSync(preRestoreBlocker, 0o755);
-
-    // Restore should have failed
+    // Should refuse — residual files detected
     expect(restoreError).not.toBeNull();
+    expect(restoreError!).toContain("残留");
 
-    // DB must still have both rows — rollback must have restored original DB
-    const db3 = new CBrainDB(dbPath);
-    const preRow = db3.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/pre-restore") as any;
-    expect(preRow.title).toBe("Pre Restore Data");
-    const postRow = db3.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("test/post-backup") as any;
-    expect(postRow).not.toBeNull();
-    expect(postRow.title).toBe("Post Backup Data");
-    db3.close();
+    // Precious file must still exist (not auto-deleted)
+    expect(existsSync(join(preRestoreDir, "precious.md"))).toBe(true);
 
-    // Original vault should still exist
-    expect(existsSync(join(vaultPath, "original.md"))).toBe(true);
+    // DB must be untouched
+    const db2 = new CBrainDB(dbPath);
+    const row = db2.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/pre-restore") as any;
+    expect(row.title).toBe("Pre Restore Data");
+    db2.close();
+  });
+
+  // ── P0: residual .rollback also refuses restore ──────────────────────
+
+  test("residual .rollback refuses restore and preserves files", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/rollback-residual", "Rollback Residual");
+    const zipPath = createBackupZip(db);
+    db.close();
+
+    // Simulate residual rollback snapshot
+    const rollbackPath = `${dbPath}.rollback`;
+    writeFileSync(rollbackPath, "fake rollback data");
+
+    let restoreError: string | null = null;
+    try {
+      execSync(`${BIN} restore ${zipPath} --force`, {
+        cwd: brainDir,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (e: any) {
+      restoreError = e.stderr?.toString() ?? e.message;
+    }
+
+    expect(restoreError).not.toBeNull();
+    expect(restoreError!).toContain("残留");
+    expect(existsSync(rollbackPath)).toBe(true);
+  });
+
+  // ── P1: installDatabase + rollbackDatabase preserves WAL-committed data
+
+  test("installDatabase + rollbackDatabase preserves WAL-committed data", async () => {
+    const unitDir = mkdtempSync(join(tmpdir(), "cbrain-p1-unit-"));
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+
+    // 1. Create target DB, insert row A (in main file)
+    const targetDbPath = join(unitDir, "target.sqlite");
+    const rawDb = new Database(targetDbPath);
+    rawDb.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    rawDb.prepare("INSERT INTO pages VALUES (?, ?)").run("test/row-a", "Row A");
+    rawDb.close();
+
+    // 2. Reopen in WAL mode, insert row B (goes to WAL)
+    const rawDb2 = new Database(targetDbPath);
+    rawDb2.exec("PRAGMA journal_mode = WAL");
+    rawDb2.prepare("INSERT INTO pages VALUES (?, ?)").run("test/row-b", "Row B In WAL");
+    rawDb2.close();
+
+    // 3. Create replacement DB (non-WAL) with row C
+    const replacementPath = join(unitDir, "replacement.sqlite");
+    const rawRep = new Database(replacementPath);
+    rawRep.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    rawRep.prepare("INSERT INTO pages VALUES (?, ?)").run("test/row-c", "Row C Replacement");
+    rawRep.close();
+
+    // 4. installDatabase with keepRollback=true → VACUUM INTO rollback
+    const rollbackPath = `${targetDbPath}.rollback`;
+    const ok = installDatabase(replacementPath, targetDbPath, true);
+    expect(ok).toBe(true);
+    expect(existsSync(rollbackPath)).toBe(true);
+
+    // 5. Target now has only row C
+    const rawDb3 = new Database(targetDbPath, { readonly: true });
+    const rowC = rawDb3.prepare("SELECT title FROM pages WHERE slug = ?").get("test/row-c") as any;
+    expect(rowC.title).toBe("Row C Replacement");
+    const rowA = rawDb3.prepare("SELECT * FROM pages WHERE slug = ?").get("test/row-a");
+    expect(rowA).toBeNull();
+    rawDb3.close();
+
+    // 6. Rollback (simulates vault failure after DB install)
+    rollbackDatabase(targetDbPath, rollbackPath);
+    expect(existsSync(rollbackPath)).toBe(false);
+
+    // 7. Target must have rows A AND B (including WAL-committed B), not C
+    const rawDb4 = new Database(targetDbPath, { readonly: true });
+    const restoredA = rawDb4.prepare("SELECT title FROM pages WHERE slug = ?").get("test/row-a") as any;
+    expect(restoredA.title).toBe("Row A");
+    const restoredB = rawDb4.prepare("SELECT title FROM pages WHERE slug = ?").get("test/row-b") as any;
+    expect(restoredB.title).toBe("Row B In WAL");
+    const goneC = rawDb4.prepare("SELECT * FROM pages WHERE slug = ?").get("test/row-c");
+    expect(goneC).toBeNull();
+    rawDb4.close();
+
+    rmSync(unitDir, { recursive: true });
+  });
+
+  // ── P1: DB-only installDatabase (keepRollback=false) still works ─────
+
+  test("installDatabase without keepRollback uses rename strategy", async () => {
+    const unitDir = mkdtempSync(join(tmpdir(), "cbrain-p1-rename-"));
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+
+    const targetDbPath = join(unitDir, "target.sqlite");
+    const rawDb = new Database(targetDbPath);
+    rawDb.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    rawDb.prepare("INSERT INTO pages VALUES (?, ?)").run("test/original", "Original Data");
+    rawDb.close();
+
+    const replacementPath = join(unitDir, "replacement.sqlite");
+    const rawRep = new Database(replacementPath);
+    rawRep.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    rawRep.prepare("INSERT INTO pages VALUES (?, ?)").run("test/new-data", "New Data");
+    rawRep.close();
+
+    const ok = installDatabase(replacementPath, targetDbPath, false);
+    expect(ok).toBe(true);
+
+    const rawDb2 = new Database(targetDbPath, { readonly: true });
+    const newRow = rawDb2.prepare("SELECT title FROM pages WHERE slug = ?").get("test/new-data") as any;
+    expect(newRow.title).toBe("New Data");
+    rawDb2.close();
+
+    // Rollback file should be cleaned up
+    expect(existsSync(`${targetDbPath}.rollback`)).toBe(false);
+
+    rmSync(unitDir, { recursive: true });
+  });
+
+  // ── P1: installDatabase rolls back on corrupt replacement ────────────
+
+  test("installDatabase rolls back when replacement is corrupt", async () => {
+    const unitDir = mkdtempSync(join(tmpdir(), "cbrain-p1-corrupt-"));
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+
+    const targetDbPath = join(unitDir, "target.sqlite");
+    const rawDb = new Database(targetDbPath);
+    rawDb.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    rawDb.prepare("INSERT INTO pages VALUES (?, ?)").run("test/precious", "Precious");
+    rawDb.close();
+
+    // Create a corrupt "replacement"
+    const corruptPath = join(unitDir, "corrupt.sqlite");
+    writeFileSync(corruptPath, "not a database at all");
+
+    const ok = installDatabase(corruptPath, targetDbPath, false);
+    expect(ok).toBe(false);
+
+    // Original data must survive
+    const rawDb2 = new Database(targetDbPath, { readonly: true });
+    const row = rawDb2.prepare("SELECT title FROM pages WHERE slug = ?").get("test/precious") as any;
+    expect(row.title).toBe("Precious");
+    rawDb2.close();
+
+    rmSync(unitDir, { recursive: true });
   });
 
   // ── P1: separated paths backup → restore E2E ───────────────────────
