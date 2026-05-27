@@ -70,7 +70,7 @@
 
 ### health
 
-10 维度健康检查，报告写入 `outputs/health/`。
+10 维度健康检查，报告写入 `<profileDir>/runtime/health/`。
 
 ```json
 {}
@@ -112,7 +112,7 @@
 
 ### generate_indexes
 
-生成首页、实体索引、概念索引、来源索引到 outputs/。
+生成首页、实体索引、概念索引、来源索引到 `<profileDir>/runtime/indexes/`。
 
 ```json
 {}

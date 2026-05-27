@@ -38,6 +38,7 @@ export interface DreamReport {
 const LOCK_KEY = "dream.lock";
 const LOCK_TTL_MS = 30 * 60 * 1000; // 30 min — if dream crashes, lock auto-expires
 const MAX_BACKUPS = 7;
+const MAX_BACKUP_BYTES = 500 * 1024 * 1024; // 500MB total budget
 const execFileAsync = promisify(execFile);
 
 function acquireLock(db: CBrainDB): boolean {
@@ -93,7 +94,7 @@ export async function runDream(
   const started = Date.now();
   logger.info("dream", "夜间维护开始");
 
-  // Stage 0: Pre-backup
+  // Stage 0: Pre-backup (SQLite only — LanceDB is rebuildable from vault)
   logger.info("dream", "Stage 0/6: backup");
   let backupPath: string | null = null;
   let backupSize = "0";
@@ -104,18 +105,40 @@ export async function runDream(
     backupPath = join(backupDir, `auto-${ts}.zip`);
     const resolvedDbPath = dbPath ?? join(vaultPath, "..", "brain.sqlite");
     const dbDir = join(resolvedDbPath, "..");
-    const lancePath = join(dbDir, "lancedb");
-    const zipArgs = ["-rq", backupPath, basename(resolvedDbPath)];
-    if (existsSync(lancePath)) zipArgs.push("lancedb/.");
-    await execFileAsync("zip", zipArgs, { cwd: dbDir, encoding: "utf-8" });
+    await execFileAsync("zip", ["-rq", backupPath, basename(resolvedDbPath)], { cwd: dbDir, encoding: "utf-8" });
     const info = await stat(backupPath);
     backupSize = (info.size / 1024 / 1024).toFixed(1);
-    logger.info("dream", `备份完成：${backupPath} (${backupSize}MB)`);
+    logger.info("dream", `备份完成：${backupPath} (${backupSize}MB, SQLite only)`);
 
-    // Keep last 7 backups
+    // Retention: count limit + byte budget, oldest first
     const backups = readdirSync(backupDir).filter(f => f.startsWith("auto-") && f.endsWith(".zip")).sort();
+    const removed: string[] = [];
+
+    // Enforce count limit
     while (backups.length > MAX_BACKUPS) {
-      unlinkSync(join(backupDir, backups.shift()!));
+      const victim = backups.shift()!;
+      unlinkSync(join(backupDir, victim));
+      removed.push(victim);
+    }
+
+    // Enforce byte budget
+    let totalBytes = 0;
+    for (const f of backups) {
+      try { totalBytes += (await stat(join(backupDir, f))).size; } catch { /* skip */ }
+    }
+    while (totalBytes > MAX_BACKUP_BYTES && backups.length > 1) {
+      const victim = backups.shift()!;
+      const victimPath = join(backupDir, victim);
+      try {
+        const victimSize = (await stat(victimPath)).size;
+        unlinkSync(victimPath);
+        totalBytes -= victimSize;
+        removed.push(victim);
+      } catch { /* skip */ }
+    }
+
+    if (removed.length > 0) {
+      logger.info("dream", `清理 ${removed.length} 个旧备份: ${removed.join(", ")}`);
     }
   } catch (e) {
     logger.warn("dream", `备份失败，继续执行：${(e as Error).message}`);

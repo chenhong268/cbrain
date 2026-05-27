@@ -1,10 +1,14 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { SyncManager } from "../../src/core/sync.js";
+
+function runtimeDir(dbPath: string) {
+  return join(dirname(dbPath), "runtime");
+}
 
 function createMockEmbedding(): EmbeddingProvider {
   return {
@@ -63,6 +67,7 @@ describe("MCP watcher_quarantine tool", () => {
       embedding: createMockEmbedding(),
       lance: createMockLanceDB() as any,
       vaultPath,
+      runtimePath: runtimeDir(dbPath),
     };
     server = createServer(deps);
   });
@@ -192,6 +197,7 @@ describe("MCP watcher_quarantine with live FileWatcher", () => {
       embedding: createMockEmbedding(),
       lance: createMockLanceDB() as any,
       vaultPath,
+      runtimePath: runtimeDir(dbPath),
       watcher,
     };
     server = createServer(deps);
@@ -221,6 +227,7 @@ describe("MCP watcher_quarantine with live FileWatcher", () => {
       embedding: createMockEmbedding(),
       lance: createMockLanceDB() as any,
       vaultPath,
+      runtimePath: runtimeDir(dbPath),
       watcher,
     };
     server = createServer(deps);
@@ -243,6 +250,7 @@ describe("MCP watcher_quarantine with live FileWatcher", () => {
       embedding: createMockEmbedding(),
       lance: createMockLanceDB() as any,
       vaultPath,
+      runtimePath: runtimeDir(dbPath),
       watcher,
     };
     server = createServer(deps);
@@ -261,6 +269,7 @@ describe("MCP watcher_quarantine with live FileWatcher", () => {
       embedding: createMockEmbedding(),
       lance: createMockLanceDB() as any,
       vaultPath,
+      runtimePath: runtimeDir(dbPath),
       watcher,
     };
     server = createServer(deps);

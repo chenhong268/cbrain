@@ -10,18 +10,17 @@ vault/
 │   ├── events/         # 会议、行程、里程碑
 │   ├── records/        # 读书笔记、材料、文章摘要
 │   └── sources/        # 原始素材（文章、视频转录等）
-├── brain/           # CBrain 编译产物（AI 维护）
-│   ├── entities/       # 人物、公司、产品、项目
-│   └── concepts/       # 方法论、术语、框架、原则
-└── outputs/          # 运行时输出
-    └── (预留)
+└── brain/           # CBrain 编译产物（AI 维护）
+    ├── entities/       # 人物、公司、产品、项目
+    └── concepts/       # 方法论、术语、框架、原则
 ```
 
 ### 核心规则
 
 1. **`raw/`** — 人写的，CBrain 只读不写
 2. **`brain/`** — CBrain 生成的，人可以编辑补充
-3. **`outputs/`** — 运行时产物（查询结果、报告），可随时清除重建
+
+> **运行时产物**（日志、健康报告、索引、dream 报告、备份）存放在 `<profileDir>/runtime/`，与内容 vault 完全分离。详见下方「运行时目录」。
 
 ## 页面类型
 
@@ -153,7 +152,34 @@ NER 从 `raw/` 内容中自动提取实体时：
 ## 版本控制
 
 - `brain/` — 建议纳入 git（CBrain 产物，可追溯）
-- `outputs/` — 不纳入（运行时临时产物）
 - `raw/` — 由用户自行决定
 
 brain.sqlite 和 lancedb/ 是索引层，可随时从 vault 文件重建。
+
+## 运行时目录
+
+运行时产物存放在 `<profileDir>/runtime/`（profileDir = brain.sqlite 所在目录），与内容 vault 完全分离：
+
+```
+runtime/
+├── backups/          # 自动备份（SQLite only，最多 7 份，500MB 总预算）
+├── dream/            # dream 日报
+├── health/           # 健康检查报告
+├── indexes/          # 生成的索引文件
+└── logs/             # 运行日志
+```
+
+核心设计原则：
+
+1. **vault 只放内容** — `raw/` 和 `brain/` 是用户可见的知识内容，运行产物不应污染
+2. **LanceDB 不备份** — 向量索引可从 vault 完全重建，备份只含 SQLite
+3. **保留双限制** — 最多 7 份 + 总大小不超过 500MB
+4. **可随时清除** — 删除整个 `runtime/` 不影响知识库功能
+
+### 路径解析
+
+`resolveRuntimePath(config)` 决定运行时目录位置：
+- 有 `config.runtimePath` → 使用显式配置
+- 默认 → `dirname(resolve(config.dbPath)) + "/runtime"`
+
+旧版 `vault/outputs/` 不再写入。已有数据可通过 `cbrain migrate-runtime` 迁移到新位置。

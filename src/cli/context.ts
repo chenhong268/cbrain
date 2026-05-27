@@ -35,12 +35,7 @@ export interface CBrainConfig {
 
 export function resolveRuntimePath(config: CBrainConfig): string {
   if (config.runtimePath) return resolve(config.runtimePath);
-  const profileDir = dirname(resolve(config.dbPath));
-  const newRuntime = join(profileDir, "runtime");
-  const legacyOutputs = join(config.vaultPath, "outputs");
-  if (existsSync(newRuntime)) return newRuntime;
-  if (existsSync(legacyOutputs)) return legacyOutputs;
-  return newRuntime;
+  return join(dirname(resolve(config.dbPath)), "runtime");
 }
 
 export function findConfig(startDir?: string): CBrainConfig | null {
