@@ -1,6 +1,5 @@
 import type { Command } from "commander";
-import { join } from "node:path";
-import { loadConfig, createDeps } from "../context.js";
+import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
 import { createServer } from "../../mcp/server.js";
 import { buildContext } from "../../mcp/context.js";
 import { createHttpServer } from "../../http/server.js";
@@ -54,7 +53,7 @@ async function initWatcher(config: ReturnType<typeof loadConfig>, deps: ReturnTy
   const watcherSync = new SyncManager(deps.db, deps.embedding, deps.lance, { pages, nerEngine });
   const { FileWatcher } = await import("../../core/watcher.js");
   const { Logger } = await import("../../core/logger.js");
-  const logger = new Logger(join(config.vaultPath, "outputs"));
+  const logger = new Logger(resolveRuntimePath(config));
   const watcher = new FileWatcher(watcherSync, config.vaultPath, { logger, db: deps.db });
   watcher.start();
 

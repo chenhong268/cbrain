@@ -12,6 +12,7 @@ export interface CBrainConfig {
   vaultPath: string;
   dbPath: string;
   lancePath: string;
+  runtimePath?: string;
   embedding: {
     provider: string;
     apiKey?: string;
@@ -30,6 +31,11 @@ export interface CBrainConfig {
     llm_api_key?: string;
     llm_base_url?: string;
   };
+}
+
+export function resolveRuntimePath(config: CBrainConfig): string {
+  if (config.runtimePath) return resolve(config.runtimePath);
+  return join(dirname(resolve(config.dbPath)), "runtime");
 }
 
 export function findConfig(startDir?: string): CBrainConfig | null {
@@ -87,5 +93,5 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
 
   const profileDir = dirname(resolve(config.dbPath));
 
-  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir };
+  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config) };
 }

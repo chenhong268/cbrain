@@ -10,18 +10,17 @@ vault/
 │   ├── events/         # 会议、行程、里程碑
 │   ├── records/        # 读书笔记、材料、文章摘要
 │   └── sources/        # 原始素材（文章、视频转录等）
-├── brain/           # CBrain 编译产物（AI 维护）
-│   ├── entities/       # 人物、公司、产品、项目
-│   └── concepts/       # 方法论、术语、框架、原则
-└── outputs/          # 运行时输出
-    └── (预留)
+└── brain/           # CBrain 编译产物（AI 维护）
+    ├── entities/       # 人物、公司、产品、项目
+    └── concepts/       # 方法论、术语、框架、原则
 ```
 
 ### 核心规则
 
 1. **`raw/`** — 人写的，CBrain 只读不写
 2. **`brain/`** — CBrain 生成的，人可以编辑补充
-3. **`outputs/`** — 运行时产物（查询结果、报告），可随时清除重建
+
+> **运行时产物**（日志、健康报告、索引、dream 报告、备份）存放在 `<profileDir>/runtime/`，与内容 vault 完全分离。详见下方「运行时目录」。
 
 ## 页面类型
 
@@ -153,7 +152,107 @@ NER 从 `raw/` 内容中自动提取实体时：
 ## 版本控制
 
 - `brain/` — 建议纳入 git（CBrain 产物，可追溯）
-- `outputs/` — 不纳入（运行时临时产物）
 - `raw/` — 由用户自行决定
 
 brain.sqlite 和 lancedb/ 是索引层，可随时从 vault 文件重建。
+
+## 运行时目录
+
+运行时产物存放在 `<profileDir>/runtime/`（profileDir = brain.sqlite 所在目录），与内容 vault 完全分离：
+
+```
+runtime/
+├── backups/          # 自动备份（SQLite only，最多 7 份，500MB 总预算）
+├── dream/            # dream 日报
+├── health/           # 健康检查报告
+├── indexes/          # 生成的索引文件
+└── logs/             # 运行日志
+```
+
+核心设计原则：
+
+1. **vault 只放内容** — `raw/` 和 `brain/` 是用户可见的知识内容，运行产物不应污染
+2. **LanceDB 不备份** — 向量索引可从 vault 完全重建，备份只含 SQLite
+3. **WAL 一致性** — 使用 `VACUUM INTO` 生成一致性快照数据库，包含所有已提交的 WAL 数据（含其他连接的并发写入），不影响活跃连接。快照在 zip 内以正式 DB 文件名（如 `brain.sqlite`）存储，`cbrain restore` 可直接恢复
+4. **保留双限制** — 最多 7 份 + 总大小不超过 500MB；单份超预算时保留最新并输出告警
+5. **可随时清除** — 删除整个 `runtime/` 不影响知识库功能
+
+### 路径解析
+
+`resolveRuntimePath(config)` 决定运行时目录位置：
+- 有 `config.runtimePath` → 使用显式配置
+- 默认 → `dirname(resolve(config.dbPath)) + "/runtime"`
+
+旧版 `vault/outputs/` 不再写入。已有数据可通过 `cbrain migrate-runtime` 迁移到新位置。
+
+### 迁移策略
+
+`cbrain migrate-runtime` 将 `vault/outputs/` 的旧数据迁入 `<runtimePath>/`：
+
+- **目标为空** — 直接复制到 runtime 根目录
+- **目标已有文件** — 当前 runtime 文件保留不动，旧数据迁入 `runtime/legacy-outputs-<timestamp>/` 子目录，不覆盖当前运行状态
+- 迁移前建议停止运行中的服务（server/dream），避免并发写入问题
+
+### 备份
+
+#### 自动备份（DB-only）
+
+`cbrain dream` 每次运行自动创建 SQLite 备份到 `runtime/backups/`：
+
+- 使用 `VACUUM INTO` 生成一致性快照，包含所有 WAL 已提交数据
+- 只备份 SQLite，不含 vault 或 LanceDB（向量索引可从 vault 重建）
+- 保留上限：最多 7 份 + 总大小不超过 500MB
+
+#### 手动全量备份（DB + vault）
+
+```
+cbrain backup -o <输出目录>
+```
+
+- 备份包含 SQLite 一致性快照 + vault 全部内容 + LanceDB（如存在）
+- 输出 zip 文件，文件名含时间戳
+- vault 和 LanceDB 通过符号链接打包，避免复制大文件
+
+### 恢复
+
+`cbrain restore <backup.zip> --force` 从备份恢复：
+
+#### 恢复前检查（任一不通过则中止）
+
+1. **活跃服务检测** — 检查 `cbrain-http.pid`、`cbrain-stdio.pid`、`.watcher.lock`，有活跃进程则拒绝
+2. **数据库锁检测** — 尝试 `BEGIN IMMEDIATE`，被占用则拒绝
+3. **残留文件检测** — 发现 `.rollback` 或 `vault.pre-restore`（上一轮恢复残留）则拒绝，提示用户手动检查后再试
+
+#### 恢复流程
+
+1. 解压到临时目录
+2. 验证备份数据库有效性（检查 pages 表存在）
+3. **原子安装数据库** — 先复制到 `.restoring` 临时文件并验证，再 `rename` 原子切换到正式路径
+4. **DB-only 备份**：只恢复数据库，完成后清理 WAL/SHM
+5. **Full 备份**（含 vault）：
+   - VACUUM INTO 当前数据库到 `.rollback` 快照（包含所有 WAL 已提交数据）
+   - 安装备份数据库（同上原子方式）
+   - 原子替换 vault（rename 旧 vault → `.pre-restore`，rename 备份 vault → 正式路径）
+   - **vault 成功** → 删除 `.rollback` 和 `.pre-restore`，清理 WAL/SHM
+   - **vault 失败** → 从 `.rollback` 快照回滚数据库，恢复旧 vault，确保数据一致
+
+#### 安全保障
+
+- **进程崩溃安全**：数据库安装使用 staging temp + rename，崩溃不会产生半写入文件
+- **WAL 数据保留**：VACUUM INTO 快照包含所有 WAL 已提交数据，回滚不丢失
+- **数据不自动删除**：上一轮残留文件由用户决定是否删除
+
+#### 典型流程
+
+```
+# 自动备份恢复（DB-only）
+cbrain dream              # 自动创建备份
+# ... 数据库出了问题 ...
+cbrain restore runtime/backups/auto-2026-05-28-00-00.zip --force
+cbrain sync               # 重建 LanceDB 索引
+
+# 全量恢复（DB + vault）
+cbrain backup -o ~/backups
+# ... 需要回滚 ...
+cbrain restore ~/backups/cbrain-backup-2026-05-28-12-00.zip --force
+```

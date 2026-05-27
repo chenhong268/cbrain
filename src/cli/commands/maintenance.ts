@@ -1,12 +1,12 @@
 import type { Command } from "commander";
 import { existsSync, unlinkSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
 import { ZhipuEmbeddingProvider } from "../../embedding/zhipu.js";
 import { ZhipuLLMProvider } from "../../llm/zhipu.js";
 import { DeepSeekLLMProvider } from "../../llm/deepseek.js";
-import { loadConfig, createDeps } from "../context.js";
+import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
 
 export function register(program: Command) {
   program
@@ -73,7 +73,7 @@ export function register(program: Command) {
     .action(async (opts) => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
-      const outputsDir = join(config.vaultPath, "outputs");
+      const outputsDir = resolveRuntimePath(config);
       const { HealthChecker } = await import("../../core/health.js");
       const { Logger } = await import("../../core/logger.js");
       const logger = new Logger(outputsDir);
@@ -258,7 +258,7 @@ export function register(program: Command) {
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
       const { NerEngine } = await import("../../core/ner.js");
-      const outputsDir = join(config.vaultPath, "outputs");
+      const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
@@ -298,7 +298,7 @@ export function register(program: Command) {
       const { InsightManager } = await import("../../core/insight.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
-      const outputsDir = join(config.vaultPath, "outputs");
+      const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
 
@@ -357,7 +357,7 @@ export function register(program: Command) {
       const { InsightManager } = await import("../../core/insight.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
-      const outputsDir = join(config.vaultPath, "outputs");
+      const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
 
@@ -403,7 +403,7 @@ export function register(program: Command) {
     .action(() => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
-      const outputsDir = join(config.vaultPath, "outputs");
+      const outputsDir = resolveRuntimePath(config);
       const { IndexGenerator } = require("../../core/indexes.js");
       const gen = new IndexGenerator(db, outputsDir);
       const files = gen.generateAll();
@@ -421,7 +421,7 @@ export function register(program: Command) {
       await deps.lance.connect(config.lancePath);
       const { PageManager } = await import("../../core/page.js");
       const { Logger } = await import("../../core/logger.js");
-      const outputsDir = join(config.vaultPath, "outputs");
+      const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const { ReflectManager } = await import("../../core/reflect.js");
@@ -477,7 +477,7 @@ export function register(program: Command) {
       if (opts.list) {
         const { PageManager: PM } = await import("../../core/page.js");
         const { Logger: L } = await import("../../core/logger.js");
-        const pagesList = new PM(deps.db, config.vaultPath, new L(join(config.vaultPath, "outputs")));
+        const pagesList = new PM(deps.db, config.vaultPath, new L(resolveRuntimePath(config)));
         const allPages = deps.db.listPages({ limit: 10000 });
         const withDossier: Array<{ slug: string; title: string; ts: string }> = [];
         for (const p of allPages) {
@@ -509,7 +509,7 @@ export function register(program: Command) {
       const { GraphManager } = await import("../../core/graph.js");
       const { Logger } = await import("../../core/logger.js");
       const { ContentPipeline } = await import("../../core/pipeline.js");
-      const outputsDir = join(config.vaultPath, "outputs");
+      const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
@@ -1554,6 +1554,112 @@ Return JSON only, no markdown:
 
       console.log(`\nDone: ${deleted} deleted, ${notFound} not found.`);
       db.close();
+    });
+
+  // ─── migrate-runtime: move vault/outputs to profileDir/runtime ─
+  program
+    .command("migrate-runtime")
+    .description("Migrate vault/outputs to runtime directory (uses resolveRuntimePath)")
+    .option("--dry-run", "Show migration plan without moving files (default)")
+    .option("--execute", "Actually move files")
+    .action((opts) => {
+      const config = loadConfig();
+      const { cpSync, rmSync, existsSync: exists, readdirSync, statSync, mkdirSync } = require("node:fs");
+      const { join: pathJoin } = require("node:path");
+
+      const sourceDir = pathJoin(config.vaultPath, "outputs");
+      const targetDir = resolveRuntimePath(config);
+
+      if (!exists(sourceDir)) {
+        console.log("  vault/outputs 不存在，无需迁移。");
+        return;
+      }
+
+      const countFiles = (dir: string): number => {
+        let count = 0;
+        try {
+          for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            if (entry.isDirectory()) count += countFiles(pathJoin(dir, entry.name));
+            else count++;
+          }
+        } catch { /* empty */ }
+        return count;
+      };
+
+      const sourceSize = ((): number => {
+        let total = 0;
+        try {
+          const walk = (dir: string) => {
+            for (const entry of readdirSync(dir, { withFileTypes: true })) {
+              if (entry.isDirectory()) walk(pathJoin(dir, entry.name));
+              else total += statSync(pathJoin(dir, entry.name)).size;
+            }
+          };
+          walk(sourceDir);
+        } catch { /* empty */ }
+        return total;
+      })();
+
+      const fileCount = countFiles(sourceDir);
+
+      console.log(`\n  Runtime 迁移计划:\n`);
+      console.log(`  源目录:   ${sourceDir}`);
+      console.log(`  目标目录: ${targetDir}`);
+      console.log(`  文件数:   ${fileCount}`);
+      console.log(`  总大小:   ${(sourceSize / 1024 / 1024).toFixed(1)}MB`);
+
+      const targetFiles = exists(targetDir) ? countFiles(targetDir) : 0;
+      if (targetFiles > 0) {
+        console.log(`\n  ⚠  目标目录已有 ${targetFiles} 个文件。`);
+        console.log(`  建议在迁移前停止运行中的服务（server/dream），以避免并发写入问题。`);
+      }
+
+      // Legacy data merges into a timestamped subdirectory — never replaces the authoritative runtime
+      const legacyStamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+      const legacyDir = pathJoin(targetDir, `legacy-outputs-${legacyStamp}`);
+
+      if (targetFiles > 0) {
+        if (opts.execute) {
+          console.log(`  Legacy 数据将迁移到 ${legacyDir}（不覆盖当前 runtime 文件）`);
+        } else {
+          console.log(`  Legacy 数据将迁移到 ${legacyDir}（不覆盖当前 runtime 文件）`);
+        }
+      }
+
+      if (!opts.execute) {
+        console.log(`\n  (DRY RUN — 使用 --execute 执行迁移)`);
+        return;
+      }
+
+      if (targetFiles > 0) {
+        try {
+          mkdirSync(legacyDir, { recursive: true });
+          // Copy legacy source contents into the legacy subdirectory
+          const entries = readdirSync(sourceDir, { withFileTypes: true });
+          for (const entry of entries) {
+            const src = pathJoin(sourceDir, entry.name);
+            const dest = pathJoin(legacyDir, entry.name);
+            cpSync(src, dest, { recursive: true });
+          }
+        } catch (err) {
+          console.error(`\n  ✗ 复制 legacy 数据失败: ${err instanceof Error ? err.message : err}`);
+          process.exit(1);
+        }
+      } else {
+        // Target is empty — copy directly into runtime root
+        try {
+          mkdirSync(targetDir, { recursive: true });
+          cpSync(sourceDir, targetDir, { recursive: true });
+        } catch (err) {
+          console.error(`\n  ✗ 复制失败: ${err instanceof Error ? err.message : err}`);
+          console.error(`  目标目录可能不完整，请手动检查: ${targetDir}`);
+          process.exit(1);
+        }
+      }
+
+      rmSync(sourceDir, { recursive: true });
+      const destination = targetFiles > 0 ? legacyDir : targetDir;
+      console.log(`\n  ✓ 已迁移到 ${destination}（源目录已删除）`);
     });
 }
 

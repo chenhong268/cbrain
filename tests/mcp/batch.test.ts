@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
 
@@ -67,6 +67,7 @@ describe("Batch Tools", () => {
       embedding: createMockEmbedding() as any,
       lance: createMockLanceDB() as any,
       vaultPath,
+      runtimePath: join(dirname(dbPath), "runtime"),
     };
   });
 

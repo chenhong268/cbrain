@@ -38,6 +38,7 @@ export interface DreamReport {
 const LOCK_KEY = "dream.lock";
 const LOCK_TTL_MS = 30 * 60 * 1000; // 30 min — if dream crashes, lock auto-expires
 const MAX_BACKUPS = 7;
+const MAX_BACKUP_BYTES = 500 * 1024 * 1024; // 500MB total budget
 const execFileAsync = promisify(execFile);
 
 function acquireLock(db: CBrainDB): boolean {
@@ -93,29 +94,82 @@ export async function runDream(
   const started = Date.now();
   logger.info("dream", "夜间维护开始");
 
-  // Stage 0: Pre-backup
+  // Stage 0: Pre-backup (SQLite only — LanceDB is rebuildable from vault)
   logger.info("dream", "Stage 0/6: backup");
   let backupPath: string | null = null;
   let backupSize = "0";
   try {
+    // Use VACUUM INTO to create a WAL-consistent snapshot without disrupting live connections
     const backupDir = join(outputsDir, "backups");
     if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
-    const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
-    backupPath = join(backupDir, `auto-${ts}.zip`);
+
+    // Clean up stale staging files from previous interrupted backups:
+    // 1. .snapshot-* files (crash before rename)
+    // 2. DB-name files left in backupDir (crash after rename but before zip/delete)
     const resolvedDbPath = dbPath ?? join(vaultPath, "..", "brain.sqlite");
-    const dbDir = join(resolvedDbPath, "..");
-    const lancePath = join(dbDir, "lancedb");
-    const zipArgs = ["-rq", backupPath, basename(resolvedDbPath)];
-    if (existsSync(lancePath)) zipArgs.push("lancedb/.");
-    await execFileAsync("zip", zipArgs, { cwd: dbDir, encoding: "utf-8" });
+    const dbBasename = basename(resolvedDbPath);
+    for (const f of readdirSync(backupDir)) {
+      const isSnapshot = f.startsWith(".snapshot-") && f.endsWith(".sqlite");
+      const isOrphanedRename = f === dbBasename;
+      if (isSnapshot || isOrphanedRename) {
+        try { unlinkSync(join(backupDir, f)); } catch { /* in use or gone */ }
+      }
+    }
+
+    const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+    const snapshotPath = join(backupDir, `.snapshot-${ts}.sqlite`);
+
+    // VACUUM INTO produces a self-contained, consistent copy including all committed WAL data
+    db.rawDb.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
+
+    // Rename snapshot to match the actual DB filename so restore can install it directly
+    const renamedPath = join(backupDir, dbBasename);
+
+    backupPath = join(backupDir, `auto-${ts}.zip`);
+    try {
+      // Rename in-place so the zip entry matches the real DB filename
+      const { renameSync } = require("node:fs") as typeof import("node:fs");
+      renameSync(snapshotPath, renamedPath);
+      await execFileAsync("zip", ["-rq", backupPath, dbBasename], { cwd: backupDir, encoding: "utf-8" });
+    } finally {
+      try { unlinkSync(renamedPath); } catch { /* already gone */ }
+    }
     const info = await stat(backupPath);
     backupSize = (info.size / 1024 / 1024).toFixed(1);
-    logger.info("dream", `备份完成：${backupPath} (${backupSize}MB)`);
+    logger.info("dream", `备份完成：${backupPath} (${backupSize}MB, SQLite snapshot via VACUUM INTO)`);
 
-    // Keep last 7 backups
+    // Retention: count limit + byte budget, oldest first
     const backups = readdirSync(backupDir).filter(f => f.startsWith("auto-") && f.endsWith(".zip")).sort();
+    const removed: string[] = [];
+
+    // Enforce count limit
     while (backups.length > MAX_BACKUPS) {
-      unlinkSync(join(backupDir, backups.shift()!));
+      const victim = backups.shift()!;
+      unlinkSync(join(backupDir, victim));
+      removed.push(victim);
+    }
+
+    // Enforce byte budget (keep at least the latest backup even if over budget)
+    let totalBytes = 0;
+    for (const f of backups) {
+      try { totalBytes += (await stat(join(backupDir, f))).size; } catch { /* skip */ }
+    }
+    while (totalBytes > MAX_BACKUP_BYTES && backups.length > 1) {
+      const victim = backups.shift()!;
+      const victimPath = join(backupDir, victim);
+      try {
+        const victimSize = (await stat(victimPath)).size;
+        unlinkSync(victimPath);
+        totalBytes -= victimSize;
+        removed.push(victim);
+      } catch { /* skip */ }
+    }
+    if (totalBytes > MAX_BACKUP_BYTES) {
+      logger.warn("dream", `单份备份超预算 (${(totalBytes / 1024 / 1024).toFixed(0)}MB > ${MAX_BACKUP_BYTES / 1024 / 1024}MB)，保留最新备份`);
+    }
+
+    if (removed.length > 0) {
+      logger.info("dream", `清理 ${removed.length} 个旧备份: ${removed.join(", ")}`);
     }
   } catch (e) {
     logger.warn("dream", `备份失败，继续执行：${(e as Error).message}`);
