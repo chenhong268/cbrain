@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";
@@ -12,14 +12,12 @@ describe("cbrain restore", () => {
   let brainDir: string;
   let dbPath: string;
   let vaultPath: string;
-  let runtimePath: string;
 
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), "cbrain-restore-test-"));
     brainDir = join(testDir, "brain");
     dbPath = join(brainDir, "brain.sqlite");
     vaultPath = join(brainDir, "vault");
-    runtimePath = join(brainDir, "runtime");
 
     // Initialize cbrain
     execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
@@ -30,7 +28,6 @@ describe("cbrain restore", () => {
   });
 
   function createBackupZip(db: CBrainDB): string {
-    // Use VACUUM INTO to create a consistent snapshot, then zip it
     const backupDir = join(testDir, "backups");
     mkdirSync(backupDir, { recursive: true });
     const snapshotPath = join(backupDir, "brain.sqlite");
@@ -42,6 +39,35 @@ describe("cbrain restore", () => {
     return zipPath;
   }
 
+  function createFullBackupZip(db: CBrainDB): string {
+    const backupDir = join(testDir, "backups");
+    mkdirSync(backupDir, { recursive: true });
+    const snapshotPath = join(backupDir, "brain.sqlite");
+    db.rawDb.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
+
+    // Create vault directory with content
+    const vaultCopyDir = join(backupDir, "vault");
+    mkdirSync(vaultCopyDir, { recursive: true });
+    writeFileSync(join(vaultCopyDir, "test-note.md"), "# Test Note\nContent here");
+    mkdirSync(join(vaultCopyDir, "entities"), { recursive: true });
+    writeFileSync(join(vaultCopyDir, "entities", "my-entity.md"), "# My Entity");
+
+    const zipPath = join(backupDir, "full-backup.zip");
+    execSync(`zip -rq ${zipPath} brain.sqlite vault/.`, { cwd: backupDir, encoding: "utf-8" });
+    rmSync(snapshotPath);
+    rmSync(vaultCopyDir, { recursive: true });
+    return zipPath;
+  }
+
+  function createCorruptBackupZip(): string {
+    const backupDir = join(testDir, "backups");
+    mkdirSync(backupDir, { recursive: true });
+    writeFileSync(join(backupDir, "brain.sqlite"), "this is not a database");
+    const zipPath = join(backupDir, "corrupt-backup.zip");
+    execSync(`zip -rq ${zipPath} brain.sqlite`, { cwd: backupDir, encoding: "utf-8" });
+    return zipPath;
+  }
+
   function insertPage(db: CBrainDB, slug: string, title: string) {
     db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)"
@@ -49,37 +75,28 @@ describe("cbrain restore", () => {
   }
 
   test("full cycle: dream backup → modify → restore → verify backup state", async () => {
-    // Write config to point to our test brain
-    const configPath = join(brainDir, "cbrain.json");
-
-    // Insert pre-backup data
     const db = new CBrainDB(dbPath);
     insertPage(db, "test/pre-backup", "Pre Backup");
     db.close();
 
-    // Create a backup zip (simulates dream auto-backup)
     const db2 = new CBrainDB(dbPath);
     const zipPath = createBackupZip(db2);
     db2.close();
 
-    // Insert post-backup data
     const db3 = new CBrainDB(dbPath);
     insertPage(db3, "test/post-backup", "Post Backup");
     db3.close();
 
-    // Verify both rows exist
     const db4 = new CBrainDB(dbPath);
     expect((db4.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as any).c).toBe(2);
     db4.close();
 
-    // Restore from backup
     const output = execSync(`${BIN} restore ${zipPath} --force`, {
       cwd: brainDir,
       encoding: "utf-8",
     });
     expect(output).toContain("已恢复");
 
-    // Reopen and verify only pre-backup data exists
     const db5 = new CBrainDB(dbPath);
     const preRow = db5.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/pre-backup") as any;
     expect(preRow.title).toBe("Pre Backup");
@@ -89,12 +106,10 @@ describe("cbrain restore", () => {
   });
 
   test("refuses to restore when database has an active write transaction", async () => {
-    // Open a connection and start a write transaction to simulate a running cbrain serve
     const db = new CBrainDB(dbPath);
     insertPage(db, "test/locked", "Locked");
     const zipPath = createBackupZip(db);
 
-    // Start an active write transaction — this blocks BEGIN IMMEDIATE from another connection
     db.rawDb.exec("BEGIN IMMEDIATE");
     insertPage(db, "test/txn-active", "Active Transaction");
 
@@ -112,13 +127,69 @@ describe("cbrain restore", () => {
     db.rawDb.exec("ROLLBACK");
     db.close();
 
-    // Should have refused
     expect(restoreError).not.toBeNull();
     expect(restoreError!).toContain("占用");
   });
 
+  test("refuses to restore when PID file indicates active serve process", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/pid-test", "PID Test");
+    const zipPath = createBackupZip(db);
+    db.close();
+
+    // Write a fake PID file with our own PID (which is definitely alive)
+    writeFileSync(join(brainDir, "cbrain-http.pid"), String(process.pid));
+
+    let restoreError: string | null = null;
+    try {
+      execSync(`${BIN} restore ${zipPath} --force`, {
+        cwd: brainDir,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (e: any) {
+      restoreError = e.stderr?.toString() ?? e.message;
+    }
+
+    // Clean up PID file
+    try { rmSync(join(brainDir, "cbrain-http.pid")); } catch { /* ok */ }
+
+    expect(restoreError).not.toBeNull();
+    expect(restoreError!).toContain("活跃");
+  });
+
+  test("refuses to restore when watcher lock indicates active watcher", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/watcher-test", "Watcher Test");
+    const zipPath = createBackupZip(db);
+    db.close();
+
+    // Write a fake watcher lock with our own PID
+    writeFileSync(join(brainDir, ".watcher.lock"), JSON.stringify({
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      transport: "http",
+    }));
+
+    let restoreError: string | null = null;
+    try {
+      execSync(`${BIN} restore ${zipPath} --force`, {
+        cwd: brainDir,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (e: any) {
+      restoreError = e.stderr?.toString() ?? e.message;
+    }
+
+    // Clean up lock file
+    try { rmSync(join(brainDir, ".watcher.lock")); } catch { /* ok */ }
+
+    expect(restoreError).not.toBeNull();
+    expect(restoreError!).toContain("活跃");
+  });
+
   test("restores correctly when dbPath is separated from vaultPath", async () => {
-    // Create a custom layout where dbPath is NOT in vaultPath's parent
     const customDir = join(testDir, "custom-layout");
     const customDbDir = join(customDir, "data");
     const customVaultDir = join(customDir, "vault");
@@ -129,7 +200,6 @@ describe("cbrain restore", () => {
     mkdirSync(customVaultDir, { recursive: true });
     mkdirSync(customRuntimeDir, { recursive: true });
 
-    // Write config with separated paths
     const config = {
       vaultPath: customVaultDir,
       dbPath: customDbPath,
@@ -138,25 +208,21 @@ describe("cbrain restore", () => {
     };
     writeFileSync(join(customDir, "cbrain.json"), JSON.stringify(config, null, 2));
 
-    // Create DB and insert data
     const db = new CBrainDB(customDbPath);
     insertPage(db, "test/separated", "Separated Path");
     const zipPath = createBackupZip(db);
     db.close();
 
-    // Modify after backup
     const db2 = new CBrainDB(customDbPath);
     insertPage(db2, "test/after-sep", "After Sep");
     db2.close();
 
-    // Restore
     const output = execSync(`${BIN} restore ${zipPath} --force`, {
       cwd: customDir,
       encoding: "utf-8",
     });
     expect(output).toContain(customDbPath);
 
-    // Verify restore went to the correct dbPath
     const db3 = new CBrainDB(customDbPath);
     const sepRow = db3.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/separated") as any;
     expect(sepRow.title).toBe("Separated Path");
@@ -169,32 +235,113 @@ describe("cbrain restore", () => {
     const db = new CBrainDB(dbPath);
     insertPage(db, "test/wal-cleanup", "WAL Cleanup");
     const zipPath = createBackupZip(db);
-
-    // Close and verify WAL exists
     db.close();
 
-    // Insert more data to create WAL activity, then close without checkpoint
     const db2 = new CBrainDB(dbPath);
     insertPage(db2, "test/wal-extra", "WAL Extra");
     db2.close();
 
-    // There should be a WAL file
     expect(existsSync(dbPath + "-wal") || existsSync(dbPath + "-shm")).toBe(true);
 
-    // Restore should clean these up
     execSync(`${BIN} restore ${zipPath} --force`, {
       cwd: brainDir,
       encoding: "utf-8",
     });
 
-    // WAL/SHM should be gone
     expect(existsSync(dbPath + "-wal")).toBe(false);
     expect(existsSync(dbPath + "-shm")).toBe(false);
 
-    // DB should be clean and restorable
     const db3 = new CBrainDB(dbPath);
     const row = db3.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/wal-cleanup") as any;
     expect(row.title).toBe("WAL Cleanup");
     db3.close();
+  });
+
+  test("full backup restores both vault and database", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/full-backup", "Full Backup");
+    const zipPath = createFullBackupZip(db);
+    db.close();
+
+    // Modify vault after backup
+    writeFileSync(join(vaultPath, "added-after-backup.md"), "Should be gone after restore");
+    expect(existsSync(join(vaultPath, "added-after-backup.md"))).toBe(true);
+
+    // Add DB row after backup
+    const db2 = new CBrainDB(dbPath);
+    insertPage(db2, "test/after-full", "After Full");
+    db2.close();
+
+    const output = execSync(`${BIN} restore ${zipPath} --force`, {
+      cwd: brainDir,
+      encoding: "utf-8",
+    });
+    expect(output).toContain("数据库已恢复");
+    expect(output).toContain("Vault 已恢复");
+
+    // Vault should have backup content but not the post-backup file
+    expect(existsSync(join(vaultPath, "test-note.md"))).toBe(true);
+    expect(existsSync(join(vaultPath, "entities", "my-entity.md"))).toBe(true);
+    expect(existsSync(join(vaultPath, "added-after-backup.md"))).toBe(false);
+
+    // DB should have pre-backup data only
+    const db3 = new CBrainDB(dbPath);
+    const fullRow = db3.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/full-backup") as any;
+    expect(fullRow.title).toBe("Full Backup");
+    const afterRow = db3.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("test/after-full");
+    expect(afterRow).toBeNull();
+    db3.close();
+  });
+
+  test("corrupt backup does not destroy existing database", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/precious", "Precious Data");
+    db.close();
+
+    const corruptZip = createCorruptBackupZip();
+
+    let restoreError: string | null = null;
+    try {
+      execSync(`${BIN} restore ${corruptZip} --force`, {
+        cwd: brainDir,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (e: any) {
+      restoreError = e.stderr?.toString() ?? e.message;
+    }
+
+    // Should have refused
+    expect(restoreError).not.toBeNull();
+    expect(restoreError!).toContain("无效");
+
+    // Original data must survive
+    const db2 = new CBrainDB(dbPath);
+    const row = db2.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/precious") as any;
+    expect(row.title).toBe("Precious Data");
+    db2.close();
+  });
+
+  test("stale PID file (dead process) allows restore", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/stale-pid", "Stale PID");
+    const zipPath = createBackupZip(db);
+    db.close();
+
+    // Write PID file with a PID that definitely doesn't exist
+    const deadPid = 99999999;
+    writeFileSync(join(brainDir, "cbrain-stdio.pid"), String(deadPid));
+
+    // Should succeed — dead PID is not a blocker
+    const output = execSync(`${BIN} restore ${zipPath} --force`, {
+      cwd: brainDir,
+      encoding: "utf-8",
+    });
+    expect(output).toContain("已恢复");
+
+    const db2 = new CBrainDB(dbPath);
+    const row = db2.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/stale-pid") as any;
+    expect(row.title).toBe("Stale PID");
+    db2.close();
   });
 });
