@@ -249,3 +249,229 @@ describe("FileWatcher", () => {
     expect(syncOrder.length).toBe(15);
   });
 });
+
+describe("FileWatcher quarantine", () => {
+  const testDir = "/tmp/cbrain-test-watcher-q";
+  const vaultPath = testDir;
+  let db: CBrainDB;
+  let syncManager: SyncManager;
+  let watcher: FileWatcher;
+  let logs: Array<{ module: string; message: string; details?: Record<string, unknown> }>;
+  let logger: Logger;
+
+  const failSync: Partial<SyncManager> = {
+    syncPage: mock(async (slug: string, _vaultPath: string) => {
+      if (slug === "fail") throw new Error("NER exploded");
+      return { success: true };
+    }),
+    removePage: mock((_slug: string) => {}),
+  };
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(":memory:");
+    syncManager = failSync as unknown as SyncManager;
+
+    logs = [];
+    logger = {
+      info: mock((module: string, message: string, details?: Record<string, unknown>) => {
+        logs.push({ module, message, details });
+      }),
+      warn: mock((module: string, message: string, details?: Record<string, unknown>) => {
+        logs.push({ module, message, details });
+      }),
+      error: mock(),
+    } as unknown as Logger;
+  });
+
+  afterEach(() => {
+    watcher?.stop();
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("quarantines file after 3 consecutive failures", async () => {
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nBad", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    // 3 scans to hit threshold
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // Wait for async failure handlers to complete
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // 4th scan — quarantined file should be skipped
+    const beforeCount = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    const afterCount = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    expect(afterCount).toBe(beforeCount); // no new calls
+  });
+
+  test("successful sync clears quarantine", async () => {
+    writeFileSync(join(testDir, "good.md"), "---\ntitle: Good\ntype: record\n---\nGood", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(watcher.getQuarantineSize()).toBe(0);
+  });
+
+  test("resetQuarantine clears state", async () => {
+    db.setConfig("watcher.quarantine", JSON.stringify({
+      fail: { failCount: 3, lastError: "boom", quarantinedAt: new Date().toISOString() },
+    }));
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    watcher.resetQuarantine();
+    expect(watcher.getQuarantineSize()).toBe(0);
+    expect(db.getConfig("watcher.quarantine")).toBeNull();
+  });
+
+  test("quarantine persists across watcher restarts", async () => {
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nBad", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Wait for async failure handlers + persistQuarantine
+    await new Promise((r) => setTimeout(r, 200));
+    watcher.stop();
+
+    // Verify quarantine is in DB
+    const raw = db.getConfig("watcher.quarantine");
+    expect(raw).not.toBeNull();
+
+    // New watcher instance — should load quarantine from DB
+    const watcher2 = new FileWatcher(syncManager, vaultPath, { logger, db });
+    expect(watcher2.getQuarantineSize()).toBe(1);
+    watcher2.stop();
+  });
+
+  // ─── Content change auto-recovers quarantine ───────────────
+
+  test("quarantined file re-syncs after content change", async () => {
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nBad", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // 4th scan with SAME content — still quarantined, no sync
+    const beforeCount = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    const sameContentCount = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    expect(sameContentCount).toBe(beforeCount);
+
+    // Fix the file — change content
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nFixed content", "utf-8");
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Quarantine cleared, sync attempted again
+    const afterFixCount = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    expect(afterFixCount).toBeGreaterThan(sameContentCount);
+  });
+
+  // ─── getQuarantineEntries returns details ──────────────────
+
+  test("getQuarantineEntries returns full details", async () => {
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nBad", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+
+    const entries = watcher.getQuarantineEntries();
+    expect(entries.length).toBe(1);
+    expect(entries[0].slug).toBe("fail");
+    expect(entries[0].failCount).toBeGreaterThanOrEqual(3);
+    expect(entries[0].lastError).toBeTruthy();
+    expect(entries[0].quarantinedAt).toBeTruthy();
+    expect(entries[0].hash).toBeTruthy();
+    expect(entries[0].fullPath).toBeTruthy();
+  });
+
+  // ─── Content fix before next scan triggers immediate re-sync ──────
+
+  test("quarantined file with content fix between scans re-syncs", async () => {
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nBad", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // Fix content BETWEEN scans — no scan yet
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fixed\ntype: record\n---\nAll better now", "utf-8");
+
+    // Next scan should detect hash change and attempt re-sync
+    // (sync will fail again because mock throws for slug "fail", but the key behavior
+    // is that quarantine was cleared and syncPage was called)
+    const beforeSync = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const afterSync = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    expect(afterSync).toBeGreaterThan(beforeSync);
+  });
+
+  // ─── Hash recovered from DB on watcher restart ──────────────
+
+  test("quarantine hash persists in DB, watcher restart detects content change", async () => {
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nBad", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    watcher.stop();
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // Verify hash in DB
+    const raw = db.getConfig("watcher.quarantine");
+    const parsed = JSON.parse(raw!);
+    expect(parsed.fail.hash).toBeTruthy();
+    expect(parsed.fail.fullPath).toBeTruthy();
+
+    // Fix file while watcher is stopped
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fixed\ntype: record\n---\nAll good", "utf-8");
+
+    // New watcher instance — should load quarantine + hash from DB
+    const watcher2 = new FileWatcher(syncManager, vaultPath, { logger, db });
+    expect(watcher2.getQuarantineSize()).toBe(1);
+
+    // Scan should detect hash change (loaded from DB) vs current file
+    const beforeSync = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher2.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const afterSync = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    expect(afterSync).toBeGreaterThan(beforeSync);
+    watcher2.stop();
+  });
+});

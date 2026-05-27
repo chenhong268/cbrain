@@ -85,7 +85,6 @@ export function createHttpServer(ctx: ToolContext) {
         },
       });
 
-      console.error(`> CBrain HTTP Server → http://127.0.0.1:${port}`);
       console.error(`> ${tools.size} tools registered`);
       return server;
     },

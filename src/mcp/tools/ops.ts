@@ -4,6 +4,7 @@ import type { ToolContext } from "../context.js";
 import { HealthChecker } from "../../core/health.js";
 import { IndexGenerator } from "../../core/indexes.js";
 import { normalizeRelation, getCanonicalRelationTypes, getReverseRelation } from "../../core/shared.js";
+import { WatcherLock } from "../../utils/watcher-lock.js";
 
 export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   // ─── health ────────────────────────────────────────────
@@ -76,7 +77,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── status ──────────────────────────────────────────────
   server.registerTool("status", {
-    description: "Get brain status: page counts, sync info, etc.",
+    description: "Get brain status: page counts, sync info, watcher state, quarantine, etc.",
     inputSchema: {},
   }, async () => {
     const totalPages = ctx.db.getPageCount();
@@ -86,10 +87,27 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     const recentNerErrors = ctx.db.getRecentNerErrorCount();
     const topHotnessEntities = ctx.db.getTopHotnessEntities(10);
 
+    const watcherLock = new WatcherLock(ctx.profileDir ?? ".");
+    const watcherOwner = watcherLock.readOwner();
+    const quarantineRaw = ctx.db.getConfig("watcher.quarantine");
+    let quarantine: Array<{ slug: string; failCount: number; lastError: string; quarantinedAt: string }> = [];
+    if (quarantineRaw) {
+      try {
+        const parsed = JSON.parse(quarantineRaw) as Record<string, { failCount: number; lastError: string; quarantinedAt: string }>;
+        quarantine = Object.entries(parsed).map(([slug, entry]) => ({ slug, ...entry }));
+      } catch { /* */ }
+    }
+
     return {
       content: [{
         type: "text",
-        text: JSON.stringify({ totalPages, byType, totalLinks, totalChunks, recentNerErrors, topHotnessEntities, vaultPath: ctx.vaultPath }, null, 2),
+        text: JSON.stringify({
+          totalPages, byType, totalLinks, totalChunks, recentNerErrors, topHotnessEntities,
+          vaultPath: ctx.vaultPath,
+          watcher: watcherOwner ? { pid: watcherOwner.pid, transport: watcherOwner.transport, startedAt: watcherOwner.startedAt } : null,
+          quarantineCount: quarantine.length,
+          quarantine,
+        }, null, 2),
       }],
     };
   });
@@ -135,6 +153,61 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     ctx.db.deleteConfig("dream.lock");
     return {
       content: [{ type: "text", text: JSON.stringify({ success: true, message: "Dream lock cleared. Ready to run again." }) }],
+    };
+  });
+
+  // ─── watcher_quarantine ──────────────────────────────────────
+  server.registerTool("watcher_quarantine", {
+    description: "Manage watcher quarantine. 'list' shows quarantined files with reasons. 'release' removes a file from quarantine so it will re-sync on next scan. 'release_all' clears entire quarantine.",
+    inputSchema: {
+      action: z.enum(["list", "release", "release_all"]).describe("'list' = show quarantined files, 'release' = un-quarantine one file, 'release_all' = clear all"),
+      slug: z.string().optional().describe("Slug to release (required for action='release')"),
+    },
+  }, async ({ action, slug }) => {
+    const quarantineRaw = ctx.db.getConfig("watcher.quarantine");
+    const quarantineMap: Record<string, { failCount: number; lastError: string; quarantinedAt: string }> = quarantineRaw
+      ? JSON.parse(quarantineRaw)
+      : {};
+
+    if (action === "list") {
+      const entries = Object.entries(quarantineMap).map(([s, e]) => ({ slug: s, ...e }));
+      return {
+        content: [{ type: "text", text: JSON.stringify({ count: entries.length, entries }, null, 2) }],
+      };
+    }
+
+    if (action === "release") {
+      if (!slug) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "slug required for release" }) }] };
+      }
+      if (!(slug in quarantineMap)) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: `${slug} is not quarantined` }) }] };
+      }
+      // Sync with live watcher memory state
+      if (ctx.watcher) {
+        ctx.watcher.releaseEntry(slug);
+      } else {
+        delete quarantineMap[slug];
+        ctx.db.setConfig("watcher.quarantine", JSON.stringify(quarantineMap));
+      }
+      // Re-read DB to get accurate remaining count
+      const afterRaw = ctx.db.getConfig("watcher.quarantine");
+      const remaining = afterRaw ? Object.keys(JSON.parse(afterRaw)).length : 0;
+      return {
+        content: [{ type: "text", text: JSON.stringify({ success: true, released: slug, remaining }) }],
+      };
+    }
+
+    // release_all
+    if (ctx.watcher) {
+      const count = ctx.watcher.releaseAllEntries();
+      return {
+        content: [{ type: "text", text: JSON.stringify({ success: true, released: count }) }],
+      };
+    }
+    ctx.db.deleteConfig("watcher.quarantine");
+    return {
+      content: [{ type: "text", text: JSON.stringify({ success: true, released: Object.keys(quarantineMap).length }) }],
     };
   });
 
