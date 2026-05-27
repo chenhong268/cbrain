@@ -21,6 +21,13 @@ function createToolRegistry(ctx: ToolContext): Map<string, ToolDef> {
         handler: handler as ToolDef["handler"],
       });
     },
+    tool(name: string, descOrSchema: unknown, schemaOrHandler?: unknown, handler?: (args: unknown) => Promise<unknown>) {
+      if (handler) {
+        this.registerTool(name, { description: descOrSchema as string, inputSchema: schemaOrHandler }, handler);
+      } else {
+        this.registerTool(name, { inputSchema: descOrSchema }, schemaOrHandler as (args: unknown) => Promise<unknown>);
+      }
+    },
   };
 
   registerAllTools(collector as never, ctx);

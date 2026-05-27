@@ -1,9 +1,34 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
 const PROJECT_ROOT = process.cwd();
+
+async function waitForHealth(port: number, timeoutMs = 15_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/health`);
+      if (resp.ok) return true;
+    } catch { /* not ready */ }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+}
+
+async function waitForExit(child: ChildProcess, timeoutMs = 10_000): Promise<number | null> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      resolve(-1);
+    }, timeoutMs);
+    child.on("exit", (code) => {
+      clearTimeout(timeout);
+      resolve(code);
+    });
+  });
+}
 
 describe("serve --http subprocess shutdown", () => {
   const testDir = "/tmp/cbrain-test-serve-shutdown";
@@ -12,11 +37,13 @@ describe("serve --http subprocess shutdown", () => {
   const lancePath = join(testDir, "lancedb");
   const port = 19876;
   const configPath = join(testDir, "cbrain.json");
+  const pidFile = join(testDir, "cbrain-http.pid");
+  const watcherLockFile = join(testDir, ".watcher.lock");
 
   beforeEach(() => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
     mkdirSync(vaultPath, { recursive: true });
-    // Minimal config pointing to test dir
+    mkdirSync(lancePath, { recursive: true });
     writeFileSync(configPath, JSON.stringify({
       vaultPath,
       dbPath,
@@ -30,89 +57,59 @@ describe("serve --http subprocess shutdown", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  test("SIGTERM stops HTTP server and releases PID lock", async () => {
-    const child = spawn("bun", ["run", join(PROJECT_ROOT, "src/cli/main.ts"), "serve", "--http", "--port", String(port), "--force"], {
+  test("SIGTERM stops real serve --http, releases PID lock + watcher lock, frees port", async () => {
+    const child = spawn("bun", [
+      join(PROJECT_ROOT, "src/cli/index.ts"),
+      "serve", "--http", "--port", String(port), "--force",
+    ], {
       cwd: testDir,
       stdio: "pipe",
       env: {
         ...process.env,
         CBRAIN_CONFIG: configPath,
         ZHIPU_API_KEY: "fake-key-for-test",
-        // Prevent real embedding/lance from initializing
-        NODE_ENV: "test",
       },
     });
 
-    // Wait for server to start (it will likely crash on LanceDB but the shutdown logic
-    // is what we test — the signal handlers are installed before warmup)
-    // Actually, we need it to reach the point where the HTTP server starts.
-    // Use a simpler approach: just run the relevant server setup code.
-    child.kill("SIGTERM");
+    let stderr = "";
+    child.stderr!.on("data", (d: Buffer) => { stderr += d.toString(); });
 
-    const exitCode = await new Promise<number | null>((resolve) => {
-      const timeout = setTimeout(() => {
-        child.kill("SIGKILL");
-        resolve(-1);
-      }, 10000);
-      child.on("exit", (code) => {
-        clearTimeout(timeout);
-        resolve(code);
-      });
-    });
+    // Detect early crash (before /health is ready)
+    let earlyExit = false;
+    child.on("exit", (code) => { if (code !== null && !child.killed) earlyExit = true; });
 
-    // Process should exit (not hang)
-    expect(exitCode).not.toBe(-1);
-
-    // PID lock should be cleaned up
-    const pidFile = join(testDir, "cbrain-http.pid");
-    // PID file might not exist if process exited before writing it,
-    // but if it does exist it shouldn't contain the child PID
-    if (existsSync(pidFile)) {
-      const { readFileSync } = require("node:fs");
-      const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
-      expect(pid).not.toBe(child.pid);
+    // Wait for /health to respond — proves HTTP server is fully up
+    const healthy = await waitForHealth(port);
+    if (!healthy) {
+      child.kill("SIGKILL");
+      await waitForExit(child);
+      throw new Error(`Server never became healthy (earlyExit=${earlyExit}). stderr:\n${stderr}`);
     }
-  });
 
-  test("port is rebindable after SIGTERM shutdown", async () => {
-    // Start a minimal HTTP server on the port, kill it, then verify port is free
-    const child = spawn("bun", ["-e", `
-      const server = Bun.serve({
-        port: ${port},
-        hostname: "127.0.0.1",
-        fetch() { return new Response("ok"); },
-      });
-      process.on("SIGTERM", () => { server.stop(true); process.exit(0); });
-      console.error("ready");
-    `], { stdio: ["pipe", "pipe", "pipe"] });
-
-    // Wait for ready
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("server didn't start")), 5000);
-      child.stderr!.on("data", (data: Buffer) => {
-        if (data.toString().includes("ready")) {
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-    });
+    // While running: PID lock and watcher lock should exist
+    expect(existsSync(pidFile)).toBe(true);
+    expect(existsSync(watcherLockFile)).toBe(true);
 
     // Send SIGTERM
     child.kill("SIGTERM");
-    const exitCode = await new Promise<number | null>((resolve) => {
-      const timeout = setTimeout(() => {
-        child.kill("SIGKILL");
-        resolve(-1);
-      }, 5000);
-      child.on("exit", (code) => {
-        clearTimeout(timeout);
-        resolve(code);
-      });
-    });
+    const exitCode = await waitForExit(child);
 
-    expect(exitCode).toBe(0);
+    // Process should exit cleanly, not hang
+    expect(exitCode).not.toBe(-1);
 
-    // Verify port is immediately rebindable
+    // PID lock should be cleaned up
+    if (existsSync(pidFile)) {
+      const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+      expect(pid).not.toBe(child.pid);
+    }
+
+    // Watcher lock should be cleaned up
+    if (existsSync(watcherLockFile)) {
+      const owner = JSON.parse(readFileSync(watcherLockFile, "utf-8"));
+      expect(owner.pid).not.toBe(child.pid);
+    }
+
+    // Port should be immediately rebindable
     const rebound = await new Promise<boolean>((resolve) => {
       try {
         const s = Bun.serve({
@@ -126,9 +123,8 @@ describe("serve --http subprocess shutdown", () => {
         resolve(false);
       }
     });
-
     expect(rebound).toBe(true);
-  });
+  }, 30_000);
 });
 
 // ─── Dual-context quarantine release ─────────────────────

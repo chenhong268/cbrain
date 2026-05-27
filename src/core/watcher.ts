@@ -204,6 +204,11 @@ export class FileWatcher {
 
   releaseEntry(slug: string): boolean {
     if (!this.quarantine.has(slug)) return false;
+    const entry = this.quarantine.get(slug)!;
+    if (entry.fullPath) {
+      this.hashes.delete(entry.fullPath);
+      this.mtimes.delete(entry.fullPath);
+    }
     this.quarantine.delete(slug);
     this.persistQuarantine();
     return true;
@@ -211,6 +216,12 @@ export class FileWatcher {
 
   releaseAllEntries(): number {
     const count = this.quarantine.size;
+    for (const entry of this.quarantine.values()) {
+      if (entry.fullPath) {
+        this.hashes.delete(entry.fullPath);
+        this.mtimes.delete(entry.fullPath);
+      }
+    }
     this.quarantine.clear();
     try { this.db?.deleteConfig(QUARANTINE_CONFIG_KEY); } catch { /* */ }
     return count;
@@ -250,7 +261,13 @@ export class FileWatcher {
       if (!raw) {
         // DB empty — remove fully-quarantined entries (released externally)
         for (const [slug, entry] of this.quarantine) {
-          if (entry.quarantinedAt !== "") this.quarantine.delete(slug);
+          if (entry.quarantinedAt !== "") {
+            if (entry.fullPath) {
+              this.hashes.delete(entry.fullPath);
+              this.mtimes.delete(entry.fullPath);
+            }
+            this.quarantine.delete(slug);
+          }
         }
         return;
       }
@@ -258,6 +275,10 @@ export class FileWatcher {
       // Remove fully-quarantined entries that no longer exist in DB
       for (const [slug, entry] of this.quarantine) {
         if (entry.quarantinedAt !== "" && !(slug in parsed)) {
+          if (entry.fullPath) {
+            this.hashes.delete(entry.fullPath);
+            this.mtimes.delete(entry.fullPath);
+          }
           this.quarantine.delete(slug);
         }
       }

@@ -474,4 +474,97 @@ describe("FileWatcher quarantine", () => {
     expect(afterSync).toBeGreaterThan(beforeSync);
     watcher2.stop();
   });
+
+  // ─── Release triggers re-sync even without content change ──────────
+
+  test("releaseEntry triggers re-sync on next scan without content change", async () => {
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nBad", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // Verify quarantined file is skipped
+    const beforeCount = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect((failSync.syncPage as ReturnType<typeof mock>).mock.calls.length).toBe(beforeCount);
+
+    // Release — must clear hashes so next scan re-detects the file
+    watcher.releaseEntry("fail");
+    expect(watcher.getQuarantineSize()).toBe(0);
+
+    // Content unchanged, but scan must now call syncPage
+    const afterRelease = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect((failSync.syncPage as ReturnType<typeof mock>).mock.calls.length).toBeGreaterThan(afterRelease);
+  });
+
+  test("releaseAllEntries triggers re-sync for all quarantined files", async () => {
+    // Use a sync that always fails
+    const failAllSync: Partial<SyncManager> = {
+      syncPage: mock(async () => { throw new Error("always fail"); }),
+      removePage: mock(() => {}),
+    };
+    const allFailSyncManager = failAllSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "a.md"), "---\ntitle: A\ntype: record\n---\nA", "utf-8");
+    writeFileSync(join(testDir, "b.md"), "---\ntitle: B\ntype: record\n---\nB", "utf-8");
+
+    watcher = new FileWatcher(allFailSyncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(2);
+
+    // Verify both skipped
+    const beforeCount = (failAllSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect((failAllSync.syncPage as ReturnType<typeof mock>).mock.calls.length).toBe(beforeCount);
+
+    // Release all
+    watcher.releaseAllEntries();
+    expect(watcher.getQuarantineSize()).toBe(0);
+
+    // Both files re-synced on next scan
+    const afterRelease = (failAllSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect((failAllSync.syncPage as ReturnType<typeof mock>).mock.calls.length).toBeGreaterThan(afterRelease);
+  });
+
+  test("cross-process DB release triggers re-sync on next scan", async () => {
+    writeFileSync(join(testDir, "fail.md"), "---\ntitle: Fail\ntype: record\n---\nBad", "utf-8");
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // Verify quarantined file is skipped
+    const beforeCount = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect((failSync.syncPage as ReturnType<typeof mock>).mock.calls.length).toBe(beforeCount);
+
+    // Simulate cross-process: MCP removes quarantine from DB directly
+    db.deleteConfig("watcher.quarantine");
+
+    // syncQuarantineFromDb + cache clear → next scan re-detects the file
+    const afterDbRelease = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect((failSync.syncPage as ReturnType<typeof mock>).mock.calls.length).toBeGreaterThan(afterDbRelease);
+  });
 });
