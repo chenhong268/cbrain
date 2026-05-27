@@ -103,9 +103,15 @@ export async function runDream(
     const backupDir = join(outputsDir, "backups");
     if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
 
-    // Clean up stale snapshot files from previous interrupted backups
+    // Clean up stale staging files from previous interrupted backups:
+    // 1. .snapshot-* files (crash before rename)
+    // 2. DB-name files left in backupDir (crash after rename but before zip/delete)
+    const resolvedDbPath = dbPath ?? join(vaultPath, "..", "brain.sqlite");
+    const dbBasename = basename(resolvedDbPath);
     for (const f of readdirSync(backupDir)) {
-      if (f.startsWith(".snapshot-") && f.endsWith(".sqlite")) {
+      const isSnapshot = f.startsWith(".snapshot-") && f.endsWith(".sqlite");
+      const isOrphanedRename = f === dbBasename;
+      if (isSnapshot || isOrphanedRename) {
         try { unlinkSync(join(backupDir, f)); } catch { /* in use or gone */ }
       }
     }
@@ -117,8 +123,6 @@ export async function runDream(
     db.rawDb.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
 
     // Rename snapshot to match the actual DB filename so restore can install it directly
-    const resolvedDbPath = dbPath ?? join(vaultPath, "..", "brain.sqlite");
-    const dbBasename = basename(resolvedDbPath);
     const renamedPath = join(backupDir, dbBasename);
 
     backupPath = join(backupDir, `auto-${ts}.zip`);

@@ -141,6 +141,31 @@ describe("dream backup retention", () => {
     expect(zips.length).toBe(1);
   });
 
+  test("cleans up orphaned renamed DB file from interrupted backup", async () => {
+    const backupDir = join(outputsDir, "backups");
+    mkdirSync(backupDir, { recursive: true });
+
+    // Simulate crash after rename: .snapshot was renamed to brain.sqlite but zip/delete never ran
+    writeFileSync(join(backupDir, "brain.sqlite"), "orphaned-db-content");
+
+    const orphansBefore = readdirSync(backupDir).filter(f => f === "brain.sqlite");
+    expect(orphansBefore.length).toBe(1);
+
+    await runDream(
+      vaultPath, db, makeMockSync(), makeMockEnrich(),
+      makeMockHealth(), outputsDir, logger,
+      undefined, dbPath,
+    );
+
+    // Orphaned brain.sqlite should be cleaned up
+    const orphansAfter = readdirSync(backupDir).filter(f => f === "brain.sqlite");
+    expect(orphansAfter.length).toBe(0);
+
+    // New backup zip exists (not the orphan)
+    const zips = readdirSync(backupDir).filter(f => f.endsWith(".zip"));
+    expect(zips.length).toBe(1);
+  });
+
   test("enforces count limit and removes oldest", async () => {
     const backupDir = join(outputsDir, "backups");
     mkdirSync(backupDir, { recursive: true });
