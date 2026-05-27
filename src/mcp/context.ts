@@ -58,9 +58,8 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath?: string; watcher?: FileWatcher }): ToolContext {
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher }): ToolContext {
   const { db, embedding, lance, vaultPath, dbPath, llm, profileDir, watcher } = deps;
-  if (!deps.runtimePath) throw new Error("runtimePath is required — call resolveRuntimePath(config) before buildContext");
   const outputsDir = deps.runtimePath;
   const logger = new Logger(outputsDir);
   const pages = new PageManager(db, vaultPath, logger, lance);

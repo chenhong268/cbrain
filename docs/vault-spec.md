@@ -173,8 +173,9 @@ runtime/
 
 1. **vault 只放内容** — `raw/` 和 `brain/` 是用户可见的知识内容，运行产物不应污染
 2. **LanceDB 不备份** — 向量索引可从 vault 完全重建，备份只含 SQLite
-3. **保留双限制** — 最多 7 份 + 总大小不超过 500MB
-4. **可随时清除** — 删除整个 `runtime/` 不影响知识库功能
+3. **WAL 一致性** — 备份前执行 `PRAGMA wal_checkpoint(TRUNCATE)`，确保 zip 内的 `.sqlite` 文件包含所有已提交写入
+4. **保留双限制** — 最多 7 份 + 总大小不超过 500MB；单份超预算时保留最新并输出告警
+5. **可随时清除** — 删除整个 `runtime/` 不影响知识库功能
 
 ### 路径解析
 
@@ -182,4 +183,4 @@ runtime/
 - 有 `config.runtimePath` → 使用显式配置
 - 默认 → `dirname(resolve(config.dbPath)) + "/runtime"`
 
-旧版 `vault/outputs/` 不再写入。已有数据可通过 `cbrain migrate-runtime` 迁移到新位置。
+旧版 `vault/outputs/` 不再写入。已有数据可通过 `cbrain migrate-runtime` 迁移到新位置。迁移冲突时，已有的目标目录会被重命名为 `runtime.pre-migrate-<timestamp>` 归档。

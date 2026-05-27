@@ -95,6 +95,11 @@ export class CBrainDB {
     return this.db;
   }
 
+  /** Flush WAL to main database file for crash-safe file-level backup. */
+  checkpoint(): void {
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+
   constructor(dbPath: string) {
     if (!existsSync(dirname(dbPath))) {
       mkdirSync(dirname(dbPath), { recursive: true });

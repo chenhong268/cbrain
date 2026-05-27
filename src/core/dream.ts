@@ -99,6 +99,8 @@ export async function runDream(
   let backupPath: string | null = null;
   let backupSize = "0";
   try {
+    // Checkpoint WAL so the zip captures all committed writes
+    db.checkpoint();
     const backupDir = join(outputsDir, "backups");
     if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
@@ -121,7 +123,7 @@ export async function runDream(
       removed.push(victim);
     }
 
-    // Enforce byte budget
+    // Enforce byte budget (keep at least the latest backup even if over budget)
     let totalBytes = 0;
     for (const f of backups) {
       try { totalBytes += (await stat(join(backupDir, f))).size; } catch { /* skip */ }
@@ -135,6 +137,9 @@ export async function runDream(
         totalBytes -= victimSize;
         removed.push(victim);
       } catch { /* skip */ }
+    }
+    if (totalBytes > MAX_BACKUP_BYTES) {
+      logger.warn("dream", `单份备份超预算 (${(totalBytes / 1024 / 1024).toFixed(0)}MB > ${MAX_BACKUP_BYTES / 1024 / 1024}MB)，保留最新备份`);
     }
 
     if (removed.length > 0) {

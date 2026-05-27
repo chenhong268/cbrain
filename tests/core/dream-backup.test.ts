@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { runDream } from "../../src/core/dream.js";
 import type { SyncManager } from "../../src/core/sync.js";
@@ -22,7 +23,7 @@ function makeMockEnrich(): EnrichManager {
   return { enrichAll: () => [] } as unknown as EnrichManager;
 }
 
-function makeMockHealth(_outputsDir: string): HealthChecker {
+function makeMockHealth(): HealthChecker {
   return {
     checkAll: async () => ({
       timestamp: new Date().toISOString(),
@@ -64,7 +65,7 @@ describe("dream backup retention", () => {
   test("creates SQLite-only backup (no LanceDB)", async () => {
     const report = await runDream(
       vaultPath, db, makeMockSync(), makeMockEnrich(),
-      makeMockHealth(outputsDir), outputsDir, logger,
+      makeMockHealth(), outputsDir, logger,
       undefined, dbPath,
     );
     expect(report.stages.backup.path).not.toBeNull();
@@ -74,18 +75,42 @@ describe("dream backup retention", () => {
     const files = readdirSync(backupDir).filter(f => f.endsWith(".zip"));
     expect(files.length).toBe(1);
 
-    // Verify zip does NOT contain lancedb
-    const { execSync } = require("node:child_process");
     const listing = execSync(`zipinfo -1 ${join(backupDir, files[0])}`, { encoding: "utf-8" });
     expect(listing).not.toContain("lancedb");
     expect(listing).toContain("brain.sqlite");
+  });
+
+  test("WAL backup includes uncheckpointed writes", async () => {
+    // Insert data that lives in the WAL (no explicit checkpoint)
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)"
+    ).run("test/wal-entity", "WAL Entity", "test/wal-entity.md", "hash-wal");
+
+    const report = await runDream(
+      vaultPath, db, makeMockSync(), makeMockEnrich(),
+      makeMockHealth(), outputsDir, logger,
+      undefined, dbPath,
+    );
+    expect(report.stages.backup.path).not.toBeNull();
+
+    // Restore backup to a new DB and verify the row exists
+    const backupDir = join(outputsDir, "backups");
+    const zipFile = readdirSync(backupDir).find(f => f.endsWith(".zip"))!;
+    const restoreDir = join(testDir, "restore");
+    mkdirSync(restoreDir, { recursive: true });
+    execSync(`unzip -o ${join(backupDir, zipFile)} -d ${restoreDir}`, { encoding: "utf-8" });
+
+    const restoredDb = new CBrainDB(join(restoreDir, "brain.sqlite"));
+    const row = restoredDb.rawDb.prepare("SELECT slug, title FROM pages WHERE slug = ?").get("test/wal-entity");
+    expect(row).toBeDefined();
+    expect((row as any).title).toBe("WAL Entity");
+    restoredDb.close();
   });
 
   test("enforces count limit and removes oldest", async () => {
     const backupDir = join(outputsDir, "backups");
     mkdirSync(backupDir, { recursive: true });
 
-    // Create 10 existing backup files
     for (let i = 0; i < 10; i++) {
       const ts = `2026-01-${String(i + 1).padStart(2, "0")}-00-00`;
       writeFileSync(join(backupDir, `auto-${ts}.zip`), "x".repeat(100));
@@ -93,13 +118,12 @@ describe("dream backup retention", () => {
 
     await runDream(
       vaultPath, db, makeMockSync(), makeMockEnrich(),
-      makeMockHealth(outputsDir), outputsDir, logger,
+      makeMockHealth(), outputsDir, logger,
       undefined, dbPath,
     );
 
     const remaining = readdirSync(backupDir).filter(f => f.endsWith(".zip")).sort();
     expect(remaining.length).toBe(7);
-    // Oldest should be removed
     expect(remaining[0]).not.toBe("auto-2026-01-01-00-00.zip");
   });
 
@@ -107,24 +131,48 @@ describe("dream backup retention", () => {
     const backupDir = join(outputsDir, "backups");
     mkdirSync(backupDir, { recursive: true });
 
-    // Create backups that together exceed 500MB budget
     for (let i = 0; i < 6; i++) {
       const ts = `2026-01-${String(i + 1).padStart(2, "0")}-00-00`;
-      // 120MB each = 720MB total > 500MB budget
       writeFileSync(join(backupDir, `auto-${ts}.zip`), "x".repeat(120 * 1024 * 1024));
     }
 
     await runDream(
       vaultPath, db, makeMockSync(), makeMockEnrich(),
-      makeMockHealth(outputsDir), outputsDir, logger,
+      makeMockHealth(), outputsDir, logger,
       undefined, dbPath,
     );
 
     const remaining = readdirSync(backupDir).filter(f => f.endsWith(".zip")).sort();
     let totalBytes = 0;
     for (const f of remaining) totalBytes += statSync(join(backupDir, f)).size;
-    // Should be under 500MB budget (+ the new small backup)
     expect(totalBytes).toBeLessThanOrEqual(500 * 1024 * 1024 + 1024 * 1024);
     expect(remaining.length).toBeLessThan(6);
+  });
+
+  test("keeps latest backup even when single file exceeds byte budget", async () => {
+    const backupDir = join(outputsDir, "backups");
+    mkdirSync(backupDir, { recursive: true });
+
+    // Single 600MB backup exceeds 500MB budget
+    writeFileSync(join(backupDir, "auto-2026-01-01-00-00.zip"), "x".repeat(600 * 1024 * 1024));
+
+    const warnMessages: string[] = [];
+    const warnLogger: Logger = {
+      info: () => {},
+      warn: (_mod: string, msg: string) => { warnMessages.push(msg); },
+      error: () => {},
+    } as unknown as Logger;
+
+    await runDream(
+      vaultPath, db, makeMockSync(), makeMockEnrich(),
+      makeMockHealth(), outputsDir, warnLogger,
+      undefined, dbPath,
+    );
+
+    // The old oversized backup should be removed (oldest-first), new small one kept
+    const remaining = readdirSync(backupDir).filter(f => f.endsWith(".zip")).sort();
+    // The 600MB one should have been cleaned by count/byte logic
+    expect(remaining).not.toContain("auto-2026-01-01-00-00.zip");
+    expect(remaining.length).toBeGreaterThanOrEqual(1);
   });
 });

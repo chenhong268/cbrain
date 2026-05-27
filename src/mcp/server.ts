@@ -16,7 +16,7 @@ export interface CBrainDeps {
   dbPath?: string;
   llm?: LLMProvider;
   profileDir?: string;
-  runtimePath?: string;
+  runtimePath: string;
   watcher?: import("../core/watcher.js").FileWatcher;
 }
 

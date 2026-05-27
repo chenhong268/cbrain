@@ -449,7 +449,7 @@ export class HealthChecker {
         slug: "-",
         title: `${recentErrors.length} 个系统错误`,
         description: `最近 7 天发现 ${recentErrors.length} 个错误，涉及模块：${[...new Set(recentErrors.map(e => e.module))].join("、")}`,
-        suggestion: "检查 outputs/logs/系统日志-*.md 查看详情",
+        suggestion: "检查 runtime/logs/ 系统日志查看详情",
       });
     }
 

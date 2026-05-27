@@ -1559,17 +1559,16 @@ Return JSON only, no markdown:
   // ─── migrate-runtime: move vault/outputs to profileDir/runtime ─
   program
     .command("migrate-runtime")
-    .description("Migrate vault/outputs to profileDir/runtime")
+    .description("Migrate vault/outputs to runtime directory (uses resolveRuntimePath)")
     .option("--dry-run", "Show migration plan without moving files (default)")
     .option("--execute", "Actually move files")
     .action((opts) => {
       const config = loadConfig();
-      const { cpSync, rmSync, existsSync: exists, readdirSync, statSync } = require("node:fs");
-      const { join: pathJoin, dirname: pathDirname } = require("node:path");
+      const { cpSync, rmSync, renameSync, existsSync: exists, readdirSync, statSync, mkdirSync } = require("node:fs");
+      const { join: pathJoin } = require("node:path");
 
       const sourceDir = pathJoin(config.vaultPath, "outputs");
-      const profileDir = pathDirname(resolve(config.dbPath));
-      const targetDir = pathJoin(profileDir, "runtime");
+      const targetDir = resolveRuntimePath(config);
 
       if (!exists(sourceDir)) {
         console.log("  vault/outputs 不存在，无需迁移。");
@@ -1609,11 +1608,17 @@ Return JSON only, no markdown:
       console.log(`  文件数:   ${fileCount}`);
       console.log(`  总大小:   ${(sourceSize / 1024 / 1024).toFixed(1)}MB`);
 
+      // When target already has files, archive conflicting entries instead of aborting
       if (exists(targetDir)) {
         const targetFiles = countFiles(targetDir);
         if (targetFiles > 0) {
-          console.error(`\n  ✗ 目标目录已有 ${targetFiles} 个文件，拒绝覆盖。手动处理后再试。`);
-          process.exit(1);
+          const archiveDir = `${targetDir}.pre-migrate-${Date.now()}`;
+          if (opts.execute) {
+            console.log(`  目标已有 ${targetFiles} 个文件，归档到 ${archiveDir}`);
+            renameSync(targetDir, archiveDir);
+          } else {
+            console.log(`  目标已有 ${targetFiles} 个文件，执行时将归档到 ${archiveDir}`);
+          }
         }
       }
 
@@ -1623,6 +1628,7 @@ Return JSON only, no markdown:
       }
 
       try {
+        mkdirSync(targetDir, { recursive: true });
         cpSync(sourceDir, targetDir, { recursive: true });
       } catch (err) {
         console.error(`\n  ✗ 复制失败: ${err instanceof Error ? err.message : err}`);
