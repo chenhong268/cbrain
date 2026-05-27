@@ -90,7 +90,7 @@ describe("MCP Server", () => {
         "read_discoveries", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
         "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
         "resolve_slugs", "revert_version", "run_discovery", "set_hierarchy", "set_trust_state",
-        "status", "summarize", "sync", "update_discovery_status", "update_profile", "writeback",
+        "status", "summarize", "sync", "update_discovery_status", "update_profile", "watcher_quarantine", "writeback",
       ]);
     });
   });

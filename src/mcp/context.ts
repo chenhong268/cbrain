@@ -20,11 +20,13 @@ import { ProvenanceManager } from "../core/provenance.js";
 import { SqliteProvenanceStore } from "../storage/provenance-store.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
+import type { FileWatcher } from "../core/watcher.js";
 
 export interface ToolContext {
   db: CBrainDB;
   vaultPath: string;
   dbPath?: string;
+  profileDir?: string;
   outputsDir: string;
   pages: PageManager;
   search: HybridSearch;
@@ -44,6 +46,7 @@ export interface ToolContext {
   learn: LearnManager;
   profile: ProfileManager;
   provenance: ProvenanceManager;
+  watcher?: FileWatcher;
 }
 
 export async function indexPage(pipeline: ContentPipeline, slug: string, body: string): Promise<void> {
@@ -55,8 +58,8 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string }): ToolContext {
-  const { db, embedding, lance, vaultPath, dbPath, llm, profileDir } = deps;
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string; watcher?: FileWatcher }): ToolContext {
+  const { db, embedding, lance, vaultPath, dbPath, llm, profileDir, watcher } = deps;
   const outputsDir = join(vaultPath, "outputs");
   const logger = new Logger(outputsDir);
   const pages = new PageManager(db, vaultPath, logger, lance);
@@ -77,5 +80,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const provenance = new ProvenanceManager(provStore);
   profile.load();
 
-  return { db, vaultPath, dbPath, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance };
+  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, watcher };
 }

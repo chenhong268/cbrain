@@ -16,6 +16,7 @@ export interface CBrainDeps {
   dbPath?: string;
   llm?: LLMProvider;
   profileDir?: string;
+  watcher?: import("../core/watcher.js").FileWatcher;
 }
 
 export function createServer(deps: CBrainDeps): McpServer {
