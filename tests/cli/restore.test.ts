@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -24,6 +24,9 @@ describe("cbrain restore", () => {
   });
 
   afterEach(() => {
+    // Ensure permissions are restored before cleanup
+    try { chmodSync(join(brainDir, "vault.pre-restore"), 0o755); } catch { /* ok */ }
+    try { chmodSync(join(brainDir, "vault"), 0o755); } catch { /* ok */ }
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
@@ -343,5 +346,178 @@ describe("cbrain restore", () => {
     const row = db2.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/stale-pid") as any;
     expect(row.title).toBe("Stale PID");
     db2.close();
+  });
+
+  // ── P0: vault restore failure preserves pre-restore DB state ────────
+
+  test("vault switch failure rolls back database to pre-restore state", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/pre-restore", "Pre Restore Data");
+
+    // Create vault content that will be in the backup
+    writeFileSync(join(vaultPath, "original.md"), "# Original");
+
+    // Build a full backup zip with vault — db must be open for VACUUM INTO
+    const zipPath = createFullBackupZip(db);
+    db.close();
+
+    // Add data after backup was created — this should survive the failed restore
+    const db2 = new CBrainDB(dbPath);
+    insertPage(db2, "test/post-backup", "Post Backup Data");
+    db2.close();
+
+    // Block vault rename by creating an undeletable directory at vault.pre-restore
+    const preRestoreBlocker = join(`${vaultPath}.pre-restore`);
+    mkdirSync(preRestoreBlocker, { recursive: true });
+    writeFileSync(join(preRestoreBlocker, "blocker.txt"), "can't touch this");
+    chmodSync(preRestoreBlocker, 0o555);
+
+    let restoreError: string | null = null;
+    try {
+      execSync(`${BIN} restore ${zipPath} --force`, {
+        cwd: brainDir,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (e: any) {
+      restoreError = e.stderr?.toString() ?? e.message;
+    }
+
+    // Clean up blocker
+    chmodSync(preRestoreBlocker, 0o755);
+
+    // Restore should have failed
+    expect(restoreError).not.toBeNull();
+
+    // DB must still have both rows — rollback must have restored original DB
+    const db3 = new CBrainDB(dbPath);
+    const preRow = db3.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/pre-restore") as any;
+    expect(preRow.title).toBe("Pre Restore Data");
+    const postRow = db3.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("test/post-backup") as any;
+    expect(postRow).not.toBeNull();
+    expect(postRow.title).toBe("Post Backup Data");
+    db3.close();
+
+    // Original vault should still exist
+    expect(existsSync(join(vaultPath, "original.md"))).toBe(true);
+  });
+
+  // ── P1: separated paths backup → restore E2E ───────────────────────
+
+  test("separated paths: cbrain backup → restore round-trip", async () => {
+    const customDir = join(testDir, "sep-roundtrip");
+    const customDbDir = join(customDir, "data");
+    const customVaultDir = join(customDir, "my-vault");
+    const customRuntimeDir = join(customDir, "runtime");
+    const customDbPath = join(customDbDir, "brain.sqlite");
+    const outputDir = join(testDir, "backup-output");
+
+    mkdirSync(customDbDir, { recursive: true });
+    mkdirSync(customVaultDir, { recursive: true });
+    mkdirSync(customRuntimeDir, { recursive: true });
+    mkdirSync(outputDir, { recursive: true });
+
+    const config = {
+      vaultPath: customVaultDir,
+      dbPath: customDbPath,
+      lancePath: join(customDir, "lancedb"),
+      embedding: { provider: "zhipu" },
+    };
+    writeFileSync(join(customDir, "cbrain.json"), JSON.stringify(config, null, 2));
+
+    // Seed DB and vault
+    const db = new CBrainDB(customDbPath);
+    insertPage(db, "test/sep-backup", "Sep Backup");
+    db.close();
+    writeFileSync(join(customVaultDir, "note.md"), "# My Note");
+    mkdirSync(join(customVaultDir, "entities"), { recursive: true });
+    writeFileSync(join(customVaultDir, "entities", "foo.md"), "# Foo");
+
+    // Backup
+    const backupOutput = execSync(`${BIN} backup -o ${outputDir}`, {
+      cwd: customDir,
+      encoding: "utf-8",
+    });
+    expect(backupOutput).toContain("备份完成");
+
+    // Find the zip file
+    const zipFiles = execSync(`ls ${outputDir}/*.zip`, { encoding: "utf-8" }).trim().split("\n");
+    expect(zipFiles.length).toBeGreaterThan(0);
+    const backupZip = zipFiles[0];
+
+    // Modify DB and vault after backup
+    const db2 = new CBrainDB(customDbPath);
+    insertPage(db2, "test/after-sep-backup", "After Sep Backup");
+    db2.close();
+    writeFileSync(join(customVaultDir, "added-later.md"), "should disappear");
+
+    // Restore
+    const restoreOutput = execSync(`${BIN} restore ${backupZip} --force`, {
+      cwd: customDir,
+      encoding: "utf-8",
+    });
+    expect(restoreOutput).toContain("数据库已恢复");
+    expect(restoreOutput).toContain("Vault 已恢复");
+
+    // Verify DB state
+    const db3 = new CBrainDB(customDbPath);
+    const backupRow = db3.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/sep-backup") as any;
+    expect(backupRow.title).toBe("Sep Backup");
+    const afterRow = db3.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("test/after-sep-backup");
+    expect(afterRow).toBeNull();
+    db3.close();
+
+    // Verify vault state
+    expect(existsSync(join(customVaultDir, "note.md"))).toBe(true);
+    expect(existsSync(join(customVaultDir, "entities", "foo.md"))).toBe(true);
+    expect(existsSync(join(customVaultDir, "added-later.md"))).toBe(false);
+  });
+
+  // ── P1: WAL-committed data survives backup → restore ────────────────
+
+  test("backup captures WAL-committed data", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/wal-pre", "WAL Pre");
+    db.close();
+
+    // Open with a separate connection, write data, close (stays in WAL)
+    const db2 = new CBrainDB(dbPath);
+    insertPage(db2, "test/wal-committed", "WAL Committed");
+    db2.close();
+
+    // Backup should capture WAL data via VACUUM INTO
+    const outputDir = join(testDir, "wal-backup-output");
+    mkdirSync(outputDir, { recursive: true });
+
+    // Seed vault so we get a full backup
+    writeFileSync(join(vaultPath, "wal-test.md"), "# WAL Test");
+
+    const backupOutput = execSync(`${BIN} backup -o ${outputDir}`, {
+      cwd: brainDir,
+      encoding: "utf-8",
+    });
+    expect(backupOutput).toContain("备份完成");
+
+    const zipFiles = execSync(`ls ${outputDir}/*.zip`, { encoding: "utf-8" }).trim().split("\n");
+    const backupZip = zipFiles[0];
+
+    // Add more data after backup
+    const db3 = new CBrainDB(dbPath);
+    insertPage(db3, "test/wal-after", "WAL After");
+    db3.close();
+
+    // Restore
+    execSync(`${BIN} restore ${backupZip} --force`, {
+      cwd: brainDir,
+      encoding: "utf-8",
+    });
+
+    // WAL-committed data should be present, post-backup data should not
+    const db4 = new CBrainDB(dbPath);
+    const committedRow = db4.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/wal-committed") as any;
+    expect(committedRow.title).toBe("WAL Committed");
+    const afterRow = db4.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("test/wal-after");
+    expect(afterRow).toBeNull();
+    db4.close();
   });
 });

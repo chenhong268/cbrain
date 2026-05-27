@@ -8,6 +8,8 @@ import {
   unlinkSync,
   renameSync,
   readFileSync,
+  symlinkSync,
+  statSync,
 } from "node:fs";
 import { join, resolve, basename, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -26,22 +28,52 @@ export function register(program: Command): void {
       if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
       const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
       const zipPath = join(outputDir, `cbrain-backup-${ts}.zip`);
-      const cwd = resolve(config.vaultPath, "..");
-      const args = ["-r", zipPath, basename(config.dbPath), "vault/."];
-      if (existsSync(config.lancePath)) args.push("lancedb/.");
-      console.log(`正在备份...`);
+
+      const dbPath = resolve(config.dbPath);
+      const vaultPath = resolve(config.vaultPath);
+      const dbBasename = basename(dbPath);
+
+      // Use staging directory with VACUUM INTO snapshot + symlinks
+      const stagingDir = mkdtempSync(join(tmpdir(), "cbrain-backup-"));
       try {
-        execFileSync("zip", args, {
-          cwd,
+        console.log("正在备份...");
+
+        // WAL-consistent DB snapshot via VACUUM INTO
+        const snapshotPath = join(stagingDir, dbBasename);
+        const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+        const db = new Database(dbPath, { readonly: true });
+        db.exec(
+          `VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`,
+        );
+        db.close();
+
+        // Symlink vault so zip follows it (zip without -y stores content)
+        symlinkSync(vaultPath, join(stagingDir, "vault"));
+
+        const zipArgs = ["-rq", zipPath, dbBasename, "vault/."];
+        // Include lance if it exists
+        if (existsSync(config.lancePath)) {
+          symlinkSync(resolve(config.lancePath), join(stagingDir, "lancedb"));
+          zipArgs.push("lancedb/.");
+        }
+
+        execFileSync("zip", zipArgs, {
+          cwd: stagingDir,
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
         });
-        const { statSync } = await import("node:fs");
+
         const sizeMB = (statSync(zipPath).size / 1024 / 1024).toFixed(1);
         console.log(`✅ 备份完成：${zipPath}（${sizeMB}MB）`);
       } catch (e) {
         console.error(`备份失败：${(e as Error).message}`);
         process.exit(1);
+      } finally {
+        try {
+          rmSync(stagingDir, { recursive: true });
+        } catch {
+          /* cleanup */
+        }
       }
     });
 
@@ -113,51 +145,96 @@ export function register(program: Command): void {
           process.exit(1);
         }
 
-        // ── Step 5: Atomic database swap ──────────────────────────────
-        if (!installDatabase(extractedDbPath, dbPath)) {
+        // ── Step 5: Pre-check vault.pre-restore path ─────────────────
+        const extractedVault = findDirectory(tmpDir, "vault");
+        const vaultBackup = `${vaultPath}.pre-restore`;
+        if (extractedVault && existsSync(vaultPath) && existsSync(vaultBackup)) {
+          // Stale .pre-restore from a previous failed restore — try cleanup
+          try {
+            rmSync(vaultBackup, { recursive: true });
+          } catch {
+            console.error(
+              `❌ 无法清除残留的 ${vaultBackup}，请手动删除后重试。`,
+            );
+            process.exit(1);
+          }
+        }
+
+        // ── Step 6: Atomic DB+vault restore ──────────────────────────
+        const hasVault = extractedVault !== null;
+        const rollbackPath = `${dbPath}.rollback`;
+
+        if (!installDatabase(extractedDbPath, dbPath, hasVault)) {
           console.error("❌ 数据库安装失败，原数据库未受影响。");
           process.exit(1);
         }
 
-        // ── Step 6: Restore vault content (full backup) ───────────────
-        const extractedVault = findDirectory(tmpDir, "vault");
-        if (extractedVault) {
-          // Full backup includes vault — restore it
+        // Restore vault (DB rollback kept until vault succeeds)
+        if (hasVault) {
+          let vaultRestored = false;
           if (existsSync(vaultPath)) {
-            const vaultBackup = `${vaultPath}.pre-restore`;
             try {
               renameSync(vaultPath, vaultBackup);
             } catch {
-              console.error("❌ 无法备份当前 vault，中止恢复。");
+              // DB already swapped — rollback
+              rollbackDatabase(dbPath, rollbackPath);
+              console.error("❌ 无法备份当前 vault，已回滚数据库。");
               process.exit(1);
             }
             try {
               renameSync(extractedVault, vaultPath);
-              // Old vault cleanup succeeded — remove backup
+              vaultRestored = true;
               try {
                 rmSync(vaultBackup, { recursive: true });
               } catch {
                 /* keep old vault as .pre-restore */
               }
             } catch {
-              // Restore failed — rollback
+              // Vault restore failed — rollback both
               try {
                 rmSync(vaultPath, { recursive: true });
               } catch {
                 /* nothing */
               }
-              renameSync(vaultBackup, vaultPath);
-              console.error("❌ Vault 恢复失败，已回滚。");
+              try {
+                renameSync(vaultBackup, vaultPath);
+              } catch {
+                /* best effort */
+              }
+              rollbackDatabase(dbPath, rollbackPath);
+              console.error("❌ Vault 恢复失败，已回滚数据库和 vault。");
               process.exit(1);
             }
           } else {
             // No existing vault — just move
-            mkdirSync(dirname(vaultPath), { recursive: true });
-            renameSync(extractedVault, vaultPath);
+            try {
+              mkdirSync(dirname(vaultPath), { recursive: true });
+              renameSync(extractedVault, vaultPath);
+              vaultRestored = true;
+            } catch {
+              rollbackDatabase(dbPath, rollbackPath);
+              console.error("❌ Vault 恢复失败，已回滚数据库。");
+              process.exit(1);
+            }
           }
-          console.log(`✅ 数据库已恢复到 ${dbPath}`);
-          console.log(`✅ Vault 已恢复到 ${vaultPath}`);
+
+          if (vaultRestored) {
+            // Both succeeded — clean up rollback
+            try {
+              unlinkSync(rollbackPath);
+            } catch {
+              /* keep rollback as safety net */
+            }
+            console.log(`✅ 数据库已恢复到 ${dbPath}`);
+            console.log(`✅ Vault 已恢复到 ${vaultPath}`);
+          }
         } else {
+          // No vault in backup — clean up rollback immediately
+          try {
+            unlinkSync(rollbackPath);
+          } catch {
+            /* keep rollback as safety net */
+          }
           console.log(`✅ 数据库已恢复到 ${dbPath}`);
         }
 
@@ -189,7 +266,6 @@ interface PidInfo {
 function detectActiveServices(profileDir: string): string[] {
   const active: string[] = [];
 
-  // Check PID files for live server processes
   for (const pidFile of PID_FILES) {
     const info = readPidFile(join(profileDir, pidFile));
     if (info && isProcessAlive(info.pid)) {
@@ -197,10 +273,8 @@ function detectActiveServices(profileDir: string): string[] {
     }
   }
 
-  // Check watcher lock
   const watcherInfo = readWatcherLock(join(profileDir, WATCHER_LOCK));
   if (watcherInfo && isProcessAlive(watcherInfo.pid)) {
-    // Deduplicate — watcher is owned by the same serve process
     const alreadyListed = active.some((a) => a.includes(`pid ${watcherInfo.pid}`));
     if (!alreadyListed) {
       active.push(`watcher (pid ${watcherInfo.pid})`);
@@ -280,7 +354,6 @@ function validateDatabase(dbPath: string): boolean {
   try {
     const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
     const conn = new Database(dbPath, { readonly: true });
-    // Verify the database has the expected structure
     const tables = conn
       .prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='pages'",
@@ -298,6 +371,7 @@ function validateDatabase(dbPath: string): boolean {
 function installDatabase(
   sourcePath: string,
   targetPath: string,
+  keepRollback = false,
 ): boolean {
   const targetDir = dirname(targetPath);
   if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
@@ -306,10 +380,8 @@ function installDatabase(
   const rollbackPath = `${targetPath}.rollback`;
 
   try {
-    // Copy to a temp file next to the target
     copyFileSync(sourcePath, tmpTarget);
 
-    // Validate the copy opens correctly at the target location
     if (!validateDatabase(tmpTarget)) {
       try {
         unlinkSync(tmpTarget);
@@ -319,23 +391,20 @@ function installDatabase(
       return false;
     }
 
-    // Preserve old DB for rollback
     if (existsSync(targetPath)) {
       renameSync(targetPath, rollbackPath);
     }
 
-    // Atomic swap
     try {
       renameSync(tmpTarget, targetPath);
     } catch {
-      // Swap failed — rollback
       if (existsSync(rollbackPath)) {
         renameSync(rollbackPath, targetPath);
       }
       return false;
     }
 
-    // Success — clean up WAL/SHM and rollback file
+    // Clean up WAL/SHM
     for (const ext of ["-wal", "-shm"]) {
       try {
         unlinkSync(targetPath + ext);
@@ -343,21 +412,39 @@ function installDatabase(
         /* not present */
       }
     }
-    try {
-      unlinkSync(rollbackPath);
-    } catch {
-      /* keep rollback as safety net */
+
+    // Only delete rollback if caller says it's safe
+    if (!keepRollback) {
+      try {
+        unlinkSync(rollbackPath);
+      } catch {
+        /* keep rollback as safety net */
+      }
     }
 
     return true;
   } catch {
-    // Clean up temp file
     try {
       unlinkSync(tmpTarget);
     } catch {
       /* nothing */
     }
     return false;
+  }
+}
+
+function rollbackDatabase(targetPath: string, rollbackPath: string): void {
+  try {
+    unlinkSync(targetPath);
+  } catch {
+    /* nothing */
+  }
+  if (existsSync(rollbackPath)) {
+    try {
+      renameSync(rollbackPath, targetPath);
+    } catch {
+      /* best effort */
+    }
   }
 }
 
