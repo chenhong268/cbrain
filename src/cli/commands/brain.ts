@@ -20,7 +20,7 @@ export function register(program: Command) {
       if (existsSync(configPath)) { console.error(`Error: ${configPath} already exists.`); process.exit(1); }
       mkdirSync(join(vaultPath, "records"), { recursive: true });
       for (const sub of ["entities", "concepts", "insights"]) mkdirSync(join(vaultPath, "brain", sub), { recursive: true });
-      mkdirSync(join(vaultPath, "outputs"), { recursive: true });
+      mkdirSync(join(dir, "runtime"), { recursive: true });
       const config: CBrainConfig = { vaultPath, dbPath, lancePath, embedding: { provider: "zhipu" } };
       writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
       new CBrainDB(dbPath);

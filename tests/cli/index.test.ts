@@ -30,7 +30,7 @@ describe("CLI", () => {
       expect(existsSync(join(brainDir, "vault/brain/entities"))).toBe(true);
       expect(existsSync(join(brainDir, "vault/brain/insights"))).toBe(true);
       expect(existsSync(join(brainDir, "vault/brain/concepts"))).toBe(true);
-      expect(existsSync(join(brainDir, "vault", "outputs"))).toBe(true);
+      expect(existsSync(join(brainDir, "runtime"))).toBe(true);
       expect(existsSync(join(brainDir, "brain.sqlite"))).toBe(true);
     });
 
