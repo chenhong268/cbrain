@@ -530,6 +530,42 @@ describe("cbrain restore", () => {
     rmSync(unitDir, { recursive: true });
   });
 
+  // ── P1: staging temp protects targetPath on corrupt replacement ──────
+
+  test("installDatabase never writes corrupt data to targetPath", async () => {
+    const unitDir = mkdtempSync(join(tmpdir(), "cbrain-p1-staging-"));
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+
+    const targetDbPath = join(unitDir, "target.sqlite");
+    const rawDb = new Database(targetDbPath);
+    rawDb.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    rawDb.prepare("INSERT INTO pages VALUES (?, ?)").run("test/safe", "Safe Data");
+    rawDb.close();
+
+    // Get file size of valid target for comparison
+    const { statSync } = await import("node:fs");
+    const originalSize = statSync(targetDbPath).size;
+
+    const corruptPath = join(unitDir, "corrupt.sqlite");
+    writeFileSync(corruptPath, "not a database at all");
+
+    installDatabase(corruptPath, targetDbPath, false);
+
+    // targetPath must be byte-identical to original — never touched by corrupt copy
+    const afterSize = statSync(targetDbPath).size;
+    expect(afterSize).toBe(originalSize);
+
+    const rawDb2 = new Database(targetDbPath, { readonly: true });
+    const row = rawDb2.prepare("SELECT title FROM pages WHERE slug = ?").get("test/safe") as any;
+    expect(row.title).toBe("Safe Data");
+    rawDb2.close();
+
+    // No .restoring temp left behind
+    expect(existsSync(`${targetDbPath}.restoring`)).toBe(false);
+
+    rmSync(unitDir, { recursive: true });
+  });
+
   // ── P1: separated paths backup → restore E2E ───────────────────────
 
   test("separated paths: cbrain backup → restore round-trip", async () => {

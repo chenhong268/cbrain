@@ -193,18 +193,66 @@ runtime/
 - **目标已有文件** — 当前 runtime 文件保留不动，旧数据迁入 `runtime/legacy-outputs-<timestamp>/` 子目录，不覆盖当前运行状态
 - 迁移前建议停止运行中的服务（server/dream），避免并发写入问题
 
-### 自动备份恢复
+### 备份
 
-`cbrain restore <backup.zip>` 从自动备份恢复 SQLite 数据库：
+#### 自动备份（DB-only）
 
-1. 备份 zip 内含以正式 DB 文件名存储的一致性快照（如 `brain.sqlite`）
-2. `restore` 命令在 profileDir 下解压，直接覆盖当前数据库文件
-3. 恢复后运行 `cbrain sync` 重建向量索引
+`cbrain dream` 每次运行自动创建 SQLite 备份到 `runtime/backups/`：
 
-典型流程：
+- 使用 `VACUUM INTO` 生成一致性快照，包含所有 WAL 已提交数据
+- 只备份 SQLite，不含 vault 或 LanceDB（向量索引可从 vault 重建）
+- 保留上限：最多 7 份 + 总大小不超过 500MB
+
+#### 手动全量备份（DB + vault）
+
 ```
+cbrain backup -o <输出目录>
+```
+
+- 备份包含 SQLite 一致性快照 + vault 全部内容 + LanceDB（如存在）
+- 输出 zip 文件，文件名含时间戳
+- vault 和 LanceDB 通过符号链接打包，避免复制大文件
+
+### 恢复
+
+`cbrain restore <backup.zip> --force` 从备份恢复：
+
+#### 恢复前检查（任一不通过则中止）
+
+1. **活跃服务检测** — 检查 `cbrain-http.pid`、`cbrain-stdio.pid`、`.watcher.lock`，有活跃进程则拒绝
+2. **数据库锁检测** — 尝试 `BEGIN IMMEDIATE`，被占用则拒绝
+3. **残留文件检测** — 发现 `.rollback` 或 `vault.pre-restore`（上一轮恢复残留）则拒绝，提示用户手动检查后再试
+
+#### 恢复流程
+
+1. 解压到临时目录
+2. 验证备份数据库有效性（检查 pages 表存在）
+3. **原子安装数据库** — 先复制到 `.restoring` 临时文件并验证，再 `rename` 原子切换到正式路径
+4. **DB-only 备份**：只恢复数据库，完成后清理 WAL/SHM
+5. **Full 备份**（含 vault）：
+   - VACUUM INTO 当前数据库到 `.rollback` 快照（包含所有 WAL 已提交数据）
+   - 安装备份数据库（同上原子方式）
+   - 原子替换 vault（rename 旧 vault → `.pre-restore`，rename 备份 vault → 正式路径）
+   - **vault 成功** → 删除 `.rollback` 和 `.pre-restore`，清理 WAL/SHM
+   - **vault 失败** → 从 `.rollback` 快照回滚数据库，恢复旧 vault，确保数据一致
+
+#### 安全保障
+
+- **进程崩溃安全**：数据库安装使用 staging temp + rename，崩溃不会产生半写入文件
+- **WAL 数据保留**：VACUUM INTO 快照包含所有 WAL 已提交数据，回滚不丢失
+- **数据不自动删除**：上一轮残留文件由用户决定是否删除
+
+#### 典型流程
+
+```
+# 自动备份恢复（DB-only）
 cbrain dream              # 自动创建备份
 # ... 数据库出了问题 ...
 cbrain restore runtime/backups/auto-2026-05-28-00-00.zip --force
 cbrain sync               # 重建 LanceDB 索引
+
+# 全量恢复（DB + vault）
+cbrain backup -o ~/backups
+# ... 需要回滚 ...
+cbrain restore ~/backups/cbrain-backup-2026-05-28-12-00.zip --force
 ```

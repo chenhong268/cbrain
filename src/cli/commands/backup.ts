@@ -362,29 +362,33 @@ function installDatabase(
   if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
 
   const rollbackPath = `${targetPath}.rollback`;
+  const stagingPath = `${targetPath}.restoring`;
 
   try {
     if (keepRollback && existsSync(targetPath)) {
-      // Full restore path: VACUUM INTO captures all WAL-committed data
       const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
       const db = new Database(targetPath);
       db.exec(`VACUUM INTO '${rollbackPath.replace(/'/g, "''")}'`);
       db.close();
-      copyFileSync(sourcePath, targetPath);
     } else if (existsSync(targetPath)) {
       renameSync(targetPath, rollbackPath);
-      copyFileSync(sourcePath, targetPath);
-    } else {
-      copyFileSync(sourcePath, targetPath);
     }
 
-    // WAL/SHM are stale (belong to previous DB) — clean before validation
-    cleanWalShm(targetPath);
+    // Copy to staging temp, validate, then atomic rename
+    copyFileSync(sourcePath, stagingPath);
 
-    if (!validateDatabase(targetPath)) {
+    if (!validateDatabase(stagingPath)) {
+      // Staging failed — don't touch targetPath, just clean up
+      try { unlinkSync(stagingPath); } catch {}
       restoreRollback(targetPath, rollbackPath, keepRollback);
       return false;
     }
+
+    // Atomic swap: rename is atomic on the same filesystem
+    renameSync(stagingPath, targetPath);
+
+    // WAL/SHM are stale (belong to previous DB)
+    cleanWalShm(targetPath);
 
     if (!keepRollback) {
       try { unlinkSync(rollbackPath); } catch {}
@@ -392,6 +396,7 @@ function installDatabase(
 
     return true;
   } catch {
+    try { unlinkSync(stagingPath); } catch {}
     restoreRollback(targetPath, rollbackPath, keepRollback);
     return false;
   }
