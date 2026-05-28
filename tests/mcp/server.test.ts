@@ -952,4 +952,84 @@ describe("MCP Server", () => {
       expect(prov.getCorrectionHistory("link", linkId).length).toBe(0);
     });
   });
+
+  // ─── deep_recall grounded mode ────────────────────
+
+  describe("deep_recall grounded mode", () => {
+    function seedGroundedData() {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/ga", "GroundedA", "ga.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/gb", "GroundedB", "gb.md", "h2");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run("entities/ga", "entities/gb", "knows", "wikilink", "trusted", 0.9);
+    }
+
+    test("grounded=true returns grounded_answer field", async () => {
+      seedGroundedData();
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "GroundedA",
+        grounded: true,
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer).toBeDefined();
+      expect(data.grounded_answer.query).toBe("GroundedA");
+      expect(data.grounded_answer.confidence).toBeDefined();
+      expect(Array.isArray(data.grounded_answer.facts)).toBe(true);
+      expect(Array.isArray(data.grounded_answer.must_not_claim)).toBe(true);
+      expect(data.search_meta).toBeDefined();
+      expect(data.search_meta.strategy).toBeDefined();
+    });
+
+    test("grounded=false (default) returns entities, no grounded_answer", async () => {
+      seedGroundedData();
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "GroundedA",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer).toBeUndefined();
+      expect(Array.isArray(data.entities)).toBe(true);
+      expect(data.entities.length).toBeGreaterThan(0);
+    });
+
+    test("grounded response does NOT contain full entity bodies", async () => {
+      seedGroundedData();
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "GroundedA",
+        grounded: true,
+      });
+      const serialized = result.content[0].text;
+
+      expect(serialized).not.toContain("body");
+      expect(serialized).not.toContain("frontmatter");
+      expect(serialized).not.toContain("dossier");
+      expect(serialized).not.toContain("proactive_hints");
+    });
+
+    test("grounded=true with zero results still returns grounded_answer", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "完全不存在的东西xyz",
+        grounded: true,
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer).toBeDefined();
+      expect(data.grounded_answer.confidence).toBe("low");
+      expect(data.grounded_answer.facts).toHaveLength(0);
+      expect(data.grounded_answer.answer).toContain("没有足够的记录");
+      expect(data.search_meta).toBeDefined();
+      expect(data.search_meta.strategy).toBeDefined();
+      // Must NOT have entities field — interface is consistent
+      expect(data.entities).toBeUndefined();
+    });
+  });
 });

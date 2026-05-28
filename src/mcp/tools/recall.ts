@@ -9,6 +9,8 @@ import { getHierarchyContext } from "../../core/hierarchy.js";
 import { generateProactiveHints } from "../../core/proactive.js";
 import { extractBirthday } from "../../core/birthday.js";
 import { type SearchTrace } from "../../core/search.js";
+import { collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
+import { buildGroundedRecall } from "../../core/grounded-answer.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -28,14 +30,16 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         .describe("brief=compact view (default, 200-char body, no dossier/peers/subordinates); normal=full context with all enrichment"),
       multiStep: z.boolean().optional().default(false)
         .describe("多轮深度搜索：自动判断结果充分性、换策略重试、LLM重排序。开启条件：查询模糊/跨领域（如'心理学和投资的关系'）、首次结果不满意、需要全面覆盖时。精确查单个实体（如'阿德勒'）不需要开。"),
+      grounded: z.boolean().optional().default(false)
+        .describe("返回有依据的证据结构而非实体详情。Agent 基于证据生成回答时开启。"),
     },
-  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep }) => {
+  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded }) => {
     const cap = Math.min(limit ?? 5, 5);
     const trace: SearchTrace = {};
 
     const searchStart = Date.now();
     let searchResults: Awaited<ReturnType<typeof ctx.search.search>>;
-    let usedStrategy: string = strategy;
+    let usedStrategy: string = strategy ?? "smart";
 
     if (strategy === "smart") {
       const resolved = ctx.db.resolveSlugs([query])[0];
@@ -79,10 +83,40 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     }
 
     if (searchResults.length === 0) {
+      if (grounded) {
+        const emptyBoard = { facts: [], user_thoughts: [], candidates: [], gaps: [], conflicts: [] as Array<{ claim: string; evidence: EvidenceItem[] }> };
+        const groundedResult = buildGroundedRecall(query, emptyBoard);
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              query,
+              grounded_answer: groundedResult,
+              search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs },
+            }, null, 2),
+          }],
+        };
+      }
       return {
         content: [{
           type: "text" as const,
           text: JSON.stringify({ query, entities: [], summary: "未找到相关实体" }, null, 2),
+        }],
+      };
+    }
+
+    // ── Grounded mode: return evidence structure, skip entity enrichment ──
+    if (grounded) {
+      const board = collectEvidenceForSlugs(ctx.db, resultSlugs);
+      const groundedResult = buildGroundedRecall(query, board);
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            query,
+            grounded_answer: groundedResult,
+            search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs },
+          }, null, 2),
         }],
       };
     }

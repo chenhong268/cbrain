@@ -23,6 +23,24 @@ export interface GroundedAnswerResult {
   conflicts: ConflictRef[];
 }
 
+export interface SourceSummary {
+  slug: string;
+  evidence_count: number;
+}
+
+export interface GroundedRecallResult {
+  query: string;
+  answer: string;
+  confidence: Confidence;
+  facts: string[];
+  user_thoughts: string[];
+  candidates: string[];
+  conflicts: string[];
+  gaps: string[];
+  sources: SourceSummary[];
+  must_not_claim: string[];
+}
+
 // ─── Internal helpers ─────────────────────────────────────────
 
 const INSUFFICIENT_ANSWER = "目前没有足够的记录来回答这个问题。";
@@ -103,4 +121,37 @@ export class GroundedAnswerer {
       conflicts: boardConflictsToRefs(board),
     };
   }
+}
+
+// ─── GroundedRecall Bridge ────────────────────────────────────
+
+export function buildGroundedRecall(
+  query: string,
+  board: EvidenceBoardResult,
+): GroundedRecallResult {
+  const synthesized = new GroundedAnswerer().synthesize(query, board);
+
+  const sources = aggregateSources(board);
+
+  return {
+    query,
+    answer: synthesized.answer,
+    confidence: synthesized.confidence,
+    facts: board.facts.map(f => f.claim),
+    user_thoughts: board.user_thoughts.map(t => t.claim),
+    candidates: board.candidates.map(c => c.claim),
+    conflicts: board.conflicts.map(c => c.claim),
+    gaps: board.gaps,
+    sources,
+    must_not_claim: board.candidates.map(c => c.claim),
+  };
+}
+
+function aggregateSources(board: EvidenceBoardResult): SourceSummary[] {
+  const counts = new Map<string, number>();
+  const allItems = [...board.facts, ...board.user_thoughts, ...board.candidates];
+  for (const item of allItems) {
+    counts.set(item.source_slug, (counts.get(item.source_slug) ?? 0) + 1);
+  }
+  return Array.from(counts.entries()).map(([slug, evidence_count]) => ({ slug, evidence_count }));
 }

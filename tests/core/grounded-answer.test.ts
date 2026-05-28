@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { GroundedAnswerer } from "../../src/core/grounded-answer.js";
+import { GroundedAnswerer, buildGroundedRecall } from "../../src/core/grounded-answer.js";
 import type { EvidenceBoardResult, EvidenceItem } from "../../src/core/evidence.js";
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -254,5 +254,79 @@ describe("GroundedAnswerer", () => {
     expect(result.answer).toContain("你之前提到");
     expect(result.answer).toContain("人物A觉得方案X最佳");
     expect(result.confidence).toBe("medium");
+  });
+});
+
+// ─── buildGroundedRecall tests ─────────────────────────────────
+
+describe("buildGroundedRecall", () => {
+  test("returns compact result — claim strings only, no body/excerpt", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      facts: [factItem()],
+    };
+
+    const result = buildGroundedRecall("人物A和主题B的关系？", board);
+
+    expect(result.query).toBe("人物A和主题B的关系？");
+    expect(result.answer).toContain("人物A与主题B有关联");
+    expect(result.confidence).toBe("high");
+    expect(result.facts).toEqual(["人物A与主题B有关联"]);
+    expect(result.must_not_claim).toHaveLength(0);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("excerpt");
+    expect(serialized).not.toContain("body");
+  });
+
+  test("sources aggregated by slug with evidence_count", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      facts: [
+        factItem({ source_slug: "records/a" }),
+        factItem({ claim: "另一个事实", source_slug: "records/a" }),
+        factItem({ source_slug: "records/b" }),
+      ],
+    };
+
+    const result = buildGroundedRecall("问题", board);
+
+    expect(result.sources).toHaveLength(2);
+    const sourceA = result.sources.find(s => s.slug === "records/a");
+    expect(sourceA).toBeDefined();
+    expect(sourceA!.evidence_count).toBe(2);
+    const sourceB = result.sources.find(s => s.slug === "records/b");
+    expect(sourceB).toBeDefined();
+    expect(sourceB!.evidence_count).toBe(1);
+  });
+
+  test("must_not_claim = candidate claims", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      candidates: [
+        candidateItem({ claim: "人物A可能认识人物D" }),
+        candidateItem({ claim: "人物A可能参与项目F" }),
+      ],
+      gaps: ["人物A可能认识人物D", "人物A可能参与项目F"],
+    };
+
+    const result = buildGroundedRecall("问题", board);
+
+    expect(result.must_not_claim).toHaveLength(2);
+    expect(result.must_not_claim).toContain("人物A可能认识人物D");
+    expect(result.must_not_claim).toContain("人物A可能参与项目F");
+  });
+
+  test("empty board → low confidence, minimal output", () => {
+    const result = buildGroundedRecall("随便什么", emptyBoard());
+
+    expect(result.confidence).toBe("low");
+    expect(result.facts).toHaveLength(0);
+    expect(result.user_thoughts).toHaveLength(0);
+    expect(result.candidates).toHaveLength(0);
+    expect(result.conflicts).toHaveLength(0);
+    expect(result.gaps).toHaveLength(0);
+    expect(result.sources).toHaveLength(0);
+    expect(result.must_not_claim).toHaveLength(0);
+    expect(result.answer).toContain("没有足够的记录");
   });
 });

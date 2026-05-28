@@ -1,4 +1,6 @@
 import type { SourceCategory, TrustState } from "./provenance.js";
+import { mapSourceType } from "./provenance.js";
+import type { CBrainDB, LinkRow } from "../storage/sqlite.js";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -128,4 +130,57 @@ export class EvidenceBoard {
     }
     return gaps;
   }
+}
+
+// ─── Slug→Evidence Bridge ────────────────────────────────────
+
+const ACCEPT_ALL: EvidenceSource = { resolveSlug: () => true };
+
+export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): EvidenceBoardResult {
+  if (slugs.length === 0) {
+    return { facts: [], user_thoughts: [], candidates: [], gaps: [], conflicts: [] };
+  }
+
+  const linksMap = db.batchGetLinksForSlugs(slugs, true);
+  const timelineMap = db.batchGetTimelineForSlugs(slugs, true);
+  const board = new EvidenceBoard(ACCEPT_ALL);
+
+  for (const slug of slugs) {
+    const { outgoing, incoming } = linksMap.get(slug) ?? { outgoing: [], incoming: [] };
+
+    for (const link of [...outgoing, ...incoming] as LinkRow[]) {
+      const otherSlug = link.from_slug !== slug ? link.from_slug : link.to_slug;
+      const sourceSlug = link.source_page_slug || otherSlug;
+      const trustState = (link.trust_state as TrustState) ?? "candidate";
+
+      board.add({
+        claim: link.context || link.relation,
+        evidence_type: trustState === "trusted" ? "fact" : trustState === "user_thought" ? "user_thought" : "candidate",
+        source_type: "link",
+        source_slug: sourceSlug,
+        source_category: mapSourceType(link.source_type ?? undefined),
+        trust_state: trustState,
+        confidence: link.confidence ?? 0.5,
+        timestamp: link.created_at,
+      });
+    }
+
+    const timeline = timelineMap.get(slug) ?? [];
+    for (const entry of timeline) {
+      const trustState = (entry.trust_state as TrustState) ?? "candidate";
+
+      board.add({
+        claim: entry.summary,
+        evidence_type: trustState === "trusted" ? "fact" : trustState === "user_thought" ? "user_thought" : "candidate",
+        source_type: "timeline",
+        source_slug: entry.source_page_slug || slug,
+        source_category: mapSourceType(entry.source ?? undefined),
+        trust_state: trustState,
+        confidence: 0.5,
+        timestamp: entry.created_at,
+      });
+    }
+  }
+
+  return board.build();
 }
