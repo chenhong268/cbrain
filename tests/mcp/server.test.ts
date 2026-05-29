@@ -88,7 +88,7 @@ describe("MCP Server", () => {
         "job_retry", "job_status", "job_submit", "list_insights",
         "list_pages", "mark_discovery_seen", "merge_pages",
         "promote_discovery", "put_page", "query", "query_insights",
-        "read_discoveries", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
+        "read_discoveries", "recall_episode", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
         "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
         "resolve_slugs", "revert_version", "run_discovery", "set_hierarchy", "set_trust_state",
         "status", "summarize", "sync", "update_discovery_status", "update_profile", "watcher_quarantine", "writeback",
@@ -1270,6 +1270,65 @@ describe("MCP Server", () => {
 
       expect(entity).toBeDefined();
       expect(entity.memory_skeleton).toBeUndefined();
+    });
+  });
+
+  describe("recall_episode tool", () => {
+    test("returns empty candidates for no-match", async () => {
+      db.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)",
+      ).run("entities/person-a", "人物A", "a.md", "h1");
+      db.prepare(
+        "INSERT INTO timeline (page_slug, summary, source, trust_state) VALUES (?, ?, ?, ?)",
+      ).run("entities/person-a", "人物A参加技术分享", "dialogue", "trusted");
+
+      const server = createServer(deps);
+      const result = await getTools(server).recall_episode.handler({
+        query: "做市场的人",
+        topic_hint: "市场推广",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.candidates).toEqual([]);
+      expect(data.search_meta.total_scanned).toBe(1);
+      expect(data.summary).toContain("没有找到");
+    });
+
+    test("returns matched candidate with enriched output shape", async () => {
+      db.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)",
+      ).run("entities/person-a", "人物A", "a.md", "h1");
+      db.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+      ).run("entities/org-e", "组织E", "e.md", "h1");
+      db.prepare(
+        "INSERT INTO timeline (page_slug, summary, source, trust_state, event_date) VALUES (?, ?, ?, ?, ?)",
+      ).run("entities/person-a", "人物A负责前端开发", "dialogue", "trusted", "2024-05-20");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run("entities/person-a", "entities/org-e", "works_at", "ner", "trusted", 0.9);
+
+      const server = createServer(deps);
+      const result = await getTools(server).recall_episode.handler({
+        query: "组织E的前端开发",
+        topic_hint: "前端开发",
+        connection_hint: "组织E",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.candidates.length).toBe(1);
+      expect(data.candidates[0].slug).toBe("entities/person-a");
+      expect(data.candidates[0].title).toBe("人物A");
+      expect(data.candidates[0].score).toBeGreaterThan(0);
+      expect(data.candidates[0].confidence).toBeDefined();
+      expect(data.candidates[0].matched_clues).toBeInstanceOf(Array);
+      expect(data.candidates[0].matched_clues.some((c: any) => c.dimension === "topic")).toBe(true);
+      expect(data.candidates[0].matched_clues.some((c: any) => c.dimension === "connection")).toBe(true);
+      expect(data.candidates[0].evidence).toBeInstanceOf(Array);
+      expect(data.candidates[0].evidence.length).toBeGreaterThan(0);
+      expect(data.candidates[0].next_disambiguating_clue).toBeNull();
+      expect(data.summary).toContain("人物A");
+      expect(data.search_meta).toBeDefined();
+      expect(data.search_meta.hints_applied).toContain("topic");
+      expect(data.search_meta.hints_applied).toContain("connection");
     });
   });
 });

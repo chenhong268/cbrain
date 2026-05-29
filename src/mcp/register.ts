@@ -22,6 +22,7 @@ import { registerHierarchyTools } from "./tools/hierarchy.js";
 import { registerFeedbackTools } from "./tools/feedback.js";
 import { registerBatchTools } from "./tools/batch.js";
 import { registerProvenanceTools } from "./tools/provenance.js";
+import { registerEpisodeTools } from "./tools/episode.js";
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerSearchTools(server, ctx);
@@ -46,4 +47,5 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerFeedbackTools(server, ctx);
   registerBatchTools(server, ctx);
   registerProvenanceTools(server, ctx);
+  registerEpisodeTools(server, ctx);
 }
