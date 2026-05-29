@@ -1033,6 +1033,183 @@ describe("MCP Server", () => {
     });
   });
 
+  // ─── deep_recall grounded trust states ─────────────────
+
+  describe("deep_recall grounded trust states", () => {
+    test("trusted evidence → facts with settled answer and high confidence", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/ta", "人物A", "ta.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tb", "主题B", "tb.md", "h2");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/ta", "entities/tb", "负责", "wikilink", "trusted", 0.9, "人物A是主题B的负责人");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "人物A", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer).toBeDefined();
+      expect(data.grounded_answer.confidence).toBe("high");
+      expect(data.grounded_answer.answer).toContain("根据记录");
+      expect(data.grounded_answer.facts.length).toBeGreaterThanOrEqual(1);
+      expect(data.grounded_answer.must_not_claim).toHaveLength(0);
+    });
+
+    test("user_thought evidence framed as prior thinking, not fact", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/ux", "主题X", "ux.md", "h1");
+      db.prepare(
+        "INSERT INTO timeline (page_slug, summary, source, trust_state, source_page_slug) VALUES (?, ?, ?, ?, ?)"
+      ).run("entities/ux", "主题X项目可能需要调整方向", "dialogue", "user_thought", "records/chat-001");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "主题X", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer).toBeDefined();
+      expect(data.grounded_answer.confidence).toBe("medium");
+      expect(data.grounded_answer.answer).toContain("你之前提到");
+      expect(data.grounded_answer.answer).not.toContain("根据记录");
+      expect(data.grounded_answer.facts).toHaveLength(0);
+      expect(data.grounded_answer.user_thoughts.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("candidate evidence marked unresolved in must_not_claim", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/cc", "组织C", "cc.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/cd", "项目D", "cd.md", "h2");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/cc", "entities/cd", "可能参与", "ner", "candidate", 0.4, "组织C可能参与项目D");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "组织C", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer).toBeDefined();
+      expect(data.grounded_answer.confidence).toBe("low");
+      expect(data.grounded_answer.answer).toContain("尚待确认");
+      expect(data.grounded_answer.facts).toHaveLength(0);
+      expect(data.grounded_answer.candidates.length).toBeGreaterThanOrEqual(1);
+      expect(data.grounded_answer.must_not_claim.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("conflicting active evidence surfaced without silent side selection", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/ce", "人物E", "ce.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/cf", "项目F", "cf.md", "h2");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/cg", "项目G", "cg.md", "h3");
+      // Trusted claim: 人物E负责项目F
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/ce", "entities/cf", "负责", "wikilink", "trusted", 0.9, "人物E负责项目F");
+      // Candidate claim that contradicts: 人物E已不负责项目F (different relation to avoid UNIQUE violation)
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/ce", "entities/cg", "不再负责", "ner", "candidate", 0.4, "人物E已不负责项目F");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "人物E", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      // Both sides visible, neither silently resolved
+      expect(data.grounded_answer.confidence).not.toBe("high");
+      expect(data.grounded_answer.conflicts.length).toBeGreaterThanOrEqual(1);
+      expect(data.grounded_answer.answer).toContain("存在矛盾信息");
+      expect(data.grounded_answer.conflicts[0]).toBeDefined();
+      // Conflicted candidate claims appear in must_not_claim
+      expect(data.grounded_answer.must_not_claim.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("conflicting trusted evidence at same trust level surfaced", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/ca", "人物A", "ca.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/cb", "主题B", "cb.md", "h2");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/cc", "主题C", "cc.md", "h3");
+      // Both trusted, claims contradict
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/ca", "entities/cb", "负责", "wikilink", "trusted", 0.9, "人物A负责主题B");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/ca", "entities/cc", "已不负责", "ner", "trusted", 0.85, "人物A已不负责主题B");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "人物A", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer.conflicts.length).toBeGreaterThanOrEqual(1);
+      expect(data.grounded_answer.confidence).not.toBe("high");
+      expect(data.grounded_answer.answer).toContain("存在矛盾信息");
+    });
+
+    test("rejected and superseded evidence excluded from grounded_answer", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rh", "人物H", "rh.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/ri", "主题I", "ri.md", "h2");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, context) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run("entities/rh", "entities/ri", "旧关系", "ner", "rejected", "人物H旧关系主题I");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, context) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run("entities/rh", "entities/ri", "替代关系", "ner", "superseded", "人物H替代关系主题I");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "人物H", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer).toBeDefined();
+      expect(data.grounded_answer.facts).toHaveLength(0);
+      expect(data.grounded_answer.candidates).toHaveLength(0);
+      expect(data.grounded_answer.user_thoughts).toHaveLength(0);
+      expect(data.grounded_answer.conflicts).toHaveLength(0);
+      expect(data.grounded_answer.answer).toContain("没有足够的记录");
+    });
+
+    test("grounded=true returns compact evidence without entity details", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/cp", "主题J", "cp.md", "h1");
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/cq", "主题K", "cq.md", "h2");
+      db.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/cp", "entities/cq", "关联", "wikilink", "trusted", 0.9, "主题J与主题K有关联");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "主题J", grounded: true });
+      const serialized = result.content[0].text;
+
+      expect(serialized).not.toContain('"entities"');
+      expect(serialized).not.toContain("frontmatter");
+      expect(serialized).not.toContain("dossier");
+      expect(serialized).not.toContain("proactive_hints");
+      expect(serialized).not.toContain("insights");
+      expect(serialized).not.toContain("cross_refs");
+    });
+  });
+
   // ─── deep_recall normal vs brief mode ────────────
 
   describe("deep_recall normal vs brief mode", () => {

@@ -148,6 +148,7 @@ export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): Evidence
   const linksMap = db.batchGetLinksForSlugs(slugs, true);
   const timelineMap = db.batchGetTimelineForSlugs(slugs, true);
   const board = new EvidenceBoard(ACCEPT_ALL);
+  const addedItems: EvidenceItem[] = [];
 
   for (const slug of slugs) {
     const { outgoing, incoming } = linksMap.get(slug) ?? { outgoing: [], incoming: [] };
@@ -161,7 +162,7 @@ export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): Evidence
       const toName = slugDisplayName(link.to_slug);
       const claim = link.context || `${fromName} ${link.relation} ${toName}`;
 
-      board.add({
+      const item: EvidenceItem = {
         claim,
         evidence_type: trustState === "trusted" ? "fact" : trustState === "user_thought" ? "user_thought" : "candidate",
         source_type: "link",
@@ -170,14 +171,16 @@ export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): Evidence
         trust_state: trustState,
         confidence: link.confidence ?? 0.5,
         timestamp: link.created_at,
-      });
+      };
+      board.add(item);
+      addedItems.push(item);
     }
 
     const timeline = timelineMap.get(slug) ?? [];
     for (const entry of timeline) {
       const trustState = (entry.trust_state as TrustState) ?? "candidate";
 
-      board.add({
+      const item: EvidenceItem = {
         claim: entry.summary,
         evidence_type: trustState === "trusted" ? "fact" : trustState === "user_thought" ? "user_thought" : "candidate",
         source_type: "timeline",
@@ -186,9 +189,42 @@ export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): Evidence
         trust_state: trustState,
         confidence: 0.5,
         timestamp: entry.created_at,
-      });
+      };
+      board.add(item);
+      addedItems.push(item);
     }
   }
 
+  detectClaimConflicts(board, addedItems);
+
   return board.build();
+}
+
+const NEGATION_RE = /已不|不再|不是|没有/g;
+
+function stripNegation(claim: string): string {
+  return claim.replace(NEGATION_RE, "");
+}
+
+function detectClaimConflicts(board: EvidenceBoard, items: EvidenceItem[]): void {
+  const active = items.filter((it) => !INACTIVE_STATES.has(it.trust_state));
+  if (active.length < 2) return;
+
+  const groups = new Map<string, EvidenceItem[]>();
+  for (const item of active) {
+    const key = stripNegation(item.claim);
+    const group = groups.get(key);
+    if (group) {
+      group.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  }
+
+  for (const [, group] of groups) {
+    if (group.length < 2) continue;
+    const uniqueClaims = new Set(group.map((it) => it.claim));
+    if (uniqueClaims.size < 2) continue;
+    board.addConflict(group[0].claim, group);
+  }
 }
