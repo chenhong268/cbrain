@@ -136,6 +136,10 @@ export class EvidenceBoard {
 
 const ACCEPT_ALL: EvidenceSource = { resolveSlug: () => true };
 
+function slugDisplayName(slug: string): string {
+  return slug.split("/").pop() || slug;
+}
+
 export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): EvidenceBoardResult {
   if (slugs.length === 0) {
     return { facts: [], user_thoughts: [], candidates: [], gaps: [], conflicts: [] };
@@ -153,8 +157,12 @@ export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): Evidence
       const sourceSlug = link.source_page_slug || otherSlug;
       const trustState = (link.trust_state as TrustState) ?? "candidate";
 
+      const fromName = slugDisplayName(link.from_slug);
+      const toName = slugDisplayName(link.to_slug);
+      const claim = link.context || `${fromName} ${link.relation} ${toName}`;
+
       board.add({
-        claim: link.context || link.relation,
+        claim,
         evidence_type: trustState === "trusted" ? "fact" : trustState === "user_thought" ? "user_thought" : "candidate",
         source_type: "link",
         source_slug: sourceSlug,

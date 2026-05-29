@@ -8,6 +8,7 @@ import { extractDossier } from "../../core/dossier.js";
 import { getHierarchyContext } from "../../core/hierarchy.js";
 import { generateProactiveHints } from "../../core/proactive.js";
 import { extractBirthday } from "../../core/birthday.js";
+import { buildMemorySkeleton } from "../../core/key-points.js";
 import { type SearchTrace } from "../../core/search.js";
 import { collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
@@ -19,7 +20,32 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       "需要完整上下文（关系、时间线、档案、层级）时传 detail=normal。" +
       "适用：'张三是谁'、'最近聊了什么投资的事'、'XX公司的信息'。" +
       "不要用 search + get_page + graph_query 拼凑，直接用这个一步到位。" +
-      "⚠️ 返回中的 proactive_hints 是系统主动发现的你可能不知道的重要信息（过期提醒、关联人动态、隐藏联系等）。你必须把每一条 hint 原样展示给用户，用 '💡 主动提示：' 开头，逐条列出。不要省略任何一条。",
+      "\n\n【grounded 模式 — 仅用于核查确认】用户问以下意图时传 grounded=true：" +
+      "'讨论过吗/聊过吗/CBrain里有吗/有没有遗漏/有没有依据/是不是真的/矛盾吗/为什么这么定/上次怎么定的'。" +
+      "这些问题需要证据板（区分事实和候选），答案是 yes/no 或 fact/candidate 分类。" +
+      "\n\n【内容回忆 — 禁止 grounded】用户问'当时怎么设计/为什么选/具体方案是什么/之前怎么讨论/怎么做的'→ 传 detail=normal，不要传 grounded=true。" +
+      "这些要的是内容本身，不是证据分类。" +
+      "\n\n【内容回忆首轮硬门控】⚠️ 条件判断，违反即错误：" +
+      "if (用户意图 === '内容回忆' && 用户没说'展开/原文/详细全文/逐条展开/继续讲' && recall未返回insufficient/low confidence) {" +
+      "  只允许调用 deep_recall 一次。" +
+      "  禁止调用: get_page, expand_entity, get_timeline, query, session_search, 第二次deep_recall。" +
+      "}" +
+      "get_page 的触发条件：用户说'展开/原文/详细' OR recall返回insufficient OR recall返回'未找到相关实体'。不满足则禁止。" +
+      "\n\n【回答模板 — 槽位式压缩，硬模板】" +
+      "⚠️ 这是槽位填充，不是自由摘要。必须优先填满5个槽位：" +
+      "槽位1-核心设计对象：这是什么方案/设计（1句）。" +
+      "槽位2-架构/机制：具体架构分层、角色分工、流程机制等。禁止用'AI嵌入流程''新型协作模式'等纯泛化表达替代具体机制。" +
+      "槽位3-为什么这样选：约束条件和决策理由。" +
+      "槽位4-当时审查意见：你当时的判断和指出的问题（最多2条）。" +
+      "槽位5-后续变化：最多1句，格式'另有后续XX变化可能影响方案适用范围'。" +
+      "开头固定：'根据 CBrain 摘要记录，可以先还原到这个层级：'" +
+      "总字数350-500字。deep_recall返回的结构词必须优先保留：架构层级名称（如三层架构）、角色数量（如6个虚拟经理）、技术名词（如数据安全/数据主权/Harness/Skills）、设计约束（如确定性/概率性）、阶段标记（如试点）。这些不能删，只能删修饰语。" +
+      "用词：明确记录→'记录显示'，用户想法→'你当时认为/你当时审查指出'，不确定→'待确认/可能'。" +
+      "禁止：'需要看原文/返回的是摘要/我需要看一下原文/要看原文吗/需要我展开吗/我可以继续查/如果你愿意'。" +
+      "\n\n【proactive_hints 硬规则】" +
+      "grounded=true：禁止展示任何 hint。" +
+      "普通 recall：默认不展示 proactive_hints。只有 hint 直接改变当前问题判断时，写成一句'另有一条后续变化可能影响这个判断'，禁止展开。" +
+      "禁止使用'💡 主动提示'标题。禁止逐条列出 hints。禁止展开 hint 细节。",
     inputSchema: {
       query: z.string().describe("Search query"),
       limit: z.number().optional().default(5).describe("Max entities to recall (capped at 5, only top results are fully enriched)"),
@@ -31,7 +57,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       multiStep: z.boolean().optional().default(false)
         .describe("多轮深度搜索：自动判断结果充分性、换策略重试、LLM重排序。开启条件：查询模糊/跨领域（如'心理学和投资的关系'）、首次结果不满意、需要全面覆盖时。精确查单个实体（如'阿德勒'）不需要开。"),
       grounded: z.boolean().optional().default(false)
-        .describe("返回有依据的证据结构而非实体详情。Agent 基于证据生成回答时开启。"),
+        .describe("【仅用于核查确认】用户问'讨论过吗/聊过吗/CBrain里有吗/有没有遗漏/有没有依据/是不是真的/矛盾吗'时=true。返回证据板（facts/candidates/conflicts）而非实体详情。" +
+          "⚠️ 内容回忆（'当时怎么设计的/为什么选/怎么做的'）不要传 grounded，传 detail=normal。"),
     },
   }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded }) => {
     const cap = Math.min(limit ?? 5, 5);
@@ -105,10 +132,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       };
     }
 
-    // ── Grounded mode: return evidence structure, skip entity enrichment ──
+    // ── Grounded mode: return evidence structure ──
     if (grounded) {
       const board = collectEvidenceForSlugs(ctx.db, resultSlugs);
       const groundedResult = buildGroundedRecall(query, board);
+
       return {
         content: [{
           type: "text" as const,
@@ -196,6 +224,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const entityType = page?.frontmatter?.type ?? page?.type;
       const birthdayInfo = entityType?.startsWith("entity/") ? extractBirthday(page?.body ?? "") : null;
 
+      const l1Summary = isBrief ? null : ctx.db.getL1Summary(slug);
+      const memorySkeleton = isBrief ? undefined : buildMemorySkeleton(
+        page?.body, page?.frontmatter, l1Summary?.content,
+      );
+
       return {
         slug,
         title: page?.title ?? slug,
@@ -209,6 +242,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         ...(isBrief ? {} : {
           dossier: dossier ?? undefined,
           dossier_updated: (page?.frontmatter as Record<string, unknown> | undefined)?.dossier_updated as string | undefined,
+          memory_skeleton: memorySkeleton,
           links,
           timeline,
           related,

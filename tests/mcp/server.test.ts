@@ -1032,4 +1032,67 @@ describe("MCP Server", () => {
       expect(data.entities).toBeUndefined();
     });
   });
+
+  // ─── deep_recall normal vs brief mode ────────────
+
+  describe("deep_recall normal vs brief mode", () => {
+    function seedRecallData() {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
+      ).run("records/project-z-design", "Project Z设计方案", "records/project-z-design.md", "h1");
+      // Write vault file so PageManager.getBySlug returns body
+      const body = [
+        "---",
+        "type: record",
+        "title: Project Z设计方案",
+        "---",
+        "",
+        "## 三层协作架构",
+        "",
+        "Company X内部数据安全区、Organization Y AI分析中台、外部分布式节点",
+        "",
+        "## 组织架构与虚拟经理",
+        "",
+        "全国总监下属3个虚拟经理，4个大区经理各下属3个虚拟经理",
+        "",
+        "## 数据安全红线",
+        "",
+        "Company X原始导出绝不能存",
+      ].join("\n");
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      writeFileSync(join(vaultPath, "records/project-z-design.md"), body);
+    }
+
+    test("detail=normal returns memory_skeleton with key_points", async () => {
+      seedRecallData();
+      const server = createServer(deps);
+      // Use exact title so the search exact-match path finds it
+      const result = await getTools(server).deep_recall.handler({
+        query: "Project Z设计方案",
+        detail: "normal",
+      });
+      const data = JSON.parse(result.content[0].text);
+      const entity = data.entities?.[0];
+
+      expect(entity).toBeDefined();
+      expect(entity.memory_skeleton).toBeDefined();
+      expect(entity.memory_skeleton.key_points).toBeInstanceOf(Array);
+      expect(entity.memory_skeleton.key_points.length).toBeGreaterThan(0);
+      expect(entity.memory_skeleton.structure_terms).toBeInstanceOf(Array);
+    });
+
+    test("detail=brief does NOT return memory_skeleton", async () => {
+      seedRecallData();
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "Project Z设计方案",
+        detail: "brief",
+      });
+      const data = JSON.parse(result.content[0].text);
+      const entity = data.entities?.[0];
+
+      expect(entity).toBeDefined();
+      expect(entity.memory_skeleton).toBeUndefined();
+    });
+  });
 });

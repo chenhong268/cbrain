@@ -5,6 +5,19 @@
 
 ## Routing Rules
 
+### Grounded Recall（最高优先级，SOUL.md 硬规则）
+- 讨论过吗、聊过吗、之前说过、以前讨论过 → query.md [grounded]
+- CBrain 里有吗、有没有相关记录、有没有依据 → query.md [grounded]
+- 为什么这么定、上次怎么定的 → query.md [grounded]
+- 这个判断有没有遗漏、这个判断对不对、是不是真的 → query.md [grounded]
+- 和之前说的矛盾吗、哪些是确定的 → query.md [grounded]
+
+### Content Recall（同样高优先级，禁止 grounded）
+- 当时怎么设计、为什么选、具体方案是什么 → query.md [detail=normal, limit=3, no-expand]
+- 具体怎么说、展开全文、怎么做的 → query.md [detail=normal]
+- 首轮禁止自动 expand_entity（除非用户追问或结果 insufficient）
+- ⚠️ 回答用槽位式压缩：5个槽位（核心设计对象/架构机制/为什么这样选/当时审查/后续变化），结构词硬保留
+
 ### Relationship Analysis
 - 什么关系、有什么关系、怎么认识的、关联、connect → connect.md
 - A和B、之间、联系、关联分析 → connect.md
