@@ -1,6 +1,19 @@
 # Changelog
 
-> Current: `v1.8.8` — 运行时产物迁出 vault、备份恢复链路加固、Obsidian 索引风险消除。
+> Current: `v1.8.9` — 内容回忆召回增强，Hermes 可用一次 deep_recall 还原方案结构与决策理由。
+
+## [v1.8.9] — 2026-05-29
+
+### Agent 体验
+- **内容回忆增强**：`deep_recall(detail=normal)` 返回 `memory_skeleton`，包含 `key_points` 与 `structure_terms`，让 Agent 在不展开全文的情况下还原方案结构、关键机制与选择理由
+- **Grounded / Content Recall 路由分离**：核查确认类问题继续走 grounded evidence board；“当时怎么设计/为什么选/具体方案”类问题走普通 recall，避免误触证据分类模式
+- **首轮工具门控**：内容回忆首轮只允许一次 `deep_recall`，禁止默认追加 `get_page` / `expand_entity` / 二次检索，减少延迟和上下文消耗
+- **主动提示收敛**：普通 recall 默认不展示 proactive hints，仅在直接改变当前判断时压缩为一句后续变化提示
+
+### 测试
+- 新增 `key-points` 单元测试，覆盖 frontmatter、heading、bold list、bullet、dossier stripping、L1 summary merge 与结构词提取
+- 新增 MCP 契约测试，确保 `detail=normal` 返回 `memory_skeleton`，`detail=brief` 不返回
+- `bun run check`：854 pass / 0 fail / 2062 expect() calls
 
 ## [v1.8.8] — 2026-05-28
 
