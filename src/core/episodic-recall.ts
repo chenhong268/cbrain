@@ -427,9 +427,6 @@ export class EpisodicRecaller {
     if (!resolved.topic_hint && queryBody.length > 0) {
       resolved.topic_hint = queryBody;
     }
-    if (!resolved.context_hint && queryBody.length > 0) {
-      resolved.context_hint = queryBody;
-    }
 
     return resolved;
   }

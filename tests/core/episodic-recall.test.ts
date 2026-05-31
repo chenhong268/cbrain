@@ -246,6 +246,34 @@ describe("EpisodicRecaller", () => {
     expect(result.candidates[0].slug).toBe("entities/person-a");
   });
 
+  test("query fallback: context_hint not inflated from query body", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { summary: "人物A负责前端开发" },
+      ],
+    });
+
+    const result = recall({ query: "做前端开发的人" });
+
+    expect(result.search_meta.hints_applied).toContain("topic");
+    expect(result.search_meta.hints_applied).not.toContain("context");
+  });
+
+  test("query fallback: single-dimension score capped at topic weight", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { summary: "人物A负责前端开发" },
+      ],
+    });
+
+    const result = recall({ query: "做前端开发的人" });
+
+    expect(result.candidates.length).toBe(1);
+    // topic=0.30 is the max from a single text dimension; no context padding
+    expect(result.candidates[0].score).toBeLessThanOrEqual(0.31);
+    expect(result.candidates[0].score).toBeGreaterThan(0);
+  });
+
   // ─── Limit cap ───────────────────────────────────────────
 
   test("limit is capped at 8", () => {
