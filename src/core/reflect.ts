@@ -590,6 +590,8 @@ export class ReflectManager {
     return sources;
   }
 
+  // Neutral prior: when both sets are empty, return 0.5 distance (similarity 0.5)
+  // — neither rewards nor penalizes pairs with no source/neighbor evidence.
   private jaccardDistance(a: Set<string>, b: Set<string>): number {
     if (a.size === 0 && b.size === 0) return 0.5;
     const intersection = [...a].filter(x => b.has(x)).length;

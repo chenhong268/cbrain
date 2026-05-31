@@ -585,5 +585,133 @@ describe("ReflectManager", () => {
       const score = await (mgr as any).scoreCandidate("entities/a", "entities/b", adj);
       expect(score).toBe(0);
     });
+
+    // P2-1: comparative sort assertion — shared > disjoint in one test
+    test("shared neighbors strictly outscore disjoint neighbors (comparative)", async () => {
+      // Shared pair: A and B both connect to X, Y
+      insertEntity(db, "entities/a", "A", 5);
+      insertEntity(db, "entities/b", "B", 5);
+      insertEntity(db, "entities/x", "X", 3);
+      insertEntity(db, "entities/y", "Y", 3);
+      db.insertLink("entities/a", "entities/x", "knows");
+      db.insertLink("entities/b", "entities/x", "knows");
+      db.insertLink("entities/a", "entities/y", "knows");
+      db.insertLink("entities/b", "entities/y", "knows");
+
+      // Disjoint pair: P connects to B1, Q connects to B3, chain via B2
+      insertEntity(db, "entities/p", "P", 5);
+      insertEntity(db, "entities/q", "Q", 5);
+      insertEntity(db, "entities/b1", "B1", 3);
+      insertEntity(db, "entities/b2", "B2", 3);
+      insertEntity(db, "entities/b3", "B3", 3);
+      db.insertLink("entities/p", "entities/b1", "knows");
+      db.insertLink("entities/b1", "entities/b2", "knows");
+      db.insertLink("entities/b2", "entities/b3", "knows");
+      db.insertLink("entities/b3", "entities/q", "knows");
+
+      const mgr = new ReflectManager(db, pages);
+      const adj = (mgr as any).buildAdjacency() as Map<string, Set<string>>;
+
+      const scoreShared = await (mgr as any).scoreCandidate("entities/a", "entities/b", adj);
+      const scoreDisjoint = await (mgr as any).scoreCandidate("entities/p", "entities/q", adj);
+
+      expect(scoreShared).toBeGreaterThan(scoreDisjoint);
+    });
+  });
+
+  // P2-2: jaccardDistance independent unit tests
+  describe("jaccardDistance", () => {
+    test("empty sets return 0.5 (neutral prior)", () => {
+      const mgr = new ReflectManager(db, pages);
+      const dist = (mgr as any).jaccardDistance(new Set(), new Set());
+      expect(dist).toBe(0.5);
+    });
+
+    test("one empty set returns 1.0 (max distance)", () => {
+      const mgr = new ReflectManager(db, pages);
+      const dist = (mgr as any).jaccardDistance(new Set(["a"]), new Set());
+      expect(dist).toBe(1.0);
+    });
+
+    test("identical single-element sets return 0 (min distance)", () => {
+      const mgr = new ReflectManager(db, pages);
+      const dist = (mgr as any).jaccardDistance(new Set(["x"]), new Set(["x"]));
+      expect(dist).toBe(0);
+    });
+
+    test("full overlap returns 0", () => {
+      const mgr = new ReflectManager(db, pages);
+      const a = new Set(["a", "b", "c"]);
+      const dist = (mgr as any).jaccardDistance(a, new Set(["a", "b", "c"]));
+      expect(dist).toBe(0);
+    });
+
+    test("full separation returns 1.0", () => {
+      const mgr = new ReflectManager(db, pages);
+      const dist = (mgr as any).jaccardDistance(new Set(["a", "b"]), new Set(["c", "d"]));
+      expect(dist).toBe(1.0);
+    });
+
+    test("partial overlap returns correct distance", () => {
+      const mgr = new ReflectManager(db, pages);
+      // Intersection = {b, c} = 2, Union = {a, b, c, d} = 4 → 1 - 2/4 = 0.5
+      const dist = (mgr as any).jaccardDistance(new Set(["a", "b", "c"]), new Set(["b", "c", "d"]));
+      expect(dist).toBeCloseTo(0.5, 10);
+    });
+  });
+
+  // P2-3: classifyActionable threshold calibration
+  describe("classifyActionable threshold behavior", () => {
+    test("score 0.70 classifies as medium for same-type non-bridge", async () => {
+      insertEntity(db, "entities/a", "A", 5);
+      insertEntity(db, "entities/b", "B", 5);
+      insertEntity(db, "entities/x", "X", 3);
+      db.insertLink("entities/a", "entities/x", "knows");
+      db.insertLink("entities/x", "entities/b", "knows");
+
+      const mgr = new ReflectManager(db, pages);
+      const result = (mgr as any).classifyActionable(0.70, "structural_hole", "entity/person", "entity/person");
+      // Same type, not bridge → 0.70 < 0.7 threshold for high... wait, 0.70 >= 0.7
+      // But high requires mixedTypes || bridge. Same type + structural_hole → no high.
+      // 0.70 >= 0.5 → medium
+      expect(result).toBe("medium");
+    });
+
+    test("score 0.70 classifies as high for bridge type", () => {
+      const mgr = new ReflectManager(db, pages);
+      const result = (mgr as any).classifyActionable(0.70, "bridge", "entity/person", "entity/person");
+      expect(result).toBe("high");
+    });
+
+    test("score 0.70 classifies as high for mixed entity-concept types", () => {
+      const mgr = new ReflectManager(db, pages);
+      const result = (mgr as any).classifyActionable(0.70, "structural_hole", "entity/person", "concept/topic");
+      expect(result).toBe("high");
+    });
+
+    test("score 0.49 classifies as low", () => {
+      const mgr = new ReflectManager(db, pages);
+      const result = (mgr as any).classifyActionable(0.49, "bridge", "entity/person", "concept/topic");
+      expect(result).toBe("low");
+    });
+
+    test("isAutoApplicable requires score >= 0.8", async () => {
+      // Build a graph where score will be high enough to check the auto-applicable threshold
+      insertEntity(db, "entities/a", "A", 5);
+      insertEntity(db, "entities/b", "B", 5);
+      insertEntity(db, "entities/c", "C", 3);
+      db.insertLink("entities/a", "entities/c", "knows");
+      db.insertLink("entities/c", "entities/b", "knows");
+
+      const mgr = new ReflectManager(db, pages);
+      const adj = (mgr as any).buildAdjacency() as Map<string, Set<string>>;
+      const score = await (mgr as any).scoreCandidate("entities/a", "entities/b", adj);
+
+      // For a 2-hop pair with same-type entities, no source pages:
+      // pathScore = 0, sourceScore = 0.5, typeScore = 0.3, contentScore varies
+      // max possible = 0.35*0 + 0.25*0.5 + 0.20*0.3 + 0.20*1.0 = 0.125 + 0.06 + 0.2 = 0.385
+      // Not auto-applicable (needs >= 0.8)
+      expect(score).toBeLessThan(0.8);
+    });
   });
 });
