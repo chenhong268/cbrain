@@ -61,8 +61,7 @@ const CONCURRENCY = 3;
 const W_PATH = 0.35;
 const W_SOURCE = 0.25;
 const W_TYPE = 0.20;
-const W_CONTENT = 0.10;
-const W_SEMANTIC = 0.10;
+const W_CONTENT = 0.20;
 const MAX_SUGGESTION_LLM = 8;
 const MAX_CANDIDATE_POOL = 100;
 
@@ -605,7 +604,10 @@ export class ReflectManager {
     const pa = this.db.getPage(a), pb = this.db.getPage(b);
     const ta = pa?.type ?? "", tb = pb?.type ?? "";
     const typeScore = (ta.startsWith("entity/") && tb.startsWith("concept/")) || (ta.startsWith("concept/") && tb.startsWith("entity/")) ? 1.0 : ta.startsWith("concept/") && tb.startsWith("concept/") ? 0.5 : 0.3;
-    return W_PATH * pathScore + W_SOURCE * sourceScore + W_TYPE * typeScore + W_CONTENT * 0.5 + W_SEMANTIC * 0.3;
+    const neighborsA = adj?.get(a) ?? new Set<string>();
+    const neighborsB = adj?.get(b) ?? new Set<string>();
+    const contentScore = 1 - this.jaccardDistance(neighborsA, neighborsB);
+    return W_PATH * pathScore + W_SOURCE * sourceScore + W_TYPE * typeScore + W_CONTENT * contentScore;
   }
 
   private async buildCandidatePool(adj?: Map<string, Set<string>>): Promise<Array<[string, string]>> {
