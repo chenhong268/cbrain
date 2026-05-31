@@ -717,70 +717,89 @@ describe("ReflectManager", () => {
 
   // P1-2: isAutoApplicable = score >= 0.8 && !!pageA && !!pageB
   describe("isAutoApplicable condition", () => {
-    test("both conditions met: high score + pages exist → autoApplicable", async () => {
-      // Engineer score >= 0.8: need mixed entity/concept types
-      // Use raw SQL to insert concept type (insertEntity hardcodes entity/person)
+    test("score >= 0.8 + pages exist → autoApplicable = true", async () => {
+      // 6-hop chain: concept/a — n1 — n2 — n3 — n4 — n5 — entity/b
+      // pathScore = 1.0 (dist >= 6), typeScore = 1.0 (mixed), sourceScore = 1.0 (disjoint records), contentScore = 0
+      // = 0.35*1.0 + 0.25*1.0 + 0.20*1.0 + 0.20*0 = 0.80
       db.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'concept/topic', ?, ?, ?, ?, ?)`
       ).run("concept/a", "ConceptA", "concept/a.md", "h-ca", 5, 3);
       insertEntity(db, "entities/b", "EntityB", 5);
 
-      // 2-hop: concept/a — mid — entities/b
-      insertEntity(db, "entities/mid", "Mid", 3);
-      db.insertLink("concept/a", "entities/mid", "knows");
-      db.insertLink("entities/mid", "entities/b", "knows");
-
-      // Shared neighbors for high contentScore
       for (let i = 1; i <= 5; i++) {
-        insertEntity(db, `entities/sn${i}`, `SN${i}`, 3);
-        db.insertLink("concept/a", `entities/sn${i}`, "related");
-        db.insertLink("entities/b", `entities/sn${i}`, "related");
+        insertEntity(db, `entities/n${i}`, `N${i}`, 3);
       }
+      db.insertLink("concept/a", "entities/n1", "knows");
+      db.insertLink("entities/n1", "entities/n2", "knows");
+      db.insertLink("entities/n2", "entities/n3", "knows");
+      db.insertLink("entities/n3", "entities/n4", "knows");
+      db.insertLink("entities/n4", "entities/n5", "knows");
+      db.insertLink("entities/n5", "entities/b", "knows");
+
+      // Disjoint source records → sourceScore = 1.0
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
+         VALUES (?, 'record/daily', ?, ?, ?, ?, ?)`
+      ).run("records/r1", "R1", "r1.md", "h-r1", 3, 2);
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
+         VALUES (?, 'record/daily', ?, ?, ?, ?, ?)`
+      ).run("records/r2", "R2", "r2.md", "h-r2", 3, 2);
+      db.insertLink("records/r1", "concept/a", "mentioned");
+      db.insertLink("records/r2", "entities/b", "mentioned");
 
       const mgr = new ReflectManager(db, pages);
       const adj = (mgr as any).buildAdjacency() as Map<string, Set<string>>;
       const score = await (mgr as any).scoreCandidate("concept/a", "entities/b", adj);
 
-      // Verify conditions
       const pageA = db.getPage("concept/a");
       const pageB = db.getPage("entities/b");
       const isAutoApplicable = score >= 0.8 && !!pageA && !!pageB;
 
-      // Concept(0) + Entity(0) → mixed → typeScore=1.0
-      // dist=2 → pathScore=0.2, sourceScore=0.5, contentScore ~1.0
-      // = 0.35*0.2 + 0.25*0.5 + 0.20*1.0 + 0.20*1.0 = 0.07 + 0.125 + 0.20 + 0.20 = 0.595
-      // Hmm, still < 0.8 with 2-hop. Need longer path.
-      // Actually the score check + page check are separate conditions.
-      // Let's just verify the full formula with score computed and assert the combined condition.
+      expect(score).toBeGreaterThanOrEqual(0.8);
       expect(pageA).not.toBeNull();
       expect(pageB).not.toBeNull();
-
-      if (score >= 0.8) {
-        expect(isAutoApplicable).toBe(true);
-      } else {
-        // Score below 0.8 even with pages — condition should fail
-        expect(isAutoApplicable).toBe(false);
-      }
+      expect(isAutoApplicable).toBe(true);
     });
 
     test("page missing nullifies autoApplicable regardless of score", async () => {
-      insertEntity(db, "entities/a", "A", 5);
-      insertEntity(db, "entities/b", "B", 5);
-      insertEntity(db, "entities/mid", "Mid", 3);
-      db.insertLink("entities/a", "entities/mid", "knows");
-      db.insertLink("entities/mid", "entities/b", "knows");
+      // Same 6-hop construction but delete B's page
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
+         VALUES (?, 'concept/topic', ?, ?, ?, ?, ?)`
+      ).run("concept/a", "ConceptA", "concept/a.md", "h-ca", 5, 3);
+      insertEntity(db, "entities/b", "EntityB", 5);
 
-      // Delete B to make getPage return null
+      for (let i = 1; i <= 5; i++) {
+        insertEntity(db, `entities/n${i}`, `N${i}`, 3);
+      }
+      db.insertLink("concept/a", "entities/n1", "knows");
+      db.insertLink("entities/n1", "entities/n2", "knows");
+      db.insertLink("entities/n2", "entities/n3", "knows");
+      db.insertLink("entities/n3", "entities/n4", "knows");
+      db.insertLink("entities/n4", "entities/n5", "knows");
+      db.insertLink("entities/n5", "entities/b", "knows");
+
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
+         VALUES (?, 'record/daily', ?, ?, ?, ?, ?)`
+      ).run("records/r1", "R1", "r1.md", "h-r1", 3, 2);
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
+         VALUES (?, 'record/daily', ?, ?, ?, ?, ?)`
+      ).run("records/r2", "R2", "r2.md", "h-r2", 3, 2);
+      db.insertLink("records/r1", "concept/a", "mentioned");
+      db.insertLink("records/r2", "entities/b", "mentioned");
+
       db.prepare("DELETE FROM pages WHERE slug = ?").run("entities/b");
 
       const mgr = new ReflectManager(db, pages);
       const adj = (mgr as any).buildAdjacency() as Map<string, Set<string>>;
-      const score = await (mgr as any).scoreCandidate("entities/a", "entities/b", adj);
+      const score = await (mgr as any).scoreCandidate("concept/a", "entities/b", adj);
 
-      const pageA = db.getPage("entities/a");
-      const pageB = db.getPage("entities/b"); // null — deleted
-      const isAutoApplicable = score >= 0.8 && !!pageA && !!pageB;
+      const pageB = db.getPage("entities/b");
+      const isAutoApplicable = score >= 0.8 && !!db.getPage("concept/a") && !!pageB;
 
       expect(pageB).toBeNull();
       expect(isAutoApplicable).toBe(false);
@@ -803,8 +822,6 @@ describe("ReflectManager", () => {
 
       expect(pageA).not.toBeNull();
       expect(pageB).not.toBeNull();
-      // 2-hop same type: pathScore=0.2, typeScore=0.3, contentScore varies
-      // Max: 0.35*0.2 + 0.25*0.5 + 0.20*0.3 + 0.20*1.0 = 0.07+0.125+0.06+0.2 = 0.455
       expect(score).toBeLessThan(0.8);
       expect(isAutoApplicable).toBe(false);
     });
