@@ -10,6 +10,7 @@ import { generateProactiveHints } from "../../core/proactive.js";
 import { extractBirthday } from "../../core/birthday.js";
 import { buildMemorySkeleton } from "../../core/key-points.js";
 import { type SearchTrace } from "../../core/search.js";
+import { traceToSteps } from "../../core/search-trace.js";
 import { collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
 
@@ -68,7 +69,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     let searchResults: Awaited<ReturnType<typeof ctx.search.search>>;
     let usedStrategy: string = strategy ?? "smart";
 
-    if (strategy === "smart") {
+    // Start trace session BEFORE search to capture real latency
+    let traceSessionId: number | undefined;
+    try { traceSessionId = ctx.db.startSearchTraceSession({ query, mode: usedStrategy }); } catch { /* non-critical */ }
+
+    if (usedStrategy === "smart") {
       const resolved = ctx.db.resolveSlugs([query])[0];
       const exactSlug = resolved?.slug ?? null;
 
@@ -84,9 +89,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
           searchResults.unshift({ slug: exactSlug, score: 1.0, snippet: resolved.title ?? query, source: "exact" as const });
         }
       }
-    } else if (strategy === "fts") {
+    } else if (usedStrategy === "fts") {
       searchResults = await ctx.search.search(query, { strategy: "fts", limit: cap, _trace: trace });
-    } else if (strategy === "vector") {
+    } else if (usedStrategy === "vector") {
       searchResults = await ctx.search.search(query, { strategy: "vector", limit: cap, _trace: trace });
     } else {
       searchResults = await ctx.search.search(query, { limit: cap, multiStep, _trace: trace });
@@ -101,6 +106,21 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         strategy_path: usedStrategy, ...trace, result_sources: sourceCounts, requested_limit: cap, multistep: !!multiStep, detail_level: detailLevel ?? "brief",
       });
     } catch { /* non-critical */ }
+
+    // Finish trace session AFTER search with measured latency
+    try {
+      if (traceSessionId != null) {
+        const steps = traceToSteps(traceSessionId, trace);
+        for (const step of steps) ctx.db.addSearchTraceStep(step);
+        ctx.db.finishSearchTraceSession(traceSessionId, {
+          latencyMs: searchLatencyMs,
+          status: searchLatencyMs > 2000 ? "degraded" : (trace.degraded_reason ? "degraded" : "success"),
+          llmCalls: trace.llm_calls,
+          totalSteps: steps.length,
+          summaryJson: { ...trace },
+        });
+      }
+    } catch { /* trace write failure must not break search */ }
 
     // Learning loop: log query + bump activity weights
     const resultSlugs = searchResults.map(r => r.slug);

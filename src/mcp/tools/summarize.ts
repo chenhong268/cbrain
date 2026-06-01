@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity } from "./trim.js";
 import { type SearchTrace } from "../../core/search.js";
+import { traceToSteps } from "../../core/search-trace.js";
 
 const TOP_N = 3;
 
@@ -26,6 +27,11 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
 
     // Step 1: Search
     const trace: SearchTrace = {};
+
+    // Start trace session BEFORE search to capture real latency
+    let traceSessionId: number | undefined;
+    try { traceSessionId = ctx.db.startSearchTraceSession({ query: topic, mode: "explore_topic" }); } catch { /* non-critical */ }
+
     const searchStart = Date.now();
     const searchResults = await ctx.search.search(topic, { limit: cap * 2, _trace: trace });
     const searchLatencyMs = Date.now() - searchStart;
@@ -33,6 +39,21 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
     try { ctx.db.logSearch(topic, "hybrid", searchLatencyMs, searchResults.length, searchLatencyMs > 2000, {
       strategy_path: "explore_topic", ...trace, requested_limit: cap * 2, traverse_depth: traverseDepth, min_weight: minW,
     }); } catch { /* non-critical */ }
+
+    // Finish trace session AFTER search with measured latency
+    try {
+      if (traceSessionId != null) {
+        const steps = traceToSteps(traceSessionId, trace);
+        for (const step of steps) ctx.db.addSearchTraceStep(step);
+        ctx.db.finishSearchTraceSession(traceSessionId, {
+          latencyMs: searchLatencyMs,
+          status: searchLatencyMs > 2000 ? "degraded" : "success",
+          llmCalls: trace.llm_calls,
+          totalSteps: steps.length,
+          summaryJson: { ...trace },
+        });
+      }
+    } catch { /* trace write failure must not break search */ }
 
     if (searchResults.length === 0) {
       return {

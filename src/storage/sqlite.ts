@@ -283,6 +283,7 @@ export class CBrainDB {
     this.migrateLinkDecayFields();
     this.migrateDiscoveries();
     this.migrateSearchLog();
+    this.migrateSearchTraceTables();
     this.migrateRawToRecords();
     this.migrateQueryLog();
     this.migrateActivityWeight();
@@ -1947,6 +1948,103 @@ export class CBrainDB {
     return this.prepare(
       "SELECT id, query, strategy, latency_ms, hit_count, degraded, details_json, created_at FROM search_log ORDER BY id DESC LIMIT $limit"
     ).all({ $limit: limit }) as Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; details_json: string | null; created_at: string }>;
+  }
+
+  // ─── Search trace ─────────────────────────────────────────────
+
+  private migrateSearchTraceTables(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS search_trace_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        intent TEXT,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        ended_at TEXT,
+        latency_ms INTEGER,
+        status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','success','degraded','error')),
+        llm_calls INTEGER NOT NULL DEFAULT 0,
+        total_steps INTEGER NOT NULL DEFAULT 0,
+        summary_json TEXT
+      );
+      CREATE TABLE IF NOT EXISTS search_trace_steps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        step_index INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        input_json TEXT,
+        output_summary TEXT,
+        latency_ms INTEGER,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (session_id) REFERENCES search_trace_sessions(id) ON DELETE CASCADE
+      );
+    `);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_sts_started ON search_trace_sessions(started_at)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_sts_id ON search_trace_sessions(id)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_steps_session ON search_trace_steps(session_id)");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_steps_session_index ON search_trace_steps(session_id, step_index)");
+  }
+
+  startSearchTraceSession(input: import("../core/search-trace.js").StartSearchTraceSessionInput): number {
+    const result = this.prepare(
+      "INSERT INTO search_trace_sessions (query, mode, intent) VALUES ($query, $mode, $intent)"
+    ).run({ $query: input.query, $mode: input.mode, $intent: input.intent ?? null });
+    return Number(result.lastInsertRowid);
+  }
+
+  finishSearchTraceSession(id: number, patch: import("../core/search-trace.js").FinishSearchTraceSessionInput): void {
+    this.prepare(
+      `UPDATE search_trace_sessions
+       SET ended_at = datetime('now'),
+           latency_ms = $latencyMs,
+           status = COALESCE($status, status),
+           llm_calls = COALESCE($llmCalls, llm_calls),
+           total_steps = COALESCE($totalSteps, total_steps),
+           summary_json = COALESCE($summary, summary_json)
+       WHERE id = $id`
+    ).run({
+      $id: id,
+      $latencyMs: patch.latencyMs ?? null,
+      $status: patch.status ?? null,
+      $llmCalls: patch.llmCalls ?? null,
+      $totalSteps: patch.totalSteps ?? null,
+      $summary: patch.summaryJson ? JSON.stringify(patch.summaryJson) : null,
+    });
+  }
+
+  addSearchTraceStep(input: import("../core/search-trace.js").AddSearchTraceStepInput): void {
+    this.prepare(
+      "INSERT INTO search_trace_steps (session_id, step_index, kind, input_json, output_summary, latency_ms, error) VALUES ($sessionId, $stepIndex, $kind, $inputJson, $outputSummary, $latencyMs, $error)"
+    ).run({
+      $sessionId: input.sessionId,
+      $stepIndex: input.stepIndex,
+      $kind: input.kind,
+      $inputJson: input.inputJson ? JSON.stringify(input.inputJson) : null,
+      $outputSummary: input.outputSummary ?? null,
+      $latencyMs: input.latencyMs ?? null,
+      $error: input.error ?? null,
+    });
+  }
+
+  getRecentSearchTraceSessions(limit: number = 20): Array<import("../core/search-trace.js").SearchTraceSessionRow> {
+    const rows = this.prepare(
+      "SELECT id, query, mode, intent, started_at, ended_at, latency_ms, status, llm_calls, total_steps, summary_json FROM search_trace_sessions ORDER BY id DESC LIMIT $limit"
+    ).all({ $limit: limit }) as Array<{ id: number; query: string; mode: string; intent: string | null; started_at: string; ended_at: string | null; latency_ms: number | null; status: string; llm_calls: number; total_steps: number; summary_json: string | null }>;
+    return rows.map(row => ({
+      ...row,
+      summary_json: row.summary_json ? JSON.parse(row.summary_json) : null,
+    }));
+  }
+
+  getSearchTraceSteps(sessionId: number): Array<import("../core/search-trace.js").SearchTraceStepRow> {
+    const rows = this.prepare(
+      "SELECT id, session_id, step_index, kind, input_json, output_summary, latency_ms, error, created_at FROM search_trace_steps WHERE session_id = $sessionId ORDER BY step_index ASC"
+    ).all({ $sessionId: sessionId }) as Array<{ id: number; session_id: number; step_index: number; kind: string; input_json: string | null; output_summary: string | null; latency_ms: number | null; error: string | null; created_at: string }>;
+    return rows.map(row => ({
+      ...row,
+      input_json: row.input_json ? JSON.parse(row.input_json) : null,
+    }));
   }
 
   // ─── Query log (Phase 1) ────────────────────────────────────

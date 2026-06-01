@@ -1331,4 +1331,99 @@ describe("MCP Server", () => {
       expect(data.search_meta.hints_applied).toContain("connection");
     });
   });
+
+  // ─── Search trace integration ────────────────────
+
+  describe("search trace integration", () => {
+    test("query tool writes trace session and steps", async () => {
+      // Seed a page so FTS returns results
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/trace-test", "TraceTest", "trace-test.md", "h1");
+      db.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
+        .run("entities/trace-test", 0, "TraceTest entity for trace integration");
+
+      const server = createServer(deps);
+      await getTools(server).query.handler({ query: "TraceTest" });
+
+      const sessions = db.getRecentSearchTraceSessions(5);
+      // Trace session should exist — query may differ due to strategy normalization
+      expect(sessions.length).toBeGreaterThan(0);
+      const session = sessions[0];
+      expect(session.status).not.toBe("running");
+      expect(session.mode).toBeDefined();
+      expect(session.ended_at).not.toBeNull();
+      expect(session.latency_ms).not.toBeNull();
+      expect(session.latency_ms).toBeGreaterThanOrEqual(0);
+    });
+
+    test("deep_recall tool writes trace session with latency", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/trace-recall", "TraceRecall", "trace-recall.md", "h1");
+
+      const server = createServer(deps);
+      await getTools(server).deep_recall.handler({ query: "TraceRecall" });
+
+      const sessions = db.getRecentSearchTraceSessions(5);
+      const session = sessions.find(s => s.query === "TraceRecall");
+      expect(session).toBeDefined();
+      expect(session!.status).not.toBe("running");
+      expect(session!.latency_ms).not.toBeNull();
+      expect(session!.latency_ms).toBeGreaterThanOrEqual(0);
+    });
+
+    test("summarize tool writes trace session with latency", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/trace-topic", "TraceTopic", "trace-topic.md", "h1");
+
+      const server = createServer(deps);
+      await getTools(server).summarize.handler({ topic: "TraceTopic" });
+
+      const sessions = db.getRecentSearchTraceSessions(5);
+      const session = sessions.find(s => s.query === "TraceTopic");
+      expect(session).toBeDefined();
+      expect(session!.status).not.toBe("running");
+      expect(session!.latency_ms).not.toBeNull();
+      expect(session!.latency_ms).toBeGreaterThanOrEqual(0);
+    });
+
+    test("query without strategy/limit uses smart defaults, not all path", async () => {
+      db.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/default-strat", "DefaultStrat", "default-strat.md", "h1");
+      db.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
+        .run("entities/default-strat", 0, "DefaultStrat entity for default strategy check");
+
+      const server = createServer(deps);
+      // Call handler WITHOUT strategy or limit — Zod defaults don't apply in direct calls
+      const result = await getTools(server).query.handler({ query: "DefaultStrat" });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.results).toBeDefined();
+      expect(Array.isArray(data.results)).toBe(true);
+
+      // Trace session must have mode='smart' (NOT NULL), not fail silently
+      const sessions = db.getRecentSearchTraceSessions(5);
+      const session = sessions.find(s => s.query === "DefaultStrat");
+      expect(session).toBeDefined();
+      expect(session!.mode).toBe("smart");
+      expect(session!.status).not.toBe("running");
+    });
+
+    test("trace failure does not break query tool return", async () => {
+      // Drop the table to force trace write to fail
+      db.prepare("DROP TABLE search_trace_steps").run();
+      db.prepare("DROP TABLE search_trace_sessions").run();
+
+      const server = createServer(deps);
+      const result = await getTools(server).query.handler({ query: "trace-failure-test" });
+      const data = JSON.parse(result.content[0].text);
+
+      // Tool still returns results
+      expect(data.results).toBeDefined();
+      expect(Array.isArray(data.results)).toBe(true);
+    });
+  });
 });
