@@ -93,6 +93,16 @@
 │   信号：有什么发现、漏掉的、关联没注意到、洞察
 │   → list_insights + read_discoveries
 │
+├─ Compounding Review（未来能力，暂不实现）
+│   定义：CBrain 主动呈现基于累积记忆的结构化观察
+│   条件：Evidence≥3 + Persistence≥2时间点 + Novelty + Action Value + Trust Risk 全达标
+│   ⚠️ 不达标时必须沉默，不是降级呈现
+│   ⚠️ 已拒绝的观察不重复提议
+│   ⚠️ 社交情境内容需隐私审查，禁止主动建议联系某人
+│   验收标准：docs/product/compounding-review-acceptance.md
+│   评分维度：evidence / persistence / novelty / action_value / trust_risk
+│   用户动作：accept / reject / defer / disable
+│
 ├─ "时间线/事件回顾"？
 │   信号：时间线、发生了什么、历史记录、什么时候
 │   → get_timeline

@@ -1,0 +1,14 @@
+{"situation": "3条记录（资料D-1、资料D-2、资料D-3）跨越2个月都指向人物A在主题B上的立场不一致，用户尚未明确总结过此模式", "expected_action": "compounding_review", "rationale": "Evidence≥3 + Persistence≥2时间点 + Novelty（用户未总结）+ 可说明行动价值"}
+{"situation": "主题B和主题D在3条独立证据中出现共同因果线索，此前两者无关联记录", "expected_action": "compounding_review", "rationale": "Evidence=3 + 新关联发现 + Novelty。Evidence≥3 是硬门槛，2条证据时应沉默"}
+{"situation": "人物A在时间点T1对主题B表示'方案X更好'，T2（T1+3月）表示'方案Y更合适'，另有资料D-3在T1和T2之间记录了方案X的实际执行困难（独立佐证）", "expected_action": "compounding_review", "rationale": "观点变化跨时间，Evidence=3（T1判断 + T2判断 + 独立佐证），Persistence≥2时间点，Novelty=高，必须标注'可能变化'而非定论"}
+{"situation": "用户在3条不同记录中反复提到主题B的重要性，每次语气一致", "expected_action": "silent", "rationale": "Novelty不达标：用户已明确知道主题B重要，呈现这条无新价值"}
+{"situation": "组织E和主题B在同一篇文章中各被提及一次，无其他关联证据", "expected_action": "silent", "rationale": "Evidence=1（<3），Persistence=1（单次），弱巧合必须沉默"}
+{"situation": "CBrain之前提出'主题B和主题D有关联'，用户reject，之后无新证据", "expected_action": "silent", "rationale": "Rejection memory：已拒绝的观察不重复提议"}
+{"situation": "人物A和人物B在事件C中一起出现，只有1条记录，但user_thought中提到'应该联系人物A'", "expected_action": "silent", "rationale": "社交情境内容 + Evidence不足 + 禁止主动建议联系某人"}
+{"situation": "CBrain扫描全部候选观察，最好的候选只有2条证据来自同一来源", "expected_action": "silent", "rationale": "无候选通过全部5维度，沉默是默认正确行为"}
+{"situation": "用户问'最近有什么发现'", "expected_action": "use:list_insights+read_discoveries", "rationale": "用户主动请求洞察，不是Compounding Review场景，走现有工具"}
+{"situation": "用户问'帮我分析一下主题B和主题D的关系'", "expected_action": "use:brain_storm", "rationale": "用户请求分析推理，不是主动Review，走brain_storm"}
+{"situation": "用户问'主题B和主题D有什么内在联系'", "expected_action": "use:agentic_research", "rationale": "复杂多步研究请求，不是主动Review，走agentic_research"}
+{"situation": "用户说'我之前对主题B的判断是不是变了'", "expected_action": "use:deep_recall", "rationale": "用户主动核查自己的观点变化，走grounded recall，不是Compounding Review"}
+{"situation": "5条记录跨越6个月都围绕主题B，但结论完全一致且用户已明确记录该结论", "expected_action": "silent", "rationale": "Novelty不达标：用户已知结论，呈现无新价值。Persistence虽高但Action Value=0"}
+{"situation": "3条来自不同来源的证据显示事件C的实际影响比用户当时记录的要大，但全部证据信任状态为candidate", "expected_action": "silent", "rationale": "Trust Risk不达标：candidate级内容不能作为Review依据呈现"}

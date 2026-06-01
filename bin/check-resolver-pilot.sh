@@ -69,6 +69,19 @@ else
   fail "agentic.routing-eval.jsonl 不存在"
 fi
 
+if [[ -f "$SKILLS_DIR/compounding-review.routing-eval.jsonl" ]]; then
+  cr_count=$(wc -l < "$SKILLS_DIR/compounding-review.routing-eval.jsonl" | tr -d ' ')
+  cr_pos=$(grep -c '"expected_action": "compounding_review"' "$SKILLS_DIR/compounding-review.routing-eval.jsonl" 2>/dev/null || echo "0")
+  cr_silent=$(grep -c '"expected_action": "silent"' "$SKILLS_DIR/compounding-review.routing-eval.jsonl" 2>/dev/null || echo "0")
+  if (( cr_count >= 10 && cr_pos >= 3 && cr_silent >= 4 )); then
+    pass "compounding-review.routing-eval.jsonl (${cr_count} cases: ${cr_pos} review, ${cr_silent} silent)"
+  else
+    fail "compounding-review.routing-eval.jsonl ${cr_count} cases (需≥10, review≥3, silent≥4), got review=${cr_pos} silent=${cr_silent}"
+  fi
+else
+  fail "compounding-review.routing-eval.jsonl 不存在"
+fi
+
 echo ""
 
 # ── 2. 路由覆盖率 ──
