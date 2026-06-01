@@ -18,6 +18,12 @@
 - 首轮禁止自动 expand_entity（除非用户追问或结果 insufficient）
 - ⚠️ 回答用槽位式压缩：5个槽位（核心设计对象/架构机制/为什么这样选/当时审查/后续变化），结构词硬保留
 
+### Episodic Person Recall（情境找人，优先于通用搜索）
+- 那个人是谁、哪个人、叫什么来着、想不起名字、忘了名字 → query.md [episodic]
+- ⎿条件：时间/地点/事件/场景 + 见过/认识/遇到 + 谁/那个人
+- ⎿示例：去年团建见过谁、上个月聚餐认识的那个、项目上线一起干的人
+- ⚠️ 不适用：用户提到具体人名（"人物A认识谁"）→ 走 query/connect；纯关系查询（"A和B什么关系"）→ 走 connect
+
 ### Relationship Analysis
 - 什么关系、有什么关系、怎么认识的、关联、connect → connect.md
 - A和B、之间、联系、关联分析 → connect.md

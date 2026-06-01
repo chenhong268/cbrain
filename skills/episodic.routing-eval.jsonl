@@ -1,0 +1,9 @@
+{"input": "去年团建见过谁", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "时间+场景+见过+谁 → 情境找人"}
+{"input": "那个人叫什么来着", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发：叫什么来着"}
+{"input": "上个月聚餐认识的那个人", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "时间+场景+认识+那个人"}
+{"input": "项目上线一起干的人是谁", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "事件+一起干+的人"}
+{"input": "人物A认识谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "提到具体人名，不是情境找人"}
+{"input": "A和B什么关系", "expected_skill": "connect.md", "expected_flag": null, "expected_tool": "graph_query", "rationale": "纯关系查询，走 connect"}
+{"input": "组织F团队的人", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "已知实体信息查询，不是忘了名字"}
+{"input": "想不起名字了，就是在某次技术分享上认识的", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发：想不起名字 + 场景线索"}
+{"input": "见过谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "无情境线索，太宽泛，走普通 query"}

@@ -1327,6 +1327,78 @@ describe("MCP Server", () => {
       expect(data.search_meta.hints_applied).toContain("topic");
       expect(data.search_meta.hints_applied).toContain("relation");
     });
+
+    test("event_hint scores against timeline summaries", async () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)",
+      ).run("entities/person-b", "人物B", "b.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO timeline (page_slug, summary, source, trust_state) VALUES (?, ?, ?, ?)",
+      ).run("entities/person-b", "人物B负责项目上线", "dialogue", "trusted");
+
+      const server = createServer(deps);
+      const result = await getTools(server).recall_episode.handler({
+        query: "项目上线参与者",
+        event_hint: "项目上线",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.candidates.length).toBe(1);
+      expect(data.candidates[0].slug).toBe("entities/person-b");
+      expect(data.candidates[0].matched_clues.some((c: any) => c.dimension === "event")).toBe(true);
+      expect(data.search_meta.hints_applied).toContain("event");
+    });
+
+    test("relation_hint produces same dimension as connection_hint", async () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)",
+      ).run("entities/person-c", "人物C", "c.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+      ).run("entities/org-f", "组织F", "f.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run("entities/person-c", "entities/org-f", "works_at", "ner", "trusted", 0.9);
+
+      const server = createServer(deps);
+      const withRelation = await getTools(server).recall_episode.handler({
+        query: "组织F的人",
+        relation_hint: "组织F",
+      });
+      const dataR = JSON.parse(withRelation.content[0].text);
+      expect(dataR.candidates.length).toBe(1);
+      expect(dataR.candidates[0].slug).toBe("entities/person-c");
+      expect(dataR.candidates[0].matched_clues.some((c: any) => c.dimension === "relation")).toBe(true);
+      expect(dataR.search_meta.hints_applied).toContain("relation");
+
+      const withConnection = await getTools(server).recall_episode.handler({
+        query: "组织F的人",
+        connection_hint: "组织F",
+      });
+      const dataC = JSON.parse(withConnection.content[0].text);
+      expect(dataC.candidates[0].slug).toBe("entities/person-c");
+      expect(dataC.candidates[0].matched_clues.some((c: any) => c.dimension === "relation")).toBe(true);
+    });
+
+    test("recall_episode accepts extracted time/context hints from natural prompt", async () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)",
+      ).run("entities/person-d", "人物D", "d.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO timeline (page_slug, summary, source, trust_state) VALUES (?, ?, ?, ?)",
+      ).run("entities/person-d", "人物D参加去年团建活动", "dialogue", "trusted");
+
+      const server = createServer(deps);
+      const result = await getTools(server).recall_episode.handler({
+        query: "去年团建见过谁",
+        time_hint: "去年",
+        context_hint: "团建",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.candidates.length).toBe(1);
+      expect(data.candidates[0].slug).toBe("entities/person-d");
+      expect(data.diagnostics).toBeDefined();
+      expect(data.diagnostics.clues_checked.length).toBeGreaterThan(0);
+    });
   });
 
   // ─── Search trace integration ────────────────────
