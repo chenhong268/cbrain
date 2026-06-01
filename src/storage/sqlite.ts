@@ -87,6 +87,33 @@ export interface CreateInsightInput {
   expiresAt?: string | null;
 }
 
+export type CandidateType = "theme_convergence" | "supported_connection" | "judgment_shift" | "preference_observation" | "other";
+export type CandidateStatus = "pending" | "accepted" | "rejected" | "deferred" | "disabled" | "superseded";
+export type FeedbackAction = "accept" | "reject" | "defer" | "disable" | "superseded" | "reactivate";
+
+export interface CandidateRow {
+  id: number;
+  title: string;
+  summary: string | null;
+  candidate_type: CandidateType;
+  status: CandidateStatus;
+  evidence_json: string | null;
+  scores_json: string | null;
+  source_slugs_json: string | null;
+  content_hash: string;
+  created_at: string;
+  updated_at: string;
+  last_seen_at: string;
+}
+
+export interface CandidateFeedbackRow {
+  id: number;
+  candidate_id: number;
+  action: FeedbackAction;
+  note: string | null;
+  created_at: string;
+}
+
 export class CBrainDB {
   private db: Database;
 
@@ -274,6 +301,34 @@ export class CBrainDB {
         PRIMARY KEY (slug, snapshot_date),
         FOREIGN KEY (slug) REFERENCES pages(slug) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS compounding_review_candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        summary TEXT,
+        candidate_type TEXT NOT NULL CHECK(candidate_type IN ('theme_convergence','supported_connection','judgment_shift','preference_observation','other')),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected','deferred','disabled','superseded')),
+        evidence_json TEXT,
+        scores_json TEXT,
+        source_slugs_json TEXT,
+        content_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS compounding_review_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        candidate_id INTEGER NOT NULL,
+        action TEXT NOT NULL CHECK(action IN ('accept','reject','defer','disable','superseded','reactivate')),
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (candidate_id) REFERENCES compounding_review_candidates(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_crc_status ON compounding_review_candidates(status);
+      CREATE INDEX IF NOT EXISTS idx_crc_last_seen ON compounding_review_candidates(last_seen_at);
+      CREATE INDEX IF NOT EXISTS idx_crf_candidate ON compounding_review_feedback(candidate_id);
     `);
 
     this.migratePagesConstraint();
@@ -2492,6 +2547,118 @@ export class CBrainDB {
         ).run({ $to: link.to_slug, $from: link.from_slug, $rel: reverse });
       }
     }
+  }
+
+  // ─── Compounding Review Candidates ──────────────────────────────
+
+  upsertCandidate(
+    title: string,
+    candidateType: CandidateType,
+    contentHash: string,
+    opts?: {
+      summary?: string;
+      evidenceJson?: string;
+      scoresJson?: string;
+      sourceSlugsJson?: string;
+    },
+  ): { id: number; isNew: boolean } {
+    const existing = this.prepare(
+      "SELECT id, status FROM compounding_review_candidates WHERE content_hash = $hash"
+    ).get({ $hash: contentHash }) as { id: number; status: CandidateStatus } | undefined;
+
+    if (existing) {
+      if (existing.status === "pending" || existing.status === "deferred") {
+        this.prepare(
+          "UPDATE compounding_review_candidates SET last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = $id"
+        ).run({ $id: existing.id });
+      }
+      return { id: existing.id, isNew: false };
+    }
+
+    const r = this.prepare(
+      `INSERT INTO compounding_review_candidates (title, summary, candidate_type, evidence_json, scores_json, source_slugs_json, content_hash)
+       VALUES ($title, $summary, $type, $evidence, $scores, $slugs, $hash)`
+    ).run({
+      $title: title,
+      $summary: opts?.summary ?? null,
+      $type: candidateType,
+      $evidence: opts?.evidenceJson ?? null,
+      $scores: opts?.scoresJson ?? null,
+      $slugs: opts?.sourceSlugsJson ?? null,
+      $hash: contentHash,
+    });
+    return { id: Number(r.lastInsertRowid), isNew: true };
+  }
+
+  getCandidate(id: number): CandidateRow | null {
+    return this.prepare(
+      "SELECT * FROM compounding_review_candidates WHERE id = $id"
+    ).get({ $id: id }) as CandidateRow | null;
+  }
+
+  listCandidates(opts?: {
+    status?: CandidateStatus;
+    includeDeferred?: boolean;
+    limit?: number;
+    offset?: number;
+  }): CandidateRow[] {
+    let sql = "SELECT * FROM compounding_review_candidates WHERE 1=1";
+    const params: Record<string, string | number> = {};
+
+    if (opts?.status) {
+      sql += " AND status = $status";
+      params.$status = opts.status;
+    } else if (opts?.includeDeferred) {
+      sql += " AND status IN ('pending', 'deferred')";
+    } else {
+      sql += " AND status = 'pending'";
+    }
+
+    sql += " ORDER BY last_seen_at DESC";
+
+    if (opts?.limit !== undefined) {
+      sql += " LIMIT $limit";
+      params.$limit = opts.limit;
+    }
+    if (opts?.offset !== undefined) {
+      sql += " OFFSET $offset";
+      params.$offset = opts.offset;
+    }
+
+    return this.prepare(sql).all(params) as CandidateRow[];
+  }
+
+  updateCandidateStatus(id: number, status: CandidateStatus): boolean {
+    const r = this.prepare(
+      "UPDATE compounding_review_candidates SET status = $status, updated_at = datetime('now') WHERE id = $id"
+    ).run({ $status: status, $id: id });
+    return r.changes > 0;
+  }
+
+  insertReviewFeedback(candidateId: number, action: FeedbackAction, note?: string): number {
+    const r = this.prepare(
+      "INSERT INTO compounding_review_feedback (candidate_id, action, note) VALUES ($cid, $action, $note)"
+    ).run({ $cid: candidateId, $action: action, $note: note ?? null });
+    return Number(r.lastInsertRowid);
+  }
+
+  getReviewFeedback(candidateId: number): CandidateFeedbackRow[] {
+    return this.prepare(
+      "SELECT * FROM compounding_review_feedback WHERE candidate_id = $cid ORDER BY created_at DESC"
+    ).all({ $cid: candidateId }) as CandidateFeedbackRow[];
+  }
+
+  countReviewCandidates(status?: CandidateStatus): number {
+    if (status) {
+      const row = this.prepare(
+        "SELECT COUNT(*) as cnt FROM compounding_review_candidates WHERE status = $status"
+      ).get({ $status: status }) as { cnt: number };
+      return row.cnt;
+    }
+    const row = this.prepare(
+      "SELECT COUNT(*) as cnt FROM compounding_review_candidates WHERE status = 'pending'"
+    ).get() as { cnt: number };
+    return row.cnt;
   }
 
   close(): void {
