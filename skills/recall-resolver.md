@@ -82,6 +82,7 @@
 │     情境找人 → recall_episode
 │     内容回忆 → deep_recall(detail: normal)
 │     两人关系 → graph_query / connect
+│   → 回答契约见下方「agentic_research 回答规范」
 │
 ├─ "XX和YY什么关系"？
 │   信号：什么关系、怎么认识的、有什么联系、之间
@@ -113,6 +114,55 @@
 └─ 不确定
     → deep_recall（安全默认，不要退回 query）
 ```
+
+### agentic_research 回答规范
+
+`agentic_research` 返回 `PipelineResult`。Hermes 回答时必须基于 `answer_context` 和 `evidence_board`，禁止暴露内部字段。
+
+**可用**：`status`、`answer_context.topClaims`、`answer_context.gaps`、`answer_context.confidence`、`answer_context.sourceSlugs`（用人名）、`evidence_board.facts`、`evidence_board.user_thoughts`、`evidence_board.candidates`（标注"可能"）、`evidence_board.conflicts`。
+
+**禁止**：`plan`、`execution`、`critic`、`follow_up_*`、`trace_summary`、`intent`、预算字段、步骤列表、工具名、JSON、slug ID、分数。
+
+**status 回答模板：**
+
+```md
+# ok（≤ 400 字）
+[判断，1-2 句]
+支持证据：
+- 事实1
+- 事实2
+- 你的观点：...
+（如有缺口 → 以下是尚未覆盖的角度：...）
+```
+
+```md
+# partial（≤ 600 字）
+[有支撑的判断，1-2 句]
+已确认：事实1、事实2
+待确认：候选1（可能）、候选2（可能）
+不确定的部分：...
+以下是尚未覆盖的角度：...
+```
+
+```md
+# insufficient（≤ 300 字）
+CBrain 目前证据不足以回答这个问题。
+已搜索的角度：角度1、角度2、角度3
+建议：[一句方向性建议，或"可以从XX开始沉淀"]
+```
+
+```md
+# degraded（≤ 300 字）
+[基于有限结果的判断]
+注意：本次搜索未完整执行，以上结论基于部分证据。
+```
+
+**硬规则**：
+- candidates 必须标注"可能/待确认"
+- conflicts 必须显式呈现
+- 禁止末尾追问（"需要我继续查吗"）
+- 缺口不是失败，呈现为"尚未覆盖的角度"
+- 不输出工具名、JSON、slug、分数
 
 ## 体验预算（Grounded Recall 专属）
 

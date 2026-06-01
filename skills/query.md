@@ -43,6 +43,41 @@ When loaded with `[agentic_research]` flag (from RESOLVER.md "Agentic Research" 
 3. **结果使用**：返回结构化 `PipelineResult`，包含 status / evidence_board / answer_context / trace_summary。直接基于 answer_context 回答用户，不需要二次调用工具
 4. **降级**：如果 `agentic_research` 返回 status=insufficient 或 degraded，可补充一次 `deep_recall`，但不要替代 agentic 结果
 
+**回答契约（answer_contract）：**
+
+`agentic_research` 返回 `PipelineResult`。以下是 Hermes 必须遵守的回答规范。
+
+可用字段（user-facing）：
+
+| 字段 | 用途 |
+|:-----|:-----|
+| `status` | ok / partial / insufficient / degraded |
+| `answer_context.topClaims` | 核心事实（最多 10 条，已截断 100 字） |
+| `answer_context.gaps` | 缺口/未覆盖角度（最多 5 条） |
+| `answer_context.confidence` | high / medium / low |
+| `answer_context.sourceSlugs` | 贡献实体（用人名，不输出 slug） |
+| `evidence_board.facts` | 已验证证据 |
+| `evidence_board.user_thoughts` | 用户之前的观点 |
+| `evidence_board.candidates` | 未验证主张 — 必须标注"可能/待确认" |
+| `evidence_board.conflicts` | 矛盾点 — 必须显式呈现 |
+
+禁止暴露字段（internal-only）：`plan`、`execution`、`critic`、`follow_up_execution`、`follow_up_critic`、`trace_summary`、`answer_context.intent`、预算字段、步骤列表、工具名、JSON 片段、slug ID、分数。
+
+按 status 的回答模板：
+
+- **`ok`** — 判断 + 2-4 条关键证据 + 1 条缺口（如有）。≤ 400 字。
+- **`partial`** — 回答有支撑的部分，明确标注哪些不确定。≤ 600 字。
+- **`insufficient`** — 说 CBrain 证据不足，列 2-3 个已搜索角度。≤ 300 字。
+- **`degraded`** — 给有限结果，不过度声称。≤ 300 字。
+
+硬规则：
+- 不输出工具名、JSON、slug ID、分数、trace 字段
+- candidates 必须标注"可能/待确认"
+- conflicts 必须显式呈现，不能回避
+- 禁止末尾追问（"需要我继续查吗"）——说完就停
+- 缺口不是失败，呈现为"以下是尚未覆盖的角度"
+- 答案长度见上方各 status 预算，超标就删条目
+
 **适用条件（满足任一）：**
 - 比较取舍："A 和 B 的差异/取舍/哪个更适合"
 - 盲区/遗漏："我还遗漏了什么/这个判断有什么盲区"

@@ -226,6 +226,25 @@ if [[ -f "$SKILLS_DIR/RESOLVER.md" ]]; then
       fail "RESOLVER.md 有 [agentic_research] 路由，但 query.md 缺少 [agentic_research] Branch"
     fi
   fi
+
+  # Agentic research 回答契约检查
+  if [[ -f "$SKILLS_DIR/query.md" ]] && grep -q '回答契约' "$SKILLS_DIR/query.md" 2>/dev/null; then
+    pass "query.md [agentic_research] 有回答契约"
+  else
+    fail "query.md [agentic_research] 缺少回答契约（answer_contract）"
+  fi
+
+  contract_doc="$PROJECT_DIR/docs/product/agentic-research-answer-contract.md"
+  if [[ -f "$contract_doc" ]]; then
+    fixture_count=$(grep -c '^### Fixture' "$contract_doc" 2>/dev/null || echo "0")
+    if (( fixture_count >= 4 )); then
+      pass "回答契约 smoke fixtures (${fixture_count} 个)"
+    else
+      fail "回答契约 smoke fixtures 只有 ${fixture_count} 个，需要 ≥ 4"
+    fi
+  else
+    fail "docs/product/agentic-research-answer-contract.md 不存在"
+  fi
 fi
 
 echo ""
