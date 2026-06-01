@@ -98,8 +98,7 @@ describe("IngestManager", () => {
       expect(result.created).toBe(true);
       expect(result.slug).toBe("records/张三");
 
-      const row = db
-        .prepare("SELECT * FROM pages WHERE slug = ?")
+      const row = db        .rawDb.prepare("SELECT * FROM pages WHERE slug = ?")
         .get("records/张三") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("张三");
@@ -126,8 +125,7 @@ describe("IngestManager", () => {
         tags: ["人物", "商务"],
       });
 
-      const tags = db
-        .prepare("SELECT tag FROM tags WHERE page_slug = ?")
+      const tags = db        .rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?")
         .all("records/tagged") as any[];
       const tagValues = tags.map((t) => t.tag);
       expect(tagValues).toContain("人物");
@@ -158,8 +156,7 @@ describe("IngestManager", () => {
       expect(result.slug).toBe("brain/entities/person/lisi");
       expect(result.created).toBe(true);
 
-      const row = db
-        .prepare("SELECT * FROM pages WHERE slug = ?")
+      const row = db        .rawDb.prepare("SELECT * FROM pages WHERE slug = ?")
         .get("brain/entities/person/lisi") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("李四");
@@ -227,8 +224,7 @@ describe("IngestManager", () => {
         tags: ["input-tag"],
       });
 
-      const tags = db
-        .prepare("SELECT tag FROM tags WHERE page_slug = ?")
+      const tags = db        .rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?")
         .all("records/tag-priority") as any[];
       const tagValues = tags.map((t) => t.tag);
       expect(tagValues).toContain("fm-tag");
@@ -238,11 +234,11 @@ describe("IngestManager", () => {
 
   describe("link extraction", () => {
     test("creates graph edges for resolved links", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("brain/entities/person/lisi", "entity/person", "李四", "brain/entities/person/lisi.md", "h1");
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("brain/entities/person/wangwu", "entity/person", "王五", "brain/entities/person/wangwu.md", "h2");
 
@@ -259,8 +255,7 @@ describe("IngestManager", () => {
       const result = await ingest.ingest({ content: md, type: "markdown" });
       expect(result.linksExtracted).toBe(2);
 
-      const links = db
-        .prepare("SELECT to_slug FROM links WHERE from_slug = ?")
+      const links = db        .rawDb.prepare("SELECT to_slug FROM links WHERE from_slug = ?")
         .all("records/link-test") as any[];
       const targets = links.map((l) => l.to_slug);
       expect(targets).toContain("brain/entities/person/lisi");
@@ -281,14 +276,13 @@ describe("IngestManager", () => {
       const result = await ingest.ingest({ content: md, type: "markdown" });
       expect(result.linksExtracted).toBe(0);
 
-      const links = db
-        .prepare("SELECT * FROM links WHERE from_slug = ?")
+      const links = db        .rawDb.prepare("SELECT * FROM links WHERE from_slug = ?")
         .all("records/unresolved") as any[];
       expect(links.length).toBe(0);
     });
 
     test("increments mention count on linked pages", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("brain/entities/person/mentioned", "entity/person", "被提及者", "brain/entities/person/mentioned.md", "h1");
 
@@ -304,8 +298,7 @@ describe("IngestManager", () => {
 
       await ingest.ingest({ content: md, type: "markdown" });
 
-      const row = db
-        .prepare("SELECT mention_count FROM pages WHERE slug = ?")
+      const row = db        .rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?")
         .get("brain/entities/person/mentioned") as any;
       expect(row.mention_count).toBe(1);
     });
@@ -322,7 +315,7 @@ describe("IngestManager", () => {
         "Original",
       ].join("\n");
       writeFileSync(join(vaultPath, "brain/entities/person/self-ref.md"), preMd, "utf-8");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("brain/entities/person/self-ref", "entity/person", "SelfRef", "brain/entities/person/self-ref.md", "h1");
 
@@ -338,8 +331,7 @@ describe("IngestManager", () => {
 
       await ingest.ingest({ content: md, type: "markdown" });
 
-      const links = db
-        .prepare("SELECT * FROM links WHERE from_slug = ? AND to_slug = ?")
+      const links = db        .rawDb.prepare("SELECT * FROM links WHERE from_slug = ? AND to_slug = ?")
         .all("brain/entities/person/self-ref", "brain/entities/person/self-ref") as any[];
       expect(links.length).toBe(0);
     });
@@ -367,8 +359,7 @@ describe("IngestManager", () => {
         pageType: "record",
       });
 
-      const logs = db
-        .prepare("SELECT * FROM ingest_log WHERE page_slug LIKE ?")
+      const logs = db        .rawDb.prepare("SELECT * FROM ingest_log WHERE page_slug LIKE ?")
         .all("%logged%") as any[];
       expect(logs.length).toBeGreaterThan(0);
       expect(logs[0].action).toBe("ingest");
@@ -406,7 +397,7 @@ describe("IngestManager", () => {
 
       // Wait for async NER to complete
       await new Promise(r => setTimeout(r, 200));
-      const stubs = db.prepare("SELECT COUNT(*) as cnt FROM tags WHERE tag = 'auto-extracted'").get() as any;
+      const stubs = db.rawDb.prepare("SELECT COUNT(*) as cnt FROM tags WHERE tag = 'auto-extracted'").get() as any;
       expect(stubs.cnt).toBeGreaterThanOrEqual(0);
     });
 
@@ -437,11 +428,11 @@ describe("IngestManager", () => {
       // Wait for async NER to complete
       await new Promise(r => setTimeout(r, 200));
 
-      const lisi = db.prepare("SELECT * FROM pages WHERE title = ?").get("李四") as any;
+      const lisi = db.rawDb.prepare("SELECT * FROM pages WHERE title = ?").get("李四") as any;
       expect(lisi).not.toBeNull();
       expect(lisi.type).toBe("entity/person");
 
-      const xyz = db.prepare("SELECT * FROM pages WHERE title = ?").get("XYZ公司") as any;
+      const xyz = db.rawDb.prepare("SELECT * FROM pages WHERE title = ?").get("XYZ公司") as any;
       expect(xyz).not.toBeNull();
       expect(xyz.type).toBe("entity/company");
     });
@@ -477,7 +468,7 @@ describe("IngestManager", () => {
       // Wait for async NER to complete
       await new Promise(r => setTimeout(r, 200));
 
-      const links = db.prepare("SELECT * FROM links WHERE relation = '任职'").all() as any[];
+      const links = db.rawDb.prepare("SELECT * FROM links WHERE relation = '任职'").all() as any[];
       expect(links.length).toBe(1);
       expect(links[0].relation).toBe("任职");
     });
@@ -509,7 +500,7 @@ describe("IngestManager", () => {
       // Wait for async NER to complete
       await new Promise(r => setTimeout(r, 200));
 
-      const events = db.prepare("SELECT * FROM timeline").all() as any[];
+      const events = db.rawDb.prepare("SELECT * FROM timeline").all() as any[];
       expect(events.length).toBe(1);
       expect(events[0].summary).toBe("赵六创办了DEF科技");
       expect(events[0].source).toBe("ner");
@@ -553,7 +544,7 @@ describe("IngestManager", () => {
       // Wait for async NER to complete
       await new Promise(r => setTimeout(r, 200));
 
-      const stub = db.prepare("SELECT * FROM pages WHERE title = '测试人物'").get() as any;
+      const stub = db.rawDb.prepare("SELECT * FROM pages WHERE title = '测试人物'").get() as any;
       expect(stub).not.toBeNull();
       expect(stub.slug).toContain("测试人物");
 
@@ -562,7 +553,7 @@ describe("IngestManager", () => {
     });
 
     test("reuses existing entity instead of creating duplicate stub", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("brain/entities/person/zhangsan", "entity/person", "张三", "brain/entities/person/zhangsan.md", "h1");
 
@@ -592,7 +583,7 @@ describe("IngestManager", () => {
       // NER is async — wait for background extraction to complete
       await new Promise(r => setTimeout(r, 200));
 
-      const pages = db.prepare("SELECT * FROM pages WHERE title = '张三'").all() as any[];
+      const pages = db.rawDb.prepare("SELECT * FROM pages WHERE title = '张三'").all() as any[];
       expect(pages.length).toBe(1);
     });
   });

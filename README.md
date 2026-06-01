@@ -492,7 +492,13 @@ bun install
 # Run tests
 bun test
 
-# Lint (tsc + biome)
+# Type-check (src only)
+bun run typecheck
+
+# Type-check (src + tests)
+bun run typecheck:tests
+
+# Lint (typecheck src + tests + biome)
 bun run lint
 
 # Full gate (lint + tests)

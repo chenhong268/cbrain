@@ -141,7 +141,7 @@ describe("PageManager", () => {
 
     // Add a link from source
     pm.create({ title: "某公司", type: "entity/person", body: "..." });
-    db.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+    db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run(sourceSlug, "brain/entities/person/某公司", "认识");
 
     const merged = await pm.merge(sourceSlug, targetSlug);
@@ -157,7 +157,7 @@ describe("PageManager", () => {
     expect(merged!.body).toContain("合并自");
 
     // Link moved from source to target
-    const link = db.prepare(
+    const link = db.rawDb.prepare(
       "SELECT from_slug FROM links WHERE from_slug = ? AND to_slug = ?"
     ).get(targetSlug, "brain/entities/person/某公司");
     expect(link).toBeDefined();

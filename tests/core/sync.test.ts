@@ -127,8 +127,7 @@ describe("SyncManager", () => {
       expect(report.skipped).toBe(0);
       expect(report.errors).toBe(0);
 
-      const row = db
-        .prepare("SELECT * FROM pages WHERE slug = ?")
+      const row = db        .rawDb.prepare("SELECT * FROM pages WHERE slug = ?")
         .get("entities/zhangsan") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("张三");
@@ -185,7 +184,7 @@ describe("SyncManager", () => {
 
       await sync.syncAll(vaultPath);
 
-      const logs = db.prepare("SELECT * FROM ingest_log WHERE page_slug = ?").all("entities/logged") as any[];
+      const logs = db.rawDb.prepare("SELECT * FROM ingest_log WHERE page_slug = ?").all("entities/logged") as any[];
       expect(logs.length).toBeGreaterThan(0);
       expect(logs[0].action).toBe("sync");
     });
@@ -225,7 +224,7 @@ describe("SyncManager", () => {
       const result = await sync.syncPage("brain/entities/person/single", vaultPath);
       expect(result.success).toBe(true);
 
-      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("brain/entities/person/single") as any;
+      const row = db.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("brain/entities/person/single") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("Single");
     });
@@ -251,10 +250,10 @@ describe("SyncManager", () => {
 
   describe("removeOrphans", () => {
     test("removes pages in SQLite but not in vault", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/orphan", "entity/person", "Orphan", "entities/orphan.md", "hash1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/real", "entity/person", "Real", "entities/real.md", "hash2");
 
@@ -265,8 +264,8 @@ describe("SyncManager", () => {
       expect(removed).toContain("entities/orphan");
       expect(removed).not.toContain("entities/real");
 
-      expect(db.prepare("SELECT * FROM pages WHERE slug = ?").get("entities/orphan")).toBeNull();
-      expect(db.prepare("SELECT * FROM pages WHERE slug = ?").get("entities/real")).not.toBeNull();
+      expect(db.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("entities/orphan")).toBeNull();
+      expect(db.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("entities/real")).not.toBeNull();
 
       expect(lance.deleted).toContain("entities/orphan");
     });
@@ -274,7 +273,7 @@ describe("SyncManager", () => {
     test("returns empty when no orphans", async () => {
       writeMdFile(vaultPath, "entities/only-real.md", { title: "OnlyReal", type: "entity/person", slug: "entities/only-real" }, "Content");
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/only-real", "entity/person", "OnlyReal", "entities/only-real.md", "hash1");
 
@@ -283,10 +282,10 @@ describe("SyncManager", () => {
     });
 
     test("removes multiple orphans", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/orphan1", "entity/person", "O1", "o1.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/orphan2", "entity/person", "O2", "o2.md", "h2");
 
@@ -369,13 +368,13 @@ describe("SyncManager", () => {
       await failSync.removePage("records/del-test");
 
       // SQLite page is gone (source of truth deleted)
-      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("records/del-test") as any;
+      const row = db.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("records/del-test") as any;
       expect(row).toBeNull();
     });
 
     test("removeOrphans: SQLite deleted first, LanceDB failure tolerated", async () => {
       // Seed an orphan (in DB but not in vault)
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("records/orphan-del", "record", "OrphanDel", "records/orphan-del.md", "hash1");
 
@@ -387,7 +386,7 @@ describe("SyncManager", () => {
 
       expect(orphans).toContain("records/orphan-del");
       // SQLite page is gone
-      const row = db.prepare("SELECT * FROM pages WHERE slug = ?").get("records/orphan-del") as any;
+      const row = db.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("records/orphan-del") as any;
       expect(row).toBeNull();
     });
 

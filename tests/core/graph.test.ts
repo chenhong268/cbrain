@@ -5,7 +5,7 @@ import { CBrainDB } from "../../src/storage/sqlite.js";
 import { GraphManager } from "../../src/core/graph.js";
 
 function insertPage(db: CBrainDB, slug: string, title: string, type: string, mentionCount = 0) {
-  db.prepare(
+  db.rawDb.prepare(
     `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count) VALUES (?, ?, ?, ?, ?, ?)`
   ).run(slug, type, title, `${slug}.md`, `h-${slug}`, mentionCount);
 }

@@ -23,7 +23,7 @@ describe("HealthChecker", () => {
   });
 
   function insertPage(slug: string, title: string, type: string, overrides: Record<string, unknown> = {}) {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(
@@ -36,7 +36,7 @@ describe("HealthChecker", () => {
   }
 
   function insertLink(from: string, to: string, relation = "提及") {
-    db.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run(from, to, relation);
   }
 

@@ -49,7 +49,7 @@ describe("SealManager", () => {
   });
 
   function insertPage(slug: string, title: string) {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, 'h1')`
     ).run(slug, title, `${slug}.md`);
   }

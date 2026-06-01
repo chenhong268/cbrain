@@ -25,7 +25,7 @@ describe("ProvenanceManager", () => {
   });
 
   function seedPage(slug: string, title: string) {
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path) VALUES ($slug, 'entity/person', $title, $path)"
     ).run({ $slug: slug, $title: title, $path: `${slug}.md` });
   }

@@ -53,9 +53,9 @@ describe("clean-timeline", () => {
     const db = makeDB(testDir);
     seedPage(db, "test/slug", "entity/person", "Test");
 
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: null, $summary: "null date entry" });
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: "2024-01-01", $summary: "valid entry" });
     db.close();
 
@@ -63,7 +63,7 @@ describe("clean-timeline", () => {
     expect(result).toContain("1 deleted");
 
     const db2 = makeDB(testDir);
-    const remaining = db2.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE event_date IS NULL").get() as any;
+    const remaining = db2.rawDb.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE event_date IS NULL").get() as any;
     expect(remaining.cnt).toBe(0);
     db2.close();
   });
@@ -73,7 +73,7 @@ describe("clean-timeline", () => {
     const db = makeDB(testDir);
     seedPage(db, "test/slug", "entity/company", "Test");
 
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: "2024", $summary: "year only" });
     db.close();
 
@@ -81,7 +81,7 @@ describe("clean-timeline", () => {
     expect(result).toContain("1 normalized");
 
     const db2 = makeDB(testDir);
-    const row = db2.prepare("SELECT event_date FROM timeline WHERE summary = 'year only'").get() as any;
+    const row = db2.rawDb.prepare("SELECT event_date FROM timeline WHERE summary = 'year only'").get() as any;
     expect(row.event_date).toBe("2024-01-01");
     db2.close();
   });
@@ -91,7 +91,7 @@ describe("clean-timeline", () => {
     const db = makeDB(testDir);
     seedPage(db, "test/slug", "entity/company", "Test");
 
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: "2024-06", $summary: "month only" });
     db.close();
 
@@ -99,7 +99,7 @@ describe("clean-timeline", () => {
     expect(result).toContain("1 normalized");
 
     const db2 = makeDB(testDir);
-    const row = db2.prepare("SELECT event_date FROM timeline WHERE summary = 'month only'").get() as any;
+    const row = db2.rawDb.prepare("SELECT event_date FROM timeline WHERE summary = 'month only'").get() as any;
     expect(row.event_date).toBe("2024-06-01");
     db2.close();
   });
@@ -109,9 +109,9 @@ describe("clean-timeline", () => {
     const db = makeDB(testDir);
     seedPage(db, "test/slug", "entity/drug", "Test");
 
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: "已完成", $summary: "status not date" });
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: "null", $summary: "string null" });
     db.close();
 
@@ -119,7 +119,7 @@ describe("clean-timeline", () => {
     expect(result).toContain("2 deleted");
 
     const db2 = makeDB(testDir);
-    const remaining = db2.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE page_slug = 'test/slug'").get() as any;
+    const remaining = db2.rawDb.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE page_slug = 'test/slug'").get() as any;
     expect(remaining.cnt).toBe(0);
     db2.close();
   });
@@ -129,7 +129,7 @@ describe("clean-timeline", () => {
     const db = makeDB(testDir);
     seedPage(db, "test/slug", "concept/model", "Test");
 
-    const stmt = db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)");
+    const stmt = db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)");
     stmt.run({ $slug: "test/slug", $date: "2024-03-15", $summary: "duplicate event" });
     stmt.run({ $slug: "test/slug", $date: "2024-03-15", $summary: "duplicate event" });
     stmt.run({ $slug: "test/slug", $date: "2024-03-15", $summary: "unique event" });
@@ -140,7 +140,7 @@ describe("clean-timeline", () => {
     expect(result).toContain("1 deleted");
 
     const db2 = makeDB(testDir);
-    const remaining = db2.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE page_slug = 'test/slug'").get() as any;
+    const remaining = db2.rawDb.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE page_slug = 'test/slug'").get() as any;
     expect(remaining.cnt).toBe(2);
     db2.close();
   });
@@ -150,7 +150,7 @@ describe("clean-timeline", () => {
     const db = makeDB(testDir);
     seedPage(db, "test/slug", "entity/person", "Test");
 
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: null, $summary: "null date" });
     db.close();
 
@@ -158,7 +158,7 @@ describe("clean-timeline", () => {
     expect(result).toContain("DRY RUN");
 
     const db2 = makeDB(testDir);
-    const remaining = db2.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE event_date IS NULL").get() as any;
+    const remaining = db2.rawDb.prepare("SELECT COUNT(*) as cnt FROM timeline WHERE event_date IS NULL").get() as any;
     expect(remaining.cnt).toBe(1);
     db2.close();
   });
@@ -168,9 +168,9 @@ describe("clean-timeline", () => {
     const db = makeDB(testDir);
     seedPage(db, "test/slug", "entity/person", "Test");
 
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: "1926年", $summary: "chinese year" });
-    db.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES ($slug, $date, $summary)")
       .run({ $slug: "test/slug", $date: "公元前384", $summary: "ancient" });
     db.close();
 
@@ -178,7 +178,7 @@ describe("clean-timeline", () => {
     expect(result).toContain("2 normalized");
 
     const db2 = makeDB(testDir);
-    const rows = db2.prepare("SELECT event_date, summary FROM timeline WHERE page_slug = 'test/slug' ORDER BY event_date").all() as any[];
+    const rows = db2.rawDb.prepare("SELECT event_date, summary FROM timeline WHERE page_slug = 'test/slug' ORDER BY event_date").all() as any[];
     expect(rows).toHaveLength(2);
     expect(rows[0].event_date).toBe("-0384-01-01");
     expect(rows[1].event_date).toBe("1926-01-01");

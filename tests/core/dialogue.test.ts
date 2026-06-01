@@ -91,18 +91,18 @@ describe("DialogueIngest", () => {
       expect(result.skipped).toBe(0);
 
       // Verify entities created
-      const chen = db.prepare("SELECT * FROM pages WHERE title = '陈博士'").get() as any;
+      const chen = db.rawDb.prepare("SELECT * FROM pages WHERE title = '陈博士'").get() as any;
       expect(chen).not.toBeNull();
       expect(chen.type).toBe("entity/person");
 
-      const xyz = db.prepare("SELECT * FROM pages WHERE title = 'XYZ研究所'").get() as any;
+      const xyz = db.rawDb.prepare("SELECT * FROM pages WHERE title = 'XYZ研究所'").get() as any;
       expect(xyz).not.toBeNull();
       expect(xyz.type).toBe("entity/company");
     });
 
     test("skips entities that already exist", async () => {
       // Pre-create an entity
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
       ).run("brain/entities/张三", "entity/person", "张三", "brain/entities/张三.md", "h1");
 
@@ -128,7 +128,7 @@ describe("DialogueIngest", () => {
       expect(result.skipped).toBe(1); // 张三被跳过
 
       // 张三 mention_count 应该增加
-      const zhang = db.prepare("SELECT mention_count FROM pages WHERE slug = 'brain/entities/张三'").get() as any;
+      const zhang = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = 'brain/entities/张三'").get() as any;
       expect(zhang.mention_count).toBe(1);
     });
 
@@ -153,7 +153,7 @@ describe("DialogueIngest", () => {
 
       expect(result.newEvents).toBe(1);
 
-      const events = db.prepare("SELECT * FROM timeline WHERE source = 'dialogue'").all() as any[];
+      const events = db.rawDb.prepare("SELECT * FROM timeline WHERE source = 'dialogue'").all() as any[];
       expect(events.length).toBe(1);
       expect(events[0].summary).toBe("王五去北京出差");
     });
@@ -212,13 +212,13 @@ describe("DialogueIngest", () => {
   describe("incremental filtering", () => {
     test("skips relations that already exist in DB", async () => {
       // Pre-create two entities with a relation
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
       ).run("brain/entities/甲公司", "entity/company", "甲公司", "brain/entities/甲公司.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
       ).run("brain/entities/张三", "entity/person", "张三", "brain/entities/张三.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("brain/entities/张三", "brain/entities/甲公司", "任职");
 
@@ -249,10 +249,10 @@ describe("DialogueIngest", () => {
 
     test("creates new relation between existing entities", async () => {
       // Pre-create two entities without relation
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
       ).run("brain/entities/李四", "entity/person", "李四", "brain/entities/李四.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
       ).run("brain/entities/乙公司", "entity/company", "乙公司", "brain/entities/乙公司.md", "h1");
 
@@ -278,7 +278,7 @@ describe("DialogueIngest", () => {
       expect(result.newEntities).toBe(0);
       expect(result.newRelations).toBe(1);
 
-      const links = db.prepare("SELECT * FROM links WHERE relation = '任职'").all() as any[];
+      const links = db.rawDb.prepare("SELECT * FROM links WHERE relation = '任职'").all() as any[];
       expect(links.length).toBe(1);
     });
   });
@@ -299,7 +299,7 @@ describe("DialogueIngest", () => {
 
       await dialogue.ingest("用户：新人物出现了");
 
-      const logs = db.prepare("SELECT * FROM ingest_log WHERE action = 'manual'").all() as any[];
+      const logs = db.rawDb.prepare("SELECT * FROM ingest_log WHERE action = 'manual'").all() as any[];
       expect(logs.length).toBe(1);
       const details = JSON.parse(logs[0].details);
       expect(details.newEntities).toBe(1);
@@ -323,7 +323,7 @@ describe("DialogueIngest", () => {
       expect(result.reason).toBe("no actionable facts");
       expect(result.newEntities).toBe(0);
 
-      const logs = db.prepare("SELECT * FROM ingest_log WHERE action = 'auto'").all() as any[];
+      const logs = db.rawDb.prepare("SELECT * FROM ingest_log WHERE action = 'auto'").all() as any[];
       expect(logs.length).toBe(1);
     });
 
@@ -381,7 +381,7 @@ describe("DialogueIngest", () => {
       expect(result.filtered[0].reason).toContain("auto_medium_skipped");
 
       // No stub file created
-      const page = db.prepare("SELECT * FROM pages WHERE title = '孙八'").get() as any;
+      const page = db.rawDb.prepare("SELECT * FROM pages WHERE title = '孙八'").get() as any;
       expect(page).toBeNull();
     });
 

@@ -79,7 +79,7 @@ describe("clean-shells", () => {
 
     seedPage(db, testDir, "brain/entities/person/ghost", "entity/person", "Ghost", "Some content.");
     seedPage(db, testDir, "brain/entities/company/alive", "entity/company", "Alive", "Some content.");
-    db.insertLink("brain/entities/company/alive", "brain/entities/person/ghost", "提及", 0.5);
+    db.insertLink("brain/entities/company/alive", "brain/entities/person/ghost", "提及", null, 0.5);
     db.close();
 
     // Ghost has a link now → not a shell. Create a real shell.
@@ -101,7 +101,7 @@ describe("clean-shells", () => {
 
     seedPage(db, testDir, "brain/entities/person/linked", "entity/person", "Linked");
     seedPage(db, testDir, "brain/entities/company/target", "entity/company", "Target");
-    db.insertLink("brain/entities/person/linked", "brain/entities/company/target", "提及", 0.5);
+    db.insertLink("brain/entities/person/linked", "brain/entities/company/target", "提及", null, 0.5);
     db.close();
 
     const result = runCleanShells(configPath, "--dry-run");

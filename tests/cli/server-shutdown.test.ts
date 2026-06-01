@@ -1,9 +1,27 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createServer as createNetServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
+import type { SyncManager } from "../../src/core/sync.js";
 
 const PROJECT_ROOT = process.cwd();
+
+function getAvailablePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = createNetServer();
+    s.listen(0, "127.0.0.1", () => {
+      const addr = s.address();
+      if (addr && typeof addr === "object") {
+        const port = addr.port;
+        s.close(() => resolve(port));
+      } else {
+        s.close(() => reject(new Error("Failed to get port")));
+      }
+    });
+    s.on("error", reject);
+  });
+}
 
 async function waitForHealth(port: number, timeoutMs = 15_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -35,7 +53,6 @@ describe("serve --http subprocess shutdown", () => {
   const vaultPath = join(testDir, "vault");
   const dbPath = join(testDir, "brain.sqlite");
   const lancePath = join(testDir, "lancedb");
-  const port = 19876;
   const configPath = join(testDir, "cbrain.json");
   const pidFile = join(testDir, "cbrain-http.pid");
   const watcherLockFile = join(testDir, ".watcher.lock");
@@ -58,6 +75,8 @@ describe("serve --http subprocess shutdown", () => {
   });
 
   test("SIGTERM stops real serve --http, releases PID lock + watcher lock, frees port", async () => {
+    const port = await getAvailablePort();
+
     const child = spawn("bun", [
       join(PROJECT_ROOT, "src/cli/index.ts"),
       "serve", "--http", "--port", String(port), "--force",
@@ -179,7 +198,7 @@ describe("Cross-process quarantine release (dual context)", () => {
     seedQuarantine({ "fail": {} });
 
     // Context 1: watcher owner process — loads quarantine from DB on construction
-    const watcher = new FileWatcher(noOpSync, vaultPath, { db });
+    const watcher = new FileWatcher(noOpSync as unknown as SyncManager, vaultPath, { db });
     expect(watcher.getQuarantineSize()).toBe(1);
 
     // Context 2: Agent's stdio MCP process — modifies DB directly (no ctx.watcher)
@@ -200,7 +219,7 @@ describe("Cross-process quarantine release (dual context)", () => {
   test("watcher picks up DB-side release_all on next scan", async () => {
     seedQuarantine({ "fail1": {}, "fail2": {} });
 
-    const watcher = new FileWatcher(noOpSync, vaultPath, { db });
+    const watcher = new FileWatcher(noOpSync as unknown as SyncManager, vaultPath, { db });
     expect(watcher.getQuarantineSize()).toBe(2);
 
     // Context 2: Agent's MCP releases all via DB
@@ -217,7 +236,7 @@ describe("Cross-process quarantine release (dual context)", () => {
   test("watcher re-syncs partial DB release", async () => {
     seedQuarantine({ "fail-a": {}, "fail-b": {} });
 
-    const watcher = new FileWatcher(noOpSync, vaultPath, { db });
+    const watcher = new FileWatcher(noOpSync as unknown as SyncManager, vaultPath, { db });
     expect(watcher.getQuarantineSize()).toBe(2);
 
     // Context 2: MCP releases only fail-a via DB

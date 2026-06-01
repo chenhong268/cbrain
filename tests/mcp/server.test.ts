@@ -3,7 +3,6 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
-import { PageManager } from "../../src/core/page.js";
 import { ProvenanceManager } from "../../src/core/provenance.js";
 import { SqliteProvenanceStore } from "../../src/storage/provenance-store.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
@@ -107,16 +106,16 @@ describe("MCP Server", () => {
     });
 
     test("returns counts after inserting data", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/test", "Test", "test.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "ha");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/b", "B", "b.md", "hb");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/a", "entities/b", "mentions");
 
@@ -130,7 +129,7 @@ describe("MCP Server", () => {
 
   describe("get_page tool", () => {
     test("returns page by slug", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/zhangsan", "张三", "zhangsan.md", "h1");
 
@@ -159,10 +158,10 @@ describe("MCP Server", () => {
     });
 
     test("filters by type", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'concept', ?, ?, ?)`
       ).run("concepts/b", "B", "b.md", "h2");
 
@@ -175,7 +174,7 @@ describe("MCP Server", () => {
 
     test("respects limit and offset", async () => {
       for (let i = 0; i < 5; i++) {
-        db.prepare(
+        db.rawDb.prepare(
           `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
         ).run(`entities/e${i}`, `E${i}`, `e${i}.md`, `h${i}`);
       }
@@ -189,7 +188,7 @@ describe("MCP Server", () => {
 
   describe("enrich tool", () => {
     test("enriches single entity", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'entity', ?, ?, ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1", 5, 3);
@@ -202,11 +201,11 @@ describe("MCP Server", () => {
     });
 
     test("enriches all entities", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1", 2, 3);
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
       ).run("entities/b", "B", "b.md", "h2", 10, 3);
@@ -220,13 +219,13 @@ describe("MCP Server", () => {
 
   describe("graph_query tool", () => {
     test("traverse from seed", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/b", "B", "b.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/a", "entities/b", "mentions");
 
@@ -239,13 +238,13 @@ describe("MCP Server", () => {
     });
 
     test("backlinks mode", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/b", "B", "b.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/b", "entities/a", "mentions");
 
@@ -258,13 +257,13 @@ describe("MCP Server", () => {
     });
 
     test("related mode", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count) VALUES (?, 'entity', ?, ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1", 0);
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count) VALUES (?, 'entity', ?, ?, ?, ?)`
       ).run("entities/b", "B", "b.md", "h2", 5);
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/a", "entities/b", "mentions");
 
@@ -331,7 +330,7 @@ describe("MCP Server", () => {
 
   describe("delete_page tool", () => {
     test("deletes a page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/todel", "Del", "del.md", "h1");
 
@@ -340,7 +339,7 @@ describe("MCP Server", () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(true);
 
-      const page = db.prepare("SELECT * FROM pages WHERE slug = ?").get("entities/todel");
+      const page = db.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("entities/todel");
       expect(page).toBeNull();
     });
 
@@ -354,7 +353,7 @@ describe("MCP Server", () => {
 
   describe("resolve_slugs tool", () => {
     test("resolves title to slugs", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/zhangsan", "张三", "zhangsan.md", "h1");
 
@@ -370,7 +369,7 @@ describe("MCP Server", () => {
     test("appends content to existing page", async () => {
       mkdirSync(join(vaultPath, "entities"), { recursive: true });
       writeFileSync(join(vaultPath, "entities", "test.md"), "---\ntitle: Test\ntype: entity\n---\noriginal content", "utf-8");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/test", "Test", "entities/test.md", "h1");
 
@@ -398,7 +397,7 @@ describe("MCP Server", () => {
 
   describe("generate_indexes tool", () => {
     test("generates index pages", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1");
 
@@ -411,7 +410,7 @@ describe("MCP Server", () => {
 
   describe("remove_orphans tool", () => {
     test("removes orphaned DB entries", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/orphan", "Orphan", "nonexistent.md", "h1");
 
@@ -424,7 +423,7 @@ describe("MCP Server", () => {
 
   describe("health tool", () => {
     test("returns health report", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count) VALUES (?, 'entity', ?, ?, ?, ?)`
       ).run("entities/h1", "H1", "h1.md", "h1", 3);
 
@@ -450,11 +449,11 @@ describe("MCP Server", () => {
 
   describe("get_tags tool", () => {
     test("returns tags for a page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/tagged", "Tagged", "tagged.md", "h1");
-      db.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tagged", "ai");
-      db.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tagged", "product");
+      db.rawDb.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tagged", "ai");
+      db.rawDb.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tagged", "product");
 
       const server = createServer(deps);
       const result = await getTools(server).get_tags.handler({ slug: "entities/tagged" });
@@ -467,7 +466,7 @@ describe("MCP Server", () => {
 
   describe("add_tag tool", () => {
     test("adds a tag to a page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/t1", "T1", "t1.md", "h1");
 
@@ -476,24 +475,24 @@ describe("MCP Server", () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(true);
 
-      const cnt = db.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ?").get("entities/t1") as { c: number };
+      const cnt = db.rawDb.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ?").get("entities/t1") as { c: number };
       expect(cnt.c).toBe(1);
     });
   });
 
   describe("remove_tag tool", () => {
     test("removes a tag from a page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/t2", "T2", "t2.md", "h1");
-      db.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/t2", "old-tag");
+      db.rawDb.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/t2", "old-tag");
 
       const server = createServer(deps);
       const result = await getTools(server).remove_tag.handler({ slug: "entities/t2", tag: "old-tag" });
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(true);
 
-      const cnt = db.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ?").get("entities/t2") as { c: number };
+      const cnt = db.rawDb.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ?").get("entities/t2") as { c: number };
       expect(cnt.c).toBe(0);
     });
   });
@@ -502,13 +501,13 @@ describe("MCP Server", () => {
 
   describe("get_links tool", () => {
     test("returns links for a page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/from", "From", "from.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/to", "To", "to.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/from", "entities/to", "mentions");
 
@@ -520,13 +519,13 @@ describe("MCP Server", () => {
     });
 
     test("returns backlinks when direction is 'to'", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/lfrom", "LFrom", "lfrom.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/lto", "LTo", "lto.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/lfrom", "entities/lto", "mentions");
 
@@ -539,13 +538,13 @@ describe("MCP Server", () => {
 
   describe("remove_link tool", () => {
     test("removes a link between pages", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/rl1", "RL1", "rl1.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/rl2", "RL2", "rl2.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/rl1", "entities/rl2", "mentions");
 
@@ -563,7 +562,7 @@ describe("MCP Server", () => {
 
   describe("add_timeline_entry tool", () => {
     test("adds a timeline event for a page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/tl", "TL", "tl.md", "h1");
 
@@ -582,10 +581,10 @@ describe("MCP Server", () => {
     test("returns timeline events for a page", async () => {
       mkdirSync(join(vaultPath, "entities"), { recursive: true });
       writeFileSync(join(vaultPath, "entities", "tl2.md"), "---\ntitle: TL2\ntype: entity\n---\n| 2026.01 | Event |");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/tl2", "TL2", "entities/tl2.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO timeline (page_slug, summary, event_date) VALUES (?, ?, ?)"
       ).run("entities/tl2", "Event 1", "2026-01-01");
 
@@ -602,10 +601,10 @@ describe("MCP Server", () => {
 
   describe("get_chunks tool", () => {
     test("returns chunks for a page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/chunked", "Chunked", "chunked.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)"
       ).run("entities/chunked", 0, "Hello world");
 
@@ -619,7 +618,7 @@ describe("MCP Server", () => {
 
   describe("get_ingest_log tool", () => {
     test("returns ingest log entries", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO ingest_log (source_type, action, page_slug, details) VALUES (?, ?, ?, ?)"
       ).run("text", "ingest", "entities/logtest", "Test entry");
 
@@ -635,10 +634,10 @@ describe("MCP Server", () => {
 
   describe("get_versions tool", () => {
     test("returns versions for a page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/ver", "Ver", "ver.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO versions (page_slug, version, content) VALUES (?, ?, ?)"
       ).run("entities/ver", 1, "v1 content");
 
@@ -655,10 +654,10 @@ describe("MCP Server", () => {
     test("reverts to a specific version", async () => {
       mkdirSync(join(vaultPath, "entities"), { recursive: true });
       writeFileSync(join(vaultPath, "entities", "rev.md"), "---\ntitle: Rev\ntype: entity\n---\noriginal", "utf-8");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/rev", "Rev", "entities/rev.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO versions (page_slug, version, content) VALUES (?, ?, ?)"
       ).run("entities/rev", 1, "original content");
 
@@ -672,7 +671,7 @@ describe("MCP Server", () => {
     });
 
     test("returns error for missing version", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/rev2", "Rev2", "entities/rev2.md", "h1");
 
@@ -703,7 +702,7 @@ describe("MCP Server", () => {
 
   describe("job_list tool", () => {
     test("lists jobs", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
       ).run("test-job", "pending", 0);
 
@@ -714,10 +713,10 @@ describe("MCP Server", () => {
     });
 
     test("filters by status", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
       ).run("done-job", "done", 0);
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
       ).run("pending-job", "pending", 0);
 
@@ -730,7 +729,7 @@ describe("MCP Server", () => {
 
   describe("job_status tool", () => {
     test("returns job details", async () => {
-      const info = db.prepare(
+      const info = db.rawDb.prepare(
         "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
       ).run("status-job", "pending", 0);
       const id = Number(info.lastInsertRowid);
@@ -751,7 +750,7 @@ describe("MCP Server", () => {
 
   describe("job_cancel tool", () => {
     test("cancels a pending job", async () => {
-      const info = db.prepare(
+      const info = db.rawDb.prepare(
         "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
       ).run("cancel-job", "pending", 0);
       const id = Number(info.lastInsertRowid);
@@ -765,7 +764,7 @@ describe("MCP Server", () => {
 
   describe("job_retry tool", () => {
     test("retries a failed job", async () => {
-      const info = db.prepare(
+      const info = db.rawDb.prepare(
         "INSERT INTO jobs (name, status, priority, attempts, max_attempts) VALUES (?, ?, ?, ?, ?)"
       ).run("retry-job", "failed", 0, 1, 3);
       const id = Number(info.lastInsertRowid);
@@ -780,25 +779,23 @@ describe("MCP Server", () => {
   // ─── merge_pages ─────────────────────────────────
   describe("merge_pages tool", () => {
     test("merges source into target", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/merge_src", "MergeSrc", "brain/entities/MergeSrc.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/merge_tgt", "MergeTgt", "brain/entities/MergeTgt.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/other", "Other", "brain/entities/Other.md", "h3");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/merge_src", "entities/other", "认识");
 
       mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
       writeFileSync(join(vaultPath, "brain/entities/MergeSrc.md"), "---\ntitle: MergeSrc\ntype: entity\nslug: entities/merge_src\n---\n# MergeSrc\n\nSource body.");
       writeFileSync(join(vaultPath, "brain/entities/MergeTgt.md"), "---\ntitle: MergeTgt\ntype: entity\nslug: entities/merge_tgt\n---\n# MergeTgt\n\nTarget body.");
-      const pageMgr = new PageManager(db, vaultPath);
-
-      const server = createServer({ ...deps, pages: pageMgr });
+      const server = createServer(deps);
       const result = await getTools(server).merge_pages.handler({
         source: "entities/merge_src",
         target: "entities/merge_tgt",
@@ -807,9 +804,9 @@ describe("MCP Server", () => {
       expect(data.success).toBe(true);
       expect(data.merged).toBe("entities/merge_tgt");
       // Source should be deleted
-      expect(db.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/merge_src")).toBeNull();
+      expect(db.rawDb.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/merge_src")).toBeNull();
       // Link should have been moved
-      const link = db.prepare("SELECT from_slug, to_slug FROM links WHERE from_slug = ?").get("entities/merge_tgt");
+      const link = db.rawDb.prepare("SELECT from_slug, to_slug FROM links WHERE from_slug = ?").get("entities/merge_tgt");
       expect(link).toBeDefined();
     });
 
@@ -829,7 +826,7 @@ describe("MCP Server", () => {
     function seedPageWithBody(slug: string, title: string, body: string) {
       const type = "entity";
       const filePath = `brain/entities/${title}.md`;
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run(slug, type, title, filePath, "hash");
       mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
@@ -957,13 +954,13 @@ describe("MCP Server", () => {
 
   describe("deep_recall grounded mode", () => {
     function seedGroundedData() {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/ga", "GroundedA", "ga.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/gb", "GroundedB", "gb.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
       ).run("entities/ga", "entities/gb", "knows", "wikilink", "trusted", 0.9);
     }
@@ -1037,13 +1034,13 @@ describe("MCP Server", () => {
 
   describe("deep_recall grounded trust states", () => {
     test("trusted evidence → facts with settled answer and high confidence", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/ta", "人物A", "ta.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/tb", "主题B", "tb.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run("entities/ta", "entities/tb", "负责", "wikilink", "trusted", 0.9, "人物A是主题B的负责人");
 
@@ -1059,10 +1056,10 @@ describe("MCP Server", () => {
     });
 
     test("user_thought evidence framed as prior thinking, not fact", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/ux", "主题X", "ux.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO timeline (page_slug, summary, source, trust_state, source_page_slug) VALUES (?, ?, ?, ?, ?)"
       ).run("entities/ux", "主题X项目可能需要调整方向", "dialogue", "user_thought", "records/chat-001");
 
@@ -1079,13 +1076,13 @@ describe("MCP Server", () => {
     });
 
     test("candidate evidence marked unresolved in must_not_claim", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/cc", "组织C", "cc.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/cd", "项目D", "cd.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run("entities/cc", "entities/cd", "可能参与", "ner", "candidate", 0.4, "组织C可能参与项目D");
 
@@ -1102,21 +1099,21 @@ describe("MCP Server", () => {
     });
 
     test("conflicting active evidence surfaced without silent side selection", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/ce", "人物E", "ce.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/cf", "项目F", "cf.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/cg", "项目G", "cg.md", "h3");
       // Trusted claim: 人物E负责项目F
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run("entities/ce", "entities/cf", "负责", "wikilink", "trusted", 0.9, "人物E负责项目F");
       // Candidate claim that contradicts: 人物E已不负责项目F (different relation to avoid UNIQUE violation)
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run("entities/ce", "entities/cg", "不再负责", "ner", "candidate", 0.4, "人物E已不负责项目F");
 
@@ -1134,20 +1131,20 @@ describe("MCP Server", () => {
     });
 
     test("conflicting trusted evidence at same trust level surfaced", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/ca", "人物A", "ca.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/cb", "主题B", "cb.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/cc", "主题C", "cc.md", "h3");
       // Both trusted, claims contradict
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run("entities/ca", "entities/cb", "负责", "wikilink", "trusted", 0.9, "人物A负责主题B");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run("entities/ca", "entities/cc", "已不负责", "ner", "trusted", 0.85, "人物A已不负责主题B");
 
@@ -1161,16 +1158,16 @@ describe("MCP Server", () => {
     });
 
     test("rejected and superseded evidence excluded from grounded_answer", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/rh", "人物H", "rh.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/ri", "主题I", "ri.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, context) VALUES (?, ?, ?, ?, ?, ?)"
       ).run("entities/rh", "entities/ri", "旧关系", "ner", "rejected", "人物H旧关系主题I");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, context) VALUES (?, ?, ?, ?, ?, ?)"
       ).run("entities/rh", "entities/ri", "替代关系", "ner", "superseded", "人物H替代关系主题I");
 
@@ -1187,13 +1184,13 @@ describe("MCP Server", () => {
     });
 
     test("grounded=true returns compact evidence without entity details", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/cp", "主题J", "cp.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/cq", "主题K", "cq.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
       ).run("entities/cp", "entities/cq", "关联", "wikilink", "trusted", 0.9, "主题J与主题K有关联");
 
@@ -1214,7 +1211,7 @@ describe("MCP Server", () => {
 
   describe("deep_recall normal vs brief mode", () => {
     function seedRecallData() {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
       ).run("records/project-z-design", "Project Z设计方案", "records/project-z-design.md", "h1");
       // Write vault file so PageManager.getBySlug returns body
@@ -1275,10 +1272,10 @@ describe("MCP Server", () => {
 
   describe("recall_episode tool", () => {
     test("returns empty candidates for no-match", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)",
       ).run("entities/person-a", "人物A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO timeline (page_slug, summary, source, trust_state) VALUES (?, ?, ?, ?)",
       ).run("entities/person-a", "人物A参加技术分享", "dialogue", "trusted");
 
@@ -1294,16 +1291,16 @@ describe("MCP Server", () => {
     });
 
     test("returns matched candidate with enriched output shape", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)",
       ).run("entities/person-a", "人物A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
       ).run("entities/org-e", "组织E", "e.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO timeline (page_slug, summary, source, trust_state, event_date) VALUES (?, ?, ?, ?, ?)",
       ).run("entities/person-a", "人物A负责前端开发", "dialogue", "trusted", "2024-05-20");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)",
       ).run("entities/person-a", "entities/org-e", "works_at", "ner", "trusted", 0.9);
 
@@ -1337,10 +1334,10 @@ describe("MCP Server", () => {
   describe("search trace integration", () => {
     test("query tool writes trace session and steps", async () => {
       // Seed a page so FTS returns results
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/trace-test", "TraceTest", "trace-test.md", "h1");
-      db.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
+      db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
         .run("entities/trace-test", 0, "TraceTest entity for trace integration");
 
       const server = createServer(deps);
@@ -1358,7 +1355,7 @@ describe("MCP Server", () => {
     });
 
     test("deep_recall tool writes trace session with latency", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/trace-recall", "TraceRecall", "trace-recall.md", "h1");
 
@@ -1374,7 +1371,7 @@ describe("MCP Server", () => {
     });
 
     test("summarize tool writes trace session with latency", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/trace-topic", "TraceTopic", "trace-topic.md", "h1");
 
@@ -1390,10 +1387,10 @@ describe("MCP Server", () => {
     });
 
     test("query without strategy/limit uses smart defaults, not all path", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/default-strat", "DefaultStrat", "default-strat.md", "h1");
-      db.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
+      db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
         .run("entities/default-strat", 0, "DefaultStrat entity for default strategy check");
 
       const server = createServer(deps);
@@ -1414,8 +1411,8 @@ describe("MCP Server", () => {
 
     test("trace failure does not break query tool return", async () => {
       // Drop the table to force trace write to fail
-      db.prepare("DROP TABLE search_trace_steps").run();
-      db.prepare("DROP TABLE search_trace_sessions").run();
+      db.rawDb.prepare("DROP TABLE search_trace_steps").run();
+      db.rawDb.prepare("DROP TABLE search_trace_sessions").run();
 
       const server = createServer(deps);
       const result = await getTools(server).query.handler({ query: "trace-failure-test" });

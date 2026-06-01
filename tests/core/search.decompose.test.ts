@@ -111,7 +111,7 @@ function insertPage(
   type: string,
   mentionCount = 0
 ) {
-  db.prepare(
+  db.rawDb.prepare(
     "INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count) VALUES (?, ?, ?, ?, ?, ?)"
   ).run(slug, type, title, `${slug}.md`, `h-${slug}`, mentionCount);
 }
@@ -122,7 +122,7 @@ function insertLink(
   to: string,
   relation = "提及"
 ) {
-  db.prepare(
+  db.rawDb.prepare(
     "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
   ).run(from, to, relation);
 }

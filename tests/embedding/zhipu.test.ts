@@ -19,7 +19,7 @@ describe("ZhipuEmbeddingProvider", () => {
     status: number;
     json: () => Promise<unknown>;
     text?: () => Promise<string>;
-  }): typeof globalThis.fetch {
+  }): ReturnType<typeof mock> {
     const fullResponse = {
       ...response,
       text:
@@ -27,7 +27,7 @@ describe("ZhipuEmbeddingProvider", () => {
         (() => Promise.resolve(JSON.stringify({ error: "unknown" }))),
     };
     const fn = mock(() => Promise.resolve(fullResponse));
-    globalThis.fetch = fn as typeof globalThis.fetch;
+    globalThis.fetch = fn as unknown as typeof globalThis.fetch;
     return fn;
   }
 

@@ -26,11 +26,11 @@ describe("IndexGenerator", () => {
   });
 
   test("All-Entities includes tiered entities", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count)
        VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
     ).run("entities/a", "Alice", "a.md", "h1", 1, 8);
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count)
        VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
     ).run("entities/b", "Bob", "b.md", "h2", 3, 1);
@@ -45,11 +45,11 @@ describe("IndexGenerator", () => {
   });
 
   test("All-Concepts lists concepts by mention count", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count)
        VALUES (?, 'concept/concept', ?, ?, ?, ?)`
     ).run("concepts/x", "AI", "x.md", "h1", 5);
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count)
        VALUES (?, 'concept/concept', ?, ?, ?, ?)`
     ).run("concepts/y", "ML", "y.md", "h2", 2);
@@ -64,15 +64,15 @@ describe("IndexGenerator", () => {
   });
 
   test("Dashboard has overview stats", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count)
        VALUES (?, 'entity/person', ?, ?, ?, ?)`
     ).run("entities/a", "Alice", "a.md", "h1", 3);
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash)
        VALUES (?, 'entity/person', ?, ?, ?)`
     ).run("entities/b", "Bob", "b.md", "h2");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
     ).run("entities/a", "entities/b", "knows");
 

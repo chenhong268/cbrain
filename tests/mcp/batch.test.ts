@@ -38,7 +38,7 @@ function getTools(server: any) {
 
 function insertPage(db: CBrainDB, slug: string, title: string, filePath?: string) {
   const fp = filePath ?? `${slug.replace(/\//g, "_")}.md`;
-  db.prepare(
+  db.rawDb.prepare(
     `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
   ).run(slug, title, fp, "h1");
 }
@@ -92,7 +92,7 @@ describe("Batch Tools", () => {
       expect(data.results).toHaveLength(3);
       expect(data.results.every((r: any) => r.success)).toBe(true);
 
-      expect(db.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number }).toEqual({ c: 0 });
+      expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number }).toEqual({ c: 0 });
     });
 
     test("handles partial failures (missing pages)", async () => {
@@ -138,7 +138,7 @@ describe("Batch Tools", () => {
       expect(data.succeeded).toBe(2);
       expect(data.failed).toBe(0);
 
-      const linkCount = db.prepare("SELECT COUNT(*) as c FROM links").get() as { c: number };
+      const linkCount = db.rawDb.prepare("SELECT COUNT(*) as c FROM links").get() as { c: number };
       expect(linkCount.c).toBe(2);
     });
 
@@ -211,10 +211,10 @@ describe("Batch Tools", () => {
       expect(data.failed).toBe(0);
 
       // Sources deleted, targets remain
-      expect(db.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/src1")).toBeNull();
-      expect(db.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/src2")).toBeNull();
-      expect(db.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/tgt1")).toBeDefined();
-      expect(db.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/tgt2")).toBeDefined();
+      expect(db.rawDb.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/src1")).toBeNull();
+      expect(db.rawDb.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/src2")).toBeNull();
+      expect(db.rawDb.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/tgt1")).toBeDefined();
+      expect(db.rawDb.prepare("SELECT slug FROM pages WHERE slug = ?").get("entities/tgt2")).toBeDefined();
     });
 
     test("detects cascading failure (target already deleted)", async () => {

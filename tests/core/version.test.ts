@@ -32,7 +32,7 @@ describe("VersionManager", () => {
     const content = `---\ntitle: "${title}"\ntype: ${type}\n---\n${body}`;
     writeFileSync(filePath, content, "utf-8");
 
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT OR REPLACE INTO pages (slug, type, title, file_path, content_hash)
        VALUES (?, ?, ?, ?, ?)`
     ).run(slug, type, title, relPath, "h1");
@@ -64,7 +64,7 @@ describe("VersionManager", () => {
       // Update and create another version
       const filePath = join(vaultPath, "entities-test.md");
       writeFileSync(filePath, "---\ntitle: \"Test\"\ntype: entity\n---\nv2", "utf-8");
-      db.prepare(
+      db.rawDb.prepare(
         `UPDATE pages SET content_hash = ? WHERE slug = ?`
       ).run("h2", "entities/test");
       vm.createVersion("entities/test");

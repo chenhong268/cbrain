@@ -311,13 +311,13 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("trusted link → fact item", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/a", "A", "a.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/b", "B", "b.md", "h2");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
     ).run("entities/a", "entities/b", "knows", "wikilink", "trusted", 0.9);
 
@@ -332,10 +332,10 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("user_thought timeline → thought item", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/x", "X", "x.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO timeline (page_slug, summary, source, trust_state, source_page_slug) VALUES (?, ?, ?, ?, ?)"
     ).run("entities/x", "用户提到X项目可能需要调整方向", "dialogue", "user_thought", "records/chat-001");
 
@@ -347,13 +347,13 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("candidate not mixed into facts", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/c", "C", "c.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/d", "D", "d.md", "h2");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
     ).run("entities/c", "entities/d", "可能认识", "ner", "candidate", 0.4);
 
@@ -364,16 +364,16 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("rejected and superseded excluded", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/e", "E", "e.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/f", "F", "f.md", "h2");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state) VALUES (?, ?, ?, ?, ?)"
     ).run("entities/e", "entities/f", "旧关系", "ner", "rejected");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state) VALUES (?, ?, ?, ?, ?)"
     ).run("entities/e", "entities/f", "替代关系", "ner", "superseded");
 
@@ -385,18 +385,18 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("same claim + trusted/candidate does NOT produce conflict", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/g", "G", "g.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/h", "H", "h.md", "h2");
     // Link says "G与H是同事" as trusted
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, context, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)"
     ).run("entities/g", "entities/h", "knows", "wikilink", "trusted", "G与H是同事", 0.9);
     // Timeline says same claim as candidate — different trust, NOT a conflict
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO timeline (page_slug, summary, source, trust_state, source_page_slug) VALUES (?, ?, ?, ?, ?)"
     ).run("entities/g", "G与H是同事", "ner", "candidate", "records/auto");
 
@@ -410,14 +410,14 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("gap detection: unsupported candidates", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/p", "P", "p.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/q", "Q", "q.md", "h2");
     // Only a candidate, no trusted fact backing it
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
     ).run("entities/p", "entities/q", "可能合作过", "ner", "candidate", 0.3);
 
@@ -428,13 +428,13 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("link.source_page_slug is preferred as source_slug", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/sp-a", "SP-A", "sp-a.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/sp-b", "SP-B", "sp-b.md", "h2");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, source_page_slug) VALUES (?, ?, ?, ?, ?, ?, ?)"
     ).run("entities/sp-a", "entities/sp-b", "knows", "wikilink", "trusted", 0.9, "records/conversation-sps");
 
@@ -446,14 +446,14 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("link without source_page_slug falls back to other-end slug", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/fb-a", "FB-A", "fb-a.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/fb-b", "FB-B", "fb-b.md", "h2");
     // No source_page_slug — should fall back to other-end slug
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
     ).run("entities/fb-a", "entities/fb-b", "knows", "wikilink", "trusted", 0.9);
 
@@ -465,14 +465,14 @@ describe("collectEvidenceForSlugs", () => {
   });
 
   test("incoming link source_slug does not equal the queried slug", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/ic-a", "IC-A", "ic-a.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
     ).run("entities/ic-b", "IC-B", "ic-b.md", "h2");
     // Link from ic-b → ic-a (incoming for ic-a). No source_page_slug.
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
     ).run("entities/ic-b", "entities/ic-a", "knows", "wikilink", "trusted", 0.9);
 

@@ -19,16 +19,16 @@ describe("generateProactiveHints", () => {
     db = new CBrainDB(dbPath);
 
     // Seed pages
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run("entities/a", "entity/person", "EntityA", "a.md", "h1", 1, 3);
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run("entities/b", "entity/person", "EntityB", "b.md", "h2", 1, 3);
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run("entities/c", "entity/person", "EntityC", "c.md", "h3", 1, 3);
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run("entities/exp", "entity/person", "ExpiringOne", "exp.md", "h4", 1, 3, "2020-01-01");
   });
@@ -42,14 +42,14 @@ describe("generateProactiveHints", () => {
     const ctx = makeCtx(db);
 
     // Link A -> B, A -> C
-    db.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+    db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run("entities/a", "entities/b", "提及");
-    db.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+    db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run("entities/a", "entities/c", "提及");
 
     // B has a recent timeline event
     const recentDate = new Date().toISOString().slice(0, 10);
-    db.prepare("INSERT INTO timeline (page_slug, summary, event_date, source) VALUES (?, ?, ?, ?)")
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, summary, event_date, source) VALUES (?, ?, ?, ?)")
       .run("entities/b", "升职为总监", recentDate, "test");
 
     const hints = await generateProactiveHints(ctx, {
@@ -67,9 +67,9 @@ describe("generateProactiveHints", () => {
     const ctx = makeCtx(db);
 
     // A and B both link to C
-    db.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+    db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run("entities/a", "entities/c", "提及");
-    db.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+    db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run("entities/b", "entities/c", "提及");
 
     // Provide linksBySlug directly (no DB call needed for this rule)

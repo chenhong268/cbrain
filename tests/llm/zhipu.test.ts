@@ -10,14 +10,14 @@ describe("ZhipuLLMProvider", () => {
 
   describe("chat", () => {
     test("returns content from API response", async () => {
-      globalThis.fetch = async () =>
+      globalThis.fetch = (async () =>
         new Response(
           JSON.stringify({
             choices: [{ message: { content: "Hello, world!" }, finish_reason: "stop" }],
             usage: { total_tokens: 10 },
           }),
           { status: 200 }
-        );
+        )) as unknown as typeof fetch;
 
       const provider = new ZhipuLLMProvider("fake-key");
       const result = await provider.chat([
@@ -28,7 +28,7 @@ describe("ZhipuLLMProvider", () => {
 
     test("sends correct request body", async () => {
       let capturedBody: string | undefined;
-      globalThis.fetch = async (_url: string, opts: any) => {
+      globalThis.fetch = (async (_url: string, opts: any) => {
         capturedBody = opts.body;
         return new Response(
           JSON.stringify({
@@ -36,7 +36,7 @@ describe("ZhipuLLMProvider", () => {
           }),
           { status: 200 }
         );
-      };
+      }) as unknown as typeof fetch;
 
       const provider = new ZhipuLLMProvider("test-key");
       await provider.chat([
@@ -54,7 +54,7 @@ describe("ZhipuLLMProvider", () => {
 
     test("uses custom base URL and model", async () => {
       let capturedUrl: string | undefined;
-      globalThis.fetch = async (url: string) => {
+      globalThis.fetch = (async (url: string) => {
         capturedUrl = url;
         return new Response(
           JSON.stringify({
@@ -62,7 +62,7 @@ describe("ZhipuLLMProvider", () => {
           }),
           { status: 200 }
         );
-      };
+      }) as unknown as typeof fetch;
 
       const provider = new ZhipuLLMProvider("key", "https://custom.api.com/v4", "glm-4-plus");
       await provider.chat([{ role: "user", content: "Hi" }]);
@@ -71,8 +71,8 @@ describe("ZhipuLLMProvider", () => {
     });
 
     test("throws on non-200 response", async () => {
-      globalThis.fetch = async () =>
-        new Response("Unauthorized", { status: 401 });
+      globalThis.fetch = (async () =>
+        new Response("Unauthorized", { status: 401 })) as unknown as typeof fetch;
 
       const provider = new ZhipuLLMProvider("bad-key");
       await expect(provider.chat([{ role: "user", content: "Hi" }])).rejects.toThrow(
@@ -81,11 +81,11 @@ describe("ZhipuLLMProvider", () => {
     });
 
     test("returns empty string on empty choices", async () => {
-      globalThis.fetch = async () =>
+      globalThis.fetch = (async () =>
         new Response(
           JSON.stringify({ choices: [] }),
           { status: 200 }
-        );
+        )) as unknown as typeof fetch;
 
       const provider = new ZhipuLLMProvider("key");
       const result = await provider.chat([{ role: "user", content: "Hi" }]);
@@ -93,9 +93,9 @@ describe("ZhipuLLMProvider", () => {
     });
 
     test("handles network errors", async () => {
-      globalThis.fetch = async () => {
+      globalThis.fetch = (async () => {
         throw new Error("Network failure");
-      };
+      }) as unknown as typeof fetch;
 
       const provider = new ZhipuLLMProvider("key");
       await expect(provider.chat([{ role: "user", content: "Hi" }])).rejects.toThrow();
@@ -110,12 +110,12 @@ describe("ZhipuLLMProvider", () => {
   describe("timeout", () => {
     test("throws on timeout", async () => {
       // Simulate a slow fetch that listens for abort signal
-      globalThis.fetch = async (_url: string, opts: any) =>
+      globalThis.fetch = (async (_url: string, opts: any) =>
         new Promise((_resolve, reject) => {
           const onAbort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
           if (opts.signal?.aborted) { onAbort(); return; }
           opts.signal?.addEventListener("abort", onAbort, { once: true });
-        });
+        })) as unknown as typeof fetch;
 
       const provider = new ZhipuLLMProvider("key", undefined, undefined, { timeoutMs: 100 });
       await expect(provider.chat([{ role: "user", content: "Hi" }])).rejects.toThrow(
@@ -130,7 +130,7 @@ describe("ZhipuLLMProvider", () => {
     });
 
     test("succeeds within timeout", async () => {
-      globalThis.fetch = async (_url: string, opts: any) => {
+      globalThis.fetch = (async (_url: string, opts: any) => {
         // Verify signal exists
         expect(opts.signal).toBeDefined();
         expect(opts.signal.aborted).toBe(false);
@@ -140,7 +140,7 @@ describe("ZhipuLLMProvider", () => {
           }),
           { status: 200 }
         );
-      };
+      }) as unknown as typeof fetch;
 
       const provider = new ZhipuLLMProvider("key", undefined, undefined, { timeoutMs: 5000 });
       const result = await provider.chat([{ role: "user", content: "Hi" }]);

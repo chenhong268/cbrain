@@ -13,7 +13,7 @@ function insertEntity(
   mentionCount = 0,
   tier = 3
 ) {
-  db.prepare(
+  db.rawDb.prepare(
     `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
      VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
   ).run(slug, title, `${slug}.md`, `h-${slug}`, mentionCount, tier);
@@ -285,7 +285,7 @@ describe("ReflectManager", () => {
       db.insertLink("entities/src", "entities/ctx", "mentions", "seen in meeting");
       db.insertLink("entities/ctx", "entities/src", "references");
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO timeline (page_slug, event_date, summary, source) VALUES (?, ?, ?, ?)`
       ).run("entities/ctx", "2025-01-15", "Key event happened", "source.md");
 
@@ -376,7 +376,7 @@ describe("ReflectManager", () => {
       const date = new Date().toISOString().slice(0, 10);
       const blockingSlug = generateSlug(`${date} test-title`, "insight");
       // Insert a page with that slug to force a collision
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'insight', ?, ?, '')`
       ).run(blockingSlug, "blocking", `${blockingSlug}.md`);
 
@@ -721,7 +721,7 @@ describe("ReflectManager", () => {
       // 6-hop chain: concept/a — n1 — n2 — n3 — n4 — n5 — entity/b
       // pathScore = 1.0 (dist >= 6), typeScore = 1.0 (mixed), sourceScore = 1.0 (disjoint records), contentScore = 0
       // = 0.35*1.0 + 0.25*1.0 + 0.20*1.0 + 0.20*0 = 0.80
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'concept/topic', ?, ?, ?, ?, ?)`
       ).run("concept/a", "ConceptA", "concept/a.md", "h-ca", 5, 3);
@@ -738,11 +738,11 @@ describe("ReflectManager", () => {
       db.insertLink("entities/n5", "entities/b", "knows");
 
       // Disjoint source records → sourceScore = 1.0
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'record/daily', ?, ?, ?, ?, ?)`
       ).run("records/r1", "R1", "r1.md", "h-r1", 3, 2);
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'record/daily', ?, ?, ?, ?, ?)`
       ).run("records/r2", "R2", "r2.md", "h-r2", 3, 2);
@@ -765,7 +765,7 @@ describe("ReflectManager", () => {
 
     test("page missing nullifies autoApplicable regardless of score", async () => {
       // Same 6-hop construction but delete B's page
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'concept/topic', ?, ?, ?, ?, ?)`
       ).run("concept/a", "ConceptA", "concept/a.md", "h-ca", 5, 3);
@@ -781,18 +781,18 @@ describe("ReflectManager", () => {
       db.insertLink("entities/n4", "entities/n5", "knows");
       db.insertLink("entities/n5", "entities/b", "knows");
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'record/daily', ?, ?, ?, ?, ?)`
       ).run("records/r1", "R1", "r1.md", "h-r1", 3, 2);
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'record/daily', ?, ?, ?, ?, ?)`
       ).run("records/r2", "R2", "r2.md", "h-r2", 3, 2);
       db.insertLink("records/r1", "concept/a", "mentioned");
       db.insertLink("records/r2", "entities/b", "mentioned");
 
-      db.prepare("DELETE FROM pages WHERE slug = ?").run("entities/b");
+      db.rawDb.prepare("DELETE FROM pages WHERE slug = ?").run("entities/b");
 
       const mgr = new ReflectManager(db, pages);
       const adj = (mgr as any).buildAdjacency() as Map<string, Set<string>>;

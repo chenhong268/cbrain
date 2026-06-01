@@ -21,13 +21,12 @@ describe("CBrainDB", () => {
 
   test("creates database file with WAL mode", () => {
     expect(existsSync(dbPath)).toBe(true);
-    const result = db.prepare("PRAGMA journal_mode").get() as any;
+    const result = db.rawDb.prepare("PRAGMA journal_mode").get() as any;
     expect(result.journal_mode).toBe("wal");
   });
 
   test("creates all required tables", () => {
-    const tables = db
-      .prepare(
+    const tables = db      .rawDb.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
       )
       .all() as any[];
@@ -42,12 +41,11 @@ describe("CBrainDB", () => {
   });
 
   test("insert and query a page", () => {
-    db.prepare(
+    db.rawDb.prepare(
       `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
     ).run("entities/test", "entity", "Test", "entities/test.md", "abc123");
 
-    const row = db
-      .prepare("SELECT * FROM pages WHERE slug = ?")
+    const row = db      .rawDb.prepare("SELECT * FROM pages WHERE slug = ?")
       .get("entities/test") as any;
     expect(row.title).toBe("Test");
     expect(row.type).toBe("entity");
@@ -56,77 +54,77 @@ describe("CBrainDB", () => {
   });
 
   test("link decay migration adds columns", () => {
-    const cols = db.prepare("PRAGMA table_info(links)").all() as any[];
+    const cols = db.rawDb.prepare("PRAGMA table_info(links)").all() as any[];
     const names = new Set(cols.map((c: any) => c.name));
     expect(names).toContain("last_validated_at");
     expect(names).toContain("effective_weight");
   });
 
   test("applyLinkDecay recalculates effective_weight", () => {
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("a", "record", "A", "a.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("b", "record", "B", "b.md", "h2");
 
     db.insertLink("a", "b", "mentions", null, 1.0, "medium", "ner", 0.7);
-    db.prepare(
+    db.rawDb.prepare(
       "UPDATE links SET last_validated_at = datetime('now', '-6 months') WHERE from_slug = 'a' AND to_slug = 'b'"
     ).run();
 
     const updated = db.applyLinkDecay();
     expect(updated).toBeGreaterThan(0);
 
-    const link = db.prepare("SELECT * FROM links WHERE from_slug = 'a' AND to_slug = 'b'").get() as any;
+    const link = db.rawDb.prepare("SELECT * FROM links WHERE from_slug = 'a' AND to_slug = 'b'").get() as any;
     expect(link.effective_weight).toBeLessThan(1.0 * 0.7);
     expect(link.effective_weight).toBeGreaterThan(0);
   });
 
   test("manual/wikilink links do not decay", () => {
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("x", "record", "X", "x.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("y", "record", "Y", "y.md", "h2");
 
     db.insertLink("x", "y", "mentions", null, 1.0, "medium", "manual", 0.9);
-    db.prepare(
+    db.rawDb.prepare(
       "UPDATE links SET last_validated_at = datetime('now', '-12 months') WHERE from_slug = 'x' AND to_slug = 'y'"
     ).run();
 
     db.applyLinkDecay();
 
-    const link = db.prepare("SELECT * FROM links WHERE from_slug = 'x' AND to_slug = 'y'").get() as any;
+    const link = db.rawDb.prepare("SELECT * FROM links WHERE from_slug = 'x' AND to_slug = 'y'").get() as any;
     expect(link.effective_weight).toBeCloseTo(1.0 * 0.9, 2);
   });
 
   test("validateLinksForSlugs resets last_validated_at", () => {
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("p", "record", "P", "p.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("q", "record", "Q", "q.md", "h2");
 
     db.insertLink("p", "q", "mentions", null, 1.0, "medium", "ner", 0.5);
-    db.prepare(
+    db.rawDb.prepare(
       "UPDATE links SET last_validated_at = datetime('now', '-3 months') WHERE from_slug = 'p' AND to_slug = 'q'"
     ).run();
 
     db.validateLinksForSlugs(["p"]);
 
-    const link = db.prepare("SELECT * FROM links WHERE from_slug = 'p' AND to_slug = 'q'").get() as any;
+    const link = db.rawDb.prepare("SELECT * FROM links WHERE from_slug = 'p' AND to_slug = 'q'").get() as any;
     const today = new Date().toISOString().slice(0, 10);
     expect(link.last_validated_at).toContain(today);
   });
 
   test("boostLinkConfidence increases confidence", () => {
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("m", "record", "M", "m.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("n", "record", "N", "n.md", "h2");
 
@@ -134,15 +132,15 @@ describe("CBrainDB", () => {
 
     db.boostLinkConfidence("m", "n", "mentions", 0.1);
 
-    const link = db.prepare("SELECT * FROM links WHERE from_slug = 'm' AND to_slug = 'n'").get() as any;
+    const link = db.rawDb.prepare("SELECT * FROM links WHERE from_slug = 'm' AND to_slug = 'n'").get() as any;
     expect(link.confidence).toBeCloseTo(0.6, 2);
   });
 
   test("boostLinkConfidence caps at 1.0", () => {
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("u", "record", "U", "u.md", "h1");
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("v", "record", "V", "v.md", "h2");
 
@@ -150,14 +148,14 @@ describe("CBrainDB", () => {
 
     db.boostLinkConfidence("u", "v", "mentions", 0.1);
 
-    const link = db.prepare("SELECT * FROM links WHERE from_slug = 'u' AND to_slug = 'v'").get() as any;
+    const link = db.rawDb.prepare("SELECT * FROM links WHERE from_slug = 'u' AND to_slug = 'v'").get() as any;
     expect(link.confidence).toBe(1.0);
   });
 
   test("transaction rolls back on error", () => {
     expect(() => {
       db.transaction(() => {
-        db.prepare(
+        db.rawDb.prepare(
           `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
         ).run("entities/tx-test", "entity", "TX Test", "tx.md", "hash");
 
@@ -165,8 +163,7 @@ describe("CBrainDB", () => {
       });
     }).toThrow("rollback");
 
-    const row = db
-      .prepare("SELECT * FROM pages WHERE slug = ?")
+    const row = db      .rawDb.prepare("SELECT * FROM pages WHERE slug = ?")
       .get("entities/tx-test");
     expect(row).toBeNull();
   });
@@ -175,8 +172,7 @@ describe("CBrainDB", () => {
 
   describe("search trace", () => {
     test("creates search_trace_sessions and search_trace_steps tables", () => {
-      const tables = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      const tables = db        .rawDb.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         .all() as Array<{ name: string }>;
       const names = tables.map(t => t.name);
       expect(names).toContain("search_trace_sessions");
@@ -187,7 +183,7 @@ describe("CBrainDB", () => {
       const id = db.startSearchTraceSession({ query: "主题A", mode: "smart" });
       expect(id).toBeGreaterThan(0);
 
-      const row = db.prepare("SELECT * FROM search_trace_sessions WHERE id = ?").get(id) as any;
+      const row = db.rawDb.prepare("SELECT * FROM search_trace_sessions WHERE id = ?").get(id) as any;
       expect(row.query).toBe("主题A");
       expect(row.mode).toBe("smart");
       expect(row.status).toBe("running");
@@ -205,7 +201,7 @@ describe("CBrainDB", () => {
         summaryJson: { vector_ms: 50, fts_ms: 20 },
       });
 
-      const row = db.prepare("SELECT * FROM search_trace_sessions WHERE id = ?").get(id) as any;
+      const row = db.rawDb.prepare("SELECT * FROM search_trace_sessions WHERE id = ?").get(id) as any;
       expect(row.status).toBe("success");
       expect(row.ended_at).not.toBeNull();
       expect(row.latency_ms).toBe(150);
@@ -234,7 +230,7 @@ describe("CBrainDB", () => {
       db.addSearchTraceStep({ sessionId: id, stepIndex: 0, kind: "vector", latencyMs: 10 });
       db.addSearchTraceStep({ sessionId: id, stepIndex: 1, kind: "fts", latencyMs: 5 });
 
-      db.prepare("DELETE FROM search_trace_sessions WHERE id = ?").run(id);
+      db.rawDb.prepare("DELETE FROM search_trace_sessions WHERE id = ?").run(id);
 
       const steps = db.getSearchTraceSteps(id);
       expect(steps).toHaveLength(0);
@@ -255,7 +251,7 @@ describe("CBrainDB", () => {
       const id = db.startSearchTraceSession({ query: "部分测试", mode: "smart" });
       db.finishSearchTraceSession(id, { status: "degraded" });
 
-      const row = db.prepare("SELECT * FROM search_trace_sessions WHERE id = ?").get(id) as any;
+      const row = db.rawDb.prepare("SELECT * FROM search_trace_sessions WHERE id = ?").get(id) as any;
       expect(row.status).toBe("degraded");
       expect(row.llm_calls).toBe(0);
       expect(row.total_steps).toBe(0);

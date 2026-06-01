@@ -178,26 +178,26 @@ describe("HybridSearch", () => {
 
   describe("graph search (BFS link traversal)", () => {
     test("finds linked pages via BFS depth 2", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/a", "entity", "A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/b", "entity", "B", "b.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/c", "entity", "C", "c.md", "h3");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/d", "entity", "D", "d.md", "h4");
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
       ).run("entities/a", "entities/b", "mentions");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
       ).run("entities/a", "entities/c", "mentions");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
       ).run("entities/b", "entities/d", "mentions");
 
@@ -211,17 +211,17 @@ describe("HybridSearch", () => {
     });
 
     test("excludes seed slug from results", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/a", "entity", "A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/b", "entity", "B", "b.md", "h2");
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
       ).run("entities/a", "entities/b", "mentions");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
       ).run("entities/b", "entities/a", "mentions");
 
@@ -232,7 +232,7 @@ describe("HybridSearch", () => {
     });
 
     test("returns empty for isolated page", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/solo", "entity", "Solo", "solo.md", "h1");
 
@@ -241,15 +241,15 @@ describe("HybridSearch", () => {
     });
 
     test("respects limit", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/seed", "entity", "Seed", "seed.md", "hs");
 
       for (let i = 0; i < 5; i++) {
-        db.prepare(
+        db.rawDb.prepare(
           `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
         ).run(`entities/n${i}`, "entity", `N${i}`, `n${i}.md`, `h${i}`);
-        db.prepare(
+        db.rawDb.prepare(
           `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
         ).run("entities/seed", `entities/n${i}`, "mentions");
       }
@@ -264,17 +264,17 @@ describe("HybridSearch", () => {
       const provider = createMockEmbeddingProvider();
       const lance = createMockLanceDB();
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/alpha", "entity", "Alpha", "alpha.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/beta", "entity", "Beta", "beta.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/gamma", "entity", "Gamma", "gamma.md", "h3");
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
       ).run("entities/alpha", "entities/beta", "mentions");
 
@@ -299,7 +299,7 @@ describe("HybridSearch", () => {
       const provider = createMockEmbeddingProvider();
       const lance = createMockLanceDB();
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/v1", "entity", "V1", "v1.md", "h1");
 
@@ -319,7 +319,7 @@ describe("HybridSearch", () => {
       const provider = createMockEmbeddingProvider();
       const lance = createMockLanceDB();
 
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/f1", "entity", "F1", "f1.md", "h1");
 
@@ -334,13 +334,13 @@ describe("HybridSearch", () => {
     });
 
     test("strategy=graph returns only graph results", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/g1", "entity", "G1", "g1.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/g2", "entity", "G2", "g2.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
       ).run("entities/g1", "entities/g2", "mentions");
 
@@ -370,7 +370,7 @@ describe("HybridSearch", () => {
     }
 
     test("exact title match returns immediately with source=exact", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/luodan", "entity", "罗丹", "luodan.md", "h1");
 
@@ -383,7 +383,7 @@ describe("HybridSearch", () => {
     });
 
     test("no exact match falls back to FTS", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/luodan", "entity", "罗丹", "luodan.md", "h1");
       db.ftsInsert("entities/luodan", "罗丹是法国著名雕塑家，创作了思想者等作品");
@@ -395,7 +395,7 @@ describe("HybridSearch", () => {
     });
 
     test("3-char query still uses short path", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/xukai", "entity", "徐凯文", "xukai.md", "h1");
 
@@ -407,7 +407,7 @@ describe("HybridSearch", () => {
     });
 
     test("4+ char query with exact title match returns exact", async () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
       ).run("entities/p1", "entity", "机器学习入门", "p1.md", "h1");
 

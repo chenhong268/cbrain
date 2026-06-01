@@ -106,6 +106,7 @@ describe("WritebackManager", () => {
 
     const result = await writeback.execute({
       action: "create_link",
+      content: "",
       fromSlug: pageA.slug,
       toSlug: pageB.slug,
       relation: "works_at",
@@ -114,7 +115,7 @@ describe("WritebackManager", () => {
 
     expect(result.success).toBe(true);
 
-    const links = db.prepare("SELECT * FROM links WHERE from_slug = ? AND to_slug = ?").all(pageA.slug, pageB.slug);
+    const links = db.rawDb.prepare("SELECT * FROM links WHERE from_slug = ? AND to_slug = ?").all(pageA.slug, pageB.slug);
     expect(links.length).toBe(1);
     expect((links[0] as any).relation).toBe("任职");
   });
@@ -122,6 +123,7 @@ describe("WritebackManager", () => {
   test("create_link fails with missing params", async () => {
     const result = await writeback.execute({
       action: "create_link",
+      content: "",
       fromSlug: "a",
       relation: "knows",
     });
@@ -138,6 +140,7 @@ describe("WritebackManager", () => {
 
     const result = await writeback.execute({
       action: "create_link",
+      content: "",
       fromSlug: "ghost",
       toSlug: pageB.slug,
       relation: "knows",

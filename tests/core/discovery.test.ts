@@ -19,7 +19,7 @@ function seedPage(db: CBrainDB, slug: string, type: string, title: string, menti
     contentHash: "abc",
   });
   if (mentionCount > 0) {
-    db.prepare("UPDATE pages SET mention_count = $mc WHERE slug = $slug")
+    db.rawDb.prepare("UPDATE pages SET mention_count = $mc WHERE slug = $slug")
       .run({ $mc: mentionCount, $slug: slug });
   }
 }
@@ -100,7 +100,7 @@ describe("DiscoveryManager - data layer", () => {
 
     const d = db.getDiscoveryById(id);
     expect(d).not.toBeNull();
-    const meta = JSON.parse(d!.metadata);
+    const meta = JSON.parse(d!.metadata!);
     expect(meta.direction).toBe("trend_rising");
     expect(meta.delta).toBe(5);
   });
@@ -151,12 +151,12 @@ describe("DiscoveryManager - detectBridges", () => {
     seedPage(db, "entity/e", "entity/person", "E", 3);
     seedPage(db, "entity/a1", "entity/person", "A1", 3);
     seedPage(db, "entity/e1", "entity/person", "E1", 3);
-    db.insertLink("entity/a", "entity/b", "提及", 0.5, "ner");
-    db.insertLink("entity/a", "entity/a1", "提及", 0.5, "ner");
-    db.insertLink("entity/b", "entity/c", "提及", 0.5, "ner");
-    db.insertLink("entity/c", "entity/d", "提及", 0.5, "ner");
-    db.insertLink("entity/d", "entity/e", "提及", 0.5, "ner");
-    db.insertLink("entity/e", "entity/e1", "提及", 0.5, "ner");
+    db.insertLink("entity/a", "entity/b", "提及", null, 0.5, undefined, "ner");
+    db.insertLink("entity/a", "entity/a1", "提及", null, 0.5, undefined, "ner");
+    db.insertLink("entity/b", "entity/c", "提及", null, 0.5, undefined, "ner");
+    db.insertLink("entity/c", "entity/d", "提及", null, 0.5, undefined, "ner");
+    db.insertLink("entity/d", "entity/e", "提及", null, 0.5, undefined, "ner");
+    db.insertLink("entity/e", "entity/e1", "提及", null, 0.5, undefined, "ner");
 
     const mgr = new DiscoveryManager(db);
     const results = mgr.detectBridges();
@@ -171,14 +171,14 @@ describe("DiscoveryManager - detectBridges", () => {
     seedPage(db, "entity/a", "entity/person", "A", 3);
     seedPage(db, "entity/b", "entity/person", "B", 3);
     seedPage(db, "entity/c", "entity/person", "C", 3);
-    db.insertLink("entity/a", "entity/b", "提及", 0.5, "ner");
-    db.insertLink("entity/b", "entity/c", "提及", 0.5, "ner");
-    db.insertLink("entity/a", "entity/c", "提及", 0.5, "ner");
+    db.insertLink("entity/a", "entity/b", "提及", null, 0.5, undefined, "ner");
+    db.insertLink("entity/b", "entity/c", "提及", null, 0.5, undefined, "ner");
+    db.insertLink("entity/a", "entity/c", "提及", null, 0.5, undefined, "ner");
 
     const mgr = new DiscoveryManager(db);
     const results = mgr.detectBridges();
 
-    const bridges = results.filter(r => r.metadata?.distance >= 4);
+    const bridges = results.filter(r => (r.metadata?.distance as number) >= 4);
     expect(bridges.length).toBe(0);
   });
 });
@@ -291,8 +291,8 @@ describe("DiscoveryManager - detectGaps", () => {
     seedPage(db, "entity/connected", "entity/person", "Connected", 10);
     seedPage(db, "entity/b", "entity/person", "B", 3);
     seedPage(db, "entity/c", "entity/person", "C", 3);
-    db.insertLink("entity/connected", "entity/b", "提及", 0.5, "ner");
-    db.insertLink("entity/c", "entity/connected", "提及", 0.5, "ner");
+    db.insertLink("entity/connected", "entity/b", "提及", null, 0.5, undefined, "ner");
+    db.insertLink("entity/c", "entity/connected", "提及", null, 0.5, undefined, "ner");
 
     const mgr = new DiscoveryManager(db);
     const results = mgr.detectGaps();
@@ -379,7 +379,7 @@ describe("DiscoveryManager - detectGaps", () => {
     // score = 0.6*0.6 + 0.5*0.4 = 0.56 < 0.7 → medium
     seedPage(db, "entity/low", "entity/person", "低分人物", 10);
     seedPage(db, "record/src", "record", "来源", 1);
-    db.insertLink("record/src", "entity/low", "提及", 0.5);
+    db.insertLink("record/src", "entity/low", "提及", null, 0.5);
 
     const mgr = new DiscoveryManager(db);
     const results = mgr.detectGaps();
@@ -410,8 +410,8 @@ describe("DiscoveryManager - detectContradictions", () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
     seedPage(db, "records/note1", "record", "会议记录1", 0);
     seedPage(db, "records/note2", "record", "会议记录2", 0);
-    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note1", "entity/person", "提及", null, 0.8, undefined, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", null, 0.8, undefined, "ner");
 
     const mockLlm = createMockLlm(JSON.stringify({
       has_contradiction: true,
@@ -435,8 +435,8 @@ describe("DiscoveryManager - detectContradictions", () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
     seedPage(db, "records/note1", "record", "会议记录1", 0);
     seedPage(db, "records/note2", "record", "会议记录2", 0);
-    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note1", "entity/person", "提及", null, 0.8, undefined, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", null, 0.8, undefined, "ner");
 
     const mockLlm = createMockLlm(JSON.stringify({
       has_contradiction: false,
@@ -455,8 +455,8 @@ describe("DiscoveryManager - detectContradictions", () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
     seedPage(db, "records/note1", "record", "会议记录1", 0);
     seedPage(db, "records/note2", "record", "会议记录2", 0);
-    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note1", "entity/person", "提及", null, 0.8, undefined, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", null, 0.8, undefined, "ner");
 
     const mgr = new DiscoveryManager(db);
     const results = await mgr.detectContradictions();
@@ -468,8 +468,8 @@ describe("DiscoveryManager - detectContradictions", () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
     seedPage(db, "records/note1", "record", "会议记录1", 0);
     seedPage(db, "records/note2", "record", "会议记录2", 0);
-    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note1", "entity/person", "提及", null, 0.8, undefined, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", null, 0.8, undefined, "ner");
 
     const mockLlm = createMockLlm("not valid json {{{");
 
@@ -483,8 +483,8 @@ describe("DiscoveryManager - detectContradictions", () => {
     seedPage(db, "entity/person", "entity/person", "某公司", 5);
     seedPage(db, "records/note1", "record", "会议记录1", 0);
     seedPage(db, "records/note2", "record", "会议记录2", 0);
-    db.insertLink("records/note1", "entity/person", "提及", 0.8, "ner");
-    db.insertLink("records/note2", "entity/person", "提及", 0.8, "ner");
+    db.insertLink("records/note1", "entity/person", "提及", null, 0.8, undefined, "ner");
+    db.insertLink("records/note2", "entity/person", "提及", null, 0.8, undefined, "ner");
 
     const mockLlm = createMockLlm("```json\n{\"has_contradiction\": true, \"confidence\": 0.9, \"explanation\": \"矛盾\", \"suggested_resolution\": \"核实\"}\n```");
 
@@ -529,7 +529,7 @@ describe("DiscoveryManager - runDiscovery orchestration", () => {
   test("runDiscovery with no filter runs all types", async () => {
     seedPage(db, "entity/a", "entity/person", "A", 10);
     seedPage(db, "entity/b", "entity/person", "B", 3);
-    db.insertLink("entity/a", "entity/b", "提及", 0.5, "ner");
+    db.insertLink("entity/a", "entity/b", "提及", null, 0.5, undefined, "ner");
     db.upsertMentionSnapshot("entity/a", daysAgo(3), 3);
     db.upsertMentionSnapshot("entity/a", daysAgo(2), 5);
     db.upsertMentionSnapshot("entity/a", daysAgo(1), 7);

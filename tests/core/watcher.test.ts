@@ -17,7 +17,7 @@ describe("FileWatcher", () => {
 
   const mockSync: Partial<SyncManager> = {
     syncPage: mock(async (_slug: string, _vaultPath: string) => ({ success: true })),
-    removePage: mock((_slug: string) => {}),
+    removePage: mock(async (_slug: string) => {}),
   };
 
   beforeEach(() => {
@@ -264,7 +264,7 @@ describe("FileWatcher quarantine", () => {
       if (slug === "fail") throw new Error("NER exploded");
       return { success: true };
     }),
-    removePage: mock((_slug: string) => {}),
+    removePage: mock(async (_slug: string) => {}),
   };
 
   beforeEach(() => {
@@ -509,7 +509,7 @@ describe("FileWatcher quarantine", () => {
     // Use a sync that always fails
     const failAllSync: Partial<SyncManager> = {
       syncPage: mock(async () => { throw new Error("always fail"); }),
-      removePage: mock(() => {}),
+      removePage: mock(async () => {}),
     };
     const allFailSyncManager = failAllSync as unknown as SyncManager;
 

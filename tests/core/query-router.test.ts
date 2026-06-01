@@ -5,7 +5,7 @@ import { CBrainDB } from "../../src/storage/sqlite.js";
 import { QueryRouter, } from "../../src/core/query-router.js";
 
 function insertPage(db: CBrainDB, slug: string, title: string) {
-  db.prepare(
+  db.rawDb.prepare(
     `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, 'h')`
   ).run(slug, title, `${slug}.md`);
 }

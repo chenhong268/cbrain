@@ -31,25 +31,25 @@ function seedPerson(
     links?: Array<{ other: string; otherTitle: string; relation: string; context?: string; trust_state?: string; confidence?: number; source_page_slug?: string }>;
   },
 ): void {
-  db.prepare(
+  db.rawDb.prepare(
     "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)",
   ).run(slug, title, `${slug}.md`, "h1");
 
   for (const entry of opts?.timeline ?? []) {
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO timeline (page_slug, summary, source, trust_state, event_date, source_page_slug) VALUES (?, ?, ?, ?, ?, ?)",
     ).run(slug, entry.summary, entry.source ?? "dialogue", entry.trust_state ?? "trusted", entry.event_date ?? null, entry.source_page_slug ?? null);
   }
 
   for (const link of opts?.links ?? []) {
-    const exists = db.prepare("SELECT 1 FROM pages WHERE slug = ?").get(link.other);
+    const exists = db.rawDb.prepare("SELECT 1 FROM pages WHERE slug = ?").get(link.other);
     if (!exists) {
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
       ).run(link.other, link.otherTitle, `${link.other}.md`, "h1");
     }
 
-    db.prepare(
+    db.rawDb.prepare(
       "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context, source_page_slug) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
       slug,

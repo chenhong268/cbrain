@@ -92,7 +92,7 @@ describe("CLI", () => {
       execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
 
       const db = new CBrainDB(join(brainDir, "brain.sqlite"));
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
       ).run("entities/test", "Test", "test.md", "h1", 5, 3);
@@ -116,13 +116,13 @@ describe("CLI", () => {
       execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
 
       const db = new CBrainDB(join(brainDir, "brain.sqlite"));
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/b", "B", "b.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/a", "entities/b", "mentions");
       db.close();
@@ -142,13 +142,13 @@ describe("CLI", () => {
       execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
 
       const db = new CBrainDB(join(brainDir, "brain.sqlite"));
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/a", "A", "a.md", "h1");
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/b", "B", "b.md", "h2");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/b", "entities/a", "mentions");
       db.close();

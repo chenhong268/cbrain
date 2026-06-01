@@ -11,7 +11,7 @@ function insertEntity(
   mentionCount = 0,
   tier = 3
 ) {
-  db.prepare(
+  db.rawDb.prepare(
     `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
      VALUES (?, 'entity/person', ?, ?, ?, ?, ?)`
   ).run(slug, title, `${slug}.md`, `h-${slug}`, mentionCount, tier);
@@ -70,8 +70,7 @@ describe("EnrichManager", () => {
       expect(result.previousTier).toBe(3);
       expect(result.newTier).toBe(2);
 
-      const row = db
-        .prepare("SELECT tier FROM pages WHERE slug = ?")
+      const row = db        .rawDb.prepare("SELECT tier FROM pages WHERE slug = ?")
         .get("entities/zhangsan") as any;
       expect(row.tier).toBe(2);
     });
@@ -115,7 +114,7 @@ describe("EnrichManager", () => {
     });
 
     test("skips non-entity pages", () => {
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
          VALUES (?, 'concept', ?, ?, ?, ?, ?)`
       ).run("concepts/test", "Test", "concepts/test.md", "h1", 10, 3);
@@ -141,7 +140,7 @@ describe("EnrichManager", () => {
 
     test("ignores non-entity pages", () => {
       insertEntity(db, "entities/a", "A", 5, 3);
-      db.prepare(
+      db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
       ).run("records/r", "R", "r.md", "h");
 
@@ -161,14 +160,14 @@ describe("EnrichManager", () => {
       insertEntity(db, "entities/profile", "Profile", 8, 2);
       insertEntity(db, "entities/other", "Other", 0, 3);
 
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO tags (page_slug, tag) VALUES (?, ?)"
       ).run("entities/profile", "人物");
 
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/other", "entities/profile", "mentions");
-      db.prepare(
+      db.rawDb.prepare(
         "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
       ).run("entities/profile", "entities/other", "mentions");
 
