@@ -130,6 +130,27 @@ if (grounded_recall 调用失败) {
 }
 ```
 
+### deep_recall 未命中降级链
+
+```
+deep_recall 返回空结果（无相关实体/chunks）
+│
+├─ 第一步：query(缩减关键词)
+│   去掉修饰词，只留核心实体名
+│   示例："组织A 主题B 活动C 日期D" → query("组织A")
+│   示例："人物A在项目B的技术方案" → query("人物A")
+│   每次缩减一级：去掉时间 → 去掉场景 → 只留核心实体
+│
+├─ 第二步：query 仍未命中
+│   告知用户 CBrain 无记录（附诊断：搜了哪些关键词、扫了多少实体）
+│   "CBrain 里没找到。我搜了 '组织A'、'组织A 主题B'，都没有匹配。"
+│
+└─ 禁止：
+    ❌ deep_recall 未命中后直接跳 web_search / session_search
+    ❌ 不做 CBrain 内重试就放弃
+    ❌ 用完整原句重试 query（必须缩减关键词）
+```
+
 ### 回答规范
 
 grounded recall 返回后，首轮回答必须：
@@ -243,6 +264,7 @@ grounded recall 返回后，首轮回答必须：
 ❌ 首轮追问用户"要看原文吗/需要我展开吗/我可以继续查" → 停在结论
 ❌ 使用"💡 主动提示"标题展示 hints → 禁止
 ❌ 逐条展开 proactive hints → 禁止。默认不展示，判断改变时压成一句
+❌ deep_recall 未命中后直接跳 web_search/session_search → 必须先用 query(缩减关键词) 在 CBrain 内重试
 ```
 
 ## 验收断言
