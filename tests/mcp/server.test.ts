@@ -80,6 +80,7 @@ describe("MCP Server", () => {
         "batch_add_links", "batch_delete_pages", "batch_merge_pages",
         "brain_storm", "confirm_evidence", "deep_recall", "delete_page", "dismiss_insight",
         "dossier", "dream", "dream_reset", "enrich", "expand_entity",
+        "export_grounded_artifact",
         "generate_indexes", "get_chunks", "get_hierarchy", "get_ingest_log", "get_insight",
         "get_links", "get_page", "get_profile", "get_provenance", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",

@@ -24,6 +24,7 @@ import { registerBatchTools } from "./tools/batch.js";
 import { registerProvenanceTools } from "./tools/provenance.js";
 import { registerEpisodeTools } from "./tools/episode.js";
 import { registerAgenticResearchTools } from "./tools/agentic-research.js";
+import { registerArtifactTools } from "./tools/artifact.js";
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerSearchTools(server, ctx);
@@ -50,4 +51,5 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerProvenanceTools(server, ctx);
   registerEpisodeTools(server, ctx);
   registerAgenticResearchTools(server, ctx);
+  registerArtifactTools(server, ctx);
 }

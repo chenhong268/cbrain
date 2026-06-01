@@ -102,6 +102,13 @@
 │   → merge_pages(source, target, dryRun=true)
 │   → 注意：必须先 dryRun=true 预览
 │
+├─ "导出/保存/分享结果"？
+│   信号：导出、保存结果、分享、生成报告、存下来、HTML
+│   → export_grounded_artifact({ result_json, title, ... })
+│   ⚠️ 只在用户明确要求时调用
+│   ⚠️ 社交/情境内容需要用户确认隐私审查（privacy_reviewed=true）
+│   ⚠️ anonymize 仅隐藏来源标识；分享前仍需用户完成隐私审查
+│
 ├─ "快速查找"？
 │   信号：搜、找、有没有、查一下、谁在XX、XX认识谁
 │   → query
