@@ -9,18 +9,21 @@ export interface EpisodeClues {
   topic_hint?: string;
   context_hint?: string;
   connection_hint?: string;
+  relation_hint?: string;
+  event_hint?: string;
   limit?: number;
 }
 
 export interface CandidateEvidence {
-  source_type: "timeline" | "link";
-  text: string;
+  source_type: "timeline" | "link" | "page" | "chunk";
+  excerpt: string;
   source_slug: string;
-  trust_state: string;
+  trust_state?: string;
+  date?: string;
 }
 
 export interface MatchedClue {
-  dimension: "time" | "topic" | "connection" | "context";
+  dimension: "time" | "topic" | "connection" | "context" | "event" | "relation";
   hint_used: string;
 }
 
@@ -41,19 +44,26 @@ export interface SearchMeta {
   hints_applied: string[];
 }
 
+export interface RecallDiagnostics {
+  clues_checked: Array<{ clue_type: string; had_support: boolean; scanned: number }>;
+}
+
 export interface EpisodicRecallResult {
   query: string;
   summary: string;
   candidates: EpisodicCandidate[];
   search_meta: SearchMeta;
+  diagnostics: RecallDiagnostics;
 }
 
 // ─── Constants ────────────────────────────────────────────────
 
-const W_TIME = 0.35;
-const W_TOPIC = 0.30;
-const W_CONNECTION = 0.20;
+const W_TIME = 0.30;
+const W_TOPIC = 0.25;
+const W_EVENT = 0.15;
+const W_CONNECTION = 0.15;
 const W_CONTEXT = 0.15;
+const MULTI_CLUE_BONUS = 0.1;
 const MAX_LIMIT = 8;
 
 type ScoredDimension = { score: number; matched: boolean; hintUsed: string };
@@ -158,6 +168,15 @@ function scoreTextHint(
   return { score: best, matched: best > 0, hintUsed: hint };
 }
 
+function scoreEvent(
+  eventHint: string | undefined,
+  timeline: Array<{ summary: string }>,
+): ScoredDimension {
+  if (!eventHint) return { score: 0, matched: false, hintUsed: "" };
+  const texts = timeline.map((e) => e.summary);
+  return scoreTextHint(eventHint, texts);
+}
+
 function scoreConnection(
   connectionHint: string | undefined,
   links: LinkRow[],
@@ -194,6 +213,7 @@ function collectEvidence(
   textTokens: string[],
   connectionTokens: string[],
   titleMap: Map<string, { title: string; type: string }>,
+  chunkContents: string[],
 ): CandidateEvidence[] {
   const evidence: CandidateEvidence[] = [];
 
@@ -204,32 +224,34 @@ function collectEvidence(
       }
       evidence.push({
         source_type: "timeline",
-        text: entry.summary,
+        excerpt: entry.summary,
         source_slug: entry.source_page_slug ?? personSlug,
         trust_state: entry.trust_state ?? "trusted",
+        date: entry.event_date ?? undefined,
       });
     }
   }
 
-  if (matchedDims.has("topic") || matchedDims.has("context")) {
+  if (matchedDims.has("topic") || matchedDims.has("context") || matchedDims.has("event")) {
     const tokens = textTokens;
     for (const entry of timeline) {
-      if (matchTokens(tokens, entry.summary) > 0 && !evidence.some((e) => e.text === entry.summary)) {
+      if (matchTokens(tokens, entry.summary) > 0 && !evidence.some((e) => e.excerpt === entry.summary)) {
         evidence.push({
           source_type: "timeline",
-          text: entry.summary,
+          excerpt: entry.summary,
           source_slug: entry.source_page_slug ?? personSlug,
           trust_state: entry.trust_state ?? "trusted",
+          date: entry.event_date ?? undefined,
         });
       }
     }
     for (const link of links) {
-      const text = link.context ?? "";
-      if (text.length > 0 && matchTokens(tokens, text) > 0) {
+      const ctx = link.context ?? "";
+      if (ctx.length > 0 && matchTokens(tokens, ctx) > 0) {
         const otherSlug = link.from_slug !== personSlug ? link.from_slug : link.to_slug;
         evidence.push({
           source_type: "link",
-          text,
+          excerpt: ctx,
           source_slug: link.source_page_slug ?? otherSlug,
           trust_state: link.trust_state ?? "trusted",
         });
@@ -237,20 +259,36 @@ function collectEvidence(
     }
   }
 
-  if (matchedDims.has("connection")) {
+  const connDim = matchedDims.has("connection") || matchedDims.has("relation");
+  if (connDim) {
     for (const link of links) {
       const otherSlug = link.from_slug !== personSlug ? link.from_slug : link.to_slug;
       const info = titleMap.get(otherSlug);
       if (!info || matchTokens(connectionTokens, info.title) <= 0) continue;
-      const text = link.context ?? `${link.from_slug} → ${link.to_slug}`;
-      const alreadyAdded = evidence.some((e) => e.source_type === "link" && e.text === text);
+      const ctx = link.context ?? `${link.from_slug} → ${link.to_slug}`;
+      const alreadyAdded = evidence.some((e) => e.source_type === "link" && e.excerpt === ctx);
       if (!alreadyAdded) {
         evidence.push({
           source_type: "link",
-          text,
+          excerpt: ctx,
           source_slug: link.source_page_slug ?? otherSlug,
           trust_state: link.trust_state ?? "trusted",
         });
+      }
+    }
+  }
+
+  if (chunkContents.length > 0 && (matchedDims.has("topic") || matchedDims.has("context") || matchedDims.has("event"))) {
+    let chunkCount = 0;
+    for (const chunk of chunkContents) {
+      if (matchTokens(textTokens, chunk) > 0) {
+        evidence.push({
+          source_type: "chunk",
+          excerpt: chunk.slice(0, 200),
+          source_slug: personSlug,
+        });
+        chunkCount++;
+        if (chunkCount >= 3) break;
       }
     }
   }
@@ -266,24 +304,40 @@ function generateDisambiguatingClue(
 ): string | null {
   if (allCandidates.length <= 1) return null;
   const dims = new Set(candidate.matched_clues.map((c) => c.dimension));
-  const allDims: ("time" | "topic" | "connection" | "context")[] = ["time", "topic", "connection", "context"];
+  const allDims: ("time" | "topic" | "connection" | "context" | "event" | "relation")[] = ["time", "topic", "relation", "context", "event"];
   const missing = allDims.filter((d) => !dims.has(d));
   if (missing.length === 0) return null;
 
   const labelMap: Record<string, string> = {
     time: "时间段",
     topic: "讨论的主题",
-    connection: "共同认识的人或组织",
+    relation: "共同认识的人或组织",
     context: "见面的场景",
+    event: "参与的事件",
   };
   return `可以补充${missing.map((d) => labelMap[d]).join("或")}来缩小范围`;
 }
 
 // ─── Summary ──────────────────────────────────────────────────
 
+function buildNoCandidateSummary(
+  diagnostics: RecallDiagnostics,
+  totalScanned: number,
+): string {
+  const unsupported = diagnostics.clues_checked
+    .filter((c) => !c.had_support)
+    .map((c) => c.clue_type);
+  const suffix = unsupported.length > 0
+    ? `（${unsupported.join("、")}线索无匹配，扫描了${totalScanned}个人物）`
+    : "";
+  return `没有找到匹配的人物候选。${suffix}`;
+}
+
 function buildSummary(result: EpisodicRecallResult): string {
   const { candidates } = result;
-  if (candidates.length === 0) return "没有找到匹配的人物候选。";
+  if (candidates.length === 0) {
+    return buildNoCandidateSummary(result.diagnostics, result.search_meta.total_scanned);
+  }
   const parts = candidates.map((c) => `${c.title} (${c.confidence})`);
   return `找到 ${candidates.length} 个候选：${parts.join("、")}。`;
 }
@@ -300,12 +354,11 @@ export class EpisodicRecaller {
   recall(clues: EpisodeClues): EpisodicRecallResult {
     const limit = Math.max(1, Math.min(clues.limit ?? 5, MAX_LIMIT));
 
-    // Query fallback: derive missing hints from query text
     const resolvedClues = this.resolveClues(clues);
 
     const personSlugs = this.db.listPageSlugs({ type: "entity/person" });
     if (personSlugs.length === 0) {
-      return this.buildEmptyResult(clues.query, resolvedClues);
+      return this.buildEmptyResult(clues.query, resolvedClues, 0);
     }
 
     const timelineMap = this.db.batchGetTimelineForSlugs(personSlugs, false);
@@ -324,42 +377,55 @@ export class EpisodicRecaller {
       titleMap.set(slug, info);
     }
 
+    // FTS pre-fetch for chunk evidence
+    const personSlugsSet = new Set(personSlugs);
+    const chunkMap = this.fetchChunkMap(resolvedClues, personSlugsSet);
+
     const candidates: EpisodicCandidate[] = [];
 
     for (const slug of personSlugs) {
       const timeline = timelineMap.get(slug) ?? [];
       const { outgoing, incoming } = linksMap.get(slug) ?? { outgoing: [], incoming: [] };
       const allLinks = [...outgoing, ...incoming];
+      const chunks = chunkMap.get(slug) ?? [];
 
       const timeDim = scoreTime(resolvedClues.time_hint, timeline);
       const topicTexts = [
         ...timeline.map((e) => e.summary),
         ...allLinks.map((l) => l.context ?? ""),
+        ...chunks,
       ];
       const topicDim = scoreTextHint(resolvedClues.topic_hint, topicTexts);
       const connDim = scoreConnection(resolvedClues.connection_hint, allLinks, slug, titleMap);
-      const contextTexts = timeline.map((e) => e.summary);
+      const contextTexts = [...timeline.map((e) => e.summary), ...chunks];
       const contextDim = scoreTextHint(resolvedClues.context_hint, contextTexts);
+      const eventDim = scoreEvent(resolvedClues.event_hint, timeline);
 
       const rawScore =
         W_TIME * timeDim.score +
         W_TOPIC * topicDim.score +
         W_CONNECTION * connDim.score +
-        W_CONTEXT * contextDim.score;
+        W_CONTEXT * contextDim.score +
+        W_EVENT * eventDim.score;
 
-      const score = Math.min(rawScore, 1.0);
-      if (score <= 0) continue;
+      if (rawScore <= 0) continue;
 
       const matchedClues: MatchedClue[] = [];
       if (timeDim.matched) matchedClues.push({ dimension: "time", hint_used: timeDim.hintUsed });
       if (topicDim.matched) matchedClues.push({ dimension: "topic", hint_used: topicDim.hintUsed });
-      if (connDim.matched) matchedClues.push({ dimension: "connection", hint_used: connDim.hintUsed });
+      if (connDim.matched) matchedClues.push({ dimension: "relation", hint_used: connDim.hintUsed });
       if (contextDim.matched) matchedClues.push({ dimension: "context", hint_used: contextDim.hintUsed });
+      if (eventDim.matched) matchedClues.push({ dimension: "event", hint_used: eventDim.hintUsed });
+
+      const matchCount = matchedClues.length;
+      const bonus = matchCount >= 2 ? 1 + MULTI_CLUE_BONUS * (matchCount - 1) : 1;
+      const score = Math.min(rawScore * bonus, 1.0);
 
       const matchedDims = new Set(matchedClues.map((c) => c.dimension));
       const textTokens = [
         ...tokenizeHint(resolvedClues.topic_hint ?? ""),
         ...tokenizeHint(resolvedClues.context_hint ?? ""),
+        ...tokenizeHint(resolvedClues.event_hint ?? ""),
       ].filter((t) => t.length > 0);
       const connectionTokens = tokenizeHint(resolvedClues.connection_hint ?? "").filter((t) => t.length > 0);
       const timePrefix = resolvedClues.time_hint ? parseTimeHint(resolvedClues.time_hint) : null;
@@ -382,6 +448,7 @@ export class EpisodicRecaller {
           textTokens,
           connectionTokens,
           titleMap,
+          chunks,
         ),
         next_disambiguating_clue: null,
       });
@@ -394,6 +461,8 @@ export class EpisodicRecaller {
       c.next_disambiguating_clue = generateDisambiguatingClue(c, capped);
     }
 
+    const diagnostics = this.buildDiagnostics(resolvedClues, capped, personSlugs.length);
+
     const result: EpisodicRecallResult = {
       query: clues.query,
       summary: "",
@@ -404,13 +473,60 @@ export class EpisodicRecaller {
         total_scanned: personSlugs.length,
         hints_applied: this.collectHintsApplied(resolvedClues),
       },
+      diagnostics,
     };
     result.summary = buildSummary(result);
     return result;
   }
 
+  private fetchChunkMap(
+    clues: EpisodeClues,
+    personSlugs: Set<string>,
+  ): Map<string, string[]> {
+    const parts = [clues.topic_hint, clues.context_hint, clues.event_hint, clues.connection_hint]
+      .filter((h): h is string => !!h && h.length >= 2);
+    if (parts.length === 0) return new Map();
+
+    const combined = parts.join(" ");
+    const results = this.db.ftsSearch(combined, 50);
+    const chunkMap = new Map<string, string[]>();
+    for (const r of results) {
+      if (!personSlugs.has(r.page_slug)) continue;
+      const list = chunkMap.get(r.page_slug);
+      if (list) list.push(r.content);
+      else chunkMap.set(r.page_slug, [r.content]);
+    }
+    return chunkMap;
+  }
+
+  private buildDiagnostics(
+    clues: EpisodeClues,
+    candidates: EpisodicCandidate[],
+    totalScanned: number,
+  ): RecallDiagnostics {
+    const dims = [
+      { type: "time", hint: clues.time_hint },
+      { type: "topic", hint: clues.topic_hint },
+      { type: "event", hint: clues.event_hint },
+      { type: "connection", hint: clues.connection_hint ?? clues.relation_hint },
+      { type: "context", hint: clues.context_hint },
+    ];
+    return {
+      clues_checked: dims.map(({ type, hint }) => ({
+        clue_type: type,
+        had_support: hint ? candidates.some((c) => c.matched_clues.some((mc) => mc.dimension === type || (type === "connection" && mc.dimension === "relation"))) : false,
+        scanned: totalScanned,
+      })),
+    };
+  }
+
   private resolveClues(clues: EpisodeClues): EpisodeClues {
     const resolved = { ...clues };
+
+    // Fallback: relation_hint -> connection_hint
+    if (!resolved.connection_hint && resolved.relation_hint) {
+      resolved.connection_hint = resolved.relation_hint;
+    }
 
     // Fallback: parse time from query
     if (!resolved.time_hint) {
@@ -436,6 +552,7 @@ export class EpisodicRecaller {
     if (clues.topic_hint) tokens.push(...tokenizeHint(clues.topic_hint));
     if (clues.context_hint) tokens.push(...tokenizeHint(clues.context_hint));
     if (clues.connection_hint) tokens.push(...tokenizeHint(clues.connection_hint));
+    if (clues.event_hint) tokens.push(...tokenizeHint(clues.event_hint));
     return [...new Set(tokens)];
   }
 
@@ -444,22 +561,27 @@ export class EpisodicRecaller {
     if (clues.time_hint) applied.push("time");
     if (clues.topic_hint) applied.push("topic");
     if (clues.context_hint) applied.push("context");
-    if (clues.connection_hint) applied.push("connection");
+    if (clues.connection_hint || clues.relation_hint) applied.push("relation");
+    if (clues.event_hint) applied.push("event");
     return applied;
   }
 
-  private buildEmptyResult(query: string, resolvedClues: EpisodeClues): EpisodicRecallResult {
+  private buildEmptyResult(query: string, resolvedClues: EpisodeClues, totalScanned: number): EpisodicRecallResult {
+    const diagnostics = this.buildDiagnostics(resolvedClues, [], totalScanned);
+
     const result: EpisodicRecallResult = {
       query,
-      summary: "没有找到匹配的人物候选。",
+      summary: "",
       candidates: [],
       search_meta: {
         time_parsed: resolvedClues.time_hint ?? null,
         tokens_used: this.collectTokens(resolvedClues),
-        total_scanned: 0,
+        total_scanned: totalScanned,
         hints_applied: this.collectHintsApplied(resolvedClues),
       },
+      diagnostics,
     };
+    result.summary = buildSummary(result);
     return result;
   }
 }

@@ -70,6 +70,8 @@ function recall(clues: {
   topic_hint?: string;
   context_hint?: string;
   connection_hint?: string;
+  event_hint?: string;
+  relation_hint?: string;
   limit?: number;
 }) {
   return new EpisodicRecaller(db).recall(clues);
@@ -127,7 +129,7 @@ describe("EpisodicRecaller", () => {
     expect(result.candidates.length).toBe(1);
     expect(result.candidates[0].slug).toBe("entities/person-a");
     expect(result.candidates[0].matched_clues.some((c) => c.dimension === "context")).toBe(true);
-    expect(result.candidates[0].matched_clues.some((c) => c.dimension === "connection")).toBe(true);
+    expect(result.candidates[0].matched_clues.some((c) => c.dimension === "relation")).toBe(true);
     expect(result.candidates[0].evidence.some((e) => e.source_type === "timeline")).toBe(true);
     expect(result.candidates[0].evidence.some((e) => e.source_type === "link")).toBe(true);
   });
@@ -429,8 +431,8 @@ describe("EpisodicRecaller", () => {
 
     const evidence = result.candidates[0].evidence;
     // Only timeline entries matching "前端开发" should appear
-    expect(evidence.some((e) => e.text.includes("前端开发"))).toBe(true);
-    expect(evidence.some((e) => e.text.includes("团建"))).toBe(false);
+    expect(evidence.some((e) => e.excerpt.includes("前端开发"))).toBe(true);
+    expect(evidence.some((e) => e.excerpt.includes("团建"))).toBe(false);
     // Link evidence should not appear (no connection hint matched)
     expect(evidence.every((e) => e.source_type !== "link")).toBe(true);
   });
@@ -541,9 +543,9 @@ describe("EpisodicRecaller", () => {
     const evidence = result.candidates[0].evidence;
     // Only March timeline should appear
     expect(evidence.length).toBe(1);
-    expect(evidence[0].text).toContain("三月");
-    expect(evidence.every((e) => !e.text.includes("六月"))).toBe(true);
-    expect(evidence.every((e) => !e.text.includes("去年底"))).toBe(true);
+    expect(evidence[0].excerpt).toContain("三月");
+    expect(evidence.every((e) => !e.excerpt.includes("六月"))).toBe(true);
+    expect(evidence.every((e) => !e.excerpt.includes("去年底"))).toBe(true);
   });
 
   test("time-only query excludes other years in timeline evidence", () => {
@@ -559,8 +561,8 @@ describe("EpisodicRecaller", () => {
     expect(result.candidates.length).toBe(1);
     const evidence = result.candidates[0].evidence;
     expect(evidence.length).toBe(1);
-    expect(evidence[0].text).toContain("今年");
-    expect(evidence.every((e) => !e.text.includes("去年"))).toBe(true);
+    expect(evidence[0].excerpt).toContain("今年");
+    expect(evidence.every((e) => !e.excerpt.includes("去年"))).toBe(true);
   });
 
   test("connection-only query excludes unrelated links from evidence", () => {
@@ -576,8 +578,8 @@ describe("EpisodicRecaller", () => {
     expect(result.candidates.length).toBe(1);
     const evidence = result.candidates[0].evidence;
     // Only link to org-e should appear
-    expect(evidence.some((e) => e.text.includes("组织E"))).toBe(true);
-    expect(evidence.every((e) => !e.text.includes("项目X"))).toBe(true);
+    expect(evidence.some((e) => e.excerpt.includes("组织E"))).toBe(true);
+    expect(evidence.every((e) => !e.excerpt.includes("项目X"))).toBe(true);
   });
 
   test("source_slug is never empty in evidence across dimensions", () => {
@@ -610,7 +612,210 @@ describe("EpisodicRecaller", () => {
     expect(result.candidates.length).toBe(1);
     const evidence = result.candidates[0].evidence;
     expect(evidence.length).toBe(1);
-    expect(evidence[0].text).toContain("三月");
-    expect(evidence.every((e) => !e.text.includes("聚餐"))).toBe(true);
+    expect(evidence[0].excerpt).toContain("三月");
+    expect(evidence.every((e) => !e.excerpt.includes("聚餐"))).toBe(true);
+  });
+
+  // ─── #85 Acceptance: event dimension, relation hint, multi-clue bonus, diagnostics ───
+
+  test("event hint recalls person matching timeline event", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { event_date: "2024-06-01", summary: "人物A带领项目上线发布" },
+      ],
+    });
+    seedPerson("entities/person-b", "人物B", {
+      timeline: [
+        { event_date: "2024-06-01", summary: "人物B负责用户调研分析" },
+      ],
+    });
+
+    const result = recall({ query: "项目上线", event_hint: "项目上线" });
+
+    expect(result.candidates.length).toBe(1);
+    expect(result.candidates[0].slug).toBe("entities/person-a");
+    expect(result.candidates[0].matched_clues.some((c) => c.dimension === "event")).toBe(true);
+  });
+
+  test("time + topic multi-clue bonus ranks above topic-only", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { event_date: "2024-03-10", summary: "人物A讨论前端架构设计" },
+      ],
+    });
+    seedPerson("entities/person-b", "人物B", {
+      timeline: [
+        { summary: "人物B也讨论前端架构设计" },
+      ],
+    });
+
+    const result = recall({ query: "2024年前端架构", time_hint: "2024", topic_hint: "前端架构" });
+
+    expect(result.candidates.length).toBe(2);
+    // person-a has time+topic (multi-clue bonus), person-b has topic only
+    expect(result.candidates[0].slug).toBe("entities/person-a");
+    expect(result.candidates[0].score).toBeGreaterThan(result.candidates[1].score);
+  });
+
+  test("relation_hint produces same result as connection_hint", () => {
+    seedPerson("entities/person-a", "人物A", {
+      links: [
+        { other: "entities/org-x", otherTitle: "组织X", relation: "works_at" },
+      ],
+    });
+
+    const withConnection = recall({ query: "组织X的人", connection_hint: "组织X" });
+    const withRelation = recall({ query: "组织X的人", relation_hint: "组织X" });
+
+    expect(withConnection.candidates.length).toBe(withRelation.candidates.length);
+    expect(withConnection.candidates[0]?.slug).toBe(withRelation.candidates[0]?.slug);
+  });
+
+  test("relation_hint falls back to connection_hint scoring", () => {
+    seedPerson("entities/person-a", "人物A", {
+      links: [
+        { other: "entities/org-y", otherTitle: "组织Y", relation: "member_of" },
+      ],
+    });
+
+    const result = recall({ query: "组织Y的人", relation_hint: "组织Y" });
+
+    expect(result.candidates.length).toBe(1);
+    expect(result.candidates[0].slug).toBe("entities/person-a");
+    expect(result.candidates[0].matched_clues.some((c) => c.dimension === "relation")).toBe(true);
+  });
+
+  test("diagnostics present in all results", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { event_date: "2024-01-01", summary: "人物A做前端开发" },
+      ],
+    });
+
+    const result = recall({ query: "2024年前端", time_hint: "2024", topic_hint: "前端" });
+
+    expect(result.diagnostics).toBeDefined();
+    expect(result.diagnostics.clues_checked.length).toBeGreaterThan(0);
+    expect(result.diagnostics.clues_checked.some((c) => c.clue_type === "time")).toBe(true);
+    expect(result.diagnostics.clues_checked.some((c) => c.clue_type === "topic")).toBe(true);
+  });
+
+  test("empty result includes diagnostic explanation", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { event_date: "2024-01-01", summary: "人物A做前端开发" },
+      ],
+    });
+
+    const result = recall({ query: "2025年量子计算", time_hint: "2025", topic_hint: "量子计算" });
+
+    expect(result.candidates.length).toBe(0);
+    expect(result.summary).toContain("没有找到");
+    expect(result.summary).toContain("time");
+    expect(result.summary).toContain("topic");
+    expect(result.summary).toContain("扫描了1个人物");
+    expect(result.diagnostics.clues_checked.some((c) => !c.had_support)).toBe(true);
+  });
+
+  test("event hint scores against timeline summaries only", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { summary: "人物A参加团队聚餐活动" },
+      ],
+      links: [
+        { other: "entities/org-z", otherTitle: "组织Z", relation: "works_at", context: "人物A参与团队聚餐" },
+      ],
+    });
+
+    const result = recall({ query: "团队聚餐", event_hint: "团队聚餐" });
+
+    expect(result.candidates.length).toBe(1);
+    expect(result.candidates[0].matched_clues.some((c) => c.dimension === "event")).toBe(true);
+  });
+
+  test("hints_applied includes event and relation", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { summary: "人物A参加项目上线" },
+      ],
+      links: [
+        { other: "entities/org-w", otherTitle: "组织W", relation: "works_at" },
+      ],
+    });
+
+    const result = recall({ query: "项目上线", event_hint: "项目上线", relation_hint: "组织W" });
+
+    expect(result.search_meta.hints_applied).toContain("event");
+    expect(result.search_meta.hints_applied).toContain("relation");
+  });
+
+  test("multi-clue bonus strictly higher than single-clue", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { event_date: "2024-03-10", summary: "人物A做前端架构" },
+      ],
+    });
+    seedPerson("entities/person-b", "人物B", {
+      timeline: [
+        { event_date: "2024-03-10", summary: "人物B做前端架构和性能优化" },
+      ],
+    });
+
+    const singleClue = recall({ query: "前端架构", topic_hint: "前端架构" });
+    const multiClue = recall({ query: "2024年3月前端架构", time_hint: "2024年3月", topic_hint: "前端架构" });
+
+    const singleScore = singleClue.candidates.find((c) => c.slug === "entities/person-a")?.score ?? 0;
+    const multiScore = multiClue.candidates.find((c) => c.slug === "entities/person-a")?.score ?? 0;
+
+    expect(multiScore).toBeGreaterThan(singleScore);
+  });
+
+  test("collectTokens includes event_hint tokens", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { summary: "人物A参加产品发布会" },
+      ],
+    });
+
+    const result = recall({ query: "产品发布会", event_hint: "产品发布会" });
+
+    expect(result.search_meta.tokens_used.length).toBeGreaterThan(0);
+  });
+
+  test("inactive evidence excluded for event and relation dimensions", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { summary: "人物A参加项目上线", trust_state: "rejected" },
+        { summary: "人物A负责代码审查" },
+      ],
+      links: [
+        { other: "entities/org-q", otherTitle: "组织Q", relation: "works_at", trust_state: "superseded" },
+      ],
+    });
+
+    const result = recall({ query: "项目上线", event_hint: "项目上线", connection_hint: "组织Q" });
+
+    // Only the non-rejected timeline entry should appear in evidence
+    const timelineEvidence = result.candidates[0]?.evidence.filter((e) => e.source_type === "timeline") ?? [];
+    expect(timelineEvidence.every((e) => !e.excerpt.includes("项目上线"))).toBe(true);
+  });
+
+  test("chunk evidence when timeline has no matches", () => {
+    seedPerson("entities/person-a", "人物A", {
+      timeline: [
+        { summary: "人物A做日常开发" },
+      ],
+    });
+    // Seed chunk content for FTS
+    db.rawDb.prepare(
+      "INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)",
+    ).run("entities/person-a", "人物A参与量子计算算法研究的讨论记录");
+
+    const result = recall({ query: "量子计算", topic_hint: "量子计算" });
+
+    expect(result.candidates.length).toBe(1);
+    const chunkEvidence = result.candidates[0].evidence.filter((e) => e.source_type === "chunk");
+    expect(chunkEvidence.length).toBeGreaterThan(0);
+    expect(chunkEvidence[0].excerpt.length).toBeLessThanOrEqual(200);
   });
 });

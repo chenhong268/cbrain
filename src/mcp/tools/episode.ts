@@ -27,6 +27,14 @@ export function registerEpisodeTools(server: McpServer, ctx: ToolContext): void 
           .string()
           .optional()
           .describe("关系线索，如'人物A的同事'、'组织E的人'"),
+        event_hint: z
+          .string()
+          .optional()
+          .describe("事件线索，如'项目上线'、'团队聚餐'"),
+        relation_hint: z
+          .string()
+          .optional()
+          .describe("关系线索（与connection_hint同义），如'人物A的同事'"),
         limit: z
           .number()
           .optional()
@@ -34,7 +42,7 @@ export function registerEpisodeTools(server: McpServer, ctx: ToolContext): void 
           .describe("最多返回候选人数"),
       },
     },
-    async ({ query, time_hint, topic_hint, context_hint, connection_hint, limit }) => {
+    async ({ query, time_hint, topic_hint, context_hint, connection_hint, event_hint, relation_hint, limit }) => {
       const recaller = new EpisodicRecaller(ctx.db);
       const result = recaller.recall({
         query,
@@ -42,6 +50,8 @@ export function registerEpisodeTools(server: McpServer, ctx: ToolContext): void 
         topic_hint,
         context_hint,
         connection_hint,
+        event_hint,
+        relation_hint,
         limit,
       });
 

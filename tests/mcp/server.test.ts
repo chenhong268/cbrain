@@ -1318,14 +1318,14 @@ describe("MCP Server", () => {
       expect(data.candidates[0].confidence).toBeDefined();
       expect(data.candidates[0].matched_clues).toBeInstanceOf(Array);
       expect(data.candidates[0].matched_clues.some((c: any) => c.dimension === "topic")).toBe(true);
-      expect(data.candidates[0].matched_clues.some((c: any) => c.dimension === "connection")).toBe(true);
+      expect(data.candidates[0].matched_clues.some((c: any) => c.dimension === "relation")).toBe(true);
       expect(data.candidates[0].evidence).toBeInstanceOf(Array);
       expect(data.candidates[0].evidence.length).toBeGreaterThan(0);
       expect(data.candidates[0].next_disambiguating_clue).toBeNull();
       expect(data.summary).toContain("人物A");
       expect(data.search_meta).toBeDefined();
       expect(data.search_meta.hints_applied).toContain("topic");
-      expect(data.search_meta.hints_applied).toContain("connection");
+      expect(data.search_meta.hints_applied).toContain("relation");
     });
   });
 
