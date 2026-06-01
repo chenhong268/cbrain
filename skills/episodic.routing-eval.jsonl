@@ -6,9 +6,16 @@
 {"input": "在地点E的那次会议上遇到过谁", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "地点+事件+遇到+谁 → 情境找人"}
 {"input": "主题C相关的项目里认识的人有哪些", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "主题+认识+谁 → 情境找人"}
 {"input": "忘了名字，就是和人物A一起做过事件的那个", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发：忘了名字 + 关系线索（人物A）"}
+{"input": "想不起名字了，之前和人物A、人物B一起旅行的另外几个人是谁", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发+关系事件组合：忘名+已知人物+共同活动+找另外的人"}
+{"input": "忘了叫什么，就是和人物A一起做项目的那个", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发+关系事件：忘名+已知人物+共同事件"}
+{"input": "那个谁，之前和人物A一起聚餐的那个人叫什么", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发+关系事件：那个谁/叫什么+已知人物+共同场景"}
+{"input": "想不起来叫什么了，和人物A一起参加过技术分享的另外那个人", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发+关系事件：想不起来+已知人物+共同场景+另外那个人"}
 {"input": "人物A认识谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "提到具体人名，不是情境找人"}
 {"input": "人物A和人物B什么关系", "expected_skill": "connect.md", "expected_flag": null, "expected_tool": "graph_query", "rationale": "纯关系查询，走 connect"}
 {"input": "组织F团队的人", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "已知实体信息查询，不是忘了名字"}
 {"input": "见过谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "无情境线索，太宽泛，走普通 query"}
 {"input": "当时怎么设计的", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "deep_recall", "rationale": "内容回忆意图，不是找人"}
 {"input": "讨论过吗", "expected_skill": "query.md", "expected_flag": "grounded", "expected_tool": "deep_recall", "rationale": "核查确认意图，走 grounded recall"}
+{"input": "人物A和人物B一起做过什么", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "deep_recall", "rationale": "已知人物+问经历内容，不是找人，走内容回忆"}
+{"input": "人物A和人物B一起旅行的经历", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "deep_recall", "rationale": "已知人物+问经历详情，不是找人，走内容回忆"}
+{"input": "帮我找和人物A、人物B都有关系的人", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "graph_query", "rationale": "图谱遍历找关联人物，不是忘名找人，走 connect/graph_query"}
