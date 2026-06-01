@@ -1,6 +1,26 @@
 # Changelog
 
-> Current: `v1.8.9` — 内容回忆召回增强，Hermes 可用一次 deep_recall 还原方案结构与决策理由。
+> Current: `v1.8.10` — 新增情境回忆找人能力，并修正 Discovery 与 episodic recall 的评分质量。
+
+## [v1.8.10] — 2026-06-01
+
+### Agent 体验
+- **情境回忆重建（#10）**：新增 `recall_episode` MCP 工具，Hermes 可在用户忘记人名时，用时间段、主题、场景或共同关系召回人物候选
+- **证据收敛**：情境召回只返回匹配当前线索的 timeline/link evidence，避免把无关社会关系或经历带入回答
+- **不主动打扰**：该能力仅在用户请求或当前对话直接相关时使用，不会因为关系沉默时间长而建议联系某人
+
+### 质量修正
+- **Discovery 评分修正（#81）**：移除 `scoreCandidate()` 的 content/semantic 固定常量 padding，改用真实邻居重叠信号，提高复利发现候选排序质量
+- **episodic recall 评分修正（#82）**：query fallback 不再把同一 queryBody 同时填入 topic/context，避免单次文本命中被双重加权
+- **阈值与测试加固（#83/#84）**：补充 Jaccard、排序、actionable threshold 与 auto-applicable 边界测试
+
+### 可靠性与隐私
+- 过滤 rejected / superseded evidence，低置信结果以候选形式呈现
+- `source_slug` 保持可追溯，`limit` 限制在 1-8
+- 测试与公开描述使用匿名占位符，避免泄露真实知识库内容
+
+### 测试
+- `bun run check`：915 pass / 0 fail / 2246 expect() calls
 
 ## [v1.8.9] — 2026-05-29
 
