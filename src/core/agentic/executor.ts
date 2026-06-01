@@ -73,6 +73,7 @@ export interface ExecutionResult {
 
 interface ExecutionState {
   resolvedSlugs: Map<string, string>;
+  evidenceSlugs: Set<string>;
   failedInputs: Set<string>;
   llmCalls: number;
   searchCalls: number;
@@ -128,6 +129,7 @@ async function handleResolve(step: SearchPlanStep, state: ExecutionState, ctx: E
   for (const r of results) {
     if (r.slug) {
       state.resolvedSlugs.set(r.query, r.slug);
+      state.evidenceSlugs.add(r.slug);
       resolved = true;
     }
   }
@@ -136,6 +138,9 @@ async function handleResolve(step: SearchPlanStep, state: ExecutionState, ctx: E
   }
   return { kind: "resolve", input: step.input, data: results, latencyMs: 0 };
 }
+
+const MAX_SEARCH_EVIDENCE_PER_STEP = 5;
+const MAX_SEARCH_EVIDENCE_TOTAL = 20;
 
 async function handleSearch(step: SearchPlanStep, state: ExecutionState, ctx: ExecutorContext): Promise<StepResult> {
   const resolved = state.resolvedSlugs.get(step.input);
@@ -146,6 +151,19 @@ async function handleSearch(step: SearchPlanStep, state: ExecutionState, ctx: Ex
     _hints: hints,
   });
   state.searchCalls++;
+  const remaining = MAX_SEARCH_EVIDENCE_TOTAL - state.evidenceSlugs.size;
+  if (remaining > 0) {
+    const topResults = results
+      .slice()
+      .sort((a, b) => b.score - a.score)
+      .slice(0, MAX_SEARCH_EVIDENCE_PER_STEP)
+      .slice(0, remaining);
+    for (const r of topResults) {
+      if (r.slug) {
+        state.evidenceSlugs.add(r.slug);
+      }
+    }
+  }
   return { kind: "search", input: step.input, data: results, latencyMs: 0 };
 }
 
@@ -219,6 +237,7 @@ export class AgenticResearchExecutor {
     const trace: ExecutionTraceEntry[] = [];
     const state: ExecutionState = {
       resolvedSlugs: new Map(),
+      evidenceSlugs: new Set(),
       failedInputs: new Set(),
       llmCalls: 0,
       searchCalls: 0,
@@ -228,6 +247,7 @@ export class AgenticResearchExecutor {
     for (const entity of plan.entities) {
       if (isSlugLike(entity)) {
         state.resolvedSlugs.set(entity, entity);
+        state.evidenceSlugs.add(entity);
       }
     }
 
@@ -303,8 +323,8 @@ export class AgenticResearchExecutor {
 
     const totalMs = this.now() - startTime;
 
-    // Build evidence board from collected slugs
-    const allSlugs = [...new Set(state.resolvedSlugs.values())];
+    // Build evidence board from resolved slugs ∪ search-derived evidence slugs
+    const allSlugs = [...new Set([...state.resolvedSlugs.values(), ...state.evidenceSlugs])];
     const evidenceBoard = collectEvidenceForSlugs(this.ctx.db, allSlugs);
 
     const status: ExecutionStatus = degradedReason

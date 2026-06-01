@@ -562,12 +562,131 @@ describe("AgenticResearchExecutor — evidence board", () => {
     expect(result.evidenceBoard.facts.length).toBeGreaterThan(0);
   });
 
-  it("evidenceBoard is empty when no slugs resolved", async () => {
-    const executor = new AgenticResearchExecutor(makeCtx());
-    const result = await executor.execute(makePlan([{ kind: "search", input: "nothing" }]));
+  it("resolve fails + search hits → evidenceBoard has content", async () => {
+    const linksMap = new Map<string, { outgoing: unknown[]; incoming: unknown[] }>();
+    linksMap.set("search-hit-a", {
+      outgoing: [{ from_slug: "search-hit-a", to_slug: "search-hit-b", relation: "related", context: "link evidence", trust_state: "trusted", source_type: null, source_page_slug: null, confidence: 0.9, created_at: "2026-01-01" }],
+      incoming: [],
+    });
+    const db = mockDB({
+      resolveSlugs: (queries) => queries.map((q) => ({ query: q, slug: null, title: null })),
+      batchGetLinksForSlugs: () => linksMap,
+      batchGetTimelineForSlugs: () => new Map(),
+    });
+    const search = mockSearch({
+      search: async () => [{ slug: "search-hit-a", score: 0.9, snippet: "found", source: "hybrid" as const }],
+    });
+    const executor = new AgenticResearchExecutor(makeCtx({ db, search }));
+    const result = await executor.execute(makePlan([
+      { kind: "resolve", input: "unknown" },
+      { kind: "search", input: "unknown" },
+    ]));
+
+    expect(result.evidenceBoard.facts.length).toBeGreaterThan(0);
+  });
+
+  it("search-derived slugs do NOT pollute resolvedSlugs", async () => {
+    const db = mockDB({
+      resolveSlugs: (queries) => queries.map((q) => ({ query: q, slug: null, title: null })),
+      batchGetLinksForSlugs: () => new Map(),
+      batchGetTimelineForSlugs: () => new Map(),
+    });
+    const search = mockSearch({
+      search: async () => [{ slug: "search-hit-a", score: 0.9, snippet: "found", source: "hybrid" as const }],
+    });
+    const executor = new AgenticResearchExecutor(makeCtx({ db, search }));
+    const result = await executor.execute(makePlan([
+      { kind: "resolve", input: "unknown" },
+      { kind: "search", input: "unknown" },
+    ]));
+
+    expect(result.resolvedSlugs.has("search-hit-a")).toBe(false);
+  });
+
+  it("search returns 30 results → per-step cap of 5 applied", async () => {
+    const allSlugs: string[] = [];
+    const search = mockSearch({
+      search: async () => Array.from({ length: 30 }, (_, i) => ({
+        slug: `hit-${i}`,
+        score: 1 - i * 0.01,
+        snippet: `result ${i}`,
+        source: "hybrid" as const,
+      })),
+    });
+    const db = mockDB({
+      resolveSlugs: () => [{ query: "q", slug: null, title: null }],
+      batchGetLinksForSlugs: (slugs: string[]) => {
+        for (const s of slugs) allSlugs.push(s);
+        return new Map();
+      },
+      batchGetTimelineForSlugs: () => new Map(),
+    });
+    const executor = new AgenticResearchExecutor(makeCtx({ db, search }));
+    await executor.execute(makePlan([
+      { kind: "resolve", input: "q" },
+      { kind: "search", input: "q" },
+    ]));
+
+    // Per-step cap = 5, so only top 5 by score
+    expect(allSlugs).toHaveLength(5);
+    expect(allSlugs).toContain("hit-0");
+    expect(allSlugs).toContain("hit-4");
+    expect(allSlugs).not.toContain("hit-5");
+  });
+
+  it("multiple search steps cap total evidence at 20", async () => {
+    let callIdx = 0;
+    const allSlugs: string[] = [];
+    const search = mockSearch({
+      search: async () => {
+        // Each call returns 8 unique results
+        const offset = callIdx * 8;
+        callIdx++;
+        return Array.from({ length: 8 }, (_, i) => ({
+          slug: `hit-${offset + i}`,
+          score: 1 - (offset + i) * 0.001,
+          snippet: `result ${offset + i}`,
+          source: "hybrid" as const,
+        }));
+      },
+    });
+    const db = mockDB({
+      resolveSlugs: (queries) => queries.map((q) => ({ query: q, slug: null, title: null })),
+      batchGetLinksForSlugs: (slugs: string[]) => {
+        for (const s of slugs) allSlugs.push(s);
+        return new Map();
+      },
+      batchGetTimelineForSlugs: () => new Map(),
+    });
+    const executor = new AgenticResearchExecutor(makeCtx({ db, search }));
+    await executor.execute(makePlan([
+      { kind: "search", input: "q1" },
+      { kind: "search", input: "q2" },
+      { kind: "search", input: "q3" },
+      { kind: "search", input: "q4" },
+      { kind: "search", input: "q5" },
+    ]));
+
+    // 5 steps × 5 per-step = 25, but total cap = 20
+    expect(allSlugs.length).toBeLessThanOrEqual(20);
+  });
+
+  it("empty search results produce empty evidence board", async () => {
+    const db = mockDB({
+      resolveSlugs: () => [{ query: "q", slug: null, title: null }],
+      batchGetLinksForSlugs: () => new Map(),
+      batchGetTimelineForSlugs: () => new Map(),
+    });
+    const search = mockSearch({
+      search: async () => [],
+    });
+    const executor = new AgenticResearchExecutor(makeCtx({ db, search }));
+    const result = await executor.execute(makePlan([
+      { kind: "resolve", input: "q" },
+      { kind: "search", input: "q" },
+    ]));
 
     expect(result.evidenceBoard.facts).toHaveLength(0);
-    expect(result.evidenceBoard.gaps).toHaveLength(0);
   });
 });
 
