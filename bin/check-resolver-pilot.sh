@@ -56,24 +56,40 @@ else
   fail "episodic.routing-eval.jsonl 不存在"
 fi
 
+if [[ -f "$SKILLS_DIR/agentic.routing-eval.jsonl" ]]; then
+  ago_count=$(wc -l < "$SKILLS_DIR/agentic.routing-eval.jsonl" | tr -d ' ')
+  ago_pos=$(grep -c '"expected_tool": "agentic_research"' "$SKILLS_DIR/agentic.routing-eval.jsonl" 2>/dev/null || echo "0")
+  ago_neg=$((ago_count - ago_pos))
+  if (( ago_count >= 12 && ago_pos >= 6 && ago_neg >= 6 )); then
+    pass "agentic.routing-eval.jsonl (${ago_count} cases: ${ago_pos} positive, ${ago_neg} negative)"
+  else
+    fail "agentic.routing-eval.jsonl ${ago_count} cases (需≥12, pos≥6, neg≥6), got pos=${ago_pos} neg=${ago_neg}"
+  fi
+else
+  fail "agentic.routing-eval.jsonl 不存在"
+fi
+
 echo ""
 
 # ── 2. 路由覆盖率 ──
 echo "[2] 路由覆盖率"
 
-TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode")
+TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode" "agentic_research")
 
 for tool in "${TOOLS[@]}"; do
   status="ok"
   details=""
 
-  # 检查 eval 覆盖（recall + episodic eval 文件）
+  # 检查 eval 覆盖（recall + episodic + agentic eval 文件）
   eval_hits=0
   if [[ -f "$SKILLS_DIR/recall.routing-eval.jsonl" ]]; then
     eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/recall.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
   fi
   if [[ -f "$SKILLS_DIR/episodic.routing-eval.jsonl" ]]; then
     eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/episodic.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
+  fi
+  if [[ -f "$SKILLS_DIR/agentic.routing-eval.jsonl" ]]; then
+    eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/agentic.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
   fi
   if (( eval_hits < 2 )); then
     status="fail"
@@ -200,6 +216,15 @@ if [[ -f "$SKILLS_DIR/RESOLVER.md" ]]; then
     pass "RESOLVER.md 引用的 skill 文件全部存在"
   else
     fail "RESOLVER.md 引用了不存在的 skill: ${missing_skills[*]}"
+  fi
+
+  # Agentic research routing 闭环检查
+  if grep -q '\[agentic_research' "$SKILLS_DIR/RESOLVER.md" 2>/dev/null; then
+    if [[ -f "$SKILLS_DIR/query.md" ]] && grep -q '\[agentic_research\] Branch' "$SKILLS_DIR/query.md" 2>/dev/null; then
+      pass "RESOLVER.md [agentic_research] → query.md branch 闭环"
+    else
+      fail "RESOLVER.md 有 [agentic_research] 路由，但 query.md 缺少 [agentic_research] Branch"
+    fi
   fi
 fi
 

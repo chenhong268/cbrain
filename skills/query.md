@@ -29,6 +29,35 @@ When loaded with `[episodic]` flag (from RESOLVER.md "Episodic Person Recall" se
 - 纯关系查询（"A和B什么关系"）
 - 已知实体的信息查询（"组织F团队的人"）
 
+## [agentic_research] Branch — 复杂多步研究
+
+When loaded with `[agentic_research]` flag (from RESOLVER.md "Agentic Research" section):
+
+**执行协议：**
+1. **直接调用 `agentic_research`**，传入用户原始问题：
+   - `query`: 用户原始问题（不要改写、缩减或拆分）
+   - `detail`: 从 RESOLVER 路由标记读取（brief/normal/full），默认 normal
+   - `known_slugs`: 如果上下文中已有相关实体 slug，传入帮助定向搜索
+   - `intent_hint`: 如果 RESOLVER 路由标记指定了 intent，传入
+2. **禁止先跑普通搜索**：不要在调 `agentic_research` 之前先跑 query / deep_recall / get_page / graph_query 组合
+3. **结果使用**：返回结构化 `PipelineResult`，包含 status / evidence_board / answer_context / trace_summary。直接基于 answer_context 回答用户，不需要二次调用工具
+4. **降级**：如果 `agentic_research` 返回 status=insufficient 或 degraded，可补充一次 `deep_recall`，但不要替代 agentic 结果
+
+**适用条件（满足任一）：**
+- 比较取舍："A 和 B 的差异/取舍/哪个更适合"
+- 盲区/遗漏："我还遗漏了什么/这个判断有什么盲区"
+- 跨主题关联："A、B、C 之间有什么内在联系"
+- 证据充分性："这个结论依据够不够/有哪些证据和缺口"
+- 复杂复盘：需要多步推理和交叉验证
+
+**不适用（走现有路由）：**
+- 简单事实回忆 → deep_recall(detail=normal)
+- 单一实体查找 → deep_recall
+- 核查确认 → deep_recall(grounded=true)
+- 情境找人 → recall_episode
+- 两人关系 → graph_query / connect
+- 简单关键词搜索 → query
+
 ## Search Strategies
 
 ### Vector Search

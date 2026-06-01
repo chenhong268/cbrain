@@ -68,6 +68,21 @@
 │   信号：分析、联想、知识缺口、cross-domain、背后逻辑、有什么联系
 │   → brain_storm
 │
+├─ 复杂多步研究（EXPERIMENTAL）？
+│   信号：A和B的差异/取舍/哪个更适合、我还遗漏了什么/盲区
+│         A、B、C之间有什么内在联系、这个结论依据够不够
+│         需要多步推理和交叉验证的复杂复盘
+│   → agentic_research({ query, detail: "normal", known_slugs, intent_hint })
+│   → 多步管道：规划 → 执行 → 评估 → (一次补充) → 结构化结果
+│   → detail: brief=快速, normal=标准, full=深度
+│   → ⚠️ 不适用场景（走现有路由）：
+│     单一实体查找 → deep_recall
+│     简单关键词搜索 → query
+│     核查确认 → deep_recall(grounded: true)
+│     情境找人 → recall_episode
+│     内容回忆 → deep_recall(detail: normal)
+│     两人关系 → graph_query / connect
+│
 ├─ "XX和YY什么关系"？
 │   信号：什么关系、怎么认识的、有什么联系、之间
 │   → graph_query(mode=traverse, depth=2)
@@ -265,6 +280,10 @@ grounded recall 返回后，首轮回答必须：
 ❌ 使用"💡 主动提示"标题展示 hints → 禁止
 ❌ 逐条展开 proactive hints → 禁止。默认不展示，判断改变时压成一句
 ❌ deep_recall 未命中后直接跳 web_search/session_search → 必须先用 query(缩减关键词) 在 CBrain 内重试
+❌ 简单实体查找用 agentic_research → deep_recall 一步搞定
+❌ 核查确认用 agentic_research → 必须 deep_recall(grounded: true)
+❌ 情境找人用 agentic_research → 必须 recall_episode
+❌ 两人关系用 agentic_research → 必须 graph_query / connect
 ```
 
 ## 验收断言
@@ -281,6 +300,7 @@ grounded recall 返回后，首轮回答必须：
 |------|---------|---------|
 | deep_recall(grounded) | 证据板（facts/candidates/conflicts/must_not_claim）+ 合成回答 | 回忆/核查/事实核查，**最高优先级** |
 | deep_recall | body + links + timeline + tags + related + insights | 需要完整上下文 |
+| agentic_research | 多步管道：规划→执行→评估→(补充)→结构化结果 | 复杂比较/盲区分析/跨主题关联/证据充分性（**EXPERIMENTAL，非默认**） |
 | summarize | 图遍历 + 结构化概览 + 可配置深度 | 需要全局鸟瞰 |
 | dossier | 结构化档案（基本信息 + 关系 + 时间线 + 洞察） | 需要表格化档案 |
 | brain_storm | LLM 推理 + 缺口分析 + 跨域关联 | 需要分析和推理 |

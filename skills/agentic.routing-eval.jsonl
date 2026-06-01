@@ -1,0 +1,12 @@
+{"intent": "实体A和实体B的差异是什么，哪个更适合当前场景", "expected_tool": "agentic_research", "category": "comparison"}
+{"intent": "实体A、主题B和组织C之间有什么内在联系", "expected_tool": "agentic_research", "category": "cross_theme"}
+{"intent": "我还遗漏了什么，这个判断有什么盲区", "expected_tool": "agentic_research", "category": "gap_analysis"}
+{"intent": "这个结论依据够不够，有哪些证据和缺口", "expected_tool": "agentic_research", "category": "evidence_sufficiency"}
+{"intent": "组织D和组织E的方案取舍，各自优劣势对比", "expected_tool": "agentic_research", "category": "comparison"}
+{"intent": "帮我全面复盘事件E，需要多步推理和交叉验证", "expected_tool": "agentic_research", "category": "complex_review"}
+{"intent": "实体A是什么来头", "expected_tool": "deep_recall", "category": "negative_simple_recall", "note": "单一实体查找，不是复杂研究"}
+{"intent": "之前讨论过这个话题吗", "expected_tool": "deep_recall", "category": "negative_grounded", "note": "核查确认 → grounded=true"}
+{"intent": "上次团建见过谁，想不起名字了", "expected_tool": "recall_episode", "category": "negative_episodic", "note": "情境找人，不是研究"}
+{"intent": "当时怎么设计这个方案的", "expected_tool": "deep_recall", "category": "negative_content_recall", "note": "内容回忆 → deep_recall(detail=normal)"}
+{"intent": "实体A和实体B什么关系", "expected_tool": "graph_query", "category": "negative_relationship", "note": "两人关系 → graph_query/connect"}
+{"intent": "搜一下有没有关于主题C的记录", "expected_tool": "query", "category": "negative_simple_search", "note": "简单关键词搜索"}

@@ -93,6 +93,12 @@
 - **触发**：改一下配置 / 调整参数 / 配置
 - **工具**：`get_config(key)` / `set_config(key, value)`
 
+### 19. 复杂多步研究（EXPERIMENTAL）
+- **触发**：A和B的差异/取舍/哪个更适合 / 我还遗漏了什么/盲区 / A、B、C之间有什么内在联系 / 这个结论依据够不够
+- **工具**：`agentic_research({ query, detail, known_slugs, intent_hint })`
+- **注意**：多步管道（规划→执行→评估→补充），仅用于需要交叉验证的复杂研究。不是默认路由。
+- **不要用**：单一实体查找→deep_recall；简单搜索→query；找人→recall_episode；核查→deep_recall(grounded)
+
 ## 速查：容易混淆的功能
 
 | 你想… | 用 | 不要用 |

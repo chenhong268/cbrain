@@ -76,6 +76,16 @@
 - 分析一下、联想、知识缺口、cross-domain、有什么盲点、帮我想想 → query.md
 - 推理、背后逻辑、深层原因、为什么、思维链 → query.md
 
+### Agentic Research（EXPERIMENTAL — 非默认路由）
+- A 和 B 的差异/取舍/哪个更适合 → query.md [agentic_research detail=normal]
+- 我还遗漏了什么/这个判断有什么盲区 → query.md [agentic_research detail=normal]
+- A、B、C 之间有什么内在联系 → query.md [agentic_research detail=normal]
+- 这个结论依据够不够/有哪些证据和缺口 → query.md [agentic_research detail=normal]
+- 复杂复盘需要多步推理和交叉验证 → query.md [agentic_research detail=full]
+- ⚠️ 不适用：单一实体查找、简单关键词搜索、找人、内容回忆 → 走 query / deep_recall / recall_episode
+- ⚠️ 不适用：核查确认 → 走 deep_recall(grounded=true)
+- ⚠️ 不适用：两人关系查询 → 走 graph_query / connect
+
 ### Merge & Dedup
 - 这两个重复了、合并、一样的、重复页面 → cleanup.md
 - merge、合并页面 → cleanup.md
