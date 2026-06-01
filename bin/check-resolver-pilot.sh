@@ -43,26 +43,43 @@ else
   fail "recall.routing-eval.jsonl 不存在"
 fi
 
+if [[ -f "$SKILLS_DIR/episodic.routing-eval.jsonl" ]]; then
+  epi_count=$(wc -l < "$SKILLS_DIR/episodic.routing-eval.jsonl" | tr -d ' ')
+  epi_pos=$(grep -c '"expected_flag": "episodic"' "$SKILLS_DIR/episodic.routing-eval.jsonl" 2>/dev/null || echo "0")
+  epi_neg=$(grep -c '"expected_flag": null' "$SKILLS_DIR/episodic.routing-eval.jsonl" 2>/dev/null || echo "0")
+  if (( epi_count >= 10 && epi_pos >= 5 && epi_neg >= 4 )); then
+    pass "episodic.routing-eval.jsonl (${epi_count} cases: ${epi_pos} positive, ${epi_neg} negative)"
+  else
+    fail "episodic.routing-eval.jsonl ${epi_count} cases (需≥10, pos≥5, neg≥4), got pos=${epi_pos} neg=${epi_neg}"
+  fi
+else
+  fail "episodic.routing-eval.jsonl 不存在"
+fi
+
 echo ""
 
 # ── 2. 路由覆盖率 ──
 echo "[2] 路由覆盖率"
 
-TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity")
+TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode")
 
 for tool in "${TOOLS[@]}"; do
   status="ok"
   details=""
 
-  # 检查 eval 覆盖
+  # 检查 eval 覆盖（recall + episodic eval 文件）
+  eval_hits=0
   if [[ -f "$SKILLS_DIR/recall.routing-eval.jsonl" ]]; then
-    eval_hits=$(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/recall.routing-eval.jsonl" 2>/dev/null || echo "0")
-    if (( eval_hits < 2 )); then
-      status="fail"
-      details+="eval 只有 ${eval_hits} cases (需≥2), "
-    else
-      details+="eval ${eval_hits} cases, "
-    fi
+    eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/recall.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
+  fi
+  if [[ -f "$SKILLS_DIR/episodic.routing-eval.jsonl" ]]; then
+    eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/episodic.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
+  fi
+  if (( eval_hits < 2 )); then
+    status="fail"
+    details+="eval 只有 ${eval_hits} cases (需≥2), "
+  else
+    details+="eval ${eval_hits} cases, "
   fi
 
   # 检查 resolver 有触发词

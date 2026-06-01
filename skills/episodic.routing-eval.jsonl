@@ -2,8 +2,13 @@
 {"input": "那个人叫什么来着", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发：叫什么来着"}
 {"input": "上个月聚餐认识的那个人", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "时间+场景+认识+那个人"}
 {"input": "项目上线一起干的人是谁", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "事件+一起干+的人"}
-{"input": "人物A认识谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "提到具体人名，不是情境找人"}
-{"input": "A和B什么关系", "expected_skill": "connect.md", "expected_flag": null, "expected_tool": "graph_query", "rationale": "纯关系查询，走 connect"}
-{"input": "组织F团队的人", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "已知实体信息查询，不是忘了名字"}
 {"input": "想不起名字了，就是在某次技术分享上认识的", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发：想不起名字 + 场景线索"}
+{"input": "在地点E的那次会议上遇到过谁", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "地点+事件+遇到+谁 → 情境找人"}
+{"input": "主题C相关的项目里认识的人有哪些", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "主题+认识+谁 → 情境找人"}
+{"input": "忘了名字，就是和人物A一起做过事件的那个", "expected_skill": "query.md", "expected_flag": "episodic", "expected_tool": "recall_episode", "rationale": "强触发：忘了名字 + 关系线索（人物A）"}
+{"input": "人物A认识谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "提到具体人名，不是情境找人"}
+{"input": "人物A和人物B什么关系", "expected_skill": "connect.md", "expected_flag": null, "expected_tool": "graph_query", "rationale": "纯关系查询，走 connect"}
+{"input": "组织F团队的人", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "已知实体信息查询，不是忘了名字"}
 {"input": "见过谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "query", "rationale": "无情境线索，太宽泛，走普通 query"}
+{"input": "当时怎么设计的", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "deep_recall", "rationale": "内容回忆意图，不是找人"}
+{"input": "讨论过吗", "expected_skill": "query.md", "expected_flag": "grounded", "expected_tool": "deep_recall", "rationale": "核查确认意图，走 grounded recall"}
