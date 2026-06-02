@@ -190,6 +190,36 @@ export class ContentPipeline {
   }
 
   /**
+   * Create a graph link from frontmatter `reports_to` field.
+   * Mirror of setHierarchy() but triggered by sync instead of agent action.
+   */
+  processReportsTo(fromSlug: string, frontmatter: Record<string, unknown>): void {
+    const reportsTo = frontmatter.reports_to;
+    if (!reportsTo || typeof reportsTo !== "string") return;
+
+    const targetSlug = reportsTo.trim();
+    if (!targetSlug || targetSlug === fromSlug) return;
+
+    // Only create link if the target page exists
+    const target = this.db.getPage(targetSlug);
+    if (!target) {
+      this.logger?.warn("pipeline", "reports_to target not found", { from: fromSlug, target: targetSlug });
+      return;
+    }
+
+    // Remove stale links if reports_to changed — filter all, not just first
+    const staleLinks = this.db.getOutgoingLinks(fromSlug)
+      .filter(l => l.relation === "reports_to" && l.to_slug !== targetSlug);
+    for (const link of staleLinks) {
+      this.db.deleteLink(fromSlug, link.to_slug, "reports_to");
+    }
+
+    // INSERT OR IGNORE — same params as setHierarchy() in hierarchy.ts
+    this.db.insertLink(fromSlug, targetSlug, "reports_to", undefined, 1.0, "strong", "agent", 0.95);
+    this.logger?.info("pipeline", "reports_to graph link synced", { from: fromSlug, to: targetSlug });
+  }
+
+  /**
    * Run NER on a page body. Returns structured result or null.
    *
    * @param skipDatelessEvents — ingest skips events without dates (agent content),

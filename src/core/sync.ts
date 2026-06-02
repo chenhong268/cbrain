@@ -126,6 +126,12 @@ export class SyncManager {
               this.pipeline.processWikilinks(slug, parsed.body);
             } catch { /* non-critical */ }
           }
+          // Backfill reports_to even when content unchanged
+          if (parsed.frontmatter?.reports_to) {
+            try {
+              this.pipeline.processReportsTo(slug, parsed.frontmatter);
+            } catch { /* non-critical */ }
+          }
           report.skipped++;
           continue;
         }
@@ -213,6 +219,15 @@ export class SyncManager {
             }
           } catch (e) {
             this.logger?.warn("sync", "Wikilink 提取失败", { slug: file.slug, error: String(e) });
+          }
+        }
+
+        // Sync reports_to frontmatter → graph link
+        if (file.frontmatter?.reports_to) {
+          try {
+            this.pipeline.processReportsTo(file.slug, file.frontmatter);
+          } catch (e) {
+            this.logger?.warn("sync", "reports_to sync failed", { slug: file.slug, error: String(e) });
           }
         }
       } catch (err) {
@@ -328,6 +343,12 @@ export class SyncManager {
           this.pipeline.processWikilinks(effectiveSlug, parsed.body);
         } catch { /* non-critical */ }
       }
+      // Backfill reports_to even when content unchanged
+      if (parsed.frontmatter?.reports_to) {
+        try {
+          this.pipeline.processReportsTo(effectiveSlug, parsed.frontmatter as Record<string, unknown>);
+        } catch { /* non-critical */ }
+      }
       // Write mention snapshot for trend detection
       try {
         const mc = this.db.getPage(effectiveSlug)?.mention_count ?? 0;
@@ -397,6 +418,15 @@ export class SyncManager {
         mentionedSlugs = wlResult.mentionedSlugs;
       } catch (e) {
         this.logger?.warn("sync", "Wikilink 提取失败", { slug: effectiveSlug, error: String(e) });
+      }
+    }
+
+    // Sync reports_to frontmatter → graph link
+    if (parsed.frontmatter?.reports_to) {
+      try {
+        this.pipeline.processReportsTo(effectiveSlug, parsed.frontmatter as Record<string, unknown>);
+      } catch (e) {
+        this.logger?.warn("sync", "reports_to sync failed", { slug: effectiveSlug, error: String(e) });
       }
     }
 
