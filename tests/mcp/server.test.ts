@@ -76,7 +76,7 @@ describe("MCP Server", () => {
       const tools = getTools(server);
       const names = Object.keys(tools);
       expect(names.sort()).toEqual([
-        "act_on_review_candidate", "add_alias", "add_link", "add_tag", "add_timeline_entry", "agentic_research", "append_page", "archive_insight",
+        "act_on_review_candidate", "add_alias", "add_knowledge", "add_link", "add_tag", "add_timeline_entry", "agentic_research", "append_page", "archive_insight",
         "batch_add_links", "batch_delete_pages", "batch_merge_pages",
         "brain_storm", "confirm_evidence", "deep_recall", "delete_page", "dismiss_insight",
         "dossier", "dream", "dream_reset", "enrich", "expand_entity",

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
