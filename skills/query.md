@@ -93,6 +93,76 @@ When loaded with `[agentic_research]` flag (from RESOLVER.md "Agentic Research" 
 - 两人关系 → graph_query / connect
 - 简单关键词搜索 → query
 
+## [provenance] Branch — 来源追踪
+
+When loaded with `[provenance]` flag (from RESOLVER.md "Source Tracking / Provenance" section):
+
+**执行协议：**
+
+1. **已有 target**：如果上下文中已有具体的关系 ID 或事件 ID（来自之前回答暴露的 link/timeline 条目），直接调用：
+   ```
+   get_provenance({ target_type: "link"|"timeline", target_id })
+   ```
+
+2. **无 target，自然语言指代**：用户用自然语言描述某条信息/关系/事件，但没有给出 ID：
+   - **关系来源**：`graph_query` 或 `get_links` 拿到 link_id → `get_provenance({ target_type: "link", target_id })`
+   - **事件来源**：`get_timeline` 拿到 timeline_id → `get_provenance({ target_type: "timeline", target_id })`
+   - **不确定指哪条**：`deep_recall` / `query` 做上下文发现，找到相关 link 或 timeline 条目后拿 ID
+   - 如果找不到具体 target → 如实告知"CBrain 有相关记忆但无法定位到具体的溯源条目"，**禁止编造来源**
+
+3. **无法定位**：如果搜索后仍无法确定用户指的具体是哪条信息：
+   - 回复："目前 CBrain 有相关记忆，但我无法确定你指的是哪一条。可以说得更具体一些吗？比如提到的人名或关系。"
+   - 禁止编造 provenance 或猜测 target_id
+
+**适用条件（满足任一）：**
+- 用户问"这条信息哪来的"、"来源是什么"、"证据来源是什么"
+- 用户问"这个关系是谁说的"、"谁告诉你的"、"这条依据从哪来"
+- 用户问"这件事有证据吗"、"这个结论确认过吗"
+- 用户问"这条记忆可靠吗"、"可信吗"、"这个来源可靠吗"
+
+**不适用（走现有路由）：**
+- 普通内容回忆（"当时怎么设计的"）→ deep_recall(detail: normal)
+- 核查确认（"讨论过吗"）→ deep_recall(grounded: true)
+- 关系查询（"A和B什么关系"）→ graph_query / connect
+
+**用户回答格式（硬规则）：**
+
+```md
+来源：[来源分类，中文]
+可信度：[信任状态，中文]
+[证据摘要，如有]
+[纠正历史，如有]
+```
+
+**来源分类映射：**
+
+| 内部值 | 用户看到 |
+|:-------|:---------|
+| ingestion | 导入内容 |
+| ner_extraction | 自动提取 |
+| user_confirmation | 用户确认 |
+| user_thought | 你的想法 |
+| correction | 纠正记录 |
+| inference | 推理得出 |
+| system_default | 系统默认 |
+
+**信任状态映射：**
+
+| 内部值 | 用户看到 |
+|:-------|:---------|
+| trusted | 已确认 |
+| candidate | 待确认 |
+| user_thought | 你的想法 |
+| rejected | 已否决 |
+| superseded | 已更新 |
+
+**硬禁止：**
+- 不输出 target_id、source_type、source_page_slug
+- 不输出 confidence 数值
+- 不输出 raw JSON 或工具名
+- 不编造 provenance — 找不到 target 就说找不到
+- 不把 provenance 用于普通内容回忆
+
 ## Search Strategies
 
 ### Vector Search

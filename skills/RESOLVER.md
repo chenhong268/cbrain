@@ -22,6 +22,14 @@
 - 首轮禁止自动 expand_entity（除非用户追问或结果 insufficient）
 - ⚠️ 回答用槽位式压缩：5个槽位（核心设计对象/架构机制/为什么这样选/当时审查/后续变化），结构词硬保留
 
+### Source Tracking / Provenance（来源追踪，优先于通用搜索）
+- 这条信息哪来的、来源是什么、证据来源是什么 → query.md [provenance]
+- 这个关系是谁说的、谁告诉你的、这条依据从哪来 → query.md [provenance]
+- 这件事有证据吗、这个结论确认过吗 → query.md [provenance]
+- 这条记忆可靠吗、可信吗、这个来源可靠吗 → query.md [provenance]
+- ⚠️ 区分 grounded vs provenance："有依据吗/是不是真的/讨论过吗" → 走 grounded（问有没有），"依据从哪来/来源是什么/谁说的" → 走 provenance（问来源）
+- ⚠️ 不适用：普通内容回忆（"当时怎么设计的"）→ 走 deep_recall
+
 ### Episodic Person Recall（情境找人，优先于通用搜索）
 - 那个人是谁、哪个人、叫什么来着、想不起名字、忘了名字 → query.md [episodic]
 - ⎿条件：时间/地点/事件/场景/主题 + 见过/认识/遇到/一起做过 + 谁/那个人/人

@@ -82,12 +82,25 @@ else
   fail "compounding-review.routing-eval.jsonl 不存在"
 fi
 
+if [[ -f "$SKILLS_DIR/provenance.routing-eval.jsonl" ]]; then
+  prov_count=$(wc -l < "$SKILLS_DIR/provenance.routing-eval.jsonl" | tr -d ' ')
+  prov_pos=$(grep -c '"expected_tool": "get_provenance"' "$SKILLS_DIR/provenance.routing-eval.jsonl" 2>/dev/null || echo "0")
+  prov_neg=$(grep -c '"negative_provenance": true' "$SKILLS_DIR/provenance.routing-eval.jsonl" 2>/dev/null || echo "0")
+  if (( prov_count >= 8 && prov_pos >= 4 && prov_neg >= 3 )); then
+    pass "provenance.routing-eval.jsonl (${prov_count} cases: ${prov_pos} positive, ${prov_neg} negative)"
+  else
+    fail "provenance.routing-eval.jsonl ${prov_count} cases (需≥8, pos≥4, neg≥3), got pos=${prov_pos} neg=${prov_neg}"
+  fi
+else
+  fail "provenance.routing-eval.jsonl 不存在"
+fi
+
 echo ""
 
 # ── 2. 路由覆盖率 ──
 echo "[2] 路由覆盖率"
 
-TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode" "agentic_research")
+TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode" "agentic_research" "get_provenance")
 
 for tool in "${TOOLS[@]}"; do
   status="ok"
@@ -103,6 +116,9 @@ for tool in "${TOOLS[@]}"; do
   fi
   if [[ -f "$SKILLS_DIR/agentic.routing-eval.jsonl" ]]; then
     eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/agentic.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
+  fi
+  if [[ -f "$SKILLS_DIR/provenance.routing-eval.jsonl" ]]; then
+    eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/provenance.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
   fi
   if (( eval_hits < 2 )); then
     status="fail"

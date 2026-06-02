@@ -1,0 +1,9 @@
+{"intent": "这条信息哪来的", "expected_tool": "get_provenance", "category": "provenance", "note": "用户问来源，走 provenance 而不是 query"}
+{"intent": "人物A和人物B的关系可靠吗", "expected_tool": "get_provenance", "category": "provenance", "note": "问关系可信度，先 graph_query 拿 link ID 再 get_provenance"}
+{"intent": "这个结论确认过吗", "expected_tool": "get_provenance", "category": "provenance", "note": "问确认状态，走 provenance"}
+{"intent": "这件事有证据吗", "expected_tool": "get_provenance", "category": "provenance", "note": "问证据，走 provenance"}
+{"intent": "这条记忆是谁说的", "expected_tool": "get_provenance", "category": "provenance", "note": "问来源人物，走 provenance"}
+{"intent": "当时怎么设计的", "expected_tool": "deep_recall", "category": "content_recall", "note": "普通内容回忆，不走 provenance", "negative_provenance": true}
+{"intent": "人物A和人物B什么关系", "expected_tool": "graph_query", "category": "relationship", "note": "关系查询本身不走 provenance", "negative_provenance": true}
+{"intent": "讨论过这个话题吗", "expected_tool": "deep_recall", "category": "grounded", "note": "核查确认，不走 provenance", "negative_provenance": true}
+{"intent": "帮我总结一下组织C的情况", "expected_tool": "summarize", "category": "overview", "note": "概览总结，不走 provenance", "negative_provenance": true}

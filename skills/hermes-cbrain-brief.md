@@ -45,7 +45,7 @@ read_discoveries({ debug: false })
 run_discovery({ debug: false })
 ```
 
-展示规则：只用 `display`、`cards`、`summary`。禁止暴露 `score`、`distance`、`shared_neighbors`、`hops`、`debug`、`_debug`、`candidate`、`filter`、图距离、共享邻居、候选、过滤。直接展示，不二次格式化。
+展示规则：只用 `display`、`cards`、`summary`。禁止暴露 score/distance/debug/candidate/filter 等内部字段。直接展示，不二次格式化。
 
 ## 5. 其他路由
 
@@ -54,22 +54,25 @@ run_discovery({ debug: false })
 - 全景总结（总结/概览） → `summarize`
 - 深度推理（A vs B取舍/盲区） → `agentic_research`（非默认，仅复杂多步推理）
 
-## 6. 用户回答红线
+## 6. 来源追踪 → `get_provenance`
+
+信号：哪来的、来源是什么、谁说的、可靠吗、可信吗
+
+```
+get_provenance({ target_type: "link"|"timeline", target_id })
+```
+
+有 target → 直接调。无 target：关系→`graph_query`/`get_links` 拿 link_id；事件→`get_timeline` 拿 timeline_id；不确定→`deep_recall` 发现上下文。找不到→如实说，**禁止编造**。禁止输出 target_id/confidence/slug/JSON。
+
+## 7. 用户回答红线
 
 面向用户的回答中：
-- 不输出工具名（如 `deep_recall`），除非客户端 UI 已单独显示工具调用
-- 不输出 raw JSON
-- 不输出 slug、source id、chunk id
-- 不输出 debug / trace / internal 字段
-- 不说"deep_recall 返回了…"、"我调了…"等工具过程描述
+- 不输出工具名（除非客户端 UI 已显示）、raw JSON、slug/source id/chunk id、debug/trace 字段
+- 不说"deep_recall 返回了…"等工具过程描述
 
-## 7. 硬禁止
+## 8. 硬禁止
 
-- ❌ `query` + `get_page` + `get_links` + `get_timeline` 连调 → `deep_recall` 一次搞定
-- ❌ 总结类请求用 `query` → `summarize`
-- ❌ 核查确认用 `query` 或 `agentic_research` → `deep_recall(grounded: true)`
-- ❌ 内容回忆首轮自动 `expand_entity`
-- ❌ 情境找人用 `agentic_research` → `recall_episode`
-- ❌ discovery 输出暴露 `score`/`distance`/`debug`
-- ❌ 回答超过 500 字 → 删条目
-- ❌ 末尾追问"需要我展开吗/要继续吗"
+- ❌ query+get_page+get_links+get_timeline 连调 → deep_recall 一次搞定
+- ❌ 总结用 query → summarize | 核查用 query/agentic_research → deep_recall(grounded:true)
+- ❌ 首轮自动 expand_entity | 情境找人用 agentic_research → recall_episode
+- ❌ discovery 暴露 score/distance/debug | 回答超 500 字 | 末尾追问

@@ -12,6 +12,9 @@
 │   信号：讨论过吗、聊过吗、CBrain 里有吗、有没有遗漏
 │         有没有依据、是不是真的、矛盾吗
 │         为什么这么定、上次怎么定的
+│   ⚠️ 区分 grounded vs provenance：
+│     "有依据吗/是不是真的/讨论过吗" → grounded（问有没有）
+│     "依据从哪来/来源是什么/谁说的" → provenance（问来源），跳到下方 provenance 分支
 │   → deep_recall({ query, grounded: true, limit: 3, detail: "brief" })
 │   → 答案是 yes/no 或 fact/candidate 分类，不需要全文
 │   → 超时预算 20 秒，见下方「体验预算」
@@ -24,6 +27,23 @@
 │   → ⚠️ 硬门控：if（用户没说"展开/原文/详细/继续" && recall没返回insufficient/low confidence）
 │     { 禁止 get_page / expand_entity / get_timeline / query / session_search / 第二次deep_recall }
 │   → get_page 触发条件：用户说"展开/原文/详细" OR recall返回insufficient OR recall返回"未找到相关实体"
+│
+├─ 来源追踪（provenance）？
+│   信号：这条信息哪来的、来源是什么、证据来源是什么
+│         这个关系是谁说的、谁告诉你的、这条依据从哪来
+│         这件事有证据吗、这个结论确认过吗
+│         这条记忆可靠吗、可信吗、这个来源可靠吗
+│   → 已知 target_id：get_provenance({ target_type, target_id })
+│   → 未知 target，定位路径：
+│     - 关系来源 → graph_query / get_links 拿到 link_id → get_provenance({ target_type: "link", target_id })
+│     - 事件来源 → get_timeline 拿到 timeline_id → get_provenance({ target_type: "timeline", target_id })
+│     - 不确定指哪条 → deep_recall / query 做上下文发现，找到相关 link 或 timeline 条目后拿 ID
+│   → 找不到具体 target：如实告知，禁止编造 provenance
+│   ⚠️ 这是解释已有记忆的来源，不是搜索新内容
+│   ⚠️ 不适用：普通内容回忆 → deep_recall(detail: normal)
+│   ⚠️ 不适用：核查确认 → deep_recall(grounded: true)
+│   回答格式：来源分类（中文）+ 信任状态（中文）+ 证据摘要 + 纠正历史
+│   禁止：输出 target_id、confidence、slug、JSON、工具名
 │
 ├─ 情境找人（用户不记得人名，靠情境线索找人）？
 │   强触发：那个人是谁、叫什么来着、想不起名字、忘了名字
@@ -360,6 +380,8 @@ grounded recall 返回后，首轮回答必须：
 ❌ discovery 输出暴露 score/distance/shared_neighbors/debug → 只展示 display/cards/summary
 ❌ run_discovery 后自行拼接原始 report 给用户 → 默认返回就是用户可读摘要，直接展示
 ❌ read_discoveries 后暴露 _debug 字段 → 除非用户明确说 debug=true
+❌ provenance 用于普通内容回忆 → provenance 只解释已有记忆来源，内容回忆走 deep_recall
+❌ 找不到 target 时编造 provenance → 如实告知无法定位，禁止猜测
 ```
 
 ## 验收断言
@@ -388,3 +410,4 @@ grounded recall 返回后，首轮回答必须：
 | query | slug + title + snippet | 快速搜索，轻量（**最后手段，不是默认**） |
 | expand_entity | 单实体的详细信息 | 追问已知实体 |
 | recall_episode | 候选人列表 + 匹配线索 + 证据 + 诊断 | 情境找人：不记得名字，靠时间/主题/事件/关系线索召回候选人 |
+| get_provenance | 来源分类 + 信任状态 + 证据 + 纠正历史 | 解释已有记忆的来源和可信度（需要 target_type + target_id） |
