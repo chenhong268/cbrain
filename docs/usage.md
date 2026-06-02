@@ -1,6 +1,6 @@
 # CBrain 使用指南
 
-> v0.3.0 — 22 个 CLI 命令，38 个 MCP 工具，11 个 Skill
+> **首次安装？** → [安装与上手指南](install-onboarding.md)
 
 ## 快速开始
 

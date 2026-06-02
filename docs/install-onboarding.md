@@ -1,0 +1,361 @@
+# CBrain 2.0 安装与上手指南
+
+> 从零开始，10 分钟跑起来。
+
+## 你会得到什么
+
+一个跑在本地的知识引擎：你把内容喂进去（文字、笔记、对话），它自动提取人名/组织/概念，建图谱，之后随时搜索、查关系、问 Agent。
+
+所有数据在本地。SQLite + Markdown 文件。没有云依赖。
+
+## 前置条件
+
+| 需要 | 版本 | 怎么装 |
+|:-----|:-----|:-------|
+| **Bun** | ≥ 1.2 | `curl -fsSL https://bun.sh/install \| bash` |
+| **智谱 API Key** | — | [open.bigmodel.cn](https://open.bigmodel.cn) 注册 → 创建 API Key |
+| **Git** | 任意 | macOS 自带，或 `xcode-select --install` |
+| **DeepSeek API Key**（可选） | — | [platform.deepseek.com](https://platform.deepseek.com)，用于洞察生成 |
+
+> 智谱是硬依赖——向量嵌入和实体提取都靠它。没有 API Key 跑不起来。
+
+---
+
+## 第一步：安装
+
+### 方式 A：从源码（开发者推荐）
+
+```bash
+git clone https://github.com/chenhong268/cbrain.git /path/to/cbrain
+cd /path/to/cbrain
+bun install
+```
+
+之后所有命令用 `bun run src/cli/index.ts` 代替 `cbrain`。
+
+为了方便，可以加个 alias：
+
+```bash
+alias cbrain='bun run /path/to/cbrain/src/cli/index.ts'
+```
+
+### 方式 B：二进制（开箱即用）
+
+从 [Releases](https://github.com/chenhong268/cbrain/releases) 下载对应平台的二进制，放到 PATH 里。
+
+---
+
+## 第二步：初始化
+
+```bash
+cbrain init --dir /path/to/mybrain
+```
+
+这会创建：
+
+```
+/path/to/mybrain/
+  cbrain.json          ← 配置文件
+  brain.sqlite         ← SQLite 数据库
+  vault/               ← 你的知识库（Markdown 文件）
+    records/           ← 原始记录
+    brain/
+      entities/        ← 人物、组织等实体页
+      concepts/        ← 概念页
+      insights/        ← 自动生成的洞察
+  runtime/             ← 运行时文件（日志、健康报告、索引缓存）
+```
+
+### Runtime 和 Vault 为什么要分开
+
+**Vault 是你的知识库。** 你可能把它放进 Git、Obsidian、云同步。它需要干净、可迁移。
+
+**Runtime 是运行时的产物。** 日志、临时锁文件、健康报告、缓存。这些东西不应该进入你的知识库，也不应该被 Git 跟踪。
+
+如果 runtime 放进 vault 里：
+- 日志和锁文件会被 Obsidian 索引，搜索结果全是垃圾
+- 云同步会锁死 SQLite，导致数据库损坏
+- Git 仓库膨胀
+
+`cbrain doctor --first-run` 会检测这个问题并警告你。
+
+> **规则：runtime 和 vault 不要放在同一个目录下。** `init` 默认就是分开的，别手动改到一起。
+
+---
+
+## 第三步：配置 API Key
+
+两种方式，选一种。
+
+### 方式 A：环境变量（推荐，最快）
+
+```bash
+export ZHIPU_API_KEY=your-zhipu-api-key
+```
+
+CBrain 启动时会自动读取。加到 `.bashrc` 或 `.zshrc` 里持久化。
+
+### 方式 B：编辑配置文件
+
+编辑 `/path/to/mybrain/cbrain.json`：
+
+```json
+{
+  "vaultPath": "/path/to/mybrain/vault",
+  "dbPath": "/path/to/mybrain/brain.sqlite",
+  "lancePath": "/path/to/mybrain/lancedb",
+  "embedding": { "provider": "zhipu", "apiKey": "your-zhipu-api-key" },
+  "ner": { "enabled": true, "llm_api_key": "your-zhipu-api-key" }
+}
+```
+
+如果需要 DeepSeek（用于 `reflect` 洞察生成），在 `cbrain.json` 里加：
+
+```json
+{
+  "reflect": {
+    "llm_provider": "deepseek",
+    "llm_api_key": "your-deepseek-api-key"
+  }
+}
+```
+
+> **注意：** API Key 存在 `cbrain.json`（本地文件）。不会上传到任何服务器。
+
+---
+
+## 第四步：验证安装
+
+```bash
+cbrain doctor --first-run
+```
+
+这个命令跑 6 个类别的检查：
+
+| 类别 | 检什么 |
+|:-----|:-------|
+| Config | `cbrain.json` 存在、路径配置完整 |
+| Paths | vault 存在、数据库目录可写、runtime 目录可写、runtime 不在 vault 里 |
+| Database | SQLite 连接正常、WAL 模式激活、表结构完整 |
+| Index | FTS5 全文索引就绪、LanceDB 向量库可连接 |
+| Services | 检测残留的 PID 锁文件 |
+| MCP Guidance | 打印 Agent 连接配置 |
+
+全部通过会看到：
+
+```
+✓ Config    cbrain.json found, paths configured
+✓ Paths     vault, db, runtime all accessible
+✓ Database  SQLite connected, WAL active, schema ready
+✓ Index     FTS5 built, LanceDB connected
+✓ Services  No stale locks
+✓ MCP       Ready
+
+All checks passed. Next: connect your Agent.
+```
+
+如果用 Agent 做自动化检查，加 `--json`：
+
+```bash
+cbrain doctor --first-run --json
+```
+
+返回结构化 JSON，每项有 `status: pass|fail|warn`，Agent 可解析后决定下一步。
+
+---
+
+## 第五步：写入第一条知识
+
+```bash
+cbrain ingest --type text --title "关于实体A的备忘" "实体A是产品经理，向实体B汇报"
+```
+
+这会：
+1. 创建一个 record 页面
+2. 自动提取实体（实体A、实体B）
+3. 在知识图谱里建立关系
+4. 生成向量索引
+
+验证写入：
+
+```bash
+cbrain query "实体A"           # 搜索
+cbrain show brain/entities/person/shi-ti-a  # 查看实体详情（slug 会自动生成）
+cbrain status                  # 查看整体统计
+```
+
+---
+
+## 第六步：启动服务，接入 Agent
+
+### HTTP 模式（推荐用于开发调试）
+
+```bash
+cbrain serve --http --port 3399
+```
+
+启动后：
+- `http://localhost:3399/health` — 健康检查
+- `http://localhost:3399/tools` — 列出所有工具
+- `http://localhost:3399/tools/{tool_name}` — POST 调用任意工具
+
+HTTP 模式会自动启动文件监听，vault 里的文件变化会实时同步到索引。
+
+### MCP stdio 模式（推荐用于 Agent 集成）
+
+```bash
+cbrain serve
+```
+
+Agent 配置示例（Claude Desktop）：
+
+```json
+{
+  "mcpServers": {
+    "cbrain": {
+      "command": "cbrain",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+从源码运行时：
+
+```json
+{
+  "mcpServers": {
+    "cbrain": {
+      "command": "bun",
+      "args": ["run", "/path/to/cbrain/src/cli/index.ts", "serve"]
+    }
+  }
+}
+```
+
+> **提示：** `serve` 默认 MCP stdio 模式。加 `--http` 切到 HTTP 模式。两个模式不能同时跑（PID 锁保护）。
+
+---
+
+## 第七步：Smoke Test
+
+跑完上面所有步骤后，用这个清单确认一切正常：
+
+```bash
+# 1. 写入
+cbrain ingest --type text --title "smoke test" "测试组织B是一家科技公司"
+
+# 2. 搜索（应该能搜到）
+cbrain query "组织B"
+
+# 3. 实体提取（应该自动创建了组织B的实体页）
+cbrain list --type entity/company
+
+# 4. 健康检查
+cbrain doctor --first-run
+
+# 5. HTTP 服务（可选）
+cbrain serve --http &
+curl http://localhost:3399/health
+# 预期返回：{"ok":true,"tools":<正整数>}
+kill %1
+```
+
+全部通过 → 你的 CBrain 已经就绪。
+
+---
+
+## 日常使用
+
+| 你想做什么 | 命令 |
+|:-----------|:-----|
+| 记一段话 | `cbrain ingest "内容" --title "标题"` |
+| 记一个文件 | `cbrain ingest @/path/to/file.md --type markdown` |
+| 搜东西 | `cbrain query "关键词"` |
+| 查某个实体 | `cbrain show <slug>` |
+| 查关系 | `cbrain graph-query <slug> --mode traverse` |
+| 列出所有实体 | `cbrain list --type entity` |
+| 看整体状态 | `cbrain status` |
+| 检查健康 | `cbrain doctor --first-run` |
+
+### 定期维护
+
+```bash
+cbrain sync       # vault → DB 同步（手动改了 vault 文件后跑一次）
+cbrain health     # 14 维度健康检查
+cbrain dream      # 一键夜间维护（备份+同步+充实+清理+健康检查）
+```
+
+---
+
+## 升级
+
+```bash
+cd /path/to/cbrain
+git pull
+bun install              # 更新依赖
+cbrain doctor --first-run  # 验证升级后一切正常
+```
+
+数据库 schema 变更会自动迁移（`initSchema` 检测新表/新列，`config` 表防重复迁移）。
+
+如果升级后遇到问题：
+
+```bash
+cbrain health --full      # 完整健康检查
+cbrain doctor --first-run # 基础设施检查
+cbrain backup             # 先备份再排查
+```
+
+---
+
+## Troubleshooting
+
+| 问题 | 原因 | 解决 |
+|:-----|:-----|:-----|
+| **`Permission denied` 写入 vault/runtime** | 目录权限不对 | `chmod 755 /path/to/vault /path/to/runtime`，确保当前用户有写权限 |
+| **`duplicate title` 错误** | 同名页面已存在 | CBrain 的 title 是唯一的。用 `cbrain list` 查看现有页面，改名或用已有 slug |
+| **`quarantine` 属性被 macOS 设置** | 下载的二进制被 Gatekeeper 拦截 | `xattr -d com.apple.quarantine /path/to/cbrain` |
+| **`watcher lock` / PID 锁残留** | 上次进程非正常退出 | 删除 `<profile>/cbrain-http.pid` 或 `<profile>/cbrain-stdio.pid`；或 `cbrain serve --force` |
+| **runtime 在 vault 里的警告** | `runtimePath` 配置指向 vault 内部 | 编辑 `cbrain.json`，把 `runtimePath` 改到 vault 外面（如 `/path/to/mybrain/runtime`） |
+| **`Port 3399 already in use`** | 已有一个 HTTP 服务在跑 | `kill $(lsof -ti:3399)` 关掉旧进程，或用 `--port` 换端口 |
+| **`FTS5: syntax error`** | 搜索词包含特殊字符 | 用空格分隔关键词，避免 `OR`、`AND`、引号等 FTS5 保留字 |
+| **`LanceDB connection failed`** | 向量库损坏 | 删除 `lancedb/` 目录，重新 `cbrain sync` 重建索引 |
+| **NER 提取不到实体** | API Key 未配置或余额不足 | 检查 `cbrain.json` 里 `ner.llm_api_key` 或环境变量 `ZHIPU_API_KEY`；到智谱控制台检查余额 |
+| **`bun: command not found`** | Bun 未安装或不在 PATH | `curl -fsSL https://bun.sh/install \| bash`，然后重启终端 |
+
+---
+
+## 目录结构速查
+
+```
+/path/to/mybrain/           ← 项目根目录
+  cbrain.json               ← 配置（路径、API Key）
+  brain.sqlite              ← SQLite 数据库
+  lancedb/                  ← 向量索引（首次使用时创建）
+  vault/                    ← 知识库（可 Git 跟踪、可 Obsidian 打开）
+    records/                ← 原始记录
+    brain/
+      entities/             ← 实体页（人物/组织/...）
+        person/             ← 人物
+        company/            ← 组织
+        ...
+      concepts/             ← 概念
+      events/               ← 事件
+      insights/             ← 自动生成的洞察
+  runtime/                  ← 运行时（不要 Git 跟踪）
+    logs/                   ← 日志
+    health/                 ← 健康报告
+    *.pid                   ← 进程锁文件
+```
+
+---
+
+## 更多文档
+
+| 文档 | 内容 |
+|:-----|:-----|
+| [使用指南](usage.md) | CLI 命令详解、工作流示例 |
+| [MCP 工具参考](mcp-tools.md) | 所有 MCP 工具的完整说明 |
+| [Vault 文件规范](vault-spec.md) | Markdown + YAML frontmatter 格式 |
+| [架构设计](design.md) | 内部架构和数据流 |

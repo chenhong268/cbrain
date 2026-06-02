@@ -37,6 +37,8 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 
 ## Quick Start
 
+> **新用户？** 先看 [安装与上手指南](docs/install-onboarding.md) — 从零到跑起来，10 分钟。
+
 ### Binary (recommended)
 
 1. Install [Bun](https://bun.sh) (required runtime):
@@ -51,10 +53,9 @@ curl -fsSL https://bun.sh/install | bash
 
 ```bash
 ./cbrain init                              # 创建配置文件和目录
-./cbrain config --set embedding.apiKey=your-zhipu-api-key
-./cbrain config --set ner.llm_apiKey=your-zhipu-api-key
-./cbrain ingest --type text --title "张三" --page-type entity "产品经理"
-./cbrain query "张三"
+export ZHIPU_API_KEY=your-zhipu-api-key    # 或编辑 cbrain.json 填入 API key
+./cbrain ingest --type text --title "实体A" --page-type entity "产品经理"
+./cbrain query "实体A"
 ./cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 ```
 
@@ -472,7 +473,7 @@ CBrain uses `cbrain.json` in your project directory:
 }
 ```
 
-Set `CBRAIN_ZHIPU_API_KEY` environment variable as an alternative to config file.
+Set `ZHIPU_API_KEY` environment variable as an alternative to config file.
 
 ## Tech Stack
 
