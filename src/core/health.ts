@@ -5,6 +5,81 @@ import type { MetricsSnapshot } from "./audit.js";
 import type { Logger } from "./logger.js";
 import { isValidRelation } from "./shared.js";
 
+// ─── Contradiction classification ─────────────────────────────
+
+export type ContextVerdict = "conflict" | "complementary" | "insufficient";
+
+const STOP_WORDS = new Set([
+  "的", "了", "在", "是", "和", "与", "也", "都", "被", "从", "到", "对", "为", "以",
+  "及", "等", "或", "但", "而", "这", "那", "他", "她", "它", "我", "你", "很", "就",
+  "才", "会", "能", "要", "可以", "一个", "一", "个", "些", "着", "过", "把", "让",
+  "上", "下", "中", "里", "外", "前", "后",
+]);
+
+const NEGATION_MARKERS = new Set([
+  "不", "没", "无", "非", "未", "别", "勿", "莫", "没有", "不是", "并非", "从未", "不再",
+]);
+
+// Mutually exclusive state pairs: side-A vs side-B
+const MUTEX_STATES: Array<[Set<string>, Set<string>]> = [
+  [new Set(["职", "任职", "在职"]), new Set(["离职", "离", "卸任"])],
+  [new Set(["负责"]), new Set(["不再负责", "卸任"])],
+  [new Set(["进行", "进行中"]), new Set(["结束", "已结束", "终止"])],
+  [new Set(["有效"]), new Set(["失效", "无效"])],
+  [new Set(["属于"]), new Set(["不属于"])],
+];
+
+const MIN_CONTENT_WORDS = 3;
+const LOW_OVERLAP = 0.2;
+
+function tokenizeContent(text: string): string[] {
+  return [...text].filter(ch => !/[\s，。、；：！？\n]/.test(ch) && !STOP_WORDS.has(ch));
+}
+
+type MutexState = "positive" | "negative" | "none";
+
+function classifyMutexState(text: string, positive: Set<string>, negative: Set<string>): MutexState {
+  if ([...negative].some(term => text.includes(term))) return "negative";
+  if ([...positive].some(term => text.includes(term))) return "positive";
+  return "none";
+}
+
+function hasMutexConflict(charsA: string[], charsB: string[]): boolean {
+  const textA = charsA.join("");
+  const textB = charsB.join("");
+  for (const [positive, negative] of MUTEX_STATES) {
+    const stateA = classifyMutexState(textA, positive, negative);
+    const stateB = classifyMutexState(textB, positive, negative);
+    if (stateA !== "none" && stateB !== "none" && stateA !== stateB) return true;
+  }
+  return false;
+}
+
+export function classifyContextPair(ctxA: string, ctxB: string): ContextVerdict {
+  const wordsA = tokenizeContent(ctxA);
+  const wordsB = tokenizeContent(ctxB);
+
+  if (wordsA.length < MIN_CONTENT_WORDS || wordsB.length < MIN_CONTENT_WORDS) {
+    return "insufficient";
+  }
+
+  const setA = new Set(wordsA);
+  const setB = new Set(wordsB);
+  const intersection = [...setA].filter(w => setB.has(w));
+  const overlap = intersection.length / Math.min(setA.size, setB.size);
+
+  if (overlap < LOW_OVERLAP) return "complementary";
+
+  const hasNegA = wordsA.some(w => NEGATION_MARKERS.has(w));
+  const hasNegB = wordsB.some(w => NEGATION_MARKERS.has(w));
+
+  if (hasNegA !== hasNegB && intersection.length > 0) return "conflict";
+
+  if (hasMutexConflict(wordsA, wordsB) && intersection.length > 0) return "conflict";
+
+  return "complementary";
+}
+
 // ─── Types ────────────────────────────────────────────────────
 
 export interface HealthDimension {
@@ -859,26 +934,21 @@ export class HealthChecker {
       if (recordSources.length < 2) continue;
 
       const contexts = recordSources.map(l => l.context!);
-      let minOverlap = 1.0;
-      let bestPair: [string, string] = ["", ""];
+      const pairs: Array<{ i: number; j: number; verdict: ContextVerdict }> = [];
 
       for (let i = 0; i < contexts.length; i++) {
-        const wordsA = new Set(contexts[i].split(/[\s，。、；：！？\n]+/).filter(w => w.length > 0));
         for (let j = i + 1; j < contexts.length; j++) {
-          const wordsB = new Set(contexts[j].split(/[\s，。、；：！？\n]+/).filter(w => w.length > 0));
-          if (wordsA.size === 0 || wordsB.size === 0) continue;
-          const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
-          const overlap = intersection / Math.min(wordsA.size, wordsB.size);
-          if (overlap < minOverlap) { minOverlap = overlap; bestPair = [recordSources[i].from_slug, recordSources[j].from_slug]; }
+          pairs.push({ i, j, verdict: classifyContextPair(contexts[i], contexts[j]) });
         }
       }
 
-      if (minOverlap < 0.3) {
+      for (const pair of pairs) {
+        if (pair.verdict !== "conflict") continue;
         issues.push({
           severity: "medium",
           slug: entity.slug,
           title: entity.title,
-          description: `来自不同来源的描述差异较大 (词重叠度 ${minOverlap.toFixed(2)})，可能存在矛盾：${bestPair[0]} vs ${bestPair[1]}`,
+          description: `来自不同来源的信息存在矛盾：${recordSources[pair.i].from_slug} vs ${recordSources[pair.j].from_slug}`,
           suggestion: "人工核实两个来源的信息是否一致",
         });
       }

@@ -304,6 +304,145 @@ describe("HealthChecker", () => {
     });
   });
 
+  describe("classifyContextPair", () => {
+    const { classifyContextPair } = require("../../src/core/health.js") as typeof import("../../src/core/health.js");
+
+    test("complementary: low overlap (different topics)", () => {
+      expect(classifyContextPair("负责区域A销售", "主导产品研发团队")).toBe("complementary");
+    });
+
+    test("complementary: high overlap (nearly identical)", () => {
+      expect(classifyContextPair("担任技术部门总监", "任职技术部总监")).toBe("complementary");
+    });
+
+    test("conflict: negation asymmetry + shared content", () => {
+      expect(classifyContextPair("目前在职负责项目A", "已不再负责项目A")).toBe("conflict");
+    });
+
+    test("conflict: negation word in one side only", () => {
+      expect(classifyContextPair("该项目正在进行中", "该项目没有在进行")).toBe("conflict");
+    });
+
+    test("insufficient: too short", () => {
+      expect(classifyContextPair("同事", "合作伙伴")).toBe("insufficient");
+    });
+
+    test("insufficient: one side too short", () => {
+      expect(classifyContextPair("负责整个区域A销售业务", "同事")).toBe("insufficient");
+    });
+
+    test("complementary: medium overlap but no conflict signals", () => {
+      expect(classifyContextPair("担任市场部总监负责品牌推广", "负责区域B业务拓展和市场运营")).toBe("complementary");
+    });
+
+    test("conflict: mutex states — 在职 vs 离职", () => {
+      expect(classifyContextPair("目前在组织C任职", "已从组织C离职")).toBe("conflict");
+    });
+
+    test("conflict: mutex states — 负责 vs 不再负责", () => {
+      expect(classifyContextPair("负责项目A推进", "已不再负责项目A")).toBe("conflict");
+    });
+
+    test("conflict: mutex states — 进行中 vs 已结束", () => {
+      expect(classifyContextPair("项目A正在进行", "项目A已结束")).toBe("conflict");
+    });
+
+    test("complementary: different roles still pass", () => {
+      expect(classifyContextPair("担任区域A销售负责人", "主导区域B产品研发")).toBe("complementary");
+    });
+
+    // Same negative state — must NOT be flagged as conflict
+    test("complementary: both negative — 离职 vs 离职", () => {
+      expect(classifyContextPair("已从组织C离职", "已从组织C离职")).toBe("complementary");
+    });
+
+    test("complementary: both negative — 不再负责 vs 不再负责", () => {
+      expect(classifyContextPair("已不再负责项目A", "已不再负责项目A")).toBe("complementary");
+    });
+
+    test("complementary: both negative — 不属于 vs 不属于", () => {
+      expect(classifyContextPair("不属于组织C", "不属于组织C")).toBe("complementary");
+    });
+  });
+
+  describe("checkContradictions", () => {
+    function insertLinkWithContext(from: string, to: string, context: string) {
+      db.rawDb.prepare(
+        "INSERT OR IGNORE INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(from, to, "提及", context, 1.0, "strong", "wikilink", 1.0);
+    }
+
+    test("complementary contexts produce no issues", async () => {
+      insertPage("entities/person-a", "人物A", "entity/person");
+      insertPage("records/rec-1", "记录1", "record");
+      insertPage("records/rec-2", "记录2", "record");
+      insertLinkWithContext("records/rec-1", "entities/person-a", "负责区域A销售");
+      insertLinkWithContext("records/rec-2", "entities/person-a", "主导产品研发团队");
+
+      const report = await checker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "矛盾检测");
+      expect(dim?.status).toBe("pass");
+      expect(dim?.issues.length).toBe(0);
+    });
+
+    test("conflicting contexts produce warn with issue", async () => {
+      insertPage("entities/person-b", "人物B", "entity/person");
+      insertPage("records/rec-3", "记录3", "record");
+      insertPage("records/rec-4", "记录4", "record");
+      insertLinkWithContext("records/rec-3", "entities/person-b", "目前在职负责项目A");
+      insertLinkWithContext("records/rec-4", "entities/person-b", "已不再负责项目A");
+
+      const report = await checker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "矛盾检测");
+      expect(dim?.status).toBe("warn");
+      expect(dim?.issues.length).toBe(1);
+      expect(dim!.issues[0].slug).toBe("entities/person-b");
+      expect(dim!.issues[0].description).toContain("records/rec-3");
+      expect(dim!.issues[0].description).toContain("records/rec-4");
+    });
+
+    test("mutex state conflict — 任职 vs 离职 produces warn", async () => {
+      insertPage("entities/person-e", "人物E", "entity/person");
+      insertPage("records/rec-10", "记录10", "record");
+      insertPage("records/rec-11", "记录11", "record");
+      insertLinkWithContext("records/rec-10", "entities/person-e", "目前在组织C任职");
+      insertLinkWithContext("records/rec-11", "entities/person-e", "已从组织C离职");
+
+      const report = await checker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "矛盾检测");
+      expect(dim?.status).toBe("warn");
+      expect(dim!.issues.length).toBe(1);
+    });
+
+    test("insufficient contexts produce no issues", async () => {
+      insertPage("entities/person-c", "人物C", "entity/person");
+      insertPage("records/rec-5", "记录5", "record");
+      insertPage("records/rec-6", "记录6", "record");
+      insertLinkWithContext("records/rec-5", "entities/person-c", "同事");
+      insertLinkWithContext("records/rec-6", "entities/person-c", "合作伙伴");
+
+      const report = await checker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "矛盾检测");
+      expect(dim?.status).toBe("pass");
+      expect(dim?.issues.length).toBe(0);
+    });
+
+    test("mixed: 3 sources with 1 conflict pair", async () => {
+      insertPage("entities/person-d", "人物D", "entity/person");
+      insertPage("records/rec-7", "记录7", "record");
+      insertPage("records/rec-8", "记录8", "record");
+      insertPage("records/rec-9", "记录9", "record");
+      insertLinkWithContext("records/rec-7", "entities/person-d", "负责区域A销售业务");
+      insertLinkWithContext("records/rec-8", "entities/person-d", "主导产品研发团队");
+      insertLinkWithContext("records/rec-9", "entities/person-d", "不再负责区域A销售");
+
+      const report = await checker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "矛盾检测");
+      expect(dim?.status).toBe("warn");
+      expect(dim!.issues.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
   describe("writeFullReport", () => {
     test("produces full Markdown with all issues", async () => {
       insertPage("entities/e1", "E1", "entity/person");
