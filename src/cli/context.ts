@@ -49,6 +49,34 @@ export function findConfig(startDir?: string): CBrainConfig | null {
   return findConfig(parent);
 }
 
+export function loadConfigSafe(): { config: CBrainConfig; configPath: string } | null {
+  if (process.env.CBRAIN_CONFIG) {
+    const p = process.env.CBRAIN_CONFIG;
+    if (existsSync(p)) {
+      try {
+        return { config: JSON.parse(readFileSync(p, "utf-8")), configPath: p };
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  let current = process.cwd();
+  while (true) {
+    const configPath = join(current, CONFIG_FILE);
+    if (existsSync(configPath)) {
+      try {
+        return { config: JSON.parse(readFileSync(configPath, "utf-8")), configPath };
+      } catch {
+        return null;
+      }
+    }
+    const parent = resolve(current, "..");
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
 export function loadConfig(): CBrainConfig {
   // 1. CBRAIN_CONFIG: explicit path to config file (no search)
   if (process.env.CBRAIN_CONFIG) {

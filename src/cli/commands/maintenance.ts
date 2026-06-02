@@ -144,8 +144,17 @@ export function register(program: Command) {
 
   program
     .command("doctor")
-    .description("Health check: DB, vault, embedding")
-    .action(async () => {
+    .description("基础设施就绪检查")
+    .option("--first-run", "2.0 首次运行就绪检查（配置、路径、DB、索引、服务、MCP）")
+    .option("--json", "JSON 输出（配合 --first-run）")
+    .action(async (opts: { firstRun?: boolean; json?: boolean }) => {
+      if (opts.firstRun) {
+        const { runFirstRunDoctor, formatHuman, formatJson } = await import("../../core/first-run.js");
+        const report = await runFirstRunDoctor();
+        console.log(opts.json ? formatJson(report) : formatHuman(report));
+        process.exit(report.overallStatus === "fail" ? 1 : 0);
+        return;
+      }
       const config = loadConfig();
       let ok = true;
       try {
