@@ -25,6 +25,7 @@ import { registerProvenanceTools } from "./tools/provenance.js";
 import { registerEpisodeTools } from "./tools/episode.js";
 import { registerAgenticResearchTools } from "./tools/agentic-research.js";
 import { registerArtifactTools } from "./tools/artifact.js";
+import { registerCompoundingReviewTools } from "./tools/compounding-review.js";
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerSearchTools(server, ctx);
@@ -52,4 +53,5 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerEpisodeTools(server, ctx);
   registerAgenticResearchTools(server, ctx);
   registerArtifactTools(server, ctx);
+  registerCompoundingReviewTools(server, ctx);
 }

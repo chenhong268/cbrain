@@ -18,6 +18,7 @@ import { LearnManager } from "../core/learn.js";
 import { ProfileManager } from "../profile/manager.js";
 import { ProvenanceManager } from "../core/provenance.js";
 import { SqliteProvenanceStore } from "../storage/provenance-store.js";
+import { CompoundingReviewManager } from "../core/compounding-review.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { FileWatcher } from "../core/watcher.js";
@@ -46,6 +47,7 @@ export interface ToolContext {
   learn: LearnManager;
   profile: ProfileManager;
   provenance: ProvenanceManager;
+  compoundingReview: CompoundingReviewManager;
   watcher?: FileWatcher;
 }
 
@@ -78,7 +80,8 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const profile = new ProfileManager(profileDir ?? join(vaultPath, ".."));
   const provStore = new SqliteProvenanceStore(db.rawDb);
   const provenance = new ProvenanceManager(provStore);
+  const compoundingReview = new CompoundingReviewManager(db);
   profile.load();
 
-  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, watcher };
+  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher };
 }
