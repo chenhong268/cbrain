@@ -115,7 +115,7 @@ cbrain query "怎么优化性能" --strategy vector
 |------|------|
 | `cbrain sync` | 把 vault 文件同步到索引 |
 | `cbrain enrich` | 实体重要性升级 |
-| `cbrain health` | 10 维度健康检查 |
+| `cbrain health` | 14 维度健康检查 |
 | `cbrain doctor` | 快速诊断：数据库、文件、API |
 | `cbrain check-resolvable` | ~~未实现，手动检查 skills/ 目录~~ |
 | `cbrain watch` | 监听文件变化，自动同步 |

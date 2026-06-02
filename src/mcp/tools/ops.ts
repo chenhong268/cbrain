@@ -9,10 +9,10 @@ import { WatcherLock } from "../../utils/watcher-lock.js";
 export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   // ─── health ────────────────────────────────────────────
   server.registerTool("health", {
-    description: "Run a 10-dimension health check (errors, dedup, slug collisions, consistency, completeness, islands, suggestions, attention, data readiness, source quality). Returns issues and writes a report file.",
+    description: "Run a 14-dimension health check (errors, dedup, slug collisions, consistency, structural consistency, completeness, islands, suggestions, attention, data readiness, source quality, etc.). Returns issues and writes a report file.",
     inputSchema: {},
   }, async () => {
-    const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger);
+    const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath);
     const report = await checker.checkAll();
     return {
       content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
@@ -131,7 +131,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     inputSchema: {},
   }, async () => {
     const { runDream } = await import("../../core/dream.js");
-    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger), ctx.outputsDir, ctx.logger, undefined, ctx.dbPath,
+    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath), ctx.outputsDir, ctx.logger, undefined, ctx.dbPath,
       ctx.llm ? { llm: ctx.llm, embedding: ctx.embedding, lance: ctx.lance } : undefined);
     return {
       content: [{ type: "text", text: JSON.stringify({

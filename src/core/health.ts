@@ -4,6 +4,9 @@ import type { CBrainDB } from "../storage/sqlite.js";
 import type { MetricsSnapshot } from "./audit.js";
 import type { Logger } from "./logger.js";
 import { isValidRelation } from "./shared.js";
+import { extractWikiLinks, stripKnownRelationsSection, isValidEntityName } from "./extract.js";
+import { parseFrontmatter } from "../utils/frontmatter.js";
+import { findEntitySlug } from "./shared.js";
 
 // ─── Contradiction classification ─────────────────────────────
 
@@ -151,11 +154,13 @@ export class HealthChecker {
   private db: CBrainDB;
   private outputsDir: string;
   private logger: Logger | null;
+  private vaultPath?: string;
 
-  constructor(db: CBrainDB, outputsDir: string, logger?: Logger) {
+  constructor(db: CBrainDB, outputsDir: string, logger?: Logger, vaultPath?: string) {
     this.db = db;
     this.outputsDir = outputsDir;
     this.logger = logger ?? null;
+    this.vaultPath = vaultPath;
   }
 
   async checkAll(): Promise<HealthReport> {
@@ -168,6 +173,7 @@ export class HealthChecker {
       this.checkSlugCollisions(),
       this.checkTitleCollisionQuarantine(),
       this.checkConsistency(),
+      this.checkStructuralConsistency(),
       this.checkCompleteness(),
       this.checkIslands(),
       this.checkNewSuggestions(),
@@ -694,6 +700,186 @@ export class HealthChecker {
       status: issues.some(i => i.severity === "high") ? "fail" : issues.length > 0 ? "warn" : "pass",
       issues,
     };
+  }
+
+  private checkStructuralConsistency(): HealthDimension {
+    const issues: HealthIssue[] = [];
+
+    if (this.vaultPath) {
+      this.checkLinksVsMarkdown(issues);
+      this.checkWikilinksVsLinks(issues);
+      this.checkReportsToConsistency(issues);
+    }
+
+    return {
+      name: "结构一致性",
+      status: issues.some(i => i.severity === "high") ? "fail" : issues.length > 0 ? "warn" : "pass",
+      issues,
+    };
+  }
+
+  private checkLinksVsMarkdown(issues: HealthIssue[]): void {
+    const allLinks = this.db.getAllLinks();
+    const pagesWithLinks = new Map<string, { outgoing: Map<string, string[]>; incoming: Map<string, string[]> }>();
+
+    for (const link of allLinks) {
+      if (!pagesWithLinks.has(link.from_slug)) {
+        pagesWithLinks.set(link.from_slug, { outgoing: new Map(), incoming: new Map() });
+      }
+      if (!pagesWithLinks.has(link.to_slug)) {
+        pagesWithLinks.set(link.to_slug, { outgoing: new Map(), incoming: new Map() });
+      }
+
+      const from = pagesWithLinks.get(link.from_slug)!;
+      const targets = from.outgoing.get(link.to_slug) ?? [];
+      targets.push(link.relation);
+      from.outgoing.set(link.to_slug, targets);
+
+      const to = pagesWithLinks.get(link.to_slug)!;
+      const sources = to.incoming.get(link.from_slug) ?? [];
+      sources.push(link.relation);
+      to.incoming.set(link.from_slug, sources);
+    }
+
+    for (const [slug, { outgoing, incoming }] of pagesWithLinks) {
+      const page = this.db.getPage(slug);
+      if (!page?.file_path) continue;
+      const filePath = join(this.vaultPath!, page.file_path);
+      if (!existsSync(filePath)) continue;
+
+      const body = readFileSync(filePath, "utf-8");
+      const krMatch = body.match(/## Known Relations\n([\s\S]*?)$/);
+      const krSection = krMatch?.[1] ?? "";
+
+      let missingOutgoing = 0;
+      for (const [to, rels] of outgoing) {
+        for (const rel of rels) {
+          const pattern = `- ${rel} → [[${to}]]`;
+          if (!krSection.includes(pattern)) {
+            missingOutgoing++;
+          }
+        }
+      }
+      if (missingOutgoing > 0) {
+        issues.push({
+          severity: "medium",
+          slug,
+          title: page.title ?? slug,
+          description: `有 ${missingOutgoing} 条出边未写入 Known Relations 区块`,
+          suggestion: `运行 syncLinksToMarkdown("${slug}") 修复`,
+        });
+      }
+
+      let missingIncoming = 0;
+      for (const [from, rels] of incoming) {
+        for (const rel of rels) {
+          const pattern = `- ← ${rel} from [[${from}]]`;
+          if (!krSection.includes(pattern)) {
+            missingIncoming++;
+          }
+        }
+      }
+      if (missingIncoming > 0) {
+        issues.push({
+          severity: "medium",
+          slug,
+          title: page.title ?? slug,
+          description: `有 ${missingIncoming} 条入边未写入 Known Relations 区块`,
+          suggestion: `运行 syncLinksToMarkdown("${slug}") 修复`,
+        });
+      }
+    }
+  }
+
+  private checkWikilinksVsLinks(issues: HealthIssue[]): void {
+    const pages = this.db.listPages({ limit: 10000, offset: 0 });
+    for (const row of pages) {
+      if (!row.file_path) continue;
+      const filePath = join(this.vaultPath!, row.file_path);
+      if (!existsSync(filePath)) continue;
+
+      const body = readFileSync(filePath, "utf-8");
+      const stripped = stripKnownRelationsSection(body);
+      const wikilinks = extractWikiLinks(stripped);
+
+      const outgoingSlugs = new Set(this.db.getOutgoingSlugs(row.slug));
+      const missingTargets: string[] = [];
+
+      for (const link of wikilinks) {
+        // Same resolution logic as processWikilinks
+        let lookupName = link.target;
+        if (link.target.includes("/")) {
+          lookupName = link.target.split("/").pop()!;
+        }
+        const targetName = link.display ?? lookupName;
+        if (!isValidEntityName(targetName)) continue;
+
+        const resolvedSlug = findEntitySlug(this.db, lookupName);
+        if (!resolvedSlug) continue; // Unresolvable — not a graph inconsistency
+        if (resolvedSlug === row.slug) continue; // Self-reference
+
+        if (!outgoingSlugs.has(resolvedSlug)) {
+          missingTargets.push(link.target);
+        }
+      }
+
+      if (missingTargets.length > 0) {
+        issues.push({
+          severity: "low",
+          slug: row.slug,
+          title: row.title ?? row.slug,
+          description: `正文提及 ${missingTargets.map(t => `[[${t}]]`).join("、")} 但 links 表无边`,
+          suggestion: "运行 processWikilinks 或 put_page 重新索引",
+        });
+      }
+    }
+  }
+
+  private checkReportsToConsistency(issues: HealthIssue[]): void {
+    const pages = this.db.listPages({ limit: 10000, offset: 0 });
+
+    for (const page of pages) {
+      if (!page.file_path) continue;
+      const filePath = join(this.vaultPath!, page.file_path);
+      if (!existsSync(filePath)) continue;
+
+      let fm: Record<string, unknown>;
+      try {
+        const raw = readFileSync(filePath, "utf-8");
+        const parsed = parseFrontmatter(raw);
+        fm = parsed.frontmatter as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+
+      const reportsTo = fm.reports_to;
+      if (typeof reportsTo !== "string" || !reportsTo) continue;
+
+      if (!reportsTo.includes("/")) {
+        issues.push({
+          severity: "high",
+          slug: page.slug,
+          title: page.title,
+          description: `reports_to 值 "${reportsTo}" 不是完整 slug（应为 entity/xxx 格式）`,
+          suggestion: `更新 reports_to 为完整 slug，如 "entity/${reportsTo}"`,
+        });
+        continue;
+      }
+
+      const hasEdge = this.db.rawDb.prepare(
+        "SELECT 1 FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to' LIMIT 1"
+      ).get(page.slug, reportsTo);
+
+      if (!hasEdge) {
+        issues.push({
+          severity: "high",
+          slug: page.slug,
+          title: page.title,
+          description: `reports_to=${reportsTo} 缺少对应图边`,
+          suggestion: `运行 setHierarchy("${page.slug}", "${reportsTo}") 建立图边`,
+        });
+      }
+    }
   }
 
   private checkCompleteness(): HealthDimension {

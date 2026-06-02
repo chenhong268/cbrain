@@ -70,7 +70,7 @@
 
 ### health
 
-10 维度健康检查，报告写入 `<profileDir>/runtime/health/`。
+14 维度健康检查，报告写入 `<profileDir>/runtime/health/`。
 
 ```json
 {}

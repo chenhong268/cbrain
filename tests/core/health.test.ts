@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { HealthChecker } from "../../src/core/health.js";
@@ -55,7 +55,7 @@ describe("HealthChecker", () => {
       const report = await checker.checkAll();
       expect(report.overallStatus).toBe("pass");
       expect(report.metrics.totalPages).toBe(17);
-      expect(report.dimensions.length).toBe(13);
+      expect(report.dimensions.length).toBe(14);
     });
 
     test("fails on insufficient data", async () => {
@@ -453,6 +453,120 @@ describe("HealthChecker", () => {
       expect(full).toContain("健康检查（完整）");
       expect(full).toContain("entities/e1");
       expect(full).toContain("指标总览");
+    });
+  });
+
+  describe("结构一致性", () => {
+    const vaultDir = join(testDir, "vault");
+
+    beforeEach(() => {
+      mkdirSync(vaultDir, { recursive: true });
+    });
+
+    function writeVaultFile(fileName: string, content: string) {
+      writeFileSync(join(vaultDir, fileName), content, "utf-8");
+    }
+
+    test("检测图边未写入 Known Relations", async () => {
+      insertPage("entity/a", "A", "entity/person", { file_path: "entity-a.md" });
+      insertPage("entity/b", "B", "entity/person", { file_path: "entity-b.md" });
+      insertLink("entity/a", "entity/b", "协作");
+
+      writeVaultFile("entity-a.md", "---\ntitle: A\ntype: entity/person\nslug: entity/a\n---\nA 的内容\n");
+      writeVaultFile("entity-b.md", "---\ntitle: B\ntype: entity/person\nslug: entity/b\n---\nB 的内容\n");
+
+      const vaultChecker = new HealthChecker(db, join(testDir, "outputs"), undefined, vaultDir);
+      const report = await vaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.issues.length).toBeGreaterThanOrEqual(1);
+      expect(dim!.issues.some(i => i.description.includes("出边未写入 Known Relations"))).toBe(true);
+    });
+
+    test("检测正文 wikilink 缺 links 表边", async () => {
+      insertPage("entity/x", "人物甲", "entity/person", { file_path: "entity-x.md" });
+      insertPage("entity/y", "人物乙", "entity/person", { file_path: "entity-y.md" });
+
+      writeVaultFile("entity-x.md", "---\ntitle: 人物甲\ntype: entity/person\nslug: entity/x\n---\n提到了 [[人物乙]]。\n");
+      writeVaultFile("entity-y.md", "---\ntitle: 人物乙\ntype: entity/person\nslug: entity/y\n---\n人物乙 的内容\n");
+
+      const vaultChecker = new HealthChecker(db, join(testDir, "outputs"), undefined, vaultDir);
+      const report = await vaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.issues.some(i => i.description.includes("links 表无边") && i.slug === "entity/x")).toBe(true);
+    });
+
+    test("检测 reports_to 使用非完整 slug", async () => {
+      insertPage("entity/staff", "Staff", "entity/person", { file_path: "entity-staff.md" });
+      insertPage("entity/boss", "Boss", "entity/person", { file_path: "entity-boss.md" });
+
+      writeVaultFile("entity-staff.md", "---\ntitle: Staff\ntype: entity/person\nslug: entity/staff\nreports_to: boss\n---\nStaff 的内容\n");
+      writeVaultFile("entity-boss.md", "---\ntitle: Boss\ntype: entity/person\nslug: entity/boss\n---\nBoss 的内容\n");
+
+      const vaultChecker = new HealthChecker(db, join(testDir, "outputs"), undefined, vaultDir);
+      const report = await vaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.issues.some(i => i.description.includes("不是完整 slug"))).toBe(true);
+    });
+
+    test("检测 reports_to 缺 graph edge", async () => {
+      insertPage("entity/staff2", "Staff2", "entity/person", { file_path: "entity-staff2.md" });
+      insertPage("entity/boss2", "Boss2", "entity/person", { file_path: "entity-boss2.md" });
+
+      writeVaultFile("entity-staff2.md", "---\ntitle: Staff2\ntype: entity/person\nslug: entity/staff2\nreports_to: entity/boss2\n---\nStaff2 的内容\n");
+      writeVaultFile("entity-boss2.md", "---\ntitle: Boss2\ntype: entity/person\nslug: entity/boss2\n---\nBoss2 的内容\n");
+
+      const vaultChecker = new HealthChecker(db, join(testDir, "outputs"), undefined, vaultDir);
+      const report = await vaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.issues.some(i => i.description.includes("缺少对应图边"))).toBe(true);
+    });
+
+    test("全部一致时返回 pass", async () => {
+      insertPage("entity/p1", "P1", "entity/person", { file_path: "entity-p1.md" });
+      insertPage("entity/p2", "P2", "entity/person", { file_path: "entity-p2.md" });
+      insertLink("entity/p1", "entity/p2", "协作");
+
+      writeVaultFile("entity-p1.md", "---\ntitle: P1\ntype: entity/person\nslug: entity/p1\n---\nP1 的内容\n\n## Known Relations\n\n- 协作 → [[entity/p2]]\n");
+      writeVaultFile("entity-p2.md", "---\ntitle: P2\ntype: entity/person\nslug: entity/p2\n---\nP2 的内容\n\n## Known Relations\n\n- ← 协作 from [[entity/p1]]\n");
+
+      const vaultChecker = new HealthChecker(db, join(testDir, "outputs"), undefined, vaultDir);
+      const report = await vaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.status).toBe("pass");
+      expect(dim!.issues.length).toBe(0);
+    });
+
+    test("正文 [[显示名]] 已有对应 slug link 时不报错", async () => {
+      insertPage("entity/person-a", "人物A", "entity/person", { file_path: "entity-person-a.md" });
+      insertPage("entity/other", "Other", "entity/person", { file_path: "entity-other.md" });
+      // Link exists by slug in DB
+      insertLink("entity/person-a", "entity/other", "提及");
+
+      // Wikilink uses display name, not slug — should resolve and NOT flag
+      writeVaultFile("entity-person-a.md", "---\ntitle: 人物A\ntype: entity/person\nslug: entity/person-a\n---\n提到了 [[Other]]。\n");
+      writeVaultFile("entity-other.md", "---\ntitle: Other\ntype: entity/person\nslug: entity/other\n---\nOther 的内容\n");
+
+      const vaultChecker = new HealthChecker(db, join(testDir, "outputs"), undefined, vaultDir);
+      const report = await vaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.issues.some(i => i.description.includes("links 表无边") && i.slug === "entity/person-a")).toBe(false);
+    });
+
+    test("无 vaultPath 时跳过结构一致性检查", async () => {
+      insertPage("entity/noVault", "NoVault", "entity/person");
+
+      const noVaultChecker = new HealthChecker(db, join(testDir, "outputs"));
+      const report = await noVaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.status).toBe("pass");
+      expect(dim!.issues.length).toBe(0);
     });
   });
 });

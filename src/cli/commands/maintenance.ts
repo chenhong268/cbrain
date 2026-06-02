@@ -66,7 +66,7 @@ export function register(program: Command) {
 
   program
     .command("health")
-    .description("Run 10-dimension health check and write report")
+    .description("Run 14-dimension health check and write report")
     .option("--full", "Print full Markdown report to stdout")
     .option("--json", "Output detail JSON to stdout")
     .option("--dimension <name>", "Only check specified dimension")
@@ -77,7 +77,7 @@ export function register(program: Command) {
       const { HealthChecker } = await import("../../core/health.js");
       const { Logger } = await import("../../core/logger.js");
       const logger = new Logger(outputsDir);
-      const checker = new HealthChecker(db, outputsDir, logger);
+      const checker = new HealthChecker(db, outputsDir, logger, config.vaultPath);
       const report = await checker.checkAll();
 
       if (opts.json) {
@@ -265,7 +265,7 @@ export function register(program: Command) {
       const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath, pages);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
-      const health = new HealthChecker(deps.db, outputsDir, logger);
+      const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
         deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined);
       if (report.locked) {
