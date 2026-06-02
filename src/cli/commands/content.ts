@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import { loadConfig, createDeps } from "../context.js";
+import { resolveUserSlug } from "./slug-resolver.js";
 
 export function register(program: Command) {
   program
@@ -44,8 +45,12 @@ export function register(program: Command) {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const pages = new (await import("../../core/page.js")).PageManager(db, config.vaultPath);
-      const page = pages.getBySlug(slug);
-      if (!page) { console.error(`Page not found: ${slug}`); process.exit(1); }
+      const resolution = resolveUserSlug(slug, (s) => pages.getBySlug(s));
+      if (!resolution) { console.error(`Page not found: ${slug}`); process.exit(1); }
+      if (resolution.ambiguous) {
+        console.warn(`⚠ Ambiguous slug "${slug}" — matched: ${resolution.ambiguous.join(", ")}. Using: ${resolution.slug}`);
+      }
+      const page = pages.getBySlug(resolution.slug)!;
       console.log(`slug:       ${page.slug}`);
       console.log(`type:       ${page.type}`);
       console.log(`title:      ${page.title}`);
@@ -82,8 +87,15 @@ export function register(program: Command) {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const pages = new (await import("../../core/page.js")).PageManager(db, config.vaultPath);
-      if (await pages.delete(slug)) { console.log(`Deleted: ${slug}`); }
-      else { console.error(`Page not found: ${slug}`); process.exit(1); }
+      const resolution = resolveUserSlug(slug, (s) => pages.getBySlug(s));
+      if (!resolution) { console.error(`Page not found: ${slug}`); process.exit(1); }
+      if (resolution.ambiguous) {
+        console.error(`⚠ Ambiguous slug "${slug}" — matched: ${resolution.ambiguous.join(", ")}`);
+        console.error("Please specify the full slug to delete.");
+        process.exit(1);
+      }
+      if (await pages.delete(resolution.slug)) { console.log(`Deleted: ${resolution.slug}`); }
+      else { console.error(`Delete failed: ${resolution.slug}`); process.exit(1); }
       db.close();
     });
 }

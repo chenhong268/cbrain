@@ -19,8 +19,7 @@ export function register(program: Command) {
       const results = await search.search(query, { strategy: opts.strategy, limit: parseInt(opts.limit, 10) });
       if (results.length === 0) { console.log("没有找到相关内容。"); } else {
         for (const r of results) {
-          const slug = r.slug.replace(/^brain\//, "").replace(/^records\//, "");
-          console.log(`${slug}`);
+          console.log(`${r.slug}`);
           if (r.snippet) console.log(`  ${r.snippet.slice(0, 120)}`);
           console.log();
         }
