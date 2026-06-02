@@ -76,6 +76,10 @@ MCP tool 测试验证的是"工具本身正确"，不验证"Agent 在对话中�
 
 所有用例使用占位符（`人物A`、`组织B`、`主题C`、`事件D`、`项目E`），不包含真实人名、公司名、组织名、产品名或地点。
 
+## Startup Brief
+
+`skills/hermes-cbrain-brief.md` — Agent 启动时优先加载的速查包（~1200 字），覆盖 CBrain First、grounded/content/episodic recall、discovery 展示规则、硬禁止列表。完整路由规则见 `skills/recall-resolver.md` 和 `skills/RESOLVER.md`。
+
 ## Manual Hermes 验收标准
 
 每次更改 discovery 或 recall 路由后，手动验收以下场景：

@@ -1,6 +1,7 @@
 # Recall Resolver — Tool 层路由表
 
 > 意图 → MCP 工具。与 skill 层 RESOLVER.md 互补：那个决定加载哪个 skill 文件，这个决定调哪个 MCP 工具。
+> 启动速查版：`hermes-cbrain-brief.md`（~1200 字，Agent 启动时优先加载）。
 
 ## 决策树
 

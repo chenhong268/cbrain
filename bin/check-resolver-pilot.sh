@@ -364,6 +364,107 @@ else
   fail "docs/product/agent-facing-routing-acceptance.md 不存在"
 fi
 
+# ── 5b. Hermes CBrain Brief ──
+echo ""
+echo "[5b] Hermes CBrain Brief"
+
+BRIEF="$SKILLS_DIR/hermes-cbrain-brief.md"
+if [[ -f "$BRIEF" ]]; then
+  pass "hermes-cbrain-brief.md 存在"
+
+  # Key tool names present
+  brief_tools=("deep_recall" "recall_episode" "read_discoveries" "run_discovery" "graph_query" "query" "summarize" "agentic_research")
+  missing_brief_tools=()
+  for bt in "${brief_tools[@]}"; do
+    if ! grep -q "$bt" "$BRIEF" 2>/dev/null; then
+      missing_brief_tools+=("$bt")
+    fi
+  done
+  if (( ${#missing_brief_tools[@]} == 0 )); then
+    pass "brief 覆盖全部 8 个关键工具名"
+  else
+    fail "brief 缺少工具名: ${missing_brief_tools[*]}"
+  fi
+
+  # Discovery guardrails present
+  disc_guardrails=("debug: false" "display" "cards" "summary")
+  missing_guardrails=()
+  for g in "${disc_guardrails[@]}"; do
+    if ! grep -q "$g" "$BRIEF" 2>/dev/null; then
+      missing_guardrails+=("$g")
+    fi
+  done
+  if (( ${#missing_guardrails[@]} == 0 )); then
+    pass "brief 包含 discovery 展示 guardrails"
+  else
+    fail "brief 缺少 discovery guardrail: ${missing_guardrails[*]}"
+  fi
+
+  # Discovery banned terms present
+  disc_banned_brief=("score" "distance" "debug")
+  missing_banned=()
+  for b in "${disc_banned_brief[@]}"; do
+    if ! grep -q "$b" "$BRIEF" 2>/dev/null; then
+      missing_banned+=("$b")
+    fi
+  done
+  if (( ${#missing_banned[@]} == 0 )); then
+    pass "brief 包含 discovery 禁止词（score/distance/debug）"
+  else
+    fail "brief 缺少 discovery 禁止词: ${missing_banned[*]}"
+  fi
+
+  # User-facing output guardrails: no tool names, raw JSON, slug, debug/trace
+  output_guardrails=("工具名" "raw JSON" "slug" "trace")
+  missing_output=()
+  for og in "${output_guardrails[@]}"; do
+    if ! grep -q "$og" "$BRIEF" 2>/dev/null; then
+      missing_output+=("$og")
+    fi
+  done
+  if (( ${#missing_output[@]} == 0 )); then
+    pass "brief 包含用户输出红线（工具名/raw JSON/slug/trace）"
+  else
+    fail "brief 缺少用户输出红线关键词: ${missing_output[*]}"
+  fi
+
+  # Verify "unless client UI" exception for tool name display
+  if grep -q "客户端 UI" "$BRIEF" 2>/dev/null || grep -q "client UI" "$BRIEF" 2>/dev/null || grep -q "客户端" "$BRIEF" 2>/dev/null; then
+    pass "brief 包含工具名展示例外（客户端 UI 已显示）"
+  else
+    fail "brief 缺少工具名展示例外（应有'除非客户端 UI'等价表达）"
+  fi
+
+  # Privacy: no real names
+  brief_privacy=0
+  for pattern in "张三" "李四" "王磊" "星辰" "某制药" "东区" "有限公司" "集团" "公司"; do
+    hits=$(grep -c "$pattern" "$BRIEF" 2>/dev/null) || hits=0
+    brief_privacy=$((brief_privacy + hits))
+  done
+  if (( brief_privacy == 0 )); then
+    pass "brief 无隐私泄露"
+  else
+    fail "brief 有 ${brief_privacy} 处疑似隐私泄露"
+  fi
+
+  # Brief is compact: ≤ 3000 bytes (~1200 Chinese chars)
+  brief_size=$(wc -c < "$BRIEF" | tr -d ' ')
+  if (( brief_size <= 3000 )); then
+    pass "brief 足够短（${brief_size} bytes，上限 3000）"
+  else
+    fail "brief 过长（${brief_size} bytes，上限 3000 / ~1200 中文字）"
+  fi
+
+  # RESOLVER.md references brief
+  if grep -q "hermes-cbrain-brief" "$SKILLS_DIR/RESOLVER.md" 2>/dev/null; then
+    pass "RESOLVER.md 引用 hermes-cbrain-brief.md"
+  else
+    fail "RESOLVER.md 未引用 hermes-cbrain-brief.md"
+  fi
+else
+  fail "skills/hermes-cbrain-brief.md 不存在"
+fi
+
 echo ""
 
 # ── 6. Skill 层一致性 ──

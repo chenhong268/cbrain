@@ -5,6 +5,10 @@
 
 ## Routing Rules
 
+### Startup / Cron
+- Agent 启动或 cron 初始化 → **hermes-cbrain-brief.md**（启动必读速查）
+- 日常操作、brain-ops → brain-ops.md [default]
+
 ### Grounded Recall（最高优先级，SOUL.md 硬规则）
 - 讨论过吗、聊过吗、之前说过、以前讨论过 → query.md [grounded]
 - CBrain 里有吗、有没有相关记录、有没有依据 → query.md [grounded]
@@ -126,16 +130,17 @@
 
 | # | Skill | Purpose | Trigger |
 |---|-------|---------|---------|
-| 1 | query.md | Hybrid search (vector+FTS+graph) + synthesis | On-demand: user asks about something |
-| 2 | review.md | Deep topic review — gather everything, synthesize coherent picture | On-demand: user wants full understanding |
-| 3 | connect.md | Relationship analysis — find and explain connections between entities | On-demand: user asks how A and B relate |
-| 4 | ingest.md | Route incoming content to correct type + index | On-demand: user wants to save content |
-| 5 | enrich.md | Tier promotion + entity enrichment | On-demand / batch: after sync |
-| 6 | cleanup.md | Guided cleanup — find duplicates, orphans, stale stubs | On-demand: user wants to clean up |
-| 7 | dream.md | Full maintenance pipeline (sync→enrich→cleanup→health→report) with cycle lock | Scheduled / on-demand |
-| 8 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
-| 9 | write.md | Knowledge-based writing — gather from brain, produce polished output | On-demand: user wants to write something |
-| 10 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
+| 1 | **hermes-cbrain-brief.md** | CBrain 启动必读速查（~1200 字） | Agent 启动 / cron 初始化 |
+| 2 | query.md | Hybrid search (vector+FTS+graph) + synthesis | On-demand: user asks about something |
+| 3 | review.md | Deep topic review — gather everything, synthesize coherent picture | On-demand: user wants full understanding |
+| 4 | connect.md | Relationship analysis — find and explain connections between entities | On-demand: user asks how A and B relate |
+| 5 | ingest.md | Route incoming content to correct type + index | On-demand: user wants to save content |
+| 6 | enrich.md | Tier promotion + entity enrichment | On-demand / batch: after sync |
+| 7 | cleanup.md | Guided cleanup — find duplicates, orphans, stale stubs | On-demand: user wants to clean up |
+| 8 | dream.md | Full maintenance pipeline (sync→enrich→cleanup→health→report) with cycle lock | Scheduled / on-demand |
+| 9 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
+| 10 | write.md | Knowledge-based writing — gather from brain, produce polished output | On-demand: user wants to write something |
+| 11 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
 
 ## Resolution Logic
 
