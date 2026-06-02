@@ -7,6 +7,12 @@ import { canMerge, getLayer } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
 
+function syncWikilinkRelations(ctx: ToolContext, slug: string, mentionedSlugs: Set<string>): void {
+  for (const s of new Set([slug, ...mentionedSlugs])) {
+    try { ctx.pages.syncLinksToMarkdown(s); } catch { /* non-critical */ }
+  }
+}
+
 export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   // ─── get_page ────────────────────────────────────────────
   server.registerTool("get_page", {
@@ -84,6 +90,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
         if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
           ctx.pipeline.processNer(slug, content, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
         }
+        syncWikilinkRelations(ctx, slug, wlResult.mentionedSlugs);
       }
       return {
         content: [{ type: "text", text: JSON.stringify({ action: "updated", page: updated ? { slug: updated.slug, title: updated.title } : null }, null, 2) }],
@@ -117,6 +124,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
       ctx.pipeline.processNer(created.slug, content, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
     }
+    syncWikilinkRelations(ctx, created.slug, wlResult.mentionedSlugs);
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "created", page: { slug: created.slug, title: created.title } }, null, 2) }],
     };
@@ -145,6 +153,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
         ctx.pipeline.processNer(slug, newBody, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
       }
+      syncWikilinkRelations(ctx, slug, wlResult.mentionedSlugs);
     }
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "appended", slug, new_length: newBody.length }) }],

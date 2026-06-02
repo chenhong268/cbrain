@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
@@ -326,6 +326,115 @@ describe("MCP Server", () => {
       });
       const data = JSON.parse(result.content[0].text);
       expect(data.error).toBeDefined();
+    });
+
+    test("update: syncs wikilinks to markdown Known Relations (bidirectional)", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-a.md");
+      const fileB = join(vaultPath, "entities", "person-b.md");
+      writeFileSync(fileA, "---\ntitle: PersonA\ntype: entity/person\n---\noriginal", "utf-8");
+      writeFileSync(fileB, "---\ntitle: PersonB\ntype: entity/person\n---\ncontent B", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-a", "PersonA", "entities/person-a.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-b", "PersonB", "entities/person-b.md", "h2");
+
+      const server = createServer(deps);
+      await getTools(server).put_page.handler({
+        slug: "brain/entities/person-a",
+        content: "met [[PersonB]] recently",
+      });
+
+      // Source page gets outgoing KR
+      const updated = readFileSync(fileA, "utf-8");
+      expect(updated).toContain("## Known Relations");
+      expect(updated).toContain("person-b");
+      // Target page gets incoming KR
+      const targetB = readFileSync(fileB, "utf-8");
+      expect(targetB).toContain("## Known Relations");
+      expect(targetB).toContain("person-a");
+    });
+
+    test("create: syncs wikilinks to markdown Known Relations (bidirectional)", async () => {
+      mkdirSync(join(vaultPath, "entities", "person"), { recursive: true });
+      const fileB = join(vaultPath, "entities", "person", "person-b.md");
+      writeFileSync(fileB, "---\ntitle: PersonB\ntype: entity/person\n---\ncontent B", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person/person-b", "PersonB", "entities/person/person-b.md", "h2");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/person-c",
+        content: "works with [[PersonB]]",
+        title: "PersonC",
+        type: "entity/person",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("created");
+      // canonicalSlug normalizes to brain/entities/person/person-c
+      expect(data.page.slug).toBe("brain/entities/person/person-c");
+
+      const fileC = join(vaultPath, "brain", "entities", "person", "person-c.md");
+      expect(existsSync(fileC)).toBe(true);
+      const content = readFileSync(fileC, "utf-8");
+      expect(content).toContain("## Known Relations");
+      expect(content).toContain("person-b");
+      // Target page gets incoming KR
+      const targetB = readFileSync(fileB, "utf-8");
+      expect(targetB).toContain("## Known Relations");
+      expect(targetB).toContain("person-c");
+    });
+  });
+
+  describe("append_page tool", () => {
+    test("appends and syncs wikilinks to markdown Known Relations (bidirectional)", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-a.md");
+      const fileB = join(vaultPath, "entities", "person-b.md");
+      writeFileSync(fileA, "---\ntitle: PersonA\ntype: entity/person\n---\noriginal", "utf-8");
+      writeFileSync(fileB, "---\ntitle: PersonB\ntype: entity/person\n---\ncontent B", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-a", "PersonA", "entities/person-a.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-b", "PersonB", "entities/person-b.md", "h2");
+
+      const server = createServer(deps);
+      await getTools(server).append_page.handler({
+        slug: "brain/entities/person-a",
+        content: "later met [[PersonB]]",
+      });
+
+      // Source page gets outgoing KR
+      const updated = readFileSync(fileA, "utf-8");
+      expect(updated).toContain("## Known Relations");
+      expect(updated).toContain("person-b");
+      // Target page gets incoming KR
+      const targetB = readFileSync(fileB, "utf-8");
+      expect(targetB).toContain("## Known Relations");
+      expect(targetB).toContain("person-a");
+    });
+
+    test("no Known Relations section when wikilink targets non-existent entity", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-a.md");
+      writeFileSync(fileA, "---\ntitle: PersonA\ntype: entity/person\n---\noriginal", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-a", "PersonA", "entities/person-a.md", "h1");
+
+      const server = createServer(deps);
+      await getTools(server).put_page.handler({
+        slug: "brain/entities/person-a",
+        content: "saw [[Nobody]] there",
+      });
+
+      const updated = readFileSync(fileA, "utf-8");
+      expect(updated).not.toContain("## Known Relations");
     });
   });
 
