@@ -117,6 +117,8 @@ cbrain query "怎么优化性能" --strategy vector
 | `cbrain enrich` | 实体重要性升级 |
 | `cbrain health` | 14 维度健康检查 |
 | `cbrain doctor` | 快速诊断：数据库、文件、API |
+| `cbrain doctor --first-run` | 2.0 首次运行全面检查（config → paths → DB → index → services） |
+| `cbrain doctor --first-run --json` | 同上，JSON 输出（供 Agent 程序化读取） |
 | `cbrain check-resolvable` | ~~未实现，手动检查 skills/ 目录~~ |
 | `cbrain watch` | 监听文件变化，自动同步 |
 

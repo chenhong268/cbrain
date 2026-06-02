@@ -134,6 +134,29 @@ describe("FirstRunDoctor", () => {
         const rt = report.checks.find((c) => c.id === "paths:runtimeOutsideVault");
         expect(rt).toBeDefined();
         expect(rt!.status).toBe("warn");
+        expect(rt!.message).toContain("inside vault");
+      } finally {
+        process.chdir(origDir);
+      }
+    });
+
+    test("fails when runtimePath equals vault root", async () => {
+      const vaultDir = join(testDir, "vault");
+      mkdirSync(vaultDir, { recursive: true });
+      const config = makeConfig({
+        vaultPath: vaultDir,
+        runtimePath: vaultDir,
+      });
+      writeConfig(config);
+
+      const origDir = process.cwd();
+      process.chdir(testDir);
+      try {
+        const report = await runFirstRunDoctor();
+        const rt = report.checks.find((c) => c.id === "paths:runtimeOutsideVault");
+        expect(rt).toBeDefined();
+        expect(rt!.status).toBe("fail");
+        expect(rt!.message).toContain("vault root");
       } finally {
         process.chdir(origDir);
       }
@@ -412,6 +435,30 @@ describe("FirstRunDoctor", () => {
       };
       const output = formatHuman(report);
       expect(output).toContain("Result: PASS");
+    });
+
+    test("shows recommendedNextAction as Next line", () => {
+      const report: FirstRunReport = {
+        overallStatus: "fail",
+        checks: [
+          { id: "config:exists", category: "config", status: "fail", message: "no config" },
+        ],
+        recommendedNextAction: "运行 cbrain init 创建配置",
+      };
+      const output = formatHuman(report);
+      expect(output).toContain("Next: 运行 cbrain init 创建配置");
+    });
+
+    test("omits Next line when recommendedNextAction is empty", () => {
+      const report: FirstRunReport = {
+        overallStatus: "pass",
+        checks: [
+          { id: "config:exists", category: "config", status: "pass", message: "ok" },
+        ],
+        recommendedNextAction: "",
+      };
+      const output = formatHuman(report);
+      expect(output).not.toContain("Next:");
     });
   });
 

@@ -136,17 +136,19 @@ function checkPaths(ctx: FirstRunContext): CheckResult[] {
     );
   }
 
-  // Runtime inside vault = warn
+  // Runtime inside vault (or equal to vault root) = warn
   const runtimeResolved = resolve(ctx.runtimePath);
   const rel = relative(vault, runtimeResolved);
-  const isInsideVault = rel !== "" && !rel.startsWith("..") && !rel.startsWith("/");
+  const isInsideVault = !rel.startsWith("..") && !rel.startsWith("/");
   if (isInsideVault) {
     results.push({
       id: "paths:runtimeOutsideVault",
       category: "paths",
-      status: "warn",
-      message: "runtime directory is inside vault",
-      action: "设置 runtimePath 避免运行产物污染 Obsidian vault",
+      status: rel === "" ? "fail" : "warn",
+      message: rel === ""
+        ? "runtimePath equals vault root — running artifacts WILL pollute vault"
+        : "runtime directory is inside vault",
+      action: "设置 runtimePath 到 vault 外的独立目录",
     });
   }
 
@@ -476,6 +478,12 @@ export function formatHuman(report: FirstRunReport): string {
   }
 
   lines.push("");
+
+  if (report.recommendedNextAction) {
+    lines.push(`  Next: ${report.recommendedNextAction}`);
+    lines.push("");
+  }
+
   return lines.join("\n");
 }
 
