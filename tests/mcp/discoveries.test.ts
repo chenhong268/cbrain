@@ -49,10 +49,17 @@ function assertNoBannedWords(text: string) {
   }
 }
 
-function seedPage(db: CBrainDB, slug: string, title: string, type: string) {
+function seedPage(db: CBrainDB, slug: string, title: string, type: string, mentionCount = 0) {
   db.rawDb.prepare(
-    "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count, hotness_score, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 0, 0, datetime('now'), datetime('now'))"
-  ).run(slug, type, title, `${slug}.md`, null);
+    "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count, hotness_score, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, 0, datetime('now'), datetime('now'))"
+  ).run(slug, type, title, `${slug}.md`, null, mentionCount);
+}
+
+function createMockLLM() {
+  return {
+    name: "mock",
+    chat: async () => JSON.stringify({ suggestion: "mock suggestion" }),
+  };
 }
 
 function seedDiscovery(
@@ -86,6 +93,7 @@ describe("MCP Discovery Tools", () => {
       db,
       embedding: createMockEmbedding(),
       lance: createMockLanceDB() as any,
+      llm: createMockLLM() as any,
       vaultPath,
       runtimePath: join(dirname(dbPath), "runtime"),
     };
@@ -241,6 +249,90 @@ describe("MCP Discovery Tools", () => {
 
       expect(payload.updated).toBe(1);
       expect(payload.status).toBe("seen");
+    });
+  });
+
+  describe("run_discovery", () => {
+    test("default summary does not contain system-log terms", async () => {
+      seedPage(db, "entities/org-c", "组织C", "entity/organization", 25);
+
+      const server = createServer(deps);
+      const result = await getTools(server).run_discovery.handler({
+        types: ["gap"],
+      });
+      const payload = JSON.parse(result.content[0].text);
+
+      const bannedSummaryWords = ["检测完成", "新增", "结构异常"];
+      for (const w of bannedSummaryWords) {
+        expect(payload.summary.includes(w)).toBe(false);
+      }
+    });
+
+    test("default output contains no banned terms", async () => {
+      // Seed entity pages with high mention_count + no links → detectGaps will find them
+      seedPage(db, "entities/person-a", "人物A", "entity/person", 20);
+      seedPage(db, "entities/person-b", "人物B", "entity/person", 15);
+      seedPage(db, "entities/org-c", "组织C", "entity/organization", 30);
+
+      const server = createServer(deps);
+      const result = await getTools(server).run_discovery.handler({
+        types: ["gap"],
+      });
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload.cards).toBeDefined();
+      expect(payload.summary).toBeDefined();
+      expect(payload.display).toBeDefined();
+
+      for (const w of BANNED_WORDS) {
+        expect(payload.summary.includes(w)).toBe(false);
+        expect(payload.display.includes(w)).toBe(false);
+      }
+      for (const card of payload.cards) {
+        assertNoBannedWords(Object.values(card).join(" "));
+      }
+
+      expect(payload._debug).toBeUndefined();
+      expect(payload.report).toBeUndefined();
+    });
+
+    test("debug=true returns raw report", async () => {
+      seedPage(db, "entities/org-c", "组织C", "entity/organization", 25);
+
+      const server = createServer(deps);
+      const result = await getTools(server).run_discovery.handler({
+        types: ["gap"],
+        debug: true,
+      });
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload._debug).toBeDefined();
+      expect(payload._debug.report).toBeDefined();
+      expect(payload._debug.report.total).toBeDefined();
+      expect(payload._debug.report.byType).toBeDefined();
+      expect(payload._debug.skipped).toBeDefined();
+    });
+
+    test("returns at most 3 cards by default", async () => {
+      // Seed 5 entities with high mentions → 5 gaps detected
+      const types: Array<[string, string, string]> = [
+        ["entities/person-a", "人物A", "entity/person"],
+        ["entities/person-b", "人物B", "entity/person"],
+        ["entities/org-c", "组织C", "entity/organization"],
+        ["entities/org-d", "组织D", "entity/organization"],
+        ["entities/org-e", "组织E", "entity/organization"],
+      ];
+      for (const [slug, title, type] of types) {
+        seedPage(db, slug, title, type, 20);
+      }
+
+      const server = createServer(deps);
+      const result = await getTools(server).run_discovery.handler({
+        types: ["gap"],
+      });
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload.cards.length).toBeLessThanOrEqual(3);
     });
   });
 });

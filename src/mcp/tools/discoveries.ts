@@ -29,10 +29,9 @@ const STATUS_LABELS: Record<string, string> = {
 export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("read_discoveries", {
     description:
-      "读取知识图谱的结构发现（桥接、跨社区、结构洞、趋势、缺口、矛盾）。" +
-      "返回未读发现，按重要程度分级（high/medium/low）。" +
-      "high 级发现带有 LLM 生成的中文建议和可操作项。" +
-      "用 update_discovery_status 标记处理状态，用 promote_discovery 升级为 insight。",
+      "读取知识图谱的结构发现摘要（最多 3 条）。" +
+      "返回用户可见的发现卡片，包含为什么重要、依据、建议动作。" +
+      "如需处理发现，用 update_discovery_status 标记已读、已解决或忽略。",
     inputSchema: {
       limit: z.number().optional().default(3).describe("Max discoveries to return"),
       actionableFilter: z.enum(["high", "medium", "low"]).optional().describe("Filter by actionable level"),
@@ -99,14 +98,15 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
 
   server.registerTool("run_discovery", {
     description:
-      "运行发现管线，检测知识图谱中的结构异常（桥接、趋势、缺口、矛盾）。" +
-      "返回检测报告：总数、按类型统计、按重要程度统计。" +
-      "可指定检测类型或默认全部。建议每天运行一次。",
+      "运行发现管线，检查知识图谱中的变化和机会。完成后返回用户可见的发现摘要（最多 3 条）。" +
+      "可用 read_discoveries 查看历史发现，用 update_discovery_status 标记处理状态。" +
+      "建议每天运行一次。",
     inputSchema: {
       types: z.array(z.enum(["bridge", "trend", "gap", "contradiction"])).optional()
-        .describe("Detection types to run. Default: all."),
+        .describe("Detection types to run. Default: bridge, trend, gap."),
+      debug: z.boolean().optional().default(false).describe("Include raw detection report"),
     },
-  }, async ({ types }) => {
+  }, async ({ types, debug }) => {
     // Run only DiscoveryManager (pure graph math, no LLM, completes in seconds).
     // ReflectManager is slower (BFS + LLM suggestions) and overlaps with bridge detection.
     // Contradiction detection is LLM-heavy — skip unless explicitly requested.
@@ -119,30 +119,53 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
     const report = await discoveryMgr.runDiscovery(runContradiction ? undefined : fastTypes);
 
-    const typeLabels = Object.entries(report.byType)
-      .map(([k, v]) => `${TYPE_LABELS[k] ?? k}: ${v}`)
-      .join("，");
-    const actionLabels = Object.entries(report.byActionable)
-      .map(([k, v]) => `${ACTIONABLE_LABELS[k] ?? k}: ${v}`)
-      .join("，");
+    // User-facing path: format new discoveries through the digest pipeline
+    const newRows = ctx.db.getUnseenDiscoveries(30);
+    const entityLookup = (slug: string) => ctx.db.getPage(slug);
+    const digest = formatDiscoveryDigest(newRows, entityLookup, 3);
 
-    const enrich = report.enrichment;
-    const enrichLabel = enrich.skipped
-      ? `enrichment 跳过（${enrich.reason}）`
-      : `enrichment: 尝试 ${enrich.attempted} 个，成功 ${enrich.saved} 个，失败 ${enrich.errors} 个`;
+    const summary = digest.cards.length > 0
+      ? `今天有 ${digest.cards.length} 条值得关注的发现。`
+      : "今天暂无值得打扰你的新发现。";
 
-    const skipped: string[] = [];
-    if (!runContradiction) skipped.push("contradiction（用 CLI 或指定 types 运行）");
-    skipped.push("reflect（社区/结构洞检测，用 CLI 运行）");
+    const payload: Record<string, unknown> = {
+      display: digest.display,
+      cards: digest.cards,
+      summary,
+    };
+
+    if (debug) {
+      const typeLabels = Object.entries(report.byType)
+        .map(([k, v]) => `${TYPE_LABELS[k] ?? k}: ${v}`)
+        .join("，");
+      const actionLabels = Object.entries(report.byActionable)
+        .map(([k, v]) => `${ACTIONABLE_LABELS[k] ?? k}: ${v}`)
+        .join("，");
+      const enrich = report.enrichment;
+      const enrichLabel = enrich.skipped
+        ? `enrichment 跳过（${enrich.reason}）`
+        : `enrichment: 尝试 ${enrich.attempted} 个，成功 ${enrich.saved} 个，失败 ${enrich.errors} 个`;
+      const skipped: string[] = [];
+      if (!runContradiction) skipped.push("contradiction（用 CLI 或指定 types 运行）");
+      skipped.push("reflect（社区/结构洞检测，用 CLI 运行）");
+      payload._debug = {
+        report: {
+          total: report.total,
+          byType: report.byType,
+          byActionable: report.byActionable,
+          enrichment: report.enrichment,
+        },
+        type_summary: typeLabels,
+        actionable_summary: actionLabels,
+        enrichment_summary: enrichLabel,
+        skipped,
+      };
+    }
 
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({
-          summary: `检测完成：${report.total} 个发现（${typeLabels}），重要程度：${actionLabels}。${enrichLabel}`,
-          report,
-          skipped,
-        }, null, 2),
+        text: JSON.stringify(payload, null, 2),
       }],
     };
   });
