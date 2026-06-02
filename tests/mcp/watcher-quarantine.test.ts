@@ -143,6 +143,54 @@ describe("MCP watcher_quarantine tool", () => {
     expect(result.quarantine[0].slug).toBe("broken-file");
     expect(result.quarantine[0].lastError).toBe("NER timeout");
   });
+
+  test("list includes titleCollisionJson metadata", async () => {
+    db.setConfig("watcher.quarantine", JSON.stringify({
+      "records/renwu-a-note": {
+        failCount: 3,
+        lastError: 'Title collision: "人物A"',
+        quarantinedAt: "2026-06-01T10:00:00Z",
+        titleCollisionJson: {
+          title: "人物A",
+          incoming: { slug: "records/renwu-a-note", type: "record", filePath: "records/renwu-a-note.md" },
+          existing: { slug: "brain/entities/person/renwu-a", type: "entity/person", filePath: "brain/entities/person/renwu-a.md" },
+        },
+      },
+    }));
+
+    const result = await callTool(server, "watcher_quarantine", { action: "list" });
+    expect(result.count).toBe(1);
+    const entry = result.entries[0];
+    expect(entry.slug).toBe("records/renwu-a-note");
+    expect(entry.titleCollisionJson).toBeDefined();
+    expect(entry.titleCollisionJson.title).toBe("人物A");
+    expect(entry.titleCollisionJson.incoming.slug).toBe("records/renwu-a-note");
+    expect(entry.titleCollisionJson.incoming.filePath).toBe("records/renwu-a-note.md");
+    expect(entry.titleCollisionJson.existing.slug).toBe("brain/entities/person/renwu-a");
+    expect(entry.titleCollisionJson.existing.filePath).toBe("brain/entities/person/renwu-a.md");
+  });
+
+  test("status includes titleCollisionJson in quarantine entries", async () => {
+    db.setConfig("watcher.quarantine", JSON.stringify({
+      "records/renwu-a-note": {
+        failCount: 3,
+        lastError: 'Title collision: "人物A"',
+        quarantinedAt: "2026-06-01T10:00:00Z",
+        titleCollisionJson: {
+          title: "人物A",
+          incoming: { slug: "records/renwu-a-note", type: "record", filePath: "records/renwu-a-note.md" },
+          existing: { slug: "brain/entities/person/renwu-a", type: "entity/person", filePath: "brain/entities/person/renwu-a.md" },
+        },
+      },
+    }));
+
+    const result = await callTool(server, "status");
+    expect(result.quarantineCount).toBe(1);
+    expect(result.quarantine[0].titleCollisionJson).toBeDefined();
+    expect(result.quarantine[0].titleCollisionJson.title).toBe("人物A");
+    expect(result.quarantine[0].titleCollisionJson.incoming.filePath).toBe("records/renwu-a-note.md");
+    expect(result.quarantine[0].titleCollisionJson.existing.filePath).toBe("brain/entities/person/renwu-a.md");
+  });
 });
 
 describe("MCP watcher_quarantine with live FileWatcher", () => {

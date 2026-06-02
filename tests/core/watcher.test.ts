@@ -3,6 +3,7 @@ import { existsSync, rmSync, mkdirSync, writeFileSync, unlinkSync } from "node:f
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { FileWatcher } from "../../src/core/watcher.js";
+import { TitleCollisionError } from "../../src/core/sync.js";
 import type { SyncManager } from "../../src/core/sync.js";
 import type { Logger } from "../../src/core/logger.js";
 
@@ -566,5 +567,85 @@ describe("FileWatcher quarantine", () => {
     await watcher.scanOnce();
     await new Promise((r) => setTimeout(r, 100));
     expect((failSync.syncPage as ReturnType<typeof mock>).mock.calls.length).toBeGreaterThan(afterDbRelease);
+  });
+
+  // ─── TitleCollisionError produces structured quarantine diagnostic ──────
+
+  test("quarantine entry includes titleCollisionJson for title collision", async () => {
+    const tcSync: Partial<SyncManager> = {
+      syncPage: mock(async (slug: string, _vp: string) => {
+        if (slug === "renwu-a-note") {
+          throw new TitleCollisionError({
+            title: "人物A",
+            incoming: { slug: "renwu-a-note", type: "record", filePath: "renwu-a-note.md" },
+            existing: { slug: "brain/entities/person/renwu-a", type: "entity/person", filePath: "brain/entities/person/renwu-a.md" },
+          });
+        }
+        return { success: true };
+      }),
+      removePage: mock(async () => {}),
+    };
+
+    writeFileSync(join(testDir, "renwu-a-note.md"), "---\ntitle: 人物A\ntype: record\n---\n内容", "utf-8");
+
+    watcher = new FileWatcher(tcSync as unknown as SyncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+
+    const entries = watcher.getQuarantineEntries();
+    expect(entries.length).toBe(1);
+    const entry = entries[0];
+    expect(entry.slug).toBe("renwu-a-note");
+    expect(entry.lastError).toContain("Title collision");
+    expect(entry.quarantinedAt).toBeTruthy();
+
+    // Structured diagnostic
+    expect(entry).toHaveProperty("titleCollisionJson");
+    const tc = (entry as Record<string, unknown>).titleCollisionJson as {
+      title: string; incoming: { slug: string; type: string; filePath: string }; existing: { slug: string; type: string; filePath: string };
+    };
+    expect(tc.title).toBe("人物A");
+    expect(tc.incoming.slug).toBe("renwu-a-note");
+    expect(tc.incoming.type).toBe("record");
+    expect(tc.incoming.filePath).toBe("renwu-a-note.md");
+    expect(tc.existing.slug).toBe("brain/entities/person/renwu-a");
+    expect(tc.existing.type).toBe("entity/person");
+    expect(tc.existing.filePath).toBe("brain/entities/person/renwu-a.md");
+  });
+
+  // ─── Stale quarantine entry cleaned when file deleted ──────────────
+
+  test("stale quarantine entry removed when file no longer exists", async () => {
+    const ghostSync: Partial<SyncManager> = {
+      syncPage: mock(async (slug: string, _vp: string) => {
+        if (slug === "ghost") throw new Error("sync fail");
+        return { success: true };
+      }),
+      removePage: mock(async () => {}),
+    };
+
+    const file = join(testDir, "ghost.md");
+    writeFileSync(file, "---\ntitle: Ghost\ntype: record\n---\nVanishing", "utf-8");
+
+    watcher = new FileWatcher(ghostSync as unknown as SyncManager, vaultPath, { logger, db });
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // Delete the file
+    unlinkSync(file);
+
+    // Next scan should clean up the stale quarantine entry
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(watcher.getQuarantineSize()).toBe(0);
+    expect(logs.some(l => l.message === "隔离文件已删除，清理隔离记录")).toBe(true);
   });
 });

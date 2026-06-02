@@ -91,6 +91,7 @@ export class HealthChecker {
       this.checkErrors(),
       this.checkSemanticDedup(),
       this.checkSlugCollisions(),
+      this.checkTitleCollisionQuarantine(),
       this.checkConsistency(),
       this.checkCompleteness(),
       this.checkIslands(),
@@ -539,6 +540,42 @@ export class HealthChecker {
     return {
       name: "疑似重复",
       status: issues.length > 0 ? "warn" : "pass",
+      issues,
+    };
+  }
+
+  private checkTitleCollisionQuarantine(): HealthDimension {
+    const issues: HealthIssue[] = [];
+
+    const raw = this.db.getConfig("watcher.quarantine");
+    if (!raw) return { name: "标题冲突隔离", status: "pass", issues: [] };
+
+    try {
+      const parsed = JSON.parse(raw) as Record<string, {
+        failCount: number;
+        lastError: string;
+        quarantinedAt: string;
+        titleCollisionJson?: { title: string; incoming: { slug: string; type: string; filePath: string }; existing: { slug: string; type: string; filePath: string } };
+      }>;
+
+      for (const [slug, entry] of Object.entries(parsed)) {
+        if (!entry.titleCollisionJson || !entry.quarantinedAt) continue;
+        const tc = entry.titleCollisionJson;
+        issues.push({
+          severity: "high",
+          slug,
+          title: tc.title,
+          description: `标题 "${tc.title}" 冲突：${tc.incoming.slug} (${tc.incoming.type}, ${tc.incoming.filePath}) vs ${tc.existing.slug} (${tc.existing.type}, ${tc.existing.filePath})`,
+          suggestion: `重命名 ${tc.incoming.filePath} 的 title，或用 merge_pages 合并到 ${tc.existing.slug}`,
+        });
+      }
+    } catch {
+      // corrupt config — not actionable here
+    }
+
+    return {
+      name: "标题冲突隔离",
+      status: issues.length > 0 ? "fail" : "pass",
       issues,
     };
   }

@@ -18,9 +18,33 @@ import {
 } from "./shared.js";
 import { ContentPipeline } from "./pipeline.js";
 
+export class TitleCollisionError extends Error {
+  constructor(
+    public readonly details: {
+      title: string;
+      incoming: { slug: string; type: string; filePath: string };
+      existing: { slug: string; type: string; filePath: string };
+    },
+  ) {
+    super(
+      `Title collision: "${details.title}" — incoming ${details.incoming.slug} vs existing ${details.existing.slug}`,
+    );
+    this.name = "TitleCollisionError";
+  }
+}
+
 export interface SyncConfig {
   chunkSize?: number;
   outputsDir?: string;
+}
+
+export interface SyncDiagnostic {
+  kind: "title_collision";
+  title: string;
+  incoming: { slug: string; type: string; filePath: string };
+  existing: { slug: string; type: string; filePath: string };
+  message: string;
+  filePath: string;
 }
 
 export interface SyncReport {
@@ -32,6 +56,7 @@ export interface SyncReport {
   nerEvents?: number;
   nerLowRelevanceSkipped?: number;
   errorDetails?: string[];
+  diagnostics?: SyncDiagnostic[];
 }
 
 export interface SyncPageResult {
@@ -73,7 +98,7 @@ export class SyncManager {
   }
 
   async syncAll(vaultPath: string): Promise<SyncReport> {
-    const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [] };
+    const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [], diagnostics: [] };
     try {
     const mdFiles = await collectMarkdownFiles(vaultPath, new Set(["outputs"]));
 
@@ -146,6 +171,8 @@ export class SyncManager {
           }
         }
 
+        this.checkTitleCollision(file.title, file.slug, file.type, file.relPath);
+
         this.db.upsertPage({
           slug: file.slug,
           type: file.type,
@@ -191,7 +218,18 @@ export class SyncManager {
       } catch (err) {
         report.errors++;
         const msg = err instanceof Error ? err.message : String(err);
-        report.errorDetails!.push(`${file.filePath}: ${msg}`);
+        report.errorDetails!.push(`${file.relPath}: ${msg}`);
+        if (err instanceof TitleCollisionError) {
+          report.diagnostics ??= [];
+          report.diagnostics.push({
+            kind: "title_collision",
+            title: err.details.title,
+            incoming: err.details.incoming,
+            existing: err.details.existing,
+            message: msg,
+            filePath: file.relPath,
+          });
+        }
         this.logger?.error("sync", `同步失败: ${file.slug}`, { error: msg });
       }
     }
@@ -330,6 +368,9 @@ export class SyncManager {
 
     const relPath = slugToFilePath(effectiveSlug);
 
+    // Preflight: title collision check
+    this.checkTitleCollision(title, effectiveSlug, type, relPath);
+
     this.db.upsertPage({
       slug: effectiveSlug,
       type,
@@ -445,6 +486,17 @@ export class SyncManager {
   }
 
   // ─── Private ────────────────────────────────────────────────
+
+  private checkTitleCollision(title: string, slug: string, type: string, filePath: string): void {
+    const collision = this.db.getPageByTitleExcluding(title, slug);
+    if (collision) {
+      throw new TitleCollisionError({
+        title,
+        incoming: { slug, type, filePath },
+        existing: { slug: collision.slug, type: collision.type, filePath: this.db.getPageFilePath(collision.slug) ?? "" },
+      });
+    }
+  }
 
   private inferTypeFromPath(relPath: string): string {
     const parts = relPath.split("/");

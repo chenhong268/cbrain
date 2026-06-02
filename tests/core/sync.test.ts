@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { SyncManager } from "../../src/core/sync.js";
+import { SyncManager, TitleCollisionError } from "../../src/core/sync.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
@@ -215,6 +215,32 @@ describe("SyncManager", () => {
       expect(report.skipped).toBe(0);
       expect(report.errors).toBe(0);
     });
+
+    test("syncAll produces structured diagnostic for title collision", async () => {
+      // Seed existing page with title "人物A"
+      writeMdFile(vaultPath, "brain/entities/person/renwu-a.md", { title: "人物A", type: "entity/person", slug: "brain/entities/person/renwu-a" }, "已有实体");
+      await sync.syncAll(vaultPath);
+
+      // Add a second file with the same title but different slug
+      writeMdFile(vaultPath, "records/renwu-a-note.md", { title: "人物A", type: "record", slug: "records/renwu-a-note" }, "新记录");
+
+      const report = await sync.syncAll(vaultPath);
+      expect(report.errors).toBeGreaterThanOrEqual(1);
+      expect(report.diagnostics).toBeDefined();
+      expect(report.diagnostics!.length).toBeGreaterThanOrEqual(1);
+
+      const diag = report.diagnostics![0];
+      expect(diag.kind).toBe("title_collision");
+      expect(diag.title).toBe("人物A");
+      expect(diag.incoming.slug).toBe("records/renwu-a-note");
+      expect(diag.incoming.type).toBe("record");
+      expect(diag.incoming.filePath).toBe("records/renwu-a-note.md");
+      expect(diag.existing.slug).toBe("brain/entities/person/renwu-a");
+      expect(diag.existing.type).toBe("entity/person");
+      expect(diag.existing.filePath).toBe("brain/entities/person/renwu-a.md");
+      expect(diag.message).toContain("Title collision");
+      expect(diag.filePath).toBe("records/renwu-a-note.md");
+    });
   });
 
   describe("syncPage", () => {
@@ -245,6 +271,34 @@ describe("SyncManager", () => {
       expect(result.success).toBe(true);
       expect(result.skipped).toBe(true);
       expect(lance.added.length).toBe(0);
+    });
+
+    test("throws TitleCollisionError when title exists under different slug", async () => {
+      // Seed existing entity page
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("brain/entities/person/renwu-a", "entity/person", "人物A", "brain/entities/person/renwu-a.md", "hash1");
+
+      // Create a record file with the same title
+      writeMdFile(
+        vaultPath,
+        "records/renwu-a-note.md",
+        { title: "人物A", type: "record", slug: "records/renwu-a-note" },
+        "人物A的会议记录",
+      );
+
+      try {
+        await sync.syncPage("records/renwu-a-note", vaultPath);
+        expect.unreachable("Should have thrown TitleCollisionError");
+      } catch (e) {
+        expect(e).toBeInstanceOf(TitleCollisionError);
+        const tc = e as TitleCollisionError;
+        expect(tc.details.title).toBe("人物A");
+        expect(tc.details.incoming.slug).toBe("records/renwu-a-note");
+        expect(tc.details.incoming.type).toBe("record");
+        expect(tc.details.existing.slug).toBe("brain/entities/person/renwu-a");
+        expect(tc.details.existing.type).toBe("entity/person");
+      }
     });
   });
 

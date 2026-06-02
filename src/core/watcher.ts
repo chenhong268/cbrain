@@ -1,7 +1,9 @@
-import { stat, readFile } from "node:fs/promises";
+import { stat as statAsync, readFile } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { relative } from "node:path";
 import pLimit from "p-limit";
 import type { SyncManager } from "./sync.js";
+import { TitleCollisionError } from "./sync.js";
 import { hashContent, collectMarkdownFiles } from "./shared.js";
 import type { Logger } from "./logger.js";
 import type { CBrainDB } from "../storage/sqlite.js";
@@ -30,6 +32,7 @@ interface QuarantineEntry {
   quarantinedAt: string;
   hash?: string;
   fullPath?: string;
+  titleCollisionJson?: { title: string; incoming: { slug: string; type: string; filePath: string }; existing: { slug: string; type: string; filePath: string } };
 }
 
 export class FileWatcher {
@@ -83,8 +86,18 @@ export class FileWatcher {
       return;
     }
     if (this.isQuarantined(pending.slug)) {
+      // Stale cleanup: if file no longer exists, remove quarantine entry
+      const entry = this.quarantine.get(pending.slug);
+      if (entry?.fullPath) {
+        try { statSync(entry.fullPath); } catch {
+          this.quarantine.delete(pending.slug);
+          this.persistQuarantine();
+          this.logger?.info("watcher", "隔离文件已删除，清理隔离记录", { slug: pending.slug });
+          return;
+        }
+      }
       const prevHash = this.hashes.get(pending.fullPath)
-        ?? this.quarantine.get(pending.slug)?.hash;
+        ?? entry?.hash;
       // Always store hash so doScan won't re-detect this file unless content actually changes
       this.hashes.set(pending.fullPath, pending.hash);
       this.mtimes.set(pending.fullPath, pending.mtime);
@@ -108,7 +121,7 @@ export class FileWatcher {
         this.logger?.info("watcher", "同步完成", { slug: pending.slug });
       })
       .catch((e) => {
-        this.recordFailure(pending.slug, String(e));
+        this.recordFailure(pending.slug, String(e), e);
         this.logger?.warn("watcher", `同步失败: ${pending.slug}`, { error: String(e) });
       })
       .finally(() => { this.inFlight.delete(pending.slug); this.inFlightHashes.delete(pending.slug); this.inFlightPaths.delete(pending.slug); });
@@ -128,7 +141,7 @@ export class FileWatcher {
     for (const fullPath of files) {
       seen.add(fullPath);
       try {
-        const s = await stat(fullPath);
+        const s = await statAsync(fullPath);
         const meta = { mtime: s.mtimeMs, size: s.size };
         const prevMeta = this.mtimes.get(fullPath);
         if (prevMeta && prevMeta.mtime === meta.mtime && prevMeta.size === meta.size) {
@@ -188,9 +201,30 @@ export class FileWatcher {
         } catch (e) {
           this.logger?.warn("watcher", `删除清理失败: ${slug}`, { error: String(e) });
         }
+        // Clean up quarantine entry for vanished file
+        if (this.quarantine.has(slug)) {
+          this.quarantine.delete(slug);
+          this.persistQuarantine();
+          this.logger?.info("watcher", "隔离文件已删除，清理隔离记录", { slug });
+        }
       }
       this.logger?.info("watcher", "删除检测", { slugs: vanished.map(v => v.slug) });
     }
+
+    // Clean quarantine entries whose files no longer exist
+    let quarantineCleaned = false;
+    for (const [slug, entry] of this.quarantine) {
+      if (entry.fullPath) {
+        try { statSync(entry.fullPath); } catch {
+          this.quarantine.delete(slug);
+          this.hashes.delete(entry.fullPath);
+          this.mtimes.delete(entry.fullPath);
+          quarantineCleaned = true;
+          this.logger?.info("watcher", "隔离文件已删除，清理隔离记录", { slug });
+        }
+      }
+    }
+    if (quarantineCleaned) this.persistQuarantine();
   }
 
   async scanOnce(): Promise<void> {
@@ -231,7 +265,7 @@ export class FileWatcher {
     return this.quarantine.size;
   }
 
-  getQuarantineEntries(): Array<{ slug: string; failCount: number; lastError: string; quarantinedAt: string; hash?: string; fullPath?: string }> {
+  getQuarantineEntries(): Array<{ slug: string; failCount: number; lastError: string; quarantinedAt: string; hash?: string; fullPath?: string; titleCollisionJson?: QuarantineEntry["titleCollisionJson"] }> {
     return [...this.quarantine.entries()].map(([slug, entry]) => ({ slug, ...entry }));
   }
 
@@ -294,9 +328,10 @@ export class FileWatcher {
     } catch { /* non-critical */ }
   }
 
-  private recordFailure(slug: string, error: string): void {
+  private recordFailure(slug: string, error: string, errorObj?: unknown): void {
     const entry = this.quarantine.get(slug);
     const failCount = (entry?.failCount ?? 0) + 1;
+    const tcDetails = errorObj instanceof TitleCollisionError ? errorObj.details : undefined;
     if (failCount >= FAIL_THRESHOLD) {
       const hash = this.inFlightHashes.get(slug);
       const fullPath = this.inFlightPaths.get(slug);
@@ -306,6 +341,9 @@ export class FileWatcher {
         quarantinedAt: new Date().toISOString(),
         hash,
         fullPath,
+        titleCollisionJson: tcDetails
+          ? { title: tcDetails.title, incoming: { slug: tcDetails.incoming.slug, type: tcDetails.incoming.type, filePath: tcDetails.incoming.filePath }, existing: { slug: tcDetails.existing.slug, type: tcDetails.existing.type, filePath: tcDetails.existing.filePath } }
+          : undefined,
       });
       this.persistQuarantine();
       this.logger?.warn("watcher", `文件已隔离: ${slug}（连续失败 ${failCount} 次）`, { error });

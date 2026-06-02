@@ -444,6 +444,36 @@ describe("MCP Server", () => {
       const data = JSON.parse(result.content[0].text);
       expect(typeof data).toBe("object");
     });
+
+    test("full sync returns structured diagnostics on title collision", async () => {
+      // Seed existing page with title "人物A"
+      mkdirSync(join(vaultPath, "brain/entities/person"), { recursive: true });
+      writeFileSync(join(vaultPath, "brain/entities/person/renwu-a.md"),
+        "---\ntitle: 人物A\ntype: entity/person\nslug: brain/entities/person/renwu-a\n---\n已有实体", "utf-8");
+
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      writeFileSync(join(vaultPath, "records/renwu-a-note.md"),
+        "---\ntitle: 人物A\ntype: record\nslug: records/renwu-a-note\n---\n新记录", "utf-8");
+
+      const server = createServer(deps);
+      // Both files are new — whichever is processed second will hit title collision
+      const result = await getTools(server).sync.handler({});
+      const data = JSON.parse(result.content[0].text);
+      expect(data.errors).toBeGreaterThanOrEqual(1);
+      expect(data.diagnostics).toBeDefined();
+      expect(data.diagnostics.length).toBeGreaterThanOrEqual(1);
+
+      const diag = data.diagnostics[0];
+      expect(diag.kind).toBe("title_collision");
+      expect(diag.title).toBe("人物A");
+      // incoming and existing have different slugs
+      expect(diag.incoming.slug).not.toBe(diag.existing.slug);
+      // Both have structured slug/type/filePath
+      expect(diag.incoming.type).toBeTruthy();
+      expect(diag.incoming.filePath).toBeTruthy();
+      expect(diag.existing.type).toBeTruthy();
+      expect(diag.existing.filePath).toBeTruthy();
+    });
   });
 
   // ─── Tag tools ─────────────────────────────────

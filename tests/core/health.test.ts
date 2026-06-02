@@ -55,7 +55,7 @@ describe("HealthChecker", () => {
       const report = await checker.checkAll();
       expect(report.overallStatus).toBe("pass");
       expect(report.metrics.totalPages).toBe(17);
-      expect(report.dimensions.length).toBe(12);
+      expect(report.dimensions.length).toBe(13);
     });
 
     test("fails on insufficient data", async () => {
@@ -128,6 +128,51 @@ describe("HealthChecker", () => {
       // ratio = 20 concepts / 1 record = 20, severity "high" → status "warn"
       expect(suggestionDim!.status).toBe("warn");
       expect(suggestionDim!.issues.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("detects title collision quarantines", async () => {
+      // Seed quarantine config with a title collision entry
+      db.setConfig("watcher.quarantine", JSON.stringify({
+        "records/renwu-a-note": {
+          failCount: 3,
+          lastError: 'Title collision: "人物A"',
+          quarantinedAt: new Date().toISOString(),
+          titleCollisionJson: {
+            title: "人物A",
+            incoming: { slug: "records/renwu-a-note", type: "record", filePath: "records/renwu-a-note.md" },
+            existing: { slug: "brain/entities/person/renwu-a", type: "entity/person", filePath: "brain/entities/person/renwu-a.md" },
+          },
+        },
+      }));
+
+      const report = await checker.checkAll();
+      const tcDim = report.dimensions.find(d => d.name === "标题冲突隔离");
+      expect(tcDim).toBeDefined();
+      expect(tcDim!.status).toBe("fail");
+      expect(tcDim!.issues.length).toBe(1);
+      expect(tcDim!.issues[0].slug).toBe("records/renwu-a-note");
+      expect(tcDim!.issues[0].title).toBe("人物A");
+      expect(tcDim!.issues[0].description).toContain("records/renwu-a-note");
+      expect(tcDim!.issues[0].description).toContain("brain/entities/person/renwu-a");
+      expect(tcDim!.issues[0].description).toContain("records/renwu-a-note.md");
+      expect(tcDim!.issues[0].description).toContain("brain/entities/person/renwu-a.md");
+      expect(tcDim!.issues[0].suggestion).toContain("merge_pages");
+    });
+
+    test("no title collision issues when quarantine is empty", async () => {
+      for (let i = 0; i < 15; i++) {
+        insertPage(`entities/e${i}`, `Entity${i}`, "entity/person", { mention_count: 2, tier: 3 });
+      }
+      insertPage("records/r1", "Record1", "record");
+      for (let i = 1; i < 15; i++) {
+        insertLink(`entities/e${i - 1}`, `entities/e${i}`);
+      }
+
+      const report = await checker.checkAll();
+      const tcDim = report.dimensions.find(d => d.name === "标题冲突隔离");
+      expect(tcDim).toBeDefined();
+      expect(tcDim!.status).toBe("pass");
+      expect(tcDim!.issues.length).toBe(0);
     });
 
     test("writes three-layer output files", async () => {
