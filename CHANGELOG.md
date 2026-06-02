@@ -1,6 +1,23 @@
 # Changelog
 
-> Current: `v1.8.11` — 修正 sync 诊断、健康检查误报，并将 Discovery Digest 改为用户可读的复利反馈。
+> Current: `v1.9.0` — 收口 Hermes 自然对话入口，将 CBrain 从工具集合推进到可验收的 Agent-facing 体验层。
+
+## [v1.9.0] — 2026-06-02
+
+### Agent 体验
+- **Hermes 启动速查（#103）**：新增 `skills/hermes-cbrain-brief.md`，为 Agent 启动和 cron 场景提供紧凑 CBrain 使用规则，覆盖 grounded recall、content recall、情境找人、discovery 展示和硬禁止项
+- **Agent-facing 路由验收（#102）**：新增结构化自然语言路由 eval，校验 Hermes 对 grounded/content/episodic/discovery 等场景是否选对工具、参数和输出红线
+- **Discovery 输出安全化（#101）**：`run_discovery` 默认只返回用户可读摘要，raw/debug report 仅在 `debug=true` 时返回，避免定时任务把图算法指标展示给用户
+
+### 用户可见质量
+- Discovery digest 只展示 `display/cards/summary`，禁止暴露 score、图距离、共享邻居、候选、过滤和 debug 字段
+- 内容回忆首轮默认一次 `deep_recall(detail=normal, limit=3)`，减少多工具连调和上下文浪费
+- Hermes 用户回答新增通用红线：不展示工具名、raw JSON、slug/source id/chunk id、debug/trace/internal 字段
+
+### 治理与测试
+- `bin/check-resolver-pilot.sh` 扩展为 Agent-facing routing + Hermes brief 双门禁
+- 所有公开示例继续使用匿名占位符，避免泄露真实知识库内容
+- `bun run check`：1215 pass / 0 fail / 3235 expect() calls
 
 ## [v1.8.11] — 2026-06-02
 
