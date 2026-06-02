@@ -91,7 +91,12 @@
 │
 ├─ "最近有什么发现"？
 │   信号：有什么发现、漏掉的、关联没注意到、洞察
-│   → list_insights + read_discoveries
+│   → read_discoveries
+│   → 展示规则：只使用返回的 display、cards、summary
+│   → 禁止暴露：score、distance、shared_neighbors、debug、_debug、
+│     candidate、filter、图距离、跳、桥接、候选、过滤、hops
+│   → run_discovery 运行后同样只展示用户可读摘要
+│   → 如需标记已读：update_discovery_status
 │
 ├─ Compounding Review（未来能力，暂不实现）
 │   定义：CBrain 主动呈现基于累积记忆的结构化观察
@@ -351,6 +356,9 @@ grounded recall 返回后，首轮回答必须：
 ❌ 核查确认用 agentic_research → 必须 deep_recall(grounded: true)
 ❌ 情境找人用 agentic_research → 必须 recall_episode
 ❌ 两人关系用 agentic_research → 必须 graph_query / connect
+❌ discovery 输出暴露 score/distance/shared_neighbors/debug → 只展示 display/cards/summary
+❌ run_discovery 后自行拼接原始 report 给用户 → 默认返回就是用户可读摘要，直接展示
+❌ read_discoveries 后暴露 _debug 字段 → 除非用户明确说 debug=true
 ```
 
 ## 验收断言
@@ -373,7 +381,7 @@ grounded recall 返回后，首轮回答必须：
 | brain_storm | LLM 推理 + 缺口分析 + 跨域关联 | 需要分析和推理 |
 | graph_query | 关系遍历（traverse/backlinks/related） | 查两个人/公司关系 |
 | list_insights | 系统自动生成的洞察列表 | 发现漏掉的关联 |
-| read_discoveries | 跨域关联发现 | 深度发现 |
+| read_discoveries | 跨域关联发现（用户可读摘要） | 深度发现，只展示 display/cards/summary |
 | get_timeline | 按时间排列的事件流 | 时间线回顾 |
 | merge_pages | 合并结果预览 + 执行 | 合并重复页面（先 dryRun） |
 | query | slug + title + snippet | 快速搜索，轻量（**最后手段，不是默认**） |

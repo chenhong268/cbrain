@@ -203,8 +203,171 @@ fi
 
 echo ""
 
-# ── 5. Skill 层一致性 ──
-echo "[5] Skill 层一致性"
+# ── 5. Agent-facing Routing Acceptance ──
+echo "[5] Agent-facing Routing Acceptance"
+
+AF_EVAL="$SKILLS_DIR/agent-facing.routing-eval.jsonl"
+
+if [[ -f "$AF_EVAL" ]]; then
+  af_count=$(wc -l < "$AF_EVAL" | tr -d ' ')
+  if (( af_count >= 25 )); then
+    pass "agent-facing.routing-eval.jsonl (${af_count} cases, 需要 ≥ 25)"
+  else
+    fail "agent-facing.routing-eval.jsonl 只有 ${af_count} cases，需要 ≥ 25"
+  fi
+
+  # Schema validation: every line must have required fields
+  missing_fields=0
+  lineno=0
+  while IFS= read -r line; do
+    ((lineno++)) || true
+    for field in "expected_args" "forbidden_tools" "forbidden_output_terms"; do
+      if ! echo "$line" | python3 -c "import json,sys; d=json.load(sys.stdin); assert '$field' in d" 2>/dev/null; then
+        ((missing_fields++)) || true
+      fi
+    done
+  done < "$AF_EVAL"
+  if (( missing_fields == 0 )); then
+    pass "每条 eval 用例都有 expected_args/forbidden_tools/forbidden_output_terms"
+  else
+    fail "有 ${missing_fields} 处缺少必需字段（expected_args/forbidden_tools/forbidden_output_terms）"
+  fi
+
+  # Per-category minimums
+  cat_failures=()
+  af_cat_mins="grounded_recall:4 content_recall:4 episodic_recall:4 discovery_digest:3 anti_pattern:5"
+  for cm in $af_cat_mins; do
+    cat="${cm%%:*}"
+    min="${cm##*:}"
+    hits=$(grep -c "\"category\": \"${cat}\"" "$AF_EVAL" 2>/dev/null) || hits=0
+    if (( hits < min )); then
+      cat_failures+=("${cat}: ${hits} < ${min}")
+    fi
+  done
+  if (( ${#cat_failures[@]} == 0 )); then
+    pass "所有 category 达到最低用例数（grounded≥4, content≥4, episodic≥4, discovery≥3, anti_pattern≥5）"
+  else
+    fail "category 不足: ${cat_failures[*]}"
+  fi
+
+  # Expected tool coverage (7 tools)
+  af_tools=("deep_recall" "recall_episode" "read_discoveries" "run_discovery" "graph_query" "query" "summarize")
+  missing_tools=()
+  for tool in "${af_tools[@]}"; do
+    tool_hits=$(grep -c "\"expected_tool\": \"${tool}\"" "$AF_EVAL" 2>/dev/null) || tool_hits=0
+    if (( tool_hits < 1 )); then
+      missing_tools+=("$tool")
+    fi
+  done
+  if (( ${#missing_tools[@]} == 0 )); then
+    pass "agent-facing eval 覆盖全部 7 个 expected_tool"
+  else
+    fail "agent-facing eval 缺少 expected_tool: ${missing_tools[*]}"
+  fi
+
+  # Grounded recall key params: grounded=true, detail=brief, limit=3
+  grounded_ok=true
+  while IFS= read -r line; do
+    cat=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin)['category'])" 2>/dev/null)
+    [[ "$cat" != "grounded_recall" ]] && continue
+    args=$(echo "$line" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['expected_args']))" 2>/dev/null)
+    if ! echo "$args" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('grounded')==True and d.get('detail')=='brief' and d.get('limit')==3" 2>/dev/null; then
+      grounded_ok=false
+      break
+    fi
+  done < "$AF_EVAL"
+  if $grounded_ok; then
+    pass "grounded_recall 用例全部有 grounded=true, detail=brief, limit=3"
+  else
+    fail "有 grounded_recall 用例的 expected_args 不符合 {grounded: true, detail: brief, limit: 3}"
+  fi
+
+  # Content recall key params: grounded=false, detail=normal, limit=3
+  content_ok=true
+  while IFS= read -r line; do
+    cat=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin)['category'])" 2>/dev/null)
+    [[ "$cat" != "content_recall" ]] && continue
+    args=$(echo "$line" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['expected_args']))" 2>/dev/null)
+    if ! echo "$args" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('grounded')==False and d.get('detail')=='normal' and d.get('limit')==3" 2>/dev/null; then
+      content_ok=false
+      break
+    fi
+  done < "$AF_EVAL"
+  if $content_ok; then
+    pass "content_recall 用例全部有 grounded=false, detail=normal, limit=3"
+  else
+    fail "有 content_recall 用例的 expected_args 不符合 {grounded: false, detail: normal, limit: 3}"
+  fi
+
+  # Discovery forbidden output terms coverage
+  disc_forbidden=("score" "distance" "shared_neighbors" "debug" "_debug")
+  disc_has_all=true
+  while IFS= read -r line; do
+    cat=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin)['category'])" 2>/dev/null)
+    [[ "$cat" != "discovery_digest" ]] && continue
+    for term in "${disc_forbidden[@]}"; do
+      if ! echo "$line" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert '$term' in d.get('forbidden_output_terms', [])
+" 2>/dev/null; then
+        disc_has_all=false
+        break 2
+      fi
+    done
+  done < "$AF_EVAL"
+  if $disc_has_all; then
+    pass "discovery_digest 用例的 forbidden_output_terms 覆盖全部禁止词"
+  else
+    fail "有 discovery_digest 用例的 forbidden_output_terms 缺少 score/distance/shared_neighbors/debug 等禁止词"
+  fi
+
+  # Privacy: no real names in eval (use -e flags, not \| in regex)
+  privacy_violations=0
+  for pattern in "张三" "李四" "王磊" "星辰" "某制药" "东区" "有限公司" "科技" "集团" "公司"; do
+    hits=$(grep -c "$pattern" "$AF_EVAL" 2>/dev/null) || hits=0
+    privacy_violations=$((privacy_violations + hits))
+  done
+  if (( privacy_violations == 0 )); then
+    pass "agent-facing eval 无隐私泄露"
+  else
+    fail "agent-facing eval 有 ${privacy_violations} 处疑似隐私泄露"
+  fi
+else
+  fail "agent-facing.routing-eval.jsonl 不存在"
+fi
+
+# Discovery presentation rules: verify resolver docs mention the constraint
+discovery_banned=("score" "distance" "shared_neighbors" "debug" "图距离" "共享邻居")
+resolver_files=("$SKILLS_DIR/RESOLVER.md" "$SKILLS_DIR/recall-resolver.md")
+banned_mentioned=0
+for f in "${resolver_files[@]}"; do
+  if [[ -f "$f" ]]; then
+    for term in "${discovery_banned[@]}"; do
+      if grep -q "$term" "$f" 2>/dev/null; then
+        banned_mentioned=$((banned_mentioned + 1))
+        break
+      fi
+    done
+  fi
+done
+if (( banned_mentioned >= 1 )); then
+  pass "resolver 文档包含 discovery 展示禁止规则"
+else
+  fail "resolver 文档缺少 discovery 展示禁止规则"
+fi
+
+# Verify acceptance doc exists
+if [[ -f "$PROJECT_DIR/docs/product/agent-facing-routing-acceptance.md" ]]; then
+  pass "agent-facing-routing-acceptance.md 存在"
+else
+  fail "docs/product/agent-facing-routing-acceptance.md 不存在"
+fi
+
+echo ""
+
+# ── 6. Skill 层一致性 ──
+echo "[6] Skill 层一致性"
 
 # review.md vs deep_recall 冲突检测
 if [[ -f "$SKILLS_DIR/review.md" ]]; then
@@ -262,7 +425,7 @@ fi
 
 echo ""
 
-# ── 6. 汇总 ──
+# ── 7. 汇总 ──
 echo "=== ${OK} OK, ${FAIL} FAIL, ${WARN} WARN ==="
 
 if (( FAIL > 0 )); then

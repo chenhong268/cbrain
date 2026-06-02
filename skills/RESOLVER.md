@@ -93,6 +93,9 @@
 ### Insights & Discoveries
 - 最近有什么发现、有什么我漏掉的、有什么关联没注意到的 → query.md
 - 洞察、insight、discovery、发现 → query.md
+- ⚠️ 展示约束：discovery 输出只使用 `display`、`cards`、`summary` 字段
+- ⚠️ 禁止暴露：score、distance、shared_neighbors、debug、_debug、candidate、filter、图距离、跳、桥接、候选、过滤
+- ⚠️ `run_discovery` 默认返回用户可读摘要（最多 3 条卡片），不需要二次格式化
 
 ### Timeline
 - 时间线、事件、发生了什么、历史记录、什么时候 → review.md
