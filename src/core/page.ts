@@ -12,7 +12,7 @@ import {
   parseFrontmatter,
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
-import { generateSlug, slugToFilePath, canonicalSlug } from "../utils/slug.js";
+import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
 import { hashContent, normalizePageType, canMerge, rewriteVaultLinks } from "./shared.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
@@ -83,6 +83,12 @@ export class PageManager {
     const normalizedType = normalizePageType(input.type);
     let slug = input.slug || generateSlug(input.title, normalizedType);
     slug = canonicalSlug(slug, normalizedType);
+
+    // Guard against invalid slug names (empty, only hyphens/special chars)
+    const slugName = slug.split("/").pop()!;
+    if (!isValidSlugName(slugName)) {
+      throw new Error(`Invalid slug generated: "${slug}". Title: "${input.title}"`);
+    }
     const fileName = slugToFilePath(slug);
     const filePath = join(this.vaultPath, fileName);
 
