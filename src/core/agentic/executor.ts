@@ -27,6 +27,9 @@ export interface ExecutorContext {
 
 export type ExecutionStatus = "ok" | "partial" | "degraded";
 
+/** Per-step search budget as a fraction of total wall-clock budget. */
+const STEP_SEARCH_BUDGET_RATIO = 0.6;
+
 export interface StepResult {
   kind: SearchPlanStep["kind"];
   input: string;
@@ -284,6 +287,18 @@ export class AgenticResearchExecutor {
         degradedReason = `Search budget exhausted (${state.searchCalls} >= ${budget.max_searches})`;
         this.skipRemaining(plan.steps, i, degradedReason, skipped, trace, traceSessionId);
         break;
+      }
+
+      // --- Per-step search budget: skip search if elapsed > 60% of total ---
+      if (step.kind === "search") {
+        const stepMaxMs = Math.floor(budget.max_ms * STEP_SEARCH_BUDGET_RATIO);
+        if (elapsed >= stepMaxMs) {
+          if (!degradedReason) degradedReason = `Per-step search budget: ${elapsed}ms elapsed, search limit is ${stepMaxMs}ms`;
+          skipped.push({ step, reason: degradedReason });
+          trace.push({ stepIndex: i, kind: step.kind, input: step.input, status: "skipped", latencyMs: 0, error: degradedReason });
+          this.recordTraceSkip(traceSessionId, i, step, degradedReason);
+          continue;
+        }
       }
 
       // --- Dependency check: slug-dependent steps need a resolved slug ---

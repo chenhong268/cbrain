@@ -394,4 +394,148 @@ describe("critic — confidence levels", () => {
     expect(result.sufficient).toBe(true);
     expect(result.confidence).toBe("high");
   });
+
+  it("degraded execution caps confidence to low even with trusted facts", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      facts: [{ claim: "确认事实", evidence_type: "fact", source_type: "page", source_slug: "page/entity-a", source_category: "agent_inference", trust_state: "trusted", confidence: 0.95 }],
+    };
+    const result = evaluateSufficiency(makeInput({
+      intent: "entity_lookup",
+      evidenceBoard: board,
+      execution: {
+        steps: [],
+        gaps: [],
+        skipped: [],
+        resolvedSlugs: new Map([["实体A", "page/entity-a"]]),
+        budgetUsed: { llmCalls: 0, searches: 0, ms: 8000 },
+        status: "degraded",
+      },
+    }));
+
+    expect(result.sufficient).toBe(true);
+    expect(result.confidence).toBe("low");
+    expect(result.reasons).toContain("execution degraded — confidence capped");
+  });
+});
+
+// --- relevance filtering ---
+
+describe("critic — relevance filtering", () => {
+  it("irrelevant facts don't count for gap_analysis", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      facts: [{ claim: "无关事实", evidence_type: "fact", source_type: "page", source_slug: "page/unrelated-entity", source_category: "agent_inference", trust_state: "trusted", confidence: 0.9 }],
+    };
+    const result = evaluateSufficiency(makeInput({
+      intent: "gap_analysis",
+      query: "实体A",
+      evidenceBoard: board,
+      execution: {
+        steps: [],
+        gaps: [],
+        skipped: [],
+        resolvedSlugs: new Map([["实体A", "page/entity-a"]]),
+        budgetUsed: { llmCalls: 0, searches: 0, ms: 5 },
+        status: "ok",
+      },
+    }));
+
+    expect(result.sufficient).toBe(false);
+    expect(result.missing).toContain("evidence or explicit gaps missing");
+  });
+
+  it("irrelevant sources don't count for comparison", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      facts: [
+        { claim: "无关A", evidence_type: "fact", source_type: "page", source_slug: "page/unrelated-a", source_category: "agent_inference", trust_state: "trusted", confidence: 0.9 },
+        { claim: "无关B", evidence_type: "fact", source_type: "page", source_slug: "page/unrelated-b", source_category: "agent_inference", trust_state: "trusted", confidence: 0.9 },
+      ],
+    };
+    const result = evaluateSufficiency(makeInput({
+      intent: "comparison",
+      query: "实体A vs 实体B",
+      evidenceBoard: board,
+      execution: {
+        steps: [],
+        gaps: [],
+        skipped: [],
+        resolvedSlugs: new Map([["实体A", "page/entity-a"], ["实体B", "page/entity-b"]]),
+        budgetUsed: { llmCalls: 0, searches: 0, ms: 5 },
+        status: "ok",
+      },
+    }));
+
+    expect(result.sufficient).toBe(false);
+    expect(result.missing[0]).toContain("comparison coverage");
+  });
+
+  it("relevant facts count for gap_analysis when resolved slugs match", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      facts: [{ claim: "相关事实", evidence_type: "fact", source_type: "page", source_slug: "page/entity-a", source_category: "agent_inference", trust_state: "trusted", confidence: 0.9 }],
+    };
+    const result = evaluateSufficiency(makeInput({
+      intent: "gap_analysis",
+      query: "实体A",
+      evidenceBoard: board,
+      execution: {
+        steps: [],
+        gaps: [],
+        skipped: [],
+        resolvedSlugs: new Map([["实体A", "page/entity-a"]]),
+        budgetUsed: { llmCalls: 0, searches: 0, ms: 5 },
+        status: "ok",
+      },
+    }));
+
+    expect(result.sufficient).toBe(true);
+  });
+
+  it("irrelevant user_thoughts don't count for gap_analysis", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      user_thoughts: [{ claim: "无关想法", evidence_type: "user_thought", source_type: "page", source_slug: "page/unrelated-entity", source_category: "agent_inference", trust_state: "trusted", confidence: 0.8 }],
+    };
+    const result = evaluateSufficiency(makeInput({
+      intent: "gap_analysis",
+      query: "实体A",
+      evidenceBoard: board,
+      execution: {
+        steps: [],
+        gaps: [],
+        skipped: [],
+        resolvedSlugs: new Map([["实体A", "page/entity-a"]]),
+        budgetUsed: { llmCalls: 0, searches: 0, ms: 5 },
+        status: "ok",
+      },
+    }));
+
+    expect(result.sufficient).toBe(false);
+    expect(result.missing).toContain("evidence or explicit gaps missing");
+  });
+
+  it("irrelevant candidates don't count for gap_analysis", () => {
+    const board: EvidenceBoardResult = {
+      ...emptyBoard(),
+      candidates: [{ claim: "无关候选", evidence_type: "candidate", source_type: "page", source_slug: "page/unrelated-entity", source_category: "agent_inference", trust_state: "candidate", confidence: 0.4 }],
+    };
+    const result = evaluateSufficiency(makeInput({
+      intent: "gap_analysis",
+      query: "实体A",
+      evidenceBoard: board,
+      execution: {
+        steps: [],
+        gaps: [],
+        skipped: [],
+        resolvedSlugs: new Map([["实体A", "page/entity-a"]]),
+        budgetUsed: { llmCalls: 0, searches: 0, ms: 5 },
+        status: "ok",
+      },
+    }));
+
+    expect(result.sufficient).toBe(false);
+    expect(result.missing).toContain("evidence or explicit gaps missing");
+  });
 });

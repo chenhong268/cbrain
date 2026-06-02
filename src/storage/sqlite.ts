@@ -699,11 +699,21 @@ export class CBrainDB {
       }
     }
 
-    // Pass 3: Fuzzy LIKE for remaining
+    // Pass 3: Fuzzy LIKE for remaining (prefer entity/concept types over record/source by type)
     if (remaining.size > 0) {
       for (const query of remaining) {
         const fuzzy = this.prepare(
-          "SELECT slug, title FROM pages WHERE title LIKE $q LIMIT 1"
+          `SELECT slug, title FROM pages WHERE title LIKE $q
+           ORDER BY
+             CASE WHEN type = 'entity' OR type LIKE 'entity/%' THEN 0
+                  WHEN type = 'concept' OR type LIKE 'concept/%' THEN 1
+                  ELSE 2
+             END,
+             CASE WHEN slug LIKE 'entity/%' OR slug LIKE 'brain/entities/%' THEN 0
+                  WHEN slug LIKE 'concept/%' OR slug LIKE 'brain/concepts/%' THEN 1
+                  ELSE 2
+             END
+           LIMIT 1`
         ).get({ $q: `%${query}%` }) as { slug: string; title: string } | undefined;
         if (fuzzy) result.set(query, fuzzy);
       }

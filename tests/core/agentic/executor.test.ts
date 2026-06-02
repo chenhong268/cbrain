@@ -725,6 +725,35 @@ describe("AgenticResearchExecutor — execution status", () => {
   });
 });
 
+// --- Per-step search budget tests ---
+
+describe("AgenticResearchExecutor — per-step search budget", () => {
+  it("search skipped at 60% threshold but non-search steps continue", async () => {
+    // Clock returns 300×callCount. With max_ms: 2000, stepMaxMs = floor(2000 * 0.6) = 1200.
+    // Each executing step consumes 3 clock calls (elapsed + stepStart + latencyMs).
+    let callCount = 0;
+    const clock = () => { callCount++; return callCount * 300; };
+    const executor = new AgenticResearchExecutor(makeCtx({ now: clock }));
+    const plan = makePlan(
+      [
+        { kind: "search", input: "q1" },    // runs (elapsed=300 < 1200)
+        { kind: "search", input: "q2" },    // skipped (elapsed=1200 >= 1200)
+        { kind: "search", input: "q3" },    // skipped (elapsed=1500 >= 1200)
+        { kind: "page", input: "slug-a" },  // runs (elapsed=1800 < 2000)
+      ],
+      [],
+      { budget: SearchPlanBudget.parse({ max_ms: 2000, max_searches: 10 }) },
+    );
+    const result = await executor.execute(plan);
+
+    expect(result.steps.map((s) => s.kind)).toEqual(["search", "page"]);
+    expect(result.skipped).toHaveLength(2);
+    expect(result.skipped.every((s) => s.step.kind === "search")).toBe(true);
+    expect(result.status).toBe("degraded");
+    expect(result.degradedReason).toContain("Per-step search budget");
+  });
+});
+
 // --- Integration-like tests ---
 
 describe("AgenticResearchExecutor — integration", () => {

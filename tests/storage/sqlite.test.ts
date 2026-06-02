@@ -271,4 +271,99 @@ describe("CBrainDB", () => {
       }).toThrow();
     });
   });
+
+  // ─── resolveSlugs type preference ───────────────────────────
+
+  describe("resolveSlugs type preference", () => {
+    test("fuzzy match prefers entity/person over record", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/shi-ti-a", "entity/person", "实体A丰", "entity/shi-ti-a.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("record/meeting-a", "record", "实体A的会议记录", "record/meeting-a.md", "h2");
+
+      const results = db.resolveSlugs(["实体A"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("entity/shi-ti-a");
+    });
+
+    test("fuzzy match prefers concept/concept over record", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("concept/zhu-ti-b", "concept/concept", "主题B综述", "concept/zhu-ti-b.md", "h3");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("source/zhu-ti-b-ref", "source", "主题B参考资料", "source/zhu-ti-b-ref.md", "h4");
+
+      const results = db.resolveSlugs(["主题B"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("concept/zhu-ti-b");
+    });
+
+    test("exact slug match still takes priority over fuzzy", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/exact", "entity/person", "精确实体", "entity/exact.md", "h5");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("record/exact", "record", "精确记录", "record/exact.md", "h6");
+
+      const results = db.resolveSlugs(["entity/exact"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("entity/exact");
+    });
+
+    test("real slug shapes: brain/entities/person wins over records note", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("brain/entities/person/entity-a", "entity/person", "人物D概览", "brain/entities/person/entity-a.md", "h7");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("records/entity-a-note", "record", "人物D的会议记录", "records/entity-a-note.md", "h8");
+
+      const results = db.resolveSlugs(["人物D"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("brain/entities/person/entity-a");
+    });
+
+    test("type=entity/person with non-entity slug prefix still wins via type column", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("custom/path/to/shi-ti-e", "entity/person", "实体E总览", "custom/path/to/shi-ti-e.md", "h9");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/shi-ti-e-note", "record", "实体E的笔记", "entity/shi-ti-e-note.md", "h10");
+
+      const results = db.resolveSlugs(["实体E"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("custom/path/to/shi-ti-e");
+    });
+
+    test("entity wins even when record is inserted first (regression)", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("records/shi-ti-f-note", "record", "实体F的讨论记录", "records/shi-ti-f-note.md", "h11");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("brain/entities/person/shi-ti-f", "entity/person", "实体F", "brain/entities/person/shi-ti-f.md", "h12");
+
+      const results = db.resolveSlugs(["实体F"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("brain/entities/person/shi-ti-f");
+    });
+
+    test("concept/concept with brain slug wins over source", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("brain/concepts/concept/zhu-ti-g", "concept/concept", "主题G概念", "brain/concepts/concept/zhu-ti-g.md", "h13");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("source/zhu-ti-g-ref", "source", "主题G参考", "source/zhu-ti-g-ref.md", "h14");
+
+      const results = db.resolveSlugs(["主题G"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("brain/concepts/concept/zhu-ti-g");
+    });
+  });
 });

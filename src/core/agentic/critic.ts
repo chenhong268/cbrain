@@ -1,5 +1,5 @@
 import type { SearchPlanIntent, SearchPlanStep } from "./plan.js";
-import type { EvidenceBoardResult } from "../evidence.js";
+import type { EvidenceBoardResult, EvidenceItem } from "../evidence.js";
 import type { ExecutionResult } from "./executor.js";
 
 // --- Types ---
@@ -42,6 +42,34 @@ function distinctSourceSlugs(board: EvidenceBoardResult): Set<string> {
     slugs.add(item.source_slug);
   }
   return slugs;
+}
+
+// --- Relevance filter ---
+
+function relevantFacts(board: EvidenceBoardResult, execution: CriticInput["execution"]): EvidenceItem[] {
+  if (!execution) return board.facts;
+  const slugValues = new Set(execution.resolvedSlugs.values());
+  if (slugValues.size === 0) return board.facts;
+  return board.facts.filter((f) => slugValues.has(f.source_slug));
+}
+
+function relevantItems(items: EvidenceItem[], execution: CriticInput["execution"]): EvidenceItem[] {
+  if (!execution) return items;
+  const slugValues = new Set(execution.resolvedSlugs.values());
+  if (slugValues.size === 0) return items;
+  return items.filter((item) => slugValues.has(item.source_slug));
+}
+
+function relevantSourceSlugs(board: EvidenceBoardResult, execution: CriticInput["execution"]): Set<string> {
+  const all = distinctSourceSlugs(board);
+  if (!execution) return all;
+  const slugValues = new Set(execution.resolvedSlugs.values());
+  if (slugValues.size === 0) return all;
+  const result = new Set<string>();
+  for (const s of all) {
+    if (slugValues.has(s)) result.add(s);
+  }
+  return result;
 }
 
 // --- Execution helpers ---
@@ -136,7 +164,7 @@ function checkEntityLookup(input: CriticInput): CheckResult {
 }
 
 function checkComparison(input: CriticInput): CheckResult {
-  const boardSlugs = distinctSourceSlugs(input.evidenceBoard);
+  const boardSlugs = relevantSourceSlugs(input.evidenceBoard, input.execution);
   const execSlugs = input.execution
     ? executionStepInputs(input.execution.steps, new Set(["page", "chunks", "graph"]))
     : new Set<string>();
@@ -161,7 +189,10 @@ function checkGapAnalysis(input: CriticInput): CheckResult {
   const board = input.evidenceBoard;
   const execGaps = input.execution?.gaps ?? [];
   const hasExplicitGaps = board.gaps.length > 0 || execGaps.length > 0;
-  const hasAnyEvidence = board.facts.length > 0 || board.user_thoughts.length > 0 || board.candidates.length > 0;
+  const facts = relevantFacts(board, input.execution);
+  const thoughts = relevantItems(board.user_thoughts, input.execution);
+  const candidates = relevantItems(board.candidates, input.execution);
+  const hasAnyEvidence = facts.length > 0 || thoughts.length > 0 || candidates.length > 0;
 
   if (hasExplicitGaps || hasAnyEvidence) {
     const reasons: string[] = [];
@@ -247,12 +278,19 @@ export function evaluateSufficiency(input: CriticInput): SufficiencyDecision {
   const sufficient = check.missing.length === 0;
   const maxFollowUp = input.maxFollowUpSteps ?? 3;
   const followUps = generateFollowUps(input.intent, check.missing, input, maxFollowUp);
+  let confidence = determineConfidence(sufficient, input.evidenceBoard);
+  const reasons = [...check.reasons];
+
+  if (sufficient && input.execution?.status === "degraded") {
+    confidence = "low";
+    reasons.push("execution degraded — confidence capped");
+  }
 
   return {
     sufficient,
-    confidence: determineConfidence(sufficient, input.evidenceBoard),
+    confidence,
     missing: check.missing,
     follow_up_steps: followUps,
-    reasons: check.reasons,
+    reasons,
   };
 }
