@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { DiscoveryManager } from "../../core/discovery.js";
 import type { DiscoveryType } from "../../core/discovery.js";
+import { formatDiscoveryDigest } from "../../core/discovery-digest.js";
 
 const TYPE_LABELS: Record<string, string> = {
   bridge: "桥接",
@@ -25,71 +26,6 @@ const STATUS_LABELS: Record<string, string> = {
   dismissed: "已忽略",
 };
 
-function buildDiscoveryText(
-  r: {
-    id: number; type: string; entities: string; score: number;
-    detail: string | null; detected_at: string;
-    actionable: string; suggestion: string | null;
-    proposed_actions: string | null; auto_applicable: number;
-    metadata?: string | null;
-  },
-  ctx: ToolContext,
-): { display: string; data: Record<string, unknown> } {
-  const entitySlugs: string[] = JSON.parse(r.entities);
-  const detail = r.detail ? JSON.parse(r.detail) as Record<string, unknown> : {};
-  const entitySummaries = entitySlugs.map(slug => {
-    const page = ctx.db.getPage(slug);
-    return page ? `${page.title}（${slug}）` : slug;
-  }).join(" 与 ");
-
-  const typeLabel = TYPE_LABELS[r.type] ?? r.type;
-  const actionLabel = ACTIONABLE_LABELS[r.actionable] ?? r.actionable;
-  const star = r.actionable === "high" ? " ⭐" : r.actionable === "medium" ? " ◆" : "";
-
-  const lines = [
-    `🔍 发现 #${r.id} [${typeLabel}]${star} ${actionLabel}`,
-    `📊 ${entitySummaries}（score: ${r.score}）`,
-  ];
-
-  if (r.metadata) {
-    try {
-      const m = JSON.parse(r.metadata) as Record<string, unknown>;
-      if (m.direction) lines.push(`📈 趋势: ${m.direction}`);
-      if (m.distance) lines.push(`🔗 距离: ${m.distance}跳`);
-      if (m.explanation) lines.push(`⚡ ${m.explanation}`);
-    } catch { /* skip */ }
-  }
-
-  if (r.suggestion) lines.push(`💡 ${r.suggestion}`);
-
-  const actions = r.proposed_actions ? JSON.parse(r.proposed_actions) as Array<{ type: string; target: string; reason: string }> : [];
-  for (const a of actions) {
-    lines.push(`🎯 建议: ${a.type}(${a.target}) — ${a.reason}`);
-  }
-
-  lines.push(`📅 ${r.detected_at.slice(0, 10)}`);
-
-  const data: Record<string, unknown> = {
-    id: r.id,
-    type: r.type,
-    type_label: typeLabel,
-    entities: entitySlugs.map(slug => {
-      const page = ctx.db.getPage(slug);
-      return page ? { slug, title: page.title, type: page.type } : { slug, title: "(deleted)", type: "unknown" };
-    }),
-    score: r.score,
-    detail,
-    actionable: r.actionable,
-    actionable_label: actionLabel,
-    suggestion: r.suggestion,
-    proposed_actions: actions,
-    auto_applicable: r.auto_applicable === 1,
-    detected_at: r.detected_at,
-  };
-
-  return { display: lines.join("\n"), data };
-}
-
 export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("read_discoveries", {
     description:
@@ -98,23 +34,25 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       "high 级发现带有 LLM 生成的中文建议和可操作项。" +
       "用 update_discovery_status 标记处理状态，用 promote_discovery 升级为 insight。",
     inputSchema: {
-      limit: z.number().optional().default(10).describe("Max discoveries to return"),
+      limit: z.number().optional().default(3).describe("Max discoveries to return"),
       actionableFilter: z.enum(["high", "medium", "low"]).optional().describe("Filter by actionable level"),
       typeFilter: z.enum(["bridge", "trend", "gap", "contradiction"]).optional().describe("Filter by discovery type"),
+      debug: z.boolean().optional().default(false).describe("Include internal debug info"),
     },
-  }, async ({ limit, actionableFilter, typeFilter }) => {
-    const effectiveLimit = limit ?? 10;
+  }, async ({ limit, actionableFilter, typeFilter, debug }) => {
+    const displayLimit = limit ?? 3;
+    const fetchLimit = Math.max(displayLimit * 3, 10);
     let rows: ReturnType<typeof ctx.db.getDiscoveriesByType>;
 
     if (typeFilter) {
-      rows = ctx.db.getDiscoveriesByType(typeFilter, effectiveLimit);
+      rows = ctx.db.getDiscoveriesByType(typeFilter, fetchLimit);
     } else {
       // Type-diverse round-robin: prevent high-score bridges from crowding out gaps
       const activeTypes = ["bridge", "trend", "gap", "contradiction"] as const;
       const typeBuckets = new Map<string, ReturnType<typeof ctx.db.getDiscoveriesByType>>();
 
       for (const t of activeTypes) {
-        const typeRows = ctx.db.getDiscoveriesByType(t, effectiveLimit);
+        const typeRows = ctx.db.getDiscoveriesByType(t, fetchLimit);
         if (actionableFilter) {
           typeBuckets.set(t, typeRows.filter(r => r.actionable === actionableFilter));
         } else {
@@ -125,7 +63,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       const nonEmpty = [...typeBuckets.entries()].filter(([, v]) => v.length > 0);
       const merged: ReturnType<typeof ctx.db.getDiscoveriesByType> = [];
       let roundIdx = 0;
-      while (merged.length < effectiveLimit && nonEmpty.some(([, v]) => v.length > 0)) {
+      while (merged.length < fetchLimit && nonEmpty.some(([, v]) => v.length > 0)) {
         const bucket = nonEmpty[roundIdx % nonEmpty.length];
         if (bucket[1].length > 0) {
           merged.push(bucket[1].shift()!);
@@ -135,18 +73,26 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       rows = merged;
     }
 
-    const results = rows.map(r => buildDiscoveryText(r, ctx));
+    const entityLookup = (slug: string) => ctx.db.getPage(slug);
+    const digest = formatDiscoveryDigest(rows, entityLookup, displayLimit);
 
-    const displays = results.map(r => r.display).join("\n\n---\n\n");
-    const summary = `共 ${results.length} 个发现` +
-      (typeFilter ? `（${TYPE_LABELS[typeFilter] ?? typeFilter}类）` : "") +
-      (actionableFilter ? `（${ACTIONABLE_LABELS[actionableFilter] ?? actionableFilter}级）` : "") +
-      `。high 级发现可 promote_discovery 升级为 insight。`;
+    const summary = digest.cards.length > 0
+      ? `今天有 ${digest.cards.length} 条值得关注的发现。`
+      : "今天暂无新的发现。";
+
+    const payload: Record<string, unknown> = {
+      display: digest.display,
+      cards: digest.cards,
+      summary,
+    };
+    if (debug) {
+      payload._debug = digest._debug;
+    }
 
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ display: displays, discoveries: results.map(r => r.data), summary }, null, 2),
+        text: JSON.stringify(payload, null, 2),
       }],
     };
   });
