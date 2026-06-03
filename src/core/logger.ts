@@ -81,8 +81,10 @@ export class Logger {
     const row = `| ${time} | ${icon} | ${entry.module} | ${entry.message} | ${details} |\n`;
     appendFileSync(logFile, row, "utf-8");
     } catch (err) {
-      // Fallback: if Logger itself can't write, at least warn on console
-      // (disk full / permission denied should not be completely silent)
+      // ENOENT: log directory gone (test temp dir cleanup) — not a real problem
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT") return;
+      // Real errors (disk full, permission denied) should not be silent
       console.error("[Logger] write failed:", err instanceof Error ? err.message : String(err));
     }
   }
