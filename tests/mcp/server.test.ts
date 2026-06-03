@@ -1634,5 +1634,24 @@ describe("MCP Server", () => {
       expect(data.results).toBeDefined();
       expect(Array.isArray(data.results)).toBe(true);
     });
+
+    test("error wrapper sanitizes internal paths and SQL errors", async () => {
+      // Force an error by dropping a table that a tool depends on
+      db.rawDb.prepare("DROP TABLE pages").run();
+
+      const server = createServer(deps);
+      const result = await getTools(server).status.handler({});
+
+      // Should have isError flag
+      expect(result.isError).toBe(true);
+      const text = result.content[0].text;
+      // Must not contain absolute filesystem paths
+      expect(text).not.toMatch(/\/Users\/|\/tmp\/|\/home\//);
+      // Must not contain raw SQLite error details
+      expect(text).not.toMatch(/no such table|SQLiteError.*pages/i);
+      // Should still have an error field
+      const parsed = JSON.parse(text);
+      expect(parsed.error).toBeDefined();
+    });
   });
 });

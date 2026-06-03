@@ -14,28 +14,20 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
       reports_to: z.string().describe("Slug of the direct manager"),
     },
   }, async ({ slug, reports_to }) => {
-    try {
-      setHierarchy(slug, reports_to, { pages: ctx.pages, graph: ctx.graph });
+    setHierarchy(slug, reports_to, { pages: ctx.pages, graph: ctx.graph });
 
-      const manager = ctx.pages.getBySlug(reports_to);
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({
-            success: true,
-            slug,
-            reports_to,
-            manager_title: manager?.title ?? null,
-          }, null, 2),
-        }],
-      };
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }],
-        isError: true,
-      };
-    }
+    const manager = ctx.pages.getBySlug(reports_to);
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          success: true,
+          slug,
+          reports_to,
+          manager_title: manager?.title ?? null,
+        }, null, 2),
+      }],
+    };
   });
 
   server.registerTool("get_hierarchy", {
@@ -45,21 +37,13 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
       slug: z.string().describe("Entity slug"),
     },
   }, async ({ slug }) => {
-    try {
-      const hierarchy = getHierarchyContext(slug, { pages: ctx.pages, graph: ctx.graph });
-      return {
-        content: [{
-          type: "text" as const,
-          text: JSON.stringify({ slug, ...hierarchy }, null, 2),
-        }],
-      };
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }],
-        isError: true,
-      };
-    }
+    const hierarchy = getHierarchyContext(slug, { pages: ctx.pages, graph: ctx.graph });
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ slug, ...hierarchy }, null, 2),
+      }],
+    };
   });
 
   server.registerTool("remove_hierarchy", {
@@ -70,29 +54,21 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
       slug: z.string().describe("Entity slug"),
     },
   }, async ({ slug }) => {
-    try {
-      const removed = removeHierarchy(slug, { pages: ctx.pages, graph: ctx.graph });
-      if (!removed) {
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify({ error: `${slug} 未设置 reports_to` }),
-          }],
-          isError: true,
-        };
-      }
+    const removed = removeHierarchy(slug, { pages: ctx.pages, graph: ctx.graph });
+    if (!removed) {
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ success: true, slug, removed }, null, 2),
+          text: JSON.stringify({ error: `${slug} 未设置 reports_to` }),
         }],
-      };
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }],
         isError: true,
       };
     }
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ success: true, slug, removed }, null, 2),
+      }],
+    };
   });
 }

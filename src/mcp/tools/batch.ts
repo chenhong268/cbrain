@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { normalizeRelation } from "../../core/shared.js";
+import { sanitizeError } from "../server.js";
 
 export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
   // ─── batch_delete_pages ────────────────────────────────────
@@ -25,7 +26,7 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
         await ctx.pages.delete(slug);
         results.push({ slug, success: true });
       } catch (e) {
-        results.push({ slug, success: false, error: e instanceof Error ? e.message : String(e) });
+        results.push({ slug, success: false, error: sanitizeError(e instanceof Error ? e.message : String(e)) });
       }
     }
 
@@ -79,7 +80,7 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
         syncedSlugs.add(to);
         results.push({ from, to, success: true });
       } catch (e) {
-        results.push({ from, to, success: false, error: e instanceof Error ? e.message : String(e) });
+        results.push({ from, to, success: false, error: sanitizeError(e instanceof Error ? e.message : String(e)) });
       }
     }
 
@@ -143,7 +144,7 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
         deletedSources.add(source);
         results.push({ source, target, success: true });
       } catch (e) {
-        results.push({ source, target, success: false, error: e instanceof Error ? e.message : String(e) });
+        results.push({ source, target, success: false, error: sanitizeError(e instanceof Error ? e.message : String(e)) });
       }
     }
 

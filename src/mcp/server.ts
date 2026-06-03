@@ -38,6 +38,15 @@ export function registerDreamWorker(ctx: ToolContext): void {
   ctx.jobs.start();
 }
 
+/** Sanitize error message for MCP client — strip paths, SQL details, and stack traces. */
+export function sanitizeError(msg: string): string {
+  return msg
+    .replace(/\/[^\s"'`\]]+\/[^\s"'`\]]+/g, "[path]")  // absolute paths (handles spaces)
+    .replace(/\/[a-zA-Z]:[^\s"'`\]]+/g, "[path]")        // Windows paths
+    .replace(/\b(SQLite\w*|no such \w+|UNIQUE constraint|FOREIGN KEY|constraint failed|database is locked|disk I\/O)[\s\S]*$/im, "[db-error]")
+    .slice(0, 500);
+}
+
 export function createServer(deps: CBrainDeps): McpServer {
   const server = new McpServer({
     name: "cbrain",
@@ -54,7 +63,7 @@ export function createServer(deps: CBrainDeps): McpServer {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }],
+          content: [{ type: "text" as const, text: JSON.stringify({ error: sanitizeError(msg) }) }],
           isError: true,
         };
       }
