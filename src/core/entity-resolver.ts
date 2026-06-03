@@ -29,9 +29,18 @@ export interface EntityCandidate {
 // ─── Resolver ─────────────────────────────────────────────────
 
 export class EntityResolver {
+  private titleCache: string[] | null = null;
+
   constructor(private db: CBrainDB, private llm?: LLMProvider) {}
 
+  private getCachedTitles(): string[] {
+    if (!this.titleCache) this.titleCache = this.db.getAllEntityTitles();
+    return this.titleCache;
+  }
+
   resolveAll(candidates: EntityCandidate[]): Map<string, ResolutionResult> {
+    // Pre-load entity titles cache for this resolution session
+    this.getCachedTitles();
     const results = new Map<string, ResolutionResult>();
 
     if (candidates.length === 0) return results;
@@ -98,6 +107,8 @@ export class EntityResolver {
       results.set(name, result);
     }
 
+    // Release cache after session
+    this.titleCache = null;
     return results;
   }
 
@@ -161,7 +172,7 @@ export class EntityResolver {
     }
 
     // Layer 2c: substring dedup
-    const subMatch = findSubstringMatch(name, this.db);
+    const subMatch = findSubstringMatch(name, this.db, this.titleCache);
     if (subMatch) {
       if (checkTypeGate(this.db, subMatch.slug, entityType)) {
         return { slug: subMatch.slug, action: "resolved_to_existing", score: 0.7, matchedBy: "substring_dedup" };
@@ -203,7 +214,7 @@ export class EntityResolver {
     }
 
     const MAX_ENTITIES_IN_PROMPT = 200;
-    const allTitles = this.db.getAllEntityTitles();
+    const allTitles = this.getCachedTitles();
     const existingEntities = allTitles
       .filter(title => !resolvedTitles.has(title))
       .slice(0, MAX_ENTITIES_IN_PROMPT)
@@ -300,8 +311,8 @@ interface SemanticResponse {
 
 // ─── Helpers ──────────────────────────────────────────────────
 
-function findSubstringMatch(name: string, db: CBrainDB): { slug: string; title: string } | null {
-  const allTitles = db.getAllEntityTitles();
+function findSubstringMatch(name: string, db: CBrainDB, cachedTitles?: string[] | null): { slug: string; title: string } | null {
+  const allTitles = cachedTitles ?? db.getAllEntityTitles();
   for (const existing of allTitles) {
     // New entity is substring of existing (e.g. "AI" ⊂ "AI Agents")
     if (existing.includes(name) && name.length > 1 && isSignificantSubstring(name, existing)) {
