@@ -3,6 +3,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { LanceDBManager as LanceDBStorage } from "../storage/lancedb.js";
 import { ResearchManager } from "./research.js";
+import type { Logger } from "./logger.js";
 
 export interface SearchResult {
   slug: string;
@@ -48,6 +49,7 @@ export interface SearchOptions {
 export interface HybridSearchConfig {
   rrf_k?: number;
   multiQuery?: boolean;
+  logger?: Logger;
 }
 
 export interface GraphContext {
@@ -160,6 +162,7 @@ export class HybridSearch {
   private lance: LanceDBStorage;
   private rrfK: number;
   private llm?: LLMProvider;
+  private logger?: Logger;
   private multiQueryEnabled: boolean;
   private queryCache = new Map<string, { queries: string[]; expires: number }>();
   private embeddingCache = new Map<string, { embedding: number[]; expires: number }>();
@@ -179,6 +182,7 @@ export class HybridSearch {
     this.lance = lance;
     this.rrfK = config?.rrf_k ?? 60;
     this.llm = config?.llm;
+    this.logger = config?.logger;
     this.multiQueryEnabled = config?.multiQuery ?? true;
   }
 
@@ -253,7 +257,7 @@ export class HybridSearch {
           );
           if (trace) trace.llm_calls = (trace.llm_calls ?? 0) + 1;
 
-          console.error(`[search] decomposition: "${query}" → ${subQueries.length} sub-queries: ${subQueries.join(" | ")}`);
+          this.logger?.info("search", `decomposition: "${query}" → ${subQueries.length} sub-queries`);
           if (subQueries.length >= 2) {
             const subResults = await Promise.all(
               subQueries.map((sq) =>
@@ -271,7 +275,7 @@ export class HybridSearch {
             }
           }
         } catch (e) {
-          console.error("[search] decomposition 路径失败，fallback 到 expandQuery:", e);
+          this.logger?.warn("search", "decomposition 路径失败，fallback 到 expandQuery", { error: String(e) });
         }
       }
     }
@@ -287,22 +291,22 @@ export class HybridSearch {
 
     const [vecOrNull, fts, graph, temporal] = await Promise.all([
       this.timedCall(() => vectorPromise, trace, "vector_ms").catch((e) => {
-        console.error("[search] vectorSearch 失败:", e);
+        this.logger?.warn("search", "vectorSearch 失败", { error: String(e) });
         if (trace && !trace.degraded_reason) trace.degraded_reason = "vector_error";
         return null as SearchResult[] | null;
       }),
       this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit)), trace, "fts_ms").catch((e) => {
-        console.error("[search] ftsSearch 失败:", e);
+        this.logger?.warn("search", "ftsSearch 失败", { error: String(e) });
         return [] as SearchResult[];
       }),
       resolved?.slug
         ? this.timedCall(() => this.graphSearch(resolved.slug!, limit), trace, "graph_ms").catch((e) => {
-            console.error("[search] graphSearch 失败:", e);
+            this.logger?.warn("search", "graphSearch 失败", { error: String(e) });
             return [] as SearchResult[];
           })
         : Promise.resolve([] as SearchResult[]),
       this.timedCall(() => Promise.resolve(this.temporalSearch(q, limit)), trace, "temporal_ms").catch((e) => {
-        console.error("[search] temporalSearch 失败:", e);
+        this.logger?.warn("search", "temporalSearch 失败", { error: String(e) });
         return [] as SearchResult[];
       }),
     ]);
@@ -343,7 +347,7 @@ export class HybridSearch {
     const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
 
     const totalMs = Date.now() - t0;
-    console.error(`[search] expansion: ${queries.length} queries, expand=${trace?.expand_ms ?? 0}ms, total=${totalMs}ms, slugs=${allSlugs.size}`);
+    this.logger?.info("search", `expansion: ${queries.length} queries, expand=${trace?.expand_ms ?? 0}ms, total=${totalMs}ms, slugs=${allSlugs.size}`);
 
     return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
   }
@@ -450,7 +454,7 @@ export class HybridSearch {
         context.chains = trimmed;
       }
     } catch (e) {
-      console.error("[search] graphPrefetch 失败:", e);
+      this.logger?.warn("search", "graphPrefetch 失败", { error: String(e) });
     }
 
     return context;
@@ -515,7 +519,7 @@ export class HybridSearch {
         .map((sq) => sq.sub_query)
         .filter((q) => typeof q === "string" && q.trim());
     } catch (e) {
-      console.error("[search] decomposeQuery 失败:", e);
+      this.logger?.warn("search", "decomposeQuery 失败", { error: String(e) });
       return [query];
     }
   }
@@ -547,7 +551,7 @@ export class HybridSearch {
       }
       return queries;
     } catch (e) {
-      console.error("[search] 查询扩展失败:", e);
+      this.logger?.warn("search", "查询扩展失败", { error: String(e) });
       return [query];
     }
   }

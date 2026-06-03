@@ -1,14 +1,17 @@
 import { CBrainDB } from "../storage/sqlite.js";
+import type { Logger } from "./logger.js";
 
 export type JobHandler = (data: unknown, jobId: number) => Promise<unknown>;
 
 export class JobQueue {
   private db: CBrainDB;
+  private logger?: Logger;
   private handlers: Map<string, JobHandler> = new Map();
   private running = false;
 
-  constructor(db: CBrainDB) {
+  constructor(db: CBrainDB, logger?: Logger) {
     this.db = db;
+    this.logger = logger;
   }
 
   register(name: string, handler: JobHandler): void {
@@ -67,7 +70,7 @@ export class JobQueue {
   /** Start background work loop. Returns immediately; runs until stop(). */
   start(): void {
     if (this.running) return;
-    this.work(2000).catch(e => console.error("[JobQueue] work loop crashed:", e));
+    this.work(2000).catch(e => this.logger?.error("jobs", "work loop crashed", { error: String(e) }));
   }
 
   stop(): void {

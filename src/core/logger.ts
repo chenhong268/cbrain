@@ -62,6 +62,7 @@ export class Logger {
   // ─── Private ────────────────────────────────────────────────
 
   private write(entry: LogEntry): void {
+    try {
     const date = entry.timestamp.slice(0, 10);
     const logFile = join(this.logDir, `系统日志-${date}.md`);
 
@@ -78,5 +79,6 @@ export class Logger {
 
     const row = `| ${time} | ${icon} | ${entry.module} | ${entry.message} | ${details} |\n`;
     appendFileSync(logFile, row, "utf-8");
+    } catch { /* log dir may not be writable in test environments */ }
   }
 }
