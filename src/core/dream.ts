@@ -27,6 +27,7 @@ export interface DreamReport {
     decay: { linksUpdated: number };
     seal: { sealed: number; skipped: number; errors: number };
     cleanup: { orphans: number; staleStubs: number; lanceOrphans: number };
+    compact: { tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; filesRemoved: number };
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
     indexes: { files: number };
@@ -68,6 +69,7 @@ export async function runDream(
   insightMgr?: InsightManager,
   dbPath?: string,
   sealDeps?: { llm: LLMProvider; embedding: EmbeddingProvider; lance: LanceDBManager },
+  lance?: LanceDBManager,
   onStageProgress?: (stage: string, detail: unknown) => void,
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
@@ -82,6 +84,7 @@ export async function runDream(
         decay: { linksUpdated: 0 },
         seal: { sealed: 0, skipped: 0, errors: 0 },
         cleanup: { orphans: 0, staleStubs: 0, lanceOrphans: 0 },
+        compact: { tables: [], fragmentsRemoved: 0, fragmentsAdded: 0, filesRemoved: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
         insight_archive: { archived: 0 },
         indexes: { files: 0 },
@@ -237,6 +240,24 @@ export async function runDream(
   const lanceOrphans = await syncMgr.cleanLanceOrphans().catch(e => { logger.warn("dream", `Cleanup LanceDB orphans 失败: ${(e as Error).message}`); return []; });
   if (onStageProgress) onStageProgress("cleanup", { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length });
 
+  // Stage 4.6: LanceDB compact — coalesce fragment versions to prevent disk bloat
+  logger.info("dream", "Stage 4.6/7: LanceDB compact");
+  let compactReport = { tables: [] as string[], fragmentsRemoved: 0, fragmentsAdded: 0, filesRemoved: 0 };
+  const lanceInstance = lance ?? sealDeps?.lance;
+  if (lanceInstance) {
+    try {
+      compactReport = await lanceInstance.compact();
+      if (compactReport.fragmentsRemoved > 0) {
+        logger.info("dream", `LanceDB compact: ${compactReport.fragmentsRemoved} fragments → ${compactReport.fragmentsAdded}, ${compactReport.filesRemoved} files removed`);
+      } else {
+        logger.info("dream", "LanceDB compact: no fragments to merge");
+      }
+    } catch (e) {
+      logger.warn("dream", `LanceDB compact 失败: ${(e as Error).message}`);
+    }
+  }
+  if (onStageProgress) onStageProgress("compact", compactReport);
+
   // Stage 5-6: Health + Insight archive (independent, run in parallel)
   logger.info("dream", "Stage 5-6/7: health + insight archive");
   const [healthReport, archived] = await Promise.all([
@@ -282,6 +303,7 @@ export async function runDream(
       decay: { linksUpdated: decayUpdated },
       seal: sealReport,
       cleanup: { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length },
+      compact: compactReport,
       health: {
         overallStatus: healthReport.overallStatus,
         dimensions: healthReport.dimensions.length,
@@ -311,6 +333,7 @@ export async function runDream(
     `| Learn | ${report.stages.learn.updated} 实体权重更新, 活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")} |`,
     `| Seal | ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过 |`,
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿 |`,
+    `| LanceDB Compact | ${report.stages.compact.fragmentsRemoved} fragments → ${report.stages.compact.fragmentsAdded}, ${report.stages.compact.filesRemoved} files removed |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
     `| Insight Archive | ${report.stages.insight_archive.archived} 条过期归档 |`,
     `| Indexes | ${report.stages.indexes.files} 个索引更新 |`,
@@ -360,6 +383,9 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.seal.sealed > 0) {
     lines.push(`Seal: ${report.stages.seal.sealed} 页摘要压缩`);
+  }
+  if (report.stages.compact.fragmentsRemoved > 0) {
+    lines.push(`LanceDB: ${report.stages.compact.fragmentsRemoved} fragments 合并, ${report.stages.compact.filesRemoved} files 清理`);
   }
   if (report.stages.insight_archive.archived > 0) {
     lines.push(`${report.stages.insight_archive.archived} 条洞察归档`);

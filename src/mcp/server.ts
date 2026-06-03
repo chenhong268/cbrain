@@ -31,6 +31,7 @@ export function registerDreamWorker(ctx: ToolContext): void {
       new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath),
       ctx.outputsDir, ctx.logger, undefined, ctx.dbPath,
       ctx.llm ? { llm: ctx.llm, embedding: ctx.embedding, lance: ctx.lance } : undefined,
+      ctx.lance,
       (stage, detail) => { try { ctx.db.updateJobProgress(jobId, stage, detail); } catch { /* non-critical */ } },
     );
     return report;
