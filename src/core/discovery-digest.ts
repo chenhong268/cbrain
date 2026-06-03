@@ -1,4 +1,5 @@
 export interface DigestCard {
+  id: number;
   title: string;
   why_it_matters: string;
   evidence: string;
@@ -83,6 +84,7 @@ export function formatDigestCard(
     case "bridge": {
       const [a, b] = slugs;
       return {
+        id: r.id,
         title: `潜在关联：${resolveTitle(a, entityLookup)} 与 ${resolveTitle(b, entityLookup)}`,
         why_it_matters: `${resolveTitle(a, entityLookup)} 和 ${resolveTitle(b, entityLookup)} 看似属于不同领域，但可能存在尚未记录的联系。`,
         evidence: "间接关系线索，需要进一步确认。",
@@ -96,6 +98,7 @@ export function formatDigestCard(
       const isRising = dir === "trend_rising" || dir === "trend_spike";
       const dirLabel = isRising ? "上升" : "下降";
       return {
+        id: r.id,
         title: `关注度${dirLabel}：${resolveTitle(slug, entityLookup)}`,
         why_it_matters: isRising
           ? "近期被频繁提及，值得留意最新动态。"
@@ -111,6 +114,7 @@ export function formatDigestCard(
       const mentionCount = meta.mention_count as number | undefined;
       const linkCount = meta.link_count as number | undefined;
       return {
+        id: r.id,
         title: `需要补全：${resolveTitle(slug, entityLookup)}`,
         why_it_matters: "被频繁提及但缺少详细描述和关联。",
         evidence: `被提及 ${mentionCount ?? "?"} 次，仅有 ${linkCount ?? 0} 条关联`,
@@ -120,6 +124,7 @@ export function formatDigestCard(
     case "contradiction": {
       const slug = slugs[0];
       return {
+        id: r.id,
         title: `信息矛盾：${resolveTitle(slug, entityLookup)}`,
         why_it_matters: "多个来源对该实体的描述存在冲突。",
         evidence: (meta.explanation as string) ?? "来源信息不一致",
@@ -129,6 +134,7 @@ export function formatDigestCard(
     default: {
       const titles = slugs.map(s => resolveTitle(s, entityLookup)).join("、");
       return {
+        id: r.id,
         title: `待确认发现：${titles}`,
         why_it_matters: "检测到新的结构发现，需要进一步确认。",
         evidence: "自动检测产生",

@@ -152,6 +152,12 @@ describe("shouldFilterDiscovery", () => {
 });
 
 describe("formatDigestCard", () => {
+  test("every card carries the DB row id", () => {
+    const row = mockRow({ id: 42, type: "gap", entities: '["entities/org-c"]', metadata: JSON.stringify({ mention_count: 10, link_count: 0 }) });
+    const card = formatDigestCard(row, entityLookup);
+    expect(card.id).toBe(42);
+  });
+
   test("bridge card: natural language, no internal terms", () => {
     const row = mockRow({
       type: "bridge",
@@ -263,6 +269,16 @@ describe("formatDigestCard", () => {
 });
 
 describe("formatDiscoveryDigest", () => {
+  test("cards carry DB row ids for update_discovery_status", () => {
+    const rows = [
+      mockRow({ id: 10, type: "gap", entities: '["entities/org-c"]', metadata: JSON.stringify({ mention_count: 20, link_count: 0 }) }),
+      mockRow({ id: 20, type: "trend", entities: '["entities/person-a"]', metadata: JSON.stringify({ direction: "trend_rising", delta: 3, daily_counts: [1, 2, 3] }), suggestion: "注意" }),
+    ];
+    const digest = formatDiscoveryDigest(rows, entityLookup, 10);
+    expect(digest.cards[0].id).toBe(10);
+    expect(digest.cards[1].id).toBe(20);
+  });
+
   test("filters bridges without suggestion", () => {
     const rows = [
       mockRow({ id: 1, type: "bridge", actionable: "high", score: 0.9, suggestion: null }),
