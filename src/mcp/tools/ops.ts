@@ -40,7 +40,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     inputSchema: {
       action: z.enum(["append", "create_concept", "create_link"]).describe("Writeback action"),
       targetSlug: z.string().optional().describe("Target page slug (for append)"),
-      content: z.string().describe("Content to write"),
+      content: z.string().max(100_000).describe("Content to write"),
       conceptTitle: z.string().optional().describe("Title for new concept (for create_concept)"),
       fromSlug: z.string().optional().describe("Source page slug (for create_link)"),
       toSlug: z.string().optional().describe("Target page slug (for create_link)"),

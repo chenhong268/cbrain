@@ -14,7 +14,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       "仅用于快速定位某个关键词出现的位置。大多数查询应该用 deep_recall 代替。" +
       "⚠️ 返回中的 proactive_hints 是系统主动发现的你可能不知道的重要信息。你必须把每一条 hint 原样展示给用户，用 '💡 主动提示：' 开头，逐条列出。不要省略任何一条。",
     inputSchema: {
-      query: z.string().describe("Search query"),
+      query: z.string().max(1000).describe("Search query"),
       limit: z.number().optional().default(10).describe("Max results"),
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),

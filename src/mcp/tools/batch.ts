@@ -46,8 +46,8 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
       "Links are marked source_type=agent (agent_inference) with confidence=0.9. To mark links as user-confirmed, use confirm_evidence.",
     inputSchema: {
       links: z.array(z.object({
-        from: z.string().describe("Source page slug"),
-        to: z.string().describe("Target page slug"),
+        from: z.string().max(500).describe("Source page slug"),
+        to: z.string().max(500).describe("Target page slug"),
         relation: z.string().default("提及").describe("Relation type"),
         context: z.string().optional().describe("Optional context"),
         weight: z.number().optional().describe("Link weight 0-1"),
@@ -105,8 +105,8 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
       "Pairs are processed in order — if a source appears as a target in a later pair, the later pair will fail.",
     inputSchema: {
       pairs: z.array(z.object({
-        source: z.string().describe("Page to absorb (will be deleted)"),
-        target: z.string().describe("Page to keep"),
+        source: z.string().max(500).describe("Page to absorb (will be deleted)"),
+        target: z.string().max(500).describe("Page to keep"),
       })).min(1).max(50).describe("Array of merge pairs (max 50)"),
     },
   }, async ({ pairs }) => {
