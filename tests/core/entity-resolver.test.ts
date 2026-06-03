@@ -407,4 +407,119 @@ describe("EntityResolver", () => {
       expect(results.get("南药")?.action).toBe("stub_created");
     });
   });
+
+  // ─── Layer 0b: prefix-based intra-document dedup (#116) ────
+  describe("Layer 0b: prefix-based dedup", () => {
+    test("full name vs abbreviation (Chinese) merges into one group", () => {
+      const results = resolver.resolveAll([
+        candidate("人物A全名", "person"),
+        candidate("人物A全", "person"),
+      ]);
+
+      const r1 = results.get("人物A全名")!;
+      const r2 = results.get("人物A全")!;
+
+      // One is the canonical (matchedBy "new"), the other is intra-doc
+      const intraDocs = [r1, r2].filter(r => r.matchedBy === "intra-doc");
+      expect(intraDocs.length).toBe(1);
+
+      // Both point to the same slug (empty for new stubs, but identical)
+      expect(r1.slug).toBe(r2.slug);
+    });
+
+    test("full name vs abbreviation (English) merges into one group", () => {
+      const results = resolver.resolveAll([
+        candidate("FirstName Fullname", "person"),
+        candidate("FirstName F", "person"),
+      ]);
+
+      const r1 = results.get("FirstName Fullname")!;
+      const r2 = results.get("FirstName F")!;
+
+      const intraDocs = [r1, r2].filter(r => r.matchedBy === "intra-doc");
+      expect(intraDocs.length).toBe(1);
+
+      expect(r1.slug).toBe(r2.slug);
+    });
+
+    test("no prefix relationship → separate groups", () => {
+      const results = resolver.resolveAll([
+        candidate("人物A", "person"),
+        candidate("人物B", "person"),
+      ]);
+
+      // No intra-doc — both are independent
+      expect(results.get("人物A")!.matchedBy).toBe("new");
+      expect(results.get("人物B")!.matchedBy).toBe("new");
+    });
+
+    test("type affinity mismatch → no merge", () => {
+      // person (entity/person) and technology (concept/technology) are NOT affine
+      const results = resolver.resolveAll([
+        candidate("张三丰", "person"),
+        candidate("张三", "technology"),
+      ]);
+
+      // Both independent — no intra-doc
+      expect(results.get("张三丰")!.matchedBy).toBe("new");
+      expect(results.get("张三")!.matchedBy).toBe("new");
+    });
+
+    test("single char too short → no merge", () => {
+      const results = resolver.resolveAll([
+        candidate("A", "person"),
+        candidate("AB Corp", "company"),
+      ]);
+
+      // Both independent — "a" is too short for prefix merge
+      expect(results.get("A")!.matchedBy).toBe("new");
+      expect(results.get("AB Corp")!.matchedBy).toBe("new");
+    });
+
+    test("3-level prefix chain merges all into one group", () => {
+      const results = resolver.resolveAll([
+        candidate("人物A全名长", "person"),
+        candidate("人物A全名", "person"),
+        candidate("人物A全", "person"),
+      ]);
+
+      // All three should share the same slug
+      const slug1 = results.get("人物A全名长")!.slug;
+      const slug2 = results.get("人物A全名")!.slug;
+      const slug3 = results.get("人物A全")!.slug;
+      expect(slug1).toBe(slug2);
+      expect(slug2).toBe(slug3);
+
+      // Two should be intra-doc, one is the canonical
+      const intraDocs = [results.get("人物A全名长")!, results.get("人物A全名")!, results.get("人物A全")!]
+        .filter(r => r.matchedBy === "intra-doc");
+      expect(intraDocs.length).toBe(2);
+    });
+
+    test("length ratio < 50% → no merge (false positive guard)", () => {
+      // "CityA" (5) vs "CityADistrict" (13) → 5/13 ≈ 38% < 50%
+      const results = resolver.resolveAll([
+        candidate("CityA", "person"),
+        candidate("CityADistrict", "person"),
+      ]);
+
+      // Should NOT merge — too different in length
+      expect(results.get("CityA")!.matchedBy).toBe("new");
+      expect(results.get("CityADistrict")!.matchedBy).toBe("new");
+    });
+
+    test("prefix merge resolves to existing entity when one matches DB", () => {
+      seedEntity("人物A全名", "entity/person", "entity/renwu-a");
+
+      const results = resolver.resolveAll([
+        candidate("人物A全名", "person"),
+        candidate("人物A全", "person"),
+      ]);
+
+      // Both should resolve to the existing entity
+      expect(results.get("人物A全名")!.action).toBe("resolved_to_existing");
+      expect(results.get("人物A全名")!.slug).toBe("entity/renwu-a");
+      expect(results.get("人物A全")!.slug).toBe("entity/renwu-a");
+    });
+  });
 });

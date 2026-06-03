@@ -48,6 +48,33 @@ export class EntityResolver {
       }
     }
 
+    // Layer 0b: prefix-based intra-document dedup
+    // "人物A全" and "人物A全名" normalize to different keys,
+    // but the shorter is a prefix of the longer — merge them.
+    const groupKeys = [...normalizedGroups.keys()];
+    for (let i = 0; i < groupKeys.length; i++) {
+      const keyA = groupKeys[i];
+      if (!normalizedGroups.has(keyA)) continue;
+      for (let j = i + 1; j < groupKeys.length; j++) {
+        const keyB = groupKeys[j];
+        if (!normalizedGroups.has(keyB)) continue;
+        const [shorter, longer] = keyA.length <= keyB.length ? [keyA, keyB] : [keyB, keyA];
+        if (shorter.length < 2 || !longer.startsWith(shorter)) continue;
+        // Length ratio filter: shorter must be >= 50% of longer to avoid false merges
+        if (shorter.length / longer.length < 0.5) continue;
+        // Type compatibility check
+        const groupShorter = normalizedGroups.get(shorter)!;
+        const groupLonger = normalizedGroups.get(longer)!;
+        const typeS = mapEntityType(groupShorter[0].type);
+        const typeL = mapEntityType(groupLonger[0].type);
+        if (typeS !== typeL && !getOntology().areTypesAffine(typeS, typeL)) continue;
+        // Merge shorter into longer (longer name is more specific)
+        groupLonger.push(...groupShorter);
+        normalizedGroups.delete(shorter);
+        if (shorter === keyA) break;
+      }
+    }
+
     // Resolve canonical candidates (best type priority in each group)
     const canonicalResults = new Map<string, ResolutionResult>();
     for (const [, group] of normalizedGroups) {
