@@ -1,6 +1,7 @@
 import type { CBrainDB, InsightRow, CreateInsightInput } from "../storage/sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
+import type { Logger } from "./logger.js";
 
 export { type InsightRow, type CreateInsightInput } from "../storage/sqlite.js";
 
@@ -22,6 +23,7 @@ export class InsightManager {
     private db: CBrainDB,
     private embedding: EmbeddingProvider,
     private lance: LanceDBManager,
+    private logger?: Logger,
   ) {}
 
   private getTtlDays(): number {
@@ -51,7 +53,7 @@ export class InsightManager {
           vector: new Float32Array(embedding),
         });
       } catch (e) {
-        console.error(`[insight] embedding 失败 for insight #${id}:`, e);
+        this.logger?.error("insight", `embedding 失败 for insight #${id}`, { error: e instanceof Error ? e.message : String(e) });
       }
     }
 
@@ -85,7 +87,7 @@ export class InsightManager {
       }
       return rows;
     } catch (e) {
-      console.error("[insight] queryInsights 失败:", e);
+      this.logger?.error("insight", "queryInsights 失败", { error: e instanceof Error ? e.message : String(e) });
       return [];
     }
   }

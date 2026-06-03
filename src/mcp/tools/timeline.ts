@@ -76,7 +76,7 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
 
         ctx.versions.createVersion(slug);
         ctx.pages.update(slug, { body: page.body + entry });
-        await indexPage(ctx.pipeline, slug, page.body + entry);
+        await indexPage(ctx.pipeline, slug, page.body + entry, ctx.logger);
       }
     }
 

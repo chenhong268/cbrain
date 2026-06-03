@@ -1,4 +1,5 @@
 import type { LLMProvider } from "../llm/provider.js";
+import type { Logger } from "./logger.js";
 import { getOntology } from "../ontology/loader.js";
 import { buildEntityPrompt, buildRelationPrompt } from "../ontology/ner-prompt.js";
 
@@ -318,9 +319,11 @@ function mergeFacts(chunks: StructuredFact[][]): StructuredFact[] {
 
 export class NerEngine {
   private llm: LLMProvider;
+  private logger?: Logger;
 
-  constructor(llm: LLMProvider) {
+  constructor(llm: LLMProvider, logger?: Logger) {
     this.llm = llm;
+    this.logger = logger;
   }
 
   get provider(): LLMProvider {
@@ -432,7 +435,7 @@ export class NerEngine {
         facts,
       };
     } catch (e) {
-      console.error("[ner] stage1 JSON 解析失败", e);
+      this.logger?.error("ner", "stage1 JSON 解析失败", { error: e instanceof Error ? e.message : String(e) });
       return { entities: [], events: [], facts: [] };
     }
   }
@@ -444,7 +447,7 @@ export class NerEngine {
       const relations: ExtractedRelation[] = Array.isArray(parsed.relations) ? parsed.relations : [];
       return relations.filter(r => r.relation && validNames.has(r.from) && validNames.has(r.to));
     } catch (e) {
-      console.error("[ner] stage2 JSON 解析失败", e);
+      this.logger?.error("ner", "stage2 JSON 解析失败", { error: e instanceof Error ? e.message : String(e) });
       return [];
     }
   }

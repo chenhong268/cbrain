@@ -117,11 +117,13 @@ export class ReflectManager {
   private db: CBrainDB;
   private llm: LLMProvider | null;
   private insightMgr: InsightManager | null;
+  private logger?: import("./logger.js").Logger;
 
-  constructor(db: CBrainDB, _pageMgr: PageManager, llm?: LLMProvider, _pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager) {
+  constructor(db: CBrainDB, _pageMgr: PageManager, llm?: LLMProvider, _pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager, logger?: import("./logger.js").Logger) {
     this.db = db;
     this.llm = llm ?? null;
     this.insightMgr = insightMgr ?? null;
+    this.logger = logger;
   }
 
   async reflectAll(): Promise<ReflectReport> {
@@ -237,7 +239,7 @@ export class ReflectManager {
                 sourceType: "reflect",
               });
             } catch (e) {
-              console.error(`[reflect] insight 写入失败:`, e);
+              this.logger?.error("reflect", "insight 写入失败", { error: e instanceof Error ? e.message : String(e) });
             }
           }
         }
@@ -293,7 +295,7 @@ export class ReflectManager {
                 sourceType: "reflect",
               });
             } catch (e) {
-              console.error(`[reflect] insight 写入失败:`, e);
+              this.logger?.error("reflect", "insight 写入失败", { error: e instanceof Error ? e.message : String(e) });
             }
           }
         }

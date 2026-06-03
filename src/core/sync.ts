@@ -100,7 +100,7 @@ export class SyncManager {
   async syncAll(vaultPath: string): Promise<SyncReport> {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [], diagnostics: [] };
     try {
-    const mdFiles = await collectMarkdownFiles(vaultPath, new Set(["outputs"]));
+    const mdFiles = await collectMarkdownFiles(vaultPath, new Set(["outputs"]), this.logger ?? undefined);
 
     // Phase 1: detect changed files + batch embed all chunks
     const changed: Array<{ filePath: string; slug: string; title: string; type: string; relPath: string; body: string; contentHash: string; frontmatter: Record<string, unknown> }> = [];

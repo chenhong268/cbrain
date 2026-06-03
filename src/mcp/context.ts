@@ -51,12 +51,12 @@ export interface ToolContext {
   watcher?: FileWatcher;
 }
 
-export async function indexPage(pipeline: ContentPipeline, slug: string, body: string): Promise<void> {
+export async function indexPage(pipeline: ContentPipeline, slug: string, body: string, logger?: Logger): Promise<void> {
   try {
     const { chunks, embedResults } = await pipeline.embed(body);
     await pipeline.writeIndexes(slug, chunks, embedResults);
   } catch (err) {
-    console.error(`indexPageContent failed for ${slug}:`, err);
+    logger?.error("indexPage", `indexing failed for ${slug}`, { error: err instanceof Error ? err.message : String(err) });
   }
 }
 
@@ -66,16 +66,16 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const logger = new Logger(outputsDir);
   const pages = new PageManager(db, vaultPath, logger, lance);
   const search = new HybridSearch(db, embedding, lance, { llm, logger });
-  const nerEngine = llm ? new NerEngine(llm) : undefined;
+  const nerEngine = llm ? new NerEngine(llm, logger) : undefined;
   const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger });
   const ingest = new IngestManager(db, embedding, lance, vaultPath, llm);
   const graph = new GraphManager(db);
   const enrich = new EnrichManager(db, undefined, undefined, vaultPath, pages);
-  const versions = new VersionManager(db, pages, vaultPath);
+  const versions = new VersionManager(db, pages, vaultPath, logger);
   const jobs = new JobQueue(db, logger);
   const writeback = new WritebackManager(pages, db, outputsDir);
   const pipeline = new ContentPipeline(db, embedding, lance, { pages, nerEngine, logger });
-  const insights = new InsightManager(db, embedding, lance);
+  const insights = new InsightManager(db, embedding, lance, logger);
   const learn = new LearnManager(db);
   const profile = new ProfileManager(profileDir ?? join(vaultPath, ".."));
   const provStore = new SqliteProvenanceStore(db.rawDb);

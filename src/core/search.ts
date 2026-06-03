@@ -275,7 +275,7 @@ export class HybridSearch {
             }
           }
         } catch (e) {
-          this.logger?.warn("search", "decomposition 路径失败，fallback 到 expandQuery", { error: String(e) });
+          this.logger?.warn("search", "decomposition 路径失败，fallback 到 expandQuery", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
         }
       }
     }
@@ -291,22 +291,22 @@ export class HybridSearch {
 
     const [vecOrNull, fts, graph, temporal] = await Promise.all([
       this.timedCall(() => vectorPromise, trace, "vector_ms").catch((e) => {
-        this.logger?.warn("search", "vectorSearch 失败", { error: String(e) });
+        this.logger?.warn("search", "vectorSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
         if (trace && !trace.degraded_reason) trace.degraded_reason = "vector_error";
         return null as SearchResult[] | null;
       }),
       this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit)), trace, "fts_ms").catch((e) => {
-        this.logger?.warn("search", "ftsSearch 失败", { error: String(e) });
+        this.logger?.warn("search", "ftsSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
         return [] as SearchResult[];
       }),
       resolved?.slug
         ? this.timedCall(() => this.graphSearch(resolved.slug!, limit), trace, "graph_ms").catch((e) => {
-            this.logger?.warn("search", "graphSearch 失败", { error: String(e) });
+            this.logger?.warn("search", "graphSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
             return [] as SearchResult[];
           })
         : Promise.resolve([] as SearchResult[]),
       this.timedCall(() => Promise.resolve(this.temporalSearch(q, limit)), trace, "temporal_ms").catch((e) => {
-        this.logger?.warn("search", "temporalSearch 失败", { error: String(e) });
+        this.logger?.warn("search", "temporalSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
         return [] as SearchResult[];
       }),
     ]);
@@ -372,7 +372,7 @@ export class HybridSearch {
     if (!this.llm) return this.searchCore(query, options);
     const trace = options._trace;
     const start = Date.now();
-    const researcher = new ResearchManager(this, this.db, this.llm);
+    const researcher = new ResearchManager(this, this.db, this.llm, undefined, this.logger);
     const results = await researcher.research(query, options);
     if (trace) {
       trace.research_ms = Date.now() - start;
@@ -454,7 +454,7 @@ export class HybridSearch {
         context.chains = trimmed;
       }
     } catch (e) {
-      this.logger?.warn("search", "graphPrefetch 失败", { error: String(e) });
+      this.logger?.warn("search", "graphPrefetch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
     }
 
     return context;
@@ -519,7 +519,7 @@ export class HybridSearch {
         .map((sq) => sq.sub_query)
         .filter((q) => typeof q === "string" && q.trim());
     } catch (e) {
-      this.logger?.warn("search", "decomposeQuery 失败", { error: String(e) });
+      this.logger?.warn("search", "decomposeQuery 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
       return [query];
     }
   }
@@ -551,7 +551,7 @@ export class HybridSearch {
       }
       return queries;
     } catch (e) {
-      this.logger?.warn("search", "查询扩展失败", { error: String(e) });
+      this.logger?.warn("search", "查询扩展失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
       return [query];
     }
   }

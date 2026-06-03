@@ -39,6 +39,7 @@ export class ResearchManager {
     private readonly db: CBrainDB,
     private readonly llm?: LLMProvider,
     config?: ResearchConfig,
+    private readonly logger?: import("./logger.js").Logger,
   ) {
     this.maxIterations = config?.maxIterations ?? 3;
     this.maxFollowUpQueries = config?.maxFollowUpQueries ?? 3;
@@ -103,7 +104,7 @@ export class ResearchManager {
             _skipDecompose: true,
             _trace: trace,
           }).catch((e) => {
-            console.error("[research] sub-query failed:", e);
+            this.logger?.error("research", "sub-query failed", { error: e instanceof Error ? e.message : String(e) });
             return [] as SearchResult[];
           })
         )
@@ -280,7 +281,7 @@ export class ResearchManager {
         follow_up_queries: parsed.follow_up_queries ?? [],
       };
     } catch {
-      console.error("[research] reasoning failed, assuming sufficient");
+      this.logger?.error("research", "reasoning failed, assuming sufficient");
       return null;
     }
   }
@@ -324,7 +325,7 @@ export class ResearchManager {
       }
       return reordered;
     } catch {
-      console.error("[research] reranking failed, returning original order");
+      this.logger?.error("research", "reranking failed, returning original order");
       return [...results];
     }
   }

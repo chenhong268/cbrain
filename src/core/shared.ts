@@ -22,14 +22,14 @@ export function hashContent(content: string): string {
 
 // ─── File Collection ─────────────────────────────────────────
 
-export async function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>): Promise<string[]> {
+export async function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>, logger?: import("./logger.js").Logger): Promise<string[]> {
   const results: string[] = [];
   const walk = async (d: string) => {
     // biome-ignore lint/suspicious/noImplicitAnyLet: readdir return type varies by runtime
     let entries;
     try { entries = await readdir(d, { withFileTypes: true }); } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "EACCES") {
-        console.error(`[shared] readdir 失败: ${d}`, e);
+        logger?.error("shared", `readdir 失败: ${d}`, { error: e instanceof Error ? e.message : String(e) });
       }
       return;
     }

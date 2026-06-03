@@ -84,7 +84,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       ctx.versions.createVersion(slug); // snapshot before update
       const updated = ctx.pages.update(slug, { body: content, tags });
       if (updated) {
-        await indexPage(ctx.pipeline, slug, content);
+        await indexPage(ctx.pipeline, slug, content, ctx.logger);
         const pageType = existing.type;
         const wlResult = ctx.pipeline.processWikilinks(slug, content);
         if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
@@ -118,7 +118,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       return { content: [{ type: "text", text: JSON.stringify({ error: "title is required for new pages" }) }] };
     }
     const created = ctx.pages.create({ slug, title, type: type ?? "record", body: content, tags });
-    await indexPage(ctx.pipeline, created.slug, content);
+    await indexPage(ctx.pipeline, created.slug, content, ctx.logger);
     const pageType = created.type;
     const wlResult = ctx.pipeline.processWikilinks(created.slug, content);
     if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
@@ -147,7 +147,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     const newBody = page.body + (separator ?? "\n\n") + content;
     const updated = ctx.pages.update(slug, { body: newBody });
     if (updated) {
-      await indexPage(ctx.pipeline, slug, newBody);
+      await indexPage(ctx.pipeline, slug, newBody, ctx.logger);
       const pageType = updated.type;
       const wlResult = ctx.pipeline.processWikilinks(slug, newBody);
       if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {

@@ -19,8 +19,9 @@ export class Logger {
     mkdirSync(this.logDir, { recursive: true });
   }
 
+  /** Info-level log. In-memory only — not persisted to disk. Keeps log files lean. */
   info(_module: string, _message: string, _details?: Record<string, unknown>): void {
-    // info only stays in memory, not persisted — keeps logs lean
+    // intentionally empty: info logs are not persisted
   }
 
   warn(module: string, message: string, details?: Record<string, unknown>): void {
@@ -79,6 +80,10 @@ export class Logger {
 
     const row = `| ${time} | ${icon} | ${entry.module} | ${entry.message} | ${details} |\n`;
     appendFileSync(logFile, row, "utf-8");
-    } catch { /* log dir may not be writable in test environments */ }
+    } catch (err) {
+      // Fallback: if Logger itself can't write, at least warn on console
+      // (disk full / permission denied should not be completely silent)
+      console.error("[Logger] write failed:", err instanceof Error ? err.message : String(err));
+    }
   }
 }

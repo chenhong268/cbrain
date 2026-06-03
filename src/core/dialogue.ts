@@ -4,6 +4,7 @@ import { CBrainDB } from "../storage/sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
+import type { Logger } from "./logger.js";
 import {
   ExtractionResult,
   StructuredFact,
@@ -106,17 +107,20 @@ export class DialogueIngest {
   private db: CBrainDB;
   private vaultPath: string;
   private llm?: LLMProvider;
+  private logger?: Logger;
 
   constructor(
     db: CBrainDB,
     _embedding: EmbeddingProvider,
     _lance: LanceDBManager,
     vaultPath: string,
-    llm?: LLMProvider
+    llm?: LLMProvider,
+    logger?: Logger
   ) {
     this.db = db;
     this.vaultPath = vaultPath;
     this.llm = llm;
+    this.logger = logger;
   }
 
   async ingest(text: string, mode: DialogueMode = "manual", sessionId?: string): Promise<DialogueIngestResult> {
@@ -134,7 +138,7 @@ export class DialogueIngest {
         { role: "user", content: truncated },
       ]);
     } catch (e) {
-      console.error("[dialogue] LLM 调用失败", e);
+      this.logger?.error("dialogue", "LLM 调用失败", { error: e instanceof Error ? e.message : String(e) });
       return { ...empty, reason: "llm error" };
     }
 
@@ -174,7 +178,7 @@ export class DialogueIngest {
         filtered: [],
       };
     } catch (e) {
-      console.error("[dialogue] LLM 响应 JSON 解析失败", e);
+      this.logger?.error("dialogue", "LLM 响应 JSON 解析失败", { error: e instanceof Error ? e.message : String(e) });
       return null;
     }
   }

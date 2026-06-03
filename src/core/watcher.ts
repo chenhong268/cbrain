@@ -134,7 +134,7 @@ export class FileWatcher {
   private async doScan(): Promise<void> {
     // Reload quarantine from DB so external releases (e.g. MCP in another process) take effect
     this.syncQuarantineFromDb();
-    const files = await collectMarkdownFiles(this.vaultPath, new Set(["outputs"]));
+    const files = await collectMarkdownFiles(this.vaultPath, new Set(["outputs"]), this.logger);
     const seen = new Set<string>();
     const changed: PendingSync[] = [];
 

@@ -33,7 +33,7 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
       sessionId: z.string().max(200).describe("Session/conversation identifier for provenance tracking (required: channel/thread ID or unique conversation ID)"),
     },
   }, async ({ text, mode, sessionId }) => {
-    const dialogue = new DialogueIngest(ctx.db, ctx.embedding, ctx.lance, ctx.vaultPath, ctx.llm);
+    const dialogue = new DialogueIngest(ctx.db, ctx.embedding, ctx.lance, ctx.vaultPath, ctx.llm, ctx.logger);
     const result = await dialogue.ingest(text, (mode ?? "manual") as DialogueMode, sessionId);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

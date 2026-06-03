@@ -270,10 +270,10 @@ export function register(program: Command) {
       const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
-      const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
+      const nerEngine = deps.llm ? new NerEngine(deps.llm, logger) : undefined;
       const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath, pages);
-      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
+      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
       const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
         deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined,
@@ -324,8 +324,8 @@ export function register(program: Command) {
 
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
-      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
-      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr);
+      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
+      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr, logger);
       console.log("🧠 Reflecting...");
       const report = await mgr.reflectAll();
 
@@ -377,8 +377,8 @@ export function register(program: Command) {
 
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
-      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance);
-      const reflect = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr);
+      const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
+      const reflect = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr, logger);
       console.log("🔍 Running discovery (structural)...");
       const reflectReport = await reflect.runDiscovery();
 
@@ -435,7 +435,7 @@ export function register(program: Command) {
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const { ReflectManager } = await import("../../core/reflect.js");
-      const mgr = new ReflectManager(deps.db, pages, undefined, undefined, deps.embedding);
+      const mgr = new ReflectManager(deps.db, pages, undefined, undefined, deps.embedding, undefined, logger);
       const report = await mgr.diagnoseCandidates();
 
       console.log("\n=== 候选池诊断 ===\n");

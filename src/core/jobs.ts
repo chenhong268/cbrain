@@ -70,7 +70,7 @@ export class JobQueue {
   /** Start background work loop. Returns immediately; runs until stop(). */
   start(): void {
     if (this.running) return;
-    this.work(2000).catch(e => this.logger?.error("jobs", "work loop crashed", { error: String(e) }));
+    this.work(2000).catch(e => this.logger?.error("jobs", "work loop crashed", { error: e instanceof Error ? e.stack ?? e.message : String(e) }));
   }
 
   stop(): void {

@@ -18,11 +18,13 @@ export class VersionManager {
   private db: CBrainDB;
   private pages: PageManager;
   private vaultPath: string;
+  private logger?: import("./logger.js").Logger;
 
-  constructor(db: CBrainDB, pages: PageManager, vaultPath: string) {
+  constructor(db: CBrainDB, pages: PageManager, vaultPath: string, logger?: import("./logger.js").Logger) {
     this.db = db;
     this.pages = pages;
     this.vaultPath = vaultPath;
+    this.logger = logger;
   }
 
   createVersion(slug: string): number | null {
@@ -62,7 +64,7 @@ export class VersionManager {
       try {
         fm = JSON.parse(ver.frontmatter);
       } catch (e) {
-        console.error("[version] frontmatter JSON 解析失败，保留现有值", { slug, error: String(e) });
+        this.logger?.error("version", "frontmatter JSON 解析失败，保留现有值", { slug, error: e instanceof Error ? e.message : String(e) });
       }
     }
     fm = { ...fm, updated_at: new Date().toISOString() };
