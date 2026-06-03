@@ -298,6 +298,32 @@ describe("SyncManager", () => {
       const skipHash = db.getConfig("sync.skip.records/renwu-a-note");
       expect(skipHash).not.toBeNull();
     });
+
+    test("rejects path traversal in frontmatter slug", async () => {
+      writeMdFile(
+        vaultPath,
+        "records/malicious.md",
+        { title: "Evil", type: "record", slug: "../../etc/passwd" },
+        "malicious content",
+      );
+
+      const result = await sync.syncPage("records/malicious", vaultPath);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid slug");
+    });
+
+    test("rejects absolute path in frontmatter slug", async () => {
+      writeMdFile(
+        vaultPath,
+        "records/abs-path.md",
+        { title: "AbsPath", type: "record", slug: "/etc/passwd" },
+        "absolute path content",
+      );
+
+      const result = await sync.syncPage("records/abs-path", vaultPath);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Invalid slug");
+    });
   });
 
   describe("removeOrphans", () => {

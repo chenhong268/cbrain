@@ -339,14 +339,17 @@ export class SyncManager {
       content = await readFile(fullPath, "utf-8");
     } catch (e) {
       this.logger?.warn("sync", "文件读取失败", { path: fullPath, error: String(e) });
-      return { success: false, error: `File not found: ${fullPath}` };
+      return { success: false, error: `File not found: ${slug}` };
     }
     const parsed = parseFrontmatter(content);
 
     let effectiveSlug = parsed.frontmatter.slug ?? slug;
 
     if (!effectiveSlug && !filePath) {
-      return { success: false, error: `No slug found and page not indexed: ${fullPath}` };
+      return { success: false, error: `No slug found and page not indexed: ${slug}` };
+    }
+    if (effectiveSlug.includes("..") || effectiveSlug.startsWith("/")) {
+      return { success: false, error: "Invalid slug" };
     }
     const contentHash = hashContent(content);
 
