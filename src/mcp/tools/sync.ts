@@ -7,7 +7,7 @@ export function registerSyncTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("sync", {
     description: "Sync vault files to SQLite + LanceDB indexes.",
     inputSchema: {
-      slug: z.string().optional().describe("Sync a single page by slug (omit for full sync)"),
+      slug: z.string().max(500).optional().describe("Sync a single page by slug (omit for full sync)"),
     },
   }, async ({ slug }) => {
     if (slug) {

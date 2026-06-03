@@ -9,7 +9,7 @@ export function registerExpandTools(server: McpServer, ctx: ToolContext): void {
       "tags, related entities, and insights. Use this after deep_recall or summarize " +
       "when a stub entity looks relevant and you need the full picture.",
     inputSchema: {
-      slug: z.string().describe("Entity slug to expand"),
+      slug: z.string().max(500).describe("Entity slug to expand"),
       includeBody: z.boolean().optional().default(true).describe("Include full page body"),
       includeLinks: z.boolean().optional().default(true).describe("Include all links with full context"),
       includeTimeline: z.boolean().optional().default(true).describe("Include all timeline events"),

@@ -22,9 +22,9 @@ export function registerArtifactTools(server: McpServer, ctx: ToolContext): void
         "导出 grounded recall 或 agentic research 结果为本地 HTML artifact。" +
         "仅在用户明确要求导出/保存/分享时调用。不执行新的检索。",
       inputSchema: {
-        result_json: z.string().describe("JSON stringified result from deep_recall(grounded) or agentic_research"),
-        title: z.string().optional().describe("Artifact 标题（默认使用查询文本）"),
-        filename: z.string().optional().describe("输出文件名（默认 artifact-{timestamp}.html）"),
+        result_json: z.string().max(1_000_000).describe("JSON stringified result from deep_recall(grounded) or agentic_research"),
+        title: z.string().max(500).optional().describe("Artifact 标题（默认使用查询文本）"),
+        filename: z.string().max(200).optional().describe("输出文件名（默认 artifact-{timestamp}.html）"),
         privacy_reviewed: z.boolean().optional().default(false).describe("确认已做隐私审查（含社交/情境内容时必填）"),
         include_social_context: z.boolean().optional().default(false).describe("包含 user_thoughts 等社交情境内容"),
         anonymize: z.boolean().optional().default(false).describe("仅匿名来源标识（slug→实体A/来源A），不保证正文内容脱敏"),

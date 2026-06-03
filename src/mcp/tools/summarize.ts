@@ -15,7 +15,7 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
       "'XX 和 YY 之间有没有我没注意到的联系'。" +
       "与 deep_recall 的区别：recall 查具体实体，explore_topic 发现领域的拓扑结构。",
     inputSchema: {
-      topic: z.string().describe("Topic or keyword to summarize"),
+      topic: z.string().max(1000).describe("Topic or keyword to summarize"),
       limit: z.number().optional().default(5).describe("Max entities to include (capped at 10)"),
       depth: z.number().optional().default(1).describe("Graph traversal depth (0=no traversal, 1=direct neighbors, 2=two-hop)"),
       minWeight: z.number().optional().default(0).describe("Minimum link weight for traversal (0.5 = only strong relations)"),

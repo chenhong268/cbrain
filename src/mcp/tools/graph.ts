@@ -8,13 +8,13 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("graph_query", {
     description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved). Links include source_type (wikilink=human, manual=human explicit input, agent=agent inference, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
     inputSchema: {
-      slug: z.string().describe("Seed entity slug or name (auto-resolved if not an exact slug)"),
+      slug: z.string().max(500).describe("Seed entity slug or name (auto-resolved if not an exact slug)"),
       mode: z.enum(["traverse", "backlinks", "related"]).optional().default("traverse").describe("Query mode"),
       depth: z.number().optional().default(2).describe("Max traversal depth"),
       limit: z.number().optional().default(20).describe("Max results"),
       minWeight: z.number().optional().describe("Minimum link weight (0-1). Higher = stronger links only."),
-      source_type: z.string().optional().describe("Filter links by source type: wikilink, manual, ner, dialogue, writeback, unknown"),
-      session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
+      source_type: z.string().max(100).optional().describe("Filter links by source type: wikilink, manual, ner, dialogue, writeback, unknown"),
+      session_id: z.string().max(200).optional().describe("Current conversation session ID for co-occurrence tracking"),
     },
   }, async ({ slug, mode, depth, limit, minWeight, source_type, session_id }) => {
     const graphStart = Date.now();
@@ -69,7 +69,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("get_links", {
     description: "Get links for a page. Returns outgoing, incoming, or both directions. Links include source_type (wikilink=human, manual=human explicit input, agent=agent inference, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
+      slug: z.string().max(500).describe("Page slug"),
       direction: z.enum(["outgoing", "incoming", "both"]).optional().default("both").describe("Link direction"),
     },
   }, async ({ slug, direction }) => {
@@ -83,10 +83,10 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("add_link", {
     description: "Create a link between two pages. Links created via this tool are marked as source_type=agent (agent_inference) with confidence=0.9. To mark a link as user-confirmed, use confirm_evidence after creation.",
     inputSchema: {
-      from: z.string().describe("Source page slug"),
-      to: z.string().describe("Target page slug"),
-      relation: z.string().default("提及").describe("Relation type (e.g. '提及', 'works_at')"),
-      context: z.string().optional().describe("Optional context for the relation"),
+      from: z.string().max(500).describe("Source page slug"),
+      to: z.string().max(500).describe("Target page slug"),
+      relation: z.string().max(100).default("提及").describe("Relation type (e.g. '提及', 'works_at')"),
+      context: z.string().max(10_000).optional().describe("Optional context for the relation"),
       weight: z.number().optional().describe("Link weight 0-1. Auto-assigned if omitted."),
       strength: z.enum(["strong", "medium", "weak"]).optional().describe("Link strength. Auto-assigned if omitted."),
     },
@@ -109,9 +109,9 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("remove_link", {
     description: "Remove a link between two pages.",
     inputSchema: {
-      from: z.string().describe("Source page slug"),
-      to: z.string().describe("Target page slug"),
-      relation: z.string().optional().describe("Relation type (omit to remove all relations between the two)"),
+      from: z.string().max(500).describe("Source page slug"),
+      to: z.string().max(500).describe("Target page slug"),
+      relation: z.string().max(100).optional().describe("Relation type (omit to remove all relations between the two)"),
     },
   }, async ({ from, to, relation }) => {
     const ok = ctx.graph.removeLink(from, to, relation);

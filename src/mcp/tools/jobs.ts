@@ -7,7 +7,7 @@ export function registerJobTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("job_submit", {
     description: "Submit a new job to the queue",
     inputSchema: {
-      name: z.string().describe("Job name (e.g. sync, embed, ner)"),
+      name: z.string().max(200).describe("Job name (e.g. sync, embed, ner)"),
       data: z.any().optional().describe("Job payload"),
       priority: z.number().optional().describe("Priority (higher = sooner)"),
     },
@@ -22,7 +22,7 @@ export function registerJobTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("job_list", {
     description: "List jobs, optionally filtered by status",
     inputSchema: {
-      status: z.string().optional().describe("Filter by status: pending, running, done, failed, cancelled"),
+      status: z.string().max(50).optional().describe("Filter by status: pending, running, done, failed, cancelled"),
     },
   }, async ({ status }) => {
     const list = ctx.jobs.list(status);

@@ -7,7 +7,7 @@ export function registerTagTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("get_tags", {
     description: "Get all tags for a page.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
+      slug: z.string().max(500).describe("Page slug"),
     },
   }, async ({ slug }) => {
     const dbTags = ctx.db.getTags(slug);
@@ -23,8 +23,8 @@ export function registerTagTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("add_tag", {
     description: "Add a tag to a page. Updates both the database and the vault file frontmatter.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
-      tag: z.string().describe("Tag to add"),
+      slug: z.string().max(500).describe("Page slug"),
+      tag: z.string().max(200).describe("Tag to add"),
     },
   }, async ({ slug, tag }) => {
     const dbRow = ctx.db.getPage(slug);
@@ -52,8 +52,8 @@ export function registerTagTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("remove_tag", {
     description: "Remove a tag from a page. Updates both the database and the vault file frontmatter.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
-      tag: z.string().describe("Tag to remove"),
+      slug: z.string().max(500).describe("Page slug"),
+      tag: z.string().max(200).describe("Tag to remove"),
     },
   }, async ({ slug, tag }) => {
     const dbRow = ctx.db.getPage(slug);

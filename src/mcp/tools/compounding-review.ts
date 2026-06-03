@@ -31,7 +31,7 @@ export function registerCompoundingReviewTools(server: McpServer, ctx: ToolConte
     inputSchema: {
       id: z.number().describe("候选 ID"),
       action: z.enum(["accept", "reject", "defer", "disable"]).describe("操作类型"),
-      note: z.string().optional().describe("可选备注"),
+      note: z.string().max(10_000).optional().describe("可选备注"),
     },
   }, async ({ id, action, note }) => {
     const ok = ctx.compoundingReview.transitionStatus(id, action, note);

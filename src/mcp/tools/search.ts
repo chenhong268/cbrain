@@ -18,7 +18,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       limit: z.number().optional().default(10).describe("Max results"),
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
-      session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
+      session_id: z.string().max(200).optional().describe("Current conversation session ID for co-occurrence tracking"),
       multiStep: z.boolean().optional().default(false)
         .describe("多轮深度搜索：自动判断结果充分性、换策略重试、LLM重排序。开启条件：查询模糊/跨领域、首次结果不满意、需要全面覆盖时。精确查单个关键词不需要开。"),
     },
@@ -133,7 +133,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("get_chunks", {
     description: "Get indexed text chunks for a page.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
+      slug: z.string().max(500).describe("Page slug"),
     },
   }, async ({ slug }) => {
     const chunks = ctx.db.getChunksByPage(slug);

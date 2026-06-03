@@ -11,7 +11,7 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
       "Delete multiple pages in one call. Each slug is deleted with vault cleanup + DB cascade. " +
       "Use this instead of calling delete_page N times for bulk cleanup.",
     inputSchema: {
-      slugs: z.array(z.string()).min(1).max(100).describe("Array of page slugs to delete (max 100)"),
+      slugs: z.array(z.string().max(500)).min(1).max(100).describe("Array of page slugs to delete (max 100)"),
     },
   }, async ({ slugs }) => {
     const results: { slug: string; success: boolean; error?: string }[] = [];
@@ -48,8 +48,8 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
       links: z.array(z.object({
         from: z.string().max(500).describe("Source page slug"),
         to: z.string().max(500).describe("Target page slug"),
-        relation: z.string().default("提及").describe("Relation type"),
-        context: z.string().optional().describe("Optional context"),
+        relation: z.string().max(100).default("提及").describe("Relation type"),
+        context: z.string().max(10_000).optional().describe("Optional context"),
         weight: z.number().optional().describe("Link weight 0-1"),
         strength: z.enum(["strong", "medium", "weak"]).optional().describe("Link strength"),
       })).min(1).max(100).describe("Array of links to create (max 100)"),

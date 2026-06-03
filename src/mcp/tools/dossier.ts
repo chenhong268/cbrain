@@ -14,7 +14,7 @@ export function registerDossierTools(server: McpServer, ctx: ToolContext): void 
       "and credibility evaluation. Results are cached in the page body and auto-refreshed after " +
       `${DEFAULT_MAX_AGE_DAYS} days. Use force=true to regenerate.`,
     inputSchema: {
-      slug: z.string().describe("Entity slug (e.g. entity/zhang-san)"),
+      slug: z.string().max(500).describe("Entity slug (e.g. entity/zhang-san)"),
       force: z.boolean().optional().default(false)
         .describe("Force regeneration even if cached dossier is fresh"),
     },

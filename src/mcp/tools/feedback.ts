@@ -8,11 +8,11 @@ export function registerFeedbackTools(server: McpServer, ctx: ToolContext): void
       "Record feedback on recall/search results. After using recall or search, report which results were useful or not. " +
       "This helps CBrain learn from usage patterns — relevant results get boosted, irrelevant ones decay over time.",
     inputSchema: {
-      query: z.string().describe("The original query that produced these results"),
-      relevant_slugs: z.array(z.string()).optional().describe("Slugs that were useful/relevant"),
-      irrelevant_slugs: z.array(z.string()).optional().describe("Slugs that were not useful"),
-      expanded_slugs: z.array(z.string()).optional().describe("Slugs that led to useful exploration (divergent discovery)"),
-      note: z.string().optional().describe("Optional context about the feedback"),
+      query: z.string().max(1000).describe("The original query that produced these results"),
+      relevant_slugs: z.array(z.string().max(500)).optional().describe("Slugs that were useful/relevant"),
+      irrelevant_slugs: z.array(z.string().max(500)).optional().describe("Slugs that were not useful"),
+      expanded_slugs: z.array(z.string().max(500)).optional().describe("Slugs that led to useful exploration (divergent discovery)"),
+      note: z.string().max(10_000).optional().describe("Optional context about the feedback"),
     },
   }, async ({ query, relevant_slugs, irrelevant_slugs, expanded_slugs, note }) => {
     let recorded = 0;

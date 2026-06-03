@@ -12,8 +12,8 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
       scope: z.enum(["open", "scoped", "private"]).optional().describe("Privacy scope filter"),
       category: z.enum(["communication", "work", "health", "finance", "interests", "general"]).optional().describe("Category filter"),
       type: z.enum(["preference", "constraint", "context", "habit"]).optional().describe("Entry type filter"),
-      tags: z.array(z.string()).optional().describe("Tag filter (entries matching any tag)"),
-      ids: z.array(z.string()).optional().describe("Specific entry IDs to retrieve"),
+      tags: z.array(z.string().max(200)).optional().describe("Tag filter (entries matching any tag)"),
+      ids: z.array(z.string().max(200)).optional().describe("Specific entry IDs to retrieve"),
     },
   }, async ({ scope, category, type, tags, ids }) => {
     const filter = { scope, category, type, tags, ids };
@@ -46,15 +46,15 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
       "Automatically sets updated_at timestamp.",
     inputSchema: {
       entries: z.array(z.object({
-        id: z.string().describe("Unique entry identifier (kebab-case)"),
+        id: z.string().max(200).describe("Unique entry identifier (kebab-case)"),
         type: z.enum(["preference", "constraint", "context", "habit"]).describe("Entry type"),
         category: z.enum(["communication", "work", "health", "finance", "interests", "general"]).describe("Category"),
         scope: z.enum(["open", "scoped", "private"]).describe("Privacy scope"),
-        agents: z.array(z.string()).optional().describe("Visible agents (for scoped entries)"),
-        content: z.string().describe("The profile content"),
+        agents: z.array(z.string().max(200)).optional().describe("Visible agents (for scoped entries)"),
+        content: z.string().max(50_000).describe("The profile content"),
         priority: z.enum(["high", "normal"]).optional().describe("Priority (mainly for constraints)"),
         source: z.enum(["explicit", "observed", "inferred"]).default("observed").describe("How this was learned"),
-        tags: z.array(z.string()).optional().describe("Tags for categorization"),
+        tags: z.array(z.string().max(200)).optional().describe("Tags for categorization"),
       })).describe("Entries to create or update"),
     },
   }, async ({ entries }) => {
@@ -75,7 +75,7 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
       "Remove profile entries by ID. Use when the user explicitly asks to remove a preference " +
       "or when an entry is confirmed outdated.",
     inputSchema: {
-      ids: z.array(z.string()).describe("Entry IDs to remove"),
+      ids: z.array(z.string().max(200)).describe("Entry IDs to remove"),
     },
   }, async ({ ids }) => {
     const removed = ctx.profile.removeEntries(ids);

@@ -41,14 +41,14 @@ export function registerAgenticResearchTools(server: McpServer, ctx: ToolContext
         "适用于复杂查询需要多步推理、交叉验证的场景。简单查询仍用 query/deep_recall。" +
         "返回结构化研究结果：状态(ok/partial/degraded/insufficient)、证据板、来源、置信度。",
       inputSchema: {
-        query: z.string().describe("研究问题"),
+        query: z.string().max(1000).describe("研究问题"),
         detail: z
           .enum(["brief", "normal", "full"])
           .optional()
           .default("normal")
           .describe("研究深度：brief=快速, normal=标准, full=深度"),
         known_slugs: z
-          .array(z.string())
+          .array(z.string().max(500))
           .optional()
           .describe("已知实体 slug 列表，帮助规划器定向搜索"),
         intent_hint: z

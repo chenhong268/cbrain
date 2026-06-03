@@ -75,7 +75,7 @@ export function registerProvenanceTools(server: McpServer, ctx: ToolContext): vo
       target_type: z.enum(["link", "timeline"]).describe("目标类型"),
       target_id: z.number().describe("目标 ID"),
       new_state: z.enum(["candidate", "rejected", "superseded"]).describe("新信任状态（只能降级或纠正）"),
-      reason: z.string().describe("状态变更原因（必填：为何改变信任状态）"),
+      reason: z.string().max(2000).describe("状态变更原因（必填：为何改变信任状态）"),
     },
     async ({ target_type, target_id, new_state, reason }) => {
       const sourceCategory = (TRUST_TRANSITION_CATEGORY[new_state] ?? "correction") as SourceCategory;
@@ -101,8 +101,8 @@ export function registerProvenanceTools(server: McpServer, ctx: ToolContext): vo
     {
       target_type: z.enum(["link", "timeline"]).describe("目标类型"),
       target_id: z.number().describe("目标 ID"),
-      confirmation_record_slug: z.string().describe("确认来源页面的 slug（必须存在于 vault 中，如对话记录页、笔记页）"),
-      excerpt: z.string().min(10).describe("确认来源页面中的原文片段（至少10字，用于审计追踪）"),
+      confirmation_record_slug: z.string().max(500).describe("确认来源页面的 slug（必须存在于 vault 中，如对话记录页、笔记页）"),
+      excerpt: z.string().min(10).max(10_000).describe("确认来源页面中的原文片段（至少10字，用于审计追踪）"),
       new_state: z.enum(["trusted", "user_thought"]).optional().default("trusted").describe("确认后的信任状态，默认 trusted"),
     },
     async ({ target_type, target_id, confirmation_record_slug, excerpt, new_state }) => {

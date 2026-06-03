@@ -9,7 +9,7 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
   server.registerTool("get_timeline", {
     description: "Get timeline entries for a page.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
+      slug: z.string().max(500).describe("Page slug"),
     },
   }, async ({ slug }) => {
     const entries = ctx.db.getTimeline(slug);
@@ -57,10 +57,10 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
   server.registerTool("add_timeline_entry", {
     description: "Add a timeline entry to a page.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
-      summary: z.string().describe("Timeline event summary"),
-      eventDate: z.string().optional().describe("Event date (ISO format)"),
-      source: z.string().optional().describe("Source of this event"),
+      slug: z.string().max(500).describe("Page slug"),
+      summary: z.string().max(2000).describe("Timeline event summary"),
+      eventDate: z.string().max(50).optional().describe("Event date (ISO format)"),
+      source: z.string().max(500).optional().describe("Source of this event"),
     },
   }, async ({ slug, summary, eventDate, source }) => {
     const id = ctx.db.addTimelineEntry(slug, summary, eventDate, source);

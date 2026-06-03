@@ -12,29 +12,35 @@ export function registerEpisodeTools(server: McpServer, ctx: ToolContext): void 
         "触发信号：'见过谁'、'认识谁'、'那个人是谁'、'叫什么来着'、'去年团建见过谁'、'在XX认识的那个'。" +
         "与 query/deep_recall 的区别：用户不记得人名，靠情境线索（时间/地点/事件/主题/关系）找人，返回候选人列表而非全文。",
       inputSchema: {
-        query: z.string().describe("用户的自然语言问题，例如'去年团建见过谁'"),
+        query: z.string().max(1000).describe("用户的自然语言问题，例如'去年团建见过谁'"),
         time_hint: z
           .string()
+          .max(500)
           .optional()
           .describe("时间线索，如'2024年'、'去年'、'上个月'"),
         topic_hint: z
           .string()
+          .max(500)
           .optional()
           .describe("主题线索，如'前端开发'、'项目管理'"),
         context_hint: z
           .string()
+          .max(500)
           .optional()
           .describe("场景线索，如'团建'、'聚餐'、'技术分享'"),
         connection_hint: z
           .string()
+          .max(500)
           .optional()
           .describe("关系线索，如'人物A的同事'、'组织E的人'"),
         event_hint: z
           .string()
+          .max(500)
           .optional()
           .describe("事件线索，如'项目上线'、'团队聚餐'"),
         relation_hint: z
           .string()
+          .max(500)
           .optional()
           .describe("关系线索（与connection_hint同义），如'人物A的同事'"),
         limit: z

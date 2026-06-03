@@ -18,7 +18,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("get_page", {
     description: "Get a page by slug. Returns frontmatter + body.",
     inputSchema: {
-      slug: z.string().describe("Page slug (e.g. brain/entities/zhangsan)"),
+      slug: z.string().max(500).describe("Page slug (e.g. brain/entities/zhangsan)"),
       include_full_body: z.boolean().optional().default(false).describe("Return full body instead of truncated (default: truncated to 1500 chars)"),
     },
   }, async ({ slug, include_full_body }) => {
@@ -57,7 +57,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("list_pages", {
     description: "List pages in the brain. Optional type filter.",
     inputSchema: {
-      type: z.string().optional().describe("Filter by type"),
+      type: z.string().max(200).optional().describe("Filter by type"),
       limit: z.number().optional().default(20).describe("Max results"),
       offset: z.number().optional().default(0).describe("Offset for pagination"),
     },
@@ -72,11 +72,11 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("put_page", {
     description: "Create or update a page. If the slug exists, updates it; otherwise creates a new page.",
     inputSchema: {
-      slug: z.string().describe("Page slug (e.g. brain/entities/zhangsan)"),
-      content: z.string().describe("Page body content (markdown)"),
-      title: z.string().optional().describe("Page title (required for new pages)"),
-      type: z.string().optional().default("record").describe("Page type (required for new pages)"),
-      tags: z.array(z.string()).optional().describe("Tags to apply"),
+      slug: z.string().max(500).describe("Page slug (e.g. brain/entities/zhangsan)"),
+      content: z.string().max(500_000).describe("Page body content (markdown)"),
+      title: z.string().max(500).optional().describe("Page title (required for new pages)"),
+      type: z.string().max(200).optional().default("record").describe("Page type (required for new pages)"),
+      tags: z.array(z.string().max(200)).optional().describe("Tags to apply"),
     },
   }, async ({ slug, content, title, type, tags }) => {
     const existing = ctx.pages.getBySlug(slug);
@@ -134,9 +134,9 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("append_page", {
     description: "Append content to an existing page's body. Does NOT overwrite existing content. Triggers re-index and NER/wikilink extraction.",
     inputSchema: {
-      slug: z.string().describe("Page slug to append to"),
-      content: z.string().describe("Content to append"),
-      separator: z.string().optional().default("\n\n").describe("Separator between existing body and new content (default: double newline)"),
+      slug: z.string().max(500).describe("Page slug to append to"),
+      content: z.string().max(500_000).describe("Content to append"),
+      separator: z.string().max(50).optional().default("\n\n").describe("Separator between existing body and new content (default: double newline)"),
     },
   }, async ({ slug, content, separator }) => {
     const page = ctx.pages.getBySlug(slug);
@@ -164,7 +164,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("delete_page", {
     description: "Delete a page by slug. Removes both the vault file and database entry.",
     inputSchema: {
-      slug: z.string().describe("Page slug to delete"),
+      slug: z.string().max(500).describe("Page slug to delete"),
     },
   }, async ({ slug }) => {
     const success = await ctx.pages.delete(slug);
@@ -177,7 +177,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("resolve_slugs", {
     description: "Resolve page titles or partial names to slugs. Returns best match for each query.",
     inputSchema: {
-      queries: z.array(z.string()).describe("List of page names or slugs to resolve"),
+      queries: z.array(z.string().max(500)).describe("List of page names or slugs to resolve"),
     },
   }, async ({ queries }) => {
     const results = ctx.db.resolveSlugs(queries);
@@ -190,8 +190,8 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("merge_pages", {
     description: "Merge a source page into a target page. All links, timeline entries, tags and raw data are moved from source to target. Source body is appended to target body. Source page is deleted after merge. Use dryRun=true to preview without executing.",
     inputSchema: {
-      source: z.string().describe("Slug of the source page to merge and delete"),
-      target: z.string().describe("Slug of the target page to merge into"),
+      source: z.string().max(500).describe("Slug of the source page to merge and delete"),
+      target: z.string().max(500).describe("Slug of the target page to merge into"),
       dryRun: z.boolean().optional().default(false).describe("Preview merge without executing"),
     },
   }, async ({ source, target, dryRun }) => {
@@ -258,8 +258,8 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("add_alias", {
     description: "Add an alias to a page. NER will resolve the alias to this page instead of creating a new entity.",
     inputSchema: {
-      slug: z.string().describe("Page slug to add alias to"),
-      alias: z.string().describe("Alias name (e.g. a person's alternative name)"),
+      slug: z.string().max(500).describe("Page slug to add alias to"),
+      alias: z.string().max(500).describe("Alias name (e.g. a person's alternative name)"),
     },
   }, async ({ slug, alias }) => {
     const page = ctx.db.getPage(slug);
@@ -274,8 +274,8 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("remove_alias", {
     description: "Remove an alias from a page.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
-      alias: z.string().describe("Alias to remove"),
+      slug: z.string().max(500).describe("Page slug"),
+      alias: z.string().max(500).describe("Alias to remove"),
     },
   }, async ({ slug, alias }) => {
     ctx.db.removeAlias(slug, alias);

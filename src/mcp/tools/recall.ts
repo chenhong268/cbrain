@@ -48,11 +48,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       "普通 recall：默认不展示 proactive_hints。只有 hint 直接改变当前问题判断时，写成一句'另有一条后续变化可能影响这个判断'，禁止展开。" +
       "禁止使用'💡 主动提示'标题。禁止逐条列出 hints。禁止展开 hint 细节。",
     inputSchema: {
-      query: z.string().describe("Search query"),
+      query: z.string().max(1000).describe("Search query"),
       limit: z.number().optional().default(5).describe("Max entities to recall (capped at 5, only top results are fully enriched)"),
       strategy: z.enum(["smart", "fts", "vector", "all"]).optional().default("smart")
         .describe("smart=FTS first, fallback to hybrid if empty (fastest); fts=FTS only; vector=embedding search; all=full hybrid (slowest)"),
-      session_id: z.string().optional().describe("Current conversation session ID for co-occurrence tracking"),
+      session_id: z.string().max(200).optional().describe("Current conversation session ID for co-occurrence tracking"),
       detail: z.enum(["normal", "brief"]).optional().default("brief")
         .describe("brief=compact view (default, 200-char body, no dossier/peers/subordinates); normal=full context with all enrichment"),
       multiStep: z.boolean().optional().default(false)

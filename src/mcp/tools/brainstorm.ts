@@ -14,8 +14,8 @@ export function registerBrainstormTools(server: McpServer, ctx: ToolContext): vo
       "cross-domain synthesis. " +
       "Do NOT use for: simple entity lookup, fact retrieval, listing related items (use search/query for those).",
     inputSchema: {
-      query: z.string().describe("The question or topic to think about"),
-      context: z.string().optional().describe("Additional context (role, situation, background)"),
+      query: z.string().max(1000).describe("The question or topic to think about"),
+      context: z.string().max(10_000).optional().describe("Additional context (role, situation, background)"),
     },
   }, async ({ query, context }) => {
     const results: {

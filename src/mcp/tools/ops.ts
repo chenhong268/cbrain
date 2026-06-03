@@ -23,7 +23,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("enrich", {
     description: "Run entity enrichment. Upgrades entity tiers based on mention counts.",
     inputSchema: {
-      slug: z.string().optional().describe("Specific entity slug (omit for all)"),
+      slug: z.string().max(500).optional().describe("Specific entity slug (omit for all)"),
     },
   }, async ({ slug }) => {
     const result = slug
@@ -39,13 +39,13 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     description: "Write insights back to the knowledge base. Actions: 'append' (add content to existing page), 'create_concept' (create new concept page), 'create_link' (add relation between two pages). All operations are logged.",
     inputSchema: {
       action: z.enum(["append", "create_concept", "create_link"]).describe("Writeback action"),
-      targetSlug: z.string().optional().describe("Target page slug (for append)"),
+      targetSlug: z.string().max(500).optional().describe("Target page slug (for append)"),
       content: z.string().max(100_000).describe("Content to write"),
-      conceptTitle: z.string().optional().describe("Title for new concept (for create_concept)"),
-      fromSlug: z.string().optional().describe("Source page slug (for create_link)"),
-      toSlug: z.string().optional().describe("Target page slug (for create_link)"),
-      relation: z.string().optional().describe("Relation type (for create_link, e.g. 'works_at')"),
-      source: z.string().optional().describe("Origin of this insight (e.g. 'query:xyz')"),
+      conceptTitle: z.string().max(500).optional().describe("Title for new concept (for create_concept)"),
+      fromSlug: z.string().max(500).optional().describe("Source page slug (for create_link)"),
+      toSlug: z.string().max(500).optional().describe("Target page slug (for create_link)"),
+      relation: z.string().max(100).optional().describe("Relation type (for create_link, e.g. 'works_at')"),
+      source: z.string().max(500).optional().describe("Origin of this insight (e.g. 'query:xyz')"),
     },
   }, async (params) => {
     const result = await ctx.writeback.execute(params);
@@ -215,7 +215,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     description: "Manage watcher quarantine. 'list' shows quarantined files with reasons. 'release' removes a file from quarantine so it will re-sync on next scan. 'release_all' clears entire quarantine.",
     inputSchema: {
       action: z.enum(["list", "release", "release_all"]).describe("'list' = show quarantined files, 'release' = un-quarantine one file, 'release_all' = clear all"),
-      slug: z.string().optional().describe("Slug to release (required for action='release')"),
+      slug: z.string().max(500).optional().describe("Slug to release (required for action='release')"),
     },
   }, async ({ action, slug }) => {
     const quarantineRaw = ctx.db.getConfig("watcher.quarantine");

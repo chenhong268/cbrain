@@ -110,7 +110,7 @@ export function registerInsightTools(server: McpServer, ctx: ToolContext): void 
       "Semantic search over insights. Finds insights whose content is semantically similar to the query. " +
       "Only returns active insights. Use this when the user asks about patterns, trends, or connections in their knowledge.",
     inputSchema: {
-      query: z.string().describe("Search query — natural language description of what to find"),
+      query: z.string().max(1000).describe("Search query — natural language description of what to find"),
       limit: z.number().optional().default(5).describe("Max results"),
     },
   }, async ({ query, limit }) => {
@@ -139,7 +139,7 @@ export function registerInsightTools(server: McpServer, ctx: ToolContext): void 
       "如果发现有 LLM 生成的建议，会自动用做洞察内容。",
     inputSchema: {
       discoveryId: z.number().describe("ID of the discovery to promote"),
-      content: z.string().optional().describe("Override content — if omitted, uses suggestion or auto-generated"),
+      content: z.string().max(10_000).optional().describe("Override content — if omitted, uses suggestion or auto-generated"),
       type: z.enum(["synthesis", "pattern", "anomaly", "bridge"]).optional().default("bridge").describe("Insight type"),
       confidence: z.number().optional().describe("Confidence score (0-1). Default from discovery score."),
     },

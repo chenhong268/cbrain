@@ -7,7 +7,7 @@ export function registerVersionTools(server: McpServer, ctx: ToolContext): void 
   server.registerTool("get_versions", {
     description: "Get version history for a page.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
+      slug: z.string().max(500).describe("Page slug"),
     },
   }, async ({ slug }) => {
     const versionList = ctx.versions.getVersions(slug);
@@ -20,7 +20,7 @@ export function registerVersionTools(server: McpServer, ctx: ToolContext): void 
   server.registerTool("revert_version", {
     description: "Revert a page to a specific version. Creates a version snapshot before reverting.",
     inputSchema: {
-      slug: z.string().describe("Page slug"),
+      slug: z.string().max(500).describe("Page slug"),
       version: z.number().describe("Version number to revert to"),
     },
   }, async ({ slug, version }) => {
