@@ -832,10 +832,45 @@ export class CBrainDB {
     return row;
   }
 
+  /** Claim the highest-priority pending job whose name is in the allowlist. */
+  claimJobForNames(names: string[]): { id: number; name: string; data: string | null; attempts: number } | null {
+    if (names.length === 0) return null;
+    const placeholders = names.map(() => "?").join(",");
+    const row = this.rawDb.prepare(
+      `SELECT id, name, data, attempts FROM jobs WHERE status = 'pending' AND name IN (${placeholders}) ORDER BY priority DESC, id ASC LIMIT 1`
+    ).get(...names) as { id: number; name: string; data: string | null; attempts: number } | undefined;
+    if (!row) return null;
+
+    this.rawDb.prepare(
+      "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = datetime('now') WHERE id = ?"
+    ).run(row.id);
+    return row;
+  }
+
   completeJob(id: number, result?: unknown): void {
+    // Merge with existing progress data (from updateJobProgress calls)
+    let finalResult = result;
+    try {
+      const row = this.prepare("SELECT result FROM jobs WHERE id = $id").get({ $id: id }) as { result: string | null } | undefined;
+      if (row?.result && result && typeof result === "object") {
+        const existing = JSON.parse(row.result) as Record<string, unknown>;
+        const incoming = result as Record<string, unknown>;
+        finalResult = { ...existing, ...incoming };
+      }
+    } catch { /* if merge fails, just use raw result */ }
     this.prepare(
       "UPDATE jobs SET status = 'done', result = $result, finished_at = datetime('now') WHERE id = $id"
-    ).run({ $id: id, $result: result ? JSON.stringify(result) : null });
+    ).run({ $id: id, $result: finalResult ? JSON.stringify(finalResult) : null });
+  }
+
+  /** Update job result field progressively (for stage-level progress). Atomic via transaction. */
+  updateJobProgress(id: number, stage: string, detail: unknown): void {
+    this.rawDb.transaction(() => {
+      const row = this.prepare("SELECT result FROM jobs WHERE id = $id").get({ $id: id }) as { result: string | null } | undefined;
+      const existing = row?.result ? JSON.parse(row.result) as Record<string, unknown> : {};
+      const updated = { ...existing, current_stage: stage, [stage]: detail };
+      this.prepare("UPDATE jobs SET result = $result WHERE id = $id").run({ $id: id, $result: JSON.stringify(updated) });
+    })();
   }
 
   failJob(id: number, error: string): void {

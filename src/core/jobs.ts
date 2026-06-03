@@ -1,6 +1,6 @@
 import { CBrainDB } from "../storage/sqlite.js";
 
-export type JobHandler = (data: unknown) => Promise<unknown>;
+export type JobHandler = (data: unknown, jobId: number) => Promise<unknown>;
 
 export class JobQueue {
   private db: CBrainDB;
@@ -38,7 +38,11 @@ export class JobQueue {
   async work(tickMs = 1000): Promise<void> {
     this.running = true;
     while (this.running) {
-      const job = this.db.claimJob();
+      const handlerNames = [...this.handlers.keys()];
+      // Scoped: only claim jobs with registered handlers. Falls back to claimJob when no handlers registered (backward compat).
+      const job = handlerNames.length > 0
+        ? this.db.claimJobForNames(handlerNames)
+        : this.db.claimJob();
       if (!job) {
         await new Promise((r) => setTimeout(r, tickMs));
         continue;
@@ -52,12 +56,18 @@ export class JobQueue {
 
       try {
         const data = job.data ? JSON.parse(job.data) : undefined;
-        const result = await handler(data);
+        const result = await handler(data, job.id);
         this.db.completeJob(job.id, result);
       } catch (err) {
         this.db.failJob(job.id, err instanceof Error ? err.message : String(err));
       }
     }
+  }
+
+  /** Start background work loop. Returns immediately; runs until stop(). */
+  start(): void {
+    if (this.running) return;
+    this.work(2000).catch(e => console.error("[JobQueue] work loop crashed:", e));
   }
 
   stop(): void {

@@ -125,22 +125,76 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     };
   });
 
-  // ─── dream ──────────────────────────────────────────────────
+  // ─── dream (async) ────────────────────────────────────────
   server.registerTool("dream", {
-    description: "Run full nightly pipeline: sync → enrich → cleanup → health → insight archive. Reflect and discovery run independently. Use for scheduled daily maintenance. Has cycle lock to prevent overlapping runs.",
+    description: "异步执行完整夜间维护流程（sync → enrich → seal → cleanup → health → insight archive）。立即返回 job_id，后台执行。使用 dream_status 查询进度。有循环锁防止重叠执行。",
     inputSchema: {},
   }, async () => {
-    const { runDream } = await import("../../core/dream.js");
-    const report = await runDream(ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich, new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath), ctx.outputsDir, ctx.logger, undefined, ctx.dbPath,
-      ctx.llm ? { llm: ctx.llm, embedding: ctx.embedding, lance: ctx.lance } : undefined);
+    // Fast lock check before submitting job
+    const lockValue = ctx.db.getConfig("dream.lock");
+    if (lockValue) {
+      const lockedAt = parseInt(lockValue, 10);
+      if (Date.now() - lockedAt < 30 * 60 * 1000) {
+        // Create a skipped job so it's trackable via dream_status
+        const jobId = ctx.jobs.submit("dream", { locked_skip: true });
+        // Immediately mark as done with locked info
+        ctx.db.completeJob(jobId, { locked: true, skipped: true, message: "上次 dream 仍在执行中，已跳过" });
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            success: false,
+            job_id: jobId,
+            status: "done",
+            locked: true,
+            message: "上次 dream 仍在执行中（或锁未释放），已跳过。使用 dream_status 查询状态。",
+          }) }],
+        };
+      }
+    }
+
+    const jobId = ctx.jobs.submit("dream", { vaultPath: ctx.vaultPath, dbPath: ctx.dbPath });
     return {
       content: [{ type: "text", text: JSON.stringify({
-        success: !report.locked,
-        brief: report.brief,
-        locked: report.locked,
-        stages: report.stages,
-        timestamp: report.timestamp,
-        duration_ms: report.duration_ms,
+        success: true,
+        job_id: jobId,
+        status: "pending",
+        message: "Dream 已提交，后台执行中。使用 dream_status 查询进度。",
+      }) }],
+    };
+  });
+
+  // ─── dream_status ──────────────────────────────────────────
+  server.registerTool("dream_status", {
+    description: "查询最近一次 dream 任务的状态和阶段进度。",
+    inputSchema: {
+      job_id: z.number().optional().describe("Job ID（省略则查询最近一次 dream）"),
+    },
+  }, async ({ job_id }) => {
+    let job: Awaited<ReturnType<typeof ctx.jobs.get>>;
+    if (job_id) {
+      job = ctx.jobs.get(job_id);
+    } else {
+      const dreamJobs = ctx.db.listJobs().filter(j => j.name === "dream");
+      job = dreamJobs.length > 0 ? dreamJobs[0] : null;
+    }
+
+    if (!job) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: "No dream job found" }) }],
+      };
+    }
+
+    let progress: Record<string, unknown> = {};
+    try { if (job.result) progress = JSON.parse(job.result) as Record<string, unknown>; } catch { /* corrupted result */ }
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        job_id: job.id,
+        status: job.status,
+        current_stage: progress.current_stage ?? null,
+        stages: progress,
+        error: job.error,
+        created_at: job.created_at,
+        started_at: job.started_at,
+        finished_at: job.finished_at,
       }, null, 2) }],
     };
   });

@@ -120,6 +120,11 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       content: [{ type: "text", text: JSON.stringify({
         results,
         proactive_hints: hints.length > 0 ? hints.map(trimHint) : undefined,
+        ...(trace.degraded_reason ? {
+          degraded: true,
+          vector_skipped: trace.degraded_reason === "vector_timeout" ? "timeout" : "error",
+          latency_ms: latencyMs,
+        } : {}),
       }, null, 2) }],
     };
   });

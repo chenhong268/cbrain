@@ -68,6 +68,7 @@ export async function runDream(
   insightMgr?: InsightManager,
   dbPath?: string,
   sealDeps?: { llm: LLMProvider; embedding: EmbeddingProvider; lance: LanceDBManager },
+  onStageProgress?: (stage: string, detail: unknown) => void,
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
     logger.warn("dream", "上次 dream 仍在执行中（或锁未释放），跳过");
@@ -174,15 +175,18 @@ export async function runDream(
   } catch (e) {
     logger.warn("dream", `备份失败，继续执行：${(e as Error).message}`);
   }
+  if (onStageProgress) onStageProgress("backup", { path: backupPath, size_mb: backupSize });
 
   // Stage 1: Sync
   logger.info("dream", "Stage 1/5: sync");
   const syncReport = await syncMgr.syncAll(vaultPath);
+  if (onStageProgress) onStageProgress("sync", { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors });
 
   // Stage 2: Enrich
   logger.info("dream", "Stage 2/7: enrich");
   const enrichResults = enrichMgr.enrichAll();
   const upgraded = enrichResults.filter((r) => r.upgraded).length;
+  if (onStageProgress) onStageProgress("enrich", { total: enrichResults.length, upgraded });
 
   // Stage 2.5: Learn
   logger.info("dream", "Stage 3/7: learn");
@@ -194,6 +198,7 @@ export async function runDream(
   } catch (e) {
     logger.warn("dream", `学习计算失败: ${(e as Error).message}`);
   }
+  if (onStageProgress) onStageProgress("learn", learnReport);
 
   // Stage 3.1: Decay
   logger.info("dream", "Stage 3.1/7: decay");
@@ -217,6 +222,7 @@ export async function runDream(
       logger.warn("dream", `Seal 失败: ${(e as Error).message}`);
     }
   }
+  if (onStageProgress) onStageProgress("seal", sealReport);
 
   // Stage 4: Page-level cleanup (independent of each other)
   logger.info("dream", "Stage 4/7: page cleanup (orphans + stale stubs)");
@@ -229,6 +235,7 @@ export async function runDream(
   // so vectors newly orphaned by page deletion are caught in the same cycle
   logger.info("dream", "Stage 4.5/7: LanceDB orphan cleanup");
   const lanceOrphans = await syncMgr.cleanLanceOrphans().catch(e => { logger.warn("dream", `Cleanup LanceDB orphans 失败: ${(e as Error).message}`); return []; });
+  if (onStageProgress) onStageProgress("cleanup", { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length });
 
   // Stage 5-6: Health + Insight archive (independent, run in parallel)
   logger.info("dream", "Stage 5-6/7: health + insight archive");
@@ -247,6 +254,8 @@ export async function runDream(
     const removed = db.cleanMentionSnapshots(30);
     if (removed > 0) logger.info("dream", `清理 ${removed} 条过期 mention snapshots`);
   } catch (e) { logger.warn("dream", `Snapshot 清理失败: ${(e as Error).message}`); }
+  if (onStageProgress) onStageProgress("health", { overallStatus: healthReport.overallStatus, dimensions: healthReport.dimensions.length, issues: healthReport.dimensions.reduce((s, d) => s + d.issues.length, 0) });
+  if (onStageProgress) onStageProgress("insight_archive", { archived });
 
   // Stage 7: Index generation
   logger.info("dream", "Stage 7/7: indexes");
@@ -259,6 +268,7 @@ export async function runDream(
   } catch (e) {
     logger.warn("dream", `索引生成失败: ${(e as Error).message}`);
   }
+  if (onStageProgress) onStageProgress("indexes", { files: indexFiles });
 
   // Report
   logger.info("dream", "building report");

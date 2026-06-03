@@ -4,6 +4,7 @@ import type { CBrainDB } from "../storage/sqlite.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
+import type { ToolContext } from "./context.js";
 import { buildContext } from "./context.js";
 import { version } from "../version.js";
 import { registerAllTools } from "./register.js";
@@ -18,6 +19,23 @@ export interface CBrainDeps {
   profileDir?: string;
   runtimePath: string;
   watcher?: import("../core/watcher.js").FileWatcher;
+}
+
+/** Register dream job handler and start the background worker. Shared by MCP and HTTP paths. */
+export function registerDreamWorker(ctx: ToolContext): void {
+  ctx.jobs.register("dream", async (_data, jobId) => {
+    const { runDream } = await import("../core/dream.js");
+    const { HealthChecker } = await import("../core/health.js");
+    const report = await runDream(
+      ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich,
+      new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath),
+      ctx.outputsDir, ctx.logger, undefined, ctx.dbPath,
+      ctx.llm ? { llm: ctx.llm, embedding: ctx.embedding, lance: ctx.lance } : undefined,
+      (stage, detail) => { try { ctx.db.updateJobProgress(jobId, stage, detail); } catch { /* non-critical */ } },
+    );
+    return report;
+  });
+  ctx.jobs.start();
 }
 
 export function createServer(deps: CBrainDeps): McpServer {
@@ -44,6 +62,7 @@ export function createServer(deps: CBrainDeps): McpServer {
 
   const ctx = buildContext(deps);
   registerAllTools(server, ctx);
+  registerDreamWorker(ctx);
 
   return server;
 }

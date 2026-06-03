@@ -87,7 +87,7 @@ describe("JobQueue", () => {
   });
 
   test("work processes jobs", async () => {
-    queue.register("echo", async (data) => ({ echoed: data }));
+    queue.register("echo", async (data, _jobId) => ({ echoed: data }));
 
     queue.submit("echo", { msg: "hello" });
     queue.submit("echo", { msg: "world" });

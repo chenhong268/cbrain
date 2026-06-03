@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
-import { createServer } from "../../mcp/server.js";
+import { createServer, registerDreamWorker } from "../../mcp/server.js";
 import { buildContext } from "../../mcp/context.js";
 import { createHttpServer } from "../../http/server.js";
 import { PidLock } from "../../utils/pid-lock.js";
@@ -11,6 +11,7 @@ interface ShutdownHandles {
   watcher?: FileWatcher;
   pidLock: PidLock;
   watcherLock?: WatcherLock;
+  stopJobs?: () => void;
 }
 
 function installShutdownHandlers(handles: ShutdownHandles): void {
@@ -18,6 +19,7 @@ function installShutdownHandlers(handles: ShutdownHandles): void {
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    handles.stopJobs?.();
     handles.watcher?.stop();
     handles.httpServer?.stop(true);
     handles.watcherLock?.release();
@@ -83,6 +85,7 @@ export function register(program: Command) {
         const watcherResult = await initWatcher(config, deps);
         deps.watcher = watcherResult?.watcher;
         const ctx = buildContext(deps);
+        registerDreamWorker(ctx);
         const httpApp = createHttpServer(ctx);
         const port = parseInt(opts.port, 10) || 3399;
         const httpServer = httpApp.start(port);
@@ -93,6 +96,7 @@ export function register(program: Command) {
           watcher: watcherResult?.watcher,
           pidLock,
           watcherLock: watcherResult?.lock,
+          stopJobs: () => ctx.jobs.stop(),
         });
         return;
       }

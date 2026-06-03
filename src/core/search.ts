@@ -166,6 +166,7 @@ export class HybridSearch {
   private static QUERY_CACHE_TTL = 300_000; // 5 minutes
   private static EMBEDDING_CACHE_TTL = 300_000;
   private static CACHE_MAX_SIZE = 100;
+  static VECTOR_TIMEOUT_MS = 5_000; // 5s budget for vector search (embedding API + LanceDB)
 
   constructor(
     db: CBrainDB,
@@ -208,7 +209,12 @@ export class HybridSearch {
     const trace = options?._trace;
 
     if (strategy === "vector") {
-      return this.timedCall(() => this.vectorSearch(query, limit), trace, "vector_ms");
+      const vecResult = await this.timedCall(() => this.boundedVectorSearch(query, limit), trace, "vector_ms").catch(() => null);
+      if (vecResult === null) {
+        if (trace) trace.degraded_reason = trace.degraded_reason ?? "vector_timeout";
+        return [];
+      }
+      return vecResult;
     }
     if (strategy === "fts") {
       return this.timedCall(() => Promise.resolve(this.ftsSearch(query, limit)), trace, "fts_ms");
@@ -276,10 +282,14 @@ export class HybridSearch {
   private async searchSingleQuery(q: string, limit: number, trace?: SearchTrace): Promise<SearchResult[][]> {
     const resolved = this.db.resolveSlugs([q])[0];
 
-    const [vec, fts, graph, temporal] = await Promise.all([
-      this.timedCall(() => this.vectorSearch(q, limit), trace, "vector_ms").catch((e) => {
+    // Race vector search against timeout — embedding API call is unbounded network I/O
+    const vectorPromise = this.boundedVectorSearch(q, limit);
+
+    const [vecOrNull, fts, graph, temporal] = await Promise.all([
+      this.timedCall(() => vectorPromise, trace, "vector_ms").catch((e) => {
         console.error("[search] vectorSearch 失败:", e);
-        return [] as SearchResult[];
+        if (trace && !trace.degraded_reason) trace.degraded_reason = "vector_error";
+        return null as SearchResult[] | null;
       }),
       this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit)), trace, "fts_ms").catch((e) => {
         console.error("[search] ftsSearch 失败:", e);
@@ -296,6 +306,11 @@ export class HybridSearch {
         return [] as SearchResult[];
       }),
     ]);
+
+    const vec = vecOrNull ?? [];
+    if (vecOrNull === null && trace && !trace.degraded_reason) {
+      trace.degraded_reason = "vector_timeout";
+    }
 
     const lists: SearchResult[][] = [];
     if (vec.length > 0) lists.push(vec);
@@ -570,6 +585,16 @@ export class HybridSearch {
       snippet: v.content.slice(0, 200),
       source: "vector" as const,
     }));
+  }
+
+  /** vectorSearch with timeout budget. Returns null on timeout, rejects on error. */
+  private boundedVectorSearch(query: string, limit: number): Promise<SearchResult[] | null> {
+    return new Promise<SearchResult[] | null>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(null), HybridSearch.VECTOR_TIMEOUT_MS);
+      this.vectorSearch(query, limit)
+        .then((r) => { clearTimeout(timer); resolve(r); })
+        .catch((e) => { clearTimeout(timer); reject(e); });
+    });
   }
 
   private ftsSearch(query: string, limit: number): SearchResult[] {
