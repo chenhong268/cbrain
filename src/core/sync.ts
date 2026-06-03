@@ -116,6 +116,7 @@ export class SyncManager {
 
         const existing = this.db.getPageContentHash(slug);
 
+        // Normal content hash match — skip as before
         if (existing && existing === contentHash) {
           // Backfill tags + wikilinks even when content unchanged
           if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
@@ -134,6 +135,20 @@ export class SyncManager {
           }
           report.skipped++;
           continue;
+        }
+
+        // Skip hash match (title-collision files) — verify collision still exists
+        const skipHash = !existing ? this.db.getConfig(`sync.skip.${slug}`) : null;
+        if (skipHash === contentHash) {
+          const pageTitle = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
+          const collision = this.db.getPageByTitleExcluding(pageTitle, slug);
+          if (collision) {
+            // Collision still present — keep skipping
+            report.skipped++;
+            continue;
+          }
+          // Collision resolved — clear skip hash and fall through to normal sync
+          try { this.db.deleteConfig(`sync.skip.${slug}`); } catch { /* non-critical */ }
         }
 
         const title = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
@@ -235,6 +250,10 @@ export class SyncManager {
         const msg = err instanceof Error ? err.message : String(err);
         report.errorDetails!.push(`${file.relPath}: ${msg}`);
         if (err instanceof TitleCollisionError) {
+          // Store content hash in config table so next sync skips this file
+          // instead of replaying the collision error. Can't write to pages table
+          // because the title unique constraint would block the insert.
+          try { this.db.setConfig(`sync.skip.${file.slug}`, file.contentHash); } catch { /* non-critical */ }
           report.diagnostics ??= [];
           report.diagnostics.push({
             kind: "title_collision",
@@ -389,8 +408,28 @@ export class SyncManager {
 
     const relPath = slugToFilePath(effectiveSlug);
 
+    // Check skip hash for title-collision files (must be AFTER canonicalization
+    // so the key matches what was stored in the TitleCollisionError handler)
+    const skipHash = !existing ? this.db.getConfig(`sync.skip.${effectiveSlug}`) : null;
+    if (skipHash && skipHash === contentHash) {
+      const collision = this.db.getPageByTitleExcluding(title, effectiveSlug);
+      if (collision) {
+        return { success: false, skipped: true, error: `Title collision: "${title}"` };
+      }
+      // Collision resolved — clear skip hash and proceed with sync
+      try { this.db.deleteConfig(`sync.skip.${effectiveSlug}`); } catch { /* non-critical */ }
+    }
+
     // Preflight: title collision check
-    this.checkTitleCollision(title, effectiveSlug, type, relPath);
+    try {
+      this.checkTitleCollision(title, effectiveSlug, type, relPath);
+    } catch (err) {
+      if (err instanceof TitleCollisionError) {
+        try { this.db.setConfig(`sync.skip.${effectiveSlug}`, contentHash); } catch { /* non-critical */ }
+        return { success: false, error: err.message };
+      }
+      throw err;
+    }
 
     this.db.upsertPage({
       slug: effectiveSlug,
@@ -453,6 +492,7 @@ export class SyncManager {
 
   async removePage(slug: string): Promise<void> {
     this.db.deletePageCascaded(slug);
+    try { this.db.deleteConfig(`sync.skip.${slug}`); } catch { /* non-critical */ }
     try {
       await this.lance.deleteByPageSlug(slug);
     } catch (e) {
@@ -474,6 +514,8 @@ export class SyncManager {
         await access(fullPath);
       } catch {
         orphans.push(page.slug);
+        // Clean up any title-collision skip hashes
+        try { this.db.deleteConfig(`sync.skip.${page.slug}`); } catch { /* non-critical */ }
         if (this.pages) {
           // PageManager.delete() handles both SQLite + LanceDB internally
           await this.pages.delete(page.slug);

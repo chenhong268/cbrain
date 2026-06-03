@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { SyncManager, TitleCollisionError } from "../../src/core/sync.js";
+import { SyncManager } from "../../src/core/sync.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
@@ -273,7 +273,7 @@ describe("SyncManager", () => {
       expect(lance.added.length).toBe(0);
     });
 
-    test("throws TitleCollisionError when title exists under different slug", async () => {
+    test("returns error when title exists under different slug", async () => {
       // Seed existing entity page
       db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
@@ -287,18 +287,16 @@ describe("SyncManager", () => {
         "人物A的会议记录",
       );
 
-      try {
-        await sync.syncPage("records/renwu-a-note", vaultPath);
-        expect.unreachable("Should have thrown TitleCollisionError");
-      } catch (e) {
-        expect(e).toBeInstanceOf(TitleCollisionError);
-        const tc = e as TitleCollisionError;
-        expect(tc.details.title).toBe("人物A");
-        expect(tc.details.incoming.slug).toBe("records/renwu-a-note");
-        expect(tc.details.incoming.type).toBe("record");
-        expect(tc.details.existing.slug).toBe("brain/entities/person/renwu-a");
-        expect(tc.details.existing.type).toBe("entity/person");
-      }
+      const result = await sync.syncPage("records/renwu-a-note", vaultPath);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Title collision");
+      expect(result.error).toContain("人物A");
+      expect(result.error).toContain("records/renwu-a-note");
+      expect(result.error).toContain("brain/entities/person/renwu-a");
+
+      // Skip hash should be stored
+      const skipHash = db.getConfig("sync.skip.records/renwu-a-note");
+      expect(skipHash).not.toBeNull();
     });
   });
 
