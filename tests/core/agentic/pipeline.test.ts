@@ -14,6 +14,7 @@ function mockDB(overrides: {
   getTimeline?: (slug: string) => unknown[];
   searchTimeline?: (keyword?: string, dateFrom?: string, limit?: number) => unknown[];
   getChunksByPage?: (slug: string, opts?: { summaryLevel?: number }) => unknown[];
+  getL1Summary?: (slug: string) => unknown;
   batchGetLinksForSlugs?: (slugs: string[], activeOnly?: boolean) => Map<string, { outgoing: unknown[]; incoming: unknown[] }>;
   batchGetTimelineForSlugs?: (slugs: string[], activeOnly?: boolean) => Map<string, unknown[]>;
   startSearchTraceSession?: (..._: unknown[]) => number;
@@ -30,7 +31,8 @@ function mockDB(overrides: {
     searchTimeline: overrides.searchTimeline ??
       ((_keyword?: string) => [{ page_slug: "page/a", summary: "found", event_date: "2026-01-01", source: null }]),
     getChunksByPage: overrides.getChunksByPage ??
-      ((_slug: string, _opts?: { summaryLevel?: number }) => [{ id: 1, chunk_index: 0, content: "chunk text", created_at: "2026-01-01" }]),
+      ((_slug: string, _opts?: { summaryLevel?: number }) => []),
+    getL1Summary: overrides.getL1Summary ?? ((_slug: string) => null),
     batchGetLinksForSlugs: overrides.batchGetLinksForSlugs ?? (() => new Map()),
     batchGetTimelineForSlugs: overrides.batchGetTimelineForSlugs ?? (() => new Map()),
     startSearchTraceSession: overrides.startSearchTraceSession ?? ((..._args: unknown[]) => ++sessionId),

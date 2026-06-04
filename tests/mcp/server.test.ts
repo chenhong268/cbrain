@@ -1954,6 +1954,176 @@ describe("MCP Server", () => {
     });
   });
 
+  // ─── deep_recall evidence_summary for normal recall ─────
+
+  describe("deep_recall evidence_summary", () => {
+    test("normal recall: evidence_summary in raw only, NOT top-level; summary has lightweight fields", async () => {
+      // Seed two entities with a trusted link
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/esa", "EntitySA", "esa.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/esb", "EntitySB", "esb.md", "h2");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/esa", "entities/esb", "collaborates", "wikilink", "trusted", 0.9, "SA collaborates with SB");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "EntitySA",
+        grounded: false,
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      // evidence_summary NOT at top level (stripped from legacy spread)
+      expect(data.evidence_summary).toBeUndefined();
+
+      // evidence_summary preserved in raw
+      expect(data.raw.evidence_summary).toBeDefined();
+      expect(data.raw.evidence_summary.confidence).toBe("high");
+      expect(data.raw.evidence_summary.top_facts.length).toBeGreaterThan(0);
+      expect(data.raw.evidence_summary.total_evidence).toBeGreaterThan(0);
+
+      // summary has lightweight human-safe fields
+      expect(data.summary.evidence_count).toBeGreaterThan(0);
+      expect(data.summary.confidence).toBe("high");
+
+      // display does NOT contain internal evidence labels
+      expect(data.display).not.toContain("证据质量");
+      expect(data.display).not.toContain("evidence_summary");
+    });
+
+    test("brief mode: raw has evidence_summary when evidence exists", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/esb2", "EntitySB2", "esb2.md", "h3");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/esb3", "EntitySB3", "esb3.md", "h4");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run("entities/esb2", "entities/esb3", "knows", "wikilink", "trusted", 0.8);
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "EntitySB2",
+        detail: "brief",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      // Top-level must not have evidence_summary
+      expect(data.evidence_summary).toBeUndefined();
+
+      // raw may have it if evidence was found
+      if (data.raw?.evidence_summary) {
+        expect(data.raw.evidence_summary).toHaveProperty("confidence");
+        expect(data.raw.evidence_summary).toHaveProperty("total_evidence");
+      }
+    });
+
+    test("grounded mode does NOT have evidence_summary", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/esc", "EntitySC", "esc.md", "h5");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/esd", "EntitySD", "esd.md", "h6");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run("entities/esc", "entities/esd", "knows", "wikilink", "trusted", 0.8);
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "EntitySC",
+        grounded: true,
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      // Grounded mode uses grounded_answer, not evidence_summary
+      expect(data.evidence_summary).toBeUndefined();
+      expect(data.grounded_answer).toBeDefined();
+    });
+  });
+
+  // ─── grounded board includes page/chunk evidence ─────
+
+  describe("grounded board page/chunk evidence", () => {
+    test("grounded recall includes page and chunk evidence items", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/gpa", "GroundedPageA", "gpa.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/gpb", "GroundedPageB", "gpb.md", "h2");
+      // Link for baseline evidence
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/gpa", "entities/gpb", "collaborates", "wikilink", "trusted", 0.9, "GPA works with GPB");
+      // L1 summary for page evidence
+      db.rawDb.prepare(
+        "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, ?, ?, ?)"
+      ).run("entities/gpa", 0, "GroundedPageA is a key entity specializing in data security.", 1);
+      // Level-0 chunks for chunk evidence
+      db.rawDb.prepare(
+        "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, ?, ?, ?)"
+      ).run("entities/gpa", 0, "GPA handles all security protocols for the organization.", 0);
+      db.rawDb.prepare(
+        "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, ?, ?, ?)"
+      ).run("entities/gpa", 1, "GPA established the three-layer architecture in 2024.", 0);
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "GroundedPageA",
+        grounded: true,
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.grounded_answer).toBeDefined();
+      // facts is string[] of claims from the evidence board
+      const facts: string[] = data.grounded_answer.facts ?? [];
+
+      // Must include claims from both page L1 summary and chunks
+      const hasPageEvidence = facts.some(c => typeof c === "string" && c.includes("data security"));
+      const hasChunkEvidence = facts.some(c => typeof c === "string" && c.includes("security protocols"));
+      expect(hasPageEvidence || hasChunkEvidence).toBe(true);
+      // Link evidence still present
+      expect(facts.some(c => typeof c === "string" && c.includes("GPA works with GPB"))).toBe(true);
+    });
+
+    test("rejected/superseded evidence does NOT enter grounded board facts", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rej", "RejectedEntity", "rej.md", "h3");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/rej2", "RejectedEntity2", "rej2.md", "h4");
+      // Rejected link — must NOT appear in facts
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/rej", "entities/rej2", "knows", "wikilink", "rejected", 0.3, "outdated info");
+      // Trusted link — must appear
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/rej", "entities/rej2", "collaborates", "wikilink", "trusted", 0.9, "current collaboration");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "RejectedEntity",
+        grounded: true,
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      // facts is string[] of claims
+      const facts: string[] = data.grounded_answer.facts ?? [];
+
+      // Trusted fact present
+      expect(facts.some((c: string) => c.includes("current collaboration"))).toBe(true);
+      // Rejected fact NOT present
+      expect(facts.some((c: string) => c.includes("outdated info"))).toBe(false);
+    });
+  });
+
   // ─── deep_recall normal vs brief mode ────────────
 
   describe("deep_recall normal vs brief mode", () => {

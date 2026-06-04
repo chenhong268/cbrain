@@ -23,6 +23,9 @@ export interface ToolSummary {
   message: string;
   degraded_reason?: string;
   next_steps?: string[];
+  /** Lightweight evidence signal for Hermes — short, human-safe. */
+  evidence_count?: number;
+  confidence?: "high" | "medium" | "low";
 }
 
 // ─── Internal identifier sanitization ───────────────────────
@@ -166,6 +169,13 @@ export function formatDialogueResult(
 interface RecallPayload {
   query: string;
   entities?: Array<{ title?: string; _stub?: boolean }>;
+  evidence_summary?: {
+    confidence: "high" | "medium" | "low";
+    top_facts: string[];
+    gap_count: number;
+    conflict_count: number;
+    total_evidence: number;
+  };
   search_meta?: { degraded?: boolean; latency_ms?: number };
   summary?: string;
 }
@@ -199,6 +209,8 @@ export function formatRecallEnvelope(payload: RecallPayload): {
     .map(e => e.title ?? "未知")
     .join("、");
 
+  const es = payload.evidence_summary;
+
   const display = isDegraded
     ? sanitizeDisplay(`搜索耗时较长，返回了部分结果。找到 ${count} 个相关实体。`)
     : sanitizeDisplay(`找到 ${count} 个相关实体。${topNames ? `最相关的是${topNames}。` : ""}`);
@@ -211,6 +223,8 @@ export function formatRecallEnvelope(payload: RecallPayload): {
       truncated: entities.some(e => e._stub),
       message: payload.summary ?? `找到 ${count} 个相关实体`,
       degraded_reason: isDegraded ? "搜索超时，降级到部分结果" : undefined,
+      evidence_count: es?.total_evidence,
+      confidence: es?.confidence,
     },
     raw: payload,
   };

@@ -12,7 +12,7 @@ import { buildMemorySkeleton } from "../../core/key-points.js";
 import { type SearchTrace } from "../../core/search.js";
 import { classifyDegradedReasons, computeSearchDegraded } from "../../core/search-diagnostics.js";
 import { traceToSteps } from "../../core/search-trace.js";
-import { collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
+import { buildEvidenceFromBatched, buildEvidenceSummary, collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
 import { formatRecallEnvelope, formatGroundedRecallEnvelope } from "./format-result.js";
 
@@ -324,6 +324,12 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const totalTimeline = entities.reduce((n, e) => n + ((e as { timeline: unknown[] }).timeline?.length ?? 0), 0);
     const lowQuality = entities.filter((e) => (e as { quality?: string }).quality === "low").length;
     const expiredCount = entities.filter(e => (e as { expiry_warning?: string }).expiry_warning?.startsWith("⚠️")).length;
+    const evidenceBoard = buildEvidenceFromBatched(
+      batchLinks,
+      timelineBySlug as Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>>,
+      topSlugs,
+    );
+    const evidenceSummary = buildEvidenceSummary(evidenceBoard) ?? undefined;
 
     // Cross-references — single batch query across all top-N entities
     const allRelatedSlugs = new Set<string>();
@@ -383,6 +389,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       query,
       search_meta: diagnosticMeta,
       entities,
+      evidence_summary: evidenceSummary,
       insights: relatedInsights.length > 0 ? relatedInsights : undefined,
       cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
       proactive_hints: (() => {
@@ -396,7 +403,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     };
 
     const { display, summary: envelopeSummary, raw } = formatRecallEnvelope(payload);
-    const { summary: legacySummary, search_meta: _rm, ...payloadRest } = payload;
+    const { summary: legacySummary, search_meta: _rm, evidence_summary: _es, ...payloadRest } = payload;
     return {
       content: [{
         type: "text" as const,

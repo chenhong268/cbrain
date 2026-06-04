@@ -501,3 +501,81 @@ describe("sanitizeDisplay", () => {
     expect(sanitizeDisplay("")).toBe("");
   });
 });
+
+// ─── Evidence Summary Display ─────────────────────────────────
+
+describe("formatRecallEnvelope with evidence_summary", () => {
+  test("evidence_summary in raw, NOT in display — summary gets lightweight fields", () => {
+    const payload = {
+      query: "test",
+      entities: [{ title: "A" }, { title: "B" }],
+      evidence_summary: {
+        confidence: "high" as const,
+        top_facts: ["fact 1", "fact 2"],
+        gap_count: 0,
+        conflict_count: 0,
+        total_evidence: 2,
+      },
+    };
+    const { display, summary, raw } = formatRecallEnvelope(payload);
+
+    // display: clean, no internal evidence labels
+    expect(display).not.toContain("证据质量");
+    expect(display).not.toContain("evidence_summary");
+    assertNoInternalTerms(display);
+
+    // summary: lightweight human-safe signal
+    expect(summary.evidence_count).toBe(2);
+    expect(summary.confidence).toBe("high");
+
+    // raw: full internal structure preserved
+    expect((raw as any).evidence_summary).toEqual(payload.evidence_summary);
+  });
+
+  test("medium confidence — summary reflects it, display stays natural", () => {
+    const payload = {
+      query: "test",
+      entities: [{ title: "A" }],
+      evidence_summary: {
+        confidence: "medium" as const,
+        top_facts: ["fact 1"],
+        gap_count: 2,
+        conflict_count: 1,
+        total_evidence: 4,
+      },
+    };
+    const { display, summary } = formatRecallEnvelope(payload);
+    expect(display).not.toContain("证据质量");
+    expect(summary.evidence_count).toBe(4);
+    expect(summary.confidence).toBe("medium");
+  });
+
+  test("no evidence_summary — summary has no evidence fields (backward compat)", () => {
+    const payload = {
+      query: "test",
+      entities: [{ title: "A" }],
+    };
+    const { display, summary } = formatRecallEnvelope(payload);
+    expect(display).not.toContain("证据质量");
+    expect(summary.evidence_count).toBeUndefined();
+    expect(summary.confidence).toBeUndefined();
+  });
+
+  test("evidence_summary with zero total_evidence — summary shows undefined", () => {
+    const payload = {
+      query: "test",
+      entities: [{ title: "A" }],
+      evidence_summary: {
+        confidence: "low" as const,
+        top_facts: [] as string[],
+        gap_count: 0,
+        conflict_count: 0,
+        total_evidence: 0,
+      },
+    };
+    const { display, summary } = formatRecallEnvelope(payload);
+    expect(display).not.toContain("证据质量");
+    expect(summary.evidence_count).toBe(0);
+    expect(summary.confidence).toBe("low");
+  });
+});
