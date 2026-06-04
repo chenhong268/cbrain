@@ -113,11 +113,12 @@
 ├─ "组织层级 / 汇报关系"？
 │   信号：下属、上级、汇报线、谁向谁汇报、组织架构、
 │         组织结构、团队有哪些人、直属、管谁、向谁汇报
-│   → 解析种子实体（从查询中提取组织/人物名称）
-│   → graph_query(mode=traverse, depth=2) 或 get_hierarchy
+│   → get_org_tree({ query: 种子实体名, direction: "both" })
+│   → 多候选 → 让用户澄清
 │   → 有结果 → 按层级呈现（树形/缩进列表）
 │   → 无结果 → fallback deep_recall(detail=normal)
 │   → 种子无法解析 → "无法确定你指的是哪个实体，能说得更具体一些吗？"
+│   ⚠️ 禁止先跑 graph_query / deep_recall 再拼层级 — 直接调 get_org_tree
 │   注意：两人关系（"A和B什么关系"）走上面的 connect 分支，不走这里
 │
 ├─ "最近有什么发现"？
@@ -413,6 +414,7 @@ grounded recall 返回后，首轮回答必须：
 | dossier | 结构化档案（基本信息 + 关系 + 时间线 + 洞察） | 需要表格化档案 |
 | brain_storm | LLM 推理 + 缺口分析 + 跨域关联 | 需要分析和推理 |
 | graph_query | 关系遍历（traverse/backlinks/related） | 查两个人/公司关系 |
+| get_org_tree | 组织层级树（向上/向下/双向） | 组织架构、下属、上级、汇报线 — **一次调用返回完整树** |
 | list_insights | 系统自动生成的洞察列表 | 发现漏掉的关联 |
 | read_discoveries | 跨域关联发现（用户可读摘要） | 深度发现，只展示 display/cards/summary |
 | get_timeline | 按时间排列的事件流 | 时间线回顾 |

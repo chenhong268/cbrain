@@ -52,7 +52,7 @@ run_discovery({ debug: false })
 ## 5. 其他路由
 
 - 关系查询（A和B什么关系） → `graph_query`
-- 组织层级（下属/上级/汇报线/组织架构） → `graph_query(depth=2)`，fallback `deep_recall`
+- 组织层级（下属/上级/汇报线/组织架构） → `get_org_tree`，fallback `deep_recall`
 - 快速查找（搜一下/有没有） → `query`
 - 全景总结（总结/概览） → `summarize`
 - 深度推理（A vs B取舍/盲区） → `agentic_research`

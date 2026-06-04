@@ -76,6 +76,20 @@ if [[ -f "$SKILLS_DIR/hierarchy.routing-eval.jsonl" ]]; then
   else
     fail "hierarchy eval 有 ${hier_privacy} 处疑似隐私泄露"
   fi
+  # Verify hierarchy eval uses get_org_tree (not graph_query) for positive cases
+  hier_old_tool=$(grep '"category": "org_hierarchy"' "$SKILLS_DIR/hierarchy.routing-eval.jsonl" 2>/dev/null | grep -c '"expected_tool": "graph_query"' 2>/dev/null || echo "0")
+  hier_old_tool=$(echo "$hier_old_tool" | tr -d '[:space:]')
+  hier_org_tree=$(grep -c '"expected_tool": "get_org_tree"' "$SKILLS_DIR/hierarchy.routing-eval.jsonl" 2>/dev/null || echo "0")
+  if (( hier_old_tool == 0 )); then
+    pass "hierarchy eval 正向用例已迁移到 get_org_tree"
+  else
+    fail "hierarchy eval 仍有 ${hier_old_tool} 处使用 graph_query（应改为 get_org_tree）"
+  fi
+  if (( hier_org_tree >= 5 )); then
+    pass "hierarchy eval get_org_tree 用例 ≥ 5（当前 ${hier_org_tree}）"
+  else
+    fail "hierarchy eval get_org_tree 用例只有 ${hier_org_tree}（需 ≥ 5）"
+  fi
 else
   fail "hierarchy.routing-eval.jsonl 不存在"
 fi
@@ -124,7 +138,7 @@ echo ""
 # ── 2. 路由覆盖率 ──
 echo "[2] 路由覆盖率"
 
-TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode" "agentic_research" "get_provenance" "graph_query")
+TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode" "agentic_research" "get_provenance" "graph_query" "get_org_tree")
 
 for tool in "${TOOLS[@]}"; do
   status="ok"
@@ -140,6 +154,9 @@ for tool in "${TOOLS[@]}"; do
   fi
   if [[ -f "$SKILLS_DIR/agentic.routing-eval.jsonl" ]]; then
     eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/agentic.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
+  fi
+  if [[ -f "$SKILLS_DIR/hierarchy.routing-eval.jsonl" ]]; then
+    eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/hierarchy.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
   fi
   if [[ -f "$SKILLS_DIR/provenance.routing-eval.jsonl" ]]; then
     eval_hits=$((eval_hits + $(grep -c "\"expected_tool\": \"$tool\"" "$SKILLS_DIR/provenance.routing-eval.jsonl" 2>/dev/null | tr -d '[:space:]' || echo "0")))
@@ -413,7 +430,7 @@ if [[ -f "$BRIEF" ]]; then
   pass "hermes-cbrain-brief.md 存在"
 
   # Key tool names present
-  brief_tools=("deep_recall" "recall_episode" "read_discoveries" "run_discovery" "graph_query" "query" "summarize" "agentic_research")
+  brief_tools=("deep_recall" "recall_episode" "read_discoveries" "run_discovery" "graph_query" "query" "summarize" "agentic_research" "get_org_tree")
   missing_brief_tools=()
   for bt in "${brief_tools[@]}"; do
     if ! grep -q "$bt" "$BRIEF" 2>/dev/null; then

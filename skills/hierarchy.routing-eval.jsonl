@@ -1,7 +1,7 @@
-{"input": "实体A的下属有哪些", "expected_tool": "graph_query", "category": "org_hierarchy", "expected_args": {"mode": "traverse", "depth": 2}, "forbidden_tools": [], "rationale": "单实体+下属 → graph遍历"}
-{"input": "组织C 北区团队下面的人", "expected_tool": "graph_query", "category": "org_hierarchy", "expected_args": {"mode": "traverse", "depth": 2}, "forbidden_tools": [], "rationale": "组织+区域+下属 → graph遍历，不进语义搜索"}
-{"input": "实体B向谁汇报", "expected_tool": "graph_query", "category": "org_hierarchy", "expected_args": {"mode": "traverse", "depth": 2}, "forbidden_tools": [], "rationale": "单实体+上级 → graph反向遍历"}
-{"input": "组织D的汇报线是什么", "expected_tool": "graph_query", "category": "org_hierarchy", "expected_args": {"mode": "traverse", "depth": 2}, "forbidden_tools": [], "rationale": "汇报线意图 → graph遍历"}
-{"input": "实体E的直属上级是谁", "expected_tool": "graph_query", "category": "org_hierarchy", "expected_args": {"mode": "traverse", "depth": 1}, "forbidden_tools": [], "rationale": "直属上级 → graph浅层遍历"}
-{"input": "组织C是什么来头", "expected_tool": "deep_recall", "category": "negative_hierarchy", "expected_args": {"detail": "normal"}, "forbidden_tools": ["graph_query"], "rationale": "实体查询，不是层级查询，不触发 graph_first"}
-{"input": "实体A和实体B什么关系", "expected_tool": "graph_query", "category": "negative_hierarchy_pairwise", "expected_args": {"mode": "traverse"}, "forbidden_tools": [], "rationale": "双实体关系查询走 connect 路由，不触发 hierarchy 路径"}
+{"input": "实体A的下属有哪些", "expected_tool": "get_org_tree", "category": "org_hierarchy", "expected_args": {"direction": "down"}, "forbidden_tools": ["graph_query"], "rationale": "单实体+下属 → get_org_tree(direction=down)"}
+{"input": "组织C 北区团队下面的人", "expected_tool": "get_org_tree", "category": "org_hierarchy", "expected_args": {"direction": "down"}, "forbidden_tools": ["graph_query"], "rationale": "组织+区域+下属 → get_org_tree(direction=down)，不进语义搜索"}
+{"input": "实体B向谁汇报", "expected_tool": "get_org_tree", "category": "org_hierarchy", "expected_args": {"direction": "up"}, "forbidden_tools": ["graph_query"], "rationale": "单实体+上级 → get_org_tree(direction=up)"}
+{"input": "组织D的汇报线是什么", "expected_tool": "get_org_tree", "category": "org_hierarchy", "expected_args": {"direction": "both"}, "forbidden_tools": ["graph_query"], "rationale": "汇报线意图 → get_org_tree(direction=both)"}
+{"input": "实体E的直属上级是谁", "expected_tool": "get_org_tree", "category": "org_hierarchy", "expected_args": {"direction": "up", "depth": 1}, "forbidden_tools": ["graph_query"], "rationale": "直属上级 → get_org_tree(direction=up, depth=1)"}
+{"input": "组织C是什么来头", "expected_tool": "deep_recall", "category": "negative_hierarchy", "expected_args": {"detail": "normal"}, "forbidden_tools": ["graph_query", "get_org_tree"], "rationale": "实体查询，不是层级查询，不触发 hierarchy 路由"}
+{"input": "实体A和实体B什么关系", "expected_tool": "graph_query", "category": "negative_hierarchy_pairwise", "expected_args": {"mode": "traverse"}, "forbidden_tools": ["get_org_tree"], "rationale": "双实体关系查询走 connect 路由，不触发 hierarchy 路径"}

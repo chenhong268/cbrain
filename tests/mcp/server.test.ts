@@ -82,7 +82,7 @@ describe("MCP Server", () => {
         "dossier", "dream", "dream_reset", "dream_status", "enrich", "expand_entity",
         "export_grounded_artifact",
         "generate_indexes", "get_chunks", "get_compounding_reviews", "get_hierarchy", "get_ingest_log", "get_insight",
-        "get_links", "get_page", "get_profile", "get_provenance", "get_tags",
+        "get_links", "get_org_tree", "get_page", "get_profile", "get_provenance", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",
         "ingest", "ingest_dialogue", "job_cancel", "job_list",
         "job_retry", "job_status", "job_submit", "list_insights",

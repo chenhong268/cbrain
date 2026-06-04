@@ -118,10 +118,13 @@
 - 批量打标、tag → ingest.md
 
 ### Hierarchy — 组织层级
-- 下属、谁向X汇报、X的团队、X管谁、直属下属 → query.md [graph_first]
-- 上级、X向谁汇报、X的老板、谁的下属包含X → query.md [graph_first]
-- 汇报线、汇报关系、报告链、reporting line → query.md [graph_first]
-- 组织架构、组织结构、组织树、某组织下面有哪些人 → query.md [graph_first]
+- 下属、谁向X汇报、X的团队、X管谁、直属下属 → get_org_tree(direction=down)
+- 上级、X向谁汇报、X的老板、谁的下属包含X → get_org_tree(direction=up)
+- 汇报线、汇报关系、报告链、reporting line → get_org_tree(direction=both)
+- 组织架构、组织结构、组织树、某组织下面有哪些人 → get_org_tree(direction=down)
+- ⚠️ 禁止先跑 deep_recall / query / graph_query 再拼层级 — 直接调 get_org_tree
+- ⚠️ get_hierarchy 保留为单点上下文工具（manager+subordinates+peers），不用于树形遍历
+- ⚠️ 两人关系（"A和B什么关系"）走 connect 分支，不走这里
 
 ### Hierarchy — 分类归属
 - 分类、层级、属于哪个、子分类、parent/child → query.md
