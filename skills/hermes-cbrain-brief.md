@@ -73,7 +73,7 @@ get_provenance({ target_type: "link"|"timeline", target_id })
 - ❌ query+get_page+get_links+get_timeline 连调 → deep_recall 一次搞定
 - ❌ 连续多次 get_page → get_pages 批量搞定
 - ❌ 总结用 query → summarize | 核查用 query/agentic_research → deep_recall(grounded:true)
-- ❌ 首轮自动 expand_entity | 情境找人用 agentic_research → recall_episode
+- ❌ 首轮自动 expand_entity | 情境找人用 agentic_research → recall_episode | proactive 默认不展示
 - ❌ discovery 暴露 score/distance/debug | 回答超 500 字 | 末尾追问
 - ❌ 自然语言走 query → deep_recall 默认 | 输出含 raw JSON/slug/trace → 只用 display/summary
 - ❌ 不输出工具名（除非客户端 UI 已显示）

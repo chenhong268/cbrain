@@ -4,7 +4,7 @@ import type { ToolContext } from "../context.js";
 import { generateProactiveHints } from "../../core/proactive.js";
 import { isComplexQuery, type SearchTrace } from "../../core/search.js";
 import { traceToSteps } from "../../core/search-trace.js";
-import { trimHint } from "./trim.js";
+import { trimHint, applyProactiveBudget } from "./trim.js";
 import { formatQueryEnvelope } from "./format-result.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
@@ -122,7 +122,10 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
 
     const payload = {
       results,
-      proactive_hints: hints.length > 0 ? hints.map(trimHint) : undefined,
+      proactive_hints: (() => {
+        const budgeted = applyProactiveBudget(hints.map(trimHint), { grounded: false, toolType: "search" });
+        return budgeted.length > 0 ? budgeted : undefined;
+      })(),
       ...(trace.degraded_reason ? {
         degraded: true,
         vector_skipped: trace.degraded_reason === "vector_timeout" ? "timeout" : "error",

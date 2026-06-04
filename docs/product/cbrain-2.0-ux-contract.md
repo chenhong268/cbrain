@@ -18,6 +18,7 @@
 | C6 | 渐进披露：brief / normal / full | `ux-contract.test.ts` C6 | 默认值 + 截断 |
 | C7 | 失败降级：有结构，不是 raw error | `ux-contract.test.ts` C7 | 降级字段存在 |
 | C8 | 文档/测试不含真实人名 | `check-resolver-pilot.sh` §8 | 正则扫描 |
+| C9 | 渐进披露路由：首轮 brief，二轮按需展开 | `ux-contract.test.ts` C9 | 源码扫描 |
 
 ---
 
@@ -145,6 +146,24 @@
 **实现位置**: `bin/check-resolver-pilot.sh` §8 + `tests/mcp/ux-contract.test.ts` 隐私扫描
 
 **测试**: 正则扫描测试文件和文档中是否出现中文名模式。
+
+---
+
+## C9: 渐进披露路由
+
+**原则**: 首轮回答必须短（brief），第二轮按需展开。路由规则必须在代码和文档双重存在。Proactive hints 代码级执行预算。
+
+**约束**:
+- `deep_recall` 默认 `detail="brief"`（代码：Zod default）
+- recall.ts 工具描述必须包含首轮硬门控文本（禁止 get_page/expand_entity/get_timeline）
+- recall.ts 工具描述必须声明第二轮展开条件（展开/原文/详细）
+- recall-resolver.md 必须描述首轮/第二轮模式
+- hermes-cbrain-brief.md 必须提及首轮约束且 ≤ 3000 bytes
+- `applyProactiveBudget()` 代码级执行：grounded → []，normal → 最多 1 条
+
+**实现位置**: `src/mcp/tools/trim.ts` → `applyProactiveBudget`, `src/mcp/tools/recall.ts`
+
+**测试**: `ux-contract.test.ts` C9 源码扫描。
 
 ---
 

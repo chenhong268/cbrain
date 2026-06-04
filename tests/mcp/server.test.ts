@@ -1933,6 +1933,25 @@ describe("MCP Server", () => {
       expect(serialized).not.toContain("insights");
       expect(serialized).not.toContain("cross_refs");
     });
+
+    test("grounded response has no proactive_hints field on parsed JSON", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/gp", "GroundedP", "gp.md", "h3");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/gq", "GroundedQ", "gq.md", "h4");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entities/gp", "entities/gq", "关联", "wikilink", "trusted", 0.9, "test context");
+
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "GroundedP", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      // proactive_hints must be completely absent, not just empty
+      expect(data.proactive_hints).toBeUndefined();
+    });
   });
 
   // ─── deep_recall normal vs brief mode ────────────

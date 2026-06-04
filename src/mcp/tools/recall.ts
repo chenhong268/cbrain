@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { truncate, safeFrontmatter, trimLink, trimTimeline, getExpiryWarning, trimHint } from "./trim.js";
+import { truncate, safeFrontmatter, trimLink, trimTimeline, getExpiryWarning, trimHint, applyProactiveBudget } from "./trim.js";
 import type { Link } from "../../core/graph.js";
 import type { LinkRow } from "../../storage/sqlite.js";
 import { extractDossier } from "../../core/dossier.js";
@@ -369,7 +369,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       entities,
       insights: relatedInsights.length > 0 ? relatedInsights : undefined,
       cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
-      proactive_hints: proactiveHints.length > 0 ? proactiveHints.map(trimHint) : undefined,
+      proactive_hints: (() => {
+        const budgeted = applyProactiveBudget(proactiveHints.map(trimHint), { grounded: false, toolType: "recall" });
+        return budgeted.length > 0 ? budgeted : undefined;
+      })(),
       summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` +
         (expiredCount > 0 ? `，${expiredCount} 个已过期` : "") +
         (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +

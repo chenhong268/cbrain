@@ -29,12 +29,22 @@ export interface ToolSummary {
 
 const SLUG_PATH_RE = /brain\/(?:entities|concepts|insights|records)\//g;
 
+/** Terms that must never appear in display/summary text. Shared by formatters and tests. */
+export const DISPLAY_BANNED_TERMS = [
+  "score", "distance", "debug", "trace", "threshold",
+  "latency_ms", "vector", "degraded_reason", "_stub",
+];
+
 /**
- * Strip internal slug paths from display text.
+ * Strip internal slug paths and banned internal terms from display text.
  * "brain/entities/person-a" → "person-a"
  */
 export function sanitizeDisplay(text: string): string {
-  return text.replace(SLUG_PATH_RE, "");
+  let cleaned = text.replace(SLUG_PATH_RE, "");
+  for (const term of DISPLAY_BANNED_TERMS) {
+    cleaned = cleaned.replace(new RegExp(`\\b${term}\\b`, "g"), "");
+  }
+  return cleaned;
 }
 
 // ─── Ingest ─────────────────────────────────────────────────

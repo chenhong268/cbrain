@@ -176,6 +176,7 @@ describe("C5: proactive budget limits", () => {
       rule: "network_timeline" as const,
       text: "A".repeat(200),
       score: 0.85,
+      why: "test why",
     };
     const trimmed = trimHint(hint);
     // truncate(str, 120) produces max 123 chars (120 + "...")
@@ -189,6 +190,7 @@ describe("C5: proactive budget limits", () => {
       rule: "shared_connection" as const,
       text: "short",
       score: 0.123456,
+      why: "test why",
     };
     const trimmed = trimHint(hint);
     // Should be rounded to 0.12
@@ -248,6 +250,93 @@ describe("C5: proactive budget limits", () => {
     expect(source).toContain("默认不展示");
     expect(source).toContain("禁止逐条列出");
     expect(source).toContain("禁止使用");
+  });
+
+  test("applyProactiveBudget returns at most 1 hint with why", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    const hints = [
+      { rule: "network_timeline", text: "hint 1", score: 0.9, why: "changes conclusion", target_slug: "a", age_days: 1 },
+      { rule: "shared_connection", text: "hint 2", score: 0.8, why: "reveals hidden link", target_slug: "b" },
+      { rule: "expiry_alert", text: "hint 3", score: 0.7, why: "data may be stale", target_slug: "c" },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: false, toolType: "recall" });
+    expect(result.length).toBe(1);
+    expect(result[0].score).toBe(0.9);
+    expect(result[0].why).toBe("changes conclusion");
+  });
+
+  test("applyProactiveBudget returns [] for grounded mode", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    const hints = [
+      { rule: "network_timeline", text: "hint 1", score: 0.9, why: "important" },
+      { rule: "expiry_alert", text: "hint 2", score: 1.0, why: "expired" },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: true, toolType: "recall" });
+    expect(result).toEqual([]);
+  });
+
+  test("applyProactiveBudget filters below threshold", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    const hints = [
+      { rule: "network_timeline", text: "hint 1", score: 0.3, why: "something" },
+      { rule: "expiry_alert", text: "hint 2", score: 0.2, why: "something else" },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: false, toolType: "recall", minScore: 0.5 });
+    expect(result).toEqual([]);
+  });
+
+  test("applyProactiveBudget returns [] for empty input", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    expect(applyProactiveBudget([], { grounded: false, toolType: "recall" })).toEqual([]);
+  });
+
+  test("applyProactiveBudget filters stale network_timeline hints (>7 days)", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    const hints = [
+      { rule: "network_timeline", text: "old event", score: 0.9, why: "was relevant", target_slug: "a", age_days: 14 },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: false, toolType: "recall" });
+    expect(result).toEqual([]);
+  });
+
+  test("applyProactiveBudget keeps fresh network_timeline hints (<=7 days)", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    const hints = [
+      { rule: "network_timeline", text: "fresh event", score: 0.9, why: "changes conclusion", target_slug: "a", age_days: 3 },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: false, toolType: "recall" });
+    expect(result.length).toBe(1);
+    expect(result[0].why).toBe("changes conclusion");
+  });
+
+  test("applyProactiveBudget exempts expiry_alert from stale filter", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    const hints = [
+      { rule: "expiry_alert", text: "expired page", score: 1.0, why: "data is stale", target_slug: "b", age_days: 90 },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: false, toolType: "recall" });
+    expect(result.length).toBe(1);
+  });
+
+  test("applyProactiveBudget filters duplicate rule+target combinations", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    const hints = [
+      { rule: "network_timeline", text: "event v1", score: 0.9, why: "relevant", target_slug: "same-target", age_days: 1 },
+      { rule: "network_timeline", text: "event v2", score: 0.8, why: "also relevant", target_slug: "same-target", age_days: 2 },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: false, toolType: "recall" });
+    // Only 1 survives dedup + max-1 cap
+    expect(result.length).toBe(1);
+    expect(result[0].score).toBe(0.9);
+  });
+
+  test("applyProactiveBudget discards hints without why", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    const hints = [
+      { rule: "network_timeline", text: "no reason", score: 0.9, target_slug: "a", age_days: 1 },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: false, toolType: "recall" });
+    expect(result).toEqual([]);
   });
 });
 
@@ -384,6 +473,45 @@ describe("C8: no real names in docs/tests", () => {
       checkedCount++;
     }
     expect(checkedCount).toBeGreaterThan(0);
+  });
+});
+
+// ─── C9: 渐进披露路由规则 ─────────────────────────────────────
+
+describe("C9: progressive disclosure routing", () => {
+  const TOOLS_DIR = path.resolve(import.meta.dir, "../../src/mcp/tools");
+  const SKILLS_DIR = path.resolve(import.meta.dir, "../../skills");
+
+  test("recall.ts source contains first-round hard gate text", () => {
+    const source = fs.readFileSync(path.join(TOOLS_DIR, "recall.ts"), "utf-8");
+    // Must explicitly forbid get_page/expand_entity in first round
+    expect(source).toContain("禁止");
+    expect(source).toMatch(/get_page/);
+    expect(source).toMatch(/expand_entity/);
+  });
+
+  test("recall.ts description states condition for second-round expansion", () => {
+    const source = fs.readFileSync(path.join(TOOLS_DIR, "recall.ts"), "utf-8");
+    // Must state the trigger words for allowing second-round tools
+    expect(source).toMatch(/展开|原文|详细/);
+  });
+
+  test("recall-resolver.md mentions first-round/second-round pattern", () => {
+    const rr = fs.readFileSync(path.join(SKILLS_DIR, "recall-resolver.md"), "utf-8");
+    // Must describe the two-round discipline
+    expect(rr).toMatch(/首轮|第一轮/);
+    // Must describe the trigger for second round
+    expect(rr).toMatch(/展开|原文|详细|继续/);
+  });
+
+  test("hermes-cbrain-brief.md mentions first-round constraint", () => {
+    const brief = fs.readFileSync(path.join(SKILLS_DIR, "hermes-cbrain-brief.md"), "utf-8");
+    expect(brief).toMatch(/首轮.*禁止|禁止.*首轮/);
+  });
+
+  test("hermes-cbrain-brief.md stays within 3000 bytes", () => {
+    const brief = fs.readFileSync(path.join(SKILLS_DIR, "hermes-cbrain-brief.md"), "utf-8");
+    expect(Buffer.byteLength(brief, "utf-8")).toBeLessThanOrEqual(3000);
   });
 });
 

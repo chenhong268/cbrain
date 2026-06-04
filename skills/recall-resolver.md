@@ -364,6 +364,7 @@ grounded recall 返回后，首轮回答必须：
 - **grounded=true**：禁止展示任何 hint
 - **普通 recall**：默认不展示。只有 hint 直接改变当前判断时写成一句"另有后续变化可能影响方案适用范围"，禁止展开日期、人名、组织名、BU名
 - **禁止**：使用"💡 主动提示"标题、逐条列出 hints、展开 hint 细节（除非用户追问）
+- **代码执行**：`applyProactiveBudget` 限制最多 1 条。grounded 模式不生成 hints。
 
 ## 禁止模式
 

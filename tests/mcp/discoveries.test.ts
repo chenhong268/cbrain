@@ -337,5 +337,17 @@ describe("MCP Discovery Tools", () => {
 
       expect(payload.cards.length).toBeLessThanOrEqual(3);
     });
+
+    test("discovery response has no proactive_hints field (scope closure for #140)", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).read_discoveries.handler({});
+      const payload = JSON.parse(result.content[0].text);
+      // Discovery digest has its own display rules; proactive_hints is not part of its scope
+      expect(payload.proactive_hints).toBeUndefined();
+      // Display and summary follow the same banned-term rules as other tools
+      for (const w of BANNED_WORDS) {
+        expect(payload.display?.includes(w) ?? false).toBe(false);
+      }
+    });
   });
 });

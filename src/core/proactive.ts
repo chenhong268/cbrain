@@ -7,6 +7,12 @@ export interface ProactiveHint {
   rule: "network_timeline" | "shared_connection" | "expiry_alert";
   text: string;
   score: number;
+  /** Why this hint changes current understanding — without a why, the hint is discarded */
+  why: string;
+  /** Target entity slug for duplicate suppression */
+  target_slug?: string;
+  /** Days since the event — null if not applicable (used for stale filtering) */
+  age_days?: number | null;
 }
 
 const JUNK_PREFIXES = ["records/", "templates/", "attachments/"];
@@ -81,7 +87,14 @@ function buildTimelineHint(
     ? (Date.now() - new Date(evt.event_date).getTime()) / (1000 * 60 * 60 * 24)
     : 90; // no date = low score
   const score = Math.max(0, 1.0 - daysSince / 180);
-  return { rule: "network_timeline", text: truncateText(text, 120), score };
+  return {
+    rule: "network_timeline",
+    text: truncateText(text, 120),
+    score,
+    why: `${evt.title} 有新动态，可能影响之前讨论的结论`,
+    target_slug: evt.slug,
+    age_days: Math.round(daysSince),
+  };
 }
 
 // ─── Rule 2: Shared Connections ────────────────────────────
@@ -133,7 +146,13 @@ function buildSharedConnectionHint(
   // Score: 1.0 for 1 unique owner (concentrated), 0 for 10+ unique owners (diffuse)
   const uniqueOwners = neighborOwners.get(sharedSlug)?.length ?? 1;
   const score = Math.max(0, 1.0 - uniqueOwners / 10);
-  return { rule: "shared_connection", text: truncateText(text, 120), score };
+  return {
+    rule: "shared_connection",
+    text: truncateText(text, 120),
+    score,
+    why: `${ownerTitles.join(" 和 ")} 之间的共同关联 ${sharedTitle} 可能揭示未注意的关系`,
+    target_slug: sharedSlug,
+  };
 }
 
 // ─── Rule 3: Expiry Alert ──────────────────────────────────
@@ -160,7 +179,13 @@ function buildExpiryHint(
   const isExpired = new Date(exp.expires_at) <= new Date();
   const status = isExpired ? "已过期" : "即将过期";
   const text = `⏰ ${exp.title} ${status}（${exp.expires_at.slice(0, 10)}），信息可能不是最新的`;
-  return { rule: "expiry_alert", text: truncateText(text, 120), score: 1.0 };
+  return {
+    rule: "expiry_alert",
+    text: truncateText(text, 120),
+    score: 1.0,
+    why: `${exp.title} ${status}，决策前提可能需要重新评估`,
+    target_slug: exp.slug,
+  };
 }
 
 // ─── Helpers ────────────────────────────────────────────────

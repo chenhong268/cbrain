@@ -99,10 +99,67 @@ export function stubEntity(
 
 const VALID_RULES = new Set(["network_timeline", "shared_connection", "expiry_alert"]);
 
-export function trimHint(hint: ProactiveHint): { rule: string; text: string; score: number } {
+export function trimHint(hint: ProactiveHint): { rule: string; text: string; score: number; why: string; target_slug?: string; age_days?: number | null } {
   return {
     rule: VALID_RULES.has(hint.rule) ? hint.rule : "unknown",
     text: truncate(hint.text, 120),
     score: Math.round(hint.score * 100) / 100,
+    why: truncate(hint.why ?? "", 200),
+    target_slug: hint.target_slug,
+    age_days: hint.age_days,
   };
+}
+
+export interface ProactiveBudgetOptions {
+  grounded: boolean;
+  toolType: "recall" | "search";
+  minScore?: number;
+  /** Days threshold for stale network_timeline hints. Default: 7. expiry_alert is exempt. */
+  staleDays?: number;
+}
+
+type BudgetHint = { rule: string; text: string; score: number; why?: string; target_slug?: string; age_days?: number | null };
+
+/**
+ * Apply the proactive budget policy.
+ * - grounded mode: always return [] (no hints in grounded responses)
+ * - normal mode: return at most 1 hint, filtered by:
+ *   1. score >= threshold (default 0.5)
+ *   2. must have a non-empty `why` (no-why → discard)
+ *   3. stale: network_timeline with age_days > staleDays (default 7) is suppressed; expiry_alert exempt
+ *   4. duplicate: same rule + target_slug only kept once
+ */
+export function applyProactiveBudget(
+  hints: BudgetHint[],
+  options: ProactiveBudgetOptions,
+): BudgetHint[] {
+  if (options.grounded) return [];
+
+  const threshold = options.minScore ?? 0.5;
+  const staleDays = options.staleDays ?? 7;
+
+  const filtered = hints
+    // Score threshold
+    .filter(h => h.score >= threshold)
+    // No-why filter: must explain why it matters
+    .filter(h => (h.why ?? "").length > 0)
+    // Stale filter: suppress old network_timeline hints (expiry_alert exempt)
+    .filter(h => {
+      if (h.rule === "expiry_alert") return true;
+      if (h.age_days == null) return true;
+      return h.age_days <= staleDays;
+    });
+
+  // Duplicate suppression: same rule + target_slug
+  const seen = new Set<string>();
+  const deduped = filtered.filter(h => {
+    const key = `${h.rule}:${h.target_slug ?? h.text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  if (deduped.length === 0) return [];
+  deduped.sort((a, b) => b.score - a.score);
+  return [deduped[0]];
 }

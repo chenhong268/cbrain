@@ -19,6 +19,7 @@ import {
   formatDiscoveriesEnvelope,
   formatGetPagesEnvelope,
   sanitizeDisplay,
+  DISPLAY_BANNED_TERMS,
   type ToolSummary,
 } from "../../src/mcp/tools/format-result.js";
 import type { EpisodicRecallResult } from "../../src/core/episodic-recall.js";
@@ -26,10 +27,9 @@ import type { OrgTreeResult } from "../../src/core/hierarchy.js";
 
 // ─── Shared ────────────────────────────────────────────────────
 
-const BANNED_INTERNAL = [
-  "slug", "chunk", "score", "tier", "trace", "latency_ms",
-  "source", "vector", "fts", "threshold", "_stub", "diagnostics",
-];
+// Test-only extras (structural internals not expected in display text)
+const TEST_ONLY_BANNED = ["slug", "chunk", "source", "tier", "fts", "diagnostics"];
+const BANNED_INTERNAL = [...DISPLAY_BANNED_TERMS, ...TEST_ONLY_BANNED];
 
 function assertNoInternalTerms(text: string): void {
   const lower = text.toLowerCase();
