@@ -7,8 +7,8 @@ import { canMerge, getLayer } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
 
-function syncWikilinkRelations(ctx: ToolContext, slug: string, mentionedSlugs: Set<string>): void {
-  for (const s of new Set([slug, ...mentionedSlugs])) {
+function syncWikilinkRelations(ctx: ToolContext, slug: string, affectedSlugs: Set<string>): void {
+  for (const s of new Set([slug, ...affectedSlugs])) {
     try { ctx.pages.syncLinksToMarkdown(s); } catch { /* non-critical */ }
   }
 }
@@ -70,37 +70,72 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── put_page ──────────────────────────────────────────────
   server.registerTool("put_page", {
-    description: "Create or update a page. If the slug exists, updates it; otherwise creates a new page.",
+    description:
+      "Create or update a page. For existing pages, defaults to patch mode (append body, merge tags, preserve content). " +
+      "Use mode='replace' to explicitly overwrite (creates a version snapshot first). " +
+      "For new pages, mode is ignored.",
     inputSchema: {
       slug: z.string().max(500).describe("Page slug (e.g. brain/entities/zhangsan)"),
-      content: z.string().max(500_000).describe("Page body content (markdown)"),
+      content: z.string().max(500_000).describe("Page body content (markdown). In patch mode: appended. In replace mode: replaces body."),
+      mode: z.enum(["patch", "replace"]).optional().describe("patch=append+merge (default for existing), replace=full overwrite (explicit opt-in)"),
       title: z.string().max(500).optional().describe("Page title (required for new pages)"),
       type: z.string().max(200).optional().default("record").describe("Page type (required for new pages)"),
-      tags: z.array(z.string().max(200)).optional().describe("Tags to apply"),
+      tags: z.array(z.string().max(200)).optional().describe("Tags. patch: merged (union). replace: replaced."),
+      extra: z.record(z.string().max(200), z.unknown()).optional().describe("Frontmatter fields to set (e.g. reports_to, confidence). Works in all modes including new pages."),
     },
-  }, async ({ slug, content, title, type, tags }) => {
+  }, async ({ slug, content, mode, title, type, tags, extra }) => {
     const existing = ctx.pages.getBySlug(slug);
     if (existing) {
-      ctx.versions.createVersion(slug); // snapshot before update
-      const updated = ctx.pages.update(slug, { body: content, tags });
+      const effectiveMode = mode ?? "patch";
+      let updated: import("../../core/page.js").Page | null = null;
+      let previousVersion: number | null = null;
+      let finalBody: string;
+
+      // Capture old reports_to before mutation for KR sync
+      const oldReportsTo = existing.frontmatter.reports_to as string | undefined;
+
+      if (effectiveMode === "replace") {
+        // Explicit full overwrite — snapshot first
+        previousVersion = ctx.versions.createVersion(slug);
+        updated = ctx.pages.update(slug, { body: content, tags, extra });
+        finalBody = content;
+      } else {
+        // Patch mode (default) — append body, merge tags, update frontmatter fields
+        updated = ctx.pages.patch(slug, { body_append: content, tags_merge: tags, extra });
+        finalBody = updated?.body ?? content;
+      }
+
       if (updated) {
-        await indexPage(ctx.pipeline, slug, content, ctx.logger);
+        await indexPage(ctx.pipeline, slug, finalBody, ctx.logger);
         const pageType = existing.type;
-        const wlResult = ctx.pipeline.processWikilinks(slug, content);
+        const wlResult = ctx.pipeline.processWikilinks(slug, finalBody);
         if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
-          ctx.pipeline.processNer(slug, content, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
+          ctx.pipeline.processNer(slug, finalBody, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
         }
-        syncWikilinkRelations(ctx, slug, wlResult.mentionedSlugs);
+        // Sync reports_to graph edge if frontmatter has it
+        ctx.pipeline.processReportsTo(slug, updated.frontmatter);
+        // Sync KR for self, wikilink targets, old manager, new manager
+        const newReportsTo = updated.frontmatter.reports_to as string | undefined;
+        const affectedSlugs = new Set([slug, ...wlResult.mentionedSlugs]);
+        if (oldReportsTo) affectedSlugs.add(oldReportsTo);
+        if (newReportsTo) affectedSlugs.add(newReportsTo);
+        syncWikilinkRelations(ctx, slug, affectedSlugs);
       }
       return {
-        content: [{ type: "text", text: JSON.stringify({ action: "updated", page: updated ? { slug: updated.slug, title: updated.title } : null }, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify({
+          action: "updated",
+          mode: effectiveMode,
+          ...(previousVersion !== null ? { previous_version: previousVersion } : {}),
+          page: updated ? { slug: updated.slug, title: updated.title } : null,
+        }, null, 2) }],
       };
     }
+
+    // ── New page path ──
     // Check for same-title-different-person before creating
     if (title) {
       const dup = ctx.db.getPageByTitleExcluding(title, slug);
       if (dup) {
-        // Suggest a disambiguated slug based on type or tags
         const context = tags?.join("-") || type || "entity";
         const suggestedSlug = slug.replace(/\/[^/]+$/, `/${title}-${context}`);
         return {
@@ -117,14 +152,20 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (!title) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "title is required for new pages" }) }] };
     }
-    const created = ctx.pages.create({ slug, title, type: type ?? "record", body: content, tags });
+    const created = ctx.pages.create({ slug, title, type: type ?? "record", body: content, tags, extra });
     await indexPage(ctx.pipeline, created.slug, content, ctx.logger);
     const pageType = created.type;
     const wlResult = ctx.pipeline.processWikilinks(created.slug, content);
     if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
       ctx.pipeline.processNer(created.slug, content, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
     }
-    syncWikilinkRelations(ctx, created.slug, wlResult.mentionedSlugs);
+    // Sync reports_to graph edge if extra provided it
+    ctx.pipeline.processReportsTo(created.slug, created.frontmatter);
+    // Sync KR for self, wikilink targets, and reports_to manager
+    const createdReportsTo = created.frontmatter.reports_to as string | undefined;
+    const createdAffected = new Set([created.slug, ...wlResult.mentionedSlugs]);
+    if (createdReportsTo) createdAffected.add(createdReportsTo);
+    syncWikilinkRelations(ctx, created.slug, createdAffected);
     return {
       content: [{ type: "text", text: JSON.stringify({ action: "created", page: { slug: created.slug, title: created.title } }, null, 2) }],
     };

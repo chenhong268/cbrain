@@ -388,6 +388,383 @@ describe("MCP Server", () => {
       expect(targetB).toContain("## Known Relations");
       expect(targetB).toContain("person-c");
     });
+
+    // ── patch/replace mode tests ──
+
+    test("existing page without mode defaults to patch (preserves body)", async () => {
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      const fileA = join(vaultPath, "records", "note.md");
+      writeFileSync(fileA, "---\ntitle: Note\ntype: record\n---\noriginal body", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
+      ).run("brain/records/note", "Note", "records/note.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/records/note",
+        content: "appended content",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("updated");
+      expect(data.mode).toBe("patch");
+      // No previous_version for patch mode
+      expect(data.previous_version).toBeUndefined();
+
+      const updated = readFileSync(fileA, "utf-8");
+      expect(updated).toContain("original body");
+      expect(updated).toContain("appended content");
+    });
+
+    test("mode=replace overwrites body and creates version snapshot", async () => {
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      const fileA = join(vaultPath, "records", "note.md");
+      writeFileSync(fileA, "---\ntitle: Note\ntype: record\n---\nold content", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
+      ).run("brain/records/note", "Note", "records/note.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/records/note",
+        content: "brand new content",
+        mode: "replace",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("updated");
+      expect(data.mode).toBe("replace");
+      expect(data.previous_version).toBeGreaterThanOrEqual(1);
+
+      const updated = readFileSync(fileA, "utf-8");
+      expect(updated).toContain("brand new content");
+      expect(updated).not.toContain("old content");
+    });
+
+    test("mode=patch with extra updates frontmatter fields", async () => {
+      mkdirSync(join(vaultPath, "entities", "person"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person", "zhang.md");
+      writeFileSync(fileA, "---\ntitle: Zhang\ntype: entity/person\n---\noriginal info", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person/zhang", "Zhang", "entities/person/zhang.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/person/zhang",
+        content: "new info",
+        mode: "patch",
+        extra: { reports_to: "brain/entities/person/boss", confidence: 0.95 },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("updated");
+      expect(data.mode).toBe("patch");
+
+      const updated = readFileSync(fileA, "utf-8");
+      expect(updated).toContain("original info");
+      expect(updated).toContain("new info");
+      expect(updated).toContain("reports_to");
+      expect(updated).toContain("brain/entities/person/boss");
+    });
+
+    test("mode=patch merges tags instead of replacing", async () => {
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      const fileA = join(vaultPath, "records", "note.md");
+      writeFileSync(fileA, "---\ntitle: Note\ntype: record\ntags:\n  - old\n  - shared\n---\nbody", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
+      ).run("brain/records/note", "Note", "records/note.md", "h1");
+      db.rawDb.prepare("INSERT INTO tags (page_slug, tag) VALUES (?, ?)").run("brain/records/note", "old");
+      db.rawDb.prepare("INSERT INTO tags (page_slug, tag) VALUES (?, ?)").run("brain/records/note", "shared");
+
+      const server = createServer(deps);
+      await getTools(server).put_page.handler({
+        slug: "brain/records/note",
+        content: "more",
+        mode: "patch",
+        tags: ["shared", "new"],
+      });
+
+      const updated = readFileSync(fileA, "utf-8");
+      expect(updated).toContain("old");
+      expect(updated).toContain("shared");
+      expect(updated).toContain("new");
+    });
+
+    test("patch preserves Known Relations section", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-a.md");
+      const fileB = join(vaultPath, "entities", "person-b.md");
+      writeFileSync(fileA, "---\ntitle: PersonA\ntype: entity/person\n---\noriginal\n\n## Known Relations\n\n- friend → [[person-b]]\n", "utf-8");
+      writeFileSync(fileB, "---\ntitle: PersonB\ntype: entity/person\n---\ncontent B", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-a", "PersonA", "entities/person-a.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-b", "PersonB", "entities/person-b.md", "h2");
+      // Add the link to DB so syncLinksToMarkdown can rebuild it
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
+      ).run("brain/entities/person-a", "brain/entities/person-b", "friend");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/person-a",
+        content: "appended info",
+        mode: "patch",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("updated");
+
+      const updated = readFileSync(fileA, "utf-8");
+      expect(updated).toContain("original");
+      expect(updated).toContain("appended info");
+      // KR section should be rebuilt by syncLinksToMarkdown
+      expect(updated).toContain("## Known Relations");
+    });
+
+    test("new page ignores mode parameter", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/person/new-person",
+        content: "brand new",
+        title: "NewPerson",
+        type: "entity/person",
+        mode: "replace",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("created");
+      expect(data.mode).toBeUndefined();
+    });
+
+    test("old-style call (no mode) on existing page is safe — patch by default", async () => {
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      const fileA = join(vaultPath, "records", "legacy.md");
+      writeFileSync(fileA, "---\ntitle: Legacy\ntype: record\n---\nimportant data that must not be lost", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
+      ).run("brain/records/legacy", "Legacy", "records/legacy.md", "h1");
+
+      const server = createServer(deps);
+      // Old-style call: no mode parameter at all
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/records/legacy",
+        content: "additional notes",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("updated");
+      expect(data.mode).toBe("patch");
+
+      const updated = readFileSync(fileA, "utf-8");
+      // Original content must NOT be lost
+      expect(updated).toContain("important data that must not be lost");
+      expect(updated).toContain("additional notes");
+    });
+
+    // ── reports_to graph sync tests ──
+
+    test("patch extra.reports_to creates graph edge", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "sub.md");
+      const fileB = join(vaultPath, "entities", "boss.md");
+      writeFileSync(fileA, "---\ntitle: Sub\ntype: entity/person\n---\ninfo", "utf-8");
+      writeFileSync(fileB, "---\ntitle: Boss\ntype: entity/person\n---\ninfo", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/sub", "Sub", "entities/sub.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/boss", "Boss", "entities/boss.md", "h2");
+
+      const server = createServer(deps);
+      await getTools(server).put_page.handler({
+        slug: "brain/entities/sub",
+        content: "updated",
+        mode: "patch",
+        extra: { reports_to: "brain/entities/boss" },
+      });
+
+      // Graph must have reports_to edge
+      const link = db.rawDb.prepare(
+        "SELECT relation FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'"
+      ).get("brain/entities/sub", "brain/entities/boss") as { relation: string } | undefined;
+      expect(link).toBeDefined();
+      expect(link!.relation).toBe("reports_to");
+    });
+
+    test("patch extra.reports_to replaces old reports_to edge", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "sub.md");
+      const fileB = join(vaultPath, "entities", "old-boss.md");
+      const fileC = join(vaultPath, "entities", "new-boss.md");
+      writeFileSync(fileA, "---\ntitle: Sub\ntype: entity/person\nreports_to: brain/entities/old-boss\n---\ninfo", "utf-8");
+      writeFileSync(fileB, "---\ntitle: OldBoss\ntype: entity/person\n---\ninfo", "utf-8");
+      writeFileSync(fileC, "---\ntitle: NewBoss\ntype: entity/person\n---\ninfo", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/sub", "Sub", "entities/sub.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/old-boss", "OldBoss", "entities/old-boss.md", "h2");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/new-boss", "NewBoss", "entities/new-boss.md", "h3");
+      // Pre-existing edge to old boss
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, 'reports_to')"
+      ).run("brain/entities/sub", "brain/entities/old-boss");
+
+      const server = createServer(deps);
+      await getTools(server).put_page.handler({
+        slug: "brain/entities/sub",
+        content: "updated",
+        mode: "patch",
+        extra: { reports_to: "brain/entities/new-boss" },
+      });
+
+      // Old edge must be gone
+      const oldLink = db.rawDb.prepare(
+        "SELECT relation FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'"
+      ).get("brain/entities/sub", "brain/entities/old-boss");
+      expect(oldLink).toBeNull();
+
+      // New edge must exist
+      const newLink = db.rawDb.prepare(
+        "SELECT relation FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'"
+      ).get("brain/entities/sub", "brain/entities/new-boss");
+      expect(newLink).not.toBeNull();
+    });
+
+    test("new page with extra.reports_to writes frontmatter and creates graph edge", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileBoss = join(vaultPath, "entities", "boss.md");
+      writeFileSync(fileBoss, "---\ntitle: Boss\ntype: entity/person\n---\ninfo", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/boss", "Boss", "entities/boss.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/newbie",
+        content: "new employee",
+        title: "Newbie",
+        type: "entity/person",
+        extra: { reports_to: "brain/entities/boss" },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("created");
+      // canonicalSlug normalizes to brain/entities/person/newbie
+      const canonicalSlug = data.page.slug;
+
+      // Frontmatter should have reports_to
+      const file = join(vaultPath, "brain", "entities", "person", "newbie.md");
+      expect(existsSync(file)).toBe(true);
+      const content = readFileSync(file, "utf-8");
+      expect(content).toContain("reports_to");
+      expect(content).toContain("brain/entities/boss");
+
+      // Graph must have reports_to edge
+      const link = db.rawDb.prepare(
+        "SELECT relation FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'"
+      ).get(canonicalSlug, "brain/entities/boss");
+      expect(link).not.toBeNull();
+    });
+
+    // ── reports_to KR sync tests ──
+
+    test("patch extra.reports_to syncs manager's incoming Known Relations", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileSub = join(vaultPath, "entities", "sub.md");
+      const fileBoss = join(vaultPath, "entities", "boss.md");
+      writeFileSync(fileSub, "---\ntitle: Sub\ntype: entity/person\n---\ninfo", "utf-8");
+      writeFileSync(fileBoss, "---\ntitle: Boss\ntype: entity/person\n---\ninfo", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/sub", "Sub", "entities/sub.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/boss", "Boss", "entities/boss.md", "h2");
+
+      const server = createServer(deps);
+      await getTools(server).put_page.handler({
+        slug: "brain/entities/sub",
+        content: "updated",
+        mode: "patch",
+        extra: { reports_to: "brain/entities/boss" },
+      });
+
+      // Manager file should have incoming Known Relations section
+      const bossContent = readFileSync(fileBoss, "utf-8");
+      expect(bossContent).toContain("## Known Relations");
+      expect(bossContent).toContain("reports_to");
+      expect(bossContent).toContain("brain/entities/sub");
+    });
+
+    test("changing reports_to removes old manager KR and adds new manager KR", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileSub = join(vaultPath, "entities", "sub.md");
+      const fileOldBoss = join(vaultPath, "entities", "old-boss.md");
+      const fileNewBoss = join(vaultPath, "entities", "new-boss.md");
+      writeFileSync(fileSub, "---\ntitle: Sub\ntype: entity/person\nreports_to: brain/entities/old-boss\n---\ninfo", "utf-8");
+      writeFileSync(fileOldBoss, "---\ntitle: OldBoss\ntype: entity/person\n---\ninfo", "utf-8");
+      writeFileSync(fileNewBoss, "---\ntitle: NewBoss\ntype: entity/person\n---\ninfo", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/sub", "Sub", "entities/sub.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/old-boss", "OldBoss", "entities/old-boss.md", "h2");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/new-boss", "NewBoss", "entities/new-boss.md", "h3");
+      // Pre-existing edge to old boss
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, 'reports_to')"
+      ).run("brain/entities/sub", "brain/entities/old-boss");
+
+      const server = createServer(deps);
+      await getTools(server).put_page.handler({
+        slug: "brain/entities/sub",
+        content: "updated",
+        mode: "patch",
+        extra: { reports_to: "brain/entities/new-boss" },
+      });
+
+      // Old boss: incoming KR should be gone
+      const oldBossContent = readFileSync(fileOldBoss, "utf-8");
+      expect(oldBossContent).not.toContain("brain/entities/sub");
+
+      // New boss: incoming KR should appear
+      const newBossContent = readFileSync(fileNewBoss, "utf-8");
+      expect(newBossContent).toContain("## Known Relations");
+      expect(newBossContent).toContain("reports_to");
+      expect(newBossContent).toContain("brain/entities/sub");
+    });
+
+    test("new page with extra.reports_to syncs manager's incoming Known Relations", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileBoss = join(vaultPath, "entities", "boss.md");
+      writeFileSync(fileBoss, "---\ntitle: Boss\ntype: entity/person\n---\ninfo", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/boss", "Boss", "entities/boss.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/rookie",
+        content: "new hire",
+        title: "Rookie",
+        type: "entity/person",
+        extra: { reports_to: "brain/entities/boss" },
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("created");
+
+      // Boss file should have incoming KR from the new employee
+      const bossContent = readFileSync(fileBoss, "utf-8");
+      expect(bossContent).toContain("## Known Relations");
+      expect(bossContent).toContain("reports_to");
+      expect(bossContent).toContain(data.page.slug);
+    });
   });
 
   describe("append_page tool", () => {

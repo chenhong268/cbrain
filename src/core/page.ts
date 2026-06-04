@@ -44,6 +44,37 @@ export interface Page {
   updated_at: string;
 }
 
+/**
+ * Strip auto-generated link sections from a page body.
+ * Removes legacy <!-- cbrain-links --> blocks, ## Known Relations section,
+ * and stray **关联** lines. Returns the cleaned body (trimmed right).
+ */
+function stripKnownRelations(body: string): string {
+  let clean = body;
+  // 1) Remove legacy <!-- cbrain-links --> ... <!-- /cbrain-links --> blocks
+  const LEGACY_OPEN = "<!-- cbrain-links -->";
+  const LEGACY_CLOSE = "<!-- /cbrain-links -->";
+  let legacyOpenIdx = clean.indexOf(LEGACY_OPEN);
+  while (legacyOpenIdx !== -1) {
+    const legacyCloseIdx = clean.indexOf(LEGACY_CLOSE, legacyOpenIdx);
+    if (legacyCloseIdx !== -1) {
+      clean = clean.substring(0, legacyOpenIdx) + clean.substring(legacyCloseIdx + LEGACY_CLOSE.length);
+    } else {
+      break;
+    }
+    legacyOpenIdx = clean.indexOf(LEGACY_OPEN);
+  }
+  // 2) Remove ## Known Relations section (to end of body)
+  const SECTION_HEADER = "## Known Relations";
+  const sectionIdx = clean.indexOf(SECTION_HEADER);
+  if (sectionIdx !== -1) {
+    clean = clean.substring(0, sectionIdx);
+  }
+  // 3) Remove any stray "**关联**" line left from legacy
+  clean = clean.replace(/\n\*\*关联\*\*\n/g, "\n");
+  return clean.trimEnd();
+}
+
 export class PageManager {
   private db: CBrainDB;
   readonly vaultPath: string;
@@ -260,6 +291,41 @@ export class PageManager {
     return this.getBySlug(slug);
   }
 
+  /**
+   * Patch an existing page: append body, merge tags, update specific frontmatter fields.
+   * Preserves original body content (strips Known Relations before append — they'll be
+   * rebuilt by syncLinksToMarkdown after the caller finishes post-processing).
+   */
+  patch(
+    slug: string,
+    updates: {
+      body_append?: string;
+      tags_merge?: string[];
+      extra?: Record<string, unknown>;
+    }
+  ): Page | null {
+    const page = this.getBySlug(slug);
+    if (!page) { this.logger?.error("page", "patch 失败：页面不存在", { slug }); return null; }
+
+    // Strip KR section before appending — syncLinksToMarkdown will rebuild it later
+    const strippedBody = stripKnownRelations(page.body ?? "");
+    const newBody = updates.body_append
+      ? strippedBody + "\n\n" + updates.body_append
+      : strippedBody;
+
+    // Merge tags (union, dedup)
+    const currentTags = (page.frontmatter.tags as string[]) ?? [];
+    const mergedTags = updates.tags_merge
+      ? [...new Set([...currentTags, ...updates.tags_merge])]
+      : undefined;
+
+    return this.update(slug, {
+      body: newBody,
+      ...(mergedTags ? { tags: mergedTags } : {}),
+      extra: updates.extra,
+    });
+  }
+
   async delete(slug: string): Promise<boolean> {
     const filePath = this.db.getPageFilePath(slug);
     if (filePath === null) return false;
@@ -311,30 +377,9 @@ export class PageManager {
     const { links: _, ...cleanFm } = frontmatter;
     const updatedFm = { ...cleanFm, updated_at: new Date().toISOString() } as PageFrontmatter;
 
-    // Remove any existing auto-generated link sections
-    let cleanBody = body;
-    // 1) Remove legacy <!-- cbrain-links --> ... <!-- /cbrain-links --> block
-    const LEGACY_OPEN = "<!-- cbrain-links -->";
-    const LEGACY_CLOSE = "<!-- /cbrain-links -->";
-    let legacyOpenIdx = cleanBody.indexOf(LEGACY_OPEN);
-    while (legacyOpenIdx !== -1) {
-      const legacyCloseIdx = cleanBody.indexOf(LEGACY_CLOSE, legacyOpenIdx);
-      if (legacyCloseIdx !== -1) {
-        cleanBody = cleanBody.substring(0, legacyOpenIdx) + cleanBody.substring(legacyCloseIdx + LEGACY_CLOSE.length);
-      } else {
-        break;
-      }
-      legacyOpenIdx = cleanBody.indexOf(LEGACY_OPEN);
-    }
-    // 2) Remove ## Known Relations section (to end of body)
+    // Strip auto-generated link sections
+    const cleanBody = stripKnownRelations(body);
     const SECTION_HEADER = "## Known Relations";
-    const sectionIdx = cleanBody.indexOf(SECTION_HEADER);
-    if (sectionIdx !== -1) {
-      cleanBody = cleanBody.substring(0, sectionIdx);
-    }
-    // 3) Remove any stray "**关联**" line left from legacy
-    cleanBody = cleanBody.replace(/\n\*\*关联\*\*\n/g, "\n");
-    cleanBody = cleanBody.trimEnd();
 
     const newBody = linkLines.length > 0
       ? `${cleanBody}\n\n${SECTION_HEADER}\n\n${linkLines.join("\n")}\n`

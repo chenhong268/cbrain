@@ -181,4 +181,51 @@ describe("PageManager", () => {
     expect(merged!.slug).toBe(targetSlug);
     expect(deletedSlugs).toEqual([sourceSlug]);
   });
+
+  // ── patch() tests ──────────────────────────────────────────
+
+  test("patch appends body to existing page", () => {
+    const page = pm.create({ title: "笔记", type: "record", body: "原始内容", tags: ["旧标签"] });
+
+    const patched = pm.patch(page.slug, { body_append: "追加内容" });
+    expect(patched).not.toBeNull();
+    expect(patched!.body).toContain("原始内容");
+    expect(patched!.body).toContain("追加内容");
+    // Appended content should come after original
+    expect(patched!.body.indexOf("原始内容")).toBeLessThan(patched!.body.indexOf("追加内容"));
+  });
+
+  test("patch merges tags (union, dedup)", () => {
+    const page = pm.create({ title: "笔记", type: "record", body: "内容", tags: ["旧标签", "共有"] });
+
+    const patched = pm.patch(page.slug, { tags_merge: ["新标签", "共有"] });
+    expect(patched).not.toBeNull();
+    const tags = (patched!.frontmatter.tags as string[]).sort();
+    expect(tags).toEqual(["共有", "新标签", "旧标签"].sort());
+  });
+
+  test("patch updates frontmatter fields via extra", () => {
+    const page = pm.create({ title: "张三", type: "entity/person", body: "信息" });
+
+    const patched = pm.patch(page.slug, { extra: { reports_to: "brain/entities/person/李四", confidence: 0.9 } });
+    expect(patched).not.toBeNull();
+    expect(patched!.frontmatter.reports_to).toBe("brain/entities/person/李四");
+    expect(patched!.frontmatter.confidence).toBe(0.9);
+    // Body should not change when only extra is provided
+    expect(patched!.body).toContain("信息");
+  });
+
+  test("patch strips Known Relations before appending", () => {
+    const page = pm.create({ title: "实体", type: "entity/person", body: "正文" });
+
+    // Simulate a Known Relations section
+    pm.update(page.slug, { body: "正文\n\n## Known Relations\n\n- 认识 → [[某人]]\n" });
+
+    const patched = pm.patch(page.slug, { body_append: "追加信息" });
+    expect(patched).not.toBeNull();
+    // Old KR section should be stripped (syncLinksToMarkdown would rebuild it)
+    expect(patched!.body).not.toContain("## Known Relations");
+    expect(patched!.body).toContain("正文");
+    expect(patched!.body).toContain("追加信息");
+  });
 });
