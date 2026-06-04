@@ -4,6 +4,7 @@ import type { ToolContext } from "../context.js";
 import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity } from "./trim.js";
 import { type SearchTrace } from "../../core/search.js";
 import { traceToSteps } from "../../core/search-trace.js";
+import { formatSummarizeEnvelope } from "./format-result.js";
 
 const TOP_N = 3;
 
@@ -56,10 +57,13 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
     } catch { /* trace write failure must not break search */ }
 
     if (searchResults.length === 0) {
+      const emptyPayload = { topic, entities: [], stats: { totalEntities: 0 }, summary: "未找到相关内容" };
+      const { display, summary, raw } = formatSummarizeEnvelope(emptyPayload);
+      const { summary: legacySummary, ...emptyRest } = emptyPayload;
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ topic, entities: [], stats: { totalEntities: 0 }, summary: "未找到相关内容" }, null, 2),
+          text: JSON.stringify({ display, summary, raw, result_summary: legacySummary, ...emptyRest }, null, 2),
         }],
       };
     }
@@ -174,18 +178,20 @@ export function registerSummarizeTools(server: McpServer, ctx: ToolContext): voi
       confidence: i.confidence,
     }));
 
+    const payload = {
+      topic,
+      search_meta: { strategy: "hybrid", latency_ms: searchLatencyMs, degraded: searchLatencyMs > 2000 },
+      entities,
+      insights: relatedInsights.length > 0 ? relatedInsights : undefined,
+      neighbors: neighbors.length > 0 ? neighbors : undefined,
+      crossRefs: crossRefs.length > 0 ? crossRefs : undefined,
+      stats: { totalEntities: entities.length, detailEntities: entities.length - stubCount, stubEntities: stubCount, totalLinks, totalEvents, avgTier, totalNeighbors: neighbors.length, totalInsights: relatedInsights.length },
+    };
+    const { display, summary, raw } = formatSummarizeEnvelope(payload);
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({
-          topic,
-          search_meta: { strategy: "hybrid", latency_ms: searchLatencyMs, degraded: searchLatencyMs > 2000 },
-          entities,
-          insights: relatedInsights.length > 0 ? relatedInsights : undefined,
-          neighbors: neighbors.length > 0 ? neighbors : undefined,
-          crossRefs: crossRefs.length > 0 ? crossRefs : undefined,
-          stats: { totalEntities: entities.length, detailEntities: entities.length - stubCount, stubEntities: stubCount, totalLinks, totalEvents, avgTier, totalNeighbors: neighbors.length, totalInsights: relatedInsights.length },
-        }, null, 2),
+        text: JSON.stringify({ display, summary, raw, ...payload }, null, 2),
       }],
     };
   });

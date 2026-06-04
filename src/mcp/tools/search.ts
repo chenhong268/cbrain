@@ -5,6 +5,7 @@ import { generateProactiveHints } from "../../core/proactive.js";
 import { isComplexQuery, type SearchTrace } from "../../core/search.js";
 import { traceToSteps } from "../../core/search-trace.js";
 import { trimHint } from "./trim.js";
+import { formatQueryEnvelope } from "./format-result.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
   // ─── query ───────────────────────────────────────────────
@@ -116,16 +117,18 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       maxHints: 2,
     });
 
+    const payload = {
+      results,
+      proactive_hints: hints.length > 0 ? hints.map(trimHint) : undefined,
+      ...(trace.degraded_reason ? {
+        degraded: true,
+        vector_skipped: trace.degraded_reason === "vector_timeout" ? "timeout" : "error",
+        latency_ms: latencyMs,
+      } : {}),
+    };
+    const { display, summary, raw } = formatQueryEnvelope(payload);
     return {
-      content: [{ type: "text", text: JSON.stringify({
-        results,
-        proactive_hints: hints.length > 0 ? hints.map(trimHint) : undefined,
-        ...(trace.degraded_reason ? {
-          degraded: true,
-          vector_skipped: trace.degraded_reason === "vector_timeout" ? "timeout" : "error",
-          latency_ms: latencyMs,
-        } : {}),
-      }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...payload }, null, 2) }],
     };
   });
 

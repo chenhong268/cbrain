@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { EpisodicRecaller } from "../../core/episodic-recall.js";
+import { formatEpisodeEnvelope } from "./format-result.js";
 
 export function registerEpisodeTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool(
@@ -63,11 +64,15 @@ export function registerEpisodeTools(server: McpServer, ctx: ToolContext): void 
         limit,
       });
 
+      // Build envelope — preserve original summary string as result_summary
+      const { display, summary, raw } = formatEpisodeEnvelope(result);
+      const { summary: legacySummary, ...restPayload } = result;
+
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(result, null, 2),
+            text: JSON.stringify({ display, summary, raw, result_summary: legacySummary, ...restPayload }, null, 2),
           },
         ],
       };

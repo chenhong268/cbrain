@@ -13,6 +13,7 @@ import { type SearchTrace } from "../../core/search.js";
 import { traceToSteps } from "../../core/search-trace.js";
 import { collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
+import { formatRecallEnvelope, formatGroundedRecallEnvelope } from "./format-result.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -133,21 +134,22 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       if (grounded) {
         const emptyBoard = { facts: [], user_thoughts: [], candidates: [], gaps: [], conflicts: [] as Array<{ claim: string; evidence: EvidenceItem[] }> };
         const groundedResult = buildGroundedRecall(query, emptyBoard);
+        const groundedPayload = { query, grounded_answer: groundedResult, search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs } };
+        const { display, summary, raw } = formatGroundedRecallEnvelope(groundedPayload);
         return {
           content: [{
             type: "text" as const,
-            text: JSON.stringify({
-              query,
-              grounded_answer: groundedResult,
-              search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs },
-            }, null, 2),
+            text: JSON.stringify({ display, summary, raw, ...groundedPayload }, null, 2),
           }],
         };
       }
+      const emptyPayload = { query, entities: [], summary: "未找到相关实体" };
+      const { display: emptyDisplay, summary: emptySummary, raw: emptyRaw } = formatRecallEnvelope(emptyPayload);
+      const { summary: emptyLegacySummary, ...emptyRest } = emptyPayload;
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ query, entities: [], summary: "未找到相关实体" }, null, 2),
+          text: JSON.stringify({ display: emptyDisplay, summary: emptySummary, raw: emptyRaw, result_summary: emptyLegacySummary, ...emptyRest }, null, 2),
         }],
       };
     }
@@ -157,14 +159,16 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const board = collectEvidenceForSlugs(ctx.db, resultSlugs);
       const groundedResult = buildGroundedRecall(query, board);
 
+      const groundedPayload = {
+        query,
+        grounded_answer: groundedResult,
+        search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs },
+      };
+      const { display: gDisplay, summary: gSummary, raw: gRaw } = formatGroundedRecallEnvelope(groundedPayload);
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({
-            query,
-            grounded_answer: groundedResult,
-            search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs },
-          }, null, 2),
+          text: JSON.stringify({ display: gDisplay, summary: gSummary, raw: gRaw, ...groundedPayload }, null, 2),
         }],
       };
     }
@@ -359,25 +363,25 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     try { ctx.db.validateLinksForSlugs(topSlugs); } catch { /* non-critical */ }
 
+    const payload = {
+      query,
+      search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs, degraded: searchLatencyMs > 2000 },
+      entities,
+      insights: relatedInsights.length > 0 ? relatedInsights : undefined,
+      cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
+      proactive_hints: proactiveHints.length > 0 ? proactiveHints.map(trimHint) : undefined,
+      summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` +
+        (expiredCount > 0 ? `，${expiredCount} 个已过期` : "") +
+        (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +
+        (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 个关联更新` : ""),
+    };
+
+    const { display, summary: envelopeSummary, raw } = formatRecallEnvelope(payload);
+    const { summary: legacySummary, ...payloadRest } = payload;
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify(
-          {
-            query,
-            search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs, degraded: searchLatencyMs > 2000 },
-            entities,
-            insights: relatedInsights.length > 0 ? relatedInsights : undefined,
-            cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
-            proactive_hints: proactiveHints.length > 0 ? proactiveHints.map(trimHint) : undefined,
-            summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` +
-              (expiredCount > 0 ? `，${expiredCount} 个已过期` : "") +
-              (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +
-              (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 个关联更新` : ""),
-          },
-          null,
-          2,
-        ),
+        text: JSON.stringify({ display, summary: envelopeSummary, raw, result_summary: legacySummary, ...payloadRest }, null, 2),
       }],
     };
   });

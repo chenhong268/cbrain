@@ -186,7 +186,8 @@ describe("MCP Discovery Tools", () => {
       expect(titles.some((t: string) => t.includes("关注度"))).toBe(true);
 
       assertNoBannedWords(payload.display);
-      assertNoBannedWords(payload.summary);
+      assertNoBannedWords(payload.summary.message);
+      expect(payload.raw).toBeDefined();
       for (const card of payload.cards) {
         assertNoBannedWords(Object.values(card).join(" "));
       }
@@ -228,7 +229,8 @@ describe("MCP Discovery Tools", () => {
 
       expect(payload.cards.length).toBe(0);
       expect(payload.display).toBe("暂无新的发现。");
-      expect(payload.summary).toContain("暂无");
+      expect(payload.result_summary).toContain("暂无");
+      expect(payload.raw).toBeDefined();
     });
   });
 
@@ -264,7 +266,7 @@ describe("MCP Discovery Tools", () => {
 
       const bannedSummaryWords = ["检测完成", "新增", "结构异常"];
       for (const w of bannedSummaryWords) {
-        expect(payload.summary.includes(w)).toBe(false);
+        expect(payload.result_summary?.includes(w) ?? payload.summary.message.includes(w)).toBe(false);
       }
     });
 
@@ -285,7 +287,8 @@ describe("MCP Discovery Tools", () => {
       expect(payload.display).toBeDefined();
 
       for (const w of BANNED_WORDS) {
-        expect(payload.summary.includes(w)).toBe(false);
+        expect(payload.summary.message.includes(w)).toBe(false);
+        expect(payload.result_summary?.includes(w) ?? false).toBe(false);
         expect(payload.display.includes(w)).toBe(false);
       }
       for (const card of payload.cards) {

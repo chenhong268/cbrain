@@ -4,6 +4,7 @@ import type { ToolContext } from "../context.js";
 import { DiscoveryManager } from "../../core/discovery.js";
 import type { DiscoveryType } from "../../core/discovery.js";
 import { formatDiscoveryDigest } from "../../core/discovery-digest.js";
+import { formatDiscoveriesEnvelope } from "./format-result.js";
 
 const TYPE_LABELS: Record<string, string> = {
   bridge: "桥接",
@@ -75,23 +76,22 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     const entityLookup = (slug: string) => ctx.db.getPage(slug);
     const digest = formatDiscoveryDigest(rows, entityLookup, displayLimit);
 
-    const summary = digest.cards.length > 0
+    const summaryText = digest.cards.length > 0
       ? `今天有 ${digest.cards.length} 条值得关注的发现。`
       : "今天暂无新的发现。";
 
     const payload: Record<string, unknown> = {
-      display: digest.display,
       cards: digest.cards,
-      summary,
     };
     if (debug) {
       payload._debug = digest._debug;
     }
 
+    const { display, summary, raw } = formatDiscoveriesEnvelope({ display: digest.display, cards: digest.cards, summary: summaryText });
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify(payload, null, 2),
+        text: JSON.stringify({ display, summary, raw, result_summary: summaryText, ...payload }, null, 2),
       }],
     };
   });
@@ -124,14 +124,12 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     const entityLookup = (slug: string) => ctx.db.getPage(slug);
     const digest = formatDiscoveryDigest(newRows, entityLookup, 3);
 
-    const summary = digest.cards.length > 0
+    const summaryText = digest.cards.length > 0
       ? `今天有 ${digest.cards.length} 条值得关注的发现。`
       : "今天暂无值得打扰你的新发现。";
 
     const payload: Record<string, unknown> = {
-      display: digest.display,
       cards: digest.cards,
-      summary,
     };
 
     if (debug) {
@@ -162,10 +160,11 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       };
     }
 
+    const { display, summary, raw } = formatDiscoveriesEnvelope({ display: digest.display, cards: digest.cards, summary: summaryText });
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify(payload, null, 2),
+        text: JSON.stringify({ display, summary, raw, result_summary: summaryText, ...payload }, null, 2),
       }],
     };
   });

@@ -1846,7 +1846,8 @@ describe("MCP Server", () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.candidates).toEqual([]);
       expect(data.search_meta.total_scanned).toBe(1);
-      expect(data.summary).toContain("没有找到");
+      expect(data.result_summary).toContain("没有找到");
+      expect(data.raw).toBeDefined();
     });
 
     test("returns matched candidate with enriched output shape", async () => {
@@ -1881,10 +1882,11 @@ describe("MCP Server", () => {
       expect(data.candidates[0].evidence).toBeInstanceOf(Array);
       expect(data.candidates[0].evidence.length).toBeGreaterThan(0);
       expect(data.candidates[0].next_disambiguating_clue).toBeNull();
-      expect(data.summary).toContain("人物A");
+      expect(data.result_summary).toContain("人物A");
       expect(data.search_meta).toBeDefined();
       expect(data.search_meta.hints_applied).toContain("topic");
       expect(data.search_meta.hints_applied).toContain("relation");
+      expect(data.raw).toBeDefined();
     });
 
     test("event_hint scores against timeline summaries", async () => {

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { setHierarchy, removeHierarchy, getHierarchyContext, getOrgTree } from "../../core/hierarchy.js";
+import { formatOrgTreeEnvelope } from "./format-result.js";
 
 export function registerHierarchyTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("set_hierarchy", {
@@ -176,10 +177,11 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
       try { ctx.learn.bumpOnQuery(allSlugs[i], i, "get_org_tree"); } catch { /* non-critical */ }
     }
 
+    const { display, summary, raw } = formatOrgTreeEnvelope(result);
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify(result, null, 2),
+        text: JSON.stringify({ display, summary, raw, ...result }, null, 2),
       }],
     };
   });

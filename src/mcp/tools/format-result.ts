@@ -1,5 +1,7 @@
 import type { IngestResult } from "../../core/ingest.js";
 import type { DialogueIngestResult } from "../../core/dialogue.js";
+import type { EpisodicRecallResult } from "../../core/episodic-recall.js";
+import type { OrgTreeResult } from "../../core/hierarchy.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -12,6 +14,27 @@ export interface CaptureEnvelope<T> {
     message: string;
   };
   raw: T;
+}
+
+export interface ToolSummary {
+  status: "ok" | "empty" | "degraded" | "error";
+  count: number;
+  truncated: boolean;
+  message: string;
+  degraded_reason?: string;
+  next_steps?: string[];
+}
+
+// ─── Internal identifier sanitization ───────────────────────
+
+const SLUG_PATH_RE = /brain\/(?:entities|concepts|insights|records)\//g;
+
+/**
+ * Strip internal slug paths from display text.
+ * "brain/entities/person-a" → "person-a"
+ */
+export function sanitizeDisplay(text: string): string {
+  return text.replace(SLUG_PATH_RE, "");
 }
 
 // ─── Ingest ─────────────────────────────────────────────────
@@ -120,5 +143,366 @@ export function formatDialogueResult(
       message: display,
     },
     raw: result,
+  };
+}
+
+// ─── Tool Envelope Formatters ──────────────────────────────────
+//
+// All formatters return { display, summary, raw }.
+// Tool handlers then spread: { display, summary, raw, result_summary?, ...rest }.
+// `result_summary` preserves the old summary string for backward compat.
+
+interface RecallPayload {
+  query: string;
+  entities?: Array<{ title?: string; _stub?: boolean }>;
+  search_meta?: { degraded?: boolean; latency_ms?: number };
+  summary?: string;
+}
+
+export function formatRecallEnvelope(payload: RecallPayload): {
+  display: string;
+  summary: ToolSummary;
+  raw: RecallPayload;
+} {
+  const entities = payload.entities ?? [];
+  const count = entities.length;
+  const isDegraded = payload.search_meta?.degraded === true;
+
+  if (count === 0) {
+    return {
+      display: `未找到与「${payload.query}」相关的实体。`,
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "未找到相关实体",
+        next_steps: ["尝试换个关键词", "用 deep_recall 换一种搜索策略"],
+      },
+      raw: payload,
+    };
+  }
+
+  const topNames = entities
+    .filter(e => !e._stub)
+    .slice(0, 3)
+    .map(e => e.title ?? "未知")
+    .join("、");
+
+  const display = isDegraded
+    ? sanitizeDisplay(`搜索耗时较长，返回了部分结果。找到 ${count} 个相关实体。`)
+    : sanitizeDisplay(`找到 ${count} 个相关实体。${topNames ? `最相关的是${topNames}。` : ""}`);
+
+  return {
+    display,
+    summary: {
+      status: isDegraded ? "degraded" : "ok",
+      count,
+      truncated: entities.some(e => e._stub),
+      message: payload.summary ?? `找到 ${count} 个相关实体`,
+      degraded_reason: isDegraded ? "搜索超时，降级到部分结果" : undefined,
+    },
+    raw: payload,
+  };
+}
+
+/** Grounded recall has its own display logic — evidence board, not entity count. */
+interface GroundedRecallPayload {
+  query: string;
+  grounded_answer: { facts?: unknown[]; candidates?: unknown[]; gaps?: unknown[]; conflicts?: unknown[]; confidence?: string };
+  search_meta?: { degraded?: boolean; latency_ms?: number };
+}
+
+export function formatGroundedRecallEnvelope(payload: GroundedRecallPayload): {
+  display: string;
+  summary: ToolSummary;
+  raw: GroundedRecallPayload;
+} {
+  const ga = payload.grounded_answer;
+  const facts = ga.facts?.length ?? 0;
+  const candidates = ga.candidates?.length ?? 0;
+  const gaps = ga.gaps?.length ?? 0;
+  const conflicts = ga.conflicts?.length ?? 0;
+  const isDegraded = payload.search_meta?.degraded === true;
+
+  const parts: string[] = [`已查找关于「${payload.query}」的证据。`];
+  if (facts > 0) parts.push(`确认 ${facts} 条事实。`);
+  if (candidates > 0) parts.push(`${candidates} 个待确认候选。`);
+  if (conflicts > 0) parts.push(`${conflicts} 处矛盾。`);
+  if (gaps > 0) parts.push(`${gaps} 个信息缺口。`);
+
+  const signalCount = facts + candidates + conflicts + gaps;
+  const display = sanitizeDisplay(parts.join(""));
+
+  return {
+    display,
+    summary: {
+      status: isDegraded ? "degraded" : (signalCount > 0 ? "ok" : "empty"),
+      count: signalCount,
+      truncated: false,
+      message: `证据核查：${facts} 条事实，${candidates} 个候选，${conflicts} 处矛盾，${gaps} 个缺口`,
+      degraded_reason: isDegraded ? "搜索超时" : undefined,
+    },
+    raw: payload,
+  };
+}
+
+interface QueryPayload {
+  results?: Array<{ snippet?: string }>;
+  degraded?: boolean;
+  vector_skipped?: string;
+  latency_ms?: number;
+}
+
+export function formatQueryEnvelope(payload: QueryPayload): {
+  display: string;
+  summary: ToolSummary;
+  raw: QueryPayload;
+} {
+  const count = payload.results?.length ?? 0;
+
+  if (count === 0) {
+    return {
+      display: "搜索未返回结果。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "搜索未返回结果",
+        next_steps: ["尝试换关键词", "用 deep_recall 代替 query"],
+      },
+      raw: payload,
+    };
+  }
+
+  if (payload.degraded) {
+    const reason = payload.vector_skipped === "timeout" ? "向量搜索超时" : "向量搜索异常";
+    return {
+      display: sanitizeDisplay(`搜索遇到问题（${reason}），返回了 ${count} 条结果。`),
+      summary: {
+        status: "degraded",
+        count,
+        truncated: false,
+        message: `搜索降级，返回 ${count} 条结果`,
+        degraded_reason: reason,
+      },
+      raw: payload,
+    };
+  }
+
+  return {
+    display: sanitizeDisplay(`搜索完成，返回 ${count} 条结果。`),
+    summary: {
+      status: "ok",
+      count,
+      truncated: false,
+      message: `搜索完成，返回 ${count} 条结果`,
+    },
+    raw: payload,
+  };
+}
+
+interface GetPagePayload {
+  title?: string | null;
+  body_length?: number;
+  has_more?: boolean;
+  slug?: string;
+  error?: string;
+}
+
+export function formatGetPageEnvelope(payload: GetPagePayload): {
+  display: string;
+  summary: ToolSummary;
+  raw: GetPagePayload;
+} {
+  if (payload.error) {
+    return {
+      display: "页面不存在。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "页面不存在",
+      },
+      raw: payload,
+    };
+  }
+
+  const title = payload.title ?? "未知页面";
+  const length = payload.body_length ?? 0;
+  const truncated = payload.has_more === true;
+  const statusLabel = truncated ? "（内容已截断）" : "（完整内容）";
+
+  return {
+    display: sanitizeDisplay(`页面「${title}」，${length} 字${statusLabel}。`),
+    summary: {
+      status: "ok",
+      count: 1,
+      truncated,
+      message: `页面「${title}」，${length} 字`,
+    },
+    raw: payload,
+  };
+}
+
+interface SummarizePayload {
+  topic: string;
+  entities?: Array<{ title?: string; _stub?: boolean }>;
+  stats?: {
+    totalEntities?: number;
+    detailEntities?: number;
+    stubEntities?: number;
+    totalLinks?: number;
+    totalEvents?: number;
+  };
+  search_meta?: { degraded?: boolean };
+  summary?: string;
+}
+
+export function formatSummarizeEnvelope(payload: SummarizePayload): {
+  display: string;
+  summary: ToolSummary;
+  raw: SummarizePayload;
+} {
+  const entities = payload.entities ?? [];
+  const count = entities.length;
+  const stats = payload.stats;
+
+  if (count === 0) {
+    return {
+      display: `未找到与「${payload.topic}」相关的内容。`,
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "未找到相关内容",
+        next_steps: ["尝试换个关键词", "缩小搜索范围"],
+      },
+      raw: payload,
+    };
+  }
+
+  const links = stats?.totalLinks ?? 0;
+  const events = stats?.totalEvents ?? 0;
+  const isDegraded = payload.search_meta?.degraded === true;
+
+  const display = sanitizeDisplay(
+    `主题「${payload.topic}」：${count} 个实体，${links} 个链接，${events} 个时间线事件。`,
+  );
+
+  return {
+    display,
+    summary: {
+      status: isDegraded ? "degraded" : "ok",
+      count,
+      truncated: (stats?.stubEntities ?? 0) > 0,
+      message: payload.summary ?? `主题「${payload.topic}」：${count} 个实体`,
+      degraded_reason: isDegraded ? "搜索超时" : undefined,
+    },
+    raw: payload,
+  };
+}
+
+export function formatEpisodeEnvelope(result: EpisodicRecallResult): {
+  display: string;
+  summary: ToolSummary;
+  raw: EpisodicRecallResult;
+} {
+  const count = result.candidates.length;
+
+  if (count === 0) {
+    return {
+      display: "根据提供的线索，未找到匹配的人物。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "未找到匹配的人物",
+        next_steps: ["提供更多线索（时间、地点、事件）", "尝试用 deep_recall 搜索"],
+      },
+      raw: result,
+    };
+  }
+
+  const names = result.candidates
+    .slice(0, 3)
+    .map(c => c.title)
+    .join("、");
+
+  return {
+    display: sanitizeDisplay(`根据线索找到 ${count} 个候选人：${names}。`),
+    summary: {
+      status: "ok",
+      count,
+      truncated: result.candidates.length > 3,
+      message: result.summary,
+    },
+    raw: result,
+  };
+}
+
+export function formatOrgTreeEnvelope(result: OrgTreeResult): {
+  display: string;
+  summary: ToolSummary;
+  raw: OrgTreeResult;
+} {
+  const upCount = result.upward.length;
+  const downCount = result.downward.length;
+  const total = 1 + upCount + downCount;
+  const title = result.seed.title;
+
+  return {
+    display: sanitizeDisplay(
+      `${title} 的组织架构：向上 ${upCount} 级，向下 ${downCount} 人，共 ${total} 个节点。`,
+    ),
+    summary: {
+      status: "ok",
+      count: total,
+      truncated: false,
+      message: `${title} 的组织架构：${total} 个节点`,
+    },
+    raw: result,
+  };
+}
+
+interface DiscoveriesPayload {
+  display?: string;
+  cards?: Array<{ title?: string }>;
+  summary?: string;
+}
+
+export function formatDiscoveriesEnvelope(payload: DiscoveriesPayload): {
+  display: string;
+  summary: ToolSummary;
+  raw: DiscoveriesPayload;
+} {
+  const count = payload.cards?.length ?? 0;
+
+  if (count === 0) {
+    return {
+      display: payload.display ?? "今天暂无新的发现。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: payload.summary ?? "暂无新发现",
+      },
+      raw: payload,
+    };
+  }
+
+  // Reuse existing display text if available
+  const display = payload.display
+    ? sanitizeDisplay(payload.display)
+    : `今天有 ${count} 条值得关注的发现。`;
+
+  return {
+    display,
+    summary: {
+      status: "ok",
+      count,
+      truncated: false,
+      message: payload.summary ?? `有 ${count} 条发现`,
+    },
+    raw: payload,
   };
 }

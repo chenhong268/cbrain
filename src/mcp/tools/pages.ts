@@ -6,6 +6,7 @@ import type { ToolContext } from "../context.js";
 import { canMerge, getLayer } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
+import { formatGetPageEnvelope } from "./format-result.js";
 
 function syncWikilinkRelations(ctx: ToolContext, slug: string, affectedSlugs: Set<string>): void {
   for (const s of new Set([slug, ...affectedSlugs])) {
@@ -24,7 +25,8 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   }, async ({ slug, include_full_body }) => {
     const row = ctx.db.getPage(slug);
     if (!row) {
-      return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }] };
+      const { display, summary, raw } = formatGetPageEnvelope({ error: "Page not found" });
+      return { content: [{ type: "text", text: JSON.stringify({ display, summary, raw, error: "Page not found" }) }] };
     }
 
     const filePath = row.file_path as string | undefined;
@@ -42,14 +44,18 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
 
     const bodyLength = body?.length ?? 0;
     if (include_full_body || bodyLength === 0) {
+      const payload = { ...row, body, body_length: bodyLength, has_more: false };
+      const { display, summary, raw } = formatGetPageEnvelope(payload);
       return {
-        content: [{ type: "text", text: JSON.stringify({ ...row, body, body_length: bodyLength, has_more: false }, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...payload }, null, 2) }],
       };
     }
 
     const { body: trimmedBody, has_more } = trimPageBody(body ?? "");
+    const payload = { ...row, body: trimmedBody, body_length: bodyLength, has_more };
+    const { display, summary, raw } = formatGetPageEnvelope(payload);
     return {
-      content: [{ type: "text", text: JSON.stringify({ ...row, body: trimmedBody, body_length: bodyLength, has_more }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...payload }, null, 2) }],
     };
   });
 

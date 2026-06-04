@@ -10,7 +10,7 @@
 import { describe, test, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { formatIngestResult, formatDialogueResult } from "../../src/mcp/tools/format-result.js";
+import { formatIngestResult, formatDialogueResult, formatRecallEnvelope, formatGroundedRecallEnvelope, formatQueryEnvelope, formatGetPageEnvelope, formatSummarizeEnvelope, formatEpisodeEnvelope, formatOrgTreeEnvelope, formatDiscoveriesEnvelope } from "../../src/mcp/tools/format-result.js";
 import type { IngestResult } from "../../src/core/ingest.js";
 import type { DialogueIngestResult } from "../../src/core/dialogue.js";
 
@@ -67,6 +67,41 @@ describe("C1: CaptureEnvelope structure", () => {
     const result = formatIngestResult(stubIngest, "Test");
     for (const term of BANNED) {
       expect(result.display.toLowerCase()).not.toContain(term.toLowerCase());
+    }
+  });
+
+  test("high-frequency tools produce display + summary + raw envelope", () => {
+    // All 8 format functions return { display, summary, raw }
+    const formatters = [
+      () => formatRecallEnvelope({ query: "test", entities: [] }),
+      () => formatGroundedRecallEnvelope({ query: "test", grounded_answer: { facts: [], candidates: [], gaps: [], conflicts: [] } }),
+      () => formatQueryEnvelope({ results: [] }),
+      () => formatGetPageEnvelope({ title: "Test", body_length: 100, has_more: false }),
+      () => formatSummarizeEnvelope({ topic: "test", entities: [] }),
+      () => formatEpisodeEnvelope({
+        query: "test", summary: "none", candidates: [],
+        search_meta: { time_parsed: null, tokens_used: [], total_scanned: 0, hints_applied: [] },
+        diagnostics: { clues_checked: [] },
+      } as any),
+      () => formatOrgTreeEnvelope({
+        seed: { slug: "a", title: "A", type: "entity" },
+        upward: [], downward: [], warnings: [],
+      }),
+      () => formatDiscoveriesEnvelope({ cards: [] }),
+    ];
+
+    for (const fn of formatters) {
+      const result = fn();
+      expect(result).toHaveProperty("display");
+      expect(result).toHaveProperty("summary");
+      expect(result).toHaveProperty("raw");
+      expect(typeof result.display).toBe("string");
+      expect(result.display.length).toBeGreaterThan(0);
+      expect(result.summary).toHaveProperty("status");
+      expect(result.summary).toHaveProperty("count");
+      expect(result.summary).toHaveProperty("truncated");
+      expect(result.summary).toHaveProperty("message");
+      expect(result.raw).toBeDefined();
     }
   });
 });
