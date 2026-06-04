@@ -1,6 +1,36 @@
 # Changelog
 
-> Current: `v1.9.0` — 收口 Hermes 自然对话入口，将 CBrain 从工具集合推进到可验收的 Agent-facing 体验层。
+> Current: `v1.9.1` — 安全加固、性能优化与 Logger 体系化：输入校验、错误脱敏、LanceDB 磁盘回收、discovery ID 闭环。
+
+## [v1.9.1] — 2026-06-04
+
+### 安全加固
+- **MCP 输入长度限制（#123）**：92 个 `z.string()` 参数全面加 `.max()` 保护，新增 `src/mcp/validation.ts` 常量参考 + 自动回归测试，防止超长输入打爆 LLM / 存储
+- **MCP 错误信息脱敏（#120）**：`sanitizeError()` 过滤内部路径、stack trace 和表名，避免 Agent 面向用户的回复泄露文件系统结构
+- **Frontmatter slug 路径穿越校验（#118）**：`syncPage` 拒绝包含 `..` 的 slug，防止恶意 markdown 文件越权读写
+
+### 性能优化
+- **LanceDB compact 集成（#124）**：dream 周期新增 Stage 4.6 碎片合并，实测 5.3GB → 56MB，解决 manifest 版本无限堆积
+- **EntityResolver 查询缓存（#122）**：`getAllEntityTitles` 在 resolve session 内缓存，避免同一批次 N 次 NER 重复查 DB
+
+### 可靠性
+- **Logger 体系化（#125 / #126）**：7 个核心类接入可选 Logger，14 处 `console.error` 迁移为结构化日志；ENOENT（测试临时目录清理）静默，真实错误 fallback 到 console.error
+- **NER 同批次前缀去重（#116）**：`"人物A全名"` 和 `"人物A全"` 不再创建两个 stub，Layer 0b 前缀分组合并
+- **Title 碰撞静默重放修复（#114）**：`idx_pages_title_uniq` 冲突不再每次 sync 循环重复报错
+- **Dream / query 超时分离（#115）**：dream timeout 不影响实时查询，各自独立控制
+- **Discovery ID 闭环**：`DigestCard` 新增 `id` 字段，Agent 可从 `read_discoveries` 返回的卡片直接调用 `update_discovery_status`
+
+### 新功能
+- **结构化知识写入（#112）**：新增 `add_knowledge` MCP 工具，支持直接写入事实和关系（facts + relations），跳过 ingest 管道
+- **来源溯源（#107）**：`deep_recall` 返回 provenance 信息，Agent 可展示"这个答案来自哪里"
+- **首运行诊断（#108）**：新增 `cbrain doctor` 快速检查 DB / vault / LanceDB 就绪状态
+- **reports_to 同步（#110）**：frontmatter `reports_to` 字段变更自动同步为 graph link
+
+### 治理与测试
+- `bun run check`：1342 pass / 0 fail / 3561 expect() calls
+- 所有测试数据继续使用匿名占位符（人物A-F, 组织D）
+
+## [v1.9.0] — 2026-06-02
 
 ## [v1.9.0] — 2026-06-02
 
