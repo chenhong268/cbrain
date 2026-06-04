@@ -110,6 +110,16 @@
 │   → graph_query(mode=traverse, depth=2)
 │   → 深度分析 → connect skill
 │
+├─ "组织层级 / 汇报关系"？
+│   信号：下属、上级、汇报线、谁向谁汇报、组织架构、
+│         组织结构、团队有哪些人、直属、管谁、向谁汇报
+│   → 解析种子实体（从查询中提取组织/人物名称）
+│   → graph_query(mode=traverse, depth=2) 或 get_hierarchy
+│   → 有结果 → 按层级呈现（树形/缩进列表）
+│   → 无结果 → fallback deep_recall(detail=normal)
+│   → 种子无法解析 → "无法确定你指的是哪个实体，能说得更具体一些吗？"
+│   注意：两人关系（"A和B什么关系"）走上面的 connect 分支，不走这里
+│
 ├─ "最近有什么发现"？
 │   信号：有什么发现、漏掉的、关联没注意到、洞察
 │   → read_discoveries

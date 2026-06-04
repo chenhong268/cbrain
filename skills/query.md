@@ -163,6 +163,59 @@ When loaded with `[provenance]` flag (from RESOLVER.md "Source Tracking / Proven
 - 不编造 provenance — 找不到 target 就说找不到
 - 不把 provenance 用于普通内容回忆
 
+## [graph_first] Branch — 组织层级查询
+
+When loaded with `[graph_first]` flag (from RESOLVER.md "Hierarchy — 组织层级" section):
+
+**核心原则**：graph 遍历优先，语义搜索兜底。组织/汇报线关系存在 graph 的 `reports_to`/`manages` 边里，不在向量/FTS 索引里，语义搜索大概率返回空。
+
+**执行协议：**
+
+1. **解析种子实体**：从查询中提取组织/人物名称
+   - 单实体 + 下属意图 → 用该实体作为种子
+   - 组织 + 区域/团队 → 尝试拼接或搜索匹配的实体 slug
+   - 无法确定种子 → 跳到步骤 5
+
+2. **graph_query 遍历**：
+   ```
+   graph_query({ slug: "解析到的slug", mode: "traverse", depth: 2 })
+   ```
+   或查看完整层级树：
+   ```
+   get_hierarchy({ slug: "解析到的slug" })
+   ```
+
+3. **有结果** → 按层级结构呈现（树形或缩进列表）
+   - 直接下属列在一起
+   - 间接下属（depth=2）分组或缩进
+   - 包含实体 title（不是 slug）
+
+4. **graph 返回空** → fallback 语义搜索：
+   ```
+   deep_recall({ query: "原始查询", detail: "normal", limit: 5 })
+   ```
+   将结果中的实体关系信息整理后呈现
+
+5. **种子无法解析** → 告知用户：
+   - "无法确定你指的是哪个实体/组织。能说得更具体一些吗？比如完整的人名或组织名称。"
+   - **禁止**：静默返回空结果、编造实体名称
+
+**适用条件（满足任一）：**
+- 用户问"X的下属/团队有哪些"、"X管谁"
+- 用户问"X向谁汇报"、"X的上级/老板是谁"
+- 用户问"汇报线/汇报关系/组织架构/组织结构"
+- 用户问"某组织/区域/团队下面有哪些人"
+
+**不适用（走现有路由）：**
+- 两人关系（"A和B什么关系"）→ connect / graph_query（非 hierarchy 路径）
+- 分类归属（"X属于哪个分类"）→ deep_recall / query
+- 普通内容回忆 → deep_recall(detail: normal)
+
+**硬禁止：**
+- 不输出 slug、link_id、edge_id
+- 不输出 raw JSON 或工具名
+- 种子无法解析时**禁止**静默返回空
+
 ## Search Strategies
 
 ### Vector Search

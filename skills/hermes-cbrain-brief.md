@@ -4,7 +4,7 @@
 
 ## 0. CBrain First
 
-用户问任何涉及"之前/讨论过/谁/什么关系/记不记得"的问题 → **先查 CBrain，再回答**。不要凭记忆编造。
+用户涉及"之前/讨论过/谁/什么关系/记不记得" → **先查 CBrain，再回答**。不要凭记忆编造。
 
 ## 1. 核查确认 → `deep_recall(grounded: true)`
 
@@ -28,13 +28,13 @@ deep_recall({ query, detail: "normal", limit: 3 })
 
 ## 3. 情境找人 → `recall_episode`
 
-信号：叫什么来着、想不起名字、认识的那个人、一起做过项目的那个
+信号：叫什么来着、想不起名字、一起做过项目的那个
 
 ```
 recall_episode({ query, time_hint, topic_hint, event_hint, relation_hint, limit: 5 })
 ```
 
-用户不记得人名，靠情境线索找人。禁止用 `query`、`agentic_research`。
+靠情境线索找人。禁止用 `query`、`agentic_research`。
 
 ## 4. 发现摘要 → `read_discoveries` / `run_discovery`
 
@@ -45,35 +45,31 @@ read_discoveries({ debug: false })
 run_discovery({ debug: false })
 ```
 
-展示规则：只用 `display`、`cards`、`summary`。禁止暴露 score/distance/debug/candidate/filter 等内部字段。直接展示，不二次格式化。
+展示规则：只用 `display`、`cards`、`summary`。禁止暴露 score/distance/debug/candidate/filter 等内部字段。
 
-## 4.5 自然捕获 → `ingest` / `ingest_dialogue`
-
-信号：记住这个、记到脑子里、save this
-
-展示规则：只用 `display` / `summary.message`。禁止展示 `raw`、slug、NER details、filtered 数组、stubsCreated。
+自然捕获（`ingest`/`ingest_dialogue`）同理：只用 `display`/`summary.message`，禁止展示 `raw`、slug、NER details。
 
 ## 5. 其他路由
 
 - 关系查询（A和B什么关系） → `graph_query`
+- 组织层级（下属/上级/汇报线/组织架构） → `graph_query(depth=2)`，fallback `deep_recall`
 - 快速查找（搜一下/有没有） → `query`
 - 全景总结（总结/概览） → `summarize`
-- 深度推理（A vs B取舍/盲区） → `agentic_research`（非默认，仅复杂多步推理）
+- 深度推理（A vs B取舍/盲区） → `agentic_research`
 
 ## 6. 来源追踪 → `get_provenance`
 
-信号：哪来的、来源是什么、谁说的、可靠吗、可信吗
+信号：哪来的、来源是什么、谁说的、可靠吗
 
 ```
 get_provenance({ target_type: "link"|"timeline", target_id })
 ```
 
-有 target → 直接调。无 target：关系→`graph_query`/`get_links` 拿 link_id；事件→`get_timeline` 拿 timeline_id；不确定→`deep_recall` 发现上下文。找不到→如实说，**禁止编造**。禁止输出 target_id/confidence/slug/JSON。
+有 target → 直接调。无 target：关系→`get_links` 拿 link_id；事件→`get_timeline` 拿 timeline_id。找不到→如实说，**禁止编造**。禁止输出 target_id/confidence/slug/JSON。
 
 ## 7. 用户回答红线
 
-面向用户的回答中：
-- 不输出工具名（除非客户端 UI 已显示）、raw JSON、slug/source id/chunk id、debug/trace 字段
+- 不输出工具名（除非客户端 UI 已显示）、raw JSON、slug/source id/chunk id、debug/trace
 - 不说"deep_recall 返回了…"等工具过程描述
 
 ## 8. 硬禁止

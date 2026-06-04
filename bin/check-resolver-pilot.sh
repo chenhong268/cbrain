@@ -56,6 +56,30 @@ else
   fail "episodic.routing-eval.jsonl 不存在"
 fi
 
+if [[ -f "$SKILLS_DIR/hierarchy.routing-eval.jsonl" ]]; then
+  hier_count=$(wc -l < "$SKILLS_DIR/hierarchy.routing-eval.jsonl" | tr -d ' ')
+  hier_pos=$(grep -c '"category": "org_hierarchy"' "$SKILLS_DIR/hierarchy.routing-eval.jsonl" 2>/dev/null || echo "0")
+  hier_neg=$((hier_count - hier_pos))
+  if (( hier_count >= 7 && hier_pos >= 5 && hier_neg >= 2 )); then
+    pass "hierarchy.routing-eval.jsonl (${hier_count} cases: ${hier_pos} positive, ${hier_neg} negative)"
+  else
+    fail "hierarchy.routing-eval.jsonl ${hier_count} cases (需≥7, pos≥5, neg≥2), got pos=${hier_pos} neg=${hier_neg}"
+  fi
+  # Privacy: no real names
+  hier_privacy=0
+  for pattern in "张三" "李四" "王磊" "星辰" "某制药" "有限公司" "集团" "公司"; do
+    hits=$(grep -c "$pattern" "$SKILLS_DIR/hierarchy.routing-eval.jsonl" 2>/dev/null) || hits=0
+    hier_privacy=$((hier_privacy + hits))
+  done
+  if (( hier_privacy == 0 )); then
+    pass "hierarchy eval 无隐私泄露"
+  else
+    fail "hierarchy eval 有 ${hier_privacy} 处疑似隐私泄露"
+  fi
+else
+  fail "hierarchy.routing-eval.jsonl 不存在"
+fi
+
 if [[ -f "$SKILLS_DIR/agentic.routing-eval.jsonl" ]]; then
   ago_count=$(wc -l < "$SKILLS_DIR/agentic.routing-eval.jsonl" | tr -d ' ')
   ago_pos=$(grep -c '"expected_tool": "agentic_research"' "$SKILLS_DIR/agentic.routing-eval.jsonl" 2>/dev/null || echo "0")
@@ -100,7 +124,7 @@ echo ""
 # ── 2. 路由覆盖率 ──
 echo "[2] 路由覆盖率"
 
-TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode" "agentic_research" "get_provenance")
+TOOLS=("deep_recall" "query" "summarize" "brain_storm" "expand_entity" "recall_episode" "agentic_research" "get_provenance" "graph_query")
 
 for tool in "${TOOLS[@]}"; do
   status="ok"

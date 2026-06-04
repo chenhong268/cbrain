@@ -117,9 +117,14 @@
 - 打个标签、加标签、标签管理、按标签找 → ingest.md
 - 批量打标、tag → ingest.md
 
-### Hierarchy
-- 分类、层级、上下级、属于哪个、子分类 → query.md
-- 组织结构、归属、parent/child → query.md
+### Hierarchy — 组织层级
+- 下属、谁向X汇报、X的团队、X管谁、直属下属 → query.md [graph_first]
+- 上级、X向谁汇报、X的老板、谁的下属包含X → query.md [graph_first]
+- 汇报线、汇报关系、报告链、reporting line → query.md [graph_first]
+- 组织架构、组织结构、组织树、某组织下面有哪些人 → query.md [graph_first]
+
+### Hierarchy — 分类归属
+- 分类、层级、属于哪个、子分类、parent/child → query.md
 
 ### Feedback
 - 这个信息不对、纠正、反馈、投诉、错了 → query.md
