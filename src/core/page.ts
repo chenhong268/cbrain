@@ -438,7 +438,7 @@ export class PageManager {
     const targetTags = this.db.getTags(targetSlug);
 
     const mergeDate = new Date().toISOString().slice(0, 10);
-    const mergeNote = `\n\n> 合并自 [[${sourceSlug}]] — ${mergeDate}`;
+    const mergeNote = `\n\n> 合并自 ${source.title}（${sourceSlug}） — ${mergeDate}`;
     const mergedBody = targetBody + mergeNote + "\n\n" + sourceBody;
 
     // Move links: update all references from source → target

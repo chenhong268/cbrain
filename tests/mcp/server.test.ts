@@ -86,7 +86,7 @@ describe("MCP Server", () => {
         "get_timeline", "get_versions", "graph_query", "health",
         "ingest", "ingest_dialogue", "job_cancel", "job_list",
         "job_retry", "job_status", "job_submit", "list_insights",
-        "list_pages", "mark_discovery_seen", "merge_pages",
+        "list_pages", "mark_discovery_seen", "merge_entities", "merge_pages",
         "promote_discovery", "put_page", "query", "query_insights",
         "read_discoveries", "recall_episode", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
         "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
