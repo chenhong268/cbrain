@@ -4,6 +4,8 @@
 > **性质**: Release gate — 以下每条合同都有对应测试，breaking = 不发版。
 > **范围**: 不改业务能力，只约束"对外的嘴脸"。
 
+> 架构边界: v2.0 默认遵循 [CBrain / Hermes Runtime Boundary](./cbrain-hermes-runtime-boundary.md)。CBrain 负责确定性记忆内核；Hermes 负责自然语言路由、展示、cron 和 agentic 编排。
+
 ---
 
 ## 合同总览
