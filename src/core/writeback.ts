@@ -25,6 +25,7 @@ export interface WritebackResult {
   action: WritebackAction;
   slug?: string;
   error?: string;
+  sync_warnings?: Array<{ slug: string; error: string }>;
 }
 
 export class WritebackManager {
@@ -112,6 +113,8 @@ export class WritebackManager {
 
     this.db.insertLink(fromSlug, toSlug, normalizeRelation(relation), input.source ?? "agent-writeback", undefined, undefined, "writeback", 0.6);
 
-    return { success: true, action: input.action, slug: fromSlug };
+    // Sync Known Relations for both endpoints
+    const warnings = this.pages.syncAffectedSlugs([fromSlug, toSlug]);
+    return { success: true, action: input.action, slug: fromSlug, ...(warnings.length > 0 ? { sync_warnings: warnings } : {}) };
   }
 }

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
@@ -252,6 +252,56 @@ describe("Batch Tools", () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.succeeded).toBe(0);
       expect(data.results[0].error).toBe("same page");
+    });
+
+    test("syncs KR for all targets and neighbors after batch merge", async () => {
+      mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+      // Setup: S1 → T1, S2 → T1 (shared target), S3 → T3
+      // Link: S1 -> Neighbor. After merge, T1 -> Neighbor (rewired).
+      writeFileSync(join(vaultPath, "brain/entities/BS1.md"), "---\ntitle: BS1\ntype: entity\nslug: entities/bs1\n---\nS1");
+      writeFileSync(join(vaultPath, "brain/entities/BS2.md"), "---\ntitle: BS2\ntype: entity\nslug: entities/bs2\n---\nS2");
+      writeFileSync(join(vaultPath, "brain/entities/BT1.md"), "---\ntitle: BT1\ntype: entity\nslug: entities/bt1\n---\nT1");
+      writeFileSync(join(vaultPath, "brain/entities/BS3.md"), "---\ntitle: BS3\ntype: entity\nslug: entities/bs3\n---\nS3");
+      writeFileSync(join(vaultPath, "brain/entities/BT3.md"), "---\ntitle: BT3\ntype: entity\nslug: entities/bt3\n---\nT3");
+      writeFileSync(join(vaultPath, "brain/entities/BNeighbor.md"), "---\ntitle: BNeighbor\ntype: entity\nslug: entities/bneighbor\n---\nNeighbor");
+
+      insertPage(db, "entities/bs1", "BS1", "brain/entities/BS1.md");
+      insertPage(db, "entities/bs2", "BS2", "brain/entities/BS2.md");
+      insertPage(db, "entities/bt1", "BT1", "brain/entities/BT1.md");
+      insertPage(db, "entities/bs3", "BS3", "brain/entities/BS3.md");
+      insertPage(db, "entities/bt3", "BT3", "brain/entities/BT3.md");
+      insertPage(db, "entities/bneighbor", "BNeighbor", "brain/entities/BNeighbor.md");
+      // S1 links to Neighbor — after merge, T1 inherits it
+      db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+        .run("entities/bs1", "entities/bneighbor", "合作");
+
+      const server = createServer(deps);
+      const result = await getTools(server).batch_merge_pages.handler({
+        pairs: [
+          { source: "entities/bs1", target: "entities/bt1" },
+          { source: "entities/bs2", target: "entities/bt1" },
+          { source: "entities/bs3", target: "entities/bt3" },
+        ],
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.succeeded).toBe(3);
+      // sync_warnings absent or empty (vault files exist)
+      expect(data.sync_warnings === undefined || data.sync_warnings.length === 0).toBe(true);
+
+      // Verify Known Relations actually written to Markdown
+      const tgtMd = readFileSync(join(vaultPath, "brain/entities/BT1.md"), "utf-8");
+      expect(tgtMd).toContain("## Known Relations");
+      // S1's link to Neighbor was rewired to T1 after merge
+      expect(tgtMd).toContain("合作 → [[entities/bneighbor]]");
+
+      // Neighbor should show incoming relation from T1 (not S1)
+      const neighborMd = readFileSync(join(vaultPath, "brain/entities/BNeighbor.md"), "utf-8");
+      expect(neighborMd).toContain("## Known Relations");
+      expect(neighborMd).toContain("← 合作 from [[entities/bt1]]");
+      // Verify T1 now has the rewired link to Neighbor
+      const link = db.rawDb.prepare("SELECT from_slug, to_slug FROM links WHERE from_slug = ? AND to_slug = ?")
+        .get("entities/bt1", "entities/bneighbor");
+      expect(link).toBeDefined();
     });
   });
 

@@ -5,6 +5,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 import type { Logger } from "./logger.js";
+import type { PageManager } from "./page.js";
 import {
   ExtractionResult,
   StructuredFact,
@@ -106,6 +107,7 @@ Every fact MUST have an evidence field (verbatim quote). No inference.
 export class DialogueIngest {
   private db: CBrainDB;
   private vaultPath: string;
+  private pages: PageManager | null;
   private llm?: LLMProvider;
   private logger?: Logger;
 
@@ -115,10 +117,12 @@ export class DialogueIngest {
     _lance: LanceDBManager,
     vaultPath: string,
     llm?: LLMProvider,
-    logger?: Logger
+    logger?: Logger,
+    pages?: PageManager,
   ) {
     this.db = db;
     this.vaultPath = vaultPath;
+    this.pages = pages ?? null;
     this.llm = llm;
     this.logger = logger;
   }
@@ -316,6 +320,7 @@ export class DialogueIngest {
 
     // Step 4: Relations — filtered by kept entity names
     const validRelations = filterRelations(result.relations, keptNames);
+    const relationSlugs = new Set<string>();
     for (const rel of validRelations) {
       const fromSlug = entitySlugMap.get(rel.from) ?? findEntitySlug(this.db, rel.from);
       const toSlug = entitySlugMap.get(rel.to) ?? findEntitySlug(this.db, rel.to);
@@ -327,7 +332,17 @@ export class DialogueIngest {
 
       this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null, undefined, undefined, "dialogue", 0.4, undefined, { source_page_slug: dialogueSource, evidence: rel.context ?? undefined });
 
+      relationSlugs.add(fromSlug);
+      relationSlugs.add(toSlug);
       newRelations++;
+    }
+
+    // Sync Known Relations for all entity slugs touched by this dialogue
+    if (this.pages) {
+      const allDialogueSlugs = new Set<string>();
+      for (const slug of entitySlugMap.values()) allDialogueSlugs.add(slug);
+      for (const s of relationSlugs) allDialogueSlugs.add(s);
+      this.pages.syncAffectedSlugs(allDialogueSlugs);
     }
 
     // Step 5: Events — only those with dates

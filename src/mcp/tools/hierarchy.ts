@@ -14,7 +14,16 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
       reports_to: z.string().max(500).describe("Slug of the direct manager"),
     },
   }, async ({ slug, reports_to }) => {
+    // Collect old manager before mutation for KR sync
+    const page = ctx.pages.getBySlug(slug);
+    const oldReportsTo = (page?.frontmatter as Record<string, unknown>)?.reports_to as string | undefined;
+
     setHierarchy(slug, reports_to, { pages: ctx.pages, graph: ctx.graph });
+
+    // Sync Known Relations for affected slugs
+    const affected = [slug, reports_to];
+    if (oldReportsTo && oldReportsTo !== reports_to) affected.push(oldReportsTo);
+    const setWarnings = ctx.pages.syncAffectedSlugs(affected);
 
     const manager = ctx.pages.getBySlug(reports_to);
     return {
@@ -25,6 +34,7 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
           slug,
           reports_to,
           manager_title: manager?.title ?? null,
+          ...(setWarnings.length > 0 ? { sync_warnings: setWarnings } : {}),
         }, null, 2),
       }],
     };
@@ -64,10 +74,12 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
         isError: true,
       };
     }
+    // Sync Known Relations for slug and old manager
+    const removeWarnings = ctx.pages.syncAffectedSlugs([slug, removed]);
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ success: true, slug, removed }, null, 2),
+        text: JSON.stringify({ success: true, slug, removed, ...(removeWarnings.length > 0 ? { sync_warnings: removeWarnings } : {}) }, null, 2),
       }],
     };
   });

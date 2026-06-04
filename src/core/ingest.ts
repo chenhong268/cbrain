@@ -182,6 +182,11 @@ export class IngestManager {
       }
     }
 
+    // Sync Known Relations for the ingested page and all mentioned/resolved entities
+    const nerResolvedSlugs = nerResult?.resolvedSlugs ?? [];
+    const nerRelationSlugs = nerResult?.relationSlugs ?? [];
+    this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]);
+
     return { slug, created: !existing, linksExtracted, ner: nerResult };
   }
 }

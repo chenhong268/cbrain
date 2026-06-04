@@ -346,6 +346,20 @@ export class PageManager {
     this.cacheDelete(slug);
   }
 
+  /** Sync Known Relations for multiple slugs, deduping and catching errors. */
+  syncAffectedSlugs(slugs: Iterable<string>): Array<{ slug: string; error: string }> {
+    const unique = [...new Set(slugs)];
+    const warnings: Array<{ slug: string; error: string }> = [];
+    for (const s of unique) {
+      try {
+        this.syncLinksToMarkdown(s);
+      } catch (e) {
+        warnings.push({ slug: s, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return warnings;
+  }
+
   /**
    * Merge source page into target. All links, timeline entries, tags and raw data
    * are moved from source to target. Source body is appended to target body.

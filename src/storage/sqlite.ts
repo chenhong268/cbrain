@@ -1446,6 +1446,16 @@ export class CBrainDB {
     return rows.map(r => r.slug);
   }
 
+  /** Return all distinct slugs that have links to/from the given slug (both directions). */
+  getLinkNeighborSlugs(slug: string): string[] {
+    const rows = this.prepare(
+      `SELECT DISTINCT from_slug AS slug FROM links WHERE to_slug = $slug` +
+      ` UNION ` +
+      `SELECT DISTINCT to_slug AS slug FROM links WHERE from_slug = $slug`
+    ).all({ $slug: slug }) as Array<{ slug: string }>;
+    return rows.map(r => r.slug);
+  }
+
   getAllLinks(includeInactive = false): Array<{ from_slug: string; to_slug: string; relation: string; weight: number }> {
     const activeFilter = includeInactive ? "" : " WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     return this.prepare(

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { IngestManager } from "../../src/core/ingest.js";
@@ -585,6 +585,40 @@ describe("IngestManager", () => {
 
       const pages = db.rawDb.prepare("SELECT * FROM pages WHERE title = '张三'").all() as any[];
       expect(pages.length).toBe(1);
+    });
+
+    test("syncs Known Relations to entity markdown after wikilink ingest", async () => {
+      // Pre-create entity pages with vault files
+      mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+      writeFileSync(join(vaultPath, "brain/entities/WikiA.md"), "---\ntitle: WikiA\ntype: entity/person\nslug: brain/entities/wiki-a\n---\nWikiA content");
+      writeFileSync(join(vaultPath, "brain/entities/WikiB.md"), "---\ntitle: WikiB\ntype: entity/person\nslug: brain/entities/wiki-b\n---\nWikiB content");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("brain/entities/wiki-a", "entity/person", "WikiA", "brain/entities/WikiA.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run("brain/entities/wiki-b", "entity/person", "WikiB", "brain/entities/WikiB.md", "h2");
+
+      // Ingest a record with wikilinks, skip NER to isolate the wikilink→KR path
+      await ingest.ingest({
+        content: "今天见了 [[WikiA]] 和 [[WikiB]]",
+        type: "text",
+        title: "会面记录",
+        skipNer: true,
+      });
+
+      // Verify wikilinks were created
+      const linkCount = db.rawDb.prepare("SELECT COUNT(*) as c FROM links WHERE relation = '提及'").get() as { c: number };
+      expect(linkCount.c).toBeGreaterThanOrEqual(2);
+
+      // Verify entity markdown files now contain Known Relations
+      const mdA = readFileSync(join(vaultPath, "brain/entities/WikiA.md"), "utf-8");
+      expect(mdA).toContain("## Known Relations");
+      expect(mdA).toContain("← 提及 from [[");
+
+      const mdB = readFileSync(join(vaultPath, "brain/entities/WikiB.md"), "utf-8");
+      expect(mdB).toContain("## Known Relations");
+      expect(mdB).toContain("← 提及 from [[");
     });
   });
 });

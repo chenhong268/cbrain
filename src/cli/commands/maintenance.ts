@@ -607,6 +607,7 @@ export function register(program: Command) {
         } else {
           const manager = pages.getBySlug(removed);
           console.log(`  ✓ 已移除 ${slug} 的上级关系 (${manager?.title ?? removed})`);
+          pages.syncAffectedSlugs([slug, removed]);
         }
         deps.db.close();
         return;
@@ -614,9 +615,14 @@ export function register(program: Command) {
 
       if (opts.reportsTo) {
         const { setHierarchy } = await import("../../core/hierarchy.js");
+        const page = pages.getBySlug(slug);
+        const oldReportsTo = (page?.frontmatter as Record<string, unknown>)?.reports_to as string | undefined;
         setHierarchy(slug, opts.reportsTo, { pages, graph });
         const manager = pages.getBySlug(opts.reportsTo);
         console.log(`  ✓ ${slug} 的直线领导设为 ${manager?.title ?? opts.reportsTo}`);
+        const affected = [slug, opts.reportsTo];
+        if (oldReportsTo && oldReportsTo !== opts.reportsTo) affected.push(oldReportsTo);
+        pages.syncAffectedSlugs(affected);
         deps.db.close();
         return;
       }

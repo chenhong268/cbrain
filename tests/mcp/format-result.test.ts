@@ -61,6 +61,8 @@ describe("formatIngestResult", () => {
         stubsCreated: ["entities/person-a"],
         lowRelevanceSkipped: 0,
         filtered: [],
+        resolvedSlugs: [],
+        relationSlugs: [],
         details: { entities: [], relations: [], events: [] },
       },
     });
@@ -96,6 +98,8 @@ describe("formatIngestResult", () => {
         stubsCreated: [],
         lowRelevanceSkipped: 0,
         filtered: [],
+        resolvedSlugs: [],
+        relationSlugs: [],
         details: { entities: [], relations: [], events: [] },
       },
     });
@@ -126,6 +130,8 @@ describe("formatIngestResult", () => {
         stubsCreated: ["entities/person-x"],
         lowRelevanceSkipped: 0,
         filtered: [{ name: "人物X", reason: "generic" }],
+        resolvedSlugs: [],
+        relationSlugs: [],
         details: { entities: [], relations: [], events: [] },
       },
     });
@@ -147,6 +153,8 @@ describe("formatIngestResult", () => {
         stubsCreated: [],
         lowRelevanceSkipped: 0,
         filtered: [],
+        resolvedSlugs: [],
+        relationSlugs: [],
         details: { entities: [], relations: [], events: [] },
       },
     });

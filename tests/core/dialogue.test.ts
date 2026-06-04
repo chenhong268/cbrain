@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { DialogueIngest } from "../../src/core/dialogue.js";
+import { PageManager } from "../../src/core/page.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
@@ -428,6 +429,58 @@ describe("DialogueIngest", () => {
 
       expect(result.decision).toBe("skipped");
       expect(result.reason).toBe("parse failed");
+    });
+  });
+
+  describe("Known Relations sync", () => {
+    test("syncs KR to entity markdown after dialogue relation creation", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "人物A", type: "person", relevance: "high", context: "人物A在组织F工作" },
+            { name: "组织F", type: "company", relevance: "high", context: "人物A在组织F工作" },
+          ],
+          relations: [
+            { from: "人物A", to: "组织F", relation: "works_at", context: "人物A在组织F工作" },
+          ],
+          events: [],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const pages = new PageManager(db, vaultPath);
+      const dialogue = new DialogueIngest(db, embedding, lance as any, vaultPath, llm, undefined, pages);
+
+      const result = await dialogue.ingest("人物A在组织F工作");
+
+      expect(result.newRelations).toBe(1);
+      expect(result.newEntities).toBe(2);
+
+      // Verify link exists in DB (works_at normalizes to 任职)
+      const link = db.rawDb.prepare(
+        "SELECT * FROM links WHERE relation = '任职'"
+      ).get() as any;
+      expect(link).not.toBeNull();
+
+      // Check entity pages for Known Relations in markdown
+      const entityPages = db.rawDb.prepare(
+        "SELECT slug, file_path FROM pages WHERE title IN ('人物A', '组织F')"
+      ).all() as Array<{ slug: string; file_path: string }>;
+      expect(entityPages.length).toBe(2);
+
+      let foundKr = false;
+      for (const ep of entityPages) {
+        const fp = join(vaultPath, ep.file_path);
+        if (!existsSync(fp)) continue;
+        const md = readFileSync(fp, "utf-8");
+        if (md.includes("## Known Relations")) {
+          foundKr = true;
+          // Should contain 任职 relation or its reverse
+          expect(md).toContain("任职");
+        }
+      }
+      expect(foundKr).toBe(true);
     });
   });
 });

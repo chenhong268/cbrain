@@ -960,6 +960,47 @@ describe("MCP Server", () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(false);
     });
+
+    test("syncs Known Relations for target and neighbors after merge", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/kr_src", "KR_Src", "brain/entities/KR_Src.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/kr_tgt", "KR_Tgt", "brain/entities/KR_Tgt.md", "h2");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/kr_neighbor", "KR_Neighbor", "brain/entities/KR_Neighbor.md", "h3");
+      // src links to neighbor — after merge, tgt should inherit this link
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
+      ).run("entities/kr_src", "entities/kr_neighbor", "合作");
+
+      mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+      writeFileSync(join(vaultPath, "brain/entities/KR_Src.md"), "---\ntitle: KR_Src\ntype: entity\nslug: entities/kr_src\n---\n# KR_Src\n\nSource.");
+      writeFileSync(join(vaultPath, "brain/entities/KR_Tgt.md"), "---\ntitle: KR_Tgt\ntype: entity\nslug: entities/kr_tgt\n---\n# KR_Tgt\n\nTarget.");
+      writeFileSync(join(vaultPath, "brain/entities/KR_Neighbor.md"), "---\ntitle: KR_Neighbor\ntype: entity\nslug: entities/kr_neighbor\n---\n# KR_Neighbor\n\nNeighbor.");
+
+      const server = createServer(deps);
+      const result = await getTools(server).merge_pages.handler({
+        source: "entities/kr_src",
+        target: "entities/kr_tgt",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+      // sync_warnings should be absent or empty (vault files exist)
+      expect(data.sync_warnings === undefined || data.sync_warnings.length === 0).toBe(true);
+
+      // Verify Known Relations actually written to Markdown
+      const tgtMd = readFileSync(join(vaultPath, "brain/entities/KR_Tgt.md"), "utf-8");
+      expect(tgtMd).toContain("## Known Relations");
+      expect(tgtMd).toContain("合作 → [[entities/kr_neighbor]]");
+
+      // Neighbor should show incoming relation
+      const neighborMd = readFileSync(join(vaultPath, "brain/entities/KR_Neighbor.md"), "utf-8");
+      expect(neighborMd).toContain("## Known Relations");
+      expect(neighborMd).toContain("← 合作 from [[entities/kr_tgt]]");
+    });
   });
 
   describe("confirm_evidence tool", () => {

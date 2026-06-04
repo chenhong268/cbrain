@@ -249,8 +249,11 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
         isError: true,
       };
     }
+    // Sync Known Relations for target and all its graph neighbors
+    const neighbors = ctx.db.getLinkNeighborSlugs(target);
+    const warnings = ctx.pages.syncAffectedSlugs([target, ...neighbors]);
     return {
-      content: [{ type: "text", text: JSON.stringify({ success: true, merged: result.slug, title: result.title, type: result.type }) }],
+      content: [{ type: "text", text: JSON.stringify({ success: true, merged: result.slug, title: result.title, type: result.type, ...(warnings.length > 0 ? { sync_warnings: warnings } : {}) }) }],
     };
   });
 

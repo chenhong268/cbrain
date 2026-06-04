@@ -84,16 +84,14 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
       }
     }
 
-    // Sync markdown once per affected slug (not per link)
-    for (const slug of syncedSlugs) {
-      try { ctx.pages.syncLinksToMarkdown(slug); } catch { /* non-critical */ }
-    }
+    // Sync Known Relations once for all affected slugs
+    const syncWarnings = ctx.pages.syncAffectedSlugs(syncedSlugs);
 
     const succeeded = results.filter(r => r.success).length;
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ total: links.length, succeeded, failed: links.length - succeeded, results }, null, 2),
+        text: JSON.stringify({ total: links.length, succeeded, failed: links.length - succeeded, results, ...(syncWarnings.length > 0 ? { sync_warnings: syncWarnings } : {}) }, null, 2),
       }],
     };
   });
@@ -148,11 +146,23 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
       }
     }
 
+    // Sync Known Relations for all successful merge targets and their neighbors
+    const allAffected = new Set<string>();
+    for (const r of results) {
+      if (r.success) {
+        allAffected.add(r.target);
+        for (const n of ctx.db.getLinkNeighborSlugs(r.target)) {
+          allAffected.add(n);
+        }
+      }
+    }
+    const syncWarnings = ctx.pages.syncAffectedSlugs(allAffected);
+
     const succeeded = results.filter(r => r.success).length;
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ total: pairs.length, succeeded, failed: pairs.length - succeeded, results }, null, 2),
+        text: JSON.stringify({ total: pairs.length, succeeded, failed: pairs.length - succeeded, results, ...(syncWarnings.length > 0 ? { sync_warnings: syncWarnings } : {}) }, null, 2),
       }],
     };
   });

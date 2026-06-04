@@ -39,6 +39,10 @@ export interface NerPipelineResult {
   stubsCreated: string[];
   lowRelevanceSkipped: number;
   filtered: Array<{ name: string; reason: string }>;
+  /** Slugs resolved/created by NER (for downstream KR sync) */
+  resolvedSlugs: string[];
+  /** Slugs that participate in NER relations (for downstream KR sync) */
+  relationSlugs: string[];
   details: {
     entities: Array<{ name: string; type: string; relevance: string }>;
     relations: Array<{ from: string; to: string; relation: string }>;
@@ -325,6 +329,7 @@ export class ContentPipeline {
     }
 
     const writtenRelations: Array<{ from: string; to: string; relation: string }> = [];
+    const relationEndpointSlugs = new Set<string>();
     for (const rel of extraction.relations) {
       const from = entitySlugMap.get(rel.from) ?? findEntitySlug(this.db, rel.from);
       const to = entitySlugMap.get(rel.to) ?? findEntitySlug(this.db, rel.to);
@@ -333,6 +338,8 @@ export class ContentPipeline {
         const rw = getRelationStrength(normRel);
         this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength, "ner", 0.5, undefined, { source_page_slug: fromSlug, evidence: rel.context });
 
+        relationEndpointSlugs.add(from);
+        relationEndpointSlugs.add(to);
         const fromTitle = this.pages?.getBySlug(from)?.title ?? rel.from;
         const toTitle = this.pages?.getBySlug(to)?.title ?? rel.to;
         writtenRelations.push({ from: fromTitle, to: toTitle, relation: normRel });
@@ -363,6 +370,8 @@ export class ContentPipeline {
       stubsCreated: [...stubsCreated],
       lowRelevanceSkipped: 0,
       filtered: extraction.filtered ?? [],
+      resolvedSlugs: [...new Set(entitySlugMap.values())],
+      relationSlugs: [...relationEndpointSlugs],
       details: {
         entities: extraction.entities.map(e => ({ name: e.name, type: e.type, relevance: e.relevance })),
         relations: writtenRelations,

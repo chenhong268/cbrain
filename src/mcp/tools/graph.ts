@@ -97,11 +97,10 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
 
     ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "agent", 0.9);
     ctx.pages.incrementMention(to);
-    ctx.pages.syncLinksToMarkdown(from);
-    ctx.pages.syncLinksToMarkdown(to);
+    const addWarnings = ctx.pages.syncAffectedSlugs([from, to]);
 
     return {
-      content: [{ type: "text", text: JSON.stringify({ success: true, from, to, relation }) }],
+      content: [{ type: "text", text: JSON.stringify({ success: true, from, to, relation, ...(addWarnings.length > 0 ? { sync_warnings: addWarnings } : {}) }) }],
     };
   });
 
@@ -115,12 +114,12 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     },
   }, async ({ from, to, relation }) => {
     const ok = ctx.graph.removeLink(from, to, relation);
+    let removeWarnings: Array<{ slug: string; error: string }> = [];
     if (ok) {
-      ctx.pages.syncLinksToMarkdown(from);
-      ctx.pages.syncLinksToMarkdown(to);
+      removeWarnings = ctx.pages.syncAffectedSlugs([from, to]);
     }
     return {
-      content: [{ type: "text", text: JSON.stringify({ success: ok, from, to, relation }) }],
+      content: [{ type: "text", text: JSON.stringify({ success: ok, from, to, relation, ...(removeWarnings.length > 0 ? { sync_warnings: removeWarnings } : {}) }) }],
     };
   });
 }
