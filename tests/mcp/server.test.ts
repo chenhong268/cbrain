@@ -286,8 +286,9 @@ describe("MCP Server", () => {
         title: "Test Page",
       });
       const data = JSON.parse(result.content[0].text);
-      expect(data.slug).toBeDefined();
-      expect(data.created).toBe(true);
+      expect(data.summary.status).toBe("recorded");
+      expect(data.raw.slug).toBeDefined();
+      expect(data.raw.created).toBe(true);
     });
   });
 

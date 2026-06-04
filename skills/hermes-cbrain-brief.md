@@ -47,6 +47,12 @@ run_discovery({ debug: false })
 
 展示规则：只用 `display`、`cards`、`summary`。禁止暴露 score/distance/debug/candidate/filter 等内部字段。直接展示，不二次格式化。
 
+## 4.5 自然捕获 → `ingest` / `ingest_dialogue`
+
+信号：记住这个、记到脑子里、save this
+
+展示规则：只用 `display` / `summary.message`。禁止展示 `raw`、slug、NER details、filtered 数组、stubsCreated。
+
 ## 5. 其他路由
 
 - 关系查询（A和B什么关系） → `graph_query`

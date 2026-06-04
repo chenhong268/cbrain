@@ -112,10 +112,10 @@
 | 暴露内部字段 | 🟢 | 返回 slug 但 Hermes 不输出 | OK |
 | 需要用户确认 | 🟡 | manual 模式需触发，auto 模式无确认 | auto 模式应有可配置的确认阈值 |
 | 可追溯可撤回 | 🟢 | provenance 记录来源 | OK |
-| 失败时用户看到 | 🔴 | LLM 调用失败时 error 返回，Hermes 可能原样输出 | 应给"暂时记不住，稍后再试" |
-| 测试覆盖 | 🟢 | 有 routing eval | OK |
+| 失败时用户看到 | 🟢 | #127 后返回自然降级文案（"暂时没能完成记录，稍后可以再试"），技术原因只在 raw.reason | OK |
+| 测试覆盖 | 🟢 | 有 routing eval + format-result 单测 | OK |
 | 维护风险 | 🟢 | 低 | — |
-| **v2.0 优先级** | **P1** | — | 静默提取的确认体验 + 失败优雅降级 |
+| **v2.0 优先级** | **🟢 收口** | — | #127 已完成 display/summary/raw 信封 + 失败自然降级 |
 
 #### A2. 内容导入（ingest）
 
@@ -123,14 +123,14 @@
 |------|------|------|----------|
 | 用户会怎么说 | 🟢 | "导入这篇内容"/"保存这个" | 不变 |
 | Hermes 路由 | 🟢 | RESOLVER → ingest.md | OK |
-| 首轮响应 | 🟡 | 返回 slug + 实体列表，Hermes 可能输出 slug | 应返回"已记住：{标题}，提取了 {N} 个人物/概念" |
-| 暴露内部字段 | 🔴 | `ingest_result` 包含 entity_slugs、ner_candidates | Hermes 层过滤，用户只看到自然语言摘要 |
+| 首轮响应 | 🟢 | #127 后返回自然语言 display（"已记住：{标题}。提取了 N 个实体…"） | OK |
+| 暴露内部字段 | 🟢 | #127 后 display/summary 不含 slug/ner/filtered，内部数据在 raw 中保留 | OK |
 | 需要用户确认 | 🟡 | NER 提取的实体无确认直接入库 | 高置信度自动入库，低置信度应列出让用户确认 |
 | 可追溯可撤回 | 🟢 | provenance 标记 `imported_content` | OK |
-| 失败时用户看到 | 🟡 | JSON error | 应给可读错误 |
-| 测试覆盖 | 🟢 | 有 routing eval | OK |
+| 失败时用户看到 | 🟢 | display 自然降级，技术原因只在 raw | OK |
+| 测试覆盖 | 🟢 | 有 routing eval + format-result 17 条单测（含 negative 断言） | OK |
 | 维护风险 | 🟢 | 低 | — |
-| **v2.0 优先级** | **P1** | — | 响应格式自然化 + 低置信度 NER 确认 |
+| **v2.0 优先级** | **🟢 收口** | — | #127 已完成响应格式自然化 + 内部字段隔离 |
 
 #### A3. 页面创建/更新（put_page）
 
@@ -162,12 +162,12 @@
 
 | 维度 | 评分 | 现状 | v2.0 期望 |
 |------|------|------|----------|
-| 用户会怎么说 | 🔴 | "这信息哪来的？"——但 Hermes 不知道该调 provenance | 应路由到 get_provenance |
-| Hermes 路由 | 🔴 | RESOLVER 没有 provenance 路由 | 需要添加 |
-| 首轮响应 | 🔴 | 直接返回 JSON，无自然语言模板 | 应返回"这条信息来自{对话日期/导入来源}，信任等级{已确认/待确认}" |
-| 暴露内部字段 | 🔴 | 全部是内部字段 | 需要格式化层 |
+| 用户会怎么说 | 🟢 | "这信息哪来的？" | 不变 |
+| Hermes 路由 | 🟢 | #107 后 RESOLVER 和 brief 已添加 provenance 路由 | OK |
+| 首轮响应 | 🟢 | #107 后返回用户可读的来源描述 | OK |
+| 暴露内部字段 | 🟡 | 部分内部字段仍在，Hermes 层过滤 | OK |
 | 可追溯可撤回 | 🟢 | update_trust_state 可纠正 | OK |
-| **v2.0 优先级** | **P0** | — | 添加路由 + 自然语言格式化 |
+| **v2.0 优先级** | **🟢 收口** | — | #107 已完成路由 + 自然语言格式化 |
 
 ### B. 自然增益回答
 
@@ -412,12 +412,12 @@
 
 | 维度 | 评分 | 现状 | v2.0 期望 |
 |------|------|------|----------|
-| 用户会怎么说 | 🔴 | "我怎么装起来给自己的 Agent 用？" | 有一条从零到可用的安装路径 |
+| 用户会怎么说 | 🟢 | "我怎么装起来给自己的 Agent 用？" | 不变 |
 | Hermes 路由 | 🟡 | 不适用，属于人类安装文档 | Agent 可辅助解释安装步骤 |
-| 首轮体验 | 🔴 | init、serve、profile、runtime、MCP/HTTP、cron 分散在多处 | 一份 guide 覆盖安装、配置、启动、验证、排错 |
-| 失败时用户看到 | 🔴 | 依赖、端口、runtime、watcher 问题需要人工判断 | guide 必须有 smoke test 和常见错误处理 |
+| 首轮体验 | 🟢 | #113 后有完整 onboarding guide（docs/product/） | OK |
+| 失败时用户看到 | 🟡 | guide 有常见错误处理段落，但 runtime/watcher 问题仍需人工 | 增强 smoke test |
 | 测试覆盖 | 🟡 | CLI 有测试，但 onboarding 无端到端验收 | 增加 install smoke checklist |
-| **v2.0 优先级** | **P0** | — | 新用户安装/onboarding guide |
+| **v2.0 优先级** | **🟢 收口** | — | #113 已完成 onboarding guide，后续迭代改进 |
 
 ---
 
@@ -425,18 +425,18 @@
 
 ### P0 — v2.0 发布前必须完成
 
-| ID | 问题 | 影响 | 建议 issue |
-|----|------|------|-----------|
-| A6 | provenance 无 Hermes 路由 | 用户问"信息哪来的"走不通 | `feat: add provenance routing to RESOLVER and brief` |
-| E1a | 缺少结构一致性 health 检查 | graph、Markdown、wikilink、结构化字段不一致会静默影响 recall | `#106 health: add structural consistency checks for graph, markdown, and structured fields` |
-| F9 | 新用户安装/onboarding 不成体系 | 2.0 推广时其他用户难以顺利安装、配置、验证和接入 Agent | `docs: create end-to-end install and onboarding guide for CBrain 2.0` |
+| ID | 问题 | 影响 | 状态 |
+|----|------|------|------|
+| A6 | provenance 无 Hermes 路由 | 用户问"信息哪来的"走不通 | ✅ #107 已完成 |
+| E1a | 缺少结构一致性 health 检查 | graph、Markdown、wikilink、结构化字段不一致会静默影响 recall | ✅ #106 已完成 |
+| F9 | 新用户安装/onboarding 不成体系 | 2.0 推广时其他用户难以顺利安装、配置、验证和接入 Agent | ✅ #113 已完成 |
 
 ### P1 — v2.0 应该完成
 
-| ID | 问题 | 影响 | 建议 issue |
-|----|------|------|-----------|
-| A1 | 对话提取失败不优雅 | 用户看到 raw error | `fix: graceful degradation for ingest_dialogue failures` |
-| A2 | ingest 返回内部字段 | slug、ner_candidates 泄露 | `feat: natural-language summary for ingest results` |
+| ID | 问题 | 影响 | 状态 |
+|----|------|------|------|
+| A1 | 对话提取失败不优雅 | 用户看到 raw error | ✅ #127 已完成（display/summary/raw 信封 + 自然降级） |
+| A2 | ingest 返回内部字段 | slug、ner_candidates 泄露 | ✅ #127 已完成（自然语言 display + 内部字段隔离在 raw） |
 | B3 | query 应默认走 deep_recall | 搜索结果不合成 | `refactor: Hermes routing should prefer deep_recall over raw query` |
 | B5 | graph_query 输出内部字段 | source_type、weight 泄露 | `feat: natural-language formatter for graph query results` |
 | B6 | summarize 输出未格式化 | 返回结构化数据而非摘要段落 | `feat: output template for summarize tool` |
@@ -447,6 +447,8 @@
 | E1 | health 输出是技术报告 | 用户看不懂 | `feat: natural-language health summary` |
 | E6 | 批量操作无确认 | 误操作风险 | `feat: confirmation gate for batch operations` |
 | F2 | profile 无路由 | 用户偏好无法自然设置 | `feat: add profile routing to RESOLVER` |
+
+> **已收口的 P1 项**：A1 (#127)、A2 (#127)
 
 ### P2 — v2.0 可以推后
 
@@ -462,7 +464,7 @@
 
 ### 🟢 已收口，维持现状
 
-B1 (grounded recall)、B2 (content recall)、B4 (episodic recall)、B8 (expand_entity)、C3 (get_page)、D1 (discovery)、D3 (compounding review)、D4 (feedback learning)、E3 (sync)、F3 (hierarchy)
+A1 (ingest_dialogue)、A2 (ingest)、A6 (provenance)、B1 (grounded recall)、B2 (content recall)、B4 (episodic recall)、B8 (expand_entity)、C3 (get_page)、D1 (discovery)、D3 (compounding review)、D4 (feedback learning)、E3 (sync)、F3 (hierarchy)、F9 (onboarding)
 
 ---
 
@@ -477,7 +479,7 @@ B1 (grounded recall)、B2 (content recall)、B4 (episodic recall)、B8 (expand_e
 | 情境找人 | query.md [episodic] | §3 → recall_episode | ✅ 一致 |
 | 关系分析 | connect.md | §5 → graph_query | ✅ 一致 |
 | 发现摘要 | query.md | §4 → read_discoveries | ✅ 一致 |
-| provenance | **无路由** | **未提及** | 🔴 缺失 |
+| provenance | query.md | §6 → get_provenance | ✅ 一致（#107 已添加） |
 | versions/revert | **无路由** | **未提及** | 🔴 缺失 |
 | profile | **无路由** | **未提及** | 🔴 缺失 |
 | signal-detector | signal-detector.md | **未提及** | 🟡 brief 缺失 |
@@ -531,24 +533,24 @@ B1 (grounded recall)、B2 (content recall)、B4 (episodic recall)、B8 (expand_e
 
 ### P0
 
-1. **`feat: add provenance routing to RESOLVER and brief`**
+1. ~~**`feat: add provenance routing to RESOLVER and brief`**~~ ✅ #107 已完成
    - 范围：RESOLVER 添加 Source Tracking 路由 → query.md；brief 添加 §provenance；Hermes 格式化 provenance 输出为自然语言
    - 验收：用户问"这信息哪来的"→ Hermes 返回来源描述 + 信任等级
 
-2. **`#106 health: add structural consistency checks for graph, markdown, and structured fields`**
+2. ~~**`#106 health: add structural consistency checks for graph, markdown, and structured fields`**~~ ✅ #106 已完成
    - 范围：health 增加结构一致性维度，检查 links 表、Known Relations、wikilink、结构化字段之间的不一致
    - 验收：graph/Markdown/structured fields 不一致时，health 和 dream 都能报告用户可理解的问题
 
-3. **`docs: create end-to-end install and onboarding guide for CBrain 2.0`**
+3. ~~**`docs: create end-to-end install and onboarding guide for CBrain 2.0`**~~ ✅ #113 已完成
    - 范围：从安装依赖、初始化、配置 vault/profile/runtime、启动 HTTP/MCP、Hermes 接入，到 health/sync/query smoke test
    - 验收：新用户按步骤执行后，能启动 CBrain、接入 Agent，并完成一次保存、同步、查询和健康检查
 
 ### P1
 
-4. **`fix: graceful degradation for ingest_dialogue failures`**
+4. ~~**`fix: graceful degradation for ingest_dialogue failures`**~~ ✅ #127 已完成
    - 范围：LLM 调用失败时返回用户可读消息而非 raw error
 
-5. **`feat: natural-language summary for ingest results`**
+5. ~~**`feat: natural-language summary for ingest results`**~~ ✅ #127 已完成
    - 范围：ingest 返回自然语言摘要（"已记住{标题}，提取了 {N} 个人物/概念"）；Hermes 过滤 slug/ner_candidates
 
 6. **`refactor: Hermes routing should prefer deep_recall over raw query`**

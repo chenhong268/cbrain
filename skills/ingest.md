@@ -13,7 +13,7 @@ Content arrives in many forms. The ingest skill routes each piece to the correct
 Best for: Quick notes, extracted entities, raw observations.
 
 ```
-cbrain ingest --type text --title "张三" --page-type entity "产品经理，负责AI产品线"
+cbrain ingest --type text --title "实体A" --page-type entity "产品经理，负责AI产品线"
 ```
 
 ### Markdown
@@ -22,14 +22,14 @@ Best for: Compiled notes, structured content, content with `[[wiki-links]]`.
 
 ```markdown
 ---
-title: 张三
+title: 实体A
 type: entity
 tags: [人物, 产品]
 ---
 
-张三是产品经理，负责AI产品线。
+实体A是产品经理，负责AI产品线。
 
-关系：[[李四]] 是他的直属上级。
+关系：[[实体B]] 是他的直属上级。
 ```
 
 ## Routing Rules
@@ -46,8 +46,8 @@ tags: [人物, 产品]
 
 Use `[[target]]` to create graph edges:
 
-- `[[张三]]` → resolves to `entities/zhangsan`
-- `[[RAG]]` → resolves to `concepts/rag`
+- `[[实体A]]` → resolves to matching entity page
+- `[[RAG]]` → resolves to matching concept page
 - Unresolvable links → stored but no graph edge created
 
 ## Tags
@@ -63,3 +63,35 @@ Use `[[target]]` to create graph edges:
 3. LanceDB chunks indexed for vector + FTS search
 4. Wiki-links extracted → graph edges created
 5. Mention counts incremented for linked entities
+
+## Response Format
+
+Both `ingest` and `ingest_dialogue` return a structured envelope:
+
+```json
+{
+  "display": "已记住：标题。提取了 2 个实体、1 条关系。",
+  "summary": {
+    "status": "recorded",
+    "title": "标题",
+    "captured": { "entities": 2, "relations": 1, "events": 0 },
+    "message": "已记住：标题。提取了 2 个实体、1 条关系。"
+  },
+  "raw": { ... }
+}
+```
+
+### 字段说明
+
+- **`display`** / **`summary.message`** — 用户可见的自然语言摘要
+- **`summary.status`** — `recorded`（已记住）| `skipped`（无需记录）| `needs_review`（待确认）
+- **`summary.captured`** — 提取的实体/关系/事件计数（NER 未运行时为 `null`）
+- **`summary.title`** — 页面标题（对话模式为 `null`）
+- **`raw`** — 完整内部结果（向后兼容 + 调试用）
+
+### Hermes 展示规则
+
+- ✅ 展示 `display` 或 `summary.message`
+- ❌ 禁止展示 `raw` 里的 slug、stubsCreated、filtered、chunk id、source_id、NER details
+- ❌ 禁止展示工具名、raw JSON、debug/trace 字段
+- 失败时展示 `display` 中的自然降级文案，不暴露技术原因

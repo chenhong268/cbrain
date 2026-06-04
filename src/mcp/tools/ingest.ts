@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { DialogueIngest, DialogueMode } from "../../core/dialogue.js";
+import { formatIngestResult, formatDialogueResult } from "./format-result.js";
 
 export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
   // ─── ingest ──────────────────────────────────────────────
@@ -20,7 +21,7 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
     const result = await ctx.ingest.ingest({ content, type: type ?? "text", title: effectiveTitle, tags, pageType, skipNer });
 
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(formatIngestResult(result, effectiveTitle), null, 2) }],
     };
   });
 
@@ -36,7 +37,7 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
     const dialogue = new DialogueIngest(ctx.db, ctx.embedding, ctx.lance, ctx.vaultPath, ctx.llm, ctx.logger);
     const result = await dialogue.ingest(text, (mode ?? "manual") as DialogueMode, sessionId);
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(formatDialogueResult(result), null, 2) }],
     };
   });
 }
