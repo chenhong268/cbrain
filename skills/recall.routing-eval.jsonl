@@ -9,10 +9,10 @@
 {"intent": "概览一下Q1的业绩", "expected_tool": "summarize", "category": "overview"}
 {"intent": "分析一下RAG和知识图谱有什么联系", "expected_tool": "brain_storm", "category": "reasoning"}
 {"intent": "这个领域的知识缺口在哪里", "expected_tool": "brain_storm", "category": "reasoning"}
-{"intent": "搜一下有没有关于某公司的记录", "expected_tool": "query", "category": "search"}
-{"intent": "查一下张三在哪个公司", "expected_tool": "query", "category": "search"}
-{"intent": "有没有关于某岗位的资料", "expected_tool": "query", "category": "search"}
-{"intent": "找一下上次讨论的内容", "expected_tool": "query", "category": "search"}
+{"intent": "搜一下有没有关于某公司的记录", "expected_tool": "deep_recall", "category": "recall", "note": "自然语言问题 → deep_recall，不是 query"}
+{"intent": "查一下张三在哪个公司", "expected_tool": "deep_recall", "category": "recall", "note": "自然语言查人 → deep_recall"}
+{"intent": "有没有关于某岗位的资料", "expected_tool": "deep_recall", "category": "recall", "note": "自然语言 → deep_recall"}
+{"intent": "找一下上次讨论的内容", "expected_tool": "deep_recall", "category": "recall", "note": "自然语言 → deep_recall"}
 {"intent": "多说说王磊的细节", "expected_tool": "expand_entity", "category": "drilldown", "requires_slug": true}
 {"intent": "展开讲讲星辰科技", "expected_tool": "expand_entity", "category": "drilldown", "requires_slug": true}
 {"intent": "query后连调get_page+get_links+get_timeline", "expected_tool": "deep_recall", "category": "anti_pattern", "note": "应该一次 deep_recall 而不是 4 次调用"}
@@ -20,3 +20,4 @@
 {"intent": "没有slug就调expand_entity", "expected_tool": "FORBIDDEN", "category": "anti_pattern", "note": "expand_entity 必须先从其他工具拿到 slug"}
 {"intent": "deep_recall未命中后直接web_search", "expected_tool": "query", "category": "anti_pattern", "note": "deep_recall 空结果必须先 query(缩减关键词) 在 CBrain 内重试，禁止直接跳外部搜索"}
 {"intent": "deep_recall未命中后直接session_search", "expected_tool": "query", "category": "anti_pattern", "note": "同上，session_search 也不能跳过 CBrain 内 query 重试"}
+{"intent": "关键词'星辰'出现在哪些页面", "expected_tool": "query", "category": "keyword_debug", "note": "精确关键词定位 → query 唯一正确场景"}

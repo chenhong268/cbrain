@@ -1,3 +1,6 @@
-{"intent": "星辰科技是什么", "expected_skill": "query.md"}
-{"intent": "查一下王磊", "expected_skill": "query.md"}
-{"intent": "搜索星河项目", "expected_skill": "query.md"}
+{"intent": "星辰科技是什么", "expected_skill": "query.md", "expected_flag": "deep_recall", "note": "自然语言问题 → deep_recall"}
+{"intent": "查一下王磊", "expected_skill": "query.md", "expected_flag": "deep_recall", "note": "自然语言查人 → deep_recall"}
+{"intent": "搜索星河项目", "expected_skill": "query.md", "expected_flag": "deep_recall", "note": "自然语言 → deep_recall"}
+{"intent": "关键词'星辰'出现在哪些页面", "expected_skill": "query.md", "expected_flag": "keyword", "note": "精确关键词 → query"}
+{"intent": "帮我定位'王磊'这个关键词在哪些文档", "expected_skill": "query.md", "expected_flag": "keyword", "note": "关键词定位 → query"}
+{"intent": "deep_recall 没找到，用'星辰'重试", "expected_skill": "query.md", "expected_flag": "keyword", "note": "降级链 → query"}

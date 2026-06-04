@@ -11,8 +11,11 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
   // ─── query ───────────────────────────────────────────────
   server.registerTool("query", {
     description:
-      "原始搜索，只返回匹配的文本片段，不附带关系、时间线等额外信息。" +
-      "仅用于快速定位某个关键词出现的位置。大多数查询应该用 deep_recall 代替。" +
+      "底层关键词搜索，返回原始文本片段（slug + snippet）。仅限以下场景：" +
+      "调试（确认某个关键词是否被索引、出现在哪些页面）、" +
+      "定位（已知精确关键词，需要找到对应的 slug）、" +
+      "deep_recall 降级链（deep_recall 未命中后缩减关键词重试）。" +
+      "❌ 不要用于自然语言问题。事实回忆 → deep_recall，全貌 → summarize，找人 → recall_episode，组织架构 → get_org_tree。" +
       "proactive_hints 默认不展示给用户。只有 hint 直接改变当前判断时，写成一句自然的话，不使用标题或列表。",
     inputSchema: {
       query: z.string().max(1000).describe("Search query"),

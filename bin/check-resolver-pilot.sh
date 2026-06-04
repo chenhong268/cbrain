@@ -524,6 +524,129 @@ fi
 
 echo ""
 
+# ── 5c. Query Demotion ──
+echo "[5c] Query Demotion"
+
+SEARCH_TS="$PROJECT_DIR/src/mcp/tools/search.ts"
+if [[ -f "$SEARCH_TS" ]]; then
+  # Query description must brand as debug/底层
+  if grep -qE '底层|调试|debug|仅限' "$SEARCH_TS" 2>/dev/null; then
+    pass "query tool description 包含底层/调试标记"
+  else
+    fail "query tool description 缺少底层/调试标记"
+  fi
+
+  # Query description must mention deep_recall as preferred
+  if grep -q 'deep_recall' "$SEARCH_TS" 2>/dev/null; then
+    pass "query tool description 提及 deep_recall 优先"
+  else
+    fail "query tool description 未提及 deep_recall"
+  fi
+else
+  fail "src/mcp/tools/search.ts 不存在"
+fi
+
+# RESOLVER catch-all must route to deep_recall
+if [[ -f "$SKILLS_DIR/RESOLVER.md" ]]; then
+  if grep -q '\[deep_recall\]' "$SKILLS_DIR/RESOLVER.md" 2>/dev/null || grep -q '\[keyword\]' "$SKILLS_DIR/RESOLVER.md" 2>/dev/null; then
+    pass "RESOLVER.md 区分自然语言路由和关键词路由"
+  else
+    fail "RESOLVER.md 未区分自然语言和关键词路由（需要 [deep_recall] 或 [keyword] 标记）"
+  fi
+fi
+
+# recall-resolver must mark query as 底层/调试
+if [[ -f "$SKILLS_DIR/recall-resolver.md" ]]; then
+  if grep -qE '底层|调试|debug|仅限.*关键词' "$SKILLS_DIR/recall-resolver.md" 2>/dev/null; then
+    pass "recall-resolver.md 标记 query 为底层工具"
+  else
+    fail "recall-resolver.md 未标记 query 为底层工具"
+  fi
+fi
+
+# agent-facing routing eval must have query demotion anti-patterns
+if [[ -f "$SKILLS_DIR/agent-facing.routing-eval.jsonl" ]]; then
+  af_query_demo=$(grep -c '"category": "anti_pattern"' "$SKILLS_DIR/agent-facing.routing-eval.jsonl" 2>/dev/null | tr -d ' ')
+  if (( af_query_demo >= 7 )); then
+    pass "agent-facing eval anti_pattern 用例 ≥ 7（当前 ${af_query_demo}）"
+  else
+    fail "agent-facing eval anti_pattern 用例只有 ${af_query_demo}（需 ≥ 7，含 query demotion）"
+  fi
+
+  # Query demotion: non-keyword_debug eval cases must NOT expect query tool
+  # Allowed: keyword_debug category, or anti_pattern with query as the WRONG tool (forbidden)
+  af_bad_query=0
+  while IFS= read -r line; do
+    cat=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('category',''))" 2>/dev/null)
+    tool=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('expected_tool',''))" 2>/dev/null)
+    # Skip keyword_debug — query is correct there
+    [[ "$cat" == "keyword_debug" ]] && continue
+    # Flag if expected_tool is "query" in any other category
+    if [[ "$tool" == "query" ]]; then
+      af_bad_query=$((af_bad_query + 1))
+    fi
+  done < "$SKILLS_DIR/agent-facing.routing-eval.jsonl"
+  if (( af_bad_query == 0 )); then
+    pass "agent-facing eval 无自然语言→query 残留（仅 keyword_debug 允许 query）"
+  else
+    fail "agent-facing eval 有 ${af_bad_query} 处非 keyword_debug 用例期望 query（应改为 deep_recall/graph_query/get_org_tree）"
+  fi
+fi
+
+# Same check for recall.routing-eval.jsonl
+if [[ -f "$SKILLS_DIR/recall.routing-eval.jsonl" ]]; then
+  recall_bad_query=0
+  while IFS= read -r line; do
+    cat=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('category',''))" 2>/dev/null)
+    tool=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('expected_tool',''))" 2>/dev/null)
+    # keyword_debug and anti_pattern (where query is the correct fallback) are OK
+    [[ "$cat" == "keyword_debug" ]] && continue
+    [[ "$cat" == "anti_pattern" ]] && continue
+    if [[ "$tool" == "query" ]]; then
+      recall_bad_query=$((recall_bad_query + 1))
+    fi
+  done < "$SKILLS_DIR/recall.routing-eval.jsonl"
+  if (( recall_bad_query == 0 )); then
+    pass "recall eval 无自然语言→query 残留（仅 keyword_debug 允许 query）"
+  else
+    fail "recall eval 有 ${recall_bad_query} 处非 keyword_debug 用例期望 query"
+  fi
+fi
+
+# Same check for episodic.routing-eval.jsonl
+if [[ -f "$SKILLS_DIR/episodic.routing-eval.jsonl" ]]; then
+  epi_bad_query=0
+  while IFS= read -r line; do
+    tool=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('expected_tool',''))" 2>/dev/null)
+    if [[ "$tool" == "query" ]]; then
+      epi_bad_query=$((epi_bad_query + 1))
+    fi
+  done < "$SKILLS_DIR/episodic.routing-eval.jsonl"
+  if (( epi_bad_query == 0 )); then
+    pass "episodic eval 无 expected_tool: query 残留"
+  else
+    fail "episodic eval 有 ${epi_bad_query} 处期望 query（应改为 deep_recall/graph_query/get_org_tree）"
+  fi
+fi
+
+# Same check for agentic.routing-eval.jsonl
+if [[ -f "$SKILLS_DIR/agentic.routing-eval.jsonl" ]]; then
+  ago_bad_query=0
+  while IFS= read -r line; do
+    tool=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('expected_tool',''))" 2>/dev/null)
+    if [[ "$tool" == "query" ]]; then
+      ago_bad_query=$((ago_bad_query + 1))
+    fi
+  done < "$SKILLS_DIR/agentic.routing-eval.jsonl"
+  if (( ago_bad_query == 0 )); then
+    pass "agentic eval 无 expected_tool: query 残留"
+  else
+    fail "agentic eval 有 ${ago_bad_query} 处期望 query（应改为 deep_recall）"
+  fi
+fi
+
+echo ""
+
 # ── 6. Skill 层一致性 ──
 echo "[6] Skill 层一致性"
 

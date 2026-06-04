@@ -9,4 +9,4 @@
 {"intent": "上次团建见过谁，想不起名字了", "expected_tool": "recall_episode", "category": "negative_episodic", "note": "情境找人，不是研究"}
 {"intent": "当时怎么设计这个方案的", "expected_tool": "deep_recall", "category": "negative_content_recall", "note": "内容回忆 → deep_recall(detail=normal)"}
 {"intent": "实体A和实体B什么关系", "expected_tool": "graph_query", "category": "negative_relationship", "note": "两人关系 → graph_query/connect"}
-{"intent": "搜一下有没有关于主题C的记录", "expected_tool": "query", "category": "negative_simple_search", "note": "简单关键词搜索"}
+{"intent": "搜一下有没有关于主题C的记录", "expected_tool": "deep_recall", "category": "negative_simple_search", "note": "自然语言搜索 → deep_recall，不是 query"}

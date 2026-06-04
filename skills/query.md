@@ -6,6 +6,36 @@
 
 Search the brain using multiple strategies, fuse results, and return the most relevant knowledge.
 
+## Default Behavior — 无 flag 时
+
+当 RESOLVER 未指定任何 flag 时，**优先使用 deep_recall**，不是 query。
+
+```
+自然语言问题 → deep_recall({ query, detail: "normal", limit: 3 })
+精确关键词/debug → query({ query, strategy: "fts" })
+```
+
+判断标准：
+- 问题包含完整句子或自然语言描述 → deep_recall
+- 问题只有 1-2 个关键词，且目的是定位 slug → query
+- 不确定 → deep_recall（安全默认）
+
+## [keyword] Branch — 精确关键词定位
+
+RESOLVER 指定 `[keyword]` flag 时：
+
+1. 调用 `query({ query, strategy: "fts" })`
+2. 禁止用 `vector` 或 `all` 策略（关键词定位不需要语义搜索）
+3. 返回结果只用于内部定位 slug，不直接展示给用户
+
+## [discovery] Branch — 发现摘要
+
+RESOLVER 指定 `[discovery]` flag 时：
+
+1. 调用 `read_discoveries({ debug: false })`，如果用户说"跑检测"则用 `run_discovery({ debug: false })`
+2. 展示规则：只使用返回的 `display`、`cards`、`summary`
+3. 禁止暴露：score、distance、shared_neighbors、debug、_debug、candidate、filter
+
 ## [episodic] Branch — 情境找人
 
 When loaded with `[episodic]` flag (from RESOLVER.md "Episodic Person Recall" section):

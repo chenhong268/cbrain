@@ -48,10 +48,17 @@
 - 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
 - 深度了解、知识总览、全景 → review.md
 
-### Query & Search
-- 查询、搜索、查找、查一下、找一下 → query.md
-- 谁、是谁、什么是、是什么、介绍一下 → query.md
-- 图谱、链接到 → query.md
+### Natural Recall（默认路由 — 自然语言问题不走 query）
+- 谁、是谁、什么是、是什么、介绍一下 → query.md [deep_recall]
+- 查询、搜索、查找、查一下、找一下 → query.md [deep_recall]
+- 任何自然语言问题（不是精确关键词）→ query.md [deep_recall]
+
+### Debug / Keyword Lookup（query 仅限此场景）
+- 精确关键词定位、debug 索引、确认某关键词 → query.md [keyword]
+- deep_recall 降级链第二步 → query.md [keyword]
+
+### Graph
+- 图谱、链接到 → connect.md
 
 ### Writing
 - 帮我写、写一段、写个、写篇、写周报、写介绍 → write.md
@@ -85,8 +92,8 @@
 - 结构化、档案页、信息表 → review.md
 
 ### Brainstorm
-- 分析一下、联想、知识缺口、cross-domain、有什么盲点、帮我想想 → query.md
-- 推理、背后逻辑、深层原因、为什么、思维链 → query.md
+- 分析一下、联想、知识缺口、cross-domain、有什么盲点、帮我想想 → query.md [brain_storm]
+- 推理、背后逻辑、深层原因、为什么、思维链 → query.md [brain_storm]
 
 ### Agentic Research（EXPERIMENTAL — 非默认路由）
 - A 和 B 的差异/取舍/哪个更适合 → query.md [agentic_research detail=normal]
@@ -103,8 +110,8 @@
 - merge、合并页面 → cleanup.md
 
 ### Insights & Discoveries
-- 最近有什么发现、有什么我漏掉的、有什么关联没注意到的 → query.md
-- 洞察、insight、discovery、发现 → query.md
+- 最近有什么发现、有什么我漏掉的、有什么关联没注意到的 → query.md [discovery]
+- 洞察、insight、discovery、发现 → query.md [discovery]
 - ⚠️ 展示约束：discovery 输出只使用 `display`、`cards`、`summary` 字段
 - ⚠️ 禁止暴露：score、distance、shared_neighbors、debug、_debug、candidate、filter、图距离、跳、桥接、候选、过滤
 - ⚠️ `run_discovery` 默认返回用户可读摘要（最多 3 条卡片），不需要二次格式化
@@ -130,7 +137,7 @@
 - 分类、层级、属于哪个、子分类、parent/child → query.md
 
 ### Feedback
-- 这个信息不对、纠正、反馈、投诉、错了 → query.md
+- 这个信息不对、纠正、反馈、投诉、错了 → ingest.md
 
 ### Config
 - 改一下配置、调整参数、配置 → dream.md

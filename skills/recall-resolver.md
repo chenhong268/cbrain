@@ -51,10 +51,10 @@
 │   关系事件组合：已知人物 + 共同事件/活动 + 忘名信号 + 找另外的人
 │   ⎿示例：去年团建见过谁、上个月聚餐认识的那个、项目上线一起干的人、主题C相关的人
 │   ⎿示例（关系事件）：想不起名字了和人物A一起旅行的另外几个人、忘了叫什么和人物A一起做项目的那个
-│   ⚠️ 不适用（走 query/connect/deep_recall）：
-│     用户提到具体人名（"人物A认识谁"）→ query
+│   ⚠️ 不适用（走 graph_query/connect/deep_recall/get_org_tree）：
+│     用户提到具体人名（"人物A认识谁"）→ graph_query（关系遍历）
 │     纯关系查询（"A和B什么关系"）→ connect
-│     已知实体信息查询（"组织F团队的人"）→ query
+│     已知组织查团队（"组织F团队的人"）→ get_org_tree
 │     已知人物+共同事件+问经历内容（"人物A和人物B一起做过什么"）→ deep_recall
 │   → recall_episode({
 │       query: 原始问题,
@@ -98,7 +98,7 @@
 │   → detail: brief=快速, normal=标准, full=深度
 │   → ⚠️ 不适用场景（走现有路由）：
 │     单一实体查找 → deep_recall
-│     简单关键词搜索 → query
+│     精确关键词定位/debug → query（仅此场景可用 query）
 │     核查确认 → deep_recall(grounded: true)
 │     情境找人 → recall_episode
 │     内容回忆 → deep_recall(detail: normal)
@@ -157,9 +157,11 @@
 │   ⚠️ anonymize 仅隐藏来源标识；分享前仍需用户完成隐私审查
 │
 ├─ "快速查找"？
-│   信号：搜、找、有没有、查一下、谁在XX、XX认识谁
-│   → query
-│   → 需要完整信息？→ expand_entity
+│   信号：搜、找、有没有、查一下
+│   ⚠️ 大部分"快速查找"仍是自然语言 → 先试 deep_recall(detail: "brief", limit: 3)
+│   ⚠️ query 仅用于精确关键词定位或降级链
+│   → deep_recall（首选）或 query（仅精确关键词）
+│   → 降级链：deep_recall 空 → query(缩减关键词) → 告知用户
 │
 ├─ 追问某个具体实体？
 │   信号：多说说、展开、细节、详细看这个
@@ -419,7 +421,7 @@ grounded recall 返回后，首轮回答必须：
 | read_discoveries | 跨域关联发现（用户可读摘要） | 深度发现，只展示 display/cards/summary |
 | get_timeline | 按时间排列的事件流 | 时间线回顾 |
 | merge_pages | 合并结果预览 + 执行 | 合并重复页面（先 dryRun） |
-| query | slug + title + snippet | 快速搜索，轻量（**最后手段，不是默认**） |
+| query | slug + title + snippet | **底层调试工具**。仅限关键词定位、debug 索引、降级链重试。自然语言问题禁止使用。 |
 | expand_entity | 单实体的详细信息 | 追问已知实体 |
 | recall_episode | 候选人列表 + 匹配线索 + 证据 + 诊断 | 情境找人：不记得名字，靠时间/主题/事件/关系线索召回候选人 |
 | get_provenance | 来源分类 + 信任状态 + 证据 + 纠正历史 | 解释已有记忆的来源和可信度（需要 target_type + target_id） |

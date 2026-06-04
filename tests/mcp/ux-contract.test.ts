@@ -110,11 +110,37 @@ describe("C1: CaptureEnvelope structure", () => {
 
 describe("C3: query is foundational, not user-facing", () => {
   const TOOLS_DIR = path.resolve(import.meta.dir, "../../src/mcp/tools");
+  const SKILLS_DIR = path.resolve(import.meta.dir, "../../skills");
 
-  test("search.ts query description warns against direct use", () => {
+  test("query description brands it as debug/底层 tool", () => {
     const source = fs.readFileSync(path.join(TOOLS_DIR, "search.ts"), "utf-8");
-    // query tool should mention deep_recall as preferred
+    // Must contain explicit debug/底层 language
+    expect(source).toMatch(/底层|调试|debug|仅限/);
+  });
+
+  test("query description mentions deep_recall as preferred", () => {
+    const source = fs.readFileSync(path.join(TOOLS_DIR, "search.ts"), "utf-8");
     expect(source).toContain("deep_recall");
+  });
+
+  test("query description lists routing alternatives", () => {
+    const source = fs.readFileSync(path.join(TOOLS_DIR, "search.ts"), "utf-8");
+    // Must mention the routing table: 事实回忆 → deep_recall, etc.
+    expect(source).toMatch(/summarize/);
+    expect(source).toMatch(/recall_episode/);
+    expect(source).toMatch(/get_org_tree/);
+  });
+
+  test("RESOLVER catch-all routes natural language to deep_recall, not query", () => {
+    const resolver = fs.readFileSync(path.join(SKILLS_DIR, "RESOLVER.md"), "utf-8");
+    // Natural language catch-all must use [deep_recall] flag, not bare query.md
+    expect(resolver).toMatch(/\[deep_recall\]/);
+    expect(resolver).toMatch(/\[keyword\]/);
+  });
+
+  test("recall-resolver marks query as 底层/调试 tool", () => {
+    const rr = fs.readFileSync(path.join(SKILLS_DIR, "recall-resolver.md"), "utf-8");
+    expect(rr).toMatch(/底层|调试|debug|仅限.*关键词/);
   });
 });
 
