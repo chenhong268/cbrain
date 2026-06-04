@@ -583,7 +583,54 @@ fi
 
 echo ""
 
-# ── 7. 汇总 ──
+# ── 8. UX 合同 / 隐私 ──
+echo "── 8. UX contract / privacy ──"
+
+# 8a. UX contract doc exists
+if [[ -f "docs/product/cbrain-2.0-ux-contract.md" ]]; then
+  echo "  ✅ UX contract doc exists"
+  ((OK++))
+else
+  echo "  ❌ docs/product/cbrain-2.0-ux-contract.md 不存在"
+  ((FAIL++))
+fi
+
+# 8b. No real email addresses in tests/evals
+EMAIL_HITS=$(grep -rE '[a-z]+@[a-z]+\.(com|cn|org)' tests/ skills/*.jsonl docs/product/ 2>/dev/null | grep -v node_modules | grep -v '.sqlite' | head -5 || true)
+if [[ -z "$EMAIL_HITS" ]]; then
+  echo "  ✅ No real email addresses in tests/evals/docs"
+  ((OK++))
+else
+  echo "  ❌ Found potential real email addresses:"
+  echo "$EMAIL_HITS"
+  ((FAIL++))
+fi
+
+# 8c. No real phone numbers in tests/evals
+PHONE_HITS=$(grep -rE '1[3-9][0-9]{9}' tests/ skills/*.jsonl docs/product/ 2>/dev/null | grep -v node_modules | head -5 || true)
+if [[ -z "$PHONE_HITS" ]]; then
+  echo "  ✅ No real phone numbers in tests/evals/docs"
+  ((OK++))
+else
+  echo "  ❌ Found potential real phone numbers:"
+  echo "$PHONE_HITS"
+  ((FAIL++))
+fi
+
+# 8d. No iCloud vault paths in product docs
+ICLOUD_HITS=$(grep -r 'iCloud~md~obsidian' docs/product/ 2>/dev/null | head -5 || true)
+if [[ -z "$ICLOUD_HITS" ]]; then
+  echo "  ✅ No iCloud vault paths in product docs"
+  ((OK++))
+else
+  echo "  ❌ Found iCloud vault paths in product docs:"
+  echo "$ICLOUD_HITS"
+  ((FAIL++))
+fi
+
+echo ""
+
+# ── 9. 汇总 ──
 echo "=== ${OK} OK, ${FAIL} FAIL, ${WARN} WARN ==="
 
 if (( FAIL > 0 )); then
