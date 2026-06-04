@@ -5,6 +5,7 @@ import { generateProactiveHints } from "../../core/proactive.js";
 import { isComplexQuery, type SearchTrace } from "../../core/search.js";
 import { traceToSteps } from "../../core/search-trace.js";
 import { trimHint, applyProactiveBudget } from "./trim.js";
+import { classifyDegradedReasons, computeSearchDegraded } from "../../core/search-diagnostics.js";
 import { formatQueryEnvelope } from "./format-result.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
@@ -84,11 +85,17 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     }
 
     const latencyMs = Date.now() - start;
+
+    // Diagnose degraded search state
+    const reasonCodes = classifyDegradedReasons(results, trace, query, cap);
+
     try {
       const sourceCounts: Record<string, number> = {};
       for (const r of results) { sourceCounts[r.source ?? "unknown"] = (sourceCounts[r.source ?? "unknown"] ?? 0) + 1; }
-      ctx.db.logSearch(query, usedStrategy, latencyMs, results.length, latencyMs > 2000, {
+      const isDegraded = computeSearchDegraded(latencyMs, trace, reasonCodes);
+      ctx.db.logSearch(query, usedStrategy, latencyMs, results.length, isDegraded, {
         strategy_path: usedStrategy, ...trace, result_sources: sourceCounts, requested_limit: cap, multistep: !!multiStep,
+        reason_codes: reasonCodes,
       });
     } catch { /* non-critical */ }
 
@@ -99,10 +106,10 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
         for (const step of steps) ctx.db.addSearchTraceStep(step);
         ctx.db.finishSearchTraceSession(traceSessionId, {
           latencyMs,
-          status: latencyMs > 2000 ? "degraded" : (trace.degraded_reason ? "degraded" : "success"),
+          status: computeSearchDegraded(latencyMs, trace, reasonCodes) ? "degraded" : "success",
           llmCalls: trace.llm_calls,
           totalSteps: steps.length,
-          summaryJson: { ...trace },
+          summaryJson: { ...trace, reason_codes: reasonCodes },
         });
       }
     } catch { /* trace write failure must not break search */ }
@@ -120,21 +127,34 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       maxHints: 2,
     });
 
+    const isSearchDegraded = computeSearchDegraded(latencyMs, trace, reasonCodes);
+    const isVectorDegraded = !!trace.degraded_reason;
     const payload = {
       results,
       proactive_hints: (() => {
         const budgeted = applyProactiveBudget(hints.map(trimHint), { grounded: false, toolType: "search" });
         return budgeted.length > 0 ? budgeted : undefined;
       })(),
-      ...(trace.degraded_reason ? {
+      // Top-level degraded: any degradation triggers formatter degraded path
+      ...(isSearchDegraded ? {
         degraded: true,
-        vector_skipped: trace.degraded_reason === "vector_timeout" ? "timeout" : "error",
+        // vector_skipped: only for actual vector failures (controls display message)
+        ...(isVectorDegraded ? { vector_skipped: trace.degraded_reason === "vector_timeout" ? "timeout" as const : "error" as const } : {}),
         latency_ms: latencyMs,
       } : {}),
+      // Diagnostic meta — only in raw envelope, NOT spread to top level
+      search_meta: {
+        strategy: usedStrategy,
+        latency_ms: latencyMs,
+        degraded: isSearchDegraded || undefined,
+        ...(reasonCodes.length > 0 ? { reason_codes: reasonCodes } : {}),
+      },
     };
     const { display, summary, raw } = formatQueryEnvelope(payload);
+    // Strip search_meta from top-level spread — diagnostics only in raw
+    const { search_meta: _meta, ...legacyPayload } = payload;
     return {
-      content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...payload }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...legacyPayload }, null, 2) }],
     };
   });
 

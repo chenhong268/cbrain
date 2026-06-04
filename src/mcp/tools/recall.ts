@@ -10,6 +10,7 @@ import { generateProactiveHints } from "../../core/proactive.js";
 import { extractBirthday } from "../../core/birthday.js";
 import { buildMemorySkeleton } from "../../core/key-points.js";
 import { type SearchTrace } from "../../core/search.js";
+import { classifyDegradedReasons, computeSearchDegraded } from "../../core/search-diagnostics.js";
 import { traceToSteps } from "../../core/search-trace.js";
 import { collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
@@ -100,11 +101,16 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     const searchLatencyMs = Date.now() - searchStart;
 
+    // Diagnose degraded search state
+    const reasonCodes = classifyDegradedReasons(searchResults, trace, query, cap);
+
     try {
       const sourceCounts: Record<string, number> = {};
       for (const r of searchResults) { sourceCounts[r.source ?? "unknown"] = (sourceCounts[r.source ?? "unknown"] ?? 0) + 1; }
-      ctx.db.logSearch(query, usedStrategy, searchLatencyMs, searchResults.length, searchLatencyMs > 2000, {
+      const isDegraded = computeSearchDegraded(searchLatencyMs, trace, reasonCodes);
+      ctx.db.logSearch(query, usedStrategy, searchLatencyMs, searchResults.length, isDegraded, {
         strategy_path: usedStrategy, ...trace, result_sources: sourceCounts, requested_limit: cap, multistep: !!multiStep, detail_level: detailLevel ?? "brief",
+        reason_codes: reasonCodes,
       });
     } catch { /* non-critical */ }
 
@@ -115,10 +121,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         for (const step of steps) ctx.db.addSearchTraceStep(step);
         ctx.db.finishSearchTraceSession(traceSessionId, {
           latencyMs: searchLatencyMs,
-          status: searchLatencyMs > 2000 ? "degraded" : (trace.degraded_reason ? "degraded" : "success"),
+          status: computeSearchDegraded(searchLatencyMs, trace, reasonCodes) ? "degraded" : "success",
           llmCalls: trace.llm_calls,
           totalSteps: steps.length,
-          summaryJson: { ...trace },
+          summaryJson: { ...trace, reason_codes: reasonCodes },
         });
       }
     } catch { /* trace write failure must not break search */ }
@@ -130,22 +136,31 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       try { ctx.learn.bumpOnQuery(searchResults[i].slug, i, "recall"); } catch { /* non-critical */ }
     }
 
+    const isSearchDegraded = computeSearchDegraded(searchLatencyMs, trace, reasonCodes);
+    const diagnosticMeta = {
+      strategy: usedStrategy,
+      latency_ms: searchLatencyMs,
+      degraded: isSearchDegraded || undefined,
+      ...(reasonCodes.length > 0 ? { reason_codes: reasonCodes } : {}),
+    };
+
     if (searchResults.length === 0) {
       if (grounded) {
         const emptyBoard = { facts: [], user_thoughts: [], candidates: [], gaps: [], conflicts: [] as Array<{ claim: string; evidence: EvidenceItem[] }> };
         const groundedResult = buildGroundedRecall(query, emptyBoard);
-        const groundedPayload = { query, grounded_answer: groundedResult, search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs } };
+        const groundedPayload = { query, grounded_answer: groundedResult, search_meta: diagnosticMeta };
         const { display, summary, raw } = formatGroundedRecallEnvelope(groundedPayload);
+        const { search_meta: _gm, ...groundedLegacy } = groundedPayload;
         return {
           content: [{
             type: "text" as const,
-            text: JSON.stringify({ display, summary, raw, ...groundedPayload }, null, 2),
+            text: JSON.stringify({ display, summary, raw, ...groundedLegacy }, null, 2),
           }],
         };
       }
-      const emptyPayload = { query, entities: [], summary: "未找到相关实体" };
+      const emptyPayload = { query, entities: [], summary: "未找到相关实体", search_meta: diagnosticMeta };
       const { display: emptyDisplay, summary: emptySummary, raw: emptyRaw } = formatRecallEnvelope(emptyPayload);
-      const { summary: emptyLegacySummary, ...emptyRest } = emptyPayload;
+      const { summary: emptyLegacySummary, search_meta: _em, ...emptyRest } = emptyPayload;
       return {
         content: [{
           type: "text" as const,
@@ -162,13 +177,14 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const groundedPayload = {
         query,
         grounded_answer: groundedResult,
-        search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs },
+        search_meta: diagnosticMeta,
       };
       const { display: gDisplay, summary: gSummary, raw: gRaw } = formatGroundedRecallEnvelope(groundedPayload);
+      const { search_meta: _gm2, ...groundedLegacy2 } = groundedPayload;
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ display: gDisplay, summary: gSummary, raw: gRaw, ...groundedPayload }, null, 2),
+          text: JSON.stringify({ display: gDisplay, summary: gSummary, raw: gRaw, ...groundedLegacy2 }, null, 2),
         }],
       };
     }
@@ -365,7 +381,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     const payload = {
       query,
-      search_meta: { strategy: usedStrategy, latency_ms: searchLatencyMs, degraded: searchLatencyMs > 2000 },
+      search_meta: diagnosticMeta,
       entities,
       insights: relatedInsights.length > 0 ? relatedInsights : undefined,
       cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
@@ -380,7 +396,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     };
 
     const { display, summary: envelopeSummary, raw } = formatRecallEnvelope(payload);
-    const { summary: legacySummary, ...payloadRest } = payload;
+    const { summary: legacySummary, search_meta: _rm, ...payloadRest } = payload;
     return {
       content: [{
         type: "text" as const,

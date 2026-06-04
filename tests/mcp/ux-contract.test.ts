@@ -515,6 +515,76 @@ describe("C9: progressive disclosure routing", () => {
   });
 });
 
+// ─── C10: degraded reason codes display safety ──────────────
+
+describe("C10: degraded reason codes display safety", () => {
+  test("DISPLAY_BANNED_TERMS includes reason_codes", async () => {
+    const { DISPLAY_BANNED_TERMS } = await import("../../src/mcp/tools/format-result.js");
+    expect(DISPLAY_BANNED_TERMS).toContain("reason_codes");
+  });
+
+  test("query envelope display/summary never contain reason_codes", () => {
+    const payload = {
+      results: [{ snippet: "test" }],
+      degraded: true,
+      vector_skipped: "timeout" as const,
+      latency_ms: 3000,
+      search_meta: { strategy: "smart", latency_ms: 3000, degraded: true, reason_codes: ["vector_timeout", "fts_empty"] },
+    };
+    const { display, summary } = formatQueryEnvelope(payload);
+    expect(display).not.toContain("reason_codes");
+    expect(JSON.stringify(summary)).not.toContain("reason_codes");
+    expect(display).not.toContain("vector_timeout");
+    expect(display).not.toContain("fts_empty");
+  });
+
+  test("query envelope non-vector degraded shows generic message, not '向量搜索异常'", () => {
+    const payload = {
+      results: [{ snippet: "test" }],
+      degraded: true,
+      search_meta: { strategy: "smart", latency_ms: 3000, degraded: true, reason_codes: ["low_score"] },
+    };
+    const { display } = formatQueryEnvelope(payload);
+    expect(display).not.toContain("向量搜索异常");
+    expect(display).not.toContain("向量搜索超时");
+    expect(display).toContain("搜索未达最佳效果");
+  });
+
+  test("recall envelope display/summary never contain reason_codes", () => {
+    const payload = {
+      query: "test",
+      entities: [{ title: "A" }, { title: "B" }],
+      search_meta: { strategy: "smart", latency_ms: 100, degraded: true, reason_codes: ["fts_empty", "low_score"] },
+      summary: "找到 2 个实体",
+    };
+    const { display, summary } = formatRecallEnvelope(payload);
+    expect(display).not.toContain("reason_codes");
+    expect(JSON.stringify(summary)).not.toContain("reason_codes");
+  });
+
+  test("grounded recall envelope display/summary never contain reason_codes", () => {
+    const payload = {
+      query: "test",
+      grounded_answer: { facts: [], candidates: [], gaps: [], conflicts: [], confidence: "low" },
+      search_meta: { strategy: "smart", latency_ms: 100, reason_codes: ["budget_exhausted"] },
+    };
+    const { display, summary } = formatGroundedRecallEnvelope(payload);
+    expect(display).not.toContain("reason_codes");
+    expect(JSON.stringify(summary)).not.toContain("reason_codes");
+    expect(display).not.toContain("budget_exhausted");
+  });
+
+  test("envelope raw retains reason_codes in search_meta", () => {
+    const payload = {
+      results: [{ snippet: "test" }],
+      search_meta: { strategy: "smart", latency_ms: 100, reason_codes: ["low_score"] },
+    };
+    const { raw } = formatQueryEnvelope(payload);
+    const meta = (raw as { search_meta?: { reason_codes?: string[] } }).search_meta;
+    expect(meta?.reason_codes).toEqual(["low_score"]);
+  });
+});
+
 // ─── Helpers ──────────────────────────────────────────────────
 
 function walkDir(dir: string, extensions: string[]): string[] {

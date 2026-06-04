@@ -30,6 +30,7 @@ export interface DreamReport {
     compact: { tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; filesRemoved: number };
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
+    search_quality: { degraded_rate: number; total: number; top_reasons: Array<{ code: string; count: number }> };
     indexes: { files: number };
   };
   duration_ms: number;
@@ -87,6 +88,7 @@ export async function runDream(
         compact: { tables: [], fragmentsRemoved: 0, fragmentsAdded: 0, filesRemoved: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
         insight_archive: { archived: 0 },
+        search_quality: { degraded_rate: 0, total: 0, top_reasons: [] },
         indexes: { files: 0 },
       },
       duration_ms: 0,
@@ -278,6 +280,13 @@ export async function runDream(
   if (onStageProgress) onStageProgress("health", { overallStatus: healthReport.overallStatus, dimensions: healthReport.dimensions.length, issues: healthReport.dimensions.reduce((s, d) => s + d.issues.length, 0) });
   if (onStageProgress) onStageProgress("insight_archive", { archived });
 
+  // Stage 6.5: Search quality summary
+  let searchQualityStats = { totalSearches: 0, degradedCount: 0, degradedRate: 0, topReasonCodes: [] as Array<{ code: string; count: number }> };
+  try {
+    searchQualityStats = db.getSearchQualityStats(7);
+    if (onStageProgress) onStageProgress("search_quality", searchQualityStats);
+  } catch (e) { logger.warn("dream", `搜索质量统计失败: ${(e as Error).message}`); }
+
   // Stage 7: Index generation
   logger.info("dream", "Stage 7/7: indexes");
   let indexFiles = 0;
@@ -310,6 +319,7 @@ export async function runDream(
         issues: healthReport.dimensions.reduce((s, d) => s + d.issues.length, 0),
       },
       insight_archive: { archived },
+      search_quality: { degraded_rate: searchQualityStats.degradedRate, total: searchQualityStats.totalSearches, top_reasons: searchQualityStats.topReasonCodes },
       indexes: { files: indexFiles },
     },
     duration_ms: Date.now() - started,
@@ -389,6 +399,9 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.insight_archive.archived > 0) {
     lines.push(`${report.stages.insight_archive.archived} 条洞察归档`);
+  }
+  if (report.stages.search_quality.total > 0 && report.stages.search_quality.degraded_rate > 0.2) {
+    lines.push(`搜索: ${report.stages.search_quality.total} 次, ${(report.stages.search_quality.degraded_rate * 100).toFixed(0)}% 降级`);
   }
   if (report.stages.indexes.files > 0) {
     lines.push(`${report.stages.indexes.files} 个索引更新`);

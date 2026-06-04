@@ -33,6 +33,7 @@ const SLUG_PATH_RE = /brain\/(?:entities|concepts|insights|records)\//g;
 export const DISPLAY_BANNED_TERMS = [
   "score", "distance", "debug", "trace", "threshold",
   "latency_ms", "vector", "degraded_reason", "_stub",
+  "reason_codes",
 ];
 
 /**
@@ -261,6 +262,7 @@ interface QueryPayload {
   degraded?: boolean;
   vector_skipped?: string;
   latency_ms?: number;
+  search_meta?: { strategy?: string; latency_ms?: number; degraded?: boolean; reason_codes?: string[] };
 }
 
 export function formatQueryEnvelope(payload: QueryPayload): {
@@ -285,7 +287,12 @@ export function formatQueryEnvelope(payload: QueryPayload): {
   }
 
   if (payload.degraded) {
-    const reason = payload.vector_skipped === "timeout" ? "向量搜索超时" : "向量搜索异常";
+    // Vector-specific messages only when vector_skipped is set
+    const reason = payload.vector_skipped === "timeout"
+      ? "向量搜索超时"
+      : payload.vector_skipped === "error"
+        ? "向量搜索异常"
+        : "搜索未达最佳效果";
     return {
       display: sanitizeDisplay(`搜索遇到问题（${reason}），返回了 ${count} 条结果。`),
       summary: {

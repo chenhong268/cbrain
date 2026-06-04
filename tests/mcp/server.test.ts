@@ -1707,8 +1707,8 @@ describe("MCP Server", () => {
       expect(data.grounded_answer.confidence).toBeDefined();
       expect(Array.isArray(data.grounded_answer.facts)).toBe(true);
       expect(Array.isArray(data.grounded_answer.must_not_claim)).toBe(true);
-      expect(data.search_meta).toBeDefined();
-      expect(data.search_meta.strategy).toBeDefined();
+      expect(data.raw.search_meta).toBeDefined();
+      expect(data.raw.search_meta.strategy).toBeDefined();
     });
 
     test("grounded=false (default) returns entities, no grounded_answer", async () => {
@@ -1751,8 +1751,8 @@ describe("MCP Server", () => {
       expect(data.grounded_answer.confidence).toBe("low");
       expect(data.grounded_answer.facts).toHaveLength(0);
       expect(data.grounded_answer.answer).toContain("没有足够的记录");
-      expect(data.search_meta).toBeDefined();
-      expect(data.search_meta.strategy).toBeDefined();
+      expect(data.raw.search_meta).toBeDefined();
+      expect(data.raw.search_meta.strategy).toBeDefined();
       // Must NOT have entities field — interface is consistent
       expect(data.entities).toBeUndefined();
     });
@@ -2242,6 +2242,29 @@ describe("MCP Server", () => {
       // Tool still returns results
       expect(data.results).toBeDefined();
       expect(Array.isArray(data.results)).toBe(true);
+    });
+
+    test("non-vector degraded (empty results) shows degraded status without vector message", async () => {
+      // No data seeded — query will return empty results → fts_empty reason code
+      const server = createServer(deps);
+      const result = await getTools(server).query.handler({ query: "完全不存在的查询xyz" });
+      const data = JSON.parse(result.content[0].text);
+
+      // Top-level should NOT have search_meta (diagnostics only in raw)
+      expect((data as Record<string, unknown>).search_meta).toBeUndefined();
+      // But raw envelope should have search_meta with reason_codes
+      const rawMeta = data.raw?.search_meta as Record<string, unknown> | undefined;
+      expect(rawMeta).toBeDefined();
+      expect(Array.isArray(rawMeta?.reason_codes)).toBe(true);
+      expect(rawMeta!.reason_codes).toContain("fts_empty");
+
+      // Display should not contain vector-specific messages
+      expect(data.display).not.toContain("向量搜索异常");
+      expect(data.display).not.toContain("向量搜索超时");
+      // Summary should reflect degraded or empty status
+      expect(data.summary.status).toMatch(/^(degraded|empty)$/);
+      // Top-level legacy payload should NOT contain reason_codes
+      expect(JSON.stringify(data).match(/"reason_codes"/g)?.length).toBe(1);
     });
 
     test("error wrapper sanitizes internal paths and SQL errors", async () => {

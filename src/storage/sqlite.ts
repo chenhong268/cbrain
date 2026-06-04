@@ -2060,6 +2060,54 @@ export class CBrainDB {
     ).all({ $limit: limit }) as Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; details_json: string | null; created_at: string }>;
   }
 
+  getSearchQualityStats(days: number = 7): { totalSearches: number; degradedCount: number; degradedRate: number; avgLatencyMs: number; topReasonCodes: Array<{ code: string; count: number }>; emptyResultCount: number; hierarchyMismatchCount: number; periodDays: number } {
+    const rows = this.prepare(
+      "SELECT degraded, hit_count, latency_ms, details_json FROM search_log WHERE created_at >= datetime('now', '-' || $days || ' days')"
+    ).all({ $days: days }) as Array<{ degraded: number; hit_count: number; latency_ms: number; details_json: string | null }>;
+
+    const totalSearches = rows.length;
+    if (totalSearches === 0) {
+      return { totalSearches: 0, degradedCount: 0, degradedRate: 0, avgLatencyMs: 0, topReasonCodes: [], emptyResultCount: 0, hierarchyMismatchCount: 0, periodDays: days };
+    }
+
+    const degradedCount = rows.filter(r => r.degraded === 1).length;
+    const avgLatencyMs = Math.round(rows.reduce((s, r) => s + r.latency_ms, 0) / totalSearches);
+    const emptyResultCount = rows.filter(r => r.hit_count === 0).length;
+
+    // Aggregate reason codes from details_json
+    const codeCounts = new Map<string, number>();
+    let hierarchyMismatchCount = 0;
+    for (const row of rows) {
+      if (!row.details_json) continue;
+      try {
+        const details = JSON.parse(row.details_json);
+        const codes: string[] = details.reason_codes ?? [];
+        for (const code of codes) {
+          codeCounts.set(code, (codeCounts.get(code) ?? 0) + 1);
+        }
+        if (codes.includes("routing_mismatch_hierarchy")) {
+          hierarchyMismatchCount++;
+        }
+      } catch { /* malformed json, skip */ }
+    }
+
+    const topReasonCodes = [...codeCounts.entries()]
+      .map(([code, count]) => ({ code, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    return {
+      totalSearches,
+      degradedCount,
+      degradedRate: degradedCount / totalSearches,
+      avgLatencyMs,
+      topReasonCodes,
+      emptyResultCount,
+      hierarchyMismatchCount,
+      periodDays: days,
+    };
+  }
+
   // ─── Search trace ─────────────────────────────────────────────
 
   private migrateSearchTraceTables(): void {

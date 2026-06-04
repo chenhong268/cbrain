@@ -182,6 +182,7 @@ export class HealthChecker {
       this.checkSourceQuality(),
       this.checkStaleContent(),
       this.checkContradictions(),
+      this.checkSearchQuality(),
     ];
 
     const highCount = dimensions.reduce((n, d) => n + d.issues.filter(i => i.severity === "high").length, 0);
@@ -1177,5 +1178,64 @@ export class HealthChecker {
       conceptsPerSource,
       indexSizeKB: 0,
     };
+  }
+
+  // ─── Dimension 15: Search Quality ─────────────────────────
+
+  private checkSearchQuality(): HealthDimension {
+    const stats = this.db.getSearchQualityStats(7);
+    const issues: HealthIssue[] = [];
+
+    if (stats.totalSearches === 0) {
+      return { name: "搜索质量", status: "pass", issues: [] };
+    }
+
+    // Degraded rate > 20%
+    if (stats.degradedRate > 0.2) {
+      issues.push({
+        severity: "medium",
+        slug: "-",
+        title: `${(stats.degradedRate * 100).toFixed(0)}% 搜索降级率`,
+        description: `最近 ${stats.periodDays} 天 ${stats.totalSearches} 次搜索中 ${stats.degradedCount} 次降级`,
+        suggestion: "检查 embedding 服务延迟和 FTS 索引覆盖率",
+      });
+    }
+
+    // Hierarchy routing mismatches
+    if (stats.hierarchyMismatchCount > 0) {
+      issues.push({
+        severity: "low",
+        slug: "-",
+        title: `${stats.hierarchyMismatchCount} 次组织架构路由偏差`,
+        description: "组织层级查询走了语义搜索而非 get_org_tree",
+        suggestion: "检查 RESOLVER.md 层级关键词覆盖，补充缺失关键词",
+      });
+    }
+
+    // Empty result rate > 30% (with 10+ searches)
+    if (stats.totalSearches >= 10 && stats.emptyResultCount / stats.totalSearches > 0.3) {
+      issues.push({
+        severity: "high",
+        slug: "-",
+        title: `${(stats.emptyResultCount / stats.totalSearches * 100).toFixed(0)}% 搜索无结果`,
+        description: `最近 ${stats.periodDays} 天 ${stats.emptyResultCount}/${stats.totalSearches} 次搜索无结果`,
+        suggestion: "检查 FTS 索引、embedding 模型、vault 内容量",
+      });
+    }
+
+    // Top reason codes as informational
+    for (const top of stats.topReasonCodes.slice(0, 3)) {
+      issues.push({
+        severity: "low",
+        slug: "-",
+        title: `频繁降级原因: ${top.code}`,
+        description: `出现 ${top.count} 次`,
+      });
+    }
+
+    const status = issues.some(i => i.severity === "high") ? "fail"
+      : issues.some(i => i.severity === "medium") ? "warn" : "pass";
+
+    return { name: "搜索质量", status, issues };
   }
 }
