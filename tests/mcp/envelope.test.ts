@@ -17,6 +17,7 @@ import {
   formatEpisodeEnvelope,
   formatOrgTreeEnvelope,
   formatDiscoveriesEnvelope,
+  formatGetPagesEnvelope,
   sanitizeDisplay,
   type ToolSummary,
 } from "../../src/mcp/tools/format-result.js";
@@ -436,6 +437,52 @@ describe("formatDiscoveriesEnvelope", () => {
     assertHasRaw(result, payload);
     expect(result.summary.status).toBe("ok");
     expect(result.raw.cards!.length).toBe(2);
+  });
+});
+
+// ─── get_pages (batch) ──────────────────────────────────────
+
+describe("formatGetPagesEnvelope", () => {
+  test("all found — status ok", () => {
+    const payload = { slugs: ["a", "b", "c"], detail: "brief" as const, found: 3, missing: 0 };
+    const result = formatGetPagesEnvelope(payload);
+    expect(result.display).toContain("找到 3 个页面");
+    assertNoInternalTerms(result.display);
+    assertValidSummary(result.summary);
+    assertHasRaw(result, payload);
+    expect(result.summary.status).toBe("ok");
+    expect(result.summary.count).toBe(3);
+    // raw preserves all payload fields
+    expect(result.raw.found).toBe(3);
+    expect(result.raw.missing).toBe(0);
+  });
+
+  test("partial — status degraded with missing reason", () => {
+    const payload = { slugs: ["a", "b", "c"], detail: "brief" as const, found: 2, missing: 1 };
+    const result = formatGetPagesEnvelope(payload);
+    expect(result.display).toContain("找到 2 个页面");
+    expect(result.display).toContain("1 个不存在");
+    assertValidSummary(result.summary);
+    assertHasRaw(result, payload);
+    expect(result.summary.status).toBe("degraded");
+    expect(result.summary.degraded_reason).toBeDefined();
+    // raw preserves full payload
+    expect(result.raw.found).toBe(2);
+    expect(result.raw.missing).toBe(1);
+  });
+
+  test("all missing — status empty", () => {
+    const payload = { slugs: ["x", "y"], detail: "brief" as const, found: 0, missing: 2 };
+    const result = formatGetPagesEnvelope(payload);
+    expect(result.display).toContain("均不存在");
+    assertValidSummary(result.summary);
+    assertHasRaw(result, payload);
+    expect(result.summary.status).toBe("empty");
+    expect(result.summary.count).toBe(0);
+    expect(result.summary.next_steps).toBeDefined();
+    // raw preserves full payload
+    expect(result.raw.found).toBe(0);
+    expect(result.raw.missing).toBe(2);
   });
 });
 

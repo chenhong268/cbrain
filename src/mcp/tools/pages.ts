@@ -6,7 +6,7 @@ import type { ToolContext } from "../context.js";
 import { canMerge, getLayer } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
-import { formatGetPageEnvelope } from "./format-result.js";
+import { formatGetPageEnvelope, formatGetPagesEnvelope } from "./format-result.js";
 
 function syncWikilinkRelations(ctx: ToolContext, slug: string, affectedSlugs: Set<string>): void {
   for (const s of new Set([slug, ...affectedSlugs])) {
@@ -331,4 +331,110 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     ctx.db.removeAlias(slug, alias);
     return { content: [{ type: "text", text: JSON.stringify({ success: true, slug, aliasRemoved: alias }) }] };
   });
+
+  // ─── get_pages ────────────────────────────────────────────
+  server.registerTool("get_pages", {
+    description:
+      "批量获取多个页面的摘要信息。用于 get_org_tree / deep_recall 后批量补详情。" +
+      "返回 compact 格式，默认不含长正文。连续多次 get_page → 改用本工具一次搞定。" +
+      "缺失的 slug 按 missing 返回，不会让整个请求失败。",
+    inputSchema: {
+      slugs: z.array(z.string().max(500)).min(1).max(20)
+        .describe("要查询的 slug 列表，最多 20 个"),
+      detail: z.enum(["brief", "normal"]).optional().default("brief")
+        .describe("brief=200字摘要+基本信息（默认）；normal=500字摘要+tags+link统计"),
+    },
+  }, async ({ slugs, detail }) => {
+    const actualDetail = detail ?? "brief";
+    const rows = ctx.db.getPagesBySlugs(slugs);
+    const rowBySlug = new Map(rows.map(r => [r.slug, r]));
+    const missing = slugs.filter(s => !rowBySlug.has(s));
+    const foundSlugs = slugs.filter(s => rowBySlug.has(s));
+
+    // Build items in input slug order (SQLite IN() returns arbitrary order)
+    const maxChars = actualDetail === "normal" ? 500 : 200;
+    const items = foundSlugs.map(slug => {
+      const row = rowBySlug.get(slug)!;
+      let body: string | null = null;
+      const filePath = row.file_path as string | undefined;
+      const fullPath = filePath ? join(ctx.vaultPath, filePath) : undefined;
+
+      if (fullPath) {
+        const resolved = resolve(fullPath);
+        const rel = relative(ctx.vaultPath, resolved);
+        if (!rel.startsWith("..") && !resolved.startsWith("..")) {
+          if (existsSync(resolved)) body = readFileSync(resolved, "utf-8");
+        }
+      }
+
+      // Strip frontmatter from body for excerpt
+      const bodyContent = stripFrontmatter(body ?? "");
+      const { body: excerpt, has_more } = trimPageBody(bodyContent, maxChars);
+
+      const item: Record<string, unknown> = {
+        slug: row.slug,
+        title: row.title,
+        type: row.type,
+        tier: row.tier,
+        excerpt,
+        has_more,
+        updated_at: row.updated_at,
+      };
+
+      if (actualDetail === "normal") {
+        item.mention_count = row.mention_count;
+      }
+
+      return item;
+    });
+
+    // Enrich with tags and link counts for normal detail
+    if (actualDetail === "normal" && foundSlugs.length > 0) {
+      const tagsMap = ctx.db.batchGetTagsForSlugs(foundSlugs);
+      const linksMap = ctx.db.getLinksForSlugs(foundSlugs);
+
+      for (const item of items) {
+        const slug = item.slug as string;
+        item.tags = tagsMap.get(slug) ?? [];
+        const links = linksMap.get(slug);
+        item.link_count = {
+          outgoing: links?.outgoing?.length ?? 0,
+          incoming: links?.incoming?.length ?? 0,
+        };
+      }
+    }
+
+    // Learning: log query + bump activity weights
+    try {
+      ctx.db.logQuery("get_pages", slugs.join(","), foundSlugs, 0, undefined);
+    } catch { /* non-critical */ }
+    for (let i = 0; i < foundSlugs.length; i++) {
+      try { ctx.learn.bumpOnQuery(foundSlugs[i], i, "get_pages"); } catch { /* non-critical */ }
+    }
+
+    const envelopePayload = {
+      slugs,
+      detail: actualDetail,
+      found: foundSlugs.length,
+      missing: missing.length,
+      items,
+      missingSlugs: missing,
+    };
+    const { display, summary, raw } = formatGetPagesEnvelope(envelopePayload);
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ display, summary, raw, items, missing }, null, 2),
+      }],
+    };
+  });
+}
+
+/** Strip YAML frontmatter (---...---) from markdown body. */
+function stripFrontmatter(body: string): string {
+  if (!body.startsWith("---")) return body;
+  const end = body.indexOf("---", 3);
+  if (end === -1) return body;
+  return body.slice(end + 3).trimStart();
 }

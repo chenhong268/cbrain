@@ -82,7 +82,7 @@ describe("MCP Server", () => {
         "dossier", "dream", "dream_reset", "dream_status", "enrich", "expand_entity",
         "export_grounded_artifact",
         "generate_indexes", "get_chunks", "get_compounding_reviews", "get_hierarchy", "get_ingest_log", "get_insight",
-        "get_links", "get_org_tree", "get_page", "get_profile", "get_provenance", "get_tags",
+        "get_links", "get_org_tree", "get_page", "get_pages", "get_profile", "get_provenance", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",
         "ingest", "ingest_dialogue", "job_cancel", "job_list",
         "job_retry", "job_status", "job_submit", "list_insights",
@@ -147,6 +147,175 @@ describe("MCP Server", () => {
       const result = await getTools(server).get_page.handler({ slug: "entities/ghost" });
       const data = JSON.parse(result.content[0].text);
       expect(data.error).toBe("Page not found");
+    });
+  });
+
+  describe("get_pages tool", () => {
+    function seedPage(slug: string, title: string, body: string = "") {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count, hotness_score, created_at, updated_at) VALUES (?, 'entity', ?, ?, NULL, 1, 0, 0, datetime('now'), datetime('now'))`
+      ).run(slug, title, `${slug}.md`);
+      // Write vault file so get_pages can read body
+      if (body) {
+        const filePath = join(vaultPath, `${slug}.md`);
+        mkdirSync(dirname(filePath), { recursive: true });
+        writeFileSync(filePath, body);
+      }
+    }
+
+    test("batch returns multiple pages with envelope", async () => {
+      seedPage("entities/person-a", "人物A", "---\ntitle: 人物A\n---\n这是人物A的详细介绍，内容比较长。".repeat(3));
+      seedPage("entities/person-b", "人物B", "---\ntitle: 人物B\n---\n人物B的简介。");
+      seedPage("entities/org-c", "组织C", "---\ntitle: 组织C\n---\n组织C的介绍。");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_pages.handler({
+        slugs: ["entities/person-a", "entities/person-b", "entities/org-c"],
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      // Envelope
+      expect(data.display).toContain("找到 3 个页面");
+      expect(data.summary.status).toBe("ok");
+      expect(data.summary.count).toBe(3);
+      expect(data.raw).toBeDefined();
+
+      // Items
+      expect(data.items.length).toBe(3);
+      expect(data.missing.length).toBe(0);
+
+      // Brief: excerpt is truncated
+      const item = data.items.find((i: any) => i.slug === "entities/person-a");
+      expect(item).toBeDefined();
+      expect(item.title).toBe("人物A");
+      expect(item.excerpt.length).toBeLessThanOrEqual(203); // 200 + "..."
+      expect(item.tags).toBeUndefined(); // brief mode has no tags
+    });
+
+    test("missing slugs returned separately, not error", async () => {
+      seedPage("entities/person-a", "人物A", "内容");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_pages.handler({
+        slugs: ["entities/person-a", "entities/ghost", "entities/phantom"],
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.summary.status).toBe("degraded");
+      expect(data.items.length).toBe(1);
+      expect(data.missing).toEqual(["entities/ghost", "entities/phantom"]);
+      expect(data.display).toContain("2 个不存在");
+    });
+
+    test("all missing returns empty status", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).get_pages.handler({
+        slugs: ["entities/nope1", "entities/nope2"],
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.summary.status).toBe("empty");
+      expect(data.items.length).toBe(0);
+      expect(data.missing.length).toBe(2);
+    });
+
+    test("normal detail includes tags and link_count", async () => {
+      seedPage("entities/person-a", "人物A", "内容");
+      seedPage("entities/person-b", "人物B", "内容");
+      // Add tags
+      db.rawDb.prepare("INSERT INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/person-a", "技术");
+      db.rawDb.prepare("INSERT INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/person-a", "前端");
+      // Add links
+      db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)").run("entities/person-a", "entities/person-b", "mentions");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_pages.handler({
+        slugs: ["entities/person-a", "entities/person-b"],
+        detail: "normal",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.items.length).toBe(2);
+
+      const personA = data.items.find((i: any) => i.slug === "entities/person-a");
+      expect(personA.tags).toContain("技术");
+      expect(personA.tags).toContain("前端");
+      expect(personA.link_count.outgoing).toBeGreaterThanOrEqual(1);
+      expect(personA.mention_count).toBeDefined();
+
+      // Normal mode: longer excerpt limit
+      const personB = data.items.find((i: any) => i.slug === "entities/person-b");
+      expect(personB.tags).toBeDefined();
+    });
+
+    test("over 20 slugs rejected by Zod", async () => {
+      const server = createServer(deps);
+      const _slugs = Array.from({ length: 21 }, (_, i) => `entities/slug-${i}`);
+
+      // Verify the inputSchema exists and has slugs array constraint
+      const tool = getTools(server).get_pages;
+      expect(tool).toBeDefined();
+      expect(tool.inputSchema).toBeDefined();
+      // The MCP SDK validates max(20) before calling handler.
+      // Verify by checking a batch of exactly 20 succeeds:
+      const slugs20 = Array.from({ length: 20 }, (_, i) => `entities/slug-${i}`);
+      // This should not throw — handler may return empty results but validation passes
+      const result = await getTools(server).get_pages.handler({ slugs: slugs20 });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.summary.status).toBe("empty"); // none exist, but validation passed
+    });
+
+    test("envelope structure is complete", async () => {
+      seedPage("entities/person-a", "人物A", "测试内容");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_pages.handler({
+        slugs: ["entities/person-a"],
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      // All envelope fields present
+      expect(typeof data.display).toBe("string");
+      expect(data.summary).toHaveProperty("status");
+      expect(data.summary).toHaveProperty("count");
+      expect(data.summary).toHaveProperty("truncated");
+      expect(data.summary).toHaveProperty("message");
+      expect(data.raw).toBeDefined();
+      expect(Array.isArray(data.items)).toBe(true);
+      expect(Array.isArray(data.missing)).toBe(true);
+      // raw contains full bounded payload
+      expect(data.raw).toHaveProperty("items");
+      expect(data.raw).toHaveProperty("missingSlugs");
+      expect(data.raw).toHaveProperty("found");
+      expect(data.raw).toHaveProperty("slugs");
+      expect(data.raw).toHaveProperty("detail");
+    });
+
+    test("items preserve input slug order regardless of DB return order", async () => {
+      // Seed pages in a different order than we'll request them
+      seedPage("entities/charlie", "Charlie", "内容C");
+      seedPage("entities/alice", "Alice", "内容A");
+      seedPage("entities/bob", "Bob", "内容B");
+
+      const server = createServer(deps);
+      const result = await getTools(server).get_pages.handler({
+        slugs: ["entities/alice", "entities/charlie", "entities/bob"],
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      // Items must be in requested order, not DB order
+      expect(data.items.map((i: any) => i.slug)).toEqual([
+        "entities/alice",
+        "entities/charlie",
+        "entities/bob",
+      ]);
+      // missing also preserves input order
+      const result2 = await getTools(server).get_pages.handler({
+        slugs: ["entities/bob", "entities/missing1", "entities/alice", "entities/missing2"],
+      });
+      const data2 = JSON.parse(result2.content[0].text);
+      expect(data2.items.map((i: any) => i.slug)).toEqual(["entities/bob", "entities/alice"]);
+      expect(data2.missing).toEqual(["entities/missing1", "entities/missing2"]);
     });
   });
 

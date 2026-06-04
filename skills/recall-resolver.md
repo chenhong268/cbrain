@@ -369,6 +369,9 @@ grounded recall 返回后，首轮回答必须：
 
 ```
 ❌ query + get_page + get_links + get_timeline 连调 → deep_recall 一次搞定
+❌ 连续多次 get_page → get_pages(slugs) 批量搞定
+❌ get_org_tree 后逐个 get_page → get_pages 批量补摘要
+❌ deep_recall 返回多实体后逐个 get_page → get_pages 批量补摘要
 ❌ 总结类请求用 query → summarize
 ❌ 无 slug 直接调 expand_entity → 先 query/deep_recall/summarize 拿 slug
 ❌ deep_recall 连调多次 → 一次搞定，limit 调大
@@ -423,5 +426,6 @@ grounded recall 返回后，首轮回答必须：
 | merge_pages | 合并结果预览 + 执行 | 合并重复页面（先 dryRun） |
 | query | slug + title + snippet | **底层调试工具**。仅限关键词定位、debug 索引、降级链重试。自然语言问题禁止使用。 |
 | expand_entity | 单实体的详细信息 | 追问已知实体 |
+| get_pages | 批量页面摘要（slug+title+excerpt+tags） | get_org_tree/deep_recall 后批量补详情，**禁止连续 get_page** |
 | recall_episode | 候选人列表 + 匹配线索 + 证据 + 诊断 | 情境找人：不记得名字，靠时间/主题/事件/关系线索召回候选人 |
 | get_provenance | 来源分类 + 信任状态 + 证据 + 纠正历史 | 解释已有记忆的来源和可信度（需要 target_type + target_id） |

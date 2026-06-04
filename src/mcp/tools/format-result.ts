@@ -506,3 +506,61 @@ export function formatDiscoveriesEnvelope(payload: DiscoveriesPayload): {
     raw: payload,
   };
 }
+
+/** Batch page retrieval envelope — ok/partial/empty based on found vs missing. */
+interface GetPagesPayload {
+  slugs: string[];
+  detail: "brief" | "normal";
+  found: number;
+  missing: number;
+  items?: Record<string, unknown>[];
+  missingSlugs?: string[];
+}
+
+export function formatGetPagesEnvelope(payload: GetPagesPayload): {
+  display: string;
+  summary: ToolSummary;
+  raw: GetPagesPayload;
+} {
+  const { slugs, found, missing } = payload;
+  const total = slugs.length;
+
+  if (found === 0) {
+    return {
+      display: `所有 ${total} 个页面均不存在。`,
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: `所有 ${total} 个页面均不存在`,
+        next_steps: ["检查 slug 是否正确", "用 query 搜索正确 slug"],
+      },
+      raw: payload,
+    };
+  }
+
+  if (missing > 0) {
+    return {
+      display: sanitizeDisplay(`找到 ${found} 个页面，${missing} 个不存在。`),
+      summary: {
+        status: "degraded",
+        count: found,
+        truncated: false,
+        message: `找到 ${found} 个页面，${missing} 个不存在`,
+        degraded_reason: "部分 slug 不存在",
+      },
+      raw: payload,
+    };
+  }
+
+  return {
+    display: sanitizeDisplay(`找到 ${found} 个页面。`),
+    summary: {
+      status: "ok",
+      count: found,
+      truncated: false,
+      message: `找到 ${found} 个页面`,
+    },
+    raw: payload,
+  };
+}

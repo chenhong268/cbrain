@@ -10,7 +10,7 @@
 import { describe, test, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { formatIngestResult, formatDialogueResult, formatRecallEnvelope, formatGroundedRecallEnvelope, formatQueryEnvelope, formatGetPageEnvelope, formatSummarizeEnvelope, formatEpisodeEnvelope, formatOrgTreeEnvelope, formatDiscoveriesEnvelope } from "../../src/mcp/tools/format-result.js";
+import { formatIngestResult, formatDialogueResult, formatRecallEnvelope, formatGroundedRecallEnvelope, formatQueryEnvelope, formatGetPageEnvelope, formatSummarizeEnvelope, formatEpisodeEnvelope, formatOrgTreeEnvelope, formatDiscoveriesEnvelope, formatGetPagesEnvelope } from "../../src/mcp/tools/format-result.js";
 import type { IngestResult } from "../../src/core/ingest.js";
 import type { DialogueIngestResult } from "../../src/core/dialogue.js";
 
@@ -88,6 +88,7 @@ describe("C1: CaptureEnvelope structure", () => {
         upward: [], downward: [], warnings: [],
       }),
       () => formatDiscoveriesEnvelope({ cards: [] }),
+      () => formatGetPagesEnvelope({ slugs: ["a", "b"], detail: "brief", found: 2, missing: 0 }),
     ];
 
     for (const fn of formatters) {
