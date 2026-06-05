@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
+import { formatVersionsEnvelope, formatRevertEnvelope } from "./format-result.js";
 
 export function registerVersionTools(server: McpServer, ctx: ToolContext): void {
   // ─── get_versions ────────────────────────────────────────────
@@ -11,8 +12,10 @@ export function registerVersionTools(server: McpServer, ctx: ToolContext): void 
     },
   }, async ({ slug }) => {
     const versionList = ctx.versions.getVersions(slug);
+    const title = ctx.db.getPageTitle(slug) ?? null;
+    const envelope = formatVersionsEnvelope(versionList, slug, title);
     return {
-      content: [{ type: "text", text: JSON.stringify(versionList, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
     };
   });
 
@@ -25,8 +28,10 @@ export function registerVersionTools(server: McpServer, ctx: ToolContext): void 
     },
   }, async ({ slug, version }) => {
     const ok = ctx.versions.revertToVersion(slug, version);
+    const title = ctx.db.getPageTitle(slug) ?? null;
+    const envelope = formatRevertEnvelope(ok, slug, version, title);
     return {
-      content: [{ type: "text", text: JSON.stringify({ success: ok, slug, revertedTo: ok ? version : null }) }],
+      content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
     };
   });
 }

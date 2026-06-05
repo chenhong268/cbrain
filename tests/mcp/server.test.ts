@@ -1331,7 +1331,7 @@ describe("MCP Server", () => {
   // ─── Version tools ─────────────────────────────
 
   describe("get_versions tool", () => {
-    test("returns versions for a page", async () => {
+    test("returns envelope with display/summary/raw", async () => {
       db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/ver", "Ver", "ver.md", "h1");
@@ -1342,14 +1342,20 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).get_versions.handler({ slug: "entities/ver" });
       const data = JSON.parse(result.content[0].text);
-      expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(1);
-      expect(data[0].version).toBe(1);
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(data.raw).toBeDefined();
+      expect(data.summary.status).toBe("ok");
+      expect(data.summary.count).toBe(1);
+      expect(data.display).toContain("版本");
+      // raw preserves full structure
+      expect(data.raw.versions).toHaveLength(1);
+      expect(data.raw.slug).toBe("entities/ver");
     });
   });
 
   describe("revert_version tool", () => {
-    test("reverts to a specific version", async () => {
+    test("reverts to a specific version with envelope", async () => {
       mkdirSync(join(vaultPath, "entities"), { recursive: true });
       writeFileSync(join(vaultPath, "entities", "rev.md"), "---\ntitle: Rev\ntype: entity\n---\noriginal", "utf-8");
       db.rawDb.prepare(
@@ -1365,10 +1371,14 @@ describe("MCP Server", () => {
         version: 1,
       });
       const data = JSON.parse(result.content[0].text);
-      expect(data.success).toBe(true);
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(data.raw).toBeDefined();
+      expect(data.raw.success).toBe(true);
+      expect(data.display).toContain("回滚");
     });
 
-    test("returns error for missing version", async () => {
+    test("returns error envelope for missing version", async () => {
       db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
       ).run("entities/rev2", "Rev2", "entities/rev2.md", "h1");
@@ -1379,7 +1389,9 @@ describe("MCP Server", () => {
         version: 999,
       });
       const data = JSON.parse(result.content[0].text);
-      expect(data.success).toBe(false);
+      expect(data.summary.status).toBe("error");
+      expect(data.raw.success).toBe(false);
+      expect(data.display).toContain("失败");
     });
   });
 

@@ -1,6 +1,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
+import {
+  formatGetProfileEnvelope,
+  formatUpdateProfileEnvelope,
+  formatRemoveProfileEnvelope,
+  formatReloadProfileEnvelope,
+} from "./format-result.js";
 
 export function registerProfileTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("get_profile", {
@@ -21,21 +27,9 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
     const stats = ctx.profile.getStats();
     const modules = ctx.profile.getModules();
 
+    const envelope = formatGetProfileEnvelope(entries, stats, modules, filter as Record<string, unknown>);
     return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({
-          entries,
-          meta: {
-            total: stats.total,
-            filtered: entries.length,
-            ...(scope && { scope }),
-            ...(category && { category }),
-            ...(type && { type }),
-            loaded_modules: modules.filter((m: { enabled: boolean }) => m.enabled).map((m: { name: string }) => m.name),
-          },
-        }, null, 2),
-      }],
+      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
     };
   });
 
@@ -59,14 +53,9 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
     },
   }, async ({ entries }) => {
     const updated = ctx.profile.updateEntries(entries);
+    const envelope = formatUpdateProfileEnvelope(updated as any[]);
     return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({
-          updated: updated.map(e => e.id),
-          count: updated.length,
-        }, null, 2),
-      }],
+      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
     };
   });
 
@@ -79,14 +68,9 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
     },
   }, async ({ ids }) => {
     const removed = ctx.profile.removeEntries(ids);
+    const envelope = formatRemoveProfileEnvelope(removed);
     return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({
-          removed,
-          count: removed.length,
-        }, null, 2),
-      }],
+      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
     };
   });
 
@@ -99,15 +83,9 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
     ctx.profile.reload();
     const stats = ctx.profile.getStats();
     const modules = ctx.profile.getModules();
+    const envelope = formatReloadProfileEnvelope(stats, modules);
     return {
-      content: [{
-        type: "text" as const,
-        text: JSON.stringify({
-          reloaded: true,
-          total_entries: stats.total,
-          modules: modules.map(m => ({ name: m.name, enabled: m.enabled, entries: m.count })),
-        }, null, 2),
-      }],
+      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
     };
   });
 }

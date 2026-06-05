@@ -964,3 +964,212 @@ function sanitizeDreamBrief(brief: string): string {
     .replace(/\n{3,}/g, "\n\n")    // Collapse extra newlines
     .trim();
 }
+
+// ─── Versions ───────────────────────────────────────────────
+
+interface VersionInfo {
+  version: number;
+  created_at: string;
+}
+
+export function formatVersionsEnvelope(
+  versions: VersionInfo[],
+  slug: string,
+  title: string | null,
+): { display: string; summary: ToolSummary; raw: { slug: string; title: string | null; versions: VersionInfo[] } } {
+  const raw = { slug, title, versions };
+  const displayName = title || "该页面";
+
+  if (versions.length === 0) {
+    return {
+      display: `📄 ${displayName}暂无版本历史。`,
+      summary: { status: "empty", count: 0, truncated: false, message: "无版本记录" },
+      raw,
+    };
+  }
+
+  const latest = versions[0];
+  const lines: string[] = [
+    `📄 ${displayName}有 ${versions.length} 个版本。`,
+    `最近版本：v${latest.version}（${formatDate(latest.created_at)}）`,
+  ];
+  if (versions.length > 1) {
+    lines.push(`最早版本：v${versions[versions.length - 1].version}`);
+  }
+
+  return {
+    display: sanitizeDisplay(lines.join("\n")),
+    summary: { status: "ok", count: versions.length, truncated: false, message: `${versions.length} 个版本` },
+    raw,
+  };
+}
+
+export function formatRevertEnvelope(
+  success: boolean,
+  slug: string,
+  version: number,
+  title: string | null,
+): { display: string; summary: ToolSummary; raw: { slug: string; version: number; success: boolean } } {
+  const raw = { slug, version, success };
+  const displayName = title || "该页面";
+
+  if (success) {
+    return {
+      display: `📄 已将${displayName}回滚到版本 ${version}。`,
+      summary: { status: "ok", count: 1, truncated: false, message: `回滚到 v${version}` },
+      raw,
+    };
+  }
+
+  return {
+    display: `📄 回滚失败：${displayName}没有版本 ${version}。`,
+    summary: { status: "error", count: 0, truncated: false, message: `版本 ${version} 不存在` },
+    raw,
+  };
+}
+
+function formatDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  } catch {
+    return iso;
+  }
+}
+
+// ─── Profile ────────────────────────────────────────────────
+
+interface ProfileEntry {
+  id: string;
+  type: string;
+  category: string;
+  scope: string;
+  content: string;
+  tags?: string[];
+  updated_at: string;
+  [key: string]: unknown;
+}
+
+export function formatGetProfileEnvelope(
+  entries: ProfileEntry[],
+  stats: { total: number; byScope: Record<string, number>; byType: Record<string, number>; modules: number },
+  modules: { name: string; enabled: boolean; count: number }[],
+  filter?: Record<string, unknown>,
+): { display: string; summary: ToolSummary; raw: Record<string, unknown> } {
+  const enabledModules = modules.filter(m => m.enabled);
+  const metaBase: Record<string, unknown> = {
+    total: stats.total,
+    filtered: entries.length,
+    loaded_modules: enabledModules.map(m => m.name),
+  };
+  if (filter?.scope) metaBase.scope = filter.scope;
+  if (filter?.category) metaBase.category = filter.category;
+  if (filter?.type) metaBase.type = filter.type;
+  const raw = { entries, meta: metaBase };
+
+  if (entries.length === 0) {
+    return {
+      display: "👤 暂无匹配的用户偏好记录。",
+      summary: { status: "empty", count: 0, truncated: false, message: "无匹配条目" },
+      raw,
+    };
+  }
+
+  // Summarize: show count + breakdown by type, truncate content preview
+  const typeCounts: Record<string, number> = {};
+  for (const e of entries) {
+    typeCounts[e.type] = (typeCounts[e.type] ?? 0) + 1;
+  }
+  const breakdown = Object.entries(typeCounts)
+    .map(([t, c]) => `${c} 个${typeLabel(t)}`)
+    .join("、");
+
+  const lines: string[] = [
+    `👤 匹配到 ${entries.length} 条偏好（共 ${stats.total} 条，${breakdown}）。`,
+  ];
+  // Show up to 3 entries as preview (content snippet only)
+  const preview = entries.slice(0, 3);
+  for (const e of preview) {
+    const snippet = e.content.length > 40 ? `${e.content.slice(0, 40)}...` : e.content;
+    lines.push(`- ${typeLabel(e.type)}：${snippet}`);
+  }
+  if (entries.length > 3) {
+    lines.push(`- ...还有 ${entries.length - 3} 条`);
+  }
+
+  return {
+    display: sanitizeDisplay(lines.join("\n")),
+    summary: { status: "ok", count: entries.length, truncated: entries.length > 3, message: `${entries.length} 条偏好` },
+    raw,
+  };
+}
+
+export function formatUpdateProfileEnvelope(
+  updated: ProfileEntry[],
+): { display: string; summary: ToolSummary; raw: { updated: string[]; count: number } } {
+  const ids = updated.map(e => e.id);
+  const raw = { updated: ids, count: ids.length };
+
+  return {
+    display: `👤 已更新 ${ids.length} 条偏好。`,
+    summary: { status: "ok", count: ids.length, truncated: false, message: `${ids.length} 条已更新` },
+    raw,
+  };
+}
+
+export function formatRemoveProfileEnvelope(
+  removed: string[],
+): { display: string; summary: ToolSummary; raw: { removed: string[]; count: number } } {
+  const raw = { removed, count: removed.length };
+
+  if (removed.length === 0) {
+    return {
+      display: "👤 未找到匹配的偏好记录。",
+      summary: { status: "empty", count: 0, truncated: false, message: "无删除" },
+      raw,
+    };
+  }
+
+  return {
+    display: `👤 已删除 ${removed.length} 条偏好。`,
+    summary: { status: "ok", count: removed.length, truncated: false, message: `${removed.length} 条已删除` },
+    raw,
+  };
+}
+
+export function formatReloadProfileEnvelope(
+  stats: { total: number; byScope: Record<string, number>; byType: Record<string, number>; modules: number },
+  modules: { name: string; enabled: boolean; count: number }[],
+): { display: string; summary: ToolSummary; raw: Record<string, unknown> } {
+  const enabledModules = modules.filter(m => m.enabled);
+  const raw = {
+    reloaded: true,
+    total_entries: stats.total,
+    modules: modules.map(m => ({ name: m.name, enabled: m.enabled, entries: m.count })),
+  };
+
+  const modNames = enabledModules.map(m => m.name);
+  const lines: string[] = [
+    `👤 偏好数据已重新加载：${stats.total} 条记录，${enabledModules.length} 个模块。`,
+  ];
+  if (modNames.length > 0) {
+    lines.push(`模块：${modNames.join("、")}`);
+  }
+
+  return {
+    display: sanitizeDisplay(lines.join("\n")),
+    summary: { status: "ok", count: stats.total, truncated: false, message: "重新加载完成" },
+    raw,
+  };
+}
+
+function typeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    preference: "偏好",
+    constraint: "约束",
+    context: "背景",
+    habit: "习惯",
+  };
+  return labels[type] ?? type;
+}
