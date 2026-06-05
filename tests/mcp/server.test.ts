@@ -402,9 +402,11 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).graph_query.handler({ slug: "entities/a" });
       const data = JSON.parse(result.content[0].text);
-      expect(data.resolvedSlug).toBe("entities/a");
-      expect(data.result.length).toBe(1);
-      expect(data.result[0].slug).toBe("entities/b");
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(data.raw.resolvedSlug).toBe("entities/a");
+      expect(data.raw.result.length).toBe(1);
+      expect(data.raw.result[0].slug).toBe("entities/b");
     });
 
     test("backlinks mode", async () => {
@@ -421,9 +423,10 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).graph_query.handler({ slug: "entities/a", mode: "backlinks" });
       const data = JSON.parse(result.content[0].text);
-      expect(data.resolvedSlug).toBe("entities/a");
-      expect(data.result.length).toBe(1);
-      expect(data.result[0].from_slug).toBe("entities/b");
+      expect(data.display).toBeDefined();
+      expect(data.raw.resolvedSlug).toBe("entities/a");
+      expect(data.raw.result.length).toBe(1);
+      expect(data.raw.result[0].from_slug).toBe("entities/b");
     });
 
     test("related mode", async () => {
@@ -440,9 +443,10 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).graph_query.handler({ slug: "entities/a", mode: "related" });
       const data = JSON.parse(result.content[0].text);
-      expect(data.resolvedSlug).toBe("entities/a");
-      expect(data.result.length).toBe(1);
-      expect(data.result[0].slug).toBe("entities/b");
+      expect(data.display).toBeDefined();
+      expect(data.raw.resolvedSlug).toBe("entities/a");
+      expect(data.raw.result.length).toBe(1);
+      expect(data.raw.result[0].slug).toBe("entities/b");
     });
   });
 
@@ -1201,8 +1205,10 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).get_links.handler({ slug: "entities/from" });
       const data = JSON.parse(result.content[0].text);
-      expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBeGreaterThanOrEqual(1);
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(Array.isArray(data.raw)).toBe(true);
+      expect(data.raw.length).toBeGreaterThanOrEqual(1);
     });
 
     test("returns backlinks when direction is 'to'", async () => {
@@ -1219,7 +1225,8 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).get_links.handler({ slug: "entities/lto", direction: "to" });
       const data = JSON.parse(result.content[0].text);
-      expect(Array.isArray(data)).toBe(true);
+      expect(data.display).toBeDefined();
+      expect(Array.isArray(data.raw)).toBe(true);
     });
   });
 
@@ -1278,9 +1285,11 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).get_timeline.handler({ slug: "entities/tl2" });
       const data = JSON.parse(result.content[0].text);
-      expect(data.slug).toBe("entities/tl2");
-      expect(Array.isArray(data.events)).toBe(true);
-      expect(data.events.length).toBeGreaterThanOrEqual(1);
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(data.raw.slug).toBe("entities/tl2");
+      expect(Array.isArray(data.raw.events)).toBe(true);
+      expect(data.raw.events.length).toBeGreaterThanOrEqual(1);
     });
   });
 

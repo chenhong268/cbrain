@@ -2,6 +2,7 @@ import type { IngestResult } from "../../core/ingest.js";
 import type { DialogueIngestResult } from "../../core/dialogue.js";
 import type { EpisodicRecallResult } from "../../core/episodic-recall.js";
 import type { OrgTreeResult } from "../../core/hierarchy.js";
+import type { Link, GraphNode } from "../../core/graph.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -594,4 +595,196 @@ export function formatGetPagesEnvelope(payload: GetPagesPayload): {
     },
     raw: payload,
   };
+}
+
+// ─── Graph query ────────────────────────────────────────────
+
+interface GraphQueryPayload {
+  resolvedSlug: string;
+  result: Link[] | GraphNode[];
+}
+
+export function formatGraphEnvelope(
+  payload: GraphQueryPayload,
+  titleResolver: (slug: string) => string | null,
+): { display: string; summary: ToolSummary; raw: GraphQueryPayload } {
+  const items = payload.result;
+  const count = items.length;
+
+  if (count === 0) {
+    return {
+      display: "未找到相关关系。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "图谱查询无结果",
+        next_steps: ["检查实体名称是否正确", "尝试 related 模式"],
+      },
+      raw: payload,
+    };
+  }
+
+  const lines: string[] = [];
+  const isLinks = items.length > 0 && "from_slug" in items[0];
+
+  if (isLinks) {
+    const links = items as Link[];
+    for (const link of links.slice(0, 8)) {
+      const fromTitle = titleResolver(link.from_slug) ?? "未知实体";
+      const toTitle = titleResolver(link.to_slug) ?? "未知实体";
+      const rel = link.relation || "关联";
+      const ctx = link.context ? `（${link.context}）` : "";
+      const trustLabel = link.trust_state === "confirmed" ? "" : "待确认：";
+      lines.push(`${trustLabel}${fromTitle} —${rel}→ ${toTitle}${ctx}`);
+    }
+    if (links.length > 8) {
+      lines.push(`...还有 ${links.length - 8} 条关系`);
+    }
+  } else {
+    const nodes = items as GraphNode[];
+    for (const node of nodes.slice(0, 8)) {
+      const nodeTitle = node.title || "未知实体";
+      const depthNote = node.depth > 1 ? `（${node.depth} 跳）` : "";
+      lines.push(`${nodeTitle}${depthNote}`);
+    }
+    if (nodes.length > 8) {
+      lines.push(`...还有 ${nodes.length - 8} 个相关实体`);
+    }
+  }
+
+  return {
+    display: sanitizeDisplay(lines.join("\n")),
+    summary: {
+      status: "ok",
+      count,
+      truncated: count > 8,
+      message: `找到 ${count} 条关系`,
+    },
+    raw: payload,
+  };
+}
+
+// ─── Links ──────────────────────────────────────────────────
+
+export function formatLinksEnvelope(
+  links: Link[],
+  seedSlug: string,
+  titleResolver: (slug: string) => string | null,
+): { display: string; summary: ToolSummary; raw: Link[] } {
+  const count = links.length;
+
+  if (count === 0) {
+    return {
+      display: "该页面暂无已知关系。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "无关联关系",
+      },
+      raw: links,
+    };
+  }
+
+  const lines: string[] = [];
+  for (const link of links.slice(0, 10)) {
+    const otherSlug = link.from_slug === seedSlug ? link.to_slug : link.from_slug;
+    const otherTitle = titleResolver(otherSlug) ?? "未知实体";
+    const rel = link.relation || "关联";
+    const direction = link.from_slug === seedSlug ? "→" : "←";
+    const trustLabel = link.trust_state === "confirmed" ? "已知" : "待确认";
+    const ctx = link.context ? `（${link.context}）` : "";
+    lines.push(`${trustLabel}：${otherTitle} ${direction} ${rel}${ctx}`);
+  }
+  if (count > 10) {
+    lines.push(`...还有 ${count - 10} 条关系`);
+  }
+
+  return {
+    display: sanitizeDisplay(lines.join("\n")),
+    summary: {
+      status: "ok",
+      count,
+      truncated: count > 10,
+      message: `${count} 条关联关系`,
+    },
+    raw: links,
+  };
+}
+
+// ─── Timeline ───────────────────────────────────────────────
+
+interface TimelineEvent {
+  id?: number;
+  date?: string;
+  summary: string;
+  source?: string;
+  source_category?: string;
+  trust_state?: string;
+  source_page_slug?: string;
+  evidence?: string;
+}
+
+interface TimelinePayload {
+  slug: string;
+  title: string;
+  events: TimelineEvent[];
+}
+
+export function formatTimelineEnvelope(
+  payload: TimelinePayload,
+): { display: string; summary: ToolSummary; raw: TimelinePayload } {
+  const { title, events } = payload;
+  const count = events.length;
+  // Use safe display title — fall back to generic label if title looks like a slug
+  const displayTitle = isSlugLike(title) ? "该页面" : title;
+
+  if (count === 0) {
+    return {
+      display: `${displayTitle}暂无时间线记录。`,
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "无时间线事件",
+      },
+      raw: payload,
+    };
+  }
+
+  // Pick up to 5 key events, prefer dated ones
+  const dated = events.filter(e => e.date).sort((a, b) => (a.date ?? "").localeCompare(b.date ?? ""));
+  const undated = events.filter(e => !e.date);
+  const selected = [...dated, ...undated].slice(0, 5);
+
+  const lines: string[] = [`${displayTitle}的时间线（${count} 个事件）：`];
+  for (const e of selected) {
+    const datePrefix = e.date ? `${e.date} ` : "";
+    const trustLabel = e.trust_state === "confirmed" ? "" : "待确认：";
+    lines.push(`- ${datePrefix}${trustLabel}${e.summary}`);
+  }
+  if (count > 5) {
+    lines.push(`- ...还有 ${count - 5} 个事件`);
+  }
+
+  return {
+    display: sanitizeDisplay(lines.join("\n")),
+    summary: {
+      status: "ok",
+      count,
+      truncated: count > 5,
+      message: `${title} 时间线：${count} 个事件`,
+    },
+    raw: payload,
+  };
+}
+
+/**
+ * Detect if a string looks like an internal slug (contains / or known prefixes).
+ * Used to avoid leaking slugs into display text.
+ */
+function isSlugLike(text: string): boolean {
+  if (!text) return true;
+  return text.includes("/") || /^(entities|concepts|records|insights|events|brain)\b/.test(text);
 }

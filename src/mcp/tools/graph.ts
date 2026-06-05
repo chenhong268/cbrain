@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { findEntitySlug, normalizeRelation } from "../../core/shared.js";
+import { formatGraphEnvelope, formatLinksEnvelope } from "./format-result.js";
 
 export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   // ─── graph_query ─────────────────────────────────────────
@@ -60,8 +61,13 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       }
     }
 
+    // Build title map from DB (not PageManager/vault) for reliable resolution
+    const allSlugs = [...new Set([resolvedSlug, ...graphSlugs])];
+    const titleMap = ctx.db.getPageTitlesAndTypes(allSlugs);
+    const titleResolver = (s: string) => titleMap.get(s)?.title || null;
+    const envelope = formatGraphEnvelope({ resolvedSlug, result }, titleResolver);
     return {
-      content: [{ type: "text", text: JSON.stringify({ resolvedSlug, result }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
     };
   });
 
@@ -74,8 +80,12 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     },
   }, async ({ slug, direction }) => {
     const links = ctx.graph.getLinks(slug, direction);
+    const linkSlugs = links.map(l => l.from_slug === slug ? l.to_slug : l.from_slug);
+    const titleMap = ctx.db.getPageTitlesAndTypes(linkSlugs);
+    const titleResolver = (s: string) => titleMap.get(s)?.title || null;
+    const envelope = formatLinksEnvelope(links, slug, titleResolver);
     return {
-      content: [{ type: "text", text: JSON.stringify(links, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
     };
   });
 

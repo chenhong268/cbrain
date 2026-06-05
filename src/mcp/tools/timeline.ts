@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { indexPage } from "../context.js";
 import { mapSourceType } from "../../core/provenance.js";
+import { formatTimelineEnvelope } from "./format-result.js";
 
 export function registerTimelineTools(server: McpServer, ctx: ToolContext): void {
   // ─── get_timeline ────────────────────────────────────────────
@@ -17,7 +18,7 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
     const body = page?.body ?? "";
 
     // Build a unified events list — structured entries + body date lines
-    const events: Array<Record<string, unknown>> = [];
+    const events: Array<{ id?: number; date?: string; summary: string; source?: string; source_category?: string; trust_state?: string; source_page_slug?: string; evidence?: string }> = [];
     for (const e of entries) {
       events.push({
         id: e.id,
@@ -36,19 +37,22 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
       if (datePattern.test(line)) {
         const cleaned = line.replace(/^\|?\s*|\s*\|?$/g, "").trim();
         if (!entries.some(e => cleaned.includes(e.summary.slice(0, 10)))) {
-          events.push({ summary: cleaned, source: "body", source_category: "agent_inference" as const, trust_state: "candidate" as const, source_type: "body-parse", source_page_slug: slug, evidence: cleaned.slice(0, 100) });
+          events.push({ summary: cleaned, source: "body", source_category: "agent_inference", trust_state: "candidate", source_page_slug: slug, evidence: cleaned.slice(0, 100) });
         }
       }
     }
 
+    // Resolve title from page manager, fallback to DB, never expose raw slug
+    const resolvedTitle = page?.title ?? ctx.db.getPageTitle(slug) ?? "";
+    const envelope = formatTimelineEnvelope({
+      slug,
+      title: resolvedTitle,
+      events,
+    });
     return {
       content: [{
         type: "text",
-        text: JSON.stringify({
-          slug,
-          title: page?.title ?? slug,
-          events,
-        }, null, 2),
+        text: JSON.stringify(envelope, null, 2),
       }],
     };
   });
