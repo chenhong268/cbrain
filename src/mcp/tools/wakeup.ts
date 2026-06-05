@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { WakeupDiff } from "../../core/wakeup.js";
+import type { ToolSummary } from "./format-result.js";
 
 export function registerWakeupTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("wakeup_diff", {
@@ -9,13 +10,55 @@ export function registerWakeupTools(server: McpServer, ctx: ToolContext): void {
   }, async () => {
     const diff = new WakeupDiff(ctx.db, ctx.outputsDir, ctx.logger);
     const result = await diff.run();
+    const envelope = formatWakeupEnvelope(result);
     return {
-      content: [{ type: "text" as const, text: buildDisplayText(result) }],
+      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
     };
   });
 }
 
-function buildDisplayText(result: Awaited<ReturnType<WakeupDiff["run"]>>): string {
+export function formatWakeupEnvelope(
+  result: Awaited<ReturnType<WakeupDiff["run"]>>,
+): { display: string; summary: ToolSummary; raw: typeof result } {
+  const display = buildDisplayText(result);
+
+  if (result.baselineCreated) {
+    return {
+      display,
+      summary: { status: "ok", count: 0, truncated: false, message: "基线已建立" },
+      raw: result,
+    };
+  }
+
+  const totalChanges = result.changes.contentUpdated.length +
+    result.changes.tierChanged.length +
+    result.changes.linkCountChanged.length +
+    result.changes.confidenceDecayed.length +
+    result.changes.removed.length;
+
+  const totalCount = totalChanges + result.newItems.length;
+
+  if (totalCount === 0) {
+    return {
+      display,
+      summary: { status: "ok", count: 0, truncated: false, message: "无认知变化" },
+      raw: result,
+    };
+  }
+
+  return {
+    display,
+    summary: {
+      status: "ok",
+      count: totalCount,
+      truncated: result.truncated,
+      message: `${totalCount} 项变化`,
+    },
+    raw: result,
+  };
+}
+
+export function buildDisplayText(result: Awaited<ReturnType<WakeupDiff["run"]>>): string {
   const lines: string[] = [`📋 CBrain Wake-up Diff · ${result.date}`, ""];
 
   if (result.baselineCreated) {

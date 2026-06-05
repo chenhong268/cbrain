@@ -44,6 +44,11 @@ async function callTool(server: unknown, name: string, args: Record<string, unkn
   return result;
 }
 
+const BANNED_IN_DISPLAY = [
+  "/tmp", "runtime/", ".json", ".md", "reportPath",
+  "entities/", "concepts/", "records/", "insights/", "brain/",
+];
+
 describe("MCP wakeup_diff tool", () => {
   const testDir = "/tmp/cbrain-test-mcp-wakeup";
   const dbPath = join(testDir, "test.sqlite");
@@ -70,7 +75,7 @@ describe("MCP wakeup_diff tool", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  test("returns single display text, no raw JSON", async () => {
+  test("baseline returns envelope with display/summary/raw", async () => {
     db.rawDb.prepare(
       "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("entities/a", "entity/person", "Alice", "entities_a.md", "h1");
@@ -78,19 +83,28 @@ describe("MCP wakeup_diff tool", () => {
     const server = createServer(deps);
     const result = await callTool(server, "wakeup_diff");
 
-    // Exactly one content block
     expect(result.content).toHaveLength(1);
-    const text = result.content[0].text;
-    // Human-readable display text, not JSON
-    expect(text).toContain("已建立基线");
-    expect(text).toContain("1 个记忆页");
-    // Must not be parseable as JSON (no raw dump)
-    expect(() => JSON.parse(text)).toThrow();
-    // Channel-safe: no local paths in display
-    expect(text).not.toMatch(/\/tmp|runtime|\.json|\.md|reportPath/);
+    const data = JSON.parse(result.content[0].text);
+    // Envelope shape
+    expect(data.display).toBeDefined();
+    expect(data.summary).toBeDefined();
+    expect(data.raw).toBeDefined();
+    // Display content
+    expect(data.display).toContain("已建立基线");
+    expect(data.display).toContain("1 个记忆页");
+    // Summary
+    expect(data.summary.status).toBe("ok");
+    expect(data.summary.count).toBe(0);
+    // Raw preserves full result
+    expect(data.raw.baselineCreated).toBe(true);
+    expect(data.raw.stats).toBeDefined();
+    // No banned terms in display
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(data.display).not.toContain(term);
+    }
   });
 
-  test("second run display mentions changes without raw JSON", async () => {
+  test("second run shows changes in envelope", async () => {
     db.rawDb.prepare(
       "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("entities/a", "entity/person", "Alice", "entities_a.md", "h1");
@@ -104,15 +118,23 @@ describe("MCP wakeup_diff tool", () => {
     db.rawDb.prepare("UPDATE pages SET content_hash = ? WHERE slug = ?").run("h1-new", "entities/a");
 
     const result = await callTool(server, "wakeup_diff");
-    expect(result.content).toHaveLength(1);
-    const text = result.content[0].text;
-    expect(text).toContain("内容更新");
-    expect(text).toContain("Alice");
-    expect(() => JSON.parse(text)).toThrow();
-    expect(text).not.toMatch(/\/tmp|runtime|\.json|\.md|reportPath/);
+    const data = JSON.parse(result.content[0].text);
+    // Display shows changes
+    expect(data.display).toContain("内容更新");
+    expect(data.display).toContain("Alice");
+    // Summary has change count
+    expect(data.summary.count).toBeGreaterThan(0);
+    expect(data.summary.truncated).toBe(false);
+    // Raw preserves full structure
+    expect(data.raw.changes).toBeDefined();
+    expect(data.raw.newItems).toBeDefined();
+    // No banned terms in display
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(data.display).not.toContain(term);
+    }
   });
 
-  test("no changes display says no changes", async () => {
+  test("no changes returns envelope with empty summary", async () => {
     db.rawDb.prepare(
       "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
     ).run("entities/a", "entity/person", "Alice", "entities_a.md", "h1");
@@ -121,10 +143,11 @@ describe("MCP wakeup_diff tool", () => {
     await callTool(server, "wakeup_diff");
     const result = await callTool(server, "wakeup_diff");
 
-    expect(result.content).toHaveLength(1);
-    const text = result.content[0].text;
-    expect(text).toContain("无认知变化");
-    expect(() => JSON.parse(text)).toThrow();
-    expect(text).not.toMatch(/\/tmp|runtime|\.json|\.md|reportPath/);
+    const data = JSON.parse(result.content[0].text);
+    expect(data.display).toContain("无认知变化");
+    expect(data.summary.count).toBe(0);
+    expect(data.summary.message).toContain("无认知变化");
+    // Raw still has full structure
+    expect(data.raw.stats).toBeDefined();
   });
 });

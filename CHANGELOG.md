@@ -1,6 +1,46 @@
 # Changelog
 
-> Current: `v1.9.2` — Hermes 自然体验与运行稳定性小版本：结构化响应信封、图优先召回、安全写入、批量保护与证据摘要收敛。
+> Current: `v1.9.3-dev` — Hermes 自然输出信封全面覆盖：所有 MCP 工具返回 display/summary/raw 三层结构，display 禁止暴露内部字段。
+
+## [v1.9.3] — 2026-06-06
+
+### 自然输出信封（#142–#144）
+
+- **图/时间线/链接信封（#142）**：`graph_query`、`get_links`、`get_timeline` 返回 display/summary/raw，display 展示中文关系和信任标签，隐藏 slug/score/weight。
+- **健康/梦境摘要（#143）**：`health` 展示大脑状态 + top 3 问题 + 行动建议；`dream_status`/`dream` 展示执行进度和日报摘要。内部路径、函数名、slug 全部清洗。
+- **版本/偏好信封（#144）**：`get_versions`/`revert_version`/`get_profile`/`update_profile`/`remove_profile`/`reload_profile` 全部 envelope 化，不暴露路径和 raw JSON。
+
+### 认知变化摘要（#141）
+
+- **Wake-up Diff**：首次运行建立基线，后续运行对比快照输出结构化变化报告（新增/更新/删除/层级变化）。挂 dream 最后 stage + 独立 MCP/CLI 触发。
+
+### Agent 行为规范（#147–#148）
+
+- **信号目标路由（#147）**：4-way destination routing（action_loop / agent_profile / cbrain_memory / no_store），优先级：行动 > 档案 > 长期记忆 > 内容复利。
+- **Channel-safe Response Contract（#148）**：定义 display/summary/raw 三层、5 类频道、禁止字段列表、工具状态矩阵。
+
+### 发布门禁（#145）
+
+- **v1.9.3 UX Release Gate**：`bin/check-v193-ux-gate.sh` 一键跑 lint + envelope 测试 + 隐私扫描 + 覆盖率检查。`tests/mcp/v193-ux-gate.test.ts` 覆盖 13 个工具的 display 禁词、compactness、raw 完整性。
+
+### Release Checklist
+
+- [ ] `bun run lint` 通过（tsc + biome）
+- [ ] `bun test` 全量通过
+- [ ] `bin/check-resolver-pilot.sh` 通过
+- [ ] `bin/check-v193-ux-gate.sh` 通过
+- [ ] 所有 envelope 工具 display 无 banned terms
+- [ ] 所有 envelope 工具 display ≤ 500 chars
+- [ ] 所有 envelope 工具 raw 保留完整结构
+- [ ] 无真实隐私标识（姓名/邮箱/电话）在 tests/docs/skills
+- [ ] signal-router + response-contract eval 覆盖率达标
+- [ ] 版本号更新到 `package.json`
+- [ ] `CHANGELOG.md` 日期确认
+- [ ] tag + push
+
+### 治理与测试
+
+- `bun run check`：1720 pass / 0 fail / 7626 expect() calls
 
 ## [v1.9.2] — 2026-06-05
 

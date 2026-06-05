@@ -57,13 +57,13 @@
 
 ## 7. Response Rules
 
-首句给结论。默认 300-500 字。不暴露 slug/score/debug/path/raw JSON。先摘要后展开。详见 `docs/product/agent-response-contract.md`。
+首句给结论。默认 300-500 字。不暴露 slug/score/debug/path/raw JSON/工具名。先摘要后展开。详见 `docs/product/agent-response-contract.md`。客户端 UI 自动展示工具调用时，不重复描述；用户主动询问时可说明。
 
 ## 8. 硬禁止
 
-- ❌ query+get_page+get_links+get_timeline 连调 → deep_recall 一次搞定
-- ❌ 连续多次 get_page → get_pages 批量搞定
-- ❌ 总结用 query → summarize | 核查用 agentic_research → deep_recall(grounded:true)
-- ❌ 首轮自动 expand_entity | 情境找人用 agentic_research → recall_episode
+- ❌ query+get_page+get_links+get_timeline 连调 → deep_recall
+- ❌ 连续 get_page → get_pages | 总结用 query → summarize
+- ❌ 核查用 agentic_research → deep_recall(grounded:true)
+- ❌ 首轮 expand_entity | 情境找人用 agentic_research → recall_episode
 - ❌ discovery 暴露内部字段 | 回答超 500 字 | 末尾追问
-- ❌ 自然语言走 query → deep_recall 默认 | 输出含 raw/slug/trace → 只用 display/summary
+- ❌ 自然语言走 query | 输出含 raw/slug/trace → 只用 display/summary
