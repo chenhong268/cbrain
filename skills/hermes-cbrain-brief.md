@@ -10,9 +10,7 @@
 
 信号：讨论过吗、有结论吗、有没有遗漏、有依据吗、是不是真的
 
-```
-deep_recall({ query, grounded: true, detail: "brief", limit: 3 })
-```
+`deep_recall({ query, grounded: true, detail: "brief", limit: 3 })`
 
 回答 ≤300 字。禁止追问。candidates 标注"待确认"。禁止 `query`、`agentic_research`。
 
@@ -20,9 +18,7 @@ deep_recall({ query, grounded: true, detail: "brief", limit: 3 })
 
 信号：当时怎么设计、为什么选、具体怎么说的、是什么来着
 
-```
-deep_recall({ query, detail: "normal", limit: 3 })
-```
+`deep_recall({ query, detail: "normal", limit: 3 })`
 
 禁止 `grounded: true`。首轮禁止 `expand_entity`/`get_page`/`get_timeline`。用户说"展开/原文/详细"时才能追查。
 
@@ -30,9 +26,7 @@ deep_recall({ query, detail: "normal", limit: 3 })
 
 信号：叫什么来着、想不起名字、一起做过项目的那个
 
-```
-recall_episode({ query, time_hint, topic_hint, event_hint, relation_hint, limit: 5 })
-```
+`recall_episode({ query, time_hint, topic_hint, event_hint, relation_hint, limit: 5 })`
 
 靠情境线索找人。禁止 `query`、`agentic_research`
 
@@ -40,14 +34,9 @@ recall_episode({ query, time_hint, topic_hint, event_hint, relation_hint, limit:
 
 信号：最近有什么发现、有没有漏掉的关联
 
-```
-read_discoveries({ debug: false })
-run_discovery({ debug: false })
-```
+`read_discoveries({ debug: false })` / `run_discovery({ debug: false })`
 
-展示规则：只用 `display`、`cards`、`summary`。禁止暴露 score/distance/debug/candidate/filter。
-
-自然捕获同理：只用 `display`/`summary.message`，禁止展示 `raw`、slug。
+只用 `display`/`cards`/`summary`。禁止暴露 score/distance/debug/candidate/filter。自然捕获同理。
 
 ## 5. 其他路由
 
@@ -62,18 +51,19 @@ run_discovery({ debug: false })
 
 信号：哪来的、来源是什么、谁说的、可靠吗
 
-```
-get_provenance({ target_type: "link"|"timeline", target_id })
-```
+`get_provenance({ target_type: "link"|"timeline", target_id })`
 
 有 target → 直接调。无 target：关系→`get_links`，事件→`get_timeline`。找不到→如实说，**禁止编造**。禁止输出 target_id/confidence/slug/JSON。
 
-## 7. 硬禁止
+## 7. Response Rules
+
+首句给结论。默认 300-500 字。不暴露 slug/score/debug/path/raw JSON。先摘要后展开。详见 `docs/product/agent-response-contract.md`。
+
+## 8. 硬禁止
 
 - ❌ query+get_page+get_links+get_timeline 连调 → deep_recall 一次搞定
 - ❌ 连续多次 get_page → get_pages 批量搞定
-- ❌ 总结用 query → summarize | 核查用 query/agentic_research → deep_recall(grounded:true)
-- ❌ 首轮自动 expand_entity | 情境找人用 agentic_research → recall_episode | proactive 默认不展示
-- ❌ discovery 暴露 score/distance/debug | 回答超 500 字 | 末尾追问
-- ❌ 自然语言走 query → deep_recall 默认 | 输出含 raw JSON/slug/trace → 只用 display/summary
-- ❌ 不输出工具名（除非客户端 UI 已显示）
+- ❌ 总结用 query → summarize | 核查用 agentic_research → deep_recall(grounded:true)
+- ❌ 首轮自动 expand_entity | 情境找人用 agentic_research → recall_episode
+- ❌ discovery 暴露内部字段 | 回答超 500 字 | 末尾追问
+- ❌ 自然语言走 query → deep_recall 默认 | 输出含 raw/slug/trace → 只用 display/summary
