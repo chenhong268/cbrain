@@ -145,6 +145,7 @@
 ### Signal Detection
 - 信号检测、扫描信号、检测 → signal-detector.md
 - 这条消息有什么值得记的、提取信号 → signal-detector.md
+- 信号路由、目的地判断 → signal-router.md
 
 ### Brain Ops (Protocol)
 - 日常操作、brain-ops、怎么用 → brain-ops.md [default]
@@ -164,6 +165,7 @@
 | 9 | signal-detector.md | Scan messages for entities, concepts, events | Event-driven: on each user message |
 | 10 | write.md | Knowledge-based writing — gather from brain, produce polished output | On-demand: user wants to write something |
 | 11 | brain-ops.md | 5-step protocol + 38-tool reference | Default: agent startup / tool lookup |
+| 12 | signal-router.md | Incoming signal destination routing (4-way split) | After signal-detector.md |
 
 ## Resolution Logic
 

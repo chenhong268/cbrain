@@ -12,52 +12,57 @@ Every conversation contains signals — names, companies, concepts, events, rela
 
 On each user message, check for:
 
-- **Named entities**: People (张三, 李总), companies (腾讯, OpenAI), products (GPT-4o, Claude)
-- **Concepts**: Technologies (RAG, MCP), methods (TDD, RRF), frameworks (React, Bun)
+- **Named entities**: People (人物A, 人物B), companies (组织A, 组织B), products (产品A, 产品B)
+- **Concepts**: Technologies (技术A, 技术B), methods (方法A, 方法B), frameworks (框架A, 框架B)
 - **Events**: Meetings, deadlines, launches, milestones
 - **Relationships**: "A 在 B 工作", "C 投资了 D", "E 和 F 合作"
 - **Ideas/Observations**: "也许我们应该...", "注意到一个趋势..."
 
 ### Step 2: Classify
 
-For each signal, classify:
+For each signal, classify its type：
 
-| Category | Action | Page Type |
-|:---------|:-------|:----------|
-| New person | Create entity | `entity` |
-| New company | Create entity | `entity` |
-| New concept | Create concept | `concept` |
-| Event/date | Create event | `event` |
-| Relationship | Add graph edge | — |
-| Idea | Append to record | `record` |
+| Signal Type | Examples | Notes |
+|:------------|:---------|:------|
+| New person/org/concept | 人物A、组织B、主题C | 只标记为潜在信号，不创建 |
+| Event/date | 事件D、时间E | 交给 signal-router 判断目的地 |
+| Relationship | 人物A 属于 组织B | 只有 `cbrain_memory` 才进入 ingest |
+| Idea/Observation | 用户观点/反思 | 可能是 `thought_memory`，也可能 `no_store` |
 
 ### Step 3: Route
 
-- **每 3-5 轮对话**，自动调用 `ingest_dialogue` 并传 `mode: "auto"`：
-  ```
-  ingest_dialogue({ text: "最近几轮对话内容", mode: "auto" })
-  ```
-  检查返回的 `decision` 字段：
-  - `"recorded"` → 可以简短告知用户"已记录"（可选，别每次都说）
-  - `"skipped"` → 静默忽略
-- **用户明确要求记录** → 用 `mode: "manual"`（行为更宽松）
-- New entities → `cbrain ingest` (text or markdown)
-- Relationship updates → `cbrain graph_query` to verify, then add via ingest with `[[wiki-links]]`
-- Duplicate signals → Skip (check existing pages first via `cbrain query`)
+每 3-5 轮对话，按以下流程处理：
+
+1. **先路由**：读取 **signal-router.md**，对最近对话中的每个信号判断目的地（`cbrain_memory` / `agent_profile` / `action_loop` / `no_store`）
+2. **仅 ingest 记忆信号**：只对目的地为 `cbrain_memory` 的片段调用 `ingest_dialogue`
+   ```
+   ingest_dialogue({ text: "仅 cbrain_memory 片段", mode: "auto" })
+   ```
+   检查返回的 `decision` 字段：
+   - `"recorded"` → 可以简短告知用户"已记录"（可选，别每次都说）
+   - `"skipped"` → 静默忽略
+3. **非记忆信号走各自通道**：
+   - `agent_profile` → `update_profile()` / `reload_profile()`
+   - `action_loop` → Agent 内部 scheduler（不调 CBrain）
+   - `no_store` → 静默跳过
+
+- 明确长期记录意图 → 仍先走 signal-router；若为 `cbrain_memory`，可用 `mode: "manual"`（行为更宽松）
+- New entities / relationships / ideas → 只作为信号，不直接 ingest
+- Duplicate check 只在 `cbrain_memory` 路由成立后执行（通过 `ingest_dialogue` 内部去重）
 
 ## MCP Tool Usage
 
 ```
-1. query("张三") — check if already known
-2. ingest({ content, type: "text", title: "张三", pageType: "entity" }) — create if new
-3. ingest({ content: "张三[[腾讯]]工作...", type: "markdown" }) — add relationships
-4. ingest_dialogue({ text: "对话内容", mode: "auto" }) — background auto-capture every 3-5 turns
-5. ingest_dialogue({ text: "对话内容", mode: "manual" }) — user-triggered explicit capture
+1. signal-router.md → 判断每个信号的目的地
+2. cbrain_memory → ingest_dialogue({ text: "仅记忆片段", mode: "auto" })
+3. explicit long-term save → ingest_dialogue({ text, mode: "manual" })
+4. agent_profile → update_profile(...)
+5. action_loop / no_store → 不调 CBrain ingest
 ```
 
 ## Guidelines
 
-- **Err on the side of creating** — storage is cheap, forgetting is expensive
-- **Chinese names**: Use full names (张三, not 小张)
-- **Context matters**: "张三说RAG不错" extracts both 张三 (entity) and RAG (concept)
+- **Route first; store only when the signal has compounding value** — forgetting low-value noise is intentional
+- **Chinese names**: Use full names (人物A, not abbreviated)
+- **Context matters**: "人物A说技术B不错" extracts both 人物A (entity) and 技术B (concept)
 - **Don't over-extract**: Articles like "一个" or "这个" are not signals
