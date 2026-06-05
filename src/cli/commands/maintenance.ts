@@ -292,6 +292,11 @@ export function register(program: Command) {
       console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿`);
       console.log(`  Health:  ${report.stages.health.overallStatus}`);
       console.log(`  Insight: ${report.stages.insight_archive.archived} 条过期归档`);
+      if (report.stages.wake_up_diff.baselineCreated) {
+        console.log(`  Wake-up:  基线已建立`);
+      } else if (report.stages.wake_up_diff.changes > 0 || report.stages.wake_up_diff.newItems > 0) {
+        console.log(`  Wake-up:  ${report.stages.wake_up_diff.changes} 项变化, ${report.stages.wake_up_diff.newItems} 个新增`);
+      }
       console.log(`  ⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
       deps.db.close();
       process.exit(0);
@@ -1676,6 +1681,32 @@ Return JSON only, no markdown:
       rmSync(sourceDir, { recursive: true });
       const destination = targetFiles > 0 ? legacyDir : targetDir;
       console.log(`\n  ✓ 已迁移到 ${destination}（源目录已删除）`);
+    });
+
+  program
+    .command("wakeup-diff")
+    .description("Generate wake-up diff: cognitive changes since last snapshot")
+    .action(async () => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      const outputsDir = resolveRuntimePath(config);
+      const { WakeupDiff } = await import("../../core/wakeup.js");
+      const diff = new WakeupDiff(deps.db, outputsDir);
+      const result = await diff.run();
+
+      if (result.baselineCreated) {
+        console.log(`📊 Wake-up Diff — ${result.date}`);
+        console.log(`  Baseline established: ${result.stats.totalPages} pages`);
+      } else {
+        const totalChanges = result.changes.contentUpdated.length + result.changes.tierChanged.length +
+          result.changes.linkCountChanged.length + result.changes.confidenceDecayed.length + result.changes.removed.length;
+        console.log(`📊 Wake-up Diff — ${result.date}`);
+        console.log(`  Changes: ${totalChanges} items`);
+        console.log(`  New: ${result.newItems.length} items`);
+        if (result.reportPath) console.log(`  Report: ${result.reportPath}`);
+      }
+      deps.db.close();
+      process.exit(0);
     });
 }
 

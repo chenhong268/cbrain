@@ -28,6 +28,7 @@ import { registerArtifactTools } from "./tools/artifact.js";
 import { registerCompoundingReviewTools } from "./tools/compounding-review.js";
 import { registerKnowledgeTools } from "./tools/knowledge.js";
 import { registerMergeWorkflowTools } from "./tools/merge-workflow.js";
+import { registerWakeupTools } from "./tools/wakeup.js";
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerSearchTools(server, ctx);
@@ -58,4 +59,5 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerCompoundingReviewTools(server, ctx);
   registerKnowledgeTools(server, ctx);
   registerMergeWorkflowTools(server, ctx);
+  registerWakeupTools(server, ctx);
 }

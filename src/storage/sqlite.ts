@@ -2441,6 +2441,29 @@ export class CBrainDB {
         note TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+
+      CREATE TABLE IF NOT EXISTS brain_snapshots (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'wakeup_diff',
+        page_count INTEGER NOT NULL,
+        link_count INTEGER NOT NULL,
+        health_issue_count INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS brain_snapshot_items (
+        snapshot_id TEXT NOT NULL REFERENCES brain_snapshots(id) ON DELETE CASCADE,
+        slug TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content_hash TEXT,
+        tier INTEGER,
+        mention_count INTEGER,
+        link_count INTEGER,
+        updated_at TEXT,
+        page_type TEXT,
+        confidence_decay REAL,
+        PRIMARY KEY (snapshot_id, slug)
+      );
     `);
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_feedback_slug ON query_feedback(slug)");
   }
@@ -2762,6 +2785,54 @@ export class CBrainDB {
       "SELECT COUNT(*) as cnt FROM compounding_review_candidates WHERE status = 'pending'"
     ).get() as { cnt: number };
     return row.cnt;
+  }
+
+  // ── Brain snapshot methods (wake-up diff) ────────────────────────
+
+  createSnapshotAtomic(
+    id: string,
+    createdAt: string,
+    pageCount: number,
+    linkCount: number,
+    items: Array<{ slug: string; title: string; contentHash: string | null; tier: number; mentionCount: number; linkCount: number; updatedAt: string | null; pageType: string; confidenceDecay: number }>,
+  ): void {
+    const headerStmt = this.prepare(
+      "INSERT INTO brain_snapshots (id, created_at, kind, page_count, link_count) VALUES ($id, $ca, 'wakeup_diff', $pc, $lc)"
+    );
+    const itemStmt = this.prepare(
+      "INSERT INTO brain_snapshot_items (snapshot_id, slug, title, content_hash, tier, mention_count, link_count, updated_at, page_type, confidence_decay) VALUES ($sid, $slug, $title, $ch, $tier, $mc, $lc, $ua, $pt, $cd)"
+    );
+    const tx = this.db.transaction((rows: typeof items) => {
+      headerStmt.run({ $id: id, $ca: createdAt, $pc: pageCount, $lc: linkCount });
+      for (const r of rows) {
+        itemStmt.run({ $sid: id, $slug: r.slug, $title: r.title, $ch: r.contentHash, $tier: r.tier, $mc: r.mentionCount, $lc: r.linkCount, $ua: r.updatedAt, $pt: r.pageType, $cd: r.confidenceDecay });
+      }
+    });
+    tx(items);
+  }
+
+  getLatestSnapshot(): { id: string; created_at: string; page_count: number; link_count: number } | null {
+    return this.prepare(
+      "SELECT id, created_at, page_count, link_count FROM brain_snapshots WHERE kind = 'wakeup_diff' ORDER BY created_at DESC, id DESC LIMIT 1"
+    ).get() as { id: string; created_at: string; page_count: number; link_count: number } | null;
+  }
+
+  getSnapshotItems(snapshotId: string): Array<{ slug: string; title: string; content_hash: string | null; tier: number; mention_count: number; link_count: number; updated_at: string | null; page_type: string; confidence_decay: number }> {
+    return this.prepare(
+      "SELECT slug, title, content_hash, tier, mention_count, link_count, updated_at, page_type, confidence_decay FROM brain_snapshot_items WHERE snapshot_id = $sid"
+    ).all({ $sid: snapshotId }) as Array<{ slug: string; title: string; content_hash: string | null; tier: number; mention_count: number; link_count: number; updated_at: string | null; page_type: string; confidence_decay: number }>;
+  }
+
+  deleteSnapshot(id: string): void {
+    this.prepare("DELETE FROM brain_snapshot_items WHERE snapshot_id = $id").run({ $id: id });
+    this.prepare("DELETE FROM brain_snapshots WHERE id = $id").run({ $id: id });
+  }
+
+  getSnapshotIds(): string[] {
+    const rows = this.prepare(
+      "SELECT id FROM brain_snapshots WHERE kind = 'wakeup_diff' ORDER BY created_at DESC, id DESC"
+    ).all() as Array<{ id: string }>;
+    return rows.map(r => r.id);
   }
 
   close(): void {

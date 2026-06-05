@@ -15,6 +15,7 @@ import type { LLMProvider } from "../llm/provider.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 import { SealManager } from "./seal.js";
+import { WakeupDiff } from "./wakeup.js";
 
 export interface DreamReport {
   timestamp: string;
@@ -32,6 +33,7 @@ export interface DreamReport {
     insight_archive: { archived: number };
     search_quality: { degraded_rate: number; total: number; top_reasons: Array<{ code: string; count: number }> };
     indexes: { files: number };
+    wake_up_diff: { baselineCreated: boolean; changes: number; newItems: number; reportPath: string | null };
   };
   duration_ms: number;
   locked: boolean;
@@ -90,6 +92,7 @@ export async function runDream(
         insight_archive: { archived: 0 },
         search_quality: { degraded_rate: 0, total: 0, top_reasons: [] },
         indexes: { files: 0 },
+        wake_up_diff: { baselineCreated: false, changes: 0, newItems: 0, reportPath: null },
       },
       duration_ms: 0,
       locked: true,
@@ -300,6 +303,20 @@ export async function runDream(
   }
   if (onStageProgress) onStageProgress("indexes", { files: indexFiles });
 
+  // Stage 7.5: Wake-up diff
+  logger.info("dream", "Stage 7.5: wake-up diff");
+  let wakeupResult: { baselineCreated: boolean; changes: number; newItems: number; reportPath: string | null } = { baselineCreated: false, changes: 0, newItems: 0, reportPath: null };
+  try {
+    const wakeupDiff = new WakeupDiff(db, outputsDir, logger);
+    const wakeupReport = await wakeupDiff.run();
+    const totalChanges = wakeupReport.changes.contentUpdated.length + wakeupReport.changes.tierChanged.length +
+      wakeupReport.changes.linkCountChanged.length + wakeupReport.changes.confidenceDecayed.length + wakeupReport.changes.removed.length;
+    wakeupResult = { baselineCreated: wakeupReport.baselineCreated, changes: totalChanges, newItems: wakeupReport.newItems.length, reportPath: wakeupReport.reportPath };
+  } catch (e) {
+    logger.warn("dream", `Wake-up diff 失败: ${(e as Error).message}`);
+  }
+  if (onStageProgress) onStageProgress("wake_up_diff", wakeupResult);
+
   // Report
   logger.info("dream", "building report");
   const report: DreamReport = {
@@ -321,6 +338,7 @@ export async function runDream(
       insight_archive: { archived },
       search_quality: { degraded_rate: searchQualityStats.degradedRate, total: searchQualityStats.totalSearches, top_reasons: searchQualityStats.topReasonCodes },
       indexes: { files: indexFiles },
+      wake_up_diff: wakeupResult,
     },
     duration_ms: Date.now() - started,
     locked: false,
@@ -405,6 +423,14 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.indexes.files > 0) {
     lines.push(`${report.stages.indexes.files} 个索引更新`);
+  }
+  if (report.stages.wake_up_diff.changes > 0 || report.stages.wake_up_diff.newItems > 0) {
+    const parts: string[] = [];
+    if (report.stages.wake_up_diff.changes > 0) parts.push(`${report.stages.wake_up_diff.changes} 项变化`);
+    if (report.stages.wake_up_diff.newItems > 0) parts.push(`${report.stages.wake_up_diff.newItems} 个新增`);
+    lines.push(`Wake-up diff: ${parts.join("，")}`);
+  } else if (report.stages.wake_up_diff.baselineCreated) {
+    lines.push("Wake-up diff: 基线已建立");
   }
 
   const icon = report.stages.health.overallStatus === "pass" ? "✅" : "⚠️";
