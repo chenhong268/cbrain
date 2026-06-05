@@ -1,6 +1,33 @@
 # Changelog
 
-> Current: `v1.9.1` — 安全加固、性能优化与 Logger 体系化：输入校验、错误脱敏、LanceDB 磁盘回收、discovery ID 闭环。
+> Current: `v1.9.2` — Hermes 自然体验与运行稳定性小版本：结构化响应信封、图优先召回、安全写入、批量保护与证据摘要收敛。
+
+## [v1.9.2] — 2026-06-05
+
+### Hermes 体验
+- **统一响应信封（#137）**：MCP 输出统一分层为 `display / summary / raw`，让 Hermes 默认读取用户可见层，调试信息保留在 raw。
+- **自然路由与 query 降级（#138）**：普通用户问题优先走 `deep_recall` / grounded answer / graph-first 路径，底层 chunk query 退为内部能力。
+- **渐进披露与主动提示预算（#140）**：首轮回答短准，主动提示最多一条且必须相关、可行动，避免重复刷屏。
+- **Evidence summary 边界修正（#139）**：证据摘要对齐 3+2 输出边界，避免把调试/内部字段带入 Hermes 首轮回答。
+- **Hermes / CBrain 运行边界文档**：明确哪些能力留在 CBrain 治理层，哪些交给 Hermes skill / cron / dialogue runtime。
+
+### 召回与写入质量
+- **组织架构图优先召回（#129 / #131）**：新增 `get_org_tree`，并将组织架构类问题路由到 graph-first recall，减少多轮人名搜索拼图。
+- **批量页面读取（#133）**：新增 `get_pages`，支持 Hermes 一次展开多个页面，降低重复工具调用和上下文浪费。
+- **安全写入契约（#132）**：`put_page` 默认 patch/append，显式 `replace` 才覆盖，并保留版本快照，降低误覆盖风险。
+- **Known Relations 自动同步（#130）**：graph mutation 后自动回写 markdown Known Relations，减少 DB / vault 不一致。
+- **对话与 ingest 输出信封（#127）**：写入类工具也返回 Agent-facing display 信息，便于 Hermes 自然说明写入结果。
+
+### 诊断与治理
+- **degraded recall 诊断（#134）**：返回可解释的降级原因，health 汇总搜索质量，方便定位召回失败是向量、FTS、路由还是预算问题。
+- **审核型实体合并（#135）**：新增 merge workflow，支持 dry-run、冲突检查、KR 同步验证和残留校验，替代手工 SQL 合并。
+- **批量变更保护（#128）**：watcher 遇到非首次大批量文件变更会暂停并持久化状态，`bulk_resume` 每次只释放有限批次，避免 NER / LanceDB / dream 被写入风暴打爆。
+- **批量写入安全门（#128）**：批量删除、批量链接、批量合并超过阈值时默认只预览，需显式确认才执行。
+- **CBrain 2.0 UX 合同（#136）**：新增产品级 release gate 文档，把自然对话、证据边界、隐私、延迟和失败降级纳入后续 2.0 验收标准。
+
+### 治理与测试
+- `bun run check`：1596 pass / 0 fail / 5755 expect() calls
+- 所有新增公开测试与文档示例继续使用匿名占位符，避免泄露真实知识库内容。
 
 ## [v1.9.1] — 2026-06-04
 
