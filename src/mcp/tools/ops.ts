@@ -5,6 +5,7 @@ import { HealthChecker } from "../../core/health.js";
 import { IndexGenerator } from "../../core/indexes.js";
 import { normalizeRelation, getCanonicalRelationTypes, getReverseRelation } from "../../core/shared.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
+import { formatHealthEnvelope, formatDreamStatusEnvelope } from "./format-result.js";
 
 export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   // ─── health ────────────────────────────────────────────
@@ -14,8 +15,9 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   }, async () => {
     const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath);
     const report = await checker.checkAll();
+    const envelope = formatHealthEnvelope(report);
     return {
-      content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
     };
   });
 
@@ -150,25 +152,24 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
         const jobId = ctx.jobs.submit("dream", { locked_skip: true });
         // Immediately mark as done with locked info
         ctx.db.completeJob(jobId, { locked: true, skipped: true, message: "上次 dream 仍在执行中，已跳过" });
+        const job = ctx.jobs.get(jobId);
         return {
           content: [{ type: "text", text: JSON.stringify({
-            success: false,
-            job_id: jobId,
-            status: "done",
-            locked: true,
-            message: "上次 dream 仍在执行中（或锁未释放），已跳过。使用 dream_status 查询状态。",
+            display: "🧠 上次 Dream 仍在执行中，已跳过。使用 dream_status 查询状态。",
+            summary: { status: "ok" as const, count: 0, truncated: false, message: "Dream 被锁跳过" },
+            raw: { job, locked: true },
           }) }],
         };
       }
     }
 
     const jobId = ctx.jobs.submit("dream", { vaultPath: ctx.vaultPath, dbPath: ctx.dbPath });
+    const job = ctx.jobs.get(jobId);
     return {
       content: [{ type: "text", text: JSON.stringify({
-        success: true,
-        job_id: jobId,
-        status: "pending",
-        message: "Dream 已提交，后台执行中。使用 dream_status 查询进度。",
+        display: "🧠 Dream 已提交，后台执行中。使用 dream_status 查询进度。",
+        summary: { status: "ok" as const, count: 0, truncated: false, message: "Dream 已提交" },
+        raw: { job },
       }) }],
     };
   });
@@ -189,24 +190,21 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     }
 
     if (!job) {
+      const envelope = {
+        display: "暂无 Dream 任务。",
+        summary: { status: "empty" as const, count: 0, truncated: false, message: "无 Dream 任务" },
+        raw: { job: null, progress: {} },
+      };
       return {
-        content: [{ type: "text", text: JSON.stringify({ error: "No dream job found" }) }],
+        content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
       };
     }
 
     let progress: Record<string, unknown> = {};
     try { if (job.result) progress = JSON.parse(job.result) as Record<string, unknown>; } catch { /* corrupted result */ }
+    const envelope = formatDreamStatusEnvelope(job, progress);
     return {
-      content: [{ type: "text", text: JSON.stringify({
-        job_id: job.id,
-        status: job.status,
-        current_stage: progress.current_stage ?? null,
-        stages: progress,
-        error: job.error,
-        created_at: job.created_at,
-        started_at: job.started_at,
-        finished_at: job.finished_at,
-      }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
     };
   });
 

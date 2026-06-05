@@ -3,6 +3,7 @@ import type { DialogueIngestResult } from "../../core/dialogue.js";
 import type { EpisodicRecallResult } from "../../core/episodic-recall.js";
 import type { OrgTreeResult } from "../../core/hierarchy.js";
 import type { Link, GraphNode } from "../../core/graph.js";
+import type { HealthReport } from "../../core/health.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -787,4 +788,179 @@ export function formatTimelineEnvelope(
 function isSlugLike(text: string): boolean {
   if (!text) return true;
   return text.includes("/") || /^(entities|concepts|records|insights|events|brain)\b/.test(text);
+}
+
+/**
+ * Internal patterns that must never appear in user-facing text.
+ * Covers: slugs, file paths, function calls, wiki-links, internal dirs, extensions.
+ */
+const INTERNAL_PATTERN = /(?:\[\[.*?\]\]|runtime\/|\.md\b|\.json\b|syncLinksToMarkdown\(|setHierarchy\(|entities\/|concepts\/|records\/|insights\/|brain\/|filePath|_slug|watcher_quarantine|bulk_resume)/;
+
+/**
+ * Map raw health suggestion to a user-safe action label.
+ * Never expose: paths, slugs, function names, internal commands.
+ */
+function sanitizeUserAction(suggestion: string | undefined): string | null {
+  if (!suggestion) return null;
+  if (INTERNAL_PATTERN.test(suggestion)) return null;
+  // Also block if it still contains suspicious fragments after basic check
+  if (/\/tmp\b|\.log\b|SELECT\b|INSERT\b/.test(suggestion)) return null;
+  return suggestion;
+}
+
+// ─── Health ─────────────────────────────────────────────────
+
+export function formatHealthEnvelope(
+  report: HealthReport,
+): { display: string; summary: ToolSummary; raw: HealthReport } {
+  const statusIcon = report.overallStatus === "pass" ? "✅" : "⚠️";
+  const statusLabel = report.overallStatus === "pass" ? "健康" : report.overallStatus === "warn" ? "需注意" : "有问题";
+
+  // Collect all issues across dimensions, sorted by severity
+  const allIssues = report.dimensions
+    .flatMap(d => d.issues.map(i => ({ ...i, dimension: d.name })))
+    .sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+
+  const totalIssues = allIssues.length;
+
+  if (totalIssues === 0) {
+    return {
+      display: `${statusIcon} 大脑状态：${statusLabel}，无问题。`,
+      summary: {
+        status: report.overallStatus === "pass" ? "ok" : "degraded",
+        count: 0,
+        truncated: false,
+        message: "健康检查通过",
+      },
+      raw: report,
+    };
+  }
+
+  // Show top 3 most severe issues with titles only
+  const topIssues = allIssues.slice(0, 3);
+  const lines: string[] = [`${statusIcon} 大脑状态：${statusLabel}（${totalIssues} 个问题）`];
+  for (const issue of topIssues) {
+    // Sanitize title: slug-like titles → generic label from dimension name
+    const safeTitle = isSlugLike(issue.title) ? `${issue.dimension}问题` : issue.title;
+    const safeAction = sanitizeUserAction(issue.suggestion);
+    lines.push(`- ${safeTitle}${safeAction ? ` → ${safeAction}` : ""}`);
+  }
+  if (totalIssues > 3) {
+    lines.push(`- ...还有 ${totalIssues - 3} 个问题`);
+  }
+
+  // User action needed?
+  const highIssues = allIssues.filter(i => i.severity === "high");
+  if (highIssues.length > 0) {
+    lines.push("", `⚠️ 需要关注：${highIssues.length} 个高优先级问题`);
+  }
+
+  return {
+    display: sanitizeDisplay(lines.join("\n")),
+    summary: {
+      status: report.overallStatus === "pass" ? "ok" : "degraded",
+      count: totalIssues,
+      truncated: totalIssues > 3,
+      message: `${statusLabel}：${totalIssues} 个问题`,
+    },
+    raw: report,
+  };
+}
+
+function severityRank(s: string): number {
+  if (s === "high") return 3;
+  if (s === "medium") return 2;
+  return 1;
+}
+
+// ─── Dream Status ───────────────────────────────────────────
+
+interface DreamProgress {
+  current_stage?: string;
+  brief?: string;
+  [key: string]: unknown;
+}
+
+interface DreamJob {
+  id: number;
+  status: string;
+  result?: string | null;
+  error?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export function formatDreamStatusEnvelope(
+  job: DreamJob,
+  progress: DreamProgress,
+): { display: string; summary: ToolSummary; raw: Record<string, unknown> } {
+  // Every branch preserves full raw for audit
+  const raw = { job, progress };
+
+  if (job.status === "pending") {
+    return {
+      display: "🧠 Dream 已提交，等待执行。",
+      summary: { status: "ok", count: 0, truncated: false, message: "Dream 已提交" },
+      raw,
+    };
+  }
+
+  if (job.status === "running") {
+    const stage = progress.current_stage ?? "处理中";
+    return {
+      display: `🧠 Dream 执行中：${stage}`,
+      summary: { status: "ok", count: 0, truncated: false, message: `执行中：${stage}` },
+      raw,
+    };
+  }
+
+  if (job.status === "failed") {
+    return {
+      display: `🧠 Dream 执行失败。请稍后重试或检查日志。`,
+      summary: { status: "error", count: 0, truncated: false, message: job.error ?? "Dream 失败" },
+      raw,
+    };
+  }
+
+  // Completed (DB stores "done"; "completed" kept for backward compat / tests)
+  const isCompleted = job.status === "done" || job.status === "completed";
+
+  if (isCompleted && progress.brief) {
+    // Clean the brief: remove internal terms
+    const cleanBrief = sanitizeDreamBrief(progress.brief);
+    return {
+      display: sanitizeDisplay(cleanBrief),
+      summary: { status: "ok", count: 0, truncated: false, message: "Dream 完成" },
+      raw,
+    };
+  }
+
+  // Fallback: generic completed message
+  if (isCompleted) {
+    return {
+      display: "🧠 Dream 已完成。",
+      summary: { status: "ok", count: 0, truncated: false, message: "Dream 完成" },
+      raw,
+    };
+  }
+
+  // Unknown status — safe fallback
+  return {
+    display: `🧠 Dream 状态：${job.status}`,
+    summary: { status: "ok", count: 0, truncated: false, message: `状态: ${job.status}` },
+    raw,
+  };
+}
+
+function sanitizeDreamBrief(brief: string): string {
+  // Remove internal implementation terms but keep the structure
+  return brief
+    .replace(/Seal:/g, "摘要压缩：")
+    .replace(/LanceDB:.*fragments.*files.*/g, "向量索引已优化")
+    .replace(/搜索:.*降级/g, "搜索质量已检查")
+    .replace(/\d+(\.\d+)?s$/, "")  // Remove duration line
+    .replace(/⏱.*/g, "")           // Remove timer icon line
+    .replace(/\n{3,}/g, "\n\n")    // Collapse extra newlines
+    .trim();
 }

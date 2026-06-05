@@ -1091,9 +1091,11 @@ describe("MCP Server", () => {
       const server = createServer(deps);
       const result = await getTools(server).health.handler({});
       const data = JSON.parse(result.content[0].text);
-      expect(data.overallStatus).toBeDefined();
-      expect(data.dimensions).toBeDefined();
-      expect(data.metrics).toBeDefined();
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(data.raw.overallStatus).toBeDefined();
+      expect(data.raw.dimensions).toBeDefined();
+      expect(data.raw.metrics).toBeDefined();
     });
   });
 
