@@ -98,6 +98,16 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
       } catch { /* */ }
     }
 
+    // Bulk-pending state
+    const bulkRaw = ctx.db.getConfig("watcher.bulk_pending");
+    let bulkPending = { paused: false, pendingCount: 0, threshold: 50 };
+    if (bulkRaw) {
+      try {
+        const bs = JSON.parse(bulkRaw) as { paused: boolean; pendingFiles: unknown[]; threshold: number };
+        bulkPending = { paused: bs.paused, pendingCount: bs.pendingFiles?.length ?? 0, threshold: bs.threshold ?? 50 };
+      } catch { /* keep defaults */ }
+    }
+
     return {
       content: [{
         type: "text",
@@ -107,6 +117,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
           watcher: watcherOwner ? { pid: watcherOwner.pid, transport: watcherOwner.transport, startedAt: watcherOwner.startedAt } : null,
           quarantineCount: quarantine.length,
           quarantine,
+          bulkPending,
         }, null, 2),
       }],
     };
@@ -212,9 +223,9 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
 
   // ─── watcher_quarantine ──────────────────────────────────────
   server.registerTool("watcher_quarantine", {
-    description: "Manage watcher quarantine. 'list' shows quarantined files with reasons. 'release' removes a file from quarantine so it will re-sync on next scan. 'release_all' clears entire quarantine.",
+    description: "Manage watcher quarantine and bulk-change backpressure. 'list' shows quarantined files. 'release'/'release_all' manages quarantine. 'bulk_status' shows bulk-pending state. 'bulk_resume' resumes paused bulk processing.",
     inputSchema: {
-      action: z.enum(["list", "release", "release_all"]).describe("'list' = show quarantined files, 'release' = un-quarantine one file, 'release_all' = clear all"),
+      action: z.enum(["list", "release", "release_all", "bulk_status", "bulk_resume"]).describe("'list' = show quarantined files, 'release' = un-quarantine one file, 'release_all' = clear all, 'bulk_status' = show bulk-pending state, 'bulk_resume' = resume bulk processing"),
       slug: z.string().max(500).optional().describe("Slug to release (required for action='release')"),
     },
   }, async ({ action, slug }) => {
@@ -222,6 +233,69 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     const quarantineMap: Record<string, { failCount: number; lastError: string; quarantinedAt: string }> = quarantineRaw
       ? JSON.parse(quarantineRaw)
       : {};
+
+    if (action === "bulk_status") {
+      const raw = ctx.db.getConfig("watcher.bulk_pending");
+      if (!raw) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ bulkPaused: false, pendingCount: 0, threshold: 50 }) }],
+        };
+      }
+      try {
+        const state = JSON.parse(raw) as { paused: boolean; pendingFiles: unknown[]; threshold: number };
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            bulkPaused: state.paused,
+            pendingCount: state.pendingFiles?.length ?? 0,
+            threshold: state.threshold ?? 50,
+          }) }],
+        };
+      } catch {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ bulkPaused: false, pendingCount: 0, threshold: 50 }) }],
+        };
+      }
+    }
+
+    if (action === "bulk_resume") {
+      if (ctx.watcher && typeof ctx.watcher.resumeBulk === "function") {
+        const result = await ctx.watcher.resumeBulk();
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            success: true,
+            resumed: true,
+            releasedCount: result.releasedCount,
+            remainingCount: result.remainingCount,
+            fullyResumed: result.remainingCount === 0,
+          }) }],
+        };
+      }
+      // No live watcher — write a resume request for the HTTP watcher to pick up on next scan
+      const raw = ctx.db.getConfig("watcher.bulk_pending");
+      if (!raw) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ success: true, resumed: true, releasedCount: 0, remainingCount: 0, fullyResumed: true }) }],
+        };
+      }
+      ctx.db.setConfig("watcher.bulk_resume_request", JSON.stringify({ requestedAt: new Date().toISOString() }));
+      try {
+        const state = JSON.parse(raw) as { paused: boolean; pendingFiles: unknown[] };
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            success: true,
+            pendingResume: true,
+            releasedCount: 0,
+            remainingCount: state.pendingFiles?.length ?? 0,
+            fullyResumed: false,
+            message: "Resume request written. Live watcher will release one batch on next scan cycle.",
+          }) }],
+        };
+      } catch {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ success: true, pendingResume: true, releasedCount: 0, remainingCount: 0, fullyResumed: false }) }],
+        };
+      }
+    }
 
     if (action === "list") {
       const entries = Object.entries(quarantineMap).map(([s, e]) => ({ slug: s, ...e }));

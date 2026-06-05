@@ -11,13 +11,18 @@ import type { CBrainDB } from "../storage/sqlite.js";
 export interface FileWatcherOpts {
   logger?: Logger;
   db?: CBrainDB;
+  bulkThreshold?: number;
 }
 
 const SYNC_CONCURRENCY = 3;
 const FIRST_SCAN_BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 500;
 const FAIL_THRESHOLD = 3;
+const DEFAULT_BULK_THRESHOLD = 50;
+const BULK_RESUME_BATCH_SIZE = 10;
 const QUARANTINE_CONFIG_KEY = "watcher.quarantine";
+const BULK_PENDING_CONFIG_KEY = "watcher.bulk_pending";
+const BULK_RESUME_REQUEST_KEY = "watcher.bulk_resume_request";
 
 interface PendingSync {
   slug: string;
@@ -52,13 +57,18 @@ export class FileWatcher {
   private inFlightPaths = new Map<string, string>();
   private isFirstScan = true;
   private quarantine: Map<string, QuarantineEntry> = new Map();
+  private bulkPaused = false;
+  private pendingBulk: PendingSync[] = [];
+  private readonly bulkThreshold: number;
 
   constructor(sync: SyncManager, vaultPath: string, opts?: FileWatcherOpts) {
     this.sync = sync;
     this.vaultPath = vaultPath;
     this.logger = opts?.logger;
     this.db = opts?.db;
+    this.bulkThreshold = opts?.bulkThreshold ?? DEFAULT_BULK_THRESHOLD;
     this.loadQuarantine();
+    this.loadBulkPending();
   }
 
   start(): void {
@@ -132,6 +142,18 @@ export class FileWatcher {
   }
 
   private async doScan(): Promise<void> {
+    // If bulk-paused, check DB for external resume signal
+    if (this.bulkPaused) {
+      const handledResume = this.syncBulkFromDb();
+      // Resume request consumed — skip full scan to avoid re-detecting in-flight files
+      if (handledResume) return;
+    }
+    // Still paused after DB sync — skip this scan cycle
+    if (this.bulkPaused) {
+      this.logger?.info("watcher", "批量暂停中，跳过扫描");
+      return;
+    }
+
     // Reload quarantine from DB so external releases (e.g. MCP in another process) take effect
     this.syncQuarantineFromDb();
     const files = await collectMarkdownFiles(this.vaultPath, new Set(["outputs"]), this.logger);
@@ -176,6 +198,16 @@ export class FileWatcher {
         }
       }
       this.logger?.info("watcher", "首次扫描分批完成", { total: changed.length, batchSize: FIRST_SCAN_BATCH_SIZE });
+    } else if (!this.isFirstScan && changed.length > this.bulkThreshold) {
+      // Subsequent scan with bulk change — pause instead of flooding
+      this.pendingBulk = [...changed];
+      this.bulkPaused = true;
+      this.persistBulkPending();
+      this.logger?.warn("watcher", "检测到大批量变更", {
+        changedFiles: changed.length,
+        threshold: this.bulkThreshold,
+        action: "暂停同步，等待 resumeBulk 或 bulk_resume 工具释放",
+      });
     } else {
       for (const pending of changed) {
         this.enqueueSync(pending);
@@ -269,6 +301,54 @@ export class FileWatcher {
     return [...this.quarantine.entries()].map(([slug, entry]) => ({ slug, ...entry }));
   }
 
+  // ── Bulk-change backpressure ────────────────────────────────────
+
+  isBulkPaused(): boolean {
+    return this.bulkPaused;
+  }
+
+  getBulkStatus(): { paused: boolean; pendingCount: number; threshold: number } {
+    return {
+      paused: this.bulkPaused,
+      pendingCount: this.pendingBulk.length,
+      threshold: this.bulkThreshold,
+    };
+  }
+
+  async resumeBulk(): Promise<{ releasedCount: number; remainingCount: number }> {
+    if (!this.bulkPaused || this.pendingBulk.length === 0) {
+      this.bulkPaused = false;
+      this.pendingBulk = [];
+      this.clearBulkPending();
+      return { releasedCount: 0, remainingCount: 0 };
+    }
+
+    // Release only one bounded batch per call
+    const toRelease = this.pendingBulk.slice(0, BULK_RESUME_BATCH_SIZE);
+    this.pendingBulk = this.pendingBulk.slice(BULK_RESUME_BATCH_SIZE);
+    const remainingCount = this.pendingBulk.length;
+
+    // Only unpause when all pending items are released
+    if (remainingCount === 0) {
+      this.bulkPaused = false;
+      this.clearBulkPending();
+    } else {
+      this.persistBulkPending();
+    }
+
+    for (const pending of toRelease) {
+      this.enqueueSync(pending);
+    }
+
+    this.logger?.info("watcher", "批量恢复已释放一批", {
+      releasedCount: toRelease.length,
+      remainingCount,
+      batchSize: BULK_RESUME_BATCH_SIZE,
+    });
+
+    return { releasedCount: toRelease.length, remainingCount };
+  }
+
   private loadQuarantine(): void {
     if (!this.db) return;
     try {
@@ -326,6 +406,76 @@ export class FileWatcher {
       for (const [k, v] of this.quarantine) obj[k] = v;
       this.db.setConfig(QUARANTINE_CONFIG_KEY, JSON.stringify(obj));
     } catch { /* non-critical */ }
+  }
+
+  private persistBulkPending(): void {
+    if (!this.db) return;
+    try {
+      const state = {
+        paused: this.bulkPaused,
+        pendingFiles: this.pendingBulk,
+        threshold: this.bulkThreshold,
+        pausedAt: new Date().toISOString(),
+      };
+      this.db.setConfig(BULK_PENDING_CONFIG_KEY, JSON.stringify(state));
+    } catch { /* non-critical */ }
+  }
+
+  private loadBulkPending(): void {
+    if (!this.db) return;
+    try {
+      const raw = this.db.getConfig(BULK_PENDING_CONFIG_KEY);
+      if (!raw) return;
+      const state = JSON.parse(raw) as {
+        paused: boolean;
+        pendingFiles: PendingSync[];
+        threshold: number;
+        pausedAt: string;
+      };
+      if (state.paused && state.pendingFiles?.length > 0) {
+        this.bulkPaused = true;
+        this.pendingBulk = state.pendingFiles;
+        this.logger?.info("watcher", "恢复批量暂停状态", { pendingCount: state.pendingFiles.length });
+      }
+    } catch { /* start fresh */ }
+  }
+
+  private clearBulkPending(): void {
+    if (!this.db) return;
+    try {
+      this.db.deleteConfig(BULK_PENDING_CONFIG_KEY);
+    } catch { /* non-critical */ }
+  }
+
+  /** Re-sync bulk-pause state from DB so external resume (cross-process MCP) takes effect.
+   *  Checks for a resume request written by MCP; if found, calls bounded resumeBulk()
+   *  to release one batch, then clears the request.
+   *  Returns true if a resume request was consumed (caller should skip full scan). */
+  private syncBulkFromDb(): boolean {
+    if (!this.db || !this.bulkPaused) return false;
+    try {
+      const req = this.db.getConfig(BULK_RESUME_REQUEST_KEY);
+      if (req) {
+        // External resume request — release one bounded batch
+        this.db.deleteConfig(BULK_RESUME_REQUEST_KEY);
+        this.logger?.info("watcher", "检测到外部 bulk_resume 请求，释放一批", {
+          pendingCount: this.pendingBulk.length,
+        });
+        // resumeBulk() handles the bounded release + persist remaining
+        void this.resumeBulk();
+        return true;
+      }
+      // Also check if bulk_pending was externally cleared (full manual reset)
+      const raw = this.db.getConfig(BULK_PENDING_CONFIG_KEY);
+      if (!raw && this.pendingBulk.length > 0) {
+        // DB config removed externally but no resume request — treat as full reset
+        this.pendingBulk = [];
+        this.bulkPaused = false;
+        this.logger?.info("watcher", "bulk_pending 已被外部清除，解除暂停");
+        return true;
+      }
+    } catch { /* keep current state */ }
+    return false;
   }
 
   private recordFailure(slug: string, error: string, errorObj?: unknown): void {

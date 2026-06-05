@@ -183,6 +183,7 @@ export class HealthChecker {
       this.checkStaleContent(),
       this.checkContradictions(),
       this.checkSearchQuality(),
+      this.checkBulkPending(),
     ];
 
     const highCount = dimensions.reduce((n, d) => n + d.issues.filter(i => i.severity === "high").length, 0);
@@ -658,6 +659,32 @@ export class HealthChecker {
     return {
       name: "标题冲突隔离",
       status: issues.length > 0 ? "fail" : "pass",
+      issues,
+    };
+  }
+
+  private checkBulkPending(): HealthDimension {
+    const issues: HealthIssue[] = [];
+
+    const raw = this.db.getConfig("watcher.bulk_pending");
+    if (!raw) return { name: "批量变更保护", status: "pass", issues: [] };
+
+    try {
+      const state = JSON.parse(raw) as { paused: boolean; pendingFiles: unknown[]; threshold: number; pausedAt: string };
+      if (!state.paused) return { name: "批量变更保护", status: "pass", issues: [] };
+
+      issues.push({
+        severity: "medium",
+        slug: "",
+        title: "批量变更暂停",
+        description: `watcher 因检测到 ${state.pendingFiles?.length ?? 0} 个文件变更（阈值 ${state.threshold}）已暂停同步，暂停于 ${state.pausedAt}`,
+        suggestion: "使用 watcher_quarantine 工具的 bulk_resume action 恢复处理，或检查是否有意外的大量文件写入",
+      });
+    } catch { /* corrupt config */ }
+
+    return {
+      name: "批量变更保护",
+      status: issues.length > 0 ? "warn" : "pass",
       issues,
     };
   }

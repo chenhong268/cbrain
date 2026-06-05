@@ -328,3 +328,169 @@ describe("MCP watcher_quarantine with live FileWatcher", () => {
     expect(slugs).toEqual(["another-stuck", "stuck-file"]);
   });
 });
+
+// ── Bulk-change backpressure MCP tools ─────────────────────────────────
+
+describe("MCP watcher bulk_status and bulk_resume", () => {
+  const testDir = "/tmp/cbrain-test-mcp-bulk";
+  const dbPath = join(testDir, "test.sqlite");
+  const vaultPath = join(testDir, "vault");
+  let db: CBrainDB;
+  let deps: CBrainDeps;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+    deps = {
+      db,
+      embedding: createMockEmbedding(),
+      lance: createMockLanceDB() as any,
+      vaultPath,
+      runtimePath: runtimeDir(dbPath),
+    };
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("bulk_status returns not paused when no bulk state", async () => {
+    const server = createServer(deps);
+    const result = await callTool(server, "watcher_quarantine", { action: "bulk_status" });
+
+    expect(result.bulkPaused).toBe(false);
+    expect(result.pendingCount).toBe(0);
+    expect(result.threshold).toBe(50);
+  });
+
+  test("bulk_status reports paused state from DB", async () => {
+    const pendingFiles = Array.from({ length: 60 }, (_, i) => ({
+      slug: `bulk${i}`,
+      fullPath: `/vault/bulk${i}.md`,
+      hash: `hash${i}`,
+      mtime: { mtime: Date.now(), size: 100 },
+    }));
+
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles,
+      threshold: 50,
+      pausedAt: new Date().toISOString(),
+    }));
+
+    const server = createServer(deps);
+    const result = await callTool(server, "watcher_quarantine", { action: "bulk_status" });
+
+    expect(result.bulkPaused).toBe(true);
+    expect(result.pendingCount).toBe(60);
+    expect(result.threshold).toBe(50);
+  });
+
+  test("bulk_resume writes resume request when no live watcher", async () => {
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: [{ slug: "test", fullPath: "/vault/test.md", hash: "h1", mtime: { mtime: 1, size: 1 } }],
+      threshold: 50,
+      pausedAt: new Date().toISOString(),
+    }));
+
+    const server = createServer(deps);
+    const result = await callTool(server, "watcher_quarantine", { action: "bulk_resume" });
+
+    expect(result.success).toBe(true);
+    expect(result.pendingResume).toBe(true);
+    expect(result.releasedCount).toBe(0);
+    expect(result.fullyResumed).toBe(false);
+    expect(result.remainingCount).toBe(1);
+
+    // Verify resume request was written (not bulk_pending deleted)
+    const req = db.getConfig("watcher.bulk_resume_request");
+    expect(req).not.toBeNull();
+
+    // bulk_pending still intact
+    const raw = db.getConfig("watcher.bulk_pending");
+    expect(raw).not.toBeNull();
+  });
+
+  test("bulk_resume with no pending state returns fullyResumed", async () => {
+    const server = createServer(deps);
+    const result = await callTool(server, "watcher_quarantine", { action: "bulk_resume" });
+
+    expect(result.success).toBe(true);
+    expect(result.fullyResumed).toBe(true);
+    expect(result.releasedCount).toBe(0);
+  });
+
+  test("bulk_resume returns incremental release info with live watcher", async () => {
+    const pendingFiles = Array.from({ length: 25 }, (_, i) => ({
+      slug: `bulk${i}`,
+      fullPath: join(vaultPath, `bulk${i}.md`),
+      hash: `hash${i}`,
+      mtime: { mtime: 1, size: 1 },
+    }));
+
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles,
+      threshold: 50,
+      pausedAt: new Date().toISOString(),
+    }));
+
+    const { FileWatcher } = await import("../../src/core/watcher.js");
+    const mockSync = {
+      syncPage: mock(async () => ({ success: true })),
+      removePage: mock(async () => {}),
+    } as unknown as SyncManager;
+
+    const reloaded = new FileWatcher(mockSync, vaultPath, { db });
+    expect(reloaded.isBulkPaused()).toBe(true);
+    expect(reloaded.getBulkStatus().pendingCount).toBe(25);
+
+    const server = createServer({
+      ...deps,
+      watcher: reloaded,
+    });
+
+    // First resume: release 10, 15 remaining
+    let result = await callTool(server, "watcher_quarantine", { action: "bulk_resume" });
+    expect(result.success).toBe(true);
+    expect(result.releasedCount).toBe(10);
+    expect(result.remainingCount).toBe(15);
+    expect(result.fullyResumed).toBe(false);
+    expect(reloaded.isBulkPaused()).toBe(true);
+
+    // Second resume: release 10, 5 remaining
+    result = await callTool(server, "watcher_quarantine", { action: "bulk_resume" });
+    expect(result.releasedCount).toBe(10);
+    expect(result.remainingCount).toBe(5);
+    expect(reloaded.isBulkPaused()).toBe(true);
+
+    // Third resume: release 5, fully done
+    result = await callTool(server, "watcher_quarantine", { action: "bulk_resume" });
+    expect(result.releasedCount).toBe(5);
+    expect(result.remainingCount).toBe(0);
+    expect(result.fullyResumed).toBe(true);
+    expect(reloaded.isBulkPaused()).toBe(false);
+  });
+
+  test("status tool includes bulk-pending info", async () => {
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: Array.from({ length: 75 }, (_, i) => ({
+        slug: `f${i}`, fullPath: `/v/f${i}.md`, hash: `h${i}`, mtime: { mtime: 1, size: 1 },
+      })),
+      threshold: 50,
+      pausedAt: new Date().toISOString(),
+    }));
+
+    const server = createServer(deps);
+    const result = await callTool(server, "status", {});
+
+    expect(result.bulkPending).toBeDefined();
+    expect(result.bulkPending.paused).toBe(true);
+    expect(result.bulkPending.pendingCount).toBe(75);
+    expect(result.bulkPending.threshold).toBe(50);
+  });
+});

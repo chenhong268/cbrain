@@ -4,6 +4,8 @@ import type { ToolContext } from "../context.js";
 import { normalizeRelation } from "../../core/shared.js";
 import { sanitizeError } from "../server.js";
 
+const BATCH_SAFETY_GATE = 20;
+
 export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
   // ─── batch_delete_pages ────────────────────────────────────
   server.registerTool("batch_delete_pages", {
@@ -12,8 +14,24 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
       "Use this instead of calling delete_page N times for bulk cleanup.",
     inputSchema: {
       slugs: z.array(z.string().max(500)).min(1).max(100).describe("Array of page slugs to delete (max 100)"),
+      confirm_large_batch: z.boolean().default(false).describe("Confirm execution for 20+ items. Without this, 20+ items returns preview only."),
     },
-  }, async ({ slugs }) => {
+  }, async ({ slugs, confirm_large_batch }) => {
+    if (slugs.length >= BATCH_SAFETY_GATE && !confirm_large_batch) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            preview: true,
+            warning: `批量删除 ${slugs.length} 个页面，超过安全阈值 ${BATCH_SAFETY_GATE}。请确认后重新调用。`,
+            itemCount: slugs.length,
+            slugs,
+            instruction: "设置 confirm_large_batch: true 以执行删除操作",
+          }, null, 2),
+        }],
+      };
+    }
+
     const results: { slug: string; success: boolean; error?: string }[] = [];
 
     for (const slug of slugs) {
@@ -53,8 +71,24 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
         weight: z.number().optional().describe("Link weight 0-1"),
         strength: z.enum(["strong", "medium", "weak"]).optional().describe("Link strength"),
       })).min(1).max(100).describe("Array of links to create (max 100)"),
+      confirm_large_batch: z.boolean().default(false).describe("Confirm execution for 20+ items. Without this, 20+ items returns preview only."),
     },
-  }, async ({ links }) => {
+  }, async ({ links, confirm_large_batch }) => {
+    if (links.length >= BATCH_SAFETY_GATE && !confirm_large_batch) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            preview: true,
+            warning: `批量创建 ${links.length} 条链接，超过安全阈值 ${BATCH_SAFETY_GATE}。请确认后重新调用。`,
+            itemCount: links.length,
+            links: links.map(l => ({ from: l.from, to: l.to, relation: l.relation })),
+            instruction: "设置 confirm_large_batch: true 以执行创建操作",
+          }, null, 2),
+        }],
+      };
+    }
+
     const results: { from: string; to: string; success: boolean; error?: string }[] = [];
     const syncedSlugs = new Set<string>();
 
@@ -106,8 +140,24 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
         source: z.string().max(500).describe("Page to absorb (will be deleted)"),
         target: z.string().max(500).describe("Page to keep"),
       })).min(1).max(50).describe("Array of merge pairs (max 50)"),
+      confirm_large_batch: z.boolean().default(false).describe("Confirm execution for 20+ pairs. Without this, 20+ pairs returns preview only."),
     },
-  }, async ({ pairs }) => {
+  }, async ({ pairs, confirm_large_batch }) => {
+    if (pairs.length >= BATCH_SAFETY_GATE && !confirm_large_batch) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            preview: true,
+            warning: `批量合并 ${pairs.length} 对页面，超过安全阈值 ${BATCH_SAFETY_GATE}。请确认后重新调用。`,
+            itemCount: pairs.length,
+            pairs,
+            instruction: "设置 confirm_large_batch: true 以执行合并操作",
+          }, null, 2),
+        }],
+      };
+    }
+
     const results: { source: string; target: string; success: boolean; error?: string }[] = [];
     const deletedSources = new Set<string>();
 

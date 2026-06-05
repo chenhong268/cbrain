@@ -55,7 +55,7 @@ describe("HealthChecker", () => {
       const report = await checker.checkAll();
       expect(report.overallStatus).toBe("pass");
       expect(report.metrics.totalPages).toBe(17);
-      expect(report.dimensions.length).toBe(15);
+      expect(report.dimensions.length).toBe(16);
     });
 
     test("fails on insufficient data", async () => {
@@ -567,6 +567,51 @@ describe("HealthChecker", () => {
       expect(dim).toBeDefined();
       expect(dim!.status).toBe("pass");
       expect(dim!.issues.length).toBe(0);
+    });
+  });
+
+  describe("批量变更保护", () => {
+    test("reports warn when bulk is paused", async () => {
+      db.setConfig("watcher.bulk_pending", JSON.stringify({
+        paused: true,
+        pendingFiles: Array.from({ length: 60 }, (_, i) => ({
+          slug: `bulk${i}`, fullPath: `/v/bulk${i}.md`, hash: `h${i}`, mtime: { mtime: 1, size: 1 },
+        })),
+        threshold: 50,
+        pausedAt: "2026-06-05T10:00:00Z",
+      }));
+
+      const report = await checker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "批量变更保护");
+      expect(dim).toBeDefined();
+      expect(dim!.status).toBe("warn");
+      expect(dim!.issues.length).toBe(1);
+      expect(dim!.issues[0].title).toBe("批量变更暂停");
+      expect(dim!.issues[0].description).toContain("60");
+      expect(dim!.issues[0].description).toContain("50");
+      expect(dim!.issues[0].suggestion).toContain("bulk_resume");
+    });
+
+    test("reports pass when no bulk state", async () => {
+      const report = await checker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "批量变更保护");
+      expect(dim).toBeDefined();
+      expect(dim!.status).toBe("pass");
+      expect(dim!.issues.length).toBe(0);
+    });
+
+    test("reports pass when bulk state exists but not paused", async () => {
+      db.setConfig("watcher.bulk_pending", JSON.stringify({
+        paused: false,
+        pendingFiles: [],
+        threshold: 50,
+        pausedAt: "2026-06-05T10:00:00Z",
+      }));
+
+      const report = await checker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "批量变更保护");
+      expect(dim).toBeDefined();
+      expect(dim!.status).toBe("pass");
     });
   });
 });

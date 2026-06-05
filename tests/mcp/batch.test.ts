@@ -340,4 +340,101 @@ describe("Batch Tools", () => {
       expect(result).toBeUndefined();
     });
   });
+
+  describe("confirm_large_batch safety gate", () => {
+    test("batch_delete_pages returns preview for 20+ items without confirmation", async () => {
+      for (let i = 0; i < 25; i++) {
+        insertPageWithVault(db, `entities/del${i}`, `Del${i}`, vaultPath);
+      }
+
+      const server = createServer(deps);
+      const slugs = Array.from({ length: 25 }, (_, i) => `entities/del${i}`);
+      const result = await getTools(server).batch_delete_pages.handler({ slugs });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.preview).toBe(true);
+      expect(data.itemCount).toBe(25);
+      expect(data.warning).toContain("20");
+
+      // Verify pages were NOT deleted
+      const count = db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
+      expect(count.c).toBe(25);
+    });
+
+    test("batch_delete_pages executes with confirm_large_batch: true", async () => {
+      for (let i = 0; i < 25; i++) {
+        insertPageWithVault(db, `entities/del${i}`, `Del${i}`, vaultPath);
+      }
+
+      const server = createServer(deps);
+      const slugs = Array.from({ length: 25 }, (_, i) => `entities/del${i}`);
+      const result = await getTools(server).batch_delete_pages.handler({
+        slugs,
+        confirm_large_batch: true,
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.succeeded).toBe(25);
+      expect(data.preview).toBeUndefined();
+    });
+
+    test("batch_add_links returns preview for 20+ items without confirmation", async () => {
+      for (let i = 0; i < 30; i++) {
+        insertPageWithVault(db, `entities/link${i}`, `Link${i}`, vaultPath);
+      }
+
+      const server = createServer(deps);
+      const links = Array.from({ length: 20 }, (_, i) => ({
+        from: `entities/link${i}`, to: `entities/link${(i + 1) % 30}`, relation: "提及",
+      }));
+      const result = await getTools(server).batch_add_links.handler({ links });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.preview).toBe(true);
+      expect(data.warning).toContain("20");
+
+      // No links created
+      const count = db.rawDb.prepare("SELECT COUNT(*) as c FROM links").get() as { c: number };
+      expect(count.c).toBe(0);
+    });
+
+    test("batch_merge_pages returns preview for 20+ pairs without confirmation", async () => {
+      const dir = join(vaultPath, "brain/entities");
+      mkdirSync(dir, { recursive: true });
+      for (let i = 0; i < 40; i++) {
+        writeFileSync(join(dir, `MergeSrc${i}.md`), `---\ntitle: MS${i}\ntype: entity\nslug: entities/msrc${i}\n---\nS${i}`);
+        writeFileSync(join(dir, `MergeTgt${i}.md`), `---\ntitle: MT${i}\ntype: entity\nslug: entities/mtgt${i}\n---\nT${i}`);
+        insertPage(db, `entities/msrc${i}`, `MS${i}`, `brain/entities/MergeSrc${i}.md`);
+        insertPage(db, `entities/mtgt${i}`, `MT${i}`, `brain/entities/MergeTgt${i}.md`);
+      }
+
+      const server = createServer(deps);
+      const pairs = Array.from({ length: 20 }, (_, i) => ({
+        source: `entities/msrc${i}`, target: `entities/mtgt${i}`,
+      }));
+      const result = await getTools(server).batch_merge_pages.handler({ pairs });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.preview).toBe(true);
+      expect(data.warning).toContain("20");
+
+      // No merges happened
+      const count = db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
+      expect(count.c).toBe(80);
+    });
+
+    test("batch tools under 20 items execute without confirmation", async () => {
+      for (let i = 0; i < 5; i++) {
+        insertPageWithVault(db, `entities/small${i}`, `Small${i}`, vaultPath);
+      }
+
+      const server = createServer(deps);
+      const result = await getTools(server).batch_delete_pages.handler({
+        slugs: Array.from({ length: 5 }, (_, i) => `entities/small${i}`),
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.preview).toBeUndefined();
+      expect(data.succeeded).toBe(5);
+    });
+  });
 });

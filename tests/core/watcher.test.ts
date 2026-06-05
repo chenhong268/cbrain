@@ -649,3 +649,317 @@ describe("FileWatcher quarantine", () => {
     expect(logs.some(l => l.message === "隔离文件已删除，清理隔离记录")).toBe(true);
   });
 });
+
+// ── Bulk-change backpressure ───────────────────────────────────────────
+
+describe("FileWatcher bulk-change backpressure", () => {
+  const testDir = "/tmp/cbrain-test-watcher-bulk";
+  const vaultPath = testDir;
+  let db: CBrainDB;
+  let syncManager: SyncManager;
+  let watcher: FileWatcher;
+  let logs: Array<{ module: string; message: string; details?: Record<string, unknown> }>;
+  let logger: Logger;
+
+  const bulkSync: Partial<SyncManager> = {
+    syncPage: mock(async (_slug: string, _vaultPath: string) => ({ success: true })),
+    removePage: mock(async (_slug: string) => {}),
+  };
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(":memory:");
+    syncManager = bulkSync as unknown as SyncManager;
+
+    logs = [];
+    logger = {
+      info: mock((module: string, message: string, details?: Record<string, unknown>) => {
+        logs.push({ module, message, details });
+      }),
+      warn: mock((module: string, message: string, details?: Record<string, unknown>) => {
+        logs.push({ module, message, details });
+      }),
+      error: mock(),
+    } as unknown as Logger;
+
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+    (bulkSync.removePage as ReturnType<typeof mock>).mockClear();
+  });
+
+  afterEach(() => {
+    watcher?.stop();
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("below-threshold scan enqueues normally", async () => {
+    // Create 5 files — well below BULK_THRESHOLD (50)
+    for (let i = 0; i < 5; i++) {
+      writeFileSync(join(testDir, `file${i}.md`), `---\ntitle: File${i}\n---\nContent`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    // First scan to establish baseline
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+
+    // Modify all 5 files
+    for (let i = 0; i < 5; i++) {
+      writeFileSync(join(testDir, `file${i}.md`), `---\ntitle: File${i}\n---\nUpdated`, "utf-8");
+    }
+
+    // Second scan — should enqueue all 5 immediately (no bulk pause)
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(5);
+    expect(watcher.isBulkPaused()).toBe(false);
+  });
+
+  test("above-threshold scan pauses and records pending state", async () => {
+    // Create 55 files (above BULK_THRESHOLD of 50)
+    for (let i = 0; i < 55; i++) {
+      writeFileSync(join(testDir, `bulk${i}.md`), `---\ntitle: Bulk${i}\n---\nContent`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    // First scan to establish baseline
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 200));
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+
+    // Modify all 55 files
+    for (let i = 0; i < 55; i++) {
+      writeFileSync(join(testDir, `bulk${i}.md`), `---\ntitle: Bulk${i}\n---\nUpdated`, "utf-8");
+    }
+
+    // Second scan — should detect bulk change and pause
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Should NOT have enqueued any syncs
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(0);
+
+    // Should be paused
+    expect(watcher.isBulkPaused()).toBe(true);
+
+    // Status should report pending count
+    const status = watcher.getBulkStatus();
+    expect(status?.paused).toBe(true);
+    expect(status?.pendingCount).toBe(55);
+    expect(status?.threshold).toBe(50);
+
+    // Should have logged bulk detection
+    expect(logs.some((l) => l.message === "检测到大批量变更")).toBe(true);
+  });
+
+  test("paused watcher skips subsequent scans", async () => {
+    // Create files and trigger bulk pause
+    for (let i = 0; i < 55; i++) {
+      writeFileSync(join(testDir, `bulk${i}.md`), `---\ntitle: Bulk${i}\n---\nContent`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 200));
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+
+    // Modify to trigger bulk
+    for (let i = 0; i < 55; i++) {
+      writeFileSync(join(testDir, `bulk${i}.md`), `---\ntitle: Bulk${i}\n---\nUpdated`, "utf-8");
+    }
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(watcher.isBulkPaused()).toBe(true);
+
+    // Add more files and scan again — should be skipped
+    writeFileSync(join(testDir, "extra.md"), "---\ntitle: Extra\n---\nMore", "utf-8");
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Still paused, no extra syncs
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(0);
+  });
+
+  test("resumeBulk releases one batch per call, stays paused until all released", async () => {
+    const fileCount = 55;
+    for (let i = 0; i < fileCount; i++) {
+      writeFileSync(join(testDir, `bulk${i}.md`), `---\ntitle: Bulk${i}\n---\nContent`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 300));
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+
+    for (let i = 0; i < fileCount; i++) {
+      writeFileSync(join(testDir, `bulk${i}.md`), `---\ntitle: Bulk${i}\n---\nUpdated`, "utf-8");
+    }
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(watcher.isBulkPaused()).toBe(true);
+    expect(watcher.getBulkStatus().pendingCount).toBe(55);
+
+    // First call: release 10 of 55
+    let result = await watcher.resumeBulk();
+    expect(result.releasedCount).toBe(10);
+    expect(result.remainingCount).toBe(45);
+    expect(watcher.isBulkPaused()).toBe(true);
+
+    // Second call: release 10 of 45
+    result = await watcher.resumeBulk();
+    expect(result.releasedCount).toBe(10);
+    expect(result.remainingCount).toBe(35);
+    expect(watcher.isBulkPaused()).toBe(true);
+
+    // Release remaining in a loop
+    let totalReleased = 20;
+    while (watcher.isBulkPaused()) {
+      result = await watcher.resumeBulk();
+      totalReleased += result.releasedCount;
+    }
+
+    expect(totalReleased).toBe(fileCount);
+    expect(watcher.isBulkPaused()).toBe(false);
+    expect(watcher.getBulkStatus().pendingCount).toBe(0);
+
+    // Give p-limit time to process all enqueued syncs
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(fileCount);
+  });
+
+  test("getBulkStatus returns not paused when no bulk state", () => {
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    const status = watcher.getBulkStatus();
+    expect(status.paused).toBe(false);
+    expect(status.pendingCount).toBe(0);
+  });
+
+  test("cross-process resume request triggers bounded release on next scan", async () => {
+    const fileCount = 55;
+    for (let i = 0; i < fileCount; i++) {
+      writeFileSync(join(testDir, `bulk${i}.md`), `---\ntitle: Bulk${i}\n---\nContent`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 300));
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+
+    for (let i = 0; i < fileCount; i++) {
+      writeFileSync(join(testDir, `bulk${i}.md`), `---\ntitle: Bulk${i}\n---\nUpdated`, "utf-8");
+    }
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(watcher.isBulkPaused()).toBe(true);
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(0);
+
+    // Simulate cross-process resume request (MCP without live watcher)
+    db.setConfig("watcher.bulk_resume_request", JSON.stringify({ requestedAt: new Date().toISOString() }));
+
+    // Next scan should detect the request and release only ONE batch (10)
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Only 10 should have been synced (one bounded batch)
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(10);
+    // Still paused with 45 remaining
+    expect(watcher.isBulkPaused()).toBe(true);
+    expect(watcher.getBulkStatus().pendingCount).toBe(45);
+
+    // Resume request should have been consumed
+    expect(db.getConfig("watcher.bulk_resume_request")).toBeNull();
+
+    // Second request releases another 10
+    db.setConfig("watcher.bulk_resume_request", JSON.stringify({ requestedAt: new Date().toISOString() }));
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(20);
+    expect(watcher.getBulkStatus().pendingCount).toBe(35);
+  });
+
+  test("final batch resume does not re-trigger bulk pause", async () => {
+    // Create exactly 12 files (threshold 50, but we use custom threshold 5)
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(join(testDir, `final${i}.md`), `---\ntitle: Final${i}\n---\nContent`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db, bulkThreshold: 5 });
+
+    // First scan — all 12 are new, first-scan batching handles them
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 300));
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+
+    // Modify all 12 files
+    for (let i = 0; i < 12; i++) {
+      writeFileSync(join(testDir, `final${i}.md`), `---\ntitle: Final${i}\n---\nUpdated`, "utf-8");
+    }
+
+    // Second scan — triggers bulk pause (12 > threshold 5)
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(watcher.isBulkPaused()).toBe(true);
+    expect(watcher.getBulkStatus().pendingCount).toBe(12);
+
+    // First resume request: release 10, 2 remaining
+    db.setConfig("watcher.bulk_resume_request", JSON.stringify({ requestedAt: new Date().toISOString() }));
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getBulkStatus().pendingCount).toBe(2);
+    expect(watcher.isBulkPaused()).toBe(true);
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+
+    // Final resume request: release last 2, should unpause
+    db.setConfig("watcher.bulk_resume_request", JSON.stringify({ requestedAt: new Date().toISOString() }));
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Should be fully unpaused now
+    expect(watcher.isBulkPaused()).toBe(false);
+    expect(watcher.getBulkStatus().pendingCount).toBe(0);
+
+    // Only the final 2 should have been synced in this round
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(2);
+
+    // No new bulk_pending should exist (would indicate re-pause)
+    expect(db.getConfig("watcher.bulk_pending")).toBeNull();
+  });
+
+  test("custom bulkThreshold changes pause threshold", async () => {
+    // Create 10 files, set threshold to 5
+    for (let i = 0; i < 10; i++) {
+      writeFileSync(join(testDir, `file${i}.md`), `---\ntitle: File${i}\n---\nContent`, "utf-8");
+    }
+
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db, bulkThreshold: 5 });
+
+    // First scan to establish baseline
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 200));
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+
+    // Modify all 10 files
+    for (let i = 0; i < 10; i++) {
+      writeFileSync(join(testDir, `file${i}.md`), `---\ntitle: File${i}\n---\nUpdated`, "utf-8");
+    }
+
+    // Second scan — should trigger bulk pause (10 > custom threshold of 5)
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(watcher.isBulkPaused()).toBe(true);
+    const status = watcher.getBulkStatus();
+    expect(status.pendingCount).toBe(10);
+    expect(status.threshold).toBe(5);
+  });
+});
