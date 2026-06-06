@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { DialogueIngest, DialogueMode } from "../../core/dialogue.js";
 import { formatIngestResult, formatDialogueResult } from "./format-result.js";
+import { classifyContentType } from "../../core/content-classifier.js";
 
 export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
   // ─── ingest ──────────────────────────────────────────────
@@ -10,18 +11,22 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
     description: "Ingest content into the brain. Supports markdown (with frontmatter) and plain text. IMPORTANT: always provide title and pageType.",
     inputSchema: {
       content: z.string().max(500_000).describe("Content to ingest"),
-      type: z.enum(["markdown", "text"]).optional().default("text").describe("Content type"),
+      type: z.enum(["markdown", "text"]).optional().describe("Content type (auto-detected from frontmatter if omitted)"),
       title: z.string().max(500).optional().describe("Title for this page — derive from content if not obvious"),
       tags: z.array(z.string().max(200)).optional().describe("Tags to apply"),
       pageType: z.enum(["record", "insight"]).optional().default("record").describe("Page type: record (doc/report/note) or insight. Entities/concepts are auto-classified via NER."),
       skipNer: z.boolean().optional().default(false).describe("Skip LLM entity extraction — use for simple entries"),
     },
   }, async ({ content, type, title, tags, pageType, skipNer }) => {
-    const effectiveTitle = title || content.split("\n").find(l => l.trim())?.trim().slice(0, 50) || "Untitled";
-    const result = await ctx.ingest.ingest({ content, type: type ?? "text", title: effectiveTitle, tags, pageType, skipNer });
+    const classifiedType = classifyContentType(content, type);
+    const result = await ctx.ingest.ingest({ content, type: classifiedType, title, tags, pageType, skipNer });
+
+    // Use actual page title from DB for display; fall back to caller title, then slug
+    const page = result.slug ? ctx.db.getPage(result.slug) : null;
+    const displayTitle = page?.title ?? title ?? result.slug.split("/").pop() ?? "已存入内容";
 
     return {
-      content: [{ type: "text", text: JSON.stringify(formatIngestResult(result, effectiveTitle), null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(formatIngestResult(result, displayTitle), null, 2) }],
     };
   });
 
