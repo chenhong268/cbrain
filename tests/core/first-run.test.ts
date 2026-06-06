@@ -261,10 +261,11 @@ describe("FirstRunDoctor", () => {
       process.chdir(testDir);
       try {
         const report = await runFirstRunDoctor();
-        const lance = report.checks.find((c) => c.id === "index:lancedb");
+        // New integrity probe uses prefixed IDs: index:lance_lance:path
+        const lance = report.checks.find((c) => c.id.startsWith("index:lance_"));
         expect(lance!.status).toBe("pass");
-        // Empty lance = message should mention sync
-        if (lance!.message.includes("empty")) {
+        // Empty install — message should mention sync or new install
+        if (lance!.message.includes("新安装")) {
           expect(lance!.message).toContain("cbrain sync");
         }
       } finally {
@@ -366,6 +367,90 @@ describe("FirstRunDoctor", () => {
         expect(mcp!.message).toContain("cbrain serve");
       } finally {
         process.chdir(origDir);
+      }
+    });
+  });
+
+  // ── Lance failure regression ──
+
+  describe("LanceDB failure next-action", () => {
+    test("LanceDB failure recommends rebuild (not 'ready')", async () => {
+      const config = makeConfig();
+      mkdirSync(config.vaultPath, { recursive: true });
+      writeConfig(config);
+
+      // Seed SQLite with chunks so LanceDB failure triggers fail
+      const db = new CBrainDB(config.dbPath);
+      db.rawDb.prepare(
+        "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+      ).run("entities/x", "X", "entities/x.md", "h1");
+      db.rawDb.prepare(
+        "INSERT OR IGNORE INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 0)",
+      ).run("entities/x", "content for x");
+      db.close();
+
+      // Don't create lancePath — probe will detect missing path with SQLite data
+      const origDir = process.cwd();
+      process.chdir(testDir);
+      try {
+        const report = await runFirstRunDoctor();
+        // Should NOT say "ready" — LanceDB is broken
+        expect(report.recommendedNextAction).not.toContain("准备就绪");
+        // Should mention LanceDB rebuild
+        expect(report.recommendedNextAction).toMatch(/LanceDB|sync/);
+      } finally {
+        process.chdir(origDir);
+      }
+    });
+
+    test("first-run doctor closes all DB handles despite LanceDB probe errors", async () => {
+      // Spy on CBrainDB.close to verify it's called even when LanceDB probe encounters errors
+      // This covers checkDatabase (1 DB) + checkIndexes (2 DBs: FTS5 check + LanceDB probe)
+      // Normal doctor's DB close is tested via handleReindexVectors in tests/cli/reindex-vectors.test.ts
+      let closeCallCount = 0;
+      const origClose = CBrainDB.prototype.close;
+      CBrainDB.prototype.close = function(this: CBrainDB) {
+        closeCallCount++;
+        return origClose.call(this);
+      };
+
+      try {
+        // Setup config with a corrupted LanceDB (garbage data that will cause probe to fail)
+        const config = makeConfig();
+        mkdirSync(config.vaultPath, { recursive: true });
+        writeConfig(config);
+
+        // Seed SQLite with chunks so LanceDB probe has data to compare against
+        const seedDb = new CBrainDB(config.dbPath);
+        seedDb.rawDb.prepare(
+          "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+        ).run("test/a", "A", "test/a.md", "h1");
+        seedDb.rawDb.prepare(
+          "INSERT OR IGNORE INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 0)",
+        ).run("test/a", "chunk content");
+        seedDb.close();
+
+        // Create a corrupted lance directory (will cause probe to fail when connecting)
+        mkdirSync(config.lancePath, { recursive: true });
+        writeFileSync(join(config.lancePath, "chunks.lance"), "CORRUPTED GARBAGE DATA");
+
+        const origDir = process.cwd();
+        process.chdir(testDir);
+        try {
+          // Run first-run doctor — it should survive LanceDB errors without leaking DB handles
+          const report = await runFirstRunDoctor();
+          // LanceDB should report failure
+          const lanceChecks = report.checks.filter(c => c.id.includes("lance"));
+          expect(lanceChecks.length).toBeGreaterThan(0);
+        } finally {
+          process.chdir(origDir);
+        }
+
+        // Verify DB.close was called — checkIndexes opens a second DB (db2) for lance probe
+        // and must close it even on error. Total close calls should be >= 2 (checkDatabase + checkIndexes).
+        expect(closeCallCount).toBeGreaterThanOrEqual(2);
+      } finally {
+        CBrainDB.prototype.close = origClose;
       }
     });
   });

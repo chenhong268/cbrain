@@ -28,9 +28,9 @@ export interface InsightSearchResult {
   _distance?: number;
 }
 
-const VECTOR_DIMENSIONS = 2048;
+export const VECTOR_DIMENSIONS = 2048;
 
-const CHUNKS_SCHEMA = new Schema([
+export const CHUNKS_SCHEMA = new Schema([
   new Field("pageSlug", new Utf8(), false),
   new Field("chunkIndex", new Int32(), false),
   new Field("content", new Utf8(), false),
@@ -41,7 +41,7 @@ const CHUNKS_SCHEMA = new Schema([
   ),
 ]);
 
-const INSIGHTS_SCHEMA = new Schema([
+export const INSIGHTS_SCHEMA = new Schema([
   new Field("id", new Int32(), false),
   new Field("content", new Utf8(), false),
   new Field(

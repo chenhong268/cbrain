@@ -2,20 +2,69 @@ import type { Command } from "commander";
 import { existsSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
+import { checkLanceIntegrity } from "../../core/lance-integrity.js";
 import { ZhipuEmbeddingProvider } from "../../embedding/zhipu.js";
 import { ZhipuLLMProvider } from "../../llm/zhipu.js";
 import { DeepSeekLLMProvider } from "../../llm/deepseek.js";
 import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
+
+/**
+ * Reindex-vectors recovery handler — extracted for testability.
+ *
+ * Invariants:
+ *   - DB is always closed (via finally), even on error
+ *   - Never calls process.exit() — returns exit code instead
+ *   - Never connects to live LanceDB
+ */
+export async function handleReindexVectors(
+  lancePath: string,
+  db: CBrainDB,
+  embedding: EmbeddingProvider,
+  log: (msg: string) => void = console.log,
+  logError: (msg: string) => void = console.error,
+): Promise<number> {
+  const { rebuildLanceIndex } = await import("../../core/lance-rebuild.js");
+  let exitCode = 0;
+  try {
+    const report = await rebuildLanceIndex(lancePath, db, embedding);
+    log(`Rebuilt:  ${report.chunksRebuilt} pages chunks, ${report.insightsRebuilt} insights`);
+    if (report.backupPath) {
+      log(`Backup:   ${report.backupPath}`);
+    }
+    if (report.errors > 0) {
+      log(`Errors:   ${report.errors}`);
+      for (const d of report.errorDetails) log(`  - ${d}`);
+    }
+    exitCode = report.errors > 0 ? 1 : 0;
+  } catch (e) {
+    logError(`Reindex failed: ${(e as Error).message}`);
+    exitCode = 1;
+  } finally {
+    db.close();
+  }
+  return exitCode;
+}
 
 export function register(program: Command) {
   program
     .command("sync")
     .description("Sync vault files to indexes")
     .option("--slug <slug>", "Sync a single page")
+    .option("--reindex-vectors", "Rebuild LanceDB vectors from SQLite chunks and insights (safe recovery)")
     .action(async (opts) => {
       const config = loadConfig();
       const deps = createDeps(config);
+
+      // --reindex-vectors: atomic staging rebuild, does NOT connect to live LanceDB
+      if (opts.reindexVectors) {
+        console.log("Reindexing vectors (atomic staging rebuild)...");
+        const exitCode = await handleReindexVectors(config.lancePath, deps.db, deps.embedding);
+        process.exitCode = exitCode;
+        return;
+      }
+
       await deps.lance.connect(config.lancePath);
       const { SyncManager } = await import("../../core/sync.js");
       const { NerEngine } = await import("../../core/ner.js");
@@ -183,6 +232,31 @@ export function register(program: Command) {
           } catch (e) { console.error(`  NER:     FAIL — ${(e as Error).message}`); ok = false; }
         } else { console.log(`  NER:     disabled (no API key)`); }
       } else { console.log(`  NER:     disabled`); }
+      // LanceDB integrity check
+      let db2: CBrainDB | null = null;
+      try {
+        db2 = new CBrainDB(config.dbPath);
+        const lanceReport = await checkLanceIntegrity(config.lancePath, db2);
+        for (const c of lanceReport.checks) {
+          const icon = c.status === "pass" ? "✓" : c.status === "warn" ? "⚠" : "✗";
+          if (c.status !== "pass" || c.id === "lance:path" && c.message.includes("新安装")) {
+            console.log(`  Lance:   ${icon} ${c.message.split("\n")[0]}`);
+            if (c.action) {
+              for (const line of c.action.split("\n")) {
+                console.log(`           ${line}`);
+              }
+            }
+            if (c.status === "fail") ok = false;
+          } else {
+            console.log(`  Lance:   ✓ ${c.message.split("\n")[0]}`);
+          }
+        }
+      } catch (e) {
+        console.error(`  Lance:   ✗ check failed — ${(e as Error).message}`);
+        ok = false;
+      } finally {
+        if (db2) { try { db2.close(); } catch { /* ignore */ } }
+      }
       console.log(ok ? "\n  All checks passed ✓" : "\n  Some checks failed ✗");
       process.exit(ok ? 0 : 1);
     });

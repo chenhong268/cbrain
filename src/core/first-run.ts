@@ -9,8 +9,8 @@ import { dirname, join, resolve, relative } from "node:path";
 import type { CBrainConfig } from "../cli/context.js";
 import { loadConfigSafe, resolveRuntimePath } from "../cli/context.js";
 import { CBrainDB } from "../storage/sqlite.js";
-import { LanceDBManager } from "../storage/lancedb.js";
 import { WatcherLock } from "../utils/watcher-lock.js";
+import { checkLanceIntegrity } from "./lance-integrity.js";
 
 // ── Types ──
 
@@ -242,40 +242,30 @@ async function checkIndexes(ctx: FirstRunContext): Promise<CheckResult[]> {
     if (db) { try { db.close(); } catch { /* ignore */ } }
   }
 
-  // LanceDB
+  // LanceDB — read-only integrity probe (no warmup, no table creation)
+  let db2: CBrainDB | null = null;
   try {
-    const lance = new LanceDBManager();
-    const connectP = lance.connect(ctx.config.lancePath);
-    const warmupResult = await Promise.race([
-      connectP.then(() => lance.warmup()),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("LanceDB warmup timeout (5s)")), 5_000),
-      ),
-    ]);
-    const { tables, elapsedMs } = warmupResult as { tables: string[]; elapsedMs: number };
-    if (tables.length === 0) {
+    db2 = new CBrainDB(ctx.config.dbPath);
+    const lanceReport = await checkLanceIntegrity(ctx.config.lancePath, db2);
+    for (const c of lanceReport.checks) {
       results.push({
-        id: "index:lancedb",
+        id: `index:lance_${c.id}`,
         category: "index",
-        status: "pass",
-        message: `LanceDB connected (${Math.round(elapsedMs)}ms) — empty, run cbrain sync to populate`,
-      });
-    } else {
-      results.push({
-        id: "index:lancedb",
-        category: "index",
-        status: "pass",
-        message: `LanceDB connected (${tables.length} tables, ${Math.round(elapsedMs)}ms)`,
+        status: c.status,
+        message: c.message,
+        action: c.action,
       });
     }
   } catch (e) {
     results.push({
-      id: "index:lancedb",
+      id: "index:lance_probe",
       category: "index",
-      status: "warn",
-      message: `LanceDB not accessible: ${e instanceof Error ? e.message : String(e)}`,
+      status: "fail",
+      message: `LanceDB integrity check failed: ${e instanceof Error ? e.message : String(e)}`,
       action: "检查 lancePath 配置和目录权限",
     });
+  } finally {
+    if (db2) { try { db2.close(); } catch { /* ignore */ } }
   }
 
   return results;
@@ -414,7 +404,14 @@ function deriveNextAction(checks: ReadonlyArray<CheckResult>): string {
   }
 
   const warns = new Set(checks.filter((c) => c.status === "warn").map((c) => c.id));
-  if (warns.has("db:tables") || warns.has("index:fts5") || warns.has("index:lancedb")) {
+  const hasLanceFail = failed.has("index:lance_probe") || [...failed].some(id => id.startsWith("index:lance_") && checks.find(c => c.id === id)?.status === "fail");
+  const hasLanceWarn = [...warns].some(id => id.startsWith("index:lance_"));
+
+  if (hasLanceFail) {
+    return "LanceDB 索引损坏，按 doctor 输出的修复步骤操作后运行 cbrain sync";
+  }
+
+  if (warns.has("db:tables") || warns.has("index:fts5") || hasLanceWarn) {
     return "运行 cbrain sync 索引你的 vault";
   }
 

@@ -1,0 +1,243 @@
+/**
+ * Atomic LanceDB index rebuilder.
+ *
+ * Builds a fresh index in a staging directory, verifies it matches SQLite
+ * source data exactly, then atomically swaps with the live directory.
+ * Never touches live data until the replacement is verified and complete.
+ *
+ * Tables rebuilt:
+ *   - `chunks`    from SQLite chunks (summary_level = 0)
+ *   - `insights`  from SQLite insights (status = 'active')
+ *
+ * Invariants:
+ *   - Any embedding, write, or verification error → abort, clean staging, live untouched
+ *   - Empty SQLite + existing live → no-op
+ *   - Staging row counts must exactly match SQLite source counts
+ *   - No partial success: all-or-nothing
+ */
+import { existsSync, renameSync, rmSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import * as lancedb from "@lancedb/lancedb";
+import type { CBrainDB } from "../storage/sqlite.js";
+import type { EmbeddingProvider } from "../embedding/provider.js";
+import { CHUNKS_SCHEMA, INSIGHTS_SCHEMA } from "../storage/lancedb.js";
+
+// ── Types ───────────────────────────────────────────────────
+
+export interface RebuildResult {
+  /** Number of pages whose chunks were successfully rebuilt */
+  readonly chunksRebuilt: number;
+  /** Number of insight vectors rebuilt */
+  readonly insightsRebuilt: number;
+  /** Always 0 on success; on throw, check error message */
+  readonly errors: number;
+  readonly errorDetails: readonly string[];
+  /** Path to backup of old live directory, or null */
+  readonly backupPath: string | null;
+}
+
+/** Filesystem operations — injectable for testing */
+export interface FsOps {
+  existsSync(path: string): boolean;
+  mkdirSync(path: string, opts: { recursive: boolean }): void;
+  renameSync(from: string, to: string): void;
+  rmSync(path: string, opts: { recursive: boolean }): void;
+}
+
+const defaultFs: FsOps = { existsSync, mkdirSync, renameSync, rmSync };
+
+// ── Main rebuilder ──────────────────────────────────────────
+
+/**
+ * Atomically rebuild the LanceDB index from SQLite data.
+ *
+ * 1. Check: empty SQLite + existing live → no-op
+ * 2. Create staging directory
+ * 3. Embed + write chunks table
+ * 4. Embed + write insights table
+ * 5. Verify staging matches SQLite exactly (row counts + key sets)
+ * 6. Swap: live → backup, staging → live
+ * 7. On any failure: clean staging, leave live untouched
+ */
+export async function rebuildLanceIndex(
+  lancePath: string,
+  db: CBrainDB,
+  embedding: EmbeddingProvider,
+  fs: FsOps = defaultFs,
+): Promise<RebuildResult> {
+  // ── 0. Read source data from SQLite ──
+  const chunkRows = db.rawDb.query(
+    "SELECT page_slug, chunk_index, content FROM chunks WHERE summary_level = 0 ORDER BY page_slug, chunk_index",
+  ).all() as Array<Record<string, unknown>>;
+
+  const insightRows = db.rawDb.query(
+    "SELECT id, content FROM insights WHERE status = 'active' ORDER BY id",
+  ).all() as Array<Record<string, unknown>>;
+
+  const hasSqliteData = chunkRows.length > 0 || insightRows.length > 0;
+  const liveExists = fs.existsSync(lancePath);
+
+  // ── No-op: empty SQLite ──
+  if (!hasSqliteData) {
+    if (liveExists) {
+      // Don't replace a working live index with empty staging
+      return {
+        chunksRebuilt: 0, insightsRebuilt: 0, errors: 0,
+        errorDetails: [], backupPath: null,
+      };
+    }
+    // No data anywhere — create empty live
+    fs.mkdirSync(lancePath, { recursive: true });
+    return {
+      chunksRebuilt: 0, insightsRebuilt: 0, errors: 0,
+      errorDetails: [], backupPath: null,
+    };
+  }
+
+  // ── 1. Create staging directory ──
+  const stagingPath = `${lancePath}.rebuild-${randomUUID().slice(0, 8)}`;
+  let stagingConn: lancedb.Connection | null = null;
+
+  try {
+    fs.mkdirSync(stagingPath, { recursive: true });
+    stagingConn = await lancedb.connect(stagingPath);
+
+    // ── 2. Build chunks table ──
+    // Group by slug for batch embedding
+    const bySlug = new Map<string, Array<{ index: number; content: string }>>();
+    for (const row of chunkRows) {
+      const slug = row.page_slug as string;
+      let group = bySlug.get(slug);
+      if (!group) { group = []; bySlug.set(slug, group); }
+      group.push({ index: row.chunk_index as number, content: row.content as string });
+    }
+
+    const allChunkData: Array<Record<string, unknown>> = [];
+    for (const [slug, chunks] of bySlug) {
+      const embedResults = await embedding.embedBatch(chunks.map(c => c.content));
+      for (let i = 0; i < chunks.length; i++) {
+        allChunkData.push({
+          pageSlug: slug,
+          chunkIndex: chunks[i].index,
+          content: chunks[i].content,
+          vector: new Float32Array(embedResults[i].embedding),
+        });
+      }
+    }
+
+    if (allChunkData.length > 0) {
+      await stagingConn.createTable("chunks", allChunkData, { schema: CHUNKS_SCHEMA, mode: "create" });
+    }
+
+    // ── 3. Build insights table ──
+    if (insightRows.length > 0) {
+      const embedResults = await embedding.embedBatch(insightRows.map(r => r.content as string));
+      const insightData = insightRows.map((row, i) => ({
+        id: row.id as number,
+        content: row.content as string,
+        vector: new Float32Array(embedResults[i].embedding),
+      }));
+      await stagingConn.createTable("insights", insightData, { schema: INSIGHTS_SCHEMA, mode: "create" });
+    }
+
+    // ── 4. Verify staging matches SQLite exactly ──
+    const tables = await stagingConn.tableNames();
+
+    // Verify chunks: row count + (pageSlug, chunkIndex) set
+    if (chunkRows.length > 0) {
+      if (!tables.includes("chunks")) {
+        throw new Error("VERIFY_FAIL: chunks table missing from staging");
+      }
+      const chunksTable = await stagingConn.openTable("chunks");
+      const stagingChunkCount = await chunksTable.countRows();
+      if (stagingChunkCount !== chunkRows.length) {
+        throw new Error(`VERIFY_FAIL: chunks staging has ${stagingChunkCount} rows, expected ${chunkRows.length}`);
+      }
+      // Verify key set
+      const stagingRows = await chunksTable.query()
+        .select(["pageSlug", "chunkIndex"])
+        .where("chunkIndex >= 0")
+        .toArray();
+      const stagingKeys = new Set(stagingRows.map((r: Record<string, unknown>) =>
+        `${r.pageSlug}:${r.chunkIndex}`,
+      ));
+      const sqliteKeys = new Set(chunkRows.map(r => `${r.page_slug}:${r.chunk_index}`));
+      if (stagingKeys.size !== sqliteKeys.size) {
+        throw new Error(`VERIFY_FAIL: chunks key count ${stagingKeys.size} != ${sqliteKeys.size}`);
+      }
+      for (const key of sqliteKeys) {
+        if (!stagingKeys.has(key)) {
+          throw new Error(`VERIFY_FAIL: missing chunk key ${key} in staging`);
+        }
+      }
+    }
+
+    // Verify insights: row count + id set
+    if (insightRows.length > 0) {
+      if (!tables.includes("insights")) {
+        throw new Error("VERIFY_FAIL: insights table missing from staging");
+      }
+      const insightsTable = await stagingConn.openTable("insights");
+      const stagingInsightCount = await insightsTable.countRows();
+      if (stagingInsightCount !== insightRows.length) {
+        throw new Error(`VERIFY_FAIL: insights staging has ${stagingInsightCount} rows, expected ${insightRows.length}`);
+      }
+      const stagingInsightRows = await insightsTable.query()
+        .select(["id"])
+        .toArray();
+      const stagingIds = new Set(stagingInsightRows.map((r: Record<string, unknown>) => r.id));
+      const sqliteIds = new Set(insightRows.map(r => r.id));
+      for (const id of sqliteIds) {
+        if (!stagingIds.has(id)) {
+          throw new Error(`VERIFY_FAIL: missing insight id ${id} in staging`);
+        }
+      }
+    }
+
+    // Close staging before filesystem operations
+    stagingConn.close();
+    stagingConn = null;
+
+    // ── 5. Atomic swap ──
+    const backupPath = liveExists
+      ? `${lancePath}.backup-${Date.now()}-${randomUUID().slice(0, 4)}`
+      : null;
+
+    if (liveExists) {
+      fs.renameSync(lancePath, backupPath!);
+      try {
+        fs.renameSync(stagingPath, lancePath);
+      } catch (swapErr) {
+        // Rollback: restore backup
+        try {
+          fs.renameSync(backupPath!, lancePath);
+        } catch (rollbackErr) {
+          throw new Error(
+            `SWAP_FAILED_AND_ROLLBACK_FAILED: swap=${swapErr instanceof Error ? swapErr.message : String(swapErr)}, rollback=${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}` +
+            `\n  live=${lancePath}` +
+            `\n  backup=${backupPath}` +
+            `\n  staging=${stagingPath}` +
+            `\n  Recovery: mv "${backupPath}" "${lancePath}"`,
+          );
+        }
+        throw new Error(`SWAP_FAILED_ROLLED_BACK: ${swapErr instanceof Error ? swapErr.message : String(swapErr)}`);
+      }
+    } else {
+      fs.renameSync(stagingPath, lancePath);
+    }
+
+    return {
+      chunksRebuilt: bySlug.size,
+      insightsRebuilt: insightRows.length,
+      errors: 0,
+      errorDetails: [],
+      backupPath,
+  };
+  } finally {
+    // Always clean up: close staging conn + remove staging dir if it still exists
+    if (stagingConn) { try { stagingConn.close(); } catch { /* ignore */ } }
+    try {
+      if (fs.existsSync(stagingPath)) fs.rmSync(stagingPath, { recursive: true });
+    } catch { /* ignore */ }
+  }
+}
