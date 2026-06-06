@@ -23,6 +23,10 @@
 
 - **v1.9.3 UX Release Gate**：`bin/check-v193-ux-gate.sh` 一键跑 lint + envelope 测试 + 隐私扫描 + 覆盖率检查。`tests/mcp/v193-ux-gate.test.ts` 覆盖 13 个工具的 display 禁词、compactness、raw 完整性。
 
+### 数据一致性修复（#149）
+
+- **person / record 同名冲突修复**：sync 遇到同 title 的 `records/` 与 `brain/entities/person/` 时，自动保留更具体的 person 页并清理旧 record 壳；ingest 遇到已有 person 的关系补充时改为 append，避免新建孤立 record。
+
 ### Release Checklist
 
 - [ ] `bun run lint` 通过（tsc + biome）
@@ -40,7 +44,7 @@
 
 ### 治理与测试
 
-- `bun run check`：1720 pass / 0 fail / 7690 expect() calls
+- `bun run check`：1723 pass / 0 fail / 7705 expect() calls
 
 ## [v1.9.2] — 2026-06-05
 

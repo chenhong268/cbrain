@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, access, rename, mkdir } from "node:fs/promises";
+import { readFile, access, rename, mkdir, unlink } from "node:fs/promises";
 import { join, relative, dirname } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
@@ -137,6 +137,13 @@ export class SyncManager {
           continue;
         }
 
+        const title = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
+        const type = normalizePageType(parsed.frontmatter.type ?? this.inferTypeFromPath(relPath));
+
+        // Auto-promote records/X -> brain/entities/person/X when the vault already has
+        // the more specific person page. Other title collisions remain diagnostics.
+        await this.promoteRecordCollisionIfPerson(title, slug, type, relPath, vaultPath);
+
         // Skip hash match (title-collision files) — verify collision still exists
         const skipHash = !existing ? this.db.getConfig(`sync.skip.${slug}`) : null;
         if (skipHash === contentHash) {
@@ -151,12 +158,14 @@ export class SyncManager {
           try { this.db.deleteConfig(`sync.skip.${slug}`); } catch { /* non-critical */ }
         }
 
-        const title = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
-        const type = normalizePageType(parsed.frontmatter.type ?? this.inferTypeFromPath(relPath));
         const chunks = chunkContent(parsed.body, this.chunkSize);
         for (const c of chunks) allChunks.push({ slug, index: c.index, content: c.content });
         changed.push({ filePath, slug, title, type, relPath, body: parsed.body, contentHash, frontmatter: parsed.frontmatter });
       } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+          report.skipped++;
+          continue;
+        }
         report.errors++;
         report.errorDetails?.push(`${filePath}: ${(e as Error).message}`);
         this.logger?.warn("sync", "文件解析失败", { file: filePath, error: String(e) });
@@ -192,6 +201,10 @@ export class SyncManager {
           }
         }
 
+        if (await this.discardRecordCollisionIfPerson(file.title, file.slug, file.type, file.relPath, vaultPath)) {
+          report.skipped++;
+          continue;
+        }
         this.checkTitleCollision(file.title, file.slug, file.type, file.relPath);
 
         this.db.upsertPage({
@@ -425,6 +438,10 @@ export class SyncManager {
 
     // Preflight: title collision check
     try {
+      await this.promoteRecordCollisionIfPerson(title, effectiveSlug, type, relPath, vaultPath);
+      if (await this.discardRecordCollisionIfPerson(title, effectiveSlug, type, relPath, vaultPath)) {
+        return { success: true, skipped: true };
+      }
       this.checkTitleCollision(title, effectiveSlug, type, relPath);
     } catch (err) {
       if (err instanceof TitleCollisionError) {
@@ -571,6 +588,63 @@ export class SyncManager {
         existing: { slug: collision.slug, type: collision.type, filePath: this.db.getPageFilePath(collision.slug) ?? "" },
       });
     }
+  }
+
+  private async promoteRecordCollisionIfPerson(
+    title: string,
+    incomingSlug: string,
+    incomingType: string,
+    incomingFilePath: string,
+    vaultPath: string,
+  ): Promise<boolean> {
+    if (incomingType !== "entity/person") return false;
+    if (!incomingSlug.startsWith("brain/entities/person/")) return false;
+
+    const collision = this.db.getPageByTitleExcluding(title, incomingSlug);
+    if (!collision || collision.type !== "record" || !collision.slug.startsWith("records/")) return false;
+
+    const oldFilePath = this.db.getPageFilePath(collision.slug);
+    this.db.movePage(collision.slug, incomingSlug, incomingType, incomingFilePath);
+    try { this.db.deleteConfig(`sync.skip.${incomingSlug}`); } catch { /* non-critical */ }
+    try { this.db.deleteConfig(`sync.skip.${collision.slug}`); } catch { /* non-critical */ }
+
+    if (oldFilePath) {
+      try {
+        await unlink(join(vaultPath, oldFilePath));
+      } catch { /* already gone or not writable; sync can still proceed */ }
+    }
+
+    this.logger?.info("sync", "同名 record 已升级为 person", {
+      title,
+      oldSlug: collision.slug,
+      newSlug: incomingSlug,
+    });
+    return true;
+  }
+
+  private async discardRecordCollisionIfPerson(
+    title: string,
+    incomingSlug: string,
+    incomingType: string,
+    incomingFilePath: string,
+    vaultPath: string,
+  ): Promise<boolean> {
+    if (incomingType !== "record") return false;
+    if (!incomingSlug.startsWith("records/")) return false;
+
+    const collision = this.db.getPageByTitleExcluding(title, incomingSlug);
+    if (!collision || collision.type !== "entity/person" || !collision.slug.startsWith("brain/entities/person/")) return false;
+
+    try {
+      await unlink(join(vaultPath, incomingFilePath));
+    } catch { /* already gone or not writable; skip still prevents collision replay */ }
+    try { this.db.deleteConfig(`sync.skip.${incomingSlug}`); } catch { /* non-critical */ }
+    this.logger?.info("sync", "同名 record 已由 person 接管，跳过旧 record", {
+      title,
+      oldSlug: incomingSlug,
+      personSlug: collision.slug,
+    });
+    return true;
   }
 
   private inferTypeFromPath(relPath: string): string {

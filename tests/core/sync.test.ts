@@ -217,12 +217,12 @@ describe("SyncManager", () => {
     });
 
     test("syncAll produces structured diagnostic for title collision", async () => {
-      // Seed existing page with title "人物A"
-      writeMdFile(vaultPath, "brain/entities/person/renwu-a.md", { title: "人物A", type: "entity/person", slug: "brain/entities/person/renwu-a" }, "已有实体");
+      // Seed existing non-person entity with title "实体A"
+      writeMdFile(vaultPath, "brain/entities/company/entity-a.md", { title: "实体A", type: "entity/company", slug: "brain/entities/company/entity-a" }, "已有实体");
       await sync.syncAll(vaultPath);
 
       // Add a second file with the same title but different slug
-      writeMdFile(vaultPath, "records/renwu-a-note.md", { title: "人物A", type: "record", slug: "records/renwu-a-note" }, "新记录");
+      writeMdFile(vaultPath, "records/entity-a-note.md", { title: "实体A", type: "record", slug: "records/entity-a-note" }, "新记录");
 
       const report = await sync.syncAll(vaultPath);
       expect(report.errors).toBeGreaterThanOrEqual(1);
@@ -231,15 +231,15 @@ describe("SyncManager", () => {
 
       const diag = report.diagnostics![0];
       expect(diag.kind).toBe("title_collision");
-      expect(diag.title).toBe("人物A");
-      expect(diag.incoming.slug).toBe("records/renwu-a-note");
+      expect(diag.title).toBe("实体A");
+      expect(diag.incoming.slug).toBe("records/entity-a-note");
       expect(diag.incoming.type).toBe("record");
-      expect(diag.incoming.filePath).toBe("records/renwu-a-note.md");
-      expect(diag.existing.slug).toBe("brain/entities/person/renwu-a");
-      expect(diag.existing.type).toBe("entity/person");
-      expect(diag.existing.filePath).toBe("brain/entities/person/renwu-a.md");
+      expect(diag.incoming.filePath).toBe("records/entity-a-note.md");
+      expect(diag.existing.slug).toBe("brain/entities/company/entity-a");
+      expect(diag.existing.type).toBe("entity/company");
+      expect(diag.existing.filePath).toBe("brain/entities/company/entity-a.md");
       expect(diag.message).toContain("Title collision");
-      expect(diag.filePath).toBe("records/renwu-a-note.md");
+      expect(diag.filePath).toBe("records/entity-a-note.md");
     });
   });
 
@@ -274,28 +274,28 @@ describe("SyncManager", () => {
     });
 
     test("returns error when title exists under different slug", async () => {
-      // Seed existing entity page
+      // Seed existing non-person entity page
       db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
-      ).run("brain/entities/person/renwu-a", "entity/person", "人物A", "brain/entities/person/renwu-a.md", "hash1");
+      ).run("brain/entities/company/entity-a", "entity/company", "实体A", "brain/entities/company/entity-a.md", "hash1");
 
       // Create a record file with the same title
       writeMdFile(
         vaultPath,
-        "records/renwu-a-note.md",
-        { title: "人物A", type: "record", slug: "records/renwu-a-note" },
-        "人物A的会议记录",
+        "records/entity-a-note.md",
+        { title: "实体A", type: "record", slug: "records/entity-a-note" },
+        "实体A的会议记录",
       );
 
-      const result = await sync.syncPage("records/renwu-a-note", vaultPath);
+      const result = await sync.syncPage("records/entity-a-note", vaultPath);
       expect(result.success).toBe(false);
       expect(result.error).toContain("Title collision");
-      expect(result.error).toContain("人物A");
-      expect(result.error).toContain("records/renwu-a-note");
-      expect(result.error).toContain("brain/entities/person/renwu-a");
+      expect(result.error).toContain("实体A");
+      expect(result.error).toContain("records/entity-a-note");
+      expect(result.error).toContain("brain/entities/company/entity-a");
 
       // Skip hash should be stored
-      const skipHash = db.getConfig("sync.skip.records/renwu-a-note");
+      const skipHash = db.getConfig("sync.skip.records/entity-a-note");
       expect(skipHash).not.toBeNull();
     });
 

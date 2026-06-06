@@ -131,6 +131,44 @@ describe("IngestManager", () => {
       expect(tagValues).toContain("人物");
       expect(tagValues).toContain("商务");
     });
+
+    test("appends relationship text to an existing person instead of creating a record", async () => {
+      mkdirSync(join(vaultPath, "brain", "entities", "person"), { recursive: true });
+      writeFileSync(
+        join(vaultPath, "brain", "entities", "person", "entity-a.md"),
+        "---\ntitle: 实体A\ntype: entity/person\nslug: brain/entities/person/entity-a\n---\n已有内容",
+      );
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+      ).run("brain/entities/person/entity-a", "entity/person", "实体A", "brain/entities/person/entity-a.md", "h1");
+
+      const result = await ingest.ingest({
+        content: "实体A，是实体B的前同事",
+        type: "text",
+        title: "实体A",
+      });
+
+      expect(result.slug).toBe("brain/entities/person/entity-a");
+      expect(result.created).toBe(false);
+      expect(db.getPageByTitle("实体A")!.type).toBe("entity/person");
+      expect(db.getPageByTitle("实体A，是实体B的前同事")).toBeNull();
+      const file = readFileSync(join(vaultPath, "brain", "entities", "person", "entity-a.md"), "utf-8");
+      expect(file).toContain("已有内容");
+      expect(file).toContain("实体A，是实体B的前同事");
+    });
+
+    test("routes short person relationship snippets to person pages", async () => {
+      const result = await ingest.ingest({
+        content: "实体B，是实体C的同事",
+        type: "text",
+      });
+
+      expect(result.slug).toBe("brain/entities/person/实体b");
+      expect(result.created).toBe(true);
+      const row = db.getPage("brain/entities/person/实体b");
+      expect(row).not.toBeNull();
+      expect(row!.type).toBe("entity/person");
+    });
   });
 
   describe("ingest markdown", () => {

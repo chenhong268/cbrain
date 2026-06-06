@@ -91,13 +91,75 @@ export class IngestManager {
   }
 
   private async ingestText(input: IngestInput): Promise<IngestResult> {
-    const title = input.title ?? input.content.split("\n").find(l => l.trim())?.trim().slice(0, 50) ?? "Untitled";
-    const type = normalizePageType(input.pageType ?? "record");
+    const rawTitle = input.title ?? input.content.split("\n").find(l => l.trim())?.trim().slice(0, 50) ?? "Untitled";
+    const routedPersonTitle = this.inferPersonRelationshipTitle(input.content, input.title);
+    const existingPersonSlug = this.findExistingPersonSlug(input.title ?? routedPersonTitle ?? rawTitle);
+
+    if (existingPersonSlug) {
+      return this.ingestEntityAppend(existingPersonSlug, input.content, input.tags ?? [], !input.skipNer);
+    }
+
+    const title = routedPersonTitle ?? rawTitle;
+    const type = normalizePageType(routedPersonTitle ? "entity/person" : input.pageType ?? "record");
     const slug = generateSlug(title, type);
     const body = input.content;
     const tags = input.tags ?? [];
 
     return this.ingestCore(slug, title, type, body, tags, !input.skipNer);
+  }
+
+  private findExistingPersonSlug(title: string | undefined): string | null {
+    if (!title) return null;
+    const row = this.db.getPageByTitle(title.trim());
+    if (!row || row.type !== "entity/person") return null;
+    return row.slug;
+  }
+
+  private inferPersonRelationshipTitle(content: string, explicitTitle?: string): string | null {
+    if (explicitTitle) return null;
+    const firstLine = content.split("\n").find(l => l.trim())?.trim() ?? "";
+    const match = firstLine.match(/^([\p{Script=Han}A-Za-z][\p{Script=Han}A-Za-z0-9·.\s-]{1,20})[，,：:]\s*(.+)$/u);
+    if (!match) return null;
+
+    const name = match[1].trim();
+    const description = match[2];
+    if (!/[\p{Script=Han}A-Za-z]/u.test(name)) return null;
+    if (!/(同事|同学|同门|朋友|学弟|学长|学姐|学妹|上级|下属|同僚|前任|现任|汇报|认识|合作|负责|任职|worked with|reports to|colleague|friend)/iu.test(description)) {
+      return null;
+    }
+    return name;
+  }
+
+  private async ingestEntityAppend(slug: string, body: string, tags: string[], doNer: boolean): Promise<IngestResult> {
+    const before = this.pages.getBySlug(slug);
+    const page = this.pages.patch(slug, {
+      body_append: body,
+      tags_merge: tags,
+    });
+    if (!page) {
+      throw new Error(`Cannot append to missing entity page: ${slug}`);
+    }
+
+    const { chunks, embedResults } = await this.pipeline.embed(page.body);
+    const { count: linksExtracted, mentionedSlugs } = this.pipeline.processWikilinks(slug, page.body);
+    await this.pipeline.writeIndexes(slug, chunks, embedResults);
+    this.pipeline.writeIngestLog(slug, "api", { appended: true, chunks: chunks.length });
+
+    let nerResult: NerPipelineResult | null | undefined;
+    if (doNer && body.trim()) {
+      try {
+        nerResult = await this.pipeline.processNer(slug, body, before?.type ?? page.type, true, undefined, mentionedSlugs);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.pipeline.writeIngestLog(slug, "api", { nerError: msg, appended: true });
+      }
+    }
+
+    const nerResolvedSlugs = nerResult?.resolvedSlugs ?? [];
+    const nerRelationSlugs = nerResult?.relationSlugs ?? [];
+    this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]);
+
+    return { slug, created: false, linksExtracted, ner: nerResult };
   }
 
   /**

@@ -58,7 +58,7 @@ describe("sync title collision", () => {
     db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("brain/entities/person/zhu-ti-a", "entity/person", "主题A", "brain/entities/person/zhu-ti-a.md", "hash-old", 0, 3);
+    ).run("brain/entities/company/zhu-ti-a", "entity/company", "主题A", "brain/entities/company/zhu-ti-a.md", "hash-old", 0, 3);
 
     writeFileSync(
       join(vaultPath, "records", "zhu-ti-a.md"),
@@ -83,7 +83,7 @@ describe("sync title collision", () => {
     db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("brain/entities/person/zhu-ti-b", "entity/person", "主题B", "brain/entities/person/zhu-ti-b.md", "hash-old", 0, 3);
+    ).run("brain/entities/company/zhu-ti-b", "entity/company", "主题B", "brain/entities/company/zhu-ti-b.md", "hash-old", 0, 3);
 
     writeFileSync(
       join(vaultPath, "records", "zhu-ti-b.md"),
@@ -102,7 +102,7 @@ describe("sync title collision", () => {
     db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("brain/entities/person/zhu-ti-c", "entity/person", "主题C", "brain/entities/person/zhu-ti-c.md", "hash-old", 0, 3);
+    ).run("brain/entities/company/zhu-ti-c", "entity/company", "主题C", "brain/entities/company/zhu-ti-c.md", "hash-old", 0, 3);
 
     writeFileSync(
       join(vaultPath, "records", "zhu-ti-c.md"),
@@ -122,7 +122,7 @@ describe("sync title collision", () => {
     db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("brain/entities/person/zhu-ti-d", "entity/person", "主题D", "brain/entities/person/zhu-ti-d.md", "hash-old", 0, 3);
+    ).run("brain/entities/company/zhu-ti-d", "entity/company", "主题D", "brain/entities/company/zhu-ti-d.md", "hash-old", 0, 3);
 
     const content = `---\ntitle: "主题D"\ntype: record\nslug: records/zhu-ti-d\n---\nPage content D`;
     writeFileSync(join(vaultPath, "records", "zhu-ti-d.md"), content);
@@ -141,7 +141,7 @@ describe("sync title collision", () => {
     db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("brain/entities/person/zhu-ti-e", "entity/person", "主题E", "brain/entities/person/zhu-ti-e.md", "hash-old", 0, 3);
+    ).run("brain/entities/company/zhu-ti-e", "entity/company", "主题E", "brain/entities/company/zhu-ti-e.md", "hash-old", 0, 3);
 
     const content = `---\ntitle: "主题E"\ntype: record\nslug: records/zhu-ti-e\n---\nPage content E`;
     writeFileSync(join(vaultPath, "records", "zhu-ti-e.md"), content);
@@ -151,7 +151,7 @@ describe("sync title collision", () => {
     expect(db.getConfig("sync.skip.records/zhu-ti-e")).not.toBeNull();
 
     // Resolve collision by deleting the conflicting entity
-    db.rawDb.prepare("DELETE FROM pages WHERE slug = ?").run("brain/entities/person/zhu-ti-e");
+    db.rawDb.prepare("DELETE FROM pages WHERE slug = ?").run("brain/entities/company/zhu-ti-e");
 
     // Second sync → collision gone → should clear skip hash and sync
     const result = await syncMgr.syncPage("records/zhu-ti-e", vaultPath);
@@ -168,7 +168,7 @@ describe("sync title collision", () => {
     db.rawDb.prepare(
       `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run("brain/entities/person/zhu-ti-f", "entity/person", "主题F", "brain/entities/person/zhu-ti-f.md", "hash-old", 0, 3);
+    ).run("brain/entities/company/zhu-ti-f", "entity/company", "主题F", "brain/entities/company/zhu-ti-f.md", "hash-old", 0, 3);
 
     writeFileSync(
       join(vaultPath, "records", "zhu-ti-f.md"),
@@ -181,7 +181,7 @@ describe("sync title collision", () => {
     expect(db.getConfig("sync.skip.records/zhu-ti-f")).not.toBeNull();
 
     // Resolve collision
-    db.rawDb.prepare("DELETE FROM pages WHERE slug = ?").run("brain/entities/person/zhu-ti-f");
+    db.rawDb.prepare("DELETE FROM pages WHERE slug = ?").run("brain/entities/company/zhu-ti-f");
 
     // Second syncAll → should sync the file (not skip it)
     const report2 = await syncMgr.syncAll(vaultPath);
@@ -224,5 +224,31 @@ describe("sync title collision", () => {
     const orphans = await syncMgr.removeOrphans(vaultPath);
     expect(orphans).toContain(slug);
     expect(db.getConfig(`sync.skip.${slug}`)).toBeNull();
+  });
+
+  test("syncAll: record/person title collision promotes the person page", async () => {
+    db.rawDb.prepare(
+      `INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash, mention_count, tier)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run("records/entity-a", "record", "实体A", "records/entity-a.md", "hash-old", 0, 3);
+
+    writeFileSync(
+      join(vaultPath, "records", "entity-a.md"),
+      `---\ntitle: "实体A"\ntype: record\nslug: records/entity-a\n---\n旧记录`,
+    );
+    mkdirSync(join(vaultPath, "brain", "entities", "person"), { recursive: true });
+    writeFileSync(
+      join(vaultPath, "brain", "entities", "person", "entity-a.md"),
+      `---\ntitle: "实体A"\ntype: entity/person\nslug: brain/entities/person/entity-a\n---\n人物页`,
+    );
+
+    const report = await syncMgr.syncAll(vaultPath);
+
+    expect(report.errors).toBe(0);
+    const promoted = db.getPage("brain/entities/person/entity-a");
+    expect(promoted).not.toBeNull();
+    expect(promoted!.type).toBe("entity/person");
+    expect(db.getPage("records/entity-a")).toBeNull();
+    expect(existsSync(join(vaultPath, "records", "entity-a.md"))).toBe(false);
   });
 });
