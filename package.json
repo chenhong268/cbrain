@@ -1,6 +1,6 @@
 {
   "name": "cbrain",
-  "version": "1.9.3",
+  "version": "1.9.4",
   "description": "Your Agent's Memory, Compounding. Agent 的记忆，复利生长。",
   "type": "module",
   "bin": {
