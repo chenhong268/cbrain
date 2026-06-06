@@ -1,6 +1,8 @@
+import { unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { PageManager } from "./page.js";
-import { generateSlug } from "../utils/slug.js";
+import { generateSlug, slugToFilePath } from "../utils/slug.js";
 import { normalizePageType, type PageType } from "./shared.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
@@ -9,6 +11,43 @@ import { NerEngine } from "./ner.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
 import { FACT_FIELD_WHITELIST, } from "./ner.js";
+import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
+
+/**
+ * Thrown when an ingest operation fails AND the subsequent rollback
+ * could not fully restore the system to a consistent state.
+ * Callers (Hermes) must treat this as requiring manual reindex.
+ */
+export class IngestRollbackError extends Error {
+  readonly originalError: Error;
+  readonly rollbackErrors: Error[];
+
+  constructor(originalError: Error, rollbackErrors: Error[]) {
+    const rollbackDetails = rollbackErrors.map(e => e.message).join("; ");
+    super(
+      `INGEST_ROLLBACK_INCOMPLETE: original=${originalError.message}; rollback failures=[${rollbackDetails}]; reindex required`,
+    );
+    this.name = "IngestRollbackError";
+    this.originalError = originalError;
+    this.rollbackErrors = rollbackErrors;
+  }
+}
+
+/** Snapshot of page state before mutation — used for rollback on downstream failure. */
+interface PageSnapshot {
+  body: string;
+  tags: string[];
+  mentionLinks: Array<{ to: string; relation: string }>;
+}
+
+function takeSnapshot(slug: string, db: CBrainDB, pages: PageManager): PageSnapshot | null {
+  const page = pages.getBySlug(slug);
+  if (!page) return null;
+  const links = db.getOutgoingLinks(slug)
+    .filter(l => l.relation === "提及")
+    .map(l => ({ to: l.to_slug, relation: l.relation }));
+  return { body: page.body, tags: [...(page.frontmatter.tags ?? [])], mentionLinks: links };
+}
 
 const ENTITY_FACTS_PROMPT = `You are a structured fact extractor. Given an entity's page content, extract concrete, verifiable facts as key-value pairs.
 
@@ -30,7 +69,7 @@ Return ONLY valid JSON.`;
 
 export interface IngestInput {
   content: string;
-  type: "markdown" | "text";
+  type?: "markdown" | "text";
   title?: string;
   tags?: string[];
   pageType?: "record" | "insight";
@@ -47,6 +86,7 @@ export interface IngestResult {
 export class IngestManager {
   private db: CBrainDB;
   private pages: PageManager;
+  private lance: LanceDBManager;
   private nerEngine: NerEngine | null;
   private llmProvider: LLMProvider | undefined;
   private pipeline: ContentPipeline;
@@ -59,7 +99,8 @@ export class IngestManager {
     llmProvider?: LLMProvider
   ) {
     this.db = db;
-    this.pages = new PageManager(db, vaultPath);
+    this.lance = lance;
+    this.pages = new PageManager(db, vaultPath, undefined, lance);
     this.nerEngine = llmProvider ? new NerEngine(llmProvider) : null;
     this.llmProvider = llmProvider;
     this.pipeline = new ContentPipeline(db, embedding, lance, {
@@ -69,7 +110,8 @@ export class IngestManager {
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
-    if (input.type === "markdown") {
+    const type = input.type ?? classifyContentType(input.content);
+    if (type === "markdown") {
       return this.ingestMarkdown(input.content, { title: input.title, pageType: input.pageType, tags: input.tags, skipNer: input.skipNer });
     }
     return this.ingestText(input);
@@ -81,7 +123,12 @@ export class IngestManager {
   ): Promise<IngestResult> {
     const parsed = parseFrontmatter(content);
 
-    const title = parsed.frontmatter.title ?? overrides?.title ?? "Untitled";
+    const declaredTitle = parsed.frontmatter.title ?? overrides?.title;
+    const bodyTitle = parsed.body.split("\n").find(line => hasSemanticContent(line))?.trim().slice(0, 50);
+    const title = hasSemanticContent(String(declaredTitle ?? "")) ? String(declaredTitle).trim() : bodyTitle;
+    if (!title) {
+      throw new Error("VALIDATION_ERROR: markdown has no semantic title or body content");
+    }
     const type = normalizePageType(parsed.frontmatter.type ?? overrides?.pageType ?? "record");
     const slug = parsed.frontmatter.slug ?? generateSlug(title, type);
     const body = parsed.body;
@@ -91,7 +138,12 @@ export class IngestManager {
   }
 
   private async ingestText(input: IngestInput): Promise<IngestResult> {
-    const rawTitle = input.title ?? input.content.split("\n").find(l => l.trim())?.trim().slice(0, 50) ?? "Untitled";
+    // Reject pure-punctuation / empty content before any file/DB write
+    if (!hasSemanticContent(input.title ?? '') && !hasSemanticContent(input.content)) {
+      throw new Error("VALIDATION_ERROR: content has no semantic content — provide a title or content with letters/numbers");
+    }
+
+    const rawTitle = input.title ?? input.content.split("\n").find(l => hasSemanticContent(l))?.trim().slice(0, 50) ?? "Untitled";
     const routedPersonTitle = this.inferPersonRelationshipTitle(input.content, input.title);
     const existingPersonSlug = this.findExistingPersonSlug(input.title ?? routedPersonTitle ?? rawTitle);
 
@@ -132,34 +184,52 @@ export class IngestManager {
 
   private async ingestEntityAppend(slug: string, body: string, tags: string[], doNer: boolean): Promise<IngestResult> {
     const before = this.pages.getBySlug(slug);
-    const page = this.pages.patch(slug, {
-      body_append: body,
-      tags_merge: tags,
-    });
-    if (!page) {
+    if (!before) {
       throw new Error(`Cannot append to missing entity page: ${slug}`);
     }
+    const snapshot = takeSnapshot(slug, this.db, this.pages);
 
-    const { chunks, embedResults } = await this.pipeline.embed(page.body);
-    const { count: linksExtracted, mentionedSlugs } = this.pipeline.processWikilinks(slug, page.body);
-    await this.pipeline.writeIndexes(slug, chunks, embedResults);
-    this.pipeline.writeIngestLog(slug, "api", { appended: true, chunks: chunks.length });
-
-    let nerResult: NerPipelineResult | null | undefined;
-    if (doNer && body.trim()) {
-      try {
-        nerResult = await this.pipeline.processNer(slug, body, before?.type ?? page.type, true, undefined, mentionedSlugs);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.pipeline.writeIngestLog(slug, "api", { nerError: msg, appended: true });
+    try {
+      const page = this.pages.patch(slug, {
+        body_append: body,
+        tags_merge: tags,
+      });
+      if (!page) {
+        throw new Error(`Cannot append to missing entity page: ${slug}`);
       }
+
+      // Write indexes FIRST — main failure point before touching links/mention_count
+      const { chunks, embedResults } = await this.pipeline.embed(page.body);
+      await this.pipeline.writeIndexes(slug, chunks, embedResults);
+      this.pipeline.writeIngestLog(slug, "api", { appended: true, chunks: chunks.length });
+
+      // Now safe to modify links and mention_count
+      const { count: linksExtracted, mentionedSlugs } = this.pipeline.replaceWikilinks(slug, page.body);
+
+      let nerResult: NerPipelineResult | null | undefined;
+      if (doNer && body.trim()) {
+        try {
+          nerResult = await this.pipeline.processNer(slug, body, before.type, true, undefined, mentionedSlugs);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          this.pipeline.writeIngestLog(slug, "api", { nerError: msg, appended: true });
+        }
+      }
+
+      const nerResolvedSlugs = nerResult?.resolvedSlugs ?? [];
+      const nerRelationSlugs = nerResult?.relationSlugs ?? [];
+      this.recordSyncWarnings(
+        slug,
+        this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]),
+      );
+
+      return { slug, created: false, linksExtracted, ner: nerResult };
+    } catch (indexError) {
+      if (snapshot) {
+        await this.restoreSnapshot(slug, snapshot, indexError);
+      }
+      throw indexError;
     }
-
-    const nerResolvedSlugs = nerResult?.resolvedSlugs ?? [];
-    const nerRelationSlugs = nerResult?.relationSlugs ?? [];
-    this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]);
-
-    return { slug, created: false, linksExtracted, ner: nerResult };
   }
 
   /**
@@ -211,44 +281,151 @@ export class IngestManager {
   ): Promise<IngestResult> {
     const { chunks, embedResults } = await this.pipeline.embed(body);
 
-    const existing = this.pages.getBySlug(slug);
-    if (existing) {
-      this.pages.update(slug, { body, tags });
-    } else {
-      this.pages.create({ title, type, body, tags, slug });
-    }
+    const existedBefore = !!this.pages.getBySlug(slug);
+    const snapshot = existedBefore ? takeSnapshot(slug, this.db, this.pages) : null;
+    let createdThisAttempt = false;
 
-    this.db.deleteLinksByRelation(slug, '提及');
-    const { count: linksExtracted, mentionedSlugs } = this.pipeline.processWikilinks(slug, body);
-
-    await this.pipeline.writeIndexes(slug, chunks, embedResults);
-    this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
-
-    let nerResult: NerPipelineResult | null | undefined;
-    const shouldNer = doNer && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
-    if (shouldNer) {
-      try {
-        nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
+    try {
+      if (existedBefore) {
+        this.pages.update(slug, { body, tags });
+      } else {
+        this.pages.create({ title, type, body, tags, slug });
+        createdThisAttempt = true;
       }
-    }
 
-    // Entity type: extract structured facts from body into frontmatter
-    if (type.startsWith("entity/") && doNer && this.llmProvider && body.trim()) {
-      try {
-        await this.extractEntityFacts(slug, title, type, body);
-      } catch {
-        // Non-critical — skip silently
+      // Write indexes FIRST — the main failure point (LanceDB) must fail
+      // before we touch links/mention_count in processWikilinks.
+      await this.pipeline.writeIndexes(slug, chunks, embedResults);
+      this.pipeline.writeIngestLog(slug, "api", { chunks: chunks.length });
+
+      // Now safe to modify links and mention_count
+      const { count: linksExtracted, mentionedSlugs } = this.pipeline.replaceWikilinks(slug, body);
+
+      let nerResult: NerPipelineResult | null | undefined;
+      const shouldNer = doNer && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
+      if (shouldNer) {
+        try {
+          nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
+        }
       }
+
+      // Entity type: extract structured facts from body into frontmatter
+      if (type.startsWith("entity/") && doNer && this.llmProvider && body.trim()) {
+        try {
+          await this.extractEntityFacts(slug, title, type, body);
+        } catch {
+          // Non-critical — skip silently
+        }
+      }
+
+      // Sync Known Relations for the ingested page and all mentioned/resolved entities
+      const nerResolvedSlugs = nerResult?.resolvedSlugs ?? [];
+      const nerRelationSlugs = nerResult?.relationSlugs ?? [];
+      this.recordSyncWarnings(
+        slug,
+        this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]),
+      );
+
+      return { slug, created: !existedBefore, linksExtracted, ner: nerResult };
+    } catch (indexError) {
+      if (createdThisAttempt) {
+        // New page: narrow cleanup — vault file + DB cascade + LanceDB
+        // cleanupNewPage throws IngestRollbackError if cleanup fails
+        await this.cleanupNewPage(slug, indexError);
+      } else if (snapshot) {
+        // Existing page: restore to pre-update state + re-index old content
+        // restoreSnapshot throws IngestRollbackError if restore fails
+        await this.restoreSnapshot(slug, snapshot, indexError);
+      }
+      throw indexError;
+    }
+  }
+
+  /** Narrow cleanup for a newly-created page that failed during indexing.
+   *  Only removes this page's file, DB rows, and LanceDB vectors —
+   *  does NOT touch other vault files (no dead-link rewrite).
+   *  Throws IngestRollbackError if any cleanup step fails. */
+  private async cleanupNewPage(slug: string, originalError: unknown): Promise<void> {
+    const original = originalError instanceof Error ? originalError : new Error(String(originalError));
+    const errors: Error[] = [];
+
+    const filePath = this.db.getPageFilePath(slug) ?? slugToFilePath(slug);
+    try {
+      unlinkSync(join(this.pages.vaultPath, filePath));
+    } catch (e) {
+      const error = e instanceof Error ? e : new Error(String(e));
+      if (!("code" in error) || error.code !== "ENOENT") errors.push(error);
+    }
+    try { this.db.deletePageCascaded(slug); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+    try { await this.lance.deleteByPageSlug(slug); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+
+    if (errors.length > 0) {
+      this.recordRollbackFailure(slug, original, errors);
+      throw new IngestRollbackError(original, errors);
+    }
+  }
+
+  /** Restore a page to its pre-mutation state after downstream failure.
+   *  Re-embeds and re-indexes the old content to keep all stores consistent.
+   *  Throws IngestRollbackError if any restore step fails. */
+  private async restoreSnapshot(slug: string, snapshot: PageSnapshot, originalError: unknown): Promise<void> {
+    const original = originalError instanceof Error ? originalError : new Error(String(originalError));
+    const errors: Error[] = [];
+
+    // 1. Restore body and tags
+    try {
+      this.pages.update(slug, { body: snapshot.body, tags: snapshot.tags });
+    } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+
+    // 2. Restore mention links
+    try {
+      this.db.transaction(() => {
+        this.db.deleteLinksByRelation(slug, "提及");
+        for (const link of snapshot.mentionLinks) {
+          this.db.insertLink(slug, link.to, link.relation);
+        }
+      });
+    } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+
+    // 3. Re-embed and re-index the OLD content to restore LanceDB + SQLite chunks
+    try {
+      const { chunks, embedResults } = await this.pipeline.embed(snapshot.body);
+      await this.pipeline.writeIndexes(slug, chunks, embedResults);
+    } catch (e) {
+      errors.push(e instanceof Error ? e : new Error(String(e)));
     }
 
-    // Sync Known Relations for the ingested page and all mentioned/resolved entities
-    const nerResolvedSlugs = nerResult?.resolvedSlugs ?? [];
-    const nerRelationSlugs = nerResult?.relationSlugs ?? [];
-    this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]);
+    if (errors.length > 0) {
+      this.recordRollbackFailure(slug, original, errors);
+      throw new IngestRollbackError(original, errors);
+    }
+  }
 
-    return { slug, created: !existing, linksExtracted, ner: nerResult };
+  private recordRollbackFailure(slug: string, original: Error, errors: Error[]): void {
+    try {
+      this.pipeline.writeIngestLog(slug, "api", {
+        rollbackIncomplete: true,
+        rollbackErrors: errors.map(error => error.message),
+        originalError: original.message,
+        reindexRequired: true,
+      });
+    } catch (auditError) {
+      errors.push(auditError instanceof Error ? auditError : new Error(String(auditError)));
+    }
+  }
+
+  private recordSyncWarnings(slug: string, warnings: Array<{ slug: string; error: string }>): void {
+    if (warnings.length === 0) return;
+    try {
+      this.pipeline.writeIngestLog(slug, "api", {
+        syncWarnings: warnings,
+        repairRecommended: true,
+      });
+    } catch {
+      // Derived markdown sync must not turn a committed ingest into a rollback.
+    }
   }
 }

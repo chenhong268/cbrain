@@ -159,6 +159,25 @@ export class ContentPipeline {
    * Returns the number of links created.
    */
   processWikilinks(fromSlug: string, body: string): { count: number; mentionedSlugs: Set<string> } {
+    return this.db.transaction(() => this.processWikilinksUnsafe(fromSlug, body));
+  }
+
+  /**
+   * Atomically replace wikilink-derived relations for a page.
+   * Link writes and mention counters share one SQLite transaction so callers
+   * never observe half-applied graph state.
+   */
+  replaceWikilinks(fromSlug: string, body: string): { count: number; mentionedSlugs: Set<string> } {
+    return this.db.transaction(() => {
+      this.db.deleteLinksByRelation(fromSlug, "提及");
+      return this.processWikilinksUnsafe(fromSlug, body);
+    });
+  }
+
+  private processWikilinksUnsafe(
+    fromSlug: string,
+    body: string,
+  ): { count: number; mentionedSlugs: Set<string> } {
     if (!this.pages || !body.trim()) return { count: 0, mentionedSlugs: new Set() };
 
     // Strip KR section — it's generated FROM links, parsing it back would create circular writes
@@ -179,11 +198,11 @@ export class ContentPipeline {
       const targetSlug = findEntitySlug(this.db, lookupName);
 
       if (targetSlug && targetSlug !== fromSlug) {
-        this.pages.incrementMention(targetSlug);
-        mentionedSlugs.add(targetSlug);
         const key = `${fromSlug}\x00${targetSlug}`;
         if (!writtenRelations.has(key)) {
           writtenRelations.add(key);
+          this.pages.incrementMention(targetSlug);
+          mentionedSlugs.add(targetSlug);
           this.db.insertLink(fromSlug, targetSlug, "提及", null, 0.3, "weak", "wikilink", 0.9, undefined, { source_page_slug: fromSlug });
           count++;
         }

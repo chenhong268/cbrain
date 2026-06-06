@@ -120,8 +120,19 @@ export class PageManager {
     if (!isValidSlugName(slugName)) {
       throw new Error(`Invalid slug generated: "${slug}". Title: "${input.title}"`);
     }
+
+    // Pre-check: refuse to overwrite an existing page
+    const existing = this.db.getPage(slug);
+    if (existing) {
+      throw new Error(`Page already exists: ${slug}. Use update() instead.`);
+    }
+
+    // Also refuse if a vault file exists without a DB row (orphan)
     const fileName = slugToFilePath(slug);
     const filePath = join(this.vaultPath, fileName);
+    if (existsSync(filePath)) {
+      throw new Error(`Vault file already exists for slug "${slug}" without a DB row — possible orphan. Refusing to overwrite.`);
+    }
 
     const now = new Date().toISOString();
     const frontmatter: PageFrontmatter = {
@@ -139,20 +150,33 @@ export class PageManager {
     mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, content, "utf-8");
 
-    const contentHash = hashContent(content);
+    let dbInserted = false;
+    try {
+      const contentHash = hashContent(content);
 
-    this.db.insertPage({
-      slug,
-      type: normalizedType,
-      title: input.title,
-      filePath: relative(this.vaultPath, filePath),
-      contentHash,
-      expiresAt: input.expiresAt ?? null,
-      confidenceDecay: input.confidenceDecay ?? 1.0,
-    });
+      this.db.insertPage({
+        slug,
+        type: normalizedType,
+        title: input.title,
+        filePath: relative(this.vaultPath, filePath),
+        contentHash,
+        expiresAt: input.expiresAt ?? null,
+        confidenceDecay: input.confidenceDecay ?? 1.0,
+      });
+      dbInserted = true;
 
-    if (input.tags && input.tags.length > 0) {
-      this.db.addTags(slug, input.tags);
+      if (input.tags && input.tags.length > 0) {
+        this.db.addTags(slug, input.tags);
+      }
+    } catch (dbError) {
+      // DB insert failed — only clean up the vault file WE just wrote
+      // Do NOT deletePageCascaded: that would wipe pre-existing data for same slug
+      try { unlinkSync(filePath); } catch { /* best effort */ }
+      // If insertPage succeeded but addTags failed, clean up partial DB state
+      if (dbInserted) {
+        try { this.db.deletePageCascaded(slug); } catch { /* best effort */ }
+      }
+      throw dbError;
     }
 
     this.logger?.info("page", "页面已创建", { slug, title: input.title, type: input.type });

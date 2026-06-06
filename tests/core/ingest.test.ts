@@ -38,10 +38,12 @@ function createMockEmbeddingProvider(): EmbeddingProvider {
 function createMockLanceDB() {
   const added: Array<{ pageSlug: string; chunks: Array<{ content: string; chunkIndex: number }> }> = [];
   const deleted: string[] = [];
+  const current = new Map<string, Array<{ content: string; chunkIndex: number }>>();
 
   return {
     added,
     deleted,
+    current,
 
     connect: async () => {},
     addChunks: async (chunks: Array<{ pageSlug: string; chunkIndex: number; content: string; vector?: Float32Array }>) => {
@@ -52,14 +54,20 @@ function createMockLanceDB() {
           added.push(entry);
         }
         entry.chunks.push({ content: chunk.content, chunkIndex: chunk.chunkIndex });
+        const existing = current.get(chunk.pageSlug) ?? [];
+        existing.push({ content: chunk.content, chunkIndex: chunk.chunkIndex });
+        current.set(chunk.pageSlug, existing);
       }
     },
     search: async () => [],
     fullTextSearch: async () => [],
     deleteByPageSlug: async (pageSlug: string) => {
       deleted.push(pageSlug);
+      current.delete(pageSlug);
     },
-    deleteRawChunksByPageSlug: async () => {},
+    deleteRawChunksByPageSlug: async (pageSlug: string) => {
+      current.delete(pageSlug);
+    },
     close: async () => {},
     createFTSIndex: async () => {},
   };
@@ -657,6 +665,560 @@ describe("IngestManager", () => {
       const mdB = readFileSync(join(vaultPath, "brain/entities/WikiB.md"), "utf-8");
       expect(mdB).toContain("## Known Relations");
       expect(mdB).toContain("← 提及 from [[");
+    });
+  });
+
+  // ── Failure cleanup tests ──
+
+  describe("failure cleanup", () => {
+    test("pre-existing slug conflict: create refuses, existing data untouched", async () => {
+      const pages = ingest["pages"]; // access private PageManager
+      // Pre-insert a page with the slug that will be generated
+      const originalContent = "---\ntitle: Original\ntype: record\n---\nOriginal body";
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      writeFileSync(join(vaultPath, "records/duplicate-test.md"), originalContent, "utf-8");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+      ).run("records/duplicate-test", "record", "Original", "records/duplicate-test.md", "h1");
+
+      // create should refuse, not overwrite
+      expect(() => {
+        pages.create({ title: "Duplicate Test", type: "record", body: "new content" });
+      }).toThrow(/already exists/);
+
+      // Original vault file byte-identical
+      const afterContent = readFileSync(join(vaultPath, "records/duplicate-test.md"), "utf-8");
+      expect(afterContent).toBe(originalContent);
+
+      // Original DB row untouched
+      const rows = db.rawDb.prepare("SELECT COUNT(*) as c FROM pages WHERE slug = 'records/duplicate-test'").get() as { c: number };
+      expect(rows.c).toBe(1);
+      const row = db.getPage("records/duplicate-test");
+      expect(row!.title).toBe("Original");
+    });
+
+    test("DB insert failure on NEW page cleans up vault file", async () => {
+      const pages = ingest["pages"];
+      // Mock insertPage to throw — no pre-existing slug
+      const origInsert = db.insertPage.bind(db);
+      db.insertPage = () => { throw new Error("DB connection lost"); };
+
+      expect(() => {
+        pages.create({ title: "New Fail Test", type: "record", body: "content" });
+      }).toThrow("DB connection lost");
+
+      // Restore
+      db.insertPage = origInsert;
+
+      // Vault file cleaned up
+      expect(existsSync(join(vaultPath, "records/new-fail-test.md"))).toBe(false);
+
+      // No DB residual
+      const row = db.getPage("records/new-fail-test");
+      expect(row).toBeNull();
+    });
+
+    test("pure punctuation text input throws validation error with no side effects", async () => {
+      await expect(ingest.ingest({
+        content: "!!! ??? --- ...",
+        type: "text",
+      })).rejects.toThrow("VALIDATION_ERROR");
+
+      // No pages created
+      const count = db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
+      expect(count.c).toBe(0);
+
+      // No vault files in records dir
+      const recordsDir = join(vaultPath, "records");
+      if (existsSync(recordsDir)) {
+        const files = require("node:fs").readdirSync(recordsDir);
+        expect(files.length).toBe(0);
+      }
+    });
+
+    test("pure punctuation title + content throws validation error", async () => {
+      await expect(ingest.ingest({
+        content: "... !!!",
+        title: "??? ---",
+        type: "text",
+      })).rejects.toThrow("VALIDATION_ERROR");
+
+      const count = db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
+      expect(count.c).toBe(0);
+    });
+
+    test("new page + LanceDB failure: fully rolled back, zero residual", async () => {
+      // Stateful mock: addChunks records the slug THEN throws — simulates partial LanceDB write
+      const lance = createMockLanceDB();
+      const originalAddChunks = lance.addChunks.bind(lance);
+      lance.addChunks = async (chunks) => {
+        await originalAddChunks(chunks);
+        throw new Error("LanceDB down");
+      };
+
+      const failingIngest = new IngestManager(db, createMockEmbeddingProvider(), lance as any, vaultPath);
+
+      await expect(failingIngest.ingest({
+        content: "Some content for LanceDB failure test",
+        type: "text",
+        title: "LanceDB Fail Test",
+        skipNer: true,
+      })).rejects.toThrow("LanceDB down");
+
+      // New page must be fully rolled back
+      const row = db.getPage("records/lancedb-fail-test");
+      expect(row).toBeNull();
+
+      // No vault file
+      expect(existsSync(join(vaultPath, "records/lancedb-fail-test.md"))).toBe(false);
+
+      // No residual chunks/tags/links in SQLite
+      const chunks = db.rawDb.prepare("SELECT COUNT(*) as c FROM chunks WHERE page_slug = ?").get("records/lancedb-fail-test") as { c: number };
+      expect(chunks.c).toBe(0);
+      const tags = db.rawDb.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ?").get("records/lancedb-fail-test") as { c: number };
+      expect(tags.c).toBe(0);
+      const links = db.rawDb.prepare("SELECT COUNT(*) as c FROM links WHERE from_slug = ? OR to_slug = ?").get("records/lancedb-fail-test", "records/lancedb-fail-test") as { c: number };
+      expect(links.c).toBe(0);
+
+      // LanceDB rollback must have deleted the slug's vectors
+      // (added is an operation log — the write happened before the throw,
+      //  but rollback must call deleteByPageSlug to clean up)
+      expect(lance.deleted).toContain("records/lancedb-fail-test");
+      expect(lance.current.has("records/lancedb-fail-test")).toBe(false);
+    });
+
+    test("existing page + LanceDB failure: page restored to pre-update state", async () => {
+      // Pre-create a page with tags and verify state
+      await ingest.ingest({
+        content: "Original content for existing page",
+        type: "text",
+        title: "Existing Page",
+        tags: ["tag-a"],
+        skipNer: true,
+      });
+
+      const slug = "records/existing-page";
+      const originalRow = db.getPage(slug);
+      expect(originalRow).not.toBeNull();
+      const originalPage = ingest["pages"].getBySlug(slug)!;
+      expect(originalPage.body).toContain("Original content");
+
+      // Now try to update with failing LanceDB
+      const failingLance = {
+        ...createMockLanceDB(),
+        addChunks: async () => { throw new Error("LanceDB down"); },
+      };
+      const failingIngest = new IngestManager(db, createMockEmbeddingProvider(), failingLance as any, vaultPath);
+
+      await expect(failingIngest.ingest({
+        content: "Updated content that will fail",
+        type: "text",
+        title: "Existing Page",
+        tags: ["tag-b"],
+        skipNer: true,
+      })).rejects.toThrow("LanceDB down");
+
+      // Page must still exist
+      const afterRow = db.getPage(slug);
+      expect(afterRow).not.toBeNull();
+      expect(existsSync(join(vaultPath, "records/existing-page.md"))).toBe(true);
+
+      // Body must be restored to original content
+      const afterPage = failingIngest["pages"].getBySlug(slug)!;
+      expect(afterPage.body).toBe(originalPage.body);
+
+      // Tags must be restored to original
+      expect(afterPage.frontmatter.tags).toEqual(["tag-a"]);
+
+      // Restore attempted to re-index old content but LanceDB was also down —
+      // audit log should record incomplete rollback
+      const logs = db.rawDb.prepare("SELECT * FROM ingest_log WHERE page_slug = ? ORDER BY id DESC").all(slug) as any[];
+      const incompleteLog = logs.find((l: any) => {
+        try { return JSON.parse(l.details ?? "{}").rollbackIncomplete === true; } catch { return false; }
+      });
+      expect(incompleteLog).toBeDefined();
+    });
+
+    test("entity append + LanceDB failure: body restored to pre-append state", async () => {
+      // Pre-create a person entity directly
+      const personSlug = "brain/entities/person/人物A";
+      ingest["pages"].create({
+        title: "人物A",
+        type: "entity/person",
+        body: "人物A的初始简介",
+        tags: ["人物"],
+        slug: personSlug,
+      });
+
+      const originalPage = ingest["pages"].getBySlug(personSlug)!;
+      const originalBody = originalPage.body;
+      const originalTags = [...(originalPage.frontmatter.tags ?? [])];
+
+      // Trigger append path with failing LanceDB
+      const failingLance = {
+        ...createMockLanceDB(),
+        addChunks: async () => { throw new Error("LanceDB down"); },
+      };
+      const failingIngest = new IngestManager(db, createMockEmbeddingProvider(), failingLance as any, vaultPath);
+
+      await expect(failingIngest.ingest({
+        content: "人物A的新追加内容",
+        title: "人物A",
+        type: "text",
+        tags: ["新标签"],
+        skipNer: true,
+      })).rejects.toThrow("LanceDB down");
+
+      // Body must be restored to pre-append state
+      const afterPage = failingIngest["pages"].getBySlug(personSlug)!;
+      expect(afterPage.body).toBe(originalBody);
+
+      // Tags must be restored (not merged with new tag)
+      expect(afterPage.frontmatter.tags).toEqual(originalTags);
+    });
+
+    test("new page rollback does not modify other vault files", async () => {
+      // Pre-create an existing note with a wikilink to a page that will fail to create
+      ingest["pages"].create({
+        title: "Existing Note",
+        type: "record",
+        body: "这是已有笔记，包含 [[待创建页面]] 的链接",
+      });
+      const existingFilePath = join(vaultPath, "records/existing-note.md");
+      const originalContent = readFileSync(existingFilePath, "utf-8");
+
+      // Ingest a NEW page that fails at LanceDB
+      const failingLance = {
+        ...createMockLanceDB(),
+        addChunks: async () => { throw new Error("LanceDB down"); },
+      };
+      const failingIngest = new IngestManager(db, createMockEmbeddingProvider(), failingLance as any, vaultPath);
+
+      await expect(failingIngest.ingest({
+        content: "New page that fails",
+        type: "text",
+        title: "待创建页面",
+        skipNer: true,
+      })).rejects.toThrow("LanceDB down");
+
+      // The existing note must be byte-identical — rollback did not rewrite its wikilinks
+      expect(readFileSync(existingFilePath, "utf-8")).toBe(originalContent);
+    });
+
+    test("existing page restore re-indexes old content successfully", async () => {
+      // Pre-create a page
+      await ingest.ingest({
+        content: "Original content to be re-indexed",
+        type: "text",
+        title: "Reindex Test",
+        tags: ["original"],
+        skipNer: true,
+      });
+      const slug = "records/reindex-test";
+
+      // Verify chunks exist for original content
+      const originalChunks = db.rawDb.prepare("SELECT COUNT(*) as c FROM chunks WHERE page_slug = ?").get(slug) as { c: number };
+      expect(originalChunks.c).toBeGreaterThan(0);
+
+      // LanceDB mock that tracks current vector state
+      const lance = createMockLanceDB();
+      const originalAddChunks = lance.addChunks.bind(lance);
+      let addCallCount = 0;
+      lance.addChunks = async (chunks) => {
+        addCallCount++;
+        if (addCallCount === 1) {
+          // First call (new content write) — fail
+          throw new Error("LanceDB down");
+        }
+        // Second call (restore old content) — succeed
+        return originalAddChunks(chunks);
+      };
+
+      const restoreIngest = new IngestManager(db, createMockEmbeddingProvider(), lance as any, vaultPath);
+
+      await expect(restoreIngest.ingest({
+        content: "Updated content that triggers failure",
+        type: "text",
+        title: "Reindex Test",
+        tags: ["updated"],
+        skipNer: true,
+      })).rejects.toThrow("LanceDB down");
+
+      // Body must be restored to original
+      const afterPage = restoreIngest["pages"].getBySlug(slug)!;
+      expect(afterPage.body).toContain("Original content to be re-indexed");
+      expect(afterPage.frontmatter.tags).toEqual(["original"]);
+
+      // SQLite chunks must still exist (re-indexed from old content)
+      const afterChunks = db.rawDb.prepare("SELECT COUNT(*) as c FROM chunks WHERE page_slug = ?").get(slug) as { c: number };
+      expect(afterChunks.c).toBeGreaterThan(0);
+
+      // LanceDB must have been called twice: failed add + successful restore add
+      expect(addCallCount).toBe(2);
+      const restoredVectorContent = lance.current.get(slug)?.map(chunk => chunk.content).join("\n") ?? "";
+      expect(restoredVectorContent).toContain("Original content to be re-indexed");
+      expect(restoredVectorContent).not.toContain("Updated content");
+    });
+
+    test("restore + re-index both fail: audit log records incomplete rollback", async () => {
+      // Pre-create a page
+      await ingest.ingest({
+        content: "Content that cannot be re-indexed",
+        type: "text",
+        title: "Double Fail Test",
+        skipNer: true,
+      });
+      const slug = "records/double-fail-test";
+
+      // LanceDB that always fails
+      const alwaysFailLance = {
+        ...createMockLanceDB(),
+        addChunks: async () => { throw new Error("LanceDB permanently down"); },
+      };
+      const failingIngest = new IngestManager(db, createMockEmbeddingProvider(), alwaysFailLance as any, vaultPath);
+
+      await expect(failingIngest.ingest({
+        content: "Will fail and restore will also fail",
+        type: "text",
+        title: "Double Fail Test",
+        skipNer: true,
+      })).rejects.toThrow("INGEST_ROLLBACK_INCOMPLETE");
+
+      // Body must still be restored despite re-index failure
+      const afterPage = failingIngest["pages"].getBySlug(slug)!;
+      expect(afterPage.body).toContain("Content that cannot be re-indexed");
+
+      // Audit log must record the incomplete rollback
+      const logs = db.rawDb.prepare("SELECT * FROM ingest_log WHERE page_slug = ? ORDER BY id DESC").all(slug) as any[];
+      const incompleteLog = logs.find((l: any) => {
+        try {
+          const meta = JSON.parse(l.details ?? "{}");
+          return meta.rollbackIncomplete === true;
+        } catch { return false; }
+      });
+      expect(incompleteLog).toBeDefined();
+      const meta = JSON.parse(incompleteLog.details);
+      expect(meta.reindexRequired).toBe(true);
+      expect(meta.rollbackErrors).toContain("LanceDB permanently down");
+    });
+
+    test("new page cleanup failure is surfaced as rollback incomplete", async () => {
+      const failingLance = {
+        ...createMockLanceDB(),
+        addChunks: async () => { throw new Error("LanceDB down"); },
+      };
+      const failingIngest = new IngestManager(db, createMockEmbeddingProvider(), failingLance as any, vaultPath);
+      const originalDelete = db.deletePageCascaded.bind(db);
+      db.deletePageCascaded = () => { throw new Error("DB cleanup failed"); };
+
+      try {
+        await expect(failingIngest.ingest({
+          content: "内容A",
+          type: "text",
+          title: "清理失败测试",
+          skipNer: true,
+        })).rejects.toThrow("INGEST_ROLLBACK_INCOMPLETE");
+      } finally {
+        db.deletePageCascaded = originalDelete;
+      }
+    });
+
+    test("page restore failure is surfaced as rollback incomplete", async () => {
+      await ingest.ingest({
+        content: "原始内容A",
+        type: "text",
+        title: "恢复失败测试",
+        skipNer: true,
+      });
+
+      const failingLance = {
+        ...createMockLanceDB(),
+        addChunks: async () => { throw new Error("LanceDB down"); },
+      };
+      const failingIngest = new IngestManager(db, createMockEmbeddingProvider(), failingLance as any, vaultPath);
+      const pages = failingIngest["pages"];
+      const originalUpdate = pages.update.bind(pages);
+      let updateCalls = 0;
+      pages.update = ((...args: Parameters<typeof pages.update>) => {
+        updateCalls++;
+        if (updateCalls === 2) throw new Error("Page restore failed");
+        return originalUpdate(...args);
+      }) as typeof pages.update;
+
+      await expect(failingIngest.ingest({
+        content: "新内容B",
+        type: "text",
+        title: "恢复失败测试",
+        skipNer: true,
+      })).rejects.toThrow("INGEST_ROLLBACK_INCOMPLETE");
+    });
+
+    test("wikilink replacement failure rolls back links and mention counts", async () => {
+      const pages = ingest["pages"];
+      const targetA = pages.create({ title: "实体A", type: "entity/person", body: "实体A" });
+      const targetB = pages.create({ title: "实体B", type: "entity/person", body: "实体B" });
+
+      await ingest.ingest({
+        content: "原记录引用 [[实体A]]",
+        type: "text",
+        title: "关系事务测试",
+        skipNer: true,
+      });
+
+      const sourceSlug = "records/关系事务测试";
+      const targetASlug = targetA.slug;
+      const targetBSlug = targetB.slug;
+      const beforeA = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetASlug) as { mention_count: number };
+      const beforeB = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetBSlug) as { mention_count: number };
+
+      const originalInsertLink = db.insertLink.bind(db);
+      let wikilinkWrites = 0;
+      db.insertLink = ((from: string, to: string, relation: string, ...rest: unknown[]) => {
+        if (from === sourceSlug && relation === "提及") {
+          wikilinkWrites++;
+          if (wikilinkWrites === 2) throw new Error("second wikilink failed");
+        }
+        return originalInsertLink(from, to, relation, ...rest as Parameters<typeof db.insertLink> extends [string, string, string, ...infer R] ? R : never);
+      }) as typeof db.insertLink;
+
+      try {
+        await expect(ingest.ingest({
+          content: "更新后引用 [[实体A]] 和 [[实体B]]",
+          type: "text",
+          title: "关系事务测试",
+          skipNer: true,
+        })).rejects.toThrow("second wikilink failed");
+      } finally {
+        db.insertLink = originalInsertLink;
+      }
+
+      const afterA = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetASlug) as { mention_count: number };
+      const afterB = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetBSlug) as { mention_count: number };
+      expect(afterA.mention_count).toBe(beforeA.mention_count);
+      expect(afterB.mention_count).toBe(beforeB.mention_count);
+
+      const links = db.getOutgoingLinks(sourceSlug).filter(link => link.relation === "提及");
+      expect(links.map(link => link.to_slug)).toEqual([targetASlug]);
+    });
+
+    test("auto-detect markdown content without explicit type", async () => {
+      const md = [
+        "---",
+        "title: 自动分类测试",
+        "type: record",
+        "tags:",
+        "  - 自动标签",
+        "---",
+        "",
+        "这是正文内容。",
+      ].join("\n");
+
+      const result = await ingest.ingest({
+        content: md,
+        // No type, no title — classifier should detect markdown
+        skipNer: true,
+      });
+
+      expect(result.created).toBe(true);
+      expect(result.slug).toBe("records/自动分类测试");
+
+      // Verify vault file has correct frontmatter
+      const filePath = join(vaultPath, "records/自动分类测试.md");
+      expect(existsSync(filePath)).toBe(true);
+      const fileContent = readFileSync(filePath, "utf-8");
+      expect(fileContent).toContain("title: 自动分类测试");
+      expect(fileContent).toContain("自动标签");
+
+      // No untitled-* files
+      const files = require("node:fs").readdirSync(join(vaultPath, "records")) as string[];
+      expect(files.some((f: string) => f.startsWith("untitled-"))).toBe(false);
+    });
+
+    test("markdown without a title derives one from semantic body content", async () => {
+      const result = await ingest.ingest({
+        content: "---\ntype: record\n---\n\n正文标题\n正文内容。",
+        skipNer: true,
+      });
+
+      expect(result.slug).toBe("records/正文标题");
+      expect(existsSync(join(vaultPath, "records/正文标题.md"))).toBe(true);
+    });
+
+    test("markdown without a semantic title or body is rejected without side effects", async () => {
+      await expect(ingest.ingest({
+        content: "---\ntype: record\ntags:\n  - test\n---\n\n!!!",
+        skipNer: true,
+      })).rejects.toThrow("VALIDATION_ERROR");
+
+      const count = db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
+      expect(count.c).toBe(0);
+      expect(existsSync(join(vaultPath, "records"))).toBe(false);
+    });
+
+    test("existing page update failure restores the original vault and DB state", async () => {
+      await ingest.ingest({
+        content: "原始内容A",
+        type: "text",
+        title: "更新事务测试",
+        tags: ["原标签"],
+        skipNer: true,
+      });
+
+      const slug = "records/更新事务测试";
+      const pages = ingest["pages"];
+      const originalUpdate = db.updatePageHash.bind(db);
+      let failed = false;
+      db.updatePageHash = ((...args: Parameters<typeof db.updatePageHash>) => {
+        if (!failed) {
+          failed = true;
+          throw new Error("SQLite update failed");
+        }
+        return originalUpdate(...args);
+      }) as typeof db.updatePageHash;
+
+      try {
+        await expect(ingest.ingest({
+          content: "不应保留的新内容B",
+          type: "text",
+          title: "更新事务测试",
+          tags: ["新标签"],
+          skipNer: true,
+        })).rejects.toThrow("SQLite update failed");
+      } finally {
+        db.updatePageHash = originalUpdate;
+      }
+
+      const restored = pages.getBySlug(slug)!;
+      expect(restored.body).toContain("原始内容A");
+      expect(restored.body).not.toContain("不应保留的新内容B");
+      expect(restored.frontmatter.tags).toEqual(["原标签"]);
+    });
+
+    test("markdown with frontmatter routed as text creates no untitled files", async () => {
+      const md = [
+        "---",
+        "title: Test Page",
+        "---",
+        "Body content.",
+      ].join("\n");
+
+      // Explicitly route as text (old broken behavior)
+      const result = await ingest.ingest({
+        content: md,
+        type: "text",
+        skipNer: true,
+      });
+
+      expect(result.created).toBe(true);
+      // Title should be "Test Page" (first semantic line after ---)
+      expect(result.slug).toContain("test-page");
+
+      // No untitled-* files
+      const recordsDir = join(vaultPath, "records");
+      if (existsSync(recordsDir)) {
+        const files = require("node:fs").readdirSync(recordsDir) as string[];
+        expect(files.some((f: string) => f.startsWith("untitled-"))).toBe(false);
+      }
     });
   });
 });

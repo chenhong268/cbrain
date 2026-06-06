@@ -124,6 +124,29 @@ describe("PageManager", () => {
     expect(deletedSlugs).toEqual([slug]);
   });
 
+  test("create refuses when vault file exists without DB row (orphan)", () => {
+    // Simulate an orphan: vault file on disk but no DB row
+    const { writeFileSync } = require("node:fs");
+    const slug = "records/orphan-test";
+    const filePath = join(vaultPath, "records/orphan-test.md");
+    const originalContent = "# Orphan\n\nThis file has no DB row.";
+
+    mkdirSync(join(vaultPath, "records"), { recursive: true });
+    writeFileSync(filePath, originalContent, "utf-8");
+
+    // create() must refuse to overwrite
+    expect(() =>
+      pm.create({ title: "Orphan Test", type: "record", body: "New content" })
+    ).toThrow(/orphan/i);
+
+    // File must remain byte-identical
+    const fileContent = require("node:fs").readFileSync(filePath, "utf-8");
+    expect(fileContent).toBe(originalContent);
+
+    // No DB row created
+    expect(db.getPage(slug)).toBeNull();
+  });
+
   test("increment mention count", () => {
     pm.create({ title: "某公司", type: "entity/person", body: "被提到的公司" });
     pm.incrementMention("brain/entities/person/某公司");

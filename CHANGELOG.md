@@ -1,6 +1,28 @@
 # Changelog
 
-> Current: `v1.9.3` — Hermes-facing 工具统一 display/summary/raw 信封，display 禁止暴露内部字段。
+> Current: `v1.9.4` — ingest 失败可回滚，LanceDB 完整性可诊断，避免脏文件和静默索引损坏。
+
+## [v1.9.4] — 2026-06-06
+
+### Ingest 可靠性（#151）
+
+- **内容类型自动识别**：省略 `type` 时根据合法 frontmatter 确定 markdown/text，不再把 `---` 误作标题。
+- **拒绝无语义输入**：缺少有效标题和正文的内容在写文件前返回校验错误，不再生成 `untitled-*` 脏页面。
+- **失败回滚**：新页面写入失败会清理 vault、SQLite 与 LanceDB；已有页面失败会恢复正文、标签、关系与旧向量。
+- **原子关系更新**：wikilink 关系替换与 mention 计数置于同一 SQLite 事务，单条失败不再留下半完成图谱。
+- **回滚可观测**：回滚本身失败时返回 `INGEST_ROLLBACK_INCOMPLETE` 并写入审计记录，明确提示需要修复索引。
+
+### 向量完整性诊断（#150）
+
+- 新增只读 LanceDB 完整性检查，识别缺表、损坏、页面/向量数量偏差等异常。
+- 诊断过程不自动重建或修改生产向量数据，修复动作继续由用户明确触发。
+
+### Release Checks
+
+- `bun run check`：1806 pass / 0 fail。
+- `bin/check-resolver-pilot.sh`：54 OK / 0 FAIL。
+- `bin/check-v193-ux-gate.sh`：15 OK / 0 FAIL。
+- 公开测试与发布说明使用匿名占位符，无用户知识库隐私信息。
 
 ## [v1.9.3] — 2026-06-06
 
