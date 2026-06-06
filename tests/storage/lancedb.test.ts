@@ -218,4 +218,89 @@ describe("LanceDBManager", () => {
 
     expect(result.tables).toContain("chunks");
   });
+
+  // ─── Compact safety ──────────────────────────────────────────────
+
+  test("compact preserves row count across all tables", async () => {
+    await manager.addChunks(makeChunks(5, "entities/compact-test"));
+
+    const report = await manager.compact();
+
+    // Row count must be unchanged after compaction
+    const results = await manager.search(makeVector(0), 100);
+    expect(results.length).toBe(5);
+    expect(report.tables).toContain("chunks");
+  });
+
+  test("compact on database with warmup succeeds", async () => {
+    // Warm up to create the chunks table, then compact.
+    await manager.warmup();
+    const report = await manager.compact();
+    expect(report.tables).toContain("chunks");
+    expect(report.fragmentsRemoved).toBe(0);
+  });
+
+  test("compact passes safe optimize options via fake table", async () => {
+    // Inject a fake connection + table to capture the exact optimize() call.
+    const optimizeCalls: Array<Partial<{ cleanupOlderThan: Date; deleteUnverified: boolean }>> = [];
+    const fakeTable = {
+      countRows: async () => 5,
+      optimize: async (opts?: Partial<{ cleanupOlderThan: Date; deleteUnverified: boolean }>) => {
+        optimizeCalls.push({ ...opts });
+        return {
+          compaction: { fragmentsRemoved: 2, fragmentsAdded: 1, filesRemoved: 2, filesAdded: 1 },
+          prune: { bytesRemoved: 1024, oldVersionsRemoved: 1 },
+        };
+      },
+      close: () => {},
+    };
+
+    const fakeDb = {
+      tableNames: async () => ["chunks"],
+      openTable: async () => fakeTable,
+    };
+
+    // Inject fake connection without calling close() (fake tables lack .close()).
+    (manager as unknown as { tables: Map<unknown, unknown> }).tables.clear();
+    (manager as unknown as { db: unknown }).db = fakeDb;
+
+    await manager.compact();
+
+    expect(optimizeCalls.length).toBe(1);
+    const opts = optimizeCalls[0];
+    // deleteUnverified MUST be false
+    expect(opts.deleteUnverified).toBe(false);
+    // cleanupOlderThan should be ~7 days ago (allow 60s tolerance for test runtime)
+    const cutoff = opts.cleanupOlderThan as Date;
+    const expectedCutoff = Date.now() - LanceDBManager.COMPACT_RETENTION_MS;
+    expect(Math.abs(cutoff.getTime() - expectedCutoff)).toBeLessThan(60_000);
+  });
+
+  test("compact throws integrity error when row count changes", async () => {
+    // Simulate a corrupted optimize: countRows returns 5 before, 4 after.
+    let callCount = 0;
+    const fakeTable = {
+      countRows: async () => {
+        callCount++;
+        return callCount === 1 ? 5 : 4;
+      },
+      optimize: async () => ({
+        compaction: { fragmentsRemoved: 1, fragmentsAdded: 1, filesRemoved: 1, filesAdded: 1 },
+        prune: { bytesRemoved: 0, oldVersionsRemoved: 0 },
+      }),
+      close: () => {},
+    };
+
+    const fakeDb = {
+      tableNames: async () => ["test-corrupt"],
+      openTable: async () => fakeTable,
+    };
+
+    (manager as unknown as { tables: Map<unknown, unknown> }).tables.clear();
+    (manager as unknown as { db: unknown }).db = fakeDb;
+
+    expect(manager.compact()).rejects.toThrow(
+      /compact integrity failure on table "test-corrupt".*5.*4/,
+    );
+  });
 });

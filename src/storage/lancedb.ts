@@ -208,6 +208,9 @@ export class LanceDBManager {
 
   // ─── Maintenance ───────────────────────────────────────────────
 
+  /** Milliseconds of old version retention after compaction. */
+  static readonly COMPACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
   async compact(): Promise<{ tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; filesRemoved: number }> {
     if (!this.db) throw new Error("LanceDB not connected");
     const tableNames = await this.db.tableNames();
@@ -217,7 +220,29 @@ export class LanceDBManager {
 
     for (const name of tableNames) {
       const tbl = await this.db.openTable(name);
-      const stats = await tbl.optimize({ cleanupOlderThan: new Date(), deleteUnverified: true });
+
+      // Capture row count before optimize for post-compaction validation.
+      const countBefore = await tbl.countRows();
+
+      // Retain old versions for 7 days so a corrupt compaction can be rolled back.
+      // deleteUnverified: false protects files that may belong to in-progress
+      // transactions from being deleted prematurely.
+      const stats = await tbl.optimize({
+        cleanupOlderThan: new Date(Date.now() - LanceDBManager.COMPACT_RETENTION_MS),
+        deleteUnverified: false,
+      });
+
+      // Post-optimize integrity check: verify row count is preserved and the
+      // table is still readable. A mismatch indicates a corrupt compaction.
+      const countAfter = await tbl.countRows();
+      if (countBefore !== countAfter) {
+        throw new Error(
+          `LanceDB compact integrity failure on table "${name}": `
+          + `row count changed from ${countBefore} to ${countAfter}. `
+          + "Old versions are retained for rollback.",
+        );
+      }
+
       fragmentsRemoved += stats.compaction.fragmentsRemoved;
       fragmentsAdded += stats.compaction.fragmentsAdded;
       filesRemoved += stats.prune?.bytesRemoved ?? stats.compaction.filesRemoved;
