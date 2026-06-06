@@ -1,6 +1,6 @@
 # Changelog
 
-> Current: `v1.9.3-dev` — Hermes 自然输出信封全面覆盖：所有 MCP 工具返回 display/summary/raw 三层结构，display 禁止暴露内部字段。
+> Current: `v1.9.3` — Hermes-facing 工具统一 display/summary/raw 信封，display 禁止暴露内部字段。
 
 ## [v1.9.3] — 2026-06-06
 
@@ -40,7 +40,7 @@
 
 ### 治理与测试
 
-- `bun run check`：1720 pass / 0 fail / 7626 expect() calls
+- `bun run check`：1720 pass / 0 fail / 7690 expect() calls
 
 ## [v1.9.2] — 2026-06-05
 

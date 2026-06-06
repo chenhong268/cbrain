@@ -75,8 +75,8 @@ echo ""
 echo "[4] Full test suite"
 FULL_OUTPUT=$(capture bun test)
 if echo "$FULL_OUTPUT" | grep -q "0 fail"; then
-  FULL_PASS=$(echo "$FULL_OUTPUT" | tail -2 | grep -oE '[0-9]+ pass' | head -1)
-  pass "full suite: ${FULL_PASS}"
+  FULL_PASS=$(echo "$FULL_OUTPUT" | grep -oE '[0-9]+ pass' | tail -1)
+  pass "full suite: ${FULL_PASS:-passed}"
 else
   fail "full test suite has failures"
 fi
