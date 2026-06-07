@@ -247,13 +247,14 @@ export async function runDream(
 
   // Stage 4.6: LanceDB compact — coalesce fragment versions to prevent disk bloat
   logger.info("dream", "Stage 4.6/7: LanceDB compact");
-  let compactReport = { tables: [] as string[], fragmentsRemoved: 0, fragmentsAdded: 0, filesRemoved: 0 };
+  let compactReport = { tables: [] as string[], fragmentsRemoved: 0, fragmentsAdded: 0, bytesRemoved: 0, filesRemoved: 0 };
   const lanceInstance = lance ?? sealDeps?.lance;
   if (lanceInstance) {
     try {
       compactReport = await lanceInstance.compact();
       if (compactReport.fragmentsRemoved > 0) {
-        logger.info("dream", `LanceDB compact: ${compactReport.fragmentsRemoved} fragments → ${compactReport.fragmentsAdded}, ${compactReport.filesRemoved} files removed`);
+        const mb = (compactReport.bytesRemoved / 1024 / 1024).toFixed(1);
+        logger.info("dream", `LanceDB compact: ${compactReport.fragmentsRemoved} fragments → ${compactReport.fragmentsAdded}, ${compactReport.filesRemoved} files, ${mb}MB freed`);
       } else {
         logger.info("dream", "LanceDB compact: no fragments to merge");
       }

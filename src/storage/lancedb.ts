@@ -211,11 +211,12 @@ export class LanceDBManager {
   /** Milliseconds of old version retention after compaction. */
   static readonly COMPACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-  async compact(): Promise<{ tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; filesRemoved: number }> {
+  async compact(): Promise<{ tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; bytesRemoved: number; filesRemoved: number }> {
     if (!this.db) throw new Error("LanceDB not connected");
     const tableNames = await this.db.tableNames();
     let fragmentsRemoved = 0;
     let fragmentsAdded = 0;
+    let bytesRemoved = 0;
     let filesRemoved = 0;
 
     for (const name of tableNames) {
@@ -245,11 +246,12 @@ export class LanceDBManager {
 
       fragmentsRemoved += stats.compaction.fragmentsRemoved;
       fragmentsAdded += stats.compaction.fragmentsAdded;
-      filesRemoved += stats.prune?.bytesRemoved ?? stats.compaction.filesRemoved;
+      bytesRemoved += stats.prune?.bytesRemoved ?? 0;
+      filesRemoved += stats.compaction.filesRemoved;
       this.tables.set(name, tbl);
     }
 
-    return { tables: tableNames, fragmentsRemoved, fragmentsAdded, filesRemoved };
+    return { tables: tableNames, fragmentsRemoved, fragmentsAdded, bytesRemoved, filesRemoved };
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────
