@@ -12,6 +12,7 @@ interface ShutdownHandles {
   pidLock: PidLock;
   watcherLock?: WatcherLock;
   stopJobs?: () => void;
+  stopMcp?: () => void;
 }
 
 function installShutdownHandlers(handles: ShutdownHandles): void {
@@ -20,6 +21,7 @@ function installShutdownHandlers(handles: ShutdownHandles): void {
     if (shuttingDown) return;
     shuttingDown = true;
     handles.stopJobs?.();
+    handles.stopMcp?.();
     handles.watcher?.stop();
     handles.httpServer?.stop(true);
     handles.watcherLock?.release();
@@ -107,16 +109,11 @@ export function register(program: Command) {
       const warmupResult = await deps.lance.warmup();
       console.error(`> LanceDB warmed up (${warmupResult.elapsedMs}ms, tables: ${warmupResult.tables.join(", ")})`);
 
-      const mcpServer = createServer(deps);
-      const mcpReady = mcpServer.connect(new StdioServerTransport());
-      // stdio MCP: watcher NOT started here — only HTTP server starts watcher
-      console.error("> stdio MCP ready (no watcher — use --http for auto-sync)");
-
-      // ── Pipe resilience for stdio MCP ──────────────────────────
+      // ── Pipe resilience for stdio MCP (registered BEFORE connect) ──
       // Hermes 0.16+ sends list_tools() every 180s as keepalive.
-      // When the client reopens the pipe, the old write emits EPIPE/SIGPIPE.
-      // Without handlers the process crashes silently.
-      process.on("SIGPIPE", () => { /* prevent default termination */ });
+      // Fix #164: handlers must be registered BEFORE connect() to avoid TOCTOU.
+      process.on("SIGPIPE", () => { /* prevent default termination (Bun kills by default) */ });
+
       process.stdout.on("error", (err: NodeJS.ErrnoException) => {
         if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED" || err.code === "EBADF") {
           console.error("> stdio: stdout pipe closed (client reconnect expected)");
@@ -124,15 +121,48 @@ export function register(program: Command) {
           console.error("> stdio: unexpected stdout error", err);
         }
       });
+
       process.stdin.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EPIPE" || err.code === "ECONNRESET" || err.code === "ERR_STREAM_DESTROYED") {
+        if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED" || err.code === "EBADF") {
           console.error("> stdio: stdin pipe closed (client reconnect expected)");
         } else {
           console.error("> stdio: unexpected stdin error", err);
         }
       });
 
-      installShutdownHandlers({ pidLock });
+      const mcpServer = createServer(deps);
+      const transport = new StdioServerTransport();
+
+      // Fix #164: when stdin closes (client disconnect), actively close MCP server.
+      // Without this, SDK's send() Promise permanently hangs → silent deadlock.
+      let pipeDead = false;
+      transport.onclose = () => {
+        pipeDead = true;
+        console.error("> stdio: transport closed");
+      };
+
+      const mcpStdin = process.stdin;
+      const handlePipeDeath = (reason: string) => {
+        if (pipeDead) return;
+        pipeDead = true;
+        console.error(`> stdio: ${reason}, shutting down MCP server`);
+        mcpServer.close().catch(() => {});
+        // Exit after brief delay to allow cleanup; Hermes will respawn.
+        setTimeout(() => process.exit(0), 500);
+      };
+      mcpStdin.on("close", () => handlePipeDeath("stdin closed by client"));
+      mcpStdin.on("end", () => handlePipeDeath("stdin end-of-stream"));
+
+      const mcpReady = mcpServer.connect(transport).catch((err: unknown) => {
+        console.error("> stdio MCP connect failed:", err);
+        process.exit(1);
+      });
+      console.error("> stdio MCP ready (no watcher — use --http for auto-sync)");
+
+      installShutdownHandlers({
+        pidLock,
+        stopMcp: () => { mcpServer.close().catch(() => {}); },
+      });
       await mcpReady;
     });
 }
