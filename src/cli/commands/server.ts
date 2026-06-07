@@ -12,6 +12,7 @@ interface ShutdownHandles {
   pidLock: PidLock;
   watcherLock?: WatcherLock;
   stopJobs?: () => void;
+  stopMcp?: () => void;
 }
 
 function installShutdownHandlers(handles: ShutdownHandles): void {
@@ -20,6 +21,7 @@ function installShutdownHandlers(handles: ShutdownHandles): void {
     if (shuttingDown) return;
     shuttingDown = true;
     handles.stopJobs?.();
+    handles.stopMcp?.();
     handles.watcher?.stop();
     handles.httpServer?.stop(true);
     handles.watcherLock?.release();
@@ -107,78 +109,60 @@ export function register(program: Command) {
       const warmupResult = await deps.lance.warmup();
       console.error(`> LanceDB warmed up (${warmupResult.elapsedMs}ms, tables: ${warmupResult.tables.join(", ")})`);
 
-      const mcpServer = createServer(deps);
-      const transport = new StdioServerTransport();
-
-      // ── Pipe resilience for stdio MCP ──────────────────────────
+      // ── Pipe resilience for stdio MCP (registered BEFORE connect) ──
       // Hermes 0.16+ sends list_tools() every 180s as keepalive.
-      // When the client reopens the pipe, the old write emits EPIPE/SIGPIPE.
-      // Without handlers the process crashes silently.
-      //
-      // Fix #164: StdioServerTransport.send() never rejects, so a broken
-      // pipe leaves every send() Promise forever pending → silent deadlock.
-      // Mitigations:
-      //   1. TOCTOU-free: register ALL error/close handlers BEFORE connect()
-      //   2. Active cleanup on stdin close/end — the most reliable indicator
-      //      that the client pipe is gone.
-      //   3. Send timeout — wraps every transport send with a 5 s deadline so
-      //      pending Promises are eventually unblocked.
-      //   4. mcpReady .catch() — handles unhandled rejection on connect failure.
-      process.on("SIGPIPE", () => { /* prevent default termination */ });
+      // Fix #164: handlers must be registered BEFORE connect() to avoid TOCTOU.
+      process.on("SIGPIPE", () => { /* prevent default termination (Bun kills by default) */ });
+
       process.stdout.on("error", (err: NodeJS.ErrnoException) => {
         if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED" || err.code === "EBADF") {
           console.error("> stdio: stdout pipe closed (client reconnect expected)");
-          // Best-effort: close transport so pending sends are unblocked
-          transport.close().catch(() => {});
         } else {
           console.error("> stdio: unexpected stdout error", err);
         }
       });
-      // stdin close/end are the primary signals that the client has detached.
-      const handlePipeBreak = async () => {
-        console.error("> stdio: stdin closed (client disconnected)");
-        try { await transport.close(); } catch { /* already closed */ }
-      };
-      process.stdin.on("close", handlePipeBreak);
-      process.stdin.on("end", handlePipeBreak);
-      // Also catch errors for observability (EPIPE can surface on stdin)
+
       process.stdin.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") {
-          console.error("> stdio: stdin error (client disconnect expected)");
+        if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED" || err.code === "EBADF") {
+          console.error("> stdio: stdin pipe closed (client reconnect expected)");
         } else {
           console.error("> stdio: unexpected stdin error", err);
         }
       });
 
-      // Wrap transport.send() with a 5-second timeout to prevent silent deadlock.
-      // StdioServerTransport.send() never rejects; without a timeout a broken
-      // pipe leaves every pending send() Promise forever waiting.
-      const SEND_TIMEOUT_MS = 5000;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const originalSend = (transport as any).send.bind(transport);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (transport as any).send = async (message: any) => {
-        return new Promise((resolve, reject) => {
-          const timer = setTimeout(() => {
-            reject(new Error("MCP send timeout after " + SEND_TIMEOUT_MS + "ms — pipe may be broken"));
-          }, SEND_TIMEOUT_MS);
-          originalSend(message)
-            .then(resolve)
-            .catch(reject)
-            .finally(() => clearTimeout(timer));
-        });
+      const mcpServer = createServer(deps);
+      const transport = new StdioServerTransport();
+
+      // Fix #164: when stdin closes (client disconnect), actively close MCP server.
+      // Without this, SDK's send() Promise permanently hangs → silent deadlock.
+      let pipeDead = false;
+      transport.onclose = () => {
+        pipeDead = true;
+        console.error("> stdio: transport closed");
       };
 
-      const mcpReady = mcpServer.connect(transport);
-      // Handle connect failures to prevent unhandled promise rejection
-      mcpReady.catch((err) => {
-        console.error("> stdio: MCP connect failed", err);
-      });
+      const mcpStdin = process.stdin;
+      const handlePipeDeath = (reason: string) => {
+        if (pipeDead) return;
+        pipeDead = true;
+        console.error(`> stdio: ${reason}, shutting down MCP server`);
+        mcpServer.close().catch(() => {});
+        // Exit after brief delay to allow cleanup; Hermes will respawn.
+        setTimeout(() => process.exit(0), 500);
+      };
+      mcpStdin.on("close", () => handlePipeDeath("stdin closed by client"));
+      mcpStdin.on("end", () => handlePipeDeath("stdin end-of-stream"));
 
-      // stdio MCP: watcher NOT started here — only HTTP server starts watcher
+      const mcpReady = mcpServer.connect(transport).catch((err: unknown) => {
+        console.error("> stdio MCP connect failed:", err);
+        process.exit(1);
+      });
       console.error("> stdio MCP ready (no watcher — use --http for auto-sync)");
 
-      installShutdownHandlers({ pidLock });
+      installShutdownHandlers({
+        pidLock,
+        stopMcp: () => { mcpServer.close().catch(() => {}); },
+      });
       await mcpReady;
     });
 }
