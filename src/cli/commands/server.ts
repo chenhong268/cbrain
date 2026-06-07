@@ -112,6 +112,26 @@ export function register(program: Command) {
       // stdio MCP: watcher NOT started here — only HTTP server starts watcher
       console.error("> stdio MCP ready (no watcher — use --http for auto-sync)");
 
+      // ── Pipe resilience for stdio MCP ──────────────────────────
+      // Hermes 0.16+ sends list_tools() every 180s as keepalive.
+      // When the client reopens the pipe, the old write emits EPIPE/SIGPIPE.
+      // Without handlers the process crashes silently.
+      process.on("SIGPIPE", () => { /* prevent default termination */ });
+      process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED" || err.code === "EBADF") {
+          console.error("> stdio: stdout pipe closed (client reconnect expected)");
+        } else {
+          console.error("> stdio: unexpected stdout error", err);
+        }
+      });
+      process.stdin.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EPIPE" || err.code === "ECONNRESET" || err.code === "ERR_STREAM_DESTROYED") {
+          console.error("> stdio: stdin pipe closed (client reconnect expected)");
+        } else {
+          console.error("> stdio: unexpected stdin error", err);
+        }
+      });
+
       installShutdownHandlers({ pidLock });
       await mcpReady;
     });
