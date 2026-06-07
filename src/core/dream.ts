@@ -28,7 +28,7 @@ export interface DreamReport {
     decay: { linksUpdated: number };
     seal: { sealed: number; skipped: number; errors: number };
     cleanup: { orphans: number; staleStubs: number; lanceOrphans: number };
-    compact: { tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; filesRemoved: number };
+    compact: { tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; bytesRemoved: number; filesRemoved: number };
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
     search_quality: { degraded_rate: number; total: number; top_reasons: Array<{ code: string; count: number }> };
@@ -87,7 +87,7 @@ export async function runDream(
         decay: { linksUpdated: 0 },
         seal: { sealed: 0, skipped: 0, errors: 0 },
         cleanup: { orphans: 0, staleStubs: 0, lanceOrphans: 0 },
-        compact: { tables: [], fragmentsRemoved: 0, fragmentsAdded: 0, filesRemoved: 0 },
+        compact: { tables: [], fragmentsRemoved: 0, fragmentsAdded: 0, bytesRemoved: 0, filesRemoved: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
         insight_archive: { archived: 0 },
         search_quality: { degraded_rate: 0, total: 0, top_reasons: [] },
