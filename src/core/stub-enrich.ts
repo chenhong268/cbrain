@@ -246,11 +246,30 @@ function buildEnrichedBody(originalBody: string, summary: string, facts: string[
   for (const fact of facts) {
     parts.push(`- ${fact}`);
   }
-  // Preserve any manual content the user added
-  if (manualLines.length > 0) {
+  // Preserve any manual content the user added — collapse consecutive blank lines
+  if (manualLines.some(l => l.trim().length > 0)) {
+    const collapsed = collapseBlankLines(manualLines);
     parts.push("");
-    parts.push(...manualLines);
+    parts.push(...collapsed);
   }
 
   return parts.join("\n");
+}
+
+function collapseBlankLines(lines: string[]): string[] {
+  const result: string[] = [];
+  let prevBlank = false;
+  for (const line of lines) {
+    if (line.trim().length === 0) {
+      if (!prevBlank) result.push("");
+      prevBlank = true;
+    } else {
+      result.push(line);
+      prevBlank = false;
+    }
+  }
+  // Trim leading/trailing blank lines
+  while (result.length > 0 && result[0].trim().length === 0) result.shift();
+  while (result.length > 0 && result[result.length - 1].trim().length === 0) result.pop();
+  return result;
 }
