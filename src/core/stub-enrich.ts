@@ -284,12 +284,12 @@ function buildEnrichedBody(originalBody: string, summary: string, facts: string[
   for (const fact of facts) {
     parts.push(`- ${fact}`);
   }
-  // Vault records — internal context snippets
+  // Vault records — internal context snippets (clean display)
   if (internalContext && internalContext.length > 0) {
     parts.push("");
     parts.push("**Vault 记录：**");
     for (const ctx of internalContext.slice(0, 3)) {
-      parts.push(`- ${ctx.slice(0, 100)}`);
+      parts.push(`- ${cleanVaultRecord(ctx)}`);
     }
   }
   // Preserve any manual content the user added — collapse consecutive blank lines
@@ -300,6 +300,21 @@ function buildEnrichedBody(originalBody: string, summary: string, facts: string[
   }
 
   return parts.join("\n");
+}
+
+/** Strip LLM-oriented prefix and markdown headers for user-facing Vault 记录 display. */
+function cleanVaultRecord(raw: string): string {
+  // Remove "[xxx 提及] " or "[xxx 内容] " prefix
+  let text = raw.replace(/^\[.*?\]\s*/, "");
+  // Remove markdown headings (## Title, ### Title, etc.)
+  text = text.replace(/^#{1,6}\s+.*/gm, "").trim();
+  // Collapse whitespace runs
+  text = text.replace(/\n{2,}/g, "\n").replace(/\s+/g, " ").trim();
+  // Truncate to 80 chars at word boundary
+  if (text.length > 80) {
+    text = text.slice(0, 80).replace(/[^一-鿿\w]+$/, "");
+  }
+  return text || raw.slice(0, 80);
 }
 
 function collapseBlankLines(lines: string[]): string[] {
