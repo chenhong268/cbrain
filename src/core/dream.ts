@@ -78,6 +78,7 @@ export async function runDream(
   sealDeps?: { llm: LLMProvider; embedding: EmbeddingProvider; lance: LanceDBManager },
   lance?: LanceDBManager,
   onStageProgress?: (stage: string, detail: unknown) => void,
+  sharedPages?: PageManager,
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
     logger.warn("dream", "上次 dream 仍在执行中（或锁未释放），跳过");
@@ -206,7 +207,7 @@ export async function runDream(
   let stubEnrichReport = { enriched: 0, skipped: 0, errors: 0 };
   if (sealDeps) {
     try {
-      const stubPages = new PageManager(db, vaultPath, logger);
+      const stubPages = sharedPages ?? new PageManager(db, vaultPath, logger);
       const stubPipeline = new ContentPipeline(db, sealDeps.embedding, sealDeps.lance, { pages: stubPages });
       const stubEnrichMgr = new StubEnrichManager(
         db, sealDeps.llm, sealDeps.embedding, sealDeps.lance,

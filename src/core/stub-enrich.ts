@@ -8,6 +8,8 @@ import type { Logger } from "./logger.js";
 
 const CONCURRENCY = 3;
 const DEFAULT_MENTION_THRESHOLD = 3;
+const MAX_BATCH_SIZE = 50;
+const STUB_TIMEOUT_MS = 30_000;
 
 const STUB_ENRICH_PROMPT = `你是一个知识提炼引擎。根据以下碎片化信息，为指定实体生成简明摘要。
 
@@ -77,23 +79,24 @@ export class StubEnrichManager {
       return { enriched: false, reason: "llm_failed" };
     }
 
-    // Build new body — preserve original auto-extracted line, append enriched content
+    // Build new body — preserve original auto-extracted line + any manual content
     const enrichedBody = buildEnrichedBody(page.body ?? "", parsed.summary, parsed.facts);
 
-    // Write back
+    // BUG-1 fix: re-index FIRST, only write vault on success
+    try {
+      const { chunks, embedResults } = await this.pipeline.embed(enrichedBody);
+      await this.pipeline.writeIndexes(slug, chunks, embedResults);
+    } catch (e) {
+      this.logger?.warn("stub-enrich", `Re-indexing failed for ${slug}, skipping vault write`, { error: String(e) });
+      return { enriched: false, reason: "reindex_failed" };
+    }
+
+    // Re-index succeeded — now persist to vault
     const now = new Date().toISOString();
     this.pages.update(slug, {
       body: enrichedBody,
       extra: { enriched_at: now },
     });
-
-    // Re-chunk + re-embed
-    try {
-      const { chunks, embedResults } = await this.pipeline.embed(enrichedBody);
-      await this.pipeline.writeIndexes(slug, chunks, embedResults);
-    } catch (e) {
-      this.logger?.warn("stub-enrich", `Re-indexing failed for ${slug}`, { error: String(e) });
-    }
 
     return { enriched: true, reason: "enriched" };
   }
@@ -104,7 +107,9 @@ export class StubEnrichManager {
       return { enriched: 0, skipped: 0, errors: 0 };
     }
 
-    return this.batchEnrich(candidates.map(c => c.slug));
+    // BUG-2 fix: cap batch size to prevent runaway processing
+    const slugs = candidates.slice(0, MAX_BATCH_SIZE).map(c => c.slug);
+    return this.batchEnrich(slugs);
   }
 
   // ─── Private ────────────────────────────────────────────────
@@ -144,8 +149,9 @@ export class StubEnrichManager {
 
     const batches = this.chunkArray(slugs, CONCURRENCY);
     for (const batch of batches) {
+      // BUG-2 fix: per-stub timeout via Promise.race
       const results = await Promise.allSettled(
-        batch.map(slug => this.enrichStub(slug)),
+        batch.map(slug => this.withTimeout(this.enrichStub(slug), STUB_TIMEOUT_MS)),
       );
       for (const r of results) {
         if (r.status === "fulfilled") {
@@ -159,6 +165,15 @@ export class StubEnrichManager {
     }
 
     return { enriched, skipped, errors };
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms)
+      ),
+    ]);
   }
 
   private async callLLM(systemPrompt: string, userContent: string): Promise<string> {
@@ -199,18 +214,36 @@ function buildUserContent(title: string, type: string, contextParts: string[]): 
 }
 
 function buildEnrichedBody(originalBody: string, summary: string, facts: string[]): string {
-  // Preserve the original auto-extracted line
-  const lines = originalBody.split("\n").filter(l => l.trim().startsWith(">"));
-  const header = lines.length > 0 ? lines[0] : "";
+  // BUG-3 fix: separate auto-extracted header from manual content
+  const lines = originalBody.split("\n");
+  const headerLines: string[] = [];
+  const manualLines: string[] = [];
+
+  let inHeader = true;
+  for (const line of lines) {
+    if (inHeader && line.trim().startsWith(">")) {
+      headerLines.push(line);
+    } else {
+      inHeader = false;
+      if (line.trim().length > 0) {
+        manualLines.push(line);
+      }
+    }
+  }
 
   const parts: string[] = [];
-  if (header) parts.push(header);
+  if (headerLines.length > 0) parts.push(headerLines[0]);
   parts.push("");
   parts.push(summary);
   parts.push("");
   parts.push("**关键事实：**");
   for (const fact of facts) {
     parts.push(`- ${fact}`);
+  }
+  // Preserve any manual content the user added
+  if (manualLines.length > 0) {
+    parts.push("");
+    parts.push(...manualLines);
   }
 
   return parts.join("\n");

@@ -351,7 +351,7 @@ export function register(program: Command) {
       const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
         deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined,
-        deps.lance);
+        deps.lance, undefined, pages);
       if (report.locked) {
         console.log(`⚠️ Dream — ${report.timestamp.slice(0, 10)} 已跳过`);
         console.log(`  上次 dream 仍在执行中（30 分钟锁未释放），本次跳过`);
