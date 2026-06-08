@@ -363,6 +363,7 @@ export function register(program: Command) {
       console.log(`  Sync:    ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过`);
       console.log(`  Enrich:  ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级`);
       console.log(`  Seal:    ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过`);
+      console.log(`  Stub:    ${report.stages.stub_enrich.enriched} 页富化, ${report.stages.stub_enrich.skipped} 跳过`);
       console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿`);
       console.log(`  Health:  ${report.stages.health.overallStatus}`);
       console.log(`  Insight: ${report.stages.insight_archive.archived} 条过期归档`);
@@ -429,6 +430,54 @@ export function register(program: Command) {
         for (const i of report.details.insights) {
           console.log(`    ${i.content.slice(0, 60)}...`);
         }
+      }
+
+      deps.db.close();
+      process.exit(0);
+    });
+
+  program
+    .command("stub-enrich [slug]")
+    .description("Enrich thin stub pages with LLM-generated summaries (single slug or all candidates)")
+    .option("-t, --threshold <n>", "Minimum mention count to qualify as thin stub", "3")
+    .action(async (slug?: string, opts?: { threshold?: string }) => {
+      const config = loadConfig();
+      const deps = createDeps(config);
+      await deps.lance.connect(config.lancePath);
+
+      if (!deps.llm) {
+        console.log("  ⚠️ 未配置 LLM，需要 API key");
+        deps.db.close();
+        process.exit(1);
+      }
+
+      const { StubEnrichManager } = await import("../../core/stub-enrich.js");
+      const { Logger } = await import("../../core/logger.js");
+      const { PageManager } = await import("../../core/page.js");
+      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const outputsDir = resolveRuntimePath(config);
+      const logger = new Logger(outputsDir);
+      const pages = new PageManager(deps.db, config.vaultPath, logger);
+      const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages });
+      const mgr = new StubEnrichManager(deps.db, deps.llm, deps.embedding, deps.lance, pages, pipeline, logger);
+
+      if (slug) {
+        console.log(`🔍 Enriching stub: ${slug}`);
+        const result = await mgr.enrichStub(slug);
+        if (result.enriched) {
+          console.log(`  ✅ 已富化`);
+          const page = pages.getBySlug(slug);
+          if (page) {
+            console.log(`  ${page.body.split("\n").slice(0, 5).join("\n  ")}`);
+          }
+        } else {
+          console.log(`  ⏭️ 跳过: ${result.reason}`);
+        }
+      } else {
+        const threshold = parseInt(opts?.threshold ?? "3", 10);
+        console.log(`🔍 Enriching all thin stubs (mention >= ${threshold})...`);
+        const result = await mgr.enrichAll(threshold);
+        console.log(`  ✅ ${result.enriched} 页富化, ${result.skipped} 跳过, ${result.errors} 错误`);
       }
 
       deps.db.close();

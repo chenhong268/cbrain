@@ -15,6 +15,9 @@ import type { LLMProvider } from "../llm/provider.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 import { SealManager } from "./seal.js";
+import { StubEnrichManager } from "./stub-enrich.js";
+import { ContentPipeline } from "./pipeline.js";
+import { PageManager } from "./page.js";
 import { WakeupDiff } from "./wakeup.js";
 
 export interface DreamReport {
@@ -27,6 +30,7 @@ export interface DreamReport {
     learn: { updated: number; topActive: string[] };
     decay: { linksUpdated: number };
     seal: { sealed: number; skipped: number; errors: number };
+    stub_enrich: { enriched: number; skipped: number; errors: number };
     cleanup: { orphans: number; staleStubs: number; lanceOrphans: number };
     compact: { tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; bytesRemoved: number; filesRemoved: number };
     health: { overallStatus: string; dimensions: number; issues: number };
@@ -86,6 +90,7 @@ export async function runDream(
         learn: { updated: 0, topActive: [] },
         decay: { linksUpdated: 0 },
         seal: { sealed: 0, skipped: 0, errors: 0 },
+        stub_enrich: { enriched: 0, skipped: 0, errors: 0 },
         cleanup: { orphans: 0, staleStubs: 0, lanceOrphans: 0 },
         compact: { tables: [], fragmentsRemoved: 0, fragmentsAdded: 0, bytesRemoved: 0, filesRemoved: 0 },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
@@ -195,6 +200,25 @@ export async function runDream(
   const enrichResults = enrichMgr.enrichAll();
   const upgraded = enrichResults.filter((r) => r.upgraded).length;
   if (onStageProgress) onStageProgress("enrich", { total: enrichResults.length, upgraded });
+
+  // Stage 2b: Stub enrichment
+  logger.info("dream", "Stage 2b: stub enrichment");
+  let stubEnrichReport = { enriched: 0, skipped: 0, errors: 0 };
+  if (sealDeps) {
+    try {
+      const stubPages = new PageManager(db, vaultPath, logger);
+      const stubPipeline = new ContentPipeline(db, sealDeps.embedding, sealDeps.lance, { pages: stubPages });
+      const stubEnrichMgr = new StubEnrichManager(
+        db, sealDeps.llm, sealDeps.embedding, sealDeps.lance,
+        stubPages, stubPipeline, logger,
+      );
+      stubEnrichReport = await stubEnrichMgr.enrichAll();
+      if (stubEnrichReport.enriched > 0) logger.info("dream", `Stub enrichment: ${stubEnrichReport.enriched} 页富化`);
+    } catch (e) {
+      logger.warn("dream", `Stub enrichment 失败: ${(e as Error).message}`);
+    }
+  }
+  if (onStageProgress) onStageProgress("stub_enrich", stubEnrichReport);
 
   // Stage 2.5: Learn
   logger.info("dream", "Stage 3/7: learn");
@@ -329,6 +353,7 @@ export async function runDream(
       learn: learnReport,
       decay: { linksUpdated: decayUpdated },
       seal: sealReport,
+      stub_enrich: stubEnrichReport,
       cleanup: { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length },
       compact: compactReport,
       health: {
@@ -361,6 +386,7 @@ export async function runDream(
     `| Enrich | ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级 |`,
     `| Learn | ${report.stages.learn.updated} 实体权重更新, 活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")} |`,
     `| Seal | ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过 |`,
+    `| Stub Enrich | ${report.stages.stub_enrich.enriched} 页富化, ${report.stages.stub_enrich.skipped} 跳过 |`,
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿 |`,
     `| LanceDB Compact | ${report.stages.compact.fragmentsRemoved} fragments → ${report.stages.compact.fragmentsAdded}, ${report.stages.compact.filesRemoved} files removed |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
@@ -412,6 +438,9 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.seal.sealed > 0) {
     lines.push(`Seal: ${report.stages.seal.sealed} 页摘要压缩`);
+  }
+  if (report.stages.stub_enrich.enriched > 0) {
+    lines.push(`Stub enrichment: ${report.stages.stub_enrich.enriched} 页富化`);
   }
   if (report.stages.compact.fragmentsRemoved > 0) {
     lines.push(`LanceDB: ${report.stages.compact.fragmentsRemoved} fragments 合并, ${report.stages.compact.filesRemoved} files 清理`);
