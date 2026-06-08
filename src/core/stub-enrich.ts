@@ -11,9 +11,12 @@ const CONCURRENCY = 3;
 const DEFAULT_MENTION_THRESHOLD = 3;
 const MAX_BATCH_SIZE = 50;
 const STUB_TIMEOUT_MS = 30_000;
-const MIN_CONTEXT_THRESHOLD = 3;
 const WEB_SEARCH_MAX_RESULTS = 3;
 const SUMMARY_MAX_LENGTH = 500;
+
+// NOTE: Web search is NOT auto-triggered. Only enabled via explicit --web CLI flag.
+// Automatic web search was rejected because there's no reliable way to distinguish
+// public entities (Mengzi) from private ones (coworkers) — wrong info is worse than no info.
 
 const STUB_ENRICH_PROMPT = `你是一个知识提炼引擎。根据以下碎片化信息，为指定实体生成简明摘要。
 
@@ -81,11 +84,11 @@ export class StubEnrichManager {
     // Gather internal context
     const internalContext = this.gatherContext(slug, page.title);
 
-    // Web search fallback when internal context is thin
+    // Web search — only when explicitly enabled via --web flag (this.search is set)
     const sources: string[] = ["internal"];
     const webSnippets: string[] = [];
 
-    if (internalContext.length < MIN_CONTEXT_THRESHOLD && this.search) {
+    if (this.search) {
       try {
         const results = await this.search.search(page.title, { maxResults: WEB_SEARCH_MAX_RESULTS });
         for (const r of results) {
@@ -93,7 +96,7 @@ export class StubEnrichManager {
         }
         if (webSnippets.length > 0) {
           sources.push("web");
-          this.logger?.info("stub-enrich", `Web search fallback for ${slug}: ${results.length} results`);
+          this.logger?.info("stub-enrich", `Web search for ${slug}: ${results.length} results`);
         }
       } catch (e) {
         this.logger?.warn("stub-enrich", `Web search failed for ${slug}, continuing with internal context`, { error: String(e) });

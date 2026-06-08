@@ -350,7 +350,7 @@ export function register(program: Command) {
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
       const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
-        deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance, search: deps.search } : undefined,
+        deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined,
         deps.lance, undefined, pages);
       if (report.locked) {
         console.log(`⚠️ Dream — ${report.timestamp.slice(0, 10)} 已跳过`);
@@ -440,7 +440,8 @@ export function register(program: Command) {
     .command("stub-enrich [slug]")
     .description("Enrich thin stub pages with LLM-generated summaries (single slug or all candidates)")
     .option("-t, --threshold <n>", "Minimum mention count to qualify as thin stub", "3")
-    .action(async (slug?: string, opts?: { threshold?: string }) => {
+    .option("--web", "Enable web search fallback (only for known public entities)", false)
+    .action(async (slug?: string, opts?: { threshold?: string; web?: boolean }) => {
       const config = loadConfig();
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
@@ -459,7 +460,9 @@ export function register(program: Command) {
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages });
-      const mgr = new StubEnrichManager(deps.db, deps.llm, deps.embedding, deps.lance, pages, pipeline, logger, deps.search);
+      // Web search only enabled via explicit --web flag (prevents false info pollution for private entities)
+      const search = opts?.web ? deps.search : undefined;
+      const mgr = new StubEnrichManager(deps.db, deps.llm, deps.embedding, deps.lance, pages, pipeline, logger, search);
 
       if (slug) {
         console.log(`🔍 Enriching stub: ${slug}`);

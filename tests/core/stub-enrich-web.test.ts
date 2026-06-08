@@ -135,7 +135,7 @@ describe("StubEnrichManager — web search fallback", () => {
 
   // ─── Tests ──────────────────────────────────────────────────
 
-  test("web fallback triggers when internal context < 3", async () => {
+  test("web search triggers when searchProvider is explicitly provided", async () => {
     const stub = seedThinStub("张岱");
     const search = makeSearchProvider(webResults);
     const mgr = makeManager(llmResponse, search);
@@ -150,22 +150,19 @@ describe("StubEnrichManager — web search fallback", () => {
     expect(updated!.frontmatter.enriched_sources).toEqual(["internal", "web"]);
   });
 
-  test("web fallback skipped when internal context >= 3", async () => {
+  test("no searchProvider — pure internal enrichment regardless of context count", async () => {
     const stub = seedRichStub("丰富实体");
-    const search = makeSearchProvider(webResults);
-    const mgr = makeManager(llmResponse, search);
+    // No searchProvider passed — mimics default behavior (no --web flag)
+    const mgr = makeManager(llmResponse, null);
 
     const result = await mgr.enrichStub(stub.slug);
 
     expect(result.enriched).toBe(true);
-    // Search should NOT have been called
-    expect(search.search).toHaveBeenCalledTimes(0);
-    // enriched_sources is internal only
     const updated = pages.getBySlug(stub.slug);
     expect(updated!.frontmatter.enriched_sources).toEqual(["internal"]);
   });
 
-  test("graceful degradation: no searchProvider", async () => {
+  test("no searchProvider — pure internal enrichment", async () => {
     const stub = seedThinStub("无搜索实体");
     const mgr = makeManager(llmResponse, null);
 
