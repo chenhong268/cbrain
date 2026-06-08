@@ -107,8 +107,12 @@ export class StubEnrichManager {
       return { enriched: 0, skipped: 0, errors: 0 };
     }
 
-    // BUG-2 fix: cap batch size to prevent runaway processing
+    // Cap batch size to prevent runaway processing
     const slugs = candidates.slice(0, MAX_BATCH_SIZE).map(c => c.slug);
+    const dropped = candidates.length - slugs.length;
+    if (dropped > 0) {
+      this.logger?.warn("stub-enrich", `${candidates.length} candidates found, processing first ${MAX_BATCH_SIZE}, ${dropped} deferred to next cycle`);
+    }
     return this.batchEnrich(slugs);
   }
 
@@ -167,6 +171,10 @@ export class StubEnrichManager {
     return { enriched, skipped, errors };
   }
 
+  // Note: Promise.race does NOT cancel the underlying fetch() — the LLM request
+  // may continue consuming quota after timeout. This is acceptable for stub
+  // enrichment (low volume, nightly batch). A proper fix would require
+  // AbortController support in the LLMProvider interface.
   private async withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
     return Promise.race([
       promise,
@@ -225,9 +233,7 @@ function buildEnrichedBody(originalBody: string, summary: string, facts: string[
       headerLines.push(line);
     } else {
       inHeader = false;
-      if (line.trim().length > 0) {
-        manualLines.push(line);
-      }
+      manualLines.push(line);
     }
   }
 
