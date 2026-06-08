@@ -5,20 +5,30 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import type { PageManager } from "./page.js";
 import type { ContentPipeline } from "./pipeline.js";
 import type { Logger } from "./logger.js";
+import type { SearchProvider } from "../search/provider.js";
 
 const CONCURRENCY = 3;
 const DEFAULT_MENTION_THRESHOLD = 3;
 const MAX_BATCH_SIZE = 50;
 const STUB_TIMEOUT_MS = 30_000;
+const MIN_CONTEXT_THRESHOLD = 3;
+const WEB_SEARCH_MAX_RESULTS = 3;
+const SUMMARY_MAX_LENGTH = 500;
 
 const STUB_ENRICH_PROMPT = `你是一个知识提炼引擎。根据以下碎片化信息，为指定实体生成简明摘要。
 
 要求：
-1. 摘要 50-100 字，概括实体的核心信息
-2. 列出 3-5 条关键事实，每条标注来源
+1. 一句话定位：50字以内，说清"这是什么"
+2. 关键事实 3-5 条，每条标注来源
+   - vault 内部信息标注为 (来源：[[slug]])
+   - 网络信息标注为 (来源：web)
 3. 只基于提供的数据，不编造任何信息
 4. 全部中文
-5. 输出 JSON 格式：{ "summary": "摘要文本", "facts": ["事实1", "事实2"] }
+5. 输出 JSON 格式：{ "summary": "摘要文本", "facts": ["事实1 (来源：web)", "事实2 (来源：[[slug]])"] }
+
+信息来源标记：
+- 前缀 [xxx 提及] 或 [xxx 内容] → vault 内部文档
+- 前缀 [web] → 网络搜索
 
 只输出 JSON，不要任何其他内容。`;
 
@@ -39,6 +49,7 @@ export class StubEnrichManager {
   private pages: PageManager;
   private pipeline: ContentPipeline;
   private logger: Logger | null;
+  private search: SearchProvider | null;
 
   constructor(
     db: CBrainDB,
@@ -48,12 +59,14 @@ export class StubEnrichManager {
     pages: PageManager,
     pipeline: ContentPipeline,
     logger?: Logger | null,
+    searchProvider?: SearchProvider | null,
   ) {
     this.db = db;
     this.llm = llm;
     this.pages = pages;
     this.pipeline = pipeline;
     this.logger = logger ?? null;
+    this.search = searchProvider ?? null;
   }
 
   async enrichStub(slug: string): Promise<StubEnrichResult> {
@@ -65,22 +78,47 @@ export class StubEnrichManager {
       return { enriched: false, reason: "already_enriched" };
     }
 
-    // Gather context
-    const context = this.gatherContext(slug, page.title);
-    if (context.length === 0) {
+    // Gather internal context
+    const internalContext = this.gatherContext(slug, page.title);
+
+    // Web search fallback when internal context is thin
+    const sources: string[] = ["internal"];
+    const webSnippets: string[] = [];
+
+    if (internalContext.length < MIN_CONTEXT_THRESHOLD && this.search) {
+      try {
+        const results = await this.search.search(page.title, { maxResults: WEB_SEARCH_MAX_RESULTS });
+        for (const r of results) {
+          webSnippets.push(`[web] ${r.snippet}`);
+        }
+        if (webSnippets.length > 0) {
+          sources.push("web");
+          this.logger?.info("stub-enrich", `Web search fallback for ${slug}: ${results.length} results`);
+        }
+      } catch (e) {
+        this.logger?.warn("stub-enrich", `Web search failed for ${slug}, continuing with internal context`, { error: String(e) });
+      }
+    }
+
+    // If still no context at all, skip
+    if (internalContext.length === 0 && webSnippets.length === 0) {
       return { enriched: false, reason: "no_context" };
     }
 
-    // Call LLM
-    const userContent = buildUserContent(page.title, page.frontmatter.type as string, context);
+    // Build combined context and call LLM
+    const allContext = [...internalContext, ...webSnippets];
+    const userContent = buildUserContent(page.title, page.frontmatter.type as string, allContext);
     const raw = await this.callLLM(STUB_ENRICH_PROMPT, userContent);
     const parsed = this.parseJSON<{ summary: string; facts: string[] }>(raw);
     if (!parsed?.summary) {
       return { enriched: false, reason: "llm_failed" };
     }
 
+    // Enforce summary length cap
+    const summary = parsed.summary.slice(0, SUMMARY_MAX_LENGTH);
+
     // Build new body — preserve original auto-extracted line + any manual content
-    const enrichedBody = buildEnrichedBody(page.body ?? "", parsed.summary, parsed.facts);
+    const enrichedBody = buildEnrichedBody(page.body ?? "", summary, parsed.facts, internalContext);
 
     // BUG-1 fix: re-index FIRST, only write vault on success
     try {
@@ -95,7 +133,7 @@ export class StubEnrichManager {
     const now = new Date().toISOString();
     this.pages.update(slug, {
       body: enrichedBody,
-      extra: { enriched_at: now },
+      extra: { enriched_at: now, enriched_sources: sources },
     });
 
     return { enriched: true, reason: "enriched" };
@@ -221,7 +259,7 @@ function buildUserContent(title: string, type: string, contextParts: string[]): 
   return `实体名称：${title}\n实体类型：${type}\n\n## 碎片化信息\n\n${contextText}`;
 }
 
-function buildEnrichedBody(originalBody: string, summary: string, facts: string[]): string {
+function buildEnrichedBody(originalBody: string, summary: string, facts: string[], internalContext?: string[]): string {
   // BUG-3 fix: separate auto-extracted header from manual content
   const lines = originalBody.split("\n");
   const headerLines: string[] = [];
@@ -245,6 +283,14 @@ function buildEnrichedBody(originalBody: string, summary: string, facts: string[
   parts.push("**关键事实：**");
   for (const fact of facts) {
     parts.push(`- ${fact}`);
+  }
+  // Vault records — internal context snippets
+  if (internalContext && internalContext.length > 0) {
+    parts.push("");
+    parts.push("**Vault 记录：**");
+    for (const ctx of internalContext.slice(0, 3)) {
+      parts.push(`- ${ctx.slice(0, 100)}`);
+    }
   }
   // Preserve any manual content the user added — collapse consecutive blank lines
   if (manualLines.some(l => l.trim().length > 0)) {

@@ -350,7 +350,7 @@ export function register(program: Command) {
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
       const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
-        deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined,
+        deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance, search: deps.search } : undefined,
         deps.lance, undefined, pages);
       if (report.locked) {
         console.log(`⚠️ Dream — ${report.timestamp.slice(0, 10)} 已跳过`);
@@ -459,7 +459,7 @@ export function register(program: Command) {
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages });
-      const mgr = new StubEnrichManager(deps.db, deps.llm, deps.embedding, deps.lance, pages, pipeline, logger);
+      const mgr = new StubEnrichManager(deps.db, deps.llm, deps.embedding, deps.lance, pages, pipeline, logger, deps.search);
 
       if (slug) {
         console.log(`🔍 Enriching stub: ${slug}`);

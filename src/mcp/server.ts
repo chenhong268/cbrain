@@ -19,6 +19,7 @@ export interface CBrainDeps {
   profileDir?: string;
   runtimePath: string;
   watcher?: import("../core/watcher.js").FileWatcher;
+  search?: import("../search/provider.js").SearchProvider;
 }
 
 /** Register dream job handler and start the background worker. Shared by MCP and HTTP paths. */

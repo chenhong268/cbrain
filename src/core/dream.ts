@@ -14,6 +14,7 @@ import { IndexGenerator } from "./indexes.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
+import type { SearchProvider } from "../search/provider.js";
 import { SealManager } from "./seal.js";
 import { StubEnrichManager } from "./stub-enrich.js";
 import { ContentPipeline } from "./pipeline.js";
@@ -75,7 +76,7 @@ export async function runDream(
   logger: Logger,
   insightMgr?: InsightManager,
   dbPath?: string,
-  sealDeps?: { llm: LLMProvider; embedding: EmbeddingProvider; lance: LanceDBManager },
+  sealDeps?: { llm: LLMProvider; embedding: EmbeddingProvider; lance: LanceDBManager; search?: SearchProvider },
   lance?: LanceDBManager,
   onStageProgress?: (stage: string, detail: unknown) => void,
   sharedPages?: PageManager,
@@ -212,6 +213,7 @@ export async function runDream(
       const stubEnrichMgr = new StubEnrichManager(
         db, sealDeps.llm, sealDeps.embedding, sealDeps.lance,
         stubPages, stubPipeline, logger,
+        sealDeps.search,
       );
       stubEnrichReport = await stubEnrichMgr.enrichAll();
       if (stubEnrichReport.enriched > 0) logger.info("dream", `Stub enrichment: ${stubEnrichReport.enriched} 页富化`);

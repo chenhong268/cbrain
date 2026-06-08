@@ -31,6 +31,10 @@ export interface CBrainConfig {
     llm_api_key?: string;
     llm_base_url?: string;
   };
+  search?: {
+    provider?: string; // "searxng"
+    base_url?: string; // e.g. "http://localhost:8080"
+  };
 }
 
 export function resolveRuntimePath(config: CBrainConfig): string {
@@ -121,5 +125,12 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
 
   const profileDir = dirname(resolve(config.dbPath));
 
-  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config) };
+  // Search provider (optional — graceful degradation when absent)
+  let search: CBrainDeps["search"];
+  if (config.search?.provider === "searxng" && config.search.base_url) {
+    const { SearXNGSearchProvider } = require("../search/provider.js");
+    search = new SearXNGSearchProvider(config.search.base_url);
+  }
+
+  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined };
 }
