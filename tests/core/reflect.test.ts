@@ -826,4 +826,31 @@ describe("ReflectManager", () => {
       expect(isAutoApplicable).toBe(false);
     });
   });
+
+  describe("runDiscovery dedup", () => {
+    test("two runs produce one durable row; second report has total=0", async () => {
+      // Set up enough entities with indirect links for candidate pool
+      insertEntity(db, "entities/a", "Alpha", 5);
+      insertEntity(db, "entities/b", "Beta", 5);
+      insertEntity(db, "entities/c", "Gamma", 5);
+      insertEntity(db, "entities/d", "Delta", 5);
+      db.insertLink("entities/a", "entities/b", "related");
+      db.insertLink("entities/b", "entities/c", "related");
+      db.insertLink("entities/c", "entities/d", "related");
+
+      const llm = mockLLM([]);
+      const mgr = new ReflectManager(db, pages, llm);
+
+      const report1 = await mgr.runDiscovery("test-run-1");
+      const report2 = await mgr.runDiscovery("test-run-2");
+
+      // Second run must not report any new findings
+      expect(report2.total).toBe(0);
+      expect(report2.autoApplicable).toBe(0);
+
+      // Physical uniqueness: count rows in discoveries
+      const count = (db.rawDb.prepare("SELECT COUNT(*) as c FROM discoveries").get() as any).c;
+      expect(count).toBe(report1.total);
+    });
+  });
 });

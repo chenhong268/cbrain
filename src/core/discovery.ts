@@ -80,8 +80,6 @@ export class DiscoveryManager {
     const run = (t: DiscoveryType) => !types || types.includes(t);
     this.llmBudget = MAX_LLM_BUDGET;
 
-    this.db.clearPendingDiscoveries();
-
     const graph = this.buildAdjacency();
     const results: DetectionResult[] = [];
 
@@ -90,7 +88,7 @@ export class DiscoveryManager {
     if (run("gap")) { for (const r of this.detectGaps(graph)) results.push(r); }
     if (run("contradiction")) results.push(...await this.detectContradictions());
 
-    // Deduplicate by entity pair key
+    // Deduplicate by entity pair key within this run
     const seen = new Set<string>();
     const deduped = results.filter(r => {
       const key = [r.type, ...r.entities.sort()].join("|");
@@ -99,17 +97,20 @@ export class DiscoveryManager {
       return true;
     });
 
-    // Persist
+    // Persist via upsert — only truly new rows count toward totals
     const byType: Record<string, number> = {};
     const byActionable: Record<string, number> = { high: 0, medium: 0, low: 0 };
     const highActionable: DetectionResult[] = [];
+    let newCount = 0;
 
     for (const r of deduped) {
-      const id = this.db.addDiscovery(
+      const { id, inserted } = this.db.upsertDiscovery(
         r.type, r.entities, r.score,
         undefined, undefined, r.actionable,
         false, r.metadata,
       );
+      if (!inserted) continue;
+      newCount++;
       byType[r.type] = (byType[r.type] ?? 0) + 1;
       byActionable[r.actionable]++;
       if (r.actionable === "high") {
@@ -118,10 +119,11 @@ export class DiscoveryManager {
       }
     }
 
+    // Only newly inserted high-actionable findings get LLM enrichment
     const enrichment = await this.enrichHighActionable(highActionable);
 
-    this.logger?.info("discovery", `检测完成: ${deduped.length} 个发现`);
-    return { total: deduped.length, byType, byActionable, highActionable, enrichment };
+    this.logger?.info("discovery", `检测完成: ${newCount} 个新发现`);
+    return { total: newCount, byType, byActionable, highActionable, enrichment };
   }
 
   detectBridges(adj?: Map<string, Set<string>>): DetectionResult[] {

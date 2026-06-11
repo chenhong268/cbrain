@@ -71,7 +71,7 @@ function seedDiscovery(
   suggestion: string | null,
   metadata: Record<string, unknown> | null = null,
 ): number {
-  const id = db.addDiscovery(type, entities, score, undefined, undefined, actionable, false, metadata ?? undefined);
+  const { id } = db.upsertDiscovery(type, entities, score, undefined, undefined, actionable, false, metadata ?? undefined);
   if (suggestion !== null) {
     db.updateDiscoverySuggestion(id, suggestion);
   }
@@ -111,9 +111,10 @@ describe("MCP Discovery Tools", () => {
       seedPage(db, "entities/org-c", "组织C", "entity/organization");
       seedPage(db, "concepts/topic-d", "主题D", "concept/concept");
 
-      // Seed 5 gaps — all pass filter
+      // Seed 5 distinct gaps — all pass filter
       for (let i = 0; i < 5; i++) {
-        seedDiscovery(db, "gap", [`entities/org-c`], 0.5 + i * 0.1, "medium", null, {
+        seedPage(db, `entities/org-${i}`, `组织${i}`, "entity/organization");
+        seedDiscovery(db, "gap", [`entities/org-${i}`], 0.5 + i * 0.1, "medium", null, {
           mention_count: 10 + i,
           link_count: 0,
         });
@@ -205,10 +206,9 @@ describe("MCP Discovery Tools", () => {
     });
 
     test("custom limit overrides default 3", async () => {
-      seedPage(db, "entities/org-c", "组织C", "entity/organization");
-
       for (let i = 0; i < 8; i++) {
-        seedDiscovery(db, "gap", ["entities/org-c"], 0.5 + i * 0.05, "medium", null, {
+        seedPage(db, `entities/org-${i}`, `组织${i}`, "entity/organization");
+        seedDiscovery(db, "gap", [`entities/org-${i}`], 0.5 + i * 0.05, "medium", null, {
           mention_count: 10 + i,
           link_count: 0,
         });

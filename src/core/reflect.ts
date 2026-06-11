@@ -491,15 +491,18 @@ export class ReflectManager {
       const actionable = this.classifyActionable(score, type, typeA, typeB);
 
       const isAutoApplicable = score >= 0.8 && !!pageA && !!pageB;
-      const id = this.db.addDiscovery(type, pair, Math.round(score * 100) / 100, {
+      const { id, inserted } = this.db.upsertDiscovery(type, pair, Math.round(score * 100) / 100, {
         distance: dist,
         sourceJaccard: Math.round(jaccard * 100) / 100,
       }, dreamRun, actionable, isAutoApplicable);
 
-      if (isAutoApplicable) autoApplicable++;
+      // Only inserted rows contribute to public/new-finding counters
+      if (!inserted) continue;
 
+      if (isAutoApplicable) autoApplicable++;
       byType[type] = (byType[type] ?? 0) + 1;
       byActionable[actionable]++;
+      total++;
 
       // LLM suggestion for actionable != low, budget limited
       if (actionable !== "low" && this.llm && suggestionCount < MAX_SUGGESTION_LLM) {
@@ -527,8 +530,6 @@ export class ReflectManager {
           // LLM failure is non-fatal, suggestion stays null
         }
       }
-
-      total++;
     }
 
     this.db.setConfig("discovery.last_run_at", new Date().toISOString());
