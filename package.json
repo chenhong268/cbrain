@@ -24,11 +24,14 @@
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "lint": "bun run typecheck && bun run typecheck:tests && biome lint ./src ./tests",
     "check": "bun run lint && bun test",
-    "check:install-network": "bash bin/check-install-smoke.sh"
+    "check:install-network": "bun bin/check-install-network.ts",
+    "check:install-tag": "bash bin/check-install-smoke.sh",
+    "gate:offline": "bun bin/check-first-recall-gate.ts"
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.27.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "apache-arrow": "^18.1.0",
     "commander": "^13.0.0",
     "gray-matter": "^4.0.3",
     "p-limit": "^7.3.0",

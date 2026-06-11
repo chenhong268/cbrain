@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import {
@@ -469,8 +469,8 @@ describe("cbrain skill-pack", () => {
       expect(entries.length).toBeGreaterThan(0);
       const pkgDir = join(installRoot, entries[0]);
 
-      // Install dependencies into extracted package
-      execSync("bun install --production", { cwd: pkgDir, encoding: "utf-8", timeout: 120_000 });
+      // Use checkout deps (offline — no network needed; production install proven by check:install-network)
+      symlinkSync(join(PROJECT_DIR, "node_modules"), join(pkgDir, "node_modules"));
 
       // Run the extracted CLI from an unrelated cwd via subprocess
       const extractedBin = join(pkgDir, "src/cli/index.ts");
@@ -491,7 +491,7 @@ describe("cbrain skill-pack", () => {
 
       // Cleanup tarball
       rmSync(tarballPath, { force: true });
-    }, 180_000); // 3 min timeout for bun install + native deps
+    }, 30_000); // symlink deps — no install needed
   });
 
   // ── Target comparison (--target) ──
@@ -658,8 +658,9 @@ describe("cbrain skill-pack", () => {
 
       const entries = readdirSync(installRoot);
       pkgDir = join(installRoot, entries[0]);
-      execSync("bun install --production", { cwd: pkgDir, encoding: "utf-8", timeout: 120_000 });
-    }, 180_000);
+      // Use checkout deps (offline — production install proven by check:install-network)
+      symlinkSync(join(PROJECT_DIR, "node_modules"), join(pkgDir, "node_modules"));
+    }, 30_000); // symlink deps — no install needed
 
     afterAll(() => {
       if (existsSync(installRoot)) rmSync(installRoot, { recursive: true });
