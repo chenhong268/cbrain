@@ -109,6 +109,7 @@ export class WakeupDiff {
     // 2. Build snapshot data
     const currentPageRows = this.getCurrentPages();
     const totalLinks = this.db.getLinkCount();
+    const linkCounts = this.db.batchGetLinkCounts(currentPageRows.map(p => p.slug));
 
     const snapshotItems: SnapshotItem[] = currentPageRows.map(p => ({
       slug: p.slug,
@@ -116,7 +117,7 @@ export class WakeupDiff {
       content_hash: p.content_hash,
       tier: p.tier,
       mention_count: p.mention_count,
-      link_count: this.db.getLinkCountForSlug(p.slug),
+      link_count: linkCounts.get(p.slug) ?? 0,
       updated_at: p.updated_at,
       page_type: p.type,
       confidence_decay: p.confidence_decay,

@@ -2507,6 +2507,38 @@ export class CBrainDB {
     return row?.cnt ?? 0;
   }
 
+  batchGetLinkCounts(slugs: string[]): Map<string, number> {
+    const result = new Map<string, number>();
+    if (slugs.length === 0) return result;
+
+    // Single scan of links table, count per slug
+    const rows = this.prepare(
+      "SELECT from_slug, to_slug FROM links"
+    ).all() as Array<{ from_slug: string; to_slug: string }>;
+
+    const slugSet = new Set(slugs);
+    const counts = new Map<string, number>();
+
+    for (const { from_slug, to_slug } of rows) {
+      if (slugSet.has(from_slug)) {
+        counts.set(from_slug, (counts.get(from_slug) ?? 0) + 1);
+      }
+      // Self-link (A→A) already counted via from_slug; skip to avoid double-count
+      if (slugSet.has(to_slug) && to_slug !== from_slug) {
+        counts.set(to_slug, (counts.get(to_slug) ?? 0) + 1);
+      }
+    }
+
+    // Build result: requested slugs → count (0 if absent)
+    for (const slug of slugs) {
+      if (!result.has(slug)) {
+        result.set(slug, counts.get(slug) ?? 0);
+      }
+    }
+
+    return result;
+  }
+
   getHotnessStats(): { mentionP95: number; linkP95: number; activityP95: number } {
     const p95 = (col: string, table: string) => {
       const row = this.prepare(

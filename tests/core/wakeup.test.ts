@@ -257,3 +257,207 @@ describe("WakeupDiff", () => {
     expect(existsSync(latestJson)).toBe(true);
   });
 });
+
+describe("batchGetLinkCounts", () => {
+  const testDir = "/tmp/cbrain-test-batch-link-counts";
+  const dbPath = join(testDir, "test.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("batch counts match single-slug results for mixed links", () => {
+    // A→B (outgoing for A), B→C, A→D, C→A (incoming for A), D→D (self-link)
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)")
+      .run("entity/a", "entity/person", "A", "a.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)")
+      .run("entity/b", "entity/person", "B", "b.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)")
+      .run("entity/c", "entity/person", "C", "c.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)")
+      .run("entity/d", "entity/person", "D", "d.md", "h");
+
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')").run("entity/a", "entity/b");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')").run("entity/b", "entity/c");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')").run("entity/a", "entity/d");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')").run("entity/c", "entity/a");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')").run("entity/d", "entity/d");
+
+    const slugs = ["entity/a", "entity/b", "entity/c", "entity/d"];
+    const batch = db.batchGetLinkCounts(slugs);
+
+    // Verify batch matches single-slug for each
+    for (const slug of slugs) {
+      expect(batch.get(slug)).toBe(db.getLinkCountForSlug(slug));
+    }
+
+    // Specific expectations:
+    // A: A→B, A→D, C→A = 3
+    expect(batch.get("entity/a")).toBe(3);
+    // B: A→B, B→C = 2
+    expect(batch.get("entity/b")).toBe(2);
+    // C: B→C, C→A = 2
+    expect(batch.get("entity/c")).toBe(2);
+    // D: A→D, D→D = 2 (self-link counts once)
+    expect(batch.get("entity/d")).toBe(2);
+  });
+
+  test("empty input returns empty map", () => {
+    const batch = db.batchGetLinkCounts([]);
+    expect(batch.size).toBe(0);
+  });
+
+  test("duplicate input slugs do not affect results", () => {
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)").run("a", "entity/person", "A", "a.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)").run("b", "entity/person", "B", "b.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')").run("a", "b");
+
+    const batch = db.batchGetLinkCounts(["a", "a", "b", "b"]);
+    expect(batch.get("a")).toBe(1);
+    expect(batch.get("b")).toBe(1);
+    expect(batch.size).toBe(2);
+  });
+
+  test("isolated slug gets count 0", () => {
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)")
+      .run("entity/x", "entity/person", "X", "x.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)")
+      .run("a", "record", "A", "a.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)")
+      .run("b", "record", "B", "b.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')").run("a", "b");
+
+    const batch = db.batchGetLinkCounts(["entity/x"]);
+    expect(batch.get("entity/x")).toBe(0);
+  });
+
+  test("self-link counts once", () => {
+    db.rawDb.prepare("INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)")
+      .run("entity/self", "entity/person", "Self", "self.md", "h");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')").run("entity/self", "entity/self");
+
+    const batch = db.batchGetLinkCounts(["entity/self"]);
+    expect(batch.get("entity/self")).toBe(1);
+    expect(batch.get("entity/self")).toBe(db.getLinkCountForSlug("entity/self"));
+  });
+});
+
+describe("WakeupDiff N+1 elimination", () => {
+  const testDir = "/tmp/cbrain-test-wakeup-n1";
+  const dbPath = join(testDir, "test.sqlite");
+  const outputsDir = join(testDir, "runtime");
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(outputsDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("wakeup uses batch API, no per-page getLinkCountForSlug calls", async () => {
+    const db = new CBrainDB(dbPath);
+
+    // Seed several pages with links
+    for (let i = 0; i < 5; i++) {
+      db.rawDb.prepare(
+        "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run(`entity/p${i}`, "entity/person", `P${i}`, `p${i}.md`, `h${i}`);
+    }
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')")
+      .run("entity/p0", "entity/p1");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')")
+      .run("entity/p1", "entity/p2");
+    db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')")
+      .run("entity/p3", "entity/p0");
+
+    // Wrap db to spy on getLinkCountForSlug
+    let singleSlugCallCount = 0;
+    const originalMethod = db.getLinkCountForSlug.bind(db);
+    db.getLinkCountForSlug = (slug: string) => {
+      singleSlugCallCount++;
+      return originalMethod(slug);
+    };
+
+    const diff = new WakeupDiff(db, outputsDir);
+    await diff.run();
+
+    // getLinkCountForSlug must not be called — batch API used instead
+    expect(singleSlugCallCount).toBe(0);
+
+    db.close();
+  });
+});
+
+describe("batchGetLinkCounts — scale", () => {
+  const testDir = "/tmp/cbrain-test-batch-scale";
+  const dbPath = join(testDir, "test.sqlite");
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("500 pages with links — batch uses bounded SQL calls", () => {
+    const db = new CBrainDB(dbPath);
+    const N = 500;
+
+    // Seed N pages
+    const insertPage = db.rawDb.prepare(
+      "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+    );
+    for (let i = 0; i < N; i++) {
+      insertPage.run(`entity/p${i}`, "entity/person", `P${i}`, `p${i}.md`, `h${i}`);
+    }
+
+    // Seed ~2N links (each page links to next, plus some random)
+    const insertLink = db.rawDb.prepare(
+      "INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, '提及')"
+    );
+    for (let i = 0; i < N - 1; i++) {
+      insertLink.run(`entity/p${i}`, `entity/p${i + 1}`);
+    }
+    for (let i = 0; i < 50; i++) {
+      insertLink.run(`entity/p${i}`, `entity/p${N - 1 - i}`);
+    }
+
+    const slugs: string[] = [];
+    for (let i = 0; i < N; i++) slugs.push(`entity/p${i}`);
+
+    // Count SQL statements issued during batchGetLinkCounts
+    let sqlCallCount = 0;
+    const originalPrepare = db.rawDb.prepare.bind(db.rawDb);
+    db.rawDb.prepare = (sql: string) => {
+      sqlCallCount++;
+      return originalPrepare(sql);
+    };
+
+    const batch = db.batchGetLinkCounts(slugs);
+
+    // SQL call count must be bounded — one scan, not N
+    expect(sqlCallCount).toBeLessThanOrEqual(3);
+
+    // Verify correctness against single-slug for a sample
+    for (let i = 0; i < N; i += 100) {
+      expect(batch.get(`entity/p${i}`)).toBe(db.getLinkCountForSlug(`entity/p${i}`));
+    }
+
+    // All slugs present in result
+    expect(batch.size).toBe(N);
+
+    db.close();
+  });
+});
