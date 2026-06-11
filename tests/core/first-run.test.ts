@@ -55,14 +55,22 @@ describe("FirstRunDoctor", () => {
       db.close();
 
       const origDir = process.cwd();
+      const origKey = process.env.ZHIPU_API_KEY;
+      process.env.ZHIPU_API_KEY = "test-key-for-pass-check";
       process.chdir(testDir);
       try {
         const report = await runFirstRunDoctor();
         expect(report.overallStatus).not.toBe("fail");
         expect(report.checks.length).toBeGreaterThan(0);
         expect(report.recommendedNextAction).toBeTruthy();
+        expect(typeof report.recommendedNextAction).toBe("string");
+        expect(report.nextAction).toBeTruthy();
+        expect(report.nextAction.id).toBeTruthy();
+        expect(report.readinessState).toBeTruthy();
       } finally {
         process.chdir(origDir);
+        if (origKey !== undefined) process.env.ZHIPU_API_KEY = origKey;
+        else delete process.env.ZHIPU_API_KEY;
       }
     });
 
@@ -77,6 +85,8 @@ describe("FirstRunDoctor", () => {
         expect(configCheck).toBeDefined();
         expect(configCheck!.status).toBe("fail");
         expect(report.recommendedNextAction).toContain("cbrain init");
+        expect(report.nextAction.id).toBe("run_init");
+        expect(report.nextAction.message).toContain("cbrain init");
       } finally {
         process.chdir(origDir);
       }
@@ -249,7 +259,7 @@ describe("FirstRunDoctor", () => {
       }
     });
 
-    test("passes LanceDB check (creates empty DB)", async () => {
+    test("warns on LanceDB for new install (missing index)", async () => {
       const config = makeConfig();
       mkdirSync(config.vaultPath, { recursive: true });
       writeConfig(config);
@@ -261,13 +271,10 @@ describe("FirstRunDoctor", () => {
       process.chdir(testDir);
       try {
         const report = await runFirstRunDoctor();
-        // New integrity probe uses prefixed IDs: index:lance_lance:path
+        // New install — lance path doesn't exist, should warn
         const lance = report.checks.find((c) => c.id.startsWith("index:lance_"));
-        expect(lance!.status).toBe("pass");
-        // Empty install — message should mention sync or new install
-        if (lance!.message.includes("新安装")) {
-          expect(lance!.message).toContain("cbrain sync");
-        }
+        expect(lance!.status).toBe("warn");
+        expect(lance!.message).toContain("cbrain sync");
       } finally {
         process.chdir(origDir);
       }
@@ -389,6 +396,10 @@ describe("FirstRunDoctor", () => {
       ).run("entities/x", "content for x");
       db.close();
 
+      // Set API key so credential check passes (LanceDB is the real failure here)
+      const origKey = process.env.ZHIPU_API_KEY;
+      process.env.ZHIPU_API_KEY = "test-key-for-lance-check";
+
       // Don't create lancePath — probe will detect missing path with SQLite data
       const origDir = process.cwd();
       process.chdir(testDir);
@@ -400,6 +411,8 @@ describe("FirstRunDoctor", () => {
         expect(report.recommendedNextAction).toMatch(/LanceDB|sync/);
       } finally {
         process.chdir(origDir);
+        if (origKey !== undefined) process.env.ZHIPU_API_KEY = origKey;
+        else delete process.env.ZHIPU_API_KEY;
       }
     });
 
@@ -463,7 +476,8 @@ describe("FirstRunDoctor", () => {
       process.chdir(testDir);
       try {
         const report = await runFirstRunDoctor();
-        expect(report.recommendedNextAction).toContain("cbrain init");
+        expect(report.nextAction.id).toBe("run_init");
+        expect(report.nextAction.message).toContain("cbrain init");
       } finally {
         process.chdir(origDir);
       }
@@ -483,6 +497,7 @@ describe("FirstRunDoctor", () => {
         const report = await runFirstRunDoctor();
         // Should mention serve (may have warns for empty DB, but that's ok)
         expect(report.recommendedNextAction).toBeTruthy();
+        expect(report.nextAction).toBeTruthy();
       } finally {
         process.chdir(origDir);
       }
@@ -501,6 +516,8 @@ describe("FirstRunDoctor", () => {
           { id: "db:open", category: "db", status: "fail", message: "failed to open", action: "check permissions" },
         ],
         recommendedNextAction: "fix db",
+        nextAction: { id: "run_init", command: "cbrain init", message: "fix db" },
+        readinessState: "no_config",
       };
       const output = formatHuman(report);
       expect(output).toContain("Config");
@@ -517,30 +534,37 @@ describe("FirstRunDoctor", () => {
           { id: "config:exists", category: "config", status: "pass", message: "ok" },
         ],
         recommendedNextAction: "ready",
+        nextAction: { id: "mcp_config", command: "cbrain mcp-config", message: "ready" },
+        readinessState: "ready",
       };
       const output = formatHuman(report);
       expect(output).toContain("Result: PASS");
     });
 
-    test("shows recommendedNextAction as Next line", () => {
+    test("shows nextAction.message as Next line", () => {
       const report: FirstRunReport = {
         overallStatus: "fail",
         checks: [
           { id: "config:exists", category: "config", status: "fail", message: "no config" },
         ],
         recommendedNextAction: "运行 cbrain init 创建配置",
+        nextAction: { id: "run_init", command: "cbrain init --dir <path>", message: "运行 cbrain init 创建配置" },
+        readinessState: "no_config",
       };
       const output = formatHuman(report);
       expect(output).toContain("Next: 运行 cbrain init 创建配置");
+      expect(output).toContain("cbrain init --dir <path>");
     });
 
-    test("omits Next line when recommendedNextAction is empty", () => {
+    test("omits Next line when nextAction has empty message", () => {
       const report: FirstRunReport = {
         overallStatus: "pass",
         checks: [
           { id: "config:exists", category: "config", status: "pass", message: "ok" },
         ],
         recommendedNextAction: "",
+        nextAction: { id: "mcp_config", command: "", message: "" },
+        readinessState: "ready",
       };
       const output = formatHuman(report);
       expect(output).not.toContain("Next:");
@@ -548,20 +572,175 @@ describe("FirstRunDoctor", () => {
   });
 
   describe("formatJson", () => {
-    test("produces valid JSON with all fields", () => {
+    test("produces valid JSON with all fields including readinessState", () => {
       const report: FirstRunReport = {
         overallStatus: "warn",
         checks: [
           { id: "test", category: "test", status: "warn", message: "test msg", action: "fix it" },
         ],
         recommendedNextAction: "do something",
+        nextAction: { id: "sync_index", command: "cbrain sync", message: "do something" },
+        readinessState: "missing_index",
       };
       const output = formatJson(report);
       const parsed = JSON.parse(output);
       expect(parsed.overallStatus).toBe("warn");
       expect(parsed.checks).toHaveLength(1);
       expect(parsed.checks[0].id).toBe("test");
+      expect(typeof parsed.recommendedNextAction).toBe("string");
       expect(parsed.recommendedNextAction).toBe("do something");
+      expect(parsed.nextAction.id).toBe("sync_index");
+      expect(parsed.nextAction.command).toBe("cbrain sync");
+      expect(parsed.readinessState).toBe("missing_index");
+    });
+  });
+
+  // ── Credential readiness ──
+
+  describe("credentials check", () => {
+    test("fails when ZHIPU_API_KEY not set", async () => {
+      const config = makeConfig();
+      mkdirSync(config.vaultPath, { recursive: true });
+      writeConfig(config);
+
+      const origDir = process.cwd();
+      const origKey = process.env.ZHIPU_API_KEY;
+      delete process.env.ZHIPU_API_KEY;
+      process.chdir(testDir);
+      try {
+        const report = await runFirstRunDoctor();
+        const cred = report.checks.find((c) => c.id === "credentials:api_key");
+        expect(cred).toBeDefined();
+        expect(cred!.status).toBe("fail");
+        expect(report.nextAction.id).toBe("set_credentials");
+        expect(report.readinessState).toBe("missing_creds");
+      } finally {
+        process.chdir(origDir);
+        if (origKey !== undefined) process.env.ZHIPU_API_KEY = origKey;
+      }
+    });
+
+    test("passes when ZHIPU_API_KEY set in env", async () => {
+      const config = makeConfig();
+      mkdirSync(config.vaultPath, { recursive: true });
+      writeConfig(config);
+
+      const db = new CBrainDB(config.dbPath);
+      db.close();
+
+      const origDir = process.cwd();
+      const origKey = process.env.ZHIPU_API_KEY;
+      process.env.ZHIPU_API_KEY = "test-key-for-doctor-check";
+      process.chdir(testDir);
+      try {
+        const report = await runFirstRunDoctor();
+        const cred = report.checks.find((c) => c.id === "credentials:api_key");
+        expect(cred).toBeDefined();
+        expect(cred!.status).toBe("pass");
+        // With creds + DB + vault, should NOT be missing_creds
+        expect(report.readinessState).not.toBe("missing_creds");
+      } finally {
+        process.chdir(origDir);
+        if (origKey !== undefined) process.env.ZHIPU_API_KEY = origKey;
+        else delete process.env.ZHIPU_API_KEY;
+      }
+    });
+  });
+
+  // ── ReadinessState transitions ──
+
+  describe("readinessState transitions", () => {
+    test("no_config when config missing", async () => {
+      const origDir = process.cwd();
+      process.chdir(testDir);
+      try {
+        const report = await runFirstRunDoctor();
+        expect(report.readinessState).toBe("no_config");
+      } finally {
+        process.chdir(origDir);
+      }
+    });
+
+    test("missing_creds when config exists but no API key", async () => {
+      const config = makeConfig();
+      mkdirSync(config.vaultPath, { recursive: true });
+      writeConfig(config);
+
+      const db = new CBrainDB(config.dbPath);
+      db.close();
+
+      const origDir = process.cwd();
+      const origKey = process.env.ZHIPU_API_KEY;
+      delete process.env.ZHIPU_API_KEY;
+      process.chdir(testDir);
+      try {
+        const report = await runFirstRunDoctor();
+        expect(report.readinessState).toBe("missing_creds");
+      } finally {
+        process.chdir(origDir);
+        if (origKey !== undefined) process.env.ZHIPU_API_KEY = origKey;
+      }
+    });
+
+    test("ready when all checks pass with credentials and index", async () => {
+      const config = makeConfig();
+      mkdirSync(config.vaultPath, { recursive: true });
+      mkdirSync(config.lancePath, { recursive: true });
+      writeConfig(config);
+
+      const db = new CBrainDB(config.dbPath);
+      // Seed a chunk so lance probe sees SQLite data and expects a matching LanceDB table
+      db.rawDb.prepare(
+        "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+      ).run("entities/x", "X", "entities/x.md", "h1");
+      db.rawDb.prepare(
+        "INSERT OR IGNORE INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 0)",
+      ).run("entities/x", "content for x");
+      db.close();
+
+      // Create a valid LanceDB chunks table to match SQLite data
+      const lancedb = await import("@lancedb/lancedb");
+      const conn = await lancedb.connect(config.lancePath);
+      await conn.createTable("chunks", [{ pageSlug: "entities/x", chunkIndex: 0, vector: Array(1024).fill(0), text: "content for x" }]);
+      conn.close();
+
+      const origDir = process.cwd();
+      const origKey = process.env.ZHIPU_API_KEY;
+      process.env.ZHIPU_API_KEY = "test-key-for-ready-check";
+      process.chdir(testDir);
+      try {
+        const report = await runFirstRunDoctor();
+        expect(report.readinessState).toBe("ready");
+        expect(report.nextAction.id).toBe("mcp_config");
+      } finally {
+        process.chdir(origDir);
+        if (origKey !== undefined) process.env.ZHIPU_API_KEY = origKey;
+        else delete process.env.ZHIPU_API_KEY;
+      }
+    });
+
+    test("missing_index when fresh init with creds but no LanceDB", async () => {
+      const config = makeConfig();
+      mkdirSync(config.vaultPath, { recursive: true });
+      // Don't create lancePath — simulates fresh init with creds
+      writeConfig(config);
+
+      const db = new CBrainDB(config.dbPath);
+      db.close();
+
+      const origDir = process.cwd();
+      const origKey = process.env.ZHIPU_API_KEY;
+      process.env.ZHIPU_API_KEY = "test-key-for-missing-index";
+      process.chdir(testDir);
+      try {
+        const report = await runFirstRunDoctor();
+        expect(report.readinessState).toBe("missing_index");
+        expect(report.nextAction.id).toBe("sync_index");
+      } finally {
+        process.chdir(origDir);
+        if (origKey !== undefined) process.env.ZHIPU_API_KEY = origKey;
+        else delete process.env.ZHIPU_API_KEY;
+      }
     });
   });
 });

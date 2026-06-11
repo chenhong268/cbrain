@@ -86,6 +86,19 @@ alias cbrain='bun run /path/to/cbrain/src/cli/index.ts'
 cbrain init --dir /path/to/mybrain
 ```
 
+加 `--json` 输出机器可读的 JSON（供 Agent/脚本解析）：
+
+```bash
+cbrain init --dir /path/to/mybrain --json
+# → { "status": "ok", "configPath": "...", "readinessState": "missing_creds", "nextAction": { ... } }
+```
+
+如果配置已存在，`init` 默认拒绝覆盖。加 `--force` 显式覆盖（保留 DB 和 vault 数据）：
+
+```bash
+cbrain init --dir /path/to/mybrain --force
+```
+
 这会创建：
 
 ```
@@ -170,6 +183,7 @@ cbrain doctor --first-run
 | 类别 | 检什么 |
 |:-----|:-------|
 | Config | `cbrain.json` 存在、路径配置完整 |
+| Credentials | `ZHIPU_API_KEY` 已配置（环境变量或 config） |
 | Paths | vault 存在、数据库目录可写、runtime 目录可写、runtime 不在 vault 里 |
 | Database | SQLite 连接正常、WAL 模式激活、表结构完整 |
 | Index | FTS5 全文索引就绪、LanceDB 向量库可连接 |
@@ -179,14 +193,15 @@ cbrain doctor --first-run
 全部通过会看到：
 
 ```
-✓ Config    cbrain.json found, paths configured
-✓ Paths     vault, db, runtime all accessible
-✓ Database  SQLite connected, WAL active, schema ready
-✓ Index     FTS5 built, LanceDB connected
-✓ Services  No stale locks
-✓ MCP       Ready
+✓ Config       cbrain.json found, paths configured
+✓ Credentials  ZHIPU_API_KEY available
+✓ Paths        vault, db, runtime all accessible
+✓ Database     SQLite connected, WAL active, schema ready
+✓ Index        FTS5 built, LanceDB connected
+✓ Services     No stale locks
+✓ MCP          Ready
 
-All checks passed. Next: connect your Agent.
+All checks passed.
 ```
 
 如果用 Agent 做自动化检查，加 `--json`：
@@ -195,7 +210,7 @@ All checks passed. Next: connect your Agent.
 cbrain doctor --first-run --json
 ```
 
-返回结构化 JSON，每项有 `status: pass|fail|warn`，Agent 可解析后决定下一步。
+返回结构化 JSON，每项有 `status: pass|fail|warn`，还有 `readinessState`（`no_config` / `missing_creds` / `missing_index` / `service_active` / `ready`）、`recommendedNextAction`（string，向后兼容）和 `nextAction`（`{ id, command, message }` 结构化对象）。Agent 应优先解析 `nextAction`。
 
 ---
 
@@ -221,7 +236,35 @@ cbrain status                  # 查看整体统计
 
 ---
 
-## 第六步：启动服务，接入 Agent
+## 第六步：获取 Agent 连接配置
+
+```bash
+cbrain mcp-config
+```
+
+输出直接可用的 MCP 配置 JSON：
+
+```json
+{
+  "mcpServers": {
+    "cbrain": {
+      "command": "<自动检测的命令>",
+      "args": ["serve"],
+      "env": {
+        "CBRAIN_CONFIG": "/path/to/mybrain/cbrain.json"
+      }
+    }
+  }
+}
+```
+
+把这个 JSON 复制到你的 Agent 配置文件即可。`cbrain mcp-config` 自动检测当前安装方式（全局安装或源码运行），无需手动编辑命令路径。
+
+> **注意：** 输出不含任何 API Key。凭证通过环境变量或 config 文件提供，不会泄露到 Agent 配置里。
+
+---
+
+## 第七步：启动服务
 
 ### HTTP 模式（推荐用于开发调试）
 
@@ -242,37 +285,13 @@ HTTP 模式会自动启动文件监听，vault 里的文件变化会实时同步
 cbrain serve
 ```
 
-Agent 配置示例（Claude Desktop）：
-
-```json
-{
-  "mcpServers": {
-    "cbrain": {
-      "command": "cbrain",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-从源码运行时：
-
-```json
-{
-  "mcpServers": {
-    "cbrain": {
-      "command": "bun",
-      "args": ["run", "/path/to/cbrain/src/cli/index.ts", "serve"]
-    }
-  }
-}
-```
+Agent 配置用 `cbrain mcp-config` 生成（见第六步），不需要手写。
 
 > **提示：** `serve` 默认 MCP stdio 模式。加 `--http` 切到 HTTP 模式。两个模式不能同时跑（PID 锁保护）。
 
 ---
 
-## 第七步：Smoke Test
+## 第八步：Smoke Test
 
 跑完上面所有步骤后，用这个清单确认一切正常：
 

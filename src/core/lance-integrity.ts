@@ -119,11 +119,12 @@ export async function checkLanceIntegrity(
           action: rebuildAction(),
         });
       } else {
-        // New install — no chunks anywhere
+        // New install — no chunks anywhere, but index is not built yet
         checks.push({
           id: "lance:path",
-          status: "pass",
+          status: "warn",
           message: "LanceDB 路径不存在（新安装），运行 cbrain sync 创建",
+          action: "运行 cbrain sync 创建向量索引",
         });
       }
       // Cannot proceed without path
@@ -176,11 +177,12 @@ export async function checkLanceIntegrity(
     }
 
     if (sqliteSlugs.length === 0 && !hasChunksTable) {
-      // New install, no data anywhere
+      // New install, no data anywhere — index not built yet
       checks.push({
         id: "lance:chunks_table",
-        status: "pass",
+        status: "warn",
         message: "无索引数据（新安装），运行 cbrain sync 创建",
+        action: "运行 cbrain sync 创建向量索引",
       });
       return finalize(checks);
     }

@@ -15,6 +15,7 @@ import { register as edgeCmds } from "./commands/edges.js";
 import { register as maintenanceCmds } from "./commands/maintenance.js";
 import { register as serverCmds } from "./commands/server.js";
 import { register as backupCmds } from "./commands/backup.js";
+import { register as mcpConfigCmds } from "./commands/mcp-config.js";
 
 brainCmds(program);
 contentCmds(program);
@@ -23,5 +24,6 @@ edgeCmds(program);
 maintenanceCmds(program);
 serverCmds(program);
 backupCmds(program);
+mcpConfigCmds(program);
 
 program.parse();

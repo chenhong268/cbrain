@@ -41,13 +41,14 @@ describe("LanceDB integrity probe", () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
   });
 
-  test("new install: no SQLite chunks, no LanceDB → pass", async () => {
+  test("new install: no SQLite chunks, no LanceDB → warn (index not built)", async () => {
     deleteChunksTable(db);
     const report = await checkLanceIntegrity(lancePath, db);
-    expect(report.overallStatus).toBe("pass");
+    expect(report.overallStatus).toBe("warn");
     expect(report.checks).toHaveLength(1);
     expect(report.checks[0].id).toBe("lance:path");
     expect(report.checks[0].message).toContain("新安装");
+    expect(report.checks[0].action).toContain("cbrain sync");
   });
 
   test("SQLite has chunks, LanceDB path missing → fail with safe recovery hint", async () => {
@@ -186,7 +187,8 @@ describe("LanceDB probe caller error paths", () => {
   test("probe does not close caller's DB handle", async () => {
     const db = makeDb(dbPath);
     const report = await checkLanceIntegrity(lancePath, db);
-    expect(report.overallStatus).toBe("pass");
+    // New install → warn (index not built)
+    expect(report.overallStatus).toBe("warn");
 
     // DB still usable — caller owns it
     const count = db.getPageCount();

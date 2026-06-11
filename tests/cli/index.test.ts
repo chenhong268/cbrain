@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, readFileSync, } from "node:fs";
+import { existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";
@@ -52,6 +52,90 @@ describe("CLI", () => {
       expect(() => {
         execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8", stdio: "pipe" });
       }).toThrow();
+    });
+
+    test("--json outputs valid InitResult JSON", () => {
+      const brainDir = join(testDir, "mybrain-json");
+      const stdout = execSync(`${BIN} init --dir ${brainDir} --json`, { encoding: "utf-8" });
+
+      const result = JSON.parse(stdout);
+      expect(result.status).toBe("ok");
+      expect(result.created).toBe(true);
+      expect(result.configPath).toBeTruthy();
+      expect(result.readinessState).toBe("missing_creds");
+      expect(result.nextAction.id).toBe("set_credentials");
+      expect(result.nextAction.command).toBeTruthy();
+      expect(result.nextAction.message).toBeTruthy();
+    });
+
+    test("--json returns missing_index when creds present", () => {
+      const brainDir = join(testDir, "mybrain-creds");
+      const stdout = execSync(`${BIN} init --dir ${brainDir} --json`, {
+        encoding: "utf-8",
+        env: { ...process.env, ZHIPU_API_KEY: "test-key" },
+      });
+
+      const result = JSON.parse(stdout);
+      expect(result.status).toBe("ok");
+      expect(result.readinessState).toBe("missing_index");
+      expect(result.nextAction.id).toBe("sync_index");
+    });
+
+    test("--json has no surrounding prose", () => {
+      const brainDir = join(testDir, "mybrain-clean");
+      const stdout = execSync(`${BIN} init --dir ${brainDir} --json`, { encoding: "utf-8" });
+
+      expect(stdout.trim()[0]).toBe("{");
+      expect(stdout.trim().at(-1)).toBe("}");
+    });
+
+    test("--force overwrites existing config", () => {
+      const brainDir = join(testDir, "mybrain-force");
+      execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
+
+      // Second init without --force should fail
+      expect(() => {
+        execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8", stdio: "pipe" });
+      }).toThrow();
+
+      // With --force should succeed
+      const stdout = execSync(`${BIN} init --dir ${brainDir} --force --json`, { encoding: "utf-8" });
+      const result = JSON.parse(stdout);
+      expect(result.status).toBe("ok");
+    });
+
+    test("writes runtimePath in generated config", () => {
+      const brainDir = join(testDir, "mybrain-rt");
+      execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
+
+      const config = JSON.parse(readFileSync(join(brainDir, "cbrain.json"), "utf-8"));
+      expect(config.runtimePath).toBe(join(brainDir, "runtime"));
+    });
+
+    test("handles paths with spaces", () => {
+      const brainDir = join(testDir, "my brain");
+      const stdout = execSync(`${BIN} init --dir "${brainDir}" --json`, { encoding: "utf-8" });
+
+      const result = JSON.parse(stdout);
+      expect(result.status).toBe("ok");
+      expect(existsSync(join(brainDir, "cbrain.json"))).toBe(true);
+      expect(existsSync(join(brainDir, "vault/records"))).toBe(true);
+    });
+
+    test("--json error has no surrounding prose on failure", () => {
+      const brainDir = join(testDir, "mybrain-err");
+      execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
+
+      let stdout = "";
+      try {
+        execSync(`${BIN} init --dir ${brainDir} --json`, { encoding: "utf-8", stdio: "pipe" });
+      } catch (e: any) {
+        stdout = e.stdout ?? "";
+      }
+
+      const result = JSON.parse(stdout);
+      expect(result.status).toBe("error");
+      expect(result.errorMessage).toBeTruthy();
     });
   });
 

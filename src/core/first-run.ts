@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "
 import { dirname, join, resolve, relative } from "node:path";
 import type { CBrainConfig } from "../cli/context.js";
 import { loadConfigSafe, resolveRuntimePath } from "../cli/context.js";
+import type { ReadinessState, NextAction } from "../cli/init-types.js";
 import { CBrainDB } from "../storage/sqlite.js";
 import { WatcherLock } from "../utils/watcher-lock.js";
 import { checkLanceIntegrity } from "./lance-integrity.js";
@@ -27,7 +28,10 @@ export interface CheckResult {
 export interface FirstRunReport {
   readonly overallStatus: CheckStatus;
   readonly checks: ReadonlyArray<CheckResult>;
+  /** @deprecated Use `nextAction` for structured data. Kept as string for backward compat. */
   readonly recommendedNextAction: string;
+  readonly nextAction: NextAction;
+  readonly readinessState: ReadinessState;
 }
 
 interface FirstRunContext {
@@ -346,6 +350,22 @@ function checkServices(ctx: FirstRunContext): CheckResult[] {
   return results;
 }
 
+// ── Check: Credentials ──
+
+function checkCredentials(ctx: FirstRunContext): CheckResult[] {
+  const envKey = process.env.ZHIPU_API_KEY;
+  const configKey = ctx.config?.embedding?.apiKey;
+  const hasCreds = !!(envKey || configKey);
+
+  return [{
+    id: "credentials:api_key",
+    category: "credentials",
+    status: hasCreds ? ("pass" as const) : ("fail" as const),
+    message: hasCreds ? "ZHIPU_API_KEY available" : "ZHIPU_API_KEY not set",
+    action: hasCreds ? undefined : "export ZHIPU_API_KEY=your-key 或在 cbrain.json 中设置 embedding.apiKey",
+  }];
+}
+
 // ── Check: MCP Guidance ──
 
 function checkMcp(_ctx: FirstRunContext): CheckResult[] {
@@ -371,6 +391,7 @@ export async function runFirstRunDoctor(): Promise<FirstRunReport> {
   const allChecks = await Promise.all([
     Promise.resolve(checkConfig(ctx)),
     Promise.resolve(checkPaths(ctx)),
+    Promise.resolve(checkCredentials(ctx)),
     checkDatabase(ctx),
     checkIndexes(ctx),
     Promise.resolve(checkServices(ctx)),
@@ -382,40 +403,79 @@ export async function runFirstRunDoctor(): Promise<FirstRunReport> {
   const hasWarn = checks.some((c) => c.status === "warn");
   const overallStatus: CheckStatus = hasFail ? "fail" : hasWarn ? "warn" : "pass";
 
-  return { overallStatus, checks, recommendedNextAction: deriveNextAction(checks) };
+  const nextAction = deriveNextAction(checks);
+
+  return {
+    overallStatus,
+    checks,
+    recommendedNextAction: nextAction.message,
+    nextAction,
+    readinessState: deriveReadinessState(checks),
+  };
 }
 
 // ── Next Action ──
 
-function deriveNextAction(checks: ReadonlyArray<CheckResult>): string {
+function deriveNextAction(checks: ReadonlyArray<CheckResult>): NextAction {
   const failed = new Set(checks.filter((c) => c.status === "fail").map((c) => c.id));
+  const warns = new Set(checks.filter((c) => c.status === "warn").map((c) => c.id));
 
   if (failed.has("config:exists") || failed.has("config:vaultPath") || failed.has("config:dbPath")) {
-    return "运行 cbrain init 创建配置";
+    return { id: "run_init", command: "cbrain init --dir <path>", message: "运行 cbrain init 创建配置" };
+  }
+  if (failed.has("credentials:api_key")) {
+    return { id: "set_credentials", command: "export ZHIPU_API_KEY=your-key", message: "设置 ZHIPU_API_KEY 环境变量" };
   }
   if (failed.has("db:open")) {
-    return "检查 dbPath 配置和目录权限";
+    return { id: "run_init", command: "cbrain init --dir <path>", message: "检查 dbPath 配置和目录权限" };
   }
   if (failed.has("paths:vaultExists")) {
-    return "创建 vault 目录或检查 cbrain.json 中的 vaultPath";
+    return { id: "fix_paths", command: "cbrain init --dir <path>", message: "创建 vault 目录或检查 cbrain.json 中的 vaultPath" };
   }
   if (failed.has("services:watcherLock")) {
-    return "清理 stale watcher lock 后运行 cbrain serve --http";
+    return { id: "serve", command: "cbrain serve --http", message: "清理 stale watcher lock 后运行 cbrain serve --http" };
   }
 
-  const warns = new Set(checks.filter((c) => c.status === "warn").map((c) => c.id));
   const hasLanceFail = failed.has("index:lance_probe") || [...failed].some(id => id.startsWith("index:lance_") && checks.find(c => c.id === id)?.status === "fail");
-  const hasLanceWarn = [...warns].some(id => id.startsWith("index:lance_"));
-
   if (hasLanceFail) {
-    return "LanceDB 索引损坏，按 doctor 输出的修复步骤操作后运行 cbrain sync";
+    return { id: "sync_index", command: "cbrain sync", message: "LanceDB 索引损坏，按 doctor 输出的修复步骤操作后运行 cbrain sync" };
   }
 
+  const hasLanceWarn = [...warns].some(id => id.startsWith("index:lance_"));
   if (warns.has("db:tables") || warns.has("index:fts5") || hasLanceWarn) {
-    return "运行 cbrain sync 索引你的 vault";
+    return { id: "sync_index", command: "cbrain sync", message: "运行 cbrain sync 索引你的 vault" };
   }
 
-  return "准备就绪！运行 cbrain serve 连接你的 Agent";
+  // Check if a service is already active
+  const svcActive = checks.some(c =>
+    (c.id.startsWith("services:pidLock:") || c.id === "services:watcherLock") && c.status === "pass",
+  );
+  if (svcActive) {
+    return { id: "serve", command: "cbrain serve", message: "CBrain 服务正在运行" };
+  }
+
+  return { id: "mcp_config", command: "cbrain mcp-config", message: "准备就绪！运行 cbrain mcp-config 获取 Agent 连接配置" };
+}
+
+// ── Readiness State ──
+
+function deriveReadinessState(checks: ReadonlyArray<CheckResult>): ReadinessState {
+  const failed = new Set(checks.filter((c) => c.status === "fail").map((c) => c.id));
+  const warns = new Set(checks.filter((c) => c.status === "warn").map((c) => c.id));
+
+  if (failed.has("config:exists")) return "no_config";
+  if (failed.has("credentials:api_key")) return "missing_creds";
+
+  const svcActive = checks.some(c =>
+    (c.id.startsWith("services:pidLock:") || c.id === "services:watcherLock") && c.status === "pass",
+  );
+  if (svcActive) return "service_active";
+
+  const hasLanceFail = [...failed].some(id => id.startsWith("index:lance_"));
+  const hasLanceWarn = [...warns].some(id => id.startsWith("index:lance_"));
+  if (warns.has("db:tables") || warns.has("index:fts5") || hasLanceFail || hasLanceWarn) return "missing_index";
+
+  return "ready";
 }
 
 // ── Formatters ──
@@ -439,6 +499,7 @@ export function formatHuman(report: FirstRunReport): string {
   const categoryLabels: Record<string, string> = {
     config: "Config",
     paths: "Paths",
+    credentials: "Credentials",
     db: "Database",
     index: "Index",
     services: "Services",
@@ -476,8 +537,11 @@ export function formatHuman(report: FirstRunReport): string {
 
   lines.push("");
 
-  if (report.recommendedNextAction) {
-    lines.push(`  Next: ${report.recommendedNextAction}`);
+  if (report.nextAction?.message) {
+    lines.push(`  Next: ${report.nextAction.message}`);
+    if (report.nextAction.command) {
+      lines.push(`    ${report.nextAction.command}`);
+    }
     lines.push("");
   }
 
