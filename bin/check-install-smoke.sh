@@ -284,6 +284,42 @@ else
   fail "@lancedb/lancedb not found — native dependency may be missing"
 fi
 
+# ─── Stage 5: Skill pack verification (network mode only) ──────────────────
+
+if [[ "${MODE}" == "network" ]]; then
+  stage "skill-pack verification"
+
+  SKILL_PACK_OUTPUT="$(cbrain skill-pack --json 2>&1 || true)"
+  echo "  cbrain skill-pack --json → ${SKILL_PACK_OUTPUT}" | head -c 500
+
+  # Parse verificationStatus using bun (no jq dependency)
+  SKILL_PACK_STATUS="$(bun -e "
+  const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+  console.log(data.verificationStatus);
+  " <<< "${SKILL_PACK_OUTPUT}" 2>&1 || true)"
+
+  if [[ "${SKILL_PACK_STATUS}" == "pass" ]]; then
+    pass "skill-pack verificationStatus: pass"
+  else
+    fail "skill-pack verificationStatus: ${SKILL_PACK_STATUS:-parse_failed}"
+  fi
+
+  # Verify all 6 required files are present
+  SKILL_PACK_MISSING="$(bun -e "
+  const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+  console.log(data.missingFiles?.length ?? 'parse_error');
+  " <<< "${SKILL_PACK_OUTPUT}" 2>&1 || true)"
+
+  if [[ "${SKILL_PACK_MISSING}" == "0" ]]; then
+    pass "skill-pack: all required files present"
+  else
+    fail "skill-pack: ${SKILL_PACK_MISSING} missing required file(s)"
+  fi
+else
+  stage "skill-pack verification (skipped in local mode)"
+  pass "skill-pack: skipped (local fixture mode)"
+fi
+
 # ─── Summary ──────────────────────────────────────────────────────────────
 
 echo ""

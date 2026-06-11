@@ -6,6 +6,16 @@
   "bin": {
     "cbrain": "./src/cli/index.ts"
   },
+  "files": [
+    "src/",
+    "!src/**/*.test.ts",
+    "!src/**/__tests__/**",
+    "skills/",
+    "bin/check-install-smoke.sh",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "bun run src/cli/index.ts",
     "test": "bun test",

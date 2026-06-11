@@ -264,7 +264,52 @@ cbrain mcp-config
 
 ---
 
-## 第七步：启动服务
+## 第七步：验证 Hermes 技能包（可选）
+
+如果你使用 Hermes Agent，CBrain 附带一套完整的技能文件（路由规则、评估数据、交互协议）。验证技能包是否完整：
+
+```bash
+cbrain skill-pack
+```
+
+输出包含版本号、文件路径、完整性状态：
+
+```
+  CBrain Skill Pack v1.9.4
+    Pack:       /path/to/skills/
+    Entrypoint: /path/to/skills/SKILL.md (2,807 chars)
+
+    Required files: 6/6 present
+    Status: PASS
+
+    Copy:    cp -r /path/to/skills/ <target>/
+    Symlink: ln -s /path/to/skills <target>
+```
+
+把技能包复制到 Hermes 的技能目录：
+
+```bash
+# 1. 查看技能包路径
+cbrain skill-pack
+# 输出中的 Pack: 行即为技能包绝对路径
+
+# 2. 复制到 Hermes 技能目录（替换下面的 <pack-path>）
+mkdir -p ~/.hermes/skills/brain-ops/cbrain/
+cp -r "<pack-path>/" ~/.hermes/skills/brain-ops/cbrain/skills/
+```
+
+或者用符号链接（方便随 CBrain 升级自动同步）：
+
+```bash
+mkdir -p ~/.hermes/skills/brain-ops/cbrain/
+ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain/skills
+```
+
+> **注意：** Hermes 是目前主要验证的 Agent 运行时。其他 MCP 客户端（Claude Desktop、Cursor 等）可以连接 `cbrain serve`，但还没有同等的路由规则验证。
+
+---
+
+## 第八步：启动服务
 
 ### HTTP 模式（推荐用于开发调试）
 
@@ -291,7 +336,7 @@ Agent 配置用 `cbrain mcp-config` 生成（见第六步），不需要手写�
 
 ---
 
-## 第八步：Smoke Test
+## 第九步：Smoke Test
 
 跑完上面所有步骤后，用这个清单确认一切正常：
 
