@@ -39,27 +39,52 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 
 > **新用户？** 先看 [安装与上手指南](docs/install-onboarding.md) — 从零到跑起来，10 分钟。
 
-### Binary (recommended)
+### Bun global install (recommended)
 
-1. Install [Bun](https://bun.sh) (required runtime):
+1. Install [Bun](https://bun.sh) (≥ 1.2):
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
 ```
 
-2. Download the latest binary from [Releases](https://github.com/chenhong/cbrain/releases)
-
-3. Run:
+2. Install CBrain — always pin to an explicit tag:
 
 ```bash
-./cbrain init                              # 创建配置文件和目录
-export ZHIPU_API_KEY=your-zhipu-api-key    # 或编辑 cbrain.json 填入 API key
-./cbrain ingest --type text --title "实体A" --page-type entity "产品经理"
-./cbrain query "实体A"
-./cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
+bun install -g github:chenhong268/cbrain#v1.9.4
 ```
 
-### From source
+3. Verify:
+
+```bash
+cbrain --version
+```
+
+4. Run:
+
+```bash
+cbrain init                              # 创建配置文件和目录
+export ZHIPU_API_KEY=your-zhipu-api-key  # 或编辑 cbrain.json 填入 API key
+cbrain ingest --type text --title "实体A" --page-type entity "产品经理"
+cbrain query "实体A"
+cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
+```
+
+**Upgrading** — reinstall with the new tag:
+
+```bash
+bun remove -g cbrain
+bun install -g github:chenhong268/cbrain#v1.9.4
+```
+
+**Uninstalling:**
+
+```bash
+bun remove -g cbrain
+```
+
+> **Note:** Standalone release binaries are not available yet. The supported path is the version-pinned Bun global install shown above.
+
+### From source (developer / contributor)
 
 1. Install [Bun](https://bun.sh):
 
@@ -73,17 +98,15 @@ curl -fsSL https://bun.sh/install | bash
 git clone https://github.com/chenhong268/cbrain.git
 cd cbrain
 bun install
-cp cbrain.json.example cbrain.json         # 复制配置模板
-# 编辑 cbrain.json，填入你的 API key
 ```
 
-3. Run:
+3. Run with `bun run` instead of the global `cbrain` command:
 
 ```bash
-bun run src/cli/index.ts init
-bun run src/cli/index.ts ingest --type text --title "张三" "产品经理"
-bun run src/cli/index.ts query "张三"
-bun run src/cli/index.ts serve --http
+bun run dev init
+bun run dev ingest --type text --title "张三" "产品经理"
+bun run dev query "张三"
+bun run dev serve --http
 ```
 
 ### API Keys
@@ -517,7 +540,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for detailed version history.
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v1.0 | HTTP API, NER (glm-5-turbo), 41 MCP tools, binary distribution | ✅ |
+| v1.0 | HTTP API, NER (glm-5-turbo), 41 MCP tools, Bun global install | ✅ |
 | v1.1 | Insight 系统, Discovery 闭环, Agent 功能分类 | ✅ Current |
 | v1.2 | Web UI, faster embedding, multi-user | Planned |
 

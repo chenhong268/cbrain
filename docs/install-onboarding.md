@@ -23,7 +23,46 @@
 
 ## 第一步：安装
 
-### 方式 A：从源码（开发者推荐）
+### 方式 A：Bun 全局安装（推荐）
+
+```bash
+# 安装指定版本 — 始终锁定到明确 tag，不要用 main 或 latest
+bun install -g github:chenhong268/cbrain#v1.9.4
+```
+
+安装完成后确认：
+
+```bash
+cbrain --version   # 应输出 1.9.4
+```
+
+**PATH 注意事项：** Bun 全局安装的命令放在 `~/.bun/bin/`。如果 `cbrain` 命令找不到，确认 Bun 的 bin 目录在你的 PATH 里：
+
+```bash
+# 检查 Bun bin 目录
+bun pm bin -g
+# 应输出类似：/Users/you/.bun/bin
+
+# 如果不在 PATH，加到 shell 配置（.zshrc / .bashrc）：
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+**升级：**
+
+```bash
+bun remove -g cbrain
+bun install -g github:chenhong268/cbrain#v<新版本号>
+```
+
+**卸载：**
+
+```bash
+bun remove -g cbrain
+```
+
+> **注意：** 独立发行版二进制暂未提供。当前支持的路径是上面这条版本锁定的 Bun 全局安装命令。
+
+### 方式 B：从源码（开发者 / 贡献者）
 
 ```bash
 git clone https://github.com/chenhong268/cbrain.git /path/to/cbrain
@@ -38,10 +77,6 @@ bun install
 ```bash
 alias cbrain='bun run /path/to/cbrain/src/cli/index.ts'
 ```
-
-### 方式 B：二进制（开箱即用）
-
-从 [Releases](https://github.com/chenhong268/cbrain/releases) 下载对应平台的二进制，放到 PATH 里。
 
 ---
 
@@ -290,11 +325,21 @@ cbrain dream      # 一键夜间维护（备份+同步+充实+清理+健康检�
 
 ## 升级
 
+### 全局安装用户
+
+```bash
+bun remove -g cbrain
+bun install -g github:chenhong268/cbrain#v<新版本号>
+cbrain doctor --first-run  # 验证升级后一切正常
+```
+
+### 源码用户
+
 ```bash
 cd /path/to/cbrain
 git pull
 bun install              # 更新依赖
-cbrain doctor --first-run  # 验证升级后一切正常
+bun run dev doctor --first-run  # 验证升级后一切正常
 ```
 
 数据库 schema 变更会自动迁移（`initSchema` 检测新表/新列，`config` 表防重复迁移）。
@@ -315,7 +360,6 @@ cbrain backup             # 先备份再排查
 |:-----|:-----|:-----|
 | **`Permission denied` 写入 vault/runtime** | 目录权限不对 | `chmod 755 /path/to/vault /path/to/runtime`，确保当前用户有写权限 |
 | **`duplicate title` 错误** | 同名页面已存在 | CBrain 的 title 是唯一的。用 `cbrain list` 查看现有页面，改名或用已有 slug |
-| **`quarantine` 属性被 macOS 设置** | 下载的二进制被 Gatekeeper 拦截 | `xattr -d com.apple.quarantine /path/to/cbrain` |
 | **`watcher lock` / PID 锁残留** | 上次进程非正常退出 | 删除 `<profile>/cbrain-http.pid` 或 `<profile>/cbrain-stdio.pid`；或 `cbrain serve --force` |
 | **runtime 在 vault 里的警告** | `runtimePath` 配置指向 vault 内部 | 编辑 `cbrain.json`，把 `runtimePath` 改到 vault 外面（如 `/path/to/mybrain/runtime`） |
 | **`Port 3399 already in use`** | 已有一个 HTTP 服务在跑 | `kill $(lsof -ti:3399)` 关掉旧进程，或用 `--port` 换端口 |
