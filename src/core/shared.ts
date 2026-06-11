@@ -20,6 +20,16 @@ export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
+/**
+ * Normalize body for deterministic ingest fingerprinting.
+ * CRLF → LF, standalone CR → LF, trim surrounding whitespace only.
+ * Does NOT touch internal whitespace, punctuation, or Markdown structure.
+ */
+export function normalizeAndHashBody(body: string): string {
+  const normalized = body.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  return hashContent(normalized);
+}
+
 // ─── File Collection ─────────────────────────────────────────
 
 export async function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>, logger?: import("./logger.js").Logger): Promise<string[]> {

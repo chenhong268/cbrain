@@ -25,6 +25,7 @@ export interface PageRow {
   title: string;
   file_path: string;
   content_hash: string | null;
+  ingest_content_hash: string | null;
   tier: number;
   mention_count: number;
   expires_at: string | null;
@@ -351,6 +352,7 @@ export class CBrainDB {
     this.migrateDiscoveriesStatus();
     this.migrateDiscoveriesDedup();
     this.migrateProvenance();
+    this.migrateIngestContentHash();
     this.repairDirtyData();
   }
 
@@ -1087,6 +1089,35 @@ export class CBrainDB {
       "SELECT content_hash FROM pages WHERE slug = $slug"
     ).get({ $slug: slug }) as { content_hash: string | null } | undefined;
     return row?.content_hash ?? null;
+  }
+
+  /** Find a durable-source page (record or insight) by its ingest content hash. */
+  findDurableSourceByIngestHash(hash: string): { slug: string; title: string } | null {
+    return this.prepare(
+      "SELECT slug, title FROM pages WHERE ingest_content_hash = $hash AND type IN ('record', 'insight') LIMIT 1"
+    ).get({ $hash: hash }) as { slug: string; title: string } | null;
+  }
+
+  /** Get the ingest content hash for a specific page. */
+  getPageIngestHash(slug: string): string | null {
+    const row = this.prepare(
+      "SELECT ingest_content_hash FROM pages WHERE slug = $slug"
+    ).get({ $slug: slug }) as { ingest_content_hash: string | null } | undefined;
+    return row?.ingest_content_hash ?? null;
+  }
+
+  /** Update the ingest content hash for a page after successful commit. */
+  updateIngestHash(slug: string, hash: string): void {
+    this.prepare(
+      "UPDATE pages SET ingest_content_hash = $hash WHERE slug = $slug"
+    ).run({ $slug: slug, $hash: hash });
+  }
+
+  /** Clear the ingest content hash — call when body changes outside ingest. */
+  clearIngestHash(slug: string): void {
+    this.prepare(
+      "UPDATE pages SET ingest_content_hash = NULL WHERE slug = $slug"
+    ).run({ $slug: slug });
   }
 
   getPageTierAndMentions(slug: string): { tier: number; mention_count: number; activity_weight: number } | null {
@@ -2741,6 +2772,18 @@ export class CBrainDB {
     this.db.exec("PRAGMA foreign_keys = ON");
 
     this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v6_ontology_types', '1')").run();
+  }
+
+  private migrateIngestContentHash(): void {
+    const done = this.db.prepare("SELECT value FROM config WHERE key = 'migration_v7_ingest_content_hash'").get() as { value: string } | undefined;
+    if (done) return;
+
+    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === "ingest_content_hash")) {
+      this.db.exec("ALTER TABLE pages ADD COLUMN ingest_content_hash TEXT");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_ingest_hash ON pages(ingest_content_hash) WHERE ingest_content_hash IS NOT NULL");
+    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v7_ingest_content_hash', '1')").run();
   }
 
   private repairDirtyData(): void {

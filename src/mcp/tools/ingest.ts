@@ -16,10 +16,11 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
       tags: z.array(z.string().max(200)).optional().describe("Tags to apply"),
       pageType: z.enum(["record", "insight"]).optional().default("record").describe("Page type: record (doc/report/note) or insight. Entities/concepts are auto-classified via NER."),
       skipNer: z.boolean().optional().default(false).describe("Skip LLM entity extraction — use for simple entries"),
+      allowDuplicate: z.boolean().optional().default(false).describe("允许重复内容（正常会被去重跳过）"),
     },
-  }, async ({ content, type, title, tags, pageType, skipNer }) => {
+  }, async ({ content, type, title, tags, pageType, skipNer, allowDuplicate }) => {
     const classifiedType = classifyContentType(content, type);
-    const result = await ctx.ingest.ingest({ content, type: classifiedType, title, tags, pageType, skipNer });
+    const result = await ctx.ingest.ingest({ content, type: classifiedType, title, tags, pageType, skipNer, allowDuplicate });
 
     // Use actual page title from DB for display; fall back to caller title, then slug
     const page = result.slug ? ctx.db.getPage(result.slug) : null;

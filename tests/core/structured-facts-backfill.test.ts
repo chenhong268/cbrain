@@ -34,6 +34,7 @@ function makePage(overrides: Partial<PageRow> = {}): PageRow {
     title: "张三",
     file_path: "brain/entities/test-entity.md",
     content_hash: null,
+    ingest_content_hash: null,
     tier: 1,
     mention_count: 10,
     expires_at: null,

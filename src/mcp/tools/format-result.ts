@@ -59,6 +59,21 @@ export function formatIngestResult(
   result: IngestResult,
   effectiveTitle: string,
 ): CaptureEnvelope<IngestResult> {
+  // Duplicate detection — short-circuit before created/updated logic
+  if (result.outcome === "duplicate" && result.duplicateOf) {
+    const display = `这份内容已经存在于《${result.duplicateOf.title}》，未重复存入。`;
+    return {
+      display,
+      summary: {
+        status: "skipped",
+        title: result.duplicateOf.title,
+        captured: null,
+        message: display,
+      },
+      raw: result,
+    };
+  }
+
   const action = result.created ? "已记住" : "已更新";
   const hasNer = result.ner != null;
   const entities = result.ner?.entities ?? 0;

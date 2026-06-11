@@ -29,6 +29,7 @@ function mockIngestResult(overrides: Partial<IngestResult> = {}): IngestResult {
     created: true,
     linksExtracted: 0,
     ner: null,
+    outcome: "created",
     ...overrides,
   };
 }
@@ -169,6 +170,28 @@ describe("formatIngestResult", () => {
     const envelope = formatIngestResult(result, "无LLM");
     expect(envelope.display).toContain("已记住：无LLM");
     expect(envelope.summary.captured).toBeNull();
+  });
+
+  test("duplicate: natural language display, status=skipped, title=existing page title", () => {
+    const result = mockIngestResult({
+      created: false,
+      outcome: "duplicate",
+      duplicateOf: { slug: "records/yi-you-zai-mian-ye", title: "已存在的页面" },
+    });
+    const envelope = formatIngestResult(result, "被拒绝的新标题");
+
+    // Display: natural language referencing existing page title
+    expect(envelope.display).toContain("已经存在于《已存在的页面》");
+    expect(envelope.display).toContain("未重复存入");
+    expect(envelope.summary.status).toBe("skipped");
+    // Title should be the EXISTING page title, not the rejected new title
+    expect(envelope.summary.title).toBe("已存在的页面");
+    expect(envelope.summary.captured).toBeNull();
+    // No slug or hash exposed in display
+    expect(envelope.display).not.toContain("records/");
+    expect(envelope.display).not.toContain("slug");
+    assertNoInternalTerms(envelope.display);
+    assertNoInternalTerms(envelope.summary.message);
   });
 });
 

@@ -21,6 +21,7 @@ describe("C1: CaptureEnvelope structure", () => {
     slug: "brain/records/test",
     created: true,
     linksExtracted: 0,
+    outcome: "created",
   };
 
   const stubDialogue: DialogueIngestResult = {

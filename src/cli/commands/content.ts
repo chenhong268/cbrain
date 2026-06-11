@@ -14,6 +14,7 @@ export function register(program: Command) {
     .option("--tags <tags>", "Comma-separated tags")
     .option("--page-type <type>", "Page type: entity|concept|record")
     .option("--no-ner", "Skip NER entity extraction")
+    .option("--allow-duplicate", "Allow duplicate content (normally deduped)")
     .argument("<content>", "Content to ingest (use @file to read from file)")
     .action(async (content, opts) => {
       const config = loadConfig();
@@ -31,9 +32,13 @@ export function register(program: Command) {
         fileTitle = basename(rawPath, extname(rawPath));
       }
       const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined;
-      const result = await ingest.ingest({ content: input, type: opts.type ?? "text", title: opts.title ?? fileTitle, tags, pageType: opts.pageType, skipNer: opts.ner === false });
-      console.log(result.created ? `✓ Created: ${result.slug}` : `✓ Updated: ${result.slug}`);
-      console.log(`  Links:   ${result.linksExtracted} wiki links extracted`);
+      const result = await ingest.ingest({ content: input, type: opts.type ?? "text", title: opts.title ?? fileTitle, tags, pageType: opts.pageType, skipNer: opts.ner === false, allowDuplicate: opts.allowDuplicate ?? false });
+      if (result.outcome === "duplicate") {
+        console.log(`- Duplicate: already exists as "${result.duplicateOf?.title}"`);
+      } else {
+        console.log(result.created ? `✓ Created: ${result.slug}` : `✓ Updated: ${result.slug}`);
+        console.log(`  Links:   ${result.linksExtracted} wiki links extracted`);
+      }
       deps.db.close();
     });
 

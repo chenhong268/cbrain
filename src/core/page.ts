@@ -13,7 +13,7 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
-import { hashContent, normalizePageType, canMerge, rewriteVaultLinks } from "./shared.js";
+import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody } from "./shared.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 
@@ -304,6 +304,12 @@ export class PageManager {
 
     const contentHash = hashContent(content);
     this.db.updatePageHash(slug, contentHash);
+
+    // Invalidate ingest dedup fingerprint only when body semantically changes
+    // (CRLF/trim-equivalent bodies should not clear the hash)
+    if (updates.body !== undefined && normalizeAndHashBody(updates.body) !== normalizeAndHashBody(page.body)) {
+      this.db.clearIngestHash(slug);
+    }
 
     if (updates.tags) {
       this.db.deleteTagsByPage(slug);

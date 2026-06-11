@@ -15,6 +15,7 @@ import {
   collectMarkdownFiles,
   DEFAULT_CHUNK_SIZE,
   normalizePageType,
+  normalizeAndHashBody,
 } from "./shared.js";
 import { ContentPipeline } from "./pipeline.js";
 
@@ -216,6 +217,16 @@ export class SyncManager {
 
         if (file.frontmatter?.tags && Array.isArray(file.frontmatter.tags)) {
           this.db.replaceTags(file.slug, file.frontmatter.tags as string[]);
+        }
+
+        // Invalidate ingest dedup fingerprint BEFORE the failure-prone embed/index path,
+        // but ONLY when the semantic body actually changed vs what produced the hash.
+        // Frontmatter-only changes preserve the existing ingest hash.
+        if (existing) {
+          const oldIngestHash = this.db.getPageIngestHash(file.slug);
+          if (oldIngestHash !== null && normalizeAndHashBody(file.body) !== oldIngestHash) {
+            this.db.clearIngestHash(file.slug);
+          }
         }
 
         // Build chunks + embedResults from cache, fall back to fresh embed
@@ -460,6 +471,16 @@ export class SyncManager {
 
     if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
       this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
+    }
+
+    // Invalidate ingest dedup fingerprint BEFORE the failure-prone embed/index path,
+    // but ONLY when the semantic body actually changed vs what produced the hash.
+    // Frontmatter-only changes preserve the existing ingest hash.
+    if (existing) {
+      const oldIngestHash = this.db.getPageIngestHash(effectiveSlug);
+      if (oldIngestHash !== null && normalizeAndHashBody(parsed.body) !== oldIngestHash) {
+        this.db.clearIngestHash(effectiveSlug);
+      }
     }
 
     const { chunks, embedResults } = await this.pipeline.embed(parsed.body);

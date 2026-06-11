@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { PageManager } from "./page.js";
 import { generateSlug, slugToFilePath } from "../utils/slug.js";
-import { normalizePageType, type PageType } from "./shared.js";
+import { normalizePageType, normalizeAndHashBody, type PageType } from "./shared.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
@@ -38,6 +38,7 @@ interface PageSnapshot {
   body: string;
   tags: string[];
   mentionLinks: Array<{ to: string; relation: string }>;
+  ingestHash: string | null;
 }
 
 function takeSnapshot(slug: string, db: CBrainDB, pages: PageManager): PageSnapshot | null {
@@ -46,7 +47,8 @@ function takeSnapshot(slug: string, db: CBrainDB, pages: PageManager): PageSnaps
   const links = db.getOutgoingLinks(slug)
     .filter(l => l.relation === "提及")
     .map(l => ({ to: l.to_slug, relation: l.relation }));
-  return { body: page.body, tags: [...(page.frontmatter.tags ?? [])], mentionLinks: links };
+  const ingestHash = db.getPageIngestHash(slug);
+  return { body: page.body, tags: [...(page.frontmatter.tags ?? [])], mentionLinks: links, ingestHash };
 }
 
 const ENTITY_FACTS_PROMPT = `You are a structured fact extractor. Given an entity's page content, extract concrete, verifiable facts as key-value pairs.
@@ -74,13 +76,18 @@ export interface IngestInput {
   tags?: string[];
   pageType?: "record" | "insight";
   skipNer?: boolean;
+  allowDuplicate?: boolean;
 }
+
+export type IngestOutcome = "created" | "updated" | "duplicate";
 
 export interface IngestResult {
   slug: string;
   created: boolean;
   linksExtracted: number;
   ner?: NerPipelineResult | null;
+  outcome: IngestOutcome;
+  duplicateOf?: { slug: string; title: string };
 }
 
 export class IngestManager {
@@ -112,14 +119,14 @@ export class IngestManager {
   async ingest(input: IngestInput): Promise<IngestResult> {
     const type = input.type ?? classifyContentType(input.content);
     if (type === "markdown") {
-      return this.ingestMarkdown(input.content, { title: input.title, pageType: input.pageType, tags: input.tags, skipNer: input.skipNer });
+      return this.ingestMarkdown(input.content, { title: input.title, pageType: input.pageType, tags: input.tags, skipNer: input.skipNer, allowDuplicate: input.allowDuplicate });
     }
     return this.ingestText(input);
   }
 
   private async ingestMarkdown(
     content: string,
-    overrides?: { title?: string; pageType?: string; tags?: string[]; skipNer?: boolean }
+    overrides?: { title?: string; pageType?: string; tags?: string[]; skipNer?: boolean; allowDuplicate?: boolean }
   ): Promise<IngestResult> {
     const parsed = parseFrontmatter(content);
 
@@ -134,7 +141,7 @@ export class IngestManager {
     const body = parsed.body;
     const effectiveTags = parsed.frontmatter.tags ?? overrides?.tags ?? [];
 
-    return this.ingestCore(slug, title, type, body, effectiveTags, !overrides?.skipNer);
+    return this.ingestCore(slug, title, type, body, effectiveTags, !overrides?.skipNer, overrides?.allowDuplicate);
   }
 
   private async ingestText(input: IngestInput): Promise<IngestResult> {
@@ -157,7 +164,7 @@ export class IngestManager {
     const body = input.content;
     const tags = input.tags ?? [];
 
-    return this.ingestCore(slug, title, type, body, tags, !input.skipNer);
+    return this.ingestCore(slug, title, type, body, tags, !input.skipNer, input.allowDuplicate);
   }
 
   private findExistingPersonSlug(title: string | undefined): string | null {
@@ -223,7 +230,7 @@ export class IngestManager {
         this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]),
       );
 
-      return { slug, created: false, linksExtracted, ner: nerResult };
+      return { slug, created: false, linksExtracted, ner: nerResult, outcome: "updated" as const };
     } catch (indexError) {
       if (snapshot) {
         await this.restoreSnapshot(slug, snapshot, indexError);
@@ -277,8 +284,49 @@ export class IngestManager {
   }
 
   private async ingestCore(
-    slug: string, title: string, type: PageType, body: string, tags: string[], doNer: boolean
+    slug: string, title: string, type: PageType, body: string, tags: string[], doNer: boolean,
+    allowDuplicate?: boolean
   ): Promise<IngestResult> {
+    // --- Dedup gate for durable source types (record / insight) ---
+    let bodyHash: string | undefined;
+    let overrideAudit: { matchedSlug: string; matchedHash: string } | null = null;
+    const isDurableSource = type === "record" || type === "insight";
+
+    if (isDurableSource) {
+      bodyHash = normalizeAndHashBody(body);
+
+      // Cross-slug: same body already exists under a different slug?
+      const match = this.db.findDurableSourceByIngestHash(bodyHash);
+      if (match && match.slug !== slug && !allowDuplicate) {
+        return {
+          slug,
+          created: false,
+          linksExtracted: 0,
+          outcome: "duplicate",
+          duplicateOf: { slug: match.slug, title: match.title },
+        };
+      }
+
+      // Same-slug same-body: re-ingest is a no-op
+      const existingHash = this.db.getPageIngestHash(slug);
+      if (existingHash === bodyHash && !allowDuplicate) {
+        const titleRow = this.db.getPageTitleAndType(slug);
+        return {
+          slug,
+          created: false,
+          linksExtracted: 0,
+          outcome: "duplicate",
+          duplicateOf: { slug, title: titleRow?.title ?? title },
+        };
+      }
+
+      // Override audit: saved for post-commit logging (after all writes succeed)
+      if (allowDuplicate && (match || existingHash === bodyHash)) {
+        overrideAudit = { matchedSlug: match?.slug ?? slug, matchedHash: bodyHash };
+      }
+    }
+
+    // --- Existing pipeline ---
     const { chunks, embedResults } = await this.pipeline.embed(body);
 
     const existedBefore = !!this.pages.getBySlug(slug);
@@ -329,7 +377,23 @@ export class IngestManager {
         this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]),
       );
 
-      return { slug, created: !existedBefore, linksExtracted, ner: nerResult };
+      // Post-commit: store ingest hash for durable source types
+      if (bodyHash) {
+        this.db.updateIngestHash(slug, bodyHash);
+      }
+
+      // Post-commit: log override audit only after all writes succeed
+      if (overrideAudit) {
+        this.pipeline.writeIngestLog(slug, "api", { duplicateOverride: true, matchedSlug: overrideAudit.matchedSlug, matchedHash: overrideAudit.matchedHash });
+      }
+
+      return {
+        slug,
+        created: !existedBefore,
+        linksExtracted,
+        ner: nerResult,
+        outcome: existedBefore ? "updated" : "created",
+      };
     } catch (indexError) {
       if (createdThisAttempt) {
         // New page: narrow cleanup — vault file + DB cascade + LanceDB
@@ -396,6 +460,13 @@ export class IngestManager {
       await this.pipeline.writeIndexes(slug, chunks, embedResults);
     } catch (e) {
       errors.push(e instanceof Error ? e : new Error(String(e)));
+    }
+
+    // 4. Restore original ingest hash (update() cleared it since body changed)
+    if (snapshot.ingestHash !== null) {
+      try {
+        this.db.updateIngestHash(slug, snapshot.ingestHash);
+      } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
     }
 
     if (errors.length > 0) {
