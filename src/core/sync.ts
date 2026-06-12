@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, access, rename, mkdir, unlink } from "node:fs/promises";
 import { join, relative, dirname } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
@@ -72,6 +72,12 @@ export class SyncManager {
   private lance: LanceDBManager;
   private pipeline: ContentPipeline;
   private chunkSize: number;
+  private _unlink: typeof unlink = unlink;
+
+  /** @internal Test seam for unlink fault injection. */
+  _setUnlink(fn: typeof unlink): void {
+    this._unlink = fn;
+  }
   private nerEngine: NerEngine | null;
   private pages: PageManager | null;
   private logger: Logger | null;
@@ -619,25 +625,68 @@ export class SyncManager {
     vaultPath: string,
   ): Promise<boolean> {
     if (incomingType !== "entity/person") return false;
-    if (!incomingSlug.startsWith("brain/entities/person/")) return false;
+    if (!incomingSlug.startsWith("brain/entities/person/")) return Promise.resolve(false);
 
     const collision = this.db.getPageByTitleExcluding(title, incomingSlug);
-    if (!collision || collision.type !== "record" || !collision.slug.startsWith("records/")) return false;
+    if (!collision || collision.type !== "record" || !collision.slug.startsWith("records/")) return Promise.resolve(false);
 
-    const oldFilePath = this.db.getPageFilePath(collision.slug);
-    this.db.movePage(collision.slug, incomingSlug, incomingType, incomingFilePath);
+    const oldSlug = collision.slug;
+    const collisionFull = this.db.getPage(oldSlug);
+    const oldType = collision.type;
+    const oldFilePath = this.db.getPageFilePath(oldSlug);
+    const oldHash: string | null = collisionFull?.content_hash ?? null;
+    const oldRelPath = collisionFull?.file_path ?? oldFilePath;
+    const oldAbsPath = oldFilePath ? join(vaultPath, oldFilePath) : null;
+
+    // Compute hash of incoming file
+    const incomingAbsPath = join(vaultPath, incomingFilePath);
+    let newHash: string;
+    try {
+      const incomingContent = readFileSync(incomingAbsPath, "utf-8");
+      newHash = hashContent(incomingContent);
+    } catch {
+      return Promise.resolve(false);
+    }
+
+    // DB move first (atomic with hash)
+    try {
+      this.db.movePage(oldSlug, incomingSlug, incomingType, incomingFilePath, newHash);
+    } catch (dbErr) {
+      this.logger?.error("sync", "promoteRecordCollision: DB move failed", {
+        oldSlug, newSlug: incomingSlug, error: dbErr,
+      });
+      return Promise.resolve(false);
+    }
+
     try { this.db.deleteConfig(`sync.skip.${incomingSlug}`); } catch { /* non-critical */ }
-    try { this.db.deleteConfig(`sync.skip.${collision.slug}`); } catch { /* non-critical */ }
+    try { this.db.deleteConfig(`sync.skip.${oldSlug}`); } catch { /* non-critical */ }
 
-    if (oldFilePath) {
+    // Delete old file — failure is a FAILED move, compensate DB back
+    if (oldAbsPath) {
       try {
-        await unlink(join(vaultPath, oldFilePath));
-      } catch { /* already gone or not writable; sync can still proceed */ }
+        await this._unlink(oldAbsPath);
+      } catch (fileErr) {
+        // Compensate: move DB back to old state
+        try {
+          this.db.movePage(incomingSlug, oldSlug, oldType, oldRelPath!, oldHash);
+        } catch (compensateErr) {
+          this.logger?.error("sync", "promoteRecordCollision: compensation failed after file delete failure", {
+            incomingSlug, oldSlug, fileErr, compensateErr,
+          });
+          throw new Error(
+            `Promote rollback incomplete: file delete failed (${fileErr}) and DB compensation failed (${compensateErr})`,
+          );
+        }
+        this.logger?.warn("sync", "promoteRecordCollision: old file delete failed, move compensated", {
+          oldSlug, oldAbsPath, error: fileErr,
+        });
+        return false;
+      }
     }
 
     this.logger?.info("sync", "同名 record 已升级为 person", {
       title,
-      oldSlug: collision.slug,
+      oldSlug,
       newSlug: incomingSlug,
     });
     return true;

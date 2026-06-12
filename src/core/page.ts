@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
   unlinkSync,
 } from "node:fs";
@@ -16,6 +17,22 @@ import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "..
 import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody } from "./shared.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
+import {
+  atomicSlugChange,
+  atomicTypeChange,
+  type MoveFsOps,
+} from "./atomic-move.js";
+
+export { RollbackIncompleteError, CleanupIncompleteError } from "./atomic-move.js";
+export type { MoveFsOps } from "./atomic-move.js";
+
+const defaultFsOps: MoveFsOps = {
+  writeFileSync,
+  renameSync,
+  unlinkSync,
+  existsSync,
+  mkdirSync,
+};
 
 export interface CreatePageInput {
   title: string;
@@ -83,6 +100,7 @@ export class PageManager {
   private cache = new Map<string, { page: Page; expires: number }>();
   private static CACHE_MAX = 200;
   private static CACHE_TTL = 30_000;
+  private _fs: MoveFsOps = defaultFsOps;
 
   constructor(db: CBrainDB, vaultPath: string, logger?: Logger, lance?: LanceDBManager) {
     this.db = db;
@@ -108,6 +126,11 @@ export class PageManager {
 
   private cacheDelete(slug: string): void {
     this.cache.delete(slug);
+  }
+
+  /** @internal Test seam for filesystem fault injection. */
+  _setFsOps(ops: Partial<MoveFsOps>): void {
+    this._fs = { ...defaultFsOps, ...ops };
   }
 
   create(input: CreatePageInput): Page {
@@ -239,39 +262,108 @@ export class PageManager {
     if (!page) return;
 
     const newSlug = canonicalSlug(slug, normalizedType);
-    const oldFilePath = join(this.vaultPath, page.file_path);
-
-    const frontmatter: PageFrontmatter = {
-      ...page.frontmatter,
-      type: normalizedType,
-      slug: newSlug,
-      updated_at: new Date().toISOString(),
-    };
 
     if (newSlug !== slug) {
-      const newFileName = slugToFilePath(newSlug);
-      const newFilePath = join(this.vaultPath, newFileName);
-      if (existsSync(newFilePath)) {
-        this.logger?.warn("page", "类型更新中止：目标文件已存在（同名实体冲突）", { oldSlug: slug, newSlug, targetFile: newFilePath });
-        return;
+      const frontmatter: PageFrontmatter = {
+        ...page.frontmatter,
+        type: normalizedType,
+        slug: newSlug,
+        updated_at: new Date().toISOString(),
+      };
+
+      try {
+        this.movePageAtomic(slug, newSlug, normalizedType, frontmatter, page.body);
+      } catch (err) {
+        this.logger?.error("page", "类型更新失败", { oldSlug: slug, newSlug, type: normalizedType, error: err });
+        throw err;
       }
-      mkdirSync(dirname(newFilePath), { recursive: true });
-      const content = stringifyFrontmatter(frontmatter, page.body);
-      writeFileSync(newFilePath, content, "utf-8");
-      unlinkSync(oldFilePath);
-      const contentHash = hashContent(content);
-      this.db.movePage(slug, newSlug, normalizedType, relative(this.vaultPath, newFilePath));
-      this.db.updatePageHash(newSlug, contentHash);
-      this.cacheDelete(slug);
-      this.cacheDelete(newSlug);
       this.logger?.info("page", "类型更新并移动文件", { oldSlug: slug, newSlug, type: normalizedType });
     } else {
-      const content = stringifyFrontmatter(frontmatter, page.body);
-      writeFileSync(oldFilePath, content, "utf-8");
-      const contentHash = hashContent(content);
-      this.db.updateType(slug, normalizedType);
-      this.db.updatePageHash(slug, contentHash);
+      // Slug unchanged — update type in-place with file/DB atomicity
+      this.updateTypeInPlace(slug, normalizedType, page);
+    }
+  }
+
+  /**
+   * Same-slug type change: delegates to shared atomicTypeChange.
+   * If DB fails, temp is deleted and nothing changes.
+   * If rename fails after DB success, DB is compensated back.
+   */
+  private updateTypeInPlace(slug: string, newType: string, page: Page): void {
+    const oldFilePath = join(this.vaultPath, page.file_path);
+    const frontmatter: PageFrontmatter = {
+      ...page.frontmatter,
+      type: newType,
+      updated_at: new Date().toISOString(),
+    };
+    const content = stringifyFrontmatter(frontmatter, page.body);
+    const contentHash = hashContent(content);
+
+    try {
+      // Get raw nullable hash from DB — Page interface converts NULL to ""
+      const rawOldHash = this.db.getPage(slug)?.content_hash ?? null;
+
+      atomicTypeChange(this._fs, this.db, {
+        slug,
+        oldType: page.type,
+        oldHash: rawOldHash,
+        newType,
+        absPath: oldFilePath,
+        stagedContent: content,
+        newHash: contentHash,
+      });
+    } finally {
       this.cacheDelete(slug);
+    }
+  }
+
+  /**
+   * Atomically move a page's slug/type with filesystem coordination.
+   * Delegates to shared atomicSlugChange for the stage→DB→publish→cleanup sequence.
+   * Old-file deletion failure is a FAILED move — DB is compensated back.
+   */
+  movePageAtomic(
+    oldSlug: string,
+    newSlug: string,
+    newType: string,
+    frontmatter: PageFrontmatter,
+    body: string,
+  ): void {
+    const page = this.getBySlug(oldSlug);
+    if (!page) throw new Error(`movePageAtomic: page not found: ${oldSlug}`);
+
+    const oldFilePath = join(this.vaultPath, page.file_path);
+    const newFileName = slugToFilePath(newSlug);
+    const newFilePath = join(this.vaultPath, newFileName);
+    const content = stringifyFrontmatter(frontmatter, body);
+    const contentHash = hashContent(content);
+
+    if (this._fs.existsSync(newFilePath)) {
+      throw new Error(`movePageAtomic: target file already exists: ${newFilePath}`);
+    }
+
+    const relativePath = relative(this.vaultPath, newFilePath);
+
+    // Get raw nullable hash from DB — Page interface converts NULL to ""
+    const rawOldHash = this.db.getPage(oldSlug)?.content_hash ?? null;
+
+    try {
+      atomicSlugChange(this._fs, this.db, {
+        oldSlug,
+        newSlug,
+        newType,
+        oldType: page.type,
+        oldRelPath: page.file_path,
+        oldHash: rawOldHash,
+        newRelPath: relativePath,
+        destAbsPath: newFilePath,
+        oldAbsPath: oldFilePath,
+        stagedContent: content,
+        newHash: contentHash,
+      });
+    } finally {
+      this.cacheDelete(oldSlug);
+      this.cacheDelete(newSlug);
     }
   }
 

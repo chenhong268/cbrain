@@ -1901,32 +1901,114 @@ export class CBrainDB {
     ).run({ $slug: slug, $type: newType });
   }
 
-  movePage(oldSlug: string, newSlug: string, newType: string, newFilePath: string): void {
+  /** Atomically update both type and content_hash for same-slug moves. */
+  updateTypeAndHash(slug: string, newType: string, contentHash: string | null): void {
+    this.db.transaction(() => {
+      this.prepare(
+        "UPDATE pages SET type = $type, content_hash = $hash, updated_at = CURRENT_TIMESTAMP WHERE slug = $slug"
+      ).run({ $slug: slug, $type: newType, $hash: contentHash });
+    })();
+  }
+
+  movePage(oldSlug: string, newSlug: string, newType: string, newFilePath: string, contentHash?: string | null): void {
+    // Pre-validation (outside transaction — fast fail on obvious errors)
+    if (oldSlug === newSlug) {
+      throw new Error(`movePage: oldSlug and newSlug must differ (got "${oldSlug}")`);
+    }
+    const existing = this.getPage(oldSlug);
+    if (!existing) {
+      throw new Error(`movePage: source page not found: "${oldSlug}"`);
+    }
+    const target = this.getPage(newSlug);
+    if (target) {
+      throw new Error(`movePage: target page already exists: "${newSlug}"`);
+    }
+
+    const hash = contentHash !== undefined ? contentHash : existing.content_hash;
+
     const tx = this.db.transaction(() => {
-      this.db.exec("PRAGMA foreign_keys = OFF");
-      this.prepare("UPDATE pages SET slug = $new, type = $type, file_path = $fp, updated_at = CURRENT_TIMESTAMP WHERE slug = $old")
-        .run({ $old: oldSlug, $new: newSlug, $type: newType, $fp: newFilePath });
+      // Defer FK checks until commit — lets us UPDATE pages.slug (PK) before
+      // child rows are updated. Unlike PRAGMA foreign_keys=OFF, this actually
+      // works inside a transaction.
+      this.db.exec("PRAGMA defer_foreign_keys = ON");
+
+      // 1. pages (primary key + type + file_path + content_hash in ONE update)
+      this.prepare(
+        "UPDATE pages SET slug = $new, type = $type, file_path = $fp, content_hash = $hash, updated_at = CURRENT_TIMESTAMP WHERE slug = $old"
+      ).run({ $old: oldSlug, $new: newSlug, $type: newType, $fp: newFilePath, $hash: hash });
+
+      // 2-4. links: from_slug, to_slug (FK), source_page_slug (no FK)
       this.prepare("UPDATE links SET from_slug = $new WHERE from_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
       this.prepare("UPDATE links SET to_slug = $new WHERE to_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE links SET source_page_slug = $new WHERE source_page_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
       this.prepare("UPDATE links SET context = REPLACE(context, $old, $new) WHERE context LIKE '%' || $old || '%'")
         .run({ $old: oldSlug, $new: newSlug });
+
+      // 5. tags
       this.prepare("UPDATE tags SET page_slug = $new WHERE page_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
+
+      // 6. chunks
       this.prepare("UPDATE chunks SET page_slug = $new WHERE page_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
+
+      // 7. versions
       this.prepare("UPDATE versions SET page_slug = $new WHERE page_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
+
+      // 8. aliases
       this.prepare("UPDATE aliases SET page_slug = $new WHERE page_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
+
+      // 9-10. timeline: page_slug (FK), source_page_slug (no FK)
       this.prepare("UPDATE timeline SET page_slug = $new WHERE page_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
+      this.prepare("UPDATE timeline SET source_page_slug = $new WHERE source_page_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+
+      // 11. mention_snapshots (FK, composite PK with snapshot_date)
+      this.prepare("UPDATE mention_snapshots SET slug = $new WHERE slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+
+      // 12. chunks_fts (virtual table, no FK)
       this.prepare("UPDATE chunks_fts SET page_slug = $new WHERE page_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
+
+      // 13. ingest_log (no FK)
       this.prepare("UPDATE ingest_log SET page_slug = $new WHERE page_slug = $old")
         .run({ $old: oldSlug, $new: newSlug });
-      this.db.exec("PRAGMA foreign_keys = ON");
+
+      // 14. query_feedback (no FK on slug column)
+      this.prepare("UPDATE query_feedback SET slug = $new WHERE slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
+
+      // 15. compounding_review_candidates.source_slugs_json (JSON array)
+      const jsonRows = this.prepare(
+        "SELECT id, source_slugs_json FROM compounding_review_candidates WHERE source_slugs_json LIKE '%' || $old || '%'"
+      ).all({ $old: oldSlug }) as Array<{ id: number; source_slugs_json: string }>;
+      for (const row of jsonRows) {
+        try {
+          const slugs: string[] = JSON.parse(row.source_slugs_json);
+          const updated = slugs.map(s => s === oldSlug ? newSlug : s);
+          this.prepare(
+            "UPDATE compounding_review_candidates SET source_slugs_json = $json WHERE id = $id"
+          ).run({ $json: JSON.stringify(updated), $id: row.id });
+        } catch {
+          // Malformed JSON — skip; non-critical data
+        }
+      }
+
+      // Integrity gate: reject commit if any FK violation remains
+      const violations = this.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
+      if (violations.length > 0) {
+        throw new Error(
+          `movePage: foreign key check failed with ${violations.length} violation(s): ` +
+          violations.map(v => `${v.table}[${v.rowid}] -> ${v.parent}`).join(", ")
+        );
+      }
     });
     tx();
   }

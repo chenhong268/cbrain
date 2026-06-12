@@ -9,6 +9,11 @@ import { ZhipuEmbeddingProvider } from "../../embedding/zhipu.js";
 import { ZhipuLLMProvider } from "../../llm/zhipu.js";
 import { DeepSeekLLMProvider } from "../../llm/deepseek.js";
 import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
+import {
+  atomicSlugChange,
+  atomicTypeChange,
+  type MoveFsOps,
+} from "../../core/atomic-move.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -45,6 +50,42 @@ export async function handleReindexVectors(
     db.close();
   }
   return exitCode;
+}
+
+/**
+ * Relocate a misplaced page — extracted for testability.
+ * Delegates to shared atomicSlugChange / atomicTypeChange.
+ */
+export function relocatePage(
+  fs: MoveFsOps,
+  db: CBrainDB,
+  params: {
+    oldSlug: string;
+    newSlug: string;
+    oldType: string;
+    newType: string;
+    oldRelPath: string;
+    newRelPath: string;
+    oldAbsPath: string;
+    destAbsPath: string;
+    stagedContent: string;
+    newHash: string;
+    oldHash: string | null;
+  },
+): void {
+  if (params.oldSlug !== params.newSlug) {
+    atomicSlugChange(fs, db, params);
+  } else {
+    atomicTypeChange(fs, db, {
+      slug: params.newSlug,
+      oldType: params.oldType,
+      oldHash: params.oldHash,
+      newType: params.newType,
+      absPath: params.oldAbsPath,
+      stagedContent: params.stagedContent,
+      newHash: params.newHash,
+    });
+  }
 }
 
 export function register(program: Command) {
@@ -826,8 +867,9 @@ export function register(program: Command) {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const { join } = await import("node:path");
-      const { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, readdirSync } = await import("node:fs");
+      const { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, renameSync, readdirSync } = await import("node:fs");
       const { parseFrontmatter, stringifyFrontmatter } = await import("../../utils/frontmatter.js");
+      const { hashContent } = await import("../../core/shared.js");
       const { getOntology } = await import("../../ontology/loader.js");
       const ontology = getOntology();
       const concreteTypes = new Set(ontology.getConcreteEntityTypes());
@@ -845,6 +887,7 @@ export function register(program: Command) {
       };
 
       type MisplacedFile = { name: string; path: string; frontmatterType: string; targetType: string; action: "move" | "fix-frontmatter" | "delete" | "skip" };
+
       const files: MisplacedFile[] = [];
 
       for (const f of readdirSync(recordsDir).filter(f => f.endsWith(".md"))) {
@@ -912,19 +955,42 @@ export function register(program: Command) {
 
           if (file.action === "move") {
             const vaultDir = ontology.getVaultDir(file.targetType);
-            const destDir = join(config.vaultPath, vaultDir);
-            mkdirSync(destDir, { recursive: true });
             const newSlug = `${vaultDir}/${file.name}`;
             const newFilePath = `${vaultDir}/${file.name}.md`;
             const fm = { ...frontmatter, type: file.targetType, slug: newSlug, updated_at: new Date().toISOString() };
-            writeFileSync(join(destDir, `${file.name}.md`), stringifyFrontmatter(fm, body), "utf-8");
-            unlinkSync(file.path);
             const oldSlug = (frontmatter as Record<string, unknown>).slug as string ?? `records/${file.name}`;
-            if (oldSlug !== newSlug) {
-              db.movePage(oldSlug, newSlug, file.targetType, newFilePath);
-            } else {
-              db.updateType(newSlug, file.targetType);
-            }
+            const stagedContent = stringifyFrontmatter(fm, body);
+            const newHash = hashContent(stagedContent);
+            const destAbsPath = join(config.vaultPath, newFilePath);
+
+            // Save old state for compensation
+            const oldPage = db.getPage(oldSlug);
+            const oldType = oldPage?.type ?? "record";
+            const oldRelPath = oldPage?.file_path ?? `${oldSlug}.md`;
+            const oldHash: string | null = oldPage?.content_hash ?? null;
+
+            const realFsOps: MoveFsOps = {
+              writeFileSync,
+              renameSync,
+              unlinkSync,
+              existsSync,
+              mkdirSync,
+            };
+
+            relocatePage(realFsOps, db, {
+              oldSlug,
+              newSlug,
+              oldType,
+              newType: file.targetType,
+              oldRelPath,
+              newRelPath: newFilePath,
+              oldAbsPath: file.path,
+              destAbsPath,
+              stagedContent,
+              newHash,
+              oldHash,
+            });
+
             moved++;
           } else if (file.action === "delete") {
             unlinkSync(file.path);
