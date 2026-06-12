@@ -64,6 +64,7 @@ export interface SyncPageResult {
   success: boolean;
   skipped?: boolean;
   error?: string;
+  diagnostics?: SyncDiagnostic[];
 }
 
 export class SyncManager {
@@ -447,7 +448,19 @@ export class SyncManager {
     if (skipHash && skipHash === contentHash) {
       const collision = this.db.getPageByTitleExcluding(title, effectiveSlug);
       if (collision) {
-        return { success: false, skipped: true, error: `Title collision: "${title}"` };
+        return {
+          success: false,
+          skipped: true,
+          error: `Title collision: "${title}"`,
+          diagnostics: [{
+            kind: "title_collision",
+            title,
+            incoming: { slug: effectiveSlug, type, filePath: relPath },
+            existing: { slug: collision.slug, type: collision.type, filePath: this.db.getPageFilePath(collision.slug) ?? "" },
+            message: `Title collision: "${title}"`,
+            filePath: relPath,
+          }],
+        };
       }
       // Collision resolved — clear skip hash and proceed with sync
       try { this.db.deleteConfig(`sync.skip.${effectiveSlug}`); } catch { /* non-critical */ }
@@ -463,7 +476,18 @@ export class SyncManager {
     } catch (err) {
       if (err instanceof TitleCollisionError) {
         try { this.db.setConfig(`sync.skip.${effectiveSlug}`, contentHash); } catch { /* non-critical */ }
-        return { success: false, error: err.message };
+        return {
+          success: false,
+          error: err.message,
+          diagnostics: [{
+            kind: "title_collision",
+            title: err.details.title,
+            incoming: err.details.incoming,
+            existing: err.details.existing,
+            message: err.message,
+            filePath: err.details.incoming.filePath,
+          }],
+        };
       }
       throw err;
     }

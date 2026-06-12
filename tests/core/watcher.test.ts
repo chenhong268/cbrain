@@ -650,6 +650,416 @@ describe("FileWatcher quarantine", () => {
   });
 });
 
+// ── Resolved failure handling (#179) ────────────────────────────────────
+
+describe("FileWatcher resolved failure handling", () => {
+  const testDir = "/tmp/cbrain-test-watcher-resolved";
+  const vaultPath = testDir;
+  let db: CBrainDB;
+  let syncManager: SyncManager;
+  let watcher: FileWatcher;
+  let logs: Array<{ module: string; message: string; details?: Record<string, unknown> }>;
+  let logger: Logger;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(":memory:");
+
+    logs = [];
+    logger = {
+      info: mock((module: string, message: string, details?: Record<string, unknown>) => {
+        logs.push({ module, message, details });
+      }),
+      warn: mock((module: string, message: string, details?: Record<string, unknown>) => {
+        logs.push({ module, message, details });
+      }),
+      error: mock(),
+    } as unknown as Logger;
+  });
+
+  afterEach(() => {
+    watcher?.stop();
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  // 1. Resolved { success: false } retries each scan, quarantines at threshold
+
+  test("resolved failure retries across scans and quarantines at threshold", async () => {
+    let callCount = 0;
+    const failSync: Partial<SyncManager> = {
+      syncPage: mock(async (_slug: string, _vp: string) => {
+        callCount++;
+        return { success: false, error: "NER service unavailable" };
+      }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = failSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "broken.md"), "---\ntitle: Broken\n---\nContent", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    // 3 scans → 3 syncPage calls → quarantine
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(callCount).toBe(3);
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // 4th scan — quarantined, no new call
+    const beforeCount = callCount;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(beforeCount);
+  });
+
+  // 2. Hash/mtime NOT updated on resolved failure
+
+  test("hash and mtime are not cached on resolved failure", async () => {
+    const failSync: Partial<SyncManager> = {
+      syncPage: mock(async () => ({ success: false, error: "boom" })),
+      removePage: mock(async () => {}),
+    };
+    syncManager = failSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "uncached.md"), "---\ntitle: Uncached\n---\nV1", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // syncPage was called (failure) but hash was NOT recorded
+    expect(failSync.syncPage).toHaveBeenCalledTimes(1);
+
+    // Second scan should re-detect the file (hash not cached)
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(failSync.syncPage).toHaveBeenCalledTimes(2);
+  });
+
+  // 3. { success: false, skipped: true, error } (persistent title collision) with structured diagnostic
+
+  test("resolved failure with skipped:true (title collision) still retries and quarantines", async () => {
+    let callCount = 0;
+    const collisionSync: Partial<SyncManager> = {
+      syncPage: mock(async () => {
+        callCount++;
+        return {
+          success: false,
+          skipped: true,
+          error: 'Title collision: "Renwu A"',
+          diagnostics: [{
+            kind: "title_collision" as const,
+            title: "Renwu A",
+            incoming: { slug: "collision", type: "record", filePath: "collision.md" },
+            existing: { slug: "brain/entities/person/renwu-a", type: "entity/person", filePath: "brain/entities/person/renwu-a.md" },
+            message: 'Title collision: "Renwu A"',
+            filePath: "collision.md",
+          }],
+        };
+      }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = collisionSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "collision.md"), "---\ntitle: Renwu A\n---\nContent", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(callCount).toBe(3);
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    const entries = watcher.getQuarantineEntries();
+    expect(entries[0].lastError).toContain("Title collision");
+
+    // Structured diagnostic preserved
+    const tc = entries[0].titleCollisionJson;
+    expect(tc).toBeTruthy();
+    expect(tc!.title).toBe("Renwu A");
+    expect(tc!.incoming.slug).toBe("collision");
+    expect(tc!.incoming.type).toBe("record");
+    expect(tc!.existing.slug).toBe("brain/entities/person/renwu-a");
+    expect(tc!.existing.type).toBe("entity/person");
+  });
+
+  // 4. { success: true, skipped: true } calls once, subsequent scans skip
+
+  test("successful skip records hash and is not re-synced", async () => {
+    let callCount = 0;
+    const skipSync: Partial<SyncManager> = {
+      syncPage: mock(async () => {
+        callCount++;
+        return { success: true, skipped: true };
+      }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = skipSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "skipped.md"), "---\ntitle: Skipped\n---\nContent", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(1);
+
+    // Second scan — hash cached, file unchanged, no new call
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(1);
+
+    // Log says "同步跳过" not "同步完成"
+    expect(logs.some(l => l.message === "同步跳过")).toBe(true);
+    expect(logs.some(l => l.message === "同步完成")).toBe(false);
+  });
+
+  // 5. Two resolved failures → third success: clears failure state
+
+  test("failure state cleared on subsequent success", async () => {
+    let callCount = 0;
+    const flakySync: Partial<SyncManager> = {
+      syncPage: mock(async () => {
+        callCount++;
+        if (callCount <= 2) return { success: false, error: "transient" };
+        return { success: true };
+      }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = flakySync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "flaky.md"), "---\ntitle: Flaky\n---\nContent", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    // Scan 1: failure
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Scan 2: failure (hash not cached, re-detects)
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Scan 3: success
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(3);
+    expect(watcher.getQuarantineSize()).toBe(0);
+
+    // Scan 4: hash cached, no new call
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(3);
+  });
+
+  // 6. Thrown error behavior does not regress
+
+  test("thrown errors still trigger quarantine (no regression)", async () => {
+    const throwSync: Partial<SyncManager> = {
+      syncPage: mock(async () => { throw new Error("thrown error"); }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = throwSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "thrower.md"), "---\ntitle: Thrower\n---\nContent", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(watcher.getQuarantineSize()).toBe(1);
+    expect(watcher.getQuarantineEntries()[0].lastError).toContain("thrown error");
+  });
+
+  // 7. Resolved failures for invalid slug / file not found have clear messages
+
+  test("resolved failures preserve original error messages", async () => {
+    const specificSync: Partial<SyncManager> = {
+      syncPage: mock(async (_slug: string) => {
+        if (_slug === "bad-slug") return { success: false, error: "Invalid slug" };
+        return { success: false, error: "File not found: missing" };
+      }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = specificSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "bad-slug.md"), "---\ntitle: Bad\n---\nContent", "utf-8");
+    writeFileSync(join(testDir, "missing.md"), "---\ntitle: Missing\n---\nContent", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const warnLogs = logs.filter(l => l.message.startsWith("同步失败"));
+    expect(warnLogs.some(l => (l.details?.error as string)?.includes("Invalid slug"))).toBe(true);
+    expect(warnLogs.some(l => (l.details?.error as string)?.includes("File not found"))).toBe(true);
+  });
+
+  // 8. Quarantined file with content change retries and recovers
+
+  test("quarantined resolved-failure file recovers after content change", async () => {
+    let callCount = 0;
+    const recoverSync: Partial<SyncManager> = {
+      syncPage: mock(async () => {
+        callCount++;
+        if (callCount <= 3) return { success: false, error: "broken" };
+        return { success: true };
+      }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = recoverSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "recover.md"), "---\ntitle: Recover\n---\nV1", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    // 3 failures → quarantine
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // 4th scan — quarantined, same content
+    const beforeCount = callCount;
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(beforeCount);
+
+    // Fix content → quarantine cleared, sync attempted, succeeds
+    writeFileSync(join(testDir, "recover.md"), "---\ntitle: Recover\n---\nFixed", "utf-8");
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(callCount).toBe(beforeCount + 1);
+    expect(watcher.getQuarantineSize()).toBe(0);
+
+    // Next scan — hash cached, no new call
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(beforeCount + 1);
+  });
+
+  // 9. P1-1 regression: quarantine content change → retry fails → still retries next scan
+
+  test("quarantine content change followed by resolved failure still retries on next scan", async () => {
+    let callCount = 0;
+    const failSync: Partial<SyncManager> = {
+      syncPage: mock(async () => {
+        callCount++;
+        return { success: false, error: "still broken" };
+      }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = failSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "sticky.md"), "---\ntitle: Sticky\n---\nV1", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    // 3 failures → quarantine
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(watcher.getQuarantineSize()).toBe(1);
+
+    // Modify content → quarantine cleared, re-sync attempted
+    writeFileSync(join(testDir, "sticky.md"), "---\ntitle: Sticky\n---\nV2", "utf-8");
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // syncPage was called (retry after content change) but failed again
+    const afterRetry = callCount;
+    expect(afterRetry).toBe(4);
+
+    // File NOT modified again — but hash was NOT cached (only cached on success)
+    // Next scan should re-detect the file (hash mismatch vs quarantine entry) and retry
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBeGreaterThan(afterRetry);
+  });
+
+  // 10. P1-1 regression: quarantine content change → retry fails → succeeds on second retry
+
+  test("quarantine content change: second retry succeeds and caches hash", async () => {
+    let callCount = 0;
+    const eventualSync: Partial<SyncManager> = {
+      syncPage: mock(async () => {
+        callCount++;
+        if (callCount <= 4) return { success: false, error: "transient" };
+        return { success: true };
+      }),
+      removePage: mock(async () => {}),
+    };
+    syncManager = eventualSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "eventual.md"), "---\ntitle: Eventual\n---\nV1", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    // 3 failures → quarantine
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(callCount).toBe(3);
+
+    // Content change → quarantine cleared, 4th sync fails (failCount=1)
+    writeFileSync(join(testDir, "eventual.md"), "---\ntitle: Eventual\n---\nV2", "utf-8");
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(4);
+
+    // Same content, re-detected (hash not cached), 5th sync succeeds
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(5);
+    expect(watcher.getQuarantineSize()).toBe(0);
+
+    // Hash cached on success — no more syncs
+    await watcher.scanOnce();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(callCount).toBe(5);
+  });
+
+  // 11. P1-2: resolved title collision without diagnostics still quarantines (backward compat)
+
+  test("resolved failure without diagnostics still quarantines (backward compat)", async () => {
+    const noDiagSync: Partial<SyncManager> = {
+      syncPage: mock(async () => ({
+        success: false,
+        error: "Some failure without diagnostics",
+      })),
+      removePage: mock(async () => {}),
+    };
+    syncManager = noDiagSync as unknown as SyncManager;
+
+    writeFileSync(join(testDir, "nodiag.md"), "---\ntitle: NoDiag\n---\nContent", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    for (let i = 0; i < 3; i++) {
+      await watcher.scanOnce();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(watcher.getQuarantineSize()).toBe(1);
+    const entry = watcher.getQuarantineEntries()[0];
+    expect(entry.lastError).toBe("Some failure without diagnostics");
+    expect(entry.titleCollisionJson).toBeUndefined();
+  });
+});
+
 // ── Bulk-change backpressure ───────────────────────────────────────────
 
 describe("FileWatcher bulk-change backpressure", () => {

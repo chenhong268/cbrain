@@ -2,7 +2,7 @@ import { stat as statAsync, readFile } from "node:fs/promises";
 import { statSync } from "node:fs";
 import { relative } from "node:path";
 import pLimit from "p-limit";
-import type { SyncManager } from "./sync.js";
+import type { SyncManager, SyncPageResult, SyncDiagnostic } from "./sync.js";
 import { TitleCollisionError } from "./sync.js";
 import { hashContent, collectMarkdownFiles } from "./shared.js";
 import type { Logger } from "./logger.js";
@@ -108,15 +108,17 @@ export class FileWatcher {
       }
       const prevHash = this.hashes.get(pending.fullPath)
         ?? entry?.hash;
-      // Always store hash so doScan won't re-detect this file unless content actually changes
-      this.hashes.set(pending.fullPath, pending.hash);
-      this.mtimes.set(pending.fullPath, pending.mtime);
       if (prevHash !== undefined && prevHash !== pending.hash) {
-        // Content changed — give it another chance
+        // Content changed — clear quarantine and attempt re-sync
+        // Do NOT cache new hash/mtime yet; only cache on sync success
         this.quarantine.delete(pending.slug);
         this.persistQuarantine();
         this.logger?.info("watcher", "隔离文件内容变更，重新同步", { slug: pending.slug });
       } else {
+        // Content unchanged — still quarantined, skip
+        // Cache hash/mtime so doScan won't re-read this file
+        this.hashes.set(pending.fullPath, pending.hash);
+        this.mtimes.set(pending.fullPath, pending.mtime);
         return;
       }
     }
@@ -124,11 +126,18 @@ export class FileWatcher {
     this.inFlightHashes.set(pending.slug, pending.hash);
     this.inFlightPaths.set(pending.slug, pending.fullPath);
     this.limit(() => this.sync.syncPage(pending.slug, this.vaultPath))
-      .then(() => {
-        this.hashes.set(pending.fullPath, pending.hash);
-        this.mtimes.set(pending.fullPath, pending.mtime);
-        this.recordSuccess(pending.slug);
-        this.logger?.info("watcher", "同步完成", { slug: pending.slug });
+      .then((result: SyncPageResult) => {
+        if (result.success) {
+          this.hashes.set(pending.fullPath, pending.hash);
+          this.mtimes.set(pending.fullPath, pending.mtime);
+          this.recordSuccess(pending.slug);
+          this.logger?.info("watcher", result.skipped ? "同步跳过" : "同步完成", { slug: pending.slug });
+        } else {
+          const msg = result.error ?? `Sync failed for ${pending.slug}`;
+          const tc = result.diagnostics?.find(d => d.kind === "title_collision");
+          this.recordFailure(pending.slug, msg, undefined, tc);
+          this.logger?.warn("watcher", `同步失败: ${pending.slug}`, { error: msg });
+        }
       })
       .catch((e) => {
         this.recordFailure(pending.slug, String(e), e);
@@ -478,10 +487,13 @@ export class FileWatcher {
     return false;
   }
 
-  private recordFailure(slug: string, error: string, errorObj?: unknown): void {
+  private recordFailure(slug: string, error: string, errorObj?: unknown, tcDiagnostic?: SyncDiagnostic): void {
     const entry = this.quarantine.get(slug);
     const failCount = (entry?.failCount ?? 0) + 1;
-    const tcDetails = errorObj instanceof TitleCollisionError ? errorObj.details : undefined;
+    // Prefer structured diagnostic from resolved result; fall back to thrown TitleCollisionError
+    const tcDetails = tcDiagnostic
+      ? { title: tcDiagnostic.title, incoming: tcDiagnostic.incoming, existing: tcDiagnostic.existing }
+      : errorObj instanceof TitleCollisionError ? errorObj.details : undefined;
     if (failCount >= FAIL_THRESHOLD) {
       const hash = this.inFlightHashes.get(slug);
       const fullPath = this.inFlightPaths.get(slug);
