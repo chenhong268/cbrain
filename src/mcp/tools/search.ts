@@ -49,7 +49,9 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       // can short-circuit on FTS results, bypassing HybridSearch.search() entirely.
       const candidates = query.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
       const ftsStart = Date.now();
-      const ftsSlugs = (() => { try { return ctx.db.ftsSearch(query, cap); } catch { return []; } })();
+      const ftsMeta: { fts_fallback?: boolean } = {};
+      const ftsSlugs = (() => { try { return ctx.db.ftsSearch(query, cap, ftsMeta); } catch { return []; } })();
+      if (ftsMeta.fts_fallback) trace.fts_fallback = true;
       const ftsElapsed = Date.now() - ftsStart;
       const knownSlugs = ctx.db.resolveSlugs(candidates).filter((r) => r.slug !== null).map((r) => r.slug!);
       const complex = isComplexQuery(query, knownSlugs, candidates);

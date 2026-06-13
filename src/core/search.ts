@@ -22,6 +22,7 @@ export interface SearchTrace {
   research_ms?: number;
   vector_ms?: number;
   fts_ms?: number;
+  fts_fallback?: boolean;
   graph_ms?: number;
   temporal_ms?: number;
   decompose_ms?: number;
@@ -221,7 +222,7 @@ export class HybridSearch {
       return vecResult;
     }
     if (strategy === "fts") {
-      return this.timedCall(() => Promise.resolve(this.ftsSearch(query, limit)), trace, "fts_ms");
+      return this.timedCall(() => Promise.resolve(this.ftsSearch(query, limit, trace)), trace, "fts_ms");
     }
     if (strategy === "graph") {
       return this.timedCall(() => this.graphSearch(query, limit), trace, "graph_ms");
@@ -295,7 +296,7 @@ export class HybridSearch {
         if (trace && !trace.degraded_reason) trace.degraded_reason = "vector_error";
         return null as SearchResult[] | null;
       }),
-      this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit)), trace, "fts_ms").catch((e) => {
+      this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit, trace)), trace, "fts_ms").catch((e) => {
         this.logger?.warn("search", "ftsSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
         return [] as SearchResult[];
       }),
@@ -601,8 +602,10 @@ export class HybridSearch {
     });
   }
 
-  private ftsSearch(query: string, limit: number): SearchResult[] {
-    const results = this.db.ftsSearch(query, limit);
+  private ftsSearch(query: string, limit: number, trace?: SearchTrace): SearchResult[] {
+    const meta: { fts_fallback?: boolean } = {};
+    const results = this.db.ftsSearch(query, limit, meta);
+    if (meta.fts_fallback && trace) trace.fts_fallback = true;
     return results.map((r) => ({
       slug: r.page_slug,
       score: Math.abs(r.rank),

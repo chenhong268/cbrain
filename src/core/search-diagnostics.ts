@@ -10,6 +10,7 @@
 
 export type DegradedReasonCode =
   | "fts_empty"
+  | "fts_parser_fallback"
   | "vector_timeout"
   | "vector_error"
   | "low_score"
@@ -23,6 +24,7 @@ export interface SearchDiagnosticInput {
   results: Array<{ score: number }>;
   trace: {
     degraded_reason?: string;
+    fts_fallback?: boolean;
     rerank_ms?: number;
     follow_up_queries?: string[];
     research_ms?: number;
@@ -62,6 +64,7 @@ export function classifyDegradedReasons(
   results: Array<{ score: number }>,
   trace: {
     degraded_reason?: string;
+    fts_fallback?: boolean;
     rerank_ms?: number;
     follow_up_queries?: string[];
     research_ms?: number;
@@ -80,6 +83,11 @@ export function classifyDegradedReasons(
     codes.push("vector_error");
   } else if (trace.degraded_reason === "reasoning_parse_failed") {
     codes.push("reasoning_parse_failed");
+  }
+
+  // 1b. FTS parser fallback — MATCH expression failed, degraded to LIKE
+  if (trace.fts_fallback) {
+    codes.push("fts_parser_fallback");
   }
 
   // 2. Empty results
@@ -132,6 +140,7 @@ const DEGRADED_REASON_CODES: ReadonlySet<DegradedReasonCode> = new Set([
   "vector_timeout",
   "vector_error",
   "fts_empty",
+  "fts_parser_fallback",
   "low_score",
   "budget_exhausted",
   "fallback_used",

@@ -993,7 +993,15 @@ export class CBrainDB {
     ).run({ $slug: pageSlug });
   }
 
-  ftsSearch(query: string, limit: number = 10): Array<{ page_slug: string; content: string; rank: number }> {
+  /**
+   * Full-text search over chunks_fts (trigram tokenizer).
+   *
+   * @param _meta Optional out-parameter: set `fts_fallback=true` when
+   *   MATCH throws a parser/runtime error and the method degrades to a
+   *   parameterized LIKE query. Callers can read this to surface
+   *   `fts_parser_fallback` in diagnostics without changing the return type.
+   */
+  ftsSearch(query: string, limit: number = 10, _meta?: { fts_fallback?: boolean }): Array<{ page_slug: string; content: string; rank: number }> {
     // Short queries (<3 chars) fall back to LIKE with TF-weighted rank.
     // rank = tf / (1 + tf): more occurrences → higher rank → higher score.
     if (query.length < 3) {
@@ -1014,13 +1022,70 @@ export class CBrainDB {
     }
     const ftsQuery = this.buildTrigramQuery(query);
     try {
-      return this.prepare(
+      const rows = this.prepare(
         "SELECT page_slug, content, rank FROM chunks_fts WHERE chunks_fts MATCH $query ORDER BY rank LIMIT $limit"
       ).all({ $query: ftsQuery, $limit: limit }) as Array<{ page_slug: string; content: string; rank: number }>;
+      // Normal zero-match is fine — do NOT trigger fallback.
+      return rows;
     } catch (e) {
-      console.warn("[ftsSearch] MATCH query failed, returning empty:", { query: ftsQuery, error: String(e) });
+      // FTS5 parser/runtime error — run deterministic LIKE fallback.
+      // Log only metadata, never the full query or content.
+      const isSyntax = String(e).includes("syntax error");
+      console.warn("[ftsSearch] MATCH failed, running LIKE fallback", {
+        category: isSyntax ? "fts5_syntax" : "fts5_runtime",
+        queryLength: query.length,
+      });
+      if (_meta) _meta.fts_fallback = true;
+      return this.ftsLikeFallback(query, limit);
+    }
+  }
+
+  /**
+   * Deterministic LIKE-based fallback when FTS5 MATCH fails.
+   * Extracts clean word fragments from the query, ORs them via LIKE
+   * against the `chunks` table, with TF-weighted ranking.
+   */
+  private ftsLikeFallback(query: string, limit: number): Array<{ page_slug: string; content: string; rank: number }> {
+    // Extract word fragments: split on non-word chars, keep >= 2 chars
+    const fragments = query
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((f) => f.length >= 2)
+      .slice(0, 5); // cap at 5 to keep query bounded
+
+    if (fragments.length === 0) {
+      // No usable fragments — return empty rather than throw
       return [];
     }
+
+    // Build parameterized OR-LIKE against chunks table
+    const conditions = fragments.map((_, i) => `content LIKE $p${i}`).join(" OR ");
+    const params: Record<string, string | number> = { $limit: limit };
+    for (let i = 0; i < fragments.length; i++) {
+      params[`$p${i}`] = `%${fragments[i]}%`;
+    }
+    // Also pass fragments for TF weighting
+    for (let i = 0; i < fragments.length; i++) {
+      params[`$f${i}`] = fragments[i];
+    }
+
+    // Sum TF across all matching fragments, weight by 1/(1+tf)
+    const tfTerms = fragments.map((_, i) =>
+      `(LENGTH(content) - LENGTH(REPLACE(content, $f${i}, ''))) * 1.0 / LENGTH($f${i})`
+    );
+    const tfExpr = tfTerms.join(" + ");
+
+    return this.prepare(`
+      SELECT page_slug, content,
+        CAST(tf AS REAL) / (1.0 + CAST(tf AS REAL)) AS rank
+      FROM (
+        SELECT page_slug, content, (${tfExpr}) AS tf
+        FROM chunks
+        WHERE ${conditions}
+      )
+      GROUP BY page_slug
+      ORDER BY rank DESC
+      LIMIT $limit
+    `).all(params) as Array<{ page_slug: string; content: string; rank: number }>;
   }
 
   private buildTrigramQuery(query: string): string {
@@ -1029,13 +1094,22 @@ export class CBrainDB {
     if (query.length <= 6) {
       return `"${query.replace(/"/g, '""')}"`;
     }
-    // For longer queries, extract overlapping trigrams and OR them
-    // e.g. "张三负责什么项目" → "张三负 OR 三负责 OR 负责什 OR 责什么 OR 什么项 OR 么项目"
-    const trigrams: string[] = [];
+    // For longer queries, extract overlapping trigrams and OR them.
+    // Each trigram is individually double-quoted as an FTS5 phrase so that
+    // punctuation (-, /, (, )) and reserved words (AND, OR, NOT) inside the
+    // 3-char slice are treated as literals, not FTS5 operators.
+    const seen = new Set<string>();
+    const parts: string[] = [];
     for (let i = 0; i <= query.length - 3; i++) {
-      trigrams.push(query.slice(i, i + 3));
+      const tri = query.slice(i, i + 3);
+      if (seen.has(tri)) continue;
+      seen.add(tri);
+      // Double internal quotes per FTS5 phrase escaping rules.
+      parts.push(`"${tri.replace(/"/g, '""')}"`);
     }
-    return trigrams.join(" OR ");
+    // Guard: if no trigrams survived, return a safe empty-match phrase.
+    if (parts.length === 0) return '""';
+    return parts.join(" OR ");
   }
 
   // ─── Job operations ────────────────────────────────────────────

@@ -2479,4 +2479,83 @@ describe("MCP Server", () => {
       expect(parsed.error).toBeDefined();
     });
   });
+
+  // ─── FTS fallback diagnostics (#181) ─────────────
+
+  describe("FTS parser fallback via MCP query tool (#181)", () => {
+    test("fts_parser_fallback appears in raw.search_meta.reason_codes when MATCH fails", async () => {
+      // Seed anonymous content into both chunks and chunks_fts
+      const slug = "entities/fallback-target";
+      const content = "anonymous fallback test content for diagnostics";
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run(slug, "FallbackTarget", "fallback-target.md", "h1");
+      db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
+        .run(slug, 0, content);
+      db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)")
+        .run(slug, content);
+
+      // Monkey-patch buildTrigramQuery to force MATCH failure
+      const original = (db as any).buildTrigramQuery.bind(db);
+      (db as any).buildTrigramQuery = () => ') OR AND NOT (';
+
+      const server = createServer(deps);
+      const result = await getTools(server).query.handler({
+        query: "anonymous fallback test",
+        strategy: "smart",
+      });
+      (db as any).buildTrigramQuery = original;
+
+      const data = JSON.parse(result.content[0].text);
+
+      // 1. raw.search_meta.reason_codes must contain fts_parser_fallback
+      const rawMeta = data.raw?.search_meta as Record<string, unknown> | undefined;
+      expect(rawMeta).toBeDefined();
+      expect(Array.isArray(rawMeta?.reason_codes)).toBe(true);
+      expect(rawMeta!.reason_codes).toContain("fts_parser_fallback");
+
+      // 2. Top-level must NOT have search_meta (diagnostics only in raw envelope)
+      expect((data as Record<string, unknown>).search_meta).toBeUndefined();
+
+      // 3. Display and summary must not leak FTS/SQL/MATCH/chunks_fts/internal expressions
+      const display = data.display ?? "";
+      const summary = JSON.stringify(data.summary ?? {});
+      const banned = ["FTS5", "MATCH", "SELECT", "chunks_fts", "fts_fallback", "fts_parser_fallback", "syntax error", "SQLiteError", "reason_codes"];
+      for (const term of banned) {
+        expect(display).not.toContain(term);
+        expect(summary).not.toContain(term);
+      }
+
+      // 4. Results still contain the anonymous page (fallback recovered it)
+      expect(data.results).toBeDefined();
+      expect(Array.isArray(data.results)).toBe(true);
+      // Fallback LIKE should match "anonymous" and/or "fallback"
+      const matchedSlugs = (data.results as Array<{ slug: string }>).map(r => r.slug);
+      expect(matchedSlugs).toContain(slug);
+    });
+
+    test("normal FTS hit does NOT trigger fts_parser_fallback reason code", async () => {
+      const slug = "entities/normal-hit";
+      const content = "normal query target with no special characters";
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run(slug, "NormalHit", "normal-hit.md", "h1");
+      db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
+        .run(slug, 0, content);
+      db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)")
+        .run(slug, content);
+
+      const server = createServer(deps);
+      const result = await getTools(server).query.handler({
+        query: "normal query target",
+        strategy: "smart",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      const rawMeta = data.raw?.search_meta as Record<string, unknown> | undefined;
+      if (rawMeta?.reason_codes) {
+        expect(rawMeta.reason_codes).not.toContain("fts_parser_fallback");
+      }
+    });
+  });
 });
