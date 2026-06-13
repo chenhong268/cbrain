@@ -51,12 +51,18 @@ export interface ToolContext {
   watcher?: FileWatcher;
 }
 
-export async function indexPage(pipeline: ContentPipeline, slug: string, body: string, logger?: Logger): Promise<void> {
+export interface IndexResult {
+  ok: boolean;
+}
+
+export async function indexPage(pipeline: ContentPipeline, slug: string, body: string, logger?: Logger): Promise<IndexResult> {
   try {
     const { chunks, embedResults } = await pipeline.embed(body);
     await pipeline.writeIndexes(slug, chunks, embedResults);
+    return { ok: true };
   } catch (err) {
     logger?.error("indexPage", `indexing failed for ${slug}`, { error: err instanceof Error ? err.message : String(err) });
+    return { ok: false };
   }
 }
 

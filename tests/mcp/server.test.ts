@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
@@ -986,6 +986,334 @@ describe("MCP Server", () => {
 
       const updated = readFileSync(fileA, "utf-8");
       expect(updated).not.toContain("## Known Relations");
+    });
+
+    // ─── #177: append must preserve content before Known Relations sync ───
+
+    test("append on entity page with existing KR preserves new content and KR", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-x.md");
+      const fileB = join(vaultPath, "entities", "person-y.md");
+      writeFileSync(fileB, "---\ntitle: PersonY\ntype: entity/person\n---\ncontent Y", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-y", "PersonY", "entities/person-y.md", "h2");
+
+      // Create page with pre-existing KR (simulating a page that already has links)
+      writeFileSync(fileA, "---\ntitle: PersonX\ntype: entity/person\n---\noriginal body\n\n## Known Relations\n\n- collaborated → [[person-y]]\n", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-x", "PersonX", "entities/person-x.md", "h1");
+      // Seed link so syncLinksToMarkdown will rebuild KR
+      db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+        .run("brain/entities/person-x", "brain/entities/person-y", "collaborated");
+
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/person-x",
+        content: "anonymous appended section",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("appended");
+
+      // Vault file must contain both original body AND new content
+      const vaultContent = readFileSync(fileA, "utf-8");
+      expect(vaultContent).toContain("original body");
+      expect(vaultContent).toContain("anonymous appended section");
+      // KR must still exist and not be duplicated
+      const krCount = (vaultContent.match(/## Known Relations/g) ?? []).length;
+      expect(krCount).toBe(1);
+      // Original graph link must still be there
+      expect(vaultContent).toContain("person-y");
+
+      // get_page should immediately reflect the appended content
+      const getPageResult = await getTools(server).get_page.handler({
+        slug: "brain/entities/person-x",
+        include_full_body: true,
+      });
+      const pageData = JSON.parse(getPageResult.content[0].text);
+      expect(pageData.raw.body).toContain("anonymous appended section");
+      expect(pageData.raw.body).toContain("original body");
+
+      // DB content_hash must match final vault file
+      const dbHash = db.rawDb.prepare("SELECT content_hash FROM pages WHERE slug = ?").get("brain/entities/person-x") as { content_hash: string | null } | undefined;
+      expect(dbHash?.content_hash).toBeDefined();
+      const { hashContent } = await import("../../src/core/shared.js");
+      const fileHash = hashContent(vaultContent);
+      expect(dbHash!.content_hash).toBe(fileHash);
+
+      // Original graph edge must still exist in links table (not just markdown)
+      const outgoing = db.getOutgoingLinks("brain/entities/person-x");
+      const edge = outgoing.find((l) => l.to_slug === "brain/entities/person-y");
+      expect(edge).toBeDefined();
+    });
+
+    test("append on entity page without KR still works", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-c.md");
+      writeFileSync(fileA, "---\ntitle: PersonC\ntype: entity/person\n---\noriginal content only", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-c", "PersonC", "entities/person-c.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/person-c",
+        content: "new section added",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("appended");
+
+      const vaultContent = readFileSync(fileA, "utf-8");
+      expect(vaultContent).toContain("original content only");
+      expect(vaultContent).toContain("new section added");
+    });
+
+    test("append on record page still works", async () => {
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      const fileA = join(vaultPath, "records", "note-a.md");
+      writeFileSync(fileA, "---\ntitle: NoteA\ntype: record\n---\nrecord content", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
+      ).run("records/note-a", "NoteA", "records/note-a.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "records/note-a",
+        content: "appended record section",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("appended");
+
+      const vaultContent = readFileSync(fileA, "utf-8");
+      expect(vaultContent).toContain("record content");
+      expect(vaultContent).toContain("appended record section");
+    });
+
+    test("custom separator is preserved", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-d.md");
+      writeFileSync(fileA, "---\ntitle: PersonD\ntype: entity/person\n---\nfirst part", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-d", "PersonD", "entities/person-d.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/person-d",
+        content: "second part",
+        separator: "\n---\n",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("appended");
+
+      const vaultContent = readFileSync(fileA, "utf-8");
+      expect(vaultContent).toContain("first part\n---\nsecond part");
+    });
+
+    test("returns error when page does not exist (not silent success)", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/nonexistent-ghost",
+        content: "should not be appended",
+      });
+      const data = JSON.parse(result.content[0].text);
+      // Must not return action: appended
+      expect(data.action).toBeUndefined();
+      expect(data.error).toBeDefined();
+    });
+
+    test("patch returns null after precheck succeeds — returns error, not fake success", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-g.md");
+      writeFileSync(fileA, "---\ntitle: PersonG\ntype: entity/person\n---\noriginal", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-g", "PersonG", "entities/person-g.md", "h1");
+
+      const server = createServer(deps);
+      const tools = getTools(server);
+
+      // Intercept CBrainDB.getPage: 1st call (precheck) succeeds,
+      // 2nd call (inside PageManager.patch → getBySlug → getPage) returns null.
+      const origGetPage = db.getPage.bind(db);
+      let getPageCalls = 0;
+      db.getPage = (s: string) => {
+        getPageCalls++;
+        if (getPageCalls === 2 && s === "brain/entities/person-g") return null;
+        return origGetPage(s);
+      };
+
+      const result = await tools.append_page.handler({
+        slug: "brain/entities/person-g",
+        content: "should not be appended",
+      });
+      db.getPage = origGetPage;
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBeUndefined();
+      expect(data.error).toBe("Append failed");
+      expect(result.isError).toBe(true);
+    });
+
+    test("final verification fails when vault file disappears mid-append", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-h.md");
+      writeFileSync(fileA, "---\ntitle: PersonH\ntype: entity/person\n---\noriginal", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-h", "PersonH", "entities/person-h.md", "h1");
+
+      const server = createServer(deps);
+      const tools = getTools(server);
+
+      // Inject file loss INSIDE a single append, between patch and verify.
+      // Call sequence of db.getPage for this slug during one append:
+      //   1 = precheck getBySlug, 2 = patch→update→getBySlug, 3 = verifyPersistedBody→getBySlugFresh→getBySlug
+      // On the 3rd call (verification read), delete the vault file so getBySlug
+      // returns null (existsSync check fails after cache bust).
+      const origGetPage = db.getPage.bind(db);
+      let callCount = 0;
+      db.getPage = (s: string) => {
+        callCount++;
+        if (callCount === 3 && s === "brain/entities/person-h" && existsSync(fileA)) {
+          unlinkSync(fileA);
+        }
+        return origGetPage(s);
+      };
+
+      let result: { content: Array<{ type: string; text: string }>; isError?: boolean };
+      try {
+        result = await tools.append_page.handler({
+          slug: "brain/entities/person-h",
+          content: "anonymous appended text",
+        });
+      } finally {
+        db.getPage = origGetPage;
+      }
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBeUndefined();
+      expect(data.error).toBe("Append verification failed");
+      expect(result.isError).toBe(true);
+    });
+
+    test("exact body verification rejects silent revert to old body (duplicate content)", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-i.md");
+      // Original body already contains the text we'll append
+      writeFileSync(fileA, "---\ntitle: PersonI\ntype: entity/person\n---\noriginal body with duplicate content here", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-i", "PersonI", "entities/person-i.md", "h1");
+
+      const server = createServer(deps);
+
+      // Simulate a post-processing failure that reverts the body to the OLD version
+      // (e.g. a buggy sync writes back the pre-append content). The appended text
+      // "duplicate content here" already exists in the old body, so a naive
+      // includes() check would falsely pass. The exact comparison must catch this.
+      //
+      // Call sequence of db.getPage during one append:
+      //   1 = precheck, 2 = patch→update→getBySlug, 3 = verifyPersistedBody→getBySlugFresh→getBySlug
+      // On the 3rd call (verification read), overwrite the file with the OLD body
+      // so the persisted body (old) != expected body (patch produced new).
+      const origGetPage = db.getPage.bind(db);
+      const oldBody = "original body with duplicate content here";
+      let callCount = 0;
+      db.getPage = (s: string) => {
+        callCount++;
+        const result = origGetPage(s);
+        if (callCount === 3 && s === "brain/entities/person-i" && result) {
+          const fm = `---\ntitle: PersonI\ntype: entity/person\n---\n${oldBody}`;
+          writeFileSync(fileA, fm, "utf-8");
+        }
+        return result;
+      };
+
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/person-i",
+        content: "duplicate content here",
+      });
+      db.getPage = origGetPage;
+
+      const data = JSON.parse(result.content[0].text);
+      // Exact verification must FAIL — old body != expected appended body.
+      // (A naive includes() implementation would return "appended" here.)
+      expect(data.action).toBeUndefined();
+      expect(data.error).toBe("Append verification failed");
+      expect(result.isError).toBe(true);
+    });
+
+    test("index failure returns partial success with warning and needs_sync", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-e.md");
+      writeFileSync(fileA, "---\ntitle: PersonE\ntype: entity/person\n---\noriginal", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-e", "PersonE", "entities/person-e.md", "h1");
+
+      // Drop chunks table to make indexing fail (writeIndexes will throw)
+      db.rawDb.prepare("DROP TABLE chunks").run();
+
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/person-e",
+        content: "anonymous appended text",
+      });
+
+      // Recreate chunks table so subsequent tests don't break
+      db.rawDb.prepare("CREATE TABLE IF NOT EXISTS chunks (id INTEGER PRIMARY KEY AUTOINCREMENT, page_slug TEXT NOT NULL, chunk_index INTEGER NOT NULL DEFAULT 0, content TEXT NOT NULL)").run();
+
+      const data = JSON.parse(result.content[0].text);
+      // Must be partial success with warning, not clean success
+      expect(data.action).toBe("appended");
+      expect(data.warnings).toContain("index_sync_failed");
+      expect(data.needs_sync).toBe(true);
+      // Must not expose raw error message, path, or SQL
+      expect(JSON.stringify(data)).not.toContain("no such table");
+      expect(JSON.stringify(data)).not.toContain("chunks");
+      expect(JSON.stringify(data)).not.toContain("/tmp/");
+
+      // Body must still be persisted in vault
+      const vaultContent = readFileSync(fileA, "utf-8");
+      expect(vaultContent).toContain("anonymous appended text");
+    });
+
+    test("KR sync failure returns partial success with warning", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      const fileA = join(vaultPath, "entities", "person-f.md");
+      writeFileSync(fileA, "---\ntitle: PersonF\ntype: entity/person\n---\noriginal", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run("brain/entities/person-f", "PersonF", "entities/person-f.md", "h1");
+
+      // Delete vault file after patch completes but before sync reads it.
+      // We can't intercept inside createServer, so instead: delete the file entirely
+      // so syncLinksToMarkdown's readFileSync will throw.
+      // First, do the append with file present...
+      const server = createServer(deps);
+
+      // Remove file to force syncLinksToMarkdown to fail (it checks existsSync and returns early,
+      // so we need a different approach: delete the pages row so getOutgoingLinks fails)
+      // Actually simpler: drop the links table to make syncLinksToMarkdown's query fail
+      db.rawDb.prepare("DROP TABLE links").run();
+
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/person-f",
+        content: "anonymous appended text",
+      });
+
+      // Recreate links table so subsequent tests don't break
+      db.rawDb.prepare("CREATE TABLE IF NOT EXISTS links (id INTEGER PRIMARY KEY AUTOINCREMENT, from_slug TEXT NOT NULL, to_slug TEXT NOT NULL, relation TEXT NOT NULL DEFAULT 'related', context TEXT, weight REAL DEFAULT 1.0, strength TEXT DEFAULT 'medium', source_type TEXT DEFAULT 'auto', confidence REAL DEFAULT 1.0, active INTEGER DEFAULT 1, provenance_id INTEGER)").run();
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("appended");
+      expect(data.warnings).toContain("relation_sync_failed");
+      expect(data.needs_sync).toBe(true);
+      // Must not expose raw error
+      expect(JSON.stringify(data)).not.toContain("no such table");
+      expect(JSON.stringify(data)).not.toContain("links");
     });
   });
 

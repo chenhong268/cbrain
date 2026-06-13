@@ -241,6 +241,33 @@ export class PageManager {
     return page;
   }
 
+  /**
+   * Force a fresh read from disk (invalidates cache first).
+   * Returns null if the file or DB row is missing.
+   */
+  getBySlugFresh(slug: string): Page | null {
+    this.cacheDelete(slug);
+    return this.getBySlug(slug);
+  }
+
+  /**
+   * Verify that the persisted body matches the expected body after relation sync.
+   * Forces a cache-busted disk read, strips auto-generated Known Relations
+   * from both sides, and compares exactly. Catches the case where a repeated
+   * append is silently reverted to the old body (which would pass a naive
+   * `includes()` check).
+   *
+   * @returns The verified final page, or null if verification failed.
+   */
+  verifyPersistedBody(slug: string, expectedBody: string): Page | null {
+    const fresh = this.getBySlugFresh(slug);
+    if (!fresh) return null;
+    const persistedStripped = stripKnownRelations(fresh.body ?? "").trim();
+    const expectedStripped = stripKnownRelations(expectedBody).trim();
+    if (persistedStripped !== expectedStripped) return null;
+    return fresh;
+  }
+
   list(options?: {
     type?: string;
     limit?: number;
@@ -422,6 +449,8 @@ export class PageManager {
     slug: string,
     updates: {
       body_append?: string;
+      /** Separator between existing body and appended content. Defaults to "\n\n". */
+      separator?: string;
       tags_merge?: string[];
       extra?: Record<string, unknown>;
     }
@@ -431,8 +460,9 @@ export class PageManager {
 
     // Strip KR section before appending — syncLinksToMarkdown will rebuild it later
     const strippedBody = stripKnownRelations(page.body ?? "");
+    const sep = updates.separator ?? "\n\n";
     const newBody = updates.body_append
-      ? strippedBody + "\n\n" + updates.body_append
+      ? strippedBody + sep + updates.body_append
       : strippedBody;
 
     // Merge tags (union, dedup)

@@ -191,19 +191,60 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }] };
     }
     ctx.versions.createVersion(slug);
-    const newBody = page.body + (separator ?? "\n\n") + content;
-    const updated = ctx.pages.update(slug, { body: newBody });
-    if (updated) {
-      await indexPage(ctx.pipeline, slug, newBody, ctx.logger);
-      const pageType = updated.type;
-      const wlResult = ctx.pipeline.processWikilinks(slug, newBody);
-      if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
-        ctx.pipeline.processNer(slug, newBody, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
-      }
-      syncWikilinkRelations(ctx, slug, wlResult.mentionedSlugs);
+    const updated = ctx.pages.patch(slug, { body_append: content, separator: separator ?? "\n\n" });
+    if (!updated) {
+      return { content: [{ type: "text", text: JSON.stringify({ error: "Append failed" }) }], isError: true };
     }
+
+    // Track degradation signals
+    const warnings: string[] = [];
+    const finalBody = updated.body;
+
+    // 1. Index — returns structured result
+    const indexResult = await indexPage(ctx.pipeline, slug, finalBody, ctx.logger);
+    if (!indexResult.ok) {
+      warnings.push("index_sync_failed");
+    }
+
+    // 2. Wikilinks — track failure
+    const pageType = updated.type;
+    let affectedSlugs = new Set<string>();
+    try {
+      const wlResult = ctx.pipeline.processWikilinks(slug, finalBody);
+      affectedSlugs = wlResult.mentionedSlugs;
+      if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
+        ctx.pipeline.processNer(slug, finalBody, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
+      }
+    } catch {
+      warnings.push("wikilink_sync_failed");
+    }
+
+    // 3. KR sync — uses structured syncAffectedSlugs to capture per-slug errors
+    const allAffected = new Set([slug, ...affectedSlugs]);
+    const syncWarnings = ctx.pages.syncAffectedSlugs(allAffected);
+    if (syncWarnings.length > 0) {
+      warnings.push("relation_sync_failed");
+    }
+
+    // 4. Verify the persisted body exactly matches what patch() produced.
+    // Forces a cache-busted disk read, strips auto-generated KR from both sides,
+    // and compares precisely — catches reverts where the appended text is silently
+    // dropped back to the old body (a naive includes() check would miss this).
+    const finalPage = ctx.pages.verifyPersistedBody(slug, finalBody);
+    if (!finalPage) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: "Append verification failed" }) }],
+        isError: true,
+      };
+    }
+
     return {
-      content: [{ type: "text", text: JSON.stringify({ action: "appended", slug, new_length: newBody.length }) }],
+      content: [{ type: "text", text: JSON.stringify({
+        action: "appended",
+        slug,
+        new_length: finalPage.body.length,
+        ...(warnings.length > 0 ? { warnings, needs_sync: true } : {}),
+      }) }],
     };
   });
 
