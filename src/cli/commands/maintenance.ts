@@ -14,6 +14,12 @@ import {
   atomicTypeChange,
   type MoveFsOps,
 } from "../../core/atomic-move.js";
+import {
+  resolveSyncMode,
+  handleReindexSlug,
+  handleReindexQuarantined,
+  createLiveLockProbe,
+} from "./reindex.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -94,15 +100,50 @@ export function register(program: Command) {
     .description("Sync vault files to indexes")
     .option("--slug <slug>", "Sync a single page")
     .option("--reindex-vectors", "Rebuild LanceDB vectors from SQLite chunks and insights (safe recovery)")
+    .option("--reindex", "Rebuild a single page's vectors (requires --slug <slug>)")
+    .option("--reindex-quarantined", "Rebuild vectors for vector-fault quarantined pages")
     .action(async (opts) => {
+      // Resolve mutually-exclusive modes before doing any expensive setup.
+      const mode = resolveSyncMode(opts);
+      if (!mode.ok) {
+        console.error(`Error: ${mode.message}`);
+        process.exitCode = 1;
+        return;
+      }
+
       const config = loadConfig();
       const deps = createDeps(config);
+      const lockProbe = createLiveLockProbe(deps.profileDir!);
 
       // --reindex-vectors: atomic staging rebuild, does NOT connect to live LanceDB
-      if (opts.reindexVectors) {
+      if (mode.mode === "reindex-vectors") {
         console.log("Reindexing vectors (atomic staging rebuild)...");
-        const exitCode = await handleReindexVectors(config.lancePath, deps.db, deps.embedding);
-        process.exitCode = exitCode;
+        process.exitCode = await handleReindexVectors(config.lancePath, deps.db, deps.embedding);
+        return;
+      }
+
+      // --slug <slug> --reindex: safe per-page vector recovery on live LanceDB
+      if (mode.mode === "reindex-slug") {
+        process.exitCode = await handleReindexSlug({
+          db: deps.db,
+          lance: deps.lance,
+          embedding: deps.embedding,
+          pageSlug: opts.slug,
+          lancePath: config.lancePath,
+          lockProbe,
+        });
+        return;
+      }
+
+      // --reindex-quarantined: recover vector-fault quarantined pages
+      if (mode.mode === "reindex-quarantined") {
+        process.exitCode = await handleReindexQuarantined({
+          db: deps.db,
+          lance: deps.lance,
+          embedding: deps.embedding,
+          lancePath: config.lancePath,
+          lockProbe,
+        });
         return;
       }
 

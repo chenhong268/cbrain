@@ -51,6 +51,43 @@ export const INSIGHTS_SCHEMA = new Schema([
   ),
 ]);
 
+/**
+ * Raised when a strict open is requested for a table that does not exist.
+ * Recovery paths MUST NOT silently create a missing live table — this error
+ * lets the caller classify the situation as "physical damage → use full rebuild".
+ */
+export class LanceTableMissingError extends Error {
+  constructor(tableName: string) {
+    super(`LANCE_TABLE_MISSING: table "${tableName}" does not exist`);
+    this.name = "LanceTableMissingError";
+  }
+}
+
+/** A raw chunk row read back from LanceDB, including its embedded vector. */
+export interface RawVectorRow {
+  pageSlug: string;
+  chunkIndex: number;
+  content: string;
+  vector: Float32Array;
+}
+
+/** Normalize whatever Arrow hands back for a FixedSizeList vector into Float32Array. */
+function normalizeVector(v: unknown): Float32Array {
+  if (v instanceof Float32Array) return v;
+  if (v instanceof Float64Array) return Float32Array.from(v);
+  if (Array.isArray(v)) return Float32Array.from(v as number[]);
+  if (v && typeof v === "object") {
+    const obj = v as { toArray?: unknown; [Symbol.iterator]?: unknown };
+    if (typeof obj.toArray === "function") {
+      return normalizeVector((obj.toArray as () => unknown).call(v));
+    }
+    if (typeof obj[Symbol.iterator] === "function") {
+      return Float32Array.from(v as Iterable<number>);
+    }
+  }
+  return new Float32Array(0);
+}
+
 export class LanceDBManager {
   private db: lancedb.Connection | null = null;
   private tables: Map<string, lancedb.Table> = new Map();
@@ -171,6 +208,77 @@ export class LanceDBManager {
     const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
     const escaped = pageSlug.replace(/'/g, "''");
     await table.delete(`pageSlug = '${escaped}' AND chunkIndex = -1`);
+  }
+
+  // ─── Per-page recovery (safe single-page vector rebuild) ──────────────────
+  //
+  // These methods are the narrow API used by the recovery core. They NEVER
+  // silently create the chunks table — `openChunksStrict` throws a classified
+  // error if it is absent, so a damaged/missing live index surfaces as
+  // `fallback_required` instead of a fake-success empty table.
+
+  /**
+   * Strictly open the existing `chunks` table. Throws `LanceTableMissingError`
+   * (classified, safe to catch) when the table does not exist — never creates it.
+   * Caches the table so subsequent recovery reads/deletes/adds reuse the handle.
+   */
+  async openChunksStrict(): Promise<lancedb.Table> {
+    if (!this.db) throw new Error("LanceDB not connected. Call connect() first.");
+
+    const cached = this.tables.get("chunks");
+    if (cached) return cached;
+
+    const tableNames = await this.db.tableNames();
+    if (!tableNames.includes("chunks")) {
+      throw new LanceTableMissingError("chunks");
+    }
+    const table = await this.db.openTable("chunks");
+    this.tables.set("chunks", table);
+    return table;
+  }
+
+  /**
+   * Read this page's raw rows (`chunkIndex >= 0`) WITH their vectors, ordered by
+   * `chunkIndex`. Used to snapshot rows before a replace and to verify after.
+   * Escapes the slug in the filter predicate.
+   */
+  async readRawVectorRows(pageSlug: string): Promise<RawVectorRow[]> {
+    const table = await this.openChunksStrict();
+    const escaped = pageSlug.replace(/'/g, "''");
+    const rows = await table
+      .query()
+      .where(`pageSlug = '${escaped}' AND chunkIndex >= 0`)
+      .select(["pageSlug", "chunkIndex", "content", "vector"])
+      .toArray();
+    return (rows as Array<Record<string, unknown>>)
+      .map((r) => ({
+        pageSlug: r.pageSlug as string,
+        chunkIndex: Number(r.chunkIndex),
+        content: r.content as string,
+        vector: normalizeVector(r.vector),
+      }))
+      .sort((a, b) => a.chunkIndex - b.chunkIndex);
+  }
+
+  /**
+   * Read this page's L1 rows (`chunkIndex === -1`) for before/after verification.
+   * Content only (no vector needed for an integrity check).
+   */
+  async readL1Rows(
+    pageSlug: string,
+  ): Promise<Array<{ pageSlug: string; chunkIndex: number; content: string }>> {
+    const table = await this.openChunksStrict();
+    const escaped = pageSlug.replace(/'/g, "''");
+    const rows = await table
+      .query()
+      .where(`pageSlug = '${escaped}' AND chunkIndex = -1`)
+      .select(["pageSlug", "chunkIndex", "content"])
+      .toArray();
+    return (rows as Array<Record<string, unknown>>).map((r) => ({
+      pageSlug: r.pageSlug as string,
+      chunkIndex: Number(r.chunkIndex),
+      content: r.content as string,
+    }));
   }
 
   // ─── Insights table ────────────────────────────────────────────
