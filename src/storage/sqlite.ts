@@ -139,7 +139,12 @@ export class CBrainDB {
     this.db.exec("PRAGMA cache_size = -64000");
     this.db.exec("PRAGMA mmap_size = 268435456");
     this.db.exec("PRAGMA synchronous = NORMAL");
-    this.migrate();
+    try {
+      this.migrate();
+    } catch (e) {
+      this.db.close();
+      throw e;
+    }
   }
 
   private migrate(): void {
@@ -345,10 +350,10 @@ export class CBrainDB {
     this.migrateActivityWeight();
     this.migrateHotnessScore();
     this.migrateQueryFeedback();
-    this.migrateMissingIndexes();
     this.migrateAliasesSource();
     this.migrateChunksSummaryLevel();
     this.migrateOntologyTypes();
+    this.migrateMissingIndexes();
     this.migrateDiscoveriesStatus();
     this.migrateDiscoveriesDedup();
     this.migrateProvenance();
@@ -585,39 +590,71 @@ export class CBrainDB {
   }
 
   private migratePagesConstraint(): void {
-    const check = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").get() as { sql: string } | undefined;
-    // Already has the correct constraint (v4) or no constraint at all (v6+) — skip
-    if (check?.sql?.includes("'insight'") && !check.sql.includes("'source'") && !check.sql.includes("'event'") && !check.sql.includes("'raw'")) return;
-    if (check?.sql && !check.sql.includes("CHECK(type IN")) return;
+    // Capture baseline before migration
+    const preCount = (this.db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number }).cnt;
 
-    this.db.exec("PRAGMA foreign_keys = OFF");
+    this.runDestructiveMigration({
+      name: "migratePagesConstraint",
+      completionKey: "migration_v4_pages_constraint",
+      body: () => {
+        const check = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").get() as { sql: string } | undefined;
+        // Already has the correct constraint (v4) or no constraint at all (v6+) — skip
+        if (check?.sql?.includes("'insight'") && !check.sql.includes("'source'") && !check.sql.includes("'event'") && !check.sql.includes("'raw'")) return;
+        if (check?.sql && !check.sql.includes("CHECK(type IN")) return;
 
-    // Convert legacy event and raw pages to record before migration
-    this.db.prepare("UPDATE pages SET type = 'record' WHERE type = 'event'").run();
-    this.db.prepare("UPDATE pages SET type = 'record' WHERE type = 'raw'").run();
+        // Convert legacy event and raw pages to record before migration
+        this.db.prepare("UPDATE pages SET type = 'record' WHERE type = 'event'").run();
+        this.db.prepare("UPDATE pages SET type = 'record' WHERE type = 'raw'").run();
 
-    this.db.exec(`
-      CREATE TABLE pages_new (
-        slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
-        title TEXT NOT NULL,
-        file_path TEXT NOT NULL,
-        content_hash TEXT,
-        tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
-        mention_count INTEGER DEFAULT 0,
-        expires_at TEXT,
-        confidence_decay REAL DEFAULT 1.0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-      INSERT INTO pages_new SELECT slug, type, title, file_path, content_hash, tier, mention_count, expires_at, confidence_decay, created_at, updated_at FROM pages;
-      DROP TABLE pages;
-      ALTER TABLE pages_new RENAME TO pages;
-    `);
+        this.cleanupTempTable("pages_new", "pages");
 
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type)");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_tier ON pages(tier)");
-    this.db.exec("PRAGMA foreign_keys = ON");
+        this.db.exec(`
+          CREATE TABLE pages_new (
+            slug TEXT PRIMARY KEY,
+            type TEXT NOT NULL CHECK(type IN ('entity', 'concept', 'record', 'insight')),
+            title TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            content_hash TEXT,
+            tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
+            mention_count INTEGER DEFAULT 0,
+            expires_at TEXT,
+            confidence_decay REAL DEFAULT 1.0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          INSERT INTO pages_new SELECT slug, type, title, file_path, content_hash, tier, mention_count, expires_at, confidence_decay, created_at, updated_at FROM pages;
+          DROP TABLE pages;
+          ALTER TABLE pages_new RENAME TO pages;
+        `);
+
+        this.ensurePagesIndexes();
+      },
+      validate: () => {
+        // pages table must exist, pages_new must not
+        const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('pages', 'pages_new')").all() as Array<{ name: string }>;
+        const tableNames = new Set(tables.map(t => t.name));
+        if (!tableNames.has("pages")) throw new Error("pages table missing after rebuild");
+        if (tableNames.has("pages_new")) throw new Error("pages_new residual after rebuild");
+
+        // Required columns must exist
+        const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+        const colNames = new Set(cols.map(c => c.name));
+        for (const required of ["slug", "type", "title", "file_path", "created_at"]) {
+          if (!colNames.has(required)) throw new Error(`pages missing required column: ${required}`);
+        }
+
+        // Row count must match baseline
+        const postCount = (this.db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number }).cnt;
+        if (postCount !== preCount) throw new Error(`pages row count mismatch: expected ${preCount}, got ${postCount}`);
+
+        // Verify indexes that exist at v4 stage (activity_weight column not added yet,
+        // so full validatePagesIndexes() would fail — ontology validate handles the rest)
+        const idxRows = this.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_pages_type', 'idx_pages_tier')").all() as Array<{ name: string }>;
+        const idxNames = new Set(idxRows.map(i => i.name));
+        if (!idxNames.has("idx_pages_type")) throw new Error("idx_pages_type missing after rebuild");
+        if (!idxNames.has("idx_pages_tier")) throw new Error("idx_pages_tier missing after rebuild");
+      },
+    });
   }
 
   /**
@@ -627,48 +664,67 @@ export class CBrainDB {
    * - Updates links, chunks, tags, timeline, versions tables accordingly
    */
   private migrateRawToRecords(): void {
-    // Check if migration already ran
-    const done = this.db.prepare("SELECT value FROM config WHERE key = 'migration_v5_raw_to_records'").get() as { value: string } | undefined;
-    if (done?.value === "1") return;
+    this.runDestructiveMigration({
+      name: "migrateRawToRecords",
+      completionKey: "migration_v5_raw_to_records",
+      body: () => {
+        // 1. Update raw/* slugs → records/* in pages
+        this.db.prepare("UPDATE pages SET slug = REPLACE(slug, 'raw/', 'records/'), file_path = REPLACE(file_path, 'raw/', 'records/') WHERE slug LIKE 'raw/%'").run();
 
-    this.db.exec("PRAGMA foreign_keys = OFF");
+        // 2. Update brain/records/* slugs → records/* in pages
+        this.db.prepare("UPDATE pages SET slug = REPLACE(slug, 'brain/records/', 'records/'), file_path = REPLACE(file_path, 'brain/records/', 'records/') WHERE slug LIKE 'brain/records/%'").run();
 
-    // 1. Update raw/* slugs → records/* in pages
-    this.db.prepare("UPDATE pages SET slug = REPLACE(slug, 'raw/', 'records/'), file_path = REPLACE(file_path, 'raw/', 'records/') WHERE slug LIKE 'raw/%'").run();
+        // 3. Update links table (from_slug and to_slug)
+        this.db.prepare("UPDATE links SET from_slug = REPLACE(from_slug, 'raw/', 'records/') WHERE from_slug LIKE 'raw/%'").run();
+        this.db.prepare("UPDATE links SET to_slug = REPLACE(to_slug, 'raw/', 'records/') WHERE to_slug LIKE 'raw/%'").run();
+        this.db.prepare("UPDATE links SET from_slug = REPLACE(from_slug, 'brain/records/', 'records/') WHERE from_slug LIKE 'brain/records/%'").run();
+        this.db.prepare("UPDATE links SET to_slug = REPLACE(to_slug, 'brain/records/', 'records/') WHERE to_slug LIKE 'brain/records/%'").run();
 
-    // 2. Update brain/records/* slugs → records/* in pages
-    this.db.prepare("UPDATE pages SET slug = REPLACE(slug, 'brain/records/', 'records/'), file_path = REPLACE(file_path, 'brain/records/', 'records/') WHERE slug LIKE 'brain/records/%'").run();
+        // 4. Update chunks table
+        this.db.prepare("UPDATE chunks SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+        this.db.prepare("UPDATE chunks SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
 
-    // 3. Update links table (from_slug and to_slug)
-    this.db.prepare("UPDATE links SET from_slug = REPLACE(from_slug, 'raw/', 'records/') WHERE from_slug LIKE 'raw/%'").run();
-    this.db.prepare("UPDATE links SET to_slug = REPLACE(to_slug, 'raw/', 'records/') WHERE to_slug LIKE 'raw/%'").run();
-    this.db.prepare("UPDATE links SET from_slug = REPLACE(from_slug, 'brain/records/', 'records/') WHERE from_slug LIKE 'brain/records/%'").run();
-    this.db.prepare("UPDATE links SET to_slug = REPLACE(to_slug, 'brain/records/', 'records/') WHERE to_slug LIKE 'brain/records/%'").run();
+        // 5. Update tags table
+        this.db.prepare("UPDATE tags SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+        this.db.prepare("UPDATE tags SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
 
-    // 4. Update chunks table
-    this.db.prepare("UPDATE chunks SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
-    this.db.prepare("UPDATE chunks SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+        // 6. Update timeline table
+        this.db.prepare("UPDATE timeline SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+        this.db.prepare("UPDATE timeline SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
 
-    // 5. Update tags table
-    this.db.prepare("UPDATE tags SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
-    this.db.prepare("UPDATE tags SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+        // 7. Update versions table
+        this.db.prepare("UPDATE versions SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+        this.db.prepare("UPDATE versions SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
 
-    // 6. Update timeline table
-    this.db.prepare("UPDATE timeline SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
-    this.db.prepare("UPDATE timeline SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
-
-    // 7. Update versions table
-    this.db.prepare("UPDATE versions SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
-    this.db.prepare("UPDATE versions SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
-
-    // 8. Update ingest_log table
-    this.db.prepare("UPDATE ingest_log SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
-    this.db.prepare("UPDATE ingest_log SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
-
-    // 9. Mark migration as done
-    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v5_raw_to_records', '1')").run();
-
-    this.db.exec("PRAGMA foreign_keys = ON");
+        // 8. Update ingest_log table
+        this.db.prepare("UPDATE ingest_log SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+        this.db.prepare("UPDATE ingest_log SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+      },
+      validate: () => {
+        // Exhaustive check: every table/column that the body updates must have no
+        // raw/* or brain/records/* residuals.  Fixed table+column list — no external input.
+        const checks: ReadonlyArray<{ table: string; column: string }> = [
+          { table: "pages", column: "slug" },
+          { table: "links", column: "from_slug" },
+          { table: "links", column: "to_slug" },
+          { table: "chunks", column: "page_slug" },
+          { table: "tags", column: "page_slug" },
+          { table: "timeline", column: "page_slug" },
+          { table: "versions", column: "page_slug" },
+          { table: "ingest_log", column: "page_slug" },
+        ];
+        for (const { table, column } of checks) {
+          for (const prefix of ["raw/%", "brain/records/%"]) {
+            const row = this.db.prepare(
+              `SELECT COUNT(*) as cnt FROM ${table} WHERE ${column} LIKE ?`
+            ).get(prefix) as { cnt: number };
+            if (row.cnt > 0) {
+              throw new Error(`${row.cnt} ${prefix} ref(s) remain in ${table}.${column}`);
+            }
+          }
+        }
+      },
+    });
   }
 
   private stmtCache = new Map<string, ReturnType<typeof this.db.prepare>>();
@@ -688,6 +744,55 @@ export class CBrainDB {
 
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  /**
+   * Run a destructive migration atomically: all-or-nothing within a transaction.
+   * Handles FK state save/restore, completion marker, and FK integrity check.
+   * FK toggle happens OUTSIDE the transaction (SQLite constraint).
+   *
+   * Flow: body() → FK check → validate() → marker write.
+   * validate() runs inside the same transaction; if it throws, everything rolls back.
+   */
+  private runDestructiveMigration(opts: {
+    name: string;
+    completionKey: string;
+    body: () => void;
+    validate?: () => void;
+  }): void {
+    const done = this.db.prepare("SELECT value FROM config WHERE key = ?").get(opts.completionKey) as { value: string } | undefined;
+    if (done?.value === "1") return;
+
+    const fkWasOn = (this.db.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys === 1;
+    try {
+      this.db.exec("PRAGMA foreign_keys = OFF");
+      this.db.transaction(() => {
+        opts.body();
+        const violations = this.db.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
+        if (violations.length > 0) {
+          throw new Error(`FK check: ${violations.length} violation(s): ${violations.map(v => `${v.table}[${v.rowid}]->${v.parent}`).join(", ")}`);
+        }
+        if (opts.validate) opts.validate();
+        this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, '1')").run(opts.completionKey);
+      })();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`${opts.name}: ${msg}`);
+    } finally {
+      if (fkWasOn) this.db.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+
+  /** Drop a leftover _new temp table from a failed prior migration.
+   *  Safe: only drops if BOTH temp and production tables exist. */
+  private cleanupTempTable(tempName: string, productionName: string): void {
+    const rows = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?)"
+    ).all(tempName, productionName) as Array<{ name: string }>;
+    const names = new Set(rows.map(r => r.name));
+    if (names.has(tempName) && names.has(productionName)) {
+      this.db.exec(`DROP TABLE ${tempName}`);
+    }
   }
 
   // ─── Tag operations ──────────────────────────────────────────
@@ -2759,23 +2864,88 @@ export class CBrainDB {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_feedback_slug ON query_feedback(slug)");
   }
 
+  /** Single source of truth for pages indexes.
+   *  Each spec has: name, SQL DDL, required columns (all must exist in pages),
+   *  and whether it's the title unique index. */
+  private static readonly PAGES_INDEX_SPECS: ReadonlyArray<{
+    readonly name: string;
+    readonly sql: string;
+    readonly columns: readonly string[];
+    readonly unique?: boolean;
+  }> = [
+    { name: "idx_pages_type", sql: "CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type)", columns: ["type"] },
+    { name: "idx_pages_tier", sql: "CREATE INDEX IF NOT EXISTS idx_pages_tier ON pages(tier)", columns: ["tier"] },
+    { name: "idx_pages_title", sql: "CREATE INDEX IF NOT EXISTS idx_pages_title ON pages(title)", columns: ["title"] },
+    { name: "idx_pages_updated_at", sql: "CREATE INDEX IF NOT EXISTS idx_pages_updated_at ON pages(updated_at)", columns: ["updated_at"] },
+    { name: "idx_pages_created_at", sql: "CREATE INDEX IF NOT EXISTS idx_pages_created_at ON pages(created_at)", columns: ["created_at"] },
+    { name: "idx_pages_activity_wt", sql: "CREATE INDEX IF NOT EXISTS idx_pages_activity_wt ON pages(activity_weight) WHERE activity_weight > 0", columns: ["activity_weight"] },
+    { name: "idx_pages_expires_at", sql: "CREATE INDEX IF NOT EXISTS idx_pages_expires_at ON pages(expires_at) WHERE expires_at IS NOT NULL", columns: ["expires_at"] },
+    { name: "idx_pages_title_uniq", sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_title_uniq ON pages(title)", columns: ["title"], unique: true },
+  ];
+
+  /** Create all pages indexes whose required columns exist.
+   *  Real errors (IO, corruption, schema conflict) propagate up and fail startup.
+   *  Only the title unique index is allowed to fail gracefully when duplicate
+   *  titles exist — all other failures are fatal. */
+  private ensurePagesIndexes(): void {
+    const colRows = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+    const available = new Set(colRows.map(c => c.name));
+
+    for (const spec of CBrainDB.PAGES_INDEX_SPECS) {
+      // Skip indexes whose columns don't exist yet (e.g., v4 lacks activity_weight)
+      if (!spec.columns.every(col => available.has(col))) continue;
+
+      try {
+        this.db.exec(spec.sql);
+      } catch (e) {
+        // Only title unique index may fail gracefully — and only for duplicate titles
+        if (spec.unique) {
+          const hasDups = this.db.prepare(
+            "SELECT title FROM pages GROUP BY title HAVING COUNT(*) > 1 LIMIT 1"
+          ).get();
+          if (hasDups) {
+            console.warn("[migrate] pages has duplicate titles — unique index skipped, run dedup first");
+            continue;
+          }
+        }
+        throw e;
+      }
+    }
+  }
+
+  /** Validate that all expected pages indexes exist.
+   *  Only safe to call after all ALTER TABLE migrations (activity_weight etc.)
+   *  have run — i.e., from the ontology migration validate or later.
+   *  Unique indexes are allowed to be absent when duplicate titles exist —
+   *  mirrors the graceful skip in ensurePagesIndexes(). */
+  private validatePagesIndexes(): void {
+    const specs = CBrainDB.PAGES_INDEX_SPECS;
+    const ph = specs.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='index' AND name IN (${ph})`
+    ).all(...specs.map(s => s.name)) as Array<{ name: string }>;
+    const found = new Set(rows.map(r => r.name));
+    for (const spec of specs) {
+      if (found.has(spec.name)) continue;
+      // Unique index absent — only OK when duplicate titles actually exist
+      if (spec.unique) {
+        const hasDups = this.db.prepare(
+          "SELECT title FROM pages GROUP BY title HAVING COUNT(*) > 1 LIMIT 1"
+        ).get();
+        if (hasDups) continue;
+      }
+      throw new Error(`${spec.name} missing after rebuild`);
+    }
+  }
+
   private migrateMissingIndexes(): void {
+    this.ensurePagesIndexes();
     this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_pages_title ON pages(title);
-      CREATE INDEX IF NOT EXISTS idx_pages_updated_at ON pages(updated_at);
-      CREATE INDEX IF NOT EXISTS idx_pages_created_at ON pages(created_at);
-      CREATE INDEX IF NOT EXISTS idx_pages_activity_wt ON pages(activity_weight) WHERE activity_weight > 0;
-      CREATE INDEX IF NOT EXISTS idx_pages_expires_at ON pages(expires_at) WHERE expires_at IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_tags_page_slug ON tags(page_slug);
       CREATE INDEX IF NOT EXISTS idx_timeline_page_slug ON timeline(page_slug);
       CREATE INDEX IF NOT EXISTS idx_ingest_log_created ON ingest_log(created_at);
       CREATE INDEX IF NOT EXISTS idx_feedback_created ON query_feedback(created_at);
     `);
-    try {
-      this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_title_uniq ON pages(title)");
-    } catch {
-      console.warn("[migrate] pages has duplicate titles — unique index skipped, run dedup first");
-    }
   }
 
   private migrateAliasesSource(): void {
@@ -2787,29 +2957,62 @@ export class CBrainDB {
   }
 
   private migrateChunksSummaryLevel(): void {
-    const cols = this.db.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    if (names.has("summary_level")) return;
+    // Capture baseline before migration
+    const preCount = (this.db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as { cnt: number }).cnt;
 
-    this.db.exec("PRAGMA foreign_keys = OFF");
-    this.db.exec(`
-      CREATE TABLE chunks_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        page_slug TEXT NOT NULL,
-        chunk_index INTEGER NOT NULL,
-        content TEXT NOT NULL,
-        summary_level INTEGER NOT NULL DEFAULT 0,
-        content_hash TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE,
-        UNIQUE(page_slug, summary_level, chunk_index)
-      );
-      INSERT INTO chunks_new (id, page_slug, chunk_index, content, summary_level, content_hash, created_at)
-        SELECT id, page_slug, chunk_index, content, 0, NULL, created_at FROM chunks;
-      DROP TABLE chunks;
-      ALTER TABLE chunks_new RENAME TO chunks;
-    `);
-    this.db.exec("PRAGMA foreign_keys = ON");
+    this.runDestructiveMigration({
+      name: "migrateChunksSummaryLevel",
+      completionKey: "migration_v4_chunks_summary_level",
+      body: () => {
+        const cols = this.db.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
+        const names = new Set(cols.map(c => c.name));
+        if (names.has("summary_level")) return;
+
+        this.cleanupTempTable("chunks_new", "chunks");
+
+        this.db.exec(`
+          CREATE TABLE chunks_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            page_slug TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            summary_level INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE,
+            UNIQUE(page_slug, summary_level, chunk_index)
+          );
+          INSERT INTO chunks_new (id, page_slug, chunk_index, content, summary_level, content_hash, created_at)
+            SELECT id, page_slug, chunk_index, content, 0, NULL, created_at FROM chunks;
+          DROP TABLE chunks;
+          ALTER TABLE chunks_new RENAME TO chunks;
+        `);
+      },
+      validate: () => {
+        // chunks table must exist, chunks_new must not
+        const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('chunks', 'chunks_new')").all() as Array<{ name: string }>;
+        const tableNames = new Set(tables.map(t => t.name));
+        if (!tableNames.has("chunks")) throw new Error("chunks table missing after rebuild");
+        if (tableNames.has("chunks_new")) throw new Error("chunks_new residual after rebuild");
+
+        // Required columns must exist
+        const cols = this.db.prepare("PRAGMA table_info(chunks)").all() as Array<{ name: string }>;
+        const colNames = new Set(cols.map(c => c.name));
+        if (!colNames.has("summary_level")) throw new Error("chunks missing summary_level column");
+        if (!colNames.has("content_hash")) throw new Error("chunks missing content_hash column");
+
+        // Row count must match baseline
+        const postCount = (this.db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as { cnt: number }).cnt;
+        if (postCount !== preCount) throw new Error(`chunks row count mismatch: expected ${preCount}, got ${postCount}`);
+
+        // UNIQUE constraint must be (page_slug, summary_level, chunk_index)
+        const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks'").get() as { sql: string } | undefined;
+        if (!schema?.sql) throw new Error("chunks schema not found");
+        if (!schema.sql.includes("UNIQUE(page_slug, summary_level, chunk_index)")) {
+          throw new Error("chunks UNIQUE constraint is not (page_slug, summary_level, chunk_index)");
+        }
+      },
+    });
   }
 
   /**
@@ -2818,42 +3021,75 @@ export class CBrainDB {
    * Migrates existing flat types to path-based types.
    */
   private migrateOntologyTypes(): void {
-    const done = this.db.prepare("SELECT value FROM config WHERE key = 'migration_v6_ontology_types'").get() as { value: string } | undefined;
-    if (done?.value === "1") return;
+    // Capture baseline before migration
+    const preCount = (this.db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number }).cnt;
 
-    this.db.exec("PRAGMA foreign_keys = OFF");
+    this.runDestructiveMigration({
+      name: "migrateOntologyTypes",
+      completionKey: "migration_v6_ontology_types",
+      body: () => {
+        this.cleanupTempTable("pages_new", "pages");
 
-    this.db.exec(`
-      CREATE TABLE pages_new (
-        slug TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        title TEXT NOT NULL,
-        file_path TEXT NOT NULL,
-        content_hash TEXT,
-        tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
-        mention_count INTEGER DEFAULT 0,
-        expires_at TEXT,
-        confidence_decay REAL DEFAULT 1.0,
-        activity_weight REAL DEFAULT 0.0,
-        last_queried_at TEXT,
-        hotness_score REAL NOT NULL DEFAULT 0.0,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-      INSERT INTO pages_new SELECT slug, type, title, file_path, content_hash, tier, mention_count, expires_at, confidence_decay, COALESCE(activity_weight, 0.0), last_queried_at, COALESCE(hotness_score, 0.0), created_at, updated_at FROM pages;
-      DROP TABLE pages;
-      ALTER TABLE pages_new RENAME TO pages;
-    `);
+        this.db.exec(`
+          CREATE TABLE pages_new (
+            slug TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            content_hash TEXT,
+            tier INTEGER DEFAULT 3 CHECK(tier BETWEEN 1 AND 3),
+            mention_count INTEGER DEFAULT 0,
+            expires_at TEXT,
+            confidence_decay REAL DEFAULT 1.0,
+            activity_weight REAL DEFAULT 0.0,
+            last_queried_at TEXT,
+            hotness_score REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+          INSERT INTO pages_new SELECT slug, type, title, file_path, content_hash, tier, mention_count, expires_at, confidence_decay, COALESCE(activity_weight, 0.0), last_queried_at, COALESCE(hotness_score, 0.0), created_at, updated_at FROM pages;
+          DROP TABLE pages;
+          ALTER TABLE pages_new RENAME TO pages;
+        `);
 
-    // Migrate old flat types → new type paths
-    this.db.prepare("UPDATE pages SET type = 'entity/person' WHERE type = 'entity' AND slug LIKE 'brain/entities/%'").run();
-    this.db.prepare("UPDATE pages SET type = 'concept/concept' WHERE type = 'concept' AND slug LIKE 'brain/concepts/%'").run();
+        // Migrate old flat types → new type paths
+        this.db.prepare("UPDATE pages SET type = 'entity/person' WHERE type = 'entity' AND slug LIKE 'brain/entities/%'").run();
+        this.db.prepare("UPDATE pages SET type = 'concept/concept' WHERE type = 'concept' AND slug LIKE 'brain/concepts/%'").run();
 
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type)");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_tier ON pages(tier)");
-    this.db.exec("PRAGMA foreign_keys = ON");
+        // Rebuild all indexes (pages rebuild drops everything)
+        this.ensurePagesIndexes();
+      },
+      validate: () => {
+        // pages table must exist, pages_new must not
+        const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('pages', 'pages_new')").all() as Array<{ name: string }>;
+        const tableNames = new Set(tables.map(t => t.name));
+        if (!tableNames.has("pages")) throw new Error("pages table missing after rebuild");
+        if (tableNames.has("pages_new")) throw new Error("pages_new residual after rebuild");
 
-    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v6_ontology_types', '1')").run();
+        // Required columns must exist
+        const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+        const colNames = new Set(cols.map(c => c.name));
+        for (const required of ["slug", "type", "title", "file_path", "activity_weight", "hotness_score"]) {
+          if (!colNames.has(required)) throw new Error(`pages missing required column: ${required}`);
+        }
+
+        // No CHECK(type IN) constraint — removed by v6
+        const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='pages'").get() as { sql: string } | undefined;
+        if (schema?.sql?.includes("CHECK(type IN")) throw new Error("pages still has CHECK(type IN) constraint");
+
+        // Row count must match baseline
+        const postCount = (this.db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number }).cnt;
+        if (postCount !== preCount) throw new Error(`pages row count mismatch: expected ${preCount}, got ${postCount}`);
+
+        this.validatePagesIndexes();
+
+        // No flat entity/concept types should remain under brain/ paths
+        const flatEntity = this.db.prepare("SELECT COUNT(*) as cnt FROM pages WHERE type = 'entity' AND slug LIKE 'brain/entities/%'").get() as { cnt: number };
+        if (flatEntity.cnt > 0) throw new Error(`${flatEntity.cnt} flat 'entity' type(s) remain under brain/entities/`);
+        const flatConcept = this.db.prepare("SELECT COUNT(*) as cnt FROM pages WHERE type = 'concept' AND slug LIKE 'brain/concepts/%'").get() as { cnt: number };
+        if (flatConcept.cnt > 0) throw new Error(`${flatConcept.cnt} flat 'concept' type(s) remain under brain/concepts/`);
+      },
+    });
   }
 
   private migrateIngestContentHash(): void {

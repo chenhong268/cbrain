@@ -11,6 +11,13 @@ function makeDB(testDir: string): CBrainDB {
   return new CBrainDB(join(testDir, "brain.sqlite"));
 }
 
+/** Drop the title unique index so dedup tests can seed duplicate titles.
+ *  In production, duplicates should not exist — but dedup tests deliberately
+ *  create them to verify the merge/dedup CLI commands work. */
+function dropTitleUniqueIndex(db: CBrainDB): void {
+  db.rawDb.exec("DROP INDEX IF EXISTS idx_pages_title_uniq");
+}
+
 function makeConfig(testDir: string): string {
   const vaultPath = join(testDir, "vault");
   mkdirSync(join(vaultPath, "records"), { recursive: true });
@@ -70,6 +77,7 @@ describe("dedup-types", () => {
   test("merges within affinity group (drug + company)", () => {
     const configPath = makeConfig(testDir);
     const db = makeDB(testDir);
+    dropTitleUniqueIndex(db);
 
     seedPage(db, testDir, "brain/entities/drug/凯丽隆", "entity/drug", "凯丽隆", 5);
     seedPage(db, testDir, "brain/entities/company/凯丽隆", "entity/company", "凯丽隆", 0);
@@ -86,6 +94,7 @@ describe("dedup-types", () => {
   test("cross-layer entity vs concept picks winner by mention count", () => {
     const configPath = makeConfig(testDir);
     const db = makeDB(testDir);
+    dropTitleUniqueIndex(db);
 
     seedPage(db, testDir, "brain/entities/book/反脆弱", "entity/book", "反脆弱", 3);
     seedPage(db, testDir, "brain/concepts/concept/反脆弱", "concept/concept", "反脆弱", 0);
@@ -100,6 +109,7 @@ describe("dedup-types", () => {
   test("does not merge with record type", () => {
     const configPath = makeConfig(testDir);
     const db = makeDB(testDir);
+    dropTitleUniqueIndex(db);
 
     seedPage(db, testDir, "brain/concepts/model/para", "concept/model", "PARA", 2);
     seedPage(db, testDir, "records/para", "record", "PARA", 1);
@@ -112,6 +122,7 @@ describe("dedup-types", () => {
   test("concept affinity group uses priority order", () => {
     const configPath = makeConfig(testDir);
     const db = makeDB(testDir);
+    dropTitleUniqueIndex(db);
 
     seedPage(db, testDir, "brain/concepts/model/第一性原理", "concept/model", "第一性原理", 0);
     seedPage(db, testDir, "brain/concepts/concept/第一性原理", "concept/concept", "第一性原理", 5);

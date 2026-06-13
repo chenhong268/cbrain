@@ -408,6 +408,28 @@ bun run dev doctor --first-run  # 验证升级后一切正常
 
 数据库 schema 变更会自动迁移（`initSchema` 检测新表/新列，`config` 表防重复迁移）。
 
+### 启动迁移说明
+
+CBrain 在启动时自动执行数据库 schema 迁移。了解以下行为有助于排查问题：
+
+**迁移在原 DB 内事务执行。** 表重建类迁移（pages、chunks、ontology）在 SQLite 事务内完成：CREATE new → INSERT → DROP old → RENAME。任何步骤失败，事务回滚，DB 保持迁移前状态。
+
+**失败会回滚并阻止启动。** 如果迁移失败，CBrain 构造函数会关闭数据库连接并抛错。服务不会启动。修复冲突数据后重试即可（修复后再次 `cbrain serve` 或 `cbrain sync`）。
+
+**迁移完成标记。** 每条迁移在 `config` 表写入 `migration_<name>=1` 标记。已完成的迁移不会重复执行。迁移前会验证 schema、行数、约束，验证失败同样回滚。
+
+**不要手动干预。**
+
+- ❌ 不要删除 `_new` 临时表（如 `pages_new`、`chunks_new`）— 如果同时存在生产表和临时表，迁移会自动清理
+- ❌ 不要删除 `config` 表里的 `migration_*` 标记 — 会导致已完成迁移重新执行
+- ⚠️ 迁移失败后先根据错误信息修复数据行（如删除冲突记录、修正非法字段值），然后重启。如果 schema 本身已畸形（表缺失、列错乱），应从备份恢复而非手动修补
+
+**升级前保留备份。**
+
+```bash
+cbrain backup  # 升级前先备份
+```
+
 如果升级后遇到问题：
 
 ```bash

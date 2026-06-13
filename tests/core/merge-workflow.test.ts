@@ -89,6 +89,8 @@ beforeEach(() => {
   if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   mkdirSync(vaultPath, { recursive: true });
   db = new CBrainDB(dbPath);
+  // Drop title unique index so merge tests can seed duplicate titles
+  db.rawDb.exec("DROP INDEX IF EXISTS idx_pages_title_uniq");
   pm = new PageManager(db, vaultPath);
   wf = new MergeWorkflow(db, pm, vaultPath);
 });
