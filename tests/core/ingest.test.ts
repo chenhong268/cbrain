@@ -177,6 +177,121 @@ describe("IngestManager", () => {
       expect(row).not.toBeNull();
       expect(row!.type).toBe("entity/person");
     });
+
+    test("routes valid Chinese names to person pages via fast path", async () => {
+      const result = await ingest.ingest({
+        content: "人物A，是人物B的前同事",
+        type: "text",
+      });
+      expect(result.slug).toBe("brain/entities/person/人物a");
+      expect(result.created).toBe(true);
+      expect(db.getPage(result.slug)!.type).toBe("entity/person");
+    });
+
+    test("routes valid English names to person pages via fast path", async () => {
+      const result = await ingest.ingest({
+        content: "Person Alpha, worked with Entity B",
+        type: "text",
+      });
+      expect(result.slug).toBe("brain/entities/person/person-alpha");
+      expect(result.created).toBe(true);
+      expect(db.getPage(result.slug)!.type).toBe("entity/person");
+    });
+
+    test("degrades job-title / team / org candidates to record", async () => {
+      const cases: Array<{ input: string; name: string }> = [
+        { input: "产品经理，负责项目设计", name: "产品经理" },
+        { input: "技术总监，认识很多合作伙伴", name: "技术总监" },
+        { input: "运营团队，负责日常活动", name: "运营团队" },
+        { input: "项目组，和组织A合作", name: "项目组" },
+        { input: "区域组织，负责某项工作", name: "区域组织" },
+        { input: "Research Team, worked with Entity B", name: "Research Team" },
+      ];
+      for (const { input, name } of cases) {
+        const result = await ingest.ingest({ content: input, type: "text" });
+        // 降级 record：slug 落 records/，不创建同名 entity/person
+        expect(result.slug.startsWith("records/")).toBe(true);
+        const personRow = db.getPageByTitle(name);
+        expect(!personRow || personRow.type !== "entity/person").toBe(true);
+        // 原始内容完整保留在 vault 文件里
+        const filePath = db.getPageFilePath(result.slug);
+        const file = readFileSync(join(vaultPath, filePath!), "utf-8");
+        expect(file).toContain(input);
+      }
+    });
+
+    test("degrades to record when a same-title non-person entity exists", async () => {
+      // 预置 entity/organization 标题"组织A"——不得被 person 快捷路由覆盖/改型
+      mkdirSync(join(vaultPath, "brain", "entities", "organization"), { recursive: true });
+      writeFileSync(
+        join(vaultPath, "brain", "entities", "organization", "org-a.md"),
+        "---\ntitle: 组织A\ntype: entity/organization\nslug: brain/entities/organization/org-a\n---\n已有组织",
+      );
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+      ).run("brain/entities/organization/org-a", "entity/organization", "组织A", "brain/entities/organization/org-a.md", "h1");
+
+      // 不得抛唯一约束；组织A 保持 organization；完整内容进 record
+      const result = await ingest.ingest({ content: "组织A，和人物B合作", type: "text" });
+      expect(result.slug.startsWith("records/")).toBe(true);
+      expect(db.getPageByTitle("组织A")!.type).toBe("entity/organization");
+      const filePath = db.getPageFilePath(result.slug);
+      expect(readFileSync(join(vaultPath, filePath!), "utf-8")).toContain("组织A，和人物B合作");
+    });
+
+    test("appends to existing person when fast-path name matches it", async () => {
+      // 预置 entity/person 标题"人物A"——验证同名 person 仍走 append，不被门控误降级
+      mkdirSync(join(vaultPath, "brain", "entities", "person"), { recursive: true });
+      writeFileSync(
+        join(vaultPath, "brain", "entities", "person", "人物a.md"),
+        "---\ntitle: 人物A\ntype: entity/person\nslug: brain/entities/person/人物a\n---\n已有内容",
+      );
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+      ).run("brain/entities/person/人物a", "entity/person", "人物A", "brain/entities/person/人物a.md", "h1");
+
+      const result = await ingest.ingest({ content: "人物A，是人物B的前同事", type: "text" });
+      expect(result.created).toBe(false);
+      expect(result.slug).toBe("brain/entities/person/人物a");
+    });
+
+    test("appends to existing person even when its title contains a job-title word", async () => {
+      // 预置 person title="人物经理"——名字含职位词但类型明确是 person。
+      // 已确认 person 必须优先于职位启发式：直接 append，不得降级 record。
+      mkdirSync(join(vaultPath, "brain", "entities", "person"), { recursive: true });
+      writeFileSync(
+        join(vaultPath, "brain", "entities", "person", "人物经理.md"),
+        "---\ntitle: 人物经理\ntype: entity/person\nslug: brain/entities/person/人物经理\n---\n已有内容",
+      );
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+      ).run("brain/entities/person/人物经理", "entity/person", "人物经理", "brain/entities/person/人物经理.md", "h1");
+
+      const result = await ingest.ingest({ content: "人物经理，是人物乙的同事", type: "text" });
+      expect(result.created).toBe(false);
+      expect(result.slug).toBe("brain/entities/person/人物经理");
+    });
+
+    test("rejected candidates still trigger NER on the record path", async () => {
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [{ name: "人物丁", type: "person", context: "运营团队负责人" }],
+          relations: [],
+          events: [],
+        }),
+      ]);
+      const embedding = createMockEmbeddingProvider();
+      const nerIngest = new IngestManager(db, embedding, lance as any, vaultPath, llm);
+
+      const result = await nerIngest.ingest({ content: "运营团队，负责日常活动", type: "text" });
+      // 降级 record，不是 entity/person
+      expect(result.slug.startsWith("records/")).toBe(true);
+      // processNer 在 ingestCore 内同步 await：result.ner 有值、stub 已落库，无需固定等待
+      expect(result.ner).not.toBeNull();
+      const extracted = db.rawDb.prepare("SELECT * FROM pages WHERE title = ?").get("人物丁") as any;
+      expect(extracted).not.toBeNull();
+      expect(extracted.type).toBe("entity/person");
+    });
   });
 
   describe("ingest markdown", () => {

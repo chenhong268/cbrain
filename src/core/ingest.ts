@@ -10,7 +10,7 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
-import { FACT_FIELD_WHITELIST, } from "./ner.js";
+import { FACT_FIELD_WHITELIST, filterExtractedEntities, type ExtractedEntity } from "./ner.js";
 import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
 
 /**
@@ -68,6 +68,15 @@ const ENTITY_FACTS_PROMPT = `You are a structured fact extractor. Given an entit
 {"facts": [{"field": "field name", "value": "value", "confidence": 0.9, "evidence": "verbatim quote"}]}
 
 Return ONLY valid JSON.`;
+
+/** 仅用于 person 快捷路由的保守门控：明显组织/团队标签（包含匹配，覆盖中英文）。
+ *  标签可能在候选名前（组织A）或后（区域组织），故用包含而非后缀匹配。
+ *  窄范围——只用明显组织词，不引入模糊判断。 */
+const ORG_LABEL = /(?:组织|机构|协会|研究院|团队|小组|部门|中心|委员会|项目组|公司|集团|\b(?:team|department|committee|company|group|organization|division|unit)\b)/i;
+/** 仅用于 person 快捷路由的保守门控：明显英文职位标签。
+ *  窄范围——只用 unambiguously 职位、不会作为人名出现的词；
+ *  避开 head/lead/chief 等可能误伤姓名的词。 */
+const ENGLISH_JOB_TITLE = /\b(?:manager|director|engineer|developer|designer|analyst|specialist|coordinator|administrator|consultant|representative|intern|officer|president|executive|architect|chairman)\b/i;
 
 export interface IngestInput {
   content: string;
@@ -186,7 +195,38 @@ export class IngestManager {
     if (!/(同事|同学|同门|朋友|学弟|学长|学姐|学妹|上级|下属|同僚|前任|现任|汇报|认识|合作|负责|任职|worked with|reports to|colleague|friend)/iu.test(description)) {
       return null;
     }
+
+    // 保守门控：不确定就降级 record，绝不在图谱里误建 person。
+    // 误漏一次自动路由只是少一次快捷操作（无害）；误建 person 会持续污染图谱（有害）。
+    if (!this.passesPersonCandidateFilter(name, description)) return null;
+
     return name;
+  }
+
+  /** Person 快捷路由专属的保守门控。
+   *  Gate-0: 同名已有页面直接以 DB 类型为准短路——person 放行走 append，其他类型降级，
+   *          绝不覆盖/改型/合并已有实体。已确认 person 优先于任何启发式。
+   *  Gate-1: 复用 NER 的 filterExtractedEntities（含既有 job-title / generic-term 过滤，不复制职位正则）。
+   *  Gate-2: 仅本路由用：拒绝明显组织/团队标签 + 英文职位标签。
+   *  任一失败返回 false → 调用方降级 record，保留完整内容走正常 NER。
+   *  注：同名 person 不在此拦截——交回 findExistingPersonSlug 走 append，保持现有行为。 */
+  private passesPersonCandidateFilter(name: string, description: string): boolean {
+    const existing = this.db.getPageByTitle(name);
+    if (existing) return existing.type === "entity/person";
+
+    const candidate: ExtractedEntity = {
+      name,
+      type: "person",
+      relevance: "high",
+      context: description,
+    };
+    const { kept } = filterExtractedEntities([candidate]);
+    if (!kept.some(e => e.name === name)) return false;
+
+    if (ORG_LABEL.test(name)) return false;
+    if (ENGLISH_JOB_TITLE.test(name)) return false;
+
+    return true;
   }
 
   private async ingestEntityAppend(slug: string, body: string, tags: string[], doNer: boolean): Promise<IngestResult> {
