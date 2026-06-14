@@ -20,7 +20,7 @@ LLMs forget everything between conversations. CBrain gives your Agent a persiste
 - **Three-layer search** — Vector + Chinese FTS + Graph traversal, fused with RRF
 - **Knowledge graph** — Wiki-link based relationships + auto NER entity/relationship extraction
 - **Entity enrichment** — People and companies auto-promote through tiers as you mention them
-- **41 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, raw data, config, and observability
+- **81 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, and observability
 - **Version history** — Every page version snapshotted, with revert support
 - **Multi-query expansion** — LLM generates search query variants for better recall, fused with RRF
 - **Job queue** — SQLite-backed async job system with priority, retry, and status tracking
@@ -33,7 +33,7 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 - **知识图谱** — 基于 Wiki Link 的实体关系 + 自动 NER 实体/关系提取
 - **实体丰富** — 人物和组织随提及次数自动升级
 - **MCP 服务器** — 接入任何兼容 MCP 的 Agent
-- **本地运行** — 无云依赖，数据留在你的机器上
+- **本地存储** — SQLite + Markdown + LanceDB 全部存在你的机器上。但向量嵌入、NER、洞察生成会把待处理文本连同 API Key 发往你配置的模型 provider（智谱/DeepSeek）
 
 ## Quick Start
 
@@ -104,8 +104,8 @@ bun install
 
 ```bash
 bun run dev init
-bun run dev ingest --type text --title "张三" "产品经理"
-bun run dev query "张三"
+bun run dev ingest --type text --title "人物A" "产品经理"
+bun run dev query "人物A"
 bun run dev serve --http
 ```
 
@@ -136,9 +136,9 @@ CBrain 需要以下 API key：
 └─────────────────────────────────────────┘
 ```
 
-**Key principle**: Obsidian vault is the single source of truth. SQLite and LanceDB are index layers — delete and rebuild anytime. All data lives in markdown files.
+**Key principle**: Obsidian vault is the single source of truth. SQLite and LanceDB are index layers — if corrupted, rebuild safely. Always `cbrain backup` first, then by scope: per-page `cbrain sync --slug <slug> --reindex`; quarantined pages `cbrain sync --reindex-quarantined`; whole-index corruption `cbrain sync --reindex-vectors`. Never delete them directly. All data lives in markdown files.
 
-**核心原则**：Obsidian vault 是唯一事实来源。SQLite 和 LanceDB 只是索引层 —— 随时可以删除重建。所有数据都存在于 Markdown 文件中。
+**核心原则**：Obsidian vault 是唯一事实来源。SQLite 和 LanceDB 只是索引层 —— 损坏时先 `cbrain backup` 备份，再按场景重建：单页 `cbrain sync --slug <slug> --reindex`；watcher 隔离页 `cbrain sync --reindex-quarantined`；整库损坏 `cbrain sync --reindex-vectors`。切勿直接删除。所有数据都存在于 Markdown 文件中。
 
 ## Page Types
 
@@ -149,7 +149,7 @@ CBrain 需要以下 API key：
 | record | `records/` | Reading notes, articles, meeting notes, transcripts |
 | insight | `insights/` | Auto-generated cross-domain connections and discoveries |
 
-## CLI Commands (24 total)
+## CLI Commands (40 total)
 
 ### 大脑管理
 ```bash
@@ -171,7 +171,7 @@ cbrain ingest <内容>                     # 录入新内容（--type, --title, 
 
 ### 搜索与图谱
 ```bash
-cbrain query "搜索内容"                  # 混合搜索（向量 + 全文 + 图谱）
+cbrain query "搜索内容"                  # CLI 默认 all：混合搜索（向量 + 全文 + 图谱）
 cbrain graph-query <slug>                # 图谱遍历（--mode traverse|backlinks|related）
 ```
 
@@ -181,7 +181,7 @@ cbrain tags <slug>                       # 查看页面的所有标签
 cbrain tags <slug> add "重要"            # 打标签
 cbrain tags <slug> remove "重要"         # 去标签
 cbrain timeline <slug>                   # 查看页面的时间线
-cbrain timeline <slug> add --date 2024-03-01 --summary "张三加入ABC科技"
+cbrain timeline <slug> add --date 2024-03-01 --summary "人物A加入组织C"
 ```
 
 ### 版本管理
@@ -199,8 +199,6 @@ cbrain health                            # 14 维度健康检查，输出报告
 cbrain doctor                            # 快速诊断：数据库、文件、API 是否正常
 cbrain doctor --first-run                # 2.0 首次运行全面检查（config → paths → DB → index → services）
 cbrain doctor --first-run --json         # 同上，JSON 输出（供 Agent 调用）
-cbrain check-resolvable                  # ⚠️ 未实现，手动检查 skills/ 目录
-cbrain watch                             # 监听文件变化，自动同步（后台守护进程）
 ```
 
 ### 服务
@@ -210,7 +208,7 @@ cbrain serve                             # 启动 MCP Server，供 AI Agent 调�
 
 ## Agent Integration
 
-> **Compatibility**: CBrain is developed and tested with [Hermes Agent](https://github.com/anthropics/hermes). It uses the standard MCP protocol — any MCP-compatible Agent should work in theory, but others haven't been tested yet. If you try it with a different Agent, feedback is welcome.
+> **Compatibility**: CBrain is developed and tested with [Hermes Agent](https://github.com/NousResearch/hermes-agent). It uses the standard MCP protocol — any MCP-compatible Agent should work in theory, but others haven't been tested yet. If you try it with a different Agent, feedback is welcome.
 >
 > **兼容性**：CBrain 以 Hermes Agent 为开发对象，使用标准 MCP 协议。理论上任何兼容 MCP 的 Agent 都能用，但除 Hermes 外尚未实际测试。欢迎反馈其他 Agent 的使用情况。
 
@@ -221,7 +219,7 @@ Not all features work the same way. Some are CLI one-liners, some need an Agent 
 | Category | Features | How it works |
 |:---------|:---------|:-------------|
 | **Standalone CLI** | `query`, `ingest`, `list`, `show`, `delete`, `tags`, `timeline`, `versions`, `health`, `doctor`, `sync` | 直接用，不需要 Agent |
-| **Agent on-demand** | `get_page`, `put_page`, `dialogue`, `resolve_slugs`, `graph_query`, `job_submit`, `status`, `get_config` | Agent 在对话中按需调用 |
+| **Agent on-demand** | `get_page`, `put_page`, `ingest_dialogue`, `resolve_slugs`, `graph_query`, `job_submit`, `status` | Agent 在对话中按需调用 |
 | **Agent periodic tasks** | `dream` (nightly), `discover` (every 3 days), `enrich` (weekly), `reflect` (after conversations), `cleanup` (weekly) | 需要 Agent 配置定时任务，自动运行 |
 
 The third category is where CBrain truly compounds. Without periodic tasks, you still get a working knowledge base. **With them, the brain maintains itself** — entity enrichment, structural discoveries, insights, and cleanup happen automatically.
@@ -234,7 +232,7 @@ To set up periodic tasks with Hermes:
 # In your Agent's skill config (SKILL.md), add scheduled tasks:
 # - Every day:  cbrain dream
 # - Every 3 days: cbrain discover
-# - Weekly: cbrain enrich && cbrain cleanup
+# - Weekly: cbrain enrich && cbrain dedup   # (cleanup is an Agent skill, not a CLI command)
 ```
 
 ### Agent Memory Rules
@@ -323,7 +321,7 @@ cbrain serve --http    # → http://127.0.0.1:3399
 Your Agent calls tools via HTTP:
 
 ```bash
-curl -s http://127.0.0.1:3399/tools/query -d '{"query":"张三"}'
+curl -s http://127.0.0.1:3399/tools/query -d '{"query":"人物A"}'
 curl -s http://127.0.0.1:3399/tools/status -d '{}'
 ```
 
@@ -342,14 +340,14 @@ Add to your Agent's MCP config:
 }
 ```
 
-### MCP Tools (41 total)
+### MCP Tools (81 total)
 
 **Core:**
 | Tool | Description |
 |:-----|:------------|
-| `query` | Hybrid search (vector + FTS + graph + multi-query expansion) |
+| `query` | 底层关键词搜索，默认 smart（FTS 优先，空则回退混合）。自然语言问题用 deep_recall |
 | `ingest` | Ingest content into the brain |
-| `dialogue` | Ingest conversation snippets with incremental entity matching |
+| `ingest_dialogue` | Ingest conversation snippets with incremental entity matching |
 | `status` | Brain statistics (pages, links, chunks) |
 | `health` | Health check |
 | `sync` | Re-index vault files |
@@ -362,7 +360,7 @@ Add to your Agent's MCP config:
 |:-----|:------------|
 | `get_page` | Retrieve a page by slug |
 | `list_pages` | List pages with type filter, limit, offset |
-| `put_page` | Create or update a page |
+| `put_page` | Create or update a page (defaults to patch; mode='replace' to overwrite) |
 | `delete_page` | Delete a page |
 | `resolve_slugs` | Resolve title/slug queries to exact slugs |
 | `writeback` | Write page changes back to vault |
@@ -402,21 +400,11 @@ Add to your Agent's MCP config:
 | `job_cancel` | Cancel a pending/running job |
 | `job_retry` | Retry a failed job |
 
-**Raw Data:**
-| Tool | Description |
-|:-----|:------------|
-| `put_raw_data` | Store binary data (base64) attached to a page |
-| `get_raw_data` | Retrieve raw data by slug + key |
-| `list_raw_data` | List raw data keys for a page |
-| `delete_raw_data` | Delete raw data by slug + key |
-
 **Observability:**
 | Tool | Description |
 |:-----|:------------|
 | `get_chunks` | Get chunks for a page |
 | `get_ingest_log` | View ingest log |
-| `get_config` | Get a config value |
-| `set_config` | Set a config value |
 
 ## Search System
 
@@ -427,12 +415,14 @@ Four search strategies, fused with Reciprocal Rank Fusion (RRF):
 3. **Chinese FTS** — Full-text search via SQLite FTS5 trigram tokenizer
 4. **Graph traversal** — Relationship-based discovery through the knowledge graph
 
+> CLI `cbrain query` 默认 `--strategy all`（全量混合）；MCP 工具 `query` 默认 `smart`（FTS 优先，空则回退混合）——两者默认策略不同。
+
 ```bash
-# Default: all three combined
+# CLI 默认 all（全量混合三策略）
 cbrain query "怎么优化RAG性能"
 
 # Single strategy
-cbrain query "张三" --strategy fts
+cbrain query "人物A" --strategy fts
 cbrain query "RAG optimization" --strategy vector
 ```
 
@@ -460,7 +450,7 @@ CBrain includes Agent-facing skill files that teach your Agent how to use the br
 
 | Skill | Purpose |
 |:------|:--------|
-| `brain-ops` | 5-step protocol + 38-tool reference (default skill) |
+| `brain-ops` | 5-step protocol + 81-tool reference (default skill) |
 | `query` | Hybrid search: vector + FTS + graph |
 | `review` | Deep topic review — gather everything, synthesize coherent picture |
 | `connect` | Relationship analysis — find and explain connections between entities |
@@ -536,13 +526,12 @@ bun run dev init
 
 ## Roadmap
 
-See [CHANGELOG.md](./CHANGELOG.md) for detailed version history.
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v1.9.4).
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v1.0 | HTTP API, NER (glm-5-turbo), 41 MCP tools, Bun global install | ✅ |
-| v1.1 | Insight 系统, Discovery 闭环, Agent 功能分类 | ✅ Current |
-| v1.2 | Web UI, faster embedding, multi-user | Planned |
+| v1.0–v1.9.4 | MCP-first 架构、三层搜索、NER、Insight/Discovery、agentic 工具、provenance、安全恢复 | ✅ Current |
+| 未来 | Web UI、eval 框架、durable job queue | Planned |
 
 ## About This Project
 

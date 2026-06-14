@@ -78,7 +78,7 @@
 
 ### 15. 维护/同步
 - **触发**：同步 / sync / 重新索引 / 体检 / 健康检查
-- **工具**：`sync()` 或 `maintain()`（sync + enrich + health）
+- **工具**：`sync()` 或 `dream()`（夜间全量维护：sync + enrich + cleanup + health）
 - **定时**：`dream.md` 完整 5 步维护流水线
 
 ### 16. 层级/分类
@@ -87,11 +87,12 @@
 
 ### 17. 反馈/纠错
 - **触发**：这个信息不对 / 纠正 / 反馈 / 投诉 / 错了
-- **工具**：`submit_feedback(type, content)` — 记录用户反馈，改进系统
+- **工具**：`record_feedback(query, relevant_slugs?, irrelevant_slugs?, note?)` — 标记某次查询结果中哪些 slug 有用 / 无用，CBrain 据此调整学习权重（有用加权、无用衰减）。必须带上原始 query，不是通用投诉通道
 
 ### 18. 配置调整
 - **触发**：改一下配置 / 调整参数 / 配置
-- **工具**：`get_config(key)` / `set_config(key, value)`
+- **读取**：`cbrain config` — 查看当前配置
+- **修改**：`cbrain config --set key=value` — 用户明确确认后执行（如 `cbrain config --set ner.enabled=false`）
 
 ### 19. 复杂多步研究（EXPERIMENTAL）
 - **触发**：A和B的差异/取舍/哪个更适合 / 我还遗漏了什么/盲区 / A、B、C之间有什么内在联系 / 这个结论依据够不够

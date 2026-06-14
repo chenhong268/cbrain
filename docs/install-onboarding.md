@@ -6,7 +6,7 @@
 
 一个跑在本地的知识引擎：你把内容喂进去（文字、笔记、对话），它自动提取人名/组织/概念，建图谱，之后随时搜索、查关系、问 Agent。
 
-所有数据在本地。SQLite + Markdown 文件。没有云依赖。
+持久数据全在本地（SQLite + Markdown + LanceDB）。但向量嵌入、NER、洞察生成会把你输入的文本连同 API Key 发往你配置的模型 provider（智谱/DeepSeek）。
 
 ## 前置条件
 
@@ -168,7 +168,7 @@ CBrain 启动时会自动读取。加到 `.bashrc` 或 `.zshrc` 里持久化。
 }
 ```
 
-> **注意：** API Key 存在 `cbrain.json`（本地文件）。不会上传到任何服务器。
+> **注意：** 配置文件（`cbrain.json`）仅保存在本地。调用 embedding/NER/reflect 时，API Key 会作为认证信息发送至你配置的 provider（智谱/DeepSeek），待处理文本一并发送。
 
 ---
 
@@ -446,11 +446,11 @@ cbrain backup             # 先备份再排查
 |:-----|:-----|:-----|
 | **`Permission denied` 写入 vault/runtime** | 目录权限不对 | `chmod 755 /path/to/vault /path/to/runtime`，确保当前用户有写权限 |
 | **`duplicate title` 错误** | 同名页面已存在 | CBrain 的 title 是唯一的。用 `cbrain list` 查看现有页面，改名或用已有 slug |
-| **`watcher lock` / PID 锁残留** | 上次进程非正常退出 | 删除 `<profile>/cbrain-http.pid` 或 `<profile>/cbrain-stdio.pid`；或 `cbrain serve --force` |
+| **`watcher lock` / PID 锁残留** | 上次进程非正常退出 | 先 `cbrain doctor` 确认无活动 serve 进程（`pgrep -f 'cbrain.*serve'`）；确认是 stale 残留锁后，删除 `<profile>/cbrain-http.pid` 或 `<profile>/cbrain-stdio.pid` 再重启。`cbrain serve --force` 会跳过 PID 检查、并发可能损坏索引，仅在你确定无活动进程时用 |
 | **runtime 在 vault 里的警告** | `runtimePath` 配置指向 vault 内部 | 编辑 `cbrain.json`，把 `runtimePath` 改到 vault 外面（如 `/path/to/mybrain/runtime`） |
 | **`Port 3399 already in use`** | 已有一个 HTTP 服务在跑 | `kill $(lsof -ti:3399)` 关掉旧进程，或用 `--port` 换端口 |
 | **`FTS5: syntax error`** | 搜索词包含特殊字符 | 用空格分隔关键词，避免 `OR`、`AND`、引号等 FTS5 保留字 |
-| **`LanceDB connection failed`** | 向量库损坏 | 删除 `lancedb/` 目录，重新 `cbrain sync` 重建索引 |
+| **`LanceDB connection failed`** | 向量库损坏 | 先 `cbrain backup` 备份、`cbrain doctor` 诊断，再重建：单页 `cbrain sync --slug <slug> --reindex`，整库损坏 `cbrain sync --reindex-vectors`（watcher 隔离页等进阶场景见 [known-issues](known-issues.md)）。**切勿直接删除 `lancedb/`** |
 | **NER 提取不到实体** | API Key 未配置或余额不足 | 检查 `cbrain.json` 里 `ner.llm_api_key` 或环境变量 `ZHIPU_API_KEY`；到智谱控制台检查余额 |
 | **`bun: command not found`** | Bun 未安装或不在 PATH | `curl -fsSL https://bun.sh/install \| bash`，然后重启终端 |
 

@@ -7,7 +7,7 @@
 ### 1. 安装
 
 ```bash
-git clone https://github.com/chenhong/cbrain.git
+git clone https://github.com/chenhong268/cbrain.git
 cd cbrain
 bun install
 ```
@@ -39,7 +39,7 @@ vault/
 
 ```bash
 # 录入一条人物
-cbrain ingest --type text --title "张三" --page-type entity "产品经理，负责AI产品线"
+cbrain ingest --type text --title "人物A" --page-type entity "产品经理，负责AI产品线"
 
 # 录入一篇文档
 cbrain ingest --type markdown --title "周会纪要0401" --page-type record @meeting.md
@@ -51,11 +51,12 @@ cbrain ingest --type text --title "项目管理原则" --page-type concept @prin
 ### 4. 搜索
 
 ```bash
-# 混合搜索（默认，向量 + 全文 + 图谱）
-cbrain query "张三的项目"
+# CLI 默认 strategy=all（全量混合：向量 + 全文 + 图谱）
+# 注意：MCP 工具 query 默认 smart（FTS 优先，空则混合），与 CLI 不同
+cbrain query "人物A的项目"
 
 # 只看全文匹配
-cbrain query "张三" --strategy fts
+cbrain query "人物A" --strategy fts
 
 # 只看语义相似
 cbrain query "怎么优化性能" --strategy vector
@@ -71,7 +72,7 @@ cbrain query "怎么优化性能" --strategy vector
 |------|------|
 | `cbrain init` | 新建一个大脑 |
 | `cbrain status` | 看一眼统计：多少页、多少关系、按类型分布 |
-| `cbrain maintain` | 一键维护：同步 → 补充 → 体检 → 报告 |
+| `cbrain dream` | 夜间全量维护：备份 → 同步 → 充实 → 学习 → 清理 → 体检 → 报告（带锁） |
 | `cbrain config` | 查看当前配置 |
 | `cbrain config --set key=value` | 修改配置（如 `ner.enabled=false`） |
 
@@ -119,8 +120,6 @@ cbrain query "怎么优化性能" --strategy vector
 | `cbrain doctor` | 快速诊断：数据库、文件、API |
 | `cbrain doctor --first-run` | 2.0 首次运行全面检查（config → paths → DB → index → services） |
 | `cbrain doctor --first-run --json` | 同上，JSON 输出（供 Agent 程序化读取） |
-| `cbrain check-resolvable` | ~~未实现，手动检查 skills/ 目录~~ |
-| `cbrain watch` | 监听文件变化，自动同步 |
 
 ### 服务
 
@@ -144,7 +143,7 @@ cbrain query "怎么优化性能" --strategy vector
 
 ```
 # 每周
-cbrain maintain
+cbrain dream
 
 # 每月
 cbrain sync && cbrain enrich && cbrain health
@@ -162,28 +161,28 @@ cbrain health
 ### 深入了解一个主题
 
 ```
-# 对 AI Agent 说"帮我全面了解星辰科技"（Agent 会走 review 协议）
+# 对 AI Agent 说"帮我全面了解组织A"（Agent 会走 review 协议）
 # 或手动：
-cbrain query "星辰科技" --strategy all
-cbrain show brain/entities/星辰科技
-cbrain graph-query brain/entities/星辰科技 --mode traverse
-cbrain timeline brain/entities/星辰科技
+cbrain query "组织A" --strategy all
+cbrain show brain/entities/组织a
+cbrain graph-query brain/entities/组织a --mode traverse
+cbrain timeline brain/entities/组织a
 ```
 
 ### 了解两个人/公司的关系
 
 ```
-# 对 AI Agent 说"王磊和星辰科技什么关系"
+# 对 AI Agent 说"人物C和组织A什么关系"
 # 或手动：
-cbrain graph-query brain/entities/王磊 --mode traverse
-cbrain graph-query brain/entities/星辰科技 --mode traverse
+cbrain graph-query brain/entities/人物c --mode traverse
+cbrain graph-query brain/entities/组织a --mode traverse
 # 交叉比对共同关联
 ```
 
 ### 基于知识库写作
 
 ```
-# 对 AI Agent 说"帮我写一段星辰科技的介绍"
+# 对 AI Agent 说"帮我写一段组织A的介绍"
 # Agent 会先搜 CBrain 素材，再写，最后问你要不要存档
 ```
 
@@ -222,3 +221,56 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 ```
 
 环境变量：`ZHIPU_API_KEY`（如果不在 cbrain.json 中配置）
+
+---
+
+## 完整 CLI 命令索引
+
+由 `cbrain --help` 自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
+
+<!-- cbrain:auto-gen cli-commands:start -->
+共 40 个 CLI 命令（`cbrain --help`）。
+
+| 命令 | 说明 |
+|------|------|
+| `backfill` | Backfill structured facts for existing entities (dry-run by default) |
+| `backup` | Create a backup of vault + DB (zip archive) |
+| `batch-delete` | Delete entities from a file of slugs (one per line) |
+| `clean-shells` | Remove entity/concept pages with 0 mentions, 0 links, and 0 aliases |
+| `clean-timeline` | Fix timeline entries with NULL, partial, or malformed dates; deduplicate |
+| `compact` | Compact LanceDB files and reclaim disk space |
+| `config` | View or update brain configuration |
+| `dedup` | Find and merge duplicate entities using LLM |
+| `dedup-types` | Find and merge same-name entities that exist under different types |
+| `delete` | Delete a page from the brain |
+| `diagnose-insight` | Diagnose insight candidate pool and scoring (no LLM calls) |
+| `discover` | Run discovery pipeline to detect structural anomalies in knowledge graph |
+| `doctor` | 基础设施就绪检查 |
+| `dossier` | Generate or update a structured dossier for an entity |
+| `dream` | Nightly full pipeline: sync → enrich → cleanup → health → insight archive |
+| `enrich` | Run entity enrichment (tier promotion) |
+| `graph-query` | Query the knowledge graph |
+| `health` | Run 14-dimension health check and write report |
+| `hierarchy` | Manage entity hierarchy (reports_to) |
+| `index` | Generate Obsidian index files |
+| `ingest` | Ingest content (text or markdown) |
+| `init` | Initialize a new brain (creates config + vault dirs) |
+| `list` | List all pages in the brain |
+| `mcp-config` | Output MCP server configuration JSON for Agent integration |
+| `migrate-runtime` | Migrate vault/outputs to runtime directory (uses resolveRuntimePath) |
+| `query` | Search the brain |
+| `reflect` | Run reflect stage: synthesize entities, infer relations, generate insights |
+| `relocate` | Fix misplaced pages in records/ by scanning file frontmatter and moving to correct directories |
+| `restore` | Restore from a backup zip file |
+| `revert` | Revert a page to a previous version |
+| `serve` | Start MCP server (stdio transport) |
+| `show` | Display a page's full content |
+| `skill-pack` | Verify and report Hermes skill pack status |
+| `status` | Show brain statistics at a glance |
+| `stub-enrich` | Enrich thin stub pages with LLM-generated summaries (single slug or all candidates) |
+| `sync` | Sync vault files to indexes |
+| `tags` | Manage tags on a page |
+| `timeline` | View or add timeline events on a page |
+| `versions` | Show version history of a page |
+| `wakeup-diff` | Generate wake-up diff: cognitive changes since last snapshot |
+<!-- cbrain:auto-gen cli-commands:end -->

@@ -26,7 +26,8 @@
     "check": "bun run lint && bun test",
     "check:install-network": "bun bin/check-install-network.ts",
     "check:install-tag": "bash bin/check-install-smoke.sh",
-    "gate:offline": "bun bin/check-first-recall-gate.ts"
+    "gate:offline": "bun bin/check-first-recall-gate.ts",
+    "check:docs": "bun bin/check-docs-consistency.ts"
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.27.0",

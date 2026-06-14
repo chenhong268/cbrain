@@ -1,6 +1,6 @@
 # CBrain Design
 
-> v0.3.0 — Your Agent's Memory, Compounding.
+> Your Agent's Memory, Compounding.
 
 ## Architecture
 
@@ -8,7 +8,7 @@
 ┌──────────────────────────────────────────┐
 │  Skills Layer (7 × SKILL.md)             │  ← Agent behavior: when to check, what to save
 ├──────────────────────────────────────────┤
-│  MCP Server (37 tools, stdio transport)  │  ← Agent interface: CRUD, search, graph, jobs
+│  MCP Server (81 tools, stdio + HTTP)     │  ← Agent interface: CRUD, search, graph, jobs
 ├──────────────────────────────────────────┤
 │  Core Engine                             │
 │  ┌──────────┬──────────┬──────────────┐  │
@@ -35,7 +35,7 @@
 
 ### Key Principle
 
-**Obsidian vault is the single source of truth.** SQLite and LanceDB are index layers — delete and rebuild anytime via `cbrain sync`. All data lives in markdown files readable by both humans and agents.
+**Obsidian vault is the single source of truth.** SQLite and LanceDB are index layers — if corrupted, rebuild safely. Always `cbrain backup` first, then per-page `cbrain sync --slug <slug> --reindex`, quarantined pages `cbrain sync --reindex-quarantined`, or whole-index `cbrain sync --reindex-vectors`. Never delete them directly. All data lives in markdown files readable by both humans and agents.
 
 ## Why SQLite + LanceDB instead of Postgres
 
@@ -45,7 +45,7 @@ GBrain uses PGLite (embedded Postgres) with pgvector. CBrain chose a different s
 |:--------|:---------------------------|:--------------------------|
 | Chinese FTS | tsvector — no trigram support, poor CJK tokenization | FTS5 trigram — proper bigram/trigram indexing for Chinese |
 | Vector search | pgvector HNSW — works, but adds PG complexity | LanceDB — purpose-built for ANN, columnar storage, zero config |
-| Deployment | Requires Postgres-compatible runtime (PGLite) | Single binary (bun:sqlite), zero external dependencies |
+| Deployment | Requires Postgres-compatible runtime (PGLite) | Embedded SQLite (bun:sqlite), zero external database dependencies |
 | Embedding dims | 1536d (OpenAI) | 2048d (智谱 embedding-3) |
 | Migration path | Easier to scale to Supabase | Stay SQLite, or migrate storage layer behind interface |
 
@@ -56,11 +56,11 @@ GBrain uses PGLite (embedded Postgres) with pgvector. CBrain chose a different s
 ### 4-Layer Hybrid Search
 
 ```
-User Query: "张三的项目"
+User Query: "人物A的项目"
      │
      ├─→ Layer 0: Multi-Query Expansion
      │   LLM (GLM-4-flash) generates variants:
-     │   "张三的项目" → ["张三 项目管理", "张三 负责的产品", ...]
+     │   "人物A的项目" → ["人物A 项目管理", "人物A 负责的产品", ...]
      │
      ├─→ Layer 1: Vector Search (LanceDB)
      │   Cosine similarity over 2048d embeddings
@@ -101,7 +101,7 @@ This works for CJK without requiring a segmenter. Combined with RRF fusion again
 Content Input (text or markdown)
      │
      ├─→ Parse frontmatter (gray-matter)
-     ├─→ Generate slug (Chinese-aware, pinyin fallback)
+     ├─→ Generate slug (Chinese-aware, preserves CJK, lowercases Latin)
      │
      ├─→ Write markdown to vault (SSOT)
      ├─→ Hash content → INSERT pages row (SQLite)
@@ -193,7 +193,7 @@ Built-in handlers: `sync`, `embed`, `ner`. Jobs are priority-ordered with config
 
 ## MCP Protocol Design
 
-37 tools organized into 9 domains:
+Tools organized into domains (full inventory in docs/mcp-tools.md):
 
 | Domain | Tools | Design Rationale |
 |:-------|:------|:-----------------|
@@ -204,8 +204,6 @@ Built-in handlers: `sync`, `embed`, `ner`. Jobs are priority-ordered with config
 | Timeline | get_timeline, add_timeline_entry | Temporal event tracking |
 | Versions | get_versions, revert_version | Non-destructive history |
 | Jobs | job_submit, job_list, job_status, job_cancel, job_retry | Async work management |
-| Raw Data | put_raw_data, get_raw_data, list_raw_data, delete_raw_data | Binary BLOB storage |
-| Config | get_config, set_config | Runtime configuration |
 | Observability | get_chunks, get_ingest_log | Debugging and inspection |
 
 All tools return JSON via MCP text content. Zod schemas on every input for type safety and auto-generated tool descriptions.
@@ -246,7 +244,7 @@ cbrain <command> [options]
 init        Initialize vault + DB + config
 doctor      Health check (DB, vault, embedding, NER connectivity)
 ingest      Ingest content (--type, --title, --slug, --tags)
-query       Hybrid search (--strategy, --limit, --no-multi-query)
+query       Hybrid search (--strategy 默认 all, --limit)
 sync        Re-index vault files → SQLite + LanceDB
 enrich      Entity tier enrichment (--slug for single)
 graph-query Graph traversal (--mode, --depth)
@@ -254,6 +252,8 @@ serve       Start MCP server over stdio
 ```
 
 All commands are thin wrappers around the core engine. The CLI and MCP server share the same code paths — no duplication.
+
+> 搜索默认值差异：CLI `cbrain query` 默认 `--strategy all`（全量混合）；MCP 工具 `query` 默认 `smart`（FTS 优先，空结果回退混合）。两者底层都走 HybridSearch，仅默认策略不同。
 
 ## Skills Layer
 
@@ -266,7 +266,7 @@ All commands are thin wrappers around the core engine. The CLI and MCP server sh
 | `ingest` | Content routing by source type | On detected signals |
 | `query` | Strategy selection + result synthesis | On brain-ops CHECK |
 | `enrich` | Tier promotion cycle | After batch ingest, periodically |
-| `maintain` | 8-dimension health → detect → suggest → confirm → execute | Weekly |
+| `cleanup` | scan duplicates/orphans/stale-stubs → suggest → confirm → execute | Periodic |
 | `dream` | sync → enrich → health → report | Nightly (cron) |
 
 Skills follow GBrain's "fat skills, thin harness" philosophy: intelligence lives in the skill files, not the runtime. The MCP server provides tools; skills teach the Agent when and how to use them.
@@ -279,10 +279,10 @@ Skills follow GBrain's "fat skills, thin harness" philosophy: intelligence lives
 |:---------|:-------|:-------|:----|
 | Storage | SQLite + LanceDB | PGLite/Postgres + pgvector | Zero-dependency for personal use; Chinese FTS requires trigram tokenizer |
 | Embedding | 智谱 embedding-3 (2048d) | OpenAI (1536d) | Better Chinese semantic understanding |
-| MCP tools | 37 | ~30 | Fuller CRUD coverage for agents |
+| MCP tools | 81 | ~30 | Fuller CRUD coverage for agents |
 | Agent integration | Skill files for any agent framework | Plugin system | Designed as MCP-first, works with any agent |
 | NER | LLM-based (GLM-4-flash) | Regex + LLM hybrid | Chinese entity extraction needs LLM for name boundaries |
-| Deployment | `bun add cbrain` + `cbrain init` | `git clone + bun install + bun link` | npm package is simpler for end users |
+| Deployment | `git clone` + `bun install`（源码安装，未发布 npm） | `git clone + bun install + bun link` | CBrain 暂未发布 npm 包，源码安装 |
 
 ### What GBrain Has That CBrain Doesn't (yet)
 
@@ -291,7 +291,6 @@ Skills follow GBrain's "fat skills, thin harness" philosophy: intelligence lives
 | eval framework (BrainBench) | P0 | Need objective search quality measurement |
 | File import/export | P1 | `gbrain import <dir>` is useful for onboarding |
 | Durable job queue (supervisor, stall detection) | P1 | Current SQLite queue works but lacks crash recovery |
-| Remote MCP over HTTP | P2 | stdio works for local; HTTP needed for remote only |
 | Supabase/Postgres backend | P2 | SQLite is sufficient for single-user |
 | Voice/Email/Calendar integration | P2 | Nice-to-have, not core memory function |
 | skillify/skillpack management | P3 | Current manual skill creation is adequate for now |
@@ -302,4 +301,3 @@ Skills follow GBrain's "fat skills, thin harness" philosophy: intelligence lives
 - **Chinese FTS** — FTS5 trigram gives native-quality CJK search without a segmenter
 - **Chinese embeddings** — 智谱 embedding-3 outperforms OpenAI on Chinese semantic similarity
 - **Chinese NER** — LLM-based extraction understands Chinese name boundaries and company suffixes
-- **npm install** — `bun add cbrain` + `npx cbrain init` is simpler than GBrain's clone+link flow

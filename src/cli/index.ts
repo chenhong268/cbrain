@@ -1,31 +1,4 @@
 #!/usr/bin/env bun
-import { Command } from "commander";
-import { version } from "../version.js";
+import { buildProgram } from "./program.js";
 
-const program = new Command()
-  .name("cbrain")
-  .description("Your Agent's Memory, Compounding. Agent 的记忆，复利生长。")
-  .version(version);
-
-// Register all command modules
-import { register as brainCmds } from "./commands/brain.js";
-import { register as contentCmds } from "./commands/content.js";
-import { register as searchCmds } from "./commands/search.js";
-import { register as edgeCmds } from "./commands/edges.js";
-import { register as maintenanceCmds } from "./commands/maintenance.js";
-import { register as serverCmds } from "./commands/server.js";
-import { register as backupCmds } from "./commands/backup.js";
-import { register as mcpConfigCmds } from "./commands/mcp-config.js";
-import { register as skillPackCmds } from "./commands/skill-pack.js";
-
-brainCmds(program);
-contentCmds(program);
-searchCmds(program);
-edgeCmds(program);
-maintenanceCmds(program);
-serverCmds(program);
-backupCmds(program);
-mcpConfigCmds(program);
-skillPackCmds(program);
-
-program.parse();
+buildProgram().parse();
