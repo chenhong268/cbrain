@@ -27,6 +27,7 @@
     "check:install-network": "bun bin/check-install-network.ts",
     "check:install-tag": "bash bin/check-install-smoke.sh",
     "gate:offline": "bun bin/check-first-recall-gate.ts",
+    "gate:rc": "bun bin/check-v2-rc-gate.ts",
     "check:docs": "bun bin/check-docs-consistency.ts"
   },
   "dependencies": {
