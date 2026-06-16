@@ -281,6 +281,29 @@ export class LanceDBManager {
     }));
   }
 
+  /**
+   * Read this page's L1 rows (`chunkIndex === -1`) WITH their vectors, for
+   * exact rollback of the empty-body writeIndexes path (which deletes L1
+   * vectors). Mirrors readRawVectorRows but filters chunkIndex = -1.
+   */
+  async readL1VectorRows(pageSlug: string): Promise<RawVectorRow[]> {
+    const table = await this.openChunksStrict();
+    const escaped = pageSlug.replace(/'/g, "''");
+    const rows = await table
+      .query()
+      .where(`pageSlug = '${escaped}' AND chunkIndex = -1`)
+      .select(["pageSlug", "chunkIndex", "content", "vector"])
+      .toArray();
+    return (rows as Array<Record<string, unknown>>)
+      .map((r) => ({
+        pageSlug: r.pageSlug as string,
+        chunkIndex: Number(r.chunkIndex),
+        content: r.content as string,
+        vector: normalizeVector(r.vector),
+      }))
+      .sort((a, b) => a.chunkIndex - b.chunkIndex);
+  }
+
   // ─── Insights table ────────────────────────────────────────────
 
   async addInsightVector(data: InsightVectorData): Promise<void> {

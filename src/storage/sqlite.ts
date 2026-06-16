@@ -993,6 +993,14 @@ export class CBrainDB {
     ).run({ $slug: pageSlug });
   }
 
+  /** Read all FTS content rows for a page (used by sync rollback verification). */
+  getFtsContentsByPage(pageSlug: string): string[] {
+    const rows = this.prepare(
+      "SELECT content FROM chunks_fts WHERE page_slug = $slug"
+    ).all({ $slug: pageSlug }) as Array<{ content: string }>;
+    return rows.map((r) => r.content);
+  }
+
   /**
    * Full-text search over chunks_fts (trigram tokenizer).
    *

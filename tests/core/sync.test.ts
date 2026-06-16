@@ -65,6 +65,11 @@ function createMockLanceDB() {
     },
     close: async () => {},
     createFTSIndex: async () => {},
+    // Stubs for sync rollback snapshot path — return empty so existing
+    // success-path tests are unaffected (no real old rows to restore).
+    readRawVectorRows: async (_pageSlug: string) => [],
+    readL1VectorRows: async (_pageSlug: string) => [],
+    openChunksStrict: async () => { throw new Error("mock: no table"); },
   };
 }
 

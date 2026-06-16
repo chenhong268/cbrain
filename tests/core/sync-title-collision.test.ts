@@ -29,6 +29,10 @@ describe("sync title collision", () => {
       addChunks: async () => {},
       deleteByPageSlug: async () => {},
       deleteRawChunksByPageSlug: async () => {},
+      deleteL1VectorByPageSlug: async () => {},
+      // Rollback-safety snapshot/restore hooks (#185); mock holds no vectors.
+      readRawVectorRows: async () => [],
+      readL1VectorRows: async () => [],
       getIndexedPageSlugs: async () => [],
       getOrCreateTable: async () => ({} as never),
       searchInsights: async () => [],

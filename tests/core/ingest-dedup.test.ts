@@ -43,6 +43,12 @@ function createMockLanceDB() {
     fullTextSearch: async () => [],
     deleteByPageSlug: async () => {},
     deleteRawChunksByPageSlug: async () => {},
+    deleteL1VectorByPageSlug: async () => {},
+    // Rollback-safety hooks read by SyncManager's snapshot/restore (#185).
+    // Mock Lance holds no real vectors, so snapshots are empty — exercises
+    // the snapshot/restore path without weakening production fail-closed logic.
+    readRawVectorRows: async () => [],
+    readL1VectorRows: async () => [],
     close: async () => {},
     createFTSIndex: async () => {},
   };
@@ -286,7 +292,7 @@ describe("Ingest dedup", () => {
 
   // ─── P1: Sync stale hash — fault injection ──────────────────
 
-  test("sync clears ingest hash BEFORE embedding, even on index failure", async () => {
+  test("sync preserves ingest hash on index failure (cleared only after success)", async () => {
     const { SyncManager } = await import("../../src/core/sync.js");
     const { writeFileSync } = await import("node:fs");
     const { hashContent } = await import("../../src/core/shared.js");
@@ -323,7 +329,8 @@ describe("Ingest dedup", () => {
       pages: new PageManager(db, vaultPath),
     });
 
-    // syncPage should detect content change, clear ingest hash, then fail on embed
+    // syncPage should detect content change, then fail on embed — leaving ingest
+    // hash untouched (rollback safety: index failure must not invalidate dedup hash)
     try {
       await syncMgr.syncPage(slug, vaultPath);
       expect.unreachable("syncPage should have thrown on embed failure");
@@ -331,8 +338,8 @@ describe("Ingest dedup", () => {
       expect((e as Error).message).toContain("Index write failed");
     }
 
-    // Ingest hash should be cleared (not "fakeoldhash123456")
-    expect(db.getPageIngestHash(slug)).toBeNull();
+    // Ingest hash preserved (compensation restores pre-sync state)
+    expect(db.getPageIngestHash(slug)).toBe("fakeoldhash123456");
 
     // Content hash should NOT be updated (retains old value for retry)
     const contentHash = db.getPageContentHash(slug);

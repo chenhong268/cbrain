@@ -18,6 +18,14 @@ import {
   normalizeAndHashBody,
 } from "./shared.js";
 import { ContentPipeline } from "./pipeline.js";
+import {
+  snapshotIndexState,
+  restoreIndexState,
+  SyncRollbackError,
+  SyncSnapshotError,
+  sanitizeForLog,
+  type IndexSnapshot,
+} from "./sync-index-safety.js";
 
 export class TitleCollisionError extends Error {
   constructor(
@@ -33,6 +41,8 @@ export class TitleCollisionError extends Error {
     this.name = "TitleCollisionError";
   }
 }
+
+export { SyncRollbackError };
 
 export interface SyncConfig {
   chunkSize?: number;
@@ -122,10 +132,12 @@ export class SyncManager {
         const slug = parsed.frontmatter.slug ?? relPath.replace(/\.md$/, "");
         const contentHash = hashContent(content);
 
-        const existing = this.db.getPageContentHash(slug);
+        const existingPage = this.db.getPage(slug);
+        const exists = !!existingPage;
+        const existingHash = existingPage?.content_hash ?? null;
 
         // Normal content hash match — skip as before
-        if (existing && existing === contentHash) {
+        if (existingHash && existingHash === contentHash) {
           // Backfill tags + wikilinks even when content unchanged
           if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
             this.db.replaceTags(slug, parsed.frontmatter.tags as string[]);
@@ -153,7 +165,7 @@ export class SyncManager {
         await this.promoteRecordCollisionIfPerson(title, slug, type, relPath, vaultPath);
 
         // Skip hash match (title-collision files) — verify collision still exists
-        const skipHash = !existing ? this.db.getConfig(`sync.skip.${slug}`) : null;
+        const skipHash = !exists ? this.db.getConfig(`sync.skip.${slug}`) : null;
         if (skipHash === contentHash) {
           const pageTitle = parsed.frontmatter.title ?? slug.split("/").pop() ?? slug;
           const collision = this.db.getPageByTitleExcluding(pageTitle, slug);
@@ -198,16 +210,8 @@ export class SyncManager {
 
     for (const file of changed) {
       try {
-        const existing = this.db.getPageContentHash(file.slug);
-
-        if (existing) {
-          try {
-            this.db.createVersion(file.slug, file.body,
-              file.frontmatter ? JSON.stringify(file.frontmatter) : undefined);
-          } catch (e) {
-            this.logger?.warn("sync", "版本快照写入失败", { slug: file.slug, error: String(e) });
-          }
-        }
+        const existingPage = this.db.getPage(file.slug);
+        const exists = !!existingPage;
 
         if (await this.discardRecordCollisionIfPerson(file.title, file.slug, file.type, file.relPath, vaultPath)) {
           report.skipped++;
@@ -215,41 +219,75 @@ export class SyncManager {
         }
         this.checkTitleCollision(file.title, file.slug, file.type, file.relPath);
 
-        this.db.upsertPage({
-          slug: file.slug,
-          type: file.type,
-          title: file.title,
-          filePath: file.relPath,
-        });
-
-        if (file.frontmatter?.tags && Array.isArray(file.frontmatter.tags)) {
-          this.db.replaceTags(file.slug, file.frontmatter.tags as string[]);
-        }
-
-        // Invalidate ingest dedup fingerprint BEFORE the failure-prone embed/index path,
-        // but ONLY when the semantic body actually changed vs what produced the hash.
-        // Frontmatter-only changes preserve the existing ingest hash.
-        if (existing) {
-          const oldIngestHash = this.db.getPageIngestHash(file.slug);
-          if (oldIngestHash !== null && normalizeAndHashBody(file.body) !== oldIngestHash) {
-            this.db.clearIngestHash(file.slug);
-          }
-        }
-
-        // Build chunks + embedResults from cache, fall back to fresh embed
+        // Build chunks + embedResults. Fresh embed happens BEFORE any durable
+        // mutation so an embedding failure touches nothing (version + ingest-hash
+        // writes are deferred to post-success below).
         const chunks = chunkContent(file.body, this.chunkSize);
-        const embedResults = chunks.map(c => this.chunkEmbedCache.get(`${file.slug}:${c.index}`));
-        if (embedResults.every(r => r)) {
-          await this.pipeline.writeIndexes(file.slug, chunks, embedResults as Array<{ embedding: number[]; tokenCount: number }>);
-        } else {
+        let embedResults = chunks.map(c => this.chunkEmbedCache.get(`${file.slug}:${c.index}`));
+        if (!embedResults.every(r => r)) {
           const fresh = await this.pipeline.embed(file.body);
-          await this.pipeline.writeIndexes(file.slug, fresh.chunks, fresh.embedResults);
+          embedResults = fresh.embedResults;
         }
 
-        // Persist content hash only after indexes are written — ensures next sync retries on failure
-        this.db.updatePageHash(file.slug, file.contentHash);
+        const isNewAll = !exists;
+        // metaSnap captures only the fields upsertPage/replaceTags can mutate
+        // (title, tags). type/filePath are excluded — upsertPage's ON CONFLICT
+        // clause leaves them untouched, so they need no rollback snapshot.
+        const metaSnap = exists
+          ? { title: existingPage?.title ?? file.title, tags: this.db.getTags(file.slug) }
+          : null;
+        const indexSnap = await this.snapshotOrFail(file.slug, exists);
 
-        this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
+        try {
+          this.db.upsertPage({
+            slug: file.slug,
+            type: file.type,
+            title: file.title,
+            filePath: file.relPath,
+          });
+
+          if (file.frontmatter?.tags && Array.isArray(file.frontmatter.tags)) {
+            this.db.replaceTags(file.slug, file.frontmatter.tags as string[]);
+          }
+
+          await this.pipeline.writeIndexes(file.slug, chunks, embedResults as Array<{ embedding: number[]; tokenCount: number }>);
+
+          // Persist content hash only after indexes are written — ensures next sync retries on failure
+          this.db.updatePageHash(file.slug, file.contentHash);
+          this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
+
+          // Post-success metadata writes (#185 P1#3): version snapshot + ingest-hash
+          // invalidation run ONLY after the failure-prone embedding+index boundary,
+          // so an embedding/index failure leaves version count and ingest hash unchanged.
+          if (exists) {
+            try {
+              this.db.createVersion(file.slug, file.body,
+                file.frontmatter ? JSON.stringify(file.frontmatter) : undefined);
+            } catch (e) {
+              this.logger?.warn("sync", "版本快照写入失败", { slug: file.slug, error: String(e) });
+            }
+            try {
+              const oldIngestHash = this.db.getPageIngestHash(file.slug);
+              if (oldIngestHash !== null && normalizeAndHashBody(file.body) !== oldIngestHash) {
+                this.db.clearIngestHash(file.slug);
+              }
+            } catch (e) {
+              this.logger?.warn("sync", "ingest hash 失效失败", { slug: file.slug, error: String(e) });
+            }
+          }
+        } catch (indexError) {
+          const original = indexError instanceof Error ? indexError : new Error(String(indexError));
+          if (isNewAll) {
+            await this.cleanupNewPage(file.slug, original);
+          } else {
+            await this.compensateSyncFailure(file.slug, metaSnap, indexSnap, original);
+          }
+          // Compensation succeeded (full rollback to pre-sync state): rethrow the
+          // original error so the watcher retries. If compensation itself failed,
+          // the helper already threw SyncRollbackError — this line is unreachable
+          // in that case, and SyncRollbackError propagates instead.
+          throw original;
+        }
         report.synced++;
 
         if (this.nerEngine && file.body.trim() && !file.type.startsWith("entity/") && !file.type.startsWith("concept/") && !file.type.startsWith("insight/")) {
@@ -384,9 +422,11 @@ export class SyncManager {
     }
     const contentHash = hashContent(content);
 
-    const existing = this.db.getPageContentHash(effectiveSlug);
+    const existingPage = this.db.getPage(effectiveSlug);
+    const exists = !!existingPage;
+    const existingHash = existingPage?.content_hash ?? null;
 
-    if (existing && existing === contentHash) {
+    if (existingHash && existingHash === contentHash) {
       // Backfill tags + wikilinks even when content unchanged
       if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
         this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
@@ -409,15 +449,6 @@ export class SyncManager {
       } catch { /* non-critical */ }
 
       return { success: true, skipped: true };
-    }
-
-    if (existing) {
-      try {
-        this.db.createVersion(effectiveSlug, parsed.body,
-          parsed.frontmatter ? JSON.stringify(parsed.frontmatter) : undefined);
-      } catch (e) {
-        this.logger?.warn("sync", "版本快照写入失败", { slug: effectiveSlug, error: String(e) });
-      }
     }
 
     const title = parsed.frontmatter.title ?? effectiveSlug;
@@ -444,7 +475,7 @@ export class SyncManager {
 
     // Check skip hash for title-collision files (must be AFTER canonicalization
     // so the key matches what was stored in the TitleCollisionError handler)
-    const skipHash = !existing ? this.db.getConfig(`sync.skip.${effectiveSlug}`) : null;
+    const skipHash = !exists ? this.db.getConfig(`sync.skip.${effectiveSlug}`) : null;
     if (skipHash && skipHash === contentHash) {
       const collision = this.db.getPageByTitleExcluding(title, effectiveSlug);
       if (collision) {
@@ -492,33 +523,67 @@ export class SyncManager {
       throw err;
     }
 
-    this.db.upsertPage({
-      slug: effectiveSlug,
-      type,
-      title,
-      filePath: relPath,
-    });
-
-    if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
-      this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
-    }
-
-    // Invalidate ingest dedup fingerprint BEFORE the failure-prone embed/index path,
-    // but ONLY when the semantic body actually changed vs what produced the hash.
-    // Frontmatter-only changes preserve the existing ingest hash.
-    if (existing) {
-      const oldIngestHash = this.db.getPageIngestHash(effectiveSlug);
-      if (oldIngestHash !== null && normalizeAndHashBody(parsed.body) !== oldIngestHash) {
-        this.db.clearIngestHash(effectiveSlug);
-      }
-    }
-
+    // --- Embed FIRST: an embedding failure must touch nothing durable-retrievable.
+    // createVersion + ingest-hash invalidation are deferred to the post-success
+    // block below so they leave zero trace on embedding/index failure (#185 #1). ---
     const { chunks, embedResults } = await this.pipeline.embed(parsed.body);
-    await this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);
 
-    // Persist content hash only after indexes are written
-    this.db.updatePageHash(effectiveSlug, contentHash);
-    this.pipeline.writeIngestLog(effectiveSlug, "vault", { hash: contentHash });
+    const isNew = !exists;
+    // Snapshot retrievable metadata + full index state before any durable mutation.
+    // (ingestHash intentionally excluded — its invalidation is logical, not rollbackable.)
+    const metaSnap = exists
+      ? {
+          title: existingPage?.title ?? title,
+          tags: this.db.getTags(effectiveSlug),
+        }
+      : null;
+    const indexSnap: IndexSnapshot = await this.snapshotOrFail(effectiveSlug, exists);
+
+    try {
+      this.db.upsertPage({ slug: effectiveSlug, type, title, filePath: relPath });
+
+      if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
+        this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
+      }
+
+      await this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);
+
+      // Persist content hash only after indexes are written
+      this.db.updatePageHash(effectiveSlug, contentHash);
+      this.pipeline.writeIngestLog(effectiveSlug, "vault", { hash: contentHash });
+
+      // Post-success metadata writes (#185 P1#3): version snapshot + ingest-hash
+      // invalidation run ONLY after the failure-prone embedding+index boundary,
+      // so an embedding/index failure leaves version count and ingest hash unchanged.
+      if (exists) {
+        try {
+          this.db.createVersion(effectiveSlug, parsed.body,
+            parsed.frontmatter ? JSON.stringify(parsed.frontmatter) : undefined);
+        } catch (e) {
+          this.logger?.warn("sync", "版本快照写入失败", { slug: effectiveSlug, error: String(e) });
+        }
+        try {
+          const oldIngestHash = this.db.getPageIngestHash(effectiveSlug);
+          if (oldIngestHash !== null && normalizeAndHashBody(parsed.body) !== oldIngestHash) {
+            this.db.clearIngestHash(effectiveSlug);
+          }
+        } catch (e) {
+          this.logger?.warn("sync", "ingest hash 失效失败", { slug: effectiveSlug, error: String(e) });
+        }
+      }
+    } catch (indexError) {
+      const original = indexError instanceof Error ? indexError : new Error(String(indexError));
+      if (isNew) {
+        await this.cleanupNewPage(effectiveSlug, original);
+      } else {
+        await this.compensateSyncFailure(effectiveSlug, metaSnap, indexSnap, original);
+      }
+      // Compensation succeeded (full rollback to pre-sync state): rethrow the
+      // original error so the watcher retries. If compensation itself failed,
+      // the helper already threw SyncRollbackError — this line is unreachable
+      // in that case, and SyncRollbackError propagates instead.
+      throw original;
+    }
 
     // Wikilink extraction first — produces mentionedSlugs for NER dedup
     let mentionedSlugs = new Set<string>();
@@ -626,6 +691,82 @@ export class SyncManager {
       }
     }
     return cleaned;
+  }
+
+  /** Compensate a failed existing-page sync: restore retrievable metadata + exact
+   *  index state. ingestHash is intentionally NOT restored — its invalidation is a
+   *  logical fact (the body changed), so a stale dedup hash must stay cleared even
+   *  after rollback, or a later re-ingest of the old body would be wrongly deduped.
+   *  Throws SyncRollbackError if compensation cannot fully restore. */
+  private async compensateSyncFailure(
+    slug: string,
+    meta: { title: string; tags: string[] } | null,
+    indexSnap: IndexSnapshot,
+    original: Error,
+  ): Promise<void> {
+    const errors: Error[] = [];
+    if (meta) {
+      // upsertPage ON CONFLICT only mutates title + updated_at, so type/filePath
+      // are read back as-is from the current row (no snapshot needed for them).
+      const page = this.db.getPage(slug);
+      try {
+        this.db.upsertPage({
+          slug,
+          type: page?.type ?? "record",
+          title: meta.title,
+          filePath: page?.file_path ?? `${slug}.md`,
+        });
+      } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+      try { this.db.replaceTags(slug, meta.tags); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+    }
+    const restore = await restoreIndexState(this.db, this.lance, slug, indexSnap);
+    if (!restore.ok) errors.push(...restore.errors);
+    if (errors.length > 0) {
+      this.writeRecoveryAudit(slug, original, errors);
+      throw new SyncRollbackError(original, errors);
+    }
+  }
+
+  /** Narrow cleanup for a newly-created page that failed during indexing.
+   *  Removes this page's DB rows (via cascade: pages + chunks/links/tags/timeline/FTS/ingest_log) and Lance vectors;
+   *  never touches the user's vault file.
+   *  Throws SyncRollbackError if any cleanup step fails. */
+  private async cleanupNewPage(slug: string, original: Error): Promise<void> {
+    const errors: Error[] = [];
+    try { this.db.deletePageCascaded(slug); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+    try { await this.lance.deleteByPageSlug(slug); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+    if (errors.length > 0) {
+      this.writeRecoveryAudit(slug, original, errors);
+      throw new SyncRollbackError(original, errors);
+    }
+  }
+
+  /** Persist a sanitized recovery-required audit entry (ingest_log) so watcher/ops
+   *  can recognize reindex-needed failures without string-matching raw messages.
+   *  Raw error text never leaves this record — messages are redacted first. */
+  private writeRecoveryAudit(slug: string, original: Error, errors: Error[]): void {
+    try {
+      this.pipeline.writeIngestLog(slug, "vault", {
+        rollbackIncomplete: true,
+        rollbackErrors: errors.map((e) => sanitizeForLog(e.message)),
+        originalError: sanitizeForLog(original.message),
+        reindexRequired: true,
+      });
+    } catch { /* audit write is non-critical */ }
+  }
+
+  /** Snapshot the index state, persisting a recovery-required audit if the
+   *  snapshot itself fails (existing page + unreadable Lance). Centralized so
+   *  both syncPage and syncAll share the fail-closed + audit behavior. */
+  private async snapshotOrFail(slug: string, exists: boolean): Promise<IndexSnapshot> {
+    try {
+      return await snapshotIndexState(this.db, this.lance, slug, exists);
+    } catch (snapError) {
+      if (snapError instanceof SyncSnapshotError) {
+        this.writeRecoveryAudit(slug, snapError, [snapError.readError]);
+      }
+      throw snapError;
+    }
   }
 
   // ─── Private ────────────────────────────────────────────────
