@@ -5,8 +5,8 @@ import { buildContext } from "../../mcp/context.js";
 import { createHttpServer } from "../../http/server.js";
 import { PidLock } from "../../utils/pid-lock.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
-import type { FileWatcher } from "../../core/watcher.js";
-interface ShutdownHandles {
+import { DEFAULT_STOP_DEADLINE_MS, type FileWatcher } from "../../core/watcher.js";
+export interface ShutdownHandles {
   httpServer?: { stop(immediate?: boolean): void };
   watcher?: FileWatcher;
   pidLock: PidLock;
@@ -15,21 +15,62 @@ interface ShutdownHandles {
   stopMcp?: () => void;
 }
 
+/** Bounded deadline for draining watcher sync work on shutdown. */
+export const SHUTDOWN_DRAIN_MS = DEFAULT_STOP_DEADLINE_MS;
+
+/**
+ * Ordered graceful shutdown. Pure: touches no `process` globals, so it is
+ * unit-testable. Ordering (issue #186): stop accepting work → stop HTTP →
+ * drain the watcher (ownership locks still held) → release locks. A sync error
+ * during drain is caught so it can never skip lock release; the timeout
+ * diagnostic exposes only counts — never paths or content.
+ */
+export async function performGracefulShutdown(
+  handles: ShutdownHandles,
+  drainDeadlineMs: number = SHUTDOWN_DRAIN_MS,
+): Promise<void> {
+  // 1. Stop accepting new work.
+  handles.stopJobs?.();
+  handles.stopMcp?.();
+
+  // 2. Stop HTTP from accepting new sync-triggering requests.
+  handles.httpServer?.stop(true);
+
+  // 3. Drain watcher in-flight work while ownership locks are still held.
+  if (handles.watcher) {
+    try {
+      const result = await handles.watcher.stop(drainDeadlineMs);
+      if (!result.drained) {
+        console.error(
+          `> watcher drain timed out after ${drainDeadlineMs}ms ` +
+          `(active=${result.activeCount}, pending=${result.pendingCount}); ` +
+          `in-flight sync may be interrupted on exit`,
+        );
+      }
+    } catch (e: unknown) {
+      console.error("> watcher drain failed:", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // 4. Release ownership locks only after drain completes (or deadline).
+  handles.watcherLock?.release();
+  handles.pidLock.release();
+}
+
 function installShutdownHandlers(handles: ShutdownHandles): void {
   let shuttingDown = false;
-  const shutdown = () => {
+  const run = (): void => {
     if (shuttingDown) return;
-    shuttingDown = true;
-    handles.stopJobs?.();
-    handles.stopMcp?.();
-    handles.watcher?.stop();
-    handles.httpServer?.stop(true);
-    handles.watcherLock?.release();
-    handles.pidLock.release();
+    shuttingDown = true; // idempotent SIGINT/SIGTERM
+    void performGracefulShutdown(handles).finally(() => {
+      // Force exit after the sequence completes so an async drain can't hang forever.
+      // The "exit" handler below best-effort releases locks too.
+      process.exit(0);
+    });
   };
 
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", run);
+  process.on("SIGINT", run);
   // "exit" fires on process.exit() but NOT on SIGTERM default — lock cleanup only
   process.on("exit", () => {
     handles.watcherLock?.release();

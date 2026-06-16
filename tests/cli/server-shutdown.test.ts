@@ -1,9 +1,10 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createServer as createNetServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { SyncManager } from "../../src/core/sync.js";
+import { performGracefulShutdown, type ShutdownHandles } from "../../src/cli/commands/server.js";
 
 const PROJECT_ROOT = process.cwd();
 
@@ -213,7 +214,7 @@ describe("Cross-process quarantine release (dual context)", () => {
     await watcher.scanOnce();
 
     expect(watcher.getQuarantineSize()).toBe(0);
-    watcher.stop();
+    await watcher.stop();
   });
 
   test("watcher picks up DB-side release_all on next scan", async () => {
@@ -230,7 +231,7 @@ describe("Cross-process quarantine release (dual context)", () => {
     await watcher.scanOnce();
 
     expect(watcher.getQuarantineSize()).toBe(0);
-    watcher.stop();
+    await watcher.stop();
   });
 
   test("watcher re-syncs partial DB release", async () => {
@@ -251,6 +252,95 @@ describe("Cross-process quarantine release (dual context)", () => {
     expect(watcher.getQuarantineSize()).toBe(1);
     const remaining = watcher.getQuarantineEntries();
     expect(remaining[0].slug).toBe("fail-b");
-    watcher.stop();
+    await watcher.stop();
+  });
+});
+
+// ─── performGracefulShutdown ordering (issue #186) ─────
+//
+// Proves the shutdown ordering contract deterministically with fakes:
+// ownership locks are released strictly AFTER the watcher drain (stop) resolves,
+// HTTP/MCP/jobs are stopped before drain begins, and a sync error during stop
+// never skips lock release. No real subprocess needed.
+
+describe("performGracefulShutdown ordering", () => {
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  test("releases ownership locks only after watcher stop resolves", async () => {
+    let resolveStop!: () => void;
+    const blocker = new Promise<void>((r) => { resolveStop = r; });
+    const order: string[] = [];
+    const handles = {
+      stopJobs: () => { order.push("stopJobs"); },
+      stopMcp: () => { order.push("stopMcp"); },
+      httpServer: { stop: () => { order.push("httpStop"); } },
+      watcher: {
+        stop: () => {
+          order.push("stopStart");
+          return blocker.then(() => {
+            order.push("stopEnd");
+            return { drained: true, activeCount: 0, pendingCount: 0 };
+          });
+        },
+      },
+      watcherLock: { release: () => { order.push("watcherLock"); } },
+      pidLock: { release: () => { order.push("pidLock"); } },
+    } as unknown as ShutdownHandles;
+
+    const shutdown = performGracefulShutdown(handles);
+    await sleep(20);
+    // drain started; HTTP/MCP/jobs stopped; locks NOT yet released
+    expect(order).toEqual(["stopJobs", "stopMcp", "httpStop", "stopStart"]);
+
+    resolveStop();
+    await shutdown;
+    expect(order).toEqual([
+      "stopJobs", "stopMcp", "httpStop",
+      "stopStart", "stopEnd",
+      "watcherLock", "pidLock",
+    ]);
+  });
+
+  test("releases locks even when watcher stop rejects (sync error during shutdown)", async () => {
+    const order: string[] = [];
+    const handles = {
+      stopJobs: () => {},
+      stopMcp: () => {},
+      httpServer: { stop: () => {} },
+      watcher: { stop: async () => { throw new Error("drain boom"); } },
+      watcherLock: { release: () => { order.push("watcherLock"); } },
+      pidLock: { release: () => { order.push("pidLock"); } },
+    } as unknown as ShutdownHandles;
+
+    // Must not throw and must release both locks despite stop() rejection.
+    await expect(performGracefulShutdown(handles)).resolves.toBeUndefined();
+    expect(order).toEqual(["watcherLock", "pidLock"]);
+  });
+
+  test("logs sanitized timeout diagnostic (counts only) when stop returns drained:false", async () => {
+    const errorMock = mock((..._args: unknown[]) => undefined);
+    const realError = console.error;
+    console.error = errorMock;
+    try {
+      const handles = {
+        stopJobs: () => {},
+        stopMcp: () => {},
+        httpServer: { stop: () => {} },
+        watcher: { stop: async () => ({ drained: false, activeCount: 2, pendingCount: 0 }) },
+        watcherLock: { release() {} },
+        pidLock: { release() {} },
+      } as unknown as ShutdownHandles;
+      await performGracefulShutdown(handles);
+    } finally {
+      console.error = realError;
+    }
+
+    expect(errorMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const msg = (errorMock.mock.calls[0] as unknown[]).join(" ");
+    expect(msg).toMatch(/timed out/);
+    expect(msg).toContain("active=2");
+    expect(msg).toContain("pending=0");
+    // sanitized: no vault path / file extension / content leaks
+    expect(msg).not.toMatch(/\/tmp|\.md|secret/i);
   });
 });

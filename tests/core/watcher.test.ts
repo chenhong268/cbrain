@@ -42,8 +42,8 @@ describe("FileWatcher", () => {
     (mockSync.removePage as ReturnType<typeof mock>).mockClear();
   });
 
-  afterEach(() => {
-    watcher?.stop();
+  afterEach(async () => {
+    await watcher?.stop();
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
@@ -131,10 +131,10 @@ describe("FileWatcher", () => {
 
   // ─── Logger called on startup ───────────────────────
 
-  test("logger called on start", () => {
+  test("logger called on start", async () => {
     watcher = new FileWatcher(syncManager, vaultPath, { logger });
     watcher.start();
-    watcher.stop();
+    await watcher.stop();
 
     expect(logs.some(l => l.message === "启动")).toBe(true);
   });
@@ -145,7 +145,7 @@ describe("FileWatcher", () => {
     writeFileSync(join(testDir, "nologger.md"), "---\ntitle: NoLog\n---\nContent", "utf-8");
     watcher = new FileWatcher(syncManager, vaultPath);
     await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
-    watcher.stop();
+    await watcher.stop();
 
     expect(mockSync.syncPage).toHaveBeenCalledTimes(1);
   });
@@ -202,6 +202,13 @@ describe("FileWatcher", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(maxInFlight).toBeLessThanOrEqual(3);
+
+    // Drain remaining in-flight + newly-started syncs so afterEach's async stop()
+    // converges (the concurrency cap leaves waves queued behind resolved resolvers).
+    for (const r of resolvers) r();
+    await new Promise((r) => setTimeout(r, 100));
+    for (const r of resolvers) r();
+    await new Promise((r) => setTimeout(r, 100));
   });
 
   // ─── Per-slug debounce ──────────────────────────────
@@ -249,6 +256,152 @@ describe("FileWatcher", () => {
 
     expect(syncOrder.length).toBe(15);
   });
+
+  // ─── Shutdown drain (issue #186) ─────────────────────
+
+  test("stop awaits an in-flight syncPage before resolving", async () => {
+    let resolveSync!: () => void;
+    const blocker = new Promise<void>((r) => { resolveSync = r; });
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async () => {
+      await blocker;
+      return { success: true };
+    });
+
+    writeFileSync(join(testDir, "slow.md"), "---\ntitle: Slow\n---\nbody", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+
+    const stopPromise = watcher.stop(3000);
+    let settled = false;
+    stopPromise.then(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 100));
+    // still blocked while the in-flight syncPage is unresolved
+    expect(settled).toBe(false);
+
+    resolveSync();
+    const result = await stopPromise;
+    expect(settled).toBe(true);
+    expect(result.drained).toBe(true);
+    expect(result.activeCount).toBe(0);
+    expect(result.pendingCount).toBe(0);
+  });
+
+  test("stop times out bounded when an in-flight syncPage blocks past the deadline", async () => {
+    let resolveSync!: () => void;
+    const blocker = new Promise<void>((r) => { resolveSync = r; });
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async () => {
+      await blocker;
+      return { success: true };
+    });
+
+    writeFileSync(join(testDir, "stuck.md"), "---\ntitle: Stuck\n---\nbody", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+
+    const start = Date.now();
+    const result = await watcher.stop(400);
+    const elapsed = Date.now() - start;
+
+    expect(result.drained).toBe(false);
+    expect(result.activeCount).toBe(1);
+    expect(elapsed).toBeGreaterThanOrEqual(350);
+    expect(elapsed).toBeLessThan(2000); // bounded — did not hang
+    resolveSync(); // let afterEach's stop converge
+  });
+
+  test("stop gates enqueue so queued/debounced sync does not start after shutdown", async () => {
+    let resolveSync!: () => void;
+    const blocker = new Promise<void>((r) => { resolveSync = r; });
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async () => {
+      await blocker;
+      return { success: true };
+    });
+
+    writeFileSync(join(testDir, "a.md"), "---\ntitle: A\n---\nbody", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan(); // a.md in-flight
+
+    // Arm the drain gate (times out on the blocked job — we only need the gate set)
+    await watcher.stop(50).catch(() => {});
+
+    // A subsequent scan must NOT enqueue new work
+    (mockSync.syncPage as ReturnType<typeof mock>).mockClear();
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    expect(mockSync.syncPage).not.toHaveBeenCalled();
+    resolveSync(); // let afterEach's stop converge
+  });
+
+  test("stop resolves even if a syncPage rejects (no hang, queue converges)", async () => {
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async () => {
+      throw new Error("sync boom");
+    });
+
+    writeFileSync(join(testDir, "boom.md"), "---\ntitle: Boom\n---\nbody", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+
+    // syncPage rejects → enqueueSync .catch records failure → finally clears inFlight → activeCount→0
+    const result = await watcher.stop(1000);
+    expect(result.drained).toBe(true);
+    expect(result.activeCount).toBe(0);
+  });
+
+  test("stop is idempotent and safe to call twice", async () => {
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    const r1 = await watcher.stop(200);
+    const r2 = await watcher.stop(200);
+    expect(r1.drained).toBe(true);
+    expect(r2.drained).toBe(true);
+  });
+
+  test("stop drains fully, then start can enqueue new changes again", async () => {
+    // Pin a success impl — beforeEach's mockClear() clears call history but not a
+    // mockImplementation leaked from an earlier test, which would break hash caching.
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async () => ({ success: true }));
+
+    // first cycle: one file syncs, then a clean stop
+    writeFileSync(join(testDir, "first.md"), "---\ntitle: First\n---\nbody", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const stopResult = await watcher.stop(1000);
+    expect(stopResult.drained).toBe(true);
+
+    // restart + a new file must sync (instance is reusable, not bricked)
+    (mockSync.syncPage as ReturnType<typeof mock>).mockClear();
+    writeFileSync(join(testDir, "second.md"), "---\ntitle: Second\n---\nbody", "utf-8");
+    watcher.start();
+    await new Promise((r) => setTimeout(r, 50)); // let start()'s scan + p-limit run
+
+    expect(mockSync.syncPage).toHaveBeenCalledTimes(1);
+  });
+
+  test("stop times out, then start does not silently enqueue while previous work is still active", async () => {
+    let resolveSync!: () => void;
+    const blocker = new Promise<void>((r) => { resolveSync = r; });
+    (mockSync.syncPage as ReturnType<typeof mock>).mockImplementation(async () => {
+      await blocker;
+      return { success: true };
+    });
+
+    writeFileSync(join(testDir, "a.md"), "---\ntitle: A\n---\nbody", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan(); // a.md in-flight (blocked)
+
+    const stopResult = await watcher.stop(50); // times out, in-flight still active
+    expect(stopResult.drained).toBe(false);
+
+    // restart attempt must NOT enqueue new work — the old in-flight writer is still running
+    (mockSync.syncPage as ReturnType<typeof mock>).mockClear();
+    writeFileSync(join(testDir, "b.md"), "---\ntitle: B\n---\nbody", "utf-8");
+    watcher.start();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mockSync.syncPage).not.toHaveBeenCalled();
+
+    resolveSync(); // let the orphaned in-flight finish for a clean teardown
+    await new Promise((r) => setTimeout(r, 50));
+  });
 });
 
 describe("FileWatcher quarantine", () => {
@@ -286,8 +439,8 @@ describe("FileWatcher quarantine", () => {
     } as unknown as Logger;
   });
 
-  afterEach(() => {
-    watcher?.stop();
+  afterEach(async () => {
+    await watcher?.stop();
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
@@ -348,7 +501,7 @@ describe("FileWatcher quarantine", () => {
     }
     // Wait for async failure handlers + persistQuarantine
     await new Promise((r) => setTimeout(r, 200));
-    watcher.stop();
+    await watcher.stop();
 
     // Verify quarantine is in DB
     const raw = db.getConfig("watcher.quarantine");
@@ -357,7 +510,7 @@ describe("FileWatcher quarantine", () => {
     // New watcher instance — should load quarantine from DB
     const watcher2 = new FileWatcher(syncManager, vaultPath, { logger, db });
     expect(watcher2.getQuarantineSize()).toBe(1);
-    watcher2.stop();
+    await watcher2.stop();
   });
 
   // ─── Content change auto-recovers quarantine ───────────────
@@ -450,7 +603,7 @@ describe("FileWatcher quarantine", () => {
       await new Promise((r) => setTimeout(r, 100));
     }
     await new Promise((r) => setTimeout(r, 200));
-    watcher.stop();
+    await watcher.stop();
     expect(watcher.getQuarantineSize()).toBe(1);
 
     // Verify hash in DB
@@ -473,7 +626,7 @@ describe("FileWatcher quarantine", () => {
 
     const afterSync = (failSync.syncPage as ReturnType<typeof mock>).mock.calls.length;
     expect(afterSync).toBeGreaterThan(beforeSync);
-    watcher2.stop();
+    await watcher2.stop();
   });
 
   // ─── Release triggers re-sync even without content change ──────────
@@ -678,8 +831,8 @@ describe("FileWatcher resolved failure handling", () => {
     } as unknown as Logger;
   });
 
-  afterEach(() => {
-    watcher?.stop();
+  afterEach(async () => {
+    await watcher?.stop();
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
@@ -1058,6 +1211,7 @@ describe("FileWatcher resolved failure handling", () => {
     expect(entry.lastError).toBe("Some failure without diagnostics");
     expect(entry.titleCollisionJson).toBeUndefined();
   });
+
 });
 
 // ── Bulk-change backpressure ───────────────────────────────────────────
@@ -1097,8 +1251,8 @@ describe("FileWatcher bulk-change backpressure", () => {
     (bulkSync.removePage as ReturnType<typeof mock>).mockClear();
   });
 
-  afterEach(() => {
-    watcher?.stop();
+  afterEach(async () => {
+    await watcher?.stop();
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });

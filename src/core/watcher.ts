@@ -24,6 +24,9 @@ const QUARANTINE_CONFIG_KEY = "watcher.quarantine";
 const BULK_PENDING_CONFIG_KEY = "watcher.bulk_pending";
 const BULK_RESUME_REQUEST_KEY = "watcher.bulk_resume_request";
 
+/** Default bounded deadline (ms) for draining in-flight sync work on stop(). */
+export const DEFAULT_STOP_DEADLINE_MS = 8000;
+
 interface PendingSync {
   slug: string;
   fullPath: string;
@@ -40,6 +43,15 @@ interface QuarantineEntry {
   titleCollisionJson?: { title: string; incoming: { slug: string; type: string; filePath: string }; existing: { slug: string; type: string; filePath: string } };
 }
 
+export interface WatcherStopResult {
+  /** True when all in-flight and queued sync jobs settled before the deadline. */
+  drained: boolean;
+  /** p-limit jobs still running when stop() returned. */
+  activeCount: number;
+  /** p-limit jobs still queued (not yet started) when stop() returned. */
+  pendingCount: number;
+}
+
 export class FileWatcher {
   private sync: SyncManager;
   private vaultPath: string;
@@ -48,6 +60,8 @@ export class FileWatcher {
   private interval: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private scanning = false;
+  private draining = false;
+  private currentScan: Promise<void> | null = null;
   private readonly POLL_MS = 30_000;
   private hashes = new Map<string, string>();
   private mtimes = new Map<string, { mtime: number; size: number }>();
@@ -73,24 +87,75 @@ export class FileWatcher {
 
   start(): void {
     if (this.running) return;
+    // A previous stop() that timed out (drained:false) leaves in-flight sync work
+    // still running. Restarting would race new scans against those writers — refuse.
+    if (this.draining) {
+      this.logger?.warn("watcher", "拒绝重启：上次 stop() 超时未排空，仍有 in-flight 任务运行");
+      return;
+    }
     this.running = true;
     this.logger?.info("watcher", "启动", { vaultPath: this.vaultPath, pollMs: this.POLL_MS });
     this.scan();
     this.interval = setInterval(() => { this.scan(); }, this.POLL_MS);
   }
 
-  stop(): void {
+  /**
+   * Stop scheduling scans, gate new enqueues, and drain in-flight + queued sync
+   * work within a bounded deadline. Resolves only after the active scan pass and
+   * all p-limit jobs settle (or the deadline expires). Idempotent.
+   *
+   * Callers MUST keep ownership locks (PID + watcher) held until this resolves so
+   * a restarting process cannot acquire them and write the same stores concurrently.
+   */
+  async stop(deadlineMs: number = DEFAULT_STOP_DEADLINE_MS): Promise<WatcherStopResult> {
     this.running = false;
+    this.draining = true;
     if (this.interval) { clearInterval(this.interval); this.interval = null; }
+
+    const deadline = Date.now() + Math.max(0, deadlineMs);
+
+    // Let the active scan pass finish so doScan() stops reading/enqueueing.
+    if (this.currentScan) {
+      const remaining = Math.max(0, deadline - Date.now());
+      await Promise.race([this.currentScan, this.sleep(remaining)]).catch(() => {});
+    }
+
+    // Wait for in-flight + queued sync jobs to settle (or the deadline).
+    while (Date.now() < deadline && (this.limit.activeCount > 0 || this.limit.pendingCount > 0)) {
+      await this.sleep(50);
+    }
+
+    const activeCount = this.limit.activeCount;
+    const pendingCount = this.limit.pendingCount;
+    const drained = activeCount === 0 && pendingCount === 0;
+    // Keep the enqueue gate only while in-flight work remains (timed-out drain).
+    // A clean drain restores the instance to a reusable state so a later
+    // start()/scanOnce() can enqueue again.
+    this.draining = !drained;
+    return { drained, activeCount, pendingCount };
   }
 
-  private async scan(): Promise<void> {
-    if (this.scanning) return;
+  private scan(): Promise<void> {
+    if (this.scanning) return this.currentScan ?? Promise.resolve();
     this.scanning = true;
-    try { await this.doScan(); } finally { this.scanning = false; }
+    this.currentScan = this.runScan();
+    return this.currentScan;
+  }
+
+  private async runScan(): Promise<void> {
+    try {
+      await this.doScan();
+    } finally {
+      this.scanning = false;
+      this.currentScan = null;
+    }
   }
 
   private enqueueSync(pending: PendingSync): void {
+    if (this.draining) {
+      this.logger?.info("watcher", "排空中，跳过入队", { slug: pending.slug });
+      return;
+    }
     if (this.inFlight.has(pending.slug)) {
       this.logger?.info("watcher", "跳过：正在同步", { slug: pending.slug });
       return;
