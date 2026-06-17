@@ -119,6 +119,22 @@ describe("Batch Tools", () => {
       expect(data.succeeded).toBe(0);
       expect(data.failed).toBe(1);
     });
+
+    test("item reports lance_repair_required when Lance cleanup fails (#187)", async () => {
+      insertPageWithVault(db, "entities/x", "X", vaultPath);
+      const failLance = {
+        ...createMockLanceDB(),
+        deleteByPageSlug: async () => { throw new Error("lance boom"); },
+      } as any;
+      const server = createServer({ ...deps, lance: failLance });
+      const result = await getTools(server).batch_delete_pages.handler({ slugs: ["entities/x"] });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.succeeded).toBe(1);
+      expect(data.results[0].success).toBe(true);
+      expect(data.results[0].lance_repair_required).toBe(true);
+      expect(data.results[0].warning).toMatch(/repair/i);
+    });
   });
 
   describe("batch_add_links", () => {

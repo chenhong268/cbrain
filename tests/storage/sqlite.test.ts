@@ -367,3 +367,50 @@ describe("CBrainDB", () => {
     });
   });
 });
+
+describe("deletePageCascaded transaction atomicity (#187)", () => {
+  const txDir = "/tmp/cbrain-test-cascaded-tx";
+  const txDbPath = join(txDir, "tx.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(txDir)) rmSync(txDir, { recursive: true });
+    mkdirSync(txDir, { recursive: true });
+    db = new CBrainDB(txDbPath);
+  });
+  afterEach(() => {
+    db.close();
+    if (existsSync(txDir)) rmSync(txDir, { recursive: true });
+  });
+
+  test("rolls back FTS + ingest_log when the pages DELETE fails mid-cascade", () => {
+    const slug = "records/alpha";
+    // Seed: page + an ingest_log row + an FTS row for the slug.
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path) VALUES ($slug, 'record', 'Alpha', 'records/alpha.md')",
+    ).run({ $slug: slug });
+    db.rawDb.prepare(
+      "INSERT INTO ingest_log (source_type, action, page_slug) VALUES ('record', 'create', $slug)",
+    ).run({ $slug: slug });
+    db.rawDb.prepare(
+      "INSERT INTO chunks_fts (page_slug, content) VALUES ($slug, 'alpha body text')",
+    ).run({ $slug: slug });
+
+    // Inject a failure on the pages DELETE (the last statement of the cascade).
+    db.rawDb.exec(
+      "CREATE TRIGGER stop_pages_delete BEFORE DELETE ON pages " +
+      "BEGIN SELECT RAISE(ABORT, 'injected pages delete failure'); END",
+    );
+
+    // The cascade must abort and roll back the FTS + ingest_log deletes that ran first.
+    expect(() => db.deletePageCascaded(slug)).toThrow("injected pages delete failure");
+
+    // All three stores still present — no partial delete survived the failed transaction.
+    const page = db.rawDb.prepare("SELECT slug FROM pages WHERE slug = $slug").get({ $slug: slug });
+    const log = db.rawDb.prepare("SELECT page_slug FROM ingest_log WHERE page_slug = $slug").get({ $slug: slug });
+    const fts = db.rawDb.prepare("SELECT page_slug FROM chunks_fts WHERE page_slug = $slug").get({ $slug: slug });
+    expect(page).toBeTruthy();
+    expect(log).toBeTruthy();
+    expect(fts).toBeTruthy();
+  });
+});

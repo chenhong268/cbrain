@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
+import { LanceDBManager } from "../../storage/lancedb.js";
 import { loadConfig, createDeps } from "../context.js";
 import { resolveUserSlug } from "./slug-resolver.js";
 
@@ -91,7 +92,14 @@ export function register(program: Command) {
     .action(async (slug) => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
-      const pages = new (await import("../../core/page.js")).PageManager(db, config.vaultPath);
+      // Best-effort LanceDB connection so delete can clean vectors + report repair-required.
+      let lance: LanceDBManager | undefined;
+      try {
+        const l = new LanceDBManager();
+        await l.connect(config.lancePath);
+        lance = l;
+      } catch { /* lance unavailable — delete still safe, just no vector cleanup */ }
+      const pages = new (await import("../../core/page.js")).PageManager(db, config.vaultPath, undefined, lance);
       const resolution = resolveUserSlug(slug, (s) => pages.getBySlug(s));
       if (!resolution) { console.error(`Page not found: ${slug}`); process.exit(1); }
       if (resolution.ambiguous) {
@@ -99,8 +107,17 @@ export function register(program: Command) {
         console.error("Please specify the full slug to delete.");
         process.exit(1);
       }
-      if (await pages.delete(resolution.slug)) { console.log(`Deleted: ${resolution.slug}`); }
-      else { console.error(`Delete failed: ${resolution.slug}`); process.exit(1); }
+      const result = await pages.deleteDetailed(resolution.slug);
+      if (result.committed) {
+        console.log(`Deleted: ${resolution.slug}`);
+        if (result.lanceRepairRequired) {
+          console.error(`⚠ Vector cleanup failed for ${resolution.slug} — page is deleted from vault+DB; run 'cbrain doctor' or reindex to repair vectors.`);
+        }
+      } else {
+        console.error(`Delete failed: ${resolution.slug}`);
+        process.exit(1);
+      }
+      await lance?.close().catch(() => {});
       db.close();
     });
 }

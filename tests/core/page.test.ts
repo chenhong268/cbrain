@@ -251,4 +251,21 @@ describe("PageManager", () => {
     expect(patched!.body).toContain("正文");
     expect(patched!.body).toContain("追加信息");
   });
+
+  test("delete with Lance failure still commits and returns true (repair-required)", async () => {
+    const failLance = {
+      deleteByPageSlug: mock(async () => { throw new Error("lance boom"); }),
+    } as unknown as LanceDBManager;
+    const pmFail = new PageManager(db, vaultPath, undefined, failLance);
+    pmFail.create({ title: "Alpha", type: "concept/concept", body: "to delete" });
+    const slug = "brain/concepts/concept/alpha";
+
+    const result = await pmFail.delete(slug);
+
+    expect(result).toBe(true); // source-of-truth delete committed despite Lance failure
+    expect(pmFail.getBySlug(slug)).toBeNull();
+    // Recovery audit recorded.
+    const pending = JSON.parse(db.getConfig("page_delete.lance_pending") ?? "[]") as string[];
+    expect(pending).toContain(slug);
+  });
 });

@@ -1374,11 +1374,14 @@ export class CBrainDB {
   }
 
   deletePageCascaded(slug: string): void {
-    // chunks_fts (virtual table) and ingest_log have no FK → delete explicitly
-    // links, tags, timeline, chunks are cleaned by ON DELETE CASCADE on pages DELETE
-    this.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
-    this.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
-    this.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+    // chunks_fts (virtual table) and ingest_log have no FK → delete explicitly.
+    // links, tags, timeline, chunks are cleaned by ON DELETE CASCADE on pages DELETE.
+    // Wrapped in one transaction so a failure mid-cascade leaves no partial delete (#187).
+    this.db.transaction(() => {
+      this.prepare("DELETE FROM chunks_fts WHERE page_slug = $slug").run({ $slug: slug });
+      this.prepare("DELETE FROM ingest_log WHERE page_slug = $slug").run({ $slug: slug });
+      this.prepare("DELETE FROM pages WHERE slug = $slug").run({ $slug: slug });
+    })();
   }
 
   rewireLinks(oldSlug: string, newSlug: string): void {

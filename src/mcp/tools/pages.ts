@@ -255,9 +255,17 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       slug: z.string().max(500).describe("Page slug to delete"),
     },
   }, async ({ slug }) => {
-    const success = await ctx.pages.delete(slug);
+    const result = await ctx.pages.deleteDetailed(slug);
+    const payload: { success: boolean; slug: string; lance_repair_required?: boolean; warning?: string } = {
+      success: result.committed,
+      slug,
+    };
+    if (result.lanceRepairRequired) {
+      payload.lance_repair_required = true;
+      payload.warning = "page deleted from vault+DB, but vector cleanup failed — repair required (reindex)";
+    }
     return {
-      content: [{ type: "text", text: JSON.stringify({ success, slug }) }],
+      content: [{ type: "text", text: JSON.stringify(payload) }],
     };
   });
 

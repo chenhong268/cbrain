@@ -32,7 +32,7 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
       };
     }
 
-    const results: { slug: string; success: boolean; error?: string }[] = [];
+    const results: { slug: string; success: boolean; lance_repair_required?: boolean; warning?: string; error?: string }[] = [];
 
     for (const slug of slugs) {
       try {
@@ -41,8 +41,16 @@ export function registerBatchTools(server: McpServer, ctx: ToolContext): void {
           results.push({ slug, success: false, error: "not found" });
           continue;
         }
-        await ctx.pages.delete(slug);
-        results.push({ slug, success: true });
+        const r = await ctx.pages.deleteDetailed(slug);
+        const item: { slug: string; success: boolean; lance_repair_required?: boolean; warning?: string } = {
+          slug,
+          success: r.committed,
+        };
+        if (r.lanceRepairRequired) {
+          item.lance_repair_required = true;
+          item.warning = "vector cleanup failed — repair required (reindex)";
+        }
+        results.push(item);
       } catch (e) {
         results.push({ slug, success: false, error: sanitizeError(e instanceof Error ? e.message : String(e)) });
       }

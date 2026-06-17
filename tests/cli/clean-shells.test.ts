@@ -144,4 +144,39 @@ describe("clean-shells", () => {
     const result = runCleanShells(configPath, "--dry-run");
     expect(result).toContain("No empty shell entities found");
   });
+
+  test("--execute preserves the vault file when SQLite delete fails (#187)", () => {
+    const configPath = makeConfig(testDir);
+    const db = makeDB(testDir);
+
+    // A real shell: 0 mentions, 0 links, 0 aliases, no body.
+    seedPage(db, testDir, "brain/concepts/concept/dust", "concept/concept", "Dust");
+    // Inject a SQLite failure on the pages DELETE (persists in the db file the
+    // subprocess opens). If clean-shells still did unlink+cascade directly, the
+    // vault file would be gone after the cascade aborts. Routing through the safe
+    // primitive restores it.
+    db.rawDb.exec(
+      "CREATE TRIGGER stop_del_187 BEFORE DELETE ON pages " +
+      "BEGIN SELECT RAISE(ABORT, 'injected sqlite failure'); END",
+    );
+    db.close();
+
+    const vaultFile = join(testDir, "vault", "brain/concepts/concept/dust.md");
+    expect(existsSync(vaultFile)).toBe(true);
+
+    // The delete fails (caught per-shell), but the vault file must survive.
+    let out = "";
+    try {
+      out = runCleanShells(configPath, "--execute");
+    } catch (e) {
+      out = (e as { stdout?: string }).stdout ?? "";
+    }
+
+    expect(existsSync(vaultFile)).toBe(true); // vault file preserved (safe primitive restored it)
+    expect(out).toMatch(/Failed|dust/i);
+    // Page row intact — the cascade transaction rolled back.
+    const db2 = makeDB(testDir);
+    expect(db2.getPageFilePath("brain/concepts/concept/dust")).not.toBeNull();
+    db2.close();
+  });
 });

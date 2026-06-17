@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
@@ -14,6 +14,7 @@ import {
   atomicTypeChange,
   type MoveFsOps,
 } from "../../core/atomic-move.js";
+import { safeDeletePage } from "../../core/page-delete-safety.js";
 import {
   resolveSyncMode,
   handleReindexSlug,
@@ -1034,9 +1035,11 @@ export function register(program: Command) {
 
             moved++;
           } else if (file.action === "delete") {
-            unlinkSync(file.path);
             const oldSlug = (frontmatter as Record<string, unknown>).slug as string ?? `records/${file.name}`;
-            db.deletePageCascaded(oldSlug);
+            const r = await safeDeletePage(oldSlug, { db, vaultPath: config.vaultPath });
+            // Orphan file (no DB row): safeDeletePage is a no-op; remove the file
+            // directly — no DB state to corrupt, so no rollback risk.
+            if (!r.committed && existsSync(file.path)) unlinkSync(file.path);
             deleted++;
           } else {
             const fm = { ...frontmatter, type: "record", updated_at: new Date().toISOString() };
@@ -1325,15 +1328,13 @@ export function register(program: Command) {
       let failed = 0;
       for (const shell of filtered) {
         try {
-          // Delete vault file
+          // Path-traversal guard (preserved): refuse file_path outside the vault.
           const absPath = resolve(vaultPath, shell.file_path);
           if (!absPath.startsWith(resolve(vaultPath))) {
             throw new Error(`Path traversal: ${shell.file_path}`);
           }
-          if (existsSync(absPath)) unlinkSync(absPath);
-
-          // Cascade delete from DB (chunks, links, tags, timeline, aliases)
-          db.deletePageCascaded(shell.slug);
+          // Staged, rollback-safe delete (rewrite dead links -> unlink -> atomic cascade).
+          await safeDeletePage(shell.slug, { db, vaultPath });
           deleted++;
         } catch (err) {
           failed++;
@@ -1795,11 +1796,14 @@ Return JSON only, no markdown:
         const page = db.getPage(slug);
         if (!page) { notFound++; continue; }
         try {
+          // Path-traversal guard (preserved; hardened to refuse — consistent with clean-shells):
+          // never touch a vault file whose file_path escapes the vault.
           const absPath = resolve(vaultPath, page.file_path);
-          if (absPath.startsWith(resolve(vaultPath)) && existsSync(absPath)) {
-            unlinkSync(absPath);
+          if (!absPath.startsWith(resolve(vaultPath))) {
+            throw new Error(`Path traversal: ${page.file_path}`);
           }
-          db.deletePageCascaded(slug);
+          // Staged, rollback-safe delete (rewrite dead links -> unlink -> atomic cascade).
+          await safeDeletePage(slug, { db, vaultPath });
           deleted++;
         } catch (err) {
           console.error(`  ✗ Failed: ${slug}: ${err}`);

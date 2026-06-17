@@ -15,6 +15,7 @@ import {
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
 import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody } from "./shared.js";
+import { safeDeletePage, type SafeDeleteResult } from "./page-delete-safety.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 import {
@@ -478,34 +479,27 @@ export class PageManager {
     });
   }
 
+  /**
+   * Staged, rollback-safe delete. Returns the full outcome so callers (MCP/CLI)
+   * can surface a Lance repair-required state truthfully. See page-delete-safety.ts.
+   */
+  async deleteDetailed(slug: string): Promise<SafeDeleteResult> {
+    const result = await safeDeletePage(slug, {
+      db: this.db,
+      vaultPath: this.vaultPath,
+      lance: this.lance ?? undefined,
+      logger: this.logger ?? undefined,
+    });
+    if (result.committed) {
+      this.cacheDelete(slug);
+      this.logger?.info("page", "页面已删除", { slug });
+    }
+    return result;
+  }
+
+  /** Boolean-compatible delete (true = vault+SQLite source-of-truth committed). */
   async delete(slug: string): Promise<boolean> {
-    const filePath = this.db.getPageFilePath(slug);
-    if (filePath === null) return false;
-
-    // Strip [[slug]] dead links in other vault files before deleting
-    const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: slug }], this.db);
-    if (rewritten > 0) {
-      this.logger?.info("page", "死链已清理", { slug, files: rewritten });
-    }
-
-    const absPath = join(this.vaultPath, filePath);
-    if (existsSync(absPath)) {
-      unlinkSync(absPath);
-    }
-
-    // SQLite-first: source of truth deleted before LanceDB best-effort cleanup
-    this.db.deletePageCascaded(slug);
-    this.cacheDelete(slug);
-    if (this.lance) {
-      try {
-        await this.lance.deleteByPageSlug(slug);
-      } catch (e) {
-        this.logger?.warn("page", `LanceDB cleanup failed for ${slug}: ${(e as Error).message}`);
-      }
-    }
-
-    this.logger?.info("page", "页面已删除", { slug });
-    return true;
+    return (await this.deleteDetailed(slug)).committed;
   }
 
   syncLinksToMarkdown(slug: string): void {

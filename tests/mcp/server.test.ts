@@ -2887,3 +2887,71 @@ describe("MCP Server", () => {
     });
   });
 });
+
+describe("delete_page lance repair-required (#187)", () => {
+  const rDir = "/tmp/cbrain-test-delete-repair";
+  const rDbPath = join(rDir, "test.sqlite");
+  const rVault = join(rDir, "vault");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(rDir)) rmSync(rDir, { recursive: true });
+    mkdirSync(rVault, { recursive: true });
+    db = new CBrainDB(rDbPath);
+  });
+  afterEach(() => {
+    db.close();
+    if (existsSync(rDir)) rmSync(rDir, { recursive: true });
+  });
+
+  function seedPage(slug: string) {
+    const fp = `${slug}.md`;
+    const slash = slug.lastIndexOf("/");
+    if (slash > 0) mkdirSync(join(rVault, slug.substring(0, slash)), { recursive: true });
+    writeFileSync(join(rVault, fp), `---\ntitle: Alpha\ntype: record\nslug: ${slug}\n---\nbody`);
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)",
+    ).run(slug, "Alpha", fp, "h");
+  }
+
+  test("returns lance_repair_required + warning when Lance cleanup fails", async () => {
+    const slug = "records/alpha";
+    seedPage(slug);
+    const failLance = {
+      ...createMockLanceDB(),
+      deleteByPageSlug: async () => { throw new Error("lance boom"); },
+    } as any;
+    const server = createServer({
+      db,
+      embedding: createMockEmbedding(),
+      lance: failLance,
+      vaultPath: rVault,
+      runtimePath: join(dirname(rDbPath), "runtime"),
+    });
+    const result = await getTools(server).delete_page.handler({ slug });
+    const data = JSON.parse(result.content[0].text);
+
+    expect(data.success).toBe(true);                  // source-of-truth delete committed
+    expect(data.lance_repair_required).toBe(true);    // truthful partial outcome surfaced
+    expect(data.warning).toMatch(/repair/i);
+    expect(db.getPageFilePath(slug)).toBeNull();      // page really gone from DB
+  });
+
+  test("clean Lance cleanup omits repair fields", async () => {
+    const slug = "records/beta";
+    seedPage(slug);
+    const server = createServer({
+      db,
+      embedding: createMockEmbedding(),
+      lance: createMockLanceDB() as any,
+      vaultPath: rVault,
+      runtimePath: join(dirname(rDbPath), "runtime"),
+    });
+    const result = await getTools(server).delete_page.handler({ slug });
+    const data = JSON.parse(result.content[0].text);
+
+    expect(data.success).toBe(true);
+    expect(data.lance_repair_required).toBeUndefined();
+    expect(data.warning).toBeUndefined();
+  });
+});
