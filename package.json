@@ -29,6 +29,7 @@
     "gate:offline": "bun bin/check-first-recall-gate.ts",
     "gate:rc": "bun bin/check-v2-rc-gate.ts",
     "gate:perf": "bun bin/check-v2-rc-gate.ts --perf",
+    "gate:hermes": "bun bin/check-v2-hermes-gate.ts",
     "check:docs": "bun bin/check-docs-consistency.ts"
   },
   "dependencies": {

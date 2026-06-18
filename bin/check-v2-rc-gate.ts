@@ -57,7 +57,7 @@ import { buildPerfReport, type PerfReport } from "../src/release/perf-report.js"
 
 type Verdict = "go" | "no-go";
 
-interface AssertionResult {
+export interface AssertionResult {
   readonly check: string;
   readonly passed: boolean;
   readonly actual: string;
@@ -103,7 +103,7 @@ interface GateResult {
   readonly exitCode: number;
 }
 
-interface IsolationContext {
+export interface IsolationContext {
   readonly tmpdir: string;
   readonly homeDir: string;
   readonly brainDir: string;
@@ -114,7 +114,7 @@ interface IsolationContext {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ToolMap = Record<string, { handler: (args: any) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> }>;
+export type ToolMap = Record<string, { handler: (args: any) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> }>;
 
 // ── Constants ──
 
@@ -210,7 +210,7 @@ function embedText(text: string): number[] {
   return v;
 }
 
-function makeMockEmbedding(): EmbeddingProvider {
+export function makeMockEmbedding(): EmbeddingProvider {
   const embedOne = (text: string) => ({
     embedding: embedText(text),
     tokenCount: text.length,
@@ -231,7 +231,7 @@ interface MockDoc {
   readonly embedding: number[];
 }
 
-interface MockLance extends LanceDBManager {
+export interface MockLance extends LanceDBManager {
   vectorMode: VectorMode;
   /** Gate-only: seed the in-memory vector index with a page-body embedding. */
   _seedDoc(pageSlug: string, chunkIndex: number, content: string, embedding: number[]): void;
@@ -260,7 +260,7 @@ function cosine(a: number[], b: number[]): number {
  *  vector recall signal (a non-exact query can hit via cosine). `vectorMode =
  *  "error"` makes the vector search throw — exercising the production
  *  vector-error → FTS-fallback degradation path. */
-function makeMockLance(): MockLance {
+export function makeMockLance(): MockLance {
   let vectorMode: VectorMode = "ok";
   const docs: MockDoc[] = [];
   const mgr = {
@@ -296,7 +296,7 @@ function makeMockLance(): MockLance {
 
 // ── Isolation ──
 
-function createIsolation(): IsolationContext {
+export function createIsolation(): IsolationContext {
   const base = mkdtempSync(join(tmpdir(), "cbrain-rc-gate-"));
   const homeDir = join(base, "home");
   const brainDir = join(base, "brain");
@@ -447,7 +447,7 @@ function seedScaleFiller(db: CBrainDB, vaultPath: string): void {
 
 // ── Server builder (mirrors src/mcp/server.ts createServer, minus dream worker) ──
 
-function buildGateServer(ctx: ToolContext): { server: McpServer; tools: ToolMap } {
+export function buildGateServer(ctx: ToolContext): { server: McpServer; tools: ToolMap } {
   const server = new McpServer({ name: "cbrain", version: "rc-gate" });
 
   // Same unified error wrapper as createServer — keeps the handler path faithful.
@@ -474,7 +474,7 @@ function buildGateServer(ctx: ToolContext): { server: McpServer; tools: ToolMap 
 
 // ── Query counter (deterministic DB operation budget) ──
 
-interface QueryCounter {
+export interface QueryCounter {
   n: number;
 }
 
@@ -482,7 +482,7 @@ interface QueryCounter {
  *  (RC_FAULT_QUERY_BUDGET), each statement counts as `INFLATE_STEP` — simulating
  *  a query explosion so budget enforcement can be proven, without timing. */
 const INFLATE_STEP = 1000;
-function installQueryCounter(db: CBrainDB, inflate: boolean): { counter: QueryCounter; restore(): void } {
+export function installQueryCounter(db: CBrainDB, inflate: boolean): { counter: QueryCounter; restore(): void } {
   const counter: QueryCounter = { n: 0 };
   const raw = db.rawDb;
   const step = inflate ? INFLATE_STEP : 1;
@@ -558,7 +558,7 @@ const FILE_PATH_FRAGMENT = /\/tmp\/|\/Users\/|runtime\/|\.sqlite|\.md\b|\.json\b
 const CREDENTIAL_FRAGMENT = /sk-[a-f0-9]{8,}|Bearer\s|api[_-]?key/i;
 const VECTOR_ARRAY_FRAGMENT = /(-?\d+\.\d{4},){8}/;
 
-function scanDisplay(display: string): AssertionResult[] {
+export function scanDisplay(display: string): AssertionResult[] {
   return [
     {
       check: "display has no slug path",
@@ -587,7 +587,7 @@ function scanDisplay(display: string): AssertionResult[] {
   ];
 }
 
-function scanGlobal(text: string): AssertionResult[] {
+export function scanGlobal(text: string): AssertionResult[] {
   return [
     {
       check: "no operator home path anywhere",
@@ -618,16 +618,16 @@ function scanGlobal(text: string): AssertionResult[] {
 
 // ── Helpers ──
 
-function verdictOf(assertions: ReadonlyArray<AssertionResult>): boolean {
+export function verdictOf(assertions: ReadonlyArray<AssertionResult>): boolean {
   return assertions.every((a) => a.passed);
 }
 
-function firstFailed(assertions: ReadonlyArray<AssertionResult>): AssertionResult | null {
+export function firstFailed(assertions: ReadonlyArray<AssertionResult>): AssertionResult | null {
   return assertions.find((a) => !a.passed) ?? null;
 }
 
 /** Race a handler promise against a hang ceiling. */
-async function withCeiling<T>(
+export async function withCeiling<T>(
   work: () => Promise<T>,
   ceilingMs: number,
 ): Promise<{ value: T | null; timedOut: boolean; durationMs: number }> {
@@ -648,7 +648,7 @@ async function withCeiling<T>(
 }
 
 // Parse a handler result envelope (content[0].text) into an object.
-function parseEnvelope(result: { content: Array<{ type: string; text: string }>; isError?: boolean }): {
+export function parseEnvelope(result: { content: Array<{ type: string; text: string }>; isError?: boolean }): {
   parsed: Record<string, unknown> | null;
   isError: boolean;
 } {
@@ -974,7 +974,7 @@ async function runJ8Empty(jc: JourneyContext): Promise<JourneyResult> {
 
 // ── Output sanitization (mirrors first-recall gate) ──
 
-function sanitizeOutput(json: string): string {
+export function sanitizeOutput(json: string): string {
   let out = json;
   const realHome = process.env.HOME ?? "";
   if (realHome) out = out.replaceAll(realHome, "<HOME>");
@@ -1208,7 +1208,8 @@ function writePerfSummary(report: PerfReport): void {
 
 const perfMode = process.argv.includes("--perf");
 
-executeGate().then(({ report, exitCode }) => {
+// Guard: only run when executed directly (`bun run`), not when imported by other gates.
+if (import.meta.main) executeGate().then(({ report, exitCode }) => {
   if (perfMode) {
     // Performance report (#188): reuse the same journey measurements, emit a perf-shaped JSON.
     const perf = buildPerfReport({

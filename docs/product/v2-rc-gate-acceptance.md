@@ -196,6 +196,38 @@ Top-level:
 SQLite; it does not add LLM calls; it does not change public MCP schemas or touch
 the user vault/runtime.
 
+## Hermes dialogue gate (`gate:hermes`)
+
+`gate:rc` proves the kernel recalls correctly; `gate:hermes` proves an Agent can
+use CBrain through **natural dialogue patterns** without exposing the user to
+internal tool mechanics. Six anonymous journeys over the real MCP tool path
+(`deep_recall`, `recall_episode`, `graph_query`, `ingest`), reusing the rc-gate
+harness (#193):
+
+```bash
+bun run gate:hermes
+```
+
+- **stdout** — stable `v2-hermes` JSON report. **stderr** — concise human summary.
+- **Exit** — `0` = go, `1` = no-go (a journey failed / privacy leak / budget
+  exceeded / cleanup failed), `2` = fatal.
+
+| Journey | Tool | Proves |
+|:--------|:-----|:-------|
+| `first-memory-recall` | ingest → deep_recall | A stored fact is recalled source-backed |
+| `forgotten-person-by-context` | recall_episode | A person is found from time/topic/context clues (curated candidate, not raw dump) |
+| `relationship-traversal` | graph_query | Graph/org traversal returns relations, bounded calls |
+| `grounded-answer` | deep_recall (grounded) | Evidence-grounded answer (facts/gaps), no full-page dump |
+| `safe-capture-routing` | ingest | A new info piece is captured cleanly (no junk pages) |
+| `failure-degraded` | deep_recall | A missing query degrades gracefully (safe wording, no stack/paths) |
+
+Per journey: `id`, `status`, `duration_ms`, `query_count`/`query_budget`,
+`degraded`, `privacy_passed`, `failure_reason`. The gate reuses the rc-gate
+privacy scanners — any slug path, filesystem path, vector array, stack trace, or
+credential in display output is a `no-go`. Fixtures are anonymous (no real
+people/orgs/products/places/paths/dialogue). Non-goals: no new tools, no
+search/NER/ingest behavior changes.
+
 ## Fault injection (test-only)
 
 The gate accepts env vars that inject a deterministic fault so the test suite
