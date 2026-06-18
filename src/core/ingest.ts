@@ -2,7 +2,7 @@ import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { PageManager } from "./page.js";
-import { generateSlug, slugToFilePath } from "../utils/slug.js";
+import { generateSlug, slugToFilePath, looksLikePath } from "../utils/slug.js";
 import { normalizePageType, normalizeAndHashBody, type PageType } from "./shared.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
@@ -145,8 +145,32 @@ export class IngestManager {
     if (!title) {
       throw new Error("VALIDATION_ERROR: markdown has no semantic title or body content");
     }
+    // (#190) Refuse path-like titles so a path can never become a page title or slug.
+    if (looksLikePath(title)) {
+      throw new Error("VALIDATION_ERROR: title looks like a filesystem path; refusing to ingest");
+    }
     const type = normalizePageType(parsed.frontmatter.type ?? overrides?.pageType ?? "record");
-    const slug = parsed.frontmatter.slug ?? generateSlug(title, type);
+    const declaredSlug = typeof parsed.frontmatter.slug === "string" && parsed.frontmatter.slug ? parsed.frontmatter.slug : undefined;
+    const slug = declaredSlug ?? generateSlug(title, type);
+
+    // (#190) Idempotent no-op when this exact frontmatter slug already exists
+    // (unless --allow-duplicate forces a re-index). Durable-source hash dedup only
+    // covers record/insight, so entity/concept markdown needs this slug-level gate.
+    if (declaredSlug && !overrides?.allowDuplicate) {
+      const existing = this.db.getPage(slug);
+      if (existing) {
+        return { slug, created: false, linksExtracted: 0, outcome: "duplicate", duplicateOf: { slug: existing.slug, title: existing.title } };
+      }
+      // (#190) Conservative: same entity/person title under a different slug → no-op
+      // duplicate rather than creating a second person page.
+      if (type === "entity/person") {
+        const byTitle = this.db.getPageByTitle(title);
+        if (byTitle && byTitle.type === "entity/person" && byTitle.slug !== slug) {
+          return { slug: byTitle.slug, created: false, linksExtracted: 0, outcome: "duplicate", duplicateOf: { slug: byTitle.slug, title: byTitle.title } };
+        }
+      }
+    }
+
     const body = parsed.body;
     const effectiveTags = parsed.frontmatter.tags ?? overrides?.tags ?? [];
 
@@ -160,6 +184,10 @@ export class IngestManager {
     }
 
     const rawTitle = input.title ?? input.content.split("\n").find(l => hasSemanticContent(l))?.trim().slice(0, 50) ?? "Untitled";
+    // (#190) Refuse path-like titles (e.g. a path passed instead of @path) before slug generation.
+    if (looksLikePath(rawTitle)) {
+      throw new Error("VALIDATION_ERROR: title looks like a filesystem path; refusing to ingest");
+    }
     const routedPersonTitle = this.inferPersonRelationshipTitle(input.content, input.title);
     const existingPersonSlug = this.findExistingPersonSlug(input.title ?? routedPersonTitle ?? rawTitle);
 
