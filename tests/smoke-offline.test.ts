@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const SCRIPT = join(ROOT, "bin", "check-install-smoke.sh");
+const PACKAGE_VERSION = (JSON.parse(readFileSync(join(ROOT, "package.json"), "utf-8")) as { version: string }).version;
 
 /**
  * Build a fake local install root with a mock `cbrain` executable
@@ -330,7 +331,7 @@ describe("docs — installation path assertions", () => {
 
   test("README primary install uses explicit tag, not floating ref", () => {
     const readme = readFileSync(readmePath, "utf-8");
-    expect(readme).toContain("bun install -g github:chenhong268/cbrain#v1.9.4");
+    expect(readme).toContain(`bun install -g github:chenhong268/cbrain#v${PACKAGE_VERSION}`);
     expect(readme).not.toContain("Download the latest binary from");
     expect(readme).toContain("bun remove -g cbrain");
     // Must NOT claim binary distribution exists
@@ -339,7 +340,7 @@ describe("docs — installation path assertions", () => {
 
   test("install-onboarding.md primary path uses explicit tag", () => {
     const doc = readFileSync(installDocPath, "utf-8");
-    expect(doc).toContain("bun install -g github:chenhong268/cbrain#v1.9.4");
+    expect(doc).toContain(`bun install -g github:chenhong268/cbrain#v${PACKAGE_VERSION}`);
     expect(doc).not.toContain("从 Releases 下载");
     expect(doc).toContain("PATH");
     expect(doc).toContain("bun pm bin -g");

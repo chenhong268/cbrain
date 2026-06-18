@@ -1,6 +1,22 @@
 # Changelog
 
-> Current: `v1.9.4` — ingest 失败可回滚，LanceDB 完整性可诊断，避免脏文件和静默索引损坏。
+> Current: `v1.9.5` — 删除、同步与 watcher 关键写路径完成回滚安全加固，进入 v2.0 RC 前稳定化。
+
+## [v1.9.5] — 2026-06-18
+
+### v2.0 前稳定性加固（#185–#187）
+
+- **Vault sync 回滚安全（#185）**：同步失败时恢复 SQLite、FTS 与 LanceDB 索引状态，避免部分写入造成召回污染。
+- **Watcher 关闭排水（#186）**：服务关闭时等待 watcher 工作收敛后再释放 ownership lock，避免 stop/start 间隙丢任务或重复同步。
+- **页面删除安全（#187）**：删除页面前快照目标文件与死链候选文件；SQLite cascade 放入事务；删除失败会恢复 vault 文件；LanceDB 清理失败时暴露 `lance_repair_required` 并记录待修复状态。
+
+### Release Checks
+
+- `bun run check`：2225 pass / 0 fail。
+- `bun run gate:offline`：GO。
+- `bun run gate:rc`：GO。
+- `bin/check-resolver-pilot.sh`：54 OK / 0 FAIL / 8 WARN。
+- 公开测试与发布说明使用匿名占位符，无用户知识库隐私信息。
 
 ## [v1.9.4] — 2026-06-06
 
