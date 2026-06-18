@@ -220,4 +220,27 @@ describe("MCP ingest type classification", () => {
       expect(readdirSync(recordsDir).some(file => file.startsWith("untitled-"))).toBe(false);
     }
   });
+
+  test("markdown ingest with existing frontmatter slug is a no-op duplicate (#191)", async () => {
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+    const md = "---\ntitle: 实体A\ntype: entity/person\nslug: brain/entities/person/shiti-a\n---\n\n实体A 简介";
+
+    const first = await handler({ content: md, skipNer: true });
+    expect(JSON.parse(first.content[0].text).raw.created).toBe(true);
+
+    const pagesBefore = (db.rawDb.prepare("SELECT COUNT(*) c FROM pages").get() as { c: number }).c;
+    const chunksBefore = (db.rawDb.prepare("SELECT COUNT(*) c FROM chunks").get() as { c: number }).c;
+    const linksBefore = (db.rawDb.prepare("SELECT COUNT(*) c FROM links").get() as { c: number }).c;
+
+    const second = await handler({ content: md, skipNer: true });
+    const s = JSON.parse(second.content[0].text).raw;
+    expect(s.outcome).toBe("duplicate");
+    expect(s.created).toBe(false);
+    expect(s.slug).toBe("brain/entities/person/shiti-a");
+
+    expect((db.rawDb.prepare("SELECT COUNT(*) c FROM pages").get() as { c: number }).c).toBe(pagesBefore);
+    expect((db.rawDb.prepare("SELECT COUNT(*) c FROM chunks").get() as { c: number }).c).toBe(chunksBefore);
+    expect((db.rawDb.prepare("SELECT COUNT(*) c FROM links").get() as { c: number }).c).toBe(linksBefore);
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
@@ -105,5 +105,38 @@ describe("CLI ingest — dedup flags and output", () => {
     expect(result.stdout).not.toContain("Duplicate");
     // Should fail with a connection error, not a dedup message
     expect(result.exitCode).not.toBe(0);
+  });
+
+  test("ingest @existing-entity.md --type markdown is a no-op duplicate (#191)", () => {
+    // Seed an existing entity page (DB row + vault file with frontmatter slug).
+    const slug = "brain/entities/person/shiti-a";
+    const relPath = `${slug}.md`;
+    mkdirSync(join(vaultPath, ...slug.split("/").slice(0, -1)), { recursive: true });
+    const md = `---\ntitle: 实体A\ntype: entity/person\nslug: ${slug}\n---\n\n实体A 简介`;
+    const filePath = join(vaultPath, relPath);
+    writeFileSync(filePath, md, "utf-8");
+    {
+      const db = new CBrainDB(dbPath);
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?,?,?,?,?,?,?)`,
+      ).run(slug, "entity/person", "实体A", relPath, `hash-${slug}`, 0, 3);
+      db.close();
+    }
+
+    const result = runIngest([`@${filePath}`, "--type", "markdown"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Duplicate");
+    // No new page created; no junk records/ page
+    {
+      const db = new CBrainDB(dbPath);
+      const c = (db.rawDb.prepare("SELECT COUNT(*) c FROM pages").get() as { c: number }).c;
+      db.close();
+      expect(c).toBe(1);
+    }
+    const recordsDir = join(vaultPath, "records");
+    expect(existsSync(recordsDir) ? readdirSync(recordsDir).length : 0).toBe(0);
+    // Sanitized: the local absolute path of @file is never echoed back.
+    expect(result.stdout + result.stderr).not.toContain(filePath);
   });
 });
