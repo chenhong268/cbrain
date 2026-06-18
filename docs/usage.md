@@ -229,7 +229,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 由 `cbrain --help` 自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen cli-commands:start -->
-共 40 个 CLI 命令（`cbrain --help`）。
+共 41 个 CLI 命令（`cbrain --help`）。
 
 | 命令 | 说明 |
 |------|------|
@@ -258,6 +258,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `list` | List all pages in the brain |
 | `mcp-config` | Output MCP server configuration JSON for Agent integration |
 | `migrate-runtime` | Migrate vault/outputs to runtime directory (uses resolveRuntimePath) |
+| `perf-diagnose` | Read-only diagnostics: where time/query budget is spent across recent search journeys (no writes). |
 | `query` | Search the brain |
 | `reflect` | Run reflect stage: synthesize entities, infer relations, generate insights |
 | `relocate` | Fix misplaced pages in records/ by scanning file frontmatter and moving to correct directories |

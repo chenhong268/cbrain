@@ -10,6 +10,7 @@ import { register as serverCmds } from "./commands/server.js";
 import { register as backupCmds } from "./commands/backup.js";
 import { register as mcpConfigCmds } from "./commands/mcp-config.js";
 import { register as skillPackCmds } from "./commands/skill-pack.js";
+import { register as perfDiagCmds } from "./commands/perf-diagnose.js";
 
 /**
  * Assemble the Commander program WITHOUT parsing it.
@@ -40,6 +41,7 @@ export function buildProgram(): Command {
   backupCmds(program);
   mcpConfigCmds(program);
   skillPackCmds(program);
+  perfDiagCmds(program);
 
   return program;
 }

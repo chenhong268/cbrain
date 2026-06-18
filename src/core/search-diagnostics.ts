@@ -20,6 +20,25 @@ export type DegradedReasonCode =
   | "budget_exhausted"
   | "reasoning_parse_failed";
 
+/**
+ * Canonical registry of EVERY degraded reason code `classifyDegradedReasons` can emit.
+ * Used as an allowlist by diagnostics so only known categories are ever reported —
+ * arbitrary/unknown strings found in telemetry are dropped, never "sanitized" into
+ * the report (#189). Keep in sync with `DegradedReasonCode`.
+ */
+export const ALL_DEGRADED_REASON_CODES: ReadonlySet<DegradedReasonCode> = new Set<DegradedReasonCode>([
+  "fts_empty",
+  "fts_parser_fallback",
+  "vector_timeout",
+  "vector_error",
+  "low_score",
+  "rerank_insufficient",
+  "routing_mismatch_hierarchy",
+  "fallback_used",
+  "budget_exhausted",
+  "reasoning_parse_failed",
+]);
+
 export interface SearchDiagnosticInput {
   results: Array<{ score: number }>;
   trace: {
