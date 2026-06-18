@@ -51,7 +51,7 @@ interface GateReport {
 
 // ── Helpers ──
 
-function runGate(extraEnv: Record<string, string> = {}): { stdout: string; exitCode: number; wallMs: number } {
+function runGate(extraEnv: Record<string, string> = {}, args = ""): { stdout: string; exitCode: number; wallMs: number } {
   const env: Record<string, string> = {};
   // Inherit only safe vars; never inherit operator secrets into the gate subprocess.
   for (const key of ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "BUN_INSTALL"]) {
@@ -61,7 +61,7 @@ function runGate(extraEnv: Record<string, string> = {}): { stdout: string; exitC
 
   const start = performance.now();
   try {
-    const stdout = execSync(`bun "${GATE_SCRIPT}"`, {
+    const stdout = execSync(`bun "${GATE_SCRIPT}"${args ? " " + args : ""}`, {
       encoding: "utf-8",
       cwd: PROJECT_DIR,
       timeout: 60_000,
@@ -337,4 +337,91 @@ describe("v2-rc gate — fault injection produces no-go", () => {
       expect(report.cleanup.path).toBe("<cleaned>");
     }
   }, 120_000);
+});
+
+// ── Performance report (--perf mode, #188) ──
+
+interface PerfJourney {
+  id: string;
+  duration_ms: number;
+  query_count: number;
+  query_budget: number;
+  query_budget_utilization: number;
+  display_chars: number;
+  passed: boolean;
+  timed_out: boolean;
+}
+
+interface PerfReport {
+  gate: string;
+  version: string;
+  timestamp: string;
+  verdict: "go" | "no-go";
+  journeys: PerfJourney[];
+  slowest_journey: { id: string; duration_ms: number } | null;
+  highest_query_utilization_journey: { id: string; utilization: number } | null;
+  total_duration_ms: number;
+  warnings: string[];
+  thresholds: { warn_budget_pct: number; warn_hang_pct: number; hang_ceiling_ms: number };
+  cleanup: { verified: boolean; path: string };
+  duration_ms: number;
+}
+
+describe("v2-perf report (--perf mode, #188)", () => {
+  const result = runGate({}, "--perf");
+  const report = JSON.parse(result.stdout) as PerfReport;
+
+  test("emits a v2-perf report with a go verdict on the clean fixture", () => {
+    expect(result.exitCode).toBe(0);
+    expect(report.gate).toBe("v2-perf");
+    expect(report.verdict).toBe("go");
+  });
+
+  test("report schema is complete and stable", () => {
+    for (const key of [
+      "gate", "version", "timestamp", "verdict", "journeys",
+      "slowest_journey", "highest_query_utilization_journey", "total_duration_ms",
+      "warnings", "thresholds", "cleanup", "duration_ms",
+    ] as const) {
+      expect(report).toHaveProperty(key);
+    }
+    expect(report.journeys.length).toBeGreaterThanOrEqual(8);
+  });
+
+  test("every journey carries exactly the perf fields incl. utilization", () => {
+    const allowed = new Set([
+      "id", "duration_ms", "query_count", "query_budget", "query_budget_utilization",
+      "display_chars", "passed", "timed_out",
+    ]);
+    for (const j of report.journeys) {
+      expect(Object.keys(j).sort()).toEqual([...allowed].sort());
+      expect(j.query_budget).toBeGreaterThan(0);
+      expect(j.query_budget_utilization).toBeGreaterThanOrEqual(0);
+      expect(j.query_budget_utilization).toBeLessThan(1); // clean fixture: well within budget
+    }
+  });
+
+  test("slowest + highest-utilization are derived consistently from journeys", () => {
+    expect(report.slowest_journey).not.toBeNull();
+    const maxDur = Math.max(...report.journeys.map((j) => j.duration_ms));
+    expect(report.slowest_journey!.duration_ms).toBe(maxDur);
+
+    expect(report.highest_query_utilization_journey).not.toBeNull();
+    const maxUtil = Math.max(...report.journeys.map((j) => j.query_budget_utilization));
+    expect(report.highest_query_utilization_journey!.utilization).toBeCloseTo(maxUtil, 5);
+
+    expect(report.total_duration_ms).toBe(report.journeys.reduce((s, j) => s + j.duration_ms, 0));
+  });
+
+  test("warnings present and sanitized (no paths/credentials/content)", () => {
+    expect(Array.isArray(report.warnings)).toBe(true);
+    const text = report.warnings.join(" ");
+    expect(text).not.toMatch(/\/Users|\/tmp|\.md\b|secret|sk-[a-f0-9]/i);
+  });
+
+  test("thresholds expose the warning knobs", () => {
+    expect(report.thresholds.warn_budget_pct).toBeGreaterThan(0);
+    expect(report.thresholds.warn_hang_pct).toBeGreaterThan(0);
+    expect(report.thresholds.hang_ceiling_ms).toBeGreaterThan(0);
+  });
 });

@@ -51,6 +51,7 @@ import type { EmbeddingProvider } from "../src/embedding/provider.js";
 import { buildContext, type ToolContext } from "../src/mcp/context.js";
 import { registerAllTools } from "../src/mcp/register.js";
 import { sanitizeError } from "../src/mcp/server.js";
+import { buildPerfReport, type PerfReport } from "../src/release/perf-report.js";
 
 // ── Types ──
 
@@ -1170,19 +1171,70 @@ function writeSummary(report: GateReport): void {
   process.stderr.write(lines.join("\n") + "\n");
 }
 
+// ── Terminal summary: performance report (#188) ──
+
+function writePerfSummary(report: PerfReport): void {
+  const lines: string[] = [];
+  lines.push(`╔══ CBrain v2.0 Perf Report ══╗`);
+  lines.push(`  verdict:    ${report.verdict.toUpperCase()}`);
+  lines.push(`  duration:   ${report.duration_ms}ms (journeys total ${report.total_duration_ms}ms)`);
+  if (report.slowest_journey) {
+    lines.push(`  slowest:    ${report.slowest_journey.id} (${report.slowest_journey.duration_ms}ms)`);
+  }
+  if (report.highest_query_utilization_journey) {
+    const h = report.highest_query_utilization_journey;
+    lines.push(`  hottest:    ${h.id} (${Math.round(h.utilization * 100)}% query budget)`);
+  }
+  lines.push(`  journeys:`);
+  for (const j of report.journeys) {
+    const mark = j.passed ? "✓" : "✗";
+    const util = Math.round(j.query_budget_utilization * 100);
+    lines.push(
+      `    ${mark} ${j.id} ${j.duration_ms}ms / ${util}% budget (${j.query_count}/${j.query_budget}q) / ${j.display_chars}chars${j.timed_out ? " TIMEOUT" : ""}`,
+    );
+  }
+  if (report.warnings.length > 0) {
+    lines.push(`  warnings:`);
+    for (const w of report.warnings) lines.push(`    ⚠ ${w}`);
+  } else {
+    lines.push(`  warnings:   none`);
+  }
+  lines.push(`  cleanup:    ${report.cleanup.verified ? "ok" : "FAILED"}`);
+  lines.push(`╚══════════════════════════════╝`);
+  process.stderr.write(lines.join("\n") + "\n");
+}
+
 // ── Entry ──
 
+const perfMode = process.argv.includes("--perf");
+
 executeGate().then(({ report, exitCode }) => {
-  const json = sanitizeOutput(JSON.stringify(report, null, 2));
-  process.stdout.write(json + "\n");
-  // The summary is derived from the sanitized report so stderr never echoes raw secrets either.
-  writeSummary(JSON.parse(json) as GateReport);
-  process.exitCode = exitCode;
+  if (perfMode) {
+    // Performance report (#188): reuse the same journey measurements, emit a perf-shaped JSON.
+    const perf = buildPerfReport({
+      journeys: report.journeys,
+      cleanupVerified: report.cleanup.verified,
+      hangCeilingMs: report.budgets.hang_ceiling_ms,
+      version: report.version,
+      timestamp: report.timestamp,
+      gateDurationMs: report.duration_ms,
+    });
+    const json = sanitizeOutput(JSON.stringify(perf, null, 2));
+    process.stdout.write(json + "\n");
+    writePerfSummary(JSON.parse(json) as PerfReport);
+    process.exitCode = perf.verdict === "go" ? 0 : (exitCode === 2 ? 2 : 1);
+  } else {
+    const json = sanitizeOutput(JSON.stringify(report, null, 2));
+    process.stdout.write(json + "\n");
+    // The summary is derived from the sanitized report so stderr never echoes raw secrets either.
+    writeSummary(JSON.parse(json) as GateReport);
+    process.exitCode = exitCode;
+  }
 }).catch((e) => {
   const detail = e instanceof Error ? e.message : String(e);
   const safe = detail.replace(/\/Users\/[^\s:"]+/g, "<HOME>/...").replace(/sk-[a-f0-9]{8,}/gi, "<REDACTED>").split("\n")[0];
   process.stdout.write(JSON.stringify({
-    gate: "v2-rc",
+    gate: perfMode ? "v2-perf" : "v2-rc",
     verdict: "no-go",
     error: safe,
     cleanup: { verified: false, path: "<unknown>" },

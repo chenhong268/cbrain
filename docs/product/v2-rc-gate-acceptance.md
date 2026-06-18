@@ -144,6 +144,58 @@ bun run gate:rc      # this gate (journey quality)
 
 All three must be green.
 
+## Performance report (`gate:perf`)
+
+`gate:rc` answers *go/no-go*; it does not surface where time or query budget is
+being spent. `gate:perf` is a deterministic performance acceptance report that
+**reuses the exact same anonymous journeys and MCP handler path** as `gate:rc`
+and adds a performance view — observability first, no optimization (#188).
+
+```bash
+bun run gate:perf
+```
+
+- **stdout** — machine-readable `v2-perf` JSON report.
+- **stderr** — a concise terminal summary for the release manager.
+- **Exit codes** — `0` = go (all journeys within hard budgets), `1` = no-go (a
+  journey over budget / failed / timed out, or cleanup failed), `2` = fatal.
+
+### What the perf report adds
+
+Per journey: `duration_ms`, `query_count`, `query_budget`,
+`query_budget_utilization` (fraction of budget used), `display_chars`, `passed`,
+`timed_out`.
+
+Top-level:
+
+| Field | Meaning |
+|:------|:--------|
+| `slowest_journey` | The journey with the largest `duration_ms` across this run |
+| `highest_query_utilization_journey` | The journey closest to its query budget |
+| `total_duration_ms` | Sum of per-journey durations (wall-clock trend signal) |
+| `warnings` | Sanitized strings — a journey at **≥80%** of its query budget, or **≥80%** of the hang ceiling |
+| `thresholds` | The `warn_budget_pct` / `warn_hang_pct` / `hang_ceiling_ms` knobs |
+| `verdict` | Same HARD rules as `gate:rc` — a journey over budget/failed/timed-out or cleanup failure is `no-go` |
+
+### How to interpret it
+
+- **Verdict is the gate.** High utilization or a slow journey is a WARNING, not a
+  failure — it tells the release manager where to look first if a user reports
+  slow recall. A `go` still releases; a `no-go` does not.
+- **Watch the hottest journey.** If `highest_query_utilization_journey` trends
+  toward 100% across release candidates, an N+1 or unbounded scan is creeping in.
+- **Compare across runs.** `slowest_journey` + `total_duration_ms` are the trend
+  needles; they are not strict sub-second thresholds (those would be flaky across
+  machines), so compare deltas, not absolutes.
+- **Privacy is unchanged.** Warnings expose only journey ids + counts — never
+  paths, content, or credentials.
+
+### Non-goals (unchanged by this report)
+
+`gate:perf` does not tune search ranking, NER, EntityResolver, LanceDB, or
+SQLite; it does not add LLM calls; it does not change public MCP schemas or touch
+the user vault/runtime.
+
 ## Fault injection (test-only)
 
 The gate accepts env vars that inject a deterministic fault so the test suite

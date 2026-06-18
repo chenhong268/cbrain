@@ -28,6 +28,7 @@
     "check:install-tag": "bash bin/check-install-smoke.sh",
     "gate:offline": "bun bin/check-first-recall-gate.ts",
     "gate:rc": "bun bin/check-v2-rc-gate.ts",
+    "gate:perf": "bun bin/check-v2-rc-gate.ts --perf",
     "check:docs": "bun bin/check-docs-consistency.ts"
   },
   "dependencies": {
