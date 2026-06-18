@@ -8,12 +8,30 @@
  */
 import * as fs from "fs";
 import * as path from "path";
+import { loadConfigSafe } from "./context.js";
 
-const VAULT =
-  process.env.CBRAIN_VAULT ??
-  "/Users/chenhong/Library/Mobile Documents/iCloud~md~obsidian/Documents/CBrain/vault";
-const CONCEPTS = path.join(VAULT, "brain/concepts");
+/**
+ * Resolve the vault directory from CBRAIN_VAULT or the project config.
+ * Throws a sanitized error (never a private/local path) when no vault can be
+ * resolved (#192 — no hardcoded local fallback in public source).
+ */
+function resolveVault(): string {
+  if (process.env.CBRAIN_VAULT) return process.env.CBRAIN_VAULT;
+  const cfg = loadConfigSafe();
+  if (cfg?.config.vaultPath) return cfg.config.vaultPath;
+  throw new Error("vault path not set: set CBRAIN_VAULT or run `cbrain init` to configure one");
+}
+
 const DRY = process.argv.includes("--dry-run");
+
+let VAULT: string;
+try {
+  VAULT = resolveVault();
+} catch (e) {
+  console.error(`Error: ${(e as Error).message}`);
+  process.exit(1);
+}
+const CONCEPTS = path.join(VAULT, "brain/concepts");
 
 // ── Keywords ──────────────────────────────────────────────────
 
