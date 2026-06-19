@@ -40,6 +40,14 @@ export function canonicalSlug(slug: string, type: string): string {
   return `${prefix}/${name}`;
 }
 
+/**
+ * 中英文标点统一替换为连字符 (#201)。与 vault 文件名 sanitize 对齐：标点变 -，
+ * 不再静默删除——否则 slug basename 与文件名 basename 分裂、去重失效。
+ * 不含 / _ - （这些由各分支的字符白名单处理）。提到 hasChinese 分支之前，
+ * 覆盖「无汉字但含中文标点」(如 TopicA：v1) 与英文标点 (如 TermA:TermB) 的情况。
+ */
+const PUNCTUATION_TO_HYPHEN = /[：，。！？、；·…—～“”‘’（）()【】《》〈〉「」『』.,!?;:"']/g;
+
 export function generateSlug(title: string, type: string): string {
   const prefix = getOntology().getVaultDir(type) ?? "records";
   // (#190) Never derive a slug name from a path-like title. Real paths only
@@ -48,20 +56,25 @@ export function generateSlug(title: string, type: string): string {
     return `${prefix}/untitled-${Date.now()}`;
   }
   const hasChinese = CJK_RANGE.test(title);
+  // (#201) 标点→- 在分支前统一，不再静默删除。
+  const dePuncted = title.replace(PUNCTUATION_TO_HYPHEN, "-");
   let cleaned: string;
   if (hasChinese) {
-    cleaned = title
+    cleaned = dePuncted
       .replace(/[^一-鿿㐀-䶿a-zA-Z0-9\s-]/g, "")
       .trim()
       .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
       .toLowerCase();
   } else {
-    cleaned = title
+    cleaned = dePuncted
       .toLowerCase()
       .replace(/[^a-z0-9\s-]/g, "")
       .trim()
       .replace(/\s+/g, "-")
-      .replace(/-+/g, "-");
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "");
   }
   // Guard: if name segment is invalid (empty, only hyphens, only specials),
   // fall back to untitled with timestamp to avoid slugs like "records/-" or "records/"
@@ -72,7 +85,7 @@ export function generateSlug(title: string, type: string): string {
 }
 
 export function extractSlugFromWikiLink(link: string): string {
-  // [[张三]] → "张三"
+  // [[实体A]] → "实体A"
   const match = link.match(/\[\[([^\]]+)\]\]/);
   return match ? match[1] : link;
 }
