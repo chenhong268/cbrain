@@ -6,7 +6,7 @@ import {
 
 describe("slug", () => {
   test("generates Chinese entity slug with brain prefix", () => {
-    expect(generateSlug("张三", "entity")).toBe("brain/entities/张三");
+    expect(generateSlug("实体A", "entity")).toBe("brain/entities/实体a");
   });
 
   test("generates English concept slug with brain prefix", () => {
@@ -28,13 +28,13 @@ describe("slug", () => {
   });
 
   test("handles mixed content entity", () => {
-    const slug = generateSlug("OpenAI GPT-4o", "entity");
+    const slug = generateSlug("产品A v1", "entity");
     expect(slug).toMatch(/^brain\/(entities|concepts)\//);
   });
 
   test("extracts slug from wiki link", () => {
-    expect(extractSlugFromWikiLink("[[张三]]")).toBe("张三");
-    expect(extractSlugFromWikiLink("[[第一性原理]]")).toBe("第一性原理");
+    expect(extractSlugFromWikiLink("[[实体A]]")).toBe("实体A");
+    expect(extractSlugFromWikiLink("[[概念A]]")).toBe("概念A");
   });
 });
 

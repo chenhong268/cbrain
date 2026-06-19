@@ -475,6 +475,37 @@ describe("C8: no real names in docs/tests", () => {
     }
     expect(checkedCount).toBeGreaterThan(0);
   });
+
+  test("utility tests (tests/utils/**) use anonymous placeholders, not real identifiers (#202)", () => {
+    // #202: tests/utils/** example fixtures get copied into docs, issues, and
+    // release reports. They must use anonymous placeholders (实体A / 组织B /
+    // 主题C / 产品D / TopicA / TermA / OrgA), never real person names, product
+    // names, model names, or company names. Grey-area concept/book names
+    // (第一性原理 / 反脆弱) are anonymized in fixtures but NOT banned here.
+    const utilsDir = path.join(ROOT, "tests/utils");
+    if (!fs.existsSync(utilsDir)) return;
+
+    const files = walkDir(utilsDir, [".ts"]);
+    const IDENTIFIABLE = [
+      // 真实常见人名（中文 + 拼音形式）
+      /张三|李四|王五|赵六/,
+      /zhang[-_]?san|li[-_]?si|wang[-_]?wu/,
+      // 真实公司 / 产品 / 模型名
+      /\bOpenAI\b|\bChatGPT\b|\bGPT[-_]?\d/i,
+      /\bClaude\b|\bAnthropic\b|\bDeepSeek\b/i,
+      /智谱|ChatGLM|\bGLM[-_]?\d/i,
+    ];
+
+    let checkedCount = 0;
+    for (const file of files) {
+      const content = fs.readFileSync(file, "utf-8");
+      for (const pattern of IDENTIFIABLE) {
+        expect(content).not.toMatch(pattern);
+      }
+      checkedCount++;
+    }
+    expect(checkedCount).toBeGreaterThan(0);
+  });
 });
 
 // ─── C9: 渐进披露路由规则 ─────────────────────────────────────

@@ -3,8 +3,8 @@ import { generateSlug, isValidSlugName } from "../../src/utils/slug.js";
 
 describe("isValidSlugName", () => {
   test("accepts valid names", () => {
-    expect(isValidSlugName("zhang-san")).toBe(true);
-    expect(isValidSlugName("张三")).toBe(true);
+    expect(isValidSlugName("name-a")).toBe(true);
+    expect(isValidSlugName("实体A")).toBe(true);
     expect(isValidSlugName("abc123")).toBe(true);
     expect(isValidSlugName("a")).toBe(true);
   });
