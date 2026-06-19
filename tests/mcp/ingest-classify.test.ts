@@ -243,4 +243,74 @@ describe("MCP ingest type classification", () => {
     expect((db.rawDb.prepare("SELECT COUNT(*) c FROM chunks").get() as { c: number }).c).toBe(chunksBefore);
     expect((db.rawDb.prepare("SELECT COUNT(*) c FROM links").get() as { c: number }).c).toBe(linksBefore);
   });
+
+  test("@file reference (absolute path) is rejected, no page created (#205)", async () => {
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+
+    const result = await handler({
+      content: "@/tmp/example.md",
+      pageType: "record",
+      skipNer: true,
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toContain("VALIDATION_ERROR");
+    expect(parsed.error).toContain("@file references");
+    // Rejection happens before ingest — no page created
+    const count = db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
+    expect(count.c).toBe(0);
+  });
+
+  test("standalone @vault path in prose is rejected, no page created (#205)", async () => {
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+
+    const result = await handler({
+      content: "见 @vault/records/example.md",
+      pageType: "record",
+      skipNer: true,
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toContain("@file references");
+    const count = db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number };
+    expect(count.c).toBe(0);
+  });
+
+  test("email and @username are NOT rejected (#205)", async () => {
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+
+    const result = await handler({
+      // .net (not .com) so the C8 privacy gate's email scanner [a-z]+@[a-z]+\.(com|cn|org)
+      // doesn't flag this fixture; @ is mid-token so FILE_REFERENCE_RE never matches.
+      content: "联系 test@example.net 或 @username",
+      title: "占位联系记录",
+      pageType: "record",
+      skipNer: true,
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.raw.created).toBe(true);
+  });
+
+  test("@file rejection error does not leak local paths (#205)", async () => {
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+
+    const result = await handler({
+      content: "@/Users/private-user/secret-vault/notes.md",
+      pageType: "record",
+      skipNer: true,
+    });
+
+    const text = result.content[0].text;
+    expect(text).toContain("@file references");
+    // Must NOT echo the injected private path back to the caller
+    expect(text).not.toContain("/Users/");
+    expect(text).not.toContain("private-user");
+    expect(text).not.toContain("secret-vault");
+  });
 });

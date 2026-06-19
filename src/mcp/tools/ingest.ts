@@ -5,6 +5,25 @@ import { DialogueIngest, DialogueMode } from "../../core/dialogue.js";
 import { formatIngestResult, formatDialogueResult } from "./format-result.js";
 import { classifyContentType } from "../../core/content-classifier.js";
 
+// (#205) MCP ingest does NOT expand @file references (unlike the CLI). A
+// standalone @<path> in content is rejected loudly — otherwise Hermes passes
+// "见 @vault/x.md" and CBrain silently writes that literal as the body, leaving
+// NER to mint shell entities. The CLI `cbrain ingest @file` path is separate
+// (src/cli/commands/content.ts) and keeps working.
+//
+// Matches a standalone @ (start-of-string or after whitespace) followed by a
+// path containing "/": covers @/abs/path, @vault/..., @brain/..., "见 @vault/...".
+// Does NOT match test@example.com (@ mid-token) or @username (no separator).
+const FILE_REFERENCE_RE = /(^|\s)@[^\s@]*\//;
+
+function assertNoFileReference(content: string): void {
+  if (FILE_REFERENCE_RE.test(content)) {
+    throw new Error(
+      "VALIDATION_ERROR: MCP ingest does not accept @file references. Read the file first and pass the full content.",
+    );
+  }
+}
+
 export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
   // ─── ingest ──────────────────────────────────────────────
   server.registerTool("ingest", {
@@ -19,6 +38,7 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
       allowDuplicate: z.boolean().optional().default(false).describe("允许重复内容（正常会被去重跳过）"),
     },
   }, async ({ content, type, title, tags, pageType, skipNer, allowDuplicate }) => {
+    assertNoFileReference(content); // (#205) reject @file refs — MCP never reads local files
     const classifiedType = classifyContentType(content, type);
     const result = await ctx.ingest.ingest({ content, type: classifiedType, title, tags, pageType, skipNer, allowDuplicate });
 
