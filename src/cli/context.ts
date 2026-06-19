@@ -3,6 +3,8 @@ import { dirname, join, resolve } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { ZhipuEmbeddingProvider } from "../embedding/zhipu.js";
+import { DeterministicEmbeddingProvider } from "../embedding/deterministic.js";
+import type { EmbeddingProvider } from "../embedding/provider.js";
 import { ZhipuLLMProvider } from "../llm/zhipu.js";
 import type { CBrainDeps } from "../mcp/server.js";
 
@@ -100,14 +102,20 @@ export function loadConfig(): CBrainConfig {
 
 export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrainDeps {
   const db = new CBrainDB(config.dbPath);
+  const embeddingProvider = config.embedding.provider ?? "zhipu";
+  const isDeterministic = embeddingProvider === "deterministic";
   const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
-  if (!apiKey && requireEmbedding) {
+  // (#204) deterministic provider is in-process: no credentials, no socket.
+  // Production "zhipu" still requires an API key.
+  if (!apiKey && requireEmbedding && !isDeterministic) {
     console.error("Error: ZHIPU_API_KEY not set (env or cbrain.json).");
     process.exit(1);
   }
-  const embedding = apiKey
-    ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
-    : (undefined as unknown as ZhipuEmbeddingProvider);
+  const embedding: EmbeddingProvider = isDeterministic
+    ? new DeterministicEmbeddingProvider()
+    : apiKey
+      ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
+      : (undefined as unknown as EmbeddingProvider);
   const lance = new LanceDBManager();
 
   const nerEnabled = config.ner?.enabled !== false;

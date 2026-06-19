@@ -38,6 +38,7 @@ interface GateReport {
   version: string;
   timestamp: string;
   verdict: "go" | "no-go";
+  embedding_mode?: "http" | "deterministic";
   stages: StageResult[];
   cleanup: { verified: boolean; path: string };
   duration_ms: number;
@@ -320,6 +321,27 @@ describe("gate fault injection (real subprocess)", () => {
     // CRITICAL: output must NOT contain the injected credential — only <REDACTED>
     expect(stdout).not.toContain("sk-abcdef1234567890abcdef1234567890");
     expect(stdout).toContain("<REDACTED>");
+  }, 180_000);
+
+  test("GATE_FORCE_DETERMINISTIC → TCP-less deterministic fallback → go (#204)", () => {
+    // 回归防线 (#204 要求 #5): 模拟 TCP listener 不可用的环境 (某些 sandbox/CI
+    // 里 Bun.serve 和 net.listen 都 bind 失败)。wrapper 的 allowlist env 太干净
+    // 会掩盖这种失败 —— 此测试显式跳过 HTTP mock, 走 in-process deterministic
+    // embedding, 断言 gate 仍 GO。若未来 gate 又强依赖 TCP, 这里会 NO-GO 而失败。
+    const { stdout } = runGate({ GATE_FORCE_DETERMINISTIC: "1" });
+    const report = parseReport(stdout);
+
+    expect(report.verdict).toBe("go");
+    expect(report.cleanup.verified).toBe(true);
+    expect(report.embedding_mode).toBe("deterministic");
+    // deterministic embeddings 让 ingest+query 正常工作 — 所有 stage 仍 pass
+    for (const stage of report.stages) {
+      expect(stage.passed).toBe(true);
+    }
+    // 无路径/credential/stack 泄露
+    expect(stdout).not.toContain("/Users/");
+    expect(stdout).not.toContain("Projects/cbrain");
+    expect(stdout).not.toMatch(/sk-[a-f0-9]{8,}/i);
   }, 180_000);
 });
 

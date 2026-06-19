@@ -21,6 +21,7 @@
 //   GATE_FAULT_VAULT_NESTED=1   — create runtime/ inside vault → artifacts fail
 //   GATE_FAULT_MIGRATION_CORRUPT=1 — corrupt migration fixture DB → migration fails
 //   GATE_FAULT_MCP_CRED_LEAK=1  — inject credential into report → privacy fail
+//   GATE_FORCE_DETERMINISTIC=1  — skip TCP, use in-process deterministic embedding (#204)
 //
 // Exit codes: 0 = go, 1 = no-go, 2 = fatal error (script bug)
 
@@ -39,6 +40,7 @@ import {
 import { join, resolve, dirname, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
+import { createServer } from "node:net";
 import { fileURLToPath } from "url";
 import { Database } from "bun:sqlite";
 
@@ -67,6 +69,7 @@ interface GateReport {
   readonly version: string;
   readonly timestamp: string;
   readonly verdict: GateVerdict;
+  readonly embedding_mode: "http" | "deterministic";
   readonly stages: ReadonlyArray<StageResult>;
   readonly cleanup: { readonly verified: boolean; readonly path: string };
   readonly duration_ms: number;
@@ -98,6 +101,13 @@ interface MockServer {
   stop(): void;
 }
 
+// (#204) How the packed CLI obtains embeddings. http = local mock server
+// (preferred, issue requirement); deterministic = in-process provider when a
+// localhost TCP listener cannot bind. Neither skips the mock — both are mocks.
+type EmbeddingMode =
+  | { readonly kind: "http"; readonly mock: MockServer }
+  | { readonly kind: "deterministic" };
+
 interface CliResult {
   readonly exitCode: number;
   readonly stdout: string;
@@ -118,36 +128,93 @@ const DETERMINISTIC_VECTOR = Array.from({ length: VECTOR_DIM }, (_, i) =>
 
 // ── Mock Embedding Server ──
 
-function startMockEmbeddingServer(): MockServer {
-  const server = Bun.serve({
-    port: 0,
-    hostname: "127.0.0.1",
-    fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === "/embeddings" && req.method === "POST") {
-        return req.json().then((body: { input?: string[] }) => {
-          const inputs = body.input ?? [];
-          const data = inputs.map((_, i) => ({
-            embedding: DETERMINISTIC_VECTOR,
-            index: i,
-          }));
-          return Response.json({
-            data,
-            usage: { total_tokens: inputs.length * 10 },
-          });
-        });
-      }
-      return new Response("NOT_FOUND", { status: 404 });
-    },
+// (#204) Probe a free localhost port via Node net rather than relying on
+// Bun.serve's port:0 auto-allocation, which some environments/Bun versions
+// misreport as "Failed to start server. Is port 0 in use?". Resolves to a
+// concrete port number handed to Bun.serve.
+function findFreeLocalhostPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.on("error", () => {
+      reject(new Error("mock embedding server failed to bind a localhost port"));
+    });
+    probe.listen(0, "127.0.0.1", () => {
+      const addr = probe.address();
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+      probe.close(() => {
+        if (port > 0) resolve(port);
+        else reject(new Error("mock embedding server failed to bind a localhost port"));
+      });
+    });
   });
+}
 
-  return {
-    url: `http://127.0.0.1:${server.port}`,
-    port: server.port,
-    stop() {
-      server.stop();
-    },
-  };
+// (#204) Deterministic, retryable localhost port selection. Probes a free port,
+// binds Bun.serve to it, and retries with a fresh probe on transient failure.
+// A startup failure surfaces a single sanitized message (no paths/stack/secrets)
+// so the release gate stays diagnosable without leaking environment detail.
+async function startMockEmbeddingServer(): Promise<MockServer> {
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const port = await findFreeLocalhostPort();
+      const served = Bun.serve({
+        port,
+        hostname: "127.0.0.1",
+        fetch(req) {
+          const url = new URL(req.url);
+          if (url.pathname === "/embeddings" && req.method === "POST") {
+            return req.json().then((body: { input?: string[] }) => {
+              const inputs = body.input ?? [];
+              const data = inputs.map((_, i) => ({
+                embedding: DETERMINISTIC_VECTOR,
+                index: i,
+              }));
+              return Response.json({
+                data,
+                usage: { total_tokens: inputs.length * 10 },
+              });
+            });
+          }
+          return new Response("NOT_FOUND", { status: 404 });
+        },
+      });
+      return {
+        url: `http://127.0.0.1:${served.port}`,
+        port: served.port,
+        stop() {
+          served.stop();
+        },
+      };
+    } catch {
+      // Port probe or Bun.serve failed — retry with a fresh localhost port.
+    }
+  }
+  throw new Error("mock embedding server failed to bind a localhost port");
+}
+
+// (#204) Resolve how the packed CLI obtains embeddings.
+// Preferred: HTTP mock server on localhost (issue requires a local mock server).
+// If a TCP listener cannot bind (some environments reject localhost bind on both
+// Bun.serve and node:net), fall back to the in-process deterministic provider
+// (embedding.provider="deterministic") — no socket, no HTTP, no creds. This is
+// NOT a pass downgrade: embeddings still work and ingest+query still run.
+async function resolveEmbeddingMode(): Promise<EmbeddingMode> {
+  // ── Test-only: force the deterministic path (simulates a TCP-less env) ──
+  if (process.env.GATE_FORCE_DETERMINISTIC === "1") {
+    return { kind: "deterministic" };
+  }
+  // ── Test-only fault: unreachable provider URL → ingest/query fail → no-go ──
+  if (process.env.GATE_FAULT_PROVIDER === "1") {
+    return { kind: "http", mock: { url: "http://127.0.0.1:1", port: 1, stop() {} } };
+  }
+  try {
+    return { kind: "http", mock: await startMockEmbeddingServer() };
+  } catch {
+    // TCP listener unavailable — use in-process deterministic embeddings.
+    return { kind: "deterministic" };
+  }
 }
 
 // ── Isolation ──
@@ -397,10 +464,18 @@ function makeSyntheticStage(
 
 // ── Config Patching ──
 
-function patchConfig(configPath: string, mockUrl: string): void {
+function patchConfig(configPath: string, mode: EmbeddingMode): void {
   const config = JSON.parse(readFileSync(configPath, "utf-8"));
-  config.embedding.baseUrl = mockUrl;
-  config.embedding.apiKey = "gate-test-fake-key";
+  if (mode.kind === "deterministic") {
+    // (#204) In-process deterministic embeddings: no HTTP server, no TCP, no creds.
+    config.embedding.provider = "deterministic";
+    config.embedding.apiKey = "gate-test-fake-key";
+    delete config.embedding.baseUrl;
+  } else {
+    config.embedding.provider = "zhipu";
+    config.embedding.baseUrl = mode.mock.url;
+    config.embedding.apiKey = "gate-test-fake-key";
+  }
   config.ner = { enabled: false };
   writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
 }
@@ -650,7 +725,7 @@ async function runStageQuery(binPath: string, ctx: IsolationContext, env: Record
 // Assertions: schema migration ran, integrity check, FK check, idempotent reopen,
 // query returns fixture data, vault/runtime separation.
 
-async function runStageMigration(binPath: string, ctx: IsolationContext, env: Record<string, string>, mockUrl: string): Promise<StageResult> {
+async function runStageMigration(binPath: string, ctx: IsolationContext, env: Record<string, string>, mode: EmbeddingMode): Promise<StageResult> {
   const migrationBrain = join(ctx.tmpdir, "migration-brain");
   const migrationVault = join(migrationBrain, "vault");
   const migrationDbPath = join(migrationBrain, "brain.sqlite");
@@ -673,7 +748,9 @@ async function runStageMigration(binPath: string, ctx: IsolationContext, env: Re
     dbPath: migrationDbPath,
     lancePath: migrationLancePath,
     runtimePath: migrationRuntime,
-    embedding: { provider: "zhipu", apiKey: "gate-test-fake-key", baseUrl: mockUrl },
+    embedding: mode.kind === "deterministic"
+      ? { provider: "deterministic", apiKey: "gate-test-fake-key" }
+      : { provider: "zhipu", apiKey: "gate-test-fake-key", baseUrl: mode.mock.url },
     ner: { enabled: false },
   };
   const migrationConfigPath = join(migrationBrain, "cbrain.json");
@@ -909,6 +986,7 @@ async function executeGate(): Promise<GateResult> {
 
   const ctx = createIsolation();
   let mock: MockServer | undefined;
+  let embeddingMode: EmbeddingMode = { kind: "deterministic" };
   const stages: StageResult[] = [];
   let cleanupVerified = false;
 
@@ -923,11 +1001,11 @@ async function executeGate(): Promise<GateResult> {
       if (existsSync(skillFile)) rmSync(skillFile, { force: true });
     }
 
-    // ── Test-only fault: use unreachable provider ──
-    if (process.env.GATE_FAULT_PROVIDER === "1") {
-      mock = { url: "http://127.0.0.1:1", port: 1, stop() {} };
-    } else {
-      mock = startMockEmbeddingServer();
+    // (#204) Resolve embedding transport: HTTP mock (preferred) or in-process
+    // deterministic fallback when a localhost TCP listener cannot bind.
+    embeddingMode = await resolveEmbeddingMode();
+    if (embeddingMode.kind === "http") {
+      mock = embeddingMode.mock;
     }
 
     let env = buildIsolatedEnv(ctx);
@@ -943,7 +1021,7 @@ async function executeGate(): Promise<GateResult> {
 
     // Subsequent stages only if init passed
     if (initStage.passed) {
-      patchConfig(ctx.configPath, mock.url);
+      patchConfig(ctx.configPath, embeddingMode);
       env = buildIsolatedEnv(ctx);
 
       stages.push(await runStageDoctor(packResult.binPath, ctx, env));
@@ -959,7 +1037,7 @@ async function executeGate(): Promise<GateResult> {
         stages.push(await runStageQuery(packResult.binPath, ctx, env));
       }
 
-      stages.push(await runStageMigration(packResult.binPath, ctx, env, mock.url));
+      stages.push(await runStageMigration(packResult.binPath, ctx, env, embeddingMode));
     }
 
     // ── Test-only fault: create runtime/ inside vault → artifacts fail ──
@@ -1012,6 +1090,7 @@ async function executeGate(): Promise<GateResult> {
     version,
     timestamp: new Date().toISOString(),
     verdict: allStagesPassed && cleanupVerified ? "go" : "no-go",
+    embedding_mode: embeddingMode.kind,
     stages,
     cleanup: { verified: cleanupVerified, path: cleanupVerified ? "<cleaned>" : "<retained>" },
     duration_ms: Math.round(performance.now() - gateStart),
