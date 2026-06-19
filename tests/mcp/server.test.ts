@@ -2109,6 +2109,122 @@ describe("MCP Server", () => {
     });
   });
 
+  // ─── deep_recall alias-aware fanout (#194) ─────────────
+
+  describe("deep_recall alias-aware fanout (#194)", () => {
+    function writeVault(fileRel: string, title: string, body: string): void {
+      writeFileSync(join(vaultPath, fileRel), `---\ntitle: ${title}\ntype: entity\n---\n${body}`);
+    }
+
+    function seedAliasEntity(): void {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entity/bie-ming-zhu-ti", "实体甲", "bie-ming-zhu-ti.md", "h1");
+      writeVault("bie-ming-zhu-ti.md", "实体甲", "实体甲的简介。");
+      db.addAlias("entity/bie-ming-zhu-ti", "别名甲");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entity/huo-ban-yi", "伙伴乙", "huo-ban-yi.md", "h2");
+      writeVault("huo-ban-yi.md", "伙伴乙", "伙伴乙的简介。");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence, context) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run("entity/bie-ming-zhu-ti", "entity/huo-ban-yi", "合作", "wikilink", "trusted", 0.9, "实体甲与伙伴乙长期合作");
+    }
+
+    function seedFanoutNeighbors(count: number): void {
+      for (let i = 0; i < count; i++) {
+        const slug = `entity/lin-ju-${i}`;
+        const fileRel = `lin-ju-${i}.md`;
+        db.rawDb.prepare(
+          `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+        ).run(slug, `邻居${i}`, fileRel, `n${i}`);
+        writeVault(fileRel, `邻居${i}`, `邻居${i}的简介。`);
+        db.rawDb.prepare(
+          "INSERT INTO links (from_slug, to_slug, relation, source_type) VALUES (?, ?, ?, ?)"
+        ).run("entity/bie-ming-zhu-ti", slug, "关联", "wikilink");
+      }
+    }
+
+    test("alias query promotes aliased entity to top result (#194)", async () => {
+      seedAliasEntity();
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "别名甲" });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(Array.isArray(data.entities)).toBe(true);
+      expect(data.entities.length).toBeGreaterThan(0);
+      expect(data.entities[0].slug).toBe("entity/bie-ming-zhu-ti");
+      expect(data.entities[0].title).toBe("实体甲");
+    });
+
+    test("grounded alias and canonical queries both return non-insufficient evidence (#194)", async () => {
+      seedAliasEntity();
+      const server = createServer(deps);
+
+      const aliasRes = await getTools(server).deep_recall.handler({ query: "别名甲", grounded: true });
+      const canonRes = await getTools(server).deep_recall.handler({ query: "实体甲", grounded: true });
+      const aliasData = JSON.parse(aliasRes.content[0].text);
+      const canonData = JSON.parse(canonRes.content[0].text);
+
+      for (const [label, data] of [["alias", aliasData], ["canonical", canonData]] as const) {
+        expect(data.grounded_answer, `${label} grounded_answer`).toBeDefined();
+        expect(data.grounded_answer.answer, `${label} answer`).not.toContain("没有足够的记录");
+        expect(data.grounded_answer.facts.length, `${label} facts`).toBeGreaterThanOrEqual(1);
+      }
+    });
+
+    test("fanout: display caps at 5 while raw exposes wider candidate pool (#194)", async () => {
+      seedAliasEntity();
+      seedFanoutNeighbors(6); // graph neighbors push the candidate pool beyond the display cap
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "别名甲" });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.entities.length).toBeLessThanOrEqual(5);
+      expect(data.raw.search_meta.candidate_count).toBeGreaterThan(5);
+      expect(data.raw.search_meta.has_more).toBe(true);
+      expect(data.raw.search_meta.truncated).toBe(true);
+    });
+
+    test("grounded evidence spans fanout candidates outside display top-5 (#194)", async () => {
+      seedAliasEntity();
+      seedFanoutNeighbors(6);
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "别名甲", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      // Grounded collected evidence from the wider candidate pool, not just display top-5.
+      expect(data.raw.search_meta.candidate_count).toBeGreaterThan(5);
+      expect(data.grounded_answer).toBeDefined();
+      // 伙伴乙 link is a trusted fact regardless of whether 伙伴乙 sits inside display top-5.
+      expect(data.grounded_answer.facts.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("display and summary.message leak no internal debug fields (#194)", async () => {
+      seedAliasEntity();
+      seedFanoutNeighbors(6);
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({ query: "别名甲", grounded: true });
+      const data = JSON.parse(result.content[0].text);
+
+      const displayText = String(data.display ?? "");
+      const summaryMsg = String(data.summary?.message ?? "");
+      const banned = [
+        "score", "vector", "trace", "reason_codes",
+        "candidate_count", "truncated", "has_more",
+        "latency_ms", "degraded_reason",
+      ];
+      for (const term of banned) {
+        expect(displayText, `display leaked ${term}`).not.toContain(term);
+        expect(summaryMsg, `summary.message leaked ${term}`).not.toContain(term);
+      }
+      expect(displayText).not.toContain("entity/");
+      expect(displayText).not.toContain(".md");
+      // raw retains safe diagnostics
+      expect(data.raw.search_meta.candidate_count).toBeGreaterThan(0);
+    });
+  });
+
   // ─── deep_recall grounded trust states ─────────────────
 
   describe("deep_recall grounded trust states", () => {

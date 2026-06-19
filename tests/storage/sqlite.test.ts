@@ -365,6 +365,80 @@ describe("CBrainDB", () => {
       expect(results).toHaveLength(1);
       expect(results[0].slug).toBe("brain/concepts/concept/zhu-ti-g");
     });
+
+    // ─── alias-aware resolution (#194) ─────────────────────────
+
+    test("exact alias resolves to the aliased page (#194)", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/shi-ti-alias", "entity/person", "实体A", "entity/shi-ti-alias.md", "h1");
+      db.addAlias("entity/shi-ti-alias", "别名A");
+
+      const results = db.resolveSlugs(["别名A"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("entity/shi-ti-alias");
+      expect(results[0].title).toBe("实体A");
+    });
+
+    test("alias batch resolves multiple aliases in one call (#194)", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/bie-ming-x", "entity/person", "实体X", "entity/bie-ming-x.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/bie-ming-y", "entity/person", "实体Y", "entity/bie-ming-y.md", "h2");
+      db.addAlias("entity/bie-ming-x", "别名X");
+      db.addAlias("entity/bie-ming-y", "别名Y");
+
+      const results = db.resolveSlugs(["别名X", "别名Y"]);
+      expect(results).toHaveLength(2);
+      expect(results[0].slug).toBe("entity/bie-ming-x");
+      expect(results[1].slug).toBe("entity/bie-ming-y");
+    });
+
+    test("alias pass preferred over fuzzy LIKE — no false record grab (#194)", () => {
+      // 精确别名命中实体；同时存在 title 含相同字符串的 record
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/bie-ming-b", "entity/person", "实体B本体", "entity/bie-ming-b.md", "h1");
+      db.addAlias("entity/bie-ming-b", "别名B");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("record/bie-ming-b-note", "record", "别名B的附属记录", "record/bie-ming-b-note.md", "h2");
+
+      const results = db.resolveSlugs(["别名B"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("entity/bie-ming-b");
+    });
+
+    test("ambiguous alias shared by entity and record prefers entity (#194)", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/gong-xiang", "entity/person", "共享实体", "entity/gong-xiang.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("record/gong-xiang", "record", "共享记录", "record/gong-xiang.md", "h2");
+      db.addAlias("entity/gong-xiang", "共享别名");
+      db.addAlias("record/gong-xiang", "共享别名");
+
+      const results = db.resolveSlugs(["共享别名"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("entity/gong-xiang");
+    });
+
+    test("exact title still wins over alias (#194)", () => {
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/shi-ti-c", "entity/person", "标题C", "entity/shi-ti-c.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)"
+      ).run("entity/shi-ti-d", "entity/person", "实体D", "entity/shi-ti-d.md", "h2");
+      db.addAlias("entity/shi-ti-d", "标题C");
+
+      const results = db.resolveSlugs(["标题C"]);
+      expect(results).toHaveLength(1);
+      expect(results[0].slug).toBe("entity/shi-ti-c");
+    });
   });
 });
 

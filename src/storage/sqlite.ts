@@ -926,7 +926,33 @@ export class CBrainDB {
       }
     }
 
-    // Pass 3: Fuzzy LIKE for remaining (prefer entity/concept types over record/source by type)
+    // Pass 3: Exact alias match (batch) — consult the aliases table so names
+    // added via add_alias resolve consistently. Prefer entity/concept over
+    // record/source when the same alias is attached to pages of mixed types.
+    if (remaining.size > 0) {
+      const left = [...remaining];
+      const ph3 = left.map(() => "?").join(",");
+      const aliasRows = this.prepare(
+        `SELECT a.alias AS q, p.slug, p.title
+         FROM aliases a JOIN pages p ON p.slug = a.page_slug
+         WHERE a.alias IN (${ph3})
+         ORDER BY
+           CASE WHEN p.type = 'entity' OR p.type LIKE 'entity/%' THEN 0
+                WHEN p.type = 'concept' OR p.type LIKE 'concept/%' THEN 1
+                ELSE 2
+           END,
+           a.id`,
+      ).all(...left) as Array<{ q: string; slug: string; title: string }>;
+      for (const row of aliasRows) {
+        // First row per query wins (already type-prefixed by ORDER BY); ignore the rest.
+        if (remaining.has(row.q)) {
+          result.set(row.q, { slug: row.slug, title: row.title });
+          remaining.delete(row.q);
+        }
+      }
+    }
+
+    // Pass 4: Fuzzy LIKE for remaining (prefer entity/concept types over record/source by type)
     if (remaining.size > 0) {
       for (const query of remaining) {
         const fuzzy = this.prepare(

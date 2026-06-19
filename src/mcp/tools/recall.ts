@@ -65,6 +65,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     },
   }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded }) => {
     const cap = Math.min(limit ?? 5, 5);
+    // Internal fanout: search a wider candidate pool so evidence collection and
+    // alias/graph matches are not clipped at the display cap. Display still caps at `cap`.
+    const candidateLimit = Math.min(Math.max(cap * 4, 10), 20);
     const trace: SearchTrace = {};
 
     const searchStart = Date.now();
@@ -79,7 +82,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const resolved = ctx.db.resolveSlugs([query])[0];
       const exactSlug = resolved?.slug ?? null;
 
-      searchResults = await ctx.search.search(query, { limit: cap, multiStep, _trace: trace });
+      searchResults = await ctx.search.search(query, { limit: candidateLimit, multiStep, _trace: trace });
       usedStrategy = "smart-hybrid";
 
       if (exactSlug) {
@@ -92,11 +95,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         }
       }
     } else if (usedStrategy === "fts") {
-      searchResults = await ctx.search.search(query, { strategy: "fts", limit: cap, _trace: trace });
+      searchResults = await ctx.search.search(query, { strategy: "fts", limit: candidateLimit, _trace: trace });
     } else if (usedStrategy === "vector") {
-      searchResults = await ctx.search.search(query, { strategy: "vector", limit: cap, _trace: trace });
+      searchResults = await ctx.search.search(query, { strategy: "vector", limit: candidateLimit, _trace: trace });
     } else {
-      searchResults = await ctx.search.search(query, { limit: cap, multiStep, _trace: trace });
+      searchResults = await ctx.search.search(query, { limit: candidateLimit, multiStep, _trace: trace });
     }
 
     const searchLatencyMs = Date.now() - searchStart;
@@ -109,7 +112,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       for (const r of searchResults) { sourceCounts[r.source ?? "unknown"] = (sourceCounts[r.source ?? "unknown"] ?? 0) + 1; }
       const isDegraded = computeSearchDegraded(searchLatencyMs, trace, reasonCodes);
       ctx.db.logSearch(query, usedStrategy, searchLatencyMs, searchResults.length, isDegraded, {
-        strategy_path: usedStrategy, ...trace, result_sources: sourceCounts, requested_limit: cap, multistep: !!multiStep, detail_level: detailLevel ?? "brief",
+        strategy_path: usedStrategy, ...trace, result_sources: sourceCounts, requested_limit: candidateLimit, multistep: !!multiStep, detail_level: detailLevel ?? "brief",
         reason_codes: reasonCodes,
       });
     } catch { /* non-critical */ }
@@ -137,10 +140,16 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     }
 
     const isSearchDegraded = computeSearchDegraded(searchLatencyMs, trace, reasonCodes);
+    // Fanout diagnostics — surfaced ONLY in raw/search_meta, never in display/summary.
+    // candidate_count reflects the wider pool searched; truncated/has_more signal that
+    // display was capped (distinct from ToolSummary.truncated which tracks _stub bodies).
+    const candidateHasMore = searchResults.length > cap;
     const diagnosticMeta = {
       strategy: usedStrategy,
       latency_ms: searchLatencyMs,
       degraded: isSearchDegraded || undefined,
+      candidate_count: searchResults.length,
+      ...(candidateHasMore ? { truncated: true, has_more: true } : {}),
       ...(reasonCodes.length > 0 ? { reason_codes: reasonCodes } : {}),
     };
 
@@ -204,6 +213,13 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       if (type === "record") sr.score *= RECORD_SCORE_FACTOR;
     }
     searchResults.sort((a, b) => b.score - a.score);
+
+    // Fanout: searched candidateLimit candidates; enrich/display only the top `cap`.
+    // The wider pool was already consumed for grounded evidence (resultSlugs above)
+    // and is surfaced as counts in raw/search_meta — never in display.
+    if (searchResults.length > cap) {
+      searchResults = searchResults.slice(0, cap);
+    }
 
     // Batch enrichment: collect all slugs, then batch-fetch links/timeline/tags
     const topSlugs = searchResults.map(r => r.slug);
