@@ -645,6 +645,48 @@ if [[ -f "$SKILLS_DIR/agentic.routing-eval.jsonl" ]]; then
   fi
 fi
 
+# ── 5d. Response Contract Eval ──
+echo ""
+echo "[5d] Response Contract Eval"
+
+RC_EVAL="$SKILLS_DIR/response-contract.routing-eval.jsonl"
+if [[ -f "$RC_EVAL" ]]; then
+  rc_count=$(wc -l < "$RC_EVAL" | tr -d ' ')
+  if (( rc_count >= 12 )); then
+    pass "response-contract.routing-eval.jsonl (${rc_count} cases, 需要 ≥ 12)"
+  else
+    fail "response-contract.routing-eval.jsonl 只有 ${rc_count} cases，需要 ≥ 12"
+  fi
+
+  # Forbidden set coverage — issue #197 contract: score/source_id/reason_codes/raw/slug/trace/vector
+  rc_forbidden=("score" "source_id" "reason_codes" "raw" "slug" "trace" "vector")
+  rc_missing=()
+  for term in "${rc_forbidden[@]}"; do
+    if ! grep -q "\"$term\"" "$RC_EVAL" 2>/dev/null; then
+      rc_missing+=("$term")
+    fi
+  done
+  if (( ${#rc_missing[@]} == 0 )); then
+    pass "response-contract eval forbidden set 全覆盖（score/source_id/reason_codes/raw/slug/trace/vector）"
+  else
+    fail "response-contract eval forbidden set 缺少: ${rc_missing[*]}"
+  fi
+
+  # Privacy: no real names
+  rc_privacy=0
+  for pattern in "张三" "李四" "王磊" "星辰" "某制药" "有限公司" "集团" "公司"; do
+    hits=$(grep -c "$pattern" "$RC_EVAL" 2>/dev/null) || hits=0
+    rc_privacy=$((rc_privacy + hits))
+  done
+  if (( rc_privacy == 0 )); then
+    pass "response-contract eval 无隐私泄露"
+  else
+    fail "response-contract eval 有 ${rc_privacy} 处疑似隐私泄露"
+  fi
+else
+  fail "skills/response-contract.routing-eval.jsonl 不存在"
+fi
+
 echo ""
 
 # ── 6. Skill 层一致性 ──
