@@ -29,8 +29,10 @@ import { registerCompoundingReviewTools } from "./tools/compounding-review.js";
 import { registerKnowledgeTools } from "./tools/knowledge.js";
 import { registerMergeWorkflowTools } from "./tools/merge-workflow.js";
 import { registerWakeupTools } from "./tools/wakeup.js";
+import { registerFrontdoorTools } from "./tools/frontdoor.js";
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
+  registerFrontdoorTools(server, ctx);
   registerSearchTools(server, ctx);
   registerIngestTools(server, ctx);
   registerPageTools(server, ctx);

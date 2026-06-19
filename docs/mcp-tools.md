@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 81 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 82 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -324,6 +324,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `batch_delete_pages` | Delete multiple pages in one call. |
 | `batch_merge_pages` | Merge multiple page pairs in one call. |
 | `brain_storm` | Deep reasoning and knowledge gap analysis. |
+| `cbrain_recall` | CBrain 自然语言前门。Hermes 面向用户提问时优先调用本工具，由 CBrain 决定走证据核查、内容回忆、情境找人、组织架构、全貌总结、关系分析、复杂判断或 debug 搜索。返回… |
 | `confirm_evidence` | 用户明确确认一条知识为可信事实。必须提供 confirmation_record_slug（vault 中已存在的页面）和 excerpt（该页面正文中必须包含的确认原文），系统会验证页面存在且 excerpt… |
 | `deep_recall` | 【默认查询工具】查找人物、公司、概念等实体。默认返回精简视图（200字摘要+基础信息）。需要完整上下文（关系、时间线、档案、层级）时传… |
 | `delete_page` | Delete a page by slug. |
