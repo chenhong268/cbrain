@@ -71,7 +71,6 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
       case "debug_search":
         envelope = await runDebugSearch(ctx, query, routing, session_id);
         break;
-      case "content_recall":
       default:
         envelope = await runContentRecall(ctx, query, routing, routeDetail);
         break;
