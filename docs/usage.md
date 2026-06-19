@@ -229,7 +229,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 由 `cbrain --help` 自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen cli-commands:start -->
-共 41 个 CLI 命令（`cbrain --help`）。
+共 42 个 CLI 命令（`cbrain --help`）。
 
 | 命令 | 说明 |
 |------|------|
@@ -251,6 +251,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `enrich` | Run entity enrichment (tier promotion) |
 | `graph-query` | Query the knowledge graph |
 | `health` | Run 14-dimension health check and write report |
+| `health-debt` | Plan health-debt repairs as a dry-run grouped queue (no execute, no delete, no merge, no LLM) |
 | `hierarchy` | Manage entity hierarchy (reports_to) |
 | `index` | Generate Obsidian index files |
 | `ingest` | Ingest content (text or markdown) |

@@ -149,7 +149,7 @@ CBrain 需要以下 API key：
 | record | `records/` | Reading notes, articles, meeting notes, transcripts |
 | insight | `insights/` | Auto-generated cross-domain connections and discoveries |
 
-## CLI Commands (41 total)
+## CLI Commands (42 total)
 
 ### 大脑管理
 ```bash
@@ -196,6 +196,7 @@ cbrain dream                             # 夜间全量维护：sync → enrich 
 cbrain sync                              # 把 vault 文件同步到索引
 cbrain enrich                            # 实体重要性升级
 cbrain health                            # 14 维度健康检查，输出报告
+cbrain health-debt                       # 健康债务修复计划（dry-run，分组：可自动修复/需审核/观察/阻塞）
 cbrain doctor                            # 快速诊断：数据库、文件、API 是否正常
 cbrain doctor --first-run                # 2.0 首次运行全面检查（config → paths → DB → index → services）
 cbrain doctor --first-run --json         # 同上，JSON 输出（供 Agent 调用）

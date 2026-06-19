@@ -21,6 +21,7 @@ import {
   handleReindexQuarantined,
   createLiveLockProbe,
 } from "./reindex.js";
+import type { PageSignals } from "../../core/health-debt.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -269,6 +270,47 @@ export function register(program: Command) {
       if (report.reportPaths) {
         console.log(`\n  摘要报告：${report.reportPaths.summary}`);
         console.log(`  行动清单：${report.reportPaths.actions}`);
+      }
+
+      db.close();
+    });
+
+  program
+    .command("health-debt")
+    .description("Plan health-debt repairs as a dry-run grouped queue (no execute, no delete, no merge, no LLM)")
+    .option("--json", "Output structured RepairPlan JSON (with real slugs) instead of anonymized Markdown")
+    .action(async (opts) => {
+      const config = loadConfig();
+      const db = new CBrainDB(config.dbPath);
+      const outputsDir = resolveRuntimePath(config);
+      const { HealthChecker } = await import("../../core/health.js");
+      const { Logger } = await import("../../core/logger.js");
+      const { planRepairs, planToMarkdown } = await import("../../core/health-debt.js");
+      const logger = new Logger(outputsDir);
+      const checker = new HealthChecker(db, outputsDir, logger, config.vaultPath);
+      const report = await checker.checkAll();
+
+      // Signal lookup for stub / island triage: pure reads, injected into the planner.
+      const signalLookup = (slug: string): PageSignals | undefined => {
+        if (!slug || slug === "-") return undefined;
+        try {
+          const tm = db.getPageTierAndMentions(slug);
+          const incoming = db.getIncomingLinks(slug);
+          return {
+            mentionCount: tm?.mention_count,
+            incomingLinkCount: incoming.length,
+          };
+        } catch {
+          return undefined;
+        }
+      };
+
+      const plan = planRepairs(report, signalLookup);
+
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(plan, null, 2));
+      } else {
+        console.log(planToMarkdown(plan));
       }
 
       db.close();
