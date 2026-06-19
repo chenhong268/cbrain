@@ -139,7 +139,9 @@ export class IngestManager {
   ): Promise<IngestResult> {
     const parsed = parseFrontmatter(content);
 
-    const declaredTitle = parsed.frontmatter.title ?? overrides?.title;
+    // (#198) Explicit caller/CLI title takes precedence over a stale frontmatter
+    // title, so `ingest @file --title X` derives slug/title/file_path from X.
+    const declaredTitle = overrides?.title ?? parsed.frontmatter.title;
     const bodyTitle = parsed.body.split("\n").find(line => hasSemanticContent(line))?.trim().slice(0, 50);
     const title = hasSemanticContent(String(declaredTitle ?? "")) ? String(declaredTitle).trim() : bodyTitle;
     if (!title) {

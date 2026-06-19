@@ -1,6 +1,5 @@
 import type { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
-import { basename, extname } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
 import { loadConfig, createDeps } from "../context.js";
@@ -10,7 +9,7 @@ export function register(program: Command) {
   program
     .command("ingest")
     .description("Ingest content (text or markdown)")
-    .option("-t, --type <type>", "Content type: text or markdown", "text")
+    .option("-t, --type <type>", "Content type: text or markdown (omit to auto-classify @file content)")
     .option("--title <title>", "Title (for text type)")
     .option("--tags <tags>", "Comma-separated tags")
     .option("--page-type <type>", "Page type: entity|concept|record")
@@ -24,16 +23,18 @@ export function register(program: Command) {
       const { IngestManager } = await import("../../core/ingest.js");
       const ingest = new IngestManager(deps.db, deps.embedding, deps.lance, config.vaultPath, deps.llm);
       let input = content;
-      let fileTitle: string | undefined;
       if (input.startsWith("@")) {
         const rawPath = input.slice(1);
         if (rawPath.includes("..")) { console.error("Error: 路径不允许包含 .."); process.exit(1); }
         if (!existsSync(rawPath)) { console.error(`Error: File not found: ${rawPath}`); process.exit(1); }
         input = readFileSync(rawPath, "utf-8");
-        fileTitle = basename(rawPath, extname(rawPath));
       }
       const tags = opts.tags ? opts.tags.split(",").map((t: string) => t.trim()) : undefined;
-      const result = await ingest.ingest({ content: input, type: opts.type ?? "text", title: opts.title ?? fileTitle, tags, pageType: opts.pageType, skipNer: opts.ner === false, allowDuplicate: opts.allowDuplicate ?? false });
+      // (#198) Omitting --type lets IngestManager auto-classify the content (e.g.
+      // @file markdown frontmatter → markdown); omitting --title lets it derive the
+      // title from frontmatter/body instead of the source filename. Explicit
+      // --type/--title always take precedence over file-derived values.
+      const result = await ingest.ingest({ content: input, type: opts.type, title: opts.title, tags, pageType: opts.pageType, skipNer: opts.ner === false, allowDuplicate: opts.allowDuplicate ?? false });
       if (result.outcome === "duplicate") {
         console.log(`- Duplicate: already exists as "${result.duplicateOf?.title}"`);
       } else {

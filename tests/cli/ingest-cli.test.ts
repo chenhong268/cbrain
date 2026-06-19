@@ -139,4 +139,31 @@ describe("CLI ingest — dedup flags and output", () => {
     // Sanitized: the local absolute path of @file is never echoed back.
     expect(result.stdout + result.stderr).not.toContain(filePath);
   });
+
+  test("ingest @file with markdown frontmatter and no --type routes as markdown (#198)", () => {
+    // Frontmatter slug points at an existing page → markdown path short-circuits
+    // as a duplicate WITHOUT embedding. The bug (default --type text) routes to
+    // the text path, tries to create, and hits offline embedding failure.
+    const slug = "brain/entities/person/shi-ti-cli";
+    const relPath = `${slug}.md`;
+    mkdirSync(join(vaultPath, ...slug.split("/").slice(0, -1)), { recursive: true });
+    const md = `---\ntitle: 实体CLI\ntype: entity/person\nslug: ${slug}\n---\n\n实体CLI 简介`;
+    writeFileSync(join(vaultPath, relPath), md, "utf-8");
+    {
+      const db = new CBrainDB(dbPath);
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?,?,?,?,?,?,?)`,
+      ).run(slug, "entity/person", "实体CLI", relPath, `hash-${slug}`, 0, 3);
+      db.close();
+    }
+
+    const srcPath = join(testDir, "temp_source.md");
+    writeFileSync(srcPath, md, "utf-8");
+
+    const result = runIngest([`@${srcPath}`]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Duplicate");
+    // Source path never echoed back
+    expect(result.stdout + result.stderr).not.toContain(srcPath);
+  });
 });

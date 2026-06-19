@@ -3,6 +3,7 @@ import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { IngestManager } from "../../src/core/ingest.js";
+import { generateSlug } from "../../src/utils/slug.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 
@@ -321,6 +322,51 @@ describe("IngestManager", () => {
         .get("brain/entities/person/lisi") as any;
       expect(row).not.toBeNull();
       expect(row.title).toBe("李四");
+    });
+
+    test("explicit caller title overrides frontmatter title for slug/title/path (#198)", async () => {
+      const md = [
+        "---",
+        "title: 临时标题A",
+        "type: record",
+        "---",
+        "",
+        "匿名正文内容",
+      ].join("\n");
+
+      const result = await ingest.ingest({
+        content: md,
+        type: "markdown",
+        title: "正式标题B",
+      });
+
+      expect(result.created).toBe(true);
+      // slug/title/file_path derived from the explicit title, not the frontmatter title
+      expect(result.slug).toBe(generateSlug("正式标题B", "record"));
+      const row = db.rawDb.prepare("SELECT title, file_path FROM pages WHERE slug = ?")
+        .get(result.slug) as { title: string; file_path: string };
+      expect(row.title).toBe("正式标题B");
+      expect(row.file_path).not.toContain("临时标题A");
+    });
+
+    test("no explicit type auto-classifies markdown frontmatter as markdown (#198)", async () => {
+      const md = [
+        "---",
+        "title: 自动分类标题C",
+        "type: record",
+        "---",
+        "",
+        "正文内容",
+      ].join("\n");
+
+      // No type → IngestManager must classify the frontmatter as markdown,
+      // so the frontmatter title is honored (not treated as plain text).
+      const result = await ingest.ingest({ content: md });
+
+      expect(result.created).toBe(true);
+      const row = db.rawDb.prepare("SELECT title FROM pages WHERE slug = ?")
+        .get(result.slug) as { title: string };
+      expect(row.title).toBe("自动分类标题C");
     });
 
     test("updates existing page on re-ingest", async () => {
