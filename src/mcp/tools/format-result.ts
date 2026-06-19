@@ -349,6 +349,52 @@ export function formatQueryEnvelope(payload: QueryPayload): {
   };
 }
 
+interface AppendPayload {
+  action: string;
+  title?: string | null;
+  new_length?: number;
+  relations_added?: number;
+  fields_updated?: string[];
+  needs_review?: boolean;
+  warnings?: string[];
+}
+
+/**
+ * append_page envelope — surfaces safe structure-update counts to the agent
+ * without leaking slugs, paths, or trust internals into display/summary.
+ */
+export function formatAppendEnvelope(payload: AppendPayload): {
+  display: string;
+  summary: ToolSummary;
+  raw: AppendPayload;
+} {
+  const title = payload.title ?? "该页面";
+  const rels = payload.relations_added ?? 0;
+  const fields = payload.fields_updated ?? [];
+  const needsReview = payload.needs_review === true;
+  const hasWarnings = (payload.warnings?.length ?? 0) > 0;
+
+  const parts: string[] = [`已追加内容到《${title}》。`];
+  if (rels > 0) parts.push(`新增 ${rels} 条关系。`);
+  if (fields.length > 0) parts.push(`更新 ${fields.length} 个字段。`);
+  if (needsReview) parts.push("部分字段需人工确认。");
+  const display = sanitizeDisplay(parts.join(""));
+
+  return {
+    display,
+    summary: {
+      status: hasWarnings ? "degraded" : "ok",
+      count: rels,
+      truncated: false,
+      message: needsReview
+        ? "已追加内容，部分字段需人工确认"
+        : `已追加内容，新增 ${rels} 条关系`,
+      ...(hasWarnings ? { degraded_reason: "部分同步失败" } : {}),
+    },
+    raw: payload,
+  };
+}
+
 interface GetPagePayload {
   title?: string | null;
   body_length?: number;

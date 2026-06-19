@@ -1317,6 +1317,171 @@ describe("MCP Server", () => {
     });
   });
 
+  // ─── #195: append_page updates entity structure from appended facts ───
+
+  describe("append_page entity structure (#195)", () => {
+    function seedEntity(slug: string, fileRel: string, title: string, body = "", extraFm = ""): void {
+      const dirParts = fileRel.split("/").slice(0, -1);
+      mkdirSync(join(vaultPath, ...dirParts), { recursive: true });
+      writeFileSync(join(vaultPath, fileRel), `---\ntitle: ${title}\ntype: entity/person\n${extraFm}---\n${body}`);
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`
+      ).run(slug, title, fileRel, `h-${slug}`);
+    }
+
+    test("append reports_to frontmatter creates candidate reports_to structure (#195)", async () => {
+      seedEntity("brain/entities/shi-ti-a", "entities/shi-ti-a.md", "实体A");
+      seedEntity("brain/entities/org-c", "entities/org-c.md", "组织C");
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/shi-ti-a",
+        content: "---\nreports_to: brain/entities/org-c\n---\n后续补充说明",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.action).toBe("appended");
+      // Body persists the appended text
+      const vault = readFileSync(join(vaultPath, "entities/shi-ti-a.md"), "utf-8");
+      expect(vault).toContain("后续补充说明");
+      // reports_to graph edge created, and it is candidate/agent — NOT trusted
+      const links = db.rawDb.prepare(
+        "SELECT source_type, trust_state FROM links WHERE from_slug = ? AND relation = 'reports_to'"
+      ).all("brain/entities/shi-ti-a") as Array<{ source_type: string; trust_state: string }>;
+      expect(links.length).toBe(1);
+      expect(links[0].source_type).toBe("agent");
+      expect(links[0].trust_state).toBe("candidate");
+      // Structured return
+      expect(data.relations_added).toBeGreaterThanOrEqual(1);
+      expect(Array.isArray(data.fields_updated)).toBe(true);
+      expect(data.fields_updated).toContain("reports_to");
+    });
+
+    test("append wikilink syncs Known Relations bidirectionally and reports relations_added (#195)", async () => {
+      seedEntity("brain/entities/shi-ti-a", "entities/shi-ti-a.md", "实体A");
+      seedEntity("brain/entities/shi-ti-b", "entities/shi-ti-b.md", "实体B");
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/shi-ti-a",
+        content: "后续提到了 [[实体B]]",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.action).toBe("appended");
+      expect(data.relations_added).toBeGreaterThanOrEqual(1);
+      // Bidirectional Known Relations
+      expect(readFileSync(join(vaultPath, "entities/shi-ti-a.md"), "utf-8")).toContain("## Known Relations");
+      expect(readFileSync(join(vaultPath, "entities/shi-ti-b.md"), "utf-8")).toContain("## Known Relations");
+    });
+
+    test("append reports_to does not overwrite existing frontmatter, flags conflict (#195)", async () => {
+      seedEntity("brain/entities/shi-ti-a", "entities/shi-ti-a.md", "实体A", "", "reports_to: brain/entities/org-old\n");
+      seedEntity("brain/entities/org-old", "entities/org-old.md", "组织旧");
+      seedEntity("brain/entities/org-new", "entities/org-new.md", "组织新");
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/shi-ti-a",
+        content: "---\nreports_to: brain/entities/org-new\n---\n补充说明",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.action).toBe("appended");
+      // Existing frontmatter preserved — NOT overwritten
+      const fm = readFileSync(join(vaultPath, "entities/shi-ti-a.md"), "utf-8");
+      expect(fm).toContain("org-old");
+      expect(fm).not.toContain("org-new");
+      // Conflict flagged for human review
+      expect(data.needs_review).toBe(true);
+      expect(Array.isArray(data.warnings)).toBe(true);
+      expect(data.warnings.length).toBeGreaterThan(0);
+    });
+
+    test("append casual prose creates no garbage links (#195)", async () => {
+      seedEntity("brain/entities/shi-ti-a", "entities/shi-ti-a.md", "实体A");
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/shi-ti-a",
+        content: "今天天气不错，随便聊聊家常，这里没有任何结构化信息。",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.action).toBe("appended");
+      expect(data.relations_added).toBe(0);
+      expect(data.fields_updated).toEqual([]);
+      const row = db.rawDb.prepare("SELECT COUNT(*) AS n FROM links WHERE from_slug = ?").get("brain/entities/shi-ti-a") as { n: number };
+      expect(row.n).toBe(0);
+    });
+
+    test("append to non-existent page returns error, no fake success (#195)", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/does-not-exist",
+        content: "whatever",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBeUndefined();
+      expect(data.error).toBeDefined();
+      expect(result.isError).toBe(true);
+    });
+
+    test("append result display/summary leak no internal fields (#195)", async () => {
+      seedEntity("brain/entities/shi-ti-a", "entities/shi-ti-a.md", "实体A");
+      seedEntity("brain/entities/shi-ti-b", "entities/shi-ti-b.md", "实体B");
+      const server = createServer(deps);
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/entities/shi-ti-a",
+        content: "后续提到了 [[实体B]]",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      // Envelope must exist
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      const displayText = String(data.display ?? "");
+      const summaryMsg = String(data.summary?.message ?? "");
+      const banned = [
+        "brain/entities", "entities/", ".md",
+        "score", "vector", "trace",
+        "SELECT", "INSERT", "source_type", "trust_state",
+      ];
+      for (const term of banned) {
+        expect(displayText, `display leaked ${term}`).not.toContain(term);
+        expect(summaryMsg, `summary.message leaked ${term}`).not.toContain(term);
+      }
+    });
+
+    test("append reports_to syncs target page incoming Known Relations (#195)", async () => {
+      seedEntity("brain/entities/shi-ti-a", "entities/shi-ti-a.md", "实体A");
+      seedEntity("brain/entities/org-c", "entities/org-c.md", "组织C");
+      const server = createServer(deps);
+      await getTools(server).append_page.handler({
+        slug: "brain/entities/shi-ti-a",
+        content: "---\nreports_to: brain/entities/org-c\n---\n补充说明",
+      });
+
+      // The reports_to target (组织C) gains an incoming edge — its markdown
+      // Known Relations must be rebuilt, else DB graph and vault drift apart.
+      const targetVault = readFileSync(join(vaultPath, "entities/org-c.md"), "utf-8");
+      expect(targetVault).toContain("## Known Relations");
+      expect(targetVault).toContain("reports_to");
+      expect(targetVault).toContain("shi-ti-a");
+    });
+
+    test("append reports_to conflict does not sync the rejected target (#195)", async () => {
+      seedEntity("brain/entities/shi-ti-a", "entities/shi-ti-a.md", "实体A", "", "reports_to: brain/entities/org-old\n");
+      seedEntity("brain/entities/org-old", "entities/org-old.md", "组织旧");
+      seedEntity("brain/entities/org-new", "entities/org-new.md", "组织新");
+      const server = createServer(deps);
+      await getTools(server).append_page.handler({
+        slug: "brain/entities/shi-ti-a",
+        content: "---\nreports_to: brain/entities/org-new\n---\n补充",
+      });
+
+      // The rejected new target must NOT gain a Known Relations section.
+      const rejectedVault = readFileSync(join(vaultPath, "entities/org-new.md"), "utf-8");
+      expect(rejectedVault).not.toContain("## Known Relations");
+    });
+  });
+
   describe("delete_page tool", () => {
     test("deletes a page", async () => {
       db.rawDb.prepare(

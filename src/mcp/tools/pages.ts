@@ -6,7 +6,8 @@ import type { ToolContext } from "../context.js";
 import { canMerge, getLayer } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
-import { formatGetPageEnvelope, formatGetPagesEnvelope } from "./format-result.js";
+import { formatGetPageEnvelope, formatGetPagesEnvelope, formatAppendEnvelope } from "./format-result.js";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
 
 function syncWikilinkRelations(ctx: ToolContext, slug: string, affectedSlugs: Set<string>): void {
   for (const s of new Set([slug, ...affectedSlugs])) {
@@ -188,16 +189,46 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
   }, async ({ slug, content, separator }) => {
     const page = ctx.pages.getBySlug(slug);
     if (!page) {
-      return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }] };
+      return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }], isError: true };
     }
     ctx.versions.createVersion(slug);
-    const updated = ctx.pages.patch(slug, { body_append: content, separator: separator ?? "\n\n" });
+
+    // ── #195: parse deterministic frontmatter from appended content ──
+    // An agent may prepend a narrow YAML block (e.g. reports_to) to convey safe
+    // deterministic structure. Only whitelisted fields are honored; existing
+    // frontmatter is never overwritten — conflicts become warnings + needs_review.
+    // Body uses the frontmatter-stripped remainder; content without a YAML block
+    // is appended whole (back-compat with plain-text appends).
+    const APPEND_SAFE_FIELDS = ["reports_to", "reports_to_type"] as const;
+    const { frontmatter: appendedFm, body: appendedBody } = parseFrontmatter(content);
+    const fieldsUpdated: string[] = [];
+    const fieldsConflicted: string[] = [];
+    const extraToMerge: Record<string, unknown> = {};
+    for (const field of APPEND_SAFE_FIELDS) {
+      const val = (appendedFm as Record<string, unknown>)[field];
+      if (val == null) continue;
+      const existing = (page.frontmatter as Record<string, unknown>)[field];
+      if (existing != null && existing !== val) {
+        fieldsConflicted.push(field);
+      } else {
+        extraToMerge[field] = val;
+        fieldsUpdated.push(field);
+      }
+    }
+    const needsReview = fieldsConflicted.length > 0;
+
+    const updated = ctx.pages.patch(slug, {
+      body_append: appendedBody,
+      separator: separator ?? "\n\n",
+      ...(Object.keys(extraToMerge).length > 0 ? { extra: extraToMerge } : {}),
+    });
     if (!updated) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "Append failed" }) }], isError: true };
     }
 
     // Track degradation signals
     const warnings: string[] = [];
+    for (const f of fieldsConflicted) warnings.push(`field_conflict:${f}`);
     const finalBody = updated.body;
 
     // 1. Index — returns structured result
@@ -206,11 +237,13 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       warnings.push("index_sync_failed");
     }
 
-    // 2. Wikilinks — track failure
+    // 2. Wikilinks — track failure + count edges added
     const pageType = updated.type;
     let affectedSlugs = new Set<string>();
+    let wikiCount = 0;
     try {
       const wlResult = ctx.pipeline.processWikilinks(slug, finalBody);
+      wikiCount = wlResult.count;
       affectedSlugs = wlResult.mentionedSlugs;
       if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
         ctx.pipeline.processNer(slug, finalBody, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
@@ -218,6 +251,33 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     } catch {
       warnings.push("wikilink_sync_failed");
     }
+
+    // 2b. #195: deterministic hierarchy sync — reports_to becomes a candidate/
+    // agent edge (processReportsTo uses source_type="agent" → trust_state=
+    // "candidate"). Mirrors put_page; entity/* only, never auto-trusted.
+    let reportsToAdded = 0;
+    if (pageType.startsWith("entity/")) {
+      try {
+        const before = ctx.db.getOutgoingLinks(slug).filter((l: { relation: string }) => l.relation === "reports_to").length;
+        ctx.pipeline.processReportsTo(slug, updated.frontmatter);
+        const after = ctx.db.getOutgoingLinks(slug).filter((l: { relation: string }) => l.relation === "reports_to").length;
+        reportsToAdded = Math.max(0, after - before);
+        // The reports_to target gains an incoming edge — it must run through
+        // syncAffectedSlugs so its markdown Known Relations stays consistent with
+        // the DB graph. Uses the EFFECTIVE frontmatter value (post-merge), so a
+        // rejected conflict target is never synced. Only when an edge was actually
+        // written (processReportsTo no-ops when the target page is missing).
+        if (reportsToAdded > 0) {
+          const effectiveTarget = (updated.frontmatter as Record<string, unknown>).reports_to;
+          if (typeof effectiveTarget === "string" && effectiveTarget.trim()) {
+            affectedSlugs.add(effectiveTarget.trim());
+          }
+        }
+      } catch {
+        warnings.push("hierarchy_sync_failed");
+      }
+    }
+    const relationsAdded = wikiCount + reportsToAdded;
 
     // 3. KR sync — uses structured syncAffectedSlugs to capture per-slug errors
     const allAffected = new Set([slug, ...affectedSlugs]);
@@ -238,13 +298,23 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       };
     }
 
+    // 5. #195: envelope-friendly structured result. Legacy fields (action/slug/
+    // new_length/warnings/needs_sync) stay at top level for back-compat; new
+    // safe summary fields (relations_added/fields_updated/needs_review) are
+    // surfaced alongside. display/summary never expose slugs or trust internals.
+    const payload = {
+      action: "appended" as const,
+      slug,
+      title: finalPage.title,
+      new_length: finalPage.body.length,
+      relations_added: relationsAdded,
+      fields_updated: fieldsUpdated,
+      ...(needsReview ? { needs_review: true } : {}),
+      ...(warnings.length > 0 ? { warnings, needs_sync: true } : {}),
+    };
+    const { display, summary, raw } = formatAppendEnvelope(payload);
     return {
-      content: [{ type: "text", text: JSON.stringify({
-        action: "appended",
-        slug,
-        new_length: finalPage.body.length,
-        ...(warnings.length > 0 ? { warnings, needs_sync: true } : {}),
-      }) }],
+      content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...payload }, null, 2) }],
     };
   });
 
