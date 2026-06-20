@@ -50,6 +50,16 @@ bun run gate:v2-preflight
 - `no-go`: stop at `failed_stage`, inspect `stdout_tail` and `stderr_tail`, fix
   that underlying gate, then rerun `bun run gate:v2-preflight`.
 
+## Manual RC checklist (after preflight is green)
+
+A green `gate:v2-preflight` is necessary but not sufficient. The offline gates
+cannot drive a real Hermes conversation, measure latency on real search
+traffic, or validate a version-pinned install — those stay human /
+environment responsibilities. The release manager must complete the items in
+[`v2-rc-release-checklist.md`](./v2-rc-release-checklist.md) (real Hermes
+dialogue observation, real performance p95 sampling, version-pinned install
+smoke) before cutting the RC tag.
+
 ## Non-goals
 
 - No new recall, NER, ontology, search, or write behavior.
