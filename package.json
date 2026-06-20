@@ -30,6 +30,7 @@
     "gate:rc": "bun bin/check-v2-rc-gate.ts",
     "gate:perf": "bun bin/check-v2-rc-gate.ts --perf",
     "gate:hermes": "bun bin/check-v2-hermes-gate.ts",
+    "gate:v2-preflight": "bun bin/check-v2-preflight.ts",
     "check:docs": "bun bin/check-docs-consistency.ts"
   },
   "dependencies": {
