@@ -116,7 +116,7 @@ async function runContentRecall(
   const payload = {
     query,
     entities,
-    summary: entities.length > 0 ? `找到 ${entities.length} 个相关实体` : "未找到相关实体",
+    summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
   return withRouting(formatted, payload, routing);

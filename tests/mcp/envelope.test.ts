@@ -28,7 +28,7 @@ import type { OrgTreeResult } from "../../src/core/hierarchy.js";
 // ─── Shared ────────────────────────────────────────────────────
 
 // Test-only extras (structural internals not expected in display text)
-const TEST_ONLY_BANNED = ["slug", "chunk", "source", "tier", "fts", "diagnostics"];
+const TEST_ONLY_BANNED = ["slug", "chunk", "source", "tier", "fts", "diagnostics", "节点", "lancedb", "candidate"];
 const BANNED_INTERNAL = [...DISPLAY_BANNED_TERMS, ...TEST_ONLY_BANNED];
 
 function assertNoInternalTerms(text: string): void {
@@ -91,7 +91,7 @@ describe("formatRecallEnvelope", () => {
       search_meta: { degraded: false },
     };
     const result = formatRecallEnvelope(payload);
-    expect(result.display).toContain("2 个相关实体");
+    expect(result.display).toContain("2 条相关记忆");
     expect(result.display).toContain("人物A");
     assertNoInternalTerms(result.display);
     assertValidSummary(result.summary);
@@ -109,7 +109,7 @@ describe("formatRecallEnvelope", () => {
       search_meta: { degraded: true },
     };
     const result = formatRecallEnvelope(payload);
-    expect(result.display).toContain("耗时较长");
+    expect(result.display).toContain("先返回");
     assertNoInternalTerms(result.display);
     assertValidSummary(result.summary);
     assertHasRaw(result, payload);
@@ -128,7 +128,7 @@ describe("formatGroundedRecallEnvelope", () => {
       search_meta: { latency_ms: 100 },
     };
     const result = formatGroundedRecallEnvelope(payload);
-    expect(result.display).toContain("已查找");
+    expect(result.display).toContain("关于");
     assertNoInternalTerms(result.display);
     assertValidSummary(result.summary);
     assertHasRaw(result, payload);
@@ -147,8 +147,8 @@ describe("formatGroundedRecallEnvelope", () => {
       search_meta: { latency_ms: 200 },
     };
     const result = formatGroundedRecallEnvelope(payload);
-    expect(result.display).toContain("确认 2 条事实");
-    expect(result.display).toContain("1 个待确认候选");
+    expect(result.display).toContain("2 条依据");
+    expect(result.display).toContain("1 条线索");
     assertNoInternalTerms(result.display);
     assertValidSummary(result.summary);
     assertHasRaw(result, payload);
@@ -169,7 +169,7 @@ describe("formatGroundedRecallEnvelope", () => {
       search_meta: {},
     };
     const result = formatGroundedRecallEnvelope(payload);
-    expect(result.display).toContain("1 处矛盾");
+    expect(result.display).toContain("说法不一致");
     assertValidSummary(result.summary);
     assertHasRaw(result, payload);
     // KEY: conflict-only must be "ok", not "empty"
@@ -189,7 +189,7 @@ describe("formatGroundedRecallEnvelope", () => {
       search_meta: {},
     };
     const result = formatGroundedRecallEnvelope(payload);
-    expect(result.display).toContain("1 个信息缺口");
+    expect(result.display).toContain("还缺信息");
     assertValidSummary(result.summary);
     assertHasRaw(result, payload);
     // KEY: gap-only must be "ok", not "empty"
@@ -209,8 +209,8 @@ describe("formatGroundedRecallEnvelope", () => {
       search_meta: {},
     };
     const result = formatGroundedRecallEnvelope(payload);
-    expect(result.display).toContain("1 处矛盾");
-    expect(result.display).toContain("1 个信息缺口");
+    expect(result.display).toContain("说法不一致");
+    expect(result.display).toContain("还缺信息");
     assertValidSummary(result.summary);
     assertHasRaw(result, payload);
     expect(result.summary.status).toBe("ok");
@@ -247,7 +247,7 @@ describe("formatQueryEnvelope", () => {
   test("normal results", () => {
     const payload = { results: [{ snippet: "a" }, { snippet: "b" }] };
     const result = formatQueryEnvelope(payload);
-    expect(result.display).toContain("2 条结果");
+    expect(result.display).toContain("2 条相关内容");
     assertNoInternalTerms(result.display);
     assertValidSummary(result.summary);
     assertHasRaw(result, payload);
@@ -295,7 +295,7 @@ describe("formatGetPageEnvelope", () => {
   test("truncated page", () => {
     const payload = { title: "长页面", body_length: 5000, has_more: true };
     const result = formatGetPageEnvelope(payload);
-    expect(result.display).toContain("截断");
+    expect(result.display).toContain("前面一部分");
     assertValidSummary(result.summary);
     assertHasRaw(result, payload);
     expect(result.summary.truncated).toBe(true);
@@ -366,7 +366,7 @@ describe("formatEpisodeEnvelope", () => {
       diagnostics: stubDiag,
     };
     const result = formatEpisodeEnvelope(result_obj);
-    expect(result.display).toContain("1 个候选人");
+    expect(result.display).toContain("匹配到 1 位");
     assertNoInternalTerms(result.display);
     assertValidSummary(result.summary);
     assertHasRaw(result, result_obj);

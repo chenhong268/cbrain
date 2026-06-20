@@ -49,6 +49,8 @@ const BANNED_TERMS = [
   '{"', '"}',
   // Wiki links
   "[[",
+  // Internal jargon banned from user-facing display (#206)
+  "节点", "Tier", "candidate", "raw",
 ];
 
 const MAX_DISPLAY_CHARS = 500;
@@ -109,7 +111,7 @@ describe("G1: wakeup_diff baseline", () => {
     const result = makeWakeupResult({ baselineCreated: true });
     const envelope = formatWakeupEnvelope(result);
     assertEnvelopeShape(envelope, "wakeup_diff baseline");
-    expect(envelope.display).toContain("基线快照");
+    expect(envelope.display).toContain("对照起点");
     expect(envelope.display).toContain("100 个记忆页");
     assertNoBannedTerms(envelope.display, "wakeup_diff baseline");
     assertCompact(envelope.display, "wakeup_diff baseline");
@@ -152,7 +154,7 @@ describe("G1: wakeup_diff subsequent changes", () => {
     });
     const envelope = formatWakeupEnvelope(result);
     assertEnvelopeShape(envelope, "wakeup_diff tier");
-    expect(envelope.display).toContain("Tier 变化");
+    expect(envelope.display).toContain("重要度变化");
     expect(envelope.display).toContain("人物A");
     expect(envelope.display).toContain("升级");
     assertNoBannedTerms(envelope.display, "wakeup_diff tier");
@@ -170,7 +172,7 @@ describe("G1: wakeup_diff subsequent changes", () => {
     });
     const envelope = formatWakeupEnvelope(result);
     assertEnvelopeShape(envelope, "wakeup_diff new");
-    expect(envelope.display).toContain("新增记忆项");
+    expect(envelope.display).toContain("新记住的");
     expect(envelope.display).toContain("新概念A");
     assertNoBannedTerms(envelope.display, "wakeup_diff new");
     expect(envelope.summary.count).toBe(1);
@@ -290,7 +292,7 @@ describe("G2: graph_query envelope", () => {
     }, noTitle);
     assertEnvelopeShape(result, "graph_query");
     assertNoBannedTerms(result.display, "graph_query");
-    expect(result.display).toContain("未知实体");
+    expect(result.display).toContain("未命名");
     expect(result.display).not.toContain("entities/ghost");
   });
 });

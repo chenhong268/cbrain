@@ -116,7 +116,7 @@ export function formatDigestCard(
       return {
         id: r.id,
         title: `需要补全：${resolveTitle(slug, entityLookup)}`,
-        why_it_matters: "被频繁提及但缺少详细描述和关联。",
+        why_it_matters: "它被多次提到，但还没有详细描述，也和其他内容缺少关联。",
         evidence: `被提及 ${mentionCount ?? "?"} 次，仅有 ${linkCount ?? 0} 条关联`,
         suggested_action: "为该实体添加更详细的描述，建立与其他实体的关联。",
       };
@@ -136,7 +136,7 @@ export function formatDigestCard(
       return {
         id: r.id,
         title: `待确认发现：${titles}`,
-        why_it_matters: "检测到新的结构发现，需要进一步确认。",
+        why_it_matters: "发现了一些新的线索，需要进一步确认。",
         evidence: "自动检测产生",
         suggested_action: r.suggestion ?? "查看详情。",
       };

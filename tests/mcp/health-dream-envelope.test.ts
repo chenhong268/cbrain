@@ -11,6 +11,8 @@ const BANNED_IN_DISPLAY = [
   "SQL", "stack", "trace",
   "syncLinksToMarkdown", "setHierarchy", "filePath",
   "[[", ".md", ".log",
+  // Internal jargon banned from user-facing display (#206)
+  "节点", "candidate", "高优先级",
 ];
 
 function makeHealthReport(overrides: Partial<HealthReport> = {}): HealthReport {
@@ -75,7 +77,7 @@ describe("formatHealthEnvelope", () => {
     expect(result.display).toContain("孤立实体：人物A");
     expect(result.display).toContain("还有 1 个问题");
     // High severity triggers user action warning
-    expect(result.display).toContain("高优先级");
+    expect(result.display).toContain("紧急");
   });
 
   test("display has no banned fields even with issues", () => {

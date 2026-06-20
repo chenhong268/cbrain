@@ -167,7 +167,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
           }],
         };
       }
-      const emptyPayload = { query, entities: [], summary: "未找到相关实体", search_meta: diagnosticMeta };
+      const emptyPayload = { query, entities: [], summary: "暂时没找到相关记忆", search_meta: diagnosticMeta };
       const { display: emptyDisplay, summary: emptySummary, raw: emptyRaw } = formatRecallEnvelope(emptyPayload);
       const { summary: emptyLegacySummary, search_meta: _em, ...emptyRest } = emptyPayload;
       return {
@@ -412,10 +412,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         const budgeted = applyProactiveBudget(proactiveHints.map(trimHint), { grounded: false, toolType: "recall" });
         return budgeted.length > 0 ? budgeted : undefined;
       })(),
-      summary: `找到 ${entities.length} 个实体（${lowQuality} 个低质量），${totalLinks} 个链接，${totalTimeline} 个时间线事件` +
-        (expiredCount > 0 ? `，${expiredCount} 个已过期` : "") +
+      summary: `有 ${entities.length} 条相关记忆${lowQuality > 0 ? `（其中 ${lowQuality} 条信息较少）` : ""}，${totalLinks} 条关系，${totalTimeline} 条时间线` +
+        (expiredCount > 0 ? `，${expiredCount} 条已过期` : "") +
         (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +
-        (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 个关联更新` : ""),
+        (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 条关联更新` : ""),
     };
 
     const { display, summary: envelopeSummary, raw } = formatRecallEnvelope(payload);

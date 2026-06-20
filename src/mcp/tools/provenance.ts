@@ -40,13 +40,13 @@ export function registerProvenanceTools(server: McpServer, ctx: ToolContext): vo
       }
 
       if (!item) {
-        return { content: [{ type: "text" as const, text: `未找到 ${target_type}#${target_id}` }] };
+        return { content: [{ type: "text" as const, text: `没找到这条${target_type === "link" ? "关系" : "事件"}` }] };
       }
 
       const history = provenance.getCorrectionHistory(target_type, target_id);
 
       const lines = [
-        `## 溯源信息 (${target_type}#${target_id})`,
+        `## 溯源信息`,
         "",
         `**来源类型**: ${item.provenance.source_type}`,
         `**来源分类**: ${item.provenance.source_category}`,
@@ -88,10 +88,10 @@ export function registerProvenanceTools(server: McpServer, ctx: ToolContext): vo
       );
 
       if (!ok) {
-        return { content: [{ type: "text" as const, text: `未找到 ${target_type}#${target_id}` }] };
+        return { content: [{ type: "text" as const, text: `没找到这条${target_type === "link" ? "关系" : "事件"}` }] };
       }
 
-      return { content: [{ type: "text" as const, text: `${target_type}#${target_id} 信任状态已更新为 ${new_state}` }] };
+      return { content: [{ type: "text" as const, text: `这条${target_type === "link" ? "关系" : "事件"}的信任状态已更新为 ${new_state}` }] };
     },
   );
 
@@ -125,10 +125,10 @@ export function registerProvenanceTools(server: McpServer, ctx: ToolContext): vo
       );
 
       if (!ok) {
-        return { content: [{ type: "text" as const, text: `未找到 ${target_type}#${target_id}` }] };
+        return { content: [{ type: "text" as const, text: `没找到这条${target_type === "link" ? "关系" : "事件"}` }] };
       }
 
-      return { content: [{ type: "text" as const, text: `${target_type}#${target_id} 已确认为 ${new_state}（确认来源: ${confirmation_record_slug}）` }] };
+      return { content: [{ type: "text" as const, text: `已确认为 ${new_state}（依据来自你指定的记录页）` }] };
     },
   );
 }

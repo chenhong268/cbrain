@@ -214,7 +214,7 @@ describe("graph_query envelope", () => {
     const server = createServer(deps);
     const result = await callTool(server, "get_links", { slug: "entities/a" });
 
-    expect(result.display).toContain("未知实体");
+    expect(result.display).toContain("未命名");
     expect(result.display).not.toContain("entities/");
   });
 });

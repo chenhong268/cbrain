@@ -38,7 +38,7 @@ const SLUG_PATH_RE = /brain\/(?:entities|concepts|insights|records)\//g;
 export const DISPLAY_BANNED_TERMS = [
   "score", "distance", "debug", "trace", "threshold",
   "latency_ms", "vector", "degraded_reason", "_stub",
-  "reason_codes",
+  "reason_codes", "candidate", "raw", "fts", "lancedb",
 ];
 
 /**
@@ -208,12 +208,12 @@ export function formatRecallEnvelope(payload: RecallPayload): {
 
   if (count === 0) {
     return {
-      display: `未找到与「${payload.query}」相关的实体。`,
+      display: `暂时没找到和「${payload.query}」相关的记忆。`,
       summary: {
         status: "empty",
         count: 0,
         truncated: false,
-        message: "未找到相关实体",
+        message: "暂时没找到相关记忆",
         next_steps: ["尝试换个关键词", "用 deep_recall 换一种搜索策略"],
       },
       raw: payload,
@@ -229,8 +229,8 @@ export function formatRecallEnvelope(payload: RecallPayload): {
   const es = payload.evidence_summary;
 
   const display = isDegraded
-    ? sanitizeDisplay(`搜索耗时较长，返回了部分结果。找到 ${count} 个相关实体。`)
-    : sanitizeDisplay(`找到 ${count} 个相关实体。${topNames ? `最相关的是${topNames}。` : ""}`);
+    ? sanitizeDisplay(`搜索花的时间长了些，先返回了 ${count} 条结果${topNames ? `，最接近的是${topNames}。` : "。"}`)
+    : sanitizeDisplay(`CBrain 里有 ${count} 条相关记忆${topNames ? `，最接近的是${topNames}。` : "。"}`);
 
   return {
     display,
@@ -238,7 +238,7 @@ export function formatRecallEnvelope(payload: RecallPayload): {
       status: isDegraded ? "degraded" : "ok",
       count,
       truncated: entities.some(e => e._stub),
-      message: payload.summary ?? `找到 ${count} 个相关实体`,
+      message: payload.summary ?? `有 ${count} 条相关记忆`,
       degraded_reason: isDegraded ? "搜索超时，降级到部分结果" : undefined,
       evidence_count: es?.total_evidence,
       confidence: es?.confidence,
@@ -266,13 +266,18 @@ export function formatGroundedRecallEnvelope(payload: GroundedRecallPayload): {
   const conflicts = ga.conflicts?.length ?? 0;
   const isDegraded = payload.search_meta?.degraded === true;
 
-  const parts: string[] = [`已查找关于「${payload.query}」的证据。`];
-  if (facts > 0) parts.push(`确认 ${facts} 条事实。`);
-  if (candidates > 0) parts.push(`${candidates} 个待确认候选。`);
-  if (conflicts > 0) parts.push(`${conflicts} 处矛盾。`);
-  if (gaps > 0) parts.push(`${gaps} 个信息缺口。`);
-
   const signalCount = facts + candidates + conflicts + gaps;
+
+  const parts: string[] = [];
+  if (signalCount === 0) {
+    parts.push(`关于「${payload.query}」，暂时还没找到明确的依据。`);
+  } else {
+    parts.push(`关于「${payload.query}」，`);
+    if (facts > 0) parts.push(`有 ${facts} 条依据支持。`);
+    if (candidates > 0) parts.push(`还有 ${candidates} 条线索需要确认。`);
+    if (conflicts > 0) parts.push(`其中 ${conflicts} 处说法不一致。`);
+    if (gaps > 0) parts.push(`另有 ${gaps} 处还缺信息。`);
+  }
   const display = sanitizeDisplay(parts.join(""));
 
   return {
@@ -281,7 +286,7 @@ export function formatGroundedRecallEnvelope(payload: GroundedRecallPayload): {
       status: isDegraded ? "degraded" : (signalCount > 0 ? "ok" : "empty"),
       count: signalCount,
       truncated: false,
-      message: `证据核查：${facts} 条事实，${candidates} 个候选，${conflicts} 处矛盾，${gaps} 个缺口`,
+      message: `${facts} 条依据、${candidates} 处待确认、${conflicts} 处不一致、${gaps} 处待补充`,
       degraded_reason: isDegraded ? "搜索超时" : undefined,
     },
     raw: payload,
@@ -305,12 +310,12 @@ export function formatQueryEnvelope(payload: QueryPayload): {
 
   if (count === 0) {
     return {
-      display: "搜索未返回结果。",
+      display: "没有找到相关内容。",
       summary: {
         status: "empty",
         count: 0,
         truncated: false,
-        message: "搜索未返回结果",
+        message: "没有找到相关内容",
         next_steps: ["尝试换关键词", "用 deep_recall 代替 query"],
       },
       raw: payload,
@@ -319,18 +324,23 @@ export function formatQueryEnvelope(payload: QueryPayload): {
 
   if (payload.degraded) {
     // Vector-specific messages only when vector_skipped is set
-    const reason = payload.vector_skipped === "timeout"
-      ? "向量搜索超时"
+    const reasonLabel = payload.vector_skipped === "timeout"
+      ? "搜索超时了"
       : payload.vector_skipped === "error"
-        ? "向量搜索异常"
+        ? "搜索出错了"
+        : "搜索未达最佳效果";
+    const reason = payload.vector_skipped === "timeout"
+      ? "搜索超时"
+      : payload.vector_skipped === "error"
+        ? "搜索出错"
         : "搜索未达最佳效果";
     return {
-      display: sanitizeDisplay(`搜索遇到问题（${reason}），返回了 ${count} 条结果。`),
+      display: sanitizeDisplay(`${reasonLabel}，先返回了 ${count} 条相关内容。`),
       summary: {
         status: "degraded",
         count,
         truncated: false,
-        message: `搜索降级，返回 ${count} 条结果`,
+        message: `搜索降级，先返回 ${count} 条结果`,
         degraded_reason: reason,
       },
       raw: payload,
@@ -338,12 +348,12 @@ export function formatQueryEnvelope(payload: QueryPayload): {
   }
 
   return {
-    display: sanitizeDisplay(`搜索完成，返回 ${count} 条结果。`),
+    display: sanitizeDisplay(`找到 ${count} 条相关内容。`),
     summary: {
       status: "ok",
       count,
       truncated: false,
-      message: `搜索完成，返回 ${count} 条结果`,
+      message: `找到 ${count} 条结果`,
     },
     raw: payload,
   };
@@ -424,15 +434,15 @@ export function formatGetPageEnvelope(payload: GetPagePayload): {
   const title = payload.title ?? "未知页面";
   const length = payload.body_length ?? 0;
   const truncated = payload.has_more === true;
-  const statusLabel = truncated ? "（内容已截断）" : "（完整内容）";
+  const lengthNote = truncated ? "只显示了前面一部分" : "内容完整";
 
   return {
-    display: sanitizeDisplay(`页面「${title}」，${length} 字${statusLabel}。`),
+    display: sanitizeDisplay(`《${title}》，${length} 字，${lengthNote}。`),
     summary: {
       status: "ok",
       count: 1,
       truncated,
-      message: `页面「${title}」，${length} 字`,
+      message: `《${title}》，${length} 字`,
     },
     raw: payload,
   };
@@ -480,7 +490,7 @@ export function formatSummarizeEnvelope(payload: SummarizePayload): {
   const isDegraded = payload.search_meta?.degraded === true;
 
   const display = sanitizeDisplay(
-    `主题「${payload.topic}」：${count} 个实体，${links} 个链接，${events} 个时间线事件。`,
+    `围绕「${payload.topic}」攒了一组材料：${count} 个人物或概念、${links} 条关系、${events} 条时间线。`,
   );
 
   return {
@@ -489,7 +499,7 @@ export function formatSummarizeEnvelope(payload: SummarizePayload): {
       status: isDegraded ? "degraded" : "ok",
       count,
       truncated: (stats?.stubEntities ?? 0) > 0,
-      message: payload.summary ?? `主题「${payload.topic}」：${count} 个实体`,
+      message: payload.summary ?? `围绕「${payload.topic}」有 ${count} 条记忆`,
       degraded_reason: isDegraded ? "搜索超时" : undefined,
     },
     raw: payload,
@@ -523,7 +533,7 @@ export function formatEpisodeEnvelope(result: EpisodicRecallResult): {
     .join("、");
 
   return {
-    display: sanitizeDisplay(`根据线索找到 ${count} 个候选人：${names}。`),
+    display: sanitizeDisplay(`根据线索，匹配到 ${count} 位：${names}。`),
     summary: {
       status: "ok",
       count,
@@ -546,13 +556,13 @@ export function formatOrgTreeEnvelope(result: OrgTreeResult): {
 
   return {
     display: sanitizeDisplay(
-      `${title} 的组织架构：向上 ${upCount} 级，向下 ${downCount} 人，共 ${total} 个节点。`,
+      `找到 ${title} 的上下级脉络：上级链 ${upCount} 层，下属 ${downCount} 人。`,
     ),
     summary: {
       status: "ok",
       count: total,
       truncated: false,
-      message: `${title} 的组织架构：${total} 个节点`,
+      message: `${title} 的组织架构，共 ${total} 人`,
     },
     raw: result,
   };
@@ -627,7 +637,7 @@ export function formatGetPagesEnvelope(payload: GetPagesPayload): {
         count: 0,
         truncated: false,
         message: `所有 ${total} 个页面均不存在`,
-        next_steps: ["检查 slug 是否正确", "用 query 搜索正确 slug"],
+        next_steps: ["检查名称是否正确", "用 query 搜索正确名称"],
       },
       raw: payload,
     };
@@ -641,7 +651,7 @@ export function formatGetPagesEnvelope(payload: GetPagesPayload): {
         count: found,
         truncated: false,
         message: `找到 ${found} 个页面，${missing} 个不存在`,
-        degraded_reason: "部分 slug 不存在",
+        degraded_reason: "部分页面不存在",
       },
       raw: payload,
     };
@@ -693,8 +703,8 @@ export function formatGraphEnvelope(
   if (isLinks) {
     const links = items as Link[];
     for (const link of links.slice(0, 8)) {
-      const fromTitle = titleResolver(link.from_slug) ?? "未知实体";
-      const toTitle = titleResolver(link.to_slug) ?? "未知实体";
+      const fromTitle = titleResolver(link.from_slug) ?? "（未命名）";
+      const toTitle = titleResolver(link.to_slug) ?? "（未命名）";
       const rel = link.relation || "关联";
       const ctx = link.context ? `（${link.context}）` : "";
       const trustLabel = link.trust_state === "confirmed" ? "" : "待确认：";
@@ -706,12 +716,12 @@ export function formatGraphEnvelope(
   } else {
     const nodes = items as GraphNode[];
     for (const node of nodes.slice(0, 8)) {
-      const nodeTitle = node.title || "未知实体";
-      const depthNote = node.depth > 1 ? `（${node.depth} 跳）` : "";
+      const nodeTitle = node.title || "（未命名）";
+      const depthNote = node.depth > 1 ? `（隔 ${node.depth} 层）` : "";
       lines.push(`${nodeTitle}${depthNote}`);
     }
     if (nodes.length > 8) {
-      lines.push(`...还有 ${nodes.length - 8} 个相关实体`);
+      lines.push(`...还有 ${nodes.length - 8} 条相关内容`);
     }
   }
 
@@ -752,7 +762,7 @@ export function formatLinksEnvelope(
   const lines: string[] = [];
   for (const link of links.slice(0, 10)) {
     const otherSlug = link.from_slug === seedSlug ? link.to_slug : link.from_slug;
-    const otherTitle = titleResolver(otherSlug) ?? "未知实体";
+    const otherTitle = titleResolver(otherSlug) ?? "（未命名）";
     const rel = link.relation || "关联";
     const direction = link.from_slug === seedSlug ? "→" : "←";
     const trustLabel = link.trust_state === "confirmed" ? "已知" : "待确认";
@@ -913,7 +923,7 @@ export function formatHealthEnvelope(
   // User action needed?
   const highIssues = allIssues.filter(i => i.severity === "high");
   if (highIssues.length > 0) {
-    lines.push("", `⚠️ 需要关注：${highIssues.length} 个高优先级问题`);
+    lines.push("", `⚠️ 这 ${highIssues.length} 个比较紧急，建议优先处理`);
   }
 
   return {

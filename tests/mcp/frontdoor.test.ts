@@ -119,7 +119,7 @@ describe("cbrain_recall front-door tool (#199)", () => {
     expect(data.raw.routing.chosen_route).toBe("hierarchy");
     expect(data.raw.routing.next_tool).toBe("get_org_tree");
     expect(data.summary.status).toBe("ok");
-    expect(data.display).toContain("组织架构");
+    expect(data.display).toContain("上下级");
     expect(data.display).not.toContain("entities/");
   });
 

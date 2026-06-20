@@ -25,7 +25,7 @@ export function formatWakeupEnvelope(
   if (result.baselineCreated) {
     return {
       display,
-      summary: { status: "ok", count: 0, truncated: false, message: "基线已建立" },
+      summary: { status: "ok", count: 0, truncated: false, message: "已建立对照起点" },
       raw: result,
     };
   }
@@ -59,10 +59,10 @@ export function formatWakeupEnvelope(
 }
 
 export function buildDisplayText(result: Awaited<ReturnType<WakeupDiff["run"]>>): string {
-  const lines: string[] = [`📋 CBrain Wake-up Diff · ${result.date}`, ""];
+  const lines: string[] = [`📋 CBrain 认知变化摘要 · ${result.date}`, ""];
 
   if (result.baselineCreated) {
-    lines.push("已建立基线快照，暂无变化摘要。");
+    lines.push("已记下当前状态作为对照起点，暂时还没有变化。");
     lines.push(`当前状态：${result.stats.totalPages} 个记忆页，${result.stats.totalLinks} 条关系。`);
     return lines.join("\n");
   }
@@ -82,7 +82,7 @@ export function buildDisplayText(result: Awaited<ReturnType<WakeupDiff["run"]>>)
 
   if (result.changes.tierChanged.length > 0) {
     lines.push("");
-    lines.push("🏷️ Tier 变化：");
+    lines.push("🏷️ 重要度变化：");
     for (const t of result.changes.tierChanged.slice(0, 5)) {
       const dir = t.newTier < t.oldTier ? "↑ 升级" : "↓ 降级";
       lines.push(`  - ${t.title}：${t.oldTier} → ${t.newTier}（${dir}）`);
@@ -99,7 +99,7 @@ export function buildDisplayText(result: Awaited<ReturnType<WakeupDiff["run"]>>)
 
   if (result.newItems.length > 0) {
     lines.push("");
-    lines.push("🆕 新增记忆项：");
+    lines.push("🆕 新记住的：");
     for (const n of result.newItems.slice(0, 5)) {
       lines.push(`  - ${n.title}（${n.type}）`);
     }

@@ -813,7 +813,7 @@ async function runJ3Grounded(jc: JourneyContext): Promise<JourneyResult> {
   const hasGrounded = parsed?.grounded_answer !== undefined || parsed?.raw?.grounded_answer !== undefined;
   const assertions: AssertionResult[] = [
     { check: "grounded answer present", passed: hasGrounded, actual: hasGrounded ? "present" : "missing", expected: "evidence board" },
-    { check: "display is evidence-shaped", passed: /证据|查找|事实|确认/.test(display), actual: display.slice(0, 40), expected: "evidence language in display" },
+    { check: "display is evidence-shaped", passed: /证据|查找|事实|确认|依据/.test(display), actual: display.slice(0, 40), expected: "evidence language in display" },
     assertRawPresent(parsed),
     assertDisplayCompact(display),
     ...scanDisplay(display),
@@ -936,7 +936,7 @@ async function runJ7Degraded(jc: JourneyContext, lance: MockLance): Promise<Jour
     { check: "not flagged as error", passed: !isError, actual: isError ? "isError" : "ok", expected: "graceful, not an error" },
     { check: "FTS fallback kept a useful result", passed: entities.length >= 1, actual: `${entities.length} entities`, expected: ">= 1 entity from FTS fallback" },
     { check: "search_meta.degraded set", passed: searchMeta?.degraded === true, actual: String(searchMeta?.degraded ?? "missing"), expected: "raw.search_meta.degraded = true" },
-    { check: "display uses degraded-safe wording", passed: /返回了部分结果|搜索耗时较长/.test(display), actual: display.slice(0, 40), expected: "user-safe degraded wording" },
+    { check: "display uses degraded-safe wording", passed: /先返回了|搜索花的时间长了些/.test(display), actual: display.slice(0, 40), expected: "user-safe degraded wording" },
     assertRawPresent(parsed),
     assertDisplayCompact(display),
     ...scanDisplay(display),
@@ -963,7 +963,7 @@ async function runJ8Empty(jc: JourneyContext): Promise<JourneyResult> {
   const assertions: AssertionResult[] = [
     { check: "empty status reported", passed: summary?.status === "empty", actual: String(summary?.status ?? "missing"), expected: "summary.status = empty" },
     { check: "not flagged as error", passed: !isError, actual: isError ? "isError" : "ok", expected: "graceful, not an error" },
-    { check: "display uses graceful empty wording", passed: /未找到/.test(display), actual: display.slice(0, 40), expected: "graceful empty wording" },
+    { check: "display uses graceful empty wording", passed: /没找到/.test(display), actual: display.slice(0, 40), expected: "graceful empty wording" },
     assertRawPresent(parsed),
     assertDisplayCompact(display),
     ...scanDisplay(display),

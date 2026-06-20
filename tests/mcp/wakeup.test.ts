@@ -90,7 +90,7 @@ describe("MCP wakeup_diff tool", () => {
     expect(data.summary).toBeDefined();
     expect(data.raw).toBeDefined();
     // Display content
-    expect(data.display).toContain("已建立基线");
+    expect(data.display).toContain("对照起点");
     expect(data.display).toContain("1 个记忆页");
     // Summary
     expect(data.summary.status).toBe("ok");

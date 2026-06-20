@@ -617,6 +617,83 @@ describe("C10: degraded reason codes display safety", () => {
   });
 });
 
+// ─── #206: display 通俗化，禁内部术语/机械状态报告 ────────────
+
+describe("#206: 高频 formatter display 不含内部术语", () => {
+  // 这些词不该出现在用户可见的 display / summary.message 里
+  const JARGON = ["节点", "Tier", "candidate", "候选", "缺口", "score", "vector", "fts", "lancedb"];
+
+  function assertNoJargon(text: string, label: string): void {
+    for (const term of JARGON) {
+      expect(text, `${label} 含内部术语 "${term}"`).not.toContain(term);
+    }
+  }
+
+  test("recall display 通俗化，先结论", () => {
+    const r = formatRecallEnvelope({ query: "主题A", entities: [{ title: "实体A" }, { title: "实体B" }] });
+    assertNoJargon(r.display, "recall display");
+    assertNoJargon(r.summary.message, "recall message");
+    expect(r.display).toContain("记忆");
+  });
+
+  test("grounded recall display/message 去候选/缺口术语", () => {
+    const r = formatGroundedRecallEnvelope({
+      query: "主题A",
+      grounded_answer: {
+        facts: [{ claim: "x" }],
+        candidates: [{ claim: "y" }],
+        gaps: [{ description: "z" }],
+        conflicts: [],
+      },
+    });
+    assertNoJargon(r.display, "grounded display");
+    assertNoJargon(r.summary.message, "grounded message");
+  });
+
+  test("query display 通俗化", () => {
+    const r = formatQueryEnvelope({ results: [{ snippet: "a" }, { snippet: "b" }] });
+    assertNoJargon(r.display, "query display");
+  });
+
+  test("get_page display 通俗化", () => {
+    const r = formatGetPageEnvelope({ title: "页面A", body_length: 1000, has_more: false });
+    assertNoJargon(r.display, "get_page display");
+  });
+
+  test("summarize display 去实体/链接计数式表述", () => {
+    const r = formatSummarizeEnvelope({
+      topic: "主题A",
+      entities: [{ title: "实体A" }],
+      stats: { totalLinks: 2, totalEvents: 1 },
+    });
+    assertNoJargon(r.display, "summarize display");
+    expect(r.display).not.toContain("个实体");
+    expect(r.display).not.toContain("个链接");
+  });
+
+  test("episode display 去候选术语", () => {
+    const r = formatEpisodeEnvelope({
+      query: "x", summary: "s",
+      candidates: [{ slug: "a", title: "人物A", score: 0.8, confidence: "high", matched_clues: [], evidence: [], next_disambiguating_clue: null }],
+      search_meta: { time_parsed: null, tokens_used: [], total_scanned: 0, hints_applied: [] },
+      diagnostics: { clues_checked: [] },
+    } as never);
+    assertNoJargon(r.display, "episode display");
+    expect(r.display).not.toContain("候选");
+  });
+
+  test("org_tree display 去节点术语", () => {
+    const r = formatOrgTreeEnvelope({
+      seed: { slug: "a", title: "组织A", type: "entity" },
+      upward: [{ slug: "b", title: "上级A", type: "entity", depth: 1, parent_slug: "a" }],
+      downward: [{ slug: "c", title: "下属A", type: "entity", depth: 1, parent_slug: "a" }],
+      warnings: [],
+    } as never);
+    assertNoJargon(r.display, "org_tree display");
+    expect(r.display).not.toContain("节点");
+  });
+});
+
 // ─── Helpers ──────────────────────────────────────────────────
 
 function walkDir(dir: string, extensions: string[]): string[] {
