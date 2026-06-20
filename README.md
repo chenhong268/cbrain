@@ -50,7 +50,7 @@ curl -fsSL https://bun.sh/install | bash
 2. Install CBrain — always pin to an explicit tag:
 
 ```bash
-bun install -g github:chenhong268/cbrain#v1.9.5
+bun install -g github:chenhong268/cbrain#v1.9.6
 ```
 
 3. Verify:
@@ -73,7 +73,7 @@ cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 
 ```bash
 bun remove -g cbrain
-bun install -g github:chenhong268/cbrain#v1.9.5
+bun install -g github:chenhong268/cbrain#v1.9.6
 ```
 
 **Uninstalling:**
@@ -529,11 +529,11 @@ bun run dev init
 
 ## Roadmap
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v1.9.5).
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v1.9.6).
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v1.0–v1.9.5 | MCP-first 架构、三层搜索、NER、Insight/Discovery、agentic 工具、provenance、安全恢复 | ✅ Current |
+| v1.0–v1.9.6 | MCP-first 架构、三层搜索、NER、Insight/Discovery、agentic 工具、provenance、安全恢复、v2 RC 发布门禁 | ✅ Current |
 | 未来 | Web UI、eval 框架、durable job queue | Planned |
 
 ## About This Project

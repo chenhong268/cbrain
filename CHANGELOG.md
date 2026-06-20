@@ -1,6 +1,25 @@
 # Changelog
 
-> Current: `v1.9.5` — 删除、同步与 watcher 关键写路径完成回滚安全加固，进入 v2.0 RC 前稳定化。
+> Current: `v1.9.6` — v2.0 RC 前发布门禁、自然语言前门、隐私/输出边界与安装验收清单收口。
+
+## [v1.9.6] — 2026-06-20
+
+### v2.0 RC 发布门禁收口（#197, #199–#207）
+
+- **Agent 输出边界**：Hermes brief 强制 `display → summary → raw` 消费顺序，禁止把 raw/debug/score/source id/reason codes/slug/trace/vector 等内部字段展示给用户。
+- **自然语言前门**：新增 `cbrain_recall` 作为 Hermes 面向用户问题的统一入口，把自然语言请求路由到 grounded recall、content recall、情境找人、组织架构、关系分析、全貌总结或 debug 搜索。
+- **真实对话验收**：新增 front-door dialogue acceptance gate，覆盖 10+ 个匿名自然语言场景，确保普通问题不直接落到底层 `query`。
+- **写入与路径安全回归**：修复 markdown/frontmatter/路径式输入导致的静默空壳、错误 slug 或重复写入风险；`ingest` 拒绝 `@file`/本地路径引用，避免把路径当内容写入。
+- **显示文案通俗化**：高频 MCP formatter 的 `display` 去除机械状态词和内部术语，让 Hermes 更容易输出自然、简洁的用户回复。
+- **v2 preflight 聚合门禁**：新增 `bun run gate:v2-preflight`，统一执行 offline-first recall、RC journeys、Hermes dialogue、performance、docs consistency 与 resolver pilot。
+- **RC 人工验收清单**：新增 v2.0 RC manual readiness checklist，固化真实 Hermes 对话观察、真实 p95 性能抽样、version-pinned install smoke 三项人工 go/no-go。
+
+### Release Checks
+
+- `bun run check`：2401 pass / 0 fail。
+- `bun run gate:v2-preflight`：GO。
+- `bun run check:docs`：PASS。
+- 公开测试、文档和发布说明继续使用匿名占位符，无用户知识库隐私信息。
 
 ## [v1.9.5] — 2026-06-18
 

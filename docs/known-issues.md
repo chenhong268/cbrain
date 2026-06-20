@@ -1,6 +1,6 @@
 # Known Issues
 
-> Current as of v1.9.5. 本文件只记录**当前版本**已知问题与安全恢复方法；历史问题随版本修复后移除。
+> Current as of v1.9.6. 本文件只记录**当前版本**已知问题与安全恢复方法；历史问题随版本修复后移除。
 
 ## LanceDB 向量索引损坏（`LanceDB connection failed`）
 
