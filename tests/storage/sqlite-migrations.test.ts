@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { CBrainDB } from "../../src/storage/sqlite.js";
+import { CBrainDB, FKMigrationError, runDestructiveMigrationForTest } from "../../src/storage/sqlite.js";
 
 // ─── Fixture helpers ──────────────────────────────────────────────
 
@@ -1414,6 +1414,39 @@ describe("Atomic migrations — index preservation after rebuild", () => {
     const page = verify.prepare("SELECT title FROM pages WHERE slug = 'brain/entities/person/shi-ti-e'").get() as { title: string };
     expect(page.title).toBe("实体E");
     verify.close();
+  });
+});
+
+// ─── runDestructiveMigration FK failure → FKMigrationError (#209) ────
+
+describe("runDestructiveMigration FK failure → summarized FKMigrationError (#209)", () => {
+  const tmp = "/tmp/cbrain-test-fk-migration";
+  beforeEach(() => { if (existsSync(tmp)) rmSync(tmp, { recursive: true }); mkdirSync(tmp, { recursive: true }); });
+  afterEach(() => { if (existsSync(tmp)) rmSync(tmp, { recursive: true }); });
+
+  test("FK violation throws FKMigrationError with by-table counts, no raw rowids", () => {
+    const dbPath = join(tmp, "brain.sqlite");
+    const db = new CBrainDB(dbPath); // 空 DB: initSchema + migrate 干净通过
+    // 手动制造 orphan derived rows(绕 FK,模拟 legacy 数据债)
+    const internal = (db as unknown as { db: Database }).db;
+    internal.exec("PRAGMA foreign_keys = OFF");
+    internal.prepare("INSERT INTO tags (page_slug, tag) VALUES ('orphan-a', 'x'), ('orphan-b', 'y')").run();
+    internal.exec("PRAGMA foreign_keys = ON");
+
+    expect(() => runDestructiveMigrationForTest(db, "test-migration", "test.fk.test", () => {}))
+      .toThrow(FKMigrationError);
+    try {
+      runDestructiveMigrationForTest(db, "test-migration", "test.fk.test", () => {});
+    } catch (e) {
+      const err = e as FKMigrationError;
+      expect(err).toBeInstanceOf(FKMigrationError);
+      expect(err.migrationName).toBe("test-migration");
+      expect(err.total).toBe(2);
+      expect(err.violationsByTable.tags).toBe(2);
+      // anonymized: message carries no slug/tag value
+      expect(err.message).not.toMatch(/orphan-a|orphan-b/);
+    }
+    db.close();
   });
 });
 
