@@ -1,5 +1,7 @@
 import { z } from "zod";
 import type { ToolContext } from "../mcp/context.js";
+// registerAllTools backs the REST /tools listing only; MCP sessions reuse attachMcpTools
+// below — so MCP has a single tool-registration semantics across stdio + HTTP.
 import { registerAllTools } from "../mcp/register.js";
 import { attachMcpTools } from "../mcp/server.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -41,6 +43,9 @@ function createToolRegistry(ctx: ToolContext): Map<string, ToolDef> {
 
 /** Idle-session TTL: a session not touched for this long is swept on the next /mcp request. */
 const MCP_SESSION_TTL_MS = 30 * 60 * 1000;
+
+/** Hard cap on live sessions — defense against a burst of client initializations (#213 review). */
+const MAX_MCP_SESSIONS = 64;
 
 /** One MCP-over-HTTP client session (issue #213): its own server + transport, sharing the single ctx. */
 interface McpSession {
@@ -91,6 +96,9 @@ export function createHttpServer(ctx: ToolContext) {
 
     // New session (initialize: no sessionId header yet)
     if (!sessionId) {
+      if (sessions.size >= MAX_MCP_SESSIONS) {
+        return new Response("too many concurrent MCP sessions", { status: 503 });
+      }
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         onsessionclosed: (sid) => { sessions.delete(sid); },
