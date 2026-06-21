@@ -1,6 +1,21 @@
 # Changelog
 
-> Current: `v1.9.6` — v2.0 RC 前发布门禁、自然语言前门、隐私/输出边界与安装验收清单收口。
+> Current: `v1.9.7` — single-writer 多 Agent 运行拓扑、MCP-over-HTTP 与现网迁移验证收口。
+
+## [v1.9.7] — 2026-06-21
+
+### 多 Agent 稳定性（#208, #213）
+
+- **Profile-wide single-writer gate**：同一 profile 下只允许一个 write-capable CBrain runtime 打开 SQLite/LanceDB。发现活跃 writer 时在打开数据库前拒绝启动，stale pid 文件自动清理，避免多进程并发写导致 `database is locked`、LanceDB concurrent writer 与 MCP stdio 断连。
+- **MCP-over-HTTP**：`cbrain serve --http` 在 `/mcp` 暴露 Streamable HTTP MCP 端点，多 Agent 作为独立 MCP client 连接同一个 HTTP runtime，保留独立 session，但共享单一 DB/LanceDB/watcher。
+- **迁移验证包**：新增 phase-3 Hermes HTTP MCP 迁移 checklist 与只读验证脚本，校验 launchd HTTP owner、单一 3399 listener、单 writer、`/mcp` initialize/listTools/callTool，以及 required/optional Hermes config 均无 stdio writer 回退。
+- **现网迁移验收**：default 与 secondary Agent 已通过真实 `status` 调用验证，调用后仍只有一个 HTTP writer，gateway 日志无并发写、端口冲突或连接断开错误。
+
+### Release Checks
+
+- `bun run check`：2424 pass / 0 fail。
+- `scripts/ops/verify-cbrain-http-mcp-migration.sh`：13 pass / 0 fail。
+- 公开测试、文档和发布说明继续使用匿名占位符，无用户知识库隐私信息。
 
 ## [v1.9.6] — 2026-06-20
 

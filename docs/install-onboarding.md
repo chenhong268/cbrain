@@ -27,13 +27,13 @@
 
 ```bash
 # 安装指定版本 — 始终锁定到明确 tag，不要用 main 或 latest
-bun install -g github:chenhong268/cbrain#v1.9.6
+bun install -g github:chenhong268/cbrain#v1.9.7
 ```
 
 安装完成后确认：
 
 ```bash
-cbrain --version   # 应输出 1.9.6
+cbrain --version   # 应输出 1.9.7
 ```
 
 **PATH 注意事项：** Bun 全局安装的命令放在 `~/.bun/bin/`。如果 `cbrain` 命令找不到，确认 Bun 的 bin 目录在你的 PATH 里：
@@ -275,7 +275,7 @@ cbrain skill-pack
 输出包含版本号、文件路径、完整性状态：
 
 ```
-  CBrain Skill Pack v1.9.6
+  CBrain Skill Pack v1.9.7
     Pack:       /path/to/skills/
     Entrypoint: /path/to/skills/SKILL.md (2,807 chars)
 
