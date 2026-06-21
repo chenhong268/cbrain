@@ -482,3 +482,162 @@ describe("profile-wide single-writer gate (issue #208)", () => {
     }
   }, 30_000);
 });
+
+// ─── MCP-over-HTTP endpoint (issue #213) ──────────────────
+//
+// Proves serve --http exposes /mcp: a real MCP client initializes, lists the same tool
+// set as stdio, and calls a read-only tool (status) over HTTP against the single shared
+// runtime. Also proves session cleanup (DELETE) so the session map cannot grow unbounded.
+
+describe("MCP-over-HTTP endpoint (issue #213)", () => {
+  const testDir = "/tmp/cbrain-test-mcp-http";
+  const vaultPath = join(testDir, "vault");
+  const dbPath = join(testDir, "brain.sqlite");
+  const lancePath = join(testDir, "lancedb");
+  const configPath = join(testDir, "cbrain.json");
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    mkdirSync(lancePath, { recursive: true });
+    writeFileSync(configPath, JSON.stringify({
+      vaultPath,
+      dbPath,
+      lancePath,
+      embedding: { provider: "deterministic" },
+      ner: { enabled: false },
+    }));
+  });
+
+  afterEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("client initializes, lists tools, calls read-only 'status' over /mcp", async () => {
+    const port = await getAvailablePort();
+    const child = spawn("bun", [
+      join(PROJECT_ROOT, "src/cli/index.ts"),
+      "serve", "--http", "--port", String(port),
+    ], {
+      cwd: testDir,
+      stdio: "pipe",
+      env: { ...process.env, CBRAIN_CONFIG: configPath },
+    });
+
+    try {
+      expect(await waitForHealth(port)).toBe(true);
+
+      const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+      const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+
+      const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+      const client = new Client({ name: "smoke-test", version: "1.0" });
+      await client.connect(transport); // initialize handshake
+
+      // Same tool registry as stdio — status must be present
+      const { tools } = await client.listTools();
+      expect(tools.length).toBeGreaterThan(20);
+      expect(tools.map((t) => t.name)).toContain("status");
+
+      // Read-only tool call over HTTP returns a valid result
+      const result = await client.callTool({ name: "status", arguments: {} });
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content).toBeInstanceOf(Array);
+      expect(content.length).toBeGreaterThan(0);
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed).toHaveProperty("totalPages");
+      expect(parsed).toHaveProperty("vaultPath");
+
+      await client.close();
+    } finally {
+      child.kill("SIGTERM");
+      await waitForExit(child);
+    }
+  }, 30_000);
+
+  test("two MCP clients get independent sessions on the shared runtime", async () => {
+    const port = await getAvailablePort();
+    const child = spawn("bun", [
+      join(PROJECT_ROOT, "src/cli/index.ts"),
+      "serve", "--http", "--port", String(port),
+    ], {
+      cwd: testDir,
+      stdio: "pipe",
+      env: { ...process.env, CBRAIN_CONFIG: configPath },
+    });
+
+    try {
+      expect(await waitForHealth(port)).toBe(true);
+      const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+      const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+
+      const a = new Client({ name: "agent-a", version: "1.0" });
+      const b = new Client({ name: "agent-b", version: "1.0" });
+      await a.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+      await b.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+
+      // Both clients operate independently; both see the shared tool set, no extra runtime
+      const ta = await a.listTools();
+      const tb = await b.listTools();
+      expect(ta.tools.length).toBe(tb.tools.length);
+      expect(ta.tools.length).toBeGreaterThan(20);
+
+      await a.close();
+      await b.close();
+    } finally {
+      child.kill("SIGTERM");
+      await waitForExit(child);
+    }
+  }, 30_000);
+
+  test("DELETE /mcp removes the session (cleanup — no unbounded growth)", async () => {
+    const port = await getAvailablePort();
+    const child = spawn("bun", [
+      join(PROJECT_ROOT, "src/cli/index.ts"),
+      "serve", "--http", "--port", String(port),
+    ], {
+      cwd: testDir,
+      stdio: "pipe",
+      env: { ...process.env, CBRAIN_CONFIG: configPath },
+    });
+
+    try {
+      expect(await waitForHealth(port)).toBe(true);
+      const base = `http://127.0.0.1:${port}/mcp`;
+
+      // raw initialize → server returns a session id
+      const initResp = await fetch(base, {
+        method: "POST",
+        headers: { "content-type": "application/json", "accept": "application/json, text/event-stream" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1, method: "initialize",
+          params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } },
+        }),
+      });
+      const sessionId = initResp.headers.get("mcp-session-id");
+      expect(sessionId).toBeTruthy();
+
+      // DELETE tears the session down
+      const delResp = await fetch(base, {
+        method: "DELETE",
+        headers: { "mcp-session-id": sessionId as string },
+      });
+      expect(delResp.status).toBe(200);
+
+      // the old session id is now rejected (session was cleaned up, not retained)
+      const postResp = await fetch(base, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "accept": "application/json, text/event-stream",
+          "mcp-session-id": sessionId as string,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+      });
+      expect(postResp.status).toBe(404);
+    } finally {
+      child.kill("SIGTERM");
+      await waitForExit(child);
+    }
+  }, 30_000);
+});

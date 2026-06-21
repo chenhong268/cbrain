@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { ToolContext } from "../mcp/context.js";
 import { registerAllTools } from "../mcp/register.js";
+import { attachMcpTools } from "../mcp/server.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { version } from "../version.js";
 
 interface ToolDef {
   name: string;
@@ -35,8 +39,85 @@ function createToolRegistry(ctx: ToolContext): Map<string, ToolDef> {
   return tools;
 }
 
+/** Idle-session TTL: a session not touched for this long is swept on the next /mcp request. */
+const MCP_SESSION_TTL_MS = 30 * 60 * 1000;
+
+/** One MCP-over-HTTP client session (issue #213): its own server + transport, sharing the single ctx. */
+interface McpSession {
+  server: McpServer;
+  transport: WebStandardStreamableHTTPServerTransport;
+  lastSeen: number;
+}
+
 export function createHttpServer(ctx: ToolContext) {
   const tools = createToolRegistry(ctx);
+
+  // Per-client MCP sessions. Each session gets its own McpServer + transport, but every
+  // server attaches tools via the SAME attachMcpTools path and shares this one ctx — so
+  // there is still exactly one DB/LanceDB/watcher/jobs owner (issue #213, honors #208 gate).
+  const sessions = new Map<string, McpSession>();
+
+  /** Lazy cleanup: drop idle sessions so the map cannot grow unbounded (#213 review). */
+  function sweepStaleSessions(now: number): void {
+    for (const [sid, s] of sessions) {
+      if (now - s.lastSeen > MCP_SESSION_TTL_MS) {
+        s.server.close().catch(() => { /* best effort */ });
+        sessions.delete(sid);
+      }
+    }
+  }
+
+  async function handleMcp(req: Request): Promise<Response> {
+    sweepStaleSessions(Date.now());
+
+    const sessionId = req.headers.get("mcp-session-id");
+
+    // DELETE → explicit session teardown
+    if (req.method === "DELETE") {
+      const session = sessionId ? sessions.get(sessionId) : undefined;
+      if (session) {
+        await session.server.close().catch(() => { /* best effort */ });
+        sessions.delete(sessionId as string);
+      }
+      return new Response(null, { status: 200 });
+    }
+
+    // Existing session — route to its own transport, refresh lastSeen
+    if (sessionId && sessions.has(sessionId)) {
+      const session = sessions.get(sessionId) as McpSession;
+      session.lastSeen = Date.now();
+      return session.transport.handleRequest(req);
+    }
+
+    // New session (initialize: no sessionId header yet)
+    if (!sessionId) {
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        onsessionclosed: (sid) => { sessions.delete(sid); },
+      });
+      const mcpServer = new McpServer({ name: "cbrain", version });
+      attachMcpTools(mcpServer, ctx); // identical to stdio registration — no second path
+      try {
+        await mcpServer.connect(transport);
+        const response = await transport.handleRequest(req);
+        if (transport.sessionId) {
+          sessions.set(transport.sessionId, { server: mcpServer, transport, lastSeen: Date.now() });
+        } else {
+          // initialize did not establish a session — don't leak the half-built server
+          await mcpServer.close().catch(() => { /* best effort */ });
+        }
+        return response;
+      } catch (e) {
+        // initialize/connect failed — clean up, never retain a broken session
+        await mcpServer.close().catch(() => { /* best effort */ });
+        console.error("> /mcp session init failed:", e instanceof Error ? e.message : String(e));
+        return new Response("MCP session init failed", { status: 500 });
+      }
+    }
+
+    // sessionId present but unknown — stale/confused client
+    return new Response("session not found", { status: 404 });
+  }
 
   return {
     start(port: number) {
@@ -46,6 +127,11 @@ export function createHttpServer(ctx: ToolContext) {
         async fetch(req) {
           const url = new URL(req.url);
 
+          // MCP-over-HTTP (issue #213)
+          if (url.pathname === "/mcp") {
+            return handleMcp(req);
+          }
+
           // GET /health
           if (req.method === "GET" && url.pathname === "/health") {
             return Response.json({ ok: true, tools: tools.size });
@@ -53,7 +139,7 @@ export function createHttpServer(ctx: ToolContext) {
 
           // GET /tools — list all tools
           if (req.method === "GET" && url.pathname === "/tools") {
-            const list = [...tools.values()].map(t => ({ name: t.name, description: t.description }));
+            const list = [...tools.values()].map((t) => ({ name: t.name, description: t.description }));
             return Response.json(list);
           }
 
@@ -92,7 +178,8 @@ export function createHttpServer(ctx: ToolContext) {
         },
       });
 
-      console.error(`> ${tools.size} tools registered`);
+      console.error(`> ${tools.size} tools registered (REST)`);
+      console.error("> MCP-over-HTTP → /mcp");
       return server;
     },
   };
