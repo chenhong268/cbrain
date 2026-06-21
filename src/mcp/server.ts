@@ -49,12 +49,16 @@ export function sanitizeError(msg: string): string {
     .slice(0, 500);
 }
 
-export function createServer(deps: CBrainDeps): McpServer {
-  const server = new McpServer({
-    name: "cbrain",
-    version,
-  });
-
+/**
+ * Install the sanitizeError wrapper + register every CBrain tool onto a McpServer.
+ * Shared by stdio (`createServer`) and HTTP-MCP per-session servers (issue #213) so
+ * tool behavior is byte-identical across transports — there is no second routing path.
+ * Pure registration: does not build context, start jobs, or open anything.
+ *
+ * NOTE (issue #213 review): registerDreamWorker is deliberately NOT called here — it
+ * must run exactly once per runtime, not once per MCP session.
+ */
+export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
   // Unified error wrapper — every tool handler gets try-catch automatically
   const origRegister = server.registerTool.bind(server);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -70,11 +74,17 @@ export function createServer(deps: CBrainDeps): McpServer {
         };
       }
     });
-
-  const ctx = buildContext(deps);
   registerAllTools(server, ctx);
-  registerDreamWorker(ctx);
+}
 
+export function createServer(deps: CBrainDeps): McpServer {
+  const server = new McpServer({
+    name: "cbrain",
+    version,
+  });
+  const ctx = buildContext(deps);
+  attachMcpTools(server, ctx);
+  registerDreamWorker(ctx);
   return server;
 }
 
