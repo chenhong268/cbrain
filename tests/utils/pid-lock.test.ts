@@ -287,3 +287,22 @@ describe("evaluateWriterGate (profile-wide decision)", () => {
     expect(existsSync(stale2)).toBe(false);
   });
 });
+
+describe("PidLock constructor rejects unsafe CBRAIN_LOCK_ID chars", () => {
+  test("accepts legal lockId charset [a-zA-Z0-9_-]", () => {
+    expect(() => new PidLock(TEST_DIR, "stdio", "xiaoai")).not.toThrow();
+    expect(() => new PidLock(TEST_DIR, "http", "prod-2_a")).not.toThrow();
+  });
+
+  test("undefined lockId is allowed (plain pid file)", () => {
+    expect(() => new PidLock(TEST_DIR, "stdio")).not.toThrow();
+  });
+
+  test("rejects lockId chars outside [a-zA-Z0-9_-] (would hide pid file from writer gate)", () => {
+    // A '.' in the lockId would write cbrain-stdio-foo.bar.pid, which scanWriters'
+    // regex [a-zA-Z0-9_-]+ cannot match → the writer gate would miss it (issue #208).
+    expect(() => new PidLock(TEST_DIR, "stdio", "foo.bar")).toThrow(/CBRAIN_LOCK_ID/);
+    expect(() => new PidLock(TEST_DIR, "http", "a/b")).toThrow(/CBRAIN_LOCK_ID/);
+    expect(() => new PidLock(TEST_DIR, "stdio", "a b")).toThrow(/CBRAIN_LOCK_ID/);
+  });
+});

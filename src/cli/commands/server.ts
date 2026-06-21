@@ -136,7 +136,7 @@ export function register(program: Command) {
     .description("Start MCP server (stdio transport)")
     .option("--http", "Start as HTTP server instead of stdio MCP")
     .option("--port <port>", "HTTP port", "3399")
-    .option("--force", "Skip PID lock check")
+    .option("--force", "Skip stale PID cleanup (does NOT bypass writer gate)")
     .action(async (opts) => {
       const config = loadConfig();
       const profileDir = dirname(resolve(config.dbPath));

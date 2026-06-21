@@ -42,6 +42,15 @@ export class PidLock {
   private pidFile: string;
 
   constructor(dataDir: string, transport: "stdio" | "http", lockId?: string) {
+    // Reject lockId chars outside [a-zA-Z0-9_-]: such a pid file (e.g. cbrain-stdio-foo.bar.pid)
+    // would be invisible to scanWriters' regex, punching a hole in the profile-wide writer
+    // gate (issue #208). Fail fast at construction instead of silently missing the writer.
+    if (lockId && !/^[a-zA-Z0-9_-]+$/.test(lockId)) {
+      throw new Error(
+        `Invalid CBRAIN_LOCK_ID=${JSON.stringify(lockId)}: must match [a-zA-Z0-9_-]+. ` +
+        `Other characters make its pid file invisible to the writer gate (issue #208).`,
+      );
+    }
     const suffix = lockId ? `-${lockId}` : "";
     this.pidFile = join(dataDir, `cbrain-${transport}${suffix}.pid`);
   }

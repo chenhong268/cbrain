@@ -472,6 +472,8 @@ describe("profile-wide single-writer gate (issue #208)", () => {
       await new Promise((r) => setTimeout(r, 2500));
       expect(chStderr).toMatch(/UNSAFE/);
       expect(chStderr).not.toMatch(/refused to start/);
+      // gate truly let it through to DB open (not a false pass from an unrelated crash)
+      expect(chStderr).toMatch(/LanceDB warmed up/);
       challenger.kill("SIGKILL");
       await waitForExit(challenger);
     } finally {
