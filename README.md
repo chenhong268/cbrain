@@ -204,6 +204,8 @@ cbrain perf-diagnose                     # 只读性能诊断：最近 journey �
 cbrain perf-diagnose --json --days 30    # 同上，30 天窗口、机器可读 JSON
 ```
 
+> **Hermes cron 集成**：见 [docs/hermes-integration.md](docs/hermes-integration.md) —— 用 `bin/cbrain-maintenance.sh` wrapper 走 HTTP `/mcp`，**不要裸调 CLI**（serve 在跑时并发写损坏数据）。
+
 ### 服务
 ```bash
 cbrain serve                             # 启动 MCP Server，供 AI Agent 调用
@@ -233,7 +235,7 @@ To set up periodic tasks with Hermes:
 
 ```bash
 # In your Agent's skill config (SKILL.md), add scheduled tasks:
-# - Every day:  cbrain dream
+# - Every day:  dream  # MCP tool（走 /mcp）；cron 场景用 bin/cbrain-maintenance.sh，勿裸调 CLI，见 docs/hermes-integration.md
 # - Every 3 days: cbrain discover
 # - Weekly: cbrain enrich && cbrain dedup   # (cleanup is an Agent skill, not a CLI command)
 ```
