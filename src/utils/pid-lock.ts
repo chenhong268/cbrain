@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** Liveness check shared by instance + static scanning paths. */
@@ -9,6 +9,33 @@ function isPidAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+/** A live, non-self write-capable runtime discovered via its pid file. */
+export interface WriterOwner {
+  pid: number;
+  transport: "http" | "stdio";
+  lockId?: string;
+  pidFile: string;
+  startedAt: Date;
+}
+
+/** Raw scan result: live owners vs dead pid files that are safe to remove. */
+export interface WriterScanResult {
+  active: WriterOwner[];
+  stale: string[];
+}
+
+/** Outcome of the profile-wide writer gate check. */
+export interface WriterGateDecision {
+  /** Start allowed (no live writer, or unsafe bypass engaged). */
+  allow: boolean;
+  /** Live owners blocking startup (empty when allowed without bypass). */
+  owners: WriterOwner[];
+  /** Stale pid files that were removed during this check. */
+  cleanedStale: string[];
+  /** True only when an unsafe env override let a conflicting writer through. */
+  bypassed: boolean;
 }
 
 export class PidLock {
@@ -109,6 +136,47 @@ export class PidLock {
     return pids;
   }
 
+  /**
+   * Profile-wide writer scan (issue #208): reads EVERY `cbrain-{http|stdio}[-{lockId}].pid`
+   * in the data dir — across transports AND across CBRAIN_LOCK_ID suffixes — and splits them
+   * into live non-self owners vs dead pid files. This is the basis of the single-writer gate.
+   * Read-only: never acquires, kills, or steals. Distinct from the transport-scoped
+   * `scanActiveOwnerPids`, which live-index recovery still uses.
+   */
+  static scanWriters(dataDir: string): WriterScanResult {
+    let entries: string[];
+    try {
+      entries = readdirSync(dataDir);
+    } catch {
+      return { active: [], stale: [] };
+    }
+    const re = /^cbrain-(http|stdio)(?:-([a-zA-Z0-9_-]+))?\.pid$/;
+    const active: WriterOwner[] = [];
+    const stale: string[] = [];
+    for (const name of entries) {
+      const m = re.exec(name);
+      if (!m) continue;
+      const pidFile = join(dataDir, name);
+      const transport = m[1] as "http" | "stdio";
+      const lockId = m[2];
+      let pid: number;
+      let startedAt: Date;
+      try {
+        pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+        startedAt = statSync(pidFile).mtime;
+      } catch {
+        continue;
+      }
+      if (!Number.isFinite(pid) || pid === process.pid) continue;
+      if (isPidAlive(pid)) {
+        active.push({ pid, transport, lockId, pidFile, startedAt });
+      } else {
+        stale.push(pidFile);
+      }
+    }
+    return { active, stale };
+  }
+
   private writePid(): void {
     writeFileSync(this.pidFile, String(process.pid));
   }
@@ -129,4 +197,36 @@ export class PidLock {
       return false;
     }
   }
+}
+
+/**
+ * Profile-wide single-writer gate decision (issue #208). Pure logic — no process.exit,
+ * no console output; the CLI layer acts on the result. Side effects are limited to
+ * best-effort removal of stale (dead-owner) pid files, which is always safe.
+ *
+ * `unsafeBypass` mirrors `CBRAIN_UNSAFE_ALLOW_MULTI_WRITER=1`: when true AND a live
+ * writer exists, it flips `allow` to true and sets `bypassed` so the caller can emit
+ * an UNSAFE banner. Without a live writer the bypass is inert.
+ */
+export function evaluateWriterGate(
+  dataDir: string,
+  opts: { unsafeBypass?: boolean } = {},
+): WriterGateDecision {
+  const scan = PidLock.scanWriters(dataDir);
+  const cleanedStale: string[] = [];
+  for (const f of scan.stale) {
+    try {
+      unlinkSync(f);
+      cleanedStale.push(f);
+    } catch {
+      /* best effort */
+    }
+  }
+  const bypassed = opts.unsafeBypass === true && scan.active.length > 0;
+  return {
+    allow: scan.active.length === 0 || bypassed,
+    owners: scan.active,
+    cleanedStale,
+    bypassed,
+  };
 }
