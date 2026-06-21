@@ -8,7 +8,17 @@
 - **原因**：旧版 PID 锁是 transport-scoped / lock-id-scoped 的，HTTP 与各 stdio（不同 `CBRAIN_LOCK_ID`）进程互相看不见，可同时打开同一数据库。
 - **修复（phase 1）**：profile-wide single-writer gate。启动时若发现已有活跃的 write-capable runtime 持有该 profile，直接拒绝启动（fail fast），且**在打开 SQLite/LanceDB 之前**就拒绝。stale（死进程）pid 文件自动清理。
 - **`cbrain serve --force` 不再绕过 writer gate**：它只保留跳过 stale 清理的旧语义，不影响 gate。要让一个 profile 同时存在多个 writer，唯一（不安全）途径是环境变量 `CBRAIN_UNSAFE_ALLOW_MULTI_WRITER=1`。
-- **多 Agent 共享同一个 brain 的正确姿势**：只跑**一个** `cbrain serve --http`，让各 Agent 连它。（phase 2 将为 HTTP serve 增加 MCP-over-HTTP，使 stdio 客户端可连 HTTP runtime；phase 3 迁移 Hermes。）
+- **多 Agent 共享同一个 brain 的正确姿势（phase 2 已完成）**：只跑**一个** `cbrain serve --http`，它现在在 `/mcp` 暴露 **MCP-over-HTTP** 端点（Streamable HTTP）。各 Agent（A/B/C、cron）作为独立 MCP client 连 `http://127.0.0.1:<port>/mcp`，各自 session、共享同一个 DB/LanceDB/watcher runtime。**禁止**为多 Agent 各自 spawn `cbrain serve`（stdio）—— single-writer gate 会挡，且并发写会损坏数据。
+  - 拓扑：
+    ```text
+    Agent A ┐
+    Agent B ├── MCP-over-HTTP ──> 单个 cbrain serve --http（唯一 writer）
+    Cron   ┘                         ├─ SQLite/LanceDB writer
+                                     ├─ watcher
+                                     └─ /mcp（多 session，自动清理）
+    ```
+  - stdio MCP 仍保留（单机/调试），但生产多 Agent 一律走 HTTP MCP。
+  - phase 3（待办）：Hermes `~/.hermes/config.yaml` 把 stdio profile 迁移到 HTTP MCP endpoint。
 - ⚠️ **`CBRAIN_UNSAFE_ALLOW_MULTI_WRITER=1` 仅用于救援/调试**：会并发写数据库、损坏数据。启用时日志打 UNSAFE banner。不写入任何推荐配置或 README。
 
 ## LanceDB 向量索引损坏（`LanceDB connection failed`）
