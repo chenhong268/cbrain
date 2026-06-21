@@ -826,6 +826,43 @@ export class CBrainDB {
     return { byTable, total: rows.length };
   }
 
+  /** Derived tables whose rows reference pages(slug) — repair whitelist (#209).
+   *  `chunks_new` is a migration temp table and is intentionally excluded. */
+  private static readonly DERIVED_FK_TABLES = new Set([
+    "aliases", "chunks", "links", "mention_snapshots", "tags", "timeline", "versions",
+  ]);
+
+  /** Delete orphan rows in derived tables (rows whose FK parent page is gone).
+   * Atomic; FK-checked before & after; touches only whitelisted derived tables
+   * (never pages, never markdown). (#209) */
+  repairOrphanedDerivedRows(): { repairedByTable: Record<string, number>; remaining: number } {
+    const before = this.checkFkViolations();
+    // Read violations OUTSIDE the transaction (PRAGMA behavior is reliable here,
+    // matching checkFkViolations); DELETE inside for atomicity.
+    const violations = this.db.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number }>;
+    const byTable = new Map<string, number[]>();
+    for (const r of violations) {
+      if (!CBrainDB.DERIVED_FK_TABLES.has(r.table)) continue; // defensive whitelist
+      if (!byTable.has(r.table)) byTable.set(r.table, []);
+      byTable.get(r.table)!.push(r.rowid);
+    }
+    // transaction(fn) returns a wrapped fn — must invoke it. Atomicity: all orphan
+    // deletes commit together or none. (#209)
+    this.db.transaction(() => {
+      for (const [table, rowids] of byTable) {
+        const stmt = this.db.prepare(`DELETE FROM "${table}" WHERE rowid = ?`);
+        for (const rowid of rowids) stmt.run(rowid);
+      }
+    })();
+    const after = this.checkFkViolations();
+    const repairedByTable: Record<string, number> = {};
+    for (const [t, beforeCount] of Object.entries(before.byTable)) {
+      const removed = beforeCount - (after.byTable[t] ?? 0);
+      if (removed > 0) repairedByTable[t] = removed;
+    }
+    return { repairedByTable, remaining: after.total };
+  }
+
   /** Drop a leftover _new temp table from a failed prior migration.
    *  Safe: only drops if BOTH temp and production tables exist. */
   private cleanupTempTable(tempName: string, productionName: string): void {
