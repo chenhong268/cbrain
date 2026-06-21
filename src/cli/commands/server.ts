@@ -4,6 +4,7 @@ import { createServer, registerDreamWorker } from "../../mcp/server.js";
 import { buildContext } from "../../mcp/context.js";
 import { createHttpServer } from "../../http/server.js";
 import { PidLock, evaluateWriterGate, type WriterOwner } from "../../utils/pid-lock.js";
+import { FKMigrationError } from "../../storage/sqlite.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
 import { DEFAULT_STOP_DEADLINE_MS, type FileWatcher } from "../../core/watcher.js";
 import { dirname, resolve } from "node:path";
@@ -130,6 +131,29 @@ function reportWriterConflict(profileDir: string, owners: WriterOwner[]): void {
   );
 }
 
+/**
+ * Fail-fast diagnostic when a migration's FK check fails (#209). Anonymized:
+ * only table + orphan count + migration name + repair command — never
+ * slugs/titles/paths/content. serve refuses to start (no HTTP/MCP/watcher/LanceDB).
+ */
+function reportFkDiagnostic(profileDir: string, err: FKMigrationError): void {
+  const lines = Object.entries(err.violationsByTable)
+    .sort()
+    .map(([t, c]) => `    ${t}:  ${c} 行`)
+    .join("\n");
+  console.error(
+    "✗ CBrain serve 启动失败:数据库外键一致性检查未通过,已拒绝带病启动。\n" +
+    `\n  Profile: ${profileDir}\n` +
+    `\n  失败的迁移:${err.migrationName}\n` +
+    `\n  孤儿引用(derived rows 引用了不存在的 page,共 ${err.total} 行):\n${lines}\n` +
+    "\n  修复步骤:\n" +
+    "    1. 查看明细(dry-run,不改 DB):   cbrain repair-fk\n" +
+    "    2. 执行修复(删孤儿引用,不动 page/markdown): cbrain repair-fk --execute\n" +
+    "    3. 修复后重启 serve。\n" +
+    "\n  不会自动修复 / 不带病启动。repair 完成后 migration 才能通过。",
+  );
+}
+
 export function register(program: Command) {
   program
     .command("serve")
@@ -160,7 +184,18 @@ export function register(program: Command) {
         );
       }
 
-      const deps = createDeps(config);
+      let deps: ReturnType<typeof createDeps>;
+      try {
+        deps = createDeps(config);
+      } catch (e) {
+        // #209: FK violation during migration → fail fast with anonymized diagnostic.
+        // No HTTP/MCP/watcher/LanceDB start; no crash-loop (single clean exit).
+        if (e instanceof FKMigrationError) {
+          reportFkDiagnostic(profileDir, e);
+          process.exit(1);
+        }
+        throw e;
+      }
 
       const pidLock = new PidLock(deps.profileDir!, opts.http ? "http" : "stdio", process.env.CBRAIN_LOCK_ID);
       pidLock.acquire(opts.force);
