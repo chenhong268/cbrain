@@ -120,6 +120,7 @@ cbrain query "怎么优化性能" --strategy vector
 | `cbrain doctor` | 快速诊断：数据库、文件、API |
 | `cbrain doctor --first-run` | 2.0 首次运行全面检查（config → paths → DB → index → services） |
 | `cbrain doctor --first-run --json` | 同上，JSON 输出（供 Agent 程序化读取） |
+| `cbrain repair-fk [--execute]` | 检测/修复 derived 表孤儿 FK 引用（默认 dry-run；`--execute` 删孤儿行,不动 page/markdown）。serve 启动遇 FK 违规时用 |
 
 ### 服务
 
@@ -229,7 +230,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 由 `cbrain --help` 自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen cli-commands:start -->
-共 42 个 CLI 命令（`cbrain --help`）。
+共 43 个 CLI 命令（`cbrain --help`）。
 
 | 命令 | 说明 |
 |------|------|
@@ -263,6 +264,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `query` | Search the brain |
 | `reflect` | Run reflect stage: synthesize entities, infer relations, generate insights |
 | `relocate` | Fix misplaced pages in records/ by scanning file frontmatter and moving to correct directories |
+| `repair-fk` | Detect/repair orphan FK references in derived tables (dry-run by default; --execute to delete) |
 | `restore` | Restore from a backup zip file |
 | `revert` | Revert a page to a previous version |
 | `serve` | Start MCP server (stdio transport) |

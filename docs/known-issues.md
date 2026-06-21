@@ -2,6 +2,16 @@
 
 > Current as of v1.9.7. 本文件只记录**当前版本**已知问题与安全恢复方法；历史问题随版本修复后移除。
 
+## serve 启动遇数据库外键违规（FK violation，#209）
+
+- **症状**：`cbrain serve` 启动报「外键一致性检查未通过」,exit 1,不进 HTTP/MCP/watcher。诊断给出按表统计的孤儿引用数 + 修复命令。
+- **原因**：legacy 数据在 derived 表(tags/chunks/links/等)留了引用已删除 page 的孤儿行;migration 的 FK check 拦下。
+- **安全恢复**：
+  1. `cbrain repair-fk`（dry-run,查看各表孤儿数,不改 DB）
+  2. `cbrain repair-fk --execute`（删孤儿 derived 行,atomic,前后 FK check,不动 page/markdown）
+  3. 重启 `cbrain serve`
+- ⚠️ serve **不自动修复、不带病启动**——FK 违规是数据一致性问题,必须显式修复。
+
 ## 多个 `cbrain serve` 进程共写同一 profile（已修复，#208 phase 1）
 
 - **症状（修复前）**：同一 profile 同时跑 `cbrain serve --http` 和一个或多个 `cbrain serve`（stdio）——并发写 `brain.sqlite` 与 LanceDB 索引，表现为 `database is locked`、LanceDB `Too many concurrent writers`、Rust 侧 panic、端口绑定失败、MCP stdio 管道异常关闭。
