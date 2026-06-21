@@ -11,6 +11,7 @@ import { register as backupCmds } from "./commands/backup.js";
 import { register as mcpConfigCmds } from "./commands/mcp-config.js";
 import { register as skillPackCmds } from "./commands/skill-pack.js";
 import { register as perfDiagCmds } from "./commands/perf-diagnose.js";
+import { register as repairFkCmds } from "./commands/repair-fk.js";
 
 /**
  * Assemble the Commander program WITHOUT parsing it.
@@ -42,6 +43,7 @@ export function buildProgram(): Command {
   mcpConfigCmds(program);
   skillPackCmds(program);
   perfDiagCmds(program);
+  repairFkCmds(program);
 
   return program;
 }
