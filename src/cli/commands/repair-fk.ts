@@ -16,7 +16,10 @@ export function register(program: Command): void {
     .option("--execute", "Delete orphan rows (default is dry-run)", false)
     .action((opts: { execute: boolean }) => {
       const config = loadConfig();
-      const db = new CBrainDB(config.dbPath);
+      // #209: skipMigrate — repair must open a DB whose migrations currently
+      // FK-fail (serve refuses to start on it). Without skipMigrate, new CBrainDB()
+      // runs migrate and rethrows FKMigrationError, making repair-fk itself fail.
+      const db = new CBrainDB(config.dbPath, { skipMigrate: true });
       try {
         const before = db.checkFkViolations();
         if (before.total === 0) {

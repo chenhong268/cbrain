@@ -90,4 +90,35 @@ describe("cbrain repair-fk CLI (#209)", () => {
     });
     expect(out).toMatch(/No FK violations/i);
   });
+
+  test("--execute works on a DB where serve's migrate would FK-fail (the #209 blocker)", () => {
+    const dbPath = join(tmp, "brain.sqlite");
+    // Build a DB that serve would reject: reset one migration's completion marker
+    // + inject orphan → a normal new CBrainDB() (migrate) would throw FKMigrationError.
+    const db0 = new CBrainDB(dbPath);
+    const internal = (db0 as unknown as { db: Database }).db;
+    internal.prepare("DELETE FROM config WHERE key = ?").run("migration_v4_pages_constraint");
+    internal.exec("PRAGMA foreign_keys = OFF");
+    internal.prepare("INSERT INTO tags (page_slug, tag) VALUES ('orphan-fk', 'x')").run();
+    internal.exec("PRAGMA foreign_keys = ON");
+    db0.close();
+    const fkConfigPath = join(tmp, "cbrain.json");
+    writeFileSync(fkConfigPath, JSON.stringify({
+      vaultPath: join(tmp, "vault"), dbPath, lancePath: join(tmp, "lancedb"),
+      embedding: { provider: "deterministic" }, ner: { enabled: false },
+    }));
+
+    // repair-fk must NOT throw (skipMigrate) and must clean the orphan.
+    const out = capture(() => {
+      process.env.CBRAIN_CONFIG = fkConfigPath;
+      buildProgram().parse(["repair-fk", "--execute"], { from: "user" });
+    });
+    expect(out).toMatch(/repaired/i);
+    const verify = new Database(dbPath);
+    expect((verify.prepare("SELECT COUNT(*) c FROM tags").get() as { c: number }).c).toBe(0);
+    verify.close();
+
+    // After repair, a normal CBrainDB (migrate) opens cleanly — serve would start.
+    expect(() => new CBrainDB(dbPath).close()).not.toThrow();
+  });
 });

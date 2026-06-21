@@ -158,7 +158,17 @@ export class CBrainDB {
     this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 
-  constructor(dbPath: string) {
+  /**
+   * Open (and normally migrate) the brain DB.
+   *
+   * opts.skipMigrate: open WITHOUT running migrations. Used by `cbrain repair-fk`
+   * (#209) so the repair command can open a DB whose migrations are currently
+   * FK-failing — serve refuses to start on such a DB, but repair-fk must still
+   * be able to open it and clean orphan rows. This is a repair-only escape
+   * hatch: it does not initialize new schema. Callers must only use methods that
+   * can operate against the already-existing DB shape.
+   */
+  constructor(dbPath: string, opts: { skipMigrate?: boolean } = {}) {
     if (!existsSync(dirname(dbPath))) {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
@@ -169,6 +179,7 @@ export class CBrainDB {
     this.db.exec("PRAGMA cache_size = -64000");
     this.db.exec("PRAGMA mmap_size = 268435456");
     this.db.exec("PRAGMA synchronous = NORMAL");
+    if (opts.skipMigrate) return;
     try {
       this.migrate();
     } catch (e) {
