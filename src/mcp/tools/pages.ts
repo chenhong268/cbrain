@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join, resolve, relative } from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -472,19 +473,27 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
 
     // Build items in input slug order (SQLite IN() returns arbitrary order)
     const maxChars = actualDetail === "normal" ? 500 : 200;
-    const items = foundSlugs.map(slug => {
+    // #214: parallel async file reads (was N serial readFileSync — up to 1-4s on iCloud
+    // vault, the deep_recall/get_org_tree hot path). Promise.all preserves order, so
+    // bodies[i] aligns with foundSlugs[i]; behavior is identical to the old serial loop.
+    const bodies = await Promise.all(foundSlugs.map(async (slug) => {
       const row = rowBySlug.get(slug)!;
-      let body: string | null = null;
       const filePath = row.file_path as string | undefined;
       const fullPath = filePath ? join(ctx.vaultPath, filePath) : undefined;
-
-      if (fullPath) {
-        const resolved = resolve(fullPath);
-        const rel = relative(ctx.vaultPath, resolved);
-        if (!rel.startsWith("..") && !resolved.startsWith("..")) {
-          if (existsSync(resolved)) body = readFileSync(resolved, "utf-8");
-        }
+      if (!fullPath) return null;
+      const resolved = resolve(fullPath);
+      const rel = relative(ctx.vaultPath, resolved);
+      if (rel.startsWith("..") || resolved.startsWith("..")) return null;
+      try {
+        return await readFile(resolved, "utf-8");
+      } catch {
+        return null; // missing or unreadable file
       }
+    }));
+
+    const items = foundSlugs.map((slug, i) => {
+      const row = rowBySlug.get(slug)!;
+      const body = bodies[i];
 
       // Strip frontmatter from body for excerpt
       const bodyContent = stripFrontmatter(body ?? "");
