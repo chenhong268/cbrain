@@ -344,3 +344,139 @@ describe("performGracefulShutdown ordering", () => {
     expect(msg).not.toMatch(/\/tmp|\.md|secret/i);
   });
 });
+
+// ─── Profile-wide single-writer gate (issue #208 phase 1) ─────
+//
+// Proves the CLI refuses a second write-capable runtime for the same profile
+// BEFORE SQLite/LanceDB is opened (no "LanceDB warmed up" on the refused process),
+// auto-cleans stale pid files, and honors the hidden UNSAFE bypass env.
+
+describe("profile-wide single-writer gate (issue #208)", () => {
+  const testDir = "/tmp/cbrain-test-writer-gate";
+  const vaultPath = join(testDir, "vault");
+  const dbPath = join(testDir, "brain.sqlite");
+  const lancePath = join(testDir, "lancedb");
+  const configPath = join(testDir, "cbrain.json");
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    mkdirSync(lancePath, { recursive: true });
+    // deterministic embedding (#204): no API key, no network — clean offline test
+    writeFileSync(configPath, JSON.stringify({
+      vaultPath,
+      dbPath,
+      lancePath,
+      embedding: { provider: "deterministic" },
+      ner: { enabled: false },
+    }));
+  });
+
+  afterEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("second stdio serve is refused while HTTP owner is alive (AC #1, #4)", async () => {
+    const port = await getAvailablePort();
+    const owner = spawn("bun", [
+      join(PROJECT_ROOT, "src/cli/index.ts"),
+      "serve", "--http", "--port", String(port),
+    ], {
+      cwd: testDir,
+      stdio: "pipe",
+      env: { ...process.env, CBRAIN_CONFIG: configPath },
+    });
+
+    try {
+      expect(await waitForHealth(port)).toBe(true);
+
+      const challenger = spawn("bun", [
+        join(PROJECT_ROOT, "src/cli/index.ts"),
+        "serve",
+      ], {
+        cwd: testDir,
+        stdio: "pipe",
+        env: { ...process.env, CBRAIN_CONFIG: configPath },
+      });
+      let chStderr = "";
+      challenger.stderr!.on("data", (d: Buffer) => { chStderr += d.toString(); });
+
+      const code = await waitForExit(challenger);
+      expect(code).toBe(1);
+      expect(chStderr).toMatch(/refused to start/i);
+      expect(chStderr).toMatch(/writer/i);
+      // Gate ran BEFORE lance.connect() → no warmup line on the refused process
+      expect(chStderr).not.toMatch(/LanceDB warmed up/);
+    } finally {
+      owner.kill("SIGTERM");
+      await waitForExit(owner);
+    }
+  }, 30_000);
+
+  test("auto-cleans a stale pid file so a clean start succeeds (AC #3)", async () => {
+    const port = await getAvailablePort();
+    // pre-seed a stale (dead) http pid file from a "previous crashed" owner
+    writeFileSync(join(testDir, "cbrain-http.pid"), "999999");
+
+    const owner = spawn("bun", [
+      join(PROJECT_ROOT, "src/cli/index.ts"),
+      "serve", "--http", "--port", String(port),
+    ], {
+      cwd: testDir,
+      stdio: "pipe",
+      env: { ...process.env, CBRAIN_CONFIG: configPath },
+    });
+    let stderr = "";
+    owner.stderr!.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+    try {
+      // stale file is removed by the gate; owner still boots
+      expect(await waitForHealth(port)).toBe(true);
+      expect(stderr).toMatch(/Cleaned 1 stale/i);
+    } finally {
+      owner.kill("SIGTERM");
+      await waitForExit(owner);
+    }
+  }, 30_000);
+
+  test("CBRAIN_UNSAFE_ALLOW_MULTI_WRITER=1 bypasses gate with UNSAFE banner", async () => {
+    const port = await getAvailablePort();
+    const owner = spawn("bun", [
+      join(PROJECT_ROOT, "src/cli/index.ts"),
+      "serve", "--http", "--port", String(port),
+    ], {
+      cwd: testDir,
+      stdio: "pipe",
+      env: { ...process.env, CBRAIN_CONFIG: configPath },
+    });
+
+    try {
+      expect(await waitForHealth(port)).toBe(true);
+
+      const challenger = spawn("bun", [
+        join(PROJECT_ROOT, "src/cli/index.ts"),
+        "serve",
+      ], {
+        cwd: testDir,
+        stdio: "pipe",
+        env: {
+          ...process.env,
+          CBRAIN_CONFIG: configPath,
+          CBRAIN_UNSAFE_ALLOW_MULTI_WRITER: "1",
+        },
+      });
+      let chStderr = "";
+      challenger.stderr!.on("data", (d: Buffer) => { chStderr += d.toString(); });
+
+      // bypass → UNSAFE banner printed early (before createDeps), not refused
+      await new Promise((r) => setTimeout(r, 2500));
+      expect(chStderr).toMatch(/UNSAFE/);
+      expect(chStderr).not.toMatch(/refused to start/);
+      challenger.kill("SIGKILL");
+      await waitForExit(challenger);
+    } finally {
+      owner.kill("SIGTERM");
+      await waitForExit(owner);
+    }
+  }, 30_000);
+});

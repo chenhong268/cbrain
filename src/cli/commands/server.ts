@@ -3,9 +3,10 @@ import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
 import { createServer, registerDreamWorker } from "../../mcp/server.js";
 import { buildContext } from "../../mcp/context.js";
 import { createHttpServer } from "../../http/server.js";
-import { PidLock } from "../../utils/pid-lock.js";
+import { PidLock, evaluateWriterGate, type WriterOwner } from "../../utils/pid-lock.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
 import { DEFAULT_STOP_DEADLINE_MS, type FileWatcher } from "../../core/watcher.js";
+import { dirname, resolve } from "node:path";
 export interface ShutdownHandles {
   httpServer?: { stop(immediate?: boolean): void };
   watcher?: FileWatcher;
@@ -106,6 +107,29 @@ async function initWatcher(config: ReturnType<typeof loadConfig>, deps: ReturnTy
   return { watcher, lock: watcherLock };
 }
 
+/**
+ * Fail-fast diagnostic when the profile-wide writer gate denies startup (issue #208).
+ * Emits PID, transport, lockId, startedAt, and concrete remediation. Sanitized: only
+ * operational fields (pid/transport/profile dir) — never vault content or file bodies.
+ */
+function reportWriterConflict(profileDir: string, owners: WriterOwner[]): void {
+  const lines = owners.map((o) => {
+    const lock = o.lockId ? `  lockId=${o.lockId}` : "";
+    return `    PID ${o.pid}   transport=${o.transport}${lock}   started ${o.startedAt.toISOString()}`;
+  });
+  console.error(
+    "✗ CBrain refused to start: another write-capable runtime owns this profile.\n" +
+    `\n  Profile: ${profileDir}\n` +
+    `\n  Active writer(s):\n${lines.join("\n")}\n` +
+    "\n  Only ONE write-capable CBrain runtime may open this profile at a time (issue #208).\n" +
+    "  Concurrent writers corrupt brain.sqlite and the LanceDB index.\n" +
+    "\n  Suggested fix:\n" +
+    "    1. If a writer above is stale (process crashed), delete its pid file and retry.\n" +
+    "    2. For multi-agent access, run ONE `cbrain serve --http` and connect agents to it.\n" +
+    "    3. Emergency rescue ONLY (will corrupt data): CBRAIN_UNSAFE_ALLOW_MULTI_WRITER=1",
+  );
+}
+
 export function register(program: Command) {
   program
     .command("serve")
@@ -115,6 +139,27 @@ export function register(program: Command) {
     .option("--force", "Skip PID lock check")
     .action(async (opts) => {
       const config = loadConfig();
+      const profileDir = dirname(resolve(config.dbPath));
+
+      // ── profile-wide single-writer gate (issue #208) ──
+      // MUST run before createDeps() opens SQLite and before lance.connect().
+      const gate = evaluateWriterGate(profileDir, {
+        unsafeBypass: process.env.CBRAIN_UNSAFE_ALLOW_MULTI_WRITER === "1",
+      });
+      if (gate.cleanedStale.length > 0) {
+        console.error(`> Cleaned ${gate.cleanedStale.length} stale CBrain pid file(s) before start`);
+      }
+      if (!gate.allow) {
+        reportWriterConflict(profileDir, gate.owners);
+        process.exit(1);
+      }
+      if (gate.bypassed) {
+        console.error(
+          "⚠️ UNSAFE: CBRAIN_UNSAFE_ALLOW_MULTI_WRITER=1 — writer gate BYPASSED; " +
+          "concurrent writes WILL corrupt brain.sqlite/LanceDB. Not for production.",
+        );
+      }
+
       const deps = createDeps(config);
 
       const pidLock = new PidLock(deps.profileDir!, opts.http ? "http" : "stdio", process.env.CBRAIN_LOCK_ID);
