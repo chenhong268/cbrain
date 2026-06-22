@@ -157,6 +157,12 @@ export function mergeRankedResults(
   return results.slice(0, limit);
 }
 
+/** Default decomposition budget — keeps default recall cheap (0-1 LLM calls).
+ *  Explicit multiStep=true / agentic_research bypass these (走 ResearchManager). */
+const MAX_DEFAULT_SUBQUERIES = 3;
+const MAX_DEFAULT_LLM_CALLS = 3;
+const MAX_DEFAULT_DECOMPOSE_MS = 8000;
+
 export class HybridSearch {
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
@@ -190,20 +196,12 @@ export class HybridSearch {
   async search(query: string, options?: SearchOptions): Promise<SearchResult[]> {
     if (!query.trim()) return [];
 
-    const shouldMultiStep = options?.multiStep === true ||
-      (options?.multiStep === undefined && this.llm && this.isMultiStepCandidate(query));
+    const shouldMultiStep = options?.multiStep === true;
 
     if (shouldMultiStep && this.llm) {
       return this.searchMultiStep(query, options ?? {});
     }
     return this.searchCore(query, options);
-  }
-
-  private isMultiStepCandidate(query: string): boolean {
-    const candidates = query.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
-    const resolved = this.db.resolveSlugs(candidates);
-    const knownSlugs = resolved.filter((r) => r.slug !== null).map((r) => r.slug!);
-    return isComplexQuery(query, knownSlugs, candidates);
   }
 
   private async searchCore(query: string, options?: SearchOptions): Promise<SearchResult[]> {
@@ -251,33 +249,63 @@ export class HybridSearch {
       }
 
       if (complex) {
+        // Budget guard: skip decompose if LLM budget already exhausted (#222)
+        if ((trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS) {
+          if (trace && !trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
+          return [] as SearchResult[]; // degraded: 零额外 LLM
+        }
+        // Decompose with a REAL wall-clock budget: Promise.race against timeout.
+        // timedCall only records elapsed — it does NOT cap latency, so a 70s LLM
+        // decompose would still block (#222 review). Race forces degraded return.
+        const decomposeStart = Date.now();
+        let decomposeTimer: ReturnType<typeof setTimeout> | undefined;
+        const decomposeTimeout = new Promise<never>((_, reject) => {
+          decomposeTimer = setTimeout(() => reject(new Error("decompose_timeout")), MAX_DEFAULT_DECOMPOSE_MS);
+        });
+        let subQueries: string[];
         try {
           const graphContext = await this.graphPrefetch(query);
-          const subQueries = await this.timedCall(
-            () => this.decomposeQuery(query, graphContext), trace, "decompose_ms",
-          );
-          if (trace) trace.llm_calls = (trace.llm_calls ?? 0) + 1;
-
-          this.logger?.info("search", `decomposition: "${query}" → ${subQueries.length} sub-queries`);
-          if (subQueries.length >= 2) {
-            const subResults = await Promise.all(
-              subQueries.map((sq) =>
-                this.search(sq, { ...(options ?? {}), _skipDecompose: true, _trace: trace }).catch(() => [] as SearchResult[])
-              )
-            );
-
-            const allSubLists = subResults.filter((r) => r.length > 0);
-            if (allSubLists.length > 0) {
-              const allSlugs = new Set<string>();
-              for (const list of allSubLists) for (const item of list) allSlugs.add(item.slug);
-              const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
-              const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
-              return mergeRankedResults(allSubLists, this.rrfK, limit, activityWeights, hotnessWeights);
-            }
-          }
+          subQueries = (await Promise.race([
+            this.decomposeQuery(query, graphContext),
+            decomposeTimeout,
+          ])).slice(0, MAX_DEFAULT_SUBQUERIES);
         } catch (e) {
-          this.logger?.warn("search", "decomposition 路径失败，fallback 到 expandQuery", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
+          if (trace) {
+            trace.decompose_ms = Date.now() - decomposeStart;
+            if (!trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
+          }
+          this.logger?.warn("search", "decomposition 超时/失败，fail-closed 返回空（零额外 LLM）", { error: e instanceof Error ? e.message : String(e) });
+          return [] as SearchResult[]; // timeout/failure: fail-closed，零额外 LLM
+        } finally {
+          // 成功 decompose 后清理 pending timeout timer，避免 8s 定时器残留
+          if (decomposeTimer) clearTimeout(decomposeTimer);
         }
+        if (trace) {
+          trace.decompose_ms = Date.now() - decomposeStart;
+          trace.llm_calls = (trace.llm_calls ?? 0) + 1;
+        }
+
+        this.logger?.info("search", `decomposition: "${query}" → ${subQueries.length} sub-queries (capped at ${MAX_DEFAULT_SUBQUERIES})`);
+        if (subQueries.length >= 2) {
+          const subResults = await Promise.all(
+            subQueries.map((sq) =>
+              this.search(sq, { ...(options ?? {}), _skipDecompose: true, multiQuery: false, _trace: trace }).catch(() => [] as SearchResult[])
+            )
+          );
+
+          const allSubLists = subResults.filter((r) => r.length > 0);
+          if (allSubLists.length > 0) {
+            const allSlugs = new Set<string>();
+            for (const list of allSubLists) for (const item of list) allSlugs.add(item.slug);
+            const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
+            const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
+            return mergeRankedResults(allSubLists, this.rrfK, limit, activityWeights, hotnessWeights);
+          }
+        }
+        // decompose 成功但弱结构/空结果 → 原查询 bounded fallback（召回不丢失）。
+        // multiQuery:false → 不 expandQuery（chat LLM escalation），不 ResearchManager；
+        // 仅 searchSingleQuery（vector/fts/graph），bounded。
+        return this.searchWithExpansion(query, limit, false, trace);
       }
     }
 
