@@ -1,6 +1,29 @@
 # Changelog
 
-> Current: `v1.9.7` — single-writer 多 Agent 运行拓扑、MCP-over-HTTP 与现网迁移验证收口。
+> Current: `v1.9.8` — 启动安全、维护任务拓扑、FK 恢复、FTS 回归和批量读取性能加固。
+
+## [v1.9.8] — 2026-06-22
+
+### 稳定性与恢复（#209, #211, #220）
+
+- **FK migration recovery**：serve 启动遇到外键违规时 fail-fast，并输出匿名化诊断和 `repair-fk` 修复路径；新增 `cbrain repair-fk` dry-run / execute，修复 orphan derived rows 后可重新启动。
+- **版本读取安全**：package metadata 不可用时 `cbrain --version` / `--help` 不再崩溃，回退到安全版本字符串。
+- **Ontology 运行时资产缺失诊断**：ontology 文件不可用时返回结构化、脱敏错误；不会静默使用空 ontology。
+
+### 搜索与性能（#210, #214）
+
+- **FTS5 回归保护**：补充长查询、混合标点、保留词、emoji/surrogate 等输入的安全测试，确保 trigram fallback 不再因查询语法抛错。
+- **批量页面读取优化**：`get_pages` 并行读取页面文件，降低多实体召回和 Hermes 批量展开路径的延迟。
+
+### 运维拓扑（#212）
+
+- **Hermes 维护任务 wrapper**：新增 script-dir-safe maintenance wrapper，通过 HTTP MCP 调用 `dream`，避免 cron 裸跑 CLI 与唯一 writer 并发写。
+- **拓扑文档加固**：补充维护任务、MCP-over-HTTP 和 single-writer 运行方式说明，并用 docs consistency 测试阻止旧命令回流。
+
+### Release Checks
+
+- `bun run check`：2452 pass / 0 fail。
+- 公开测试、文档和发布说明继续使用匿名占位符，无用户知识库隐私信息。
 
 ## [v1.9.7] — 2026-06-21
 
