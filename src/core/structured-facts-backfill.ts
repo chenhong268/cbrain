@@ -1,7 +1,7 @@
 import type { LLMProvider } from "../llm/provider.js";
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { EntityType, StructuredFact } from "./ner.js";
-import { FACT_FIELD_WHITELIST } from "./ner.js";
+import { getFactFieldWhitelist } from "./ner.js";
 import { readPageFile, writePageFile } from "../utils/frontmatter.js";
 import { join } from "node:path";
 
@@ -111,7 +111,7 @@ export async function structuredFactsBackfill(
     // Filter by whitelist
     const shortType = target.type.includes("/") ? target.type.split("/").pop()! : target.type;
     const entityType = shortType as EntityType;
-    const allowedFields = FACT_FIELD_WHITELIST[entityType] ?? [];
+    const allowedFields = getFactFieldWhitelist()[entityType] ?? [];
     const filtered = facts.filter(f => {
       if (options.onlyFields && !options.onlyFields.includes(f.field)) return false;
       return allowedFields.includes(f.field);
