@@ -3,6 +3,36 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
 
+/** Raised when a destructive migration's FK integrity check fails (#209).
+ * Carries summarized per-table counts (NO raw row data) so callers can emit an
+ * anonymized diagnostic and point the operator at `cbrain repair-fk`. */
+export class FKMigrationError extends Error {
+  readonly migrationName: string;
+  readonly violationsByTable: Record<string, number>;
+  readonly total: number;
+  constructor(migrationName: string, violationsByTable: Record<string, number>) {
+    const total = Object.values(violationsByTable).reduce((a, b) => a + b, 0);
+    super(
+      `FK integrity check failed in migration "${migrationName}": ${total} violation(s) across ${Object.keys(violationsByTable).length} table(s)`,
+    );
+    this.name = "FKMigrationError";
+    this.migrationName = migrationName;
+    this.violationsByTable = violationsByTable;
+    this.total = total;
+  }
+}
+
+/** @internal — test hook to exercise runDestructiveMigration's FK path. (#209) */
+export function runDestructiveMigrationForTest(
+  db: CBrainDB,
+  name: string,
+  completionKey: string,
+  body: () => void,
+): void {
+  (db as unknown as { runDestructiveMigration(o: { name: string; completionKey: string; body: () => void }): void })
+    .runDestructiveMigration({ name, completionKey, body });
+}
+
 const ALLOWED_ORDER_COLUMNS = new Set([
   "slug", "title", "type", "created_at", "updated_at", "mention_count", "tier",
 ]);
@@ -128,7 +158,17 @@ export class CBrainDB {
     this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 
-  constructor(dbPath: string) {
+  /**
+   * Open (and normally migrate) the brain DB.
+   *
+   * opts.skipMigrate: open WITHOUT running migrations. Used by `cbrain repair-fk`
+   * (#209) so the repair command can open a DB whose migrations are currently
+   * FK-failing — serve refuses to start on such a DB, but repair-fk must still
+   * be able to open it and clean orphan rows. This is a repair-only escape
+   * hatch: it does not initialize new schema. Callers must only use methods that
+   * can operate against the already-existing DB shape.
+   */
+  constructor(dbPath: string, opts: { skipMigrate?: boolean } = {}) {
     if (!existsSync(dirname(dbPath))) {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
@@ -139,6 +179,7 @@ export class CBrainDB {
     this.db.exec("PRAGMA cache_size = -64000");
     this.db.exec("PRAGMA mmap_size = 268435456");
     this.db.exec("PRAGMA synchronous = NORMAL");
+    if (opts.skipMigrate) return;
     try {
       this.migrate();
     } catch (e) {
@@ -770,17 +811,67 @@ export class CBrainDB {
         opts.body();
         const violations = this.db.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
         if (violations.length > 0) {
-          throw new Error(`FK check: ${violations.length} violation(s): ${violations.map(v => `${v.table}[${v.rowid}]->${v.parent}`).join(", ")}`);
+          // #209: summarized by-table counts (anonymized), not raw rowid dumps.
+          const byTable: Record<string, number> = {};
+          for (const v of violations) byTable[v.table] = (byTable[v.table] ?? 0) + 1;
+          throw new FKMigrationError(opts.name, byTable);
         }
         if (opts.validate) opts.validate();
         this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, '1')").run(opts.completionKey);
       })();
     } catch (e) {
+      // FKMigrationError already carries the anonymized summary — rethrow as-is.
+      if (e instanceof FKMigrationError) throw e;
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(`${opts.name}: ${msg}`);
     } finally {
       if (fkWasOn) this.db.exec("PRAGMA foreign_keys = ON");
     }
+  }
+
+  /** Summarize FK violations by table — anonymized (no slugs/titles/paths). (#209) */
+  checkFkViolations(): { byTable: Record<string, number>; total: number } {
+    const rows = this.db.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string }>;
+    const byTable: Record<string, number> = {};
+    for (const r of rows) byTable[r.table] = (byTable[r.table] ?? 0) + 1;
+    return { byTable, total: rows.length };
+  }
+
+  /** Derived tables whose rows reference pages(slug) — repair whitelist (#209).
+   *  `chunks_new` is a migration temp table and is intentionally excluded. */
+  private static readonly DERIVED_FK_TABLES = new Set([
+    "aliases", "chunks", "links", "mention_snapshots", "tags", "timeline", "versions",
+  ]);
+
+  /** Delete orphan rows in derived tables (rows whose FK parent page is gone).
+   * Atomic; FK-checked before & after; touches only whitelisted derived tables
+   * (never pages, never markdown). (#209) */
+  repairOrphanedDerivedRows(): { repairedByTable: Record<string, number>; remaining: number } {
+    const before = this.checkFkViolations();
+    // Read violations OUTSIDE the transaction (PRAGMA behavior is reliable here,
+    // matching checkFkViolations); DELETE inside for atomicity.
+    const violations = this.db.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number }>;
+    const byTable = new Map<string, number[]>();
+    for (const r of violations) {
+      if (!CBrainDB.DERIVED_FK_TABLES.has(r.table)) continue; // defensive whitelist
+      if (!byTable.has(r.table)) byTable.set(r.table, []);
+      byTable.get(r.table)!.push(r.rowid);
+    }
+    // transaction(fn) returns a wrapped fn — must invoke it. Atomicity: all orphan
+    // deletes commit together or none. (#209)
+    this.db.transaction(() => {
+      for (const [table, rowids] of byTable) {
+        const stmt = this.db.prepare(`DELETE FROM "${table}" WHERE rowid = ?`);
+        for (const rowid of rowids) stmt.run(rowid);
+      }
+    })();
+    const after = this.checkFkViolations();
+    const repairedByTable: Record<string, number> = {};
+    for (const [t, beforeCount] of Object.entries(before.byTable)) {
+      const removed = beforeCount - (after.byTable[t] ?? 0);
+      if (removed > 0) repairedByTable[t] = removed;
+    }
+    return { repairedByTable, remaining: after.total };
   }
 
   /** Drop a leftover _new temp table from a failed prior migration.

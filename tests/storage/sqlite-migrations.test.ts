@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
-import { CBrainDB } from "../../src/storage/sqlite.js";
+import { CBrainDB, FKMigrationError, runDestructiveMigrationForTest } from "../../src/storage/sqlite.js";
 
 // ─── Fixture helpers ──────────────────────────────────────────────
 
@@ -1417,9 +1417,75 @@ describe("Atomic migrations — index preservation after rebuild", () => {
   });
 });
 
+// ─── runDestructiveMigration FK failure → FKMigrationError (#209) ────
+
+describe("runDestructiveMigration FK failure → summarized FKMigrationError (#209)", () => {
+  const tmp = "/tmp/cbrain-test-fk-migration";
+  beforeEach(() => { if (existsSync(tmp)) rmSync(tmp, { recursive: true }); mkdirSync(tmp, { recursive: true }); });
+  afterEach(() => { if (existsSync(tmp)) rmSync(tmp, { recursive: true }); });
+
+  test("FK violation throws FKMigrationError with by-table counts, no raw rowids", () => {
+    const dbPath = join(tmp, "brain.sqlite");
+    const db = new CBrainDB(dbPath); // 空 DB: initSchema + migrate 干净通过
+    // 手动制造 orphan derived rows(绕 FK,模拟 legacy 数据债)
+    const internal = (db as unknown as { db: Database }).db;
+    internal.exec("PRAGMA foreign_keys = OFF");
+    internal.prepare("INSERT INTO tags (page_slug, tag) VALUES ('orphan-a', 'x'), ('orphan-b', 'y')").run();
+    internal.exec("PRAGMA foreign_keys = ON");
+
+    expect(() => runDestructiveMigrationForTest(db, "test-migration", "test.fk.test", () => {}))
+      .toThrow(FKMigrationError);
+    try {
+      runDestructiveMigrationForTest(db, "test-migration", "test.fk.test", () => {});
+    } catch (e) {
+      const err = e as FKMigrationError;
+      expect(err).toBeInstanceOf(FKMigrationError);
+      expect(err.migrationName).toBe("test-migration");
+      expect(err.total).toBe(2);
+      expect(err.violationsByTable.tags).toBe(2);
+      // anonymized: message carries no slug/tag value
+      expect(err.message).not.toMatch(/orphan-a|orphan-b/);
+    }
+    db.close();
+  });
+});
+
 // ─── Helper ──────────────────────────────────────────────────────
 
 function verifyPageCount(db: Database, expected: number): boolean {
   const count = db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number };
   return count.cnt === expected;
 }
+
+// ─── repairOrphanedDerivedRows (#209) ──────────────────────────────
+
+describe("repairOrphanedDerivedRows (#209)", () => {
+  const tmp = "/tmp/cbrain-test-fk-repair";
+  beforeEach(() => { if (existsSync(tmp)) rmSync(tmp, { recursive: true }); mkdirSync(tmp, { recursive: true }); });
+  afterEach(() => { if (existsSync(tmp)) rmSync(tmp, { recursive: true }); });
+
+  test("deletes orphan derived rows; valid (non-orphan) rows + pages untouched; FK clean after", () => {
+    const dbPath = join(tmp, "brain.sqlite");
+    const db = new CBrainDB(dbPath); // 空 DB: initSchema + migrate 干净通过
+    const internal = (db as unknown as { db: Database }).db;
+    // legacy 数据债:orphan tags(2,引用不存在的 page)+ 一个合法 tag(real-page)
+    internal.exec("PRAGMA foreign_keys = OFF");
+    internal.prepare("INSERT INTO pages (slug, type, title, file_path) VALUES ('real-page', 'note', 't', 'real.md')").run();
+    internal.prepare("INSERT INTO tags (page_slug, tag) VALUES ('real-page', 'keep'), ('orphan-1', 'drop1'), ('orphan-2', 'drop2')").run();
+    internal.exec("PRAGMA foreign_keys = ON");
+
+    const before = db.checkFkViolations();
+    expect(before.total).toBe(2); // 2 orphan tags
+    expect(before.byTable.tags).toBe(2);
+
+    const result = db.repairOrphanedDerivedRows();
+    expect(result.repairedByTable.tags).toBe(2);
+    expect(result.remaining).toBe(0);
+
+    const remainingTags = internal.prepare("SELECT COUNT(*) c FROM tags").get() as { c: number };
+    expect(remainingTags.c).toBe(1); // real-page's tag survives (non-orphan)
+    const pages = internal.prepare("SELECT COUNT(*) c FROM pages").get() as { c: number };
+    expect(pages.c).toBe(1); // pages NEVER deleted
+    db.close();
+  });
+});

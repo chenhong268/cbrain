@@ -5,6 +5,8 @@ import { createServer as createNetServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { SyncManager } from "../../src/core/sync.js";
 import { performGracefulShutdown, type ShutdownHandles } from "../../src/cli/commands/server.js";
+import { CBrainDB } from "../../src/storage/sqlite.js";
+import { Database } from "bun:sqlite";
 
 const PROJECT_ROOT = process.cwd();
 
@@ -639,5 +641,52 @@ describe("MCP-over-HTTP endpoint (issue #213)", () => {
       child.kill("SIGTERM");
       await waitForExit(child);
     }
+  }, 30_000);
+});
+
+// ─── serve FK migration failure → exit 1 + diagnostic (#209) ─────
+
+describe("serve FK migration failure → exit 1 + diagnostic (#209)", () => {
+  const testDir = "/tmp/cbrain-test-serve-fk-fail";
+  const dbPath = join(testDir, "brain.sqlite");
+  const configPath = join(testDir, "cbrain.json");
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(join(testDir, "vault"), { recursive: true });
+    // Build a fully-migrated DB, then reset one destructive migration's completion
+    // marker + inject orphan FK rows. serve's migrate() re-runs migratePagesConstraint
+    // (body skips on v4 schema), hits FK check on the orphans → FKMigrationError.
+    new CBrainDB(dbPath).close();
+    const raw = new Database(dbPath);
+    raw.prepare("DELETE FROM config WHERE key = ?").run("migration_v4_pages_constraint");
+    raw.exec("PRAGMA foreign_keys = OFF");
+    raw.prepare("INSERT INTO tags (page_slug, tag) VALUES ('orphan-1','x'),('orphan-2','y')").run();
+    raw.exec("PRAGMA foreign_keys = ON");
+    raw.close();
+    writeFileSync(configPath, JSON.stringify({
+      vaultPath: join(testDir, "vault"), dbPath, lancePath: join(testDir, "lancedb"),
+      embedding: { provider: "deterministic" }, ner: { enabled: false },
+    }));
+  });
+  afterEach(() => { if (existsSync(testDir)) rmSync(testDir, { recursive: true }); });
+
+  test("serve exits 1 with anonymized diagnostic; watcher/LanceDB never start", async () => {
+    const port = await getAvailablePort();
+    const child = spawn("bun", [
+      join(PROJECT_ROOT, "src/cli/index.ts"), "serve", "--http", "--port", String(port),
+    ], { cwd: testDir, stdio: "pipe", env: { ...process.env, CBRAIN_CONFIG: configPath } });
+    let stderr = "";
+    child.stderr!.on("data", (d: Buffer) => { stderr += d.toString(); });
+    const code = await waitForExit(child);
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/外键|FK/i);
+    expect(stderr).toMatch(/tags:\s*2/);
+    expect(stderr).toMatch(/repair-fk/);
+    // anonymized: no orphan slug leaks
+    expect(stderr).not.toMatch(/orphan-1|orphan-2/);
+    // never reached runtime
+    expect(stderr).not.toMatch(/LanceDB warmed up/);
+    expect(stderr).not.toMatch(/Auto-sync|watcher 启动/i);
   }, 30_000);
 });
