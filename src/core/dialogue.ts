@@ -9,7 +9,7 @@ import type { PageManager } from "./page.js";
 import {
   ExtractionResult,
   StructuredFact,
-  FACT_FIELD_WHITELIST,
+  getFactFieldWhitelist,
   type EntityType,
   filterExtractedEntities,
   filterRelations,
@@ -283,7 +283,7 @@ export class DialogueIngest {
         .filter(f => {
           const et = entityTypeMap.get(f.entity);
           if (!et) return false;
-          const allowed = FACT_FIELD_WHITELIST[et];
+          const allowed = getFactFieldWhitelist()[et];
           return allowed && allowed.includes(f.field);
         });
 

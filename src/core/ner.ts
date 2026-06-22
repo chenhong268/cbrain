@@ -40,7 +40,14 @@ export interface StructuredFact {
   evidence: string;
 }
 
+let _factFieldWhitelist: Record<string, string[]> | undefined;
+
+/** Lazy memoized fact-field whitelist. Deliberately NOT evaluated at module top
+ *  level so importing ner.ts does not trigger ontology load — this keeps
+ *  --version / --help (and any path that never needs NER) from crashing when
+ *  the ontology runtime asset is absent (#220). */
 export function getFactFieldWhitelist(): Record<string, string[]> {
+  if (_factFieldWhitelist) return _factFieldWhitelist;
   const ontology = getOntology();
   const result: Record<string, string[]> = {};
   for (const type of ontology.getConcreteEntityTypes()) {
@@ -48,10 +55,9 @@ export function getFactFieldWhitelist(): Record<string, string[]> {
     if (!type.includes("/")) continue;
     result[shortName] = ontology.getStructuredFields(type);
   }
+  _factFieldWhitelist = result;
   return result;
 }
-
-export const FACT_FIELD_WHITELIST: Record<string, string[]> = getFactFieldWhitelist();
 
 export interface ExtractionResult {
   entities: ExtractedEntity[];

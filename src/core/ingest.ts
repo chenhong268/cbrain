@@ -10,7 +10,7 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
-import { FACT_FIELD_WHITELIST, filterExtractedEntities, type ExtractedEntity } from "./ner.js";
+import { getFactFieldWhitelist, filterExtractedEntities, type ExtractedEntity } from "./ner.js";
 import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
 
 /**
@@ -337,7 +337,7 @@ export class IngestManager {
     }
 
     const shortType = type.split("/").pop() ?? type;
-    const allowedFields = FACT_FIELD_WHITELIST[shortType] ?? [];
+    const allowedFields = getFactFieldWhitelist()[shortType] ?? [];
     const pageData = page.frontmatter ?? {};
     const extra: Record<string, string> = {};
 

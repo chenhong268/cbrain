@@ -1,6 +1,6 @@
 import type { PageManager } from "./page.js";
 import type { CBrainDB } from "../storage/sqlite.js";
-import { FACT_FIELD_WHITELIST, type EntityType, type StructuredFact } from "./ner.js";
+import { getFactFieldWhitelist, type EntityType, type StructuredFact } from "./ner.js";
 
 export interface FactWriteResult {
   written: number;
@@ -22,7 +22,7 @@ export function validateFacts(
     const entityType = entityTypeMap.get(f.entity);
     if (!entityType) continue;
 
-    const allowedFields = FACT_FIELD_WHITELIST[entityType];
+    const allowedFields = getFactFieldWhitelist()[entityType];
     if (!allowedFields || !allowedFields.includes(f.field)) continue;
 
     const key = `${f.entity}|${f.field}`;
