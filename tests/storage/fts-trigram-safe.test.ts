@@ -177,4 +177,59 @@ describe("FTS5 trigram query safety (#181)", () => {
     const results = db.ftsSearch("aaaaaa", 10);
     expect(results.length).toBeGreaterThan(0);
   });
+
+  // ─── 7. Long-query & surrogate safety (#210) ─────────────────
+  //
+  // #181 covered SHORT queries; #210 locks in safety for LONG queries (>6 chars)
+  // that exercise the trigram-OR construction path. No input may throw an
+  // fts5 syntax/runtime error — worst case is silent LIKE fallback (verified
+  // separately above). We assert only not.toThrow to avoid coupling to the
+  // exact fallback decision of any particular sqlite version.
+
+  test("long reserved-word query does not throw (#210)", () => {
+    seedChunk(db, "test/long-reserved", "cats AND dogs AND birds OR NOT fish together");
+    expect(() => db.ftsSearch("cats AND dogs AND birds OR NOT fish", 10)).not.toThrow();
+  });
+
+  test("very long ascii query (200 chars) does not throw (#210)", () => {
+    seedChunk(db, "test/long-ascii", "trace failure repeat content");
+    expect(() => db.ftsSearch("a".repeat(200), 10)).not.toThrow();
+  });
+
+  test("long mixed punctuation query does not throw (#210)", () => {
+    seedChunk(db, "test/long-punct", "self-driving api/v2 test quoted path");
+    expect(() =>
+      db.ftsSearch('self-driving/api/v2 (test) "quoted" AND OR NOT / \\ end', 10),
+    ).not.toThrow();
+  });
+
+  test("long mixed CJK+latin+reserved query does not throw (#210)", () => {
+    seedChunk(db, "test/long-mixed", "组织A 发布了 Framework-X 模型");
+    expect(() =>
+      db.ftsSearch("组织A发布了 Framework-X 模型 并且 OR NOT 这是什么", 10),
+    ).not.toThrow();
+  });
+
+  test("emoji + CJK query does not throw (#210)", () => {
+    seedChunk(db, "test/emoji-cjk", "🎉 发布会 测试 search content");
+    expect(() => db.ftsSearch("🎉 emoji test 测试 search", 10)).not.toThrow();
+  });
+
+  test("surrogate-pair query degrades gracefully without throwing (#210)", () => {
+    seedChunk(db, "test/surrogate", "mathematical symbols content here");
+    // 𝕳𝖊𝖑𝖑𝖔 are surrogate pairs; UTF-16 slicing can split a pair, producing
+    // trigrams FTS5 rejects at runtime. Must degrade to LIKE fallback, never throw.
+    const meta: { fts_fallback?: boolean } = {};
+    expect(() => db.ftsSearch("𝕳𝖊𝖑𝖑𝖔 𝔚𝖔𝖗𝖑𝖉 test 测试", 10, meta)).not.toThrow();
+  });
+
+  test("many embedded quotes in long query do not throw (#210)", () => {
+    seedChunk(db, "test/many-quotes", "quoted text with marks here");
+    expect(() => db.ftsSearch('"""""""""" quoted """""""""" end', 10)).not.toThrow();
+  });
+
+  test("newlines and tabs in query do not throw (#210)", () => {
+    seedChunk(db, "test/newlines", "multi line content with AND OR words");
+    expect(() => db.ftsSearch("line1\nline2\ttab AND OR end", 10)).not.toThrow();
+  });
 });
