@@ -243,6 +243,46 @@ function checkBinary(docs: Map<string, string>): CheckResult[] {
   return out;
 }
 
+/** Catch docs that recommend bypassing the maintenance wrapper (#212):
+ *  - `cbrain watch` (removed command; also caught by checkCommands, but this
+ *    makes the intent explicit and catches prose that spells it out)
+ *  - bare `bun run src/cli/index.ts (compact|dream)` (bypasses wrapper →
+ *    concurrent writer risk per #208 single-writer gate)
+ *  Wrapper usage (bin/cbrain-maintenance.sh) and valid `cbrain <cmd>` CLI
+ *  verbs for one-shot commands are NOT flagged. Respects the
+ *  docs-consistency:ignore-command opt-out (used for the "cbrain watch 已废弃"
+ *  negative example in docs/hermes-integration.md). */
+function checkLegacyCronPatterns(docs: Map<string, string>): CheckResult[] {
+  const out: CheckResult[] = [];
+  const bad = [
+    /\bcbrain watch\b/,
+    /\bbun run src\/cli\/index\.ts\s+(compact|dream)\b/,
+  ];
+  for (const [file, text] of docs) {
+    text.split("\n").forEach((line, i) => {
+      if (line.includes("<!-- docs-consistency:ignore-command -->")) return;
+      for (const re of bad) {
+        const m = line.match(re);
+        if (m) {
+          out.push({
+            check: `legacy cron pattern @${file}:${i + 1}`,
+            passed: false,
+            detail: `"${m[0]}" 绕过 wrapper（用 bin/cbrain-maintenance.sh 走 /mcp，见 docs/hermes-integration.md）`,
+          });
+        }
+      }
+    });
+  }
+  if (out.length === 0) {
+    out.push({
+      check: "legacy cron patterns",
+      passed: true,
+      detail: "no cbrain watch / bare bun run compact|dream bypasses",
+    });
+  }
+  return out;
+}
+
 // ── MCP tool reference check ───────────────────────────────────────────────
 
 /** Remove auto-generated sections so tool-ref linting only sees hand-written
@@ -439,6 +479,7 @@ function main(): void {
     ...checkSyncRecovery(docs, new Set(cli.keys())),
     ...checkCounts(docs, tools.length, cli.size),
     ...checkBinary(docs),
+    ...checkLegacyCronPatterns(docs),
     ...checkToolReferences(docs, new Set(tools.map((t) => t.name))),
     ...checkSkillsToolRefs(docs, new Set(tools.map((t) => t.name))),
     ...checkSections(docs, tools, cli),
