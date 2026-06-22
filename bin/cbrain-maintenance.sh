@@ -43,6 +43,18 @@ if [[ -z "$SESSION" ]]; then
   exit 1
 fi
 
+# 注册 session cleanup：脚本退出时（成功或失败）DELETE /mcp 释放 session，
+# 不依赖 serve idle-TTL。cleanup 失败只 warning，不覆盖原始退出码
+# （if 包裹，set -e 不触发；trap 不改退出码除非内部 exit）。
+_session_cleanup() {
+  if [[ -n "${SESSION:-}" ]]; then
+    if ! curl -sf -X DELETE "$CBRAIN_MCP_URL" -H "mcp-session-id: $SESSION" >/dev/null 2>&1; then
+      echo "WARN: MCP session cleanup (DELETE /mcp) 失败；session 将由 serve idle-TTL 清理" >&2
+    fi
+  fi
+}
+trap _session_cleanup EXIT
+
 # 3. notifications/initialized
 if ! curl -sf -o /dev/null -X POST "$CBRAIN_MCP_URL" \
   -H 'Content-Type: application/json' \
