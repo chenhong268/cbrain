@@ -13,6 +13,21 @@ import type {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/** Sanitized error thrown when ontology.yaml is not available on the filesystem
+ *  (e.g. packaged/compiled runtime where the asset is not bundled). Message is
+ *  deliberately path-free and gives a fix direction. Does NOT fall back to an
+ *  empty ontology — callers that need ontology must stop with this error. */
+export class OntologyRuntimeAssetMissingError extends Error {
+  constructor() {
+    super(
+      "ontology runtime asset 不可用。这是 packaged/compiled runtime 的已知限制 —— " +
+        "ontology.yaml 未随 bundle 分发。需要 ontology 的命令（NER / 实体解析 / ingest 等）" +
+        "请用 source checkout 或 npm install 模式运行。",
+    );
+    this.name = "OntologyRuntimeAssetMissingError";
+  }
+}
+
 export class OntologyLoader implements Ontology {
   private data: OntologyYaml;
   private aliasMap: Map<string, string>;
@@ -20,7 +35,13 @@ export class OntologyLoader implements Ontology {
 
   constructor(yamlPath?: string) {
     const path = yamlPath ?? join(__dirname, "ontology.yaml");
-    this.data = parse(readFileSync(path, "utf-8")) as OntologyYaml;
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+    } catch {
+      throw new OntologyRuntimeAssetMissingError();
+    }
+    this.data = parse(raw) as OntologyYaml;
     this.aliasMap = new Map();
     this.nerToPageType = new Map();
     for (const type of this.getConcreteEntityTypes()) {
