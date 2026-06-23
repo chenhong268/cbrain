@@ -345,6 +345,32 @@ function checkDailyPatrolContract(docs: Map<string, string>): CheckResult[] {
         }
       }
     });
+    // cwd 独立检查（#223 review）：脚本必须解析 PROJECT_DIR + 支持 CBRAIN_REPO_DIR，
+    // 不依赖 caller cwd。否则从非 repo 目录跑会静默跳过 perf/gate → 误报 healthy。
+    if (!script.includes("PROJECT_DIR=") || !script.includes("CBRAIN_REPO_DIR")) {
+      out.push({
+        check: "daily-patrol cwd independence",
+        passed: false,
+        detail: "daily-patrol.sh 必须解析 PROJECT_DIR + 支持 CBRAIN_REPO_DIR（独立于 caller cwd，#223 review）",
+      });
+    }
+    // 裸 `bun src/cli/index.ts`（无 $PROJECT_DIR 前缀）= cwd 依赖反模式
+    if (/\bbun src\/cli\/index\.ts\b/.test(script)) {
+      out.push({
+        check: "daily-patrol cwd independence",
+        passed: false,
+        detail: "daily-patrol.sh 含裸 `bun src/cli/index.ts`（需 `bun \"$PROJECT_DIR/src/cli/index.ts\"` 独立于 cwd）",
+      });
+    }
+    // perf-diagnose 必须在 (cd $PROJECT_DIR && ...) 下——src/cli/index.ts 内部
+    // loadConfig() 按 cwd 找 cbrain.json，裸绝对路径但 cwd 错会静默失败（#223 review）
+    if (/perf-diagnose/.test(script) && !/\(cd "\$PROJECT_DIR" &&[^)]*perf-diagnose/.test(script)) {
+      out.push({
+        check: "daily-patrol perf cwd",
+        passed: false,
+        detail: "perf-diagnose 必须在 (cd \"$PROJECT_DIR\" && ...) 下（loadConfig 按 cwd 找 cbrain.json），#223 review",
+      });
+    }
   }
   const patrolDoc = docs.get("docs/patrol.md");
   if (patrolDoc) {

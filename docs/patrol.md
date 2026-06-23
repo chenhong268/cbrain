@@ -34,3 +34,4 @@ exit 0 = runtime healthy（perf/repo_gate 可能 deferred）；exit 1 = runtime 
 - **不要**直接把 full `bun test` 塞进 120s timeout——会因 test suite 合理超时而误报 "CBrain unhealthy"（#223 根因）
 - single-writer + HTTP `/mcp` 拓扑下，cron **走 HTTP/MCP**，不 spawn stdio CBrain（避免触 single-writer gate / 并发写）
 - daily cron 调 `bin/daily-patrol.sh`；maintenance cron 调 `bin/cbrain-maintenance.sh dream`（见 `docs/hermes-integration.md`）
+- 复制 `bin/daily-patrol.sh` 到 Hermes scripts 目录时，需 `export CBRAIN_REPO_DIR=<cbrain-repo-root>`（否则脚本从非 repo 目录跑会找不到 perf-diagnose/gate）。`<cbrain-repo-root>` 是占位，不写真实路径

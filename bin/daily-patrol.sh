@@ -21,6 +21,18 @@ BASE="${CBRAIN_MCP_URL%/mcp}"
 PROTOCOL_VERSION="2025-11-25"
 REPO_GATE_TIMEOUT_S="${REPO_GATE_TIMEOUT_S:-50}"
 
+# Repo root：解析脚本位置（独立于 caller cwd），支持 CBRAIN_REPO_DIR 覆盖。
+# 复制到 Hermes scripts 目录时需 export CBRAIN_REPO_DIR=<repo root>（见 docs/patrol.md）。
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_DIR="${CBRAIN_REPO_DIR:-$DEFAULT_PROJECT_DIR}"
+
+# 启动验证：PROJECT_DIR 必须是有效 CBrain repo（通用错误，不写真实路径）
+if [[ ! -f "$PROJECT_DIR/package.json" || ! -f "$PROJECT_DIR/src/cli/index.ts" ]]; then
+  echo "FAIL: PROJECT_DIR 不是有效的 CBrain repo（缺 package.json 或 src/cli/index.ts）。设置 CBRAIN_REPO_DIR 指向 CBrain repo root。" >&2
+  exit 1
+fi
+
 # timeout 命令检测（Linux timeout / macOS gtimeout）；都没有则 gate 依赖自身 bounded
 TIMEOUT_CMD=""
 if command -v timeout >/dev/null 2>&1; then TIMEOUT_CMD="timeout";
@@ -82,7 +94,7 @@ fi
 
 # ── perf（readonly SQLite，不 spawn 写 runtime）──
 section "perf"
-PERF_JSON="$(bun src/cli/index.ts perf-diagnose --days 7 --min-latency-ms 0 --json 2>/dev/null || true)"
+PERF_JSON="$((cd "$PROJECT_DIR" && bun "$PROJECT_DIR/src/cli/index.ts" perf-diagnose --days 7 --min-latency-ms 0 --json) 2>/dev/null || true)"
 if [[ -n "$PERF_JSON" ]]; then
   ok "perf-diagnose（readonly，JSON 详情省略）"
 else
@@ -93,9 +105,9 @@ fi
 section "repo_gate"
 GATE_STATUS=0
 if [[ -n "$TIMEOUT_CMD" ]]; then
-  $TIMEOUT_CMD "$REPO_GATE_TIMEOUT_S" bun run gate:v2-preflight >/dev/null 2>&1 || GATE_STATUS=$?
+  (cd "$PROJECT_DIR" && $TIMEOUT_CMD "$REPO_GATE_TIMEOUT_S" bun run gate:v2-preflight) >/dev/null 2>&1 || GATE_STATUS=$?
 else
-  bun run gate:v2-preflight >/dev/null 2>&1 || GATE_STATUS=$?
+  (cd "$PROJECT_DIR" && bun run gate:v2-preflight) >/dev/null 2>&1 || GATE_STATUS=$?
 fi
 if [[ "$GATE_STATUS" -eq 0 ]]; then
   ok "gate:v2-preflight pass"
