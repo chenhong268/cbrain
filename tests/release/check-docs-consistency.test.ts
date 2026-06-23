@@ -212,3 +212,26 @@ test("fails when a skill index references a phantom MCP tool on a 工具 line", 
     },
   );
 });
+
+test("fails when daily-patrol counts MCP tools with grep name fields", () => {
+  const scriptPath = join(PROJECT_DIR, "bin", "daily-patrol.sh");
+  const original = readFileSync(scriptPath, "utf-8");
+  const patched = original.replace(
+    /TOOL_COUNT="\$\(printf '%s' "\$TOOLS_LIST" \| bun -e '[\s\S]*?' 2>\/dev\/null \|\| printf '\?'\)"/,
+    "TOOL_COUNT=\"$(echo \"$TOOLS_LIST\" | grep -o '\"name\"' | wc -l | tr -d ' ')\"",
+  );
+
+  if (patched === original) {
+    throw new Error("test fixture failed to patch daily-patrol tool counter");
+  }
+
+  try {
+    writeFileSync(scriptPath, patched);
+    const { stdout, code } = runCheck();
+    expect(code).toBe(1);
+    expect(stdout).toContain("daily-patrol mcp tool count");
+    expect(stdout).toContain("result.tools.length");
+  } finally {
+    writeFileSync(scriptPath, original);
+  }
+});

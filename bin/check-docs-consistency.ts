@@ -371,6 +371,16 @@ function checkDailyPatrolContract(docs: Map<string, string>): CheckResult[] {
         detail: "perf-diagnose 必须在 (cd \"$PROJECT_DIR\" && ...) 下（loadConfig 按 cwd 找 cbrain.json），#223 review",
       });
     }
+    // MCP tools/list 响应里除 tool.name 外，还可能有 inputSchema.properties.name
+    // 等字段。grep `"name"` 会把参数名也算进工具总数，造成 patrol 报告
+    // 与 docs/health 真值不一致。
+    if (/grep\s+-o\s+['"]"name"['"]/.test(script)) {
+      out.push({
+        check: "daily-patrol mcp tool count",
+        passed: false,
+        detail: "daily-patrol.sh 不得用 grep '\"name\"' 统计 MCP tools；必须解析 result.tools.length",
+      });
+    }
   }
   const patrolDoc = docs.get("docs/patrol.md");
   if (patrolDoc) {

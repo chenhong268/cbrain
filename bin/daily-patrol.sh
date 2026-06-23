@@ -82,7 +82,16 @@ if [[ -n "$SESSION" ]]; then
     -H "mcp-session-id: $SESSION" \
     -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' 2>&1 || true)"
   if echo "$TOOLS_LIST" | grep -q '"tools"'; then
-    TOOL_COUNT="$(echo "$TOOLS_LIST" | grep -o '"name"' | wc -l | tr -d ' ')"
+    TOOL_COUNT="$(printf '%s' "$TOOLS_LIST" | bun -e '
+      const chunks = [];
+      for await (const chunk of Bun.stdin.stream()) chunks.push(chunk);
+      const text = Buffer.concat(chunks).toString("utf8");
+      const jsonStart = text.indexOf("{");
+      const payload = JSON.parse(jsonStart >= 0 ? text.slice(jsonStart) : text);
+      const tools = payload?.result?.tools;
+      if (!Array.isArray(tools)) throw new Error("missing tools array");
+      console.log(tools.length);
+    ' 2>/dev/null || printf '?')"
     ok "MCP /mcp tools/list（${TOOL_COUNT} tools 暴露）"
     MCP_OK=1
   else
