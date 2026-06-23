@@ -315,6 +315,61 @@ function stripAutoGen(text: string): string {
  *      Tool. Parameter tables (参数/类型/...), capability tables (Category/
  *      Skill/Page Type) and prose that merely mentions "tool" never trip it.
  *  Auto-generated sections are stripped first. */
+
+/** Enforce the #223 daily-patrol contract:
+ *  - `bin/daily-patrol.sh` must NOT invoke `bun test`, `bun run check`, or
+ *    `cbrain doctor` (single-writer topology: cron must not spawn stdio CLI
+ *    that touches runtime; full suite belongs to nightly/release).
+ *  - `docs/patrol.md` must not recommend running `bun test`/`bun run check`
+ *    in the daily patrol path. */
+function checkDailyPatrolContract(docs: Map<string, string>): CheckResult[] {
+  const out: CheckResult[] = [];
+  const badInScript = [
+    /\bbun test\b/,
+    /\bbun run check\b/,
+    /\bcbrain doctor\b/,
+  ];
+  const scriptPath = join(PROJECT_DIR, "bin", "daily-patrol.sh");
+  if (existsSync(scriptPath)) {
+    const script = readFileSync(scriptPath, "utf-8");
+    script.split("\n").forEach((line, i) => {
+      if (line.trimStart().startsWith("#")) return; // 跳过注释
+      for (const re of badInScript) {
+        const m = line.match(re);
+        if (m) {
+          out.push({
+            check: `daily-patrol contract @bin/daily-patrol.sh:${i + 1}`,
+            passed: false,
+            detail: `"${m[0]}" 违反 #223：daily patrol 不调 full suite / doctor（single-writer 拓扑，见 docs/patrol.md）`,
+          });
+        }
+      }
+    });
+  }
+  const patrolDoc = docs.get("docs/patrol.md");
+  if (patrolDoc) {
+    patrolDoc.split("\n").forEach((line, i) => {
+      if (line.includes("<!-- docs-consistency:ignore-command -->")) return;
+      // patrol.md 提 bun test/check 必须在 nightly/release 语境，不能在 daily 推荐
+      if (/\bdaily\b.*\bbun (test|run check)\b/i.test(line)) {
+        out.push({
+          check: `daily-patrol doc @docs/patrol.md:${i + 1}`,
+          passed: false,
+          detail: `daily 行不应推荐 bun test/check（#223：daily bounded，full suite 留 nightly/release）`,
+        });
+      }
+    });
+  }
+  if (out.length === 0) {
+    out.push({
+      check: "daily-patrol contract",
+      passed: true,
+      detail: "daily-patrol.sh 不调 full suite/doctor；docs/patrol.md daily 不推荐 bun test/check",
+    });
+  }
+  return out;
+}
+
 function checkToolReferences(docs: Map<string, string>, tools: Set<string>): CheckResult[] {
   const out: CheckResult[] = [];
   const SEPARATOR_RE = /^\|[\s:|-]+\|$/;
@@ -480,6 +535,7 @@ function main(): void {
     ...checkCounts(docs, tools.length, cli.size),
     ...checkBinary(docs),
     ...checkLegacyCronPatterns(docs),
+    ...checkDailyPatrolContract(docs),
     ...checkToolReferences(docs, new Set(tools.map((t) => t.name))),
     ...checkSkillsToolRefs(docs, new Set(tools.map((t) => t.name))),
     ...checkSections(docs, tools, cli),
