@@ -206,6 +206,8 @@ cbrain perf-diagnose --json --days 30    # 同上，30 天窗口、机器可读 
 
 > **Hermes cron 集成**：见 [docs/hermes-integration.md](docs/hermes-integration.md) —— 用 `bin/cbrain-maintenance.sh` wrapper 走 HTTP `/mcp`，**不要裸调 CLI**（serve 在跑时并发写损坏数据）。
 
+> **运维巡检**：见 [docs/patrol.md](docs/patrol.md) —— daily（`bin/daily-patrol.sh` bounded）/ nightly（`bun run check`）/ release 三层分离。daily 不跑 full `bun test`（避免短 timeout 误报）。
+
 ### 服务
 ```bash
 cbrain serve                             # 启动 MCP Server，供 AI Agent 调用
