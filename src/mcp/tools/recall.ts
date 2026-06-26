@@ -292,7 +292,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         relevance: sr.score,
         quality,
         tier,
-        snippet: sr.snippet,
+        snippet: sr.detail?.snippet ?? sr.snippet,
         body: truncate(page?.body, isBrief ? 200 : 500),
         frontmatter: safeFrontmatter(page?.frontmatter ?? null),
         ...(isBrief ? {} : {
