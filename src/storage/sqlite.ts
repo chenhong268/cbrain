@@ -2049,6 +2049,46 @@ export class CBrainDB {
     this.prepare("DELETE FROM chunks WHERE page_slug = $slug AND summary_level = 1").run({ $slug: slug });
   }
 
+  /** A page is "sealed" when it owns an L1 summary chunk (summary_level = 1). */
+  isSealedPage(pageSlug: string): boolean {
+    const row = this.prepare(
+      "SELECT 1 FROM chunks WHERE page_slug = $slug AND summary_level = 1 LIMIT 1"
+    ).get({ $slug: pageSlug });
+    return Boolean(row);
+  }
+
+  /**
+   * Bounded raw-chunk lookup for a single page. Deterministic OR-LIKE over ONLY
+   * that page's summary_level = 0 chunks — no global FTS scan, no LLM. Terms are
+   * pre-extracted by the caller (see HybridSearch.extractDetailTerms). LIKE
+   * wildcards (%, _, \) in each term are escaped so they match literally. Terms
+   * shorter than 2 chars are dropped. Returns up to `maxChunks` raw chunks
+   * ordered by chunk_index. Defensive term cap keeps the SQL bounded.
+   */
+  getRawChunkHitsForPage(
+    pageSlug: string,
+    terms: string[],
+    maxChunks: number = 3
+  ): Array<{ chunk_index: number; content: string }> {
+    const escaped = terms
+      .slice(0, 16)
+      .filter((t) => t.trim().length >= 2)
+      .map((t) => t.replace(/[%_\\]/g, "\\$&"));
+    if (escaped.length === 0) return [];
+    const clauses = escaped.map(() => "content LIKE ? ESCAPE '\\'").join(" OR ");
+    const params: string[] = escaped.map((e) => `%${e}%`);
+    return this.rawDb
+      .prepare(
+        `SELECT chunk_index, content FROM chunks
+         WHERE page_slug = ? AND summary_level = 0 AND (${clauses})
+         ORDER BY chunk_index LIMIT ?`
+      )
+      .all(pageSlug, ...params, maxChunks) as Array<{
+      chunk_index: number;
+      content: string;
+    }>;
+  }
+
   getPagesNeedingSeal(): string[] {
     const rows = this.prepare(
       `SELECT DISTINCT c1.page_slug FROM chunks c1
