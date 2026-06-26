@@ -159,4 +159,65 @@ describe("HybridSearch sealed detail enrichment (#169)", () => {
     expect(results.find((r) => r.slug === "p/sealed-c")!.detail?.level).toBe("raw_chunk");
     expect(results.find((r) => r.slug === "p/raw-d")!.detail).toBeUndefined();
   });
+
+  test("detail picks the strongest-signal chunk, not the lowest chunk_index", async () => {
+    const DETAIL = "ALPHA-123";
+    // chunk 0: generic CJK context — matches the low-signal 3-gram "项目的".
+    // chunk 1: carries the real ID — matches the high-signal term ALPHA-123.
+    insertPage(db, "p/sealed-rank");
+    db.insertChunkWithLevel("p/sealed-rank", 0, "项目的基本背景资料与介绍说明。", 0, null);
+    db.ftsInsert("p/sealed-rank", "项目的基本背景资料与介绍说明。");
+    db.insertChunkWithLevel("p/sealed-rank", 1, `记录的审批编号 ${DETAIL} 已存档。`, 0, null);
+    db.ftsInsert("p/sealed-rank", `记录的审批编号 ${DETAIL} 已存档。`);
+    db.insertChunkWithLevel("p/sealed-rank", -1, "概要省略编号。", 1, "h-rank");
+    db.ftsInsert("p/sealed-rank", "概要省略编号。");
+
+    const search = new HybridSearch(
+      db,
+      createMockEmbeddingProvider(),
+      createMockLance("p/sealed-rank", "概要省略编号。") as any,
+      { rrf_k: 60 }
+    );
+    // Query carries both natural language AND the ID.
+    const results = await search.search(`项目的审批编号 ${DETAIL} 是多少`, { limit: 5 });
+    const hit = results.find((r) => r.slug === "p/sealed-rank");
+    expect(hit).toBeTruthy();
+    expect(hit!.detail).toBeDefined();
+    // Must surface chunk 1 (the ID), not chunk 0 (generic context).
+    expect(hit!.detail!.snippet).toContain(DETAIL);
+  });
+
+  test("detail surfaces high-signal chunk even when it sits beyond the LIMIT cutoff", async () => {
+    const DETAIL = "ALPHA-123";
+    insertPage(db, "p/sealed-late");
+    // chunks 0-3: generic CJK context (match the low-signal "项目的" 3-gram).
+    const generic = [
+      "项目的基本背景资料与介绍说明。",
+      "项目的整体流程备注与说明。",
+      "项目的前提条件与相关上下文。",
+      "项目的补充信息与附加备注。",
+    ];
+    for (let i = 0; i < generic.length; i++) {
+      db.insertChunkWithLevel("p/sealed-late", i, generic[i], 0, null);
+      db.ftsInsert("p/sealed-late", generic[i]);
+    }
+    // chunk 4 sits beyond the MAX_RAW_CHUNK_HITS_PER_PAGE (3) cutoff but carries
+    // the real ID. Term-signal ranking must promote it BEFORE the LIMIT.
+    db.insertChunkWithLevel("p/sealed-late", 4, `关键审批编号 ${DETAIL} 已确认存档。`, 0, null);
+    db.ftsInsert("p/sealed-late", `关键审批编号 ${DETAIL} 已确认存档。`);
+    db.insertChunkWithLevel("p/sealed-late", -1, "概要省略编号。", 1, "h-late");
+    db.ftsInsert("p/sealed-late", "概要省略编号。");
+
+    const search = new HybridSearch(
+      db,
+      createMockEmbeddingProvider(),
+      createMockLance("p/sealed-late", "概要省略编号。") as any,
+      { rrf_k: 60 }
+    );
+    const results = await search.search(`项目的审批编号 ${DETAIL} 是多少`, { limit: 5 });
+    const hit = results.find((r) => r.slug === "p/sealed-late");
+    expect(hit).toBeTruthy();
+    expect(hit!.detail).toBeDefined();
+    expect(hit!.detail!.snippet).toContain(DETAIL);
+  });
 });

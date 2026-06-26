@@ -676,10 +676,10 @@ export class HybridSearch {
     const pagesToProbe = sealedSlugs.slice(0, MAX_SEALED_DETAIL_PAGES);
     const detailBySlug = new Map<string, SealedDetailHit>();
     for (const slug of pagesToProbe) {
-      const hits = this.db.getRawChunkHitsForPage(slug, terms, MAX_RAW_CHUNK_HITS_PER_PAGE);
-      if (hits.length === 0) continue;
+      const snippet = this.pickStrongestRawHit(slug, terms);
+      if (snippet === null) continue;
       detailBySlug.set(slug, {
-        snippet: hits[0].content.slice(0, DETAIL_SNIPPET_CHARS),
+        snippet: snippet.slice(0, DETAIL_SNIPPET_CHARS),
         level: "raw_chunk",
       });
     }
@@ -689,6 +689,29 @@ export class HybridSearch {
       const d = detailBySlug.get(r.slug);
       return d ? { ...r, detail: d } : r;
     });
+  }
+
+  /**
+   * Pick the raw chunk matching the highest-signal query term. Signal order:
+   * non-CJK tokens (ID/date/number/amount/latin) outrank pure-CJK 3-grams;
+   * within a class, terms are length-desc (more specific first); chunk_index is
+   * the final tie-breaker. Prevents a generic-context chunk (matching only a
+   * low-signal CJK n-gram at a lower chunk_index) from hiding the chunk that
+   * actually carries the ID/number/date (#169 review).
+   */
+  private pickStrongestRawHit(slug: string, terms: string[]): string | null {
+    if (terms.length === 0) return null;
+    // Rank terms by signal class: non-CJK (ID/date/number/amount/latin) before
+    // pure-CJK n-grams; within a class, preserve length-desc specificity from
+    // extractDetailTerms. getRawChunkHitsForPage turns this order into SQL
+    // match_rank so the strongest-signal chunk survives LIMIT (#169 review).
+    const isCjk = (t: string) => /^[一-鿿]+$/.test(t);
+    const ranked = [
+      ...terms.filter((t) => !isCjk(t)),
+      ...terms.filter((t) => isCjk(t)),
+    ];
+    const hits = this.db.getRawChunkHitsForPage(slug, ranked, MAX_RAW_CHUNK_HITS_PER_PAGE);
+    return hits.length === 0 ? null : hits[0].content;
   }
 
   private async vectorSearch(query: string, limit: number): Promise<SearchResult[]> {

@@ -2060,10 +2060,14 @@ export class CBrainDB {
   /**
    * Bounded raw-chunk lookup for a single page. Deterministic OR-LIKE over ONLY
    * that page's summary_level = 0 chunks — no global FTS scan, no LLM. Terms are
-   * pre-extracted by the caller (see HybridSearch.extractDetailTerms). LIKE
-   * wildcards (%, _, \) in each term are escaped so they match literally. Terms
-   * shorter than 2 chars are dropped. Returns up to `maxChunks` raw chunks
-   * ordered by chunk_index. Defensive term cap keeps the SQL bounded.
+   * pre-extracted and RANKED BY PRIORITY by the caller (see
+   * HybridSearch.pickStrongestRawHit): highest-signal term first. LIKE wildcards
+   * (%, _, \) are escaped to match literally; terms < 2 chars are dropped.
+   *
+   * match_rank is computed in SQL (CASE: index of the first matching term) so
+   * the strongest-signal chunk is promoted BEFORE LIMIT — a high-signal chunk
+   * at chunk_index 4 is not lost to a chunk_index-ordered LIMIT cutoff (#169).
+   * Returns up to `maxChunks` raw chunks ordered by (match_rank, chunk_index).
    */
   getRawChunkHitsForPage(
     pageSlug: string,
@@ -2075,15 +2079,21 @@ export class CBrainDB {
       .filter((t) => t.trim().length >= 2)
       .map((t) => t.replace(/[%_\\]/g, "\\$&"));
     if (escaped.length === 0) return [];
-    const clauses = escaped.map(() => "content LIKE ? ESCAPE '\\'").join(" OR ");
-    const params: string[] = escaped.map((e) => `%${e}%`);
+    const patterns = escaped.map((e) => `%${e}%`);
+    const caseClauses = escaped
+      .map((_, i) => `WHEN content LIKE ? ESCAPE '\\' THEN ${i}`)
+      .join(" ");
+    const whereClauses = escaped.map(() => "content LIKE ? ESCAPE '\\'").join(" OR ");
     return this.rawDb
       .prepare(
-        `SELECT chunk_index, content FROM chunks
-         WHERE page_slug = ? AND summary_level = 0 AND (${clauses})
-         ORDER BY chunk_index LIMIT ?`
+        `SELECT chunk_index, content,
+           CASE ${caseClauses} ELSE ${escaped.length} END AS match_rank
+         FROM chunks
+         WHERE page_slug = ? AND summary_level = 0 AND (${whereClauses})
+         ORDER BY match_rank ASC, chunk_index ASC
+         LIMIT ?`
       )
-      .all(pageSlug, ...params, maxChunks) as Array<{
+      .all(...patterns, pageSlug, ...patterns, maxChunks) as Array<{
       chunk_index: number;
       content: string;
     }>;
