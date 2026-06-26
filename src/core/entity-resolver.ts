@@ -320,9 +320,13 @@ export class EntityResolver {
 
     const MAX_ENTITIES_IN_PROMPT = 200;
     const allTitles = this.getCachedTitles();
-    const baseEntities = allTitles
+    // The embedding candidate POOL is larger than the final prompt cap so the
+    // shortlist can surface entities beyond MAX_ENTITIES_IN_PROMPT (#168 review):
+    // embedding searches up to EMBED_MAX_EXISTING_TITLES, the shortlist is
+    // prioritized to the front, then the list is trimmed to the prompt cap.
+    const poolEntities: Array<{ title: string; type: string; slug: string }> = allTitles
       .filter(title => !resolvedTitles.has(title))
-      .slice(0, MAX_ENTITIES_IN_PROMPT)
+      .slice(0, EMBED_MAX_EXISTING_TITLES)
       .map(title => {
         const slug = this.db.getEntitySlugByTitle(title) ?? "";
         const type = this.db.getEntityType(slug) ?? "record";
@@ -330,26 +334,26 @@ export class EntityResolver {
       });
 
     // Phase 1 (#168): in shadow mode, prioritize embedding-shortlisted entities to
-    // the front of the LLM prompt. Prioritize (not replace) — the rest of the list
-    // is preserved so recall never drops vs. today. Full fallback on any embedding
-    // failure; the alias write below is unchanged.
-    let existingEntities: Array<{ title: string; type: string; slug: string }> = baseEntities;
+    // the front. Prioritize (not replace) — remaining entities follow in original
+    // order, then the whole list is trimmed to the prompt cap. Full fallback on any
+    // embedding failure; the alias write below is unchanged.
+    let existingEntities: Array<{ title: string; type: string; slug: string }> = poolEntities.slice(0, MAX_ENTITIES_IN_PROMPT);
     if (this.embeddingMode === "shadow" && this.embedding && unmatched.length > 0) {
       try {
-        const shortlistByCandidate = await this.findEmbeddingCandidates(unmatched, baseEntities);
+        const shortlistByCandidate = await this.findEmbeddingCandidates(unmatched, poolEntities);
         const prioritizedSlugs = new Set<string>();
         for (const set of shortlistByCandidate.values()) {
           for (const s of set) prioritizedSlugs.add(s);
         }
         if (prioritizedSlugs.size > 0) {
           existingEntities = [
-            ...baseEntities.filter((e) => prioritizedSlugs.has(e.slug)),
-            ...baseEntities.filter((e) => !prioritizedSlugs.has(e.slug)),
-          ];
+            ...poolEntities.filter((e) => prioritizedSlugs.has(e.slug)),
+            ...poolEntities.filter((e) => !prioritizedSlugs.has(e.slug)),
+          ].slice(0, MAX_ENTITIES_IN_PROMPT);
         }
       } catch {
         // Embedding must never break resolution — fall back to the unfiltered list.
-        existingEntities = baseEntities;
+        existingEntities = poolEntities.slice(0, MAX_ENTITIES_IN_PROMPT);
       }
     }
     // Call LLM

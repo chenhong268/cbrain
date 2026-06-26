@@ -198,4 +198,32 @@ describe("EntityResolver embedding shortlist (#168 Phase 1)", () => {
     expect(results.get("PA")?.action).toBe("alias_added");
     expect(results.get("PA")?.matchedBy).toBe("llm_semantic");
   });
+
+  test("embedding surfaces an entity beyond the 200-prompt cap (201-500 pool)", async () => {
+    // 220 fillers push Project Alpha past MAX_ENTITIES_IN_PROMPT (200) but within
+    // the 500 embedding pool. getAllEntityTitles returns insertion order, so
+    // Project Alpha lands at index 220. Without pool/cap separation it is never
+    // shortlisted and never reaches the prompt — defeating Phase 1's purpose.
+    for (let i = 0; i < 220; i++) seedEntity(`Filler ${i}`, "entity/company", `entity/filler-${i}`);
+    seedEntity("Project Alpha", "entity/company", "entity/project-alpha");
+    const vec = [1, 0, 0, 0, 0, 0, 0, 0];
+    let capturedPrompt = "";
+    const spyingLlm: LLMProvider = {
+      name: "mock",
+      chat: async (msgs) => {
+        capturedPrompt = msgs.find((m) => m.role === "user")?.content ?? "";
+        return '{"matches":[]}';
+      },
+    };
+    const resolver = new EntityResolver(
+      db,
+      spyingLlm,
+      { embedding: mockEmbedding({ "PA": vec, "Project Alpha": vec }), embeddingMode: "shadow" },
+    );
+    const results = resolver.resolveAll([candidate("PA")]);
+    await resolver.semanticResolve(results, [candidate("PA")]);
+    // Project Alpha (beyond the 200 cap) must enter the prompt and precede fillers.
+    expect(capturedPrompt).toContain("Project Alpha");
+    expect(capturedPrompt.indexOf("Project Alpha")).toBeLessThan(capturedPrompt.indexOf("Filler 0"));
+  });
 });
