@@ -5,11 +5,24 @@ import { LanceDBManager as LanceDBStorage } from "../storage/lancedb.js";
 import { ResearchManager } from "./research.js";
 import type { Logger } from "./logger.js";
 
+export interface SealedDetailHit {
+  /** Raw-chunk fragment recovered from a sealed page. User-visible. */
+  snippet: string;
+  /** Internal-only marker. Never emitted to Hermes-facing display. */
+  level: "raw_chunk";
+}
+
 export interface SearchResult {
   slug: string;
   score: number;
   snippet: string;
   source: "vector" | "fts" | "graph" | "hybrid" | "temporal" | "exact";
+  /**
+   * Detail-level evidence recovered from a sealed page's raw chunks.
+   * `snippet` is surfaced to users; `level` is internal-only (never displayed).
+   * Undefined for unsealed pages or when no raw chunk matches.
+   */
+  detail?: SealedDetailHit;
 }
 
 export interface SearchHints {
@@ -45,6 +58,8 @@ export interface SearchOptions {
   _hints?: SearchHints;
   /** @internal Trace accumulator for per-stage timing diagnostics */
   _trace?: SearchTrace;
+  /** @internal Skip sealed detail enrichment (set for recursive sub-queries). */
+  _skipDetailEnrich?: boolean;
 }
 
 export interface HybridSearchConfig {
@@ -153,6 +168,11 @@ export function extractDetailTerms(query: string): string[] {
 const W_ACTIVITY = 0.15;
 const W_HOTNESS = 0.12;
 
+/** Sealed-page detail enrichment bounds — keep the post-fusion probe cheap and fanout-bounded (#169). */
+const MAX_SEALED_DETAIL_PAGES = 5;
+const MAX_RAW_CHUNK_HITS_PER_PAGE = 3;
+const DETAIL_SNIPPET_CHARS = 200;
+
 export function mergeRankedResults(
   lists: SearchResult[][],
   k: number,
@@ -244,10 +264,14 @@ export class HybridSearch {
 
     const shouldMultiStep = options?.multiStep === true;
 
-    if (shouldMultiStep && this.llm) {
-      return this.searchMultiStep(query, options ?? {});
-    }
-    return this.searchCore(query, options);
+    const results = shouldMultiStep && this.llm
+      ? await this.searchMultiStep(query, options ?? {})
+      : await this.searchCore(query, options);
+
+    // Post-fusion sealed detail recovery (#169). Skipped for recursive
+    // sub-queries so enrichment happens exactly once at the outer exit.
+    if (options?._skipDetailEnrich) return results;
+    return this.enrichSealedDetail(query, results);
   }
 
   private async searchCore(query: string, options?: SearchOptions): Promise<SearchResult[]> {
@@ -335,7 +359,7 @@ export class HybridSearch {
         if (subQueries.length >= 2) {
           const subResults = await Promise.all(
             subQueries.map((sq) =>
-              this.search(sq, { ...(options ?? {}), _skipDecompose: true, multiQuery: false, _trace: trace }).catch(() => [] as SearchResult[])
+              this.search(sq, { ...(options ?? {}), _skipDecompose: true, multiQuery: false, _skipDetailEnrich: true, _trace: trace }).catch(() => [] as SearchResult[])
             )
           );
 
@@ -629,6 +653,42 @@ export class HybridSearch {
       this.logger?.warn("search", "查询扩展失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
       return [query];
     }
+  }
+
+  /**
+   * Post-fusion enrichment (#169): for already-recalled sealed pages, recover
+   * detail-level evidence from raw chunks via a bounded per-page OR-LIKE over
+   * query-derived terms. Does NOT change ranking, does NOT replace the summary
+   * result, does NOT run for unsealed pages or queries with no usable terms.
+   * No LLM, no global scan. Idempotent: skips results that already carry detail.
+   */
+  private enrichSealedDetail(query: string, results: SearchResult[]): SearchResult[] {
+    const terms = extractDetailTerms(query);
+    if (terms.length === 0 || results.length === 0) return results;
+
+    const sealedSlugs: string[] = [];
+    for (const r of results) {
+      if (!r.detail && this.db.isSealedPage(r.slug)) sealedSlugs.push(r.slug);
+    }
+    if (sealedSlugs.length === 0) return results;
+
+    // Bound fanout: only already-recalled sealed pages, capped.
+    const pagesToProbe = sealedSlugs.slice(0, MAX_SEALED_DETAIL_PAGES);
+    const detailBySlug = new Map<string, SealedDetailHit>();
+    for (const slug of pagesToProbe) {
+      const hits = this.db.getRawChunkHitsForPage(slug, terms, MAX_RAW_CHUNK_HITS_PER_PAGE);
+      if (hits.length === 0) continue;
+      detailBySlug.set(slug, {
+        snippet: hits[0].content.slice(0, DETAIL_SNIPPET_CHARS),
+        level: "raw_chunk",
+      });
+    }
+    if (detailBySlug.size === 0) return results;
+
+    return results.map((r) => {
+      const d = detailBySlug.get(r.slug);
+      return d ? { ...r, detail: d } : r;
+    });
   }
 
   private async vectorSearch(query: string, limit: number): Promise<SearchResult[]> {
