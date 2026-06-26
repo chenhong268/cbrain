@@ -70,6 +70,7 @@ describe("extractReasonCodes allowlist (#189 review)", () => {
     const raw = JSON.stringify({
       reason_codes: [
         "vector_timeout",
+        "latency_budget_exceeded",
         "sk-DEADBEEF-PRIVATE",
         "用户私密判断",
         "/Users/private/vault/file.md",
@@ -79,7 +80,7 @@ describe("extractReasonCodes allowlist (#189 review)", () => {
       secret_blob: "RAW-PRIVATE-CONTENT",
     });
     const codes = extractReasonCodes(raw);
-    expect(codes.sort()).toEqual(["low_score", "reasoning_parse_failed", "vector_timeout"]);
+    expect(codes.sort()).toEqual(["latency_budget_exceeded", "low_score", "reasoning_parse_failed", "vector_timeout"]);
     expect(codes).not.toContain("sk-DEADBEEF-PRIVATE");
     expect(codes).not.toContain("用户私密判断");
     expect(codes.some((c) => c.includes("/Users"))).toBe(false);

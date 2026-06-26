@@ -18,6 +18,7 @@ export type DegradedReasonCode =
   | "routing_mismatch_hierarchy"
   | "fallback_used"
   | "budget_exhausted"
+  | "latency_budget_exceeded"
   | "reasoning_parse_failed";
 
 /**
@@ -36,6 +37,7 @@ export const ALL_DEGRADED_REASON_CODES: ReadonlySet<DegradedReasonCode> = new Se
   "routing_mismatch_hierarchy",
   "fallback_used",
   "budget_exhausted",
+  "latency_budget_exceeded",
   "reasoning_parse_failed",
 ]);
 
@@ -51,6 +53,7 @@ export interface SearchDiagnosticInput {
   };
   query: string;
   requestedLimit?: number;
+  latencyMs?: number;
 }
 
 // ─── Constants ─────────────────────────────────────────────
@@ -91,6 +94,7 @@ export function classifyDegradedReasons(
   },
   query: string,
   _requestedLimit?: number,
+  latencyMs?: number,
 ): DegradedReasonCode[] {
   const codes: DegradedReasonCode[] = [];
   const hasVectorDegradation = !!trace.degraded_reason;
@@ -102,6 +106,8 @@ export function classifyDegradedReasons(
     codes.push("vector_error");
   } else if (trace.degraded_reason === "reasoning_parse_failed") {
     codes.push("reasoning_parse_failed");
+  } else if (trace.degraded_reason === "decompose_budget_exceeded") {
+    codes.push("budget_exhausted");
   }
 
   // 1b. FTS parser fallback — MATCH expression failed, degraded to LIKE
@@ -140,6 +146,13 @@ export function classifyDegradedReasons(
     codes.push("budget_exhausted");
   }
 
+  // 8. Latency-only degraded sessions. computeSearchDegraded() marks slow
+  // searches degraded even when no retrieval-specific reason applies; emit a
+  // stable category so perf-diagnose can explain the degraded rate.
+  if (latencyMs != null && latencyMs > 2000) {
+    codes.push("latency_budget_exceeded");
+  }
+
   return codes;
 }
 
@@ -162,6 +175,7 @@ const DEGRADED_REASON_CODES: ReadonlySet<DegradedReasonCode> = new Set([
   "fts_parser_fallback",
   "low_score",
   "budget_exhausted",
+  "latency_budget_exceeded",
   "fallback_used",
   "reasoning_parse_failed",
 ]);

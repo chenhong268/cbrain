@@ -182,7 +182,7 @@ describe("cbrain perf-diagnose (#189)", () => {
       "q", "deep_recall", "topic", now, 2500, "degraded", 1, 3,
       JSON.stringify({
         degraded_reason: "vector_timeout",
-        reason_codes: ["vector_timeout", "sk-DEADBEEF-PRIVATE", "用户私密判断", "/Users/private/vault/file.md"],
+        reason_codes: ["vector_timeout", "latency_budget_exceeded", "sk-DEADBEEF-PRIVATE", "用户私密判断", "/Users/private/vault/file.md"],
         secret_blob: "RAW-PRIVATE-CONTENT",
       }),
     );
@@ -191,7 +191,7 @@ describe("cbrain perf-diagnose (#189)", () => {
     const out = run("--json --min-latency-ms 1000");
     const d = JSON.parse(out.stdout);
     // Only the known code is categorized; unknown strings are NOT turned into categories.
-    expect(d.by_degraded_reason.map((x: { reason: string }) => x.reason).sort()).toEqual(["vector_timeout"]);
+    expect(d.by_degraded_reason.map((x: { reason: string }) => x.reason).sort()).toEqual(["latency_budget_exceeded", "vector_timeout"]);
     // Private content never reaches the report — neither as a category nor echoed.
     expect(out.stdout).not.toContain("sk-DEADBEEF-PRIVATE");
     expect(out.stdout).not.toContain("用户私密判断");

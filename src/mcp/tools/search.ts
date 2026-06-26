@@ -89,7 +89,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     const latencyMs = Date.now() - start;
 
     // Diagnose degraded search state
-    const reasonCodes = classifyDegradedReasons(results, trace, query, cap);
+    const reasonCodes = classifyDegradedReasons(results, trace, query, cap, latencyMs);
 
     try {
       const sourceCounts: Record<string, number> = {};

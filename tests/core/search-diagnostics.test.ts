@@ -147,6 +147,37 @@ describe("classifyDegradedReasons", () => {
     expect(codes).toEqual(["reasoning_parse_failed"]);
   });
 
+  test("decompose_budget_exceeded → budget_exhausted", () => {
+    const codes = classifyDegradedReasons(
+      [{ score: 0.8 }],
+      { degraded_reason: "decompose_budget_exceeded" },
+      "test query",
+    );
+    expect(codes).toEqual(["budget_exhausted"]);
+  });
+
+  test("slow response → latency_budget_exceeded", () => {
+    const codes = classifyDegradedReasons(
+      [{ score: 0.8 }],
+      NO_TRACE,
+      "test query",
+      undefined,
+      2500,
+    );
+    expect(codes).toEqual(["latency_budget_exceeded"]);
+  });
+
+  test("fast response does not emit latency_budget_exceeded", () => {
+    const codes = classifyDegradedReasons(
+      [{ score: 0.8 }],
+      NO_TRACE,
+      "test query",
+      undefined,
+      2000,
+    );
+    expect(codes).toEqual([]);
+  });
+
   // ─── HIERARCHY_KEYWORDS coverage ─────────────────────────
 
   test("all HIERARCHY_KEYWORDS trigger detection on empty results", () => {
@@ -184,5 +215,9 @@ describe("computeSearchDegraded", () => {
 
   test("vector_timeout code + low latency → degraded", () => {
     expect(computeSearchDegraded(50, {}, ["vector_timeout"])).toBe(true);
+  });
+
+  test("latency_budget_exceeded code + low latency → degraded", () => {
+    expect(computeSearchDegraded(50, {}, ["latency_budget_exceeded"])).toBe(true);
   });
 });

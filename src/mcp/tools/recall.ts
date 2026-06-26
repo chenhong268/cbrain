@@ -105,7 +105,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const searchLatencyMs = Date.now() - searchStart;
 
     // Diagnose degraded search state
-    const reasonCodes = classifyDegradedReasons(searchResults, trace, query, cap);
+    const reasonCodes = classifyDegradedReasons(searchResults, trace, query, cap, searchLatencyMs);
 
     try {
       const sourceCounts: Record<string, number> = {};
