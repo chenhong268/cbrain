@@ -3,6 +3,7 @@ import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { mapEntityType } from "./shared.js";
 import { getOntology } from "../ontology/loader.js";
+import type { EmbeddingProvider } from "../embedding/provider.js";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -26,12 +27,32 @@ export interface EntityCandidate {
   relevance: Relevance;
 }
 
+export type ResolverEmbeddingMode = "off" | "shadow";
+
+export interface ResolverOptions {
+  /** Embedding provider for the candidate shortlist. Undefined ⇒ embedding disabled. */
+  embedding?: EmbeddingProvider;
+  /** "off" (default) preserves current behavior; "shadow" enables shortlist focusing only. */
+  embeddingMode?: ResolverEmbeddingMode;
+}
+
 // ─── Resolver ─────────────────────────────────────────────────
 
 export class EntityResolver {
   private titleCache: string[] | null = null;
 
-  constructor(private db: CBrainDB, private llm?: LLMProvider) {}
+  constructor(
+    private db: CBrainDB,
+    private llm?: LLMProvider,
+    private readonly options: ResolverOptions = {},
+  ) {}
+
+  private get embedding(): EmbeddingProvider | undefined {
+    return this.options.embedding;
+  }
+  private get embeddingMode(): ResolverEmbeddingMode {
+    return this.options.embeddingMode ?? "off";
+  }
 
   private getCachedTitles(): string[] {
     if (!this.titleCache) this.titleCache = this.db.getAllEntityTitles();
