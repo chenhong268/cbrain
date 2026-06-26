@@ -1,6 +1,31 @@
 # Changelog
 
-> Current: `v1.9.8` — 启动安全、维护任务拓扑、FK 恢复、FTS 回归和批量读取性能加固。
+> Current: `v2.0.0` — Agentic memory kernel 公共发布：自然语言前门、Hermes 输出边界、EvidenceBoard/grounded recall、single-writer 多 Agent 拓扑、v2 发布门禁与安装上手路径。
+
+## [v2.0.0] — 2026-06-26
+
+### Agentic Memory Kernel
+
+- **自然语言前门**：Hermes 面向用户问题优先走 `cbrain_recall` / `deep_recall` / grounded recall / 情境回忆 / 组织架构 / 关系分析等高层路径，底层 `query` 降级为调试能力。
+- **证据边界**：高频工具输出统一遵循 `display` / `summary` / `raw` 分层；Hermes 默认只使用自然语言 display 与摘要，不把 raw/debug/score/slug/trace/vector 暴露给用户。
+- **Grounded recall 与 EvidenceBoard**：复杂问题先组织事实、来源、缺口和信任状态，再生成回答；candidate/rejected/superseded 等证据状态不会被静默当成事实。
+- **情境回忆与组织架构召回**：支持按时间、事件、地点、共同关系找回人物和经历；组织架构查询走图遍历，不再依赖多轮关键词搜索拼接。
+
+### 运行与发布稳定性
+
+- **单 writer 多 Agent 拓扑**：`cbrain serve --http` 作为唯一写入 runtime，在 `/mcp` 暴露 MCP-over-HTTP；多个 Agent 共享同一个 DB/LanceDB/watcher runtime，避免 stdio 多 writer 并发写。
+- **安全写入与恢复**：补齐 vault sync rollback、watcher shutdown drain、page delete recovery、FK repair、LanceDB rebuild、install smoke、daily patrol 等稳定性路径。
+- **v2 发布门禁**：新增并持续通过 offline first recall、RC journeys、Hermes dialogue、performance、docs consistency、resolver pilot 聚合 gate。
+- **安装上手路径**：README 与 `docs/install-onboarding.md` 提供版本锁定 Bun global install、first-run doctor、MCP/Hermes 接入、skill-pack 验证和故障排查路径。
+
+### Release Checks
+
+- `bun run check`：2466 pass / 0 fail。
+- `bun run gate:v2-preflight`：GO。
+- `bun run check:docs`：PASS。
+- `bin/check-resolver-pilot.sh`：56 OK / 0 FAIL / 9 WARN。
+- `bash bin/daily-patrol.sh`：runtime healthy。
+- 公开测试、文档和发布说明继续使用匿名占位符，无用户知识库隐私信息。
 
 ## [v1.9.8] — 2026-06-22
 
