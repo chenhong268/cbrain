@@ -104,6 +104,52 @@ export function rrfScore(ranks: number[], k: number): number {
   return ranks.reduce((sum, rank) => sum + 1 / (k + rank), 0);
 }
 
+/** Max detail terms extracted from a query — keeps the OR-LIKE bounded (#169). */
+export const MAX_DETAIL_TERMS = 12;
+
+/**
+ * Extract detail-bearing terms from a query for sealed-page raw-chunk lookup.
+ * Deterministic regex only — no LLM, no tokenizer dep. Primary signal: IDs,
+ * dates, numbers+units, latin tokens (exact, high-signal). Secondary: CJK
+ * 3-grams (so a natural-language query that is NOT a raw-chunk substring can
+ * still match a raw-chunk fragment via LIKE). Returns unique terms, length-desc
+ * (longest/most-specific first), capped at MAX_DETAIL_TERMS. Empty array when
+ * nothing usable — caller must skip enrichment rather than scan.
+ */
+export function extractDetailTerms(query: string): string[] {
+  const terms = new Set<string>();
+
+  // IDs / latin+digit compounds: ALPHA-123, RFC-7231, QXR9876
+  for (const m of query.matchAll(/[A-Za-z]+[A-Za-z0-9]*[-/][A-Za-z0-9]+/g)) terms.add(m[0]);
+  for (const m of query.matchAll(/[A-Za-z]+\d+/g)) terms.add(m[0]);
+  // Dates: 2026-06-26, 2026/6/6
+  for (const m of query.matchAll(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/g)) terms.add(m[0]);
+  // Numbers with optional unit: 120万, 3.5亿, 50%, 12万元, 30岁
+  for (const m of query.matchAll(/\d+(?:\.\d+)?(?:万元|亿元|万|亿|%|元|岁|年|度|次|个|人|k|m)?/g)) {
+    if (m[0].length >= 2) terms.add(m[0]);
+  }
+  // Pure multi-digit numbers: 12345
+  for (const m of query.matchAll(/\d{2,}/g)) terms.add(m[0]);
+  // Latin identifiers: API, HTTP
+  for (const m of query.matchAll(/[A-Za-z]{2,}/g)) terms.add(m[0]);
+
+  // CJK runs: 2-char runs kept whole; longer runs → sliding 3-grams so LIKE can
+  // match a raw-chunk fragment even when the full sentence is not a substring.
+  for (const run of query.matchAll(/[一-鿿]+/g)) {
+    const seg = run[0];
+    if (seg.length === 2) {
+      terms.add(seg);
+    } else {
+      for (let i = 0; i <= seg.length - 3; i++) terms.add(seg.slice(i, i + 3));
+    }
+  }
+
+  return [...terms]
+    .filter((t) => t.trim().length >= 2)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, MAX_DETAIL_TERMS);
+}
+
 const W_ACTIVITY = 0.15;
 const W_HOTNESS = 0.12;
 
