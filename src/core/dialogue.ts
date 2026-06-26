@@ -110,10 +110,11 @@ export class DialogueIngest {
   private pages: PageManager | null;
   private llm?: LLMProvider;
   private logger?: Logger;
+  private embedding: EmbeddingProvider;
 
   constructor(
     db: CBrainDB,
-    _embedding: EmbeddingProvider,
+    embedding: EmbeddingProvider,
     _lance: LanceDBManager,
     vaultPath: string,
     llm?: LLMProvider,
@@ -125,6 +126,7 @@ export class DialogueIngest {
     this.pages = pages ?? null;
     this.llm = llm;
     this.logger = logger;
+    this.embedding = embedding;
   }
 
   async ingest(text: string, mode: DialogueMode = "manual", sessionId?: string): Promise<DialogueIngestResult> {
@@ -212,7 +214,10 @@ export class DialogueIngest {
     skipped += filtered.length;
 
     // Step 2: Resolve kept entities through EntityResolver
-    const resolver = new EntityResolver(this.db, this.llm);
+    const resolver = new EntityResolver(this.db, this.llm, {
+      embedding: this.embedding,
+      embeddingMode: "shadow",
+    });
     const candidates = kept.map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
     const resolutionMap = resolver.resolveAll(candidates);
     await resolver.semanticResolve(resolutionMap, candidates);

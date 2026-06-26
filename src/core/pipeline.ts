@@ -279,7 +279,10 @@ export class ContentPipeline {
     const entitySlugMap = new Map<string, string>();
     const stubsCreated = new Set<string>();
 
-    const resolver = new EntityResolver(this.db, this.nerEngine?.provider);
+    const resolver = new EntityResolver(this.db, this.nerEngine?.provider, {
+      embedding: this.embedding,
+      embeddingMode: "shadow",
+    });
     const candidates = extraction.entities
       .map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
     const resolutionMap = resolver.resolveAll(candidates);
