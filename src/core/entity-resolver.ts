@@ -36,6 +36,34 @@ export interface ResolverOptions {
   embeddingMode?: ResolverEmbeddingMode;
 }
 
+/** Embedding shortlist bounds — Phase 1 conservative caps (#168). */
+const EMBED_MAX_STUB_CANDIDATES = 20;
+const EMBED_MAX_EXISTING_TITLES = 500;
+const EMBED_SHORTLIST_K = 10;
+/**
+ * SHORTLIST CUTOFF — NOT a confidence/merge threshold. An existing entity must
+ * clear this cosine vs. a candidate name merely to enter the LLM-focus shortlist.
+ * It never merges entities or writes an alias on its own; alias writes remain
+ * gated by LLM match + confidence ≥ 0.7 + checkTypeGate in semanticResolve.
+ */
+const EMBED_MIN_COSINE = 0.5;
+const EMBED_TIMEOUT_MS = 2000;
+
+/** Cosine similarity over two equal-length vectors. 0 if either is zero-length/zero-norm. */
+function cosine(a: number[], b: number[]): number {
+  if (a.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
 // ─── Resolver ─────────────────────────────────────────────────
 
 export class EntityResolver {
@@ -57,6 +85,62 @@ export class EntityResolver {
   private getCachedTitles(): string[] {
     if (!this.titleCache) this.titleCache = this.db.getAllEntityTitles();
     return this.titleCache;
+  }
+
+  /** embedBatch with a wall-clock guard. Returns null on timeout/throw so callers fall back. */
+  private async embedWithTimeout(texts: string[]): Promise<number[][] | null> {
+    const provider = this.embedding;
+    if (!provider || texts.length === 0) return null;
+    return await new Promise<number[][] | null>((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (!done) { done = true; resolve(null); }
+      }, EMBED_TIMEOUT_MS);
+      provider.embedBatch(texts)
+        .then((res) => { if (!done) { done = true; resolve(res.map((r) => r.embedding)); } })
+        .catch(() => { if (!done) { done = true; resolve(null); } })
+        .finally(() => clearTimeout(timer));
+    });
+  }
+
+  /**
+   * Phase 1 (#168): bounded cosine shortlist of existing entities semantically
+   * similar to each unresolved candidate. Same/affine type only. Returns at most
+   * EMBED_SHORTLIST_K per candidate, cosine ≥ EMBED_MIN_COSINE (shortlist cutoff,
+   * NOT a merge threshold). Writes nothing — purely for LLM prompt focusing.
+   */
+  private async findEmbeddingCandidates(
+    unmatched: Array<{ name: string; type: string }>,
+    existingEntities: Array<{ title: string; type: string; slug: string }>,
+  ): Promise<Map<string, Set<string>>> {
+    const result = new Map<string, Set<string>>(); // candidate name → set of shortlisted slugs
+    if (!this.embedding || this.embeddingMode !== "shadow") return result;
+    if (unmatched.length === 0 || existingEntities.length === 0) return result;
+
+    const cands = unmatched.slice(0, EMBED_MAX_STUB_CANDIDATES);
+    const titles = existingEntities.slice(0, EMBED_MAX_EXISTING_TITLES);
+
+    const candVecs = await this.embedWithTimeout(cands.map((c) => c.name));
+    if (candVecs === null) return result; // timeout/throw → no shortlist, caller falls back
+    const titleVecs = await this.embedWithTimeout(titles.map((t) => t.title));
+    if (titleVecs === null) return result;
+
+    for (let i = 0; i < cands.length; i++) {
+      const cand = cands[i];
+      const candVec = candVecs[i];
+      const candType = mapEntityType(cand.type as EntityType);
+      const scored: Array<{ slug: string; score: number }> = [];
+      for (let j = 0; j < titles.length; j++) {
+        const ent = titles[j];
+        // Type gate: same type or ontology-affine. Non-affine never shortlisted.
+        if (ent.type !== candType && !getOntology().areTypesAffine(ent.type, candType)) continue;
+        const score = cosine(candVec, titleVecs[j]);
+        if (score >= EMBED_MIN_COSINE) scored.push({ slug: ent.slug, score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      result.set(cand.name, new Set(scored.slice(0, EMBED_SHORTLIST_K).map((s) => s.slug)));
+    }
+    return result;
   }
 
   resolveAll(candidates: EntityCandidate[]): Map<string, ResolutionResult> {
@@ -236,14 +320,38 @@ export class EntityResolver {
 
     const MAX_ENTITIES_IN_PROMPT = 200;
     const allTitles = this.getCachedTitles();
-    const existingEntities = allTitles
+    const baseEntities = allTitles
       .filter(title => !resolvedTitles.has(title))
       .slice(0, MAX_ENTITIES_IN_PROMPT)
       .map(title => {
         const slug = this.db.getEntitySlugByTitle(title) ?? "";
         const type = this.db.getEntityType(slug) ?? "record";
-        return { title, type };
+        return { title, type, slug };
       });
+
+    // Phase 1 (#168): in shadow mode, prioritize embedding-shortlisted entities to
+    // the front of the LLM prompt. Prioritize (not replace) — the rest of the list
+    // is preserved so recall never drops vs. today. Full fallback on any embedding
+    // failure; the alias write below is unchanged.
+    let existingEntities: Array<{ title: string; type: string; slug: string }> = baseEntities;
+    if (this.embeddingMode === "shadow" && this.embedding && unmatched.length > 0) {
+      try {
+        const shortlistByCandidate = await this.findEmbeddingCandidates(unmatched, baseEntities);
+        const prioritizedSlugs = new Set<string>();
+        for (const set of shortlistByCandidate.values()) {
+          for (const s of set) prioritizedSlugs.add(s);
+        }
+        if (prioritizedSlugs.size > 0) {
+          existingEntities = [
+            ...baseEntities.filter((e) => prioritizedSlugs.has(e.slug)),
+            ...baseEntities.filter((e) => !prioritizedSlugs.has(e.slug)),
+          ];
+        }
+      } catch {
+        // Embedding must never break resolution — fall back to the unfiltered list.
+        existingEntities = baseEntities;
+      }
+    }
     // Call LLM
     const prompt = SEMANTIC_MATCH_PROMPT(unmatched, existingEntities);
     let response: SemanticResponse;
