@@ -53,13 +53,14 @@ export class ResearchManager {
     const limit = options?.limit ?? 10;
     const trace = options?._trace;
 
-    if (!this.llm) return this.search.search(query, { ...options, multiStep: false });
+    if (!this.llm) return this.search.search(query, { ...options, multiStep: false, _skipDetailEnrich: true });
 
     let session = this.createSession(query);
 
     const initialResults = await this.search.search(query, {
       ...options,
       multiStep: false,
+      _skipDetailEnrich: true,
     });
     if (initialResults.length === 0) return [];
 
@@ -102,6 +103,7 @@ export class ResearchManager {
             limit: 10,
             multiStep: false,
             _skipDecompose: true,
+            _skipDetailEnrich: true,
             _trace: trace,
           }).catch((e) => {
             this.logger?.error("research", "sub-query failed", { error: e instanceof Error ? e.message : String(e) });
