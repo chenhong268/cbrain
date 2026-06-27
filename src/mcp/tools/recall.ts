@@ -15,6 +15,7 @@ import { traceToSteps } from "../../core/search-trace.js";
 import { buildEvidenceFromBatched, buildEvidenceSummary, collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
 import { formatRecallEnvelope, formatGroundedRecallEnvelope } from "./format-result.js";
+import { buildCompactRecallResponse } from "./recall-compact.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -62,8 +63,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       grounded: z.boolean().optional().default(false)
         .describe("【仅用于核查确认】用户问'讨论过吗/聊过吗/CBrain里有吗/有没有遗漏/有没有依据/是不是真的/矛盾吗'时=true。返回证据板（facts/candidates/conflicts）而非实体详情。" +
           "⚠️ 内容回忆（'当时怎么设计的/为什么选/怎么做的'）不要传 grounded，传 detail=normal。"),
+      include_raw: z.boolean().optional().default(false)
+        .describe("true=返回完整 raw/审计数据（body/links/timeline/dossier/search_meta 诊断），用于调试/核查/高级调用。默认 false 只返回精简首轮响应（display+summary+精简 entities），省上下文。"),
     },
-  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded }) => {
+  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded, include_raw }) => {
     const cap = Math.min(limit ?? 5, 5);
     // Internal fanout: search a wider candidate pool so evidence collection and
     // alias/graph matches are not clipped at the display cap. Display still caps at `cap`.
@@ -212,20 +215,38 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         const groundedPayload = { query, grounded_answer: groundedResult, search_meta: diagnosticMeta };
         const { display, summary, raw } = formatGroundedRecallEnvelope(groundedPayload);
         const { search_meta: _gm, ...groundedLegacy } = groundedPayload;
+        if (include_raw) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify({ display, summary, raw, ...groundedLegacy }, null, 2),
+            }],
+          };
+        }
+        // #231 compact grounded — display/summary/grounded_answer only, no raw.
         return {
           content: [{
             type: "text" as const,
-            text: JSON.stringify({ display, summary, raw, ...groundedLegacy }, null, 2),
+            text: JSON.stringify({ display, summary, grounded_answer: groundedResult }, null, 2),
           }],
         };
       }
       const emptyPayload = { query, entities: [], summary: "暂时没找到相关记忆", search_meta: diagnosticMeta };
       const { display: emptyDisplay, summary: emptySummary, raw: emptyRaw } = formatRecallEnvelope(emptyPayload);
       const { summary: emptyLegacySummary, search_meta: _em, ...emptyRest } = emptyPayload;
+      if (include_raw) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ display: emptyDisplay, summary: emptySummary, raw: emptyRaw, result_summary: emptyLegacySummary, ...emptyRest }, null, 2),
+          }],
+        };
+      }
+      // #231 compact empty — no raw, no audit search_meta.
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ display: emptyDisplay, summary: emptySummary, raw: emptyRaw, result_summary: emptyLegacySummary, ...emptyRest }, null, 2),
+          text: JSON.stringify({ display: emptyDisplay, summary: emptySummary, result_summary: emptyLegacySummary, query, entities: [] }, null, 2),
         }],
       };
     }
@@ -242,10 +263,19 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       };
       const { display: gDisplay, summary: gSummary, raw: gRaw } = formatGroundedRecallEnvelope(groundedPayload);
       const { search_meta: _gm2, ...groundedLegacy2 } = groundedPayload;
+      if (include_raw) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ display: gDisplay, summary: gSummary, raw: gRaw, ...groundedLegacy2 }, null, 2),
+          }],
+        };
+      }
+      // #231 compact grounded — display/summary/grounded_answer only, no raw.
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ display: gDisplay, summary: gSummary, raw: gRaw, ...groundedLegacy2 }, null, 2),
+          text: JSON.stringify({ display: gDisplay, summary: gSummary, grounded_answer: groundedResult }, null, 2),
         }],
       };
     }
@@ -461,10 +491,29 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     const { display, summary: envelopeSummary, raw } = formatRecallEnvelope(payload);
     const { summary: legacySummary, search_meta: _rm, evidence_summary: _es, ...payloadRest } = payload;
+    if (include_raw) {
+      // Full audit/legacy payload — body/links/timeline/dossier, raw search_meta, etc.
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ display, summary: envelopeSummary, raw, result_summary: legacySummary, ...payloadRest }, null, 2),
+        }],
+      };
+    }
+    // #231 default compact — first-turn Agent-facing payload with a hard char
+    // budget. Heavy fields and audit diagnostics only return via include_raw.
+    const compact = buildCompactRecallResponse({
+      display,
+      summary: envelopeSummary,
+      resultSummary: legacySummary,
+      query,
+      entities: entities as Array<Record<string, unknown>>,
+      searchMeta: diagnosticMeta,
+    });
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ display, summary: envelopeSummary, raw, result_summary: legacySummary, ...payloadRest }, null, 2),
+        text: JSON.stringify(compact, null, 2),
       }],
     };
   });

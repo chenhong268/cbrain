@@ -2215,6 +2215,7 @@ describe("MCP Server", () => {
       const result = await getTools(server).deep_recall.handler({
         query: "GroundedA",
         grounded: true,
+        include_raw: true,
       });
       const data = JSON.parse(result.content[0].text);
 
@@ -2260,6 +2261,7 @@ describe("MCP Server", () => {
       const result = await getTools(server).deep_recall.handler({
         query: "完全不存在的东西xyz",
         grounded: true,
+        include_raw: true,
       });
       const data = JSON.parse(result.content[0].text);
 
@@ -2342,7 +2344,7 @@ describe("MCP Server", () => {
       seedAliasEntity();
       seedFanoutNeighbors(6); // graph neighbors push the candidate pool beyond the display cap
       const server = createServer(deps);
-      const result = await getTools(server).deep_recall.handler({ query: "别名甲" });
+      const result = await getTools(server).deep_recall.handler({ query: "别名甲", include_raw: true });
       const data = JSON.parse(result.content[0].text);
 
       expect(data.entities.length).toBeLessThanOrEqual(5);
@@ -2355,7 +2357,7 @@ describe("MCP Server", () => {
       seedAliasEntity();
       seedFanoutNeighbors(6);
       const server = createServer(deps);
-      const result = await getTools(server).deep_recall.handler({ query: "别名甲", grounded: true });
+      const result = await getTools(server).deep_recall.handler({ query: "别名甲", grounded: true, include_raw: true });
       const data = JSON.parse(result.content[0].text);
 
       // Grounded collected evidence from the wider candidate pool, not just display top-5.
@@ -2369,7 +2371,7 @@ describe("MCP Server", () => {
       seedAliasEntity();
       seedFanoutNeighbors(6);
       const server = createServer(deps);
-      const result = await getTools(server).deep_recall.handler({ query: "别名甲", grounded: true });
+      const result = await getTools(server).deep_recall.handler({ query: "别名甲", grounded: true, include_raw: true });
       const data = JSON.parse(result.content[0].text);
 
       const displayText = String(data.display ?? "");
@@ -2605,6 +2607,7 @@ describe("MCP Server", () => {
       const result = await getTools(server).deep_recall.handler({
         query: "EntitySA",
         grounded: false,
+        include_raw: true,
       });
       const data = JSON.parse(result.content[0].text);
 
@@ -2793,6 +2796,7 @@ describe("MCP Server", () => {
       const result = await getTools(server).deep_recall.handler({
         query: "Project Z设计方案",
         detail: "normal",
+        include_raw: true,
       });
       const data = JSON.parse(result.content[0].text);
       const entity = data.entities?.[0];

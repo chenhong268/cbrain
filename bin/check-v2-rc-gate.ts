@@ -682,6 +682,17 @@ function assertRawPresent(parsed: Record<string, unknown> | null): AssertionResu
   };
 }
 
+// #231 — deep_recall is compact by default; raw/audit data is opt-in via
+// include_raw=true. The default Hermes-facing response must NOT carry raw.
+function assertRawAbsent(parsed: Record<string, unknown> | null): AssertionResult {
+  return {
+    check: "raw omitted by default (compact response)",
+    passed: !parsed || parsed.raw === undefined,
+    actual: parsed?.raw ? "present" : "missing",
+    expected: "no raw in default response (include_raw=true to audit)",
+  };
+}
+
 function assertQueryBudget(id: string, q: number): AssertionResult {
   const budget = budgetFor(id);
   return {
@@ -754,7 +765,7 @@ async function runJ1ExactRecall(jc: JourneyContext): Promise<JourneyResult> {
   const assertions: AssertionResult[] = [
     { check: "exact entity recalled", passed: topMatches, actual: topMatches ? "method-alpha found" : "not found", expected: "方法Alpha recalled" },
     { check: "summary status ok", passed: summaryStatus === "ok", actual: String(summaryStatus ?? "missing"), expected: "ok" },
-    assertRawPresent(parsed),
+    assertRawAbsent(parsed),
     assertDisplayCompact(display),
     ...scanDisplay(display),
     assertQueryBudget(id, q),
@@ -791,7 +802,7 @@ async function runJ2TopicRecall(jc: JourneyContext): Promise<JourneyResult> {
     { check: "summary status ok", passed: summaryStatus === "ok", actual: String(summaryStatus ?? "missing"), expected: "ok" },
     { check: "not degraded", passed: !isDegraded, actual: isDegraded ? "degraded" : "ok", expected: "normal recall is healthy, not degraded" },
     { check: "no degradation reason code", passed: reasonCodes.length === 0, actual: reasonCodes.join(",") || "none", expected: "no low_score/vector_error/etc." },
-    assertRawPresent(parsed),
+    assertRawAbsent(parsed),
     assertDisplayCompact(display),
     ...scanDisplay(display),
     assertQueryBudget(id, q),
@@ -814,7 +825,7 @@ async function runJ3Grounded(jc: JourneyContext): Promise<JourneyResult> {
   const assertions: AssertionResult[] = [
     { check: "grounded answer present", passed: hasGrounded, actual: hasGrounded ? "present" : "missing", expected: "evidence board" },
     { check: "display is evidence-shaped", passed: /证据|查找|事实|确认|依据/.test(display), actual: display.slice(0, 40), expected: "evidence language in display" },
-    assertRawPresent(parsed),
+    assertRawAbsent(parsed),
     assertDisplayCompact(display),
     ...scanDisplay(display),
     assertQueryBudget(id, q),
@@ -929,15 +940,17 @@ async function runJ7Degraded(jc: JourneyContext, lance: MockLance): Promise<Jour
   const entities = entitiesOf(parsed);
   const display = displayOf(parsed);
   const summary = parsed?.summary as { status?: string; degraded_reason?: string } | undefined;
-  const searchMeta = parsed?.raw?.search_meta as { degraded?: boolean; reason_codes?: string[] } | undefined;
+  // #231 — default response is compact; degraded flag surfaces in the compact
+  // search_meta (audit reason stay raw-only behind include_raw).
+  const searchMeta = (parsed?.search_meta ?? parsed?.raw?.search_meta) as { degraded?: boolean; reason_codes?: string[] } | undefined;
   const assertions: AssertionResult[] = [
     { check: "degraded status reported", passed: summary?.status === "degraded", actual: String(summary?.status ?? "missing"), expected: "summary.status = degraded" },
     { check: "degraded reason surfaced (raw only)", passed: !!summary?.degraded_reason, actual: summary?.degraded_reason ? "present" : "missing", expected: "degraded_reason in summary (kept out of display)" },
     { check: "not flagged as error", passed: !isError, actual: isError ? "isError" : "ok", expected: "graceful, not an error" },
     { check: "FTS fallback kept a useful result", passed: entities.length >= 1, actual: `${entities.length} entities`, expected: ">= 1 entity from FTS fallback" },
-    { check: "search_meta.degraded set", passed: searchMeta?.degraded === true, actual: String(searchMeta?.degraded ?? "missing"), expected: "raw.search_meta.degraded = true" },
+    { check: "search_meta.degraded set", passed: searchMeta?.degraded === true, actual: String(searchMeta?.degraded ?? "missing"), expected: "search_meta.degraded = true (compact)" },
     { check: "display uses degraded-safe wording", passed: /先返回了|搜索花的时间长了些/.test(display), actual: display.slice(0, 40), expected: "user-safe degraded wording" },
-    assertRawPresent(parsed),
+    assertRawAbsent(parsed),
     assertDisplayCompact(display),
     ...scanDisplay(display),
     assertQueryBudget(id, q),
@@ -964,7 +977,7 @@ async function runJ8Empty(jc: JourneyContext): Promise<JourneyResult> {
     { check: "empty status reported", passed: summary?.status === "empty", actual: String(summary?.status ?? "missing"), expected: "summary.status = empty" },
     { check: "not flagged as error", passed: !isError, actual: isError ? "isError" : "ok", expected: "graceful, not an error" },
     { check: "display uses graceful empty wording", passed: /没找到/.test(display), actual: display.slice(0, 40), expected: "graceful empty wording" },
-    assertRawPresent(parsed),
+    assertRawAbsent(parsed),
     assertDisplayCompact(display),
     ...scanDisplay(display),
     assertQueryBudget(id, q),
