@@ -1,8 +1,10 @@
 # Changelog
 
-> Current: `v2.0.0` — Agentic memory kernel 公共发布：自然语言前门、Hermes 输出边界、EvidenceBoard/grounded recall、single-writer 多 Agent 拓扑、v2 发布门禁与安装上手路径。
+> Current: `v2.0.1` — Recall 可用性与 HTTP-MCP 长请求稳定性修复：`deep_recall` 默认 compact 输出，长 sync/ingest 请求不再被 Bun 默认 idle timeout 掐断。
 
 ## [Unreleased]
+
+## [v2.0.1] — 2026-06-27
 
 ### 搜索与可用性（#231, #237）
 
