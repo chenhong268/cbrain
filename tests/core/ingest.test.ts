@@ -3,6 +3,7 @@ import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { IngestManager } from "../../src/core/ingest.js";
+import { NerEngine } from "../../src/core/ner.js";
 import { generateSlug } from "../../src/utils/slug.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
@@ -1381,5 +1382,51 @@ describe("IngestManager", () => {
         expect(files.some((f: string) => f.startsWith("untitled-"))).toBe(false);
       }
     });
+  });
+});
+
+describe("IngestManager NER timeout partial (#229)", () => {
+  const testDir = "/tmp/cbrain-test-ingest-ner-timeout";
+  const vaultPath = join(testDir, "vault");
+  const dbPath = join(testDir, "t.sqlite");
+  let db: CBrainDB;
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("NER timeout → ingest succeeds with nerSkipped='timeout'", async () => {
+    const slowLlm: LLMProvider = {
+      name: "slow",
+      chat: async () => new Promise<string>(() => { /* never resolves */ }),
+    };
+    class FastTimeoutNer extends NerEngine {
+      async extract(text: string) { return super.extract(text, 100); }
+    }
+    const ingest = new IngestManager(
+      db,
+      createMockEmbeddingProvider(),
+      createMockLanceDB() as any,
+      vaultPath,
+      slowLlm,
+      new FastTimeoutNer(slowLlm),
+    );
+
+    const result = await ingest.ingest({
+      content: "一段会触发 NER 的中文正文内容",
+      type: "markdown",
+      title: "测试文档",
+      pageType: "record",
+    });
+
+    expect(result.outcome).toMatch(/created|updated/);
+    expect(result.slug).toBeDefined();
+    expect(result.nerSkipped).toBe("timeout");
+    expect(db.getPage(result.slug)).not.toBeNull();
   });
 });

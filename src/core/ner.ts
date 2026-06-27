@@ -321,6 +321,31 @@ function mergeFacts(chunks: StructuredFact[][]): StructuredFact[] {
   return [...best.values()];
 }
 
+// ─── NER timeout (#229 Phase 1) ──────────────────────────────
+
+/** Default per-file NER timeout. A single slow NER must not block sync/ingest
+ *  past the MCP client's reachability threshold. Configurable per call. */
+const NER_DEFAULT_TIMEOUT_MS = 60_000;
+
+/** Thrown when NerEngine.extract exceeds its timeout box. Stable type so callers
+ *  can distinguish timeout from ordinary NER errors without string matching. */
+export class NerTimeoutError extends Error {
+  readonly code = "NER_TIMEOUT" as const;
+  readonly isNerTimeout = true;
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`NER timeout after ${timeoutMs}ms`);
+    this.name = "NerTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** Type guard for timeout errors (instanceof + flag, resilient across realms). */
+export function isNerTimeoutError(e: unknown): boolean {
+  if (e instanceof NerTimeoutError) return true;
+  return e instanceof Error && (e as { isNerTimeout?: boolean }).isNerTimeout === true;
+}
+
 // ─── NER Engine ─────────────────────────────────────────────
 
 export class NerEngine {
@@ -336,7 +361,25 @@ export class NerEngine {
     return this.llm;
   }
 
-  async extract(text: string): Promise<ExtractionResult> {
+  async extract(text: string, timeoutMs: number = NER_DEFAULT_TIMEOUT_MS): Promise<ExtractionResult> {
+    if (!text.trim()) {
+      return { entities: [], relations: [], events: [], facts: [], filtered: [] };
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new NerTimeoutError(timeoutMs)), timeoutMs);
+    });
+    try {
+      // extract is pure read (LLM chat, no DB writes). On timeout the in-flight
+      // HTTP completes but its result is discarded — no DB write fires, so this
+      // is NOT a fire-and-forget DB task. applyExtraction is the caller's job.
+      return await Promise.race([this._extractInternal(text), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async _extractInternal(text: string): Promise<ExtractionResult> {
     if (!text.trim()) {
       return { entities: [], relations: [], events: [], facts: [], filtered: [] };
     }

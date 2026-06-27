@@ -3,7 +3,9 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { SyncManager } from "../../src/core/sync.js";
+import { NerEngine } from "../../src/core/ner.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
+import type { LLMProvider } from "../../src/llm/provider.js";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
   return {
@@ -581,5 +583,43 @@ describe("SyncManager", () => {
       expect(cleaned).toContain("records/orphan-ok");
       expect(cleaned).not.toContain("records/orphan-fail");
     });
+  });
+});
+
+describe("SyncManager NER timeout partial (#229)", () => {
+  const testDir = "/tmp/cbrain-test-sync-ner-timeout";
+  const vaultPath = join(testDir, "vault");
+  const dbPath = join(testDir, "t.sqlite");
+  let db: CBrainDB;
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("NER timeout increments report.nerTimedOut, sync still completes", async () => {
+    const slowLlm: LLMProvider = {
+      name: "slow",
+      chat: async () => new Promise<string>(() => { /* never resolves */ }),
+    };
+    class FastTimeoutNer extends NerEngine {
+      async extract(text: string) { return super.extract(text, 100); }
+    }
+    writeMdFile(vaultPath, "note.md", { type: "record", title: "测试" }, "中文正文触发NER需要足够长度来进入NER流程");
+
+    const sync = new SyncManager(db, createMockEmbeddingProvider(), createMockLanceDB() as any, {
+      nerEngine: new FastTimeoutNer(slowLlm),
+    });
+
+    const report = await sync.syncAll(vaultPath);
+
+    expect(report.synced).toBeGreaterThanOrEqual(1);
+    expect(report.nerTimedOut ?? 0).toBeGreaterThanOrEqual(1);
+    // content still indexed & searchable despite NER timeout
+    expect(db.getPageCount()).toBeGreaterThanOrEqual(1);
   });
 });

@@ -5,7 +5,7 @@ import { CBrainDB } from "../storage/sqlite.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
-import { NerEngine } from "./ner.js";
+import { NerEngine, isNerTimeoutError } from "./ner.js";
 import { PageManager } from "./page.js";
 import { canonicalSlug, slugToFilePath } from "../utils/slug.js";
 import type { Logger } from "./logger.js";
@@ -66,6 +66,8 @@ export interface SyncReport {
   nerRelations?: number;
   nerEvents?: number;
   nerLowRelevanceSkipped?: number;
+  nerTimedOut?: number;
+  nerErrors?: number;
   errorDetails?: string[];
   diagnostics?: SyncDiagnostic[];
 }
@@ -344,7 +346,13 @@ export class SyncManager {
         const batch = nerJobs.slice(i, i + CONCURRENCY);
         const extractions = await Promise.all(
           batch.map(job => this.nerEngine!.extract(job.text).catch((e) => {
-              this.logger?.warn("sync", "NER extract 失败", { slug: job.slug, error: String(e) });
+              const timedOut = isNerTimeoutError(e);
+              if (timedOut) report.nerTimedOut = (report.nerTimedOut ?? 0) + 1;
+              else report.nerErrors = (report.nerErrors ?? 0) + 1;
+              this.logger?.warn("sync", timedOut ? "NER 超时跳过" : "NER extract 失败", {
+                slug: job.slug,
+                reasonCode: timedOut ? "ner_timeout" : "ner_error",
+              });
               return null;
             }))
         );
@@ -360,7 +368,13 @@ export class SyncManager {
               report.nerLowRelevanceSkipped = (report.nerLowRelevanceSkipped ?? 0) + nerResult.lowRelevanceSkipped;
             }
           } catch (e) {
-            this.logger?.warn("sync", "NER 处理失败", { slug: batch[j].slug, error: String(e) });
+            const timedOut = isNerTimeoutError(e);
+            if (timedOut) report.nerTimedOut = (report.nerTimedOut ?? 0) + 1;
+            else report.nerErrors = (report.nerErrors ?? 0) + 1;
+            this.logger?.warn("sync", timedOut ? "NER 超时跳过" : "NER 处理失败", {
+              slug: batch[j].slug,
+              reasonCode: timedOut ? "ner_timeout" : "ner_error",
+            });
           }
         }
       }

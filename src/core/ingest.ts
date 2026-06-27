@@ -7,7 +7,7 @@ import { normalizePageType, normalizeAndHashBody, type PageType } from "./shared
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
-import { NerEngine } from "./ner.js";
+import { NerEngine, isNerTimeoutError } from "./ner.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
 import { getFactFieldWhitelist, filterExtractedEntities, type ExtractedEntity } from "./ner.js";
@@ -95,6 +95,7 @@ export interface IngestResult {
   created: boolean;
   linksExtracted: number;
   ner?: NerPipelineResult | null;
+  nerSkipped?: "timeout" | "error";
   outcome: IngestOutcome;
   duplicateOf?: { slug: string; title: string };
 }
@@ -112,12 +113,13 @@ export class IngestManager {
     embedding: EmbeddingProvider,
     lance: LanceDBManager,
     vaultPath: string,
-    llmProvider?: LLMProvider
+    llmProvider?: LLMProvider,
+    nerEngine?: NerEngine
   ) {
     this.db = db;
     this.lance = lance;
     this.pages = new PageManager(db, vaultPath, undefined, lance);
-    this.nerEngine = llmProvider ? new NerEngine(llmProvider) : null;
+    this.nerEngine = nerEngine ?? (llmProvider ? new NerEngine(llmProvider) : null);
     this.llmProvider = llmProvider;
     this.pipeline = new ContentPipeline(db, embedding, lance, {
       pages: this.pages,
@@ -284,12 +286,14 @@ export class IngestManager {
       const { count: linksExtracted, mentionedSlugs } = this.pipeline.replaceWikilinks(slug, page.body);
 
       let nerResult: NerPipelineResult | null | undefined;
+      let nerSkipped: "timeout" | "error" | undefined;
       if (doNer && body.trim()) {
         try {
           nerResult = await this.pipeline.processNer(slug, body, before.type, true, undefined, mentionedSlugs);
         } catch (e) {
+          nerSkipped = isNerTimeoutError(e) ? "timeout" : "error";
           const msg = e instanceof Error ? e.message : String(e);
-          this.pipeline.writeIngestLog(slug, "api", { nerError: msg, appended: true });
+          this.pipeline.writeIngestLog(slug, "api", { nerError: msg, nerSkipped, appended: true });
         }
       }
 
@@ -300,7 +304,7 @@ export class IngestManager {
         this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]),
       );
 
-      return { slug, created: false, linksExtracted, ner: nerResult, outcome: "updated" as const };
+      return { slug, created: false, linksExtracted, ner: nerResult, nerSkipped, outcome: "updated" as const };
     } catch (indexError) {
       if (snapshot) {
         await this.restoreSnapshot(slug, snapshot, indexError);
@@ -420,13 +424,15 @@ export class IngestManager {
       const { count: linksExtracted, mentionedSlugs } = this.pipeline.replaceWikilinks(slug, body);
 
       let nerResult: NerPipelineResult | null | undefined;
+      let nerSkipped: "timeout" | "error" | undefined;
       const shouldNer = doNer && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
       if (shouldNer) {
         try {
           nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs);
         } catch (e) {
+          nerSkipped = isNerTimeoutError(e) ? "timeout" : "error";
           const msg = e instanceof Error ? e.message : String(e);
-          this.pipeline.writeIngestLog(slug, "api", { nerError: msg });
+          this.pipeline.writeIngestLog(slug, "api", { nerError: msg, nerSkipped });
         }
       }
 
@@ -462,6 +468,7 @@ export class IngestManager {
         created: !existedBefore,
         linksExtracted,
         ner: nerResult,
+        nerSkipped,
         outcome: existedBefore ? "updated" : "created",
       };
     } catch (indexError) {

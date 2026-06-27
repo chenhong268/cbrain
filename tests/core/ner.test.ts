@@ -1,6 +1,10 @@
-import { describe, test, expect } from "bun:test";
-import { NerEngine } from "../../src/core/ner.js";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { NerEngine, NerTimeoutError, isNerTimeoutError } from "../../src/core/ner.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
+import { ContentPipeline } from "../../src/core/pipeline.js";
+import { CBrainDB } from "../../src/storage/sqlite.js";
+import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 
 function createMockLLM(responses: string[]): LLMProvider {
   let callIndex = 0;
@@ -394,5 +398,97 @@ describe("NerEngine", () => {
 
     expect(result.facts).toHaveLength(1);
     expect(result.facts[0].confidence).toBe(0.9);
+  });
+});
+
+describe("NerEngine extract timeout (#229)", () => {
+  // never-resolving chat stands in for a hung/slow LLM without holding a timer
+  const neverResolveLlm: LLMProvider = {
+    name: "slow",
+    chat: async () => new Promise<string>(() => { /* never resolves */ }),
+  };
+  const emptyJsonLlm: LLMProvider = {
+    name: "empty",
+    chat: async () => '{"entities":[],"relations":[],"events":[],"facts":[]}',
+  };
+
+  test("slow chat is rejected with NerTimeoutError", async () => {
+    const engine = new NerEngine(neverResolveLlm);
+    await expect(engine.extract("一段需要 NER 的中文正文", 100)).rejects.toBeInstanceOf(NerTimeoutError);
+  });
+
+  test("isNerTimeoutError identifies timeout vs normal error", async () => {
+    const engine = new NerEngine(neverResolveLlm);
+    let caught: unknown;
+    try {
+      await engine.extract("中文正文", 100);
+    } catch (e) {
+      caught = e;
+    }
+    expect(isNerTimeoutError(caught)).toBe(true);
+    expect(isNerTimeoutError(new Error("ordinary"))).toBe(false);
+  });
+
+  test("fast NER returns normally within timeout (behavior unchanged)", async () => {
+    const engine = new NerEngine(emptyJsonLlm);
+    const result = await engine.extract("中文正文", 60_000);
+    expect(result.entities).toEqual([]);
+    expect(result.relations).toEqual([]);
+  });
+
+  test("empty text short-circuits before timeout", async () => {
+    const engine = new NerEngine(neverResolveLlm);
+    const result = await engine.extract("   ", 100);
+    expect(result.entities).toEqual([]);
+  });
+});
+
+describe("processNer propagates extract timeout, no DB writes (#229)", () => {
+  const testDir = "/tmp/cbrain-test-ner-timeout-pipe";
+  const dbPath = join(testDir, "t.sqlite");
+  let db: CBrainDB;
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  class FastTimeoutNer extends NerEngine {
+    async extract(text: string) {
+      return super.extract(text, 100);
+    }
+  }
+  const neverResolveLlm: LLMProvider = {
+    name: "slow",
+    chat: async () => new Promise<string>(() => { /* never resolves */ }),
+  };
+  const stubEmbedding = {
+    embedBatch: async (t: string[]) => t.map(() => ({ embedding: [0, 0], tokenCount: 1 })),
+    embedQuery: async () => ({ embedding: [0, 0], tokenCount: 1 }),
+  } as any;
+  const stubLance = {
+    deleteRawChunksByPageSlug: async () => {},
+    deleteL1VectorByPageSlug: async () => {},
+    addChunks: async () => {},
+  } as any;
+
+  test("processNer rejects with NerTimeoutError and writes no NER rows", async () => {
+    const pipeline = new ContentPipeline(db, stubEmbedding, stubLance, {
+      nerEngine: new FastTimeoutNer(neverResolveLlm),
+    });
+
+    await expect(
+      pipeline.processNer("records/x", "中文正文用于触发NER", "record", true, undefined, new Set()),
+    ).rejects.toBeInstanceOf(NerTimeoutError);
+
+    // applyExtraction never ran → no ner-source links, no auto-extracted stubs
+    const nerLinks = (db.rawDb.prepare("SELECT COUNT(*) as c FROM links WHERE source_type = 'ner'").get() as { c: number }).c;
+    const autoStubs = db.getAutoExtractedPages().length;
+    expect(nerLinks).toBe(0);
+    expect(autoStubs).toBe(0);
   });
 });
