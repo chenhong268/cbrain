@@ -283,6 +283,55 @@ function checkLegacyCronPatterns(docs: Map<string, string>): CheckResult[] {
   return out;
 }
 
+/** #234: catch docs that recommend bare concurrent-writer CLI maintenance
+ *  (compact/dream/enrich/dedup/discover/sync) inside a periodic/cron code
+ *  block. These spawn a competing writer while `serve --http` owns the runtime.
+ *  Scoped to fenced code blocks that carry a periodic/cron marker, so the CLI
+ *  command inventory tables and one-shot non-cron examples are not flagged.
+ *  Opt out per-line or per-block with <!-- docs-consistency:ignore-command -->. */
+function checkBareMaintenanceCron(docs: Map<string, string>): CheckResult[] {
+  const out: CheckResult[] = [];
+  const writerRe = /(^|[\s`'"])cbrain (compact|dream|enrich|dedup|discover|sync)\b/;
+  const periodicRe = /(每天|每周|每月|daily|weekly|monthly|every\s+\d+|crontab|定期|periodic)/i;
+  for (const [file, raw] of docs) {
+    const lines = stripAutoGen(raw).split("\n");
+    let i = 0;
+    while (i < lines.length) {
+      if (!lines[i].trimStart().startsWith("```")) { i++; continue; }
+      const blockStart = i;
+      const block: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
+        block.push(lines[i]);
+        i++;
+      }
+      i++; // consume closing fence (or EOF)
+      const blockText = block.join("\n");
+      if (!periodicRe.test(blockText)) continue;
+      if (blockText.includes("<!-- docs-consistency:ignore-command -->")) continue;
+      block.forEach((bl, idx) => {
+        if (bl.includes("<!-- docs-consistency:ignore-command -->")) return;
+        const m = bl.match(writerRe);
+        if (m) {
+          out.push({
+            check: `bare maintenance cron @${file}:${blockStart + 1 + idx}`,
+            passed: false,
+            detail: `"cbrain ${m[2]}" 在 periodic/cron 代码块里裸跑——并发写风险；走 bin/cbrain-maintenance.sh dream 或 MCP 工具（见 docs/hermes-integration.md）`,
+          });
+        }
+      });
+    }
+  }
+  if (out.length === 0) {
+    out.push({
+      check: "bare maintenance cron",
+      passed: true,
+      detail: "no bare concurrent-writer CLI in periodic/cron code blocks",
+    });
+  }
+  return out;
+}
+
 // ── MCP tool reference check ───────────────────────────────────────────────
 
 /** Remove auto-generated sections so tool-ref linting only sees hand-written
@@ -571,6 +620,7 @@ function main(): void {
     ...checkCounts(docs, tools.length, cli.size),
     ...checkBinary(docs),
     ...checkLegacyCronPatterns(docs),
+    ...checkBareMaintenanceCron(docs),
     ...checkDailyPatrolContract(docs),
     ...checkToolReferences(docs, new Set(tools.map((t) => t.name))),
     ...checkSkillsToolRefs(docs, new Set(tools.map((t) => t.name))),

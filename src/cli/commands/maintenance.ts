@@ -1,6 +1,6 @@
 import type { Command } from "commander";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { resolve, dirname, join } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
@@ -20,6 +20,7 @@ import {
   handleReindexSlug,
   handleReindexQuarantined,
   createLiveLockProbe,
+  type LockProbe,
 } from "./reindex.js";
 import type { PageSignals } from "../../core/health-debt.js";
 
@@ -61,6 +62,66 @@ export async function handleReindexVectors(
 }
 
 /**
+ * Compact LanceDB files (#234) — single-writer safe.
+ *
+ * Refuses to connect while a live CBrain writer (serve/watcher) holds the
+ * index, so a bare `cbrain compact` can never compete with `serve --http` and
+ * corrupt LanceDB. The correct daily entry is `bin/cbrain-maintenance.sh dream`
+ * (dream runs compact in-process at Stage 4.6, inside the sole writer — that
+ * path is unaffected by this guard).
+ *
+ * Invariants:
+ *   - Lock checked BEFORE `lance.connect`
+ *   - `lance` always closed on the proceed path (finally)
+ *   - Never calls process.exit(); returns an exit code
+ *   - Output anonymized (pid only, no local absolute paths)
+ *
+ * Best-effort guard, not an atomic lock: a serve could start in the window
+ * between blockingOwner() and lance.connect(). The canonical single-writer
+ * path remains `bin/cbrain-maintenance.sh dream`.
+ */
+export interface CompactDeps {
+  lance: LanceDBManager;
+  lancePath: string;
+  lockProbe: LockProbe;
+}
+
+export async function handleCompact(
+  deps: CompactDeps,
+  measureBytes: () => number,
+  log: (m: string) => void = console.log,
+  logError: (m: string) => void = console.error,
+): Promise<number> {
+  const owner = deps.lockProbe.blockingOwner();
+  if (owner) {
+    logError(`已拒绝：检测到活动的 CBrain ${owner.kind}（pid ${owner.pid}）。`);
+    logError(`不要裸跑 cbrain compact —— 并发写会损坏 LanceDB。`);
+    logError(`日常维护走 HTTP /mcp：bin/cbrain-maintenance.sh dream（dream 内含 compact，Stage 4.6）。`);
+    logError(`如确需离线 compact，请先停止 serve。`);
+    return 1;
+  }
+  try {
+    const beforeBytes = measureBytes();
+    await deps.lance.connect(deps.lancePath);
+    log("Compacting...");
+    const result = await deps.lance.compact();
+    const afterBytes = measureBytes();
+    const beforeMB = (beforeBytes / 1024 / 1024).toFixed(1);
+    const afterMB = (afterBytes / 1024 / 1024).toFixed(1);
+    const savedMB = ((beforeBytes - afterBytes) / 1024 / 1024).toFixed(1);
+    log(`  Tables:     ${result.tables.join(", ")}`);
+    log(`  Fragments:  ${result.fragmentsRemoved} removed, ${result.fragmentsAdded} created`);
+    log(`  Disk:       ${beforeMB}MB → ${afterMB}MB (saved ${savedMB}MB)`);
+    return 0;
+  } catch (e) {
+    logError(`Compact failed: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    try { await deps.lance.close(); } catch { /* best effort */ }
+  }
+}
+
+/**
  * Relocate a misplaced page — extracted for testability.
  * Delegates to shared atomicSlugChange / atomicTypeChange.
  */
@@ -94,6 +155,22 @@ export function relocatePage(
       newHash: params.newHash,
     });
   }
+}
+
+/** Sum bytes of the LanceDB directory tree (best-effort; 0 if unreadable). */
+function measureLanceBytes(lancePath: string): number {
+  let total = 0;
+  try {
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name);
+        if (entry.isDirectory()) walk(p);
+        else total += statSync(p).size;
+      }
+    };
+    walk(lancePath);
+  } catch { /* unreadable / missing — report 0 */ }
+  return total;
 }
 
 export function register(program: Command) {
@@ -388,67 +465,19 @@ export function register(program: Command) {
 
   program
     .command("compact")
-    .description("Compact LanceDB files and reclaim disk space")
+    .description("Compact LanceDB files; refuses while serve/watcher is active — use the maintenance wrapper for cron")
     .action(async () => {
       const config = loadConfig();
+      // #234: refuse to connect while a live CBrain writer holds the index,
+      // so a bare `cbrain compact` never competes with `serve --http`. Daily
+      // maintenance should go through bin/cbrain-maintenance.sh dream instead.
+      const profileDir = dirname(resolve(config.dbPath));
+      const lockProbe = createLiveLockProbe(profileDir);
       const lance = new LanceDBManager();
-      const beforeBytes = await import("node:fs").then(m => {
-        const { statSync } = m;
-        try {
-          const { readdirSync } = require("node:fs");
-          let total = 0;
-          function walkDir(dir: string) {
-            for (const entry of readdirSync(dir, { withFileTypes: true })) {
-              const p = require("node:path").join(dir, entry.name);
-              if (entry.isDirectory()) walkDir(p);
-              else total += statSync(p).size;
-            }
-          }
-          walkDir(config.lancePath);
-          return total;
-        } catch { return 0; }
-      });
-
-      await lance.connect(config.lancePath);
-      console.log("Compacting...");
-      const result = await lance.compact();
-      await lance.close();
-
-      const afterBytes = await import("node:fs").then(m => {
-        const { statSync, readdirSync } = m;
-        try {
-          let total = 0;
-          function walkDir(dir: string) {
-            for (const entry of readdirSync(dir, { withFileTypes: true })) {
-              const p = require("node:path").join(dir, entry.name);
-              if (entry.isDirectory()) walkDir(p);
-              else total += statSync(p).size;
-            }
-          }
-          walkDir(config.lancePath);
-          return total;
-        } catch { return 0; }
-      });
-
-      const beforeMB = (beforeBytes / 1024 / 1024).toFixed(1);
-      const afterMB = (afterBytes / 1024 / 1024).toFixed(1);
-      const savedMB = ((beforeBytes - afterBytes) / 1024 / 1024).toFixed(1);
-
-      console.log(`  Tables:     ${result.tables.join(", ")}`);
-      console.log(`  Fragments:  ${result.fragmentsRemoved} removed, ${result.fragmentsAdded} created`);
-      console.log(`  Disk:       ${beforeMB}MB → ${afterMB}MB (saved ${savedMB}MB)`);
-
-      // Restart running serve processes to pick up new LanceDB files
-      const { execSync } = await import("node:child_process");
-      try {
-        const pids = execSync("pgrep -f 'cbrain.*serve'", { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
-        if (pids.length > 0) {
-          execSync(`kill ${pids.join(" ")}`);
-          console.log(`  Restart:    killed ${pids.length} stale serve process(es) (launchd will restart)`);
-        }
-      } catch {
-        // No serve processes running, nothing to restart
-      }
+      process.exitCode = await handleCompact(
+        { lance, lancePath: config.lancePath, lockProbe },
+        () => measureLanceBytes(config.lancePath),
+      );
     });
 
   program

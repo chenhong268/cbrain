@@ -236,10 +236,12 @@ The third category is where CBrain truly compounds. Without periodic tasks, you 
 To set up periodic tasks with Hermes:
 
 ```bash
-# In your Agent's skill config (SKILL.md), add scheduled tasks:
-# - Every day:  dream  # MCP tool（走 /mcp）；cron 场景用 bin/cbrain-maintenance.sh，勿裸调 CLI，见 docs/hermes-integration.md
-# - Every 3 days: cbrain discover
-# - Weekly: cbrain enrich && cbrain dedup   # (cleanup is an Agent skill, not a CLI command)
+# In your Agent's skill config (SKILL.md), add scheduled tasks.
+# Periodic maintenance MUST go through the single-writer wrapper (HTTP /mcp),
+# never bare CLI maintenance — compact/dream/enrich/sync compete with serve (#234).
+# - Every day:  dream   # MCP tool；cron 场景调 bin/cbrain-maintenance.sh dream
+# - enrich / discover / dedup:  enrich is an MCP tool; dedup/discover are CLI-only,
+#   so fold them into dream or run as a one-shot with serve stopped (not cron).
 ```
 
 ### Agent Memory Rules

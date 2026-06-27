@@ -235,3 +235,31 @@ test("fails when daily-patrol counts MCP tools with grep name fields", () => {
     writeFileSync(scriptPath, original);
   }
 });
+
+test("#234: fails when a periodic/cron block bare-runs a concurrent-writer CLI command", () => {
+  withTmpDocs(
+    {
+      "mcp-tools.md": "no tools here\n",
+      "usage.md": "## 定期维护\n\n```bash\n# - Weekly: cbrain enrich && cbrain dedup\n```\n",
+    },
+    (dir) => {
+      const { stdout, code } = runCheck({ DOCS_DIR: dir });
+      expect(code).toBe(1);
+      expect(stdout).toContain("bare maintenance cron");
+      expect(stdout).toContain("enrich");
+    },
+  );
+});
+
+test("#234: the single-writer wrapper in a cron block is not flagged", () => {
+  withTmpDocs(
+    {
+      "mcp-tools.md": "no tools here\n",
+      "usage.md": "## Cron\n\n```bash\n# Weekly maintenance via the single-writer wrapper (not bare CLI):\n0 3 * * * CBRAIN_MCP_URL=http://127.0.0.1:3399/mcp cbrain-maintenance.sh dream\n```\n",
+    },
+    (dir) => {
+      const { stdout } = runCheck({ DOCS_DIR: dir });
+      expect(stdout).not.toMatch(/bare maintenance cron @.*FAILED/);
+    },
+  );
+});

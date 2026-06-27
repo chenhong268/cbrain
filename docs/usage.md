@@ -142,12 +142,21 @@ cbrain query "怎么优化性能" --strategy vector
 
 ### 定期维护
 
-```
-# 每周
-cbrain dream
+定期维护走 single-writer wrapper（HTTP /mcp），不裸跑 CLI —— compact/dream/enrich/sync 等会与 serve 抢写（#234，见 docs/hermes-integration.md）：
 
-# 每月
-cbrain sync && cbrain enrich && cbrain health
+```
+# 维护：dream 内含 sync/enrich/compact/cleanup，经 wrapper 走 /mcp
+CBRAIN_MCP_URL=http://127.0.0.1:3399/mcp bin/cbrain-maintenance.sh dream
+```
+
+### 离线一次性维护
+
+如确需离线跑（先停 serve），下列命令可单独执行（非 cron 场景）：
+
+```
+cbrain sync
+cbrain enrich
+cbrain health
 ```
 
 ### 清理重复/孤立内容
@@ -239,7 +248,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `batch-delete` | Delete entities from a file of slugs (one per line) |
 | `clean-shells` | Remove entity/concept pages with 0 mentions, 0 links, and 0 aliases |
 | `clean-timeline` | Fix timeline entries with NULL, partial, or malformed dates; deduplicate |
-| `compact` | Compact LanceDB files and reclaim disk space |
+| `compact` | Compact LanceDB files; refuses while serve/watcher is active — use the maintenance wrapper for cron |
 | `config` | View or update brain configuration |
 | `dedup` | Find and merge duplicate entities using LLM |
 | `dedup-types` | Find and merge same-name entities that exist under different types |
