@@ -2,6 +2,13 @@
 
 > Current: `v2.0.0` — Agentic memory kernel 公共发布：自然语言前门、Hermes 输出边界、EvidenceBoard/grounded recall、single-writer 多 Agent 拓扑、v2 发布门禁与安装上手路径。
 
+## [Unreleased]
+
+### 搜索与可用性（#231, #237）
+
+- **deep_recall 默认精简响应（#231）**：`deep_recall` 默认返回 compact 首轮响应（`display` + `summary` + 精简 entities + safe `search_meta`），不再把完整 `raw` / body / links / timeline / dossier 灌给 Agent；需要审计或调试时显式传 `include_raw=true` 取回完整 payload。grounded 模式默认只返回 `grounded_answer`。默认响应 12000 字符硬预算，按最终 `has_more` 语义测量，snippet / 尾部 entity 渐进降级保证不超。
+- **HTTP-MCP 长请求不再被掐断（#237）**：`Bun.serve` 默认 `idleTimeout`（10s）会掐断 sync / 大文件 ingest 的重索引请求，导致 Hermes MCP client 收到 `RemoteDisconnected` 被判"不可用"；改为 `idleTimeout: 0`（禁用，Bun 正数上限仅 255s 对大批量仍不够），与 stdio MCP 无超时语义一致，session 清理走 app 层 TTL。
+
 ## [v2.0.0] — 2026-06-26
 
 ### Agentic Memory Kernel
