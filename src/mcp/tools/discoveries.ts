@@ -23,6 +23,7 @@ const ACTIONABLE_LABELS: Record<string, string> = {
 
 const STATUS_LABELS: Record<string, string> = {
   pending: "待处理",
+  seen: "已读",
   resolved: "已解决",
   dismissed: "已忽略",
 };

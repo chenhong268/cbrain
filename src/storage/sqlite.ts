@@ -2474,7 +2474,7 @@ export class CBrainDB {
 
   getUnseenDiscoveries(limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; dream_run: string | null; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
     return this.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, dream_run, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE seen = 0 ORDER BY CASE actionable WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, score DESC, id DESC LIMIT $limit"
+      "SELECT id, type, entities, score, detail, detected_at, dream_run, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE seen = 0 AND status = 'pending' ORDER BY CASE actionable WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, score DESC, id DESC LIMIT $limit"
     ).all({ $limit: limit }) as any[];
   }
 
@@ -2494,8 +2494,13 @@ export class CBrainDB {
     return r.changes;
   }
 
-  updateDiscoveryStatus(id: number, status: string): void {
-    this.prepare("UPDATE discoveries SET status = $status WHERE id = $id").run({ $id: id, $status: status });
+  updateDiscoveryStatus(id: number, status: "pending" | "seen" | "resolved" | "dismissed"): void {
+    // Any non-pending status means the user has acted on this discovery → seen=1.
+    // This protects it from cleanupOldDiscoveries (which keys off seen=0) so a
+    // dismissed/resolved row is not deleted and later resurrected by recurrence
+    // as a fresh pending row. pending resets seen=0 (awaiting attention). (#172)
+    const seen = status === "pending" ? 0 : 1;
+    this.prepare("UPDATE discoveries SET status = $status, seen = $seen WHERE id = $id").run({ $id: id, $status: status, $seen: seen });
   }
 
   // ─── Mention Snapshots ─────────────────────────────────────────
@@ -2529,19 +2534,19 @@ export class CBrainDB {
 
   getDiscoveriesByActionable(actionable: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
     return this.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE actionable = $actionable AND seen = 0 ORDER BY score DESC, id DESC LIMIT $limit"
+      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE actionable = $actionable AND seen = 0 AND status = 'pending' ORDER BY score DESC, id DESC LIMIT $limit"
     ).all({ $actionable: actionable, $limit: limit }) as any[];
   }
 
   getDiscoveriesByType(type: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
     return this.prepare(
-      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE type = $type AND seen = 0 ORDER BY CASE actionable WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, score DESC, id DESC LIMIT $limit"
+      "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE type = $type AND seen = 0 AND status = 'pending' ORDER BY CASE actionable WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, score DESC, id DESC LIMIT $limit"
     ).all({ $type: type, $limit: limit }) as any[];
   }
 
   countDiscoveriesByActionable(): Record<string, number> {
     const rows = this.prepare(
-      "SELECT actionable, COUNT(*) as cnt FROM discoveries WHERE seen = 0 GROUP BY actionable"
+      "SELECT actionable, COUNT(*) as cnt FROM discoveries WHERE seen = 0 AND status = 'pending' GROUP BY actionable"
     ).all() as Array<{ actionable: string; cnt: number }>;
     const result: Record<string, number> = { high: 0, medium: 0, low: 0 };
     for (const row of rows) result[row.actionable] = row.cnt;

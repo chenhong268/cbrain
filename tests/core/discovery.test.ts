@@ -756,6 +756,95 @@ describe("Discovery dedup — upsertDiscovery", () => {
     expect(d!.status).toBe("dismissed");
   });
 
+  test("[#172] pending discovery remains visible by default", () => {
+    seedPage(db, "entity/a", "entity/person", "A");
+    const { id } = db.upsertDiscovery("gap", ["entity/a"], 0.7, undefined, undefined, "high");
+
+    expect(db.getUnseenDiscoveries(10).find(r => r.id === id)).toBeDefined();
+    expect(db.getDiscoveriesByType("gap", 10).find(r => r.id === id)).toBeDefined();
+    expect(db.countDiscoveriesByActionable().high).toBe(1);
+  });
+
+  test("[#172] dismissed discovery excluded from default reads", () => {
+    seedPage(db, "entity/a", "entity/person", "A");
+    const { id } = db.upsertDiscovery("gap", ["entity/a"], 0.7, undefined, undefined, "high");
+    db.updateDiscoveryStatus(id, "dismissed");
+
+    expect(db.getUnseenDiscoveries(10).find(r => r.id === id)).toBeUndefined();
+    expect(db.getDiscoveriesByType("gap", 10).find(r => r.id === id)).toBeUndefined();
+    expect(db.getDiscoveriesByActionable("high", 10).find(r => r.id === id)).toBeUndefined();
+    expect(db.countDiscoveriesByActionable().high).toBe(0);
+  });
+
+  test("[#172] resolved discovery excluded from default reads", () => {
+    seedPage(db, "entity/a", "entity/person", "A");
+    const { id } = db.upsertDiscovery("gap", ["entity/a"], 0.7, undefined, undefined, "high");
+    db.updateDiscoveryStatus(id, "resolved");
+
+    expect(db.getUnseenDiscoveries(10).find(r => r.id === id)).toBeUndefined();
+    expect(db.getDiscoveriesByType("gap", 10).find(r => r.id === id)).toBeUndefined();
+    expect(db.countDiscoveriesByActionable().high).toBe(0);
+  });
+
+  test("[#172] seen discovery excluded from default reads", () => {
+    seedPage(db, "entity/a", "entity/person", "A");
+    const { id } = db.upsertDiscovery("gap", ["entity/a"], 0.7, undefined, undefined, "high");
+    db.updateDiscoveryStatus(id, "seen");
+
+    expect(db.getUnseenDiscoveries(10).find(r => r.id === id)).toBeUndefined();
+    expect(db.getDiscoveriesByType("gap", 10).find(r => r.id === id)).toBeUndefined();
+    expect(db.countDiscoveriesByActionable().high).toBe(0);
+  });
+
+  test("[#172] updateDiscoveryStatus sets seen=1 for non-pending, resets pending", () => {
+    seedPage(db, "entity/a", "entity/person", "A");
+    const { id } = db.upsertDiscovery("gap", ["entity/a"], 0.5, undefined, undefined, "medium");
+    expect(db.getDiscoveryById(id)!.seen).toBe(0);
+    expect(db.getDiscoveryById(id)!.status).toBe("pending");
+
+    db.updateDiscoveryStatus(id, "resolved");
+    expect(db.getDiscoveryById(id)!.status).toBe("resolved");
+    expect(db.getDiscoveryById(id)!.seen).toBe(1);
+
+    db.updateDiscoveryStatus(id, "dismissed");
+    expect(db.getDiscoveryById(id)!.status).toBe("dismissed");
+    expect(db.getDiscoveryById(id)!.seen).toBe(1);
+
+    db.updateDiscoveryStatus(id, "pending");
+    expect(db.getDiscoveryById(id)!.status).toBe("pending");
+    expect(db.getDiscoveryById(id)!.seen).toBe(0);
+  });
+
+  test("[#172] recurrence after dismissed stays invisible (occurrence increments, status preserved)", () => {
+    seedPage(db, "entity/a", "entity/person", "A");
+    const { id } = db.upsertDiscovery("bridge", ["entity/a"], 0.9, undefined, undefined, "high");
+    db.updateDiscoveryStatus(id, "dismissed");
+
+    const before = db.getDiscoveryById(id)!;
+    db.upsertDiscovery("bridge", ["entity/a"], 0.9, undefined, undefined, "high");
+    const after = db.getDiscoveryById(id)!;
+
+    expect(after.status).toBe("dismissed");
+    expect(after.occurrence_count).toBe(before.occurrence_count + 1);
+    expect(after.seen).toBe(1);
+    expect(db.getUnseenDiscoveries(10).find(r => r.id === id)).toBeUndefined();
+  });
+
+  test("[#172] cleanupOldDiscoveries does not delete dismissed (seen=1 protects)", () => {
+    seedPage(db, "entity/a", "entity/person", "A");
+    const { id } = db.upsertDiscovery("gap", ["entity/a"], 0.7, undefined, undefined, "high");
+    db.updateDiscoveryStatus(id, "dismissed");
+    db.rawDb.prepare("UPDATE discoveries SET detected_at = datetime('now', '-180 days') WHERE id = $id")
+      .run({ $id: id });
+
+    const deleted = db.cleanupOldDiscoveries(90);
+    expect(deleted).toBe(0);
+    const after = db.getDiscoveryById(id);
+    expect(after).not.toBeNull();
+    expect(after!.status).toBe("dismissed");
+    expect(after!.seen).toBe(1);
+  });
+
   test("suggestion survives recurrence", () => {
     seedPage(db, "entity/a", "entity/person", "A");
 

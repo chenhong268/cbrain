@@ -205,6 +205,52 @@ describe("MCP Discovery Tools", () => {
       assertNoBannedWords(trendText);
     });
 
+    test("[#172] excludes dismissed discoveries", async () => {
+      seedPage(db, "entities/org-c", "组织C", "entity/organization");
+      const id = seedDiscovery(db, "gap", ["entities/org-c"], 0.9, "high", null, {
+        mention_count: 20,
+        link_count: 0,
+      });
+
+      const server = createServer(deps);
+      await getTools(server).update_discovery_status.handler({ ids: [id], status: "dismissed" });
+
+      const result = await getTools(server).read_discoveries.handler({});
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload.cards.length).toBe(0);
+    });
+
+    test("[#172] excludes resolved discoveries", async () => {
+      seedPage(db, "entities/org-c", "组织C", "entity/organization");
+      const id = seedDiscovery(db, "gap", ["entities/org-c"], 0.9, "high", null, {
+        mention_count: 20,
+        link_count: 0,
+      });
+
+      const server = createServer(deps);
+      await getTools(server).update_discovery_status.handler({ ids: [id], status: "resolved" });
+
+      const result = await getTools(server).read_discoveries.handler({});
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload.cards.length).toBe(0);
+    });
+
+    test("[#172] update_discovery_status(seen) returns 已读 label", async () => {
+      seedPage(db, "entities/org-c", "组织C", "entity/organization");
+      const id = seedDiscovery(db, "gap", ["entities/org-c"], 0.9, "high", null, {
+        mention_count: 20,
+        link_count: 0,
+      });
+
+      const server = createServer(deps);
+      const result = await getTools(server).update_discovery_status.handler({ ids: [id], status: "seen" });
+      const payload = JSON.parse(result.content[0].text);
+
+      expect(payload.status_label).toBe("已读");
+    });
+
     test("custom limit overrides default 3", async () => {
       for (let i = 0; i < 8; i++) {
         seedPage(db, `entities/org-${i}`, `组织${i}`, "entity/organization");
@@ -348,6 +394,48 @@ describe("MCP Discovery Tools", () => {
       for (const w of BANNED_WORDS) {
         expect(payload.display?.includes(w) ?? false).toBe(false);
       }
+    });
+  });
+
+  describe("run_discovery lifecycle (#172)", () => {
+    const daysAgoN = (n: number) => {
+      const d = new Date();
+      d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10);
+    };
+
+    test("dismissed recurring discovery does not reappear as fresh card", async () => {
+      // Seed a trend-producing entity: 3+ consecutive mention increases.
+      seedPage(db, "entity/trend-x", "趋势X", "entity/person", 10);
+      // delta >= 10 ⇒ high-actionable ⇒ enriched with suggestion ⇒ not filtered by digest
+      db.upsertMentionSnapshot("entity/trend-x", daysAgoN(3), 2);
+      db.upsertMentionSnapshot("entity/trend-x", daysAgoN(2), 5);
+      db.upsertMentionSnapshot("entity/trend-x", daysAgoN(1), 9);
+      db.upsertMentionSnapshot("entity/trend-x", daysAgoN(0), 14);
+
+      const server = createServer(deps);
+
+      // First run — trend discovery appears (pending).
+      const first = await getTools(server).run_discovery.handler({ types: ["trend"] });
+      const firstPayload = JSON.parse(first.content[0].text);
+      expect(firstPayload.cards.length).toBeGreaterThan(0);
+
+      const trendId = (db.rawDb.prepare(
+        "SELECT id FROM discoveries WHERE type = 'trend' ORDER BY id DESC LIMIT 1"
+      ).get() as { id: number }).id;
+
+      // Dismiss it.
+      await getTools(server).update_discovery_status.handler({ ids: [trendId], status: "dismissed" });
+
+      // Second run — same graph, recurrence. Must NOT reappear.
+      const second = await getTools(server).run_discovery.handler({ types: ["trend"] });
+      const secondPayload = JSON.parse(second.content[0].text);
+      const after = db.getDiscoveryById(trendId)!;
+
+      expect(after.status).toBe("dismissed");
+      expect(after.occurrence_count).toBeGreaterThanOrEqual(2);
+      expect(after.seen).toBe(1);
+      expect(secondPayload.cards.length).toBe(0);
     });
   });
 });
