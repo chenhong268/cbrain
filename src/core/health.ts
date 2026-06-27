@@ -184,6 +184,7 @@ export class HealthChecker {
       this.checkContradictions(),
       this.checkSearchQuality(),
       this.checkBulkPending(),
+      this.checkNerQuality(),
     ];
 
     const highCount = dimensions.reduce((n, d) => n + d.issues.filter(i => i.severity === "high").length, 0);
@@ -1264,5 +1265,59 @@ export class HealthChecker {
       : issues.some(i => i.severity === "medium") ? "warn" : "pass";
 
     return { name: "搜索质量", status, issues };
+  }
+
+  // ─── Dimension: NER Quality (observe-only, #167 Phase 1) ────
+
+  private checkNerQuality(): HealthDimension {
+    const stats = this.db.getNerQualityStats(7);
+    const issues: HealthIssue[] = [];
+
+    if (stats.runs === 0) {
+      return { name: "NER 质量", status: "pass", issues: [] };
+    }
+
+    const kept = stats.extractedEntities + stats.extractedConcepts;
+
+    if (stats.filteredRate > 0.6) {
+      issues.push({
+        severity: "medium",
+        slug: "-",
+        title: `${(stats.filteredRate * 100).toFixed(0)}% 抽取结果被过滤`,
+        description: `最近 ${stats.periodDays} 天 ${stats.runs} 次 NER：保留 ${kept} 个、过滤 ${stats.filteredTotal} 个`,
+        suggestion: "观察 NER 是否抽到过多噪声词（observe-only，未自动调整）",
+      });
+    }
+
+    if (stats.duplicateRate > 0.4) {
+      issues.push({
+        severity: "medium",
+        slug: "-",
+        title: `${(stats.duplicateRate * 100).toFixed(0)}% 候选触发类型门控冲突`,
+        description: `${stats.duplicateCandidate} 个候选因类型不匹配被标为 duplicate_candidate`,
+        suggestion: "检查实体类型一致性（observe-only，未自动调整）",
+      });
+    }
+
+    if (stats.stubRate > 0.5) {
+      issues.push({
+        severity: "low",
+        slug: "-",
+        title: `${(stats.stubRate * 100).toFixed(0)}% 候选新建为 stub`,
+        description: `${stats.stubCreated} 个候选未匹配已有实体，直接新建 stub`,
+      });
+    }
+
+    for (const top of stats.topFilterReasons.slice(0, 3)) {
+      issues.push({
+        severity: "low",
+        slug: "-",
+        title: `主要过滤原因: ${top.reason}`,
+        description: `出现 ${top.count} 次`,
+      });
+    }
+
+    const status = issues.some((i) => i.severity === "medium") ? "warn" : "pass";
+    return { name: "NER 质量", status, issues };
   }
 }

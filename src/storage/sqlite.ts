@@ -386,6 +386,7 @@ export class CBrainDB {
     this.migrateDiscoveries();
     this.migrateSearchLog();
     this.migrateSearchTraceTables();
+    this.migrateNerQualityLog();
     this.migrateRawToRecords();
     this.migrateQueryLog();
     this.migrateActivityWeight();
@@ -2664,6 +2665,27 @@ export class CBrainDB {
     } catch { /* column already exists */ }
   }
 
+  private migrateNerQualityLog(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ner_quality_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        extracted_entities INTEGER NOT NULL,
+        extracted_concepts INTEGER NOT NULL,
+        filtered_total INTEGER NOT NULL,
+        filter_reasons_json TEXT,
+        resolved_existing INTEGER NOT NULL,
+        alias_added INTEGER NOT NULL,
+        stub_created INTEGER NOT NULL,
+        duplicate_candidate INTEGER NOT NULL,
+        relations_total INTEGER NOT NULL,
+        relations_written INTEGER NOT NULL,
+        relations_skipped INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_ner_quality_log_created ON ner_quality_log(created_at)");
+  }
+
   logSearch(query: string, strategy: string, latencyMs: number, hitCount: number, degraded: boolean, details?: Record<string, unknown>): void {
     this.prepare(
       "INSERT INTO search_log (query, strategy, latency_ms, hit_count, degraded, details_json) VALUES ($query, $strategy, $latency, $hits, $degraded, $details)"
@@ -2720,6 +2742,129 @@ export class CBrainDB {
       topReasonCodes,
       emptyResultCount,
       hierarchyMismatchCount,
+      periodDays: days,
+    };
+  }
+
+  // ─── NER quality observability (#167 Phase 1, observe-only) ────
+
+  logNerQuality(input: {
+    extractedEntities: number;
+    extractedConcepts: number;
+    filteredTotal: number;
+    filterReasons: Record<string, number>;
+    resolvedExisting: number;
+    aliasAdded: number;
+    stubCreated: number;
+    duplicateCandidate: number;
+    relationsTotal: number;
+    relationsWritten: number;
+  }): void {
+    const skipped = Math.max(0, input.relationsTotal - input.relationsWritten);
+    this.prepare(
+      `INSERT INTO ner_quality_log
+       (extracted_entities, extracted_concepts, filtered_total, filter_reasons_json,
+        resolved_existing, alias_added, stub_created, duplicate_candidate,
+        relations_total, relations_written, relations_skipped)
+       VALUES ($ee, $ec, $ft, $fr, $re, $aa, $sc, $dc, $rt, $rw, $rs)`
+    ).run({
+      $ee: input.extractedEntities,
+      $ec: input.extractedConcepts,
+      $ft: input.filteredTotal,
+      $fr: JSON.stringify(input.filterReasons),
+      $re: input.resolvedExisting,
+      $aa: input.aliasAdded,
+      $sc: input.stubCreated,
+      $dc: input.duplicateCandidate,
+      $rt: input.relationsTotal,
+      $rw: input.relationsWritten,
+      $rs: skipped,
+    });
+  }
+
+  getNerQualityStats(days: number = 7): {
+    runs: number;
+    extractedEntities: number;
+    extractedConcepts: number;
+    filteredTotal: number;
+    filteredRate: number;
+    resolvedExisting: number;
+    aliasAdded: number;
+    stubCreated: number;
+    duplicateCandidate: number;
+    duplicateRate: number;
+    stubRate: number;
+    relationsTotal: number;
+    relationsSkipped: number;
+    relationSkipRate: number;
+    topFilterReasons: Array<{ reason: string; count: number }>;
+    periodDays: number;
+  } {
+    const rows = this.prepare(
+      "SELECT extracted_entities, extracted_concepts, filtered_total, filter_reasons_json, resolved_existing, alias_added, stub_created, duplicate_candidate, relations_total, relations_written, relations_skipped FROM ner_quality_log WHERE created_at >= datetime('now', '-' || $days || ' days')"
+    ).all({ $days: days }) as Array<{
+      extracted_entities: number; extracted_concepts: number; filtered_total: number;
+      filter_reasons_json: string | null; resolved_existing: number; alias_added: number;
+      stub_created: number; duplicate_candidate: number; relations_total: number;
+      relations_written: number; relations_skipped: number;
+    }>;
+
+    const runs = rows.length;
+    if (runs === 0) {
+      return {
+        runs: 0, extractedEntities: 0, extractedConcepts: 0, filteredTotal: 0,
+        filteredRate: 0, resolvedExisting: 0, aliasAdded: 0, stubCreated: 0,
+        duplicateCandidate: 0, duplicateRate: 0, stubRate: 0,
+        relationsTotal: 0, relationsSkipped: 0, relationSkipRate: 0,
+        topFilterReasons: [], periodDays: days,
+      };
+    }
+
+    const sum = (sel: (r: typeof rows[number]) => number) => rows.reduce((s, r) => s + sel(r), 0);
+    const extractedEntities = sum((r) => r.extracted_entities);
+    const extractedConcepts = sum((r) => r.extracted_concepts);
+    const filteredTotal = sum((r) => r.filtered_total);
+    const resolvedExisting = sum((r) => r.resolved_existing);
+    const aliasAdded = sum((r) => r.alias_added);
+    const stubCreated = sum((r) => r.stub_created);
+    const duplicateCandidate = sum((r) => r.duplicate_candidate);
+    const relationsTotal = sum((r) => r.relations_total);
+    const relationsSkipped = sum((r) => r.relations_skipped);
+
+    const kept = extractedEntities + extractedConcepts;
+    const outcomes = resolvedExisting + aliasAdded + stubCreated + duplicateCandidate;
+
+    const reasonCounts = new Map<string, number>();
+    for (const row of rows) {
+      if (!row.filter_reasons_json) continue;
+      try {
+        const parsed = JSON.parse(row.filter_reasons_json) as Record<string, number>;
+        for (const [reason, count] of Object.entries(parsed)) {
+          reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + count);
+        }
+      } catch { /* malformed json, skip */ }
+    }
+    const topFilterReasons = [...reasonCounts.entries()]
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    return {
+      runs,
+      extractedEntities,
+      extractedConcepts,
+      filteredTotal,
+      filteredRate: kept + filteredTotal > 0 ? filteredTotal / (kept + filteredTotal) : 0,
+      resolvedExisting,
+      aliasAdded,
+      stubCreated,
+      duplicateCandidate,
+      duplicateRate: outcomes > 0 ? duplicateCandidate / outcomes : 0,
+      stubRate: outcomes > 0 ? stubCreated / outcomes : 0,
+      relationsTotal,
+      relationsSkipped,
+      relationSkipRate: relationsTotal > 0 ? relationsSkipped / relationsTotal : 0,
+      topFilterReasons,
       periodDays: days,
     };
   }

@@ -9,6 +9,7 @@ import { extractWikiLinks, isValidEntityName, stripKnownRelationsSection } from 
 import type { Logger } from "./logger.js";
 import { EntityResolver } from "./entity-resolver.js";
 import { getOntology } from "../ontology/loader.js";
+import { sanitizeForLog } from "./sync-index-safety.js";
 import {
   chunkContent,
   mapEntityType,
@@ -382,6 +383,67 @@ export class ContentPipeline {
     for (const event of extraction.events) {
       if (skipDatelessEvents && !event.date) continue;
       this.db.addTimelineEntry(fromSlug, event.description, event.date ?? undefined, "ner", { source_page_slug: fromSlug });
+    }
+
+    // ─── NER quality metrics — observe-only, anonymized (#167 Phase 1) ───
+    // FAIL-OPEN: these metrics are diagnostics only. Any failure here (corrupt
+    // ner_quality_log, botched migration, transient SQLite write error) MUST NOT
+    // break the NER write path or roll back the entity/relation/event writes
+    // already applied above. Counts only — no raw entity names, slugs, body,
+    // prompt, or file paths are persisted or logged.
+    try {
+      const filterReasons: Record<string, number> = {};
+      for (const f of extraction.filtered ?? []) {
+        filterReasons[f.reason] = (filterReasons[f.reason] ?? 0) + 1;
+      }
+      let extractedEntities = 0;
+      let extractedConcepts = 0;
+      for (const e of extraction.entities) {
+        if (mapEntityType(e.type).startsWith("concept/")) extractedConcepts++;
+        else extractedEntities++;
+      }
+      let resolvedExisting = 0;
+      let aliasAdded = 0;
+      let stubCreated = 0;
+      let duplicateCandidate = 0;
+      for (const r of resolutionMap.values()) {
+        if (r.action === "resolved_to_existing") resolvedExisting++;
+        else if (r.action === "alias_added") aliasAdded++;
+        else if (r.action === "stub_created") stubCreated++;
+        else if (r.action === "duplicate_candidate") duplicateCandidate++;
+      }
+      this.db.logNerQuality({
+        extractedEntities,
+        extractedConcepts,
+        filteredTotal: (extraction.filtered ?? []).length,
+        filterReasons,
+        resolvedExisting,
+        aliasAdded,
+        stubCreated,
+        duplicateCandidate,
+        relationsTotal: extraction.relations.length,
+        relationsWritten: writtenRelations.length,
+      });
+    } catch (err) {
+      // Observe-only: never let metrics break the NER write path. Sanitize the
+      // error before logging — reuse sanitizeForLog (redacts absolute paths +
+      // credential-like tokens) and additionally redact any raw extraction token
+      // that could ride along in the message (entity names, source slug, relation
+      // endpoints). sanitizeForLog's path regex only matches absolute paths, so
+      // relative slugs/entity names need this extra pass. No raw content leaks.
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const rawTokens = new Set<string>();
+      if (fromSlug) rawTokens.add(fromSlug);
+      for (const e of extraction.entities) rawTokens.add(e.name);
+      for (const f of extraction.filtered ?? []) rawTokens.add(f.name);
+      for (const r of extraction.relations) { rawTokens.add(r.from); rawTokens.add(r.to); }
+      let safe = sanitizeForLog(rawMessage);
+      for (const token of rawTokens) {
+        if (token.length >= 2) safe = safe.split(token).join("<redacted>");
+      }
+      this.logger?.warn("pipeline", "ner_quality metrics write failed (observe-only, ignored)", {
+        error: safe,
+      });
     }
 
     return {
