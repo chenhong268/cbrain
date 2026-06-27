@@ -132,6 +132,13 @@ export function createHttpServer(ctx: ToolContext) {
       const server = Bun.serve({
         port,
         hostname: "127.0.0.1",
+        // sync / large-file ingest triggers re-indexing (embedding + NER +
+        // LanceDB writes) that can run well past Bun's default idleTimeout (10s),
+        // which kills the in-flight connection → Hermes MCP client sees
+        // RemoteDisconnected → "unavailable". Bun caps positive idleTimeout at
+        // 255s, still too short for big batches, so disable it here — requests
+        // are legitimately long and session cleanup is handled at the app layer.
+        idleTimeout: 0,
         async fetch(req) {
           const url = new URL(req.url);
 
