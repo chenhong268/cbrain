@@ -9,7 +9,7 @@ import { getHierarchyContext } from "../../core/hierarchy.js";
 import { generateProactiveHints } from "../../core/proactive.js";
 import { extractBirthday } from "../../core/birthday.js";
 import { buildMemorySkeleton } from "../../core/key-points.js";
-import { type SearchTrace } from "../../core/search.js";
+import { type SearchTrace, applyRecallQualityGate } from "../../core/search.js";
 import { classifyDegradedReasons, computeSearchDegraded } from "../../core/search-diagnostics.js";
 import { traceToSteps } from "../../core/search-trace.js";
 import { buildEvidenceFromBatched, buildEvidenceSummary, collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
@@ -73,6 +73,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const searchStart = Date.now();
     let searchResults: Awaited<ReturnType<typeof ctx.search.search>>;
     let usedStrategy: string = strategy ?? "smart";
+    let exactSlug: string | null = null;
 
     // Start trace session BEFORE search to capture real latency
     let traceSessionId: number | undefined;
@@ -80,7 +81,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     if (usedStrategy === "smart") {
       const resolved = ctx.db.resolveSlugs([query])[0];
-      const exactSlug = resolved?.slug ?? null;
+      exactSlug = resolved?.slug ?? null;
 
       searchResults = await ctx.search.search(query, { limit: candidateLimit, multiStep, _trace: trace });
       usedStrategy = "smart-hybrid";
@@ -132,7 +133,57 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       }
     } catch { /* trace write failure must not break search */ }
 
-    // Learning loop: log query + bump activity weights
+    // #230 quality gate BEFORE learning/logging — filtered noise must not enter
+    // query log, activity weights, grounded evidence, or proactive hints. Runs
+    // on the RAW search score (record-type demotion is applied AFTER the gate
+    // and only affects ranking, so a rich record's single-source FTS hit is not
+    // filtered out by its demoted score).
+    const pagesBySlug = new Map<string, ReturnType<typeof ctx.pages.getBySlug>>();
+    for (const sr of searchResults) {
+      const p = ctx.pages.getBySlug(sr.slug);
+      if (p) pagesBySlug.set(sr.slug, p);
+    }
+    // candidateCount = wider pool searched. The gate runs on the RAW search score
+    // (before record demotion) so a rich record page with a genuine single-source
+    // FTS hit (rrf rank-1 ≈ 0.016 > 0.01) survives — record demotion is applied
+    // AFTER the gate and only affects ranking, not filtering.
+    const candidateCount = searchResults.length;
+    // Per-slug link counts so isBareStubCandidate can tell apart true bare stubs
+    // (≤1 link) from tier-3 entities that are structurally connected (many links)
+    // — without this, a well-connected tier-3 entity would be misclassified.
+    const candidateLinks = ctx.db.batchGetLinksForSlugs(searchResults.map(r => r.slug));
+    const linkCounts = new Map<string, number>();
+    for (const sr of searchResults) {
+      const l = candidateLinks.get(sr.slug);
+      linkCounts.set(sr.slug, (l?.outgoing.length ?? 0) + (l?.incoming.length ?? 0));
+    }
+    // Gate pages via db.getPage (vault-independent). PageManager.getBySlug can
+    // return null when the vault file is absent, which would silently disable
+    // the bare-stub check; db.getPage reads the row directly so the gate always
+    // has tier/type/mention_count to decide on.
+    const gatePages = new Map<string, { tier?: number; type?: string; mention_count?: number }>();
+    for (const sr of searchResults) {
+      const p = ctx.db.getPage(sr.slug);
+      if (p) gatePages.set(sr.slug, { tier: p.tier, type: p.type, mention_count: p.mention_count });
+    }
+    const gateResult = applyRecallQualityGate(searchResults, {
+      pagesBySlug: gatePages,
+      linkCounts,
+      exactSlugs: exactSlug ? new Set([exactSlug]) : new Set(),
+    });
+    searchResults = gateResult.results;
+
+    // Record-type demotion affects RANKING only, not gate filtering. A record
+    // page that cleared the gate on raw score is kept but ranked below richer
+    // entity/concept evidence — preserves "之前讨论过/当时怎么设计" recall that
+    // often depends on record pages with a single-source FTS hit.
+    const RECORD_SCORE_FACTOR = 0.5;
+    for (const sr of searchResults) {
+      if (gatePages.get(sr.slug)?.type === "record") sr.score *= RECORD_SCORE_FACTOR;
+    }
+    searchResults.sort((a, b) => b.score - a.score);
+
+    // Learning loop: log query + bump activity weights (gate-filtered results only)
     const resultSlugs = searchResults.map(r => r.slug);
     try { ctx.db.logQuery("recall", query, resultSlugs, searchLatencyMs, session_id); } catch { /* non-critical */ }
     for (let i = 0; i < searchResults.length; i++) {
@@ -143,14 +194,15 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     // Fanout diagnostics — surfaced ONLY in raw/search_meta, never in display/summary.
     // candidate_count reflects the wider pool searched; truncated/has_more signal that
     // display was capped (distinct from ToolSummary.truncated which tracks _stub bodies).
-    const candidateHasMore = searchResults.length > cap;
+    const candidateHasMore = candidateCount > cap;
     const diagnosticMeta = {
       strategy: usedStrategy,
       latency_ms: searchLatencyMs,
       degraded: isSearchDegraded || undefined,
-      candidate_count: searchResults.length,
+      candidate_count: candidateCount,
       ...(candidateHasMore ? { truncated: true, has_more: true } : {}),
       ...(reasonCodes.length > 0 ? { reason_codes: reasonCodes } : {}),
+      ...(gateResult.filteredCount > 0 ? { quality_gate: { filtered: gateResult.filteredCount, reason_codes: gateResult.reasonCodes } } : {}),
     };
 
     if (searchResults.length === 0) {
@@ -199,20 +251,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     }
 
     // ── Batch enrichment for all result entities ─────────────────
-    const pagesBySlug = new Map<string, ReturnType<typeof ctx.pages.getBySlug>>();
-    for (const sr of searchResults) {
-      const p = ctx.pages.getBySlug(sr.slug);
-      if (p) pagesBySlug.set(sr.slug, p);
-    }
-
-    // Type demotion: record-type results rank lower
-    const RECORD_SCORE_FACTOR = 0.5;
-    for (const sr of searchResults) {
-      const page = pagesBySlug.get(sr.slug);
-      const type = page?.frontmatter?.type ?? page?.type;
-      if (type === "record") sr.score *= RECORD_SCORE_FACTOR;
-    }
-    searchResults.sort((a, b) => b.score - a.score);
+    // (pagesBySlug, record-type demotion, and the #230 quality gate already
+    // ran above — before learning/logging — so noise never enters query log,
+    // activity weights, grounded evidence, or proactive hints.)
 
     // Fanout: searched candidateLimit candidates; enrich/display only the top `cap`.
     // The wider pool was already consumed for grounded evidence (resultSlugs above)

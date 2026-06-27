@@ -223,6 +223,89 @@ export function mergeRankedResults(
   return results.slice(0, limit);
 }
 
+// ─── Recall quality gate (#230) ──────────────────────────────
+
+/** Conservative minimum fused score for normal recall output. Kept BELOW the
+ *  rrf rank-1 score (≈1/(k+1) ≈ 0.016 at k=60) so a genuine single-source FTS
+ *  hit — the fallback evidence when vector is degraded/unavailable — is NOT
+ *  filtered out. A bare-stub penalty (BARE_STUB_PENALTY=0.5) pushes a rank-1
+ *  bare stub to ≈0.008, which IS filtered. exact matches bypass. Deterministic
+ *  default, not tuned on private data. */
+export const RECALL_MIN_SCORE = 0.01;
+
+/** Score multiplier applied to bare tier-3 stubs in normal recall so richer
+ *  evidence outranks them. Exact matches are never penalized. */
+export const BARE_STUB_PENALTY = 0.5;
+
+/** Minimal page-like shape consumed by the bare-stub detector. recall already
+ *  fetches these fields during enrichment, so the gate needs no extra queries. */
+export interface PageLike {
+  tier?: number;
+  type?: string;
+  mention_count?: number;
+}
+
+/** Deterministic bare-stub detector: a tier-3 entity/concept with ≤1 link and
+ *  ≤1 mention. Mirrors the getBareStubs SQL signal but operates on a page-like
+ *  object so recall can apply it per-result without a full table scan. */
+export function isBareStubCandidate(page: PageLike, linkCount?: number): boolean {
+  if (page.tier !== 3) return false;
+  const type = page.type ?? "";
+  if (!type.startsWith("entity/") && !type.startsWith("concept/")) return false;
+  const links = linkCount ?? 0;
+  const mentions = page.mention_count ?? 0;
+  return links <= 1 && mentions <= 1;
+}
+
+export interface QualityGateOptions {
+  pagesBySlug: Map<string, PageLike>;
+  linkCounts?: Map<string, number>;
+  threshold?: number;
+  /** Slugs promoted as exact matches (slug/title/alias). Bypass penalty + filter. */
+  exactSlugs?: Set<string>;
+}
+
+export interface QualityGateResult {
+  results: SearchResult[];
+  filteredCount: number;
+  reasonCodes: string[];
+}
+
+/** Apply the recall quality gate: (1) demote bare tier-3 stubs via a score
+ *  penalty, (2) re-sort, (3) filter results below the minimum-relevance
+ *  threshold. Exact matches (source === "exact" or in exactSlugs) bypass both
+ *  the penalty and the filter. Deterministic — no LLM, no private tuning.
+ *  NOTE: like the existing RECORD_SCORE_FACTOR demotion, this mutates `score`
+ *  in place; callers pass their local candidate list, not shared state. */
+export function applyRecallQualityGate(
+  results: SearchResult[],
+  opts: QualityGateOptions,
+): QualityGateResult {
+  const threshold = opts.threshold ?? RECALL_MIN_SCORE;
+  const exactSlugs = opts.exactSlugs ?? new Set<string>();
+  const isExact = (r: SearchResult): boolean => r.source === "exact" || exactSlugs.has(r.slug);
+
+  for (const r of results) {
+    if (isExact(r)) continue;
+    const page = opts.pagesBySlug.get(r.slug);
+    if (page && isBareStubCandidate(page, opts.linkCounts?.get(r.slug))) {
+      r.score *= BARE_STUB_PENALTY;
+    }
+  }
+  results.sort((a, b) => b.score - a.score);
+
+  const reasonCodes: string[] = [];
+  const kept: SearchResult[] = [];
+  for (const r of results) {
+    if (isExact(r) || r.score >= threshold) {
+      kept.push(r);
+    } else {
+      reasonCodes.push("low_relevance_filtered");
+    }
+  }
+  return { results: kept, filteredCount: results.length - kept.length, reasonCodes };
+}
+
 /** Default decomposition budget — keeps default recall cheap (0-1 LLM calls).
  *  Explicit multiStep=true / agentic_research bypass these (走 ResearchManager). */
 const MAX_DEFAULT_SUBQUERIES = 3;

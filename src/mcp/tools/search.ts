@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { generateProactiveHints } from "../../core/proactive.js";
-import { isComplexQuery, type SearchTrace } from "../../core/search.js";
+import { isComplexQuery, applyRecallQualityGate, type SearchTrace } from "../../core/search.js";
 import { traceToSteps } from "../../core/search-trace.js";
 import { trimHint, applyProactiveBudget } from "./trim.js";
 import { classifyDegradedReasons, computeSearchDegraded } from "../../core/search-diagnostics.js";
@@ -33,6 +33,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     const start = Date.now();
     let results: Awaited<ReturnType<typeof ctx.search.search>>;
     let usedStrategy: string = actualStrategy;
+    let exactSlug: string | null = null;
     const trace: SearchTrace = {};
 
     // Start trace session BEFORE search to capture real latency
@@ -42,7 +43,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     if (actualStrategy === "smart") {
       // Exact slug/title match fast path
       const resolved = ctx.db.resolveSlugs([query])[0];
-      const exactSlug = resolved?.slug ?? null;
+      exactSlug = resolved?.slug ?? null;
 
       // Detect complex queries before FTS — routes to decomposition in ctx.search.search().
       // This check is needed here (not just inside HybridSearch) because the smart strategy
@@ -116,7 +117,26 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       }
     } catch { /* trace write failure must not break search */ }
 
-    // Learning loop: log query + bump activity weights
+    // #230 low-relevance gate BEFORE learning/logging — filtered noise must not
+    // enter query log, activity weights, or proactive hints. query uses a near-
+    // zero threshold + fts/exact/decompose bypass so debug keyword lookups stay.
+    const ftsScenario = usedStrategy.includes("fts") || usedStrategy.includes("boost");
+    const queryExactSlugs = new Set<string>();
+    if (exactSlug) queryExactSlugs.add(exactSlug);
+    for (const r of results) {
+      if (r.source === "fts" || r.source === "exact" || ftsScenario) queryExactSlugs.add(r.slug);
+    }
+    const queryGate = applyRecallQualityGate(results, {
+      pagesBySlug: new Map(),
+      exactSlugs: queryExactSlugs,
+      threshold: 0.005,
+    });
+    results = queryGate.results;
+    const queryQualityMeta = queryGate.filteredCount > 0
+      ? { quality_gate: { filtered: queryGate.filteredCount, reason_codes: queryGate.reasonCodes } }
+      : {};
+
+    // Learning loop: log query + bump activity weights (gate-filtered only)
     const resultSlugs = results.map((r: { slug: string }) => r.slug);
     try { ctx.db.logQuery("query", query, resultSlugs, latencyMs, session_id); } catch { /* non-critical */ }
     for (let i = 0; i < results.length; i++) {
@@ -131,6 +151,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
 
     const isSearchDegraded = computeSearchDegraded(latencyMs, trace, reasonCodes);
     const isVectorDegraded = !!trace.degraded_reason;
+
     const payload = {
       results,
       proactive_hints: (() => {
@@ -150,6 +171,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
         latency_ms: latencyMs,
         degraded: isSearchDegraded || undefined,
         ...(reasonCodes.length > 0 ? { reason_codes: reasonCodes } : {}),
+        ...queryQualityMeta,
       },
     };
     const { display, summary, raw } = formatQueryEnvelope(payload);
