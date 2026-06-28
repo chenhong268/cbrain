@@ -149,7 +149,7 @@ CBrain 需要以下 API key：
 | record | `records/` | Reading notes, articles, meeting notes, transcripts |
 | insight | `insights/` | Auto-generated cross-domain connections and discoveries |
 
-## CLI Commands (43 total)
+## CLI Commands (44 total)
 
 ### 大脑管理
 ```bash
@@ -202,6 +202,8 @@ cbrain doctor --first-run                # 2.0 首次运行全面检查（config
 cbrain doctor --first-run --json         # 同上，JSON 输出（供 Agent 调用）
 cbrain perf-diagnose                     # 只读性能诊断：最近 journey 的慢查询/慢步骤分布（不写入）
 cbrain perf-diagnose --json --days 30    # 同上，30 天窗口、机器可读 JSON
+cbrain knowledge-map                     # 只读生成知识图谱报告：领域/成熟度/桥接/孤立节点（不写 vault）
+cbrain knowledge-map --debug             # 同上，附原始/调试附录（含 slug、权重等内部数据）
 ```
 
 > **Hermes cron 集成**：见 [docs/hermes-integration.md](docs/hermes-integration.md) —— 用 `bin/cbrain-maintenance.sh` wrapper 走 HTTP `/mcp`，**不要裸调 CLI**（serve 在跑时并发写损坏数据）。

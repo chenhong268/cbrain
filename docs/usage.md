@@ -239,7 +239,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 由 `cbrain --help` 自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen cli-commands:start -->
-共 43 个 CLI 命令（`cbrain --help`）。
+共 44 个 CLI 命令（`cbrain --help`）。
 
 | 命令 | 说明 |
 |------|------|
@@ -266,6 +266,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `index` | Generate Obsidian index files |
 | `ingest` | Ingest content (text or markdown) |
 | `init` | Initialize a new brain (creates config + vault dirs) |
+| `knowledge-map` | 生成知识图谱报告（只读）：领域、成熟度、桥接节点、孤立/弱连接条目。不写 vault。 |
 | `list` | List all pages in the brain |
 | `mcp-config` | Output MCP server configuration JSON for Agent integration |
 | `migrate-runtime` | Migrate vault/outputs to runtime directory (uses resolveRuntimePath) |
