@@ -110,7 +110,7 @@ function renderMaturity(a: KnowledgeMapAnalysis): string {
   if (communities.length === 0) return "暂无可评估的领域。";
   return communities
     .map((c, i) => {
-      const mature = isMature(c);
+      const mature = isCommunityMature(c);
       return mature
         ? `- **${domainLabel(i)}** 看起来比较成熟——条目之间有较多可信的内部关联。`
         : `- **${domainLabel(i)}** 还比较稀疏——条目之间的关联较少，可以考虑补充。`;
@@ -148,7 +148,7 @@ function renderNextActions(a: KnowledgeMapAnalysis): string {
   if (a.bridgeCandidates.length > 0) {
     actions.push("- 桥接节点值得回顾——它们可能指向需要更新的关联。");
   }
-  if (a.communities.some((c) => !isMature(c))) {
+  if (a.communities.some((c) => !isCommunityMature(c))) {
     actions.push("- 稀疏领域可以补充更多条目或关联，让结构更清晰。");
   }
   if (a.health.nodeCount > 0 && a.communities.length === 0) {
@@ -172,7 +172,12 @@ function orderCommunities(communities: CommunitySummary[]): CommunitySummary[] {
   return [...communities].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
 }
 
-function isMature(c: CommunitySummary): boolean {
+/**
+ * Shared maturity classifier — the SINGLE source for the size/internal-edge/
+ * density thresholds. Used by both this report's wording (#241) and the Dream
+ * Knowledge Map brief counts (#242), so the two never silently disagree.
+ */
+export function isCommunityMature(c: CommunitySummary): boolean {
   return (
     c.size >= MATURITY_MIN_SIZE &&
     c.internalEdgeCount >= MATURITY_MIN_INTERNAL_EDGES &&

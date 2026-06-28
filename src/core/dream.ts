@@ -20,6 +20,12 @@ import { StubEnrichManager } from "./stub-enrich.js";
 import { ContentPipeline } from "./pipeline.js";
 import { PageManager } from "./page.js";
 import { WakeupDiff } from "./wakeup.js";
+import {
+  runKnowledgeMapStage,
+  defaultKnowledgeMapStageResult,
+  knowledgeMapBriefLine,
+  type KnowledgeMapStageResult,
+} from "./knowledge-map-schedule.js";
 
 export interface DreamReport {
   timestamp: string;
@@ -39,6 +45,7 @@ export interface DreamReport {
     search_quality: { degraded_rate: number; total: number; top_reasons: Array<{ code: string; count: number }> };
     indexes: { files: number };
     wake_up_diff: { baselineCreated: boolean; changes: number; newItems: number; reportPath: string | null };
+    knowledge_map: KnowledgeMapStageResult;
   };
   duration_ms: number;
   locked: boolean;
@@ -100,6 +107,7 @@ export async function runDream(
         search_quality: { degraded_rate: 0, total: 0, top_reasons: [] },
         indexes: { files: 0 },
         wake_up_diff: { baselineCreated: false, changes: 0, newItems: 0, reportPath: null },
+        knowledge_map: defaultKnowledgeMapStageResult(),
       },
       duration_ms: 0,
       locked: true,
@@ -345,6 +353,11 @@ export async function runDream(
   }
   if (onStageProgress) onStageProgress("wake_up_diff", wakeupResult);
 
+  // Stage 7.6: Knowledge Map (weekly, failure-isolated — #242)
+  logger.info("dream", "Stage 7.6: knowledge map");
+  const knowledgeMapResult = await runKnowledgeMapStage(db, outputsDir, logger);
+  if (onStageProgress) onStageProgress("knowledge_map", knowledgeMapResult);
+
   // Report
   logger.info("dream", "building report");
   const report: DreamReport = {
@@ -368,6 +381,7 @@ export async function runDream(
       search_quality: { degraded_rate: searchQualityStats.degradedRate, total: searchQualityStats.totalSearches, top_reasons: searchQualityStats.topReasonCodes },
       indexes: { files: indexFiles },
       wake_up_diff: wakeupResult,
+      knowledge_map: knowledgeMapResult,
     },
     duration_ms: Date.now() - started,
     locked: false,
@@ -465,6 +479,9 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   } else if (report.stages.wake_up_diff.baselineCreated) {
     lines.push("Wake-up diff: 基线已建立");
   }
+
+  const kmLine = knowledgeMapBriefLine(report.stages.knowledge_map);
+  if (kmLine) lines.push(kmLine);
 
   const icon = report.stages.health.overallStatus === "pass" ? "✅" : "⚠️";
   lines.push(`健康: ${icon} ${report.stages.health.issues} 个问题`);
