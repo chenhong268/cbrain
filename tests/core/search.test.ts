@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
@@ -256,6 +256,97 @@ describe("HybridSearch", () => {
 
       const results = await search.graphSearch("entities/seed", 3);
       expect(results.length).toBeLessThanOrEqual(3);
+    });
+  });
+
+  // ─── #248: graphSearch delegates to batched GraphManager.traverse ───
+  // Decision A: dangling neighbors (link target with no page row) are excluded
+  // from recall candidates — they are data-debt handled by health/repair, not
+  // surfaced as search hits. Existing behavior coverage (depth 2, seed-excluded,
+  // isolated, limit, smart/all fusion) lives in the "graph search" describe above
+  // and the "full hybrid search" describe below; all those fixtures insert page
+  // rows for every link endpoint, so decision A does not perturb them.
+  describe("#248 graphSearch batched traversal", () => {
+    function seedPage(slug: string, title: string): void {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+      ).run(slug, "entity", title, `${slug}.md`, `h-${slug}`);
+    }
+    function seedLink(from: string, to: string): void {
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)`
+      ).run(from, to, "mentions");
+    }
+
+    test("golden: exact ordered projection (slug/score/snippet/source) is stable", async () => {
+      // Covers outgoing + incoming edges, depth 1/2 nodes, a cycle (B->seed),
+      // and dual-reachability (seed->B direct AND A->B) so the direct path wins.
+      // Ordering contract: BFS frontier order, per slug out-then-in, in link
+      // rowid-insertion order (getOutgoingSlugs and getLinksForSlugs share the
+      // same query shape with no ORDER BY, so both return rowid order). If a
+      // future query adds an ORDER BY, this golden breaks on purpose — that is
+      // the signal to re-baseline.
+      seedPage("entities/seed", "Seed");
+      seedPage("entities/a", "A");
+      seedPage("entities/b", "B");
+      seedPage("entities/c", "C");
+      seedPage("entities/d", "D");
+      seedLink("entities/seed", "entities/a"); // depth 1, outgoing
+      seedLink("entities/seed", "entities/b"); // depth 1, outgoing (also reachable via A)
+      seedLink("entities/a", "entities/b");    // B already visited at depth 1
+      seedLink("entities/a", "entities/c");    // depth 2
+      seedLink("entities/b", "entities/seed"); // cycle back to seed
+      seedLink("entities/d", "entities/seed"); // depth 1, incoming to seed
+
+      const results = await search.graphSearch("entities/seed", 10);
+
+      // Direct path wins for dual-reach: B keeps depth 1 / score 1.0. Both the
+      // old graphSearch and the batched traverse use visited-on-first-encounter
+      // BFS, so this baseline must hold before AND after the refactor.
+      expect(results.map((r) => ({ slug: r.slug, score: r.score, snippet: r.snippet, source: r.source }))).toEqual([
+        { slug: "entities/a", score: 1.0, snippet: "A", source: "graph" },
+        { slug: "entities/b", score: 1.0, snippet: "B", source: "graph" },
+        { slug: "entities/d", score: 1.0, snippet: "D", source: "graph" },
+        { slug: "entities/c", score: 0.5, snippet: "C", source: "graph" },
+      ]);
+    });
+
+    test("dangling graph neighbors are excluded from recall candidates", async () => {
+      seedPage("entities/seed", "Seed");
+      // The links FK (to_slug -> pages.slug, ON DELETE CASCADE) makes a true
+      // dangling link schema-impossible under PRAGMA foreign_keys = ON, so this
+      // is a defensive contract: construct the impossible state deliberately
+      // (FK off) and assert graphSearch never surfaces a link target that lacks
+      // a page row as a recall candidate.
+      db.rawDb.exec("PRAGMA foreign_keys = OFF");
+      seedLink("entities/seed", "entities/ghost"); // ghost has no page row
+      db.rawDb.exec("PRAGMA foreign_keys = ON");
+      const results = await search.graphSearch("entities/seed", 10);
+      expect(results.map((r) => r.slug)).not.toContain("entities/ghost");
+      expect(results).toEqual([]);
+    });
+
+    test("N+1 regression: uses batched traversal, not per-node lookups (fallback GraphManager)", async () => {
+      seedPage("entities/seed", "Seed");
+      seedPage("entities/a", "A");
+      seedLink("entities/seed", "entities/a");
+
+      const outSpy = spyOn(db, "getOutgoingSlugs");
+      const inSpy = spyOn(db, "getIncomingSlugs");
+      const titleSpy = spyOn(db, "getPageTitle");
+      const batchLinksSpy = spyOn(db, "getLinksForSlugs");
+      const batchTitlesSpy = spyOn(db, "getPageTitlesAndTypes");
+
+      // No config.graph -> fallback `new GraphManager(this.db)` must wrap THIS
+      // spied db instance, so traverse's batch calls are observable.
+      const hs = new HybridSearch(db, createMockEmbeddingProvider(), createMockLanceDB() as never);
+      await hs.graphSearch("entities/seed", 10);
+
+      expect(outSpy).not.toHaveBeenCalled();
+      expect(inSpy).not.toHaveBeenCalled();
+      expect(titleSpy).not.toHaveBeenCalled();
+      expect(batchLinksSpy).toHaveBeenCalled();
+      expect(batchTitlesSpy).toHaveBeenCalled();
     });
   });
 

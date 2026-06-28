@@ -3,6 +3,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { LanceDBManager as LanceDBStorage } from "../storage/lancedb.js";
 import { ResearchManager } from "./research.js";
+import { GraphManager } from "./graph.js";
 import type { Logger } from "./logger.js";
 
 export interface SealedDetailHit {
@@ -66,6 +67,12 @@ export interface HybridSearchConfig {
   rrf_k?: number;
   multiQuery?: boolean;
   logger?: Logger;
+  /**
+   * #248 — GraphManager used by graphSearch's batched traversal. When omitted,
+   * HybridSearch constructs a stateless `new GraphManager(this.db)` so existing
+   * call sites (CLI, tests) keep working without changes.
+   */
+  graph?: GraphManager;
 }
 
 export interface GraphContext {
@@ -320,6 +327,7 @@ export class HybridSearch {
   private llm?: LLMProvider;
   private logger?: Logger;
   private multiQueryEnabled: boolean;
+  private graph: GraphManager;
   private queryCache = new Map<string, { queries: string[]; expires: number }>();
   private embeddingCache = new Map<string, { embedding: number[]; expires: number }>();
   private static QUERY_CACHE_TTL = 300_000; // 5 minutes
@@ -340,6 +348,10 @@ export class HybridSearch {
     this.llm = config?.llm;
     this.logger = config?.logger;
     this.multiQueryEnabled = config?.multiQuery ?? true;
+    // #248 — reuse a shared GraphManager when provided (ToolContext path),
+    // otherwise construct a stateless one over the same db so call sites that
+    // don't pass config.graph still get batched traversal.
+    this.graph = config?.graph ?? new GraphManager(db);
   }
 
   async search(query: string, options?: SearchOptions): Promise<SearchResult[]> {
@@ -865,45 +877,19 @@ export class HybridSearch {
   }
 
   async graphSearch(seedSlug: string, limit: number): Promise<SearchResult[]> {
-    const visited = new Set<string>();
-    visited.add(seedSlug);
-
-    let frontier = [seedSlug];
-    const results: SearchResult[] = [];
-
-    for (let depth = 0; depth < 2; depth++) {
-      const nextFrontier: string[] = [];
-
-      for (const slug of frontier) {
-        const outSlugs = this.db.getOutgoingSlugs(slug);
-        const inSlugs = this.db.getIncomingSlugs(slug);
-
-        const neighbors = [...outSlugs, ...inSlugs];
-
-        for (const neighbor of neighbors) {
-          if (!visited.has(neighbor)) {
-            visited.add(neighbor);
-            nextFrontier.push(neighbor);
-
-            const pageTitle = this.db.getPageTitle(neighbor);
-
-            results.push({
-              slug: neighbor,
-              score: 1 / (depth + 1),
-              snippet: pageTitle ?? neighbor,
-              source: "graph",
-            });
-
-            if (results.length >= limit) {
-              return results;
-            }
-          }
-        }
-      }
-
-      frontier = nextFrontier;
-    }
-
-    return results;
+    // #248 — delegate to GraphManager.traverse's batched no-filter BFS instead
+    // of per-node getOutgoingSlugs/getIncomingSlugs/getPageTitle lookups. Same
+    // two-hop, bidirectional, visited-on-first-encounter BFS semantics; score
+    // maps 1/node.depth (depth 1 -> 1.0, depth 2 -> 0.5), matching the old
+    // 1/(depth+1). Behavior change: traverse only returns nodes with a page
+    // row, so dangling link targets are excluded from recall candidates
+    // (defensive — the links FK makes such targets schema-impossible under
+    // PRAGMA foreign_keys = ON, so this is unobservable on valid data).
+    return this.graph.traverse(seedSlug, { direction: "both", maxDepth: 2, limit }).map((node) => ({
+      slug: node.slug,
+      score: 1 / node.depth,
+      snippet: node.title,
+      source: "graph" as const,
+    }));
   }
 }
