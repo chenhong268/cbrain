@@ -949,15 +949,17 @@ export class CBrainDB {
 
   // ─── Chunk operations ────────────────────────────────────────
 
-  getChunksByPage(pageSlug: string, opts?: { summaryLevel?: number }): Array<{ id: number; chunk_index: number; content: string; created_at: string }> {
+  getChunksByPage(pageSlug: string, opts?: { summaryLevel?: number; limit?: number }): Array<{ id: number; chunk_index: number; content: string; created_at: string }> {
+    const limitClause = opts?.limit != null ? " LIMIT $limit" : "";
+    const bind = (extra: Record<string, unknown>) => ({ $slug: pageSlug, ...(opts?.limit != null ? { $limit: opts.limit } : {}), ...extra });
     if (opts?.summaryLevel != null) {
       return this.prepare(
-        "SELECT id, chunk_index, content, created_at FROM chunks WHERE page_slug = $slug AND summary_level = $level ORDER BY chunk_index"
-      ).all({ $slug: pageSlug, $level: opts.summaryLevel }) as any[];
+        `SELECT id, chunk_index, content, created_at FROM chunks WHERE page_slug = $slug AND summary_level = $level ORDER BY chunk_index${limitClause}`
+      ).all(bind({ $level: opts.summaryLevel })) as any[];
     }
     return this.prepare(
-      "SELECT id, chunk_index, content, created_at FROM chunks WHERE page_slug = $slug ORDER BY chunk_index"
-    ).all({ $slug: pageSlug }) as any[];
+      `SELECT id, chunk_index, content, created_at FROM chunks WHERE page_slug = $slug ORDER BY chunk_index${limitClause}`
+    ).all(bind({})) as any[];
   }
 
   // ─── Ingest log ──────────────────────────────────────────────

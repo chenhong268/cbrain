@@ -8,6 +8,8 @@ import { AgenticResearchPipeline } from "../../core/agentic/pipeline.js";
 import type { SearchPlanIntent } from "../../core/agentic/plan.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
 import { collectEvidenceForSlugs } from "../../core/evidence.js";
+import { shouldCompleteEvidence } from "../../core/recall-intent.js";
+import { assembleEvidencePack } from "../../core/evidence-completion.js";
 import {
   formatEpisodeEnvelope,
   formatGroundedRecallEnvelope,
@@ -105,6 +107,7 @@ async function runContentRecall(
 ): Promise<FrontdoorEnvelope> {
   const limit = detail === "brief" ? 3 : 5;
   const results = await ctx.search.search(query, { limit });
+  const slugs = results.map((r) => r.slug);
   const entities = results.map((r) => {
     const page = ctx.pages.getBySlug(r.slug);
     return {
@@ -113,13 +116,30 @@ async function runContentRecall(
       ...(detail !== "brief" ? { body: page?.body?.slice(0, 500) ?? "" } : {}),
     };
   });
+  // #232 — reuse the same evidence-completion helper as deep_recall. Fires only
+  // on temporal/history intent; the pack rides in `raw` (frontdoor's contract is
+  // always-raw for detail, distinct from deep_recall's #231 compact gate), and
+  // insufficient coverage surfaces as display text + summary.status.
+  const evidencePack =
+    shouldCompleteEvidence(query, "auto") && slugs.length > 0
+      ? assembleEvidencePack(ctx.db, slugs, query)
+      : undefined;
   const payload = {
     query,
     entities,
+    ...(evidencePack ? { evidence_pack: evidencePack } : {}),
     summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
-  return withRouting(formatted, payload, routing);
+  const surfaceInsufficient =
+    !!evidencePack &&
+    evidencePack.coverage.coverage_status !== "sufficient" &&
+    formatted.summary.status !== "empty";
+  const display = surfaceInsufficient ? `只找到部分线索：${formatted.display}` : formatted.display;
+  const summary = surfaceInsufficient
+    ? { ...formatted.summary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
+    : formatted.summary;
+  return withRouting({ display, summary, raw: formatted.raw }, payload, routing);
 }
 
 function runEpisodeRecall(

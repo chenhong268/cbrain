@@ -16,6 +16,8 @@ import { buildEvidenceFromBatched, buildEvidenceSummary, collectEvidenceForSlugs
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
 import { formatRecallEnvelope, formatGroundedRecallEnvelope } from "./format-result.js";
 import { buildCompactRecallResponse } from "./recall-compact.js";
+import { shouldCompleteEvidence } from "../../core/recall-intent.js";
+import { assembleEvidencePack, type EvidencePack } from "../../core/evidence-completion.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -65,8 +67,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
           "⚠️ 内容回忆（'当时怎么设计的/为什么选/怎么做的'）不要传 grounded，传 detail=normal。"),
       include_raw: z.boolean().optional().default(false)
         .describe("true=返回完整 raw/审计数据（body/links/timeline/dossier/search_meta 诊断），用于调试/核查/高级调用。默认 false 只返回精简首轮响应（display+summary+精简 entities），省上下文。"),
+      evidence: z.enum(["auto", "on", "off"]).optional().default("auto")
+        .describe("时序/历史证据补全（#232）。auto=检测到'之前/上次/当时为什么这么定/后来/变化/前任现任'等意图时自动装配 timeline+links+raw chunks 证据包（coverage 进 raw，不进 display）；on=强制装配；off=关闭（普通查询零开销）。"),
     },
-  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded, include_raw }) => {
+  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded, include_raw, evidence }) => {
     const cap = Math.min(limit ?? 5, 5);
     // Internal fanout: search a wider candidate pool so evidence collection and
     // alias/graph matches are not clipped at the display cap. Display still caps at `cap`.
@@ -472,6 +476,14 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     try { ctx.db.validateLinksForSlugs(topSlugs); } catch { /* non-critical */ }
 
+    // #232 — temporal/history evidence completion. Fires only on temporal intent
+    // (auto), so plain entity lookup is unchanged. Pack is raw-only; insufficient
+    // coverage surfaces as display text + summary.status (no debug in display).
+    const evidencePack: EvidencePack | undefined =
+      shouldCompleteEvidence(query, evidence) && topSlugs.length > 0
+        ? assembleEvidencePack(ctx.db, topSlugs, query)
+        : undefined;
+
     const payload = {
       query,
       search_meta: diagnosticMeta,
@@ -489,19 +501,33 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 条关联更新` : ""),
     };
 
-    const { display, summary: envelopeSummary, raw } = formatRecallEnvelope(payload);
+    const { display: baseDisplay, summary: baseSummary, raw } = formatRecallEnvelope(payload);
     const { summary: legacySummary, search_meta: _rm, evidence_summary: _es, ...payloadRest } = payload;
+    // #232: surface insufficient evidence coverage whenever we have results but
+    // the pack is partial (coverage is independent of search latency). Coverage
+    // internals stay in raw; display gets a prefix, summary gets status=degraded.
+    const surfaceInsufficient =
+      !!evidencePack &&
+      evidencePack.coverage.coverage_status !== "sufficient" &&
+      baseSummary.status !== "empty";
+    const display = surfaceInsufficient ? `只找到部分线索：${baseDisplay}` : baseDisplay;
+    const envelopeSummary = surfaceInsufficient
+      ? { ...baseSummary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
+      : baseSummary;
     if (include_raw) {
-      // Full audit/legacy payload — body/links/timeline/dossier, raw search_meta, etc.
+      // Full audit/legacy payload — body/links/timeline/dossier, raw search_meta,
+      // and the evidence pack (#232) when temporal intent fired.
+      const fullRaw = evidencePack ? { ...raw, evidence_pack: evidencePack } : raw;
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ display, summary: envelopeSummary, raw, result_summary: legacySummary, ...payloadRest }, null, 2),
+          text: JSON.stringify({ display, summary: envelopeSummary, raw: fullRaw, result_summary: legacySummary, ...payloadRest }, null, 2),
         }],
       };
     }
     // #231 default compact — first-turn Agent-facing payload with a hard char
-    // budget. Heavy fields and audit diagnostics only return via include_raw.
+    // budget. Heavy fields, audit diagnostics, and the evidence pack only return
+    // via include_raw; compact gets just the coverage display/status signal.
     const compact = buildCompactRecallResponse({
       display,
       summary: envelopeSummary,
