@@ -32,6 +32,12 @@ export interface CBrainConfig {
     llm_model?: string;
     llm_api_key?: string;
     llm_base_url?: string;
+    /** #238: DeepSeek request timeout in ms (default 30000). */
+    timeoutMs?: number;
+    /** #238: per-stage candidate cap (default 15). */
+    maxEntities?: number;
+    /** #238: total LLM-call budget across one reflect run (default 24). */
+    maxLlmCalls?: number;
   };
   search?: {
     provider?: string; // "searxng"

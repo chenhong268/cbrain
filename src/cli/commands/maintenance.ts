@@ -547,7 +547,7 @@ export function register(program: Command) {
       const pages = new PageManager(deps.db, config.vaultPath, logger);
 
       const reflectLlm = config.reflect?.llm_api_key
-        ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model)
+        ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model, { timeoutMs: config.reflect.timeoutMs ?? 30_000 })
         : deps.llm;
 
       if (!reflectLlm) {
@@ -559,13 +559,14 @@ export function register(program: Command) {
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
-      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr, logger);
+      const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr, logger, { maxEntities: config.reflect?.maxEntities, maxLlmCalls: config.reflect?.maxLlmCalls });
       console.log("🧠 Reflecting...");
       const report = await mgr.reflectAll();
 
       console.log(`  Entity Synthesis:  ${report.entitiesSynthesized} 实体综合`);
       console.log(`  Relation Inference: ${report.relationsInferred} 关系推理`);
       console.log(`  Insight Generation: ${report.insightsGenerated} 洞察生成`);
+      console.log(`  Budget:            ${report.budget.llmCallsUsed}/${report.budget.maxLlmCalls} LLM calls${report.budget.partial ? `（partial：${report.budget.llmCallsSkipped} skipped，${report.budget.llmTimeouts} timeouts）` : ""}`);
 
       if (report.details.syntheses.length > 0) {
         console.log("\n  综合摘要：");
@@ -657,13 +658,13 @@ export function register(program: Command) {
       const pages = new PageManager(deps.db, config.vaultPath, logger);
 
       const reflectLlm = config.reflect?.llm_api_key
-        ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model)
+        ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model, { timeoutMs: config.reflect.timeoutMs ?? 30_000 })
         : deps.llm;
 
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
-      const reflect = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr, logger);
+      const reflect = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr, logger, { maxEntities: config.reflect?.maxEntities, maxLlmCalls: config.reflect?.maxLlmCalls });
       console.log("🔍 Running discovery (structural)...");
       const reflectReport = await reflect.runDiscovery();
 

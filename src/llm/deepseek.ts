@@ -11,16 +11,22 @@ interface DeepSeekChatResponse {
   usage?: { total_tokens: number };
 }
 
+export interface DeepSeekLLMOptions {
+  timeoutMs?: number;
+}
+
 export class DeepSeekLLMProvider implements LLMProvider {
   readonly name = "deepseek";
   private apiKey: string;
   private baseUrl: string;
   private model: string;
+  private timeoutMs: number;
 
-  constructor(apiKey: string, baseUrl?: string, model?: string) {
+  constructor(apiKey: string, baseUrl?: string, model?: string, opts?: DeepSeekLLMOptions) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl ?? DEFAULT_BASE_URL;
     this.model = model ?? DEFAULT_MODEL;
+    this.timeoutMs = opts?.timeoutMs ?? 30_000;
   }
 
   async chat(messages: ChatMessage[]): Promise<string> {
@@ -32,21 +38,33 @@ export class DeepSeekLLMProvider implements LLMProvider {
       response_format: { type: "json_object" },
     });
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body,
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`DeepSeek API error: ${response.status} ${text}`);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`DeepSeek API error: ${response.status} ${text}`);
+      }
+
+      const json = (await response.json()) as DeepSeekChatResponse;
+      return json.choices[0]?.message?.content ?? "";
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        throw new Error(`DeepSeek LLM request timed out after ${this.timeoutMs}ms`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-
-    const json = (await response.json()) as DeepSeekChatResponse;
-    return json.choices[0]?.message?.content ?? "";
   }
 }

@@ -1,5 +1,5 @@
 import type { CBrainDB } from "../storage/sqlite.js";
-import type { LLMProvider } from "../llm/provider.js";
+import type { LLMProvider, ChatMessage } from "../llm/provider.js";
 import type { PageManager } from "./page.js";
 import type { ContentPipeline } from "./pipeline.js";
 import type { InsightManager } from "./insight.js";
@@ -26,6 +26,15 @@ export interface GeneratedInsight {
   confidence: number;
 }
 
+export interface ReflectBudget {
+  maxLlmCalls: number;
+  llmCallsUsed: number;
+  llmCallsSkipped: number;
+  llmTimeouts: number;
+  /** true when the run was bounded: aborted (breaker), budget exhausted, or any skip/timeout. */
+  partial: boolean;
+}
+
 export interface ReflectReport {
   entitiesSynthesized: number;
   relationsInferred: number;
@@ -35,6 +44,18 @@ export interface ReflectReport {
     relations: Array<{ from: string; to: string; relation: string }>;
     insights: Array<{ content: string; related: string[] }>;
   };
+  budget: ReflectBudget;
+}
+
+/** #238 — bounded maintenance budget. Keeps `cbrain reflect` from fanning into
+ *  an unbounded LLM run that blows past the external 120s maintenance timeout. */
+export interface ReflectOptions {
+  /** per-stage candidate cap (replaces the old MAX_LLM_CALLS=50 slice). */
+  maxEntities?: number;
+  /** total LLM-call budget across the whole run (synthesis + insights). */
+  maxLlmCalls?: number;
+  /** circuit breaker: stop issuing LLM calls after N consecutive timeouts. */
+  maxConsecutiveTimeouts?: number;
 }
 
 interface SynthesisPayload {
@@ -53,10 +74,17 @@ interface InsightPayload {
   }>;
 }
 
-const MAX_LLM_CALLS = 50;
 const MIN_MENTIONS = 3;
 const MIN_CONFIDENCE = 0.7;
 const CONCURRENCY = 3;
+
+// #238 — default reflect budget. Worst case: each LLM call ≤ provider timeout
+// (30s); the breaker bails after MAX_CONSECUTIVE_TIMEOUTS; total calls ≤
+// DEFAULT_MAX_LLM_CALLS. A healthy run ≈ 24×~3s/3 ≈ 24s; a degraded DeepSeek
+// bails in ~30–60s with a partial report — both under the 120s maintenance kill.
+const DEFAULT_MAX_ENTITIES = 15;
+const DEFAULT_MAX_LLM_CALLS = 24;
+const DEFAULT_MAX_CONSECUTIVE_TIMEOUTS = 3;
 
 const W_PATH = 0.35;
 const W_SOURCE = 0.25;
@@ -118,16 +146,29 @@ export class ReflectManager {
   private llm: LLMProvider | null;
   private insightMgr: InsightManager | null;
   private logger?: import("./logger.js").Logger;
+  private readonly maxEntities: number;
+  private readonly maxLlmCalls: number;
+  private readonly maxConsecutiveTimeouts: number;
+  // #238 budget counters (mutable across one run).
+  private llmCallsUsed = 0;
+  private llmCallsSkipped = 0;
+  private llmTimeouts = 0;
+  private consecutiveTimeouts = 0;
+  private aborted = false;
 
-  constructor(db: CBrainDB, _pageMgr: PageManager, llm?: LLMProvider, _pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager, logger?: import("./logger.js").Logger) {
+  constructor(db: CBrainDB, _pageMgr: PageManager, llm?: LLMProvider, _pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager, logger?: import("./logger.js").Logger, opts?: ReflectOptions) {
     this.db = db;
     this.llm = llm ?? null;
     this.insightMgr = insightMgr ?? null;
     this.logger = logger;
+    this.maxEntities = opts?.maxEntities ?? DEFAULT_MAX_ENTITIES;
+    this.maxLlmCalls = opts?.maxLlmCalls ?? DEFAULT_MAX_LLM_CALLS;
+    this.maxConsecutiveTimeouts = opts?.maxConsecutiveTimeouts ?? DEFAULT_MAX_CONSECUTIVE_TIMEOUTS;
   }
 
   async reflectAll(): Promise<ReflectReport> {
-    if (!this.llm) return emptyReport();
+    this.resetBudget();
+    if (!this.llm) return emptyReport(this.budgetMeta());
 
     const [syntheses, relations, insights] = await Promise.all([
       this.synthesizeEntities(),
@@ -151,12 +192,13 @@ export class ReflectManager {
           related: i.relatedEntities,
         })),
       },
+      budget: this.budgetMeta(),
     };
   }
 
   private async synthesizeEntities(): Promise<SynthesisResult[]> {
     const candidates = this.db.getHighMentionEntities(MIN_MENTIONS);
-    const limit = Math.min(candidates.length, MAX_LLM_CALLS);
+    const limit = Math.min(candidates.length, this.maxEntities);
     const tasks = candidates.slice(0, limit).map((c) => ({ slug: c.slug, context: this.buildEntityContext(c.slug) }));
     const valid = tasks.filter((t) => t.context !== null);
     const results: SynthesisResult[] = [];
@@ -195,7 +237,7 @@ export class ReflectManager {
 
     const existingSigs = this.buildExistingInsightSigs();
     const candidates = this.db.getHighMentionEntities(MIN_MENTIONS);
-    const limit = Math.min(candidates.length, MAX_LLM_CALLS);
+    const limit = Math.min(candidates.length, this.maxEntities);
     const tasks = candidates.slice(0, limit).map((c) => ({ slug: c.slug, context: this.buildEntityContext(c.slug) }));
     const valid = tasks.filter((t) => t.context !== null);
     const results: GeneratedInsight[] = [];
@@ -306,17 +348,18 @@ export class ReflectManager {
   }
 
   async reflectIncremental(): Promise<ReflectReport> {
-    if (!this.llm) return emptyReport();
+    this.resetBudget();
+    if (!this.llm) return emptyReport(this.budgetMeta());
 
     const lastRun = this.db.getConfig("reflect.last_run_at");
     const since = lastRun ?? new Date(0).toISOString();
 
     const changed = this.db.getEntityConceptPagesUpdatedSince(since);
     if (changed.length === 0) {
-      return emptyReport();
+      return emptyReport(this.budgetMeta());
     }
 
-    const slugs = changed.map((p) => p.slug).slice(0, MAX_LLM_CALLS);
+    const slugs = changed.map((p) => p.slug).slice(0, this.maxEntities);
 
     const [syntheses, insights] = await Promise.all([
       this.synthesizeEntitiesForSlugs(slugs),
@@ -338,6 +381,7 @@ export class ReflectManager {
           related: i.relatedEntities,
         })),
       },
+      budget: this.budgetMeta(),
     };
   }
 
@@ -460,6 +504,7 @@ export class ReflectManager {
   // ─── Discovery Pipeline ──────────────────────────────────────
 
   async runDiscovery(dreamRun?: string): Promise<DiscoveryReport> {
+    this.resetBudget(); // discovery issues its own LLM calls via callLLM (#238)
     const adj = this.buildAdjacency();
     const pool = await this.buildCandidatePool(adj);
     const scored: Array<{ pair: [string, string]; score: number }> = [];
@@ -696,18 +741,57 @@ export class ReflectManager {
 
   private async callLLM(systemPrompt: string, userContent: string): Promise<string> {
     if (!this.llm) return "";
+    // #238 budget + circuit breaker: once aborted or over budget, skip the item
+    // (count it) instead of issuing another call that could push past the 120s
+    // maintenance ceiling. check+increment are synchronous, so the parallel
+    // synthesis/insights stages share the budget safely.
+    if (this.aborted || this.llmCallsUsed >= this.maxLlmCalls) {
+      this.llmCallsSkipped++;
+      return "";
+    }
+    this.llmCallsUsed++;
+    const messages: ChatMessage[] = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userContent },
+    ];
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        return await this.llm.chat([
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
-        ]);
+        const out = await this.llm.chat(messages);
+        this.consecutiveTimeouts = 0; // success resets the breaker
+        return out;
       } catch (e) {
-        if (attempt === 2) throw e;
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/timed out/i.test(msg)) {
+          // Provider timeout: don't retry (a hung endpoint won't recover in 3s).
+          // Count it, maybe trip the breaker, then skip this item.
+          this.llmTimeouts++;
+          this.consecutiveTimeouts++;
+          if (this.consecutiveTimeouts >= this.maxConsecutiveTimeouts) this.aborted = true;
+          return "";
+        }
+        if (attempt === 2) throw e; // non-timeout: keep the existing 3× backoff retry
         await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
       }
     }
     return "";
+  }
+
+  private budgetMeta(): ReflectBudget {
+    return {
+      maxLlmCalls: this.maxLlmCalls,
+      llmCallsUsed: this.llmCallsUsed,
+      llmCallsSkipped: this.llmCallsSkipped,
+      llmTimeouts: this.llmTimeouts,
+      partial: this.aborted || this.llmCallsSkipped > 0 || this.llmTimeouts > 0,
+    };
+  }
+
+  private resetBudget(): void {
+    this.llmCallsUsed = 0;
+    this.llmCallsSkipped = 0;
+    this.llmTimeouts = 0;
+    this.consecutiveTimeouts = 0;
+    this.aborted = false;
   }
 
   private parseJSON<T>(raw: string, fallback: T | null): T | null {
@@ -730,11 +814,12 @@ function mapInsightType(llmType: string): "synthesis" | "pattern" | "anomaly" | 
   }
 }
 
-function emptyReport(): ReflectReport {
+function emptyReport(budget: ReflectBudget): ReflectReport {
   return {
     entitiesSynthesized: 0,
     relationsInferred: 0,
     insightsGenerated: 0,
     details: { syntheses: [], relations: [], insights: [] },
+    budget,
   };
 }

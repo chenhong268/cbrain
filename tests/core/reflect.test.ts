@@ -853,4 +853,66 @@ describe("ReflectManager", () => {
       expect(count).toBe(report1.total);
     });
   });
+
+  // ─── #238: bounded LLM budget + timeout circuit breaker ───────────────────
+
+  describe("budget + circuit breaker (#238)", () => {
+    test("respects a small maxLlmCalls budget and reports partial", async () => {
+      for (let i = 0; i < 6; i++) insertEntity(db, `entities/e${i}`, `E${i}`, 5);
+      let calls = 0;
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => {
+          calls++;
+          return JSON.stringify({ summary: "s", key_facts: [], confidence: 0.5 });
+        },
+      };
+      const mgr = new ReflectManager(db, pages, llm, undefined, undefined, undefined, undefined, { maxLlmCalls: 4, maxEntities: 10 });
+      const report = await mgr.reflectAll();
+
+      expect(calls).toBeLessThanOrEqual(4);
+      expect(report.budget).toBeDefined();
+      expect(report.budget!.llmCallsUsed).toBeLessThanOrEqual(4);
+      expect(report.budget!.llmCallsSkipped).toBeGreaterThan(0);
+      expect(report.budget!.partial).toBe(true);
+    });
+
+    test("a timing-out LLM does not hang the run and is counted", async () => {
+      insertEntity(db, "entities/t", "T", 5);
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => { throw new Error("DeepSeek LLM request timed out after 30000ms"); },
+      };
+      const mgr = new ReflectManager(db, pages, llm, undefined, undefined, undefined, undefined, { maxLlmCalls: 10, maxEntities: 10, maxConsecutiveTimeouts: 5 });
+      const report = await mgr.reflectAll();
+
+      expect(report.budget!.llmTimeouts).toBeGreaterThan(0);
+      expect(report.budget!.partial).toBe(true);
+    });
+
+    test("circuit breaker stops the run after N consecutive timeouts", async () => {
+      for (let i = 0; i < 6; i++) insertEntity(db, `entities/e${i}`, `E${i}`, 5);
+      let calls = 0;
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => { calls++; throw new Error("DeepSeek LLM request timed out after 30000ms"); },
+      };
+      const mgr = new ReflectManager(db, pages, llm, undefined, undefined, undefined, undefined, { maxLlmCalls: 50, maxEntities: 10, maxConsecutiveTimeouts: 3 });
+      const report = await mgr.reflectAll();
+
+      // Breaker tripped: only the first concurrent wave ran, far below the 12
+      // candidate calls (6 synthesis + 6 insights). Run did not hang.
+      expect(report.budget!.llmTimeouts).toBeGreaterThanOrEqual(3);
+      expect(calls).toBeLessThan(12);
+    });
+
+    test("budget metadata is always present, even with no LLM", async () => {
+      const mgr = new ReflectManager(db, pages);
+      const report = await mgr.reflectAll();
+      expect(report.budget).toBeDefined();
+      expect(report.budget!.maxLlmCalls).toBeGreaterThan(0);
+      expect(report.budget!.llmCallsUsed).toBe(0);
+      expect(report.budget!.partial).toBe(false);
+    });
+  });
 });
