@@ -25,6 +25,20 @@ const COMPACT_ENTITY_KEYS = [
   "snippet", "tags", "expiry_warning", "birthday",
 ] as const;
 
+/**
+ * #249 — Agent-facing proactive hint in the compact response. Smaller than the
+ * raw hint shape: only the fields the Agent needs to surface a one-line caveat
+ * (expiry / stale-timeline / shared-connection). Budgeted upstream to at most 1.
+ */
+export interface CompactProactiveHint {
+  rule: string;
+  text: string;
+  score: number;
+  why: string;
+  target_slug?: string;
+  age_days?: number | null;
+}
+
 export interface CompactRecallInput {
   display: string;
   summary: ToolSummary;
@@ -32,6 +46,8 @@ export interface CompactRecallInput {
   query: string;
   entities: Array<Record<string, unknown>>;
   searchMeta: Record<string, unknown>;
+  /** Already-budgeted proactive hints (at most 1). Omitted from output when empty. */
+  proactiveHints?: CompactProactiveHint[];
 }
 
 export interface CompactRecallResponse {
@@ -46,6 +62,8 @@ export interface CompactRecallResponse {
     degraded?: boolean;
     has_more?: boolean;
   };
+  /** Budgeted proactive hint; present only when non-empty and within budget. */
+  proactive_hints?: CompactProactiveHint[];
 }
 
 /** Pick only first-turn fields and cap the snippet length. */
@@ -95,9 +113,15 @@ function safeSearchMeta(
 /**
  * Build the default Agent-facing compact response. Projects entities to a
  * first-turn subset, strips audit diagnostics from search_meta, and enforces a
- * hard char budget: shorten snippets → drop tail entities → shrink snippets to
- * empty (display text is never cut mid-sentence). has_more signals a wider
- * candidate pool or a budget-driven entity drop.
+ * hard char budget: shorten snippets → drop the proactive hint → drop tail
+ * entities → shrink snippets to empty (display text is never cut mid-sentence).
+ * has_more signals a wider candidate pool or a budget-driven entity drop.
+ *
+ * Budget priority (#249): a proactive hint is bonus context, an entity result is
+ * the answer. So under budget pressure the hint is dropped BEFORE any entity —
+ * we keep the hint only while it fits alongside every entity (full or
+ * floor-snippet projection); the moment an entity would have to go, the hint is
+ * sacrificed first and the entity pipeline runs without it.
  *
  * The budget is a true hard ceiling: every stage measures the JSON with the
  * has_more value the final response will actually carry (candidateHasMore until
@@ -113,43 +137,62 @@ export function buildCompactRecallResponse(
   const candidateHasMore =
     input.searchMeta.has_more === true || input.searchMeta.truncated === true;
 
-  let entities = input.entities.map(projectCompactEntity);
+  const hints = input.proactiveHints ?? [];
 
   const assemble = (
     ents: Array<Record<string, unknown>>,
     hasMore: boolean,
-  ): CompactRecallResponse => ({
-    display: input.display,
-    summary: input.summary,
-    result_summary: input.resultSummary,
-    query: input.query,
-    entities: ents,
-    search_meta: safeSearchMeta(input.searchMeta, hasMore),
-  });
+    withHints: boolean,
+  ): CompactRecallResponse => {
+    const base: CompactRecallResponse = {
+      display: input.display,
+      summary: input.summary,
+      result_summary: input.resultSummary,
+      query: input.query,
+      entities: ents,
+      search_meta: safeSearchMeta(input.searchMeta, hasMore),
+    };
+    return withHints && hints.length > 0 ? { ...base, proactive_hints: hints } : base;
+  };
 
   // Measure with the FINAL has_more semantics: pre-drop stages use
   // candidateHasMore (no entities hidden yet); once we drop, has_more is true.
   // Keeps the measured length honest so the response never exceeds maxChars.
-  const fits = (ents: Array<Record<string, unknown>>, hasMore: boolean): boolean =>
-    JSON.stringify(assemble(ents, hasMore)).length <= maxChars;
+  const fits = (
+    ents: Array<Record<string, unknown>>,
+    hasMore: boolean,
+    withHints: boolean,
+  ): boolean => JSON.stringify(assemble(ents, hasMore, withHints)).length <= maxChars;
 
-  // Stage 1 — full projection, no trimming.
-  if (fits(entities, candidateHasMore)) return assemble(entities, candidateHasMore);
+  let entities = input.entities.map(projectCompactEntity);
 
-  // Stage 2 — shorten snippets to the floor, keep all entities (no has_more flip).
+  // Phase A — only when there IS a hint: keep it and only trim snippets (every
+  // entity stays). A hint is dropped BEFORE any useful entity result, so we
+  // never sacrifice an entity to make room for a hint.
+  if (hints.length > 0) {
+    if (fits(entities, candidateHasMore, true)) return assemble(entities, candidateHasMore, true);
+    entities = entities.map((e) => trimSnippet(e, COMPACT_SNIPPET_FLOOR));
+    if (fits(entities, candidateHasMore, true)) return assemble(entities, candidateHasMore, true);
+    // Reset to full projection; Phase B runs without the hint.
+    entities = input.entities.map(projectCompactEntity);
+  }
+
+  // Phase B — the hint is gone (never present, or wouldn't fit alongside every
+  // entity). Run the entity budget pipeline without it: full → floor → drop
+  // tail → shrink empty.
+  if (fits(entities, candidateHasMore, false)) return assemble(entities, candidateHasMore, false);
   entities = entities.map((e) => trimSnippet(e, COMPACT_SNIPPET_FLOOR));
-  if (fits(entities, candidateHasMore)) return assemble(entities, candidateHasMore);
-
-  // Stage 3 — over budget even with floor snippets: drop tail entities one by
-  // one (down to 0 when the budget is extremely tight). Dropping flips has_more.
-  while (entities.length > 0 && !fits(entities, true)) {
+  if (fits(entities, candidateHasMore, false)) return assemble(entities, candidateHasMore, false);
+  // Over budget even with floor snippets: drop tail entities one by one (down
+  // to 0 when the budget is extremely tight). Dropping flips has_more.
+  while (entities.length > 0 && !fits(entities, true, false)) {
     entities = entities.slice(0, -1);
   }
-  // Stage 4 — shrink remaining snippets progressively to empty to claw back the
-  // last chars (e.g. the has_more flag itself under a very tight budget).
+  // Shrink remaining snippets progressively to empty to claw back the last
+  // chars (e.g. the has_more flag itself under a very tight budget).
   for (const cap of [80, 40, 16, 0]) {
-    if (fits(entities, true)) break;
+    if (fits(entities, true, false)) break;
     entities = entities.map((e) => trimSnippet(e, cap));
   }
-  return assemble(entities, true);
+  return assemble(entities, true, false);
 }

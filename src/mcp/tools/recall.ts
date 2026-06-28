@@ -15,7 +15,7 @@ import { traceToSteps } from "../../core/search-trace.js";
 import { buildEvidenceFromBatched, buildEvidenceSummary, collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
 import { formatRecallEnvelope, formatGroundedRecallEnvelope } from "./format-result.js";
-import { buildCompactRecallResponse } from "./recall-compact.js";
+import { buildCompactRecallResponse, type CompactProactiveHint } from "./recall-compact.js";
 import { shouldCompleteEvidence } from "../../core/recall-intent.js";
 import { assembleEvidencePack, type EvidencePack } from "../../core/evidence-completion.js";
 
@@ -484,6 +484,20 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         ? assembleEvidencePack(ctx.db, topSlugs, query)
         : undefined;
 
+    // #249 — compute the budgeted proactive hint once. Feeds both the raw/full
+    // payload (via payloadRest) and the default compact response.
+    // applyProactiveBudget caps to ≤1 hint, drops why-less/stale/duplicate hints,
+    // and returns [] in grounded mode (grounded returns earlier, so this path is
+    // always normal recall here).
+    const budgetedProactiveHints = applyProactiveBudget(
+      proactiveHints.map(trimHint),
+      { grounded: false, toolType: "recall" },
+    );
+    // Compact hint shape requires a non-empty `why`; the budget already guarantees
+    // it, so this narrows the type without changing runtime values.
+    const compactProactiveHints: CompactProactiveHint[] = budgetedProactiveHints
+      .filter((h): h is CompactProactiveHint => typeof h.why === "string" && h.why.length > 0);
+
     const payload = {
       query,
       search_meta: diagnosticMeta,
@@ -491,10 +505,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       evidence_summary: evidenceSummary,
       insights: relatedInsights.length > 0 ? relatedInsights : undefined,
       cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
-      proactive_hints: (() => {
-        const budgeted = applyProactiveBudget(proactiveHints.map(trimHint), { grounded: false, toolType: "recall" });
-        return budgeted.length > 0 ? budgeted : undefined;
-      })(),
+      proactive_hints: budgetedProactiveHints.length > 0 ? budgetedProactiveHints : undefined,
       summary: `有 ${entities.length} 条相关记忆${lowQuality > 0 ? `（其中 ${lowQuality} 条信息较少）` : ""}，${totalLinks} 条关系，${totalTimeline} 条时间线` +
         (expiredCount > 0 ? `，${expiredCount} 条已过期` : "") +
         (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +
@@ -527,7 +538,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     }
     // #231 default compact — first-turn Agent-facing payload with a hard char
     // budget. Heavy fields, audit diagnostics, and the evidence pack only return
-    // via include_raw; compact gets just the coverage display/status signal.
+    // via include_raw; compact gets just the coverage display/status signal plus
+    // the budgeted proactive hint (#249), which the helper drops before any
+    // entity if the budget demands it.
     const compact = buildCompactRecallResponse({
       display,
       summary: envelopeSummary,
@@ -535,6 +548,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       query,
       entities: entities as Array<Record<string, unknown>>,
       searchMeta: diagnosticMeta,
+      proactiveHints: compactProactiveHints,
     });
     return {
       content: [{

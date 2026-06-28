@@ -8,6 +8,7 @@ import {
   buildCompactRecallResponse,
   MAX_DEFAULT_RECALL_RESPONSE_CHARS,
   COMPACT_SNIPPET_CAP,
+  type CompactProactiveHint,
 } from "../../src/mcp/tools/recall-compact.js";
 
 // ─── Integration harness (mirrors recall-quality.test.ts) ────────────────────
@@ -69,6 +70,18 @@ function fullEntity(overrides: Record<string, unknown> = {}): Record<string, unk
     tags: ["标签甲"],
     expiry_warning: undefined,
     birthday: undefined,
+    ...overrides,
+  };
+}
+
+/** A budgeted proactive hint shaped exactly like the compact output (#249). */
+function compactHint(overrides: Partial<CompactProactiveHint> = {}): CompactProactiveHint {
+  return {
+    rule: "expiry_alert",
+    text: "⏰ 实体A 已过期（2020-01-01），信息可能不是最新的",
+    score: 1.0,
+    why: "实体A 已过期，决策前提可能需要重新评估",
+    target_slug: "entity/a",
     ...overrides,
   };
 }
@@ -208,6 +221,84 @@ describe("buildCompactRecallResponse (unit)", () => {
     });
     expect(res.search_meta.has_more).toBeUndefined();
   });
+
+  // ─── #249: proactive hints survive into compact output ───
+
+  test("#249 preserves a single budgeted proactive hint when non-empty", () => {
+    const res = buildCompactRecallResponse({
+      display: "d",
+      summary: BASE_SUMMARY,
+      resultSummary: "s",
+      query: "q",
+      entities: [fullEntity()],
+      searchMeta: { latency_ms: 1, candidate_count: 1 },
+      proactiveHints: [compactHint()],
+    });
+    expect(res.proactive_hints).toHaveLength(1);
+    expect(res.proactive_hints?.[0].rule).toBe("expiry_alert");
+    expect(res.proactive_hints?.[0].score).toBe(1.0);
+    expect(typeof res.proactive_hints?.[0].why).toBe("string");
+    expect(res.proactive_hints?.[0].target_slug).toBe("entity/a");
+  });
+
+  test("#249 omits proactive_hints key when no hint is provided", () => {
+    const res = buildCompactRecallResponse({
+      display: "d",
+      summary: BASE_SUMMARY,
+      resultSummary: "s",
+      query: "q",
+      entities: [fullEntity()],
+      searchMeta: { latency_ms: 1, candidate_count: 1 },
+    });
+    expect(res.proactive_hints).toBeUndefined();
+  });
+
+  test("#249 stays under the hard budget when a proactive hint is present", () => {
+    const entities = Array.from({ length: 5 }, (_, i) =>
+      fullEntity({ slug: `entity/${i}`, snippet: "字".repeat(COMPACT_SNIPPET_CAP) }));
+    const res = buildCompactRecallResponse({
+      display: "d".repeat(500),
+      summary: BASE_SUMMARY,
+      resultSummary: "s".repeat(200),
+      query: "q",
+      entities,
+      searchMeta: { latency_ms: 1, candidate_count: 5 },
+      proactiveHints: [compactHint()],
+    });
+    expect(JSON.stringify(res).length).toBeLessThanOrEqual(MAX_DEFAULT_RECALL_RESPONSE_CHARS);
+  });
+
+  test("#249 drops the hint before dropping useful entity results under a tight budget", () => {
+    // Snippets stay tiny so the floor pass is a no-op: the only variable under
+    // budget pressure is the hint itself.
+    const entities = [
+      fullEntity({ slug: "entity/one", snippet: "短摘要一" }),
+      fullEntity({ slug: "entity/two", snippet: "短摘要二" }),
+    ];
+    const base = {
+      display: "d",
+      summary: BASE_SUMMARY,
+      resultSummary: "s",
+      query: "q",
+      searchMeta: { latency_ms: 1, candidate_count: 2 },
+    };
+
+    // Natural length of both entities with NO hint — the tightest budget that
+    // still keeps every entity once the hint is gone.
+    const bothNoHint = buildCompactRecallResponse({ ...base, entities }, Number.MAX_SAFE_INTEGER);
+    const bothNoHintLen = JSON.stringify(bothNoHint).length;
+
+    // Same content WITH a hint cannot fit that budget → hint must be sacrificed,
+    // not the entities.
+    const res = buildCompactRecallResponse(
+      { ...base, entities, proactiveHints: [compactHint()] },
+      bothNoHintLen,
+    );
+    expect(res.entities.length).toBe(2);
+    expect(res.entities.map((e) => e.slug)).toEqual(["entity/one", "entity/two"]);
+    expect(res.proactive_hints).toBeUndefined();
+    expect(JSON.stringify(res).length).toBeLessThanOrEqual(bothNoHintLen);
+  });
 });
 
 // ─── Integration: deep_recall handler payload budget (#231) ──────────────────
@@ -282,10 +373,13 @@ describe("deep_recall payload budget (#231)", () => {
     for (const key of ["body", "frontmatter", "links", "timeline", "dossier", "memory_skeleton", "related", "subordinates", "peers"]) {
       expect(e[key], `${key} must be absent in compact`).toBeUndefined();
     }
-    // No audit blobs at top level.
-    for (const key of ["evidence_summary", "insights", "cross_refs", "proactive_hints"]) {
+    // Audit blobs stay out of compact. proactive_hints is NOT an audit blob
+    // (#249): it may appear when a budgeted hint exists. seedRichEntity produces
+    // no hint, so it is absent here; presence is proven in test 8 below.
+    for (const key of ["evidence_summary", "insights", "cross_refs"]) {
       expect(data[key], `${key} must be absent in compact`).toBeUndefined();
     }
+    expect(data.proactive_hints).toBeUndefined();
   });
 
   test("2. default response JSON stays under the 12000 char budget", async () => {
@@ -361,5 +455,65 @@ describe("deep_recall payload budget (#231)", () => {
       expect(summaryJson, `summary leaked ${term}`).not.toContain(term);
     }
     expect(displayText).not.toContain("entity/");
+  });
+
+  // ─── #249: budgeted proactive hints reach the default compact response ───
+
+  /** Seed an entity found via FTS whose expires_at is in the past → expiry_alert. */
+  function seedExpiredEntity(): void {
+    const slug = "entity/expired-a";
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(slug, "entity/person", "过期实体A", "expired-a.md", "h1", 1, 5, "2020-01-01");
+    writeFileSync(
+      join(vaultPath, "expired-a.md"),
+      `---\ntitle: 过期实体A\ntype: entity/person\ntier: 1\nexpires_at: 2020-01-01\n---\n过期实体A的正文，含独特过期fts关键词。`,
+    );
+    db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)")
+      .run(slug, 0, "过期实体A的独特过期fts关键词详细内容");
+    db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)")
+      .run(slug, "过期实体A的独特过期fts关键词详细内容");
+  }
+
+  const EXPIRY_QUERY = "独特过期fts关键词";
+
+  test("8. default deep_recall surfaces expiry_alert hint without include_raw (#249)", async () => {
+    seedExpiredEntity();
+    const server = createServer(deps);
+    const result = await getTools(server).deep_recall.handler({ query: EXPIRY_QUERY }) as { content: Array<{ text: string }> };
+    const data = JSON.parse(result.content[0].text);
+
+    // Compact: no raw envelope and no audit/debug internals.
+    expect(data.raw).toBeUndefined();
+    // Sanity: the expired entity was actually found (else a missing hint would
+    // hide a missing-result bug).
+    expect(data.entities.length).toBeGreaterThanOrEqual(1);
+    expect(data.entities[0].slug).toBe("entity/expired-a");
+    for (const key of ["evidence_summary", "insights", "cross_refs", "evidence_pack", "reason_codes", "quality_gate"]) {
+      expect(data[key], `${key} must stay out of compact`).toBeUndefined();
+    }
+    // The budgeted expiry hint survived into the default response.
+    expect(Array.isArray(data.proactive_hints)).toBe(true);
+    expect(data.proactive_hints).toHaveLength(1);
+    expect(data.proactive_hints[0].rule).toBe("expiry_alert");
+    expect(data.proactive_hints[0].score).toBe(1.0);
+    expect(typeof data.proactive_hints[0].why).toBe("string");
+    expect(data.proactive_hints[0].why.length).toBeGreaterThan(0);
+    // Compact never carries more than one hint.
+    expect(data.proactive_hints.length).toBeLessThanOrEqual(1);
+    // Hard char budget still holds with the hint present.
+    expect(result.content[0].text.length).toBeLessThanOrEqual(MAX_DEFAULT_RECALL_RESPONSE_CHARS);
+  });
+
+  test("9. grounded=true default still suppresses proactive_hints (#249)", async () => {
+    seedExpiredEntity();
+    const server = createServer(deps);
+    const result = await getTools(server).deep_recall.handler({ query: EXPIRY_QUERY, grounded: true }) as { content: Array<{ text: string }> };
+    const data = JSON.parse(result.content[0].text);
+
+    expect(data.raw).toBeUndefined();
+    expect(data.grounded_answer).toBeDefined();
+    // Grounded mode never surfaces proactive hints, even with an expiry present.
+    expect(data.proactive_hints).toBeUndefined();
   });
 });
