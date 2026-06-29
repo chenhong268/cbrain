@@ -273,7 +273,9 @@ describe("deep_recall latency_warning (#250)", () => {
     }};
     const slowDeps = { ...deps, lance: slowLance as never };
     const server = createServer(slowDeps);
-    const r = await getTools(server).deep_recall.handler({ query: "实体Alpha", include_raw: true }) as { content: Array<{ text: string }> };
+    // Non-exact query so the exact-title fast path does NOT short-circuit — the
+    // slow vector path actually runs and drives the latency_warning.
+    const r = await getTools(server).deep_recall.handler({ query: "标记内容", include_raw: true }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
     expect(payload.summary?.status).not.toBe("degraded"); // high-score vector hit
     expect(payload.raw?.search_meta?.latency_warning).toBe(true);
@@ -396,8 +398,10 @@ describe("expandQuery gate (#250)", () => {
     let expandCalled = false;
     const llm = { name: "mock", chat: async () => "{}", expandQuery: async () => { expandCalled = true; return ["主题A", "主题B"]; } };
     const search = new HybridSearch(db, mockEmbed(), { connect: async () => {}, addChunks: async () => {}, search: async () => [], fullTextSearch: async () => [], deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {} } as never, { llm: llm as never });
-    // complex: conjunction word 和
-    await search.search("主题A 和 主题B");
+    // complex + _skipDecompose: isolate the expandQuery gate. Without
+    // _skipDecompose, a complex query enters the decompose branch first and we'd
+    // be testing decompose, not the expand gate.
+    await search.search("主题A 和 主题B", { _skipDecompose: true });
     expect(expandCalled).toBe(true);
   });
 
