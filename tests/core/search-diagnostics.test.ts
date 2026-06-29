@@ -8,7 +8,9 @@ import { describe, test, expect } from "bun:test";
 import {
   classifyDegradedReasons,
   computeSearchDegraded,
+  computeLatencyWarning,
   HIERARCHY_KEYWORDS,
+  WARNING_REASON_CODES,
 } from "../../src/core/search-diagnostics.js";
 
 const NO_TRACE = {};
@@ -189,8 +191,8 @@ describe("classifyDegradedReasons", () => {
 });
 
 describe("computeSearchDegraded", () => {
-  test("latency > 2000ms → degraded", () => {
-    expect(computeSearchDegraded(2500, {}, [])).toBe(true);
+  test("latency > 2000ms alone → NOT degraded (#250: latency-only is a warning)", () => {
+    expect(computeSearchDegraded(2500, {}, [])).toBe(false);
   });
 
   test("latency ≤ 2000ms + no trace + no codes → not degraded", () => {
@@ -217,7 +219,52 @@ describe("computeSearchDegraded", () => {
     expect(computeSearchDegraded(50, {}, ["vector_timeout"])).toBe(true);
   });
 
-  test("latency_budget_exceeded code + low latency → degraded", () => {
-    expect(computeSearchDegraded(50, {}, ["latency_budget_exceeded"])).toBe(true);
+  test("latency_budget_exceeded code + low latency → NOT degraded (#250)", () => {
+    expect(computeSearchDegraded(50, {}, ["latency_budget_exceeded"])).toBe(false);
+  });
+});
+
+describe("latency-only split (#250)", () => {
+  test("latency-only slow → NOT degraded (quality is fine)", () => {
+    expect(computeSearchDegraded(5000, {}, [])).toBe(false);
+  });
+
+  test("latency-only slow → latency_warning true", () => {
+    expect(computeLatencyWarning(5000, [])).toBe(true);
+  });
+
+  test("latency-only fast → no latency_warning", () => {
+    expect(computeLatencyWarning(500, [])).toBe(false);
+  });
+
+  test("latency_budget_exceeded code alone → NOT degraded (moved to warning)", () => {
+    expect(computeSearchDegraded(50, {}, ["latency_budget_exceeded"])).toBe(false);
+  });
+
+  test("fts_parser_fallback code alone + would-be-good → NOT degraded", () => {
+    expect(computeSearchDegraded(50, {}, ["fts_parser_fallback"])).toBe(false);
+  });
+
+  test("latency slow + real retrieval degraded → degraded AND warning", () => {
+    expect(computeSearchDegraded(5000, {}, ["vector_timeout"])).toBe(true);
+    expect(computeLatencyWarning(5000, ["vector_timeout"])).toBe(true);
+  });
+
+  test("WARNING_REASON_CODES contains latency_budget_exceeded + fts_parser_fallback", () => {
+    expect(WARNING_REASON_CODES.has("latency_budget_exceeded")).toBe(true);
+    expect(WARNING_REASON_CODES.has("fts_parser_fallback")).toBe(true);
+    expect(WARNING_REASON_CODES.has("vector_timeout")).toBe(false);
+  });
+
+  test("parser_fallback + good results → NOT degraded (warning only)", () => {
+    // fts_parser_fallback is warning-only; real degradation comes from a
+    // simultaneous fts_empty / low_score code, NOT from parser_fallback itself.
+    // (computeSearchDegraded only consumes reasonCodes, not fts_fallback — pass {}
+    // for the trace to satisfy its { degraded_reason?: string } type.)
+    expect(computeSearchDegraded(100, {}, ["fts_parser_fallback"])).toBe(false);
+  });
+
+  test("parser_fallback + empty results → degraded via fts_empty (not via parser_fallback)", () => {
+    expect(computeSearchDegraded(100, {}, ["fts_parser_fallback", "fts_empty"])).toBe(true);
   });
 });

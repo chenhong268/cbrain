@@ -172,21 +172,40 @@ const DEGRADED_REASON_CODES: ReadonlySet<DegradedReasonCode> = new Set([
   "vector_timeout",
   "vector_error",
   "fts_empty",
-  "fts_parser_fallback",
   "low_score",
   "budget_exhausted",
-  "latency_budget_exceeded",
   "fallback_used",
   "reasoning_parse_failed",
 ]);
+
+/**
+ * #250 — Warning-only reason codes: observable but do NOT force status=degraded.
+ * - latency_budget_exceeded: slow but complete.
+ * - fts_parser_fallback: query syntax downgraded to LIKE; degraded only if
+ *   results are also empty/low (those codes stay in DEGRADED_REASON_CODES).
+ */
+export const WARNING_REASON_CODES: ReadonlySet<DegradedReasonCode> = new Set([
+  "latency_budget_exceeded",
+  "fts_parser_fallback",
+]);
+
+/** #250 — latency_warning: slow (over threshold) regardless of degradation. */
+export function computeLatencyWarning(
+  latencyMs: number,
+  _reasonCodes: DegradedReasonCode[],
+  latencyThreshold = 2000,
+): boolean {
+  return latencyMs > latencyThreshold;
+}
 
 export function computeSearchDegraded(
   latencyMs: number,
   trace: { degraded_reason?: string },
   reasonCodes: DegradedReasonCode[],
-  latencyThreshold = 2000,
+  _latencyThreshold = 2000,
 ): boolean {
-  if (latencyMs > latencyThreshold) return true;
+  // #250: latency alone is NOT degraded (it's a latency_warning). Only real
+  // retrieval degradation forces status=degraded.
   if (trace.degraded_reason) return true;
   if (reasonCodes.some(code => DEGRADED_REASON_CODES.has(code))) return true;
   return false;
