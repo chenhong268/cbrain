@@ -3,6 +3,7 @@ import {
   shouldFilterDiscovery,
   formatDigestCard,
   formatDiscoveryDigest,
+  formatKnowledgeMapSurface,
 } from "../../src/core/discovery-digest.js";
 import type { DiscoveryRow } from "../../src/core/discovery-digest.js";
 
@@ -372,5 +373,85 @@ describe("formatDiscoveryDigest", () => {
     expect(digest._debug.filtered).toBe(2);
     expect(digest._debug.filter_reasons["bridge_no_suggestion"]).toBe(1);
     expect(digest._debug.filter_reasons["trend_no_suggestion"]).toBe(1);
+  });
+});
+
+describe("knowledge_map surface (#244)", () => {
+  const KM_BANNED = [
+    "slug", "community_id", "weighted_degree", "density",
+    "source_type", "debug", "raw", "节点", "桥接", "候选",
+  ];
+
+  test("shouldFilterDiscovery passes KM types", () => {
+    expect(
+      shouldFilterDiscovery(mockRow({ type: "knowledge_map_isolation", entities: '["entities/person-a"]' })),
+    ).toBeNull();
+    expect(
+      shouldFilterDiscovery(mockRow({ type: "knowledge_map_bridge", entities: '["concepts/topic-d"]' })),
+    ).toBeNull();
+  });
+
+  test("isolation card: natural language, no raw terms", () => {
+    const row = mockRow({
+      id: 1,
+      type: "knowledge_map_isolation",
+      entities: '["entities/person-a"]',
+      actionable: "medium",
+      metadata: JSON.stringify({ source: "knowledge_map", mention_count: 12 }),
+    });
+    const card = formatDigestCard(row, entityLookup);
+    expect(card.title).toContain("人物A");
+    expect(card.title).toContain("孤立记忆");
+    assertNoBannedWords(Object.values(card).join(" "));
+    for (const b of KM_BANNED) {
+      expect(Object.values(card).join(" ")).not.toContain(b);
+    }
+  });
+
+  test("bridge card: avoids 桥接, uses 连接", () => {
+    const row = mockRow({
+      id: 2,
+      type: "knowledge_map_bridge",
+      entities: '["concepts/topic-d"]',
+      actionable: "medium",
+      metadata: JSON.stringify({ source: "knowledge_map", community_count: 3 }),
+    });
+    const card = formatDigestCard(row, entityLookup);
+    expect(card.title).toContain("主题D");
+    expect(card.title).toContain("跨领域连接");
+    expect(Object.values(card).join(" ")).not.toContain("桥接");
+    assertNoBannedWords(Object.values(card).join(" "));
+  });
+
+  test("formatKnowledgeMapSurface: isolation first, capped at 5", () => {
+    const isolations = [1, 2, 3].map((id, i) =>
+      mockRow({
+        id,
+        type: "knowledge_map_isolation",
+        entities: '["entities/person-a"]',
+        score: 0.9 - i * 0.1,
+        metadata: JSON.stringify({ source: "knowledge_map" }),
+      }),
+    );
+    const bridges = [4, 5, 6].map((id, i) =>
+      mockRow({
+        id,
+        type: "knowledge_map_bridge",
+        entities: '["concepts/topic-d"]',
+        score: 0.8 - i * 0.1,
+        metadata: JSON.stringify({ source: "knowledge_map" }),
+      }),
+    );
+    const surface = formatKnowledgeMapSurface(isolations, bridges, entityLookup, 5);
+    expect(surface.cards).toHaveLength(5);
+    expect(surface.cards[0].id).toBe(1); // isolation first
+    expect(surface.cards[3].id).toBe(4); // then bridge
+    expect(surface.display).toContain("知识结构观察");
+  });
+
+  test("formatKnowledgeMapSurface: empty → empty display", () => {
+    const surface = formatKnowledgeMapSurface([], [], entityLookup, 5);
+    expect(surface.cards).toHaveLength(0);
+    expect(surface.display).toBe("");
   });
 });

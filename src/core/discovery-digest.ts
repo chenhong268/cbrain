@@ -41,6 +41,10 @@ function parseJsonSafe(raw: string | null | undefined): Record<string, unknown> 
 }
 
 export function shouldFilterDiscovery(r: DiscoveryRow): string | null {
+  // #244 — Knowledge Map surface: always surface (already limited at production).
+  if (r.type === "knowledge_map_isolation" || r.type === "knowledge_map_bridge") {
+    return null;
+  }
   if (r.type === "gap") return null;
 
   const meta = parseJsonSafe(r.metadata);
@@ -131,6 +135,26 @@ export function formatDigestCard(
         suggested_action: (meta.suggested_resolution as string) ?? r.suggestion ?? "检查矛盾来源，确认正确信息。",
       };
     }
+    case "knowledge_map_isolation": {
+      const slug = slugs[0];
+      return {
+        id: r.id,
+        title: `孤立记忆：${resolveTitle(slug, entityLookup)}`,
+        why_it_matters: "这条记忆被多次提及，但几乎没有和其他内容建立关联。",
+        evidence: "它在知识结构中处于孤立位置。",
+        suggested_action: "补一条关联，或写一段说明把它和已有内容联系起来。",
+      };
+    }
+    case "knowledge_map_bridge": {
+      const slug = slugs[0];
+      return {
+        id: r.id,
+        title: `跨领域连接：${resolveTitle(slug, entityLookup)}`,
+        why_it_matters: "这个主题把多个不同的知识领域连在了一起。",
+        evidence: "它同时和不止一个知识领域相关。",
+        suggested_action: "做一次复盘，巩固它已有的连接。",
+      };
+    }
     default: {
       const titles = slugs.map(s => resolveTitle(s, entityLookup)).join("、");
       return {
@@ -184,4 +208,30 @@ export function formatDiscoveryDigest(
       filter_reasons: filterReasons,
     },
   };
+}
+
+/**
+ * #244 — Independent Knowledge Map surface for read_discoveries/run_discovery.
+ * Isolation cards first, then bridge cards, capped at maxItems (default 5).
+ * Deterministic ordering: isolation-before-bridge, then the underlying row
+ * order (actionable/score/id from the DB query). Does NOT mix into the normal
+ * discovery digest, so normal ranking quotas are untouched.
+ */
+export function formatKnowledgeMapSurface(
+  isolationRows: DiscoveryRow[],
+  bridgeRows: DiscoveryRow[],
+  entityLookup: (slug: string) => EntityInfo | null,
+  maxItems = 5,
+): { cards: DigestCard[]; display: string } {
+  const isolationCards = isolationRows.map((r) => formatDigestCard(r, entityLookup));
+  const bridgeCards = bridgeRows.map((r) => formatDigestCard(r, entityLookup));
+  const cards = [...isolationCards, ...bridgeCards].slice(0, maxItems);
+  const display =
+    cards.length > 0
+      ? "## 知识结构观察\n\n" +
+        cards
+          .map((c) => `### ${c.title}\n${c.why_it_matters}\n${c.evidence}\n**建议**：${c.suggested_action}`)
+          .join("\n\n---\n\n")
+      : "";
+  return { cards, display };
 }
