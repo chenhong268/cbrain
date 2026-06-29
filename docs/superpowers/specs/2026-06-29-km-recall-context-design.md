@@ -32,7 +32,7 @@ KM 的 community 由确定性 label propagation 产出（同图同结果），�
 
 - 在 `deep_recall` 的 **supplemental 层**注入同知识域节点。
 - 一个默认 **off** 的 explicit option `knowledge_map_context`。
-- 进程内缓存 analysis（带图指纹失效），摊薄 flag-on 时的全图计算成本。
+- flag-on 时每次现算 analysis（Phase 1 无 cache，见下）。
 - trace 元数据进 raw，display 只出自然语言 title。
 
 ### Out of scope（一期不做，留 Phase 2）
@@ -52,7 +52,7 @@ KM 的 community 由确定性 label propagation 产出（同图同结果），�
 flag-on 时，`deep_recall` 在**主结果 enrichment 之后**插入一个纯计算的 KM context pass：
 
 1. 取主结果 top-N slug。
-2. 用缓存的 analysis 查每个 slug 的 `communityId`。
+2. 调 `analyzeKnowledgeMap(db)` **现算** analysis，查每个 slug 的 `communityId`（Phase 1 无 cache，见下）。
 3. 对每个命中的 mature community，挑不在主结果中的高 `weightedDegree` 节点作 supplemental。
 4. 孤立节点（degree 0）从 supplemental 排除并计数。
 5. supplemental 挂进响应（compact 自然语言摘要 + raw trace）。
@@ -96,18 +96,6 @@ export function buildKnowledgeMapContext(
 - 纯函数，零 DB / LLM 依赖，可独立单测。
 - **直接 `import { isCommunityMature }`**（`src/core/knowledge-map-report.ts:180`）——它是 size/internal-edge/density 阈值的**单一来源**（#241 报告 + #242 brief 共用）。**禁止在 km-context.ts 复制阈值。**（宏哥修正 #4）
 
-### 新增 `src/core/recall/km-context-cache.ts`（进程内缓存）
-
-```ts
-export class KnowledgeMapContextCache {
-  getAnalysis(db: CBrainDB): KnowledgeMapAnalysis;
-  // 指纹命中 → 返回缓存；否则调 analyzeKnowledgeMap(db) 并缓存
-}
-```
-
-- 挂在 `ToolContext`（实现时定位注入点），进程级单例。
-- 指纹与失效策略见下节。可一行关闭退化为"每次算"。
-
 ### 改动 `src/mcp/tools/recall.ts`（最小）
 
 - `inputSchema` 新增参数（宏哥修正 #1）：
@@ -119,16 +107,12 @@ export class KnowledgeMapContextCache {
 
   参数名**必须**是 `knowledge_map_context`，不叫 `km` / `context` 等泛名。描述必须写清"补充线索、非主召回排序"。
 
-- handler：`knowledge_map_context === "on"` **且主结果非空**时 → `ctx.kmContextCache.getAnalysis(db)` → `buildKnowledgeMapContext(analysis, primarySlugs)` → 结果进 `raw.knowledge_map_context`（仅 `include_raw=true` / full raw 路径）+ compact `summary.related_context`。
+- handler：`knowledge_map_context === "on"` **且主结果非空**时 → `analyzeKnowledgeMap(db)` 现算 analysis → `buildKnowledgeMapContext(analysis, primarySlugs)` → 结果进 `raw.knowledge_map_context`（仅 `include_raw=true` / full raw 路径）+ compact `summary.related_context`。
 - `off` → **完全不调 KM**（零开销，行为 byte-for-byte 不变）。
 
 ### 改动 `src/mcp/tools/recall-compact.ts`
 
 - `summary` 增 `related_context`：自然语言 title 摘要（见输出层次契约）。不塞进 entity 投影、不破 char budget。
-
-### 改动 `ToolContext`（定位文件待实现）
-
-- 注入 `kmContextCache: KnowledgeMapContextCache`。
 
 ---
 
@@ -138,7 +122,7 @@ export class KnowledgeMapContextCache {
 query
   → search(完全不变: RRF 四通道融合 mergeRankedResults)
   → 主结果 top-N + exact/grounded 路径(不变)
-  → [flag on] ctx.kmContextCache.getAnalysis(db)
+  → [flag on] analyzeKnowledgeMap(db)（现算，Phase 1 无 cache）
   → buildKnowledgeMapContext(analysis, primarySlugs)
   → supplemental slugs → enrich 成 title/type
   → raw.knowledge_map_context (include_raw) + compact summary.related_context
@@ -158,30 +142,30 @@ query
 
 ---
 
-## cache 策略（宏哥修正 #2 —— 核心防跑偏点）
+## 为什么 Phase 1 不做 cache（宏哥复审修正）
 
-### 为什么需要
+### 最初设想与它的致命漏洞
 
-`analyzeKnowledgeMap(db)` 是全图 label propagation（coarse 6 / default 10 / fine 14 轮），flag-on 每次重算成本不可忽略。Hermes 高频 opt-in 时会抖。
+初稿设想进程内缓存 analysis，指纹用 `pages: COUNT + MAX(updated_at)` + `links: MAX(id) + SUM(weight)`。**这个指纹不成立**：
 
-### 指纹（pages 强 + links 弱）
+KM 的有效边权 = `weight * confidence * sourceReliability`（`knowledge-map.ts` effective-weight 计算），且 analysis 只消费 `trust_state` 为 active 的边。这意味着：
 
-- **pages**：`COUNT(*) + MAX(updated_at)`，scope 限定 KM 分析范围（`entity/%` + `concept/%`）。
-  - `pages.updated_at` 在 tier / mention_count / content_hash 任何变更时都刷新（`sqlite.ts:1463/1475/1481/1487`），是**强指纹**。
-- **links**：`MAX(id) + SUM(weight)`（全表，单行聚合）。
-  - `links` 表**无 `updated_at`**（`sqlite.ts:207-219`，只有 `created_at` + 自增 `id` + `weight` + `strength`）。
-  - `MAX(id)` 抓增删；`SUM(weight)` 抓权重批量变更。
-- 命中：指纹与缓存一致 → 复用 analysis；否则重算并刷新缓存。
+- 一条 link 的 `trust_state` 从 trusted → rejected：`MAX(id)` + `SUM(weight)` 都不变，但 analysis 应丢掉这条边。
+- `source_type` 从 manual → ner：reliability 系数变（1.0 → 0.3），analysis 应变，指纹不变。
+- `confidence` 调整：effective weight 变，指纹不变。
 
-### 已知盲区（spec 必须写明）
+→ 结果是**长期 stale**（直到某条不相关的 page/link 变化才偶然刷新），不是"多活一轮"。**错缓存比没缓存更坏。**
 
-单条 link 的 `weight`/`strength` UPDATE 不改 `id`，靠 `SUM(weight)` 兜；若未来新增"不改 weight 的 links 字段变更"，指纹会 stale。这是**可接受的弱指纹**——最坏情况是缓存多存活一轮（stale community），不是错缓存导致主结果错。
+### Phase 1 决策：无 cache
 
-### 逃生口（宏哥原话约束）
+- `knowledge_map_context="on"` 时**每次调用 `analyzeKnowledgeMap(db)` 现算**。
+- 默认 `off`，日常零开销；opt-in 时才付全图计算成本。
+- 符合 #245 的 experimental / optional 定位：**先验证 Hermes 是否真会消费 `related_context`**，再谈优化。
+- 强指纹（要覆盖 in-scope active links 的 `COUNT + MAX(id) + SUM(weight) + SUM(confidence) + source_type/trust_state 分布`）是独立工作量，不值得在没验证使用频率前投入。
 
-> 若实现复杂，就第一版不要 cache，每次 flag-on 才算。因为默认 off，成本可控。**不要为了 cache 引入错缓存。**
+## Future Extension：analysis cache
 
-实现决策：一期**默认带最薄缓存**（上述两条单行聚合指纹，远比 analysis 便宜）；指纹逻辑封装在 `KnowledgeMapContextCache` 内，**留一行开关可退化为"每次算"**。若实测指纹查询成本 ≈ analysis，或 review 发现 stale 风险，直接关开关退回无缓存。
+仅当实测确认 Hermes 高频 opt-in、`analyzeKnowledgeMap` 成为热点后，再单开 issue 做 cache。届时指纹**必须基于 active graph 输入**计算（至少 in-scope pages 的 `COUNT + MAX(updated_at)` + active links 的 `COUNT + MAX(id) + SUM(weight) + SUM(confidence) + source_type/trust_state 分布`），且只统计 `analyzeKnowledgeMap()` 实际消费的 active links，而不是全 `links` 表。
 
 ---
 
@@ -244,12 +228,6 @@ query
 - 空 analysis / 空图 → `reason: "km_unavailable"`，不抛。
 - 全域非 mature → `reason: "no_mature_domain"`。
 
-**`tests/core/recall/km-context-cache.test.ts`**
-- 指纹命中 → 复用缓存（`analyzeKnowledgeMap` 只调一次）。
-- `pages.updated_at` 变 → 重算。
-- `links.id` / `SUM(weight)` 变 → 重算。
-- 关闭开关 → 退化为每次算。
-
 **`tests/mcp/recall-km-context.test.ts`**（集成）
 - **`off` 时 spy `analyzeKnowledgeMap` 断言零调用**（宏哥修正 #5）。
 - `off` 时主结果排序 / score / entity projection **byte-for-byte 不变**。
@@ -282,6 +260,6 @@ query
 
 ## 执行方式
 
-M 级 worktree + **inline TDD**（不分 subagent）。理由：cache/指纹 + compact/raw 边界最容易错，集中在一个上下文里做、每段 RED→GREEN→REFACTOR、每段 `bun run lint` + 相关测试。文件不多但契约细节密。
+M 级 worktree + **inline TDD**（不分 subagent）。理由：compact/raw 边界 + off 不变量最容易错，集中在一个上下文里做、每段 RED→GREEN→REFACTOR、每段 `bun run lint` + 相关测试。文件不多但契约细节密。
 
 完成本实验后，观察 Hermes 是否真会消费 `related_context`；有价值再开 #245 Phase 2（Agent 追问 / 扩展时显式请求 KM domain context）。
