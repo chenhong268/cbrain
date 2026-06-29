@@ -69,6 +69,11 @@ function seedPage(db: CBrainDB, slug: string, title: string): void {
     .run(slug, "entity/person", title, `${slug}.md`, "h", 1, 1);
 }
 
+// Normal (non-KM) discovery row, seeded directly like Dream/DiscoveryManager would.
+function seedGap(db: CBrainDB, slug: string, meta: { mention_count: number; link_count: number }): void {
+  db.upsertDiscovery("gap", [slug], 0.7, undefined, undefined, "medium", false, meta);
+}
+
 const RAW_BANNED = [
   "score", "entity/a", "community_id", "weighted_degree", "density",
   "source_type", "debug", "节点", "桥接", "候选",
@@ -133,5 +138,73 @@ describe("MCP discovery Knowledge Map surface (#244)", () => {
     for (const b of RAW_BANNED) {
       expect(blob, `${b} leaked`).not.toContain(b);
     }
+  });
+
+  // #244 review — Fix 1: a KM-only response must not read as "empty".
+  test("read_discoveries with only KM candidates keeps summary.status ok and count > 0", async () => {
+    seedPage(db, "entity/a", "实体A");
+    produceKnowledgeMapDiscoveries(db, analysisWith({ isolates: [isolate("entity/a", "实体A", 12)] }));
+    const data = await callTool(deps, "read_discoveries", {});
+    // Normal cards empty, KM surface present — Hermes must NOT conclude "no discoveries today".
+    expect(((data.cards as unknown[]) ?? []).length).toBe(0);
+    expect((data.knowledge_map_cards as unknown[]).length).toBe(1);
+    const summary = data.summary as { status: string; count: number };
+    expect(summary.status).toBe("ok");
+    expect(summary.count).toBeGreaterThan(0);
+  });
+
+  // #244 review — Fix 2: an explicit non-KM type filter suppresses the KM surface.
+  test("read_discoveries typeFilter=gap does not attach the Knowledge Map surface", async () => {
+    seedPage(db, "entity/a", "实体A");
+    seedPage(db, "entity/gap-b", "缺口实体B");
+    produceKnowledgeMapDiscoveries(db, analysisWith({ isolates: [isolate("entity/a", "实体A", 12)] }));
+    seedGap(db, "entity/gap-b", { mention_count: 15, link_count: 0 });
+
+    const data = await callTool(deps, "read_discoveries", { typeFilter: "gap" });
+    expect(data.knowledge_map_cards).toBeUndefined();
+    expect(String(data.display)).not.toContain("知识结构观察");
+    const titles = ((data.cards as Array<{ title: string }>) ?? []).map(c => c.title);
+    expect(titles.some(t => t.includes("缺口实体B"))).toBe(true);
+  });
+
+  // #244 review — Fix 2: a KM type filter returns only that KM type's cards.
+  test("read_discoveries typeFilter=knowledge_map_isolation returns only isolation cards", async () => {
+    seedPage(db, "entity/a", "实体A");
+    produceKnowledgeMapDiscoveries(db, analysisWith({ isolates: [isolate("entity/a", "实体A", 12)] }));
+    // Seed a bridge too — it must NOT leak in when filtering to isolation.
+    db.upsertDiscovery(
+      "knowledge_map_bridge",
+      ["entity/a"],
+      0.5,
+      undefined,
+      undefined,
+      "medium",
+      false,
+      { source: "knowledge_map", community_count: 2 },
+    );
+
+    const data = await callTool(deps, "read_discoveries", { typeFilter: "knowledge_map_isolation" });
+    const kmCards = (data.knowledge_map_cards as Array<{ title: string }>) ?? [];
+    expect(kmCards.length).toBe(1);
+    expect(kmCards[0].title).toContain("实体A");
+    expect(kmCards.every(c => !c.title.startsWith("跨领域连接"))).toBe(true);
+    const summary = data.summary as { status: string; count: number };
+    expect(summary.status).toBe("ok");
+    expect(summary.count).toBeGreaterThan(0);
+  });
+
+  // #244 review — Fix 2: actionableFilter applies to the KM surface.
+  test("read_discoveries actionableFilter filters the Knowledge Map surface", async () => {
+    seedPage(db, "entity/a", "实体A");
+    // produceKnowledgeMapDiscoveries writes medium-actionable isolates.
+    produceKnowledgeMapDiscoveries(db, analysisWith({ isolates: [isolate("entity/a", "实体A", 12)] }));
+
+    const baseline = await callTool(deps, "read_discoveries", {});
+    expect((baseline.knowledge_map_cards as unknown[]).length).toBe(1);
+
+    const highOnly = await callTool(deps, "read_discoveries", { actionableFilter: "high" });
+    // medium KM card must be filtered out under a high-actionable filter.
+    expect(highOnly.knowledge_map_cards).toBeUndefined();
+    expect(String(highOnly.display)).not.toContain("知识结构观察");
   });
 });

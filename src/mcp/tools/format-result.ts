@@ -572,6 +572,13 @@ interface DiscoveriesPayload {
   display?: string;
   cards?: Array<{ title?: string }>;
   summary?: string;
+  /**
+   * Cards surfaced in a parallel surface (e.g. the Knowledge Map surface) that
+   * are intentionally NOT mixed into `cards`. They still count toward the
+   * summary status/count so a parallel-surface-only response is not misread as
+   * "empty". #244
+   */
+  extraCardCount?: number;
 }
 
 export function formatDiscoveriesEnvelope(payload: DiscoveriesPayload): {
@@ -579,7 +586,7 @@ export function formatDiscoveriesEnvelope(payload: DiscoveriesPayload): {
   summary: ToolSummary;
   raw: DiscoveriesPayload;
 } {
-  const count = payload.cards?.length ?? 0;
+  const count = (payload.cards?.length ?? 0) + (payload.extraCardCount ?? 0);
 
   if (count === 0) {
     return {

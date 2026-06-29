@@ -36,13 +36,33 @@ const STATUS_LABELS: Record<string, string> = {
 const KM_TYPES = new Set(["knowledge_map_isolation", "knowledge_map_bridge"]);
 
 type EntityInfo = { title: string; type: string };
+type ActionableLevel = "high" | "medium" | "low";
+type KmSurfaceType = "knowledge_map_isolation" | "knowledge_map_bridge";
+
+interface KmSurfaceOptions {
+  /** Restrict to a single KM type (when the caller filtered to one). */
+  typeFilter?: KmSurfaceType;
+  /** Apply the same actionable filter as the normal surface. */
+  actionableFilter?: ActionableLevel;
+}
+
+function filterByActionable<T extends { actionable: string }>(rows: T[], level: ActionableLevel | undefined): T[] {
+  return level ? rows.filter(r => r.actionable === level) : rows;
+}
 
 function buildKmSurface(
   db: ToolContext["db"],
   entityLookup: (slug: string) => EntityInfo | null,
+  opts: KmSurfaceOptions = {},
 ): { cards: ReturnType<typeof formatKnowledgeMapSurface>["cards"]; display: string } {
-  const isolation = db.getDiscoveriesByType("knowledge_map_isolation", 3);
-  const bridge = db.getDiscoveriesByType("knowledge_map_bridge", 3);
+  const wantIsolation = opts.typeFilter !== "knowledge_map_bridge";
+  const wantBridge = opts.typeFilter !== "knowledge_map_isolation";
+  const isolation = wantIsolation
+    ? filterByActionable(db.getDiscoveriesByType("knowledge_map_isolation", 3), opts.actionableFilter)
+    : [];
+  const bridge = wantBridge
+    ? filterByActionable(db.getDiscoveriesByType("knowledge_map_bridge", 3), opts.actionableFilter)
+    : [];
   return formatKnowledgeMapSurface(isolation, bridge, entityLookup, 5);
 }
 
@@ -68,10 +88,16 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
   }, async ({ limit, actionableFilter, typeFilter, debug }) => {
     const displayLimit = limit ?? 3;
     const fetchLimit = Math.max(displayLimit * 3, 10);
-    let rows: ReturnType<typeof ctx.db.getDiscoveriesByType>;
+    const entityLookup = (slug: string) => ctx.db.getPage(slug);
+    const isKmTypeFilter = typeFilter !== undefined && KM_TYPES.has(typeFilter);
 
-    if (typeFilter) {
-      rows = ctx.db.getDiscoveriesByType(typeFilter, fetchLimit);
+    // Normal discovery rows. KM types never enter this path — they are surfaced
+    // exclusively through the independent Knowledge Map surface below.
+    let normalRows: ReturnType<typeof ctx.db.getDiscoveriesByType>;
+    if (isKmTypeFilter) {
+      normalRows = [];
+    } else if (typeFilter) {
+      normalRows = ctx.db.getDiscoveriesByType(typeFilter, fetchLimit);
     } else {
       // Type-diverse round-robin: prevent high-score bridges from crowding out gaps
       const activeTypes = ["bridge", "trend", "gap", "contradiction"] as const;
@@ -96,15 +122,22 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
         }
         roundIdx++;
       }
-      rows = merged;
+      normalRows = merged;
     }
 
-    const entityLookup = (slug: string) => ctx.db.getPage(slug);
-    const digest = formatDiscoveryDigest(rows, entityLookup, displayLimit);
+    const digest = formatDiscoveryDigest(normalRows, entityLookup, displayLimit);
 
-    // #244 — attach independent KM surface (unless caller already filtered to a KM type).
-    const isKmFilter = typeFilter !== undefined && KM_TYPES.has(typeFilter);
-    const kmSurface = isKmFilter ? { cards: [], display: "" } : buildKmSurface(ctx.db, entityLookup);
+    // #244 — independent KM surface.
+    // - Suppressed when the caller explicitly filtered to a non-KM type: an
+    //   explicit filter must not bleed in a different surface.
+    // - Restricted to the requested type when the caller filtered to a KM type.
+    // - actionableFilter applies uniformly to both normal and KM cards.
+    const kmSurface = typeFilter && !isKmTypeFilter
+      ? { cards: [], display: "" }
+      : buildKmSurface(ctx.db, entityLookup, {
+          typeFilter: isKmTypeFilter ? (typeFilter as KmSurfaceType) : undefined,
+          actionableFilter,
+        });
     const combinedDisplay = kmSurface.display ? `${digest.display}\n\n${kmSurface.display}` : digest.display;
 
     const summaryText = buildDiscoverySummary(digest.cards.length, kmSurface.cards.length, "今天暂无新的发现。");
@@ -119,7 +152,12 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       payload._debug = digest._debug;
     }
 
-    const { display, summary, raw } = formatDiscoveriesEnvelope({ display: combinedDisplay, cards: digest.cards, summary: summaryText });
+    const { display, summary, raw } = formatDiscoveriesEnvelope({
+      display: combinedDisplay,
+      cards: digest.cards,
+      summary: summaryText,
+      extraCardCount: kmSurface.cards.length,
+    });
     return {
       content: [{
         type: "text" as const,
@@ -197,7 +235,12 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       };
     }
 
-    const { display, summary, raw } = formatDiscoveriesEnvelope({ display: combinedDisplay, cards: digest.cards, summary: summaryText });
+    const { display, summary, raw } = formatDiscoveriesEnvelope({
+      display: combinedDisplay,
+      cards: digest.cards,
+      summary: summaryText,
+      extraCardCount: kmSurface.cards.length,
+    });
     return {
       content: [{
         type: "text" as const,
