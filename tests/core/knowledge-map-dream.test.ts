@@ -198,6 +198,18 @@ describe("Knowledge Map Dream stage (#242)", () => {
     expect(report.brief).toContain("1 个主要领域");
   });
 
+  test("Dream brief includes discovery signals when KM stage produced candidates (#244)", async () => {
+    db.rawDb
+      .prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("entity/f", "entity/person", "实体F", "f.md", "h3", 1, 20);
+    const report = await runDream(
+      vaultPath, db, mockSync(), mockEnrich(), mockHealth(),
+      outputsDir, silentLogger, undefined, dbPath,
+    );
+    expect(report.stages.knowledge_map.discoveryCandidates).toBeGreaterThan(0);
+    expect(report.brief).toContain("发现信号");
+  });
+
   test("locked Dream skip returns safe-default knowledge_map stage and generates nothing", async () => {
     db.setConfig("dream.lock", String(Date.now())); // hold the lock
 

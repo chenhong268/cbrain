@@ -186,5 +186,6 @@ function sanitizeWarning(e: unknown): string {
  */
 export function knowledgeMapBriefLine(stage: KnowledgeMapStageResult): string | null {
   if (stage.status !== "generated") return null;
-  return `Knowledge Map: ${stage.domains} 个主要领域，${stage.growing} 个成长中，${stage.mature} 个成熟，${stage.highMentionIsolates} 个高提及孤岛`;
+  const base = `Knowledge Map: ${stage.domains} 个主要领域，${stage.growing} 个成长中，${stage.mature} 个成熟，${stage.highMentionIsolates} 个高提及孤岛`;
+  return stage.discoveryCandidates > 0 ? `${base}，${stage.discoveryCandidates} 条发现信号` : base;
 }
