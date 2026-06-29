@@ -79,6 +79,16 @@ describe("latency-only split (#250)", () => {
     expect(WARNING_REASON_CODES.has("fts_parser_fallback")).toBe(true);
     expect(WARNING_REASON_CODES.has("vector_timeout")).toBe(false);
   });
+
+  test("parser_fallback + good results → NOT degraded (warning only)", () => {
+    // fts_parser_fallback is warning-only; real degradation comes from a
+    // simultaneous fts_empty / low_score code, NOT from parser_fallback itself.
+    expect(computeSearchDegraded(100, { fts_fallback: true }, ["fts_parser_fallback"])).toBe(false);
+  });
+
+  test("parser_fallback + empty results → degraded via fts_empty (not via parser_fallback)", () => {
+    expect(computeSearchDegraded(100, { fts_fallback: true }, ["fts_parser_fallback", "fts_empty"])).toBe(true);
+  });
 });
 ```
 
@@ -233,20 +243,38 @@ describe("deep_recall latency_warning (#250)", () => {
   });
   afterEach(() => { db.close(); if (existsSync(testDir)) rmSync(testDir, { recursive: true }); });
 
-  test("good FTS result + no retrieval degradation → not degraded, latency_warning present in raw", async () => {
-    // Seed a strong FTS hit so results are good (top score high).
+  function seedStrongFts() {
+    // Strong FTS hit so retrieval is good (top score high) regardless of latency.
     db.rawDb.prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run("entity/alpha", "entity/person", "实体Alpha", "entity-alpha.md", "h1", 1, 5);
     db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run("entity/alpha", 0, "实体Alpha 的独特标记内容");
     db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run("entity/alpha", "实体Alpha 的独特标记内容");
+  }
 
+  test("good FTS result, FAST → not degraded, latency_warning absent (false→omitted)", async () => {
+    seedStrongFts();
     const server = createServer(deps);
     const r = await getTools(server).deep_recall.handler({ query: "独特标记", include_raw: true }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
-    // status must NOT be degraded when results are good (regardless of latency)
     expect(payload.summary?.status).not.toBe("degraded");
-    // raw search_meta carries the latency_warning flag
-    expect(payload.raw?.search_meta).toHaveProperty("latency_warning");
+    // fast search → computeLatencyWarning=false → field omitted via `|| undefined`
+    expect(payload.raw?.search_meta?.latency_warning).toBeUndefined();
+  });
+
+  test("good FTS result, SLOW (injected latency) → latency_warning true, still not degraded", async () => {
+    seedStrongFts();
+    // Inject >2000ms REAL latency via a slow LanceDB search stub (vector path
+    // sleeps 2100ms; FTS stays fast and returns the good hit). Total search
+    // latency > threshold → computeLatencyWarning true. No fake-timer dep: this
+    // is a controlled, deterministic slow path. (2100ms < VECTOR_TIMEOUT_MS 5000,
+    // so vector completes normally with empty result, not a timeout.)
+    const slowLance = { ...createMockLanceDB(), search: async () => { await new Promise((r) => setTimeout(r, 2100)); return []; } };
+    const slowDeps = { ...deps, lance: slowLance as never };
+    const server = createServer(slowDeps);
+    const r = await getTools(server).deep_recall.handler({ query: "独特标记", include_raw: true }) as { content: Array<{ text: string }> };
+    const payload = JSON.parse(r.content[0].text);
+    expect(payload.summary?.status).not.toBe("degraded"); // good FTS results
+    expect(payload.raw?.search_meta?.latency_warning).toBe(true);
   });
 });
 ```
@@ -392,9 +420,15 @@ const FTS_SUFFICIENT_RESULTS = 3;
 (b) Change the final `searchCore` return (line 477) to run a bounded FTS probe, decide the gate, and pass `initialFts` so it's reused:
 
 ```ts
-    // #250 — bounded FTS probe to gate expandQuery. Reused as initialFts so the
-    // downstream searchSingleQuery does NOT re-run the same FTS (no double-query).
-    const ftsProbe = this.ftsSearch(query, limit, trace);
+    // #250 — bounded FTS probe to gate expandQuery. Timed + fail-open (mirrors
+    // searchSingleQuery's FTS path: timedCall records fts_ms, catch returns [] on
+    // failure) so trace/error semantics stay consistent. Reused as initialFts so
+    // searchSingleQuery does NOT re-run FTS (no double-query, no double fts_ms).
+    const ftsProbe = await this.timedCall(
+      () => Promise.resolve(this.ftsSearch(query, limit, trace)),
+      trace,
+      "fts_ms",
+    ).catch(() => [] as SearchResult[]);
     const ftsSufficient = ftsProbe.length >= FTS_SUFFICIENT_RESULTS;
     const knownSlugsForGate = options?._hints?.knownSlugs ?? [];
     const isComplex = options?._hints?.isComplex ?? isComplexQuery(query, knownSlugsForGate);
@@ -517,15 +551,19 @@ git commit -m "feat(search): gate expandQuery behind isComplexQuery||FTS<3, reus
 Append:
 
 ```ts
-  test("expandQuery over call-count budget → skipped, no throw, results preserved", async () => {
-    seedFtsHits(3); // FTS sufficient so we have results even if expand is skipped
+  test("expandQuery over call-count budget → skipped, FTS preserved, expand_skipped=budget_exhausted", async () => {
+    seedFtsHits(3); // FTS sufficient so results exist even when expand is skipped
     let expandCalls = 0;
     const llm = { name: "mock", chat: async () => "{}", expandQuery: async () => { expandCalls++; return ["x"]; } };
-    const search = new HybridSearch(db, mockEmbed(), { connect: async () => {}, addChunks: async () => {}, search: async () => [], fullTextSearch: async () => [], deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {} } as never, { llm: llm as never });
-    const trace: Record<string, unknown> = { llm_calls: 3 }; // budget already exhausted (#222 MAX_DEFAULT_LLM_CALLS=3)
-    const results = await search.search("阿德勒 和 心理学", { _trace: trace as never });
+    const search = new HybridSearch(db, mockEmbed(), { connect: async () => {}, addChunks: async () => {}, search: async () => [], fullTextSearch: async () => {}, deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {} } as never, { llm: llm as never });
+    const trace: Record<string, unknown> = { llm_calls: 3 }; // #222 MAX_DEFAULT_LLM_CALLS budget exhausted
+    // _skipDecompose ISOLATES the expand path: without it, the complex query
+    // ("阿德勒 和 心理学") enters the decompose branch and the existing decompose
+    // budget guard returns [] BEFORE reaching searchWithExpansion/expandQuery.
+    const results = await search.search("阿德勒 和 心理学", { _skipDecompose: true, _trace: trace as never });
     expect(results.length).toBeGreaterThan(0); // FTS results preserved
     expect(expandCalls).toBe(0); // expand skipped due to budget
+    expect(trace.expand_skipped).toBe("budget_exhausted");
   });
 ```
 
@@ -548,9 +586,9 @@ In `searchWithExpansion`, guard the expand call with the #222 budget (reuse `MAX
       // guard). LLMProvider has no AbortSignal: on timeout we discard the result,
       // do NOT write anything, and fall back to the original query. expandQuery is
       // pure-read, so discarding is safe.
-      const expandTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+      let expandTimer: ReturnType<typeof setTimeout> | undefined;
       const expandTimeout = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error("expand_timeout")), MAX_DEFAULT_DECOMPOSE_MS);
+        expandTimer = setTimeout(() => reject(new Error("expand_timeout")), MAX_DEFAULT_DECOMPOSE_MS);
       });
       try {
         queries = await Promise.race([
@@ -575,7 +613,7 @@ In `searchWithExpansion`, guard the expand call with the #222 budget (reuse `MAX
     }
 ```
 
-(Fix the `expandTimer` declaration — declare it before the timeout promise so `finally` can clear it; mirror the decompose pattern at search.ts:426-446 exactly.)
+(Declaration above is the exact correct form: `let expandTimer` assigned inside the promise constructor, cleared in `finally` — mirrors search.ts:426-446 decompose pattern verbatim. No fix-up needed.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -661,7 +699,15 @@ import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCod
 
 ```ts
   const slowLats = slowAll.map((s) => s.latency_ms).sort((a, b) => a - b);
-  const latencyWarningCount = sessions.filter((s) => s.reason_codes.some((c) => WARNING_REASON_CODES.has(c as DegradedReasonCode))).length;
+  // #250 — latency_warning_rate: dual source for robustness.
+  // (a) reason_codes carries a warning code (latency_budget_exceeded is written
+  //     by classifyDegradedReasons whenever latency>2000; recall.ts/search.ts
+  //     persist reason_codes into summary_json, so slow sessions ARE tagged).
+  // (b) fallback: latency_ms > threshold AND status !== degraded — catches any
+  //     slow-but-ok session even if the code wasn't persisted (defensive).
+  const warningByCode = sessions.filter((s) => s.reason_codes.some((c) => WARNING_REASON_CODES.has(c as DegradedReasonCode))).length;
+  const warningByLatency = sessions.filter((s) => s.latency_ms != null && s.latency_ms > 2000 && s.status !== "degraded").length;
+  const latencyWarningCount = Math.max(warningByCode, warningByLatency);
   const summary: PerfDiagnoseReport["summary"] = {
     session_count: sessions.length,
     slow_count: slowAll.length,
