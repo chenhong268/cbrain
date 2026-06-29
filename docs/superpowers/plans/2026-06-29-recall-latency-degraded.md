@@ -83,11 +83,13 @@ describe("latency-only split (#250)", () => {
   test("parser_fallback + good results → NOT degraded (warning only)", () => {
     // fts_parser_fallback is warning-only; real degradation comes from a
     // simultaneous fts_empty / low_score code, NOT from parser_fallback itself.
-    expect(computeSearchDegraded(100, { fts_fallback: true }, ["fts_parser_fallback"])).toBe(false);
+    // (computeSearchDegraded only consumes reasonCodes, not fts_fallback — pass {}
+    // for the trace to satisfy its { degraded_reason?: string } type.)
+    expect(computeSearchDegraded(100, {}, ["fts_parser_fallback"])).toBe(false);
   });
 
   test("parser_fallback + empty results → degraded via fts_empty (not via parser_fallback)", () => {
-    expect(computeSearchDegraded(100, { fts_fallback: true }, ["fts_parser_fallback", "fts_empty"])).toBe(true);
+    expect(computeSearchDegraded(100, {}, ["fts_parser_fallback", "fts_empty"])).toBe(true);
   });
 });
 ```
