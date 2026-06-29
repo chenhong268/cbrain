@@ -128,6 +128,9 @@ describe("MCP discovery Knowledge Map surface (#244)", () => {
     produceKnowledgeMapDiscoveries(db, analysisWith({ isolates: [isolate("entity/a", "实体A", 12)] }));
     const data = await callTool(deps, "run_discovery", {});
     expect((data.knowledge_map_cards as unknown[]).length).toBe(1);
+    // KM-only output must not lead with the empty placeholder.
+    expect(String(data.display)).toContain("知识结构观察");
+    expect(String(data.display)).not.toContain("暂无");
   });
 
   test("display and knowledge_map_cards never leak raw terms", async () => {
@@ -151,6 +154,9 @@ describe("MCP discovery Knowledge Map surface (#244)", () => {
     const summary = data.summary as { status: string; count: number };
     expect(summary.status).toBe("ok");
     expect(summary.count).toBeGreaterThan(0);
+    // Display must show the KM observation, not the empty placeholder.
+    expect(String(data.display)).toContain("知识结构观察");
+    expect(String(data.display)).not.toContain("暂无新的发现");
   });
 
   // #244 review — Fix 2: an explicit non-KM type filter suppresses the KM surface.
@@ -191,6 +197,9 @@ describe("MCP discovery Knowledge Map surface (#244)", () => {
     const summary = data.summary as { status: string; count: number };
     expect(summary.status).toBe("ok");
     expect(summary.count).toBeGreaterThan(0);
+    // KM-type filter must not surface the empty placeholder either.
+    expect(String(data.display)).toContain("知识结构观察");
+    expect(String(data.display)).not.toContain("暂无");
   });
 
   // #244 review — Fix 2: actionableFilter applies to the KM surface.

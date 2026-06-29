@@ -73,6 +73,26 @@ function buildDiscoverySummary(normalCount: number, kmCount: number, emptyText: 
   return parts.length > 0 ? `今天有 ${parts.join("，另有 ")}` : emptyText;
 }
 
+/**
+ * #244 — Stitch the normal-digest display and the KM-surface display without
+ * contradicting ourselves. The normal digest returns an "暂无新的发现。" placeholder
+ * when it has no cards; that placeholder must NOT be shown when the KM surface
+ * carries the actual signal (and vice versa).
+ *
+ * `digestDisplay` is already the correct empty placeholder when normal is empty,
+ * so the neither-case just falls back to it.
+ */
+function combineDiscoveryDisplay(
+  digestDisplay: string,
+  kmDisplay: string,
+  hasNormalCards: boolean,
+  hasKmCards: boolean,
+): string {
+  if (hasNormalCards && hasKmCards) return `${digestDisplay}\n\n${kmDisplay}`;
+  if (hasKmCards) return kmDisplay;
+  return digestDisplay;
+}
+
 export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("read_discoveries", {
     description:
@@ -138,7 +158,12 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
           typeFilter: isKmTypeFilter ? (typeFilter as KmSurfaceType) : undefined,
           actionableFilter,
         });
-    const combinedDisplay = kmSurface.display ? `${digest.display}\n\n${kmSurface.display}` : digest.display;
+    const combinedDisplay = combineDiscoveryDisplay(
+      digest.display,
+      kmSurface.display,
+      digest.cards.length > 0,
+      kmSurface.cards.length > 0,
+    );
 
     const summaryText = buildDiscoverySummary(digest.cards.length, kmSurface.cards.length, "今天暂无新的发现。");
 
@@ -196,7 +221,12 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     const normalRows = newRows.filter(r => !KM_TYPES.has(r.type));
     const digest = formatDiscoveryDigest(normalRows, entityLookup, 3);
     const kmSurface = buildKmSurface(ctx.db, entityLookup);
-    const combinedDisplay = kmSurface.display ? `${digest.display}\n\n${kmSurface.display}` : digest.display;
+    const combinedDisplay = combineDiscoveryDisplay(
+      digest.display,
+      kmSurface.display,
+      digest.cards.length > 0,
+      kmSurface.cards.length > 0,
+    );
 
     const summaryText = buildDiscoverySummary(digest.cards.length, kmSurface.cards.length, "今天暂无值得打扰你的新发现。");
 
