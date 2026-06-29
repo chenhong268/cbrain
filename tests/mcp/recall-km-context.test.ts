@@ -132,4 +132,35 @@ describe("deep_recall knowledge_map_context (#245)", () => {
     // privacy: no internal identifiers leak into the Agent-facing field
     expect(rc).not.toMatch(/community-\d|entity\/|slug|weight/i);
   });
+
+  test("on: display mentions same-domain titles and leaks no internals", async () => {
+    const { query } = seedMatureTriad("entity/triad6");
+    const server = createServer(deps);
+    const r = await getTools(server).deep_recall.handler({ query, strategy: "fts", knowledge_map_context: "on" }) as { content: Array<{ text: string }> };
+    const payload = JSON.parse(r.content[0].text);
+    // Strong: supplemental exists, so the display line MUST be present.
+    expect(payload.display).toContain("同知识域还涉及");
+    // FORBIDDEN_VISIBLE_TERMS guard (KM internals only; confidence is a pre-existing evidence field).
+    // summary is a ToolSummary object (not a string), validated structurally elsewhere.
+    expect(payload.display).not.toMatch(/community-\d|source_type|modularity|weightedDegree/i);
+  });
+
+  test("on: exact-match order is unchanged (exact match still first)", async () => {
+    db.rawDb.prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("entity/exact-km", "entity/person", "精确域桩", "entity-exact-km.md", "h1", 2, 5);
+    const server = createServer(deps);
+    const r = await getTools(server).deep_recall.handler({ query: "精确域桩", knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
+    const payload = JSON.parse(r.content[0].text);
+    const firstSlug = payload.entities[0]?.slug;
+    expect(firstSlug).toBe("entity/exact-km");
+  });
+
+  test("on: grounded mode is unaffected (no related_context, no display line)", async () => {
+    const { query } = seedMatureTriad("entity/triad7");
+    const server = createServer(deps);
+    const r = await getTools(server).deep_recall.handler({ query, strategy: "fts", knowledge_map_context: "on", grounded: true }) as { content: Array<{ text: string }> };
+    const payload = JSON.parse(r.content[0].text);
+    expect(payload.related_context).toBeUndefined();
+    expect(payload.grounded_answer).toBeDefined();
+  });
 });

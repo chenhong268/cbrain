@@ -530,13 +530,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       !!evidencePack &&
       evidencePack.coverage.coverage_status !== "sufficient" &&
       baseSummary.status !== "empty";
-    const display = surfaceInsufficient ? `只找到部分线索：${baseDisplay}` : baseDisplay;
     const envelopeSummary = surfaceInsufficient
       ? { ...baseSummary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
       : baseSummary;
     // #245 — KM context trace. raw-only: never display/summary. Carries only
-    // structural signals; titles stay out (display/summary get the natural line
-    // in Task 5/6).
+    // structural signals; titles stay out (display/summary get the natural line).
     const kmTrace = kmResult
       ? {
           matched_domains: kmResult.matchedDomains.map((c) => c.id),
@@ -550,6 +548,9 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const kmRelatedLine = kmResult && kmResult.supplemental.length > 0
       ? `同知识域还涉及：${kmResult.supplemental.map((s) => s.title).join("、")}`
       : undefined;
+    // display appends the KM same-domain line after the base + insufficient prefix.
+    const display = (surfaceInsufficient ? `只找到部分线索：${baseDisplay}` : baseDisplay) +
+      (kmRelatedLine ? `\n${kmRelatedLine}` : "");
     if (include_raw) {
       // Full audit/legacy payload — body/links/timeline/dossier, raw search_meta,
       // and the evidence pack (#232) when temporal intent fired.
