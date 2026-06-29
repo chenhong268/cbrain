@@ -83,4 +83,35 @@ describe("deep_recall knowledge_map_context (#245)", () => {
     expect(payload.raw?.knowledge_map_context).toBeUndefined();
     expect(payload.related_context).toBeUndefined();
   });
+
+  test("on + include_raw: raw.knowledge_map_context carries matched domains + supplemental", async () => {
+    const { slugs, query } = seedMatureTriad("entity/triad3");
+    const server = createServer(deps);
+    // Query token is on A only → primary = [A]; KM MUST surface B and C as
+    // same-domain supplemental. This is #245's core value, not an FTS artifact.
+    // strategy: "fts" isolates the primary result to FTS-only hits (A), so the
+    // graph channel doesn't pull B/C (A's triangle neighbors) into primary and
+    // de-duplicate KM supplemental to empty. KM logic is strategy-independent;
+    // this just controls what lands in primarySlugs for a deterministic assertion.
+    const r = await getTools(server).deep_recall.handler({ query, strategy: "fts", knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
+    const payload = JSON.parse(r.content[0].text);
+    const km = payload.raw?.knowledge_map_context;
+    expect(km).toBeDefined();
+    expect(km.reason).toBe("same_domain_context");
+    // Strong: the two non-primary triad members MUST be exactly the supplemental
+    // (order-independent — weightedDegree is symmetric across the triangle).
+    expect(km.supplemental_slugs).toEqual(expect.arrayContaining([slugs[1], slugs[2]]));
+    expect(km.supplemental_slugs.length).toBe(2);
+    expect(km.excluded_isolates_count).toBe(0); // no isolates seeded in this triad
+  });
+
+  test("on: main result order is unchanged by KM context", async () => {
+    const { query } = seedMatureTriad("entity/triad4");
+    const server = createServer(deps);
+    const without = await getTools(server).deep_recall.handler({ query, include_raw: true }) as { content: Array<{ text: string }> };
+    const withKm = await getTools(server).deep_recall.handler({ query, knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
+    const orderWithout = JSON.parse(without.content[0].text).entities.map((e: { slug: string }) => e.slug);
+    const orderWith = JSON.parse(withKm.content[0].text).entities.map((e: { slug: string }) => e.slug);
+    expect(orderWith).toEqual(orderWithout);
+  });
 });
