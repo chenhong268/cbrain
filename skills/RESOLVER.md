@@ -147,6 +147,14 @@
 - 这条消息有什么值得记的、提取信号 → signal-detector.md
 - 信号路由、目的地判断 → signal-router.md
 
+### Knowledge Map（知识图谱概览，只读）
+- 知识图谱、知识地图、图谱概览、图谱长什么样 → read_knowledge_map({ include_raw: false })
+- 主要领域、哪些领域、领域分布 → read_knowledge_map({ include_raw: false })
+- 成熟领域、成长中领域、稀疏领域 → read_knowledge_map({ include_raw: false })
+- 桥接节点、跨领域的条目、连接多个领域 → read_knowledge_map({ include_raw: false })
+- 孤岛条目、孤立条目、弱连接条目、高提及但孤立 → read_knowledge_map({ include_raw: false })
+- ⚠️ 只读最近一次生成的报告（dream 周报或 `cbrain knowledge-map`）；不要在 read 调用里重算图谱
+
 ### Brain Ops (Protocol)
 - 日常操作、brain-ops、怎么用 → brain-ops.md [default]
 

@@ -27,6 +27,7 @@ import { registerAgenticResearchTools } from "./tools/agentic-research.js";
 import { registerArtifactTools } from "./tools/artifact.js";
 import { registerCompoundingReviewTools } from "./tools/compounding-review.js";
 import { registerKnowledgeTools } from "./tools/knowledge.js";
+import { registerKnowledgeMapTools } from "./tools/knowledge-map.js";
 import { registerMergeWorkflowTools } from "./tools/merge-workflow.js";
 import { registerWakeupTools } from "./tools/wakeup.js";
 import { registerFrontdoorTools } from "./tools/frontdoor.js";
@@ -60,6 +61,7 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerArtifactTools(server, ctx);
   registerCompoundingReviewTools(server, ctx);
   registerKnowledgeTools(server, ctx);
+  registerKnowledgeMapTools(server, ctx);
   registerMergeWorkflowTools(server, ctx);
   registerWakeupTools(server, ctx);
 }

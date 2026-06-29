@@ -20,7 +20,7 @@ LLMs forget everything between conversations. CBrain gives your Agent a persiste
 - **Three-layer search** — Vector + Chinese FTS + Graph traversal, fused with RRF
 - **Knowledge graph** — Wiki-link based relationships + auto NER entity/relationship extraction
 - **Entity enrichment** — People and companies auto-promote through tiers as you mention them
-- **82 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, and observability
+- **83 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, and observability
 - **Version history** — Every page version snapshotted, with revert support
 - **Multi-query expansion** — LLM generates search query variants for better recall, fused with RRF
 - **Job queue** — SQLite-backed async job system with priority, retry, and status tracking
@@ -351,7 +351,7 @@ Add to your Agent's MCP config:
 }
 ```
 
-### MCP Tools (82 total)
+### MCP Tools (83 total)
 
 **Core:**
 | Tool | Description |
