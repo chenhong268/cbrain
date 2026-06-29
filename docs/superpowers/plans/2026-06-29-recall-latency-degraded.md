@@ -243,37 +243,39 @@ describe("deep_recall latency_warning (#250)", () => {
   });
   afterEach(() => { db.close(); if (existsSync(testDir)) rmSync(testDir, { recursive: true }); });
 
-  function seedStrongFts() {
-    // Strong FTS hit so retrieval is good (top score high) regardless of latency.
+  function seedAlphaPage() {
     db.rawDb.prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run("entity/alpha", "entity/person", "实体Alpha", "entity-alpha.md", "h1", 1, 5);
-    db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run("entity/alpha", 0, "实体Alpha 的独特标记内容");
-    db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run("entity/alpha", "实体Alpha 的独特标记内容");
+    db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run("entity/alpha", 0, "实体Alpha 的标记内容");
+    db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run("entity/alpha", "实体Alpha 的标记内容");
   }
 
-  test("good FTS result, FAST → not degraded, latency_warning absent (false→omitted)", async () => {
-    seedStrongFts();
+  test("exact title match, FAST → not degraded, latency_warning absent (score=1, no FTS-score dependency)", async () => {
+    seedAlphaPage();
     const server = createServer(deps);
-    const r = await getTools(server).deep_recall.handler({ query: "独特标记", include_raw: true }) as { content: Array<{ text: string }> };
+    // query == page title → exact-match fast path, score 1.0 (deterministic,
+    // independent of FTS scoring).
+    const r = await getTools(server).deep_recall.handler({ query: "实体Alpha", include_raw: true }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
     expect(payload.summary?.status).not.toBe("degraded");
-    // fast search → computeLatencyWarning=false → field omitted via `|| undefined`
     expect(payload.raw?.search_meta?.latency_warning).toBeUndefined();
   });
 
-  test("good FTS result, SLOW (injected latency) → latency_warning true, still not degraded", async () => {
-    seedStrongFts();
-    // Inject >2000ms REAL latency via a slow LanceDB search stub (vector path
-    // sleeps 2100ms; FTS stays fast and returns the good hit). Total search
-    // latency > threshold → computeLatencyWarning true. No fake-timer dep: this
-    // is a controlled, deterministic slow path. (2100ms < VECTOR_TIMEOUT_MS 5000,
-    // so vector completes normally with empty result, not a timeout.)
-    const slowLance = { ...createMockLanceDB(), search: async () => { await new Promise((r) => setTimeout(r, 2100)); return []; } };
+  test("high-score vector hit, SLOW (injected latency) → latency_warning true, not degraded", async () => {
+    seedAlphaPage();
+    // Slow vector path returns a delayed HIGH-score hit (low _distance 0.05).
+    // The "good result" assertion relies on the vector hit score, NOT FTS — so
+    // this test does not depend on FTS scoring at all. (2100ms < VECTOR_TIMEOUT_MS
+    // 5000, so the vector call completes normally — not a timeout.)
+    const slowLance = { ...createMockLanceDB(), search: async () => {
+      await new Promise((r) => setTimeout(r, 2100));
+      return [{ pageSlug: "entity/alpha", chunkIndex: 0, content: "实体Alpha 的标记内容", _distance: 0.05 }];
+    }};
     const slowDeps = { ...deps, lance: slowLance as never };
     const server = createServer(slowDeps);
-    const r = await getTools(server).deep_recall.handler({ query: "独特标记", include_raw: true }) as { content: Array<{ text: string }> };
+    const r = await getTools(server).deep_recall.handler({ query: "实体Alpha", include_raw: true }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
-    expect(payload.summary?.status).not.toBe("degraded"); // good FTS results
+    expect(payload.summary?.status).not.toBe("degraded"); // high-score vector hit
     expect(payload.raw?.search_meta?.latency_warning).toBe(true);
   });
 });
@@ -336,7 +338,7 @@ git commit -m "feat(recall): surface latency_warning in raw search_meta (#250)"
 `tests/core/search-latency-gate.test.ts`:
 
 ```ts
-import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
@@ -392,11 +394,21 @@ describe("expandQuery gate (#250)", () => {
   test("complex query → expandQuery IS called even with FTS>=3", async () => {
     seedFtsHits(3);
     let expandCalled = false;
-    const llm = { name: "mock", chat: async () => "{}", expandQuery: async () => { expandCalled = true; return ["阿德勒", "心理学"]; } };
+    const llm = { name: "mock", chat: async () => "{}", expandQuery: async () => { expandCalled = true; return ["主题A", "主题B"]; } };
     const search = new HybridSearch(db, mockEmbed(), { connect: async () => {}, addChunks: async () => {}, search: async () => [], fullTextSearch: async () => [], deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {} } as never, { llm: llm as never });
     // complex: conjunction word 和
-    await search.search("阿德勒 和 心理学");
+    await search.search("主题A 和 主题B");
     expect(expandCalled).toBe(true);
+  });
+
+  test("FTS empty + explicit multiQuery:false → expandQuery NOT called (caller opt-out beats gate)", async () => {
+    let expandCalled = false;
+    const llm = { name: "mock", chat: async () => "{}", expandQuery: async () => { expandCalled = true; return ["主题A"]; } };
+    const search = new HybridSearch(db, mockEmbed(), { connect: async () => {}, addChunks: async () => {}, search: async () => [], fullTextSearch: async () => [], deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {} } as never, { llm: llm as never });
+    // FTS empty (no seed) AND multiQuery:false → must NOT expand, even though FTS
+    // is insufficient. Caller opt-out beats the isComplexQuery||FTS<3 gate.
+    await search.search("查无此物zzz", { multiQuery: false });
+    expect(expandCalled).toBe(false);
   });
 });
 ```
@@ -432,7 +444,11 @@ const FTS_SUFFICIENT_RESULTS = 3;
     const ftsSufficient = ftsProbe.length >= FTS_SUFFICIENT_RESULTS;
     const knownSlugsForGate = options?._hints?.knownSlugs ?? [];
     const isComplex = options?._hints?.isComplex ?? isComplexQuery(query, knownSlugsForGate);
-    const shouldExpand = !!this.llm && (isComplex || !ftsSufficient);
+    // #250 — preserve explicit multiQuery:false (decompose fallback at search.ts:473
+    // passes multiQuery:false to forbid LLM escalation). Caller opt-out is honored
+    // even when the query is complex or FTS is insufficient.
+    const multiQueryAllowed = options?.multiQuery ?? this.multiQueryEnabled;
+    const shouldExpand = multiQueryAllowed && !!this.llm && (isComplex || !ftsSufficient);
     if (trace && this.llm && !shouldExpand && ftsSufficient) {
       trace.expand_skipped = "fts_sufficient";
     }
@@ -558,9 +574,9 @@ Append:
     const search = new HybridSearch(db, mockEmbed(), { connect: async () => {}, addChunks: async () => {}, search: async () => [], fullTextSearch: async () => {}, deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {} } as never, { llm: llm as never });
     const trace: Record<string, unknown> = { llm_calls: 3 }; // #222 MAX_DEFAULT_LLM_CALLS budget exhausted
     // _skipDecompose ISOLATES the expand path: without it, the complex query
-    // ("阿德勒 和 心理学") enters the decompose branch and the existing decompose
+    // ("主题A 和 主题B") enters the decompose branch and the existing decompose
     // budget guard returns [] BEFORE reaching searchWithExpansion/expandQuery.
-    const results = await search.search("阿德勒 和 心理学", { _skipDecompose: true, _trace: trace as never });
+    const results = await search.search("主题A 和 主题B", { _skipDecompose: true, _trace: trace as never });
     expect(results.length).toBeGreaterThan(0); // FTS results preserved
     expect(expandCalls).toBe(0); // expand skipped due to budget
     expect(trace.expand_skipped).toBe("budget_exhausted");
@@ -705,9 +721,15 @@ import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCod
   //     persist reason_codes into summary_json, so slow sessions ARE tagged).
   // (b) fallback: latency_ms > threshold AND status !== degraded — catches any
   //     slow-but-ok session even if the code wasn't persisted (defensive).
-  const warningByCode = sessions.filter((s) => s.reason_codes.some((c) => WARNING_REASON_CODES.has(c as DegradedReasonCode))).length;
-  const warningByLatency = sessions.filter((s) => s.latency_ms != null && s.latency_ms > 2000 && s.status !== "degraded").length;
-  const latencyWarningCount = Math.max(warningByCode, warningByLatency);
+  // #250 — latency_warning sessions: UNION by session id (not Math.max of counts,
+  // which mis-counts when the two sources cover different sessions).
+  const latencyWarningIds = new Set<number>();
+  for (const s of sessions) {
+    const codeWarn = s.reason_codes.some((c) => WARNING_REASON_CODES.has(c as DegradedReasonCode));
+    const latencyWarn = s.latency_ms != null && s.latency_ms > 2000 && s.status !== "degraded";
+    if (codeWarn || latencyWarn) latencyWarningIds.add(s.id);
+  }
+  const latencyWarningCount = latencyWarningIds.size;
   const summary: PerfDiagnoseReport["summary"] = {
     session_count: sessions.length,
     slow_count: slowAll.length,
@@ -733,6 +755,13 @@ import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCod
       const arr = target.get(code) ?? [];
       arr.push(s.latency_ms);
       target.set(code, arr);
+    }
+    // #250 — synthesize latency_budget_exceeded for slow-but-ok sessions whose
+    // reason_codes didn't capture it, so by_latency_warning_reason never undercounts.
+    if (s.latency_ms != null && s.latency_ms > 2000 && s.status !== "degraded" && !s.reason_codes.includes("latency_budget_exceeded")) {
+      const arr = warningReasonLat.get("latency_budget_exceeded") ?? [];
+      arr.push(s.latency_ms);
+      warningReasonLat.set("latency_budget_exceeded", arr);
     }
   }
   const agg = (map: Map<string, number[]>): ReasonAggregate[] => [...map.entries()]
