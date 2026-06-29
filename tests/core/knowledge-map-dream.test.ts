@@ -164,6 +164,27 @@ describe("Knowledge Map Dream stage (#242)", () => {
     expect(existsSync(join(vaultPath, "knowledge-map"))).toBe(false);
   });
 
+  test("Dream KM stage feeds isolation/bridge signals into discoveries (#244)", async () => {
+    // Add an isolated, high-mention node (实体F) on top of the seeded a–b edge.
+    // f has degree 0 and mention_count 20 > graph mean → highMentionIsolate.
+    db.rawDb
+      .prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("entity/f", "entity/person", "实体F", "f.md", "h3", 1, 20);
+
+    const stage = await runKnowledgeMapStage(db, outputsDir, silentLogger, { force: true });
+    expect(stage.status).toBe("generated");
+    expect(stage.discoveryCandidates).toBeGreaterThan(0);
+
+    const kmRows =
+      db.getDiscoveriesByType("knowledge_map_isolation", 10).length +
+      db.getDiscoveriesByType("knowledge_map_bridge", 10).length;
+    expect(kmRows).toBeGreaterThan(0);
+
+    // producer must not touch the existing discovery ranking path
+    expect(db.getDiscoveriesByType("bridge", 10)).toHaveLength(0);
+    expect(db.getDiscoveriesByType("gap", 10)).toHaveLength(0);
+  });
+
   // ─── Dream integration ─────────────────────────────────────────────────
 
   test("Dream brief includes the Knowledge Map line after a successful run", async () => {

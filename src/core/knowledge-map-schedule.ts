@@ -4,6 +4,7 @@ import type { CBrainDB } from "../storage/sqlite.js";
 import type { Logger } from "./logger.js";
 import { analyzeKnowledgeMap } from "./knowledge-map.js";
 import { buildKnowledgeMapReport, isCommunityMature } from "./knowledge-map-report.js";
+import { produceKnowledgeMapDiscoveries } from "./knowledge-map-discovery.js";
 import { sanitizeForLog } from "./sync-index-safety.js";
 
 /**
@@ -28,6 +29,8 @@ export interface KnowledgeMapStageResult {
   mature: number;
   growing: number;
   highMentionIsolates: number;
+  /** #244 — isolation/bridge candidates written to the discoveries table. */
+  discoveryCandidates: number;
   reportPath: string | null;
   warning?: string;
   lastRunAt: string | null;
@@ -42,6 +45,7 @@ export function defaultKnowledgeMapStageResult(): KnowledgeMapStageResult {
     mature: 0,
     growing: 0,
     highMentionIsolates: 0,
+    discoveryCandidates: 0,
     reportPath: null,
     lastRunAt: null,
   };
@@ -107,6 +111,7 @@ export async function runKnowledgeMapStage(
     mature: 0,
     growing: 0,
     highMentionIsolates: 0,
+    discoveryCandidates: 0,
     reportPath: null,
     lastRunAt,
   };
@@ -125,6 +130,11 @@ export async function runKnowledgeMapStage(
     writeFileSync(reportPath, report.markdown, "utf-8");
 
     const stamp = new Date(now).toISOString();
+    // #244 — feed KM signals into Discovery (independent surface, reuses this analysis).
+    const kmDiscovery = produceKnowledgeMapDiscoveries(db, analysis, { dreamRun: `dream-${date}` });
+    if (kmDiscovery.total > 0) {
+      logger.info("dream", `Knowledge Map → Discovery: ${kmDiscovery.total} 条候选（新增 ${kmDiscovery.inserted}）`);
+    }
     db.setConfig(KM_LAST_RUN_KEY, stamp);
     logger.info("dream", `Knowledge Map 报告 → ${reportPath}`);
 
@@ -135,6 +145,7 @@ export async function runKnowledgeMapStage(
       mature,
       growing: analysis.communities.length - mature,
       highMentionIsolates: analysis.highMentionIsolates.length,
+      discoveryCandidates: kmDiscovery.total,
       reportPath,
       lastRunAt: stamp,
     };
@@ -148,6 +159,7 @@ export async function runKnowledgeMapStage(
       mature: 0,
       growing: 0,
       highMentionIsolates: 0,
+      discoveryCandidates: 0,
       reportPath: null,
       warning,
       lastRunAt,
