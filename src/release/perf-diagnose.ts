@@ -11,7 +11,7 @@
  * only safe columns. Missing optional tables degrade to a sanitized warning.
  */
 import type { Database } from "bun:sqlite";
-import { ALL_DEGRADED_REASON_CODES, type DegradedReasonCode } from "../core/search-diagnostics.js";
+import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCode } from "../core/search-diagnostics.js";
 
 // ── Safe row shapes (only the columns we are allowed to read/report) ──
 
@@ -113,6 +113,7 @@ export interface PerfDiagnoseReport {
     readonly session_count: number;
     readonly slow_count: number;
     readonly degraded_rate: number;
+    readonly latency_warning_rate: number;
     readonly latency: { readonly p50: number; readonly p95: number; readonly max: number } | null;
     readonly avg_total_steps: number;
     readonly avg_llm_calls: number;
@@ -121,6 +122,7 @@ export interface PerfDiagnoseReport {
   readonly by_intent: DimAggregate[];
   readonly by_status: DimAggregate[];
   readonly by_degraded_reason: ReasonAggregate[];
+  readonly by_latency_warning_reason: ReasonAggregate[];
   readonly slowest_step_kinds: StepKindStat[];
   readonly slow_sessions: SlowSession[];
   readonly by_tool?: DimAggregate[];
@@ -237,10 +239,20 @@ export function diagnose(snapshot: DiagnosticSnapshot, opts: DiagnoseOptions): P
   }));
 
   const slowLats = slowAll.map((s) => s.latency_ms).sort((a, b) => a - b);
+  // #250 — latency_warning sessions: UNION by session id (not Math.max of counts,
+  // which mis-counts when the two sources cover different sessions). Dual source:
+  // (a) reason_codes carries a warning code; (b) latency_ms > 2000 AND not degraded.
+  const latencyWarningIds = new Set<number>();
+  for (const s of sessions) {
+    const codeWarn = s.reason_codes.some((c) => WARNING_REASON_CODES.has(c as DegradedReasonCode));
+    const latencyWarn = s.latency_ms != null && s.latency_ms > 2000 && s.status !== "degraded";
+    if (codeWarn || latencyWarn) latencyWarningIds.add(s.id);
+  }
   const summary: PerfDiagnoseReport["summary"] = {
     session_count: sessions.length,
     slow_count: slowAll.length,
     degraded_rate: sessions.length ? sessions.filter((s) => s.status === "degraded").length / sessions.length : 0,
+    latency_warning_rate: sessions.length ? latencyWarningIds.size / sessions.length : 0,
     latency: slowLats.length
       ? { p50: percentile(slowLats, 50), p95: percentile(slowLats, 95), max: slowLats[slowLats.length - 1] }
       : null,
@@ -263,21 +275,32 @@ export function diagnose(snapshot: DiagnosticSnapshot, opts: DiagnoseOptions): P
     .map(([kind, v]) => ({ kind: sanitizeDim(kind), count: v.count, avg_latency_ms: v.count ? v.sum / v.count : 0 }))
     .sort((a, b) => b.count - a.count);
 
-  // Degraded-reason-category aggregation (#189): WHY sessions degraded.
-  const reasonLat = new Map<string, number[]>();
+  // #250 — split: retrieval-degraded reasons vs latency/parser warnings. Synthesize
+  // latency_budget_exceeded for slow-but-ok sessions missing the code so
+  // by_latency_warning_reason never undercounts.
+  const degradedReasonLat = new Map<string, number[]>();
+  const warningReasonLat = new Map<string, number[]>();
   for (const s of sessions) {
     for (const code of s.reason_codes) {
-      const arr = reasonLat.get(code) ?? [];
+      const target = WARNING_REASON_CODES.has(code as DegradedReasonCode) ? warningReasonLat : degradedReasonLat;
+      const arr = target.get(code) ?? [];
       arr.push(s.latency_ms);
-      reasonLat.set(code, arr);
+      target.set(code, arr);
+    }
+    if (s.latency_ms != null && s.latency_ms > 2000 && s.status !== "degraded" && !s.reason_codes.includes("latency_budget_exceeded")) {
+      const arr = warningReasonLat.get("latency_budget_exceeded") ?? [];
+      arr.push(s.latency_ms);
+      warningReasonLat.set("latency_budget_exceeded", arr);
     }
   }
-  const by_degraded_reason: ReasonAggregate[] = [...reasonLat.entries()]
+  const aggReason = (map: Map<string, number[]>): ReasonAggregate[] => [...map.entries()]
     .map(([reason, lats]) => {
       const sorted = [...lats].sort((a, b) => a - b);
       return { reason, count: lats.length, p50: percentile(sorted, 50), p95: percentile(sorted, 95), max: sorted[sorted.length - 1] };
     })
     .sort((a, b) => b.count - a.count);
+  const by_degraded_reason: ReasonAggregate[] = aggReason(degradedReasonLat);
+  const by_latency_warning_reason: ReasonAggregate[] = aggReason(warningReasonLat);
 
   return {
     generated_at: "",
@@ -289,6 +312,7 @@ export function diagnose(snapshot: DiagnosticSnapshot, opts: DiagnoseOptions): P
     by_intent: aggregateBy(sessions, (s) => s.intent ?? "<null>", (s) => s.latency_ms, (s) => s.status === "degraded"),
     by_status: aggregateBy(sessions, (s) => s.status, (s) => s.latency_ms, () => false),
     by_degraded_reason,
+    by_latency_warning_reason,
     slowest_step_kinds,
     slow_sessions: slowSessions,
     by_tool: snapshot.queryLogs.length
