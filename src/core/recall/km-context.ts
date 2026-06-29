@@ -1,4 +1,6 @@
+import { analyzeKnowledgeMap } from "../knowledge-map.js";
 import { isCommunityMature } from "../knowledge-map-report.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
 import type { CommunitySummary, KnowledgeMapAnalysis, KnowledgeMapNode } from "../knowledge-map-types.js";
 
 export interface KmSupplementalNode {
@@ -85,3 +87,28 @@ export function buildKnowledgeMapContext(
   const supplemental = pooled.sort((a, b) => b.weightedDegree - a.weightedDegree).slice(0, totalCap);
   return { matchedDomains, supplemental, excludedIsolatesCount, reason: "same_domain_context" };
 }
+
+/**
+ * #245 — Spyable entry point for recall. recall.ts calls ONLY computeForRecall.
+ * Tests spyOn(kmContextApi, "analyze"|"computeForRecall") to prove the off path
+ * never analyzes. Arrow functions + explicit `kmContextApi.analyze(db)` (no `this`)
+ * so spies stay stable regardless of call-site binding.
+ */
+export const kmContextApi = {
+  analyze: (db: CBrainDB): KnowledgeMapAnalysis => analyzeKnowledgeMap(db),
+  computeForRecall: (
+    db: CBrainDB,
+    primarySlugs: string[],
+    options?: KmContextOptions,
+  ): KmContextResult => {
+    try {
+      const analysis = kmContextApi.analyze(db);
+      if (analysis.nodes.length === 0) {
+        return { matchedDomains: [], supplemental: [], excludedIsolatesCount: 0, reason: "no_mature_domain" };
+      }
+      return buildKnowledgeMapContext(analysis, primarySlugs, options);
+    } catch {
+      return { matchedDomains: [], supplemental: [], excludedIsolatesCount: 0, reason: "km_unavailable" };
+    }
+  },
+};

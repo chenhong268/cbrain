@@ -1,6 +1,9 @@
-import { describe, test, expect } from "bun:test";
-import { buildKnowledgeMapContext } from "../../../src/core/recall/km-context.js";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
+import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { buildKnowledgeMapContext, kmContextApi } from "../../../src/core/recall/km-context.js";
 import type { KnowledgeMapAnalysis, KnowledgeMapNode, CommunitySummary } from "../../../src/core/knowledge-map-types.js";
+import { CBrainDB } from "../../../src/storage/sqlite.js";
 
 // Anonymous fixtures only (roadmap privacy constraint): Entity A/B/C, Domain D.
 function node(slug: string, title: string, communityId: string, weightedDegree: number, degree = 2): KnowledgeMapNode {
@@ -74,5 +77,33 @@ describe("buildKnowledgeMapContext (#245)", () => {
     const res = buildKnowledgeMapContext(an, ["entity/a"]);
     const degs = res.supplemental.map(s => s.weightedDegree);
     expect(degs).toEqual([...degs].sort((x, y) => y - x));
+  });
+});
+
+describe("kmContextApi (#245)", () => {
+  const testDir = "/tmp/cbrain-test-km-context-api";
+  const dbPath = join(testDir, "t.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(dirname(dbPath), { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+  afterEach(() => { db.close(); if (existsSync(testDir)) rmSync(testDir, { recursive: true }); });
+
+  test("computeForRecall returns no_mature_domain on empty graph (no communities)", () => {
+    const res = kmContextApi.computeForRecall(db, ["entity/none"]);
+    expect(res.reason).toBe("no_mature_domain");
+    expect(res.supplemental).toEqual([]);
+  });
+
+  test("analyze is spyable (off-path zero-call proof)", () => {
+    const spy = spyOn(kmContextApi, "analyze");
+    kmContextApi.computeForRecall(db, []);
+    // empty graph still calls analyze once (to discover emptiness); this test
+    // exists to lock the spyable surface used by the recall integration test.
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
   });
 });
