@@ -5,7 +5,7 @@ import { generateProactiveHints } from "../../core/proactive.js";
 import { isComplexQuery, applyRecallQualityGate, type SearchTrace } from "../../core/search.js";
 import { traceToSteps } from "../../core/search-trace.js";
 import { trimHint, applyProactiveBudget } from "./trim.js";
-import { classifyDegradedReasons, computeSearchDegraded } from "../../core/search-diagnostics.js";
+import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning } from "../../core/search-diagnostics.js";
 import { formatQueryEnvelope } from "./format-result.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
@@ -170,6 +170,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
         strategy: usedStrategy,
         latency_ms: latencyMs,
         degraded: isSearchDegraded || undefined,
+        latency_warning: computeLatencyWarning(latencyMs, reasonCodes) || undefined,
         ...(reasonCodes.length > 0 ? { reason_codes: reasonCodes } : {}),
         ...queryQualityMeta,
       },

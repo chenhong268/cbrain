@@ -10,7 +10,7 @@ import { generateProactiveHints } from "../../core/proactive.js";
 import { extractBirthday } from "../../core/birthday.js";
 import { buildMemorySkeleton } from "../../core/key-points.js";
 import { type SearchTrace, applyRecallQualityGate } from "../../core/search.js";
-import { classifyDegradedReasons, computeSearchDegraded } from "../../core/search-diagnostics.js";
+import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning } from "../../core/search-diagnostics.js";
 import { traceToSteps } from "../../core/search-trace.js";
 import { buildEvidenceFromBatched, buildEvidenceSummary, collectEvidenceForSlugs, type EvidenceItem } from "../../core/evidence.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";
@@ -97,11 +97,14 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       usedStrategy = "smart-hybrid";
 
       if (exactSlug) {
+        // #250: an exact (title/alias/slug) match must score 1.0 regardless of
+        // where it sits in searchResults. Previously existingIdx===0 kept the raw
+        // (low) RRF score, so an alias hit at rank 0 stayed low_score/degraded.
         const existingIdx = searchResults.findIndex(r => r.slug === exactSlug);
-        if (existingIdx > 0) {
+        if (existingIdx >= 0) {
           const [match] = searchResults.splice(existingIdx, 1);
           searchResults.unshift({ ...match, score: 1.0 });
-        } else if (existingIdx === -1) {
+        } else {
           searchResults.unshift({ slug: exactSlug, score: 1.0, snippet: resolved.title ?? query, source: "exact" as const });
         }
       }
@@ -209,6 +212,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       strategy: usedStrategy,
       latency_ms: searchLatencyMs,
       degraded: isSearchDegraded || undefined,
+      latency_warning: computeLatencyWarning(searchLatencyMs, reasonCodes) || undefined,
       candidate_count: candidateCount,
       ...(candidateHasMore ? { truncated: true, has_more: true } : {}),
       ...(reasonCodes.length > 0 ? { reason_codes: reasonCodes } : {}),
