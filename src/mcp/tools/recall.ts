@@ -545,6 +545,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
           reason: kmResult.reason,
         }
       : undefined;
+    // #245 — natural-language same-domain line for display + compact. Titles
+    // only (no slug/community_id/weight) — context navigation, not evidence.
+    const kmRelatedLine = kmResult && kmResult.supplemental.length > 0
+      ? `同知识域还涉及：${kmResult.supplemental.map((s) => s.title).join("、")}`
+      : undefined;
     if (include_raw) {
       // Full audit/legacy payload — body/links/timeline/dossier, raw search_meta,
       // and the evidence pack (#232) when temporal intent fired.
@@ -573,6 +578,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       entities: entities as Array<Record<string, unknown>>,
       searchMeta: diagnosticMeta,
       proactiveHints: compactProactiveHints,
+      relatedContext: kmRelatedLine,
     });
     return {
       content: [{

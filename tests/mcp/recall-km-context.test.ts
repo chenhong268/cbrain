@@ -48,9 +48,12 @@ describe("deep_recall knowledge_map_context (#245)", () => {
       `domain sibling beta`,    // B: no token shared with the query
       `domain sibling gamma`,   // C: no token shared with the query
     ];
+    // Human-readable titles (NOT the slug path) — kmRelatedLine surfaces titles
+    // to the Agent, so the fixture must mirror real pages where title ≠ slug.
+    const titles = ["Entity Alpha", "Entity Beta", "Entity Gamma"];
     for (let i = 0; i < 3; i++) {
       db.rawDb.prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(slugs[i], "entity/person", slugs[i], `${slugs[i]}.md`, "h1", 2, 3);
+        .run(slugs[i], "entity/person", titles[i], `${slugs[i]}.md`, "h1", 2, 3);
       db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run(slugs[i], 0, chunks[i]);
       db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run(slugs[i], chunks[i]);
     }
@@ -113,5 +116,20 @@ describe("deep_recall knowledge_map_context (#245)", () => {
     const orderWithout = JSON.parse(without.content[0].text).entities.map((e: { slug: string }) => e.slug);
     const orderWith = JSON.parse(withKm.content[0].text).entities.map((e: { slug: string }) => e.slug);
     expect(orderWith).toEqual(orderWithout);
+  });
+
+  test("on (compact): related_context is natural-language titles, no slug/community_id/weight", async () => {
+    const { query } = seedMatureTriad("entity/triad5");
+    const server = createServer(deps);
+    const r = await getTools(server).deep_recall.handler({ query, strategy: "fts", knowledge_map_context: "on" }) as { content: Array<{ text: string }> };
+    const payload = JSON.parse(r.content[0].text);
+    // compact default (no include_raw) — no raw audit at all
+    expect(payload.raw).toBeUndefined();
+    // Strong: mature triad seeded, query hit A → B/C supplemental must exist.
+    expect(typeof payload.related_context).toBe("string");
+    const rc = payload.related_context as string;
+    expect(rc).toMatch(/同知识域还涉及/);
+    // privacy: no internal identifiers leak into the Agent-facing field
+    expect(rc).not.toMatch(/community-\d|entity\/|slug|weight/i);
   });
 });

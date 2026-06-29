@@ -48,6 +48,8 @@ export interface CompactRecallInput {
   searchMeta: Record<string, unknown>;
   /** Already-budgeted proactive hints (at most 1). Omitted from output when empty. */
   proactiveHints?: CompactProactiveHint[];
+  /** #245 — natural-language same-domain titles; Agent-facing, no internals. */
+  relatedContext?: string;
 }
 
 export interface CompactRecallResponse {
@@ -64,6 +66,8 @@ export interface CompactRecallResponse {
   };
   /** Budgeted proactive hint; present only when non-empty and within budget. */
   proactive_hints?: CompactProactiveHint[];
+  /** #245 — same-domain exploration hint, titles only. Omitted when empty. */
+  related_context?: string;
 }
 
 /** Pick only first-turn fields and cap the snippet length. */
@@ -138,6 +142,7 @@ export function buildCompactRecallResponse(
     input.searchMeta.has_more === true || input.searchMeta.truncated === true;
 
   const hints = input.proactiveHints ?? [];
+  const relatedContext = input.relatedContext;
 
   const assemble = (
     ents: Array<Record<string, unknown>>,
@@ -152,7 +157,8 @@ export function buildCompactRecallResponse(
       entities: ents,
       search_meta: safeSearchMeta(input.searchMeta, hasMore),
     };
-    return withHints && hints.length > 0 ? { ...base, proactive_hints: hints } : base;
+    const withRelated = relatedContext ? { ...base, related_context: relatedContext } : base;
+    return withHints && hints.length > 0 ? { ...withRelated, proactive_hints: hints } : withRelated;
   };
 
   // Measure with the FINAL has_more semantics: pre-drop stages use
