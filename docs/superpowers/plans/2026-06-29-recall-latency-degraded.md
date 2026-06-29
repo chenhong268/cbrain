@@ -366,13 +366,16 @@ describe("expandQuery gate (#250)", () => {
   });
   afterEach(() => { db.close(); if (existsSync(dir)) rmSync(dir, { recursive: true }); });
 
-  function seedFtsHits(n: number) {
+  // content is parameterized so a test can seed FTS hits that MATCH its query
+  // tokens — otherwise the FTS probe returns 0 and the test never exercises the
+  // "FTS sufficient" branch.
+  function seedFtsHits(n: number, content = "唯一标记内容片段") {
     for (let i = 0; i < n; i++) {
       const slug = `entity/fts-${i}`;
       db.rawDb.prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(slug, "entity/person", `实体${i}`, `${slug}.md`, "h1", 1, 3);
-      db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run(slug, 0, "唯一标记内容片段");
-      db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run(slug, "唯一标记内容片段");
+      db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run(slug, 0, content);
+      db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run(slug, content);
     }
   }
 
@@ -394,7 +397,10 @@ describe("expandQuery gate (#250)", () => {
   });
 
   test("complex query → expandQuery IS called even with FTS>=3", async () => {
-    seedFtsHits(3);
+    // Seed FTS hits whose content MATCHES the complex query tokens, so the FTS
+    // probe genuinely returns >=3 and this exercises the complex-branch of the
+    // gate (isComplex wins over ftsSufficient).
+    seedFtsHits(3, "主题A 主题B 共同标记内容");
     let expandCalled = false;
     const llm = { name: "mock", chat: async () => "{}", expandQuery: async () => { expandCalled = true; return ["主题A", "主题B"]; } };
     const search = new HybridSearch(db, mockEmbed(), { connect: async () => {}, addChunks: async () => {}, search: async () => [], fullTextSearch: async () => [], deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {} } as never, { llm: llm as never });
@@ -572,7 +578,10 @@ Append:
 
 ```ts
   test("expandQuery over call-count budget → skipped, FTS preserved, expand_skipped=budget_exhausted", async () => {
-    seedFtsHits(3); // FTS sufficient so results exist even when expand is skipped
+    // Seed FTS hits matching the complex query tokens so the FTS probe returns
+    // >=3. This verifies: when expand is skipped by the budget, the initialFts
+    // probe result is REUSED (not lost) — results.length > 0.
+    seedFtsHits(3, "主题A 主题B 共同标记内容");
     let expandCalls = 0;
     const llm = { name: "mock", chat: async () => "{}", expandQuery: async () => { expandCalls++; return ["x"]; } };
     const search = new HybridSearch(db, mockEmbed(), { connect: async () => {}, addChunks: async () => {}, search: async () => [], fullTextSearch: async () => {}, deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {} } as never, { llm: llm as never });
