@@ -43,6 +43,7 @@ export interface SearchTrace {
   rerank_ms?: number;
   llm_calls?: number;
   degraded_reason?: string;
+  expand_skipped?: string;
   follow_up_queries?: string[];
   query_variants?: string[];
 }
@@ -318,6 +319,8 @@ export function applyRecallQualityGate(
 const MAX_DEFAULT_SUBQUERIES = 3;
 const MAX_DEFAULT_LLM_CALLS = 3;
 const MAX_DEFAULT_DECOMPOSE_MS = 8000;
+/** #250 — FTS probe is "sufficient" at this many results → skip expandQuery LLM. */
+const FTS_SUFFICIENT_RESULTS = 3;
 
 export class HybridSearch {
   private db: CBrainDB;
@@ -474,10 +477,30 @@ export class HybridSearch {
       }
     }
 
-    return this.searchWithExpansion(query, limit, options?.multiQuery, trace);
+    // #250 — bounded FTS probe to gate expandQuery. Timed + fail-open (mirrors
+    // searchSingleQuery's FTS path: timedCall records fts_ms, catch returns [] on
+    // failure) so trace/error semantics stay consistent. Reused as initialFts so
+    // searchSingleQuery does NOT re-run FTS (no double-query, no double fts_ms).
+    const ftsProbe = await this.timedCall(
+      () => Promise.resolve(this.ftsSearch(query, limit, trace)),
+      trace,
+      "fts_ms",
+    ).catch(() => [] as SearchResult[]);
+    const ftsSufficient = ftsProbe.length >= FTS_SUFFICIENT_RESULTS;
+    const knownSlugsForGate = options?._hints?.knownSlugs ?? [];
+    const isComplex = options?._hints?.isComplex ?? isComplexQuery(query, knownSlugsForGate);
+    // #250 — preserve explicit multiQuery:false (decompose fallback at search.ts:473
+    // passes multiQuery:false to forbid LLM escalation). Caller opt-out is honored
+    // even when the query is complex or FTS is insufficient.
+    const multiQueryAllowed = options?.multiQuery ?? this.multiQueryEnabled;
+    const shouldExpand = multiQueryAllowed && !!this.llm && (isComplex || !ftsSufficient);
+    if (trace && this.llm && !shouldExpand && ftsSufficient) {
+      trace.expand_skipped = "fts_sufficient";
+    }
+    return this.searchWithExpansion(query, limit, shouldExpand, trace, ftsProbe);
   }
 
-  private async searchSingleQuery(q: string, limit: number, trace?: SearchTrace): Promise<SearchResult[][]> {
+  private async searchSingleQuery(q: string, limit: number, trace?: SearchTrace, initialFts?: SearchResult[]): Promise<SearchResult[][]> {
     const resolved = this.db.resolveSlugs([q])[0];
 
     // Race vector search against timeout — embedding API call is unbounded network I/O
@@ -489,10 +512,12 @@ export class HybridSearch {
         if (trace && !trace.degraded_reason) trace.degraded_reason = "vector_error";
         return null as SearchResult[] | null;
       }),
-      this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit, trace)), trace, "fts_ms").catch((e) => {
-        this.logger?.warn("search", "ftsSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
-        return [] as SearchResult[];
-      }),
+      initialFts !== undefined
+        ? Promise.resolve(initialFts)
+        : this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit, trace)), trace, "fts_ms").catch((e) => {
+            this.logger?.warn("search", "ftsSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
+            return [] as SearchResult[];
+          }),
       resolved?.slug
         ? this.timedCall(() => this.graphSearch(resolved.slug!, limit), trace, "graph_ms").catch((e) => {
             this.logger?.warn("search", "graphSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
@@ -518,9 +543,15 @@ export class HybridSearch {
     return lists;
   }
 
-  private async searchWithExpansion(query: string, limit: number, multiQuery?: boolean, trace?: SearchTrace): Promise<SearchResult[]> {
+  private async searchWithExpansion(
+    query: string,
+    limit: number,
+    expand: boolean,
+    trace?: SearchTrace,
+    initialFts?: SearchResult[],
+  ): Promise<SearchResult[]> {
     const t0 = Date.now();
-    const useMultiQuery = (multiQuery ?? this.multiQueryEnabled) && !!this.llm;
+    const useMultiQuery = expand && !!this.llm;
     const queries = useMultiQuery
       ? await this.timedCall(() => this.expandQuery(query), trace, "expand_ms")
       : [query];
@@ -531,7 +562,7 @@ export class HybridSearch {
     }
 
     const queryResults = await Promise.all(
-      queries.map((q) => this.searchSingleQuery(q, limit, trace))
+      queries.map((q, i) => this.searchSingleQuery(q, limit, trace, i === 0 ? initialFts : undefined))
     );
     const allLists = queryResults.flat();
 
