@@ -18,6 +18,7 @@ import { formatRecallEnvelope, formatGroundedRecallEnvelope } from "./format-res
 import { buildCompactRecallResponse, type CompactProactiveHint } from "./recall-compact.js";
 import { shouldCompleteEvidence } from "../../core/recall-intent.js";
 import { assembleEvidencePack, type EvidencePack } from "../../core/evidence-completion.js";
+import { kmContextApi } from "../../core/recall/km-context.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -69,8 +70,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         .describe("true=返回完整 raw/审计数据（body/links/timeline/dossier/search_meta 诊断），用于调试/核查/高级调用。默认 false 只返回精简首轮响应（display+summary+精简 entities），省上下文。"),
       evidence: z.enum(["auto", "on", "off"]).optional().default("auto")
         .describe("时序/历史证据补全（#232）。auto=检测到'之前/上次/当时为什么这么定/后来/变化/前任现任'等意图时自动装配 timeline+links+raw chunks 证据包（coverage 进 raw，不进 display）；on=强制装配；off=关闭（普通查询零开销）。"),
+      knowledge_map_context: z.enum(["on", "off"]).optional().default("off")
+        .describe("【探索线索，非主召回】开启后在主结果之外补充同一知识域的相关节点，帮 Agent 决定下一步探索什么。不改变主结果排序，不作为事实依据。默认 off。"),
     },
-  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded, include_raw, evidence }) => {
+  }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded, include_raw, evidence, knowledge_map_context }) => {
     const cap = Math.min(limit ?? 5, 5);
     // Internal fanout: search a wider candidate pool so evidence collection and
     // alias/graph matches are not clipped at the display cap. Display still caps at `cap`.
@@ -298,6 +301,12 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
 
     // Batch enrichment: collect all slugs, then batch-fetch links/timeline/tags
     const topSlugs = searchResults.map(r => r.slug);
+    // #245 — Knowledge Map domain context. Supplemental navigation ONLY; never
+    // affects main ranking/score/projection. Off path short-circuits before the
+    // call, so analyzeKnowledgeMap is never invoked (proven by spy in tests).
+    const kmResult = knowledge_map_context === "on" && topSlugs.length > 0
+      ? kmContextApi.computeForRecall(ctx.db, topSlugs)
+      : null;
     const isBrief = detailLevel === "brief";
 
     const linksBySlug = new Map<string, { outgoing: Record<string, unknown>[]; incoming: Record<string, unknown>[] }>();
@@ -525,10 +534,25 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const envelopeSummary = surfaceInsufficient
       ? { ...baseSummary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
       : baseSummary;
+    // #245 — KM context trace. raw-only: never display/summary. Carries only
+    // structural signals; titles stay out (display/summary get the natural line
+    // in Task 5/6).
+    const kmTrace = kmResult
+      ? {
+          matched_domains: kmResult.matchedDomains.map((c) => c.id),
+          supplemental_slugs: kmResult.supplemental.map((s) => s.slug),
+          excluded_isolates_count: kmResult.excludedIsolatesCount,
+          reason: kmResult.reason,
+        }
+      : undefined;
     if (include_raw) {
       // Full audit/legacy payload — body/links/timeline/dossier, raw search_meta,
       // and the evidence pack (#232) when temporal intent fired.
-      const fullRaw = evidencePack ? { ...raw, evidence_pack: evidencePack } : raw;
+      const fullRaw = {
+        ...raw,
+        ...(evidencePack ? { evidence_pack: evidencePack } : {}),
+        ...(kmTrace ? { knowledge_map_context: kmTrace } : {}),
+      };
       return {
         content: [{
           type: "text" as const,
