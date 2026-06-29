@@ -112,3 +112,19 @@ export const kmContextApi = {
     }
   },
 };
+
+// Budget caps for the Agent-facing same-domain line (#245 Codex review): titles
+// can be arbitrarily long, so cap per-title and total to keep compact <12k.
+const KM_RELATED_TITLE_CAP = 80;
+const KM_RELATED_LINE_CAP = 600;
+
+/**
+ * #245 — Format same-domain titles into a budget-safe natural-language line.
+ * Returns undefined when there are no titles (caller omits the field). Pure.
+ */
+export function formatKmRelatedLine(titles: string[]): string | undefined {
+  if (titles.length === 0) return undefined;
+  const capped = titles.map((t) => t.slice(0, KM_RELATED_TITLE_CAP));
+  const base = `同知识域还涉及：${capped.join("、")}`;
+  return base.length > KM_RELATED_LINE_CAP ? `${base.slice(0, KM_RELATED_LINE_CAP - 1)}…` : base;
+}

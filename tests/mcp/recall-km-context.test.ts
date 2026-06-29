@@ -71,11 +71,16 @@ describe("deep_recall knowledge_map_context (#245)", () => {
 
   test("off (default): analyzeKnowledgeMap is never called", async () => {
     const { query } = seedMatureTriad("entity/triad");
-    const spy = spyOn(kmContextApi, "computeForRecall");
+    const wrapperSpy = spyOn(kmContextApi, "computeForRecall");
+    const analyzeSpy = spyOn(kmContextApi, "analyze");
     const server = createServer(deps);
     await getTools(server).deep_recall.handler({ query });
-    expect(spy).toHaveBeenCalledTimes(0);
-    spy.mockRestore();
+    // spec: off must zero-call analyzeKnowledgeMap. Spy BOTH the wrapper and the
+    // raw analyze so a future direct analyzeKnowledgeMap(db) call is also caught.
+    expect(wrapperSpy).toHaveBeenCalledTimes(0);
+    expect(analyzeSpy).toHaveBeenCalledTimes(0);
+    wrapperSpy.mockRestore();
+    analyzeSpy.mockRestore();
   });
 
   test("off (default): response has no knowledge_map_context trace", async () => {
@@ -108,14 +113,16 @@ describe("deep_recall knowledge_map_context (#245)", () => {
     expect(km.excluded_isolates_count).toBe(0); // no isolates seeded in this triad
   });
 
-  test("on: main result order is unchanged by KM context", async () => {
+  test("on: main result entities are byte-for-byte unchanged by KM context", async () => {
     const { query } = seedMatureTriad("entity/triad4");
     const server = createServer(deps);
-    const without = await getTools(server).deep_recall.handler({ query, include_raw: true }) as { content: Array<{ text: string }> };
-    const withKm = await getTools(server).deep_recall.handler({ query, knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
-    const orderWithout = JSON.parse(without.content[0].text).entities.map((e: { slug: string }) => e.slug);
-    const orderWith = JSON.parse(withKm.content[0].text).entities.map((e: { slug: string }) => e.slug);
-    expect(orderWith).toEqual(orderWithout);
+    const without = await getTools(server).deep_recall.handler({ query, strategy: "fts", include_raw: true }) as { content: Array<{ text: string }> };
+    const withKm = await getTools(server).deep_recall.handler({ query, strategy: "fts", knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
+    const withoutPayload = JSON.parse(without.content[0].text);
+    const withKmPayload = JSON.parse(withKm.content[0].text);
+    // spec: main results (sorting/score/projection) unchanged. KM only adds
+    // raw.knowledge_map_context + display/related_context — entities must match.
+    expect(withKmPayload.entities).toEqual(withoutPayload.entities);
   });
 
   test("on (compact): related_context is natural-language titles, no slug/community_id/weight", async () => {

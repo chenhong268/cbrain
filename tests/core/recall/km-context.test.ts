@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { buildKnowledgeMapContext, kmContextApi } from "../../../src/core/recall/km-context.js";
+import { buildKnowledgeMapContext, kmContextApi, formatKmRelatedLine } from "../../../src/core/recall/km-context.js";
 import type { KnowledgeMapAnalysis, KnowledgeMapNode, CommunitySummary } from "../../../src/core/knowledge-map-types.js";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 
@@ -105,5 +105,32 @@ describe("kmContextApi (#245)", () => {
     // exists to lock the spyable surface used by the recall integration test.
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockRestore();
+  });
+
+  test("computeForRecall downgrades to km_unavailable when analyze throws", () => {
+    const spy = spyOn(kmContextApi, "analyze").mockImplementation(() => { throw new Error("boom"); });
+    const res = kmContextApi.computeForRecall(db, ["entity/a"]);
+    expect(res.reason).toBe("km_unavailable");
+    expect(res.supplemental).toEqual([]);
+    spy.mockRestore();
+  });
+});
+
+describe("formatKmRelatedLine (#245)", () => {
+  test("returns undefined for empty titles", () => {
+    expect(formatKmRelatedLine([])).toBeUndefined();
+  });
+  test("joins titles with natural-language prefix", () => {
+    expect(formatKmRelatedLine(["Entity Beta", "Entity Gamma"])).toBe("同知识域还涉及：Entity Beta、Entity Gamma");
+  });
+  test("caps each title to 80 chars", () => {
+    const res = formatKmRelatedLine(["X".repeat(200)])!;
+    expect(res).toContain("同知识域还涉及：");
+    expect(res.length).toBeLessThanOrEqual("同知识域还涉及：".length + 80);
+  });
+  test("caps total line to 600 chars", () => {
+    const many = Array.from({ length: 50 }, () => "Y".repeat(80));
+    const res = formatKmRelatedLine(many)!;
+    expect(res.length).toBeLessThanOrEqual(600);
   });
 });

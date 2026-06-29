@@ -18,7 +18,7 @@ import { formatRecallEnvelope, formatGroundedRecallEnvelope } from "./format-res
 import { buildCompactRecallResponse, type CompactProactiveHint } from "./recall-compact.js";
 import { shouldCompleteEvidence } from "../../core/recall-intent.js";
 import { assembleEvidencePack, type EvidencePack } from "../../core/evidence-completion.js";
-import { kmContextApi } from "../../core/recall/km-context.js";
+import { kmContextApi, formatKmRelatedLine } from "../../core/recall/km-context.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -545,9 +545,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       : undefined;
     // #245 — natural-language same-domain line for display + compact. Titles
     // only (no slug/community_id/weight) — context navigation, not evidence.
-    const kmRelatedLine = kmResult && kmResult.supplemental.length > 0
-      ? `同知识域还涉及：${kmResult.supplemental.map((s) => s.title).join("、")}`
-      : undefined;
+    // formatKmRelatedLine caps titles so the line can't break the compact budget.
+    const kmRelatedLine = formatKmRelatedLine(kmResult?.supplemental.map((s) => s.title) ?? []);
     // display appends the KM same-domain line after the base + insufficient prefix.
     const display = (surfaceInsufficient ? `只找到部分线索：${baseDisplay}` : baseDisplay) +
       (kmRelatedLine ? `\n${kmRelatedLine}` : "");
