@@ -94,7 +94,7 @@ describe("buildKnowledgeMapContext (#245)", () => {
     const an = analysis([A, B, C], [matureCommunity("community-1", [A, B, C])], [iso]);
     const res = buildKnowledgeMapContext(an, ["entity/a"]);
     expect(res.supplemental.map(s => s.slug)).not.toContain("entity/iso");
-    expect(res.excludedIsolatesCount).toBeGreaterThanOrEqual(1);
+    expect(res.excludedIsolatesCount).toBe(1);
   });
 
   test("respects maxPerDomain and totalCap", () => {
@@ -125,7 +125,7 @@ describe("buildKnowledgeMapContext (#245)", () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bun test tests/core/recall/km-context.test.ts`
-Expected: FAIL — `Cannot find module "../../src/core/recall/km-context.js"`.
+Expected: FAIL — `Cannot find module "../../../src/core/recall/km-context.js"`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -218,8 +218,14 @@ export function buildKnowledgeMapContext(
     return { matchedDomains: [], supplemental: [], excludedIsolatesCount: 0, reason: "no_mature_domain" };
   }
 
-  const isolateSlugs = new Set(analysis.health.isolatedNodes.map((n) => n.slug));
-  let excludedIsolatesCount = 0;
+  // Isolates = degree-0 (health.isolatedNodes) ∪ high-mention isolates. Excluded
+  // from supplemental AND counted. The count is WHOLE-GRAPH (isolates carry no
+  // communityId by definition), not per matched-domain — matches spec "孤立节点
+  // 排除并计数".
+  const isolateSlugs = new Set<string>();
+  for (const n of analysis.health.isolatedNodes) isolateSlugs.add(n.slug);
+  for (const n of analysis.highMentionIsolates) isolateSlugs.add(n.slug);
+  const excludedIsolatesCount = [...isolateSlugs].filter((s) => !primarySet.has(s)).length;
 
   const pooled: KmSupplementalNode[] = [];
   for (const c of matchedDomains) {
@@ -234,12 +240,6 @@ export function buildKnowledgeMapContext(
       .slice(0, maxPerDomain);
     for (const n of candidates) {
       pooled.push({ slug: n.slug, title: n.title, type: n.type, communityId: c.id, weightedDegree: n.weightedDegree });
-    }
-    // Count isolates inside this matched domain (excluded from supplemental).
-    for (const n of analysis.nodes) {
-      if (n.communityId === c.id && isolateSlugs.has(n.slug) && !primarySet.has(n.slug)) {
-        excludedIsolatesCount++;
-      }
     }
   }
 
@@ -412,15 +412,24 @@ describe("deep_recall knowledge_map_context (#245)", () => {
   });
   afterEach(() => { db.close(); if (existsSync(testDir)) rmSync(testDir, { recursive: true }); });
 
-  // Seed a mature community of 3 entity nodes fully interconnected (3 edges,
-  // density 1.0 >= 0.4) so isCommunityMature is true.
-  function seedMatureTriad(prefix: string) {
+  // Seed a mature triad (3 nodes + triangle links, density 1.0 → isCommunityMature
+  // true). CRITICAL for test validity: ONLY node A carries the query token; B and C
+  // share no token with the query. So a query for `token` returns A as the SOLE
+  // primary hit, and KM must surface B/C as same-domain supplemental — proving
+  // #245's value rather than an FTS artifact that already returned all three.
+  function seedMatureTriad(prefix: string): { slugs: string[]; query: string } {
     const slugs = [`${prefix}/a`, `${prefix}/b`, `${prefix}/c`];
-    for (const s of slugs) {
+    const token = `${prefix.replace(/\//g, "-")}-alpha`; // FTS-safe unique token (no slash)
+    const chunks = [
+      `${token} domain anchor`, // A: the only node the query token matches
+      `domain sibling beta`,    // B: no token shared with the query
+      `domain sibling gamma`,   // C: no token shared with the query
+    ];
+    for (let i = 0; i < 3; i++) {
       db.rawDb.prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(s, "entity/person", s, `${s}.md`, "h1", 2, 3);
-      db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run(s, 0, `${prefix} keyword content`);
-      db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run(s, `${prefix} keyword content`);
+        .run(slugs[i], "entity/person", slugs[i], `${slugs[i]}.md`, "h1", 2, 3);
+      db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run(slugs[i], 0, chunks[i]);
+      db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run(slugs[i], chunks[i]);
     }
     // Fully-connected triangle (3 edges). Columns verified vs sqlite.ts: links
     // gains source_type/confidence/trust_state via migration; KM effective weight
@@ -431,30 +440,28 @@ describe("deep_recall knowledge_map_context (#245)", () => {
       db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation, weight, confidence, source_type, trust_state) VALUES (?, ?, 'mentions', 1.0, 0.9, 'manual', 'trusted')")
         .run(slugs[i], slugs[j]);
     }
-    return slugs;
+    return { slugs, query: token };
   }
 
   test("off (default): analyzeKnowledgeMap is never called", async () => {
-    seedMatureTriad("entity/triad");
+    const { query } = seedMatureTriad("entity/triad");
     const spy = spyOn(kmContextApi, "computeForRecall");
     const server = createServer(deps);
-    await getTools(server).deep_recall.handler({ query: "entity/triad/a keyword" });
+    await getTools(server).deep_recall.handler({ query });
     expect(spy).toHaveBeenCalledTimes(0);
     spy.mockRestore();
   });
 
   test("off (default): response has no knowledge_map_context trace", async () => {
-    seedMatureTriad("entity/triad2");
+    const { query } = seedMatureTriad("entity/triad2");
     const server = createServer(deps);
-    const r = await getTools(server).deep_recall.handler({ query: "entity/triad2/a keyword", include_raw: true }) as { content: Array<{ text: string }> };
+    const r = await getTools(server).deep_recall.handler({ query, include_raw: true }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
     expect(payload.raw?.knowledge_map_context).toBeUndefined();
     expect(payload.related_context).toBeUndefined();
   });
 });
 ```
-
-> **Note on `chunks_fts` seed:** check the actual `chunks_fts` column names in `src/storage/sqlite.ts` before running (recall-quality.test.ts uses `(page_slug, content)`). Keep the seed consistent with that file.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -521,26 +528,27 @@ Append:
 
 ```ts
   test("on + include_raw: raw.knowledge_map_context carries matched domains + supplemental", async () => {
-    const slugs = seedMatureTriad("entity/triad3");
+    const { slugs, query } = seedMatureTriad("entity/triad3");
     const server = createServer(deps);
-    // Query hits one triad member via FTS; KM should find the other two as same-domain.
-    const r = await getTools(server).deep_recall.handler({ query: `${slugs[0]} keyword`, knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
+    // Query token is on A only → primary = [A]; KM MUST surface B and C as
+    // same-domain supplemental. This is #245's core value, not an FTS artifact.
+    const r = await getTools(server).deep_recall.handler({ query, knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
     const km = payload.raw?.knowledge_map_context;
     expect(km).toBeDefined();
-    // Strong: a mature triad was seeded and the query hit a member, so the
-    // other two MUST surface as same-domain supplemental. Anything weaker means
-    // #245's core value silently failed.
     expect(km.reason).toBe("same_domain_context");
-    expect(km.supplemental_slugs.length).toBeGreaterThan(0);
-    expect(km.excluded_isolates_count).toBeGreaterThanOrEqual(0);
+    // Strong: the two non-primary triad members MUST be exactly the supplemental
+    // (order-independent — weightedDegree is symmetric across the triangle).
+    expect(km.supplemental_slugs).toEqual(expect.arrayContaining([slugs[1], slugs[2]]));
+    expect(km.supplemental_slugs.length).toBe(2);
+    expect(km.excluded_isolates_count).toBe(0); // no isolates seeded in this triad
   });
 
   test("on: main result order is unchanged by KM context", async () => {
-    const slugs = seedMatureTriad("entity/triad4");
+    const { query } = seedMatureTriad("entity/triad4");
     const server = createServer(deps);
-    const without = await getTools(server).deep_recall.handler({ query: `${slugs[0]} keyword`, include_raw: true }) as { content: Array<{ text: string }> };
-    const withKm = await getTools(server).deep_recall.handler({ query: `${slugs[0]} keyword`, knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
+    const without = await getTools(server).deep_recall.handler({ query, include_raw: true }) as { content: Array<{ text: string }> };
+    const withKm = await getTools(server).deep_recall.handler({ query, knowledge_map_context: "on", include_raw: true }) as { content: Array<{ text: string }> };
     const orderWithout = JSON.parse(without.content[0].text).entities.map((e: { slug: string }) => e.slug);
     const orderWith = JSON.parse(withKm.content[0].text).entities.map((e: { slug: string }) => e.slug);
     expect(orderWith).toEqual(orderWithout);
@@ -616,18 +624,18 @@ Append:
 
 ```ts
   test("on (compact): related_context is natural-language titles, no slug/community_id/weight", async () => {
-    const slugs = seedMatureTriad("entity/triad5");
+    const { query } = seedMatureTriad("entity/triad5");
     const server = createServer(deps);
-    const r = await getTools(server).deep_recall.handler({ query: `${slugs[0]} keyword`, knowledge_map_context: "on" }) as { content: Array<{ text: string }> };
+    const r = await getTools(server).deep_recall.handler({ query, knowledge_map_context: "on" }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
     // compact default (no include_raw) — no raw audit at all
     expect(payload.raw).toBeUndefined();
-    const rc = payload.related_context;
-    if (typeof rc === "string") {
-      expect(rc).toMatch(/同知识域还涉及/);
-      // privacy: no internal identifiers leak into the Agent-facing field
-      expect(rc).not.toMatch(/community-\d|entity\/|slug|weight/i);
-    }
+    // Strong: mature triad seeded, query hit A → B/C supplemental must exist.
+    expect(typeof payload.related_context).toBe("string");
+    const rc = payload.related_context as string;
+    expect(rc).toMatch(/同知识域还涉及/);
+    // privacy: no internal identifiers leak into the Agent-facing field
+    expect(rc).not.toMatch(/community-\d|entity\/|slug|weight/i);
   });
 ```
 
@@ -715,13 +723,12 @@ Append:
 
 ```ts
   test("on: display mentions same-domain titles and leaks no internals", async () => {
-    const slugs = seedMatureTriad("entity/triad6");
+    const { query } = seedMatureTriad("entity/triad6");
     const server = createServer(deps);
-    const r = await getTools(server).deep_recall.handler({ query: `${slugs[0]} keyword`, knowledge_map_context: "on" }) as { content: Array<{ text: string }> };
+    const r = await getTools(server).deep_recall.handler({ query, knowledge_map_context: "on" }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
-    if (typeof payload.related_context === "string") {
-      expect(payload.display).toContain("同知识域还涉及");
-    }
+    // Strong: supplemental exists, so the display line MUST be present.
+    expect(payload.display).toContain("同知识域还涉及");
     // FORBIDDEN_VISIBLE_TERMS guard (mirrors frontdoor-dialogue-gate)
     expect(payload.display).not.toMatch(/community-\d|source_type|modularity|weightedDegree|confidence/i);
     expect(payload.summary).not.toMatch(/community-\d|source_type|modularity/i);
@@ -738,9 +745,9 @@ Append:
   });
 
   test("on: grounded mode is unaffected (no related_context, no display line)", async () => {
-    seedMatureTriad("entity/triad7");
+    const { query } = seedMatureTriad("entity/triad7");
     const server = createServer(deps);
-    const r = await getTools(server).deep_recall.handler({ query: "entity/triad7/a keyword", knowledge_map_context: "on", grounded: true }) as { content: Array<{ text: string }> };
+    const r = await getTools(server).deep_recall.handler({ query, knowledge_map_context: "on", grounded: true }) as { content: Array<{ text: string }> };
     const payload = JSON.parse(r.content[0].text);
     expect(payload.related_context).toBeUndefined();
     expect(payload.grounded_answer).toBeDefined();
@@ -816,7 +823,7 @@ git commit -m "test(recall): KM context regression guard green (#245)"
 **1. Spec coverage:**
 - Default-off explicit option `knowledge_map_context` → Task 3 ✓
 - Same-mature-domain supplemental → Task 1 (pure) + Task 4 (wired) ✓
-- Isolate exclusion + count → Task 1 (`excludedIsolatesCount`) + Task 4 (trace) ✓
+- Isolate exclusion + whole-graph count (degree-0 ∪ high-mention, NOT per-community since isolates have no communityId) → Task 1 (`excludedIsolatesCount`) + Task 4 (trace) ✓
 - `isCommunityMature` reuse, no threshold copy → Task 1 imports it ✓
 - Trace in raw only → Task 4 (`raw.knowledge_map_context`) ✓
 - Natural-language titles in display/compact, no internals → Task 5 + Task 6 ✓
