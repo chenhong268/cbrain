@@ -190,8 +190,10 @@ describe("cbrain perf-diagnose (#189)", () => {
 
     const out = run("--json --min-latency-ms 1000");
     const d = JSON.parse(out.stdout);
-    // Only the known code is categorized; unknown strings are NOT turned into categories.
-    expect(d.by_degraded_reason.map((x: { reason: string }) => x.reason).sort()).toEqual(["latency_budget_exceeded", "vector_timeout"]);
+    // #250: latency_budget_exceeded moved to by_latency_warning_reason (warning, not degraded).
+    // Only vector_timeout (a real retrieval-degraded code) stays in by_degraded_reason.
+    expect(d.by_degraded_reason.map((x: { reason: string }) => x.reason).sort()).toEqual(["vector_timeout"]);
+    expect((d.by_latency_warning_reason ?? []).map((x: { reason: string }) => x.reason)).toContain("latency_budget_exceeded");
     // Private content never reaches the report — neither as a category nor echoed.
     expect(out.stdout).not.toContain("sk-DEADBEEF-PRIVATE");
     expect(out.stdout).not.toContain("用户私密判断");

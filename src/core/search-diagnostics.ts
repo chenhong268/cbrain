@@ -199,7 +199,7 @@ export function computeLatencyWarning(
 }
 
 export function computeSearchDegraded(
-  latencyMs: number,
+  _latencyMs: number,
   trace: { degraded_reason?: string },
   reasonCodes: DegradedReasonCode[],
   _latencyThreshold = 2000,

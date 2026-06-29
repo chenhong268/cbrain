@@ -12,12 +12,12 @@ const snapshot: DiagnosticSnapshot = {
   steps: [],
   queryLogs: [],
   searchLogs: [],
-  tables: [],
+  tables: { sessions: true, steps: true, queryLog: true, searchLog: true },
   warnings: [],
 };
 
 describe("perf-diagnose latency split (#250)", () => {
-  const report = diagnose(snapshot, { days: 7, minLatencyMs: 0, limit: 50 });
+  const report = diagnose(snapshot, { minLatencyMs: 0, limit: 50 });
 
   test("degraded_rate counts only the vector_timeout session", () => {
     expect(report.summary.degraded_rate).toBe(0.5);
