@@ -43,8 +43,8 @@
 
 ```ts
 import { describe, test, expect } from "bun:test";
-import { buildKnowledgeMapContext } from "../../src/core/recall/km-context.js";
-import type { KnowledgeMapAnalysis, KnowledgeMapNode, CommunitySummary } from "../../src/core/knowledge-map-types.js";
+import { buildKnowledgeMapContext } from "../../../src/core/recall/km-context.js";
+import type { KnowledgeMapAnalysis, KnowledgeMapNode, CommunitySummary } from "../../../src/core/knowledge-map-types.js";
 
 // Anonymous fixtures only (roadmap privacy constraint): Entity A/B/C, Domain D.
 function node(slug: string, title: string, communityId: string, weightedDegree: number, degree = 2): KnowledgeMapNode {
@@ -275,9 +275,9 @@ git commit -m "feat(recall): pure buildKnowledgeMapContext for KM domain context
 Append to `tests/core/recall/km-context.test.ts`:
 
 ```ts
-import { kmContextApi } from "../../src/core/recall/km-context.js";
+import { kmContextApi } from "../../../src/core/recall/km-context.js";
 import { spyOn } from "bun:test";
-import { CBrainDB } from "../../src/storage/sqlite.js";
+import { CBrainDB } from "../../../src/storage/sqlite.js";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 
@@ -325,19 +325,18 @@ Append to `src/core/recall/km-context.ts`:
 /**
  * #245 — Spyable entry point for recall. recall.ts calls ONLY computeForRecall.
  * Tests spyOn(kmContextApi, "analyze"|"computeForRecall") to prove the off path
- * never analyzes. Methods are arrow-bound so `this` is stable under spy.
+ * never analyzes. Arrow functions + explicit `kmContextApi.analyze(db)` (no `this`)
+ * so spies stay stable regardless of call-site binding.
  */
 export const kmContextApi = {
-  analyze(db: CBrainDB): KnowledgeMapAnalysis {
-    return analyzeKnowledgeMap(db);
-  },
-  computeForRecall(
+  analyze: (db: CBrainDB): KnowledgeMapAnalysis => analyzeKnowledgeMap(db),
+  computeForRecall: (
     db: CBrainDB,
     primarySlugs: string[],
     options?: KmContextOptions,
-  ): KmContextResult {
+  ): KmContextResult => {
     try {
-      const analysis = this.analyze(db);
+      const analysis = kmContextApi.analyze(db);
       if (analysis.nodes.length === 0) {
         return { matchedDomains: [], supplemental: [], excludedIsolatesCount: 0, reason: "no_mature_domain" };
       }
@@ -529,11 +528,12 @@ Append:
     const payload = JSON.parse(r.content[0].text);
     const km = payload.raw?.knowledge_map_context;
     expect(km).toBeDefined();
-    expect(km.reason === "same_domain_context" || km.reason === "no_mature_domain").toBe(true);
-    if (km.reason === "same_domain_context") {
-      expect(km.supplemental_slugs.length).toBeGreaterThan(0);
-      expect(km.excluded_isolates_count).toBeGreaterThanOrEqual(0);
-    }
+    // Strong: a mature triad was seeded and the query hit a member, so the
+    // other two MUST surface as same-domain supplemental. Anything weaker means
+    // #245's core value silently failed.
+    expect(km.reason).toBe("same_domain_context");
+    expect(km.supplemental_slugs.length).toBeGreaterThan(0);
+    expect(km.excluded_isolates_count).toBeGreaterThanOrEqual(0);
   });
 
   test("on: main result order is unchanged by KM context", async () => {
@@ -833,4 +833,4 @@ git commit -m "test(recall): KM context regression guard green (#245)"
 - `kmContextApi.computeForRecall` name is consistent in Task 2 (def), Task 3 (spy + call), Task 4 (call site already added in Task 3).
 - `related_context` (snake_case response field) vs `relatedContext` (camelCase input/options) — matches existing `proactive_hints`/`proactiveHints` convention in recall-compact.ts.
 
-**Note (spec wording refinement, non-blocking):** spec says "compact 默认响应可以有 `summary.related_context`"; implementation puts it at the compact **top level** (`related_context`) because `summary` is the shared `ToolSummary` shape. This is a faithful reading of intent (Agent-facing natural-language field, budgeted) and avoids polluting the cross-tool summary type. Flagged here for 宏哥's awareness; spec wording can be nudged to match during review.
+**Output contract alignment:** spec and plan agree — compact exposes a **top-level** `related_context` (mirrors `proactive_hints`); it does NOT live on the shared `ToolSummary`. `raw.knowledge_map_context` returns only with `include_raw=true`.

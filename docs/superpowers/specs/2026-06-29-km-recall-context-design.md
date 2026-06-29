@@ -107,12 +107,12 @@ export function buildKnowledgeMapContext(
 
   参数名**必须**是 `knowledge_map_context`，不叫 `km` / `context` 等泛名。描述必须写清"补充线索、非主召回排序"。
 
-- handler：`knowledge_map_context === "on"` **且主结果非空**时 → `analyzeKnowledgeMap(db)` 现算 analysis → `buildKnowledgeMapContext(analysis, primarySlugs)` → 结果进 `raw.knowledge_map_context`（仅 `include_raw=true` / full raw 路径）+ compact `summary.related_context`。
+- handler：`knowledge_map_context === "on"` **且主结果非空**时 → `analyzeKnowledgeMap(db)` 现算 analysis → `buildKnowledgeMapContext(analysis, primarySlugs)` → 结果进 `raw.knowledge_map_context`（仅 `include_raw=true` / full raw 路径）+ compact 顶层 `related_context`。
 - `off` → **完全不调 KM**（零开销，行为 byte-for-byte 不变）。
 
 ### 改动 `src/mcp/tools/recall-compact.ts`
 
-- `summary` 增 `related_context`：自然语言 title 摘要（见输出层次契约）。不塞进 entity 投影、不破 char budget。
+- compact 顶层增 `related_context`（自然语言 title 摘要，照 `proactive_hints` 同款；**不**进共享 `ToolSummary`）。不塞进 entity 投影、不破 char budget。
 
 ---
 
@@ -125,7 +125,7 @@ query
   → [flag on] analyzeKnowledgeMap(db)（现算，Phase 1 无 cache）
   → buildKnowledgeMapContext(analysis, primarySlugs)
   → supplemental slugs → enrich 成 title/type
-  → raw.knowledge_map_context (include_raw) + compact summary.related_context
+  → raw.knowledge_map_context (include_raw) + compact top-level related_context
 ```
 
 主结果 score / 排序 / entity projection 在整条链路上**只读不写**。
@@ -185,7 +185,7 @@ KM 的有效边权 = `weight * confidence * sourceReliability`（`knowledge-map.
 | 层 | 允许内容 | 禁止出现 |
 |---|---|---|
 | `display` | 自然语言 title：「同知识域还涉及：{A}、{B}」 | slug / community_id / weight / source_type / score / modularity |
-| `summary.related_context` | 同上自然语言 title | 同上禁止项 |
+| `related_context`（compact 顶层字段） | 同上自然语言 title | 同上禁止项 |
 | `raw.knowledge_map_context` | `{ matched_domains[], supplemental_slugs[], excluded_isolates_count, reason }` | 仅 `include_raw=true` 或 full raw 路径返回 |
 
 - display 措辞固定为「同知识域还涉及…」一类；**严禁**「因为同域所以相关 / 为真」（**context ≠ truth**，守 guardrail）。
@@ -195,7 +195,7 @@ KM 的有效边权 = `weight * confidence * sourceReliability`（`knowledge-map.
 
 ## 错误处理与降级
 
-- `analyzeKnowledgeMap` 抛错 / 空图 / 无节点 → `buildKnowledgeMapContext` 返回 `reason: "km_unavailable"`，**不抛**，主结果不受影响（守 roadmap"不阻塞普通 recall"）。
+- `analyzeKnowledgeMap` **抛错** → 降级 `reason: "km_unavailable"`，**不抛**，主结果不受影响（守 roadmap"不阻塞普通 recall"）。空图 / 无节点 / 无 mature domain → `reason: "no_mature_domain"`（正常分析结果，非错误）。
 - 缓存计算失败 → 同上降级，不污染主召回。
 - 主结果为空 → 不调 KM。
 - 所有降级路径都要在测试里覆盖。
@@ -225,13 +225,13 @@ KM 的有效边权 = `weight * confidence * sourceReliability`（`knowledge-map.
 - 孤立节点 → 排除 + `excludedIsolatesCount` 正确。
 - `totalCap` / `maxPerDomain` 生效。
 - `primarySlugs` 内的节点不重复补。
-- 空 analysis / 空图 → `reason: "km_unavailable"`，不抛。
-- 全域非 mature → `reason: "no_mature_domain"`。
+- `analyzeKnowledgeMap` 抛错 → `reason: "km_unavailable"`（降级，不抛）。
+- 空 analysis / 空图 / 全域非 mature → `reason: "no_mature_domain"`。
 
 **`tests/mcp/recall-km-context.test.ts`**（集成）
 - **`off` 时 spy `analyzeKnowledgeMap` 断言零调用**（宏哥修正 #5）。
 - `off` 时主结果排序 / score / entity projection **byte-for-byte 不变**。
-- `on` 时 supplemental 出现在 `raw.knowledge_map_context` + `summary.related_context`。
+- `on` 时 supplemental 出现在 `raw.knowledge_map_context` + compact 顶层 `related_context`。
 - `on` 时主结果顺序不变；**exact match 顺序不变**。
 - `on` 时 display 只出 title，无 slug/community_id/weight。
 - grounded recall 不受影响。
