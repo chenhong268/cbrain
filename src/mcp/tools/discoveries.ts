@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { DiscoveryManager } from "../../core/discovery.js";
 import type { DiscoveryType } from "../../core/discovery.js";
-import { formatDiscoveryDigest } from "../../core/discovery-digest.js";
+import { formatDiscoveryDigest, formatKnowledgeMapSurface } from "../../core/discovery-digest.js";
 import { formatDiscoveriesEnvelope } from "./format-result.js";
 
 const TYPE_LABELS: Record<string, string> = {
@@ -13,6 +13,8 @@ const TYPE_LABELS: Record<string, string> = {
   trend: "趋势",
   gap: "缺口",
   contradiction: "矛盾",
+  knowledge_map_isolation: "孤立记忆",
+  knowledge_map_bridge: "跨领域连接",
 };
 
 const ACTIONABLE_LABELS: Record<string, string> = {
@@ -28,6 +30,29 @@ const STATUS_LABELS: Record<string, string> = {
   dismissed: "已忽略",
 };
 
+// #244 — Knowledge Map discovery types live in the discoveries table as an
+// INDEPENDENT surface. They never enter the normal round-robin / digest, so
+// normal discovery ranking quotas are untouched.
+const KM_TYPES = new Set(["knowledge_map_isolation", "knowledge_map_bridge"]);
+
+type EntityInfo = { title: string; type: string };
+
+function buildKmSurface(
+  db: ToolContext["db"],
+  entityLookup: (slug: string) => EntityInfo | null,
+): { cards: ReturnType<typeof formatKnowledgeMapSurface>["cards"]; display: string } {
+  const isolation = db.getDiscoveriesByType("knowledge_map_isolation", 3);
+  const bridge = db.getDiscoveriesByType("knowledge_map_bridge", 3);
+  return formatKnowledgeMapSurface(isolation, bridge, entityLookup, 5);
+}
+
+function buildDiscoverySummary(normalCount: number, kmCount: number, emptyText: string): string {
+  const parts: string[] = [];
+  if (normalCount > 0) parts.push(`${normalCount} 条值得关注的发现`);
+  if (kmCount > 0) parts.push(`${kmCount} 条知识结构观察`);
+  return parts.length > 0 ? `今天有 ${parts.join("，另有 ")}` : emptyText;
+}
+
 export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("read_discoveries", {
     description:
@@ -37,7 +62,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     inputSchema: {
       limit: z.number().optional().default(3).describe("Max discoveries to return"),
       actionableFilter: z.enum(["high", "medium", "low"]).optional().describe("Filter by actionable level"),
-      typeFilter: z.enum(["bridge", "trend", "gap", "contradiction"]).optional().describe("Filter by discovery type"),
+      typeFilter: z.enum(["bridge", "trend", "gap", "contradiction", "knowledge_map_isolation", "knowledge_map_bridge"]).optional().describe("Filter by discovery type"),
       debug: z.boolean().optional().default(false).describe("Include internal debug info"),
     },
   }, async ({ limit, actionableFilter, typeFilter, debug }) => {
@@ -77,18 +102,24 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     const entityLookup = (slug: string) => ctx.db.getPage(slug);
     const digest = formatDiscoveryDigest(rows, entityLookup, displayLimit);
 
-    const summaryText = digest.cards.length > 0
-      ? `今天有 ${digest.cards.length} 条值得关注的发现。`
-      : "今天暂无新的发现。";
+    // #244 — attach independent KM surface (unless caller already filtered to a KM type).
+    const isKmFilter = typeFilter !== undefined && KM_TYPES.has(typeFilter);
+    const kmSurface = isKmFilter ? { cards: [], display: "" } : buildKmSurface(ctx.db, entityLookup);
+    const combinedDisplay = kmSurface.display ? `${digest.display}\n\n${kmSurface.display}` : digest.display;
+
+    const summaryText = buildDiscoverySummary(digest.cards.length, kmSurface.cards.length, "今天暂无新的发现。");
 
     const payload: Record<string, unknown> = {
       cards: digest.cards,
     };
+    if (kmSurface.cards.length > 0) {
+      payload.knowledge_map_cards = kmSurface.cards;
+    }
     if (debug) {
       payload._debug = digest._debug;
     }
 
-    const { display, summary, raw } = formatDiscoveriesEnvelope({ display: digest.display, cards: digest.cards, summary: summaryText });
+    const { display, summary, raw } = formatDiscoveriesEnvelope({ display: combinedDisplay, cards: digest.cards, summary: summaryText });
     return {
       content: [{
         type: "text" as const,
@@ -123,15 +154,20 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     // User-facing path: format new discoveries through the digest pipeline
     const newRows = ctx.db.getUnseenDiscoveries(30);
     const entityLookup = (slug: string) => ctx.db.getPage(slug);
-    const digest = formatDiscoveryDigest(newRows, entityLookup, 3);
+    // #244 — split KM rows out so they never compete for the normal top-3 quota.
+    const normalRows = newRows.filter(r => !KM_TYPES.has(r.type));
+    const digest = formatDiscoveryDigest(normalRows, entityLookup, 3);
+    const kmSurface = buildKmSurface(ctx.db, entityLookup);
+    const combinedDisplay = kmSurface.display ? `${digest.display}\n\n${kmSurface.display}` : digest.display;
 
-    const summaryText = digest.cards.length > 0
-      ? `今天有 ${digest.cards.length} 条值得关注的发现。`
-      : "今天暂无值得打扰你的新发现。";
+    const summaryText = buildDiscoverySummary(digest.cards.length, kmSurface.cards.length, "今天暂无值得打扰你的新发现。");
 
     const payload: Record<string, unknown> = {
       cards: digest.cards,
     };
+    if (kmSurface.cards.length > 0) {
+      payload.knowledge_map_cards = kmSurface.cards;
+    }
 
     if (debug) {
       const typeLabels = Object.entries(report.byType)
@@ -161,7 +197,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       };
     }
 
-    const { display, summary, raw } = formatDiscoveriesEnvelope({ display: digest.display, cards: digest.cards, summary: summaryText });
+    const { display, summary, raw } = formatDiscoveriesEnvelope({ display: combinedDisplay, cards: digest.cards, summary: summaryText });
     return {
       content: [{
         type: "text" as const,
