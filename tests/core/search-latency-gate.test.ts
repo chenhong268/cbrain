@@ -93,4 +93,22 @@ describe("expandQuery gate (#250)", () => {
     expect(expandSpy).toHaveBeenCalledTimes(0);
     expandSpy.mockRestore();
   });
+
+  test("expandQuery over call-count budget → skipped, FTS preserved, expand_skipped=budget_exhausted", async () => {
+    // Seed FTS hits matching the complex query tokens so the FTS probe returns
+    // >=3. This verifies: when expand is skipped by the budget, the initialFts
+    // probe result is REUSED (not lost) — results.length > 0.
+    seedFtsHits(3, "主题A 主题B 共同标记内容");
+    const llm = { name: "mock", chat: async () => "{}" };
+    const search = new HybridSearch(db, mockEmbed(), makeLance(), { llm: llm as never });
+    const trace: Record<string, unknown> = { llm_calls: 3 }; // #222 MAX_DEFAULT_LLM_CALLS budget exhausted
+    // _skipDecompose isolates the expand path (else complex query hits the
+    // decompose budget guard first, returning [] before searchWithExpansion).
+    const expandSpy = spyExpand(search, async () => ["x"]);
+    const results = await search.search("主题A 和 主题B", { _skipDecompose: true, _trace: trace as never });
+    expect(results.length).toBeGreaterThan(0); // FTS results preserved (initialFts reused)
+    expect(expandSpy).toHaveBeenCalledTimes(0); // expand skipped due to budget
+    expect(trace.expand_skipped).toBe("budget_exhausted");
+    expandSpy.mockRestore();
+  });
 });

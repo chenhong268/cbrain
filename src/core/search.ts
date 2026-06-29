@@ -551,14 +551,39 @@ export class HybridSearch {
     initialFts?: SearchResult[],
   ): Promise<SearchResult[]> {
     const t0 = Date.now();
-    const useMultiQuery = expand && !!this.llm;
-    const queries = useMultiQuery
-      ? await this.timedCall(() => this.expandQuery(query), trace, "expand_ms")
-      : [query];
+    const budgetExhausted = (trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS;
+    const useMultiQuery = expand && !!this.llm && !budgetExhausted;
 
-    if (trace && useMultiQuery) {
-      trace.query_variants = queries;
-      trace.llm_calls = (trace.llm_calls ?? 0) + 1;
+    let queries: string[];
+    if (useMultiQuery) {
+      // #250 — race expandQuery against a wall-clock budget (mirrors #222 decompose
+      // guard). LLMProvider has no AbortSignal: on timeout we discard the result,
+      // do NOT write anything, and fall back to the original query. expandQuery is
+      // pure-read, so discarding is safe.
+      let expandTimer: ReturnType<typeof setTimeout> | undefined;
+      const expandTimeout = new Promise<never>((_, reject) => {
+        expandTimer = setTimeout(() => reject(new Error("expand_timeout")), MAX_DEFAULT_DECOMPOSE_MS);
+      });
+      try {
+        queries = await Promise.race([
+          this.timedCall(() => this.expandQuery(query), trace, "expand_ms"),
+          expandTimeout,
+        ]);
+      } catch (e) {
+        this.logger?.warn("search", "expandQuery 超时/失败，回退原查询（不写 DB，丢弃结果）", { error: e instanceof Error ? e.message : String(e) });
+        queries = [query];
+      } finally {
+        if (expandTimer) clearTimeout(expandTimer);
+      }
+      if (trace) {
+        trace.query_variants = queries;
+        trace.llm_calls = (trace.llm_calls ?? 0) + 1;
+      }
+    } else {
+      queries = [query];
+      if (trace && budgetExhausted && expand && this.llm) {
+        trace.expand_skipped = "budget_exhausted";
+      }
     }
 
     const queryResults = await Promise.all(
