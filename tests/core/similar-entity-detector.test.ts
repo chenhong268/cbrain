@@ -121,3 +121,36 @@ describe("similar-entity-detector strategies", () => {
     expect(r.candidates[0].actionable).toBe("high");
   });
 });
+
+describe("similar-entity-detector canonical target", () => {
+  test("non-stub beats stub as merge target", () => {
+    const q = new Map<string, PageQuality>();
+    q.set("entity/a", quality({ isStub: true }));
+    q.set("entity/b", quality({ isStub: false, mentionCount: 5 }));
+    const r = detectSimilarEntities(input([
+      page("entity/a", "实体A"), page("entity/b", "实体A"),
+    ], { quality: q }));
+    expect(r.candidates[0].recommendedTarget).toBe("entity/b");
+  });
+
+  test("completeness (bodyChars) breaks stub-tie", () => {
+    const q = new Map<string, PageQuality>();
+    q.set("entity/a", quality({ bodyChars: 10 }));
+    q.set("entity/b", quality({ bodyChars: 500 }));
+    const r = detectSimilarEntities(input([
+      page("entity/a", "实体A"), page("entity/b", "实体A"),
+    ], { quality: q }));
+    expect(r.candidates[0].recommendedTarget).toBe("entity/b");
+  });
+
+  test("ambiguous_target when discriminators 1-5 tie", () => {
+    const q = new Map<string, PageQuality>();
+    q.set("entity/a", quality());
+    q.set("entity/b", quality());
+    const r = detectSimilarEntities(input([
+      page("entity/a", "实体A"), page("entity/b", "实体A"),
+    ], { quality: q }));
+    expect(r.candidates[0].ambiguousTarget).toBe(true);
+    expect(r.candidates[0].recommendedTarget).toBeUndefined();
+  });
+});

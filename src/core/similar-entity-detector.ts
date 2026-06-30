@@ -1,6 +1,6 @@
 import {
   normalizeForComparison, isSignificantSubstring, boundedLevenshtein,
-  tokenizeForBlocking,
+  tokenizeForBlocking, titleCanonicalScore,
 } from "./name-similarity.js";
 
 export type SimilarMatchKind =
@@ -240,8 +240,6 @@ function buildCandidate(
  * Canonical merge-sink selection (#246 §8). alias_shadow with a single direction
  * always points at the alias holder. Otherwise compare on discriminators 1-5;
  * tie on all five → ambiguous (slug lexicographic is NOT used to force a choice).
- * Task 3 stub: only the alias_direction path is implemented; full discriminators
- * arrive in Task 4.
  */
 function computeRecommendedTarget(
   slugA: string,
@@ -253,8 +251,49 @@ function computeRecommendedTarget(
   if (kind === "alias_shadow_page") {
     if (aliasDirection === "aToB") return { target: slugB };
     if (aliasDirection === "bToA") return { target: slugA };
-    // "both" → fall through to canonical scoring (Task 4)
+    // "both" → fall through to canonical scoring
   }
-  void input;
-  return {};
+
+  const pick = (whenA: boolean): { target?: string; ambiguous?: boolean } =>
+    whenA ? { target: slugA } : { target: slugB };
+
+  const qa = input.qualityBySlug.get(slugA);
+  const qb = input.qualityBySlug.get(slugB);
+  const pageBySlug = new Map<string, DetectorPage>();
+  for (const p of input.pages) pageBySlug.set(p.slug, p);
+
+  // 1. non-stub beats stub
+  const stubA = qa?.isStub ?? true;
+  const stubB = qb?.isStub ?? true;
+  if (stubA !== stubB) return pick(!stubA);
+
+  // 2. completeness: bodyChars, then chunkCount
+  const bodyA = qa?.bodyChars ?? 0;
+  const bodyB = qb?.bodyChars ?? 0;
+  if (bodyA !== bodyB) return pick(bodyA > bodyB);
+  const chunksA = qa?.chunkCount ?? 0;
+  const chunksB = qb?.chunkCount ?? 0;
+  if (chunksA !== chunksB) return pick(chunksA > chunksB);
+
+  // 3. link_degree
+  const degA = input.linkDegree.get(slugA) ?? 0;
+  const degB = input.linkDegree.get(slugB) ?? 0;
+  if (degA !== degB) return pick(degA > degB);
+
+  // 4. mention_count
+  const menA = qa?.mentionCount ?? 0;
+  const menB = qb?.mentionCount ?? 0;
+  if (menA !== menB) return pick(menA > menB);
+
+  // 5. title canonicalness
+  const ta = pageBySlug.get(slugA);
+  const tb = pageBySlug.get(slugB);
+  if (ta && tb) {
+    const ca = titleCanonicalScore(ta.title, ta.slug);
+    const cb = titleCanonicalScore(tb.title, tb.slug);
+    if (ca !== cb) return pick(ca > cb);
+  }
+
+  // tie on 1-5 → ambiguous; refuse to recommend
+  return { ambiguous: true };
 }
