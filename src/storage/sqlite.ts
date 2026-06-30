@@ -1647,7 +1647,12 @@ export class CBrainDB {
       FROM pages p
       LEFT JOIN (SELECT page_slug, COUNT(*) c FROM aliases GROUP BY page_slug) a ON a.page_slug = p.slug
       LEFT JOIN (SELECT page_slug, COUNT(*) c FROM tags GROUP BY page_slug) t ON t.page_slug = p.slug
-      LEFT JOIN (SELECT page_slug, SUM(length(content)) body_chars, COUNT(*) chunk_count FROM chunks GROUP BY page_slug) c ON c.page_slug = p.slug
+      LEFT JOIN (
+        SELECT page_slug, SUM(length(content)) body_chars, COUNT(*) chunk_count
+        FROM chunks
+        WHERE page_slug IN (SELECT slug FROM pages WHERE type LIKE 'entity/%' OR type LIKE 'concept/%')
+        GROUP BY page_slug
+      ) c ON c.page_slug = p.slug
       WHERE p.type LIKE 'entity/%' OR p.type LIKE 'concept/%'
     `).all() as Array<{ slug: string; mention_count: number; alias_count: number; tag_count: number; body_chars: number; chunk_count: number }>;
   }

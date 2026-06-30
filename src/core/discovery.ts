@@ -157,11 +157,14 @@ export class DiscoveryManager {
       if (set) set.add(norm); else registeredAliasesBySlug.set(page_slug, new Set([norm]));
     }
 
-    // qualityBySlug + linkDegree.
+    // qualityBySlug + linkDegree (build the degree map once, reuse for isStub + detector input).
     const qualityBySlug = new Map<string, PageQuality>();
+    const linkDegreeMap = new Map<string, number>();
     const adj = this.buildAdjacency();
+    for (const [slug, neighbors] of adj) linkDegreeMap.set(slug, neighbors.size);
+
     for (const row of this.db.getEntityConceptQuality()) {
-      const linkDegree = adj.get(row.slug)?.size ?? 0;
+      const linkDegree = linkDegreeMap.get(row.slug) ?? 0;
       qualityBySlug.set(row.slug, {
         isStub: row.mention_count === 0 && linkDegree === 0 && row.alias_count === 0 && row.tag_count === 0,
         bodyChars: row.body_chars,
@@ -171,8 +174,6 @@ export class DiscoveryManager {
         tagCount: row.tag_count,
       });
     }
-    const linkDegreeMap = new Map<string, number>();
-    for (const [slug, neighbors] of adj) linkDegreeMap.set(slug, neighbors.size);
 
     const detectorInput: DetectorInput = {
       pages: entityPages as DetectorPage[],
