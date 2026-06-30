@@ -239,7 +239,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 由 `cbrain --help` 自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen cli-commands:start -->
-共 44 个 CLI 命令（`cbrain --help`）。
+共 45 个 CLI 命令（`cbrain --help`）。
 
 | 命令 | 说明 |
 |------|------|
@@ -279,6 +279,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `revert` | Revert a page to a previous version |
 | `serve` | Start MCP server (stdio transport) |
 | `show` | Display a page's full content |
+| `similar-entities` | Detect likely-duplicate entity/concept pages for review (no auto-merge) |
 | `skill-pack` | Verify and report Hermes skill pack status |
 | `status` | Show brain statistics at a glance |
 | `stub-enrich` | Enrich thin stub pages with LLM-generated summaries (single slug or all candidates) |

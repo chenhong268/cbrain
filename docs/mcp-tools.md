@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 83 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 84 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -336,6 +336,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `enrich` | Run entity enrichment. |
 | `expand_entity` | Expand a single entity to full detail — complete body, all links, full timeline, tags, related entities, and… |
 | `export_grounded_artifact` | 导出 grounded recall 或 agentic research 结果为本地 HTML artifact。仅在用户明确要求导出/保存/分享时调用。不执行新的检索。 |
+| `find_similar_entities` | 查找可能重复的实体/概念页面对，供人工或 Agent 核对后通过 merge_entities 合并。默认会把候选写入 discoveries 生命周期（dismissed/resolved 不会重复打扰）。返回… |
 | `generate_indexes` | Generate Obsidian-readable index files: All-Entities, All-Concepts, All-Sources, Dashboard. |
 | `get_chunks` | Get indexed text chunks for a page. |
 | `get_compounding_reviews` | 生成复利洞察：只有通过全部5个门槛（证据充分性、持久性、新颖性、行动价值、信任风险）的候选才会出现在结果中。没通过门槛的候选会被过滤，返回 silence_reason 说明原因。 |
