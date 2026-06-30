@@ -7,6 +7,10 @@ import { JobQueueNerSubmitter, resolveNerBody } from "../../src/core/ner-backfil
 import { IngestManager } from "../../src/core/ingest";
 import { PageManager } from "../../src/core/page";
 import type { EmbeddingProvider } from "../../src/embedding/provider";
+import { runNerBackfillStage } from "../../src/core/ner-backfill";
+import { ContentPipeline } from "../../src/core/pipeline";
+import { NerEngine, NerTimeoutError } from "../../src/core/ner";
+import type { LLMProvider } from "../../src/llm/provider";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
   return {
@@ -200,5 +204,87 @@ describe("resolveNerBody (#252)", () => {
     db.rawDb.prepare("DELETE FROM chunks WHERE page_slug = ? AND summary_level = 0").run(res.slug);
     const pm = new PageManager(db, testDir);
     expect(resolveNerBody(db, pm, res.slug)).toBeNull();
+  });
+});
+
+function pipelineWith(llm: LLMProvider): ContentPipeline {
+  return new ContentPipeline(db, createMockEmbeddingProvider(), createMockLanceDB() as never, {
+    pages: new PageManager(db, testDir),
+    nerEngine: new NerEngine(llm),
+  });
+}
+
+describe("runNerBackfillStage (#252)", () => {
+  test("consumes a pending job and produces entity/link output", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const res = await seedIngest.ingest({ content: "提到匿名实体乙的正文", type: "text", title: "p1", skipNer: true });
+    db.submitJob("ner-backfill", { slug: res.slug, pageType: "record" });
+
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [{ name: "匿名实体乙", type: "person", context: "x" }], relations: [], events: [],
+      }),
+    };
+    const pages = new PageManager(db, testDir);
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), pages);
+    expect(counts.processed).toBe(1);
+    expect(db.listJobs("pending").length).toBe(0);
+    const stub = db.rawDb.prepare("SELECT * FROM pages WHERE title = ?").get("匿名实体乙") as any;
+    expect(stub).toBeTruthy();
+  });
+
+  test("stale running job is recovered and processed in the same run", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const res = await seedIngest.ingest({ content: "提到匿名实体丙", type: "text", title: "p2", skipNer: true });
+    const id = db.submitJob("ner-backfill", { slug: res.slug });
+    db.claimJobById(id);
+    db.rawDb.prepare("UPDATE jobs SET started_at = datetime('now','-2 hours') WHERE id = ?").run(id);
+
+    const llm: LLMProvider = { name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' };
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir));
+    expect(counts.processed).toBe(1);
+    expect(db.getJob(id)!.status).toBe("done");
+  });
+
+  test("a failing job is attempted at most once per run (no retry starvation)", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const res = await seedIngest.ingest({ content: "失败页正文", type: "text", title: "p3", skipNer: true });
+    db.submitJob("ner-backfill", { slug: res.slug });
+
+    const llm: LLMProvider = { name: "mock", chat: async () => { throw new Error("boom"); } };
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir), { maxItems: 50 });
+    expect(counts.failed).toBe(1);
+    const job = db.listJobs("pending")[0];
+    expect(job.attempts).toBe(1);
+    expect(job.status).toBe("pending");
+  });
+
+  test("NER timeout during processing → timed_out count, job retryable, no index corruption", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const res = await seedIngest.ingest({ content: "超时页正文", type: "text", title: "p4", skipNer: true });
+    db.submitJob("ner-backfill", { slug: res.slug });
+
+    class TimeoutNer extends NerEngine {
+      async extract(_text: string, _timeoutMs?: number): Promise<never> { throw new NerTimeoutError(100); }
+    }
+    const pipeline = new ContentPipeline(db, embedding, createMockLanceDB() as never, {
+      pages: new PageManager(db, testDir), nerEngine: new TimeoutNer({ name: "m", chat: async () => "x" } as any),
+    });
+    const counts = await runNerBackfillStage(db, pipeline, new PageManager(db, testDir));
+    expect(counts.timed_out).toBe(1);
+    expect(db.listJobs("pending")[0].status).toBe("pending");
+    expect(db.getPage(res.slug)).not.toBeNull();
+  });
+
+  test("no usable body (sealed, no raw chunks) → job failed once with clear reason", async () => {
+    db.submitJob("ner-backfill", { slug: "records/does-not-exist" });
+    const llm: LLMProvider = { name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' };
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir));
+    expect(counts.failed).toBe(1);
   });
 });

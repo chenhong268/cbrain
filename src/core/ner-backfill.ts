@@ -1,6 +1,8 @@
 // src/core/ner-backfill.ts
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { PageManager } from "./page.js";
+import type { ContentPipeline } from "./pipeline.js";
+import { isNerTimeoutError } from "./ner.js";
 /** Stale-running recovery TTL — aligned with Dream lock TTL (dream.ts). */
 export const NER_BACKFILL_STALE_TTL_MS = 30 * 60 * 1000;
 
@@ -66,10 +68,61 @@ export function resolveNerBody(
   };
 
   if (db.isSealedPage(slug)) {
-    return rawChunksBody() ? { body: rawChunksBody()!, type } : null;
+    const body = rawChunksBody();
+    return body ? { body, type } : null;
   }
   const body = pages.getBySlug(slug)?.body ?? "";
   if (body.trim()) return { body, type };
   const fallback = rawChunksBody();
   return fallback ? { body: fallback, type } : null;
+}
+
+/**
+ * #252: bounded Dream stage 1.5. Recovers stale running jobs, snapshots eligible
+ * pending ids ONCE (each processed at most once per run — no retry starvation),
+ * and reuses pipeline.processNer (60s timeout / fail-open). No always-on worker.
+ */
+export async function runNerBackfillStage(
+  db: CBrainDB,
+  pipeline: ContentPipeline,
+  pages: PageManager,
+  opts?: { maxItems?: number; staleTtlMs?: number },
+): Promise<NerBackfillCounts> {
+  const counts = emptyNerBackfillCounts();
+  const maxItems = opts?.maxItems ?? NER_BACKFILL_MAX_ITEMS;
+  const staleTtlMs = opts?.staleTtlMs ?? NER_BACKFILL_STALE_TTL_MS;
+
+  // (a) recover stale running from a crashed previous Dream
+  db.resetStaleJobsForNames([NER_BACKFILL_JOB], staleTtlMs);
+
+  // (b) snapshot eligible ids ONCE — each processed at most once this run
+  const ids = db.snapshotEligibleJobIds([NER_BACKFILL_JOB], maxItems);
+
+  for (const id of ids) {
+    const job = db.claimJobById(id); // null if no longer pending (race-safe)
+    if (!job) { counts.skipped++; continue; }
+
+    let parsed: { slug?: string } = {};
+    try { parsed = job.data ? JSON.parse(job.data) : {}; } catch { /* malformed */ }
+    const slug = parsed.slug;
+    if (!slug) { db.failJob(id, "ner-backfill job missing slug"); counts.failed++; continue; }
+
+    const resolved = resolveNerBody(db, pages, slug);
+    if (!resolved) { db.failJob(id, `no usable body for ${slug} (sealed/no raw chunks)`); counts.failed++; continue; }
+
+    try {
+      await pipeline.processNer(slug, resolved.body, resolved.type, true, undefined, new Set());
+      db.completeJob(id);
+      counts.processed++;
+    } catch (e) {
+      if (isNerTimeoutError(e)) {
+        db.failJob(id, "NER_TIMEOUT");
+        counts.timed_out++;
+      } else {
+        db.failJob(id, e instanceof Error ? e.message : String(e));
+        counts.failed++;
+      }
+    }
+  }
+  return counts;
 }
