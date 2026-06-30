@@ -1276,6 +1276,31 @@ export class CBrainDB {
     return row;
   }
 
+  /** #252: active ner-backfill jobs for a slug = pending, or running and not stale. */
+  findActiveNerJobs(slug: string, staleTtlMs: number): Array<{ id: number; status: string }> {
+    const ttlSec = Math.floor(staleTtlMs / 1000);
+    return this.rawDb.prepare(
+      `SELECT id, status FROM jobs
+       WHERE name = 'ner-backfill'
+         AND json_extract(data, '$.slug') = ?
+         AND (status = 'pending'
+              OR (status = 'running' AND started_at IS NOT NULL
+                  AND julianday('now') - julianday(started_at) < ?))`
+    ).all(slug, ttlSec / 86400) as Array<{ id: number; status: string }>;
+  }
+
+  /** #252: claim a specific pending job by id. Returns null if no longer pending. */
+  claimJobById(id: number): { id: number; name: string; data: string | null; attempts: number } | null {
+    const row = this.rawDb.prepare(
+      "SELECT id, name, data, attempts FROM jobs WHERE id = ? AND status = 'pending'"
+    ).get(id) as { id: number; name: string; data: string | null; attempts: number } | undefined;
+    if (!row) return null;
+    this.rawDb.prepare(
+      "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = datetime('now') WHERE id = ?"
+    ).run(id);
+    return row;
+  }
+
   completeJob(id: number, result?: unknown): void {
     // Merge with existing progress data (from updateJobProgress calls)
     let finalResult = result;
