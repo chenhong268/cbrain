@@ -26,6 +26,8 @@ export interface CBrainConfig {
     llm_model?: string;
     llm_api_key?: string;
     llm_base_url?: string;
+    /** #252: ingest NER mode — sync (default) | defer | off. */
+    ingest_mode?: "sync" | "defer" | "off";
   };
   reflect?: {
     llm_provider?: string;
@@ -43,6 +45,24 @@ export interface CBrainConfig {
     provider?: string; // "searxng"
     base_url?: string; // e.g. "http://localhost:8080"
   };
+}
+
+export type IngestNerMode = "sync" | "defer" | "off";
+
+const VALID_INGEST_NER_MODES = new Set<IngestNerMode>(["sync", "defer", "off"]);
+
+/** #252: env > config > "sync". Invalid values fall back to "sync" (never throw). */
+export function resolveIngestNerMode(env?: string, configMode?: string): IngestNerMode {
+  const envMode = env?.trim().toLowerCase();
+  if (envMode && VALID_INGEST_NER_MODES.has(envMode as IngestNerMode)) return envMode as IngestNerMode;
+  if (envMode) {
+    console.warn(`[cbrain] Invalid CBRAIN_INGEST_NER_MODE="${env}", falling back to sync.`);
+  }
+  if (configMode && VALID_INGEST_NER_MODES.has(configMode as IngestNerMode)) return configMode as IngestNerMode;
+  if (configMode) {
+    console.warn(`[cbrain] Invalid ner.ingest_mode="${configMode}" in config, falling back to sync.`);
+  }
+  return "sync";
 }
 
 export function resolveRuntimePath(config: CBrainConfig): string {
