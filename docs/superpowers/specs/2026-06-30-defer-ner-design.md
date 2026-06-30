@@ -117,6 +117,29 @@ each explicitly.
    Must have a test: sealed page with raw chunks available → processor
    reconstructs body from raw chunks and produces entities.
 
+### 4.3 Review-driven hardening (spec amend)
+
+Four issues raised in #252 spec review. All four are addressed in §5 and the
+test matrix; listed here so the implementation plan cannot miss them.
+
+7. **Stale `running` recovery (HIGH 1).** A `ner-backfill` job left `running` by
+   a crashed Dream must be recoverable, not permanent. Dedup must treat stale
+   `running` as inactive. See §5.4 (active definition) + §5.5
+   (`resetStaleJobsForNames`, 30-min TTL).
+
+8. **No retry starvation in one Dream run (HIGH 2).** A failing job is attempted
+   **at most once per Dream stage**; remaining attempts wait for the next cycle.
+   No claim→fail→claim loop on the same id. See §5.5 (`snapshotEligibleJobIds`
+   + `claimJobById`).
+
+9. **Do not overload `IngestResult.ner` (HIGH 3).** `ner` stays
+   `NerPipelineResult | null`; defer sets `ner = null` + a separate `nerPending?
+   : boolean`. `format-result.ts` needs no change. See §5.4.
+
+10. **`defer` without submitter fails fast (MEDIUM).** No silent degrade-to-sync
+    in production. Construction throws if `defer` and no submitter; tests may
+    omit the submitter only in `sync`/`off`. See §5.3.
+
 ## 5. Detailed design
 
 ### 5.1 Config & env
@@ -139,7 +162,7 @@ Effective mode per ingest call:
 skipNer === true           → NO_NER_NO_MARKER   (overrides everything; acceptance #5)
 effective mode = "off"     → NO_NER_NO_MARKER
 effective mode = "sync"    → SYNC_NER           (current behavior, unchanged)
-effective mode = "defer"   → DEFER_NER          (no await; submit job; ner: "pending")
+effective mode = "defer"   → DEFER_NER          (no await; submit job; ner=null, nerPending=true)
 ```
 
 Implementation site: the NER gate in `ingestCore()` (`ingest.ts:428-437`) and
@@ -151,65 +174,105 @@ in all modes — derived page types never NER and never get a marker.
 
 - Define `DeferredNerSubmitter` (above) in `src/core/ingest.ts` (or a small
   adjacent types file) — keep `ingest.ts` focused.
-- `IngestManager` constructor gains two optional params: the resolved default
-  `nerMode` and a `deferredNerSubmitter?`. When the submitter is absent
-  (e.g. tests that only exercise sync), defer mode degrades to **sync** with a
-  one-time logger warning — never crashes.
+- `IngestManager` constructor gains two params: the resolved default `nerMode`
+  and a `deferredNerSubmitter?`.
+- **`defer` without a submitter must NOT silently degrade to sync** (review
+  MEDIUM): that hides wiring bugs and reintroduces the synchronous LLM latency
+  #252 removes. Production paths (`buildContext`, CLI ingest) wire the submitter
+  whenever effective mode is `defer`; if construction sees `defer` with no
+  submitter it **fails fast** (throws during construction/config validation).
+  Tests may construct `IngestManager` without a submitter **only** when mode is
+  `sync` or `off`.
 - Adapter: a thin `JobQueueNerSubmitter implements DeferredNerSubmitter` wraps
   `JobQueue` + the dedup query. Lives next to `jobs.ts` or `context.ts`.
 
 ### 5.4 Pending marker (jobs table) + dedup
 
 - `submitDeferredNer({ slug, contentHash?, pageType? })`:
-  1. Query existing `ner-backfill` jobs in `pending`/`running` whose
-     `json_extract(data, '$.slug')` equals `slug`.
-     - Add a focused DB method, e.g.
-       `findPendingJobsBySlug(name, slug): { id; status; data }[]` using
-       `json_extract` (SQLite JSON1). Avoids a full table scan pattern.
-  2. If any exists → return `null` (deduped). Do **not** touch the running job.
+  1. Query existing `ner-backfill` jobs for this slug via a focused DB helper
+     `findActiveNerJobs(slug)` using `json_extract(data, '$.slug')` (SQLite
+     JSON1). **"Active"** = `status = 'pending'` **or** (`status = 'running'`
+     **and not stale** — stale defined in §5.5). A stale `running` job does
+     **not** count as active; it must never permanently suppress new work
+     (review HIGH 1).
+  2. If an active job exists → return `null` (deduped). The submit path never
+     mutates a running job.
   3. Else → `jobs.submit("ner-backfill", { slug, contentHash?, pageType? })`,
      return job id.
 - Job `data` shape (stable contract for the processor):
   `{ slug: string; contentHash?: string; pageType?: string }`.
-- `result.ner` for the ingest return value carries `"pending"` (internal/raw
-  signal only — not surfaced noisily to end users).
+- **Ingest return contract (review HIGH 3):** `IngestResult.ner` stays
+  `NerPipelineResult | null` — defer mode sets `ner = null` (no extraction ran
+  synchronously). The pending signal is a **separate** field `nerPending?:
+  boolean` (defer → `true`); existing `nerSkipped` is unchanged.
+  `format-result.ts` already gates the NER block on `result.ner != null`, so a
+  defer ingest renders no NER line — user-facing display stays quiet with **zero
+  formatter changes**.
 
 ### 5.5 Dream stage 1.5 processor
 
 New stage in `runDream()` (`src/core/dream.ts`), placed after Stage 1 (sync)
-and before Stage 2 (enrich):
+and before Stage 2 (enrich). Two review-driven invariants shape the loop:
+
+- **HIGH 1 — stale `running` recovery.** If Dream crashes mid-job, the
+  `ner-backfill` job stays `running` forever and (per §5.4 dedup) would block
+  the slug permanently. `claimJobForNames` only claims `pending`
+  (`sqlite.ts:1269`) and `retryJob` only resets `failed` (`:1349`), so neither
+  recovers stale `running`. Before claiming, the stage resets stale `running`
+  `ner-backfill` jobs back to `pending`. **Stale** = `started_at` older than a
+  bounded TTL (default **30 min**, aligned with the Dream lock TTL
+  `dream.ts:55`). Via a focused DB helper `resetStaleJobsForNames(names,
+  ttlMs)`.
+- **HIGH 2 — no in-run retry starvation.** `failJob()` (`sqlite.ts:1305-1311`)
+  sets a failed job back to `pending` when `attempts < max_attempts`, and
+  claiming increments `attempts` (`:1259`). A naive claim→fail→claim loop would
+  re-claim the same job immediately (still the oldest pending) and burn all
+  retries in one Dream run, starving later jobs. The stage therefore
+  **snapshots** the eligible pending job ids once at start and processes each id
+  **at most once** this run; a job that fails now stays pending until the *next*
+  Dream cycle, which also spaces out retries naturally.
 
 ```
 stage 1.5 / ner-backfill:
+  // (a) recover stale running from a crashed previous Dream (HIGH 1)
+  db.resetStaleJobsForNames(["ner-backfill"], STALE_TTL_MS)
+
+  // (b) snapshot eligible ids ONCE — each processed at most once this run (HIGH 2)
+  ids = db.snapshotEligibleJobIds(["ner-backfill"], maxItems)  // pending only,
+                                                              // ORDER BY priority,id
   processed = 0; failed = 0; timed_out = 0; skipped = 0
-  for i in [0, maxItems):
-      job = db.claimJobForNames(["ner-backfill"])     // single-job claim; loop
-      if !job: break
+  for id in ids:
+      job = db.claimJobById(id)                  // claim by id; null if no longer pending
+      if !job: continue
       slug = JSON.parse(job.data).slug
-      resolved = resolveNerBody(pages, db, slug)       // §5.6 fallback chain
+      resolved = resolveNerBody(pages, db, slug)                 // §5.6
       if !resolved:
-          db.failJob(job.id, "no usable body (sealed/no raw chunks)")
-          failed++; continue
+          db.failJob(id, "no usable body (sealed/no raw chunks)"); failed++; continue
       try:
-          pipeline.processNer(slug, resolved.body, resolved.type, …)  // reuse existing
-          db.completeJob(job.id)
-          processed++
+          pipeline.processNer(slug, resolved.body, resolved.type, …)   // reuse existing
+          db.completeJob(id); processed++
       catch e if isNerTimeoutError(e):
-          db.failJob(job.id, "NER_TIMEOUT")            // attempts++, retryable
-          timed_out++
+          db.failJob(id, "NER_TIMEOUT"); timed_out++     // retryable next Dream run
       catch e:
-          db.failJob(job.id, msg)                       // attempts++, retryable
-          failed++
+          db.failJob(id, msg); failed++
   onStageProgress("ner_backfill", { processed, failed, timed_out, skipped })
 ```
 
-- `maxItems` default **50** (bounded per run; remaining jobs wait for the next
-  Dream cycle).
+- `maxItems` default **50** (bounded per run; overflow waits for the next cycle).
 - Reuses `pipeline.processNer` → existing `applyExtraction` (stubs, links,
   timeline, facts). Zero new NER logic.
-- `claimJobForNames` returns a single job (`sqlite.ts:1265`); the loop claims
-  one at a time. No new batch-claim DB method needed.
-- **No** handler registered with `ctx.jobs` for `ner-backfill` (§4.2 #5).
+- **New focused DB helpers** (`sqlite.ts` job section):
+  - `resetStaleJobsForNames(names, ttlMs)` — `UPDATE jobs SET status='pending',
+    started_at=NULL WHERE name IN (…) AND status='running' AND started_at <
+    datetime('now','-$ttlMs seconds')`.
+  - `snapshotEligibleJobIds(names, limit)` — `SELECT id FROM jobs WHERE
+    status='pending' AND name IN (…) ORDER BY priority DESC, id ASC LIMIT ?`.
+  - `claimJobById(id)` — claims a specific id (`status='running'`,
+    `attempts+1`, `started_at=now`); returns null if the row is no longer
+    pending (race-safe; also lets the snapshot skip ids claimed by another
+    process).
+- **No** handler registered with `ctx.jobs` for `ner-backfill` (§4.2 #5) — the
+  always-on `JobQueue.work()` loop never touches these jobs.
 
 ### 5.6 Sealed-page body fallback (`resolveNerBody`)
 
@@ -277,6 +340,12 @@ resolveNerBody(pages, db, slug): { body: string; type: string } | null
   error → `failJob` (attempts++). When `attempts >= max_attempts`, the job lands
   in terminal `failed` state + an `ingest_log` entry; it does **not** retry
   forever (bounded noise).
+- **Crash-safe via stale-running recovery.** A Dream crash mid-job leaves the
+  job `running`; the next Dream run resets stale `running` back to `pending`
+  (§5.5), so no slug is permanently stuck and dedup (§5.4) never blocks on a
+  dead job.
+- **Retries are bounded per cycle.** A failing job is attempted at most once per
+  Dream run (§5.5 snapshot); attempts are not burned down in a single run.
 - **Dedup prevents job storms** on repeated updates of the same slug.
 - **Sealed-body fallback prevents empty-input NER** (would produce junk
   entities); missing body → clear fail, no extraction.
@@ -299,8 +368,13 @@ resolveNerBody(pages, db, slug): { body: string; type: string } | null
 | 12 | Sealed page with raw chunks → processor reconstructs body, produces entities | defer→dream |
 | 13 | No usable body (sealed, no raw chunks) → job fails with clear reason, no NER | defer→dream |
 | 14 | Existing NER timeout tests still pass (#229 regression) | sync |
+| 15 | Stale `running` `ner-backfill` (`started_at` > TTL) → Dream resets to `pending` and processes it | defer→dream |
+| 16 | Fresh `running` same slug → submit still dedupes (counts as active) | defer |
+| 17 | A failing job is attempted **at most once** per Dream run; another pending job in the same snapshot still gets processed; attempts not exhausted in one run | defer→dream |
+| 18 | Defer ingest returns `ner = null`, `nerPending = true`; `format-result` renders no NER line (existing formatter behavior unchanged) | defer |
+| 19 | `buildContext` + CLI ingest wire the submitter under `defer`; constructing `IngestManager` with `defer` and no submitter throws | wiring |
 
-Add to `tests/core/ingest.test.ts` (defer/skipNer/off/dedup) and a new focused
+Add to `tests/core/ingest.test.ts` (defer/skipNer/off/dedup/return-contract/wiring) and a new focused
 `tests/core/ner-backfill.test.ts` (processor + sealed fallback). Mock LLM via
 the existing `createMockLLM` sequential-response pattern.
 
@@ -341,6 +415,9 @@ why full check was deferred.
 | MCP ingest option | `src/mcp/tools/ingest.ts` | `:31-39` |
 | CLI flag + submitter wiring | `src/cli/commands/content.ts` | `:16-37` |
 | Submitter wiring | `src/mcp/context.ts` | `:78`, `:81` |
+| `IngestResult.nerPending` field | `src/core/ingest.ts` | `IngestResult` (`:93`) |
+| Stale / snapshot / by-id job helpers | `src/storage/sqlite.ts` | job section (after `:1277`) |
+| Formatter | `src/mcp/tools/format-result.ts` | **no change** (`:78` gates on `ner != null`) |
 
 ## 11. Review focus (reject criteria, from issue)
 
