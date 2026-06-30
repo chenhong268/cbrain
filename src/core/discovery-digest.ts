@@ -40,12 +40,22 @@ function parseJsonSafe(raw: string | null | undefined): Record<string, unknown> 
   catch { return {}; }
 }
 
+/**
+ * #246 — Types excluded from the DEFAULT discovery digest feed (daily run_discovery
+ * digest, default read_discoveries). similar_entity is a governance/cleanup lane and
+ * must not pollute the insight digest. KM types were already excluded upstream.
+ */
+export function isDigestExcluded(type: string): boolean {
+  return type === "similar_entity";
+}
+
 export function shouldFilterDiscovery(r: DiscoveryRow): string | null {
   // #244 — Knowledge Map surface: always surface (already limited at production).
   if (r.type === "knowledge_map_isolation" || r.type === "knowledge_map_bridge") {
     return null;
   }
   if (r.type === "gap") return null;
+  if (r.type === "similar_entity") return null;
 
   const meta = parseJsonSafe(r.metadata);
 
@@ -153,6 +163,27 @@ export function formatDigestCard(
         why_it_matters: "这个主题把多个不同的知识领域连在了一起。",
         evidence: "它同时和不止一个知识领域相关。",
         suggested_action: "做一次复盘，巩固它已有的连接。",
+      };
+    }
+    case "similar_entity": {
+      const [a, b] = slugs;
+      const titleA = resolveTitle(a, entityLookup);
+      const titleB = resolveTitle(b, entityLookup);
+      const matchKind = meta.match_kind as string | undefined;
+      const kindLabel =
+        matchKind === "alias_shadow_page" ? "名称已是别名的残留页"
+        : matchKind === "shared_alias" ? "共享别名"
+        : matchKind === "name_exact" ? "名称相同"
+        : matchKind === "name_normalized" ? "名称仅大小写/标点不同"
+        : matchKind === "name_substring" ? "名称相互包含"
+        : matchKind === "edit_distance" ? "名称仅有细微拼写差异"
+        : "名称高度相似";
+      return {
+        id: r.id,
+        title: `可能重复：${titleA} 与 ${titleB}`,
+        why_it_matters: `两条记忆${kindLabel}，类型相同或相近，疑似指向同一对象，合并前请核对。`,
+        evidence: `${kindLabel}（置信度：${r.actionable === "high" ? "高" : "中"}）。`,
+        suggested_action: "用 merge_entities 先 dry-run 核对，确认后再执行合并。",
       };
     }
     default: {

@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { DiscoveryManager } from "../../core/discovery.js";
 import type { DiscoveryType } from "../../core/discovery.js";
-import { formatDiscoveryDigest, formatKnowledgeMapSurface } from "../../core/discovery-digest.js";
+import { formatDiscoveryDigest, formatKnowledgeMapSurface, isDigestExcluded } from "../../core/discovery-digest.js";
 import { formatDiscoveriesEnvelope } from "./format-result.js";
 
 const TYPE_LABELS: Record<string, string> = {
@@ -218,7 +218,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     const newRows = ctx.db.getUnseenDiscoveries(30);
     const entityLookup = (slug: string) => ctx.db.getPage(slug);
     // #244 — split KM rows out so they never compete for the normal top-3 quota.
-    const normalRows = newRows.filter(r => !KM_TYPES.has(r.type));
+    const normalRows = newRows.filter(r => !KM_TYPES.has(r.type) && !isDigestExcluded(r.type));
     const digest = formatDiscoveryDigest(normalRows, entityLookup, 3);
     const kmSurface = buildKmSurface(ctx.db, entityLookup);
     const combinedDisplay = combineDiscoveryDisplay(
