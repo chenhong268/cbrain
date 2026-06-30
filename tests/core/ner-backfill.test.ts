@@ -3,7 +3,44 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite";
 import { NER_BACKFILL_STALE_TTL_MS, NER_BACKFILL_JOB } from "../../src/core/ner-backfill";
-import { JobQueueNerSubmitter } from "../../src/core/ner-backfill";
+import { JobQueueNerSubmitter, resolveNerBody } from "../../src/core/ner-backfill";
+import { IngestManager } from "../../src/core/ingest";
+import { PageManager } from "../../src/core/page";
+import type { EmbeddingProvider } from "../../src/embedding/provider";
+
+function createMockEmbeddingProvider(): EmbeddingProvider {
+  return {
+    dimensions: 128,
+    embed: async (text: string) => {
+      const vec = new Array(128).fill(0);
+      for (let i = 0; i < text.length; i++) {
+        vec[i % 128] += text.charCodeAt(i) / 65536;
+      }
+      return { embedding: vec, tokenCount: text.length };
+    },
+    embedBatch: async (texts: string[]) =>
+      texts.map((t) => ({
+        embedding: new Array(128).fill(0),
+        tokenCount: t.length,
+      })),
+  };
+}
+
+function createMockLanceDB() {
+  return {
+    connect: async () => {},
+    addChunks: async () => {},
+    search: async () => [],
+    fullTextSearch: async () => [],
+    deleteByPageSlug: async () => {},
+    deleteRawChunksByPageSlug: async () => {},
+    deleteL1VectorByPageSlug: async () => {},
+    readRawVectorRows: async () => [],
+    readL1VectorRows: async () => [],
+    close: async () => {},
+    createFTSIndex: async () => {},
+  };
+}
 
 const testDir = "/tmp/cbrain-test-ner-backfill";
 const dbPath = join(testDir, "test.sqlite");
@@ -125,5 +162,43 @@ describe("JobQueueNerSubmitter (#252)", () => {
     db.rawDb.prepare("UPDATE jobs SET started_at = datetime('now','-2 hours') WHERE id = ?").run(first);
     // stale running is not "active" → submit proceeds
     expect(s.submitDeferredNer({ slug: "records/foo" })).not.toBeNull();
+  });
+});
+
+describe("resolveNerBody (#252)", () => {
+  test("returns current body + type for a normal (unsealed) page", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const ingest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const res = await ingest.ingest({ content: "匿名未密封页正文", type: "text", title: "匿名页", skipNer: true });
+    const pm = new PageManager(db, testDir);
+    const out = resolveNerBody(db, pm, res.slug);
+    expect(out).not.toBeNull();
+    expect(out!.type).toBe("record");
+    expect(out!.body).toContain("匿名未密封页正文");
+  });
+
+  test("sealed page falls back to summary_level=0 raw chunks", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const ingest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const res = await ingest.ingest({ content: "匿名密封页原始内容片段", type: "text", title: "密封页", skipNer: true });
+    // simulate sealing: insert an L1 summary chunk (summary_level=1)
+    db.rawDb.prepare(
+      "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 1)"
+    ).run(res.slug, "这是摘要，不是原始正文");
+    const pm = new PageManager(db, testDir);
+    const out = resolveNerBody(db, pm, res.slug);
+    expect(out).not.toBeNull();
+    expect(out!.body).toContain("匿名密封页原始内容片段");
+    expect(out!.body).not.toContain("这是摘要");
+  });
+
+  test("sealed page with no raw chunks → null (clear fail)", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const ingest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const res = await ingest.ingest({ content: "x", type: "text", title: "空密封", skipNer: true });
+    db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 1)").run(res.slug, "sum");
+    db.rawDb.prepare("DELETE FROM chunks WHERE page_slug = ? AND summary_level = 0").run(res.slug);
+    const pm = new PageManager(db, testDir);
+    expect(resolveNerBody(db, pm, res.slug)).toBeNull();
   });
 });
