@@ -55,6 +55,7 @@ describe("similar-entity-detector scaffolding", () => {
     for (let i = 0; i < 60; i++) pages.push(page(`entity/p${i}`, `共享${i}号`));
     const r = detectSimilarEntities(input(pages), { maxBucketSize: 50, maxPairsEvaluated: 5000 });
     expect(r.pairsEvaluated).toBeLessThan(60);
+    expect(r.truncated).toBe(true);
   });
 });
 
@@ -105,6 +106,18 @@ describe("similar-entity-detector strategies", () => {
     const r = detectSimilarEntities(input([
       page("entity/a", "实体A"), page("entity/b", "实体A"),
     ], { aliases }));
+    expect(r.candidates[0].matchKind).toBe("name_exact");
+  });
+
+  test("C1: identical titles stay name_exact even if aliases table leaks own-title form", () => {
+    // entity/b's registered aliases happen to contain its own-title normalized form
+    // (NER whitespace/case variants can cause this). Identical titles must still be name_exact.
+    const aliases = new Map<string, Set<string>>();
+    aliases.set("entity/b", new Set(["实体a"])); // normalized form of the shared title
+    const r = detectSimilarEntities(input([
+      page("entity/a", "实体A"), page("entity/b", "实体A"),
+    ], { aliases }));
+    expect(r.candidates).toHaveLength(1);
     expect(r.candidates[0].matchKind).toBe("name_exact");
   });
 

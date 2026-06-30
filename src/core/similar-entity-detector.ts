@@ -94,8 +94,10 @@ export function detectSimilarEntities(
   // Generate unique candidate pairs from discriminative buckets.
   const seenPairs = new Set<string>();
   const pairList: Array<[string, string]> = [];
+  let truncated = false;
   for (const [, slugs] of index) {
-    if (slugs.length < 2 || slugs.length > opts.maxBucketSize) continue;
+    if (slugs.length < 2) continue;
+    if (slugs.length > opts.maxBucketSize) { truncated = true; continue; }
     for (let i = 0; i < slugs.length; i++) {
       for (let j = i + 1; j < slugs.length; j++) {
         const [a, b] = slugs[i] < slugs[j] ? [slugs[i], slugs[j]] : [slugs[j], slugs[i]];
@@ -108,7 +110,6 @@ export function detectSimilarEntities(
   }
 
   let pairsEvaluated = 0;
-  let truncated = false;
   const candidates: SimilarEntityCandidate[] = [];
   for (const [a, b] of pairList) {
     if (pairsEvaluated >= opts.maxPairsEvaluated) { truncated = true; break; }
@@ -167,7 +168,13 @@ function evaluatePair(
   const normA = normalizeForComparison(pa.title);
   const normB = normalizeForComparison(pb.title);
 
-  // Priority 1: alias_shadow_page (registered aliases ONLY — no own title).
+  // Priority 1: name_exact (identical raw titles are unambiguously duplicates;
+  // this also defends against aliases-table own-title leaks — #246 final review C1).
+  if (pa.title.toLowerCase() === pb.title.toLowerCase()) {
+    return buildCandidate(slugA, slugB, "name_exact", 1.0, typeGate, input, pageBySlug);
+  }
+
+  // Priority 2: alias_shadow_page (registered aliases ONLY — titles now differ).
   const aTitleAliasedToB = normA.length > 0 && aliasesB.has(normA);
   const bTitleAliasedToA = normB.length > 0 && aliasesA.has(normB);
   if (aTitleAliasedToB || bTitleAliasedToA) {
@@ -175,15 +182,10 @@ function evaluatePair(
     return buildCandidate(slugA, slugB, "alias_shadow_page", 1.0, typeGate, input, pageBySlug, { aliasDirection: direction });
   }
 
-  // Priority 2: shared_alias
+  // Priority 3: shared_alias
   const shared = [...aliasesA].filter((x) => aliasesB.has(x));
   if (shared.length > 0) {
     return buildCandidate(slugA, slugB, "shared_alias", 0.85, typeGate, input, pageBySlug, { sharedAlias: shared });
-  }
-
-  // Priority 3: name_exact (case-insensitive raw equality)
-  if (pa.title.toLowerCase() === pb.title.toLowerCase()) {
-    return buildCandidate(slugA, slugB, "name_exact", 1.0, typeGate, input, pageBySlug);
   }
 
   // Priority 4: name_normalized

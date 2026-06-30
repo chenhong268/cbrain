@@ -35,8 +35,8 @@ describe("DiscoveryManager.runSimilarEntityDetection (#246)", () => {
   test("seeds two case-insensitive duplicate titles → persists one similar_entity discovery", async () => {
     // name_exact is case-insensitive in the detector; raw titles differ to avoid
     // the pages.title UNIQUE constraint (idx_pages_title_uniq).
-    seedPage("entity/a", "AlphaCorp", "entity/company", 3);
-    seedPage("entity/b", "alphacorp", "entity/company", 1);
+    seedPage("entity/a", "公司Alpha", "entity/company", 3);
+    seedPage("entity/b", "公司alpha", "entity/company", 1);
 
     const mgr = new DiscoveryManager(db);
     const report = await mgr.runSimilarEntityDetection();
@@ -54,8 +54,8 @@ describe("DiscoveryManager.runSimilarEntityDetection (#246)", () => {
   });
 
   test("re-running does not duplicate visible rows (recurrence)", async () => {
-    seedPage("entity/a", "BetaCorp");
-    seedPage("entity/b", "betacorp");
+    seedPage("entity/a", "公司Beta");
+    seedPage("entity/b", "公司beta");
 
     const mgr = new DiscoveryManager(db);
     await mgr.runSimilarEntityDetection();
@@ -66,8 +66,8 @@ describe("DiscoveryManager.runSimilarEntityDetection (#246)", () => {
   });
 
   test("dismissed candidate does NOT resurrect as pending", async () => {
-    seedPage("entity/a", "GammaCorp");
-    seedPage("entity/b", "gammacorp");
+    seedPage("entity/a", "公司Gamma");
+    seedPage("entity/b", "公司gamma");
 
     const mgr = new DiscoveryManager(db);
     await mgr.runSimilarEntityDetection();
