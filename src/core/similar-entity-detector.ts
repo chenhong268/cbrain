@@ -172,37 +172,37 @@ function evaluatePair(
   const bTitleAliasedToA = normB.length > 0 && aliasesA.has(normB);
   if (aTitleAliasedToB || bTitleAliasedToA) {
     const direction = aTitleAliasedToB && bTitleAliasedToA ? "both" : aTitleAliasedToB ? "aToB" : "bToA";
-    return buildCandidate(slugA, slugB, "alias_shadow_page", 1.0, typeGate, input, { aliasDirection: direction });
+    return buildCandidate(slugA, slugB, "alias_shadow_page", 1.0, typeGate, input, pageBySlug, { aliasDirection: direction });
   }
 
   // Priority 2: shared_alias
   const shared = [...aliasesA].filter((x) => aliasesB.has(x));
   if (shared.length > 0) {
-    return buildCandidate(slugA, slugB, "shared_alias", 0.85, typeGate, input, { sharedAlias: shared });
+    return buildCandidate(slugA, slugB, "shared_alias", 0.85, typeGate, input, pageBySlug, { sharedAlias: shared });
   }
 
   // Priority 3: name_exact (case-insensitive raw equality)
   if (pa.title.toLowerCase() === pb.title.toLowerCase()) {
-    return buildCandidate(slugA, slugB, "name_exact", 1.0, typeGate, input);
+    return buildCandidate(slugA, slugB, "name_exact", 1.0, typeGate, input, pageBySlug);
   }
 
   // Priority 4: name_normalized
   if (normA.length > 0 && normA === normB) {
-    return buildCandidate(slugA, slugB, "name_normalized", 0.95, typeGate, input);
+    return buildCandidate(slugA, slugB, "name_normalized", 0.95, typeGate, input, pageBySlug);
   }
 
   // Priority 5: name_substring
   const [shorterN, longerN] = normA.length <= normB.length ? [normA, normB] : [normB, normA];
   if (shorterN.length >= 2 && longerN.includes(shorterN) && isSignificantSubstring(shorterN, longerN)) {
     const ratio = shorterN.length / longerN.length;
-    return buildCandidate(slugA, slugB, "name_substring", 0.6 + ratio * 0.3, typeGate, input);
+    return buildCandidate(slugA, slugB, "name_substring", 0.6 + ratio * 0.3, typeGate, input, pageBySlug);
   }
 
   // Priority 6: edit_distance (bounded)
   const dist = boundedLevenshtein(normA, normB, 2);
   if (dist !== null && normA.length > 0) {
     const score = Math.max(1 - dist / Math.max(normA.length, normB.length), 0.5);
-    return buildCandidate(slugA, slugB, "edit_distance", score, typeGate, input, { editDistance: dist });
+    return buildCandidate(slugA, slugB, "edit_distance", score, typeGate, input, pageBySlug, { editDistance: dist });
   }
 
   return null;
@@ -221,9 +221,10 @@ function buildCandidate(
   nameScore: number,
   typeGate: "same_type" | "affine_type",
   input: DetectorInput,
+  pageBySlug: Map<string, DetectorPage>,
   extra: CandidateExtra = {},
 ): SimilarEntityCandidate {
-  const recommended = computeRecommendedTarget(slugA, slugB, kind, input, extra.aliasDirection);
+  const recommended = computeRecommendedTarget(slugA, slugB, kind, input, pageBySlug, extra.aliasDirection);
   const cand: SimilarEntityCandidate = {
     slugA, slugB, matchKind: kind, nameScore, typeGate,
     actionable: computeActionable(kind, typeGate),
@@ -246,6 +247,7 @@ function computeRecommendedTarget(
   slugB: string,
   kind: SimilarMatchKind,
   input: DetectorInput,
+  pageBySlug: Map<string, DetectorPage>,
   aliasDirection?: "aToB" | "bToA" | "both",
 ): { target?: string; ambiguous?: boolean } {
   if (kind === "alias_shadow_page") {
@@ -259,10 +261,10 @@ function computeRecommendedTarget(
 
   const qa = input.qualityBySlug.get(slugA);
   const qb = input.qualityBySlug.get(slugB);
-  const pageBySlug = new Map<string, DetectorPage>();
-  for (const p of input.pages) pageBySlug.set(p.slug, p);
 
-  // 1. non-stub beats stub
+  // Missing quality → treat as stub: a merge-SINK decision must never recommend
+  // an unknown page as the target. (Orchestrator always supplies quality, so this
+  // is purely defensive.)
   const stubA = qa?.isStub ?? true;
   const stubB = qb?.isStub ?? true;
   if (stubA !== stubB) return pick(!stubA);
