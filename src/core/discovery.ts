@@ -5,7 +5,7 @@ import { getOntology } from "../ontology/loader.js";
 import { normalizeForComparison } from "./name-similarity.js";
 import {
   detectSimilarEntities,
-  type DetectorInput, type DetectorPage, type PageQuality,
+  type DetectorInput, type DetectorPage, type PageQuality, type SimilarEntityCandidate,
 } from "./similar-entity-detector.js";
 
 export type DiscoveryType = "bridge" | "trend" | "gap" | "contradiction" | "similar_entity";
@@ -138,7 +138,7 @@ export class DiscoveryManager {
    * runs the pure detector, and feeds results through the existing dedup →
    * upsertDiscovery loop. Persists candidates only; merges nothing.
    */
-  async runSimilarEntityDetection(): Promise<DiscoveryReport> {
+  async runSimilarEntityDetection(options: { dryRun?: boolean } = {}): Promise<DiscoveryReport & { candidates?: SimilarEntityCandidate[] }> {
     this.llmBudget = MAX_LLM_BUDGET;
     const byType: Record<string, number> = {};
     const byActionable: Record<string, number> = { high: 0, medium: 0, low: 0 };
@@ -182,6 +182,19 @@ export class DiscoveryManager {
       areTypesAffine: (a, b) => getOntology().areTypesAffine(a, b),
     };
     const report = detectSimilarEntities(detectorInput);
+
+    if (options.dryRun) {
+      const byActionableDry = { high: 0, medium: 0, low: 0 };
+      for (const c of report.candidates) byActionableDry[c.actionable]++;
+      return {
+        total: report.candidates.length,
+        byType: { similar_entity: report.candidates.length },
+        byActionable: byActionableDry,
+        highActionable: [],
+        enrichment: { skipped: true, reason: "dry_run", llmAvailable: !!this.llm, attempted: 0, saved: 0, errors: 0 },
+        candidates: report.candidates,
+      };
+    }
 
     const seen = new Set<string>();
     let newCount = 0;

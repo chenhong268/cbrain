@@ -102,7 +102,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     inputSchema: {
       limit: z.number().optional().default(3).describe("Max discoveries to return"),
       actionableFilter: z.enum(["high", "medium", "low"]).optional().describe("Filter by actionable level"),
-      typeFilter: z.enum(["bridge", "trend", "gap", "contradiction", "knowledge_map_isolation", "knowledge_map_bridge"]).optional().describe("Filter by discovery type"),
+      typeFilter: z.enum(["bridge", "trend", "gap", "contradiction", "knowledge_map_isolation", "knowledge_map_bridge", "similar_entity"]).optional().describe("Filter by discovery type"),
       debug: z.boolean().optional().default(false).describe("Include internal debug info"),
     },
   }, async ({ limit, actionableFilter, typeFilter, debug }) => {
@@ -197,7 +197,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       "可用 read_discoveries 查看历史发现，用 update_discovery_status 标记处理状态。" +
       "建议每天运行一次。",
     inputSchema: {
-      types: z.array(z.enum(["bridge", "trend", "gap", "contradiction"])).optional()
+      types: z.array(z.enum(["bridge", "trend", "gap", "contradiction", "similar_entity"])).optional()
         .describe("Detection types to run. Default: bridge, trend, gap."),
       debug: z.boolean().optional().default(false).describe("Include raw detection report"),
     },
@@ -206,13 +206,23 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     // ReflectManager is slower (BFS + LLM suggestions) and overlaps with bridge detection.
     // Contradiction detection is LLM-heavy — skip unless explicitly requested.
     const requested = types as DiscoveryType[] | undefined;
-    const fastTypes: DiscoveryType[] = requested
-      ? requested.filter(t => t !== "contradiction")
+    const wantsSimilar = requested?.includes("similar_entity") ?? false;
+    const normalRequested = requested ? requested.filter((t) => t !== "similar_entity") : undefined;
+
+    const fastTypes: DiscoveryType[] = normalRequested
+      ? normalRequested.filter((t) => t !== "contradiction")
       : ["bridge", "trend", "gap"];
-    const runContradiction = requested?.includes("contradiction") ?? false;
+    const runContradiction = normalRequested?.includes("contradiction") ?? false;
 
     const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
     const report = await discoveryMgr.runDiscovery(runContradiction ? undefined : fastTypes);
+    if (wantsSimilar) {
+      const simReport = await discoveryMgr.runSimilarEntityDetection();
+      report.total += simReport.total;
+      for (const [k, v] of Object.entries(simReport.byType)) report.byType[k] = (report.byType[k] ?? 0) + v;
+      for (const [k, v] of Object.entries(simReport.byActionable)) report.byActionable[k] = (report.byActionable[k] ?? 0) + v;
+      report.highActionable.push(...simReport.highActionable);
+    }
 
     // User-facing path: format new discoveries through the digest pipeline
     const newRows = ctx.db.getUnseenDiscoveries(30);
@@ -275,6 +285,80 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       content: [{
         type: "text" as const,
         text: JSON.stringify({ display, summary, raw, result_summary: summaryText, ...payload }, null, 2),
+      }],
+    };
+  });
+
+  server.registerTool("find_similar_entities", {
+    description:
+      "查找可能重复的实体/概念页面对，供人工或 Agent 核对后通过 merge_entities 合并。" +
+      "默认会把候选写入 discoveries 生命周期（dismissed/resolved 不会重复打扰）。" +
+      "返回 display（用户可见自然语言）和 candidates（含 slug 与推荐合并目标，供调用 merge_entities）。" +
+      "绝不自动合并或写别名。",
+    inputSchema: {
+      limit: z.number().optional().default(20).describe("Max candidates to return"),
+      scope: z.enum(["entity", "concept"]).optional().describe("Restrict to slug namespace (entity/% or concept/%)"),
+      dryRun: z.boolean().optional().default(false).describe("If true, do not persist candidates"),
+    },
+  }, async ({ limit, scope, dryRun }) => {
+    const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
+    const report = await discoveryMgr.runSimilarEntityDetection({ dryRun });
+
+    interface CandidateOut {
+      slug_a: string; slug_b: string; match_kind: string | null; type_gate: string | null;
+      recommended_target: string | null; ambiguous_target: boolean; confidence: "高" | "中";
+    }
+    const cap = limit ?? 20;
+    let out: CandidateOut[] = [];
+    if (dryRun && report.candidates) {
+      out = report.candidates.map((c) => ({
+        slug_a: c.slugA, slug_b: c.slugB, match_kind: c.matchKind, type_gate: c.typeGate,
+        recommended_target: c.recommendedTarget ?? null, ambiguous_target: c.ambiguousTarget === true,
+        confidence: c.actionable === "high" ? "高" : "中",
+      }));
+    } else {
+      const rows = ctx.db.getDiscoveriesByType("similar_entity", Math.max(cap, 20));
+      out = rows.map((r) => {
+        const [a, b] = JSON.parse(r.entities) as string[];
+        const meta = r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {};
+        return {
+          slug_a: a, slug_b: b,
+          match_kind: (meta.match_kind as string) ?? null,
+          type_gate: (meta.type_gate as string) ?? null,
+          recommended_target: (meta.recommended_target as string) ?? null,
+          ambiguous_target: meta.ambiguous_target === true,
+          confidence: r.actionable === "high" ? "高" : "中",
+        };
+      });
+    }
+    if (scope === "entity") out = out.filter((c) => c.slug_a.startsWith("entity/"));
+    if (scope === "concept") out = out.filter((c) => c.slug_a.startsWith("concept/"));
+    out = out.slice(0, cap);
+
+    const titleFor = (slug: string) => ctx.db.getPage(slug)?.title ?? slug;
+    const kindLabel = (k: string | null) =>
+      k === "alias_shadow_page" ? "名称已是别名的残留页"
+      : k === "shared_alias" ? "共享别名"
+      : k === "name_exact" ? "名称相同"
+      : k === "name_normalized" ? "名称仅大小写/标点不同"
+      : k === "name_substring" ? "名称相互包含"
+      : k === "edit_distance" ? "名称仅有细微拼写差异"
+      : "名称高度相似";
+
+    const display = out.length > 0
+      ? out.map((c) =>
+          `### 可能重复：${titleFor(c.slug_a)} 与 ${titleFor(c.slug_b)}\n${kindLabel(c.match_kind)}（置信度：${c.confidence}）。疑似指向同一对象，合并前请核对。\n**建议**：用 merge_entities 先 dry-run 核对，确认后再执行合并。`
+        ).join("\n\n---\n\n")
+      : "暂无可能重复的实体。";
+
+    const summary = out.length > 0
+      ? `发现 ${out.length} 组可能重复的实体，请核对后用 merge_entities 合并。`
+      : "暂无可能重复的实体。";
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ display, summary, candidates: out, result_summary: summary }, null, 2),
       }],
     };
   });
