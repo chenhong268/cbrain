@@ -61,7 +61,7 @@ describe("similar-entity-detector scaffolding", () => {
 describe("similar-entity-detector strategies", () => {
   test("name_normalized: punctuation/case variants → high", () => {
     const r = detectSimilarEntities(input([
-      page("entity/a", "A.I. Helper"), page("entity/b", "ai helper"),
+      page("entity/a", "实体 A"), page("entity/b", "实体A"),
     ]));
     expect(r.candidates).toHaveLength(1);
     expect(r.candidates[0].matchKind).toBe("name_normalized");
@@ -70,7 +70,7 @@ describe("similar-entity-detector strategies", () => {
 
   test("name_substring: significant containment → high", () => {
     const r = detectSimilarEntities(input([
-      page("entity/a", "Claude"), page("entity/b", "Claude Code"),
+      page("entity/a", "实体甲"), page("entity/b", "实体甲公司"),
     ]));
     expect(r.candidates).toHaveLength(1);
     expect(r.candidates[0].matchKind).toBe("name_substring");
@@ -79,7 +79,7 @@ describe("similar-entity-detector strategies", () => {
 
   test("edit_distance: typo-like variant → medium", () => {
     const r = detectSimilarEntities(input([
-      page("entity/a", "Alpha Inc"), page("entity/b", "Alpho Inc"),
+      page("entity/a", "实体甲乙"), page("entity/b", "实体甲丙"),
     ]));
     expect(r.candidates).toHaveLength(1);
     expect(r.candidates[0].matchKind).toBe("edit_distance");
@@ -88,9 +88,9 @@ describe("similar-entity-detector strategies", () => {
 
   test("alias_shadow_page: A.title is B's registered alias → high, target=B", () => {
     const aliases = new Map<string, Set<string>>();
-    aliases.set("entity/b", new Set(["alpha"]));
+    aliases.set("entity/b", new Set(["实体甲"]));
     const r = detectSimilarEntities(input([
-      page("entity/a", "Alpha"), page("entity/b", "组织C"),
+      page("entity/a", "实体甲"), page("entity/b", "组织C"),
     ], { aliases }));
     expect(r.candidates).toHaveLength(1);
     const c = r.candidates[0];

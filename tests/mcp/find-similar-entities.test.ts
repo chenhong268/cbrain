@@ -133,8 +133,8 @@ describe("MCP find_similar_entities (#246)", () => {
   });
 
   test("no similar entities returns clean empty message", async () => {
-    seedPage(db, "entity/a", "太平洋保险");
-    seedPage(db, "entity/b", "珠穆朗玛峰");
+    seedPage(db, "entity/a", "实体甲集团");
+    seedPage(db, "entity/b", "实体乙工厂");
 
     const res = await tools.get("find_similar_entities")!({});
     const payload = JSON.parse(res.content[0].text);

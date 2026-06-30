@@ -13,7 +13,7 @@ describe("name-similarity", () => {
   });
 
   test("isSignificantSubstring guards", () => {
-    expect(isSignificantSubstring("claude", "claude code")).toBe(true);
+    expect(isSignificantSubstring("foo", "foo bar")).toBe(true);
     expect(isSignificantSubstring("数字化", "数字化转型")).toBe(true);
     expect(isSignificantSubstring("a", "ab")).toBe(false);
   });
@@ -36,9 +36,9 @@ describe("name-similarity", () => {
     expect(keys.has("实体alpha")).toBe(true);
     expect(keys.has("alpha")).toBe(true);
     expect(keys.has("实体")).toBe(true);
-    const en = tokenizeForBlocking("Claude Code");
-    expect(en.has("claude")).toBe(true);
-    expect(en.has("code")).toBe(true);
+    const en = tokenizeForBlocking("Foo Bar");
+    expect(en.has("foo")).toBe(true);
+    expect(en.has("bar")).toBe(true);
   });
 
   test("titleCanonicalScore: shorter, fewer parens, shallower slug scores higher", () => {
