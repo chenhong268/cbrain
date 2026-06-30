@@ -1309,6 +1309,46 @@ export function register(program: Command) {
       db.close();
     });
 
+  // ─── similar-entities: detect duplicate entity/concept candidates (#246) ──
+  program
+    .command("similar-entities")
+    .description("Detect likely-duplicate entity/concept pages for review (no auto-merge)")
+    .option("--dry-run", "Print candidates without persisting (default)")
+    .option("--execute", "Persist candidates to the discoveries lifecycle")
+    .option("--scope <scope>", "Restrict to entity or concept namespace")
+    .action(async (opts) => {
+      const config = loadConfig();
+      const deps = createDeps(config, false);
+      const db = deps.db;
+      const { DiscoveryManager } = await import("../../core/discovery.js");
+      const mgr = new DiscoveryManager(db);
+      const dryRun = !opts.execute;
+      const report = await mgr.runSimilarEntityDetection({ dryRun });
+
+      const candidates = report.candidates ?? [];
+      const visible = opts.scope
+        ? candidates.filter((c) => {
+            const inScope = (s: string) => opts.scope === "entity" ? s.startsWith("entity/") : s.startsWith("concept/");
+            return inScope(c.slugA) && inScope(c.slugB);
+          })
+        : candidates;
+
+      if (visible.length === 0) {
+        console.log(dryRun ? "No similar entities found." : "No new similar-entity candidates persisted.");
+        db.close();
+        return;
+      }
+
+      console.log(`${dryRun ? "[dry-run] " : ""}${visible.length} similar-entity candidate(s):${dryRun ? " (not persisted)" : ""}`);
+      for (const c of visible) {
+        const ta = db.getPage(c.slugA)?.title ?? c.slugA;
+        const tb = db.getPage(c.slugB)?.title ?? c.slugB;
+        const target = c.recommendedTarget ? ` → target: ${c.recommendedTarget}` : c.ambiguousTarget ? " → ambiguous target" : "";
+        console.log(`  ${ta}  ⟷  ${tb}   [${c.matchKind} / ${c.actionable}]${target}`);
+      }
+      db.close();
+    });
+
   // ─── clean-shells: remove empty shell entities ─────────────────
   program
     .command("clean-shells")
