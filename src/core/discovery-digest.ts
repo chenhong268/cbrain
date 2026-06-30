@@ -55,6 +55,9 @@ export function shouldFilterDiscovery(r: DiscoveryRow): string | null {
     return null;
   }
   if (r.type === "gap") return null;
+  // #246 — similar_entity is excluded from the DEFAULT feed by isDigestExcluded at
+  // the call site. When it reaches here (explicit read_discoveries typeFilter), it
+  // should render — so do not filter.
   if (r.type === "similar_entity") return null;
 
   const meta = parseJsonSafe(r.metadata);

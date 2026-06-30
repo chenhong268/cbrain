@@ -331,8 +331,10 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
         };
       });
     }
-    if (scope === "entity") out = out.filter((c) => c.slug_a.startsWith("entity/"));
-    if (scope === "concept") out = out.filter((c) => c.slug_a.startsWith("concept/"));
+    // Require BOTH slugs in the namespace: a cross-namespace pair (blocked by the
+    // type gate in practice) must never sneak through on a single-slug check.
+    if (scope === "entity") out = out.filter((c) => c.slug_a.startsWith("entity/") && c.slug_b.startsWith("entity/"));
+    if (scope === "concept") out = out.filter((c) => c.slug_a.startsWith("concept/") && c.slug_b.startsWith("concept/"));
     out = out.slice(0, cap);
 
     const titleFor = (slug: string) => ctx.db.getPage(slug)?.title ?? slug;
