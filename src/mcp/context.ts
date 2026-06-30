@@ -22,6 +22,8 @@ import { CompoundingReviewManager } from "../core/compounding-review.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { FileWatcher } from "../core/watcher.js";
+import { resolveIngestNerMode } from "../cli/context.js";
+import { JobQueueNerSubmitter } from "../core/ner-backfill.js";
 
 export interface ToolContext {
   db: CBrainDB;
@@ -66,7 +68,7 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher }): ToolContext {
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off" }): ToolContext {
   const { db, embedding, lance, vaultPath, dbPath, llm, profileDir, watcher } = deps;
   const outputsDir = deps.runtimePath;
   const logger = new Logger(outputsDir);
@@ -75,10 +77,16 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const search = new HybridSearch(db, embedding, lance, { llm, logger, graph });
   const nerEngine = llm ? new NerEngine(llm, logger) : undefined;
   const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger });
-  const ingest = new IngestManager(db, embedding, lance, vaultPath, llm);
+  const jobs = new JobQueue(db, logger);
+  // #252: re-resolve defensively — createDeps already put the config-resolved mode in deps.nerIngestMode,
+  // but env should still win if buildContext is called without going through createDeps.
+  const nerMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, deps.nerIngestMode);
+  const ingest = new IngestManager(db, embedding, lance, vaultPath, llm, undefined, {
+    nerMode,
+    deferredNerSubmitter: new JobQueueNerSubmitter(db),
+  });
   const enrich = new EnrichManager(db, undefined, undefined, vaultPath, pages);
   const versions = new VersionManager(db, pages, vaultPath, logger);
-  const jobs = new JobQueue(db, logger);
   const writeback = new WritebackManager(pages, db, outputsDir);
   const pipeline = new ContentPipeline(db, embedding, lance, { pages, nerEngine, logger });
   const insights = new InsightManager(db, embedding, lance, logger);

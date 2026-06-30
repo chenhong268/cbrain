@@ -166,5 +166,6 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
     search = new SearXNGSearchProvider(config.search.base_url);
   }
 
-  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined };
+  const nerIngestMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, config.ner?.ingest_mode);
+  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined, nerIngestMode };
 }

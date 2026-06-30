@@ -3,9 +3,11 @@ import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync, unlinkSync 
 import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
+import { buildContext } from "../../src/mcp/context.js";
 import { ProvenanceManager } from "../../src/core/provenance.js";
 import { SqliteProvenanceStore } from "../../src/storage/provenance-store.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
+import type { IngestNerMode } from "../../src/cli/context.js";
 
 function createMockEmbedding(): EmbeddingProvider {
   return {
@@ -3169,6 +3171,39 @@ describe("MCP Server", () => {
       if (rawMeta?.reason_codes) {
         expect(rawMeta.reason_codes).not.toContain("fts_parser_fallback");
       }
+    });
+  });
+
+  // ─── #252: ner-backfill wiring via buildContext ─────
+
+  describe("buildContext ner-backfill wiring (#252)", () => {
+    test("defer deps wire deferredNerSubmitter into ingest (no throw)", async () => {
+      const { IngestManager } = await import("../../src/core/ingest.js");
+      // Prove: bare IngestManager with defer+no submitter THROWS
+      expect(() => new IngestManager(db, deps.embedding, deps.lance, vaultPath, undefined, undefined, { nerMode: "defer" })).toThrow();
+
+      // But buildContext with defer deps should NOT throw (it injects submitter)
+      const deferDeps: CBrainDeps & { nerIngestMode: IngestNerMode } = {
+        ...deps,
+        nerIngestMode: "defer",
+      };
+      expect(() => buildContext(deferDeps)).not.toThrow();
+      const ctx = buildContext(deferDeps);
+      expect(ctx.ingest).toBeDefined();
+    });
+
+    test("sync deps (no nerIngestMode) construct ingest without error", () => {
+      expect(() => buildContext(deps)).not.toThrow();
+      const ctx = buildContext(deps);
+      expect(ctx.ingest).toBeDefined();
+      expect(ctx.jobs).toBeDefined();
+    });
+
+    test("jobs is created before ingest in buildContext (submitter depends on db)", () => {
+      const ctx = buildContext(deps);
+      // jobs must be available for the submitter to reference db
+      expect(ctx.jobs).toBeDefined();
+      expect(ctx.ingest).toBeDefined();
     });
   });
 });

@@ -512,9 +512,11 @@ export function register(program: Command) {
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath, pages);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
       const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
+      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const nerPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
         deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined,
-        deps.lance, undefined, pages);
+        deps.lance, undefined, pages, nerPipeline);
       if (report.locked) {
         console.log(`⚠️ Dream — ${report.timestamp.slice(0, 10)} 已跳过`);
         console.log(`  上次 dream 仍在执行中（30 分钟锁未释放），本次跳过`);

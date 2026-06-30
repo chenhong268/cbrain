@@ -8,6 +8,7 @@ import type { ToolContext } from "./context.js";
 import { buildContext } from "./context.js";
 import { version } from "../version.js";
 import { registerAllTools } from "./register.js";
+import type { IngestNerMode } from "../cli/context.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -20,6 +21,8 @@ export interface CBrainDeps {
   runtimePath: string;
   watcher?: import("../core/watcher.js").FileWatcher;
   search?: import("../search/provider.js").SearchProvider;
+  /** #252: resolved ingest NER mode (env > config > sync), threaded into buildContext. */
+  nerIngestMode?: IngestNerMode;
 }
 
 /** Register dream job handler and start the background worker. Shared by MCP and HTTP paths. */
@@ -34,6 +37,8 @@ export function registerDreamWorker(ctx: ToolContext): void {
       ctx.llm ? { llm: ctx.llm, embedding: ctx.embedding, lance: ctx.lance } : undefined,
       ctx.lance,
       (stage, detail) => { try { ctx.db.updateJobProgress(jobId, stage, detail); } catch { /* non-critical */ } },
+      ctx.pages,        // sharedPages (#252)
+      ctx.pipeline,     // nerPipeline (#252)
     );
     return report;
   });
