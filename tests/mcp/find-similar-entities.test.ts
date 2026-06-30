@@ -141,4 +141,17 @@ describe("MCP find_similar_entities (#246)", () => {
     expect(payload.candidates).toHaveLength(0);
     expect(payload.display).toContain("暂无");
   });
+
+  test("scope=entity persists only entity pairs (HIGH1)", async () => {
+    seedPage(db, "entity/a", "实体 A 公司", "entity/company");
+    seedPage(db, "entity/b", "实体A公司", "entity/company");
+    seedPage(db, "concept/x", "主题 D 概念", "concept/concept");
+    seedPage(db, "concept/y", "主题D概念", "concept/concept");
+    await tools.get("find_similar_entities")!({ scope: "entity" }); // default persists
+    const rows = db.getDiscoveriesByType("similar_entity", 10);
+    expect(rows).toHaveLength(1);
+    const [a, b] = JSON.parse(rows[0].entities);
+    expect(a.startsWith("entity/")).toBe(true);
+    expect(b.startsWith("entity/")).toBe(true);
+  });
 });

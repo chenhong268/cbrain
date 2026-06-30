@@ -78,4 +78,34 @@ describe("DiscoveryManager.runSimilarEntityDetection (#246)", () => {
     await mgr.runSimilarEntityDetection();
     expect(db.getDiscoveriesByType("similar_entity", 10)).toHaveLength(0);
   });
+
+  test("HIGH2: own-title alias does not turn a normalized duplicate into alias_shadow", async () => {
+    // Two pages whose titles normalize-equal but raw-differ (space). B's aliases table
+    // happens to contain B's own title. Must classify name_normalized, NOT alias_shadow_page.
+    seedPage("entity/a", "实体 A 公司");
+    seedPage("entity/b", "实体A公司");
+    db.rawDb.prepare("INSERT OR IGNORE INTO aliases (page_slug, alias) VALUES (?, ?)").run("entity/b", "实体A公司");
+    const mgr = new DiscoveryManager(db);
+    const _report = await mgr.runSimilarEntityDetection();
+    const rows = db.getDiscoveriesByType("similar_entity", 10);
+    expect(rows).toHaveLength(1);
+    const meta = JSON.parse(rows[0].metadata ?? "{}");
+    expect(meta.match_kind).toBe("name_normalized");
+  });
+
+  test("HIGH1: scope=entity persists only entity pairs, not concept pairs", async () => {
+    // Entity pair: raw titles differ (space) but normalize-equal → would be detected
+    seedPage("entity/a", "实体 A 公司", "entity/company");
+    seedPage("entity/b", "实体A公司", "entity/company");
+    // Concept pair: similarly normalize-equal → would ALSO be detected without scope
+    seedPage("concept/x", "主题 D 概念", "concept/concept");
+    seedPage("concept/y", "主题D概念", "concept/concept");
+    // Without scope: 2 candidates. With scope=entity: 1 candidate.
+    const mgr = new DiscoveryManager(db);
+    await mgr.runSimilarEntityDetection({ scope: "entity" });
+    const rows = db.getDiscoveriesByType("similar_entity", 10);
+    expect(rows).toHaveLength(1);
+    const entities = JSON.parse(rows[0].entities);
+    expect(entities.every((s: string) => s.startsWith("entity/"))).toBe(true);
+  });
 });

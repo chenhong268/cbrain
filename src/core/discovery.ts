@@ -138,21 +138,30 @@ export class DiscoveryManager {
    * runs the pure detector, and feeds results through the existing dedup →
    * upsertDiscovery loop. Persists candidates only; merges nothing.
    */
-  async runSimilarEntityDetection(options: { dryRun?: boolean } = {}): Promise<DiscoveryReport & { candidates?: SimilarEntityCandidate[] }> {
+  async runSimilarEntityDetection(options: { dryRun?: boolean; scope?: "entity" | "concept" } = {}): Promise<DiscoveryReport & { candidates?: SimilarEntityCandidate[] }> {
     this.llmBudget = MAX_LLM_BUDGET;
     const byType: Record<string, number> = {};
     const byActionable: Record<string, number> = { high: 0, medium: 0, low: 0 };
     const highActionable: DetectionResult[] = [];
     const empty: DiscoveryReport = { total: 0, byType, byActionable, highActionable, enrichment: { skipped: true, reason: "no_candidates", llmAvailable: !!this.llm, attempted: 0, saved: 0, errors: 0 } };
 
-    const entityPages = this.db.getEntityConceptPages();
+    let entityPages = this.db.getEntityConceptPages();
+
+    // HIGH 1: scope filters the page universe BEFORE any alias/quality/detector/upsert work
+    if (options.scope === "entity") entityPages = entityPages.filter(p => p.type.startsWith("entity/"));
+    else if (options.scope === "concept") entityPages = entityPages.filter(p => p.type.startsWith("concept/"));
+
     if (entityPages.length < 2) return empty;
 
-    // registeredAliasesBySlug: aliases table only, normalized, NO own title.
+    // HIGH 2: build own-title normalization map, then filter own-title aliases during bulk load
+    const pageTitleNormBySlug = new Map<string, string>();
+    for (const p of entityPages) pageTitleNormBySlug.set(p.slug, normalizeForComparison(p.title));
+
     const registeredAliasesBySlug = new Map<string, Set<string>>();
     for (const { page_slug, alias } of this.db.getAliasesBySlugBulk()) {
       const norm = normalizeForComparison(alias);
       if (!norm) continue;
+      if (norm === pageTitleNormBySlug.get(page_slug)) continue; // own-title alias — skip (#246 HIGH 2)
       const set = registeredAliasesBySlug.get(page_slug);
       if (set) set.add(norm); else registeredAliasesBySlug.set(page_slug, new Set([norm]));
     }
@@ -199,6 +208,7 @@ export class DiscoveryManager {
 
     const seen = new Set<string>();
     let newCount = 0;
+    const insertedCandidates: SimilarEntityCandidate[] = [];
     for (const c of report.candidates) {
       const key = [c.slugA, c.slugB].sort().join("|");
       if (seen.has(key)) continue;
@@ -220,6 +230,7 @@ export class DiscoveryManager {
       );
       if (!inserted) continue;
       newCount++;
+      insertedCandidates.push(c);
       byType.similar_entity = (byType.similar_entity ?? 0) + 1;
       byActionable[c.actionable]++;
       if (c.actionable === "high") {
@@ -236,6 +247,7 @@ export class DiscoveryManager {
     return {
       total: newCount, byType, byActionable, highActionable,
       enrichment: { skipped: true, reason: "no_enrichment", llmAvailable: !!this.llm, attempted: 0, saved: 0, errors: 0 },
+      candidates: insertedCandidates,
     };
   }
 

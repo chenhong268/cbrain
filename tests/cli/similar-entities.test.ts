@@ -41,4 +41,17 @@ describe("CLI similar-entities (dry-run default) (#246)", () => {
     await mgr.runSimilarEntityDetection(); // execute path (default)
     expect(db.getDiscoveriesByType("similar_entity", 10)).toHaveLength(1);
   });
+
+  test("MEDIUM: execute returns inserted candidates (CLI persisted-count contract)", async () => {
+    seedPage("entity/a", "实体 A 公司");
+    seedPage("entity/b", "实体A公司");
+    const mgr = new DiscoveryManager(db);
+    const report = await mgr.runSimilarEntityDetection(); // execute
+    expect(report.total).toBe(1);
+    expect(report.candidates?.length ?? 0).toBe(1); // execute now returns inserted candidates
+    // second run: recurring, nothing new inserted
+    const report2 = await mgr.runSimilarEntityDetection();
+    expect(report2.total).toBe(0);
+    expect(report2.candidates?.length ?? 0).toBe(0);
+  });
 });

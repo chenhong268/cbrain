@@ -1323,24 +1323,19 @@ export function register(program: Command) {
       const { DiscoveryManager } = await import("../../core/discovery.js");
       const mgr = new DiscoveryManager(db);
       const dryRun = !opts.execute;
-      const report = await mgr.runSimilarEntityDetection({ dryRun });
+      const scope = opts.scope as "entity" | "concept" | undefined;
+      const report = await mgr.runSimilarEntityDetection({ dryRun, scope });
 
       const candidates = report.candidates ?? [];
-      const visible = opts.scope
-        ? candidates.filter((c) => {
-            const inScope = (s: string) => opts.scope === "entity" ? s.startsWith("entity/") : s.startsWith("concept/");
-            return inScope(c.slugA) && inScope(c.slugB);
-          })
-        : candidates;
 
-      if (visible.length === 0) {
+      if (candidates.length === 0) {
         console.log(dryRun ? "No similar entities found." : "No new similar-entity candidates persisted.");
         db.close();
         return;
       }
 
-      console.log(`${dryRun ? "[dry-run] " : ""}${visible.length} similar-entity candidate(s):${dryRun ? " (not persisted)" : ""}`);
-      for (const c of visible) {
+      console.log(`${dryRun ? "[dry-run] " : ""}${candidates.length} similar-entity candidate(s):${dryRun ? " (not persisted)" : ""}`);
+      for (const c of candidates) {
         const ta = db.getPage(c.slugA)?.title ?? c.slugA;
         const tb = db.getPage(c.slugB)?.title ?? c.slugB;
         const target = c.recommendedTarget ? ` → target: ${c.recommendedTarget}` : c.ambiguousTarget ? " → ambiguous target" : "";

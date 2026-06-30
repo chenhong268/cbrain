@@ -302,7 +302,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     },
   }, async ({ limit, scope, dryRun }) => {
     const discoveryMgr = new DiscoveryManager(ctx.db, ctx.llm);
-    const report = await discoveryMgr.runSimilarEntityDetection({ dryRun });
+    const report = await discoveryMgr.runSimilarEntityDetection({ dryRun, scope });
 
     interface CandidateOut {
       slug_a: string; slug_b: string; match_kind: string | null; type_gate: string | null;
@@ -311,6 +311,12 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     const cap = limit ?? 20;
     let out: CandidateOut[] = [];
     if (dryRun && report.candidates) {
+      out = report.candidates.map((c) => ({
+        slug_a: c.slugA, slug_b: c.slugB, match_kind: c.matchKind, type_gate: c.typeGate,
+        recommended_target: c.recommendedTarget ?? null, ambiguous_target: c.ambiguousTarget === true,
+        confidence: c.actionable === "high" ? "高" : "中",
+      }));
+    } else if (report.candidates && report.candidates.length > 0) {
       out = report.candidates.map((c) => ({
         slug_a: c.slugA, slug_b: c.slugB, match_kind: c.matchKind, type_gate: c.typeGate,
         recommended_target: c.recommendedTarget ?? null, ambiguous_target: c.ambiguousTarget === true,
@@ -331,10 +337,6 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
         };
       });
     }
-    // Require BOTH slugs in the namespace: a cross-namespace pair (blocked by the
-    // type gate in practice) must never sneak through on a single-slug check.
-    if (scope === "entity") out = out.filter((c) => c.slug_a.startsWith("entity/") && c.slug_b.startsWith("entity/"));
-    if (scope === "concept") out = out.filter((c) => c.slug_a.startsWith("concept/") && c.slug_b.startsWith("concept/"));
     out = out.slice(0, cap);
 
     const titleFor = (slug: string) => ctx.db.getPage(slug)?.title ?? slug;
