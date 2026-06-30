@@ -18,6 +18,7 @@ import type { SearchProvider } from "../search/provider.js";
 import { SealManager } from "./seal.js";
 import { StubEnrichManager } from "./stub-enrich.js";
 import { ContentPipeline } from "./pipeline.js";
+import { runNerBackfillStage, emptyNerBackfillCounts, type NerBackfillCounts } from "./ner-backfill.js";
 import { PageManager } from "./page.js";
 import { WakeupDiff } from "./wakeup.js";
 import {
@@ -46,6 +47,7 @@ export interface DreamReport {
     indexes: { files: number };
     wake_up_diff: { baselineCreated: boolean; changes: number; newItems: number; reportPath: string | null };
     knowledge_map: KnowledgeMapStageResult;
+    ner_backfill: NerBackfillCounts;
   };
   duration_ms: number;
   locked: boolean;
@@ -87,6 +89,7 @@ export async function runDream(
   lance?: LanceDBManager,
   onStageProgress?: (stage: string, detail: unknown) => void,
   sharedPages?: PageManager,
+  nerPipeline?: ContentPipeline,
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
     logger.warn("dream", "上次 dream 仍在执行中（或锁未释放），跳过");
@@ -108,6 +111,7 @@ export async function runDream(
         indexes: { files: 0 },
         wake_up_diff: { baselineCreated: false, changes: 0, newItems: 0, reportPath: null },
         knowledge_map: defaultKnowledgeMapStageResult(),
+        ner_backfill: emptyNerBackfillCounts(),
       },
       duration_ms: 0,
       locked: true,
@@ -204,6 +208,21 @@ export async function runDream(
   logger.info("dream", "Stage 1/5: sync");
   const syncReport = await syncMgr.syncAll(vaultPath);
   if (onStageProgress) onStageProgress("sync", { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors });
+
+  // Stage 1.5: ner-backfill (#252) — after sync (so newly-synced pages are current),
+  // before enrich (NER stubs/links/timeline feed enrich/learn/stub_enrich).
+  logger.info("dream", "Stage 1.5: ner-backfill");
+  let nerBackfillReport = emptyNerBackfillCounts();
+  if (nerPipeline) {
+    try {
+      const stagePages = sharedPages ?? new PageManager(db, vaultPath, logger);
+      nerBackfillReport = await runNerBackfillStage(db, nerPipeline, stagePages);
+      if (nerBackfillReport.processed > 0) logger.info("dream", `NER backfill: ${nerBackfillReport.processed} 页补抽`);
+    } catch (e) {
+      logger.warn("dream", `NER backfill 失败: ${(e as Error).message}`);
+    }
+  }
+  if (onStageProgress) onStageProgress("ner_backfill", nerBackfillReport);
 
   // Stage 2: Enrich
   logger.info("dream", "Stage 2/7: enrich");
@@ -382,6 +401,7 @@ export async function runDream(
       indexes: { files: indexFiles },
       wake_up_diff: wakeupResult,
       knowledge_map: knowledgeMapResult,
+      ner_backfill: nerBackfillReport,
     },
     duration_ms: Date.now() - started,
     locked: false,
@@ -404,6 +424,7 @@ export async function runDream(
     `| Learn | ${report.stages.learn.updated} 实体权重更新, 活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")} |`,
     `| Seal | ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过 |`,
     `| Stub Enrich | ${report.stages.stub_enrich.enriched} 页富化, ${report.stages.stub_enrich.skipped} 跳过 |`,
+    `| NER Backfill | ${report.stages.ner_backfill.processed} 页补抽, ${report.stages.ner_backfill.failed} 失败, ${report.stages.ner_backfill.timed_out} 超时 |`,
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿 |`,
     `| LanceDB Compact | ${report.stages.compact.fragmentsRemoved} fragments → ${report.stages.compact.fragmentsAdded}, ${report.stages.compact.filesRemoved} files removed |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
@@ -458,6 +479,14 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
   }
   if (report.stages.stub_enrich.enriched > 0) {
     lines.push(`Stub enrichment: ${report.stages.stub_enrich.enriched} 页富化`);
+  }
+  if (report.stages.ner_backfill.processed > 0 || report.stages.ner_backfill.failed > 0 || report.stages.ner_backfill.timed_out > 0) {
+    const n = report.stages.ner_backfill;
+    const parts: string[] = [];
+    if (n.processed > 0) parts.push(`${n.processed} 页补抽`);
+    if (n.failed > 0) parts.push(`${n.failed} 失败`);
+    if (n.timed_out > 0) parts.push(`${n.timed_out} 超时`);
+    lines.push(`NER backfill: ${parts.join("，")}`);
   }
   if (report.stages.compact.fragmentsRemoved > 0) {
     lines.push(`LanceDB: ${report.stages.compact.fragmentsRemoved} fragments 合并, ${report.stages.compact.filesRemoved} files 清理`);
