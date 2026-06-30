@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite";
 import { NER_BACKFILL_STALE_TTL_MS, NER_BACKFILL_JOB } from "../../src/core/ner-backfill";
+import { JobQueueNerSubmitter } from "../../src/core/ner-backfill";
 
 const testDir = "/tmp/cbrain-test-ner-backfill";
 const dbPath = join(testDir, "test.sqlite");
@@ -90,5 +91,39 @@ describe("snapshotEligibleJobIds (#252)", () => {
     db.submitJob("ner-backfill", { slug: "a" }, 0);
     db.submitJob("ner-backfill", { slug: "b" }, 0);
     expect(db.snapshotEligibleJobIds([NER_BACKFILL_JOB], 1).length).toBe(1);
+  });
+});
+
+describe("JobQueueNerSubmitter (#252)", () => {
+  test("first submit returns a job id and creates a pending ner-backfill job", () => {
+    const s = new JobQueueNerSubmitter(db);
+    const id = s.submitDeferredNer({ slug: "records/foo", pageType: "record" });
+    expect(id).not.toBeNull();
+    const job = db.getJob(id!)!;
+    expect(job.name).toBe("ner-backfill");
+    expect(job.status).toBe("pending");
+    expect(JSON.parse(job.data!)).toEqual({ slug: "records/foo", pageType: "record" });
+  });
+  test("second submit for same slug is deduped (returns null, no new job)", () => {
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/foo" });
+    expect(first).not.toBeNull();
+    expect(s.submitDeferredNer({ slug: "records/foo" })).toBeNull();
+    expect(db.listJobs("pending").length).toBe(1);
+  });
+  test("different slug submits a second job", () => {
+    const s = new JobQueueNerSubmitter(db);
+    s.submitDeferredNer({ slug: "records/foo" });
+    const second = s.submitDeferredNer({ slug: "records/bar" });
+    expect(second).not.toBeNull();
+    expect(db.listJobs("pending").length).toBe(2);
+  });
+  test("stale running same slug does NOT dedupe (new job allowed)", () => {
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/foo" })!;
+    db.claimJobById(first);
+    db.rawDb.prepare("UPDATE jobs SET started_at = datetime('now','-2 hours') WHERE id = ?").run(first);
+    // stale running is not "active" → submit proceeds
+    expect(s.submitDeferredNer({ slug: "records/foo" })).not.toBeNull();
   });
 });
