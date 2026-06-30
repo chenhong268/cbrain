@@ -12,6 +12,18 @@ import type { LLMProvider } from "../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
 import { getFactFieldWhitelist, filterExtractedEntities, type ExtractedEntity } from "./ner.js";
 import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
+import type { DeferredNerSubmitter } from "./ner-backfill.js";
+
+export type NerMode = "sync" | "defer" | "off";
+/** Internal, resolved per-ingest from skipNer + NerMode. */
+export type NerAction = "none" | "sync" | "defer";
+
+export interface IngestManagerOptions {
+  /** #252: default NER mode for this manager (config/env resolved upstream). Default "sync". */
+  nerMode?: NerMode;
+  /** #252: required when nerMode resolves to "defer"; else throws. */
+  deferredNerSubmitter?: DeferredNerSubmitter;
+}
 
 /**
  * Thrown when an ingest operation fails AND the subsequent rollback
@@ -86,6 +98,8 @@ export interface IngestInput {
   pageType?: "record" | "insight";
   skipNer?: boolean;
   allowDuplicate?: boolean;
+  /** #252: per-call override for this manager's default nerMode. */
+  nerMode?: NerMode;
 }
 
 export type IngestOutcome = "created" | "updated" | "duplicate";
@@ -96,6 +110,8 @@ export interface IngestResult {
   linksExtracted: number;
   ner?: NerPipelineResult | null;
   nerSkipped?: "timeout" | "error";
+  /** #252: true when NER was deferred to a background job. */
+  nerPending?: boolean;
   outcome: IngestOutcome;
   duplicateOf?: { slug: string; title: string };
 }
@@ -107,6 +123,8 @@ export class IngestManager {
   private nerEngine: NerEngine | null;
   private llmProvider: LLMProvider | undefined;
   private pipeline: ContentPipeline;
+  private readonly defaultNerMode: NerMode;
+  private readonly deferredNerSubmitter?: DeferredNerSubmitter;
 
   constructor(
     db: CBrainDB,
@@ -114,7 +132,8 @@ export class IngestManager {
     lance: LanceDBManager,
     vaultPath: string,
     llmProvider?: LLMProvider,
-    nerEngine?: NerEngine
+    nerEngine?: NerEngine,
+    opts?: IngestManagerOptions,
   ) {
     this.db = db;
     this.lance = lance;
@@ -125,25 +144,46 @@ export class IngestManager {
       pages: this.pages,
       nerEngine: this.nerEngine ?? undefined,
     });
+    this.defaultNerMode = opts?.nerMode ?? "sync";
+    this.deferredNerSubmitter = opts?.deferredNerSubmitter;
+    if (this.defaultNerMode === "defer" && !this.deferredNerSubmitter) {
+      throw new Error("IngestManager: nerMode='defer' requires a deferredNerSubmitter");
+    }
+  }
+
+  /** #252: resolve effective action. skipNer/off → none; defer needs submitter (fail fast). */
+  private resolveNerAction(skipNer?: boolean, perCallMode?: NerMode): NerAction {
+    if (skipNer) return "none";
+    const mode = perCallMode ?? this.defaultNerMode;
+    if (mode === "off") return "none";
+    if (mode === "defer") {
+      if (!this.deferredNerSubmitter) {
+        throw new Error("IngestManager: nerMode='defer' requires a deferredNerSubmitter");
+      }
+      return "defer";
+    }
+    return "sync";
   }
 
   async ingest(input: IngestInput): Promise<IngestResult> {
+    const nerAction = this.resolveNerAction(input.skipNer, input.nerMode);
     const type = input.type ?? classifyContentType(input.content);
     if (type === "markdown") {
-      return this.ingestMarkdown(input.content, { title: input.title, pageType: input.pageType, tags: input.tags, skipNer: input.skipNer, allowDuplicate: input.allowDuplicate });
+      return this.ingestMarkdown(input.content, input, nerAction);
     }
-    return this.ingestText(input);
+    return this.ingestText(input, nerAction);
   }
 
   private async ingestMarkdown(
     content: string,
-    overrides?: { title?: string; pageType?: string; tags?: string[]; skipNer?: boolean; allowDuplicate?: boolean }
+    input: IngestInput,
+    nerAction: NerAction,
   ): Promise<IngestResult> {
     const parsed = parseFrontmatter(content);
 
     // (#198) Explicit caller/CLI title takes precedence over a stale frontmatter
     // title, so `ingest @file --title X` derives slug/title/file_path from X.
-    const declaredTitle = overrides?.title ?? parsed.frontmatter.title;
+    const declaredTitle = input.title ?? parsed.frontmatter.title;
     const bodyTitle = parsed.body.split("\n").find(line => hasSemanticContent(line))?.trim().slice(0, 50);
     const title = hasSemanticContent(String(declaredTitle ?? "")) ? String(declaredTitle).trim() : bodyTitle;
     if (!title) {
@@ -153,14 +193,14 @@ export class IngestManager {
     if (looksLikePath(title)) {
       throw new Error("VALIDATION_ERROR: title looks like a filesystem path; refusing to ingest");
     }
-    const type = normalizePageType(parsed.frontmatter.type ?? overrides?.pageType ?? "record");
+    const type = normalizePageType(parsed.frontmatter.type ?? input.pageType ?? "record");
     const declaredSlug = typeof parsed.frontmatter.slug === "string" && parsed.frontmatter.slug ? parsed.frontmatter.slug : undefined;
     const slug = declaredSlug ?? generateSlug(title, type);
 
     // (#190) Idempotent no-op when this exact frontmatter slug already exists
     // (unless --allow-duplicate forces a re-index). Durable-source hash dedup only
     // covers record/insight, so entity/concept markdown needs this slug-level gate.
-    if (declaredSlug && !overrides?.allowDuplicate) {
+    if (declaredSlug && !input.allowDuplicate) {
       const existing = this.db.getPage(slug);
       if (existing) {
         return { slug, created: false, linksExtracted: 0, outcome: "duplicate", duplicateOf: { slug: existing.slug, title: existing.title } };
@@ -176,12 +216,12 @@ export class IngestManager {
     }
 
     const body = parsed.body;
-    const effectiveTags = parsed.frontmatter.tags ?? overrides?.tags ?? [];
+    const effectiveTags = parsed.frontmatter.tags ?? input.tags ?? [];
 
-    return this.ingestCore(slug, title, type, body, effectiveTags, !overrides?.skipNer, overrides?.allowDuplicate);
+    return this.ingestCore(slug, title, type, body, effectiveTags, nerAction, input.allowDuplicate);
   }
 
-  private async ingestText(input: IngestInput): Promise<IngestResult> {
+  private async ingestText(input: IngestInput, nerAction: NerAction): Promise<IngestResult> {
     // Reject pure-punctuation / empty content before any file/DB write
     if (!hasSemanticContent(input.title ?? '') && !hasSemanticContent(input.content)) {
       throw new Error("VALIDATION_ERROR: content has no semantic content — provide a title or content with letters/numbers");
@@ -196,7 +236,7 @@ export class IngestManager {
     const existingPersonSlug = this.findExistingPersonSlug(input.title ?? routedPersonTitle ?? rawTitle);
 
     if (existingPersonSlug) {
-      return this.ingestEntityAppend(existingPersonSlug, input.content, input.tags ?? [], !input.skipNer);
+      return this.ingestEntityAppend(existingPersonSlug, input.content, input.tags ?? [], nerAction);
     }
 
     const title = routedPersonTitle ?? rawTitle;
@@ -205,7 +245,7 @@ export class IngestManager {
     const body = input.content;
     const tags = input.tags ?? [];
 
-    return this.ingestCore(slug, title, type, body, tags, !input.skipNer, input.allowDuplicate);
+    return this.ingestCore(slug, title, type, body, tags, nerAction, input.allowDuplicate);
   }
 
   private findExistingPersonSlug(title: string | undefined): string | null {
@@ -261,7 +301,7 @@ export class IngestManager {
     return true;
   }
 
-  private async ingestEntityAppend(slug: string, body: string, tags: string[], doNer: boolean): Promise<IngestResult> {
+  private async ingestEntityAppend(slug: string, body: string, tags: string[], nerAction: NerAction): Promise<IngestResult> {
     const before = this.pages.getBySlug(slug);
     if (!before) {
       throw new Error(`Cannot append to missing entity page: ${slug}`);
@@ -285,9 +325,10 @@ export class IngestManager {
       // Now safe to modify links and mention_count
       const { count: linksExtracted, mentionedSlugs } = this.pipeline.replaceWikilinks(slug, page.body);
 
-      let nerResult: NerPipelineResult | null | undefined;
+      let nerResult: NerPipelineResult | null = null;
       let nerSkipped: "timeout" | "error" | undefined;
-      if (doNer && body.trim()) {
+      let nerPending = false;
+      if (nerAction === "sync" && body.trim()) {
         try {
           nerResult = await this.pipeline.processNer(slug, body, before.type, true, undefined, mentionedSlugs);
         } catch (e) {
@@ -295,6 +336,10 @@ export class IngestManager {
           const msg = e instanceof Error ? e.message : String(e);
           this.pipeline.writeIngestLog(slug, "api", { nerError: msg, nerSkipped, appended: true });
         }
+      } else if (nerAction === "defer" && body.trim()) {
+        // submitter guaranteed non-null by resolveNerAction fail-fast (defer ⇒ submitter wired)
+        this.deferredNerSubmitter!.submitDeferredNer({ slug, pageType: before.type });
+        nerPending = true;
       }
 
       const nerResolvedSlugs = nerResult?.resolvedSlugs ?? [];
@@ -304,7 +349,7 @@ export class IngestManager {
         this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]),
       );
 
-      return { slug, created: false, linksExtracted, ner: nerResult, nerSkipped, outcome: "updated" as const };
+      return { slug, created: false, linksExtracted, ner: nerResult, nerSkipped, ...(nerPending ? { nerPending: true } : {}), outcome: "updated" as const };
     } catch (indexError) {
       if (snapshot) {
         await this.restoreSnapshot(slug, snapshot, indexError);
@@ -358,7 +403,7 @@ export class IngestManager {
   }
 
   private async ingestCore(
-    slug: string, title: string, type: PageType, body: string, tags: string[], doNer: boolean,
+    slug: string, title: string, type: PageType, body: string, tags: string[], nerAction: NerAction,
     allowDuplicate?: boolean
   ): Promise<IngestResult> {
     // --- Dedup gate for durable source types (record / insight) ---
@@ -423,10 +468,11 @@ export class IngestManager {
       // Now safe to modify links and mention_count
       const { count: linksExtracted, mentionedSlugs } = this.pipeline.replaceWikilinks(slug, body);
 
-      let nerResult: NerPipelineResult | null | undefined;
+      let nerResult: NerPipelineResult | null = null;
       let nerSkipped: "timeout" | "error" | undefined;
-      const shouldNer = doNer && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
-      if (shouldNer) {
+      let nerPending = false;
+      const nerEligibleType = !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
+      if (nerAction === "sync" && nerEligibleType) {
         try {
           nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs);
         } catch (e) {
@@ -434,10 +480,15 @@ export class IngestManager {
           const msg = e instanceof Error ? e.message : String(e);
           this.pipeline.writeIngestLog(slug, "api", { nerError: msg, nerSkipped });
         }
+      } else if (nerAction === "defer" && nerEligibleType) {
+        // submitter guaranteed non-null by resolveNerAction fail-fast (defer ⇒ submitter wired)
+        this.deferredNerSubmitter!.submitDeferredNer({ slug, contentHash: bodyHash ?? undefined, pageType: type });
+        nerPending = true;
       }
 
-      // Entity type: extract structured facts from body into frontmatter
-      if (type.startsWith("entity/") && doNer && this.llmProvider && body.trim()) {
+      // Entity type: extract structured facts from body into frontmatter.
+      // NOTE (#252 scope): extractEntityFacts stays synchronous in all non-"none" modes.
+      if (type.startsWith("entity/") && nerAction !== "none" && this.llmProvider && body.trim()) {
         try {
           await this.extractEntityFacts(slug, title, type, body);
         } catch {
@@ -469,6 +520,7 @@ export class IngestManager {
         linksExtracted,
         ner: nerResult,
         nerSkipped,
+        ...(nerPending ? { nerPending: true } : {}),
         outcome: existedBefore ? "updated" : "created",
       };
     } catch (indexError) {

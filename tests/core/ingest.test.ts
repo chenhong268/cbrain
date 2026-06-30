@@ -1430,3 +1430,105 @@ describe("IngestManager NER timeout partial (#229)", () => {
     expect(db.getPage(result.slug)).not.toBeNull();
   });
 });
+
+import { JobQueueNerSubmitter } from "../../src/core/ner-backfill.js";
+import type { DeferredNerSubmitter } from "../../src/core/ner-backfill.js";
+
+describe("IngestManager NER defer mode (#252)", () => {
+  const testDir = "/tmp/cbrain-test-ingest-defer";
+  const vaultPath = join(testDir, "vault");
+  const dbPath = join(testDir, "t.sqlite");
+  let db: CBrainDB;
+  let lance: ReturnType<typeof createMockLanceDB>;
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+    lance = createMockLanceDB();
+  });
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  function makeDeferIngest(submitter: DeferredNerSubmitter, llm?: LLMProvider) {
+    const embedding = createMockEmbeddingProvider();
+    return new IngestManager(db, embedding, lance as any, vaultPath, llm, undefined, {
+      nerMode: "defer",
+      deferredNerSubmitter: submitter,
+    });
+  }
+
+  test("defer mode does not await NER; LLM chat not called at ingest time", async () => {
+    let chatCalls = 0;
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => { chatCalls++; return '{"entities":[],"relations":[],"events":[]}'; },
+    };
+    const submitter = new JobQueueNerSubmitter(db);
+    const ingestD = makeDeferIngest(submitter, llm);
+    const result = await ingestD.ingest({ content: "一段需要 NER 的记录内容", type: "text" });
+    expect(chatCalls).toBe(0);
+    expect(result.ner).toBeNull();
+    expect(result.nerPending).toBe(true);
+    expect(db.listJobs("pending").length).toBe(1);
+  });
+
+  test("defer mode leaves content searchable (FTS/chunks written before return)", async () => {
+    const submitter = new JobQueueNerSubmitter(db);
+    const ingestD = makeDeferIngest(submitter);
+    const result = await ingestD.ingest({ content: "可搜索的匿名正文片段", type: "text" });
+    const fts = db.rawDb.prepare("SELECT COUNT(*) as c FROM chunks_fts WHERE chunks_fts MATCH '匿名正文'").get() as { c: number };
+    expect(fts.c).toBeGreaterThan(0);
+    expect(result.nerPending).toBe(true);
+  });
+
+  test("skipNer overrides defer: no job, no nerPending", async () => {
+    const submitter = new JobQueueNerSubmitter(db);
+    const ingestD = makeDeferIngest(submitter);
+    const result = await ingestD.ingest({ content: "匿名内容", type: "text", skipNer: true });
+    expect(result.nerPending).toBeUndefined();
+    expect(db.listJobs("pending").length).toBe(0);
+  });
+
+  test("off mode: no NER, no job, no nerPending", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const ingestOff = new IngestManager(db, embedding, lance as any, vaultPath, undefined, undefined, { nerMode: "off" });
+    const result = await ingestOff.ingest({ content: "匿名内容", type: "text" });
+    expect(result.nerPending).toBeUndefined();
+    expect(db.listJobs("pending").length).toBe(0);
+  });
+
+  test("defer without submitter fails fast (throws, no silent sync degrade)", () => {
+    const embedding = createMockEmbeddingProvider();
+    expect(() => new IngestManager(db, embedding, lance as any, vaultPath, undefined, undefined, { nerMode: "defer" }))
+      .toThrow(/defer/i);
+  });
+
+  test("per-call nerMode=defer without submitter fails fast at ingest time", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const ingestSync = new IngestManager(db, embedding, lance as any, vaultPath);
+    await expect(ingestSync.ingest({ content: "x", type: "text", nerMode: "defer" })).rejects.toThrow(/defer/i);
+  });
+
+  test("sync mode behavior unchanged (existing path still awaits NER)", async () => {
+    const llm = createMockLLM([JSON.stringify({
+      entities: [{ name: "匿名实体甲", type: "person", context: "x" }], relations: [], events: [],
+    })]);
+    const embedding = createMockEmbeddingProvider();
+    const ingestSync = new IngestManager(db, embedding, lance as any, vaultPath, llm);
+    const result = await ingestSync.ingest({ content: "提到匿名实体甲的记录", type: "text" });
+    expect(result.ner).not.toBeNull();
+    expect(result.nerPending).toBeUndefined();
+    expect(db.listJobs("pending").length).toBe(0);
+  });
+
+  test("default sync + injected submitter: per-call nerMode=defer creates a job", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const submitter = new JobQueueNerSubmitter(db);
+    const ingestDefaultSync = new IngestManager(db, embedding, lance as any, vaultPath, undefined, undefined, { nerMode: "sync", deferredNerSubmitter: submitter });
+    const result = await ingestDefaultSync.ingest({ content: "匿名 per-call defer 正文", type: "text", nerMode: "defer" });
+    expect(result.nerPending).toBe(true);
+    expect(db.listJobs("pending").length).toBe(1);
+  });
+});
