@@ -57,3 +57,67 @@ describe("similar-entity-detector scaffolding", () => {
     expect(r.pairsEvaluated).toBeLessThan(60);
   });
 });
+
+describe("similar-entity-detector strategies", () => {
+  test("name_normalized: punctuation/case variants → high", () => {
+    const r = detectSimilarEntities(input([
+      page("entity/a", "A.I. Helper"), page("entity/b", "ai helper"),
+    ]));
+    expect(r.candidates).toHaveLength(1);
+    expect(r.candidates[0].matchKind).toBe("name_normalized");
+    expect(r.candidates[0].actionable).toBe("high");
+  });
+
+  test("name_substring: significant containment → high", () => {
+    const r = detectSimilarEntities(input([
+      page("entity/a", "Claude"), page("entity/b", "Claude Code"),
+    ]));
+    expect(r.candidates).toHaveLength(1);
+    expect(r.candidates[0].matchKind).toBe("name_substring");
+    expect(r.candidates[0].actionable).toBe("high");
+  });
+
+  test("edit_distance: typo-like variant → medium", () => {
+    const r = detectSimilarEntities(input([
+      page("entity/a", "Alpha Inc"), page("entity/b", "Alpho Inc"),
+    ]));
+    expect(r.candidates).toHaveLength(1);
+    expect(r.candidates[0].matchKind).toBe("edit_distance");
+    expect(r.candidates[0].actionable).toBe("medium");
+  });
+
+  test("alias_shadow_page: A.title is B's registered alias → high, target=B", () => {
+    const aliases = new Map<string, Set<string>>();
+    aliases.set("entity/b", new Set(["alpha"]));
+    const r = detectSimilarEntities(input([
+      page("entity/a", "Alpha"), page("entity/b", "组织C"),
+    ], { aliases }));
+    expect(r.candidates).toHaveLength(1);
+    const c = r.candidates[0];
+    expect(c.matchKind).toBe("alias_shadow_page");
+    expect(c.actionable).toBe("high");
+    expect(c.recommendedTarget).toBe("entity/b");
+  });
+
+  test("HIGH fix: identical titles are name_exact, NOT alias_shadow_page", () => {
+    const aliases = new Map<string, Set<string>>();
+    aliases.set("entity/b", new Set(["whatever"]));
+    const r = detectSimilarEntities(input([
+      page("entity/a", "实体A"), page("entity/b", "实体A"),
+    ], { aliases }));
+    expect(r.candidates[0].matchKind).toBe("name_exact");
+  });
+
+  test("shared_alias: two pages share a registered alias → high (same type)", () => {
+    const aliases = new Map<string, Set<string>>();
+    aliases.set("entity/a", new Set(["共享别名"]));
+    aliases.set("entity/b", new Set(["共享别名"]));
+    const r = detectSimilarEntities(input([
+      page("entity/a", "实体A"), page("entity/b", "实体B"),
+    ], { aliases }));
+    expect(r.candidates).toHaveLength(1);
+    expect(r.candidates[0].matchKind).toBe("shared_alias");
+    expect(r.candidates[0].sharedAlias).toContain("共享别名");
+    expect(r.candidates[0].actionable).toBe("high");
+  });
+});

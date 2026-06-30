@@ -1,5 +1,6 @@
 import {
-  normalizeForComparison, tokenizeForBlocking,
+  normalizeForComparison, isSignificantSubstring, boundedLevenshtein,
+  tokenizeForBlocking,
 } from "./name-similarity.js";
 
 export type SimilarMatchKind =
@@ -146,11 +147,6 @@ function reasonFor(kind: SimilarMatchKind, typeGate: "same_type" | "affine_type"
   return `${kind}:${t}`;
 }
 
-/**
- * Evaluate one candidate pair through the strategy priority chain.
- * Returns null if no strategy fires or the type gate drops the pair.
- * (Task 2 implements name_exact + the structure; Tasks 3-4 extend it.)
- */
 function evaluatePair(
   slugA: string,
   slugB: string,
@@ -166,18 +162,99 @@ function evaluatePair(
   if (!sameType && !affine) return null;
   const typeGate: "same_type" | "affine_type" = sameType ? "same_type" : "affine_type";
 
+  const aliasesA = input.registeredAliasesBySlug.get(slugA) ?? new Set<string>();
+  const aliasesB = input.registeredAliasesBySlug.get(slugB) ?? new Set<string>();
   const normA = normalizeForComparison(pa.title);
   const normB = normalizeForComparison(pb.title);
 
-  // Strategy: name_exact (case-insensitive raw equality)
-  if (pa.title.toLowerCase() === pb.title.toLowerCase()) {
-    return {
-      slugA, slugB, matchKind: "name_exact", nameScore: 1.0, typeGate,
-      actionable: computeActionable("name_exact", typeGate), reasonCode: reasonFor("name_exact", typeGate),
-    };
+  // Priority 1: alias_shadow_page (registered aliases ONLY — no own title).
+  const aTitleAliasedToB = normA.length > 0 && aliasesB.has(normA);
+  const bTitleAliasedToA = normB.length > 0 && aliasesA.has(normB);
+  if (aTitleAliasedToB || bTitleAliasedToA) {
+    const direction = aTitleAliasedToB && bTitleAliasedToA ? "both" : aTitleAliasedToB ? "aToB" : "bToA";
+    return buildCandidate(slugA, slugB, "alias_shadow_page", 1.0, typeGate, input, { aliasDirection: direction });
   }
 
-  // (name_normalized / name_substring / edit_distance / alias strategies added in Tasks 3-4)
-  void normA; void normB;
+  // Priority 2: shared_alias
+  const shared = [...aliasesA].filter((x) => aliasesB.has(x));
+  if (shared.length > 0) {
+    return buildCandidate(slugA, slugB, "shared_alias", 0.85, typeGate, input, { sharedAlias: shared });
+  }
+
+  // Priority 3: name_exact (case-insensitive raw equality)
+  if (pa.title.toLowerCase() === pb.title.toLowerCase()) {
+    return buildCandidate(slugA, slugB, "name_exact", 1.0, typeGate, input);
+  }
+
+  // Priority 4: name_normalized
+  if (normA.length > 0 && normA === normB) {
+    return buildCandidate(slugA, slugB, "name_normalized", 0.95, typeGate, input);
+  }
+
+  // Priority 5: name_substring
+  const [shorterN, longerN] = normA.length <= normB.length ? [normA, normB] : [normB, normA];
+  if (shorterN.length >= 2 && longerN.includes(shorterN) && isSignificantSubstring(shorterN, longerN)) {
+    const ratio = shorterN.length / longerN.length;
+    return buildCandidate(slugA, slugB, "name_substring", 0.6 + ratio * 0.3, typeGate, input);
+  }
+
+  // Priority 6: edit_distance (bounded)
+  const dist = boundedLevenshtein(normA, normB, 2);
+  if (dist !== null && normA.length > 0) {
+    const score = Math.max(1 - dist / Math.max(normA.length, normB.length), 0.5);
+    return buildCandidate(slugA, slugB, "edit_distance", score, typeGate, input, { editDistance: dist });
+  }
+
   return null;
+}
+
+interface CandidateExtra {
+  aliasDirection?: "aToB" | "bToA" | "both";
+  sharedAlias?: string[];
+  editDistance?: number;
+}
+
+function buildCandidate(
+  slugA: string,
+  slugB: string,
+  kind: SimilarMatchKind,
+  nameScore: number,
+  typeGate: "same_type" | "affine_type",
+  input: DetectorInput,
+  extra: CandidateExtra = {},
+): SimilarEntityCandidate {
+  const recommended = computeRecommendedTarget(slugA, slugB, kind, input, extra.aliasDirection);
+  const cand: SimilarEntityCandidate = {
+    slugA, slugB, matchKind: kind, nameScore, typeGate,
+    actionable: computeActionable(kind, typeGate),
+    reasonCode: reasonFor(kind, typeGate),
+  };
+  if (extra.editDistance !== undefined) cand.editDistance = extra.editDistance;
+  if (extra.sharedAlias) cand.sharedAlias = extra.sharedAlias;
+  if (recommended.target) cand.recommendedTarget = recommended.target;
+  if (recommended.ambiguous) cand.ambiguousTarget = true;
+  return cand;
+}
+
+/**
+ * Canonical merge-sink selection (#246 §8). alias_shadow with a single direction
+ * always points at the alias holder. Otherwise compare on discriminators 1-5;
+ * tie on all five → ambiguous (slug lexicographic is NOT used to force a choice).
+ * Task 3 stub: only the alias_direction path is implemented; full discriminators
+ * arrive in Task 4.
+ */
+function computeRecommendedTarget(
+  slugA: string,
+  slugB: string,
+  kind: SimilarMatchKind,
+  input: DetectorInput,
+  aliasDirection?: "aToB" | "bToA" | "both",
+): { target?: string; ambiguous?: boolean } {
+  if (kind === "alias_shadow_page") {
+    if (aliasDirection === "aToB") return { target: slugB };
+    if (aliasDirection === "bToA") return { target: slugA };
+    // "both" → fall through to canonical scoring (Task 4)
+  }
+  void input;
+  return {};
 }
