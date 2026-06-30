@@ -173,6 +173,15 @@ function measureLanceBytes(lancePath: string): number {
   return total;
 }
 
+/** Parse + validate the --scope CLI flag. Returns the scope, or an error message. (#246) */
+export function parseScopeFlag(
+  raw: string | undefined,
+): { ok: true; scope: "entity" | "concept" | undefined } | { ok: false; error: string } {
+  if (raw === undefined) return { ok: true, scope: undefined };
+  if (raw === "entity" || raw === "concept") return { ok: true, scope: raw };
+  return { ok: false, error: "--scope must be entity or concept" };
+}
+
 export function register(program: Command) {
   program
     .command("sync")
@@ -1317,13 +1326,18 @@ export function register(program: Command) {
     .option("--execute", "Persist candidates to the discoveries lifecycle")
     .option("--scope <scope>", "Restrict to entity or concept namespace")
     .action(async (opts) => {
+      const parsed = parseScopeFlag(opts.scope);
+      if (!parsed.ok) {
+        console.error(parsed.error);
+        process.exit(1);
+      }
       const config = loadConfig();
       const deps = createDeps(config, false);
       const db = deps.db;
       const { DiscoveryManager } = await import("../../core/discovery.js");
       const mgr = new DiscoveryManager(db);
       const dryRun = !opts.execute;
-      const scope = opts.scope as "entity" | "concept" | undefined;
+      const scope = parsed.scope;
       const report = await mgr.runSimilarEntityDetection({ dryRun, scope });
 
       const candidates = report.candidates ?? [];
