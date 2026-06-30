@@ -1301,6 +1301,31 @@ export class CBrainDB {
     return row;
   }
 
+  /** #252: reset stale 'running' jobs (older than ttl) back to 'pending'. Returns count reset. */
+  resetStaleJobsForNames(names: string[], staleTtlMs: number): number {
+    if (names.length === 0) return 0;
+    const ttlSec = Math.floor(staleTtlMs / 1000);
+    const placeholders = names.map(() => "?").join(",");
+    const r = this.rawDb.prepare(
+      `UPDATE jobs SET status = 'pending', started_at = NULL, finished_at = NULL
+       WHERE status = 'running' AND started_at IS NOT NULL
+         AND julianday('now') - julianday(started_at) >= ?
+         AND name IN (${placeholders})`
+    ).run(ttlSec / 86400, ...names);
+    return Number(r.changes);
+  }
+
+  /** #252: snapshot pending job ids for names, ordered by priority desc then id asc, limited. */
+  snapshotEligibleJobIds(names: string[], limit: number): number[] {
+    if (names.length === 0 || limit <= 0) return [];
+    const placeholders = names.map(() => "?").join(",");
+    const rows = this.rawDb.prepare(
+      `SELECT id FROM jobs WHERE status = 'pending' AND name IN (${placeholders})
+       ORDER BY priority DESC, id ASC LIMIT ?`
+    ).all(...names, limit) as Array<{ id: number }>;
+    return rows.map((r) => r.id);
+  }
+
   completeJob(id: number, result?: unknown): void {
     // Merge with existing progress data (from updateJobProgress calls)
     let finalResult = result;

@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite";
-import { NER_BACKFILL_STALE_TTL_MS } from "../../src/core/ner-backfill";
+import { NER_BACKFILL_STALE_TTL_MS, NER_BACKFILL_JOB } from "../../src/core/ner-backfill";
 
 const testDir = "/tmp/cbrain-test-ner-backfill";
 const dbPath = join(testDir, "test.sqlite");
@@ -50,5 +50,45 @@ describe("findActiveNerJobs (#252)", () => {
   test("findActiveNerJobs ignores non-ner-backfill job names", () => {
     db.submitJob("dream", { slug: "records/foo" });
     expect(db.findActiveNerJobs("records/foo", NER_BACKFILL_STALE_TTL_MS)).toEqual([]);
+  });
+});
+
+describe("resetStaleJobsForNames (#252)", () => {
+  test("stale running ner-backfill is reset to pending", () => {
+    const id = db.submitJob("ner-backfill", { slug: "records/foo" });
+    db.claimJobById(id);
+    db.rawDb.prepare("UPDATE jobs SET started_at = datetime('now','-2 hours') WHERE id = ?").run(id);
+    const reset = db.resetStaleJobsForNames([NER_BACKFILL_JOB], NER_BACKFILL_STALE_TTL_MS);
+    expect(reset).toBe(1);
+    const row = db.getJob(id)!;
+    expect(row.status).toBe("pending");
+  });
+  test("fresh running job is NOT reset", () => {
+    const id = db.submitJob("ner-backfill", { slug: "records/foo" });
+    db.claimJobById(id);
+    expect(db.resetStaleJobsForNames([NER_BACKFILL_JOB], NER_BACKFILL_STALE_TTL_MS)).toBe(0);
+    expect(db.getJob(id)!.status).toBe("running");
+  });
+  test("does not touch other job names", () => {
+    const id = db.submitJob("dream", {});
+    db.claimJobById(id);
+    db.rawDb.prepare("UPDATE jobs SET started_at = datetime('now','-2 hours') WHERE id = ?").run(id);
+    expect(db.resetStaleJobsForNames([NER_BACKFILL_JOB], NER_BACKFILL_STALE_TTL_MS)).toBe(0);
+  });
+});
+
+describe("snapshotEligibleJobIds (#252)", () => {
+  test("returns pending ner-backfill ids ordered by priority then id, bounded by limit", () => {
+    const a = db.submitJob("ner-backfill", { slug: "a" }, 0);
+    const b = db.submitJob("ner-backfill", { slug: "b" }, 5);
+    const c = db.submitJob("ner-backfill", { slug: "c" }, 5);
+    db.claimJobById(a);
+    const ids = db.snapshotEligibleJobIds([NER_BACKFILL_JOB], 50);
+    expect(ids).toEqual([b, c]);
+  });
+  test("respects limit", () => {
+    db.submitJob("ner-backfill", { slug: "a" }, 0);
+    db.submitJob("ner-backfill", { slug: "b" }, 0);
+    expect(db.snapshotEligibleJobIds([NER_BACKFILL_JOB], 1).length).toBe(1);
   });
 });
