@@ -1,8 +1,36 @@
 # Changelog
 
-> Current: `v2.0.1` — Recall 可用性与 HTTP-MCP 长请求稳定性修复：`deep_recall` 默认 compact 输出，长 sync/ingest 请求不再被 Bun 默认 idle timeout 掐断。
+> Current: `v2.0.3` — Recall 质量与延迟修复：Knowledge Map 可选同域上下文；默认 smart recall 降低 LLM query expansion 调用，并将 `degraded` 与 `latency_warning` 分离。
 
 ## [Unreleased]
+
+## [v2.0.3] — 2026-06-30
+
+### Recall 质量与延迟（#245, #250）
+
+- **Knowledge Map 可选 recall context（#245）**：`deep_recall` 可在显式开启时使用稳定知识域补充同域上下文；主结果排序、exact match、grounded recall 不受影响，调试信息仅进入 raw，用户可见输出只保留自然语言相关提示。
+- **默认 smart recall 延迟修复（#250）**：默认 smart 路径不再无条件调用 LLM query expansion；简单查询在 FTS 结果足够时跳过扩展，复杂或 FTS 不足时再扩展，并增加 expand budget guard。
+- **degraded 语义修正（#250）**：`latency_budget_exceeded` 不再单独把完整结果标成 degraded；慢但完整的查询标记为 `latency_warning`，真正的 `degraded_rate` 聚焦低分、空结果、超时和预算耗尽等检索质量问题。
+
+### Release Checks
+
+- `bun run check`：2720 pass / 0 fail。
+- `bun run check:docs`：PASS。
+- targeted release smoke：CLI / skill-pack 52 pass / 0 fail。
+
+## [v2.0.2] — 2026-06-29
+
+### Knowledge Map 与维护稳定性（#232, #234, #240-#244, #248, #249）
+
+- **Knowledge Map 第一阶段闭环**：新增只读图谱分析核心、CLI 报告、MCP 读取与 Dream 周报接入，用于识别社区、桥接节点、孤岛和弱连接，不写入新关系。
+- **Temporal evidence completion（#232）**：时序/历史类 recall 可补齐 timeline、chunk 和 link 证据，避免仅靠相似度召回遗漏“之前/后来/为什么这么定”等问题。
+- **graphSearch 批量遍历（#248）**：搜索热路径复用批量图遍历，减少 N+1 图查询；dangling link 不再作为召回候选暴露。
+- **维护命令 single-writer 加固（#234）**：`cbrain compact` 遇到活跃 writer 时拒绝裸跑，维护任务应通过 HTTP MCP wrapper 执行，避免与唯一 runtime 并发写。
+
+### Release Checks
+
+- `bun run check`：2570+ pass / 0 fail。
+- `bun run check:docs`：PASS。
 
 ## [v2.0.1] — 2026-06-27
 
