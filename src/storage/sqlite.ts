@@ -1625,6 +1625,33 @@ export class CBrainDB {
     ).all() as Array<{ slug: string; title: string; file_path: string }>;
   }
 
+  /** Bulk alias loader: rows of (page_slug, alias). Caller groups + normalizes. (#246) */
+  getAliasesBySlugBulk(): Array<{ page_slug: string; alias: string }> {
+    return this.prepare("SELECT page_slug, alias FROM aliases").all() as Array<{ page_slug: string; alias: string }>;
+  }
+
+  /**
+   * Bulk entity/concept quality signals for similar-entity detection (#246).
+   * pages has no summary column; completeness comes from chunks.
+   */
+  getEntityConceptQuality(): Array<{
+    slug: string; mention_count: number; alias_count: number; tag_count: number; body_chars: number; chunk_count: number;
+  }> {
+    return this.prepare(`
+      SELECT p.slug,
+             p.mention_count AS mention_count,
+             COALESCE(a.c, 0) AS alias_count,
+             COALESCE(t.c, 0) AS tag_count,
+             COALESCE(c.body_chars, 0) AS body_chars,
+             COALESCE(c.chunk_count, 0) AS chunk_count
+      FROM pages p
+      LEFT JOIN (SELECT page_slug, COUNT(*) c FROM aliases GROUP BY page_slug) a ON a.page_slug = p.slug
+      LEFT JOIN (SELECT page_slug, COUNT(*) c FROM tags GROUP BY page_slug) t ON t.page_slug = p.slug
+      LEFT JOIN (SELECT page_slug, SUM(length(content)) body_chars, COUNT(*) chunk_count FROM chunks GROUP BY page_slug) c ON c.page_slug = p.slug
+      WHERE p.type LIKE 'entity/%' OR p.type LIKE 'concept/%'
+    `).all() as Array<{ slug: string; mention_count: number; alias_count: number; tag_count: number; body_chars: number; chunk_count: number }>;
+  }
+
   findEmptyShells(): Array<{ slug: string; type: string; title: string; file_path: string }> {
     return this.prepare(`
       SELECT p.slug, p.type, p.title, p.file_path

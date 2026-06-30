@@ -1,8 +1,14 @@
 import { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { Logger } from "./logger.js";
+import { getOntology } from "../ontology/loader.js";
+import { normalizeForComparison } from "./name-similarity.js";
+import {
+  detectSimilarEntities,
+  type DetectorInput, type DetectorPage, type PageQuality,
+} from "./similar-entity-detector.js";
 
-export type DiscoveryType = "bridge" | "trend" | "gap" | "contradiction";
+export type DiscoveryType = "bridge" | "trend" | "gap" | "contradiction" | "similar_entity";
 
 export interface DetectionResult {
   type: DiscoveryType;
@@ -124,6 +130,99 @@ export class DiscoveryManager {
 
     this.logger?.info("discovery", `检测完成: ${newCount} 个新发现`);
     return { total: newCount, byType, byActionable, highActionable, enrichment };
+  }
+
+  /**
+   * #246 — On-demand similar-entity detection lane. Structurally separate from
+   * runDiscovery(): runDiscovery NEVER calls this. Builds DetectorInput in bulk,
+   * runs the pure detector, and feeds results through the existing dedup →
+   * upsertDiscovery loop. Persists candidates only; merges nothing.
+   */
+  async runSimilarEntityDetection(): Promise<DiscoveryReport> {
+    this.llmBudget = MAX_LLM_BUDGET;
+    const byType: Record<string, number> = {};
+    const byActionable: Record<string, number> = { high: 0, medium: 0, low: 0 };
+    const highActionable: DetectionResult[] = [];
+    const empty: DiscoveryReport = { total: 0, byType, byActionable, highActionable, enrichment: { skipped: true, reason: "no_candidates", llmAvailable: !!this.llm, attempted: 0, saved: 0, errors: 0 } };
+
+    const entityPages = this.db.getEntityConceptPages();
+    if (entityPages.length < 2) return empty;
+
+    // registeredAliasesBySlug: aliases table only, normalized, NO own title.
+    const registeredAliasesBySlug = new Map<string, Set<string>>();
+    for (const { page_slug, alias } of this.db.getAliasesBySlugBulk()) {
+      const norm = normalizeForComparison(alias);
+      if (!norm) continue;
+      const set = registeredAliasesBySlug.get(page_slug);
+      if (set) set.add(norm); else registeredAliasesBySlug.set(page_slug, new Set([norm]));
+    }
+
+    // qualityBySlug + linkDegree.
+    const qualityBySlug = new Map<string, PageQuality>();
+    const adj = this.buildAdjacency();
+    for (const row of this.db.getEntityConceptQuality()) {
+      const linkDegree = adj.get(row.slug)?.size ?? 0;
+      qualityBySlug.set(row.slug, {
+        isStub: row.mention_count === 0 && linkDegree === 0 && row.alias_count === 0 && row.tag_count === 0,
+        bodyChars: row.body_chars,
+        chunkCount: row.chunk_count,
+        mentionCount: row.mention_count,
+        aliasCount: row.alias_count,
+        tagCount: row.tag_count,
+      });
+    }
+    const linkDegreeMap = new Map<string, number>();
+    for (const [slug, neighbors] of adj) linkDegreeMap.set(slug, neighbors.size);
+
+    const detectorInput: DetectorInput = {
+      pages: entityPages as DetectorPage[],
+      registeredAliasesBySlug,
+      linkDegree: linkDegreeMap,
+      qualityBySlug,
+      areTypesAffine: (a, b) => getOntology().areTypesAffine(a, b),
+    };
+    const report = detectSimilarEntities(detectorInput);
+
+    const seen = new Set<string>();
+    let newCount = 0;
+    for (const c of report.candidates) {
+      const key = [c.slugA, c.slugB].sort().join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const metadata: Record<string, unknown> = {
+        match_kind: c.matchKind,
+        name_score: c.nameScore,
+        type_gate: c.typeGate,
+        reason_code: c.reasonCode,
+      };
+      if (c.editDistance !== undefined) metadata.edit_distance = c.editDistance;
+      if (c.recommendedTarget) metadata.recommended_target = c.recommendedTarget;
+      if (c.ambiguousTarget) metadata.ambiguous_target = true;
+      if (c.sharedAlias) metadata.shared_alias = c.sharedAlias;
+
+      const { id, inserted } = this.db.upsertDiscovery(
+        "similar_entity", [c.slugA, c.slugB], c.nameScore,
+        undefined, undefined, c.actionable, false, metadata,
+      );
+      if (!inserted) continue;
+      newCount++;
+      byType.similar_entity = (byType.similar_entity ?? 0) + 1;
+      byActionable[c.actionable]++;
+      if (c.actionable === "high") {
+        const r: DetectionResult = {
+          type: "similar_entity", entities: [c.slugA, c.slugB], score: c.nameScore,
+          metadata, actionable: "high",
+        };
+        r._dbId = id;
+        highActionable.push(r);
+      }
+    }
+
+    this.logger?.info("discovery", `similar_entity: ${newCount} 个新候选 (truncated=${report.truncated})`);
+    return {
+      total: newCount, byType, byActionable, highActionable,
+      enrichment: { skipped: true, reason: "no_enrichment", llmAvailable: !!this.llm, attempted: 0, saved: 0, errors: 0 },
+    };
   }
 
   detectBridges(adj?: Map<string, Set<string>>): DetectionResult[] {
