@@ -2,6 +2,7 @@ import type { EntityType, Relevance } from "./ner.js";
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { mapEntityType } from "./shared.js";
+import { normalizeForComparison, isSignificantSubstring } from "./name-similarity.js";
 import { getOntology } from "../ontology/loader.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 
@@ -459,24 +460,6 @@ function findSubstringMatch(name: string, db: CBrainDB, cachedTitles?: string[] 
     }
   }
   return null;
-}
-
-function isSignificantSubstring(shorter: string, longer: string): boolean {
-  const diff = longer.length - shorter.length;
-  // Absolute diff >= 3 (e.g. "Claude" ⊂ "Claude Code" = 5)
-  if (diff >= 3) return true;
-  // Or shorter occupies >= 60% of longer (e.g. "数字化" 3/5 = 60%)
-  if (shorter.length >= longer.length * 0.6) return true;
-  return false;
-}
-
-function normalizeForComparison(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[\s\-_.]+/g, "")
-    .replace(/[（(].+?[）)]/g, "")
-    .replace(/[^\p{L}\p{N}]/gu, "")
-    .trim();
 }
 
 function stripParenthetical(name: string): string {
