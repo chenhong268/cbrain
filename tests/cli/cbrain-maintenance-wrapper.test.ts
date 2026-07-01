@@ -74,4 +74,16 @@ describe("bin/cbrain-maintenance.sh — single-writer wrapper (#212, #234)", () 
       .filter((l) => /^\s*[a-z]*\s*cbrain\s+(compact|dream|enrich|dedup|discover|sync)\b/.test(l));
     expect(offenders).toEqual([]);
   });
+
+  test("declares X-CBrain-Tool-Profile: maintenance on every MCP request (#260)", () => {
+    const src = readFileSync(WRAPPER, "utf-8");
+    // Three MCP curl calls: initialize, notifications/initialized, tools/call.
+    // Each must carry the profile header so the per-session runtime assigns maintenance.
+    const profileHeaders = src
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"))
+      .filter((l) => l.includes("X-CBrain-Tool-Profile: maintenance"));
+    // initialize + notifications/initialized + tools/call = 3
+    expect(profileHeaders.length).toBe(3);
+  });
 });

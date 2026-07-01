@@ -31,9 +31,11 @@ if ! curl -sf "${BASE}/health" >/dev/null 2>&1; then
 fi
 
 # 2. MCP initialize → mcp-session-id (从 response header 取，取不到就 fail)
+#    带 X-CBrain-Tool-Profile: maintenance 让共享 /mcp runtime 给本 session 分配 maintenance 面（#260）。
 INIT_HEADERS="$(curl -s -o /dev/null -D - -X POST "$CBRAIN_MCP_URL" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
+  -H 'X-CBrain-Tool-Profile: maintenance' \
   -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"${PROTOCOL_VERSION}\",\"capabilities\":{},\"clientInfo\":{\"name\":\"cbrain-maintenance\",\"version\":\"1.0\"}}}" 2>&1)"
 
 SESSION="$(printf '%s\n' "$INIT_HEADERS" | awk -F': ' 'tolower($1)=="mcp-session-id"{gsub(/[\r\n]/,"",$2); print $2; exit}')"
@@ -60,6 +62,7 @@ if ! curl -sf -o /dev/null -X POST "$CBRAIN_MCP_URL" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H "mcp-session-id: $SESSION" \
+  -H 'X-CBrain-Tool-Profile: maintenance' \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' 2>&1; then
   echo "FAIL: notifications/initialized 失败" >&2
   exit 1
@@ -70,6 +73,7 @@ if ! curl -sf -X POST "$CBRAIN_MCP_URL" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   -H "mcp-session-id: $SESSION" \
+  -H 'X-CBrain-Tool-Profile: maintenance' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"dream","arguments":{}}}'; then
   echo "FAIL: tools/call dream 失败" >&2
   exit 1
