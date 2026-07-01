@@ -166,6 +166,18 @@ Entities auto-promote through tiers based on mention frequency:
 
 Mentions are counted from wiki-links extracted during ingest. Each `[[entity]]` reference increments the target entity's `mention_count`. Enrichment is idempotent, only upgrades (never downgrades), and can skip directly from tier 3 to tier 1 for surge mentions.
 
+Enrichment also writes a `hotness_score` used as a small retrieval bonus and as a signal for trimming low-value stubs. Hotness is not a second ontology tier; it is a normalized freshness/usefulness score built from five bounded signals:
+
+| Signal | Weight | Meaning |
+|:-------|:-------|:--------|
+| mention count | 0.25 | Explicit wiki-link mentions indicate repeated use. |
+| graph links | 0.20 | Connected entities are more useful than isolated names. |
+| activity | 0.30 | Recently read or written pages should surface while the context is active. |
+| tier | 0.15 | Stable tier-1/tier-2 entities should not disappear only because recent activity is quiet. |
+| body richness | 0.10 | Substantial pages get a small advantage over empty stubs. |
+
+The current weights are fixed in code. They are documented before being made configurable so changes can be reviewed as behavior changes, not silent tuning.
+
 ## Version History
 
 Every page mutation creates a version snapshot before the change. The `versions` table stores:

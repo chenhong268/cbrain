@@ -5,10 +5,15 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 
 const HOTNESS_WEIGHTS = {
+  // Direct mentions show how often an entity appears in explicit wikilinks.
   mention: 0.25,
+  // Links capture graph connectedness so well-related entities are not judged by mentions alone.
   link: 0.20,
+  // Activity is weighted highest because recent reads/writes should surface living context quickly.
   activity: 0.30,
+  // Tier keeps long-running core entities stable even when recent activity temporarily drops.
   tier: 0.15,
+  // Body richness prevents empty stubs from competing equally with substantial pages.
   body: 0.10,
 } as const;
 
