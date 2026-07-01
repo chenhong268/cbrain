@@ -23,6 +23,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { FileWatcher } from "../core/watcher.js";
 import { resolveIngestNerMode } from "../cli/context.js";
+import type { ToolProfile } from "./tool-profiles.js";
 import { JobQueueNerSubmitter } from "../core/ner-backfill.js";
 
 export interface ToolContext {
@@ -51,6 +52,8 @@ export interface ToolContext {
   provenance: ProvenanceManager;
   compoundingReview: CompoundingReviewManager;
   watcher?: FileWatcher;
+  /** #251: MCP tool surface profile — gates which tools attachMcpTools exposes. */
+  toolProfile: ToolProfile;
 }
 
 export interface IndexResult {
@@ -68,7 +71,7 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off" }): ToolContext {
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile }): ToolContext {
   const { db, embedding, lance, vaultPath, dbPath, llm, profileDir, watcher } = deps;
   const outputsDir = deps.runtimePath;
   const logger = new Logger(outputsDir);
@@ -97,5 +100,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const compoundingReview = new CompoundingReviewManager(db);
   profile.load();
 
-  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher };
+  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full" };
 }

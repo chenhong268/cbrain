@@ -7,6 +7,7 @@ import { DeterministicEmbeddingProvider } from "../embedding/deterministic.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { ZhipuLLMProvider } from "../llm/zhipu.js";
 import type { CBrainDeps } from "../mcp/server.js";
+import { resolveToolProfile } from "../mcp/tool-profiles.js";
 
 const CONFIG_FILE = "cbrain.json";
 
@@ -167,5 +168,6 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
   }
 
   const nerIngestMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, config.ner?.ingest_mode);
-  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined, nerIngestMode };
+  const toolProfile = resolveToolProfile(process.env.CBRAIN_MCP_TOOL_PROFILE);
+  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined, nerIngestMode, toolProfile };
 }

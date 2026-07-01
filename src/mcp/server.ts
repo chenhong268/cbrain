@@ -9,6 +9,7 @@ import { buildContext } from "./context.js";
 import { version } from "../version.js";
 import { registerAllTools } from "./register.js";
 import type { IngestNerMode } from "../cli/context.js";
+import type { ToolProfile } from "./tool-profiles.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -23,6 +24,8 @@ export interface CBrainDeps {
   search?: import("../search/provider.js").SearchProvider;
   /** #252: resolved ingest NER mode (env > config > sync), threaded into buildContext. */
   nerIngestMode?: IngestNerMode;
+  /** #251: resolved MCP tool surface profile (env > full), threaded into buildContext. */
+  toolProfile?: ToolProfile;
 }
 
 /** Register dream job handler and start the background worker. Shared by MCP and HTTP paths. */
