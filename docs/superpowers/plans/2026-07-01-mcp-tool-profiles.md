@@ -749,7 +749,7 @@ describe("error sanitization asymmetry (behavioral, preserved)", () => {
     const server = new McpServer({ name: "cbrain", version: "0.0.0" });
     attachMcpTools(server, { ...buildContext(deps), toolProfile: "full" });
     // A raw message the sanitizer would mangle: matches the SQLite + path rules in sanitizeError.
-    const RAW = "SQLite: no such table: secrets at /home/realuser/secret.sqlite3";
+    const RAW = "SQLite: no such table: fixture_table at /tmp/sanitize-probe/fixture.sqlite3";
 
     // registerTool path — sanitized
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -772,12 +772,12 @@ describe("error sanitization asymmetry (behavioral, preserved)", () => {
     const regText = JSON.stringify(regResult);
     const legacyText = JSON.stringify(legacyResult);
 
-    // Sanitized: the raw secret path is gone and the db-error tail is replaced.
-    expect(regText).not.toContain("/home/realuser/secret.sqlite3");
+    // Sanitized: the raw fixture path is gone and the db-error tail is replaced.
+    expect(regText).not.toContain("/tmp/sanitize-probe/fixture.sqlite3");
     expect(regText).toContain("[db-error]");
     // NOT sanitized: the raw message survives intact (whatever envelope the SDK uses).
-    expect(legacyText).toContain("no such table: secrets");
-    expect(legacyText).toContain("/home/realuser/secret.sqlite3");
+    expect(legacyText).toContain("no such table: fixture_table");
+    expect(legacyText).toContain("/tmp/sanitize-probe/fixture.sqlite3");
   });
 });
 ```
@@ -1049,4 +1049,4 @@ Walk #251 acceptance criteria 1–12 + scope-update additions against the tasks 
 - **The `server.tool` patch is filter-only.** Adding a try-catch there is the easiest mistake to make and the most forbidden — Task 4 Step 5 locks it behaviorally.
 - **REST `/tools` stays full-surface in Phase 1** (documented boundary). Don't filter `createToolRegistry`.
 - **Env-only.** No `config as ...` casts. Config-file support is Phase 2 with a real typed `CBrainConfig` field.
-- All commits end with the `(#251)` trailer; do not push or close the issue (Hermes/宏哥's job).
+- All commits end with the `(#251)` trailer; do not push or close the issue (release-owner job).
