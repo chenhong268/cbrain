@@ -1,0 +1,89 @@
+import { describe, test, expect } from "bun:test";
+import {
+  TOOL_PROFILES,
+  TOOL_PROFILE_ALLOWLISTS,
+  resolveToolProfile,
+  isToolAllowedForProfile,
+} from "../../src/mcp/tool-profiles";
+
+describe("resolveToolProfile (env only)", () => {
+  test("env value resolves", () => {
+    expect(resolveToolProfile("agent")).toBe("agent");
+    expect(resolveToolProfile("maintenance")).toBe("maintenance");
+    expect(resolveToolProfile("debug")).toBe("debug");
+    expect(resolveToolProfile("full")).toBe("full");
+  });
+  test("absent / empty / whitespace defaults to full", () => {
+    expect(resolveToolProfile(undefined)).toBe("full");
+    expect(resolveToolProfile("")).toBe("full");
+    expect(resolveToolProfile("   ")).toBe("full");
+  });
+  test("trims + lowercases", () => {
+    expect(resolveToolProfile("  AGENT ")).toBe("agent");
+  });
+  test("invalid fails fast with the env var name in the message", () => {
+    expect(() => resolveToolProfile("garbage")).toThrow(/CBRAIN_MCP_TOOL_PROFILE/);
+  });
+  test("every member of TOOL_PROFILES resolves", () => {
+    for (const p of TOOL_PROFILES) expect(resolveToolProfile(p)).toBe(p);
+  });
+});
+
+describe("isToolAllowedForProfile", () => {
+  test("full allows everything", () => {
+    expect(isToolAllowedForProfile("anything", "full")).toBe(true);
+    expect(isToolAllowedForProfile("query", "full")).toBe(true);
+  });
+  test("agent excludes low-level/admin tools", () => {
+    for (const t of ["query", "get_chunks", "dream", "dream_status", "dream_reset", "sync", "health",
+      "job_submit", "job_list", "job_status", "job_cancel", "job_retry", "relation_audit",
+      "watcher_quarantine", "get_provenance", "set_trust_state", "confirm_evidence"]) {
+      expect(isToolAllowedForProfile(t, "agent")).toBe(false);
+    }
+  });
+  test("agent includes the documented user-facing surface", () => {
+    for (const t of ["cbrain_recall", "deep_recall", "ingest", "get_page", "put_page",
+      "merge_entities", "get_org_tree", "status"]) {
+      expect(isToolAllowedForProfile(t, "agent")).toBe(true);
+    }
+  });
+  test("maintenance includes dream + job_* + sync + health + relation_audit", () => {
+    for (const t of ["dream", "dream_status", "dream_reset", "sync", "health", "relation_audit",
+      "job_submit", "job_list", "job_status", "job_cancel", "job_retry", "status", "wakeup_diff"]) {
+      expect(isToolAllowedForProfile(t, "maintenance")).toBe(true);
+    }
+  });
+  test("debug includes query + get_chunks + list_pages + provenance", () => {
+    for (const t of ["query", "get_chunks", "list_pages", "get_links", "get_tags",
+      "get_versions", "get_ingest_log", "get_provenance", "set_trust_state", "confirm_evidence"]) {
+      expect(isToolAllowedForProfile(t, "debug")).toBe(true);
+    }
+  });
+});
+
+describe("allowlist shape", () => {
+  test("only agent/maintenance/debug have allowlists (not full)", () => {
+    expect(TOOL_PROFILE_ALLOWLISTS.agent).toBeInstanceOf(Array);
+    expect(TOOL_PROFILE_ALLOWLISTS.maintenance).toBeInstanceOf(Array);
+    expect(TOOL_PROFILE_ALLOWLISTS.debug).toBeInstanceOf(Array);
+    expect((TOOL_PROFILE_ALLOWLISTS as Record<string, unknown>).full).toBeUndefined();
+  });
+  test("agent allowlist is bounded <= 20", () => {
+    expect(TOOL_PROFILE_ALLOWLISTS.agent.length).toBeLessThanOrEqual(20);
+  });
+  test("no duplicate names within an allowlist", () => {
+    for (const p of ["agent", "maintenance", "debug"] as const) {
+      const names = TOOL_PROFILE_ALLOWLISTS[p];
+      expect(new Set(names).size).toBe(names.length);
+    }
+  });
+  test("every allowlist entry is a non-empty trimmed string", () => {
+    for (const p of ["agent", "maintenance", "debug"] as const) {
+      for (const n of TOOL_PROFILE_ALLOWLISTS[p]) {
+        expect(typeof n).toBe("string");
+        expect(n.length).toBeGreaterThan(0);
+        expect(n).toBe(n.trim());
+      }
+    }
+  });
+});
