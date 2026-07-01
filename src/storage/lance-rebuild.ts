@@ -18,9 +18,9 @@
 import { existsSync, renameSync, rmSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as lancedb from "@lancedb/lancedb";
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { CBrainDB } from "./sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
-import { CHUNKS_SCHEMA, INSIGHTS_SCHEMA } from "../storage/lancedb.js";
+import { CHUNKS_SCHEMA, INSIGHTS_SCHEMA } from "./lancedb.js";
 
 // ── Types ───────────────────────────────────────────────────
 

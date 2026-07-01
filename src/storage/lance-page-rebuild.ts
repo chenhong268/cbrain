@@ -18,13 +18,13 @@
  *   - Rollback restores the EXACT old rows (re-embedding could drift otherwise).
  *   - User-facing output is anonymized + sanitized (no paths, credentials, stacks).
  */
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { CBrainDB } from "./sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import {
   LanceTableMissingError,
   type LanceDBManager,
   type RawVectorRow,
-} from "../storage/lancedb.js";
+} from "./lancedb.js";
 
 // ── Public types ────────────────────────────────────────────────────────
 

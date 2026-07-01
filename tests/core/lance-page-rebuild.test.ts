@@ -6,7 +6,7 @@ import { LanceDBManager, LanceTableMissingError } from "../../src/storage/lanced
 import {
   rebuildPageVectors,
   classifyQuarantineFault,
-} from "../../src/core/lance-page-rebuild.js";
+} from "../../src/storage/lance-page-rebuild.js";
 
 /**
  * Deterministic fake embedding provider matching 2048 dimensions.

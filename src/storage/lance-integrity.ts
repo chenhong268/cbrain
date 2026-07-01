@@ -10,7 +10,7 @@
 import { existsSync, statSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import * as lancedb from "@lancedb/lancedb";
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { CBrainDB } from "./sqlite.js";
 
 // ── Types ───────────────────────────────────────────────────
 

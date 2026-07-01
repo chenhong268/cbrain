@@ -17,7 +17,7 @@ import {
   classifyQuarantineFault,
   anonymizeSlug,
   sanitizeError,
-} from "../../core/lance-page-rebuild.js";
+} from "../../storage/lance-page-rebuild.js";
 import { PidLock } from "../../utils/pid-lock.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
 

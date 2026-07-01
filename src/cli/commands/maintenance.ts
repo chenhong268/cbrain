@@ -4,7 +4,7 @@ import { resolve, dirname, join } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
-import { checkLanceIntegrity } from "../../core/lance-integrity.js";
+import { checkLanceIntegrity } from "../../storage/lance-integrity.js";
 import { ZhipuEmbeddingProvider } from "../../embedding/zhipu.js";
 import { ZhipuLLMProvider } from "../../llm/zhipu.js";
 import { DeepSeekLLMProvider } from "../../llm/deepseek.js";
@@ -39,7 +39,7 @@ export async function handleReindexVectors(
   log: (msg: string) => void = console.log,
   logError: (msg: string) => void = console.error,
 ): Promise<number> {
-  const { rebuildLanceIndex } = await import("../../core/lance-rebuild.js");
+  const { rebuildLanceIndex } = await import("../../storage/lance-rebuild.js");
   let exitCode = 0;
   try {
     const report = await rebuildLanceIndex(lancePath, db, embedding);

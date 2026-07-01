@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { rebuildLanceIndex, type FsOps } from "../../src/core/lance-rebuild.js";
+import { rebuildLanceIndex, type FsOps } from "../../src/storage/lance-rebuild.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
 
 /**
