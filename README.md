@@ -8,19 +8,20 @@
   <em>Your Agent's Memory, Compounding. Agent 的记忆，复利生长。</em>
 </p>
 
-CBrain is an open-source personal knowledge brain for AI Agents. Inspired by [Karpathy's LLM Wiki pattern](https://x.com/karpathy) — human inputs, Agent compiles, knowledge compounds with every interaction.
+CBrain is an open-source **Agentic Memory Kernel** — a structured, compounding memory layer that any MCP-compatible Agent can query, reason over, and write to. Inspired by [Karpathy's LLM Wiki pattern](https://x.com/karpathy) — human inputs, Agent compiles, knowledge compounds with every interaction.
 
-CBrain 是一个开源的 AI Agent 个人知识大脑。受 Karpathy 的 LLM Wiki 模式启发 —— 人类输入，Agent 编译，知识在每次交互中复利增长。
+CBrain 是一个开源的 **Agentic Memory Kernel（Agent 记忆内核）** —— 一层结构化、复利增长的记忆，任何兼容 MCP 的 Agent 都能查询、推理、写入。受 Karpathy 的 LLM Wiki 模式启发 —— 人类输入，Agent 编译，知识在每次交互中复利增长。
 
 ## Why CBrain
 
-LLMs forget everything between conversations. CBrain gives your Agent a persistent, compounding memory that grows richer over time.
+LLMs forget everything between conversations. CBrain is the memory kernel your Agent is missing — persistent, structured, and compounding. It turns every conversation into a growing knowledge graph the Agent reasons over next time, instead of a chat log that scatters and dies.
 
 - **Obsidian-native** — All pages are markdown files you can read, edit, and browse in Obsidian
 - **Three-layer search** — Vector + Chinese FTS + Graph traversal, fused with RRF
 - **Knowledge graph** — Wiki-link based relationships + auto NER entity/relationship extraction
 - **Entity enrichment** — People and companies auto-promote through tiers as you mention them
-- **84 MCP tools** — Full page CRUD, tags, links, timeline, version history, job queue, and observability
+- **Narrow agent surface by default** — Daily Agents get a small `agent` tool profile (recall, read/write, graph), not the full 84-tool inventory. Profiles reduce routing noise — they're an ergonomics boundary, not a security one
+- **Local-first, explicit external flow** — SQLite + Markdown + LanceDB live on your machine; embedding/NER/reflection send the text being processed to your configured model provider (Zhipu/DeepSeek)
 - **Version history** — Every page version snapshotted, with revert support
 - **Multi-query expansion** — LLM generates search query variants for better recall, fused with RRF
 - **Job queue** — SQLite-backed async job system with priority, retry, and status tracking
@@ -32,8 +33,8 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 - **三层搜索** — 向量 + 中文全文 + 图遍历，RRF 融合排序
 - **知识图谱** — 基于 Wiki Link 的实体关系 + 自动 NER 实体/关系提取
 - **实体丰富** — 人物和组织随提及次数自动升级
-- **MCP 服务器** — 接入任何兼容 MCP 的 Agent
-- **本地存储** — SQLite + Markdown + LanceDB 全部存在你的机器上。但向量嵌入、NER、洞察生成会把待处理文本连同 API Key 发往你配置的模型 provider（智谱/DeepSeek）
+- **默认窄工具面** — 日常 Agent 用 `agent` profile（recall + 读写 + 图谱），不直接面对 84 个工具。Profile 是降噪音的人体工学边界，不是安全边界
+- **本地优先，数据流透明** — SQLite + Markdown + LanceDB 全在本地；向量嵌入、NER、洞察生成会把待处理文本发往你配置的模型 provider（智谱/DeepSeek）
 
 ## Quick Start
 
@@ -356,6 +357,8 @@ Add to your Agent's MCP config:
 
 ### MCP Tools (84 total)
 
+> 日常 Agent 不必面对全部 84 个工具——走 [`agent` profile](#mcp-tool-profiles) 只暴露 recall / 读写 / 图谱等用户态工具。下面是完整清单（reference）。
+
 **Core:**
 | Tool | Description |
 |:-----|:------------|
@@ -478,29 +481,25 @@ CBrain includes Agent-facing skill files that teach your Agent how to use the br
 
 ## Configuration
 
-CBrain uses `cbrain.json` in your project directory:
+CBrain reads `cbrain.json` in your project directory. **Keep config minimal — paths + provider — and supply API keys via environment variables**, not the config file:
 
 ```json
 {
-  "vault_path": "./vault",
-  "db_path": "./brain.sqlite",
-  "lancedb_path": "./lancedb",
-  "embedding": {
-    "provider": "zhipu",
-    "model": "embedding-3",
-    "dimensions": 2048,
-    "api_key": "your-api-key"
-  },
-  "ner": {
-    "enabled": true,
-    "llm_provider": "zhipu",
-    "llm_model": "glm-5-turbo",
-    "llm_api_key": "your-api-key"
-  }
+  "vaultPath": "./vault",
+  "dbPath": "./brain.sqlite",
+  "lancePath": "./lancedb",
+  "embedding": { "provider": "zhipu" },
+  "ner": { "enabled": true }
 }
 ```
 
-Set `ZHIPU_API_KEY` environment variable as an alternative to config file.
+```bash
+export ZHIPU_API_KEY=your-zhipu-api-key   # 向量嵌入 + NER（硬依赖）
+```
+
+Config-file keys (`embedding.apiKey`, `ner.llm_api_key`) still work, but env vars are the recommended pattern — they keep secrets out of files you might share or sync. Optional providers that have no env shortcut yet (e.g. DeepSeek for `reflect`) fall back to their config field: `"reflect": { "llm_provider": "deepseek", "llm_api_key": "your-deepseek-api-key" }`.
+
+> **Field-name convention is mixed by design**: top-level keys and the `embedding` block are camelCase (`vaultPath`, `dbPath`, `lancePath`, `apiKey`); the `ner` and `reflect` blocks use snake_case (`llm_api_key`, `llm_base_url`, `llm_model`). This matches `cbrain.json.example`.
 
 ### Optional web fallback
 
@@ -530,7 +529,31 @@ When `search` is absent, or when SearXNG is unreachable, stub enrichment continu
 
 ### MCP tool profiles
 
-Set `CBRAIN_MCP_TOOL_PROFILE=agent|maintenance|debug|full` to choose the MCP tool surface (default `full`; env only). See `docs/mcp-tools.md#工具暴露面-profile251`. Keep the shared `/mcp` runtime on `full`/`maintenance` — the maintenance cron depends on `dream`/`health` being reachable over `/mcp`.
+CBrain ships 84 MCP tools, but a daily Agent shouldn't have to navigate all of them. Pick a **tool profile** to narrow the surface:
+
+| Profile | For | Surface |
+|:--------|:----|:--------|
+| `agent` | Normal Agent use (Hermes etc.) | Recall, read/write pages, resolve slugs, graph, timeline, profile — ~20 user-facing tools |
+| `maintenance` | cron / patrol / ops | `dream_*`, `sync`, `health`, `job_*`, `relation_audit`, `wakeup_diff` |
+| `debug` / `full` | Development & diagnostics / local dev | Low-level search, chunks, provenance, add/remove helpers (`debug`); everything (`full`, default) |
+
+**Per-session selection (HTTP `/mcp`, #260):** each new session requests a profile via the `X-CBrain-Tool-Profile` header or `initialize` metadata, without touching the shared runtime. The shared `/mcp` runtime stays on `full`/`maintenance` (the maintenance cron needs `dream`/`health` reachable), while your Agent's own session runs on `agent`.
+
+**Whole-runtime selection (stdio / env):** `CBRAIN_MCP_TOOL_PROFILE=agent|maintenance|debug|full` (default `full`; env only, no config field yet). Invalid values fail fast at startup.
+
+```json
+{
+  "mcpServers": {
+    "cbrain": {
+      "command": "cbrain",
+      "args": ["serve"],
+      "env": { "CBRAIN_MCP_TOOL_PROFILE": "agent" }
+    }
+  }
+}
+```
+
+> **A profile is an ergonomics boundary, not an auth/security boundary.** It reduces tool-routing noise for the Agent; it does not isolate tenants or restrict a determined caller. See `docs/mcp-tools.md#工具暴露面-profile251` for the full per-profile allowlist.
 
 ## Tech Stack
 

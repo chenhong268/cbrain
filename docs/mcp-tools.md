@@ -414,4 +414,4 @@ CBrain 默认对所有客户端暴露完整工具集（`full`）。可以为单�
 
 选择方式：`CBRAIN_MCP_TOOL_PROFILE=agent|maintenance|debug|full`（env > `full`；Phase 1 暂不支持 config 字段）。非法值启动时 fail fast。
 
-> **Phase 1 边界**：profile 目前只是「基础设施 + 测试」。生产 `/mcp` runtime 仍保持 `full`——`bin/cbrain-maintenance.sh` 通过 `/mcp` 调 `dream`，patrol 也通过 `/mcp` health-check。**不要把共享 runtime 设成 `agent`**，否则 cron + patrol 会坏（`dream`/`health` 被隐藏）。让日常 Agent 真正用上 `agent` 暴露面是后续 per-session profile 的工作（或独立 Agent runtime），不属于 #251 Phase 1。
+> **Per-session profile 已落地（#260）**：日常 Agent 通过 HTTP `/mcp` 按 session 请求 `agent` 暴露面——用 `X-CBrain-Tool-Profile` 请求头或 `initialize` metadata 指定，无需动共享 runtime。共享 `/mcp` runtime 仍保持 `full`/`maintenance`——`bin/cbrain-maintenance.sh` 通过 `/mcp` 调 `dream`，patrol 也通过 `/mcp` health-check。**不要把共享 runtime 整体设成 `agent`**，否则 cron + patrol 会坏（`dream`/`health` 被隐藏）；要给日常 Agent 窄面，走 per-session profile，不要改 runtime 默认。

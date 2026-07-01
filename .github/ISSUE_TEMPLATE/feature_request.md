@@ -19,4 +19,4 @@ Any alternative approaches you've thought about.
 
 ## Additional Context
 
-Why does this fit CBrain's scope as a personal knowledge brain for AI Agents?
+Why does this fit CBrain's scope as an agentic memory kernel for AI Agents?

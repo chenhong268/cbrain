@@ -236,7 +236,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 }
 ```
 
-环境变量：`ZHIPU_API_KEY`（如果不在 cbrain.json 中配置）
+环境变量（推荐）：`ZHIPU_API_KEY` —— 优先用环境变量，避免把密钥写进可能被同步或分享的配置文件；config 里的 `embedding.apiKey` / `ner.llm_api_key` 仍可作为备选。可选的 DeepSeek（reflect）目前只能走 config 字段 `reflect.llm_api_key`，尚无环境变量快捷方式。
 
 ### 可选 search provider
 

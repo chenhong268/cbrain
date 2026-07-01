@@ -49,7 +49,7 @@ GBrain uses PGLite (embedded Postgres) with pgvector. CBrain chose a different s
 | Embedding dims | 1536d (OpenAI) | 2048d (智谱 embedding-3) |
 | Migration path | Easier to scale to Supabase | Stay SQLite, or migrate storage layer behind interface |
 
-**The tradeoff**: SQLite can't do remote multi-writer. But for a personal knowledge brain, single-writer is the correct model — you're the only one writing to your brain.
+**The tradeoff**: SQLite can't do remote multi-writer. But for a single-user agentic memory kernel, single-writer is the correct model — you're the only one writing to your brain.
 
 ## Search Pipeline
 
