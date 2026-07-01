@@ -397,6 +397,10 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `writeback` | Write insights back to the knowledge base. |
 <!-- cbrain:auto-gen mcp-tools:end -->
 
+## 来源与信任（Provenance）
+
+`get_provenance`（查来源）、`set_trust_state`（降级 / 纠正）、`confirm_evidence`（升级为可信）三个工具管来源追踪。什么场景用哪个、面向用户怎么措辞，见 [来源与信任指南](provenance.md)。
+
 ## 工具暴露面 Profile（#251）
 
 CBrain 默认对所有客户端暴露完整工具集（`full`）。可以为单个 runtime 选更小的暴露面，降低日常 Agent 的工具路由噪音：

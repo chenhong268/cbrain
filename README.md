@@ -118,7 +118,7 @@ CBrain 需要以下 API key：
 | 智谱（Zhipu） | 向量嵌入 + NER 实体提取 | [open.bigmodel.cn](https://open.bigmodel.cn) |
 | DeepSeek（可选） | 洞察生成（reflect） | [platform.deepseek.com](https://platform.deepseek.com) |
 
-> 完整文档：[使用指南](docs/usage.md) | [MCP 工具参考](docs/mcp-tools.md)
+> 完整文档：[使用指南](docs/usage.md) | [MCP 工具参考](docs/mcp-tools.md) | [来源与信任](docs/provenance.md)
 
 ## Architecture
 
