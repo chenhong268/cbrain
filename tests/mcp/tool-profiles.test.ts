@@ -5,6 +5,7 @@ import {
   resolveToolProfile,
   isToolAllowedForProfile,
 } from "../../src/mcp/tool-profiles";
+import { collectRegisteredToolNames } from "../helpers/mcp-inventory";
 
 describe("resolveToolProfile (env only)", () => {
   test("env value resolves", () => {
@@ -84,6 +85,26 @@ describe("allowlist shape", () => {
         expect(n.length).toBeGreaterThan(0);
         expect(n).toBe(n.trim());
       }
+    }
+  });
+});
+
+describe("allowlist validity vs real inventory", () => {
+  const all = collectRegisteredToolNames();
+  test("inventory is non-empty and unique", () => {
+    expect(all.length).toBeGreaterThan(40);
+    expect(new Set(all).size).toBe(all.length);
+  });
+  test("every allowlisted name exists in the full inventory", () => {
+    for (const p of ["agent", "maintenance", "debug"] as const) {
+      for (const name of TOOL_PROFILE_ALLOWLISTS[p]) {
+        expect(all, `profile ${p} references unknown tool ${name}`).toContain(name);
+      }
+    }
+  });
+  test("full inventory includes tools excluded from agent", () => {
+    for (const t of ["query", "get_chunks", "dream", "sync", "health", "job_submit"]) {
+      expect(all).toContain(t);
     }
   });
 });
