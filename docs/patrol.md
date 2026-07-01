@@ -28,6 +28,7 @@ exit 0 = runtime healthy（perf/repo_gate 可能 deferred）；exit 1 = runtime 
 - `cbrain doctor` —— 开 CBrainDB + 调 embedding API，非纯只读；cron 不应 spawn stdio CLI 触 runtime
 - `cbrain dream` —— 写操作，走 `bin/cbrain-maintenance.sh`（maintenance）非 patrol
 - `cbrain health` 全量重扫 —— 除非确认 bounded 且不写
+- **Profile 约束（#251）**：共享 `/mcp` runtime 必须保持 `full` 或 `maintenance`（`CBRAIN_MCP_TOOL_PROFILE`）。设成 `agent` 会隐藏 `dream`/`health`，直接坏掉 patrol（`/mcp` health-check）和 `bin/cbrain-maintenance.sh`（`/mcp` 调 `dream`）。
 
 ## Hermes cron 指引
 

@@ -499,6 +499,10 @@ CBrain uses `cbrain.json` in your project directory:
 
 Set `ZHIPU_API_KEY` environment variable as an alternative to config file.
 
+### MCP tool profiles
+
+Set `CBRAIN_MCP_TOOL_PROFILE=agent|maintenance|debug|full` to choose the MCP tool surface (default `full`; env only). See `docs/mcp-tools.md#工具暴露面-profile251`. Keep the shared `/mcp` runtime on `full`/`maintenance` — the maintenance cron depends on `dream`/`health` being reachable over `/mcp`.
+
 ## Tech Stack
 
 | Component | Choice | Why |

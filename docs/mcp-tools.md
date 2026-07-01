@@ -396,3 +396,18 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `watcher_quarantine` | Manage watcher quarantine and bulk-change backpressure. |
 | `writeback` | Write insights back to the knowledge base. |
 <!-- cbrain:auto-gen mcp-tools:end -->
+
+## 工具暴露面 Profile（#251）
+
+CBrain 默认对所有客户端暴露完整工具集（`full`）。可以为单个 runtime 选更小的暴露面，降低日常 Agent 的工具路由噪音：
+
+| Profile | 适用场景 | 暴露范围 |
+|:--------|:--------|:--------|
+| `full`（默认） | 本地开发 / 向后兼容 / 共享 `/mcp` runtime | 全部工具 |
+| `agent` | 日常用户态 Agent（Hermes 等） | ~20 个用户态工具；排除 `query`、`get_chunks`、`dream`、`dream_status`、`dream_reset`、`sync`、`health`、`job_submit` 等 `job_*`、provenance |
+| `maintenance` | cron / patrol / 运维（走 `/mcp`） | `dream`、`dream_status`、`dream_reset`、`sync`、`health`、`job_*`、`relation_audit`、`wakeup_diff` 等 |
+| `debug` | 底层排查 | `query`、`get_chunks`、`list_pages`、provenance、add/remove helpers 等 |
+
+选择方式：`CBRAIN_MCP_TOOL_PROFILE=agent|maintenance|debug|full`（env > `full`；Phase 1 暂不支持 config 字段）。非法值启动时 fail fast。
+
+> **Phase 1 边界**：profile 目前只是「基础设施 + 测试」。生产 `/mcp` runtime 仍保持 `full`——`bin/cbrain-maintenance.sh` 通过 `/mcp` 调 `dream`，patrol 也通过 `/mcp` health-check。**不要把共享 runtime 设成 `agent`**，否则 cron + patrol 会坏（`dream`/`health` 被隐藏）。让日常 Agent 真正用上 `agent` 暴露面是后续 per-session profile 的工作（或独立 Agent runtime），不属于 #251 Phase 1。
