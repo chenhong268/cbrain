@@ -1383,6 +1383,151 @@ describe("IngestManager", () => {
       }
     });
   });
+
+  describe("personal tag (#236)", () => {
+    test("text ingest of clear personal preference adds personal tag", async () => {
+      const result = await ingest.ingest({
+        content: "我的偏好 是 偏好X",
+        type: "text",
+        title: "偏好X 笔记",
+        skipNer: true,
+      });
+      expect(result.created).toBe(true);
+      const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(result.slug) as any[];
+      expect(tags.map(t => t.tag)).toContain("personal");
+    });
+
+    test("text ingest of business content does NOT add personal", async () => {
+      const result = await ingest.ingest({
+        content: "项目Y 的 架构 设计",
+        type: "text",
+        title: "项目Y 设计",
+        skipNer: true,
+      });
+      const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(result.slug) as any[];
+      expect(tags.map(t => t.tag)).not.toContain("personal");
+    });
+
+    test("text ingest of ambiguous mixed content does NOT add personal", async () => {
+      const result = await ingest.ingest({
+        content: "项目Y 让 我 失眠",
+        type: "text",
+        title: "项目Y 感受",
+        skipNer: true,
+      });
+      const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(result.slug) as any[];
+      expect(tags.map(t => t.tag)).not.toContain("personal");
+    });
+
+    test("caller-provided tags are preserved alongside personal", async () => {
+      const result = await ingest.ingest({
+        content: "我习惯 每天 偏好X",
+        type: "text",
+        title: "偏好X 习惯",
+        tags: ["偏好X"],
+        skipNer: true,
+      });
+      const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(result.slug) as any[];
+      const tagValues = tags.map(t => t.tag);
+      expect(tagValues).toContain("personal");
+      expect(tagValues).toContain("偏好X");
+    });
+
+    test("entity append of clearly-personal text merges personal without dropping existing tags", async () => {
+      // Step 1: create a person carrying an existing tag via the relationship fast path.
+      // Content has no personal signal → effective tags stay ["auto-extracted"].
+      await ingest.ingest({ content: "人物A，是人物B的同事", type: "text", tags: ["auto-extracted"], skipNer: true });
+      const personSlug = db.getPageByTitle("人物A")!.slug;
+      const seedTags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(personSlug) as any[];
+      expect(seedTags.map(t => t.tag)).toContain("auto-extracted");
+
+      // Step 2: append clearly-personal text via the person's title → ingestEntityAppend
+      const result = await ingest.ingest({
+        content: "我的偏好 是 偏好X",
+        type: "text",
+        title: "人物A",
+        skipNer: true,
+      });
+      expect(result.slug).toBe(personSlug);
+      expect(result.created).toBe(false);
+
+      const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(personSlug) as any[];
+      const tagValues = tags.map(t => t.tag);
+      expect(tagValues).toContain("personal");
+      expect(tagValues).toContain("auto-extracted");
+    });
+
+    test("markdown ingest of personal body adds personal while preserving frontmatter tags", async () => {
+      const md = [
+        "---",
+        "title: 偏好X 笔记",
+        "type: record",
+        "slug: records/preference-note",
+        "tags:",
+        "  - fm-tag",
+        "---",
+        "",
+        "我的偏好 是 偏好X",
+      ].join("\n");
+      const result = await ingest.ingest({ content: md, type: "markdown", skipNer: true });
+      const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(result.slug) as any[];
+      const tagValues = tags.map(t => t.tag);
+      expect(tagValues).toContain("fm-tag");
+      expect(tagValues).toContain("personal");
+    });
+
+    test("markdown ingest of business body does NOT add personal", async () => {
+      const md = [
+        "---",
+        "title: 项目Y 设计",
+        "type: record",
+        "slug: records/project-design",
+        "---",
+        "",
+        "项目Y 的 架构 设计",
+      ].join("\n");
+      const result = await ingest.ingest({ content: md, type: "markdown", skipNer: true });
+      const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(result.slug) as any[];
+      expect(tags.map(t => t.tag)).not.toContain("personal");
+    });
+
+    test("markdown ingest is idempotent when personal tag already in frontmatter", async () => {
+      const md = [
+        "---",
+        "title: 偏好X 习惯",
+        "type: record",
+        "slug: records/preference-idempotent",
+        "tags:",
+        "  - personal",
+        "---",
+        "",
+        "我习惯 每天 偏好X",
+      ].join("\n");
+      const result = await ingest.ingest({ content: md, type: "markdown", skipNer: true });
+      const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(result.slug) as any[];
+      const personalCount = tags.filter(t => t.tag === "personal").length;
+      expect(personalCount).toBe(1);
+    });
+
+    test("duplicate re-ingest of personal content does not create extra tag side effects", async () => {
+      const content = "我的偏好 是 偏好X";
+      const first = await ingest.ingest({ content, type: "text", title: "偏好X 唯一", skipNer: true });
+      expect(first.outcome).toBe("created");
+
+      const tagsAfterFirst = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(first.slug) as any[];
+      const personalAfterFirst = tagsAfterFirst.filter(t => t.tag === "personal").length;
+      expect(personalAfterFirst).toBe(1);
+
+      // Re-ingest the exact same body → durable-source dedup returns duplicate, no write.
+      const second = await ingest.ingest({ content, type: "text", title: "偏好X 唯一", skipNer: true });
+      expect(second.outcome).toBe("duplicate");
+
+      const tagsAfterSecond = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(first.slug) as any[];
+      const personalAfterSecond = tagsAfterSecond.filter(t => t.tag === "personal").length;
+      // No new side effect: still exactly one personal tag row.
+      expect(personalAfterSecond).toBe(1);
+    });
+  });
 });
 
 describe("IngestManager NER timeout partial (#229)", () => {

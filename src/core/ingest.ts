@@ -12,6 +12,7 @@ import type { LLMProvider } from "../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
 import { getFactFieldWhitelist, filterExtractedEntities, type ExtractedEntity } from "./ner.js";
 import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
+import { classifyPersonalTag } from "./personal-tag-classifier.js";
 import type { DeferredNerSubmitter } from "./ner-backfill.js";
 
 export type NerMode = "sync" | "defer" | "off";
@@ -216,7 +217,11 @@ export class IngestManager {
     }
 
     const body = parsed.body;
-    const effectiveTags = parsed.frontmatter.tags ?? input.tags ?? [];
+    const baseTags = parsed.frontmatter.tags ?? input.tags ?? [];
+    // #236: classify against the stripped body + title; union personal into effective tags.
+    const effectiveTags = classifyPersonalTag({ title, content: body, tags: baseTags })
+      ? [...new Set([...baseTags, "personal"])]
+      : baseTags;
 
     return this.ingestCore(slug, title, type, body, effectiveTags, nerAction, input.allowDuplicate);
   }
@@ -235,17 +240,24 @@ export class IngestManager {
     const routedPersonTitle = this.inferPersonRelationshipTitle(input.content, input.title);
     const existingPersonSlug = this.findExistingPersonSlug(input.title ?? routedPersonTitle ?? rawTitle);
 
+    // #236: classify personal memory before durable write. One effectiveTags value
+    // covers BOTH branches (ingestEntityAppend + ingestCore) of the text path.
+    const classifierTitle = input.title ?? routedPersonTitle ?? rawTitle;
+    const baseTags = input.tags ?? [];
+    const effectiveTags = classifyPersonalTag({ title: classifierTitle, content: input.content, tags: baseTags })
+      ? [...new Set([...baseTags, "personal"])]
+      : baseTags;
+
     if (existingPersonSlug) {
-      return this.ingestEntityAppend(existingPersonSlug, input.content, input.tags ?? [], nerAction);
+      return this.ingestEntityAppend(existingPersonSlug, input.content, effectiveTags, nerAction);
     }
 
     const title = routedPersonTitle ?? rawTitle;
     const type = normalizePageType(routedPersonTitle ? "entity/person" : input.pageType ?? "record");
     const slug = generateSlug(title, type);
     const body = input.content;
-    const tags = input.tags ?? [];
 
-    return this.ingestCore(slug, title, type, body, tags, nerAction, input.allowDuplicate);
+    return this.ingestCore(slug, title, type, body, effectiveTags, nerAction, input.allowDuplicate);
   }
 
   private findExistingPersonSlug(title: string | undefined): string | null {

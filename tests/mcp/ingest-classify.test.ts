@@ -373,3 +373,65 @@ describe("MCP ingest nerMode option (#252)", () => {
     expect(parsed.raw.created).toBe(true);
   });
 });
+
+describe("MCP ingest personal tag (#236)", () => {
+  const testDir = "/tmp/cbrain-test-mcp-personal";
+  const dbPath = join(testDir, "test.sqlite");
+  const vaultPath = join(testDir, "vault");
+  let db: CBrainDB;
+  let deps: CBrainDeps;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+    deps = {
+      db,
+      embedding: createMockEmbedding(),
+      lance: createMockLanceDB() as any,
+      vaultPath,
+      runtimePath: join(dirname(dbPath), "runtime"),
+    };
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("MCP ingest of clear personal content writes personal tag", async () => {
+    const server = createServer(deps);
+    const tools = getTools(server);
+    const handler = tools["ingest"].handler;
+
+    const result = await handler({
+      content: "我的偏好 是 偏好X",
+      type: "text",
+      title: "偏好X 笔记",
+      skipNer: true,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    const slug = parsed.raw.slug;
+
+    const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(slug) as any[];
+    expect(tags.map(t => t.tag)).toContain("personal");
+  });
+
+  test("MCP ingest of business content does NOT write personal tag", async () => {
+    const server = createServer(deps);
+    const tools = getTools(server);
+    const handler = tools["ingest"].handler;
+
+    const result = await handler({
+      content: "项目Y 的 架构 设计",
+      type: "text",
+      title: "项目Y 设计",
+      skipNer: true,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    const slug = parsed.raw.slug;
+
+    const tags = db.rawDb.prepare("SELECT tag FROM tags WHERE page_slug = ?").all(slug) as any[];
+    expect(tags.map(t => t.tag)).not.toContain("personal");
+  });
+});
