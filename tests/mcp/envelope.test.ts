@@ -20,6 +20,7 @@ import {
   formatGetPagesEnvelope,
   sanitizeDisplay,
   DISPLAY_BANNED_TERMS,
+  DISPLAY_BANNED_TERM_RULES,
   type ToolSummary,
 } from "../../src/mcp/tools/format-result.js";
 import type { EpisodicRecallResult } from "../../src/core/episodic-recall.js";
@@ -499,6 +500,35 @@ describe("sanitizeDisplay", () => {
   test("leaves plain text untouched", () => {
     expect(sanitizeDisplay("找到 3 个相关实体")).toBe("找到 3 个相关实体");
     expect(sanitizeDisplay("")).toBe("");
+  });
+});
+
+// ─── DISPLAY_BANNED_TERM_RULES structure (#256) ──────────────
+
+describe("DISPLAY_BANNED_TERM_RULES", () => {
+  test("every rule has a non-empty term, reason, and explicit scope", () => {
+    expect(DISPLAY_BANNED_TERM_RULES.length).toBeGreaterThan(0);
+    const validScopes = ["display", "summary", "display_summary", "global"];
+    for (const rule of DISPLAY_BANNED_TERM_RULES) {
+      expect(rule.term.length).toBeGreaterThan(0);
+      expect(rule.reason.trim().length).toBeGreaterThan(0);
+      expect(validScopes).toContain(rule.scope);
+    }
+  });
+
+  test("DISPLAY_BANNED_TERMS compatibility export equals structured rule terms", () => {
+    expect(DISPLAY_BANNED_TERMS).toEqual(DISPLAY_BANNED_TERM_RULES.map((r) => r.term));
+  });
+
+  test("preserves every legacy banned term (no silent drops)", () => {
+    const legacy = [
+      "score", "distance", "debug", "trace", "threshold",
+      "latency_ms", "vector", "degraded_reason", "_stub",
+      "reason_codes", "candidate", "raw", "fts", "lancedb",
+    ];
+    for (const term of legacy) {
+      expect(DISPLAY_BANNED_TERMS).toContain(term);
+    }
   });
 });
 

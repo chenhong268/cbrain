@@ -34,12 +34,45 @@ export interface ToolSummary {
 
 const SLUG_PATH_RE = /brain\/(?:entities|concepts|insights|records)\//g;
 
-/** Terms that must never appear in display/summary text. Shared by formatters and tests. */
-export const DISPLAY_BANNED_TERMS = [
-  "score", "distance", "debug", "trace", "threshold",
-  "latency_ms", "vector", "degraded_reason", "_stub",
-  "reason_codes", "candidate", "raw", "fts", "lancedb",
+/**
+ * Structured display-sanitization rule. `scope` is intent metadata for
+ * maintainers (which surface the term applies to); `sanitizeDisplay` strips
+ * every term regardless of scope, preserving prior behavior (#256).
+ */
+export interface DisplayBannedTermRule {
+  term: string;
+  reason: string;
+  scope: "display" | "summary" | "display_summary" | "global";
+}
+
+/**
+ * Structured banned-term rules. Each entry says why a term is banned and which
+ * surface it applies to. Order matches the historical flat list so the derived
+ * `DISPLAY_BANNED_TERMS` is identical to the pre-refactor array.
+ */
+export const DISPLAY_BANNED_TERM_RULES: readonly DisplayBannedTermRule[] = [
+  { term: "score",           reason: "retrieval ranking score; internal signal, meaningless to user",        scope: "display_summary" },
+  { term: "distance",        reason: "vector distance; internal similarity signal",                          scope: "display_summary" },
+  { term: "debug",           reason: "debug flag/field; never user content",                                 scope: "global" },
+  { term: "trace",           reason: "execution trace; internal audit data",                                 scope: "global" },
+  { term: "threshold",       reason: "internal scoring threshold parameter",                                 scope: "display_summary" },
+  { term: "latency_ms",      reason: "latency in milliseconds; internal performance metric",                  scope: "display_summary" },
+  { term: "vector",          reason: "vector-search internal term",                                          scope: "display_summary" },
+  { term: "degraded_reason", reason: "internal field name; summary carries it structured, display must not echo the raw name", scope: "display" },
+  { term: "_stub",           reason: "stub placeholder for an unfilled entity",                              scope: "display_summary" },
+  { term: "reason_codes",    reason: "degradation reason-code list; internal diagnostics",                   scope: "display_summary" },
+  { term: "candidate",       reason: "candidate/unconfirmed internal marker",                                scope: "display_summary" },
+  { term: "raw",             reason: "raw payload field name; internal only",                                scope: "global" },
+  { term: "fts",             reason: "full-text search internal term",                                       scope: "display_summary" },
+  { term: "lancedb",         reason: "vector store implementation name",                                     scope: "display_summary" },
 ];
+
+/**
+ * Terms that must never appear in display/summary text. Shared by formatters
+ * and tests. Derived from `DISPLAY_BANNED_TERM_RULES` so the flat list cannot
+ * drift from the structured rules.
+ */
+export const DISPLAY_BANNED_TERMS: string[] = DISPLAY_BANNED_TERM_RULES.map((r) => r.term);
 
 /**
  * Strip internal slug paths and banned internal terms from display text.
