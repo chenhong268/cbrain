@@ -36,11 +36,12 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
       pageType: z.enum(["record", "insight"]).optional().default("record").describe("Page type: record (doc/report/note) or insight. Entities/concepts are auto-classified via NER."),
       skipNer: z.boolean().optional().default(false).describe("Skip LLM entity extraction — use for simple entries"),
       allowDuplicate: z.boolean().optional().default(false).describe("允许重复内容（正常会被去重跳过）"),
+      nerMode: z.enum(["sync", "defer", "off"]).optional().describe("覆盖 NER 模式（默认走 config/env）。一般无需设置。"),
     },
-  }, async ({ content, type, title, tags, pageType, skipNer, allowDuplicate }) => {
+  }, async ({ content, type, title, tags, pageType, skipNer, allowDuplicate, nerMode }) => {
     assertNoFileReference(content); // (#205) reject @file refs — MCP never reads local files
     const classifiedType = classifyContentType(content, type);
-    const result = await ctx.ingest.ingest({ content, type: classifiedType, title, tags, pageType, skipNer, allowDuplicate });
+    const result = await ctx.ingest.ingest({ content, type: classifiedType, title, tags, pageType, skipNer, allowDuplicate, nerMode });
 
     // Use actual page title from DB for display; fall back to caller title, then slug
     const page = result.slug ? ctx.db.getPage(result.slug) : null;

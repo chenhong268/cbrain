@@ -314,3 +314,62 @@ describe("MCP ingest type classification", () => {
     expect(text).not.toContain("secret-vault");
   });
 });
+
+describe("MCP ingest nerMode option (#252)", () => {
+  const testDir = "/tmp/cbrain-test-mcp-ingest-nm";
+  const dbPath = join(testDir, "test.sqlite");
+  const vaultPath = join(testDir, "vault");
+  let db: CBrainDB;
+  let deps: CBrainDeps;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+    deps = {
+      db,
+      embedding: createMockEmbedding(),
+      lance: createMockLanceDB() as any,
+      vaultPath,
+      runtimePath: join(dirname(dbPath), "runtime"),
+    };
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("ingest accepts optional nerMode='off' and completes successfully", async () => {
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+
+    const result = await handler({
+      content: "nerMode 关闭测试内容",
+      title: "占位NER模式测试",
+      pageType: "record",
+      skipNer: true,
+      nerMode: "off",
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.raw.created).toBe(true);
+  });
+
+  test("nerMode omitted works fine (config default applies)", async () => {
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+
+    const result = await handler({
+      content: "默认模式测试内容",
+      title: "占位默认模式",
+      pageType: "record",
+      skipNer: true,
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.raw.created).toBe(true);
+  });
+});
