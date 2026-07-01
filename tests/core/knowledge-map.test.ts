@@ -2,8 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { analyzeKnowledgeMap } from "../../src/core/knowledge-map.js";
-import type { KnowledgeMapAnalysis, KnowledgeMapNode } from "../../src/core/knowledge-map.js";
+import { analyzeKnowledgeMap } from "../../src/core/knowledge-map/index.js";
+import type { KnowledgeMapAnalysis, KnowledgeMapNode } from "../../src/core/knowledge-map/index.js";
 
 // ─── Anonymous fixture helpers (no real names/orgs/products) ─────────────────
 

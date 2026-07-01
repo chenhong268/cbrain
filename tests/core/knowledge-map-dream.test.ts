@@ -9,7 +9,7 @@ import {
   shouldRunKnowledgeMap,
   KM_ENABLED_KEY,
   KM_LAST_RUN_KEY,
-} from "../../src/core/knowledge-map-schedule.js";
+} from "../../src/core/knowledge-map/schedule.js";
 import type { SyncManager } from "../../src/core/sync.js";
 import type { EnrichManager } from "../../src/core/enrich.js";
 import type { HealthChecker } from "../../src/core/health.js";

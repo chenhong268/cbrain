@@ -1,5 +1,5 @@
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { KnowledgeMapAnalysis } from "./knowledge-map-types.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { KnowledgeMapAnalysis } from "./types.js";
 
 /**
  * #244 — Feed Knowledge Map isolation/bridge signals into Discovery as an

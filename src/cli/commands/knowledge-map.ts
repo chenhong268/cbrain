@@ -2,8 +2,8 @@ import type { Command } from "commander";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { loadConfig, createDeps } from "../context.js";
-import { analyzeKnowledgeMap } from "../../core/knowledge-map.js";
-import { buildKnowledgeMapReport } from "../../core/knowledge-map-report.js";
+import { analyzeKnowledgeMap } from "../../core/knowledge-map/index.js";
+import { buildKnowledgeMapReport } from "../../core/knowledge-map/report.js";
 
 /**
  * `cbrain knowledge-map` — generate a user-facing Knowledge Map report (#241).

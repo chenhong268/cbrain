@@ -3,7 +3,7 @@ import type {
   CommunitySummary,
   KnowledgeMapAnalysis,
   KnowledgeMapNode,
-} from "./knowledge-map-types.js";
+} from "./types.js";
 
 /** Options for the Knowledge Map report builder. */
 export interface KnowledgeMapReportOptions {

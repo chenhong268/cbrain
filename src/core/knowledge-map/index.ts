@@ -1,13 +1,13 @@
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
 import type {
   KnowledgeMapAnalysis,
   KnowledgeMapHealth,
   KnowledgeMapNode,
   KnowledgeMapOptions,
   KnowledgeMapResolution,
-} from "./knowledge-map-types.js";
+} from "./types.js";
 
-export * from "./knowledge-map-types.js";
+export * from "./types.js";
 
 // ─── Deterministic source reliability ───────────────────────────────────
 // Multiplier applied on top of stored weight * confidence. Higher = more

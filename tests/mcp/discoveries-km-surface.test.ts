@@ -3,8 +3,8 @@ import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
-import { produceKnowledgeMapDiscoveries } from "../../src/core/knowledge-map-discovery.js";
-import type { KnowledgeMapAnalysis, KnowledgeMapNode } from "../../src/core/knowledge-map-types.js";
+import { produceKnowledgeMapDiscoveries } from "../../src/core/knowledge-map/discovery.js";
+import type { KnowledgeMapAnalysis, KnowledgeMapNode } from "../../src/core/knowledge-map/types.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 // ─── Harness (mirrors knowledge-map-envelope.test.ts) ───────────────────────

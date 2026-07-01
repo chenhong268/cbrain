@@ -1,7 +1,7 @@
-import { analyzeKnowledgeMap } from "../knowledge-map.js";
-import { isCommunityMature } from "../knowledge-map-report.js";
+import { analyzeKnowledgeMap } from "../knowledge-map/index.js";
+import { isCommunityMature } from "../knowledge-map/report.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
-import type { CommunitySummary, KnowledgeMapAnalysis, KnowledgeMapNode } from "../knowledge-map-types.js";
+import type { CommunitySummary, KnowledgeMapAnalysis, KnowledgeMapNode } from "../knowledge-map/types.js";
 
 export interface KmSupplementalNode {
   slug: string;

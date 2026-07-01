@@ -3,13 +3,13 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
-import { buildKnowledgeMapReport } from "../../src/core/knowledge-map-report.js";
+import { buildKnowledgeMapReport } from "../../src/core/knowledge-map/report.js";
 import type {
   BridgeCandidate,
   CommunitySummary,
   KnowledgeMapAnalysis,
   KnowledgeMapNode,
-} from "../../src/core/knowledge-map.js";
+} from "../../src/core/knowledge-map/index.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 // ─── Harness ───────────────────────────────────────────────────────────────

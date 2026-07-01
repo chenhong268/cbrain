@@ -1,11 +1,11 @@
 import { describe, test, expect } from "bun:test";
-import { buildKnowledgeMapReport } from "../../src/core/knowledge-map-report.js";
+import { buildKnowledgeMapReport } from "../../src/core/knowledge-map/report.js";
 import type {
   BridgeCandidate,
   CommunitySummary,
   KnowledgeMapAnalysis,
   KnowledgeMapNode,
-} from "../../src/core/knowledge-map.js";
+} from "../../src/core/knowledge-map/index.js";
 
 // ─── Anonymous synthetic fixtures (slugs are test-only; titles are the
 //     human labels the report is allowed to show) ────────────────────────────

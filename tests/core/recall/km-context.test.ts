@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { buildKnowledgeMapContext, kmContextApi, formatKmRelatedLine } from "../../../src/core/recall/km-context.js";
-import type { KnowledgeMapAnalysis, KnowledgeMapNode, CommunitySummary } from "../../../src/core/knowledge-map-types.js";
+import type { KnowledgeMapAnalysis, KnowledgeMapNode, CommunitySummary } from "../../../src/core/knowledge-map/types.js";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 
 // Anonymous fixtures only (roadmap privacy constraint): Entity A/B/C, Domain D.

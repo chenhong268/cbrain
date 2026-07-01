@@ -26,7 +26,7 @@ import {
   defaultKnowledgeMapStageResult,
   knowledgeMapBriefLine,
   type KnowledgeMapStageResult,
-} from "./knowledge-map-schedule.js";
+} from "./knowledge-map/schedule.js";
 
 export interface DreamReport {
   timestamp: string;

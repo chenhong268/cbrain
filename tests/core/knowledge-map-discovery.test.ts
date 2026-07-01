@@ -1,8 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { rmSync } from "node:fs";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { produceKnowledgeMapDiscoveries } from "../../src/core/knowledge-map-discovery.js";
-import type { KnowledgeMapAnalysis, KnowledgeMapNode, BridgeCandidate } from "../../src/core/knowledge-map-types.js";
+import { produceKnowledgeMapDiscoveries } from "../../src/core/knowledge-map/discovery.js";
+import type { KnowledgeMapAnalysis, KnowledgeMapNode, BridgeCandidate } from "../../src/core/knowledge-map/types.js";
 
 // 匿名 sentinel fixture —— 不含真人名/路径/email
 function isolateNode(slug: string, title: string, mentionCount: number): KnowledgeMapNode {

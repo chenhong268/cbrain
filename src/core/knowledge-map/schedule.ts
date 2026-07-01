@@ -1,11 +1,11 @@
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { Logger } from "./logger.js";
-import { analyzeKnowledgeMap } from "./knowledge-map.js";
-import { buildKnowledgeMapReport, isCommunityMature } from "./knowledge-map-report.js";
-import { produceKnowledgeMapDiscoveries } from "./knowledge-map-discovery.js";
-import { sanitizeForLog } from "./sync-index-safety.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { Logger } from "../logger.js";
+import { analyzeKnowledgeMap } from "./index.js";
+import { buildKnowledgeMapReport, isCommunityMature } from "./report.js";
+import { produceKnowledgeMapDiscoveries } from "./discovery.js";
+import { sanitizeForLog } from "../sync-index-safety.js";
 
 /**
  * #242 — Knowledge Map Dream stage: generate the user-facing report at most

@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import type { ToolSummary } from "./format-result.js";
-import { readLatestKnowledgeMap, type LatestKnowledgeMapReport } from "../../core/knowledge-map-latest.js";
+import { readLatestKnowledgeMap, type LatestKnowledgeMapReport } from "../../core/knowledge-map/latest.js";
 
 // Display budget — cap section items so the default envelope stays compact.
 const MAX_DOMAINS = 5;
