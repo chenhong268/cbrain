@@ -27,8 +27,10 @@ function init(params: Record<string, unknown> = {}): unknown {
 const FB: ToolProfile = "full";
 
 describe("resolveSessionProfile (#260)", () => {
-  test("header valid → ok, source=header (short-circuits metadata)", async () => {
-    const r = await resolveSessionProfile(req({ header: "agent", body: init({ _meta: { cbrainToolProfile: "debug" } }) }), FB);
+  test("header valid → ok, source=header (short-circuits even invalid metadata)", async () => {
+    // header=agent (valid) + metadata=BOGUS (invalid): header wins by short-circuit,
+    // metadata is never read so the invalid value must NOT cause a 400.
+    const r = await resolveSessionProfile(req({ header: "agent", body: init({ _meta: { cbrainToolProfile: "BOGUS" } }) }), FB);
     expect(r).toEqual({ profile: "agent", source: "header" });
   });
   test("header trims + lowercases", async () => {
@@ -72,5 +74,9 @@ describe("resolveSessionProfile (#260)", () => {
   test("fallback honors server default (e.g. env-set agent)", async () => {
     const r = await resolveSessionProfile(req({ body: init() }), "maintenance");
     expect(r).toEqual({ profile: "maintenance", source: "default" });
+  });
+  test("metadata non-string value (e.g. number) → ignored, falls back", async () => {
+    const r = await resolveSessionProfile(req({ body: init({ _meta: { cbrainToolProfile: 42 } }) }), FB);
+    expect(r).toEqual({ profile: "full", source: "default" });
   });
 });

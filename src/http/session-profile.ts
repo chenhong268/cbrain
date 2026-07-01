@@ -37,12 +37,18 @@ function invalidError(field: string, raw: string): string {
  */
 async function readInitMetaProfile(req: Request): Promise<string | undefined> {
   try {
-    const body = (await req.clone().json()) as { params?: unknown };
-    const params = body?.params;
-    if (params && typeof params === "object") {
-      const p = params as { _meta?: Record<string, unknown>; metadata?: Record<string, unknown> };
-      const raw = p._meta?.[META_KEY] ?? p.metadata?.[META_KEY];
-      if (typeof raw === "string") return raw;
+    const body = await req.clone().json();
+    if (!body || typeof body !== "object") return undefined;
+    const params = (body as Record<string, unknown>).params;
+    if (!params || typeof params !== "object" || Array.isArray(params)) return undefined;
+    const p = params as Record<string, unknown>;
+    // _meta is the MCP-spec slot (preferred); metadata is a hand-written-client convention.
+    for (const field of ["_meta", "metadata"] as const) {
+      const slot = p[field];
+      if (slot && typeof slot === "object") {
+        const raw = (slot as Record<string, unknown>)[META_KEY];
+        if (typeof raw === "string") return raw;
+      }
     }
     return undefined;
   } catch {
