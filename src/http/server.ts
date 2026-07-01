@@ -6,6 +6,8 @@ import { registerAllTools } from "../mcp/register.js";
 import { attachMcpTools } from "../mcp/server.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { resolveSessionProfile } from "./session-profile.js";
+import type { ToolProfile } from "../mcp/tool-profiles.js";
 import { version } from "../version.js";
 
 interface ToolDef {
@@ -52,6 +54,9 @@ interface McpSession {
   server: McpServer;
   transport: WebStandardStreamableHTTPServerTransport;
   lastSeen: number;
+  /** #260: per-session resolved profile (observability; not used in dispatch). */
+  profile: ToolProfile;
+  source: "header" | "metadata" | "default";
 }
 
 export function createHttpServer(ctx: ToolContext) {
@@ -99,17 +104,38 @@ export function createHttpServer(ctx: ToolContext) {
       if (sessions.size >= MAX_MCP_SESSIONS) {
         return new Response("too many concurrent MCP sessions", { status: 503 });
       }
+
+      // #260: resolve this client's tool profile ONCE at session creation. Header
+      // X-CBrain-Tool-Profile > initialize _meta/metadata > ctx default. An explicit
+      // invalid signal → 400 (no session, no silent fallback to full). Existing-session
+      // requests above never reach here, so a session's profile is fixed for its life.
+      const resolved = await resolveSessionProfile(req, ctx.toolProfile);
+      if ("error" in resolved) {
+        return new Response(JSON.stringify({ error: resolved.error }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      // Derived ctx — never mutate the shared ctx. attachMcpTools reads ctx.toolProfile.
+      const sessionCtx: ToolContext = { ...ctx, toolProfile: resolved.profile };
+
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         onsessionclosed: (sid) => { sessions.delete(sid); },
       });
       const mcpServer = new McpServer({ name: "cbrain", version });
-      attachMcpTools(mcpServer, ctx); // identical to stdio registration — no second path
+      attachMcpTools(mcpServer, sessionCtx); // identical registration path, per-session profile
       try {
         await mcpServer.connect(transport);
         const response = await transport.handleRequest(req);
         if (transport.sessionId) {
-          sessions.set(transport.sessionId, { server: mcpServer, transport, lastSeen: Date.now() });
+          sessions.set(transport.sessionId, {
+            server: mcpServer, transport, lastSeen: Date.now(),
+            profile: resolved.profile, source: resolved.source,
+          });
+          console.error(
+            `> /mcp session ${transport.sessionId} profile=${resolved.profile} source=${resolved.source}`,
+          );
         } else {
           // initialize did not establish a session — don't leak the half-built server
           await mcpServer.close().catch(() => { /* best effort */ });
