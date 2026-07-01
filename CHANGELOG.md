@@ -1,8 +1,21 @@
 # Changelog
 
-> Current: `v2.0.3` — Recall 质量与延迟修复：Knowledge Map 可选同域上下文；默认 smart recall 降低 LLM query expansion 调用，并将 `degraded` 与 `latency_warning` 分离。
+> Current: `v2.0.4` — 写入与 MCP 使用体验：NER 可延迟到 Dream backfill；MCP 工具分 profile 暴露，并支持 HTTP /mcp per-session profile。
 
 ## [Unreleased]
+
+## [v2.0.4] — 2026-07-01
+
+### 写入与 MCP 使用体验（#251, #252, #260）
+
+- **NER 延迟处理（#252）**：新增 `CBRAIN_INGEST_NER_MODE=sync|defer|off` 与 `--ner-mode` / MCP `nerMode` 覆盖。`defer` 模式下 ingest 只完成确定性写入、chunks/FTS/vector 索引与 durable `ner-backfill` job，不等待 LLM NER；Dream Stage 1.5 有界消费 pending NER job，成功后清除 marker，失败按 job retry 语义处理。
+- **MCP 工具 profile（#251）**：新增 `full` / `agent` / `maintenance` / `debug` 工具 profile。默认 full 保持完整工具面；Agent profile 将日常对话暴露面压到 20 个工具以内，maintenance/debug 分别面向巡检维护与调试审计，降低 Agent 误选底层工具的概率。
+- **HTTP /mcp per-session profile（#260）**：HTTP MCP 每个 session 可通过 `X-CBrain-Tool-Profile` header 或 initialize metadata 选择 profile；缺省回退到 server 默认。maintenance wrapper 显式使用 maintenance profile，多个 Agent 可共享同一 runtime 但获得不同工具面。
+
+### Release Checks
+
+- `bun run check`：2869 pass / 0 fail。
+- `bun run check:docs`：PASS。
 
 ## [v2.0.3] — 2026-06-30
 

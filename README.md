@@ -50,7 +50,7 @@ curl -fsSL https://bun.sh/install | bash
 2. Install CBrain — always pin to an explicit tag:
 
 ```bash
-bun install -g github:chenhong268/cbrain#v2.0.3
+bun install -g github:chenhong268/cbrain#v2.0.4
 ```
 
 3. Verify:
@@ -73,7 +73,7 @@ cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 
 ```bash
 bun remove -g cbrain
-bun install -g github:chenhong268/cbrain#v2.0.3
+bun install -g github:chenhong268/cbrain#v2.0.4
 ```
 
 **Uninstalling:**
@@ -541,11 +541,12 @@ bun run dev init
 
 ## Roadmap
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.3).
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.4).
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v2.0.3 | Recall 质量与延迟修复：Knowledge Map 可选同域上下文；默认 smart recall 降低 LLM query expansion 调用，并将 `degraded` 与 `latency_warning` 分离 | ✅ Current |
+| v2.0.4 | 写入与 MCP 使用体验：NER 可延迟到 Dream backfill；MCP 工具分 profile 暴露，并支持 HTTP /mcp per-session profile | ✅ Current |
+| v2.0.3 | Recall 质量与延迟修复：Knowledge Map 可选同域上下文；默认 smart recall 降低 LLM query expansion 调用，并将 `degraded` 与 `latency_warning` 分离 | Previous |
 | v2.0.2 | Knowledge Map 第一阶段闭环：只读图谱分析、用户报告、Dream 周报、MCP 读取；同时包含 temporal evidence completion、graphSearch 批量遍历、reflect timeout 与维护命令 single-writer 加固 | Previous |
 | v2.0.1 | Recall 可用性与 HTTP-MCP 长请求稳定性修复：`deep_recall` 默认 compact 输出；长 sync/ingest 请求不再被 Bun 默认 idle timeout 掐断 | Previous |
 | v2.0.0 | Agentic memory kernel：自然语言前门、Hermes display/summary/raw 边界、EvidenceBoard/grounded recall、single-writer 多 Agent 拓扑、v2 发布门禁与安装上手路径 | |
