@@ -117,6 +117,9 @@ CBrain 需要以下 API key：
 |:-----|:-----|:---------|
 | 智谱（Zhipu） | 向量嵌入 + NER 实体提取 | [open.bigmodel.cn](https://open.bigmodel.cn) |
 | DeepSeek（可选） | 洞察生成（reflect） | [platform.deepseek.com](https://platform.deepseek.com) |
+| SearXNG（可选） | `stub-enrich --web` 的网页补充信息 | 自行部署或跳过 |
+
+SearXNG 不是核心依赖。默认不配置时，CBrain 的本地写入、向量/全文/图谱检索、MCP recall 都正常工作；只是薄 stub 的网页补充不会启用。
 
 > 完整文档：[使用指南](docs/usage.md) | [MCP 工具参考](docs/mcp-tools.md) | [来源与信任](docs/provenance.md) | [性能基准](docs/performance.md)
 
@@ -498,6 +501,32 @@ CBrain uses `cbrain.json` in your project directory:
 ```
 
 Set `ZHIPU_API_KEY` environment variable as an alternative to config file.
+
+### Optional web fallback
+
+Core local memory does **not** require a web search provider. Leave `search` unset to disable web fallback:
+
+```json
+{
+  "vaultPath": "./vault",
+  "dbPath": "./brain.sqlite",
+  "lancePath": "./lancedb",
+  "embedding": { "provider": "zhipu" }
+}
+```
+
+If you want `cbrain stub-enrich --web` to supplement thin public stubs with web snippets, configure a SearXNG instance:
+
+```json
+{
+  "search": {
+    "provider": "searxng",
+    "base_url": "http://127.0.0.1:8080"
+  }
+}
+```
+
+When `search` is absent, or when SearXNG is unreachable, stub enrichment continues with internal CBrain context only. Future provider adapters such as Brave Search or Tavily can fit behind the same optional search-provider interface; they are not required for installation.
 
 ### MCP tool profiles
 

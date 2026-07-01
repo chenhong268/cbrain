@@ -232,6 +232,32 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 
 环境变量：`ZHIPU_API_KEY`（如果不在 cbrain.json 中配置）
 
+### 可选 search provider
+
+`search` 配置只服务于网页补充场景，不是本地记忆检索的依赖。默认不写 `search` 即为关闭：
+
+```json
+{
+  "vaultPath": "./vault",
+  "dbPath": "./brain.sqlite",
+  "lancePath": "./lancedb",
+  "embedding": { "provider": "zhipu", "apiKey": "your-api-key" }
+}
+```
+
+启用 SearXNG 后，`cbrain stub-enrich --web` 可以在内部上下文不足时补充网页片段：
+
+```json
+{
+  "search": {
+    "provider": "searxng",
+    "base_url": "http://127.0.0.1:8080"
+  }
+}
+```
+
+未配置或连接失败时，CBrain 会继续使用内部上下文；不会影响 `ingest`、`query`、`deep_recall` 或 MCP 本地记忆工具。Brave Search、Tavily 等 API provider 可作为未来适配方向，目前无需安装。
+
 ---
 
 ## 完整 CLI 命令索引

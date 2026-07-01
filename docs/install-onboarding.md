@@ -16,6 +16,7 @@
 | **智谱 API Key** | — | [open.bigmodel.cn](https://open.bigmodel.cn) 注册 → 创建 API Key |
 | **Git** | 任意 | macOS 自带，或 `xcode-select --install` |
 | **DeepSeek API Key**（可选） | — | [platform.deepseek.com](https://platform.deepseek.com)，用于洞察生成 |
+| **SearXNG**（可选） | — | 仅用于 `stub-enrich --web` 网页补充，不影响本地记忆检索 |
 
 > 智谱是硬依赖——向量嵌入和实体提取都靠它。没有 API Key 跑不起来。
 
@@ -169,6 +170,23 @@ CBrain 启动时会自动读取。加到 `.bashrc` 或 `.zshrc` 里持久化。
 ```
 
 > **注意：** 配置文件（`cbrain.json`）仅保存在本地。调用 embedding/NER/reflect 时，API Key 会作为认证信息发送至你配置的 provider（智谱/DeepSeek），待处理文本一并发送。
+
+### 可选：网页补充搜索
+
+CBrain 的核心路径不需要 SearXNG。你不配置 `search` 时，`ingest`、`query`、`deep_recall`、图谱查询和本地维护都照常运行；薄 stub 充实时只使用 CBrain 内部上下文。
+
+只有在你显式运行 `cbrain stub-enrich --web`，并且配置了 search provider 时，CBrain 才会调用网页搜索。当前内置 provider 是 SearXNG：
+
+```json
+{
+  "search": {
+    "provider": "searxng",
+    "base_url": "http://127.0.0.1:8080"
+  }
+}
+```
+
+如果 SearXNG 未配置或不可达，stub enrichment 会降级为内部上下文，不会影响本地记忆系统。Brave Search、Tavily 等 API 型 provider 可以作为后续适配方向，但不是安装前置条件。
 
 ---
 
