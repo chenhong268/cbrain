@@ -9,7 +9,7 @@ import { buildContext } from "./context.js";
 import { version } from "../version.js";
 import { registerAllTools } from "./register.js";
 import type { IngestNerMode } from "../cli/context.js";
-import type { ToolProfile } from "./tool-profiles.js";
+import { TOOL_PROFILE_ALLOWLISTS, type ToolProfile } from "./tool-profiles.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -67,10 +67,17 @@ export function sanitizeError(msg: string): string {
  * must run exactly once per runtime, not once per MCP session.
  */
 export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
-  // Unified error wrapper — every tool handler gets try-catch automatically
+  const profile: ToolProfile = ctx.toolProfile ?? "full";
+  const gate = profile === "full" ? null : new Set(TOOL_PROFILE_ALLOWLISTS[profile]);
+
+  // registerTool: error-sanitize (unchanged) + profile gate (#251).
+  // Gating happens BEFORE the sanitized handler is registered, so tools that pass
+  // the gate keep byte-identical error-sanitization behavior. `full` (gate=null)
+  // skips the check entirely → identical to pre-#251 behavior.
   const origRegister = server.registerTool.bind(server);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (server as any).registerTool = (name: string, def: any, handler: (...a: any[]) => Promise<any>) =>
+  (server as any).registerTool = (name: string, def: any, handler: (...a: any[]) => Promise<any>) => {
+    if (gate && !gate.has(name)) return; // #251: profile-filtered, skip registration
     origRegister(name, def, async (...a: any[]) => {
       try {
         return await handler(...a);
@@ -82,6 +89,20 @@ export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
         };
       }
     });
+  };
+
+  // server.tool: profile gate ONLY (#251). Deliberately NO try-catch — the 3 legacy
+  // provenance tools are not error-sanitized today and the issue forbids changing
+  // handler behavior. This patch is filter-only.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const origTool: (...args: any[]) => unknown = server.tool.bind(server);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server as any).tool = (...args: any[]) => {
+    const name = args[0];
+    if (gate && typeof name === "string" && !gate.has(name)) return; // #251: filtered
+    return origTool(...args);
+  };
+
   registerAllTools(server, ctx);
 }
 
