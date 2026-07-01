@@ -113,17 +113,34 @@ function normalize(raw: string | undefined): string | undefined {
   return v === "" ? undefined : v;
 }
 
+/** Three-state parse: absent (no signal) / ok (valid) / invalid (fail-fast).
+ *  Shared by env resolution (throwing) and HTTP per-session resolution
+ *  (non-throwing, #260). `null` and `undefined` both mean "no signal". */
+export type ProfileParseResult =
+  | { kind: "absent" }
+  | { kind: "ok"; profile: ToolProfile }
+  | { kind: "invalid"; raw: string };
+
+export function parseToolProfile(raw: string | null | undefined): ProfileParseResult {
+  const normalized = normalize(raw ?? undefined);
+  if (normalized === undefined) return { kind: "absent" };
+  if (VALID_PROFILES.has(normalized as ToolProfile)) {
+    return { kind: "ok", profile: normalized as ToolProfile };
+  }
+  return { kind: "invalid", raw: normalized };
+}
+
 /** Resolve profile from env. Undefined/empty → "full". Invalid → throw (fail fast). */
 export function resolveToolProfile(env?: string): ToolProfile {
-  const resolved = normalize(env);
-  if (resolved === undefined) return "full";
-  if (!VALID_PROFILES.has(resolved as ToolProfile)) {
+  const parsed = parseToolProfile(env);
+  if (parsed.kind === "absent") return "full";
+  if (parsed.kind === "invalid") {
     throw new Error(
-      `Invalid CBRAIN_MCP_TOOL_PROFILE=${JSON.stringify(resolved)}. ` +
+      `Invalid CBRAIN_MCP_TOOL_PROFILE=${JSON.stringify(parsed.raw)}. ` +
         `Expected one of: ${TOOL_PROFILES.join(", ")}.`,
     );
   }
-  return resolved as ToolProfile;
+  return parsed.profile;
 }
 
 /** `full` allows everything; otherwise the name must be in the profile allowlist. */

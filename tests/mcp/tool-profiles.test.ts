@@ -3,6 +3,7 @@ import {
   TOOL_PROFILES,
   TOOL_PROFILE_ALLOWLISTS,
   resolveToolProfile,
+  parseToolProfile,
   isToolAllowedForProfile,
 } from "../../src/mcp/tool-profiles";
 import { collectRegisteredToolNames } from "../helpers/mcp-inventory";
@@ -106,5 +107,29 @@ describe("allowlist validity vs real inventory", () => {
     for (const t of ["query", "get_chunks", "dream", "sync", "health", "job_submit"]) {
       expect(all).toContain(t);
     }
+  });
+});
+
+describe("parseToolProfile (three-state, #260)", () => {
+  test("absent for undefined / null / empty / whitespace", () => {
+    expect(parseToolProfile(undefined)).toEqual({ kind: "absent" });
+    expect(parseToolProfile(null)).toEqual({ kind: "absent" });
+    expect(parseToolProfile("")).toEqual({ kind: "absent" });
+    expect(parseToolProfile("   ")).toEqual({ kind: "absent" });
+  });
+  test("ok for valid profiles, trimmed + lowercased", () => {
+    for (const p of TOOL_PROFILES) {
+      expect(parseToolProfile(p)).toEqual({ kind: "ok", profile: p });
+    }
+    expect(parseToolProfile("  AGENT ")).toEqual({ kind: "ok", profile: "agent" });
+  });
+  test("invalid for garbage, raw is the normalized value", () => {
+    const r = parseToolProfile("Garbage");
+    expect(r.kind).toBe("invalid");
+    if (r.kind === "invalid") expect(r.raw).toBe("garbage");
+  });
+  test("invalid distinct from absent (fail-fast contract)", () => {
+    expect(parseToolProfile(undefined).kind).toBe("absent");
+    expect(parseToolProfile("nope").kind).toBe("invalid");
   });
 });
