@@ -242,7 +242,7 @@ stage 1.5 / ner-backfill:
                                                               // ORDER BY priority,id
   processed = 0; failed = 0; timed_out = 0; skipped = 0
   for id in ids:
-      job = db.claimJobById(id)                  // claim by id; null if no longer pending
+      job = db.claimJobById(id)                  // null if no longer pending (race-safe)
       if !job: continue
       slug = JSON.parse(job.data).slug
       resolved = resolveNerBody(pages, db, slug)                 // §5.6
