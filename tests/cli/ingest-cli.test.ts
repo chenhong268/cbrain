@@ -167,3 +167,91 @@ describe("CLI ingest — dedup flags and output", () => {
     expect(result.stdout + result.stderr).not.toContain(srcPath);
   });
 });
+
+describe("cbrain ingest --ner-mode (#252)", () => {
+  let testDir: string;
+  let brainDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), "cbrain-test-nermode-"));
+    brainDir = join(testDir, "mybrain");
+    dbPath = join(brainDir, "brain.sqlite");
+
+    execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
+
+    // Deterministic embedding (no network) + NER disabled (no LLM needed).
+    const configPath = join(brainDir, "cbrain.json");
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    config.embedding.provider = "deterministic";
+    config.ner = { enabled: false };
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+  });
+
+  afterEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  function runIngest(args: string[]): { stdout: string; stderr: string; exitCode: number } {
+    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", ...args], {
+      encoding: "utf-8",
+      cwd: brainDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+    return {
+      stdout: result.stdout?.trim() ?? "",
+      stderr: result.stderr?.trim() ?? "",
+      exitCode: result.status ?? 1,
+    };
+  }
+
+  function countNerBackfillJobs(): number {
+    const db = new CBrainDB(dbPath);
+    const row = db.rawDb.prepare("SELECT COUNT(*) AS c FROM jobs WHERE status = 'pending' AND name = 'ner-backfill'").get() as { c: number } | undefined;
+    db.close();
+    return row?.c ?? 0;
+  }
+
+  test("env CBRAIN_INGEST_NER_MODE=defer creates a ner-backfill job", () => {
+    const env = { ...process.env, CBRAIN_INGEST_NER_MODE: "defer" };
+    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", "匿名正文", "--type", "text"], {
+      encoding: "utf-8",
+      cwd: brainDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env,
+    });
+    expect(result.status ?? 1).toBe(0);
+    expect(countNerBackfillJobs()).toBe(1);
+  });
+
+  test("invalid --ner-mode falls back to sync (no throw, no job)", () => {
+    const result = runIngest(["匿名正文", "--type", "text", "--ner-mode", "garbage"]);
+    expect(result.exitCode).toBe(0);
+    expect(countNerBackfillJobs()).toBe(0);
+  });
+
+  test("env defer + --ner-mode off → no job (CLI flag beats env)", () => {
+    const env = { ...process.env, CBRAIN_INGEST_NER_MODE: "defer" };
+    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", "匿名正文", "--type", "text", "--ner-mode", "off"], {
+      encoding: "utf-8",
+      cwd: brainDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env,
+    });
+    expect(result.status ?? 1).toBe(0);
+    expect(countNerBackfillJobs()).toBe(0);
+  });
+
+  test("env sync + --ner-mode defer → creates job (CLI flag beats env)", () => {
+    const env = { ...process.env, CBRAIN_INGEST_NER_MODE: "sync" };
+    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", "匿名正文", "--type", "text", "--ner-mode", "defer"], {
+      encoding: "utf-8",
+      cwd: brainDir,
+      stdio: ["pipe", "pipe", "pipe"],
+      env,
+    });
+    expect(result.status ?? 1).toBe(0);
+    expect(countNerBackfillJobs()).toBe(1);
+  });
+});

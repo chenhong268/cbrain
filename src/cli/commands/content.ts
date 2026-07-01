@@ -14,6 +14,7 @@ export function register(program: Command) {
     .option("--tags <tags>", "Comma-separated tags")
     .option("--page-type <type>", "Page type: entity|concept|record")
     .option("--no-ner", "Skip NER entity extraction")
+    .option("--ner-mode <mode>", "NER mode: sync | defer | off (explicitly overrides config/env for this ingest)")
     .option("--allow-duplicate", "Allow duplicate content (normally deduped)")
     .argument("<content>", "Content to ingest (use @file to read from file)")
     .action(async (content, opts) => {
@@ -21,7 +22,17 @@ export function register(program: Command) {
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
       const { IngestManager } = await import("../../core/ingest.js");
-      const ingest = new IngestManager(deps.db, deps.embedding, deps.lance, config.vaultPath, deps.llm);
+      const { JobQueueNerSubmitter } = await import("../../core/ner-backfill.js");
+      const { resolveIngestNerMode } = await import("../context.js");
+      // Manager default: env > config. opts.nerMode is NOT mixed in here — it is a per-call override.
+      const managerMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, config.ner?.ingest_mode);
+      const ingest = new IngestManager(deps.db, deps.embedding, deps.lance, config.vaultPath, deps.llm, undefined, {
+        nerMode: managerMode,
+        deferredNerSubmitter: new JobQueueNerSubmitter(deps.db),
+      });
+      // CLI --ner-mode is an explicit override that BEATS env/config.
+      // resolveIngestNerMode(undefined, raw) normalizes without letting env override it.
+      const cliOverride = opts.nerMode !== undefined ? resolveIngestNerMode(undefined, opts.nerMode) : undefined;
       let input = content;
       if (input.startsWith("@")) {
         const rawPath = input.slice(1);
@@ -34,7 +45,7 @@ export function register(program: Command) {
       // @file markdown frontmatter → markdown); omitting --title lets it derive the
       // title from frontmatter/body instead of the source filename. Explicit
       // --type/--title always take precedence over file-derived values.
-      const result = await ingest.ingest({ content: input, type: opts.type, title: opts.title, tags, pageType: opts.pageType, skipNer: opts.ner === false, allowDuplicate: opts.allowDuplicate ?? false });
+      const result = await ingest.ingest({ content: input, type: opts.type, title: opts.title, tags, pageType: opts.pageType, skipNer: opts.ner === false, allowDuplicate: opts.allowDuplicate ?? false, nerMode: cliOverride });
       if (result.outcome === "duplicate") {
         console.log(`- Duplicate: already exists as "${result.duplicateOf?.title}"`);
       } else {
