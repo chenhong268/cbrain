@@ -8,7 +8,9 @@
  *
  * The aggregation (diagnose) + formatters are pure and unit-testable. The read
  * function takes a bun:sqlite handle (opened READ-ONLY by the CLI) and selects
- * only safe columns. Missing optional tables degrade to a sanitized warning.
+ * only safe columns — summary_json is read solely to extract allowlisted reason
+ * codes (then discarded; see readDiagnosticSnapshot). Missing optional tables
+ * degrade to a sanitized warning.
  */
 import type { Database } from "bun:sqlite";
 import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCode } from "../core/search-diagnostics.js";
@@ -397,8 +399,11 @@ function readTable<T>(
 }
 
 /**
- * Read a privacy-safe telemetry snapshot. Selects ONLY safe columns (never query
- * text, summary_json, input_json, output_summary, result_slugs, error, details_json).
+ * Read a privacy-safe telemetry snapshot. Query text, input_json, output_summary,
+ * result_slugs, error, and details_json are never read. summary_json IS read, but
+ * solely to extract allowlisted reason codes (extractReasonCodes); the raw summary
+ * is parsed and discarded, and unknown strings are dropped — never "sanitized"
+ * into the report.
  * A missing optional table is downgraded to a sanitized warning, not a crash.
  */
 export function readDiagnosticSnapshot(db: Database, opts: ReadOpts): DiagnosticSnapshot {
