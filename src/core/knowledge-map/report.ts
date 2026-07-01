@@ -27,7 +27,25 @@ export interface KnowledgeMapReport {
 const MATURITY_MIN_SIZE = 3;
 const MATURITY_MIN_INTERNAL_EDGES = 3;
 const MATURITY_MIN_DENSITY = 0.4;
+const MAIN_DOMAIN_MIN_SIZE = 12;
+const SUBDOMAIN_MIN_SIZE = 5;
 const CORE_TITLES_CAP = 5;
+
+/** User-facing shape counters for the Knowledge Map. */
+export interface KnowledgeMapShapeSummary {
+  /** Larger communities worth naming as main knowledge domains. */
+  mainDomains: number;
+  /** Mid-sized communities that are useful, but too small to call main domains. */
+  subdomains: number;
+  /** Tiny communities/noisy clusters that should be summarized, not listed as domains. */
+  edgeClusters: number;
+  /** Total Louvain communities, retained for honest structure accounting. */
+  totalStructures: number;
+  /** Mature structures by the shared maturity classifier. */
+  matureStructures: number;
+  /** Structures that are not yet mature. */
+  sparseStructures: number;
+}
 
 /**
  * #241 — Turn a KnowledgeMapAnalysis into a deterministic, user-facing Markdown
@@ -57,10 +75,14 @@ export function buildKnowledgeMapReport(
 
 function renderSummary(a: KnowledgeMapAnalysis): string {
   const nodeCount = a.health.nodeCount;
-  const domainCount = a.communities.length;
+  const shape = summarizeKnowledgeMapShape(a);
   if (nodeCount === 0) return "你的知识图谱目前是空的——还没有可分析的条目。";
-  if (domainCount === 0) return `你的知识图谱目前有 ${nodeCount} 个条目，但还没有形成明显的领域结构。`;
-  return `你的知识图谱目前有 ${domainCount} 个主要领域，共 ${nodeCount} 个条目。`;
+  if (shape.totalStructures === 0) return `你的知识图谱目前有 ${nodeCount} 个条目，但还没有形成明显的领域结构。`;
+  if (shape.mainDomains === 0) {
+    return `你的知识图谱目前有 ${nodeCount} 个条目，已形成 ${shape.totalStructures} 个小型结构，但还没有稳定的主知识域。`;
+  }
+  const smallCount = shape.subdomains + shape.edgeClusters;
+  return `你的知识图谱目前形成了 ${shape.mainDomains} 个主知识域，另有 ${smallCount} 个子域/边缘小簇；全部结构中 ${shape.matureStructures} 个较成熟、${shape.sparseStructures} 个偏松散，共 ${nodeCount} 个条目。`;
 }
 
 // ─── Base Markdown (all default sections) ─────────────────────────────────
@@ -73,6 +95,9 @@ function renderBase(a: KnowledgeMapAnalysis, summary: string): string {
     "",
     "## 主要领域",
     renderDomains(a),
+    "",
+    "## 子域与边缘小簇",
+    renderSmallClusters(a),
     "",
     "## 领域成熟度",
     renderMaturity(a),
@@ -94,7 +119,7 @@ function domainLabel(index: number): string {
 }
 
 function renderDomains(a: KnowledgeMapAnalysis): string {
-  const communities = orderCommunities(a.communities);
+  const communities = orderCommunitiesBySize(a.communities.filter(isMainKnowledgeDomain));
   if (communities.length === 0) return "暂未识别出明显的领域。";
   return communities
     .map((c, i) => {
@@ -106,16 +131,41 @@ function renderDomains(a: KnowledgeMapAnalysis): string {
 }
 
 function renderMaturity(a: KnowledgeMapAnalysis): string {
-  const communities = orderCommunities(a.communities);
+  const communities = orderCommunitiesBySize(a.communities.filter(isMainKnowledgeDomain));
+  const shape = summarizeKnowledgeMapShape(a);
   if (communities.length === 0) return "暂无可评估的领域。";
-  return communities
+  const lines = communities
     .map((c, i) => {
       const mature = isCommunityMature(c);
       return mature
         ? `- **${domainLabel(i)}** 看起来比较成熟——条目之间有较多可信的内部关联。`
         : `- **${domainLabel(i)}** 还比较稀疏——条目之间的关联较少，可以考虑补充。`;
-    })
-    .join("\n");
+    });
+  const smallCount = shape.subdomains + shape.edgeClusters;
+  if (smallCount > 0) {
+    lines.push(`- 另有 ${smallCount} 个子域/边缘小簇；全部结构中 ${shape.sparseStructures} 个仍偏松散。`);
+  }
+  return lines.join("\n");
+}
+
+function renderSmallClusters(a: KnowledgeMapAnalysis): string {
+  const shape = summarizeKnowledgeMapShape(a);
+  const smallCount = shape.subdomains + shape.edgeClusters;
+  if (smallCount === 0) return "暂无需要单独归类的小型结构。";
+  const parts = [`共 ${smallCount} 个小型结构：${shape.subdomains} 个子域、${shape.edgeClusters} 个边缘小簇。`];
+  const candidates = orderCommunitiesBySize(a.communities.filter((c) => !isMainKnowledgeDomain(c))).slice(0, 5);
+  if (candidates.length > 0) {
+    parts.push(
+      "代表性结构：" +
+        candidates
+          .map((c) => {
+            const titles = uniqueTitles(c.topCoreNodes).slice(0, 2).join("、");
+            return titles.length > 0 ? `${titles}（${c.size} 项）` : `${c.size} 项`;
+          })
+          .join("；"),
+    );
+  }
+  return parts.join("\n");
 }
 
 function renderBridges(bridges: BridgeCandidate[]): string {
@@ -148,8 +198,9 @@ function renderNextActions(a: KnowledgeMapAnalysis): string {
   if (a.bridgeCandidates.length > 0) {
     actions.push("- 桥接节点值得回顾——它们可能指向需要更新的关联。");
   }
-  if (a.communities.some((c) => !isCommunityMature(c))) {
-    actions.push("- 稀疏领域可以补充更多条目或关联，让结构更清晰。");
+  const shape = summarizeKnowledgeMapShape(a);
+  if (shape.sparseStructures > 0) {
+    actions.push("- 偏松散结构可以补充更多条目或关联，让结构更清晰。");
   }
   if (a.health.nodeCount > 0 && a.communities.length === 0) {
     actions.push("- 增加条目之间的关联，帮助形成领域结构。");
@@ -168,8 +219,29 @@ function renderDebugAppendix(a: KnowledgeMapAnalysis): string {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-function orderCommunities(communities: CommunitySummary[]): CommunitySummary[] {
-  return [...communities].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+function orderCommunitiesBySize(communities: CommunitySummary[]): CommunitySummary[] {
+  return [...communities].sort((x, y) => y.size - x.size || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+}
+
+/** Larger communities should read as main knowledge domains, not every cluster. */
+export function isMainKnowledgeDomain(c: CommunitySummary): boolean {
+  return c.size >= MAIN_DOMAIN_MIN_SIZE;
+}
+
+/** Shared shape classifier for report, MCP summary, and Dream brief counts. */
+export function summarizeKnowledgeMapShape(a: KnowledgeMapAnalysis): KnowledgeMapShapeSummary {
+  const mainDomains = a.communities.filter(isMainKnowledgeDomain).length;
+  const subdomains = a.communities.filter((c) => c.size >= SUBDOMAIN_MIN_SIZE && !isMainKnowledgeDomain(c)).length;
+  const edgeClusters = a.communities.length - mainDomains - subdomains;
+  const matureStructures = a.communities.filter(isCommunityMature).length;
+  return {
+    mainDomains,
+    subdomains,
+    edgeClusters,
+    totalStructures: a.communities.length,
+    matureStructures,
+    sparseStructures: a.communities.length - matureStructures,
+  };
 }
 
 /**

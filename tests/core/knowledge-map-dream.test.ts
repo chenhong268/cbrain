@@ -35,7 +35,7 @@ function mockHealth(): HealthChecker {
   } as unknown as HealthChecker;
 }
 
-/** Seed an anonymous 2-entity graph (one community, growing). */
+/** Seed an anonymous 2-entity graph (one tiny structure, not a main domain). */
 function seedGraph(db: CBrainDB): void {
   const ins = db.rawDb.prepare(
     "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -112,7 +112,8 @@ describe("Knowledge Map Dream stage (#242)", () => {
     expect(existsSync(stage.reportPath as string)).toBe(true);
     expect(stage.lastRunAt).not.toBeNull();
     expect(db.getConfig(KM_LAST_RUN_KEY)).toBe(stage.lastRunAt);
-    expect(stage.domains).toBe(1); // a–b is one community
+    expect(stage.domains).toBe(0); // a–b is too small to be a main domain
+    expect(stage.growing).toBe(1);
   });
 
   test("second run inside the interval skips and leaves last_run_at untouched", async () => {
@@ -195,7 +196,8 @@ describe("Knowledge Map Dream stage (#242)", () => {
     expect(report.locked).toBe(false);
     expect(report.stages.knowledge_map.status).toBe("generated");
     expect(report.brief).toContain("Knowledge Map:");
-    expect(report.brief).toContain("1 个主要领域");
+    expect(report.brief).toContain("0 个主知识域");
+    expect(report.brief).toContain("1 个偏松散结构");
   });
 
   test("Dream brief includes discovery signals when KM stage produced candidates (#244)", async () => {

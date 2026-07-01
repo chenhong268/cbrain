@@ -25,16 +25,16 @@ function node(slug: string, title: string, overrides: Partial<KnowledgeMapNode> 
 function makeAnalysis(overrides: Partial<KnowledgeMapAnalysis> = {}): KnowledgeMapAnalysis {
   const community1: CommunitySummary = {
     id: "community-1",
-    size: 4,
-    internalEdgeCount: 5,
-    density: 0.8,
-    totalInternalWeight: 9.5,
+    size: 12,
+    internalEdgeCount: 20,
+    density: 0.6,
+    totalInternalWeight: 28.5,
     topCoreNodes: [
       node("entity/a", "实体A", { weightedDegree: 5, degree: 3, communityId: "community-1" }),
       node("entity/b", "实体B", { weightedDegree: 4, degree: 3, communityId: "community-1" }),
       node("entity/c", "实体C", { weightedDegree: 4, degree: 3, communityId: "community-1" }),
     ],
-    typeDistribution: { "entity/person": 3, "concept/topic": 1 },
+    typeDistribution: { "entity/person": 8, "concept/topic": 4 },
   };
   const community2: CommunitySummary = {
     id: "community-2",
@@ -61,8 +61,8 @@ function makeAnalysis(overrides: Partial<KnowledgeMapAnalysis> = {}): KnowledgeM
     resolution: "default",
     nodes: [isolate, weak],
     health: {
-      nodeCount: 9,
-      edgeCount: 6,
+      nodeCount: 17,
+      edgeCount: 21,
       isolatedNodes: [isolate],
       degreeOneNodes: [weak],
       connectedComponentCount: 2,
@@ -83,14 +83,16 @@ describe("Knowledge Map report builder (#241)", () => {
     const { markdown, summary } = buildKnowledgeMapReport(makeAnalysis());
     expect(summary.length).toBeGreaterThan(0);
     expect(markdown).toContain(summary);
-    for (const section of ["主要领域", "成熟度", "桥接", "孤立", "建议"]) {
+    expect(summary).toContain("1 个主知识域");
+    expect(summary).toContain("子域/边缘小簇");
+    for (const section of ["主要领域", "子域与边缘小簇", "成熟度", "桥接", "孤立", "建议"]) {
       expect(markdown, `${section} section missing`).toContain(section);
     }
   });
 
   // ─── 2. Domains ordered, human titles (not slugs) ──────────────────────
 
-  test("domains render human titles in id order, never slugs", () => {
+  test("main domains render human titles and small clusters are not promoted", () => {
     const { markdown } = buildKnowledgeMapReport(makeAnalysis());
     // Human titles appear…
     expect(markdown).toContain("实体A");
@@ -98,7 +100,9 @@ describe("Knowledge Map report builder (#241)", () => {
     // …slugs never do.
     expect(markdown).not.toContain("entity/");
     expect(markdown).not.toContain("concept/");
-    // community-1 (实体A) renders before community-2 (概念D).
+    // community-1 is a main domain; community-2 is summarized as a small cluster.
+    expect(markdown).toContain("### 领域 1（12 项）");
+    expect(markdown).not.toContain("### 领域 2（3 项）");
     expect(markdown.indexOf("实体A")).toBeLessThan(markdown.indexOf("概念D"));
   });
 
@@ -106,10 +110,10 @@ describe("Knowledge Map report builder (#241)", () => {
 
   test("mature vs sparse wording follows size/density/internal-edge signals", () => {
     const { markdown } = buildKnowledgeMapReport(makeAnalysis());
-    // community-1 (size4, density0.8, edges5) → mature wording.
+    // community-1 (size12, density0.6, edges20) → mature wording.
     expect(markdown).toContain("成熟");
-    // community-2 (edges1, density0.2) → sparse wording.
-    expect(markdown).toContain("稀疏");
+    // community-2 (edges1, density0.2) → sparse/loose wording.
+    expect(markdown).toContain("松散");
   });
 
   // ─── 4. Bridge candidates in natural language ──────────────────────────

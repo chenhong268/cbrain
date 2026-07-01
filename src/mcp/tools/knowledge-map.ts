@@ -108,7 +108,7 @@ function renderDisplay(report: LatestKnowledgeMapReport): {
       continue;
     }
     if (line.startsWith("## ")) {
-      section = trimmed;
+      section = trimmed.replace(/^##\s+/, "");
       skipDomainCore = false;
       out.push(line);
       continue;

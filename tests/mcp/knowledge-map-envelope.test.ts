@@ -52,16 +52,16 @@ function node(slug: string, title: string, overrides: Partial<KnowledgeMapNode> 
 function makeAnalysis(): KnowledgeMapAnalysis {
   const mature: CommunitySummary = {
     id: "community-1",
-    size: 4,
-    internalEdgeCount: 5,
-    density: 0.8,
-    totalInternalWeight: 9.5,
+    size: 12,
+    internalEdgeCount: 20,
+    density: 0.6,
+    totalInternalWeight: 28.5,
     topCoreNodes: [
       node("entity/a", "实体A", { weightedDegree: 5, degree: 3, communityId: "community-1" }),
       node("entity/b", "实体B", { weightedDegree: 4, degree: 3, communityId: "community-1" }),
       node("entity/c", "实体C", { weightedDegree: 4, degree: 3, communityId: "community-1" }),
     ],
-    typeDistribution: { "entity/person": 3, "concept/topic": 1 },
+    typeDistribution: { "entity/person": 8, "concept/topic": 4 },
   };
   const sparse: CommunitySummary = {
     id: "community-2",
@@ -87,8 +87,8 @@ function makeAnalysis(): KnowledgeMapAnalysis {
     resolution: "default",
     nodes: [isolate, weak],
     health: {
-      nodeCount: 9,
-      edgeCount: 6,
+      nodeCount: 17,
+      edgeCount: 21,
       isolatedNodes: [isolate],
       degreeOneNodes: [weak],
       connectedComponentCount: 2,
@@ -143,6 +143,7 @@ describe("read_knowledge_map MCP tool (#243)", () => {
     const data = await callTool(deps, {});
     expect(typeof data.display).toBe("string");
     expect(data.summary).toBeDefined();
+    expect((data.summary as { count: number }).count).toBe(1);
     expect(typeof data.result_summary).toBe("string");
     expect(data.raw).toBeUndefined();
   });
@@ -158,7 +159,7 @@ describe("read_knowledge_map MCP tool (#243)", () => {
   test("default display includes overview + domains + maturity + bridges + gaps + actions", async () => {
     writeReport(runtimePath, "2026-06-28");
     const data = await callTool(deps, {});
-    for (const section of ["主要领域", "成熟", "桥接", "孤立", "建议"]) {
+    for (const section of ["主要领域", "子域与边缘小簇", "成熟", "桥接", "孤立", "建议"]) {
       expect(data.display, `${section} missing`).toContain(section);
     }
   });
@@ -172,7 +173,7 @@ describe("read_knowledge_map MCP tool (#243)", () => {
     const resultSummary = String(data.result_summary);
     for (const banned of [
       "entity/", "concept/", "source_type", "weightedDegree", "modularity",
-      "centrality", "score", "调试附录", "/tmp", "/Users", "runtime/knowledge-map",
+      "centrality", "score", "调试附录", "报告已写入", "/tmp", "/Users", "runtime/knowledge-map",
     ]) {
       expect(display, `${banned} leaked into display`).not.toContain(banned);
       expect(message, `${banned} leaked into summary.message`).not.toContain(banned);

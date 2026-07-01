@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { Logger } from "../logger.js";
 import { analyzeKnowledgeMap } from "./index.js";
-import { buildKnowledgeMapReport, isCommunityMature } from "./report.js";
+import { buildKnowledgeMapReport, summarizeKnowledgeMapShape } from "./report.js";
 import { produceKnowledgeMapDiscoveries } from "./discovery.js";
 import { sanitizeForLog } from "../sync-index-safety.js";
 
@@ -120,7 +120,7 @@ export async function runKnowledgeMapStage(
   try {
     const now = opts.now ?? Date.now();
     const analysis = analyzeKnowledgeMap(db);
-    const mature = analysis.communities.filter(isCommunityMature).length;
+    const shape = summarizeKnowledgeMapShape(analysis);
     const report = buildKnowledgeMapReport(analysis);
 
     const dir = join(outputsDir, "knowledge-map");
@@ -141,9 +141,9 @@ export async function runKnowledgeMapStage(
     return {
       status: "generated",
       enabled,
-      domains: analysis.communities.length,
-      mature,
-      growing: analysis.communities.length - mature,
+      domains: shape.mainDomains,
+      mature: shape.matureStructures,
+      growing: shape.sparseStructures,
       highMentionIsolates: analysis.highMentionIsolates.length,
       discoveryCandidates: kmDiscovery.total,
       reportPath,
@@ -186,6 +186,6 @@ function sanitizeWarning(e: unknown): string {
  */
 export function knowledgeMapBriefLine(stage: KnowledgeMapStageResult): string | null {
   if (stage.status !== "generated") return null;
-  const base = `Knowledge Map: ${stage.domains} 个主要领域，${stage.growing} 个成长中，${stage.mature} 个成熟，${stage.highMentionIsolates} 个高提及孤岛`;
+  const base = `Knowledge Map: ${stage.domains} 个主知识域，${stage.growing} 个偏松散结构，${stage.mature} 个较成熟结构，${stage.highMentionIsolates} 个高提及孤岛`;
   return stage.discoveryCandidates > 0 ? `${base}，${stage.discoveryCandidates} 条发现信号` : base;
 }
