@@ -28,7 +28,7 @@ const ROUTE_RULES: RouteRule[] = [
     nextTool: "query",
     signals: [
       ["debug", /\bdebug\b|调试|诊断/iu],
-      ["keyword_location", /关键词.*(在哪|出现|索引)|搜索结果|原始搜索|查.*slug/iu],
+      ["keyword_location", /关键词.*(在哪|出现|索引)|搜索结果|原始搜索|查.*slug|raw search|keyword search/iu],
     ],
   },
   {
@@ -45,6 +45,7 @@ const ROUTE_RULES: RouteRule[] = [
     signals: [
       ["org_tree", /组织架构|汇报线|架构图|层级/iu],
       ["manager_or_report", /上级|下属|汇报给|向.*汇报|谁管|管理.*谁/iu],
+      ["hierarchy_en", /reports to|direct reports|org chart|reporting line/iu],
     ],
   },
   {
@@ -68,6 +69,7 @@ const ROUTE_RULES: RouteRule[] = [
     nextTool: "agentic_research",
     signals: [
       ["relationship", /什么关系|什么联系|有什么联系|有关系吗|之间.*关系|之间.*联系/iu],
+      ["relationship_en", /relationship|connected to|how.*(related|connected)|link between/iu],
     ],
   },
   {
@@ -75,7 +77,7 @@ const ROUTE_RULES: RouteRule[] = [
     nextTool: "agentic_research",
     signals: [
       ["judgement", /帮我判断|怎么看|是否合理|有无风险|盲区|优缺点/iu],
-      ["comparison", /对比|比较|哪个更|A\s*vs\s*B|vs\./iu],
+      ["comparison", /对比|区别|哪个更|\bvs\b|compare|difference|differ/iu],
     ],
   },
   {
@@ -84,6 +86,7 @@ const ROUTE_RULES: RouteRule[] = [
     signals: [
       ["overview", /总结|梳理|复盘|全面了解|概览|全貌/iu],
       ["topic_map", /有哪些关键|生态|脉络|整体情况/iu],
+      ["overview_en", /summarize|review of|overview|walk me through/iu],
     ],
   },
 ];

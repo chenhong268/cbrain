@@ -48,6 +48,26 @@ describe("detectTemporalIntent (#232)", () => {
       expect(i.temporal || i.history || i.formerCurrent, `${q} should have no evidence intent`).toBe(false);
     }
   });
+
+  // ── #255 bilingual (English) markers ──
+  test("#255 English temporal markers", () => {
+    for (const q of ["实体A last time", "what changed for 实体A", "实体A previously"]) {
+      const i = detectTemporalIntent(q);
+      expect(i.temporal, `${q} should be temporal`).toBe(true);
+    }
+  });
+
+  test("#255 English history markers", () => {
+    for (const q of ["why was this decided for 实体A", "what was the reasoning for 实体A"]) {
+      const i = detectTemporalIntent(q);
+      expect(i.history, `${q} should be history`).toBe(true);
+    }
+  });
+
+  test("#255 English former/current markers", () => {
+    const i = detectTemporalIntent("实体A former and current");
+    expect(i.formerCurrent).toBe(true);
+  });
 });
 
 describe("shouldCompleteEvidence (#232)", () => {

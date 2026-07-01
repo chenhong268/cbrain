@@ -181,4 +181,56 @@ describe("QueryRouter", () => {
     expect(r.mode).toBe("hybrid");
     expect(r.intent).toBe("timeline");
   });
+
+  // ── #255 over-routing: 比较 adverb must NOT escalate, even with 2 entities ──
+  test("比较 + adjective (adverb) does NOT escalate to comparison", () => {
+    for (const q of ["比较重要的主题A", "实体A和实体B都比较重要", "比较类似的主题"]) {
+      const r = router.route(q);
+      expect(r.intent, `${q} must not be comparison`).not.toBe("comparison");
+    }
+  });
+
+  test("比较 in compare-structure DOES escalate", () => {
+    const r = router.route("比较 实体A 和 实体B");
+    expect(r.intent).toBe("comparison");
+  });
+
+  // ── #255 bilingual positive (English strong signals) ──
+  test("English comparison strong → comparison", () => {
+    const r = router.route("实体A compare 实体B difference");
+    expect(r.intent).toBe("comparison");
+  });
+  test("English relationship → relationship", () => {
+    const r = router.route("实体A and 实体B relationship");
+    expect(r.intent).toBe("relationship");
+  });
+  test("English timeline strong → timeline", () => {
+    const r = router.route("实体A what changed since last time");
+    expect(r.intent).toBe("timeline");
+  });
+
+  // ── #255 English negative: weak words must NOT trigger their intent ──
+  // ── #255 over-routing (review feedback): ambiguous actions must NOT escalate to agentic ──
+  test("review the code / change the title / change manager → NOT agentic (safer default)", () => {
+    for (const q of ["review the code", "review the code about 实体A and 实体B", "change the title", "change manager"]) {
+      const r = router.route(q);
+      expect(r.mode, `${q} must not be agentic`).not.toBe("agentic");
+    }
+  });
+
+  // ── #255 English review structure (strong) → review intent ──
+  test("English review structure → review intent", () => {
+    for (const q of ["review of 实体A", "walk me through 实体A", "overview of 实体A"]) {
+      const r = router.route(q);
+      expect(r.intent, `${q} should be review`).toBe("review");
+    }
+  });
+
+  // ── #255 exact title precedence over intent keywords (bilingual) ──
+  test("exact English title with intent word still → fast/entity_lookup", () => {
+    insertPage(db, "concepts/overview-alpha", "Overview Alpha");
+    const r = router.route("Overview Alpha");
+    expect(r.mode).toBe("fast");
+    expect(r.intent).toBe("entity_lookup");
+  });
 });

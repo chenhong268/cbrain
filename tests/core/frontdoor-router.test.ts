@@ -29,4 +29,48 @@ describe("classifyFrontdoorQuery", () => {
     expect(decision.chosen_route).toBe("content_recall");
     expect(decision.next_tool).toBe("deep_recall");
   });
+
+  // ── #255 over-routing: bare 比较 (adverb) must NOT escalate ──
+  test("比较 + adjective (adverb) does NOT route to reasoning/comparison", () => {
+    for (const q of ["比较重要的主题A", "实体A和实体B都比较重要", "比较类似的主题"]) {
+      const decision = classifyFrontdoorQuery(q);
+      expect(decision.chosen_route, `${q} must not be reasoning`).not.toBe("reasoning");
+    }
+  });
+
+  // ── #255 bilingual positive signals ──
+  test("English relationship → relationship route", () => {
+    const d = classifyFrontdoorQuery("how is 实体A connected to 实体B");
+    expect(d.chosen_route).toBe("relationship");
+  });
+  test("English hierarchy → hierarchy route", () => {
+    for (const q of ["实体A reports to 实体B", "org chart for 实体A"]) {
+      const d = classifyFrontdoorQuery(q);
+      expect(d.chosen_route, `${q}`).toBe("hierarchy");
+    }
+  });
+  test("English overview → overview route", () => {
+    for (const q of ["walk me through 实体A", "overview of 实体A"]) {
+      const d = classifyFrontdoorQuery(q);
+      expect(d.chosen_route, `${q}`).toBe("overview");
+    }
+  });
+  test("English comparison strong → reasoning route", () => {
+    const d = classifyFrontdoorQuery("compare 实体A and 实体B, what's the difference");
+    expect(d.chosen_route).toBe("reasoning");
+  });
+
+  // ── #255 frontdoor: X vs Y → reasoning (any entities, not literal A/B) ──
+  test("实体A vs 实体B → reasoning route", () => {
+    const d = classifyFrontdoorQuery("实体A vs 实体B");
+    expect(d.chosen_route).toBe("reasoning");
+  });
+
+  // ── #255 frontdoor: explicit debug/search terms → debug_search ──
+  test("raw search / keyword search → debug_search route", () => {
+    for (const q of ["raw search 实体A", "keyword search 实体A"]) {
+      const d = classifyFrontdoorQuery(q);
+      expect(d.chosen_route, `${q}`).toBe("debug_search");
+    }
+  });
 });
