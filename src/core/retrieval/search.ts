@@ -644,8 +644,13 @@ export class HybridSearch {
       const known = resolved.filter((r) => r.slug !== null);
 
       for (const r of known) {
-        const outgoing = this.db.getOutgoingLinks(r.slug!);
-        const incoming = this.db.getIncomingLinks(r.slug!);
+        // #233: exclude candidate reports_to from search context (current-fact
+        // semantic — candidate reports_to is evidence, not a confirmed relation
+        // to feed LLM chains). Non-reports_to candidate neighbors are kept.
+        const outFilter = (l: { relation: string; trust_state?: string | null }) =>
+          !(l.relation === "reports_to" && l.trust_state === "candidate");
+        const outgoing = this.db.getOutgoingLinks(r.slug!).filter(outFilter);
+        const incoming = this.db.getIncomingLinks(r.slug!).filter(outFilter);
 
         // Map to { slug, relation }, dedup by slug (keep first occurrence)
         const seen = new Set<string>();
