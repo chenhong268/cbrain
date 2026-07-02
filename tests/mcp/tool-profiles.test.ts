@@ -70,7 +70,7 @@ describe("isToolAllowedForProfile", () => {
   // HTTP config (docs/hermes-integration.md) makes any single slow ingest fail
   // fast instead of hanging the whole MCP client. ingest's synchronous NER is
   // bounded by its 500k content cap + per-call timeout/fail-open
-  // (src/core/ner.ts NER_DEFAULT_TIMEOUT_MS); large captures should use
+  // (src/core/ingestion/ner.ts NER_DEFAULT_TIMEOUT_MS); large captures should use
   // `nerMode: "defer"` to skip synchronous NER entirely. This test locks the
   // keep-decision against accidental removal.
   test("ingest remains in agent by design (#264) — poison cure is profile + client timeout, not ingest removal", () => {

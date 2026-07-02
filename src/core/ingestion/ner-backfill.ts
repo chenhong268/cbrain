@@ -1,4 +1,4 @@
-// src/core/ner-backfill.ts
+// src/core/ingestion/ner-backfill.ts
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { PageManager } from "../page.js";
 import type { ContentPipeline } from "./pipeline.js";
