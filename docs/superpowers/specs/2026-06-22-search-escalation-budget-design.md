@@ -12,7 +12,7 @@ v1.9.8 后真实 telemetry（匿名 7 天）：overall search p95 ~47s，`smart-
 
 两条独立 escalation：
 
-1. **internal cron/discovery**：调用方传 `multiStep === undefined` → `src/core/search.ts:193-194` auto 分支（`multiStep === undefined && this.llm && isMultiStepCandidate`）→ `searchMultiStep` → `ResearchManager`（默认 3 iterations × 3 follow-up + rerank）。
+1. **internal cron/discovery**：调用方传 `multiStep === undefined` → `src/core/retrieval/search.ts:193-194` auto 分支（`multiStep === undefined && this.llm && isMultiStepCandidate`）→ `searchMultiStep` → `ResearchManager`（默认 3 iterations × 3 follow-up + rerank）。
 2. **MCP `smart-decompose`**：complex query → `mcp/tools/search.ts:59` `ctx.search.search(strategy:"all")` → `searchCore` decomposition path（`search.ts:237-282`）：`decomposeQuery`（1 LLM）→ N sub-query 各 `this.search(sq, {_skipDecompose:true, ...options})` → **sub-query 走 `searchWithExpansion` → `expandQuery`（LLM）+ 多路 vector**。**二次 expand** 是关键隐藏成本：3 sub-query 实际 = 1 decompose + 3 expand + 多组 vector。
 
 ## Design Decision
@@ -21,7 +21,7 @@ v1.9.8 后真实 telemetry（匿名 7 天）：overall search p95 ~47s，`smart-
 
 ### 1. `multiStep` gate（核心，不妥协）
 
-`src/core/search.ts:193-194`：
+`src/core/retrieval/search.ts:193-194`：
 
 ```ts
 const shouldMultiStep = options?.multiStep === true;

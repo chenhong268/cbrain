@@ -4,7 +4,7 @@
 
 **Goal:** Add a deterministic, pure `personal`-tag classifier to the ingest write path so clear personal memory is auto-tagged, while work/research/technical content and ambiguous input fail closed.
 
-**Architecture:** New pure module `src/core/personal-tag-classifier.ts` (no LLM/DB/IO) with a 3-gate function (routing-marker → guardrail → positive → fail-closed). `src/core/ingest.ts` calls it at the entry of `ingestText` and `ingestMarkdown` to merge `personal` into effective tags via set union before any durable write. `DialogueIngest` is untouched.
+**Architecture:** New pure module `src/core/ingestion/personal-tag-classifier.ts` (no LLM/DB/IO) with a 3-gate function (routing-marker → guardrail → positive → fail-closed). `src/core/ingestion/ingest.ts` calls it at the entry of `ingestText` and `ingestMarkdown` to merge `personal` into effective tags via set union before any durable write. `DialogueIngest` is untouched.
 
 **Tech Stack:** Bun, TypeScript (strict), `bun:test`. SQLite via `bun:sqlite`.
 
@@ -16,9 +16,9 @@
 
 ## File Structure
 
-- **Create:** `src/core/personal-tag-classifier.ts` — pure classifier, 3 gates, exported `classifyPersonalTag`.
+- **Create:** `src/core/ingestion/personal-tag-classifier.ts` — pure classifier, 3 gates, exported `classifyPersonalTag`.
 - **Create:** `tests/core/personal-tag-classifier.test.ts` — pure-function matrix (no DB/mock).
-- **Modify:** `src/core/ingest.ts` — import classifier; inject effective tags in `ingestText` (~:235-248) and `ingestMarkdown` (~:219-221).
+- **Modify:** `src/core/ingestion/ingest.ts` — import classifier; inject effective tags in `ingestText` (~:235-248) and `ingestMarkdown` (~:219-221).
 - **Modify:** `tests/core/ingest.test.ts` — extend with personal-tag cases on text + markdown + entity-append + duplicate paths.
 - **Modify:** `tests/mcp/ingest-classify.test.ts` — extend with MCP-layer personal-tag case.
 
@@ -30,7 +30,7 @@ Privacy: all fixtures use sentinels only (`人物A / 事件B / 主题C / 资料D
 
 **Files:**
 - Create: `tests/core/personal-tag-classifier.test.ts`
-- Create: `src/core/personal-tag-classifier.ts`
+- Create: `src/core/ingestion/personal-tag-classifier.ts`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -38,7 +38,7 @@ Create `tests/core/personal-tag-classifier.test.ts`:
 
 ```ts
 import { describe, test, expect } from "bun:test";
-import { classifyPersonalTag } from "../../src/core/personal-tag-classifier.js";
+import { classifyPersonalTag } from "../../src/core/ingestion/personal-tag-classifier.js";
 
 describe("classifyPersonalTag — positive signals", () => {
   // Possessive preference / habit (first-person)
@@ -83,11 +83,11 @@ describe("classifyPersonalTag — fail closed", () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bun test tests/core/personal-tag-classifier.test.ts`
-Expected: FAIL — module `../../src/core/personal-tag-classifier.js` not found.
+Expected: FAIL — module `../../src/core/ingestion/personal-tag-classifier.js` not found.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Create `src/core/personal-tag-classifier.ts`:
+Create `src/core/ingestion/personal-tag-classifier.ts`:
 
 ```ts
 /**
@@ -141,7 +141,7 @@ Expected: PASS (10 tests).
 
 **Files:**
 - Modify: `tests/core/personal-tag-classifier.test.ts` (append `guardrail` describe block)
-- Modify: `src/core/personal-tag-classifier.ts` (add Gate 1)
+- Modify: `src/core/ingestion/personal-tag-classifier.ts` (add Gate 1)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -193,7 +193,7 @@ Expected: FAIL on the new guardrail cases (e.g. `日常运维` returns `true` be
 
 - [ ] **Step 3: Add Gate 1 (guardrail) to the implementation**
 
-In `src/core/personal-tag-classifier.ts`, add the guardrail constants (above the function) and short-circuit before Gate 2:
+In `src/core/ingestion/personal-tag-classifier.ts`, add the guardrail constants (above the function) and short-circuit before Gate 2:
 
 ```ts
 // Gate 1 — guardrail (veto, overrides any positive signal). Conflict wins.
@@ -232,7 +232,7 @@ Expected: PASS (all positive, fail-closed, and guardrail cases).
 
 **Files:**
 - Modify: `tests/core/personal-tag-classifier.test.ts` (append edge-case describe)
-- Modify: `src/core/personal-tag-classifier.ts` (add Gate 0)
+- Modify: `src/core/ingestion/personal-tag-classifier.ts` (add Gate 0)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -274,7 +274,7 @@ Expected: most pass already (the `个人 OKR`, `personal contribution`, `mixed` 
 
 - [ ] **Step 3: Add Gate 0 (routing markers) to the implementation**
 
-Update `classifyPersonalTag` in `src/core/personal-tag-classifier.ts` to consult `tags` first:
+Update `classifyPersonalTag` in `src/core/ingestion/personal-tag-classifier.ts` to consult `tags` first:
 
 ```ts
 const ROUTING_MARKERS = new Set(["agent_profile", "action_loop", "no_store"]);
@@ -314,7 +314,7 @@ Expected: PASS (full classifier matrix).
 This task satisfies the explicit reminder: **effectiveTags must cover both the `ingestEntityAppend` and `ingestCore` text branches.**
 
 **Files:**
-- Modify: `src/core/ingest.ts` (import + `ingestText` injection)
+- Modify: `src/core/ingestion/ingest.ts` (import + `ingestText` injection)
 - Modify: `tests/core/ingest.test.ts` (new describe block)
 
 - [ ] **Step 1: Write the failing tests**
@@ -406,7 +406,7 @@ Expected: FAIL — no `personal` tag is ever written (classifier not wired into 
 
 - [ ] **Step 3: Wire the classifier into `ingestText`**
 
-In `src/core/ingest.ts`:
+In `src/core/ingestion/ingest.ts`:
 
 (a) Add the import at the top (next to the existing `content-classifier.js` import, line ~14):
 
@@ -471,7 +471,7 @@ Expected: PASS (including the new `personal tag (#236)` block).
 ## Task 5: Integrate into `ingestMarkdown` (frontmatter precedence + idempotent union)
 
 **Files:**
-- Modify: `src/core/ingest.ts` (`ingestMarkdown` injection, line ~219)
+- Modify: `src/core/ingestion/ingest.ts` (`ingestMarkdown` injection, line ~219)
 - Modify: `tests/core/ingest.test.ts` (markdown cases in the `personal tag (#236)` block)
 
 - [ ] **Step 1: Write the failing tests**
@@ -539,7 +539,7 @@ Expected: FAIL on the markdown personal case (no `personal` written for markdown
 
 - [ ] **Step 3: Wire the classifier into `ingestMarkdown`**
 
-In `src/core/ingest.ts`, locate `ingestMarkdown` (line ~219):
+In `src/core/ingestion/ingest.ts`, locate `ingestMarkdown` (line ~219):
 
 ```ts
     const body = parsed.body;
@@ -691,7 +691,7 @@ Expected: PASS (lint + full `bun test`). If a pre-existing unrelated test fails,
 
 - [ ] **Step 3: Verify DialogueIngest is untouched**
 
-Run: `git diff main -- src/core/dialogue.ts`
+Run: `git diff main -- src/core/ingestion/dialogue.ts`
 Expected: empty (no diff). `tests/core/dialogue.test.ts` likewise untouched.
 
 - [ ] **Step 4: Privacy scan of the diff**
@@ -702,9 +702,9 @@ Expected: no real names, companies, products, paths, emails, or private content 
 - [ ] **Step 5: Single independent commit**
 
 ```bash
-git add src/core/personal-tag-classifier.ts \
+git add src/core/ingestion/personal-tag-classifier.ts \
         tests/core/personal-tag-classifier.test.ts \
-        src/core/ingest.ts \
+        src/core/ingestion/ingest.ts \
         tests/core/ingest.test.ts \
         tests/mcp/ingest-classify.test.ts
 git commit -m "feat(ingest): #236 deterministic personal-tag classifier on write path" -m "Pure 3-gate classifier (routing-marker -> guardrail -> positive, fail closed; no LLM/DB/IO) merged into ingestText + ingestMarkdown effective tags via set union. Covers ingestEntityAppend + ingestCore; duplicate/no-op has no tag side effect. DialogueIngest untouched. Anonymous fixtures only." -m "Co-Authored-By: Claude <noreply@anthropic.com>"

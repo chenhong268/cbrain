@@ -17,7 +17,7 @@ ENOENT: no such file or directory, open '/$bunfs/root/ontology.yaml'
 
 ## Root Cause（复现审计）
 
-**触发链**：`src/core/ner.ts:54 export const FACT_FIELD_WHITELIST = getFactFieldWhitelist()` 在**模块顶层 eager 求值** → `getOntology()`（loader.ts:165 singleton）→ `new OntologyLoader()`（loader.ts:21）→ `parse(readFileSync(ontology.yaml))`（loader.ts:23）。
+**触发链**：`src/core/ingestion/ner.ts:54 export const FACT_FIELD_WHITELIST = getFactFieldWhitelist()` 在**模块顶层 eager 求值** → `getOntology()`（loader.ts:165 singleton）→ `new OntologyLoader()`（loader.ts:21）→ `parse(readFileSync(ontology.yaml))`（loader.ts:23）。
 
 - `OntologyLoader` 构造 `readFileSync(join(__dirname, "ontology.yaml"))`：source/npm 模式 ontology.yaml 在位（成功）；compiled 模式 `__dirname` 是 `/$bunfs/root`，ontology.yaml 不在 → ENOENT throw（**含绝对路径**）。
 - **触发面**：任何 CLI 启动。`buildProgram()` import 所有命令模块 → `mcp/context.ts:10` / `dialogue` / `ingest` 等都 import `ner.ts` → 顶层 `FACT_FIELD_WHITELIST` 执行 → ontology 加载。`--version`/`--help` 被 commander 处理前就崩。
@@ -28,15 +28,15 @@ ENOENT: no such file or directory, open '/$bunfs/root/ontology.yaml'
 
 **lazy-load + sanitized diagnostic**。不是 #211 version fallback 的延伸——ontology 缺失**不静默吞、不回退空**，要明确报错。
 
-### 1. `src/core/ner.ts` — lazy `FACT_FIELD_WHITELIST`（方案 A1）
+### 1. `src/core/ingestion/ner.ts` — lazy `FACT_FIELD_WHITELIST`（方案 A1）
 
 - 删 `export const FACT_FIELD_WHITELIST = getFactFieldWhitelist()`（顶层 eager，根因）。
 - `getFactFieldWhitelist()` 改 **memoized lazy**（首次调用才 load ontology，缓存结果）。
 - 4 调用方改 function 调用：
-  - `src/core/dialogue.ts:286` `FACT_FIELD_WHITELIST[et]` → `getFactFieldWhitelist()[et]`（import 改 `getFactFieldWhitelist`）
-  - `src/core/ingest.ts:340` 同
-  - `src/core/structured-facts.ts:25` 同
-  - `src/core/structured-facts-backfill.ts:114` 同
+  - `src/core/ingestion/dialogue.ts:286` `FACT_FIELD_WHITELIST[et]` → `getFactFieldWhitelist()[et]`（import 改 `getFactFieldWhitelist`）
+  - `src/core/ingestion/ingest.ts:340` 同
+  - `src/core/ingestion/structured-facts.ts:25` 同
+  - `src/core/ingestion/structured-facts-backfill.ts:114` 同
 - 效果：import ner.ts 不再触发 ontology；`--version`/`--help` 不崩。
 
 ### 2. `src/ontology/loader.ts` — `OntologyLoader` sanitized error

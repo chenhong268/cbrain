@@ -25,8 +25,8 @@ This is a **governance / cleanup lane**, not a daily knowledge-insight lane. Tha
 
 Three layers, each independently testable:
 
-1. **`src/core/name-similarity.ts`** — pure shared helpers extracted from `entity-resolver.ts` plus new primitives. No DB, no LLM, no I/O.
-2. **`src/core/similar-entity-detector.ts`** — pure detector: takes the page universe + alias map + link degrees, returns `DetectionResult[]` with `type: "similar_entity"`. No DB writes, no LLM.
+1. **`src/core/ingestion/name-similarity.ts`** — pure shared helpers extracted from `entity-resolver.ts` plus new primitives. No DB, no LLM, no I/O.
+2. **`src/core/ingestion/similar-entity-detector.ts`** — pure detector: takes the page universe + alias map + link degrees, returns `DetectionResult[]` with `type: "similar_entity"`. No DB writes, no LLM.
 3. **`DiscoveryManager`** — gains a **structurally separate** method `runSimilarEntityDetection()` that fetches pages/aliases/adjacency from DB, calls the detector, and feeds results through the **existing** dedup → `upsertDiscovery` loop. This method is **never called by `runDiscovery()`**.
 
 Why structural separation (not a flag): the CLI `cbrain discover` calls `runDiscovery()` with no args, and `runDiscovery(undefined)` currently means "run all types". To guarantee `similar_entity` can never leak through that path, it lives behind a different method, invoked only by explicit opt-in callers.
@@ -230,17 +230,17 @@ This makes "default excludes" and "opt-in routes to the dedicated method" both t
 ## File structure
 
 **New:**
-- `src/core/name-similarity.ts`
-- `src/core/similar-entity-detector.ts`
+- `src/core/ingestion/name-similarity.ts`
+- `src/core/ingestion/similar-entity-detector.ts`
 - `tests/core/name-similarity.test.ts`
 - `tests/core/similar-entity-detector.test.ts`
 - `tests/mcp/find-similar-entities.test.ts`
 - `tests/cli/similar-entities.test.ts`
 
 **Modified (behavior-preserving edits where noted):**
-- `src/core/entity-resolver.ts` — delete local `normalizeForComparison` / `isSignificantSubstring`, import from `name-similarity.ts`. **Behavior unchanged.** Existing suite stays green.
-- `src/core/discovery.ts` — add `"similar_entity"` to `DiscoveryType`; add `runSimilarEntityDetection()`. Do **not** touch `runDiscovery`'s switch.
-- `src/core/discovery-digest.ts` — add `similar_entity` case to `formatDigestCard`; ensure `shouldFilterDiscovery` / digest feed excludes it from the default path (§10).
+- `src/core/ingestion/entity-resolver.ts` — delete local `normalizeForComparison` / `isSignificantSubstring`, import from `name-similarity.ts`. **Behavior unchanged.** Existing suite stays green.
+- `src/core/maintenance/discovery.ts` — add `"similar_entity"` to `DiscoveryType`; add `runSimilarEntityDetection()`. Do **not** touch `runDiscovery`'s switch.
+- `src/core/maintenance/discovery-digest.ts` — add `similar_entity` case to `formatDigestCard`; ensure `shouldFilterDiscovery` / digest feed excludes it from the default path (§10).
 - `src/mcp/tools/discoveries.ts` — add `"similar_entity"` to the `typeFilter` enum (read side only); register `find_similar_entities`; route `run_discovery({types:[similar_entity]})`.
 - `src/cli/commands/maintenance.ts` — add `similar-entities` command.
 

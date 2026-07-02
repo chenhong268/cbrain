@@ -78,7 +78,7 @@
 - grounded 模式返回 `confidence`（high/medium/low）+ `facts[]` + `conflicts[]` + `gaps[]`
 - 未 grounded 时，返回结构仍包含 `search_meta`（策略、延迟、是否降级）
 
-**实现位置**: `src/core/grounded-answer.ts` → `GroundedRecallResult`, `src/core/evidence.ts`
+**实现位置**: `src/core/retrieval/grounded-answer.ts` → `GroundedRecallResult`, `src/core/retrieval/evidence.ts`
 
 **测试**: 断言 `GroundedRecallResult` 必须包含 confidence + facts + conflicts + gaps 字段。
 
@@ -96,7 +96,7 @@
 - `MIN_SCORE` = 0.5（低于此分数的 hint 不返回）
 - 生成失败不阻塞主响应（try-catch 返回 `[]`）
 
-**实现位置**: `src/core/proactive.ts` → `generateProactiveHints`, `src/mcp/tools/recall.ts` 硬规则
+**实现位置**: `src/core/retrieval/proactive.ts` → `generateProactiveHints`, `src/mcp/tools/recall.ts` 硬规则
 
 **测试**: 断言 `trimHint` 输出 text ≤ 123（含截断省略号）。断言 search.ts / recall.ts 不得包含强制展示文案。断言 `MIN_SCORE` 常量值。
 
@@ -130,7 +130,7 @@
 - pipeline 状态枚举：`"ok" | "partial" | "degraded" | "insufficient"`
 - 错误隔离模式：`try { ... } catch { /* non-critical */ }` 至少 25 处
 
-**实现位置**: `src/core/search.ts` SearchTrace, `src/core/agentic/pipeline.ts` PipelineStatus
+**实现位置**: `src/core/retrieval/search.ts` SearchTrace, `src/core/agentic/pipeline.ts` PipelineStatus
 
 **测试**: 断言 `PipelineStatus` 是 `"ok" | "partial" | "degraded" | "insufficient"` 联合类型。断言 search trace 有 `degraded_reason` 字段。
 

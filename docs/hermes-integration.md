@@ -87,7 +87,7 @@ cbrain mcp-config --http
 
 ### `ingest` 为什么留在 `agent`
 
-`ingest` 是日常捕获的主入口，砍了 Agent 只能用 `put_page`（跳过 NER → 不铸实体 → 记忆质量降级）。它的同步 NER 延迟有上界：内容上限 500k、NER 有 per-call timeout + fail-open（见 `src/core/ner.ts` 的 `NER_DEFAULT_TIMEOUT_MS`），病理性的大块 dump 由上面的 bounded client timeout 兜住（快速失败，不毒化）。大块内容捕获建议传 `nerMode: "defer"`，NER 转后台 job，调用立即返回，彻底避开同步 NER 的延迟。
+`ingest` 是日常捕获的主入口，砍了 Agent 只能用 `put_page`（跳过 NER → 不铸实体 → 记忆质量降级）。它的同步 NER 延迟有上界：内容上限 500k、NER 有 per-call timeout + fail-open（见 `src/core/ingestion/ner.ts` 的 `NER_DEFAULT_TIMEOUT_MS`），病理性的大块 dump 由上面的 bounded client timeout 兜住（快速失败，不毒化）。大块内容捕获建议传 `nerMode: "defer"`，NER 转后台 job，调用立即返回，彻底避开同步 NER 的延迟。
 
 ## 排障
 

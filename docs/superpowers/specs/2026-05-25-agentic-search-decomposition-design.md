@@ -107,7 +107,7 @@ Constraints:
 
 ## Code Changes
 
-### Modified: `src/core/search.ts`
+### Modified: `src/core/retrieval/search.ts`
 
 New functions:
 - `isComplexQuery(query: string, knownSlugs: string[]): boolean`
@@ -124,11 +124,11 @@ New interface:
 
 - `src/mcp/tools/recall.ts` — 透明受益
 - `src/mcp/tools/search.ts` — 透明受益
-- `src/core/graph.ts` — 只调现有 API
+- `src/core/graph/graph.ts` — 只调现有 API
 - `src/llm/` — 只调现有 `chat()` 接口
 - `src/storage/sqlite.ts` — 无新表/新查询
 
-### New: `src/core/search.decompose.test.ts`
+### New: `src/core/retrieval/search.decompose.test.ts`
 
 Coverage:
 - `isComplexQuery`: simple/complex/edge cases

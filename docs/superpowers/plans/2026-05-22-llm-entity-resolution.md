@@ -14,10 +14,10 @@
 
 | File | Action | Responsibility |
 |------|--------|----------------|
-| `src/core/entity-resolver.ts` | Modify | Add `llm` to constructor, add `semanticResolve()` method, add `buildSemanticPrompt()` helper |
+| `src/core/ingestion/entity-resolver.ts` | Modify | Add `llm` to constructor, add `semanticResolve()` method, add `buildSemanticPrompt()` helper |
 | `tests/core/entity-resolver.test.ts` | Modify | Add tests for semantic resolution with mock LLM |
-| `src/core/pipeline.ts` | Modify | Pass `nerEngine.llm` to EntityResolver, call `semanticResolve` after `resolveAll` |
-| `src/core/dialogue.ts` | Modify | Pass `llm` to EntityResolver, call `semanticResolve` after `resolveAll` |
+| `src/core/ingestion/pipeline.ts` | Modify | Pass `nerEngine.llm` to EntityResolver, call `semanticResolve` after `resolveAll` |
+| `src/core/ingestion/dialogue.ts` | Modify | Pass `llm` to EntityResolver, call `semanticResolve` after `resolveAll` |
 
 ---
 
@@ -147,11 +147,11 @@ Expected: FAIL — `semanticResolve` does not exist on `EntityResolver`
 ### Task 2: Implement — semanticResolve method
 
 **Files:**
-- Modify: `src/core/entity-resolver.ts`
+- Modify: `src/core/ingestion/entity-resolver.ts`
 
 - [ ] **Step 1: Add LLMProvider import and constructor parameter**
 
-In `src/core/entity-resolver.ts`, add import at top:
+In `src/core/ingestion/entity-resolver.ts`, add import at top:
 
 ```typescript
 import type { LLMProvider } from "../llm/provider.js";
@@ -291,11 +291,11 @@ Expected: ALL PASS
 ### Task 3: Wire into pipeline.ts
 
 **Files:**
-- Modify: `src/core/pipeline.ts`
+- Modify: `src/core/ingestion/pipeline.ts`
 
 - [ ] **Step 1: Extract LLM from nerEngine and pass to EntityResolver**
 
-In `src/core/pipeline.ts`, change the `applyExtraction` method. Find the line:
+In `src/core/ingestion/pipeline.ts`, change the `applyExtraction` method. Find the line:
 
 ```typescript
     const resolver = new EntityResolver(this.db);
@@ -325,7 +325,7 @@ The `llm` is private. We have two options:
 
 Option 1 is cleaner. Let me add a getter.
 
-**In `src/core/ner.ts`**, add a getter after the constructor:
+**In `src/core/ingestion/ner.ts`**, add a getter after the constructor:
 
 ```typescript
 export class NerEngine {
@@ -340,7 +340,7 @@ export class NerEngine {
   }
 ```
 
-**In `src/core/pipeline.ts`**, change `applyExtraction`:
+**In `src/core/ingestion/pipeline.ts`**, change `applyExtraction`:
 
 Find:
 ```typescript
@@ -408,11 +408,11 @@ Expected: ALL PASS
 ### Task 4: Wire into dialogue.ts
 
 **Files:**
-- Modify: `src/core/dialogue.ts`
+- Modify: `src/core/ingestion/dialogue.ts`
 
 - [ ] **Step 1: Pass LLM to EntityResolver and call semanticResolve**
 
-In `src/core/dialogue.ts`, the `DialogueManager` constructor receives `llm: LLMProvider`. Find:
+In `src/core/ingestion/dialogue.ts`, the `DialogueManager` constructor receives `llm: LLMProvider`. Find:
 
 ```typescript
     // Step 2: Resolve kept entities through EntityResolver
@@ -444,7 +444,7 @@ Expected: ALL PASS
 
 ```bash
 cd /Users/chenhong/Projects/cbrain
-git add src/core/entity-resolver.ts src/core/ner.ts src/core/pipeline.ts src/core/dialogue.ts tests/core/entity-resolver.test.ts
+git add src/core/ingestion/entity-resolver.ts src/core/ingestion/ner.ts src/core/ingestion/pipeline.ts src/core/ingestion/dialogue.ts tests/core/entity-resolver.test.ts
 git commit -m "feat: add LLM semantic entity resolution for Chinese abbreviations
 
 EntityResolver gains an async semanticResolve() layer that uses LLM

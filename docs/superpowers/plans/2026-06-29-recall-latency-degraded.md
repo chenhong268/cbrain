@@ -20,8 +20,8 @@
 
 | File | Action | Responsibility |
 |---|---|---|
-| `src/core/search-diagnostics.ts` | Modify | `computeSearchDegraded` drops latency-only; new `WARNING_REASON_CODES` + `computeLatencyWarning`; `DEGRADED_REASON_CODES` drops `latency_budget_exceeded` + `fts_parser_fallback`. |
-| `src/core/search.ts` | Modify | `searchCore` smart path runs a bounded FTS probe + gates `expandQuery`; `searchWithExpansion` accepts `initialFts` (no double-query); `expandQuery` gets timeout + call-count guard. |
+| `src/core/retrieval/search-diagnostics.ts` | Modify | `computeSearchDegraded` drops latency-only; new `WARNING_REASON_CODES` + `computeLatencyWarning`; `DEGRADED_REASON_CODES` drops `latency_budget_exceeded` + `fts_parser_fallback`. |
+| `src/core/retrieval/search.ts` | Modify | `searchCore` smart path runs a bounded FTS probe + gates `expandQuery`; `searchWithExpansion` accepts `initialFts` (no double-query); `expandQuery` gets timeout + call-count guard. |
 | `src/mcp/tools/recall.ts` | Modify | `diagnosticMeta` carries `latency_warning`; passes reason codes to `computeSearchDegraded`. |
 | `src/mcp/tools/search.ts` | Modify | Same `latency_warning` plumbing as recall.ts. |
 | `src/release/perf-diagnose.ts` | Modify | `summary.latency_warning_rate`; `by_latency_warning_reason`; `by_degraded_reason` excludes `latency_budget_exceeded`. |
@@ -36,7 +36,7 @@
 ## Task 1: latency-only split in search-diagnostics
 
 **Files:**
-- Modify: `src/core/search-diagnostics.ts:149-193`
+- Modify: `src/core/retrieval/search-diagnostics.ts:149-193`
 - Test: `tests/core/search-diagnostics.test.ts`
 
 - [ ] **Step 1: Write the failing tests**
@@ -44,7 +44,7 @@
 Append to `tests/core/search-diagnostics.test.ts`:
 
 ```ts
-import { computeLatencyWarning, WARNING_REASON_CODES } from "../../src/core/search-diagnostics.js";
+import { computeLatencyWarning, WARNING_REASON_CODES } from "../../src/core/retrieval/search-diagnostics.js";
 
 describe("latency-only split (#250)", () => {
   test("latency-only slow → NOT degraded (quality is fine)", () => {
@@ -129,7 +129,7 @@ Expected: FAIL — `computeLatencyWarning` not exported; latency-only still degr
 
 - [ ] **Step 3: Write minimal implementation**
 
-Edit `src/core/search-diagnostics.ts`:
+Edit `src/core/retrieval/search-diagnostics.ts`:
 
 (a) Add `WARNING_REASON_CODES` and `computeLatencyWarning` after `DEGRADED_REASON_CODES` (line 181) and **remove `latency_budget_exceeded` + `fts_parser_fallback` from `DEGRADED_REASON_CODES`**:
 
@@ -192,7 +192,7 @@ Expected: PASS (existing latency tests now reflect new semantics; new warning te
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/search-diagnostics.ts tests/core/search-diagnostics.test.ts
+git add src/core/retrieval/search-diagnostics.ts tests/core/search-diagnostics.test.ts
 git commit -m "fix(search): latency-only and parser_fallback no longer force degraded (#250)"
 ```
 
@@ -295,7 +295,7 @@ Expected: FAIL — `latency_warning` not present in `search_meta`.
 In `src/mcp/tools/recall.ts`, import `computeLatencyWarning` and add it to `diagnosticMeta` (around line 205-213). The `diagnosticMeta` object currently builds `reason_codes` etc; add:
 
 ```ts
-import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning } from "../../core/search-diagnostics.js";
+import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning } from "../../core/retrieval/search-diagnostics.js";
 ```
 
 Then in the `diagnosticMeta` const:
@@ -334,7 +334,7 @@ git commit -m "feat(recall): surface latency_warning in raw search_meta (#250)"
 ## Task 3: expandQuery gate + FTS probe reuse
 
 **Files:**
-- Modify: `src/core/search.ts` (`searchCore` ~line 477, `searchWithExpansion` ~521, `searchSingleQuery` ~480)
+- Modify: `src/core/retrieval/search.ts` (`searchCore` ~line 477, `searchWithExpansion` ~521, `searchSingleQuery` ~480)
 - Test: `tests/core/search-latency-gate.test.ts`
 
 - [ ] **Step 1: Write the failing test**
@@ -346,7 +346,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { HybridSearch } from "../../src/core/search.js";
+import { HybridSearch } from "../../src/core/retrieval/search.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 function mockEmbed(): EmbeddingProvider {
@@ -432,7 +432,7 @@ Expected: FAIL — first test throws (expandQuery IS called today because `multi
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/core/search.ts`:
+In `src/core/retrieval/search.ts`:
 
 (a) Add an FTS-sufficiency constant near the #222 guards (line 320):
 
@@ -562,7 +562,7 @@ Expected: PASS — simple+FTS>=3 skips expandQuery; simple+empty calls it; compl
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/search.ts tests/core/search-latency-gate.test.ts
+git add src/core/retrieval/search.ts tests/core/search-latency-gate.test.ts
 git commit -m "feat(search): gate expandQuery behind isComplexQuery||FTS<3, reuse FTS probe (#250)"
 ```
 
@@ -571,7 +571,7 @@ git commit -m "feat(search): gate expandQuery behind isComplexQuery||FTS<3, reus
 ## Task 4: expandQuery budget guard (timeout + call-count)
 
 **Files:**
-- Modify: `src/core/search.ts` (`searchWithExpansion` expand path)
+- Modify: `src/core/retrieval/search.ts` (`searchWithExpansion` expand path)
 - Test: `tests/core/search-latency-gate.test.ts` (append)
 
 - [ ] **Step 1: Write the failing test**
@@ -654,7 +654,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/search.ts tests/core/search-latency-gate.test.ts
+git add src/core/retrieval/search.ts tests/core/search-latency-gate.test.ts
 git commit -m "feat(search): expandQuery budget guard (timeout + call-count, non-cancellable) (#250)"
 ```
 
@@ -725,7 +725,7 @@ In `src/release/perf-diagnose.ts`:
 (a) Import `WARNING_REASON_CODES` and add `latency_warning_rate` to `summary` (around line 240-249):
 
 ```ts
-import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCode } from "../core/search-diagnostics.js";
+import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCode } from "../core/retrieval/search-diagnostics.js";
 ```
 
 ```ts

@@ -85,9 +85,9 @@ Add high-frequency garbage terms that slipped through:
 
 | File | Change |
 |------|--------|
-| `src/core/ner.ts` | Suffix regex in `classifyEntity`, `filterEntities` returns `FilterResult`, `ExtractionResult` gains `filtered` field |
-| `src/core/entity-resolver.ts` | Layer 2c substring dedup in `resolveSingle` |
-| `src/core/pipeline.ts` | `applyExtraction` propagates filter info, `NerPipelineResult` gains `filtered` field |
+| `src/core/ingestion/ner.ts` | Suffix regex in `classifyEntity`, `filterEntities` returns `FilterResult`, `ExtractionResult` gains `filtered` field |
+| `src/core/ingestion/entity-resolver.ts` | Layer 2c substring dedup in `resolveSingle` |
+| `src/core/ingestion/pipeline.ts` | `applyExtraction` propagates filter info, `NerPipelineResult` gains `filtered` field |
 | `src/mcp/tools/ingest.ts` | Return value includes `ner.filtered` |
 
 ## What This Does NOT Do

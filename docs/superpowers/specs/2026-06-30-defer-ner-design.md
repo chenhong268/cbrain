@@ -10,14 +10,14 @@
 ## 1. Background & Problem
 
 CBrain runs LLM-backed NER **synchronously** inside the ingest write path. The
-call sequence in `IngestManager.ingestCore()` (`src/core/ingest.ts:360-486`) is:
+call sequence in `IngestManager.ingestCore()` (`src/core/ingestion/ingest.ts:360-486`) is:
 
 ```
 validate → embed → page create/update → chunks/FTS/vectors (ContentPipeline)
          → wikilinks/links → [BLOCKING] pipeline.processNer() → applyExtraction
 ```
 
-`pipeline.processNer()` (`src/core/pipeline.ts:252-270`) `await`s
+`pipeline.processNer()` (`src/core/ingestion/pipeline.ts:252-270`) `await`s
 `NerEngine.extract()`. Recent fixes (#229) added a 60s timeout + fail-open, so a
 slow/hung LLM no longer hard-fails ingest. But the write path **still pays NER
 latency and API cost synchronously** on every capture.
@@ -172,7 +172,7 @@ in all modes — derived page types never NER and never get a marker.
 
 ### 5.3 `DeferredNerSubmitter` injection
 
-- Define `DeferredNerSubmitter` (above) in `src/core/ingest.ts` (or a small
+- Define `DeferredNerSubmitter` (above) in `src/core/ingestion/ingest.ts` (or a small
   adjacent types file) — keep `ingest.ts` focused.
 - `IngestManager` constructor gains two params: the resolved default `nerMode`
   and a `deferredNerSubmitter?`.
@@ -211,7 +211,7 @@ in all modes — derived page types never NER and never get a marker.
 
 ### 5.5 Dream stage 1.5 processor
 
-New stage in `runDream()` (`src/core/dream.ts`), placed after Stage 1 (sync)
+New stage in `runDream()` (`src/core/maintenance/dream.ts`), placed after Stage 1 (sync)
 and before Stage 2 (enrich). Two review-driven invariants shape the loop:
 
 - **HIGH 1 — stale `running` recovery.** If Dream crashes mid-job, the
@@ -404,18 +404,18 @@ why full check was deferred.
 | What | File | Anchor |
 |:---|:---|:---|
 | Config field + env override | `src/cli/context.ts` | `CBrainConfig.ner`, `createDeps` |
-| NER gate (sync/defer/off) | `src/core/ingest.ts` | `ingestCore:428-437`, `ingestEntityAppend:288-297` |
-| `IngestInput.nerMode` + constructor | `src/core/ingest.ts` | `:81-128` |
-| `DeferredNerSubmitter` + adapter | `src/core/ingest.ts` / `src/mcp/context.ts` | new |
+| NER gate (sync/defer/off) | `src/core/ingestion/ingest.ts` | `ingestCore:428-437`, `ingestEntityAppend:288-297` |
+| `IngestInput.nerMode` + constructor | `src/core/ingestion/ingest.ts` | `:81-128` |
+| `DeferredNerSubmitter` + adapter | `src/core/ingestion/ingest.ts` / `src/mcp/context.ts` | new |
 | Dedup query | `src/storage/sqlite.ts` | new `findPendingJobsBySlug` (json_extract) |
 | submit / claim / complete / fail | `src/storage/sqlite.ts` | `:1245-1313` (exist) |
-| Dream stage 1.5 | `src/core/dream.ts` | after `:206`, before `:209` |
-| `resolveNerBody` fallback | `src/core/dream.ts` or `ner-backfill.ts` | new; uses `:2087`, `:952`, `:2162` |
-| `DreamReport.stages.ner_backfill` | `src/core/dream.ts` | `:30-52`, `:93-115`, `:363-385`, `buildBrief`, `:397-412` |
+| Dream stage 1.5 | `src/core/maintenance/dream.ts` | after `:206`, before `:209` |
+| `resolveNerBody` fallback | `src/core/maintenance/dream.ts` or `ner-backfill.ts` | new; uses `:2087`, `:952`, `:2162` |
+| `DreamReport.stages.ner_backfill` | `src/core/maintenance/dream.ts` | `:30-52`, `:93-115`, `:363-385`, `buildBrief`, `:397-412` |
 | MCP ingest option | `src/mcp/tools/ingest.ts` | `:31-39` |
 | CLI flag + submitter wiring | `src/cli/commands/content.ts` | `:16-37` |
 | Submitter wiring | `src/mcp/context.ts` | `:78`, `:81` |
-| `IngestResult.nerPending` field | `src/core/ingest.ts` | `IngestResult` (`:93`) |
+| `IngestResult.nerPending` field | `src/core/ingestion/ingest.ts` | `IngestResult` (`:93`) |
 | Stale / snapshot / by-id job helpers | `src/storage/sqlite.ts` | job section (after `:1277`) |
 | Formatter | `src/mcp/tools/format-result.ts` | **no change** (`:78` gates on `ner != null`) |
 

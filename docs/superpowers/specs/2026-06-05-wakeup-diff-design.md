@@ -113,7 +113,7 @@ interface WakeupDiff {
 ### 文件组织
 
 ```
-src/core/wakeup.ts          — WakeupDiff 类：snapshot + diff + report
+src/core/maintenance/wakeup.ts          — WakeupDiff 类：snapshot + diff + report
 src/mcp/tools/wakeup.ts     — MCP tool: wakeup_diff
 src/cli/                    — CLI 命令注册（复用 WakeupDiff）
 tests/core/wakeup.test.ts   — 单元测试
@@ -122,7 +122,7 @@ tests/mcp/wakeup.test.ts    — MCP tool 测试
 
 ### 与现有系统的集成
 
-1. **Dream pipeline**（`src/core/dream.ts`）: 加 Stage 7.5 调 `WakeupDiff.run()`
+1. **Dream pipeline**（`src/core/maintenance/dream.ts`）: 加 Stage 7.5 调 `WakeupDiff.run()`
 2. **Dream brief**（`buildBrief()`）: 加一行 "Wake-up diff generated"
 3. **MCP register**（`src/mcp/register.ts`）: 注册 wakeup tool
 4. **Server tool list**（`tests/mcp/server.test.ts`）: 加 `wakeup_diff`

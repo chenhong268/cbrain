@@ -52,12 +52,12 @@
 
 ### Task 4: Hybrid Search + FTS
 
-- [ ] Create src/core/search.ts — HybridSearch class
+- [ ] Create src/core/retrieval/search.ts — HybridSearch class
   - vector_search: LanceDB ANN
   - fts_search: SQLite FTS5 trigram (Chinese-compatible)
   - graph_search: SQLite link traversal
   - RRF fusion: score = Σ(1/(60 + rank)) across all results
-- [ ] Create src/core/sync.ts — sync vault files → SQLite + LanceDB indexes
+- [ ] Create src/core/maintenance/sync.ts — sync vault files → SQLite + LanceDB indexes
 - [ ] Tests: search with seeded data, RRF ranking
 - [ ] Commit
 
@@ -67,7 +67,7 @@
 
 ### Task 5: Ingest Pipeline
 
-- [ ] Create src/core/ingest.ts — IngestManager
+- [ ] Create src/core/ingestion/ingest.ts — IngestManager
   - route by content type (markdown, url, text)
   - create page → write to vault → index to SQLite/LanceDB
   - extract entities → create/update entity pages
@@ -77,7 +77,7 @@
 
 ### Task 6: Knowledge Graph
 
-- [ ] Create src/core/graph.ts — GraphManager
+- [ ] Create src/core/graph/graph.ts — GraphManager
   - add/remove/query relationships (SQLite links table)
   - graph traversal (BFS/DFS from entity, depth N)
   - backlink auto-completion
@@ -87,7 +87,7 @@
 
 ### Task 7: Entity Enrichment
 
-- [ ] Create src/core/enrich.ts — EnrichManager
+- [ ] Create src/core/maintenance/enrich.ts — EnrichManager
   - tier tracking (mention count → tier 3/2/1)
   - auto-upgrade entity pages on threshold cross
   - tier 1: full profile with timeline + relationship network

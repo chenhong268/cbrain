@@ -14,9 +14,9 @@
 
 | File | Responsibility |
 |------|----------------|
-| `src/core/ner.ts` | NER extraction, classifyEntity blacklist, filterEntities |
-| `src/core/entity-resolver.ts` | Multi-layer entity resolution including new substring dedup |
-| `src/core/pipeline.ts` | NER pipeline orchestration, NerPipelineResult type |
+| `src/core/ingestion/ner.ts` | NER extraction, classifyEntity blacklist, filterEntities |
+| `src/core/ingestion/entity-resolver.ts` | Multi-layer entity resolution including new substring dedup |
+| `src/core/ingestion/pipeline.ts` | NER pipeline orchestration, NerPipelineResult type |
 | `src/storage/sqlite.ts` | DB access layer — new `getAllEntityTitles()` method |
 | `src/mcp/tools/ingest.ts` | MCP tool return value — no code change, existing JSON.stringify covers it |
 | `tests/core/ner-parallel.test.ts` | NER filtering tests |
@@ -27,7 +27,7 @@
 ### Task 1: Add suffix pattern filter to classifyEntity
 
 **Files:**
-- Modify: `src/core/ner.ts:91-109`
+- Modify: `src/core/ingestion/ner.ts:91-109`
 - Test: `tests/core/ner-parallel.test.ts`
 
 - [ ] **Step 1: Write the failing test**
@@ -77,7 +77,7 @@ Expected: FAIL — "数字化转型" and "商业模式" are not being filtered
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/core/ner.ts`, add the suffix pattern to `classifyEntity` after the `STRUCTURAL_TERMS` check (line 100), before Layer 2:
+In `src/core/ingestion/ner.ts`, add the suffix pattern to `classifyEntity` after the `STRUCTURAL_TERMS` check (line 100), before Layer 2:
 
 ```ts
   // Suffix pattern filter: generic compound words (XX化, XX模式, etc.)
@@ -93,7 +93,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/ner.ts tests/core/ner-parallel.test.ts
+git add src/core/ingestion/ner.ts tests/core/ner-parallel.test.ts
 git commit -m "feat(ner): add suffix pattern filter for generic compound words (XX化/XX模式/XX战略)"
 ```
 
@@ -102,7 +102,7 @@ git commit -m "feat(ner): add suffix pattern filter for generic compound words (
 ### Task 2: Expand GENERIC_TERMS with high-frequency garbage
 
 **Files:**
-- Modify: `src/core/ner.ts:54-72` (GENERIC_TERMS set)
+- Modify: `src/core/ingestion/ner.ts:54-72` (GENERIC_TERMS set)
 - Test: `tests/core/ner-parallel.test.ts`
 
 - [ ] **Step 1: Write the failing test**
@@ -128,7 +128,7 @@ Expected: FAIL
 
 - [ ] **Step 3: Add terms to GENERIC_TERMS**
 
-In `src/core/ner.ts`, add to the `GENERIC_TERMS` set (after "人工智能", "企业"):
+In `src/core/ingestion/ner.ts`, add to the `GENERIC_TERMS` set (after "人工智能", "企业"):
 
 ```ts
   // Overly broad tech terms
@@ -145,7 +145,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/ner.ts tests/core/ner-parallel.test.ts
+git add src/core/ingestion/ner.ts tests/core/ner-parallel.test.ts
 git commit -m "feat(ner): expand GENERIC_TERMS with AI and digital transformation garbage"
 ```
 
@@ -154,7 +154,7 @@ git commit -m "feat(ner): expand GENERIC_TERMS with AI and digital transformatio
 ### Task 3: Change filterEntities to return FilterResult with filtered list
 
 **Files:**
-- Modify: `src/core/ner.ts:30-36` (new type), `src/core/ner.ts:114-134` (filterEntities)
+- Modify: `src/core/ingestion/ner.ts:30-36` (new type), `src/core/ingestion/ner.ts:114-134` (filterEntities)
 - Test: `tests/core/ner-parallel.test.ts`
 
 - [ ] **Step 1: Write the failing test**
@@ -184,7 +184,7 @@ Expected: FAIL — `result.filtered` does not exist
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/core/ner.ts`, add the new type after `ExtractionResult`:
+In `src/core/ingestion/ner.ts`, add the new type after `ExtractionResult`:
 
 ```ts
 export interface FilteredEntity {
@@ -334,7 +334,7 @@ Expected: ALL PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/ner.ts tests/core/ner-parallel.test.ts
+git add src/core/ingestion/ner.ts tests/core/ner-parallel.test.ts
 git commit -m "feat(ner): filterEntities returns FilterResult with filtered entities and reasons"
 ```
 
@@ -400,7 +400,7 @@ git commit -m "feat(db): add getAllEntityTitles for substring dedup lookups"
 ### Task 5: Add Layer 2c substring dedup to EntityResolver
 
 **Files:**
-- Modify: `src/core/entity-resolver.ts:136-141` (between Layer 2b and "no match")
+- Modify: `src/core/ingestion/entity-resolver.ts:136-141` (between Layer 2b and "no match")
 - Test: `tests/core/entity-resolver.test.ts`
 
 - [ ] **Step 1: Write the failing test**
@@ -462,7 +462,7 @@ Expected: FAIL — all resolve to `stub_created`
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/core/entity-resolver.ts`, add a helper function after the existing helpers:
+In `src/core/ingestion/entity-resolver.ts`, add a helper function after the existing helpers:
 
 ```ts
 function findSubstringMatch(name: string, db: CBrainDB): { slug: string; title: string } | null {
@@ -508,7 +508,7 @@ Expected: ALL PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/entity-resolver.ts src/storage/sqlite.ts tests/core/entity-resolver.test.ts
+git add src/core/ingestion/entity-resolver.ts src/storage/sqlite.ts tests/core/entity-resolver.test.ts
 git commit -m "feat(resolver): add Layer 2c substring dedup to prevent generic entity duplicates"
 ```
 
@@ -517,12 +517,12 @@ git commit -m "feat(resolver): add Layer 2c substring dedup to prevent generic e
 ### Task 6: Propagate filtered entities through pipeline to MCP return value
 
 **Files:**
-- Modify: `src/core/pipeline.ts:32-44` (NerPipelineResult type), `src/core/pipeline.ts:321-333` (return value)
+- Modify: `src/core/ingestion/pipeline.ts:32-44` (NerPipelineResult type), `src/core/ingestion/pipeline.ts:321-333` (return value)
 - Test: check existing tests pass
 
 - [ ] **Step 1: Update NerPipelineResult type**
 
-In `src/core/pipeline.ts`, add `filtered` field to `NerPipelineResult`:
+In `src/core/ingestion/pipeline.ts`, add `filtered` field to `NerPipelineResult`:
 
 ```ts
 export interface NerPipelineResult {
@@ -581,7 +581,7 @@ Expected: ALL PASS
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/core/pipeline.ts
+git add src/core/ingestion/pipeline.ts
 git commit -m "feat(pipeline): propagate filtered entities to MCP return value for transparency"
 ```
 

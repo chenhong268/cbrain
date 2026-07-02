@@ -16,9 +16,9 @@
 
 ## File Structure
 
-- **Modify:** `src/core/frontdoor-router.ts` — remove bare `比较` from reasoning.comparison; add English strong signals to relationship/comparison/hierarchy/overview/debug.
-- **Modify:** `src/core/query-router.ts` — replace `比较` keyword with a syntax gate; add English strong signals to COMPARISON/REVIEW/RELATIONSHIP/TEMPORAL. No `hierarchy` intent.
-- **Modify:** `src/core/recall-intent.ts` — add English temporal/history/former-current regex.
+- **Modify:** `src/core/retrieval/frontdoor-router.ts` — remove bare `比较` from reasoning.comparison; add English strong signals to relationship/comparison/hierarchy/overview/debug.
+- **Modify:** `src/core/retrieval/query-router.ts` — replace `比较` keyword with a syntax gate; add English strong signals to COMPARISON/REVIEW/RELATIONSHIP/TEMPORAL. No `hierarchy` intent.
+- **Modify:** `src/core/retrieval/recall-intent.ts` — add English temporal/history/former-current regex.
 - **Modify:** `tests/core/frontdoor-router.test.ts`, `tests/core/query-router.test.ts`, `tests/core/recall-intent.test.ts`, `tests/mcp/frontdoor.test.ts` — negative-first bilingual eval matrix.
 
 Privacy: sentinels only (`实体A / 实体B / 主题A`). No real names/companies/products/paths.
@@ -28,7 +28,7 @@ Privacy: sentinels only (`实体A / 实体B / 主题A`). No real names/companies
 ## Task 1: frontdoor — remove bare `比较` (over-routing fix) + negative eval
 
 **Files:**
-- Modify: `src/core/frontdoor-router.ts` (reasoning.comparison signal, line ~78)
+- Modify: `src/core/retrieval/frontdoor-router.ts` (reasoning.comparison signal, line ~78)
 - Modify: `tests/core/frontdoor-router.test.ts`
 
 - [ ] **Step 1: Write the failing negative test**
@@ -52,7 +52,7 @@ Expected: FAIL — `比较重要的主题A` currently hits reasoning because `/�
 
 - [ ] **Step 3: Remove bare `比较` from the comparison signal**
 
-In `src/core/frontdoor-router.ts`, the `reasoning` rule (line ~73-80) currently has:
+In `src/core/retrieval/frontdoor-router.ts`, the `reasoning` rule (line ~73-80) currently has:
 
 ```ts
   {
@@ -85,7 +85,7 @@ Expected: PASS (existing cases still pass — none of them rely on bare `比较`
 ## Task 2: query-router — `比较` syntax gate + negative eval
 
 **Files:**
-- Modify: `src/core/query-router.ts` (COMPARISON_KEYWORDS + route + classifyComplexIntent)
+- Modify: `src/core/retrieval/query-router.ts` (COMPARISON_KEYWORDS + route + classifyComplexIntent)
 - Modify: `tests/core/query-router.test.ts`
 
 - [ ] **Step 1: Write the failing negative tests**
@@ -114,7 +114,7 @@ Expected: FAIL — `比较重要的主题A` currently matches `比较` in `COMPA
 
 - [ ] **Step 3: Add the `比较` syntax gate and rewire comparison detection**
 
-In `src/core/query-router.ts`:
+In `src/core/retrieval/query-router.ts`:
 
 (a) Replace the COMPARISON_KEYWORDS line (line ~14):
 
@@ -165,7 +165,7 @@ Expected: PASS — `比较重要的主题A` / `实体A和实体B都比较重要`
 ## Task 3: frontdoor — bilingual positive signals + eval
 
 **Files:**
-- Modify: `src/core/frontdoor-router.ts` (ROUTE_RULES signals)
+- Modify: `src/core/retrieval/frontdoor-router.ts` (ROUTE_RULES signals)
 - Modify: `tests/core/frontdoor-router.test.ts`
 
 - [ ] **Step 1: Write the failing bilingual positive tests**
@@ -203,7 +203,7 @@ Expected: FAIL — English queries don't match the Chinese-only signals.
 
 - [ ] **Step 3: Add English signals to ROUTE_RULES**
 
-In `src/core/frontdoor-router.ts`, update the signals (keep all existing Chinese signals, add English alternatives):
+In `src/core/retrieval/frontdoor-router.ts`, update the signals (keep all existing Chinese signals, add English alternatives):
 
 - `relationship` rule — add to its signals array:
   ```ts
@@ -233,7 +233,7 @@ Expected: PASS (all bilingual positive + prior negative).
 ## Task 4: query-router — bilingual strong signals + English negative regression
 
 **Files:**
-- Modify: `src/core/query-router.ts` (REVIEW/RELATIONSHIP/TEMPORAL keyword lists)
+- Modify: `src/core/retrieval/query-router.ts` (REVIEW/RELATIONSHIP/TEMPORAL keyword lists)
 - Modify: `tests/core/query-router.test.ts`
 
 - [ ] **Step 1: Write the failing bilingual positive tests + English negative regression**
@@ -271,7 +271,7 @@ Expected: the three English positive cases FAIL (no English keywords yet). The E
 
 - [ ] **Step 3: Add English strong signals (no weak English keywords)**
 
-In `src/core/query-router.ts`, expand the keyword arrays (add English strong only; do NOT add bare `review`/`change`/`manager`):
+In `src/core/retrieval/query-router.ts`, expand the keyword arrays (add English strong only; do NOT add bare `review`/`change`/`manager`):
 
 ```ts
 const TEMPORAL_KEYWORDS = ["最近", "什么时候", "上次", "下次", "上周", "这周", "时间线", "last time", "previously", "what changed"];
@@ -293,7 +293,7 @@ Expected: PASS — English positives route via strong signals; `review the code`
 ## Task 5: recall-intent — bilingual temporal/history/former-current
 
 **Files:**
-- Modify: `src/core/recall-intent.ts` (TEMPORAL_RE / HISTORY_RE / FORMER_CURRENT_RE)
+- Modify: `src/core/retrieval/recall-intent.ts` (TEMPORAL_RE / HISTORY_RE / FORMER_CURRENT_RE)
 - Modify: `tests/core/recall-intent.test.ts`
 
 - [ ] **Step 1: Write the failing bilingual tests**
@@ -328,7 +328,7 @@ Expected: FAIL — English markers don't match the Chinese-only regex.
 
 - [ ] **Step 3: Add English alternatives to the regexes**
 
-In `src/core/recall-intent.ts`, update the three regexes (append English alternatives inside the existing groups):
+In `src/core/retrieval/recall-intent.ts`, update the three regexes (append English alternatives inside the existing groups):
 
 ```ts
 const TEMPORAL_RE = /(之前|上次|下次|上周|这周|最近|后来|曾经|以前|当时|原来|时间线|什么时候|变化|进展|动态|last time|previously|before|what changed|changed)/;
@@ -384,7 +384,7 @@ Expected: PASS (lint + full `bun test`). Capture any pre-existing unrelated fail
 
 Verify untouched:
 ```bash
-git diff main -- src/core/recall.ts src/core/search.ts src/mcp/tools/ src/agentic/
+git diff main -- src/core/recall.ts src/core/retrieval/search.ts src/mcp/tools/ src/agentic/
 ```
 Expected: empty (no recall ranking, MCP tool-profile, or agentic planner changes).
 
@@ -395,7 +395,7 @@ Run: `git diff main` — confirm no real names/companies/products/paths/emails. 
 - [ ] **Step 5: Single independent commit**
 
 ```bash
-git add src/core/frontdoor-router.ts src/core/query-router.ts src/core/recall-intent.ts \
+git add src/core/retrieval/frontdoor-router.ts src/core/retrieval/query-router.ts src/core/retrieval/recall-intent.ts \
         tests/core/frontdoor-router.test.ts tests/core/query-router.test.ts \
         tests/core/recall-intent.test.ts
 git commit -m "feat(recall): #255 phase 1 deterministic bilingual intent routing" -m "CN/EN/mixed rule expansion across frontdoor-router / query-router / recall-intent. Over-routing fix: bare 比较 removed from frontdoor comparison and gated in query-router by syntax (adverb blacklist + compare-structure whitelist; not entity-count based). English adds strong signals only (no weak review/change/manager keywords) so review the code / change manager never escalate. Hierarchy stays frontdoor→get_org_tree; no QueryRouter.hierarchy intent. No LLM, no empty hook. Negative-first bilingual evals. Anonymous fixtures only." -m "Co-Authored-By: Claude <noreply@anthropic.com>"

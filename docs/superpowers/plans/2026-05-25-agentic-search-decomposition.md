@@ -16,7 +16,7 @@
 
 | File | Action | Responsibility |
 |------|--------|----------------|
-| `src/core/search.ts` | Modify | Add `GraphContext` interface, `isComplexQuery()`, `graphPrefetch()`, `decomposeQuery()`, modify `search()` |
+| `src/core/retrieval/search.ts` | Modify | Add `GraphContext` interface, `isComplexQuery()`, `graphPrefetch()`, `decomposeQuery()`, modify `search()` |
 | `tests/core/search.decompose.test.ts` | Create | All tests for decomposition feature |
 
 No other files are modified. `recall.ts`, `search.ts` (MCP tool), `graph.ts`, `sqlite.ts` are untouched.
@@ -26,7 +26,7 @@ No other files are modified. `recall.ts`, `search.ts` (MCP tool), `graph.ts`, `s
 ### Task 1: Add `GraphContext` interface and `isComplexQuery()` function
 
 **Files:**
-- Modify: `src/core/search.ts` (add after `HybridSearchConfig` interface, ~line 22)
+- Modify: `src/core/retrieval/search.ts` (add after `HybridSearchConfig` interface, ~line 22)
 - Create: `tests/core/search.decompose.test.ts`
 
 - [ ] **Step 1: Write failing tests for `isComplexQuery`**
@@ -34,7 +34,7 @@ No other files are modified. `recall.ts`, `search.ts` (MCP tool), `graph.ts`, `s
 ```typescript
 // tests/core/search.decompose.test.ts
 import { describe, test, expect } from "bun:test";
-import { isComplexQuery } from "../../src/core/search.js";
+import { isComplexQuery } from "../../src/core/retrieval/search.js";
 
 describe("isComplexQuery", () => {
   test("simple single entity is not complex", () => {
@@ -92,7 +92,7 @@ Expected: FAIL — `isComplexQuery` is not exported from `search.ts`
 
 - [ ] **Step 3: Add `GraphContext` interface and implement `isComplexQuery`**
 
-Add to `src/core/search.ts` after the `HybridSearchConfig` interface (line 22):
+Add to `src/core/retrieval/search.ts` after the `HybridSearchConfig` interface (line 22):
 
 ```typescript
 export interface GraphContext {
@@ -147,7 +147,7 @@ Expected: PASS (no regressions)
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/search.ts tests/core/search.decompose.test.ts
+git add src/core/retrieval/search.ts tests/core/search.decompose.test.ts
 git commit -m "feat(search): add GraphContext interface and isComplexQuery()"
 ```
 
@@ -156,7 +156,7 @@ git commit -m "feat(search): add GraphContext interface and isComplexQuery()"
 ### Task 2: Implement `graphPrefetch()`
 
 **Files:**
-- Modify: `src/core/search.ts` (add `graphPrefetch` method to `HybridSearch`)
+- Modify: `src/core/retrieval/search.ts` (add `graphPrefetch` method to `HybridSearch`)
 - Modify: `tests/core/search.decompose.test.ts`
 
 - [ ] **Step 1: Write failing tests for `graphPrefetch`**
@@ -168,7 +168,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { HybridSearch } from "../../src/core/search.js";
+import { HybridSearch } from "../../src/core/retrieval/search.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 // ... (isComplexQuery tests from Task 1 remain above)
@@ -286,7 +286,7 @@ Expected: FAIL — `graphPrefetch` is not a method on `HybridSearch`
 
 - [ ] **Step 3: Implement `graphPrefetch` on `HybridSearch`**
 
-Add to `src/core/search.ts` inside `HybridSearch` class, after the `expandQuery` method (~line 200):
+Add to `src/core/retrieval/search.ts` inside `HybridSearch` class, after the `expandQuery` method (~line 200):
 
 ```typescript
   async graphPrefetch(query: string): Promise<GraphContext> {
@@ -365,7 +365,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/search.ts tests/core/search.decompose.test.ts
+git add src/core/retrieval/search.ts tests/core/search.decompose.test.ts
 git commit -m "feat(search): add graphPrefetch() for graph-aware context extraction"
 ```
 
@@ -374,7 +374,7 @@ git commit -m "feat(search): add graphPrefetch() for graph-aware context extract
 ### Task 3: Implement `decomposeQuery()`
 
 **Files:**
-- Modify: `src/core/search.ts` (add `decomposeQuery` method to `HybridSearch`)
+- Modify: `src/core/retrieval/search.ts` (add `decomposeQuery` method to `HybridSearch`)
 - Modify: `tests/core/search.decompose.test.ts`
 
 - [ ] **Step 1: Write failing tests for `decomposeQuery`**
@@ -522,7 +522,7 @@ Expected: FAIL — `decomposeQuery` is not a method on `HybridSearch`
 
 - [ ] **Step 3: Implement `decomposeQuery` on `HybridSearch`**
 
-Add to `src/core/search.ts` inside `HybridSearch` class, after `graphPrefetch`:
+Add to `src/core/retrieval/search.ts` inside `HybridSearch` class, after `graphPrefetch`:
 
 ```typescript
   private static DECOMPOSE_TIMEOUT_MS = 10_000;
@@ -598,7 +598,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/core/search.ts tests/core/search.decompose.test.ts
+git add src/core/retrieval/search.ts tests/core/search.decompose.test.ts
 git commit -m "feat(search): add decomposeQuery() with graph-aware LLM decomposition"
 ```
 
@@ -607,7 +607,7 @@ git commit -m "feat(search): add decomposeQuery() with graph-aware LLM decomposi
 ### Task 4: Wire decomposition into `search()` flow
 
 **Files:**
-- Modify: `src/core/search.ts` (modify `search()` method)
+- Modify: `src/core/retrieval/search.ts` (modify `search()` method)
 - Modify: `tests/core/search.decompose.test.ts`
 
 - [ ] **Step 1: Write failing integration tests**
@@ -755,7 +755,7 @@ Expected: FAIL — complex query does not trigger decomposition, `_skipDecompose
 
 - [ ] **Step 3: Modify `SearchOptions` and `search()` method**
 
-Update `SearchOptions` interface in `src/core/search.ts`:
+Update `SearchOptions` interface in `src/core/retrieval/search.ts`:
 
 ```typescript
 export interface SearchOptions {
@@ -889,7 +889,7 @@ Expected: PASS — all existing tests still pass
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/search.ts tests/core/search.decompose.test.ts
+git add src/core/retrieval/search.ts tests/core/search.decompose.test.ts
 git commit -m "feat(search): wire decomposition into search() with recursion guard"
 ```
 

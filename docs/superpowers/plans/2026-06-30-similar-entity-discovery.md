@@ -26,17 +26,17 @@
 ## File Structure
 
 **New:**
-- `src/core/name-similarity.ts` — pure shared helpers: `normalizeForComparison`, `isSignificantSubstring` (extracted from `entity-resolver.ts`), plus `hasCjk`, `boundedLevenshtein`, `tokenizeForBlocking`, `titleCanonicalScore`.
-- `src/core/similar-entity-detector.ts` — pure detector: `detectSimilarEntities(input, opts) → DetectorReport`.
+- `src/core/ingestion/name-similarity.ts` — pure shared helpers: `normalizeForComparison`, `isSignificantSubstring` (extracted from `entity-resolver.ts`), plus `hasCjk`, `boundedLevenshtein`, `tokenizeForBlocking`, `titleCanonicalScore`.
+- `src/core/ingestion/similar-entity-detector.ts` — pure detector: `detectSimilarEntities(input, opts) → DetectorReport`.
 - `tests/core/name-similarity.test.ts`
 - `tests/core/similar-entity-detector.test.ts`
 - `tests/mcp/find-similar-entities.test.ts`
 - `tests/cli/similar-entities.test.ts`
 
 **Modified:**
-- `src/core/entity-resolver.ts` — delete local `normalizeForComparison` / `isSignificantSubstring`, import from `name-similarity.ts`. Behavior unchanged.
-- `src/core/discovery.ts` — add `"similar_entity"` to `DiscoveryType`; add `runSimilarEntityDetection()`. Do NOT touch `runDiscovery`'s switch.
-- `src/core/discovery-digest.ts` — add `similar_entity` case to `formatDigestCard`; add a shared `isDigestExcluded` helper used to keep `similar_entity` out of the default digest feed.
+- `src/core/ingestion/entity-resolver.ts` — delete local `normalizeForComparison` / `isSignificantSubstring`, import from `name-similarity.ts`. Behavior unchanged.
+- `src/core/maintenance/discovery.ts` — add `"similar_entity"` to `DiscoveryType`; add `runSimilarEntityDetection()`. Do NOT touch `runDiscovery`'s switch.
+- `src/core/maintenance/discovery-digest.ts` — add `similar_entity` case to `formatDigestCard`; add a shared `isDigestExcluded` helper used to keep `similar_entity` out of the default digest feed.
 - `src/mcp/tools/discoveries.ts` — add `"similar_entity"` to `read_discoveries`/`run_discovery` enums; register `find_similar_entities`; route `run_discovery({types:[similar_entity]})` at the handler layer.
 - `src/storage/sqlite.ts` — add two bulk readers: `getAliasesBySlugBulk()`, `getEntityConceptQuality()`.
 - `src/cli/commands/maintenance.ts` — add `similar-entities` command.
@@ -46,9 +46,9 @@
 ## Task 1: name-similarity.ts (extracted + new primitives) + rewire resolver
 
 **Files:**
-- Create: `src/core/name-similarity.ts`
+- Create: `src/core/ingestion/name-similarity.ts`
 - Create: `tests/core/name-similarity.test.ts`
-- Modify: `src/core/entity-resolver.ts` (delete local copies at lines ~464-480, add import)
+- Modify: `src/core/ingestion/entity-resolver.ts` (delete local copies at lines ~464-480, add import)
 
 - [ ] **Step 1: Write failing tests for the new primitives**
 
@@ -59,7 +59,7 @@ import { describe, test, expect } from "bun:test";
 import {
   normalizeForComparison, isSignificantSubstring, hasCjk,
   boundedLevenshtein, tokenizeForBlocking, titleCanonicalScore,
-} from "../../src/core/name-similarity.js";
+} from "../../src/core/ingestion/name-similarity.js";
 
 describe("name-similarity", () => {
   test("normalizeForComparison strips case/space/punct/parentheticals", () => {
@@ -111,7 +111,7 @@ describe("name-similarity", () => {
 Run: `bun test tests/core/name-similarity.test.ts`
 Expected: FAIL — module not found (`Cannot resolve module ".../name-similarity.js"`).
 
-- [ ] **Step 3: Create src/core/name-similarity.ts with all six functions**
+- [ ] **Step 3: Create src/core/ingestion/name-similarity.ts with all six functions**
 
 ```ts
 /**
@@ -223,7 +223,7 @@ Expected: PASS (all 6 tests).
 
 - [ ] **Step 5: Rewire entity-resolver to import the extracted helpers**
 
-In `src/core/entity-resolver.ts`:
+In `src/core/ingestion/entity-resolver.ts`:
 - Add to the import block near the top (after line 5, alongside other `./` imports):
   ```ts
   import { normalizeForComparison, isSignificantSubstring } from "./name-similarity.js";
@@ -243,7 +243,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/core/name-similarity.ts src/core/entity-resolver.ts tests/core/name-similarity.test.ts
+git add src/core/ingestion/name-similarity.ts src/core/ingestion/entity-resolver.ts tests/core/name-similarity.test.ts
 git commit -m "feat(discovery): extract name-similarity helpers + blocking primitives (#246)"
 ```
 
@@ -252,7 +252,7 @@ git commit -m "feat(discovery): extract name-similarity helpers + blocking primi
 ## Task 2: similar-entity-detector.ts — scaffolding (types, blocking, pair-gen, caps, name_exact)
 
 **Files:**
-- Create: `src/core/similar-entity-detector.ts`
+- Create: `src/core/ingestion/similar-entity-detector.ts`
 - Create: `tests/core/similar-entity-detector.test.ts`
 
 - [ ] **Step 1: Write failing tests for the scaffolding**
@@ -264,7 +264,7 @@ import { describe, test, expect } from "bun:test";
 import {
   detectSimilarEntities,
   type DetectorInput, type DetectorPage, type PageQuality,
-} from "../../src/core/similar-entity-detector.js";
+} from "../../src/core/ingestion/similar-entity-detector.js";
 
 const sameType = () => true; // affine predicate for tests: control per-test
 
@@ -330,7 +330,7 @@ describe("similar-entity-detector scaffolding", () => {
 Run: `bun test tests/core/similar-entity-detector.test.ts`
 Expected: FAIL — module not found.
 
-- [ ] **Step 3: Create src/core/similar-entity-detector.ts (scaffolding)**
+- [ ] **Step 3: Create src/core/ingestion/similar-entity-detector.ts (scaffolding)**
 
 ```ts
 import {
@@ -533,7 +533,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/similar-entity-detector.ts tests/core/similar-entity-detector.test.ts
+git add src/core/ingestion/similar-entity-detector.ts tests/core/similar-entity-detector.test.ts
 git commit -m "feat(discovery): similar-entity detector scaffolding + name_exact (#246)"
 ```
 
@@ -542,7 +542,7 @@ git commit -m "feat(discovery): similar-entity detector scaffolding + name_exact
 ## Task 3: detector — full strategy suite (alias + name_normalized/substring/edit_distance)
 
 **Files:**
-- Modify: `src/core/similar-entity-detector.ts` (`evaluatePair`)
+- Modify: `src/core/ingestion/similar-entity-detector.ts` (`evaluatePair`)
 - Modify: `tests/core/similar-entity-detector.test.ts` (append)
 
 - [ ] **Step 1: Write failing tests for the new strategies**
@@ -623,7 +623,7 @@ Expected: FAIL — `name_normalized` etc. not produced (evaluatePair only handle
 
 - [ ] **Step 3: Replace evaluatePair with the full strategy chain**
 
-In `src/core/similar-entity-detector.ts`, replace the entire `evaluatePair` function (and remove the `void ...` suppression line) with:
+In `src/core/ingestion/similar-entity-detector.ts`, replace the entire `evaluatePair` function (and remove the `void ...` suppression line) with:
 
 ```ts
 function evaluatePair(
@@ -751,7 +751,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/similar-entity-detector.ts tests/core/similar-entity-detector.test.ts
+git add src/core/ingestion/similar-entity-detector.ts tests/core/similar-entity-detector.test.ts
 git commit -m "feat(discovery): detector alias + name strategies (#246)"
 ```
 
@@ -760,7 +760,7 @@ git commit -m "feat(discovery): detector alias + name strategies (#246)"
 ## Task 4: detector — canonical target scoring + ambiguous rule
 
 **Files:**
-- Modify: `src/core/similar-entity-detector.ts` (`computeRecommendedTarget`)
+- Modify: `src/core/ingestion/similar-entity-detector.ts` (`computeRecommendedTarget`)
 - Modify: `tests/core/similar-entity-detector.test.ts` (append)
 
 - [ ] **Step 1: Write failing tests for canonical target selection**
@@ -809,7 +809,7 @@ Expected: FAIL — `recommendedTarget` undefined for the stub test (computeRecom
 
 - [ ] **Step 3: Implement computeRecommendedTarget discriminators 1-5**
 
-In `src/core/similar-entity-detector.ts`, replace `computeRecommendedTarget` with:
+In `src/core/ingestion/similar-entity-detector.ts`, replace `computeRecommendedTarget` with:
 
 ```ts
 function computeRecommendedTarget(
@@ -883,7 +883,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/similar-entity-detector.ts tests/core/similar-entity-detector.test.ts
+git add src/core/ingestion/similar-entity-detector.ts tests/core/similar-entity-detector.test.ts
 git commit -m "feat(discovery): canonical merge-target scoring + ambiguous rule (#246)"
 ```
 
@@ -892,7 +892,7 @@ git commit -m "feat(discovery): canonical merge-target scoring + ambiguous rule 
 ## Task 5: discovery.ts orchestrator + DiscoveryType + bulk loaders
 
 **Files:**
-- Modify: `src/core/discovery.ts` (add `"similar_entity"` to union; add `runSimilarEntityDetection`; import detector + helpers + getOntology)
+- Modify: `src/core/maintenance/discovery.ts` (add `"similar_entity"` to union; add `runSimilarEntityDetection`; import detector + helpers + getOntology)
 - Modify: `src/storage/sqlite.ts` (add `getAliasesBySlugBulk`, `getEntityConceptQuality`)
 - Create: `tests/core/similar-entity-orchestrator.test.ts`
 
@@ -905,7 +905,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { DiscoveryManager } from "../../src/core/discovery.js";
+import { DiscoveryManager } from "../../src/core/maintenance/discovery.js";
 
 describe("DiscoveryManager.runSimilarEntityDetection (#246)", () => {
   const testDir = "/tmp/cbrain-test-similar-orch";
@@ -1003,7 +1003,7 @@ In `src/storage/sqlite.ts`, add these methods on `CBrainDB` (place near `findEmp
 
 - [ ] **Step 4: Add similar_entity to DiscoveryType + imports in discovery.ts**
 
-In `src/core/discovery.ts`, change the union (line 5) to:
+In `src/core/maintenance/discovery.ts`, change the union (line 5) to:
 
 ```ts
 export type DiscoveryType = "bridge" | "trend" | "gap" | "contradiction" | "similar_entity";
@@ -1137,7 +1137,7 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/core/discovery.ts src/storage/sqlite.ts tests/core/similar-entity-orchestrator.test.ts
+git add src/core/maintenance/discovery.ts src/storage/sqlite.ts tests/core/similar-entity-orchestrator.test.ts
 git commit -m "feat(discovery): runSimilarEntityDetection orchestrator + bulk loaders (#246)"
 ```
 
@@ -1146,7 +1146,7 @@ git commit -m "feat(discovery): runSimilarEntityDetection orchestrator + bulk lo
 ## Task 6: discovery-digest.ts — similar_entity card + default-digest exclusion
 
 **Files:**
-- Modify: `src/core/discovery-digest.ts` (`formatDigestCard` case; `isDigestExcluded` helper)
+- Modify: `src/core/maintenance/discovery-digest.ts` (`formatDigestCard` case; `isDigestExcluded` helper)
 - Modify: `src/mcp/tools/discoveries.ts` (use `isDigestExcluded` in the unseen-feed filter)
 - Create: `tests/core/similar-entity-digest.test.ts`
 
@@ -1156,7 +1156,7 @@ Create `tests/core/similar-entity-digest.test.ts`:
 
 ```ts
 import { describe, test, expect } from "bun:test";
-import { formatDigestCard, shouldFilterDiscovery, isDigestExcluded } from "../../src/core/discovery-digest.js";
+import { formatDigestCard, shouldFilterDiscovery, isDigestExcluded } from "../../src/core/maintenance/discovery-digest.js";
 
 const lookup = (slug: string) => ({ title: slug.replace("entity/", ""), type: "entity/company" });
 
@@ -1198,7 +1198,7 @@ Expected: FAIL — `isDigestExcluded` not exported; `formatDigestCard` returns t
 
 - [ ] **Step 3: Add isDigestExcluded + similar_entity card case**
 
-In `src/core/discovery-digest.ts`, add an exported helper near `shouldFilterDiscovery`:
+In `src/core/maintenance/discovery-digest.ts`, add an exported helper near `shouldFilterDiscovery`:
 
 ```ts
 /**
@@ -1242,7 +1242,7 @@ Add a `case "similar_entity"` inside the `switch (r.type)` in `formatDigestCard`
 In `src/mcp/tools/discoveries.ts`, import `isDigestExcluded`:
 
 ```ts
-import { formatDiscoveryDigest, formatKnowledgeMapSurface, isDigestExcluded } from "../../core/discovery-digest.js";
+import { formatDiscoveryDigest, formatKnowledgeMapSurface, isDigestExcluded } from "../../core/maintenance/discovery-digest.js";
 ```
 
 In the `run_discovery` handler, change the line that filters KM types out of `newRows`:
@@ -1266,7 +1266,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/core/discovery-digest.ts src/mcp/tools/discoveries.ts tests/core/similar-entity-digest.test.ts
+git add src/core/maintenance/discovery-digest.ts src/mcp/tools/discoveries.ts tests/core/similar-entity-digest.test.ts
 git commit -m "feat(discovery): similar_entity digest card + default-feed exclusion (#246)"
 ```
 
@@ -1468,7 +1468,7 @@ In `registerDiscoveryTools`, add (e.g. after `run_discovery`):
 
 - [ ] **Step 6: Thread dryRun through runSimilarEntityDetection (cleaner approach)**
 
-Update `runSimilarEntityDetection` signature in `src/core/discovery.ts`:
+Update `runSimilarEntityDetection` signature in `src/core/maintenance/discovery.ts`:
 
 ```ts
   async runSimilarEntityDetection(options: { dryRun?: boolean } = {}): Promise<DiscoveryReport & { candidates?: import("./similar-entity-detector.js").SimilarEntityCandidate[] }> {
@@ -1502,7 +1502,7 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/mcp/tools/discoveries.ts src/core/discovery.ts tests/mcp/find-similar-entities.test.ts
+git add src/mcp/tools/discoveries.ts src/core/maintenance/discovery.ts tests/mcp/find-similar-entities.test.ts
 git commit -m "feat(mcp): find_similar_entities tool + run_discovery similar_entity routing (#246)"
 ```
 
@@ -1528,7 +1528,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { DiscoveryManager } from "../../src/core/discovery.js";
+import { DiscoveryManager } from "../../src/core/maintenance/discovery.js";
 
 describe("CLI similar-entities (dry-run default) (#246)", () => {
   const testDir = "/tmp/cbrain-test-cli-similar";
@@ -1671,7 +1671,7 @@ Visually confirm fixtures use only `实体A`/`实体B`/`组织C`/`主题D`/`共�
 
 Run:
 ```bash
-git diff main -- src/core/similar-entity-detector.ts src/core/discovery.ts src/mcp/tools/discoveries.ts src/cli/commands/maintenance.ts | grep -nE "addAlias|upsertPage|insertLink|addLink|upsertLink|mergeEntities|batchMerge" || echo "CLEAN: no write/merge calls added in detection path"
+git diff main -- src/core/ingestion/similar-entity-detector.ts src/core/maintenance/discovery.ts src/mcp/tools/discoveries.ts src/cli/commands/maintenance.ts | grep -nE "addAlias|upsertPage|insertLink|addLink|upsertLink|mergeEntities|batchMerge" || echo "CLEAN: no write/merge calls added in detection path"
 ```
 Expected: `CLEAN` (the only writes are `upsertDiscovery` for discovery rows). `merge_entities`/`batch_merge_pages` are referenced in suggestion text only, not invoked.
 

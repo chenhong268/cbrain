@@ -21,12 +21,12 @@
 | Create | `src/ontology/__tests__/loader.test.ts` | Loader 单元测试 |
 | Create | `src/ontology/__tests__/ner-prompt.test.ts` | NER 提示词生成测试 |
 | Modify | `src/core/shared.ts` | `mapEntityType` → YAML 查询，`normalizeRelation` → YAML 查询，`PageType` 扩展 |
-| Modify | `src/core/ner.ts` | 删除硬编码提示词，改为调用 `buildNerPrompts()` |
+| Modify | `src/core/ingestion/ner.ts` | 删除硬编码提示词，改为调用 `buildNerPrompts()` |
 | Modify | `src/utils/slug.ts` | `TYPE_PREFIX` 改为动态查询 |
 | Modify | `src/utils/frontmatter.ts` | `type` 字段类型扩展 |
 | Modify | `src/storage/sqlite.ts` | DB CHECK 约束迁移，支持 `entity/person` 格式 |
-| Modify | `src/core/dialogue.ts` | 使用新类型系统 |
-| Modify | `src/core/entity-resolver.ts` | 使用新类型系统 |
+| Modify | `src/core/ingestion/dialogue.ts` | 使用新类型系统 |
+| Modify | `src/core/ingestion/entity-resolver.ts` | 使用新类型系统 |
 | Create | `src/ontology/__tests__/migration.test.ts` | 数据迁移测试 |
 
 ---
@@ -587,7 +587,7 @@ git commit -m "feat: add declarative YAML ontology with 12 entity types and 36 r
 - [ ] **Step 1: 写 types.ts**
 
 ```typescript
-import type { EntityType as NerEntityType } from "../core/ner.js";
+import type { EntityType as NerEntityType } from "../core/ingestion/ner.js";
 
 export interface EntityTypeDef {
   label: string;
@@ -1202,7 +1202,7 @@ git commit -m "refactor: replace hardcoded types/relations with ontology YAML lo
 ### Task 5: 重构 ner.ts — 用动态提示词替换硬编码
 
 **Files:**
-- Modify: `src/core/ner.ts`
+- Modify: `src/core/ingestion/ner.ts`
 
 - [ ] **Step 1: 扩展 EntityType**
 
@@ -1271,7 +1271,7 @@ Expected: PASS（可能需要更新测试中的类型断言，见 Task 7）
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/ner.ts
+git add src/core/ingestion/ner.ts
 git commit -m "refactor: replace hardcoded NER prompts with dynamic ontology-driven prompts"
 ```
 
@@ -1446,11 +1446,11 @@ git commit -m "feat: DB migration v6 to support ontology type paths"
 ### Task 8: 消费者迁移 — dialogue.ts, entity-resolver.ts 等
 
 **Files:**
-- Modify: `src/core/dialogue.ts`
-- Modify: `src/core/entity-resolver.ts`
-- Modify: `src/core/pipeline.ts`
-- Modify: `src/core/hierarchy.ts`
-- Modify: `src/core/graph.ts`
+- Modify: `src/core/ingestion/dialogue.ts`
+- Modify: `src/core/ingestion/entity-resolver.ts`
+- Modify: `src/core/ingestion/pipeline.ts`
+- Modify: `src/core/graph/hierarchy.ts`
+- Modify: `src/core/graph/graph.ts`
 - Modify: `src/core/ops.ts`
 
 逐个文件检查并替换:
@@ -1485,7 +1485,7 @@ Expected: 全部 PASS
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/core/dialogue.ts src/core/entity-resolver.ts src/core/pipeline.ts src/core/hierarchy.ts src/core/graph.ts src/core/ops.ts
+git add src/core/ingestion/dialogue.ts src/core/ingestion/entity-resolver.ts src/core/ingestion/pipeline.ts src/core/graph/hierarchy.ts src/core/graph/graph.ts src/core/ops.ts
 git commit -m "refactor: migrate consumers to ontology-driven type system"
 ```
 

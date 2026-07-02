@@ -27,12 +27,12 @@ via set union with existing tags, never overwriting or removing them.
 ## Scope
 
 **In (Phase 1):**
-- `src/core/ingest.ts` — `ingestText`, `ingestMarkdown`, `ingestEntityAppend` durable write paths.
+- `src/core/ingestion/ingest.ts` — `ingestText`, `ingestMarkdown`, `ingestEntityAppend` durable write paths.
 - New pure classifier module under `src/core/`.
 - CLI + MCP ingest layers inherit behavior through `IngestManager`.
 
 **Out (deferred / forbidden):**
-- `src/core/dialogue.ts` — `DialogueIngest`, its prompt, entity-stub creation, relation/event/fact extraction, and generated tags are **untouched**. Rationale: dialogue does not persist original dialogue as a durable personal record; it extracts entity stubs. Tagging a stub as `personal` mislabels an entity page, and the dialogue auto-prompt intentionally skips preferences/feelings without concrete facts — exactly where personal signals live. Making dialogue store those is a separate product/architecture change.
+- `src/core/ingestion/dialogue.ts` — `DialogueIngest`, its prompt, entity-stub creation, relation/event/fact extraction, and generated tags are **untouched**. Rationale: dialogue does not persist original dialogue as a durable personal record; it extracts entity stubs. Tagging a stub as `personal` mislabels an entity page, and the dialogue auto-prompt intentionally skips preferences/feelings without concrete facts — exactly where personal signals live. Making dialogue store those is a separate product/architecture change.
 - No schema, table, or migration.
 - No slug, file-path, vault-directory, or ontology behavior changes.
 - No recall, search, or ranking changes.
@@ -54,7 +54,7 @@ is the failure mode to prevent.**
 
 ## Module
 
-New file: `src/core/personal-tag-classifier.ts`
+New file: `src/core/ingestion/personal-tag-classifier.ts`
 
 ```ts
 export interface PersonalTagInput {
@@ -145,7 +145,7 @@ This is the central over-tagging defense (issue review focus):
 
 The guardrail short-circuit handles the work-reading case without special-casing.
 
-## Integration (`src/core/ingest.ts`)
+## Integration (`src/core/ingestion/ingest.ts`)
 
 The classifier is pure and runs at the **entry** of each ingest path to compute
 effective tags. All dedup gates, NER, and the ContentPipeline sit downstream and
