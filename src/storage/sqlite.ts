@@ -1943,6 +1943,88 @@ export class CBrainDB {
     ).run({ $slug: slug, $rel: relation });
   }
 
+  // ─── Volatile relation lifecycle (Phase 1: reports_to) ───────────
+  // reports_to has no reverse relation (it is a structured_field, not in
+  // relation_types), so these helpers are forward-only — no symmetric
+  // reverse handling like deleteLink. Superseded rows are preserved so the
+  // old manager edge stays auditable; active reads already exclude
+  // 'superseded' via the shared filter.
+
+  /** Active (non-superseded, non-rejected) reports_to edges from `fromSlug`. */
+  getActiveReportsToLinks(fromSlug: string): LinkRow[] {
+    return this.prepare(
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence, last_validated_at, effective_weight
+       FROM links WHERE from_slug = $slug AND relation = 'reports_to'
+       AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))`
+    ).all({ $slug: fromSlug }) as LinkRow[];
+  }
+
+  /**
+   * Mark every active reports_to edge from `fromSlug` as superseded.
+   * Preserves rows + evidence (no hard delete). Pass `exceptToSlug` to spare
+   * the edge that is about to be (re)activated. Returns forward count.
+   */
+  supersedeReportsTo(fromSlug: string, exceptToSlug?: string): number {
+    const r = this.prepare(
+      `UPDATE links SET trust_state = 'superseded'
+       WHERE from_slug = $slug AND relation = 'reports_to'
+       AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))
+       AND ($except IS NULL OR to_slug <> $except)`
+    ).run({ $slug: fromSlug, $except: exceptToSlug ?? null });
+    return r.changes;
+  }
+
+  /**
+   * Insert a reports_to edge as active+trusted, or REACTIVATE an existing
+   * (superseded/candidate/rejected) edge. Deterministic reports_to paths
+   * (frontmatter sync, setHierarchy) are authoritative → trust_state='trusted'.
+   * Avoids the INSERT OR IGNORE trap where a superseded row would silently
+   * block reactivation on revert. Existing evidence is preserved unless
+   * overridden via `provenance`.
+   */
+  upsertActiveReportsTo(
+    from: string,
+    to: string,
+    sourceType = "agent",
+    confidence = 0.95,
+    provenance?: ProvenanceInput,
+  ): void {
+    const existing = this.prepare(
+      "SELECT id, source_page_slug, evidence FROM links WHERE from_slug = $from AND to_slug = $to AND relation = 'reports_to'"
+    ).get({ $from: from, $to: to }) as
+      | { id: number; source_page_slug: string | null; evidence: string | null }
+      | undefined;
+
+    if (existing) {
+      this.prepare(
+        `UPDATE links SET trust_state = 'trusted', source_type = $st, confidence = $c,
+            weight = 1.0, strength = 'strong',
+            source_page_slug = $sps, evidence = $ev,
+            effective_weight = 1.0 * $c
+         WHERE id = $id`
+      ).run({
+        $st: sourceType,
+        $c: confidence,
+        $sps: provenance?.source_page_slug ?? existing.source_page_slug,
+        $ev: provenance?.evidence ?? existing.evidence,
+        $id: existing.id,
+      });
+      return;
+    }
+
+    this.prepare(
+      `INSERT INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence, source_page_slug, trust_state, evidence, effective_weight)
+       VALUES ($from, $to, 'reports_to', NULL, 1.0, 'strong', $st, $c, $sps, 'trusted', $ev, 1.0 * $c)`
+    ).run({
+      $from: from,
+      $to: to,
+      $st: sourceType,
+      $c: confidence,
+      $sps: provenance?.source_page_slug ?? null,
+      $ev: provenance?.evidence ?? null,
+    });
+  }
+
   getOutgoingLinks(slug: string, includeInactive = false): LinkRow[] {
     const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     return this.prepare(
