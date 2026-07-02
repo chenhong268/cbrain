@@ -2,10 +2,19 @@ import type { PageManager } from "../page.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import { getFactFieldWhitelist, type EntityType, type StructuredFact } from "./ner.js";
 
+export interface FactConflict {
+  slug: string;
+  field: string;
+  current: string;
+  proposed: string;
+  /** true for volatile-relation fields (e.g. reports_to) — surfaced, not silently skipped. */
+  volatile?: boolean;
+}
+
 export interface FactWriteResult {
   written: number;
   skipped: number;
-  conflicts: Array<{ slug: string; field: string; current: string; proposed: string }>;
+  conflicts: FactConflict[];
 }
 
 export function validateFacts(
@@ -58,7 +67,9 @@ export function applyFacts(
       continue;
     }
 
-    // Only fill empty fields — never overwrite
+    // Only fill empty fields — never overwrite. For volatile relation fields
+    // (reports_to), surface the conflict explicitly rather than treating it as
+    // a generic field skip (#233 Phase 1).
     const current = page.frontmatter[fact.field];
     if (current !== undefined && current !== null && current !== "") {
       conflicts.push({
@@ -66,6 +77,7 @@ export function applyFacts(
         field: fact.field,
         current: String(current),
         proposed: fact.value,
+        ...(fact.field === "reports_to" ? { volatile: true } : {}),
       });
       continue;
     }

@@ -361,6 +361,21 @@ export class ContentPipeline {
         const rw = getRelationStrength(normRel);
         this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength, "ner", 0.5, undefined, { source_page_slug: fromSlug, evidence: rel.context });
 
+        // Phase 1 #233: a weak/NER reports_to must never overwrite a trusted
+        // active edge. insertLink already writes it as 'candidate' and leaves
+        // any trusted edge untouched — here we only surface the conflict for
+        // review instead of leaving it silent.
+        if (normRel === "reports_to") {
+          const trustedOther = this.db.getActiveReportsToLinks(from)
+            .some(l => l.to_slug !== to && (l.trust_state === "trusted" || l.trust_state === "user_thought"));
+          if (trustedOther) {
+            this.logger?.warn("pipeline", "ner reports_to conflicts with trusted active edge (kept candidate)", {
+              from,
+              proposed: to,
+            });
+          }
+        }
+
         relationEndpointSlugs.add(from);
         relationEndpointSlugs.add(to);
         const fromTitle = this.pages?.getBySlug(from)?.title ?? rel.from;
