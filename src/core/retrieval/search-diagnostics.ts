@@ -108,6 +108,8 @@ export function classifyDegradedReasons(
     codes.push("reasoning_parse_failed");
   } else if (trace.degraded_reason === "decompose_budget_exceeded") {
     codes.push("budget_exhausted");
+  } else if (trace.degraded_reason === "research_budget_exceeded") {
+    codes.push("budget_exhausted");
   }
 
   // 1b. FTS parser fallback — MATCH expression failed, degraded to LIKE

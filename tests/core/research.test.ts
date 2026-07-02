@@ -19,6 +19,22 @@ function createMockLLM(responses: string[]): LLMProvider & { calls: string[][] }
   };
 }
 
+function createDelayedRerankLLM(delayMs: number): LLMProvider & { calls: string[][] } {
+  const calls: string[][] = [];
+  let callIndex = 0;
+  return {
+    name: "mock",
+    calls,
+    chat: async (messages) => {
+      calls.push(messages.map((m: { content: string }) => m.content));
+      callIndex++;
+      if (callIndex === 1) return '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}';
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return '{"order":[2,1]}';
+    },
+  };
+}
+
 function insertPage(
   db: CBrainDB,
   slug: string,
@@ -402,6 +418,25 @@ describe("ResearchManager", () => {
     // Rerank swapped order
     expect(results[0].slug).toBe("entity/b");
     expect(results[1].slug).toBe("entity/a");
+  });
+
+  test("rerank timeout returns existing order and marks research budget degradation", async () => {
+    const searchResponses = new Map<string, SearchResult[]>([
+      ["Alpha Beta", [makeResult("entity/a", 0.9, "Alpha"), makeResult("entity/b", 0.8, "Beta")]],
+    ]);
+    const llm = createDelayedRerankLLM(50);
+    const researcher = new ResearchManager(
+      createMockSearch(searchResponses), db, llm,
+      { maxRerankMs: 5 },
+    );
+    const trace: import("../../src/core/retrieval/search.js").SearchTrace = {};
+    const started = Date.now();
+
+    const results = await researcher.research("Alpha Beta", { _trace: trace });
+
+    expect(Date.now() - started).toBeLessThan(45);
+    expect(results.map((r) => r.slug)).toEqual(["entity/a", "entity/b"]);
+    expect(trace.degraded_reason).toBe("research_budget_exceeded");
   });
 
   test("graph with no neighbors does not crash", async () => {

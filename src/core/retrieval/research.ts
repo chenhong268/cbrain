@@ -28,11 +28,13 @@ interface ResearchReasoning {
 export interface ResearchConfig {
   maxIterations?: number;
   maxFollowUpQueries?: number;
+  maxRerankMs?: number;
 }
 
 export class ResearchManager {
   private readonly maxIterations: number;
   private readonly maxFollowUpQueries: number;
+  private readonly maxRerankMs?: number;
   private llmCallCount = 0;
 
   constructor(
@@ -44,6 +46,7 @@ export class ResearchManager {
   ) {
     this.maxIterations = config?.maxIterations ?? 3;
     this.maxFollowUpQueries = config?.maxFollowUpQueries ?? 3;
+    this.maxRerankMs = config?.maxRerankMs;
   }
 
   getLLMCallCount(): number {
@@ -120,7 +123,7 @@ export class ResearchManager {
     }
 
     const rerankStart = Date.now();
-    const reranked = await this.rerankResults(query, session.allResults);
+    const reranked = await this.rerankResults(query, session.allResults, trace);
     if (trace) {
       trace.rerank_ms = Date.now() - rerankStart;
     }
@@ -294,6 +297,7 @@ export class ResearchManager {
   private async rerankResults(
     query: string,
     results: readonly SearchResult[],
+    trace?: SearchOptions["_trace"],
   ): Promise<SearchResult[]> {
     if (!this.llm || results.length <= 1) return [...results];
 
@@ -303,7 +307,7 @@ export class ResearchManager {
 
     try {
       this.llmCallCount++;
-      const resp = await this.llm.chat([
+      const rerankPromise = this.llm.chat([
         {
           role: "system",
           content:
@@ -313,6 +317,8 @@ export class ResearchManager {
         },
         { role: "user", content: `查询: ${query}\n\n结果:\n${info}` },
       ]);
+      const resp = await this.raceBudget(rerankPromise, this.maxRerankMs, trace);
+      if (resp === null) return [...results];
 
       const parsed = JSON.parse(resp) as { order: number[] };
       if (!Array.isArray(parsed.order) || parsed.order.length === 0) return [...results];
@@ -332,6 +338,29 @@ export class ResearchManager {
     } catch {
       this.logger?.error("research", "reranking failed, returning original order");
       return [...results];
+    }
+  }
+
+  private async raceBudget<T>(
+    operation: Promise<T>,
+    timeoutMs: number | undefined,
+    trace?: SearchOptions["_trace"],
+  ): Promise<T | null> {
+    if (timeoutMs == null || timeoutMs <= 0) return operation;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), timeoutMs);
+    });
+    try {
+      const result = await Promise.race([operation, timeout]);
+      if (result === null && trace && !trace.degraded_reason) {
+        trace.degraded_reason = "research_budget_exceeded";
+      }
+      return result;
+    } finally {
+      if (timer) clearTimeout(timer);
+      operation.catch(() => undefined);
     }
   }
 }

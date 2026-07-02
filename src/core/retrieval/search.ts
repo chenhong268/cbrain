@@ -320,6 +320,9 @@ export function applyRecallQualityGate(
 const MAX_DEFAULT_SUBQUERIES = 3;
 const MAX_DEFAULT_LLM_CALLS = 3;
 const MAX_DEFAULT_DECOMPOSE_MS = 8000;
+const MAX_MULTISTEP_ITERATIONS = 1;
+const MAX_MULTISTEP_FOLLOWUPS = 2;
+const MAX_MULTISTEP_RERANK_MS = 3000;
 /** #250 — FTS probe is "sufficient" at this many results → skip expandQuery LLM. */
 const FTS_SUFFICIENT_RESULTS = 3;
 
@@ -623,7 +626,11 @@ export class HybridSearch {
     if (!this.llm) return this.searchCore(query, options);
     const trace = options._trace;
     const start = Date.now();
-    const researcher = new ResearchManager(this, this.db, this.llm, undefined, this.logger);
+    const researcher = new ResearchManager(this, this.db, this.llm, {
+      maxIterations: MAX_MULTISTEP_ITERATIONS,
+      maxFollowUpQueries: MAX_MULTISTEP_FOLLOWUPS,
+      maxRerankMs: MAX_MULTISTEP_RERANK_MS,
+    }, this.logger);
     const results = await researcher.research(query, options);
     if (trace) {
       trace.research_ms = Date.now() - start;

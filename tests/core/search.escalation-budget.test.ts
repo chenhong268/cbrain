@@ -35,11 +35,16 @@ function createMockLance() {
   };
 }
 
-function createMockLLM(responses: string[]): LLMProvider {
+function createMockLLM(responses: string[]): LLMProvider & { calls: string[][] } {
   let callIndex = 0;
+  const calls: string[][] = [];
   return {
     name: "mock",
-    chat: async () => responses[callIndex++] ?? '{"sufficient": true, "reason": "default"}',
+    calls,
+    chat: async (messages) => {
+      calls.push(messages.map((m: { content: string }) => m.content));
+      return responses[callIndex++] ?? '{"sufficient": true, "reason": "default"}';
+    },
   };
 }
 
@@ -94,6 +99,29 @@ describe("HybridSearch escalation budget (#222)", () => {
       _hints: { isComplex: true, knownSlugs: [] },
     });
     expect(spy).toHaveBeenCalled();
+  });
+
+  test("multiStep=true uses a bounded ResearchManager profile in the HybridSearch path", async () => {
+    insertPage(db, "entity/root", "Root", "entity/person");
+    insertPage(db, "entity/f1", "F1", "entity/person");
+    insertPage(db, "entity/f2", "F2", "entity/person");
+    insertPage(db, "entity/f3", "F3", "entity/person");
+    const llm = createMockLLM([
+      '{"reasoning":"不够","sufficient":false,"follow_up_queries":[{"query":"F1","intent":"方向1"},{"query":"F2","intent":"方向2"},{"query":"F3","intent":"方向3"}]}',
+      '{"reasoning":"仍不够","sufficient":false,"follow_up_queries":[{"query":"F3","intent":"方向3"}]}',
+      '{"reasoning":"够了","sufficient":true,"follow_up_queries":[]}',
+      '{"order":[1,2,3,4]}',
+    ]);
+    const hs = new HybridSearch(db, createMockEmbeddingProvider(), createMockLance() as any, {
+      rrf_k: 60,
+      llm,
+    });
+    const trace: Record<string, unknown> = {};
+
+    await hs.search("Root", { multiStep: true, limit: 5, _trace: trace as any });
+
+    expect(llm.calls.length).toBeLessThanOrEqual(2);
+    expect((trace.follow_up_queries as string[] | undefined) ?? []).toEqual(["F1", "F2"]);
   });
 
   test("decomposition caps subqueries to MAX_DEFAULT_SUBQUERIES (3)", async () => {

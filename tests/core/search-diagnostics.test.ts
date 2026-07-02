@@ -158,6 +158,15 @@ describe("classifyDegradedReasons", () => {
     expect(codes).toEqual(["budget_exhausted"]);
   });
 
+  test("research_budget_exceeded → budget_exhausted", () => {
+    const codes = classifyDegradedReasons(
+      [{ score: 0.8 }],
+      { degraded_reason: "research_budget_exceeded" },
+      "test query",
+    );
+    expect(codes).toEqual(["budget_exhausted"]);
+  });
+
   test("slow response → latency_budget_exceeded", () => {
     const codes = classifyDegradedReasons(
       [{ score: 0.8 }],
