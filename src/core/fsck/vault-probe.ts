@@ -9,6 +9,7 @@ function walkMd(root: string): string[] {
 	const out: string[] = [];
 	const entries = readdirSync(root, { withFileTypes: true });
 	for (const ent of entries) {
+		if (ent.name.startsWith(".")) continue; // skip hidden dirs/files (.obsidian, .trash, .git)
 		const p = join(root, ent.name);
 		if (ent.isDirectory()) {
 			out.push(...walkMd(p));

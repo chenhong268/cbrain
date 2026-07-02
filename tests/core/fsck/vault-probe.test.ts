@@ -32,6 +32,17 @@ test("empty vault + empty db → no findings", () => {
 	expect(probeVault(vaultDir, db)).toEqual([]);
 });
 
+test("hidden dirs (.obsidian/.trash) skipped — no false-positive file_exists_db_missing", () => {
+	freshEnv();
+	// .obsidian 内部 md（Obsidian workspace/plugins 等）带 slug 也不应触发 finding
+	writeMd(".obsidian/workspace.md", "---\ntitle: WS\ntype: record\nslug: test-vp-hidden\n---\nObsidian internal.");
+	// 正常 vault md（无 DB page）应当触发
+	writeMd("real.md", "---\nslug: test-vp-real\n---\nbody");
+	const samples = probeVault(vaultDir, db).flatMap((f) => f.sampleSlugs);
+	expect(samples).toContain("test-vp-real");      // 正常 md 被扫到
+	expect(samples).not.toContain("test-vp-hidden"); // .obsidian 被跳过
+});
+
 test("md file in vault with slug, no DB page → file_exists_db_missing error", () => {
 	freshEnv();
 	writeMd("alpha.md", "---\ntitle: Alpha\ntype: record\nslug: test-vp-alpha\n---\nBody here.");
