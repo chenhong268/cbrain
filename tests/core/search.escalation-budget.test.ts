@@ -183,7 +183,7 @@ describe("HybridSearch escalation budget (#222)", () => {
     expect(expandSpy).not.toHaveBeenCalled();
   });
 
-  test("decompose failure/timeout → degraded [], no expansion", async () => {
+  test("decompose failure/timeout → bounded original-query fallback, no expansion", async () => {
     insertPage(db, "entity/a", "Entity A", "entity/person");
     const hs = new HybridSearch(db, createMockEmbeddingProvider(), createMockLance() as any, {
       rrf_k: 60,
@@ -194,14 +194,23 @@ describe("HybridSearch escalation budget (#222)", () => {
       throw new Error("decompose_timeout");
     });
     const expandSpy = spyOn(hs as any, "expandQuery");
+    const fallbackSpy = spyOn(hs as any, "searchWithExpansion").mockImplementation(async (q: string) => {
+      if (q.includes("Entity")) {
+        return [{ slug: "entity/a", score: 0.5, snippet: "fallback", source: "fts" as const }];
+      }
+      return [] as SearchResult[];
+    });
     const trace: { decompose_ms?: number; degraded_reason?: string } = {};
     const result = await hs.search("Entity A 和 Entity B", {
       _hints: { isComplex: true, knownSlugs: [] },
       _trace: trace as any,
     });
-    expect(Array.isArray(result)).toBe(true);
+    expect(result).toEqual([{ slug: "entity/a", score: 0.5, snippet: "fallback", source: "fts" }]);
     expect(trace.degraded_reason).toBe("decompose_budget_exceeded");
     expect(expandSpy).not.toHaveBeenCalled(); // 超时/失败不 fallback expansion
+    expect(fallbackSpy).toHaveBeenCalledTimes(1);
+    expect(fallbackSpy.mock.calls[0][0]).toBe("Entity A 和 Entity B");
+    expect(fallbackSpy.mock.calls[0][2]).toBe(false); // bounded: no expandQuery
   });
 
   test("complex decompose weak/empty sub-results → bounded fallback (recall preserved, multiQuery:false, no expandQuery)", async () => {

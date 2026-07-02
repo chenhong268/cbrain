@@ -442,8 +442,8 @@ export class HybridSearch {
             trace.decompose_ms = Date.now() - decomposeStart;
             if (!trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
           }
-          this.logger?.warn("search", "decomposition 超时/失败，fail-closed 返回空（零额外 LLM）", { error: e instanceof Error ? e.message : String(e) });
-          return [] as SearchResult[]; // timeout/failure: fail-closed，零额外 LLM
+          this.logger?.warn("search", "decomposition 超时/失败，回退原查询（零额外 LLM）", { error: e instanceof Error ? e.message : String(e) });
+          return this.searchWithExpansion(query, limit, false, trace);
         } finally {
           // 成功 decompose 后清理 pending timeout timer，避免 8s 定时器残留
           if (decomposeTimer) clearTimeout(decomposeTimer);
