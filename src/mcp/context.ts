@@ -4,7 +4,7 @@ import { LanceDBManager } from "../storage/lancedb.js";
 import { HybridSearch } from "../core/search.js";
 import { SyncManager } from "../core/sync.js";
 import { IngestManager } from "../core/ingest.js";
-import { GraphManager } from "../core/graph.js";
+import { GraphManager } from "../core/graph/graph.js";
 import { EnrichManager } from "../core/enrich.js";
 import { WritebackManager } from "../core/writeback.js";
 import { NerEngine } from "../core/ner.js";

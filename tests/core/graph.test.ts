@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { GraphManager } from "../../src/core/graph.js";
+import { GraphManager } from "../../src/core/graph/graph.js";
 
 function insertPage(db: CBrainDB, slug: string, title: string, type: string, mentionCount = 0) {
   db.rawDb.prepare(

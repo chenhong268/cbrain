@@ -1,4 +1,4 @@
-import type { Link } from "../../core/graph.js";
+import type { Link } from "../../core/graph/graph.js";
 import { mapSourceType } from "../../core/provenance.js";
 import type { ProactiveHint } from "../../core/proactive.js";
 import type { PageFrontmatter } from "../../utils/frontmatter.js";

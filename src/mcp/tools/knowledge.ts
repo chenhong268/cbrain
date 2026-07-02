@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { addKnowledge } from "../../core/knowledge-write.js";
+import { addKnowledge } from "../../core/graph/knowledge-write.js";
 
 export function registerKnowledgeTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("add_knowledge", {

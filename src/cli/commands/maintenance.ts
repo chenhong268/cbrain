@@ -813,7 +813,7 @@ export function register(program: Command) {
 
       const { generateDossier, isDossierFresh } = await import("../../core/dossier.js");
       const { PageManager } = await import("../../core/page.js");
-      const { GraphManager } = await import("../../core/graph.js");
+      const { GraphManager } = await import("../../core/graph/graph.js");
       const { Logger } = await import("../../core/logger.js");
       const { ContentPipeline } = await import("../../core/pipeline.js");
       const outputsDir = resolveRuntimePath(config);
@@ -863,7 +863,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const deps = createDeps(config);
       const { PageManager } = await import("../../core/page.js");
-      const { GraphManager } = await import("../../core/graph.js");
+      const { GraphManager } = await import("../../core/graph/graph.js");
       const pages = new PageManager(deps.db, config.vaultPath);
       const graph = new GraphManager(deps.db);
 
@@ -897,7 +897,7 @@ export function register(program: Command) {
       }
 
       if (opts.remove) {
-        const { removeHierarchy } = await import("../../core/hierarchy.js");
+        const { removeHierarchy } = await import("../../core/graph/hierarchy.js");
         const removed = removeHierarchy(slug, { pages, graph });
         if (!removed) {
           console.log(`  ${slug} 未设置 reports_to`);
@@ -911,7 +911,7 @@ export function register(program: Command) {
       }
 
       if (opts.reportsTo) {
-        const { setHierarchy } = await import("../../core/hierarchy.js");
+        const { setHierarchy } = await import("../../core/graph/hierarchy.js");
         const page = pages.getBySlug(slug);
         const oldReportsTo = (page?.frontmatter as Record<string, unknown>)?.reports_to as string | undefined;
         setHierarchy(slug, opts.reportsTo, { pages, graph });
@@ -925,7 +925,7 @@ export function register(program: Command) {
       }
 
       // Show hierarchy context
-      const { getHierarchyContext } = await import("../../core/hierarchy.js");
+      const { getHierarchyContext } = await import("../../core/graph/hierarchy.js");
       const ctx = getHierarchyContext(slug, { pages, graph });
       const entity = pages.getBySlug(slug);
       console.log(`  ${entity?.title ?? slug} 的组织层级\n`);

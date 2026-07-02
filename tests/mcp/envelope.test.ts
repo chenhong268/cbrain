@@ -24,7 +24,7 @@ import {
   type ToolSummary,
 } from "../../src/mcp/tools/format-result.js";
 import type { EpisodicRecallResult } from "../../src/core/episodic-recall.js";
-import type { OrgTreeResult } from "../../src/core/hierarchy.js";
+import type { OrgTreeResult } from "../../src/core/graph/hierarchy.js";
 
 // ─── Shared ────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { HybridSearch } from "../search.js";
-import type { GraphManager, GraphNode } from "../graph.js";
+import type { GraphManager, GraphNode } from "../graph/graph.js";
 import type { PageManager } from "../page.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import type {

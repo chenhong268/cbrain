@@ -37,7 +37,7 @@ export function register(program: Command) {
     .action(async (slug, opts) => {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
-      const { GraphManager } = await import("../../core/graph.js");
+      const { GraphManager } = await import("../../core/graph/graph.js");
       const graph = new GraphManager(db);
       let result: unknown;
       switch (opts.mode) {

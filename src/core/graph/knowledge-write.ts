@@ -8,9 +8,9 @@
  * Phase 1: structured input only (no NLP parsing).
  */
 
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { PageManager } from "./page.js";
-import type { ContentPipeline } from "./pipeline.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { PageManager } from "../page.js";
+import type { ContentPipeline } from "../pipeline.js";
 import type { GraphManager } from "./graph.js";
 import {
   findEntitySlug,
@@ -18,9 +18,9 @@ import {
   normalizeRelation,
   getRelationStrength,
   getLayer,
-} from "./shared.js";
+} from "../shared.js";
 import { setHierarchy } from "./hierarchy.js";
-import { canonicalSlug, generateSlug } from "../utils/slug.js";
+import { canonicalSlug, generateSlug } from "../../utils/slug.js";
 
 // ─── Constants ──────────────────────────────────────────────
 

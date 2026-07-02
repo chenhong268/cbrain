@@ -2,10 +2,10 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { GraphManager } from "../../src/core/graph.js";
+import { GraphManager } from "../../src/core/graph/graph.js";
 import { PageManager } from "../../src/core/page.js";
 import { Logger } from "../../src/core/logger.js";
-import { getOrgTree } from "../../src/core/hierarchy.js";
+import { getOrgTree } from "../../src/core/graph/hierarchy.js";
 
 /**
  * Test fixtures: 3-level org tree

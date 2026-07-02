@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { setHierarchy, removeHierarchy, getHierarchyContext, getOrgTree } from "../../core/hierarchy.js";
+import { setHierarchy, removeHierarchy, getHierarchyContext, getOrgTree } from "../../core/graph/hierarchy.js";
 import { formatOrgTreeEnvelope } from "./format-result.js";
 
 export function registerHierarchyTools(server: McpServer, ctx: ToolContext): void {

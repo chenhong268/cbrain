@@ -1,4 +1,4 @@
-import type { PageManager } from "./page.js";
+import type { PageManager } from "../page.js";
 import type { GraphManager, Link } from "./graph.js";
 
 export interface HierarchyDeps {

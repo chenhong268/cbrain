@@ -1,4 +1,4 @@
-import { CBrainDB } from "../storage/sqlite.js";
+import { CBrainDB } from "../../storage/sqlite.js";
 
 export interface Link {
   id: number;

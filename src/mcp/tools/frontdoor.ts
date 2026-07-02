@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { classifyFrontdoorQuery, type FrontdoorRoutingDecision } from "../../core/frontdoor-router.js";
 import { EpisodicRecaller } from "../../core/episodic-recall.js";
-import { getOrgTree } from "../../core/hierarchy.js";
+import { getOrgTree } from "../../core/graph/hierarchy.js";
 import { AgenticResearchPipeline } from "../../core/agentic/pipeline.js";
 import type { SearchPlanIntent } from "../../core/agentic/plan.js";
 import { buildGroundedRecall } from "../../core/grounded-answer.js";

@@ -3,7 +3,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import { LanceDBManager as LanceDBStorage } from "../storage/lancedb.js";
 import { ResearchManager } from "./research.js";
-import { GraphManager } from "./graph.js";
+import { GraphManager } from "./graph/graph.js";
 import type { Logger } from "./logger.js";
 
 export interface SealedDetailHit {
