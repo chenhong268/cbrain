@@ -50,6 +50,11 @@ export class GraphManager {
     return this.db.supersedeReportsTo(from, exceptToSlug);
   }
 
+  /** Phase 1 #233 (HIGH 1): current (authoritative) reports_to edges — excludes candidate. */
+  getCurrentReportsToLinks(slug: string, direction: "outgoing" | "incoming"): Link[] {
+    return this.db.getCurrentReportsToLinks(slug, direction) as Link[];
+  }
+
   /**
    * Phase 1 #233: atomically make `to` the sole active reports_to of `from`.
    * Supersede + upsert run in one transaction so callers never observe zero

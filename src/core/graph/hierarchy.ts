@@ -1,5 +1,5 @@
 import type { PageManager } from "../page.js";
-import type { GraphManager, Link } from "./graph.js";
+import type { GraphManager } from "./graph.js";
 
 export interface HierarchyDeps {
   pages: PageManager;
@@ -38,7 +38,6 @@ export interface GetOrgTreeOptions {
   limit?: number;
 }
 
-const REPORTS_TO_RELATION = "reports_to";
 
 // Hard bounds — callers cannot exceed these regardless of input
 const MAX_DEPTH = 5;
@@ -127,19 +126,19 @@ export function getHierarchyContext(
     reportsToTitle = managerPage?.title ?? null;
   }
 
-  // Subordinates: incoming links with relation "reports_to"
-  const subordinates = graph.getLinks(slug, "incoming")
-    .filter(l => l.relation === REPORTS_TO_RELATION)
+  // Subordinates: current incoming reports_to edges (#233 HIGH 1 — candidate/
+  // rejected/superseded edges are evidence, not current subordinates).
+  const subordinates = graph.getCurrentReportsToLinks(slug, "incoming")
     .map(l => {
       const p = pages.getBySlug(l.from_slug);
       return { slug: l.from_slug, title: p?.title ?? l.from_slug };
     });
 
-  // Peers: others who report to the same manager
+  // Peers: others who currently report to the same manager
   let peers: Array<{ slug: string; title: string }> = [];
   if (reportsToSlug) {
-    peers = graph.getLinks(reportsToSlug, "incoming")
-      .filter(l => l.relation === REPORTS_TO_RELATION && l.from_slug !== slug)
+    peers = graph.getCurrentReportsToLinks(reportsToSlug, "incoming")
+      .filter(l => l.from_slug !== slug)
       .map(l => {
         const p = pages.getBySlug(l.from_slug);
         return { slug: l.from_slug, title: p?.title ?? l.from_slug };
@@ -279,16 +278,14 @@ function getReportsToLinks(
   slug: string,
   dir: "up" | "down",
 ): string[] {
-  const links: Link[] = dir === "up"
-    ? graph.getLinks(slug, "outgoing")
-    : graph.getLinks(slug, "incoming");
+  // Phase 1 #233 (HIGH 1): current-fact reads only. candidate/rejected/
+  // superseded edges are evidence, not current managers/subordinates. They
+  // stay visible via includeInactive=true / debug / raw / evidence paths.
+  const direction = dir === "up" ? "outgoing" : "incoming";
+  const links = graph.getCurrentReportsToLinks(slug, direction);
 
   const neighbors = new Set<string>();
   for (const link of links) {
-    if (link.relation !== REPORTS_TO_RELATION) continue;
-    // Skip rejected/superseded links
-    if (link.trust_state === "rejected" || link.trust_state === "superseded") continue;
-
     if (dir === "up") {
       // outgoing: from_slug = current, to_slug = manager
       neighbors.add(link.to_slug);

@@ -895,8 +895,11 @@ export class HealthChecker {
         continue;
       }
 
+      // Phase 1 #233 (HIGH 2): only a current (authoritative) edge satisfies
+      // consistency — superseded/rejected/candidate edges are evidence, not a
+      // live graph edge for the frontmatter's current reports_to.
       const hasEdge = this.db.rawDb.prepare(
-        "SELECT 1 FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to' LIMIT 1"
+        "SELECT 1 FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to' AND (trust_state IS NULL OR trust_state IN ('trusted','user_thought')) LIMIT 1"
       ).get(page.slug, reportsTo);
 
       if (!hasEdge) {

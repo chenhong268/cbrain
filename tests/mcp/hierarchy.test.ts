@@ -62,7 +62,9 @@ function seedPage(db: CBrainDB, vaultPath: string, slug: string, title: string, 
 }
 
 function seedLink(db: CBrainDB, from: string, to: string): void {
-  db.insertLink(from, to, "reports_to", null, 1.0, "strong", "agent", 0.95);
+  // #233: deterministic reports_to edges are trusted (upsertActiveReportsTo);
+  // insertLink would write 'candidate', which current-fact reads exclude.
+  db.upsertActiveReportsTo(from, to, "agent", 0.95);
 }
 
 function buildTree(db: CBrainDB, vaultPath: string): void {

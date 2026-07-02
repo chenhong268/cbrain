@@ -614,6 +614,18 @@ export class CBrainDB {
     if (!tlNames.has("evidence")) {
       this.db.exec("ALTER TABLE timeline ADD COLUMN evidence TEXT");
     }
+
+    // #233 Phase 1 (HIGH 1): deterministic reports_to edges (source_type='agent')
+    // were historically 'candidate' because insertLink mapped source_type=agent to
+    // 'candidate'. They are authoritative current facts (setHierarchy /
+    // processReportsTo). Promote them to 'trusted' so current-fact reads
+    // (current = trusted/user_thought/NULL) include them — otherwise existing
+    // vaults' org trees would empty out. Idempotent: matches only candidate rows,
+    // so re-runs are no-ops once promoted. NER-source candidate reports_to edges
+    // stay candidate (weak, not current).
+    this.db.exec(
+      "UPDATE links SET trust_state = 'trusted' WHERE relation = 'reports_to' AND source_type = 'agent' AND trust_state = 'candidate'"
+    );
   }
 
   private migratePagesExpiry(): void {
@@ -1766,13 +1778,13 @@ export class CBrainDB {
 
   getBareStubs(): Array<{ slug: string; title: string; type: string }> {
     return this.prepare(
-      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE (p.type LIKE 'entity/%' OR p.type LIKE 'concept/%') AND p.mention_count <= 1 GROUP BY p.slug HAVING COUNT(l.id) <= 1"
+      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON (l.from_slug = p.slug OR l.to_slug = p.slug) AND (l.trust_state IS NULL OR l.trust_state NOT IN ('rejected','superseded')) WHERE (p.type LIKE 'entity/%' OR p.type LIKE 'concept/%') AND p.mention_count <= 1 GROUP BY p.slug HAVING COUNT(l.id) <= 1"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
   getIslandPages(): Array<{ slug: string; title: string; type: string }> {
     return this.prepare(
-      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE (p.type LIKE 'entity/%' OR p.type LIKE 'concept/%') GROUP BY p.slug HAVING COUNT(l.id) = 0"
+      "SELECT p.slug, p.title, p.type FROM pages p LEFT JOIN links l ON (l.from_slug = p.slug OR l.to_slug = p.slug) AND (l.trust_state IS NULL OR l.trust_state NOT IN ('rejected','superseded')) WHERE (p.type LIKE 'entity/%' OR p.type LIKE 'concept/%') GROUP BY p.slug HAVING COUNT(l.id) = 0"
     ).all() as Array<{ slug: string; title: string; type: string }>;
   }
 
@@ -1794,14 +1806,14 @@ export class CBrainDB {
     types.forEach((t, i) => { params[`$t${i}`] = t; });
     const order = sanitizeOrderBy(orderBy, "title ASC");
     return this.prepare(
-      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type IN (${placeholders}) GROUP BY p.slug ORDER BY ${order}`
+      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON (l.from_slug = p.slug OR l.to_slug = p.slug) AND (l.trust_state IS NULL OR l.trust_state NOT IN ('rejected','superseded')) WHERE p.type IN (${placeholders}) GROUP BY p.slug ORDER BY ${order}`
     ).all(params) as Array<{ slug: string; title: string; type: string; link_count: number }>;
   }
 
   getPagesWithLinkCountByPrefix(prefix: string, orderBy?: string): Array<{ slug: string; title: string; type: string; link_count: number }> {
     const order = sanitizeOrderBy(orderBy, "title ASC");
     return this.prepare(
-      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON l.from_slug = p.slug OR l.to_slug = p.slug WHERE p.type LIKE $prefix GROUP BY p.slug ORDER BY ${order}`
+      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON (l.from_slug = p.slug OR l.to_slug = p.slug) AND (l.trust_state IS NULL OR l.trust_state NOT IN ('rejected','superseded')) WHERE p.type LIKE $prefix GROUP BY p.slug ORDER BY ${order}`
     ).all({ $prefix: `${prefix}%` }) as Array<{ slug: string; title: string; type: string; link_count: number }>;
   }
 
@@ -2024,6 +2036,23 @@ export class CBrainDB {
       $sps: provenance?.source_page_slug ?? null,
       $ev: provenance?.evidence ?? null,
     });
+  }
+
+  /**
+   * Current (authoritative) reports_to edges for `slug` in a direction.
+   * trust_state IS NULL or IN ('trusted','user_thought') — EXCLUDES candidate
+   * (unverified), rejected, superseded. This is the "current fact" semantic for
+   * volatile relations (#233 Phase 1 HIGH 1): a weak/NER candidate edge is
+   * evidence, not a current manager/subordinate. candidate remains visible via
+   * includeInactive=true / debug / raw / evidence paths (getOutgoingLinks).
+   */
+  getCurrentReportsToLinks(slug: string, direction: "outgoing" | "incoming"): LinkRow[] {
+    const col = direction === "outgoing" ? "from_slug" : "to_slug";
+    return this.prepare(
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence, last_validated_at, effective_weight
+       FROM links WHERE ${col} = $slug AND relation = 'reports_to'
+       AND (trust_state IS NULL OR trust_state IN ('trusted','user_thought'))`
+    ).all({ $slug: slug }) as LinkRow[];
   }
 
   getOutgoingLinks(slug: string, includeInactive = false): LinkRow[] {
@@ -3361,7 +3390,7 @@ export class CBrainDB {
 
   getLinkCountForSlug(slug: string): number {
     const row = this.prepare(
-      "SELECT count(*) as cnt FROM links WHERE from_slug = $slug OR to_slug = $slug"
+      "SELECT count(*) as cnt FROM links WHERE (from_slug = $slug OR to_slug = $slug) AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))"
     ).get({ $slug: slug }) as { cnt: number } | null;
     return row?.cnt ?? 0;
   }
@@ -3372,7 +3401,7 @@ export class CBrainDB {
 
     // Single scan of links table, count per slug
     const rows = this.prepare(
-      "SELECT from_slug, to_slug FROM links"
+      "SELECT from_slug, to_slug FROM links WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))"
     ).all() as Array<{ from_slug: string; to_slug: string }>;
 
     const slugSet = new Set(slugs);

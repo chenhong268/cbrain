@@ -170,4 +170,66 @@ describe("reports_to lifecycle helpers", () => {
       expect(db.getActiveReportsToLinks(FROM)).toHaveLength(1);
     });
   });
+
+  describe("getCurrentReportsToLinks (current-fact semantics)", () => {
+    test("outgoing: returns only trusted/user_thought/NULL — excludes candidate", () => {
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95); // trusted
+      db.insertLink(FROM, MGR_B, "reports_to", null, 0.5, "weak", "ner", 0.5); // candidate
+
+      const current = db.getCurrentReportsToLinks(FROM, "outgoing");
+      expect(current.map((l) => l.to_slug)).toEqual([MGR_A]);
+    });
+
+    test("NULL trust_state counts as current (legacy compatibility)", () => {
+      // Column has DEFAULT 'candidate', so NULL must be inserted explicitly.
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, weight, strength, source_type, confidence, trust_state)
+         VALUES (?, ?, 'reports_to', 1.0, 'strong', 'agent', 0.95, NULL)`,
+      ).run(FROM, MGR_A);
+      expect(db.getCurrentReportsToLinks(FROM, "outgoing")).toHaveLength(1);
+    });
+
+    test("incoming: returns only current subordinates (excludes candidate)", () => {
+      const SUB = "entities/person-delta";
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(SUB, "entity/person", SUB, `${SUB}.md`, `h-${SUB}`, 0, 3);
+
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95); // FROM -> MGR_A trusted
+      db.insertLink(SUB, MGR_A, "reports_to", null, 0.5, "weak", "ner", 0.5); // SUB -> MGR_A candidate
+
+      const subs = db.getCurrentReportsToLinks(MGR_A, "incoming");
+      expect(subs.map((l) => l.from_slug)).toEqual([FROM]);
+    });
+  });
+
+  describe("link-count metrics exclude inactive (MEDIUM)", () => {
+    test("getLinkCountForSlug excludes superseded/rejected edges", () => {
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95); // active trusted
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'superseded', 'agent')`,
+      ).run(FROM, MGR_B);
+      expect(db.getLinkCountForSlug(FROM)).toBe(1); // only the active edge
+    });
+
+    test("batchGetLinkCounts excludes superseded/rejected edges", () => {
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95);
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'rejected', 'agent')`,
+      ).run(FROM, MGR_B);
+      const counts = db.batchGetLinkCounts([FROM, MGR_A]);
+      expect(counts.get(FROM)).toBe(1);
+      expect(counts.get(MGR_A)).toBe(1);
+    });
+
+    test("getPagesWithLinkCount excludes superseded/rejected from link_count", () => {
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95);
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'superseded', 'agent')`,
+      ).run(FROM, MGR_B);
+      const rows = db.getPagesWithLinkCount(["entity/person"]);
+      const fromRow = rows.find((r) => r.slug === FROM);
+      expect(fromRow?.link_count).toBe(1);
+    });
+  });
 });

@@ -109,4 +109,35 @@ describe("hierarchy lifecycle (setHierarchy / removeHierarchy)", () => {
     // edge stays correctly traceable (#233 review finding).
     expect(edge!.source_page_slug).toBe(SEED);
   });
+
+  test("HIGH 1: weak/NER candidate reports_to does NOT appear in default org tree (up)", () => {
+    // Trusted current manager MGR_A (deterministic setHierarchy)
+    setHierarchy(SEED, MGR_A, deps());
+    // Weak/NER candidate edge to a DIFFERENT target (does not overwrite trusted)
+    db.insertLink(SEED, MGR_B, "reports_to", null, 0.5, "weak", "ner", 0.5);
+
+    // Default up traversal must return only the trusted manager
+    const tree = getOrgTree(SEED, deps(), { direction: "up" })!;
+    expect(tree.upward.map((n) => n.slug)).toEqual([MGR_A]);
+
+    // But includeInactive/debug can still see the candidate edge as evidence
+    const all = db.getOutgoingLinks(SEED, true).filter((l) => l.relation === "reports_to");
+    expect(all.map((l) => l.to_slug).sort()).toEqual([MGR_A, MGR_B].sort());
+  });
+
+  test("HIGH 1: candidate subordinates/peers excluded from hierarchy context", () => {
+    // SUB reports to SEED (trusted), SUB2 reports to SEED (NER candidate)
+    const SUB = "entities/sub-trusted";
+    const SUB2 = "entities/sub-candidate";
+    for (const s of [SUB, SUB2]) {
+      db.upsertPage({ slug: s, type: "entity/person", title: s, filePath: `${s}.md`, contentHash: `h-${s}` });
+      mkdirSync(join(vaultPath, ...s.split("/").slice(0, -1)), { recursive: true });
+      writeFileSync(join(vaultPath, `${s}.md`), `---\ntitle: "${s}"\ntype: entity/person\nslug: ${s}\n---\n`);
+    }
+    db.upsertActiveReportsTo(SUB, SEED, "agent", 0.95);
+    db.insertLink(SUB2, SEED, "reports_to", null, 0.5, "weak", "ner", 0.5);
+
+    const ctx = getHierarchyContext(SEED, deps());
+    expect(ctx.subordinates.map((s) => s.slug)).toEqual([SUB]);
+  });
 });
