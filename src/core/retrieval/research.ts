@@ -1,5 +1,5 @@
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { LLMProvider } from "../llm/provider.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { LLMProvider } from "../../llm/provider.js";
 import type { HybridSearch, SearchResult, SearchOptions, GraphContext } from "./search.js";
 
 const MAX_NEIGHBORS_PER_ENTITY = 5;
@@ -39,7 +39,7 @@ export class ResearchManager {
     private readonly db: CBrainDB,
     private readonly llm?: LLMProvider,
     config?: ResearchConfig,
-    private readonly logger?: import("./logger.js").Logger,
+    private readonly logger?: import("../logger.js").Logger,
   ) {
     this.maxIterations = config?.maxIterations ?? 3;
     this.maxFollowUpQueries = config?.maxFollowUpQueries ?? 3;

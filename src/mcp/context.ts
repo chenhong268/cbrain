@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
-import { HybridSearch } from "../core/search.js";
+import { HybridSearch } from "../core/retrieval/search.js";
 import { SyncManager } from "../core/sync.js";
 import { IngestManager } from "../core/ingestion/ingest.js";
 import { GraphManager } from "../core/graph/graph.js";

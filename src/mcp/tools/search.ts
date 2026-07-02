@@ -1,11 +1,11 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { generateProactiveHints } from "../../core/proactive.js";
-import { isComplexQuery, applyRecallQualityGate, type SearchTrace } from "../../core/search.js";
-import { traceToSteps } from "../../core/search-trace.js";
+import { generateProactiveHints } from "../../core/retrieval/proactive.js";
+import { isComplexQuery, applyRecallQualityGate, type SearchTrace } from "../../core/retrieval/search.js";
+import { traceToSteps } from "../../core/retrieval/search-trace.js";
 import { trimHint, applyProactiveBudget } from "./trim.js";
-import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning } from "../../core/search-diagnostics.js";
+import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning } from "../../core/retrieval/search-diagnostics.js";
 import { formatQueryEnvelope } from "./format-result.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {

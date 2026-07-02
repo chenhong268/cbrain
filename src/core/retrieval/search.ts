@@ -1,10 +1,10 @@
-import { CBrainDB } from "../storage/sqlite.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
-import type { LLMProvider } from "../llm/provider.js";
-import { LanceDBManager as LanceDBStorage } from "../storage/lancedb.js";
+import { CBrainDB } from "../../storage/sqlite.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import { LanceDBManager as LanceDBStorage } from "../../storage/lancedb.js";
 import { ResearchManager } from "./research.js";
-import { GraphManager } from "./graph/graph.js";
-import type { Logger } from "./logger.js";
+import { GraphManager } from "../graph/graph.js";
+import type { Logger } from "../logger.js";
 
 export interface SealedDetailHit {
   /** Raw-chunk fragment recovered from a sealed page. User-visible. */

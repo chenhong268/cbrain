@@ -1,5 +1,5 @@
-import type { CBrainDB, LinkRow } from "../storage/sqlite.js";
-import type { ToolContext } from "../mcp/context.js";
+import type { CBrainDB, LinkRow } from "../../storage/sqlite.js";
+import type { ToolContext } from "../../mcp/context.js";
 
 // ─── Types ──────────────────────────────────────────────────
 

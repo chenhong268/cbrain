@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { assembleEvidencePack } from "../../src/core/evidence-completion.js";
+import { assembleEvidencePack } from "../../src/core/retrieval/evidence-completion.js";
 
 const TEST_DIR = "/tmp/cbrain-test-evidence-completion";
 const dbPath = join(TEST_DIR, "t.sqlite");

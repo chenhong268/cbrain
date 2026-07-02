@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { HybridSearch } from "../../src/core/search.js";
+import { HybridSearch } from "../../src/core/retrieval/search.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 function mockEmbed(): EmbeddingProvider {

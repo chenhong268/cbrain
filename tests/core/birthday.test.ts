@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { extractBirthday, getZodiac, getShengxiao } from "../../src/core/birthday.js";
+import { extractBirthday, getZodiac, getShengxiao } from "../../src/core/retrieval/birthday.js";
 
 describe("getZodiac", () => {
   test("9/22 = 处女座", () => expect(getZodiac(9, 22)).toBe("♍️ 处女座"));

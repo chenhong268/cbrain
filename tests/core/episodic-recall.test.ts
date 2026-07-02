@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { EpisodicRecaller } from "../../src/core/episodic-recall.js";
+import { EpisodicRecaller } from "../../src/core/retrieval/episodic-recall.js";
 
 // ─── Test setup ──────────────────────────────────────────────
 

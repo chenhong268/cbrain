@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { HybridSearch, type SearchResult } from "../../src/core/search.js";
+import { HybridSearch, type SearchResult } from "../../src/core/retrieval/search.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 

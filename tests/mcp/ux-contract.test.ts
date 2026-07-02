@@ -150,18 +150,18 @@ describe("C3: query is foundational, not user-facing", () => {
 
 describe("C4: GroundedRecallResult structure", () => {
   test("grounded-answer.ts exports required fields", async () => {
-    const mod = await import("../../src/core/grounded-answer.js");
+    const mod = await import("../../src/core/retrieval/grounded-answer.js");
     expect(mod).toBeDefined();
     // Verify GroundedRecallResult shape by checking the builder exists
     expect(typeof mod.buildGroundedRecall).toBe("function");
   });
 
   test("evidence.ts exports EvidenceBoard with build method", async () => {
-    const mod = await import("../../src/core/evidence.js");
+    const mod = await import("../../src/core/retrieval/evidence.js");
     expect(mod.EvidenceBoard).toBeDefined();
     // EvidenceBoard requires a db parameter — verify class has build()
     const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/evidence.ts"),
+      path.resolve(import.meta.dir, "../../src/core/retrieval/evidence.ts"),
       "utf-8",
     );
     expect(source).toContain("build()");
@@ -200,7 +200,7 @@ describe("C5: proactive budget limits", () => {
 
   test("MIN_SCORE threshold is 0.5 in proactive engine source", () => {
     const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/proactive.ts"),
+      path.resolve(import.meta.dir, "../../src/core/retrieval/proactive.ts"),
       "utf-8",
     );
     expect(source).toContain("MIN_SCORE = 0.5");
@@ -209,7 +209,7 @@ describe("C5: proactive budget limits", () => {
   test("truncateText caps at specified length", async () => {
     // Read the source to verify the constant
     const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/proactive.ts"),
+      path.resolve(import.meta.dir, "../../src/core/retrieval/proactive.ts"),
       "utf-8",
     );
     // All hint texts are truncated to 120 chars
@@ -218,7 +218,7 @@ describe("C5: proactive budget limits", () => {
 
   test("proactive errors never propagate — try-catch returns []", () => {
     const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/proactive.ts"),
+      path.resolve(import.meta.dir, "../../src/core/retrieval/proactive.ts"),
       "utf-8",
     );
     // Main function has catch { return []; }
@@ -404,7 +404,7 @@ describe("C7: failure degradation structure", () => {
 
   test("SearchTrace has degraded_reason field", async () => {
     const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/search.ts"),
+      path.resolve(import.meta.dir, "../../src/core/retrieval/search.ts"),
       "utf-8",
     );
     expect(source).toContain("degraded_reason");

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { generateDossier, extractDossier, isDossierFresh } from "../../core/dossier.js";
+import { generateDossier, extractDossier, isDossierFresh } from "../../core/retrieval/dossier.js";
 
 const DEFAULT_MAX_AGE_DAYS = 7;
 

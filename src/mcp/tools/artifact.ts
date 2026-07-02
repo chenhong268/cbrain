@@ -4,9 +4,9 @@ import { join, resolve, sep } from "node:path";
 import { writeFile } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { renderArtifact, type ArtifactInput } from "../../core/artifact.js";
+import { renderArtifact, type ArtifactInput } from "../../core/retrieval/artifact.js";
 import type { PipelineResult } from "../../core/agentic/pipeline.js";
-import type { GroundedRecallResult } from "../../core/grounded-answer.js";
+import type { GroundedRecallResult } from "../../core/retrieval/grounded-answer.js";
 
 function sanitizeFilename(name: string): string | null {
   if (name.includes("/") || name.includes("\\") || name.includes("..")) return null;

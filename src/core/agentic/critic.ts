@@ -1,5 +1,5 @@
 import type { SearchPlanIntent, SearchPlanStep } from "./plan.js";
-import type { EvidenceBoardResult, EvidenceItem } from "../evidence.js";
+import type { EvidenceBoardResult, EvidenceItem } from "../retrieval/evidence.js";
 import type { ExecutionResult } from "./executor.js";
 
 // --- Types ---

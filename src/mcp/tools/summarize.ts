@@ -2,8 +2,8 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { truncate, safeFrontmatter, trimLink, trimTimeline, stubEntity } from "./trim.js";
-import { type SearchTrace } from "../../core/search.js";
-import { traceToSteps } from "../../core/search-trace.js";
+import { type SearchTrace } from "../../core/retrieval/search.js";
+import { traceToSteps } from "../../core/retrieval/search-trace.js";
 import { formatSummarizeEnvelope } from "./format-result.js";
 
 const TOP_N = 3;

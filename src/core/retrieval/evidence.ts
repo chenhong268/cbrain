@@ -1,6 +1,6 @@
-import type { SourceCategory, TrustState } from "./provenance.js";
-import { mapSourceType } from "./provenance.js";
-import type { CBrainDB, LinkRow } from "../storage/sqlite.js";
+import type { SourceCategory, TrustState } from "../provenance.js";
+import { mapSourceType } from "../provenance.js";
+import type { CBrainDB, LinkRow } from "../../storage/sqlite.js";
 
 export type Confidence = "high" | "medium" | "low";
 

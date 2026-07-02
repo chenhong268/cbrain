@@ -13,7 +13,7 @@
  * degrade to a sanitized warning.
  */
 import type { Database } from "bun:sqlite";
-import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCode } from "../core/search-diagnostics.js";
+import { ALL_DEGRADED_REASON_CODES, WARNING_REASON_CODES, type DegradedReasonCode } from "../core/retrieval/search-diagnostics.js";
 
 // ── Safe row shapes (only the columns we are allowed to read/report) ──
 

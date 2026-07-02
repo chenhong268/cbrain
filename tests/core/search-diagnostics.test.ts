@@ -11,7 +11,7 @@ import {
   computeLatencyWarning,
   HIERARCHY_KEYWORDS,
   WARNING_REASON_CODES,
-} from "../../src/core/search-diagnostics.js";
+} from "../../src/core/retrieval/search-diagnostics.js";
 
 const NO_TRACE = {};
 

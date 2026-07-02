@@ -23,7 +23,7 @@ import {
   DISPLAY_BANNED_TERM_RULES,
   type ToolSummary,
 } from "../../src/mcp/tools/format-result.js";
-import type { EpisodicRecallResult } from "../../src/core/episodic-recall.js";
+import type { EpisodicRecallResult } from "../../src/core/retrieval/episodic-recall.js";
 import type { OrgTreeResult } from "../../src/core/graph/hierarchy.js";
 
 // ─── Shared ────────────────────────────────────────────────────

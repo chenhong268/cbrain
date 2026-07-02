@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { evaluateSufficiency, type CriticInput } from "../../../src/core/agentic/critic.js";
-import type { EvidenceBoardResult } from "../../../src/core/evidence.js";
+import type { EvidenceBoardResult } from "../../../src/core/retrieval/evidence.js";
 import type { StepResult } from "../../../src/core/agentic/executor.js";
 
 // --- Helpers ---

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { extractKeyPoints, buildMemorySkeleton } from "../../src/core/key-points";
+import { extractKeyPoints, buildMemorySkeleton } from "../../src/core/retrieval/key-points.js";
 
 describe("extractKeyPoints", () => {
   // ── Strategy 1: Frontmatter (entity pages) ──

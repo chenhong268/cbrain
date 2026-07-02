@@ -1,8 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { HybridSearch, type SearchResult, type GraphContext } from "../../src/core/search.js";
-import { ResearchManager } from "../../src/core/research.js";
+import { HybridSearch, type SearchResult, type GraphContext } from "../../src/core/retrieval/search.js";
+import { ResearchManager } from "../../src/core/retrieval/research.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 
@@ -508,7 +508,7 @@ describe("ResearchManager", () => {
     ]);
 
     const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
-    const trace: import("../../src/core/search.js").SearchTrace = {};
+    const trace: import("../../src/core/retrieval/search.js").SearchTrace = {};
     await researcher.research("X", { _trace: trace });
 
     expect(typeof trace.rerank_ms).toBe("number");
@@ -528,7 +528,7 @@ describe("ResearchManager", () => {
     ]);
 
     const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
-    const trace: import("../../src/core/search.js").SearchTrace = {};
+    const trace: import("../../src/core/retrieval/search.js").SearchTrace = {};
     await researcher.research("root", { _trace: trace });
 
     expect(trace.follow_up_queries).toBeDefined();
@@ -545,7 +545,7 @@ describe("ResearchManager", () => {
     ]);
 
     const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
-    const trace: import("../../src/core/search.js").SearchTrace = {};
+    const trace: import("../../src/core/retrieval/search.js").SearchTrace = {};
     await researcher.research("bad", { _trace: trace });
 
     expect(trace.degraded_reason).toBe("reasoning_parse_failed");
@@ -581,7 +581,7 @@ describe("ResearchManager", () => {
     ]);
 
     const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
-    const trace: import("../../src/core/search.js").SearchTrace = {};
+    const trace: import("../../src/core/retrieval/search.js").SearchTrace = {};
     await researcher.research("combo", { _trace: trace });
 
     expect(typeof trace.rerank_ms).toBe("number");
@@ -744,7 +744,7 @@ describe("ResearchManager", () => {
     // Custom mock that writes to _trace when called
     const mockSearch: HybridSearch = {
       search: async (query: string, options?: unknown) => {
-        const opts = options as import("../../src/core/search.js").SearchOptions | undefined;
+        const opts = options as import("../../src/core/retrieval/search.js").SearchOptions | undefined;
         if (opts?._trace && query === "traceFollow") {
           // Simulate search writing vector_ms to trace
           opts._trace.vector_ms = (opts._trace.vector_ms ?? 0) + 42;
@@ -760,7 +760,7 @@ describe("ResearchManager", () => {
     ]);
 
     const researcher = new ResearchManager(mockSearch, db, llm);
-    const trace: import("../../src/core/search.js").SearchTrace = {};
+    const trace: import("../../src/core/retrieval/search.js").SearchTrace = {};
     await researcher.research("traceRoot", { _trace: trace });
 
     // Follow-up search wrote vector_ms through the propagated _trace

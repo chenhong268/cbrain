@@ -1,10 +1,10 @@
-import { CBrainDB } from "../storage/sqlite.js";
-import type { PageManager } from "./page.js";
-import type { GraphManager } from "./graph/graph.js";
-import type { LLMProvider } from "../llm/provider.js";
-import type { ContentPipeline } from "./ingestion/pipeline.js";
-import type { Logger } from "./logger.js";
-import { getHierarchyContext } from "./graph/hierarchy.js";
+import { CBrainDB } from "../../storage/sqlite.js";
+import type { PageManager } from "../page.js";
+import type { GraphManager } from "../graph/graph.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import type { ContentPipeline } from "../ingestion/pipeline.js";
+import type { Logger } from "../logger.js";
+import { getHierarchyContext } from "../graph/hierarchy.js";
 
 const DOSSIER_OPEN = "<!-- cbrain-dossier -->";
 const DOSSIER_CLOSE = "<!-- /cbrain-dossier -->";

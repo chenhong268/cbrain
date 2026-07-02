@@ -7,7 +7,7 @@ import {
   rrfScore,
   mergeRankedResults,
   type SearchResult,
-} from "../../src/core/search.js";
+} from "../../src/core/retrieval/search.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {

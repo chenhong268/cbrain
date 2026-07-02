@@ -14,7 +14,7 @@ export function register(program: Command) {
       const needsEmbedding = opts.strategy === "vector" || opts.strategy === "all";
       const deps = createDeps(config, needsEmbedding);
       if (needsEmbedding) await deps.lance.connect(config.lancePath);
-      const { HybridSearch } = await import("../../core/search.js");
+      const { HybridSearch } = await import("../../core/retrieval/search.js");
       const search = new HybridSearch(deps.db, deps.embedding, deps.lance);
       const results = await search.search(query, { strategy: opts.strategy, limit: parseInt(opts.limit, 10) });
       if (results.length === 0) { console.log("没有找到相关内容。"); } else {

@@ -10,7 +10,7 @@ import {
   EvidenceBoard,
   type EvidenceBoardResult,
   type EvidenceItem,
-} from "../../src/core/evidence.js";
+} from "../../src/core/retrieval/evidence.js";
 
 // ─── Helpers ─────────────────────────────────────────────────
 

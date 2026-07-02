@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
-import { GroundedAnswerer, buildGroundedRecall } from "../../src/core/grounded-answer.js";
-import type { EvidenceBoardResult, EvidenceItem } from "../../src/core/evidence.js";
+import { GroundedAnswerer, buildGroundedRecall } from "../../src/core/retrieval/grounded-answer.js";
+import type { EvidenceBoardResult, EvidenceItem } from "../../src/core/retrieval/evidence.js";
 
 // ─── Helpers ──────────────────────────────────────────────────
 

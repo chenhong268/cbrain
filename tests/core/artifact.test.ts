@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { escapeHtml, renderArtifact, Anonymizer, BLOCKED_FIELD_PATTERNS } from "../../src/core/artifact.js";
+import { escapeHtml, renderArtifact, Anonymizer, BLOCKED_FIELD_PATTERNS } from "../../src/core/retrieval/artifact.js";
 import type { PipelineResult } from "../../src/core/agentic/pipeline.js";
-import type { GroundedRecallResult } from "../../src/core/grounded-answer.js";
-import type { ArtifactInput, RenderOptions } from "../../src/core/artifact.js";
+import type { GroundedRecallResult } from "../../src/core/retrieval/grounded-answer.js";
+import type { ArtifactInput, RenderOptions } from "../../src/core/retrieval/artifact.js";
 
 // ─── Fixtures ─────────────────────────────────────────────────
 

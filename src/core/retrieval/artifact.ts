@@ -1,4 +1,4 @@
-import type { PipelineResult, PipelineStatus } from "./agentic/pipeline.js";
+import type { PipelineResult, PipelineStatus } from "../agentic/pipeline.js";
 import type { Confidence } from "./grounded-answer.js";
 import type { GroundedRecallResult } from "./grounded-answer.js";
 

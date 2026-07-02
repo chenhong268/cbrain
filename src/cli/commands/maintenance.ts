@@ -811,7 +811,7 @@ export function register(program: Command) {
         process.exit(1);
       }
 
-      const { generateDossier, isDossierFresh } = await import("../../core/dossier.js");
+      const { generateDossier, isDossierFresh } = await import("../../core/retrieval/dossier.js");
       const { PageManager } = await import("../../core/page.js");
       const { GraphManager } = await import("../../core/graph/graph.js");
       const { Logger } = await import("../../core/logger.js");

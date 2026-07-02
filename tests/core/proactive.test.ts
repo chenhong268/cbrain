@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { generateProactiveHints } from "../../src/core/proactive.js";
+import { generateProactiveHints } from "../../src/core/retrieval/proactive.js";
 
 function makeCtx(db: CBrainDB) {
   return { db } as any;

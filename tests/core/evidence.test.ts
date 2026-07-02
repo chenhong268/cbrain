@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { EvidenceBoard, collectEvidenceForSlugs, type EvidenceItem, type EvidenceSource } from "../../src/core/evidence.js";
+import { EvidenceBoard, collectEvidenceForSlugs, type EvidenceItem, type EvidenceSource } from "../../src/core/retrieval/evidence.js";
 
 // ─── Helpers ──────────────────────────────────────────────────
 

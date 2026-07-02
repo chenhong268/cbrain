@@ -1,5 +1,5 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
-import type { HybridSearch } from "../search.js";
+import type { HybridSearch } from "../retrieval/search.js";
 import type { GraphManager, GraphNode } from "../graph/graph.js";
 import type { PageManager } from "../page.js";
 import type { LLMProvider } from "../../llm/provider.js";
@@ -9,7 +9,7 @@ import type {
   SearchPlanBudget,
 } from "./plan.js";
 import { isFallback } from "./plan.js";
-import { collectEvidenceForSlugs, type EvidenceBoardResult } from "../evidence.js";
+import { collectEvidenceForSlugs, type EvidenceBoardResult } from "../retrieval/evidence.js";
 
 // --- Executor Context (minimal read-only subset of ToolContext) ---
 

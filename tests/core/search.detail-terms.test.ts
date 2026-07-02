@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { extractDetailTerms } from "../../src/core/search.js";
+import { extractDetailTerms } from "../../src/core/retrieval/search.js";
 
 describe("extractDetailTerms", () => {
   test("extracts IDs, dates, numbers+units, latin tokens", () => {

@@ -2994,14 +2994,14 @@ export class CBrainDB {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_steps_session_index ON search_trace_steps(session_id, step_index)");
   }
 
-  startSearchTraceSession(input: import("../core/search-trace.js").StartSearchTraceSessionInput): number {
+  startSearchTraceSession(input: import("../core/retrieval/search-trace.js").StartSearchTraceSessionInput): number {
     const result = this.prepare(
       "INSERT INTO search_trace_sessions (query, mode, intent) VALUES ($query, $mode, $intent)"
     ).run({ $query: input.query, $mode: input.mode, $intent: input.intent ?? null });
     return Number(result.lastInsertRowid);
   }
 
-  finishSearchTraceSession(id: number, patch: import("../core/search-trace.js").FinishSearchTraceSessionInput): void {
+  finishSearchTraceSession(id: number, patch: import("../core/retrieval/search-trace.js").FinishSearchTraceSessionInput): void {
     this.prepare(
       `UPDATE search_trace_sessions
        SET ended_at = datetime('now'),
@@ -3021,7 +3021,7 @@ export class CBrainDB {
     });
   }
 
-  addSearchTraceStep(input: import("../core/search-trace.js").AddSearchTraceStepInput): void {
+  addSearchTraceStep(input: import("../core/retrieval/search-trace.js").AddSearchTraceStepInput): void {
     this.prepare(
       "INSERT INTO search_trace_steps (session_id, step_index, kind, input_json, output_summary, latency_ms, error) VALUES ($sessionId, $stepIndex, $kind, $inputJson, $outputSummary, $latencyMs, $error)"
     ).run({
@@ -3035,7 +3035,7 @@ export class CBrainDB {
     });
   }
 
-  getRecentSearchTraceSessions(limit: number = 20): Array<import("../core/search-trace.js").SearchTraceSessionRow> {
+  getRecentSearchTraceSessions(limit: number = 20): Array<import("../core/retrieval/search-trace.js").SearchTraceSessionRow> {
     const rows = this.prepare(
       "SELECT id, query, mode, intent, started_at, ended_at, latency_ms, status, llm_calls, total_steps, summary_json FROM search_trace_sessions ORDER BY id DESC LIMIT $limit"
     ).all({ $limit: limit }) as Array<{ id: number; query: string; mode: string; intent: string | null; started_at: string; ended_at: string | null; latency_ms: number | null; status: string; llm_calls: number; total_steps: number; summary_json: string | null }>;
@@ -3045,7 +3045,7 @@ export class CBrainDB {
     }));
   }
 
-  getSearchTraceSteps(sessionId: number): Array<import("../core/search-trace.js").SearchTraceStepRow> {
+  getSearchTraceSteps(sessionId: number): Array<import("../core/retrieval/search-trace.js").SearchTraceStepRow> {
     const rows = this.prepare(
       "SELECT id, session_id, step_index, kind, input_json, output_summary, latency_ms, error, created_at FROM search_trace_steps WHERE session_id = $sessionId ORDER BY step_index ASC"
     ).all({ $sessionId: sessionId }) as Array<{ id: number; session_id: number; step_index: number; kind: string; input_json: string | null; output_summary: string | null; latency_ms: number | null; error: string | null; created_at: string }>;

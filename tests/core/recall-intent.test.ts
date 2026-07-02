@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { detectTemporalIntent, shouldCompleteEvidence } from "../../src/core/recall-intent.js";
+import { detectTemporalIntent, shouldCompleteEvidence } from "../../src/core/retrieval/recall-intent.js";
 
 describe("detectTemporalIntent (#232)", () => {
   test("temporal markers: 之前/上次/最近/后来/变化/时间线", () => {

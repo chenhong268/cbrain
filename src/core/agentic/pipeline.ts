@@ -5,7 +5,7 @@ import { SearchPlanBudget as SearchPlanBudgetSchema } from "./plan.js";
 import { SearchPlanner, type PlannerInput } from "./planner.js";
 import { AgenticResearchExecutor } from "./executor.js";
 import { evaluateSufficiency, type Confidence, type SufficiencyDecision } from "./critic.js";
-import type { EvidenceBoardResult, EvidenceItem } from "../evidence.js";
+import type { EvidenceBoardResult, EvidenceItem } from "../retrieval/evidence.js";
 
 // --- Public types ---
 

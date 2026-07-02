@@ -1,5 +1,5 @@
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { LinkRow } from "../storage/sqlite.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { LinkRow } from "../../storage/sqlite.js";
 
 // ─── Types ────────────────────────────────────────────────────
 

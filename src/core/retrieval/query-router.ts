@@ -1,5 +1,5 @@
 import { isComplexQuery } from "./search.js";
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
 
 export interface RouteResult {
   mode: "fast" | "hybrid" | "agentic";

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { EpisodicRecaller } from "../../core/episodic-recall.js";
+import { EpisodicRecaller } from "../../core/retrieval/episodic-recall.js";
 import { formatEpisodeEnvelope } from "./format-result.js";
 
 export function registerEpisodeTools(server: McpServer, ctx: ToolContext): void {

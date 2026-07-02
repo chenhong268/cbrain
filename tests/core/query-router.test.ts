@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { QueryRouter, } from "../../src/core/query-router.js";
+import { QueryRouter, } from "../../src/core/retrieval/query-router.js";
 
 function insertPage(db: CBrainDB, slug: string, title: string) {
   db.rawDb.prepare(

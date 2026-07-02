@@ -1,9 +1,9 @@
 import type { Link } from "../../core/graph/graph.js";
 import { mapSourceType } from "../../core/provenance.js";
-import type { ProactiveHint } from "../../core/proactive.js";
+import type { ProactiveHint } from "../../core/retrieval/proactive.js";
 import type { PageFrontmatter } from "../../utils/frontmatter.js";
 import type { Page } from "../../core/page.js";
-import type { SearchResult } from "../../core/search.js";
+import type { SearchResult } from "../../core/retrieval/search.js";
 
 const KNOWN_FM_KEYS = new Set([
   "title", "type", "slug", "tags", "tier",

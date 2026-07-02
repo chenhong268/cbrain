@@ -5,8 +5,8 @@ import {
   RECALL_MIN_SCORE,
   BARE_STUB_PENALTY,
   type PageLike,
-} from "../../src/core/search.js";
-import type { SearchResult } from "../../src/core/search.js";
+} from "../../src/core/retrieval/search.js";
+import type { SearchResult } from "../../src/core/retrieval/search.js";
 
 const sr = (slug: string, score: number, source: SearchResult["source"] = "hybrid"): SearchResult =>
   ({ slug, score, snippet: "", source });

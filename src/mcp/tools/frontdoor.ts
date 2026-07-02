@@ -1,15 +1,15 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { classifyFrontdoorQuery, type FrontdoorRoutingDecision } from "../../core/frontdoor-router.js";
-import { EpisodicRecaller } from "../../core/episodic-recall.js";
+import { classifyFrontdoorQuery, type FrontdoorRoutingDecision } from "../../core/retrieval/frontdoor-router.js";
+import { EpisodicRecaller } from "../../core/retrieval/episodic-recall.js";
 import { getOrgTree } from "../../core/graph/hierarchy.js";
 import { AgenticResearchPipeline } from "../../core/agentic/pipeline.js";
 import type { SearchPlanIntent } from "../../core/agentic/plan.js";
-import { buildGroundedRecall } from "../../core/grounded-answer.js";
-import { collectEvidenceForSlugs } from "../../core/evidence.js";
-import { shouldCompleteEvidence } from "../../core/recall-intent.js";
-import { assembleEvidencePack } from "../../core/evidence-completion.js";
+import { buildGroundedRecall } from "../../core/retrieval/grounded-answer.js";
+import { collectEvidenceForSlugs } from "../../core/retrieval/evidence.js";
+import { shouldCompleteEvidence } from "../../core/retrieval/recall-intent.js";
+import { assembleEvidencePack } from "../../core/retrieval/evidence-completion.js";
 import {
   formatEpisodeEnvelope,
   formatGroundedRecallEnvelope,

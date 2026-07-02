@@ -12,7 +12,7 @@
  * pages are kept at `summary_level=0` by the seal stage, so a sealed summary
  * still yields its raw detail here (marked `sealed: true`).
  */
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
 import { extractDetailTerms } from "./search.js";
 
 export interface EvidenceTimelineHit {
