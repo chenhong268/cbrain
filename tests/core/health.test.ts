@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { HealthChecker } from "../../src/core/health.js";
+import { HealthChecker } from "../../src/core/maintenance/health.js";
 
 describe("HealthChecker", () => {
   const testDir = "/tmp/cbrain-test-health";
@@ -305,7 +305,7 @@ describe("HealthChecker", () => {
   });
 
   describe("classifyContextPair", () => {
-    const { classifyContextPair } = require("../../src/core/health.js") as typeof import("../../src/core/health.js");
+    const { classifyContextPair } = require("../../src/core/maintenance/health.js") as typeof import("../../src/core/maintenance/health.js");
 
     test("complementary: low overlap (different topics)", () => {
       expect(classifyContextPair("负责区域A销售", "主导产品研发团队")).toBe("complementary");

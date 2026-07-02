@@ -1,11 +1,11 @@
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { LLMProvider } from "../llm/provider.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
-import { LanceDBManager } from "../storage/lancedb.js";
-import type { PageManager } from "./page.js";
-import type { ContentPipeline } from "./ingestion/pipeline.js";
-import type { Logger } from "./logger.js";
-import type { SearchProvider } from "../search/provider.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
+import { LanceDBManager } from "../../storage/lancedb.js";
+import type { PageManager } from "../page.js";
+import type { ContentPipeline } from "../ingestion/pipeline.js";
+import type { Logger } from "../logger.js";
+import type { SearchProvider } from "../../search/provider.js";
 
 const CONCURRENCY = 3;
 const DEFAULT_MENTION_THRESHOLD = 3;

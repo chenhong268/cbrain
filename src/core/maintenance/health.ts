@@ -1,12 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { MetricsSnapshot } from "./audit.js";
-import type { Logger } from "./logger.js";
-import { isValidRelation } from "./shared.js";
-import { extractWikiLinks, stripKnownRelationsSection, isValidEntityName } from "./ingestion/extract.js";
-import { parseFrontmatter } from "../utils/frontmatter.js";
-import { findEntitySlug } from "./shared.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { MetricsSnapshot } from "../audit.js";
+import type { Logger } from "../logger.js";
+import { isValidRelation } from "../shared.js";
+import { extractWikiLinks, stripKnownRelationsSection, isValidEntityName } from "../ingestion/extract.js";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
+import { findEntitySlug } from "../shared.js";
 
 // ─── Contradiction classification ─────────────────────────────
 

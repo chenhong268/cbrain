@@ -6,12 +6,12 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve, relative } from "node:path";
-import type { CBrainConfig } from "../cli/context.js";
-import { loadConfigSafe, resolveRuntimePath } from "../cli/context.js";
-import type { ReadinessState, NextAction } from "../cli/init-types.js";
-import { CBrainDB } from "../storage/sqlite.js";
-import { WatcherLock } from "../utils/watcher-lock.js";
-import { checkLanceIntegrity } from "../storage/lance-integrity.js";
+import type { CBrainConfig } from "../../cli/context.js";
+import { loadConfigSafe, resolveRuntimePath } from "../../cli/context.js";
+import type { ReadinessState, NextAction } from "../../cli/init-types.js";
+import { CBrainDB } from "../../storage/sqlite.js";
+import { WatcherLock } from "../../utils/watcher-lock.js";
+import { checkLanceIntegrity } from "../../storage/lance-integrity.js";
 
 // ── Types ──
 

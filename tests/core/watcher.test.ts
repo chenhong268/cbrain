@@ -2,9 +2,9 @@ import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { FileWatcher } from "../../src/core/watcher.js";
-import { TitleCollisionError } from "../../src/core/sync.js";
-import type { SyncManager } from "../../src/core/sync.js";
+import { FileWatcher } from "../../src/core/maintenance/watcher.js";
+import { TitleCollisionError } from "../../src/core/maintenance/sync.js";
+import type { SyncManager } from "../../src/core/maintenance/sync.js";
 import type { Logger } from "../../src/core/logger.js";
 
 describe("FileWatcher", () => {

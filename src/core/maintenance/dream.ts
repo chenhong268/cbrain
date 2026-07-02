@@ -3,30 +3,30 @@ import { appendFile, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { CBrainDB } from "../storage/sqlite.js";
+import { CBrainDB } from "../../storage/sqlite.js";
 import type { SyncManager } from "./sync.js";
 import type { EnrichManager } from "./enrich.js";
 import type { HealthChecker } from "./health.js";
-import type { Logger } from "./logger.js";
-import type { InsightManager } from "./insight.js";
-import { LearnManager } from "./learn.js";
-import { IndexGenerator } from "./indexes.js";
-import type { LLMProvider } from "../llm/provider.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
-import type { LanceDBManager } from "../storage/lancedb.js";
-import type { SearchProvider } from "../search/provider.js";
+import type { Logger } from "../logger.js";
+import type { InsightManager } from "../insight.js";
+import { LearnManager } from "../learn.js";
+import { IndexGenerator } from "../indexes.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
+import type { LanceDBManager } from "../../storage/lancedb.js";
+import type { SearchProvider } from "../../search/provider.js";
 import { SealManager } from "./seal.js";
 import { StubEnrichManager } from "./stub-enrich.js";
-import { ContentPipeline } from "./ingestion/pipeline.js";
-import { runNerBackfillStage, emptyNerBackfillCounts, type NerBackfillCounts } from "./ingestion/ner-backfill.js";
-import { PageManager } from "./page.js";
+import { ContentPipeline } from "../ingestion/pipeline.js";
+import { runNerBackfillStage, emptyNerBackfillCounts, type NerBackfillCounts } from "../ingestion/ner-backfill.js";
+import { PageManager } from "../page.js";
 import { WakeupDiff } from "./wakeup.js";
 import {
   runKnowledgeMapStage,
   defaultKnowledgeMapStageResult,
   knowledgeMapBriefLine,
   type KnowledgeMapStageResult,
-} from "./knowledge-map/schedule.js";
+} from "../knowledge-map/schedule.js";
 
 export interface DreamReport {
   timestamp: string;

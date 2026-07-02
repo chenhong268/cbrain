@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { ReflectManager } from "../../src/core/reflect.js";
+import { ReflectManager } from "../../src/core/maintenance/reflect.js";
 import { PageManager } from "../../src/core/page.js";
 import type { LLMProvider, ChatMessage } from "../../src/llm/provider.js";
 

@@ -8,7 +8,7 @@ import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
 import { PageManager } from "../../src/core/page.js";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
-import { StubEnrichManager } from "../../src/core/stub-enrich.js";
+import { StubEnrichManager } from "../../src/core/maintenance/stub-enrich.js";
 
 function makeLLM(response: string): LLMProvider {
   return {

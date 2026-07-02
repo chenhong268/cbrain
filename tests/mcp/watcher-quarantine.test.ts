@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
-import type { SyncManager } from "../../src/core/sync.js";
+import type { SyncManager } from "../../src/core/maintenance/sync.js";
 
 function runtimeDir(dbPath: string) {
   return join(dirname(dbPath), "runtime");
@@ -212,7 +212,7 @@ describe("MCP watcher_quarantine with live FileWatcher", () => {
     const sync = createMockSync();
     // FileWatcher needs a real-ish vault dir
     mkdirSync(vaultPath, { recursive: true });
-    const { FileWatcher } = require("../../src/core/watcher.js") as typeof import("../../src/core/watcher.js");
+    const { FileWatcher } = require("../../src/core/maintenance/watcher.js") as typeof import("../../src/core/maintenance/watcher.js");
     // Manually inject quarantine entries into the DB
     // (simulating files that were quarantined during previous watcher runs)
     const quarantineData: Record<string, { failCount: number; lastError: string; quarantinedAt: string; hash?: string; fullPath?: string }> = {
@@ -438,7 +438,7 @@ describe("MCP watcher bulk_status and bulk_resume", () => {
       pausedAt: new Date().toISOString(),
     }));
 
-    const { FileWatcher } = await import("../../src/core/watcher.js");
+    const { FileWatcher } = await import("../../src/core/maintenance/watcher.js");
     const mockSync = {
       syncPage: mock(async () => ({ success: true })),
       removePage: mock(async () => {}),

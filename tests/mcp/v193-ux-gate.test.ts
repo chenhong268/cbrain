@@ -25,8 +25,8 @@ import {
   formatRemoveProfileEnvelope,
   formatReloadProfileEnvelope,
 } from "../../src/mcp/tools/format-result.js";
-import type { HealthReport } from "../../src/core/health.js";
-import type { WakeupDiffResult } from "../../src/core/wakeup.js";
+import type { HealthReport } from "../../src/core/maintenance/health.js";
+import type { WakeupDiffResult } from "../../src/core/maintenance/wakeup.js";
 import { formatWakeupEnvelope } from "../../src/mcp/tools/wakeup.js";
 
 // ─── Shared banned terms ────────────────────────────────────

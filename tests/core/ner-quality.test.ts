@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
 import type { ExtractionResult } from "../../src/core/ingestion/ner.js";
-import { HealthChecker } from "../../src/core/health.js";
+import { HealthChecker } from "../../src/core/maintenance/health.js";
 
 describe("ner_quality_log storage", () => {
   const testDir = "/tmp/cbrain-test-ner-quality";

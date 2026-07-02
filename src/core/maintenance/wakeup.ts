@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { Logger } from "./logger.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { Logger } from "../logger.js";
 
 const MAX_LINES = 20;
 const MAX_SNAPSHOTS = 7;

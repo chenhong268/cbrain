@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { formatHealthEnvelope, formatDreamStatusEnvelope } from "../../src/mcp/tools/format-result.js";
-import type { HealthReport } from "../../src/core/health.js";
+import type { HealthReport } from "../../src/core/maintenance/health.js";
 
 const BANNED_IN_DISPLAY = [
   "slug", "score", "confidence", "source_type", "weight",

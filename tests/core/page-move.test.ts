@@ -13,7 +13,7 @@ import {
 import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { PageManager, RollbackIncompleteError, CleanupIncompleteError } from "../../src/core/page.js";
-import { SyncManager } from "../../src/core/sync.js";
+import { SyncManager } from "../../src/core/maintenance/sync.js";
 import {
   atomicSlugChange,
   atomicTypeChange,

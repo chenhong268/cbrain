@@ -4,8 +4,8 @@ import {
   planToMarkdown,
   slugToAnonymousToken,
   type PageSignals,
-} from "../../src/core/health-debt.js";
-import type { HealthReport, HealthDimension, HealthIssue } from "../../src/core/health.js";
+} from "../../src/core/maintenance/health-debt.js";
+import type { HealthReport, HealthDimension, HealthIssue } from "../../src/core/maintenance/health.js";
 
 // ─── Fixtures (anonymous only — entity/entity-a, 实体A, 组织C, records/record-a) ──
 

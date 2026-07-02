@@ -1,8 +1,8 @@
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { LLMProvider } from "../llm/provider.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
-import { LanceDBManager } from "../storage/lancedb.js";
-import type { Logger } from "./logger.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
+import { LanceDBManager } from "../../storage/lancedb.js";
+import type { Logger } from "../logger.js";
 
 const CONCURRENCY = 3;
 

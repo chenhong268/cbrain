@@ -1,8 +1,8 @@
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { LLMProvider, ChatMessage } from "../llm/provider.js";
-import type { PageManager } from "./page.js";
-import type { ContentPipeline } from "./ingestion/pipeline.js";
-import type { InsightManager } from "./insight.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { LLMProvider, ChatMessage } from "../../llm/provider.js";
+import type { PageManager } from "../page.js";
+import type { ContentPipeline } from "../ingestion/pipeline.js";
+import type { InsightManager } from "../insight.js";
 
 export interface SynthesisResult {
   slug: string;
@@ -145,7 +145,7 @@ export class ReflectManager {
   private db: CBrainDB;
   private llm: LLMProvider | null;
   private insightMgr: InsightManager | null;
-  private logger?: import("./logger.js").Logger;
+  private logger?: import("../logger.js").Logger;
   private readonly maxEntities: number;
   private readonly maxLlmCalls: number;
   private readonly maxConsecutiveTimeouts: number;
@@ -156,7 +156,7 @@ export class ReflectManager {
   private consecutiveTimeouts = 0;
   private aborted = false;
 
-  constructor(db: CBrainDB, _pageMgr: PageManager, llm?: LLMProvider, _pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager, logger?: import("./logger.js").Logger, opts?: ReflectOptions) {
+  constructor(db: CBrainDB, _pageMgr: PageManager, llm?: LLMProvider, _pipeline?: ContentPipeline, _embedding?: unknown, insightMgr?: InsightManager, logger?: import("../logger.js").Logger, opts?: ReflectOptions) {
     this.db = db;
     this.llm = llm ?? null;
     this.insightMgr = insightMgr ?? null;

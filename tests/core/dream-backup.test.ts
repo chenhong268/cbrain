@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { runDream } from "../../src/core/dream.js";
-import type { SyncManager } from "../../src/core/sync.js";
-import type { EnrichManager } from "../../src/core/enrich.js";
-import type { HealthChecker } from "../../src/core/health.js";
+import { runDream } from "../../src/core/maintenance/dream.js";
+import type { SyncManager } from "../../src/core/maintenance/sync.js";
+import type { EnrichManager } from "../../src/core/maintenance/enrich.js";
+import type { HealthChecker } from "../../src/core/maintenance/health.js";
 import type { Logger } from "../../src/core/logger.js";
 
 function makeMockSync(): SyncManager {

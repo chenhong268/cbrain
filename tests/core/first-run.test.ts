@@ -7,8 +7,8 @@ import {
   runFirstRunDoctor,
   formatHuman,
   formatJson,
-} from "../../src/core/first-run.js";
-import type { FirstRunReport } from "../../src/core/first-run.js";
+} from "../../src/core/maintenance/first-run.js";
+import type { FirstRunReport } from "../../src/core/maintenance/first-run.js";
 
 // Re-import internal check functions via a test-only re-export approach.
 // We test through the runner and also test formatters.

@@ -6,7 +6,7 @@ import { createHttpServer } from "../../http/server.js";
 import { PidLock, evaluateWriterGate, type WriterOwner } from "../../utils/pid-lock.js";
 import { FKMigrationError } from "../../storage/sqlite.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
-import { DEFAULT_STOP_DEADLINE_MS, type FileWatcher } from "../../core/watcher.js";
+import { DEFAULT_STOP_DEADLINE_MS, type FileWatcher } from "../../core/maintenance/watcher.js";
 import { dirname, resolve } from "node:path";
 export interface ShutdownHandles {
   httpServer?: { stop(immediate?: boolean): void };
@@ -96,9 +96,9 @@ async function initWatcher(config: ReturnType<typeof loadConfig>, deps: ReturnTy
   const nerLLM = nerApiKey ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model) : undefined;
   const nerEngine = nerLLM ? new NerEngine(nerLLM) : undefined;
   console.error(`> Watcher NER: ${nerEngine ? "enabled" : "DISABLED (no API key)"}`);
-  const { SyncManager } = await import("../../core/sync.js");
+  const { SyncManager } = await import("../../core/maintenance/sync.js");
   const watcherSync = new SyncManager(deps.db, deps.embedding, deps.lance, { pages, nerEngine });
-  const { FileWatcher } = await import("../../core/watcher.js");
+  const { FileWatcher } = await import("../../core/maintenance/watcher.js");
   const { Logger } = await import("../../core/logger.js");
   const logger = new Logger(resolveRuntimePath(config));
   const watcher = new FileWatcher(watcherSync, config.vaultPath, { logger, db: deps.db });

@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { EnrichManager } from "../../src/core/enrich.js";
+import { EnrichManager } from "../../src/core/maintenance/enrich.js";
 
 function insertEntity(
   db: CBrainDB,

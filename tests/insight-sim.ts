@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { PageManager } from "../src/core/page.js";
 import { Logger } from "../src/core/logger.js";
-import { ReflectManager } from "../src/core/reflect.js";
+import { ReflectManager } from "../src/core/maintenance/reflect.js";
 import { loadConfig, createDeps } from "../src/cli/context.js";
 
 const full = process.argv.includes("--full");

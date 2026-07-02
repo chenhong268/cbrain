@@ -293,7 +293,7 @@ describe("Ingest dedup", () => {
   // ─── P1: Sync stale hash — fault injection ──────────────────
 
   test("sync preserves ingest hash on index failure (cleared only after success)", async () => {
-    const { SyncManager } = await import("../../src/core/sync.js");
+    const { SyncManager } = await import("../../src/core/maintenance/sync.js");
     const { writeFileSync } = await import("node:fs");
     const { hashContent } = await import("../../src/core/shared.js");
     const { stringifyFrontmatter } = await import("../../src/utils/frontmatter.js");
@@ -353,7 +353,7 @@ describe("Ingest dedup", () => {
   });
 
   test("syncPage: frontmatter-only change preserves ingest hash", async () => {
-    const { SyncManager } = await import("../../src/core/sync.js");
+    const { SyncManager } = await import("../../src/core/maintenance/sync.js");
     const { writeFileSync: writeFile } = await import("node:fs");
     const { stringifyFrontmatter } = await import("../../src/utils/frontmatter.js");
 

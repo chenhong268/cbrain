@@ -3,16 +3,16 @@ import { existsSync, rmSync, mkdtempSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { runDream } from "../../src/core/dream.js";
+import { runDream } from "../../src/core/maintenance/dream.js";
 import { PageManager } from "../../src/core/page.js";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
 import { NerEngine } from "../../src/core/ingestion/ner.js";
 import { IngestManager } from "../../src/core/ingestion/ingest.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
-import type { SyncManager } from "../../src/core/sync.js";
-import type { EnrichManager } from "../../src/core/enrich.js";
-import type { HealthChecker } from "../../src/core/health.js";
+import type { SyncManager } from "../../src/core/maintenance/sync.js";
+import type { EnrichManager } from "../../src/core/maintenance/enrich.js";
+import type { HealthChecker } from "../../src/core/maintenance/health.js";
 import type { Logger } from "../../src/core/logger.js";
 
 // ---- mock helpers (mirrored from dream-backup.test.ts) ----

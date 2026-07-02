@@ -1,6 +1,6 @@
-import { CBrainDB } from "../storage/sqlite.js";
-import type { LLMProvider } from "../llm/provider.js";
-import type { PageManager } from "./page.js";
+import { CBrainDB } from "../../storage/sqlite.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import type { PageManager } from "../page.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 

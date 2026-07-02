@@ -3,16 +3,16 @@ import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync } from "node:
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { runDream } from "../../src/core/dream.js";
+import { runDream } from "../../src/core/maintenance/dream.js";
 import {
   runKnowledgeMapStage,
   shouldRunKnowledgeMap,
   KM_ENABLED_KEY,
   KM_LAST_RUN_KEY,
 } from "../../src/core/knowledge-map/schedule.js";
-import type { SyncManager } from "../../src/core/sync.js";
-import type { EnrichManager } from "../../src/core/enrich.js";
-import type { HealthChecker } from "../../src/core/health.js";
+import type { SyncManager } from "../../src/core/maintenance/sync.js";
+import type { EnrichManager } from "../../src/core/maintenance/enrich.js";
+import type { HealthChecker } from "../../src/core/maintenance/health.js";
 import type { Logger } from "../../src/core/logger.js";
 
 const MS_PER_DAY = 86_400_000;

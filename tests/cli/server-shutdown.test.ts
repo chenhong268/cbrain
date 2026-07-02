@@ -3,7 +3,7 @@ import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node
 import { join } from "node:path";
 import { createServer as createNetServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import type { SyncManager } from "../../src/core/sync.js";
+import type { SyncManager } from "../../src/core/maintenance/sync.js";
 import { performGracefulShutdown, type ShutdownHandles } from "../../src/cli/commands/server.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { Database } from "bun:sqlite";
@@ -164,7 +164,7 @@ describe("Cross-process quarantine release (dual context)", () => {
   let db: any;
 
   const { CBrainDB } = require("../../src/storage/sqlite.js") as typeof import("../../src/storage/sqlite.js");
-  const { FileWatcher } = require("../../src/core/watcher.js") as typeof import("../../src/core/watcher.js");
+  const { FileWatcher } = require("../../src/core/maintenance/watcher.js") as typeof import("../../src/core/maintenance/watcher.js");
 
   const noOpSync = {
     syncPage: async () => ({ success: true }),

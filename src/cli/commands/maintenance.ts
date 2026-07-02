@@ -22,7 +22,7 @@ import {
   createLiveLockProbe,
   type LockProbe,
 } from "./reindex.js";
-import type { PageSignals } from "../../core/health-debt.js";
+import type { PageSignals } from "../../core/maintenance/health-debt.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -236,7 +236,7 @@ export function register(program: Command) {
       }
 
       await deps.lance.connect(config.lancePath);
-      const { SyncManager } = await import("../../core/sync.js");
+      const { SyncManager } = await import("../../core/maintenance/sync.js");
       const { NerEngine } = await import("../../core/ingestion/ner.js");
       const { PageManager } = await import("../../core/page.js");
       const pages = new PageManager(deps.db, config.vaultPath);
@@ -274,7 +274,7 @@ export function register(program: Command) {
       const apiKey = config.embedding.apiKey ?? process.env.ZHIPU_API_KEY;
       const nerApiKey = config.ner?.llm_api_key ?? apiKey;
       const llm = nerApiKey ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model) : undefined;
-      const { EnrichManager } = await import("../../core/enrich.js");
+      const { EnrichManager } = await import("../../core/maintenance/enrich.js");
       const { PageManager } = await import("../../core/page.js");
       const pages = new PageManager(db, config.vaultPath);
       const enrich = new EnrichManager(db, undefined, llm, config.vaultPath, pages);
@@ -293,7 +293,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const outputsDir = resolveRuntimePath(config);
-      const { HealthChecker } = await import("../../core/health.js");
+      const { HealthChecker } = await import("../../core/maintenance/health.js");
       const { Logger } = await import("../../core/logger.js");
       const logger = new Logger(outputsDir);
       const checker = new HealthChecker(db, outputsDir, logger, config.vaultPath);
@@ -369,9 +369,9 @@ export function register(program: Command) {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const outputsDir = resolveRuntimePath(config);
-      const { HealthChecker } = await import("../../core/health.js");
+      const { HealthChecker } = await import("../../core/maintenance/health.js");
       const { Logger } = await import("../../core/logger.js");
-      const { planRepairs, planToMarkdown } = await import("../../core/health-debt.js");
+      const { planRepairs, planToMarkdown } = await import("../../core/maintenance/health-debt.js");
       const logger = new Logger(outputsDir);
       const checker = new HealthChecker(db, outputsDir, logger, config.vaultPath);
       const report = await checker.checkAll();
@@ -409,7 +409,7 @@ export function register(program: Command) {
     .option("--json", "JSON 输出（配合 --first-run）")
     .action(async (opts: { firstRun?: boolean; json?: boolean }) => {
       if (opts.firstRun) {
-        const { runFirstRunDoctor, formatHuman, formatJson } = await import("../../core/first-run.js");
+        const { runFirstRunDoctor, formatHuman, formatJson } = await import("../../core/maintenance/first-run.js");
         const report = await runFirstRunDoctor();
         console.log(opts.json ? formatJson(report) : formatHuman(report));
         process.exit(report.overallStatus === "fail" ? 1 : 0);
@@ -496,11 +496,11 @@ export function register(program: Command) {
       const config = loadConfig();
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
-      const { runDream } = await import("../../core/dream.js");
-      const { SyncManager } = await import("../../core/sync.js");
-      const { EnrichManager } = await import("../../core/enrich.js");
+      const { runDream } = await import("../../core/maintenance/dream.js");
+      const { SyncManager } = await import("../../core/maintenance/sync.js");
+      const { EnrichManager } = await import("../../core/maintenance/enrich.js");
       const { InsightManager } = await import("../../core/insight.js");
-      const { HealthChecker } = await import("../../core/health.js");
+      const { HealthChecker } = await import("../../core/maintenance/health.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
       const { NerEngine } = await import("../../core/ingestion/ner.js");
@@ -549,7 +549,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
-      const { ReflectManager } = await import("../../core/reflect.js");
+      const { ReflectManager } = await import("../../core/maintenance/reflect.js");
       const { InsightManager } = await import("../../core/insight.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
@@ -618,7 +618,7 @@ export function register(program: Command) {
         process.exit(1);
       }
 
-      const { StubEnrichManager } = await import("../../core/stub-enrich.js");
+      const { StubEnrichManager } = await import("../../core/maintenance/stub-enrich.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
       const { ContentPipeline } = await import("../../core/ingestion/pipeline.js");
@@ -660,7 +660,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
-      const { ReflectManager } = await import("../../core/reflect.js");
+      const { ReflectManager } = await import("../../core/maintenance/reflect.js");
       const { InsightManager } = await import("../../core/insight.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
@@ -731,7 +731,7 @@ export function register(program: Command) {
       const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
-      const { ReflectManager } = await import("../../core/reflect.js");
+      const { ReflectManager } = await import("../../core/maintenance/reflect.js");
       const mgr = new ReflectManager(deps.db, pages, undefined, undefined, deps.embedding, undefined, logger);
       const report = await mgr.diagnoseCandidates();
 
@@ -2050,7 +2050,7 @@ Return JSON only, no markdown:
       const config = loadConfig();
       const deps = createDeps(config);
       const outputsDir = resolveRuntimePath(config);
-      const { WakeupDiff } = await import("../../core/wakeup.js");
+      const { WakeupDiff } = await import("../../core/maintenance/wakeup.js");
       const diff = new WakeupDiff(deps.db, outputsDir);
       const result = await diff.run();
 

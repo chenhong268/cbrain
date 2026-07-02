@@ -4,9 +4,9 @@ import { relative } from "node:path";
 import pLimit from "p-limit";
 import type { SyncManager, SyncPageResult, SyncDiagnostic } from "./sync.js";
 import { TitleCollisionError } from "./sync.js";
-import { hashContent, collectMarkdownFiles } from "./shared.js";
-import type { Logger } from "./logger.js";
-import type { CBrainDB } from "../storage/sqlite.js";
+import { hashContent, collectMarkdownFiles } from "../shared.js";
+import type { Logger } from "../logger.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
 
 export interface FileWatcherOpts {
   logger?: Logger;

@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { WakeupDiff } from "../../src/core/wakeup.js";
+import { WakeupDiff } from "../../src/core/maintenance/wakeup.js";
 
 describe("WakeupDiff", () => {
   const testDir = "/tmp/cbrain-test-wakeup";

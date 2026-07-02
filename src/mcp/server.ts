@@ -20,7 +20,7 @@ export interface CBrainDeps {
   llm?: LLMProvider;
   profileDir?: string;
   runtimePath: string;
-  watcher?: import("../core/watcher.js").FileWatcher;
+  watcher?: import("../core/maintenance/watcher.js").FileWatcher;
   search?: import("../search/provider.js").SearchProvider;
   /** #252: resolved ingest NER mode (env > config > sync), threaded into buildContext. */
   nerIngestMode?: IngestNerMode;
@@ -31,8 +31,8 @@ export interface CBrainDeps {
 /** Register dream job handler and start the background worker. Shared by MCP and HTTP paths. */
 export function registerDreamWorker(ctx: ToolContext): void {
   ctx.jobs.register("dream", async (_data, jobId) => {
-    const { runDream } = await import("../core/dream.js");
-    const { HealthChecker } = await import("../core/health.js");
+    const { runDream } = await import("../core/maintenance/dream.js");
+    const { HealthChecker } = await import("../core/maintenance/health.js");
     const report = await runDream(
       ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich,
       new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath),

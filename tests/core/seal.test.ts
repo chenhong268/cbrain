@@ -5,7 +5,7 @@ import { CBrainDB } from "../../src/storage/sqlite.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
-import { SealManager } from "../../src/core/seal.js";
+import { SealManager } from "../../src/core/maintenance/seal.js";
 
 function makeLLM(response: string): LLMProvider {
   return {

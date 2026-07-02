@@ -9,7 +9,7 @@ import type { SearchProvider, SearchResult } from "../../src/search/provider.js"
 import { LanceDBManager } from "../../src/storage/lancedb.js";
 import { PageManager } from "../../src/core/page.js";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
-import { StubEnrichManager } from "../../src/core/stub-enrich.js";
+import { StubEnrichManager } from "../../src/core/maintenance/stub-enrich.js";
 
 // ─── Mock factories ────────────────────────────────────────────
 

@@ -1,14 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { readFile, access, rename, mkdir, unlink } from "node:fs/promises";
 import { join, relative, dirname } from "node:path";
-import { CBrainDB } from "../storage/sqlite.js";
-import { parseFrontmatter } from "../utils/frontmatter.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
-import { LanceDBManager } from "../storage/lancedb.js";
-import { NerEngine, isNerTimeoutError } from "./ingestion/ner.js";
-import { PageManager } from "./page.js";
-import { canonicalSlug, slugToFilePath } from "../utils/slug.js";
-import type { Logger } from "./logger.js";
+import { CBrainDB } from "../../storage/sqlite.js";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
+import { LanceDBManager } from "../../storage/lancedb.js";
+import { NerEngine, isNerTimeoutError } from "../ingestion/ner.js";
+import { PageManager } from "../page.js";
+import { canonicalSlug, slugToFilePath } from "../../utils/slug.js";
+import type { Logger } from "../logger.js";
 import {
   chunkContent,
   hashContent,
@@ -16,8 +16,8 @@ import {
   DEFAULT_CHUNK_SIZE,
   normalizePageType,
   normalizeAndHashBody,
-} from "./shared.js";
-import { ContentPipeline } from "./ingestion/pipeline.js";
+} from "../shared.js";
+import { ContentPipeline } from "../ingestion/pipeline.js";
 import {
   snapshotIndexState,
   restoreIndexState,
@@ -25,7 +25,7 @@ import {
   SyncSnapshotError,
   sanitizeForLog,
   type IndexSnapshot,
-} from "./safety/sync-index-safety.js";
+} from "../safety/sync-index-safety.js";
 
 export class TitleCollisionError extends Error {
   constructor(

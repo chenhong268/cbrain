@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { WakeupDiff } from "../../core/wakeup.js";
+import { WakeupDiff } from "../../core/maintenance/wakeup.js";
 import type { ToolSummary } from "./format-result.js";
 
 export function registerWakeupTools(server: McpServer, ctx: ToolContext): void {
