@@ -15,6 +15,13 @@ export type ToolProfile = "agent" | "maintenance" | "debug" | "full";
 
 export const TOOL_PROFILES = ["agent", "maintenance", "debug", "full"] as const;
 
+/**
+ * Canonical HTTP header name for per-session tool-profile selection (#260, #264).
+ * The wire lookup in src/http/session-profile.ts lowercases this; MCP clients
+ * (`cbrain mcp-config --http`, bin/cbrain-maintenance.sh) emit it verbatim.
+ */
+export const TOOL_PROFILE_HEADER = "X-CBrain-Tool-Profile";
+
 const VALID_PROFILES: ReadonlySet<ToolProfile> = new Set(TOOL_PROFILES);
 
 /**

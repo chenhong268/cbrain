@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### Hermes 日常 session 防毒化（#264）
+
+- **`cbrain mcp-config --http`（#264）**：新增 HTTP/streamable MCP 配置生成路径，输出 `{ url, headers: { "X-CBrain-Tool-Profile": "agent" } }`，可配 `--port`/`--host`/`--profile`（默认 `127.0.0.1:3399` + `agent`）。这是 Hermes 多 Agent / 持久 serve single-writer 拓扑的正确配置形状——日常 session 走 `agent` 暴露面，摸不到 `sync`/`dream` 等慢维护工具，避免一次 300s 长调用毒化整个 MCP client 把记忆接口搞挂。stdio 默认行为不变（单用户本地开发）。bounded client timeout 作为 documented snippet 放 `docs/hermes-integration.md`（单位 client 侧约定，不进生成配置）。
+- **`ingest` 留在 `agent` profile**：靠 `agent` 排除慢工具 + bounded client timeout 两层兜底，砍了会逼 Agent 用 `put_page` 跳 NER 降级记忆质量。`tool-profiles` 测试锁定该决策。
+
 ### 运维（#262）
 
 - **只读 fsck 一致性检查（#262）**：新增 `cbrain fsck`，跨 vault/SQLite/FTS/LanceDB 四层报告存储一致性 + FK 孤儿，不写数据。exit `0`/`1`/`2`（pass / 发现一致性问题 / 检查器自身故障），`--json` 稳定 schema 供下游 Agent 解析，`--layer vault|sqlite|fts|lance` 限定单层。建议修复命令（`sync --reindex` / `repair-fk --execute` / `doctor`）只打印不执行。

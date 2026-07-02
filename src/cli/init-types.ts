@@ -56,3 +56,23 @@ export interface McpConfigOutput {
     };
   };
 }
+
+/**
+ * HTTP/streamable MCP config for the single-writer topology (#208, #264).
+ *
+ * Unlike `McpConfigOutput` (stdio — launches a per-agent `cbrain serve`), this
+ * points an MCP client at the already-running shared `cbrain serve --http` over
+ * `/mcp` and pins a tool profile via header so the daily-Agent session can't
+ * reach the long-running maintenance tools (`sync`/`dream`) that poison the
+ * 300s client timeout. No `command`/`env`: the client connects, it does not
+ * spawn. Timeout bounds live in docs (hermes-integration.md), not here — their
+ * unit is client-specific.
+ */
+export interface McpHttpConfigOutput {
+  readonly mcpServers: {
+    readonly cbrain: {
+      readonly url: string;
+      readonly headers: Record<string, string>;
+    };
+  };
+}

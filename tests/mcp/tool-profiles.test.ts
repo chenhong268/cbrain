@@ -61,6 +61,25 @@ describe("isToolAllowedForProfile", () => {
       expect(isToolAllowedForProfile(t, "debug")).toBe(true);
     }
   });
+
+  // #264: raw `ingest` stays in the agent surface BY DESIGN. Removing it would
+  // force daily Agents onto `put_page` (skips NER → no entity minting → degraded
+  // memory). The 300s client-poison failure mode is cured two layers out of
+  // ingest's reach: (1) the agent profile already excludes the guaranteed-slow
+  // tools (sync/dream — locked above), and (2) a bounded client timeout on the
+  // HTTP config (docs/hermes-integration.md) makes any single slow ingest fail
+  // fast instead of hanging the whole MCP client. ingest's synchronous NER is
+  // bounded by its 500k content cap + per-call timeout/fail-open
+  // (src/core/ner.ts NER_DEFAULT_TIMEOUT_MS); large captures should use
+  // `nerMode: "defer"` to skip synchronous NER entirely. This test locks the
+  // keep-decision against accidental removal.
+  test("ingest remains in agent by design (#264) — poison cure is profile + client timeout, not ingest removal", () => {
+    expect(isToolAllowedForProfile("ingest", "agent")).toBe(true);
+    // And the guaranteed-slow maintenance path that actually caused the poison
+    // stays excluded from agent:
+    expect(isToolAllowedForProfile("sync", "agent")).toBe(false);
+    expect(isToolAllowedForProfile("dream", "agent")).toBe(false);
+  });
 });
 
 describe("allowlist shape", () => {

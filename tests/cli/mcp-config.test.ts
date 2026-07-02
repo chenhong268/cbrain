@@ -254,3 +254,125 @@ describe("cbrain mcp-config", () => {
     expect(stderr).toContain("lancePath");
   });
 });
+
+// ── --http: single-writer HTTP topology (#264) ──
+
+describe("cbrain mcp-config --http", () => {
+  test("generateMcpHttpConfig defaults to 127.0.0.1:3399 + agent profile", async () => {
+    const { generateMcpHttpConfig } = await import("../../src/cli/commands/mcp-config.js");
+    const out = generateMcpHttpConfig({ host: "127.0.0.1", port: 3399, profile: "agent" });
+    expect(out.mcpServers.cbrain.url).toBe("http://127.0.0.1:3399/mcp");
+    expect(out.mcpServers.cbrain.headers["X-CBrain-Tool-Profile"]).toBe("agent");
+    // No stdio-launch fields — the client connects, it does not spawn cbrain.
+    expect((out.mcpServers.cbrain as unknown as Record<string, unknown>).command).toBeUndefined();
+    expect((out.mcpServers.cbrain as unknown as Record<string, unknown>).env).toBeUndefined();
+  });
+
+  test("generateMcpHttpConfig reflects host/port/profile overrides", async () => {
+    const { generateMcpHttpConfig } = await import("../../src/cli/commands/mcp-config.js");
+    const out = generateMcpHttpConfig({ host: "0.0.0.0", port: 4400, profile: "maintenance" });
+    expect(out.mcpServers.cbrain.url).toBe("http://0.0.0.0:4400/mcp");
+    expect(out.mcpServers.cbrain.headers["X-CBrain-Tool-Profile"]).toBe("maintenance");
+  });
+
+  test("CLI --http emits default url + agent header", () => {
+    const stdout = execSync(`${BIN} mcp-config --http`, { encoding: "utf-8" });
+    const parsed = JSON.parse(stdout);
+    expect(parsed.mcpServers.cbrain.url).toBe("http://127.0.0.1:3399/mcp");
+    expect(parsed.mcpServers.cbrain.headers["X-CBrain-Tool-Profile"]).toBe("agent");
+  });
+
+  test("CLI --http honors --port/--host/--profile", () => {
+    const stdout = execSync(
+      `${BIN} mcp-config --http --port 4400 --host 0.0.0.0 --profile maintenance`,
+      { encoding: "utf-8" },
+    );
+    const parsed = JSON.parse(stdout);
+    expect(parsed.mcpServers.cbrain.url).toBe("http://0.0.0.0:4400/mcp");
+    expect(parsed.mcpServers.cbrain.headers["X-CBrain-Tool-Profile"]).toBe("maintenance");
+  });
+
+  test("CLI --http --profile <invalid> fails fast", () => {
+    let stderr = "";
+    try {
+      execSync(`${BIN} mcp-config --http --profile garbage`, {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      expect.unreachable("should have thrown");
+    } catch (e: any) {
+      stderr = e.stderr ?? "";
+    }
+    expect(stderr).toContain("garbage");
+    expect(stderr).toMatch(/profile/i);
+  });
+
+  test("CLI --http --port <non-integer> fails fast (no silent truncation)", () => {
+    // Number.parseInt would silently turn "3399abc"→3399 and "3.14"→3, emitting
+    // a config that looks fine but connects to the wrong port. Strict match rejects them.
+    for (const bad of ["abc", "0", "99999", "-1", "3399abc", "3.14", "1e3", "0x10"]) {
+      let stderr = "";
+      try {
+        execSync(`${BIN} mcp-config --http --port "${bad}"`, {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        expect.unreachable(`should have thrown for --port ${bad}`);
+      } catch (e: any) {
+        stderr = e.stderr ?? "";
+      }
+      expect(stderr).toMatch(/--port/i);
+    }
+  });
+
+  test("CLI --http --port accepts a valid in-range integer", () => {
+    const stdout = execSync(`${BIN} mcp-config --http --port 3400`, { encoding: "utf-8" });
+    expect(JSON.parse(stdout).mcpServers.cbrain.url).toBe("http://127.0.0.1:3400/mcp");
+  });
+
+  test("CLI --http --host rejects scheme / path / port-in-host (no malformed url)", () => {
+    for (const bad of ["", "http://127.0.0.1", "localhost/path", "127.0.0.1:8080", "host?", "a b"]) {
+      let stderr = "";
+      try {
+        execSync(`${BIN} mcp-config --http --host "${bad}"`, {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        expect.unreachable(`should have thrown for --host ${JSON.stringify(bad)}`);
+      } catch (e: any) {
+        stderr = e.stderr ?? "";
+      }
+      expect(stderr).toMatch(/--host/i);
+    }
+  });
+
+  test("CLI --http --host accepts bare hosts (127.0.0.1 / localhost / 0.0.0.0)", () => {
+    for (const ok of ["127.0.0.1", "localhost", "0.0.0.0"]) {
+      const stdout = execSync(`${BIN} mcp-config --http --host ${ok}`, { encoding: "utf-8" });
+      expect(JSON.parse(stdout).mcpServers.cbrain.url).toBe(`http://${ok}:3399/mcp`);
+    }
+  });
+
+  test("CLI --http --config <path> fails fast (config is stdio-only)", () => {
+    let stderr = "";
+    try {
+      execSync(`${BIN} mcp-config --http --config /tmp/whatever.json`, {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      expect.unreachable("should have thrown");
+    } catch (e: any) {
+      stderr = e.stderr ?? "";
+    }
+    expect(stderr).toMatch(/--config/i);
+    expect(stderr).toMatch(/stdio|http/i);
+  });
+
+  test("CLI --http output has no surrounding prose and no credentials", () => {
+    const stdout = execSync(`${BIN} mcp-config --http`, { encoding: "utf-8" });
+    expect(stdout.trim()[0]).toBe("{");
+    expect(stdout.trim().at(-1)).toBe("}");
+    expect(stdout).not.toMatch(/api[_-]?key/i);
+    expect(stdout).not.toMatch(/sk-/);
+  });
+});

@@ -280,6 +280,32 @@ cbrain mcp-config
 
 > **注意：** 输出不含任何 API Key。凭证通过环境变量或 config 文件提供，不会泄露到 Agent 配置里。
 
+### 上面是 stdio 配置——我该用 stdio 还是 HTTP？
+
+两种传输方式，按拓扑选：
+
+- **stdio（上面这个，默认）**：每个 Agent 自己 spawn 一个 `cbrain serve`。适合**单用户本地开发**——就你一个 Agent、没有常驻 serve、没有并发写。
+- **HTTP（`--http`）**：所有 Agent / cron 共用一个常驻 `cbrain serve --http` 的 `/mcp`。适合 **Hermes 等多 Agent / 持久 serve 拓扑**——这是 single-writer 模型的正确姿势（见 [Hermes Integration](hermes-integration.md)）。给每个 Agent 各自 spawn stdio serve 会撞 single-writer gate 或并发写坏数据。
+
+Hermes 日常 Agent 用 HTTP 配置：
+
+```bash
+cbrain mcp-config --http
+```
+
+```json
+{
+  "mcpServers": {
+    "cbrain": {
+      "url": "http://127.0.0.1:3399/mcp",
+      "headers": { "X-CBrain-Tool-Profile": "agent" }
+    }
+  }
+}
+```
+
+`agent` profile 让日常 session 只看到 recall / 读写 / 图谱等用户态工具，**摸不到** `sync`/`dream` 这些慢维护工具——这样一次慢调用不会毒化整个 MCP client 把记忆接口搞挂（#264）。可加 `--port`/`--host`/`--profile` 覆盖。timeout 边界与防毒化原理见 [Hermes Integration](hermes-integration.md)（「Daily Agent MCP config」段）。
+
 ---
 
 ## 第七步：验证 Hermes 技能包（可选）
@@ -342,13 +368,13 @@ cbrain serve --http --port 3399
 
 HTTP 模式会自动启动文件监听，vault 里的文件变化会实时同步到索引。
 
-### MCP stdio 模式（推荐用于 Agent 集成）
+### MCP stdio 模式（单用户本地开发）
 
 ```bash
 cbrain serve
 ```
 
-Agent 配置用 `cbrain mcp-config` 生成（见第六步），不需要手写。
+Agent 配置用 `cbrain mcp-config` 生成（见第六步）。**仅限单 Agent 本地开发**——多 Agent / 持久 serve 场景用上面的 HTTP 模式 + `cbrain mcp-config --http`，否则会撞 single-writer gate（#208）。
 
 > **提示：** `serve` 默认 MCP stdio 模式。加 `--http` 切到 HTTP 模式。两个模式不能同时跑（PID 锁保护）。
 

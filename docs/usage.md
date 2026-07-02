@@ -301,7 +301,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `init` | Initialize a new brain (creates config + vault dirs) |
 | `knowledge-map` | 生成知识图谱报告（只读）：领域、成熟度、桥接节点、孤立/弱连接条目。不写 vault。 |
 | `list` | List all pages in the brain |
-| `mcp-config` | Output MCP server configuration JSON for Agent integration |
+| `mcp-config` | Output MCP server config JSON (default stdio; --http for the shared serve /mcp topology, #264) |
 | `migrate-runtime` | Migrate vault/outputs to runtime directory (uses resolveRuntimePath) |
 | `perf-diagnose` | Read-only diagnostics: where time/query budget is spent across recent search journeys (no writes). |
 | `query` | Search the brain |

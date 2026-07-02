@@ -40,6 +40,55 @@ wrapper 走 HTTP `/mcp` 的 dream tool（通过 serve 的 single writer）。
 
 `cbrain watch` 命令已废弃移除（watcher 归 `serve`），不要再引用。 <!-- docs-consistency:ignore-command -->
 
+## Daily Agent MCP config（HTTP + agent profile，#264）
+
+日常 Hermes Agent session **必须**走 HTTP `/mcp` + `agent` profile，不要用 stdio（stdio 会为每个 Agent spawn serve，撞 single-writer gate）。生成配置：
+
+```bash
+cbrain mcp-config --http
+```
+
+```json
+{
+  "mcpServers": {
+    "cbrain": {
+      "url": "http://127.0.0.1:3399/mcp",
+      "headers": { "X-CBrain-Tool-Profile": "agent" }
+    }
+  }
+}
+```
+
+可加 `--port`/`--host`/`--profile` 覆盖（profile 默认 `agent`，可选 `maintenance`/`debug`/`full`）。
+
+### 为什么——防 300s 毒化
+
+观测到的故障模式：一次长时间写/维护调用（`sync`、大块 `ingest`）在 MCP client 端挂到 300s 超时，Hermes 把整个 `cbrain` server 标记成 disconnected，之后所有 `recall`/`status` 立刻报 `MCP server 'cbrain' is not connected`。一次慢调用毒化了整个记忆接口。
+
+两层解药，都靠这条 HTTP 配置交付：
+
+1. **`agent` profile**：日常 session 看不到 `sync`/`dream`/`health`/`job_*` 这些注定慢的维护工具（`agent` 暴露面见 [MCP 工具参考](mcp-tools.md#工具暴露面-profile251)）。慢工具只能从 `maintenance` profile（维护 wrapper）进。
+2. **bounded client timeout**：在你的 Hermes MCP config 里给 `/mcp` 连接设一个远低于 300s 的请求超时——慢调用在 client 边界快速失败，而不是把整个 MCP client 挂死。单位取决于你的 MCP client（Hermes 用什么单位就填什么），建议量级：请求 ~120s / 连接 ~5s。示例片段：
+
+   ```json
+   {
+     "mcpServers": {
+       "cbrain": {
+         "url": "http://127.0.0.1:3399/mcp",
+         "headers": { "X-CBrain-Tool-Profile": "agent" },
+         "timeout": 120,
+         "connect_timeout": 5
+       }
+     }
+   }
+   ```
+
+   > `timeout`/`connect_timeout` 的单位是 client 侧约定（Claude Code 等用秒），CBrain 服务端不读这俩字段——按你的 client schema 填，把请求卡在 300s 以下即可。生成的 config（`cbrain mcp-config --http`）**不含**这俩字段，避免单位猜错；需要就手动加。
+
+### `ingest` 为什么留在 `agent`
+
+`ingest` 是日常捕获的主入口，砍了 Agent 只能用 `put_page`（跳过 NER → 不铸实体 → 记忆质量降级）。它的同步 NER 延迟有上界：内容上限 500k、NER 有 per-call timeout + fail-open（见 `src/core/ner.ts` 的 `NER_DEFAULT_TIMEOUT_MS`），病理性的大块 dump 由上面的 bounded client timeout 兜住（快速失败，不毒化）。大块内容捕获建议传 `nerMode: "defer"`，NER 转后台 job，调用立即返回，彻底避开同步 NER 的延迟。
+
 ## 排障
 
 - **serve 未运行**：wrapper health check 失败 → 重启 `launchctl kickstart -k "gui/$(id -u)/ai.cbrain.serve"`，等 3 秒 `curl -s http://127.0.0.1:<port>/health` → `{"ok":true,...}`。
