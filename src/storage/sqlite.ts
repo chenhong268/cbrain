@@ -1725,7 +1725,7 @@ export class CBrainDB {
       FROM pages p
       WHERE p.type != 'record'
         AND p.mention_count = 0
-        AND NOT EXISTS (SELECT 1 FROM links WHERE from_slug = p.slug OR to_slug = p.slug)
+        AND NOT EXISTS (SELECT 1 FROM links WHERE (from_slug = p.slug OR to_slug = p.slug) AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded')))
         AND NOT EXISTS (SELECT 1 FROM aliases WHERE page_slug = p.slug)
         AND NOT EXISTS (SELECT 1 FROM tags WHERE page_slug = p.slug)
       ORDER BY p.type, p.title
@@ -1851,8 +1851,8 @@ export class CBrainDB {
       `SELECT p.slug, p.title FROM pages p
        WHERE p.type LIKE 'entity/%'
        AND (
-         (SELECT COUNT(DISTINCT to_slug) FROM links WHERE from_slug = p.slug) +
-         (SELECT COUNT(DISTINCT from_slug) FROM links WHERE to_slug = p.slug)
+         (SELECT COUNT(DISTINCT to_slug) FROM links WHERE from_slug = p.slug AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))) +
+         (SELECT COUNT(DISTINCT from_slug) FROM links WHERE to_slug = p.slug AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded')))
        ) >= $min
        ORDER BY p.mention_count DESC`
     ).all({ $min: minNeighbors }) as Array<{ slug: string; title: string }>;
@@ -2206,7 +2206,7 @@ export class CBrainDB {
 
   getLinkCountBySlug(slug: string): number {
     const row = this.prepare(
-      "SELECT COUNT(*) as cnt FROM links WHERE from_slug = $slug OR to_slug = $slug"
+      "SELECT COUNT(*) as cnt FROM links WHERE (from_slug = $slug OR to_slug = $slug) AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))"
     ).get({ $slug: slug }) as { cnt: number };
     return row.cnt;
   }

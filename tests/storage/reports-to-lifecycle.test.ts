@@ -231,5 +231,39 @@ describe("reports_to lifecycle helpers", () => {
       const fromRow = rows.find((r) => r.slug === FROM);
       expect(fromRow?.link_count).toBe(1);
     });
+
+    test("getLinkCountBySlug excludes superseded/rejected (parity with getLinkCountForSlug)", () => {
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95);
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'superseded', 'agent')`,
+      ).run(FROM, MGR_B);
+      expect(db.getLinkCountBySlug(FROM)).toBe(1);
+    });
+
+    test("getHighConnectivityEntities excludes superseded/rejected from neighbor count", () => {
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95);
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'superseded', 'agent')`,
+      ).run(FROM, MGR_B);
+      // FROM has 1 active neighbor (MGR_A) + 1 superseded (MGR_B). minNeighbors=2 must NOT match.
+      const hi = db.getHighConnectivityEntities(2);
+      expect(hi.find((r) => r.slug === FROM)).toBeUndefined();
+      const hi1 = db.getHighConnectivityEntities(1);
+      expect(hi1.find((r) => r.slug === FROM)).toBeDefined();
+    });
+
+    test("findEmptyShells treats superseded-only pages as empty shells", () => {
+      // ISOLATED has only a superseded edge -> no active connection -> empty shell
+      const ISOLATED = "entities/person-epsilon";
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, 'entity/person', ?, ?, ?, 0, 3)`,
+      ).run(ISOLATED, ISOLATED, `${ISOLATED}.md`, `h-${ISOLATED}`);
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'superseded', 'agent')`,
+      ).run(ISOLATED, MGR_A);
+
+      const shells = db.findEmptyShells();
+      expect(shells.find((s) => s.slug === ISOLATED)).toBeDefined();
+    });
   });
 });
