@@ -19,6 +19,7 @@ import { buildCompactRecallResponse, type CompactProactiveHint } from "./recall-
 import { shouldCompleteEvidence } from "../../core/retrieval/recall-intent.js";
 import { assembleEvidencePack, type EvidencePack } from "../../core/retrieval/evidence-completion.js";
 import { kmContextApi, formatKmRelatedLine } from "../../core/recall/km-context.js";
+import { isCurrentFactLink } from "../../core/shared.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -168,7 +169,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const linkCounts = new Map<string, number>();
     for (const sr of searchResults) {
       const l = candidateLinks.get(sr.slug);
-      linkCounts.set(sr.slug, (l?.outgoing.length ?? 0) + (l?.incoming.length ?? 0));
+      linkCounts.set(
+        sr.slug,
+        (l?.outgoing.filter(isCurrentFactLink).length ?? 0) +
+        (l?.incoming.filter(isCurrentFactLink).length ?? 0),
+      );
     }
     // Gate pages via db.getPage (vault-independent). PageManager.getBySlug can
     // return null when the vault file is absent, which would silently disable
@@ -337,8 +342,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         const toLink = (l: LinkRow): Link => ({
           ...l, context: l.context ?? undefined, source_type: l.source_type ?? undefined, confidence: l.confidence ?? undefined,
         });
-        const outgoing = rawLinks.outgoing.map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-        const incoming = rawLinks.incoming.map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
+        const outgoing = rawLinks.outgoing.filter(isCurrentFactLink).map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
+        const incoming = rawLinks.incoming.filter(isCurrentFactLink).map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
         linksBySlug.set(slug, { outgoing, incoming });
 
         const rawTimeline = batchTimeline.get(slug) ?? [];

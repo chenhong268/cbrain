@@ -33,6 +33,9 @@ export function runDestructiveMigrationForTest(
     .runDestructiveMigration({ name, completionKey, body });
 }
 
+const ACTIVE_LINK_SQL = "(trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
+const CURRENT_FACT_LINK_SQL = `${ACTIVE_LINK_SQL} AND NOT (relation = 'reports_to' AND trust_state = 'candidate')`;
+
 const ALLOWED_ORDER_COLUMNS = new Set([
   "slug", "title", "type", "created_at", "updated_at", "mention_count", "tier",
 ]);
@@ -1806,14 +1809,14 @@ export class CBrainDB {
     types.forEach((t, i) => { params[`$t${i}`] = t; });
     const order = sanitizeOrderBy(orderBy, "title ASC");
     return this.prepare(
-      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON (l.from_slug = p.slug OR l.to_slug = p.slug) AND (l.trust_state IS NULL OR l.trust_state NOT IN ('rejected','superseded')) WHERE p.type IN (${placeholders}) GROUP BY p.slug ORDER BY ${order}`
+      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON (l.from_slug = p.slug OR l.to_slug = p.slug) AND ${CURRENT_FACT_LINK_SQL} WHERE p.type IN (${placeholders}) GROUP BY p.slug ORDER BY ${order}`
     ).all(params) as Array<{ slug: string; title: string; type: string; link_count: number }>;
   }
 
   getPagesWithLinkCountByPrefix(prefix: string, orderBy?: string): Array<{ slug: string; title: string; type: string; link_count: number }> {
     const order = sanitizeOrderBy(orderBy, "title ASC");
     return this.prepare(
-      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON (l.from_slug = p.slug OR l.to_slug = p.slug) AND (l.trust_state IS NULL OR l.trust_state NOT IN ('rejected','superseded')) WHERE p.type LIKE $prefix GROUP BY p.slug ORDER BY ${order}`
+      `SELECT p.slug, p.title, p.type, COUNT(l.id) as link_count FROM pages p LEFT JOIN links l ON (l.from_slug = p.slug OR l.to_slug = p.slug) AND ${CURRENT_FACT_LINK_SQL} WHERE p.type LIKE $prefix GROUP BY p.slug ORDER BY ${order}`
     ).all({ $prefix: `${prefix}%` }) as Array<{ slug: string; title: string; type: string; link_count: number }>;
   }
 
@@ -1851,8 +1854,8 @@ export class CBrainDB {
       `SELECT p.slug, p.title FROM pages p
        WHERE p.type LIKE 'entity/%'
        AND (
-         (SELECT COUNT(DISTINCT to_slug) FROM links WHERE from_slug = p.slug AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))) +
-         (SELECT COUNT(DISTINCT from_slug) FROM links WHERE to_slug = p.slug AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded')))
+         (SELECT COUNT(DISTINCT to_slug) FROM links WHERE from_slug = p.slug AND ${CURRENT_FACT_LINK_SQL}) +
+         (SELECT COUNT(DISTINCT from_slug) FROM links WHERE to_slug = p.slug AND ${CURRENT_FACT_LINK_SQL})
        ) >= $min
        ORDER BY p.mention_count DESC`
     ).all({ $min: minNeighbors }) as Array<{ slug: string; title: string }>;
@@ -2111,11 +2114,11 @@ export class CBrainDB {
     return rows.map(r => r.slug);
   }
 
-  getAllLinks(includeInactive = false): Array<{ from_slug: string; to_slug: string; relation: string; weight: number }> {
+  getAllLinks(includeInactive = false): Array<{ from_slug: string; to_slug: string; relation: string; weight: number; trust_state?: string | null }> {
     const activeFilter = includeInactive ? "" : " WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     return this.prepare(
-      `SELECT from_slug, to_slug, relation, weight FROM links${activeFilter}`
-    ).all() as Array<{ from_slug: string; to_slug: string; relation: string; weight: number }>;
+      `SELECT from_slug, to_slug, relation, weight, trust_state FROM links${activeFilter}`
+    ).all() as Array<{ from_slug: string; to_slug: string; relation: string; weight: number; trust_state?: string | null }>;
   }
 
   batchGetLinksForSlugs(slugs: string[], includeInactive = false): Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }> {
@@ -2176,7 +2179,7 @@ export class CBrainDB {
     if (slugs.length === 0) return result;
     for (const slug of slugs) result.set(slug, { outgoing: [], incoming: [] });
     const placeholders = slugs.map(() => "?").join(",");
-    const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
+    const activeFilter = includeInactive ? "" : ` AND ${CURRENT_FACT_LINK_SQL}`;
     const outRows = this.prepare(
       `SELECT from_slug, to_slug FROM links WHERE from_slug IN (${placeholders})${activeFilter}`
     ).all(...slugs) as Array<{ from_slug: string; to_slug: string }>;
@@ -2206,7 +2209,7 @@ export class CBrainDB {
 
   getLinkCountBySlug(slug: string): number {
     const row = this.prepare(
-      "SELECT COUNT(*) as cnt FROM links WHERE (from_slug = $slug OR to_slug = $slug) AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))"
+      `SELECT COUNT(*) as cnt FROM links WHERE (from_slug = $slug OR to_slug = $slug) AND ${CURRENT_FACT_LINK_SQL}`
     ).get({ $slug: slug }) as { cnt: number };
     return row.cnt;
   }
@@ -3393,7 +3396,7 @@ export class CBrainDB {
 
   getLinkCountForSlug(slug: string): number {
     const row = this.prepare(
-      "SELECT count(*) as cnt FROM links WHERE (from_slug = $slug OR to_slug = $slug) AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))"
+      `SELECT count(*) as cnt FROM links WHERE (from_slug = $slug OR to_slug = $slug) AND ${CURRENT_FACT_LINK_SQL}`
     ).get({ $slug: slug }) as { cnt: number } | null;
     return row?.cnt ?? 0;
   }
@@ -3404,7 +3407,7 @@ export class CBrainDB {
 
     // Single scan of links table, count per slug
     const rows = this.prepare(
-      "SELECT from_slug, to_slug FROM links WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))"
+      `SELECT from_slug, to_slug FROM links WHERE ${CURRENT_FACT_LINK_SQL}`
     ).all() as Array<{ from_slug: string; to_slug: string }>;
 
     const slugSet = new Set(slugs);

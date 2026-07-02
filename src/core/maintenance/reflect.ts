@@ -3,6 +3,7 @@ import type { LLMProvider, ChatMessage } from "../../llm/provider.js";
 import type { PageManager } from "../page.js";
 import type { ContentPipeline } from "../ingestion/pipeline.js";
 import type { InsightManager } from "./insight.js";
+import { isCurrentFactLink } from "../shared.js";
 
 export interface SynthesisResult {
   slug: string;
@@ -418,8 +419,8 @@ export class ReflectManager {
     const page = this.db.getPage(slug);
     if (!page) return null;
 
-    const inLinks = this.db.getIncomingLinks(slug);
-    const outLinks = this.db.getOutgoingLinks(slug);
+    const inLinks = this.db.getIncomingLinks(slug).filter(isCurrentFactLink);
+    const outLinks = this.db.getOutgoingLinks(slug).filter(isCurrentFactLink);
     const timeline = this.db.getTimeline(slug);
     const tags = this.db.getTags(slug);
 
@@ -469,7 +470,7 @@ export class ReflectManager {
   }
 
   private buildAdjacency(): Map<string, Set<string>> {
-    const allLinks = this.db.getAllLinks();
+    const allLinks = this.db.getAllLinks().filter(isCurrentFactLink);
     const adj = new Map<string, Set<string>>();
     for (const { from_slug, to_slug } of allLinks) {
       if (!adj.has(from_slug)) adj.set(from_slug, new Set());
@@ -632,7 +633,7 @@ export class ReflectManager {
 
   private getSourcePages(slug: string): Set<string> {
     const sources = new Set<string>();
-    for (const l of this.db.getIncomingLinks(slug)) {
+    for (const l of this.db.getIncomingLinks(slug).filter(isCurrentFactLink)) {
       if (l.from_slug.startsWith("records/")) sources.add(l.from_slug);
     }
     return sources;

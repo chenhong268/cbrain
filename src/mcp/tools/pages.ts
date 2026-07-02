@@ -260,9 +260,9 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     let reportsToAdded = 0;
     if (pageType.startsWith("entity/")) {
       try {
-        const before = ctx.db.getOutgoingLinks(slug).filter((l: { relation: string }) => l.relation === "reports_to").length;
+        const before = ctx.db.getCurrentReportsToLinks(slug, "outgoing").length;
         ctx.pipeline.processReportsTo(slug, updated.frontmatter);
-        const after = ctx.db.getOutgoingLinks(slug).filter((l: { relation: string }) => l.relation === "reports_to").length;
+        const after = ctx.db.getCurrentReportsToLinks(slug, "outgoing").length;
         reportsToAdded = Math.max(0, after - before);
         // The reports_to target gains an incoming edge — it must run through
         // syncAffectedSlugs so its markdown Known Relations stays consistent with

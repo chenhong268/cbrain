@@ -13,6 +13,7 @@
  * still yields its raw detail here (marked `sealed: true`).
  */
 import type { CBrainDB } from "../../storage/sqlite.js";
+import { isCurrentFactLink } from "../shared.js";
 import { extractDetailTerms } from "./search.js";
 
 export interface EvidenceTimelineHit {
@@ -131,7 +132,7 @@ export function assembleEvidencePack(
     }
 
     const lr = linksMap.get(slug) ?? { outgoing: [], incoming: [] };
-    for (const l of [...lr.outgoing, ...lr.incoming].slice(0, linksPerSlug)) {
+    for (const l of [...lr.outgoing, ...lr.incoming].filter(isCurrentFactLink).slice(0, linksPerSlug)) {
       const row = l as { from_slug: string; to_slug: string; relation: string | null; trust_state?: string | null };
       links.push({ from: row.from_slug, to: row.to_slug, relation: row.relation ?? "关联", trust_state: row.trust_state ?? undefined });
     }

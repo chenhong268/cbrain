@@ -1,6 +1,7 @@
 import { CBrainDB } from "../../storage/sqlite.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import type { Logger } from "../logger.js";
+import { isCurrentFactLink } from "../shared.js";
 import { getOntology } from "../../ontology/loader.js";
 import { normalizeForComparison } from "../ingestion/name-similarity.js";
 import {
@@ -502,7 +503,7 @@ export class DiscoveryManager {
 
   private buildAdjacency(): Map<string, Set<string>> {
     const adj = new Map<string, Set<string>>();
-    const links = this.db.getAllLinks();
+    const links = this.db.getAllLinks().filter(isCurrentFactLink);
     for (const l of links) {
       if (!adj.has(l.from_slug)) adj.set(l.from_slug, new Set());
       if (!adj.has(l.to_slug)) adj.set(l.to_slug, new Set());

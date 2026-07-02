@@ -134,6 +134,30 @@ describe("EpisodicRecaller", () => {
     expect(result.candidates[0].evidence.some((e) => e.source_type === "link")).toBe(true);
   });
 
+  test("connection recall excludes candidate reports_to as current fact", () => {
+    seedPerson("entities/person-a", "人物A", {
+      links: [
+        { other: "entities/candidate-manager", otherTitle: "候选上级", relation: "reports_to", trust_state: "candidate" },
+      ],
+    });
+
+    const result = recall({ query: "候选上级", connection_hint: "候选上级" });
+
+    expect(result.candidates.map((c) => c.slug)).not.toContain("entities/person-a");
+  });
+
+  test("connection recall keeps ordinary candidate links", () => {
+    seedPerson("entities/person-a", "人物A", {
+      links: [
+        { other: "concepts/topic-b", otherTitle: "主题B", relation: "related", trust_state: "candidate" },
+      ],
+    });
+
+    const result = recall({ query: "主题B", connection_hint: "主题B" });
+
+    expect(result.candidates.map((c) => c.slug)).toContain("entities/person-a");
+  });
+
   // ─── #10 Acceptance Category 3: multiple candidates with uncertainty + disambiguating clue ───
 
   test("multiple candidates with uncertainty and next_disambiguating_clue", () => {

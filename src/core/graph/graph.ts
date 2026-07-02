@@ -1,4 +1,5 @@
 import { CBrainDB } from "../../storage/sqlite.js";
+import { isCurrentFactLink } from "../shared.js";
 
 export interface Link {
   id: number;
@@ -28,18 +29,6 @@ export interface TraverseOptions {
   minWeight?: number;
   maxDepth?: number;
   limit?: number;
-}
-
-/**
- * #233 HIGH 1: candidate reports_to is evidence, not a confirmed default
- * graph-read edge. Excluded from getLinks / getBacklinks / traverse /
- * getRelatedEntities. rejected/superseded are already excluded by the storage
- * active filter (these reads default to includeInactive=false). Ordinary
- * non-reports_to candidate links are unaffected (candidate is a legitimate
- * pending edge for every other relation).
- */
-function isDefaultGraphReadLink(l: { relation?: string; trust_state?: string }): boolean {
-  return !(l.relation === "reports_to" && l.trust_state === "candidate");
 }
 
 export class GraphManager {
@@ -97,7 +86,7 @@ export class GraphManager {
       results.push(...this.db.getIncomingLinks(slug) as Link[]);
     }
 
-    return results.filter(isDefaultGraphReadLink);
+    return results.filter(isCurrentFactLink);
   }
 
   getBacklinks(slug: string): Link[] {
@@ -122,7 +111,7 @@ export class GraphManager {
 
       // One unified path covers all three filter modes (minWeight / relation /
       // none). batchGetLinksForSlugs returns LinkRow with relation + trust_state,
-      // so isDefaultGraphReadLink can exclude candidate reports_to (#233 HIGH 1).
+      // so isCurrentFactLink can exclude candidate reports_to (#233).
       const batchLinks = this.db.batchGetLinksForSlugs(frontier);
       for (const slug of frontier) {
         const links = batchLinks.get(slug);
@@ -132,7 +121,7 @@ export class GraphManager {
           ...(direction === "incoming" || direction === "both" ? links.incoming : []),
         ];
         for (const l of all) {
-          if (!isDefaultGraphReadLink(l)) continue;
+          if (!isCurrentFactLink(l)) continue;
           if (relation && l.relation !== relation) continue;
           if (minWeight !== undefined && (l.effective_weight ?? l.weight * l.confidence) < minWeight) continue;
           const neighbor = l.from_slug === slug ? l.to_slug : l.from_slug;

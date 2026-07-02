@@ -215,6 +215,23 @@ export function getReverseRelation(rel: string): string | undefined {
 
 export const HIERARCHY_RELATIONS = new Set(["reports_to"]);
 
+/**
+ * Candidate reports_to is evidence, not a current organizational fact.
+ * Default user/LLM-facing relation reads should exclude it, while ordinary
+ * non-reports_to candidate links remain visible as pending graph evidence.
+ */
+export function isCurrentFactLink(l: { relation?: string | null; trust_state?: string | null }): boolean {
+  if (l.relation !== "reports_to") return true;
+  return l.trust_state === undefined ||
+    l.trust_state === null ||
+    l.trust_state === "trusted" ||
+    l.trust_state === "user_thought";
+}
+
+export function filterCurrentFactLinks<T extends { relation?: string | null; trust_state?: string | null }>(links: T[]): T[] {
+  return links.filter(isCurrentFactLink);
+}
+
 export function isValidRelation(r: string): boolean {
   return getOntology().isValidRelation(r) || HIERARCHY_RELATIONS.has(r);
 }
@@ -307,4 +324,3 @@ export function resolveEntityName(
   // 4. DB fallback
   return findEntitySlug(db, name) ?? findEntitySlug(db, stripped);
 }
-

@@ -3,6 +3,7 @@ import type { LLMProvider } from "../../llm/provider.js";
 import type { PageManager } from "../page.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
+import { isCurrentFactLink } from "../shared.js";
 
 const HOTNESS_WEIGHTS = {
   // Direct mentions show how often an entity appears in explicit wikilinks.
@@ -141,8 +142,8 @@ export class EnrichManager {
 
     if (!page) return null;
 
-    const backlinks = this.db.getIncomingLinks(slug).length;
-    const outLinks = this.db.getOutgoingLinks(slug).length;
+    const backlinks = this.db.getIncomingLinks(slug).filter(isCurrentFactLink).length;
+    const outLinks = this.db.getOutgoingLinks(slug).filter(isCurrentFactLink).length;
     const tags = this.db.getTags(slug);
 
     return {

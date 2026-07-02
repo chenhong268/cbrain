@@ -90,6 +90,26 @@ describe("ResearchManager", () => {
     expect(aResult.snippet).toBe("new");
   });
 
+  test("expandGraphContext excludes candidate reports_to from current-fact neighbors", () => {
+    insertPage(db, "entities/entity-a", "实体A", "entity/person");
+    insertPage(db, "entities/candidate-manager", "候选上级", "entity/person");
+    insertPage(db, "concepts/topic-b", "主题B", "concept/concept");
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'candidate', 'ner')",
+    ).run("entities/entity-a", "entities/candidate-manager");
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'related', 'candidate', 'ner')",
+    ).run("entities/entity-a", "concepts/topic-b");
+
+    const researcher = new ResearchManager(createMockSearch(new Map()), db);
+    const context = researcher.expandGraphContext({ entities: [], chains: [] }, ["entities/entity-a"]);
+
+    const entity = context.entities.find((e) => e.slug === "entities/entity-a");
+    expect(entity).toBeDefined();
+    expect(entity!.neighbors.map((n) => n.slug)).not.toContain("entities/candidate-manager");
+    expect(entity!.neighbors.map((n) => n.slug)).toContain("concepts/topic-b");
+  });
+
   test("mergeResults preserves all unique slugs", () => {
     const mockSearch = createMockSearch(new Map());
     const researcher = new ResearchManager(mockSearch, db);

@@ -462,6 +462,20 @@ describe("MergeWorkflow.verifyMerge", () => {
     expect(v.all_passed).toBe(false);
   });
 
+  test("candidate reports_to does not make target KR verification fail", () => {
+    seedPageWithVault("entities/shiti-a", "实体A", "entity/person", "内容A");
+    seedPageWithVault("entities/shiti-b", "实体B", "entity/person", "内容B");
+    seedPageWithVault("entities/candidate-manager", "候选上级", "entity/person", "内容C");
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'candidate', 'ner')",
+    ).run("entities/shiti-b", "entities/candidate-manager");
+
+    const targetKrSynced = (wf as unknown as { checkTargetKrSync(slug: string): boolean })
+      .checkTargetKrSync("entities/shiti-b");
+
+    expect(targetKrSynced).toBe(true);
+  });
+
   test("clean merge leaves zero [[source]] wikilinks in entire vault including target", async () => {
     seedPageWithVault("entities/shiti-a", "实体A", "entity/person", "内容A");
     seedPageWithVault("entities/shiti-b", "实体B", "entity/person", "内容B");

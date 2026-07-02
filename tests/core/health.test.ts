@@ -504,6 +504,30 @@ describe("HealthChecker", () => {
       expect(dim!.issues.some(i => i.description.includes("出边未写入 Known Relations"))).toBe(true);
     });
 
+    test("candidate reports_to 不要求写入 Known Relations", async () => {
+      insertPage("entity/staff-candidate", "StaffCandidate", "entity/person", { file_path: "entity-staff-candidate.md" });
+      insertPage("entity/boss-candidate", "BossCandidate", "entity/person", { file_path: "entity-boss-candidate.md" });
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'candidate', 'ner')",
+      ).run("entity/staff-candidate", "entity/boss-candidate");
+
+      writeVaultFile("entity-staff-candidate.md", "---\ntitle: StaffCandidate\ntype: entity/person\nslug: entity/staff-candidate\n---\nStaffCandidate 的内容\n");
+      writeVaultFile("entity-boss-candidate.md", "---\ntitle: BossCandidate\ntype: entity/person\nslug: entity/boss-candidate\n---\nBossCandidate 的内容\n");
+
+      const vaultChecker = new HealthChecker(db, join(testDir, "outputs"), undefined, vaultDir);
+      const report = await vaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.issues.some(i =>
+        i.slug === "entity/staff-candidate" &&
+        i.description.includes("出边未写入 Known Relations")
+      )).toBe(false);
+      expect(dim!.issues.some(i =>
+        i.slug === "entity/boss-candidate" &&
+        i.description.includes("入边未写入 Known Relations")
+      )).toBe(false);
+    });
+
     test("检测正文 wikilink 缺 links 表边", async () => {
       insertPage("entity/x", "人物甲", "entity/person", { file_path: "entity-x.md" });
       insertPage("entity/y", "人物乙", "entity/person", { file_path: "entity-y.md" });

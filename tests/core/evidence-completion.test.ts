@@ -76,6 +76,23 @@ describe("assembleEvidencePack (#232)", () => {
     expect(pack.coverage.chunk_hits).toBeGreaterThan(0);
   });
 
+  test("links exclude candidate reports_to from supplemental context", () => {
+    seedRich("entity/a", "实体A", { timeline: 1, chunks: 1 });
+    seedRich("entity/b", "实体B", { timeline: 0, chunks: 0 });
+    seedRich("entity/c", "实体C", { timeline: 0, chunks: 0 });
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, 'reports_to', 'ner', 'candidate', 0.5)",
+    ).run("entity/a", "entity/b");
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, 'related', 'ner', 'candidate', 0.5)",
+    ).run("entity/a", "entity/c");
+
+    const pack = assembleEvidencePack(db, ["entity/a"], "q");
+
+    expect(pack.links.some((l) => l.to === "entity/b")).toBe(false);
+    expect(pack.links.some((l) => l.to === "entity/c")).toBe(true);
+  });
+
   test("coverage_status = insufficient when slug has no evidence", () => {
     seedRich("entity/empty", "空实体", { timeline: 0, chunks: 0 });
     const pack = assembleEvidencePack(db, ["entity/empty"], "q");

@@ -3,6 +3,7 @@ import type { EmbeddingProvider } from "../../embedding/provider.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { LanceDBManager as LanceDBStorage } from "../../storage/lancedb.js";
 import { ResearchManager } from "./research.js";
+import { isCurrentFactLink } from "../shared.js";
 import { GraphManager } from "../graph/graph.js";
 import type { Logger } from "../logger.js";
 
@@ -647,10 +648,8 @@ export class HybridSearch {
         // #233: exclude candidate reports_to from search context (current-fact
         // semantic — candidate reports_to is evidence, not a confirmed relation
         // to feed LLM chains). Non-reports_to candidate neighbors are kept.
-        const outFilter = (l: { relation: string; trust_state?: string | null }) =>
-          !(l.relation === "reports_to" && l.trust_state === "candidate");
-        const outgoing = this.db.getOutgoingLinks(r.slug!).filter(outFilter);
-        const incoming = this.db.getIncomingLinks(r.slug!).filter(outFilter);
+        const outgoing = this.db.getOutgoingLinks(r.slug!).filter(isCurrentFactLink);
+        const incoming = this.db.getIncomingLinks(r.slug!).filter(isCurrentFactLink);
 
         // Map to { slug, relation }, dedup by slug (keep first occurrence)
         const seen = new Set<string>();

@@ -1,5 +1,6 @@
 import type { CBrainDB, LinkRow } from "../../storage/sqlite.js";
 import type { ToolContext } from "../../mcp/context.js";
+import { isCurrentFactLink } from "../shared.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -113,10 +114,10 @@ function buildSharedConnectionHint(
     const links = linksMap.get(slug);
     if (!links) continue;
     const neighbors = new Set<string>();
-    for (const l of links.outgoing) {
+    for (const l of links.outgoing.filter(isCurrentFactLink)) {
       if (!isJunkSlug(l.to_slug)) neighbors.add(l.to_slug);
     }
-    for (const l of links.incoming) {
+    for (const l of links.incoming.filter(isCurrentFactLink)) {
       if (!isJunkSlug(l.from_slug)) neighbors.add(l.from_slug);
     }
     neighborSets.set(slug, neighbors);

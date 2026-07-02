@@ -1,6 +1,7 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import type { HybridSearch, SearchResult, SearchOptions, GraphContext } from "./search.js";
+import { isCurrentFactLink } from "../shared.js";
 
 const MAX_NEIGHBORS_PER_ENTITY = 5;
 
@@ -197,17 +198,19 @@ export class ResearchManager {
       const links = linksMap.get(slug);
       const neighbors: GraphContext["entities"][number]["neighbors"] = [];
       if (links) {
+        const outgoing = links.outgoing.filter(isCurrentFactLink);
+        const incoming = links.incoming.filter(isCurrentFactLink);
         const allNeighborSlugs = [
-          ...links.outgoing.map(l => l.to_slug),
-          ...links.incoming.map(l => l.from_slug),
+          ...outgoing.map(l => l.to_slug),
+          ...incoming.map(l => l.from_slug),
         ];
         const uniqueNeighbors = [...new Set(allNeighborSlugs)].slice(0, MAX_NEIGHBORS_PER_ENTITY);
         const neighborTitles = this.db.getPageTitlesAndTypes(uniqueNeighbors);
         for (const ns of uniqueNeighbors) {
           const nInfo = neighborTitles.get(ns);
           if (nInfo) {
-            const relation = links.outgoing.find(l => l.to_slug === ns)?.relation
-              ?? links.incoming.find(l => l.from_slug === ns)?.relation
+            const relation = outgoing.find(l => l.to_slug === ns)?.relation
+              ?? incoming.find(l => l.from_slug === ns)?.relation
               ?? "related";
             neighbors.push({ slug: ns, title: nInfo.title, relation });
           }

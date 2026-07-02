@@ -14,7 +14,7 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
-import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody } from "./shared.js";
+import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody, isCurrentFactLink } from "./shared.js";
 import { safeDeletePage, type SafeDeleteResult } from "./safety/page-delete-safety.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
@@ -517,20 +517,9 @@ export class PageManager {
     const outgoing = this.db.getOutgoingLinks(slug);
     const incoming = this.db.getIncomingLinks(slug);
 
-    // #233 R2 (HIGH 1 surface): candidate reports_to edges are evidence, not
-    // confirmed relationships — exclude them from the user-facing Known
-    // Relations section. Non-reports_to edges keep active semantic (candidate
-    // counts as a live pending link there).
-    const isConfirmed = (l: { relation: string; trust_state?: string | null }) =>
-      l.relation !== "reports_to" ||
-      l.trust_state === undefined ||
-      l.trust_state === null ||
-      l.trust_state === "trusted" ||
-      l.trust_state === "user_thought";
-
     const linkLines: string[] = [];
-    for (const l of outgoing.filter(isConfirmed)) linkLines.push(`- ${l.relation} → [[${l.to_slug}]]`);
-    for (const l of incoming.filter(isConfirmed)) linkLines.push(`- ← ${l.relation} from [[${l.from_slug}]]`);
+    for (const l of outgoing.filter(isCurrentFactLink)) linkLines.push(`- ${l.relation} → [[${l.to_slug}]]`);
+    for (const l of incoming.filter(isCurrentFactLink)) linkLines.push(`- ← ${l.relation} from [[${l.from_slug}]]`);
 
     const filePath = join(this.vaultPath, page.file_path);
     if (!existsSync(filePath)) return;

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { MetricsSnapshot } from "../audit.js";
 import type { Logger } from "../logger.js";
-import { isValidRelation } from "../shared.js";
+import { isCurrentFactLink, isValidRelation } from "../shared.js";
 import { extractWikiLinks, stripKnownRelationsSection, isValidEntityName } from "../ingestion/extract.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import { findEntitySlug } from "../shared.js";
@@ -751,7 +751,7 @@ export class HealthChecker {
     const allLinks = this.db.getAllLinks();
     const pagesWithLinks = new Map<string, { outgoing: Map<string, string[]>; incoming: Map<string, string[]> }>();
 
-    for (const link of allLinks) {
+    for (const link of allLinks.filter(isCurrentFactLink)) {
       if (!pagesWithLinks.has(link.from_slug)) {
         pagesWithLinks.set(link.from_slug, { outgoing: new Map(), incoming: new Map() });
       }

@@ -86,6 +86,22 @@ describe("generateProactiveHints", () => {
     expect(shared!.text).toContain("EntityC");
   });
 
+  test("shared_connection excludes candidate reports_to from current-fact hints", async () => {
+    const ctx = makeCtx(db);
+
+    db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'candidate', 'ner')")
+      .run("entities/a", "entities/c");
+    db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'candidate', 'ner')")
+      .run("entities/b", "entities/c");
+
+    const hints = await generateProactiveHints(ctx, {
+      resultSlugs: ["entities/a", "entities/b"],
+      maxHints: 3,
+    });
+
+    expect(hints.find(h => h.rule === "shared_connection")).toBeUndefined();
+  });
+
   test("expiry_alert: flags expired entities", async () => {
     const ctx = makeCtx(db);
 

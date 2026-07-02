@@ -5,6 +5,7 @@ import { LanceDBManager } from "../../storage/lancedb.js";
 import type { PageManager } from "../page.js";
 import type { ContentPipeline } from "../ingestion/pipeline.js";
 import type { Logger } from "../logger.js";
+import { isCurrentFactLink } from "../shared.js";
 import type { SearchProvider } from "../../search/provider.js";
 
 const CONCURRENCY = 3;
@@ -163,7 +164,7 @@ export class StubEnrichManager {
     const contextParts: string[] = [];
 
     // 1. Incoming links with context strings
-    const incoming = this.db.getIncomingLinks(slug);
+    const incoming = this.db.getIncomingLinks(slug).filter(isCurrentFactLink);
     for (const link of incoming) {
       if (link.context && link.context.trim().length > 0) {
         const source = link.from_slug.split("/").pop() ?? link.from_slug;

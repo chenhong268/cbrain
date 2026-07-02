@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { PageManager } from "../page.js";
-import { canMerge, getLayer } from "../shared.js";
+import { canMerge, getLayer, isCurrentFactLink } from "../shared.js";
 import { getOntology } from "../../ontology/loader.js";
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -260,8 +260,8 @@ export class MergeWorkflow {
     const raw = readFileSync(filePath, "utf-8");
     const krSection = this.extractKnownRelations(raw);
 
-    const outgoing = this.db.getOutgoingLinks(targetSlug);
-    const incoming = this.db.getIncomingLinks(targetSlug);
+    const outgoing = this.db.getOutgoingLinks(targetSlug).filter(isCurrentFactLink);
+    const incoming = this.db.getIncomingLinks(targetSlug).filter(isCurrentFactLink);
 
     // If no links in DB, KR absent or empty is fine
     if (outgoing.length === 0 && incoming.length === 0) {

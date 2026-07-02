@@ -1,5 +1,6 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { LinkRow } from "../../storage/sqlite.js";
+import { isCurrentFactLink } from "../shared.js";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -366,7 +367,7 @@ export class EpisodicRecaller {
 
     const allReferencedSlugs = new Set<string>();
     for (const [, data] of linksMap) {
-      for (const link of [...data.outgoing, ...data.incoming]) {
+      for (const link of [...data.outgoing, ...data.incoming].filter(isCurrentFactLink)) {
         allReferencedSlugs.add(link.from_slug);
         allReferencedSlugs.add(link.to_slug);
       }
@@ -386,7 +387,7 @@ export class EpisodicRecaller {
     for (const slug of personSlugs) {
       const timeline = timelineMap.get(slug) ?? [];
       const { outgoing, incoming } = linksMap.get(slug) ?? { outgoing: [], incoming: [] };
-      const allLinks = [...outgoing, ...incoming];
+      const allLinks = [...outgoing, ...incoming].filter(isCurrentFactLink);
       const chunks = chunkMap.get(slug) ?? [];
 
       const timeDim = scoreTime(resolvedClues.time_hint, timeline);

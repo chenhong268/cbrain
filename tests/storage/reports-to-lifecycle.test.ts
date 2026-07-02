@@ -232,6 +232,24 @@ describe("reports_to lifecycle helpers", () => {
       expect(fromRow?.link_count).toBe(1);
     });
 
+    test("default link-count helpers exclude candidate reports_to but keep ordinary candidate links", () => {
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'candidate', 'ner')`,
+      ).run(FROM, MGR_A);
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'related', 'candidate', 'ner')`,
+      ).run(FROM, MGR_B);
+
+      expect(db.getLinkCountBySlug(FROM)).toBe(1);
+      expect(db.getLinkCountForSlug(FROM)).toBe(1);
+      expect(db.batchGetLinkCounts([FROM]).get(FROM)).toBe(1);
+      const rows = db.getPagesWithLinkCount(["entity/person"]);
+      expect(rows.find((r) => r.slug === FROM)?.link_count).toBe(1);
+
+      const links = db.getLinksForSlugs([FROM]).get(FROM);
+      expect(links?.outgoing).toEqual([MGR_B]);
+    });
+
     test("getLinkCountBySlug excludes superseded/rejected (parity with getLinkCountForSlug)", () => {
       db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95);
       db.rawDb.prepare(

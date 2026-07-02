@@ -1,4 +1,5 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
+import { isCurrentFactLink } from "../shared.js";
 import type {
   KnowledgeMapAnalysis,
   KnowledgeMapHealth,
@@ -198,7 +199,7 @@ function buildGraph(
     const entry = linksBySlug.get(slug);
     if (!entry) continue;
     // Process each directed link once via outgoing.
-    for (const l of entry.outgoing) {
+    for (const l of entry.outgoing.filter(isCurrentFactLink)) {
       const other = l.to_slug;
       if (!inScope.has(other)) continue; // both endpoints must be in scope
       if (l.from_slug === l.to_slug) continue; // ignore self-loops
