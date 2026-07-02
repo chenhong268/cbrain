@@ -3178,7 +3178,7 @@ describe("MCP Server", () => {
 
   describe("buildContext ner-backfill wiring (#252)", () => {
     test("defer deps wire deferredNerSubmitter into ingest (no throw)", async () => {
-      const { IngestManager } = await import("../../src/core/ingest.js");
+      const { IngestManager } = await import("../../src/core/ingestion/ingest.js");
       // Prove: bare IngestManager with defer+no submitter THROWS
       expect(() => new IngestManager(db, deps.embedding, deps.lance, vaultPath, undefined, undefined, { nerMode: "defer" })).toThrow();
 

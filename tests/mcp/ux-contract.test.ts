@@ -11,8 +11,8 @@ import { describe, test, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatIngestResult, formatDialogueResult, formatRecallEnvelope, formatGroundedRecallEnvelope, formatQueryEnvelope, formatGetPageEnvelope, formatSummarizeEnvelope, formatEpisodeEnvelope, formatOrgTreeEnvelope, formatDiscoveriesEnvelope, formatGetPagesEnvelope } from "../../src/mcp/tools/format-result.js";
-import type { IngestResult } from "../../src/core/ingest.js";
-import type { DialogueIngestResult } from "../../src/core/dialogue.js";
+import type { IngestResult } from "../../src/core/ingestion/ingest.js";
+import type { DialogueIngestResult } from "../../src/core/ingestion/dialogue.js";
 
 // ─── C1: CaptureEnvelope 三层输出 ────────────────────────────
 

@@ -3,7 +3,7 @@ import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { IngestManager } from "../../src/core/ingest.js";
+import { IngestManager } from "../../src/core/ingestion/ingest.js";
 import { normalizeAndHashBody } from "../../src/core/shared.js";
 import { PageManager } from "../../src/core/page.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";

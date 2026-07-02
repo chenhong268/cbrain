@@ -3,7 +3,7 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { PageManager } from "../../src/core/page.js";
-import { ContentPipeline } from "../../src/core/pipeline.js";
+import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
 import { GraphManager } from "../../src/core/graph/graph.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";

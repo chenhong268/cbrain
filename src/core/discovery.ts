@@ -2,11 +2,11 @@ import { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { Logger } from "./logger.js";
 import { getOntology } from "../ontology/loader.js";
-import { normalizeForComparison } from "./name-similarity.js";
+import { normalizeForComparison } from "./ingestion/name-similarity.js";
 import {
   detectSimilarEntities,
   type DetectorInput, type DetectorPage, type PageQuality, type SimilarEntityCandidate,
-} from "./similar-entity-detector.js";
+} from "./ingestion/similar-entity-detector.js";
 
 export type DiscoveryType = "bridge" | "trend" | "gap" | "contradiction" | "similar_entity";
 

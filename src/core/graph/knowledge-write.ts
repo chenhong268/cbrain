@@ -10,7 +10,7 @@
 
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { PageManager } from "../page.js";
-import type { ContentPipeline } from "../pipeline.js";
+import type { ContentPipeline } from "../ingestion/pipeline.js";
 import type { GraphManager } from "./graph.js";
 import {
   findEntitySlug,

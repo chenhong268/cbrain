@@ -1,5 +1,5 @@
 import { describe, test, expect, mock } from "bun:test";
-import { NerEngine } from "../../src/core/ner.js";
+import { NerEngine } from "../../src/core/ingestion/ner.js";
 import type { LLMProvider, ChatMessage } from "../../src/llm/provider.js";
 
 function createMockLLM(responses: string[]): LLMProvider & { calls: ChatMessage[][] } {

@@ -6,7 +6,7 @@
  * for robust YAML/frontmatter handling.
  */
 
-import { parseFrontmatter } from "../utils/frontmatter.js";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
 
 const SUPPORTED_FM_FIELDS = new Set(["title", "type", "slug", "tags"]);
 

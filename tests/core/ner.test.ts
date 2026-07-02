@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { NerEngine, NerTimeoutError, isNerTimeoutError } from "../../src/core/ner.js";
+import { NerEngine, NerTimeoutError, isNerTimeoutError } from "../../src/core/ingestion/ner.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
-import { ContentPipeline } from "../../src/core/pipeline.js";
+import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";

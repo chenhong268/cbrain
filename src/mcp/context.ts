@@ -3,13 +3,13 @@ import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { HybridSearch } from "../core/search.js";
 import { SyncManager } from "../core/sync.js";
-import { IngestManager } from "../core/ingest.js";
+import { IngestManager } from "../core/ingestion/ingest.js";
 import { GraphManager } from "../core/graph/graph.js";
 import { EnrichManager } from "../core/enrich.js";
 import { WritebackManager } from "../core/safety/writeback.js";
-import { NerEngine } from "../core/ner.js";
+import { NerEngine } from "../core/ingestion/ner.js";
 import { PageManager } from "../core/page.js";
-import { ContentPipeline } from "../core/pipeline.js";
+import { ContentPipeline } from "../core/ingestion/pipeline.js";
 import { VersionManager } from "../core/version.js";
 import { JobQueue } from "../core/jobs.js";
 import { Logger } from "../core/logger.js";
@@ -24,7 +24,7 @@ import type { LLMProvider } from "../llm/provider.js";
 import type { FileWatcher } from "../core/watcher.js";
 import { resolveIngestNerMode } from "../cli/context.js";
 import type { ToolProfile } from "./tool-profiles.js";
-import { JobQueueNerSubmitter } from "../core/ner-backfill.js";
+import { JobQueueNerSubmitter } from "../core/ingestion/ner-backfill.js";
 
 export interface ToolContext {
   db: CBrainDB;

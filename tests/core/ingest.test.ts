@@ -2,8 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { IngestManager } from "../../src/core/ingest.js";
-import { NerEngine } from "../../src/core/ner.js";
+import { IngestManager } from "../../src/core/ingestion/ingest.js";
+import { NerEngine } from "../../src/core/ingestion/ner.js";
 import { generateSlug } from "../../src/utils/slug.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
@@ -1576,8 +1576,8 @@ describe("IngestManager NER timeout partial (#229)", () => {
   });
 });
 
-import { JobQueueNerSubmitter } from "../../src/core/ner-backfill.js";
-import type { DeferredNerSubmitter } from "../../src/core/ner-backfill.js";
+import { JobQueueNerSubmitter } from "../../src/core/ingestion/ner-backfill.js";
+import type { DeferredNerSubmitter } from "../../src/core/ingestion/ner-backfill.js";
 
 describe("IngestManager NER defer mode (#252)", () => {
   const testDir = "/tmp/cbrain-test-ingest-defer";

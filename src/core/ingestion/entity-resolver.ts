@@ -1,10 +1,10 @@
 import type { EntityType, Relevance } from "./ner.js";
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { LLMProvider } from "../llm/provider.js";
-import { mapEntityType } from "./shared.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import { mapEntityType } from "../shared.js";
 import { normalizeForComparison, isSignificantSubstring } from "./name-similarity.js";
-import { getOntology } from "../ontology/loader.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
+import { getOntology } from "../../ontology/loader.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
 
 // ─── Types ────────────────────────────────────────────────────
 

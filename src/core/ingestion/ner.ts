@@ -1,7 +1,7 @@
-import type { LLMProvider } from "../llm/provider.js";
-import type { Logger } from "./logger.js";
-import { getOntology } from "../ontology/loader.js";
-import { buildEntityPrompt, buildRelationPrompt } from "../ontology/ner-prompt.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import type { Logger } from "../logger.js";
+import { getOntology } from "../../ontology/loader.js";
+import { buildEntityPrompt, buildRelationPrompt } from "../../ontology/ner-prompt.js";
 
 // ─── Types ──────────────────────────────────────────────────
 

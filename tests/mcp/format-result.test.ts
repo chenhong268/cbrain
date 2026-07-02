@@ -3,8 +3,8 @@ import {
   formatIngestResult,
   formatDialogueResult,
 } from "../../src/mcp/tools/format-result.js";
-import type { IngestResult } from "../../src/core/ingest.js";
-import type { DialogueIngestResult } from "../../src/core/dialogue.js";
+import type { IngestResult } from "../../src/core/ingestion/ingest.js";
+import type { DialogueIngestResult } from "../../src/core/ingestion/dialogue.js";
 
 // ─── Helpers ────────────────────────────────────────────────
 

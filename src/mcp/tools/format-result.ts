@@ -1,5 +1,5 @@
-import type { IngestResult } from "../../core/ingest.js";
-import type { DialogueIngestResult } from "../../core/dialogue.js";
+import type { IngestResult } from "../../core/ingestion/ingest.js";
+import type { DialogueIngestResult } from "../../core/ingestion/dialogue.js";
 import type { EpisodicRecallResult } from "../../core/episodic-recall.js";
 import type { OrgTreeResult } from "../../core/graph/hierarchy.js";
 import type { Link, GraphNode } from "../../core/graph/graph.js";

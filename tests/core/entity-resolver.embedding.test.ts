@@ -2,8 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { EntityResolver } from "../../src/core/entity-resolver.js";
-import type { EntityCandidate } from "../../src/core/entity-resolver.js";
+import { EntityResolver } from "../../src/core/ingestion/entity-resolver.js";
+import type { EntityCandidate } from "../../src/core/ingestion/entity-resolver.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 

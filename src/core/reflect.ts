@@ -1,7 +1,7 @@
 import type { CBrainDB } from "../storage/sqlite.js";
 import type { LLMProvider, ChatMessage } from "../llm/provider.js";
 import type { PageManager } from "./page.js";
-import type { ContentPipeline } from "./pipeline.js";
+import type { ContentPipeline } from "./ingestion/pipeline.js";
 import type { InsightManager } from "./insight.js";
 
 export interface SynthesisResult {

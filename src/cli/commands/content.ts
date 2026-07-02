@@ -21,8 +21,8 @@ export function register(program: Command) {
       const config = loadConfig();
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
-      const { IngestManager } = await import("../../core/ingest.js");
-      const { JobQueueNerSubmitter } = await import("../../core/ner-backfill.js");
+      const { IngestManager } = await import("../../core/ingestion/ingest.js");
+      const { JobQueueNerSubmitter } = await import("../../core/ingestion/ner-backfill.js");
       const { resolveIngestNerMode } = await import("../context.js");
       // Manager default: env > config. opts.nerMode is NOT mixed in here — it is a per-call override.
       const managerMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, config.ner?.ingest_mode);

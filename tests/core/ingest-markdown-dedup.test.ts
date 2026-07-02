@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { IngestManager } from "../../src/core/ingest.js";
+import { IngestManager } from "../../src/core/ingestion/ingest.js";
 import { generateSlug, looksLikePath } from "../../src/utils/slug.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 

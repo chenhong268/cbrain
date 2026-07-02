@@ -17,8 +17,8 @@ import type { LanceDBManager } from "../storage/lancedb.js";
 import type { SearchProvider } from "../search/provider.js";
 import { SealManager } from "./seal.js";
 import { StubEnrichManager } from "./stub-enrich.js";
-import { ContentPipeline } from "./pipeline.js";
-import { runNerBackfillStage, emptyNerBackfillCounts, type NerBackfillCounts } from "./ner-backfill.js";
+import { ContentPipeline } from "./ingestion/pipeline.js";
+import { runNerBackfillStage, emptyNerBackfillCounts, type NerBackfillCounts } from "./ingestion/ner-backfill.js";
 import { PageManager } from "./page.js";
 import { WakeupDiff } from "./wakeup.js";
 import {

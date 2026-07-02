@@ -1,9 +1,9 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { DialogueIngest, DialogueMode } from "../../core/dialogue.js";
+import { DialogueIngest, DialogueMode } from "../../core/ingestion/dialogue.js";
 import { formatIngestResult, formatDialogueResult } from "./format-result.js";
-import { classifyContentType } from "../../core/content-classifier.js";
+import { classifyContentType } from "../../core/ingestion/content-classifier.js";
 
 // (#205) MCP ingest does NOT expand @file references (unlike the CLI). A
 // standalone @<path> in content is rejected loudly — otherwise Hermes passes

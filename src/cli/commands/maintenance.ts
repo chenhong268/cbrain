@@ -237,7 +237,7 @@ export function register(program: Command) {
 
       await deps.lance.connect(config.lancePath);
       const { SyncManager } = await import("../../core/sync.js");
-      const { NerEngine } = await import("../../core/ner.js");
+      const { NerEngine } = await import("../../core/ingestion/ner.js");
       const { PageManager } = await import("../../core/page.js");
       const pages = new PageManager(deps.db, config.vaultPath);
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
@@ -503,7 +503,7 @@ export function register(program: Command) {
       const { HealthChecker } = await import("../../core/health.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
-      const { NerEngine } = await import("../../core/ner.js");
+      const { NerEngine } = await import("../../core/ingestion/ner.js");
       const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
@@ -512,7 +512,7 @@ export function register(program: Command) {
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath, pages);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
       const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
-      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const { ContentPipeline } = await import("../../core/ingestion/pipeline.js");
       const nerPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
         deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined,
@@ -567,7 +567,7 @@ export function register(program: Command) {
         process.exit(1);
       }
 
-      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const { ContentPipeline } = await import("../../core/ingestion/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
       const mgr = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr, logger, { maxEntities: config.reflect?.maxEntities, maxLlmCalls: config.reflect?.maxLlmCalls });
@@ -621,7 +621,7 @@ export function register(program: Command) {
       const { StubEnrichManager } = await import("../../core/stub-enrich.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
-      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const { ContentPipeline } = await import("../../core/ingestion/pipeline.js");
       const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
@@ -672,7 +672,7 @@ export function register(program: Command) {
         ? new DeepSeekLLMProvider(config.reflect.llm_api_key, config.reflect.llm_base_url, config.reflect.llm_model, { timeoutMs: config.reflect.timeoutMs ?? 30_000 })
         : deps.llm;
 
-      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const { ContentPipeline } = await import("../../core/ingestion/pipeline.js");
       const reflectPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
       const reflect = new ReflectManager(deps.db, pages, reflectLlm, reflectPipeline, deps.embedding, insightMgr, logger, { maxEntities: config.reflect?.maxEntities, maxLlmCalls: config.reflect?.maxLlmCalls });
@@ -815,7 +815,7 @@ export function register(program: Command) {
       const { PageManager } = await import("../../core/page.js");
       const { GraphManager } = await import("../../core/graph/graph.js");
       const { Logger } = await import("../../core/logger.js");
-      const { ContentPipeline } = await import("../../core/pipeline.js");
+      const { ContentPipeline } = await import("../../core/ingestion/pipeline.js");
       const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
@@ -958,7 +958,7 @@ export function register(program: Command) {
         process.exit(1);
       }
 
-      const { structuredFactsBackfill } = await import("../../core/structured-facts-backfill.js");
+      const { structuredFactsBackfill } = await import("../../core/ingestion/structured-facts-backfill.js");
       const report = await structuredFactsBackfill(deps.db, config.vaultPath, deps.llm, {
         apply: opts.apply === true,
         limit: parseInt(opts.limit, 10) || 50,

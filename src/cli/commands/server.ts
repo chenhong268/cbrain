@@ -92,7 +92,7 @@ async function initWatcher(config: ReturnType<typeof loadConfig>, deps: ReturnTy
   const pages = new PageManager(deps.db, config.vaultPath);
   const nerApiKey = config.ner?.llm_api_key ?? config.embedding?.apiKey ?? process.env.ZHIPU_API_KEY;
   const { ZhipuLLMProvider } = await import("../../llm/zhipu.js");
-  const { NerEngine } = await import("../../core/ner.js");
+  const { NerEngine } = await import("../../core/ingestion/ner.js");
   const nerLLM = nerApiKey ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model) : undefined;
   const nerEngine = nerLLM ? new NerEngine(nerLLM) : undefined;
   console.error(`> Watcher NER: ${nerEngine ? "enabled" : "DISABLED (no API key)"}`);

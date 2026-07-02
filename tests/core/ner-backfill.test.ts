@@ -2,14 +2,14 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite";
-import { NER_BACKFILL_STALE_TTL_MS, NER_BACKFILL_JOB } from "../../src/core/ner-backfill";
-import { JobQueueNerSubmitter, resolveNerBody } from "../../src/core/ner-backfill";
-import { IngestManager } from "../../src/core/ingest";
+import { NER_BACKFILL_STALE_TTL_MS, NER_BACKFILL_JOB } from "../../src/core/ingestion/ner-backfill";
+import { JobQueueNerSubmitter, resolveNerBody } from "../../src/core/ingestion/ner-backfill";
+import { IngestManager } from "../../src/core/ingestion/ingest";
 import { PageManager } from "../../src/core/page";
 import type { EmbeddingProvider } from "../../src/embedding/provider";
-import { runNerBackfillStage } from "../../src/core/ner-backfill";
-import { ContentPipeline } from "../../src/core/pipeline";
-import { NerEngine, NerTimeoutError } from "../../src/core/ner";
+import { runNerBackfillStage } from "../../src/core/ingestion/ner-backfill";
+import { ContentPipeline } from "../../src/core/ingestion/pipeline";
+import { NerEngine, NerTimeoutError } from "../../src/core/ingestion/ner";
 import type { LLMProvider } from "../../src/llm/provider";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {

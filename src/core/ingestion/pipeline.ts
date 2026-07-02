@@ -1,15 +1,15 @@
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
-import { LanceDBManager } from "../storage/lancedb.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
+import { LanceDBManager } from "../../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { ExtractionResult } from "./ner.js";
 import { validateFacts, applyFacts } from "./structured-facts.js";
-import { PageManager } from "./page.js";
+import { PageManager } from "../page.js";
 import { extractWikiLinks, isValidEntityName, stripKnownRelationsSection } from "./extract.js";
-import type { Logger } from "./logger.js";
+import type { Logger } from "../logger.js";
 import { EntityResolver } from "./entity-resolver.js";
-import { getOntology } from "../ontology/loader.js";
-import { sanitizeForLog } from "./safety/sync-index-safety.js";
+import { getOntology } from "../../ontology/loader.js";
+import { sanitizeForLog } from "../safety/sync-index-safety.js";
 import {
   chunkContent,
   mapEntityType,
@@ -19,7 +19,7 @@ import {
   DEFAULT_CHUNK_SIZE,
   normalizeRelation,
   getRelationStrength,
-} from "./shared.js";
+} from "../shared.js";
 
 export interface PipelineInput {
   slug: string;

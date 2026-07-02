@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import {
   normalizeForComparison, isSignificantSubstring, hasCjk,
   boundedLevenshtein, tokenizeForBlocking, titleCanonicalScore,
-} from "../../src/core/name-similarity.js";
+} from "../../src/core/ingestion/name-similarity.js";
 
 describe("name-similarity", () => {
   test("normalizeForComparison strips case/space/punct/parentheticals", () => {

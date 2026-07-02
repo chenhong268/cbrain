@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import {
   detectSimilarEntities,
   type DetectorInput, type DetectorPage, type PageQuality,
-} from "../../src/core/similar-entity-detector.js";
+} from "../../src/core/ingestion/similar-entity-detector.js";
 
 function page(slug: string, title: string, type = "entity/company"): DetectorPage {
   return { slug, title, type };

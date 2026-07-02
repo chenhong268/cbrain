@@ -2,8 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { ContentPipeline } from "../../src/core/pipeline.js";
-import type { ExtractionResult } from "../../src/core/ner.js";
+import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
+import type { ExtractionResult } from "../../src/core/ingestion/ner.js";
 import { HealthChecker } from "../../src/core/health.js";
 
 describe("ner_quality_log storage", () => {

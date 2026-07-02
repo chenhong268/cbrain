@@ -5,7 +5,7 @@ import { CBrainDB } from "../storage/sqlite.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import { LanceDBManager } from "../storage/lancedb.js";
-import { NerEngine, isNerTimeoutError } from "./ner.js";
+import { NerEngine, isNerTimeoutError } from "./ingestion/ner.js";
 import { PageManager } from "./page.js";
 import { canonicalSlug, slugToFilePath } from "../utils/slug.js";
 import type { Logger } from "./logger.js";
@@ -17,7 +17,7 @@ import {
   normalizePageType,
   normalizeAndHashBody,
 } from "./shared.js";
-import { ContentPipeline } from "./pipeline.js";
+import { ContentPipeline } from "./ingestion/pipeline.js";
 import {
   snapshotIndexState,
   restoreIndexState,

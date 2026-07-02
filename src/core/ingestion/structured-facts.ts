@@ -1,5 +1,5 @@
-import type { PageManager } from "./page.js";
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { PageManager } from "../page.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
 import { getFactFieldWhitelist, type EntityType, type StructuredFact } from "./ner.js";
 
 export interface FactWriteResult {

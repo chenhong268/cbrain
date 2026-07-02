@@ -1,11 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname, relative } from "node:path";
-import { CBrainDB } from "../storage/sqlite.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
-import type { LLMProvider } from "../llm/provider.js";
-import type { LanceDBManager } from "../storage/lancedb.js";
-import type { Logger } from "./logger.js";
-import type { PageManager } from "./page.js";
+import { CBrainDB } from "../../storage/sqlite.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import type { LanceDBManager } from "../../storage/lancedb.js";
+import type { Logger } from "../logger.js";
+import type { PageManager } from "../page.js";
 import {
   ExtractionResult,
   StructuredFact,
@@ -14,10 +14,10 @@ import {
   filterExtractedEntities,
   filterRelations,
 } from "./ner.js";
-import { findEntitySlug, mapEntityType, hashContent, normalizeRelation } from "./shared.js";
+import { findEntitySlug, mapEntityType, hashContent, normalizeRelation } from "../shared.js";
 import { EntityResolver } from "./entity-resolver.js";
-import { generateSlug, slugToFilePath } from "../utils/slug.js";
-import { stringifyFrontmatter, readPageFile, writePageFile } from "../utils/frontmatter.js";
+import { generateSlug, slugToFilePath } from "../../utils/slug.js";
+import { stringifyFrontmatter, readPageFile, writePageFile } from "../../utils/frontmatter.js";
 
 export type DialogueMode = "auto" | "manual";
 

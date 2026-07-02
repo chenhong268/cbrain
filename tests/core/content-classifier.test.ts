@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { classifyContentType, hasSemanticContent } from "../../src/core/content-classifier.js";
+import { classifyContentType, hasSemanticContent } from "../../src/core/ingestion/content-classifier.js";
 
 describe("classifyContentType", () => {
   // ── Explicit type is always respected ──

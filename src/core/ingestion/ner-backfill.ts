@@ -1,6 +1,6 @@
 // src/core/ner-backfill.ts
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { PageManager } from "./page.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { PageManager } from "../page.js";
 import type { ContentPipeline } from "./pipeline.js";
 import { isNerTimeoutError } from "./ner.js";
 /** Stale-running recovery TTL — aligned with Dream lock TTL (dream.ts). */

@@ -1,8 +1,8 @@
-import type { LLMProvider } from "../llm/provider.js";
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
 import type { EntityType, StructuredFact } from "./ner.js";
 import { getFactFieldWhitelist } from "./ner.js";
-import { readPageFile, writePageFile } from "../utils/frontmatter.js";
+import { readPageFile, writePageFile } from "../../utils/frontmatter.js";
 import { join } from "node:path";
 
 const BACKFILL_PROMPT = `You are a structured fact extractor. Given an entity's page content, extract concrete, verifiable facts as key-value pairs.

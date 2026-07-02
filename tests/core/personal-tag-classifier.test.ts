@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { classifyPersonalTag } from "../../src/core/personal-tag-classifier.js";
+import { classifyPersonalTag } from "../../src/core/ingestion/personal-tag-classifier.js";
 
 describe("classifyPersonalTag — positive signals", () => {
   // Possessive preference / habit (first-person)

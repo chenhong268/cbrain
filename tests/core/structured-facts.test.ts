@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
-import { validateFacts, applyFacts } from "../../src/core/structured-facts.js";
-import type { StructuredFact, EntityType } from "../../src/core/ner.js";
+import { validateFacts, applyFacts } from "../../src/core/ingestion/structured-facts.js";
+import type { StructuredFact, EntityType } from "../../src/core/ingestion/ner.js";
 import type { PageManager } from "../../src/core/page.js";
 import type { CBrainDB } from "../../src/storage/sqlite.js";
 

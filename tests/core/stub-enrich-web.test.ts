@@ -8,7 +8,7 @@ import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { SearchProvider, SearchResult } from "../../src/search/provider.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
 import { PageManager } from "../../src/core/page.js";
-import { ContentPipeline } from "../../src/core/pipeline.js";
+import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
 import { StubEnrichManager } from "../../src/core/stub-enrich.js";
 
 // ─── Mock factories ────────────────────────────────────────────
