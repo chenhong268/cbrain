@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { SyncManager } from "../../src/core/sync.js";
-import { snapshotIndexState, restoreIndexState, SyncRollbackError, sanitizeForLog, SyncSnapshotError } from "../../src/core/sync-index-safety.js";
+import { snapshotIndexState, restoreIndexState, SyncRollbackError, sanitizeForLog, SyncSnapshotError } from "../../src/core/safety/sync-index-safety.js";
 
 const TEST_DIR = "/tmp/cbrain-test-sync-rollback";
 

@@ -25,7 +25,7 @@ import {
   SyncSnapshotError,
   sanitizeForLog,
   type IndexSnapshot,
-} from "./sync-index-safety.js";
+} from "./safety/sync-index-safety.js";
 
 export class TitleCollisionError extends Error {
   constructor(

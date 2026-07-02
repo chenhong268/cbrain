@@ -6,7 +6,7 @@ import { SyncManager } from "../core/sync.js";
 import { IngestManager } from "../core/ingest.js";
 import { GraphManager } from "../core/graph/graph.js";
 import { EnrichManager } from "../core/enrich.js";
-import { WritebackManager } from "../core/writeback.js";
+import { WritebackManager } from "../core/safety/writeback.js";
 import { NerEngine } from "../core/ner.js";
 import { PageManager } from "../core/page.js";
 import { ContentPipeline } from "../core/pipeline.js";

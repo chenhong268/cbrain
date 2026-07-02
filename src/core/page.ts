@@ -15,17 +15,17 @@ import {
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
 import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody } from "./shared.js";
-import { safeDeletePage, type SafeDeleteResult } from "./page-delete-safety.js";
+import { safeDeletePage, type SafeDeleteResult } from "./safety/page-delete-safety.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
 import {
   atomicSlugChange,
   atomicTypeChange,
   type MoveFsOps,
-} from "./atomic-move.js";
+} from "./safety/atomic-move.js";
 
-export { RollbackIncompleteError, CleanupIncompleteError } from "./atomic-move.js";
-export type { MoveFsOps } from "./atomic-move.js";
+export { RollbackIncompleteError, CleanupIncompleteError } from "./safety/atomic-move.js";
+export type { MoveFsOps } from "./safety/atomic-move.js";
 
 const defaultFsOps: MoveFsOps = {
   writeFileSync,

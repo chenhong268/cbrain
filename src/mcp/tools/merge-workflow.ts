@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { MergeWorkflow } from "../../core/merge-workflow.js";
+import { MergeWorkflow } from "../../core/safety/merge-workflow.js";
 import { getLayer } from "../../core/shared.js";
 
 /**

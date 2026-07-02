@@ -241,7 +241,7 @@ describe("merge_entities tool", () => {
     db.rawDb.exec("PRAGMA foreign_keys = ON");
 
     // Use MergeWorkflow directly to verify residual detection
-    const { MergeWorkflow: MW } = await import("../../src/core/merge-workflow.js");
+    const { MergeWorkflow: MW } = await import("../../src/core/safety/merge-workflow.js");
     const { PageManager: PM } = await import("../../src/core/page.js");
     const pm = new PM(db, vaultPath);
     const wf = new MW(db, pm, vaultPath);

@@ -11,8 +11,8 @@
  * real vectors; verify after restore; surface a structured recovery-required
  * error if compensation itself fails.
  */
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { LanceDBManager, RawVectorRow } from "../storage/lancedb.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { LanceDBManager, RawVectorRow } from "../../storage/lancedb.js";
 
 /**
  * Redact filesystem paths and credential-like tokens from a message before it

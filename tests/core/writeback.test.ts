@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { PageManager } from "../../src/core/page.js";
-import { WritebackManager } from "../../src/core/writeback.js";
+import { WritebackManager } from "../../src/core/safety/writeback.js";
 
 let db: CBrainDB;
 let pages: PageManager;

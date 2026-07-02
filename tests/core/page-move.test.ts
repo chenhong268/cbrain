@@ -18,7 +18,7 @@ import {
   atomicSlugChange,
   atomicTypeChange,
   type MoveFsOps,
-} from "../../src/core/atomic-move.js";
+} from "../../src/core/safety/atomic-move.js";
 import { relocatePage } from "../../src/cli/commands/maintenance.js";
 import type { LanceDBManager } from "../../src/storage/lancedb.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";

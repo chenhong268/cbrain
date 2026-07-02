@@ -1,6 +1,6 @@
-import type { CBrainDB } from "../storage/sqlite.js";
-import { PageManager, } from "./page.js";
-import { normalizeRelation } from "./shared.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import { PageManager, } from "../page.js";
+import { normalizeRelation } from "../shared.js";
 
 export type WritebackAction = "append" | "create_concept" | "create_link";
 

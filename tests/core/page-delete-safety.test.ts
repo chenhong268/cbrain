@@ -3,7 +3,7 @@ import { existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { PageManager } from "../../src/core/page.js";
-import { safeDeletePage } from "../../src/core/page-delete-safety.js";
+import { safeDeletePage } from "../../src/core/safety/page-delete-safety.js";
 import { rewriteVaultLinks } from "../../src/core/shared.js";
 import type { LanceDBManager } from "../../src/storage/lancedb.js";
 

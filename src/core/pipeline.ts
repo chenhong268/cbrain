@@ -9,7 +9,7 @@ import { extractWikiLinks, isValidEntityName, stripKnownRelationsSection } from 
 import type { Logger } from "./logger.js";
 import { EntityResolver } from "./entity-resolver.js";
 import { getOntology } from "../ontology/loader.js";
-import { sanitizeForLog } from "./sync-index-safety.js";
+import { sanitizeForLog } from "./safety/sync-index-safety.js";
 import {
   chunkContent,
   mapEntityType,

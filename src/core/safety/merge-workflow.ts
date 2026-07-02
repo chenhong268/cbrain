@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { PageManager } from "./page.js";
-import { canMerge, getLayer } from "./shared.js";
-import { getOntology } from "../ontology/loader.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { PageManager } from "../page.js";
+import { canMerge, getLayer } from "../shared.js";
+import { getOntology } from "../../ontology/loader.js";
 
 // ── Types ─────────────────────────────────────────────────────────────
 

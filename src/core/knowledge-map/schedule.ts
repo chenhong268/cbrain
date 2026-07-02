@@ -5,7 +5,7 @@ import type { Logger } from "../logger.js";
 import { analyzeKnowledgeMap } from "./index.js";
 import { buildKnowledgeMapReport, summarizeKnowledgeMapShape } from "./report.js";
 import { produceKnowledgeMapDiscoveries } from "./discovery.js";
-import { sanitizeForLog } from "../sync-index-safety.js";
+import { sanitizeForLog } from "../safety/sync-index-safety.js";
 
 /**
  * #242 — Knowledge Map Dream stage: generate the user-facing report at most

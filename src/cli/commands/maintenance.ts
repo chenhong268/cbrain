@@ -13,8 +13,8 @@ import {
   atomicSlugChange,
   atomicTypeChange,
   type MoveFsOps,
-} from "../../core/atomic-move.js";
-import { safeDeletePage } from "../../core/page-delete-safety.js";
+} from "../../core/safety/atomic-move.js";
+import { safeDeletePage } from "../../core/safety/page-delete-safety.js";
 import {
   resolveSyncMode,
   handleReindexSlug,

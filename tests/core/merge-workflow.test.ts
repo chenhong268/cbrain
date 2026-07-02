@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { PageManager } from "../../src/core/page.js";
-import { MergeWorkflow } from "../../src/core/merge-workflow.js";
+import { MergeWorkflow } from "../../src/core/safety/merge-workflow.js";
 
 const testDir = "/tmp/cbrain-test-merge-wf";
 const dbPath = join(testDir, "test.sqlite");

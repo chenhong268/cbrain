@@ -1,9 +1,9 @@
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { rewriteVaultLinks } from "./shared.js";
-import type { CBrainDB } from "../storage/sqlite.js";
-import type { LanceDBManager } from "../storage/lancedb.js";
-import type { Logger } from "./logger.js";
+import { rewriteVaultLinks } from "../shared.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { LanceDBManager } from "../../storage/lancedb.js";
+import type { Logger } from "../logger.js";
 
 const LANCE_PENDING_DELETE_KEY = "page_delete.lance_pending";
 
