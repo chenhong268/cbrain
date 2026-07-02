@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 运维（#262）
+
+- **只读 fsck 一致性检查（#262）**：新增 `cbrain fsck`，跨 vault/SQLite/FTS/LanceDB 四层报告存储一致性 + FK 孤儿，不写数据。exit `0`/`1`/`2`（pass / 发现一致性问题 / 检查器自身故障），`--json` 稳定 schema 供下游 Agent 解析，`--layer vault|sqlite|fts|lance` 限定单层。建议修复命令（`sync --reindex` / `repair-fk --execute` / `doctor`）只打印不执行。
+
 ## [v2.0.4] — 2026-07-01
 
 ### 写入与 MCP 使用体验（#251, #252, #260）
