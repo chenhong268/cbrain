@@ -50,7 +50,7 @@ test("page without chunks → warning finding", () => {
 	expect(nc).toBeDefined();
 	expect(nc!.severity).toBe("warning");
 	expect(nc!.count).toBe(1);
-	expect(nc!.sampleSlugs).toContain("test-no-chunks");
+	expect(nc!.sampleSlugs).not.toContain("test-no-chunks"); // 匿名
 	expect(nc!.suggestedCommand).toContain("cbrain sync");
 });
 
@@ -95,8 +95,8 @@ test("quarantine context → info finding with count + sample slugs", () => {
 	expect(q).toBeDefined();
 	expect(q!.severity).toBe("info");
 	expect(q!.count).toBe(2);
-	expect(q!.sampleSlugs).toContain("test-q-a");
-	expect(q!.sampleSlugs).toContain("test-q-b");
+	expect(q!.sampleSlugs).not.toContain("test-q-a"); // 匿名
+	expect(q!.sampleSlugs).not.toContain("test-q-b"); // 匿名
 	// info severity — suggestedCommand is empty (not a failure)
 	expect(q!.suggestedCommand).toBe("");
 });

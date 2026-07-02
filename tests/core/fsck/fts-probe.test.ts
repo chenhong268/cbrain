@@ -56,7 +56,7 @@ test("page with chunk but no fts row → fts.coverage_gap warning", () => {
 	expect(gap!.severity).toBe("warning");
 	expect(gap!.layer).toBe("fts");
 	expect(gap!.count).toBe(1);
-	expect(gap!.sampleSlugs).toContain("test-no-fts-page");
+	expect(gap!.sampleSlugs).not.toContain("test-no-fts-page"); // 匿名
 	expect(gap!.suggestedCommand).toContain("cbrain sync");
 });
 
@@ -138,4 +138,28 @@ test("sampleSlugs capped at 5 even with many gaps", () => {
 	const gap = findings.find((f) => f.check === "fts.coverage_gap");
 	expect(gap).toBeDefined();
 	expect(gap!.sampleSlugs.length).toBeLessThanOrEqual(5);
+});
+
+test("stale fts rows (chunk deleted, fts remains) → fts.stale_rows warning", () => {
+	db = freshDb();
+	db.insertPage({
+		slug: "test-stale-page",
+		type: "record",
+		title: "Stale",
+		filePath: "s.md",
+		contentHash: "h",
+	});
+	db.insertChunk("test-stale-page", 0, "stale content");
+	db.ftsInsert("test-stale-page", "stale content");
+	// 删 chunk 但保留 fts row（绕过正常同步路径，制造残留）
+	db.rawDb.prepare("DELETE FROM chunks WHERE page_slug = ?").run("test-stale-page");
+
+	const findings = probeFts(db);
+	const stale = findings.find((f) => f.check === "fts.stale_rows");
+	expect(stale).toBeDefined();
+	expect(stale!.severity).toBe("warning");
+	expect(stale!.layer).toBe("fts");
+	expect(stale!.count).toBe(1);
+	expect(stale!.sampleSlugs).not.toContain("test-stale-page"); // 匿名
+	expect(stale!.suggestedCommand).toContain("cbrain sync");
 });

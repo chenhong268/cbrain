@@ -55,18 +55,42 @@ export function register(program: Command): void {
 		.action(async (opts: { json?: boolean; layer?: string }) => {
 			const { loadConfig } = await import("../context.js");
 			const { CBrainDB } = await import("../../storage/sqlite.js");
+			const { existsSync } = await import("node:fs");
+			const { FsckLayerSchema } = await import("../../core/fsck/types.js");
 			const config = loadConfig();
+			const ts = new Date().toISOString();
+			const emit = (report: FsckReport, exitCode: 0 | 1 | 2): void => {
+				if (opts.json) console.log(JSON.stringify(report));
+				else console.log(reportToMarkdown(report));
+				process.exit(exitCode);
+			};
+
+			// 非法 --layer → exit 2（否则任意字符串会让无 layer 执行 → 静默 pass）
+			let layer: FsckLayer | undefined;
+			if (opts.layer) {
+				const parsed = FsckLayerSchema.safeParse(opts.layer);
+				if (!parsed.success) {
+					emit(buildReport([], "unchecked", ts, `Invalid --layer: ${opts.layer}. Allowed: vault|sqlite|fts|lance`), 2);
+					return;
+				}
+				layer = parsed.data;
+			}
+
+			// DB 不存在 → exit 2，绝不创建文件/目录（只读契约；CBrainDB 构造器会建）
+			if (!existsSync(config.dbPath)) {
+				emit(buildReport([], "unchecked", ts, "DB file not found at configured dbPath"), 2);
+				return;
+			}
+
 			const db = new CBrainDB(config.dbPath, { skipMigrate: true });
 			try {
 				const { report, exitCode } = await runFsck({
 					vaultPath: config.vaultPath,
 					lancePath: config.lancePath,
 					db,
-					layer: opts.layer as FsckLayer | undefined,
+					layer,
 				});
-				if (opts.json) console.log(JSON.stringify(report));
-				else console.log(reportToMarkdown(report));
-				process.exit(exitCode);
+				emit(report, exitCode);
 			} finally {
 				db.close();
 			}

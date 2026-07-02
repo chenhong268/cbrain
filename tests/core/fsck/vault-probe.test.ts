@@ -38,9 +38,10 @@ test("hidden dirs (.obsidian/.trash) skipped — no false-positive file_exists_d
 	writeMd(".obsidian/workspace.md", "---\ntitle: WS\ntype: record\nslug: test-vp-hidden\n---\nObsidian internal.");
 	// 正常 vault md（无 DB page）应当触发
 	writeMd("real.md", "---\nslug: test-vp-real\n---\nbody");
-	const samples = probeVault(vaultDir, db).flatMap((f) => f.sampleSlugs);
-	expect(samples).toContain("test-vp-real");      // 正常 md 被扫到
-	expect(samples).not.toContain("test-vp-hidden"); // .obsidian 被跳过
+	const findings = probeVault(vaultDir, db);
+	const fm = findings.find((x) => x.check === "vault.file_exists_db_missing");
+	expect(fm?.count).toBe(1);                    // 只有 real.md；.obsidian/workspace.md 被跳
+	expect(fm?.sampleSlugs).toEqual(["item_1"]);  // 匿名 token，不含真实 slug
 });
 
 test("md file in vault with slug, no DB page → file_exists_db_missing error", () => {
@@ -52,7 +53,7 @@ test("md file in vault with slug, no DB page → file_exists_db_missing error", 
 	expect(f).toBeDefined();
 	expect(f!.severity).toBe("error");
 	expect(f!.count).toBe(1);
-	expect(f!.sampleSlugs).toContain("test-vp-alpha");
+	expect(f!.sampleSlugs).not.toContain("test-vp-alpha"); // 匿名：真实 slug 不泄露
 	expect(f!.suggestedCommand).toContain("cbrain sync");
 	expect(f!.suggestedCommand).toContain("--reindex");
 	expect(f!.layer).toBe("vault");
@@ -74,7 +75,7 @@ test("DB page with file_path, no file on disk → db_exists_file_missing error",
 	expect(f).toBeDefined();
 	expect(f!.severity).toBe("error");
 	expect(f!.count).toBe(1);
-	expect(f!.sampleSlugs).toContain("test-vp-ghost");
+	expect(f!.sampleSlugs).not.toContain("test-vp-ghost"); // 匿名
 	expect(f!.suggestedCommand).toContain("cbrain show");
 	// Must NOT be a repair command — verify no --execute or --writeback
 	expect(f!.suggestedCommand).not.toContain("--execute");
@@ -116,7 +117,7 @@ test("frontmatter slug resolves to DB page at different file_path → frontmatte
 	expect(f).toBeDefined();
 	expect(f!.severity).toBe("warning");
 	expect(f!.count).toBe(1);
-	expect(f!.sampleSlugs).toContain("test-vp-ok");
+	expect(f!.sampleSlugs).not.toContain("test-vp-ok"); // 匿名
 	expect(f!.suggestedCommand).toContain("cbrain sync");
 	expect(f!.suggestedCommand).toContain("--reindex");
 	expect(f!.layer).toBe("vault");
@@ -178,5 +179,5 @@ test("nested md files scanned", () => {
 	const findings = probeVault(vaultDir, db);
 	const f = findings.find((x) => x.check === "vault.file_exists_db_missing");
 	expect(f).toBeDefined();
-	expect(f!.sampleSlugs).toContain("test-vp-nested");
+	expect(f!.sampleSlugs).not.toContain("test-vp-nested"); // 匿名
 });

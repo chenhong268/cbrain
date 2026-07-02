@@ -21,10 +21,10 @@ export function severityToStatus(severities: FsckSeverity[]): FsckOverallStatus 
 	return "pass";
 }
 
-const MAX_SLUG_LEN = 40;
-
 export function anonymizeSlugs(slugs: string[], max = 5): string[] {
-	return slugs.slice(0, max).map((s) => (s.length > MAX_SLUG_LEN ? `${s.slice(0, MAX_SLUG_LEN - 1)}…` : s));
+	// 稳定匿名 token：丢弃真实 slug（CBrain slug 可能含人名/公司/概念名），
+	// 只保留序号反映规模。原 slug 仅未来 --debug/--unsafe-raw 可见，本期默认匿名。
+	return slugs.slice(0, max).map((_, i) => `item_${i + 1}`);
 }
 
 export function buildReport(

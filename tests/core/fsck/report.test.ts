@@ -23,11 +23,20 @@ test("buildReport aggregates counts + status; fatalError forces fail", () => {
 	expect(failed.fatalError).toBe("DB unreadable");
 });
 
-test("anonymizeSlugs truncates to 5 + caps long slug length", () => {
-	const many = Array.from({ length: 10 }, (_, i) => `slug-${i}`.repeat(8));
+test("anonymizeSlugs returns stable anonymous tokens, NEVER real slugs", () => {
+	const real = ["zhang-san-person", "acme-corp", "a-very-long-real-slug-here"];
+	const out = anonymizeSlugs(real);
+	expect(out).toEqual(["item_1", "item_2", "item_3"]);
+	// 真实 slug 不得出现在输出（可能含人名/公司名 — 隐私）
+	const joined = out.join("|");
+	for (const r of real) expect(joined).not.toContain(r);
+});
+
+test("anonymizeSlugs caps at 5 samples", () => {
+	const many = Array.from({ length: 10 }, (_, i) => `real-slug-${i}`);
 	const out = anonymizeSlugs(many);
 	expect(out).toHaveLength(5);
-	for (const s of out) expect(s.length).toBeLessThanOrEqual(40);
+	expect(out).toEqual(["item_1", "item_2", "item_3", "item_4", "item_5"]);
 });
 
 test("reportToMarkdown groups by layer and lists suggestedCommand", () => {
