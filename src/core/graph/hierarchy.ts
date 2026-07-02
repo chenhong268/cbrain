@@ -65,17 +65,15 @@ export function setHierarchy(
   const manager = pages.getBySlug(reportsToSlug);
   if (!manager) throw new Error(`上级实体不存在: ${reportsToSlug}`);
 
-  // Clean up old graph link if reports_to changed
-  const oldReportsTo = page.frontmatter.reports_to as string | undefined;
-  if (oldReportsTo && oldReportsTo !== reportsToSlug) {
-    graph.removeLink(slug, oldReportsTo, REPORTS_TO_RELATION);
-  }
+  // Phase 1 #233: supersede stale active reports_to edges (preserve evidence),
+  // sparing the new target. Deterministic hierarchy set is authoritative.
+  graph.supersedeReportsTo(slug, reportsToSlug);
 
   // Write frontmatter
   pages.update(slug, { extra: { reports_to: reportsToSlug } });
 
-  // Write graph link (skip if already exists — INSERT OR IGNORE)
-  graph.addLink(slug, reportsToSlug, REPORTS_TO_RELATION, undefined, 1.0, "strong", "agent", 0.95);
+  // Write graph link — insert or reactivate as trusted+active
+  graph.upsertActiveReportsTo(slug, reportsToSlug, "agent", 0.95);
 }
 
 /**
@@ -94,10 +92,12 @@ export function removeHierarchy(
   const oldReportsTo = (page.frontmatter.reports_to as string) ?? null;
   if (!oldReportsTo) return null;
 
-  // Remove from graph
-  graph.removeLink(slug, oldReportsTo, REPORTS_TO_RELATION);
+  // Phase 1 #233: supersede the active reports_to edge (preserve evidence)
+  // instead of hard-deleting it. "No current manager" is modelled as the
+  // prior edge becoming stale, not erased.
+  graph.supersedeReportsTo(slug);
 
-  // Remove from frontmatter by setting reports_to to undefined
+  // Clear frontmatter reports_to (PageManager treats undefined as deletion).
   pages.update(slug, {
     body: page.body ?? "",
     extra: { reports_to: undefined },

@@ -413,6 +413,14 @@ export class PageManager {
       updated_at: now,
       ...(updates.extra || {}),
     };
+    // Treat undefined-valued extra keys as deletions (clear the frontmatter
+    // key). js-yaml cannot serialize undefined; this also lets callers like
+    // removeHierarchy clear a field by passing { field: undefined }.
+    if (updates.extra) {
+      for (const [k, v] of Object.entries(updates.extra)) {
+        if (v === undefined) delete (frontmatter as Record<string, unknown>)[k];
+      }
+    }
 
     if (updates.tags) {
       frontmatter.tags = updates.tags;
