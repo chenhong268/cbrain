@@ -117,4 +117,55 @@ describe("processReportsTo", () => {
     const links = db.getOutgoingLinks("brain/entities/person/person-a");
     expect(links.filter((l) => l.relation === "reports_to")).toHaveLength(1);
   });
+
+  test("supersedes (not deletes) stale reports_to edge, preserving evidence", () => {
+    seedPage("brain/entities/person/person-a", "人物甲", "entity/person");
+    seedPage("brain/entities/person/person-b", "人物乙", "entity/person");
+    seedPage("brain/entities/person/person-c", "人物丙", "entity/person");
+
+    pipeline.processReportsTo("brain/entities/person/person-a", {
+      reports_to: "brain/entities/person/person-b",
+    });
+    pipeline.processReportsTo("brain/entities/person/person-a", {
+      reports_to: "brain/entities/person/person-c",
+    });
+
+    // Active read: only C, trusted
+    const active = db.getOutgoingLinks("brain/entities/person/person-a")
+      .filter((l) => l.relation === "reports_to");
+    expect(active).toHaveLength(1);
+    expect(active[0].to_slug).toBe("brain/entities/person/person-c");
+    expect(active[0].trust_state).toBe("trusted");
+
+    // includeInactive: superseded B edge preserved as evidence
+    const all = db.getOutgoingLinks("brain/entities/person/person-a", true)
+      .filter((l) => l.relation === "reports_to");
+    expect(all).toHaveLength(2);
+    const old = all.find((l) => l.to_slug === "brain/entities/person/person-b");
+    expect(old).toBeDefined();
+    expect(old!.trust_state).toBe("superseded");
+    expect(old!.source_page_slug).toBe("brain/entities/person/person-a");
+  });
+
+  test("reactivates edge on revert without duplicating rows", () => {
+    seedPage("brain/entities/person/person-a", "人物甲", "entity/person");
+    seedPage("brain/entities/person/person-b", "人物乙", "entity/person");
+    seedPage("brain/entities/person/person-c", "人物丙", "entity/person");
+
+    // a -> b, then a -> c (b superseded), then revert a -> b
+    pipeline.processReportsTo("brain/entities/person/person-a", { reports_to: "brain/entities/person/person-b" });
+    pipeline.processReportsTo("brain/entities/person/person-a", { reports_to: "brain/entities/person/person-c" });
+    pipeline.processReportsTo("brain/entities/person/person-a", { reports_to: "brain/entities/person/person-b" });
+
+    const active = db.getOutgoingLinks("brain/entities/person/person-a")
+      .filter((l) => l.relation === "reports_to");
+    expect(active).toHaveLength(1);
+    expect(active[0].to_slug).toBe("brain/entities/person/person-b");
+    expect(active[0].trust_state).toBe("trusted");
+
+    // Exactly two rows total (b + c), no duplicate for b
+    const all = db.getOutgoingLinks("brain/entities/person/person-a", true)
+      .filter((l) => l.relation === "reports_to");
+    expect(all).toHaveLength(2);
+  });
 });

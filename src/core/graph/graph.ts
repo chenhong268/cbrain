@@ -45,6 +45,16 @@ export class GraphManager {
     return this.db.deleteLink(from, to, relation);
   }
 
+  /** Phase 1 #233: supersede active reports_to edges, preserving evidence. */
+  supersedeReportsTo(from: string, exceptToSlug?: string): number {
+    return this.db.supersedeReportsTo(from, exceptToSlug);
+  }
+
+  /** Phase 1 #233: insert or reactivate a trusted active reports_to edge. */
+  upsertActiveReportsTo(from: string, to: string, sourceType?: string, confidence?: number): void {
+    this.db.upsertActiveReportsTo(from, to, sourceType, confidence);
+  }
+
   getLinks(slug: string, direction: "outgoing" | "incoming" | "both" = "both"): Link[] {
     const results: Link[] = [];
 

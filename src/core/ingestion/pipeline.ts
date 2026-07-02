@@ -231,15 +231,15 @@ export class ContentPipeline {
       return;
     }
 
-    // Remove stale links if reports_to changed — filter all, not just first
-    const staleLinks = this.db.getOutgoingLinks(fromSlug)
-      .filter(l => l.relation === "reports_to" && l.to_slug !== targetSlug);
-    for (const link of staleLinks) {
-      this.db.deleteLink(fromSlug, link.to_slug, "reports_to");
-    }
-
-    // INSERT OR IGNORE — same params as setHierarchy() in hierarchy.ts
-    this.db.insertLink(fromSlug, targetSlug, "reports_to", undefined, 1.0, "strong", "agent", 0.95);
+    // Phase 1 #233: supersede stale active reports_to edges (preserve evidence),
+    // then insert or reactivate the target as a trusted active edge. One
+    // transaction so callers never observe two active managers mid-write.
+    this.db.transaction(() => {
+      this.db.supersedeReportsTo(fromSlug, targetSlug);
+      this.db.upsertActiveReportsTo(fromSlug, targetSlug, "agent", 0.95, {
+        source_page_slug: fromSlug,
+      });
+    });
     this.logger?.info("pipeline", "reports_to graph link synced", { from: fromSlug, to: targetSlug });
   }
 
