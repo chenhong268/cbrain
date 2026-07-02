@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { IndexGenerator } from "../../src/core/indexes.js";
+import { IndexGenerator } from "../../src/core/maintenance/indexes.js";
 
 let db: CBrainDB;
 let outputsDir: string;

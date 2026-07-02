@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { ReviewGenerator } from "../../core/compounding-review.js";
+import { ReviewGenerator } from "../../core/maintenance/compounding-review.js";
 
 export function registerCompoundingReviewTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("get_compounding_reviews", {

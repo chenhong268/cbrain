@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CBrainDB } from "../storage/sqlite.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
 
 export class IndexGenerator {
   private db: CBrainDB;

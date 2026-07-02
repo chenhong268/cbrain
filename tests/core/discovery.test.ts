@@ -3,7 +3,7 @@ import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { DiscoveryManager } from "../../src/core/discovery.js";
+import { DiscoveryManager } from "../../src/core/maintenance/discovery.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 
 /** Days offset from today — formats as YYYY-MM-DD */

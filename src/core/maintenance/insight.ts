@@ -1,9 +1,9 @@
-import type { CBrainDB, InsightRow, CreateInsightInput } from "../storage/sqlite.js";
-import type { EmbeddingProvider } from "../embedding/provider.js";
-import type { LanceDBManager } from "../storage/lancedb.js";
-import type { Logger } from "./logger.js";
+import type { CBrainDB, InsightRow, CreateInsightInput } from "../../storage/sqlite.js";
+import type { EmbeddingProvider } from "../../embedding/provider.js";
+import type { LanceDBManager } from "../../storage/lancedb.js";
+import type { Logger } from "../logger.js";
 
-export { type InsightRow, type CreateInsightInput } from "../storage/sqlite.js";
+export { type InsightRow, type CreateInsightInput } from "../../storage/sqlite.js";
 
 export interface InsightFilters {
   type?: "synthesis" | "pattern" | "anomaly" | "bridge";

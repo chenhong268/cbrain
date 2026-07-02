@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { formatDigestCard, shouldFilterDiscovery, isDigestExcluded } from "../../src/core/discovery-digest.js";
+import { formatDigestCard, shouldFilterDiscovery, isDigestExcluded } from "../../src/core/maintenance/discovery-digest.js";
 
 const lookup = (slug: string) => ({ title: slug.replace("entity/", ""), type: "entity/company" });
 

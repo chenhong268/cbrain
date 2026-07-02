@@ -499,7 +499,7 @@ export function register(program: Command) {
       const { runDream } = await import("../../core/maintenance/dream.js");
       const { SyncManager } = await import("../../core/maintenance/sync.js");
       const { EnrichManager } = await import("../../core/maintenance/enrich.js");
-      const { InsightManager } = await import("../../core/insight.js");
+      const { InsightManager } = await import("../../core/maintenance/insight.js");
       const { HealthChecker } = await import("../../core/maintenance/health.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
@@ -550,7 +550,7 @@ export function register(program: Command) {
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
       const { ReflectManager } = await import("../../core/maintenance/reflect.js");
-      const { InsightManager } = await import("../../core/insight.js");
+      const { InsightManager } = await import("../../core/maintenance/insight.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
       const outputsDir = resolveRuntimePath(config);
@@ -661,7 +661,7 @@ export function register(program: Command) {
       const deps = createDeps(config);
       await deps.lance.connect(config.lancePath);
       const { ReflectManager } = await import("../../core/maintenance/reflect.js");
-      const { InsightManager } = await import("../../core/insight.js");
+      const { InsightManager } = await import("../../core/maintenance/insight.js");
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
       const outputsDir = resolveRuntimePath(config);
@@ -679,7 +679,7 @@ export function register(program: Command) {
       console.log("🔍 Running discovery (structural)...");
       const reflectReport = await reflect.runDiscovery();
 
-      const { DiscoveryManager } = await import("../../core/discovery.js");
+      const { DiscoveryManager } = await import("../../core/maintenance/discovery.js");
       const discoveryMgr = new DiscoveryManager(deps.db, reflectLlm, logger);
       console.log("🔍 Running discovery (trend/gap/contradiction)...");
       const discoveryReport = await discoveryMgr.runDiscovery();
@@ -711,7 +711,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const db = new CBrainDB(config.dbPath);
       const outputsDir = resolveRuntimePath(config);
-      const { IndexGenerator } = require("../../core/indexes.js");
+      const { IndexGenerator } = require("../../core/maintenance/indexes.js");
       const gen = new IndexGenerator(db, outputsDir);
       const files = gen.generateAll();
       console.log(`  Generated ${files.length} index files:`);
@@ -1336,7 +1336,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const deps = createDeps(config, false);
       const db = deps.db;
-      const { DiscoveryManager } = await import("../../core/discovery.js");
+      const { DiscoveryManager } = await import("../../core/maintenance/discovery.js");
       const mgr = new DiscoveryManager(db);
       const dryRun = !opts.execute;
       const scope = parsed.scope;

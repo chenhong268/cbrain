@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { DiscoveryManager } from "../../src/core/discovery.js";
+import { DiscoveryManager } from "../../src/core/maintenance/discovery.js";
 import { parseScopeFlag } from "../../src/cli/commands/maintenance.js";
 
 describe("CLI similar-entities (dry-run default) (#246)", () => {

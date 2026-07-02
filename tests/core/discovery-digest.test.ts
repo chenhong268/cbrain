@@ -4,8 +4,8 @@ import {
   formatDigestCard,
   formatDiscoveryDigest,
   formatKnowledgeMapSurface,
-} from "../../src/core/discovery-digest.js";
-import type { DiscoveryRow } from "../../src/core/discovery-digest.js";
+} from "../../src/core/maintenance/discovery-digest.js";
+import type { DiscoveryRow } from "../../src/core/maintenance/discovery-digest.js";
 
 function mockRow(overrides: Partial<DiscoveryRow> = {}): DiscoveryRow {
   return {

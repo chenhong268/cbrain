@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { DiscoveryManager } from "../../src/core/discovery.js";
+import { DiscoveryManager } from "../../src/core/maintenance/discovery.js";
 
 describe("DiscoveryManager.runSimilarEntityDetection (#246)", () => {
   const testDir = "/tmp/cbrain-test-similar-orch";

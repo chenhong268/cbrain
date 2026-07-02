@@ -6,7 +6,7 @@ import type {
   CandidateStatus,
   FeedbackAction,
   CandidateFeedbackRow,
-} from "../storage/sqlite.js";
+} from "../../storage/sqlite.js";
 
 export type { CandidateRow, CandidateType, CandidateStatus, FeedbackAction, CandidateFeedbackRow };
 

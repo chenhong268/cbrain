@@ -1,4 +1,4 @@
-import { CBrainDB } from "../storage/sqlite.js";
+import { CBrainDB } from "../../storage/sqlite.js";
 
 const LAMBDA = 0.05; // time decay — half-life ~14 days
 const QUERY_VALUES: Record<string, number> = {

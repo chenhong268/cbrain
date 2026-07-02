@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { rmSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { CompoundingReviewManager } from "../../src/core/compounding-review.js";
+import { CompoundingReviewManager } from "../../src/core/maintenance/compounding-review.js";
 
 const TEST_DIRS = [
   "/tmp/cbrain-test-cr-schema",

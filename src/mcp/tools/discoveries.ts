@@ -1,9 +1,9 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { DiscoveryManager } from "../../core/discovery.js";
-import type { DiscoveryType } from "../../core/discovery.js";
-import { formatDiscoveryDigest, formatKnowledgeMapSurface, isDigestExcluded } from "../../core/discovery-digest.js";
+import { DiscoveryManager } from "../../core/maintenance/discovery.js";
+import type { DiscoveryType } from "../../core/maintenance/discovery.js";
+import { formatDiscoveryDigest, formatKnowledgeMapSurface, isDigestExcluded } from "../../core/maintenance/discovery-digest.js";
 import { formatDiscoveriesEnvelope } from "./format-result.js";
 
 const TYPE_LABELS: Record<string, string> = {
