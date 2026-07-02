@@ -796,17 +796,24 @@ describe("MCP Server", () => {
         extra: { reports_to: "brain/entities/new-boss" },
       });
 
-      // Old edge must be gone
+      // #233 Phase 1: old edge is superseded (evidence preserved), NOT hard-deleted
       const oldLink = db.rawDb.prepare(
-        "SELECT relation FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'"
-      ).get("brain/entities/sub", "brain/entities/old-boss");
-      expect(oldLink).toBeNull();
+        "SELECT trust_state FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'"
+      ).get("brain/entities/sub", "brain/entities/old-boss") as { trust_state: string } | undefined;
+      expect(oldLink).toBeDefined();
+      expect(oldLink!.trust_state).toBe("superseded");
 
-      // New edge must exist
+      // New edge must exist as active+trusted (deterministic patch)
       const newLink = db.rawDb.prepare(
-        "SELECT relation FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'"
-      ).get("brain/entities/sub", "brain/entities/new-boss");
-      expect(newLink).not.toBeNull();
+        "SELECT trust_state FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'"
+      ).get("brain/entities/sub", "brain/entities/new-boss") as { trust_state: string } | undefined;
+      expect(newLink).toBeDefined();
+      expect(newLink!.trust_state).toBe("trusted");
+
+      // Active read sees only the new edge
+      const active = db.getOutgoingLinks("brain/entities/sub").filter((l) => l.relation === "reports_to");
+      expect(active).toHaveLength(1);
+      expect(active[0].to_slug).toBe("brain/entities/new-boss");
     });
 
     test("new page with extra.reports_to writes frontmatter and creates graph edge", async () => {
@@ -1331,7 +1338,7 @@ describe("MCP Server", () => {
       ).run(slug, title, fileRel, `h-${slug}`);
     }
 
-    test("append reports_to frontmatter creates candidate reports_to structure (#195)", async () => {
+    test("append reports_to frontmatter creates trusted reports_to edge (#195, #233)", async () => {
       seedEntity("brain/entities/shi-ti-a", "entities/shi-ti-a.md", "实体A");
       seedEntity("brain/entities/org-c", "entities/org-c.md", "组织C");
       const server = createServer(deps);
@@ -1345,13 +1352,15 @@ describe("MCP Server", () => {
       // Body persists the appended text
       const vault = readFileSync(join(vaultPath, "entities/shi-ti-a.md"), "utf-8");
       expect(vault).toContain("后续补充说明");
-      // reports_to graph edge created, and it is candidate/agent — NOT trusted
+      // reports_to graph edge created. #233: deterministic agent write -> trusted
+      // (previously source_type=agent yielded 'candidate'; authoritative reports_to
+      // is now trusted so it can supersede stale edges).
       const links = db.rawDb.prepare(
         "SELECT source_type, trust_state FROM links WHERE from_slug = ? AND relation = 'reports_to'"
       ).all("brain/entities/shi-ti-a") as Array<{ source_type: string; trust_state: string }>;
       expect(links.length).toBe(1);
       expect(links[0].source_type).toBe("agent");
-      expect(links[0].trust_state).toBe("candidate");
+      expect(links[0].trust_state).toBe("trusted");
       // Structured return
       expect(data.relations_added).toBeGreaterThanOrEqual(1);
       expect(Array.isArray(data.fields_updated)).toBe(true);
