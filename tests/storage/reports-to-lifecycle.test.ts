@@ -265,5 +265,33 @@ describe("reports_to lifecycle helpers", () => {
       const shells = db.findEmptyShells();
       expect(shells.find((s) => s.slug === ISOLATED)).toBeDefined();
     });
+
+    test("getLinkCount() total excludes superseded/rejected", () => {
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95);
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'superseded', 'agent')`,
+      ).run(FROM, MGR_B);
+      expect(db.getLinkCount()).toBe(1);
+    });
+
+    test("linkExists returns false for superseded-only, true once active", () => {
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'superseded', 'agent')`,
+      ).run(FROM, MGR_A);
+      expect(db.linkExists(FROM, MGR_A, "reports_to")).toBe(false);
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95);
+      expect(db.linkExists(FROM, MGR_A, "reports_to")).toBe(true);
+    });
+
+    test("getHotnessStats linkP95 excludes superseded/rejected", () => {
+      // FROM has 1 active edge + 1 superseded edge (different target).
+      // linkP95 = max active link count per slug. Unfiltered it would be 2.
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95);
+      db.rawDb.prepare(
+        `INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', 'superseded', 'agent')`,
+      ).run(FROM, MGR_B);
+      const stats = db.getHotnessStats();
+      expect(stats.linkP95).toBe(1);
+    });
   });
 });

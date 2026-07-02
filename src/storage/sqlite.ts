@@ -2200,7 +2200,7 @@ export class CBrainDB {
   }
 
   getLinkCount(): number {
-    const row = this.prepare("SELECT COUNT(*) as cnt FROM links").get() as { cnt: number };
+    const row = this.prepare("SELECT COUNT(*) as cnt FROM links WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))").get() as { cnt: number };
     return row.cnt;
   }
 
@@ -2212,8 +2212,11 @@ export class CBrainDB {
   }
 
   linkExists(from: string, to: string, relation: string): boolean {
+    // #233 R2: exclude rejected/superseded — a superseded evidence row must NOT
+    // satisfy an existence check, otherwise generic dedup guards (dialogue) and
+    // INSERT OR IGNORE would silently block re-creation after supersede.
     const row = this.prepare(
-      "SELECT 1 FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel"
+      "SELECT 1 FROM links WHERE from_slug = $from AND to_slug = $to AND relation = $rel AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))"
     ).get({ $from: from, $to: to, $rel: relation });
     return row != null;
   }
@@ -3435,7 +3438,7 @@ export class CBrainDB {
       return row?.val ?? 1;
     };
     const linkRow = this.prepare(
-      "SELECT MAX(cnt) as cnt FROM (SELECT count(*) as cnt FROM (SELECT from_slug as slug FROM links UNION ALL SELECT to_slug as slug FROM links) GROUP BY slug)"
+      "SELECT MAX(cnt) as cnt FROM (SELECT count(*) as cnt FROM (SELECT from_slug as slug FROM links WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded')) UNION ALL SELECT to_slug as slug FROM links WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))) GROUP BY slug)"
     ).get() as { cnt: number } | null;
     return {
       mentionP95: p95("mention_count", "pages"),

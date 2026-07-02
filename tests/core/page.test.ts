@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { PageManager } from "../../src/core/page.js";
@@ -250,6 +250,25 @@ describe("PageManager", () => {
     expect(patched!.body).not.toContain("## Known Relations");
     expect(patched!.body).toContain("正文");
     expect(patched!.body).toContain("追加信息");
+  });
+
+  test("syncLinksToMarkdown excludes candidate reports_to from Known Relations (#233)", () => {
+    const sub = pm.create({ title: "Sub", type: "entity/person", body: "正文" });
+    const boss = pm.create({ title: "Boss", type: "entity/person", body: "正文" });
+    const weak = pm.create({ title: "Weak", type: "entity/person", body: "正文" });
+
+    // Trusted current manager + a weak/NER candidate edge to a different target
+    db.upsertActiveReportsTo(sub.slug, boss.slug, "agent", 0.95);
+    db.insertLink(sub.slug, weak.slug, "reports_to", null, 0.5, "weak", "ner", 0.5);
+
+    pm.syncLinksToMarkdown(sub.slug);
+
+    const subPage = pm.getBySlug(sub.slug)!;
+    const raw = readFileSync(join(vaultPath, subPage.file_path), "utf-8");
+    // Trusted manager appears as a confirmed Known Relation
+    expect(raw).toContain(`reports_to → [[${boss.slug}]]`);
+    // Candidate (evidence, not confirmed) must NOT leak into user-facing markdown
+    expect(raw).not.toContain(`[[${weak.slug}]]`);
   });
 
   test("delete with Lance failure still commits and returns true (repair-required)", async () => {
