@@ -175,6 +175,27 @@ describe("HealthChecker", () => {
       expect(tcDim!.issues.length).toBe(0);
     });
 
+    test("reports latency-only searches as warnings, not degraded search quality", async () => {
+      for (let i = 0; i < 8; i++) {
+        db.logSearch(`主题${i}`, "smart", 3500 + i, 5, i % 2 === 0, {
+          reason_codes: ["latency_budget_exceeded"],
+        });
+      }
+      db.logSearch("主题降级", "smart", 80, 0, true, {
+        reason_codes: ["fts_empty"],
+      });
+      db.logSearch("主题正常", "smart", 30, 4, false, { reason_codes: [] });
+
+      const report = await checker.checkAll();
+      const searchDim = report.dimensions.find(d => d.name === "搜索质量");
+
+      expect(searchDim).toBeDefined();
+      expect(searchDim!.issues.some(i => i.title.includes("80% 搜索降级率"))).toBe(false);
+      expect(searchDim!.issues.some(i => i.title === "频繁降级原因: latency_budget_exceeded")).toBe(false);
+      expect(searchDim!.issues.some(i => i.title.includes("搜索慢查询提示"))).toBe(true);
+      expect(searchDim!.issues.some(i => i.title === "频繁慢查询原因: latency_budget_exceeded")).toBe(true);
+    });
+
     test("writes three-layer output files", async () => {
       insertPage("entities/e1", "E1", "entity/person");
 

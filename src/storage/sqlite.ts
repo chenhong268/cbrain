@@ -2787,38 +2787,107 @@ export class CBrainDB {
     ).all({ $limit: limit }) as Array<{ id: number; query: string; strategy: string; latency_ms: number; hit_count: number; degraded: number; details_json: string | null; created_at: string }>;
   }
 
-  getSearchQualityStats(days: number = 7): { totalSearches: number; degradedCount: number; degradedRate: number; avgLatencyMs: number; topReasonCodes: Array<{ code: string; count: number }>; emptyResultCount: number; hierarchyMismatchCount: number; periodDays: number } {
+  getSearchQualityStats(days: number = 7): {
+    totalSearches: number;
+    degradedCount: number;
+    degradedRate: number;
+    latencyWarningCount: number;
+    latencyWarningRate: number;
+    avgLatencyMs: number;
+    topReasonCodes: Array<{ code: string; count: number }>;
+    topLatencyWarningCodes: Array<{ code: string; count: number }>;
+    emptyResultCount: number;
+    hierarchyMismatchCount: number;
+    periodDays: number;
+  } {
     const rows = this.prepare(
       "SELECT degraded, hit_count, latency_ms, details_json FROM search_log WHERE created_at >= datetime('now', '-' || $days || ' days')"
     ).all({ $days: days }) as Array<{ degraded: number; hit_count: number; latency_ms: number; details_json: string | null }>;
 
     const totalSearches = rows.length;
     if (totalSearches === 0) {
-      return { totalSearches: 0, degradedCount: 0, degradedRate: 0, avgLatencyMs: 0, topReasonCodes: [], emptyResultCount: 0, hierarchyMismatchCount: 0, periodDays: days };
+      return {
+        totalSearches: 0,
+        degradedCount: 0,
+        degradedRate: 0,
+        latencyWarningCount: 0,
+        latencyWarningRate: 0,
+        avgLatencyMs: 0,
+        topReasonCodes: [],
+        topLatencyWarningCodes: [],
+        emptyResultCount: 0,
+        hierarchyMismatchCount: 0,
+        periodDays: days,
+      };
     }
 
-    const degradedCount = rows.filter(r => r.degraded === 1).length;
     const avgLatencyMs = Math.round(rows.reduce((s, r) => s + r.latency_ms, 0) / totalSearches);
     const emptyResultCount = rows.filter(r => r.hit_count === 0).length;
 
     // Aggregate reason codes from details_json
-    const codeCounts = new Map<string, number>();
+    const degradedReasonCodes = new Set([
+      "vector_timeout",
+      "vector_error",
+      "fts_empty",
+      "low_score",
+      "budget_exhausted",
+      "fallback_used",
+      "reasoning_parse_failed",
+    ]);
+    const warningReasonCodes = new Set(["latency_budget_exceeded", "fts_parser_fallback"]);
+    const informationalReasonCodes = new Set(["rerank_insufficient", "routing_mismatch_hierarchy"]);
+    const knownReasonCodes = new Set([
+      ...degradedReasonCodes,
+      ...warningReasonCodes,
+      ...informationalReasonCodes,
+    ]);
+    const degradedCodeCounts = new Map<string, number>();
+    const warningCodeCounts = new Map<string, number>();
     let hierarchyMismatchCount = 0;
+    let degradedCount = 0;
+    let latencyWarningCount = 0;
     for (const row of rows) {
-      if (!row.details_json) continue;
+      let codes: string[] = [];
       try {
-        const details = JSON.parse(row.details_json);
-        const codes: string[] = details.reason_codes ?? [];
-        for (const code of codes) {
-          codeCounts.set(code, (codeCounts.get(code) ?? 0) + 1);
+        if (row.details_json) {
+          const details = JSON.parse(row.details_json);
+          codes = Array.isArray(details.reason_codes)
+            ? details.reason_codes.filter((code: unknown): code is string => typeof code === "string" && knownReasonCodes.has(code))
+            : [];
         }
-        if (codes.includes("routing_mismatch_hierarchy")) {
-          hierarchyMismatchCount++;
+      } catch {
+        codes = [];
+      }
+
+      if (codes.includes("routing_mismatch_hierarchy")) hierarchyMismatchCount++;
+
+      const hasParserFallback = codes.includes("fts_parser_fallback");
+      const parserFallbackDegraded = hasParserFallback && row.hit_count === 0;
+      const hasDegradedReason = codes.some(code => degradedReasonCodes.has(code)) || parserFallbackDegraded;
+      const hasWarningReason = codes.some(code => warningReasonCodes.has(code));
+      const legacyDegradedWithoutReasons = row.degraded === 1 && codes.length === 0;
+      const isRetrievalDegraded = hasDegradedReason || legacyDegradedWithoutReasons;
+      const isLatencyWarning = row.latency_ms > 2000 || hasWarningReason;
+
+      if (isRetrievalDegraded) degradedCount++;
+      if (isLatencyWarning) latencyWarningCount++;
+
+      for (const code of codes) {
+        if (degradedReasonCodes.has(code)) {
+          degradedCodeCounts.set(code, (degradedCodeCounts.get(code) ?? 0) + 1);
+        } else if (code === "fts_parser_fallback" && parserFallbackDegraded) {
+          degradedCodeCounts.set(code, (degradedCodeCounts.get(code) ?? 0) + 1);
+        } else if (warningReasonCodes.has(code)) {
+          warningCodeCounts.set(code, (warningCodeCounts.get(code) ?? 0) + 1);
         }
-      } catch { /* malformed json, skip */ }
+      }
     }
 
-    const topReasonCodes = [...codeCounts.entries()]
+    const topReasonCodes = [...degradedCodeCounts.entries()]
+      .map(([code, count]) => ({ code, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+    const topLatencyWarningCodes = [...warningCodeCounts.entries()]
       .map(([code, count]) => ({ code, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
@@ -2827,8 +2896,11 @@ export class CBrainDB {
       totalSearches,
       degradedCount,
       degradedRate: degradedCount / totalSearches,
+      latencyWarningCount,
+      latencyWarningRate: latencyWarningCount / totalSearches,
       avgLatencyMs,
       topReasonCodes,
+      topLatencyWarningCodes,
       emptyResultCount,
       hierarchyMismatchCount,
       periodDays: days,

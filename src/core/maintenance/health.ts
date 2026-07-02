@@ -1229,6 +1229,19 @@ export class HealthChecker {
       });
     }
 
+    // Latency warning is separate from retrieval degradation (#250). Slow but
+    // successful searches are an observability signal, not a recall-quality
+    // failure.
+    if (stats.latencyWarningRate > 0.2) {
+      issues.push({
+        severity: "low",
+        slug: "-",
+        title: `${(stats.latencyWarningRate * 100).toFixed(0)}% 搜索慢查询提示`,
+        description: `最近 ${stats.periodDays} 天 ${stats.totalSearches} 次搜索中 ${stats.latencyWarningCount} 次超过延迟预算但不一定降级`,
+        suggestion: "检查 search trace 中 LLM、rerank、vector 阶段耗时",
+      });
+    }
+
     // Hierarchy routing mismatches
     if (stats.hierarchyMismatchCount > 0) {
       issues.push({
@@ -1257,6 +1270,14 @@ export class HealthChecker {
         severity: "low",
         slug: "-",
         title: `频繁降级原因: ${top.code}`,
+        description: `出现 ${top.count} 次`,
+      });
+    }
+    for (const top of stats.topLatencyWarningCodes.slice(0, 3)) {
+      issues.push({
+        severity: "low",
+        slug: "-",
+        title: `频繁慢查询原因: ${top.code}`,
         description: `出现 ${top.count} 次`,
       });
     }
