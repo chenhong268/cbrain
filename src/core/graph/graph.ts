@@ -30,6 +30,18 @@ export interface TraverseOptions {
   limit?: number;
 }
 
+/**
+ * #233 HIGH 1: candidate reports_to is evidence, not a confirmed default
+ * graph-read edge. Excluded from getLinks / getBacklinks / traverse /
+ * getRelatedEntities. rejected/superseded are already excluded by the storage
+ * active filter (these reads default to includeInactive=false). Ordinary
+ * non-reports_to candidate links are unaffected (candidate is a legitimate
+ * pending edge for every other relation).
+ */
+function isDefaultGraphReadLink(l: { relation?: string; trust_state?: string }): boolean {
+  return !(l.relation === "reports_to" && l.trust_state === "candidate");
+}
+
 export class GraphManager {
   private db: CBrainDB;
 
@@ -85,7 +97,7 @@ export class GraphManager {
       results.push(...this.db.getIncomingLinks(slug) as Link[]);
     }
 
-    return results;
+    return results.filter(isDefaultGraphReadLink);
   }
 
   getBacklinks(slug: string): Link[] {
@@ -108,85 +120,39 @@ export class GraphManager {
     for (let depth = 1; depth <= maxDepth; depth++) {
       const nextFrontier: string[] = [];
 
-      // Batch-fetch links for entire frontier
-      if (minWeight !== undefined) {
-        const batchLinks = this.db.batchGetLinksForSlugs(frontier);
-        const neighborSlugs = new Set<string>();
-        for (const slug of frontier) {
-          const links = batchLinks.get(slug);
-          if (!links) continue;
-          const all = [
-            ...(direction === "outgoing" || direction === "both" ? links.outgoing : []),
-            ...(direction === "incoming" || direction === "both" ? links.incoming : []),
-          ];
-          for (const l of all) {
-            if ((!relation || l.relation === relation) && (l.effective_weight ?? l.weight * l.confidence) >= minWeight) {
-              const neighbor = l.from_slug === slug ? l.to_slug : l.from_slug;
-              if (!visited.has(neighbor)) {
-                visited.add(neighbor);
-                nextFrontier.push(neighbor);
-                neighborSlugs.add(neighbor);
-              }
-            }
-          }
-        }
-        // Batch-fetch titles for all new neighbors
-        const titles = this.db.getPageTitlesAndTypes([...neighborSlugs]);
-        for (const neighbor of nextFrontier) {
-          const page = titles.get(neighbor);
-          if (page) {
-            results.push({ slug: neighbor, title: page.title, type: page.type, depth });
-            if (results.length >= limit) return results;
-          }
-        }
-      } else if (relation !== undefined) {
-        // relation filter needs getLinkedSlugs per slug (no batch for filtered)
-        for (const slug of frontier) {
-          const slugs = this.getNeighbors(slug, direction, relation);
-          for (const neighbor of slugs) {
-            if (!visited.has(neighbor)) {
-              visited.add(neighbor);
-              nextFrontier.push(neighbor);
-            }
-          }
-        }
-        const titles = this.db.getPageTitlesAndTypes(nextFrontier);
-        for (const neighbor of nextFrontier) {
-          const page = titles.get(neighbor);
-          if (page) {
-            results.push({ slug: neighbor, title: page.title, type: page.type, depth });
-            if (results.length >= limit) return results;
-          }
-        }
-      } else {
-        // No relation filter — use lightweight batch neighbor fetch
-        const batchNeighbors = this.db.getLinksForSlugs(frontier);
-        const neighborSlugs: string[] = [];
-        for (const slug of frontier) {
-          const entry = batchNeighbors.get(slug);
-          if (!entry) continue;
-          const candidates = [
-            ...(direction === "outgoing" || direction === "both" ? entry.outgoing : []),
-            ...(direction === "incoming" || direction === "both" ? entry.incoming : []),
-          ];
-          for (const neighbor of candidates) {
-            if (!visited.has(neighbor)) {
-              visited.add(neighbor);
-              nextFrontier.push(neighbor);
-              neighborSlugs.push(neighbor);
-            }
-          }
-        }
-        const titles = this.db.getPageTitlesAndTypes(neighborSlugs);
-        for (const neighbor of nextFrontier) {
-          const page = titles.get(neighbor);
-          if (page) {
-            results.push({ slug: neighbor, title: page.title, type: page.type, depth });
-            if (results.length >= limit) return results;
+      // One unified path covers all three filter modes (minWeight / relation /
+      // none). batchGetLinksForSlugs returns LinkRow with relation + trust_state,
+      // so isDefaultGraphReadLink can exclude candidate reports_to (#233 HIGH 1).
+      const batchLinks = this.db.batchGetLinksForSlugs(frontier);
+      for (const slug of frontier) {
+        const links = batchLinks.get(slug);
+        if (!links) continue;
+        const all = [
+          ...(direction === "outgoing" || direction === "both" ? links.outgoing : []),
+          ...(direction === "incoming" || direction === "both" ? links.incoming : []),
+        ];
+        for (const l of all) {
+          if (!isDefaultGraphReadLink(l)) continue;
+          if (relation && l.relation !== relation) continue;
+          if (minWeight !== undefined && (l.effective_weight ?? l.weight * l.confidence) < minWeight) continue;
+          const neighbor = l.from_slug === slug ? l.to_slug : l.from_slug;
+          if (!visited.has(neighbor)) {
+            visited.add(neighbor);
+            nextFrontier.push(neighbor);
           }
         }
       }
 
+      const titles = this.db.getPageTitlesAndTypes(nextFrontier);
+      for (const neighbor of nextFrontier) {
+        const page = titles.get(neighbor);
+        if (page) {
+          results.push({ slug: neighbor, title: page.title, type: page.type, depth });
+          if (results.length >= limit) return results;
+        }
+      }
+
+      if (nextFrontier.length === 0) break;
       frontier = nextFrontier;
     }
 
@@ -194,8 +160,11 @@ export class GraphManager {
   }
 
   getRelatedEntities(slug: string, limit: number = 10): GraphNode[] {
-    const neighbors = this.getNeighbors(slug, "both");
-    const sorted = this.sortSlugsByMentionCount(neighbors.filter(n => n !== slug));
+    // #233: getLinks already excludes candidate reports_to from default reads.
+    const neighbors = this.getLinks(slug, "both")
+      .map((l) => (l.from_slug === slug ? l.to_slug : l.from_slug))
+      .filter((n) => n !== slug);
+    const sorted = this.sortSlugsByMentionCount(neighbors);
 
     const batch = this.db.getPageTitlesAndTypes(sorted);
     const results: GraphNode[] = [];
@@ -208,24 +177,6 @@ export class GraphManager {
     }
 
     return results;
-  }
-
-  private getNeighbors(slug: string, direction: string, relation?: string): string[] {
-    const neighbors = new Set<string>();
-
-    if (direction === "outgoing" || direction === "both") {
-      for (const s of this.db.getLinkedSlugs(slug, "from", relation)) {
-        neighbors.add(s);
-      }
-    }
-
-    if (direction === "incoming" || direction === "both") {
-      for (const s of this.db.getLinkedSlugs(slug, "to", relation)) {
-        neighbors.add(s);
-      }
-    }
-
-    return Array.from(neighbors);
   }
 
   private sortSlugsByMentionCount(slugs: string[]): string[] {

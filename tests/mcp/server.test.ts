@@ -3284,3 +3284,64 @@ describe("delete_page lance repair-required (#187)", () => {
     expect(data.warning).toBeUndefined();
   });
 });
+
+describe("graph_query / get_links candidate reports_to exclusion (#233)", () => {
+  const tDir = "/tmp/cbrain-test-mcp-graph233";
+  const tDbPath = join(tDir, "test.sqlite");
+  const tVault = join(tDir, "vault");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(tDir)) rmSync(tDir, { recursive: true });
+    mkdirSync(tVault, { recursive: true });
+    db = new CBrainDB(tDbPath);
+  });
+  afterEach(() => {
+    db.close();
+    if (existsSync(tDir)) rmSync(tDir, { recursive: true });
+  });
+
+  function makeServer() {
+    return createServer({
+      db,
+      embedding: createMockEmbedding(),
+      lance: createMockLanceDB() as any,
+      vaultPath: tVault,
+      runtimePath: join(dirname(tDbPath), "runtime"),
+    });
+  }
+
+  test("graph_query mode=traverse does not return candidate reports_to", async () => {
+    for (const s of ["entities/gq-seed", "entities/gq-trusted", "entities/gq-weak"]) {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, 'entity/person', ?, ?, ?, 0, 3)`,
+      ).run(s, s, `${s}.md`, `h-${s}`);
+    }
+    db.upsertActiveReportsTo("entities/gq-seed", "entities/gq-trusted", "agent", 0.95);
+    db.insertLink("entities/gq-seed", "entities/gq-weak", "reports_to", null, 0.5, "weak", "ner", 0.5);
+
+    const result = await getTools(makeServer()).graph_query.handler({
+      slug: "entities/gq-seed", mode: "traverse", depth: 1, limit: 50,
+    });
+    const text = result.content[0].text;
+    expect(text).toContain("entities/gq-trusted");
+    expect(text).not.toContain("entities/gq-weak");
+  });
+
+  test("get_links excludes candidate reports_to, keeps ordinary candidate", async () => {
+    for (const s of ["entities/gl-seed", "entities/gl-trusted", "entities/gl-weak", "entities/gl-mention"]) {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, 'entity/person', ?, ?, ?, 0, 3)`,
+      ).run(s, s, `${s}.md`, `h-${s}`);
+    }
+    db.upsertActiveReportsTo("entities/gl-seed", "entities/gl-trusted", "agent", 0.95);
+    db.insertLink("entities/gl-seed", "entities/gl-weak", "reports_to", null, 0.5, "weak", "ner", 0.5);
+    db.insertLink("entities/gl-seed", "entities/gl-mention", "提及", null, 0.3, "weak", "ner", 0.5);
+
+    const result = await getTools(makeServer()).get_links.handler({ slug: "entities/gl-seed", direction: "outgoing" });
+    const text = result.content[0].text;
+    expect(text).toContain("entities/gl-trusted");
+    expect(text).not.toContain("entities/gl-weak");
+    expect(text).toContain("entities/gl-mention");
+  });
+});

@@ -139,9 +139,13 @@ async function seedHermesFixture(
   raw.prepare("UPDATE pages SET activity_weight = 1.0, hotness_score = 1.0 WHERE slug = ?").run(METHOD_SLUG);
 
   const seedLink = (from: string, to: string, relation: string, context: string): void => {
+    // #233: reports_to is a current-fact relation — seed as trusted so default
+    // graph reads (graph_query traverse) include it. Other relations stay
+    // default ('candidate' via column default), which is fine for them.
+    const trustState = relation === "reports_to" ? "trusted" : "candidate";
     raw.prepare(
-      "INSERT INTO links (from_slug, to_slug, relation, context, source_type, confidence) VALUES (?, ?, ?, ?, 'agent', 0.9)",
-    ).run(from, to, relation, context);
+      "INSERT INTO links (from_slug, to_slug, relation, context, source_type, confidence, trust_state) VALUES (?, ?, ?, ?, 'agent', 0.9, ?)",
+    ).run(from, to, relation, context, trustState);
   };
   seedLink(P1_SLUG, ORG_SLUG, "reports_to", "联系人甲向组织甲汇报");
   seedLink(P1_SLUG, P2_SLUG, "collaborated", "团建上合作讨论");

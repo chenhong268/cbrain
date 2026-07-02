@@ -334,7 +334,7 @@ describe("HybridSearch", () => {
       const outSpy = spyOn(db, "getOutgoingSlugs");
       const inSpy = spyOn(db, "getIncomingSlugs");
       const titleSpy = spyOn(db, "getPageTitle");
-      const batchLinksSpy = spyOn(db, "getLinksForSlugs");
+      const batchLinksSpy = spyOn(db, "batchGetLinksForSlugs");
       const batchTitlesSpy = spyOn(db, "getPageTitlesAndTypes");
 
       // No config.graph -> fallback `new GraphManager(this.db)` must wrap THIS

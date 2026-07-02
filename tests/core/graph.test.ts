@@ -274,4 +274,63 @@ describe("GraphManager", () => {
       expect(related.length).toBeLessThanOrEqual(3);
     });
   });
+
+  describe("#233: candidate reports_to excluded from default graph reads", () => {
+    const SEED = "entities/seed";
+    const TRUSTED = "entities/trusted";
+    const WEAK = "entities/weak";
+    const MENTION = "entities/mention-target";
+
+    beforeEach(() => {
+      for (const s of [SEED, TRUSTED, WEAK, MENTION]) {
+        insertPage(db, s, s, "entity/person");
+      }
+      db.upsertActiveReportsTo(SEED, TRUSTED, "agent", 0.95); // trusted reports_to
+      db.insertLink(SEED, WEAK, "reports_to", null, 0.5, "weak", "ner", 0.5); // candidate reports_to
+      db.insertLink(SEED, MENTION, "提及", null, 0.3, "weak", "ner", 0.5); // ordinary candidate, non-reports_to
+    });
+
+    test("traverse() default branch excludes candidate reports_to, keeps ordinary candidate", () => {
+      const slugs = graph.traverse(SEED, { direction: "outgoing", maxDepth: 1 }).map((r) => r.slug);
+      expect(slugs).toContain(TRUSTED);
+      expect(slugs).not.toContain(WEAK);
+      expect(slugs).toContain(MENTION);
+    });
+
+    test("traverse() minWeight branch excludes candidate reports_to", () => {
+      // candidate reports_to effective_weight ~0.25, passes minWeight 0.1 by weight
+      const slugs = graph.traverse(SEED, { direction: "outgoing", maxDepth: 1, minWeight: 0.1 }).map((r) => r.slug);
+      expect(slugs).toContain(TRUSTED);
+      expect(slugs).not.toContain(WEAK);
+    });
+
+    test("traverse() relation=reports_to returns only trusted", () => {
+      const slugs = graph.traverse(SEED, { direction: "outgoing", maxDepth: 1, relation: "reports_to" }).map((r) => r.slug);
+      expect(slugs).toEqual([TRUSTED]);
+    });
+
+    test("getLinks() excludes candidate reports_to, keeps ordinary candidate", () => {
+      const out = graph.getLinks(SEED, "outgoing");
+      const reportsTargets = out.filter((l) => l.relation === "reports_to").map((l) => l.to_slug);
+      expect(reportsTargets).toEqual([TRUSTED]);
+      expect(out.some((l) => l.relation === "提及")).toBe(true);
+    });
+
+    test("getBacklinks() excludes candidate reports_to", () => {
+      expect(graph.getBacklinks(TRUSTED).filter((l) => l.relation === "reports_to")).toHaveLength(1);
+      expect(graph.getBacklinks(WEAK).filter((l) => l.relation === "reports_to")).toHaveLength(0);
+    });
+
+    test("getRelatedEntities() excludes candidate reports_to", () => {
+      const slugs = graph.getRelatedEntities(SEED, 10).map((r) => r.slug);
+      expect(slugs).toContain(TRUSTED);
+      expect(slugs).not.toContain(WEAK);
+      expect(slugs).toContain(MENTION);
+    });
+
+    test("includeInactive still sees candidate reports_to evidence", () => {
+      const all = db.getOutgoingLinks(SEED, true).filter((l) => l.relation === "reports_to");
+      expect(all.map((l) => l.to_slug).sort()).toEqual([TRUSTED, WEAK].sort());
+    });
+  });
 });
