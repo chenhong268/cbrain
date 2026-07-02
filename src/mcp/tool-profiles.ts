@@ -49,7 +49,7 @@ const AGENT_ALLOWLIST = [
   "find_similar_entities",
   "merge_entities",
   "get_profile",
-  "update_profile",
+  "read_project_state",
   "status",
 ] as const;
 

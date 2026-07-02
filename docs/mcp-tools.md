@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 84 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 85 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -372,6 +372,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `query_insights` | Semantic search over insights. |
 | `read_discoveries` | 读取知识图谱的结构发现摘要（最多 3 条）。返回用户可见的发现卡片，包含为什么重要、依据、建议动作。如需处理发现，用 update_discovery_status 标记已读、已解决或忽略。 |
 | `read_knowledge_map` | 【知识图谱】读取最近一次生成的知识图谱报告（由每周 dream 的 knowledge-map 阶段或 `cbrain knowledge-map` 生成）。回答：我的知识图谱长什么样 / 哪些领域成熟 /… |
+| `read_project_state` | 读取 compact 项目状态 artifact，用于 Agent session continuity。只读，不写 vault/SQLite/LanceDB，不做 prompt 注入。 |
 | `recall_episode` | 被动情境找人：根据时间、主题、关系、场景、事件等线索，召回可能匹配的人物。适用于用户不记得人名、但记得某些情境信息的场景。触发信号：'见过谁'、'认识谁'、'那个人是谁'、'叫什么来着'、'去年团建见过谁'、'在XX认识… |
 | `record_feedback` | Record feedback on recall/search results. |
 | `relation_audit` | Audit and fix non-standard relation types. |

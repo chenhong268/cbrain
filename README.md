@@ -20,7 +20,7 @@ LLMs forget everything between conversations. CBrain is the memory kernel your A
 - **Three-layer search** — Vector + Chinese FTS + Graph traversal, fused with RRF
 - **Knowledge graph** — Wiki-link based relationships + auto NER entity/relationship extraction
 - **Entity enrichment** — People and companies auto-promote through tiers as you mention them
-- **Narrow agent surface by default** — Daily Agents get a small `agent` tool profile (recall, read/write, graph), not the full 84-tool inventory. Profiles reduce routing noise — they're an ergonomics boundary, not a security one
+- **Narrow agent surface by default** — Daily Agents get a small `agent` tool profile (recall, read/write, graph), not the full 85-tool inventory. Profiles reduce routing noise — they're an ergonomics boundary, not a security one
 - **Local-first, explicit external flow** — SQLite + Markdown + LanceDB live on your machine; embedding/NER/reflection send the text being processed to your configured model provider (Zhipu/DeepSeek)
 - **Version history** — Every page version snapshotted, with revert support
 - **Multi-query expansion** — LLM generates search query variants for better recall, fused with RRF
@@ -33,7 +33,7 @@ LLM 在对话之间会遗忘一切。CBrain 为你的 Agent 提供持久的、�
 - **三层搜索** — 向量 + 中文全文 + 图遍历，RRF 融合排序
 - **知识图谱** — 基于 Wiki Link 的实体关系 + 自动 NER 实体/关系提取
 - **实体丰富** — 人物和组织随提及次数自动升级
-- **默认窄工具面** — 日常 Agent 用 `agent` profile（recall + 读写 + 图谱），不直接面对 84 个工具。Profile 是降噪音的人体工学边界，不是安全边界
+- **默认窄工具面** — 日常 Agent 用 `agent` profile（recall + 读写 + 图谱），不直接面对 85 个工具。Profile 是降噪音的人体工学边界，不是安全边界
 - **本地优先，数据流透明** — SQLite + Markdown + LanceDB 全在本地；向量嵌入、NER、洞察生成会把待处理文本发往你配置的模型 provider（智谱/DeepSeek）
 
 ## Quick Start
@@ -153,7 +153,7 @@ SearXNG 不是核心依赖。默认不配置时，CBrain 的本地写入、向�
 | record | `records/` | Reading notes, articles, meeting notes, transcripts |
 | insight | `insights/` | Auto-generated cross-domain connections and discoveries |
 
-## CLI Commands (46 total)
+## CLI Commands (47 total)
 
 ### 大脑管理
 ```bash
@@ -357,9 +357,9 @@ Add to your Agent's MCP config:
 }
 ```
 
-### MCP Tools (84 total)
+### MCP Tools (85 total)
 
-> 日常 Agent 不必面对全部 84 个工具——走 [`agent` profile](#mcp-tool-profiles) 只暴露 recall / 读写 / 图谱等用户态工具。下面是完整清单（reference）。
+> 日常 Agent 不必面对全部 85 个工具——走 [`agent` profile](#mcp-tool-profiles) 只暴露 recall / 读写 / 图谱等用户态工具。下面是完整清单（reference）。
 
 **Core:**
 | Tool | Description |
@@ -531,7 +531,7 @@ When `search` is absent, or when SearXNG is unreachable, stub enrichment continu
 
 ### MCP tool profiles
 
-CBrain ships 84 MCP tools, but a daily Agent shouldn't have to navigate all of them. Pick a **tool profile** to narrow the surface:
+CBrain ships 85 MCP tools, but a daily Agent shouldn't have to navigate all of them. Pick a **tool profile** to narrow the surface:
 
 | Profile | For | Surface |
 |:--------|:----|:--------|

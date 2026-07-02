@@ -31,6 +31,7 @@ import { registerKnowledgeMapTools } from "./tools/knowledge-map.js";
 import { registerMergeWorkflowTools } from "./tools/merge-workflow.js";
 import { registerWakeupTools } from "./tools/wakeup.js";
 import { registerFrontdoorTools } from "./tools/frontdoor.js";
+import { registerProjectStateTools } from "./tools/project-state.js";
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerFrontdoorTools(server, ctx);
@@ -64,4 +65,5 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerKnowledgeMapTools(server, ctx);
   registerMergeWorkflowTools(server, ctx);
   registerWakeupTools(server, ctx);
+  registerProjectStateTools(server, ctx);
 }
