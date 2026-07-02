@@ -100,4 +100,13 @@ describe("hierarchy lifecycle (setHierarchy / removeHierarchy)", () => {
     expect(tree.upward).toHaveLength(1);
     expect(tree.upward[0].slug).toBe(MGR_B);
   });
+
+  test("setHierarchy edge carries source_page_slug provenance (the subordinate)", () => {
+    setHierarchy(SEED, MGR_A, deps());
+    const edge = db.getOutgoingLinks(SEED, true).find((l) => l.relation === "reports_to");
+    expect(edge).toBeDefined();
+    // Provenance points at the subordinate (SEED), not the manager — so the
+    // edge stays correctly traceable (#233 review finding).
+    expect(edge!.source_page_slug).toBe(SEED);
+  });
 });

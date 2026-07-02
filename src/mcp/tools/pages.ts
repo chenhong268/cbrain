@@ -253,9 +253,10 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       warnings.push("wikilink_sync_failed");
     }
 
-    // 2b. #195: deterministic hierarchy sync — reports_to becomes a candidate/
-    // agent edge (processReportsTo uses source_type="agent" → trust_state=
-    // "candidate"). Mirrors put_page; entity/* only, never auto-trusted.
+    // 2b. #195/#233: deterministic hierarchy sync — reports_to becomes a trusted
+    // active edge (processReportsTo → upsertActiveReportsTo, source_type="agent"
+    // → trust_state="trusted"; supersedes any stale active reports_to edge).
+    // Mirrors put_page; entity/* only.
     let reportsToAdded = 0;
     if (pageType.startsWith("entity/")) {
       try {

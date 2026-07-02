@@ -2000,7 +2000,8 @@ export class CBrainDB {
         `UPDATE links SET trust_state = 'trusted', source_type = $st, confidence = $c,
             weight = 1.0, strength = 'strong',
             source_page_slug = $sps, evidence = $ev,
-            effective_weight = 1.0 * $c
+            effective_weight = 1.0 * $c,
+            last_validated_at = datetime('now')
          WHERE id = $id`
       ).run({
         $st: sourceType,
@@ -2013,8 +2014,8 @@ export class CBrainDB {
     }
 
     this.prepare(
-      `INSERT INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence, source_page_slug, trust_state, evidence, effective_weight)
-       VALUES ($from, $to, 'reports_to', NULL, 1.0, 'strong', $st, $c, $sps, 'trusted', $ev, 1.0 * $c)`
+      `INSERT INTO links (from_slug, to_slug, relation, context, weight, strength, source_type, confidence, source_page_slug, trust_state, evidence, effective_weight, last_validated_at)
+       VALUES ($from, $to, 'reports_to', NULL, 1.0, 'strong', $st, $c, $sps, 'trusted', $ev, 1.0 * $c, datetime('now'))`
     ).run({
       $from: from,
       $to: to,

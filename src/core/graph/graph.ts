@@ -50,9 +50,23 @@ export class GraphManager {
     return this.db.supersedeReportsTo(from, exceptToSlug);
   }
 
-  /** Phase 1 #233: insert or reactivate a trusted active reports_to edge. */
-  upsertActiveReportsTo(from: string, to: string, sourceType?: string, confidence?: number): void {
-    this.db.upsertActiveReportsTo(from, to, sourceType, confidence);
+  /**
+   * Phase 1 #233: atomically make `to` the sole active reports_to of `from`.
+   * Supersede + upsert run in one transaction so callers never observe zero
+   * active reports_to (or two active managers) mid-write. Forwards provenance
+   * so hierarchy-set edges stay traceable (source_page_slug = the subordinate).
+   */
+  setActiveReportsTo(
+    from: string,
+    to: string,
+    sourceType = "agent",
+    confidence = 0.95,
+    provenance?: { source_page_slug?: string; evidence?: string },
+  ): void {
+    this.db.transaction(() => {
+      this.db.supersedeReportsTo(from, to);
+      this.db.upsertActiveReportsTo(from, to, sourceType, confidence, provenance);
+    });
   }
 
   getLinks(slug: string, direction: "outgoing" | "incoming" | "both" = "both"): Link[] {

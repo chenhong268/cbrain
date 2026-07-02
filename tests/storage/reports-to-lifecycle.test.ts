@@ -123,6 +123,22 @@ describe("reports_to lifecycle helpers", () => {
       expect(row.trust_state).toBe("trusted");
       expect(row.evidence).toBe("original-evidence");
     });
+
+    test("refreshes last_validated_at on reactivation (no stale decay)", () => {
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95, { source_page_slug: FROM });
+      // Force a stale last_validated_at, then supersede + reactivate.
+      db.rawDb.prepare(
+        "UPDATE links SET last_validated_at = '2020-01-01T00:00:00Z' WHERE from_slug = ? AND relation = 'reports_to'",
+      ).run(FROM);
+      db.supersedeReportsTo(FROM);
+      db.upsertActiveReportsTo(FROM, MGR_A, "agent", 0.95, { source_page_slug: FROM });
+
+      const row = db.rawDb.prepare(
+        "SELECT last_validated_at FROM links WHERE from_slug = ? AND to_slug = ? AND relation = 'reports_to'",
+      ).get(FROM, MGR_A) as { last_validated_at: string };
+      expect(row.last_validated_at).not.toBe("2020-01-01T00:00:00Z");
+      expect(row.last_validated_at > "2020-01-01").toBe(true);
+    });
   });
 
   describe("non-reports_to regression", () => {

@@ -347,7 +347,19 @@ export class ContentPipeline {
       const factResult = applyFacts(valid, resolvedForFacts, this.pages, this.db);
       factsWritten = factResult.written;
       if (factResult.conflicts.length > 0) {
-        this.logger?.info("pipeline", "facts skipped (fields already set)", { conflicts: factResult.conflicts });
+        // #233: volatile (reports_to) conflicts are surfaced at warn — they must
+        // not be silently dropped alongside generic field skips. The volatile
+        // flag is set by applyFacts for hierarchy-relation field conflicts.
+        const volatile = factResult.conflicts.filter((c) => c.volatile);
+        if (volatile.length > 0) {
+          this.logger?.warn("pipeline", "volatile fact conflicts surfaced (kept trusted, not overwritten)", {
+            conflicts: volatile,
+          });
+        }
+        const generic = factResult.conflicts.filter((c) => !c.volatile);
+        if (generic.length > 0) {
+          this.logger?.info("pipeline", "facts skipped (fields already set)", { conflicts: generic });
+        }
       }
     }
 

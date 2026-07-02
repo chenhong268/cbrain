@@ -65,15 +65,14 @@ export function setHierarchy(
   const manager = pages.getBySlug(reportsToSlug);
   if (!manager) throw new Error(`上级实体不存在: ${reportsToSlug}`);
 
-  // Phase 1 #233: supersede stale active reports_to edges (preserve evidence),
-  // sparing the new target. Deterministic hierarchy set is authoritative.
-  graph.supersedeReportsTo(slug, reportsToSlug);
-
   // Write frontmatter
   pages.update(slug, { extra: { reports_to: reportsToSlug } });
 
-  // Write graph link — insert or reactivate as trusted+active
-  graph.upsertActiveReportsTo(slug, reportsToSlug, "agent", 0.95);
+  // Phase 1 #233: atomically supersede stale active reports_to edges (preserve
+  // evidence) + upsert the new target as trusted+active, in one transaction.
+  // Deterministic hierarchy set is authoritative. Provenance source_page_slug
+  // = the subordinate (slug), so the edge stays traceable.
+  graph.setActiveReportsTo(slug, reportsToSlug, "agent", 0.95, { source_page_slug: slug });
 }
 
 /**
