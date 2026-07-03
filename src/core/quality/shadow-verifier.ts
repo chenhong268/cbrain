@@ -348,3 +348,32 @@ export function runNerShadowVerifierFailOpen(opts: {
     opts.logger?.warn("pipeline", "ner shadow verifier failed (fail-open, ignored)", { error: safe });
   }
 }
+
+// ─── Fail-open runner (Task 5: discovery) ───────────────────────────────────
+//
+// #265: discovery shadow verifier runs at all three upsertDiscovery sites —
+// runDiscovery upsert loop, runSimilarEntityDetection upsert loop, and
+// ActionCandidateManager.persistDrafts. The runner is fail-open absolute: a
+// thrown verifier MUST NEVER block the upsert/persist. page_slug is ALWAYS
+// null for discovery rows — discovery has no page affinity and the row must
+// never carry dedup_key/slug/entity-refs/title/display-text. Only the summary
+// JSON (counts + reason codes + type + worst) is persisted.
+
+export function runDiscoveryShadowVerifierFailOpen(opts: {
+  db: CBrainDB;
+  logger?: Logger | null;
+  input: DiscoveryVerifierInput;
+}): void {
+  if (isVerifierDisabled()) return;
+  try {
+    const observations = verifyDiscoveryCandidate(opts.input);
+    const summary = summarizeShadowVerifierObservations("discovery", observations, opts.input.type);
+    // page_slug=null: discovery rows have no page affinity; never write
+    // dedup_key/slug/entities/title/display text — only the summary JSON.
+    opts.db.addIngestLog("verifier", "discovery_shadow_verifier", null, JSON.stringify(summary));
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const safe = sanitizeVerifierError(raw, null, undefined, opts.input.displayTexts);
+    opts.logger?.warn("discovery", "discovery shadow verifier failed (fail-open, ignored)", { error: safe });
+  }
+}

@@ -8,6 +8,7 @@ import {
   detectSimilarEntities,
   type DetectorInput, type DetectorPage, type PageQuality, type SimilarEntityCandidate,
 } from "../ingestion/similar-entity-detector.js";
+import { runDiscoveryShadowVerifierFailOpen } from "../quality/shadow-verifier.js";
 
 export type DiscoveryType = "bridge" | "trend" | "gap" | "contradiction" | "similar_entity";
 
@@ -111,6 +112,22 @@ export class DiscoveryManager {
     let newCount = 0;
 
     for (const r of deduped) {
+      // #265: shadow-verify BEFORE upsert. Fail-open absolute — runner
+      // catches all; upsert independent of verifier success. page_slug stays
+      // null at all discovery sites.
+      runDiscoveryShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        input: {
+          type: r.type,
+          actionable: r.actionable,
+          score: r.score,
+          autoApplicable: false,
+          hasEvidence: false,
+          hasProposedActions: false,
+          displayTexts: [r.suggestion ?? ""],
+        },
+      });
       const { id, inserted } = this.db.upsertDiscovery(
         r.type, r.entities, r.score,
         undefined, undefined, r.actionable,
@@ -225,6 +242,20 @@ export class DiscoveryManager {
       if (c.ambiguousTarget) metadata.ambiguous_target = true;
       if (c.sharedAlias) metadata.shared_alias = c.sharedAlias;
 
+      // #265: shadow-verify BEFORE upsert (similar_entity site).
+      runDiscoveryShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        input: {
+          type: "similar_entity",
+          actionable: c.actionable,
+          score: c.nameScore,
+          autoApplicable: false,
+          hasEvidence: false,
+          hasProposedActions: false,
+          displayTexts: [],
+        },
+      });
       const { id, inserted } = this.db.upsertDiscovery(
         "similar_entity", [c.slugA, c.slugB], c.nameScore,
         undefined, undefined, c.actionable, false, metadata,

@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
 import type { ExtractionResult } from "../../src/core/ingestion/ner.js";
+import { ActionCandidateManager } from "../../src/core/maintenance/action-candidates.js";
+import { DiscoveryManager } from "../../src/core/maintenance/discovery.js";
 
 describe("CBrainDB.getRecentVerifierCounts", () => {
   const testDir = "/tmp/cbrain-test-verifier-db";
@@ -277,5 +279,116 @@ describe("ContentPipeline NER shadow verifier hook", () => {
     };
     await pipeline.processNer("records/source-1", "正文".repeat(300), "record", true, extraction);
     expect(verifierRows().length).toBe(0);
+  });
+});
+
+describe("Discovery shadow verifier hooks", () => {
+  const testDir = "/tmp/cbrain-test-verifier-disc";
+  const dbPath = join(testDir, "test.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+    process.env.CBRAIN_SHADOW_VERIFIER_DISABLE = "";
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  function verifierRows() {
+    return db.rawDb
+      .prepare("SELECT action, page_slug, details FROM ingest_log WHERE source_type = 'verifier'")
+      .all() as Array<{ action: string; page_slug: string | null; details: string | null }>;
+  }
+
+  test("persistDrafts writes a discovery_shadow_verifier row per draft; page_slug is null", () => {
+    const mgr = new ActionCandidateManager(db);
+    mgr.persistDrafts([{
+      type: "action_health_review",
+      entities: ["health:test:scope"],
+      score: 0.6,
+      actionable: "medium",
+      displayTitle: "有一项健康问题需要人工确认",
+      displayReason: "这项信号可能影响知识质量",
+      suggestedAction: "人工确认后再决定",
+      evidence: [{ source: "health", ref: "health:test:scope", kind: "test" }],
+      proposedActions: [{ type: "review", target: "health:test:scope", reason: "复核" }],
+      metadata: {},
+    }]);
+
+    const rows = verifierRows().filter((r) => r.action === "discovery_shadow_verifier");
+    expect(rows.length).toBe(1);
+    expect(rows[0].page_slug).toBeNull();
+    const summary = JSON.parse(rows[0].details!);
+    expect(summary.counts.warning).toBe(0);
+    expect(summary.counts.error).toBe(0);
+    expect(summary.type).toBe("action_health_review");
+  });
+
+  // Note: the unsafe-display case (`discovery_display_private_raw`) is NOT
+  // re-tested through persistDrafts because persistDrafts' own
+  // assertSafeActionDisplay guard throws on `/Users/` BEFORE the verifier
+  // runs — that stronger guard subsumes the verifier check on this path.
+  // The verifier check stays valuable on discovery.ts sites B/C (LLM
+  // enrichment suggestion text is NOT assert-guarded) and is unit-covered in
+  // shadow-verifier.test.ts.
+
+  test("verifier details never leak entity refs / dedup_key / display text", () => {
+    const mgr = new ActionCandidateManager(db);
+    mgr.persistDrafts([{
+      type: "action_health_review",
+      entities: ["health:dim:k:records/sensitive-slug"],
+      score: 0.6,
+      actionable: "medium",
+      displayTitle: "敏感标题实体Z",
+      displayReason: "理由",
+      suggestedAction: "动作",
+      evidence: [{ source: "health", ref: "health:dim:k:records/sensitive-slug", kind: "k" }],
+      proposedActions: [{ type: "review", target: "health:dim:k:records/sensitive-slug", reason: "r" }],
+      metadata: { source_ref: "health:dim:k:records/sensitive-slug" },
+    }]);
+    const details = verifierRows()[0].details!;
+    for (const forbidden of ["records/sensitive-slug", "敏感标题实体Z", "health:dim:k:records/sensitive-slug"]) {
+      expect(details).not.toContain(forbidden);
+    }
+  });
+
+  test("verifier throw inside discovery path is fail-open: candidate still persisted", () => {
+    const leaky = "boom entity=实体A /Users/secret";
+    (db as any).addIngestLog = () => { throw new Error(leaky); };
+    const warnCalls: unknown[] = [];
+    const mgr = new ActionCandidateManager(db, {
+      warn: (_m: string, _s: string, ctx?: unknown) => warnCalls.push(ctx),
+      info: () => {}, error: () => {}, debug() {},
+    } as any);
+    const report = mgr.persistDrafts([{
+      type: "action_health_review",
+      entities: ["health:x:y"],
+      score: 0.6, actionable: "medium",
+      displayTitle: "标题", displayReason: "理由", suggestedAction: "动作",
+      evidence: [{ source: "health", ref: "health:x:y", kind: "k" }],
+      proposedActions: [{ type: "review", target: "health:x:y", reason: "r" }],
+      metadata: {},
+    }]);
+    expect(report.total).toBe(1);
+  });
+
+  test("DiscoveryManager.runDiscovery gap path writes discovery_shadow_verifier rows (page_slug=null)", async () => {
+    // Seed a high-mention, zero-link entity page → deterministic gap detector fires
+    // (no LLM needed: types=["gap"] skips detectContradictions). Proves discovery.ts wiring.
+    db.rawDb
+      .prepare("INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run("entity/test-entity", "entity/person", "实体A", "entity-test-entity.md", "h1", 10, 3);
+    const mgr = new DiscoveryManager(db, undefined, { warn() {}, info() {}, error() {}, debug() {} } as any);
+    await mgr.runDiscovery(["gap"]);
+    const discRows = verifierRows().filter((r) => r.action === "discovery_shadow_verifier");
+    expect(discRows.length).toBeGreaterThan(0);
+    expect(discRows.every((r) => r.page_slug === null)).toBe(true);
+    // If this fails because detectGaps did not fire under this seed, adjust the seed
+    // (raise mention_count / widen title) rather than deleting the test.
   });
 });

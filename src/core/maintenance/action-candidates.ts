@@ -1,5 +1,7 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
+import type { Logger } from "../logger.js";
 import type { RepairAction, RepairPlan } from "./health-debt.js";
+import { runDiscoveryShadowVerifierFailOpen } from "../quality/shadow-verifier.js";
 
 export const ACTION_CANDIDATE_TYPES = [
   "action_review_discovery",
@@ -296,7 +298,10 @@ function persistedFromRow(
 }
 
 export class ActionCandidateManager {
-  constructor(private readonly db: CBrainDB) {}
+  constructor(
+    private readonly db: CBrainDB,
+    private readonly logger?: Logger | null,
+  ) {}
 
   persistDrafts(drafts: ActionCandidateDraft[]): ActionCandidateReport {
     const byType: Record<ActionCandidateType, number> = {
@@ -312,6 +317,22 @@ export class ActionCandidateManager {
       assertSafeActionDisplay(draft.displayTitle);
       assertSafeActionDisplay(draft.displayReason);
       assertSafeActionDisplay(draft.suggestedAction);
+      // #265: shadow-verify BEFORE the upsert. Fail-open absolute — the runner
+      // catches all internally; the upsert path is independent of verifier
+      // success. page_slug stays null (discovery rows never carry slug/dedup_key).
+      runDiscoveryShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        input: {
+          type: draft.type,
+          actionable: draft.actionable,
+          score: draft.score,
+          autoApplicable: false,
+          hasEvidence: draft.evidence.length > 0,
+          hasProposedActions: draft.proposedActions.length > 0,
+          displayTexts: [draft.displayTitle, draft.displayReason, draft.suggestedAction],
+        },
+      });
       const result = this.db.upsertDiscovery(
         draft.type,
         draft.entities,
