@@ -53,7 +53,7 @@ describe("handleReindexVectors", () => {
     ).run("entities/a", "content for a");
 
     const logs: string[] = [];
-    const exitCode = await handleReindexVectors(lancePath, db, embedding, (msg) => logs.push(msg));
+    const exitCode = await handleReindexVectors(lancePath, db, embedding, { blockingOwner: () => null }, (msg) => logs.push(msg));
 
     expect(exitCode).toBe(0);
     expect(logs.some(l => l.includes("Rebuilt:"))).toBe(true);
@@ -81,6 +81,7 @@ describe("handleReindexVectors", () => {
       lancePath,
       db,
       failingEmbedding as any,
+      { blockingOwner: () => null },
       () => {},
       (msg) => errors.push(msg),
     );
@@ -106,7 +107,7 @@ describe("handleReindexVectors", () => {
     ).run("entities/recover", "content for recover");
 
     // handleReindexVectors must succeed — it never opens live as LanceDB
-    const exitCode = await handleReindexVectors(lancePath, db, embedding);
+    const exitCode = await handleReindexVectors(lancePath, db, embedding, { blockingOwner: () => null });
     expect(exitCode).toBe(0);
 
     // New live should be valid (staging was built and swapped)
@@ -123,5 +124,45 @@ describe("handleReindexVectors", () => {
       return false;
     });
     expect(hasCorruptFile).toBe(false);
+  });
+
+  // ── #269: lock gate refuses while a live writer holds the index ──
+
+  test("#269 refuses when a live serve/watcher holds the index, before any rebuild", async () => {
+    db.rawDb.prepare(
+      "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+    ).run("entities/blocked-269", "Blocked269", "entities/blocked-269.md", "hash-blocked-269");
+    db.rawDb.prepare(
+      "INSERT OR IGNORE INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 0)",
+    ).run("entities/blocked-269", "content for blocked");
+
+    const blocking = { blockingOwner: () => ({ kind: "serve" as const, pid: 4242 }) };
+    const errors: string[] = [];
+    const exitCode = await handleReindexVectors(
+      lancePath,
+      db,
+      embedding,
+      blocking,
+      () => {},
+      (msg) => errors.push(msg),
+    );
+
+    expect(exitCode).toBe(1);
+    expect(errors.some((e) => e.includes("已拒绝"))).toBe(true);
+    expect(errors.some((e) => e.includes("4242"))).toBe(true);
+    // No rebuild happened — no live directory was created.
+    expect(existsSync(lancePath)).toBe(false);
+    // DB still closed by the finally block on the refuse path.
+    expect(() => db.close()).not.toThrow();
+
+    // #269 review: refuse message must give the unique stop-serve recovery path
+    // and must NOT send operators to `dream` (which doesn't rebuild vectors).
+    const joined = errors.join("\n");
+    expect(errors.some((e) => e.includes("唯一修复路径"))).toBe(true);
+    expect(joined).toMatch(/停 serve|停止 serve/);
+    expect(joined).toMatch(/reindex-vectors/);
+    expect(joined).toMatch(/重启 serve/);
+    expect(joined).toMatch(/fsck/);
+    expect(joined).not.toMatch(/或走.*dream|走 bin\/cbrain-maintenance\.sh dream/);
   });
 });

@@ -95,7 +95,7 @@ describe("LanceDB integrity probe", () => {
     expect(failCheck!.action).not.toContain("content_hash");
   });
 
-  test("coverage gap → warn with reindex hint (no rm-rf, no 停止)", async () => {
+  test("coverage gap → warn with reindex hint incl stop-serve prerequisite (no rm-rf)", async () => {
     const allSlugs = Array.from({ length: 20 }, (_, i) => `entities/page-${i}`);
     seedChunks(db, allSlugs);
     mkdirSync(lancePath, { recursive: true });
@@ -113,7 +113,12 @@ describe("LanceDB integrity probe", () => {
     expect(coverageCheck?.status).toBe("warn");
     expect(coverageCheck?.action).toContain("--reindex-vectors");
     expect(coverageCheck?.action).not.toContain("rm -rf");
-    expect(coverageCheck?.action).not.toContain("停止");
+    // #269 review: coverage-gap action must carry the stop-serve prerequisite
+    // and the verify step; must not send operators to dream (which doesn't rebuild).
+    expect(coverageCheck?.action).toContain("停止");
+    expect(coverageCheck?.action).toMatch(/重启 serve/);
+    expect(coverageCheck?.action).toMatch(/fsck/);
+    expect(coverageCheck?.action).not.toMatch(/运行 cbrain dream|走 bin\/cbrain-maintenance\.sh dream/);
   });
 
   test("orphan vectors → warn with dream cleanup hint (not full rebuild)", async () => {

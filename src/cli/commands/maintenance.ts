@@ -31,17 +31,33 @@ import type { PageSignals } from "../../core/maintenance/health-debt.js";
  *   - DB is always closed (via finally), even on error
  *   - Never calls process.exit() — returns exit code instead
  *   - Never connects to live LanceDB
+ *   - Refuses while a live serve/watcher holds the index (lock gate before rebuild)
  */
 export async function handleReindexVectors(
   lancePath: string,
   db: CBrainDB,
   embedding: EmbeddingProvider,
+  lockProbe: LockProbe,
   log: (msg: string) => void = console.log,
   logError: (msg: string) => void = console.error,
 ): Promise<number> {
-  const { rebuildLanceIndex } = await import("../../storage/lance-rebuild.js");
   let exitCode = 0;
   try {
+    // #269: refuse while a live serve/watcher holds the index. The rebuild is
+    // staging-only, but the final directory swap renames the live LanceDB path
+    // out from under the running serve's open file descriptors. Guard before
+    // any rebuild work, like handleCompact / handleReindexSlug.
+    const owner = lockProbe.blockingOwner();
+    if (owner) {
+      logError(`已拒绝：检测到活动的 CBrain ${owner.kind}（pid ${owner.pid}）。`);
+      logError(`reindex-vectors 会原子替换 LanceDB 目录，与运行中的 serve 并发会损坏索引。`);
+      logError(`唯一修复路径：停 serve → cbrain sync --reindex-vectors → 重启 serve → cbrain fsck --json --layer lance 验证。`);
+      logError(`停 serve：launchctl unload ~/Library/LaunchAgents/ai.cbrain.serve.plist（KeepAlive job，kill 会自动重启）。`);
+      logError(`注意：cbrain dream 不重建缺失向量（只做 orphan cleanup + compact），无法修复 coverage gap。`);
+      return 1;
+    }
+
+    const { rebuildLanceIndex } = await import("../../storage/lance-rebuild.js");
     const report = await rebuildLanceIndex(lancePath, db, embedding);
     log(`Rebuilt:  ${report.chunksRebuilt} pages chunks, ${report.insightsRebuilt} insights`);
     if (report.backupPath) {
@@ -203,10 +219,12 @@ export function register(program: Command) {
       const deps = createDeps(config);
       const lockProbe = createLiveLockProbe(deps.profileDir!);
 
-      // --reindex-vectors: atomic staging rebuild, does NOT connect to live LanceDB
+      // --reindex-vectors: atomic staging rebuild, does NOT connect to live LanceDB.
+      // #269: lock-gated — the directory swap renames live LanceDB out from under
+      // a running serve, so refuse while a writer is active.
       if (mode.mode === "reindex-vectors") {
         console.log("Reindexing vectors (atomic staging rebuild)...");
-        process.exitCode = await handleReindexVectors(config.lancePath, deps.db, deps.embedding);
+        process.exitCode = await handleReindexVectors(config.lancePath, deps.db, deps.embedding, lockProbe);
         return;
       }
 

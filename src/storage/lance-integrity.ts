@@ -66,18 +66,27 @@ function getSqliteChunkPageSlugs(db: CBrainDB): string[] {
 function rebuildAction(): string {
   return [
     "修复步骤：",
-    "  1. 停止 cbrain serve",
+    "  1. 停止 cbrain serve（launchctl unload ai.cbrain.serve.plist；KeepAlive job，kill 会自动重启）",
     "  2. 运行 cbrain sync --reindex-vectors",
+    "  3. 重启 serve（launchctl load ai.cbrain.serve.plist）",
+    "  4. 运行 cbrain fsck --json --layer lance 验证 coverage gap 清零",
     "",
     "--reindex-vectors 会在 staging 目录重建 chunks + insights，",
-    "验证后原子替换，旧索引自动保留为 backup。",
-    "源数据在 SQLite 和 vault 中，数据不丢。",
+    "验证后原子替换，旧索引自动保留为 backup。源数据在 SQLite 和 vault 中，数据不丢。",
+    "（dream 不重建缺失向量，不能修复 coverage gap）",
   ].join("\n");
 }
 
 /** Partial rebuild action for coverage gaps / orphans */
 function reindexAction(): string {
-  return "运行 cbrain sync --reindex-vectors 重建缺失向量（原子替换，安全）";
+  return [
+    "修复步骤：",
+    "  1. 停止 cbrain serve（reindex 会原子替换 LanceDB 目录，与 serve 并发会损坏）",
+    "  2. 运行 cbrain sync --reindex-vectors",
+    "  3. 重启 serve",
+    "  4. 运行 cbrain fsck --json --layer lance 验证 coverage gap 清零",
+    "（dream 不重建缺失向量，不适用）",
+  ].join("\n");
 }
 
 /** Orphan-only action: dream stage 4.5 cleanup */

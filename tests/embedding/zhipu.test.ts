@@ -201,4 +201,40 @@ describe("ZhipuEmbeddingProvider", () => {
     const [url] = fetchFn.mock.calls[0];
     expect(url).toBe("https://custom.api.com/v4/embeddings");
   });
+
+  test("#269 embedBatch shards at zhipu 64-text cap and preserves order", async () => {
+    const texts = Array.from({ length: 100 }, (_, i) => `text-${i}`);
+    const fetchFn = mock(async (_url: string, init?: { body?: string }) => {
+      const input = JSON.parse(init?.body ?? "{}").input as string[];
+      return {
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            data: input.map((t, idx) => ({ embedding: [t.length], index: idx })),
+            usage: { total_tokens: input.length * 10 },
+          }),
+      };
+    });
+    globalThis.fetch = fetchFn as unknown as typeof globalThis.fetch;
+
+    const results = await provider.embedBatch(texts);
+
+    // 100 texts at cap 64 → exactly 2 shards (64 + 36)
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    const body1 = JSON.parse(fetchFn.mock.calls[0][1]?.body as string) as { input: string[] };
+    const body2 = JSON.parse(fetchFn.mock.calls[1][1]?.body as string) as { input: string[] };
+    expect(body1.input).toHaveLength(64);
+    expect(body2.input).toHaveLength(36);
+
+    // N-in → N-out, input order preserved across shards
+    expect(results).toHaveLength(100);
+    expect(results[0].embedding).toEqual([texts[0].length]);
+    expect(results[63].embedding).toEqual([texts[63].length]);
+    expect(results[64].embedding).toEqual([texts[64].length]);
+    expect(results[99].embedding).toEqual([texts[99].length]);
+
+    // total tokens 1000 averaged over 100 texts = 10
+    expect(results[0].tokenCount).toBe(10);
+  });
 });

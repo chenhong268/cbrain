@@ -33,8 +33,8 @@ export async function probeLance(
 					severity: "error",
 					count: missing.length,
 					sampleSlugs: anonymizeSlugs(missing.map((r) => r.page_slug)),
-					detail: "page 有 chunks 但 LanceDB 无向量（recall 受损）",
-					suggestedCommand: "cbrain sync --reindex-vectors",
+					detail: "page 有 chunks 但 LanceDB 无向量（recall 受损）。必须先停 serve：reindex 会原子替换 LanceDB 目录，与运行中的 serve 并发会损坏索引。dream 不重建缺失向量，不适用。",
+					suggestedCommand: "停 serve（launchctl unload ai.cbrain.serve.plist）→ cbrain sync --reindex-vectors → 重启 serve → cbrain fsck --json --layer lance 验证",
 				},
 			],
 		};

@@ -6,7 +6,7 @@
  * Never touches live data until the replacement is verified and complete.
  *
  * Tables rebuilt:
- *   - `chunks`    from SQLite chunks (summary_level = 0)
+ *   - `chunks`    from SQLite chunks (all summary_levels: L0 raw + L1 summary)
  *   - `insights`  from SQLite insights (status = 'active')
  *
  * Invariants:
@@ -66,8 +66,12 @@ export async function rebuildLanceIndex(
   fs: FsOps = defaultFs,
 ): Promise<RebuildResult> {
   // ── 0. Read source data from SQLite ──
+  // #269: rebuild BOTH L0 raw chunks (summary_level = 0) AND L1 summary chunks
+  // (summary_level = 1, chunk_index = -1). Filtering to L0 only silently dropped
+  // every L1 summary vector on the directory swap, while the fsck probe (which
+  // counts any row as coverage) reported the page as covered — a hidden regression.
   const chunkRows = db.rawDb.query(
-    "SELECT page_slug, chunk_index, content FROM chunks WHERE summary_level = 0 ORDER BY page_slug, chunk_index",
+    "SELECT page_slug, chunk_index, content FROM chunks WHERE summary_level IN (0, 1) ORDER BY page_slug, chunk_index",
   ).all() as Array<Record<string, unknown>>;
 
   const insightRows = db.rawDb.query(
@@ -154,9 +158,10 @@ export async function rebuildLanceIndex(
         throw new Error(`VERIFY_FAIL: chunks staging has ${stagingChunkCount} rows, expected ${chunkRows.length}`);
       }
       // Verify key set
+      // Include chunkIndex = -1 (L1 summary) rows so verification covers both
+      // tiers — a >= 0 filter would let a missing-L1 rebuild pass verify.
       const stagingRows = await chunksTable.query()
         .select(["pageSlug", "chunkIndex"])
-        .where("chunkIndex >= 0")
         .toArray();
       const stagingKeys = new Set(stagingRows.map((r: Record<string, unknown>) =>
         `${r.pageSlug}:${r.chunkIndex}`,

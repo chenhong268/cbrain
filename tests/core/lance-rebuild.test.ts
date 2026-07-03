@@ -457,4 +457,43 @@ describe("Atomic LanceDB rebuild", () => {
     // Backup name should contain timestamp + UUID fragment
     expect(result.backupPath!).toMatch(/backup-\d+-[0-9a-f]{4}$/);
   });
+
+  // ── #269: L1 summary chunks must be rebuilt, not silently dropped ──
+
+  test("#269 rebuilds L1 summary chunks (chunkIndex = -1) alongside L0 raw chunks", async () => {
+    // A sealed page owns BOTH an L0 raw chunk and an L1 summary chunk in SQLite.
+    // The atomic rebuild must embed BOTH. Previously the SELECT filtered to
+    // summary_level=0, so the staging index had zero L1 rows and the directory
+    // swap silently destroyed every existing L1 summary vector — while the fsck
+    // probe (which counts any row as coverage) reported the page as covered.
+    db.rawDb.prepare(
+      "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+    ).run("entities/sealed-269", "Sealed269", "entities/sealed-269.md", "hash-sealed-269");
+    db.rawDb.prepare(
+      "INSERT OR IGNORE INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 0)",
+    ).run("entities/sealed-269", "raw detail body ALPHA");
+    db.rawDb.prepare(
+      "INSERT OR IGNORE INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, -1, ?, 1)",
+    ).run("entities/sealed-269", "sealed page summary BETA");
+
+    const result = await rebuildLanceIndex(lancePath, db, embedding);
+    expect(result.errors).toBe(0);
+
+    // Inspect the live chunks table directly — both chunkIndex tiers must exist.
+    const lancedb = await import("@lancedb/lancedb");
+    const conn = await lancedb.connect(lancePath);
+    const table = await conn.openTable("chunks");
+    const rows = await table.query()
+      .select(["pageSlug", "chunkIndex", "content"])
+      .toArray() as Array<{ pageSlug: string; chunkIndex: number; content: string }>;
+    conn.close();
+
+    const l0 = rows.filter((r) => r.chunkIndex >= 0);
+    const l1 = rows.filter((r) => r.chunkIndex === -1);
+    expect(l0).toHaveLength(1);
+    expect(l0[0].content).toBe("raw detail body ALPHA");
+    expect(l1).toHaveLength(1);
+    expect(l1[0].content).toBe("sealed page summary BETA");
+    expect(l1[0].pageSlug).toBe("entities/sealed-269");
+  });
 });
