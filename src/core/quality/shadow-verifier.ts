@@ -19,6 +19,10 @@
 // private/internal refs (privacy invariant: detail holds counts only).
 
 import { DISPLAY_UNSAFE_PATTERNS } from "../maintenance/action-candidates.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import type { Logger } from "../logger.js";
+import type { ExtractionResult } from "../ingestion/ner.js";
+import { sanitizeForLog } from "../safety/sync-index-safety.js";
 
 export type VerifierSeverity = "info" | "warning" | "error";
 export type VerifierSurface = "ner" | "discovery";
@@ -254,4 +258,77 @@ export function verifyDiscoveryCandidate(input: DiscoveryVerifierInput): ShadowV
   }
 
   return obs;
+}
+
+// ─── Fail-open runners (Task 4: NER) ───────────────────────────────────────
+//
+// #265: shadow verifier runs AFTER extract() and BEFORE the empty-extraction
+// early-return in ContentPipeline.processNer, so a long body producing zero
+// extraction gets flagged. Fail-open is absolute: a thrown verifier MUST NEVER
+// prevent the ingest/NER write or roll back already-applied writes. The runner
+// catches everything; the caller's write path is independent of the verifier.
+//
+// Kill switch: CBRAIN_SHADOW_VERIFIER_DISABLE=1 reads process.env EACH call
+// (NOT cached at module load) so tests can toggle it in-process without flake.
+
+function isVerifierDisabled(): boolean {
+  return process.env.CBRAIN_SHADOW_VERIFIER_DISABLE === "1";
+}
+
+/** Redact raw extraction tokens (entity names / slug / relation endpoints) from
+ *  an error message before it reaches the warn context. Mirrors the redaction
+ *  approach in pipeline.ts (~L454-473): sanitizeForLog handles absolute paths +
+ *  credential-like tokens; this pass additionally redacts relative slugs/entity
+ *  names that sanitizeForLog's path regex does not match. */
+function sanitizeVerifierError(
+  rawMessage: string,
+  slug: string | null,
+  extraction?: ExtractionResult,
+  displayTexts?: string[],
+): string {
+  let safe = sanitizeForLog(rawMessage);
+  const tokens = new Set<string>();
+  if (slug) tokens.add(slug);
+  if (extraction) {
+    for (const e of extraction.entities) tokens.add(e.name);
+    for (const f of extraction.filtered ?? []) tokens.add(f.name);
+    for (const r of extraction.relations) { tokens.add(r.from); tokens.add(r.to); }
+  }
+  if (displayTexts) for (const t of displayTexts) { if (t && t.length >= 2) tokens.add(t); }
+  for (const token of tokens) {
+    if (token && token.length >= 2) safe = safe.split(token).join("<redacted>");
+  }
+  return safe;
+}
+
+export function runNerShadowVerifierFailOpen(opts: {
+  db: CBrainDB;
+  logger?: Logger | null;
+  slug: string;
+  bodyChars: number;
+  extraction: ExtractionResult;
+}): void {
+  if (isVerifierDisabled()) return;
+  try {
+    const input: NerVerifierInput = {
+      bodyChars: opts.bodyChars,
+      entityCount: opts.extraction.entities.length,
+      relationCount: opts.extraction.relations.length,
+      eventCount: opts.extraction.events.length,
+      factCount: opts.extraction.facts.length,
+      entities: opts.extraction.entities.map((e) => ({ name: e.name, type: e.type })),
+      relations: opts.extraction.relations.map((r) => ({ from: r.from, to: r.to })),
+      events: opts.extraction.events.map((e) => ({ date: e.date })),
+    };
+    const observations = verifyNerExtraction(input);
+    const summary = summarizeShadowVerifierObservations("ner", observations);
+    // Privacy: persisted row holds ONLY summary JSON (counts + reason codes +
+    // surface + worst + checks). No observations[].detail, no raw names. The
+    // slug column legitimately holds fromSlug (ingest_log audit semantic).
+    opts.db.addIngestLog("verifier", "ner_shadow_verifier", opts.slug, JSON.stringify(summary));
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const safe = sanitizeVerifierError(raw, opts.slug, opts.extraction);
+    opts.logger?.warn("pipeline", "ner shadow verifier failed (fail-open, ignored)", { error: safe });
+  }
 }

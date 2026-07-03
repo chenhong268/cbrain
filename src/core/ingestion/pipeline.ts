@@ -3,6 +3,7 @@ import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { ExtractionResult } from "./ner.js";
+import { runNerShadowVerifierFailOpen } from "../quality/shadow-verifier.js";
 import { validateFacts, applyFacts } from "./structured-facts.js";
 import { PageManager } from "../page.js";
 import { extractWikiLinks, isValidEntityName, stripKnownRelationsSection } from "./extract.js";
@@ -262,6 +263,17 @@ export class ContentPipeline {
     if (getOntology().isDerivedPageType(type)) return null;
 
     const extraction = precomputed ?? await this.nerEngine.extract(body);
+    // #265: shadow verifier runs BEFORE the empty-extraction early-return so
+    // that a long body producing zero extraction is flagged. Fail-open by
+    // construction — the runner never rethrows; the write path below is
+    // independent of the verifier succeeding.
+    runNerShadowVerifierFailOpen({
+      db: this.db,
+      logger: this.logger,
+      slug: fromSlug,
+      bodyChars: body.trim().length,
+      extraction,
+    });
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {
       return null;
     }
