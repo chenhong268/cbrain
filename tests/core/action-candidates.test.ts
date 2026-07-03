@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   ACTION_CANDIDATE_TYPES,
   isActionCandidateType,
@@ -6,6 +8,8 @@ import {
   buildActionCandidatesFromDiscoveries,
   buildActionCandidatesFromHealthPlan,
 } from "../../src/core/maintenance/action-candidates.js";
+import { ActionCandidateManager } from "../../src/core/maintenance/action-candidates.js";
+import { CBrainDB } from "../../src/storage/sqlite.js";
 import type { RepairPlan } from "../../src/core/maintenance/health-debt.js";
 
 describe("action candidate core helpers (#267)", () => {
@@ -192,5 +196,95 @@ describe("buildActionCandidatesFromHealthPlan (#267)", () => {
 
     expect(drafts).toHaveLength(1);
     expect(drafts[0].entities).toEqual(["health:系统错误:blocked:global"]);
+  });
+});
+
+describe("ActionCandidateManager persistence (#267)", () => {
+  const testDir = "/tmp/cbrain-test-action-candidates";
+  const dbPath = join(testDir, "test.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("persists one candidate and stores proposed actions", () => {
+    const mgr = new ActionCandidateManager(db);
+    const draft = buildActionCandidatesFromDiscoveries([{
+      id: 1,
+      type: "similar_entity",
+      entities: JSON.stringify(["entity/a", "entity/b"]),
+      score: 0.9,
+      actionable: "high",
+      auto_applicable: 0,
+      occurrence_count: 1,
+      dedup_key: "similar_entity|entity/a|entity/b",
+    }])[0];
+
+    const report = mgr.persistDrafts([draft]);
+
+    expect(report.total).toBe(1);
+    expect(report.inserted).toBe(1);
+    expect(report.updated).toBe(0);
+    expect(report.byType.action_review_discovery).toBe(1);
+    const rows = db.getDiscoveriesByType("action_review_discovery", 10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].auto_applicable).toBe(0);
+    expect(rows[0].proposed_actions).toContain("review");
+  });
+
+  test("rerun does not duplicate and increments occurrence count", () => {
+    const mgr = new ActionCandidateManager(db);
+    const draft = buildActionCandidatesFromDiscoveries([{
+      id: 1,
+      type: "similar_entity",
+      entities: JSON.stringify(["entity/a", "entity/b"]),
+      score: 0.9,
+      actionable: "high",
+      auto_applicable: 0,
+      occurrence_count: 1,
+      dedup_key: "similar_entity|entity/a|entity/b",
+    }])[0];
+
+    mgr.persistDrafts([draft]);
+    const second = mgr.persistDrafts([draft]);
+
+    expect(second.total).toBe(1);
+    expect(second.inserted).toBe(0);
+    expect(second.updated).toBe(1);
+    const row = db.getDiscoveriesByType("action_review_discovery", 10)[0];
+    const full = db.getDiscoveryById(row.id)!;
+    expect(full.occurrence_count).toBe(2);
+  });
+
+  test("dismissed candidate is not visible as pending after rerun", () => {
+    const mgr = new ActionCandidateManager(db);
+    const draft = buildActionCandidatesFromDiscoveries([{
+      id: 1,
+      type: "similar_entity",
+      entities: JSON.stringify(["entity/a", "entity/b"]),
+      score: 0.9,
+      actionable: "high",
+      auto_applicable: 0,
+      occurrence_count: 1,
+      dedup_key: "similar_entity|entity/a|entity/b",
+    }])[0];
+
+    mgr.persistDrafts([draft]);
+    const row = db.getDiscoveriesByType("action_review_discovery", 10)[0];
+    db.updateDiscoveryStatus(row.id, "dismissed");
+    mgr.persistDrafts([draft]);
+
+    expect(db.getDiscoveriesByType("action_review_discovery", 10)).toHaveLength(0);
+    const full = db.getDiscoveryById(row.id)!;
+    expect(full.status).toBe("dismissed");
+    expect(full.occurrence_count).toBe(2);
   });
 });

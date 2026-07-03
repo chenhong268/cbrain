@@ -265,20 +265,84 @@ export function buildActionCandidatesFromHealthPlan(plan: RepairPlan): ActionCan
   return drafts;
 }
 
+function parseActions(raw: string | null | undefined): ProposedAction[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed as ProposedAction[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistedFromRow(
+  row: NonNullable<ReturnType<CBrainDB["getDiscoveryById"]>>,
+  draft: ActionCandidateDraft,
+  inserted: boolean,
+): PersistedActionCandidate {
+  return {
+    id: row.id,
+    type: draft.type,
+    entities: JSON.parse(row.entities) as string[],
+    actionable: draft.actionable,
+    displayTitle: draft.displayTitle,
+    displayReason: draft.displayReason,
+    suggestedAction: draft.suggestedAction,
+    evidence: draft.evidence,
+    proposedActions: parseActions(row.proposed_actions),
+    occurrenceCount: row.occurrence_count,
+    inserted,
+  };
+}
+
 export class ActionCandidateManager {
   constructor(private readonly db: CBrainDB) {}
 
-  persistDrafts(_drafts: ActionCandidateDraft[]): ActionCandidateReport {
+  persistDrafts(drafts: ActionCandidateDraft[]): ActionCandidateReport {
+    const byType: Record<ActionCandidateType, number> = {
+      action_review_discovery: 0,
+      action_health_review: 0,
+      action_repair_preview: 0,
+    };
+    const candidates: PersistedActionCandidate[] = [];
+    let insertedCount = 0;
+    let updatedCount = 0;
+
+    for (const draft of drafts) {
+      assertSafeActionDisplay(draft.displayTitle);
+      assertSafeActionDisplay(draft.displayReason);
+      assertSafeActionDisplay(draft.suggestedAction);
+      const result = this.db.upsertDiscovery(
+        draft.type,
+        draft.entities,
+        draft.score,
+        undefined,
+        undefined,
+        draft.actionable,
+        false,
+        {
+          ...draft.metadata,
+          display_title: draft.displayTitle,
+          display_reason: draft.displayReason,
+          suggested_action: draft.suggestedAction,
+          evidence: draft.evidence,
+        },
+      );
+      this.db.updateDiscoveryActions(result.id, draft.proposedActions);
+      const row = this.db.getDiscoveryById(result.id);
+      if (!row) continue;
+      if (result.inserted) insertedCount++;
+      else updatedCount++;
+      byType[draft.type]++;
+      candidates.push(persistedFromRow(row, draft, result.inserted));
+    }
+
     return {
-      total: 0,
-      inserted: 0,
-      updated: 0,
-      byType: {
-        action_review_discovery: 0,
-        action_health_review: 0,
-        action_repair_preview: 0,
-      },
-      candidates: [],
+      total: candidates.length,
+      inserted: insertedCount,
+      updated: updatedCount,
+      byType,
+      candidates,
     };
   }
 }
