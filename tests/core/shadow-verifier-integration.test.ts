@@ -225,6 +225,47 @@ describe("ContentPipeline NER shadow verifier hook", () => {
     expect(ctx).not.toContain("records/source-1");
   });
 
+  test("fail-open sanitizes event/fact/context fields in error messages", async () => {
+    insertPage("records/source-1", "Source", "record");
+    const warnCalls: unknown[] = [];
+    const captureLogger = {
+      warn: (_m: string, _msg: string, ctx?: unknown) => warnCalls.push(ctx),
+      info: () => {}, error: () => {}, debug() {},
+    } as any;
+    const pipeline = new ContentPipeline(db, stubEmbedding, stubLance, {
+      pages: stubPages, nerEngine: {} as any, logger: captureLogger,
+    });
+    // Leaky error embedding previously-unredacted fields.
+    const leaky = [
+      "boom",
+      "ctx=实体A是某公司的高管",            // entity context snippet
+      "rel=孤儿B 介绍 实体C",                // relation context
+      "event=2026年发布于 描述敏感事件D",     // event description
+      "participants=实体E,实体F",            // participant names
+      "fact=实体G field=role value=敏感职位 evidence=据正文",
+    ].join(" | ");
+    (db as any).addIngestLog = () => { throw new Error(leaky); };
+
+    const extraction: ExtractionResult = {
+      entities: [{ name: "实体A", type: "company", relevance: "high", context: "实体A是某公司的高管" }],
+      relations: [{ from: "实体A", to: "孤儿B", relation: "介绍", context: "实体C" }],
+      events: [{ date: "2026-07-03", description: "描述敏感事件D", participants: ["实体E", "实体F"] }],
+      facts: [{ entity: "实体G", field: "role", value: "敏感职位", confidence: 0.9, evidence: "据正文" }],
+      filtered: [],
+    };
+
+    const result = await pipeline.processNer("records/source-1", "正文".repeat(50), "record", true, extraction);
+    expect(result).not.toBeNull();
+    expect(warnCalls.length).toBe(1);
+    const ctx = JSON.stringify(warnCalls[0]);
+    for (const forbidden of [
+      "实体A是某公司的高管", "实体C", "描述敏感事件D", "实体E", "实体F",
+      "敏感职位", "据正文", "实体G",
+    ]) {
+      expect(ctx).not.toContain(forbidden);
+    }
+  });
+
   test("CBRAIN_SHADOW_VERIFIER_DISABLE=1 writes no verifier rows", async () => {
     process.env.CBRAIN_SHADOW_VERIFIER_DISABLE = "1";
     insertPage("records/source-1", "Source", "record");

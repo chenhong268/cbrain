@@ -290,9 +290,25 @@ function sanitizeVerifierError(
   const tokens = new Set<string>();
   if (slug) tokens.add(slug);
   if (extraction) {
-    for (const e of extraction.entities) tokens.add(e.name);
+    for (const e of extraction.entities) {
+      tokens.add(e.name);
+      if (e.context) tokens.add(e.context);
+    }
     for (const f of extraction.filtered ?? []) tokens.add(f.name);
-    for (const r of extraction.relations) { tokens.add(r.from); tokens.add(r.to); }
+    for (const r of extraction.relations) {
+      tokens.add(r.from);
+      tokens.add(r.to);
+      if (r.context) tokens.add(r.context);
+    }
+    for (const ev of extraction.events) {
+      if (ev.description) tokens.add(ev.description);
+      for (const p of ev.participants ?? []) tokens.add(p);
+    }
+    for (const fa of extraction.facts) {
+      tokens.add(fa.entity);
+      tokens.add(fa.value);
+      tokens.add(fa.evidence);
+    }
   }
   if (displayTexts) for (const t of displayTexts) { if (t && t.length >= 2) tokens.add(t); }
   for (const token of tokens) {
