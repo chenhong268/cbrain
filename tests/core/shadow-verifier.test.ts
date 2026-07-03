@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   summarizeShadowVerifierObservations,
+  verifyDiscoveryCandidate,
   verifyNerExtraction,
+  type DiscoveryVerifierInput,
   type NerVerifierInput,
 } from "../../src/core/quality/shadow-verifier.js";
 
@@ -171,5 +173,119 @@ describe("summarizeShadowVerifierObservations", () => {
     expect(summary.counts).toEqual({ info: 0, warning: 0, error: 0 });
     expect(summary.worst).toBe("none");
     expect(summary.reasonCounts).toEqual({});
+  });
+});
+
+function discInput(over: Partial<DiscoveryVerifierInput> = {}): DiscoveryVerifierInput {
+  return {
+    type: "bridge",
+    actionable: "medium",
+    score: 0.5,
+    autoApplicable: false,
+    hasEvidence: false,
+    hasProposedActions: false,
+    displayTexts: [],
+    ...over,
+  };
+}
+
+describe("verifyDiscoveryCandidate", () => {
+  test("high actionable with no evidence and no proposed actions → error", () => {
+    const obs = verifyDiscoveryCandidate(
+      discInput({
+        type: "contradiction",
+        actionable: "high",
+        score: 0.9,
+        hasEvidence: false,
+        hasProposedActions: false,
+      }),
+    );
+    const e = obs.find((o) => o.code === "discovery_high_actionable_no_evidence");
+    expect(e).toBeDefined();
+    expect(e!.severity).toBe("error");
+  });
+
+  test("high actionable WITH evidence → NOT flagged", () => {
+    const obs = verifyDiscoveryCandidate(
+      discInput({
+        actionable: "high",
+        hasEvidence: true,
+        hasProposedActions: false,
+      }),
+    );
+    expect(obs.some((o) => o.code === "discovery_high_actionable_no_evidence")).toBe(false);
+  });
+
+  test("auto_applicable on action_ type → error", () => {
+    const obs = verifyDiscoveryCandidate(
+      discInput({
+        type: "action_review_discovery",
+        autoApplicable: true,
+      }),
+    );
+    const e = obs.find((o) => o.code === "discovery_auto_applicable_on_review_type");
+    expect(e).toBeDefined();
+    expect(e!.severity).toBe("error");
+  });
+
+  test("score out of [0,1] → warning", () => {
+    const obs = verifyDiscoveryCandidate(discInput({ score: 1.5 }));
+    expect(obs.some((o) => o.code === "discovery_score_out_of_range")).toBe(true);
+  });
+
+  test("unknown actionable value → warning", () => {
+    const obs = verifyDiscoveryCandidate(discInput({ actionable: "urgent" }));
+    expect(obs.some((o) => o.code === "discovery_score_out_of_range")).toBe(true);
+  });
+
+  test("action_ type with all-empty display texts → warning discovery_display_missing_fields", () => {
+    const obs = verifyDiscoveryCandidate(
+      discInput({
+        type: "action_health_review",
+        displayTexts: ["", "  ", ""],
+      }),
+    );
+    expect(obs.some((o) => o.code === "discovery_display_missing_fields")).toBe(true);
+  });
+
+  test("display text containing /Users/ path → warning discovery_display_private_raw", () => {
+    const obs = verifyDiscoveryCandidate(
+      discInput({
+        type: "action_review_discovery",
+        displayTexts: ["正常标题", "详情见 /Users/secret/note.md"],
+      }),
+    );
+    const e = obs.find((o) => o.code === "discovery_display_private_raw");
+    expect(e).toBeDefined();
+    expect(e!.severity).toBe("warning");
+  });
+
+  test("metadata-style internal refs in displayTexts are NOT flagged when not user-visible", () => {
+    // displayTexts is empty → nothing to scan; internal entity/ refs live elsewhere.
+    const obs = verifyDiscoveryCandidate(discInput({ displayTexts: [] }));
+    expect(obs.some((o) => o.code === "discovery_display_private_raw")).toBe(false);
+  });
+
+  test("normal discovery draft → no warning/error observations", () => {
+    const obs = verifyDiscoveryCandidate(
+      discInput({
+        type: "action_review_discovery",
+        actionable: "high",
+        score: 0.8,
+        hasEvidence: true,
+        hasProposedActions: true,
+        displayTexts: ["有一条发现值得复核", "建议人工确认", "打开对应发现确认"],
+      }),
+    );
+    expect(obs.filter((o) => o.severity === "warning" || o.severity === "error")).toEqual([]);
+  });
+
+  test("summary carries discovery type and check count 5", () => {
+    const obs = verifyDiscoveryCandidate(discInput({ type: "similar_entity", score: 2 }));
+    const summary = summarizeShadowVerifierObservations("discovery", obs, "similar_entity");
+    expect(summary.surface).toBe("discovery");
+    expect(summary.type).toBe("similar_entity");
+    expect(summary.checks).toBe(5);
+    expect(summary.worst).toBe("warning");
   });
 });

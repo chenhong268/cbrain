@@ -13,6 +13,12 @@
 // Task 1 lands ONLY the NER pure functions — no external imports yet (they
 // would be unused and trip the lint gate at commit time). Tasks 2/4/5 add
 // imports as the symbols they need come online.
+//
+// Task 2 adds the first external import: DISPLAY_UNSAFE_PATTERNS from
+// action-candidates, used to scan user-visible discovery display texts for
+// private/internal refs (privacy invariant: detail holds counts only).
+
+import { DISPLAY_UNSAFE_PATTERNS } from "../maintenance/action-candidates.js";
 
 export type VerifierSeverity = "info" | "warning" | "error";
 export type VerifierSurface = "ner" | "discovery";
@@ -182,4 +188,70 @@ export function summarizeShadowVerifierObservations(
     counts.error > 0 ? "error" : counts.warning > 0 ? "warning" : counts.info > 0 ? "info" : "none";
   const checks = surface === "ner" ? NER_CHECK_COUNT : DISCOVERY_CHECK_COUNT;
   return { surface, type, checks, counts, reasonCounts, worst };
+}
+
+export function verifyDiscoveryCandidate(input: DiscoveryVerifierInput): ShadowVerifierObservation[] {
+  const obs: ShadowVerifierObservation[] = [];
+  const isActionType = input.type.startsWith("action_");
+
+  // 1. discovery_high_actionable_no_evidence
+  if (input.actionable === "high" && !input.hasEvidence && !input.hasProposedActions) {
+    obs.push({
+      surface: "discovery",
+      code: "discovery_high_actionable_no_evidence",
+      severity: "error",
+      detail: `type=${input.type}`,
+    });
+  }
+
+  // 2. discovery_auto_applicable_on_review_type
+  if (input.autoApplicable && isActionType) {
+    obs.push({
+      surface: "discovery",
+      code: "discovery_auto_applicable_on_review_type",
+      severity: "error",
+      detail: `type=${input.type}`,
+    });
+  }
+
+  // 3. discovery_score_out_of_range (covers score AND unknown actionable)
+  const knownActionable =
+    input.actionable === "high" || input.actionable === "medium" || input.actionable === "low";
+  if (input.score < 0 || input.score > 1 || !knownActionable) {
+    obs.push({
+      surface: "discovery",
+      code: "discovery_score_out_of_range",
+      severity: "warning",
+      detail: `score=${input.score} actionable=${input.actionable}`,
+    });
+  }
+
+  // 4. discovery_display_missing_fields
+  if (isActionType && input.displayTexts.every((t) => !t || !t.trim())) {
+    obs.push({
+      surface: "discovery",
+      code: "discovery_display_missing_fields",
+      severity: "warning",
+      detail: `type=${input.type}`,
+    });
+  }
+
+  // 5. discovery_display_private_raw — user-visible texts only
+  let unsafeHits = 0;
+  for (const text of input.displayTexts) {
+    if (!text) continue;
+    for (const pattern of DISPLAY_UNSAFE_PATTERNS) {
+      if (pattern.test(text)) unsafeHits++;
+    }
+  }
+  if (unsafeHits > 0) {
+    obs.push({
+      surface: "discovery",
+      code: "discovery_display_private_raw",
+      severity: "warning",
+      detail: `${unsafeHits} unsafe display matches`,
+    });
+  }
+
+  return obs;
 }

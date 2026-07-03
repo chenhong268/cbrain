@@ -75,7 +75,7 @@ export function isActionCandidateType(type: string): type is ActionCandidateType
   return (ACTION_CANDIDATE_TYPES as readonly string[]).includes(type);
 }
 
-const DISPLAY_UNSAFE_PATTERNS = [
+export const DISPLAY_UNSAFE_PATTERNS = [
   /\bscore\b/i,
   /\bdedup_key\b/i,
   /\bdebug\b/i,
