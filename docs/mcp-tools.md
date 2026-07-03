@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 85 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 88 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -370,6 +370,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `put_page` | Create or update a page. |
 | `query` | 底层关键词搜索，返回原始文本片段（slug + snippet）。仅限以下场景：调试（确认某个关键词是否被索引、出现在哪些页面）、定位（已知精确关键词，需要找到对应的 slug）、deep_recall… |
 | `query_insights` | Semantic search over insights. |
+| `read_action_candidates` | 读取待处理的内部行动候选。不会执行任何动作。 |
 | `read_discoveries` | 读取知识图谱的结构发现摘要（最多 3 条）。返回用户可见的发现卡片，包含为什么重要、依据、建议动作。如需处理发现，用 update_discovery_status 标记已读、已解决或忽略。 |
 | `read_knowledge_map` | 【知识图谱】读取最近一次生成的知识图谱报告（由每周 dream 的 knowledge-map 阶段或 `cbrain knowledge-map` 生成）。回答：我的知识图谱长什么样 / 哪些领域成熟 /… |
 | `read_project_state` | 读取 compact 项目状态 artifact，用于 Agent session continuity。只读，不写 vault/SQLite/LanceDB，不做 prompt 注入。 |
@@ -385,12 +386,14 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `remove_tag` | Remove a tag from a page. |
 | `resolve_slugs` | Resolve page titles or partial names to slugs. |
 | `revert_version` | Revert a page to a specific version. |
+| `run_action_candidates` | 从 Discovery/Health 信号生成内部行动候选。不发送通知、不创建 issue、不执行修复。 |
 | `run_discovery` | 运行发现管线，检查知识图谱中的变化和机会。完成后返回用户可见的发现摘要（最多 3 条）。可用 read_discoveries 查看历史发现，用 update_discovery_status… |
 | `set_hierarchy` | Set the direct manager (reports_to) for an entity. |
 | `set_trust_state` | 设置知识条目的信任状态（仅降级/纠正，不可升级为 trusted）。要将条目升级为 trusted，请使用 confirm_evidence。 |
 | `status` | Get brain status: page counts, sync info, watcher state, quarantine, etc. |
 | `summarize` | 探索一个领域或主题的全貌。搜索相关实体后沿图做 1-2 跳遍历，发现实体间的关联和邻居节点。适用：'帮我了解 XX 生态'、'这个领域有哪些关键玩家'、'XX 和 YY 之间有没有我没注意到的联系'。与… |
 | `sync` | Sync vault files to SQLite + LanceDB indexes. |
+| `update_action_candidate_status` | 更新行动候选状态。支持 resolved/dismissed/seen，不会执行候选动作。 |
 | `update_discovery_status` | 更新发现的处理状态。支持标记已读(seen)、已解决(resolved)、已忽略(dismissed)。 |
 | `update_profile` | Create or update profile entries. |
 | `wakeup_diff` | 生成认知变化摘要（Wake-up Diff）。对比上次快照，产出新增记忆项、内容更新、tier 变化、关系变化、置信度衰减等差异。首次运行建立基线。可由 dream 自动触发或手动运行。 |

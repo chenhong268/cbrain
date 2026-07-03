@@ -164,16 +164,18 @@ export function registerActionCandidateTools(server: McpServer, ctx: ToolContext
       status: z.enum(["seen", "resolved", "dismissed"]).describe("New status"),
     },
   }, async ({ ids, status }) => {
+    let updated = 0;
     for (const id of ids) {
       const row = ctx.db.getDiscoveryById(id);
       if (!row || !isActionCandidateType(row.type)) continue;
       ctx.db.updateDiscoveryStatus(id, status);
       if (status === "seen") ctx.db.markDiscoverySeen(id);
+      updated++;
     }
     return {
       content: [{
         type: "text" as const,
-        text: JSON.stringify({ updated: ids.length, status, status_label: STATUS_LABELS[status] }),
+        text: JSON.stringify({ updated, status, status_label: STATUS_LABELS[status] }),
       }],
     };
   });

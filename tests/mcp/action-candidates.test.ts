@@ -123,4 +123,21 @@ describe("MCP action candidates (#267)", () => {
     const payload = JSON.parse((result as { content: { text: string }[] }).content[0].text);
     expect(payload.cards).toHaveLength(0);
   });
+
+  test("update_action_candidate_status skips non-action discovery ids", async () => {
+    // A plain (non-action) discovery:
+    const { id } = db.upsertDiscovery("gap", ["entity/a"], 0.8, undefined, undefined, "high", false, {
+      mention_count: 5, link_count: 0,
+    });
+
+    const server = createServer(deps);
+    const result = await getTools(server).update_action_candidate_status.handler({ ids: [id], status: "dismissed" });
+    const payload = JSON.parse((result as { content: { text: string }[] }).content[0].text);
+
+    // Tool reports 0 actually updated (the gap id was skipped).
+    expect(payload.updated).toBe(0);
+    // The plain discovery is NOT mutated — still pending.
+    const full = db.getDiscoveryById(id)!;
+    expect(full.status).toBe("pending");
+  });
 });
