@@ -185,6 +185,7 @@ export class HealthChecker {
       this.checkSearchQuality(),
       this.checkBulkPending(),
       this.checkNerQuality(),
+      this.checkVerifierQuality(),
     ];
 
     const highCount = dimensions.reduce((n, d) => n + d.issues.filter(i => i.severity === "high").length, 0);
@@ -1343,5 +1344,49 @@ export class HealthChecker {
 
     const status = issues.some((i) => i.severity === "medium") ? "warn" : "pass";
     return { name: "NER 质量", status, issues };
+  }
+
+  // ─── Dimension: Shadow Verifier Quality (observe-only, #265) ──
+
+  private checkVerifierQuality(): HealthDimension {
+    const c = this.db.getRecentVerifierCounts(24);
+    const nerErr = c.ner.error;
+    const nerWarn = c.ner.warning;
+    const discErr = c.discovery.error;
+    const discWarn = c.discovery.warning;
+    const issues: HealthIssue[] = [];
+
+    const topReasons = (prefix: string): string => {
+      const entries = Object.entries(c.byCode)
+        .filter(([code]) => code.startsWith(prefix))
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([code, n]) => `${code}×${n}`);
+      return entries.length > 0 ? entries.join(", ") : "无";
+    };
+
+    if (nerErr > 0 || nerWarn > 0) {
+      issues.push({
+        severity: nerErr > 0 ? "high" : "medium",
+        slug: "verifier:ner",
+        title: `影子校验：最近 24h NER 抽取存在 ${nerErr} 处 error / ${nerWarn} 处 warning 生成质量风险`,
+        description: `主要 reason: ${topReasons("ner_")}。详见 ingest_log（source_type=verifier）。`,
+        suggestion: "观察 NER 抽取质量趋势（observe-only，未自动调整，不影响已写入记忆）",
+      });
+    }
+    if (discErr > 0 || discWarn > 0) {
+      issues.push({
+        severity: discErr > 0 ? "high" : "medium",
+        slug: "verifier:discovery",
+        title: `影子校验：最近 24h Discovery 存在 ${discErr} 处 error / ${discWarn} 处 warning 生成质量风险`,
+        description: `主要 reason: ${topReasons("discovery_")}。详见 ingest_log（source_type=verifier）。`,
+        suggestion: "观察 Discovery 候选质量趋势（observe-only，未自动调整，不影响已写入发现）",
+      });
+    }
+
+    const hasError = nerErr > 0 || discErr > 0;
+    const hasWarning = nerWarn > 0 || discWarn > 0;
+    const status: "pass" | "warn" | "fail" = hasError ? "fail" : hasWarning ? "warn" : "pass";
+    return { name: "生成质量影子校验", status, issues };
   }
 }

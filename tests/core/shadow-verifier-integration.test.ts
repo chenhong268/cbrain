@@ -6,6 +6,7 @@ import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
 import type { ExtractionResult } from "../../src/core/ingestion/ner.js";
 import { ActionCandidateManager } from "../../src/core/maintenance/action-candidates.js";
 import { DiscoveryManager } from "../../src/core/maintenance/discovery.js";
+import { HealthChecker, type HealthDimension } from "../../src/core/maintenance/health.js";
 
 describe("CBrainDB.getRecentVerifierCounts", () => {
   const testDir = "/tmp/cbrain-test-verifier-db";
@@ -390,5 +391,86 @@ describe("Discovery shadow verifier hooks", () => {
     expect(discRows.every((r) => r.page_slug === null)).toBe(true);
     // If this fails because detectGaps did not fire under this seed, adjust the seed
     // (raise mention_count / widen title) rather than deleting the test.
+  });
+});
+
+describe("HealthChecker.checkVerifierQuality", () => {
+  const testDir = "/tmp/cbrain-test-verifier-health";
+  const dbPath = join(testDir, "test.sqlite");
+  let db: CBrainDB;
+  let checker: HealthChecker;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+    db = new CBrainDB(dbPath);
+    checker = new HealthChecker(db, join(testDir, "outputs"));
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  function findVerifierDim(report: { dimensions: HealthDimension[] }): HealthDimension {
+    return report.dimensions.find((d) => d.name === "生成质量影子校验")!;
+  }
+  function writeNerRow(warning: number, error: number) {
+    db.addIngestLog("verifier", "ner_shadow_verifier", "x", JSON.stringify({
+      surface: "ner", checks: 6,
+      counts: { info: 0, warning, error },
+      reasonCounts: error > 0 ? { ner_zero_from_long_body: error } : { ner_invalid_event_date: warning },
+      worst: error > 0 ? "error" : "warning",
+    }));
+  }
+
+  test("clean → pass, no issues", async () => {
+    const report = await checker.checkAll();
+    const dim = findVerifierDim(report);
+    expect(dim.status).toBe("pass");
+    expect(dim.issues).toEqual([]);
+  });
+
+  test("ner error → dimension fail, issue severity high", async () => {
+    writeNerRow(0, 2);
+    const report = await checker.checkAll();
+    const dim = findVerifierDim(report);
+    expect(dim.status).toBe("fail");
+    expect(dim.issues.some((i) => i.severity === "high")).toBe(true);
+  });
+
+  test("warning only → warn, issue severity medium", async () => {
+    writeNerRow(3, 0);
+    const report = await checker.checkAll();
+    const dim = findVerifierDim(report);
+    expect(dim.status).toBe("warn");
+    expect(dim.issues.some((i) => i.severity === "medium")).toBe(true);
+  });
+
+  test("issue text says '生成质量风险' (not 'data corruption' / '损坏')", async () => {
+    writeNerRow(0, 1);
+    const report = await checker.checkAll();
+    const dim = findVerifierDim(report);
+    const text = JSON.stringify(dim);
+    expect(text).toContain("生成质量风险");
+    expect(text).not.toContain("损坏");
+    expect(text).not.toContain("腐坏");
+  });
+
+  test("health output contains no raw slugs / entity names / page_slug field name", async () => {
+    writeNerRow(0, 1);
+    db.addIngestLog("verifier", "discovery_shadow_verifier", null, JSON.stringify({
+      surface: "discovery", type: "action_review_discovery", checks: 5,
+      counts: { info: 0, warning: 1, error: 0 },
+      reasonCounts: { discovery_display_private_raw: 1 }, worst: "warning",
+    }));
+    const report = await checker.checkAll();
+    const fullMd = checker.writeFullReport(report);
+    const { reportPaths: _rp, ...rest } = report;
+    const json = JSON.stringify(rest);
+    for (const forbidden of ["entity/", "records/", "page_slug", "file_path", "实体A"]) {
+      expect(json).not.toContain(forbidden);
+      expect(fullMd).not.toContain(forbidden);
+    }
   });
 });
