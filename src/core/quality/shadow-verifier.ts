@@ -14,11 +14,13 @@
 // would be unused and trip the lint gate at commit time). Tasks 2/4/5 add
 // imports as the symbols they need come online.
 //
-// Task 2 adds the first external import: DISPLAY_UNSAFE_PATTERNS from
-// action-candidates, used to scan user-visible discovery display texts for
-// private/internal refs (privacy invariant: detail holds counts only).
+// Task 2 adds the first external import: DISPLAY_UNSAFE_PATTERNS from the
+// neutral core/safety/display-safety module, used to scan user-visible
+// discovery display texts for private/internal refs (privacy invariant:
+// detail holds counts only). Lives under core/safety/ to avoid a
+// quality <-> maintenance circular import.
 
-import { DISPLAY_UNSAFE_PATTERNS } from "../maintenance/action-candidates.js";
+import { DISPLAY_UNSAFE_PATTERNS } from "../safety/display-safety.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { Logger } from "../logger.js";
 import type { ExtractionResult } from "../ingestion/ner.js";

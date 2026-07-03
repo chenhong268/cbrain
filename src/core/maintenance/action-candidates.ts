@@ -2,6 +2,7 @@ import type { CBrainDB } from "../../storage/sqlite.js";
 import type { Logger } from "../logger.js";
 import type { RepairAction, RepairPlan } from "./health-debt.js";
 import { runDiscoveryShadowVerifierFailOpen } from "../quality/shadow-verifier.js";
+import { assertSafeActionDisplay } from "../safety/display-safety.js";
 
 export const ACTION_CANDIDATE_TYPES = [
   "action_review_discovery",
@@ -75,28 +76,6 @@ export interface DiscoveryCandidateSource {
 
 export function isActionCandidateType(type: string): type is ActionCandidateType {
   return (ACTION_CANDIDATE_TYPES as readonly string[]).includes(type);
-}
-
-export const DISPLAY_UNSAFE_PATTERNS = [
-  /\bscore\b/i,
-  /\bdedup_key\b/i,
-  /\bdebug\b/i,
-  /\bmetadata\b/i,
-  /\bsql\b/i,
-  /\bselect\s+\*\s+from\b/i,
-  /\bentity\/[^\s]+/i,
-  /\bconcept\/[^\s]+/i,
-  /\brecords?\//i,
-  /\/Users\//,
-  /[A-Z]:\\/,
-];
-
-export function assertSafeActionDisplay(text: string): void {
-  for (const pattern of DISPLAY_UNSAFE_PATTERNS) {
-    if (pattern.test(text)) {
-      throw new Error(`unsafe display text for action candidate: ${pattern}`);
-    }
-  }
 }
 
 const HIGH_VALUE_DISCOVERY_TYPES = new Set([

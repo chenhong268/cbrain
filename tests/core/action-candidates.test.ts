@@ -4,11 +4,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   ACTION_CANDIDATE_TYPES,
   isActionCandidateType,
-  assertSafeActionDisplay,
   buildActionCandidatesFromDiscoveries,
   buildActionCandidatesFromHealthPlan,
 } from "../../src/core/maintenance/action-candidates.js";
 import { ActionCandidateManager } from "../../src/core/maintenance/action-candidates.js";
+import { assertSafeActionDisplay } from "../../src/core/safety/display-safety.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import type { RepairPlan } from "../../src/core/maintenance/health-debt.js";
 
