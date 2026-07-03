@@ -41,12 +41,14 @@ function parseJsonSafe(raw: string | null | undefined): Record<string, unknown> 
 }
 
 /**
- * #246 — Types excluded from the DEFAULT discovery digest feed (daily run_discovery
- * digest, default read_discoveries). similar_entity is a governance/cleanup lane and
- * must not pollute the insight digest. KM types were already excluded upstream.
+ * #246 / #267 — Types excluded from the DEFAULT discovery digest feed (daily
+ * run_discovery digest, default read_discoveries). similar_entity is a
+ * governance/cleanup lane; action_* rows surface through their own MCP tools
+ * (run_action_candidates / read_action_candidates), not the insight digest. KM
+ * types were already excluded upstream.
  */
 export function isDigestExcluded(type: string): boolean {
-  return type === "similar_entity";
+  return type === "similar_entity" || type.startsWith("action_");
 }
 
 export function shouldFilterDiscovery(r: DiscoveryRow): string | null {
@@ -211,6 +213,14 @@ export function formatDiscoveryDigest(
   const kept: DiscoveryRow[] = [];
 
   for (const r of rows) {
+    // #267 — exclude action_* rows up front so they never reach shouldFilterDiscovery
+    // (which would otherwise bucket them as unknown_type). This is the safety net that
+    // covers read_discoveries (which does NOT pre-filter via isDigestExcluded upstream).
+    if (isDigestExcluded(r.type)) {
+      const key = `${r.type}_excluded`;
+      filterReasons[key] = (filterReasons[key] ?? 0) + 1;
+      continue;
+    }
     const reason = shouldFilterDiscovery(r);
     if (reason) {
       filterReasons[reason] = (filterReasons[reason] ?? 0) + 1;

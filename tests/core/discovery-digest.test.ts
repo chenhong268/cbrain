@@ -455,3 +455,46 @@ describe("knowledge_map surface (#244)", () => {
     expect(surface.display).toBe("");
   });
 });
+
+test("[#267] default digest excludes action candidate rows via explicit action_ path", () => {
+  const rows = [
+    {
+      id: 1,
+      type: "action_review_discovery",
+      entities: JSON.stringify(["discovery:a"]),
+      score: 1,
+      detail: null,
+      detected_at: "2026-07-03T00:00:00.000Z",
+      actionable: "high",
+      suggestion: null,
+      proposed_actions: null,
+      auto_applicable: 0,
+      metadata: JSON.stringify({
+        display_title: "有一条发现值得复核",
+        display_reason: "同类信号已经多次出现，建议确认是否需要采取行动。",
+        suggested_action: "打开对应发现，确认是否需要处理。",
+      }),
+    },
+    {
+      id: 2,
+      type: "gap",
+      entities: JSON.stringify(["entity/a"]),
+      score: 0.8,
+      detail: null,
+      detected_at: "2026-07-03T00:00:00.000Z",
+      actionable: "high",
+      suggestion: null,
+      proposed_actions: null,
+      auto_applicable: 0,
+      metadata: JSON.stringify({ mention_count: 10, link_count: 0 }),
+    },
+  ];
+
+  const digest = formatDiscoveryDigest(rows, () => ({ title: "实体A", type: "entity/person" }), 10);
+  expect(digest.cards).toHaveLength(1);
+  expect(digest.cards[0].title).toContain("需要补全");
+  expect(digest._debug.filtered).toBe(1);
+  // Strengthened: action_* must be excluded via the EXPLICIT action_ path, not the unknown_type fallback.
+  expect(digest._debug.filter_reasons["action_review_discovery_excluded"]).toBe(1);
+  expect(digest._debug.filter_reasons["unknown_type"]).toBeUndefined();
+});
