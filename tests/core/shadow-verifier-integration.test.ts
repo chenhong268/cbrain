@@ -378,6 +378,38 @@ describe("Discovery shadow verifier hooks", () => {
     expect(report.total).toBe(1);
   });
 
+  test("fail-open verifier error is observable via manager logger (sanitized)", () => {
+    // Two captures: warn (must fire) and the sanitized payload (no raw tokens).
+    const warnCalls: Array<{ msg: string; ctx: unknown }> = [];
+    const mgr = new ActionCandidateManager(db, {
+      warn: (_module: string, msg: string, ctx?: unknown) => warnCalls.push({ msg, ctx }),
+      info: () => {}, error: () => {}, debug() {},
+    } as any);
+    // Leaky error: path + raw display text. Both are redaction-design vectors
+    // (sanitizeForLog handles /Users/ paths; displayTexts are split-joined to
+    // <redacted>). Verifier errors in production come from these sources.
+    (db as any).addIngestLog = () => {
+      throw new Error("boom at /Users/secret/x.md display=敏感标题实体Z");
+    };
+    const report = mgr.persistDrafts([{
+      type: "action_health_review",
+      entities: ["health:x:y"],
+      score: 0.6, actionable: "medium",
+      displayTitle: "敏感标题实体Z", displayReason: "理由", suggestedAction: "动作",
+      evidence: [{ source: "health", ref: "health:x:y", kind: "k" }],
+      proposedActions: [{ type: "review", target: "health:x:y", reason: "r" }],
+      metadata: {},
+    }]);
+    // fail-open: candidate still persisted
+    expect(report.total).toBe(1);
+    // observable: warn fired
+    expect(warnCalls.length).toBe(1);
+    // sanitized: raw tokens redacted
+    const ctxJson = JSON.stringify(warnCalls[0].ctx);
+    expect(ctxJson).not.toContain("/Users/secret/x.md");
+    expect(ctxJson).not.toContain("敏感标题实体Z");
+  });
+
   test("DiscoveryManager.runDiscovery gap path writes discovery_shadow_verifier rows (page_slug=null)", async () => {
     // Seed a high-mention, zero-link entity page → deterministic gap detector fires
     // (no LLM needed: types=["gap"] skips detectContradictions). Proves discovery.ts wiring.

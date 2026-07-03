@@ -125,7 +125,7 @@ export function registerActionCandidateTools(server: McpServer, ctx: ToolContext
       drafts.push(...buildActionCandidatesFromHealthPlan(planRepairs(report, signalLookup)));
     }
 
-    const manager = new ActionCandidateManager(ctx.db);
+    const manager = new ActionCandidateManager(ctx.db, ctx.logger);
     const persistedReport = manager.persistDrafts(drafts.slice(0, cap));
     const rendered = renderCandidates(persistedReport.candidates);
     return {
