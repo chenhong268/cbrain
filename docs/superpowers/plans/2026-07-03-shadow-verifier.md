@@ -1596,19 +1596,22 @@
 
 **Files:** none (review only — apply fixes if defects found)
 
-- [ ] **Step 1: Run the adversarial review workflow**
+- [ ] **Step 1: Run the adversarial review (REAL execution, not a one-liner)**
 
-  Dispatch a multi-perspective review (or perform inline) over the diff (`git diff main...HEAD`) checking exactly these five dimensions:
+  This task is not complete on a "review passed" sentence. Dispatch a multi-perspective review over the diff (`git diff main...HEAD`) AND back each finding with code evidence (file:line + a concrete failure scenario or a regression test). Check exactly these eight points — each must be answered with PASS/FAIL plus evidence:
 
-  1. **Privacy leakage** — Does any `ingest_log` row with `source_type="verifier"` or any health/dream output contain entity names, slugs, dedup_key, titles, body, prompts, or relation endpoints? Confirm `discovery_*` rows have `page_slug=null`. Confirm `observations[].detail` is never persisted.
-  2. **Accidental write blocking** — Can any verifier code path throw in a way that prevents an ingest, NER write, discovery upsert, or action-candidate persist? Trace every `run*ShadowVerifierFailOpen` call site; the surrounding code must not depend on the verifier succeeding.
-  3. **Noisy health output** — Does `checkVerifierQuality` push the overall `HealthReport.overallStatus` to `fail` on benign signals? Is the dimension silent (pass, no issues) when there is nothing to report?
-  4. **Unbounded cost/latency** — Are all checks O(n) in extraction size with no LLM, no DB reads inside the hot path (NER hook runs per-page on every ingest), and no unbounded loops? Confirm env kill switch short-circuits before any allocation.
-  5. **Duplicated quality logic** — Does this re-implement checks already in `ner.ts` (`filterExtractedEntities`, `classifyEntity`) or `action-candidates.ts` (`assertSafeActionDisplay`)? Reuse, don't duplicate. `DISPLAY_UNSAFE_PATTERNS` must be the single source for display-text safety.
+  1. **`ingest_log.details` privacy** — Does any persisted `source_type="verifier"` row contain body, entity names, slugs, titles, dedup_key, or relation endpoints? `details` must hold ONLY `{surface, type?, checks, counts, reasonCounts, worst}`. Grep the runner write-sites; confirm `observations[].detail` is never serialized into the persisted JSON.
+  2. **discovery `page_slug` is always null** — Every `addIngestLog("verifier", "discovery_shadow_verifier", …)` call must pass `null` (or omit) for slug. Grep all three discovery hook sites. NER may pass `fromSlug`; discovery must not.
+  3. **verifier errors never block ingest/discovery** — Trace every `runNerShadowVerifierFailOpen` / `runDiscoveryShadowVerifierFailOpen` call site. The surrounding write path (entity/relation/event write, `upsertDiscovery`, `persistDrafts`) must not depend on the verifier succeeding. A thrown verifier must leave already-applied writes intact (no rollback) and let the caller return normally. The fail-open tests (Task 4/5) prove this.
+  4. **Health wording = "生成质量风险", never "数据损坏/腐坏"** — Grep `checkVerifierQuality` output strings and the full health report text. The dimension must describe generation-quality risk, not main-line storage corruption. The Task 6 wording test must pass.
+  5. **No LLM / external IO / schema migration / auto-fix introduced** — Grep the diff for `llm.chat`, `fetch`, network calls, `CREATE TABLE`, `ALTER TABLE`, and any write/delete/merge/rewrite of entities/links/discoveries triggered by verifier output. Phase 1 is observe-only; none of these may be present.
+  6. **`DISPLAY_UNSAFE_PATTERNS` export did not change semantics** — `git diff main...HEAD -- src/core/maintenance/action-candidates.ts` for that symbol must be a single-keyword change (`const` → `export const`), array contents/order unchanged. `#267` action-candidates tests must still pass.
+  7. **`CBRAIN_SHADOW_VERIFIER_DISABLE=1` is truly zero-write** — With the env set, no `source_type="verifier"` ingest_log row is written on any NER/discovery path. The Task 4 env test must pass; spot-check the runner entry short-circuits before any allocation.
+  8. **`bun run check` is green** — `lint` (source) + full `bun test` pass. No new test-only type errors introduced beyond the documented pre-existing set.
 
 - [ ] **Step 2: Triage findings**
 
-  For each confirmed defect: fix with a surgical commit. For each "plausible but unconfirmed" finding: add a regression test that proves the behavior is safe, or fix it.
+  For each of the 8 points: if FAIL, fix with a surgical commit. If PASS-by-test, cite the test name. If PASS-by-inspection, cite file:line. No point may be left unanswered.
 
 - [ ] **Step 3: Re-run gate after fixes**
 
