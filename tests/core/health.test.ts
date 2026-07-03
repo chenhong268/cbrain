@@ -55,7 +55,7 @@ describe("HealthChecker", () => {
       const report = await checker.checkAll();
       expect(report.overallStatus).toBe("pass");
       expect(report.metrics.totalPages).toBe(17);
-      expect(report.dimensions.length).toBe(17);
+      expect(report.dimensions.length).toBe(18); // +1: checkVerifierQuality (#265)
     });
 
     test("fails on insufficient data", async () => {
