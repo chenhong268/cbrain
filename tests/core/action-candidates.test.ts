@@ -4,7 +4,9 @@ import {
   isActionCandidateType,
   assertSafeActionDisplay,
   buildActionCandidatesFromDiscoveries,
+  buildActionCandidatesFromHealthPlan,
 } from "../../src/core/maintenance/action-candidates.js";
+import type { RepairPlan } from "../../src/core/maintenance/health-debt.js";
 
 describe("action candidate core helpers (#267)", () => {
   test("recognizes all action candidate types", () => {
@@ -111,5 +113,84 @@ describe("buildActionCandidatesFromDiscoveries (#267)", () => {
     ]);
 
     expect(drafts).toHaveLength(0);
+  });
+});
+
+function makePlan(actions: RepairPlan["actions"]): RepairPlan {
+  return {
+    source: "2026-07-03T00:00:00.000Z",
+    counts: {
+      auto_repairable: actions.filter((a) => a.group === "auto_repairable").length,
+      needs_review: actions.filter((a) => a.group === "needs_review").length,
+      observe_only: actions.filter((a) => a.group === "observe_only").length,
+      blocked: actions.filter((a) => a.group === "blocked").length,
+    },
+    actions,
+  };
+}
+
+describe("buildActionCandidatesFromHealthPlan (#267)", () => {
+  test("creates health review candidate for needs_review action", () => {
+    const drafts = buildActionCandidatesFromHealthPlan(makePlan([{
+      group: "needs_review",
+      dimension: "结构一致性",
+      severity: "high",
+      slug: "entity/a",
+      action: "人工核实结构一致性",
+    }]));
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].type).toBe("action_health_review");
+    expect(drafts[0].entities).toEqual(["health:结构一致性:needs_review:entity/a"]);
+    expect(drafts[0].actionable).toBe("high");
+    expect(drafts[0].metadata.dimension).toBe("结构一致性");
+    expect(drafts[0].metadata.repair_group).toBe("needs_review");
+    expect(drafts[0].displayTitle).not.toContain("entity/");
+  });
+
+  test("creates repair preview candidate for auto_repairable action", () => {
+    const drafts = buildActionCandidatesFromHealthPlan(makePlan([{
+      group: "auto_repairable",
+      kind: "normalize_reports_to",
+      dimension: "结构一致性",
+      severity: "medium",
+      slug: "entity/a",
+      action: "将 reports_to 归一化为完整 slug",
+      rollbackNote: "归一化时需写版本快照。",
+    }]));
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].type).toBe("action_repair_preview");
+    expect(drafts[0].actionable).toBe("medium");
+    expect(drafts[0].proposedActions[0]).toEqual({
+      type: "dry_run",
+      target: "health:结构一致性:normalize_reports_to:entity/a",
+      reason: "预览这项修复，不自动执行。",
+    });
+  });
+
+  test("skips observe_only health actions in phase 1", () => {
+    const drafts = buildActionCandidatesFromHealthPlan(makePlan([{
+      group: "observe_only",
+      dimension: "完整性",
+      severity: "low",
+      slug: "concept/a",
+      action: "稀疏 stub，暂保留观察（dry-run 不删除）",
+    }]));
+
+    expect(drafts).toHaveLength(0);
+  });
+
+  test("uses global stable ref for non-page health action", () => {
+    const drafts = buildActionCandidatesFromHealthPlan(makePlan([{
+      group: "blocked",
+      dimension: "系统错误",
+      severity: "high",
+      slug: "-",
+      action: "检查 runtime/logs 系统日志后重新评估",
+    }]));
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].entities).toEqual(["health:系统错误:blocked:global"]);
   });
 });

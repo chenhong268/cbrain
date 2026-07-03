@@ -181,8 +181,88 @@ export function buildActionCandidatesFromDiscoveries(rows: DiscoveryCandidateSou
   return drafts;
 }
 
-export function buildActionCandidatesFromHealthPlan(_plan: RepairPlan): ActionCandidateDraft[] {
-  return [];
+function healthStableRef(action: RepairAction): string {
+  const scope = action.slug && action.slug !== "-" ? action.slug : "global";
+  return `health:${action.dimension}:${action.kind ?? action.group}:${scope}`;
+}
+
+function actionableFromSeverity(severity: RepairAction["severity"]): "high" | "medium" | "low" {
+  if (severity === "high") return "high";
+  if (severity === "medium") return "medium";
+  return "low";
+}
+
+function buildHealthDisplay(action: RepairAction): { title: string; reason: string; suggestion: string } {
+  if (action.group === "blocked") {
+    return {
+      title: "有一项健康检查被前置条件阻塞",
+      reason: "系统需要先处理运行条件或日志问题，再重新评估这项健康信号。",
+      suggestion: "先查看健康报告中的阻塞原因，再决定是否继续处理。",
+    };
+  }
+  if (action.group === "auto_repairable") {
+    return {
+      title: "有一项修复建议可以先预览",
+      reason: "这项问题有确定性的修复方向，但仍应先 dry-run 查看影响范围。",
+      suggestion: "先运行预览，不要直接执行修复。",
+    };
+  }
+  return {
+    title: "有一项健康问题需要人工确认",
+    reason: "这项信号可能影响知识质量，但不适合自动处理。",
+    suggestion: "人工确认后再决定修复、忽略或继续观察。",
+  };
+}
+
+function healthDraft(action: RepairAction, source: string): ActionCandidateDraft | null {
+  if (action.group === "observe_only") return null;
+  const ref = healthStableRef(action);
+  const display = buildHealthDisplay(action);
+  assertSafeActionDisplay(display.title);
+  assertSafeActionDisplay(display.reason);
+  assertSafeActionDisplay(display.suggestion);
+
+  const type: ActionCandidateType =
+    action.group === "auto_repairable" ? "action_repair_preview" : "action_health_review";
+  const proposedType: ActionCandidateActionType =
+    action.group === "auto_repairable" ? "dry_run" : "review";
+  const proposedReason =
+    action.group === "auto_repairable"
+      ? "预览这项修复，不自动执行。"
+      : "复核这项健康信号是否需要后续处理。";
+
+  return {
+    type,
+    entities: [ref],
+    score: action.severity === "high" ? 0.9 : action.severity === "medium" ? 0.6 : 0.3,
+    actionable: actionableFromSeverity(action.severity),
+    displayTitle: display.title,
+    displayReason: display.reason,
+    suggestedAction: display.suggestion,
+    evidence: [{ source: "health", ref, kind: action.kind ?? action.group }],
+    proposedActions: [{ type: proposedType, target: ref, reason: proposedReason }],
+    metadata: {
+      source: "health",
+      source_report: source,
+      source_ref: ref,
+      dimension: action.dimension,
+      repair_group: action.group,
+      repair_kind: action.kind ?? null,
+      severity: action.severity,
+      evidence: [{ source: "health", ref, kind: action.kind ?? action.group }],
+      action_text: action.action,
+      rollback_note: action.rollbackNote ?? null,
+    },
+  };
+}
+
+export function buildActionCandidatesFromHealthPlan(plan: RepairPlan): ActionCandidateDraft[] {
+  const drafts: ActionCandidateDraft[] = [];
+  for (const action of plan.actions) {
+    const draft = healthDraft(action, plan.source);
+    if (draft) drafts.push(draft);
+  }
+  return drafts;
 }
 
 export class ActionCandidateManager {
