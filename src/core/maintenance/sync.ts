@@ -6,6 +6,13 @@ import { parseFrontmatter } from "../../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
 import { NerEngine, isNerTimeoutError } from "../ingestion/ner.js";
+import type { DeferredNerSubmitter } from "../ingestion/ner-backfill.js";
+import {
+  resolveNerAction,
+  shouldProcessNerForWritePath,
+  submitDeferredNerForWritePath,
+  type NerMode,
+} from "../ingestion/ner-write-path.js";
 import { PageManager } from "../page.js";
 import { canonicalSlug, slugToFilePath } from "../../utils/slug.js";
 import type { Logger } from "../logger.js";
@@ -47,6 +54,9 @@ export { SyncRollbackError };
 export interface SyncConfig {
   chunkSize?: number;
   outputsDir?: string;
+  /** #271: sync/watch paths must honor the same ingest NER mode as MCP ingest. */
+  nerMode?: NerMode;
+  deferredNerSubmitter?: DeferredNerSubmitter;
 }
 
 export interface SyncDiagnostic {
@@ -94,6 +104,8 @@ export class SyncManager {
   private nerEngine: NerEngine | null;
   private pages: PageManager | null;
   private logger: Logger | null;
+  private readonly nerMode: NerMode;
+  private readonly deferredNerSubmitter?: DeferredNerSubmitter;
   private chunkEmbedCache = new Map<string, { embedding: number[]; tokenCount: number }>();
 
   constructor(
@@ -109,6 +121,11 @@ export class SyncManager {
     this.nerEngine = config?.nerEngine ?? null;
     this.pages = config?.pages ?? null;
     this.logger = config?.logger ?? null;
+    this.nerMode = config?.nerMode ?? "sync";
+    this.deferredNerSubmitter = config?.deferredNerSubmitter;
+    if (this.nerMode === "defer" && !this.deferredNerSubmitter) {
+      throw new Error("SyncManager: nerMode='defer' requires a deferredNerSubmitter");
+    }
     this.pipeline = new ContentPipeline(db, embedding, lance, {
       pages: this.pages ?? undefined,
       nerEngine: this.nerEngine ?? undefined,
@@ -292,8 +309,17 @@ export class SyncManager {
         }
         report.synced++;
 
-        if (this.nerEngine && file.body.trim() && !file.type.startsWith("entity/") && !file.type.startsWith("concept/") && !file.type.startsWith("insight/")) {
-          nerJobs.push({ slug: file.slug, text: file.body, type: file.type, mentionedSlugs: new Set() });
+        if (shouldProcessNerForWritePath(file.body, file.type)) {
+          const nerAction = resolveNerAction(false, this.nerMode, this.deferredNerSubmitter);
+          if (nerAction === "sync" && this.nerEngine) {
+            nerJobs.push({ slug: file.slug, text: file.body, type: file.type, mentionedSlugs: new Set() });
+          } else if (nerAction === "defer") {
+            submitDeferredNerForWritePath(this.deferredNerSubmitter!, {
+              slug: file.slug,
+              pageType: file.type,
+              contentHash: file.contentHash,
+            });
+          }
         }
 
         if (this.pages && file.body.trim()) {
@@ -620,14 +646,23 @@ export class SyncManager {
     }
 
     // NER — skip entity/concept pages
-    if (this.nerEngine && parsed.body.trim() && !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/")) {
-      try {
-        const nerResult = await this.pipeline.processNer(effectiveSlug, parsed.body, type, false, undefined, mentionedSlugs);
-        if (nerResult && nerResult.entities > 0) {
-          this.logger?.info("sync", `NER: ${nerResult.entities} entities from ${effectiveSlug}`);
+    if (shouldProcessNerForWritePath(parsed.body, type)) {
+      const nerAction = resolveNerAction(false, this.nerMode, this.deferredNerSubmitter);
+      if (nerAction === "sync" && this.nerEngine) {
+        try {
+          const nerResult = await this.pipeline.processNer(effectiveSlug, parsed.body, type, false, undefined, mentionedSlugs);
+          if (nerResult && nerResult.entities > 0) {
+            this.logger?.info("sync", `NER: ${nerResult.entities} entities from ${effectiveSlug}`);
+          }
+        } catch (e) {
+          this.logger?.warn("sync", `NER failed for ${effectiveSlug}: ${(e as Error).message}`);
         }
-      } catch (e) {
-        this.logger?.warn("sync", `NER failed for ${effectiveSlug}: ${(e as Error).message}`);
+      } else if (nerAction === "defer") {
+        submitDeferredNerForWritePath(this.deferredNerSubmitter!, {
+          slug: effectiveSlug,
+          pageType: type,
+          contentHash,
+        });
       }
     }
 

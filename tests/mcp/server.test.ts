@@ -590,6 +590,49 @@ describe("MCP Server", () => {
       expect(updated).toContain("appended content");
     });
 
+    test("defer NER mode creates backfill job for existing record patch instead of running NER inline (#271)", async () => {
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      const fileA = join(vaultPath, "records", "defer-note.md");
+      writeFileSync(fileA, "---\ntitle: DeferNote\ntype: record\n---\noriginal body", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
+      ).run("brain/records/defer-note", "DeferNote", "records/defer-note.md", "h1");
+
+      const server = createServer({ ...deps, nerIngestMode: "defer" });
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/records/defer-note",
+        content: "新增正文应该排入 NER backfill",
+      });
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("updated");
+      const job = db.rawDb.prepare(
+        "SELECT name, status, data FROM jobs WHERE name = 'ner-backfill'"
+      ).get() as { name: string; status: string; data: string } | undefined;
+      expect(job).toBeDefined();
+      expect(job!.status).toBe("pending");
+      expect(JSON.parse(job!.data).slug).toBe("brain/records/defer-note");
+    });
+
+    test("defer NER mode creates backfill job for new record page instead of running NER inline (#271)", async () => {
+      const server = createServer({ ...deps, nerIngestMode: "defer" });
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/records/new-defer-note",
+        title: "NewDeferNote",
+        type: "record",
+        content: "新建正文应该排入 NER backfill",
+      });
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("created");
+      const jobs = db.rawDb.prepare(
+        "SELECT name, status, data FROM jobs WHERE name = 'ner-backfill'"
+      ).all() as Array<{ name: string; status: string; data: string }>;
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].status).toBe("pending");
+      expect(JSON.parse(jobs[0].data).slug).toBe(data.page.slug);
+    });
+
     test("mode=replace overwrites body and creates version snapshot", async () => {
       mkdirSync(join(vaultPath, "records"), { recursive: true });
       const fileA = join(vaultPath, "records", "note.md");
@@ -1546,6 +1589,30 @@ describe("MCP Server", () => {
       });
       const data = JSON.parse(result.content[0].text);
       expect(data.success).toBe(true);
+    });
+
+    test("defer NER mode creates backfill job for append_page instead of running NER inline (#271)", async () => {
+      mkdirSync(join(vaultPath, "records"), { recursive: true });
+      const fileA = join(vaultPath, "records", "append-defer.md");
+      writeFileSync(fileA, "---\ntitle: AppendDefer\ntype: record\n---\noriginal body", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'record', ?, ?, ?)`
+      ).run("brain/records/append-defer", "AppendDefer", "records/append-defer.md", "h1");
+
+      const server = createServer({ ...deps, nerIngestMode: "defer" });
+      const result = await getTools(server).append_page.handler({
+        slug: "brain/records/append-defer",
+        content: "追加正文应该排入 NER backfill",
+      });
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.summary.status).toBe("ok");
+      const job = db.rawDb.prepare(
+        "SELECT name, status, data FROM jobs WHERE name = 'ner-backfill'"
+      ).get() as { name: string; status: string; data: string } | undefined;
+      expect(job).toBeDefined();
+      expect(job!.status).toBe("pending");
+      expect(JSON.parse(job!.data).slug).toBe("brain/records/append-defer");
     });
 
     test("creates a concept via writeback", async () => {

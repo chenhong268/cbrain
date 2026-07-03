@@ -6,6 +6,7 @@ import { SyncManager } from "../../src/core/maintenance/sync.js";
 import { NerEngine } from "../../src/core/ingestion/ner.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
+import { JobQueueNerSubmitter } from "../../src/core/ingestion/ner-backfill.js";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
   return {
@@ -621,5 +622,92 @@ describe("SyncManager NER timeout partial (#229)", () => {
     expect(report.nerTimedOut ?? 0).toBeGreaterThanOrEqual(1);
     // content still indexed & searchable despite NER timeout
     expect(db.getPageCount()).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("SyncManager deferred NER write paths (#271)", () => {
+  const testDir = "/tmp/cbrain-test-sync-ner-defer";
+  const vaultPath = join(testDir, "vault");
+  const dbPath = join(testDir, "t.sqlite");
+  let db: CBrainDB;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("syncAll with nerMode=defer submits ner-backfill job and does not call NER inline", async () => {
+    let llmCalls = 0;
+    const llm: LLMProvider = {
+      name: "counting",
+      chat: async () => {
+        llmCalls++;
+        throw new Error("inline NER should not run in defer mode");
+      },
+    };
+    writeMdFile(
+      vaultPath,
+      "records/defer-sync.md",
+      { type: "record", title: "DeferSync", slug: "records/defer-sync" },
+      "中文正文触发 NER，但 defer 模式应只提交 backfill job"
+    );
+    const sync = new SyncManager(db, createMockEmbeddingProvider(), createMockLanceDB() as any, {
+      nerEngine: new NerEngine(llm),
+      pages: undefined,
+      nerMode: "defer",
+      deferredNerSubmitter: new JobQueueNerSubmitter(db),
+    });
+
+    const report = await sync.syncAll(vaultPath);
+
+    expect(report.synced).toBe(1);
+    expect(report.nerTimedOut ?? 0).toBe(0);
+    expect(report.nerErrors ?? 0).toBe(0);
+    expect(llmCalls).toBe(0);
+    const job = db.rawDb.prepare(
+      "SELECT status, data FROM jobs WHERE name = 'ner-backfill'"
+    ).get() as { status: string; data: string } | undefined;
+    expect(job).toBeDefined();
+    expect(job!.status).toBe("pending");
+    expect(JSON.parse(job!.data).slug).toBe("records/defer-sync");
+  });
+
+  test("syncPage with nerMode=defer submits ner-backfill job and does not await NER", async () => {
+    let llmCalls = 0;
+    const llm: LLMProvider = {
+      name: "counting",
+      chat: async () => {
+        llmCalls++;
+        throw new Error("inline NER should not run in defer mode");
+      },
+    };
+    writeMdFile(
+      vaultPath,
+      "records/defer-page.md",
+      { type: "record", title: "DeferPage", slug: "records/defer-page" },
+      "中文正文触发 NER，但 syncPage defer 模式应只提交 backfill job"
+    );
+    const sync = new SyncManager(db, createMockEmbeddingProvider(), createMockLanceDB() as any, {
+      nerEngine: new NerEngine(llm),
+      nerMode: "defer",
+      deferredNerSubmitter: new JobQueueNerSubmitter(db),
+    });
+
+    const result = await sync.syncPage("records/defer-page", vaultPath);
+
+    expect(result.success).toBe(true);
+    expect(llmCalls).toBe(0);
+    const job = db.rawDb.prepare(
+      "SELECT status, data FROM jobs WHERE name = 'ner-backfill'"
+    ).get() as { status: string; data: string } | undefined;
+    expect(job).toBeDefined();
+    expect(job!.status).toBe("pending");
+    expect(JSON.parse(job!.data).slug).toBe("records/defer-page");
   });
 });

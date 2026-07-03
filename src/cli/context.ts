@@ -8,6 +8,7 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import { ZhipuLLMProvider } from "../llm/zhipu.js";
 import type { CBrainDeps } from "../mcp/server.js";
 import { resolveToolProfile } from "../mcp/tool-profiles.js";
+import type { NerMode } from "../core/ingestion/ner-write-path.js";
 
 const CONFIG_FILE = "cbrain.json";
 
@@ -48,7 +49,7 @@ export interface CBrainConfig {
   };
 }
 
-export type IngestNerMode = "sync" | "defer" | "off";
+export type IngestNerMode = NerMode;
 
 const VALID_INGEST_NER_MODES = new Set<IngestNerMode>(["sync", "defer", "off"]);
 

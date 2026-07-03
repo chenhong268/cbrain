@@ -97,7 +97,13 @@ async function initWatcher(config: ReturnType<typeof loadConfig>, deps: ReturnTy
   const nerEngine = nerLLM ? new NerEngine(nerLLM) : undefined;
   console.error(`> Watcher NER: ${nerEngine ? "enabled" : "DISABLED (no API key)"}`);
   const { SyncManager } = await import("../../core/maintenance/sync.js");
-  const watcherSync = new SyncManager(deps.db, deps.embedding, deps.lance, { pages, nerEngine });
+  const { JobQueueNerSubmitter } = await import("../../core/ingestion/ner-backfill.js");
+  const watcherSync = new SyncManager(deps.db, deps.embedding, deps.lance, {
+    pages,
+    nerEngine,
+    nerMode: deps.nerIngestMode,
+    deferredNerSubmitter: new JobQueueNerSubmitter(deps.db),
+  });
   const { FileWatcher } = await import("../../core/maintenance/watcher.js");
   const { Logger } = await import("../../core/logger.js");
   const logger = new Logger(resolveRuntimePath(config));

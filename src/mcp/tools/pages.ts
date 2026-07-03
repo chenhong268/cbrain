@@ -9,10 +9,33 @@ import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
 import { formatGetPageEnvelope, formatGetPagesEnvelope, formatAppendEnvelope } from "./format-result.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
+import {
+  resolveNerAction,
+  shouldProcessNerForWritePath,
+  submitDeferredNerForWritePath,
+} from "../../core/ingestion/ner-write-path.js";
 
 function syncWikilinkRelations(ctx: ToolContext, slug: string, affectedSlugs: Set<string>): void {
   for (const s of new Set([slug, ...affectedSlugs])) {
     try { ctx.pages.syncLinksToMarkdown(s); } catch { /* non-critical */ }
+  }
+}
+
+function schedulePageToolNer(
+  ctx: ToolContext,
+  slug: string,
+  body: string,
+  pageType: string,
+  mentionedSlugs: Set<string>,
+): void {
+  if (!shouldProcessNerForWritePath(body, pageType)) return;
+  const action = resolveNerAction(false, ctx.nerIngestMode, ctx.deferredNerSubmitter);
+  if (action === "defer") {
+    submitDeferredNerForWritePath(ctx.deferredNerSubmitter, { slug, pageType });
+    return;
+  }
+  if (action === "sync") {
+    ctx.pipeline.processNer(slug, body, pageType, false, undefined, mentionedSlugs).catch(() => {});
   }
 }
 
@@ -117,9 +140,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
         await indexPage(ctx.pipeline, slug, finalBody, ctx.logger);
         const pageType = existing.type;
         const wlResult = ctx.pipeline.processWikilinks(slug, finalBody);
-        if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
-          ctx.pipeline.processNer(slug, finalBody, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
-        }
+        schedulePageToolNer(ctx, slug, finalBody, pageType, wlResult.mentionedSlugs);
         // Sync reports_to graph edge if frontmatter has it
         ctx.pipeline.processReportsTo(slug, updated.frontmatter);
         // Sync KR for self, wikilink targets, old manager, new manager
@@ -164,9 +185,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     await indexPage(ctx.pipeline, created.slug, content, ctx.logger);
     const pageType = created.type;
     const wlResult = ctx.pipeline.processWikilinks(created.slug, content);
-    if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
-      ctx.pipeline.processNer(created.slug, content, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
-    }
+    schedulePageToolNer(ctx, created.slug, content, pageType, wlResult.mentionedSlugs);
     // Sync reports_to graph edge if extra provided it
     ctx.pipeline.processReportsTo(created.slug, created.frontmatter);
     // Sync KR for self, wikilink targets, and reports_to manager
@@ -246,9 +265,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       const wlResult = ctx.pipeline.processWikilinks(slug, finalBody);
       wikiCount = wlResult.count;
       affectedSlugs = wlResult.mentionedSlugs;
-      if (!pageType.startsWith("entity/") && !pageType.startsWith("concept/") && !pageType.startsWith("insight/")) {
-        ctx.pipeline.processNer(slug, finalBody, pageType, false, undefined, wlResult.mentionedSlugs).catch(() => {});
-      }
+      schedulePageToolNer(ctx, slug, finalBody, pageType, wlResult.mentionedSlugs);
     } catch {
       warnings.push("wikilink_sync_failed");
     }

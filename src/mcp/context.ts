@@ -23,8 +23,9 @@ import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { FileWatcher } from "../core/maintenance/watcher.js";
 import { resolveIngestNerMode } from "../cli/context.js";
+import type { IngestNerMode } from "../cli/context.js";
 import type { ToolProfile } from "./tool-profiles.js";
-import { JobQueueNerSubmitter } from "../core/ingestion/ner-backfill.js";
+import { JobQueueNerSubmitter, type DeferredNerSubmitter } from "../core/ingestion/ner-backfill.js";
 
 export interface ToolContext {
   db: CBrainDB;
@@ -54,6 +55,10 @@ export interface ToolContext {
   watcher?: FileWatcher;
   /** #251: MCP tool surface profile — gates which tools attachMcpTools exposes. */
   toolProfile: ToolProfile;
+  /** #252/#271: resolved NER mode shared by ingest, page tools, and sync. */
+  nerIngestMode: IngestNerMode;
+  /** #252/#271: durable backfill submitter for write paths in defer mode. */
+  deferredNerSubmitter: DeferredNerSubmitter;
 }
 
 export interface IndexResult {
@@ -79,14 +84,15 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const graph = new GraphManager(db);
   const search = new HybridSearch(db, embedding, lance, { llm, logger, graph });
   const nerEngine = llm ? new NerEngine(llm, logger) : undefined;
-  const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger });
   const jobs = new JobQueue(db, logger);
   // #252: re-resolve defensively — createDeps already put the config-resolved mode in deps.nerIngestMode,
   // but env should still win if buildContext is called without going through createDeps.
   const nerMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, deps.nerIngestMode);
+  const deferredNerSubmitter = new JobQueueNerSubmitter(db);
+  const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger, nerMode, deferredNerSubmitter });
   const ingest = new IngestManager(db, embedding, lance, vaultPath, llm, undefined, {
     nerMode,
-    deferredNerSubmitter: new JobQueueNerSubmitter(db),
+    deferredNerSubmitter,
   });
   const enrich = new EnrichManager(db, undefined, undefined, vaultPath, pages);
   const versions = new VersionManager(db, pages, vaultPath, logger);
@@ -100,5 +106,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const compoundingReview = new CompoundingReviewManager(db);
   profile.load();
 
-  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full" };
+  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter };
 }

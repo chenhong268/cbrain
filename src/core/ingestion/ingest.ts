@@ -14,10 +14,12 @@ import { getFactFieldWhitelist, filterExtractedEntities, type ExtractedEntity } 
 import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
 import { classifyPersonalTag } from "./personal-tag-classifier.js";
 import type { DeferredNerSubmitter } from "./ner-backfill.js";
-
-export type NerMode = "sync" | "defer" | "off";
-/** Internal, resolved per-ingest from skipNer + NerMode. */
-export type NerAction = "none" | "sync" | "defer";
+import {
+  resolveNerAction,
+  submitDeferredNerForWritePath,
+  type NerAction,
+  type NerMode,
+} from "./ner-write-path.js";
 
 export interface IngestManagerOptions {
   /** #252: default NER mode for this manager (config/env resolved upstream). Default "sync". */
@@ -152,22 +154,8 @@ export class IngestManager {
     }
   }
 
-  /** #252: resolve effective action. skipNer/off → none; defer needs submitter (fail fast). */
-  private resolveNerAction(skipNer?: boolean, perCallMode?: NerMode): NerAction {
-    if (skipNer) return "none";
-    const mode = perCallMode ?? this.defaultNerMode;
-    if (mode === "off") return "none";
-    if (mode === "defer") {
-      if (!this.deferredNerSubmitter) {
-        throw new Error("IngestManager: nerMode='defer' requires a deferredNerSubmitter");
-      }
-      return "defer";
-    }
-    return "sync";
-  }
-
   async ingest(input: IngestInput): Promise<IngestResult> {
-    const nerAction = this.resolveNerAction(input.skipNer, input.nerMode);
+    const nerAction = resolveNerAction(input.skipNer, input.nerMode ?? this.defaultNerMode, this.deferredNerSubmitter);
     const type = input.type ?? classifyContentType(input.content);
     if (type === "markdown") {
       return this.ingestMarkdown(input.content, input, nerAction);
@@ -350,8 +338,7 @@ export class IngestManager {
         }
       } else if (nerAction === "defer" && body.trim()) {
         // submitter guaranteed non-null by resolveNerAction fail-fast (defer ⇒ submitter wired)
-        this.deferredNerSubmitter!.submitDeferredNer({ slug, pageType: before.type });
-        nerPending = true;
+        nerPending = submitDeferredNerForWritePath(this.deferredNerSubmitter!, { slug, pageType: before.type });
       }
 
       const nerResolvedSlugs = nerResult?.resolvedSlugs ?? [];
@@ -494,8 +481,7 @@ export class IngestManager {
         }
       } else if (nerAction === "defer" && nerEligibleType) {
         // submitter guaranteed non-null by resolveNerAction fail-fast (defer ⇒ submitter wired)
-        this.deferredNerSubmitter!.submitDeferredNer({ slug, contentHash: bodyHash ?? undefined, pageType: type });
-        nerPending = true;
+        nerPending = submitDeferredNerForWritePath(this.deferredNerSubmitter!, { slug, contentHash: bodyHash ?? undefined, pageType: type });
       }
 
       // Entity type: extract structured facts from body into frontmatter.

@@ -256,10 +256,16 @@ export function register(program: Command) {
       await deps.lance.connect(config.lancePath);
       const { SyncManager } = await import("../../core/maintenance/sync.js");
       const { NerEngine } = await import("../../core/ingestion/ner.js");
+      const { JobQueueNerSubmitter } = await import("../../core/ingestion/ner-backfill.js");
       const { PageManager } = await import("../../core/page.js");
       const pages = new PageManager(deps.db, config.vaultPath);
       const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
-      const sync = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages });
+      const sync = new SyncManager(deps.db, deps.embedding, deps.lance, {
+        nerEngine,
+        pages,
+        nerMode: deps.nerIngestMode,
+        deferredNerSubmitter: new JobQueueNerSubmitter(deps.db),
+      });
       if (opts.slug) {
         console.log(JSON.stringify(await sync.syncPage(opts.slug, config.vaultPath), null, 2));
       } else {
@@ -522,11 +528,18 @@ export function register(program: Command) {
       const { Logger } = await import("../../core/logger.js");
       const { PageManager } = await import("../../core/page.js");
       const { NerEngine } = await import("../../core/ingestion/ner.js");
+      const { JobQueueNerSubmitter } = await import("../../core/ingestion/ner-backfill.js");
       const outputsDir = resolveRuntimePath(config);
       const logger = new Logger(outputsDir);
       const pages = new PageManager(deps.db, config.vaultPath, logger);
       const nerEngine = deps.llm ? new NerEngine(deps.llm, logger) : undefined;
-      const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, { nerEngine, pages, logger });
+      const syncMgr = new SyncManager(deps.db, deps.embedding, deps.lance, {
+        nerEngine,
+        pages,
+        logger,
+        nerMode: deps.nerIngestMode,
+        deferredNerSubmitter: new JobQueueNerSubmitter(deps.db),
+      });
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath, pages);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
       const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
