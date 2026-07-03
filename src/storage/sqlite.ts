@@ -2360,6 +2360,43 @@ export class CBrainDB {
     return row.cnt;
   }
 
+  getRecentVerifierCounts(hours = 24): {
+    ner: { warning: number; error: number };
+    discovery: { warning: number; error: number };
+    byCode: Record<string, number>;
+  } {
+    const rows = this.prepare(
+      "SELECT action, details FROM ingest_log WHERE source_type = $src AND created_at > datetime('now', '-' || $hours || ' hours')"
+    ).all({ $src: "verifier", $hours: hours }) as Array<{ action: string; details: string | null }>;
+
+    const out = {
+      ner: { warning: 0, error: 0 },
+      discovery: { warning: 0, error: 0 },
+      byCode: {} as Record<string, number>,
+    };
+
+    for (const row of rows) {
+      let summary: { counts?: { warning?: number; error?: number }; reasonCounts?: Record<string, unknown> };
+      try {
+        summary = row.details ? JSON.parse(row.details) : {};
+      } catch {
+        continue;
+      }
+      const bucket =
+        row.action === "ner_shadow_verifier" ? out.ner :
+        row.action === "discovery_shadow_verifier" ? out.discovery : null;
+      if (!bucket) continue;
+      bucket.warning += summary.counts?.warning ?? 0;
+      bucket.error += summary.counts?.error ?? 0;
+      if (summary.reasonCounts) {
+        for (const [code, n] of Object.entries(summary.reasonCounts)) {
+          if (typeof n === "number") out.byCode[code] = (out.byCode[code] ?? 0) + n;
+        }
+      }
+    }
+    return out;
+  }
+
   // ─── Timeline write operations ──────────────────────────────
 
   deleteTimelineByPage(slug: string): void {
