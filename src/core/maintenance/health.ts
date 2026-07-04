@@ -149,6 +149,13 @@ export interface HealthDelta {
 
 const CHRONIC_THRESHOLD = 3;
 const RETENTION_DAYS = 7;
+const SYSTEM_ERROR_FAIL_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function isWithinSystemErrorFailWindow(timestamp: string, now = Date.now()): boolean {
+  const parsed = Date.parse(timestamp.endsWith("Z") ? timestamp : `${timestamp}Z`);
+  if (Number.isNaN(parsed)) return true;
+  return now - parsed <= SYSTEM_ERROR_FAIL_WINDOW_MS;
+}
 
 export class HealthChecker {
   private db: CBrainDB;
@@ -529,19 +536,24 @@ export class HealthChecker {
     }
 
     const recentErrors = this.logger.getRecentErrors(7);
+    const activeErrors = recentErrors.filter(e => isWithinSystemErrorFailWindow(e.timestamp));
     if (recentErrors.length > 0) {
+      const isActive = activeErrors.length > 0;
+      const errorsForModules = isActive ? activeErrors : recentErrors;
       issues.push({
-        severity: "high",
+        severity: isActive ? "high" : "medium",
         slug: "-",
-        title: `${recentErrors.length} 个系统错误`,
-        description: `最近 7 天发现 ${recentErrors.length} 个错误，涉及模块：${[...new Set(recentErrors.map(e => e.module))].join("、")}`,
+        title: isActive ? `${activeErrors.length} 个当前系统错误` : `${recentErrors.length} 个历史系统错误`,
+        description: isActive
+          ? `最近 24 小时发现 ${activeErrors.length} 个错误，最近 7 天共 ${recentErrors.length} 个，涉及模块：${[...new Set(errorsForModules.map(e => e.module))].join("、")}`
+          : `最近 7 天发现 ${recentErrors.length} 个历史错误，最近 24 小时无新增，涉及模块：${[...new Set(errorsForModules.map(e => e.module))].join("、")}`,
         suggestion: "检查 runtime/logs/ 系统日志查看详情",
       });
     }
 
     return {
       name: "系统错误",
-      status: recentErrors.length > 0 ? "fail" : "pass",
+      status: activeErrors.length > 0 ? "fail" : recentErrors.length > 0 ? "warn" : "pass",
       issues,
     };
   }

@@ -3,6 +3,7 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { HealthChecker } from "../../src/core/maintenance/health.js";
+import { Logger } from "../../src/core/logger.js";
 
 describe("HealthChecker", () => {
   const testDir = "/tmp/cbrain-test-health";
@@ -38,6 +39,29 @@ describe("HealthChecker", () => {
   function insertLink(from: string, to: string, relation = "提及") {
     db.rawDb.prepare("INSERT OR IGNORE INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
       .run(from, to, relation);
+  }
+
+  function insertHealthyFixture() {
+    for (let i = 0; i < 15; i++) {
+      insertPage(`entities/e${i}`, `Entity${i}`, "entity/person", { mention_count: 2, tier: 3 });
+    }
+    insertPage("concepts/c1", "Concept1", "concept/concept", { mention_count: 2, tier: 3 });
+    insertPage("records/r1", "Record1", "record");
+    for (let i = 1; i < 15; i++) {
+      insertLink(`entities/e${i - 1}`, `entities/e${i}`);
+    }
+  }
+
+  function writeSystemErrorLog(outputsDir: string, date: Date, module: string, message: string) {
+    const isoDate = date.toISOString().slice(0, 10);
+    const time = date.toISOString().slice(11, 19);
+    const logDir = join(outputsDir, "logs");
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(
+      join(logDir, `系统日志-${isoDate}.md`),
+      `# 系统日志 — ${isoDate}\n\n| 时间 | 级别 | 模块 | 消息 | 详情 |\n|------|------|------|------|------|\n| ${time} | ❌ | ${module} | ${message} | - |\n`,
+      "utf-8",
+    );
   }
 
   describe("checkAll", () => {
@@ -194,6 +218,38 @@ describe("HealthChecker", () => {
       expect(searchDim!.issues.some(i => i.title === "频繁降级原因: latency_budget_exceeded")).toBe(false);
       expect(searchDim!.issues.some(i => i.title.includes("搜索慢查询提示"))).toBe(true);
       expect(searchDim!.issues.some(i => i.title === "频繁慢查询原因: latency_budget_exceeded")).toBe(true);
+    });
+
+    test("fails system error health when an error happened in the last 24 hours", async () => {
+      insertHealthyFixture();
+      const outputsDir = join(testDir, "outputs");
+      const logger = new Logger(outputsDir);
+      logger.error("sync", "recent failure");
+
+      const report = await new HealthChecker(db, outputsDir, logger).checkAll();
+      const dim = report.dimensions.find(d => d.name === "系统错误");
+
+      expect(dim).toBeDefined();
+      expect(dim!.status).toBe("fail");
+      expect(dim!.issues[0].severity).toBe("high");
+      expect(dim!.issues[0].description).toContain("最近 24 小时");
+    });
+
+    test("warns but does not fail on historical system errors older than 24 hours", async () => {
+      insertHealthyFixture();
+      const outputsDir = join(testDir, "outputs");
+      const logger = new Logger(outputsDir);
+      const olderErrorDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+      writeSystemErrorLog(outputsDir, olderErrorDate, "research", "historical failure");
+
+      const report = await new HealthChecker(db, outputsDir, logger).checkAll();
+      const dim = report.dimensions.find(d => d.name === "系统错误");
+
+      expect(dim).toBeDefined();
+      expect(dim!.status).toBe("warn");
+      expect(dim!.issues[0].severity).toBe("medium");
+      expect(dim!.issues[0].description).toContain("最近 7 天");
+      expect(report.overallStatus).not.toBe("fail");
     });
 
     test("writes three-layer output files", async () => {
