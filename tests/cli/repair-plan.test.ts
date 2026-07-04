@@ -160,3 +160,30 @@ test("repair-plan --execute --limit 0 executes nothing", async () => {
 		verify.close();
 	}
 });
+
+test("repair-plan --verify returns clean when no findings remain", async () => {
+	dir = mkdtempSync(join(tmpdir(), "cbrain-repair-plan-verify-clean-"));
+	const dbPath = join(dir, "brain.sqlite");
+	const db = new CBrainDB(dbPath);
+	db.close();
+	const cfg = writeCfg(dbPath);
+
+	const res = await runCli(["repair-plan", "--verify", "--json"], cfg);
+	expect(res.exitCode).toBe(0);
+	const plan = JSON.parse(res.stdout);
+	expect(plan.overallStatus).toBe("clean");
+	expect(plan.execution.mode).toBe("verify");
+});
+
+test("repair-plan --verify exits 1 when findings remain", async () => {
+	dir = mkdtempSync(join(tmpdir(), "cbrain-repair-plan-verify-dirty-"));
+	const dbPath = join(dir, "brain.sqlite");
+	seedStaleFts(dbPath);
+	const cfg = writeCfg(dbPath);
+
+	const res = await runCli(["repair-plan", "--verify", "--json"], cfg);
+	expect(res.exitCode).toBe(1);
+	const plan = JSON.parse(res.stdout);
+	expect(plan.overallStatus).toBe("actionable");
+	expect(plan.execution.mode).toBe("verify");
+});

@@ -181,6 +181,17 @@ export function register(program: Command): void {
 				};
 				const { plan } = await runRepairPlan(input);
 
+				if (opts.verify) {
+					plan.execution = {
+						mode: "verify",
+						executed: [],
+						skipped: [],
+						verificationCommand: "cbrain repair-plan --verify --json",
+					};
+					emitPlan(plan, repairPlanExitCode(plan.overallStatus));
+					return;
+				}
+
 				if (opts.execute) {
 					const limit = parseRepairLimit(opts.limit);
 					const executable = plan.items.filter((item) => item.canExecute && item.check === "fts.stale_rows");

@@ -271,7 +271,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 由 `cbrain --help` 自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen cli-commands:start -->
-共 47 个 CLI 命令（`cbrain --help`）。
+共 48 个 CLI 命令（`cbrain --help`）。
 
 | 命令 | 说明 |
 |------|------|
@@ -309,6 +309,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `reflect` | Run reflect stage: synthesize entities, infer relations, generate insights |
 | `relocate` | Fix misplaced pages in records/ by scanning file frontmatter and moving to correct directories |
 | `repair-fk` | Detect/repair orphan FK references in derived tables (dry-run by default; --execute to delete) |
+| `repair-plan` | 将 fsck 发现转成 privacy-safe 修复计划（默认 dry-run） |
 | `restore` | Restore from a backup zip file |
 | `revert` | Revert a page to a previous version |
 | `serve` | Start MCP server (stdio transport) |
