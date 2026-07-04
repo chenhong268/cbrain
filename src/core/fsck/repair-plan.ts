@@ -26,6 +26,12 @@ export interface RepairPlan {
 	overallStatus: RepairPlanStatus;
 	counts: Record<RepairBucket, number>;
 	items: RepairPlanItem[];
+	execution?: {
+		mode: "dry_run" | "execute" | "verify";
+		executed: string[];
+		skipped: string[];
+		verificationCommand: string;
+	};
 }
 
 interface Rule {

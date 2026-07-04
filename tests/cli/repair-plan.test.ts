@@ -105,3 +105,58 @@ test("repair-plan missing DB exits 2 without creating files", async () => {
 	expect(existsSync(dbPath)).toBe(false);
 	expect(existsSync(join(dir, "missing"))).toBe(false);
 });
+
+test("repair-plan --execute repairs stale FTS rows only and verifies clean plan", async () => {
+	dir = mkdtempSync(join(tmpdir(), "cbrain-repair-plan-execute-"));
+	const dbPath = join(dir, "brain.sqlite");
+	const db = new CBrainDB(dbPath);
+	db.insertPage({
+		slug: "records/valid-a",
+		type: "record",
+		title: "Valid A",
+		filePath: "valid-a.md",
+		contentHash: "hash-a",
+	});
+	db.insertChunk("records/valid-a", 0, "valid body");
+	db.ftsInsert("records/valid-a", "valid body");
+	db.ftsInsert("records/stale-a", "stale body");
+	db.close();
+	const cfg = writeCfg(dbPath);
+	writeFileSync(
+		join(dir, "vault", "valid-a.md"),
+		"---\nslug: records/valid-a\ntitle: Valid A\ntype: record\n---\n\nvalid body\n",
+	);
+
+	const res = await runCli(["repair-plan", "--execute", "--json"], cfg);
+	expect(res.exitCode).toBe(0);
+	const plan = JSON.parse(res.stdout);
+	expect(plan.execution.executed).toEqual(["fts.stale_rows"]);
+	expect(JSON.stringify(plan)).not.toContain("records/stale-a");
+
+	const verify = new CBrainDB(dbPath, { skipMigrate: true });
+	try {
+		expect(verify.getFtsContentsByPage("records/valid-a")).toEqual(["valid body"]);
+		expect(verify.getFtsContentsByPage("records/stale-a")).toEqual([]);
+	} finally {
+		verify.close();
+	}
+});
+
+test("repair-plan --execute --limit 0 executes nothing", async () => {
+	dir = mkdtempSync(join(tmpdir(), "cbrain-repair-plan-limit-zero-"));
+	const dbPath = join(dir, "brain.sqlite");
+	seedStaleFts(dbPath);
+	const cfg = writeCfg(dbPath);
+
+	const res = await runCli(["repair-plan", "--execute", "--limit", "0", "--json"], cfg);
+	expect(res.exitCode).toBe(1);
+	const plan = JSON.parse(res.stdout);
+	expect(plan.execution.executed).toEqual([]);
+
+	const verify = new CBrainDB(dbPath, { skipMigrate: true });
+	try {
+		expect(verify.getFtsContentsByPage("records/stale-a").length).toBeGreaterThan(0);
+	} finally {
+		verify.close();
+	}
+});

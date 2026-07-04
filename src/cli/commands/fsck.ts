@@ -59,6 +59,13 @@ function repairPlanExitCode(status: RepairPlanStatus): 0 | 1 | 2 {
 	return 1;
 }
 
+function parseRepairLimit(raw: string | undefined): number {
+	if (raw === undefined) return 50;
+	const n = Number.parseInt(raw, 10);
+	if (!Number.isFinite(n) || n < 0) return 50;
+	return n;
+}
+
 export async function runRepairPlan(input: FsckInput): Promise<RepairPlanResult> {
 	const { report } = await runFsck(input);
 	const plan = buildRepairPlan(report);
@@ -159,12 +166,6 @@ export function register(program: Command): void {
 				process.exit(exitCode);
 			};
 
-			if (opts.execute) {
-				const report = buildReport([], "unchecked", ts, "repair-plan --execute is not implemented in this phase");
-				emitPlan(buildRepairPlan(report), 2);
-				return;
-			}
-
 			if (!existsSync(config.dbPath)) {
 				const report = buildReport([], "unchecked", ts, "DB file not found at configured dbPath");
 				emitPlan(buildRepairPlan(report), 2);
@@ -173,11 +174,46 @@ export function register(program: Command): void {
 
 			const db = new CBrainDB(config.dbPath, { skipMigrate: true });
 			try {
-				const { plan, exitCode } = await runRepairPlan({
+				const input: FsckInput = {
 					vaultPath: config.vaultPath,
 					lancePath: config.lancePath,
 					db,
-				});
+				};
+				const { plan } = await runRepairPlan(input);
+
+				if (opts.execute) {
+					const limit = parseRepairLimit(opts.limit);
+					const executable = plan.items.filter((item) => item.canExecute && item.check === "fts.stale_rows");
+					const toExecute = executable.slice(0, limit);
+					const executed: string[] = [];
+					const skipped = plan.items
+						.filter((item) => item.canExecute)
+						.slice(limit)
+						.map((item) => item.check);
+					for (const item of toExecute) {
+						if (item.check === "fts.stale_rows") {
+							db.cleanupStaleFtsRows();
+							executed.push(item.check);
+						}
+					}
+					const refreshed = buildRepairPlan((await runFsck(input)).report);
+					refreshed.execution = {
+						mode: "execute",
+						executed,
+						skipped,
+						verificationCommand: "cbrain repair-plan --verify --json",
+					};
+					emitPlan(refreshed, repairPlanExitCode(refreshed.overallStatus));
+					return;
+				}
+
+				plan.execution = {
+					mode: "dry_run",
+					executed: [],
+					skipped: [],
+					verificationCommand: "cbrain repair-plan --verify --json",
+				};
+				const exitCode = repairPlanExitCode(plan.overallStatus);
 				emitPlan(plan, exitCode);
 			} finally {
 				db.close();
