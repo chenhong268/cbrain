@@ -40,18 +40,15 @@ CBrain 有多个会 drift 的独立层：Markdown vault、SQLite pages/chunks、
 
 ### 2. gate 脚本：`bin/check-consistency-gate.ts` + `src/core/fsck/consistency-gate.ts`
 
-- **mirror** `bin/check-v2-preflight.ts:39-95,179-217` 的 shape：`{gate:"consistency", passed, results[], next_action}`，每个 source `{id, label, command, stdout_tail, stderr_tail, exitCode}`。
-- **逻辑分层**（testability）：判定逻辑（消费 `FsckReport` + `RepairPlan` → `{passed, hard[], warnings[], next_action}`）抽到 `src/core/fsck/consistency-gate.ts` 纯 function。`bin/check-consistency-gate.ts` 只 shell 子进程 + 调 function + 输出。test 直接调 function（fixture `FsckReport`），不 spawn 子进程。
-- **sources**（shell 子命令，**用源码 CLI 入口，不依赖 PATH 中的安装版 `cbrain`**——repo/CI/test 环境不一定有 installed cbrain）：
-  - `bun run src/cli/index.ts fsck --json` → `FsckReport`（`fsck/types.ts:26-39`）。human markdown 输出里仍显示等价命令 `cbrain fsck --json` 给用户看。
-  - `bun run src/cli/index.ts repair-plan --verify --json` → `execution.verification`（`repair-plan.ts:29-34`，`clean|actionable|blocked`）。
+- **输出 schema**：`{gate:"consistency", version, timestamp, passed, hard[], warnings[], lanceState, repairPlanStatus, next_action, duration_ms}`。**不 mirror v2-preflight 的 `results[]`/`stdout_tail`**——gate **import src 函数**（非 shell 子进程），没有 sub-process stdout 可截；`hard[]`/`warnings[]` 分类对 Agent 路由比 `stdout_tail` 更有用。只输出 stable JSON（单消费者 = Agent/daily-patrol；无 `--json`/markdown 分支，YAGNI）。**不输出 raw `fatalError`**（probe 内部错误含 SqliteError/IO path → 隐私；`next_action` 用固定字符串）。
+- **逻辑分层**（testability）：判定逻辑抽到 `src/core/fsck/consistency-gate.ts` 纯 function（`evaluateConsistencyGate(report, hasChunks, repairPlanStatus?)`）。`bin/check-consistency-gate.ts` import src（`loadConfig` + `CBrainDB` + `runFsck` + `buildRepairPlan` + `evaluateConsistencyGate`）——**不 shell cbrain**，不依赖 PATH installed cbrain。test 直接调 function（fixture `FsckReport`）+ e2e spawn bin/（`tests/cli/gate-consistency.test.ts`，锁 schema/exit/隐私）。
 - **hard/warning 分层**（gate 维护自己的分类，**独立于 fsck severity**——`page_without_chunks` 等 fsck 标 `warning` 但 gate 列 hard no-go）：
-  - **hard no-go（gate fail，exit 1）**：`sqlite.page_without_chunks`、`fts.stale_rows`、`fts.coverage_gap`、`hierarchy.frontmatter_graph_mismatch`、`lance.vector_coverage_gap`（chunks 有但 LanceDB 缺向量 → 直接影响 recall）、`sqlite.orphan_*`（dangling FK）、`vault.file_exists_db_missing`、`vault.db_exists_file_missing`、`vault.frontmatter_slug_mismatch`。
-  - **LanceDB `lanceState` 额外判定**（**不只看 findings**——`probeLance()` table missing/corrupt 时可能只设 `lanceState` 不出 finding，gate 必须额外解释 `lanceState`，否则 LanceDB 损坏会 pass）：`lanceState === "corrupt"` → hard no-go；`lanceState === "missing"` 且 DB 有 chunks → hard no-go；`lanceState === "missing"` 且空库/新库（无 chunks）→ warning/pass。
-  - **warning（gate pass，报告但不 fail）**：`sqlite.title_collision`（→ `cbrain doctor`，needs_review 而非物理损坏）、`sqlite.quarantine_context`（observe-only）、stub/orphan/discovery 质量 signal（不违反 hard storage invariant）。
-- **判定**：任一 hard finding count > 0 或 lanceState hard → `passed:false`，exit 1。仅 warning → `passed:true`，exit 0（output 列 warnings）。fsck `fatalError` → 直接 fail。
-- **repair-plan verify** 作为**辅助信号**（非 hard fail 源，因为 `actionable`/`blocked` 不等于物理损坏；写进 `results[]` + `next_action` 让 Agent 路由下一步）。
-- **output**：`--json` stable JSON（Agent 用）；默认 markdown（human，列 hard failures + warnings + next_action）。
+  - **hard no-go（gate fail，exit 1）**：`sqlite.page_without_chunks`、`fts.stale_rows`、`fts.coverage_gap`、`hierarchy.frontmatter_graph_mismatch`、`hierarchy.malformed_reports_to`（reports_to 非完整 slug，Hermes 反馈的真实断链）、`lance.vector_coverage_gap`（chunks 有但 LanceDB 缺向量）、`sqlite.orphan_*`（dangling FK）、`vault.file_exists_db_missing`、`vault.db_exists_file_missing`、`vault.frontmatter_slug_mismatch`。
+  - **LanceDB `lanceState` 额外判定**（`probeLance()` table missing/corrupt 时只设 `lanceState` 不出 finding，gate 必须额外解释，否则 LanceDB 损坏会 pass）：`corrupt` → hard；`missing` 或 `unchecked`（lancePath 不存在）且 DB 有 chunks → hard（删 LanceDB dir 不能把 hard 转 silent-pass）；`missing`/`unchecked` 且空库 → warning。
+  - **warning（gate pass）**：`sqlite.title_collision`（needs_review）、`sqlite.quarantine_context`（observe-only）、stub/orphan/discovery 质量 signal。
+- **判定**：任一 hard finding count > 0 或 lanceState hard 或 fatalError → `passed:false`，exit 1。仅 warning → `passed:true`，exit 0。DB 不存在 → exit 2。
+- **repair-plan verify** 作辅助信号（`repairPlanStatus` 字段，非 hard fail 源——`actionable`/`blocked` ≠ 物理损坏）。
+- **probe 扫描无静默上限**：`probeHierarchy` 直接 SQL `SELECT ... WHERE file_path IS NOT NULL`（无 LIMIT）——release gate 不能静默漏扫 >N 页（samples 限 5，count 不限）。
 
 ### 3. `package.json` + v2-preflight 接入
 

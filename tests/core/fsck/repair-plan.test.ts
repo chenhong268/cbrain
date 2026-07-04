@@ -94,4 +94,11 @@ describe("buildRepairPlan (#278)", () => {
 		expect(md).not.toContain("private/slug-a");
 		expect(md).not.toContain("synthetic detail");
 	});
+
+	test("#279 lance.vector_coverage_gap classified auto_repairable (rule key match)", () => {
+		const plan = buildRepairPlan(report([finding({ check: "lance.vector_coverage_gap", layer: "lance", severity: "error", count: 3 })]));
+		const item = plan.items.find((i) => i.check === "lance.vector_coverage_gap");
+		expect(item).toBeDefined();
+		expect(item!.bucket).toBe("auto_repairable");
+	});
 });

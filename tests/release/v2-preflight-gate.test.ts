@@ -24,6 +24,7 @@ describe("v2 preflight aggregate gate", () => {
       "performance",
       "docs-consistency",
       "resolver-pilot",
+      "storage-consistency",
     ]);
     for (const check of DEFAULT_PREFLIGHT_CHECKS) {
       expect(check.required).toBe(true);

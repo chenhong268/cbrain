@@ -97,6 +97,13 @@ export const DEFAULT_PREFLIGHT_CHECKS: readonly PreflightCheckSpec[] = [
     required: true,
     timeoutMs: 60_000,
   },
+  {
+    id: "storage-consistency",
+    label: "Storage consistency gate (fsck + repair-plan)",
+    command: ["bun", "run", "gate:consistency"],
+    required: true,
+    timeoutMs: 180_000,
+  },
 ];
 
 function tail(text: string, maxChars = 2000): string {

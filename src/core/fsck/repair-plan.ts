@@ -76,7 +76,7 @@ const RULES: Record<string, Rule> = {
 		dryRunSummary: "Run targeted sync to rebuild derived indexes without changing facts.",
 		verifyCommand: "cbrain fsck --json --layer sqlite",
 	},
-	"lance.coverage_gap": {
+	"lance.vector_coverage_gap": {
 		bucket: "auto_repairable",
 		canExecute: false,
 		prerequisite: "stop active writers before rebuilding vectors",

@@ -17,7 +17,7 @@
 - **runtime**：`curl /health`（serve 运行）
 - **mcp**：HTTP `/mcp` `initialize` → `tools/list`（复用 `bin/cbrain-maintenance.sh` 模式；MCP 响应 = healthy）
 - **perf**：`cbrain perf-diagnose --days 7 --min-latency-ms 0 --json`（readonly SQLite）
-- **repo_gate**：`bun run gate:v2-preflight`（timeout-bounded；**timeout/fail = deferred，非 runtime unhealthy**）
+- **repo_gate**：`bun run gate:v2-preflight`（timeout-bounded；**timeout/fail = deferred，非 runtime unhealthy**）。v2-preflight 含 `gate:consistency`（#279）—— fsck + repair-plan 硬/软分层（hard no-go: missing chunks / stale FTS / coverage gap / hierarchy split-brain / dangling FK / LanceDB corrupt/missing-with-chunks；warning: title collision / 空库 LanceDB missing）。gate 解释 `lanceState`（probeLance 无 finding 时）；也可独立跑 `bun run gate:consistency`
 - **data_quality**：汇总 `/health` + `tools/list` 高层数字（不跑 full health/dream/scan）
 
 exit 0 = runtime healthy（perf/repo_gate 可能 deferred）；exit 1 = runtime unhealthy（runtime/mcp fail）。

@@ -8,6 +8,7 @@ import { probeSqlite } from "../../core/fsck/sqlite-probe.js";
 import { probeFts } from "../../core/fsck/fts-probe.js";
 import { probeLance } from "../../core/fsck/lance-probe.js";
 import { probeVault } from "../../core/fsck/vault-probe.js";
+import { probeHierarchy } from "../../core/fsck/hierarchy-probe.js";
 
 export interface FsckInput {
 	vaultPath: string;
@@ -37,7 +38,10 @@ export async function runFsck(input: FsckInput): Promise<FsckResult> {
 
 	try {
 		if (layers.includes("vault")) findings.push(...probeVault(input.vaultPath, input.db));
-		if (layers.includes("sqlite")) findings.push(...probeSqlite(input.db));
+		if (layers.includes("sqlite")) {
+			findings.push(...probeSqlite(input.db));
+			findings.push(...probeHierarchy(input.vaultPath, input.db));
+		}
 		if (layers.includes("fts")) findings.push(...probeFts(input.db));
 		if (layers.includes("lance")) {
 			const r = await probeLance(input.lancePath, input.db);
