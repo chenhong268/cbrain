@@ -45,6 +45,7 @@ export interface SearchTrace {
   llm_calls?: number;
   degraded_reason?: string;
   expand_skipped?: string;
+  decompose_skipped?: string;
   follow_up_queries?: string[];
   query_variants?: string[];
 }
@@ -404,6 +405,17 @@ export class HybridSearch {
       return [{ slug: exact.slug, score: 1.0, snippet: exact.title, source: "exact" as const }];
     }
 
+    // #272 — hoist the bounded FTS probe above the decompose branch so the same
+    // probe can gate decompose AND feed the #250 expand path below (no second
+    // ftsSearch on the original query). Timed + fail-open (catch → []), mirroring
+    // searchSingleQuery's FTS path so trace/error semantics stay consistent.
+    const ftsProbe = await this.timedCall(
+      () => Promise.resolve(this.ftsSearch(query, limit, trace)),
+      trace,
+      "fts_ms",
+    ).catch(() => [] as SearchResult[]);
+    const ftsSufficient = ftsProbe.length >= FTS_SUFFICIENT_RESULTS;
+
     // Decomposition path for complex queries
     if (this.llm && !options?._skipDecompose) {
       const hints = options?._hints;
@@ -421,76 +433,76 @@ export class HybridSearch {
       }
 
       if (complex) {
-        // Budget guard: skip decompose if LLM budget already exhausted (#222)
-        if ((trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS) {
-          if (trace && !trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
-          return [] as SearchResult[]; // degraded: 零额外 LLM
-        }
-        // Decompose with a REAL wall-clock budget: Promise.race against timeout.
-        // timedCall only records elapsed — it does NOT cap latency, so a 70s LLM
-        // decompose would still block (#222 review). Race forces degraded return.
-        const decomposeStart = Date.now();
-        let decomposeTimer: ReturnType<typeof setTimeout> | undefined;
-        const decomposeTimeout = new Promise<never>((_, reject) => {
-          decomposeTimer = setTimeout(() => reject(new Error("decompose_timeout")), MAX_DEFAULT_DECOMPOSE_MS);
-        });
-        let subQueries: string[];
-        try {
-          const graphContext = await this.graphPrefetch(query);
-          subQueries = (await Promise.race([
-            this.decomposeQuery(query, graphContext),
-            decomposeTimeout,
-          ])).slice(0, MAX_DEFAULT_SUBQUERIES);
-        } catch (e) {
+        // #272 — FTS-sufficient complex query: skip the LLM decompose, fall
+        // through to the bounded hybrid + expand path (reusing ftsProbe).
+        // knownSlugs is deliberately NOT part of sufficiency: a 2+-entity
+        // comparison still needs decompose when FTS alone hasn't surfaced enough.
+        if (ftsSufficient) {
+          if (trace) trace.decompose_skipped = "fts_sufficient";
+        } else {
+          // Budget guard: skip decompose if LLM budget already exhausted (#222)
+          if ((trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS) {
+            if (trace && !trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
+            return [] as SearchResult[]; // degraded: 零额外 LLM
+          }
+          // Decompose with a REAL wall-clock budget: Promise.race against timeout.
+          // timedCall only records elapsed — it does NOT cap latency, so a 70s LLM
+          // decompose would still block (#222 review). Race forces degraded return.
+          const decomposeStart = Date.now();
+          let decomposeTimer: ReturnType<typeof setTimeout> | undefined;
+          const decomposeTimeout = new Promise<never>((_, reject) => {
+            decomposeTimer = setTimeout(() => reject(new Error("decompose_timeout")), MAX_DEFAULT_DECOMPOSE_MS);
+          });
+          let subQueries: string[];
+          try {
+            const graphContext = await this.graphPrefetch(query);
+            subQueries = (await Promise.race([
+              this.decomposeQuery(query, graphContext),
+              decomposeTimeout,
+            ])).slice(0, MAX_DEFAULT_SUBQUERIES);
+          } catch (e) {
+            if (trace) {
+              trace.decompose_ms = Date.now() - decomposeStart;
+              if (!trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
+            }
+            this.logger?.warn("search", "decomposition 超时/失败，回退原查询（零额外 LLM）", { error: e instanceof Error ? e.message : String(e) });
+            return this.searchWithExpansion(query, limit, false, trace, ftsProbe);
+          } finally {
+            // 成功 decompose 后清理 pending timeout timer，避免 8s 定时器残留
+            if (decomposeTimer) clearTimeout(decomposeTimer);
+          }
           if (trace) {
             trace.decompose_ms = Date.now() - decomposeStart;
-            if (!trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
+            trace.llm_calls = (trace.llm_calls ?? 0) + 1;
           }
-          this.logger?.warn("search", "decomposition 超时/失败，回退原查询（零额外 LLM）", { error: e instanceof Error ? e.message : String(e) });
-          return this.searchWithExpansion(query, limit, false, trace);
-        } finally {
-          // 成功 decompose 后清理 pending timeout timer，避免 8s 定时器残留
-          if (decomposeTimer) clearTimeout(decomposeTimer);
-        }
-        if (trace) {
-          trace.decompose_ms = Date.now() - decomposeStart;
-          trace.llm_calls = (trace.llm_calls ?? 0) + 1;
-        }
 
-        this.logger?.info("search", `decomposition: "${query}" → ${subQueries.length} sub-queries (capped at ${MAX_DEFAULT_SUBQUERIES})`);
-        if (subQueries.length >= 2) {
-          const subResults = await Promise.all(
-            subQueries.map((sq) =>
-              this.search(sq, { ...(options ?? {}), _skipDecompose: true, multiQuery: false, _skipDetailEnrich: true, _trace: trace }).catch(() => [] as SearchResult[])
-            )
-          );
+          this.logger?.info("search", `decomposition: "${query}" → ${subQueries.length} sub-queries (capped at ${MAX_DEFAULT_SUBQUERIES})`);
+          if (subQueries.length >= 2) {
+            const subResults = await Promise.all(
+              subQueries.map((sq) =>
+                this.search(sq, { ...(options ?? {}), _skipDecompose: true, multiQuery: false, _skipDetailEnrich: true, _trace: trace }).catch(() => [] as SearchResult[])
+              )
+            );
 
-          const allSubLists = subResults.filter((r) => r.length > 0);
-          if (allSubLists.length > 0) {
-            const allSlugs = new Set<string>();
-            for (const list of allSubLists) for (const item of list) allSlugs.add(item.slug);
-            const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
-            const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
-            return mergeRankedResults(allSubLists, this.rrfK, limit, activityWeights, hotnessWeights);
+            const allSubLists = subResults.filter((r) => r.length > 0);
+            if (allSubLists.length > 0) {
+              const allSlugs = new Set<string>();
+              for (const list of allSubLists) for (const item of list) allSlugs.add(item.slug);
+              const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
+              const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
+              return mergeRankedResults(allSubLists, this.rrfK, limit, activityWeights, hotnessWeights);
+            }
           }
+          // decompose 成功但弱结构/空结果 → 原查询 bounded fallback（召回不丢失）。
+          // multiQuery:false → 不 expandQuery（chat LLM escalation），不 ResearchManager；
+          // 仅 searchSingleQuery（vector/fts/graph），bounded。复用 hoisted ftsProbe 避免二次 ftsSearch。
+          return this.searchWithExpansion(query, limit, false, trace, ftsProbe);
         }
-        // decompose 成功但弱结构/空结果 → 原查询 bounded fallback（召回不丢失）。
-        // multiQuery:false → 不 expandQuery（chat LLM escalation），不 ResearchManager；
-        // 仅 searchSingleQuery（vector/fts/graph），bounded。
-        return this.searchWithExpansion(query, limit, false, trace);
       }
     }
 
-    // #250 — bounded FTS probe to gate expandQuery. Timed + fail-open (mirrors
-    // searchSingleQuery's FTS path: timedCall records fts_ms, catch returns [] on
-    // failure) so trace/error semantics stay consistent. Reused as initialFts so
-    // searchSingleQuery does NOT re-run FTS (no double-query, no double fts_ms).
-    const ftsProbe = await this.timedCall(
-      () => Promise.resolve(this.ftsSearch(query, limit, trace)),
-      trace,
-      "fts_ms",
-    ).catch(() => [] as SearchResult[]);
-    const ftsSufficient = ftsProbe.length >= FTS_SUFFICIENT_RESULTS;
+    // #250 — bounded FTS probe gate. ftsProbe is hoisted above (reused here, NOT
+    // re-run) so there is no second ftsSearch on the original query.
     const knownSlugsForGate = options?._hints?.knownSlugs ?? [];
     const isComplex = options?._hints?.isComplex ?? isComplexQuery(query, knownSlugsForGate);
     // #250 — preserve explicit multiQuery:false (decompose fallback at search.ts:473
