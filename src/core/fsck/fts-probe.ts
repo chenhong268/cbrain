@@ -38,7 +38,7 @@ export function probeFts(db: CBrainDB): FsckFinding[] {
 			count: stale.length,
 			sampleSlugs: anonymizeSlugs(stale.map((r) => r.page_slug)),
 			detail: "FTS 索引残留：chunks_fts 有 row 但对应 chunks 已删（搜索可能召回已删除内容）",
-			suggestedCommand: stale.length <= 5 ? "cbrain sync --slug <slug> --reindex" : "cbrain doctor",
+			suggestedCommand: "cbrain fsck --repair-stale-fts",
 		});
 	}
 

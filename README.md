@@ -208,8 +208,9 @@ cbrain perf-diagnose                     # 只读性能诊断：最近 journey �
 cbrain perf-diagnose --json --days 30    # 同上，30 天窗口、机器可读 JSON
 cbrain knowledge-map                     # 只读生成知识图谱报告：领域/成熟度/桥接/孤立节点（不写 vault）
 cbrain knowledge-map --debug             # 同上，附原始/调试附录（含 slug、权重等内部数据）
-cbrain fsck                              # 只读存储一致性检查：vault/SQLite/FTS/LanceDB 四层对齐 + FK 孤儿（不写）
+cbrain fsck                              # 存储一致性检查：默认只读，检查 vault/SQLite/FTS/LanceDB + FK 孤儿
 cbrain fsck --json                       # 同上，稳定 JSON schema（供下游 Agent 解析），exit 0/1/2
+cbrain fsck --repair-stale-fts           # 仅清理 chunks_fts 中没有对应 chunks 的残留 rows
 ```
 
 > **Hermes cron 集成**：见 [docs/hermes-integration.md](docs/hermes-integration.md) —— 用 `bin/cbrain-maintenance.sh` wrapper 走 HTTP `/mcp`，**不要裸调 CLI**（serve 在跑时并发写损坏数据）。

@@ -186,6 +186,7 @@ function createPreV5DB(dbPath: string): Database {
     CREATE INDEX idx_chunks_page ON chunks(page_slug);
     CREATE INDEX idx_versions_page ON versions(page_slug);
     CREATE INDEX idx_aliases_alias ON aliases(alias);
+    CREATE VIRTUAL TABLE chunks_fts USING fts5(page_slug, content, tokenize='trigram');
     INSERT INTO config (key, value) VALUES ('migration_v4_pages_constraint', '1');
     INSERT INTO config (key, value) VALUES ('migration_v4_chunks_summary_level', '1');
   `);
@@ -442,6 +443,7 @@ describe("Atomic migrations — raw to records", () => {
     raw.prepare("INSERT INTO pages (slug, type, title, file_path) VALUES (?, 'record', ?, ?)").run("raw/meeting-2024", "Meeting", "raw/meeting-2024.md");
     raw.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, 'mentions')").run("raw/meeting-2024", "brain/entities/person/john");
     raw.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, 0, 'content')").run("raw/meeting-2024");
+    raw.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, 'content')").run("raw/meeting-2024");
     raw.prepare("INSERT INTO tags (page_slug, tag) VALUES (?, 'work')").run("raw/meeting-2024");
     raw.prepare("INSERT INTO timeline (page_slug, summary) VALUES (?, 'event')").run("raw/meeting-2024");
     raw.prepare("INSERT INTO versions (page_slug, version, content) VALUES (?, 1, 'v1')").run("raw/meeting-2024");
@@ -458,6 +460,9 @@ describe("Atomic migrations — raw to records", () => {
 
     const chunk = db.rawDb.prepare("SELECT page_slug FROM chunks WHERE page_slug LIKE 'records/%'").get() as { page_slug: string };
     expect(chunk.page_slug).toBe("records/meeting-2024");
+
+    const fts = db.rawDb.prepare("SELECT page_slug FROM chunks_fts WHERE page_slug LIKE 'records/%'").get() as { page_slug: string };
+    expect(fts.page_slug).toBe("records/meeting-2024");
 
     const tag = db.rawDb.prepare("SELECT page_slug FROM tags WHERE page_slug LIKE 'records/%'").get() as { page_slug: string };
     expect(tag.page_slug).toBe("records/meeting-2024");

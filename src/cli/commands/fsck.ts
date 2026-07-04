@@ -49,10 +49,11 @@ export async function runFsck(input: FsckInput): Promise<FsckResult> {
 export function register(program: Command): void {
 	program
 		.command("fsck")
-		.description("只读存储一致性检查（vault/SQLite/FTS/LanceDB 四层对齐 + FK 孤儿），不写数据")
+		.description("存储一致性检查（默认只读；--repair-stale-fts 仅清理 stale FTS rows）")
 		.option("--json", "输出稳定 FsckReport JSON（供下游 Agent 解析）")
 		.option("--layer <name>", "只跑指定层：vault|sqlite|fts|lance")
-		.action(async (opts: { json?: boolean; layer?: string }) => {
+		.option("--repair-stale-fts", "安全删除 chunks_fts 中没有对应 chunks 的残留 rows")
+		.action(async (opts: { json?: boolean; layer?: string; repairStaleFts?: boolean }) => {
 			const { loadConfig } = await import("../context.js");
 			const { CBrainDB } = await import("../../storage/sqlite.js");
 			const { existsSync } = await import("node:fs");
@@ -75,6 +76,11 @@ export function register(program: Command): void {
 				}
 				layer = parsed.data;
 			}
+			if (opts.repairStaleFts && layer && layer !== "fts") {
+				emit(buildReport([], "unchecked", ts, "--repair-stale-fts can only be used with --layer fts"), 2);
+				return;
+			}
+			if (opts.repairStaleFts) layer = "fts";
 
 			// DB 不存在 → exit 2，绝不创建文件/目录（只读契约；CBrainDB 构造器会建）
 			if (!existsSync(config.dbPath)) {
@@ -84,6 +90,9 @@ export function register(program: Command): void {
 
 			const db = new CBrainDB(config.dbPath, { skipMigrate: true });
 			try {
+				if (opts.repairStaleFts) {
+					db.cleanupStaleFtsRows();
+				}
 				const { report, exitCode } = await runFsck({
 					vaultPath: config.vaultPath,
 					lancePath: config.lancePath,

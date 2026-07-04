@@ -52,6 +52,7 @@ test("page without chunks → warning finding", () => {
 	expect(nc!.count).toBe(1);
 	expect(nc!.sampleSlugs).not.toContain("test-no-chunks"); // 匿名
 	expect(nc!.suggestedCommand).toContain("cbrain sync");
+	expect(nc!.suggestedCommand).not.toContain("reindex-vectors");
 });
 
 test("page with chunks → no page_without_chunks finding", () => {

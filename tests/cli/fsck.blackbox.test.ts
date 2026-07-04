@@ -60,3 +60,48 @@ test("invalid --layer → exit 2 + fatalError lists allowed values", async () =>
 	expect(report.fatalError).toMatch(/Invalid --layer/);
 	expect(report.fatalError).toMatch(/vault.*sqlite.*fts.*lance/);
 });
+
+test("--repair-stale-fts deletes only stale FTS rows and verifies fts layer", async () => {
+	dir = mkdtempSync(join(tmpdir(), "cbrain-fsck-bb-repair-"));
+	const dbPath = join(dir, "brain.sqlite");
+	const db = new CBrainDB(dbPath);
+	db.insertPage({
+		slug: "test-valid-page",
+		type: "record",
+		title: "Valid",
+		filePath: "valid.md",
+		contentHash: "h-valid",
+	});
+	db.insertChunk("test-valid-page", 0, "valid body");
+	db.ftsInsert("test-valid-page", "valid body");
+	db.ftsInsert("test-stale-page", "stale body");
+	db.close();
+	const cfg = writeCfg(dbPath);
+
+	const res = await runFsckCli(["--repair-stale-fts", "--json"], cfg);
+	expect(res.exitCode).toBe(0);
+	const report = JSON.parse(res.stdout);
+	expect(report.overallStatus).toBe("pass");
+	expect(report.findings.find((f: { check: string }) => f.check === "fts.stale_rows")).toBeUndefined();
+
+	const verify = new CBrainDB(dbPath, { skipMigrate: true });
+	try {
+		expect(verify.getFtsContentsByPage("test-valid-page")).toEqual(["valid body"]);
+		expect(verify.getFtsContentsByPage("test-stale-page")).toEqual([]);
+	} finally {
+		verify.close();
+	}
+});
+
+test("--repair-stale-fts rejects non-fts layer to avoid ambiguous repair", async () => {
+	dir = mkdtempSync(join(tmpdir(), "cbrain-fsck-bb-repair-layer-"));
+	const dbPath = join(dir, "brain.sqlite");
+	const db = new CBrainDB(dbPath);
+	db.close();
+	const cfg = writeCfg(dbPath);
+
+	const res = await runFsckCli(["--repair-stale-fts", "--layer", "sqlite", "--json"], cfg);
+	expect(res.exitCode).toBe(2);
+	const report = JSON.parse(res.stdout);
+	expect(report.fatalError).toContain("--repair-stale-fts");
+});

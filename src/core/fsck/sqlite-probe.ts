@@ -36,8 +36,8 @@ export function probeSqlite(db: CBrainDB): FsckFinding[] {
 			severity: "warning",
 			count: noChunks.length,
 			sampleSlugs: anonymizeSlugs(noChunks.map((r) => r.slug)),
-			detail: "page 没有 chunks（无法检索）",
-			suggestedCommand: "cbrain sync --slug <slug> --reindex",
+			detail: "page 没有 chunks（无法检索；普通 sync 会在 hash 匹配但索引缺失时重建）",
+			suggestedCommand: noChunks.length <= 5 ? "cbrain sync --slug <slug>" : "cbrain sync",
 		});
 	}
 

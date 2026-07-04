@@ -161,5 +161,25 @@ test("stale fts rows (chunk deleted, fts remains) → fts.stale_rows warning", (
 	expect(stale!.layer).toBe("fts");
 	expect(stale!.count).toBe(1);
 	expect(stale!.sampleSlugs).not.toContain("test-stale-page"); // 匿名
-	expect(stale!.suggestedCommand).toContain("cbrain sync");
+	expect(stale!.suggestedCommand).toContain("cbrain fsck --repair-stale-fts");
+});
+
+test("cleanupStaleFtsRows removes only FTS rows whose chunks are gone (#274)", () => {
+	db = freshDb();
+	db.insertPage({
+		slug: "test-valid-page",
+		type: "record",
+		title: "Valid",
+		filePath: "valid.md",
+		contentHash: "h-valid",
+	});
+	db.insertChunk("test-valid-page", 0, "valid content");
+	db.ftsInsert("test-valid-page", "valid content");
+	db.ftsInsert("test-stale-only", "stale content");
+
+	const removed = db.cleanupStaleFtsRows();
+
+	expect(removed).toBe(1);
+	expect(db.getFtsContentsByPage("test-valid-page")).toEqual(["valid content"]);
+	expect(db.getFtsContentsByPage("test-stale-only")).toEqual([]);
 });

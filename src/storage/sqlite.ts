@@ -741,19 +741,23 @@ export class CBrainDB {
         this.db.prepare("UPDATE chunks SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
         this.db.prepare("UPDATE chunks SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
 
-        // 5. Update tags table
+        // 5. Update chunks_fts virtual table (no FK; must be migrated explicitly)
+        this.db.prepare("UPDATE chunks_fts SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
+        this.db.prepare("UPDATE chunks_fts SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
+
+        // 6. Update tags table
         this.db.prepare("UPDATE tags SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
         this.db.prepare("UPDATE tags SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
 
-        // 6. Update timeline table
+        // 7. Update timeline table
         this.db.prepare("UPDATE timeline SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
         this.db.prepare("UPDATE timeline SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
 
-        // 7. Update versions table
+        // 8. Update versions table
         this.db.prepare("UPDATE versions SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
         this.db.prepare("UPDATE versions SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
 
-        // 8. Update ingest_log table
+        // 9. Update ingest_log table
         this.db.prepare("UPDATE ingest_log SET page_slug = REPLACE(page_slug, 'raw/', 'records/') WHERE page_slug LIKE 'raw/%'").run();
         this.db.prepare("UPDATE ingest_log SET page_slug = REPLACE(page_slug, 'brain/records/', 'records/') WHERE page_slug LIKE 'brain/records/%'").run();
       },
@@ -765,6 +769,7 @@ export class CBrainDB {
           { table: "links", column: "from_slug" },
           { table: "links", column: "to_slug" },
           { table: "chunks", column: "page_slug" },
+          { table: "chunks_fts", column: "page_slug" },
           { table: "tags", column: "page_slug" },
           { table: "timeline", column: "page_slug" },
           { table: "versions", column: "page_slug" },
@@ -1134,6 +1139,18 @@ export class CBrainDB {
       "SELECT content FROM chunks_fts WHERE page_slug = $slug"
     ).all({ $slug: pageSlug }) as Array<{ content: string }>;
     return rows.map((r) => r.content);
+  }
+
+  cleanupStaleFtsRows(): number {
+    const row = this.prepare(
+      `SELECT COUNT(DISTINCT page_slug) AS cnt FROM chunks_fts
+       WHERE page_slug NOT IN (SELECT DISTINCT page_slug FROM chunks)`
+    ).get() as { cnt: number };
+    this.prepare(
+      `DELETE FROM chunks_fts
+       WHERE page_slug NOT IN (SELECT DISTINCT page_slug FROM chunks)`
+    ).run();
+    return row.cnt;
   }
 
   /**

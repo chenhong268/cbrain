@@ -163,6 +163,38 @@ describe("SyncManager", () => {
       expect(lance.added.length).toBe(0);
     });
 
+    test("hash match but missing chunks is reindexed, not skipped (#274)", async () => {
+      writeMdFile(vaultPath, "records/missing-chunks.md", { title: "MissingChunks", type: "record", slug: "records/missing-chunks" }, "Stable body that should be indexed");
+
+      await sync.syncAll(vaultPath);
+      db.rawDb.prepare("DELETE FROM chunks WHERE page_slug = ?").run("records/missing-chunks");
+      db.rawDb.prepare("DELETE FROM chunks_fts WHERE page_slug = ?").run("records/missing-chunks");
+      lance.added.length = 0;
+
+      const report = await sync.syncAll(vaultPath);
+
+      expect(report.synced).toBe(1);
+      expect(report.skipped).toBe(0);
+      expect(db.rawDb.prepare("SELECT COUNT(*) AS c FROM chunks WHERE page_slug = ? AND summary_level = 0").get("records/missing-chunks") as { c: number }).toEqual({ c: 1 });
+      expect(db.getFtsContentsByPage("records/missing-chunks").length).toBeGreaterThan(0);
+      expect(lance.added.find((entry) => entry.pageSlug === "records/missing-chunks")).toBeDefined();
+    });
+
+    test("hash match but missing FTS row is reindexed, not skipped (#274)", async () => {
+      writeMdFile(vaultPath, "records/missing-fts.md", { title: "MissingFts", type: "record", slug: "records/missing-fts" }, "Stable body that needs FTS");
+
+      await sync.syncAll(vaultPath);
+      db.rawDb.prepare("DELETE FROM chunks_fts WHERE page_slug = ?").run("records/missing-fts");
+      lance.added.length = 0;
+
+      const report = await sync.syncAll(vaultPath);
+
+      expect(report.synced).toBe(1);
+      expect(report.skipped).toBe(0);
+      expect(db.getFtsContentsByPage("records/missing-fts").length).toBeGreaterThan(0);
+      expect(lance.added.find((entry) => entry.pageSlug === "records/missing-fts")).toBeDefined();
+    });
+
     test("re-syncs when file content changes", async () => {
       writeMdFile(vaultPath, "entities/changed.md", { title: "Changed", type: "entity/person", slug: "entities/changed" }, "Original");
       await sync.syncAll(vaultPath);
@@ -279,6 +311,23 @@ describe("SyncManager", () => {
       expect(result.success).toBe(true);
       expect(result.skipped).toBe(true);
       expect(lance.added.length).toBe(0);
+    });
+
+    test("syncPage reindexes hash-matching page with missing chunks (#274)", async () => {
+      writeMdFile(vaultPath, "records/page-missing-chunks.md", { title: "PageMissingChunks", type: "record", slug: "records/page-missing-chunks" }, "Stable single-page body");
+
+      await sync.syncPage("records/page-missing-chunks", vaultPath);
+      db.rawDb.prepare("DELETE FROM chunks WHERE page_slug = ?").run("records/page-missing-chunks");
+      db.rawDb.prepare("DELETE FROM chunks_fts WHERE page_slug = ?").run("records/page-missing-chunks");
+      lance.added.length = 0;
+
+      const result = await sync.syncPage("records/page-missing-chunks", vaultPath);
+
+      expect(result.success).toBe(true);
+      expect(result.skipped).toBeUndefined();
+      expect(db.rawDb.prepare("SELECT COUNT(*) AS c FROM chunks WHERE page_slug = ? AND summary_level = 0").get("records/page-missing-chunks") as { c: number }).toEqual({ c: 1 });
+      expect(db.getFtsContentsByPage("records/page-missing-chunks").length).toBeGreaterThan(0);
+      expect(lance.added.find((entry) => entry.pageSlug === "records/page-missing-chunks")).toBeDefined();
     });
 
     test("returns error when title exists under different slug", async () => {

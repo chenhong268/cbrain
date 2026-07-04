@@ -155,8 +155,10 @@ export class SyncManager {
         const exists = !!existingPage;
         const existingHash = existingPage?.content_hash ?? null;
 
-        // Normal content hash match — skip as before
-        if (existingHash && existingHash === contentHash) {
+        // Content hash alone only proves Markdown is unchanged. A prior crash
+        // or bug may still leave derived indexes missing; only skip when
+        // chunks + FTS are complete for non-empty bodies.
+        if (existingHash && existingHash === contentHash && this.hasCompletePageIndexes(slug, parsed.body)) {
           // Backfill tags + wikilinks even when content unchanged
           if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
             this.db.replaceTags(slug, parsed.frontmatter.tags as string[]);
@@ -466,7 +468,7 @@ export class SyncManager {
     const exists = !!existingPage;
     const existingHash = existingPage?.content_hash ?? null;
 
-    if (existingHash && existingHash === contentHash) {
+    if (existingHash && existingHash === contentHash && this.hasCompletePageIndexes(effectiveSlug, parsed.body)) {
       // Backfill tags + wikilinks even when content unchanged
       if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
         this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
@@ -740,6 +742,18 @@ export class SyncManager {
       }
     }
     return cleaned;
+  }
+
+  private hasCompletePageIndexes(slug: string, body: string): boolean {
+    if (!body.trim()) return true;
+    const hasRawChunk = this.db.rawDb.prepare(
+      "SELECT 1 FROM chunks WHERE page_slug = ? AND summary_level = 0 LIMIT 1",
+    ).get(slug);
+    if (!hasRawChunk) return false;
+    const hasFtsRow = this.db.rawDb.prepare(
+      "SELECT 1 FROM chunks_fts WHERE page_slug = ? LIMIT 1",
+    ).get(slug);
+    return !!hasFtsRow;
   }
 
   /** Compensate a failed existing-page sync: restore retrievable metadata + exact

@@ -291,7 +291,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `dossier` | Generate or update a structured dossier for an entity |
 | `dream` | Nightly full pipeline: sync → enrich → cleanup → health → insight archive |
 | `enrich` | Run entity enrichment (tier promotion) |
-| `fsck` | 只读存储一致性检查（vault/SQLite/FTS/LanceDB 四层对齐 + FK 孤儿），不写数据 |
+| `fsck` | 存储一致性检查（默认只读；--repair-stale-fts 仅清理 stale FTS rows） |
 | `graph-query` | Query the knowledge graph |
 | `health` | Run 14-dimension health check and write report |
 | `health-debt` | Plan health-debt repairs as a dry-run grouped queue (no execute, no delete, no merge, no LLM) |
