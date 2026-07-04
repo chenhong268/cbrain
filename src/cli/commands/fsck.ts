@@ -2,6 +2,8 @@ import type { Command } from "commander";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { FsckFinding, FsckLayer, FsckLanceState, FsckReport } from "../../core/fsck/types.js";
 import { buildReport, reportToMarkdown } from "../../core/fsck/report.js";
+import type { RepairPlan, RepairPlanStatus } from "../../core/fsck/repair-plan.js";
+import { buildRepairPlan, formatRepairPlanMarkdown } from "../../core/fsck/repair-plan.js";
 import { probeSqlite } from "../../core/fsck/sqlite-probe.js";
 import { probeFts } from "../../core/fsck/fts-probe.js";
 import { probeLance } from "../../core/fsck/lance-probe.js";
@@ -16,6 +18,11 @@ export interface FsckInput {
 
 export interface FsckResult {
 	report: FsckReport;
+	exitCode: 0 | 1 | 2;
+}
+
+export interface RepairPlanResult {
+	plan: RepairPlan;
 	exitCode: 0 | 1 | 2;
 }
 
@@ -46,14 +53,27 @@ export async function runFsck(input: FsckInput): Promise<FsckResult> {
 	return { report, exitCode };
 }
 
+function repairPlanExitCode(status: RepairPlanStatus): 0 | 1 | 2 {
+	if (status === "clean") return 0;
+	if (status === "blocked") return 2;
+	return 1;
+}
+
+export async function runRepairPlan(input: FsckInput): Promise<RepairPlanResult> {
+	const { report } = await runFsck(input);
+	const plan = buildRepairPlan(report);
+	return { plan, exitCode: repairPlanExitCode(plan.overallStatus) };
+}
+
 export function register(program: Command): void {
 	program
 		.command("fsck")
 		.description("存储一致性检查（默认只读；--repair-stale-fts 仅清理 stale FTS rows）")
 		.option("--json", "输出稳定 FsckReport JSON（供下游 Agent 解析）")
 		.option("--layer <name>", "只跑指定层：vault|sqlite|fts|lance")
+		.option("--repair-plan", "输出 privacy-safe repair plan，而不是原始 fsck report")
 		.option("--repair-stale-fts", "安全删除 chunks_fts 中没有对应 chunks 的残留 rows")
-		.action(async (opts: { json?: boolean; layer?: string; repairStaleFts?: boolean }) => {
+		.action(async (opts: { json?: boolean; layer?: string; repairPlan?: boolean; repairStaleFts?: boolean }) => {
 			const { loadConfig } = await import("../context.js");
 			const { CBrainDB } = await import("../../storage/sqlite.js");
 			const { existsSync } = await import("node:fs");
@@ -63,6 +83,11 @@ export function register(program: Command): void {
 			const emit = (report: FsckReport, exitCode: 0 | 1 | 2): void => {
 				if (opts.json) console.log(JSON.stringify(report));
 				else console.log(reportToMarkdown(report));
+				process.exit(exitCode);
+			};
+			const emitPlan = (plan: RepairPlan, exitCode: 0 | 1 | 2): void => {
+				if (opts.json) console.log(JSON.stringify(plan));
+				else console.log(formatRepairPlanMarkdown(plan));
 				process.exit(exitCode);
 			};
 
@@ -84,7 +109,12 @@ export function register(program: Command): void {
 
 			// DB 不存在 → exit 2，绝不创建文件/目录（只读契约；CBrainDB 构造器会建）
 			if (!existsSync(config.dbPath)) {
-				emit(buildReport([], "unchecked", ts, "DB file not found at configured dbPath"), 2);
+				const report = buildReport([], "unchecked", ts, "DB file not found at configured dbPath");
+				if (opts.repairPlan) {
+					emitPlan(buildRepairPlan(report), 2);
+				} else {
+					emit(report, 2);
+				}
 				return;
 			}
 
@@ -99,7 +129,56 @@ export function register(program: Command): void {
 					db,
 					layer,
 				});
+				if (opts.repairPlan) {
+					const plan = buildRepairPlan(report);
+					emitPlan(plan, repairPlanExitCode(plan.overallStatus));
+					return;
+				}
 				emit(report, exitCode);
+			} finally {
+				db.close();
+			}
+		});
+
+	program
+		.command("repair-plan")
+		.description("将 fsck 发现转成 privacy-safe 修复计划（默认 dry-run）")
+		.option("--json", "输出稳定 RepairPlan JSON（供下游 Agent 解析）")
+		.option("--limit <n>", "限制本次可执行修复数量", "50")
+		.option("--execute", "执行已声明安全的派生层修复（Phase 1 之后逐步开放）")
+		.option("--verify", "只验证当前 repair plan 是否清空，不执行修复")
+		.action(async (opts: { json?: boolean; limit?: string; execute?: boolean; verify?: boolean }) => {
+			const { loadConfig } = await import("../context.js");
+			const { CBrainDB } = await import("../../storage/sqlite.js");
+			const { existsSync } = await import("node:fs");
+			const config = loadConfig();
+			const ts = new Date().toISOString();
+			const emitPlan = (plan: RepairPlan, exitCode: 0 | 1 | 2): void => {
+				if (opts.json) console.log(JSON.stringify(plan));
+				else console.log(formatRepairPlanMarkdown(plan));
+				process.exit(exitCode);
+			};
+
+			if (opts.execute) {
+				const report = buildReport([], "unchecked", ts, "repair-plan --execute is not implemented in this phase");
+				emitPlan(buildRepairPlan(report), 2);
+				return;
+			}
+
+			if (!existsSync(config.dbPath)) {
+				const report = buildReport([], "unchecked", ts, "DB file not found at configured dbPath");
+				emitPlan(buildRepairPlan(report), 2);
+				return;
+			}
+
+			const db = new CBrainDB(config.dbPath, { skipMigrate: true });
+			try {
+				const { plan, exitCode } = await runRepairPlan({
+					vaultPath: config.vaultPath,
+					lancePath: config.lancePath,
+					db,
+				});
+				emitPlan(plan, exitCode);
 			} finally {
 				db.close();
 			}
