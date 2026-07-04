@@ -58,6 +58,16 @@ const GAP_ENTITY_TYPES = new Set([
   "entity/product",
 ]);
 
+function hasStructuralDiscoveryEvidence(
+  entities: string[],
+  metadata: Record<string, unknown>,
+  suggestion?: string,
+): boolean {
+  // Privacy boundary: the verifier only receives this boolean. Slugs and
+  // metadata stay in discovery storage and never enter verifier audit rows.
+  return entities.length > 0 || Object.keys(metadata).length > 0 || Boolean(suggestion?.trim());
+}
+
 function stripJsonFence(raw: string): string {
   return raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 }
@@ -123,7 +133,7 @@ export class DiscoveryManager {
           actionable: r.actionable,
           score: r.score,
           autoApplicable: false,
-          hasEvidence: false,
+          hasEvidence: hasStructuralDiscoveryEvidence(r.entities, r.metadata, r.suggestion),
           hasProposedActions: false,
           displayTexts: [r.suggestion ?? ""],
         },
@@ -251,7 +261,7 @@ export class DiscoveryManager {
           actionable: c.actionable,
           score: c.nameScore,
           autoApplicable: false,
-          hasEvidence: false,
+          hasEvidence: true,
           hasProposedActions: false,
           displayTexts: [],
         },

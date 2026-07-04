@@ -1376,7 +1376,7 @@ export class HealthChecker {
     }
     if (discErr > 0 || discWarn > 0) {
       issues.push({
-        severity: discErr > 0 ? "high" : "medium",
+        severity: "medium",
         slug: "verifier:discovery",
         title: `影子校验：最近 24h Discovery 存在 ${discErr} 处 error / ${discWarn} 处 warning 生成质量风险`,
         description: `主要 reason: ${topReasons("discovery_")}。详见 ingest_log（source_type=verifier）。`,
@@ -1384,8 +1384,8 @@ export class HealthChecker {
       });
     }
 
-    const hasError = nerErr > 0 || discErr > 0;
-    const hasWarning = nerWarn > 0 || discWarn > 0;
+    const hasError = nerErr > 0;
+    const hasWarning = nerWarn > 0 || discErr > 0 || discWarn > 0;
     const status: "pass" | "warn" | "fail" = hasError ? "fail" : hasWarning ? "warn" : "pass";
     return { name: "生成质量影子校验", status, issues };
   }

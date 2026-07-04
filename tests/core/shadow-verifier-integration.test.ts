@@ -421,6 +421,10 @@ describe("Discovery shadow verifier hooks", () => {
     const discRows = verifierRows().filter((r) => r.action === "discovery_shadow_verifier");
     expect(discRows.length).toBeGreaterThan(0);
     expect(discRows.every((r) => r.page_slug === null)).toBe(true);
+    for (const row of discRows) {
+      const summary = JSON.parse(row.details!);
+      expect(summary.reasonCounts.discovery_high_actionable_no_evidence ?? 0).toBe(0);
+    }
     // If this fails because detectGaps did not fire under this seed, adjust the seed
     // (raise mention_count / widen title) rather than deleting the test.
   });
@@ -455,6 +459,16 @@ describe("HealthChecker.checkVerifierQuality", () => {
       worst: error > 0 ? "error" : "warning",
     }));
   }
+  function writeDiscoveryRow(warning: number, error: number) {
+    db.addIngestLog("verifier", "discovery_shadow_verifier", null, JSON.stringify({
+      surface: "discovery", type: "gap", checks: 5,
+      counts: { info: 0, warning, error },
+      reasonCounts: error > 0
+        ? { discovery_high_actionable_no_evidence: error }
+        : { discovery_display_private_raw: warning },
+      worst: error > 0 ? "error" : "warning",
+    }));
+  }
 
   test("clean → pass, no issues", async () => {
     const report = await checker.checkAll();
@@ -476,6 +490,15 @@ describe("HealthChecker.checkVerifierQuality", () => {
     const report = await checker.checkAll();
     const dim = findVerifierDim(report);
     expect(dim.status).toBe("warn");
+    expect(dim.issues.some((i) => i.severity === "medium")).toBe(true);
+  });
+
+  test("discovery verifier errors are observe-only warnings in health", async () => {
+    writeDiscoveryRow(0, 299);
+    const report = await checker.checkAll();
+    const dim = findVerifierDim(report);
+    expect(dim.status).toBe("warn");
+    expect(dim.issues.every((i) => i.severity !== "high")).toBe(true);
     expect(dim.issues.some((i) => i.severity === "medium")).toBe(true);
   });
 
