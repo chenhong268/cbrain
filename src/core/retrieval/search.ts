@@ -442,8 +442,14 @@ export class HybridSearch {
         } else {
           // Budget guard: skip decompose if LLM budget already exhausted (#222)
           if ((trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS) {
-            if (trace && !trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
-            return [] as SearchResult[]; // degraded: 零额外 LLM
+            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe);
+            if (trace) {
+              trace.decompose_skipped = "budget_exhausted_fallback";
+              if (fallback.length === 0 && !trace.degraded_reason) {
+                trace.degraded_reason = "decompose_budget_exceeded";
+              }
+            }
+            return fallback; // 零额外 LLM，但保留已有本地证据
           }
           // Decompose with a REAL wall-clock budget: Promise.race against timeout.
           // timedCall only records elapsed — it does NOT cap latency, so a 70s LLM
@@ -463,10 +469,16 @@ export class HybridSearch {
           } catch (e) {
             if (trace) {
               trace.decompose_ms = Date.now() - decomposeStart;
-              if (!trace.degraded_reason) trace.degraded_reason = "decompose_budget_exceeded";
             }
             this.logger?.warn("search", "decomposition 超时/失败，回退原查询（零额外 LLM）", { error: e instanceof Error ? e.message : String(e) });
-            return this.searchWithExpansion(query, limit, false, trace, ftsProbe);
+            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe);
+            if (trace) {
+              trace.decompose_skipped = "decompose_failed_fallback";
+              if (fallback.length === 0 && !trace.degraded_reason) {
+                trace.degraded_reason = "decompose_budget_exceeded";
+              }
+            }
+            return fallback;
           } finally {
             // 成功 decompose 后清理 pending timeout timer，避免 8s 定时器残留
             if (decomposeTimer) clearTimeout(decomposeTimer);

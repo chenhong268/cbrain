@@ -176,24 +176,28 @@ describe("HybridSearch escalation budget (#222)", () => {
     expect(trace.degraded_reason).toBe("decompose_budget_exceeded");
   });
 
-  test("degraded fallback triggers zero additional LLM/embedding calls", async () => {
+  test("budget-exhausted fallback uses local retrieval only (no extra LLM escalation)", async () => {
     insertPage(db, "entity/a", "Entity A", "entity/person");
     const embedProvider = createMockEmbeddingProvider();
     const embedSpy = spyOn(embedProvider, "embed");
+    const llm = createMockLLM([JSON.stringify(["sq1", "sq2"])]);
     const hs = new HybridSearch(db, embedProvider, createMockLance() as any, {
       rrf_k: 60,
-      llm: createMockLLM([JSON.stringify(["sq1", "sq2"])]),
+      llm,
     });
     const expandSpy = spyOn(hs as any, "expandQuery");
-    // LLM budget 预先耗尽 → budget guard 命中 → degraded 返回 []
+    const decomposeSpy = spyOn(hs as any, "decomposeQuery");
+    // LLM budget 预先耗尽 → 不再 decompose / expand，但仍允许一次本地 fallback 检索。
     const trace: { llm_calls?: number; degraded_reason?: string } = { llm_calls: 3 };
     await hs.search("Entity A 和 Entity B", {
       _hints: { isComplex: true, knownSlugs: [] },
       _trace: trace as any,
     });
     expect(trace.degraded_reason).toBe("decompose_budget_exceeded");
-    expect(embedSpy).not.toHaveBeenCalled(); // degraded 不触发 embedding（vector）
-    expect(expandSpy).not.toHaveBeenCalled(); // degraded 不触发 expandQuery
+    expect(llm.calls).toHaveLength(0);
+    expect(decomposeSpy).not.toHaveBeenCalled();
+    expect(expandSpy).not.toHaveBeenCalled();
+    expect(embedSpy).toHaveBeenCalledTimes(1); // 本地 vector fallback 允许一次 embedding
   });
 
   test("complex default decompose (success path) does not fallback to expandQuery", async () => {
@@ -228,13 +232,14 @@ describe("HybridSearch escalation budget (#222)", () => {
       }
       return [] as SearchResult[];
     });
-    const trace: { decompose_ms?: number; degraded_reason?: string } = {};
+    const trace: { decompose_ms?: number; degraded_reason?: string; decompose_skipped?: string } = {};
     const result = await hs.search("Entity A 和 Entity B", {
       _hints: { isComplex: true, knownSlugs: [] },
       _trace: trace as any,
     });
     expect(result).toEqual([{ slug: "entity/a", score: 0.5, snippet: "fallback", source: "fts" }]);
-    expect(trace.degraded_reason).toBe("decompose_budget_exceeded");
+    expect(trace.degraded_reason).toBeUndefined();
+    expect(trace.decompose_skipped).toBe("decompose_failed_fallback");
     expect(expandSpy).not.toHaveBeenCalled(); // 超时/失败不 fallback expansion
     expect(fallbackSpy).toHaveBeenCalledTimes(1);
     expect(fallbackSpy.mock.calls[0][0]).toBe("Entity A 和 Entity B");

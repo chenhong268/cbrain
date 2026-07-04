@@ -213,6 +213,53 @@ describe("decompose gate (#272)", () => {
     decomposeSpy.mockRestore();
   });
 
+  test("decompose failure + usable fallback → 不标记 budget_exhausted degraded", async () => {
+    // FTS<3 仍会尝试 decompose；decompose 失败后，已有的本地 FTS 结果足够作为保守 fallback。
+    // 这种情况是"放弃慢路径"，不是"检索质量失败"，不能把 decompose_budget_exceeded 泄漏成 degraded。
+    seedFtsHits(db, 2, "主题A 主题B 局部证据");
+    const llm = { name: "mock", chat: async () => { throw new Error("decompose boom"); } };
+    const search = new HybridSearch(db, mockEmbed(), makeLance(), { llm: llm as never });
+    const trace: Record<string, unknown> = {};
+    const decomposeSpy = spyDecompose(search, async () => { throw new Error("decompose fail"); });
+
+    const results = await search.search("主题A 和 主题B", { _trace: trace as never });
+
+    expect(results.length).toBeGreaterThan(0);
+    expect(trace.degraded_reason).toBeUndefined();
+    expect(trace.decompose_skipped).toBe("decompose_failed_fallback");
+    decomposeSpy.mockRestore();
+  });
+
+  test("decompose budget exhausted before call → fallback to local evidence, not empty", async () => {
+    // #222 的 LLM call budget 是为了阻止继续升级，不应把已有 FTS 证据直接丢掉。
+    seedFtsHits(db, 2, "主题A 主题B 局部证据");
+    const llm = { name: "mock", chat: async () => { throw new Error("chat should not be called"); } };
+    const search = new HybridSearch(db, mockEmbed(), makeLance(), { llm: llm as never });
+    const trace: Record<string, unknown> = { llm_calls: 3 };
+    const decomposeSpy = spyDecompose(search, async () => { throw new Error("decomposeQuery should not be called"); });
+
+    const results = await search.search("主题A 和 主题B", { _trace: trace as never });
+
+    expect(results.length).toBeGreaterThan(0);
+    expect(decomposeSpy).toHaveBeenCalledTimes(0);
+    expect(trace.degraded_reason).toBeUndefined();
+    expect(trace.decompose_skipped).toBe("budget_exhausted_fallback");
+    decomposeSpy.mockRestore();
+  });
+
+  test("decompose failure + empty fallback → 仍标记 decompose_budget_exceeded", async () => {
+    const llm = { name: "mock", chat: async () => { throw new Error("decompose boom"); } };
+    const search = new HybridSearch(db, mockEmbed(), makeLance(), { llm: llm as never });
+    const trace: Record<string, unknown> = {};
+    const decomposeSpy = spyDecompose(search, async () => { throw new Error("decompose fail"); });
+
+    const results = await search.search("主题A 和 主题B", { _trace: trace as never });
+
+    expect(results).toEqual([]);
+    expect(trace.degraded_reason).toBe("decompose_budget_exceeded");
+    decomposeSpy.mockRestore();
+  });
+
   test("decompose weak/empty fallback 复用 hoisted ftsProbe (原 query ftsSearch = 1)", async () => {
     // FTS<3 (不 seed) → 进 decompose；decompose 返回 2 sub-queries 但都无匹配 → weak fallback。
     // fallback 必须复用 hoisted ftsProbe，不能对原 query 再跑一次 ftsSearch。
