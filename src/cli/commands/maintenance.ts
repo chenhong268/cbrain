@@ -929,7 +929,20 @@ export function register(program: Command) {
 
       if (opts.remove) {
         const { removeHierarchy } = await import("../../core/graph/hierarchy.js");
-        const removed = removeHierarchy(slug, { pages, graph });
+        let removed: string | null = null;
+        try {
+          removed = removeHierarchy(slug, { pages, graph });
+        } catch (e) {
+          // #273: anonymous stderr (slug-only) — no path/stack leak. Duck-type
+          // RollbackIncompleteError by name to stay with the file's dynamic-import style.
+          if (e instanceof Error && e.name === "RollbackIncompleteError") {
+            console.error(`  reports_to 移除失败且回滚未完成，状态可能不一致，需人工核查: ${slug}`);
+          } else {
+            console.error(`  reports_to 移除失败，已回滚至原状态: ${slug}`);
+          }
+          deps.db.close();
+          process.exit(1);
+        }
         if (!removed) {
           console.log(`  ${slug} 未设置 reports_to`);
         } else {
@@ -945,7 +958,18 @@ export function register(program: Command) {
         const { setHierarchy } = await import("../../core/graph/hierarchy.js");
         const page = pages.getBySlug(slug);
         const oldReportsTo = (page?.frontmatter as Record<string, unknown>)?.reports_to as string | undefined;
-        setHierarchy(slug, opts.reportsTo, { pages, graph });
+        try {
+          setHierarchy(slug, opts.reportsTo, { pages, graph });
+        } catch (e) {
+          // #273: anonymous stderr (slug-only) — no path/stack leak.
+          if (e instanceof Error && e.name === "RollbackIncompleteError") {
+            console.error(`  reports_to 写入失败且回滚未完成，状态可能不一致，需人工核查: ${slug}`);
+          } else {
+            console.error(`  reports_to 写入失败，已回滚至原状态: ${slug}`);
+          }
+          deps.db.close();
+          process.exit(1);
+        }
         const manager = pages.getBySlug(opts.reportsTo);
         console.log(`  ✓ ${slug} 的直线领导设为 ${manager?.title ?? opts.reportsTo}`);
         const affected = [slug, opts.reportsTo];

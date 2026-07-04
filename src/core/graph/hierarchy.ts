@@ -1,5 +1,6 @@
 import type { PageManager } from "../page.js";
 import type { GraphManager } from "./graph.js";
+import { RollbackIncompleteError } from "../safety/atomic-move.js";
 
 export interface HierarchyDeps {
   pages: PageManager;
@@ -45,7 +46,11 @@ const MAX_LIMIT = 100;
 
 /**
  * Set the direct manager (reports_to) for an entity.
- * Writes to frontmatter + graph link (dual write).
+ * Writes frontmatter + graph link with compensation (#273): if the graph write
+ * fails after frontmatter is written, the old frontmatter value is restored;
+ * if restore also fails, throws RollbackIncompleteError. NOT crash-safe
+ * (mid-flight process crash can still split the two stores) — only synchronous
+ * throw failures are compensated.
  */
 export function setHierarchy(
   slug: string,
@@ -58,25 +63,45 @@ export function setHierarchy(
     throw new Error("不能将自己设为上级");
   }
 
-  const page = pages.getBySlug(slug);
+  const page = pages.getBySlugFresh(slug);
   if (!page) throw new Error(`实体不存在: ${slug}`);
 
   const manager = pages.getBySlug(reportsToSlug);
   if (!manager) throw new Error(`上级实体不存在: ${reportsToSlug}`);
 
-  // Write frontmatter
+  // #273: capture old frontmatter value (fresh read) for compensation.
+  const oldReportsTo = (page.frontmatter.reports_to as string | null) ?? null;
+
+  // (A) frontmatter write — failure here means graph untouched; throw as-is.
   pages.update(slug, { extra: { reports_to: reportsToSlug } });
 
-  // Phase 1 #233: atomically supersede stale active reports_to edges (preserve
-  // evidence) + upsert the new target as trusted+active, in one transaction.
-  // Deterministic hierarchy set is authoritative. Provenance source_page_slug
-  // = the subordinate (slug), so the edge stays traceable.
-  graph.setActiveReportsTo(slug, reportsToSlug, "agent", 0.95, { source_page_slug: slug });
+  // (B) graph write — on failure, compensate by restoring frontmatter.
+  // Phase 1 #233: setActiveReportsTo supersedes stale active edges + upserts
+  // the new target as trusted+active in one DB transaction (graph layer atomic).
+  try {
+    graph.setActiveReportsTo(slug, reportsToSlug, "agent", 0.95, { source_page_slug: slug });
+  } catch (graphError) {
+    try {
+      // oldReportsTo === null → delete key (undefined, NOT null/empty string);
+      // else restore old value.
+      pages.update(slug, { extra: { reports_to: oldReportsTo ?? undefined } });
+    } catch {
+      // Anonymous message (slug-only) — no path/stack leak (#273 review).
+      throw new RollbackIncompleteError(
+        new Error(`reports_to graph write failed for slug=${slug}`),
+        new Error(`reports_to frontmatter restore failed for slug=${slug}`),
+      );
+    }
+    throw graphError;
+  }
 }
 
 /**
  * Remove the reports_to hierarchy for an entity.
  * Returns the old reports_to slug, or null if none was set.
+ * #273: flipped order to frontmatter-clear → graph-supersede so a frontmatter
+ * failure leaves graph untouched; on graph failure after clear, restores
+ * frontmatter. RollbackIncompleteError if restore also fails. NOT crash-safe.
  */
 export function removeHierarchy(
   slug: string,
@@ -84,22 +109,33 @@ export function removeHierarchy(
 ): string | null {
   const { pages, graph } = deps;
 
-  const page = pages.getBySlug(slug);
+  const page = pages.getBySlugFresh(slug);
   if (!page) throw new Error(`实体不存在: ${slug}`);
 
-  const oldReportsTo = (page.frontmatter.reports_to as string) ?? null;
+  // #273: capture old value (fresh read) for compensation.
+  const oldReportsTo = (page.frontmatter.reports_to as string | null) ?? null;
   if (!oldReportsTo) return null;
 
-  // Phase 1 #233: supersede the active reports_to edge (preserve evidence)
-  // instead of hard-deleting it. "No current manager" is modelled as the
-  // prior edge becoming stale, not erased.
-  graph.supersedeReportsTo(slug);
-
-  // Clear frontmatter reports_to (PageManager treats undefined as deletion).
+  // (A) frontmatter clear — failure here means graph untouched; throw as-is.
   pages.update(slug, {
-    body: page.body ?? "",
+    body: page.body,
     extra: { reports_to: undefined },
   });
+
+  // (B) graph supersede — on failure, compensate by restoring frontmatter.
+  try {
+    graph.supersedeReportsTo(slug);
+  } catch (graphError) {
+    try {
+      pages.update(slug, { extra: { reports_to: oldReportsTo } });
+    } catch {
+      throw new RollbackIncompleteError(
+        new Error(`reports_to graph supersede failed for slug=${slug}`),
+        new Error(`reports_to frontmatter restore failed for slug=${slug}`),
+      );
+    }
+    throw graphError;
+  }
 
   return oldReportsTo;
 }

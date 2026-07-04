@@ -3,6 +3,34 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { setHierarchy, removeHierarchy, getHierarchyContext, getOrgTree } from "../../core/graph/hierarchy.js";
 import { formatOrgTreeEnvelope } from "./format-result.js";
+import { RollbackIncompleteError } from "../../core/safety/atomic-move.js";
+
+/** #273: shape a hierarchy write failure into an anonymous MCP error (slug-only, no path/stack). */
+function hierarchyErrorResponse(e: unknown, slug: string, op: "set" | "remove") {
+  if (e instanceof RollbackIncompleteError) {
+    return {
+      isError: true as const,
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          error: `reports_to ${op} 失败且回滚未完成，状态可能不一致，需人工核查`,
+          rollback_incomplete: true,
+          slug,
+        }),
+      }],
+    };
+  }
+  return {
+    isError: true as const,
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({
+        error: `reports_to ${op} 失败，已回滚至原状态`,
+        slug,
+      }),
+    }],
+  };
+}
 
 export function registerHierarchyTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("set_hierarchy", {
@@ -19,7 +47,11 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
     const page = ctx.pages.getBySlug(slug);
     const oldReportsTo = (page?.frontmatter as Record<string, unknown>)?.reports_to as string | undefined;
 
-    setHierarchy(slug, reports_to, { pages: ctx.pages, graph: ctx.graph });
+    try {
+      setHierarchy(slug, reports_to, { pages: ctx.pages, graph: ctx.graph });
+    } catch (e) {
+      return hierarchyErrorResponse(e, slug, "set");
+    }
 
     // Sync Known Relations for affected slugs
     const affected = [slug, reports_to];
@@ -65,7 +97,12 @@ export function registerHierarchyTools(server: McpServer, ctx: ToolContext): voi
       slug: z.string().max(500).describe("Entity slug"),
     },
   }, async ({ slug }) => {
-    const removed = removeHierarchy(slug, { pages: ctx.pages, graph: ctx.graph });
+    let removed: string | null;
+    try {
+      removed = removeHierarchy(slug, { pages: ctx.pages, graph: ctx.graph });
+    } catch (e) {
+      return hierarchyErrorResponse(e, slug, "remove");
+    }
     if (!removed) {
       return {
         content: [{

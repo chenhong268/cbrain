@@ -203,3 +203,62 @@ describe("get_org_tree MCP tool", () => {
     expect(data.downward[0].slug).toBe(VP_ENG);
   });
 });
+
+describe("set_hierarchy / remove_hierarchy error handling (#273)", () => {
+  const testDir = "/tmp/cbrain-test-mcp-hierarchy-rollback";
+  const dbPath = join(testDir, "test.sqlite");
+  const vaultPath = join(testDir, "vault");
+  let db: CBrainDB;
+  let deps: CBrainDeps;
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+    deps = {
+      db,
+      embedding: createMockEmbedding() as never,
+      lance: createMockLanceDB() as never,
+      vaultPath,
+      runtimePath: join(dirname(dbPath), "runtime"),
+    };
+    buildTree(db, vaultPath);
+  });
+  afterEach(() => {
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("set_hierarchy: graph failure → isError + anonymous error (no path/stack leak)", async () => {
+    // Inject a graph failure whose message WOULD leak a path + stack if surfaced.
+    const orig = db.upsertActiveReportsTo.bind(db);
+    db.upsertActiveReportsTo = (() => {
+      throw new Error("leak-marker-graph-failure");
+    }) as never;
+    const server = createServer(deps);
+    const { data, isError } = await callTool(server, "set_hierarchy", { slug: VP_ENG, reports_to: CEO });
+    expect(isError).toBe(true);
+    expect(data.success).toBeUndefined();
+    expect(data.slug).toBe(VP_ENG);
+    // Original error.message must NOT surface — anonymous slug-only error (#273).
+    expect(JSON.stringify(data)).not.toContain("leak-marker-graph-failure");
+    db.upsertActiveReportsTo = orig;
+  });
+
+  test("remove_hierarchy: graph failure → isError + anonymous error", async () => {
+    const server = createServer(deps);
+    // First set EM1 -> CEO successfully (writes frontmatter reports_to).
+    await callTool(server, "set_hierarchy", { slug: EM1, reports_to: CEO });
+    // Then break graph supersede so remove_hierarchy fails after frontmatter clear.
+    const orig = db.supersedeReportsTo.bind(db);
+    db.supersedeReportsTo = (() => {
+      throw new Error("leak-marker-supersede-failure");
+    }) as never;
+    const { data, isError } = await callTool(server, "remove_hierarchy", { slug: EM1 });
+    expect(isError).toBe(true);
+    expect(data.success).toBeUndefined();
+    // Original error.message must NOT surface — anonymous slug-only error (#273).
+    expect(JSON.stringify(data)).not.toContain("leak-marker-supersede-failure");
+    db.supersedeReportsTo = orig;
+  });
+});
