@@ -153,13 +153,14 @@ SearXNG 不是核心依赖。默认不配置时，CBrain 的本地写入、向�
 | record | `records/` | Reading notes, articles, meeting notes, transcripts |
 | insight | `insights/` | Auto-generated cross-domain connections and discoveries |
 
-## CLI Commands (48 total)
+## CLI Commands (49 total)
 
 ### 大脑管理
 ```bash
 cbrain init                              # 新建一个大脑（配置 + 目录 + 数据库）
 cbrain status                            # 看一眼：多少页、多少关系、按类型分布
 cbrain dream                             # 全量维护：sync → enrich → cleanup → health → report（带锁）
+cbrain ner-backfill                      # 处理延迟 NER job（serve/watcher 活跃时拒绝）
 cbrain config                            # 查看当前配置
 cbrain config --set ner.enabled=false    # 修改配置
 ```

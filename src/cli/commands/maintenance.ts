@@ -23,6 +23,8 @@ import {
   type LockProbe,
 } from "./reindex.js";
 import type { PageSignals } from "../../core/maintenance/health-debt.js";
+import type { PageManager } from "../../core/page.js";
+import type { ContentPipeline } from "../../core/ingestion/pipeline.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -135,6 +137,50 @@ export async function handleCompact(
   } finally {
     try { await deps.lance.close(); } catch { /* best effort */ }
   }
+}
+
+export interface NerBackfillDeps {
+  db: CBrainDB;
+  pages: PageManager;
+  pipeline: ContentPipeline;
+  lockProbe: LockProbe;
+}
+
+export interface NerBackfillOptions {
+  limit: number;
+  json?: boolean;
+}
+
+export async function handleNerBackfill(
+  deps: NerBackfillDeps,
+  opts: NerBackfillOptions,
+  log: (m: string) => void = console.log,
+  logError: (m: string) => void = console.error,
+): Promise<number> {
+  const owner = deps.lockProbe.blockingOwner();
+  if (owner) {
+    if (opts.json) {
+      log(JSON.stringify({
+        ok: false,
+        blocked: true,
+        owner: { kind: owner.kind, pid: owner.pid },
+        next_action: "stop CBrain serve or run during the Dream maintenance window",
+      }, null, 2));
+    } else {
+      logError(`已拒绝：检测到活动的 CBrain ${owner.kind}（pid ${owner.pid}）。`);
+      logError("ner-backfill 会写 SQLite/vault；请先停止 serve，或让 Dream Stage 1.5 在维护窗口消费。");
+    }
+    return 1;
+  }
+
+  const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
+  const counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, { maxItems: opts.limit });
+  if (opts.json) {
+    log(JSON.stringify({ ok: true, counts }, null, 2));
+  } else {
+    log(`NER backfill: ${counts.processed} processed, ${counts.failed} failed, ${counts.timed_out} timed out, ${counts.skipped} skipped`);
+  }
+  return counts.failed > 0 || counts.timed_out > 0 ? 1 : 0;
 }
 
 /**
@@ -571,6 +617,53 @@ export function register(program: Command) {
       console.log(`  ⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
       deps.db.close();
       process.exit(0);
+    });
+
+  program
+    .command("ner-backfill")
+    .description("Process deferred NER jobs; refuses while serve/watcher is active")
+    .option("--limit <n>", "Maximum pending jobs to process", "50")
+    .option("--json", "Emit machine-readable JSON")
+    .action(async (opts) => {
+      const limit = Number.parseInt(String(opts.limit), 10);
+      if (!Number.isFinite(limit) || limit < 0) {
+        const message = "--limit must be an integer >= 0";
+        if (opts.json) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+        else console.error(message);
+        process.exitCode = 1;
+        return;
+      }
+
+      const config = loadConfig();
+      const deps = createDeps(config);
+      try {
+        if (!deps.llm) {
+          const message = "No LLM configured — ner-backfill requires an NER LLM provider.";
+          if (opts.json) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+          else console.error(message);
+          process.exitCode = 1;
+          return;
+        }
+
+        const profileDir = dirname(resolve(config.dbPath));
+        const lockProbe = createLiveLockProbe(profileDir);
+        const { Logger } = await import("../../core/logger.js");
+        const { PageManager } = await import("../../core/page.js");
+        const { NerEngine } = await import("../../core/ingestion/ner.js");
+        const { ContentPipeline } = await import("../../core/ingestion/pipeline.js");
+        const outputsDir = resolveRuntimePath(config);
+        const logger = new Logger(outputsDir);
+        const pages = new PageManager(deps.db, config.vaultPath, logger);
+        const nerEngine = new NerEngine(deps.llm, logger);
+        const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
+
+        process.exitCode = await handleNerBackfill(
+          { db: deps.db, pages, pipeline, lockProbe },
+          { limit, json: Boolean(opts.json) },
+        );
+      } finally {
+        deps.db.close();
+      }
     });
 
   program
