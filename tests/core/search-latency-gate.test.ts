@@ -64,7 +64,7 @@ describe("expandQuery gate (#250)", () => {
   });
 
   test("simple query + FTS empty → expandQuery IS called", async () => {
-    const llm = { name: "mock", chat: async () => "{}" };
+    const llm = { name: "mock", chat: async () => { throw new Error("chat should not be called"); } };
     const search = new HybridSearch(db, mockEmbed(), makeLance(), { llm: llm as never });
     const expandSpy = spyExpand(search, async () => ["唯一标记"]);
     await search.search("查无此物的标记zzz");
@@ -72,19 +72,22 @@ describe("expandQuery gate (#250)", () => {
     expandSpy.mockRestore();
   });
 
-  test("complex query → expandQuery IS called even with FTS>=3", async () => {
-    // Seed FTS hits whose content MATCHES the complex query tokens, so the FTS
-    // probe genuinely returns >=3 and this exercises the complex-branch of the
-    // gate (isComplex wins over ftsSufficient).
+  test("complex query + FTS>=3 → expandQuery NOT called (FTS evidence is sufficient)", async () => {
+    // Seed FTS hits whose content MATCHES the complex query tokens. FTS>=3 is
+    // sufficient local evidence, so the query must avoid LLM expansion even
+    // though the wording is complex.
     seedFtsHits(db, 3, "主题A 主题B 共同标记内容");
     const llm = { name: "mock", chat: async () => "{}" };
     const search = new HybridSearch(db, mockEmbed(), makeLance(), { llm: llm as never });
     // complex + _skipDecompose: isolate the expandQuery gate. Without
     // _skipDecompose, a complex query enters the decompose branch first and we'd
     // be testing decompose, not the expand gate.
-    const expandSpy = spyExpand(search, async () => ["主题A", "主题B"]);
-    await search.search("主题A 和 主题B", { _skipDecompose: true });
-    expect(expandSpy).toHaveBeenCalledTimes(1);
+    const trace: Record<string, unknown> = {};
+    const expandSpy = spyExpand(search, async () => { throw new Error("expandQuery should not be called"); });
+    const results = await search.search("主题A 和 主题B", { _skipDecompose: true, _trace: trace as never });
+    expect(results.length).toBeGreaterThan(0);
+    expect(expandSpy).toHaveBeenCalledTimes(0);
+    expect(trace.expand_skipped).toBe("fts_sufficient");
     expandSpy.mockRestore();
   });
 
@@ -100,10 +103,10 @@ describe("expandQuery gate (#250)", () => {
   });
 
   test("expandQuery over call-count budget → skipped, FTS preserved, expand_skipped=budget_exhausted", async () => {
-    // Seed FTS hits matching the complex query tokens so the FTS probe returns
-    // >=3. This verifies: when expand is skipped by the budget, the initialFts
-    // probe result is REUSED (not lost) — results.length > 0.
-    seedFtsHits(db, 3, "主题A 主题B 共同标记内容");
+    // Seed fewer than 3 FTS hits, so local evidence is useful but not sufficient.
+    // This verifies: when expand is skipped by the budget, the initialFts probe
+    // result is REUSED (not lost) — results.length > 0.
+    seedFtsHits(db, 2, "主题A 主题B 共同标记内容");
     const llm = { name: "mock", chat: async () => "{}" };
     const search = new HybridSearch(db, mockEmbed(), makeLance(), { llm: llm as never });
     const trace: Record<string, unknown> = { llm_calls: 3 }; // #222 MAX_DEFAULT_LLM_CALLS budget exhausted

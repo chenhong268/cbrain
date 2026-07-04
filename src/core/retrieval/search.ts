@@ -503,13 +503,12 @@ export class HybridSearch {
 
     // #250 — bounded FTS probe gate. ftsProbe is hoisted above (reused here, NOT
     // re-run) so there is no second ftsSearch on the original query.
-    const knownSlugsForGate = options?._hints?.knownSlugs ?? [];
-    const isComplex = options?._hints?.isComplex ?? isComplexQuery(query, knownSlugsForGate);
     // #250 — preserve explicit multiQuery:false (decompose fallback at search.ts:473
     // passes multiQuery:false to forbid LLM escalation). Caller opt-out is honored
-    // even when the query is complex or FTS is insufficient.
+    // even when FTS is insufficient. FTS>=3 is sufficient local evidence, so it
+    // skips expandQuery even for complex wording; FTS<3 can still expand.
     const multiQueryAllowed = options?.multiQuery ?? this.multiQueryEnabled;
-    const shouldExpand = multiQueryAllowed && !!this.llm && (isComplex || !ftsSufficient);
+    const shouldExpand = multiQueryAllowed && !!this.llm && !ftsSufficient;
     if (trace && this.llm && !shouldExpand && ftsSufficient) {
       trace.expand_skipped = "fts_sufficient";
     }
