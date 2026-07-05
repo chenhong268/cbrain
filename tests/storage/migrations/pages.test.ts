@@ -30,6 +30,11 @@ describe("runPageMigrations", () => {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
+      CREATE TABLE config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
     `);
     db.prepare("INSERT INTO pages (slug, type, title, file_path) VALUES (?, ?, ?, ?)").run(
       "entity/a",
@@ -70,6 +75,34 @@ describe("runPageMigrations", () => {
     }
   });
 
+  test("adds page activity and hotness additive fields", () => {
+    const db = legacyPagesDb();
+    try {
+      runPageMigrations(db);
+
+      const columns = db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+      expect(names).toContain("activity_weight");
+      expect(names).toContain("last_queried_at");
+      expect(names).toContain("hotness_score");
+
+      const row = db.prepare(
+        "SELECT activity_weight, last_queried_at, hotness_score FROM pages WHERE slug = ?",
+      ).get("entity/a") as {
+        activity_weight: number;
+        last_queried_at: string | null;
+        hotness_score: number;
+      };
+      expect(row).toEqual({
+        activity_weight: 0,
+        last_queried_at: null,
+        hotness_score: 0,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   test("is idempotent and preserves existing expiry values", () => {
     const db = legacyPagesDb();
     try {
@@ -87,6 +120,36 @@ describe("runPageMigrations", () => {
       const record = db.prepare("SELECT expires_at FROM pages WHERE slug = ?").get("records/b") as { expires_at: string | null };
       expect(entity).toEqual({ expires_at: "2026-12-31T00:00:00Z", confidence_decay: 1 });
       expect(record.expires_at).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("is idempotent and preserves existing activity and hotness values", () => {
+    const db = legacyPagesDb();
+    try {
+      db.exec("ALTER TABLE pages ADD COLUMN activity_weight REAL DEFAULT 0.0");
+      db.exec("ALTER TABLE pages ADD COLUMN last_queried_at TEXT");
+      db.exec("ALTER TABLE pages ADD COLUMN hotness_score REAL NOT NULL DEFAULT 0.0");
+      db.prepare(
+        "UPDATE pages SET activity_weight = ?, last_queried_at = ?, hotness_score = ? WHERE slug = ?",
+      ).run(0.75, "2026-07-01T00:00:00Z", 0.42, "entity/a");
+
+      runPageMigrations(db);
+      runPageMigrations(db);
+
+      const row = db.prepare(
+        "SELECT activity_weight, last_queried_at, hotness_score FROM pages WHERE slug = ?",
+      ).get("entity/a") as {
+        activity_weight: number;
+        last_queried_at: string;
+        hotness_score: number;
+      };
+      expect(row).toEqual({
+        activity_weight: 0.75,
+        last_queried_at: "2026-07-01T00:00:00Z",
+        hotness_score: 0.42,
+      });
     } finally {
       db.close();
     }

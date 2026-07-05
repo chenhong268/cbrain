@@ -391,8 +391,6 @@ export class CBrainDB {
     this.migrateNerQualityLog();
     this.migrateRawToRecords();
     this.migrateQueryLog();
-    this.migrateActivityWeight();
-    this.migrateHotnessScore();
     this.migrateQueryFeedback();
     this.migrateAliasesSource();
     this.migrateChunksSummaryLevel();
@@ -3177,19 +3175,6 @@ export class CBrainDB {
     return rows.map(r => r.session_id);
   }
 
-  // ─── Activity weight (Phase 2) ──────────────────────────────
-
-  private migrateActivityWeight(): void {
-    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    if (!names.has("activity_weight")) {
-      this.db.exec("ALTER TABLE pages ADD COLUMN activity_weight REAL DEFAULT 0.0");
-    }
-    if (!names.has("last_queried_at")) {
-      this.db.exec("ALTER TABLE pages ADD COLUMN last_queried_at TEXT");
-    }
-  }
-
   batchUpdateActivityWeights(weights: Map<string, { weight: number; lastQueriedAt: string }>): number {
     if (weights.size === 0) return 0;
     const stmt = this.prepare(
@@ -3226,16 +3211,6 @@ export class CBrainDB {
     return this.prepare(
       "SELECT slug, title, activity_weight FROM pages WHERE activity_weight > 0 ORDER BY activity_weight DESC LIMIT $limit"
     ).all({ $limit: limit }) as Array<{ slug: string; title: string; activity_weight: number }>;
-  }
-
-  // ─── Hotness score ───────────────────────────────────────────
-
-  private migrateHotnessScore(): void {
-    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    if (!names.has("hotness_score")) {
-      this.db.exec("ALTER TABLE pages ADD COLUMN hotness_score REAL NOT NULL DEFAULT 0.0");
-    }
   }
 
   updateHotnessScore(slug: string, score: number): void {
