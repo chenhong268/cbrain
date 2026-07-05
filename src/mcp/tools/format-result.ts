@@ -38,6 +38,51 @@ export function toolEnvelope<T>(
   return { display, summary, raw };
 }
 
+type ToolSummaryOptions = Partial<Omit<ToolSummary, "status" | "count" | "message">>;
+
+function makeSummary(
+  status: ToolSummary["status"],
+  count: number,
+  message: string,
+  options: ToolSummaryOptions = {},
+): ToolSummary {
+  return {
+    status,
+    count,
+    truncated: false,
+    message,
+    ...options,
+  };
+}
+
+function okEnvelope<T>(
+  raw: T,
+  display: string,
+  count: number,
+  message: string,
+  options?: ToolSummaryOptions,
+): { display: string; summary: ToolSummary; raw: T } {
+  return toolEnvelope(raw, display, makeSummary("ok", count, message, options));
+}
+
+function emptyEnvelope<T>(
+  raw: T,
+  display: string,
+  message: string,
+  options?: ToolSummaryOptions,
+): { display: string; summary: ToolSummary; raw: T } {
+  return toolEnvelope(raw, display, makeSummary("empty", 0, message, options));
+}
+
+function errorEnvelope<T>(
+  raw: T,
+  display: string,
+  message: string,
+  options?: ToolSummaryOptions,
+): { display: string; summary: ToolSummary; raw: T } {
+  return toolEnvelope(raw, display, makeSummary("error", 0, message, options));
+}
+
 // ─── Internal identifier sanitization ───────────────────────
 
 const SLUG_PATH_RE = /brain\/(?:entities|concepts|insights|records)\//g;
@@ -460,16 +505,7 @@ export function formatGetPageEnvelope(payload: GetPagePayload): {
   raw: GetPagePayload;
 } {
   if (payload.error) {
-    return toolEnvelope(
-      payload,
-      "页面不存在。",
-      {
-        status: "empty",
-        count: 0,
-        truncated: false,
-        message: "页面不存在",
-      },
-    );
+    return emptyEnvelope(payload, "页面不存在。", "页面不存在");
   }
 
   const title = payload.title ?? "未知页面";
@@ -477,15 +513,12 @@ export function formatGetPageEnvelope(payload: GetPagePayload): {
   const truncated = payload.has_more === true;
   const lengthNote = truncated ? "只显示了前面一部分" : "内容完整";
 
-  return toolEnvelope(
+  return okEnvelope(
     payload,
     sanitizeDisplay(`《${title}》，${length} 字，${lengthNote}。`),
-    {
-      status: "ok",
-      count: 1,
-      truncated,
-      message: `《${title}》，${length} 字`,
-    },
+    1,
+    `《${title}》，${length} 字`,
+    { truncated },
   );
 }
 
@@ -1100,11 +1133,7 @@ export function formatVersionsEnvelope(
   const displayName = title || "该页面";
 
   if (versions.length === 0) {
-    return {
-      display: `📄 ${displayName}暂无版本历史。`,
-      summary: { status: "empty", count: 0, truncated: false, message: "无版本记录" },
-      raw,
-    };
+    return emptyEnvelope(raw, `📄 ${displayName}暂无版本历史。`, "无版本记录");
   }
 
   const latest = versions[0];
@@ -1116,11 +1145,7 @@ export function formatVersionsEnvelope(
     lines.push(`最早版本：v${versions[versions.length - 1].version}`);
   }
 
-  return {
-    display: sanitizeDisplay(lines.join("\n")),
-    summary: { status: "ok", count: versions.length, truncated: false, message: `${versions.length} 个版本` },
-    raw,
-  };
+  return okEnvelope(raw, sanitizeDisplay(lines.join("\n")), versions.length, `${versions.length} 个版本`);
 }
 
 export function formatRevertEnvelope(
@@ -1133,18 +1158,10 @@ export function formatRevertEnvelope(
   const displayName = title || "该页面";
 
   if (success) {
-    return {
-      display: `📄 已将${displayName}回滚到版本 ${version}。`,
-      summary: { status: "ok", count: 1, truncated: false, message: `回滚到 v${version}` },
-      raw,
-    };
+    return okEnvelope(raw, `📄 已将${displayName}回滚到版本 ${version}。`, 1, `回滚到 v${version}`);
   }
 
-  return {
-    display: `📄 回滚失败：${displayName}没有版本 ${version}。`,
-    summary: { status: "error", count: 0, truncated: false, message: `版本 ${version} 不存在` },
-    raw,
-  };
+  return errorEnvelope(raw, `📄 回滚失败：${displayName}没有版本 ${version}。`, `版本 ${version} 不存在`);
 }
 
 function formatDate(iso: string): string {
@@ -1243,18 +1260,10 @@ export function formatRemoveProfileEnvelope(
   const raw = { removed, count: removed.length };
 
   if (removed.length === 0) {
-    return {
-      display: "👤 未找到匹配的偏好记录。",
-      summary: { status: "empty", count: 0, truncated: false, message: "无删除" },
-      raw,
-    };
+    return emptyEnvelope(raw, "👤 未找到匹配的偏好记录。", "无删除");
   }
 
-  return {
-    display: `👤 已删除 ${removed.length} 条偏好。`,
-    summary: { status: "ok", count: removed.length, truncated: false, message: `${removed.length} 条已删除` },
-    raw,
-  };
+  return okEnvelope(raw, `👤 已删除 ${removed.length} 条偏好。`, removed.length, `${removed.length} 条已删除`);
 }
 
 export function formatReloadProfileEnvelope(
