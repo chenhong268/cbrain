@@ -109,6 +109,7 @@ const DEBUG_ALLOWLIST = [
   "get_provenance",
   "set_trust_state",
   "confirm_evidence",
+  "profile",
   "add_link",
   "remove_link",
   "add_tag",

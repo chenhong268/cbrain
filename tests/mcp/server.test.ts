@@ -89,7 +89,7 @@ describe("MCP Server", () => {
         "ingest", "ingest_dialogue", "job", "job_cancel", "job_list",
         "job_retry", "job_status", "job_submit", "link", "list_insights",
         "list_pages", "mark_discovery_seen", "merge_entities", "merge_pages",
-        "promote_discovery", "put_page", "query", "query_insights",
+        "profile", "promote_discovery", "put_page", "query", "query_insights",
         "read_action_candidates", "read_discoveries", "read_knowledge_map", "read_project_state", "recall_episode", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
         "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
         "resolve_slugs", "revert_version", "run_action_candidates", "run_discovery", "set_hierarchy", "set_trust_state",
@@ -127,6 +127,52 @@ describe("MCP Server", () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.totalPages).toBe(3);
       expect(data.totalLinks).toBe(1);
+    });
+  });
+
+  describe("profile tool", () => {
+    const profileEntry = {
+      id: "pref-a",
+      type: "preference" as const,
+      category: "work" as const,
+      scope: "open" as const,
+      content: "偏好A",
+      source: "explicit" as const,
+      tags: ["tag-a"],
+    };
+
+    test("action=get matches get_profile envelope shape", async () => {
+      const server = createServer(deps);
+      const tools = getTools(server);
+      const unified = await tools.profile.handler({ action: "get" });
+      const legacy = await tools.get_profile.handler({});
+      expect(JSON.parse(unified.content[0].text)).toEqual(JSON.parse(legacy.content[0].text));
+    });
+
+    test("action=update matches update_profile shape and writes entries", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).profile.handler({ action: "update", entries: [profileEntry] });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.summary).toMatchObject({ status: "ok", count: 1 });
+      expect(data.raw).toEqual({ updated: ["pref-a"], count: 1 });
+    });
+
+    test("action=remove matches remove_profile shape and removes entries", async () => {
+      const server = createServer(deps);
+      const tools = getTools(server);
+      await tools.profile.handler({ action: "update", entries: [profileEntry] });
+      const result = await tools.profile.handler({ action: "remove", ids: ["pref-a"] });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.summary).toMatchObject({ status: "ok", count: 1 });
+      expect(data.raw).toEqual({ removed: ["pref-a"], count: 1 });
+    });
+
+    test("action=reload matches reload_profile envelope shape", async () => {
+      const server = createServer(deps);
+      const tools = getTools(server);
+      const unified = await tools.profile.handler({ action: "reload" });
+      const legacy = await tools.reload_profile.handler({});
+      expect(JSON.parse(unified.content[0].text)).toEqual(JSON.parse(legacy.content[0].text));
     });
   });
 

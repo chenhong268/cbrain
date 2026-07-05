@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
+import type { ProfileCategory, ProfileEntryType, ProfileScope } from "../../profile/schema.js";
 import {
   formatGetProfileEnvelope,
   formatUpdateProfileEnvelope,
@@ -8,7 +9,119 @@ import {
   formatReloadProfileEnvelope,
 } from "./format-result.js";
 
+type ProfileAction = "get" | "update" | "remove" | "reload";
+
+interface ProfileFilterInput {
+  scope?: ProfileScope;
+  category?: ProfileCategory;
+  type?: ProfileEntryType;
+  tags?: string[];
+  ids?: string[];
+}
+
+interface ProfileUpdateInput {
+  id: string;
+  type: ProfileEntryType;
+  category: ProfileCategory;
+  scope: ProfileScope;
+  agents?: string[];
+  content: string;
+  priority?: "high" | "normal";
+  source?: "explicit" | "observed" | "inferred";
+  tags?: string[];
+}
+
+function textResult(envelope: unknown): { content: Array<{ type: "text"; text: string }> } {
+  return {
+    content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
+  };
+}
+
+function errorResult(message: string): { content: Array<{ type: "text"; text: string }>; isError: boolean } {
+  return {
+    content: [{ type: "text", text: JSON.stringify({ error: message }) }],
+    isError: true,
+  };
+}
+
+function getProfile(ctx: ToolContext, filter: ProfileFilterInput) {
+  const entries = ctx.profile.getEntries(filter);
+  const stats = ctx.profile.getStats();
+  const modules = ctx.profile.getModules();
+  return textResult(formatGetProfileEnvelope(entries, stats, modules, filter as Record<string, unknown>));
+}
+
+function updateProfile(ctx: ToolContext, entries: ProfileUpdateInput[]) {
+  const updated = ctx.profile.updateEntries(entries.map(entry => ({ ...entry })));
+  return textResult(formatUpdateProfileEnvelope(updated));
+}
+
+function removeProfile(ctx: ToolContext, ids: string[]) {
+  const removed = ctx.profile.removeEntries(ids);
+  return textResult(formatRemoveProfileEnvelope(removed));
+}
+
+function reloadProfile(ctx: ToolContext) {
+  ctx.profile.reload();
+  const stats = ctx.profile.getStats();
+  const modules = ctx.profile.getModules();
+  return textResult(formatReloadProfileEnvelope(stats, modules));
+}
+
+function runProfileAction(
+  ctx: ToolContext,
+  action: ProfileAction,
+  args: {
+    scope?: ProfileScope;
+    category?: ProfileCategory;
+    type?: ProfileEntryType;
+    tags?: string[];
+    ids?: string[];
+    entries?: ProfileUpdateInput[];
+  },
+) {
+  if (action === "get") {
+    const { scope, category, type, tags, ids } = args;
+    return getProfile(ctx, { scope, category, type, tags, ids });
+  }
+  if (action === "update") {
+    if (!args.entries) return errorResult("entries is required for action: update");
+    return updateProfile(ctx, args.entries);
+  }
+  if (action === "remove") {
+    if (!args.ids) return errorResult("ids is required for action: remove");
+    return removeProfile(ctx, args.ids);
+  }
+  return reloadProfile(ctx);
+}
+
 export function registerProfileTools(server: McpServer, ctx: ToolContext): void {
+  server.registerTool("profile", {
+    description:
+      "Unified profile operations. Use action=get/update/remove/reload. " +
+      "Compatibility aliases get_profile/update_profile/remove_profile/reload_profile remain available.",
+    inputSchema: {
+      action: z.enum(["get", "update", "remove", "reload"]).describe("Profile operation"),
+      scope: z.enum(["open", "scoped", "private"]).optional().describe("Privacy scope filter for action=get"),
+      category: z.enum(["communication", "work", "health", "finance", "interests", "general"]).optional().describe("Category filter for action=get"),
+      type: z.enum(["preference", "constraint", "context", "habit"]).optional().describe("Entry type filter for action=get"),
+      tags: z.array(z.string().max(200)).optional().describe("Tag filter for action=get"),
+      ids: z.array(z.string().max(200)).optional().describe("Entry IDs for action=get/remove"),
+      entries: z.array(z.object({
+        id: z.string().max(200).describe("Unique entry identifier (kebab-case)"),
+        type: z.enum(["preference", "constraint", "context", "habit"]).describe("Entry type"),
+        category: z.enum(["communication", "work", "health", "finance", "interests", "general"]).describe("Category"),
+        scope: z.enum(["open", "scoped", "private"]).describe("Privacy scope"),
+        agents: z.array(z.string().max(200)).optional().describe("Visible agents (for scoped entries)"),
+        content: z.string().max(50_000).describe("The profile content"),
+        priority: z.enum(["high", "normal"]).optional().describe("Priority (mainly for constraints)"),
+        source: z.enum(["explicit", "observed", "inferred"]).default("observed").describe("How this was learned"),
+        tags: z.array(z.string().max(200)).optional().describe("Tags for categorization"),
+      })).optional().describe("Entries for action=update"),
+    },
+  }, async ({ action, scope, category, type, tags, ids, entries }) =>
+    runProfileAction(ctx, action, { scope, category, type, tags, ids, entries }));
+
   server.registerTool("get_profile", {
     description:
       "Query personalized profile entries — preferences, constraints, habits, and context " +
@@ -21,17 +134,7 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
       tags: z.array(z.string().max(200)).optional().describe("Tag filter (entries matching any tag)"),
       ids: z.array(z.string().max(200)).optional().describe("Specific entry IDs to retrieve"),
     },
-  }, async ({ scope, category, type, tags, ids }) => {
-    const filter = { scope, category, type, tags, ids };
-    const entries = ctx.profile.getEntries(filter);
-    const stats = ctx.profile.getStats();
-    const modules = ctx.profile.getModules();
-
-    const envelope = formatGetProfileEnvelope(entries, stats, modules, filter as Record<string, unknown>);
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-    };
-  });
+  }, async ({ scope, category, type, tags, ids }) => getProfile(ctx, { scope, category, type, tags, ids }));
 
   server.registerTool("update_profile", {
     description:
@@ -51,13 +154,7 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
         tags: z.array(z.string().max(200)).optional().describe("Tags for categorization"),
       })).describe("Entries to create or update"),
     },
-  }, async ({ entries }) => {
-    const updated = ctx.profile.updateEntries(entries);
-    const envelope = formatUpdateProfileEnvelope(updated as any[]);
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-    };
-  });
+  }, async ({ entries }) => updateProfile(ctx, entries));
 
   server.registerTool("remove_profile", {
     description:
@@ -66,26 +163,12 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
     inputSchema: {
       ids: z.array(z.string().max(200)).describe("Entry IDs to remove"),
     },
-  }, async ({ ids }) => {
-    const removed = ctx.profile.removeEntries(ids);
-    const envelope = formatRemoveProfileEnvelope(removed);
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-    };
-  });
+  }, async ({ ids }) => removeProfile(ctx, ids));
 
   server.registerTool("reload_profile", {
     description:
       "Reload profile data from YAML files. Use after profile files are manually edited " +
       "to pick up changes without restarting the server.",
     inputSchema: {},
-  }, async () => {
-    ctx.profile.reload();
-    const stats = ctx.profile.getStats();
-    const modules = ctx.profile.getModules();
-    const envelope = formatReloadProfileEnvelope(stats, modules);
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-    };
-  });
+  }, async () => reloadProfile(ctx));
 }

@@ -8,7 +8,7 @@
 ┌──────────────────────────────────────────┐
 │  Skills Layer (7 × SKILL.md)             │  ← Agent behavior: when to check, what to save
 ├──────────────────────────────────────────┤
-│  MCP Server (93 tools, stdio + HTTP)     │  ← Agent interface: CRUD, search, graph, jobs
+│  MCP Server (94 tools, stdio + HTTP)     │  ← Agent interface: CRUD, search, graph, jobs
 ├──────────────────────────────────────────┤
 │  Core Engine                             │
 │  ┌──────────┬──────────┬──────────────┐  │
