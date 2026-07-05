@@ -54,6 +54,7 @@ describe("isToolAllowedForProfile", () => {
       "job", "job_submit", "job_list", "job_status", "job_cancel", "job_retry", "status", "wakeup_diff"]) {
       expect(isToolAllowedForProfile(t, "maintenance")).toBe(true);
     }
+    expect(isToolAllowedForProfile("batch", "maintenance")).toBe(true);
   });
   test("debug includes query + get_chunks + list_pages + provenance", () => {
     for (const t of ["query", "get_chunks", "list_pages", "get_links", "get_tags", "tag",
@@ -86,6 +87,10 @@ describe("isToolAllowedForProfile", () => {
 
   test("agent does not expose unified profile tool because it includes write/reload actions (#291)", () => {
     expect(isToolAllowedForProfile("profile", "agent")).toBe(false);
+  });
+
+  test("agent does not expose unified batch tool because it is bulk/destructive (#292)", () => {
+    expect(isToolAllowedForProfile("batch", "agent")).toBe(false);
   });
 
   // #264: raw `ingest` stays in the agent surface BY DESIGN. Removing it would

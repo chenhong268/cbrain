@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 94 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 95 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -321,6 +321,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `alias` | Unified alias operations. |
 | `append_page` | Append content to an existing page's body. |
 | `archive_insight` | Archive an insight. |
+| `batch` | Unified batch operations. |
 | `batch_add_links` | Create multiple links in one call. |
 | `batch_delete_pages` | Delete multiple pages in one call. |
 | `batch_merge_pages` | Merge multiple page pairs in one call. |

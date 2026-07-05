@@ -82,6 +82,7 @@ const MAINTENANCE_ALLOWLIST = [
   "read_action_candidates",
   "update_action_candidate_status",
   "wakeup_diff",
+  "batch",
   "batch_delete_pages",
   "batch_add_links",
   "batch_merge_pages",

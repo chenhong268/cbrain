@@ -76,6 +76,64 @@ describe("Batch Tools", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
+  describe("batch unified tool", () => {
+    test("action=delete_pages returns the same safety preview shape", async () => {
+      for (let i = 0; i < 20; i++) {
+        insertPageWithVault(db, `entities/preview${i}`, `Preview${i}`, vaultPath);
+      }
+
+      const server = createServer(deps);
+      const slugs = Array.from({ length: 20 }, (_, i) => `entities/preview${i}`);
+      const result = await getTools(server).batch.handler({ action: "delete_pages", slugs });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.preview).toBe(true);
+      expect(data.itemCount).toBe(20);
+      expect(data.warning).toContain("20");
+      expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number }).toEqual({ c: 20 });
+    });
+
+    test("action=add_links creates links like batch_add_links", async () => {
+      insertPageWithVault(db, "entities/a", "A", vaultPath);
+      insertPageWithVault(db, "entities/b", "B", vaultPath);
+
+      const server = createServer(deps);
+      const result = await getTools(server).batch.handler({
+        action: "add_links",
+        links: [{ from: "entities/a", to: "entities/b", relation: "相关" }],
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.succeeded).toBe(1);
+      expect(data.failed).toBe(0);
+      expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM links").get() as { c: number }).toEqual({ c: 1 });
+    });
+
+    test("action=merge_pages returns the same safety preview shape", async () => {
+      const dir = join(vaultPath, "brain/entities");
+      mkdirSync(dir, { recursive: true });
+      for (let i = 0; i < 20; i++) {
+        writeFileSync(join(dir, `Src${i}.md`), `---\ntitle: Src${i}\ntype: entity\nslug: entities/src${i}\n---\nS${i}`);
+        writeFileSync(join(dir, `Tgt${i}.md`), `---\ntitle: Tgt${i}\ntype: entity\nslug: entities/tgt${i}\n---\nT${i}`);
+        insertPage(db, `entities/src${i}`, `Src${i}`, `brain/entities/Src${i}.md`);
+        insertPage(db, `entities/tgt${i}`, `Tgt${i}`, `brain/entities/Tgt${i}.md`);
+      }
+
+      const server = createServer(deps);
+      const pairs = Array.from({ length: 20 }, (_, i) => ({
+        source: `entities/src${i}`,
+        target: `entities/tgt${i}`,
+      }));
+      const result = await getTools(server).batch.handler({ action: "merge_pages", pairs });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.preview).toBe(true);
+      expect(data.itemCount).toBe(20);
+      expect(data.warning).toContain("20");
+      expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get() as { c: number }).toEqual({ c: 40 });
+    });
+  });
+
   describe("batch_delete_pages", () => {
     test("deletes multiple pages", async () => {
       insertPageWithVault(db, "entities/a", "A", vaultPath);
