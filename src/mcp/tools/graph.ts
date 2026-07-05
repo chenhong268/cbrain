@@ -4,7 +4,78 @@ import type { ToolContext } from "../context.js";
 import { findEntitySlug, normalizeRelation } from "../../core/shared.js";
 import { formatGraphEnvelope, formatLinksEnvelope } from "./format-result.js";
 
+type LinkDirection = "outgoing" | "incoming" | "both";
+type LinkAction = "list" | "add" | "remove";
+
+function linkJson(payload: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
+}
+
 export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
+  const listLinks = (slug: string, direction: LinkDirection = "both") => {
+    const links = ctx.graph.getLinks(slug, direction);
+    const linkSlugs = links.map(l => l.from_slug === slug ? l.to_slug : l.from_slug);
+    const titleMap = ctx.db.getPageTitlesAndTypes(linkSlugs);
+    const titleResolver = (s: string) => titleMap.get(s)?.title || null;
+    const envelope = formatLinksEnvelope(links, slug, titleResolver);
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+    };
+  };
+
+  const addLink = (
+    from: string,
+    to: string,
+    relation = "提及",
+    context?: string,
+    weight?: number,
+    strength?: "strong" | "medium" | "weak",
+  ) => {
+    if (!ctx.pages.getBySlug(from)) return { ...linkJson({ error: `Source page not found: ${from}` }), isError: true };
+    if (!ctx.pages.getBySlug(to)) return { ...linkJson({ error: `Target page not found: ${to}` }), isError: true };
+    if (from === to) return { ...linkJson({ error: "Cannot create self-referencing link" }), isError: true };
+
+    ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "agent", 0.9);
+    ctx.pages.incrementMention(to);
+    const addWarnings = ctx.pages.syncAffectedSlugs([from, to]);
+
+    return linkJson({ success: true, from, to, relation, ...(addWarnings.length > 0 ? { sync_warnings: addWarnings } : {}) });
+  };
+
+  const removeLink = (from: string, to: string, relation?: string) => {
+    const ok = ctx.graph.removeLink(from, to, relation);
+    let removeWarnings: Array<{ slug: string; error: string }> = [];
+    if (ok) {
+      removeWarnings = ctx.pages.syncAffectedSlugs([from, to]);
+    }
+    return linkJson({ success: ok, from, to, relation, ...(removeWarnings.length > 0 ? { sync_warnings: removeWarnings } : {}) });
+  };
+
+  const runLinkAction = (
+    action: LinkAction,
+    input: {
+      slug?: string;
+      direction?: LinkDirection;
+      from?: string;
+      to?: string;
+      relation?: string;
+      context?: string;
+      weight?: number;
+      strength?: "strong" | "medium" | "weak";
+    },
+  ) => {
+    if (action === "list") {
+      if (!input.slug) return { ...linkJson({ error: "slug is required for link action=list" }), isError: true };
+      return listLinks(input.slug, input.direction);
+    }
+    if (!input.from) return { ...linkJson({ error: `from is required for link action=${action}` }), isError: true };
+    if (!input.to) return { ...linkJson({ error: `to is required for link action=${action}` }), isError: true };
+    if (action === "add") {
+      return addLink(input.from, input.to, input.relation ?? "提及", input.context, input.weight, input.strength);
+    }
+    return removeLink(input.from, input.to, input.relation);
+  };
+
   // ─── graph_query ─────────────────────────────────────────
   server.registerTool("graph_query", {
     description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved). Links include source_type (wikilink=human, manual=human explicit input, agent=agent inference, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
@@ -71,6 +142,24 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     };
   });
 
+  // ─── link ─────────────────────────────────────────────────
+  server.registerTool("link", {
+    description: "Unified link operations. Use action=list/add/remove. Compatibility aliases get_links/add_link/remove_link remain available.",
+    inputSchema: {
+      action: z.enum(["list", "add", "remove"]).describe("Link action to run"),
+      slug: z.string().max(500).optional().describe("Page slug for action=list"),
+      direction: z.enum(["outgoing", "incoming", "both"]).optional().default("both").describe("Link direction for action=list"),
+      from: z.string().max(500).optional().describe("Source page slug for action=add/remove"),
+      to: z.string().max(500).optional().describe("Target page slug for action=add/remove"),
+      relation: z.string().max(100).optional().describe("Relation type. Defaults to 提及 for action=add; omit for action=remove to remove all relations between the two."),
+      context: z.string().max(10_000).optional().describe("Optional context for action=add"),
+      weight: z.number().optional().describe("Link weight 0-1 for action=add. Auto-assigned if omitted."),
+      strength: z.enum(["strong", "medium", "weak"]).optional().describe("Link strength for action=add. Auto-assigned if omitted."),
+    },
+  }, async ({ action, slug, direction, from, to, relation, context, weight, strength }) => {
+    return runLinkAction(action, { slug, direction, from, to, relation, context, weight, strength });
+  });
+
   // ─── get_links ───────────────────────────────────────────────
   server.registerTool("get_links", {
     description: "Get links for a page. Returns outgoing, incoming, or both directions. Links include source_type (wikilink=human, manual=human explicit input, agent=agent inference, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
@@ -79,14 +168,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       direction: z.enum(["outgoing", "incoming", "both"]).optional().default("both").describe("Link direction"),
     },
   }, async ({ slug, direction }) => {
-    const links = ctx.graph.getLinks(slug, direction);
-    const linkSlugs = links.map(l => l.from_slug === slug ? l.to_slug : l.from_slug);
-    const titleMap = ctx.db.getPageTitlesAndTypes(linkSlugs);
-    const titleResolver = (s: string) => titleMap.get(s)?.title || null;
-    const envelope = formatLinksEnvelope(links, slug, titleResolver);
-    return {
-      content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
-    };
+    return listLinks(slug, direction);
   });
 
   // ─── add_link ────────────────────────────────────────────────
@@ -101,17 +183,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       strength: z.enum(["strong", "medium", "weak"]).optional().describe("Link strength. Auto-assigned if omitted."),
     },
   }, async ({ from, to, relation, context, weight, strength }) => {
-    if (!ctx.pages.getBySlug(from)) return { content: [{ type: "text", text: JSON.stringify({ error: `Source page not found: ${from}` }) }], isError: true };
-    if (!ctx.pages.getBySlug(to)) return { content: [{ type: "text", text: JSON.stringify({ error: `Target page not found: ${to}` }) }], isError: true };
-    if (from === to) return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot create self-referencing link" }) }], isError: true };
-
-    ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "agent", 0.9);
-    ctx.pages.incrementMention(to);
-    const addWarnings = ctx.pages.syncAffectedSlugs([from, to]);
-
-    return {
-      content: [{ type: "text", text: JSON.stringify({ success: true, from, to, relation, ...(addWarnings.length > 0 ? { sync_warnings: addWarnings } : {}) }) }],
-    };
+    return addLink(from, to, relation, context, weight, strength);
   });
 
   // ─── remove_link ─────────────────────────────────────────────
@@ -123,13 +195,6 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       relation: z.string().max(100).optional().describe("Relation type (omit to remove all relations between the two)"),
     },
   }, async ({ from, to, relation }) => {
-    const ok = ctx.graph.removeLink(from, to, relation);
-    let removeWarnings: Array<{ slug: string; error: string }> = [];
-    if (ok) {
-      removeWarnings = ctx.pages.syncAffectedSlugs([from, to]);
-    }
-    return {
-      content: [{ type: "text", text: JSON.stringify({ success: ok, from, to, relation, ...(removeWarnings.length > 0 ? { sync_warnings: removeWarnings } : {}) }) }],
-    };
+    return removeLink(from, to, relation);
   });
 }

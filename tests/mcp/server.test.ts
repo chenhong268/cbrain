@@ -87,7 +87,7 @@ describe("MCP Server", () => {
         "get_links", "get_org_tree", "get_page", "get_pages", "get_profile", "get_provenance", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",
         "ingest", "ingest_dialogue", "job_cancel", "job_list",
-        "job_retry", "job_status", "job_submit", "list_insights",
+        "job_retry", "job_status", "job_submit", "link", "list_insights",
         "list_pages", "mark_discovery_seen", "merge_entities", "merge_pages",
         "promote_discovery", "put_page", "query", "query_insights",
         "read_action_candidates", "read_discoveries", "read_knowledge_map", "read_project_state", "recall_episode", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
@@ -1850,6 +1850,90 @@ describe("MCP Server", () => {
   });
 
   // ─── Link tools ────────────────────────────────
+
+  describe("link tool", () => {
+    test("action=list matches get_links envelope shape", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/link-list-from", "Link List From", "link-list-from.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/link-list-to", "Link List To", "link-list-to.md", "h2");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
+      ).run("entities/link-list-from", "entities/link-list-to", "mentions");
+
+      const server = createServer(deps);
+      const result = await getTools(server).link.handler({
+        action: "list",
+        slug: "entities/link-list-from",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(Array.isArray(data.raw)).toBe(true);
+      expect(data.raw.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("action=add matches add_link shape and writes link", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/link-add-from", "Link Add From", "link-add-from.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/link-add-to", "Link Add To", "link-add-to.md", "h2");
+      writeFileSync(join(vaultPath, "link-add-from.md"), "---\ntitle: Link Add From\ntype: entity\n---\n");
+      writeFileSync(join(vaultPath, "link-add-to.md"), "---\ntitle: Link Add To\ntype: entity\n---\n");
+
+      const server = createServer(deps);
+      const result = await getTools(server).link.handler({
+        action: "add",
+        from: "entities/link-add-from",
+        to: "entities/link-add-to",
+        relation: "mentions",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({
+        success: true,
+        from: "entities/link-add-from",
+        to: "entities/link-add-to",
+        relation: "mentions",
+      });
+      const cnt = db.rawDb.prepare(
+        "SELECT COUNT(*) as c FROM links WHERE from_slug = ? AND to_slug = ?"
+      ).get("entities/link-add-from", "entities/link-add-to") as { c: number };
+      expect(cnt.c).toBe(1);
+    });
+
+    test("action=remove matches remove_link shape and removes link", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/link-remove-from", "Link Remove From", "link-remove-from.md", "h1");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/link-remove-to", "Link Remove To", "link-remove-to.md", "h2");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
+      ).run("entities/link-remove-from", "entities/link-remove-to", "mentions");
+
+      const server = createServer(deps);
+      const result = await getTools(server).link.handler({
+        action: "remove",
+        from: "entities/link-remove-from",
+        to: "entities/link-remove-to",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({
+        success: true,
+        from: "entities/link-remove-from",
+        to: "entities/link-remove-to",
+      });
+      const cnt = db.rawDb.prepare(
+        "SELECT COUNT(*) as c FROM links WHERE from_slug = ? AND to_slug = ?"
+      ).get("entities/link-remove-from", "entities/link-remove-to") as { c: number };
+      expect(cnt.c).toBe(0);
+    });
+  });
 
   describe("get_links tool", () => {
     test("returns links for a page", async () => {

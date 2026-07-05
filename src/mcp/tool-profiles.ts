@@ -98,6 +98,7 @@ const DEBUG_ALLOWLIST = [
   "get_page",
   "get_pages",
   "get_links",
+  "link",
   "get_tags",
   "tag",
   "timeline",
