@@ -1,17 +1,34 @@
 # Changelog
 
-> Current: `v2.0.4` — 写入与 MCP 使用体验：NER 可延迟到 Dream backfill；MCP 工具分 profile 暴露，并支持 HTTP /mcp per-session profile。
+> Current: `v2.0.5` — 可靠性与治理收敛：fsck/consistency/health-debt gate、MCP 工具合并、core 分域重组、search/NER 稳定性与 storage migration registry 收敛。
 
 ## [Unreleased]
 
-### Hermes 日常 session 防毒化（#264）
+## [v2.0.5] — 2026-07-05
+
+### 可靠性与治理收敛（#262, #264, #277, #279）
 
 - **`cbrain mcp-config --http`（#264）**：新增 HTTP/streamable MCP 配置生成路径，输出 `{ url, headers: { "X-CBrain-Tool-Profile": "agent" } }`，可配 `--port`/`--host`/`--profile`（默认 `127.0.0.1:3399` + `agent`）。这是 Hermes 多 Agent / 持久 serve single-writer 拓扑的正确配置形状——日常 session 走 `agent` 暴露面，摸不到 `sync`/`dream` 等慢维护工具，避免一次 300s 长调用毒化整个 MCP client 把记忆接口搞挂。stdio 默认行为不变（单用户本地开发）。bounded client timeout 作为 documented snippet 放 `docs/hermes-integration.md`（单位 client 侧约定，不进生成配置）。
 - **`ingest` 留在 `agent` profile**：靠 `agent` 排除慢工具 + bounded client timeout 两层兜底，砍了会逼 Agent 用 `put_page` 跳 NER 降级记忆质量。`tool-profiles` 测试锁定该决策。
-
-### 运维（#262）
-
 - **只读 fsck 一致性检查（#262）**：新增 `cbrain fsck`，跨 vault/SQLite/FTS/LanceDB 四层报告存储一致性 + FK 孤儿，不写数据。exit `0`/`1`/`2`（pass / 发现一致性问题 / 检查器自身故障），`--json` 稳定 schema 供下游 Agent 解析，`--layer vault|sqlite|fts|lance` 限定单层。建议修复命令（`sync --reindex` / `repair-fk --execute` / `doctor`）只打印不执行。
+- **Consistency / health debt gates（#279）**：新增一致性 release guard 与 health debt delta gate，把 page/chunk/FTS/hierarchy split-brain 等硬债纳入发布前门禁，避免状态一致性回归静默进入 main。
+- **Storage migration registry 收敛（#277）**：将 discovery、provenance、alias、page additive/expiry、links、telemetry、query interaction、late page 与 missing-index migration 从 `sqlite.ts` 逐步抽到 `src/storage/migrations/*`，保留 destructive/rebuild migration 在 `sqlite.ts`，降低启动迁移代码面。
+
+### Agent 使用体验与搜索稳定性
+
+- **MCP 工具合并**：将 timeline、tag、alias、link、job、profile、batch、insight 等相邻工具折叠为统一工具入口，保留 profile gate，降低 Agent 在大工具面里误选底层工具的概率。
+- **search/NER 稳定性**：补齐 decompose/expand local fallback 与预算 guard，避免复杂查询在 LLM 超时后直接空返回；新增 gated `ner-backfill` CLI 与失败 job retry 路径，用于补跑延迟 NER。
+- **Shadow verifier 修正**：发现类 verifier 维持 observe-only 语义，不把候选生成质量信号误报为数据损坏。
+
+### 内部结构与文档
+
+- **core 分域重组（#259）**：按 knowledge-map、graph、safety、ingestion 等域移动模块，保持行为不变，降低后续维护和 review 成本。
+- **MCP 输出与文档收敛**：抽取低风险 envelope/format helper，补充 provenance、performance、SearXNG fallback、hotness weights 与 Agentic Memory Kernel 定位文档。
+
+### Release Checks
+
+- `pre-push` gate：typecheck + full test suite，3300 pass / 0 fail。
+- `bun run check:docs`：PASS。
 
 ## [v2.0.4] — 2026-07-01
 
