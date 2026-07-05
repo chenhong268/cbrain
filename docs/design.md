@@ -8,7 +8,7 @@
 ┌──────────────────────────────────────────┐
 │  Skills Layer (7 × SKILL.md)             │  ← Agent behavior: when to check, what to save
 ├──────────────────────────────────────────┤
-│  MCP Server (88 tools, stdio + HTTP)     │  ← Agent interface: CRUD, search, graph, jobs
+│  MCP Server (89 tools, stdio + HTTP)     │  ← Agent interface: CRUD, search, graph, jobs
 ├──────────────────────────────────────────┤
 │  Core Engine                             │
 │  ┌──────────┬──────────┬──────────────┐  │
@@ -211,7 +211,7 @@ Tools organized into domains (full inventory in docs/mcp-tools.md):
 |:-------|:------|:-----------------|
 | Core | query, ingest, status, health, sync, enrich, writeback, generate_indexes, remove_orphans | Every agent needs these |
 | Pages | get_page, list_pages, put_page, delete_page, resolve_slugs | Full CRUD lifecycle |
-| Tags | get_tags, add_tag, remove_tag | Lightweight categorization |
+| Tags | tag, get_tags, add_tag, remove_tag | Lightweight categorization; old names remain compatibility aliases |
 | Links | get_links, remove_link, graph_query | Graph edge management |
 | Timeline | get_timeline, add_timeline_entry | Temporal event tracking |
 | Versions | get_versions, revert_version | Non-destructive history |

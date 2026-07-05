@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 88 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 89 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -393,6 +393,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `status` | Get brain status: page counts, sync info, watcher state, quarantine, etc. |
 | `summarize` | 探索一个领域或主题的全貌。搜索相关实体后沿图做 1-2 跳遍历，发现实体间的关联和邻居节点。适用：'帮我了解 XX 生态'、'这个领域有哪些关键玩家'、'XX 和 YY 之间有没有我没注意到的联系'。与… |
 | `sync` | Sync vault files to SQLite + LanceDB indexes. |
+| `tag` | Unified tag operations. |
 | `update_action_candidate_status` | 更新行动候选状态。支持 resolved/dismissed/seen，不会执行候选动作。 |
 | `update_discovery_status` | 更新发现的处理状态。支持标记已读(seen)、已解决(resolved)、已忽略(dismissed)。 |
 | `update_profile` | Create or update profile entries. |

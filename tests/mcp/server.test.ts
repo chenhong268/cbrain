@@ -93,7 +93,7 @@ describe("MCP Server", () => {
         "read_action_candidates", "read_discoveries", "read_knowledge_map", "read_project_state", "recall_episode", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
         "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
         "resolve_slugs", "revert_version", "run_action_candidates", "run_discovery", "set_hierarchy", "set_trust_state",
-        "status", "summarize", "sync", "update_action_candidate_status", "update_discovery_status", "update_profile", "wakeup_diff", "watcher_quarantine", "writeback",
+        "status", "summarize", "sync", "tag", "update_action_candidate_status", "update_discovery_status", "update_profile", "wakeup_diff", "watcher_quarantine", "writeback",
       ]);
     });
   });
@@ -1725,6 +1725,52 @@ describe("MCP Server", () => {
       expect(data.slug).toBe("entities/tagged");
       expect(Array.isArray(data.tags)).toBe(true);
       expect(data.tags.length).toBe(2);
+    });
+  });
+
+  describe("tag tool", () => {
+    test("action=list matches get_tags shape", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tag-tool-list", "Tagged", "tag-tool-list.md", "h1");
+      db.rawDb.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tag-tool-list", "tag-a");
+      db.rawDb.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tag-tool-list", "tag-b");
+
+      const server = createServer(deps);
+      const result = await getTools(server).tag.handler({ action: "list", slug: "entities/tag-tool-list" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({ slug: "entities/tag-tool-list", tags: ["tag-a", "tag-b"] });
+    });
+
+    test("action=add matches add_tag shape and writes tag", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tag-tool-add", "Tagged", "tag-tool-add.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).tag.handler({ action: "add", slug: "entities/tag-tool-add", tag: "new-tag" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({ success: true, slug: "entities/tag-tool-add", tag: "new-tag" });
+
+      const cnt = db.rawDb.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ? AND tag = ?")
+        .get("entities/tag-tool-add", "new-tag") as { c: number };
+      expect(cnt.c).toBe(1);
+    });
+
+    test("action=remove matches remove_tag shape and removes tag", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tag-tool-remove", "Tagged", "tag-tool-remove.md", "h1");
+      db.rawDb.prepare("INSERT OR IGNORE INTO tags (page_slug, tag) VALUES (?, ?)").run("entities/tag-tool-remove", "old-tag");
+
+      const server = createServer(deps);
+      const result = await getTools(server).tag.handler({ action: "remove", slug: "entities/tag-tool-remove", tag: "old-tag" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({ success: true, slug: "entities/tag-tool-remove", tag: "old-tag" });
+
+      const cnt = db.rawDb.prepare("SELECT COUNT(*) as c FROM tags WHERE page_slug = ? AND tag = ?")
+        .get("entities/tag-tool-remove", "old-tag") as { c: number };
+      expect(cnt.c).toBe(0);
     });
   });
 
