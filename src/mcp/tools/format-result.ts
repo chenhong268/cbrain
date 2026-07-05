@@ -30,6 +30,14 @@ export interface ToolSummary {
   confidence?: "high" | "medium" | "low";
 }
 
+export function toolEnvelope<T>(
+  raw: T,
+  display: string,
+  summary: ToolSummary,
+): { display: string; summary: ToolSummary; raw: T } {
+  return { display, summary, raw };
+}
+
 // ─── Internal identifier sanitization ───────────────────────
 
 const SLUG_PATH_RE = /brain\/(?:entities|concepts|insights|records)\//g;
@@ -342,17 +350,17 @@ export function formatQueryEnvelope(payload: QueryPayload): {
   const count = payload.results?.length ?? 0;
 
   if (count === 0) {
-    return {
-      display: "没有找到相关内容。",
-      summary: {
+    return toolEnvelope(
+      payload,
+      "没有找到相关内容。",
+      {
         status: "empty",
         count: 0,
         truncated: false,
         message: "没有找到相关内容",
         next_steps: ["尝试换关键词", "用 deep_recall 代替 query"],
       },
-      raw: payload,
-    };
+    );
   }
 
   if (payload.degraded) {
@@ -367,29 +375,29 @@ export function formatQueryEnvelope(payload: QueryPayload): {
       : payload.vector_skipped === "error"
         ? "搜索出错"
         : "搜索未达最佳效果";
-    return {
-      display: sanitizeDisplay(`${reasonLabel}，先返回了 ${count} 条相关内容。`),
-      summary: {
+    return toolEnvelope(
+      payload,
+      sanitizeDisplay(`${reasonLabel}，先返回了 ${count} 条相关内容。`),
+      {
         status: "degraded",
         count,
         truncated: false,
         message: `搜索降级，先返回 ${count} 条结果`,
         degraded_reason: reason,
       },
-      raw: payload,
-    };
+    );
   }
 
-  return {
-    display: sanitizeDisplay(`找到 ${count} 条相关内容。`),
-    summary: {
+  return toolEnvelope(
+    payload,
+    sanitizeDisplay(`找到 ${count} 条相关内容。`),
+    {
       status: "ok",
       count,
       truncated: false,
       message: `找到 ${count} 条结果`,
     },
-    raw: payload,
-  };
+  );
 }
 
 interface AppendPayload {
@@ -452,16 +460,16 @@ export function formatGetPageEnvelope(payload: GetPagePayload): {
   raw: GetPagePayload;
 } {
   if (payload.error) {
-    return {
-      display: "页面不存在。",
-      summary: {
+    return toolEnvelope(
+      payload,
+      "页面不存在。",
+      {
         status: "empty",
         count: 0,
         truncated: false,
         message: "页面不存在",
       },
-      raw: payload,
-    };
+    );
   }
 
   const title = payload.title ?? "未知页面";
@@ -469,16 +477,16 @@ export function formatGetPageEnvelope(payload: GetPagePayload): {
   const truncated = payload.has_more === true;
   const lengthNote = truncated ? "只显示了前面一部分" : "内容完整";
 
-  return {
-    display: sanitizeDisplay(`《${title}》，${length} 字，${lengthNote}。`),
-    summary: {
+  return toolEnvelope(
+    payload,
+    sanitizeDisplay(`《${title}》，${length} 字，${lengthNote}。`),
+    {
       status: "ok",
       count: 1,
       truncated,
       message: `《${title}》，${length} 字`,
     },
-    raw: payload,
-  };
+  );
 }
 
 interface SummarizePayload {
@@ -670,43 +678,43 @@ export function formatGetPagesEnvelope(payload: GetPagesPayload): {
   const total = slugs.length;
 
   if (found === 0) {
-    return {
-      display: `所有 ${total} 个页面均不存在。`,
-      summary: {
+    return toolEnvelope(
+      payload,
+      `所有 ${total} 个页面均不存在。`,
+      {
         status: "empty",
         count: 0,
         truncated: false,
         message: `所有 ${total} 个页面均不存在`,
         next_steps: ["检查名称是否正确", "用 query 搜索正确名称"],
       },
-      raw: payload,
-    };
+    );
   }
 
   if (missing > 0) {
-    return {
-      display: sanitizeDisplay(`找到 ${found} 个页面，${missing} 个不存在。`),
-      summary: {
+    return toolEnvelope(
+      payload,
+      sanitizeDisplay(`找到 ${found} 个页面，${missing} 个不存在。`),
+      {
         status: "degraded",
         count: found,
         truncated: false,
         message: `找到 ${found} 个页面，${missing} 个不存在`,
         degraded_reason: "部分页面不存在",
       },
-      raw: payload,
-    };
+    );
   }
 
-  return {
-    display: sanitizeDisplay(`找到 ${found} 个页面。`),
-    summary: {
+  return toolEnvelope(
+    payload,
+    sanitizeDisplay(`找到 ${found} 个页面。`),
+    {
       status: "ok",
       count: found,
       truncated: false,
       message: `找到 ${found} 个页面`,
     },
-    raw: payload,
-  };
+  );
 }
 
 // ─── Graph query ────────────────────────────────────────────

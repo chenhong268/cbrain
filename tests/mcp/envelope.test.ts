@@ -18,6 +18,7 @@ import {
   formatOrgTreeEnvelope,
   formatDiscoveriesEnvelope,
   formatGetPagesEnvelope,
+  toolEnvelope,
   sanitizeDisplay,
   DISPLAY_BANNED_TERMS,
   DISPLAY_BANNED_TERM_RULES,
@@ -66,6 +67,26 @@ function assertHasRaw(result: { raw: unknown }, payload: object): void {
     expect(result.raw).toHaveProperty(key);
   }
 }
+
+describe("toolEnvelope helper (#284)", () => {
+  test("builds display/summary/raw envelope and preserves raw object identity", () => {
+    const raw = { marker: "匿名原始数据", extra: { nested: true } };
+    const summary: ToolSummary = {
+      status: "degraded",
+      count: 2,
+      truncated: false,
+      message: "匿名摘要",
+      degraded_reason: "匿名原因",
+      next_steps: ["匿名下一步"],
+    };
+
+    const envelope = toolEnvelope(raw, "匿名展示", summary);
+
+    expect(envelope.display).toBe("匿名展示");
+    expect(envelope.summary).toEqual(summary);
+    expect(envelope.raw).toBe(raw);
+  });
+});
 
 // ─── deep_recall ─────────────────────────────────────────────
 
@@ -235,6 +256,46 @@ describe("formatGroundedRecallEnvelope", () => {
 // ─── query ────────────────────────────────────────────────────
 
 describe("formatQueryEnvelope", () => {
+  test("exact migrated outputs for empty, degraded, and ok branches (#284)", () => {
+    const emptyPayload = { results: [] };
+    expect(formatQueryEnvelope(emptyPayload)).toEqual({
+      display: "没有找到相关内容。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "没有找到相关内容",
+        next_steps: ["尝试换关键词", "用 deep_recall 代替 query"],
+      },
+      raw: emptyPayload,
+    });
+
+    const degradedPayload = { results: [{ snippet: "a" }], degraded: true, vector_skipped: "timeout", latency_ms: 3000 };
+    expect(formatQueryEnvelope(degradedPayload)).toEqual({
+      display: "搜索超时了，先返回了 1 条相关内容。",
+      summary: {
+        status: "degraded",
+        count: 1,
+        truncated: false,
+        message: "搜索降级，先返回 1 条结果",
+        degraded_reason: "搜索超时",
+      },
+      raw: degradedPayload,
+    });
+
+    const okPayload = { results: [{ snippet: "a" }, { snippet: "b" }] };
+    expect(formatQueryEnvelope(okPayload)).toEqual({
+      display: "找到 2 条相关内容。",
+      summary: {
+        status: "ok",
+        count: 2,
+        truncated: false,
+        message: "找到 2 条结果",
+      },
+      raw: okPayload,
+    });
+  });
+
   test("empty results preserves raw", () => {
     const payload = { results: [] };
     const result = formatQueryEnvelope(payload);
@@ -270,6 +331,44 @@ describe("formatQueryEnvelope", () => {
 // ─── get_page ─────────────────────────────────────────────────
 
 describe("formatGetPageEnvelope", () => {
+  test("exact migrated outputs for missing, full, and truncated branches (#284)", () => {
+    const missingPayload = { error: "Page not found" };
+    expect(formatGetPageEnvelope(missingPayload)).toEqual({
+      display: "页面不存在。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "页面不存在",
+      },
+      raw: missingPayload,
+    });
+
+    const fullPayload = { title: "页面A", body_length: 200, has_more: false };
+    expect(formatGetPageEnvelope(fullPayload)).toEqual({
+      display: "《页面A》，200 字，内容完整。",
+      summary: {
+        status: "ok",
+        count: 1,
+        truncated: false,
+        message: "《页面A》，200 字",
+      },
+      raw: fullPayload,
+    });
+
+    const truncatedPayload = { title: "页面B", body_length: 5000, has_more: true };
+    expect(formatGetPageEnvelope(truncatedPayload)).toEqual({
+      display: "《页面B》，5000 字，只显示了前面一部分。",
+      summary: {
+        status: "ok",
+        count: 1,
+        truncated: true,
+        message: "《页面B》，5000 字",
+      },
+      raw: truncatedPayload,
+    });
+  });
+
   test("page not found — display uses natural language, raw has original error", () => {
     const payload = { error: "Page not found" };
     const result = formatGetPageEnvelope(payload);
@@ -444,6 +543,46 @@ describe("formatDiscoveriesEnvelope", () => {
 // ─── get_pages (batch) ──────────────────────────────────────
 
 describe("formatGetPagesEnvelope", () => {
+  test("exact migrated outputs for all found, partial, and all missing branches (#284)", () => {
+    const allFound = { slugs: ["a", "b"], detail: "brief" as const, found: 2, missing: 0 };
+    expect(formatGetPagesEnvelope(allFound)).toEqual({
+      display: "找到 2 个页面。",
+      summary: {
+        status: "ok",
+        count: 2,
+        truncated: false,
+        message: "找到 2 个页面",
+      },
+      raw: allFound,
+    });
+
+    const partial = { slugs: ["a", "b"], detail: "brief" as const, found: 1, missing: 1 };
+    expect(formatGetPagesEnvelope(partial)).toEqual({
+      display: "找到 1 个页面，1 个不存在。",
+      summary: {
+        status: "degraded",
+        count: 1,
+        truncated: false,
+        message: "找到 1 个页面，1 个不存在",
+        degraded_reason: "部分页面不存在",
+      },
+      raw: partial,
+    });
+
+    const missing = { slugs: ["x", "y"], detail: "brief" as const, found: 0, missing: 2 };
+    expect(formatGetPagesEnvelope(missing)).toEqual({
+      display: "所有 2 个页面均不存在。",
+      summary: {
+        status: "empty",
+        count: 0,
+        truncated: false,
+        message: "所有 2 个页面均不存在",
+        next_steps: ["检查名称是否正确", "用 query 搜索正确名称"],
+      },
+      raw: missing,
+    });
+  });
+
   test("all found — status ok", () => {
     const payload = { slugs: ["a", "b", "c"], detail: "brief" as const, found: 3, missing: 0 };
     const result = formatGetPagesEnvelope(payload);
