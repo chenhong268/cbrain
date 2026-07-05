@@ -163,6 +163,34 @@ describe("SyncManager", () => {
       expect(lance.added.length).toBe(0);
     });
 
+    test("writes mention snapshot when syncAll syncs a changed page", async () => {
+      writeMdFile(vaultPath, "entities/snapshot-changed.md", { title: "SnapshotChanged", type: "entity/person", slug: "entities/snapshot-changed" }, "Initial content");
+      await sync.syncAll(vaultPath);
+
+      db.rawDb.prepare("UPDATE pages SET mention_count = ? WHERE slug = ?").run(4, "entities/snapshot-changed");
+      writeMdFile(vaultPath, "entities/snapshot-changed.md", { title: "SnapshotChanged", type: "entity/person", slug: "entities/snapshot-changed" }, "Updated content");
+
+      const report = await sync.syncAll(vaultPath);
+      const snapshots = db.getMentionSnapshots("entities/snapshot-changed", 1);
+
+      expect(report.synced).toBe(1);
+      expect(snapshots.at(-1)?.mention_count).toBe(4);
+    });
+
+    test("writes mention snapshot when syncAll skips an unchanged indexed page", async () => {
+      writeMdFile(vaultPath, "entities/snapshot-skipped.md", { title: "SnapshotSkipped", type: "entity/person", slug: "entities/snapshot-skipped" }, "Stable content");
+      await sync.syncAll(vaultPath);
+
+      db.rawDb.prepare("UPDATE pages SET mention_count = ? WHERE slug = ?").run(7, "entities/snapshot-skipped");
+
+      const report = await sync.syncAll(vaultPath);
+      const snapshots = db.getMentionSnapshots("entities/snapshot-skipped", 1);
+
+      expect(report.skipped).toBe(1);
+      expect(report.synced).toBe(0);
+      expect(snapshots.at(-1)?.mention_count).toBe(7);
+    });
+
     test("hash match but missing chunks is reindexed, not skipped (#274)", async () => {
       writeMdFile(vaultPath, "records/missing-chunks.md", { title: "MissingChunks", type: "record", slug: "records/missing-chunks" }, "Stable body that should be indexed");
 

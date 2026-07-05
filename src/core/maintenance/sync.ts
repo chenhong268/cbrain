@@ -134,6 +134,15 @@ export class SyncManager {
     });
   }
 
+  private writeMentionSnapshot(slug: string): void {
+    try {
+      const mentionCount = this.db.getPage(slug)?.mention_count ?? 0;
+      this.db.upsertMentionSnapshot(slug, new Date().toISOString().slice(0, 10), mentionCount);
+    } catch {
+      /* non-critical */
+    }
+  }
+
   async syncAll(vaultPath: string): Promise<SyncReport> {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [], diagnostics: [] };
     try {
@@ -174,6 +183,7 @@ export class SyncManager {
               this.pipeline.processReportsTo(slug, parsed.frontmatter);
             } catch { /* non-critical */ }
           }
+          this.writeMentionSnapshot(slug);
           report.skipped++;
           continue;
         }
@@ -344,6 +354,7 @@ export class SyncManager {
             this.logger?.warn("sync", "reports_to sync failed", { slug: file.slug, error: String(e) });
           }
         }
+        this.writeMentionSnapshot(file.slug);
       } catch (err) {
         report.errors++;
         const msg = err instanceof Error ? err.message : String(err);
@@ -484,11 +495,7 @@ export class SyncManager {
           this.pipeline.processReportsTo(effectiveSlug, parsed.frontmatter as Record<string, unknown>);
         } catch { /* non-critical */ }
       }
-      // Write mention snapshot for trend detection
-      try {
-        const mc = this.db.getPage(effectiveSlug)?.mention_count ?? 0;
-        this.db.upsertMentionSnapshot(effectiveSlug, new Date().toISOString().slice(0, 10), mc);
-      } catch { /* non-critical */ }
+      this.writeMentionSnapshot(effectiveSlug);
 
       return { success: true, skipped: true };
     }
@@ -668,11 +675,7 @@ export class SyncManager {
       }
     }
 
-    // Write mention snapshot for trend detection
-    try {
-      const mc = this.db.getPage(effectiveSlug)?.mention_count ?? 0;
-      this.db.upsertMentionSnapshot(effectiveSlug, new Date().toISOString().slice(0, 10), mc);
-    } catch { /* non-critical */ }
+    this.writeMentionSnapshot(effectiveSlug);
 
     return { success: true };
   }
