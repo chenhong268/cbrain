@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 90 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 91 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -318,6 +318,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `add_tag` | Add a tag to a page. |
 | `add_timeline_entry` | Add a timeline entry to a page. |
 | `agentic_research` | [EXPERIMENTAL/INTERNAL] 多步 agentic 研究：规划→执行→评估→(一次补充)→结果。适用于复杂查询需要多步推理、交叉验证的场景。简单查询仍用… |
+| `alias` | Unified alias operations. |
 | `append_page` | Append content to an existing page's body. |
 | `archive_insight` | Archive an insight. |
 | `batch_add_links` | Create multiple links in one call. |

@@ -57,7 +57,7 @@ describe("isToolAllowedForProfile", () => {
   });
   test("debug includes query + get_chunks + list_pages + provenance", () => {
     for (const t of ["query", "get_chunks", "list_pages", "get_links", "get_tags", "tag",
-      "timeline", "get_versions", "get_ingest_log", "get_provenance", "set_trust_state", "confirm_evidence"]) {
+      "timeline", "alias", "get_versions", "get_ingest_log", "get_provenance", "set_trust_state", "confirm_evidence"]) {
       expect(isToolAllowedForProfile(t, "debug")).toBe(true);
     }
   });
@@ -69,6 +69,10 @@ describe("isToolAllowedForProfile", () => {
   test("agent does not expose unified timeline tool because it includes a write action (#287)", () => {
     expect(isToolAllowedForProfile("timeline", "agent")).toBe(false);
     expect(isToolAllowedForProfile("get_timeline", "agent")).toBe(true);
+  });
+
+  test("agent does not expose unified alias tool because it is write-capable (#288)", () => {
+    expect(isToolAllowedForProfile("alias", "agent")).toBe(false);
   });
 
   // #264: raw `ingest` stays in the agent surface BY DESIGN. Removing it would

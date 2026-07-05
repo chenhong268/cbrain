@@ -78,7 +78,7 @@ describe("MCP Server", () => {
       const tools = getTools(server);
       const names = Object.keys(tools);
       expect(names.sort()).toEqual([
-        "act_on_review_candidate", "add_alias", "add_knowledge", "add_link", "add_tag", "add_timeline_entry", "agentic_research", "append_page", "archive_insight",
+        "act_on_review_candidate", "add_alias", "add_knowledge", "add_link", "add_tag", "add_timeline_entry", "agentic_research", "alias", "append_page", "archive_insight",
         "batch_add_links", "batch_delete_pages", "batch_merge_pages",
         "brain_storm", "cbrain_recall", "confirm_evidence", "deep_recall", "delete_page", "dismiss_insight",
         "dossier", "dream", "dream_reset", "dream_status", "enrich", "expand_entity",
@@ -149,6 +149,48 @@ describe("MCP Server", () => {
       const result = await getTools(server).get_page.handler({ slug: "entities/ghost" });
       const data = JSON.parse(result.content[0].text);
       expect(data.error).toBe("Page not found");
+    });
+  });
+
+  describe("alias tool", () => {
+    test("action=add matches add_alias shape and writes alias", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/alias-add", "Alias Add", "alias-add.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).alias.handler({
+        action: "add",
+        slug: "entities/alias-add",
+        alias: "Alias Alpha",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({ success: true, slug: "entities/alias-add", alias: "Alias Alpha" });
+
+      const row = db.rawDb.prepare("SELECT alias FROM aliases WHERE page_slug = ? AND alias = ?")
+        .get("entities/alias-add", "Alias Alpha") as { alias: string } | undefined;
+      expect(row?.alias).toBe("Alias Alpha");
+    });
+
+    test("action=remove matches remove_alias shape and removes alias", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/alias-remove", "Alias Remove", "alias-remove.md", "h1");
+      db.rawDb.prepare("INSERT OR IGNORE INTO aliases (page_slug, alias) VALUES (?, ?)")
+        .run("entities/alias-remove", "Alias Beta");
+
+      const server = createServer(deps);
+      const result = await getTools(server).alias.handler({
+        action: "remove",
+        slug: "entities/alias-remove",
+        alias: "Alias Beta",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({ success: true, slug: "entities/alias-remove", aliasRemoved: "Alias Beta" });
+
+      const cnt = db.rawDb.prepare("SELECT COUNT(*) as c FROM aliases WHERE page_slug = ? AND alias = ?")
+        .get("entities/alias-remove", "Alias Beta") as { c: number };
+      expect(cnt.c).toBe(0);
     });
   });
 

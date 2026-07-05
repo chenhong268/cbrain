@@ -101,6 +101,7 @@ const DEBUG_ALLOWLIST = [
   "get_tags",
   "tag",
   "timeline",
+  "alias",
   "get_versions",
   "get_ingest_log",
   "get_provenance",
