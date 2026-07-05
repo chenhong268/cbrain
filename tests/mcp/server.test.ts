@@ -28,7 +28,9 @@ function createMockLanceDB() {
   return {
     connect: async () => {},
     addChunks: async () => {},
+    addInsightVector: async () => {},
     search: async () => [],
+    searchInsights: async () => [{ id: 1 }],
     fullTextSearch: async () => [],
     deleteByPageSlug: async () => {},
     deleteRawChunksByPageSlug: async () => {},
@@ -87,7 +89,7 @@ describe("MCP Server", () => {
         "generate_indexes", "get_chunks", "get_compounding_reviews", "get_hierarchy", "get_ingest_log", "get_insight",
         "get_links", "get_org_tree", "get_page", "get_pages", "get_profile", "get_provenance", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",
-        "ingest", "ingest_dialogue", "job", "job_cancel", "job_list",
+        "ingest", "ingest_dialogue", "insight", "job", "job_cancel", "job_list",
         "job_retry", "job_status", "job_submit", "link", "list_insights",
         "list_pages", "mark_discovery_seen", "merge_entities", "merge_pages",
         "profile", "promote_discovery", "put_page", "query", "query_insights",
@@ -174,6 +176,91 @@ describe("MCP Server", () => {
       const unified = await tools.profile.handler({ action: "reload" });
       const legacy = await tools.reload_profile.handler({});
       expect(JSON.parse(unified.content[0].text)).toEqual(JSON.parse(legacy.content[0].text));
+    });
+  });
+
+  describe("insight tool", () => {
+    function seedInsight(overrides: Partial<{ content: string; type: "synthesis" | "pattern" | "anomaly" | "bridge"; confidence: number; sourceEntities: string[]; sourceType: "reflect" | "discovery" | "manual" }> = {}) {
+      return db.createInsight({
+        content: overrides.content ?? "匿名洞察内容A",
+        type: overrides.type ?? "bridge",
+        confidence: overrides.confidence ?? 0.7,
+        sourceEntities: overrides.sourceEntities ?? ["entity/a"],
+        sourceType: overrides.sourceType ?? "manual",
+      });
+    }
+
+    function seedDiscovery(entities: string[], suggestion = "建议保留这条匿名发现") {
+      const { id } = db.upsertDiscovery("bridge", entities, 0.8, { distance: 2 }, undefined, "medium", false);
+      db.updateDiscoverySuggestion(id, suggestion);
+      return id;
+    }
+
+    test("action=list matches list_insights shape", async () => {
+      seedInsight({ content: "匿名洞察内容A" });
+      const server = createServer(deps);
+      const tools = getTools(server);
+      const unified = await tools.insight.handler({ action: "list" });
+      const legacy = await tools.list_insights.handler({});
+      expect(JSON.parse(unified.content[0].text)).toEqual(JSON.parse(legacy.content[0].text));
+    });
+
+    test("action=get matches get_insight shape", async () => {
+      const id = seedInsight({ content: "匿名洞察内容B", sourceEntities: ["entity/b"] });
+      const server = createServer(deps);
+      const tools = getTools(server);
+      const unified = await tools.insight.handler({ action: "get", id });
+      const legacy = await tools.get_insight.handler({ id });
+      expect(JSON.parse(unified.content[0].text)).toEqual(JSON.parse(legacy.content[0].text));
+    });
+
+    test("action=archive matches archive_insight shape", async () => {
+      const id = seedInsight();
+      const server = createServer(deps);
+      const result = await getTools(server).insight.handler({ action: "archive", id });
+      expect(JSON.parse(result.content[0].text)).toEqual({ success: true, id, action: "archived" });
+    });
+
+    test("action=dismiss matches dismiss_insight shape", async () => {
+      const id = seedInsight();
+      const server = createServer(deps);
+      const result = await getTools(server).insight.handler({ action: "dismiss", id });
+      expect(JSON.parse(result.content[0].text)).toEqual({ success: true, id, action: "dismissed" });
+    });
+
+    test("action=query matches query_insights shape", async () => {
+      seedInsight({ content: "匿名查询洞察" });
+      const server = createServer(deps);
+      const tools = getTools(server);
+      const unified = await tools.insight.handler({ action: "query", query: "匿名", limit: 5 });
+      const legacy = await tools.query_insights.handler({ query: "匿名", limit: 5 });
+      expect(JSON.parse(unified.content[0].text)).toEqual(JSON.parse(legacy.content[0].text));
+    });
+
+    test("action=get fails fast when required id is missing", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).insight.handler({ action: "get" });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text)).toEqual({ error: "insight action=get requires id" });
+    });
+
+    test("action=promote_discovery matches promote_discovery behavior and marks discovery seen", async () => {
+      const legacyDiscoveryId = seedDiscovery(["entity/a", "entity/b"], "建议升级为匿名洞察A");
+      const unifiedDiscoveryId = seedDiscovery(["entity/c", "entity/d"], "建议升级为匿名洞察B");
+      const server = createServer(deps);
+      const tools = getTools(server);
+      const legacy = await tools.promote_discovery.handler({ discoveryId: legacyDiscoveryId, type: "bridge" });
+      const unified = await tools.insight.handler({ action: "promote_discovery", discoveryId: unifiedDiscoveryId, type: "bridge" });
+      const legacyData = JSON.parse(legacy.content[0].text);
+      const unifiedData = JSON.parse(unified.content[0].text);
+      expect(unifiedData).toMatchObject({
+        success: true,
+        promoted_from: unifiedDiscoveryId,
+        actionable: legacyData.actionable,
+        had_suggestion: true,
+      });
+      expect(unifiedData.insight).toMatchObject({ type: legacyData.insight.type, confidence: legacyData.insight.confidence });
+      expect(db.getDiscoveryById(unifiedDiscoveryId)?.seen).toBe(1);
     });
   });
 

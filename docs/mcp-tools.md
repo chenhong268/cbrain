@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 95 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 96 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -358,6 +358,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `health` | Run a 14-dimension health check (errors, dedup, slug collisions, consistency, structural consistency,… |
 | `ingest` | Ingest content into the brain. |
 | `ingest_dialogue` | Ingest a dialogue/conversation into the brain. |
+| `insight` | Unified insight lifecycle tool. |
 | `job` | Unified job queue operations. |
 | `job_cancel` | Cancel a pending or running job |
 | `job_list` | List jobs, optionally filtered by status |

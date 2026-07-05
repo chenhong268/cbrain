@@ -59,7 +59,7 @@ describe("isToolAllowedForProfile", () => {
   test("debug includes query + get_chunks + list_pages + provenance", () => {
     for (const t of ["query", "get_chunks", "list_pages", "get_links", "get_tags", "tag",
       "link",
-      "timeline", "alias", "profile", "get_versions", "get_ingest_log", "get_provenance", "set_trust_state", "confirm_evidence"]) {
+      "timeline", "alias", "profile", "insight", "get_versions", "get_ingest_log", "get_provenance", "set_trust_state", "confirm_evidence"]) {
       expect(isToolAllowedForProfile(t, "debug")).toBe(true);
     }
   });
@@ -91,6 +91,10 @@ describe("isToolAllowedForProfile", () => {
 
   test("agent does not expose unified batch tool because it is bulk/destructive (#292)", () => {
     expect(isToolAllowedForProfile("batch", "agent")).toBe(false);
+  });
+
+  test("agent does not expose unified insight tool because it includes lifecycle mutation (#293)", () => {
+    expect(isToolAllowedForProfile("insight", "agent")).toBe(false);
   });
 
   // #264: raw `ingest` stays in the agent surface BY DESIGN. Removing it would

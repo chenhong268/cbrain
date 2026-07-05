@@ -378,7 +378,7 @@ Agent 配置用 `cbrain mcp-config` 生成（见第六步）。**仅限单 Agent
 
 > **提示：** `serve` 默认 MCP stdio 模式。加 `--http` 切到 HTTP 模式。两个模式不能同时跑（PID 锁保护）。
 
-> **工具暴露面（profile）**：日常 Agent 不必面对全部 95 个工具。HTTP `/mcp` 支持按 session 选 profile（请求头 `X-CBrain-Tool-Profile: agent`），让 Agent 只看到 recall / 读写 / 图谱等用户态工具；stdio 模式用环境变量 `CBRAIN_MCP_TOOL_PROFILE=agent`。详见 [MCP 工具参考 · 工具暴露面 Profile](mcp-tools.md#工具暴露面-profile251)。Profile 是降噪音的人体工学边界，不是安全边界。
+> **工具暴露面（profile）**：日常 Agent 不必面对全部 96 个工具。HTTP `/mcp` 支持按 session 选 profile（请求头 `X-CBrain-Tool-Profile: agent`），让 Agent 只看到 recall / 读写 / 图谱等用户态工具；stdio 模式用环境变量 `CBRAIN_MCP_TOOL_PROFILE=agent`。详见 [MCP 工具参考 · 工具暴露面 Profile](mcp-tools.md#工具暴露面-profile251)。Profile 是降噪音的人体工学边界，不是安全边界。
 
 ---
 
