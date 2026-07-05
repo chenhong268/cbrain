@@ -39,3 +39,15 @@ export function runPageMigrations(db: Database): void {
   migratePageActivityFields(db);
   migratePageHotnessScore(db);
 }
+
+export function runLatePageMigrations(db: Database): void {
+  const done = db.prepare("SELECT value FROM config WHERE key = 'migration_v7_ingest_content_hash'").get() as { value: string } | undefined;
+  if (done) return;
+
+  const names = pageColumnNames(db);
+  if (!names.has("ingest_content_hash")) {
+    db.exec("ALTER TABLE pages ADD COLUMN ingest_content_hash TEXT");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_pages_ingest_hash ON pages(ingest_content_hash) WHERE ingest_content_hash IS NOT NULL");
+  db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v7_ingest_content_hash', '1')").run();
+}

@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runPageMigrations } from "../../../src/storage/migrations/index.js";
+import { runLatePageMigrations, runPageMigrations } from "../../../src/storage/migrations/index.js";
 
 describe("runPageMigrations", () => {
   const dirs: string[] = [];
@@ -150,6 +150,55 @@ describe("runPageMigrations", () => {
         last_queried_at: "2026-07-01T00:00:00Z",
         hotness_score: 0.42,
       });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("late page migration adds ingest content hash column and partial index", () => {
+    const db = legacyPagesDb();
+    try {
+      runLatePageMigrations(db);
+
+      const columns = db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+      expect(names).toContain("ingest_content_hash");
+
+      const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{ name: string }>;
+      expect(indexes.map((index) => index.name)).toContain("idx_pages_ingest_hash");
+
+      const row = db.prepare("SELECT ingest_content_hash FROM pages WHERE slug = ?").get("entity/a") as {
+        ingest_content_hash: string | null;
+      };
+      expect(row.ingest_content_hash).toBeNull();
+
+      const marker = db.prepare("SELECT value FROM config WHERE key = ?").get("migration_v7_ingest_content_hash") as {
+        value: string;
+      };
+      expect(marker.value).toBe("1");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("late page migration is idempotent and preserves existing ingest content hashes", () => {
+    const db = legacyPagesDb();
+    try {
+      db.exec("ALTER TABLE pages ADD COLUMN ingest_content_hash TEXT");
+      db.prepare("UPDATE pages SET ingest_content_hash = ? WHERE slug = ?").run("hash-a", "entity/a");
+
+      runLatePageMigrations(db);
+      runLatePageMigrations(db);
+
+      const row = db.prepare("SELECT ingest_content_hash FROM pages WHERE slug = ?").get("entity/a") as {
+        ingest_content_hash: string;
+      };
+      expect(row.ingest_content_hash).toBe("hash-a");
+
+      const indexes = db.prepare("SELECT COUNT(*) AS cnt FROM sqlite_master WHERE type = 'index' AND name = 'idx_pages_ingest_hash'").get() as {
+        cnt: number;
+      };
+      expect(indexes.cnt).toBe(1);
     } finally {
       db.close();
     }

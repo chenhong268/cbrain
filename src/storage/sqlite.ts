@@ -5,6 +5,7 @@ import { getReverseRelation } from "../core/shared.js";
 import {
   runAliasMigrations,
   runDiscoveryMigrations,
+  runLatePageMigrations,
   runLinkMigrations,
   runPageMigrations,
   runProvenanceMigrations,
@@ -402,7 +403,7 @@ export class CBrainDB {
     this.migrateOntologyTypes();
     this.migrateMissingIndexes();
     runProvenanceMigrations(this.db);
-    this.migrateIngestContentHash();
+    runLatePageMigrations(this.db);
     this.repairDirtyData();
   }
 
@@ -3414,18 +3415,6 @@ export class CBrainDB {
         if (flatConcept.cnt > 0) throw new Error(`${flatConcept.cnt} flat 'concept' type(s) remain under brain/concepts/`);
       },
     });
-  }
-
-  private migrateIngestContentHash(): void {
-    const done = this.db.prepare("SELECT value FROM config WHERE key = 'migration_v7_ingest_content_hash'").get() as { value: string } | undefined;
-    if (done) return;
-
-    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
-    if (!cols.some(c => c.name === "ingest_content_hash")) {
-      this.db.exec("ALTER TABLE pages ADD COLUMN ingest_content_hash TEXT");
-    }
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_pages_ingest_hash ON pages(ingest_content_hash) WHERE ingest_content_hash IS NOT NULL");
-    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('migration_v7_ingest_content_hash', '1')").run();
   }
 
   private repairDirtyData(): void {
