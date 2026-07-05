@@ -1,11 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { truncate, safeFrontmatter, trimLink, trimTimeline, getExpiryWarning, trimHint, applyProactiveBudget } from "./trim.js";
-import type { Link } from "../../core/graph/graph.js";
-import type { LinkRow } from "../../storage/sqlite.js";
+import { truncate, safeFrontmatter, getExpiryWarning, trimHint, applyProactiveBudget } from "./trim.js";
 import { extractDossier } from "../../core/retrieval/dossier.js";
-import { getHierarchyContext } from "../../core/graph/hierarchy.js";
 import { generateProactiveHints } from "../../core/retrieval/proactive.js";
 import { extractBirthday } from "../../core/retrieval/birthday.js";
 import { buildMemorySkeleton } from "../../core/retrieval/key-points.js";
@@ -20,6 +17,7 @@ import { shouldCompleteEvidence } from "../../core/retrieval/recall-intent.js";
 import { assembleEvidencePack, type EvidencePack } from "../../core/retrieval/evidence-completion.js";
 import { kmContextApi, formatKmRelatedLine } from "../../core/recall/km-context.js";
 import { isCurrentFactLink } from "../../core/shared.js";
+import { hydrateRecallSlugs } from "./recall-hydration.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -308,7 +306,6 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       searchResults = searchResults.slice(0, cap);
     }
 
-    // Batch enrichment: collect all slugs, then batch-fetch links/timeline/tags
     const topSlugs = searchResults.map(r => r.slug);
     // #245 — Knowledge Map domain context. Supplemental navigation ONLY; never
     // affects main ranking/score/projection. Off path short-circuits before the
@@ -318,47 +315,22 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       : null;
     const isBrief = detailLevel === "brief";
 
-    const linksBySlug = new Map<string, { outgoing: Record<string, unknown>[]; incoming: Record<string, unknown>[] }>();
-    const timelineBySlug = new Map<string, Record<string, unknown>[]>();
-    const tagsBySlug = new Map<string, string[]>();
-    const relatedBySlug = new Map<string, { slug: string; title: string; type: string }[]>();
-    const hierarchyBySlug = new Map<string, ReturnType<typeof getHierarchyContext>>();
-
-    // Brief mode: only fetch tags (cheap, always needed); skip heavy enrichment
-    const batchLinks = ctx.db.batchGetLinksForSlugs(topSlugs);
-    const batchTags = ctx.db.batchGetTagsForSlugs(topSlugs);
-    for (const slug of topSlugs) {
-      const page = pagesBySlug.get(slug);
-      const dbTags = batchTags.get(slug) ?? [];
-      const fmTags = (page as { frontmatter?: { tags?: string[] } } | undefined)?.frontmatter?.tags ?? [];
-      tagsBySlug.set(slug, [...new Set([...dbTags, ...fmTags])]);
-    }
-
-    if (!isBrief) {
-      const batchTimeline = ctx.db.batchGetTimelineForSlugs(topSlugs);
-
-      for (const slug of topSlugs) {
-        const rawLinks = batchLinks.get(slug) ?? { outgoing: [], incoming: [] };
-        const toLink = (l: LinkRow): Link => ({
-          ...l, context: l.context ?? undefined, source_type: l.source_type ?? undefined, confidence: l.confidence ?? undefined,
-        });
-        const outgoing = rawLinks.outgoing.filter(isCurrentFactLink).map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-        const incoming = rawLinks.incoming.filter(isCurrentFactLink).map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-        linksBySlug.set(slug, { outgoing, incoming });
-
-        const rawTimeline = batchTimeline.get(slug) ?? [];
-        timelineBySlug.set(slug, trimTimeline(rawTimeline as Array<{ summary: string; event_date: string | null; source: string | null; created_at: string; id: number; trust_state?: string; source_page_slug?: string; evidence?: string; source_type?: string }>, 3));
-
-        try { relatedBySlug.set(slug, ctx.graph.getRelatedEntities(slug, 5)); } catch { relatedBySlug.set(slug, []); }
-
-        try { hierarchyBySlug.set(slug, getHierarchyContext(slug, { pages: ctx.pages, graph: ctx.graph })); } catch { /* non-critical */ }
-      }
-    }
+    const hydration = hydrateRecallSlugs(ctx, topSlugs, { isBrief, preloadedPages: pagesBySlug });
+    const {
+      pagesBySlug: hydratedPagesBySlug,
+      batchLinks,
+      linksBySlug,
+      timelineBySlug,
+      tagsBySlug,
+      relatedBySlug,
+      hierarchyBySlug,
+      hotnessWeights,
+    } = hydration;
 
     // Build entity objects — all fully enriched (no stubs)
     const entities = searchResults.map((sr) => {
       const slug = sr.slug;
-      const page = pagesBySlug.get(slug);
+      const page = hydratedPagesBySlug.get(slug);
       const links = linksBySlug.get(slug) ?? { outgoing: [], incoming: [] };
       const timeline = timelineBySlug.get(slug) ?? [];
       const tags = tagsBySlug.get(slug) ?? [];
@@ -412,7 +384,6 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     });
 
     // Hotness-based stub: low-hotness entities get trimmed to snippet only
-    const hotnessWeights = topSlugs.length > 0 ? ctx.db.getHotnessWeights(topSlugs) : new Map<string, number>();
     for (const e of entities) {
       const slug = (e as { slug: string }).slug;
       const tier = (e as { tier?: number }).tier;
@@ -454,7 +425,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const allRecent = allRelatedSlugs.size > 0 ? ctx.db.getRecentUpdatesBySlugs([...allRelatedSlugs], 7) : [];
     const crossRefs: { subject: string; related: string; type: string; updated_at: string }[] = [];
     for (const slug of topSlugs) {
-      const entityTitle = (pagesBySlug.get(slug) as { title?: string } | undefined)?.title ?? slug;
+      const entityTitle = (hydratedPagesBySlug.get(slug) as { title?: string } | undefined)?.title ?? slug;
       const links = linksBySlug.get(slug);
       const related = relatedBySlug.get(slug);
       const entityRelatedSlugs = new Set<string>();
@@ -488,7 +459,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     const proactiveHints = await generateProactiveHints(ctx, {
       resultSlugs: searchResults.map(r => r.slug),
       linksBySlug: batchLinks,
-      pagesBySlug: pagesBySlug as Map<string, { slug: string; expires_at: string | null }>,
+      pagesBySlug: hydratedPagesBySlug as Map<string, { slug: string; expires_at: string | null }>,
       maxHints: 3,
     });
 
