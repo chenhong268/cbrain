@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
+import { runLinkMigrations } from "./migrations/index.js";
 
 /** Raised when a destructive migration's FK integrity check fails (#209).
  * Carries summarized per-table counts (NO raw row data) so callers can emit an
@@ -383,9 +384,7 @@ export class CBrainDB {
 
     this.migratePagesConstraint();
     this.migratePagesExpiry();
-    this.migrateLinksStrength();
-    this.migrateLinksCredibility();
-    this.migrateLinkDecayFields();
+    runLinkMigrations(this.db);
     this.migrateDiscoveries();
     this.migrateSearchLog();
     this.migrateSearchTraceTables();
@@ -404,42 +403,6 @@ export class CBrainDB {
     this.migrateProvenance();
     this.migrateIngestContentHash();
     this.repairDirtyData();
-  }
-
-  private migrateLinksStrength(): void {
-    const cols = this.db.prepare("PRAGMA table_info(links)").all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    if (!names.has("weight")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN weight REAL DEFAULT 1.0");
-    }
-    if (!names.has("strength")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN strength TEXT DEFAULT 'medium'");
-    }
-  }
-
-  private migrateLinksCredibility(): void {
-    const cols = this.db.prepare("PRAGMA table_info(links)").all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    if (!names.has("source_type")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN source_type TEXT DEFAULT 'unknown'");
-    }
-    if (!names.has("confidence")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN confidence REAL DEFAULT 0.5");
-    }
-  }
-
-  private migrateLinkDecayFields(): void {
-    const cols = this.db.prepare("PRAGMA table_info(links)").all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    if (!names.has("last_validated_at")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN last_validated_at TEXT");
-      this.db.exec("UPDATE links SET last_validated_at = created_at");
-    }
-    if (!names.has("effective_weight")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN effective_weight REAL DEFAULT 1.0");
-      this.db.exec("UPDATE links SET effective_weight = weight * confidence");
-    }
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_links_last_validated ON links(last_validated_at)");
   }
 
   private migrateDiscoveries(): void {
