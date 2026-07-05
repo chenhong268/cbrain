@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 
-let dir: string;
+const dirs: string[] = [];
+
 afterEach(() => {
-	if (dir) rmSync(dir, { recursive: true, force: true });
+	for (const dir of dirs.splice(0)) {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 async function runFsckCli(args: string[], cfgPath: string): Promise<{ exitCode: number; stdout: string }> {
@@ -20,7 +23,13 @@ async function runFsckCli(args: string[], cfgPath: string): Promise<{ exitCode: 
 	return { exitCode, stdout };
 }
 
-function writeCfg(dbPath: string): string {
+function makeTempDir(prefix: string): string {
+	const dir = mkdtempSync(join(tmpdir(), prefix));
+	dirs.push(dir);
+	return dir;
+}
+
+function writeCfg(dir: string, dbPath: string): string {
 	mkdirSync(join(dir, "vault"), { recursive: true });
 	const cfgPath = join(dir, "cbrain.json");
 	writeFileSync(
@@ -31,9 +40,9 @@ function writeCfg(dbPath: string): string {
 }
 
 test("missing DB → exit 2 + no file/dir created (read-only contract)", async () => {
-	dir = mkdtempSync(join(tmpdir(), "cbrain-fsck-bb-missing-"));
+	const dir = makeTempDir("cbrain-fsck-bb-missing-");
 	const dbPath = join(dir, "missing-dir", "brain.sqlite"); // 父目录不存在
-	const cfg = writeCfg(dbPath);
+	const cfg = writeCfg(dir, dbPath);
 	expect(existsSync(dbPath)).toBe(false);
 
 	const res = await runFsckCli(["--json"], cfg);
@@ -47,12 +56,12 @@ test("missing DB → exit 2 + no file/dir created (read-only contract)", async (
 });
 
 test("invalid --layer → exit 2 + fatalError lists allowed values", async () => {
-	dir = mkdtempSync(join(tmpdir(), "cbrain-fsck-bb-layer-"));
+	const dir = makeTempDir("cbrain-fsck-bb-layer-");
 	const dbPath = join(dir, "brain.sqlite");
 	// 建真 DB 让 DB 预检通过，隔离 layer 校验
 	const db = new CBrainDB(dbPath);
 	db.close();
-	const cfg = writeCfg(dbPath);
+	const cfg = writeCfg(dir, dbPath);
 
 	const res = await runFsckCli(["--layer", "nope", "--json"], cfg);
 	expect(res.exitCode).toBe(2);
@@ -62,7 +71,7 @@ test("invalid --layer → exit 2 + fatalError lists allowed values", async () =>
 });
 
 test("--repair-stale-fts deletes only stale FTS rows and verifies fts layer", async () => {
-	dir = mkdtempSync(join(tmpdir(), "cbrain-fsck-bb-repair-"));
+	const dir = makeTempDir("cbrain-fsck-bb-repair-");
 	const dbPath = join(dir, "brain.sqlite");
 	const db = new CBrainDB(dbPath);
 	db.insertPage({
@@ -76,7 +85,7 @@ test("--repair-stale-fts deletes only stale FTS rows and verifies fts layer", as
 	db.ftsInsert("test-valid-page", "valid body");
 	db.ftsInsert("test-stale-page", "stale body");
 	db.close();
-	const cfg = writeCfg(dbPath);
+	const cfg = writeCfg(dir, dbPath);
 
 	const res = await runFsckCli(["--repair-stale-fts", "--json"], cfg);
 	expect(res.exitCode).toBe(0);
@@ -94,11 +103,11 @@ test("--repair-stale-fts deletes only stale FTS rows and verifies fts layer", as
 });
 
 test("--repair-stale-fts rejects non-fts layer to avoid ambiguous repair", async () => {
-	dir = mkdtempSync(join(tmpdir(), "cbrain-fsck-bb-repair-layer-"));
+	const dir = makeTempDir("cbrain-fsck-bb-repair-layer-");
 	const dbPath = join(dir, "brain.sqlite");
 	const db = new CBrainDB(dbPath);
 	db.close();
-	const cfg = writeCfg(dbPath);
+	const cfg = writeCfg(dir, dbPath);
 
 	const res = await runFsckCli(["--repair-stale-fts", "--layer", "sqlite", "--json"], cfg);
 	expect(res.exitCode).toBe(2);
