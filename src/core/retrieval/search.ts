@@ -673,13 +673,19 @@ export class HybridSearch {
     try {
       const resolved = this.db.resolveSlugs(candidates);
       const known = resolved.filter((r) => r.slug !== null);
+      const knownSlugs = known.map((r) => r.slug!);
+      const linksBySlug = this.db.batchGetLinksForSlugs(knownSlugs);
+      const neighborEntriesBySlug = new Map<string, Array<{ slug: string; relation: string }>>();
+      const slugsToHydrate = new Set<string>(knownSlugs);
 
       for (const r of known) {
+        const slug = r.slug!;
         // #233: exclude candidate reports_to from search context (current-fact
         // semantic — candidate reports_to is evidence, not a confirmed relation
         // to feed LLM chains). Non-reports_to candidate neighbors are kept.
-        const outgoing = this.db.getOutgoingLinks(r.slug!).filter(isCurrentFactLink);
-        const incoming = this.db.getIncomingLinks(r.slug!).filter(isCurrentFactLink);
+        const rawLinks = linksBySlug.get(slug) ?? { outgoing: [], incoming: [] };
+        const outgoing = rawLinks.outgoing.filter(isCurrentFactLink);
+        const incoming = rawLinks.incoming.filter(isCurrentFactLink);
 
         // Map to { slug, relation }, dedup by slug (keep first occurrence)
         const seen = new Set<string>();
@@ -697,22 +703,25 @@ export class HybridSearch {
           }
         }
 
-        const neighborData: Array<{
-          slug: string;
-          title: string;
-          relation: string;
-        }> = [];
-        for (const entry of neighborEntries.slice(0, MAX_NEIGHBORS_PER_ENTITY)) {
-          const info = this.db.getPageTitleAndType(entry.slug);
-          if (info) {
-            neighborData.push({ slug: entry.slug, title: info.title, relation: entry.relation });
-          }
+        const cappedEntries = neighborEntries.slice(0, MAX_NEIGHBORS_PER_ENTITY);
+        neighborEntriesBySlug.set(slug, cappedEntries);
+        for (const entry of cappedEntries) slugsToHydrate.add(entry.slug);
+      }
+
+      const titlesAndTypes = this.db.getPageTitlesAndTypes([...slugsToHydrate]);
+
+      for (const r of known) {
+        const slug = r.slug!;
+        const neighborData: Array<{ slug: string; title: string; relation: string }> = [];
+        for (const entry of neighborEntriesBySlug.get(slug) ?? []) {
+          const info = titlesAndTypes.get(entry.slug);
+          if (info) neighborData.push({ slug: entry.slug, title: info.title, relation: entry.relation });
         }
 
-        const pageType = this.db.getPageTitleAndType(r.slug!);
+        const pageType = titlesAndTypes.get(slug);
         context.entities.push({
-          slug: r.slug!,
-          title: r.title ?? r.slug!,
+          slug,
+          title: r.title ?? slug,
           type: pageType?.type ?? "unknown",
           neighbors: neighborData,
         });

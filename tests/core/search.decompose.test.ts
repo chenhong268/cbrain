@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isComplexQuery, HybridSearch } from "../../src/core/retrieval/search.js";
@@ -120,11 +120,12 @@ function insertLink(
   db: CBrainDB,
   from: string,
   to: string,
-  relation = "提及"
+  relation = "提及",
+  trustState?: string
 ) {
   db.rawDb.prepare(
-    "INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)"
-  ).run(from, to, relation);
+    "INSERT INTO links (from_slug, to_slug, relation, trust_state) VALUES (?, ?, ?, ?)"
+  ).run(from, to, relation, trustState ?? null);
 }
 
 describe("HybridSearch.graphPrefetch", () => {
@@ -180,6 +181,43 @@ describe("HybridSearch.graphPrefetch", () => {
     expect(zhangsan).toBeDefined();
     const lisi = ctx.entities.find((e) => e.title === "李四");
     expect(lisi).toBeUndefined();
+  });
+
+  test("uses batched link and title hydration instead of per-slug lookups (#283)", async () => {
+    insertPage(db, "entity/entity-a", "实体A", "entity/person");
+    insertPage(db, "entity/entity-b", "实体B", "entity/person");
+    insertPage(db, "entity/entity-c", "实体C", "entity/person");
+    insertLink(db, "entity/entity-a", "entity/entity-b", "related_to");
+    insertLink(db, "entity/entity-c", "entity/entity-a", "mentioned_by");
+
+    const outgoingSpy = spyOn(db, "getOutgoingLinks");
+    const incomingSpy = spyOn(db, "getIncomingLinks");
+    const titleSpy = spyOn(db, "getPageTitleAndType");
+    const batchLinksSpy = spyOn(db, "batchGetLinksForSlugs");
+    const batchTitlesSpy = spyOn(db, "getPageTitlesAndTypes");
+
+    const ctx = await search.graphPrefetch("实体A");
+
+    expect(ctx.entities[0]?.neighbors.map((n) => n.title)).toEqual(["实体B", "实体C"]);
+    expect(outgoingSpy).not.toHaveBeenCalled();
+    expect(incomingSpy).not.toHaveBeenCalled();
+    expect(titleSpy).not.toHaveBeenCalled();
+    expect(batchLinksSpy).toHaveBeenCalledTimes(1);
+    expect(batchTitlesSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test("filters candidate reports_to from graph prefetch context (#283)", async () => {
+    insertPage(db, "entity/entity-a", "实体A", "entity/person");
+    insertPage(db, "entity/entity-b", "实体B", "entity/person");
+    insertPage(db, "entity/entity-c", "实体C", "entity/person");
+    insertLink(db, "entity/entity-a", "entity/entity-b", "reports_to", "candidate");
+    insertLink(db, "entity/entity-a", "entity/entity-c", "related_to", "trusted");
+
+    const ctx = await search.graphPrefetch("实体A");
+    const entity = ctx.entities.find((e) => e.slug === "entity/entity-a");
+
+    expect(entity?.neighbors.map((n) => n.title)).toEqual(["实体C"]);
+    expect(ctx.chains.some((chain) => chain.includes("实体B"))).toBe(false);
   });
 });
 
