@@ -148,7 +148,17 @@ export interface NerBackfillDeps {
 
 export interface NerBackfillOptions {
   limit: number;
+  retryFailed?: boolean;
   json?: boolean;
+}
+
+function retryFailedNerBackfillJobs(db: CBrainDB): number {
+  let retried = 0;
+  for (const job of db.listJobs("failed")) {
+    if (job.name !== "ner-backfill") continue;
+    if (db.retryJob(job.id)) retried++;
+  }
+  return retried;
 }
 
 export async function handleNerBackfill(
@@ -173,11 +183,13 @@ export async function handleNerBackfill(
     return 1;
   }
 
+  const retriedFailed = opts.retryFailed ? retryFailedNerBackfillJobs(deps.db) : 0;
   const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
   const counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, { maxItems: opts.limit });
   if (opts.json) {
-    log(JSON.stringify({ ok: true, counts }, null, 2));
+    log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts }, null, 2));
   } else {
+    if (opts.retryFailed) log(`NER backfill: ${retriedFailed} failed jobs reset to pending`);
     log(`NER backfill: ${counts.processed} processed, ${counts.failed} failed, ${counts.timed_out} timed out, ${counts.skipped} skipped`);
   }
   return counts.failed > 0 || counts.timed_out > 0 ? 1 : 0;
@@ -623,6 +635,7 @@ export function register(program: Command) {
     .command("ner-backfill")
     .description("Process deferred NER jobs; refuses while serve/watcher is active")
     .option("--limit <n>", "Maximum pending jobs to process", "50")
+    .option("--retry-failed", "Reset failed ner-backfill jobs to pending before processing")
     .option("--json", "Emit machine-readable JSON")
     .action(async (opts) => {
       const limit = Number.parseInt(String(opts.limit), 10);
@@ -659,7 +672,7 @@ export function register(program: Command) {
 
         process.exitCode = await handleNerBackfill(
           { db: deps.db, pages, pipeline, lockProbe },
-          { limit, json: Boolean(opts.json) },
+          { limit, retryFailed: Boolean(opts.retryFailed), json: Boolean(opts.json) },
         );
       } finally {
         deps.db.close();

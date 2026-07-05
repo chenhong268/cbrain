@@ -36,6 +36,7 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
   test("command is registered with bounded/json options", () => {
     expect(SRC).toContain('.command("ner-backfill")');
     expect(SRC).toContain("--limit <n>");
+    expect(SRC).toContain("--retry-failed");
     expect(SRC).toContain("--json");
   });
 
@@ -92,6 +93,84 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
       });
       expect(JSON.stringify(payload)).not.toContain("records/private-b");
       expect(deps.db.listJobs("pending").filter((j) => j.name === "ner-backfill")).toHaveLength(1);
+      deps.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--retry-failed refuses under a live writer and leaves failed jobs untouched", async () => {
+    const dir = withTempDir("cbrain-ner-backfill-retry-blocked-");
+    try {
+      const deps = makeDeps(dir);
+      const id = deps.db.submitJob("ner-backfill", { slug: "records/private-c" });
+      deps.db.claimJobById(id);
+      deps.db.failJob(id, "timeout-1");
+      deps.db.claimJobById(id);
+      deps.db.failJob(id, "timeout-2");
+      deps.db.claimJobById(id);
+      deps.db.failJob(id, "timeout-3");
+      const logs: string[] = [];
+      const errs: string[] = [];
+
+      const exit = await handleNerBackfill(
+        { db: deps.db, pages: deps.pages, pipeline: deps.pipeline, lockProbe: blocking },
+        { limit: 0, retryFailed: true, json: true },
+        (m) => logs.push(m),
+        (m) => errs.push(m),
+      );
+
+      expect(exit).toBe(1);
+      expect(deps.processCalls).toBe(0);
+      expect(JSON.stringify(JSON.parse(logs.join("\n")))).not.toContain("records/private-c");
+      expect(deps.db.getJob(id)?.status).toBe("failed");
+      deps.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--retry-failed resets only failed ner-backfill jobs without leaking slugs", async () => {
+    const dir = withTempDir("cbrain-ner-backfill-retry-");
+    try {
+      const deps = makeDeps(dir);
+      const failedNer = deps.db.submitJob("ner-backfill", { slug: "records/private-d" });
+      const failedOther = deps.db.submitJob("other-job", { slug: "records/private-e" });
+      deps.db.claimJobById(failedNer);
+      deps.db.failJob(failedNer, "timeout-1");
+      deps.db.claimJobById(failedNer);
+      deps.db.failJob(failedNer, "timeout-2");
+      deps.db.claimJobById(failedNer);
+      deps.db.failJob(failedNer, "timeout-3");
+      deps.db.claimJobById(failedOther);
+      deps.db.failJob(failedOther, "other-failure");
+      deps.db.claimJobById(failedOther);
+      deps.db.failJob(failedOther, "other-failure");
+      deps.db.claimJobById(failedOther);
+      deps.db.failJob(failedOther, "other-failure");
+      const logs: string[] = [];
+      const errs: string[] = [];
+
+      const exit = await handleNerBackfill(
+        { db: deps.db, pages: deps.pages, pipeline: deps.pipeline, lockProbe: open },
+        { limit: 0, retryFailed: true, json: true },
+        (m) => logs.push(m),
+        (m) => errs.push(m),
+      );
+
+      expect(exit).toBe(0);
+      expect(deps.processCalls).toBe(0);
+      expect(errs).toHaveLength(0);
+      const payload = JSON.parse(logs.join("\n"));
+      expect(payload).toEqual({
+        ok: true,
+        retried_failed: 1,
+        counts: { processed: 0, failed: 0, timed_out: 0, skipped: 0 },
+      });
+      expect(JSON.stringify(payload)).not.toContain("records/private-d");
+      expect(deps.db.getJob(failedNer)?.status).toBe("pending");
+      expect(deps.db.getJob(failedNer)?.attempts).toBe(0);
+      expect(deps.db.getJob(failedOther)?.status).toBe("failed");
       deps.db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
