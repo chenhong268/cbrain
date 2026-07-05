@@ -2,7 +2,13 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
-import { runDiscoveryMigrations, runLinkMigrations, runPageMigrations, runProvenanceMigrations } from "./migrations/index.js";
+import {
+  runAliasMigrations,
+  runDiscoveryMigrations,
+  runLinkMigrations,
+  runPageMigrations,
+  runProvenanceMigrations,
+} from "./migrations/index.js";
 
 /** Raised when a destructive migration's FK integrity check fails (#209).
  * Carries summarized per-table counts (NO raw row data) so callers can emit an
@@ -392,7 +398,7 @@ export class CBrainDB {
     this.migrateRawToRecords();
     this.migrateQueryLog();
     this.migrateQueryFeedback();
-    this.migrateAliasesSource();
+    runAliasMigrations(this.db);
     this.migrateChunksSummaryLevel();
     this.migrateOntologyTypes();
     this.migrateMissingIndexes();
@@ -3408,14 +3414,6 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_ingest_log_created ON ingest_log(created_at);
       CREATE INDEX IF NOT EXISTS idx_feedback_created ON query_feedback(created_at);
     `);
-  }
-
-  private migrateAliasesSource(): void {
-    const cols = this.db.prepare("PRAGMA table_info(aliases)").all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    if (!names.has("source")) {
-      this.db.exec("ALTER TABLE aliases ADD COLUMN source TEXT DEFAULT 'manual'");
-    }
   }
 
   private migrateChunksSummaryLevel(): void {
