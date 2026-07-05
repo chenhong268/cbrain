@@ -51,7 +51,7 @@ describe("isToolAllowedForProfile", () => {
   });
   test("maintenance includes dream + job_* + sync + health + relation_audit", () => {
     for (const t of ["dream", "dream_status", "dream_reset", "sync", "health", "relation_audit",
-      "job_submit", "job_list", "job_status", "job_cancel", "job_retry", "status", "wakeup_diff"]) {
+      "job", "job_submit", "job_list", "job_status", "job_cancel", "job_retry", "status", "wakeup_diff"]) {
       expect(isToolAllowedForProfile(t, "maintenance")).toBe(true);
     }
   });
@@ -78,6 +78,10 @@ describe("isToolAllowedForProfile", () => {
 
   test("agent does not expose unified link tool because it is write-capable (#289)", () => {
     expect(isToolAllowedForProfile("link", "agent")).toBe(false);
+  });
+
+  test("agent does not expose unified job tool because it is maintenance control surface (#290)", () => {
+    expect(isToolAllowedForProfile("job", "agent")).toBe(false);
   });
 
   // #264: raw `ingest` stays in the agent surface BY DESIGN. Removing it would

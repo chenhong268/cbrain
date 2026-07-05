@@ -86,7 +86,7 @@ describe("MCP Server", () => {
         "generate_indexes", "get_chunks", "get_compounding_reviews", "get_hierarchy", "get_ingest_log", "get_insight",
         "get_links", "get_org_tree", "get_page", "get_pages", "get_profile", "get_provenance", "get_tags",
         "get_timeline", "get_versions", "graph_query", "health",
-        "ingest", "ingest_dialogue", "job_cancel", "job_list",
+        "ingest", "ingest_dialogue", "job", "job_cancel", "job_list",
         "job_retry", "job_status", "job_submit", "link", "list_insights",
         "list_pages", "mark_discovery_seen", "merge_entities", "merge_pages",
         "promote_discovery", "put_page", "query", "query_insights",
@@ -2193,6 +2193,68 @@ describe("MCP Server", () => {
       const data = JSON.parse(result.content[0].text);
       expect(data.id).toBeGreaterThan(0);
       expect(data.status).toBe("pending");
+    });
+  });
+
+  describe("job tool", () => {
+    test("action=submit matches job_submit shape", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).job.handler({
+        action: "submit",
+        name: "anonymous-task",
+        data: { value: 1 },
+        priority: 2,
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.name).toBe("anonymous-task");
+      expect(data.status).toBe("pending");
+      expect(typeof data.id).toBe("number");
+    });
+
+    test("action=list matches job_list shape", async () => {
+      const id = Number(db.rawDb.prepare(
+        "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
+      ).run("anonymous-list-task", "done", 1).lastInsertRowid);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job.handler({ action: "list", status: "done" });
+      const data = JSON.parse(result.content[0].text);
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.some((j: any) => j.id === id && j.status === "done")).toBe(true);
+    });
+
+    test("action=status matches job_status shape", async () => {
+      const id = Number(db.rawDb.prepare(
+        "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
+      ).run("anonymous-status-task", "pending", 1).lastInsertRowid);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job.handler({ action: "status", id });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.id).toBe(id);
+      expect(data.name).toBe("anonymous-status-task");
+    });
+
+    test("action=cancel matches job_cancel shape", async () => {
+      const id = Number(db.rawDb.prepare(
+        "INSERT INTO jobs (name, status, priority) VALUES (?, ?, ?)"
+      ).run("anonymous-cancel-task", "pending", 1).lastInsertRowid);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job.handler({ action: "cancel", id });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({ success: true, id });
+    });
+
+    test("action=retry matches job_retry shape", async () => {
+      const id = Number(db.rawDb.prepare(
+        "INSERT INTO jobs (name, status, priority, attempts, max_attempts) VALUES (?, ?, ?, ?, ?)"
+      ).run("anonymous-retry-task", "failed", 1, 1, 3).lastInsertRowid);
+
+      const server = createServer(deps);
+      const result = await getTools(server).job.handler({ action: "retry", id });
+      const data = JSON.parse(result.content[0].text);
+      expect(data).toEqual({ success: true, id });
     });
   });
 

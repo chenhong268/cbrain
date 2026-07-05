@@ -8,7 +8,7 @@
 ┌──────────────────────────────────────────┐
 │  Skills Layer (7 × SKILL.md)             │  ← Agent behavior: when to check, what to save
 ├──────────────────────────────────────────┤
-│  MCP Server (92 tools, stdio + HTTP)     │  ← Agent interface: CRUD, search, graph, jobs
+│  MCP Server (93 tools, stdio + HTTP)     │  ← Agent interface: CRUD, search, graph, jobs
 ├──────────────────────────────────────────┤
 │  Core Engine                             │
 │  ┌──────────┬──────────┬──────────────┐  │
@@ -216,7 +216,7 @@ Tools organized into domains (full inventory in docs/mcp-tools.md):
 | Links | link, get_links, add_link, remove_link, graph_query | Graph edge management; old names remain compatibility aliases |
 | Timeline | timeline, get_timeline, add_timeline_entry | Temporal event tracking; old names remain compatibility aliases |
 | Versions | get_versions, revert_version | Non-destructive history |
-| Jobs | job_submit, job_list, job_status, job_cancel, job_retry | Async work management |
+| Jobs | job, job_submit, job_list, job_status, job_cancel, job_retry | Async work management; old names remain compatibility aliases |
 | Observability | get_chunks, get_ingest_log | Debugging and inspection |
 
 All tools return JSON via MCP text content. Zod schemas on every input for type safety and auto-generated tool descriptions.
