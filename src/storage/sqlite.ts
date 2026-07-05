@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
-import { runDiscoveryMigrations, runLinkMigrations } from "./migrations/index.js";
+import { runDiscoveryMigrations, runLinkMigrations, runPageMigrations } from "./migrations/index.js";
 
 /** Raised when a destructive migration's FK integrity check fails (#209).
  * Carries summarized per-table counts (NO raw row data) so callers can emit an
@@ -383,7 +383,7 @@ export class CBrainDB {
     `);
 
     this.migratePagesConstraint();
-    this.migratePagesExpiry();
+    runPageMigrations(this.db);
     runLinkMigrations(this.db);
     runDiscoveryMigrations(this.db, CBrainDB.discoveryDedupKey);
     this.migrateSearchLog();
@@ -440,21 +440,6 @@ export class CBrainDB {
     this.db.exec(
       "UPDATE links SET trust_state = 'trusted' WHERE relation = 'reports_to' AND source_type = 'agent' AND trust_state = 'candidate'"
     );
-  }
-
-  private migratePagesExpiry(): void {
-    const cols = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
-    const names = new Set(cols.map(c => c.name));
-    if (!names.has("expires_at")) {
-      this.db.exec("ALTER TABLE pages ADD COLUMN expires_at TEXT");
-    }
-    // Backfill: entity pages without expires_at get now + 90d
-    this.db.exec(
-      "UPDATE pages SET expires_at = datetime('now', '+90 days') WHERE type LIKE 'entity/%' AND expires_at IS NULL"
-    );
-    if (!names.has("confidence_decay")) {
-      this.db.exec("ALTER TABLE pages ADD COLUMN confidence_decay REAL DEFAULT 1.0");
-    }
   }
 
   private migratePagesConstraint(): void {
