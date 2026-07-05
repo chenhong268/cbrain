@@ -4,13 +4,16 @@ import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
 import {
   runAliasMigrations,
+  ensurePagesIndexes,
   runDiscoveryMigrations,
   runLatePageMigrations,
+  runMissingIndexMigrations,
   runLinkMigrations,
   runPageMigrations,
   runProvenanceMigrations,
   runQueryInteractionMigrations,
   runTelemetryMigrations,
+  validatePagesIndexes,
 } from "./migrations/index.js";
 
 /** Raised when a destructive migration's FK integrity check fails (#209).
@@ -401,7 +404,7 @@ export class CBrainDB {
     runAliasMigrations(this.db);
     this.migrateChunksSummaryLevel();
     this.migrateOntologyTypes();
-    this.migrateMissingIndexes();
+    runMissingIndexMigrations(this.db);
     runProvenanceMigrations(this.db);
     runLatePageMigrations(this.db);
     this.repairDirtyData();
@@ -445,7 +448,7 @@ export class CBrainDB {
           ALTER TABLE pages_new RENAME TO pages;
         `);
 
-        this.ensurePagesIndexes();
+        ensurePagesIndexes(this.db);
       },
       validate: () => {
         // pages table must exist, pages_new must not
@@ -3198,89 +3201,6 @@ export class CBrainDB {
     ).run({ $from: from, $to: to, $rel: relation, $delta: delta });
   }
 
-  /** Single source of truth for pages indexes.
-   *  Each spec has: name, SQL DDL, required columns (all must exist in pages),
-   *  and whether it's the title unique index. */
-  private static readonly PAGES_INDEX_SPECS: ReadonlyArray<{
-    readonly name: string;
-    readonly sql: string;
-    readonly columns: readonly string[];
-    readonly unique?: boolean;
-  }> = [
-    { name: "idx_pages_type", sql: "CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type)", columns: ["type"] },
-    { name: "idx_pages_tier", sql: "CREATE INDEX IF NOT EXISTS idx_pages_tier ON pages(tier)", columns: ["tier"] },
-    { name: "idx_pages_title", sql: "CREATE INDEX IF NOT EXISTS idx_pages_title ON pages(title)", columns: ["title"] },
-    { name: "idx_pages_updated_at", sql: "CREATE INDEX IF NOT EXISTS idx_pages_updated_at ON pages(updated_at)", columns: ["updated_at"] },
-    { name: "idx_pages_created_at", sql: "CREATE INDEX IF NOT EXISTS idx_pages_created_at ON pages(created_at)", columns: ["created_at"] },
-    { name: "idx_pages_activity_wt", sql: "CREATE INDEX IF NOT EXISTS idx_pages_activity_wt ON pages(activity_weight) WHERE activity_weight > 0", columns: ["activity_weight"] },
-    { name: "idx_pages_expires_at", sql: "CREATE INDEX IF NOT EXISTS idx_pages_expires_at ON pages(expires_at) WHERE expires_at IS NOT NULL", columns: ["expires_at"] },
-    { name: "idx_pages_title_uniq", sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_title_uniq ON pages(title)", columns: ["title"], unique: true },
-  ];
-
-  /** Create all pages indexes whose required columns exist.
-   *  Real errors (IO, corruption, schema conflict) propagate up and fail startup.
-   *  Only the title unique index is allowed to fail gracefully when duplicate
-   *  titles exist — all other failures are fatal. */
-  private ensurePagesIndexes(): void {
-    const colRows = this.db.prepare("PRAGMA table_info(pages)").all() as Array<{ name: string }>;
-    const available = new Set(colRows.map(c => c.name));
-
-    for (const spec of CBrainDB.PAGES_INDEX_SPECS) {
-      // Skip indexes whose columns don't exist yet (e.g., v4 lacks activity_weight)
-      if (!spec.columns.every(col => available.has(col))) continue;
-
-      try {
-        this.db.exec(spec.sql);
-      } catch (e) {
-        // Only title unique index may fail gracefully — and only for duplicate titles
-        if (spec.unique) {
-          const hasDups = this.db.prepare(
-            "SELECT title FROM pages GROUP BY title HAVING COUNT(*) > 1 LIMIT 1"
-          ).get();
-          if (hasDups) {
-            console.warn("[migrate] pages has duplicate titles — unique index skipped, run dedup first");
-            continue;
-          }
-        }
-        throw e;
-      }
-    }
-  }
-
-  /** Validate that all expected pages indexes exist.
-   *  Only safe to call after all ALTER TABLE migrations (activity_weight etc.)
-   *  have run — i.e., from the ontology migration validate or later.
-   *  Unique indexes are allowed to be absent when duplicate titles exist —
-   *  mirrors the graceful skip in ensurePagesIndexes(). */
-  private validatePagesIndexes(): void {
-    const specs = CBrainDB.PAGES_INDEX_SPECS;
-    const ph = specs.map(() => "?").join(",");
-    const rows = this.db.prepare(
-      `SELECT name FROM sqlite_master WHERE type='index' AND name IN (${ph})`
-    ).all(...specs.map(s => s.name)) as Array<{ name: string }>;
-    const found = new Set(rows.map(r => r.name));
-    for (const spec of specs) {
-      if (found.has(spec.name)) continue;
-      // Unique index absent — only OK when duplicate titles actually exist
-      if (spec.unique) {
-        const hasDups = this.db.prepare(
-          "SELECT title FROM pages GROUP BY title HAVING COUNT(*) > 1 LIMIT 1"
-        ).get();
-        if (hasDups) continue;
-      }
-      throw new Error(`${spec.name} missing after rebuild`);
-    }
-  }
-
-  private migrateMissingIndexes(): void {
-    this.ensurePagesIndexes();
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_tags_page_slug ON tags(page_slug);
-      CREATE INDEX IF NOT EXISTS idx_timeline_page_slug ON timeline(page_slug);
-      CREATE INDEX IF NOT EXISTS idx_ingest_log_created ON ingest_log(created_at);
-    `);
-  }
-
   private migrateChunksSummaryLevel(): void {
     // Capture baseline before migration
     const preCount = (this.db.prepare("SELECT COUNT(*) as cnt FROM chunks").get() as { cnt: number }).cnt;
@@ -3382,7 +3302,7 @@ export class CBrainDB {
         this.db.prepare("UPDATE pages SET type = 'concept/concept' WHERE type = 'concept' AND slug LIKE 'brain/concepts/%'").run();
 
         // Rebuild all indexes (pages rebuild drops everything)
-        this.ensurePagesIndexes();
+        ensurePagesIndexes(this.db);
       },
       validate: () => {
         // pages table must exist, pages_new must not
@@ -3406,7 +3326,7 @@ export class CBrainDB {
         const postCount = (this.db.prepare("SELECT COUNT(*) as cnt FROM pages").get() as { cnt: number }).cnt;
         if (postCount !== preCount) throw new Error(`pages row count mismatch: expected ${preCount}, got ${postCount}`);
 
-        this.validatePagesIndexes();
+        validatePagesIndexes(this.db);
 
         // No flat entity/concept types should remain under brain/ paths
         const flatEntity = this.db.prepare("SELECT COUNT(*) as cnt FROM pages WHERE type = 'entity' AND slug LIKE 'brain/entities/%'").get() as { cnt: number };
