@@ -8,6 +8,7 @@ import {
   runLinkMigrations,
   runPageMigrations,
   runProvenanceMigrations,
+  runQueryInteractionMigrations,
   runTelemetryMigrations,
 } from "./migrations/index.js";
 
@@ -395,8 +396,7 @@ export class CBrainDB {
     runDiscoveryMigrations(this.db, CBrainDB.discoveryDedupKey);
     runTelemetryMigrations(this.db);
     this.migrateRawToRecords();
-    this.migrateQueryLog();
-    this.migrateQueryFeedback();
+    runQueryInteractionMigrations(this.db);
     runAliasMigrations(this.db);
     this.migrateChunksSummaryLevel();
     this.migrateOntologyTypes();
@@ -2983,25 +2983,6 @@ export class CBrainDB {
     }));
   }
 
-  // ─── Query log (Phase 1) ────────────────────────────────────
-
-  private migrateQueryLog(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS query_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tool TEXT NOT NULL,
-        query TEXT NOT NULL,
-        result_slugs TEXT NOT NULL,
-        result_count INTEGER NOT NULL,
-        latency_ms INTEGER,
-        session_id TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-    `);
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_query_log_created ON query_log(created_at)");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_query_log_session ON query_log(session_id)");
-  }
-
   logQuery(tool: string, query: string, resultSlugs: string[], latencyMs: number, sessionId?: string): void {
     this.prepare(
       "INSERT INTO query_log (tool, query, result_slugs, result_count, latency_ms, session_id) VALUES ($tool, $query, $slugs, $count, $latency, $session)"
@@ -3216,45 +3197,6 @@ export class CBrainDB {
     ).run({ $from: from, $to: to, $rel: relation, $delta: delta });
   }
 
-  // ─── Query feedback (Phase 4) ───────────────────────────────
-
-  private migrateQueryFeedback(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS query_feedback (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query_id INTEGER REFERENCES query_log(id) ON DELETE CASCADE,
-        slug TEXT NOT NULL,
-        signal TEXT NOT NULL CHECK(signal IN ('relevant', 'irrelevant', 'corrected', 'expanded')),
-        note TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-
-      CREATE TABLE IF NOT EXISTS brain_snapshots (
-        id TEXT PRIMARY KEY,
-        created_at TEXT NOT NULL,
-        kind TEXT NOT NULL DEFAULT 'wakeup_diff',
-        page_count INTEGER NOT NULL,
-        link_count INTEGER NOT NULL,
-        health_issue_count INTEGER
-      );
-
-      CREATE TABLE IF NOT EXISTS brain_snapshot_items (
-        snapshot_id TEXT NOT NULL REFERENCES brain_snapshots(id) ON DELETE CASCADE,
-        slug TEXT NOT NULL,
-        title TEXT NOT NULL,
-        content_hash TEXT,
-        tier INTEGER,
-        mention_count INTEGER,
-        link_count INTEGER,
-        updated_at TEXT,
-        page_type TEXT,
-        confidence_decay REAL,
-        PRIMARY KEY (snapshot_id, slug)
-      );
-    `);
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_feedback_slug ON query_feedback(slug)");
-  }
-
   /** Single source of truth for pages indexes.
    *  Each spec has: name, SQL DDL, required columns (all must exist in pages),
    *  and whether it's the title unique index. */
@@ -3335,7 +3277,6 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_tags_page_slug ON tags(page_slug);
       CREATE INDEX IF NOT EXISTS idx_timeline_page_slug ON timeline(page_slug);
       CREATE INDEX IF NOT EXISTS idx_ingest_log_created ON ingest_log(created_at);
-      CREATE INDEX IF NOT EXISTS idx_feedback_created ON query_feedback(created_at);
     `);
   }
 
