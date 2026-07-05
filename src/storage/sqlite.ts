@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
-import { runDiscoveryMigrations, runLinkMigrations, runPageMigrations } from "./migrations/index.js";
+import { runDiscoveryMigrations, runLinkMigrations, runPageMigrations, runProvenanceMigrations } from "./migrations/index.js";
 
 /** Raised when a destructive migration's FK integrity check fails (#209).
  * Carries summarized per-table counts (NO raw row data) so callers can emit an
@@ -396,48 +396,9 @@ export class CBrainDB {
     this.migrateChunksSummaryLevel();
     this.migrateOntologyTypes();
     this.migrateMissingIndexes();
-    this.migrateProvenance();
+    runProvenanceMigrations(this.db);
     this.migrateIngestContentHash();
     this.repairDirtyData();
-  }
-
-  private migrateProvenance(): void {
-    const linkCols = this.db.prepare("PRAGMA table_info(links)").all() as Array<{ name: string }>;
-    const linkNames = new Set(linkCols.map(c => c.name));
-    if (!linkNames.has("source_page_slug")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN source_page_slug TEXT");
-    }
-    if (!linkNames.has("trust_state")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN trust_state TEXT DEFAULT 'candidate' CHECK(trust_state IN ('trusted','user_thought','candidate','rejected','superseded'))");
-      this.db.exec("UPDATE links SET trust_state = 'trusted' WHERE source_type IN ('wikilink','manual')");
-    }
-    if (!linkNames.has("evidence")) {
-      this.db.exec("ALTER TABLE links ADD COLUMN evidence TEXT");
-    }
-
-    const tlCols = this.db.prepare("PRAGMA table_info(timeline)").all() as Array<{ name: string }>;
-    const tlNames = new Set(tlCols.map(c => c.name));
-    if (!tlNames.has("source_page_slug")) {
-      this.db.exec("ALTER TABLE timeline ADD COLUMN source_page_slug TEXT");
-    }
-    if (!tlNames.has("trust_state")) {
-      this.db.exec("ALTER TABLE timeline ADD COLUMN trust_state TEXT DEFAULT 'candidate'");
-    }
-    if (!tlNames.has("evidence")) {
-      this.db.exec("ALTER TABLE timeline ADD COLUMN evidence TEXT");
-    }
-
-    // #233 Phase 1 (HIGH 1): deterministic reports_to edges (source_type='agent')
-    // were historically 'candidate' because insertLink mapped source_type=agent to
-    // 'candidate'. They are authoritative current facts (setHierarchy /
-    // processReportsTo). Promote them to 'trusted' so current-fact reads
-    // (current = trusted/user_thought/NULL) include them — otherwise existing
-    // vaults' org trees would empty out. Idempotent: matches only candidate rows,
-    // so re-runs are no-ops once promoted. NER-source candidate reports_to edges
-    // stay candidate (weak, not current).
-    this.db.exec(
-      "UPDATE links SET trust_state = 'trusted' WHERE relation = 'reports_to' AND source_type = 'agent' AND trust_state = 'candidate'"
-    );
   }
 
   private migratePagesConstraint(): void {
