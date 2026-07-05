@@ -14,10 +14,15 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
-import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody, isCurrentFactLink } from "./shared.js";
+import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody } from "./shared.js";
 import { safeDeletePage, type SafeDeleteResult } from "./safety/page-delete-safety.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
+import {
+  buildKnownRelationsBlock,
+  replaceKnownRelationsSection,
+  stripKnownRelationsSection,
+} from "./graph/known-relations-projector.js";
 import {
   atomicSlugChange,
   atomicTypeChange,
@@ -68,29 +73,7 @@ export interface Page {
  * and stray **关联** lines. Returns the cleaned body (trimmed right).
  */
 function stripKnownRelations(body: string): string {
-  let clean = body;
-  // 1) Remove legacy <!-- cbrain-links --> ... <!-- /cbrain-links --> blocks
-  const LEGACY_OPEN = "<!-- cbrain-links -->";
-  const LEGACY_CLOSE = "<!-- /cbrain-links -->";
-  let legacyOpenIdx = clean.indexOf(LEGACY_OPEN);
-  while (legacyOpenIdx !== -1) {
-    const legacyCloseIdx = clean.indexOf(LEGACY_CLOSE, legacyOpenIdx);
-    if (legacyCloseIdx !== -1) {
-      clean = clean.substring(0, legacyOpenIdx) + clean.substring(legacyCloseIdx + LEGACY_CLOSE.length);
-    } else {
-      break;
-    }
-    legacyOpenIdx = clean.indexOf(LEGACY_OPEN);
-  }
-  // 2) Remove ## Known Relations section (to end of body)
-  const SECTION_HEADER = "## Known Relations";
-  const sectionIdx = clean.indexOf(SECTION_HEADER);
-  if (sectionIdx !== -1) {
-    clean = clean.substring(0, sectionIdx);
-  }
-  // 3) Remove any stray "**关联**" line left from legacy
-  clean = clean.replace(/\n\*\*关联\*\*\n/g, "\n");
-  return clean.trimEnd();
+  return stripKnownRelationsSection(body);
 }
 
 export class PageManager {
@@ -517,10 +500,6 @@ export class PageManager {
     const outgoing = this.db.getOutgoingLinks(slug);
     const incoming = this.db.getIncomingLinks(slug);
 
-    const linkLines: string[] = [];
-    for (const l of outgoing.filter(isCurrentFactLink)) linkLines.push(`- ${l.relation} → [[${l.to_slug}]]`);
-    for (const l of incoming.filter(isCurrentFactLink)) linkLines.push(`- ← ${l.relation} from [[${l.from_slug}]]`);
-
     const filePath = join(this.vaultPath, page.file_path);
     if (!existsSync(filePath)) return;
 
@@ -531,13 +510,7 @@ export class PageManager {
     const { links: _, ...cleanFm } = frontmatter;
     const updatedFm = { ...cleanFm, updated_at: new Date().toISOString() } as PageFrontmatter;
 
-    // Strip auto-generated link sections
-    const cleanBody = stripKnownRelations(body);
-    const SECTION_HEADER = "## Known Relations";
-
-    const newBody = linkLines.length > 0
-      ? `${cleanBody}\n\n${SECTION_HEADER}\n\n${linkLines.join("\n")}\n`
-      : cleanBody;
+    const newBody = replaceKnownRelationsSection(body, buildKnownRelationsBlock(outgoing, incoming));
 
     const content = stringifyFrontmatter(updatedFm, newBody);
     writeFileSync(filePath, content, "utf-8");

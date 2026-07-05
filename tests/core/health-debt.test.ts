@@ -80,6 +80,20 @@ describe("planRepairs — auto_repairable classification", () => {
     expect(action.action.length).toBeGreaterThan(0);
   });
 
+  test("Known Relations projection drift → auto_repairable / sync_known_relations", () => {
+    const report = makeReport([
+      makeIssue("结构一致性", "entity/entity-a", "Known Relations projection drift: Markdown projection differs from SQLite graph", {
+        severity: "medium",
+      }),
+    ]);
+    const plan = planRepairs(report, noSignals);
+    expect(plan.counts.auto_repairable).toBe(1);
+    const action = plan.actions[0];
+    expect(action.group).toBe("auto_repairable");
+    expect(action.kind).toBe("sync_known_relations");
+    expect(action.slug).toBe("entity/entity-a");
+  });
+
   test("正文 wikilink 缺 links 边 → auto_repairable / reindex_wikilinks", () => {
     const report = makeReport([
       makeIssue("结构一致性", "entity/entity-b", "正文提及 [[实体B]] 但 links 表无边", {

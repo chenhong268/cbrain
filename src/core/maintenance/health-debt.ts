@@ -109,7 +109,7 @@ function classify(
 
   // ── 结构一致性：3 类 auto_repairable + 1 类 needs_review（缺图边）──
   if (dimension === "结构一致性") {
-    if (issue.description.includes("未写入 Known Relations")) {
+    if (issue.description.includes("未写入 Known Relations") || issue.description.includes("Known Relations projection drift")) {
       return {
         ...base,
         group: "auto_repairable",

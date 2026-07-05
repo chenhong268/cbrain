@@ -7,6 +7,11 @@ import { isCurrentFactLink, isValidRelation } from "../shared.js";
 import { extractWikiLinks, stripKnownRelationsSection, isValidEntityName } from "../ingestion/extract.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import { findEntitySlug } from "../shared.js";
+import {
+  buildKnownRelationsProjection,
+  hasKnownRelationsDrift,
+  type KnownRelationsLink,
+} from "../graph/known-relations-projector.js";
 
 // ─── Contradiction classification ─────────────────────────────
 
@@ -762,28 +767,22 @@ export class HealthChecker {
 
   private checkLinksVsMarkdown(issues: HealthIssue[]): void {
     const allLinks = this.db.getAllLinks();
-    const pagesWithLinks = new Map<string, { outgoing: Map<string, string[]>; incoming: Map<string, string[]> }>();
+    const pagesWithLinks = new Map<string, { outgoing: KnownRelationsLink[]; incoming: KnownRelationsLink[] }>();
+
+    const ensurePageLinks = (slug: string): { outgoing: KnownRelationsLink[]; incoming: KnownRelationsLink[] } => {
+      const existing = pagesWithLinks.get(slug);
+      if (existing) return existing;
+      const created = { outgoing: [], incoming: [] };
+      pagesWithLinks.set(slug, created);
+      return created;
+    };
 
     for (const link of allLinks.filter(isCurrentFactLink)) {
-      if (!pagesWithLinks.has(link.from_slug)) {
-        pagesWithLinks.set(link.from_slug, { outgoing: new Map(), incoming: new Map() });
-      }
-      if (!pagesWithLinks.has(link.to_slug)) {
-        pagesWithLinks.set(link.to_slug, { outgoing: new Map(), incoming: new Map() });
-      }
-
-      const from = pagesWithLinks.get(link.from_slug)!;
-      const targets = from.outgoing.get(link.to_slug) ?? [];
-      targets.push(link.relation);
-      from.outgoing.set(link.to_slug, targets);
-
-      const to = pagesWithLinks.get(link.to_slug)!;
-      const sources = to.incoming.get(link.from_slug) ?? [];
-      sources.push(link.relation);
-      to.incoming.set(link.from_slug, sources);
+      ensurePageLinks(link.from_slug).outgoing.push(link);
+      ensurePageLinks(link.to_slug).incoming.push(link);
     }
 
-    for (const [slug, { outgoing, incoming }] of pagesWithLinks) {
+    for (const [slug, links] of pagesWithLinks) {
       const page = this.db.getPage(slug);
       if (!page?.file_path) continue;
       const filePath = join(this.vaultPath!, page.file_path);
@@ -792,14 +791,12 @@ export class HealthChecker {
       const body = readFileSync(filePath, "utf-8");
       const krMatch = body.match(/## Known Relations\n([\s\S]*?)$/);
       const krSection = krMatch?.[1] ?? "";
+      const projection = buildKnownRelationsProjection(links.outgoing, links.incoming);
 
       let missingOutgoing = 0;
-      for (const [to, rels] of outgoing) {
-        for (const rel of rels) {
-          const pattern = `- ${rel} → [[${to}]]`;
-          if (!krSection.includes(pattern)) {
-            missingOutgoing++;
-          }
+      for (const pattern of projection.outgoingLines) {
+        if (!krSection.includes(pattern)) {
+          missingOutgoing++;
         }
       }
       if (missingOutgoing > 0) {
@@ -813,12 +810,9 @@ export class HealthChecker {
       }
 
       let missingIncoming = 0;
-      for (const [from, rels] of incoming) {
-        for (const rel of rels) {
-          const pattern = `- ← ${rel} from [[${from}]]`;
-          if (!krSection.includes(pattern)) {
-            missingIncoming++;
-          }
+      for (const pattern of projection.incomingLines) {
+        if (!krSection.includes(pattern)) {
+          missingIncoming++;
         }
       }
       if (missingIncoming > 0) {
@@ -827,6 +821,16 @@ export class HealthChecker {
           slug,
           title: page.title ?? slug,
           description: `有 ${missingIncoming} 条入边未写入 Known Relations 区块`,
+          suggestion: `运行 syncLinksToMarkdown("${slug}") 修复`,
+        });
+      }
+
+      if (missingOutgoing === 0 && missingIncoming === 0 && hasKnownRelationsDrift(body, links.outgoing, links.incoming)) {
+        issues.push({
+          severity: "medium",
+          slug,
+          title: page.title ?? slug,
+          description: "Known Relations projection drift: Markdown projection differs from SQLite graph",
           suggestion: `运行 syncLinksToMarkdown("${slug}") 修复`,
         });
       }

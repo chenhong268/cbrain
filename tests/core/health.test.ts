@@ -560,6 +560,23 @@ describe("HealthChecker", () => {
       expect(dim!.issues.some(i => i.description.includes("出边未写入 Known Relations"))).toBe(true);
     });
 
+    test("检测 Known Relations stale projection drift", async () => {
+      insertPage("entity/a", "A", "entity/person", { file_path: "entity-a.md" });
+      insertPage("entity/b", "B", "entity/person", { file_path: "entity-b.md" });
+      insertPage("entity/old", "Old", "entity/person", { file_path: "entity-old.md" });
+      insertLink("entity/a", "entity/b", "协作");
+
+      writeVaultFile("entity-a.md", "---\ntitle: A\ntype: entity/person\nslug: entity/a\n---\nA 的内容\n\n## Known Relations\n\n- 协作 → [[entity/b]]\n- 协作 → [[entity/old]]\n");
+      writeVaultFile("entity-b.md", "---\ntitle: B\ntype: entity/person\nslug: entity/b\n---\nB 的内容\n\n## Known Relations\n\n- ← 协作 from [[entity/a]]\n");
+      writeVaultFile("entity-old.md", "---\ntitle: Old\ntype: entity/person\nslug: entity/old\n---\nOld 的内容\n");
+
+      const vaultChecker = new HealthChecker(db, join(testDir, "outputs"), undefined, vaultDir);
+      const report = await vaultChecker.checkAll();
+      const dim = report.dimensions.find(d => d.name === "结构一致性");
+      expect(dim).toBeDefined();
+      expect(dim!.issues.some(i => i.slug === "entity/a" && i.description.includes("Known Relations projection drift"))).toBe(true);
+    });
+
     test("candidate reports_to 不要求写入 Known Relations", async () => {
       insertPage("entity/staff-candidate", "StaffCandidate", "entity/person", { file_path: "entity-staff-candidate.md" });
       insertPage("entity/boss-candidate", "BossCandidate", "entity/person", { file_path: "entity-boss-candidate.md" });
