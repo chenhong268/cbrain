@@ -93,7 +93,7 @@ describe("MCP Server", () => {
         "read_action_candidates", "read_discoveries", "read_knowledge_map", "read_project_state", "recall_episode", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
         "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
         "resolve_slugs", "revert_version", "run_action_candidates", "run_discovery", "set_hierarchy", "set_trust_state",
-        "status", "summarize", "sync", "tag", "update_action_candidate_status", "update_discovery_status", "update_profile", "wakeup_diff", "watcher_quarantine", "writeback",
+        "status", "summarize", "sync", "tag", "timeline", "update_action_candidate_status", "update_discovery_status", "update_profile", "wakeup_diff", "watcher_quarantine", "writeback",
       ]);
     });
   });
@@ -1872,6 +1872,49 @@ describe("MCP Server", () => {
   });
 
   // ─── Timeline tools ────────────────────────────
+
+  describe("timeline tool", () => {
+    test("action=get matches get_timeline envelope shape", async () => {
+      mkdirSync(join(vaultPath, "entities"), { recursive: true });
+      writeFileSync(join(vaultPath, "entities", "tl-unified-get.md"), "---\ntitle: TL Unified\ntype: entity\n---\n| 2026.01 | Event |");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tl-unified-get", "TL Unified", "entities/tl-unified-get.md", "h1");
+      db.rawDb.prepare(
+        "INSERT INTO timeline (page_slug, summary, event_date) VALUES (?, ?, ?)"
+      ).run("entities/tl-unified-get", "Event 1", "2026-01-01");
+
+      const server = createServer(deps);
+      const result = await getTools(server).timeline.handler({ action: "get", slug: "entities/tl-unified-get" });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.display).toBeDefined();
+      expect(data.summary).toBeDefined();
+      expect(data.raw.slug).toBe("entities/tl-unified-get");
+      expect(Array.isArray(data.raw.events)).toBe(true);
+      expect(data.raw.events.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("action=add matches add_timeline_entry shape and writes event", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
+      ).run("entities/tl-unified-add", "TL Unified Add", "tl-unified-add.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).timeline.handler({
+        action: "add",
+        slug: "entities/tl-unified-add",
+        summary: "Unified event",
+        eventDate: "2026-07-05",
+      });
+      const data = JSON.parse(result.content[0].text);
+      expect(data.success).toBe(true);
+      expect(data.slug).toBe("entities/tl-unified-add");
+
+      const cnt = db.rawDb.prepare("SELECT COUNT(*) as c FROM timeline WHERE page_slug = ? AND summary = ?")
+        .get("entities/tl-unified-add", "Unified event") as { c: number };
+      expect(cnt.c).toBe(1);
+    });
+  });
 
   describe("add_timeline_entry tool", () => {
     test("adds a timeline event for a page", async () => {
