@@ -49,7 +49,7 @@ const AGENT_ALLOWLIST = [
   "find_similar_entities",
   "merge_entities",
   "get_profile",
-  "read_project_state",
+  "next_actions",
   "status",
 ] as const;
 
@@ -78,6 +78,7 @@ const MAINTENANCE_ALLOWLIST = [
   "job_cancel",
   "job_retry",
   "read_knowledge_map",
+  "read_project_state",
   "run_action_candidates",
   "read_action_candidates",
   "update_action_candidate_status",

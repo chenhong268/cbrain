@@ -102,8 +102,12 @@ describe("read_project_state MCP tool (#266)", () => {
     expect(raw.raw).toBeDefined();
   });
 
-  test("agent profile exposes read_project_state without growing above 20 tools", () => {
-    expect(isToolAllowedForProfile("read_project_state", "agent")).toBe(true);
+  // #309: read_project_state moved out of agent (project metadata; next_actions is the
+  // attention entry daily Agents need). Stays reachable via maintenance + full.
+  test("agent excludes read_project_state (moved to maintenance in #309); update_profile still excluded", () => {
+    expect(isToolAllowedForProfile("read_project_state", "agent")).toBe(false);
+    expect(isToolAllowedForProfile("read_project_state", "maintenance")).toBe(true);
+    expect(isToolAllowedForProfile("read_project_state", "full")).toBe(true);
     expect(isToolAllowedForProfile("update_profile", "agent")).toBe(false);
   });
 });

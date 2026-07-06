@@ -62,9 +62,12 @@ describe("HTTP /mcp per-session tool profiles (#260)", () => {
     for (const t of ["query", "get_chunks", "dream", "sync", "health", "job_submit"]) {
       expect(names, `agent must exclude ${t}`).not.toContain(t);
     }
-    for (const t of ["cbrain_recall", "deep_recall", "ingest", "status"]) {
+    for (const t of ["cbrain_recall", "deep_recall", "ingest", "status", "next_actions"]) {
       expect(names).toContain(t);
     }
+    // #309: read_project_state moved out of agent (project metadata, not daily memory path);
+    // next_actions is the unified attention entry the daily Agent needs.
+    expect(names).not.toContain("read_project_state");
   });
 
   test("client B (header maintenance) → dream/health/job_* reachable, no agent frontdoor", async () => {

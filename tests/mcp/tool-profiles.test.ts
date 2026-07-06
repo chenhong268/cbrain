@@ -115,6 +115,17 @@ describe("isToolAllowedForProfile", () => {
     expect(isToolAllowedForProfile("sync", "agent")).toBe(false);
     expect(isToolAllowedForProfile("dream", "agent")).toBe(false);
   });
+
+  // #309: next_actions is the unified attention entry — daily Agents need it.
+  // read_project_state moves out of agent (project metadata, not the daily memory-call
+  // path) but stays reachable via maintenance + full. Agent surface stays bounded <= 20.
+  test("next_actions in agent; read_project_state moved to maintenance/full (#309)", () => {
+    expect(isToolAllowedForProfile("next_actions", "agent")).toBe(true);
+    expect(isToolAllowedForProfile("read_project_state", "agent")).toBe(false);
+    expect(isToolAllowedForProfile("read_project_state", "maintenance")).toBe(true);
+    expect(isToolAllowedForProfile("read_project_state", "full")).toBe(true);
+    expect(isToolAllowedForProfile("next_actions", "maintenance")).toBe(true);
+  });
 });
 
 describe("allowlist shape", () => {
