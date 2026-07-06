@@ -144,6 +144,46 @@ describe("next_actions MCP (#309)", () => {
     expect(existsSync(join(deps.runtimePath, "health"))).toBe(false);
   });
 
+  test("hostile persisted display metadata never leaks into display or items[] (#309 review)", async () => {
+    // Simulate a corrupted/migrated persisted row carrying hostile display text.
+    const hostile = "entity/private-a score=0.99 /Users/example/private SELECT * FROM pages";
+    db.upsertDiscovery(
+      "action_health_review",
+      ["health:结构一致性:needs_review:entity/private-a"],
+      0.6,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        display_title: hostile,
+        display_reason: hostile,
+        suggested_action: hostile,
+        source: "health",
+        repair_group: "needs_review",
+        dimension: "结构一致性",
+        evidence: [{ source: "health", ref: "health:结构一致性:needs_review:entity/private-a", kind: "needs_review" }],
+      },
+    );
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["health"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    // display must not leak any hostile marker
+    expect(payload.display).not.toContain("entity/");
+    expect(payload.display).not.toContain("/Users/");
+    expect(payload.display).not.toMatch(/\bscore\b/i);
+    expect(payload.display).not.toMatch(/SELECT\s+\*\s+FROM/i);
+    // structured items[] must fall back to safe copy, not echo hostile text
+    for (const it of payload.items) {
+      for (const f of [it.title, it.reason, it.suggestion]) {
+        expect(f).not.toContain("entity/");
+        expect(f).not.toContain("/Users/");
+        expect(f).not.toMatch(/\bscore\b/i);
+        expect(f).not.toMatch(/SELECT\s+\*\s+FROM/i);
+      }
+    }
+  });
+
   test("default sources merges health + discovery and stays within cap", async () => {
     for (let i = 0; i < 4; i++) {
       db.upsertDiscovery("similar_entity", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, {});

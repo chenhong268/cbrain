@@ -287,6 +287,23 @@ function parseJsonArray(raw: string | null | undefined): string[] {
 }
 
 /**
+ * Treat persisted display text as UNTRUSTED. display_title/reason/suggested_action in
+ * discovery metadata were written by a past run_action_candidates, but the row is mutable
+ * storage — a corrupted/migrated/third-party-updated row could carry hostile text (slugs,
+ * paths, scores, SQL). Validate via assertSafeActionDisplay; on failure fall back to fixed
+ * copy rather than echoing the raw value. #309 review fix.
+ */
+function safeDisplayText(text: unknown, fallback: string): string {
+  const s = typeof text === "string" && text.trim().length > 0 ? text : fallback;
+  try {
+    assertSafeActionDisplay(s);
+    return s;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
  * Read-side counterpart of the draft builders: reconstruct an in-memory draft from a
  * persisted action-candidate discovery row (created by `ActionCandidateManager.persistDrafts`
  * via `run_action_candidates`). Used by READ-ONLY consumers (e.g. next_actions) that must
@@ -309,9 +326,9 @@ export function persistedCandidateRowToDraft(
     entities: parseJsonArray(row.entities),
     score: row.score,
     actionable: safeActionable(row.actionable),
-    displayTitle: String(meta.display_title ?? "有一项候选需要确认"),
-    displayReason: String(meta.display_reason ?? "这项信号需要人工复核后再处理。"),
-    suggestedAction: String(meta.suggested_action ?? "确认后再决定处理或忽略。"),
+    displayTitle: safeDisplayText(meta.display_title, "有一项候选需要确认"),
+    displayReason: safeDisplayText(meta.display_reason, "这项信号需要人工复核后再处理。"),
+    suggestedAction: safeDisplayText(meta.suggested_action, "确认后再决定处理或忽略。"),
     evidence,
     proposedActions: parseActions(row.proposed_actions),
     metadata: {
