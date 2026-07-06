@@ -5,6 +5,7 @@ import { CBrainDB } from "../../../src/storage/sqlite.js";
 import {
   detectProactiveConnections,
   pairKey,
+  produceProactiveConnectionCandidates,
 } from "../../../src/core/maintenance/proactive-connection.js";
 
 const testDir = "/tmp/cbrain-test-proactive-connection";
@@ -167,5 +168,78 @@ describe("detectProactiveConnections", () => {
     }
     const result = detectProactiveConnections(db, { since: "1970-01-01", minShared: 2, minSessions: 2, cap: 3 });
     expect(result.length).toBe(3);
+  });
+});
+
+describe("produceProactiveConnectionCandidates", () => {
+  it("emits + persists one row for a qualifying pair (Signal A + B)", () => {
+    seedSharedPair(db, { sessions: true });
+    const res = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(res.inserted).toBe(1);
+    const rows = db.getDiscoveriesByType("proactive_connection", 10);
+    expect(rows.length).toBe(1);
+    expect(JSON.parse(rows[0].entities).sort()).toEqual(["entity-alpha", "entity-beta"]);
+    expect(rows[0].actionable).toBe("low");
+    expect(rows[0].auto_applicable).toBe(0);
+  });
+
+  it("does NOT persist Signal A alone (no supporting) — acceptance #2", () => {
+    seedSharedPair(db); // shared neighbors only, no sessions/timeline
+    const res = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(res.inserted).toBe(0);
+    expect(db.getDiscoveriesByType("proactive_connection", 10)).toEqual([]);
+  });
+
+  it("repeated runs bump occurrence, no duplicate — acceptance #5", () => {
+    seedSharedPair(db, { sessions: true });
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const res2 = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(res2.inserted).toBe(0); // recurrence, not new insert
+    expect(db.getDiscoveriesByType("proactive_connection", 10).length).toBe(1);
+  });
+
+  it("dismissed row is not resurrected on re-run — acceptance #4", () => {
+    seedSharedPair(db, { sessions: true });
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const [row] = db.getDiscoveriesByType("proactive_connection", 10);
+    db.updateDiscoveryStatus(row.id, "dismissed");
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(db.getDiscoveriesByType("proactive_connection", 10)).toEqual([]);
+  });
+
+  it("resolved row is not resurrected on re-run — acceptance #4", () => {
+    seedSharedPair(db, { sessions: true });
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const [row] = db.getDiscoveriesByType("proactive_connection", 10);
+    db.updateDiscoveryStatus(row.id, "resolved");
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(db.getDiscoveriesByType("proactive_connection", 10)).toEqual([]);
+  });
+
+  it("shadow verifier runs and does not block persistence — acceptance #8", () => {
+    seedSharedPair(db, { sessions: true });
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    // Persistence happened despite the shadow verifier running before each upsert.
+    expect(db.getDiscoveriesByType("proactive_connection", 10).length).toBe(1);
+    const logs = db.rawDb
+      .prepare(
+        "SELECT COUNT(*) AS c FROM ingest_log WHERE source_type='verifier' AND action='discovery_shadow_verifier'",
+      )
+      .get() as { c: number };
+    expect(logs.c).toBeGreaterThanOrEqual(1);
+  });
+
+  it("metadata holds counts only — no slug/path/score/secret — acceptance #3", () => {
+    seedSharedPair(db, { sessions: true });
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const [row] = db.getDiscoveriesByType("proactive_connection", 10);
+    const meta = JSON.parse(row.metadata ?? "{}");
+    expect(meta.signals.shared_neighbors).toBe(2);
+    expect(meta.signals.cooccurring_sessions).toBe(2);
+    const blob = JSON.stringify(meta);
+    expect(blob).not.toContain("entity-alpha");
+    expect(blob).not.toContain("entity-beta");
+    expect(blob).not.toContain("/Users/");
+    expect(blob).not.toContain("SELECT");
   });
 });

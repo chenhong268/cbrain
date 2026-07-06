@@ -1,4 +1,6 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
+import type { Logger } from "../logger.js";
+import { runDiscoveryShadowVerifierFailOpen } from "../quality/shadow-verifier.js";
 
 /**
  * #310 — Phase 0 proactive memory connection candidates.
@@ -215,4 +217,75 @@ export function detectProactiveConnections(
     }
   }
   return out;
+}
+
+/**
+ * Persist proactive connection candidates into the `discoveries` table under the
+ * open-string type `proactive_connection`. Applies the emit rule (Signal A AND
+ * ≥1 supporting) before persisting, runs the fail-open shadow verifier before
+ * every upsert (privacy + quality audit, never blocks), and writes only counts
+ * into `metadata` (no slug/path/score/secret).
+ *
+ * Lifecycle is inherited from `upsertDiscovery`: dedup via `${type}|sorted`,
+ * recurrence bumps `occurrence_count`, and dismissed/resolved rows (status !=
+ * pending) are never resurrected because the conflict path never touches
+ * status/seen (#172, #310 acceptance #4/#5).
+ */
+export function produceProactiveConnectionCandidates(
+  db: CBrainDB,
+  opts: ProactiveConnectionOptions & { dreamRun?: string; logger?: Logger | null } = {},
+): ProactiveConnectionResult {
+  const candidates = detectProactiveConnections(db, opts);
+  let inserted = 0;
+  for (const c of candidates) {
+    // Emit rule: the strong signal (shared neighbors) needs ≥1 supporting
+    // signal. Embedding similarity is never used (issue #310 non-goal).
+    const supporting = (c.signalB ? 1 : 0) + (c.signalC ? 1 : 0);
+    if (!(c.signalA && supporting >= 1)) continue;
+
+    const entities = [c.a, c.b].sort();
+    const metadata = {
+      source: "proactive_connection",
+      signals: {
+        shared_neighbors: c.sharedNeighbors,
+        cooccurring_sessions: c.coOccurringSessions,
+        timeline_proximity_days: c.timelineProximityDays,
+      },
+      pivot: "recently_ingested",
+    };
+
+    // Display texts are the candidate titles only — fixed display copy is
+    // generated at read time by formatDigestCard. The verifier scans these for
+    // unsafe patterns (secret/slug/path); counts only are persisted.
+    const displayTexts = [c.a, c.b]
+      .map((slug) => db.getPage(slug)?.title ?? "")
+      .filter((t) => t.length > 0);
+
+    runDiscoveryShadowVerifierFailOpen({
+      db,
+      logger: opts.logger ?? null,
+      input: {
+        type: "proactive_connection",
+        actionable: "low",
+        score: c.score,
+        autoApplicable: false,
+        hasEvidence: true,
+        hasProposedActions: false,
+        displayTexts,
+      },
+    });
+
+    const res = db.upsertDiscovery(
+      "proactive_connection",
+      entities,
+      c.score,
+      undefined,
+      opts.dreamRun,
+      "low",
+      false,
+      metadata,
+    );
+    if (res.inserted) inserted++;
+  }
+  return { total: candidates.length, inserted };
 }
