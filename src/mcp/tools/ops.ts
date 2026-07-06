@@ -6,6 +6,32 @@ import { IndexGenerator } from "../../core/maintenance/indexes.js";
 import { normalizeRelation, getCanonicalRelationTypes, getReverseRelation } from "../../core/shared.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
 import { formatHealthEnvelope, formatDreamStatusEnvelope } from "./format-result.js";
+import type { PageSignals, SignalLookup } from "../../core/maintenance/health-debt.js";
+
+const MAX_HEALTH_SIGNAL_LOOKUPS = 200;
+
+export function createHealthSignalLookup(ctx: ToolContext): SignalLookup {
+  const cache = new Map<string, PageSignals | undefined>();
+  let reads = 0;
+
+  return (slug: string): PageSignals | undefined => {
+    if (!slug || slug === "-") return undefined;
+    if (cache.has(slug)) return cache.get(slug);
+    if (reads >= MAX_HEALTH_SIGNAL_LOOKUPS) return undefined;
+
+    reads++;
+    try {
+      const tm = ctx.db.getPageTierAndMentions(slug);
+      const incoming = ctx.db.getIncomingLinks(slug);
+      const signals = { mentionCount: tm?.mention_count, incomingLinkCount: incoming.length };
+      cache.set(slug, signals);
+      return signals;
+    } catch {
+      cache.set(slug, undefined);
+      return undefined;
+    }
+  };
+}
 
 export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   // ─── health ────────────────────────────────────────────
@@ -15,7 +41,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
   }, async () => {
     const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath);
     const report = await checker.checkAll();
-    const envelope = formatHealthEnvelope(report);
+    const envelope = formatHealthEnvelope(report, createHealthSignalLookup(ctx));
     return {
       content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
     };

@@ -4,7 +4,7 @@ import type { EpisodicRecallResult } from "../../core/retrieval/episodic-recall.
 import type { OrgTreeResult } from "../../core/graph/hierarchy.js";
 import type { Link, GraphNode } from "../../core/graph/graph.js";
 import type { HealthReport } from "../../core/maintenance/health.js";
-import { planRepairs } from "../../core/maintenance/health-debt.js";
+import { planRepairs, type SignalLookup } from "../../core/maintenance/health-debt.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -957,13 +957,14 @@ const ATTENTION_GROUP_LABEL: Record<"blocked" | "auto_repairable" | "needs_revie
 
 export function formatHealthEnvelope(
   report: HealthReport,
+  signalLookup?: SignalLookup,
 ): { display: string; summary: ToolSummary; raw: HealthReport } {
   const statusIcon = report.overallStatus === "pass" ? "✅" : "⚠️";
   const statusLabel = report.overallStatus === "pass" ? "健康" : report.overallStatus === "warn" ? "需注意" : "有问题";
   const summaryStatus: ToolSummary["status"] = report.overallStatus === "pass" ? "ok" : "degraded";
 
   // Reuse health-debt classification — do NOT re-classify here. #306
-  const plan = planRepairs(report);
+  const plan = planRepairs(report, signalLookup);
   const total = plan.actions.length;
 
   if (total === 0) {

@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { formatHealthEnvelope, formatDreamStatusEnvelope } from "../../src/mcp/tools/format-result.js";
 import type { HealthReport } from "../../src/core/maintenance/health.js";
+import type { PageSignals } from "../../src/core/maintenance/health-debt.js";
 
 const BANNED_IN_DISPLAY = [
   "slug", "score", "confidence", "source_type", "weight",
@@ -403,6 +404,54 @@ describe("formatHealthEnvelope", () => {
     expect(result.display).not.toContain("可安全修复");
     expect(result.display).toContain("观察项");
     expect(result.display).toContain("5");
+  });
+
+  test("#308 high-signal bare stub is promoted to review when signal lookup is provided", () => {
+    const report = makeHealthReport({
+      overallStatus: "warn",
+      dimensions: [{
+        name: "完整性",
+        status: "warn",
+        issues: [{
+          severity: "low",
+          slug: "entity/entity-a",
+          title: "Bare entity/person stub with minimal content",
+          description: "内容过薄",
+        }],
+      }],
+    });
+    const signalLookup = (slug: string): PageSignals | undefined =>
+      slug === "entity/entity-a" ? { mentionCount: 3, incomingLinkCount: 0 } : undefined;
+
+    const result = formatHealthEnvelope(report, signalLookup);
+
+    expect(result.display).toContain("需人工确认");
+    expect(result.display).not.toContain("观察项");
+    expect(result.display).not.toContain("entity/entity-a");
+    expect(result.display).not.toContain("Bare entity");
+    expect(result.summary.next_steps).toContain("逐项人工核实");
+  });
+
+  test("#308 same bare stub remains observe-only without signal lookup", () => {
+    const report = makeHealthReport({
+      overallStatus: "warn",
+      dimensions: [{
+        name: "完整性",
+        status: "warn",
+        issues: [{
+          severity: "low",
+          slug: "entity/entity-a",
+          title: "Bare entity/person stub with minimal content",
+          description: "内容过薄",
+        }],
+      }],
+    });
+
+    const result = formatHealthEnvelope(report);
+
+    expect(result.display).not.toContain("需人工确认");
+    expect(result.display).toContain("观察项");
+    expect(result.summary.next_steps).toContain("无需处理，保持观察");
   });
 
   test("priority: blocked appears before observe-only crowd", () => {
