@@ -145,8 +145,10 @@ describe("next_actions MCP (#309)", () => {
   });
 
   test("hostile persisted display metadata never leaks into display or items[] (#309 review)", async () => {
-    // Simulate a corrupted/migrated persisted row carrying hostile display text.
-    const hostile = "entity/private-a score=0.99 /Users/example/private SELECT * FROM pages";
+    // Simulate a corrupted/migrated persisted row carrying hostile display text — including
+    // the secret class the first review missed (Bearer/sk-/password). All markers below must
+    // be caught by assertSafeActionDisplay and fall back to fixed copy.
+    const hostile = "entity/private-a score=0.99 /Users/example/private SELECT * FROM pages Bearer sk-test-marker-abcdef password=hunter2";
     db.upsertDiscovery(
       "action_health_review",
       ["health:结构一致性:needs_review:entity/private-a"],
@@ -168,11 +170,14 @@ describe("next_actions MCP (#309)", () => {
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["health"] }) as ToolResponse;
     const payload = JSON.parse(res.content[0].text);
-    // display must not leak any hostile marker
+    // display must not leak any hostile marker — including the secret class
     expect(payload.display).not.toContain("entity/");
     expect(payload.display).not.toContain("/Users/");
     expect(payload.display).not.toMatch(/\bscore\b/i);
     expect(payload.display).not.toMatch(/SELECT\s+\*\s+FROM/i);
+    expect(payload.display).not.toContain("Bearer");
+    expect(payload.display).not.toContain("sk-test");
+    expect(payload.display).not.toContain("hunter2");
     // structured items[] must fall back to safe copy, not echo hostile text
     for (const it of payload.items) {
       for (const f of [it.title, it.reason, it.suggestion]) {
@@ -180,6 +185,9 @@ describe("next_actions MCP (#309)", () => {
         expect(f).not.toContain("/Users/");
         expect(f).not.toMatch(/\bscore\b/i);
         expect(f).not.toMatch(/SELECT\s+\*\s+FROM/i);
+        expect(f).not.toContain("Bearer");
+        expect(f).not.toContain("sk-test");
+        expect(f).not.toContain("hunter2");
       }
     }
   });
