@@ -189,9 +189,19 @@ export class CBrainDB {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
     this.db = new Database(dbPath);
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA foreign_keys = ON");
+    // busy_timeout 尽早设：让后续普通语句（migrate 写、读 schema 等）在 SQLITE_BUSY
+    // 时自动重试。注意 `PRAGMA journal_mode = WAL` 的 EXCLUSIVE 获取不被 busy_handler
+    // 保护，所以下方「已 WAL 就跳过这条 PRAGMA」才是 flaky 的根治。#307
     this.db.exec("PRAGMA busy_timeout = 5000");
+    // 只在非 WAL 时切换：对已 WAL 的 DB 再执行 `PRAGMA journal_mode = WAL` 即使是
+    // no-op，SQLite 仍会尝试获取 EXCLUSIVE 锁来「切换」，而 busy_handler 不保护该
+    // PRAGMA，遇 checkpoint 窗口立即抛 "database is locked"（fsck CLI reopen WAL
+    // DB 时偶发，#307）。读 journal_mode 是纯元数据读，不抢 EXCLUSIVE，安全。
+    const modeRow = this.db.prepare("PRAGMA journal_mode").get() as { journal_mode?: string };
+    if (modeRow?.journal_mode !== "wal") {
+      this.db.exec("PRAGMA journal_mode = WAL");
+    }
+    this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec("PRAGMA cache_size = -64000");
     this.db.exec("PRAGMA mmap_size = 268435456");
     this.db.exec("PRAGMA synchronous = NORMAL");
