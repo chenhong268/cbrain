@@ -15,6 +15,7 @@ import { registerBrainstormTools } from "./tools/brainstorm.js";
 import { registerSummarizeTools } from "./tools/summarize.js";
 import { registerDiscoveryTools } from "./tools/discoveries.js";
 import { registerActionCandidateTools } from "./tools/action-candidates.js";
+import { registerNextActionsTools } from "./tools/next-actions.js";
 import { registerInsightTools } from "./tools/insights.js";
 import { registerExpandTools } from "./tools/expand.js";
 import { registerProfileTools } from "./tools/profile.js";
@@ -51,6 +52,7 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerSummarizeTools(server, ctx);
   registerDiscoveryTools(server, ctx);
   registerActionCandidateTools(server, ctx);
+  registerNextActionsTools(server, ctx);
   registerInsightTools(server, ctx);
   registerExpandTools(server, ctx);
   registerProfileTools(server, ctx);

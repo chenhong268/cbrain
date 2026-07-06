@@ -1,0 +1,133 @@
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { CBrainDB } from "../../src/storage/sqlite.js";
+import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
+import type { EmbeddingProvider } from "../../src/embedding/provider.js";
+
+// Synthetic sentinels only (entity/aN). No real names or paths.
+
+function createMockEmbedding(): EmbeddingProvider {
+  return {
+    dimensions: 128,
+    embed: async (text: string) => ({
+      embedding: new Array(128).fill(0).map((_, i) => (text.charCodeAt(i % Math.max(text.length, 1)) ?? 0) / 65536),
+      tokenCount: text.length,
+    }),
+    embedBatch: async (texts: string[]) =>
+      texts.map((t) => ({
+        embedding: new Array(128).fill(0).map((_, i) => (t.charCodeAt(i % Math.max(t.length, 1)) ?? 0) / 65536),
+        tokenCount: t.length,
+      })),
+  };
+}
+
+function createMockLanceDB() {
+  return {
+    connect: async () => {},
+    addChunks: async () => {},
+    search: async () => [],
+    fullTextSearch: async () => [],
+    deleteByPageSlug: async () => {},
+    deleteRawChunksByPageSlug: async () => {},
+    close: async () => {},
+    createFTSIndex: async () => {},
+  };
+}
+
+function getTools(server: unknown) {
+  return (server as { _registeredTools: Record<string, { handler: (input: unknown) => Promise<unknown> }> })._registeredTools;
+}
+
+interface ToolResponse { content: Array<{ type: string; text: string }> }
+
+describe("next_actions MCP (#309)", () => {
+  const dir = "/tmp/cbrain-test-next-actions";
+  const dbPath = join(dir, "test.sqlite");
+  const vaultPath = join(dir, "vault");
+  let db: CBrainDB;
+  let deps: CBrainDeps;
+
+  beforeEach(() => {
+    if (existsSync(dir)) rmSync(dir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(dbPath);
+    deps = {
+      db,
+      embedding: createMockEmbedding(),
+      lance: createMockLanceDB() as CBrainDeps["lance"],
+      vaultPath,
+      runtimePath: join(dirname(dbPath), "runtime"),
+    };
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(dir)) rmSync(dir, { recursive: true });
+  });
+
+  test("returns at most 3 items from a discovery-heavy queue; no slug/score leakage", async () => {
+    for (let i = 0; i < 6; i++) {
+      db.upsertDiscovery("similar_entity", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, { reason_code: "name_exact" });
+    }
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.items.length).toBeLessThanOrEqual(3);
+    expect(payload.display).not.toContain("entity/");
+    expect(payload.display).not.toMatch(/\bscore\b/i);
+    expect(payload.display).not.toContain("similar_entity");
+    expect(payload.summary.shownCount).toBeLessThanOrEqual(3);
+  });
+
+  test("never writes: no seen flip, no action_* candidate rows after read", async () => {
+    db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    const beforePending = db.getUnseenDiscoveries(50).length;
+    const server = createServer(deps);
+    await getTools(server).next_actions.handler({ sources: ["discovery"] });
+    expect(db.getUnseenDiscoveries(50).length).toBe(beforePending);
+    expect(db.getDiscoveriesByType("action_review_discovery", 50)).toHaveLength(0);
+    expect(db.getDiscoveriesByType("action_health_review", 50)).toHaveLength(0);
+    expect(db.getDiscoveriesByType("action_repair_preview", 50)).toHaveLength(0);
+  });
+
+  test("dismissed discovery never surfaces", async () => {
+    const { id } = db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    db.updateDiscoveryStatus(id, "dismissed");
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.items).toHaveLength(0);
+    expect(payload.display).toContain("无需");
+  });
+
+  test("include_raw exposes raw audit object", async () => {
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"], include_raw: true }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.raw).toBeTruthy();
+    expect(payload.raw.observeOnlyItems).toBeInstanceOf(Array);
+    expect(payload.raw.allItemsRanked).toBeInstanceOf(Array);
+  });
+
+  test("health-only stream returns a well-formed envelope without throwing", async () => {
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["health"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.items).toBeInstanceOf(Array);
+    expect(payload.summary).toBeTruthy();
+    expect(payload.display).not.toContain("entity/");
+    expect(payload.display).not.toMatch(/\bscore\b/i);
+  });
+
+  test("default sources merges health + discovery and stays within cap", async () => {
+    for (let i = 0; i < 4; i++) {
+      db.upsertDiscovery("similar_entity", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, {});
+    }
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({}) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.items.length).toBeLessThanOrEqual(3);
+    expect(payload.display).not.toContain("entity/");
+  });
+});
