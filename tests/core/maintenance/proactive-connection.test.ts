@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { execSync } from "node:child_process";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 import {
   detectProactiveConnections,
@@ -241,5 +242,32 @@ describe("produceProactiveConnectionCandidates", () => {
     expect(blob).not.toContain("entity-beta");
     expect(blob).not.toContain("/Users/");
     expect(blob).not.toContain("SELECT");
+  });
+});
+
+describe("proactive_connection — structural isolation (#310 adversarial)", () => {
+  it("no proactive_connection wiring leaks into recall/search/ingest paths", () => {
+    const cwd = process.cwd();
+    const forbidden = [
+      "src/mcp/tools/recall.ts",
+      "src/mcp/tools/search.ts",
+      "src/core/ingestion/pipeline.ts",
+    ];
+    for (const p of forbidden) {
+      const src = readFileSync(resolve(cwd, p), "utf8");
+      expect(src).not.toContain("proactive_connection");
+    }
+  });
+
+  it("proactive_connection appears only in the allowed source files", () => {
+    const out = execSync("git grep -l proactive_connection -- src/", { encoding: "utf8" });
+    const files = out.trim().split("\n").filter(Boolean).sort();
+    const allowed = [
+      "src/core/maintenance/action-candidates.ts",
+      "src/core/maintenance/discovery-digest.ts",
+      "src/core/maintenance/proactive-connection.ts",
+      "src/mcp/tools/discoveries.ts",
+    ].sort();
+    expect(files).toEqual(allowed);
   });
 });
