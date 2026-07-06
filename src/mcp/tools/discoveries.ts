@@ -206,11 +206,11 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     // Run only DiscoveryManager (pure graph math, no LLM, completes in seconds).
     // ReflectManager is slower (BFS + LLM suggestions) and overlaps with bridge detection.
     // Contradiction detection is LLM-heavy — skip unless explicitly requested.
-    const requested = types as DiscoveryType[] | undefined;
+    const requested = types as Array<DiscoveryType | "proactive_connection"> | undefined;
     const wantsSimilar = requested?.includes("similar_entity") ?? false;
     const wantsProactive = requested?.includes("proactive_connection") ?? false;
     const normalRequested = requested
-      ? requested.filter((t) => t !== "similar_entity" && t !== "proactive_connection")
+      ? requested.filter((t): t is DiscoveryType => t !== "similar_entity" && t !== "proactive_connection")
       : undefined;
 
     const fastTypes: DiscoveryType[] = normalRequested
