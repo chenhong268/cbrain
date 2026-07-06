@@ -276,6 +276,54 @@ function persistedFromRow(
   };
 }
 
+function parseJsonArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((v) => String(v)) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read-side counterpart of the draft builders: reconstruct an in-memory draft from a
+ * persisted action-candidate discovery row (created by `ActionCandidateManager.persistDrafts`
+ * via `run_action_candidates`). Used by READ-ONLY consumers (e.g. next_actions) that must
+ * NOT re-run HealthChecker.checkAll (which persists FS state) or re-persist candidates.
+ * Pure: reads only the row argument, writes nothing.
+ *
+ * Severity is derived from the candidate type — action_repair_preview -> auto_repairable,
+ * action_health_review -> needs_review — preserving the planRepairs classification that
+ * ran when the row was created. No parallel taxonomy.
+ */
+export function persistedCandidateRowToDraft(
+  row: NonNullable<ReturnType<CBrainDB["getDiscoveryById"]>>,
+): ActionCandidateDraft | null {
+  if (!isActionCandidateType(row.type)) return null;
+  const meta = parseJsonObject(row.metadata);
+  const source: "health" | "discovery" = row.type === "action_review_discovery" ? "discovery" : "health";
+  const evidence: ActionEvidenceRef[] = Array.isArray(meta.evidence) ? meta.evidence as ActionEvidenceRef[] : [];
+  return {
+    type: row.type,
+    entities: parseJsonArray(row.entities),
+    score: row.score,
+    actionable: safeActionable(row.actionable),
+    displayTitle: String(meta.display_title ?? "有一项候选需要确认"),
+    displayReason: String(meta.display_reason ?? "这项信号需要人工复核后再处理。"),
+    suggestedAction: String(meta.suggested_action ?? "确认后再决定处理或忽略。"),
+    evidence,
+    proposedActions: parseActions(row.proposed_actions),
+    metadata: {
+      source,
+      repair_group: row.type === "action_repair_preview" ? "auto_repairable" : "needs_review",
+      source_type: source === "discovery" ? String(meta.source_type ?? row.type) : undefined,
+      dimension: source === "health" ? String(meta.dimension ?? "dim") : undefined,
+      repair_kind: source === "health" ? ((meta.repair_kind as string | null | undefined) ?? null) : undefined,
+    },
+  };
+}
+
 export class ActionCandidateManager {
   constructor(
     private readonly db: CBrainDB,

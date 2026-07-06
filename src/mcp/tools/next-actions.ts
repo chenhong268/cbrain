@@ -1,11 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { HealthChecker } from "../../core/maintenance/health.js";
-import { planRepairs, type PageSignals } from "../../core/maintenance/health-debt.js";
 import {
+  ACTION_CANDIDATE_TYPES,
   buildActionCandidatesFromDiscoveries,
-  buildActionCandidatesFromHealthPlan,
+  persistedCandidateRowToDraft,
   type ActionCandidateDraft,
 } from "../../core/maintenance/action-candidates.js";
 import { buildAttentionQueue, type AttentionQueueSummary, type NextAction } from "../../core/maintenance/attention-queue.js";
@@ -43,14 +42,23 @@ function renderDisplay(items: NextAction[], summary: AttentionQueueSummary): str
 
 const DEFAULT_SOURCES = ["health", "discovery"] as const;
 
+/** action_* candidate types that carry health-derived severity (vs discovery-derived). */
+const HEALTH_CANDIDATE_TYPES: ReadonlySet<string> = new Set(["action_health_review", "action_repair_preview"]);
+
 /**
- * Read-only unified next-action queue (#309). Reuses planRepairs + action-candidate
- * draft builders + discovery lifecycle SQL. Performs NO writes — never persists
- * candidates, never flips discovery seen/status, never calls put_page/sync/repair.
+ * Read-only unified next-action queue (#309). Consumes ALREADY-PERSISTED action
+ * candidate rows (created by run_action_candidates) plus plain discovery signals.
+ * Strictly read-only: queries discoveries via CBrainDB SELECT methods only.
+ *
+ * NEVER runs HealthChecker.checkAll — that persists filesystem state/reports and
+ * would violate the "no durable writes" invariant. Health signals reach this
+ * surface only after run_action_candidates has classified them via planRepairs and
+ * persisted action_health_review / action_repair_preview rows. NEVER persists
+ * candidates, NEVER flips discovery seen/status, NEVER calls put_page/sync/repair.
  */
 export function registerNextActionsTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("next_actions", {
-    description: "只读。返回当前最该处理的 top 1-3 项（跨健康/发现信号）。不修复、不删除、不合并、不提升候选。",
+    description: "只读。返回当前最该处理的 top 1-3 项（跨健康/发现信号）。不修复、不删除、不合并、不提升候选。健康信号来自 run_action_candidates 已分类的候选，不重跑健康检查。",
     inputSchema: {
       sources: z
         .array(z.enum(["health", "discovery"]))
@@ -66,27 +74,29 @@ export function registerNextActionsTools(server: McpServer, ctx: ToolContext): v
     const srcs = sources ?? [...DEFAULT_SOURCES];
     const includeRaw = include_raw === true;
 
-    let healthDrafts: ActionCandidateDraft[] = [];
-    if (srcs.includes("health")) {
-      // planRepairs is pure; HealthChecker.checkAll is read-only.
-      const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath);
-      const report = await checker.checkAll();
-      const signalLookup = (slug: string): PageSignals | undefined => {
-        if (!slug || slug === "-") return undefined;
-        try {
-          const tm = ctx.db.getPageTierAndMentions(slug);
-          const incoming = ctx.db.getIncomingLinks(slug);
-          return { mentionCount: tm?.mention_count, incomingLinkCount: incoming.length };
-        } catch {
-          return undefined;
-        }
-      };
-      healthDrafts = buildActionCandidatesFromHealthPlan(planRepairs(report, signalLookup));
+    const healthDrafts: ActionCandidateDraft[] = [];
+    const discoveryDrafts: ActionCandidateDraft[] = [];
+
+    // Persisted action candidate rows (read-only SELECTs). Severity derives from the
+    // candidate type (action_repair_preview -> auto_repairable, action_health_review ->
+    // needs_review), preserving the planRepairs classification from run_action_candidates.
+    for (const t of ACTION_CANDIDATE_TYPES) {
+      const isHealth = HEALTH_CANDIDATE_TYPES.has(t);
+      if (isHealth && !srcs.includes("health")) continue;
+      if (!isHealth && !srcs.includes("discovery")) continue;
+      for (const r of ctx.db.getDiscoveriesByType(t, 50)) {
+        const full = ctx.db.getDiscoveryById(r.id);
+        if (!full) continue;
+        const draft = persistedCandidateRowToDraft(full);
+        if (!draft) continue;
+        // getDiscoveriesByType + getDiscoveryById are pure SELECTs (seen=0 AND status='pending').
+        (isHealth ? healthDrafts : discoveryDrafts).push(draft);
+      }
     }
 
-    let discoveryDrafts: ActionCandidateDraft[] = [];
+    // Plain (non-action) discovery signals — buildActionCandidatesFromDiscoveries
+    // skips action_* types, so these never overlap with the loop above.
     if (srcs.includes("discovery")) {
-      // getUnseenDiscoveries already filters seen=0 AND status='pending' (lifecycle-safe).
       const rows = ctx.db.getUnseenDiscoveries(50).map((row) => {
         const full = ctx.db.getDiscoveryById(row.id);
         return {
@@ -95,7 +105,7 @@ export function registerNextActionsTools(server: McpServer, ctx: ToolContext): v
           dedup_key: full?.dedup_key,
         };
       });
-      discoveryDrafts = buildActionCandidatesFromDiscoveries(rows);
+      discoveryDrafts.push(...buildActionCandidatesFromDiscoveries(rows));
     }
 
     const queue = buildAttentionQueue(healthDrafts, discoveryDrafts, { includeRaw });

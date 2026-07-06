@@ -198,6 +198,31 @@ describe("buildAttentionQueue include_raw (#309)", () => {
   });
 });
 
+describe("buildAttentionQueue cap safety (#309)", () => {
+  const five = () => [1, 2, 3, 4, 5].map((i) => healthDraftAt("needs_review", "high", `d${i}`));
+
+  test("negative cap clamps to 0 (no tail-slice bypass)", () => {
+    const q = buildAttentionQueue(five(), [], { cap: -1 });
+    expect(q.items).toHaveLength(0);
+    expect(q.summary.suppressedBeyondTop3).toBe(5);
+  });
+
+  test("cap -5 still clamps to 0, not 95", () => {
+    const q = buildAttentionQueue(five(), [], { cap: -5 });
+    expect(q.items).toHaveLength(0);
+  });
+
+  test("NaN cap falls back to default 3", () => {
+    const q = buildAttentionQueue(five(), [], { cap: NaN });
+    expect(q.items).toHaveLength(3);
+  });
+
+  test("Infinity cap clamps to default 3", () => {
+    const q = buildAttentionQueue(five(), [], { cap: Infinity });
+    expect(q.items).toHaveLength(3);
+  });
+});
+
 describe("buildAttentionQueue privacy (#309)", () => {
   test("sourceRefs carry internal refs but never bleed into display-text fields", () => {
     const d = discoveryDraft("high");

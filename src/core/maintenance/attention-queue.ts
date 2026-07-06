@@ -142,7 +142,12 @@ export function buildAttentionQueue(
   discoveryDrafts: ActionCandidateDraft[],
   options?: BuildAttentionQueueOptions,
 ): AttentionQueue {
-  const cap = Math.min(options?.cap ?? DEFAULT_CAP, DEFAULT_CAP);
+  // Clamp BOTH bounds: negative cap would hit `slice(0, cap)` counting from the tail
+  // and bypass the ≤3 ceiling. NaN/Infinity fall back to default. #309 adversarial fix.
+  const requested = options?.cap;
+  const cap = typeof requested === "number" && Number.isFinite(requested)
+    ? Math.max(0, Math.min(requested, DEFAULT_CAP))
+    : DEFAULT_CAP;
   const includeRaw = options?.includeRaw === true;
 
   const all = dedupAndMerge([

@@ -80,15 +80,18 @@ describe("next_actions MCP (#309)", () => {
     expect(payload.summary.shownCount).toBeLessThanOrEqual(3);
   });
 
-  test("never writes: no seen flip, no action_* candidate rows after read", async () => {
+  test("never writes DB or filesystem (default sources incl health, no checkAll)", async () => {
     db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
     const beforePending = db.getUnseenDiscoveries(50).length;
     const server = createServer(deps);
-    await getTools(server).next_actions.handler({ sources: ["discovery"] });
+    await getTools(server).next_actions.handler({}); // default sources incl health
     expect(db.getUnseenDiscoveries(50).length).toBe(beforePending);
     expect(db.getDiscoveriesByType("action_review_discovery", 50)).toHaveLength(0);
     expect(db.getDiscoveriesByType("action_health_review", 50)).toHaveLength(0);
     expect(db.getDiscoveriesByType("action_repair_preview", 50)).toHaveLength(0);
+    // next_actions must NOT run HealthChecker.checkAll — that would mkdirSync(outputsDir/health).
+    const healthDir = join(deps.runtimePath, "health");
+    expect(existsSync(healthDir)).toBe(false);
   });
 
   test("dismissed discovery never surfaces", async () => {
@@ -110,14 +113,35 @@ describe("next_actions MCP (#309)", () => {
     expect(payload.raw.allItemsRanked).toBeInstanceOf(Array);
   });
 
-  test("health-only stream returns a well-formed envelope without throwing", async () => {
+  test("health-only stream reads persisted health candidate rows (no checkAll FS write)", async () => {
+    db.upsertDiscovery(
+      "action_health_review",
+      ["health:结构一致性:needs_review:entity/a"],
+      0.6,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        display_title: "有一项健康问题需要人工确认",
+        display_reason: "这项信号可能影响知识质量。",
+        suggested_action: "人工确认后再决定。",
+        source: "health",
+        repair_group: "needs_review",
+        dimension: "结构一致性",
+        evidence: [{ source: "health", ref: "health:结构一致性:needs_review:entity/a", kind: "needs_review" }],
+      },
+    );
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["health"] }) as ToolResponse;
     const payload = JSON.parse(res.content[0].text);
-    expect(payload.items).toBeInstanceOf(Array);
-    expect(payload.summary).toBeTruthy();
+    expect(payload.items.length).toBeGreaterThanOrEqual(1);
+    expect(payload.items[0].source).toBe("health");
+    expect(payload.items[0].severity).toBe("needs_review");
     expect(payload.display).not.toContain("entity/");
     expect(payload.display).not.toMatch(/\bscore\b/i);
+    // health path must not run checkAll either
+    expect(existsSync(join(deps.runtimePath, "health"))).toBe(false);
   });
 
   test("default sources merges health + discovery and stays within cap", async () => {
