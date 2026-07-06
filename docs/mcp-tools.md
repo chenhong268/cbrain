@@ -307,7 +307,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 96 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 97 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -371,6 +371,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `mark_discovery_seen` | 标记发现为已读。建议使用 update_discovery_status 替代。 |
 | `merge_entities` | 实体合并专用安全入口。支持 dry_run（返回合并规划，零写入）和 execute（安全执行合并 + 自动验证残留）。仅限 derived 层（entity/concept/insight），拒绝 record… |
 | `merge_pages` | Merge a source page into a target page. |
+| `next_actions` | 只读。返回当前最该处理的 top 1-3 项（跨健康/发现信号）。不修复、不删除、不合并、不提升候选。 |
 | `profile` | Unified profile operations. |
 | `promote_discovery` | 将结构发现升级为结构化洞察。Agent 或用户审核发现后确认值得保留时使用。如果发现有 LLM 生成的建议，会自动用做洞察内容。 |
 | `put_page` | Create or update a page. |

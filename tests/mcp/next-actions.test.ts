@@ -55,7 +55,7 @@ describe("next_actions MCP (#309)", () => {
     deps = {
       db,
       embedding: createMockEmbedding(),
-      lance: createMockLanceDB() as CBrainDeps["lance"],
+      lance: createMockLanceDB() as any,
       vaultPath,
       runtimePath: join(dirname(dbPath), "runtime"),
     };
