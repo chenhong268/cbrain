@@ -395,9 +395,11 @@ describe("G3: health envelope", () => {
     }));
     assertEnvelopeShape(result, "health");
     assertNoBannedTerms(result.display, "health");
-    // Titles are safe
-    expect(result.display).toContain("关系未同步");
-    expect(result.display).toContain("系统错误");
+    assertCompact(result.display, "health");
+    // 一致性 → needs_review，display 只说「需人工确认」，不 dump title
+    expect(result.display).toContain("需人工确认");
+    expect(result.display).not.toContain("关系未同步");
+    expect(result.display).not.toContain("系统错误");
     // No internal terms from suggestions leaked
     expect(result.display).not.toContain("syncLinksToMarkdown");
     expect(result.display).not.toContain("runtime");
@@ -417,7 +419,8 @@ describe("G3: health envelope", () => {
     }));
     assertNoBannedTerms(result.display, "health");
     expect(result.display).not.toContain("entities/slug-title");
-    expect(result.display).toContain("完整性");
+    // 完整性 → observe_only 折叠
+    expect(result.display).toContain("观察项");
   });
 
   test("raw preserves full report", () => {

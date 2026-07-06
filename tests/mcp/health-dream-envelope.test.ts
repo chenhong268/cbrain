@@ -51,7 +51,7 @@ describe("formatHealthEnvelope", () => {
     }
   });
 
-  test("warn report with issues shows top issues", () => {
+  test("warn report with observe-only issues summarizes by count", () => {
     const report = makeHealthReport({
       overallStatus: "warn",
       dimensions: [
@@ -72,12 +72,15 @@ describe("formatHealthEnvelope", () => {
     expect(result.summary.status).toBe("degraded");
     expect(result.summary.count).toBe(4);
     expect(result.display).toContain("需注意");
-    expect(result.display).toContain("4 个问题");
-    // Shows top 3 issues by severity
-    expect(result.display).toContain("孤立实体：人物A");
-    expect(result.display).toContain("还有 1 个问题");
-    // High severity triggers user action warning
-    expect(result.display).toContain("紧急");
+    expect(result.display).toContain("4 条信号");
+    // observe-only 折叠成 count，不 dump 具体标题
+    expect(result.display).toContain("观察项");
+    expect(result.display).not.toContain("人物A");
+    expect(result.display).not.toContain("紧急");
+    expect(result.display).not.toContain("还有 1 个问题");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
   });
 
   test("display has no banned fields even with issues", () => {
@@ -131,7 +134,7 @@ describe("formatHealthEnvelope", () => {
     expect(result.display).toContain("有问题");
   });
 
-  test("safe suggestion shown for clean text", () => {
+  test("observe-only issue suggestion not dumped into display", () => {
     const report = makeHealthReport({
       overallStatus: "warn",
       dimensions: [{
@@ -143,7 +146,13 @@ describe("formatHealthEnvelope", () => {
       }],
     });
     const result = formatHealthEnvelope(report);
-    expect(result.display).toContain("补充关系");
+    // observe-only 不 dump 具体建议
+    expect(result.display).not.toContain("补充关系");
+    expect(result.display).not.toContain("entities/x");
+    expect(result.display).toContain("观察项");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
   });
 
   // ─── Real leakage scenario tests ───────────────────────────
@@ -165,10 +174,15 @@ describe("formatHealthEnvelope", () => {
     });
     const result = formatHealthEnvelope(report);
 
-    expect(result.display).toContain("系统错误");
+    // 系统错误 → blocked group，display 只说「阻塞项」
+    expect(result.display).toContain("阻塞项");
+    expect(result.display).not.toContain("系统错误");
     expect(result.display).not.toContain("runtime");
     expect(result.display).not.toContain("logs/");
     expect(result.display).not.toContain("runtime/");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
   });
 
   test("suggestion with syncLinksToMarkdown and slug is stripped", () => {
@@ -188,10 +202,15 @@ describe("formatHealthEnvelope", () => {
     });
     const result = formatHealthEnvelope(report);
 
-    expect(result.display).toContain("关系未同步");
+    // 一致性 → needs_review，display 只说「需人工确认」
+    expect(result.display).toContain("需人工确认");
+    expect(result.display).not.toContain("关系未同步");
     expect(result.display).not.toContain("syncLinksToMarkdown");
     expect(result.display).not.toContain("entities/");
     expect(result.display).not.toContain("person-a");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
   });
 
   test("suggestion with setHierarchy and slug is stripped", () => {
@@ -211,9 +230,14 @@ describe("formatHealthEnvelope", () => {
     });
     const result = formatHealthEnvelope(report);
 
-    expect(result.display).toContain("缺少图边");
+    // 组织结构不在 planner 已知 dimension → observe_only
+    expect(result.display).toContain("观察项");
+    expect(result.display).not.toContain("缺少图边");
     expect(result.display).not.toContain("setHierarchy");
     expect(result.display).not.toContain("entities/");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
   });
 
   test("suggestion with wiki-links and filePath is stripped", () => {
@@ -233,11 +257,16 @@ describe("formatHealthEnvelope", () => {
     });
     const result = formatHealthEnvelope(report);
 
-    expect(result.display).toContain("重复标题");
+    // 标题冲突隔离 → needs_review
+    expect(result.display).toContain("需人工确认");
+    expect(result.display).not.toContain("重复标题");
     expect(result.display).not.toContain(".md");
     expect(result.display).not.toContain("filePath");
     expect(result.display).not.toContain("entities/");
     expect(result.display).not.toContain("merge_pages");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
   });
 
   test("suggestion with [[slug]] wiki-links is stripped", () => {
@@ -257,10 +286,15 @@ describe("formatHealthEnvelope", () => {
     });
     const result = formatHealthEnvelope(report);
 
-    expect(result.display).toContain("语义重复");
+    // 语义去重 → needs_review
+    expect(result.display).toContain("需人工确认");
+    expect(result.display).not.toContain("语义重复");
     expect(result.display).not.toContain("[[");
     expect(result.display).not.toContain("entities/");
     expect(result.display).not.toContain("dup-b");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
   });
 
   test("slug-like issue title is replaced with dimension name", () => {
@@ -280,12 +314,156 @@ describe("formatHealthEnvelope", () => {
     });
     const result = formatHealthEnvelope(report);
 
+    // needs_review 折叠，slug-like title 不进 display
     expect(result.display).not.toContain("entities/");
     expect(result.display).not.toContain("person-a");
-    // Should show dimension-based label instead
-    expect(result.display).toContain("一致性问题");
-    // raw still has the original title
+    expect(result.display).toContain("需人工确认");
+    // raw 仍保留原始 title
     expect(result.raw.dimensions[0].issues[0].title).toBe("entities/person-a");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
+  });
+
+  // ─── #306 attention summary ───────────────────────────────
+
+  test("large report shows top actions + observe count, not every issue", () => {
+    const report = makeHealthReport({
+      overallStatus: "warn",
+      dimensions: [
+        {
+          name: "系统错误",
+          status: "fail",
+          issues: [{
+            severity: "high", slug: "-", title: "1 个系统错误",
+            description: "最近发现错误", suggestion: "检查 runtime/logs/ 详情",
+          }],
+        },
+        {
+          name: "结构一致性",
+          status: "warn",
+          issues: [{
+            severity: "medium", slug: "entities/kr-missing",
+            title: "Known Relations 缺失",
+            description: "未写入 Known Relations projection drift",
+            suggestion: '运行 syncAffectedSlugs("entities/kr-missing")',
+          }],
+        },
+        {
+          name: "搜索质量",
+          status: "warn",
+          issues: Array.from({ length: 1000 }, (_, i) => ({
+            severity: "low" as const,
+            slug: "entities/observe-item-i",
+            title: `观察项 ${i}`,
+            description: "非确定性信号",
+          })),
+        },
+      ],
+    });
+    const result = formatHealthEnvelope(report);
+
+    // AC#9: display 只说 top actions + observe count，不列每个 issue
+    expect(result.display).toContain("阻塞项");
+    expect(result.display).toContain("可安全修复项");
+    expect(result.display).toContain("1000");
+    expect(result.display).toContain("观察项");
+    // 不 dump 具体观察项标题
+    expect(result.display).not.toContain("观察项 0");
+    expect(result.display).not.toContain("观察项 999");
+    // AC#1: 不说 1000 urgent
+    expect(result.display).not.toContain("紧急");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
+    // raw 完整保留
+    expect(result.raw.dimensions[2].issues).toHaveLength(1000);
+  });
+
+  test("only-observe-only report does not produce urgent message", () => {
+    const report = makeHealthReport({
+      overallStatus: "warn",
+      dimensions: [{
+        name: "搜索质量",
+        status: "warn",
+        issues: Array.from({ length: 5 }, () => ({
+          severity: "medium" as const,
+          slug: "entities/observe",
+          title: "搜索质量观察",
+          description: "非确定性信号",
+        })),
+      }],
+    });
+    const result = formatHealthEnvelope(report);
+
+    // AC#10: 纯 observe-only 不产 urgent/action-required
+    expect(result.display).not.toContain("优先处理");
+    expect(result.display).not.toContain("紧急");
+    expect(result.display).not.toContain("阻塞");
+    expect(result.display).not.toContain("可安全修复");
+    expect(result.display).toContain("观察项");
+    expect(result.display).toContain("5");
+  });
+
+  test("priority: blocked appears before observe-only crowd", () => {
+    const report = makeHealthReport({
+      overallStatus: "warn",
+      dimensions: [
+        {
+          name: "搜索质量",
+          status: "warn",
+          issues: Array.from({ length: 50 }, () => ({
+            severity: "medium" as const, slug: "entities/o",
+            title: "观察", description: "非确定性信号",
+          })),
+        },
+        {
+          name: "批量变更保护",
+          status: "fail",
+          issues: [{
+            severity: "high", slug: "-", title: "watcher 暂停",
+            description: "bulk pending", suggestion: "bulk_resume 恢复",
+          }],
+        },
+      ],
+    });
+    const result = formatHealthEnvelope(report);
+
+    // AC#3: blocked 排在 observe-only 前面
+    const blockedIdx = result.display.indexOf("阻塞项");
+    const observeIdx = result.display.indexOf("观察项");
+    expect(blockedIdx).toBeGreaterThan(-1);
+    expect(blockedIdx).toBeLessThan(observeIdx);
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
+  });
+
+  test("auto_repairable suggestion with slug does not leak into display", () => {
+    const report = makeHealthReport({
+      overallStatus: "warn",
+      dimensions: [{
+        name: "结构一致性",
+        status: "warn",
+        issues: [{
+          severity: "medium", slug: "entities/leak",
+          title: "Known Relations 缺失",
+          description: "未写入 Known Relations projection drift",
+          suggestion: '运行 syncAffectedSlugs("entities/leak") 修复',
+        }],
+      }],
+    });
+    const result = formatHealthEnvelope(report);
+
+    // AC#7: 即使 suggestion 含 slug/function，display 不 leak
+    expect(result.display).toContain("可安全修复项");
+    expect(result.display).not.toContain("entities/leak");
+    expect(result.display).not.toContain("leak");
+    expect(result.display).not.toContain("syncAffectedSlugs");
+    expect(result.display).not.toContain("Known Relations");
+    for (const term of BANNED_IN_DISPLAY) {
+      expect(result.display).not.toContain(term);
+    }
   });
 });
 

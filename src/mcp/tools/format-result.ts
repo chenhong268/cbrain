@@ -4,6 +4,7 @@ import type { EpisodicRecallResult } from "../../core/retrieval/episodic-recall.
 import type { OrgTreeResult } from "../../core/graph/hierarchy.js";
 import type { Link, GraphNode } from "../../core/graph/graph.js";
 import type { HealthReport } from "../../core/maintenance/health.js";
+import { planRepairs } from "../../core/maintenance/health-debt.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -942,44 +943,34 @@ function isSlugLike(text: string): boolean {
   return text.includes("/") || /^(entities|concepts|records|insights|events|brain)\b/.test(text);
 }
 
-/**
- * Internal patterns that must never appear in user-facing text.
- * Covers: slugs, file paths, function calls, wiki-links, internal dirs, extensions.
- */
-const INTERNAL_PATTERN = /(?:\[\[.*?\]\]|runtime\/|\.md\b|\.json\b|syncLinksToMarkdown\(|setHierarchy\(|entities\/|concepts\/|records\/|insights\/|brain\/|filePath|_slug|watcher_quarantine|bulk_resume)/;
-
-/**
- * Map raw health suggestion to a user-safe action label.
- * Never expose: paths, slugs, function names, internal commands.
- */
-function sanitizeUserAction(suggestion: string | undefined): string | null {
-  if (!suggestion) return null;
-  if (INTERNAL_PATTERN.test(suggestion)) return null;
-  // Also block if it still contains suspicious fragments after basic check
-  if (/\/tmp\b|\.log\b|SELECT\b|INSERT\b/.test(suggestion)) return null;
-  return suggestion;
-}
-
 // ─── Health ─────────────────────────────────────────────────
+
+/**
+ * Attention-summary labels for each repair group. Display-layer wording only —
+ * the grouping itself comes from planRepairs (no parallel taxonomy). #306
+ */
+const ATTENTION_GROUP_LABEL: Record<"blocked" | "auto_repairable" | "needs_review", string> = {
+  blocked: "阻塞项：需先恢复运行条件",
+  auto_repairable: "可安全修复项：建议先 dry-run 预览",
+  needs_review: "需人工确认：涉及事实或关系判断",
+};
 
 export function formatHealthEnvelope(
   report: HealthReport,
 ): { display: string; summary: ToolSummary; raw: HealthReport } {
   const statusIcon = report.overallStatus === "pass" ? "✅" : "⚠️";
   const statusLabel = report.overallStatus === "pass" ? "健康" : report.overallStatus === "warn" ? "需注意" : "有问题";
+  const summaryStatus: ToolSummary["status"] = report.overallStatus === "pass" ? "ok" : "degraded";
 
-  // Collect all issues across dimensions, sorted by severity
-  const allIssues = report.dimensions
-    .flatMap(d => d.issues.map(i => ({ ...i, dimension: d.name })))
-    .sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+  // Reuse health-debt classification — do NOT re-classify here. #306
+  const plan = planRepairs(report);
+  const total = plan.actions.length;
 
-  const totalIssues = allIssues.length;
-
-  if (totalIssues === 0) {
+  if (total === 0) {
     return {
       display: `${statusIcon} 大脑状态：${statusLabel}，无问题。`,
       summary: {
-        status: report.overallStatus === "pass" ? "ok" : "degraded",
+        status: summaryStatus,
         count: 0,
         truncated: false,
         message: "健康检查通过",
@@ -988,41 +979,51 @@ export function formatHealthEnvelope(
     };
   }
 
-  // Show top 3 most severe issues with titles only
-  const topIssues = allIssues.slice(0, 3);
-  const lines: string[] = [`${statusIcon} 大脑状态：${statusLabel}（${totalIssues} 个问题）`];
-  for (const issue of topIssues) {
-    // Sanitize title: slug-like titles → generic label from dimension name
-    const safeTitle = isSlugLike(issue.title) ? `${issue.dimension}问题` : issue.title;
-    const safeAction = sanitizeUserAction(issue.suggestion);
-    lines.push(`- ${safeTitle}${safeAction ? ` → ${safeAction}` : ""}`);
-  }
-  if (totalIssues > 3) {
-    lines.push(`- ...还有 ${totalIssues - 3} 个问题`);
+  const { blocked, auto_repairable, needs_review, observe_only } = plan.counts;
+
+  const lines: string[] = [`${statusIcon} 大脑状态：${statusLabel}（共 ${total} 条信号）`];
+
+  // Priority order: blocked → auto_repairable → needs_review (at most 3 group lines).
+  const actionLines: string[] = [];
+  if (blocked > 0) actionLines.push(`- ${blocked} 个${ATTENTION_GROUP_LABEL.blocked}`);
+  if (auto_repairable > 0) actionLines.push(`- ${auto_repairable} 个${ATTENTION_GROUP_LABEL.auto_repairable}`);
+  if (needs_review > 0) actionLines.push(`- ${needs_review} 个${ATTENTION_GROUP_LABEL.needs_review}`);
+
+  if (actionLines.length > 0) {
+    lines.push("优先处理：");
+    lines.push(...actionLines);
   }
 
-  // User action needed?
-  const highIssues = allIssues.filter(i => i.severity === "high");
-  if (highIssues.length > 0) {
-    lines.push("", `⚠️ 这 ${highIssues.length} 个比较紧急，建议优先处理`);
+  // Observe-only: count only, never dump items. Wording depends on whether
+  // actionable groups exist (avoid "其余" when nothing precedes it).
+  if (observe_only > 0) {
+    const observeLine = actionLines.length > 0
+      ? `其余 ${observe_only} 条为观察项，默认不打扰。`
+      : `${observe_only} 条为观察项，默认不打扰。`;
+    lines.push(observeLine);
   }
+
+  // Raw details preserved — avoid the banned literal "raw" in display.
+  lines.push("完整明细已保留。");
+
+  // Structured next_steps for the agent (fixed wording, no commands/functions).
+  const nextSteps: string[] = [];
+  if (blocked > 0) nextSteps.push("先恢复运行条件后再检查");
+  if (auto_repairable > 0) nextSteps.push("用试运行预览可修复项");
+  if (needs_review > 0) nextSteps.push("逐项人工核实");
+  if (observe_only > 0 && actionLines.length === 0) nextSteps.push("无需处理，保持观察");
 
   return {
     display: sanitizeDisplay(lines.join("\n")),
     summary: {
-      status: report.overallStatus === "pass" ? "ok" : "degraded",
-      count: totalIssues,
-      truncated: totalIssues > 3,
-      message: `${statusLabel}：${totalIssues} 个问题`,
+      status: summaryStatus,
+      count: total,
+      truncated: observe_only > 0,
+      message: `${statusLabel}：${total} 条信号`,
+      next_steps: nextSteps.length > 0 ? nextSteps : undefined,
     },
     raw: report,
   };
-}
-
-function severityRank(s: string): number {
-  if (s === "high") return 3;
-  if (s === "medium") return 2;
-  return 1;
 }
 
 // ─── Dream Status ───────────────────────────────────────────
