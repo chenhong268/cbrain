@@ -85,6 +85,15 @@ const HIGH_VALUE_DISCOVERY_TYPES = new Set([
   "contradiction",
 ]);
 
+/**
+ * #310 — Discovery types that are intentionally review-only and must NEVER be
+ * auto-promoted into the action-candidate / next_actions queue, regardless of
+ * actionable level, occurrence_count, or proposed_actions. Phase 0 proactive
+ * memory candidates stay quiet unless the user explicitly reads them via
+ * read_discoveries({ typeFilter: "proactive_connection" }).
+ */
+const QUIET_DISCOVERY_TYPES = new Set(["proactive_connection"]);
+
 function parseJsonObject(raw: string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
   try {
@@ -148,6 +157,7 @@ export function buildActionCandidatesFromDiscoveries(rows: DiscoveryCandidateSou
   const drafts: ActionCandidateDraft[] = [];
   for (const row of rows) {
     if (isActionCandidateType(row.type)) continue;
+    if (QUIET_DISCOVERY_TYPES.has(row.type)) continue;
     if (row.auto_applicable === 1) continue;
     const occurrenceCount = row.occurrence_count ?? 1;
     const hasProposedActions = typeof row.proposed_actions === "string" && row.proposed_actions.trim().length > 0;

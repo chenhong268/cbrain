@@ -118,6 +118,22 @@ describe("buildActionCandidatesFromDiscoveries (#267)", () => {
 
     expect(drafts).toHaveLength(0);
   });
+
+  test("does not promote proactive_connection even with high actionable / occurrence (#310)", () => {
+    const drafts = buildActionCandidatesFromDiscoveries([
+      {
+        id: 11,
+        type: "proactive_connection",
+        entities: JSON.stringify(["entity/alpha", "entity/beta"]),
+        score: 0.9,
+        actionable: "high",
+        auto_applicable: 0,
+        occurrence_count: 5,
+        dedup_key: "proactive_connection|entity/alpha|entity/beta",
+      },
+    ]);
+    expect(drafts).toHaveLength(0);
+  });
 });
 
 function makePlan(actions: RepairPlan["actions"]): RepairPlan {
