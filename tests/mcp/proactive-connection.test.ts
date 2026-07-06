@@ -104,3 +104,25 @@ describe("run_discovery proactive_connection (#310)", () => {
     expect(blob).not.toContain("proactive_connection");
   });
 });
+
+describe("read_discoveries proactive_connection (#310)", () => {
+  test("explicit typeFilter returns proactive cards, KM surface suppressed", async () => {
+    seedQualifyingPair(db);
+    await call("run_discovery", { types: ["proactive_connection"] });
+    const payload = await call("read_discoveries", { typeFilter: "proactive_connection" });
+    expect(payload.cards.length).toBe(1);
+    expect(payload.cards[0].title).toContain("可能的连接");
+    expect(payload.knowledge_map_cards ?? []).toEqual([]);
+    const blob = JSON.stringify(payload);
+    expect(blob).not.toContain("entity-alpha");
+  });
+
+  test("default read (no typeFilter) does NOT surface proactive_connection", async () => {
+    seedQualifyingPair(db);
+    await call("run_discovery", { types: ["proactive_connection"] });
+    const payload = await call("read_discoveries", {});
+    const blob = JSON.stringify(payload);
+    expect(blob).not.toContain("可能的连接");
+    expect(blob).not.toContain("proactive_connection");
+  });
+});

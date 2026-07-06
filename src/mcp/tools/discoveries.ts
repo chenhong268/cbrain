@@ -103,7 +103,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     inputSchema: {
       limit: z.number().optional().default(3).describe("Max discoveries to return"),
       actionableFilter: z.enum(["high", "medium", "low"]).optional().describe("Filter by actionable level"),
-      typeFilter: z.enum(["bridge", "trend", "gap", "contradiction", "knowledge_map_isolation", "knowledge_map_bridge", "similar_entity"]).optional().describe("Filter by discovery type"),
+      typeFilter: z.enum(["bridge", "trend", "gap", "contradiction", "knowledge_map_isolation", "knowledge_map_bridge", "similar_entity", "proactive_connection"]).optional().describe("Filter by discovery type"),
       debug: z.boolean().optional().default(false).describe("Include internal debug info"),
     },
   }, async ({ limit, actionableFilter, typeFilter, debug }) => {
