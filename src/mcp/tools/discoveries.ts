@@ -5,6 +5,7 @@ import { DiscoveryManager } from "../../core/maintenance/discovery.js";
 import type { DiscoveryType } from "../../core/maintenance/discovery.js";
 import { formatDiscoveryDigest, formatKnowledgeMapSurface, isDigestExcluded } from "../../core/maintenance/discovery-digest.js";
 import { formatDiscoveriesEnvelope } from "./format-result.js";
+import { produceProactiveConnectionCandidates } from "../../core/maintenance/proactive-connection.js";
 
 const TYPE_LABELS: Record<string, string> = {
   bridge: "桥接",
@@ -197,7 +198,7 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       "可用 read_discoveries 查看历史发现，用 update_discovery_status 标记处理状态。" +
       "建议每天运行一次。",
     inputSchema: {
-      types: z.array(z.enum(["bridge", "trend", "gap", "contradiction", "similar_entity"])).optional()
+      types: z.array(z.enum(["bridge", "trend", "gap", "contradiction", "similar_entity", "proactive_connection"])).optional()
         .describe("Detection types to run. Default: bridge, trend, gap."),
       debug: z.boolean().optional().default(false).describe("Include raw detection report"),
     },
@@ -207,7 +208,10 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
     // Contradiction detection is LLM-heavy — skip unless explicitly requested.
     const requested = types as DiscoveryType[] | undefined;
     const wantsSimilar = requested?.includes("similar_entity") ?? false;
-    const normalRequested = requested ? requested.filter((t) => t !== "similar_entity") : undefined;
+    const wantsProactive = requested?.includes("proactive_connection") ?? false;
+    const normalRequested = requested
+      ? requested.filter((t) => t !== "similar_entity" && t !== "proactive_connection")
+      : undefined;
 
     const fastTypes: DiscoveryType[] = normalRequested
       ? normalRequested.filter((t) => t !== "contradiction")
@@ -223,12 +227,27 @@ export function registerDiscoveryTools(server: McpServer, ctx: ToolContext): voi
       for (const [k, v] of Object.entries(simReport.byActionable)) report.byActionable[k] = (report.byActionable[k] ?? 0) + v;
       report.highActionable.push(...simReport.highActionable);
     }
+    if (wantsProactive) {
+      // #310 — Phase 0 proactive connection lane. Independent producer; does NOT
+      // go through DiscoveryManager.runDiscovery. Persists via upsertDiscovery.
+      const proReport = produceProactiveConnectionCandidates(ctx.db, { logger: ctx.logger ?? null });
+      report.total += proReport.total;
+      report.byType["proactive_connection"] = (report.byType["proactive_connection"] ?? 0) + proReport.total;
+    }
 
     // User-facing path: format new discoveries through the digest pipeline
     const newRows = ctx.db.getUnseenDiscoveries(30);
     const entityLookup = (slug: string) => ctx.db.getPage(slug);
     // #244 — split KM rows out so they never compete for the normal top-3 quota.
-    const normalRows = newRows.filter(r => !KM_TYPES.has(r.type) && !isDigestExcluded(r.type));
+    // #310 — proactive_connection is default-quiet: historical pending rows must
+    // NOT surface in the run_discovery digest unless the user explicitly asked
+    // for the proactive lane this call. isDigestExcluded is intentionally NOT
+    // extended (that would also hide explicit read_discoveries typeFilter reads).
+    const normalRows = newRows.filter(r =>
+      !KM_TYPES.has(r.type)
+      && !isDigestExcluded(r.type)
+      && (wantsProactive || r.type !== "proactive_connection"),
+    );
     const digest = formatDiscoveryDigest(normalRows, entityLookup, 3);
     const kmSurface = buildKmSurface(ctx.db, entityLookup);
     const combinedDisplay = combineDiscoveryDisplay(

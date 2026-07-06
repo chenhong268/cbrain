@@ -61,6 +61,10 @@ export function shouldFilterDiscovery(r: DiscoveryRow): string | null {
   // the call site. When it reaches here (explicit read_discoveries typeFilter), it
   // should render — so do not filter.
   if (r.type === "similar_entity") return null;
+  // #310 — proactive_connection is kept out of the DEFAULT feed by the
+  // run_discovery digest filter and the read_discoveries round-robin. When it
+  // reaches here (explicit read_discoveries typeFilter), it should render.
+  if (r.type === "proactive_connection") return null;
 
   const meta = parseJsonSafe(r.metadata);
 
