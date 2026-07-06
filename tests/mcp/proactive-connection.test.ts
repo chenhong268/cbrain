@@ -103,6 +103,26 @@ describe("run_discovery proactive_connection (#310)", () => {
     expect(blob).not.toContain("可能的连接");
     expect(blob).not.toContain("proactive_connection");
   });
+
+  test("hostile page titles do NOT leak into run_discovery payload (F3/secrecy)", async () => {
+    seedPage(db, "entity-secret-a", "Bearer SENTINEL_TOKEN");
+    seedPage(db, "entity-secret-b", "sk-SENTINEL-KEY");
+    for (const s of ["project-gamma", "concept-delta"]) {
+      seedPage(db, s, s, "entity/project");
+      seedLink(db, "entity-secret-a", s);
+      seedLink(db, "entity-secret-b", s);
+    }
+    seedQueryLog(db, "s1", ["entity-secret-a", "entity-secret-b"]);
+    seedQueryLog(db, "s2", ["entity-secret-a", "entity-secret-b"]);
+    const payload = await call("run_discovery", { types: ["proactive_connection"] });
+    expect(payload.cards.length).toBe(1);
+    const blob = JSON.stringify(payload);
+    expect(blob).not.toContain("SENTINEL");
+    expect(blob).not.toContain("Bearer");
+    expect(blob).not.toContain("sk-SENTINEL");
+    expect(blob).not.toContain("entity-secret-a");
+    expect(blob).not.toContain("entity-secret-b");
+  });
 });
 
 describe("read_discoveries proactive_connection (#310)", () => {
