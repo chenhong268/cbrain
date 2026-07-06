@@ -191,6 +191,16 @@ export function formatDigestCard(
         suggested_action: "用 merge_entities 先 dry-run 核对，确认后再执行合并。",
       };
     }
+    case "proactive_connection": {
+      const [a, b] = slugs;
+      return {
+        id: r.id,
+        title: `可能的连接：${resolveTitle(a, entityLookup)} 与 ${resolveTitle(b, entityLookup)}`,
+        why_it_matters: "这两条记忆近期出现了多处共同信号，可能存在尚未记录的关联。",
+        evidence: "综合图谱、检索与时间线索。",
+        suggested_action: "确认是否需要建立关联，或忽略。",
+      };
+    }
     default: {
       const titles = slugs.map(s => resolveTitle(s, entityLookup)).join("、");
       return {

@@ -47,6 +47,30 @@ function assertNoBannedWords(text: string) {
   }
 }
 
+describe("formatDigestCard — proactive_connection (#310)", () => {
+  test("renders concise anonymous card with resolved titles", () => {
+    const row = mockRow({
+      type: "proactive_connection",
+      entities: '["entities/person-a", "entities/org-c"]',
+      actionable: "low",
+      score: 0.78,
+      metadata: JSON.stringify({
+        source: "proactive_connection",
+        signals: { shared_neighbors: 2, cooccurring_sessions: 2, timeline_proximity_days: 9 },
+      }),
+    });
+    const card = formatDigestCard(row, entityLookup);
+    expect(card.title).toContain("人物A");
+    expect(card.title).toContain("组织C");
+    expect(card.title).toContain("连接");
+    const blob = JSON.stringify(card);
+    expect(blob).not.toContain("entities/person-a");
+    expect(blob).not.toContain("entities/org-c");
+    expect(blob).not.toContain("0.78");
+    assertNoBannedWords(blob);
+  });
+});
+
 describe("shouldFilterDiscovery", () => {
   test("gap always passes regardless of suggestion", () => {
     const row = mockRow({ type: "gap", actionable: "low", suggestion: null });
