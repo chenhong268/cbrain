@@ -69,6 +69,40 @@ describe("formatDigestCard — proactive_connection (#310)", () => {
     expect(blob).not.toContain("0.78");
     assertNoBannedWords(blob);
   });
+
+  test("hostile page titles are replaced with anonymous fallback (F3/secrecy)", () => {
+    const hostileLookup = (slug: string): { title: string; type: string } | null => {
+      const map: Record<string, { title: string; type: string }> = {
+        "entity/secret-a": { title: "Bearer SENTINEL_TOKEN", type: "entity/person" },
+        "entity/secret-b": { title: "sk-SENTINEL-KEY -----BEGIN PRIVATE KEY-----", type: "entity/person" },
+      };
+      return map[slug] ?? null;
+    };
+    const row = mockRow({
+      type: "proactive_connection",
+      entities: '["entity/secret-a", "entity/secret-b"]',
+    });
+    const card = formatDigestCard(row, hostileLookup);
+    const blob = JSON.stringify(card);
+    expect(blob).not.toContain("SENTINEL");
+    expect(blob).not.toContain("Bearer");
+    expect(blob).not.toContain("sk-SENTINEL");
+    expect(blob).not.toContain("PRIVATE KEY");
+    expect(blob).not.toContain("entity/secret-a");
+    expect(blob).not.toContain("entity/secret-b");
+  });
+
+  test("missing page → slug fallback also sanitized (no slug leak)", () => {
+    const noPageLookup = (): { title: string; type: string } | null => null;
+    const row = mockRow({
+      type: "proactive_connection",
+      entities: '["entity/gone-slug", "concept/missing-x"]',
+    });
+    const card = formatDigestCard(row, noPageLookup);
+    const blob = JSON.stringify(card);
+    expect(blob).not.toContain("entity/gone-slug");
+    expect(blob).not.toContain("concept/missing-x");
+  });
 });
 
 describe("shouldFilterDiscovery", () => {

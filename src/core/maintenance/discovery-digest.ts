@@ -1,3 +1,5 @@
+import { assertSafeActionDisplay } from "../safety/display-safety.js";
+
 export interface DigestCard {
   id: number;
   title: string;
@@ -94,6 +96,28 @@ export function shouldFilterDiscovery(r: DiscoveryRow): string | null {
 
 function resolveTitle(slug: string, lookup: (s: string) => EntityInfo | null): string {
   return lookup(slug)?.title ?? slug;
+}
+
+/**
+ * Resolve a slug to a DISPLAY-SAFE title. If the resolved title (or the slug
+ * fallback when no page exists) matches an unsafe-display pattern — secret /
+ * credential / slug / path / score / SQL — substitute a fixed anonymous label.
+ * Mirrors the #309 read-side "persisted display text is untrusted" guard so a
+ * hostile page title (e.g. a pasted Bearer token) or a missing page can never
+ * leak into a user-visible card. One hostile row must NOT fail the whole read.
+ */
+function safeTitle(
+  slug: string,
+  lookup: (s: string) => EntityInfo | null,
+  fallback: string,
+): string {
+  const resolved = resolveTitle(slug, lookup);
+  try {
+    assertSafeActionDisplay(resolved);
+    return resolved;
+  } catch {
+    return fallback;
+  }
 }
 
 export function formatDigestCard(
@@ -197,9 +221,11 @@ export function formatDigestCard(
     }
     case "proactive_connection": {
       const [a, b] = slugs;
+      const ta = safeTitle(a, entityLookup, "一条记忆");
+      const tb = safeTitle(b, entityLookup, "另一条记忆");
       return {
         id: r.id,
-        title: `可能的连接：${resolveTitle(a, entityLookup)} 与 ${resolveTitle(b, entityLookup)}`,
+        title: `可能的连接：${ta} 与 ${tb}`,
         why_it_matters: "这两条记忆近期出现了多处共同信号，可能存在尚未记录的关联。",
         evidence: "综合图谱、检索与时间线索。",
         suggested_action: "确认是否需要建立关联，或忽略。",
