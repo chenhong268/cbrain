@@ -100,7 +100,9 @@ The accepted-entity build + boost live in `proactive-connection.ts` (a `buildAcc
 ## Acceptance criteria → mechanism
 
 1. Accepted feedback boosts a future evidence-backed candidate → D2 (entity-level boost on `quality`; test: seed resolved [a,b], produce [a,c] sharing entity a → quality is +0.05 vs the no-feedback baseline).
-2. Same accepted feedback does NOT rescue insufficient-evidence candidate → D2 (boost on `quality` only; test: [a,c] with `sharedNeighbors=2` → upserted with boosted quality, but bridge `mapProactiveToReviewScores` gives `evidence=2 < 3` → `passesReviewGate` fails → not in review output).
+2. Boost cannot rescue a weak candidate — neither the #311 emit gate NOR the #312 review gate → D2 (boost on `quality` only, applied AFTER the `:451` gate-reject). Two test cases:
+   - **#311 emit gate not weakened**: a `gate_path="rejected"` candidate (e.g. `sharedNeighbors=2` with only one supporting signal — fails the strong/multi-independent paths at `proactive-connection.ts:187-193`) sharing an entity with an accepted pair is NOT upserted; `feedbackBoosted` does not increment for it.
+   - **#312 review gate not bypassed**: a candidate that PASSES the #311 gate but FAILS the review gate (e.g. `sharedNeighbors=3 + one supporting signal` → `strong_corroborated`, upserted with boosted `quality`, but one-shot without dual corroboration → `mapProactiveToReviewScores` yields `persistence < 2` → `passesReviewGate` fails) is NOT promoted into review. Plus a structural assertion that `passesReviewGate` does not read `metadata.scoring.quality` or `feedback_boost`.
 3. Rejected/disabled suppresses exact or evidence-identical → D3 (Layer 3; test: seed dismissed [a,b] via evidence {x,y,z}, produce evidence-identical [a,c] → not upserted; `feedbackSuppressed` increments).
 4. Partial overlap NOT suppressed → D3 (Layer 3 set-equality; test: dismissed {x,y,z} vs new {x,y,w} → upserted normally).
 5. Deferred neutral → D4 (test: seed deferred [a,b] — discovery pending — produce [a,b] recurrence → occurrence bumps, no boost from its own status, no suppress).
@@ -112,7 +114,7 @@ The accepted-entity build + boost live in `proactive-connection.ts` (a `buildAcc
 
 ## Adversarial review targets (required before handoff)
 
-1. **Boost-rescue attack**: a weak candidate (insufficient evidence / failing #311 emit gate) sharing an entity with an accepted pair must NOT be promoted — the boost cannot flip `gate_path` or `passesReviewGate`.
+1. **Boost-rescue attack (two fronts)**: (a) a `gate_path="rejected"` candidate (e.g. `sharedNeighbors=2` + one supporting signal) sharing an accepted entity is NOT upserted — the #311 emit gate is not weakened; (b) a `strong_corroborated` but review-gate-failing candidate (e.g. one-shot without dual corroboration → `persistence < 2`) sharing an accepted entity IS upserted with boosted `quality` but NOT promoted into review — the boost cannot flip `gate_path` or any `passesReviewGate` dimension.
 2. **Over-boost attack**: a candidate sharing BOTH entities with accepted pairs must receive at most `2 * FEEDBACK_BOOST = 0.10` boost, and the (0.01, 1] clamp must hold.
 3. **Accepted-identical leak attack**: a new candidate evidence-identical to an accepted pair must be SUPPRESSED by Layer 3 (not boosted) — accepted must not bypass the "don't re-emit the same connection" guarantee.
 4. **Rejected-evasion attack**: a candidate exact or evidence-identical to a rejected/disabled pair must be suppressed even after the discovery has recurred once (occurrence bump on a still-pending sibling must not wash out the dismissed evidence).
@@ -124,7 +126,7 @@ The accepted-entity build + boost live in `proactive-connection.ts` (a `buildAcc
 ## Known limitations / deferred
 
 - **Boost effect is marginal when <20 pending discoveries**: the boost affects promotion priority (top `PROMOTION_LIMIT=20`) + `discoveries.score` ranking in explicit reads. `ReviewGenerator`'s top-3 surfacing order is by candidate-table order, not `quality`, so the boost does not directly reorder review output. Accepted — the issue asks for a ranking signal, not a review-surfacing change; making `ReviewGenerator` order by `quality` is a separate #312-scope decision.
-- **Entity-level boost can be broad for hub entities**: a popular entity in many accepted pairs boosts all its candidates (bounded by `FEEDBACK_BOOST_CAP`). Accepted for Phase 3a; evidence-level boost (narrower) is a deferred alternative if this proves noisy.
+- **Entity-level boost can be broad for hub entities**: a popular entity in many accepted pairs boosts all its candidates (bounded by `2 * FEEDBACK_BOOST = 0.10` per candidate, since a candidate has only 2 entities). Accepted for Phase 3a; evidence-level boost (narrower) is a deferred alternative if this proves noisy.
 - **No review-table attribution**: reason codes say `feedback_boosted` but do not cite the specific accepted review candidate id (would require reading `compounding_review_candidates`). The resolved discovery itself is the auditable anchor.
 - **Slug-rename edge**: a renamed entity changes the `acceptedEntities` membership; a resolved discovery under the old slug stops boosting. Inherited #311 limitation.
 
