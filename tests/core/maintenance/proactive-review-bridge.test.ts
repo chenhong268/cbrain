@@ -2,7 +2,9 @@ import { describe, test, expect } from "bun:test";
 import { sanitizeDisplayText } from "../../../src/core/safety/display-safety.js";
 import {
   mapProactiveToReviewScores,
+  buildReviewCandidateDisplay,
   REVIEW_ACTION_VALUE,
+  PROACTIVE_REVIEW_TITLE,
 } from "../../../src/core/maintenance/proactive-review-bridge.js";
 
 describe("sanitizeDisplayText", () => {
@@ -95,5 +97,63 @@ describe("mapProactiveToReviewScores", () => {
   test("returns null when metadata is malformed (gate attack #6)", () => {
     expect(mapProactiveToReviewScores("not-an-object", 1)).toBeNull();
     expect(mapProactiveToReviewScores({ signals: "nope" }, 1)).toBeNull();
+  });
+});
+
+// ─── Display builder (D5) ──────────────────────────────────────
+
+describe("buildReviewCandidateDisplay", () => {
+  test("fixed anonymous title; count-templated summary; labeled evidence", () => {
+    const d = buildReviewCandidateDisplay(
+      meta({ sn: 3, co: 2, timelineRefs: [{ slug: "entity-alpha", eventId: 7, eventDate: "2026-06-01" }] }),
+    )!;
+    expect(d.title).toBe(PROACTIVE_REVIEW_TITLE);
+    expect(d.summary).toContain("3");
+    expect(d.summary).toContain("2");
+    expect(d.evidence.length).toBe(3);
+    const sources = d.evidence.map((e) => e.source);
+    expect(sources).toContain("共同上下文");
+    expect(sources).toContain("共现会话");
+    expect(sources).toContain("时间线邻近");
+  });
+
+  test("no raw slugs / event ids / session refs / scores leak into display", () => {
+    const d = buildReviewCandidateDisplay(
+      meta({ sn: 3, co: 1, timelineRefs: [{ slug: "entity-alpha", eventId: 99, eventDate: "2026-06-01" }] }),
+    )!;
+    const blob = JSON.stringify(d);
+    expect(blob).not.toContain("entity-alpha");
+    expect(blob).not.toContain("concept-x");
+    expect(blob).not.toContain("session-s1");
+    expect(blob).not.toContain("eventId");
+    expect(blob).not.toContain("score");
+    expect(blob).not.toContain("dedup_key");
+  });
+
+  test("hostile eventDate is sanitized to empty dateRange (privacy attack #4)", () => {
+    // Representative payloads the current DISPLAY_UNSAFE_PATTERNS catches
+    // (destructive SQL, paths, raw slugs, JWT, sk-, Bearer). Wider secret-class
+    // coverage is added by the Task 9 adversarial review.
+    const payloads = [
+      "DROP TABLE pages; --",
+      "/etc/passwd",
+      "/Users/admin/.ssh/id_rsa",
+      "entity/secret-person",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+      "sk-proj-abcdef1234567890abcdef",
+      "Bearer dGhpcyBpcyBhIHNlY3JldA==",
+    ];
+    for (const eventDate of payloads) {
+      const d = buildReviewCandidateDisplay(
+        meta({ sn: 3, co: 1, timelineRefs: [{ slug: "a", eventId: 1, eventDate }] }),
+      )!;
+      const tl = d.evidence.find((e) => e.source === "时间线邻近")!;
+      expect(tl.dateRange).toBe("");
+    }
+  });
+
+  test("returns null on malformed metadata", () => {
+    expect(buildReviewCandidateDisplay(null)).toBeNull();
+    expect(buildReviewCandidateDisplay({ signals: {} })).toBeNull();
   });
 });
