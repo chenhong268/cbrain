@@ -74,7 +74,9 @@ Already in the CHECK constraint (`sqlite.ts:382`) and type union (`sqlite.ts:137
 - the `computeContentHash` input (stable per pair), and
 - the reverse-lookup key for lifecycle sync.
 
-At `act_on_review_candidate` time, the sync helper resolves the source discovery by scanning `getDiscoveryLifecycleIndex('proactive_connection')` for a row whose `entities` JSON matches the candidate's `source_slugs_json` pair, then calls `updateDiscoveryStatus(id, ...)`. `dedup_key` uniqueness guarantees at most one match. No new column, no migration, fully testable.
+At `act_on_review_candidate` time, the sync helper resolves the source discovery by scanning `getDiscoveryLifecycleIndex('proactive_connection', LIMIT)` for a row whose `entities` JSON matches the candidate's `source_slugs_json` pair, then calls `updateDiscoveryStatus(id, ...)`. `dedup_key` uniqueness guarantees at most one match. No new column, no migration, fully testable.
+
+**Limit handling (hard constraint)**: `getDiscoveryLifecycleIndex` takes a `limit` (default 500). The bridge sync helper passes a deliberately large `LIMIT` (e.g. 5000) so an older source discovery is not silently missed. A regression test locks this: a target discovery sitting beyond the first 20 rows still resolves. If a large limit proves insufficient in practice, the fallback is a new read-only `getDiscoveryByEntities(type, entities)` keyed on `dedup_key` — deferred (adds surface); Phase 2 ships large-limit + test.
 
 ### D4 — Score mapping (TIGHT — confirmed decision)
 
@@ -161,6 +163,9 @@ A small helper `syncProactiveDiscoveryOnReviewAction(db, candidate, action)` liv
 4. **Privacy**: hostile page titles, raw source slugs, scoring metadata, session refs, event ids in the source discovery → none leak into review `title`/`summary`/`evidence` (D5).
 5. **Side-effect**: `accept`/`reject`/`defer`/`disable` never write pages/links/aliases/external actions — only candidate row + feedback audit + (best-effort) discovery status (D8).
 6. **Gate attack**: a proactive discovery missing `metadata.scoring`/`metadata.signals` (or malformed JSON) → `mapProactiveToReviewScores` returns null → adapter skips, no candidate, no throw (D4 fail-closed).
+7. **Deferred no re-float (hard)**: after `defer`, a second `get_compounding_reviews(refreshProactive:true)` does NOT re-emit that candidate in default output AND does not create a new candidate row — the existing deferred row gets at most a timestamp bump (D6 + `includeDeferred:false` default).
+8. **Pure-read escape hatch (hard)**: `get_compounding_reviews(refreshProactive:false)` calls neither the bridge nor `upsertCandidate` — zero candidate writes; identical to today's behavior (D7).
+9. **Sync fail-open (hard)**: when the source discovery cannot be resolved (renamed/cleaned/malformed), `act_on_review_candidate` still returns success with the candidate's new status — candidate state is NOT rolled back and no error is surfaced (D8).
 
 ## Known limitations / deferred
 
