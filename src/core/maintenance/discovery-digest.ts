@@ -111,7 +111,12 @@ function safeTitle(
   lookup: (s: string) => EntityInfo | null,
   fallback: string,
 ): string {
-  const resolved = resolveTitle(slug, lookup);
+  // #311 secrecy hardening (adversarial fix) — when no page exists for the slug,
+  // resolveTitle would echo the raw slug, leaking hyphen-form slugs (entity-missing-a)
+  // past assertSafeActionDisplay (which only catches slash-form). Substitute the
+  // anonymous fallback instead — never echo a raw slug into display.
+  const resolved = lookup(slug)?.title;
+  if (!resolved) return fallback;
   try {
     assertSafeActionDisplay(resolved);
     return resolved;

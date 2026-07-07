@@ -487,4 +487,97 @@ describe("deletePageCascaded transaction atomicity (#187)", () => {
     expect(log).toBeTruthy();
     expect(fts).toBeTruthy();
   });
+
+  // #311 — read methods backing proactive scoring (hub filter) + cooldown.
+  describe("#311 proactive scoring/cooldown reads", () => {
+    function seedPageFor311(slug: string): void {
+      db.rawDb
+        .prepare(
+          "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(slug, "entity", slug, `${slug}.md`, null);
+    }
+
+    test("batchGetLinkDegrees counts active link endpoints; rejected excluded; missing → 0", () => {
+      for (const s of ["entity-alpha", "entity-beta", "entity-gamma", "entity-hub"]) {
+        seedPageFor311(s);
+      }
+      // 'mentions' has no reverse relation → insertLink stores one forward row.
+      // degree = endpoint count (from_slug OR to_slug), matching batchGetLinksForSlugs.
+      db.insertLink("entity-alpha", "entity-hub", "mentions", null, 1.0, "medium", "ner", 0.7);
+      db.insertLink("entity-beta", "entity-hub", "mentions", null, 1.0, "medium", "ner", 0.7);
+      db.insertLink("entity-gamma", "entity-hub", "mentions", null, 1.0, "medium", "ner", 0.7);
+      db.insertLink("entity-alpha", "entity-beta", "mentions", null, 1.0, "medium", "ner", 0.7);
+
+      let d = db.batchGetLinkDegrees([
+        "entity-alpha",
+        "entity-beta",
+        "entity-gamma",
+        "entity-hub",
+        "entity-missing",
+      ]);
+      expect(d.get("entity-alpha")).toBe(2); // from: hub, beta
+      expect(d.get("entity-beta")).toBe(2); // from: hub; to: alpha
+      expect(d.get("entity-gamma")).toBe(1); // from: hub
+      expect(d.get("entity-hub")).toBe(3); // to: alpha, beta, gamma
+      expect(d.get("entity-missing")).toBe(0);
+
+      // Reject the alpha→hub row → degree drops for both endpoints.
+      db.rawDb
+        .prepare(
+          "UPDATE links SET trust_state = 'rejected' " +
+            "WHERE from_slug='entity-alpha' AND to_slug='entity-hub'",
+        )
+        .run();
+      d = db.batchGetLinkDegrees(["entity-alpha", "entity-hub"]);
+      expect(d.get("entity-alpha")).toBe(1); // only beta remains
+      expect(d.get("entity-hub")).toBe(2); // beta, gamma
+    });
+
+    test("batchGetLinkDegrees excludes self-loops (adversarial: a from=to row must not double-count)", () => {
+      seedPageFor311("entity-self");
+      seedPageFor311("entity-other");
+      db.insertLink("entity-self", "entity-other", "mentions", null, 1.0, "medium", "ner", 0.7);
+      // Raw-insert a self-loop (UNIQUE(from,to,relation) allows from=to; no app guard today).
+      db.rawDb
+        .prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES ('entity-self', 'entity-self', 'mentions')")
+        .run();
+      const d = db.batchGetLinkDegrees(["entity-self", "entity-other"]);
+      // entity-self: 1 real edge (→other) + self-loop (must NOT count) = 1, not 3.
+      expect(d.get("entity-self")).toBe(1);
+      expect(d.get("entity-other")).toBe(1);
+    });
+
+    test("getDiscoveryLifecycleIndex returns all rows with lifecycle fields; producer derives dismissed + occurrence", () => {
+      const meta = { source: "proactive_connection" };
+      db.upsertDiscovery("proactive_connection", ["entity-alpha", "entity-beta"], 0.5, undefined, undefined, "low", false, meta);
+      db.upsertDiscovery("proactive_connection", ["entity-alpha", "entity-gamma"], 0.5, undefined, undefined, "low", false, meta);
+      db.upsertDiscovery("proactive_connection", ["entity-beta", "entity-gamma"], 0.5, undefined, undefined, "low", false, meta);
+
+      const seeded = db.rawDb
+        .prepare("SELECT id FROM discoveries WHERE type='proactive_connection' ORDER BY id")
+        .all() as Array<{ id: number }>;
+      expect(seeded).toHaveLength(3);
+      db.updateDiscoveryStatus(seeded[0].id, "dismissed");
+      db.updateDiscoveryStatus(seeded[1].id, "resolved");
+      // seeded[2] stays pending
+
+      const index = db.getDiscoveryLifecycleIndex("proactive_connection", 10);
+      expect(index).toHaveLength(3); // ALL rows, any status
+      for (const r of index) {
+        expect(["dismissed", "resolved", "pending"]).toContain(r.status);
+        expect(typeof r.dedup_key).toBe("string");
+        expect(r.dedup_key.startsWith("proactive_connection|")).toBe(true);
+        expect(typeof r.entities).toBe("string");
+        expect(typeof r.occurrence_count).toBe("number");
+      }
+      // Producer-side derivations:
+      const dismissed = index.filter((r) => r.status === "dismissed" || r.status === "resolved");
+      expect(dismissed).toHaveLength(2);
+      const pending = index.filter((r) => r.status === "pending");
+      expect(pending).toHaveLength(1);
+      // Limit respected.
+      expect(db.getDiscoveryLifecycleIndex("proactive_connection", 1)).toHaveLength(1);
+    });
+  });
 });

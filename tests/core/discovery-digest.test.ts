@@ -70,6 +70,88 @@ describe("formatDigestCard — proactive_connection (#310)", () => {
     assertNoBannedWords(blob);
   });
 
+  test("#311 metadata.scoring never leaks into the card (display/raw isolation, acceptance #3/#7)", () => {
+    const row = mockRow({
+      type: "proactive_connection",
+      entities: '["entities/person-a", "entities/org-c"]',
+      score: 0.65,
+      metadata: JSON.stringify({
+        source: "proactive_connection",
+        signals: { shared_neighbors: 3, cooccurring_sessions: 2, timeline_proximity_days: 9 },
+        evidence: {
+          shared_neighbor_slugs: ["project-cfg", "concept-delta"],
+          timeline_event_refs: [],
+          cooccurring_session_refs: ["s1", "s2"],
+        },
+        scoring: {
+          evidence_strength: 0.85, novelty: 1.0, recurrence: 0.01, actionability: 0.20, risk: 0.10,
+          quality: 0.6495, gate_path: "strong_corroborated",
+          weights: { evidence: 0.35, novelty: 0.15, recurrence: 0.20, actionability: 0.10, safety: 0.20 },
+        },
+      }),
+    });
+    const card = formatDigestCard(row, entityLookup);
+    const blob = JSON.stringify(card);
+    // No scoring field names or gate classification leak into display.
+    for (const k of ["evidence_strength", "novelty", "recurrence", "actionability", "risk", "quality", "gate_path", "weights", "strong_corroborated", "multi_independent"]) {
+      expect(blob).not.toContain(k);
+    }
+    // No numeric score or raw evidence refs leak.
+    expect(blob).not.toContain("0.65");
+    expect(blob).not.toContain("0.6495");
+    expect(blob).not.toContain("project-cfg");
+    expect(blob).not.toContain("concept-delta");
+    expect(blob).not.toContain("shared_neighbor_slugs");
+    // Card still renders the anonymous connection copy + safe titles.
+    expect(card.title).toContain("人物A");
+    expect(card.title).toContain("组织C");
+    assertNoBannedWords(blob);
+  });
+
+  test("#311 secrecy (adversarial): Unix absolute path title is sanitized", () => {
+    const lookup = (_slug: string) => ({ title: "/etc/passwd 和 /root/.ssh/id_rsa", type: "entity/person" });
+    const row = mockRow({ type: "proactive_connection", entities: '["entity/path-a", "entity/path-b"]' });
+    const card = formatDigestCard(row, lookup);
+    const blob = JSON.stringify(card);
+    expect(blob).not.toContain("/etc/");
+    expect(blob).not.toContain("/root/");
+    expect(blob).not.toContain("passwd");
+    expect(blob).not.toContain("id_rsa");
+  });
+
+  test("#311 secrecy (adversarial): destructive SQL title is sanitized", () => {
+    const lookup = (_slug: string) => ({ title: "DROP TABLE pages; --", type: "entity/person" });
+    const row = mockRow({ type: "proactive_connection", entities: '["entity/sql-a", "entity/sql-b"]' });
+    const card = formatDigestCard(row, lookup);
+    const blob = JSON.stringify(card);
+    expect(blob).not.toContain("DROP");
+    expect(blob).not.toContain("TABLE");
+    expect(blob).not.toContain("pages;");
+    expect(blob).not.toContain("--");
+  });
+
+  test("#311 secrecy (adversarial): missing page → anonymous fallback, no raw slug leak", () => {
+    const noPage = (_slug: string) => null;
+    const row = mockRow({ type: "proactive_connection", entities: '["entity-missing-a", "concept-missing-b"]' });
+    const card = formatDigestCard(row, noPage);
+    const blob = JSON.stringify(card);
+    expect(blob).not.toContain("entity-missing-a");
+    expect(blob).not.toContain("concept-missing-b");
+    expect(blob).not.toContain("missing-a");
+    expect(blob).not.toContain("missing-b");
+  });
+
+  test("#311 secrecy (adversarial): short-header JWT title is sanitized (pre-existing #309 regex gap)", () => {
+    // First JWT segment is short (7 chars after 'eyJ'), which the old {8,}-on-first-segment regex missed.
+    const jwt = "eyJhIjoxfQ.eyJbIjoxfQ.abcd12345678";
+    const lookup = (_slug: string) => ({ title: jwt, type: "entity/person" });
+    const row = mockRow({ type: "proactive_connection", entities: '["entity/jwt-a", "entity/jwt-b"]' });
+    const card = formatDigestCard(row, lookup);
+    const blob = JSON.stringify(card);
+    expect(blob).not.toContain("eyJ");
+    expect(blob).not.toContain(jwt);
+  });
+
   test("hostile page titles are replaced with anonymous fallback (F3/secrecy)", () => {
     const hostileLookup = (slug: string): { title: string; type: string } | null => {
       const map: Record<string, { title: string; type: string }> = {

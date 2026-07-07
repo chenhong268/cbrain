@@ -45,6 +45,12 @@ function seedQueryLog(db: CBrainDB, sessionId: string, slugs: string[]): void {
     .run(JSON.stringify(slugs), slugs.length, sessionId);
 }
 
+function seedTimeline(db: CBrainDB, slug: string, eventDate: string): void {
+  db.rawDb
+    .prepare("INSERT INTO timeline (page_slug, event_date, summary) VALUES (?, ?, 'e')")
+    .run(slug, eventDate);
+}
+
 function seedQualifyingPair(db: CBrainDB): void {
   seedPage(db, "entity-alpha", "Alpha");
   seedPage(db, "entity-beta", "Beta");
@@ -55,6 +61,9 @@ function seedQualifyingPair(db: CBrainDB): void {
   }
   seedQueryLog(db, "s1", ["entity-alpha", "entity-beta"]);
   seedQueryLog(db, "s2", ["entity-alpha", "entity-beta"]);
+  // #311 — strengthened gate needs both supporting signals: sessions (B) + timeline (C).
+  seedTimeline(db, "entity-alpha", "2026-06-01");
+  seedTimeline(db, "entity-beta", "2026-06-10");
 }
 
 const testDir = "/tmp/cbrain-test-proactive-mcp";
@@ -114,6 +123,8 @@ describe("run_discovery proactive_connection (#310)", () => {
     }
     seedQueryLog(db, "s1", ["entity-secret-a", "entity-secret-b"]);
     seedQueryLog(db, "s2", ["entity-secret-a", "entity-secret-b"]);
+    seedTimeline(db, "entity-secret-a", "2026-06-01");
+    seedTimeline(db, "entity-secret-b", "2026-06-10");
     const payload = await call("run_discovery", { types: ["proactive_connection"] });
     expect(payload.cards.length).toBe(1);
     const blob = JSON.stringify(payload);

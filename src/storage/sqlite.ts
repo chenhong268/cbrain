@@ -1929,6 +1929,36 @@ export class CBrainDB {
     return result;
   }
 
+  /**
+   * #311 — active link degree (endpoint count) per slug, for proactive-connection
+   * hub filtering. Counts link rows where the slug is `from_slug` OR `to_slug` and
+   * the edge is active (`trust_state` NULL or not rejected/superseded) — same
+   * definition as `batchGetLinksForSlugs(includeInactive=false)`. Missing slugs → 0.
+   * One query over the bounded batch scope; mirrors the positional-IN pattern of
+   * `batchGetLinksForSlugs`.
+   */
+  batchGetLinkDegrees(slugs: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (slugs.length === 0) return out;
+    for (const s of slugs) out.set(s, 0);
+    const placeholders = slugs.map(() => "?").join(",");
+    const activeFilter = " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
+    // #311 adversarial fix — exclude self-loops (from_slug = to_slug): a single self-loop
+    // row would otherwise be counted by both halves of the UNION ALL (+2), inflating degree
+    // and misclassifying a boundary-degree neighbor as a hub. Matches buildLocalAdjacency's
+    // `a === b` drop.
+    const noSelfLoop = " AND from_slug != to_slug";
+    const rows = this.prepare(
+      `SELECT slug, COUNT(*) AS deg FROM (
+         SELECT from_slug AS slug FROM links WHERE from_slug IN (${placeholders})${activeFilter}${noSelfLoop}
+         UNION ALL
+         SELECT to_slug AS slug FROM links WHERE to_slug IN (${placeholders})${activeFilter}${noSelfLoop}
+       ) GROUP BY slug`,
+    ).all(...slugs, ...slugs) as Array<{ slug: string; deg: number }>;
+    for (const r of rows) out.set(r.slug, r.deg);
+    return out;
+  }
+
   batchGetTimelineForSlugs(slugs: string[], includeInactive = false): Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>> {
     const result = new Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>>();
     if (slugs.length === 0) return result;
@@ -2571,6 +2601,20 @@ export class CBrainDB {
   getDiscoveriesByType(type: string, limit: number = 20): Array<{ id: number; type: string; entities: string; score: number; detail: string | null; detected_at: string; actionable: string; suggestion: string | null; proposed_actions: string | null; auto_applicable: number; metadata: string | null }> {
     return this.prepare(
       "SELECT id, type, entities, score, detail, detected_at, actionable, suggestion, proposed_actions, auto_applicable, metadata FROM discoveries WHERE type = $type AND seen = 0 AND status = 'pending' ORDER BY CASE actionable WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, score DESC, id DESC LIMIT $limit"
+    ).all({ $type: type, $limit: limit }) as any[];
+  }
+
+  /**
+   * #311 — lifecycle index for a discovery type: ALL rows (any status) with the
+   * fields the proactive-connection producer needs to (a) skip exact dismissed/
+   * resolved dedup_keys, (b) match evidence-identical equivalent candidates, and
+   * (c) read pre-upsert occurrence_count for novelty/recurrence scoring. One query
+   * backs cooldown + scoring. No schema change — reuses the existing discoveries
+   * lifecycle (`status` + `dedup_key` from `runDiscoveryMigrations`).
+   */
+  getDiscoveryLifecycleIndex(type: string, limit: number = 500): Array<{ id: number; dedup_key: string; entities: string; metadata: string | null; last_detected_at: string | null; occurrence_count: number; status: string }> {
+    return this.prepare(
+      "SELECT id, dedup_key, entities, metadata, last_detected_at, occurrence_count, status FROM discoveries WHERE type = $type ORDER BY last_detected_at DESC, id DESC LIMIT $limit",
     ).all({ $type: type, $limit: limit }) as any[];
   }
 

@@ -63,7 +63,6 @@ export interface ProactiveConnectionCandidate {
   signalA: boolean;
   signalB: boolean;
   signalC: boolean;
-  score: number;
   /**
    * Bounded concrete evidence refs for audit. Written into `metadata.evidence`
    * by the producer and NEVER read by `formatDigestCard` (user display is fixed
@@ -98,6 +97,103 @@ export function clamp01(n: number): number {
 /** Order-independent pair key "alpha|beta" (sorted). */
 export function pairKey(a: string, b: string): string {
   return [a, b].sort().join("|");
+}
+
+// ─── #311 Phase 1 scoring ───────────────────────────────────────
+//
+// Pure scoring layer for proactive candidates. Produces 5 per-dimension scores +
+// composite `quality` + the strengthened-gate classification. Stored ONLY in
+// `metadata.scoring` (raw/debug audit) — `formatDigestCard` never reads it. The
+// persisted `discoveries.score` is set to `quality`. All weights are named
+// constants summing to 1.0 (Phase 1 defaults, confirmed 宏哥 2026-07-07).
+
+/** Per-dimension weights (sum to 1.0). Phase 1 defaults. */
+export const SCORE_WEIGHTS = {
+  evidence: 0.35,
+  novelty: 0.15,
+  recurrence: 0.20,
+  actionability: 0.10,
+  safety: 0.20,
+} as const;
+
+const SCORE_BASE_EVIDENCE = 0.40;
+const SCORE_STEP_NEIGHBOR = 0.15; // per extra non-hub neighbor beyond minShared, up to 2
+const SCORE_STEP_SIGNAL = 0.15; // per supporting signal (B / C)
+const SCORE_RISK_BASE = 0.60;
+const SCORE_RISK_SIGNAL = 0.20;
+const SCORE_RISK_NEIGHBOR = 0.10;
+const SCORE_NOVELTY_DECAY = 0.5;
+const SCORE_RECURRENCE_TARGET = 5;
+const SCORE_ACTIONABILITY_FLAT = 0.20;
+/** Strong-signal threshold for gate path 1 (one above Phase 0 minShared=2). */
+const STRONG_SHARED = 3;
+/** Shared-neighbor global degree above which a neighbor is treated as a generic hub. */
+const HUB_DEGREE_MAX = 20;
+
+export interface ScoringInput {
+  /** Non-hub shared current-fact neighbor count (post hub filter). */
+  sharedNeighbors: number;
+  signalB: boolean;
+  signalC: boolean;
+  /** Existing occurrence_count for the pair (0 if new). */
+  occurrenceCount: number;
+}
+
+export type ProactiveGatePath = "strong_corroborated" | "multi_independent" | "rejected";
+
+export interface ProactiveScore {
+  evidence_strength: number;
+  novelty: number;
+  recurrence: number;
+  actionability: number;
+  risk: number;
+  quality: number;
+  gate_path: ProactiveGatePath;
+}
+
+/**
+ * Score a proactive candidate on 5 dimensions + composite `quality` and classify
+ * it under the strengthened gate (spec D1/D2). Dimensions are always computed
+ * (useful for debug even when rejected). Gate rule:
+ *   - `strong_corroborated`: sharedNeighbors ≥ STRONG_SHARED AND ≥1 supporting.
+ *   - `multi_independent`: sharedNeighbors ≥ DEFAULT_MIN_SHARED AND signalB AND signalC.
+ *   - `rejected` otherwise.
+ * `sharedNeighbors` is the post-hub-filter count supplied by the detector.
+ * Embedding/LLM never feed this (issue #311 non-goal).
+ */
+export function scoreProactiveConnectionCandidate(input: ScoringInput): ProactiveScore {
+  const neighborBoost = Math.max(0, Math.min(input.sharedNeighbors - DEFAULT_MIN_SHARED, 2));
+  const bN = input.signalB ? 1 : 0;
+  const cN = input.signalC ? 1 : 0;
+
+  const evidence_strength = clamp01(
+    SCORE_BASE_EVIDENCE + SCORE_STEP_NEIGHBOR * neighborBoost + SCORE_STEP_SIGNAL * bN + SCORE_STEP_SIGNAL * cN,
+  );
+  const novelty = input.occurrenceCount === 0 ? 1 : clamp01(1 / (1 + SCORE_NOVELTY_DECAY * input.occurrenceCount));
+  const recurrence = clamp01(input.occurrenceCount / SCORE_RECURRENCE_TARGET);
+  const actionability = SCORE_ACTIONABILITY_FLAT;
+  const risk = clamp01(
+    SCORE_RISK_BASE - SCORE_RISK_SIGNAL * bN - SCORE_RISK_SIGNAL * cN - SCORE_RISK_NEIGHBOR * neighborBoost,
+  );
+
+  const quality = clamp01(
+    SCORE_WEIGHTS.evidence * evidence_strength +
+      SCORE_WEIGHTS.novelty * novelty +
+      SCORE_WEIGHTS.recurrence * recurrence +
+      SCORE_WEIGHTS.actionability * actionability +
+      SCORE_WEIGHTS.safety * (1 - risk),
+  );
+
+  let gate_path: ProactiveGatePath;
+  if (input.sharedNeighbors >= STRONG_SHARED && (input.signalB || input.signalC)) {
+    gate_path = "strong_corroborated";
+  } else if (input.sharedNeighbors >= DEFAULT_MIN_SHARED && input.signalB && input.signalC) {
+    gate_path = "multi_independent";
+  } else {
+    gate_path = "rejected";
+  }
+
+  return { evidence_strength, novelty, recurrence, actionability, risk, quality, gate_path };
 }
 
 interface LocalAdjacency {
@@ -218,6 +314,12 @@ export function detectProactiveConnections(
     const pivotNeighbors = neighbors.get(pivot.slug);
     if (!pivotNeighbors || pivotNeighbors.size === 0) continue;
 
+    // #311 — global link degree per neighborhood slug, for the anti-generic hub
+    // filter (spec D2). A shared neighbor whose active-link degree exceeds
+    // HUB_DEGREE_MAX is a generic hub, not evidence of a real pair connection.
+    const degrees = db.batchGetLinkDegrees([...neighbors.keys()]);
+    const isHub = (slug: string): boolean => (degrees.get(slug) ?? 0) > HUB_DEGREE_MAX;
+
     const candidateNodes: string[] = [];
     for (const node of neighbors.keys()) {
       if (node === pivot.slug) continue;
@@ -235,6 +337,7 @@ export function detectProactiveConnections(
       let shared = 0;
       const sharedSlugs: string[] = [];
       for (const n of pivotNeighbors) {
+        if (isHub(n)) continue; // #311 — generic hub, not real evidence
         if (nodeNeighbors.has(n)) {
           shared++;
           if (sharedSlugs.length < MAX_REFS) sharedSlugs.push(n);
@@ -257,11 +360,6 @@ export function detectProactiveConnections(
       if (pivotLatest) timelineEventRefs.push(pivotLatest);
       if (nodeLatest) timelineEventRefs.push(nodeLatest);
 
-      const supporting = (signalB ? 1 : 0) + (signalC ? 1 : 0);
-      const score = clamp01(
-        0.34 + (signalB ? 0.22 : 0) + (signalC ? 0.22 : 0) + (supporting === 2 ? 0.11 : 0),
-      );
-
       out.push({
         a: pivot.slug,
         b: node,
@@ -271,7 +369,6 @@ export function detectProactiveConnections(
         signalA: true,
         signalB,
         signalC,
-        score,
         sharedNeighborSlugs: sharedSlugs,
         timelineEventRefs,
         coOccurringSessionRefs,
@@ -283,19 +380,22 @@ export function detectProactiveConnections(
 
 /**
  * Persist proactive connection candidates into the `discoveries` table under the
- * open-string type `proactive_connection`. Applies the emit rule (Signal A AND
- * ≥1 supporting) before persisting, runs the fail-open shadow verifier before
- * every upsert (privacy + quality audit, never blocks), and writes bounded
- * CONCRETE evidence refs into `metadata.evidence` so each candidate is auditable
- * (which neighbors are shared, which timeline events are close, which sessions
- * co-occurred). Query text is never stored.
+ * open-string type `proactive_connection`. Per-candidate pipeline (issue #311):
+ * detect → score on 5 dimensions + composite `quality` → apply the strengthened
+ * gate (`strong_corroborated` OR `multi_independent`, else reject) → cooldown
+ * (skip exact dismissed dedup_key; suppress evidence-identical equivalents) →
+ * run the fail-open shadow verifier → `upsertDiscovery` with `metadata.scoring`
+ * (raw/debug) and `quality` as the row score. Bounded CONCRETE evidence refs are
+ * written into `metadata.evidence` so each candidate is auditable. Query text is
+ * never stored.
  *
- * Boundary: `metadata.evidence` is raw/debug audit data — `formatDigestCard`
- * never reads it; user display is fixed anonymous copy + `safeTitle`. Lifecycle
- * is inherited from `upsertDiscovery`: dedup via `${type}|sorted`, recurrence
- * bumps `occurrence_count`, and dismissed/resolved rows (status != pending) are
- * never resurrected because the conflict path never touches status/seen
- * (#172, #310 acceptance #4/#5).
+ * Boundary: `metadata.evidence` AND `metadata.scoring` are raw/debug audit data —
+ * `formatDigestCard` never reads either; user display is fixed anonymous copy +
+ * `safeTitle`. Lifecycle is inherited from `upsertDiscovery`: dedup via
+ * `${type}|sorted`, recurrence bumps `occurrence_count`, and dismissed/resolved
+ * rows (status != pending) are never resurrected because the conflict path never
+ * touches status/seen (#172, #310 acceptance #4/#5). #311 additionally SKIPS the
+ * upsert for dismissed pairs so occurrence_count stays frozen on dead rows.
  */
 export function produceProactiveConnectionCandidates(
   db: CBrainDB,
@@ -303,13 +403,79 @@ export function produceProactiveConnectionCandidates(
 ): ProactiveConnectionResult {
   const candidates = detectProactiveConnections(db, opts);
   let inserted = 0;
-  for (const c of candidates) {
-    // Emit rule: the strong signal (shared neighbors) needs ≥1 supporting
-    // signal. Embedding similarity is never used (issue #310 non-goal).
-    const supporting = (c.signalB ? 1 : 0) + (c.signalC ? 1 : 0);
-    if (!(c.signalA && supporting >= 1)) continue;
 
-    const entities = [c.a, c.b].sort();
+  // #311 — lifecycle index keyed by the canonical entities JSON (the same form
+  // `upsertDiscovery` stores). Backs (a) exact-pair cooldown skip, (b) evidence-
+  // identical equivalent suppression, (c) pre-upsert occurrence_count for
+  // novelty/recurrence scoring. One query per run.
+  type LifeEntry = { status: string; occurrence_count: number };
+  const byEntities = new Map<string, LifeEntry>();
+  const dismissedEvidence: Array<{ entities: string[]; slugs: Set<string>; count: number }> = [];
+  for (const row of db.getDiscoveryLifecycleIndex("proactive_connection")) {
+    byEntities.set(row.entities, { status: row.status, occurrence_count: row.occurrence_count });
+    if (row.status === "dismissed" || row.status === "resolved") {
+      let slugs: string[] = [];
+      let count = 0;
+      if (row.metadata) {
+        try {
+          const meta = JSON.parse(row.metadata) as {
+            evidence?: { shared_neighbor_slugs?: string[] };
+            signals?: { shared_neighbors?: number };
+          };
+          slugs = meta.evidence?.shared_neighbor_slugs ?? [];
+          count = meta.signals?.shared_neighbors ?? 0;
+        } catch {
+          slugs = [];
+          count = 0;
+        }
+      }
+      dismissedEvidence.push({ entities: JSON.parse(row.entities) as string[], slugs: new Set(slugs), count });
+    }
+  }
+
+  for (const c of candidates) {
+    const sortedEntities = [...new Set([c.a, c.b])].sort();
+    const entitiesJson = JSON.stringify(sortedEntities);
+    const existing = byEntities.get(entitiesJson);
+    const occurrenceCount = existing?.occurrence_count ?? 0;
+
+    // #311 scoring + strengthened gate (spec D1/D2). Dimensions are always
+    // computed; gate_path decides persist vs reject. Embedding/LLM never feed
+    // this (issue #311 non-goal).
+    const sc = scoreProactiveConnectionCandidate({
+      sharedNeighbors: c.sharedNeighbors,
+      signalB: c.signalB,
+      signalC: c.signalC,
+      occurrenceCount,
+    });
+    if (sc.gate_path === "rejected") continue;
+
+    // #311 cooldown layer 2: any non-pending existing row → skip upsert entirely.
+    // `upsertDiscovery` never resurrects status by construction (its conflict path
+    // never touches status/seen); this additionally avoids bumping occurrence_count
+    // and overwriting score/metadata on a row the user has already acted on
+    // (dismissed / resolved / seen — adversarial fix: 'seen' was previously bumped).
+    if (existing && existing.status !== "pending") continue;
+
+    // #311 cooldown layer 3 / spec D3: evidence-identical equivalent → suppress.
+    // Same evidence neighborhood + shared entity = the same dismissed signal under
+    // a different target. Partial overlap is deliberately NOT suppressed (would
+    // falsely silence legitimate new connections). The FULL shared-neighbor COUNT
+    // gates the comparison first (adversarial fix: the stored slug list is
+    // truncated to MAX_REFS=3, so set-equality on it alone would false-match a
+    // 3-neighbor candidate against a 4-neighbor dismissed pair).
+    const candSlugs = new Set(c.sharedNeighborSlugs);
+    if (candSlugs.size > 0) {
+      const equivalent = dismissedEvidence.some((d) => {
+        if (d.count !== c.sharedNeighbors) return false; // FULL count, not truncated slugs
+        if (d.slugs.size === 0 || d.slugs.size !== candSlugs.size) return false;
+        if (!d.entities.some((e) => sortedEntities.includes(e))) return false;
+        for (const s of candSlugs) if (!d.slugs.has(s)) return false;
+        return true;
+      });
+      if (equivalent) continue;
+    }
+
     const metadata = {
       source: "proactive_connection",
       signals: {
@@ -317,13 +483,26 @@ export function produceProactiveConnectionCandidates(
         cooccurring_sessions: c.coOccurringSessions,
         timeline_proximity_days: c.timelineProximityDays,
       },
-      // Bounded concrete evidence refs so a reviewer can reconstruct WHY this
-      // candidate fired. Raw/debug audit only — formatDigestCard never reads
-      // this; display stays anonymous. NO query text (opaque session ids only).
+      // Bounded concrete evidence refs — raw/debug audit only. formatDigestCard
+      // never reads this; display stays anonymous + safeTitle-sanitized. NO query
+      // text (opaque session ids only).
       evidence: {
         shared_neighbor_slugs: c.sharedNeighborSlugs,
         timeline_event_refs: c.timelineEventRefs,
         cooccurring_session_refs: c.coOccurringSessionRefs,
+      },
+      // #311 — per-dimension scores + composite quality + gate classification.
+      // Raw/debug audit only; formatDigestCard never reads this. `quality` is also
+      // persisted as the discoveries.score column (internal sort, never rendered).
+      scoring: {
+        evidence_strength: sc.evidence_strength,
+        novelty: sc.novelty,
+        recurrence: sc.recurrence,
+        actionability: sc.actionability,
+        risk: sc.risk,
+        quality: sc.quality,
+        gate_path: sc.gate_path,
+        weights: SCORE_WEIGHTS,
       },
       pivot: "recently_ingested",
     };
@@ -341,7 +520,7 @@ export function produceProactiveConnectionCandidates(
       input: {
         type: "proactive_connection",
         actionable: "low",
-        score: c.score,
+        score: sc.quality,
         autoApplicable: false,
         hasEvidence: true,
         hasProposedActions: false,
@@ -351,8 +530,8 @@ export function produceProactiveConnectionCandidates(
 
     const res = db.upsertDiscovery(
       "proactive_connection",
-      entities,
-      c.score,
+      sortedEntities,
+      sc.quality,
       undefined,
       opts.dreamRun,
       "low",
