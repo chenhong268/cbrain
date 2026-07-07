@@ -1,7 +1,7 @@
 # proactive_connection Phase 1 — Scoring & Noise Control — Implementation Plan
 
 **Issue:** #311 (parent #235)
-**Spec:** `docs/superpowers/specs/2026-07-07-proactive-scoring-design.md`
+**Spec:** `docs/superpowers/specs/2026-07-07-proactive-candidate-scoring-design.md`
 **Branch:** `feat/311-proactive-scoring` (worktree)
 **Decisions:** locked — see spec "Resolved decisions".
 
@@ -10,7 +10,7 @@
 - **TDD per phase**: write RED tests first (anonymous sentinels only — no real names/slugs/paths/secrets), watch them fail, then GREEN. No production code without a failing test.
 - **Worktree absolute paths**: every Read/Edit/Write inside the worktree uses the worktree absolute path; relative paths land in the main repo (memory `worktree-relative-write-main-repo`). Re-Read in-worktree before Edit even if main repo was read (memory `worktree-edit-needs-worktree-read`).
 - **Surgical diffs**: match existing style; no drive-by refactors. Clean only the dead code this change creates.
-- **No push, no close**: commit on the worktree branch only; do not push, do not close #311. Hand back for 宏哥 review.
+- **No push, no close**: commit on the worktree branch only; do not push, do not close #311. Hand back for review.
 - **Gates**: `bun run lint` (tsc + biome) + `bun test` must both pass; `bun run check` runs both.
 - **Anonymization**: tests/docs use only synthetic sentinels (`entity-alpha`, `project-cfg`, `concept-delta`, `concept-popular-hub`). No credential-like strings (auth-header prefixes, secret-key prefixes), real names, or paths — anonymous sentinels only, even in negative assertions (memory `public-tests-anonymous-placeholders`, `plan-files-untracked-anonymized`).
 - This spec + plan are committed deliverables for #311 (precedent: #310 `5659bae`), so reviewers can audit the scoring/gate/cooldown decisions alongside the code.
@@ -18,14 +18,18 @@
 ## Files
 
 **Source (edit)**
-- `src/storage/sqlite.ts` — 2 new read-only methods.
-- `src/core/maintenance/proactive-connection.ts` — scoring helper + strengthened gate + hub filter + producer cooldown/equivalent skip + metadata.scoring.
+- `src/storage/sqlite.ts` — 2 new read-only methods (`batchGetLinkDegrees`, `getDiscoveryLifecycleIndex`).
+- `src/core/maintenance/proactive-connection.ts` — pure scoring helper + strengthened gate + hub filter + producer cooldown/equivalent skip + metadata.scoring.
+- `src/core/maintenance/discovery-digest.ts` — `safeTitle` returns the anonymous fallback (never a raw slug) when the page lookup is null (adversarial secrecy fix).
+- `src/core/safety/display-safety.ts` — `DISPLAY_UNSAFE_PATTERNS` hardened: Unix absolute paths, destructive SQL, JWT first-segment regex (adversarial secrecy fix; shared module — carries no `proactive_connection` literal).
 
 **Tests (new + edit)**
-- `tests/core/maintenance/proactive-connection.test.ts` — add scoring/gate/hub/cooldown/equivalent cases.
-- `tests/core/discovery-digest.test.ts` — add display-isolation case (scoring fields never in card blob).
+- `tests/core/maintenance/proactive-connection.test.ts` — scoring / gate / hub / cooldown / equivalent + adversarial-fix cases.
+- `tests/core/discovery-digest.test.ts` — scoring-fields-not-in-card + adversarial secrecy cases (Unix path / SQL / missing-page slug / JWT).
+- `tests/mcp/proactive-connection.test.ts` — fixtures updated for the strengthened gate (added timeline).
+- `tests/storage/sqlite.test.ts` — `batchGetLinkDegrees` (incl. self-loop) + `getDiscoveryLifecycleIndex`.
 
-No other source files are touched. The 4-file `git grep -l proactive_connection` structural-isolation invariant stays intact (D5).
+The 4-file `git grep -l proactive_connection -- src/` structural-isolation invariant stays intact (D5): `display-safety.ts` is a shared safety module, not a proactive-specific one.
 
 ## Phases
 
@@ -105,4 +109,4 @@ Fix any confirmed finding (TDD a regression test first). Re-run until dry.
 - Full `bun run check`.
 
 ### Phase 10 — Hand back
-- Summarize: decisions, files changed, test counts, adversarial-review outcome. Do NOT push, do NOT close #311. Fast-forward nothing. 宏哥 reviews.
+- Summarize: decisions, files changed, test counts, adversarial-review outcome. Do NOT push, do NOT close #311. Fast-forward nothing. Hand back for reviewer review.

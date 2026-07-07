@@ -105,7 +105,7 @@ export function pairKey(a: string, b: string): string {
 // composite `quality` + the strengthened-gate classification. Stored ONLY in
 // `metadata.scoring` (raw/debug audit) — `formatDigestCard` never reads it. The
 // persisted `discoveries.score` is set to `quality`. All weights are named
-// constants summing to 1.0 (Phase 1 defaults, confirmed 宏哥 2026-07-07).
+// constants summing to 1.0 (Phase 1 defaults, confirmed at the 2026-07-07 review checkpoint).
 
 /** Per-dimension weights (sum to 1.0). Phase 1 defaults. */
 export const SCORE_WEIGHTS = {

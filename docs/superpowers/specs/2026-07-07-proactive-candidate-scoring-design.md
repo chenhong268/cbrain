@@ -2,7 +2,7 @@
 
 **Issue:** #311 (parent #235, follows #310 Phase 0 — merged to main)
 **Phase:** 1 — evidence scoring + noise control; default-quiet preserved
-**Status:** implemented on `worktree-feat+311-proactive-scoring` (commit `8f532a4`); awaiting 宏哥 review
+**Status:** implemented on `worktree-feat+311-proactive-scoring` (commit `8f532a4`); awaiting review
 
 ## Context
 
@@ -121,14 +121,13 @@ Keep scoring in `src/core/maintenance/proactive-connection.ts` for Phase 1: expo
     "risk": 0.10,
     "quality": 0.65,
     "gate_path": "strong_corroborated",
-    "suppressed": null,
     "weights": { "evidence": 0.35, "novelty": 0.15, "recurrence": 0.20, "actionability": 0.10, "safety": 0.20 }
   },
   "pivot": "recently_ingested"
 }
 ```
 
-`gate_path ∈ {'strong_corroborated','multi_independent','rejected'}`. `suppressed` is `null` for persisted rows, or the reason (`'cooldown_exact' | 'cooldown_equivalent' | 'insufficient_evidence' | 'hub_only'`) when the producer skips (the skipped candidate is NOT persisted, so this field is for in-producer logging/`_debug` only — never reaches the discoveries table). `formatDigestCard` MUST NOT read `metadata.scoring`; locked by display-isolation test.
+`gate_path ∈ {'strong_corroborated','multi_independent','rejected'}`. Persisted rows always carry the 5 dimensions + `quality` + `gate_path` + `weights`. Candidates that fail the gate are simply not upserted — no row is written, no extra debug field is stored on the discoveries row. `formatDigestCard` MUST NOT read `metadata.scoring`; locked by display-isolation test.
 
 ### D7 — Score column semantics
 
@@ -179,7 +178,7 @@ Net: 7 confirmed findings, all fixed with regression tests; `bun run check` gree
 - `actionability` is a fixed constant in Phase 1; deriving from neighbor entity-types is deferred.
 - `formatDigestCard`'s other cases (bridge/trend/gap/similar_entity) still do not call `assertSafeActionDisplay` (inherited Phase 0 gap); out of scope here.
 
-## Resolved decisions (宏哥 confirmed 2026-07-07)
+## Resolved decisions (confirmed 2026-07-07 review checkpoint)
 
 1. **D1 weights & dimension set** — ✅ proposed 5-dimension weighted composite (evidence_strength 0.35 / recurrence 0.20 / safety 0.20 / novelty 0.15 / actionability 0.10; actionability flat 0.20).
 2. **D2 hub filter** — ✅ global-degree hub filter, `HUB_DEGREE_MAX=20`, via new `batchGetLinkDegrees`.
