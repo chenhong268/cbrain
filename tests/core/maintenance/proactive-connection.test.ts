@@ -170,6 +170,23 @@ describe("detectProactiveConnections", () => {
     const result = detectProactiveConnections(db, { since: "1970-01-01", minShared: 2, minSessions: 2, cap: 3 });
     expect(result.length).toBe(3);
   });
+
+  it("candidates carry bounded concrete evidence refs", () => {
+    seedSharedPair(db, { sessions: true, timeline: true });
+    const c = findPair(
+      detectProactiveConnections(db, { since: "1970-01-01", minShared: 2, minSessions: 2 }),
+      "entity-alpha",
+      "entity-beta",
+    );
+    expect(c).toBeDefined();
+    expect(c!.sharedNeighborSlugs).toEqual(expect.arrayContaining(["project-gamma", "concept-delta"]));
+    expect(c!.sharedNeighborSlugs.length).toBeLessThanOrEqual(3);
+    expect(c!.timelineEventRefs).toHaveLength(2);
+    expect(c!.timelineEventRefs[0]).toHaveProperty("eventId");
+    expect(c!.timelineEventRefs[0]).toHaveProperty("eventDate");
+    expect(c!.coOccurringSessionRefs).toEqual(expect.arrayContaining(["s1", "s2"]));
+    expect(c!.coOccurringSessionRefs.length).toBeLessThanOrEqual(3);
+  });
 });
 
 describe("produceProactiveConnectionCandidates", () => {
@@ -230,18 +247,44 @@ describe("produceProactiveConnectionCandidates", () => {
     expect(logs.c).toBeGreaterThanOrEqual(1);
   });
 
-  it("metadata holds counts only — no slug/path/score/secret — acceptance #3", () => {
-    seedSharedPair(db, { sessions: true });
+  it("metadata carries bounded evidence refs for audit; no query text (#3)", () => {
+    seedSharedPair(db, { sessions: true, timeline: true });
     produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
     const [row] = db.getDiscoveriesByType("proactive_connection", 10);
     const meta = JSON.parse(row.metadata ?? "{}");
+    // counts drive ranking/sort
     expect(meta.signals.shared_neighbors).toBe(2);
     expect(meta.signals.cooccurring_sessions).toBe(2);
+    // bounded concrete evidence refs present for audit
+    expect(meta.evidence.shared_neighbor_slugs).toEqual(expect.arrayContaining(["project-gamma", "concept-delta"]));
+    expect(meta.evidence.shared_neighbor_slugs.length).toBeLessThanOrEqual(3);
+    expect(meta.evidence.timeline_event_refs).toHaveLength(2);
+    expect(meta.evidence.timeline_event_refs[0]).toHaveProperty("eventId");
+    expect(meta.evidence.timeline_event_refs[0]).toHaveProperty("eventDate");
+    expect(meta.evidence.cooccurring_session_refs).toEqual(expect.arrayContaining(["s1", "s2"]));
+    expect(meta.evidence.cooccurring_session_refs.length).toBeLessThanOrEqual(3);
+    // query TEXT is never stored (only opaque session ids)
     const blob = JSON.stringify(meta);
-    expect(blob).not.toContain("entity-alpha");
-    expect(blob).not.toContain("entity-beta");
-    expect(blob).not.toContain("/Users/");
-    expect(blob).not.toContain("SELECT");
+    expect(blob).not.toMatch(/query/i);
+  });
+
+  it("hostile page titles never enter metadata — refs are slug/id/session, not title text (#3)", () => {
+    seedPage(db, "entity-hostile-a", "Bearer SENTINEL_TOKEN");
+    seedPage(db, "entity-hostile-b", "sk-SENTINEL-KEY");
+    for (const s of ["project-gamma", "concept-delta"]) {
+      seedPage(db, s, s, "entity/project");
+      seedLink(db, "entity-hostile-a", s);
+      seedLink(db, "entity-hostile-b", s);
+    }
+    seedQueryLog(db, "s1", ["entity-hostile-a", "entity-hostile-b"]);
+    seedQueryLog(db, "s2", ["entity-hostile-a", "entity-hostile-b"]);
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const [row] = db.getDiscoveriesByType("proactive_connection", 10);
+    const meta = JSON.parse(row.metadata ?? "{}");
+    const blob = JSON.stringify(meta);
+    expect(blob).not.toContain("SENTINEL");
+    expect(blob).not.toContain("Bearer");
+    expect(blob).not.toContain("sk-SENTINEL");
   });
 });
 

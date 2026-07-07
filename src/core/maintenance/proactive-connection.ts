@@ -12,6 +12,15 @@ import { runDiscoveryShadowVerifierFailOpen } from "../quality/shadow-verifier.j
  * under the open-string type `proactive_connection`, so dedup / status / seen /
  * occurrence_count are inherited unchanged from the discoveries lifecycle.
  *
+ * Evidence auditability (issue core): each candidate carries bounded CONCRETE
+ * evidence refs — shared neighbor slugs, the two sides' latest timeline event
+ * ids, and the opaque query-session ids that co-occurred — in
+ * `metadata.evidence`. These refs are raw/debug audit data that let a reviewer
+ * (human, Hermes, Codex) reconstruct WHY the candidate fired. They are NEVER
+ * echoed into user-visible display text: display is generated at read time by
+ * `formatDigestCard` from fixed anonymous copy + `safeTitle`, which sanitizes
+ * page titles. Query TEXT is never stored (only opaque session ids).
+ *
  * The detector returns pairs that pass Signal A (shared current-fact neighbors,
  * unlinked). Signal B (query-session co-occurrence) and Signal C (timeline
  * proximity) are gathered as supporting evidence. The producer applies the emit
@@ -32,6 +41,19 @@ export interface ProactiveConnectionOptions {
   cap?: number;
 }
 
+/** A single timeline event referenced as evidence (slug + stable id + date). */
+export interface TimelineEventRef {
+  slug: string;
+  eventId: number;
+  eventDate: string | null;
+}
+
+interface CoOccurEntry {
+  count: number;
+  /** Bounded list of opaque session ids that co-occurred this pair. NO query text. */
+  sessionRefs: string[];
+}
+
 export interface ProactiveConnectionCandidate {
   a: string;
   b: string;
@@ -42,6 +64,15 @@ export interface ProactiveConnectionCandidate {
   signalB: boolean;
   signalC: boolean;
   score: number;
+  /**
+   * Bounded concrete evidence refs for audit. Written into `metadata.evidence`
+   * by the producer and NEVER read by `formatDigestCard` (user display is fixed
+   * anonymous copy + safeTitle). Query text is never stored (opaque session
+   * ids only).
+   */
+  sharedNeighborSlugs: string[];
+  timelineEventRefs: TimelineEventRef[];
+  coOccurringSessionRefs: string[];
 }
 
 export interface ProactiveConnectionResult {
@@ -54,7 +85,8 @@ const DEFAULT_MIN_SHARED = 2;
 const DEFAULT_MIN_SESSIONS = 2;
 const DEFAULT_MAX_TIMELINE_DAYS = 14;
 const DEFAULT_CAP = 20;
-
+/** Bound on evidence ref lists (shared-neighbor slugs, session refs). */
+const MAX_REFS = 3;
 const MS_PER_DAY = 86_400_000;
 
 /** Deterministic (0.01, 1] clamp; never 0 so rows stay sortable above true-zero. */
@@ -98,42 +130,55 @@ function buildLocalAdjacency(
 }
 
 /**
- * Build a pair→distinct-session-count map over the window. One pass over recent
- * sessions; each pair counts at most once per session regardless of in-session
- * repetition. Mirrors the read pattern of `LearnManager.updateCoOccurrences`
+ * Build a pair→{count, bounded sessionRefs} map over the window. One pass over
+ * recent sessions; each pair counts at most once per session regardless of
+ * in-session repetition. Only OPAQUE session ids are captured — query text is
+ * never stored. Mirrors the read pattern of `LearnManager.updateCoOccurrences`
  * (learn.ts) but performs NO writes — Phase 0 is evidence-only.
  */
 export function countPairCoOccurrencesAcrossSessions(
   db: CBrainDB,
   since: string,
-): Map<string, number> {
-  const map = new Map<string, number>();
+  maxSessionRefs: number = MAX_REFS,
+): Map<string, CoOccurEntry> {
+  const map = new Map<string, CoOccurEntry>();
   const sessions = db.getDistinctSessionsSince(since);
   for (const sid of sessions) {
     const pairs = db.getSessionCoOccurrences(sid);
     for (const p of pairs) {
       const key = pairKey(p.slug_a, p.slug_b);
-      map.set(key, (map.get(key) ?? 0) + 1);
+      const e = map.get(key) ?? { count: 0, sessionRefs: [] };
+      e.count++;
+      if (e.sessionRefs.length < maxSessionRefs) e.sessionRefs.push(sid);
+      map.set(key, e);
     }
   }
   return map;
 }
 
-/** Absolute day-gap between each side's latest dated event, or null if either side has none. */
-export function timelineGapDays(
-  eventsA: Array<{ event_date: string | null }>,
-  eventsB: Array<{ event_date: string | null }>,
-): number | null {
-  const latest = (events: Array<{ event_date: string | null }>): number | null => {
-    const ts = events
-      .map((e) => (e.event_date ? Date.parse(e.event_date) : NaN))
-      .filter((t) => Number.isFinite(t));
-    return ts.length > 0 ? Math.max(...ts) : null;
-  };
-  const la = latest(eventsA);
-  const lb = latest(eventsB);
-  if (la === null || lb === null) return null;
-  return Math.abs(la - lb) / MS_PER_DAY;
+/** The latest dated event among `events`, as a stable audit ref; null if none has a parseable date. */
+function latestEventRef(
+  slug: string,
+  events: Array<{ id: number; event_date: string | null }>,
+): TimelineEventRef | null {
+  let best: TimelineEventRef | null = null;
+  let bestTs = -Infinity;
+  for (const e of events) {
+    if (!e.event_date) continue;
+    const ts = Date.parse(e.event_date);
+    if (!Number.isFinite(ts) || ts <= bestTs) continue;
+    bestTs = ts;
+    best = { slug, eventId: e.id, eventDate: e.event_date };
+  }
+  return best;
+}
+
+function gapDaysBetween(a: TimelineEventRef | null, b: TimelineEventRef | null): number | null {
+  if (!a?.eventDate || !b?.eventDate) return null;
+  const ta = Date.parse(a.eventDate);
+  const tb = Date.parse(b.eventDate);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return null;
+  return Math.abs(ta - tb) / MS_PER_DAY;
 }
 
 /**
@@ -182,22 +227,36 @@ export function detectProactiveConnections(
     if (candidateNodes.length === 0) continue;
 
     const tlMap = db.batchGetTimelineForSlugs([pivot.slug, ...candidateNodes]);
-    const pivotEvents = tlMap.get(pivot.slug) ?? [];
+    const pivotLatest = latestEventRef(pivot.slug, tlMap.get(pivot.slug) ?? []);
 
     for (const node of candidateNodes) {
       if (out.length >= cap) break;
       const nodeNeighbors = neighbors.get(node) ?? new Set<string>();
       let shared = 0;
-      for (const n of pivotNeighbors) if (nodeNeighbors.has(n)) shared++;
+      const sharedSlugs: string[] = [];
+      for (const n of pivotNeighbors) {
+        if (nodeNeighbors.has(n)) {
+          shared++;
+          if (sharedSlugs.length < MAX_REFS) sharedSlugs.push(n);
+        }
+      }
       if (shared < minShared) continue;
       const key = pairKey(pivot.slug, node);
       if (seen.has(key)) continue;
       seen.add(key);
 
-      const coOccurringSessions = coOccurMap.get(key) ?? 0;
+      const coOccurEntry = coOccurMap.get(key);
+      const coOccurringSessions = coOccurEntry?.count ?? 0;
+      const coOccurringSessionRefs = coOccurEntry?.sessionRefs ?? [];
       const signalB = coOccurringSessions >= minSessions;
-      const gapDays = timelineGapDays(pivotEvents, tlMap.get(node) ?? []);
+
+      const nodeLatest = latestEventRef(node, tlMap.get(node) ?? []);
+      const gapDays = gapDaysBetween(pivotLatest, nodeLatest);
       const signalC = gapDays !== null && gapDays <= maxTimelineDays;
+      const timelineEventRefs: TimelineEventRef[] = [];
+      if (pivotLatest) timelineEventRefs.push(pivotLatest);
+      if (nodeLatest) timelineEventRefs.push(nodeLatest);
+
       const supporting = (signalB ? 1 : 0) + (signalC ? 1 : 0);
       const score = clamp01(
         0.34 + (signalB ? 0.22 : 0) + (signalC ? 0.22 : 0) + (supporting === 2 ? 0.11 : 0),
@@ -213,6 +272,9 @@ export function detectProactiveConnections(
         signalB,
         signalC,
         score,
+        sharedNeighborSlugs: sharedSlugs,
+        timelineEventRefs,
+        coOccurringSessionRefs,
       });
     }
   }
@@ -223,13 +285,17 @@ export function detectProactiveConnections(
  * Persist proactive connection candidates into the `discoveries` table under the
  * open-string type `proactive_connection`. Applies the emit rule (Signal A AND
  * ≥1 supporting) before persisting, runs the fail-open shadow verifier before
- * every upsert (privacy + quality audit, never blocks), and writes only counts
- * into `metadata` (no slug/path/score/secret).
+ * every upsert (privacy + quality audit, never blocks), and writes bounded
+ * CONCRETE evidence refs into `metadata.evidence` so each candidate is auditable
+ * (which neighbors are shared, which timeline events are close, which sessions
+ * co-occurred). Query text is never stored.
  *
- * Lifecycle is inherited from `upsertDiscovery`: dedup via `${type}|sorted`,
- * recurrence bumps `occurrence_count`, and dismissed/resolved rows (status !=
- * pending) are never resurrected because the conflict path never touches
- * status/seen (#172, #310 acceptance #4/#5).
+ * Boundary: `metadata.evidence` is raw/debug audit data — `formatDigestCard`
+ * never reads it; user display is fixed anonymous copy + `safeTitle`. Lifecycle
+ * is inherited from `upsertDiscovery`: dedup via `${type}|sorted`, recurrence
+ * bumps `occurrence_count`, and dismissed/resolved rows (status != pending) are
+ * never resurrected because the conflict path never touches status/seen
+ * (#172, #310 acceptance #4/#5).
  */
 export function produceProactiveConnectionCandidates(
   db: CBrainDB,
@@ -251,12 +317,20 @@ export function produceProactiveConnectionCandidates(
         cooccurring_sessions: c.coOccurringSessions,
         timeline_proximity_days: c.timelineProximityDays,
       },
+      // Bounded concrete evidence refs so a reviewer can reconstruct WHY this
+      // candidate fired. Raw/debug audit only — formatDigestCard never reads
+      // this; display stays anonymous. NO query text (opaque session ids only).
+      evidence: {
+        shared_neighbor_slugs: c.sharedNeighborSlugs,
+        timeline_event_refs: c.timelineEventRefs,
+        cooccurring_session_refs: c.coOccurringSessionRefs,
+      },
       pivot: "recently_ingested",
     };
 
     // Display texts are the candidate titles only — fixed display copy is
-    // generated at read time by formatDigestCard. The verifier scans these for
-    // unsafe patterns (secret/slug/path); counts only are persisted.
+    // generated at read time by formatDigestCard (safeTitle sanitizes). The
+    // verifier scans these titles for unsafe patterns (secret/slug/path).
     const displayTexts = [c.a, c.b]
       .map((slug) => db.getPage(slug)?.title ?? "")
       .filter((t) => t.length > 0);
