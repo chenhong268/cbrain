@@ -77,6 +77,10 @@ export interface ProactiveConnectionCandidate {
 export interface ProactiveConnectionResult {
   total: number;
   inserted: number;
+  /** #314 — count of candidates whose quality was boosted by accepted feedback (new insert OR recurrence). */
+  feedbackBoosted: number;
+  /** #314 — count of candidates suppressed by review feedback (Layer 3 evidence-identical to dismissed/resolved). */
+  feedbackSuppressed: number;
 }
 
 const DEFAULT_SINCE_DAYS = 30;
@@ -115,6 +119,9 @@ export const SCORE_WEIGHTS = {
   actionability: 0.10,
   safety: 0.20,
 } as const;
+
+/** #314 — quality boost per accepted-entity hit. A candidate has 2 entities → max boost 2 * FEEDBACK_BOOST = 0.10. */
+export const FEEDBACK_BOOST = 0.05;
 
 const SCORE_BASE_EVIDENCE = 0.40;
 const SCORE_STEP_NEIGHBOR = 0.15; // per extra non-hub neighbor beyond minShared, up to 2
@@ -194,6 +201,22 @@ export function scoreProactiveConnectionCandidate(input: ScoringInput): Proactiv
   }
 
   return { evidence_strength, novelty, recurrence, actionability, risk, quality, gate_path };
+}
+
+/**
+ * #314 — bounded quality boost from accepted review feedback. A candidate gets
+ * FEEDBACK_BOOST per entity that appears in the acceptedEntities set (derived
+ * from resolved discoveries). A candidate has exactly 2 entities, so the boost
+ * is construction-bounded at 2 * FEEDBACK_BOOST; clamp01 (applied by the caller)
+ * enforces the (0.01, 1] quality invariant. Pure + deterministic; no DB access.
+ *
+ * The boost targets the `quality` composite (ranking), NOT any review gate
+ * dimension, so it cannot rescue a weak candidate (acceptance #2).
+ */
+export function acceptedEntityBoost(entities: string[], acceptedEntities: Set<string>): number {
+  let hits = 0;
+  for (const e of entities) if (acceptedEntities.has(e)) hits++;
+  return hits * FEEDBACK_BOOST;
 }
 
 interface LocalAdjacency {
@@ -540,5 +563,5 @@ export function produceProactiveConnectionCandidates(
     );
     if (res.inserted) inserted++;
   }
-  return { total: candidates.length, inserted };
+  return { total: candidates.length, inserted, feedbackBoosted: 0, feedbackSuppressed: 0 };
 }

@@ -8,6 +8,8 @@ import {
   pairKey,
   produceProactiveConnectionCandidates,
   scoreProactiveConnectionCandidate,
+  acceptedEntityBoost,
+  FEEDBACK_BOOST,
 } from "../../../src/core/maintenance/proactive-connection.js";
 
 const testDir = "/tmp/cbrain-test-proactive-connection";
@@ -155,6 +157,25 @@ describe("scoreProactiveConnectionCandidate (#311)", () => {
         expect(inBounds(s.quality)).toBe(true);
       }
     }
+  });
+});
+
+describe("acceptedEntityBoost (#314)", () => {
+  it("0 hits → 0 boost", () => {
+    expect(acceptedEntityBoost(["entity-alpha", "entity-beta"], new Set())).toBe(0);
+  });
+  it("1 hit → FEEDBACK_BOOST", () => {
+    expect(acceptedEntityBoost(["entity-alpha", "entity-gamma"], new Set(["entity-alpha"]))).toBe(FEEDBACK_BOOST);
+  });
+  it("2 hits → 2 * FEEDBACK_BOOST (both entities accepted)", () => {
+    expect(
+      acceptedEntityBoost(["entity-alpha", "entity-beta"], new Set(["entity-alpha", "entity-beta"])),
+    ).toBe(2 * FEEDBACK_BOOST);
+  });
+  it("never exceeds 2 * FEEDBACK_BOOST (a candidate has only 2 entities)", () => {
+    expect(
+      acceptedEntityBoost(["entity-alpha", "entity-beta"], new Set(["entity-alpha", "entity-beta", "entity-gamma"])),
+    ).toBe(2 * FEEDBACK_BOOST);
   });
 });
 
