@@ -167,6 +167,15 @@ A small helper `syncProactiveDiscoveryOnReviewAction(db, candidate, action)` liv
 8. **Pure-read escape hatch (hard)**: `get_compounding_reviews(refreshProactive:false)` calls neither the bridge nor `upsertCandidate` — zero candidate writes; identical to today's behavior (D7).
 9. **Sync fail-open (hard)**: when the source discovery cannot be resolved (renamed/cleaned/malformed), `act_on_review_candidate` still returns success with the candidate's new status — candidate state is NOT rolled back and no error is surfaced (D8).
 
+## Adversarial review outcome (6 attackers, each constructed + ran a real bun attack)
+
+- **Attacks 1 / 2 / 3 / 5 / 6 → CLEAN**: duplicate-promotion idempotency (incl. duplicated source rows, occurrence/metadata drift, weak-candidate residue), quiet-surface across all default consumers (max-score proactive stays silent; bridge is the sole trigger), feedback-sync reappearance (reject/disable/accept loops + source_not_found edge), side-effect audit (zero writes to pages/links/aliases/timeline/tags/chunks/versions across happy + both throwing fallback paths), and gate fail-closed (malformed metadata + weak-but-valid → skipped by `passesReviewGate`, never written).
+- **Attack 4 (CONFIRMED — fixed)**: the bridge's only injectable field is `metadata.evidence.timeline_event_refs[].eventDate` → `evidence[].dateRange`. The plan's blacklist (`sanitizeDisplayText`) leaks non-`SELECT *` SQL injection (`UNION SELECT`, `SELECT col FROM`, `UPDATE <table> SET`), Slack tokens (`xox[bpra]-`), Google API keys (`AIza…`), `password is <word>` phrasing, and markdown/URL exfil — classes a blacklist can't cover without false-positive risk on legitimate text. **Fix**: since `eventDate` is a date field (sourced from timeline `event_date`, parsed via `Date.parse`), switch to a **`Date.parse` whitelist** as the primary defense (any non-date payload → `""`) with `sanitizeDisplayText` kept as defense-in-depth backup. Regression test covers all 16 hostile payloads + valid-ISO-date preservation. This is a deviation from the plan's blacklist-only D5, justified by the review finding; it closes the whole eventDate surface without growing the shared blacklist.
+- **Attack 3 benign note**: re-`accept` on a previously-rejected candidate flips the source discovery `dismissed → resolved`. Producer treats both identically (`proactive-connection.ts` skips any non-`pending`), so no functional impact; the candidate never re-outputs. Not fixed (audit-record nuance only).
+- **Attack 6 PLAUSIBLE note**: a non-array `timeline_event_refs` is coerced to `[]` rather than fail-closing the row. Out of spec (D4 fail-closed covers missing/malformed `signals`/`scoring`), and degrades fail-safe (no leak/crash). Not fixed.
+
+Net: 1 confirmed finding, fixed with a regression test (whitelist); `bun run check` green (3424 pass).
+
 ## Known limitations / deferred
 
 - **No score back-propagation**: upsert conflict never overwrites scores; a candidate's review scores are a promotion-time snapshot. Accepted — issue does not require live refresh.
