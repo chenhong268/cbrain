@@ -12,6 +12,8 @@
 // - no schema migration.
 
 import { sanitizeDisplayText } from "../safety/display-safety.js";
+import type { CBrainDB } from "../../storage/sqlite.js";
+import { GATE, type CompoundingReviewManager } from "./compounding-review.js";
 
 export const PROACTIVE_DISCOVERY_TYPE = "proactive_connection";
 export const PROACTIVE_CANDIDATE_TYPE = "supported_connection" as const;
@@ -124,4 +126,102 @@ export function buildReviewCandidateDisplay(metadata: unknown): ReviewCandidateD
   }
 
   return { title: PROACTIVE_REVIEW_TITLE, summary, evidence: items.slice(0, 3) };
+}
+
+export interface PromotionResult {
+  promoted: number;
+  skipped: number;
+  seen: number;
+}
+
+function qualityOf(meta: unknown): number {
+  if (!isRecord(meta) || !isRecord(meta.scoring)) return 0;
+  return asNum((meta.scoring as Record<string, unknown>).quality) ?? 0;
+}
+
+/**
+ * D4 gate precheck — mirrors ReviewGenerator.evaluateGates at write time so weak
+ * candidates never enter the candidate table (acceptance #2: "weak not promoted").
+ * trust_risk is a "lower is better" dimension (gate is an upper bound), inverted
+ * vs the others. Imports GATE so thresholds stay a single source of truth.
+ */
+export function passesReviewGate(scores: Record<string, number>): boolean {
+  return (
+    (scores.evidence ?? 0) >= GATE.evidence &&
+    (scores.persistence ?? 0) >= GATE.persistence &&
+    (scores.novelty ?? 0) >= GATE.novelty &&
+    (scores.action_value ?? 0) >= GATE.action_value &&
+    (scores.trust_risk ?? 1) <= GATE.trust_risk
+  );
+}
+
+/**
+ * D1/D6 — read pending proactive discoveries, map scores + display, upsert as
+ * supported_connection candidates. Idempotent via content_hash (fixed title +
+ * sorted entity pair). Processes highest-quality first, capped at PROMOTION_LIMIT.
+ *
+ * Pre-loop filter is status==='pending' ONLY. All validity checks (malformed
+ * metadata, gate fail, entities≠2) happen IN the loop so every skipped row is
+ * counted — none vanish silently into a chain filter (HIGH #2). Weak candidates
+ * fail the gate precheck and are skipped, never written (HIGH #1).
+ */
+export function promoteProactiveCandidatesToReview(
+  db: CBrainDB,
+  mgr: CompoundingReviewManager,
+): PromotionResult {
+  const rows = db.getDiscoveryLifecycleIndex(PROACTIVE_DISCOVERY_TYPE, LIFECYCLE_LOOKUP_LIMIT);
+
+  const pending = rows
+    .filter((r) => r.status === "pending")
+    .map((r) => {
+      let meta: unknown = null;
+      try {
+        meta = r.metadata ? JSON.parse(r.metadata) : null;
+      } catch {
+        meta = null;
+      }
+      return { r, meta, occ: r.occurrence_count };
+    })
+    .sort((a, b) => qualityOf(b.meta) - qualityOf(a.meta))
+    .slice(0, PROMOTION_LIMIT);
+
+  let promoted = 0;
+  let skipped = 0;
+  let seen = 0;
+  for (const x of pending) {
+    const scores = mapProactiveToReviewScores(x.meta, x.occ);
+    const display = buildReviewCandidateDisplay(x.meta);
+    if (!scores || !display) {
+      skipped++; // malformed metadata → fail-closed
+      continue;
+    }
+    if (!passesReviewGate(scores)) {
+      skipped++; // weak → NOT written (HIGH #1, acceptance #2)
+      continue;
+    }
+    let entities: unknown = [];
+    try {
+      entities = JSON.parse(x.r.entities);
+    } catch {
+      entities = [];
+    }
+    if (!Array.isArray(entities) || entities.length !== 2) {
+      skipped++;
+      continue;
+    }
+    const sourceSlugs = [...(entities as string[])].sort();
+
+    const { isNew } = mgr.upsertCandidate({
+      title: display.title,
+      candidateType: PROACTIVE_CANDIDATE_TYPE,
+      summary: display.summary,
+      evidence: display.evidence,
+      scores,
+      sourceSlugs,
+    });
+    if (isNew) promoted++;
+    else seen++;
+  }
+
+  return { promoted, skipped, seen };
 }

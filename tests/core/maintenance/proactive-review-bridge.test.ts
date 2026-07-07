@@ -1,8 +1,14 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { sanitizeDisplayText } from "../../../src/core/safety/display-safety.js";
+import { CBrainDB } from "../../../src/storage/sqlite.js";
+import { CompoundingReviewManager } from "../../../src/core/maintenance/compounding-review.js";
 import {
   mapProactiveToReviewScores,
   buildReviewCandidateDisplay,
+  promoteProactiveCandidatesToReview,
   REVIEW_ACTION_VALUE,
   PROACTIVE_REVIEW_TITLE,
 } from "../../../src/core/maintenance/proactive-review-bridge.js";
@@ -155,5 +161,126 @@ describe("buildReviewCandidateDisplay", () => {
   test("returns null on malformed metadata", () => {
     expect(buildReviewCandidateDisplay(null)).toBeNull();
     expect(buildReviewCandidateDisplay({ signals: {} })).toBeNull();
+  });
+});
+
+// ─── Promotion adapter (D1, D6) ────────────────────────────────
+
+const promoDirs: string[] = [];
+function makeDb(): CBrainDB {
+  const dir = mkdtempSync(join(tmpdir(), "cbrain-test-prb-promo-")); // MEDIUM #3
+  promoDirs.push(dir);
+  return new CBrainDB(join(dir, "t.sqlite"));
+}
+
+function seedProactive(
+  db: CBrainDB,
+  entities: string[],
+  opts: Partial<{ sn: number; co: number; timeline: boolean; novelty: number; risk: number; quality: number }> = {},
+) {
+  const m = {
+    source: "proactive_connection",
+    signals: {
+      shared_neighbors: opts.sn ?? 3,
+      cooccurring_sessions: opts.co ?? 1,
+      timeline_proximity_days: null,
+    },
+    evidence: {
+      shared_neighbor_slugs: ["concept-x"],
+      timeline_event_refs:
+        opts.timeline === false ? [] : [{ slug: "entity-alpha", eventId: 1, eventDate: "2026-06-01" }],
+      cooccurring_session_refs: opts.co ? ["session-s1"] : [],
+    },
+    scoring: {
+      evidence_strength: 0.85,
+      novelty: opts.novelty ?? 0.9,
+      recurrence: 0.2,
+      actionability: 0.2,
+      risk: opts.risk ?? 0.1,
+      quality: opts.quality ?? 0.7,
+      gate_path: "strong_corroborated",
+      weights: {},
+    },
+    pivot: "recently_ingested",
+  };
+  return db.upsertDiscovery("proactive_connection", entities, opts.quality ?? 0.7, undefined, undefined, "low", false, m);
+}
+
+describe("promoteProactiveCandidatesToReview", () => {
+  afterEach(() => {
+    for (const d of promoDirs) rmSync(d, { recursive: true, force: true });
+    promoDirs.length = 0;
+  });
+
+  test("strong pending discovery → 1 supported_connection candidate (acceptance #1)", () => {
+    const db = makeDb();
+    const mgr = new CompoundingReviewManager(db);
+    seedProactive(db, ["entity-alpha", "entity-beta"], { sn: 3, co: 1, timeline: true });
+    const r = promoteProactiveCandidatesToReview(db, mgr);
+    expect(r.promoted).toBe(1);
+    const list = mgr.listCandidates({ includeDeferred: true, limit: 50 });
+    expect(list.length).toBe(1);
+    expect(list[0].candidate_type).toBe("supported_connection");
+    expect(list[0].source_slugs_json).toBe(JSON.stringify(["entity-alpha", "entity-beta"]));
+    db.close();
+  });
+
+  test("promoting twice is idempotent — no duplicate (acceptance #3, attack #1)", () => {
+    const db = makeDb();
+    const mgr = new CompoundingReviewManager(db);
+    seedProactive(db, ["entity-alpha", "entity-beta"]);
+    promoteProactiveCandidatesToReview(db, mgr);
+    const r2 = promoteProactiveCandidatesToReview(db, mgr);
+    expect(r2.promoted).toBe(0);
+    expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(1);
+    db.close();
+  });
+
+  test("weak-persistence discovery NOT written — gate precheck (HIGH #1, acceptance #2)", () => {
+    const db = makeDb();
+    const mgr = new CompoundingReviewManager(db);
+    // occurrence=1, no timeline, no co-occurrence → persistence=1 → fails gate ≥2
+    seedProactive(db, ["entity-alpha", "entity-beta"], { sn: 3, co: 0, timeline: false });
+    const r = promoteProactiveCandidatesToReview(db, mgr);
+    expect(r.promoted).toBe(0);
+    expect(r.skipped).toBeGreaterThanOrEqual(1);
+    expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0); // NOT written
+    db.close();
+  });
+
+  test("low-trust-risk discovery NOT written — every gate dimension prechecked", () => {
+    const db = makeDb();
+    const mgr = new CompoundingReviewManager(db);
+    // strong on persistence/evidence but risk above the ≤0.3 gate → must skip
+    seedProactive(db, ["entity-alpha", "entity-beta"], { sn: 3, co: 1, timeline: true, risk: 0.9 });
+    const r = promoteProactiveCandidatesToReview(db, mgr);
+    expect(r.promoted).toBe(0);
+    expect(r.skipped).toBeGreaterThanOrEqual(1);
+    expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0);
+    db.close();
+  });
+
+  test("dismissed discoveries are NOT promoted (acceptance #2)", () => {
+    const db = makeDb();
+    const mgr = new CompoundingReviewManager(db);
+    const { id } = seedProactive(db, ["entity-alpha", "entity-beta"]);
+    db.updateDiscoveryStatus(id, "dismissed");
+    const r = promoteProactiveCandidatesToReview(db, mgr);
+    expect(r.promoted).toBe(0);
+    expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0);
+    db.close();
+  });
+
+  test("malformed-metadata discovery skipped fail-closed, counted (HIGH #2, attack #6)", () => {
+    const db = makeDb();
+    const mgr = new CompoundingReviewManager(db);
+    db.upsertDiscovery("proactive_connection", ["entity-alpha", "entity-beta"], 0.7, undefined, undefined, "low", false, {
+      source: "proactive_connection", // no signals/scoring/evidence
+    });
+    const r = promoteProactiveCandidatesToReview(db, mgr);
+    expect(r.promoted).toBe(0);
+    expect(r.skipped).toBeGreaterThanOrEqual(1); // counted in-loop, not silently filtered
+    expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0);
+    db.close();
   });
 });
