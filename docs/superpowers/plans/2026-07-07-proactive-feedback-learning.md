@@ -40,8 +40,8 @@
 - [ ] **Step 1: Create worktree**
   Run: `EnterWorktree` → name `feat-314-feedback-learning`.
 - [ ] **Step 2: Fast-forward to local main** (memory `worktree-fresh-base-misses-local-main` — fresh worktree bases off origin/main and misses local doc commits)
-  Run (in worktree): `git merge main --ff-only && git log --oneline -1`
-  Expected: HEAD is `588a953 docs(proactive): fix #314 spec acceptance #2...` (the latest #314 spec commit on local main). If the spec/plan files are missing, the worktree branched before the doc commits — re-run the merge.
+  Run (in worktree): `git merge main --ff-only && ls docs/superpowers/specs/2026-07-07-proactive-feedback-learning-design.md docs/superpowers/plans/2026-07-07-proactive-feedback-learning.md`
+  Expected: both the spec + plan files exist (main is at or beyond the #314 plan commit). If either is missing, the worktree branched before the doc commits — re-run the merge.
 - [ ] **Step 3: Baseline green**
   Run: `bun install && bun run lint && bun test tests/core/maintenance/proactive-connection.test.ts`
   Expected: lint clean; existing producer tests pass. `bun install` first if `node_modules` missing (memory `worktree-fresh-node-modules-gate`).
@@ -124,9 +124,17 @@ export function acceptedEntityBoost(entities: string[], acceptedEntities: Set<st
 }
 ```
 
-- [ ] **Step 4: Run → PASS**
-  Run: `bun test tests/core/maintenance/proactive-connection.test.ts`
-  Expected: PASS (the new unit tests; the producer still returns `{ total, inserted }` at this point — the return-shape change lands in Task 3, but TS won't complain yet because callers in this file don't destructure strictly. If biome/tsc flags the existing `return { total, inserted };` as missing the new fields, leave it — Task 3 fixes it).
+  3d. Update the producer's return statement (line 543) to satisfy the extended type — initialize the new counters to 0 (Task 3 replaces them with the real counter values):
+
+```typescript
+  return { total: candidates.length, inserted, feedbackBoosted: 0, feedbackSuppressed: 0 };
+```
+
+  This keeps the Task 2 commit typecheck-green (`bun run lint` must pass before the Task 2 commit).
+
+- [ ] **Step 4: Run → PASS + lint**
+  Run: `bun run lint && bun test tests/core/maintenance/proactive-connection.test.ts`
+  Expected: lint clean (the extended type is satisfied by the 3d return change) + the new unit tests PASS.
 - [ ] **Step 5: Commit**
   `git add src/core/maintenance/proactive-connection.ts tests/core/maintenance/proactive-connection.test.ts && git commit -m "feat(proactive): FEEDBACK_BOOST + acceptedEntityBoost pure helper (#314)"`
 
@@ -189,6 +197,43 @@ describe("produceProactiveConnectionCandidates feedback learning (#314)", () => 
     expect(meta.scoring.feedback_boost).toBe(0);
     expect(meta.scoring.feedback_reason).toBeNull();
     expect(res.feedbackBoosted).toBe(0);
+  });
+
+  it("recurrence of an existing pending candidate is boosted (inserted=0, feedbackBoosted=1) — HIGH fix", () => {
+    // First run: [alpha, gamma] inserted with NO accepted history → no boost.
+    seedSharedEntityGamma(db);
+    const res1 = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(res1.inserted).toBe(1);
+    expect(res1.feedbackBoosted).toBe(0);
+    const before = db.getDiscoveryLifecycleIndex("proactive_connection", 50)[0];
+    const beforeMeta = JSON.parse(before.metadata ?? "{}");
+    expect(beforeMeta.scoring.feedback_reason).toBeNull();
+
+    // Add accepted history: a resolved [alpha, beta] discovery (shares entity-alpha).
+    const accepted = db.upsertDiscovery(
+      "proactive_connection",
+      ["entity-alpha", "entity-beta"],
+      0.7,
+      undefined,
+      undefined,
+      "low",
+      false,
+      { source: "proactive_connection", signals: { shared_neighbors: 3, cooccurring_sessions: 1, timeline_proximity_days: null }, evidence: { shared_neighbor_slugs: ["concept-delta"], timeline_event_refs: [], cooccurring_session_refs: [] }, scoring: { evidence_strength: 0.85, novelty: 0.9, recurrence: 0.2, actionability: 0.2, risk: 0.1, quality: 0.7, gate_path: "strong_corroborated", weights: {} }, pivot: "recently_ingested" },
+    );
+    db.updateDiscoveryStatus(accepted.id, "resolved");
+
+    // Second run: [alpha, gamma] recurs (existing pending) → boost applied + persisted.
+    const res2 = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(res2.inserted).toBe(0); // recurrence, not a new row
+    expect(res2.feedbackBoosted).toBe(1); // boosted on recurrence (HIGH fix: not gated on inserted)
+    const after = db
+      .getDiscoveryLifecycleIndex("proactive_connection", 50)
+      .find((r) => r.id !== accepted.id)!;
+    const afterMeta = JSON.parse(after.metadata ?? "{}");
+    expect(afterMeta.scoring.feedback_reason).toBe("feedback_boosted");
+    expect(afterMeta.scoring.feedback_boost).toBe(FEEDBACK_BOOST);
+    expect(after.score).toBeCloseTo(beforeMeta.scoring.quality + FEEDBACK_BOOST, 5); // score updated
+    expect(after.occurrence_count).toBeGreaterThan(before.occurrence_count); // recurrence bumped
   });
 });
 
@@ -271,13 +316,11 @@ function seedSharedEntityGamma(db: CBrainDB): void {
         feedback_reason: acceptedHits > 0 ? "feedback_boosted" : null,
 ```
 
-  3f. Increment `feedbackBoosted` on a successful upsert. After `if (res.inserted) inserted++;` (line 541):
+  3f. Increment the counters after the upsert (line 541). IMPORTANT: `feedbackBoosted` counts ANY upsert with a boost — new insert OR recurrence. `upsertDiscovery`'s conflict path updates `score` + `metadata` on a recurring pending candidate (inserted=false), so a boost applied to an existing pending candidate IS persisted and MUST be counted, otherwise the audit counter lies. `inserted` stays a count of new rows only.
 
 ```typescript
-    if (res.inserted) {
-      inserted++;
-      if (acceptedHits > 0) feedbackBoosted++;
-    }
+    if (res.inserted) inserted++;
+    if (acceptedHits > 0) feedbackBoosted++; // new OR recurrence — both persist the boost via upsertDiscovery
 ```
 
   3g. Update the return (replace line 543):
