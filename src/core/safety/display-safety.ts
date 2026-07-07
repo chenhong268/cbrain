@@ -47,3 +47,15 @@ export function assertSafeActionDisplay(text: string): void {
     }
   }
 }
+
+// Non-throwing variant for display builders that compose user-facing text from
+// partially-external fields (e.g. proactive-review-bridge assembling evidence
+// dateRange from a discovery eventDate). Returns the fallback on the first
+// unsafe match instead of throwing, so a single bad field cannot sink the whole
+// candidate render. Shares DISPLAY_UNSAFE_PATTERNS as the single source of truth.
+export function sanitizeDisplayText(text: string, fallback: string): string {
+  for (const pattern of DISPLAY_UNSAFE_PATTERNS) {
+    if (pattern.test(text)) return fallback;
+  }
+  return text;
+}
