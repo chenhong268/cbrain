@@ -12,7 +12,7 @@
 // - no schema migration.
 
 import { sanitizeDisplayText } from "../safety/display-safety.js";
-import type { CBrainDB } from "../../storage/sqlite.js";
+import type { CBrainDB, CandidateRow, FeedbackAction } from "../../storage/sqlite.js";
 import { GATE, type CompoundingReviewManager } from "./compounding-review.js";
 
 export const PROACTIVE_DISCOVERY_TYPE = "proactive_connection";
@@ -224,4 +224,74 @@ export function promoteProactiveCandidatesToReview(
   }
 
   return { promoted, skipped, seen };
+}
+
+export interface SyncResult {
+  synced: boolean;
+  reason: string;
+}
+
+/**
+ * D8 — best-effort sync of the source proactive discovery lifecycle after a
+ * successful review action. Called from the act_on_review_candidate MCP handler
+ * AFTER transitionStatus has already committed the candidate status.
+ *
+ *   accept          → source discovery resolved
+ *   reject / disable → source discovery dismissed
+ *   defer           → no-op (source discovery stays pending; the deferred
+ *                     candidate is excluded from default generate() output and
+ *                     re-promotion is an idempotent timestamp bump, so defer
+ *                     does not cause re-surfacing)
+ *
+ * Fail-open: any failure (source not found, malformed, throw) returns
+ * {synced:false} and NEVER throws — the candidate status is authoritative.
+ * Reverse-lookup uses LIFECYCLE_LOOKUP_LIMIT (>default 500) so an older source
+ * discovery is not silently missed.
+ */
+export function syncProactiveDiscoveryOnReviewAction(
+  db: CBrainDB,
+  candidate: CandidateRow,
+  action: FeedbackAction,
+): SyncResult {
+  if (candidate.candidate_type !== PROACTIVE_CANDIDATE_TYPE) {
+    return { synced: false, reason: "not_proactive" };
+  }
+  let slugs: unknown = null;
+  try {
+    slugs = candidate.source_slugs_json ? JSON.parse(candidate.source_slugs_json) : null;
+  } catch {
+    slugs = null;
+  }
+  if (!Array.isArray(slugs) || slugs.length !== 2) {
+    return { synced: false, reason: "no_pair" };
+  }
+  if (action === "defer") {
+    return { synced: false, reason: "defer_no_op" };
+  }
+
+  let discoveryStatus: "resolved" | "dismissed";
+  if (action === "accept") discoveryStatus = "resolved";
+  else if (action === "reject" || action === "disable") discoveryStatus = "dismissed";
+  else return { synced: false, reason: "action_unmapped" }; // superseded/reactivate not in MCP enum
+
+  const pair = [...(slugs as string[])].sort();
+  try {
+    const rows = db.getDiscoveryLifecycleIndex(PROACTIVE_DISCOVERY_TYPE, LIFECYCLE_LOOKUP_LIMIT);
+    const match = rows.find((r) => {
+      let ents: unknown = [];
+      try {
+        ents = JSON.parse(r.entities);
+      } catch {
+        return false;
+      }
+      if (!Array.isArray(ents)) return false;
+      const sorted = [...(ents as string[])].sort();
+      return sorted.length === pair.length && sorted.every((v, i) => v === pair[i]);
+    });
+    if (!match) return { synced: false, reason: "source_not_found" };
+    db.updateDiscoveryStatus(match.id, discoveryStatus);
+    return { synced: true, reason: discoveryStatus };
+  } catch {
+    return { synced: false, reason: "error" };
+  }
 }

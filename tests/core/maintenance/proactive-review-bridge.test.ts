@@ -9,6 +9,7 @@ import {
   mapProactiveToReviewScores,
   buildReviewCandidateDisplay,
   promoteProactiveCandidatesToReview,
+  syncProactiveDiscoveryOnReviewAction,
   REVIEW_ACTION_VALUE,
   PROACTIVE_REVIEW_TITLE,
 } from "../../../src/core/maintenance/proactive-review-bridge.js";
@@ -281,6 +282,113 @@ describe("promoteProactiveCandidatesToReview", () => {
     expect(r.promoted).toBe(0);
     expect(r.skipped).toBeGreaterThanOrEqual(1); // counted in-loop, not silently filtered
     expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0);
+    db.close();
+  });
+});
+
+// ─── Lifecycle sync (D8) ───────────────────────────────────────
+
+const syncDirs: string[] = [];
+function makeSyncDb(): CBrainDB {
+  const dir = mkdtempSync(join(tmpdir(), "cbrain-test-prb-sync-")); // MEDIUM #3
+  syncDirs.push(dir);
+  return new CBrainDB(join(dir, "t.sqlite"));
+}
+
+function bridgeCandidate(mgr: CompoundingReviewManager, pair: string[]) {
+  return mgr.upsertCandidate({
+    title: PROACTIVE_REVIEW_TITLE,
+    candidateType: "supported_connection",
+    summary: "两条记忆通过 3 个共同邻居与 1 次共现形成连接。",
+    evidence: [{ source: "共同上下文", dateRange: "", text: "3 个共同连接的条目" }],
+    scores: { evidence: 5, persistence: 2, novelty: 0.9, action_value: 0.5, trust_risk: 0.1 },
+    sourceSlugs: [...pair].sort(),
+  });
+}
+
+describe("syncProactiveDiscoveryOnReviewAction", () => {
+  afterEach(() => {
+    for (const d of syncDirs) rmSync(d, { recursive: true, force: true });
+    syncDirs.length = 0;
+  });
+
+  test("accept → source discovery resolved (acceptance #5)", () => {
+    const db = makeSyncDb();
+    const mgr = new CompoundingReviewManager(db);
+    const { id: dId } = seedProactive(db, ["entity-alpha", "entity-beta"]);
+    const { id: cId } = bridgeCandidate(mgr, ["entity-alpha", "entity-beta"]);
+    const r = syncProactiveDiscoveryOnReviewAction(db, mgr.getCandidate(cId)!, "accept");
+    expect(r.synced).toBe(true);
+    const d = db.getDiscoveryLifecycleIndex("proactive_connection", 50).find((x) => x.id === dId)!;
+    expect(d.status).toBe("resolved");
+    db.close();
+  });
+
+  test("reject / disable → source discovery dismissed", () => {
+    const db = makeSyncDb();
+    const mgr = new CompoundingReviewManager(db);
+    const { id: dId } = seedProactive(db, ["entity-alpha", "entity-beta"]);
+    const { id: cId } = bridgeCandidate(mgr, ["entity-alpha", "entity-beta"]);
+    for (const action of ["reject", "disable"] as const) {
+      const r = syncProactiveDiscoveryOnReviewAction(db, mgr.getCandidate(cId)!, action);
+      expect(r.synced).toBe(true);
+    }
+    const d = db.getDiscoveryLifecycleIndex("proactive_connection", 50).find((x) => x.id === dId)!;
+    expect(d.status).toBe("dismissed");
+    db.close();
+  });
+
+  test("defer → source discovery stays pending (D8 decision, hard constraint #7)", () => {
+    const db = makeSyncDb();
+    const mgr = new CompoundingReviewManager(db);
+    const { id: dId } = seedProactive(db, ["entity-alpha", "entity-beta"]);
+    const { id: cId } = bridgeCandidate(mgr, ["entity-alpha", "entity-beta"]);
+    const r = syncProactiveDiscoveryOnReviewAction(db, mgr.getCandidate(cId)!, "defer");
+    expect(r.synced).toBe(false);
+    expect(r.reason).toBe("defer_no_op");
+    const d = db.getDiscoveryLifecycleIndex("proactive_connection", 50).find((x) => x.id === dId)!;
+    expect(d.status).toBe("pending");
+    db.close();
+  });
+
+  test("source missing → fail-open, no throw (hard constraint #9)", () => {
+    const db = makeSyncDb();
+    const mgr = new CompoundingReviewManager(db);
+    const { id: cId } = bridgeCandidate(mgr, ["entity-gamma", "entity-delta"]);
+    const r = syncProactiveDiscoveryOnReviewAction(db, mgr.getCandidate(cId)!, "accept");
+    expect(r.synced).toBe(false);
+    expect(r.reason).toBe("source_not_found");
+    db.close();
+  });
+
+  test("non-proactive candidate → no-op", () => {
+    const db = makeSyncDb();
+    const mgr = new CompoundingReviewManager(db);
+    const { id } = mgr.upsertCandidate({
+      title: "主题观察",
+      candidateType: "theme_convergence",
+      sourceSlugs: ["a", "b"],
+    });
+    const r = syncProactiveDiscoveryOnReviewAction(db, mgr.getCandidate(id)!, "accept");
+    expect(r.synced).toBe(false);
+    expect(r.reason).toBe("not_proactive");
+    db.close();
+  });
+
+  test("reverse-lookup finds discovery beyond the default lifecycle limit of 500", () => {
+    const db = makeSyncDb();
+    const mgr = new CompoundingReviewManager(db);
+    let targetId = -1;
+    for (let i = 0; i < 510; i++) {
+      const pair = [`entity-${i}-a`, `entity-${i}-b`];
+      const res = seedProactive(db, pair);
+      if (i === 0) targetId = res.id;
+    }
+    const { id: cId } = bridgeCandidate(mgr, ["entity-0-a", "entity-0-b"]);
+    const r = syncProactiveDiscoveryOnReviewAction(db, mgr.getCandidate(cId)!, "accept");
+    expect(r.synced).toBe(true);
+    const d = db.getDiscoveryLifecycleIndex("proactive_connection", 1000).find((x) => x.id === targetId)!;
+    expect(d.status).toBe("resolved");
     db.close();
   });
 });
