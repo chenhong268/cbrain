@@ -1,10 +1,11 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, afterEach } from "bun:test";
 import { rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sanitizeDisplayText } from "../../../src/core/safety/display-safety.js";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 import { CompoundingReviewManager } from "../../../src/core/maintenance/compounding-review.js";
+import { buildActionCandidatesFromDiscoveries } from "../../../src/core/maintenance/action-candidates.js";
 import {
   mapProactiveToReviewScores,
   buildReviewCandidateDisplay,
@@ -389,6 +390,28 @@ describe("syncProactiveDiscoveryOnReviewAction", () => {
     expect(r.synced).toBe(true);
     const d = db.getDiscoveryLifecycleIndex("proactive_connection", 1000).find((x) => x.id === targetId)!;
     expect(d.status).toBe("resolved");
+    db.close();
+  });
+});
+
+// ─── Quiet-surface regression (acceptance #6, attack #2) ───────
+
+describe("next_actions quiet-surface after promotion", () => {
+  afterEach(() => {
+    for (const d of promoDirs) rmSync(d, { recursive: true, force: true });
+    promoDirs.length = 0;
+  });
+
+  test("a promoted proactive discovery produces zero next_actions candidates (G3 holds)", () => {
+    const db = makeDb();
+    const mgr = new CompoundingReviewManager(db);
+    seedProactive(db, ["entity-alpha", "entity-beta"], { sn: 3, co: 1, timeline: true, quality: 0.99 });
+    promoteProactiveCandidatesToReview(db, mgr);
+    // The discovery is still pending + actionable='low'; next_actions must skip it
+    // (proactive_connection is in QUIET_DISCOVERY_TYPES in action-candidates.ts).
+    const rows = db.getUnseenDiscoveries(50);
+    const actions = buildActionCandidatesFromDiscoveries(rows);
+    expect(actions.length).toBe(0);
     db.close();
   });
 });

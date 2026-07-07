@@ -553,10 +553,16 @@ describe("proactive_connection — structural isolation (#310 adversarial)", () 
   it("proactive_connection appears only in the allowed source files", () => {
     const out = execSync("git grep -l proactive_connection -- src/", { encoding: "utf8" });
     const files = out.trim().split("\n").filter(Boolean).sort();
+    // The producer lane is confined to the first 4 files. #312 adds the deliberate
+    // opt-in promotion surface: proactive-review-bridge (the adapter) + the
+    // compounding-review MCP tool (its only trigger). Neither writes to the
+    // producer lane; both are the sanctioned bridge from discovery → review.
     const allowed = [
       "src/core/maintenance/action-candidates.ts",
       "src/core/maintenance/discovery-digest.ts",
       "src/core/maintenance/proactive-connection.ts",
+      "src/core/maintenance/proactive-review-bridge.ts",
+      "src/mcp/tools/compounding-review.ts",
       "src/mcp/tools/discoveries.ts",
     ].sort();
     expect(files).toEqual(allowed);
