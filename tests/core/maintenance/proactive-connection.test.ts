@@ -557,6 +557,111 @@ describe("produceProactiveConnectionCandidates", () => {
   });
 });
 
+describe("produceProactiveConnectionCandidates feedback learning (#314)", () => {
+  /** Seed [entity-alpha, entity-gamma] sharing 3 current-fact neighbors (entity/project), unlinked, + 2 co-occur sessions → strong_corroborated (sn=3 + signalB). Mirrors seedSharedPair conventions. */
+  function seedSharedEntityGamma(db: CBrainDB): void {
+    seedPage(db, "entity-alpha", "Alpha");
+    seedPage(db, "entity-gamma", "Gamma");
+    for (const s of ["concept-delta", "project-cfg", "concept-epsilon"]) {
+      seedPage(db, s, s, "entity/project");
+      seedLink(db, "entity-alpha", s);
+      seedLink(db, "entity-gamma", s);
+    }
+    seedQueryLog(db, "session-s1", ["entity-alpha", "entity-gamma"]);
+    seedQueryLog(db, "session-s2", ["entity-alpha", "entity-gamma"]);
+  }
+
+  it("accepted resolved pair boosts a future candidate sharing an entity (acceptance #1)", () => {
+    // Seed accepted history: a resolved [entity-alpha, entity-beta] discovery.
+    const accepted = db.upsertDiscovery(
+      "proactive_connection",
+      ["entity-alpha", "entity-beta"],
+      0.7,
+      undefined,
+      undefined,
+      "low",
+      false,
+      { source: "proactive_connection", signals: { shared_neighbors: 3, cooccurring_sessions: 1, timeline_proximity_days: null }, evidence: { shared_neighbor_slugs: ["concept-delta"], timeline_event_refs: [], cooccurring_session_refs: [] }, scoring: { evidence_strength: 0.85, novelty: 0.9, recurrence: 0.2, actionability: 0.2, risk: 0.1, quality: 0.7, gate_path: "strong_corroborated", weights: {} }, pivot: "recently_ingested" },
+    );
+    db.updateDiscoveryStatus(accepted.id, "resolved");
+
+    seedSharedEntityGamma(db);
+    const res = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+
+    const row = db
+      .getDiscoveryLifecycleIndex("proactive_connection", 50)
+      .find((r) => r.id !== accepted.id)!;
+    const meta = JSON.parse(row.metadata ?? "{}");
+    expect(meta.scoring.feedback_boost).toBe(FEEDBACK_BOOST); // 1 entity hit (alpha)
+    expect(meta.scoring.feedback_reason).toBe("feedback_boosted");
+    expect(res.feedbackBoosted).toBe(1);
+
+    // Baseline: same signals without the resolved pair → unboosted quality. Assert the +FEEDBACK_BOOST delta.
+    const baseline = scoreProactiveConnectionCandidate({
+      sharedNeighbors: 3,
+      signalB: true,
+      signalC: false,
+      occurrenceCount: 0,
+    }).quality;
+    expect(meta.scoring.quality).toBeCloseTo(baseline + FEEDBACK_BOOST, 5);
+  });
+
+  it("no accepted history → no boost, feedback_reason null (D1/D2 negative)", () => {
+    seedSharedEntityGamma(db);
+    const res = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const row = db.getDiscoveryLifecycleIndex("proactive_connection", 50)[0];
+    const meta = JSON.parse(row.metadata ?? "{}");
+    expect(meta.scoring.feedback_boost).toBe(0);
+    expect(meta.scoring.feedback_reason).toBeNull();
+    expect(res.feedbackBoosted).toBe(0);
+  });
+
+  it("recurrence of an existing pending candidate is boosted (inserted=0, feedbackBoosted=1) — HIGH fix", () => {
+    // First run: [alpha, gamma] inserted with NO accepted history → no boost.
+    seedSharedEntityGamma(db);
+    const res1 = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(res1.inserted).toBe(1);
+    expect(res1.feedbackBoosted).toBe(0);
+    const before = db.getDiscoveryLifecycleIndex("proactive_connection", 50)[0];
+    const beforeMeta = JSON.parse(before.metadata ?? "{}");
+    expect(beforeMeta.scoring.feedback_reason).toBeNull();
+
+    // Add accepted history: a resolved [alpha, beta] discovery (shares entity-alpha).
+    const accepted = db.upsertDiscovery(
+      "proactive_connection",
+      ["entity-alpha", "entity-beta"],
+      0.7,
+      undefined,
+      undefined,
+      "low",
+      false,
+      { source: "proactive_connection", signals: { shared_neighbors: 3, cooccurring_sessions: 1, timeline_proximity_days: null }, evidence: { shared_neighbor_slugs: ["concept-delta"], timeline_event_refs: [], cooccurring_session_refs: [] }, scoring: { evidence_strength: 0.85, novelty: 0.9, recurrence: 0.2, actionability: 0.2, risk: 0.1, quality: 0.7, gate_path: "strong_corroborated", weights: {} }, pivot: "recently_ingested" },
+    );
+    db.updateDiscoveryStatus(accepted.id, "resolved");
+
+    // Second run: [alpha, gamma] recurs (existing pending) → boost applied + persisted.
+    const res2 = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(res2.inserted).toBe(0);
+    expect(res2.feedbackBoosted).toBe(1);
+    const after = db
+      .getDiscoveryLifecycleIndex("proactive_connection", 50)
+      .find((r) => r.id !== accepted.id)!;
+    const afterMeta = JSON.parse(after.metadata ?? "{}");
+    expect(afterMeta.scoring.feedback_reason).toBe("feedback_boosted");
+    expect(afterMeta.scoring.feedback_boost).toBe(FEEDBACK_BOOST);
+    // Recurrence re-scores with the pre-bump occurrenceCount (before.occurrence_count, here 1),
+    // so the expected baseline differs from the first run (occ=0). Assert the +FEEDBACK_BOOST delta.
+    const recurrenceBaseline = scoreProactiveConnectionCandidate({
+      sharedNeighbors: 3,
+      signalB: true,
+      signalC: false,
+      occurrenceCount: before.occurrence_count,
+    }).quality;
+    expect(afterMeta.scoring.quality).toBeCloseTo(recurrenceBaseline + FEEDBACK_BOOST, 5);
+    expect(after.occurrence_count).toBeGreaterThan(before.occurrence_count);
+  });
+});
+
 describe("proactive_connection — structural isolation (#310 adversarial)", () => {
   it("no proactive_connection wiring leaks into recall/search/ingest paths", () => {
     const cwd = process.cwd();

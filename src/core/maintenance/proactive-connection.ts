@@ -426,6 +426,8 @@ export function produceProactiveConnectionCandidates(
 ): ProactiveConnectionResult {
   const candidates = detectProactiveConnections(db, opts);
   let inserted = 0;
+  let feedbackBoosted = 0;
+  let feedbackSuppressed = 0;
 
   // #311 — lifecycle index keyed by the canonical entities JSON (the same form
   // `upsertDiscovery` stores). Backs (a) exact-pair cooldown skip, (b) evidence-
@@ -434,6 +436,8 @@ export function produceProactiveConnectionCandidates(
   type LifeEntry = { status: string; occurrence_count: number };
   const byEntities = new Map<string, LifeEntry>();
   const dismissedEvidence: Array<{ entities: string[]; slugs: Set<string>; count: number }> = [];
+  // #314 — entities appearing in resolved (accepted) discoveries; backs the bounded quality boost.
+  const acceptedEntities = new Set<string>();
   for (const row of db.getDiscoveryLifecycleIndex("proactive_connection")) {
     byEntities.set(row.entities, { status: row.status, occurrence_count: row.occurrence_count });
     if (row.status === "dismissed" || row.status === "resolved") {
@@ -453,6 +457,15 @@ export function produceProactiveConnectionCandidates(
         }
       }
       dismissedEvidence.push({ entities: JSON.parse(row.entities) as string[], slugs: new Set(slugs), count });
+    }
+    if (row.status === "resolved") {
+      // #314 — accepted feedback: both entities of a resolved discovery become boost-eligible.
+      try {
+        const ents = JSON.parse(row.entities) as string[];
+        if (Array.isArray(ents)) for (const e of ents) acceptedEntities.add(e);
+      } catch {
+        // malformed entities JSON → skip this row's contribution to acceptedEntities
+      }
     }
   }
 
@@ -496,7 +509,19 @@ export function produceProactiveConnectionCandidates(
         for (const s of candSlugs) if (!d.slugs.has(s)) return false;
         return true;
       });
-      if (equivalent) continue;
+      if (equivalent) {
+        feedbackSuppressed++;
+        continue;
+      }
+    }
+
+    // #314 — accepted-feedback boost on quality (NOT gate dims). Applied after the
+    // #311 gate-reject (:474) and after Layer 2/3 suppression, so rejected and
+    // suppressed candidates are never boosted. Recurrence of an existing pending
+    // candidate IS boosted (upsertDiscovery persists score/metadata on recurrence).
+    const acceptedHits = acceptedEntityBoost(sortedEntities, acceptedEntities);
+    if (acceptedHits > 0) {
+      sc.quality = clamp01(sc.quality + acceptedHits);
     }
 
     const metadata = {
@@ -526,6 +551,10 @@ export function produceProactiveConnectionCandidates(
         quality: sc.quality,
         gate_path: sc.gate_path,
         weights: SCORE_WEIGHTS,
+        // #314 — feedback-learning audit (raw/debug only). feedback_boost is the
+        // applied delta (0 if none); feedback_reason flags a boosted candidate.
+        feedback_boost: acceptedHits,
+        feedback_reason: acceptedHits > 0 ? "feedback_boosted" : null,
       },
       pivot: "recently_ingested",
     };
@@ -562,6 +591,7 @@ export function produceProactiveConnectionCandidates(
       metadata,
     );
     if (res.inserted) inserted++;
+    if (acceptedHits > 0) feedbackBoosted++; // new OR recurrence — upsertDiscovery persists the boost either way
   }
-  return { total: candidates.length, inserted, feedbackBoosted: 0, feedbackSuppressed: 0 };
+  return { total: candidates.length, inserted, feedbackBoosted, feedbackSuppressed };
 }
