@@ -341,7 +341,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `find_similar_entities` | 查找可能重复的实体/概念页面对，供人工或 Agent 核对后通过 merge_entities 合并。默认会把候选写入 discoveries 生命周期（dismissed/resolved 不会重复打扰）。返回… |
 | `generate_indexes` | Generate Obsidian-readable index files: All-Entities, All-Concepts, All-Sources, Dashboard. |
 | `get_chunks` | Get indexed text chunks for a page. |
-| `get_compounding_reviews` | 生成复利洞察：只有通过全部5个门槛（证据充分性、持久性、新颖性、行动价值、信任风险）的候选才会出现在结果中。没通过门槛的候选会被过滤，返回 silence_reason 说明原因。 |
+| `get_compounding_reviews` | 生成复利洞察：只有通过全部5个门槛（证据充分性、持久性、新颖性、行动价值、信任风险）的候选才会出现在结果中。没通过门槛的候选会被过滤，返回 silence_reason 说明原因。默认会先把 pending 的… |
 | `get_hierarchy` | Get the full hierarchy context for an entity: direct manager, subordinates, and peers. |
 | `get_ingest_log` | Get recent ingest log entries. |
 | `get_insight` | Get full insight details by ID, including content and linked source entities. |
