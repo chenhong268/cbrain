@@ -67,7 +67,7 @@ RED:
 - Exact-pair cooldown: dismissed pair → re-run produce → no new insert AND `occurrence_count` NOT bumped (producer skips upsert). (Phase 0 asserted "not resurrected"; Phase 1 additionally asserts occurrence_count frozen.)
 - Equivalent cooldown: dismiss pair {alpha,beta} with evidence {cfg,delta}; construct a new candidate {alpha,gamma} whose `shared_neighbor_slugs` set is also {cfg,delta} → producer suppresses (no insert). Partial overlap ({cfg,other}) → NOT suppressed.
 - Resolved pair behaves same as dismissed.
-- `metadata.scoring.suppressed` reason logged via producer return / `_debug` (not persisted on a discoveries row — suppressed candidates aren't upserted).
+- Suppression outcome is observable only via the producer's `{ total, inserted }` return and the absence of a discoveries row — candidates hit by suppression are not upserted and do not bump `occurrence_count`. No `suppressed`/`_debug` field is stored on the discoveries row.
 GREEN:
 - Producer reads `getDiscoveryLifecycleIndex('proactive_connection', N)` once per run; builds a dismissed set keyed by canonical entities JSON + an evidence-set index; skips upsert for exact-dismissed pairs and for evidence-identical equivalents.
 
