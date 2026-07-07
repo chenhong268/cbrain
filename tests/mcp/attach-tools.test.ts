@@ -136,9 +136,10 @@ describe("attachMcpTools profile gating (#251)", () => {
     for (const t of ["query", "get_chunks", "dream", "sync", "health", "job_submit"]) {
       expect(names, `agent must exclude ${t}`).not.toContain(t);
     }
-    for (const t of ["cbrain_recall", "deep_recall", "ingest", "status"]) {
+    for (const t of ["cbrain_recall", "deep_recall", "ingest", "list_pages", "status"]) {
       expect(names).toContain(t);
     }
+    expect(names).not.toContain("get_profile");
   });
 
   test("maintenance keeps dream + health + job_* + sync reachable", async () => {

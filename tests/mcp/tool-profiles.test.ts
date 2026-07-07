@@ -44,7 +44,7 @@ describe("isToolAllowedForProfile", () => {
     }
   });
   test("agent includes the documented user-facing surface", () => {
-    for (const t of ["cbrain_recall", "deep_recall", "ingest", "get_page", "put_page",
+    for (const t of ["cbrain_recall", "deep_recall", "ingest", "get_page", "list_pages", "put_page",
       "merge_entities", "get_org_tree", "status"]) {
       expect(isToolAllowedForProfile(t, "agent")).toBe(true);
     }
@@ -119,11 +119,14 @@ describe("isToolAllowedForProfile", () => {
   // #309: next_actions is the unified attention entry — daily Agents need it.
   // read_project_state moves out of agent (project metadata, not the daily memory-call
   // path) but stays reachable via maintenance + full. Agent surface stays bounded <= 20.
-  test("next_actions in agent; read_project_state moved to maintenance/full (#309)", () => {
+  test("next_actions and list_pages in agent; project/profile metadata moved out (#309/#313)", () => {
     expect(isToolAllowedForProfile("next_actions", "agent")).toBe(true);
+    expect(isToolAllowedForProfile("list_pages", "agent")).toBe(true);
     expect(isToolAllowedForProfile("read_project_state", "agent")).toBe(false);
+    expect(isToolAllowedForProfile("get_profile", "agent")).toBe(false);
     expect(isToolAllowedForProfile("read_project_state", "maintenance")).toBe(true);
     expect(isToolAllowedForProfile("read_project_state", "full")).toBe(true);
+    expect(isToolAllowedForProfile("get_profile", "full")).toBe(true);
     expect(isToolAllowedForProfile("next_actions", "maintenance")).toBe(true);
   });
 });

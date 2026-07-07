@@ -37,6 +37,7 @@ const AGENT_ALLOWLIST = [
   "ingest",
   "ingest_dialogue",
   "get_page",
+  "list_pages",
   "get_pages",
   "put_page",
   "append_page",
@@ -48,7 +49,6 @@ const AGENT_ALLOWLIST = [
   "update_discovery_status",
   "find_similar_entities",
   "merge_entities",
-  "get_profile",
   "next_actions",
   "status",
 ] as const;
