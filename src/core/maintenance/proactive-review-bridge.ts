@@ -33,6 +33,19 @@ function asNum(v: unknown): number | null {
 }
 
 /**
+ * eventDate is a date field, so a whitelist (Date.parse) is the primary defense —
+ * any non-date payload becomes "" regardless of pattern. sanitizeDisplayText
+ * runs as defense-in-depth on whatever parses as a date. This closes the whole
+ * eventDate leak surface (adversarial review attack #4: Slack/Google tokens,
+ * UNION SELECT, UPDATE-table, password-is, markdown/URL exfil) without the
+ * false-positive risk of growing the shared blacklist to cover date-shaped text.
+ */
+function safeDateRange(raw: string): string {
+  if (!raw || !Number.isFinite(Date.parse(raw))) return "";
+  return sanitizeDisplayText(raw, "");
+}
+
+/**
  * D4 — map #311 proactive scoring into the 5 compounding-review gates.
  * Returns null on any malformed/missing field so the adapter skips fail-closed.
  *
@@ -120,7 +133,7 @@ export function buildReviewCandidateDisplay(metadata: unknown): ReviewCandidateD
     const raw = first ? (typeof first.eventDate === "string" ? first.eventDate : "") : "";
     items.push({
       source: "时间线邻近",
-      dateRange: sanitizeDisplayText(raw, ""),
+      dateRange: safeDateRange(raw),
       text: "存在时间线上的邻近事件",
     });
   }
