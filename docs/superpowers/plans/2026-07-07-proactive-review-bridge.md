@@ -353,15 +353,19 @@ export function buildReviewCandidateDisplay(metadata: unknown): ReviewCandidateD
 - [ ] **Step 1: Write failing tests** (append; needs CBrainDB + CompoundingReviewManager)
 
 ```typescript
+import { rmSync, mkdtempSync } from "node:fs";   // MEDIUM #3: mkdtemp per-test
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 import { CompoundingReviewManager } from "../../../src/core/maintenance/compounding-review.js";
 import { promoteProactiveCandidatesToReview } from "../../../src/core/maintenance/proactive-review-bridge.js";
 
-const PROMO_DIR = "/tmp/cbrain-test-prb-promo";
-function makeDb() {
-  if (existsSync(PROMO_DIR)) rmSync(PROMO_DIR, { recursive: true, force: true });
-  mkdirSync(PROMO_DIR, { recursive: true });
-  return new CBrainDB(join(PROMO_DIR, "t.sqlite"));
+const promoDirs: string[] = [];
+function makeDb(): CBrainDB {
+  // mkdtemp per call — no fixed dir (MEDIUM #3: avoids concurrency / crash-leave pollution).
+  const dir = mkdtempSync(join(tmpdir(), "cbrain-test-prb-promo-"));
+  promoDirs.push(dir);
+  return new CBrainDB(join(dir, "t.sqlite"));
 }
 function seedProactive(db: CBrainDB, entities: string[], opts: Partial<{ sn: number; co: number; timeline: boolean; novelty: number; risk: number; quality: number; }> = {}) {
   const m = {
@@ -379,8 +383,7 @@ function seedProactive(db: CBrainDB, entities: string[], opts: Partial<{ sn: num
 }
 
 describe("promoteProactiveCandidatesToReview", () => {
-  beforeEach(() => { if (existsSync(PROMO_DIR)) rmSync(PROMO_DIR, { recursive: true, force: true }); });
-  afterEach(() => { if (existsSync(PROMO_DIR)) rmSync(PROMO_DIR, { recursive: true, force: true }); });
+  afterEach(() => { for (const d of promoDirs) rmSync(d, { recursive: true, force: true }); promoDirs.length = 0; });
 
   test("strong pending discovery → 1 supported_connection candidate (acceptance #1)", () => {
     const db = makeDb(); const mgr = new CompoundingReviewManager(db);
@@ -405,16 +408,26 @@ describe("promoteProactiveCandidatesToReview", () => {
     db.close();
   });
 
-  test("one-shot weak-persistence discovery NOT promoted by gates (tight mapping)", () => {
+  test("one-shot weak-persistence discovery NOT written — gate precheck (HIGH #1, acceptance #2)", () => {
     const db = makeDb(); const mgr = new CompoundingReviewManager(db);
-    // occurrence=1, no timeline, no co-occurrence → persistence=1 → fails gate
+    // occurrence=1, no timeline, no co-occurrence → persistence=1 → fails gate ≥2
     seedProactive(db, ["entity-alpha", "entity-beta"], { sn: 3, co: 0, timeline: false });
-    promoteProactiveCandidatesToReview(db, mgr);
-    // Row is upserted (promotion does not pre-filter on gates) but ReviewGenerator filters it:
-    const list = mgr.listCandidates({ includeDeferred: true, limit: 50 });
-    expect(list.length).toBe(1);
-    const scores = JSON.parse(list[0].scores_json ?? "{}");
-    expect(scores.persistence).toBe(1); // below gate ≥2
+    const r = promoteProactiveCandidatesToReview(db, mgr);
+    // Weak candidate must NOT enter the candidate table at all (gate precheck).
+    expect(r.promoted).toBe(0);
+    expect(r.skipped).toBeGreaterThanOrEqual(1);
+    expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0);
+    db.close();
+  });
+
+  test("low-trust-risk discovery NOT written — every gate dimension prechecked", () => {
+    const db = makeDb(); const mgr = new CompoundingReviewManager(db);
+    // Strong on persistence/evidence but risk above the ≤0.3 gate → must skip.
+    seedProactive(db, ["entity-alpha", "entity-beta"], { sn: 3, co: 1, timeline: true, risk: 0.9 });
+    const r = promoteProactiveCandidatesToReview(db, mgr);
+    expect(r.promoted).toBe(0);
+    expect(r.skipped).toBeGreaterThanOrEqual(1);
+    expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0);
     db.close();
   });
 
@@ -440,7 +453,20 @@ describe("promoteProactiveCandidatesToReview", () => {
 ```
 
 - [ ] **Step 2: Run → FAIL** (`promoteProactiveCandidatesToReview` not exported).
-- [ ] **Step 3: Implement** — append to `proactive-review-bridge.ts`:
+- [ ] **Step 3: Implement** — append to `proactive-review-bridge.ts`.
+
+  **Design note (HIGH #1 fix):** promotion MUST precheck the review gates — a
+  weak candidate (any mapped score below its gate threshold) is NOT written to
+  `compounding_review_candidates` (`skipped++`), per acceptance #2 "weak not
+  promoted". Import `GATE` from `compounding-review.ts` so the thresholds are a
+  single source of truth; `ReviewGenerator` still applies the gates at read time
+  as defense-in-depth. Add to the import block at the top of the file:
+
+```typescript
+import { GATE } from "./compounding-review.js";
+```
+
+  Then append:
 
 ```typescript
 export interface PromotionResult {
@@ -455,9 +481,29 @@ function qualityOf(meta: unknown): number {
 }
 
 /**
+ * D4 gate precheck — mirrors ReviewGenerator.evaluateGates at write time so weak
+ * candidates never enter the candidate table (acceptance #2). trust_risk is a
+ * "lower is better" dimension (gate is an upper bound), inverted vs the others.
+ */
+export function passesReviewGate(scores: Record<string, number>): boolean {
+  return (
+    (scores.evidence ?? 0) >= GATE.evidence &&
+    (scores.persistence ?? 0) >= GATE.persistence &&
+    (scores.novelty ?? 0) >= GATE.novelty &&
+    (scores.action_value ?? 0) >= GATE.action_value &&
+    (scores.trust_risk ?? 1) <= GATE.trust_risk
+  );
+}
+
+/**
  * D1/D6 — read pending proactive discoveries, map scores + display, upsert as
  * supported_connection candidates. Idempotent via content_hash (fixed title +
  * sorted entity pair). Processes highest-quality first, capped at PROMOTION_LIMIT.
+ *
+ * Pre-loop filter is status==='pending' ONLY. All validity checks (malformed
+ * metadata, gate fail, entities≠2) happen IN the loop so every skipped row is
+ * counted — none vanish silently into a chain filter (HIGH #2). Weak candidates
+ * fail the gate precheck and are skipped, never written (HIGH #1).
  */
 export function promoteProactiveCandidatesToReview(
   db: CBrainDB,
@@ -472,7 +518,6 @@ export function promoteProactiveCandidatesToReview(
       try { meta = r.metadata ? JSON.parse(r.metadata) : null; } catch { meta = null; }
       return { r, meta, occ: r.occurrence_count };
     })
-    .filter((x) => mapProactiveToReviewScores(x.meta, x.occ) !== null && buildReviewCandidateDisplay(x.meta) !== null)
     .sort((a, b) => qualityOf(b.meta) - qualityOf(a.meta))
     .slice(0, PROMOTION_LIMIT);
 
@@ -480,15 +525,16 @@ export function promoteProactiveCandidatesToReview(
   let skipped = 0;
   let seen = 0;
   for (const x of pending) {
-    const scores = mapProactiveToReviewScores(x.meta, x.occ)!;
-    const display = buildReviewCandidateDisplay(x.meta)!;
+    const scores = mapProactiveToReviewScores(x.meta, x.occ);
+    const display = buildReviewCandidateDisplay(x.meta);
+    if (!scores || !display) { skipped++; continue; }         // malformed → fail-closed
+    if (!passesReviewGate(scores)) { skipped++; continue; }   // weak → not promoted (HIGH #1)
     let entities: unknown = [];
     try { entities = JSON.parse(x.r.entities); } catch { entities = []; }
     if (!Array.isArray(entities) || entities.length !== 2) { skipped++; continue; }
     const sourceSlugs = [...(entities as string[])].sort();
 
-    const before = mgr.count();
-    mgr.upsertCandidate({
+    const { isNew } = mgr.upsertCandidate({                   // use return value, not count() delta (MEDIUM #4)
       title: display.title,
       candidateType: PROACTIVE_CANDIDATE_TYPE,
       summary: display.summary,
@@ -496,7 +542,7 @@ export function promoteProactiveCandidatesToReview(
       scores,
       sourceSlugs,
     });
-    if (mgr.count() > before) promoted++; else seen++;
+    if (isNew) promoted++; else seen++;
   }
   return { promoted, skipped, seen };
 }
@@ -518,11 +564,11 @@ export function promoteProactiveCandidatesToReview(
 ```typescript
 import { syncProactiveDiscoveryOnReviewAction } from "../../../src/core/maintenance/proactive-review-bridge.js";
 
-const SYNC_DIR = "/tmp/cbrain-test-prb-sync";
-function makeSyncDb() {
-  if (existsSync(SYNC_DIR)) rmSync(SYNC_DIR, { recursive: true, force: true });
-  mkdirSync(SYNC_DIR, { recursive: true });
-  return new CBrainDB(join(SYNC_DIR, "t.sqlite"));
+const syncDirs: string[] = [];
+function makeSyncDb(): CBrainDB {
+  const dir = mkdtempSync(join(tmpdir(), "cbrain-test-prb-sync-")); // MEDIUM #3
+  syncDirs.push(dir);
+  return new CBrainDB(join(dir, "t.sqlite"));
 }
 function bridgeCandidate(mgr: CompoundingReviewManager, pair: string[]) {
   return mgr.upsertCandidate({
@@ -536,8 +582,8 @@ function bridgeCandidate(mgr: CompoundingReviewManager, pair: string[]) {
 }
 
 describe("syncProactiveDiscoveryOnReviewAction", () => {
-  beforeEach(() => { if (existsSync(SYNC_DIR)) rmSync(SYNC_DIR, { recursive: true, force: true }); });
-  afterEach(() => { if (existsSync(SYNC_DIR)) rmSync(SYNC_DIR, { recursive: true, force: true }); });
+  beforeEach(() => {});
+  afterEach(() => { for (const d of syncDirs) rmSync(d, { recursive: true, force: true }); syncDirs.length = 0; });
 
   test("accept → source discovery resolved (acceptance #5)", () => {
     const db = makeSyncDb(); const mgr = new CompoundingReviewManager(db);
@@ -688,10 +734,13 @@ import { rmSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 
-const MCP_DIR = "/tmp/cbrain-test-prb-mcp";
-function cleanup() { if (existsSync(MCP_DIR)) rmSync(MCP_DIR, { recursive: true, force: true }); }
-beforeEach(() => { cleanup(); mkdirSync(MCP_DIR, { recursive: true }); });
-afterEach(cleanup);
+const mcpDirs: string[] = [];
+function mcpDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "cbrain-test-prb-mcp-")); // MEDIUM #3
+  mcpDirs.push(dir);
+  return dir;
+}
+afterEach(() => { for (const d of mcpDirs) rmSync(d, { recursive: true, force: true }); mcpDirs.length = 0; });
 
 const FakeEmb = {
   embed: async (t: string) => ({ embedding: new Array(128).fill(0), tokenCount: t.length }),
@@ -702,9 +751,9 @@ const FakeLance = {
   deleteByPageSlug: async () => {}, deleteRawChunksByPageSlug: async () => {}, close: async () => {}, createFTSIndex: async () => {},
 };
 
-async function makeServer(db: CBrainDB) {
+async function makeServer(db: CBrainDB, dir: string) {
   const { createServer } = await import("../../src/mcp/server.js");
-  return createServer({ db, embedding: FakeEmb as any, lance: FakeLance as any, vaultPath: MCP_DIR, dbPath: join(MCP_DIR, "t.sqlite"), runtimePath: MCP_DIR });
+  return createServer({ db, embedding: FakeEmb as any, lance: FakeLance as any, vaultPath: dir, dbPath: join(dir, "t.sqlite"), runtimePath: dir });
 }
 // Invocation pattern per tests/mcp/hierarchy.test.ts:39-46 — _registeredTools[name].handler(args)
 async function callTool(server: any, name: string, args: Record<string, unknown> = {}) {
@@ -730,9 +779,10 @@ function candidateCount(db: CBrainDB): number {
 
 describe("get_compounding_reviews — refreshProactive", () => {
   test("default (no arg) bridges a strong proactive discovery into review output", async () => {
-    const db = new CBrainDB(join(MCP_DIR, "t.sqlite"));
+    const dir = mcpDir();
+    const db = new CBrainDB(join(dir, "t.sqlite"));
     seedProactive(db, ["entity-alpha", "entity-beta"]);
-    const server = await makeServer(db);
+    const server = await makeServer(db, dir);
     const { data } = await callTool(server, "get_compounding_reviews", {});
     expect(data.items.length).toBe(1);
     expect(data.items[0].candidate_type).toBe("supported_connection");
@@ -740,10 +790,11 @@ describe("get_compounding_reviews — refreshProactive", () => {
   });
 
   test("refreshProactive:false is pure read — zero candidate writes (hard constraint #8)", async () => {
-    const db = new CBrainDB(join(MCP_DIR, "t.sqlite"));
+    const dir = mcpDir();
+    const db = new CBrainDB(join(dir, "t.sqlite"));
     seedProactive(db, ["entity-alpha", "entity-beta"]);
     const before = candidateCount(db);
-    const server = await makeServer(db);
+    const server = await makeServer(db, dir);
     const { data } = await callTool(server, "get_compounding_reviews", { refreshProactive: false });
     expect(candidateCount(db)).toBe(before); // no write
     expect(data.items.length).toBe(0); // nothing promoted → silence
@@ -753,9 +804,10 @@ describe("get_compounding_reviews — refreshProactive", () => {
 
 describe("act_on_review_candidate — discovery sync", () => {
   test("accept on a bridged candidate marks source discovery resolved (acceptance #5)", async () => {
-    const db = new CBrainDB(join(MCP_DIR, "t.sqlite"));
+    const dir = mcpDir();
+    const db = new CBrainDB(join(dir, "t.sqlite"));
     const { id: dId } = seedProactive(db, ["entity-alpha", "entity-beta"]);
-    const server = await makeServer(db);
+    const server = await makeServer(db, dir);
     await callTool(server, "get_compounding_reviews", {}); // promote
     const candId = (db.rawDb.query("SELECT id FROM compounding_review_candidates LIMIT 1").get() as { id: number }).id;
     const { data } = await callTool(server, "act_on_review_candidate", { id: candId, action: "accept" });
@@ -766,9 +818,10 @@ describe("act_on_review_candidate — discovery sync", () => {
   });
 
   test("act never creates pages/links (side-effect attack #5)", async () => {
-    const db = new CBrainDB(join(MCP_DIR, "t.sqlite"));
+    const dir = mcpDir();
+    const db = new CBrainDB(join(dir, "t.sqlite"));
     seedProactive(db, ["entity-alpha", "entity-beta"]);
-    const server = await makeServer(db);
+    const server = await makeServer(db, dir);
     await callTool(server, "get_compounding_reviews", {});
     const candId = (db.rawDb.query("SELECT id FROM compounding_review_candidates LIMIT 1").get() as { id: number }).id;
     await callTool(server, "act_on_review_candidate", { id: candId, action: "reject" });
@@ -778,7 +831,8 @@ describe("act_on_review_candidate — discovery sync", () => {
   });
 
   test("source missing → fail-open: candidate status succeeds, no error (hard constraint #9)", async () => {
-    const db = new CBrainDB(join(MCP_DIR, "t.sqlite"));
+    const dir = mcpDir();
+    const db = new CBrainDB(join(dir, "t.sqlite"));
     // Manually insert a supported_connection candidate whose pair has NO matching discovery.
     const mgr = new (await import("../../src/core/maintenance/compounding-review.js")).CompoundingReviewManager(db);
     const { id } = mgr.upsertCandidate({
@@ -786,10 +840,26 @@ describe("act_on_review_candidate — discovery sync", () => {
       summary: "x", scores: { evidence: 5, persistence: 2, novelty: 0.9, action_value: 0.5, trust_risk: 0.1 },
       sourceSlugs: ["entity-gamma", "entity-delta"],
     });
-    const server = await makeServer(db);
+    const server = await makeServer(db, dir);
     const { data, isError } = await callTool(server, "act_on_review_candidate", { id, action: "accept" });
     expect(isError).toBe(false);
     expect(data.new_status).toBe("accepted"); // candidate still updated
+    db.close();
+  });
+
+  test("defer then get_compounding_reviews(refreshProactive:true) → not re-emitted, no new row (hard constraint #7)", async () => {
+    const dir = mcpDir();
+    const db = new CBrainDB(join(dir, "t.sqlite"));
+    seedProactive(db, ["entity-alpha", "entity-beta"]);
+    const server = await makeServer(db, dir);
+    const first = await callTool(server, "get_compounding_reviews", {}); // promote
+    expect(first.data.items.length).toBe(1);
+    const candId = first.data.items[0].id;
+    await callTool(server, "act_on_review_candidate", { id: candId, action: "defer" });
+    // Second review generation with refreshProactive defaulting true:
+    const second = await callTool(server, "get_compounding_reviews", {});
+    expect(second.data.items.length).toBe(0); // deferred → excluded from default output (includeDeferred:false)
+    expect(candidateCount(db)).toBe(1); // no new row (idempotent upsert on the deferred candidate)
     db.close();
   });
 });
