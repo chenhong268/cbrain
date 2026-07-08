@@ -123,6 +123,21 @@ The accepted-entity build + boost live in `proactive-connection.ts` (a `buildAcc
 7. **Privacy attack**: `metadata.scoring` feedback fields + producer return contain no slugs/paths/scores-leaked-into-display; reason codes are stable anonymous strings.
 8. **Feedback-write attack**: the boost path performs NO write beyond `upsertDiscovery` (no page/link/alias/external).
 
+## Adversarial review outcome (8 attackers, each constructed + ran a real bun attack)
+
+All 8 → **CLEAN**, no fixes:
+
+1. **Boost-rescue (two fronts)** — the boost writes only `sc.quality`; `mapProactiveToReviewScores` derives the 5 gate dims from `metadata.signals`, never `quality`; `passesReviewGate` compares only the 5 dims. A `gate_path=rejected` candidate sharing an accepted entity is not upserted; a `strong_corroborated` one-shot (persistence<2) candidate is upserted with a boost but not promoted to review.
+2. **Over-boost** — `acceptedEntityBoost` returns `hits * FEEDBACK_BOOST` where `hits` ≤ 2 (a candidate has 2 deduped entities via `[...new Set([c.a, c.b])]`); `acceptedEntities` is a `Set` so duplicate resolved rows never inflate it; `clamp01` caps `quality+boost` at 1.0.
+3. **Accepted-identical leak** — Layer 3 builds `dismissedEvidence` from BOTH `dismissed` AND `resolved` rows, and the equivalent-check `continue`s before the boost, so an evidence-identical-to-accepted candidate is suppressed, not boosted.
+4. **Rejected-evasion + recurrence count** — Layer 3 keys off `metadata.signals.shared_neighbors` (evidence-neighborhood FULL count), not `occurrence_count`, so a dismissed pair stays suppressive regardless of recurrence. `feedbackBoosted` is accurate for recurrence (`inserted=0, feedbackBoosted=1`); the 3 `continue` guards (gate-reject → Layer 2 → Layer 3) all fire before the boost, so a candidate that is simultaneously boost-eligible AND suppressed increments `feedbackSuppressed`, never `feedbackBoosted` — the counter cannot lie.
+5. **Deferred-as-reject** — `acceptedEntities` is sourced only from `resolved`; pending (deferred) rows are in neither `acceptedEntities` nor `dismissedEvidence`; Layer 2 skips only non-pending. A deferred pair recurs normally, is not self-suppressed, and an unrelated accepted pair can still boost it via a shared entity.
+6. **Quiet-surface** — the boost touches only `discoveries.score` + `metadata.scoring.quality`; G1/G2/G3 gate on type before ranking, so the inflated score never surfaces in default reads.
+7. **Privacy** — `feedback_boost`/`feedback_reason`/`quality` are raw/debug audit fields; `formatDigestCard`, `buildReviewCandidateDisplay`, and `mapProactiveToReviewScores` never read them. Repo privacy grep on the touched files is CLEAN.
+8. **Feedback-write** — the producer writes only via `upsertDiscovery` (+ the shadow verifier's `ingest_log`); no page/link/alias/`compounding_review_candidates` writes.
+
+Net: 0 confirmed findings; `bun run check` green (3438 pass, +14 over #312's 3424).
+
 ## Known limitations / deferred
 
 - **Boost effect is marginal when <20 pending discoveries**: the boost affects promotion priority (top `PROMOTION_LIMIT=20`) + `discoveries.score` ranking in explicit reads. `ReviewGenerator`'s top-3 surfacing order is by candidate-table order, not `quality`, so the boost does not directly reorder review output. Accepted — the issue asks for a ranking signal, not a review-surfacing change; making `ReviewGenerator` order by `quality` is a separate #312-scope decision.
