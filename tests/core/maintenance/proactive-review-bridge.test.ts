@@ -11,6 +11,7 @@ import {
   buildReviewCandidateDisplay,
   promoteProactiveCandidatesToReview,
   syncProactiveDiscoveryOnReviewAction,
+  passesReviewGate,
   REVIEW_ACTION_VALUE,
   PROACTIVE_REVIEW_TITLE,
 } from "../../../src/core/maintenance/proactive-review-bridge.js";
@@ -437,5 +438,25 @@ describe("next_actions quiet-surface after promotion", () => {
     const actions = buildActionCandidatesFromDiscoveries(rows);
     expect(actions.length).toBe(0);
     db.close();
+  });
+});
+
+// ─── #314: boost cannot bypass the review gate (structural) ────
+
+describe("passesReviewGate — boost fields cannot influence the gate (#314)", () => {
+  const passing = { evidence: 4, persistence: 3, novelty: 0.8, action_value: 0.6, trust_risk: 0.2 };
+  const failingPersistence = { ...passing, persistence: 1 }; // < GATE.persistence (2)
+
+  test("quality and feedback_boost keys do not change a passing decision", () => {
+    expect(passesReviewGate(passing)).toBe(true);
+    expect(passesReviewGate({ ...passing, quality: 0.0 } as Record<string, number>)).toBe(true);
+    expect(passesReviewGate({ ...passing, feedback_boost: 0.0 } as Record<string, number>)).toBe(true);
+  });
+
+  test("a failing gate stays failing regardless of quality/feedback_boost (boost cannot rescue)", () => {
+    expect(passesReviewGate(failingPersistence)).toBe(false);
+    expect(
+      passesReviewGate({ ...failingPersistence, quality: 1, feedback_boost: 1 } as Record<string, number>),
+    ).toBe(false);
   });
 });

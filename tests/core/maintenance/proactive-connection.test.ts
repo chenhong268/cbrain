@@ -660,6 +660,73 @@ describe("produceProactiveConnectionCandidates feedback learning (#314)", () => 
     expect(afterMeta.scoring.quality).toBeCloseTo(recurrenceBaseline + FEEDBACK_BOOST, 5);
     expect(after.occurrence_count).toBeGreaterThan(before.occurrence_count);
   });
+
+  /** Seed [entity-alpha, entity-gamma] sharing 2 current-fact neighbors + signalB only (no signalC) → gate_path=rejected (path 2 needs B AND C). */
+  function seedWeakAlphaGamma(db: CBrainDB): void {
+    seedPage(db, "entity-alpha", "Alpha");
+    seedPage(db, "entity-gamma", "Gamma");
+    for (const s of ["concept-delta", "project-cfg"]) {
+      seedPage(db, s, s, "entity/project");
+      seedLink(db, "entity-alpha", s);
+      seedLink(db, "entity-gamma", s);
+    }
+    seedQueryLog(db, "session-s1", ["entity-alpha", "entity-gamma"]);
+    seedQueryLog(db, "session-s2", ["entity-alpha", "entity-gamma"]);
+  }
+
+  it("#311 emit gate NOT weakened: gate_path=rejected candidate sharing an accepted entity is NOT upserted (acceptance #2a)", () => {
+    const accepted = db.upsertDiscovery(
+      "proactive_connection",
+      ["entity-alpha", "entity-beta"],
+      0.7,
+      undefined,
+      undefined,
+      "low",
+      false,
+      { source: "proactive_connection", signals: { shared_neighbors: 3, cooccurring_sessions: 1, timeline_proximity_days: null }, evidence: { shared_neighbor_slugs: ["concept-delta"], timeline_event_refs: [], cooccurring_session_refs: [] }, scoring: { evidence_strength: 0.85, novelty: 0.9, recurrence: 0.2, actionability: 0.2, risk: 0.1, quality: 0.7, gate_path: "strong_corroborated", weights: {} }, pivot: "recently_ingested" },
+    );
+    db.updateDiscoveryStatus(accepted.id, "resolved");
+
+    seedWeakAlphaGamma(db); // sn=2 + signalB only → gate_path=rejected
+    const res = produceProactiveConnectionCandidates(db, { since: "1970-01-01", minShared: 2 });
+
+    const rows = db.getDiscoveryLifecycleIndex("proactive_connection", 50);
+    expect(rows.length).toBe(1); // only the pre-seeded accepted [alpha, beta]
+    expect(rows.every((r) => !JSON.parse(r.entities).includes("entity-gamma"))).toBe(true);
+    expect(res.feedbackBoosted).toBe(0); // rejected candidate never reached the boost
+  });
+
+  it("#312 review gate NOT bypassed: boosted but review-gate-failing candidate is absent from review (acceptance #2b)", async () => {
+    const accepted = db.upsertDiscovery(
+      "proactive_connection",
+      ["entity-alpha", "entity-beta"],
+      0.7,
+      undefined,
+      undefined,
+      "low",
+      false,
+      { source: "proactive_connection", signals: { shared_neighbors: 3, cooccurring_sessions: 1, timeline_proximity_days: null }, evidence: { shared_neighbor_slugs: ["concept-delta"], timeline_event_refs: [], cooccurring_session_refs: [] }, scoring: { evidence_strength: 0.85, novelty: 0.9, recurrence: 0.2, actionability: 0.2, risk: 0.1, quality: 0.7, gate_path: "strong_corroborated", weights: {} }, pivot: "recently_ingested" },
+    );
+    db.updateDiscoveryStatus(accepted.id, "resolved");
+
+    // [alpha, gamma] is strong_corroborated (sn=3 + signalB) but ONE-SHOT (occ=0, no dual
+    // corroboration) → review persistence < 2 → fails the #312 review gate.
+    seedSharedEntityGamma(db);
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+
+    const agRow = db
+      .getDiscoveryLifecycleIndex("proactive_connection", 50)
+      .find((r) => r.id !== accepted.id)!;
+    const agMeta = JSON.parse(agRow.metadata ?? "{}");
+    expect(agMeta.scoring.feedback_reason).toBe("feedback_boosted"); // boosted...
+
+    // ...but NOT promoted into review (persistence gate fails).
+    const { promoteProactiveCandidatesToReview } = await import("../../../src/core/maintenance/proactive-review-bridge.js");
+    const { CompoundingReviewManager } = await import("../../../src/core/maintenance/compounding-review.js");
+    const mgr = new CompoundingReviewManager(db);
+    promoteProactiveCandidatesToReview(db, mgr);
+    expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0);
+  });
 });
 
 describe("proactive_connection — structural isolation (#310 adversarial)", () => {
