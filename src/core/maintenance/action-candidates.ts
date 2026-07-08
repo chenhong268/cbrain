@@ -72,6 +72,8 @@ export interface DiscoveryCandidateSource {
   metadata?: string | null;
   occurrence_count?: number;
   dedup_key?: string | null;
+  detected_at?: string;
+  last_detected_at?: string | null;
 }
 
 export function isActionCandidateType(type: string): type is ActionCandidateType {
@@ -147,6 +149,8 @@ function reviewDiscoveryDraft(row: DiscoveryCandidateSource): ActionCandidateDra
       source_type: row.type,
       source_ref: ref,
       occurrence_count: occurrenceCount,
+      detected_at: row.detected_at,
+      last_detected_at: row.last_detected_at ?? null,
       evidence: [{ source: "discovery", ref, kind: row.type }],
       source_metadata: metadata,
     },
@@ -347,6 +351,9 @@ export function persistedCandidateRowToDraft(
       source_type: source === "discovery" ? String(meta.source_type ?? row.type) : undefined,
       dimension: source === "health" ? String(meta.dimension ?? "dim") : undefined,
       repair_kind: source === "health" ? ((meta.repair_kind as string | null | undefined) ?? null) : undefined,
+      detected_at: row.detected_at,
+      last_detected_at: row.last_detected_at ?? null,
+      occurrence_count: row.occurrence_count,
     },
   };
 }

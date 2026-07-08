@@ -146,9 +146,28 @@ function discoveryGroupKey(draft: ActionCandidateDraft): string {
   return `discovery:${t}`;
 }
 
+function readMetaString(meta: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const k of keys) {
+    const v = meta[k];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return null;
+}
+
+function readMetaNumber(meta: Record<string, unknown>, ...keys: string[]): number | undefined {
+  for (const k of keys) {
+    const v = meta[k];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+  }
+  return undefined;
+}
+
 function toNextAction(draft: ActionCandidateDraft): NextAction {
   const source = draftSource(draft);
   const groupKey = source === "health" ? healthGroupKey(draft) : discoveryGroupKey(draft);
+  const detectedAt = readMetaString(draft.metadata, "detected_at", "detectedAt");
+  const lastDetectedAt = readMetaString(draft.metadata, "last_detected_at", "lastDetectedAt");
+  const occurrenceCount = readMetaNumber(draft.metadata, "occurrence_count", "occurrenceCount");
   return {
     severity: draftSeverity(draft),
     source,
@@ -158,6 +177,9 @@ function toNextAction(draft: ActionCandidateDraft): NextAction {
     evidenceCount: 1,
     groupKey,
     sourceRefs: draft.entities.slice(),
+    detectedAt,
+    lastDetectedAt,
+    occurrenceCount,
   };
 }
 

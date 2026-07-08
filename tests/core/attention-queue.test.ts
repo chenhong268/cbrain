@@ -50,6 +50,7 @@ function discoveryDraft(
   actionable: "high" | "medium" | "low",
   sourceType = "similar_entity",
   occurrence = 1,
+  opts: { detectedAt?: string; lastDetectedAt?: string } = {},
 ): ActionCandidateDraft {
   return {
     type: "action_review_discovery",
@@ -66,6 +67,8 @@ function discoveryDraft(
       source_type: sourceType,
       source_ref: `discovery:${sourceType}|entity/a|entity/b`,
       occurrence_count: occurrence,
+      detected_at: opts.detectedAt,
+      last_detected_at: opts.lastDetectedAt,
     },
   };
 }
@@ -294,5 +297,28 @@ describe("freshness primitives (#315)", () => {
   test("effective timestamp prefers lastDetectedAt over detectedAt", () => {
     // first-seen ancient, last-seen recent -> fresh
     expect(classifyFreshness({ source: "discovery", severity: "needs_review", detectedAt: "2020-01-01 00:00:00", lastDetectedAt: "2026-07-05 12:00:00", occurrenceCount: 1, now: NOW })).toBe("fresh");
+  });
+});
+
+describe("toNextAction freshness metadata wiring (#315)", () => {
+  test("discovery draft metadata is carried onto NextAction timestamp/occurrence fields", () => {
+    const q = buildAttentionQueue(
+      [],
+      [discoveryDraft("high", "similar_entity", 2, { detectedAt: "2026-06-01 00:00:00", lastDetectedAt: "2026-06-01 00:00:00" })],
+      { includeRaw: true },
+    );
+    const item = q.raw!.allItemsRanked[0];
+    expect(item.detectedAt).toBe("2026-06-01 00:00:00");
+    expect(item.lastDetectedAt).toBe("2026-06-01 00:00:00");
+    expect(item.occurrenceCount).toBe(2);
+    // freshness classification is asserted in Task 3 once buildAttentionQueue assigns it.
+  });
+
+  test("health draft without timestamps leaves detected fields null", () => {
+    const q = buildAttentionQueue([healthDraft("needs_review", "high")], [], { includeRaw: true });
+    const item = q.raw!.allItemsRanked[0];
+    expect(item.source).toBe("health");
+    expect(item.detectedAt).toBeNull();
+    expect(item.lastDetectedAt).toBeNull();
   });
 });
