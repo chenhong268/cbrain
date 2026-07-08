@@ -322,3 +322,75 @@ describe("toNextAction freshness metadata wiring (#315)", () => {
     expect(item.lastDetectedAt).toBeNull();
   });
 });
+
+describe("buildAttentionQueue stale gate (#315)", () => {
+  const NOW = Date.UTC(2026, 6, 8, 12, 0, 0);
+  const OLD = "2026-05-01 00:00:00"; // well outside FRESH_DAYS
+  const RECENT = "2026-07-05 00:00:00";
+
+  test("stale low-evidence discovery is hidden by default and counted in hiddenStale", () => {
+    const q = buildAttentionQueue(
+      [],
+      [discoveryDraft("high", "similar_entity", 1, { detectedAt: OLD, lastDetectedAt: OLD })],
+      { now: NOW },
+    );
+    expect(q.items).toHaveLength(0);
+    expect(q.summary.hiddenStale).toBe(1);
+  });
+
+  test("stale discovery with occurrence_count >= 3 (recurring) stays visible", () => {
+    const q = buildAttentionQueue(
+      [],
+      [discoveryDraft("high", "similar_entity", 3, { detectedAt: OLD, lastDetectedAt: OLD })],
+      { now: NOW },
+    );
+    expect(q.items).toHaveLength(1);
+    expect(q.summary.hiddenStale).toBe(0);
+    expect(q.items[0].freshness).toBe("recurring");
+  });
+
+  test("old blocked / auto_repairable health items stay visible and classified fresh (immune)", () => {
+    const blocked = { ...healthDraftAt("blocked", "high", "d"), metadata: { ...healthDraftAt("blocked", "high", "d").metadata, detected_at: OLD, last_detected_at: OLD } };
+    const auto = { ...healthDraftAt("auto_repairable", "medium", "d2"), metadata: { ...healthDraftAt("auto_repairable", "medium", "d2").metadata, detected_at: OLD, last_detected_at: OLD } };
+    const q = buildAttentionQueue([blocked, auto], [], { now: NOW });
+    expect(q.items.map((i) => i.severity)).toEqual(["blocked", "auto_repairable"]);
+    expect(q.items.every((i) => i.freshness === "fresh")).toBe(true);
+    expect(q.summary.hiddenStale).toBe(0);
+  });
+
+  test("stale gate does NOT bypass the top-3 cap (slot released to fresh item)", () => {
+    const stale = discoveryDraft("high", "similar_entity", 1, { detectedAt: OLD, lastDetectedAt: OLD });
+    const fresh = (dim: string) => discoveryDraft("high", `similar_entity_${dim}`, 1, { detectedAt: RECENT, lastDetectedAt: RECENT });
+    const q = buildAttentionQueue([], [stale, fresh("a"), fresh("b"), fresh("c")], { now: NOW });
+    expect(q.items).toHaveLength(3);
+    expect(q.summary.hiddenStale).toBe(1);
+    expect(q.summary.shownCount).toBeLessThanOrEqual(3);
+  });
+
+  test("include_raw exposes staleItems audit list and hiddenStale count", () => {
+    const q = buildAttentionQueue(
+      [],
+      [discoveryDraft("high", "similar_entity", 1, { detectedAt: OLD, lastDetectedAt: OLD })],
+      { includeRaw: true, now: NOW },
+    );
+    expect(q.items).toHaveLength(0);
+    expect(q.summary.hiddenStale).toBe(1);
+    expect(q.raw).not.toBeNull();
+    expect(q.raw!.staleItems).toHaveLength(1);
+    expect(q.raw!.staleItems[0].freshness).toBe("stale");
+  });
+
+  test("missing timestamp fails open: discovery draft without timestamps stays visible", () => {
+    const q = buildAttentionQueue([], [discoveryDraft("high")], { now: NOW });
+    expect(q.items).toHaveLength(1);
+    expect(q.summary.hiddenStale).toBe(0);
+  });
+
+  test("merged discovery group keeps the most favorable freshness (not hidden)", () => {
+    const stalePeer = discoveryDraft("high", "similar_entity", 1, { detectedAt: OLD, lastDetectedAt: OLD });
+    const freshPeer = discoveryDraft("high", "similar_entity", 1, { detectedAt: RECENT, lastDetectedAt: RECENT });
+    const q = buildAttentionQueue([], [stalePeer, freshPeer], { now: NOW });
+    expect(q.items).toHaveLength(1);
+    expect(q.summary.hiddenStale).toBe(0);
+  });
+});

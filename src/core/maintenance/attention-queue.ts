@@ -89,11 +89,15 @@ export interface AttentionQueueSummary {
   shownCount: number;
   hiddenObserveOnly: number;
   suppressedBeyondTop3: number;
+  /** Stale low-evidence items hidden from default output (#315). */
+  hiddenStale: number;
 }
 
 export interface AttentionQueueRaw {
   observeOnlyItems: NextAction[];
   allItemsRanked: NextAction[];
+  /** Stale low-evidence items hidden by default; auditable under include_raw (#315). */
+  staleItems: NextAction[];
 }
 
 export interface AttentionQueue {
@@ -106,6 +110,8 @@ export interface BuildAttentionQueueOptions {
   includeRaw?: boolean;
   /** Default 3; clamped to 3 — display output never exceeds 3. */
   cap?: number;
+  /** Deterministic clock for the stale gate (#315). Defaults to Date.now(). */
+  now?: number;
 }
 
 const DEFAULT_CAP = 3;
@@ -191,7 +197,16 @@ function rankCompare(a: NextAction, b: NextAction): number {
   return 0;
 }
 
-/** Merge same-groupKey items: sum evidence, union sourceRefs. Stable first-seen order. */
+/** Return whichever of two timestamp strings parses as newer; null if both unparseable. #315 */
+function newerTimestamp(a: string | null | undefined, b: string | null | undefined): string | null {
+  const ta = parseDetectedAt(a);
+  const tb = parseDetectedAt(b);
+  if (ta === null) return b ?? null;
+  if (tb === null) return a ?? null;
+  return ta >= tb ? (a ?? null) : (b ?? null);
+}
+
+/** Merge same-groupKey items: sum evidence, union sourceRefs, keep most-favorable freshness. Stable first-seen order. */
 function dedupAndMerge(actions: NextAction[]): NextAction[] {
   const map = new Map<string, NextAction>();
   for (const a of actions) {
@@ -201,6 +216,11 @@ function dedupAndMerge(actions: NextAction[]): NextAction[] {
     } else {
       prev.evidenceCount += a.evidenceCount;
       for (const ref of a.sourceRefs) if (!prev.sourceRefs.includes(ref)) prev.sourceRefs.push(ref);
+      // Favor eligibility: newest last/first-seen + max occurrence so a merge never
+      // hides a group when any peer would individually stay visible. #315
+      prev.detectedAt = newerTimestamp(prev.detectedAt, a.detectedAt);
+      prev.lastDetectedAt = newerTimestamp(prev.lastDetectedAt, a.lastDetectedAt);
+      prev.occurrenceCount = Math.max(prev.occurrenceCount ?? 0, a.occurrenceCount ?? 0);
     }
   }
   return [...map.values()];
@@ -224,18 +244,36 @@ export function buildAttentionQueue(
     ? Math.max(0, Math.min(requested, DEFAULT_CAP))
     : DEFAULT_CAP;
   const includeRaw = options?.includeRaw === true;
+  const now = typeof options?.now === "number" && Number.isFinite(options?.now) ? options.now : Date.now();
 
   const all = dedupAndMerge([
     ...healthDrafts.map(toNextAction),
     ...discoveryDrafts.map(toNextAction),
   ]);
+  // Classify AFTER merge so occurrence_count/timestamps reflect the merged group.
+  for (const a of all) {
+    a.freshness = classifyFreshness({
+      source: a.source,
+      severity: a.severity,
+      detectedAt: a.detectedAt,
+      lastDetectedAt: a.lastDetectedAt,
+      occurrenceCount: a.occurrenceCount,
+      now,
+    });
+  }
   all.sort(rankCompare);
 
   const observeOnly = all.filter((a) => a.severity === "observe_only");
   const actionable = all.filter((a) => a.severity !== "observe_only");
 
-  const shown = actionable.slice(0, cap);
-  const suppressed = actionable.length - shown.length;
+  // Stale gate runs BEFORE the cap slice: hidden stale items release their budget to
+  // fresher items. Health is immune (classifyFreshness), so only discovery/action-review
+  // items can land here. The slice still enforces the hard ≤3 ceiling. #315
+  const eligible = actionable.filter((a) => a.freshness !== "stale");
+  const staleHidden = actionable.filter((a) => a.freshness === "stale");
+
+  const shown = eligible.slice(0, cap);
+  const suppressed = eligible.length - shown.length;
 
   return {
     items: shown,
@@ -244,9 +282,10 @@ export function buildAttentionQueue(
       shownCount: shown.length,
       hiddenObserveOnly: observeOnly.length,
       suppressedBeyondTop3: suppressed,
+      hiddenStale: staleHidden.length,
     },
     raw: includeRaw
-      ? { observeOnlyItems: observeOnly, allItemsRanked: all }
+      ? { observeOnlyItems: observeOnly, allItemsRanked: all, staleItems: staleHidden }
       : null,
   };
 }
