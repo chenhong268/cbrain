@@ -36,6 +36,9 @@ function renderDisplay(items: NextAction[], summary: AttentionQueueSummary): str
   if (summary.suppressedBeyondTop3 > 0) {
     tail.push(`还有 ${summary.suppressedBeyondTop3} 项次要问题未显示，可用 include_raw 查看。`);
   }
+  if (summary.hiddenStale > 0) {
+    tail.push(`另有 ${summary.hiddenStale} 条长期未变动的低优先级发现已隐藏，可用 include_raw 查看。`);
+  }
   if (tail.length > 0) lines.push(tail.join(" "));
   return sanitizeDisplay(lines.join("\n"));
 }
@@ -103,6 +106,8 @@ export function registerNextActionsTools(server: McpServer, ctx: ToolContext): v
           ...row,
           occurrence_count: full?.occurrence_count,
           dedup_key: full?.dedup_key,
+          detected_at: row.detected_at,
+          last_detected_at: full?.last_detected_at ?? null,
         };
       });
       discoveryDrafts.push(...buildActionCandidatesFromDiscoveries(rows));

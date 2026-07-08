@@ -41,6 +41,13 @@ function getTools(server: unknown) {
 
 interface ToolResponse { content: Array<{ type: string; text: string }> }
 
+/** Backdate a discovery row for #315 stale-gate tests. Test-only raw SQL via the public rawDb handle. */
+function backdateDiscovery(db: CBrainDB, id: number, days: number, occurrenceCount?: number): void {
+  const occClause = occurrenceCount !== undefined ? `, occurrence_count = ${occurrenceCount}` : "";
+  const rawDb = (db as unknown as { rawDb: { prepare: (q: string) => { run: (p: Record<string, unknown>) => void } } }).rawDb;
+  rawDb.prepare(`UPDATE discoveries SET detected_at = datetime('now','-${days} days'), last_detected_at = datetime('now','-${days} days')${occClause} WHERE id = $id`).run({ $id: id });
+}
+
 describe("next_actions MCP (#309)", () => {
   const dir = "/tmp/cbrain-test-next-actions";
   const dbPath = join(dir, "test.sqlite");
@@ -201,5 +208,70 @@ describe("next_actions MCP (#309)", () => {
     const payload = JSON.parse(res.content[0].text);
     expect(payload.items.length).toBeLessThanOrEqual(3);
     expect(payload.display).not.toContain("entity/");
+  });
+
+  test("stale low-occurrence discovery is hidden by default; hiddenStale counted (#315)", async () => {
+    const { id } = db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    backdateDiscovery(db, id, 30); // occurrence_count stays 1
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.items).toHaveLength(0);
+    expect(payload.summary.hiddenStale).toBe(1);
+    expect(payload.display).toContain("无需");
+  });
+
+  test("stale discovery with occurrence_count >= 3 stays visible (#315)", async () => {
+    const { id } = db.upsertDiscovery("similar_entity", ["entity/c", "entity/d"], 0.9, undefined, undefined, "high", false, {});
+    backdateDiscovery(db, id, 30, 3);
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.items).toHaveLength(1);
+    expect(payload.summary.hiddenStale).toBe(0);
+  });
+
+  test("include_raw exposes stale audit but display/items leak nothing (#315)", async () => {
+    const { id } = db.upsertDiscovery("similar_entity", ["entity/private-a", "entity/private-b"], 0.9, undefined, undefined, "high", false, {});
+    backdateDiscovery(db, id, 30);
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"], include_raw: true }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.summary.hiddenStale).toBe(1);
+    expect(payload.raw.staleItems).toBeInstanceOf(Array);
+    expect(payload.raw.staleItems.length).toBe(1);
+    // display + items[] must not leak internal identifiers
+    expect(payload.display).not.toContain("entity/");
+    expect(payload.display).not.toContain("/Users/");
+    expect(payload.display).not.toMatch(/\bscore\b/i);
+    expect(payload.display).not.toContain("dedup_key");
+    for (const it of payload.items) {
+      expect(JSON.stringify(it)).not.toContain("entity/");
+      expect(JSON.stringify(it)).not.toContain("dedup_key");
+    }
+  });
+
+  test("next_actions stays read-only even with a stale candidate present (#315)", async () => {
+    const { id } = db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    backdateDiscovery(db, id, 30);
+    const beforePending = db.getUnseenDiscoveries(50).length;
+    const server = createServer(deps);
+    await getTools(server).next_actions.handler({});
+    expect(db.getUnseenDiscoveries(50).length).toBe(beforePending);
+    // next_actions must NOT run HealthChecker.checkAll — that would mkdirSync(outputsDir/health).
+    expect(existsSync(join(deps.runtimePath, "health"))).toBe(false);
+  });
+
+  test("display notes hidden stale count when fresh items remain (#315)", async () => {
+    // 1 fresh + 1 stale; fresh stays visible, stale hidden + mentioned in display.
+    db.upsertDiscovery("similar_entity", ["entity/f1", "entity/f2"], 0.9, undefined, undefined, "high", false, {});
+    const stale = db.upsertDiscovery("similar_entity_2", ["entity/s1", "entity/s2"], 0.9, undefined, undefined, "high", false, {});
+    backdateDiscovery(db, stale.id, 30);
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.items).toHaveLength(1);
+    expect(payload.summary.hiddenStale).toBe(1);
+    expect(payload.display).toContain("隐藏");
   });
 });
