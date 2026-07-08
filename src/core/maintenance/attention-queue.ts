@@ -18,6 +18,54 @@
 import type { ActionCandidateDraft } from "./action-candidates.js";
 import type { RepairGroup } from "./health-debt.js";
 
+/** Freshness bucket assigned by the stale gate (#315). Pure, derived, never persisted. */
+export type Freshness = "fresh" | "recurring" | "stale";
+
+/** Issue #315 constants — named, not magic. */
+export const FRESH_DAYS = 14;
+export const RECURRING_MIN_OCCURRENCES = 3;
+
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Parse a persisted discovery timestamp to epoch ms. SQLite `datetime('now')` emits
+ * "YYYY-MM-DD HH:MM:SS" in UTC; normalize to ISO-UTC before parsing. Returns null for
+ * missing/malformed input so callers fail OPEN (treat as fresh, never hide). #315
+ */
+export function parseDetectedAt(raw: string | null | undefined): number | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const iso = raw.includes("T") ? raw : `${raw.replace(" ", "T")}Z`;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}
+
+interface ClassifyFreshnessArgs {
+  source: "health" | "discovery";
+  severity: RepairGroup;
+  detectedAt: string | null | undefined;
+  lastDetectedAt: string | null | undefined;
+  occurrenceCount: number | null | undefined;
+  now: number;
+}
+
+/**
+ * Pure freshness classification (#315).
+ *   - health source is immune: structural health signals do not lose priority with age;
+ *   - missing/malformed timestamp fails OPEN as fresh (never silently hidden);
+ *   - discovery older than FRESH_DAYS with occurrence_count < RECURRING_MIN_OCCURRENCES is stale;
+ *   - recurring (occurrence_count >= RECURRING_MIN_OCCURRENCES) stays eligible.
+ * Effective timestamp is lastDetectedAt ?? detectedAt ("hasn't re-occurred recently").
+ */
+export function classifyFreshness(args: ClassifyFreshnessArgs): Freshness {
+  if (args.source === "health") return "fresh";
+  const ts = parseDetectedAt(args.lastDetectedAt) ?? parseDetectedAt(args.detectedAt);
+  if (ts === null) return "fresh";
+  const ageDays = (args.now - ts) / MS_PER_DAY;
+  if (ageDays <= FRESH_DAYS) return "fresh";
+  const occ = typeof args.occurrenceCount === "number" && args.occurrenceCount > 0 ? args.occurrenceCount : 0;
+  return occ >= RECURRING_MIN_OCCURRENCES ? "recurring" : "stale";
+}
+
 /** Local next-action shape. severity reuses RepairGroup — no parallel taxonomy. */
 export interface NextAction {
   severity: RepairGroup;
@@ -29,6 +77,11 @@ export interface NextAction {
   groupKey: string;
   /** raw/debug only — stable refs, never reach default display */
   sourceRefs: string[];
+  /** raw/debug + classification input — never reaches the public items[] surface (#315). */
+  detectedAt?: string | null;
+  lastDetectedAt?: string | null;
+  occurrenceCount?: number;
+  freshness?: Freshness;
 }
 
 export interface AttentionQueueSummary {

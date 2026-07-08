@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { buildAttentionQueue } from "../../src/core/maintenance/attention-queue.js";
+import {
+  buildAttentionQueue,
+  parseDetectedAt,
+  classifyFreshness,
+  FRESH_DAYS,
+  RECURRING_MIN_OCCURRENCES,
+} from "../../src/core/maintenance/attention-queue.js";
 import type { ActionCandidateDraft } from "../../src/core/maintenance/action-candidates.js";
 
 // ─── Synthetic draft helpers (sentinel-only fixtures) ──────────────────────
@@ -237,5 +243,56 @@ describe("buildAttentionQueue privacy (#309)", () => {
     }
     // sourceRefs are the audit channel — internal refs live here, never in display.
     expect(item.sourceRefs[0]).toContain("discovery:");
+  });
+});
+
+describe("freshness primitives (#315)", () => {
+  const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z, deterministic
+
+  test("named constants are the issue-mandated values", () => {
+    expect(FRESH_DAYS).toBe(14);
+    expect(RECURRING_MIN_OCCURRENCES).toBe(3);
+  });
+
+  test("parseDetectedAt normalizes SQLite datetime (UTC) and ISO; null/missing/garbage -> null", () => {
+    expect(parseDetectedAt("2026-06-20 12:00:00")).toBe(Date.UTC(2026, 5, 20, 12, 0, 0));
+    expect(parseDetectedAt("2026-06-20T12:00:00Z")).toBe(Date.UTC(2026, 5, 20, 12, 0, 0));
+    expect(parseDetectedAt(null)).toBe(null);
+    expect(parseDetectedAt(undefined)).toBe(null);
+    expect(parseDetectedAt("")).toBe(null);
+    expect(parseDetectedAt("not-a-date")).toBe(null);
+  });
+
+  test("health source is always fresh regardless of age (immune to stale gate)", () => {
+    const old = "2020-01-01 00:00:00";
+    expect(classifyFreshness({ source: "health", severity: "blocked", detectedAt: old, lastDetectedAt: old, occurrenceCount: 0, now: NOW })).toBe("fresh");
+    expect(classifyFreshness({ source: "health", severity: "auto_repairable", detectedAt: old, lastDetectedAt: old, occurrenceCount: 0, now: NOW })).toBe("fresh");
+    expect(classifyFreshness({ source: "health", severity: "needs_review", detectedAt: old, lastDetectedAt: old, occurrenceCount: 0, now: NOW })).toBe("fresh");
+  });
+
+  test("discovery within FRESH_DAYS is fresh", () => {
+    const recent = "2026-07-01 12:00:00"; // 7 days before NOW
+    expect(classifyFreshness({ source: "discovery", severity: "needs_review", detectedAt: recent, lastDetectedAt: recent, occurrenceCount: 1, now: NOW })).toBe("fresh");
+  });
+
+  test("old discovery with occurrence_count < 3 is stale", () => {
+    const old = "2026-06-01 12:00:00"; // > FRESH_DAYS before NOW
+    expect(classifyFreshness({ source: "discovery", severity: "needs_review", detectedAt: old, lastDetectedAt: old, occurrenceCount: 2, now: NOW })).toBe("stale");
+  });
+
+  test("old discovery with occurrence_count >= 3 is recurring (stays eligible)", () => {
+    const old = "2026-06-01 12:00:00";
+    expect(classifyFreshness({ source: "discovery", severity: "needs_review", detectedAt: old, lastDetectedAt: old, occurrenceCount: 3, now: NOW })).toBe("recurring");
+    expect(classifyFreshness({ source: "discovery", severity: "needs_review", detectedAt: old, lastDetectedAt: old, occurrenceCount: 9, now: NOW })).toBe("recurring");
+  });
+
+  test("missing/malformed timestamp fails OPEN as fresh (never hidden)", () => {
+    expect(classifyFreshness({ source: "discovery", severity: "needs_review", detectedAt: null, lastDetectedAt: null, occurrenceCount: 1, now: NOW })).toBe("fresh");
+    expect(classifyFreshness({ source: "discovery", severity: "needs_review", detectedAt: "garbage", lastDetectedAt: undefined, occurrenceCount: 0, now: NOW })).toBe("fresh");
+  });
+
+  test("effective timestamp prefers lastDetectedAt over detectedAt", () => {
+    // first-seen ancient, last-seen recent -> fresh
+    expect(classifyFreshness({ source: "discovery", severity: "needs_review", detectedAt: "2020-01-01 00:00:00", lastDetectedAt: "2026-07-05 12:00:00", occurrenceCount: 1, now: NOW })).toBe("fresh");
   });
 });
