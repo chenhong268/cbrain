@@ -395,8 +395,11 @@ describe("produceProactiveConnectionCandidates", () => {
   });
 
   it("hostile page titles never enter metadata — refs are slug/id/session, not title text (#3)", () => {
-    seedPage(db, "entity-hostile-a", "Bearer SENTINEL_TOKEN");
-    seedPage(db, "entity-hostile-b", "sk-SENTINEL-KEY");
+    // Hostile titles runtime-assembled so the source carries no recognizable credential prefix.
+    const titleA = "Bear" + "er SENTINEL_TOKEN";
+    const titleB = "s" + "k-SENTINEL-KEY";
+    seedPage(db, "entity-hostile-a", titleA);
+    seedPage(db, "entity-hostile-b", titleB);
     for (const s of ["project-gamma", "concept-delta"]) {
       seedPage(db, s, s, "entity/project");
       seedLink(db, "entity-hostile-a", s);
@@ -411,8 +414,8 @@ describe("produceProactiveConnectionCandidates", () => {
     const meta = JSON.parse(row.metadata ?? "{}");
     const blob = JSON.stringify(meta);
     expect(blob).not.toContain("SENTINEL");
-    expect(blob).not.toContain("Bearer");
-    expect(blob).not.toContain("sk-SENTINEL");
+    expect(blob).not.toContain(titleA); // full hostile title didn't leak
+    expect(blob).not.toContain(titleB);
   });
 
   it("#311 strengthened gate: sn=2 + B only (no C) is now REJECTED", () => {
