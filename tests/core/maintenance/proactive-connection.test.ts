@@ -727,6 +727,63 @@ describe("produceProactiveConnectionCandidates feedback learning (#314)", () => 
     promoteProactiveCandidatesToReview(db, mgr);
     expect(mgr.listCandidates({ includeDeferred: true, limit: 50 }).length).toBe(0);
   });
+
+  it("rejected (dismissed) evidence-identical candidate is suppressed + feedbackSuppressed counts it (acceptance #3)", () => {
+    seedSharedPair(db, { sessions: true, timeline: true });
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const [ab] = db.getDiscoveriesByType("proactive_connection", 10);
+    db.updateDiscoveryStatus(ab.id, "dismissed");
+
+    // NEW pair [alpha, zeta] with the SAME evidence neighborhood {gamma, delta} + B+C.
+    seedPage(db, "entity-zeta", "Zeta");
+    seedLink(db, "entity-zeta", "project-gamma");
+    seedLink(db, "entity-zeta", "concept-delta");
+    seedQueryLog(db, "s5", ["entity-alpha", "entity-zeta"]);
+    seedQueryLog(db, "s6", ["entity-alpha", "entity-zeta"]);
+    seedTimeline(db, "entity-zeta", "2026-06-08");
+    const res = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+
+    const rows = db.getDiscoveriesByType("proactive_connection", 10);
+    expect(rows.some((r) => JSON.parse(r.entities).includes("entity-zeta"))).toBe(false);
+    expect(res.feedbackSuppressed).toBeGreaterThanOrEqual(1);
+  });
+
+  it("partial evidence overlap is NOT suppressed (acceptance #4)", () => {
+    seedSharedPair(db, { sessions: true, timeline: true });
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const [ab] = db.getDiscoveriesByType("proactive_connection", 10);
+    db.updateDiscoveryStatus(ab.id, "dismissed");
+
+    // zeta shares only ONE dismissed-evidence neighbor + a fresh one → evidence set differs.
+    seedPage(db, "entity-zeta", "Zeta");
+    seedPage(db, "concept-fresh", "Fresh", "concept/concept");
+    seedLink(db, "entity-zeta", "project-gamma");
+    seedLink(db, "entity-zeta", "concept-fresh");
+    seedLink(db, "entity-alpha", "concept-fresh");
+    seedQueryLog(db, "s5", ["entity-alpha", "entity-zeta"]);
+    seedQueryLog(db, "s6", ["entity-alpha", "entity-zeta"]);
+    seedTimeline(db, "entity-zeta", "2026-06-08");
+    const res = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+
+    expect(res.feedbackSuppressed).toBe(0);
+    const rows = db.getDiscoveriesByType("proactive_connection", 10);
+    expect(rows.some((r) => JSON.parse(r.entities).includes("entity-zeta"))).toBe(true);
+  });
+
+  it("deferred (pending) pair is neutral: recurs normally, no boost, no suppress (acceptance #5)", () => {
+    seedSharedPair(db, { sessions: true, timeline: true });
+    produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    const rows = db.getDiscoveryLifecycleIndex("proactive_connection", 10);
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe("pending"); // #312 defer leaves the discovery pending
+
+    const res = produceProactiveConnectionCandidates(db, { since: "1970-01-01" });
+    expect(res.feedbackSuppressed).toBe(0);
+    expect(res.feedbackBoosted).toBe(0); // no accepted history
+    const after = db.getDiscoveryLifecycleIndex("proactive_connection", 10)[0];
+    expect(after.occurrence_count).toBeGreaterThan(1);
+    expect(JSON.parse(after.metadata ?? "{}").scoring.feedback_reason).toBeNull();
+  });
 });
 
 describe("proactive_connection — structural isolation (#310 adversarial)", () => {
