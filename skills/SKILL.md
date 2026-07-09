@@ -19,12 +19,12 @@
 
 | 信号 | 技能 | 文件 | 关键工具 |
 |:-----|:-----|:-----|:---------|
-| "讨论过吗/有结论吗" | 核查确认 | `hermes-cbrain-brief.md` §1 | `deep_recall(grounded: true)` |
-| "当时怎么设计的" | 内容回忆 | `hermes-cbrain-brief.md` §2 | `deep_recall(detail: "normal")` |
+| "讨论过吗/有结论吗" | 核查确认 | `hermes-cbrain-brief.md` §1 | `cbrain_recall(detail: "brief")` |
+| "当时怎么设计的" | 内容回忆 | `hermes-cbrain-brief.md` §2 | `cbrain_recall(detail: "normal")` |
 | "那个人叫什么" | 情景人物 | `hermes-cbrain-brief.md` §3 | `recall_episode` |
 | "有新发现吗" | 发现 | `hermes-cbrain-brief.md` §4 | `read_discoveries` |
-| "总结一下 X" | 深度回顾 | `review.md` | `query` + 综合分析 |
-| "A 和 B 什么关系" | 关系分析 | `connect.md` | `graph_query` |
+| "总结一下 X" | 深度回顾 | `review.md` | `cbrain_recall`（内部 overview 分发） |
+| "A 和 B 什么关系" | 关系分析 | `connect.md` | `cbrain_recall`（内部 relationship 分发） |
 | "写一份关于 X 的报告" | 知识写作 | `write.md` | 多步检索 + 组织 |
 | "把这些内容存下来" | 摄入 | `ingest.md` | `ingest` |
 | "帮我整理/去重" | 清理 | `cleanup.md` | `clean_shells` / `dedup` |
@@ -35,7 +35,7 @@
 - 先给结论，300-500 字为默认长度。核查确认回答 ≤ 300 字。
 - 禁止暴露 slug、score、debug 字段、raw JSON、内部数据结构。
 - 渐进披露：先摘要，用户追问再展开细节。
-- 禁止 `query` + `get_page` 链式调用做核查 — 用 `deep_recall(grounded: true)` 一步到位。
+- 禁止 `query` + `get_page` 链式调用做核查 — 用 `cbrain_recall(detail: "brief")` 一步到位。
 - 禁止对核查意图用 `agentic_research`。
 
 ## 4. 文件索引

@@ -16,8 +16,8 @@
 
 - 讨论过吗、有依据吗、是不是真的 → `cbrain_recall(detail:"brief")`，内部 grounded；≤300 字，candidates 标"待确认"。
 - 当时怎么设计、为什么选、具体怎么说 → `cbrain_recall(detail:"normal")`；首轮禁止 expand_entity/get_page/get_timeline。
-- 想不起名字、叫什么来着、一起做过项目 → `cbrain_recall`，内部 recall_episode；禁 query/agentic_research。
-- 关系/下属/全貌/盲区 → 默认 `cbrain_recall`；只有明确调试才直用 graph_query/get_org_tree/summarize/agentic_research。
+- 想不起名字、叫什么来着、一起做过项目 → `cbrain_recall`，内部 recall_episode；禁止 query/agentic_research。
+- 关系/下属/全貌/盲区 → 默认 `cbrain_recall`；只有明确 debug 才直用 graph_query/get_org_tree/summarize/agentic_research。
 - 关键词定位/debug → `query`，底层工具；自然语言禁止 query。
 - 批量补详情 → `get_pages`，禁止连续 get_page。
 
@@ -35,9 +35,9 @@
 
 ## 6. 硬禁止
 
-- query+get_page+get_links+get_timeline 连调 → deep_recall
-- 总结用 query → summarize
-- 核查用 agentic_research → deep_recall(grounded:true)
-- 情境找人用 agentic_research → recall_episode
-- discovery 暴露内部字段；回答超 500 字；末尾追问
-- 自然语言走 query → cbrain_recall
+- ❌ query+get_page+get_links+get_timeline 连调 → cbrain_recall
+- ❌ 总结用 query → cbrain_recall（内部 overview 分发）
+- ❌ 核查用 agentic_research → cbrain_recall（内部 grounded_recall）
+- ❌ 情境找人用 agentic_research → cbrain_recall（内部 recall_episode）
+- ❌ discovery 暴露内部字段；回答超 500 字；末尾追问
+- ❌ 自然语言走 query → cbrain_recall

@@ -16,12 +16,12 @@ Search returns fragments. Review returns understanding. When you need to know ev
 
 ## Protocol
 
-### ⚡ 优先用 deep_recall（一步搞定）
+### ⚡ 优先用 cbrain_recall（默认前门，一步搞定）
 
-`deep_recall` 是 MCP tool（不是 CLI 命令），Agent 通过 `deep_recall` tool 调用。一次返回 body + links + timeline + tags + related + insights，等价于下面 4 步连调：
+`cbrain_recall` 是 MCP tool（不是 CLI 命令），Agent 通过 `cbrain_recall` 调用，CBrain 内部按 intent 分发到 overview/relationship/content。一次返回完整画像，等价于下面 4 步连调（这些是 debug/手动步骤，默认不链式调用）：
 - query（搜索）+ get_page（取全文）+ graph-query（关系）+ timeline（时间线）
 
-**只在 deep_recall 不可用时才退回以下步骤。**
+**只在 cbrain_recall 不足以表达深度时，才用 advanced escape hatch：deep_recall（精细参数），或退回以下手动 4 步（debug-only fallback）。**
 
 ### Fallback: 手动 4 步
 
@@ -74,7 +74,7 @@ YYYY-MM-DD  事件描述 [Source: slug]
 
 ## Anti-Patterns
 
-- ❌ deep_recall 可用却手动 query+get_page+graph+timeline 连调 — deep_recall 一步搞定
+- ❌ cbrain_recall 可用却手动 query+get_page+graph+timeline 连调 — cbrain_recall 一步搞定
 - ❌ 只搜一次就下结论 — 可能遗漏别名、关联实体
 - ❌ 编造关系 — "可能与 Y 有合作" 改成 "目前未记录与 Y 的关联"
 - ❌ 把查询结果当正文 — 需要用自己的话重新组织，不是复制粘贴

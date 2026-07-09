@@ -8,17 +8,17 @@ Search the brain using multiple strategies, fuse results, and return the most re
 
 ## Default Behavior — 无 flag 时
 
-当 RESOLVER 未指定任何 flag 时，**优先使用 deep_recall**，不是 query。
+当 RESOLVER 未指定任何 flag 时，**默认走 cbrain_recall 前门**（自然语言首选，CBrain 内部分发），不是 query（query 是 debug 工具，仅精确关键词定位）。
 
 ```
-自然语言问题 → deep_recall({ query, detail: "normal", limit: 3 })
-精确关键词/debug → query({ query, strategy: "fts" })
+自然语言问题 → cbrain_recall({ query, detail: "normal" })
+精确关键词/debug → query({ query, strategy: "fts" })（debug 工具）
 ```
 
 判断标准：
-- 问题包含完整句子或自然语言描述 → deep_recall
-- 问题只有 1-2 个关键词，且目的是定位 slug → query
-- 不确定 → deep_recall（安全默认）
+- 问题包含完整句子或自然语言描述 → cbrain_recall
+- 问题只有 1-2 个关键词，且目的是定位 slug → query（debug）
+- 不确定 → cbrain_recall（安全默认前门）
 
 ## [keyword] Branch — 精确关键词定位
 
@@ -116,12 +116,12 @@ When loaded with `[agentic_research]` flag (from RESOLVER.md "Agentic Research" 
 - 复杂复盘：需要多步推理和交叉验证
 
 **不适用（走现有路由）：**
-- 简单事实回忆 → deep_recall(detail=normal)
-- 单一实体查找 → deep_recall
-- 核查确认 → deep_recall(grounded=true)
-- 情境找人 → recall_episode
-- 两人关系 → graph_query / connect
-- 简单关键词搜索 → query
+- 简单事实回忆 → cbrain_recall(detail:"normal")
+- 单一实体查找 → cbrain_recall
+- 核查确认 → cbrain_recall（grounded 内部分发）
+- 情境找人 → cbrain_recall（recall_episode 内部分发）
+- 两人关系 → cbrain_recall（relationship 内部分发）/ graph_query / connect
+- 简单关键词搜索 → query（debug，仅精确关键词）
 
 ## [provenance] Branch — 来源追踪
 
@@ -135,7 +135,7 @@ When loaded with `[provenance]` flag (from RESOLVER.md "Source Tracking / Proven
    ```
 
 2. **无 target，自然语言指代**：用户用自然语言描述某条信息/关系/事件，但没有给出 ID：
-   - **关系来源**：`graph_query` 或 `get_links` 拿到 link_id → `get_provenance({ target_type: "link", target_id })`
+   - **关系来源**：`graph_query` 或 `get_links`（debug 工具）拿 link_id → `get_provenance({ target_type: "link", target_id })`
    - **事件来源**：`get_timeline` 拿到 timeline_id → `get_provenance({ target_type: "timeline", target_id })`
    - **不确定指哪条**：`deep_recall` / `query` 做上下文发现，找到相关 link 或 timeline 条目后拿 ID
    - 如果找不到具体 target → 如实告知"CBrain 有相关记忆但无法定位到具体的溯源条目"，**禁止编造来源**
@@ -151,9 +151,9 @@ When loaded with `[provenance]` flag (from RESOLVER.md "Source Tracking / Proven
 - 用户问"这条记忆可靠吗"、"可信吗"、"这个来源可靠吗"
 
 **不适用（走现有路由）：**
-- 普通内容回忆（"当时怎么设计的"）→ deep_recall(detail: normal)
-- 核查确认（"讨论过吗"）→ deep_recall(grounded: true)
-- 关系查询（"A和B什么关系"）→ graph_query / connect
+- 普通内容回忆（"当时怎么设计的"）→ cbrain_recall(detail: "normal")
+- 核查确认（"讨论过吗"）→ cbrain_recall（grounded 内部分发）
+- 关系查询（"A和B什么关系"）→ cbrain_recall（relationship 内部分发）/ graph_query / connect
 
 **用户回答格式（硬规则）：**
 

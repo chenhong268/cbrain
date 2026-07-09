@@ -28,9 +28,11 @@ If the user hasn't specified, ask. One round of clarification is worth five rewr
 
 ### Step 2: Gather
 
-Deep search for material:
+先走 `cbrain_recall` 前门取素材（默认，CBrain 内部分发）；以下 `cbrain` CLI 是手动 fallback（debug / 精确操作）：
 
 ```
+cbrain_recall({ query: "<topic>", detail: "normal" })   # 默认前门
+# 手动 fallback（debug）：
 cbrain query "<topic>" --strategy all --limit 10
 cbrain show <key-slug>
 cbrain graph-query <slug> --mode traverse --depth 2
