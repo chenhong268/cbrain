@@ -31,6 +31,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAllTools } from "../src/mcp/register.js";
 import { buildProgram } from "../src/cli/program.js";
 import { resolveSyncMode, type SyncOptions } from "../src/cli/commands/reindex.js";
+import { AGENT_ALLOWLIST } from "../src/mcp/tool-profiles.js";
 
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION: string = JSON.parse(readFileSync(join(PROJECT_DIR, "package.json"), "utf-8")).version;
@@ -38,7 +39,7 @@ const UPDATE = process.argv.includes("--update");
 const DOCS_DIR = process.env.DOCS_DIR ?? join(PROJECT_DIR, "docs");
 const SKILLS_INDEX = process.env.SKILLS_INDEX ?? join(PROJECT_DIR, "skills", "feature-index.md");
 
-interface CheckResult {
+export interface CheckResult {
   check: string;
   passed: boolean;
   detail: string;
@@ -67,7 +68,7 @@ function getCliCommands(): Map<string, string> {
  *  Lets registerAllTools run its registration phase against ctx fields it
  *  dereferences up front (e.g. `const provenance = ctx.provenance`). */
 function makeNoopChain(): unknown {
-  const proxy = new Proxy(function noop() { /* chain */ }, {
+  const proxy: unknown = new Proxy(function noop() { /* chain */ }, {
     get: () => proxy,
     apply: () => proxy,
   });
@@ -507,6 +508,97 @@ function checkSkillsToolRefs(docs: Map<string, string>, tools: Set<string>): Che
   return out;
 }
 
+/** #316 — collect every tool reference on a line: backticked `tool` AND bare tool
+ *  names. Bare names immediately followed by `.` (e.g. `query.md`) are NOT matched,
+ *  so skill-file targets are not mistaken for tool names. */
+function extractToolRefs(line: string): string[] {
+  const tools = new Set<string>();
+  for (const m of line.matchAll(/`([a-z_][a-z0-9_]*)`/g)) tools.add(m[1]);
+  for (const m of line.matchAll(/(?<![.\w])([a-z_][a-z0-9_]*)(?![.\w])/g)) tools.add(m[1]);
+  return [...tools];
+}
+
+/** #316 — Agent contract gate for skills/*.md.
+ *  Check 1: an agent-excluded tool must not be positioned as a first choice.
+ *  Check 2: `deep_recall` (in allowlist) is a restricted first-choice tool — it
+ *  fails when framed as default/first choice WITHOUT an advanced/fallback cue.
+ *  `→` is a first-choice cue, but skill-file targets (`xxx.md`) and agent-allowlisted
+ *  tools routed via `→` do not trip the gate (debug branches and the front door stay legal).
+ *  Per-line opt-out: <!-- docs-consistency:ignore-agent-contract --> */
+const AGENT_CONTRACT_IGNORE = "<!-- docs-consistency:ignore-agent-contract -->";
+const FIRST_CHOICE_CUES = /(首选|优先|默认|第一选择|一步搞定|default\s+query\s+tool|→)/;
+const DEEP_RECALL_ADVANCED_CUES = /(advanced|fine-grained|fine\s+grained|fallback|direct-call\s+only|direct\s+call\s+only|高级|精细参数|降级|escape\s+hatch)/i;
+
+export function checkAgentContractTools(tools: Set<string>, skillsDir: string): CheckResult[] {
+  const out: CheckResult[] = [];
+  if (!existsSync(skillsDir)) {
+    return [{ check: "agent-contract tools", passed: true, detail: "no skills/ dir" }];
+  }
+  const excluded = new Set(tools);
+  for (const t of AGENT_ALLOWLIST) excluded.delete(t);
+
+  for (const f of readdirSync(skillsDir).filter((x) => x.endsWith(".md"))) {
+    const text = readFileSync(join(skillsDir, f), "utf-8");
+    text.split("\n").forEach((line, i) => {
+      if (line.includes(AGENT_CONTRACT_IGNORE)) return;
+      if (!FIRST_CHOICE_CUES.test(line)) return;
+      const refs = extractToolRefs(line);
+      // Check 1 — excluded tool as first choice
+      for (const r of refs) {
+        if (excluded.has(r)) {
+          out.push({
+            check: `agent-contract @skills/${f}:${i + 1}`,
+            passed: false,
+            detail: `\`${r}\` 不在 agent profile，不应作首选/默认`,
+          });
+        }
+      }
+      // Check 2 — deep_recall restricted first-choice
+      if (refs.includes("deep_recall") && !DEEP_RECALL_ADVANCED_CUES.test(line)) {
+        out.push({
+          check: `agent-contract deep_recall @skills/${f}:${i + 1}`,
+          passed: false,
+          detail: `deep_recall 是 advanced escape hatch，不应作默认/首选（用 cbrain_recall）；本行缺少 advanced/fallback 上下文`,
+        });
+      }
+    });
+  }
+  if (out.length === 0) {
+    out.push({ check: "agent-contract tools", passed: true, detail: "skills 无 excluded/deep_recall 首选漂移" });
+  }
+  return out;
+}
+
+/** #316 — registered MCP tool descriptions gate. `deep_recall` must not claim to be
+ *  the default entry point; `query`'s description must not route natural-language
+ *  paths to deep_recall / excluded tools. Scoped to those two tools so legitimate
+ *  pipeline descriptions (e.g. dream `sync → enrich → seal`) are not flagged. */
+const DEFAULT_CLAIM_RE = /(默认查询工具|默认查询|默认入口|default\s+query\s+tool|默认前门)/i;
+const DESC_ADVANCED_CUES = /(advanced|fine-grained|fine\s+grained|fallback|direct-call\s+only|escape\s+hatch|高级|精细参数|降级)/i;
+const DESC_ROUTING_RE = /(?:→|请用)\s*`?([a-z_][a-z0-9_]*)`?/g;
+
+export function checkToolDescriptions(tools: ToolInfo[]): CheckResult[] {
+  const out: CheckResult[] = [];
+  const agentAllow = new Set<string>(AGENT_ALLOWLIST);
+  for (const t of tools) {
+    if (t.name === "deep_recall" && DEFAULT_CLAIM_RE.test(t.description) && !DESC_ADVANCED_CUES.test(t.description)) {
+      out.push({ check: "tool description deep_recall", passed: false, detail: "deep_recall 注册描述仍宣称默认入口（改为 advanced/escape hatch）" });
+    }
+    if (t.name === "query") {
+      for (const m of t.description.matchAll(DESC_ROUTING_RE)) {
+        const target = m[1];
+        if (!agentAllow.has(target)) {
+          out.push({ check: "tool description query", passed: false, detail: `query 描述把路径指向 \`${target}\`（不在 agent profile，应指向 cbrain_recall）` });
+        } else if (target === "deep_recall" && !DESC_ADVANCED_CUES.test(t.description)) {
+          out.push({ check: "tool description query", passed: false, detail: "query 描述把路径指向 deep_recall，但无 advanced/fallback 上下文（应指向 cbrain_recall）" });
+        }
+      }
+    }
+  }
+  if (out.length === 0) out.push({ check: "tool descriptions", passed: true, detail: "工具描述已对齐 cbrain_recall 前门" });
+  return out;
+}
+
 // ── Auto-generated index sections ──────────────────────────────────────────
 
 // docsFile is relative to DOCS_DIR; the in-memory docs map keys it as `docs/<docsFile>`.
@@ -637,4 +729,4 @@ function main(): void {
   process.exitCode = allPassed ? 0 : 1;
 }
 
-main();
+if (import.meta.main) main();

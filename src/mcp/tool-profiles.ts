@@ -30,7 +30,7 @@ const VALID_PROFILES: ReadonlySet<ToolProfile> = new Set(TOOL_PROFILES);
  * tools (dream_*, sync, health, watcher_quarantine, relation_audit), all job_*
  * tools, and provenance tools.
  */
-const AGENT_ALLOWLIST = [
+export const AGENT_ALLOWLIST = [
   "cbrain_recall",
   "deep_recall",
   "recall_episode",
