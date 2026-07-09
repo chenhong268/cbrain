@@ -16,7 +16,7 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       "调试（确认某个关键词是否被索引、出现在哪些页面）、" +
       "定位（已知精确关键词，需要找到对应的 slug）、" +
       "deep_recall 降级链（deep_recall 未命中后缩减关键词重试）。" +
-      "❌ 不要用于自然语言问题。事实回忆 → deep_recall，全貌 → summarize，找人 → recall_episode，组织架构 → get_org_tree。" +
+      "❌ 不要用于自然语言问题。自然语言问题请用 cbrain_recall（前门，内部分发）；本工具仅限精确关键词定位/debug。" +
       "proactive_hints 默认不展示给用户。只有 hint 直接改变当前判断时，写成一句自然的话，不使用标题或列表。",
     inputSchema: {
       query: z.string().max(1000).describe("Search query"),

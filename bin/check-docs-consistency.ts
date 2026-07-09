@@ -716,6 +716,7 @@ function main(): void {
     ...checkDailyPatrolContract(docs),
     ...checkToolReferences(docs, new Set(tools.map((t) => t.name))),
     ...checkSkillsToolRefs(docs, new Set(tools.map((t) => t.name))),
+    ...checkToolDescriptions(tools),
     ...checkSections(docs, tools, cli),
   ];
 

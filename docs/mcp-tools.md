@@ -328,7 +328,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `brain_storm` | Deep reasoning and knowledge gap analysis. |
 | `cbrain_recall` | CBrain 自然语言前门。Hermes 面向用户提问时优先调用本工具，由 CBrain 决定走证据核查、内容回忆、情境找人、组织架构、全貌总结、关系分析、复杂判断或 debug 搜索。返回… |
 | `confirm_evidence` | 用户明确确认一条知识为可信事实。必须提供 confirmation_record_slug（vault 中已存在的页面）和 excerpt（该页面正文中必须包含的确认原文），系统会验证页面存在且 excerpt… |
-| `deep_recall` | 【默认查询工具】查找人物、公司、概念等实体。默认返回精简视图（200字摘要+基础信息）。需要完整上下文（关系、时间线、档案、层级）时传… |
+| `deep_recall` | 【高级 escape hatch】默认前门是 cbrain_recall（自然语言首选）。本工具仅当需要精细参数（grounded/detail/limit）或前门无法表达意图时直调，不是默认首选。查找人物、公司、概念等… |
 | `delete_page` | Delete a page by slug. |
 | `dismiss_insight` | Dismiss an insight as not useful. |
 | `dossier` | Generate or retrieve a structured dossier (brief/profile) for an entity. |

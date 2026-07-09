@@ -22,7 +22,9 @@ import { hydrateRecallSlugs } from "./recall-hydration.js";
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
     description:
-      "【默认查询工具】查找人物、公司、概念等实体。默认返回精简视图（200字摘要+基础信息）。" +
+      "【高级 escape hatch】默认前门是 cbrain_recall（自然语言首选）。" +
+      "本工具仅当需要精细参数（grounded/detail/limit）或前门无法表达意图时直调，不是默认首选。" +
+      "查找人物、公司、概念等实体。默认返回精简视图（200字摘要+基础信息）。" +
       "需要完整上下文（关系、时间线、档案、层级）时传 detail=normal。" +
       "适用：'张三是谁'、'最近聊了什么投资的事'、'XX公司的信息'。" +
       "不要用 search + get_page + graph_query 拼凑，直接用这个一步到位。" +
