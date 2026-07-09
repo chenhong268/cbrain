@@ -18,6 +18,7 @@ bun run gate:v2-preflight
 | `performance` | `bun run gate:perf` | Deterministic performance report stays within hard budgets |
 | `docs-consistency` | `bun run check:docs` | Public docs match current version, tools, commands, and install claims |
 | `resolver-pilot` | `bin/check-resolver-pilot.sh` | Agent routing and skill coverage do not drift silently |
+| `storage-consistency` | `bun run gate:consistency` | Storage fsck + repair-plan stays green (no silent drift) |
 
 ## Report Contract
 

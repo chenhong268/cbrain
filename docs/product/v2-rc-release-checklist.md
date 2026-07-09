@@ -7,10 +7,11 @@
 
 ## Why this exists
 
-`gate:v2-preflight` aggregates six offline gates (first-recall, RC journeys,
-Hermes dialogue, performance, docs consistency, resolver pilot). They are
-deterministic and fully offline — they cannot drive a real Hermes
-conversation, measure end-to-end latency on real search traffic, or validate a
+`gate:v2-preflight` aggregates seven offline gates (`offline-first-recall`,
+`rc-journeys`, `hermes-dialogue`, `performance`, `docs-consistency`,
+`resolver-pilot`, `storage-consistency`). They are deterministic and fully
+offline — they cannot drive a real Hermes conversation, measure end-to-end
+latency on real search traffic, or validate a
 version-pinned install against an external ref. Those three remain human /
 environment responsibilities. This checklist fixes them in one place so the
 RC decision does not depend on oral memory.
