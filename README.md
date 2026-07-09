@@ -268,16 +268,16 @@ Route to the right tool based on user intent:
 
 | User intent | Tool | Why |
 |:------------|:-----|:----|
-| Recall / deep understanding / what is / tell me about | `deep_recall` | One call: page + links + timeline |
-| Summarize / overview / big picture | `summarize` | Aggregated cross-page view |
-| Analyze / brainstorm / cross-domain | `brain_storm` | Cross-domain pattern finding |
-| Quick search / find / look up | `query` | Fast — returns slug + title + snippet |
-| Expand / more details | `expand_entity` | Requires slug first |
+| Recall / deep understanding / what is / tell me about | `cbrain_recall` | 默认前门：自然语言首选，CBrain 内部分发（page + links + timeline 一步到位） |
+| Summarize / overview / big picture | `cbrain_recall` | 内部 overview 分发（`summarize` 是 debug/internal escape hatch） |
+| Analyze / brainstorm / cross-domain | `cbrain_recall` | 内部 reasoning 分发（`brain_storm` 是 debug/internal escape hatch） |
+| Quick search / find / look up | `cbrain_recall` | 默认前门（`query` 是 debug 工具，仅精确关键词定位） |
+| Expand / more details | `expand_entity` | Requires slug first（debug/fallback） |
 
 Anti-patterns:
-- ❌ Chaining `query` + `get_page` + `get_links` + `get_timeline` → `deep_recall` does it in one call
-- ❌ Routing summarize requests to `query` → wrong tool
-- ❌ Calling `expand_entity` without a slug → query first
+- ❌ Chaining `query` + `get_page` + `get_links` + `get_timeline` → `cbrain_recall` does it in one call
+- ❌ Routing natural-language requests directly to `query` / `summarize` / `brain_storm` → use `cbrain_recall` front door (those are debug/internal escape hatches)
+- ❌ Calling `expand_entity` without a slug → `cbrain_recall` first
 - ❌ Skipping query tools because you "know" the slug → query tools handle session tracking and weight learning
 
 **2. Storage Routing（存储路由）**

@@ -177,7 +177,7 @@ cbrain health
 ### 深入了解一个主题
 
 ```
-# 对 AI Agent 说"帮我全面了解组织A"（Agent 会走 review 协议）
+# 对 AI Agent 说"帮我全面了解组织A"（Agent 默认走 cbrain_recall 前门，内部分发）
 # 或手动：
 cbrain query "组织A" --strategy all
 cbrain show brain/entities/组织a
@@ -188,7 +188,7 @@ cbrain timeline brain/entities/组织a
 ### 了解两个人/公司的关系
 
 ```
-# 对 AI Agent 说"人物C和组织A什么关系"
+# 对 AI Agent 说"人物C和组织A什么关系"（Agent 默认走 cbrain_recall，relationship 内部分发）
 # 或手动：
 cbrain graph-query brain/entities/人物c --mode traverse
 cbrain graph-query brain/entities/组织a --mode traverse

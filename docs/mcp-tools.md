@@ -23,7 +23,7 @@
 
 ### query
 
-底层关键词搜索，返回 slug + snippet。默认 smart 策略（FTS 优先，空结果回退混合）。用于调试、定位精确关键词、deep_recall 降级。**自然语言问题请用 `deep_recall`**，全貌用 `summarize`，找人用 `recall_episode`。
+底层关键词搜索，返回 slug + snippet。默认 smart 策略（FTS 优先，空结果回退混合）。用于调试、定位精确关键词、降级链。**自然语言问题请用 `cbrain_recall`**（默认前门，CBrain 内部分发），找人用 `recall_episode`。
 
 ```json
 { "query": "组织A", "limit": 10 }

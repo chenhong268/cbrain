@@ -42,7 +42,7 @@ wrapper 走 HTTP `/mcp` 的 dream tool（通过 serve 的 single writer）。
 
 ## Daily Agent MCP config（HTTP + agent profile，#264）
 
-日常 Hermes Agent session **必须**走 HTTP `/mcp` + `agent` profile，不要用 stdio（stdio 会为每个 Agent spawn serve，撞 single-writer gate）。生成配置：
+日常 Hermes Agent session **必须**走 HTTP `/mcp` + `agent` profile，不要用 stdio（stdio 会为每个 Agent spawn serve，撞 single-writer gate）。工具层前门是 `cbrain_recall`——Agent 自然语言提问首选它，由 CBrain 内部分发；低层工具（`query` / `deep_recall` / `summarize` 等）只在 debug/fallback。生成配置：
 
 ```bash
 cbrain mcp-config --http
