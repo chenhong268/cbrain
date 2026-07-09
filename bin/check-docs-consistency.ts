@@ -536,15 +536,23 @@ const DEEP_RECALL_ADVANCED_CUES = /(advanced|fine-grained|fine\s+grained|fallbac
 // Check 1 exception: an excluded tool mentioned in an advanced / debug / internal /
 // fallback / 禁止 context is a legitimate non-default mention (e.g. recall-resolver
 // teaching "advanced escape hatch: summarize"), not default-first-choice drift.
-const EXCLUDED_ALLOWED_CUES = /(advanced|fine-grained|fine\s+grained|fallback|direct-call\s+only|escape\s+hatch|debug|internal|降级|精细参数|高级|追问|关键词定位|EXPERIMENTAL|禁止|❌|仅限|仅当|不适用|不要|不能|stub|前置|降级链|上下文发现)/i;
+const EXCLUDED_ALLOWED_CUES = /(advanced|fine-grained|fine\s+grained|fallback|direct-call\s+only|escape\s+hatch|debug|internal|降级|精细参数|高级|追问|关键词定位|EXPERIMENTAL|禁止|❌|仅限|仅当|不适用|不要|不能|stub|前置|降级链|上下文发现|maintenance|只读|specialized|pipeline|周报|维护)/i;
+
+/** #316 — low-level recall alternatives Agents might pick INSTEAD of the cbrain_recall
+ *  front door. Check 1 targets ONLY these (plus deep_recall via Check 2). Specialized
+ *  tools (provenance / merge / profile / insight / timeline / knowledge-map / discovery /
+ *  maintenance) are deliberately NOT in this set — they are purpose-built, not
+ *  cbrain_recall substitutes, so teaching them is legitimate. */
+const RECALL_ALTERNATIVES = new Set([
+  "query", "get_chunks", "expand_entity", "summarize", "brain_storm",
+  "dossier", "agentic_research", "get_links",
+]);
 
 export function checkAgentContractTools(tools: Set<string>, skillsDir: string): CheckResult[] {
   const out: CheckResult[] = [];
   if (!existsSync(skillsDir)) {
     return [{ check: "agent-contract tools", passed: true, detail: "no skills/ dir" }];
   }
-  const excluded = new Set(tools);
-  for (const t of AGENT_ALLOWLIST) excluded.delete(t);
 
   for (const f of readdirSync(skillsDir).filter((x) => x.endsWith(".md"))) {
     const text = readFileSync(join(skillsDir, f), "utf-8");
@@ -555,7 +563,7 @@ export function checkAgentContractTools(tools: Set<string>, skillsDir: string): 
       // Check 1 — excluded tool as first choice (allowed if the line frames it as
       // advanced / debug / internal / fallback / 禁止 — a legitimate non-default mention)
       for (const r of refs) {
-        if (excluded.has(r) && !EXCLUDED_ALLOWED_CUES.test(line)) {
+        if (RECALL_ALTERNATIVES.has(r) && !EXCLUDED_ALLOWED_CUES.test(line)) {
           out.push({
             check: `agent-contract @skills/${f}:${i + 1}`,
             passed: false,
@@ -727,6 +735,7 @@ function main(): void {
     ...checkToolReferences(docs, new Set(tools.map((t) => t.name))),
     ...checkSkillsToolRefs(docs, new Set(tools.map((t) => t.name))),
     ...checkToolDescriptions(tools),
+    ...checkAgentContractTools(new Set(tools.map((t) => t.name)), join(PROJECT_DIR, "skills")),
     ...checkSections(docs, tools, cli),
   ];
 

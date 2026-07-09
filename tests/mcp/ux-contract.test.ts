@@ -120,23 +120,17 @@ describe("C3: query is foundational, not user-facing", () => {
     expect(source).toMatch(/底层|调试|debug|仅限/);
   });
 
-  test("query description mentions deep_recall as preferred", () => {
+  test("query description points natural language to cbrain_recall front door (#316)", () => {
     const source = fs.readFileSync(path.join(TOOLS_DIR, "search.ts"), "utf-8");
-    expect(source).toContain("deep_recall");
+    expect(source).toContain("cbrain_recall");
+    // #316: query must NOT route NL to deep_recall/summarize anymore — cbrain_recall is the front door
+    expect(source).not.toMatch(/事实回忆\s*→\s*deep_recall|全貌\s*→\s*summarize/);
   });
 
-  test("query description lists routing alternatives", () => {
-    const source = fs.readFileSync(path.join(TOOLS_DIR, "search.ts"), "utf-8");
-    // Must mention the routing table: 事实回忆 → deep_recall, etc.
-    expect(source).toMatch(/summarize/);
-    expect(source).toMatch(/recall_episode/);
-    expect(source).toMatch(/get_org_tree/);
-  });
-
-  test("RESOLVER catch-all routes natural language to deep_recall, not query", () => {
+  test("RESOLVER catch-all routes natural language to cbrain_recall, not query/deep_recall (#316)", () => {
     const resolver = fs.readFileSync(path.join(SKILLS_DIR, "RESOLVER.md"), "utf-8");
-    // Natural language catch-all must use [deep_recall] flag, not bare query.md
-    expect(resolver).toMatch(/\[deep_recall\]/);
+    // Natural language catch-all must use [cbrain_recall] flag (front door), not [deep_recall]/bare query.md
+    expect(resolver).toMatch(/\[cbrain_recall\]/);
     expect(resolver).toMatch(/\[keyword\]/);
   });
 

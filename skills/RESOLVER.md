@@ -114,7 +114,7 @@
 - 洞察、insight、discovery、发现 → query.md [discovery]
 - ⚠️ 展示约束：discovery 输出只使用 `display`、`cards`、`summary` 字段
 - ⚠️ 禁止暴露：score、distance、shared_neighbors、debug、_debug、candidate、filter、图距离、跳、桥接、候选、过滤
-- ⚠️ `run_discovery` 默认返回用户可读摘要（最多 3 条卡片），不需要二次格式化
+- ⚠️ `run_discovery` 返回用户可读摘要（最多 3 条卡片），不需要二次格式化
 
 ### Timeline
 - 时间线、事件、发生了什么、历史记录、什么时候 → review.md
@@ -122,7 +122,7 @@
 
 ### Tags
 - 打个标签、加标签、标签管理、按标签找 → ingest.md
-- 批量打标、tag → ingest.md
+- 批量打标签、批量打标 → ingest.md
 
 ### Hierarchy — 组织层级
 - 下属、谁向X汇报、X的团队、X管谁、直属下属 → get_org_tree(direction=down)
@@ -148,11 +148,11 @@
 - 信号路由、目的地判断 → signal-router.md
 
 ### Knowledge Map（知识图谱概览，只读）
-- 知识图谱、知识地图、图谱概览、图谱长什么样 → read_knowledge_map({ include_raw: false })
-- 主要领域、哪些领域、领域分布 → read_knowledge_map({ include_raw: false })
-- 成熟领域、成长中领域、稀疏领域 → read_knowledge_map({ include_raw: false })
-- 桥接节点、跨领域的条目、连接多个领域 → read_knowledge_map({ include_raw: false })
-- 孤岛条目、孤立条目、弱连接条目、高提及但孤立 → read_knowledge_map({ include_raw: false })
+- 知识图谱、知识地图、图谱概览、图谱长什么样 → read_knowledge_map（只读 maintenance，{ include_raw: false }）
+- 主要领域、哪些领域、领域分布 → read_knowledge_map（只读 maintenance，{ include_raw: false }）
+- 成熟领域、成长中领域、稀疏领域 → read_knowledge_map（只读 maintenance，{ include_raw: false }）
+- 桥接节点、跨领域的条目、连接多个领域 → read_knowledge_map（只读 maintenance，{ include_raw: false }）
+- 孤岛条目、孤立条目、弱连接条目、高提及但孤立 → read_knowledge_map（只读 maintenance，{ include_raw: false }）
 - ⚠️ 只读最近一次生成的报告（dream 周报或 `cbrain knowledge-map`）；不要在 read 调用里重算图谱
 
 ### Brain Ops (Protocol)
