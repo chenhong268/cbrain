@@ -9,6 +9,12 @@ function readDoc(name: string): string {
   return readFileSync(join(DOCS_DIR, name), "utf-8");
 }
 
+const DOCS_ROOT = join(import.meta.dir, "..", "..", "docs");
+
+function readTopDoc(name: string): string {
+  return readFileSync(join(DOCS_ROOT, name), "utf-8");
+}
+
 describe("getPreflightCheckIds", () => {
   test("returns exactly the ids of DEFAULT_PREFLIGHT_CHECKS, in order", () => {
     expect([...getPreflightCheckIds()]).toEqual(DEFAULT_PREFLIGHT_CHECKS.map((c) => c.id));
@@ -67,6 +73,22 @@ describe("preflight release docs consistency", () => {
     const audit = readDoc("v2-preflight-bug-audit.md");
     for (const id of IDS) {
       expect(audit, `bug audit missing check id ${id}`).toContain(id);
+    }
+  });
+
+  test("performance doc lists every preflight check id", () => {
+    const perf = readTopDoc("performance.md");
+    for (const id of IDS) {
+      expect(perf, `performance doc missing check id ${id}`).toContain(id);
+    }
+  });
+
+  test("performance doc states the real gate count everywhere", () => {
+    const perf = readTopDoc("performance.md");
+    const counts = [...perf.matchAll(/(\d+)\s*个\s*gate/g)].map((m) => Number(m[1]));
+    expect(counts.length, "performance doc should state the preflight gate count").toBeGreaterThan(0);
+    for (const c of counts) {
+      expect(c, `performance doc states ${c} gates, expected ${IDS.length}`).toBe(IDS.length);
     }
   });
 });
