@@ -15,6 +15,7 @@ import { classifyContentType } from "../../core/ingestion/content-classifier.js"
 // path containing "/": covers @/abs/path, @vault/..., @brain/..., "见 @vault/...".
 // Does NOT match test@example.com (@ mid-token) or @username (no separator).
 const FILE_REFERENCE_RE = /(^|\s)@[^\s@]*\//;
+export const MCP_INGEST_PAGE_TYPES = ["record", "insight"] as const;
 
 function assertNoFileReference(content: string): void {
   if (FILE_REFERENCE_RE.test(content)) {
@@ -33,7 +34,7 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
       type: z.enum(["markdown", "text"]).optional().describe("Content type (auto-detected from frontmatter if omitted)"),
       title: z.string().max(500).optional().describe("Title for this page — derive from content if not obvious"),
       tags: z.array(z.string().max(200)).optional().describe("Tags to apply"),
-      pageType: z.enum(["record", "insight"]).optional().default("record").describe("Page type: record (doc/report/note) or insight. Entities/concepts are auto-classified via NER."),
+      pageType: z.enum(MCP_INGEST_PAGE_TYPES).optional().default("record").describe("Page type: record (doc/report/note) or insight. Entities/concepts are auto-classified via NER."),
       skipNer: z.boolean().optional().default(false).describe("Skip LLM entity extraction — use for simple entries"),
       allowDuplicate: z.boolean().optional().default(false).describe("允许重复内容（正常会被去重跳过）"),
       nerMode: z.enum(["sync", "defer", "off"]).optional().describe("覆盖 NER 模式（默认走 config/env）。一般无需设置。"),

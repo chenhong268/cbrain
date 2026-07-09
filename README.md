@@ -159,7 +159,7 @@ SearXNG 不是核心依赖。默认不配置时，CBrain 的本地写入、向�
 ```bash
 cbrain init                              # 新建一个大脑（配置 + 目录 + 数据库）
 cbrain status                            # 看一眼：多少页、多少关系、按类型分布
-cbrain dream                             # 全量维护：sync → enrich → cleanup → health → report（带锁）
+cbrain dream                             # 离线一次性全量维护；serve 在跑时改走 HTTP /mcp wrapper
 cbrain ner-backfill                      # 处理延迟 NER job（serve/watcher 活跃时拒绝）
 cbrain config                            # 查看当前配置
 cbrain config --set ner.enabled=false    # 修改配置
@@ -197,7 +197,7 @@ cbrain revert <slug> <版本号>            # 回滚到某个历史版本
 
 ### 维护与诊断
 ```bash
-cbrain dream                             # 夜间全量维护：sync → enrich → cleanup → health → report
+cbrain dream                             # 离线一次性维护；cron/多 Agent 场景不要裸跑
 cbrain sync                              # 把 vault 文件同步到索引
 cbrain enrich                            # 实体重要性升级
 cbrain health                            # 14 维度健康检查，输出报告
@@ -282,18 +282,18 @@ Anti-patterns:
 
 **2. Storage Routing（存储路由）**
 
-When saving content, route to the correct page type:
+When saving content through MCP `ingest`, use only the supported write page types:
 
 | Content | Page type |
 |:--------|:----------|
-| People / companies / products / organizations | `entity` |
-| Recognized methodologies / theories / models | `concept` |
-| Events / articles / notes / meetings | `record` |
+| Events / articles / notes / meetings / source text | `record` |
 | System-generated analysis / discoveries | `insight` |
 
-- Unsure between entity vs concept → pick `entity` (easier to reclassify later)
-- ❌ Don't treat generic business jargon as concepts
-- ❌ Don't skip NER — content like poetry, philosophy often contains extractable names
+People / companies / products / organizations and methodologies / theories / models are extracted from `record` content by NER and the resolver; do **not** pass `entity` / `concept` as MCP `ingest.pageType`.
+
+- Unsure between record vs insight → pick `record`
+- ❌ Don't use `entity` / `concept` / `event` / `source` as MCP `ingest.pageType`
+- ❌ Don't skip NER unless the entry is intentionally plain text without facts
 
 **3. Session Tracking（会话追踪）**
 
@@ -346,7 +346,9 @@ curl -s http://127.0.0.1:3399/tools/query -d '{"query":"人物A"}'
 curl -s http://127.0.0.1:3399/tools/status -d '{}'
 ```
 
-### MCP (stdio)
+### MCP stdio (single-Agent local development only)
+
+For multi-Agent / Hermes / persistent-runtime use, prefer HTTP `/mcp` via `cbrain mcp-config --http`. stdio spawns a separate `cbrain serve` for that Agent and must not be used alongside a shared HTTP writer.
 
 Add to your Agent's MCP config:
 

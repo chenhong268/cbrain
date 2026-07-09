@@ -32,6 +32,7 @@ import { registerAllTools } from "../src/mcp/register.js";
 import { buildProgram } from "../src/cli/program.js";
 import { resolveSyncMode, type SyncOptions } from "../src/cli/commands/reindex.js";
 import { AGENT_ALLOWLIST } from "../src/mcp/tool-profiles.js";
+import { MCP_INGEST_PAGE_TYPES } from "../src/mcp/tools/ingest.js";
 
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION: string = JSON.parse(readFileSync(join(PROJECT_DIR, "package.json"), "utf-8")).version;
@@ -617,6 +618,40 @@ export function checkToolDescriptions(tools: ToolInfo[]): CheckResult[] {
   return out;
 }
 
+/** #318 — MCP ingest.pageType docs must match the registered schema.
+ *  MCP ingest accepts only record|insight. Entity/concept extraction happens
+ *  through NER and resolver flows, not by passing entity/concept as pageType.
+ *  This intentionally checks hand-written docs, not generated schemas. */
+export function checkIngestPageTypeDocs(docs: Map<string, string>): CheckResult[] {
+  const out: CheckResult[] = [];
+  const supported = new Set<string>(MCP_INGEST_PAGE_TYPES);
+  for (const [file, raw] of docs) {
+    const lines = stripAutoGen(raw).split("\n");
+    lines.forEach((line, i) => {
+      if (!line.includes("pageType")) return;
+      if (line.includes("<!-- docs-consistency:ignore-page-type -->")) return;
+      const quotedValues = [...line.matchAll(/"([^"]+)"/g)].map((m) => m[1]).filter((value) => value !== "pageType");
+      for (const value of quotedValues) {
+        if (!supported.has(value)) {
+          out.push({
+            check: `ingest.pageType @${file}:${i + 1}`,
+            passed: false,
+            detail: `MCP ingest.pageType 文档声称支持 "${value}"，实际只支持 ${MCP_INGEST_PAGE_TYPES.map((v) => `"${v}"`).join(" | ")}`,
+          });
+        }
+      }
+    });
+  }
+  if (out.length === 0) {
+    out.push({
+      check: "ingest.pageType contract",
+      passed: true,
+      detail: `MCP ingest.pageType docs match schema: ${MCP_INGEST_PAGE_TYPES.join("|")}`,
+    });
+  }
+  return out;
+}
+
 // ── Auto-generated index sections ──────────────────────────────────────────
 
 // docsFile is relative to DOCS_DIR; the in-memory docs map keys it as `docs/<docsFile>`.
@@ -736,6 +771,7 @@ function main(): void {
     ...checkSkillsToolRefs(docs, new Set(tools.map((t) => t.name))),
     ...checkToolDescriptions(tools),
     ...checkAgentContractTools(new Set(tools.map((t) => t.name)), join(PROJECT_DIR, "skills")),
+    ...checkIngestPageTypeDocs(docs),
     ...checkSections(docs, tools, cli),
   ];
 

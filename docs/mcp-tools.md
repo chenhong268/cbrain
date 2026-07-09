@@ -4,7 +4,30 @@
 
 ## 接入方式
 
-在 Agent 的 MCP 配置中添加：
+多 Agent / Hermes / 常驻服务场景推荐 HTTP `/mcp`。先启动唯一 writer：
+
+```bash
+cbrain serve --http --port 3399
+```
+
+然后生成 Agent 配置：
+
+```bash
+cbrain mcp-config --http
+```
+
+```json
+{
+  "mcpServers": {
+    "cbrain": {
+      "url": "http://127.0.0.1:3399/mcp",
+      "headers": { "X-CBrain-Tool-Profile": "agent" }
+    }
+  }
+}
+```
+
+stdio 只适合单 Agent 本地开发，且不能和常驻 HTTP writer 并行：
 
 ```json
 {
@@ -55,7 +78,7 @@
 | content | string | 是 | 要录入的内容 |
 | type | "text" \| "markdown" | 否 | 默认 text |
 | title | string | 建议 | 页面标题 |
-| pageType | "entity" \| "concept" \| "event" \| "record" \| "source" | 否 | 默认 record |
+| pageType | "record" \| "insight" | 否 | 默认 record；实体/概念由 NER 与 resolver 自动抽取，不作为 MCP `ingest.pageType` 传入 |
 | tags | string[] | 否 | 标签列表 |
 
 ### status

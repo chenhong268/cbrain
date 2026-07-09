@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   checkAgentContractTools,
+  checkIngestPageTypeDocs,
   checkToolDescriptions,
   type CheckResult,
 } from "../../bin/check-docs-consistency.js";
@@ -143,5 +144,31 @@ describe("checkToolDescriptions (#316)", () => {
   test("maintenance pipeline description passes (dream: sync → enrich → health)", () => {
     // `→` in non-query tool descriptions describes a maintenance pipeline, not NL routing.
     expect(fails(checkToolDescriptions([T("dream", "夜间维护：sync → enrich → seal → health → report。")]))).toBe(false);
+  });
+});
+
+describe("checkIngestPageTypeDocs (#318)", () => {
+  test("fails when docs claim unsupported MCP ingest pageType values", () => {
+    const docs = new Map<string, string>([[
+      "docs/mcp-tools.md",
+      '| pageType | "entity" | "concept" | "event" | "record" | "source" | 否 | 默认 record |',
+    ]]);
+    expect(fails(checkIngestPageTypeDocs(docs))).toBe(true);
+  });
+
+  test("passes when docs match the MCP ingest schema", () => {
+    const docs = new Map<string, string>([[
+      "docs/mcp-tools.md",
+      '| pageType | "record" | "insight" | 否 | 默认 record；实体/概念由 NER 自动抽取 |',
+    ]]);
+    expect(fails(checkIngestPageTypeDocs(docs))).toBe(false);
+  });
+
+  test("ignores explanatory prose without quoted enum claims", () => {
+    const docs = new Map<string, string>([[
+      "docs/mcp-tools.md",
+      "pageType 只控制记录类页面；实体和概念通过 NER / resolver 生成，不作为 MCP ingest pageType 传入。",
+    ]]);
+    expect(fails(checkIngestPageTypeDocs(docs))).toBe(false);
   });
 });

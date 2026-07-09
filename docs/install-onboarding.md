@@ -355,7 +355,7 @@ ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain/skills
 
 ## 第八步：启动服务
 
-### HTTP 模式（推荐用于开发调试）
+### HTTP 模式（推荐用于 Hermes / 多 Agent / 常驻服务）
 
 ```bash
 cbrain serve --http --port 3399
@@ -428,10 +428,11 @@ kill %1
 ### 定期维护
 
 ```bash
-cbrain sync       # vault → DB 同步（手动改了 vault 文件后跑一次）
-cbrain health     # 14 维度健康检查
-cbrain dream      # 一键夜间维护（备份+同步+充实+清理+健康检查）
+# serve --http 正在运行时，定期维护必须经 single-writer wrapper 走 HTTP /mcp
+CBRAIN_MCP_URL=http://127.0.0.1:3399/mcp bin/cbrain-maintenance.sh dream
 ```
+
+裸 `cbrain dream` / `cbrain sync` / `cbrain enrich` 只用于离线一次性维护：先停掉常驻 `serve --http`，确认没有其他 writer 后再手动执行。
 
 ---
 
