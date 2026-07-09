@@ -28,7 +28,7 @@
 - 这件事有证据吗、这个结论确认过吗 → query.md [provenance]
 - 这条记忆可靠吗、可信吗、这个来源可靠吗 → query.md [provenance]
 - ⚠️ 区分 grounded vs provenance："有依据吗/是不是真的/讨论过吗" → 走 grounded（问有没有），"依据从哪来/来源是什么/谁说的" → 走 provenance（问来源）
-- ⚠️ 不适用：普通内容回忆（"当时怎么设计的"）→ 走 deep_recall
+- ⚠️ 不适用：普通内容回忆（"当时怎么设计的"）→ 走 cbrain_recall
 
 ### Episodic Person Recall（情境找人，优先于通用搜索）
 - 那个人是谁、哪个人、叫什么来着、想不起名字、忘了名字 → query.md [episodic]
@@ -37,7 +37,7 @@
 - ⎿示例：去年团建见过谁、上个月聚餐认识的那个、项目上线一起干的人、主题C相关的人
 - ⎿示例（关系事件）：想不起名字了，之前和人物A、人物B一起旅行的另外几个人、忘了叫什么就是和人物A一起做项目的那个人
 - ⚠️ 不适用：用户提到具体人名（"人物A认识谁"）→ 走 query/connect；纯关系查询（"A和B什么关系"）→ 走 connect
-- ⚠️ 区分：已知人物+共同事件+**找别人**→episodic；已知人物+共同事件+**问经历/内容**→deep_recall
+- ⚠️ 区分：已知人物+共同事件+**找别人**→episodic；已知人物+共同事件+**问经历/内容**→cbrain_recall
 
 ### Relationship Analysis
 - 什么关系、有什么关系、怎么认识的、关联、connect → connect.md
@@ -48,14 +48,14 @@
 - 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
 - 深度了解、知识总览、全景 → review.md
 
-### Natural Recall（默认路由 — 自然语言问题不走 query）
-- 谁、是谁、什么是、是什么、介绍一下 → query.md [deep_recall]
-- 查询、搜索、查找、查一下、找一下 → query.md [deep_recall]
-- 任何自然语言问题（不是精确关键词）→ query.md [deep_recall]
+### Natural Recall（默认路由 — 自然语言问题走 cbrain_recall 前门）
+- 谁、是谁、什么是、是什么、介绍一下 → query.md [cbrain_recall]
+- 查询、搜索、查找、查一下、找一下 → query.md [cbrain_recall]
+- 任何自然语言问题（不是精确关键词）→ query.md [cbrain_recall]
 
 ### Debug / Keyword Lookup（query 仅限此场景）
 - 精确关键词定位、debug 索引、确认某关键词 → query.md [keyword]
-- deep_recall 降级链第二步 → query.md [keyword]
+- cbrain_recall 降级链第二步 → query.md [keyword]
 
 ### Graph
 - 图谱、链接到 → connect.md
@@ -101,8 +101,8 @@
 - A、B、C 之间有什么内在联系 → query.md [agentic_research detail=normal]
 - 这个结论依据够不够/有哪些证据和缺口 → query.md [agentic_research detail=normal]
 - 复杂复盘需要多步推理和交叉验证 → query.md [agentic_research detail=full]
-- ⚠️ 不适用：单一实体查找、简单关键词搜索、找人、内容回忆 → 走 query / deep_recall / recall_episode
-- ⚠️ 不适用：核查确认 → 走 deep_recall(grounded=true)
+- ⚠️ 不适用：单一实体查找、简单关键词搜索、找人、内容回忆 → 走 query / cbrain_recall / recall_episode
+- ⚠️ 不适用：核查确认 → 走 cbrain_recall（grounded 内部分发，detail:"brief"）
 - ⚠️ 不适用：两人关系查询 → 走 graph_query / connect
 
 ### Merge & Dedup
@@ -129,7 +129,7 @@
 - 上级、X向谁汇报、X的老板、谁的下属包含X → get_org_tree(direction=up)
 - 汇报线、汇报关系、报告链、reporting line → get_org_tree(direction=both)
 - 组织架构、组织结构、组织树、某组织下面有哪些人 → get_org_tree(direction=down)
-- ⚠️ 禁止先跑 deep_recall / query / graph_query 再拼层级 — 直接调 get_org_tree
+- ⚠️ 层级查询直接调 get_org_tree（或走 cbrain_recall，内部 hierarchy 分发）；禁止用 query / graph_query 手动拼层级
 - ⚠️ get_hierarchy 保留为单点上下文工具（manager+subordinates+peers），不用于树形遍历
 - ⚠️ 两人关系（"A和B什么关系"）走 connect 分支，不走这里
 
