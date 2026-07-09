@@ -106,6 +106,10 @@ export const DEFAULT_PREFLIGHT_CHECKS: readonly PreflightCheckSpec[] = [
   },
 ];
 
+export function getPreflightCheckIds(): readonly string[] {
+  return DEFAULT_PREFLIGHT_CHECKS.map((c) => c.id);
+}
+
 function tail(text: string, maxChars = 2000): string {
   const sanitized = text
     .replaceAll(PROJECT_DIR, "<project>")
