@@ -514,7 +514,12 @@ function checkSkillsToolRefs(docs: Map<string, string>, tools: Set<string>): Che
 function extractToolRefs(line: string): string[] {
   const tools = new Set<string>();
   for (const m of line.matchAll(/`([a-z_][a-z0-9_]*)`/g)) tools.add(m[1]);
-  for (const m of line.matchAll(/(?<![.\w])([a-z_][a-z0-9_]*)(?![.\w])/g)) tools.add(m[1]);
+  // Bare names, excluding those followed by `.` (e.g. query.md) or parameter-position
+  // chars (`,)}:`) so `cbrain_recall({ query, detail })` does not read the `query`
+  // parameter as the `query` tool. Also skip `[flag]` bracketed mode flags and
+  // trigger-word lists separated by `、` (e.g. "dossier、RAGmap" — dossier is a user
+  // trigger word there, not a tool call).
+  for (const m of line.matchAll(/(?<![.\w\[])([a-z_][a-z0-9_]*)(?![.\w,)}:\]、])/g)) tools.add(m[1]);
   return [...tools];
 }
 
@@ -528,6 +533,10 @@ function extractToolRefs(line: string): string[] {
 const AGENT_CONTRACT_IGNORE = "<!-- docs-consistency:ignore-agent-contract -->";
 const FIRST_CHOICE_CUES = /(首选|优先|默认|第一选择|一步搞定|default\s+query\s+tool|→)/;
 const DEEP_RECALL_ADVANCED_CUES = /(advanced|fine-grained|fine\s+grained|fallback|direct-call\s+only|direct\s+call\s+only|高级|精细参数|降级|escape\s+hatch)/i;
+// Check 1 exception: an excluded tool mentioned in an advanced / debug / internal /
+// fallback / 禁止 context is a legitimate non-default mention (e.g. recall-resolver
+// teaching "advanced escape hatch: summarize"), not default-first-choice drift.
+const EXCLUDED_ALLOWED_CUES = /(advanced|fine-grained|fine\s+grained|fallback|direct-call\s+only|escape\s+hatch|debug|internal|降级|精细参数|高级|追问|关键词定位|EXPERIMENTAL|禁止|❌|仅限|仅当|不适用|不要|不能|stub|前置|降级链|上下文发现)/i;
 
 export function checkAgentContractTools(tools: Set<string>, skillsDir: string): CheckResult[] {
   const out: CheckResult[] = [];
@@ -543,9 +552,10 @@ export function checkAgentContractTools(tools: Set<string>, skillsDir: string): 
       if (line.includes(AGENT_CONTRACT_IGNORE)) return;
       if (!FIRST_CHOICE_CUES.test(line)) return;
       const refs = extractToolRefs(line);
-      // Check 1 — excluded tool as first choice
+      // Check 1 — excluded tool as first choice (allowed if the line frames it as
+      // advanced / debug / internal / fallback / 禁止 — a legitimate non-default mention)
       for (const r of refs) {
-        if (excluded.has(r)) {
+        if (excluded.has(r) && !EXCLUDED_ALLOWED_CUES.test(line)) {
           out.push({
             check: `agent-contract @skills/${f}:${i + 1}`,
             passed: false,

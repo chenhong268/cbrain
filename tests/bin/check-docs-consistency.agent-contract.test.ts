@@ -100,6 +100,14 @@ describe("checkAgentContractTools (#316)", () => {
     const dir = withSkills({ "a.md": "- 优先用 query <!-- docs-consistency:ignore-agent-contract -->\n" });
     expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(false);
   });
+  test("Check 1 passes: excluded tool framed as advanced escape hatch", () => {
+    const dir = withSkills({ "a.md": "- → advanced escape hatch：summarize（debug/internal profile 工具）\n" });
+    expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(false);
+  });
+  test("Check 1 passes: query as a parameter name is not the query tool", () => {
+    const dir = withSkills({ "a.md": "- 默认 cbrain_recall({ query, detail: \"brief\" })\n" });
+    expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(false);
+  });
   test("clean skills dir passes", () => {
     const dir = withSkills({ "a.md": "- 首选 cbrain_recall\n" });
     expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(false);
