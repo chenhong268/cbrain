@@ -394,3 +394,98 @@ describe("buildAttentionQueue stale gate (#315)", () => {
     expect(q.summary.hiddenStale).toBe(0);
   });
 });
+
+describe("buildAttentionQueue audit summary (#319)", () => {
+  const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z
+  const OLD = "2026-05-01 00:00:00";          // well outside FRESH_DAYS
+  const RECENT = "2026-07-05 00:00:00";       // inside FRESH_DAYS
+
+  test("audit counts partition the ranked set exactly; breakdowns sum to rankedInputCount", () => {
+    // 9 raw drafts; dStale+dStale2 share source_type -> merge into 1 ranked item.
+    const hBlocked = healthDraftAt("blocked", "high", "d-blk");
+    const hAuto = healthDraftAt("auto_repairable", "medium", "d-auto");
+    const hNeeds1 = healthDraftAt("needs_review", "high", "d-nr1");
+    const hNeeds2 = healthDraftAt("needs_review", "high", "d-nr2");
+    const hObserve = healthDraft("observe_only", "low");
+    const dStale = discoveryDraft("high", "similar_entity", 1, { detectedAt: OLD, lastDetectedAt: OLD });
+    const dStale2 = discoveryDraft("high", "similar_entity", 1, { detectedAt: OLD, lastDetectedAt: OLD });
+    const dRecurring = discoveryDraft("high", "similar_entity_b", 3, { detectedAt: OLD, lastDetectedAt: OLD });
+    const dFresh = discoveryDraft("high", "similar_entity_c", 1, { detectedAt: RECENT, lastDetectedAt: RECENT });
+
+    const q = buildAttentionQueue(
+      [hBlocked, hAuto, hNeeds1, hNeeds2, hObserve],
+      [dStale, dStale2, dRecurring, dFresh],
+      { includeRaw: true, now: NOW },
+    );
+
+    expect(q.raw).not.toBeNull();
+    const audit = q.raw!.audit;
+    expect(audit).toBeDefined();
+
+    // pre-merge vs post-merge (dedup gap = 1 from the dStale merge)
+    expect(audit.totalInput).toBe(9);
+    expect(audit.rankedInputCount).toBe(8);
+    expect(audit.rankedInputCount).toBe(q.raw!.allItemsRanked.length);
+
+    // outcome partition: exact, anchored on post-merge rankedInputCount
+    expect(audit.visibleCount).toBe(3);
+    expect(audit.hiddenObserveOnlyCount).toBe(1);
+    expect(audit.hiddenStaleCount).toBe(1);
+    expect(audit.suppressedBeyondCapCount).toBe(3);
+    expect(
+      audit.visibleCount + audit.hiddenObserveOnlyCount + audit.hiddenStaleCount + audit.suppressedBeyondCapCount,
+    ).toBe(audit.rankedInputCount);
+    expect(audit.rankedInputCount).toBeLessThanOrEqual(audit.totalInput);
+
+    // breakdowns: post-merge basis, each sums to rankedInputCount
+    expect(audit.bySource.health + audit.bySource.discovery).toBe(audit.rankedInputCount);
+    expect(audit.bySource.health).toBe(5);
+    expect(audit.bySource.discovery).toBe(3);
+    expect(
+      audit.bySeverity.blocked + audit.bySeverity.auto_repairable +
+        audit.bySeverity.needs_review + audit.bySeverity.observe_only,
+    ).toBe(audit.rankedInputCount);
+    expect(audit.bySeverity.blocked).toBe(1);
+    expect(audit.bySeverity.auto_repairable).toBe(1);
+    expect(audit.bySeverity.needs_review).toBe(5);
+    expect(audit.bySeverity.observe_only).toBe(1);
+    expect(
+      audit.byFreshness.fresh + audit.byFreshness.recurring + audit.byFreshness.stale,
+    ).toBe(audit.rankedInputCount);
+    expect(audit.byFreshness.fresh).toBe(6);
+    expect(audit.byFreshness.recurring).toBe(1);
+    expect(audit.byFreshness.stale).toBe(1);
+
+    // cross-check vs the always-on summary
+    expect(audit.totalInput).toBe(q.summary.totalInput);
+    expect(audit.visibleCount).toBe(q.summary.shownCount);
+    expect(audit.hiddenObserveOnlyCount).toBe(q.summary.hiddenObserveOnly);
+    expect(audit.hiddenStaleCount).toBe(q.summary.hiddenStale);
+    expect(audit.suppressedBeyondCapCount).toBe(q.summary.suppressedBeyondTop3);
+
+    // AC #6: recurring counted as recurring, NOT hidden stale
+    expect(audit.byFreshness.recurring).toBe(1);
+    expect(audit.hiddenStaleCount).toBe(1); // only the merged stale discovery
+    // AC #7: health is freshness-immune — all 5 health items count as fresh
+    expect(audit.byFreshness.fresh).toBeGreaterThanOrEqual(5);
+  });
+
+  test("audit absent when includeRaw is false (default surface clean)", () => {
+    const q = buildAttentionQueue([healthDraft("needs_review", "high")], []);
+    expect(q.raw).toBeNull();
+  });
+
+  test("fresh blocker stays visible alongside stale + observe; audit counts it visible", () => {
+    const q = buildAttentionQueue(
+      [healthDraftAt("blocked", "high", "d-blk"), healthDraft("observe_only", "low")],
+      [discoveryDraft("high", "similar_entity", 1, { detectedAt: OLD, lastDetectedAt: OLD })],
+      { includeRaw: true, now: NOW },
+    );
+    expect(q.items).toHaveLength(1);
+    expect(q.items[0].severity).toBe("blocked");
+    expect(q.raw!.audit.visibleCount).toBe(1);
+    expect(q.raw!.audit.hiddenObserveOnlyCount).toBe(1);
+    expect(q.raw!.audit.hiddenStaleCount).toBe(1);
+    expect(q.raw!.audit.suppressedBeyondCapCount).toBe(0);
+  });
+});

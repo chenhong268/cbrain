@@ -93,11 +93,33 @@ export interface AttentionQueueSummary {
   hiddenStale: number;
 }
 
+/**
+ * Scalar-only attention audit summary (#319). Pure counts over the post-merge
+ * ranked set; no slugs, paths, scores, dedup keys, or refs. Surfaced only under
+ * raw.audit (include_raw=true). Breakdowns partition the SAME ranked set as the
+ * outcome buckets, so each breakdown sums to rankedInputCount.
+ */
+export interface AttentionAuditSummary {
+  /** Pre-merge: raw drafts entering buildAttentionQueue (== summary.totalInput). */
+  totalInput: number;
+  /** Post-merge: dedup/merged ranked set size (== raw.allItemsRanked.length). */
+  rankedInputCount: number;
+  visibleCount: number;
+  hiddenObserveOnlyCount: number;
+  hiddenStaleCount: number;
+  suppressedBeyondCapCount: number;
+  bySource: Record<"health" | "discovery", number>;
+  bySeverity: Record<RepairGroup, number>;
+  byFreshness: Record<Freshness, number>;
+}
+
 export interface AttentionQueueRaw {
   observeOnlyItems: NextAction[];
   allItemsRanked: NextAction[];
   /** Stale low-evidence items hidden by default; auditable under include_raw (#315). */
   staleItems: NextAction[];
+  /** Scalar-only audit summary (#319). Present whenever raw is built (includeRaw=true). */
+  audit: AttentionAuditSummary;
 }
 
 export interface AttentionQueue {
@@ -227,6 +249,49 @@ function dedupAndMerge(actions: NextAction[]): NextAction[] {
 }
 
 /**
+ * Pure audit derivation (#319). Counts the post-merge ranked set along three
+ * orthogonal dimensions (source / severity / freshness) and partitions it into
+ * four outcome buckets. Scalar-only: no slugs, paths, scores, or refs.
+ * `freshness` is assigned upstream by the classifyFreshness loop in
+ * buildAttentionQueue; the `?? "fresh"` guard is a TS-only safety net
+ * (classifyFreshness already fails open to fresh) and guarantees every ranked
+ * item is counted so the breakdown sums exactly to rankedInputCount.
+ */
+function computeAttentionAudit(
+  all: NextAction[],
+  observeOnly: NextAction[],
+  staleHidden: NextAction[],
+  shown: NextAction[],
+  suppressed: number,
+  totalInput: number,
+): AttentionAuditSummary {
+  const bySource: Record<"health" | "discovery", number> = { health: 0, discovery: 0 };
+  const bySeverity: Record<RepairGroup, number> = {
+    blocked: 0,
+    auto_repairable: 0,
+    needs_review: 0,
+    observe_only: 0,
+  };
+  const byFreshness: Record<Freshness, number> = { fresh: 0, recurring: 0, stale: 0 };
+  for (const a of all) {
+    bySource[a.source] += 1;
+    bySeverity[a.severity] += 1;
+    byFreshness[a.freshness ?? "fresh"] += 1;
+  }
+  return {
+    totalInput,
+    rankedInputCount: all.length,
+    visibleCount: shown.length,
+    hiddenObserveOnlyCount: observeOnly.length,
+    hiddenStaleCount: staleHidden.length,
+    suppressedBeyondCapCount: suppressed,
+    bySource,
+    bySeverity,
+    byFreshness,
+  };
+}
+
+/**
  * Build the ranked, capped, observe-hiding attention queue. Pure: reads nothing,
  * writes nothing. Both inputs are draft arrays produced upstream by the existing
  * `buildActionCandidatesFromHealthPlan` / `buildActionCandidatesFromDiscoveries`
@@ -275,17 +340,24 @@ export function buildAttentionQueue(
   const shown = eligible.slice(0, cap);
   const suppressed = eligible.length - shown.length;
 
+  const totalInput = healthDrafts.length + discoveryDrafts.length;
+
   return {
     items: shown,
     summary: {
-      totalInput: healthDrafts.length + discoveryDrafts.length,
+      totalInput,
       shownCount: shown.length,
       hiddenObserveOnly: observeOnly.length,
       suppressedBeyondTop3: suppressed,
       hiddenStale: staleHidden.length,
     },
     raw: includeRaw
-      ? { observeOnlyItems: observeOnly, allItemsRanked: all, staleItems: staleHidden }
+      ? {
+          observeOnlyItems: observeOnly,
+          allItemsRanked: all,
+          staleItems: staleHidden,
+          audit: computeAttentionAudit(all, observeOnly, staleHidden, shown, suppressed, totalInput),
+        }
       : null,
   };
 }
