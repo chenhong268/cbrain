@@ -155,6 +155,7 @@ export function createHttpServer(ctx: ToolContext) {
 
   return {
     start(port: number) {
+      const startedAt = new Date().toISOString();
       const server = Bun.serve({
         port,
         hostname: "127.0.0.1",
@@ -175,7 +176,7 @@ export function createHttpServer(ctx: ToolContext) {
 
           // GET /health
           if (req.method === "GET" && url.pathname === "/health") {
-            return Response.json({ ok: true, tools: tools.size });
+            return Response.json({ ok: true, tools: tools.size, version, started_at: startedAt });
           }
 
           // GET /tools — list all tools
