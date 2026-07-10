@@ -71,6 +71,7 @@ const MAINTENANCE_ALLOWLIST = [
   "enrich",
   "writeback",
   "relation_audit",
+  "repair_known_relations",
   "job",
   "job_submit",
   "job_list",

@@ -95,7 +95,7 @@ describe("MCP Server", () => {
         "next_actions", "profile", "promote_discovery", "put_page", "query", "query_insights",
         "read_action_candidates", "read_discoveries", "read_knowledge_map", "read_project_state", "recall_episode", "record_feedback", "relation_audit", "reload_profile", "remove_alias",
         "remove_hierarchy", "remove_link", "remove_orphans", "remove_profile", "remove_tag",
-        "resolve_slugs", "revert_version", "run_action_candidates", "run_discovery", "set_hierarchy", "set_trust_state",
+        "repair_known_relations", "resolve_slugs", "revert_version", "run_action_candidates", "run_discovery", "set_hierarchy", "set_trust_state",
         "status", "summarize", "sync", "tag", "timeline", "update_action_candidate_status", "update_discovery_status", "update_profile", "wakeup_diff", "watcher_quarantine", "writeback",
       ]);
     });

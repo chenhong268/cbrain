@@ -330,7 +330,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 由 `cbrain serve` 注册输出自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen mcp-tools:start -->
-共 97 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
+共 98 个 MCP 工具（`cbrain serve` 注册输出，按字母序）。
 
 | 工具 | 说明 |
 |------|------|
@@ -414,6 +414,7 @@ mode: "traverse"（前向遍历）、"backlinks"（反向引用）、"related"�
 | `remove_orphans` | Remove database entries that have no corresponding vault file. |
 | `remove_profile` | Remove profile entries by ID. |
 | `remove_tag` | Remove a tag from a page. |
+| `repair_known_relations` | Maintenance-only bounded repair for Markdown Known Relations projection drift. |
 | `resolve_slugs` | Resolve page titles or partial names to slugs. |
 | `revert_version` | Revert a page to a specific version. |
 | `run_action_candidates` | 从 Discovery/Health 信号生成内部行动候选。不发送通知、不创建 issue、不执行修复。 |

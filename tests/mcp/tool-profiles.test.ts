@@ -50,11 +50,12 @@ describe("isToolAllowedForProfile", () => {
     }
   });
   test("maintenance includes dream + job_* + sync + health + relation_audit", () => {
-    for (const t of ["dream", "dream_status", "dream_reset", "sync", "health", "relation_audit",
+    for (const t of ["dream", "dream_status", "dream_reset", "sync", "health", "relation_audit", "repair_known_relations",
       "job", "job_submit", "job_list", "job_status", "job_cancel", "job_retry", "status", "wakeup_diff"]) {
       expect(isToolAllowedForProfile(t, "maintenance")).toBe(true);
     }
     expect(isToolAllowedForProfile("batch", "maintenance")).toBe(true);
+    expect(isToolAllowedForProfile("repair_known_relations", "agent")).toBe(false);
   });
   test("debug includes query + get_chunks + list_pages + provenance", () => {
     for (const t of ["query", "get_chunks", "list_pages", "get_links", "get_tags", "tag",

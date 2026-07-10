@@ -34,6 +34,7 @@ import { registerMergeWorkflowTools } from "./tools/merge-workflow.js";
 import { registerWakeupTools } from "./tools/wakeup.js";
 import { registerFrontdoorTools } from "./tools/frontdoor.js";
 import { registerProjectStateTools } from "./tools/project-state.js";
+import { registerKnownRelationsRepairTools } from "./tools/known-relations-repair.js";
 
 export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerFrontdoorTools(server, ctx);
@@ -70,4 +71,5 @@ export function registerAllTools(server: McpServer, ctx: ToolContext): void {
   registerMergeWorkflowTools(server, ctx);
   registerWakeupTools(server, ctx);
   registerProjectStateTools(server, ctx);
+  registerKnownRelationsRepairTools(server, ctx);
 }
