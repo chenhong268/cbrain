@@ -328,4 +328,20 @@ describe("next_actions MCP (#309)", () => {
     expect(payload.items.length).toBeLessThanOrEqual(3);
     expect(payload.display).not.toContain("entity/");
   });
+
+  test("include_raw=true path stays read-only: no DB write, no FS write, no candidate insert (#319)", async () => {
+    const { id } = db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    backdateDiscovery(db, id, 30); // stale candidate exercises the audit path
+    const beforePending = db.getUnseenDiscoveries(50).length;
+    const server = createServer(deps);
+    await getTools(server).next_actions.handler({ include_raw: true }); // default sources + raw
+    // no discovery status flip
+    expect(db.getUnseenDiscoveries(50).length).toBe(beforePending);
+    // no action candidate insertion
+    expect(db.getDiscoveriesByType("action_review_discovery", 50)).toHaveLength(0);
+    expect(db.getDiscoveriesByType("action_health_review", 50)).toHaveLength(0);
+    expect(db.getDiscoveriesByType("action_repair_preview", 50)).toHaveLength(0);
+    // no HealthChecker.checkAll FS write
+    expect(existsSync(join(deps.runtimePath, "health"))).toBe(false);
+  });
 });
