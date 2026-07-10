@@ -19,6 +19,7 @@ bun run gate:v2-preflight
 | `docs-consistency` | `bun run check:docs` | Public docs match current version, tools, commands, and install claims |
 | `resolver-pilot` | `bin/check-resolver-pilot.sh` | Agent routing and skill coverage do not drift silently |
 | `storage-consistency` | `bun run gate:consistency` | Storage fsck + repair-plan stays green (no silent drift) |
+| `recall-quality-matrix` | `bun run gate:recall-quality` | Anonymous Chinese, English, mixed, abstract, temporal, relationship, operational, and honest-empty recall lanes stay green |
 
 ## Report Contract
 

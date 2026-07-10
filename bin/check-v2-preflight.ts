@@ -104,6 +104,13 @@ export const DEFAULT_PREFLIGHT_CHECKS: readonly PreflightCheckSpec[] = [
     required: true,
     timeoutMs: 180_000,
   },
+  {
+    id: "recall-quality-matrix",
+    label: "Anonymous bilingual recall quality matrix",
+    command: ["bun", "run", "gate:recall-quality"],
+    required: true,
+    timeoutMs: 60_000,
+  },
 ];
 
 export function getPreflightCheckIds(): readonly string[] {

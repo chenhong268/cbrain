@@ -17,7 +17,7 @@
 |:-----|:------|:-----|:------|
 | `cbrain perf-diagnose` | 你这个 brain 的真实慢 journey 分布 | 运行时 telemetry（warm） | 日常诊断「为什么慢」 |
 | `bun run gate:perf` | 确定性合成基准（匿名 fixture） | 65 页 / 65 chunks（cold） | 发版前验收 |
-| `bun run gate:v2-preflight` | 发布聚合 go/no-go | 7 个 gate 合跑 | 发版 go/no-go |
+| `bun run gate:v2-preflight` | 发布聚合 go/no-go | 8 个 gate 合跑 | 发版 go/no-go |
 
 ## 1. `cbrain perf-diagnose` — 运行时观测
 
@@ -136,7 +136,7 @@ bun run gate:perf
 
 ## 3. `bun run gate:v2-preflight` — 发布聚合
 
-把 7 个 gate 合跑成一个 go/no-go 包，返回单份 JSON 报告：
+把 8 个 gate 合跑成一个 go/no-go 包，返回单份 JSON 报告：
 
 | check | 命令 | 超时 |
 |:------|:-----|:-----|
@@ -147,6 +147,7 @@ bun run gate:perf
 | docs-consistency | `bun run check:docs` | 60s |
 | resolver-pilot | `bash bin/check-resolver-pilot.sh` | 60s |
 | storage-consistency | `bun run gate:consistency` | 180s |
+| recall-quality-matrix | `bun run gate:recall-quality` | 60s |
 
 任一 required check fail → `no-go`，报告给出 `failed_stage` 和 `next_action`。这是 v2.0 发版的 go/no-go 总闸。
 
