@@ -90,6 +90,7 @@ export async function runDream(
   onStageProgress?: (stage: string, detail: unknown) => void,
   sharedPages?: PageManager,
   nerPipeline?: ContentPipeline,
+  entityFactsLlm?: LLMProvider,
 ): Promise<DreamReport> {
   if (!acquireLock(db)) {
     logger.warn("dream", "上次 dream 仍在执行中（或锁未释放），跳过");
@@ -216,7 +217,9 @@ export async function runDream(
   if (nerPipeline) {
     try {
       const stagePages = sharedPages ?? new PageManager(db, vaultPath, logger);
-      nerBackfillReport = await runNerBackfillStage(db, nerPipeline, stagePages);
+      nerBackfillReport = await runNerBackfillStage(db, nerPipeline, stagePages, {
+        entityFactsLlm,
+      });
       if (nerBackfillReport.processed > 0) logger.info("dream", `NER backfill: ${nerBackfillReport.processed} 页补抽`);
     } catch (e) {
       logger.warn("dream", `NER backfill 失败: ${(e as Error).message}`);

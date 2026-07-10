@@ -25,6 +25,7 @@ import {
 import type { PageSignals } from "../../core/maintenance/health-debt.js";
 import type { PageManager } from "../../core/page.js";
 import type { ContentPipeline } from "../../core/ingestion/pipeline.js";
+import type { LLMProvider } from "../../llm/provider.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -144,6 +145,7 @@ export interface NerBackfillDeps {
   pages: PageManager;
   pipeline: ContentPipeline;
   lockProbe: LockProbe;
+  llm?: LLMProvider;
 }
 
 export interface NerBackfillOptions {
@@ -185,7 +187,10 @@ export async function handleNerBackfill(
 
   const retriedFailed = opts.retryFailed ? retryFailedNerBackfillJobs(deps.db) : 0;
   const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
-  const counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, { maxItems: opts.limit });
+  const counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, {
+    maxItems: opts.limit,
+    entityFactsLlm: deps.llm,
+  });
   if (opts.json) {
     log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts }, null, 2));
   } else {
@@ -605,7 +610,7 @@ export function register(program: Command) {
       const nerPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,
         deps.llm && deps.embedding ? { llm: deps.llm, embedding: deps.embedding, lance: deps.lance } : undefined,
-        deps.lance, undefined, pages, nerPipeline);
+        deps.lance, undefined, pages, nerPipeline, deps.llm);
       if (report.locked) {
         console.log(`⚠️ Dream — ${report.timestamp.slice(0, 10)} 已跳过`);
         console.log(`  上次 dream 仍在执行中（30 分钟锁未释放），本次跳过`);
@@ -671,7 +676,7 @@ export function register(program: Command) {
         const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
 
         process.exitCode = await handleNerBackfill(
-          { db: deps.db, pages, pipeline, lockProbe },
+          { db: deps.db, pages, pipeline, lockProbe, llm: deps.llm },
           { limit, retryFailed: Boolean(opts.retryFailed), json: Boolean(opts.json) },
         );
       } finally {

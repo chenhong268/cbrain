@@ -28,12 +28,13 @@ export function shouldProcessNerForWritePath(body: string, pageType: string): bo
 
 export function submitDeferredNerForWritePath(
   submitter: DeferredNerSubmitter,
-  input: { slug: string; pageType: string; contentHash?: string },
+  input: { slug: string; pageType: string; contentHash?: string; kind?: "ner" | "entity_facts" },
 ): boolean {
   submitter.submitDeferredNer({
     slug: input.slug,
     pageType: input.pageType,
     contentHash: input.contentHash,
+    kind: input.kind,
   });
   return true;
 }

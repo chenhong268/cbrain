@@ -28,8 +28,19 @@ function schedulePageToolNer(
   pageType: string,
   mentionedSlugs: Set<string>,
 ): void {
-  if (!shouldProcessNerForWritePath(body, pageType)) return;
+  if (!body.trim()) return;
   const action = resolveNerAction(false, ctx.nerIngestMode, ctx.deferredNerSubmitter);
+  if (pageType.startsWith("entity/")) {
+    if (action === "defer") {
+      submitDeferredNerForWritePath(ctx.deferredNerSubmitter, {
+        slug,
+        pageType,
+        kind: "entity_facts",
+      });
+    }
+    return;
+  }
+  if (!shouldProcessNerForWritePath(body, pageType)) return;
   if (action === "defer") {
     submitDeferredNerForWritePath(ctx.deferredNerSubmitter, { slug, pageType });
     return;

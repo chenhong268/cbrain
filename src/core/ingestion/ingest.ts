@@ -10,7 +10,7 @@ import { LanceDBManager } from "../../storage/lancedb.js";
 import { NerEngine, isNerTimeoutError } from "./ner.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
-import { getFactFieldWhitelist, filterExtractedEntities, type ExtractedEntity } from "./ner.js";
+import { filterExtractedEntities, type ExtractedEntity } from "./ner.js";
 import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
 import { classifyPersonalTag } from "./personal-tag-classifier.js";
 import type { DeferredNerSubmitter } from "./ner-backfill.js";
@@ -20,6 +20,7 @@ import {
   type NerAction,
   type NerMode,
 } from "./ner-write-path.js";
+import { extractEntityFacts } from "./entity-facts.js";
 
 export interface IngestManagerOptions {
   /** #252: default NER mode for this manager (config/env resolved upstream). Default "sync". */
@@ -65,24 +66,6 @@ function takeSnapshot(slug: string, db: CBrainDB, pages: PageManager): PageSnaps
   const ingestHash = db.getPageIngestHash(slug);
   return { body: page.body, tags: [...(page.frontmatter.tags ?? [])], mentionLinks: links, ingestHash };
 }
-
-const ENTITY_FACTS_PROMPT = `You are a structured fact extractor. Given an entity's page content, extract concrete, verifiable facts as key-value pairs.
-
-## Field whitelist by entity type:
-- person: birthday, birthplace, english_name, current_title, organization, reports_to
-- company: location, industry, founded_year
-- product: generic_name, brand_name
-
-## Rules:
-- Every fact MUST have an evidence field (verbatim quote from source)
-- Do NOT infer or fabricate — only extract explicitly stated facts
-- Skip fields not in the whitelist
-- confidence: 0.0-1.0
-
-## Output (JSON only):
-{"facts": [{"field": "field name", "value": "value", "confidence": 0.9, "evidence": "verbatim quote"}]}
-
-Return ONLY valid JSON.`;
 
 /** 仅用于 person 快捷路由的保守门控：明显组织/团队标签（包含匹配，覆盖中英文）。
  *  标签可能在候选名前（组织A）或后（区域组织），故用包含而非后缀匹配。
@@ -357,50 +340,6 @@ export class IngestManager {
     }
   }
 
-  /**
-   * For entity pages: extract structured facts from body into frontmatter.
-   * Uses a targeted LLM call (like backfill), not the full NER pipeline.
-   */
-  private async extractEntityFacts(slug: string, title: string, type: string, body: string): Promise<void> {
-    const page = this.pages.getBySlug(slug);
-    if (!page) return;
-
-    const llm = this.llmProvider;
-    if (!llm) return;
-
-    const raw = await llm.chat([
-      { role: "system", content: ENTITY_FACTS_PROMPT },
-      { role: "user", content: `Entity: ${title}\nType: ${type}\n\nContent:\n${body.slice(0, 3000)}` },
-    ]);
-
-    interface RawFact { field: string; value: string; confidence: number; evidence: string }
-    let facts: RawFact[];
-    try {
-      const cleaned = raw.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "");
-      const parsed = JSON.parse(cleaned);
-      facts = (Array.isArray(parsed.facts) ? parsed.facts : [])
-        .filter((f: Record<string, unknown>) => f.field && f.value && f.evidence);
-    } catch {
-      return;
-    }
-
-    const shortType = type.split("/").pop() ?? type;
-    const allowedFields = getFactFieldWhitelist()[shortType] ?? [];
-    const pageData = page.frontmatter ?? {};
-    const extra: Record<string, string> = {};
-
-    for (const fact of facts) {
-      if (!allowedFields.includes(fact.field)) continue;
-      const current = pageData[fact.field];
-      if (current !== undefined && current !== null && current !== "") continue;
-      extra[fact.field] = String(fact.value);
-    }
-
-    if (Object.keys(extra).length > 0) {
-      this.pages.update(slug, { extra });
-    }
-  }
-
   private async ingestCore(
     slug: string, title: string, type: PageType, body: string, tags: string[], nerAction: NerAction,
     allowDuplicate?: boolean
@@ -484,13 +423,21 @@ export class IngestManager {
         nerPending = submitDeferredNerForWritePath(this.deferredNerSubmitter!, { slug, contentHash: bodyHash ?? undefined, pageType: type });
       }
 
-      // Entity type: extract structured facts from body into frontmatter.
-      // NOTE (#252 scope): extractEntityFacts stays synchronous in all non-"none" modes.
-      if (type.startsWith("entity/") && nerAction !== "none" && this.llmProvider && body.trim()) {
-        try {
-          await this.extractEntityFacts(slug, title, type, body);
-        } catch {
-          // Non-critical — skip silently
+      // Entity facts share the same mode contract as regular NER: sync preserves
+      // the existing behavior; defer records a durable job and never awaits LLM.
+      if (type.startsWith("entity/") && body.trim()) {
+        if (nerAction === "sync" && this.llmProvider) {
+          try {
+            await extractEntityFacts({ pages: this.pages, llm: this.llmProvider, slug, title, type, body });
+          } catch {
+            // Non-critical — skip silently
+          }
+        } else if (nerAction === "defer") {
+          nerPending = submitDeferredNerForWritePath(this.deferredNerSubmitter!, {
+            slug,
+            pageType: type,
+            kind: "entity_facts",
+          });
         }
       }
 

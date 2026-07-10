@@ -11,6 +11,7 @@ import { runNerBackfillStage } from "../../src/core/ingestion/ner-backfill";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline";
 import { NerEngine, NerTimeoutError } from "../../src/core/ingestion/ner";
 import type { LLMProvider } from "../../src/llm/provider";
+import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
   return {
@@ -159,6 +160,13 @@ describe("JobQueueNerSubmitter (#252)", () => {
     expect(second).not.toBeNull();
     expect(db.listJobs("pending").length).toBe(2);
   });
+  test("same slug can queue regular NER and entity facts without cross-kind suppression", () => {
+    const s = new JobQueueNerSubmitter(db);
+    expect(s.submitDeferredNer({ slug: "brain/entities/company/a" })).not.toBeNull();
+    expect(s.submitDeferredNer({ slug: "brain/entities/company/a", kind: "entity_facts" })).not.toBeNull();
+    expect(s.submitDeferredNer({ slug: "brain/entities/company/a", kind: "entity_facts" })).toBeNull();
+    expect(db.listJobs("pending")).toHaveLength(2);
+  });
   test("stale running same slug does NOT dedupe (new job allowed)", () => {
     const s = new JobQueueNerSubmitter(db);
     const first = s.submitDeferredNer({ slug: "records/foo" })!;
@@ -281,10 +289,84 @@ describe("runNerBackfillStage (#252)", () => {
     expect(db.getPage(res.slug)).not.toBeNull();
   });
 
-  test("no usable body (sealed, no raw chunks) → job failed once with clear reason", async () => {
-    db.submitJob("ner-backfill", { slug: "records/does-not-exist" });
+  test("missing source is terminal skipped with a fixed private-safe reason", async () => {
+    const id = db.submitJob("ner-backfill", { slug: "records/does-not-exist" });
     const llm: LLMProvider = { name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' };
     const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir));
+    expect(counts.skipped).toBe(1);
+    const job = db.getJob(id)!;
+    expect(job.status).toBe("done");
+    expect(JSON.parse(job.result ?? "{}")).toEqual({ outcome: "skipped", reason: "SOURCE_UNAVAILABLE" });
+    expect(job.error).toBeNull();
+  });
+
+  test("malformed job is terminal skipped and never retries", async () => {
+    const id = db.submitJob("ner-backfill", { pageType: "record" });
+    const llm: LLMProvider = { name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' };
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir));
+    expect(counts.skipped).toBe(1);
+    expect(db.getJob(id)!.status).toBe("done");
+    expect(JSON.parse(db.getJob(id)!.result ?? "{}")).toEqual({ outcome: "skipped", reason: "INVALID_JOB" });
+  });
+
+  test("entity_facts job applies only whitelisted empty fields", async () => {
+    const seed = new IngestManager(
+      db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir,
+      undefined, undefined, { nerMode: "off" },
+    );
+    const page = await seed.ingest({
+      type: "markdown",
+      content: "---\ntitle: 实体A\ntype: entity/company\n---\n实体A属于领域C。",
+    });
+    const pages = new PageManager(db, testDir);
+    pages.update(page.slug, { extra: { location: "已有地区" } });
+    const id = db.submitJob("ner-backfill", { slug: page.slug, pageType: "entity/company", kind: "entity_facts" });
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({ facts: [
+        { field: "industry", value: "领域C", confidence: 0.9, evidence: "明确证据" },
+        { field: "location", value: "新地区", confidence: 0.9, evidence: "明确证据" },
+        { field: "unsafe", value: "忽略", confidence: 1, evidence: "明确证据" },
+      ] }),
+    };
+
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), pages, { entityFactsLlm: llm });
+    expect(counts.processed).toBe(1);
+    expect(db.getJob(id)!.status).toBe("done");
+    const updated = pages.getBySlug(page.slug)!;
+    expect(updated.frontmatter.industry).toBe("领域C");
+    expect(updated.frontmatter.location).toBe("已有地区");
+    expect(updated.frontmatter.unsafe).toBeUndefined();
+  });
+
+  test("entity_facts provider failure stays retryable with a fixed reason code", async () => {
+    const seed = new IngestManager(
+      db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir,
+      undefined, undefined, { nerMode: "off" },
+    );
+    const page = await seed.ingest({ type: "markdown", content: "---\ntitle: 实体A\ntype: entity/company\n---\n匿名正文。" });
+    const id = db.submitJob("ner-backfill", { slug: page.slug, kind: "entity_facts" });
+    const llm: LLMProvider = { name: "mock", chat: async () => { throw new Error("private provider detail"); } };
+
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir), { entityFactsLlm: llm });
     expect(counts.failed).toBe(1);
+    const job = db.getJob(id)!;
+    expect(job.status).toBe("pending");
+    expect(job.error).toBe("ENTITY_FACTS_PROVIDER_ERROR");
+  });
+
+  test("entity_facts timeout stays retryable and is counted separately", async () => {
+    const seed = new IngestManager(
+      db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir,
+      undefined, undefined, { nerMode: "off" },
+    );
+    const page = await seed.ingest({ type: "markdown", content: "---\ntitle: 实体A\ntype: entity/company\n---\n匿名正文。" });
+    const id = db.submitJob("ner-backfill", { slug: page.slug, kind: "entity_facts" });
+    const llm: LLMProvider = { name: "mock", chat: async () => { throw new EntityFactsTimeoutError(10); } };
+
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir), { entityFactsLlm: llm });
+    expect(counts.timed_out).toBe(1);
+    expect(db.getJob(id)!.status).toBe("pending");
+    expect(db.getJob(id)!.error).toBe("ENTITY_FACTS_TIMEOUT");
   });
 });

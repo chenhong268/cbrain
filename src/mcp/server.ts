@@ -42,6 +42,7 @@ export function registerDreamWorker(ctx: ToolContext): void {
       (stage, detail) => { try { ctx.db.updateJobProgress(jobId, stage, detail); } catch { /* non-critical */ } },
       ctx.pages,        // sharedPages (#252)
       ctx.pipeline,     // nerPipeline (#252)
+      ctx.llm,          // deferred entity facts (#321)
     );
     return report;
   });

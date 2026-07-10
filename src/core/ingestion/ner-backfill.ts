@@ -3,6 +3,8 @@ import type { CBrainDB } from "../../storage/sqlite.js";
 import type { PageManager } from "../page.js";
 import type { ContentPipeline } from "./pipeline.js";
 import { isNerTimeoutError } from "./ner.js";
+import type { LLMProvider } from "../../llm/provider.js";
+import { EntityFactsTimeoutError, extractEntityFacts } from "./entity-facts.js";
 /** Stale-running recovery TTL — aligned with Dream lock TTL (dream.ts). */
 export const NER_BACKFILL_STALE_TTL_MS = 30 * 60 * 1000;
 
@@ -24,6 +26,8 @@ export interface DeferredNerInput {
   slug: string;
   contentHash?: string;
   pageType?: string;
+  /** Absent preserves legacy NER jobs. */
+  kind?: "ner" | "entity_facts";
 }
 
 /**
@@ -40,7 +44,11 @@ export class JobQueueNerSubmitter implements DeferredNerSubmitter {
   constructor(private db: CBrainDB) {}
 
   submitDeferredNer(input: DeferredNerInput): number | null {
-    const active = this.db.findActiveNerJobs(input.slug, NER_BACKFILL_STALE_TTL_MS);
+    const active = this.db.findActiveNerJobs(
+      input.slug,
+      NER_BACKFILL_STALE_TTL_MS,
+      input.kind === "entity_facts" ? "entity_facts" : "ner",
+    );
     if (active.length > 0) return null;
     return this.db.submitJob(NER_BACKFILL_JOB, input);
   }
@@ -57,7 +65,7 @@ export function resolveNerBody(
   db: CBrainDB,
   pages: PageManager,
   slug: string,
-): { body: string; type: string } | null {
+): { body: string; type: string; title: string } | null {
   const page = db.getPage(slug);
   if (!page) return null;
   const type = page.type;
@@ -69,12 +77,12 @@ export function resolveNerBody(
 
   if (db.isSealedPage(slug)) {
     const body = rawChunksBody();
-    return body ? { body, type } : null;
+    return body ? { body, type, title: page.title } : null;
   }
   const body = pages.getBySlug(slug)?.body ?? "";
-  if (body.trim()) return { body, type };
+  if (body.trim()) return { body, type, title: page.title };
   const fallback = rawChunksBody();
-  return fallback ? { body: fallback, type } : null;
+  return fallback ? { body: fallback, type, title: page.title } : null;
 }
 
 /**
@@ -86,7 +94,7 @@ export async function runNerBackfillStage(
   db: CBrainDB,
   pipeline: ContentPipeline,
   pages: PageManager,
-  opts?: { maxItems?: number; staleTtlMs?: number },
+  opts?: { maxItems?: number; staleTtlMs?: number; entityFactsLlm?: LLMProvider },
 ): Promise<NerBackfillCounts> {
   const counts = emptyNerBackfillCounts();
   const maxItems = opts?.maxItems ?? NER_BACKFILL_MAX_ITEMS;
@@ -102,24 +110,52 @@ export async function runNerBackfillStage(
     const job = db.claimJobById(id); // null if no longer pending (race-safe)
     if (!job) { counts.skipped++; continue; }
 
-    let parsed: { slug?: string } = {};
+    let parsed: { slug?: unknown; kind?: unknown } = {};
     try { parsed = job.data ? JSON.parse(job.data) : {}; } catch { /* malformed */ }
-    const slug = parsed.slug;
-    if (!slug) { db.failJob(id, "ner-backfill job missing slug"); counts.failed++; continue; }
+    const slug = typeof parsed.slug === "string" && parsed.slug.trim() ? parsed.slug : null;
+    const kind = parsed.kind === undefined || parsed.kind === "ner"
+      ? "ner"
+      : parsed.kind === "entity_facts" ? "entity_facts" : null;
+    if (!slug || !kind) {
+      db.completeJob(id, { outcome: "skipped", reason: "INVALID_JOB" });
+      counts.skipped++;
+      continue;
+    }
 
     const resolved = resolveNerBody(db, pages, slug);
-    if (!resolved) { db.failJob(id, `no usable body for ${slug} (sealed/no raw chunks)`); counts.failed++; continue; }
+    if (!resolved) {
+      db.completeJob(id, { outcome: "skipped", reason: "SOURCE_UNAVAILABLE" });
+      counts.skipped++;
+      continue;
+    }
 
     try {
-      await pipeline.processNer(slug, resolved.body, resolved.type, true, undefined, new Set());
-      db.completeJob(id);
+      if (kind === "entity_facts") {
+        if (!opts?.entityFactsLlm) {
+          db.failJob(id, "ENTITY_FACTS_PROVIDER_UNAVAILABLE");
+          counts.failed++;
+          continue;
+        }
+        const result = await extractEntityFacts({
+          pages,
+          llm: opts.entityFactsLlm,
+          slug,
+          title: resolved.title,
+          type: resolved.type,
+          body: resolved.body,
+        });
+        db.completeJob(id, { outcome: "processed", kind, applied_fields: result.appliedCount });
+      } else {
+        await pipeline.processNer(slug, resolved.body, resolved.type, true, undefined, new Set());
+        db.completeJob(id, { outcome: "processed", kind });
+      }
       counts.processed++;
     } catch (e) {
-      if (isNerTimeoutError(e)) {
-        db.failJob(id, "NER_TIMEOUT");
+      if (isNerTimeoutError(e) || e instanceof EntityFactsTimeoutError) {
+        db.failJob(id, kind === "entity_facts" ? "ENTITY_FACTS_TIMEOUT" : "NER_TIMEOUT");
         counts.timed_out++;
       } else {
-        db.failJob(id, e instanceof Error ? e.message : String(e));
+        db.failJob(id, kind === "entity_facts" ? "ENTITY_FACTS_PROVIDER_ERROR" : "NER_PROVIDER_ERROR");
         counts.failed++;
       }
     }

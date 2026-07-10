@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { IngestManager } from "../../src/core/ingestion/ingest.js";
 import { NerEngine } from "../../src/core/ingestion/ner.js";
+import { PageManager } from "../../src/core/page.js";
 import { generateSlug } from "../../src/utils/slug.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
@@ -1617,6 +1618,68 @@ describe("IngestManager NER defer mode (#252)", () => {
     expect(result.ner).toBeNull();
     expect(result.nerPending).toBe(true);
     expect(db.listJobs("pending").length).toBe(1);
+  });
+
+  test("defer entity ingest does not await facts LLM and queues entity_facts", async () => {
+    let chatCalls = 0;
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => {
+        chatCalls++;
+        return '{"facts":[]}';
+      },
+    };
+    const ingestD = makeDeferIngest(new JobQueueNerSubmitter(db), llm);
+    const result = await ingestD.ingest({
+      type: "markdown",
+      content: "---\ntitle: 实体A\ntype: entity/company\n---\n实体A位于地区B。",
+    });
+
+    expect(chatCalls).toBe(0);
+    expect(result.nerPending).toBe(true);
+    const jobs = db.listJobs("pending");
+    expect(jobs).toHaveLength(1);
+    expect(JSON.parse(jobs[0].data ?? "{}")).toEqual({
+      slug: result.slug,
+      pageType: "entity/company",
+      kind: "entity_facts",
+    });
+    expect(db.ftsSearch("地区B", 5).some((row) => row.page_slug === result.slug)).toBe(true);
+  });
+
+  test("sync entity ingest still applies whitelisted facts without overwriting existing values", async () => {
+    let chatCalls = 0;
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => {
+        chatCalls++;
+        return JSON.stringify({
+          facts: [
+            { field: "industry", value: "领域C", confidence: 0.9, evidence: "明确证据" },
+            { field: "not_allowed", value: "忽略", confidence: 1, evidence: "明确证据" },
+          ],
+        });
+      },
+    };
+    const seed = new IngestManager(db, createMockEmbeddingProvider(), lance as any, vaultPath, undefined, undefined, { nerMode: "off" });
+    const seeded = await seed.ingest({
+      type: "markdown",
+      content: "---\ntitle: 实体A\ntype: entity/company\n---\n初始正文。",
+    });
+    const pages = new PageManager(db, vaultPath);
+    pages.update(seeded.slug, { extra: { industry: "已有领域" } });
+
+    const ingestSync = new IngestManager(db, createMockEmbeddingProvider(), lance as any, vaultPath, llm);
+    const result = await ingestSync.ingest({
+      type: "markdown",
+      allowDuplicate: true,
+      content: `---\ntitle: 实体A\ntype: entity/company\nslug: ${seeded.slug}\n---\n实体A属于领域C。`,
+    });
+
+    expect(chatCalls).toBe(1);
+    const page = pages.getBySlug(result.slug);
+    expect(page?.frontmatter.industry).toBe("已有领域");
+    expect(page?.frontmatter.not_allowed).toBeUndefined();
   });
 
   test("defer mode leaves content searchable (FTS/chunks written before return)", async () => {

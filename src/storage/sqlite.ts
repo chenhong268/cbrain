@@ -1082,17 +1082,23 @@ export class CBrainDB {
     return row;
   }
 
-  /** #252: active ner-backfill jobs for a slug = pending, or running and not stale. */
-  findActiveNerJobs(slug: string, staleTtlMs: number): Array<{ id: number; status: string }> {
+  /** #252/#321: active backfill jobs for one slug + enrichment kind. */
+  findActiveNerJobs(
+    slug: string,
+    staleTtlMs: number,
+    kind: "ner" | "entity_facts" = "ner",
+  ): Array<{ id: number; status: string }> {
     const ttlSec = Math.floor(staleTtlMs / 1000);
     return this.rawDb.prepare(
       `SELECT id, status FROM jobs
        WHERE name = 'ner-backfill'
          AND json_extract(data, '$.slug') = ?
+         AND CASE WHEN json_extract(data, '$.kind') = 'entity_facts'
+                  THEN 'entity_facts' ELSE 'ner' END = ?
          AND (status = 'pending'
               OR (status = 'running' AND started_at IS NOT NULL
                   AND julianday('now') - julianday(started_at) < ?))`
-    ).all(slug, ttlSec / 86400) as Array<{ id: number; status: string }>;
+    ).all(slug, kind, ttlSec / 86400) as Array<{ id: number; status: string }>;
   }
 
   /** #252: claim a specific pending job by id. Returns null if no longer pending. */

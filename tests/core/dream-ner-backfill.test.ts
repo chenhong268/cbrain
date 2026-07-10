@@ -80,6 +80,7 @@ function createMockLanceDB() {
 interface RunDreamHarnessOpts {
   nerPipeline?: ContentPipeline;
   sharedPages?: PageManager;
+  entityFactsLlm?: LLMProvider;
 }
 
 function runDreamHarness(
@@ -105,6 +106,7 @@ function runDreamHarness(
     undefined, // onStageProgress
     opts.sharedPages,
     opts.nerPipeline,
+    opts.entityFactsLlm,
   );
 }
 
@@ -185,5 +187,38 @@ describe("Dream Stage 1.5 ner-backfill (#252)", () => {
     // The job must be cleared (no longer pending)
     const pendingJobs = db.listJobs("pending").filter((j) => j.name === "ner-backfill");
     expect(pendingJobs.length).toBe(0);
+  });
+
+  test("Stage 1.5 consumes deferred entity facts with the shared runtime LLM", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const seed = new IngestManager(
+      db, embedding, createMockLanceDB() as never, vaultPath,
+      undefined, undefined, { nerMode: "off" },
+    );
+    const entity = await seed.ingest({
+      type: "markdown",
+      content: "---\ntitle: 实体A\ntype: entity/company\n---\n实体A属于领域C。",
+    });
+    db.submitJob("ner-backfill", { slug: entity.slug, kind: "entity_facts" });
+
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({ facts: [
+        { field: "industry", value: "领域C", confidence: 0.9, evidence: "明确证据" },
+      ] }),
+    };
+    const pages = new PageManager(db, vaultPath);
+    const nerPipeline = new ContentPipeline(db, embedding, createMockLanceDB() as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const report = await runDreamHarness(db, vaultPath, outputsDir, logger, dbPath, {
+      nerPipeline,
+      sharedPages: pages,
+      entityFactsLlm: llm,
+    });
+    expect(report.stages.ner_backfill.processed).toBe(1);
+    expect(pages.getBySlug(entity.slug)?.frontmatter.industry).toBe("领域C");
   });
 });

@@ -809,6 +809,28 @@ describe("MCP Server", () => {
       expect(JSON.parse(jobs[0].data).slug).toBe(data.page.slug);
     });
 
+    test("defer mode queues entity_facts for put_page entity updates (#321)", async () => {
+      const server = createServer({ ...deps, nerIngestMode: "defer" });
+      const created = await getTools(server).put_page.handler({
+        slug: "brain/entities/company/entity-a",
+        title: "实体A",
+        type: "entity/company",
+        content: "实体A属于领域C。",
+      });
+      expect(JSON.parse(created.content[0].text).action).toBe("created");
+
+      const jobs = db.rawDb.prepare(
+        "SELECT status, data FROM jobs WHERE name = 'ner-backfill'",
+      ).all() as Array<{ status: string; data: string }>;
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].status).toBe("pending");
+      expect(JSON.parse(jobs[0].data)).toEqual({
+        slug: "brain/entities/company/entity-a",
+        pageType: "entity/company",
+        kind: "entity_facts",
+      });
+    });
+
     test("mode=replace overwrites body and creates version snapshot", async () => {
       mkdirSync(join(vaultPath, "records"), { recursive: true });
       const fileA = join(vaultPath, "records", "note.md");
