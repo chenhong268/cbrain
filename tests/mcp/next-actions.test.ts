@@ -274,4 +274,58 @@ describe("next_actions MCP (#309)", () => {
     expect(payload.summary.hiddenStale).toBe(1);
     expect(payload.display).toContain("隐藏");
   });
+
+  test("include_raw=true exposes scalar-only raw.audit with exact partition (#319)", async () => {
+    for (let i = 0; i < 2; i++) {
+      db.upsertDiscovery("similar_entity", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, {});
+    }
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"], include_raw: true }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.raw).toBeTruthy();
+    expect(payload.raw.audit).toBeTruthy();
+    const audit = payload.raw.audit;
+
+    // all scalar values are numbers
+    for (const v of [
+      audit.totalInput, audit.rankedInputCount, audit.visibleCount,
+      audit.hiddenObserveOnlyCount, audit.hiddenStaleCount, audit.suppressedBeyondCapCount,
+    ]) {
+      expect(typeof v).toBe("number");
+    }
+    // fixed enum keys present
+    expect(audit.bySource).toHaveProperty("health");
+    expect(audit.bySource).toHaveProperty("discovery");
+    expect(audit.bySeverity).toHaveProperty("blocked");
+    expect(audit.bySeverity).toHaveProperty("auto_repairable");
+    expect(audit.bySeverity).toHaveProperty("needs_review");
+    expect(audit.bySeverity).toHaveProperty("observe_only");
+    expect(audit.byFreshness).toHaveProperty("fresh");
+    expect(audit.byFreshness).toHaveProperty("recurring");
+    expect(audit.byFreshness).toHaveProperty("stale");
+    // partition invariant holds on the wire
+    expect(
+      audit.visibleCount + audit.hiddenObserveOnlyCount + audit.hiddenStaleCount + audit.suppressedBeyondCapCount,
+    ).toBe(audit.rankedInputCount);
+
+    // scalar-only: no item-derived strings leak into the audit blob
+    const auditJson = JSON.stringify(audit);
+    expect(auditJson).not.toContain("entity/");
+    expect(auditJson).not.toContain("discovery:");
+    expect(auditJson).not.toMatch(/\bscore\b/i);
+    expect(auditJson).not.toContain("dedup_key");
+    expect(auditJson).not.toContain("/Users/");
+  });
+
+  test("default call leaves raw null and exposes no audit key (#319)", async () => {
+    db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.raw).toBeNull();
+    // audit must not exist anywhere on the default response
+    expect(payload).not.toHaveProperty("audit");
+    expect(payload.items.length).toBeLessThanOrEqual(3);
+    expect(payload.display).not.toContain("entity/");
+  });
 });
