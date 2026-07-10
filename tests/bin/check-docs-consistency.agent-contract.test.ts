@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   checkAgentContractTools,
+  checkAgentWorkflowContract,
   checkIngestPageTypeDocs,
   checkToolDescriptions,
   type CheckResult,
@@ -112,6 +113,39 @@ describe("checkAgentContractTools (#316)", () => {
   test("clean skills dir passes", () => {
     const dir = withSkills({ "a.md": "- 首选 cbrain_recall\n" });
     expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(false);
+  });
+});
+
+describe("checkAgentWorkflowContract (#322)", () => {
+  const valid = {
+    "RESOLVER.md": "- 当前痛点、系统异常、该处理什么 → query.md [operations]\n",
+    "ingest.md": "新内容使用 `ingest`。已有页面更新使用 `put_page`。禁止使用 `write_file` 绕过 CBrain。\n",
+    "query.md": "## [operations] Branch\n调用 `next_actions`。\n普通 recall degraded 时最多一次 fallback，然后停止。\n",
+    "brain-ops.md": "### Step 5: UPDATE\n已有页面更新使用 `put_page` 默认 patch。\n",
+  };
+
+  test("canonical create/update/operations/bounded contract passes", () => {
+    expect(fails(checkAgentWorkflowContract(withSkills(valid)))).toBe(false);
+  });
+
+  test("positive write_file vault guidance fails", () => {
+    const dir = withSkills({ ...valid, "ingest.md": "写 CBrain 失败时使用 `write_file` 写 vault。\n" });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("existing-page update routed to ingest fails", () => {
+    const dir = withSkills({ ...valid, "brain-ops.md": "### Step 5: UPDATE\n已有页面更新使用 `ingest`。\n" });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("missing operational next_actions route fails", () => {
+    const dir = withSkills({ ...valid, "query.md": "普通 recall degraded 时最多一次 fallback，然后停止。\n" });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("fallback without one-shot stop condition fails", () => {
+    const dir = withSkills({ ...valid, "query.md": "## [operations] Branch\n调用 `next_actions`。\n失败后继续 fallback。\n" });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
   });
 });
 

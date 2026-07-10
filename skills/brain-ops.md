@@ -16,6 +16,7 @@ Before executing any protocol, check RESOLVER.md (`skills/RESOLVER.md`) to see i
 | 有什么关系/A和B有什么联系 | connect.md | Relationship explanation |
 | 清理/去重/该删什么 | cleanup.md | Guided cleanup wizard |
 | 帮我写/写段介绍/写周报 | write.md | Knowledge-based writing |
+| CBrain 当前痛点/异常/该处理什么 | query.md [operations] | Read-only attention queue, not semantic recall |
 
 If no specific skill matches, proceed with the 5-step protocol below.
 
@@ -25,50 +26,33 @@ If no specific skill matches, proceed with the 5-step protocol below.
 
 Before responding to a question about a person, company, concept, or project:
 
-```
-cbrain query "张三"
-```
+调用 `cbrain_recall({ query, detail: "normal" })`。
 
 If results exist → proceed to Step 2.
-If no results → consider: is this a deep review request? If so, dig deeper (graph, related entities, timeline) before giving up.
-Only declare "not in brain" after exhausting all paths.
+If no results → if the original intent is a deep review, re-route to review.md; otherwise use the bounded fallback below.
+Only declare "not in brain" after the single bounded fallback defined in query.md.
 
 ### Step 2: GET
 
-Retrieve full context for matching results:
-
-```
-cbrain show <slug>
-cbrain graph-query --mode related <slug>
-cbrain graph-query --mode backlinks <slug>
-cbrain timeline <slug>
-```
+首轮结果不足时只允许 query.md 定义的一次 bounded fallback。不要默认串联 page、graph、timeline；深度复盘和关系分析应在 Step 0 路由到专用 skill。
 
 ### Step 3: INTEGRATE
 
 Combine brain knowledge with the current conversation:
 
 - Synthesize into your own words, don't copy-paste
-- Cross-reference with related entities from the graph
+- Cross-reference graph evidence only when a dedicated review/connect route returned it
 - Check tier: Tier 1 entities deserve more detail
-- Cite every factual claim: `[Source: slug, updated DATE]`
+- Add source labels in review flows; ordinary conversational recall stays natural and compact
 - If a section has no data, say so honestly — don't fabricate
 
 ### Step 4: LEARN
 
-If the conversation reveals new information:
-
-```
-cbrain ingest --type text --title "新发现" "..."
-```
+如果对话产生**新内容**，使用 `ingest`。
 
 ### Step 5: UPDATE
 
-If existing information has changed:
-
-```
-cbrain ingest --type markdown  # With updated content
-```
+如果**已有页面**发生变化，先 `resolve_slugs`，再使用 `put_page` 默认 patch。禁止把已有页面再次交给 `ingest` 创建副本。
 
 ## When to Apply
 

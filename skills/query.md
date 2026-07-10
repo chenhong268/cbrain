@@ -20,6 +20,23 @@ Search the brain using multiple strategies, fuse results, and return the most re
 - 问题只有 1-2 个关键词，且目的是定位 slug → query（debug）
 - 不确定 → cbrain_recall（安全默认前门）
 
+### Bounded degraded fallback
+
+如果首轮 `cbrain_recall` 返回 empty / insufficient / degraded：
+
+1. 最多一次 advanced fallback：`deep_recall({ query, detail: "brief", limit: 3 })`。
+2. fallback 后立即停止，不再串联 get_page / graph_query / timeline 或继续改写查询。
+3. 仍不足就诚实说明“CBrain 目前只找到有限线索”，不要用低相关结果填满答案。
+
+## [operations] Branch — 当前状态与待处理事项
+
+当 RESOLVER 指定 `[operations]`：
+
+1. 调用 `next_actions({ include_raw: false })`，使用它的自然语言 `display/items` 回答当前问题与优先动作。
+2. 只有用户明确询问页面数、关系数、chunk 数或运行状态时，再补一次 `status`；不要把统计数字当作问题诊断。
+3. 禁止调用普通 cbrain_recall / deep_recall 搜“痛点”或“异常”，因为语义相似内容不能代表当前运行状态。
+4. `next_actions` 是只读建议，不得自动 repair、merge、delete 或改变 discovery 状态。
+
 ## [keyword] Branch — 精确关键词定位
 
 RESOLVER 指定 `[keyword]` flag 时：
@@ -263,15 +280,14 @@ cbrain query "张三的项目" --strategy all
 
 When answering user questions:
 
-1. **Query** the brain with the user's question
-2. **Get context** — for top results, use `get_page` for full content
-3. **Traverse graph** — follow related entities for richer context
-4. **Synthesize** — combine brain knowledge with current conversation
-5. **Cite** — mention which pages/entities informed the answer
+1. **Use the front door** — call `cbrain_recall` with the user's natural-language question.
+2. **Respect the first response** — synthesize compactly from returned evidence; do not expose tool metadata.
+3. **Fallback once** — only when empty/insufficient/degraded, use the bounded advanced fallback above.
+4. **Stop honestly** — if evidence remains insufficient, say so instead of chaining more tools.
+5. **Cite in review flows** — source labels are required by review.md, not by ordinary conversational answers.
 
 ## Guidelines
 
-- Start with `all` strategy, narrow down if needed
+- Start with `cbrain_recall`; `query(strategy:"fts")` is keyword/debug-only
 - For entity lookups, FTS is most precise
-- For exploratory questions, vector search finds unexpected connections
-- Graph traversal adds relationship context that search alone misses
+- Use graph/timeline only through dedicated resolver branches, not as an automatic recall chain

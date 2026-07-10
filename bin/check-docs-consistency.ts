@@ -588,6 +588,71 @@ export function checkAgentContractTools(tools: Set<string>, skillsDir: string): 
   return out;
 }
 
+/** #322 — keep the daily Agent on canonical write + operational recall paths.
+ * This is deliberately structural and limited to managed skills: public docs
+ * may discuss lower-level recovery, but skills are executable Agent policy. */
+export function checkAgentWorkflowContract(skillsDir: string): CheckResult[] {
+  const out: CheckResult[] = [];
+  if (!existsSync(skillsDir)) {
+    return [{ check: "agent workflow contract", passed: true, detail: "no skills/ dir" }];
+  }
+
+  const files = new Map<string, string>();
+  for (const file of readdirSync(skillsDir).filter((name) => name.endsWith(".md"))) {
+    files.set(file, readFileSync(join(skillsDir, file), "utf-8"));
+  }
+  const negativeCue = /(禁止|不得|不要|不能|不允许|严禁|never|do not|must not|bypass|绕过)/i;
+
+  for (const [file, text] of files) {
+    text.split("\n").forEach((line, index) => {
+      if (/\bwrite_file\b/i.test(line) && !negativeCue.test(line)) {
+        out.push({
+          check: `agent write bypass @skills/${file}:${index + 1}`,
+          passed: false,
+          detail: "managed skill positively recommends write_file; CBrain writes must use ingest/put_page",
+        });
+      }
+      if (/(已有|现有|existing).{0,24}(页面|page)?.{0,24}(更新|修改|补充|update)/i.test(line)
+        && /\bingest\b(?!\.md)/i.test(line) && !negativeCue.test(line)) {
+        out.push({
+          check: `agent existing-page route @skills/${file}:${index + 1}`,
+          passed: false,
+          detail: "existing-page update is routed to ingest; use put_page patch",
+        });
+      }
+    });
+  }
+
+  const resolver = files.get("RESOLVER.md") ?? "";
+  if (!/(痛点|异常|该处理什么|what to do next)[^\n]*query\.md\s*\[operations\]/i.test(resolver)) {
+    out.push({ check: "agent operations resolver", passed: false, detail: "RESOLVER lacks operations route for current problems/next work" });
+  }
+
+  const ingest = files.get("ingest.md") ?? "";
+  if (!/(新内容|新增内容|new content)[\s\S]{0,120}\bingest\b/i.test(ingest)
+    || !/(已有页面|现有页面|existing page)[\s\S]{0,120}\bput_page\b/i.test(ingest)) {
+    out.push({ check: "agent create-update split", passed: false, detail: "ingest.md must split new content=ingest and existing page=put_page" });
+  }
+
+  const query = files.get("query.md") ?? "";
+  if (!/\[operations\][\s\S]{0,500}\bnext_actions\b/i.test(query)) {
+    out.push({ check: "agent operations branch", passed: false, detail: "query.md operations branch must call next_actions" });
+  }
+  if (!/degraded[\s\S]{0,300}(最多一次|at most one)[\s\S]{0,200}(停止|stop)/i.test(query)) {
+    out.push({ check: "agent bounded recall fallback", passed: false, detail: "query.md must cap degraded fallback at one attempt and stop" });
+  }
+
+  const brainOps = files.get("brain-ops.md") ?? "";
+  if (!/Step 5[^#]*\bput_page\b/is.test(brainOps)) {
+    out.push({ check: "agent update path", passed: false, detail: "brain-ops Step 5 must update existing pages through put_page" });
+  }
+
+  if (out.length === 0) {
+    out.push({ check: "agent workflow contract", passed: true, detail: "create/update/operations/fallback paths are canonical and bounded" });
+  }
+  return out;
+}
+
 /** #316 — registered MCP tool descriptions gate. `deep_recall` must not claim to be
  *  the default entry point; `query`'s description must not route natural-language
  *  paths to deep_recall / excluded tools. Scoped to those two tools so legitimate
@@ -771,6 +836,7 @@ function main(): void {
     ...checkSkillsToolRefs(docs, new Set(tools.map((t) => t.name))),
     ...checkToolDescriptions(tools),
     ...checkAgentContractTools(new Set(tools.map((t) => t.name)), join(PROJECT_DIR, "skills")),
+    ...checkAgentWorkflowContract(join(PROJECT_DIR, "skills")),
     ...checkIngestPageTypeDocs(docs),
     ...checkSections(docs, tools, cli),
   ];

@@ -6,14 +6,21 @@
 
 Content arrives in many forms. The ingest skill routes each piece to the correct type, adds metadata, and ensures proper indexing.
 
+## Canonical Write Contract
+
+- **新内容**使用 `ingest`，让 CBrain 完成去重、slug 校验、索引和 deferred NER。
+- **已有页面**先用 `resolve_slugs` 确认 canonical slug，再使用 `put_page`；默认 patch 会追加正文、合并 tags、保留已有字段。
+- **禁止使用 `write_file` 绕过 CBrain**。即使是超时补救，也不能直接写 vault；应返回明确失败或改走 `put_page`。
+- 不确定页面是否存在时，先 `resolve_slugs`：存在走 update，不存在才走 create。
+
 ## Content Types
 
 ### Text (Plain)
 
-Best for: Quick notes, extracted entities, raw observations.
+Best for: Quick notes and raw observations. Entities are extracted asynchronously.
 
 ```
-cbrain ingest --type text --title "实体A" --page-type entity "产品经理，负责AI产品线"
+cbrain ingest --type text --title "记录A" --page-type record "一条新的匿名观察"
 ```
 
 ### Markdown
@@ -36,11 +43,20 @@ tags: [人物, 产品]
 
 | Input Source | Content Type | Page Type | Notes |
 |:-------------|:-------------|:----------|:------|
-| Chat extraction | text | entity | Signal detector output |
+| Chat extraction | text | record | NER creates or resolves entity pages |
 | Article summary | markdown | source | With original URL in frontmatter |
 | Meeting notes | markdown | event | Date in frontmatter |
 | Raw observation | text | record | Auto-timestamped |
-| Concept definition | text | concept | Title = concept name |
+| Concept definition | text | record | NER/resolver derives the concept |
+
+## Existing Page Update
+
+```text
+resolve_slugs({ queries: ["实体A"] })
+put_page({ slug: "<resolved slug>", content: "补充内容" })
+```
+
+`put_page` 对已有页面默认使用 patch。只有用户明确要求完整替换时才传 `mode: "replace"`。
 
 ## Wiki-Link Convention
 

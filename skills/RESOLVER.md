@@ -48,6 +48,13 @@
 - 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
 - 深度了解、知识总览、全景 → review.md
 
+### Operational Attention（优先于普通内容召回）
+- CBrain 当前有什么痛点、当前异常、现在有什么问题 → query.md [operations]
+- 接下来该处理什么、有什么待办、what to do next → query.md [operations]
+- CBrain 是否正常、运行状态、页面/关系/chunk 数量 → query.md [operations]
+- CBrain current issues、what is wrong、health status、what to do next → query.md [operations]
+- ⚠️ 这是运行与治理问题，不是主题语义搜索；禁止用普通 cbrain_recall 猜测系统现状
+
 ### Natural Recall（默认路由 — 自然语言问题走 cbrain_recall 前门）
 - 谁、是谁、什么是、是什么、介绍一下 → query.md [cbrain_recall]
 - 查询、搜索、查找、查一下、找一下 → query.md [cbrain_recall]
@@ -55,7 +62,7 @@
 
 ### Debug / Keyword Lookup（query 仅限此场景）
 - 精确关键词定位、debug 索引、确认某关键词 → query.md [keyword]
-- cbrain_recall 降级链第二步 → query.md [keyword]
+- cbrain_recall empty/degraded 的一次补救 → query.md [bounded-fallback]
 
 ### Graph
 - 图谱、链接到 → connect.md
@@ -69,6 +76,7 @@
 - 添加新、新增、创建 → ingest.md
 - 这篇文章、这段内容、记录下来 → ingest.md
 - signal-detector 输出待入库内容 → ingest.md
+- 已有页面更新、补充已有实体 → ingest.md [update=put_page]
 
 ### Enrichment
 - 补充、丰富、完善、扩展 → enrich.md
