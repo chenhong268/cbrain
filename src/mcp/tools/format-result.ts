@@ -773,7 +773,6 @@ export type GraphPathSummary = ToolSummary & {
 
 const GRAPH_PATH_FIELD_UNSAFE_PATTERNS = [
   /\b(?:source_type|trust_state|confidence|weight|score|slug|path|id)\b\s*(?:[:=]|\b)/i,
-  /\b[A-Za-z0-9_-]*(?:source|trust|confidence|weight|score|slug|path|id|evidence)[A-Za-z0-9_-]*\b/i,
   /\b(?:brain\/)?(?:entities|entity|concepts|concept|records|record|insights|insight)\/\S+/i,
   /(?:^|\s)\/(?:[^\s/]+\/)+[^\s]*/,
   /\b(?:system|assistant|user)\s*:/i,
@@ -798,7 +797,17 @@ function safeGraphPathField(value: string | undefined, fallback: string, maxLeng
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, maxLength);
-  if (!singleLine || GRAPH_PATH_FIELD_UNSAFE_PATTERNS.some((pattern) => pattern.test(singleLine))) return fallback;
+  const identifierTokens = singleLine.match(/\b[A-Za-z][A-Za-z0-9_-]*\b/g) ?? [];
+  const internalIdentifierParts = new Set(["source", "trust", "confidence", "weight", "score", "slug", "path", "id", "evidence"]);
+  const hasCompositeInternalIdentifier = identifierTokens.some((token) => {
+    const normalized = token.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
+    if (normalized === token && !/[_-]/.test(token)) return false;
+    return normalized.split(/[_-]+/).some((part) => internalIdentifierParts.has(part.toLowerCase()));
+  });
+  const hasMixedLatinCyrillic = /(?=.*[A-Za-z])(?=.*\p{Script=Cyrillic})/u.test(singleLine);
+  if (!singleLine || hasCompositeInternalIdentifier || hasMixedLatinCyrillic || GRAPH_PATH_FIELD_UNSAFE_PATTERNS.some((pattern) => pattern.test(singleLine))) {
+    return fallback;
+  }
   return sanitizeDisplayText(singleLine, fallback);
 }
 
