@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { findEntitySlug, normalizeRelation } from "../../core/shared.js";
-import { formatGraphEnvelope, formatLinksEnvelope } from "./format-result.js";
+import { formatGraphEnvelope, formatGraphPathEnvelope, formatLinksEnvelope } from "./format-result.js";
 
 type LinkDirection = "outgoing" | "incoming" | "both";
 type LinkAction = "list" | "add" | "remove";
@@ -81,15 +81,55 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     description: "Query the knowledge graph. Traverse from a seed entity or get backlinks. Accepts a slug or entity name (auto-resolved). Links include source_type (wikilink=human, manual=human explicit input, agent=agent inference, ner=LLM-extracted, dialogue=conversation, writeback=auto) and confidence (0-1, higher=more reliable).",
     inputSchema: {
       slug: z.string().max(500).describe("Seed entity slug or name (auto-resolved if not an exact slug)"),
-      mode: z.enum(["traverse", "backlinks", "related"]).optional().default("traverse").describe("Query mode"),
-      depth: z.number().optional().default(2).describe("Max traversal depth"),
+      mode: z.enum(["traverse", "backlinks", "related", "shortest_path"]).optional().default("traverse").describe("Query mode"),
+      target: z.string().max(500).optional().describe("Target entity slug or name, required for shortest_path"),
+      depth: z.number().optional().describe("Max traversal depth; defaults to 2, or 4 for shortest_path"),
       limit: z.number().optional().default(20).describe("Max results"),
       minWeight: z.number().optional().describe("Minimum link weight (0-1). Higher = stronger links only."),
       source_type: z.string().max(100).optional().describe("Filter links by source type: wikilink, manual, ner, dialogue, writeback, unknown"),
       session_id: z.string().max(200).optional().describe("Current conversation session ID for co-occurrence tracking"),
     },
-  }, async ({ slug, mode, depth, limit, minWeight, source_type, session_id }) => {
+  }, async ({ slug, mode, target, depth, limit, minWeight, source_type, session_id }) => {
     const graphStart = Date.now();
+
+    if (mode === "shortest_path") {
+      const maxDepth = depth ?? 4;
+      if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 6) {
+        return linkJson(formatGraphPathEnvelope({ maxDepth, reason: "invalid_depth", path: null }));
+      }
+      if (!target) {
+        return linkJson(formatGraphPathEnvelope({ maxDepth, reason: "missing_target", path: null }));
+      }
+
+      const resolveEndpoint = (input: string): string | null => {
+        if (ctx.db.getPage(input)) return input;
+        return findEntitySlug(ctx.db, input);
+      };
+      const fromSlug = resolveEndpoint(slug);
+      if (!fromSlug) {
+        return linkJson(formatGraphPathEnvelope({ maxDepth, reason: "unresolved_source", path: null }));
+      }
+      const toSlug = resolveEndpoint(target);
+      if (!toSlug) {
+        return linkJson(formatGraphPathEnvelope({ maxDepth, reason: "unresolved_target", path: null }));
+      }
+
+      const titles = ctx.db.getPageTitlesAndTypes([fromSlug, toSlug]);
+      const fromTitle = titles.get(fromSlug)?.title;
+      const toTitle = titles.get(toSlug)?.title;
+      const path = ctx.graph.findShortestPath(fromSlug, toSlug, { maxDepth });
+      try {
+        ctx.db.logQuery("graph", fromSlug, path?.nodes.map((node) => node.slug) ?? [], Date.now() - graphStart, session_id);
+      } catch { /* non-critical telemetry */ }
+      return linkJson(formatGraphPathEnvelope({
+        fromTitle,
+        toTitle,
+        maxDepth,
+        reason: path ? "path_found" : "no_path",
+        path,
+      }));
+    }
+
     let resolvedSlug = slug;
     if (!ctx.pages.getBySlug(slug)) {
       const found = findEntitySlug(ctx.db, slug);
@@ -106,7 +146,7 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
         result = ctx.graph.getRelatedEntities(resolvedSlug, limit);
         break;
       default:
-        result = ctx.graph.traverse(resolvedSlug, { maxDepth: depth, limit, minWeight });
+        result = ctx.graph.traverse(resolvedSlug, { maxDepth: depth ?? 2, limit, minWeight });
     }
 
     // Learning loop: extract slugs from result, log + bump

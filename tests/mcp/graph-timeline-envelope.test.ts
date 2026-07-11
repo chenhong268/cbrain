@@ -2,7 +2,9 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { attachMcpTools, createServer, type CBrainDeps } from "../../src/mcp/server.js";
+import { buildContext } from "../../src/mcp/context.js";
 import { formatGraphEnvelope, formatGraphPathEnvelope, formatLinksEnvelope, formatTimelineEnvelope } from "../../src/mcp/tools/format-result.js";
 
 function createMockEmbedding() {
@@ -155,6 +157,91 @@ describe("graph_query envelope", () => {
     expect(result.raw.resolvedSlug).toBe("entities/a");
     expect(result.raw.result).toBeDefined();
     expect(Array.isArray(result.raw.result)).toBe(true);
+  });
+
+  test("graph_query shortest_path resolves titles and returns an ordered path", async () => {
+    insertPage("entities/a", "实体A", "entity/person");
+    insertPage("entities/b", "实体B", "entity/person");
+    insertLink("entities/a", "entities/b", "协作", "trusted");
+
+    const server = createServer(deps);
+    const result = await callTool(server, "graph_query", {
+      slug: "实体A",
+      mode: "shortest_path",
+      target: "实体B",
+    });
+
+    expect(result.summary).toMatchObject({ status: "ok", reason: "path_found", hops: 1, maxDepth: 4 });
+    expect(result.raw.path.nodes.map((n: { slug: string }) => n.slug)).toEqual(["entities/a", "entities/b"]);
+  });
+
+  test("graph_query shortest_path defaults to four while traverse remains depth two", async () => {
+    for (const name of ["a", "b", "c", "d", "e"]) insertPage(`entities/${name}`, `实体${name.toUpperCase()}`, "entity/person");
+    for (const [from, to] of [["a", "b"], ["b", "c"], ["c", "d"], ["d", "e"]]) {
+      insertLink(`entities/${from}`, `entities/${to}`, "关联", "trusted");
+    }
+    const server = createServer(deps);
+
+    const shortest = await callTool(server, "graph_query", { slug: "entities/a", mode: "shortest_path", target: "entities/e" });
+    expect(shortest.summary).toMatchObject({ status: "ok", hops: 4, maxDepth: 4 });
+
+    const legacy = await callTool(server, "graph_query", { slug: "entities/a", mode: "traverse" });
+    expect(legacy.raw.result.map((n: { slug: string }) => n.slug)).not.toContain("entities/d");
+  });
+
+  test("graph_query shortest_path returns structured input errors", async () => {
+    insertPage("entities/a", "实体A", "entity/person");
+    const server = createServer(deps);
+
+    const missing = await callTool(server, "graph_query", { slug: "entities/a", mode: "shortest_path" });
+    expect(missing.summary).toMatchObject({ status: "error", reason: "missing_target" });
+
+    const source = await callTool(server, "graph_query", { slug: "不存在A", mode: "shortest_path", target: "entities/a" });
+    expect(source.summary).toMatchObject({ status: "error", reason: "unresolved_source" });
+
+    const target = await callTool(server, "graph_query", { slug: "entities/a", mode: "shortest_path", target: "不存在B" });
+    expect(target.summary).toMatchObject({ status: "error", reason: "unresolved_target" });
+  });
+
+  test("graph_query validates depth only for shortest_path", async () => {
+    insertPage("entities/a", "实体A", "entity/person");
+    insertPage("entities/b", "实体B", "entity/person");
+    const server = createServer(deps);
+
+    for (const depth of [0, -1, 1.5, 7]) {
+      const result = await callTool(server, "graph_query", { slug: "entities/a", mode: "shortest_path", target: "entities/b", depth });
+      expect(result.summary).toMatchObject({ status: "error", reason: "invalid_depth", maxDepth: depth });
+    }
+
+    const legacy = await callTool(server, "graph_query", { slug: "entities/a", mode: "traverse", depth: 7 });
+    expect(legacy.summary.status).toBe("empty");
+  });
+
+  test("graph_query shortest_path returns explicit no_path", async () => {
+    insertPage("entities/a", "实体A", "entity/person");
+    insertPage("entities/b", "实体B", "entity/person");
+    const server = createServer(deps);
+
+    const result = await callTool(server, "graph_query", { slug: "entities/a", mode: "shortest_path", target: "entities/b", depth: 3 });
+    expect(result.summary).toMatchObject({ status: "empty", reason: "no_path", hops: 0, maxDepth: 3 });
+  });
+
+  test("graph_query shortest_path does not train or boost graph facts", async () => {
+    insertPage("entities/a", "实体A", "entity/person");
+    insertPage("entities/b", "实体B", "entity/person");
+    insertLink("entities/a", "entities/b", "协作", "trusted");
+    const ctx = buildContext(deps);
+    let bumps = 0;
+    let boosts = 0;
+    ctx.learn.bumpOnQuery = () => { bumps++; };
+    ctx.db.boostLinkConfidence = (() => { boosts++; }) as typeof ctx.db.boostLinkConfidence;
+    const server = new McpServer({ name: "test", version: "0" });
+    attachMcpTools(server, ctx);
+
+    const result = await callTool(server, "graph_query", { slug: "entities/a", mode: "shortest_path", target: "entities/b" });
+    expect(result.summary.status).toBe("ok");
+    expect(bumps).toBe(0);
+    expect(boosts).toBe(0);
   });
 
   test("get_links returns envelope with display/summary/raw", async () => {
