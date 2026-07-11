@@ -10,6 +10,20 @@ function insertPage(db: CBrainDB, slug: string, title: string, type: string, men
   ).run(slug, type, title, `${slug}.md`, `h-${slug}`, mentionCount);
 }
 
+function insertPathLink(
+  db: CBrainDB,
+  from: string,
+  to: string,
+  relation = "关联",
+  trustState: string | null = "trusted",
+) {
+  db.rawDb.prepare(
+    `INSERT INTO links
+      (from_slug, to_slug, relation, weight, strength, context, source_type, confidence, trust_state)
+     VALUES (?, ?, ?, 0.9, 'strong', NULL, 'manual', 0.95, ?)`,
+  ).run(from, to, relation, trustState);
+}
+
 describe("GraphManager", () => {
   const testDir = "/tmp/cbrain-test-graph";
   const dbPath = join(testDir, "test.sqlite");
@@ -331,6 +345,147 @@ describe("GraphManager", () => {
     test("includeInactive still sees candidate reports_to evidence", () => {
       const all = db.getOutgoingLinks(SEED, true).filter((l) => l.relation === "reports_to");
       expect(all.map((l) => l.to_slug).sort()).toEqual([TRUSTED, WEAK].sort());
+    });
+  });
+
+  describe("findShortestPath (#326)", () => {
+    const seedPages = (...names: string[]) => {
+      for (const name of names) insertPage(db, `entities/${name}`, `实体${name.toUpperCase()}`, "entity/person");
+    };
+
+    test("returns the direct stored edge in source-to-target node order", () => {
+      seedPages("a", "b");
+      insertPathLink(db, "entities/a", "entities/b", "协作");
+
+      const path = graph.findShortestPath("entities/a", "entities/b");
+
+      expect(path?.nodes.map((n) => n.slug)).toEqual(["entities/a", "entities/b"]);
+      expect(path?.edges.map((e) => [e.from_slug, e.to_slug])).toEqual([["entities/a", "entities/b"]]);
+      expect(path?.depth).toBe(1);
+    });
+
+    test("returns a two-hop path ordered from query source to target even with a reverse stored edge", () => {
+      seedPages("a", "b", "c");
+      insertPathLink(db, "entities/b", "entities/a", "管理");
+      insertPathLink(db, "entities/b", "entities/c", "协作");
+
+      const path = graph.findShortestPath("entities/a", "entities/c");
+
+      expect(path?.nodes.map((n) => n.slug)).toEqual(["entities/a", "entities/b", "entities/c"]);
+      expect(path?.edges.map((e) => [e.from_slug, e.to_slug])).toEqual([
+        ["entities/b", "entities/a"],
+        ["entities/b", "entities/c"],
+      ]);
+    });
+
+    test("chooses a shorter path over an available longer path", () => {
+      seedPages("a", "b", "c", "d", "e");
+      insertPathLink(db, "entities/a", "entities/b");
+      insertPathLink(db, "entities/b", "entities/e");
+      insertPathLink(db, "entities/a", "entities/c");
+      insertPathLink(db, "entities/c", "entities/d");
+      insertPathLink(db, "entities/d", "entities/e");
+
+      expect(graph.findShortestPath("entities/a", "entities/e")?.nodes.map((n) => n.slug))
+        .toEqual(["entities/a", "entities/b", "entities/e"]);
+    });
+
+    test("terminates on cycles without duplicating nodes", () => {
+      seedPages("a", "b", "c", "d");
+      insertPathLink(db, "entities/a", "entities/b");
+      insertPathLink(db, "entities/b", "entities/c");
+      insertPathLink(db, "entities/c", "entities/a");
+      insertPathLink(db, "entities/c", "entities/d");
+
+      const path = graph.findShortestPath("entities/a", "entities/d");
+      const slugs = path?.nodes.map((n) => n.slug) ?? [];
+      expect(slugs).toEqual(["entities/a", "entities/c", "entities/d"]);
+      expect(new Set(slugs).size).toBe(slugs.length);
+    });
+
+    test("returns null for no path or a missing endpoint", () => {
+      seedPages("a", "b", "c");
+      insertPathLink(db, "entities/a", "entities/b");
+
+      expect(graph.findShortestPath("entities/a", "entities/c")).toBeNull();
+      expect(graph.findShortestPath("entities/a", "entities/missing")).toBeNull();
+    });
+
+    test("returns a zero-hop path when source equals the existing target", () => {
+      seedPages("a");
+      const path = graph.findShortestPath("entities/a", "entities/a");
+      expect(path?.depth).toBe(0);
+      expect(path?.edges).toEqual([]);
+      expect(path?.nodes.map((n) => n.slug)).toEqual(["entities/a"]);
+    });
+
+    test("enforces maxDepth and clamps core values to one through six", () => {
+      seedPages("a", "b", "c");
+      insertPathLink(db, "entities/a", "entities/b");
+      insertPathLink(db, "entities/b", "entities/c");
+
+      expect(graph.findShortestPath("entities/a", "entities/c", { maxDepth: 1 })).toBeNull();
+      expect(graph.findShortestPath("entities/a", "entities/b", { maxDepth: 0 })?.depth).toBe(1);
+      expect(graph.findShortestPath("entities/a", "entities/c", { maxDepth: 99 })?.depth).toBe(2);
+      expect(graph.findShortestPath("entities/a", "entities/c", { maxDepth: 2.9 })?.depth).toBe(2);
+    });
+
+    test("excludes candidate reports_to but keeps ordinary candidate evidence", () => {
+      seedPages("a", "b", "c");
+      insertPathLink(db, "entities/a", "entities/b", "reports_to", "candidate");
+      insertPathLink(db, "entities/a", "entities/c", "提及", "candidate");
+
+      expect(graph.findShortestPath("entities/a", "entities/b")).toBeNull();
+      expect(graph.findShortestPath("entities/a", "entities/c")?.depth).toBe(1);
+    });
+
+    test("chooses the lexicographically stable equal-hop path regardless of insertion order", () => {
+      seedPages("a", "b", "c", "d");
+      insertPathLink(db, "entities/a", "entities/c");
+      insertPathLink(db, "entities/c", "entities/d");
+      insertPathLink(db, "entities/a", "entities/b");
+      insertPathLink(db, "entities/b", "entities/d");
+
+      expect(graph.findShortestPath("entities/a", "entities/d")?.nodes.map((n) => n.slug))
+        .toEqual(["entities/a", "entities/b", "entities/d"]);
+    });
+
+    test("uses one batched link read per depth and only batched page hydration", () => {
+      seedPages("a", "b", "c", "d");
+      insertPathLink(db, "entities/a", "entities/b");
+      insertPathLink(db, "entities/b", "entities/c");
+      insertPathLink(db, "entities/c", "entities/d");
+
+      const originalBatchLinks = db.batchGetLinksForSlugs.bind(db);
+      const linkFrontiers: string[][] = [];
+      db.batchGetLinksForSlugs = ((slugs: string[], includeInactive?: boolean) => {
+        linkFrontiers.push([...slugs]);
+        return originalBatchLinks(slugs, includeInactive);
+      }) as typeof db.batchGetLinksForSlugs;
+
+      const originalBatchPages = db.getPageTitlesAndTypes.bind(db);
+      const pageBatches: string[][] = [];
+      db.getPageTitlesAndTypes = ((slugs: string[]) => {
+        pageBatches.push([...slugs]);
+        return originalBatchPages(slugs);
+      }) as typeof db.getPageTitlesAndTypes;
+
+      let pointReads = 0;
+      db.getOutgoingLinks = (() => { pointReads++; return []; }) as typeof db.getOutgoingLinks;
+      db.getIncomingLinks = (() => { pointReads++; return []; }) as typeof db.getIncomingLinks;
+      db.getPageTitle = (() => { pointReads++; return null; }) as typeof db.getPageTitle;
+      db.getPageTitleAndType = (() => { pointReads++; return null; }) as typeof db.getPageTitleAndType;
+      db.getPage = (() => { pointReads++; return null; }) as typeof db.getPage;
+
+      const path = graph.findShortestPath("entities/a", "entities/d", { maxDepth: 3 });
+
+      expect(path?.depth).toBe(3);
+      expect(linkFrontiers).toEqual([["entities/a"], ["entities/b"], ["entities/c"]]);
+      expect(pageBatches).toEqual([
+        ["entities/a", "entities/d"],
+        ["entities/a", "entities/b", "entities/c", "entities/d"],
+      ]);
+      expect(pointReads).toBe(0);
     });
   });
 });

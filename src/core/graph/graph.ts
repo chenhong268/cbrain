@@ -1,4 +1,4 @@
-import { CBrainDB } from "../../storage/sqlite.js";
+import { CBrainDB, type LinkRow } from "../../storage/sqlite.js";
 import { isCurrentFactLink } from "../shared.js";
 
 export interface Link {
@@ -21,6 +21,22 @@ export interface GraphNode {
   title: string;
   type: string;
   depth: number;
+}
+
+export interface GraphPathNode {
+  slug: string;
+  title: string;
+  type: string;
+}
+
+export interface GraphPath {
+  nodes: GraphPathNode[];
+  edges: Link[];
+  depth: number;
+}
+
+export interface ShortestPathOptions {
+  maxDepth?: number;
 }
 
 export interface TraverseOptions {
@@ -148,6 +164,95 @@ export class GraphManager {
     return results;
   }
 
+  findShortestPath(fromSlug: string, toSlug: string, options?: ShortestPathOptions): GraphPath | null {
+    const requestedDepth = options?.maxDepth ?? 4;
+    const maxDepth = Math.min(6, Math.max(1, Math.trunc(requestedDepth)));
+    const endpoints = this.db.getPageTitlesAndTypes([...new Set([fromSlug, toSlug])]);
+    const fromPage = endpoints.get(fromSlug);
+    const toPage = endpoints.get(toSlug);
+    if (!fromPage || !toPage) return null;
+
+    if (fromSlug === toSlug) {
+      return {
+        nodes: [{ slug: fromSlug, title: fromPage.title, type: fromPage.type }],
+        edges: [],
+        depth: 0,
+      };
+    }
+
+    const visited = new Set([fromSlug]);
+    const parents = new Map<string, { previous: string; edge: Link }>();
+    let frontier = [fromSlug];
+    let found = false;
+
+    for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth++) {
+      const linksBySlug = this.db.batchGetLinksForSlugs(frontier);
+      const nextFrontier: string[] = [];
+
+      for (const slug of [...frontier].sort(compareStrings)) {
+        const links = linksBySlug.get(slug);
+        if (!links) continue;
+        const neighbors = [...links.outgoing, ...links.incoming]
+          .filter(isCurrentFactLink)
+          .map((edge) => ({
+            neighbor: edge.from_slug === slug ? edge.to_slug : edge.from_slug,
+            edge,
+          }))
+          .sort((a, b) =>
+            compareStrings(a.neighbor, b.neighbor)
+            || compareStrings(a.edge.relation, b.edge.relation)
+            || a.edge.id - b.edge.id,
+          );
+
+        for (const candidate of neighbors) {
+          if (visited.has(candidate.neighbor)) continue;
+          visited.add(candidate.neighbor);
+          parents.set(candidate.neighbor, {
+            previous: slug,
+            edge: toGraphLink(candidate.edge),
+          });
+          nextFrontier.push(candidate.neighbor);
+          if (candidate.neighbor === toSlug) {
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+
+      if (found) break;
+      frontier = nextFrontier;
+    }
+
+    if (!found) return null;
+
+    const reversedSlugs = [toSlug];
+    const reversedEdges: Link[] = [];
+    let cursor = toSlug;
+    while (cursor !== fromSlug) {
+      const parent = parents.get(cursor);
+      if (!parent) return null;
+      reversedEdges.push(parent.edge);
+      cursor = parent.previous;
+      reversedSlugs.push(cursor);
+    }
+
+    const pathSlugs = reversedSlugs.reverse();
+    const pathPages = this.db.getPageTitlesAndTypes(pathSlugs);
+    const nodes: GraphPathNode[] = [];
+    for (const slug of pathSlugs) {
+      const page = pathPages.get(slug);
+      if (!page) return null;
+      nodes.push({ slug, title: page.title, type: page.type });
+    }
+
+    return {
+      nodes,
+      edges: reversedEdges.reverse(),
+      depth: reversedEdges.length,
+    };
+  }
+
   getRelatedEntities(slug: string, limit: number = 10): GraphNode[] {
     // #233: getLinks already excludes candidate reports_to from default reads.
     const neighbors = this.getLinks(slug, "both")
@@ -176,4 +281,25 @@ export class GraphManager {
     const ordered = new Set(rows.map((r) => r.slug));
     return [...ordered, ...slugs.filter((s) => !ordered.has(s))];
   }
+}
+
+function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function toGraphLink(row: LinkRow): Link {
+  return {
+    id: row.id,
+    from_slug: row.from_slug,
+    to_slug: row.to_slug,
+    relation: row.relation,
+    weight: row.weight,
+    strength: row.strength,
+    context: row.context ?? undefined,
+    source_type: row.source_type,
+    confidence: row.confidence,
+    trust_state: row.trust_state,
+    source_page_slug: row.source_page_slug,
+    evidence: row.evidence,
+  };
 }
