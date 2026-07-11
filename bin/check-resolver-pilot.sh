@@ -401,12 +401,13 @@ import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 pairwise = [r for r in rows if r.get("category") == "relationship" and r.get("expected_tool") == "graph_query"]
 assert len(pairwise) >= 2
-assert any(
+assert all(
     r.get("expected_args", {}).get("mode") == "shortest_path"
     and isinstance(r.get("expected_args", {}).get("slug"), str)
     and isinstance(r.get("expected_args", {}).get("target"), str)
     and r.get("expected_args", {}).get("depth") == 4
     and r.get("required_sequence") == ["resolve_slugs", "graph_query"]
+    and r.get("fallback_only_on") == ["empty", "no_path"]
     for r in pairwise
 )
 assert any(

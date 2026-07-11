@@ -773,10 +773,15 @@ export type GraphPathSummary = ToolSummary & {
 
 const GRAPH_PATH_FIELD_UNSAFE_PATTERNS = [
   /\b(?:source_type|trust_state|confidence|weight|score|slug|path|id)\b\s*(?:[:=]|\b)/i,
+  /\b[A-Za-z0-9_-]*(?:source|trust|confidence|weight|score|slug|path|id|evidence)[A-Za-z0-9_-]*\s*[:=]/i,
   /\b(?:brain\/)?(?:entities|entity|concepts|concept|records|record|insights|insight)\/\S+/i,
   /(?:^|\s)\/(?:[^\s/]+\/)+[^\s]*/,
   /\b(?:system|assistant|user)\s*:/i,
   /忽略(?:此前|以上|所有)?(?:规则|指令)|输出\s*(?:内部|source_type|trust_state)/i,
+  /(?:ignore|disregard|override|forget).{0,40}(?:previous|prior|above|all|instructions?|rules?|system|safety)/i,
+  /(?:reveal|show|print|output|expose).{0,30}(?:private|internal|hidden|secret|memory|prompt|instructions?)/i,
+  /(?:忽略|无视|绕过|覆盖|忘掉).{0,20}(?:此前|前面|以上|所有|规则|指令|要求|限制|安全)/,
+  /(?:展示|输出|泄露|打印|透露).{0,20}(?:私密|隐私|内部|隐藏|记忆|提示词|规则|指令)/,
 ];
 
 function safeGraphPathField(value: string | undefined, fallback: string, maxLength = 100): string {
@@ -787,6 +792,7 @@ function safeGraphPathField(value: string | undefined, fallback: string, maxLeng
       return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? " " : character;
     })
     .join("")
+    .replace(/\p{Cf}/gu, "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, maxLength);
@@ -803,7 +809,10 @@ function graphPathRelationLabel(relation: string): string {
   if (resolved !== "提及" || relation === "提及" || relation === "mentions") {
     return safeGraphPathField(ontology.getRelationType(resolved)?.label ?? resolved, "关联", 40);
   }
-  return safeGraphPathField(relation, "关联", 40);
+  if (/^[\p{Script=Han}\s·・]{1,20}$/u.test(relation)) {
+    return safeGraphPathField(relation, "关联", 40);
+  }
+  return "关联";
 }
 
 export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {

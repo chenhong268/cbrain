@@ -94,4 +94,4 @@ YYYY-MM-DD  共同事件描述 [Source: slug]
 - ❌ 只返回 graph_query 原始结果 — 需要翻译成人话
 - ❌ A 或 B 不在 CBrain → 直接上网搜 — 应该先告知"XX 不在 CBrain 中"
 - ❌ 路径深度太大 (>4) — 超过 4 跳的关系通常不再适合作为首轮解释
-- ❌ 漏了共同关联 — graph_query 结果要交叉比对
+- ❌ 已找到最短路径仍继续 traverse — 只有 `empty/no_path` 才进入共同关联回退
