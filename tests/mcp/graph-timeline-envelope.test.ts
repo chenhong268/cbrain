@@ -3,7 +3,7 @@ import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
-import { formatGraphEnvelope, formatLinksEnvelope, formatTimelineEnvelope } from "../../src/mcp/tools/format-result.js";
+import { formatGraphEnvelope, formatGraphPathEnvelope, formatLinksEnvelope, formatTimelineEnvelope } from "../../src/mcp/tools/format-result.js";
 
 function createMockEmbedding() {
   return {
@@ -372,6 +372,112 @@ describe("formatGraphEnvelope unit tests", () => {
     }, (s) => s === "entities/b" ? "人物B" : null);
     expect(result.display).toContain("人物B");
     expect(result.display).toContain("同事");
+  });
+});
+
+describe("formatGraphPathEnvelope (#326)", () => {
+  const nodeA = { slug: "entities/a", title: "实体A", type: "entity/person" };
+  const nodeB = { slug: "entities/b", title: "实体B", type: "entity/person" };
+  const nodeC = { slug: "entities/c", title: "实体C", type: "entity/person" };
+  const edge = (
+    from: string,
+    to: string,
+    relation: string,
+    trustState: string | undefined = "trusted",
+    id = 1,
+  ) => ({
+    id,
+    from_slug: from,
+    to_slug: to,
+    relation,
+    weight: 0.9,
+    strength: "strong",
+    source_type: "manual",
+    confidence: 0.95,
+    trust_state: trustState,
+  });
+
+  test("renders a stored-forward direct path", () => {
+    const result = formatGraphPathEnvelope({
+      fromTitle: "实体A",
+      toTitle: "实体B",
+      maxDepth: 4,
+      reason: "path_found",
+      path: { nodes: [nodeA, nodeB], edges: [edge("entities/a", "entities/b", "协作")], depth: 1 },
+    });
+    expect(result.display).toContain("实体A —协作→ 实体B");
+    expect(result.summary).toMatchObject({ status: "ok", reason: "path_found", hops: 1, maxDepth: 4 });
+  });
+
+  test("renders a stored-reverse direct path without reversing raw evidence", () => {
+    const result = formatGraphPathEnvelope({
+      fromTitle: "实体A",
+      toTitle: "实体B",
+      maxDepth: 4,
+      reason: "path_found",
+      path: { nodes: [nodeA, nodeB], edges: [edge("entities/b", "entities/a", "管理")], depth: 1 },
+    });
+    expect(result.display).toContain("实体A ←管理— 实体B");
+    expect(result.raw.path?.edges[0]).toMatchObject({ from_slug: "entities/b", to_slug: "entities/a" });
+  });
+
+  test("renders mixed edge directions hop by hop", () => {
+    const result = formatGraphPathEnvelope({
+      fromTitle: "实体A",
+      toTitle: "实体C",
+      maxDepth: 4,
+      reason: "path_found",
+      path: {
+        nodes: [nodeA, nodeB, nodeC],
+        edges: [edge("entities/b", "entities/a", "管理", "trusted", 1), edge("entities/b", "entities/c", "协作", "trusted", 2)],
+        depth: 2,
+      },
+    });
+    expect(result.display).toContain("实体A ←管理— 实体B");
+    expect(result.display).toContain("实体B —协作→ 实体C");
+  });
+
+  test("marks only candidate relations as pending", () => {
+    for (const [trustState, shouldMark] of [
+      ["candidate", true],
+      ["trusted", false],
+      ["user_thought", false],
+      [undefined, false],
+    ] as const) {
+      const result = formatGraphPathEnvelope({
+        fromTitle: "实体A",
+        toTitle: "实体B",
+        maxDepth: 4,
+        reason: "path_found",
+        path: { nodes: [nodeA, nodeB], edges: [edge("entities/a", "entities/b", "关联", trustState)], depth: 1 },
+      });
+      expect(result.display.includes("待确认关系")).toBe(shouldMark);
+      expect(result.display).not.toContain("candidate");
+    }
+  });
+
+  test("returns stable empty and invalid-input summaries", () => {
+    const noPath = formatGraphPathEnvelope({ fromTitle: "实体A", toTitle: "实体B", maxDepth: 3, reason: "no_path", path: null });
+    expect(noPath.summary).toMatchObject({ status: "empty", count: 0, reason: "no_path", hops: 0, maxDepth: 3 });
+    expect(noPath.display).toContain("未找到");
+
+    for (const reason of ["missing_target", "unresolved_source", "unresolved_target", "invalid_depth"] as const) {
+      const invalid = formatGraphPathEnvelope({ maxDepth: 0, reason, path: null });
+      expect(invalid.summary).toMatchObject({ status: "error", count: 0, reason, hops: 0, maxDepth: 0 });
+    }
+  });
+
+  test("keeps internal fields in raw and out of display", () => {
+    const result = formatGraphPathEnvelope({
+      fromTitle: "实体A",
+      toTitle: "实体B",
+      maxDepth: 4,
+      reason: "path_found",
+      path: { nodes: [nodeA, nodeB], edges: [edge("entities/a", "entities/b", "协作")], depth: 1 },
+    });
+    for (const term of BANNED_IN_DISPLAY) expect(result.display).not.toContain(term);
+    expect(result.display).not.toContain("trusted");
+    expect(result.raw.path?.nodes[0].slug).toBe("entities/a");
   });
 });
 

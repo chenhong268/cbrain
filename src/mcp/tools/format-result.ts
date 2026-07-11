@@ -2,7 +2,7 @@ import type { IngestResult } from "../../core/ingestion/ingest.js";
 import type { DialogueIngestResult } from "../../core/ingestion/dialogue.js";
 import type { EpisodicRecallResult } from "../../core/retrieval/episodic-recall.js";
 import type { OrgTreeResult } from "../../core/graph/hierarchy.js";
-import type { Link, GraphNode } from "../../core/graph/graph.js";
+import type { Link, GraphNode, GraphPath } from "../../core/graph/graph.js";
 import type { HealthReport } from "../../core/maintenance/health.js";
 import { planRepairs, type SignalLookup } from "../../core/maintenance/health-debt.js";
 
@@ -752,6 +752,128 @@ export function formatGetPagesEnvelope(payload: GetPagesPayload): {
 }
 
 // ─── Graph query ────────────────────────────────────────────
+
+export interface GraphPathEnvelopePayload {
+  fromTitle?: string;
+  toTitle?: string;
+  maxDepth: number;
+  reason: "path_found" | "no_path" | "unresolved_source" | "unresolved_target" | "missing_target" | "invalid_depth";
+  path: GraphPath | null;
+}
+
+export type GraphPathSummary = ToolSummary & {
+  reason: GraphPathEnvelopePayload["reason"];
+  fromTitle?: string;
+  toTitle?: string;
+  hops: number;
+  maxDepth: number;
+};
+
+export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
+  display: string;
+  summary: GraphPathSummary;
+  raw: GraphPathEnvelopePayload;
+} {
+  if (payload.reason !== "path_found") {
+    const status = payload.reason === "no_path" ? "empty" : "error";
+    const displayByReason: Record<Exclude<GraphPathEnvelopePayload["reason"], "path_found">, string> = {
+      no_path: payload.fromTitle && payload.toTitle
+        ? `在最多 ${payload.maxDepth} 层关系内，未找到 ${payload.fromTitle} 与 ${payload.toTitle} 的连接。`
+        : "在指定范围内未找到关系路径。",
+      missing_target: "需要提供目标实体。",
+      unresolved_source: "未找到起点实体。",
+      unresolved_target: "未找到目标实体。",
+      invalid_depth: "路径深度需要是 1 到 6 的整数。",
+    };
+    const display = displayByReason[payload.reason];
+    return {
+      display,
+      summary: {
+        status,
+        count: 0,
+        truncated: false,
+        message: display,
+        reason: payload.reason,
+        fromTitle: payload.fromTitle,
+        toTitle: payload.toTitle,
+        hops: 0,
+        maxDepth: payload.maxDepth,
+      },
+      raw: payload,
+    };
+  }
+
+  if (!payload.path) {
+    const display = "关系路径结果不可用。";
+    return {
+      display,
+      summary: {
+        status: "error",
+        count: 0,
+        truncated: false,
+        message: display,
+        reason: "path_found",
+        fromTitle: payload.fromTitle,
+        toTitle: payload.toTitle,
+        hops: 0,
+        maxDepth: payload.maxDepth,
+      },
+      raw: payload,
+    };
+  }
+
+  if (payload.path.depth === 0) {
+    const title = payload.path.nodes[0]?.title || payload.fromTitle || "该条目";
+    const display = `${title} 与自身是同一条目。`;
+    return {
+      display,
+      summary: {
+        status: "ok",
+        count: 0,
+        truncated: false,
+        message: "起点与目标是同一条目",
+        reason: "path_found",
+        fromTitle: title,
+        toTitle: title,
+        hops: 0,
+        maxDepth: payload.maxDepth,
+      },
+      raw: payload,
+    };
+  }
+
+  const lines: string[] = [];
+  for (let i = 0; i < payload.path.edges.length; i++) {
+    const from = payload.path.nodes[i];
+    const to = payload.path.nodes[i + 1];
+    const edge = payload.path.edges[i];
+    if (!from || !to) continue;
+    const relation = edge.relation || "关联";
+    const pending = edge.trust_state === "candidate" ? "（待确认关系）" : "";
+    const forward = edge.from_slug === from.slug && edge.to_slug === to.slug;
+    lines.push(forward
+      ? `${from.title} —${relation}${pending}→ ${to.title}`
+      : `${from.title} ←${relation}${pending}— ${to.title}`);
+  }
+  const display = sanitizeDisplay(lines.join("\n"));
+  const fromTitle = payload.path.nodes[0]?.title ?? payload.fromTitle;
+  const toTitle = payload.path.nodes.at(-1)?.title ?? payload.toTitle;
+  return {
+    display,
+    summary: {
+      status: "ok",
+      count: payload.path.edges.length,
+      truncated: false,
+      message: `找到 ${payload.path.depth} 层关系路径`,
+      reason: "path_found",
+      fromTitle,
+      toTitle,
+      hops: payload.path.depth,
+      maxDepth: payload.maxDepth,
+    },
+    raw: payload,
+  };
+}
 
 interface GraphQueryPayload {
   resolvedSlug: string;
