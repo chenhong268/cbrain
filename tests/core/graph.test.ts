@@ -457,7 +457,7 @@ describe("GraphManager", () => {
       expect(graph.findShortestPath("entities/a", "entities/e")).toBeNull();
     });
 
-    test("chooses the lexicographically stable equal-hop path regardless of insertion order", () => {
+    test("uses the stable edge-id tie-break after neighbor and relation", () => {
       seedPages("a", "b", "c", "d");
       insertPathLink(db, "entities/a", "entities/c");
       insertPathLink(db, "entities/c", "entities/d");
@@ -465,7 +465,20 @@ describe("GraphManager", () => {
       insertPathLink(db, "entities/b", "entities/d");
 
       expect(graph.findShortestPath("entities/a", "entities/d")?.nodes.map((n) => n.slug))
-        .toEqual(["entities/a", "entities/b", "entities/d"]);
+        .toEqual(["entities/a", "entities/c", "entities/d"]);
+    });
+
+    test("uses the global relation tie-break when different parents reach the same neighbor", () => {
+      seedPages("s", "a", "b", "t");
+      insertPathLink(db, "entities/s", "entities/a", "关联");
+      insertPathLink(db, "entities/s", "entities/b", "关联");
+      insertPathLink(db, "entities/a", "entities/t", "z_relation");
+      insertPathLink(db, "entities/b", "entities/t", "a_relation");
+
+      const path = graph.findShortestPath("entities/s", "entities/t");
+
+      expect(path?.nodes.map((node) => node.slug)).toEqual(["entities/s", "entities/b", "entities/t"]);
+      expect(path?.edges.at(-1)?.relation).toBe("a_relation");
     });
 
     test("uses one batched link read per depth and only batched page hydration", () => {

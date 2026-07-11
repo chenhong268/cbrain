@@ -190,7 +190,6 @@ export class GraphManager {
       const linksBySlug = this.db.batchGetLinksForSlugs(frontier);
       const nextFrontier: string[] = [];
       const candidates: Array<{ previous: string; neighbor: string; edge: LinkRow }> = [];
-      const candidateSlugs = new Set<string>();
 
       for (const slug of [...frontier].sort(compareStrings)) {
         const links = linksBySlug.get(slug);
@@ -208,15 +207,20 @@ export class GraphManager {
           );
 
         for (const candidate of neighbors) {
-          if (visited.has(candidate.neighbor) || candidateSlugs.has(candidate.neighbor)) continue;
-          candidateSlugs.add(candidate.neighbor);
+          if (visited.has(candidate.neighbor)) continue;
           candidates.push({ previous: slug, neighbor: candidate.neighbor, edge: candidate.edge });
         }
       }
 
-      const existingCandidates = this.db.getPageTitlesAndTypes(candidates.map((candidate) => candidate.neighbor));
+      candidates.sort((a, b) =>
+        compareStrings(a.neighbor, b.neighbor)
+        || compareStrings(a.edge.relation, b.edge.relation)
+        || a.edge.id - b.edge.id
+        || compareStrings(a.previous, b.previous),
+      );
+      const existingCandidates = this.db.getPageTitlesAndTypes([...new Set(candidates.map((candidate) => candidate.neighbor))]);
       for (const candidate of candidates) {
-        if (!existingCandidates.has(candidate.neighbor)) continue;
+        if (visited.has(candidate.neighbor) || !existingCandidates.has(candidate.neighbor)) continue;
         visited.add(candidate.neighbor);
         parents.set(candidate.neighbor, {
           previous: candidate.previous,
