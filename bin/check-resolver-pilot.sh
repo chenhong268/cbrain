@@ -394,6 +394,41 @@ else
   fail "agent-facing.routing-eval.jsonl 不存在"
 fi
 
+# #326: pairwise relationships use the bounded shortest-path contract, while
+# single-entity neighborhood queries keep the legacy traversal route.
+if python3 - "$AF_EVAL" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+pairwise = [r for r in rows if r.get("category") == "relationship" and r.get("expected_tool") == "graph_query"]
+assert any(
+    r.get("expected_args", {}).get("mode") == "shortest_path"
+    and isinstance(r.get("expected_args", {}).get("slug"), str)
+    and isinstance(r.get("expected_args", {}).get("target"), str)
+    for r in pairwise
+)
+assert any(
+    r.get("category") == "relationship_single"
+    and r.get("expected_tool") == "graph_query"
+    and r.get("expected_args", {}).get("mode") == "traverse"
+    and "target" not in r.get("expected_args", {})
+    for r in rows
+)
+PY
+then
+  relationship_eval_contract=true
+else
+  relationship_eval_contract=false
+fi
+
+if $relationship_eval_contract \
+  && grep -q 'mode: "shortest_path"' "$SKILLS_DIR/connect.md" \
+  && grep -q 'target:' "$SKILLS_DIR/connect.md" \
+  && grep -q 'empty/no_path' "$SKILLS_DIR/connect.md"; then
+  pass "pairwise relationship contract uses graph shortest_path"
+else
+  fail "pairwise relationship contract must use graph shortest_path"
+fi
+
 # Discovery presentation rules: verify resolver docs mention the constraint
 discovery_banned=("score" "distance" "shared_neighbors" "debug" "图距离" "共享邻居")
 resolver_files=("$SKILLS_DIR/RESOLVER.md" "$SKILLS_DIR/recall-resolver.md")

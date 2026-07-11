@@ -8,11 +8,11 @@ When you need to understand how two people, companies, or concepts are related. 
 
 ## When to Use
 
-- "王磊和张伟什么关系"
-- "星辰科技和星河项目有什么关联"
+- "人物A和人物B什么关系"
+- "组织C和项目D有什么关联"
 - "A 和 B 怎么认识的"
 - "这两个项目之间有什么交叉"
-- "connect 王磊 张伟"
+- "connect 人物A 人物B"
 
 ## Protocol
 
@@ -28,14 +28,14 @@ Confirm exact slugs. If either entity doesn't exist in CBrain, stop and say so.
 ### Step 2: Find the Shortest Path
 
 ```
-cbrain graph-query <slugA> --mode traverse --depth 3
+graph_query({ slug: <slugA>, mode: "shortest_path", target: <slugB>, depth: 4 })
 ```
 
-Look for <slugB> in the results. If found, you have a direct or near-direct path. Note the intermediate nodes.
+Use the ordered path as the relationship chain. A found path, including a multi-hop path, completes this step without another traversal.
 
 ### Step 3: Find Shared Connections
 
-Run graph_query on both and intersect the results. Entities that appear in both lists are shared connections — they know or relate to both A and B.
+Only when shortest path returns `empty/no_path`, run graph_query on both entities and intersect the results. Entities that appear in both lists are shared connections — they know or relate to both A and B.
 
 ### Step 4: Check Timeline Intersection
 
@@ -94,5 +94,5 @@ YYYY-MM-DD  共同事件描述 [Source: slug]
 
 - ❌ 只返回 graph_query 原始结果 — 需要翻译成人话
 - ❌ A 或 B 不在 CBrain → 直接上网搜 — 应该先告知"XX 不在 CBrain 中"
-- ❌ 遍历深度太大 (>3) — 超过 3 跳的关系基本没意义
+- ❌ 路径深度太大 (>4) — 超过 4 跳的关系通常不再适合作为首轮解释
 - ❌ 漏了共同关联 — graph_query 结果要交叉比对
