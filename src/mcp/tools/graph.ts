@@ -118,9 +118,6 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       const fromTitle = titles.get(fromSlug)?.title;
       const toTitle = titles.get(toSlug)?.title;
       const path = ctx.graph.findShortestPath(fromSlug, toSlug, { maxDepth });
-      try {
-        ctx.db.logQuery("graph", fromSlug, path?.nodes.map((node) => node.slug) ?? [], Date.now() - graphStart, session_id);
-      } catch { /* non-critical telemetry */ }
       return linkJson(formatGraphPathEnvelope({
         fromTitle,
         toTitle,

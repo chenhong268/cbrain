@@ -56,6 +56,7 @@ The method uses bounded breadth-first search because Phase 1 optimizes hop count
 - Only links accepted by `isCurrentFactLink` participate.
 - Candidate `reports_to` links are therefore excluded exactly as in normal traversal. Other candidate relation types retain existing graph-read semantics, but the formatter must label each such edge as a human-readable “待确认关系” rather than presenting it as confirmed fact.
 - Each BFS depth calls `batchGetLinksForSlugs(frontier)` once.
+- Each BFS depth batch-hydrates discovered neighbor slugs before marking them visited, so dangling links cannot mask a complete path and no per-node page lookup is introduced.
 - A slug is visited once. The first discovered route is the shortest route.
 - Neighbor expansion is sorted by neighbor slug, then relation, then edge id. This makes equal-length path selection independent of incidental SQLite row order.
 - Parent state stores both predecessor slug and the exact link used. Reconstruction returns ordered nodes and ordered edges.
@@ -118,7 +119,7 @@ Update `skills/connect.md` and `skills/agent-facing.routing-eval.jsonl` so pairw
 
 - Read-only graph operation.
 - No page, link, confidence, mention count, discovery, or query-learning mutation is caused by shortest-path reconstruction.
-- Existing `graph_query` telemetry may call `logQuery`, but shortest-path reads must bypass both `learn.bumpOnQuery` and `boostLinkConfidence`; finding a path is not user confirmation of its truth.
+- Shortest-path reads do not call `logQuery`, `learn.bumpOnQuery`, or `boostLinkConfidence`. Query-log rows feed delayed activity and link-weight learning, so logging a path would violate the read-only boundary; finding a path is not user confirmation of its truth.
 - No schema migration, cache, snapshot, inferred link, or automatic repair.
 
 ## Error Handling

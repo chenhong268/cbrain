@@ -5,6 +5,8 @@ import type { OrgTreeResult } from "../../core/graph/hierarchy.js";
 import type { Link, GraphNode, GraphPath } from "../../core/graph/graph.js";
 import type { HealthReport } from "../../core/maintenance/health.js";
 import { planRepairs, type SignalLookup } from "../../core/maintenance/health-debt.js";
+import { sanitizeDisplayText } from "../../core/safety/display-safety.js";
+import { getOntology } from "../../ontology/loader.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -769,16 +771,53 @@ export type GraphPathSummary = ToolSummary & {
   maxDepth: number;
 };
 
+const GRAPH_PATH_FIELD_UNSAFE_PATTERNS = [
+  /\b(?:source_type|trust_state|confidence|weight|score|slug|path|id)\b\s*(?:[:=]|\b)/i,
+  /\b(?:brain\/)?(?:entities|entity|concepts|concept|records|record|insights|insight)\/\S+/i,
+  /(?:^|\s)\/(?:[^\s/]+\/)+[^\s]*/,
+  /\b(?:system|assistant|user)\s*:/i,
+  /忽略(?:此前|以上|所有)?(?:规则|指令)|输出\s*(?:内部|source_type|trust_state)/i,
+];
+
+function safeGraphPathField(value: string | undefined, fallback: string, maxLength = 100): string {
+  if (!value) return fallback;
+  const singleLine = [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? " " : character;
+    })
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+  if (!singleLine || GRAPH_PATH_FIELD_UNSAFE_PATTERNS.some((pattern) => pattern.test(singleLine))) return fallback;
+  return sanitizeDisplayText(singleLine, fallback);
+}
+
+function graphPathRelationLabel(relation: string): string {
+  if (relation === "reports_to") return "汇报给";
+  const ontology = getOntology();
+  const direct = ontology.getRelationType(relation);
+  if (direct) return safeGraphPathField(direct.label, "关联", 40);
+  const resolved = ontology.resolveAlias(relation);
+  if (resolved !== "提及" || relation === "提及" || relation === "mentions") {
+    return safeGraphPathField(ontology.getRelationType(resolved)?.label ?? resolved, "关联", 40);
+  }
+  return safeGraphPathField(relation, "关联", 40);
+}
+
 export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
   display: string;
   summary: GraphPathSummary;
   raw: GraphPathEnvelopePayload;
 } {
+  const safeFromTitle = payload.fromTitle ? safeGraphPathField(payload.fromTitle, "起点实体") : undefined;
+  const safeToTitle = payload.toTitle ? safeGraphPathField(payload.toTitle, "目标实体") : undefined;
   if (payload.reason !== "path_found") {
     const status = payload.reason === "no_path" ? "empty" : "error";
     const displayByReason: Record<Exclude<GraphPathEnvelopePayload["reason"], "path_found">, string> = {
-      no_path: payload.fromTitle && payload.toTitle
-        ? `在最多 ${payload.maxDepth} 层关系内，未找到 ${payload.fromTitle} 与 ${payload.toTitle} 的连接。`
+      no_path: safeFromTitle && safeToTitle
+        ? `在 ${payload.maxDepth} 跳范围内，未找到 ${safeFromTitle} 与 ${safeToTitle} 的连接。`
         : "在指定范围内未找到关系路径。",
       missing_target: "需要提供目标实体。",
       unresolved_source: "未找到起点实体。",
@@ -794,8 +833,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
         truncated: false,
         message: display,
         reason: payload.reason,
-        fromTitle: payload.fromTitle,
-        toTitle: payload.toTitle,
+        fromTitle: safeFromTitle,
+        toTitle: safeToTitle,
         hops: 0,
         maxDepth: payload.maxDepth,
       },
@@ -813,8 +852,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
         truncated: false,
         message: display,
         reason: "path_found",
-        fromTitle: payload.fromTitle,
-        toTitle: payload.toTitle,
+        fromTitle: safeFromTitle,
+        toTitle: safeToTitle,
         hops: 0,
         maxDepth: payload.maxDepth,
       },
@@ -823,7 +862,7 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
   }
 
   if (payload.path.depth === 0) {
-    const title = payload.path.nodes[0]?.title || payload.fromTitle || "该条目";
+    const title = safeGraphPathField(payload.path.nodes[0]?.title ?? payload.fromTitle, "该条目");
     const display = `${title} 与自身是同一条目。`;
     return {
       display,
@@ -848,23 +887,25 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
     const to = payload.path.nodes[i + 1];
     const edge = payload.path.edges[i];
     if (!from || !to) continue;
-    const relation = edge.relation || "关联";
+    const fromTitle = safeGraphPathField(from.title, "起点实体");
+    const toTitle = safeGraphPathField(to.title, "目标实体");
+    const relation = graphPathRelationLabel(edge.relation || "关联");
     const pending = edge.trust_state === "candidate" ? "（待确认关系）" : "";
     const forward = edge.from_slug === from.slug && edge.to_slug === to.slug;
     lines.push(forward
-      ? `${from.title} —${relation}${pending}→ ${to.title}`
-      : `${from.title} ←${relation}${pending}— ${to.title}`);
+      ? `${fromTitle} —${relation}${pending}→ ${toTitle}`
+      : `${fromTitle} ←${relation}${pending}— ${toTitle}`);
   }
   const display = sanitizeDisplay(lines.join("\n"));
-  const fromTitle = payload.path.nodes[0]?.title ?? payload.fromTitle;
-  const toTitle = payload.path.nodes.at(-1)?.title ?? payload.toTitle;
+  const fromTitle = safeGraphPathField(payload.path.nodes[0]?.title ?? payload.fromTitle, "起点实体");
+  const toTitle = safeGraphPathField(payload.path.nodes.at(-1)?.title ?? payload.toTitle, "目标实体");
   return {
     display,
     summary: {
       status: "ok",
       count: payload.path.edges.length,
       truncated: false,
-      message: `找到 ${payload.path.depth} 层关系路径`,
+      message: `找到一条 ${payload.path.depth} 跳关系路径`,
       reason: "path_found",
       fromTitle,
       toTitle,

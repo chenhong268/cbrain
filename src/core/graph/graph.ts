@@ -166,7 +166,8 @@ export class GraphManager {
 
   findShortestPath(fromSlug: string, toSlug: string, options?: ShortestPathOptions): GraphPath | null {
     const requestedDepth = options?.maxDepth ?? 4;
-    const maxDepth = Math.min(6, Math.max(1, Math.trunc(requestedDepth)));
+    const normalizedDepth = Number.isNaN(requestedDepth) ? 4 : Math.trunc(requestedDepth);
+    const maxDepth = Math.min(6, Math.max(1, normalizedDepth));
     const endpoints = this.db.getPageTitlesAndTypes([...new Set([fromSlug, toSlug])]);
     const fromPage = endpoints.get(fromSlug);
     const toPage = endpoints.get(toSlug);
@@ -188,6 +189,8 @@ export class GraphManager {
     for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth++) {
       const linksBySlug = this.db.batchGetLinksForSlugs(frontier);
       const nextFrontier: string[] = [];
+      const candidates: Array<{ previous: string; neighbor: string; edge: LinkRow }> = [];
+      const candidateSlugs = new Set<string>();
 
       for (const slug of [...frontier].sort(compareStrings)) {
         const links = linksBySlug.get(slug);
@@ -205,19 +208,25 @@ export class GraphManager {
           );
 
         for (const candidate of neighbors) {
-          if (visited.has(candidate.neighbor)) continue;
-          visited.add(candidate.neighbor);
-          parents.set(candidate.neighbor, {
-            previous: slug,
-            edge: toGraphLink(candidate.edge),
-          });
-          nextFrontier.push(candidate.neighbor);
-          if (candidate.neighbor === toSlug) {
-            found = true;
-            break;
-          }
+          if (visited.has(candidate.neighbor) || candidateSlugs.has(candidate.neighbor)) continue;
+          candidateSlugs.add(candidate.neighbor);
+          candidates.push({ previous: slug, neighbor: candidate.neighbor, edge: candidate.edge });
         }
-        if (found) break;
+      }
+
+      const existingCandidates = this.db.getPageTitlesAndTypes(candidates.map((candidate) => candidate.neighbor));
+      for (const candidate of candidates) {
+        if (!existingCandidates.has(candidate.neighbor)) continue;
+        visited.add(candidate.neighbor);
+        parents.set(candidate.neighbor, {
+          previous: candidate.previous,
+          edge: toGraphLink(candidate.edge),
+        });
+        nextFrontier.push(candidate.neighbor);
+        if (candidate.neighbor === toSlug) {
+          found = true;
+          break;
+        }
       }
 
       if (found) break;

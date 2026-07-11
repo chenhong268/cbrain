@@ -19,8 +19,7 @@ When you need to understand how two people, companies, or concepts are related. 
 ### Step 1: Resolve Both Entities
 
 ```
-cbrain query "A" --strategy fts
-cbrain query "B" --strategy fts
+resolve_slugs({ titles: ["人物A", "人物B"] })
 ```
 
 Confirm exact slugs. If either entity doesn't exist in CBrain, stop and say so.
@@ -31,7 +30,7 @@ Confirm exact slugs. If either entity doesn't exist in CBrain, stop and say so.
 graph_query({ slug: <slugA>, mode: "shortest_path", target: <slugB>, depth: 4 })
 ```
 
-Use the ordered path as the relationship chain. A found path, including a multi-hop path, completes this step without another traversal.
+Use the ordered path as the relationship chain. A found path, including a multi-hop path, completes this step without another traversal. If any hop is marked “待确认关系”, keep that wording: the whole candidate-only path is a **待确认关系线索** and不得作为确定事实。
 
 ### Step 3: Find Shared Connections
 
@@ -56,7 +55,7 @@ cbrain show <key-slug>
 
 ### Step 6: Explain
 
-Synthesize into a narrative: how A and B are connected, through whom, since when, and what the relationship means.
+Synthesize into a narrative: how A and B are connected, through whom, since when, and what the relationship means. Preserve “待确认” on every candidate hop in the final narrative; do not upgrade it to a fact.
 
 ## Output Format
 
@@ -64,7 +63,7 @@ Synthesize into a narrative: how A and B are connected, through whom, since when
 ## A ↔ B 关联分析
 
 ### 直接关系
-<如果 CBrain 里有直接链接，描述之> [Source: slug]
+<如果 CBrain 里有直接链接，描述之；candidate 必须写成“待确认关系线索”> [Source: slug]
 
 ### 通过谁连接
 A → [中间人1] → [中间人2] → B
@@ -79,7 +78,7 @@ A 和 B 都关联到：
 YYYY-MM-DD  共同事件描述 [Source: slug]
 
 ### 关系总结
-<2-3 句话总结 A 和 B 的关系性质、强度、背景>
+<2-3 句话总结 A 和 B 的关系性质、强度、背景；待确认线索不得作为确定事实>
 ```
 
 ## Guidelines

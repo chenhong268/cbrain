@@ -400,10 +400,13 @@ if python3 - "$AF_EVAL" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
 pairwise = [r for r in rows if r.get("category") == "relationship" and r.get("expected_tool") == "graph_query"]
+assert len(pairwise) >= 2
 assert any(
     r.get("expected_args", {}).get("mode") == "shortest_path"
     and isinstance(r.get("expected_args", {}).get("slug"), str)
     and isinstance(r.get("expected_args", {}).get("target"), str)
+    and r.get("expected_args", {}).get("depth") == 4
+    and r.get("required_sequence") == ["resolve_slugs", "graph_query"]
     for r in pairwise
 )
 assert any(
@@ -423,7 +426,10 @@ fi
 if $relationship_eval_contract \
   && grep -q 'mode: "shortest_path"' "$SKILLS_DIR/connect.md" \
   && grep -q 'target:' "$SKILLS_DIR/connect.md" \
-  && grep -q 'empty/no_path' "$SKILLS_DIR/connect.md"; then
+  && grep -q 'empty/no_path' "$SKILLS_DIR/connect.md" \
+  && grep -q 'resolve_slugs' "$SKILLS_DIR/connect.md" \
+  && grep -q '待确认关系线索' "$SKILLS_DIR/connect.md" \
+  && grep -q '不得作为确定事实' "$SKILLS_DIR/connect.md"; then
   pass "pairwise relationship contract uses graph shortest_path"
 else
   fail "pairwise relationship contract must use graph shortest_path"

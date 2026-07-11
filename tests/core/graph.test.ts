@@ -411,6 +411,19 @@ describe("GraphManager", () => {
       expect(graph.findShortestPath("entities/a", "entities/missing")).toBeNull();
     });
 
+    test("ignores a dangling shorter chain and finds the complete valid path", () => {
+      seedPages("a", "b", "c", "d");
+      db.rawDb.exec("PRAGMA foreign_keys = OFF");
+      insertPathLink(db, "entities/a", "entities/ghost");
+      insertPathLink(db, "entities/ghost", "entities/d");
+      insertPathLink(db, "entities/a", "entities/b");
+      insertPathLink(db, "entities/b", "entities/c");
+      insertPathLink(db, "entities/c", "entities/d");
+
+      expect(graph.findShortestPath("entities/a", "entities/d", { maxDepth: 3 })?.nodes.map((n) => n.slug))
+        .toEqual(["entities/a", "entities/b", "entities/c", "entities/d"]);
+    });
+
     test("returns a zero-hop path when source equals the existing target", () => {
       seedPages("a");
       const path = graph.findShortestPath("entities/a", "entities/a");
@@ -428,15 +441,20 @@ describe("GraphManager", () => {
       expect(graph.findShortestPath("entities/a", "entities/b", { maxDepth: 0 })?.depth).toBe(1);
       expect(graph.findShortestPath("entities/a", "entities/c", { maxDepth: 99 })?.depth).toBe(2);
       expect(graph.findShortestPath("entities/a", "entities/c", { maxDepth: 2.9 })?.depth).toBe(2);
+      expect(graph.findShortestPath("entities/a", "entities/b", { maxDepth: Number.NaN })?.depth).toBe(1);
     });
 
-    test("excludes candidate reports_to but keeps ordinary candidate evidence", () => {
-      seedPages("a", "b", "c");
+    test("excludes non-current relations but keeps ordinary candidate evidence", () => {
+      seedPages("a", "b", "c", "d", "e");
       insertPathLink(db, "entities/a", "entities/b", "reports_to", "candidate");
       insertPathLink(db, "entities/a", "entities/c", "提及", "candidate");
+      insertPathLink(db, "entities/a", "entities/d", "关联", "rejected");
+      insertPathLink(db, "entities/a", "entities/e", "关联", "superseded");
 
       expect(graph.findShortestPath("entities/a", "entities/b")).toBeNull();
       expect(graph.findShortestPath("entities/a", "entities/c")?.depth).toBe(1);
+      expect(graph.findShortestPath("entities/a", "entities/d")).toBeNull();
+      expect(graph.findShortestPath("entities/a", "entities/e")).toBeNull();
     });
 
     test("chooses the lexicographically stable equal-hop path regardless of insertion order", () => {
@@ -483,6 +501,9 @@ describe("GraphManager", () => {
       expect(linkFrontiers).toEqual([["entities/a"], ["entities/b"], ["entities/c"]]);
       expect(pageBatches).toEqual([
         ["entities/a", "entities/d"],
+        ["entities/b"],
+        ["entities/c"],
+        ["entities/d"],
         ["entities/a", "entities/b", "entities/c", "entities/d"],
       ]);
       expect(pointReads).toBe(0);

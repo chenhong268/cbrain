@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- SQLite is the source of truth; this feature is read-only except existing scalar `logQuery` telemetry.
+- SQLite is the source of truth; this feature is fully read-only and does not write query-log rows because they feed delayed learning.
 - Default shortest-path depth is 4; core clamps 1..6 and MCP accepts integer 1..6 only for `shortest_path`.
 - Existing graph modes retain default depth 2 and their permissive numeric schema behavior.
 - Use `isCurrentFactLink`; candidate `reports_to` is excluded, while other candidate relations are shown as “待确认关系”.
@@ -67,7 +67,7 @@ expect(frontiers).toEqual([
 ]);
 ```
 
-Also spy `getOutgoingLinks`, `getIncomingLinks`, `getPageTitle`, `getPageTitleAndType`, and `getPage` and assert they are never called. Record `getPageTitlesAndTypes` arguments and assert there are exactly two batched hydration calls: one for both endpoints and one for the final ordered path nodes.
+Also spy `getOutgoingLinks`, `getIncomingLinks`, `getPageTitle`, `getPageTitleAndType`, and `getPage` and assert they are never called. Record `getPageTitlesAndTypes` arguments and assert one endpoint batch, one candidate-existence batch per visited depth, and one final ordered-path batch. The per-depth batch prevents a dangling shorter chain from masking a complete longer path without introducing N+1 reads.
 
 - [ ] **Step 2: Verify RED**
 
@@ -253,7 +253,7 @@ Add integration tests for:
 - shortest-path rejects 0, negative, fractional, and >6 depth through a structured error envelope;
 - legacy mode still accepts its historical numeric values;
 - no path returns `empty/no_path`;
-- spies prove `logQuery` may run but `learn.bumpOnQuery` and `db.boostLinkConfidence` do not run.
+- spies and a delayed `LearnManager.recomputeAll()` check prove `logQuery`, `learn.bumpOnQuery`, and `db.boostLinkConfidence` do not change activity or link state.
 
 The side-effect test must build and patch the actual `ToolContext` before registration:
 
@@ -295,7 +295,7 @@ Expected: FAIL because the schema does not accept `shortest_path`.
 - Validate only this branch with `Number.isInteger(effectiveDepth) && effectiveDepth >= 1 && effectiveDepth <= 6`.
 - Resolve source and target separately. Do not treat an unknown name as a valid raw slug.
 - Build and return `formatGraphPathEnvelope`.
-- Call scalar `db.logQuery("graph", ...)` best-effort if desired, then return before the shared learning/confidence loop.
+- Return before `db.logQuery`, `learn.bumpOnQuery`, and `boostLinkConfidence`; query-log rows are intentionally skipped because they participate in delayed learning.
 
 Do not alter the legacy switch or its post-processing beyond supplying `effectiveDepth` to `traverse`.
 
