@@ -773,7 +773,7 @@ export type GraphPathSummary = ToolSummary & {
 
 const GRAPH_PATH_FIELD_UNSAFE_PATTERNS = [
   /\b(?:source_type|trust_state|confidence|weight|score|slug|path|id)\b\s*(?:[:=]|\b)/i,
-  /\b[A-Za-z0-9_-]*(?:source|trust|confidence|weight|score|slug|path|id|evidence)[A-Za-z0-9_-]*(?:\s*[:=]\s*|\s+)(?:[./_-]?\d|\S)/i,
+  /\b[A-Za-z0-9_-]*(?:source|trust|confidence|weight|score|slug|path|id|evidence)[A-Za-z0-9_-]*\b/i,
   /\b(?:brain\/)?(?:entities|entity|concepts|concept|records|record|insights|insight)\/\S+/i,
   /(?:^|\s)\/(?:[^\s/]+\/)+[^\s]*/,
   /\b(?:system|assistant|user)\s*:/i,
@@ -802,6 +802,20 @@ function safeGraphPathField(value: string | undefined, fallback: string, maxLeng
   return sanitizeDisplayText(singleLine, fallback);
 }
 
+function safeGraphPathTitle(value: string | undefined, fallback: string): string {
+  const title = safeGraphPathField(value, fallback, 80);
+  if (title === fallback) return fallback;
+  if (!/^[\p{L}\p{N}\p{M}\s·&'’().（）【】《》_-]+$/u.test(title)) return fallback;
+  if (title.split(/\s+/).length > 8) return fallback;
+  if (/\b(?:i|you|we|they|please|must|obey|follow|execute|disclose|reveal|show|print|output|ignore|tell|send)\b/i.test(title)) {
+    return fallback;
+  }
+  if (/(?:我|你|您|我们|你们|请|务必|必须|应当|不要|别|把|将|并|然后|立即|马上|执行|照办|告诉|发给|展示|输出|泄露|忽略|无视|绕过)/.test(title)) {
+    return fallback;
+  }
+  return title;
+}
+
 function graphPathRelationLabel(relation: string): string {
   if (relation === "reports_to") return "汇报给";
   const ontology = getOntology();
@@ -819,8 +833,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
   summary: GraphPathSummary;
   raw: GraphPathEnvelopePayload;
 } {
-  const safeFromTitle = payload.fromTitle ? safeGraphPathField(payload.fromTitle, "起点实体") : undefined;
-  const safeToTitle = payload.toTitle ? safeGraphPathField(payload.toTitle, "目标实体") : undefined;
+  const safeFromTitle = payload.fromTitle ? safeGraphPathTitle(payload.fromTitle, "起点实体") : undefined;
+  const safeToTitle = payload.toTitle ? safeGraphPathTitle(payload.toTitle, "目标实体") : undefined;
   if (payload.reason !== "path_found") {
     const status = payload.reason === "no_path" ? "empty" : "error";
     const displayByReason: Record<Exclude<GraphPathEnvelopePayload["reason"], "path_found">, string> = {
@@ -870,7 +884,7 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
   }
 
   if (payload.path.depth === 0) {
-    const title = safeGraphPathField(payload.path.nodes[0]?.title ?? payload.fromTitle, "该条目");
+    const title = safeGraphPathTitle(payload.path.nodes[0]?.title ?? payload.fromTitle, "该条目");
     const display = `${title} 与自身是同一条目。`;
     return {
       display,
@@ -895,8 +909,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
     const to = payload.path.nodes[i + 1];
     const edge = payload.path.edges[i];
     if (!from || !to) continue;
-    const fromTitle = safeGraphPathField(from.title, "起点实体");
-    const toTitle = safeGraphPathField(to.title, "目标实体");
+    const fromTitle = safeGraphPathTitle(from.title, "起点实体");
+    const toTitle = safeGraphPathTitle(to.title, "目标实体");
     const relation = graphPathRelationLabel(edge.relation || "关联");
     const pending = edge.trust_state === "candidate" ? "（待确认关系）" : "";
     const forward = edge.from_slug === from.slug && edge.to_slug === to.slug;
@@ -905,8 +919,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
       : `${fromTitle} ←${relation}${pending}— ${toTitle}`);
   }
   const display = sanitizeDisplay(lines.join("\n"));
-  const fromTitle = safeGraphPathField(payload.path.nodes[0]?.title ?? payload.fromTitle, "起点实体");
-  const toTitle = safeGraphPathField(payload.path.nodes.at(-1)?.title ?? payload.toTitle, "目标实体");
+  const fromTitle = safeGraphPathTitle(payload.path.nodes[0]?.title ?? payload.fromTitle, "起点实体");
+  const toTitle = safeGraphPathTitle(payload.path.nodes.at(-1)?.title ?? payload.toTitle, "目标实体");
   return {
     display,
     summary: {
