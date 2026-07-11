@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import * as lancedb from "@lancedb/lancedb";
 import type { CBrainDB } from "./sqlite.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
+import type { EmbeddingResult } from "../embedding/provider.js";
 import { CHUNKS_SCHEMA, INSIGHTS_SCHEMA } from "./lancedb.js";
 
 // ── Types ───────────────────────────────────────────────────
@@ -46,6 +47,68 @@ export interface FsOps {
 
 const defaultFs: FsOps = { existsSync, mkdirSync, renameSync, rmSync };
 
+export type RebuildProgressPhase = "chunks" | "insights";
+
+export interface RebuildProgress {
+  readonly phase: RebuildProgressPhase;
+  readonly processed: number;
+  readonly total: number;
+  readonly batch: number;
+  readonly batches: number;
+}
+
+export interface RebuildOptions {
+  readonly chunkBatchSize?: number;
+  readonly insightBatchSize?: number;
+  readonly onProgress?: (progress: RebuildProgress) => void;
+}
+
+export const DEFAULT_REBUILD_BATCH_SIZE = 256;
+
+function normalizeBatchSize(value: number | undefined, label: string): number {
+  const size = value ?? DEFAULT_REBUILD_BATCH_SIZE;
+  if (!Number.isInteger(size) || size < 1) throw new Error(`${label} must be a positive integer`);
+  return size;
+}
+
+function notifyProgress(observer: RebuildOptions["onProgress"], progress: RebuildProgress): void {
+  if (!observer) return;
+  try {
+    observer(progress);
+  } catch {
+    // Observability must never decide whether an atomic recovery commits.
+  }
+}
+
+async function embedInBatches<T>(input: {
+  rows: readonly T[];
+  content: (row: T) => string;
+  embedding: EmbeddingProvider;
+  batchSize: number;
+  phase: RebuildProgressPhase;
+  onProgress?: RebuildOptions["onProgress"];
+}): Promise<EmbeddingResult[]> {
+  const out: EmbeddingResult[] = [];
+  const batches = Math.ceil(input.rows.length / input.batchSize);
+  for (let offset = 0; offset < input.rows.length; offset += input.batchSize) {
+    const rows = input.rows.slice(offset, offset + input.batchSize);
+    const embedded = await input.embedding.embedBatch(rows.map(input.content));
+    if (embedded.length !== rows.length) {
+      throw new Error(`EMBEDDING_COUNT_MISMATCH: ${input.phase} batch returned ${embedded.length}, expected ${rows.length}`);
+    }
+    out.push(...embedded);
+    const batch = Math.floor(offset / input.batchSize) + 1;
+    notifyProgress(input.onProgress, {
+      phase: input.phase,
+      processed: Math.min(offset + rows.length, input.rows.length),
+      total: input.rows.length,
+      batch,
+      batches,
+    });
+  }
+  return out;
+}
+
 // ── Main rebuilder ──────────────────────────────────────────
 
 /**
@@ -64,7 +127,10 @@ export async function rebuildLanceIndex(
   db: CBrainDB,
   embedding: EmbeddingProvider,
   fs: FsOps = defaultFs,
+  options: RebuildOptions = {},
 ): Promise<RebuildResult> {
+  const chunkBatchSize = normalizeBatchSize(options.chunkBatchSize, "chunkBatchSize");
+  const insightBatchSize = normalizeBatchSize(options.insightBatchSize, "insightBatchSize");
   // ── 0. Read source data from SQLite ──
   // #269: rebuild BOTH L0 raw chunks (summary_level = 0) AND L1 summary chunks
   // (summary_level = 1, chunk_index = -1). Filtering to L0 only silently dropped
@@ -107,27 +173,23 @@ export async function rebuildLanceIndex(
     stagingConn = await lancedb.connect(stagingPath);
 
     // ── 2. Build chunks table ──
-    // Group by slug for batch embedding
-    const bySlug = new Map<string, Array<{ index: number; content: string }>>();
-    for (const row of chunkRows) {
-      const slug = row.page_slug as string;
-      let group = bySlug.get(slug);
-      if (!group) { group = []; bySlug.set(slug, group); }
-      group.push({ index: row.chunk_index as number, content: row.content as string });
-    }
-
-    const allChunkData: Array<Record<string, unknown>> = [];
-    for (const [slug, chunks] of bySlug) {
-      const embedResults = await embedding.embedBatch(chunks.map(c => c.content));
-      for (let i = 0; i < chunks.length; i++) {
-        allChunkData.push({
-          pageSlug: slug,
-          chunkIndex: chunks[i].index,
-          content: chunks[i].content,
-          vector: new Float32Array(embedResults[i].embedding),
-        });
-      }
-    }
+    // SQLite already supplies deterministic (page_slug, chunk_index) order.
+    // Batch across page boundaries so provider calls scale with chunks, not pages.
+    const chunkEmbeddings = await embedInBatches({
+      rows: chunkRows,
+      content: (row) => row.content as string,
+      embedding,
+      batchSize: chunkBatchSize,
+      phase: "chunks",
+      onProgress: options.onProgress,
+    });
+    const allChunkData = chunkRows.map((row, index) => ({
+      pageSlug: row.page_slug as string,
+      chunkIndex: row.chunk_index as number,
+      content: row.content as string,
+      vector: new Float32Array(chunkEmbeddings[index].embedding),
+    }));
+    const rebuiltPageCount = new Set(chunkRows.map((row) => row.page_slug as string)).size;
 
     if (allChunkData.length > 0) {
       await stagingConn.createTable("chunks", allChunkData, { schema: CHUNKS_SCHEMA, mode: "create" });
@@ -135,7 +197,14 @@ export async function rebuildLanceIndex(
 
     // ── 3. Build insights table ──
     if (insightRows.length > 0) {
-      const embedResults = await embedding.embedBatch(insightRows.map(r => r.content as string));
+      const embedResults = await embedInBatches({
+        rows: insightRows,
+        content: (row) => row.content as string,
+        embedding,
+        batchSize: insightBatchSize,
+        phase: "insights",
+        onProgress: options.onProgress,
+      });
       const insightData = insightRows.map((row, i) => ({
         id: row.id as number,
         content: row.content as string,
@@ -232,7 +301,7 @@ export async function rebuildLanceIndex(
     }
 
     return {
-      chunksRebuilt: bySlug.size,
+      chunksRebuilt: rebuiltPageCount,
       insightsRebuilt: insightRows.length,
       errors: 0,
       errorDetails: [],

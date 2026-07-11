@@ -57,6 +57,8 @@ describe("handleReindexVectors", () => {
 
     expect(exitCode).toBe(0);
     expect(logs.some(l => l.includes("Rebuilt:"))).toBe(true);
+    expect(logs.some(l => /^Progress: chunks \d+\/\d+ \(batch \d+\/\d+\)$/.test(l))).toBe(true);
+    expect(logs.join("\n")).not.toContain("entities/a");
 
     // DB should be closed — calling close() again should not throw
     expect(() => db.close()).not.toThrow();

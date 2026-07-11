@@ -496,4 +496,185 @@ describe("Atomic LanceDB rebuild", () => {
     expect(l1[0].content).toBe("sealed page summary BETA");
     expect(l1[0].pageSlug).toBe("entities/sealed-269");
   });
+
+  test("#325 batches chunks across pages while preserving deterministic input mapping", async () => {
+    const rows = [
+      ["entities/a", -1, "summary-a", 1],
+      ["entities/a", 0, "raw-a-0", 0],
+      ["entities/a", 1, "raw-a-1", 0],
+      ["entities/b", 0, "raw-b-0", 0],
+      ["entities/b", 1, "raw-b-1", 0],
+      ["entities/c", 0, "raw-c-0", 0],
+    ] as const;
+    for (const [index, slug] of ["entities/a", "entities/b", "entities/c"].entries()) {
+      db.rawDb.prepare(
+        "INSERT OR IGNORE INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+      ).run(slug, `匿名实体${index}`, `${slug}.md`, `hash-${slug}`);
+    }
+    for (const [slug, index, content, level] of rows) {
+      db.rawDb.prepare(
+        "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, ?, ?, ?)",
+      ).run(slug, index, content, level);
+    }
+
+    const calls: string[][] = [];
+    const progress: unknown[] = [];
+    const provider = {
+      dimensions: 2048,
+      embed: async () => ({ embedding: new Array(2048).fill(0), tokenCount: 0 }),
+      embedBatch: async (texts: string[]) => {
+        calls.push([...texts]);
+        return texts.map((text) => ({
+          embedding: [text.length, ...new Array(2047).fill(0)],
+          tokenCount: text.length,
+        }));
+      },
+    };
+
+    const result = await rebuildLanceIndex(lancePath, db, provider, undefined, {
+      chunkBatchSize: 4,
+      onProgress: (event) => progress.push(event),
+    });
+
+    expect(result.chunksRebuilt).toBe(3);
+    expect(calls).toEqual([
+      ["summary-a", "raw-a-0", "raw-a-1", "raw-b-0"],
+      ["raw-b-1", "raw-c-0"],
+    ]);
+    expect(progress).toEqual([
+      { phase: "chunks", processed: 4, total: 6, batch: 1, batches: 2 },
+      { phase: "chunks", processed: 6, total: 6, batch: 2, batches: 2 },
+    ]);
+
+    const verify = new LanceDBManager();
+    await verify.connect(lancePath);
+    const stored = [
+      ...(await verify.readL1VectorRows("entities/a")),
+      ...(await verify.readRawVectorRows("entities/a")),
+      ...(await verify.readRawVectorRows("entities/b")),
+      ...(await verify.readRawVectorRows("entities/c")),
+    ];
+    await verify.close();
+    for (const row of stored) expect(row.vector[0]).toBe(row.content.length);
+  });
+
+  test("#325 second batch failure leaves live index untouched and removes staging", async () => {
+    mkdirSync(lancePath, { recursive: true });
+    const live = new LanceDBManager();
+    await live.connect(lancePath);
+    await live.addChunks([{ pageSlug: "entities/live", chunkIndex: 0, content: "live", vector: new Float32Array(2048) }]);
+    await live.close();
+
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+    ).run("entities/source", "匿名实体", "entities/source.md", "hash-source");
+    for (let i = 0; i < 5; i++) {
+      db.rawDb.prepare(
+        "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, ?, ?, 0)",
+      ).run("entities/source", i, `chunk-${i}`);
+    }
+    let calls = 0;
+    const provider = {
+      dimensions: 2048,
+      embed: async () => ({ embedding: new Array(2048).fill(0), tokenCount: 0 }),
+      embedBatch: async (texts: string[]) => {
+        calls++;
+        if (calls === 2) throw new Error("provider unavailable");
+        return texts.map(() => ({ embedding: new Array(2048).fill(0), tokenCount: 0 }));
+      },
+    };
+
+    await expect(rebuildLanceIndex(lancePath, db, provider, undefined, { chunkBatchSize: 3 })).rejects.toThrow();
+    expect(calls).toBe(2);
+    expect(readdirSync(TEST_DIR).filter((entry) => entry.includes(".rebuild-"))).toHaveLength(0);
+
+    const verify = new LanceDBManager();
+    await verify.connect(lancePath);
+    const results = await verify.search(new Float32Array(2048), 5);
+    expect(results[0].content).toBe("live");
+    await verify.close();
+  });
+
+  test("#325 progress is scalar-only and observer failure cannot abort rebuild", async () => {
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+    ).run("entities/private-source", "匿名实体", "entities/private-source.md", "hash-private");
+    db.rawDb.prepare(
+      "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 0)",
+    ).run("entities/private-source", "private-content-marker");
+    const events: unknown[] = [];
+
+    const result = await rebuildLanceIndex(lancePath, db, embedding, undefined, {
+      onProgress: (event) => {
+        events.push(event);
+        throw new Error("observer failed");
+      },
+    });
+
+    expect(result.errors).toBe(0);
+    expect(events.length).toBeGreaterThan(0);
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("private-source");
+    expect(serialized).not.toContain("private-content-marker");
+    expect(serialized).not.toContain(TEST_DIR);
+  });
+
+  test("#325 active insights use bounded batches with scalar progress", async () => {
+    for (let i = 0; i < 5; i++) {
+      db.rawDb.prepare(
+        "INSERT INTO insights (content, type, source_type, status) VALUES (?, 'synthesis', 'reflect', 'active')",
+      ).run(`anonymous-insight-${i}`);
+    }
+    const calls: string[][] = [];
+    const progress: unknown[] = [];
+    const provider = {
+      dimensions: 2048,
+      embed: async () => ({ embedding: new Array(2048).fill(0), tokenCount: 0 }),
+      embedBatch: async (texts: string[]) => {
+        calls.push([...texts]);
+        return texts.map(() => ({ embedding: new Array(2048).fill(0), tokenCount: 0 }));
+      },
+    };
+
+    const result = await rebuildLanceIndex(lancePath, db, provider, undefined, {
+      insightBatchSize: 2,
+      onProgress: (event) => progress.push(event),
+    });
+
+    expect(result.chunksRebuilt).toBe(0);
+    expect(result.insightsRebuilt).toBe(5);
+    expect(calls.map((call) => call.length)).toEqual([2, 2, 1]);
+    expect(progress).toEqual([
+      { phase: "insights", processed: 2, total: 5, batch: 1, batches: 3 },
+      { phase: "insights", processed: 4, total: 5, batch: 2, batches: 3 },
+      { phase: "insights", processed: 5, total: 5, batch: 3, batches: 3 },
+    ]);
+  });
+
+  test("#325 rejects provider count mismatch before swapping live index", async () => {
+    mkdirSync(lancePath, { recursive: true });
+    const live = new LanceDBManager();
+    await live.connect(lancePath);
+    await live.addChunks([{ pageSlug: "entities/live-count", chunkIndex: 0, content: "live", vector: new Float32Array(2048) }]);
+    await live.close();
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)",
+    ).run("entities/source-count", "匿名实体", "entities/source-count.md", "hash-source");
+    db.rawDb.prepare(
+      "INSERT INTO chunks (page_slug, chunk_index, content, summary_level) VALUES (?, 0, ?, 0)",
+    ).run("entities/source-count", "anonymous-content");
+    const shortProvider = {
+      dimensions: 2048,
+      embed: async () => ({ embedding: new Array(2048).fill(0), tokenCount: 0 }),
+      embedBatch: async () => [],
+    };
+
+    await expect(rebuildLanceIndex(lancePath, db, shortProvider)).rejects.toThrow("EMBEDDING_COUNT_MISMATCH");
+    expect(readdirSync(TEST_DIR).filter((entry) => entry.includes(".rebuild-"))).toHaveLength(0);
+    const verify = new LanceDBManager();
+    await verify.connect(lancePath);
+    const results = await verify.search(new Float32Array(2048), 5);
+    expect(results[0].content).toBe("live");
+    await verify.close();
+  });
 });

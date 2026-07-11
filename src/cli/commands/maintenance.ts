@@ -61,7 +61,11 @@ export async function handleReindexVectors(
     }
 
     const { rebuildLanceIndex } = await import("../../storage/lance-rebuild.js");
-    const report = await rebuildLanceIndex(lancePath, db, embedding);
+    const report = await rebuildLanceIndex(lancePath, db, embedding, undefined, {
+      onProgress: ({ phase, processed, total, batch, batches }) => {
+        log(`Progress: ${phase} ${processed}/${total} (batch ${batch}/${batches})`);
+      },
+    });
     log(`Rebuilt:  ${report.chunksRebuilt} pages chunks, ${report.insightsRebuilt} insights`);
     if (report.backupPath) {
       log(`Backup:   ${report.backupPath}`);
