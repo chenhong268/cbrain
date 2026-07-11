@@ -26,6 +26,7 @@ import { resolveIngestNerMode } from "../cli/context.js";
 import type { IngestNerMode } from "../cli/context.js";
 import type { ToolProfile } from "./tool-profiles.js";
 import { JobQueueNerSubmitter, type DeferredNerSubmitter } from "../core/ingestion/ner-backfill.js";
+import { resolveOutputMode, type OutputMode } from "./output-mode.js";
 
 export interface ToolContext {
   db: CBrainDB;
@@ -55,6 +56,8 @@ export interface ToolContext {
   watcher?: FileWatcher;
   /** #251: MCP tool surface profile — gates which tools attachMcpTools exposes. */
   toolProfile: ToolProfile;
+  /** #327 Phase 1: pilot output trust-boundary mode (legacy | structured). */
+  outputMode: OutputMode;
   /** #252/#271: resolved NER mode shared by ingest, page tools, and sync. */
   nerIngestMode: IngestNerMode;
   /** #252/#271: durable backfill submitter for write paths in defer mode. */
@@ -106,5 +109,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const compoundingReview = new CompoundingReviewManager(db);
   profile.load();
 
-  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter };
+  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY) };
 }

@@ -3,6 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { findEntitySlug, normalizeRelation } from "../../core/shared.js";
 import { formatGraphEnvelope, formatGraphPathEnvelope, formatLinksEnvelope } from "./format-result.js";
+import { buildToolResult } from "./result-builder.js";
+import { TITLE_MAX, RELATION_MAX, CONTEXT_MAX, SUMMARY_MAX } from "../validation.js";
 
 type LinkDirection = "outgoing" | "incoming" | "both";
 type LinkAction = "list" | "add" | "remove";
@@ -10,6 +12,31 @@ type LinkAction = "list" | "add" | "remove";
 function linkJson(payload: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
 }
+
+const GRAPH_QUERY_OUTPUT_SCHEMA = {
+  schema_version: z.literal(1),
+  summary: z.object({
+    status: z.enum(["ok", "empty", "degraded", "error"]),
+    count: z.number(),
+    truncated: z.boolean(),
+    message: z.string().max(SUMMARY_MAX),
+  }),
+  data: z.union([
+    z.object({
+      from: z.string().max(TITLE_MAX),
+      to: z.string().max(TITLE_MAX),
+      hops: z.array(z.object({ title: z.string().max(TITLE_MAX), relation: z.string().max(RELATION_MAX) })),
+    }),
+    z.object({
+      links: z.array(z.object({
+        title: z.string().max(TITLE_MAX),
+        relation: z.string().max(RELATION_MAX),
+        context: z.string().max(CONTEXT_MAX).optional(),
+      })),
+    }),
+  ]),
+  audit: z.object({ raw: z.unknown() }).optional(),
+};
 
 export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
   const listLinks = (slug: string, direction: LinkDirection = "both") => {
@@ -88,17 +115,47 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       minWeight: z.number().optional().describe("Minimum link weight (0-1). Higher = stronger links only."),
       source_type: z.string().max(100).optional().describe("Filter links by source type: wikilink, manual, ner, dialogue, writeback, unknown"),
       session_id: z.string().max(200).optional().describe("Current conversation session ID for co-occurrence tracking"),
+      include_raw: z.boolean().optional().describe("若为 true，返回脱敏后的审计数据（audit.raw，凭据与绝对路径已剥离）。默认 false。"),
     },
-  }, async ({ slug, mode, target, depth, limit, minWeight, source_type, session_id }) => {
+    // #327 Fix: outputSchema is registered ONLY in structured mode. In legacy mode the
+    // handler returns byte-compatible {display,summary,raw} text with NO structuredContent,
+    // and the MCP SDK validates structuredContent against outputSchema on real transport
+    // calls — so an unconditional outputSchema makes every legacy call fail with -32602.
+    // Conditional registration (ctx.outputMode is known at registration time) keeps legacy
+    // byte-compatible with main while structured mode still gets SDK-validated output.
+    ...(ctx.outputMode === "structured" ? { outputSchema: GRAPH_QUERY_OUTPUT_SCHEMA } : {}),
+  }, async ({ slug, mode, target, depth, limit, minWeight, source_type, session_id, include_raw }) => {
     const graphStart = Date.now();
 
     if (mode === "shortest_path") {
       const maxDepth = depth ?? 4;
       if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 6) {
-        return linkJson(formatGraphPathEnvelope({ maxDepth, reason: "invalid_depth", path: null }));
+        const env = formatGraphPathEnvelope({ maxDepth, reason: "invalid_depth", path: null });
+        return buildToolResult({
+          mode: ctx.outputMode,
+          display: env.display,
+          displayStructured: env.displayStructured,
+          summary: env.summary,
+          summaryStructured: env.summaryStructured,
+          data: env.data,
+          raw: env.raw,
+          includeRaw: include_raw ?? false,
+          legacyIndent: 0,
+        });
       }
       if (!target) {
-        return linkJson(formatGraphPathEnvelope({ maxDepth, reason: "missing_target", path: null }));
+        const env = formatGraphPathEnvelope({ maxDepth, reason: "missing_target", path: null });
+        return buildToolResult({
+          mode: ctx.outputMode,
+          display: env.display,
+          displayStructured: env.displayStructured,
+          summary: env.summary,
+          summaryStructured: env.summaryStructured,
+          data: env.data,
+          raw: env.raw,
+          includeRaw: include_raw ?? false,
+          legacyIndent: 0,
+        });
       }
 
       const resolveEndpoint = (input: string): string | null => {
@@ -107,24 +164,57 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
       };
       const fromSlug = resolveEndpoint(slug);
       if (!fromSlug) {
-        return linkJson(formatGraphPathEnvelope({ maxDepth, reason: "unresolved_source", path: null }));
+        const env = formatGraphPathEnvelope({ maxDepth, reason: "unresolved_source", path: null });
+        return buildToolResult({
+          mode: ctx.outputMode,
+          display: env.display,
+          displayStructured: env.displayStructured,
+          summary: env.summary,
+          summaryStructured: env.summaryStructured,
+          data: env.data,
+          raw: env.raw,
+          includeRaw: include_raw ?? false,
+          legacyIndent: 0,
+        });
       }
       const toSlug = resolveEndpoint(target);
       if (!toSlug) {
-        return linkJson(formatGraphPathEnvelope({ maxDepth, reason: "unresolved_target", path: null }));
+        const env = formatGraphPathEnvelope({ maxDepth, reason: "unresolved_target", path: null });
+        return buildToolResult({
+          mode: ctx.outputMode,
+          display: env.display,
+          displayStructured: env.displayStructured,
+          summary: env.summary,
+          summaryStructured: env.summaryStructured,
+          data: env.data,
+          raw: env.raw,
+          includeRaw: include_raw ?? false,
+          legacyIndent: 0,
+        });
       }
 
       const titles = ctx.db.getPageTitlesAndTypes([fromSlug, toSlug]);
       const fromTitle = titles.get(fromSlug)?.title;
       const toTitle = titles.get(toSlug)?.title;
       const path = ctx.graph.findShortestPath(fromSlug, toSlug, { maxDepth });
-      return linkJson(formatGraphPathEnvelope({
+      const env = formatGraphPathEnvelope({
         fromTitle,
         toTitle,
         maxDepth,
         reason: path ? "path_found" : "no_path",
         path,
-      }));
+      });
+      return buildToolResult({
+        mode: ctx.outputMode,
+        display: env.display,
+        displayStructured: env.displayStructured,
+        summary: env.summary,
+        summaryStructured: env.summaryStructured,
+        data: env.data,
+        raw: env.raw,
+        includeRaw: include_raw ?? false,
+        legacyIndent: 0,
+      });
     }
 
     let resolvedSlug = slug;
@@ -174,9 +264,17 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     const titleMap = ctx.db.getPageTitlesAndTypes(allSlugs);
     const titleResolver = (s: string) => titleMap.get(s)?.title || null;
     const envelope = formatGraphEnvelope({ resolvedSlug, result }, titleResolver);
-    return {
-      content: [{ type: "text", text: JSON.stringify(envelope, null, 2) }],
-    };
+    return buildToolResult({
+      mode: ctx.outputMode,
+      display: envelope.display,
+      displayStructured: envelope.displayStructured,
+      summary: envelope.summary,
+      summaryStructured: envelope.summaryStructured,
+      data: envelope.data,
+      raw: envelope.raw,
+      includeRaw: include_raw ?? false,
+      legacyIndent: 2,
+    });
   });
 
   // ─── link ─────────────────────────────────────────────────

@@ -837,13 +837,63 @@ function graphPathRelationLabel(relation: string): string {
   return "关联";
 }
 
+// ─── #327 Phase 1 structured templates (NO vault-derived text) ───
+// displayStructured is a fixed per-reason string; summaryStructured is a strict
+// whitelist ToolSummary (status/count/truncated/message only — NEVER fromTitle/
+// toTitle/reason/hops/maxDepth). The builder uses summaryStructured as-is in
+// structured mode (Codex HIGH 1: no spread of legacy GraphPathSummary).
+function graphPathDisplayStructured(payload: GraphPathEnvelopePayload): string {
+  switch (payload.reason) {
+    case "path_found":
+      return payload.path && payload.path.depth > 0
+        ? `找到一条 ${payload.path.depth} 跳关系路径。`
+        : "起点与目标是同一条目。";
+    case "no_path":
+      return `在 ${payload.maxDepth} 跳范围内未找到连接。`;
+    case "missing_target":
+      return "需要提供目标实体。";
+    case "unresolved_source":
+      return "未找到起点实体。";
+    case "unresolved_target":
+      return "未找到目标实体。";
+    case "invalid_depth":
+      return "路径深度需要是 1 到 6 的整数。";
+  }
+}
+function graphPathSummaryStructured(payload: GraphPathEnvelopePayload): ToolSummary {
+  const found = payload.reason === "path_found" && payload.path !== null && payload.path.depth > 0;
+  return {
+    status: payload.reason === "path_found" ? "ok" : payload.reason === "no_path" ? "empty" : "error",
+    count: found ? (payload.path?.edges.length ?? 0) : 0,
+    truncated: false,
+    // whitelist: status/count/truncated/message only — NO reason/hops/maxDepth/fromTitle/toTitle
+    message: found && payload.path ? `找到一条 ${payload.path.depth} 跳关系路径` : graphPathDisplayStructured(payload),
+  };
+}
+
 export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
   display: string;
+  displayStructured: string;
   summary: GraphPathSummary;
+  summaryStructured: ToolSummary;
+  data: { from: string; to: string; hops: Array<{ title: string; relation: string }> };
   raw: GraphPathEnvelopePayload;
 } {
   const safeFromTitle = payload.fromTitle ? safeGraphPathTitle(payload.fromTitle, "起点实体") : undefined;
   const safeToTitle = payload.toTitle ? safeGraphPathTitle(payload.toTitle, "目标实体") : undefined;
+  const path = payload.path;
+  const hops: Array<{ title: string; relation: string }> =
+    path && path.depth > 0
+      ? path.edges.map((edge, i) => ({
+          title: path.nodes[i]?.title ?? payload.fromTitle ?? "起点实体",
+          relation: graphPathRelationLabel(edge.relation || "关联"),
+        }))
+      : [];
+  const data = {
+    from: payload.fromTitle ?? "起点实体",
+    to: payload.toTitle ?? "目标实体",
+    hops,
+  };
   if (payload.reason !== "path_found") {
     const status = payload.reason === "no_path" ? "empty" : "error";
     const displayByReason: Record<Exclude<GraphPathEnvelopePayload["reason"], "path_found">, string> = {
@@ -858,6 +908,7 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
     const display = displayByReason[payload.reason];
     return {
       display,
+      displayStructured: graphPathDisplayStructured(payload),
       summary: {
         status,
         count: 0,
@@ -869,6 +920,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
         hops: 0,
         maxDepth: payload.maxDepth,
       },
+      summaryStructured: graphPathSummaryStructured(payload),
+      data,
       raw: payload,
     };
   }
@@ -877,6 +930,7 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
     const display = "关系路径结果不可用。";
     return {
       display,
+      displayStructured: graphPathDisplayStructured(payload),
       summary: {
         status: "error",
         count: 0,
@@ -888,6 +942,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
         hops: 0,
         maxDepth: payload.maxDepth,
       },
+      summaryStructured: graphPathSummaryStructured(payload),
+      data,
       raw: payload,
     };
   }
@@ -897,6 +953,7 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
     const display = `${title} 与自身是同一条目。`;
     return {
       display,
+      displayStructured: graphPathDisplayStructured(payload),
       summary: {
         status: "ok",
         count: 0,
@@ -908,6 +965,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
         hops: 0,
         maxDepth: payload.maxDepth,
       },
+      summaryStructured: graphPathSummaryStructured(payload),
+      data,
       raw: payload,
     };
   }
@@ -932,6 +991,7 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
   const toTitle = safeGraphPathTitle(payload.path.nodes.at(-1)?.title ?? payload.toTitle, "目标实体");
   return {
     display,
+    displayStructured: graphPathDisplayStructured(payload),
     summary: {
       status: "ok",
       count: payload.path.edges.length,
@@ -943,6 +1003,8 @@ export function formatGraphPathEnvelope(payload: GraphPathEnvelopePayload): {
       hops: payload.path.depth,
       maxDepth: payload.maxDepth,
     },
+    summaryStructured: graphPathSummaryStructured(payload),
+    data,
     raw: payload,
   };
 }
@@ -955,13 +1017,21 @@ interface GraphQueryPayload {
 export function formatGraphEnvelope(
   payload: GraphQueryPayload,
   titleResolver: (slug: string) => string | null,
-): { display: string; summary: ToolSummary; raw: GraphQueryPayload } {
+): {
+  display: string;
+  displayStructured: string;
+  summary: ToolSummary;
+  summaryStructured: ToolSummary;
+  data: { links: Array<{ title: string; relation: string; context?: string }> };
+  raw: GraphQueryPayload;
+} {
   const items = payload.result;
   const count = items.length;
 
   if (count === 0) {
     return {
       display: "未找到相关关系。",
+      displayStructured: "未找到相关关系。",
       summary: {
         status: "empty",
         count: 0,
@@ -969,6 +1039,8 @@ export function formatGraphEnvelope(
         message: "图谱查询无结果",
         next_steps: ["检查实体名称是否正确", "尝试 related 模式"],
       },
+      summaryStructured: { status: "empty", count: 0, truncated: false, message: "图谱查询无结果" },
+      data: { links: [] },
       raw: payload,
     };
   }
@@ -1001,14 +1073,31 @@ export function formatGraphEnvelope(
     }
   }
 
+  const dataLinks: Array<{ title: string; relation: string; context?: string }> = [];
+  if (isLinks) {
+    for (const link of (items as Link[]).slice(0, 8)) {
+      const otherSlug = link.from_slug === payload.resolvedSlug ? link.to_slug : link.from_slug;
+      dataLinks.push({
+        title: titleResolver(otherSlug) ?? "（未命名）",
+        relation: link.relation || "关联",
+        ...(link.context ? { context: link.context } : {}),
+      });
+    }
+  } else {
+    for (const node of (items as GraphNode[]).slice(0, 8)) {
+      dataLinks.push({ title: node.title || "（未命名）", relation: "关联" });
+    }
+  }
+  const data = { links: dataLinks };
+  // (this final return runs only when count > 0; the empty early-return is handled separately)
+  const displayStructured = `找到 ${count} 条关系。`;
+  const summaryStructured: ToolSummary = { status: "ok", count, truncated: count > 8, message: `找到 ${count} 条关系` };
   return {
     display: sanitizeDisplay(lines.join("\n")),
-    summary: {
-      status: "ok",
-      count,
-      truncated: count > 8,
-      message: `找到 ${count} 条关系`,
-    },
+    displayStructured,
+    summary: { status: "ok", count, truncated: count > 8, message: `找到 ${count} 条关系` },
+    summaryStructured,
+    data,
     raw: payload,
   };
 }
@@ -1082,7 +1171,14 @@ interface TimelinePayload {
 
 export function formatTimelineEnvelope(
   payload: TimelinePayload,
-): { display: string; summary: ToolSummary; raw: TimelinePayload } {
+): {
+  display: string;
+  displayStructured: string;
+  summary: ToolSummary;
+  summaryStructured: ToolSummary;
+  data: { title: string; events: Array<{ date?: string; summary: string; source?: string }> };
+  raw: TimelinePayload;
+} {
   const { title, events } = payload;
   const count = events.length;
   // Use safe display title — fall back to generic label if title looks like a slug
@@ -1091,12 +1187,15 @@ export function formatTimelineEnvelope(
   if (count === 0) {
     return {
       display: `${displayTitle}暂无时间线记录。`,
+      displayStructured: "暂无时间线记录。",
       summary: {
         status: "empty",
         count: 0,
         truncated: false,
         message: "无时间线事件",
       },
+      summaryStructured: { status: "empty", count: 0, truncated: false, message: "无时间线事件" },
+      data: { title: displayTitle, events: [] },
       raw: payload,
     };
   }
@@ -1116,14 +1215,25 @@ export function formatTimelineEnvelope(
     lines.push(`- ...还有 ${count - 5} 个事件`);
   }
 
+  const dataEvents = selected.map((e) => ({
+    ...(e.date ? { date: e.date } : {}),
+    summary: e.summary,
+    ...(e.source ? { source: e.source } : {}),
+  }));
+  const data = { title: displayTitle, events: dataEvents };
+  const displayStructured = `时间线（${count} 个事件）。`;
+  const summaryStructured: ToolSummary = { status: "ok", count, truncated: count > 5, message: `${count} 个事件` };
   return {
     display: sanitizeDisplay(lines.join("\n")),
+    displayStructured,
     summary: {
       status: "ok",
       count,
       truncated: count > 5,
       message: `${title} 时间线：${count} 个事件`,
     },
+    summaryStructured,
+    data,
     raw: payload,
   };
 }

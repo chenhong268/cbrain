@@ -4,10 +4,35 @@ import type { ToolContext } from "../context.js";
 import { indexPage } from "../context.js";
 import { mapSourceType } from "../../core/provenance.js";
 import { formatTimelineEnvelope } from "./format-result.js";
+import { buildToolResult, type BuiltToolResult } from "./result-builder.js";
+import { TITLE_MAX, SUMMARY_MAX } from "../validation.js";
 
 type TimelineAction = "get" | "add";
 
-async function getTimeline(ctx: ToolContext, slug: string): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+const TIMELINE_OUTPUT_SCHEMA = {
+  schema_version: z.literal(1),
+  summary: z.object({
+    status: z.enum(["ok", "empty", "degraded", "error"]),
+    count: z.number(),
+    truncated: z.boolean(),
+    message: z.string().max(SUMMARY_MAX),
+  }),
+  data: z.object({
+    title: z.string().max(TITLE_MAX),
+    events: z.array(z.object({
+      date: z.string().max(50).optional(),
+      summary: z.string().max(SUMMARY_MAX),
+      source: z.string().max(500).optional(),
+    })),
+  }),
+  audit: z.object({ raw: z.unknown() }).optional(),
+};
+
+async function getTimeline(
+  ctx: ToolContext,
+  slug: string,
+  includeRaw: boolean,
+): Promise<BuiltToolResult> {
   const entries = ctx.db.getTimeline(slug);
   const page = ctx.pages.getBySlug(slug);
   const body = page?.body ?? "";
@@ -44,12 +69,17 @@ async function getTimeline(ctx: ToolContext, slug: string): Promise<{ content: A
     title: resolvedTitle,
     events,
   });
-  return {
-    content: [{
-      type: "text",
-      text: JSON.stringify(envelope, null, 2),
-    }],
-  };
+  return buildToolResult({
+    mode: ctx.outputMode,
+    display: envelope.display,
+    displayStructured: envelope.displayStructured,
+    summary: envelope.summary,
+    summaryStructured: envelope.summaryStructured,
+    data: envelope.data,
+    raw: envelope.raw,
+    includeRaw,
+    legacyIndent: 2,
+  });
 }
 
 async function addTimelineEntry(
@@ -84,11 +114,12 @@ async function runTimelineAction(
   ctx: ToolContext,
   action: TimelineAction,
   slug: string,
-  summary?: string,
-  eventDate?: string,
-  source?: string,
-): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
-  if (action === "get") return getTimeline(ctx, slug);
+  summary: string | undefined,
+  eventDate: string | undefined,
+  source: string | undefined,
+  includeRaw: boolean,
+): Promise<{ content: Array<{ type: "text"; text: string }>; structuredContent?: Record<string, unknown>; isError?: boolean }> {
+  if (action === "get") return getTimeline(ctx, slug, includeRaw);
   if (!summary) {
     return { content: [{ type: "text", text: JSON.stringify({ error: "summary is required for action: add" }) }], isError: true };
   }
@@ -105,16 +136,24 @@ export function registerTimelineTools(server: McpServer, ctx: ToolContext): void
       summary: z.string().max(2000).optional().describe("Timeline event summary for action=add"),
       eventDate: z.string().max(50).optional().describe("Event date for action=add (ISO format)"),
       source: z.string().max(500).optional().describe("Source for action=add"),
+      include_raw: z.boolean().optional().describe("action=get 时若为 true，返回脱敏后的审计数据。默认 false。"),
     },
-  }, async ({ action, slug, summary, eventDate, source }) => runTimelineAction(ctx, action, slug, summary, eventDate, source));
+    // No outputSchema in Phase 1: action=add returns {success,id,slug}/error and would not
+    // satisfy a read-only schema. (Codex HIGH 3.2)
+  }, async ({ action, slug, summary, eventDate, source, include_raw }) => runTimelineAction(ctx, action, slug, summary, eventDate, source, include_raw ?? false));
 
   // ─── get_timeline ────────────────────────────────────────────
   server.registerTool("get_timeline", {
     description: "Get timeline entries for a page.",
     inputSchema: {
       slug: z.string().max(500).describe("Page slug"),
+      include_raw: z.boolean().optional().describe("若为 true，返回脱敏后的审计数据（audit.raw，凭据与绝对路径已剥离）。默认 false。"),
     },
-  }, async ({ slug }) => getTimeline(ctx, slug));
+    // #327 Fix: outputSchema registered ONLY in structured mode (see graph.ts note).
+    // Legacy mode returns {display,summary,raw} text with no structuredContent; an
+    // unconditional outputSchema breaks every legacy call with -32602 on real transport.
+    ...(ctx.outputMode === "structured" ? { outputSchema: TIMELINE_OUTPUT_SCHEMA } : {}),
+  }, async ({ slug, include_raw }) => getTimeline(ctx, slug, include_raw ?? false));
 
   // ─── add_timeline_entry ──────────────────────────────────────
   server.registerTool("add_timeline_entry", {

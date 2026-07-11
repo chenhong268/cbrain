@@ -791,3 +791,100 @@ describe("formatLinksEnvelope unit tests", () => {
     expect(result.display).toContain("待确认");
   });
 });
+
+describe("formatter displayStructured / summaryStructured / data (#327 rev2)", () => {
+  test("formatGraphPathEnvelope: fixed displayStructured + data {from,to,hops} (path found)", () => {
+    const result = formatGraphPathEnvelope({
+      fromTitle: "实体A", toTitle: "实体B", maxDepth: 4, reason: "path_found",
+      path: {
+        nodes: [{ slug: "entities/a", title: "实体A", type: "entity/person" }, { slug: "entities/b", title: "实体B", type: "entity/person" }],
+        edges: [{ id: 1, from_slug: "entities/a", to_slug: "entities/b", relation: "认识", weight: 0.9, strength: "strong", source_type: "manual", confidence: 0.9, trust_state: "trusted" }],
+        depth: 1,
+      },
+    });
+    expect(result.displayStructured).toBe("找到一条 1 跳关系路径。");
+    expect(result.summaryStructured.message).toBe("找到一条 1 跳关系路径");
+    // summaryStructured is a whitelist object: safe fields only, NO fromTitle/toTitle (HIGH 1).
+    // Inspect own keys (not property access) so the assertion stays meaningful even if
+    // ToolSummary is ever widened — and satisfies strict tsc on the base type.
+    expect(Object.keys(result.summaryStructured)).not.toContain("fromTitle");
+    expect(Object.keys(result.summaryStructured)).not.toContain("toTitle");
+    expect(result.summaryStructured.status).toBe("ok");
+    expect(result.summaryStructured.count).toBe(1);
+    expect(result.data).toEqual({ from: "实体A", to: "实体B", hops: [{ title: "实体A", relation: "认识" }] });
+    // slug stays in raw, out of data
+    expect(JSON.stringify(result.data)).not.toContain("entities/");
+    expect(result.raw.path?.nodes[0].slug).toBe("entities/a");
+  });
+
+  test("formatGraphPathEnvelope: fixed displayStructured for each non-path reason; hops:[]", () => {
+    const cases: Array<[{ reason: import("../../src/mcp/tools/format-result.js").GraphPathEnvelopePayload["reason"]; maxDepth: number }, string]> = [
+      [{ reason: "no_path", maxDepth: 3 }, "在 3 跳范围内未找到连接。"],
+      [{ reason: "missing_target", maxDepth: 4 }, "需要提供目标实体。"],
+      [{ reason: "unresolved_source", maxDepth: 4 }, "未找到起点实体。"],
+      [{ reason: "unresolved_target", maxDepth: 4 }, "未找到目标实体。"],
+      [{ reason: "invalid_depth", maxDepth: 7 }, "路径深度需要是 1 到 6 的整数。"],
+    ];
+    for (const [payload, expected] of cases) {
+      const r = formatGraphPathEnvelope({ fromTitle: "实体A", toTitle: "实体B", ...payload, path: null });
+      expect(r.displayStructured).toBe(expected);
+      expect(r.data).toEqual({ from: "实体A", to: "实体B", hops: [] });
+    }
+  });
+
+  test("formatGraphEnvelope: fixed displayStructured + data {links:[{title(other party),relation,context?}]}", () => {
+    const result = formatGraphEnvelope({
+      resolvedSlug: "entities/a",
+      result: [{ id: 1, from_slug: "entities/b", to_slug: "entities/a", relation: "同事", weight: 0.8, strength: "medium", context: "项目Sentinel", trust_state: "confirmed" }],
+    }, (s) => s === "entities/b" ? "实体B" : null);
+    expect(result.displayStructured).toBe("找到 1 条关系。");
+    expect(result.summaryStructured.message).toBe("找到 1 条关系");
+    expect(result.summaryStructured.count).toBe(1);
+    // title is the OTHER party (entities/b), not the seed
+    expect(result.data).toEqual({ links: [{ title: "实体B", relation: "同事", context: "项目Sentinel" }] });
+    expect(JSON.stringify(result.data)).not.toContain("entities/");
+  });
+
+  test("formatGraphEnvelope: nodes-mode (related) data title = node title", () => {
+    const result = formatGraphEnvelope(
+      { resolvedSlug: "entities/a", result: [{ slug: "entities/b", title: "实体B", type: "entity/person", depth: 2 }] },
+      () => null,
+    );
+    expect(result.data).toEqual({ links: [{ title: "实体B", relation: "关联" }] });
+  });
+
+  test("formatGraphEnvelope: empty → fixed displayStructured, data {links:[]}", () => {
+    const result = formatGraphEnvelope({ resolvedSlug: "entities/a", result: [] }, () => null);
+    expect(result.displayStructured).toBe("未找到相关关系。");
+    expect(result.data).toEqual({ links: [] });
+  });
+
+  test("formatTimelineEnvelope: fixed displayStructured + data {title, events:[{date?,summary,source?}]}", () => {
+    const result = formatTimelineEnvelope({
+      slug: "entities/a", title: "实体A",
+      events: [{ summary: "加入了组织Sentinel", date: "2025-01-15", source: "manual", trust_state: "candidate", source_page_slug: "entities/a", evidence: "ctx", id: 7 }],
+    });
+    expect(result.displayStructured).toBe("时间线（1 个事件）。");
+    expect(result.summaryStructured.message).toBe("1 个事件");
+    expect(result.summaryStructured.count).toBe(1);
+    expect(result.data).toEqual({ title: "实体A", events: [{ date: "2025-01-15", summary: "加入了组织Sentinel", source: "manual" }] });
+    // internal fields stay in raw, out of data
+    expect(JSON.stringify(result.data)).not.toContain("source_page_slug");
+    expect(JSON.stringify(result.data)).not.toContain("evidence");
+    expect(result.raw.events[0].source_page_slug).toBe("entities/a");
+  });
+
+  test("formatTimelineEnvelope: empty → fixed displayStructured, data {title, events:[]}", () => {
+    const result = formatTimelineEnvelope({ slug: "entities/a", title: "实体A", events: [] });
+    expect(result.displayStructured).toBe("暂无时间线记录。");
+    expect(result.data).toEqual({ title: "实体A", events: [] });
+  });
+
+  test("display (legacy) still contains vault titles — unchanged main behavior", () => {
+    const result = formatGraphPathEnvelope({
+      fromTitle: "实体A", toTitle: "实体B", maxDepth: 4, reason: "path_found",
+      path: { nodes: [{ slug: "entities/a", title: "实体A", type: "entity/person" }, { slug: "entities/b", title: "实体B", type: "entity/person" }], edges: [{ id: 1, from_slug: "entities/a", to_slug: "entities/b", relation: "认识", weight: 0.9, strength: "strong", source_type: "manual", confidence: 0.9, trust_state: "trusted" }], depth: 1 },
+    });
+    expect(result.display).toContain("实体A —认识→ 实体B");
+  });
+});
