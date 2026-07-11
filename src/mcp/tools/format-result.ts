@@ -773,7 +773,7 @@ export type GraphPathSummary = ToolSummary & {
 
 const GRAPH_PATH_FIELD_UNSAFE_PATTERNS = [
   /\b(?:source_type|trust_state|confidence|weight|score|slug|path|id)\b\s*(?:[:=]|\b)/i,
-  /\b[A-Za-z0-9_-]*(?:source|trust|confidence|weight|score|slug|path|id|evidence)[A-Za-z0-9_-]*\s*[:=]/i,
+  /\b[A-Za-z0-9_-]*(?:source|trust|confidence|weight|score|slug|path|id|evidence)[A-Za-z0-9_-]*(?:\s*[:=]\s*|\s+)(?:[./_-]?\d|\S)/i,
   /\b(?:brain\/)?(?:entities|entity|concepts|concept|records|record|insights|insight)\/\S+/i,
   /(?:^|\s)\/(?:[^\s/]+\/)+[^\s]*/,
   /\b(?:system|assistant|user)\s*:/i,
@@ -782,11 +782,13 @@ const GRAPH_PATH_FIELD_UNSAFE_PATTERNS = [
   /(?:reveal|show|print|output|expose).{0,30}(?:private|internal|hidden|secret|memory|prompt|instructions?)/i,
   /(?:忽略|无视|绕过|覆盖|忘掉).{0,20}(?:此前|前面|以上|所有|规则|指令|要求|限制|安全)/,
   /(?:展示|输出|泄露|打印|透露).{0,20}(?:私密|隐私|内部|隐藏|记忆|提示词|规则|指令)/,
+  /^(?=[\s\S]*(?:obey|follow|execute|disclose|reveal|show|print|output|ignore|disregard|override|tell))(?=[\s\S]*(?:message|instruction|rule|memory|private|secret|prompt|system))[\s\S]*$/i,
+  /^(?=[\s\S]*(?:请|执行|按照|按这|告诉|展示|输出|泄露|忽略|无视|绕过))(?=[\s\S]*(?:消息|指令|规则|要求|记忆|隐私|私密|内部|提示词))[\s\S]*$/,
 ];
 
 function safeGraphPathField(value: string | undefined, fallback: string, maxLength = 100): string {
   if (!value) return fallback;
-  const singleLine = [...value]
+  const singleLine = [...value.normalize("NFKC")]
     .map((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
       return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? " " : character;
@@ -808,9 +810,6 @@ function graphPathRelationLabel(relation: string): string {
   const resolved = ontology.resolveAlias(relation);
   if (resolved !== "提及" || relation === "提及" || relation === "mentions") {
     return safeGraphPathField(ontology.getRelationType(resolved)?.label ?? resolved, "关联", 40);
-  }
-  if (/^[\p{Script=Han}\s·・]{1,20}$/u.test(relation)) {
-    return safeGraphPathField(relation, "关联", 40);
   }
   return "关联";
 }

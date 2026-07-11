@@ -399,10 +399,11 @@ fi
 if python3 - "$AF_EVAL" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-pairwise = [r for r in rows if r.get("category") == "relationship" and r.get("expected_tool") == "graph_query"]
+pairwise = [r for r in rows if r.get("category") == "relationship"]
 assert len(pairwise) >= 2
 assert all(
-    r.get("expected_args", {}).get("mode") == "shortest_path"
+    r.get("expected_tool") == "graph_query"
+    and r.get("expected_args", {}).get("mode") == "shortest_path"
     and isinstance(r.get("expected_args", {}).get("slug"), str)
     and isinstance(r.get("expected_args", {}).get("target"), str)
     and r.get("expected_args", {}).get("depth") == 4
