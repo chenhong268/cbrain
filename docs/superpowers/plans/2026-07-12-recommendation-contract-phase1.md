@@ -1,4 +1,4 @@
-# Recommendation Contract — Phase 1 Infrastructure Implementation Plan (rev7)
+# Recommendation Contract — Phase 1 Infrastructure Implementation Plan (rev8)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -7,6 +7,8 @@
 **Architecture:** `src/core/recommendation/`. Additive migration (DDL + completion marker in ONE transaction; test fault hook proves rollback). Deterministic producers, never auto-execute. Immutable payload hashed per RFC 8785 JCS + prose/identifier layer. Two orthogonal persisted axes (`lifecycle_status` / `freshness_status`), each its OWN store API; terminals cannot regress. Atomic supersede keeps `active count ≤ 1`; rejected suppression via `EXISTS(... IS NULL OR > now)` with default TTL wired in; all timestamps semantically validated. Store is the single persistence entry. **A rule is a typed declarative `RuleDefinition`** (full behavior+input source); the registry **deep-clones + deep-freezes** it at registration (caller cannot mutate replay behavior/hash); `code_hash = sha256(canonical(BEHAVIOR subset))` (implementation identity, excludes rule_id/version/registry_ref); tombstone `code_hash` is **derived internally** (never caller-supplied). Registry allows multiple live versions per rule_id (old versions stay exact-resolvable for replay); `setActive` enters **`policyManifest`** (active only — adding/cleaning inactive stock does NOT change policyHash). Display has exactly one public entry — `loadAndProjectDisplay` — hard-depending on module production `ontologyHash()` (no seam), forcing integrity + freshness (which verifies resolved runner `code_hash`+`registry_ref` match the record's producer metadata), gating on active+fresh, projecting through the safety boundary.
 
 **Tech Stack:** Bun, TypeScript strict, `bun:sqlite`, `bun:test`, `node:crypto`. No new runtime deps.
+
+**rev8 changelog:** closes Codex plan-rev7 findings — (HIGH) tombstone identity derives ONLY from a live entry: unknown key (no live, no existing tombstone) throws; same-state repeat is idempotent (original hash preserved); different-state overwrite is rejected; 3 RED tests cover all three. (MED 1) `register` uses canonical content equivalence (`sameDefinition`) instead of the unreachable `ex.def === def` identity check; same-content re-register is no-op, different-content throws. (MED 2) the `1.1.0` fixture carries its own `registry_ref: "d@1.1.0"`; a new `refOwner` guard rejects the same `registry_ref` bound to a different `(rule_id, rule_version)`. (MED 3) all 5 test files use `mkdtempSync(join(tmpdir(), "cbrain-rec-…"))` per setup (no fixed `/tmp` paths, no `Math.random`); the Task 12 fault fixture is wrapped in `try/finally`. The display "active identity change" test switched from `markIncompatible` (now refuses active) to `registerVersion(v2) + setActive(v2)`.
 
 **rev7 changelog:** closes Codex plan-rev6 findings — (H1) tasks reordered to the real dependency DAG so every checkpoint can RED→GREEN independently: canonical → types/policy → migration → integrity → rule-runtime → registry → ontology+versions → store → projection+freshness → producer+manager → display → rollback+gates; the registry test asserts `policyManifest()` directly (no `versions` import). (H2) `register` validates the definition JSON-safe, deep-clones + deep-freezes it, builds the runner from the **frozen snapshot**, and stores that snapshot — caller mutations (incl. nested `fields`/`propose`) cannot change resolved behavior, `code_hash`, or `policyManifest`; attack test asserts immutability. (M1) `markPurged`/`markIncompatible` take NO `codeHash` argument — the tombstone identity is derived internally from the live `runner.code_hash`. (M2) the rule-runtime "trust-state" test is renamed to what it actually proves (`runRule` reads `def.readTemplate.as`, not a hardcoded `reports_to`); the display "metadata mismatch" test builds a record with a **self-consistent fingerprint but wrong `code_hash`** via `store.createRecord`, so it passes integrity and is blocked by the **freshness metadata check** (persisted `version_invalid`), not by integrity.
 
@@ -241,7 +243,7 @@ export function runRecommendationRecordsMigration(db: Database, hooks: Migration
 }
 ```
 
-- [ ] **Step 4: Wire** — `migrations/index.ts`: add `export { runRecommendationRecordsMigration } from "./recommendations.js";`. `sqlite.ts`: import from `./migrations/index.js`; call `runRecommendationRecordsMigration(this.db);` after `runLatePageMigrations(this.db);` (≈ L420).
+- [ ] **Step 4: Wire** — `migrations/index.ts`: add `export { runRecommendationRecordsMigration } from "./recommendations.js";`. `sqlite.ts`: add to the `./migrations/index.js` import block; call `runRecommendationRecordsMigration(this.db);` as the **last statement of the private `migrate()` method**, immediately after `this.repairDirtyData();` (currently ~L420).
 - [ ] **Step 5: Run → PASS**.
 - [ ] **Step 6: Commit**
 
@@ -432,34 +434,53 @@ function def(id: string, ver: string, behavior = "a"): RuleDefinition { return {
 describe("VersionedRuleRegistry", () => {
   test("multiple live versions COEXIST; old exact-resolvable", () => { const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.register(def("d", "1.1.0")); expect(reg.resolve("d", "1.0.0").status).toBe("ok"); expect(reg.resolve("d", "1.1.0").status).toBe("ok"); });
   test("register does not grab active; setActive required", () => { const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); expect(reg.resolveActive("d").status).toBe("unavailable"); reg.setActive("d", "1.0.0"); expect(reg.resolveActive("d").status).toBe("ok"); expect(() => reg.setActive("d", "9.9.9")).toThrow(/live runner/); });
-  test("HIGH 2: registering an INACTIVE version does NOT change policyManifest", () => { const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.setActive("d", "1.0.0"); const before = reg.policyManifest(); reg.register(def("d", "1.1.0")); expect(reg.policyManifest()).toBe(before); });
+  test("registering an INACTIVE version does NOT change policyManifest", () => { const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.setActive("d", "1.0.0"); const before = reg.policyManifest(); reg.register(def("d", "1.1.0")); expect(reg.policyManifest()).toBe(before); });
   test("setActive changes policyManifest", () => { const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.register(def("d", "1.1.0")); reg.setActive("d", "1.0.0"); const before = reg.policyManifest(); reg.setActive("d", "1.1.0"); expect(reg.policyManifest()).not.toBe(before); expect(reg.policyManifest()).toContain("active:d:1.1.0:"); });
-  test("HIGH 2: post-register mutation of the ORIGINAL def does NOT change resolved behavior/code_hash/policyManifest", () => {
+  test("post-register mutation of the ORIGINAL def does NOT change resolved behavior/code_hash/policyManifest", () => {
     const reg = new VersionedRuleRegistry(); const d = def("d", "1.0.0"); reg.register(d); reg.setActive("d", "1.0.0");
     const resolvedBefore = reg.resolveActive("d"); if (resolvedBefore.status !== "ok") throw new Error();
     const manifestBefore = reg.policyManifest(); const hashBefore = resolvedBefore.runner.code_hash;
-    // mutate the ORIGINAL object (incl. nested) AFTER registration
     d.abstainReason = "below_threshold"; d.propose.reason = "changed"; d.readTemplate.fields.push("extra");
     const resolvedAfter = reg.resolveActive("d"); if (resolvedAfter.status !== "ok") throw new Error();
-    expect(resolvedAfter.runner.code_hash).toBe(hashBefore);          // code_hash unchanged
-    expect(resolvedAfter.def.abstainReason).toBe("insufficient_evidence"); // resolved def = frozen snapshot
-    expect(reg.policyManifest()).toBe(manifestBefore);                // policyManifest unchanged
-    // the resolved def itself is frozen
+    expect(resolvedAfter.runner.code_hash).toBe(hashBefore);
+    expect(resolvedAfter.def.abstainReason).toBe("insufficient_evidence");
+    expect(reg.policyManifest()).toBe(manifestBefore);
     expect(Object.isFrozen(resolvedAfter.def)).toBe(true);
     expect(Object.isFrozen((resolvedAfter.def as unknown as { readTemplate: object }).readTemplate)).toBe(true);
-    // behavior unchanged: decide still abstains with the ORIGINAL reason on empty input
     const c = resolvedAfter.runner.decide(resolvedAfter.runner.captureInputs({ eA: { reports_to: [] } }));
     expect(c.kind).toBe("abstain"); if (c.kind === "abstain") expect(c.reason).toBe("insufficient_evidence");
   });
-  test("M1: markPurged takes NO codeHash arg; tombstone identity derived internally", () => {
+  test("MED 1: re-register SAME content (different object) is idempotent no-op; DIFFERENT content throws", () => {
+    const reg = new VersionedRuleRegistry(); const d1 = def("d", "1.0.0"); reg.register(d1);
+    expect(() => reg.register(def("d", "1.0.0"))).not.toThrow();             // same content, fresh object => no-op
+    expect(() => reg.register({ ...def("d", "1.0.0"), abstainReason: "below_threshold" })).toThrow(/different definition/); // different content => fail-closed
+  });
+  test("MED 2: same registry_ref bound to a different (rule_id,rule_version) is rejected", () => {
+    const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); // registry_ref "d@1.0.0"
+    const reuseRef: RuleDefinition = { ...def("e", "1.0.0"), registry_ref: "d@1.0.0" }; // different key, same ref
+    expect(() => reg.register(reuseRef)).toThrow(/registry_ref 'd@1\.0\.0' already bound/);
+  });
+  test("markPurged takes NO codeHash arg; tombstone identity derived internally", () => {
     const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.register(def("d", "1.1.0")); reg.setActive("d", "1.1.0");
     const live0 = reg.resolve("d", "1.0.0"); if (live0.status !== "ok") throw new Error();
     const expectedHash = live0.runner.code_hash;
-    reg.markPurged("d", "1.0.0"); // NO hash argument
+    reg.markPurged("d", "1.0.0");
     expect(reg.resolve("d", "1.0.0").status).toBe("unavailable");
-    expect(reg.registryAuditManifest()).toContain(`d@1.0.0:purged:${expectedHash}`); // derived, not caller-supplied
+    expect(reg.registryAuditManifest()).toContain(`d@1.0.0:purged:${expectedHash}`);
     const liveActive = reg.resolve("d", "1.1.0"); if (liveActive.status !== "ok") throw new Error();
     expect(() => reg.markPurged("d", "1.1.0")).toThrow(/cannot purge active/);
+  });
+  test("HIGH 1: unknown tombstone (no live, no existing) throws", () => { const reg = new VersionedRuleRegistry(); expect(() => reg.markPurged("d", "9.9.9")).toThrow(/no live entry/); expect(() => reg.markIncompatible("d", "9.9.9")).toThrow(/no live entry/); });
+  test("HIGH 1: same-state tombstone repeat is idempotent — original hash preserved", () => {
+    const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.register(def("d", "1.1.0")); reg.setActive("d", "1.1.0");
+    reg.markPurged("d", "1.0.0"); const after1 = reg.registryAuditManifest();
+    reg.markPurged("d", "1.0.0"); // repeat
+    expect(reg.registryAuditManifest()).toBe(after1); // unchanged (idempotent, original hash kept)
+  });
+  test("HIGH 1: purged → incompatible is rejected (no state overwrite)", () => {
+    const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.register(def("d", "1.1.0")); reg.setActive("d", "1.1.0");
+    reg.markPurged("d", "1.0.0");
+    expect(() => reg.markIncompatible("d", "1.0.0")).toThrow(/already purged/);
   });
   test("purging an inactive version does NOT change policyManifest", () => { const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.register(def("d", "1.1.0")); reg.setActive("d", "1.1.0"); const before = reg.policyManifest(); reg.markPurged("d", "1.0.0"); expect(reg.policyManifest()).toBe(before); });
 });
@@ -470,7 +491,7 @@ describe("VersionedRuleRegistry", () => {
 
 ```ts
 // src/core/recommendation/registry.ts
-import { assertJsonSafe } from "./canonical.js";
+import { assertJsonSafe, canonicalJson } from "./canonical.js";
 import { runRule } from "./rule-runtime.js";
 import type { DecisionInputs, RecommendationConclusion, RecommendationProducer, RuleDefinition } from "./types.js";
 
@@ -480,41 +501,51 @@ interface LiveEntry { def: RuleDefinition; runner: RuleRunner; }
 interface Tombstone { tombstone: "purged" | "incompatible"; code_hash: string; }
 
 function deepFreeze<T>(x: T): T { if (x && typeof x === "object") { Object.freeze(x); for (const v of Object.values(x as Record<string, unknown>)) deepFreeze(v); } return x; }
-/** Validate JSON-safe, deep-clone, deep-freeze (rev7 HIGH 2). Callers cannot mutate the stored snapshot. */
-function snapshotDef(def: RuleDefinition): RuleDefinition {
-  assertJsonSafe(def);
-  const clone = JSON.parse(JSON.stringify(def)) as RuleDefinition;
-  return deepFreeze(clone);
-}
+function snapshotDef(def: RuleDefinition): RuleDefinition { assertJsonSafe(def); return deepFreeze(JSON.parse(JSON.stringify(def)) as RuleDefinition); }
+/** rev8 MED 1: content equivalence replaces the unreachable `ex.def === def` identity check. */
+function sameDefinition(a: RuleDefinition, b: RuleDefinition): boolean { return canonicalJson(a) === canonicalJson(b); }
 
 export class VersionedRuleRegistry {
   private live = new Map<string, LiveEntry>();
   private tombstones = new Map<string, Tombstone>();
   private activeVersion = new Map<string, string>();
+  private refOwner = new Map<string, string>(); // registry_ref -> key (rev8 MED 2: locator uniqueness)
   private key(id: string, ver: string): string { return `${id}@${ver}`; }
 
   register(def: RuleDefinition): void {
     const k = this.key(def.rule_id, def.rule_version);
+    // MED 2: a registry_ref (locator) must not bind two different (rule_id, rule_version) keys.
+    const owner = this.refOwner.get(def.registry_ref);
+    if (owner !== undefined && owner !== k) throw new Error(`registry: registry_ref '${def.registry_ref}' already bound to ${owner}`);
     const ex = this.live.get(k);
-    if (ex) { if (ex.def === def) return; throw new Error(`registry: ${k} already registered differently`); }
+    if (ex) {
+      // MED 1: canonical equivalence, not object identity. Same content => no-op; different => fail-closed.
+      if (sameDefinition(ex.def, def)) return;
+      throw new Error(`registry: ${k} already registered with a different definition`);
+    }
     if (this.tombstones.has(k)) throw new Error(`registry: ${k} is tombstoned`);
-    const frozen = snapshotDef(def);          // isolate from caller mutations
+    const frozen = snapshotDef(def);
+    this.refOwner.set(def.registry_ref, k);
     this.live.set(k, { def: frozen, runner: runRule(frozen) });
   }
   setActive(id: string, ver: string): void { const k = this.key(id, ver); if (!this.live.has(k)) throw new Error(`registry: setActive target ${k} not a live runner`); this.activeVersion.set(id, ver); }
-  /** M1: tombstone code_hash derived from the live runner; NO caller-supplied hash. */
-  markPurged(id: string, ver: string): void {
-    if (this.activeVersion.get(id) === ver) throw new Error(`registry: cannot purge active ${id}@${ver}; setActive another first`);
-    const k = this.key(id, ver); const e = this.live.get(k);
-    const code_hash = e ? e.runner.code_hash : "<unknown-purged>";
-    this.live.delete(k); this.tombstones.set(k, { tombstone: "purged", code_hash });
+  /** rev8 HIGH 1: tombstone identity derives ONLY from a live entry. Unknown key => throw;
+   *  same-state repeat => idempotent no-op (keep original hash); different-state => throw (no overwrite). */
+  private tombstone(id: string, ver: string, to: "purged" | "incompatible"): void {
+    const k = this.key(id, ver);
+    if (this.live.has(k)) {
+      if (this.activeVersion.get(id) === ver) throw new Error(`registry: cannot ${to} active ${id}@${ver}; setActive another first`);
+      const code_hash = this.live.get(k)!.runner.code_hash;
+      this.live.delete(k); this.tombstones.set(k, { tombstone: to, code_hash });
+      return;
+    }
+    const existing = this.tombstones.get(k);
+    if (!existing) throw new Error(`registry: cannot ${to} ${id}@${ver}: no live entry and no existing tombstone`);
+    if (existing.tombstone === to) return; // idempotent — original hash preserved
+    throw new Error(`registry: cannot ${to} ${id}@${ver}: already ${existing.tombstone}`);
   }
-  markIncompatible(id: string, ver: string): void {
-    if (this.activeVersion.get(id) === ver) this.activeVersion.delete(id);
-    const k = this.key(id, ver); const e = this.live.get(k);
-    const code_hash = e ? e.runner.code_hash : "<unknown-incompatible>";
-    this.live.delete(k); this.tombstones.set(k, { tombstone: "incompatible", code_hash });
-  }
+  markPurged(id: string, ver: string): void { this.tombstone(id, ver, "purged"); }
+  markIncompatible(id: string, ver: string): void { this.tombstone(id, ver, "incompatible"); }
   resolve(id: string, ver: string): ResolveResult { const k = this.key(id, ver); const e = this.live.get(k); if (e) return { status: "ok", runner: e.runner, def: e.def }; const t = this.tombstones.get(k); if (t) return { status: "unavailable", reason: t.tombstone }; return { status: "unavailable", reason: "unknown" }; }
   resolveActive(id: string): ResolveResult { const v = this.activeVersion.get(id); if (v === undefined) return { status: "unavailable", reason: "unknown" }; return this.resolve(id, v); }
   directory(): RecommendationProducer[] { return [...this.activeVersion.entries()].map(([id, ver]) => { const e = this.live.get(this.key(id, ver)); return e ? { rule_id: e.def.rule_id, rule_version: e.def.rule_version, code_hash: e.runner.code_hash, registry_ref: e.def.registry_ref } : null; }).filter((x): x is RecommendationProducer => x !== null); }
@@ -552,7 +583,7 @@ describe("ontology + versions", () => {
   test("policyHash uses registry.policyManifest (active only)", () => {
     const reg = new VersionedRuleRegistry(); reg.register(DEF); reg.setActive("d", "1.0.0");
     expect(policyHash(reg)).toMatch(/^[0-9a-f]{64}$/);
-    const before = policyHash(reg); reg.register({ ...DEF, rule_version: "1.1.0" }); // inactive
+    const before = policyHash(reg); reg.register({ ...DEF, rule_version: "1.1.0", registry_ref: "d@1.1.0" }); // inactive (MED 2: own registry_ref)
     expect(policyHash(reg)).toBe(before); // inactive stock doesn't change policyHash
   });
 });
@@ -594,19 +625,20 @@ git commit -m "feat(rec): ontology + policy-version sources (#328)"
 
 ```ts
 // tests/core/recommendation/record-store.test.ts
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 import { RecommendationStore } from "../../../src/core/recommendation/record-store.js";
 import { computeInputsHash, computeFingerprint } from "../../../src/core/recommendation/integrity.js";
 import type { RecommendationImmutablePayload } from "../../../src/core/recommendation/types.js";
 import { SCHEMA_VERSION } from "../../../src/core/recommendation/types.js";
-const DIR = "/tmp/cbrain-test-rec-store";
-let db: CBrainDB; let store: RecommendationStore;
+let db: CBrainDB; let store: RecommendationStore; let dir: string;
 function mkPayload(codeHash: string, key = "k1"): RecommendationImmutablePayload { const di = { signals: { v: 1 }, entity_snapshot: { eA: { reports_to: [{ from: "eA", to: "eB", trust_state: "candidate" }] } }, evidence_refs: ["health:k:eA:eB"] }; return { namespace: "maintenance", maintenance_key: key, inputs_hash: computeInputsHash(di), conclusion: { kind: "propose", action: { type: "dry_run", target_ref: "health:k:eA", reason: "r" }, alternatives: [] }, decision_inputs: di, evidence_manifest: [{ source: "health", ref: "health:k:eA:eB", trust_state: "candidate" }], constraints: { policy_version: "p", ontology_version: "o", schema_version: SCHEMA_VERSION }, dependency_manifest: { rule_id: "health:k", declarations: [{ slug: "eA", table: "links", as: "reports_to", relation: "reports_to", direction: "outgoing", fields: ["from", "to", "trust_state"], filter: "active" }] }, applicability: { audience: "user_only", auto_execute: false, requires_confirmation: { tier: "standard" } }, risks: [], gaps: [], producer: { rule_id: "health:k", rule_version: "1.0.0", code_hash: codeHash, registry_ref: "r@1.0.0" } }; }
 describe("RecommendationStore", () => {
-  afterEach(() => { db?.close(); rmSync(DIR, { recursive: true, force: true }); });
-  function open() { db = new CBrainDB(`${DIR}/db.sqlite`); store = new RecommendationStore(db); }
+  afterEach(() => { db?.close(); if (dir) rmSync(dir, { recursive: true, force: true }); });
+  function open() { dir = mkdtempSync(join(tmpdir(), "cbrain-rec-store-")); db = new CBrainDB(`${dir}/db.sqlite`); store = new RecommendationStore(db); }
   test("createRecord computes fingerprint internally", () => { open(); const p = mkPayload("h1"); const r = store.createRecord(p, "2026-07-12 10:00:00"); expect(r.fingerprint).toBe(computeFingerprint({ ...p, inputs_hash: computeInputsHash(p.decision_inputs) })); expect(r.lifecycle_status).toBe("pending"); expect(r.freshness_status).toBe("fresh"); });
   test("rejects auto_execute !== false", () => { open(); const p = mkPayload("h1"); expect(() => store.createRecord({ ...p, applicability: { ...p.applicability, auto_execute: true as unknown as false } }, "2026-07-12 10:00:00")).toThrow(/auto_execute/); });
   test("same fingerprint idempotent", () => { open(); const p = mkPayload("h1"); const r1 = store.createRecord(p, "2026-07-12 10:00:00"); expect(store.createRecord(p, "2026-07-12 10:00:00").record_id).toBe(r1.record_id); });
@@ -636,9 +668,12 @@ import type { FreshnessStatus, LifecycleStatus, RecommendationImmutablePayload, 
 interface Row { record_id: string; maintenance_key: string; fingerprint: string; inputs_hash: string; payload: string; created_at: string; last_revalidated_at: string; lifecycle_status: string; freshness_status: string; suppressed_until: string | null }
 const LIFECYCLE_TRANSITIONS: Record<LifecycleStatus, LifecycleStatus[]> = { pending: ["current", "superseded", "rejected", "invalidated"], current: ["superseded", "rejected", "invalidated"], superseded: ["invalidated"], rejected: ["invalidated"], invalidated: [] };
 export class RecommendationStore {
+  /** CBrainDB.prepare is private; all SQL goes through the public rawDb getter
+   *  (sqlite.ts:168 `get rawDb(): Database`). CBrainDB.transaction is public and
+   *  auto-invokes fn — no trailing `()`. (Verified by adversarial review rev8.) */
   constructor(private db: CBrainDB) {}
-  activeCountFor(key: string): number { return (this.db.prepare("SELECT COUNT(*) c FROM recommendation_records WHERE maintenance_key=$key AND lifecycle_status IN ('pending','current')").get({ $key: key }) as { c: number }).c; }
-  getById(id: string): RecommendationRecord | null { const r = this.db.prepare("SELECT * FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as Row | undefined; return r ? fromRow(r) : null; }
+  activeCountFor(key: string): number { return (this.db.rawDb.prepare("SELECT COUNT(*) c FROM recommendation_records WHERE maintenance_key=$key AND lifecycle_status IN ('pending','current')").get({ $key: key }) as { c: number }).c; }
+  getById(id: string): RecommendationRecord | null { const r = this.db.rawDb.prepare("SELECT * FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as Row | undefined; return r ? fromRow(r) : null; }
   createRecord(payload: RecommendationImmutablePayload, now: string): RecommendationRecord {
     validateTimestamp(now, "now");
     if (payload.applicability.auto_execute !== false) throw new Error("record-store: auto_execute must be false");
@@ -650,10 +685,10 @@ export class RecommendationStore {
     return this.db.transaction(() => {
       const active = this.activeRow(key);
       if (active && active.fingerprint === fingerprint) return fromRow(active);
-      const rej = this.db.prepare("SELECT 1 FROM recommendation_records WHERE maintenance_key=$key AND fingerprint=$fp AND lifecycle_status='rejected' AND (suppressed_until IS NULL OR suppressed_until > $now) LIMIT 1").get({ $key: key, $fp: fingerprint, $now: now });
+      const rej = this.db.rawDb.prepare("SELECT 1 FROM recommendation_records WHERE maintenance_key=$key AND fingerprint=$fp AND lifecycle_status='rejected' AND (suppressed_until IS NULL OR suppressed_until > $now) LIMIT 1").get({ $key: key, $fp: fingerprint, $now: now });
       if (rej) throw new Error("record-store: creation suppressed (rejected within suppression window)");
-      if (active) { this.db.prepare("UPDATE recommendation_records SET lifecycle_status='superseded' WHERE record_id=$id").run({ $id: active.record_id }); this.history(active.record_id, "superseded", active.lifecycle_status, "superseded", undefined, undefined, "replaced by " + provisional.record_id, now); }
-      this.db.prepare("INSERT INTO recommendation_records (record_id, maintenance_key, fingerprint, inputs_hash, payload, auto_execute, created_at, last_revalidated_at, lifecycle_status, freshness_status, suppressed_until) VALUES ($rid,$key,$fp,$ih,$payload,0,$now,$now,'pending','fresh',NULL)").run({ $rid: provisional.record_id, $key: key, $fp: fingerprint, $ih: withHash.inputs_hash, $payload: canonicalJson(withHash), $now: now });
+      if (active) { this.db.rawDb.prepare("UPDATE recommendation_records SET lifecycle_status='superseded' WHERE record_id=$id").run({ $id: active.record_id }); this.history(active.record_id, "superseded", active.lifecycle_status, "superseded", undefined, undefined, "replaced by " + provisional.record_id, now); }
+      this.db.rawDb.prepare("INSERT INTO recommendation_records (record_id, maintenance_key, fingerprint, inputs_hash, payload, auto_execute, created_at, last_revalidated_at, lifecycle_status, freshness_status, suppressed_until) VALUES ($rid,$key,$fp,$ih,$payload,0,$now,$now,'pending','fresh',NULL)").run({ $rid: provisional.record_id, $key: key, $fp: fingerprint, $ih: withHash.inputs_hash, $payload: canonicalJson(withHash), $now: now });
       this.history(provisional.record_id, "created", undefined, "pending", undefined, undefined, undefined, now);
       return provisional;
     });
@@ -664,38 +699,38 @@ export class RecommendationStore {
     if (to === "rejected" && suppressedUntil === undefined) eff = defaultSuppressedUntil(now);
     if (typeof eff === "string") validateTimestamp(eff, "suppressed_until");
     this.db.transaction(() => {
-      const row = this.db.prepare("SELECT lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as { l: LifecycleStatus } | undefined;
+      const row = this.db.rawDb.prepare("SELECT lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as { l: LifecycleStatus } | undefined;
       if (!row) throw new Error("record-store: record not found");
       if (!LIFECYCLE_TRANSITIONS[row.l].includes(to)) throw new Error(`record-store: illegal lifecycle transition ${row.l} → ${to}`);
-      if (to === "rejected" && eff === null) this.db.prepare("UPDATE recommendation_records SET lifecycle_status=$to, suppressed_until=NULL WHERE record_id=$id").run({ $to: to, $id: id });
-      else if (to === "rejected" && typeof eff === "string") this.db.prepare("UPDATE recommendation_records SET lifecycle_status=$to, suppressed_until=$sut WHERE record_id=$id").run({ $to: to, $sut: eff, $id: id });
-      else this.db.prepare("UPDATE recommendation_records SET lifecycle_status=$to WHERE record_id=$id").run({ $to: to, $id: id });
+      if (to === "rejected" && eff === null) this.db.rawDb.prepare("UPDATE recommendation_records SET lifecycle_status=$to, suppressed_until=NULL WHERE record_id=$id").run({ $to: to, $id: id });
+      else if (to === "rejected" && typeof eff === "string") this.db.rawDb.prepare("UPDATE recommendation_records SET lifecycle_status=$to, suppressed_until=$sut WHERE record_id=$id").run({ $to: to, $sut: eff, $id: id });
+      else this.db.rawDb.prepare("UPDATE recommendation_records SET lifecycle_status=$to WHERE record_id=$id").run({ $to: to, $id: id });
       this.history(id, to, row.l, to, undefined, undefined, reason, now);
     });
   }
   updateFreshness(id: string, to: FreshnessStatus, now: string): void {
     validateTimestamp(now, "now");
     this.db.transaction(() => {
-      const row = this.db.prepare("SELECT freshness_status AS f, lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as { f: FreshnessStatus; l: LifecycleStatus } | undefined;
+      const row = this.db.rawDb.prepare("SELECT freshness_status AS f, lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as { f: FreshnessStatus; l: LifecycleStatus } | undefined;
       if (!row) throw new Error("record-store: record not found");
       const revalidate = to === "fresh";
-      this.db.prepare(`UPDATE recommendation_records SET freshness_status=$to${revalidate ? ", last_revalidated_at=$now" : ""} WHERE record_id=$id`).run({ $to: to, $now: now, $id: id });
+      this.db.rawDb.prepare(`UPDATE recommendation_records SET freshness_status=$to${revalidate ? ", last_revalidated_at=$now" : ""} WHERE record_id=$id`).run({ $to: to, $now: now, $id: id });
       this.history(id, `freshness:${to}`, row.l, row.l, row.f, to, undefined, now);
     });
   }
   clearSuppression(id: string, now: string, reason: string): void {
     validateTimestamp(now, "now");
     this.db.transaction(() => {
-      const row = this.db.prepare("SELECT lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as { l: string } | undefined;
+      const row = this.db.rawDb.prepare("SELECT lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as { l: string } | undefined;
       if (!row) throw new Error("record-store: record not found");
       if (row.l !== "rejected") throw new Error("record-store: clearSuppression only allowed on rejected records");
-      const res = this.db.prepare("UPDATE recommendation_records SET suppressed_until=$past WHERE record_id=$id AND lifecycle_status='rejected'").run({ $past: SUPPRESSION_REOPENED, $id: id });
+      const res = this.db.rawDb.prepare("UPDATE recommendation_records SET suppressed_until=$past WHERE record_id=$id AND lifecycle_status='rejected'").run({ $past: SUPPRESSION_REOPENED, $id: id });
       if (res.changes !== 1) throw new Error("record-store: reopen affected no rows");
       this.history(id, "reopen", "rejected", "rejected", undefined, undefined, reason, now);
     });
   }
-  private activeRow(key: string): Row | undefined { return this.db.prepare("SELECT * FROM recommendation_records WHERE maintenance_key=$key AND lifecycle_status IN ('pending','current') ORDER BY rowid DESC LIMIT 1").get({ $key: key }) as Row | undefined; }
-  private history(id: string, action: string, fl: string | undefined, tl: string, ff: string | undefined, tf: string | undefined, reason: string | undefined, now: string): void { this.db.prepare("INSERT INTO recommendation_lifecycle_history (record_id, action, from_lifecycle, to_lifecycle, from_freshness, to_freshness, reason, created_at) VALUES ($rid,$action,$fl,$tl,$ff,$tf,$reason,$now)").run({ $rid: id, $action: action, $fl: fl ?? null, $tl: tl, $ff: ff ?? null, $tf: tf ?? null, $reason: reason ?? null, $now: now }); }
+  private activeRow(key: string): Row | undefined { return this.db.rawDb.prepare("SELECT * FROM recommendation_records WHERE maintenance_key=$key AND lifecycle_status IN ('pending','current') ORDER BY rowid DESC LIMIT 1").get({ $key: key }) as Row | undefined; }
+  private history(id: string, action: string, fl: string | undefined, tl: string, ff: string | undefined, tf: string | undefined, reason: string | undefined, now: string): void { this.db.rawDb.prepare("INSERT INTO recommendation_lifecycle_history (record_id, action, from_lifecycle, to_lifecycle, from_freshness, to_freshness, reason, created_at) VALUES ($rid,$action,$fl,$tl,$ff,$tf,$reason,$now)").run({ $rid: id, $action: action, $fl: fl ?? null, $tl: tl, $ff: ff ?? null, $tf: tf ?? null, $reason: reason ?? null, $now: now }); }
 }
 function fromRow(r: Row): RecommendationRecord { return { record_id: r.record_id, payload: JSON.parse(r.payload) as RecommendationImmutablePayload, fingerprint: r.fingerprint, created_at: r.created_at, last_revalidated_at: r.last_revalidated_at, lifecycle_status: r.lifecycle_status as LifecycleStatus, freshness_status: r.freshness_status as FreshnessStatus, suppressed_until: r.suppressed_until }; }
 ```
@@ -718,8 +753,10 @@ git commit -m "feat(rec): record store (single entry, suppression, guarded reope
 
 ```ts
 // tests/core/recommendation/freshness.test.ts
-import { rmSync } from "node:fs";
-import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 import { RecommendationStore } from "../../../src/core/recommendation/record-store.js";
 import { DeclaredProjectionReader } from "../../../src/core/recommendation/projection.js";
@@ -728,7 +765,7 @@ import { VersionedRuleRegistry } from "../../../src/core/recommendation/registry
 import { computeInputsHash } from "../../../src/core/recommendation/integrity.js";
 import type { DependencyManifest, RecommendationImmutablePayload, RecommendationProducer, RuleDefinition } from "../../../src/core/recommendation/types.js";
 import { SCHEMA_VERSION } from "../../../src/core/recommendation/types.js";
-const DIR = "/tmp/cbrain-test-rec-fresh";
+let DIR: string;
 const A = "entities/eA"; const B = "entities/eB";
 function seed(db: CBrainDB) { for (const s of [A, B]) db.rawDb.prepare(`INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, 'entity', ?, ?, ?, 0, 3)`).run(s, s, `${s}.md`, `h-${s}`); }
 function link(db: CBrainDB, from: string, to: string, trust: string) { db.rawDb.prepare(`INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', ?, 'agent')`).run(from, to, trust); }
@@ -738,7 +775,8 @@ function makeRegistry(): VersionedRuleRegistry { const reg = new VersionedRuleRe
 function payloadFor(db: CBrainDB, reg: VersionedRuleRegistry, producerOverride?: Partial<RecommendationProducer>): RecommendationImmutablePayload { const proj = new DeclaredProjectionReader(db).read(decls.declarations); const r = reg.resolveActive(DEF.rule_id); if (r.status !== "ok") throw new Error("no active"); const di = r.runner.captureInputs(proj); const producer: RecommendationProducer = { rule_id: DEF.rule_id, rule_version: DEF.rule_version, code_hash: r.runner.code_hash, registry_ref: DEF.registry_ref, ...producerOverride }; return { namespace: "maintenance", maintenance_key: `health:known_relations:${JSON.stringify([A, B])}`, inputs_hash: computeInputsHash(di), conclusion: { kind: "propose", action: { type: "dry_run", target_ref: `health:known_relations:${A}`, reason: "r" }, alternatives: [] }, decision_inputs: di, evidence_manifest: di.evidence_refs.map((ref) => ({ source: "health", ref, trust_state: "candidate" as const })), constraints: { policy_version: "p", ontology_version: "o", schema_version: SCHEMA_VERSION }, dependency_manifest: decls, applicability: { audience: "user_only", auto_execute: false, requires_confirmation: { tier: "standard" } }, risks: [], gaps: [], producer }; }
 const CC = { policy_version: "p", ontology_version: "o", schema_version: SCHEMA_VERSION };
 describe("DeclaredProjectionReader", () => {
-  afterEach(() => { rmSync(DIR, { recursive: true, force: true }); });
+  beforeEach(() => { DIR = mkdtempSync(join(tmpdir(), "cbrain-rec-fresh-")); });
+  afterEach(() => { if (DIR) rmSync(DIR, { recursive: true, force: true }); });
   test("preserves from/to/trust_state", () => { const db = new CBrainDB(`${DIR}/r1.sqlite`); seed(db); link(db, A, B, "candidate"); const e = (new DeclaredProjectionReader(db).read(decls.declarations)[A] as { reports_to: { from: string; to: string; trust_state: string }[] }).reports_to[0]; expect(e).toEqual({ from: A, to: B, trust_state: "candidate" }); db.close(); });
   test("fail-closed unsupported table", () => { const db = new CBrainDB(`${DIR}/r2.sqlite`); seed(db); expect(() => new DeclaredProjectionReader(db).read([{ slug: A, table: "lance", as: "x", fields: ["y"] }])).toThrow(/unsupported table/); db.close(); });
   test("fail-closed undeclared field", () => { const db = new CBrainDB(`${DIR}/r3.sqlite`); seed(db); link(db, A, B, "candidate"); expect(() => new DeclaredProjectionReader(db).read([{ slug: A, table: "links", as: "reports_to", relation: "reports_to", fields: ["from", "bogus"], filter: "active" }])).toThrow(/not available/); db.close(); });
@@ -746,7 +784,8 @@ describe("DeclaredProjectionReader", () => {
   test("inactive excluded", () => { const db = new CBrainDB(`${DIR}/r5.sqlite`); seed(db); link(db, A, B, "rejected"); expect((new DeclaredProjectionReader(db).read(decls.declarations)[A] as { reports_to: unknown[] }).reports_to.length).toBe(0); db.close(); });
 });
 describe("recomputeAndPersistFreshness", () => {
-  afterEach(() => { rmSync(DIR, { recursive: true, force: true }); });
+  beforeEach(() => { DIR = mkdtempSync(join(tmpdir(), "cbrain-rec-fresh-")); });
+  afterEach(() => { if (DIR) rmSync(DIR, { recursive: true, force: true }); });
   test("drift → persisted stale, lifecycle untouched", () => { const db = new CBrainDB(`${DIR}/f1.sqlite`); seed(db); link(db, A, B, "candidate"); const reg = makeRegistry(); const store = new RecommendationStore(db); const c = store.createRecord(payloadFor(db, reg), "2026-07-12 10:00:00"); link(db, B, A, "candidate"); const out = recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), reg, store, CC, "2026-07-12 11:00:00"); expect(out.freshness).toBe("stale"); const re = store.getById(c.record_id); expect(re?.freshness_status).toBe("stale"); expect(re?.lifecycle_status).toBe("pending"); db.close(); });
   test("A→B→A path 1 → fresh recovers", () => { const db = new CBrainDB(`${DIR}/f2.sqlite`); seed(db); link(db, A, B, "candidate"); const reg = makeRegistry(); const store = new RecommendationStore(db); const c = store.createRecord(payloadFor(db, reg), "2026-07-12 10:00:00"); link(db, B, A, "candidate"); recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), reg, store, CC, "2026-07-12 11:00:00"); db.rawDb.prepare("DELETE FROM links WHERE from_slug=? AND to_slug=?").run(B, A); recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), reg, store, CC, "2026-07-12 12:00:00"); expect(store.getById(c.record_id)?.freshness_status).toBe("fresh"); db.close(); });
   test("runner unavailable → version_invalid", () => { const db = new CBrainDB(`${DIR}/f3.sqlite`); seed(db); link(db, A, B, "candidate"); const reg = makeRegistry(); const store = new RecommendationStore(db); const c = store.createRecord(payloadFor(db, reg), "2026-07-12 10:00:00"); expect(recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), new VersionedRuleRegistry(), store, CC, "2026-07-12 11:00:00").freshness).toBe("version_invalid"); db.close(); });
@@ -818,7 +857,9 @@ git commit -m "feat(rec): fail-closed reader + freshness (metadata + ontology ch
 
 ```ts
 // tests/core/recommendation/producers/known-relations.test.ts
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CBrainDB } from "../../../../src/storage/sqlite.js";
 import { registerMaintenanceProducers, registerVersion } from "../../../../src/core/recommendation/producers/index.js";
@@ -827,13 +868,13 @@ import { RecommendationManager } from "../../../../src/core/recommendation/manag
 import { policyHash } from "../../../../src/core/recommendation/versions.js";
 import { definitionCodeHash } from "../../../../src/core/recommendation/rule-runtime.js";
 import { KNOWN_RELATIONS_DEF } from "../../../../src/core/recommendation/producers/known-relations.js";
-const DIR = "/tmp/cbrain-test-rec-producer";
 const A = "entities/entityA"; const B = "entities/entityB";
 function seed(db: CBrainDB) { for (const s of [A, B]) db.rawDb.prepare(`INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, 'entity', ?, ?, ?, 0, 3)`).run(s, s, `${s}.md`, `h-${s}`); }
 function link(db: CBrainDB, from: string, to: string, trust: string) { db.rawDb.prepare(`INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', ?, 'agent')`).run(from, to, trust); }
-function fresh() { const db = new CBrainDB(`${DIR}/${Math.random().toString(36).slice(2)}.sqlite`); const reg = new VersionedRuleRegistry(); registerMaintenanceProducers(reg); return { db, reg, mgr: new RecommendationManager(db, reg) }; }
+const dirs: string[] = []; const dbs: CBrainDB[] = [];
+function fresh() { const dir = mkdtempSync(join(tmpdir(), "cbrain-rec-producer-")); dirs.push(dir); const db = new CBrainDB(`${dir}/db.sqlite`); dbs.push(db); const reg = new VersionedRuleRegistry(); registerMaintenanceProducers(reg); return { db, reg, mgr: new RecommendationManager(db, reg) }; }
 describe("known_relations producer", () => {
-  afterEach(() => { rmSync(DIR, { recursive: true, force: true }); });
+  afterEach(() => { dbs.forEach((d) => d.close()); dbs.length = 0; dirs.forEach((d) => rmSync(d, { recursive: true, force: true })); dirs.length = 0; });
   test("abstains when no candidate edge", () => { const { db, mgr } = fresh(); seed(db); expect(mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00").payload.conclusion.kind).toBe("abstain"); db.close(); });
   test("exact evidence ref + source from def", () => { const { db, mgr } = fresh(); seed(db); link(db, A, B, "candidate"); const r = mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00"); expect(r.payload.evidence_manifest[0].ref).toBe(`health:known_relations:${A}:${B}`); expect(r.payload.evidence_manifest[0].source).toBe("health"); db.close(); });
   test("normalized slugs", () => { const a = fresh(); seed(a.db); link(a.db, A, B, "candidate"); const r1 = a.mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [B, A, A] }, "2026-07-12 10:00:00"); const r2 = a.mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:01"); expect(r1.payload.maintenance_key).toBe(r2.payload.maintenance_key); expect(r1.fingerprint).toBe(r2.fingerprint); a.db.close(); });
@@ -909,30 +950,33 @@ git commit -m "feat(rec): declarative producer + def-sourced manager (#328)"
 
 ```ts
 // tests/core/recommendation/display.test.ts
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 import { RecommendationStore } from "../../../src/core/recommendation/record-store.js";
 import { DeclaredProjectionReader } from "../../../src/core/recommendation/projection.js";
 import { VersionedRuleRegistry } from "../../../src/core/recommendation/registry.js";
-import { registerMaintenanceProducers } from "../../../src/core/recommendation/producers/index.js";
+import { registerMaintenanceProducers, registerVersion } from "../../../src/core/recommendation/producers/index.js";
 import { RecommendationManager } from "../../../src/core/recommendation/manager.js";
 import { loadAndProjectDisplay } from "../../../src/core/recommendation/display.js";
 import { policyHash } from "../../../src/core/recommendation/versions.js";
 import { ontologyHash } from "../../../src/core/recommendation/ontology.js";
 import { computeInputsHash } from "../../../src/core/recommendation/integrity.js";
+import { KNOWN_RELATIONS_DEF } from "../../../src/core/recommendation/producers/known-relations.js";
 import type { RecommendationImmutablePayload } from "../../../src/core/recommendation/types.js";
 import { SCHEMA_VERSION } from "../../../src/core/recommendation/types.js";
-const DIR = "/tmp/cbrain-test-rec-display";
 const A = "entities/eA"; const B = "entities/eB";
 function seed(db: CBrainDB) { for (const s of [A, B]) db.rawDb.prepare(`INSERT INTO pages (slug, type, title, file_path, content_hash, mention_count, tier) VALUES (?, 'entity', ?, ?, ?, 0, 3)`).run(s, s, `${s}.md`, `h-${s}`); }
 function link(db: CBrainDB, from: string, to: string, trust: string) { db.rawDb.prepare(`INSERT INTO links (from_slug, to_slug, relation, trust_state, source_type) VALUES (?, ?, 'reports_to', ?, 'agent')`).run(from, to, trust); }
-function fresh() { const db = new CBrainDB(`${DIR}/${Math.random().toString(36).slice(2)}.sqlite`); const reg = new VersionedRuleRegistry(); registerMaintenanceProducers(reg); return { db, store: new RecommendationStore(db), reg, mgr: new RecommendationManager(db, reg) }; }
+const dirs: string[] = []; const dbs: CBrainDB[] = [];
+function fresh() { const dir = mkdtempSync(join(tmpdir(), "cbrain-rec-display-")); dirs.push(dir); const db = new CBrainDB(`${dir}/db.sqlite`); dbs.push(db); const reg = new VersionedRuleRegistry(); registerMaintenanceProducers(reg); return { db, store: new RecommendationStore(db), reg, mgr: new RecommendationManager(db, reg) }; }
 describe("loadAndProjectDisplay", () => {
-  afterEach(() => { rmSync(DIR, { recursive: true, force: true }); });
+  afterEach(() => { dbs.forEach((d) => d.close()); dbs.length = 0; dirs.forEach((d) => rmSync(d, { recursive: true, force: true })); dirs.length = 0; });
   test("real positive → display produced", () => { const { db, store, reg, mgr } = fresh(); seed(db); link(db, A, B, "candidate"); const created = mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00"); const out = loadAndProjectDisplay(created.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "实体A"); expect(out.blocked).toBe(false); if (!out.blocked) { expect(out.target_display).toBe("实体A"); expect(out.reason).toContain("候选边"); } db.close(); });
   test("drift after create, no manual refresh → blocked", () => { const { db, store, reg, mgr } = fresh(); seed(db); link(db, A, B, "candidate"); const created = mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00"); link(db, B, A, "candidate"); expect(loadAndProjectDisplay(created.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "x").blocked).toBe(true); db.close(); });
-  test("active identity change (markIncompatible) → blocked", () => { const { db, store, reg, mgr } = fresh(); seed(db); link(db, A, B, "candidate"); const created = mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00"); reg.markIncompatible("health:known_relations", "1.0.0"); expect(loadAndProjectDisplay(created.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "x").blocked).toBe(true); db.close(); });
+  test("active identity change (setActive to a differently-hashed version) → blocked", () => { const { db, store, reg, mgr } = fresh(); seed(db); link(db, A, B, "candidate"); const created = mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00"); registerVersion(reg, { ...KNOWN_RELATIONS_DEF, rule_version: "1.1.0", registry_ref: "cbrain.rules:maintenance.known_relations@1.1.0", abstainReason: "below_threshold" }); reg.setActive("health:known_relations", "1.1.0"); expect(loadAndProjectDisplay(created.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "x").blocked).toBe(true); });
   test("M2b: metadata mismatch — fingerprint SELF-CONSISTENT but code_hash wrong → blocked BY freshness (not integrity), persisted version_invalid", () => {
     const { db, store, reg } = fresh(); seed(db); link(db, A, B, "candidate");
     // build a payload with a WRONG producer.code_hash; store.createRecord computes the fingerprint
@@ -1019,14 +1063,18 @@ git commit -m "feat(rec): single display entry (metadata mismatch hits freshness
 
 ```ts
 test("createRecord supersede rolls back on partial failure", () => {
-  const faultDir = "/tmp/cbrain-test-rec-store-fault"; rmSync(faultDir, { recursive: true, force: true });
-  const fdb = new CBrainDB(`${faultDir}/db.sqlite`); const fstore = new RecommendationStore(fdb);
-  const created = fstore.createRecord(mkPayload("hA"), "2026-07-12 10:00:00");
-  fdb.rawDb.exec("DROP TABLE recommendation_lifecycle_history");
-  expect(() => fstore.createRecord(mkPayload("hB"), "2026-07-12 10:00:01")).toThrow();
-  expect(fstore.activeCountFor("k1")).toBe(1);
-  expect(fstore.getById(created.record_id)?.fingerprint).toBe(created.fingerprint);
-  fdb.close(); rmSync(faultDir, { recursive: true, force: true });
+  const faultDir = mkdtempSync(join(tmpdir(), "cbrain-rec-fault-"));
+  try {
+    const fdb = new CBrainDB(`${faultDir}/db.sqlite`); const fstore = new RecommendationStore(fdb);
+    const created = fstore.createRecord(mkPayload("hA"), "2026-07-12 10:00:00");
+    fdb.rawDb.exec("DROP TABLE recommendation_lifecycle_history");
+    expect(() => fstore.createRecord(mkPayload("hB"), "2026-07-12 10:00:01")).toThrow();
+    expect(fstore.activeCountFor("k1")).toBe(1);
+    expect(fstore.getById(created.record_id)?.fingerprint).toBe(created.fingerprint);
+    fdb.close();
+  } finally {
+    rmSync(faultDir, { recursive: true, force: true });
+  }
 });
 ```
 
