@@ -1,4 +1,4 @@
-import { assertSafeActionDisplay } from "../safety/display-safety.js";
+import { assertSafeActionDisplay, UNICODE_CONTROL_RE } from "../safety/display-safety.js";
 import { checkIntegrity } from "./integrity.js";
 import { recomputeAndPersistFreshness } from "./freshness.js";
 import { ontologyHash } from "./ontology.js";
@@ -12,11 +12,18 @@ import type { RecommendationRecord } from "./types.js";
 const FALLBACK_DISPLAY = "一项待确认的记忆";
 const FALLBACK_REASON = "有一项建议需要人工复核。";
 
-/** Run the L1 display guard; fall back on any match (never leak internal/credential text). */
+/** Run the L1 display guard; fall back on any match (never leak internal/credential text).
+ *  Defeats post-write NFKC-equivalent tamper: the persisted payload is prose-normalized at write,
+ *  but a DB tamper that swaps an ascii term for its fullwidth equivalent (e.g. score → ｓｃｏｒｅ)
+ *  leaves the fingerprint valid (canonicalPayload NFKC-normalizes both to the same form) while the
+ *  raw fullwidth would bypass the ascii-only guard patterns. Normalize (NFKC) + strip Unicode
+ *  control/format chars BEFORE the guard, and return the normalized form so the tampered raw never
+ *  reaches the caller. */
 function safe(text: string, fallback: string): string {
+  const normalized = text.replace(UNICODE_CONTROL_RE, "").normalize("NFKC");
   try {
-    assertSafeActionDisplay(text);
-    return text;
+    assertSafeActionDisplay(normalized);
+    return normalized;
   } catch {
     return fallback;
   }
