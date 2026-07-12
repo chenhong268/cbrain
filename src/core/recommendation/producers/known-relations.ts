@@ -14,5 +14,5 @@ export const KNOWN_RELATIONS_DEF: RuleDefinition = {
   evidenceSource: "health",
   evidenceRefTemplate: "health:known_relations:{from}:{to}",
   abstainReason: "insufficient_evidence",
-  propose: { type: "dry_run", targetTemplate: "health:known_relations:{first_slug}", reason: "存在待确认的 reports_to 候选边，建议人工复核" },
+  propose: { type: "dry_run", targetTemplate: "health:known_relations:{first_slug}", reason: "存在待确认的汇报关系候选边，建议人工复核" },
 };

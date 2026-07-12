@@ -190,4 +190,18 @@ describe("recomputeAndPersistFreshness", () => {
     expect(recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), reg, store, { policy_version: "p", ontology_version: "changed", schema_version: SCHEMA_VERSION }, "2026-07-12 11:00:00").freshness).toBe("version_invalid");
     db.close();
   });
+  test("MED-1: a stale freshness check still updates last_revalidated_at (audit time)", () => {
+    const db = new CBrainDB(`${DIR}/f7.sqlite`);
+    seed(db);
+    link(db, A, B, "candidate");
+    const reg = makeRegistry();
+    const store = new RecommendationStore(db);
+    const c = store.createRecord(payloadFor(db, reg), "2026-07-12 10:00:00");
+    expect(store.getById(c.record_id)?.last_revalidated_at).toBe("2026-07-12 10:00:00");
+    link(db, B, A, "candidate");
+    const out = recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), reg, store, CC, "2026-07-12 11:00:00");
+    expect(out.freshness).toBe("stale");
+    expect(store.getById(c.record_id)?.last_revalidated_at).toBe("2026-07-12 11:00:00");
+    db.close();
+  });
 });

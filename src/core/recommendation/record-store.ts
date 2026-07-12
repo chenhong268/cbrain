@@ -90,8 +90,9 @@ export class RecommendationStore {
     this.db.transaction(() => {
       const row = this.db.rawDb.prepare("SELECT freshness_status AS f, lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as { f: FreshnessStatus; l: LifecycleStatus } | undefined;
       if (!row) throw new Error("record-store: record not found");
-      const revalidate = to === "fresh";
-      this.db.rawDb.prepare(`UPDATE recommendation_records SET freshness_status=$to${revalidate ? ", last_revalidated_at=$now" : ""} WHERE record_id=$id`).run({ $to: to, $now: now, $id: id });
+      // last_revalidated_at records when a freshness check RAN (regardless of outcome) so audit can
+      // see a stale/version_invalid record was still checked; freshness_status records the result.
+      this.db.rawDb.prepare("UPDATE recommendation_records SET freshness_status=$to, last_revalidated_at=$now WHERE record_id=$id").run({ $to: to, $now: now, $id: id });
       this.history(id, `freshness:${to}`, row.l, row.l, row.f, to, undefined, now);
     });
   }
