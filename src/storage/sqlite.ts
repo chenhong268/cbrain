@@ -1755,6 +1755,35 @@ export class CBrainDB {
     ).run({ $slug: slug, $rel: relation });
   }
 
+  /** Remove only mention edges owned by the Markdown wikilink projector. */
+  deleteWikilinkMentions(fromSlug: string): void {
+    this.prepare(
+      "DELETE FROM links WHERE from_slug = $slug AND relation = '提及' AND source_type = 'wikilink'"
+    ).run({ $slug: fromSlug });
+  }
+
+  /**
+   * Persist explicit wikilink evidence without downgrading a manually curated
+   * edge that already occupies the unique (from, to, relation) key.
+   */
+  upsertWikilinkMention(fromSlug: string, toSlug: string): void {
+    this.prepare(
+      `INSERT INTO links
+        (from_slug, to_slug, relation, context, weight, strength, source_type,
+         confidence, source_page_slug, trust_state, evidence)
+       VALUES ($from, $to, '提及', NULL, 0.3, 'weak', 'wikilink', 0.9, $from, 'trusted', NULL)
+       ON CONFLICT(from_slug, to_slug, relation) DO UPDATE SET
+         context = CASE WHEN links.source_type = 'manual' THEN links.context ELSE excluded.context END,
+         weight = CASE WHEN links.source_type = 'manual' THEN links.weight ELSE excluded.weight END,
+         strength = CASE WHEN links.source_type = 'manual' THEN links.strength ELSE excluded.strength END,
+         source_type = CASE WHEN links.source_type = 'manual' THEN links.source_type ELSE excluded.source_type END,
+         confidence = CASE WHEN links.source_type = 'manual' THEN links.confidence ELSE excluded.confidence END,
+         source_page_slug = CASE WHEN links.source_type = 'manual' THEN links.source_page_slug ELSE excluded.source_page_slug END,
+         trust_state = CASE WHEN links.source_type = 'manual' THEN links.trust_state ELSE excluded.trust_state END,
+         evidence = CASE WHEN links.source_type = 'manual' THEN links.evidence ELSE excluded.evidence END`
+    ).run({ $from: fromSlug, $to: toSlug });
+  }
+
   // ─── Volatile relation lifecycle (Phase 1: reports_to) ───────────
   // reports_to has no reverse relation (it is a structured_field, not in
   // relation_types), so these helpers are forward-only — no symmetric
