@@ -22,11 +22,14 @@ function safe(text: string, fallback: string): string {
   }
 }
 
-function projectDisplay(rec: RecommendationRecord, resolveSafeTitle: (slug: string) => string): { blocked: true } | { blocked: false; target_display: string; reason: string } {
+function projectDisplay(rec: RecommendationRecord, resolveSafeTitle: (slug: string) => string): { blocked: true; why: "not_active_fresh" | "abstained" } | { blocked: false; target_display: string; reason: string } {
   const active = rec.lifecycle_status === "pending" || rec.lifecycle_status === "current";
-  if (!active || rec.freshness_status !== "fresh") return { blocked: true };
+  if (!active || rec.freshness_status !== "fresh") return { blocked: true, why: "not_active_fresh" };
   const c = rec.payload.conclusion;
-  if (c.kind === "abstain") return { blocked: false, target_display: FALLBACK_DISPLAY, reason: safe(`abstain: ${c.reason}`, FALLBACK_REASON) };
+  // Spec §9: abstain records are default-hidden — they are NOT rendered as recommendations.
+  // The explanation is reserved for a future explicit "why no suggestion?" audit surface; for now
+  // it is a structured blocked outcome, never an exposed enum string.
+  if (c.kind === "abstain") return { blocked: true, why: "abstained" };
   const slug = c.action.target_ref.split(":").pop() ?? c.action.target_ref;
   return { blocked: false, target_display: safe(resolveSafeTitle(slug) || FALLBACK_DISPLAY, FALLBACK_DISPLAY), reason: safe(c.action.reason, FALLBACK_REASON) };
 }
@@ -39,7 +42,7 @@ export interface DisplayCtx {
 }
 
 export type DisplayOutcome =
-  | { blocked: true; reason: "not_found" | "integrity_failed" | "not_active_fresh" }
+  | { blocked: true; reason: "not_found" | "integrity_failed" | "not_active_fresh" | "abstained" }
   | { blocked: false; target_display: string; reason: string };
 
 /**
@@ -53,13 +56,24 @@ export type DisplayOutcome =
  *      #327 display guard so unsafe text degrades to a generic fallback instead of leaking.
  */
 export function loadAndProjectDisplay(recordId: string, ctx: DisplayCtx, resolveSafeTitle: (slug: string) => string): DisplayOutcome {
-  const rec = ctx.store.getById(recordId);
+  // getById throws on a tampered row envelope (review HIGH-2); treat that as integrity_failed.
+  let rec: RecommendationRecord | null;
+  try {
+    rec = ctx.store.getById(recordId);
+  } catch {
+    return { blocked: true, reason: "integrity_failed" };
+  }
   if (!rec) return { blocked: true, reason: "not_found" };
   if (!checkIntegrity(rec).ok) return { blocked: true, reason: "integrity_failed" };
   const current = { policy_version: policyHash(ctx.registry), ontology_version: ontologyHash(), schema_version: SCHEMA_VERSION };
   recomputeAndPersistFreshness(rec, ctx.reader, ctx.registry, ctx.store, current, ctx.now);
-  const reloaded = ctx.store.getById(recordId);
+  let reloaded: RecommendationRecord | null;
+  try {
+    reloaded = ctx.store.getById(recordId);
+  } catch {
+    return { blocked: true, reason: "integrity_failed" };
+  }
   if (!reloaded) return { blocked: true, reason: "not_found" };
   const out = projectDisplay(reloaded, resolveSafeTitle);
-  return out.blocked ? { blocked: true, reason: "not_active_fresh" } : { blocked: false, target_display: out.target_display, reason: out.reason };
+  return out.blocked ? { blocked: true, reason: out.why } : { blocked: false, target_display: out.target_display, reason: out.reason };
 }

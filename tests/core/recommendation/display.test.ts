@@ -63,6 +63,18 @@ describe("loadAndProjectDisplay", () => {
     db.close();
   });
 
+  test("HIGH-3: abstain record is NOT displayed (spec §9 default-hidden; reason deferred to audit surface)", () => {
+    const { db, store, reg, mgr } = fresh();
+    seed(db);
+    // no candidate edge → producer abstains
+    const created = mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00");
+    expect(created.payload.conclusion.kind).toBe("abstain");
+    const out = loadAndProjectDisplay(created.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "x");
+    expect(out.blocked).toBe(true);
+    if (out.blocked) expect(out.reason).toBe("abstained");
+    db.close();
+  });
+
   test("drift after create, no manual refresh → blocked", () => {
     const { db, store, reg, mgr } = fresh();
     seed(db);

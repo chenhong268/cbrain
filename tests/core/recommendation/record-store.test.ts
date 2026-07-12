@@ -168,4 +168,11 @@ describe("RecommendationStore", () => {
     expect(reloaded?.fingerprint).toBe(created.fingerprint);
     expect(computeFingerprint(reloaded!.payload)).toBe(created.fingerprint);
   });
+
+  test("HIGH-2: tampered row-level maintenance_key → getById throws (envelope mismatch, fail-closed)", () => {
+    open();
+    const r = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
+    db.rawDb.prepare("UPDATE recommendation_records SET maintenance_key=$k WHERE record_id=$id").run({ $k: "tampered-key", $id: r.record_id });
+    expect(() => store.getById(r.record_id)).toThrow(/envelope mismatch/);
+  });
 });
