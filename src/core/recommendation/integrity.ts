@@ -7,7 +7,8 @@ export type IntegrityCode =
   | "cross_undeclared_field"
   | "cross_evidence_not_projected"
   | "cross_rule_id_mismatch"
-  | "duplicate_declaration";
+  | "duplicate_declaration"
+  | "illegal_action_type";
 
 export type IntegrityResult = { ok: true } | { ok: false; code: IntegrityCode; message: string };
 
@@ -69,7 +70,26 @@ function canonicalConclusion(c: RecommendationConclusion): unknown {
   }) };
 }
 
+/** Spec §15 #5 / F13: a proposal's action type must be in the read-only whitelist. This is a
+ *  RUNTIME guard — the ActionType type alias is erased, and a DB-tampered type would otherwise
+ *  yield a self-consistent fingerprint (canonicalPayload hashes whatever is present). Enforced in
+ *  checkIntegrity so it bites at BOTH createRecord (reject) and display-load (block). */
+const ACTION_TYPES: ReadonlySet<string> = new Set(["review", "dry_run", "notify_draft"]);
+
+function validateConclusionActionTypes(c: RecommendationConclusion): void {
+  if (c.kind === "abstain") return;
+  if (!ACTION_TYPES.has(c.action.type)) throw new Error(`integrity: illegal action.type '${c.action.type}'`);
+  for (const alt of c.alternatives) {
+    if (!ACTION_TYPES.has(alt.type)) throw new Error(`integrity: illegal alternative action.type '${alt.type}'`);
+  }
+}
+
 export function checkIntegrity(r: RecommendationRecord): IntegrityResult {
+  try {
+    validateConclusionActionTypes(r.payload.conclusion);
+  } catch {
+    return { ok: false, code: "illegal_action_type", message: "non-whitelist action type" };
+  }
   try {
     validateDependencyDeclarations(r.payload.dependency_manifest.declarations);
   } catch {

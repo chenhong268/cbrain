@@ -77,6 +77,34 @@ describe("checkIntegrity", () => {
       expect(x.message).not.toContain("health:k");
     }
   });
+  test("F13: illegal action.type rejected (runtime whitelist, not just the TS type)", () => {
+    const r = rec(basePayload());
+    (r.payload.conclusion as { kind: "propose"; action: { type: string } }).action.type = "execute";
+    const x = checkIntegrity(r);
+    expect(x.ok).toBe(false);
+    if (!x.ok) expect(x.code).toBe("illegal_action_type");
+  });
+  test("F18: applicability.auto_execute tamper → fingerprint_mismatch", () => {
+    const r = rec(basePayload());
+    (r.payload.applicability as { auto_execute: boolean }).auto_execute = true;
+    const x = checkIntegrity(r);
+    expect(x.ok).toBe(false);
+    if (!x.ok) expect(x.code).toBe("fingerprint_mismatch");
+  });
+  test("F19: dependency declaration tamper → fingerprint_mismatch", () => {
+    const r = rec(basePayload());
+    r.payload.dependency_manifest.declarations = [];
+    const x = checkIntegrity(r);
+    expect(x.ok).toBe(false);
+    if (!x.ok) expect(x.code).toBe("fingerprint_mismatch");
+  });
+  test("F20: evidence ref tamper → fingerprint_mismatch", () => {
+    const r = rec(basePayload());
+    r.payload.evidence_manifest[0].ref = "health:k:eA:eC";
+    const x = checkIntegrity(r);
+    expect(x.ok).toBe(false);
+    if (!x.ok) expect(x.code).toBe("fingerprint_mismatch");
+  });
   test("cross: undeclared projection as-key", () => {
     const p = basePayload();
     (p.decision_inputs.entity_snapshot.eA as Record<string, unknown>).bogus = [];
