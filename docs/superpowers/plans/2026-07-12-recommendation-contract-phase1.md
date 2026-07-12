@@ -1,4 +1,4 @@
-# Recommendation Contract — Phase 1 Infrastructure Implementation Plan (rev8)
+# Recommendation Contract — Phase 1 Infrastructure Implementation Plan (rev9)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -7,6 +7,8 @@
 **Architecture:** `src/core/recommendation/`. Additive migration (DDL + completion marker in ONE transaction; test fault hook proves rollback). Deterministic producers, never auto-execute. Immutable payload hashed per RFC 8785 JCS + prose/identifier layer. Two orthogonal persisted axes (`lifecycle_status` / `freshness_status`), each its OWN store API; terminals cannot regress. Atomic supersede keeps `active count ≤ 1`; rejected suppression via `EXISTS(... IS NULL OR > now)` with default TTL wired in; all timestamps semantically validated. Store is the single persistence entry. **A rule is a typed declarative `RuleDefinition`** (full behavior+input source); the registry **deep-clones + deep-freezes** it at registration (caller cannot mutate replay behavior/hash); `code_hash = sha256(canonical(BEHAVIOR subset))` (implementation identity, excludes rule_id/version/registry_ref); tombstone `code_hash` is **derived internally** (never caller-supplied). Registry allows multiple live versions per rule_id (old versions stay exact-resolvable for replay); `setActive` enters **`policyManifest`** (active only — adding/cleaning inactive stock does NOT change policyHash). Display has exactly one public entry — `loadAndProjectDisplay` — hard-depending on module production `ontologyHash()` (no seam), forcing integrity + freshness (which verifies resolved runner `code_hash`+`registry_ref` match the record's producer metadata), gating on active+fresh, projecting through the safety boundary.
 
 **Tech Stack:** Bun, TypeScript strict, `bun:sqlite`, `bun:test`, `node:crypto`. No new runtime deps.
+
+**rev9 changelog:** closes Codex plan-rev8 findings (minimal — no architecture changes): (HIGH) `tombstone()` now distinguishes purge (active → throw, retention must switch first) from incompatible (active → **allowed**, clears active mapping + writes derived-hash tombstone — safety shutdown so the sole active runner can be taken offline without a pre-registered replacement). RED test covers the single-active-version scenario. (MED) Task 12 fault fixture hoists `fdb` outside `try` so `finally { fdb?.close(); rmSync(...) }` closes the DB handle even on assertion failure. (LOW) handoff version corrected.
 
 **rev8 changelog:** closes Codex plan-rev7 findings — (HIGH) tombstone identity derives ONLY from a live entry: unknown key (no live, no existing tombstone) throws; same-state repeat is idempotent (original hash preserved); different-state overwrite is rejected; 3 RED tests cover all three. (MED 1) `register` uses canonical content equivalence (`sameDefinition`) instead of the unreachable `ex.def === def` identity check; same-content re-register is no-op, different-content throws. (MED 2) the `1.1.0` fixture carries its own `registry_ref: "d@1.1.0"`; a new `refOwner` guard rejects the same `registry_ref` bound to a different `(rule_id, rule_version)`. (MED 3) all 5 test files use `mkdtempSync(join(tmpdir(), "cbrain-rec-…"))` per setup (no fixed `/tmp` paths, no `Math.random`); the Task 12 fault fixture is wrapped in `try/finally`. The display "active identity change" test switched from `markIncompatible` (now refuses active) to `registerVersion(v2) + setActive(v2)`.
 
@@ -483,6 +485,17 @@ describe("VersionedRuleRegistry", () => {
     expect(() => reg.markIncompatible("d", "1.0.0")).toThrow(/already purged/);
   });
   test("purging an inactive version does NOT change policyManifest", () => { const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.register(def("d", "1.1.0")); reg.setActive("d", "1.1.0"); const before = reg.policyManifest(); reg.markPurged("d", "1.0.0"); expect(reg.policyManifest()).toBe(before); });
+  test("rev9 HIGH: markIncompatible on the SOLE active version safely shuts it down (fail-closed)", () => {
+    const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.setActive("d", "1.0.0");
+    expect(() => reg.markIncompatible("d", "1.0.0")).not.toThrow(); // safety shutdown — no need to register a replacement first
+    expect(reg.resolveActive("d").status).toBe("unavailable"); // no active anymore → manager buildAndStore throws
+    expect(reg.policyManifest()).toBe("");                        // active identity removed from policy
+    expect(reg.resolve("d", "1.0.0").status).toBe("unavailable"); // now an incompatible tombstone
+  });
+  test("rev9: markPurged on active still refused (retention must switch first)", () => {
+    const reg = new VersionedRuleRegistry(); reg.register(def("d", "1.0.0")); reg.setActive("d", "1.0.0");
+    expect(() => reg.markPurged("d", "1.0.0")).toThrow(/cannot purge active/);
+  });
 });
 ```
 
@@ -529,12 +542,17 @@ export class VersionedRuleRegistry {
     this.live.set(k, { def: frozen, runner: runRule(frozen) });
   }
   setActive(id: string, ver: string): void { const k = this.key(id, ver); if (!this.live.has(k)) throw new Error(`registry: setActive target ${k} not a live runner`); this.activeVersion.set(id, ver); }
-  /** rev8 HIGH 1: tombstone identity derives ONLY from a live entry. Unknown key => throw;
-   *  same-state repeat => idempotent no-op (keep original hash); different-state => throw (no overwrite). */
+  /** rev8 HIGH 1 + rev9 HIGH: tombstone identity derives ONLY from a live entry. Unknown key => throw;
+   *  same-state repeat => idempotent no-op (keep original hash); different-state => throw (no overwrite).
+   *  rev9: purge refuses the active version (retention cleanup must switch first); but incompatible
+   *  is a SAFETY SHUTDOWN — an active runner confirmed incompatible MUST be taken offline immediately,
+   *  clearing active so resolveActive → unavailable and manager fail-closes. */
   private tombstone(id: string, ver: string, to: "purged" | "incompatible"): void {
     const k = this.key(id, ver);
     if (this.live.has(k)) {
-      if (this.activeVersion.get(id) === ver) throw new Error(`registry: cannot ${to} active ${id}@${ver}; setActive another first`);
+      const isActive = this.activeVersion.get(id) === ver;
+      if (to === "purged" && isActive) throw new Error(`registry: cannot purge active ${id}@${ver}; setActive another first`);
+      if (isActive) this.activeVersion.delete(id); // incompatible active: clear so resolveActive → unavailable
       const code_hash = this.live.get(k)!.runner.code_hash;
       this.live.delete(k); this.tombstones.set(k, { tombstone: to, code_hash });
       return;
@@ -1064,15 +1082,16 @@ git commit -m "feat(rec): single display entry (metadata mismatch hits freshness
 ```ts
 test("createRecord supersede rolls back on partial failure", () => {
   const faultDir = mkdtempSync(join(tmpdir(), "cbrain-rec-fault-"));
+  let fdb: CBrainDB | undefined;
   try {
-    const fdb = new CBrainDB(`${faultDir}/db.sqlite`); const fstore = new RecommendationStore(fdb);
+    fdb = new CBrainDB(`${faultDir}/db.sqlite`); const fstore = new RecommendationStore(fdb);
     const created = fstore.createRecord(mkPayload("hA"), "2026-07-12 10:00:00");
     fdb.rawDb.exec("DROP TABLE recommendation_lifecycle_history");
     expect(() => fstore.createRecord(mkPayload("hB"), "2026-07-12 10:00:01")).toThrow();
     expect(fstore.activeCountFor("k1")).toBe(1);
     expect(fstore.getById(created.record_id)?.fingerprint).toBe(created.fingerprint);
-    fdb.close();
   } finally {
+    fdb?.close();
     rmSync(faultDir, { recursive: true, force: true });
   }
 });
@@ -1120,6 +1139,6 @@ git commit -m "test(rec): production-path rollback + store-reload round-trip (#3
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-07-12-recommendation-contract-phase1.md` (rev7).
+Plan complete and saved to `docs/superpowers/plans/2026-07-12-recommendation-contract-phase1.md` (rev9).
 
 **Per the user's instruction: STOP for re-review. Do not execute. Do not push.** Every commit stages explicit paths only.
