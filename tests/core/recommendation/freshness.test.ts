@@ -126,18 +126,38 @@ describe("recomputeAndPersistFreshness", () => {
     expect(re?.lifecycle_status).toBe("pending");
     db.close();
   });
-  test("A→B→A path 1 → fresh recovers", () => {
+  test("F15: A→B→A path 1 — freshness recovers, lifecycle NEVER moves", () => {
     const db = new CBrainDB(`${DIR}/f2.sqlite`);
     seed(db);
     link(db, A, B, "candidate");
     const reg = makeRegistry();
     const store = new RecommendationStore(db);
     const c = store.createRecord(payloadFor(db, reg), "2026-07-12 10:00:00");
+    expect(store.getById(c.record_id)?.lifecycle_status).toBe("pending");
     link(db, B, A, "candidate");
     recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), reg, store, CC, "2026-07-12 11:00:00");
+    const afterDrift = store.getById(c.record_id);
+    expect(afterDrift?.freshness_status).toBe("stale");
+    expect(afterDrift?.lifecycle_status).toBe("pending");
     db.rawDb.prepare("DELETE FROM links WHERE from_slug=? AND to_slug=?").run(B, A);
     recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), reg, store, CC, "2026-07-12 12:00:00");
-    expect(store.getById(c.record_id)?.freshness_status).toBe("fresh");
+    const afterRecover = store.getById(c.record_id);
+    expect(afterRecover?.freshness_status).toBe("fresh");
+    expect(afterRecover?.lifecycle_status).toBe("pending");
+    db.close();
+  });
+  test("F11: candidate→trusted fact-upgrade → stale (lifecycle untouched)", () => {
+    const db = new CBrainDB(`${DIR}/f6.sqlite`);
+    seed(db);
+    link(db, A, B, "candidate");
+    const reg = makeRegistry();
+    const store = new RecommendationStore(db);
+    const c = store.createRecord(payloadFor(db, reg), "2026-07-12 10:00:00");
+    db.rawDb.prepare("UPDATE links SET trust_state='trusted' WHERE from_slug=? AND to_slug=?").run(A, B);
+    const out = recomputeAndPersistFreshness(store.getById(c.record_id)!, new DeclaredProjectionReader(db), reg, store, CC, "2026-07-12 11:00:00");
+    expect(out.freshness).toBe("stale");
+    const re = store.getById(c.record_id);
+    expect(re?.lifecycle_status).toBe("pending");
     db.close();
   });
   test("runner unavailable → version_invalid", () => {
