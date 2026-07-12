@@ -46,7 +46,7 @@ describe("recommendation_records migration", () => {
     dbs.push(db);
     runRecommendationRecordsMigration(db);
     const ins = (id: string, lc: string) =>
-      db.exec(`INSERT INTO recommendation_records (record_id, maintenance_key, fingerprint, inputs_hash, payload, auto_execute, created_at, last_revalidated_at, lifecycle_status, freshness_status, suppressed_until) VALUES ('${id}','k','f','ih','{}',0,'t','t','${lc}','fresh',NULL)`);
+      db.exec(`INSERT INTO recommendation_records (record_id, maintenance_key, fingerprint, inputs_hash, payload, auto_execute, created_at, last_revalidated_at, lifecycle_status, freshness_status, suppressed_until) VALUES ('${id}','k','f','ih','{"maintenance_key":"k","inputs_hash":"ih","applicability":{"auto_execute":false}}',0,'t','t','${lc}','fresh',NULL)`);
     ins("r1", "pending");
     expect(() => ins("r2", "current")).toThrow(/UNIQUE/);
     expect(() => ins("r3", "superseded")).not.toThrow();

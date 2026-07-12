@@ -120,10 +120,10 @@ export class RecommendationStore {
 
 function fromRow(r: Row): RecommendationRecord {
   const payload = JSON.parse(r.payload) as RecommendationImmutablePayload;
-  // Envelope integrity (review HIGH-2): the row-level maintenance_key/inputs_hash columns drive
-  // active-uniqueness, supersede, and suppression grouping. If either diverges from the decoded
-  // payload (column tampered without touching the payload JSON), integrity over the payload alone
-  // would still pass while the operational invariants break. Fail closed.
+  // Defense-in-depth envelope check (review HIGH-2). The migration's CHECK constraints enforce
+  // maintenance_key/inputs_hash == payload at the DB layer (HIGH-2b, primary), so a tampered row
+  // cannot normally exist; this read-side check still fails closed if a row ever diverges (legacy
+  // data, a future schema change, or a SQLite edge) so write-side trust is never silently broken.
   if (payload.maintenance_key !== r.maintenance_key || payload.inputs_hash !== r.inputs_hash) {
     throw new Error(`record-store: row envelope mismatch for ${r.record_id} (column vs payload tampered)`);
   }

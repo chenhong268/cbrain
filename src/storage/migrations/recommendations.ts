@@ -29,7 +29,16 @@ export function runRecommendationRecordsMigration(db: Database, hooks: Migration
         created_at TEXT NOT NULL, last_revalidated_at TEXT NOT NULL,
         lifecycle_status TEXT NOT NULL CHECK(lifecycle_status IN ('pending','current','superseded','rejected','invalidated')),
         freshness_status TEXT NOT NULL CHECK(freshness_status IN ('fresh','stale','version_invalid')),
-        suppressed_until TEXT
+        suppressed_until TEXT,
+        -- Envelope integrity (review HIGH-2b): the row-level columns that drive active-uniqueness,
+        -- supersede, and suppression grouping must stay byte-identical to the payload JSON. Without
+        -- this, a column tamper (maintenance_key/inputs_hash changed without the payload) is invisible
+        -- to payload-only integrity and can mis-group records into wrong slots. The IS operator is
+        -- NULL-safe so a missing or invalid payload key fails the check rather than slipping through.
+        CHECK(json_valid(payload)),
+        CHECK(maintenance_key IS json_extract(payload, '$.maintenance_key')),
+        CHECK(inputs_hash IS json_extract(payload, '$.inputs_hash')),
+        CHECK(auto_execute IS json_extract(payload, '$.applicability.auto_execute'))
       );
       CREATE INDEX IF NOT EXISTS idx_rec_fingerprint ON recommendation_records(fingerprint);
       CREATE INDEX IF NOT EXISTS idx_rec_inputs_hash ON recommendation_records(inputs_hash);

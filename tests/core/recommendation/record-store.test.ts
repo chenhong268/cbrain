@@ -169,10 +169,23 @@ describe("RecommendationStore", () => {
     expect(computeFingerprint(reloaded!.payload)).toBe(created.fingerprint);
   });
 
-  test("HIGH-2: tampered row-level maintenance_key → getById throws (envelope mismatch, fail-closed)", () => {
+  test("HIGH-2b: DB CHECK rejects tampering row-level maintenance_key away from payload (root-cause)", () => {
     open();
     const r = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
-    db.rawDb.prepare("UPDATE recommendation_records SET maintenance_key=$k WHERE record_id=$id").run({ $k: "tampered-key", $id: r.record_id });
-    expect(() => store.getById(r.record_id)).toThrow(/envelope mismatch/);
+    // The migration enforces maintenance_key/inputs_hash == payload at the DB layer, so a column
+    // tamper is rejected at the UPDATE itself — write-side operations can trust the row columns.
+    expect(() => db.rawDb.prepare("UPDATE recommendation_records SET maintenance_key=$k WHERE record_id=$id").run({ $k: "tampered-key", $id: r.record_id })).toThrow(/CHECK|constraint/i);
+    expect(() => db.rawDb.prepare("UPDATE recommendation_records SET inputs_hash=$h WHERE record_id=$id").run({ $h: "tampered-hash", $id: r.record_id })).toThrow(/CHECK|constraint/i);
+    // record is unchanged and still readable
+    expect(store.getById(r.record_id)?.payload.maintenance_key).toBe("k1");
+  });
+
+  test("HIGH-2b: DB CHECK rejects tampering payload applicability.auto_execute to true", () => {
+    open();
+    const r = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
+    // Flip auto_execute inside the payload JSON; the column stays 0, so the envelope CHECK
+    // (auto_execute IS json_extract(payload, '$.applicability.auto_execute')) rejects the UPDATE.
+    expect(() => db.rawDb.prepare("UPDATE recommendation_records SET payload = json_set(payload, '$.applicability.auto_execute', 1) WHERE record_id=$id").run({ $id: r.record_id })).toThrow(/CHECK|constraint/i);
+    expect(store.getById(r.record_id)?.payload.applicability.auto_execute).toBe(false);
   });
 });
