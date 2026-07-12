@@ -11,6 +11,7 @@ import {
   runLinkMigrations,
   runPageMigrations,
   runProvenanceMigrations,
+  runRecommendationRecordsMigration,
   runQueryInteractionMigrations,
   runTelemetryMigrations,
   validatePagesIndexes,
@@ -418,6 +419,7 @@ export class CBrainDB {
     runProvenanceMigrations(this.db);
     runLatePageMigrations(this.db);
     this.repairDirtyData();
+    runRecommendationRecordsMigration(this.db);
   }
 
   private migratePagesConstraint(): void {

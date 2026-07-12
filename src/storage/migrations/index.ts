@@ -4,5 +4,6 @@ export { ensurePagesIndexes, runMissingIndexMigrations, validatePagesIndexes } f
 export { runLinkMigrations } from "./links.js";
 export { runLatePageMigrations, runPageMigrations } from "./pages.js";
 export { runProvenanceMigrations } from "./provenance.js";
+export { runRecommendationRecordsMigration } from "./recommendations.js";
 export { runQueryInteractionMigrations } from "./query-interactions.js";
 export { runTelemetryMigrations } from "./telemetry.js";
