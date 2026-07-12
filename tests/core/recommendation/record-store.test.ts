@@ -143,4 +143,29 @@ describe("RecommendationStore", () => {
     expect(re?.freshness_status).toBe("stale");
     expect(re?.lifecycle_status).toBe("pending");
   });
+
+  test("createRecord supersede rolls back on partial failure", () => {
+    const faultDir = mkdtempSync(join(tmpdir(), "cbrain-rec-fault-"));
+    let fdb: CBrainDB | undefined;
+    try {
+      fdb = new CBrainDB(`${faultDir}/db.sqlite`);
+      const fstore = new RecommendationStore(fdb);
+      const created = fstore.createRecord(mkPayload("hA"), "2026-07-12 10:00:00");
+      fdb.rawDb.exec("DROP TABLE recommendation_lifecycle_history");
+      expect(() => fstore.createRecord(mkPayload("hB"), "2026-07-12 10:00:01")).toThrow();
+      expect(fstore.activeCountFor("k1")).toBe(1);
+      expect(fstore.getById(created.record_id)?.fingerprint).toBe(created.fingerprint);
+    } finally {
+      fdb?.close();
+      rmSync(faultDir, { recursive: true, force: true });
+    }
+  });
+
+  test("fingerprint survives store → DB → store reload", () => {
+    open();
+    const created = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
+    const reloaded = store.getById(created.record_id);
+    expect(reloaded?.fingerprint).toBe(created.fingerprint);
+    expect(computeFingerprint(reloaded!.payload)).toBe(created.fingerprint);
+  });
 });
