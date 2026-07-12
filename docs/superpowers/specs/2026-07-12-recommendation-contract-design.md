@@ -2,11 +2,15 @@
 
 > Issue: #328（roadmap: governed Recommendation Record and replayable decision support）
 > Phase: **0（仅合同设计，不改运行时）**
-> 状态：rev4 — 待 Codex 第四轮 re-review
+> 状态：rev5 — 待 Codex 第五轮 re-review
 > 依赖：#327（output trust boundary）— display 前置；未完成全部 surface 前 recommendation 不进默认展示
 
 **修订记录**：
-- **rev4**（本轮）：修 Codex 第三轮 `CHANGES REQUESTED` —— HIGH 1（canonical 递归算法：对象按码点排 key、数组按完整元素串排序、prose/identifier 分开归一、tie case 覆盖 rollback_note/trust_state/filter）、HIGH 2（registry 暴露 version-pinned `captureInputs()` 投影器，creation 与 freshness 共用，不可用→version_invalid 不猜）、HIGH 3（A→B→A 拆 freshness-only 路径 1 vs producer-produced 路径 2，删"无新 record"绝对断言）、MED（fingerprint 身份 wording 改为"完整 canonical payload 相同"）。
+- **rev5**（本轮）：修 Codex 第四轮 `CHANGES REQUESTED` —— HIGH（路径 2 恢复撞 active 唯一约束：删显式 reactivation，恢复一律"新 record_id 同 F_A + 同事务 supersede 当前 active R_B"，active count 全程 ≤ 1）、MED（canonical number 限 finite JSON，NaN/±Infinity fail-closed、`-0`→`0` 规范化，key 排序改 UTF-16 code-unit order）。
+- rev4：HIGH 1（递归 canonical + prose/identifier 分开）、HIGH 2（version-pinned `captureInputs()`）、HIGH 3（A→B→A 两路径）、MED（fingerprint wording）。
+- rev3：HIGH 1（完整 immutable payload）、HIGH 2（真双轴字段）、HIGH 3（versioned rule registry）、MED 1-4、LOW。
+- rev2：HIGH 1（decision_inputs + integrity/replay 拆分）、HIGH 2（pending freshness）、HIGH 3（record_id≠fingerprint）、MED 1-3。
+- rev1：初版 Phase 0 合同。
 - rev3：HIGH 1（完整 immutable payload）、HIGH 2（真双轴字段）、HIGH 3（versioned rule registry）、MED 1-4、LOW。
 - rev2：HIGH 1（decision_inputs + integrity/replay 拆分）、HIGH 2（pending freshness）、HIGH 3（record_id≠fingerprint）、MED 1-3。
 - rev1：初版 Phase 0 合同。
@@ -368,13 +372,13 @@ rev1/rev2 文字说 lifecycle/freshness 正交，但 `stale` 仍混在 lifecycle
 - **无新 record、无新 fingerprint**——A 身份全程保留，直接重新展示。（F15）
 
 **路径 2 — producer 已在 B 态产出替代 record**（maintenance cycle / on-demand 在 B 态跑了 producer）：
-- A→B + producer 跑：producer 用 B 态输入算出**不同** `inputs_hash_B` → 按 §5.5 原子 supersede：A `→ superseded`，新 record B（新 fingerprint）→ pending。
-- B→A（状态恢复到 A 的输入）：A **仍是 `superseded`**（freshness 翻转救不了 superseded 的 lifecycle）。要重新展示 A 的内容：
-  - **(i)** producer 再跑，`captureInputs()` 产出原 `inputs_hash_A` → 插入**新 record（新 record_id，同 fingerprint F_A）**为 pending（A 已 superseded，不冲突 active 唯一约束）；写 lifecycle_history（`reactivated`）。
-  - **(ii)** 或显式 reactivation 转换（superseded → pending），带 history。
-  - 二选一由 Phase 1 policy 定（§17）；**不能**只翻 freshness。（F23）
+- A→B + producer 跑：producer 用 B 态输入算出**不同** `inputs_hash_B` → 按 §5.5 原子 supersede：A `→ superseded`，新 record R_B（F_B）→ pending。此时同 key 的 active 是 **R_B**。
+- B→A（状态恢复到 A 的输入）：A **仍是 `superseded`**（freshness 翻转救不了）。要重新展示 A 的内容，**只能**让 producer 再跑：`captureInputs()` 产出原 `inputs_hash_A` → 复用 §5.5 原子 supersede，**同事务** `R_B → superseded + 插入 R_A2（新 record_id，同 F_A）→ pending`。
+  - **关键（rev5 HIGH）**：插入 R_A2 前**必须**先 supersede 当前 active 的 R_B（同 key）——否则 R_B 与 R_A2 同 key 双 active 违反 `UNIQUE(maintenance_key) WHERE active`。整笔回滚。
+  - **不做**显式 reactivation（`superseded → pending`）——那是 lifecycle 回退，删掉以保持 lifecycle 单调性（Codex 建议简化）。恢复一律走"新 record_id 同 fingerprint + 原子 supersede 当前 active"。
+- **不能**只翻 freshness。（F23）
 
-> 区分关键：**producer 是否在中间态跑过、产生过替代 record**。跑过 → 路径 2（superseded，需新 record/reactivation）；没跑 → 路径 1（freshness 自恢复）。rev3 的"无新 record"断言删除。
+> 区分关键：**producer 是否在中间态跑过、产生过替代 record**。跑过 → 路径 2（A superseded，恢复需 producer 再跑 + 原子 supersede R_B）；没跑 → 路径 1（freshness 自恢复）。
 
 ### 5.5 active 唯一性 + 原子 supersede（MED 3）
 
@@ -393,6 +397,8 @@ CREATE UNIQUE INDEX idx_rec_active_unique
 - 同 key 无 active → 新 record → pending。
 - 同 key 有 active 且**同 fingerprint** → 幂等 no-op（已存在）。
 - 同 key 有 active 且**不同 fingerprint** → 旧 active → superseded + 新 record → pending（同事务，避免窗口期双 active）。
+
+> **不变量（rev5 HIGH）**：任一时刻，每个 `maintenance_key` 的 active（pending/current）count **≤ 1**。原子 supersede 全程保持——插入新 active 前，同事务把同 key 旧 active → superseded。**路径 2 的"旧 fingerprint 回归"走同一机制**：插入 R_A2 前必须 supersede 当前 active R_B，不得跳过（否则双 active 撞唯一约束，整笔回滚）。
 
 `record_id` 是主键；`fingerprint` 非唯一（多条历史 record 可同 fingerprint，superseded/stale 不参与 active 唯一约束）。
 
@@ -455,23 +461,31 @@ fingerprint  = SHA-256(canonical_json(RecommendationImmutablePayload))
 
 **payload 值类型受限**（JSON-safe）：只允许 `null | boolean | number | string | array | object`。禁止 `undefined`/`function`/`symbol`/`Date` 对象。时间戳是 ISO string 且本就排除在 payload 外（§6.1）。
 
+**number 合法域**（rev5 MEDIUM，防跨实现 fingerprint 漂移）：
+- **只允许 finite JSON number**（IEEE 754 双精度有限实数）。**禁止** `NaN` / `+Infinity` / `-Infinity`——它们不是合法 JSON 值，`JSON.stringify` 会把它们转成 `null`，与合法 `null` 碰撞。`captureInputs()` 若算出非有限数，producer **必须**钳制或 abstain，**不得**写入 payload；违反 → record 拒绝创建（fail-closed）。
+- **`-0` 规范化为 `0`**（canonical 输出 `0`）。`-0 === 0` 数值等价但符号位不同，统一为 `+0` 避免跨实现歧义。
+
 **一个递归 canonical 算法**（绝不依赖插入顺序）：
 
 ```
 canonical(value):
   null / boolean        → JSON 标准字面量
-  number                → 最短等价十进制（整数无尾零；避免 1 vs 1.0 歧义；Phase 1 优先整数信号）
+  number                → 若非 finite（NaN/±Infinity）→ fail-closed 拒绝；
+                          若为 -0 → 规范为 0；
+                          否则最短等价十进制（整数无尾零；避免 1 vs 1.0 歧义；Phase 1 优先整数信号）
   string                → 按"字段分类"归一化（见下），再 JSON-escape
   array                 → 对每元素递归 canonical 得字符串；**按这些字符串升序排序**后逗号拼入 [ ]
                           （数组视为集合——排序键是完整元素的 canonical 串，自动含全部字段，
                             rollback_note/trust_state/filter 无遗漏；若某 rule 输入顺序语义相关，
                             必须把序号编码进元素自身）
-  object                → 对每 value 递归 canonical；**按 key 的 UTF-16 码点升序显式排序**输出
+  object                → 对每 value 递归 canonical；**按 key 的 UTF-16 code-unit order 升序显式排序**输出
+                          （= JS/JSON.stringify 的排序序，跨语言实现以此为准；补充平面字符按
+                            surrogate pair 计两个 code unit）
 ```
 
 **关键**：
 - **数组排序键 = 完整元素的 canonical 字符串**（不是 `type|target_ref|reason` 之类的部分比较器）——任何被漏的字段自动进排序键。
-- **对象 key 显式按码点排序**，不靠 `JSON.stringify`（它保持插入序）。
+- **对象 key 显式按 UTF-16 code-unit order 排序**，不靠 `JSON.stringify`（它保持插入序）。
 
 **字符串字段分类归一化**（prose vs identifier 分开）：
 
@@ -891,6 +905,7 @@ type DerivationEdge =
 **given (tie 漏字段)**：两条 alternatives 其余相同、仅 `rollback_note` 不同；两条 evidence 仅 `trust_state` 不同；两条 declarations 仅 `filter` 不同。
 **then**：排序键含完整元素 → 这些差异**进**排序/哈希 → 产出**不同** fingerprint（不因 tie 漏字段而误判相同）。
 **given (identifier 不归一)**：两个不同 slug `entityA-1` 与其全角变体——identifier 字段**不做 NFKC**，原样字节 → 不同实体不合并；prose 字段才 NFKC。
+**given (number 域，rev5 MEDIUM)**：`captureInputs` 算出 `NaN`/`Infinity`/`-Infinity` → record **拒绝创建**（fail-closed，不写成 `null`）；`-0` 与 `0` → 规范化为同一 canonical `0` → 同 fingerprint（无数值差异时不制造新指纹）。
 
 ### F13 — 隐式执行攻击（对抗）
 **given**：恶意/失误的 producer 规则尝试在结论里嵌写操作。
@@ -944,10 +959,13 @@ type DerivationEdge =
 **when**：decision replay / freshness。
 **then**：`registry.resolve` 返回 `{status:"unavailable", reason:"purged"}` → replay `rule_version_unavailable`、freshness `version_invalid`——**不是** failure，是"无法历史验证"，不误报、不污染 audit。
 
-### F23 — A→B→A 路径 2：producer 已产替代 record（HIGH 3）
+### F23 — A→B→A 路径 2：producer 已产替代 record（HIGH 3 + rev5 唯一约束）
 **given**：record R_A（inputs_hash=A, fingerprint=F_A）`current+fresh`。状态变 B 后 **producer 跑了**：用 B 态输入算出 inputs_hash_B（≠A）→ §5.5 原子 supersede：R_A `→ superseded`，新 R_B（fingerprint=F_B）→ pending。
-**when**：状态恢复回 A。
-**then**：R_A **仍是 `superseded`**——freshness 翻转**救不了**（lifecycle 排除展示）。要重新展示 A 的内容：producer 再跑产 `inputs_hash_A` → 插入**新 record（新 record_id，同 F_A）**为 pending（R_A 已 superseded 不冲突 active 唯一约束），写 `reactivated` history；**或**显式 superseded→pending reactivation。**不能**只翻 freshness。
+**when**：状态恢复回 A，producer 再跑产 `inputs_hash_A`（=A）。
+**then**：复用 §5.5 原子 supersede，**同事务** `R_B → superseded + 插入 R_A2（新 record_id，同 F_A）→ pending`。
+- **断言**：全过程每个 maintenance_key 的 active count **始终 ≤ 1**——R_A2 插入**前** R_B 已 superseded（同事务），无窗口期双 active；若事务任一步失败，整笔回滚（R_B 仍 active，R_A2 不存在）。
+- R_A（旧）**仍 superseded**，不复活（删显式 reactivation，lifecycle 单调）。
+- **不能**只翻 freshness。
 
 ### F24 — projector 规范唯一性（HIGH 2）
 **given**：声明依赖的**原始行**完全不变；但某实现者用不同 `captureInputs`（signals 聚合方式不同，或 inspected_claims 排序/过滤不同）。
@@ -985,8 +1003,10 @@ type DerivationEdge =
 | 21 | **rev4 HIGH 2** freshness 无法重建 DecisionInputs | versioned registry 暴露精确版本 `captureInputs()`；creation 与 freshness 共用同一规范投影器；不可用 → version_invalid，不猜 | F24、§5.3、§7.2 |
 | 22 | **rev4 HIGH 3** A→B→A 与原子 supersede 冲突 | 拆 freshness-only（路径 1，F15）vs producer-produced（路径 2，superseded 需新 record/reactivation，F23）；删"无新 record"绝对断言 | F15、F23、§5.4 |
 | 23 | **rev4 MED** fingerprint 身份 wording 与全 payload 矛盾 | fingerprint 相同 ⟺ 完整 canonical payload 相同（不只 inputs+conclusion+constraints） | §6.3、§6.4 |
+| 24 | **rev5 HIGH** 路径 2 reactivation 撞 active 唯一约束（R_B 仍 active） | 删显式 reactivation；恢复一律"新 record_id 同 F_A + **同事务 supersede 当前 active R_B**"；active count 全程 ≤ 1，失败整笔回滚 | F23、§5.4/§5.5 |
+| 25 | **rev5 MED** canonical number 未定义 NaN/±Inf/-0 | number 限 finite JSON；NaN/±Infinity fail-closed 拒绝；`-0`→`0` 规范化；key 排序改"UTF-16 code-unit order" | F12、§6.2 |
 
-**审查结论**：原 7 + rev2 6 + rev3 8 + rev4 4 全部有合同层缓解 + fixture 覆盖。隐私（#4）依赖 #327 后续 surface 覆盖——**已知前置依赖**，Phase 1 强制 gate。
+**审查结论**：原 7 + rev2 6 + rev3 8 + rev4 4 + rev5 2 全部有合同层缓解 + fixture 覆盖。隐私（#4）依赖 #327 后续 surface 覆盖——**已知前置依赖**，Phase 1 强制 gate。
 
 ---
 
@@ -1032,9 +1052,17 @@ Phase 0 不决策，仅列出：
 | 6. 公开示例匿名占位符 | §14 + §11.3 |
 | 推导结构约束（节点/边/causes 限定） | §12 |
 | 不保存模型私有 CoT | §12 + §0 |
-| 对抗审查（原 7 + rev2 6 + rev3 8 + rev4 4） | §15（23 行） |
+| 对抗审查（原 7 + rev2 6 + rev3 8 + rev4 4 + rev5 2） | §15（25 行） |
 
-**rev4 Codex 修订验收对照**（本轮）：
+**rev5 Codex 修订验收对照**（本轮）：
+
+| Codex rev5 验收 | 本 spec 落点 |
+|:--|:--|
+| HIGH：reactivation 须同事务 supersede 当前 active B，保 active count ≤ 1 | §5.4 路径 2 + §5.5 不变量 + F23（删显式 reactivation，统一新 record + 原子 supersede） |
+| MEDIUM：canonical number 定义合法域（NaN/±Inf/-0） | §6.2 number 域（finite only、`-0`→`0`、fail-closed）+ F12 |
+| 仍 Phase 0 spec-only，不写 plan/runtime/DB/MCP，不 push | §0 + 本文件唯一交付 |
+
+**rev4 Codex 修订验收对照**（上一轮，已落实）：
 
 | Codex rev4 验收 | 本 spec 落点 |
 |:--|:--|
