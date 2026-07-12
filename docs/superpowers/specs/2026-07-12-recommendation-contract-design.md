@@ -2,11 +2,12 @@
 
 > Issue: #328（roadmap: governed Recommendation Record and replayable decision support）
 > Phase: **0（仅合同设计，不改运行时）**
-> 状态：rev2 — 待 Codex re-review
+> 状态：rev3 — 待 Codex 第三轮 re-review
 > 依赖：#327（output trust boundary）— display 前置；未完成全部 surface 前 recommendation 不进默认展示
 
 **修订记录**：
-- **rev2**（本轮）：修 Codex `CHANGES REQUESTED` —— HIGH 1（replay 拆 integrity-check vs decision-replay + 存 `decision_inputs` + 解耦 `inputs_hash`/`fingerprint`）、HIGH 2（pending/current 都受 freshness gate）、HIGH 3（`record_id` ≠ `fingerprint`、partial unique index、revalidation 带审计复活）、MED 1（ref 非 privacy boundary + 三层 ref/display）、MED 2（per-rule declarative dependency 替代全量 entity hash）、MED 3（conflict 限本 record scope + confirmation 分类规则）。
+- **rev3**（本轮）：修 Codex 第二轮 `CHANGES REQUESTED` —— HIGH 1（fingerprint 覆盖完整 `RecommendationImmutablePayload`，含 auto_execute/declarations/evidence/risks/gaps/producer）、HIGH 2（真双轴落到类型：`lifecycle_status` 删 stale + 独立 `freshness_status` 字段，依赖漂移只动 freshness 不丢身份）、HIGH 3（versioned rule registry + `rule_version_unavailable` 语义）、MED 1（target_display 改 read-time projection，移出 payload）、MED 2（三份输入 source of truth + 交叉一致性校验）、MED 3（`UNIQUE(maintenance_key) WHERE active` + 原子 supersede）、MED 4（rejected durable `suppressed_until` + policy TTL）、LOW（additive migration）。
+- rev2：HIGH 1（decision_inputs + integrity/replay 拆分）、HIGH 2（pending freshness）、HIGH 3（record_id≠fingerprint）、MED 1-3。
 - rev1：初版 Phase 0 合同。
 
 ---
@@ -95,41 +96,38 @@ evidence_manifest 里的每条证据**仍然带 `trust_state`**（真值轴）�
 ```ts
 // 逻辑类型（Phase 0 合同；物理 schema 留给 Phase 1 gate）
 interface RecommendationRecord {
-  // ── 身份（两层，HIGH 3：实例身份 ≠ 内容指纹）──
-  record_id: string;              // 不可变实例身份（maintenance_key + created_at + 确定性 nonce），主键
-  fingerprint: string;            // 内容身份 = hash(inputs_hash + conclusion + constraints)，非唯一（§6）
-  inputs_hash: string;            // = hash(decision_inputs)，纯输入身份（HIGH 1，与 fingerprint 解耦）
-  namespace: string;              // Phase 1 固定 "maintenance"；未来 "open_question" 等
-  maintenance_key: string;        // 归一化稳定键，见 §4.1
+  // ── 身份 ──
+  record_id: string;              // 不可变实例身份（主键），不进 fingerprint
 
-  // ── 结论（提案轴）──
-  conclusion: RecommendationConclusion;
+  // ── immutable payload（HIGH 1：整体进 fingerprint，见 §6）──
+  payload: RecommendationImmutablePayload;
+  fingerprint: string;            // = hash(canonical(payload))，内容身份，非唯一（§5.5）
 
-  // ── 冻结决策输入（HIGH 1：decision replay 的依据）──
-  decision_inputs: DecisionInputs;        // canonical 冻结输入，足以离线重跑 rule；audit/raw 层（§11）
-
-  // ── 证据清单（真值轴过滤后；internal ref，audit 层，非隐私边界）──
-  evidence_manifest: EvidenceManifestEntry[];
-
-  // ── 约束与版本（replay/diff 用）──
-  constraints: RecommendationConstraints;
-
-  // ── 依赖声明（MED 2：per-rule declarative）──
-  dependency_manifest: DependencyManifest;   // rule 声明实际读取并影响结论的字段；只这些进 inputs_hash
-
-  // ── 适用性与风险 ──
-  applicability: Applicability;
-  risks: string[];
-  gaps: string[];                 // 复用 EvidenceBoard.gaps 语义
-
-  // ── 生命周期（与 freshness 正交，HIGH 2/3）──
-  created_at: string;             // 不进 fingerprint
-  last_revalidated_at: string;    // 最近一次 freshness check 通过时间；不进 fingerprint
-  lifecycle_status: RecommendationLifecycle;
-
-  // ── record 自身来源（非 vault provenance）──
-  producer: RecommendationProducer;
+  // ── mutable 状态（不进 fingerprint）──
+  created_at: string;
+  last_revalidated_at: string;    // 最近一次 freshness check 通过时间
+  lifecycle_status: LifecycleStatus;     // HIGH 2：真双轴之一（用户/系统驱动）
+  freshness_status: FreshnessStatus;     // HIGH 2：真双轴之二（依赖/版本驱动，独立字段）
+  suppressed_until: string | null;       // MED 4：rejected 的 durable 抑制到期；null=直到用户显式 reopen
 }
+
+// ── HIGH 1：明确的不可变语义负载，整体纳入 fingerprint ──
+interface RecommendationImmutablePayload {
+  namespace: string;              // Phase 1 固定 "maintenance"
+  maintenance_key: string;        // 归一化稳定键，见 §4.1
+  inputs_hash: string;            // = hash(decision_inputs)，纯输入身份（§6）
+  conclusion: RecommendationConclusion;
+  decision_inputs: DecisionInputs;        // 冻结重放输入（source of truth，§4.3）
+  evidence_manifest: EvidenceManifestEntry[];  // decision_inputs 的证据投影（§4.3）
+  constraints: RecommendationConstraints;
+  dependency_manifest: DependencyManifest;     // producer schema（声明读了哪些字段，§7）
+  applicability: Applicability;                // 含 auto_execute —— 篡改即 fingerprint 失配
+  risks: string[];
+  gaps: string[];
+  producer: RecommendationProducer;            // 含 rule_id + rule_version（HIGH 3）
+}
+// payload 排除：record_id、created_at、last_revalidated_at、lifecycle_status、freshness_status、
+//              suppressed_until、target_display（MED 1 read-time 投影）。这些是身份/状态/展示，非语义。
 
 type RecommendationConclusion =
   | { kind: "propose"; action: ProposedAction; alternatives: ProposedAction[] }
@@ -137,19 +135,18 @@ type RecommendationConclusion =
 
 interface ProposedAction {
   type: "review" | "dry_run" | "notify_draft";  // 对齐 ActionCandidateActionType
-  target_ref: string;            // internal ref（audit 层，含 slug，§4.2/§11）
-  target_display: string;        // runtime 用户展示：经 #327 清洗的安全 title（safeTitle/safeDisplayText）
+  target_ref: string;            // internal ref（audit 层，含 slug，§4.2/§11）—— 持久化、进 fingerprint
   reason: string;                // 显式可审计理由，非模型 CoT
   rollback_note?: string;        // 对齐 RepairAction.rollbackNote
+  // MED 1：无 target_display —— 安全 title 是 read-time projection，读取时经 #327 + safeTitle 生成（§4.4）
 }
 
 interface DecisionInputs {
-  // canonical 冻结输入：离线重跑 deterministic rule 所需的全部有界输入。
-  // Phase 1 maintenance 多为结构化信号（slug 集合、活跃边、计数、分数），少 prose。
-  // 若 rule 检视 claim 文本（如 conflict 检测），相关文本进 inspected_claims，tier = audit/raw（§11）。
-  signals: Record<string, unknown>;               // rule 声明的结构化输入（计数/分数/集合）
+  // MED 2 source of truth：冻结重放输入。离线重跑 rule 所需的全部有界输入。
+  // Phase 1 maintenance 多为结构化信号；rule 检视 claim 文本时进 inspected_claims（audit/raw）。
+  signals: Record<string, unknown>;               // 结构化输入（计数/分数/集合）
   inspected_claims?: string[];                     // rule 实际检视的 claim 文本（audit/raw）
-  entity_snapshot: Record<string, EntityProjection>;  // 仅 dependency_manifest 声明的字段（§7）
+  entity_snapshot: Record<string, EntityProjection>;  // 仅 dependency_manifest 声明的字段
 }
 
 interface EntityProjection {
@@ -167,21 +164,18 @@ interface EvidenceManifestEntry {
 // manifest 只含 active 证据：producer 构建前必须过 INACTIVE_STATES（evidence.ts:52）
 // 与 ACTIVE_LINK_SQL（sqlite.ts:49），与 EvidenceBoard.build 的 drop 行为一致（evidence.ts:125）。
 // manifest 无 active 字段——inactive 在结构上无法进入结论。全量（含 inactive）证据视图进 audit/raw。
-// 推论：inactive 证据日后翻 active（rejected→trusted）→ decision_inputs.entity_snapshot 变 → inputs_hash 变 → 旧 record stale（F11/F15）。
+// MED 2：manifest 是 decision_inputs 的确定性投影——integrity 校验 evidence_manifest ⊆ projection(decision_inputs)。
 
 interface RecommendationConstraints {
-  policy_version: string;       // 见 §7.2
-  ontology_version: string;
+  policy_version: string;       // hash of policy bundle（含 rule registry manifest，§7.2）
+  ontology_version: string;     // hash of ontology.yaml
   schema_version: string;       // 合同自身版本，如 "rec-v1"
-  rule_hashes: Record<string, string>;  // 产出规则的代码哈希
 }
 
 interface DependencyManifest {
-  // per-rule 声明式依赖（MED 2）：只 hash rule 真正读取并影响结论的字段。
-  // 替代旧的"全实体投影哈希"——无关字段变化不 stale 语义建议。
-  rule_id: string;                     // 声明归属（与 producer.rule_id 一致）
+  // per-rule 声明式依赖（MED 2：producer schema）。声明 rule 读了哪些字段——是 schema，不是值。
+  rule_id: string;                     // 声明归属（= producer.rule_id，integrity 校验一致）
   declarations: DependencyDeclaration[];
-  inputs_hash: string;                 // = hash(canonical(declared projections))，= record.inputs_hash 的依赖分量
 }
 
 interface DependencyDeclaration {
@@ -189,13 +183,12 @@ interface DependencyDeclaration {
   table: "pages" | "links" | "tags" | "aliases" | "timeline" | "chunks" | "fts" | "lance" | "config";
   fields: string[];             // 只这些字段；如 links 只取 relation + trust_state + other_slug
   filter?: "active" | "all";    // 默认 active（过 ACTIVE_LINK_SQL）
-  // 关键：fts/lance 只在 storage-health 类 rule 显式声明时才进 hash——
-  // 索引重建不让语义 recommendation stale。
+  // 关键：fts/lance 只在 storage-health 类 rule 显式声明时才进 hash——索引重建不让语义建议 stale。
 }
 
 interface Applicability {
   audience: "user_only";        // Phase 1 固定
-  auto_execute: false;          // Phase 1 不变量
+  auto_execute: false;          // Phase 1 不变量；进 payload → 篡改为 true 即 fingerprint 失配（HIGH 1）
   requires_confirmation: ConfirmationRequirement;
 }
 
@@ -211,18 +204,27 @@ type HighImpactReason =
   | "high_value_entity";            // 高连接度实体的结构性变更
 
 interface RecommendationProducer {
+  // HIGH 3：versioned rule registry——code_hash 只识别版本，rule_version + registry_ref 才能定位可执行 runner
   rule_id: string;              // 确定性规则标识
-  code_hash: string;            // 规则代码哈希（= policy_version 来源之一）
-  // inputs_hash 不再放这里——已在 record 顶层（HIGH 1 解耦 input hash 与 record hash）
+  rule_version: string;         // 规则逻辑的语义版本（如 "1.2.0"）
+  code_hash: string;            // 该版本 rule 实现的哈希
+  registry_ref: string;         // 版本化 runner 定位符（如 "cbrain.rules:maintenance.known_relations@1.2.0"）
 }
 
-type RecommendationLifecycle =
-  | "pending"      // 已建，待用户确认（创建默认）；仍受 freshness gate（HIGH 2）
-  | "current"      // 用户已确认相关；仍受 freshness gate
-  | "stale"        // 依赖/输入漂移；可经 revalidation 回 current（HIGH 3）
-  | "superseded"   // 同 maintenance_key 的新 active record 取代
-  | "rejected"     // 用户显式拒绝；同 fingerprint 在抑制窗口内不重复提案
-  | "invalidated"; // ontology/policy/schema 版本变化，结构上不再适用
+// ── HIGH 2：真双轴。lifecycle（用户/系统驱动）与 freshness（依赖/版本驱动）是独立字段 ──
+type LifecycleStatus =
+  | "pending"      // 创建默认，待用户确认
+  | "current"      // 用户已确认相关（confirm 只改 lifecycle，不执行）
+  | "superseded"   // 同 maintenance_key 新 active record 取代（§5.5 原子事务）
+  | "rejected"     // 用户显式拒绝；durable 抑制（suppressed_until，MED 4）
+  | "invalidated"; // 终态结构退休（namespace/contract 废弃；Phase 1 罕用）
+
+type FreshnessStatus =
+  | "fresh"            // inputs_hash + 版本约束都匹配当前状态
+  | "stale"            // 声明依赖漂移（inputs_hash 不匹配）；recoverable
+  | "version_invalid"; // policy/ontology/schema 版本结构不匹配；recoverable（版本恢复即可）
+
+// 关键：依赖漂移只改 freshness_status，不碰 lifecycle_status —— A→B→A 不丢 pending/current 身份（HIGH 2）
 
 type AbstainReason =
   | "insufficient_evidence"
@@ -266,125 +268,180 @@ evidence ref 不存原文摘录，只存稳定引用，复用现有 `ActionEvide
 
 **关键**：ref 层不能直接给用户看（含 slug）；runtime display 走 `safeTitle` 拿真实但清洗过的 title，让建议保持可操作性。一刀切输出"实体A"会让建议失去操作意义——Codex MED 1 指出这点。
 
+### 4.3 三份输入的 source of truth（MED 2）
+
+record 有三处看似重叠：`decision_inputs` / `evidence_manifest` / `dependency_manifest`。Codex MED 2 指出若三处独立存真相会不一致。明确角色与派生关系：
+
+| 字段 | 角色 | 真相来源 | 派生关系 |
+|:--|:--|:--|:--|
+| `decision_inputs` | **冻结重放输入**（rule 实际读到的值） | **source of truth** | producer 执行时冻结 |
+| `evidence_manifest` | decision_inputs 的**证据投影**（可引用的 active 证据，stable ref） | 派生 | `evidence_manifest ⊆ projection(decision_inputs)`，确定性投影 |
+| `dependency_manifest` | **producer schema**（rule 声明读哪些字段/表，是 shape 非值） | 派生 | rule 注册时声明；`entity_snapshot` 字段集 ⊆ declarations 覆盖 |
+
+**一致性校验**（integrity，§8.1 必查）：
+1. `hash(decision_inputs) == record.inputs_hash`（输入未篡改）
+2. `evidence_manifest` 每条都能追溯到某条 `decision_inputs` 条目（投影一致性）
+3. `decision_inputs.entity_snapshot` 的每个字段都落在 `dependency_manifest.declarations` 内（producer 没读未声明字段——否则 freshness 会漏）
+4. `dependency_manifest.rule_id == producer.rule_id`（声明归属一致）
+
+三份都进 immutable payload（HIGH 1），任一篡改 → fingerprint 失配；交叉不一致 → integrity 失败。
+
+### 4.4 target_display —— read-time projection（MED 1）
+
+> Codex MED 1：安全 title 随页面标题与输出边界变化，属当前 read-time projection。存进 frozen conclusion 会让纯展示变化造新 fingerprint，且扩大持久化隐私面。
+
+- `ProposedAction` **只持久化 `target_ref`**（进 fingerprint）。
+- `target_display` **不持久化**、不进 payload；在 MCP/display 读取时动态生成：
+  ```
+  target_display = sanitize_via_#327(safeTitle(resolve_slug(target_ref), entityLookup, fallback))
+  ```
+- 公开投影类型（`RecommendationDisplay`：含 target_display + 清洗后的 reason/risks）与内部 record 类型分开——display 是 read-time 派生，不是存储字段。
+- 效果：页面改名或 #327 boundary 升级只改 display，不改 fingerprint、不造新 record。
+
 ---
 
 ## 5. 生命周期
 
 > 验收 #2：定义生命周期。
 
-**不复用 `CandidateStatus` enum**（虽然它最完整：`pending|accepted|rejected|deferred|disabled|superseded`，`src/storage/sqlite.ts:138`）。原因：recommendation 需要 `stale`（依赖漂移）和 `invalidated`（版本结构变化）语义，`CandidateStatus` 没有；反过来 recommendation 不需要 `deferred`/`disabled`。复用会导致 Wrong Abstraction + display filter 漏判。
+**不复用 `CandidateStatus` enum**（`pending|accepted|rejected|deferred|disabled|superseded`，`src/storage/sqlite.ts:138`）。原因：recommendation 需要**真双轴**——用户/系统驱动的 lifecycle **加** 依赖/版本驱动的独立 freshness；`CandidateStatus` 是单 enum，无法表达"依赖漂移只动 freshness、不丢 lifecycle 身份"（HIGH 2）。把 stale 塞进 lifecycle enum 正是 rev1/rev2 的错。复用 = Wrong Abstraction + display filter 漏判。
 
-**但复用审计副表模式**：`compounding_review_feedback`（`src/storage/sqlite.ts:393`）是 action→status 转换 + reason 的审计副表，recommendation 应有同构的 `recommendation_lifecycle_history`（逻辑定义，Phase 1 落表）。
+**但复用审计副表模式**：`compounding_review_feedback`（`src/storage/sqlite.ts:393`）是 action→status 转换 + reason 的审计副表，recommendation 应有同构的 `recommendation_lifecycle_history`（记 lifecycle 与 freshness 转换，逻辑定义，Phase 1 落表）。
 
-### 5.1 两条正交轴（HIGH 2/3 的根因修复）
+### 5.1 真双轴（HIGH 2：落到类型，不是文字）
 
-rev1 把"用户确认状态"和"依赖是否新鲜"混进一个 enum，导致 pending 能绕过 freshness、A→B→A 死锁。rev2 拆成两条正交轴：
+rev1/rev2 文字说 lifecycle/freshness 正交，但 `stale` 仍混在 lifecycle enum 里——current 变 stale 后丢失"曾是 current"身份，revalidation 该恢复 pending 还是 current 只能靠猜 history。rev3 把双轴**落到两个独立持久化字段**：
 
-**轴 A — lifecycle（用户/系统驱动的实例状态）**：`pending` → `current` → `superseded`；`→ rejected`；`→ invalidated`。这些是**用户确认或系统取代**触发的离散转换，写 `recommendation_lifecycle_history`。
+- **`lifecycle_status`**（用户/系统驱动）：`pending | current | superseded | rejected | invalidated`。**不含 stale**。
+- **`freshness_status`**（依赖/版本驱动，独立字段）：`fresh | stale | version_invalid`。
 
-**轴 B — freshness（依赖/约束驱动的可重算性）**：`fresh` / `stale` / `version_invalid`。这是**每次读/display 前确定性重算**的连续判断，**不写 enum**，写 `last_revalidated_at`。
+**核心不变量**：依赖漂移**只改 `freshness_status`，永不碰 `lifecycle_status`**。于是 A→B→A 时 lifecycle 全程不动（一直是 current 或 pending），freshness stale→fresh 自然恢复——无"复活到哪个状态"的歧义，无需猜 history。
 
-**展示门控 = 轴 A ∈ {pending, current} AND 轴 B = fresh**。两个都要满足。
+**展示门控** = `lifecycle_status ∈ {pending, current}` **AND** `freshness_status == fresh`。
 
-### 5.2 lifecycle 转换（轴 A）
+> `lifecycle.invalidated` 仅用于**终态结构退休**（namespace/contract 废弃），Phase 1 罕用；版本漂移走 `freshness.version_invalid`（可恢复），不进 lifecycle。
+
+### 5.2 lifecycle 转换（用户/系统驱动，写 history）
 
 ```
    创建 → pending ──(用户 confirm)──→ current
                 │                       │
-                │         (同 key 新 active record 接受/取代)
+                │   (同 key 新 active 插入，§5.5 原子 supersede)
                 │                       ▼
                 │                   superseded
                 │
-                ├──(用户 reject)──→ rejected
-                └──(版本结构性变, 轴B=version_invalid)──→ invalidated
+                ├──(用户 reject, 设 suppressed_until)──→ rejected
+                └──(namespace/contract 废弃)──────────→ invalidated
 ```
 
-- **pending**：创建默认。尚未用户确认。**仍受 freshness gate**（HIGH 2 修复）。
-- **current**：用户显式 confirm（"这条建议相关，保留为 active"）。confirm **只改 lifecycle，不代表执行动作**——Phase 1 `auto_execute:false` 不变，proposed action 永不因 confirm 而执行。
-- **superseded**：同 `maintenance_key` 产生新 active record（用户更认可新的）。
-- **rejected**：用户显式拒绝。同 `fingerprint` 在抑制窗口内不重复提案（见 §5.4）。
-- **invalidated**：轴 B 判定 `version_invalid`（ontology/policy/schema 版本结构变化），系统转 invalidated。
+- **pending → current**：用户显式 confirm。confirm **只改 lifecycle，不执行 proposed action**（`auto_execute:false` 不变）。
+- **→ superseded**：同 `maintenance_key` 新 active record 插入，旧 active 原子转 superseded（§5.5）。
+- **→ rejected**：用户拒绝。写 `suppressed_until`（MED 4 durable）。
+- **→ invalidated**：终态退休（罕用）。
 
-### 5.3 freshness gate（轴 B，HIGH 2 核心）
+### 5.3 freshness gate（每次读/display 前重算，写 freshness_status + last_revalidated_at）
 
-**任何 pending/current record 在读/display 前必须过 freshness check**（不只 current）：
+任何 record（无论 lifecycle）读/display 前必须重算 freshness：
 
-1. 重算当前 `inputs_hash'`（按 dependency_manifest 重读声明字段）+ 当前 `constraints'`（重算 policy/ontology/schema version）。
-2. 比较：
-   - `inputs_hash' != record.inputs_hash` → 轴 B = `stale`。轴 A 转 `stale`（pending/current 都转）。
-   - `constraints'` 版本结构变化（ontology/policy/schema_version 不匹配）→ 轴 B = `version_invalid`。轴 A 转 `invalidated`。
-   - 都匹配 → 轴 B = `fresh`，更新 `last_revalidated_at`。
-3. **stale/invalidated 不展示**，即使轴 A 还是 pending/current 名义值——freshness check 在 display 前已把轴 A 推到 stale/invalidated。
+1. 按 `dependency_manifest` 重读声明字段 → 当前 `inputs_hash'`。
+2. 重算当前 `constraints'`（policy/ontology/schema version）。
+3. 写 `freshness_status`：
+   - `inputs_hash' != record.inputs_hash` → `stale`。
+   - `constraints'` 版本结构不匹配 → `version_invalid`。
+   - 都匹配 → `fresh`，更新 `last_revalidated_at`。
+4. **display 只展示 `freshness_status == fresh` 的 pending/current**。
 
-> 这修复 HIGH 2：rev1 的 display filter 只看轴 A，pending 能绕过。rev2 display 前强制 freshness check，pending/current 一视同仁。
+> 依赖漂移**不**改 lifecycle（rev2 错在写"轴 A 转 stale"）。pending 和 current 一视同仁过 gate——HIGH 2 真正修复。
 
-### 5.4 revalidation 与回摆（HIGH 3 核心）
+### 5.4 A→B→A 回摆（HIGH 3，现在是 freshness 单轴变化）
 
-stale **不是终态**，可经完整 revalidation 回 active：
+依赖状态 A→B（漂移）→ `freshness_status: fresh → stale`，lifecycle 不动。B→A（恢复）→ 下次 freshness gate 重算 `inputs_hash' == record.inputs_hash` → `freshness_status: stale → fresh`，lifecycle 仍不动。
 
-- revalidation = 用**当前 DB 状态**重跑 rule（读当前状态，非冻结输入；与 §8.2 decision replay 不同——后者跑冻结 `decision_inputs`），产出**当前** `inputs_hash'` 与 `conclusion'`，与 stale record 比对（详见 §8.4）。
-- 若重跑得到**同 `inputs_hash`**（依赖状态恢复，A→B→A 的 "回到 A"）：原 stale record 的 fingerprint 仍匹配 → **原地复活**为 pending/current（保留用户原确认），写 lifecycle_history（`revalidated` + 时间）。**不需要新 fingerprint**，因为内容没变。
-- 若重跑得到**不同 `inputs_hash`**（B 是新状态）：产出新 record（新 fingerprint），旧 stale record 保留为审计历史，新 record 走正常 pending 流程。
+- **无新 record、无新 fingerprint**——内容没变，lifecycle 身份全程保留。
+- 无需 revalidation 的"复活"歧义：freshness 字段自己翻回 fresh 即可。
+- 若 B 是新状态（`inputs_hash'` 不同于原），producer 会产**新 record**（新 fingerprint）走 §5.5 supersede；旧 record 留作审计。
 
-> 这修复 HIGH 3：rev1 要求 stale 必须产"新 fingerprint"才能回 current，但 A→B→A 确定性重算必然得原 fingerprint，配 `fingerprint UNIQUE` 死锁。rev2 允许同 fingerprint 经 revalidation 带审计复活。
+### 5.5 active 唯一性 + 原子 supersede（MED 3）
 
-### 5.5 唯一性约束（替代 `fingerprint UNIQUE`）
+> Codex MED 3：rev2 的 `UNIQUE(maintenance_key, fingerprint) WHERE active` 只防"同 key 同 fingerprint"，仍允许同 key 两个**不同** fingerprint 同时 active。rev3 收紧。
 
-**`fingerprint` 不再全局 UNIQUE**。改为**partial unique index**（SQLite 已有 `WHERE` 部分索引先例，`src/storage/migrations/pages.ts:51` / `indexes.ts:14-15`）：
+产品语义：**每个 `maintenance_key` 同时最多一条 active（pending 或 current）**——一个建议槽位不该有两个矛盾建议并存。
 
 ```sql
--- 逻辑约束（Phase 1 落表时实现）
+-- 逻辑约束（Phase 1 落表；additive migration，§10）
 CREATE UNIQUE INDEX idx_rec_active_unique
-  ON recommendation_records (maintenance_key, fingerprint)
+  ON recommendation_records (maintenance_key)
   WHERE lifecycle_status IN ('pending', 'current');
 ```
 
-- 同一 `(maintenance_key, fingerprint)` 同时只能有一条 active（pending/current）—— 满足"不重复提案"。
-- stale/superseded/rejected/invalidated record 不参与唯一约束 —— A→B→A 复活、审计历史共存都不冲突。
-- `record_id`（非 fingerprint）才是主键。
+**原子 supersede**（producer 插入新 record 时，同事务）：
+- 同 key 无 active → 新 record → pending。
+- 同 key 有 active 且**同 fingerprint** → 幂等 no-op（已存在）。
+- 同 key 有 active 且**不同 fingerprint** → 旧 active → superseded + 新 record → pending（同事务，避免窗口期双 active）。
 
-### 5.6 不变量汇总
+`record_id` 是主键；`fingerprint` 非唯一（多条历史 record 可同 fingerprint，superseded/stale 不参与 active 唯一约束）。
 
-- **展示门控**：`lifecycle_status ∈ {pending, current}` **AND** freshness check 通过。pending/current 都过 freshness gate（HIGH 2）。
-- **stale 可复活**：同 fingerprint 经完整 revalidation 回 active，写 history（HIGH 3）。
-- **rejected 抑制窗口**：同 `(maintenance_key, fingerprint)` 在窗口内（默认至 end-of-session 或配置 TTL）不再以 active 提案；窗口外或不同 fingerprint 不受限。
-- **confirm ≠ execute**：pending→current 只改 lifecycle，不触发任何写操作。
-- **inactive 不进 manifest**：见 §4 manifest 不变量。
+### 5.6 rejected durable 抑制（MED 4）
+
+> Codex MED 4："end-of-session" 不适合 durable record——CBrain 跨 session 持久，session 边界不稳定。
+
+- rejected record 带 `suppressed_until: string | null`：durable 时间戳；`null` = 抑制到用户显式 reopen。
+- producer 插入前检查：若同 `(maintenance_key, fingerprint)` 存在 rejected record 且 `now < suppressed_until`（或 `suppressed_until == null`）→ **不**新插 active。
+- 默认 TTL 进 **policy contract**（如 7 天），不靠 session。
+- `suppressed_until` 过期 或 用户显式 reopen → 同 fingerprint 允许新 active（新 record_id）。
+
+### 5.7 不变量汇总
+
+- **展示门控**：`lifecycle ∈ {pending, current}` **AND** `freshness == fresh`（HIGH 2）。
+- **依赖漂移只动 freshness**：lifecycle 身份不丢，A→B→A 自动恢复（HIGH 3）。
+- **每 key 最多一条 active**：partial unique index + 原子 supersede（MED 3）。
+- **rejected durable**：`suppressed_until` + policy TTL，非 session（MED 4）。
+- **confirm ≠ execute**：pending→current 只改 lifecycle。
+- **inactive 不进 manifest**：见 §4。
+- **fingerprint 覆盖全 payload**：见 §6（HIGH 1）。
 
 ---
 
-## 6. 内容指纹与输入哈希（HIGH 1 解耦）
+## 6. 内容指纹与输入哈希（HIGH 1：覆盖完整 payload）
 
-> 验收 #2 + 硬约束"同一状态与 policy 产生 byte-stable structured result/fingerprint"。
-> **rev2 修正**：rev1 只有一个 `fingerprint` 且把 conclusion 也 hash 进去——replay 时变成"对已存结论再 hash"，只能验完整性、不能从输入重推结论。rev2 拆成两个独立 hash。
+> 验收 #2 + 硬约束"byte-stable structured result/fingerprint"。
+> **rev3 修正**：rev2 的 fingerprint 只覆盖 `{inputs_hash, conclusion, constraints}`——`auto_execute`、dependency declarations、evidence_manifest、risks、gaps、producer 被篡改时 integrity 仍通过。rev3 定义显式 `RecommendationImmutablePayload`，fingerprint 覆盖**全部不可变语义字段**。
 
-### 6.1 两个独立 hash
+### 6.1 两个独立 hash + 完整 payload
 
 ```
 inputs_hash  = SHA-256(canonical_json(decision_inputs))
-               // 纯输入身份：只 hash 冻结输入（signals + inspected_claims + entity_snapshot）
-               // 不含 conclusion。这是 decision replay 的输入指纹。
+               // 纯输入身份：hash 冻结输入（signals + inspected_claims + entity_snapshot）
+               // 不含 conclusion。decision replay 的输入指纹。
 
-fingerprint  = SHA-256(canonical_json({
-                 inputs_hash,                // 绑定输入
-                 conclusion,                 // kind + propose(action+alternatives) | abstain(reason)
-                 constraints                 // policy/ontology/schema/rule_hashes
-               }))
-               // 内容身份：输入 + 结论 + 约束。非唯一（§5.5 用 partial unique index 约束 active）。
+fingerprint  = SHA-256(canonical_json(RecommendationImmutablePayload))
+               // 内容身份：覆盖完整不可变语义负载（§4 payload 接口）
+               //   namespace, maintenance_key, inputs_hash, conclusion,
+               //   evidence_manifest, constraints, dependency_manifest,
+               //   applicability(含 auto_execute), risks, gaps, producer
+               // 非唯一（§5.5 partial unique index 仅约束 active）。
 ```
 
+**payload 排除**（不进 fingerprint）：`record_id`、`created_at`、`last_revalidated_at`、`lifecycle_status`、`freshness_status`、`suppressed_until`、`target_display`（MED 1 read-time 投影）。这些是身份/状态/展示。
+
+**篡改检测覆盖**（HIGH 1）：
+- 改 `auto_execute:false → true` → applicability 变 → payload 变 → fingerprint 失配。
+- 删 `dependency_manifest.declarations` 一条 → payload 变 → fingerprint 失配（也防"freshness 永远漏检"）。
+- 改 evidence ref / risks / gaps / producer.rule_id → payload 变 → fingerprint 失配。
+- DB 层另加 `CHECK (auto_execute = 0)`（defense in depth），但 fingerprint 是主防线。
+
 **角色分工**：
-- `inputs_hash`：决策重放（§8.2）用它——重跑 rule 得到的输出结论，其 `inputs_hash` 应等于冻结值，证明"同输入"。
-- `fingerprint`：内容身份 + 完整性校验（§8.1）——绑定"这输入→这结论"，篡改任一项即不匹配。
+- `inputs_hash`：decision replay（§8.2）的输入身份。
+- `fingerprint`：完整 payload 的内容身份 + 完整性校验（§8.1）。
 
 ### 6.2 canonical JSON 规则（byte-stable 保证）
 
 1. 对象 key 按 UTF-16 码点升序（JSON.stringify 默认 + 显式 sort 兜底）。
-2. 数组按显式 sort（inspected_claims / entity_snapshot keys / alternatives 按 `type|target_ref|reason` / declarations 按 `slug|table|fields`）。
-3. 字符串值做 **NFKC 归一化**（对齐 #327 `sanitizeStructuredText` 的 NFKC 步骤，`src/core/safety/display-safety.ts:106`），消除全角/半角差异（`ｓｃｏｒｅ` ≡ `score`）——指纹要语义稳定。
+2. 数组按显式 sort（inspected_claims / entity_snapshot keys / alternatives 按 `type|target_ref|reason` / declarations 按 `slug|table|fields` / evidence_manifest 按 `source|ref` / risks、gaps 字典序）。
+3. 字符串值做 **NFKC 归一化**（对齐 #327 `sanitizeStructuredText` 的 NFKC 步骤，`src/core/safety/display-safety.ts:106`），消除全角/半角差异——指纹要语义稳定。
 4. 无多余空白（`JSON.stringify` 默认）。
 5. UTF-8 编码后 SHA-256，输出 64 hex（对齐 `computeContentHash` 全长风格，`src/core/maintenance/compounding-review.ts:84`）。
-6. **不使用** `Date.now()` / `Math.random()` / 自增 id / `created_at` / `last_revalidated_at` / `lifecycle_status`（这些进 hash 就破坏 byte-stable）。
+6. **不使用** `Date.now()` / `Math.random()` / 自增 id / 任何 mutable 字段。
 
 ### 6.3 同一状态 → 同一指纹
 
@@ -440,15 +497,17 @@ dependency_manifest = {
 
 **审查义务**：rule 的 declaration 是**合同**——Codex review 时必须核对 declaration ⊆ rule 实际读取集合（漏声明 = 漏失效，过声明 = 无意义 stale）。
 
-### 7.2 版本定义（文件/代码哈希，非 DB 列）
+### 7.2 版本定义（文件/代码哈希 + 版本化 rule registry，非 DB 列）
 
 | 版本字段 | 定义 | 来源 | 是否需 DB 迁移 |
 |:--|:--|:--|:--|
 | `ontology_version` | SHA-256(`ontology.yaml` 内容) | 文件 | 否 |
-| `policy_version` | 产出 recommendation 的规则代码哈希（`rule_hashes` 聚合） | 代码 | 否 |
+| `policy_version` | policy bundle 哈希（含 rule registry manifest：rule_id→version 映射） | 代码+registry | 否 |
 | `schema_version` | 合同自身版本常量（如 `"rec-v1"`） | spec 定义 | 否 |
 
-**关键设计**：版本不存 DB 列，而是**算出来存进 record 字段**。record 落表时这些是普通 JSON 字段值，不需要 schema migration。Phase 1 即使复用现有表（见 §10），版本也能完整记录。
+**关键设计**：版本不存 DB 列，**算出来存进 record payload**。落表时是 JSON 字段值，不需要 schema migration。
+
+**HIGH 3 版本化 rule registry**：rule 单独由 `producer.{rule_id, rule_version, code_hash, registry_ref}` 标识（§4）。policy 升级后旧 rule 实现可能已不存在——`code_hash` 只识别版本，**不能执行**。Phase 2 replay 必须经 registry 解析**精确版本** runner（§8.2）。registry 保留窗口 / 兼容策略见 §8.2。
 
 ### 7.3 全局输入（并入 manifest）
 
@@ -460,30 +519,53 @@ rev1 的 `global_state_hash` 独立概念取消——全局读取（fsck 全表�
 
 > Phase 0 定义语义；Phase 2 实现（且 Phase 2 涉及数据模型，须单独过 data-model gate）。
 
-### 8.1 Integrity check（完整性校验）—— 廉价，不跑 rule
+### 8.1 Integrity check（完整性 + 交叉一致性，MED 2）—— 廉价，不跑 rule
 
-> 回答："record 自身没被篡改、字段内部自洽吗？"
+> 回答："record 没被篡改、且三份输入（decision_inputs/manifest/dependency）互相一致吗？"
 
-用 record 里**已存的** `decision_inputs` + `conclusion` + `constraints` 重算：
-- `inputs_hash' == record.inputs_hash`？
-- `fingerprint' == record.fingerprint`？
+用 record **已存**字段重算（不执行 rule、不查 DB、不调 LLM/网络）：
 
-两个都等 = 完整性通过。**不执行 rule、不查 DB、不调 LLM/网络**。这是 rev1 唯一做的事——rev2 明确降级为"完整性校验"，不再叫 replay。
+1. **输入完整性**：`hash(decision_inputs) == record.inputs_hash`？
+2. **payload 完整性**（HIGH 1）：`hash(canonical(payload)) == record.fingerprint`？——覆盖 conclusion/evidence_manifest/dependency_manifest/applicability(含 auto_execute)/risks/gaps/producer/constraints 全集。
+3. **交叉一致性**（MED 2，§4.3）：
+   - `evidence_manifest` 每条可追溯到 `decision_inputs`（投影一致）。
+   - `decision_inputs.entity_snapshot` 字段集 ⊆ `dependency_manifest.declarations` 覆盖（producer 没读未声明字段）。
+   - `dependency_manifest.rule_id == producer.rule_id`。
 
-### 8.2 Decision replay（决策重放）—— HIGH 1 的真正 replay
+全通过 = 完整。任一失败 = 篡改或 bug，记 audit。这是 rev1 唯一做的事——明确为"完整性校验"，不叫 replay。
 
-> 回答："从冻结输入重跑确定性 rule，能得到记录的结论吗？"
+### 8.2 Decision replay（决策重放）—— HIGH 1/3 的真正 replay
+
+> 回答："从冻结输入、用记录时的精确 rule 版本重跑，能得到记录的结论吗？"
 > Phase 2 硬约束：replay 只读冻结 record（含 `decision_inputs`），不调 LLM、网络、不重新检索 vault。
 
-```
-replayed_conclusion = rule(decision_inputs)        // 离线执行确定性 rule
-assert hash(decision_inputs) == record.inputs_hash  // 输入身份一致
-assert replayed_conclusion == record.conclusion      // 结论可重现
+**HIGH 3 版本化 rule registry**：`code_hash` 只识别版本，不能执行。policy 升级后当前代码可能只剩 rule v2，用 v2 跑 v1 输入 ≠ 历史 replay。所以 replay 必须经 registry 解析**精确版本** runner：
+
+```ts
+interface VersionedRuleRegistry {
+  resolve(rule_id: string, rule_version: string): RuleRunner | RuleUnavailable;
+}
+type RuleUnavailable = { status: "unavailable"; reason: "purged" | "incompatible" | "unknown" };
+
+type ReplayResult =
+  | { status: "replayed"; conclusion: RecommendationConclusion; inputs_match: boolean }
+  | { status: "rule_version_unavailable"; reason: RuleUnavailable["reason"] }
+  | { status: "unverifiable"; reason: string };  // 输入与 registry 期望 schema 不兼容
 ```
 
-- `decision_inputs` 是 canonical 冻结输入（§4），**足以离线重跑 rule**——这是 rev2 相对 rev1 的关键增加。rev1 没存 `decision_inputs`，所以"重算"只能 hash 已存结论，证明不了可重推。
-- 通过 = 该 record 的结论**确定性可从冻结输入重现**（满足 issue replay 目标）。
-- 失败 = rule 非确定性 / record 被改 / rule 代码变了但 `policy_version` 没更新——任一都是 bug，记 audit。
+replay 流程：
+```
+runner = registry.resolve(producer.rule_id, producer.rule_version)
+if runner is RuleUnavailable → return rule_version_unavailable   // 不是 replay failure
+if hash(decision_inputs) != record.inputs_hash → return unverifiable
+replayed = runner(decision_inputs)
+if replayed != record.conclusion → replay failure（非确定性/篡改，记 audit）
+else → replayed, inputs_match = true
+```
+
+- **`rule_version_unavailable` ≠ replay failure**：旧 rule 被清理/不兼容时，不算"重放失败"，算"无法历史验证"——不误报。
+- **保留策略**（Phase 2 定）：旧 rule version 保留 N 个 policy 版本或 TTL；超期 → `purged` → 后续 replay 返回 unavailable。兼容窗口内的旧 rule 必须可执行。
+- 通过 = 结论**确定性可从冻结输入 + 精确版本 rule 重现**（满足 issue replay 目标）。
 
 ### 8.3 Diff（差异）
 
@@ -502,25 +584,26 @@ interface Diff { axis: DiffAxis; before: string; after: string; }[]
 
 Phase 2 先做 hash 级快判（`inputs_hash` 比、`constraints` 比），命中再下沉到字段级 diff。排序优先级必须下沉到截断层（对齐 memory：`rank-priority-before-truncate`），不在 TS 后置排序。
 
-### 8.4 Freshness / Invalidation / Revalidation（HIGH 2/3）
+### 8.4 Freshness gate（HIGH 2/3，写 freshness_status 字段）
 
-> **freshness gate 同时约束 pending 与 current**（HIGH 2）；**stale 可经 revalidation 复活**（HIGH 3）。
+> 真双轴后，freshness 是**独立持久化字段**，不是"不写 enum"。依赖漂移只改 freshness，lifecycle 不动。
 
-任何 pending/current record 在读/display 前重算 `inputs_hash'` 与 `constraints'`：
+任何 record 读/display 前重算 `inputs_hash'`（按 dependency_manifest 重读声明字段）+ `constraints'`（重算版本），写 `freshness_status` + `last_revalidated_at`：
 
-| 触发 | 转换（轴 A） | 适用 |
+| 触发 | freshness_status | lifecycle_status |
 |:--|:--|:--|
-| `inputs_hash' != record.inputs_hash`（声明依赖漂移） | `pending/current → stale` | pending **和** current（HIGH 2） |
-| `ontology_version` / `policy_version` / `schema_version` 结构性不匹配 | `pending/current → invalidated` | pending **和** current |
-| 同 `maintenance_key` 新 active record 被确认 | 旧 active `→ superseded` | pending/current |
-| 用户拒绝 | `→ rejected` | pending/current |
-| **revalidation**：用当前状态重跑 rule 得**同 `inputs_hash`** | `stale → pending/current`（保留原确认，写 history） | stale（HIGH 3 复活） |
-| **revalidation**：重跑得**不同 `inputs_hash`** | 产出**新 record**，旧 stale 留作审计 | stale |
+| `inputs_hash' != record.inputs_hash`（声明依赖漂移） | `→ stale` | **不动** |
+| `constraints'` 版本结构不匹配（ontology/policy/schema） | `→ version_invalid` | **不动** |
+| 都匹配 | `→ fresh` | **不动** |
+| A→B→A：漂移后状态恢复，`inputs_hash'` 重新相等 | `stale → fresh` | **不动**（身份保留） |
+
+**display 只展示 `lifecycle ∈ {pending,current} AND freshness == fresh`**。
 
 **硬规则**：
-- 任一声明依赖变化 → stale，**pending/current 都不得静默展示**（issue 原文要求，HIGH 2 落实）。
-- 未声明的字段变化**不**触发 stale（MED 2，见 F16）。
-- stale 经完整 revalidation 可复活——同 fingerprint 不死锁（HIGH 3，见 F15）。
+- 任一声明依赖变化 → `freshness=stale`，不展示（pending/current 一视同仁，HIGH 2）。
+- 未声明字段变化**不**触发 stale（MED 2，见 F16）。
+- 依赖漂移**永不**改 lifecycle——A→B→A freshness 自恢复，无身份丢失（HIGH 3，见 F15）。
+- `lifecycle.invalidated` 仅 namespace/contract 终态退休触发，与 version_invalid 无关。
 
 ---
 
@@ -566,16 +649,16 @@ Phase 1 全部落在 standard，`auto_execute:false` 不变。high_impact 是为
 ### 方案 A：新 `recommendation_records` 表
 
 **Pros**
-- Schema 为 record shape 量身定做：`record_id` 主键 + **partial unique index** `(maintenance_key, fingerprint) WHERE lifecycle IN (pending,current)`（§5.5）+ `inputs_hash` 索引 + `lifecycle_status CHECK`。
+- Schema 为 record shape 量身定做：`record_id` 主键 + **partial unique index** `(maintenance_key) WHERE lifecycle IN (pending,current)`（§5.5，MED 3 收紧到单 key）+ `inputs_hash` 索引 + `freshness_status` / `lifecycle_status` 双列 + `CHECK (auto_execute = 0)`（HIGH 1 defense in depth）。
 - 与 discoveries / compounding_review_candidates 零语义碰撞。
-- 审计副表 `recommendation_lifecycle_history` 同构 `compounding_review_feedback`（sqlite.ts:393），记录 revalidation/复活历史（HIGH 3）。
+- 审计副表 `recommendation_lifecycle_history` 同构 `compounding_review_feedback`（sqlite.ts:393），记录 freshness/lifecycle 转换历史。
 - "查当前 recommendation" = 单条索引查询。
-- 生命周期 vocab 干净（pending/current/stale/superseded/rejected/invalidated），无 overload。
-- `decision_inputs` 作为 JSON 列存储，支持 decision replay（HIGH 1）。
+- 双轴 vocab 干净（lifecycle 5 值 + freshness 3 值，分开），无 overload。
+- `decision_inputs` + immutable payload 作为 JSON 列存储，支持 integrity + decision replay（HIGH 1/3）。
 
 **Cons**
-- 新增 migration（config-key 守卫，对齐 `runDestructiveMigration` 模式 sqlite.ts:593）。
-- 代码库已有 5 套 status vocab，再加一套。
+- 新增 **additive** migration（`CREATE TABLE` + 索引，config-key 守卫，对齐 `runLatePageMigrations` 模式 `src/storage/migrations/pages.ts:43`——**非** destructive helper，LOW 修正）。
+- 代码库已有 5 套 status vocab，再加一套（但双轴分开，比塞进单 enum 清晰）。
 - Phase 1 record 与 discoveries/action_candidates 行有信息重叠。
 
 ### 方案 B：复用现有 lifecycle（discoveries 表）
@@ -691,15 +774,15 @@ type DerivationEdge =
 **when**：同一 rule 两次产出 recommendation。
 **then**：两次 `inputs_hash` 与 `fingerprint` 都相同；integrity check（§8.1）通过；decision replay（§8.2，离线 `rule(decision_inputs)`）重现同 conclusion。
 
-### F2 — 依赖变化 → stale（pending 和 current 都转，HIGH 2）
-**given**：F1 的 record 处于 `pending`（或 `current`）。
+### F2 — 依赖变化 → freshness=stale（lifecycle 不动，HIGH 2）
+**given**：F1 的 record 处于 `pending`（或 `current`），`freshness_status=fresh`。
 **when**：实体A 被编辑，rule 声明的依赖字段变化 → 重算 `inputs_hash'` ≠ `record.inputs_hash`。
-**then**：freshness gate 把 record 转 `stale`（**无论原 pending 还是 current**）；不得展示。
+**then**：freshness gate 写 `freshness_status=stale`；**`lifecycle_status` 不变**（仍是 pending/current）；display 因 freshness≠fresh 不展示。pending 和 current 一视同仁。
 
-### F3 — policy diff（pending 和 current 都转）
-**given**：F1 record 记录 `policy_version = H(rule code v1)`，处于 pending/current。
-**when**：rule 代码改动，`policy_version = H(rule code v2)`。
-**then**：`constraints.policy_version` 结构性不匹配 → record 转 `invalidated`（pending/current 同样）；diff axis = `constraint`。
+### F3 — 版本漂移 → freshness=version_invalid（lifecycle 不动）
+**given**：F1 record 记录 `policy_version/ontology_version`，处于 pending/current + fresh。
+**when**：ontology/policy 升级，重算 `constraints'` 不匹配。
+**then**：freshness gate 写 `freshness_status=version_invalid`；**lifecycle 不动**；display 不展示。版本若回退 → freshness 恢复 fresh（lifecycle 全程不动）。`lifecycle.invalidated` 不触发（仅 namespace 退休才用）。
 
 ### F4 — candidate 不升级为 fact（confirm ≠ execute）
 **given**：recommendation 引用一条 `trust_state=candidate` 的 reports_to 证据，处于 `pending`。
@@ -721,10 +804,10 @@ type DerivationEdge =
 **when**：rule 评估。
 **then**：`conclusion = { kind: "abstain", reason: "insufficient_evidence" }`（或 `inactive_evidence_only`）。
 
-### F8 — 拒绝后不重复（同 fingerprint 抑制窗口）
-**given**：record R（maintenance_key=K, fingerprint=F）被用户 `rejected`。
-**when**：rule 再次产出同 K 同 F 的 record（输入未变）。
-**then**：抑制窗口内**不重新提案**为 active。同 K 不同 fingerprint（输入变了）不受限，仍可新提案。
+### F8 — 拒绝后 durable 抑制（MED 4，suppressed_until + policy TTL）
+**given**：record R（maintenance_key=K, fingerprint=F）被用户 `rejected`，写 `suppressed_until = T+7d`（policy 默认 TTL）。
+**when**：rule 在 T+3d 再次产出同 K 同 F record（输入未变）。
+**then**：`now < suppressed_until` → **不**新插 active（durable，跨 session）。T+8d 后或用户显式 reopen → 同 F 允许新 active（新 record_id）。同 K 不同 fingerprint 不受限。
 
 ### F9 — 三层 ref/display 分层（MED 1）
 **given**：任意 maintenance record。
@@ -737,9 +820,9 @@ type DerivationEdge =
 **then**：`applicability.auto_execute === false`；producer 无任何写操作调用；无 repair/merge/sync/delete 触发；confirm 只改 lifecycle。
 
 ### F11 — 事实升级改输入哈希（对抗）
-**given**：F1 record 的 decision_inputs 含 `trust_state=candidate` 证据。
+**given**：F1 record 的 decision_inputs 含 `trust_state=candidate` 证据，处于 current+fresh。
 **when**：该证据独立升为 `trusted`（经用户确认流，非 recommendation 自动）。
-**then**：decision_inputs.entity_snapshot 变 → `inputs_hash` 变 → fingerprint 变 → 旧 record `stale`，不作 current。
+**then**：decision_inputs.entity_snapshot 变 → 重算 `inputs_hash'` ≠ record.inputs_hash → `freshness_status=stale`（lifecycle 仍 current）；display 不展示。
 
 ### F12 — 非确定性攻击（对抗）
 **given**：同一输入，但 manifest/declarations 数组顺序不同。
@@ -751,48 +834,82 @@ type DerivationEdge =
 **when**：合同校验。
 **then**：`ProposedAction.type` 只允许 `review|dry_run|notify_draft`；`auto_execute:false` 不变量；任何写操作尝试 = 合同违反，record 拒绝创建。
 
-### F14 — integrity check ≠ decision replay（HIGH 1）
+### F14 — integrity check ≠ decision replay（HIGH 1）+ 交叉一致性（MED 2）
 **given**：一条 record，其 `conclusion` 被手动篡改，但 `decision_inputs` + `inputs_hash` 未变。
-**when (integrity check)**：重算 `fingerprint'` ≠ `record.fingerprint` → 完整性失败（检测篡改）。
-**when (decision replay)**：离线 `rule(decision_inputs)` 得到**原** conclusion ≠ 被篡改的 conclusion → replay 失败（证明结论不可从输入重推出现值）。
-**then**：两个操作给出不同诊断——integrity 抓篡改，replay 抓"输入推不出结论"。两个操作各有 fixture，不混用。
+**when (integrity)**：重算 `fingerprint'`（覆盖全 payload）≠ `record.fingerprint` → 完整性失败；另：若删一条 `dependency_manifest.declarations`，payload 也变 → 失配。
+**when (decision replay)**：离线 `runner(decision_inputs)` 得**原** conclusion ≠ 篡改值 → replay 失败。
+**when (交叉一致性)**：若 `evidence_manifest` 含一条 decision_inputs 里没有的 ref，或 entity_snapshot 含未声明字段 → integrity 失败（MED 2）。
+**then**：integrity 抓篡改/不一致，replay 抓"推不出结论"——不同诊断，各有 fixture。
 
-### F15 — A→B→A 状态回摆 + revalidation（HIGH 3）
-**given**：record R（inputs_hash=A）处于 current。状态变 B（依赖漂移）→ R 转 stale。
-**when**：状态恢复回 A（依赖再变回）→ 重算 `inputs_hash'` = A = R.inputs_hash。
-**then**：R 经完整 revalidation **原地复活**为 current（保留用户确认），写 lifecycle_history（`revalidated` + 时间）；**不需要新 fingerprint**，partial unique index 不冲突（stale 不参与 active 唯一约束）。
+### F15 — A→B→A freshness 单轴回摆（HIGH 3，lifecycle 全程不动）
+**given**：record R（inputs_hash=A）`lifecycle=current, freshness=fresh`。
+**when**：状态变 B（依赖漂移）→ freshness gate 写 `freshness=stale`（lifecycle 仍 current）。
+**then**：状态恢复回 A → 下次 freshness gate 重算 `inputs_hash'=A` → 写 `freshness=fresh`（lifecycle **仍是 current**，身份无丢失）。**无新 record、无新 fingerprint、无需"复活到哪个状态"判断**。
 
 ### F16 — 无关字段变化不 stale（MED 2）
-**given**：known_relations rule 只声明依赖 `links(reports_to)`；record R 处于 current。
+**given**：known_relations rule 只声明依赖 `links(reports_to)`；record R 处于 current+fresh。
 **when**：实体A 新增一个**tag**（rule 未声明依赖 tags）。
-**then**：rule 的 declared projection 不含 tags → `inputs_hash'` == R.inputs_hash → **不转 stale**，R 仍 current 展示。
+**then**：declared projection 不含 tags → `inputs_hash'` == R.inputs_hash → `freshness` 仍 fresh；R 继续展示。
 
-### F17 — rejected 同 fingerprint 跨窗口边界
-**given**：record R（fingerprint=F）被 rejected，抑制窗口为 session。
-**when**：窗口过期后 rule 再产同 F record；或用户主动"重新考虑"。
-**then**：允许以新 record_id 重新进 active（同 fingerprint，因 R 已 rejected 不在 active 唯一约束内）；写新 lifecycle_history。
+### F17 — rejected 同 fingerprint 跨 durable 窗口（MED 4）
+**given**：record R（fingerprint=F）被 rejected，`suppressed_until=T+7d`。
+**when**：T+8d 后 rule 再产同 F record；或用户显式 reopen。
+**then**：允许以新 record_id 重新进 active（同 fingerprint，R 已 rejected 不在 active 唯一约束内）；写新 lifecycle_history。
+
+### F18 — 篡改 auto_execute（HIGH 1）
+**given**：record R（`applicability.auto_execute=false`，fingerprint=F）。
+**when**：攻击者/bug 把 `auto_execute` 改成 `true`。
+**then**：integrity 重算 `fingerprint'`（payload 含 applicability）≠ F → 失败；DB 层 `CHECK (auto_execute = 0)` 再拦一道。
+
+### F19 — 篡改 dependency declaration（HIGH 1）
+**given**：record R 的 `dependency_manifest.declarations` 含 links 声明，fingerprint=F。
+**when**：删掉该声明（企图让 freshness 永远漏检）。
+**then**：payload 变 → `fingerprint'` ≠ F → integrity 失败。
+
+### F20 — 篡改 evidence ref（HIGH 1）
+**given**：record R 的 `evidence_manifest` 含 ref `discovery:K1`，fingerprint=F。
+**when**：把 ref 改成 `discovery:K2`。
+**then**：payload 变 → `fingerprint'` ≠ F → integrity 失败；交叉一致性也 catch（K2 不在 decision_inputs）。
+
+### F21 — policy 升级，旧 rule runner 仍可用（HIGH 3）
+**given**：record R 由 rule v1 产出（`producer.rule_version=1.0.0`）。当前 policy 已升 v2，但 registry 仍保留 v1 runner（兼容窗口内）。
+**when**：decision replay。
+**then**：`registry.resolve(rule_id, "1.0.0")` 返回 v1 runner → `runner(decision_inputs)` 重现 R.conclusion → `ReplayResult{status:"replayed"}`。
+
+### F22 — policy 升级，旧 rule runner 已清理（HIGH 3）
+**given**：record R 由 rule v1 产出。v1 超过保留窗口被 purge。
+**when**：decision replay。
+**then**：`registry.resolve` 返回 `{status:"unavailable", reason:"purged"}` → `ReplayResult{status:"rule_version_unavailable"}`——**不是** replay failure，是"无法历史验证"，不误报、不污染 audit。
 
 ---
 
-## 15. 对抗审查（task #7 + rev2 Codex 6 项）
+## 15. 对抗审查（task #7 + rev2 6 项 + rev3 8 项）
 
-> 原 7 类攻击 + rev2 Codex HIGH 1-3 / MED 1-3，全部合同层缓解 + fixture 覆盖。
+> 原 7 类 + rev2 HIGH 1-3/MED 1-3 + rev3 HIGH 1-3/MED 1-4/LOW，全部合同层缓解 + fixture 覆盖。
 
 | # | 攻击 | 缓解（合同层） | fixture |
 |:--|:--|:--|:--|
-| 1 | **事实升级**：candidate→trusted 后旧 record 冒充 current | decision_inputs 含 trust_state → `inputs_hash` 捕获升级 → freshness gate 转 stale（pending/current 都转） | F11 |
-| 2 | **inactive evidence**：rejected/superseded 漏进结论 | manifest 无 `active` 字段，inactive 结构性无法进入；翻转由 inputs_hash 捕获 → stale | F5、F11 |
-| 3 | **conflict**：矛盾下仍 propose | **仅命中本 record scope 的冲突** abstain；无关冲突不阻断（MED 3） | F6 |
-| 4 | **隐私泄漏**：record/display 泄漏 vault | 三层模型：internal ref（audit）≠ runtime display（`safeTitle` 清洗真实 title）≠ 公开匿名；display 准入挂 #327；audit/raw 经 `redactAudit`（MED 1） | F9、§11 |
-| 5 | **隐式执行**：recommendation 触发写操作 | `auto_execute:false` 不变量；`ProposedAction.type` 白名单；confirm ≠ execute；合同校验拒绝写操作 | F10、F13 |
-| 6 | **非确定性 hash**：顺序/时间/随机致同输入不同指纹 | canonical JSON 排序；NFKC；排除时间/随机/自增 id；显式 sort | F12 |
-| 7 | **旧 record 冒充 current**：stale/superseded 仍展示 | display 门控 = `lifecycle ∈ {pending,current}` **AND** freshness 通过（HIGH 2）；stale 经 revalidation 可复活，带审计（HIGH 3） | F2、F15 |
-| 8 | **HIGH 1 replay 名不副实**：只验完整性不能重推结论 | 拆 integrity-check（§8.1）vs decision-replay（§8.2，离线 `rule(decision_inputs)`）；存 canonical `decision_inputs`；`inputs_hash` ≠ `fingerprint` | F1、F14 |
-| 9 | **HIGH 2 pending 绕过 freshness** | freshness gate 同时约束 pending 与 current；display 前强制校验 | F2、F3 |
-| 10 | **HIGH 3 fingerprint UNIQUE + A→B→A 死锁** | `record_id`（实例身份）≠ `fingerprint`（内容身份，非唯一）；partial unique index 仅约束 active；stale 同 fingerprint 经 revalidation 带审计复活 | F15、F17 |
-| 11 | **MED 2 无关字段 stale 风暴** | per-rule declarative dependency manifest；未声明字段不进 inputs_hash；FTS/Lance 仅 storage-health 声明时才进 | F16 |
+| 1 | 事实升级：candidate→trusted 后旧 record 冒充 current | decision_inputs 含 trust_state → `inputs_hash` 捕获 → freshness=stale | F11 |
+| 2 | inactive evidence 漏进结论 | manifest 无 active 字段，inactive 结构性无法进入 | F5、F11 |
+| 3 | conflict 下仍 propose | 仅命中本 record scope 的冲突 abstain | F6 |
+| 4 | 隐私泄漏 | 三层 ref/display；display 准入挂 #327；audit/raw 经 redactAudit | F9、§11 |
+| 5 | 隐式执行 | `auto_execute:false`；ProposedAction.type 白名单；confirm≠execute | F10、F13 |
+| 6 | 非确定性 hash | canonical JSON 排序 + NFKC；排除时间/随机 | F12 |
+| 7 | 旧 record 冒充 current | display 门控 lifecycle∈{pending,current} **AND** freshness=fresh | F2、F3 |
+| 8 | replay 名不副实 | 拆 integrity（§8.1）vs decision-replay（§8.2）；存 decision_inputs | F1、F14 |
+| 9 | pending 绕过 freshness | freshness gate 约束 pending 与 current | F2、F3 |
+| 10 | A→B→A 死锁 | record_id≠fingerprint；partial unique index 仅 active | F15、F17 |
+| 11 | 无关字段 stale 风暴 | per-rule declarative dependency；未声明不进 hash | F16 |
+| 12 | **rev3 HIGH 1** fingerprint 漏覆盖关键字段 | 显式 `RecommendationImmutablePayload` 覆盖全语义字段（含 auto_execute/declarations/evidence/risks/gaps/producer）；DB `CHECK(auto_execute=0)` | F14、F18、F19、F20 |
+| 13 | **rev3 HIGH 2** 双轴仍混成 enum、stale 丢身份 | 真双字段：`lifecycle_status`（无 stale）+ 独立 `freshness_status`；依赖漂移只动 freshness | F2、F3、F15 |
+| 14 | **rev3 HIGH 3** 历史 rule 无可执行版本 | versioned rule registry（rule_id+rule_version→runner）；unavailable 返回结构化状态，非 failure | F21、F22 |
+| 15 | **rev3 MED 1** target_display 进 frozen 结论 | target_display 移出 payload，read-time projection；只存 target_ref | F9、§4.4 |
+| 16 | **rev3 MED 2** 三份输入真相重叠 | decision_inputs=source of truth，manifest=投影，dependency=schema；integrity 交叉校验 | F14、§4.3 |
+| 17 | **rev3 MED 3** 同 key 两不同 fingerprint 并存 active | `UNIQUE(maintenance_key) WHERE active` + 原子 supersede | §5.5 |
+| 18 | **rev3 MED 4** rejected session 抑制不 durable | `suppressed_until` + policy TTL（durable，跨 session） | F8、F17 |
+| 19 | **rev3 LOW** 新表误套 destructive migration | additive migration（runLatePageMigrations 风格） | §10 |
 
-**审查结论**：7 类原攻击 + Codex 6 项（HIGH 1-3 / MED 1-3）均有合同层缓解 + fixture 覆盖。隐私（#4）依赖 #327 后续 surface 覆盖——**已知前置依赖**，Phase 1 实现时强制 gate。
+**审查结论**：原 7 + rev2 6 + rev3 8 全部有合同层缓解 + fixture 覆盖。隐私（#4）依赖 #327 后续 surface 覆盖——**已知前置依赖**，Phase 1 强制 gate。
 
 ---
 
@@ -814,14 +931,15 @@ type DerivationEdge =
 
 Phase 0 不决策，仅列出：
 
-1. **物理 schema**：CREATE TABLE 的列、`record_id` 主键、**partial unique index** `(maintenance_key, fingerprint) WHERE lifecycle IN (pending,current)`、`inputs_hash` 索引、CHECK 约束、config-key migration key 命名。
-2. **审计副表**：`recommendation_lifecycle_history` 是否同构 `compounding_review_feedback`（含 revalidation/复活记录），还是复用一张泛化 audit 表。
-3. **producer 注册机制**：rule_id 命名空间、code_hash 计算边界（整文件 vs 函数）、如何防 producer 偷偷写、**dependency_manifest declaration 的审查流程**（核对 ⊆ 实际读取集合）。
-4. **decision_inputs 存储成本**：canonical 冻结输入作为 JSON 列的体积；是否需要分离 blob 存储；replay 的离线 rule 执行环境。
-5. **display 准入**：与 #327 Phase 2-4 的具体对接点；recommendation 走哪个 MCP surface；`safeTitle` 在 recommendation 上下文的 fallback 策略。
-6. **abstain 展示**：是否给"为什么没建议"的查询入口。
-7. **与 next_actions 的并轨**：attention queue 是否直接消费 freshness-gated `current` recommendation，还是双轨。
-8. **抑制窗口策略**：rejected 同 fingerprint 的抑制窗口（session vs TTL）的默认值与配置点。
+1. **物理 schema**：CREATE TABLE 列、`record_id` 主键、**partial unique index** `(maintenance_key) WHERE lifecycle IN (pending,current)`（MED 3）、`inputs_hash`/`fingerprint` 索引、`CHECK (auto_execute = 0)`（HIGH 1）、双 status 列、config-key **additive** migration key 命名（LOW）。
+2. **审计副表**：`recommendation_lifecycle_history` 是否同构 `compounding_review_feedback`（记 lifecycle+freshness 转换），还是泛化 audit 表。
+3. **versioned rule registry 实现**：rule_id+rule_version→runner 的物理形式（版本化模块/序列化 AST/快照）；旧 rule 保留窗口与兼容策略（HIGH 3）；code_hash 计算边界。
+4. **decision_inputs 存储成本**：immutable payload + decision_inputs 作为 JSON 列的体积；是否分离 blob 存储；replay 的离线 runner 执行环境。
+5. **producer 注册与审查**：rule_id 命名空间、如何防 producer 偷偷写、dependency_manifest declaration 审查流程（核对 ⊆ 实际读取集合，MED 2）。
+6. **display 准入**：与 #327 Phase 2-4 对接点；recommendation 走哪个 MCP surface；`safeTitle` fallback 策略；`RecommendationDisplay` read-time 投影类型定义（MED 1）。
+7. **abstain 展示**：是否给"为什么没建议"查询入口。
+8. **与 next_actions 的并轨**：attention queue 是否直接消费 freshness-gated active recommendation。
+9. **抑制 TTL 默认值**：`suppressed_until` 的 policy 默认 TTL（MED 4）与配置点。
 
 ---
 
@@ -831,25 +949,38 @@ Phase 0 不决策，仅列出：
 |:--|:--|
 | 1. Recommendation Contract spec，与 research/EvidenceBoard/next_actions/Compounding Review 分工 | §2、§13 |
 | 2. 稳定最小 record shape + 生命周期，不提前锁 DB 迁移 | §4、§5、§6、§7、§10 |
-| 3. ≥10 条匿名 fixture，覆盖全部验收场景 | §14（17 条：F1–F17） |
+| 3. ≥10 条匿名 fixture，覆盖全部验收场景 | §14（22 条：F1–F22） |
 | 4. 新表 vs 复用 lifecycle trade-off + 推荐 | §10 |
 | 5. #327 未完成前不进默认 display | §11 |
 | 6. 公开示例匿名占位符 | §14 + §11.3 |
 | 推导结构约束（节点/边/causes 限定） | §12 |
 | 不保存模型私有 CoT | §12 + §0 |
-| 对抗审查 7 类 + Codex 6 项 | §15（11 行） |
+| 对抗审查（原 7 + rev2 6 + rev3 8） | §15（19 行） |
 
-**rev2 Codex 修订验收对照**：
+**rev3 Codex 修订验收对照**（本轮）：
+
+| Codex rev3 验收 | 本 spec 落点 |
+|:--|:--|
+| 1. fingerprint 覆盖完整 immutable semantic payload，展示/生命周期字段排除 | §6.1（`RecommendationImmutablePayload`）+ F14/F18/F19/F20 |
+| 2. lifecycle/freshness 真双轴，A→B→A 不丢确认状态 | §5.1（双字段）+ §8.4 + F2/F3/F15 |
+| 3. versioned rule registry + rule unavailable 语义 | §7.2 + §8.2 + F21/F22 |
+| 4. target_display 改 read-time projection | §4.4 + F9 |
+| 5. 三类输入/manifest/dependency 的 source-of-truth 与一致性规则 | §4.3 + §8.1 交叉校验 + F14 |
+| 6. active uniqueness 与 rejected suppression policy 明确 | §5.5（UNIQUE maintenance_key WHERE active）+ §5.6（suppressed_until）+ F8/F17 |
+| 7. additive migration 表述修正 | §10 Cons + §17 item 1 |
+| 8. 仍只改 spec，不写 plan/runtime/DB/MCP，不 push | §0 + 本文件唯一交付 |
+
+**rev2 Codex 修订验收对照**（上一轮，已落实）：
 
 | Codex 修订验收 | 本 spec 落点 |
 |:--|:--|
 | 1. integrity-check vs decision-replay 两类语义 + fixture | §8.1 / §8.2 + F1、F14 |
 | 2. pending/current 都受 freshness gate | §5.3 + F2、F3 |
-| 3. A→B→A 生命周期回摆 | §5.4 + F15、F17 |
+| 3. A→B→A 生命周期回摆 | §5.4 + F15 |
 | 4. internal ref 与用户 display 分层 | §4.2、§11.3 + F9 |
 | 5. dependency hash 改 rule-scoped + 无关变化不失效 | §7.1 + F16 |
 | 6. conflict scope 与 high-impact policy 明确 | §9、§9.1 + F6 |
-| 7. 仍 Phase 0：只改 spec，不写 plan/不改 runtime/DB/MCP，不 push | §0 + 本文件是唯一交付 |
+| 7. 仍 Phase 0 | §0 |
 
 Codex comment 任务边界对照：
 
