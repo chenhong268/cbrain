@@ -2,11 +2,12 @@
 
 > Issue: #328（roadmap: governed Recommendation Record and replayable decision support）
 > Phase: **0（仅合同设计，不改运行时）**
-> 状态：rev3 — 待 Codex 第三轮 re-review
+> 状态：rev4 — 待 Codex 第四轮 re-review
 > 依赖：#327（output trust boundary）— display 前置；未完成全部 surface 前 recommendation 不进默认展示
 
 **修订记录**：
-- **rev3**（本轮）：修 Codex 第二轮 `CHANGES REQUESTED` —— HIGH 1（fingerprint 覆盖完整 `RecommendationImmutablePayload`，含 auto_execute/declarations/evidence/risks/gaps/producer）、HIGH 2（真双轴落到类型：`lifecycle_status` 删 stale + 独立 `freshness_status` 字段，依赖漂移只动 freshness 不丢身份）、HIGH 3（versioned rule registry + `rule_version_unavailable` 语义）、MED 1（target_display 改 read-time projection，移出 payload）、MED 2（三份输入 source of truth + 交叉一致性校验）、MED 3（`UNIQUE(maintenance_key) WHERE active` + 原子 supersede）、MED 4（rejected durable `suppressed_until` + policy TTL）、LOW（additive migration）。
+- **rev4**（本轮）：修 Codex 第三轮 `CHANGES REQUESTED` —— HIGH 1（canonical 递归算法：对象按码点排 key、数组按完整元素串排序、prose/identifier 分开归一、tie case 覆盖 rollback_note/trust_state/filter）、HIGH 2（registry 暴露 version-pinned `captureInputs()` 投影器，creation 与 freshness 共用，不可用→version_invalid 不猜）、HIGH 3（A→B→A 拆 freshness-only 路径 1 vs producer-produced 路径 2，删"无新 record"绝对断言）、MED（fingerprint 身份 wording 改为"完整 canonical payload 相同"）。
+- rev3：HIGH 1（完整 immutable payload）、HIGH 2（真双轴字段）、HIGH 3（versioned rule registry）、MED 1-4、LOW。
 - rev2：HIGH 1（decision_inputs + integrity/replay 拆分）、HIGH 2（pending freshness）、HIGH 3（record_id≠fingerprint）、MED 1-3。
 - rev1：初版 Phase 0 合同。
 
@@ -224,7 +225,7 @@ type FreshnessStatus =
   | "stale"            // 声明依赖漂移（inputs_hash 不匹配）；recoverable
   | "version_invalid"; // policy/ontology/schema 版本结构不匹配；recoverable（版本恢复即可）
 
-// 关键：依赖漂移只改 freshness_status，不碰 lifecycle_status —— A→B→A 不丢 pending/current 身份（HIGH 2）
+// 关键：依赖漂移只改 freshness_status，不碰 lifecycle_status —— A→B→A 路径 1 不丢 pending/current 身份（HIGH 2/3）
 
 type AbstainReason =
   | "insufficient_evidence"
@@ -315,7 +316,7 @@ rev1/rev2 文字说 lifecycle/freshness 正交，但 `stale` 仍混在 lifecycle
 - **`lifecycle_status`**（用户/系统驱动）：`pending | current | superseded | rejected | invalidated`。**不含 stale**。
 - **`freshness_status`**（依赖/版本驱动，独立字段）：`fresh | stale | version_invalid`。
 
-**核心不变量**：依赖漂移**只改 `freshness_status`，永不碰 `lifecycle_status`**。于是 A→B→A 时 lifecycle 全程不动（一直是 current 或 pending），freshness stale→fresh 自然恢复——无"复活到哪个状态"的歧义，无需猜 history。
+**核心不变量**：依赖漂移**只改 `freshness_status`，永不碰 `lifecycle_status`**。于是 A→B→A **路径 1**（无 producer 替代）时 lifecycle 全程不动（一直是 current 或 pending），freshness stale→fresh 自然恢复——无"复活到哪个状态"的歧义。**路径 2**（producer 已产替代）则 A 经 §5.5 转 superseded，需新 record/reactivation（§5.4）。
 
 **展示门控** = `lifecycle_status ∈ {pending, current}` **AND** `freshness_status == fresh`。
 
@@ -341,25 +342,39 @@ rev1/rev2 文字说 lifecycle/freshness 正交，但 `stale` 仍混在 lifecycle
 
 ### 5.3 freshness gate（每次读/display 前重算，写 freshness_status + last_revalidated_at）
 
+> rev4 修正（HIGH 2）：rev3 说"按 dependency_manifest 重读声明字段 → inputs_hash'"——**不够**。declarations 只声明原始表/字段，无法重建派生 `signals`、`inspected_claims` 顺序/过滤、聚合结果。不同实现者会 hash 不同投影却都自称合规。freshness 必须用与 creation **同一个 version-pinned 投影器** `captureInputs()`。
+
 任何 record（无论 lifecycle）读/display 前必须重算 freshness：
 
-1. 按 `dependency_manifest` 重读声明字段 → 当前 `inputs_hash'`。
-2. 重算当前 `constraints'`（policy/ontology/schema version）。
-3. 写 `freshness_status`：
+1. 经 versioned rule registry 解析 `producer.{rule_id, rule_version}` 的 `captureInputs()` 投影器（§7.2）。
+2. 按 `dependency_manifest` 重读声明字段的**当前**值，喂给 `captureInputs()` → 重建当前 `decision_inputs'` → `inputs_hash'`。
+   - 若该 rule_version 的 `captureInputs` 不可用（purged/incompatible）→ `freshness_status = version_invalid`（结构化，**不猜**），stop。
+3. 重算当前 `constraints'`（policy/ontology/schema version）。
+4. 写 `freshness_status`：
    - `inputs_hash' != record.inputs_hash` → `stale`。
-   - `constraints'` 版本结构不匹配 → `version_invalid`。
+   - `constraints'` 版本结构不匹配，或 captureInputs 不可用 → `version_invalid`。
    - 都匹配 → `fresh`，更新 `last_revalidated_at`。
-4. **display 只展示 `freshness_status == fresh` 的 pending/current**。
+5. **display 只展示 `freshness_status == fresh` 的 pending/current**。
 
-> 依赖漂移**不**改 lifecycle（rev2 错在写"轴 A 转 stale"）。pending 和 current 一视同仁过 gate——HIGH 2 真正修复。
+> `captureInputs()` 与 creation 用**同一精确版本**（§7.2），保证 creation 与 freshness hash 的是同一规范投影。依赖漂移**不**改 lifecycle。pending 和 current 一视同仁过 gate。
 
-### 5.4 A→B→A 回摆（HIGH 3，现在是 freshness 单轴变化）
+### 5.4 A→B→A 回摆（HIGH 3：两条路径，不能混）
 
-依赖状态 A→B（漂移）→ `freshness_status: fresh → stale`，lifecycle 不动。B→A（恢复）→ 下次 freshness gate 重算 `inputs_hash' == record.inputs_hash` → `freshness_status: stale → fresh`，lifecycle 仍不动。
+> rev4 修正：rev3 §5.4 无条件说"A→B→A 无新 record，freshness 翻回即可"。但若 producer 在 B 态**跑过**，按 §5.5 它已原子 supersede A 并插入 B——A 的 lifecycle 变 `superseded`，再回 A 不能只靠 freshness 恢复展示。必须分两种情况。
 
-- **无新 record、无新 fingerprint**——内容没变，lifecycle 身份全程保留。
-- 无需 revalidation 的"复活"歧义：freshness 字段自己翻回 fresh 即可。
-- 若 B 是新状态（`inputs_hash'` 不同于原），producer 会产**新 record**（新 fingerprint）走 §5.5 supersede；旧 record 留作审计。
+**路径 1 — freshness-only 观察**（producer **未**在 B 态跑，无替代 record 产生）：
+- A→B：freshness gate 观察到漂移 → `freshness_status: fresh → stale`，**lifecycle 不动**（A 仍 pending/current）。
+- B→A：下次 freshness gate 经 `captureInputs()` 重算 `inputs_hash' == record.inputs_hash` → `freshness_status: stale → fresh`，**lifecycle 仍不动**。
+- **无新 record、无新 fingerprint**——A 身份全程保留，直接重新展示。（F15）
+
+**路径 2 — producer 已在 B 态产出替代 record**（maintenance cycle / on-demand 在 B 态跑了 producer）：
+- A→B + producer 跑：producer 用 B 态输入算出**不同** `inputs_hash_B` → 按 §5.5 原子 supersede：A `→ superseded`，新 record B（新 fingerprint）→ pending。
+- B→A（状态恢复到 A 的输入）：A **仍是 `superseded`**（freshness 翻转救不了 superseded 的 lifecycle）。要重新展示 A 的内容：
+  - **(i)** producer 再跑，`captureInputs()` 产出原 `inputs_hash_A` → 插入**新 record（新 record_id，同 fingerprint F_A）**为 pending（A 已 superseded，不冲突 active 唯一约束）；写 lifecycle_history（`reactivated`）。
+  - **(ii)** 或显式 reactivation 转换（superseded → pending），带 history。
+  - 二选一由 Phase 1 policy 定（§17）；**不能**只翻 freshness。（F23）
+
+> 区分关键：**producer 是否在中间态跑过、产生过替代 record**。跑过 → 路径 2（superseded，需新 record/reactivation）；没跑 → 路径 1（freshness 自恢复）。rev3 的"无新 record"断言删除。
 
 ### 5.5 active 唯一性 + 原子 supersede（MED 3）
 
@@ -393,7 +408,7 @@ CREATE UNIQUE INDEX idx_rec_active_unique
 ### 5.7 不变量汇总
 
 - **展示门控**：`lifecycle ∈ {pending, current}` **AND** `freshness == fresh`（HIGH 2）。
-- **依赖漂移只动 freshness**：lifecycle 身份不丢，A→B→A 自动恢复（HIGH 3）。
+- **依赖漂移只动 freshness**：lifecycle 身份不丢；路径 1 A→B→A freshness 自动恢复，路径 2（producer 已产替代 → superseded）需新 record/reactivation（HIGH 3，F15/F23）。
 - **每 key 最多一条 active**：partial unique index + 原子 supersede（MED 3）。
 - **rejected durable**：`suppressed_until` + policy TTL，非 session（MED 4）。
 - **confirm ≠ execute**：pending→current 只改 lifecycle。
@@ -434,24 +449,53 @@ fingerprint  = SHA-256(canonical_json(RecommendationImmutablePayload))
 - `inputs_hash`：decision replay（§8.2）的输入身份。
 - `fingerprint`：完整 payload 的内容身份 + 完整性校验（§8.1）。
 
-### 6.2 canonical JSON 规则（byte-stable 保证）
+### 6.2 Canonical JSON（递归、identifier-safe、byte-stable）
 
-1. 对象 key 按 UTF-16 码点升序（JSON.stringify 默认 + 显式 sort 兜底）。
-2. 数组按显式 sort（inspected_claims / entity_snapshot keys / alternatives 按 `type|target_ref|reason` / declarations 按 `slug|table|fields` / evidence_manifest 按 `source|ref` / risks、gaps 字典序）。
-3. 字符串值做 **NFKC 归一化**（对齐 #327 `sanitizeStructuredText` 的 NFKC 步骤，`src/core/safety/display-safety.ts:106`），消除全角/半角差异——指纹要语义稳定。
-4. 无多余空白（`JSON.stringify` 默认）。
-5. UTF-8 编码后 SHA-256，输出 64 hex（对齐 `computeContentHash` 全长风格，`src/core/maintenance/compounding-review.ts:84`）。
-6. **不使用** `Date.now()` / `Math.random()` / 自增 id / 任何 mutable 字段。
+> rev4 修正（HIGH 1）：rev3 的 "JSON.stringify 默认排序" 是**错的**——它不排序；数组比较器漏字段（`rollback_note`/`trust_state`/`filter`）；NFKC 一刀切会合并寻址不同实体的 identifier。
 
-### 6.3 同一状态 → 同一指纹
+**payload 值类型受限**（JSON-safe）：只允许 `null | boolean | number | string | array | object`。禁止 `undefined`/`function`/`symbol`/`Date` 对象。时间戳是 ISO string 且本就排除在 payload 外（§6.1）。
 
-只要 `decision_inputs + conclusion + constraints` 相同，`inputs_hash` 与 `fingerprint` 都相同，无论何时何地计算。这是 replay 与 A→B→A 复活（§5.4）的基础。
+**一个递归 canonical 算法**（绝不依赖插入顺序）：
+
+```
+canonical(value):
+  null / boolean        → JSON 标准字面量
+  number                → 最短等价十进制（整数无尾零；避免 1 vs 1.0 歧义；Phase 1 优先整数信号）
+  string                → 按"字段分类"归一化（见下），再 JSON-escape
+  array                 → 对每元素递归 canonical 得字符串；**按这些字符串升序排序**后逗号拼入 [ ]
+                          （数组视为集合——排序键是完整元素的 canonical 串，自动含全部字段，
+                            rollback_note/trust_state/filter 无遗漏；若某 rule 输入顺序语义相关，
+                            必须把序号编码进元素自身）
+  object                → 对每 value 递归 canonical；**按 key 的 UTF-16 码点升序显式排序**输出
+```
+
+**关键**：
+- **数组排序键 = 完整元素的 canonical 字符串**（不是 `type|target_ref|reason` 之类的部分比较器）——任何被漏的字段自动进排序键。
+- **对象 key 显式按码点排序**，不靠 `JSON.stringify`（它保持插入序）。
+
+**字符串字段分类归一化**（prose vs identifier 分开）：
+
+| 类别 | 处理 | 字段（Phase 1） |
+|:--|:--|:--|
+| **prose** | NFKC + 折叠多余空白 | `inspected_claims` 文本、`reason`、`risks`、`gaps`、`rollback_note` |
+| **identifier** | **原样字节，不做 NFKC** | refs、slug、`source` enum、`rule_id`、`rule_version`、`code_hash`、`registry_ref`、`table`/`fields` 名、`namespace`、`maintenance_key`、各 hash 值 |
+
+> identifier 寻址具体存储实体，NFKC 会合并不同实体（如 `entityA-1` 与全角变体可能冲突）。identifier 的规范化由生产侧保证（slug 生成即规范），hash 时不二次归一。
+
+**输出**：canonical 串 UTF-8 编码后 SHA-256，64 hex（对齐 `computeContentHash` 全长风格，`compounding-review.ts:84`）。**不使用** `Date.now()`/`Math.random()`/自增 id/任何 mutable 字段。
+
+### 6.3 同一 payload → 同一指纹
+
+- `inputs_hash` 相同 ⟺ `decision_inputs` 的 canonical 形式相同（**输入身份**）。
+- `fingerprint` 相同 ⟺ **完整 `RecommendationImmutablePayload` 的 canonical 形式相同**（**内容身份**）——不只是 inputs+conclusion+constraints，还含 evidence_manifest / dependency_manifest / applicability / risks / gaps / producer。
+
+仅 `decision_inputs + conclusion + constraints` 相同**不**保证 fingerprint 相同（其它 payload 字段也参与）。这是 replay 与状态恢复（§5.4）的基础。
 
 ### 6.4 与现有去重键的关系
 
 - `discoveryDedupKey`（实体集合复合键，sqlite.ts:2499）：标识"同一组实体+类型的信号"。**不区分结论**。
 - `compounding_review_candidates.content_hash`（type|title|sorted slugs，compounding-review.ts:84）：标识"同一候选内容"。
-- **recommendation `inputs_hash`**：标识"同一冻结输入"。**recommendation `fingerprint`**：标识"同一输入→同一结论"。两层最细粒度。
+- **recommendation `inputs_hash`**：标识"同一冻结输入"。**recommendation `fingerprint`**：标识"**同一完整不可变内容**"（全 payload）。两层最细粒度。
 
 ---
 
@@ -473,8 +517,8 @@ dependency_manifest = {
     { slug: "entityA", table: "links", fields: ["relation","trust_state","other_slug"], filter: "active" },
     { slug: "entityB", table: "links", fields: ["relation","trust_state","other_slug"], filter: "active" }
     // 不声明 tags/aliases/chunks/timeline —— 这些变化不让本建议 stale
-  ],
-  inputs_hash: SHA-256(canonical_json(declared_projections_sorted))
+  ]
+  // 注：inputs_hash 不在 manifest 里——它在 record 顶层，是 captureInputs() 输出的哈希（§7.2）
 }
 
 // 例：storage-health rule 显式依赖索引状态
@@ -507,7 +551,27 @@ dependency_manifest = {
 
 **关键设计**：版本不存 DB 列，**算出来存进 record payload**。落表时是 JSON 字段值，不需要 schema migration。
 
-**HIGH 3 版本化 rule registry**：rule 单独由 `producer.{rule_id, rule_version, code_hash, registry_ref}` 标识（§4）。policy 升级后旧 rule 实现可能已不存在——`code_hash` 只识别版本，**不能执行**。Phase 2 replay 必须经 registry 解析**精确版本** runner（§8.2）。registry 保留窗口 / 兼容策略见 §8.2。
+**HIGH 3 版本化 rule registry**：rule 单独由 `producer.{rule_id, rule_version, code_hash, registry_ref}` 标识（§4）。policy 升级后旧 rule 实现可能已不存在——`code_hash` 只识别版本，**不能执行**。registry 在**精确版本**上暴露**两个**确定性函数：
+
+```ts
+interface VersionedRuleRegistry {
+  resolve(rule_id, rule_version): RuleRunner | RuleUnavailable;
+}
+interface RuleRunner {
+  // (a) 输入投影器：声明依赖的当前值 → canonical DecisionInputs。
+  //     产出 signals（派生/聚合）、inspected_claims（规范序/过滤）、entity_snapshot。
+  //     declarations 只声明读了哪些原始字段；captureInputs 才能重建派生 DecisionInputs（HIGH 2）。
+  captureInputs(declaredValues: DeclaredProjection): DecisionInputs;
+  // (b) 决策执行器：冻结 DecisionInputs → conclusion（离线，无 DB/LLM/网络）。
+  decide(decision_inputs: DecisionInputs): RecommendationConclusion;
+}
+```
+
+- **creation**：`decision_inputs = runner.captureInputs(readDeclaredDeps())`；`inputs_hash = hash(canonical(decision_inputs))`；`conclusion = runner.decide(decision_inputs)`。
+- **freshness**（§5.3）：重读声明字段当前值 → **同一 version-pinned** `captureInputs()` → `inputs_hash'`。
+- **replay**（§8.2）：`runner.decide(record.decision_inputs)` → 比 conclusion。
+- creation 与 freshness **必须用同一精确版本的 `captureInputs`**——否则 hash 的是不同投影（HIGH 2）。`captureInputs` 不可用（rule_version purged）→ freshness 返回 `version_invalid`，replay 返回 `rule_version_unavailable`，**都不猜**。
+- registry 保留窗口 / 兼容策略见 §8.2。
 
 ### 7.3 全局输入（并入 manifest）
 
@@ -539,17 +603,12 @@ rev1 的 `global_state_hash` 独立概念取消——全局读取（fsck 全表�
 > 回答："从冻结输入、用记录时的精确 rule 版本重跑，能得到记录的结论吗？"
 > Phase 2 硬约束：replay 只读冻结 record（含 `decision_inputs`），不调 LLM、网络、不重新检索 vault。
 
-**HIGH 3 版本化 rule registry**：`code_hash` 只识别版本，不能执行。policy 升级后当前代码可能只剩 rule v2，用 v2 跑 v1 输入 ≠ 历史 replay。所以 replay 必须经 registry 解析**精确版本** runner：
+`code_hash` 只识别版本，不能执行。replay 经 §7.2 的 versioned registry 解析**精确版本** runner，调 `runner.decide()`：
 
 ```ts
-interface VersionedRuleRegistry {
-  resolve(rule_id: string, rule_version: string): RuleRunner | RuleUnavailable;
-}
-type RuleUnavailable = { status: "unavailable"; reason: "purged" | "incompatible" | "unknown" };
-
 type ReplayResult =
   | { status: "replayed"; conclusion: RecommendationConclusion; inputs_match: boolean }
-  | { status: "rule_version_unavailable"; reason: RuleUnavailable["reason"] }
+  | { status: "rule_version_unavailable"; reason: "purged" | "incompatible" | "unknown" }
   | { status: "unverifiable"; reason: string };  // 输入与 registry 期望 schema 不兼容
 ```
 
@@ -558,13 +617,13 @@ replay 流程：
 runner = registry.resolve(producer.rule_id, producer.rule_version)
 if runner is RuleUnavailable → return rule_version_unavailable   // 不是 replay failure
 if hash(decision_inputs) != record.inputs_hash → return unverifiable
-replayed = runner(decision_inputs)
-if replayed != record.conclusion → replay failure（非确定性/篡改，记 audit）
+replayed = runner.decide(decision_inputs)                        // §7.2 decide()
+if canonical(replayed) != canonical(record.conclusion) → replay failure（非确定性/篡改，记 audit）
 else → replayed, inputs_match = true
 ```
 
 - **`rule_version_unavailable` ≠ replay failure**：旧 rule 被清理/不兼容时，不算"重放失败"，算"无法历史验证"——不误报。
-- **保留策略**（Phase 2 定）：旧 rule version 保留 N 个 policy 版本或 TTL；超期 → `purged` → 后续 replay 返回 unavailable。兼容窗口内的旧 rule 必须可执行。
+- **保留策略**（Phase 2 定）：旧 rule version 保留 N 个 policy 版本或 TTL；超期 → `purged` → 后续 replay 返回 unavailable。兼容窗口内的旧 rule 必须可执行（`captureInputs` + `decide` 都在）。
 - 通过 = 结论**确定性可从冻结输入 + 精确版本 rule 重现**（满足 issue replay 目标）。
 
 ### 8.3 Diff（差异）
@@ -586,23 +645,25 @@ Phase 2 先做 hash 级快判（`inputs_hash` 比、`constraints` 比），命�
 
 ### 8.4 Freshness gate（HIGH 2/3，写 freshness_status 字段）
 
-> 真双轴后，freshness 是**独立持久化字段**，不是"不写 enum"。依赖漂移只改 freshness，lifecycle 不动。
+> freshness 是**独立持久化字段**。依赖漂移只改 freshness，lifecycle 不动。重算用 §7.2 的 version-pinned `captureInputs()`（HIGH 2）。
 
-任何 record 读/display 前重算 `inputs_hash'`（按 dependency_manifest 重读声明字段）+ `constraints'`（重算版本），写 `freshness_status` + `last_revalidated_at`：
+任何 record 读/display 前经 `captureInputs()` 重算 `inputs_hash'` + `constraints'`，写 `freshness_status` + `last_revalidated_at`：
 
 | 触发 | freshness_status | lifecycle_status |
 |:--|:--|:--|
 | `inputs_hash' != record.inputs_hash`（声明依赖漂移） | `→ stale` | **不动** |
-| `constraints'` 版本结构不匹配（ontology/policy/schema） | `→ version_invalid` | **不动** |
+| `constraints'` 版本结构不匹配，或 `captureInputs` runner 不可用 | `→ version_invalid` | **不动** |
 | 都匹配 | `→ fresh` | **不动** |
-| A→B→A：漂移后状态恢复，`inputs_hash'` 重新相等 | `stale → fresh` | **不动**（身份保留） |
+| 路径 1 A→B→A（无替代 record）：状态恢复，`inputs_hash'` 重新相等 | `stale → fresh` | **不动** |
+| 路径 2 A→B→A（producer 已产 B，A=superseded）：状态恢复 | freshness 不适用（A 已 superseded，display 由 lifecycle 排除） | **仍是 superseded**，需新 record/reactivation（§5.4 路径 2） |
 
 **display 只展示 `lifecycle ∈ {pending,current} AND freshness == fresh`**。
 
 **硬规则**：
 - 任一声明依赖变化 → `freshness=stale`，不展示（pending/current 一视同仁，HIGH 2）。
 - 未声明字段变化**不**触发 stale（MED 2，见 F16）。
-- 依赖漂移**永不**改 lifecycle——A→B→A freshness 自恢复，无身份丢失（HIGH 3，见 F15）。
+- 依赖漂移**只**动 freshness——路径 1 A→B→A freshness 自恢复（HIGH 3，F15）；路径 2（已 superseded）需新 record（F23）。
+- `captureInputs` 不可用 → `version_invalid`（不猜），不静默展示。
 - `lifecycle.invalidated` 仅 namespace/contract 终态退休触发，与 version_invalid 无关。
 
 ---
@@ -772,7 +833,7 @@ type DerivationEdge =
 ### F1 — 稳定重放（integrity + decision replay）
 **given**：实体A、实体B 存在 reports_to 候选边；policy/ontology 不变。
 **when**：同一 rule 两次产出 recommendation。
-**then**：两次 `inputs_hash` 与 `fingerprint` 都相同；integrity check（§8.1）通过；decision replay（§8.2，离线 `rule(decision_inputs)`）重现同 conclusion。
+**then**：两次 `inputs_hash` 与 `fingerprint` 都相同；integrity check（§8.1）通过；decision replay（§8.2，离线 `runner.decide(decision_inputs)`，精确版本）重现同 conclusion。
 
 ### F2 — 依赖变化 → freshness=stale（lifecycle 不动，HIGH 2）
 **given**：F1 的 record 处于 `pending`（或 `current`），`freshness_status=fresh`。
@@ -824,10 +885,12 @@ type DerivationEdge =
 **when**：该证据独立升为 `trusted`（经用户确认流，非 recommendation 自动）。
 **then**：decision_inputs.entity_snapshot 变 → 重算 `inputs_hash'` ≠ record.inputs_hash → `freshness_status=stale`（lifecycle 仍 current）；display 不展示。
 
-### F12 — 非确定性攻击（对抗）
-**given**：同一输入，但 manifest/declarations 数组顺序不同。
-**when**：算 inputs_hash / fingerprint。
-**then**：canonical JSON 强制排序 → hash 相同；顺序差异不影响指纹。
+### F12 — canonical 稳定性 + tie 完整性（对抗，HIGH 1）
+**given (顺序)**：同一 payload，但 alternatives / evidence_manifest / declarations 数组到达顺序不同。
+**then**：canonical 算法按**完整元素**的 canonical 串排序 → inputs_hash / fingerprint 相同；顺序差异不影响指纹。
+**given (tie 漏字段)**：两条 alternatives 其余相同、仅 `rollback_note` 不同；两条 evidence 仅 `trust_state` 不同；两条 declarations 仅 `filter` 不同。
+**then**：排序键含完整元素 → 这些差异**进**排序/哈希 → 产出**不同** fingerprint（不因 tie 漏字段而误判相同）。
+**given (identifier 不归一)**：两个不同 slug `entityA-1` 与其全角变体——identifier 字段**不做 NFKC**，原样字节 → 不同实体不合并；prose 字段才 NFKC。
 
 ### F13 — 隐式执行攻击（对抗）
 **given**：恶意/失误的 producer 规则尝试在结论里嵌写操作。
@@ -837,14 +900,14 @@ type DerivationEdge =
 ### F14 — integrity check ≠ decision replay（HIGH 1）+ 交叉一致性（MED 2）
 **given**：一条 record，其 `conclusion` 被手动篡改，但 `decision_inputs` + `inputs_hash` 未变。
 **when (integrity)**：重算 `fingerprint'`（覆盖全 payload）≠ `record.fingerprint` → 完整性失败；另：若删一条 `dependency_manifest.declarations`，payload 也变 → 失配。
-**when (decision replay)**：离线 `runner(decision_inputs)` 得**原** conclusion ≠ 篡改值 → replay 失败。
+**when (decision replay)**：离线 `runner.decide(decision_inputs)`（§7.2）得**原** conclusion ≠ 篡改值 → replay 失败。
 **when (交叉一致性)**：若 `evidence_manifest` 含一条 decision_inputs 里没有的 ref，或 entity_snapshot 含未声明字段 → integrity 失败（MED 2）。
 **then**：integrity 抓篡改/不一致，replay 抓"推不出结论"——不同诊断，各有 fixture。
 
-### F15 — A→B→A freshness 单轴回摆（HIGH 3，lifecycle 全程不动）
-**given**：record R（inputs_hash=A）`lifecycle=current, freshness=fresh`。
+### F15 — A→B→A 路径 1：freshness-only（HIGH 3，producer 未跑）
+**given**：record R（inputs_hash=A）`lifecycle=current, freshness=fresh`。两次读之间**无 producer 运行**。
 **when**：状态变 B（依赖漂移）→ freshness gate 写 `freshness=stale`（lifecycle 仍 current）。
-**then**：状态恢复回 A → 下次 freshness gate 重算 `inputs_hash'=A` → 写 `freshness=fresh`（lifecycle **仍是 current**，身份无丢失）。**无新 record、无新 fingerprint、无需"复活到哪个状态"判断**。
+**then**：状态恢复回 A → 下次 freshness gate 经 `captureInputs()` 重算 `inputs_hash'=A` → 写 `freshness=fresh`（lifecycle **仍是 current**，身份无丢失）。**无新 record、无新 fingerprint**。
 
 ### F16 — 无关字段变化不 stale（MED 2）
 **given**：known_relations rule 只声明依赖 `links(reports_to)`；record R 处于 current+fresh。
@@ -872,14 +935,24 @@ type DerivationEdge =
 **then**：payload 变 → `fingerprint'` ≠ F → integrity 失败；交叉一致性也 catch（K2 不在 decision_inputs）。
 
 ### F21 — policy 升级，旧 rule runner 仍可用（HIGH 3）
-**given**：record R 由 rule v1 产出（`producer.rule_version=1.0.0`）。当前 policy 已升 v2，但 registry 仍保留 v1 runner（兼容窗口内）。
+**given**：record R 由 rule v1 产出（`producer.rule_version=1.0.0`）。当前 policy 已升 v2，但 registry 仍保留 v1 runner（`captureInputs`+`decide` 都在，兼容窗口内）。
 **when**：decision replay。
-**then**：`registry.resolve(rule_id, "1.0.0")` 返回 v1 runner → `runner(decision_inputs)` 重现 R.conclusion → `ReplayResult{status:"replayed"}`。
+**then**：`registry.resolve(rule_id, "1.0.0")` 返回 v1 runner → `runner.decide(decision_inputs)` 重现 R.conclusion → `ReplayResult{status:"replayed"}`。
 
 ### F22 — policy 升级，旧 rule runner 已清理（HIGH 3）
 **given**：record R 由 rule v1 产出。v1 超过保留窗口被 purge。
-**when**：decision replay。
-**then**：`registry.resolve` 返回 `{status:"unavailable", reason:"purged"}` → `ReplayResult{status:"rule_version_unavailable"}`——**不是** replay failure，是"无法历史验证"，不误报、不污染 audit。
+**when**：decision replay / freshness。
+**then**：`registry.resolve` 返回 `{status:"unavailable", reason:"purged"}` → replay `rule_version_unavailable`、freshness `version_invalid`——**不是** failure，是"无法历史验证"，不误报、不污染 audit。
+
+### F23 — A→B→A 路径 2：producer 已产替代 record（HIGH 3）
+**given**：record R_A（inputs_hash=A, fingerprint=F_A）`current+fresh`。状态变 B 后 **producer 跑了**：用 B 态输入算出 inputs_hash_B（≠A）→ §5.5 原子 supersede：R_A `→ superseded`，新 R_B（fingerprint=F_B）→ pending。
+**when**：状态恢复回 A。
+**then**：R_A **仍是 `superseded`**——freshness 翻转**救不了**（lifecycle 排除展示）。要重新展示 A 的内容：producer 再跑产 `inputs_hash_A` → 插入**新 record（新 record_id，同 F_A）**为 pending（R_A 已 superseded 不冲突 active 唯一约束），写 `reactivated` history；**或**显式 superseded→pending reactivation。**不能**只翻 freshness。
+
+### F24 — projector 规范唯一性（HIGH 2）
+**given**：声明依赖的**原始行**完全不变；但某实现者用不同 `captureInputs`（signals 聚合方式不同，或 inspected_claims 排序/过滤不同）。
+**when**：算 inputs_hash。
+**then**：只有 registry 解析的**精确版本 `captureInputs()`** 是规范投影——creation 与 freshness 用**同一个**；任何偏离 = projector bug，产出不同 inputs_hash → 被识别为 stale/不一致，**不**被当作"另一种合规实现"。原始行相同不保证 inputs_hash 相同（取决于规范 captureInputs）。
 
 ---
 
@@ -908,8 +981,12 @@ type DerivationEdge =
 | 17 | **rev3 MED 3** 同 key 两不同 fingerprint 并存 active | `UNIQUE(maintenance_key) WHERE active` + 原子 supersede | §5.5 |
 | 18 | **rev3 MED 4** rejected session 抑制不 durable | `suppressed_until` + policy TTL（durable，跨 session） | F8、F17 |
 | 19 | **rev3 LOW** 新表误套 destructive migration | additive migration（runLatePageMigrations 风格） | §10 |
+| 20 | **rev4 HIGH 1** canonicalization 不稳定（JSON.stringify 不排序 + 数组比较器漏字段 + NFKC 合并 identifier） | 递归 canonical JSON（对象按码点排 key、数组按完整元素 canonical 串排序）；prose/identifier 分开归一；tie case 覆盖 rollback_note/trust_state/filter | F12、§6.2 |
+| 21 | **rev4 HIGH 2** freshness 无法重建 DecisionInputs | versioned registry 暴露精确版本 `captureInputs()`；creation 与 freshness 共用同一规范投影器；不可用 → version_invalid，不猜 | F24、§5.3、§7.2 |
+| 22 | **rev4 HIGH 3** A→B→A 与原子 supersede 冲突 | 拆 freshness-only（路径 1，F15）vs producer-produced（路径 2，superseded 需新 record/reactivation，F23）；删"无新 record"绝对断言 | F15、F23、§5.4 |
+| 23 | **rev4 MED** fingerprint 身份 wording 与全 payload 矛盾 | fingerprint 相同 ⟺ 完整 canonical payload 相同（不只 inputs+conclusion+constraints） | §6.3、§6.4 |
 
-**审查结论**：原 7 + rev2 6 + rev3 8 全部有合同层缓解 + fixture 覆盖。隐私（#4）依赖 #327 后续 surface 覆盖——**已知前置依赖**，Phase 1 强制 gate。
+**审查结论**：原 7 + rev2 6 + rev3 8 + rev4 4 全部有合同层缓解 + fixture 覆盖。隐私（#4）依赖 #327 后续 surface 覆盖——**已知前置依赖**，Phase 1 强制 gate。
 
 ---
 
@@ -949,15 +1026,25 @@ Phase 0 不决策，仅列出：
 |:--|:--|
 | 1. Recommendation Contract spec，与 research/EvidenceBoard/next_actions/Compounding Review 分工 | §2、§13 |
 | 2. 稳定最小 record shape + 生命周期，不提前锁 DB 迁移 | §4、§5、§6、§7、§10 |
-| 3. ≥10 条匿名 fixture，覆盖全部验收场景 | §14（22 条：F1–F22） |
+| 3. ≥10 条匿名 fixture，覆盖全部验收场景 | §14（24 条：F1–F24） |
 | 4. 新表 vs 复用 lifecycle trade-off + 推荐 | §10 |
 | 5. #327 未完成前不进默认 display | §11 |
 | 6. 公开示例匿名占位符 | §14 + §11.3 |
 | 推导结构约束（节点/边/causes 限定） | §12 |
 | 不保存模型私有 CoT | §12 + §0 |
-| 对抗审查（原 7 + rev2 6 + rev3 8） | §15（19 行） |
+| 对抗审查（原 7 + rev2 6 + rev3 8 + rev4 4） | §15（23 行） |
 
-**rev3 Codex 修订验收对照**（本轮）：
+**rev4 Codex 修订验收对照**（本轮）：
+
+| Codex rev4 验收 | 本 spec 落点 |
+|:--|:--|
+| 1. Canonicalization 完整、递归、identifier-safe、覆盖 tie case | §6.2（递归 canonical + prose/identifier 分类 + 完整元素排序）+ F12 |
+| 2. Freshness 用 creation 同一 versioned input projector | §5.3 + §7.2（`captureInputs()`）+ F24 |
+| 3. A→B→A 拆 freshness-only vs replacement-produced | §5.4（两条路径）+ §8.4 + F15（路径 1）/ F23（路径 2） |
+| 4. Fingerprint 身份 wording 匹配完整 immutable payload | §6.3 + §6.4 |
+| 5. 仍 Phase 0 spec-only，不写 plan/runtime/DB/MCP，不 push | §0 + 本文件唯一交付 |
+
+**rev3 Codex 修订验收对照**（上一轮，已落实）：
 
 | Codex rev3 验收 | 本 spec 落点 |
 |:--|:--|
