@@ -1,6 +1,6 @@
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { CBrainDB } from "../../storage/sqlite.js";
+import { CBrainDB, type LinkRow } from "../../storage/sqlite.js";
 import { PageManager } from "../page.js";
 import { generateSlug, slugToFilePath, looksLikePath } from "../../utils/slug.js";
 import { normalizePageType, normalizeAndHashBody, type PageType } from "../shared.js";
@@ -53,16 +53,15 @@ export class IngestRollbackError extends Error {
 interface PageSnapshot {
   body: string;
   tags: string[];
-  mentionLinks: Array<{ to: string; relation: string }>;
+  mentionLinks: LinkRow[];
   ingestHash: string | null;
 }
 
 function takeSnapshot(slug: string, db: CBrainDB, pages: PageManager): PageSnapshot | null {
   const page = pages.getBySlug(slug);
   if (!page) return null;
-  const links = db.getOutgoingLinks(slug)
-    .filter(l => l.relation === "提及")
-    .map(l => ({ to: l.to_slug, relation: l.relation }));
+  const links = db.getOutgoingLinks(slug, true)
+    .filter(l => l.relation === "提及");
   const ingestHash = db.getPageIngestHash(slug);
   return { body: page.body, tags: [...(page.frontmatter.tags ?? [])], mentionLinks: links, ingestHash };
 }
@@ -244,7 +243,11 @@ export class IngestManager {
     contentHash?: string;
   }): boolean {
     if (!this.deferredNerSubmitter) return false;
-    return submitDeferredNerForWritePath(this.deferredNerSubmitter, input);
+    try {
+      return submitDeferredNerForWritePath(this.deferredNerSubmitter, input);
+    } catch {
+      return false;
+    }
   }
 
   private inferPersonRelationshipTitle(content: string, explicitTitle?: string): string | null {
@@ -543,10 +546,7 @@ export class IngestManager {
     // 2. Restore mention links
     try {
       this.db.transaction(() => {
-        this.db.deleteLinksByRelation(slug, "提及");
-        for (const link of snapshot.mentionLinks) {
-          this.db.insertLink(slug, link.to, link.relation);
-        }
+        this.db.restoreOutgoingMentionLinks(slug, snapshot.mentionLinks);
       });
     } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
 

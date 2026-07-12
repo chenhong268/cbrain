@@ -1784,6 +1784,43 @@ export class CBrainDB {
     ).run({ $from: fromSlug, $to: toSlug });
   }
 
+  /** Restore an exact outgoing mention snapshot during ingest compensation. */
+  restoreOutgoingMentionLinks(fromSlug: string, links: readonly LinkRow[]): void {
+    const insert = this.prepare(
+      `INSERT INTO links
+        (id, from_slug, to_slug, relation, context, weight, strength,
+         source_type, confidence, created_at, source_page_slug, trust_state,
+         evidence, last_validated_at, effective_weight)
+       VALUES
+        ($id, $from, $to, '提及', $context, $weight, $strength,
+         $sourceType, $confidence, $createdAt, $sourcePageSlug, $trustState,
+         $evidence, $lastValidatedAt, $effectiveWeight)`
+    );
+
+    this.deleteLinksByRelation(fromSlug, "提及");
+    for (const link of links) {
+      if (link.from_slug !== fromSlug || link.relation !== "提及") {
+        throw new Error("Invalid mention-link snapshot");
+      }
+      insert.run({
+        $id: link.id,
+        $from: link.from_slug,
+        $to: link.to_slug,
+        $context: link.context,
+        $weight: link.weight,
+        $strength: link.strength,
+        $sourceType: link.source_type,
+        $confidence: link.confidence,
+        $createdAt: link.created_at,
+        $sourcePageSlug: link.source_page_slug ?? null,
+        $trustState: link.trust_state ?? null,
+        $evidence: link.evidence ?? null,
+        $lastValidatedAt: link.last_validated_at,
+        $effectiveWeight: link.effective_weight,
+      });
+    }
+  }
+
   // ─── Volatile relation lifecycle (Phase 1: reports_to) ───────────
   // reports_to has no reverse relation (it is a structured_field, not in
   // relation_types), so these helpers are forward-only — no symmetric

@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import { IngestManager } from "../../src/core/ingestion/ingest.js";
-import { JobQueueNerSubmitter } from "../../src/core/ingestion/ner-backfill.js";
+import {
+  JobQueueNerSubmitter,
+  type DeferredNerSubmitter,
+} from "../../src/core/ingestion/ner-backfill.js";
 import { NerEngine, NerTimeoutError } from "../../src/core/ingestion/ner.js";
 import { PageManager } from "../../src/core/page.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
@@ -145,6 +148,32 @@ describe("sync NER durable recovery (#329)", () => {
     expect(result.nerSkipped).toBe("error");
     expect(result.nerPending).toBeUndefined();
     expect(db.listJobs("pending")).toHaveLength(0);
+  });
+
+  test("recovery submit failure does not turn an NER failure into an ingest failure", async () => {
+    await seedRecord();
+    const failingSubmitter: DeferredNerSubmitter = {
+      submitDeferredNer: () => {
+        throw new Error("private queue failure");
+      },
+    };
+    const ingest = new IngestManager(
+      db,
+      embedding,
+      createLanceStub() as never,
+      vaultPath,
+      llm,
+      new ProviderFailureNer(llm),
+      { nerMode: "sync", deferredNerSubmitter: failingSubmitter },
+    );
+
+    const result = await ingest.ingest(updateInput);
+
+    expect(result.outcome).toBe("updated");
+    expect(result.nerSkipped).toBe("error");
+    expect(result.nerPending).toBeUndefined();
+    const details = db.getIngestLog(20).map((row) => row.details ?? "").join("\n");
+    expect(details).not.toContain("private queue failure");
   });
 
   test("entity append failure also queues recovery", async () => {

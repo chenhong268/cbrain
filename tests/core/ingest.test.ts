@@ -1231,6 +1231,7 @@ describe("IngestManager", () => {
       const sourceSlug = "records/关系事务测试";
       const targetASlug = targetA.slug;
       const targetBSlug = targetB.slug;
+      db.insertLink(sourceSlug, targetBSlug, "提及", "NER 上下文", 0.3, "weak", "ner", 0.5);
       const beforeA = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetASlug) as { mention_count: number };
       const beforeB = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetBSlug) as { mention_count: number };
 
@@ -1261,7 +1262,21 @@ describe("IngestManager", () => {
       expect(afterB.mention_count).toBe(beforeB.mention_count);
 
       const links = db.getOutgoingLinks(sourceSlug).filter(link => link.relation === "提及");
-      expect(links.map(link => link.to_slug)).toEqual([targetASlug]);
+      expect(links.map(link => link.to_slug)).toEqual([targetASlug, targetBSlug]);
+      const wikilink = links.find(link => link.to_slug === targetASlug);
+      expect(wikilink).toMatchObject({
+        source_type: "wikilink",
+        trust_state: "trusted",
+        confidence: 0.9,
+        source_page_slug: sourceSlug,
+      });
+      const nerLink = db.getOutgoingLinks(sourceSlug, true).find(link => link.to_slug === targetBSlug);
+      expect(nerLink).toMatchObject({
+        source_type: "ner",
+        trust_state: "candidate",
+        confidence: 0.5,
+        context: "NER 上下文",
+      });
     });
 
     test("auto-detect markdown content without explicit type", async () => {
