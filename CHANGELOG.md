@@ -1,8 +1,34 @@
 # Changelog
 
-> Current: `v2.0.5` — 可靠性与治理收敛：fsck/consistency/health-debt gate、MCP 工具合并、core 分域重组、search/NER 稳定性与 storage migration registry 收敛。
+> Current: `v2.0.6` — Agent 合同与可信输出：自然语言前门、只读注意力队列、主动连接候选、可解释最短路径，以及 graph/timeline 结构化输出 pilot。
 
 ## [Unreleased]
+
+## [v2.0.6] — 2026-07-12
+
+### Agent 合同与注意力治理（#309, #315-#319）
+
+- **自然语言前门收敛**：Agent 文档、skill、工具描述和评估集统一优先使用 `cbrain_recall`；底层 `query` 保留为明确的调试/关键词路径。
+- **只读注意力队列**：`next_actions` 聚合 health、discovery 与 action candidates，并隐藏 stale、低证据条目；`include_raw=true` 仍保持只读，并提供仅含标量的审计计数。
+- **CI 与发布合同**：GitHub Actions、文档一致性和 preflight check ID 使用可验证合同，避免门禁与文档静默漂移。
+
+### 主动记忆与安全写入（#310-#314, #320-#325）
+
+- **主动连接候选**：新增有界、确定性的连接检测、评分、review bridge 与反馈学习；默认安静，不自动写事实、建边或执行操作。
+- **写入可靠性**：延迟 entity enrichment、Known Relations 有界修复、运行时健康新鲜度和匿名 recall quality matrix，降低 NER/维护路径对日常写入与判断的干扰。
+- **向量重建性能**：LanceDB 全量恢复改为批量 embedding，保留原子 staging 替换与 single-writer 保护。
+
+### 可解释图路径与可信输出（#326, #327）
+
+- **确定性最短路径**：`graph_query` 支持有界 shortest path，固定全局 tie-break，按 ontology 关系词输出可解释路径，并对 hostile title、内部标识和提示注入做边界过滤。
+- **结构化输出 pilot**：graph / timeline 在显式 `CBRAIN_OUTPUT_BOUNDARY=structured` 时返回稳定 `structuredContent`；默认仍为 `legacy`，避免现有 Agent 客户端行为变化。
+- **输出信任边界**：公开 data 与 audit/raw 使用不同过滤规则；凭据、绝对路径、内部 score/slug 和 Unicode 控制字符不得进入 Agent-facing structured data。
+
+### Release Checks
+
+- `bun run gate:v2-preflight`：GO（8/8 gates）。
+- output boundary 双模式专项：100 pass / 0 fail。
+- LanceDB coverage：单页缺口已恢复，`cbrain fsck --json --layer lance` 为 PASS。
 
 ## [v2.0.5] — 2026-07-05
 
