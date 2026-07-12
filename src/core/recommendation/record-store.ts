@@ -1,5 +1,5 @@
 import { canonicalJson } from "./canonical.js";
-import { checkIntegrity, computeFingerprint, computeInputsHash } from "./integrity.js";
+import { checkIntegrity, computeFingerprint, computeInputsHash, normalizePayloadProse } from "./integrity.js";
 import { SUPPRESSION_REOPENED, defaultSuppressedUntil, validateTimestamp } from "./policy.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { FreshnessStatus, LifecycleStatus, RecommendationImmutablePayload, RecommendationRecord } from "./types.js";
@@ -44,8 +44,9 @@ export class RecommendationStore {
     validateTimestamp(now, "now");
     if (payload.applicability.auto_execute !== false) throw new Error("record-store: auto_execute must be false");
     const withHash: RecommendationImmutablePayload = { ...payload, inputs_hash: computeInputsHash(payload.decision_inputs) };
-    const fingerprint = computeFingerprint(withHash);
-    const provisional: RecommendationRecord = { record_id: globalThis.crypto.randomUUID(), payload: withHash, fingerprint, created_at: now, last_revalidated_at: now, lifecycle_status: "pending", freshness_status: "fresh", suppressed_until: null };
+    const normalized = normalizePayloadProse(withHash);
+    const fingerprint = computeFingerprint(normalized);
+    const provisional: RecommendationRecord = { record_id: globalThis.crypto.randomUUID(), payload: normalized, fingerprint, created_at: now, last_revalidated_at: now, lifecycle_status: "pending", freshness_status: "fresh", suppressed_until: null };
     const integrity = checkIntegrity(provisional);
     if (!integrity.ok) throw new Error(`record-store: integrity failed (${integrity.code})`);
     const key = payload.maintenance_key;
@@ -58,7 +59,7 @@ export class RecommendationStore {
         this.db.rawDb.prepare("UPDATE recommendation_records SET lifecycle_status='superseded' WHERE record_id=$id").run({ $id: active.record_id });
         this.history(active.record_id, "superseded", active.lifecycle_status, "superseded", undefined, undefined, "replaced by " + provisional.record_id, now);
       }
-      this.db.rawDb.prepare("INSERT INTO recommendation_records (record_id, maintenance_key, fingerprint, inputs_hash, payload, auto_execute, created_at, last_revalidated_at, lifecycle_status, freshness_status, suppressed_until) VALUES ($rid,$key,$fp,$ih,$payload,0,$now,$now,'pending','fresh',NULL)").run({ $rid: provisional.record_id, $key: key, $fp: fingerprint, $ih: withHash.inputs_hash, $payload: canonicalJson(withHash), $now: now });
+      this.db.rawDb.prepare("INSERT INTO recommendation_records (record_id, maintenance_key, fingerprint, inputs_hash, payload, auto_execute, created_at, last_revalidated_at, lifecycle_status, freshness_status, suppressed_until) VALUES ($rid,$key,$fp,$ih,$payload,0,$now,$now,'pending','fresh',NULL)").run({ $rid: provisional.record_id, $key: key, $fp: fingerprint, $ih: normalized.inputs_hash, $payload: canonicalJson(normalized), $now: now });
       this.history(provisional.record_id, "created", undefined, "pending", undefined, undefined, undefined, now);
       return provisional;
     });

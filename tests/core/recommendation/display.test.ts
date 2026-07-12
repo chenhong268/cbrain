@@ -132,4 +132,31 @@ describe("loadAndProjectDisplay", () => {
     }
     db.close();
   });
+
+  test("HIGH-1: fullwidth internal term normalized at persist → cannot bypass the display guard", () => {
+    const { db, store, reg } = fresh();
+    seed(db);
+    link(db, A, B, "candidate");
+    const di = { signals: { candidate_count: 1 }, entity_snapshot: { [A]: { reports_to: [{ from: A, to: B, trust_state: "candidate" }] }, [B]: { reports_to: [] } }, evidence_refs: [`health:known_relations:${A}:${B}`] };
+    const meta = reg.directory()[0];
+    const payload: RecommendationImmutablePayload = {
+      namespace: "maintenance", maintenance_key: `health:known_relations:${JSON.stringify([A, B])}`, inputs_hash: "",
+      conclusion: { kind: "propose", action: { type: "dry_run", target_ref: `health:known_relations:${A}`, reason: "ｓｃｏｒｅ leak" }, alternatives: [] },
+      decision_inputs: di, evidence_manifest: [{ source: "health", ref: `health:known_relations:${A}:${B}`, trust_state: "candidate" }],
+      constraints: { policy_version: policyHash(reg), ontology_version: ontologyHash(), schema_version: SCHEMA_VERSION },
+      dependency_manifest: { rule_id: "health:known_relations", declarations: [A, B].map((s) => ({ slug: s, table: "links" as const, as: "reports_to", relation: "reports_to", direction: "outgoing" as const, fields: ["from", "to", "trust_state"], filter: "active" as const })) },
+      applicability: { audience: "user_only", auto_execute: false, requires_confirmation: { tier: "standard" } }, risks: [], gaps: [],
+      producer: { rule_id: meta.rule_id, rule_version: meta.rule_version, code_hash: meta.code_hash, registry_ref: meta.registry_ref },
+    };
+    const rec = store.createRecord(payload, "2026-07-12 10:00:00");
+    // persisted reason is the NORMALIZED ascii form — the raw fullwidth never reaches the DB
+    expect((rec.payload.conclusion as { action: { reason: string } }).action.reason).toBe("score leak");
+    const out = loadAndProjectDisplay(rec.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "实体A");
+    expect(out.blocked).toBe(false);
+    if (!out.blocked) {
+      expect(out.reason).not.toContain("ｓｃｏｒｅ");
+      expect(out.reason).not.toContain("score");
+    }
+    db.close();
+  });
 });

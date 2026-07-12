@@ -1,5 +1,5 @@
 import { canonicalJson, normalizeProse, sha256Hex } from "./canonical.js";
-import type { DecisionInputs, DependencyDeclaration, RecommendationConclusion, RecommendationImmutablePayload, RecommendationRecord } from "./types.js";
+import type { DecisionInputs, DependencyDeclaration, ProposedAction, RecommendationConclusion, RecommendationImmutablePayload, RecommendationRecord } from "./types.js";
 
 export type IntegrityCode =
   | "inputs_hash_mismatch"
@@ -82,6 +82,35 @@ function validateConclusionActionTypes(c: RecommendationConclusion): void {
   for (const alt of c.alternatives) {
     if (!ACTION_TYPES.has(alt.type)) throw new Error(`integrity: illegal alternative action.type '${alt.type}'`);
   }
+}
+
+/**
+ * Normalize the prose fields of an immutable payload (NFKC + whitespace fold). MUST cover exactly
+ * the same fields `canonicalPayload` normalizes for fingerprinting, so that the persisted/returned
+ * payload is byte-identical to what was hashed. Without this, a fullwidth internal term like
+ * "ｓｃｏｒｅ" hashes as ascii "score" (fingerprint passes) yet persists raw and bypasses the display
+ * safety guard (which matches /\bscore\b/i on ascii only). Identifiers (refs/slug/source/...) are
+ * left untouched — only prose fields normalize. Returns a new payload (immutable). */
+export function normalizePayloadProse(p: RecommendationImmutablePayload): RecommendationImmutablePayload {
+  const conclusion: RecommendationConclusion = p.conclusion.kind === "abstain"
+    ? p.conclusion
+    : { kind: "propose", action: normalizeActionProse(p.conclusion.action), alternatives: p.conclusion.alternatives.map(normalizeActionProse) };
+  return {
+    ...p,
+    conclusion,
+    decision_inputs: {
+      ...p.decision_inputs,
+      ...(p.decision_inputs.inspected_claims !== undefined ? { inspected_claims: p.decision_inputs.inspected_claims.map(normalizeProse) } : {}),
+    },
+    risks: p.risks.map(normalizeProse),
+    gaps: p.gaps.map(normalizeProse),
+  };
+}
+
+function normalizeActionProse(a: ProposedAction): ProposedAction {
+  const out: ProposedAction = { type: a.type, target_ref: a.target_ref, reason: normalizeProse(a.reason) };
+  if (a.rollback_note !== undefined) out.rollback_note = normalizeProse(a.rollback_note);
+  return out;
 }
 
 export function checkIntegrity(r: RecommendationRecord): IntegrityResult {
