@@ -2,15 +2,13 @@
 
 > Issue: #328（roadmap: governed Recommendation Record and replayable decision support）
 > Phase: **0（仅合同设计，不改运行时）**
-> 状态：rev5 — 待 Codex 第五轮 re-review
+> 状态：rev6 — 待 Codex 第六轮 re-review
 > 依赖：#327（output trust boundary）— display 前置；未完成全部 surface 前 recommendation 不进默认展示
 
 **修订记录**：
-- **rev5**（本轮）：修 Codex 第四轮 `CHANGES REQUESTED` —— HIGH（路径 2 恢复撞 active 唯一约束：删显式 reactivation，恢复一律"新 record_id 同 F_A + 同事务 supersede 当前 active R_B"，active count 全程 ≤ 1）、MED（canonical number 限 finite JSON，NaN/±Infinity fail-closed、`-0`→`0` 规范化，key 排序改 UTF-16 code-unit order）。
+- **rev6**（本轮）：修 Codex 第五轮 `CHANGES REQUESTED` —— MED（删 4 处 reactivation 残留口径，统一"新 record + 原子 supersede"）、MED（number 序列化与 key 排序锁定 RFC 8785 JCS 字节序，删 JSON.stringify 排序误述，F12 加 golden bytes）、LOW（修订记录去重）。
+- rev5：HIGH（删 reactivation，路径 2 统一新 record + 同事务 supersede，active count ≤ 1）、MED（number 限 finite、`-0`→`0`）。
 - rev4：HIGH 1（递归 canonical + prose/identifier 分开）、HIGH 2（version-pinned `captureInputs()`）、HIGH 3（A→B→A 两路径）、MED（fingerprint wording）。
-- rev3：HIGH 1（完整 immutable payload）、HIGH 2（真双轴字段）、HIGH 3（versioned rule registry）、MED 1-4、LOW。
-- rev2：HIGH 1（decision_inputs + integrity/replay 拆分）、HIGH 2（pending freshness）、HIGH 3（record_id≠fingerprint）、MED 1-3。
-- rev1：初版 Phase 0 合同。
 - rev3：HIGH 1（完整 immutable payload）、HIGH 2（真双轴字段）、HIGH 3（versioned rule registry）、MED 1-4、LOW。
 - rev2：HIGH 1（decision_inputs + integrity/replay 拆分）、HIGH 2（pending freshness）、HIGH 3（record_id≠fingerprint）、MED 1-3。
 - rev1：初版 Phase 0 合同。
@@ -320,7 +318,7 @@ rev1/rev2 文字说 lifecycle/freshness 正交，但 `stale` 仍混在 lifecycle
 - **`lifecycle_status`**（用户/系统驱动）：`pending | current | superseded | rejected | invalidated`。**不含 stale**。
 - **`freshness_status`**（依赖/版本驱动，独立字段）：`fresh | stale | version_invalid`。
 
-**核心不变量**：依赖漂移**只改 `freshness_status`，永不碰 `lifecycle_status`**。于是 A→B→A **路径 1**（无 producer 替代）时 lifecycle 全程不动（一直是 current 或 pending），freshness stale→fresh 自然恢复——无"复活到哪个状态"的歧义。**路径 2**（producer 已产替代）则 A 经 §5.5 转 superseded，需新 record/reactivation（§5.4）。
+**核心不变量**：依赖漂移**只改 `freshness_status`，永不碰 `lifecycle_status`**。于是 A→B→A **路径 1**（无 producer 替代）时 lifecycle 全程不动（一直是 current 或 pending），freshness stale→fresh 自然恢复——无"复活到哪个状态"的歧义。**路径 2**（producer 已产替代）则 A 经 §5.5 转 superseded，恢复须 producer 新建同 fingerprint record + 原子 supersede 当前 active（§5.4，**无 reactivation 路径**）。
 
 **展示门控** = `lifecycle_status ∈ {pending, current}` **AND** `freshness_status == fresh`。
 
@@ -414,7 +412,7 @@ CREATE UNIQUE INDEX idx_rec_active_unique
 ### 5.7 不变量汇总
 
 - **展示门控**：`lifecycle ∈ {pending, current}` **AND** `freshness == fresh`（HIGH 2）。
-- **依赖漂移只动 freshness**：lifecycle 身份不丢；路径 1 A→B→A freshness 自动恢复，路径 2（producer 已产替代 → superseded）需新 record/reactivation（HIGH 3，F15/F23）。
+- **依赖漂移只动 freshness**：lifecycle 身份不丢；路径 1 A→B→A freshness 自动恢复，路径 2（producer 已产替代 → superseded）须 producer 新建同 fingerprint record + 原子 supersede 当前 active（HIGH 3，F15/F23，**无 reactivation**）。
 - **每 key 最多一条 active**：partial unique index + 原子 supersede（MED 3）。
 - **rejected durable**：`suppressed_until` + policy TTL，非 session（MED 4）。
 - **confirm ≠ execute**：pending→current 只改 lifecycle。
@@ -461,31 +459,34 @@ fingerprint  = SHA-256(canonical_json(RecommendationImmutablePayload))
 
 **payload 值类型受限**（JSON-safe）：只允许 `null | boolean | number | string | array | object`。禁止 `undefined`/`function`/`symbol`/`Date` 对象。时间戳是 ISO string 且本就排除在 payload 外（§6.1）。
 
-**number 合法域**（rev5 MEDIUM，防跨实现 fingerprint 漂移）：
-- **只允许 finite JSON number**（IEEE 754 双精度有限实数）。**禁止** `NaN` / `+Infinity` / `-Infinity`——它们不是合法 JSON 值，`JSON.stringify` 会把它们转成 `null`，与合法 `null` 碰撞。`captureInputs()` 若算出非有限数，producer **必须**钳制或 abstain，**不得**写入 payload；违反 → record 拒绝创建（fail-closed）。
-- **`-0` 规范化为 `0`**（canonical 输出 `0`）。`-0 === 0` 数值等价但符号位不同，统一为 `+0` 避免跨实现歧义。
+**number 序列化与 key 排序锁定字节序**（rev6 MEDIUM：跨语言 byte-stable 必须唯一可实现）：
+
+- **number 合法域**：只允许 **finite JSON number**（IEEE 754 双精度有限实数）。**禁止** `NaN`/`+Infinity`/`-Infinity`——非合法 JSON 值。`captureInputs()` 若算出非有限数，producer **必须**钳制或 abstain，**不得**写入 payload；违反 → record 拒绝创建（fail-closed）。
+- **number 序列化 = RFC 8785 JCS §3.2.2.3**（即 ECMAScript `Number::toString` 的 finite-number 输出，`-0` 预归一为 `0`）。跨语言实现必须复现该字节序，**不得**自造"最短等价十进制"。代表性 golden bytes（输入 → canonical）：
+  - `1` → `1`；`1.0` → `1`（无尾零）；`-0` → `0`；`0.1` → `0.1`
+  - `1e-7` → `1e-7`；`1e21` → `1e+21`；`299792458` → `299792458`
+- **object key 排序 = RFC 8785 JCS §3.2.2.2**：对 key 按 **UTF-16 code unit 序作字典序（lexicographic）升序**排序后输出。补充平面字符按 surrogate pair 计两个 code unit。**不靠 `JSON.stringify`**——它保持插入序，**不排序**。
 
 **一个递归 canonical 算法**（绝不依赖插入顺序）：
 
 ```
 canonical(value):
   null / boolean        → JSON 标准字面量
-  number                → 若非 finite（NaN/±Infinity）→ fail-closed 拒绝；
-                          若为 -0 → 规范为 0；
-                          否则最短等价十进制（整数无尾零；避免 1 vs 1.0 歧义；Phase 1 优先整数信号）
+  number                → 若非 finite → fail-closed 拒绝；
+                          否则按 RFC 8785 JCS §3.2.2.3 序列化（-0 已归一为 0）
   string                → 按"字段分类"归一化（见下），再 JSON-escape
   array                 → 对每元素递归 canonical 得字符串；**按这些字符串升序排序**后逗号拼入 [ ]
                           （数组视为集合——排序键是完整元素的 canonical 串，自动含全部字段，
                             rollback_note/trust_state/filter 无遗漏；若某 rule 输入顺序语义相关，
                             必须把序号编码进元素自身）
-  object                → 对每 value 递归 canonical；**按 key 的 UTF-16 code-unit order 升序显式排序**输出
-                          （= JS/JSON.stringify 的排序序，跨语言实现以此为准；补充平面字符按
-                            surrogate pair 计两个 code unit）
+  object                → 对每 value 递归 canonical；**按 key 的 UTF-16 code unit 字典序升序排序**输出（JCS §3.2.2.2）
 ```
+
+> 除 string 的 prose/identifier 分类归一化（本节自定义，JCS 不含）外，number 序列化与 key 排序**完全委托 RFC 8785 JCS**，确保跨语言 byte-stable。Phase 1 实现可直接用成熟 JCS 库，再叠加本节的 prose/identifier 字符串处理。
 
 **关键**：
 - **数组排序键 = 完整元素的 canonical 字符串**（不是 `type|target_ref|reason` 之类的部分比较器）——任何被漏的字段自动进排序键。
-- **对象 key 显式按 UTF-16 code-unit order 排序**，不靠 `JSON.stringify`（它保持插入序）。
+- **对象 key 按 JCS §3.2.2.2（UTF-16 code unit 字典序）排序**，不靠 `JSON.stringify`（它保持插入序）。
 
 **字符串字段分类归一化**（prose vs identifier 分开）：
 
@@ -669,7 +670,7 @@ Phase 2 先做 hash 级快判（`inputs_hash` 比、`constraints` 比），命�
 | `constraints'` 版本结构不匹配，或 `captureInputs` runner 不可用 | `→ version_invalid` | **不动** |
 | 都匹配 | `→ fresh` | **不动** |
 | 路径 1 A→B→A（无替代 record）：状态恢复，`inputs_hash'` 重新相等 | `stale → fresh` | **不动** |
-| 路径 2 A→B→A（producer 已产 B，A=superseded）：状态恢复 | freshness 不适用（A 已 superseded，display 由 lifecycle 排除） | **仍是 superseded**，需新 record/reactivation（§5.4 路径 2） |
+| 路径 2 A→B→A（producer 已产 B，A=superseded）：状态恢复 | freshness 不适用（A 已 superseded，display 由 lifecycle 排除） | **仍是 superseded**，须 producer 新建同 fingerprint record + 原子 supersede 当前 active（§5.4 路径 2） |
 
 **display 只展示 `lifecycle ∈ {pending,current} AND freshness == fresh`**。
 
@@ -905,7 +906,9 @@ type DerivationEdge =
 **given (tie 漏字段)**：两条 alternatives 其余相同、仅 `rollback_note` 不同；两条 evidence 仅 `trust_state` 不同；两条 declarations 仅 `filter` 不同。
 **then**：排序键含完整元素 → 这些差异**进**排序/哈希 → 产出**不同** fingerprint（不因 tie 漏字段而误判相同）。
 **given (identifier 不归一)**：两个不同 slug `entityA-1` 与其全角变体——identifier 字段**不做 NFKC**，原样字节 → 不同实体不合并；prose 字段才 NFKC。
-**given (number 域，rev5 MEDIUM)**：`captureInputs` 算出 `NaN`/`Infinity`/`-Infinity` → record **拒绝创建**（fail-closed，不写成 `null`）；`-0` 与 `0` → 规范化为同一 canonical `0` → 同 fingerprint（无数值差异时不制造新指纹）。
+**given (number 域 + JCS golden bytes，rev6 MEDIUM)**：
+- `captureInputs` 算出 `NaN`/`Infinity`/`-Infinity` → record **拒绝创建**（fail-closed，不写成 `null`）。
+- 序列化锁定 **RFC 8785 JCS §3.2.2.3**，跨语言 byte-stable，golden bytes：`1`→`1`、`1.0`→`1`（无尾零）、`-0`→`0`、`0.1`→`0.1`、`1e-7`→`1e-7`、`1e21`→`1e+21`。`1.0` 与 `1` 产出**相同** canonical（无数值差异不造新指纹）；`1e21` 等指数形式按 JCS 唯一字节序，不依赖实现。
 
 ### F13 — 隐式执行攻击（对抗）
 **given**：恶意/失误的 producer 规则尝试在结论里嵌写操作。
@@ -1001,12 +1004,15 @@ type DerivationEdge =
 | 19 | **rev3 LOW** 新表误套 destructive migration | additive migration（runLatePageMigrations 风格） | §10 |
 | 20 | **rev4 HIGH 1** canonicalization 不稳定（JSON.stringify 不排序 + 数组比较器漏字段 + NFKC 合并 identifier） | 递归 canonical JSON（对象按码点排 key、数组按完整元素 canonical 串排序）；prose/identifier 分开归一；tie case 覆盖 rollback_note/trust_state/filter | F12、§6.2 |
 | 21 | **rev4 HIGH 2** freshness 无法重建 DecisionInputs | versioned registry 暴露精确版本 `captureInputs()`；creation 与 freshness 共用同一规范投影器；不可用 → version_invalid，不猜 | F24、§5.3、§7.2 |
-| 22 | **rev4 HIGH 3** A→B→A 与原子 supersede 冲突 | 拆 freshness-only（路径 1，F15）vs producer-produced（路径 2，superseded 需新 record/reactivation，F23）；删"无新 record"绝对断言 | F15、F23、§5.4 |
+| 22 | **rev4 HIGH 3** A→B→A 与原子 supersede 冲突 | 拆 freshness-only（路径 1，F15）vs producer-produced（路径 2，superseded 须新 record + 原子 supersede，F23）；删"无新 record"绝对断言；rev5 进一步删 reactivation | F15、F23、§5.4 |
 | 23 | **rev4 MED** fingerprint 身份 wording 与全 payload 矛盾 | fingerprint 相同 ⟺ 完整 canonical payload 相同（不只 inputs+conclusion+constraints） | §6.3、§6.4 |
 | 24 | **rev5 HIGH** 路径 2 reactivation 撞 active 唯一约束（R_B 仍 active） | 删显式 reactivation；恢复一律"新 record_id 同 F_A + **同事务 supersede 当前 active R_B**"；active count 全程 ≤ 1，失败整笔回滚 | F23、§5.4/§5.5 |
 | 25 | **rev5 MED** canonical number 未定义 NaN/±Inf/-0 | number 限 finite JSON；NaN/±Infinity fail-closed 拒绝；`-0`→`0` 规范化；key 排序改"UTF-16 code-unit order" | F12、§6.2 |
+| 26 | **rev6 MED** 4 处旧文字仍允许 reactivation（与 §5.4 删除冲突） | 四处（§5.1/§5.7/§8.4/§15#22）统一"新 record + 原子 supersede"；全文件 reactivation 只在"删除/禁止"语境 | §5.1/§5.7/§8.4/§15 |
+| 27 | **rev6 MED** number/key canonicalization 未锁字节序 + JSON.stringify 排序误述 | number 序列化与 key 排序**委托 RFC 8785 JCS**（§3.2.2.3 / §3.2.2.2）；删"JSON.stringify 排序序"误述；F12 加 golden bytes（1e-7/1e21/尾零） | §6.2、F12 |
+| 28 | **rev6 LOW** 修订记录 rev1-3 重复 | 去重 | 顶部 |
 
-**审查结论**：原 7 + rev2 6 + rev3 8 + rev4 4 + rev5 2 全部有合同层缓解 + fixture 覆盖。隐私（#4）依赖 #327 后续 surface 覆盖——**已知前置依赖**，Phase 1 强制 gate。
+**审查结论**：原 7 + rev2 6 + rev3 8 + rev4 4 + rev5 2 + rev6 3 全部有合同层缓解 + fixture 覆盖。隐私（#4）依赖 #327 后续 surface 覆盖——**已知前置依赖**，Phase 1 强制 gate。
 
 ---
 
@@ -1052,9 +1058,18 @@ Phase 0 不决策，仅列出：
 | 6. 公开示例匿名占位符 | §14 + §11.3 |
 | 推导结构约束（节点/边/causes 限定） | §12 |
 | 不保存模型私有 CoT | §12 + §0 |
-| 对抗审查（原 7 + rev2 6 + rev3 8 + rev4 4 + rev5 2） | §15（25 行） |
+| 对抗审查（原 7 + rev2 6 + rev3 8 + rev4 4 + rev5 2 + rev6 3） | §15（28 行） |
 
-**rev5 Codex 修订验收对照**（本轮）：
+**rev6 Codex 修订验收对照**（本轮）：
+
+| Codex rev6 验收 | 本 spec 落点 |
+|:--|:--|
+| MED：全文件不再把 reactivation 列为允许路径 | §5.1/§5.7/§8.4/§15#22 四处统一"新 record + 原子 supersede"；`rg reactivat\|复活` 只在删除/禁止语境 |
+| MED：number serializer 与 key ordering 有唯一 byte-level 规范 + 边界 fixture | §6.2 委托 RFC 8785 JCS（§3.2.2.3 number / §3.2.2.2 key）；删 JSON.stringify 排序误述；F12 加 golden bytes（1e-7/1e21/尾零） |
+| LOW：修订记录去重 | 顶部（rev1-3 不再重复） |
+| 仍 Phase 0 spec-only，`check:docs`/privacy/`diff --check` 通过，不 push | §0 + 本文件唯一交付 |
+
+**rev5 Codex 修订验收对照**（上一轮，已落实）：
 
 | Codex rev5 验收 | 本 spec 落点 |
 |:--|:--|
