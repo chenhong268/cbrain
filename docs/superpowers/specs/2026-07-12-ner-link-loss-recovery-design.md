@@ -91,4 +91,3 @@ schema or graph-semantics change inside an urgent fix.
 7. Deferred ingest remains non-blocking and keeps existing NER mentions.
 8. Backfill retry semantics and all existing ingest tests remain green.
 9. Fixtures and diagnostics are anonymous and contain no local paths/content.
-

@@ -84,4 +84,3 @@
 - [ ] Run `git diff --check` and a privacy grep over the branch diff.
 - [ ] Record findings and fix any CRITICAL/HIGH/MEDIUM regression before final
   acceptance.
-
