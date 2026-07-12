@@ -116,7 +116,7 @@ describe("loadAndProjectDisplay", () => {
     const meta = reg.directory()[0];
     const payload: RecommendationImmutablePayload = {
       namespace: "maintenance", maintenance_key: `health:known_relations:${JSON.stringify([A, B])}`, inputs_hash: "",
-      conclusion: { kind: "propose", action: { type: "dry_run", target_ref: `health:known_relations:${A}`, reason: "score=0.9 /Users/secret" }, alternatives: [] },
+      conclusion: { kind: "propose", action: { type: "dry_run", target_ref: `health:known_relations:${A}`, reason: "score=0.9 internal-metric" }, alternatives: [] },
       decision_inputs: di, evidence_manifest: [{ source: "health", ref: `health:known_relations:${A}:${B}`, trust_state: "candidate" }],
       constraints: { policy_version: policyHash(reg), ontology_version: ontologyHash(), schema_version: SCHEMA_VERSION },
       dependency_manifest: { rule_id: "health:known_relations", declarations: [A, B].map((s) => ({ slug: s, table: "links" as const, as: "reports_to", relation: "reports_to", direction: "outgoing" as const, fields: ["from", "to", "trust_state"], filter: "active" as const })) },
@@ -128,7 +128,7 @@ describe("loadAndProjectDisplay", () => {
     expect(out.blocked).toBe(false);
     if (!out.blocked) {
       expect(out.reason).not.toContain("score");
-      expect(out.reason).not.toContain("/Users/");
+      expect(out.reason).not.toContain("internal-metric");
     }
     db.close();
   });
