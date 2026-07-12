@@ -171,7 +171,7 @@ export class ContentPipeline {
    */
   replaceWikilinks(fromSlug: string, body: string): { count: number; mentionedSlugs: Set<string> } {
     return this.db.transaction(() => {
-      this.db.deleteLinksByRelation(fromSlug, "提及");
+      this.db.deleteWikilinkMentions(fromSlug);
       return this.processWikilinksUnsafe(fromSlug, body);
     });
   }
@@ -205,7 +205,7 @@ export class ContentPipeline {
           writtenRelations.add(key);
           this.pages.incrementMention(targetSlug);
           mentionedSlugs.add(targetSlug);
-          this.db.insertLink(fromSlug, targetSlug, "提及", null, 0.3, "weak", "wikilink", 0.9, undefined, { source_page_slug: fromSlug });
+          this.db.upsertWikilinkMention(fromSlug, targetSlug);
           count++;
         }
       }
