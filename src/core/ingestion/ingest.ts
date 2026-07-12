@@ -238,6 +238,15 @@ export class IngestManager {
     return row.slug;
   }
 
+  private submitNerRecovery(input: {
+    slug: string;
+    pageType: string;
+    contentHash?: string;
+  }): boolean {
+    if (!this.deferredNerSubmitter) return false;
+    return submitDeferredNerForWritePath(this.deferredNerSubmitter, input);
+  }
+
   private inferPersonRelationshipTitle(content: string, explicitTitle?: string): string | null {
     if (explicitTitle) return null;
     const firstLine = content.split("\n").find(l => l.trim())?.trim() ?? "";
@@ -316,8 +325,13 @@ export class IngestManager {
           nerResult = await this.pipeline.processNer(slug, body, before.type, true, undefined, mentionedSlugs);
         } catch (e) {
           nerSkipped = isNerTimeoutError(e) ? "timeout" : "error";
-          const msg = e instanceof Error ? e.message : String(e);
-          this.pipeline.writeIngestLog(slug, "api", { nerError: msg, nerSkipped, appended: true });
+          nerPending = this.submitNerRecovery({ slug, pageType: before.type });
+          this.pipeline.writeIngestLog(slug, "api", {
+            nerError: nerSkipped === "timeout" ? "NER_TIMEOUT" : "NER_PROVIDER_ERROR",
+            nerSkipped,
+            nerRecoveryQueued: nerPending,
+            appended: true,
+          });
         }
       } else if (nerAction === "defer" && body.trim()) {
         // submitter guaranteed non-null by resolveNerAction fail-fast (defer ⇒ submitter wired)
@@ -415,8 +429,16 @@ export class IngestManager {
           nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs);
         } catch (e) {
           nerSkipped = isNerTimeoutError(e) ? "timeout" : "error";
-          const msg = e instanceof Error ? e.message : String(e);
-          this.pipeline.writeIngestLog(slug, "api", { nerError: msg, nerSkipped });
+          nerPending = this.submitNerRecovery({
+            slug,
+            contentHash: bodyHash ?? undefined,
+            pageType: type,
+          });
+          this.pipeline.writeIngestLog(slug, "api", {
+            nerError: nerSkipped === "timeout" ? "NER_TIMEOUT" : "NER_PROVIDER_ERROR",
+            nerSkipped,
+            nerRecoveryQueued: nerPending,
+          });
         }
       } else if (nerAction === "defer" && nerEligibleType) {
         // submitter guaranteed non-null by resolveNerAction fail-fast (defer ⇒ submitter wired)

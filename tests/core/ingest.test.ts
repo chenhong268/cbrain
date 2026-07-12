@@ -1234,15 +1234,15 @@ describe("IngestManager", () => {
       const beforeA = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetASlug) as { mention_count: number };
       const beforeB = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetBSlug) as { mention_count: number };
 
-      const originalInsertLink = db.insertLink.bind(db);
+      const originalUpsertWikilinkMention = db.upsertWikilinkMention.bind(db);
       let wikilinkWrites = 0;
-      db.insertLink = ((from: string, to: string, relation: string, ...rest: unknown[]) => {
-        if (from === sourceSlug && relation === "提及") {
+      db.upsertWikilinkMention = ((from: string, to: string) => {
+        if (from === sourceSlug) {
           wikilinkWrites++;
           if (wikilinkWrites === 2) throw new Error("second wikilink failed");
         }
-        return originalInsertLink(from, to, relation, ...rest as Parameters<typeof db.insertLink> extends [string, string, string, ...infer R] ? R : never);
-      }) as typeof db.insertLink;
+        return originalUpsertWikilinkMention(from, to);
+      }) as typeof db.upsertWikilinkMention;
 
       try {
         await expect(ingest.ingest({
@@ -1252,7 +1252,7 @@ describe("IngestManager", () => {
           skipNer: true,
         })).rejects.toThrow("second wikilink failed");
       } finally {
-        db.insertLink = originalInsertLink;
+        db.upsertWikilinkMention = originalUpsertWikilinkMention;
       }
 
       const afterA = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(targetASlug) as { mention_count: number };
