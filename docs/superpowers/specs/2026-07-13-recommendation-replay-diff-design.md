@@ -184,15 +184,26 @@ export type ReplayResult =
 ### 4.1 注入与签名
 
 ```ts
+// src/core/recommendation/record-reader.ts — 可信、只读、不可由普通结构对象冒充
+export class RecommendationRecordReader {
+  readonly #store: RecommendationStore;
+  private constructor(store: RecommendationStore);
+  static fromStore(store: RecommendationStore): RecommendationRecordReader;
+  getById(id: string): RecommendationRecord | null;
+}
+
 // src/core/recommendation/replay.ts
 export interface ReplayDeps {
-  readonly store: RecommendationStore;       // 注入，便于 spy 写方法（证明 read-only）
-  readonly registry: VersionedRuleRegistry;  // 注入，便于 spy resolve vs resolveActive
+  readonly store: RecommendationRecordReader; // 最小权限：仅 getById
+  readonly registry: ExactRuleResolver;       // 最小权限：仅 resolve
+}
+export interface ExactRuleResolver {
+  resolve(id: string, version: string): ResolveResult;
 }
 export function replayRecord(deps: ReplayDeps, recordId: string): ReplayResult;
 ```
 
-- 函数式入口（无状态、无缓存）。不引入 `ReplayEngine` 类（YAGNI，见 §7）。
+- 函数式入口（无状态、无缓存）。不引入 `ReplayEngine` 类（YAGNI，见 §7）。`RecommendationRecordReader` 是极薄 facade：只能由 `fromStore(realStore)` 构造（`RecommendationStore` 因 private `db` 本身具有 nominal typing），实例只暴露 `getById`；普通 `{getById(){...}}` 结构对象不能冒充。resolver 接口按最小权限定义，不暴露 `register`/`setActive`/`markPurged` 等写方法。
 - `recordId` 是 `RecommendationRecord.record_id`（UUID），**不出现在任何结果变体里**（脱敏）。
 
 ### 4.2 流程（顺序即合同）
@@ -264,15 +275,15 @@ step 5  if (canonicalJson(replayed) === canonicalJson(rec.payload.conclusion))
 
 **前置 incomparable 判定**：若 `a.payload.namespace !== b.payload.namespace` 或 `a.payload.maintenance_key !== b.payload.maintenance_key`，两 record 不属同一比较槽位 → 返回固定 `{ ok:false, reason:"incomparable" }`，**不**生成任何 entries（避免 misleading diff）。`namespace`/`maintenance_key` **不是 diff 轴**。
 
-**粒度（锁定）**：per-element + per-field——每个变化字段/元素一条 `DiffEntry`，携带稳定 `key`（字段路径）+ 显式 `change`（不靠 before/after 猜，见 §5.2）。
+**粒度（锁定）**：per-element + per-field——每个变化字段/元素一条 `DiffEntry`，携带稳定 `key`（RFC 6901 JSON Pointer）+ 显式 `change`（不靠 before/after 猜，见 §5.2）。所有动态 path segment 必须先做 `~ → ~0`、`/ → ~1` 转义；禁止用 `.`, `:`, `::`, `[]` 裸拼 identifier。
 
-| 轴（固定序） | 承载字段 | `key` path 示例 | 触发 |
+| 轴（固定序） | 承载字段 | `key` JSON Pointer 示例 | 触发 |
 |---|---|---|---|
-| `evidence` | `evidence_manifest[]` {source,ref,trust_state} | `evidence_manifest.<source>:<ref>` | 条目增删或 trust_state 翻转 |
-| `constraint` | `constraints` + `producer` + `applicability` + `risks[]` + `gaps[]`（均影响建议可执行边界） | `constraints.policy_version`、`producer.code_hash`、`applicability.requires_confirmation.tier`、`applicability.requires_confirmation.reason`、`applicability.requires_confirmation.confirm`（集语义数组，仅 `high_impact` 臂出现）、`risks[<canonical>]`、`gaps[<canonical>]` | 任一变化 |
-| `option` | `conclusion.alternatives[]`（**仅候选选项集**） | `conclusion.alternatives[<canonical(action)>]` | alternatives 集合增删/变化 |
-| `dependency` | `inputs_hash`（快判）+ `decision_inputs` 字段级 + `dependency_manifest.declarations[]` | `decision_inputs.signals.<k>`、`decision_inputs.entity_snapshot.<slug>.<as>`、`decision_inputs.evidence_refs[<ref>]`、`decision_inputs.inspected_claims[<claim>]`、`dependency_manifest.declarations[<slug>::<as>]` | inputs_hash 不等则下沉 decision_inputs 字段级 diff（§5.3）；declarations 变化 |
-| `conclusion` | `conclusion.kind` + 最终 selected `action`（propose）或 abstain `reason` | `conclusion.kind`、`conclusion.action.type`、`conclusion.action.target_ref`、`conclusion.action.reason`、`conclusion.action.rollback_note`、`conclusion.reason` | 最终建议变化 |
+| `evidence` | `evidence_manifest[]` {source,ref,trust_state} | `/evidence_manifest/<source>/<escaped-ref>` | 条目增删或 trust_state 翻转 |
+| `constraint` | `constraints` + `producer` + `applicability` + `risks[]` + `gaps[]`（均影响建议可执行边界） | `/constraints/policy_version`、`/producer/code_hash`、`/applicability/requires_confirmation/tier`、`/applicability/requires_confirmation/reason`、`/applicability/requires_confirmation/confirm`（集语义数组，仅 `high_impact` 臂出现）、`/risks/<escaped-canonical>`、`/gaps/<escaped-canonical>` | 任一变化 |
+| `option` | `conclusion.alternatives[]`（**仅候选选项集**） | `/conclusion/alternatives/<escaped-canonical-action>` | alternatives 集合增删/变化 |
+| `dependency` | `inputs_hash`（快判）+ `decision_inputs` 字段级 + `dependency_manifest.declarations[]` | `/decision_inputs/signals/<escaped-k>`、`/decision_inputs/entity_snapshot/<escaped-slug>/<escaped-as>`、`/decision_inputs/evidence_refs/<escaped-ref>`、`/decision_inputs/inspected_claims/<escaped-claim>`、`/dependency_manifest/declarations/slug/<escaped-slug>/<escaped-as>` | inputs_hash 不等则下沉 decision_inputs 字段级 diff（§5.3）；declarations 变化 |
+| `conclusion` | `conclusion.kind` + 最终 selected `action`（propose）或 abstain `reason` | `/conclusion/kind`、`/conclusion/action/type`、`/conclusion/action/target_ref`、`/conclusion/action/reason`、`/conclusion/action/rollback_note`、`/conclusion/reason` | 最终建议变化 |
 
 **rule_id 单归属**：`rule_id` 经 `producer.rule_id` 只在 constraint 轴追踪（`dependency_manifest.rule_id` 在 trusted record 上恒等于 `producer.rule_id`，不重复）。
 
@@ -286,7 +297,7 @@ step 5  if (canonicalJson(replayed) === canonicalJson(rec.payload.conclusion))
 export type DiffChange = "added" | "removed" | "changed";
 export interface DiffEntry {
   readonly axis: DiffAxis;
-  readonly key: string;        // 稳定字段路径（见 §5.1 示例）；集合元素以 canonical 串作下标
+  readonly key: string;        // RFC 6901 JSON Pointer；动态 segment 先 escape，集合元素用 canonical 串作 segment
   readonly change: DiffChange; // 显式派生，不靠 before/after 猜
   readonly before: string;     // canonicalJson(左值)；added 时 ""
   readonly after: string;      // canonicalJson(右值)；removed 时 ""
@@ -294,7 +305,8 @@ export interface DiffEntry {
 ```
 
 - **`change` 显式派生**：元素 A 有 B 无 → `removed`；B 有 A 无 → `added`；都有但 canonical 不等 → `changed`。标量字段（如 `constraints.policy_version`、`conclusion.kind`）只可能 `changed`（永 present）。
-- **去重（修正 HIGH 1）**：按完整 `(axis, key, change, before, after)` 五元组去重——**仅**防 impl 重复报告同一变化。`key` 承载字段身份：**不同字段的相同值变化不会被合并**（例：`constraints.policy_version` 与 `constraints.ontology_version` 都 `"v1"→"v2"` → key 不同 → 保留**两条** entry）。
+- **JSON Pointer 编码**：`escapePointerSegment(s) = s.replaceAll("~", "~0").replaceAll("/", "~1")`。path 由固定 segment 与逐个转义后的动态 segment 用 `/` 连接；不得先拼动态 identifier 再整体转义。`slug=null` 的 global declaration 使用固定分支 `/dependency_manifest/declarations/global/<escaped-as>`；有 slug 使用 `/dependency_manifest/declarations/slug/<escaped-slug>/<escaped-as>`，不使用 `__global__` sentinel。
+- **去重（修正 HIGH 1）**：按完整 `(axis, key, change, before, after)` 五元组去重——**仅**防 impl 重复报告同一变化。`key` 承载字段身份：**不同字段的相同值变化不会被合并**（例：`/constraints/policy_version` 与 `/constraints/ontology_version` 都 `"v1"→"v2"` → key 不同 → 保留**两条** entry）。
 - **排序（全序）**：primary `axis` 固定序（evidence<constraint<option<dependency<conclusion）；secondary `key` 字典序；tertiary `change`（`added`<`changed`<`removed`）；quaternary `before`；quinary `after`。不依赖 Map/SQL/对象插入序；`(axis,key,change)` 唯一保证全序确定。
 - 空 `entries = []` ⟺ 五轴全等（且 namespace/maintenance_key 相同，否则 incomparable）。
 
@@ -302,36 +314,36 @@ export interface DiffEntry {
 
 - `inputs_hash` **仅作相等快判**：`a.payload.inputs_hash === b.payload.inputs_hash` → 跳过 `decision_inputs` 字段级 diff（canonical 相等，无字段差异）。
 - 不等时对 `decision_inputs` 下沉 **path-level diff**（确定性，集语义数组按成员）：
-  - `signals`（`Record<string, unknown>`）：逐 key，path `decision_inputs.signals.<key>`，标量 `changed` / key 增删 `added`/`removed`。
-  - `entity_snapshot`（`Record<slug, Record<as, unknown>>`）：path `decision_inputs.entity_snapshot.<slug>.<as>`。
-  - `evidence_refs`（`string[]`，集语义）：path `decision_inputs.evidence_refs[<ref>]`，增删。
-  - `inspected_claims?`（optional `string[]`，集语义）：path `decision_inputs.inspected_claims[<claim>]`，增删。
-- `dependency_manifest.declarations[]`（集语义，键 `(slug ?? "__global__")::as`）：**独立于 inputs_hash** 比对，path `dependency_manifest.declarations[<key>]`，字段级（table/as/fields/relation/direction/filter 任一变 → `changed`；条目增删 → `added`/`removed`）。键中 `slug`/`as` 为投影别名 identifier（不含分隔符 `::`，与 `integrity.validateDependencyDeclarations` 的 `(slug,as)` 唯一性键一致），故复合键无碰撞。
+  - `signals`（`Record<string, unknown>`）：逐 key，path `/decision_inputs/signals/<escaped-key>`，标量 `changed` / key 增删 `added`/`removed`。
+  - `entity_snapshot`（`Record<slug, Record<as, unknown>>`）：path `/decision_inputs/entity_snapshot/<escaped-slug>/<escaped-as>`。
+  - `evidence_refs`（`string[]`，集语义）：path `/decision_inputs/evidence_refs/<escaped-ref>`，增删。
+  - `inspected_claims?`（optional `string[]`，集语义）：path `/decision_inputs/inspected_claims/<escaped-claim>`，增删。
+- `dependency_manifest.declarations[]`（集语义）：**独立于 inputs_hash** 比对。global declaration path 为 `/dependency_manifest/declarations/global/<escaped-as>`；slug declaration path 为 `/dependency_manifest/declarations/slug/<escaped-slug>/<escaped-as>`。字段级（table/as/fields/relation/direction/filter 任一变 → `changed`；条目增删 → `added`/`removed`）。不复用 `integrity.validateDependencyDeclarations` 当前的字符串拼接 key，也不假设 identifier 禁止分隔符。
 - 所有 `key`/`before`/`after` 均 canonical；数组按集语义。用户因此能看到「哪个 signal / entity snapshot / evidence ref / inspected claim 变了」，而非仅「输入变了」。
 
 ### 5.4 纯核心 vs fetch 包装（含 incomparable）
 
 ```ts
-// 纯核心：对两条已可信 record 做 incomparable 判定 + 五轴字段级 diff，无 DB/registry 依赖
+// 模块私有纯核心：只由可信 fetch wrapper 调用，不作为生产导出 API
 export type DiffResult =
   | { ok: true; entries: DiffEntry[] }
   | { ok: false; reason: "incomparable" };   // namespace 或 maintenance_key 不同
-export function diffRecommendationRecords(a: RecommendationRecord, b: RecommendationRecord): DiffResult;
+function diffTrustedRecords(a: RecommendationRecord, b: RecommendationRecord): DiffResult;
 
 // fetch + fail-closed 包装
 export type DiffOutcome =
   | { ok: true; entries: DiffEntry[] }
   | { ok: false; reason: "not_found" | "integrity_failed" | "incomparable" };
-export function diffRecordsById(store: RecommendationStore, idA: string, idB: string): DiffOutcome;
+export function diffRecordsById(store: RecommendationRecordReader, idA: string, idB: string): DiffOutcome;
 ```
 
-- 纯核心做 incomparable 判定 + 五轴 diff，只依赖 `types` + `canonical`。
+- 模块私有纯核心做 incomparable 判定 + 五轴 diff，只依赖 `types` + `canonical`。生产 `diff.ts` **唯一运行时导出函数**为 `diffRecordsById`；调用者无法传入裸 `RecommendationRecord`，也不能用普通结构对象伪造 reader。
 - `diffRecordsById` 按 A→B fetch（A `null` → `not_found`；A 抛 → `integrity_failed`；B 同理），再调纯核心（`incomparable` 透传）。任一侧 fetch 失败立即 fail-closed，绝不对仅存一侧做部分 diff。
 
 ### 5.5 fail-closed
 
 - 任一 record 不可信 → 整体失败，不返回部分 entries。
-- 纯核心不做可信校验（输入契约：已可信）；fail-closed 责任在 `diffRecordsById` 的 fetch 层。
+- 模块私有纯核心不重复可信校验；fail-closed 责任在 `diffRecordsById` 的 fetch 层。因为 helper 不导出，生产调用路径无法绕过该层。
 
 ### 5.6 不生成用户文案（锁定 #12）
 
@@ -347,7 +359,7 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 
 **证明手段（分层）**：
 
-1. **结构性 import guard**：`replay.ts`/`diff.ts` 的 import 仅限 `store`（只调 `getById`）/`registry`（只调 `resolve` + 两个 manifest）/`rule-runtime`（只调 `decide`）/`canonical`/`types`/`integrity`（只读 helper）。**禁止** import raw DB 句柄（`rawDb`/`better-sqlite3`）、projection builder、search、vault、Lance、ingest 模块。落地：ESLint `no-restricted-imports` 规则 **或** 一个 `import` 自检测试（断言模块依赖图）。这是阻断「绕 store 写 raw DB / 触达 projection/search/vault/Lance」的主防线。
+1. **结构性 import guard + nominal reader facade**：`replay.ts`/`diff.ts` 的 import 仅限 `record-reader`/`registry`（replay 仅 type import `ResolveResult`）/`canonical`/`types`。运行时 deps 只暴露 `RecommendationRecordReader.getById` 与 resolver `resolve`；`record-reader.ts` 是唯一可 import `RecommendationStore` 的新模块，且只委托 `getById`。**禁止** replay/diff import `RecommendationStore` 实现、raw DB 句柄（`rawDb`/`better-sqlite3`）、projection builder、search、vault、Lance、ingest 模块。落地：一个 `import` 自检测试（断言模块依赖图）+ 导出面测试（`diff.ts` 运行时仅导出 `diffRecordsById`）+ compile-time negative fixture（普通结构 reader 不可赋值）。这是阻断「绕 trusted read / 绕 store 写 raw DB / 触达 projection/search/vault/Lance」的主防线。
 2. **DB `total_changes()`**：replay/diff 前后 `SELECT total_changes()`（该连接累计写操作数）相等 → 证明无任何 DB 写，**覆盖所有表**（含 pages/links/chunks/FTS），不依赖逐表快照。
 3. **recommendation 表快照（纵深）**：前后 `SELECT * FROM recommendation_records ORDER BY rowid` + `recommendation_lifecycle_history` byte 相等。
 4. **registry manifest 快照**：前后 `policyManifest()` + `registryAuditManifest()` byte 相等。
@@ -361,8 +373,8 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 
 ## 7. 方案对比
 
-### 方案 A（推荐）：`replayRecord` + `diffRecommendationRecords` 两个小模块，store/registry 注入
-- replay.ts 依赖 store+registry+rule-runtime+canonical+types；diff.ts 依赖 types+canonical（纯核心）+ store（fetch 包装）。
+### 方案 A（推荐）：`replayRecord` + `diffRecordsById` 两个小模块，最小 reader/resolver 注入
+- record-reader.ts 只把真实 `RecommendationStore.getById` 收窄为 nominal read facade；replay.ts 依赖 reader+最小 resolver type+canonical+types；diff.ts 依赖 reader+types+canonical。纯 diff helper 留在模块私有边界。
 - 职责分离：persistence（store）/ registration（registry）/ 重放与比对（本期）。纯核心可无 DB 单测。
 - 注入 seam 天然支持 spy（§6）。**不扩张 `record-store.ts`**。
 - 代价：两个新模块 + 一个轻量注入类型。可接受。
@@ -392,19 +404,22 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 | 6 | runner throw → 固定脱敏 `unverifiable`，无 stack/路径/record id/payload | fake runner `decide` 抛（含传入 JSON-safe 但语义 schema 错的 shape 致抛）→ `runner_failed`；`JSON.stringify(result)` 不含 record_id/payload/路径/stack |
 | 7 | spy 证明 replay 从不调 `captureInputs`，不读 vault/search/network/LLM | fake runner `captureInputs` 抛哨兵；replay 正常返回；call count=0 |
 | 8 | replay/diff 前后全存储层不变 | §6 七层证据：import guard + `total_changes()` + recommendation 两表 + registry manifest + Lance 目录，前后 byte/hash 相等 |
-| 9 | 两条相同 payload、不同 lifecycle/timestamp → diff 空 | payload 相同、mutable 字段不同的两 record；`diffRecommendationRecords` → `{ok:true, entries:[]}` |
+| 9 | 两条相同 payload、不同 lifecycle/timestamp → diff 空 | 在临时 DB 持久化两条 payload 相同、mutable 字段不同的 record，经 `RecommendationRecordReader.fromStore(realStore)` 调 `diffRecordsById` → `{ok:true, entries:[]}` |
 | 10 | 五轴 + 字段级独立 fixture（无复合假绿，Codex HIGH 2） | 各自独立 fixture，断言仅命中字段：`conclusion.action.target_ref` 改（conclusion 轴）；仅 `conclusion.alternatives` 增（option 轴）；仅 `applicability.requires_confirmation.tier` 改（constraint 轴）；仅一条 `risks`/`gaps` 改（constraint 轴）；不同 `maintenance_key` → `{ok:false, reason:"incomparable"}`；不同 `namespace` → `incomparable` |
 | 11 | diff 输入顺序 / 对象 key 顺序 / 数组顺序改变 → 输出稳定 | 拆三 fixture：(a) 仅打乱对象 key 序；(b) 仅打乱数组序（evidence_manifest/alternatives/risks/evidence_refs）；(c) 仅打乱 decision_inputs.entity_snapshot 的 slug/as 序。各自 entries 逐字节相等 |
 | 12 | 损坏的任一 diff record / 任一 id 不存在 → fail-closed，不返回部分 diff | 拆三 fixture：(a) A 或 B 经篡改使 `getById` 抛 → `{ok:false, reason:"integrity_failed"}`；(b) A 或 B 的 id 不存在 → `getById` 返回 `null` → `{ok:false, reason:"not_found"}`；(c) A 不存在且 B 损坏 → 取先命中者，仍 `{ok:false}`。均无 entries、不对存活侧部分 diff |
 | 13 | focused suite、`bun run lint`、`bun run check`、`bun run check:docs` 全绿 | 实现期 gate；spec 阶段不跑 |
 | 14 | diff/privacy scan 不含真实知识/绝对路径/凭据/个人标识 | 匿名 fixture；privacy 扫描过 |
 | **H1** | **不同字段相同值变化不被去重吞掉（Codex HIGH 1）** | `constraints.policy_version` 与 `constraints.ontology_version` 都 `"v1"→"v2"` → 断言**两条** entry（key 不同），change 均 `changed` |
-| **H3a** | **dependency inputs_hash 不等 → signals 字段级 diff** | 改 `decision_inputs.signals.candidate_count`（重算 inputs_hash）→ dependency 轴出 `decision_inputs.signals.candidate_count` 一条 `changed` entry，before/after canonical |
-| **H3b** | **entity_snapshot 字段级 diff** | 改某 `<slug>.<as>` 值 → `decision_inputs.entity_snapshot.<slug>.<as>` 一条 |
-| **H3c1** | **evidence_refs 集语义增删** | 增删一条 evidence_ref（重算 inputs_hash）→ `decision_inputs.evidence_refs[<ref>]` 一条 `added`/`removed`；顺序打乱不产生 entry |
-| **H3c2** | **inspected_claims 集语义增删** | 增删一条 inspected_claim → `decision_inputs.inspected_claims[<claim>]` 一条 `added`/`removed`；顺序打乱不产生 entry |
-| **H3d** | **declarations 字段级 diff** | 改一条 declaration 的 fields/filter → `dependency_manifest.declarations[<key>]` 一条 `changed` |
+| **H3a** | **dependency inputs_hash 不等 → signals 字段级 diff** | 改 `decision_inputs.signals.candidate_count`（重算 inputs_hash）→ dependency 轴出 `/decision_inputs/signals/candidate_count` 一条 `changed` entry，before/after canonical |
+| **H3b** | **entity_snapshot 字段级 diff** | 改某 `<slug>.<as>` 值 → `/decision_inputs/entity_snapshot/<escaped-slug>/<escaped-as>` 一条 |
+| **H3c1** | **evidence_refs 集语义增删** | 增删一条 evidence_ref（重算 inputs_hash）→ `/decision_inputs/evidence_refs/<escaped-ref>` 一条 `added`/`removed`；顺序打乱不产生 entry |
+| **H3c2** | **inspected_claims 集语义增删** | 增删一条 inspected_claim → `/decision_inputs/inspected_claims/<escaped-claim>` 一条 `added`/`removed`；顺序打乱不产生 entry |
+| **H3d** | **declarations 字段级 diff** | 改一条 declaration 的 fields/filter → `/dependency_manifest/declarations/(global|slug)/...` 一条 `changed` |
 | **H-ck** | **cross-kind（propose↔abstain）完整 entry 集** | A=propose、B=abstain（同 namespace/maintenance_key）；断言 conclusion 轴：`conclusion.kind` changed + `conclusion.action.{type,target_ref,reason,rollback_note}` 各一条 removed + `conclusion.reason` 一条 added；option 轴：A 的每条 `conclusion.alternatives[<canonical>]` 一条 removed（abstain 无 alternatives 字段）。验证与 option 轴不重叠 |
+| **H-key** | **动态 segment 含分隔符仍无碰撞** | 分别使用含 `.`, `:`, `::`, `[]`, `/`, `~` 的 slug/as/ref/claim/signal key；断言 JSON Pointer key 唯一、`~`/`/` 正确转义、remove+add 不误报 changed，A/B 输入顺序固定时两次输出 byte-stable |
+| **H-trust** | **生产导出 API 无裸 record/伪 reader 绕过入口** | 动态 import `diff.ts`，运行时导出 key 仅 `diffRecordsById`；compile-time negative fixture（`// @ts-expect-error`）证明普通 `{getById}` 结构对象不可赋给带 private field 的 `RecommendationRecordReader`；真实 reader 的 null/throw 仍 fail-closed |
+| **M-cap** | **最小权限依赖** | `RecommendationRecordReader` 实例只暴露 `getById`；resolver fake 用 `satisfies ExactRuleResolver`；源码/导出面扫描确认 replay/diff deps 不暴露或调用 store/registry 写方法 |
 
 ### 8.2 攻击映射（issue #330 §对抗性审查）
 
@@ -421,24 +436,25 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 
 ---
 
-## 9. Codex 复审锁定的决策 + 残留开放点
+## 9. Codex 复审锁定的决策 + 延后项
 
 **Codex 复审 `ee43297` 已锁定（本轮已落实）：**
 
 1. **五轴字段归属（HIGH 2）**：`option` = 只 `alternatives`；`conclusion` = `kind` + 最终 selected `action`（propose）或 abstain `reason`；`constraint` 纳入 `applicability` + `risks` + `gaps`（影响可执行边界）；`namespace`/`maintenance_key` 不同 → 固定 `incomparable`，不静默忽略、不进轴。
-2. **DiffEntry 字段身份（HIGH 1）**：加 `key`（字段路径）+ 显式 `change`；去重/排序按 `(axis,key,change,before,after)`，不同字段相同值变化不合并。
+2. **DiffEntry 字段身份（HIGH 1 + 二审 HIGH 2）**：加 RFC 6901 JSON Pointer `key` + 显式 `change`；动态 segment 逐个 escape；去重/排序按 `(axis,key,change,before,after)`，不同字段相同值变化不合并，identifier 分隔符不碰撞。
 3. **dependency 字段级 diff（HIGH 3）**：`inputs_hash` 仅快判，不等时下沉 `decision_inputs` path-level diff（signals/entity_snapshot/evidence_refs/inspected_claims）+ declarations 字段级。
+4. **可信边界与最小权限（二审 HIGH 1 + MEDIUM 1）**：纯 diff helper 模块私有；唯一生产导出按 id 经 nominal reader 可信读取；reader 只能从真实 store 构造且只暴露 `getById`，resolver 只暴露 `resolve`。
 
-**残留开放点：**
+**延后项与已决兼容字段：**
 
-4. **`runner_schema_incompatible` 统一为 `runner_failed`（MEDIUM 1，Codex 已认可统一）**：Phase 2A 无 typed input validator，`assertJsonSafe` 只保证可序列化不保证语义 schema 兼容，二者不可靠区分，统一 `runner_failed`。措辞已从「不可达」改为「不可区分」。typed validator 留后续 phase。
-5. **`replayed.inputs_match` 字面量字段**：integrity-first 下恒 `true`。保留以对齐 #330 类型，还是去掉？本 spec 保留，待 Codex 终判。
+5. **`runner_schema_incompatible` 统一为 `runner_failed`（MEDIUM 1，Codex 已认可统一）**：Phase 2A 无 typed input validator，`assertJsonSafe` 只保证可序列化不保证语义 schema 兼容，二者不可靠区分，统一 `runner_failed`。措辞已从「不可达」改为「不可区分」。typed validator 留后续 phase。
+6. **`replayed.inputs_match` 字面量字段**：integrity-first 下恒 `true`。本期保留以对齐 #330 已公布的内部类型建议；不再作为开放决策。
 
 ---
 
 ## 10. 范围与非目标
 
-**范围**：`replay.ts` + `diff.ts` 两个模块；新增 `ReplayResult`/`DiffAxis`/`DiffEntry`/`DiffChange`/`DiffResult`/`DiffOutcome`/`ReplayDeps` 类型；对应 `tests/core/recommendation/replay.test.ts` + `diff.test.ts`。跨模块稳定共用才入 `types.ts`，否则留模块内。
+**范围**：`record-reader.ts`（nominal read facade）+ `replay.ts` + `diff.ts` 三个小模块；模块内新增 `RecommendationRecordReader`/`ReplayResult`/`DiffAxis`/`DiffEntry`/`DiffChange`/`DiffResult`/`DiffOutcome`/`ReplayDeps`/`ExactRuleResolver`；对应 `tests/core/recommendation/record-reader.test.ts` + `replay.test.ts` + `diff.test.ts`。不修改 `record-store.ts`。
 
 **非目标**（与 #330 一致）：不新增 MCP/CLI/HTTP/Agent profile；不改 #327 rollout default；不实现 display/自然语言/derivation graph；不做 record vs current-state diff；不新增 migration/audit 表/retention scheduler；不自动执行 recommendation；不调 LLM/embedding/search/vault/网络；不改 recall/ranking/ingest/ontology 行为；不改 `record-store.ts`；**不引入 typed input validator**（§9 #4，留后续）。
 
@@ -448,20 +464,23 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 
 ## 11. 自审清单（提交前）
 
-- [x] 无 TBD / TODO（残留开放项为 §9 #4 typed validator 留后续 phase、§9 #5 `inputs_match` 待 Codex 终判；余皆 Codex 已锁或本 spec 已决）。
+- [x] 无 TBD / TODO（typed validator 留后续 phase；`inputs_match:true` 本期保留；余皆已决）。
 - [x] `ReplayResult` 5 状态判别不重叠、`unverifiable.reason` 3 值互斥；`DiffResult`/`DiffOutcome` union 不重叠（`incomparable` 独立）。
 - [x] replay 与 integrity（§8.1）/ freshness（§8.4）分工不冲突——replay 不重建投影、不写 freshness、不重跑 integrity。
 - [x] diff 五轴字段映射 Codex 已锁（§5.1）：option=alternatives only、conclusion=kind+action/reason、constraint 含 applicability/risks/gaps、namespace/maintenance_key 不同→incomparable。
 - [x] `DiffEntry` 含 `key`+`change`，去重不吞不同字段相同值变化（HIGH 1 attack fixture H1 已锁）。
+- [x] key 使用 RFC 6901 JSON Pointer，所有动态 segment 逐个 escape；不继承现有 declaration `::` 拼接碰撞（H-key 已锁）。
 - [x] dependency 轴 inputs_hash 不等时下沉 decision_inputs 字段级 path diff（HIGH 3，fixture H3a–H3d）。
+- [x] 生产 diff 只导出 `diffRecordsById`；纯 helper 模块私有，双侧只能经 nominal trusted reader 进入，普通结构 fake 不可冒充（H-trust 已锁）。
+- [x] replay/diff deps 为最小权限 reader/resolver；reader 只暴露 `getById`，resolver 只暴露 `resolve`（M-cap 已锁）。
 - [x] entries 全序排序（axis→key→change→before→after），不依赖 Map/SQL/插入序。
 - [x] schema 类异常统一 `runner_failed`，措辞「无 typed validator 不可靠区分」非「不可达」（MEDIUM 1）。
 - [x] 只读证明 claim 与证据对齐：import guard + `total_changes()` + Lance 目录快照 + recommendation 两表 + registry manifest（MEDIUM 2）。
 - [x] 无真实标识 / 绝对路径 / 凭据 / 个人标识（自审 grep 全清）。
 - [x] 范围可由单个 M 级 plan 完成，不改 schema、不加 MCP、不引入 typed validator。
-- [x] 12 条锁定决策（#330 handoff）逐条落地：#1 not_found→§3/§4.2 · #2 integrity-first→§4.2/§4.5 · #3 exact-version→§4.2 · #4 identity pin→§4.2/§4.3 · #5 frozen-input→§4.2 · #6 conclusion_mismatch→§3 · #7 sanitized enum→§3/§4.4 · #8 五轴 diff→§5 · #9 fail-closed→§5.4/§5.5 · #10 semantic/mutable 分离→§5.1 · #11 read-only→§6 · #12 no Agent surface→§5.6。Codex 复审 3 HIGH + 2 MEDIUM 全闭环。
-- [x] 14 验收 + 8 攻击 + H1/H3a/H3b/H3c1/H3c2/H3d/H-ck 专项逐条映射到独立 fixture（§8），无复合假绿。
+- [x] 12 条锁定决策（#330 handoff）逐条落地：#1 not_found→§3/§4.2 · #2 integrity-first→§4.2/§4.5 · #3 exact-version→§4.2 · #4 identity pin→§4.2/§4.3 · #5 frozen-input→§4.2 · #6 conclusion_mismatch→§3 · #7 sanitized enum→§3/§4.4 · #8 五轴 diff→§5 · #9 fail-closed→§5.4/§5.5 · #10 semantic/mutable 分离→§5.1 · #11 read-only→§6 · #12 no Agent surface→§5.6。两轮 Codex 复审 findings 均已闭环。
+- [x] 14 验收 + 8 攻击 + H1/H3a/H3b/H3c1/H3c2/H3d/H-ck/H-key/H-trust/M-cap 专项逐条映射到独立 fixture（§8），无复合假绿。
 
 ---
 
-**下一步**：本 spec 追加 `fix(spec)` commit 后停在 Codex re-review gate。未 APPROVE 前不进 writing-plans、不写实现。
+**下一步**：本 spec 经 Codex 自审与门禁通过后进入 writing-plans；实现仍须独立 worktree TDD + 对抗审查。
