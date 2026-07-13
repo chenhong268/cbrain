@@ -205,4 +205,39 @@ describe("RecommendationStore", () => {
     const r1Status = (db.rawDb.prepare("SELECT lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: r1.record_id }) as { l: string }).l;
     expect(r1Status).toBe("pending");
   });
+
+  test("HIGH: row-level auto_execute=1 with payload false (CHECK bypassed) → getById throws envelope mismatch", () => {
+    open();
+    const r = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
+    db.rawDb.exec("PRAGMA ignore_check_constraints=ON");
+    db.rawDb.prepare("UPDATE recommendation_records SET auto_execute=1 WHERE record_id=$id").run({ $id: r.record_id });
+    db.rawDb.exec("PRAGMA ignore_check_constraints=OFF");
+    // row auto_execute=1 but payload.applicability.auto_execute=false → envelope mismatch → the row
+    // is not silently accepted as "auto_execute:false"; read fails closed.
+    expect(() => store.getById(r.record_id)).toThrow(/envelope mismatch/);
+  });
+
+  test("HIGH: row-level inputs_hash tampered (CHECK bypassed) → getById throws envelope mismatch", () => {
+    open();
+    const r = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
+    db.rawDb.exec("PRAGMA ignore_check_constraints=ON");
+    db.rawDb.prepare("UPDATE recommendation_records SET inputs_hash='deadbeef' WHERE record_id=$id").run({ $id: r.record_id });
+    db.rawDb.exec("PRAGMA ignore_check_constraints=OFF");
+    expect(() => store.getById(r.record_id)).toThrow(/envelope mismatch/);
+  });
+
+  test("HIGH: envelope-corrupt rejected row does NOT trigger suppression (only trusted rows suppress)", () => {
+    open();
+    const p = mkPayload("h1");
+    const r = store.createRecord(p, "2026-07-12 10:00:00");
+    store.transitionLifecycle(r.record_id, "rejected", "2026-07-12 10:00:01", "declined"); // suppressed_until = 2026-07-19
+    // Sanity: an intact rejected row DOES suppress.
+    expect(() => store.createRecord(p, "2026-07-13 10:00:00")).toThrow(/suppressed/);
+    // Now corrupt r's envelope (CHECK bypassed): payload maintenance_key diverges from the column.
+    db.rawDb.exec("PRAGMA ignore_check_constraints=ON");
+    db.rawDb.prepare("UPDATE recommendation_records SET payload = json_set(payload, '$.maintenance_key', 'evil') WHERE record_id=$id").run({ $id: r.record_id });
+    db.rawDb.exec("PRAGMA ignore_check_constraints=OFF");
+    // r is no longer credible evidence of a prior rejection → it must NOT suppress creation.
+    expect(() => store.createRecord(p, "2026-07-13 10:00:01")).not.toThrow();
+  });
 });

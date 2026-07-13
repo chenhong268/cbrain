@@ -10,6 +10,7 @@ interface Row {
   fingerprint: string;
   inputs_hash: string;
   payload: string;
+  auto_execute: number;
   created_at: string;
   last_revalidated_at: string;
   lifecycle_status: string;
@@ -58,8 +59,20 @@ export class RecommendationStore {
       // rolls back — the write side never trusts row-level columns to drive a supersede (review HIGH).
       const active = activeRow ? fromRow(activeRow) : undefined;
       if (active && active.fingerprint === fingerprint) return active;
-      const rej = this.db.rawDb.prepare("SELECT 1 FROM recommendation_records WHERE maintenance_key=$key AND fingerprint=$fp AND lifecycle_status='rejected' AND (suppressed_until IS NULL OR suppressed_until > $now) LIMIT 1").get({ $key: key, $fp: fingerprint, $now: now });
-      if (rej) throw new Error("record-store: creation suppressed (rejected within suppression window)");
+      // Suppression must rest on TRUSTED evidence of a prior rejection. The matching rejected rows
+      // are read as full rows and envelope-validated via fromRow: a rejected row whose columns
+      // diverge from its payload (DB CHECK bypassed) is not credible and must NOT trigger suppression
+      // (review HIGH). Only the first envelope-valid rejected row in-window suppresses creation.
+      const rejRows = this.db.rawDb.prepare("SELECT * FROM recommendation_records WHERE maintenance_key=$key AND fingerprint=$fp AND lifecycle_status='rejected' AND (suppressed_until IS NULL OR suppressed_until > $now)").all({ $key: key, $fp: fingerprint, $now: now }) as Row[];
+      for (const rej of rejRows) {
+        try {
+          fromRow(rej);
+          throw new Error("record-store: creation suppressed (rejected within suppression window)");
+        } catch (e) {
+          if (!(e instanceof Error) || !e.message.includes("envelope mismatch")) throw e;
+          // envelope mismatch → untrusted rejected row, cannot suppress on it → continue
+        }
+      }
       if (active) {
         this.db.rawDb.prepare("UPDATE recommendation_records SET lifecycle_status='superseded' WHERE record_id=$id").run({ $id: active.record_id });
         this.history(active.record_id, "superseded", active.lifecycle_status, "superseded", undefined, undefined, "replaced by " + provisional.record_id, now);
@@ -125,11 +138,15 @@ export class RecommendationStore {
 
 function fromRow(r: Row): RecommendationRecord {
   const payload = JSON.parse(r.payload) as RecommendationImmutablePayload;
-  // Defense-in-depth envelope check (review HIGH-2). The migration's CHECK constraints enforce
-  // maintenance_key/inputs_hash == payload at the DB layer (HIGH-2b, primary), so a tampered row
-  // cannot normally exist; this read-side check still fails closed if a row ever diverges (legacy
-  // data, a future schema change, or a SQLite edge) so write-side trust is never silently broken.
-  if (payload.maintenance_key !== r.maintenance_key || payload.inputs_hash !== r.inputs_hash) {
+  // Defense-in-depth envelope check (review HIGH-2 / round-4 HIGH). The migration's CHECK constraints
+  // enforce maintenance_key/inputs_hash/auto_execute == payload at the DB layer (primary), so a
+  // tampered row cannot normally exist. This read-side check fails closed INDEPENDENTLY of CHECK
+  // (PRAGMA ignore_check_constraints bypasses CHECK) — it re-derives the three payload fields that
+  // have row-level column mirrors and rejects divergence, so neither read nor write paths ever trust
+  // a column over the payload. auto_execute is included: a row whose column says 1 but whose payload
+  // says false must not be silently accepted as "auto_execute:false".
+  const aeExpected = payload.applicability.auto_execute ? 1 : 0;
+  if (payload.maintenance_key !== r.maintenance_key || payload.inputs_hash !== r.inputs_hash || aeExpected !== r.auto_execute) {
     throw new Error(`record-store: row envelope mismatch for ${r.record_id} (column vs payload tampered)`);
   }
   return {

@@ -180,6 +180,9 @@ describe("loadAndProjectDisplay", () => {
     // resolveSafeTitle returns a title carrying a fullwidth internal term (ｓｃｏｒｅ); display must
     // NFKC-fold it before the guard and degrade to fallback rather than leak the raw fullwidth.
     const out = loadAndProjectDisplay(created.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "ｓｃｏｒｅ 实体A");
+    // Assert we reached projection (blocked===false) BEFORE the not-contain checks, so an unexpected
+    // block cannot make the test pass by skipping the assertions (no false green).
+    expect(out.blocked).toBe(false);
     if (!out.blocked) {
       expect(out.target_display).not.toContain("ｓｃｏｒｅ");
       expect(out.target_display).not.toContain("score");
@@ -209,6 +212,7 @@ describe("loadAndProjectDisplay", () => {
     // NFKC+guard catches the fullwidth.
     db.rawDb.prepare("UPDATE recommendation_records SET payload = REPLACE(payload, 'score', 'ｓｃｏｒｅ') WHERE record_id=$id").run({ $id: rec.record_id });
     const out = loadAndProjectDisplay(rec.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "实体A");
+    expect(out.blocked).toBe(false);
     if (!out.blocked) {
       expect(out.reason).not.toContain("ｓｃｏｒｅ");
       expect(out.reason).not.toContain("score");
