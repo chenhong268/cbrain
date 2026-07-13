@@ -241,6 +241,16 @@ describe("diffRecordsById", () => {
     expect(diffRecordsById(reader, left.record_id, right.record_id)).toEqual({ ok: true, entries: [] });
   });
 
+  test("duplicate members do not create changes on fields defined as sets", () => {
+    const { reader, left, right } = pair((payload) => {
+      payload.risks.push("risk:a");
+      payload.gaps.push("gap:a");
+      payload.decision_inputs.evidence_refs.push("health:r:entity/a:entity/b");
+      payload.decision_inputs.inspected_claims?.push("claim:a");
+    });
+    expect(diffRecordsById(reader, left.record_id, right.record_id)).toEqual({ ok: true, entries: [] });
+  });
+
   test("the same pair produces byte-identical output repeatedly", () => {
     const { reader, left, right } = pair((payload) => {
       payload.constraints.policy_version = "v2";

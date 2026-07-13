@@ -1,12 +1,14 @@
 import { canonicalJson } from "./canonical.js";
+import { normalizePayloadProse } from "./integrity.js";
 import type { RecommendationRecordReader } from "./record-reader.js";
 import type { ResolveResult } from "./registry.js";
+import type { RecommendationRecord } from "./types.js";
 
 export type ReplayResult =
   | { status: "not_found" }
   | { status: "replayed"; inputs_match: true }
   | { status: "rule_version_unavailable"; reason: "unknown" | "purged" | "incompatible" }
-  | { status: "unverifiable"; reason: "integrity_failed" | "producer_mismatch" | "runner_failed" }
+  | { status: "unverifiable"; reason: "integrity_failed" | "resolver_failed" | "producer_mismatch" | "runner_failed" }
   | { status: "conclusion_mismatch" };
 
 export interface ExactRuleResolver {
@@ -19,7 +21,7 @@ export interface ReplayDeps {
 }
 
 export function replayRecord(deps: ReplayDeps, recordId: string): ReplayResult {
-  let record;
+  let record: RecommendationRecord | null;
   try {
     record = deps.store.getById(recordId);
   } catch {
@@ -28,7 +30,12 @@ export function replayRecord(deps: ReplayDeps, recordId: string): ReplayResult {
   if (!record) return { status: "not_found" };
 
   const producer = record.payload.producer;
-  const resolved = deps.registry.resolve(producer.rule_id, producer.rule_version);
+  let resolved: ResolveResult;
+  try {
+    resolved = deps.registry.resolve(producer.rule_id, producer.rule_version);
+  } catch {
+    return { status: "unverifiable", reason: "resolver_failed" };
+  }
   if (resolved.status === "unavailable") {
     return { status: "rule_version_unavailable", reason: resolved.reason };
   }
@@ -43,7 +50,8 @@ export function replayRecord(deps: ReplayDeps, recordId: string): ReplayResult {
 
   try {
     const conclusion = resolved.runner.decide(record.payload.decision_inputs);
-    return canonicalJson(conclusion) === canonicalJson(record.payload.conclusion)
+    const normalizedConclusion = normalizePayloadProse({ ...record.payload, conclusion }).conclusion;
+    return canonicalJson(normalizedConclusion) === canonicalJson(record.payload.conclusion)
       ? { status: "replayed", inputs_match: true }
       : { status: "conclusion_mismatch" };
   } catch {

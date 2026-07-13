@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { canonicalJson } from "../../../src/core/recommendation/canonical.js";
 import { computeInputsHash } from "../../../src/core/recommendation/integrity.js";
 import { RecommendationRecordReader } from "../../../src/core/recommendation/record-reader.js";
@@ -101,6 +101,16 @@ describe("replayRecord", () => {
     expect(canonicalJson(first)).toBe(canonicalJson(second));
   });
 
+  test("replay applies the same prose normalization as record persistence", () => {
+    const store = openStore();
+    const registry = new VersionedRuleRegistry();
+    registry.register(rule("1.0.0", "ｒｅｖｉｅｗ   relation"));
+    const record = persistFor(store, registry, "1.0.0");
+
+    expect(replayRecord({ store: RecommendationRecordReader.fromStore(store), registry }, record.record_id))
+      .toEqual({ status: "replayed", inputs_match: true });
+  });
+
   test.each(["purged", "incompatible"] as const)("reports exact %s tombstone", (state) => {
     const store = openStore();
     const registry = new VersionedRuleRegistry();
@@ -124,6 +134,18 @@ describe("replayRecord", () => {
 
     expect(replayRecord({ store: RecommendationRecordReader.fromStore(store), registry: emptyRegistry }, record.record_id))
       .toEqual({ status: "rule_version_unavailable", reason: "unknown" });
+  });
+
+  test("sanitizes resolver exceptions without leaking internal text", () => {
+    const store = openStore();
+    const registry = new VersionedRuleRegistry();
+    registry.register(rule("1.0.0"));
+    const record = persistFor(store, registry, "1.0.0");
+    const throwing: ExactRuleResolver = { resolve: () => { throw new Error("/private/registry record-id payload"); } };
+
+    const result = replayRecord({ store: RecommendationRecordReader.fromStore(store), registry: throwing }, record.record_id);
+    expect(result).toEqual({ status: "unverifiable", reason: "resolver_failed" });
+    expect(JSON.stringify(result)).not.toContain("private/registry");
   });
 
   test("fails integrity before registry resolution", () => {
@@ -233,11 +255,23 @@ describe("replayRecord", () => {
     registry.register(rule("1.0.0"));
     registry.setActive("rule:r", "1.0.0");
     const record = persistFor(store, registry, "1.0.0");
+    const lanceDir = join(dir, "lance-snapshot");
+    const lanceFile = join(lanceDir, "fragment.bin");
+    mkdirSync(lanceDir, { recursive: true });
+    writeFileSync(lanceFile, "unchanged");
     const beforeChanges = db!.rawDb.prepare("SELECT total_changes() AS n").get() as { n: number };
     const beforeRecords = db!.rawDb.prepare("SELECT * FROM recommendation_records ORDER BY rowid").all();
     const beforeHistory = db!.rawDb.prepare("SELECT * FROM recommendation_lifecycle_history ORDER BY rowid").all();
     const beforePolicy = registry.policyManifest();
     const beforeAudit = registry.registryAuditManifest();
+    const beforeLance = readdirSync(lanceDir).map((name) => {
+      const stat = statSync(join(lanceDir, name));
+      return { name, size: stat.size, mtimeMs: stat.mtimeMs };
+    });
+    const registerSpy = spyOn(registry, "register");
+    const activeSpy = spyOn(registry, "setActive");
+    const purgeSpy = spyOn(registry, "markPurged");
+    const incompatibleSpy = spyOn(registry, "markIncompatible");
 
     expect(replayRecord({ store: RecommendationRecordReader.fromStore(store), registry }, record.record_id))
       .toEqual({ status: "replayed", inputs_match: true });
@@ -247,5 +281,13 @@ describe("replayRecord", () => {
     expect(db!.rawDb.prepare("SELECT * FROM recommendation_lifecycle_history ORDER BY rowid").all()).toEqual(beforeHistory);
     expect(registry.policyManifest()).toBe(beforePolicy);
     expect(registry.registryAuditManifest()).toBe(beforeAudit);
+    expect(readdirSync(lanceDir).map((name) => {
+      const stat = statSync(join(lanceDir, name));
+      return { name, size: stat.size, mtimeMs: stat.mtimeMs };
+    })).toEqual(beforeLance);
+    expect(registerSpy).toHaveBeenCalledTimes(0);
+    expect(activeSpy).toHaveBeenCalledTimes(0);
+    expect(purgeSpy).toHaveBeenCalledTimes(0);
+    expect(incompatibleSpy).toHaveBeenCalledTimes(0);
   });
 });

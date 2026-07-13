@@ -161,7 +161,7 @@ export type ReplayResult =
   | { status: "not_found" }
   | { status: "replayed"; inputs_match: true }
   | { status: "rule_version_unavailable"; reason: "unknown" | "purged" | "incompatible" }
-  | { status: "unverifiable"; reason: "integrity_failed" | "producer_mismatch" | "runner_failed" }
+  | { status: "unverifiable"; reason: "integrity_failed" | "resolver_failed" | "producer_mismatch" | "runner_failed" }
   | { status: "conclusion_mismatch" };
 ```
 
@@ -171,11 +171,11 @@ export type ReplayResult =
 | 新增 `conclusion_mismatch` 独立状态 | 锁定 #6：conclusion 不一致 ≠ unavailable/unverifiable |
 | `replayed.inputs_match` 收为字面量 `true` | integrity-first 保证到达 `replayed` 时 inputs_hash 必已通过，`inputs_match` 恒真；保留字段以对齐 #330 类型 |
 | `replayed` 去掉 `conclusion` 字段 | 成功路径，caller 已持 record（经 `getById`），重复回传 `conclusion`（payload 子集）无信息增益且扩大泄露面 |
-| `unverifiable.reason` 由 `string` 收为 **3 值** enum | 锁定 #7：固定 enum，禁止 exception message/stack 泄露 |
+| `unverifiable.reason` 由 `string` 收为 **4 值** enum | 锁定 #7：固定 enum，禁止 store/registry/runner exception message/stack 泄露；`resolver_failed` 精确区分 registry 异常与版本确实 unavailable |
 | **偏离 #330 建议形态：删 `runner_schema_incompatible`，统一 `runner_failed`** | Phase 2A **无 typed input validator**——`assertJsonSafe` 只保证可序列化、不保证语义 schema 兼容，JSON-safe 的错误 shape 可让 runner 抛错，故**无法可靠区分** schema incompatibility 与 runner exception，统一映射 `runner_failed`（**非「不可达」**）；typed validator 留后续，本期不扩 scope（§9 #4） |
 | `rule_version_unavailable.reason` 直接透传 registry 的 `unknown\|purged\|incompatible` | 锁定 #3：精确版本；三类不混淆 |
 
-**union 不重叠自检**：5 个 `status` 字面量两两不同；`unverifiable.reason` 3 值互斥；附加字段不产生歧义判别。✅
+**union 不重叠自检**：5 个 `status` 字面量两两不同；`unverifiable.reason` 4 值互斥；附加字段不产生歧义判别。✅
 
 ---
 
@@ -216,6 +216,8 @@ step 1  rec = store.getById(recordId)
         └─ 返回可信 record                  → 继续（已过 auto_execute 绝对不变量 + envelope + checkIntegrity）
 
 step 2  r = registry.resolve(rec.payload.producer.rule_id, rec.payload.producer.rule_version)
+        ├─ 抛（任何 Error）                 → catch，丢弃 .message
+        │                                     → { status: "unverifiable", reason: "resolver_failed" }
         └─ r.status === "unavailable"       → { status: "rule_version_unavailable", reason: r.reason }  // 透传 enum
 
 step 3  身份钉扎（identity pin；任一不等 → producer_mismatch，不调 decide）
@@ -232,7 +234,9 @@ step 4  try { replayed = runner.decide(rec.payload.decision_inputs) }
         └─ 抛（任何，含 schema-shape 错误）  → catch，丢弃 .message → { status: "unverifiable", reason: "runner_failed" }
         // 禁止调用 runner.captureInputs；只喂冻结 decision_inputs
 
-step 5  if (canonicalJson(replayed) === canonicalJson(rec.payload.conclusion))
+step 5  normalized = normalizePayloadProse({ ...rec.payload, conclusion: replayed }).conclusion
+        // 必须复用写入侧同一 normalization，避免多空格/NFKC 造成假 mismatch
+        if (canonicalJson(normalized) === canonicalJson(rec.payload.conclusion))
           → { status: "replayed", inputs_match: true }
         else
           → { status: "conclusion_mismatch" }
@@ -245,6 +249,7 @@ step 5  if (canonicalJson(replayed) === canonicalJson(rec.payload.conclusion))
 | `not_found` | `getById` 返回 `null` | 否 |
 | `integrity_failed` | `getById` 抛（auto_execute/envelope/integrity 任一，payload JSON 损坏 `SyntaxError`，或 `decision_inputs` 非JSON-safe 致 `checkIntegrity` 内 `assertJsonSafe` 抛） | 否 |
 | `rule_version_unavailable` | `resolve` 返回 `unavailable`（`unknown`/`purged`/`incompatible`） | 否 |
+| `resolver_failed` | `resolve` 抛；丢弃异常文本，固定脱敏 | 否 |
 | `producer_mismatch` | 身份钉扎：`runner.code_hash` 或 `def.registry_ref` 不等（承重）；或 `def.rule_id`/`def.rule_version` 不等（防御纵深） | 否 |
 | `runner_failed` | `runner.decide` 抛（含 JSON-safe 但语义 schema 不兼容致 runner 抛——见下） | 调了，但 fail-closed |
 | `replayed` | `decide` 返回且 canonical conclusion 相等 | 是 |
@@ -256,7 +261,9 @@ step 5  if (canonicalJson(replayed) === canonicalJson(rec.payload.conclusion))
 
 - `ReplayResult` 所有变体**只含 enum / 字面量**：`status`、`reason`、`inputs_match`。**绝不**包含 `record_id`、`payload`、`conclusion`、异常 `message`、`stack`、文件路径、slug、ref。
 - `getById` 抛出的 `Error` message 含 `record_id` + integrity `code`——`replayRecord` 必须 `catch (_e) { ... }`，**不读 `e.message`**，统一映射为 `integrity_failed`。
+- `registry.resolve` 抛错同理：`catch (_e)`，不读 message，映射 `resolver_failed`；不得误报 `unknown`（后者表示正常 resolve 后确实无历史版本）。
 - `runner.decide` 抛错同理：`catch (_e)`，不读 message，映射 `runner_failed`。**不靠字符串匹配区分 schema/failure**——无 typed validator，二者不可靠区分（§4.3）。
+- runner 返回值的 write-time prose normalization 与 `canonicalJson` 比较也必须在同一 try/catch 内；非 JSON-safe/cyclic/NaN 返回统一 `runner_failed`，不得把 canonical 异常抛给 caller。
 - `rule_version_unavailable.reason` 直接透传 registry 的 enum（结构化串，非泄露向量）。
 
 ### 4.5 与 integrity / freshness 的分工（锁定 #2，Phase 0 §8.1 vs §8.2 / F14）
@@ -306,6 +313,7 @@ export interface DiffEntry {
 
 - **`change` 显式派生**：元素 A 有 B 无 → `removed`；B 有 A 无 → `added`；都有但 canonical 不等 → `changed`。标量字段（如 `constraints.policy_version`、`conclusion.kind`）只可能 `changed`（永 present）。
 - **JSON Pointer 编码**：`escapePointerSegment(s) = s.replaceAll("~", "~0").replaceAll("/", "~1")`。path 由固定 segment 与逐个转义后的动态 segment 用 `/` 连接；不得先拼动态 identifier 再整体转义。`slug=null` 的 global declaration 使用固定分支 `/dependency_manifest/declarations/global/<escaped-as>`；有 slug 使用 `/dependency_manifest/declarations/slug/<escaped-slug>/<escaped-as>`，不使用 `__global__` sentinel。
+- **集合基数**：标为 set 的数组（`risks`、`gaps`、`confirm`、`alternatives`、`evidence_refs`、`inspected_claims`）忽略成员顺序与重复次数；重复同一成员不是新的语义证据，也不产生 diff。
 - **去重（修正 HIGH 1）**：按完整 `(axis, key, change, before, after)` 五元组去重——**仅**防 impl 重复报告同一变化。`key` 承载字段身份：**不同字段的相同值变化不会被合并**（例：`/constraints/policy_version` 与 `/constraints/ontology_version` 都 `"v1"→"v2"` → key 不同 → 保留**两条** entry）。
 - **排序（全序）**：primary `axis` 固定序（evidence<constraint<option<dependency<conclusion）；secondary `key` 字典序；tertiary `change`（`added`<`changed`<`removed`）；quaternary `before`；quinary `after`。不依赖 Map/SQL/对象插入序；`(axis,key,change)` 唯一保证全序确定。
 - 空 `entries = []` ⟺ 五轴全等（且 namespace/maintenance_key 相同，否则 incomparable）。
@@ -359,7 +367,7 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 
 **证明手段（分层）**：
 
-1. **结构性 import guard + nominal reader facade**：`replay.ts`/`diff.ts` 的 import 仅限 `record-reader`/`registry`（replay 仅 type import `ResolveResult`）/`canonical`/`types`。运行时 deps 只暴露 `RecommendationRecordReader.getById` 与 resolver `resolve`；`record-reader.ts` 是唯一可 import `RecommendationStore` 的新模块，且只委托 `getById`。**禁止** replay/diff import `RecommendationStore` 实现、raw DB 句柄（`rawDb`/`better-sqlite3`）、projection builder、search、vault、Lance、ingest 模块。落地：一个 `import` 自检测试（断言模块依赖图）+ 导出面测试（`diff.ts` 运行时仅导出 `diffRecordsById`）+ compile-time negative fixture（普通结构 reader 不可赋值）。这是阻断「绕 trusted read / 绕 store 写 raw DB / 触达 projection/search/vault/Lance」的主防线。
+1. **结构性 import guard + nominal reader facade**：`replay.ts`/`diff.ts` 的 import 仅限 `record-reader`/`registry`（replay 仅 type import `ResolveResult`）/`canonical`/`types`，以及 replay 对 `integrity.normalizePayloadProse` 的纯函数复用。运行时 deps 只暴露 `RecommendationRecordReader.getById` 与 resolver `resolve`；`record-reader.ts` 是唯一可 import `RecommendationStore` 的新模块，且只委托 `getById`。**禁止** replay/diff import `RecommendationStore` 实现、raw DB 句柄（`rawDb`/`better-sqlite3`）、projection builder、search、vault、Lance、ingest 模块。落地：一个 `import` 自检测试（断言模块依赖图）+ 导出面测试（`diff.ts` 运行时仅导出 `diffRecordsById`）+ compile-time negative fixture（普通结构 reader 不可赋值）。这是阻断「绕 trusted read / 绕 store 写 raw DB / 触达 projection/search/vault/Lance」的主防线。
 2. **DB `total_changes()`**：replay/diff 前后 `SELECT total_changes()`（该连接累计写操作数）相等 → 证明无任何 DB 写，**覆盖所有表**（含 pages/links/chunks/FTS），不依赖逐表快照。
 3. **recommendation 表快照（纵深）**：前后 `SELECT * FROM recommendation_records ORDER BY rowid` + `recommendation_lifecycle_history` byte 相等。
 4. **registry manifest 快照**：前后 `policyManifest()` + `registryAuditManifest()` byte 相等。
@@ -396,12 +404,12 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 
 | # | 验收 | fixture / 断言 |
 |---|---|---|
-| 1 | 同一 frozen record + 精确 runner → `replayed`，连续两次 byte-stable | `replayRecord` 两次，`canonicalJson(result)` 字节相等；`status==="replayed"`, `inputs_match===true` |
+| 1 | 同一 frozen record + 精确 runner → `replayed`，连续两次 byte-stable | `replayRecord` 两次，`canonicalJson(result)` 字节相等；`status==="replayed"`, `inputs_match===true`；另用 runner reason 含多空格/NFKC 字符证明 replay 复用写入 normalization、不产生假 mismatch |
 | 2 | active=v2，record 属仍保留的 v1 → 解析 v1 replay 成功 | registry 同时 live v1+v2 且 `setActive(v2)`；record producer 锁 v1；断言走 `resolve(v1)` 非 `resolveActive`，结果 `replayed` |
 | 3 | v1 为 unknown/purged/incompatible → 三种 `rule_version_unavailable` | 三 fixture：v1 未注册 / `markPurged` / `markIncompatible`；reason 分别等于三者 |
 | 4 | fingerprint/inputs_hash/producer.code_hash/registry_ref 任一篡改 → runner 未调 | 四 fixture：(a1) 改 fingerprint 列 → `integrity_failed`；(a2) 改 inputs_hash 不自洽 → `integrity_failed`；(b1) 自洽篡改 `producer.code_hash` + 重算 fingerprint → `producer_mismatch`；(b2) 自洽篡改 `producer.registry_ref` + 重算 fingerprint → `producer_mismatch`。均断言 `decide` call count=0 |
 | 5 | runner 对同输入返回不同 conclusion → `conclusion_mismatch` | fake runner `decide` 返回不同 conclusion；结果 `conclusion_mismatch` |
-| 6 | runner throw → 固定脱敏 `unverifiable`，无 stack/路径/record id/payload | fake runner `decide` 抛（含传入 JSON-safe 但语义 schema 错的 shape 致抛）→ `runner_failed`；`JSON.stringify(result)` 不含 record_id/payload/路径/stack |
+| 6 | resolver/runner 异常 → 固定脱敏 `unverifiable`，无 stack/路径/record id/payload | resolver throw → `resolver_failed`；runner `decide` 抛或返回 cyclic/NaN 非 JSON-safe 值 → `runner_failed`；`JSON.stringify(result)` 不含 record_id/payload/路径/stack |
 | 7 | spy 证明 replay 从不调 `captureInputs`，不读 vault/search/network/LLM | fake runner `captureInputs` 抛哨兵；replay 正常返回；call count=0 |
 | 8 | replay/diff 前后全存储层不变 | §6 七层证据：import guard + `total_changes()` + recommendation 两表 + registry manifest + Lance 目录，前后 byte/hash 相等 |
 | 9 | 两条相同 payload、不同 lifecycle/timestamp → diff 空 | 在临时 DB 持久化两条 payload 相同、mutable 字段不同的 record，经 `RecommendationRecordReader.fromStore(realStore)` 调 `diffRecordsById` → `{ok:true, entries:[]}` |
@@ -431,7 +439,7 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 | 4 | hidden read：replay 内调 captureInputs/DB projection 重读当前状态 | fake runner `captureInputs` 抛哨兵；import guard 阻断 projection/search/vault；spy `getById` 仅一次；call count 证据 |
 | 5 | partial diff：一侧损坏仍返回另一侧差异 | `diffRecordsById` 损坏侧 fail-closed → `{ok:false}`，无 entries |
 | 6 | nondeterminism：Map/object/array 顺序导致字节不稳定 | `canonicalJson` 排序 key+数组；entries 全序排序（axis→key→change→before→after）；同对 record 两次 diff byte 相等（验收 #11 三 fixture 佐证） |
-| 7 | error leak：runner throw 带 stack/路径/payload/id 出 | `catch (_e)` 不读 message；result 仅 enum；`JSON.stringify` 扫描 |
+| 7 | error leak：resolver/runner throw 或 canonical failure 带 stack/路径/payload/id 出 | 三段 catch 均不读 message；result 仅 enum；`JSON.stringify` 扫描 |
 | 8 | side effect：replay/diff 改 freshness/history/registry/存储 | §6 七层证据 |
 
 ---
@@ -465,7 +473,7 @@ replay/diff 前后须证明**完全不变**：recommendation 两表、mutable �
 ## 11. 自审清单（提交前）
 
 - [x] 无 TBD / TODO（typed validator 留后续 phase；`inputs_match:true` 本期保留；余皆已决）。
-- [x] `ReplayResult` 5 状态判别不重叠、`unverifiable.reason` 3 值互斥；`DiffResult`/`DiffOutcome` union 不重叠（`incomparable` 独立）。
+- [x] `ReplayResult` 5 状态判别不重叠、`unverifiable.reason` 4 值互斥；`DiffResult`/`DiffOutcome` union 不重叠（`incomparable` 独立）。
 - [x] replay 与 integrity（§8.1）/ freshness（§8.4）分工不冲突——replay 不重建投影、不写 freshness、不重跑 integrity。
 - [x] diff 五轴字段映射 Codex 已锁（§5.1）：option=alternatives only、conclusion=kind+action/reason、constraint 含 applicability/risks/gaps、namespace/maintenance_key 不同→incomparable。
 - [x] `DiffEntry` 含 `key`+`change`，去重不吞不同字段相同值变化（HIGH 1 attack fixture H1 已锁）。

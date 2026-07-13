@@ -106,7 +106,7 @@ expect(replayRecord(depsIncompatible, recordV1.record_id)).toEqual({ status: "ru
 expect(replayRecord(depsUnknown, recordV1.record_id)).toEqual({ status: "rule_version_unavailable", reason: "unknown" });
 ```
 
-Also assert: active v2 does not replace frozen v1; tampered row returns `integrity_failed` before registry resolve; code hash/ref mismatch returns `producer_mismatch`; changed deterministic conclusion returns `conclusion_mismatch`; runner throw returns only `runner_failed`; `captureInputs` call count remains zero.
+Also assert: active v2 does not replace frozen v1; tampered row returns `integrity_failed` before registry resolve; resolver throw returns `resolver_failed`; code hash/ref mismatch returns `producer_mismatch`; changed deterministic conclusion returns `conclusion_mismatch`; runner throw/non-JSON-safe return yields `runner_failed`; write-time prose normalization is reused; `captureInputs` call count remains zero.
 
 - [ ] **Step 2: Verify RED**
 
@@ -121,7 +121,7 @@ export type ReplayResult =
   | { status: "not_found" }
   | { status: "replayed"; inputs_match: true }
   | { status: "rule_version_unavailable"; reason: "unknown" | "purged" | "incompatible" }
-  | { status: "unverifiable"; reason: "integrity_failed" | "producer_mismatch" | "runner_failed" }
+  | { status: "unverifiable"; reason: "integrity_failed" | "resolver_failed" | "producer_mismatch" | "runner_failed" }
   | { status: "conclusion_mismatch" };
 
 export function replayRecord(deps: ReplayDeps, recordId: string): ReplayResult {
@@ -364,4 +364,3 @@ Run a diff-only scan for local paths, real names, credentials, and non-anonymous
 Commit format: `fix(rec): address replay diff adversarial review (#330)`.
 
 Do not push or close #330 during implementation handoff.
-
