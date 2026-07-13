@@ -10,7 +10,7 @@
 // This file calls the tools through the REAL protocol: InMemoryTransport + Client.callTool.
 // It is the load-bearing contract that would have caught the bug. It runs BOTH modes.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, mkdtempSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -263,6 +263,147 @@ describe("#327 transport — structured mode: real Client.callTool returns valid
         expect(result.structuredContent).toBeDefined();
         const sc = result.structuredContent as Record<string, unknown>;
         expect(sc.schema_version).toBe(1);
+      } finally {
+        await close();
+      }
+    });
+  });
+});
+
+describe("#331 transport — recall/query boundary validates over real Client.callTool", () => {
+  let root: string;
+  let db: CBrainDB;
+  let deps: CBrainDeps;
+
+  beforeEach(() => {
+    root = freshRoot("transport-recall-query");
+    const vaultPath = join(root, "vault");
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(join(root, "test.sqlite"));
+    deps = makeDeps(db, vaultPath, join(root, "runtime"));
+    db.rawDb.prepare(
+      "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, mention_count) VALUES (?, ?, ?, ?, ?, 1, 5)",
+    ).run("entity/entity-a", "entity/person", "实体A", "entity-a.md", "hash-a");
+    writeFileSync(join(vaultPath, "entity-a.md"), "---\ntitle: 实体A\ntype: entity/person\n---\n实体A的正常内容。");
+  });
+
+  afterEach(() => {
+    db.close();
+    if (existsSync(root)) rmSync(root, { recursive: true });
+  });
+
+  test("legacy tools advertise no schema and return no structuredContent", async () => {
+    await withEnv(OUTPUT_MODE_ENV, "legacy", async () => {
+      const server = createServer(deps);
+      const { client, close } = await wireTransport(server);
+      try {
+        for (const [name, args] of [
+          ["query", { query: "实体A" }],
+          ["deep_recall", { query: "实体A" }],
+          ["cbrain_recall", { query: "主题A之前讨论过吗" }],
+        ] as const) {
+          const result = asTransportResult(await client.callTool({ name, arguments: args }));
+          expect(result.isError).toBeFalsy();
+          expect(result.structuredContent).toBeUndefined();
+          expect(await getToolOutputSchema(client, name)).toBeUndefined();
+        }
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  test("structured direct tools validate schemas while frontdoor stays schema-free", async () => {
+    await withEnv(OUTPUT_MODE_ENV, "structured", async () => {
+      const server = createServer(deps);
+      const { client, close } = await wireTransport(server);
+      try {
+        for (const [name, args] of [
+          ["query", { query: "实体A" }],
+          ["deep_recall", { query: "实体A" }],
+        ] as const) {
+          const result = asTransportResult(await client.callTool({ name, arguments: args }));
+          expect(result.isError).toBeFalsy();
+          expect(result.structuredContent?.schema_version).toBe(1);
+          expect(await getToolOutputSchema(client, name)).toBeDefined();
+        }
+
+        const frontdoor = asTransportResult(await client.callTool({
+          name: "cbrain_recall",
+          arguments: { query: "主题A之前讨论过吗" },
+        }));
+        expect(frontdoor.isError).toBeFalsy();
+        expect(frontdoor.structuredContent?.schema_version).toBe(1);
+        expect(await getToolOutputSchema(client, "cbrain_recall")).toBeUndefined();
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  test("structured deep_recall truncates 101 valid tags before real SDK output validation", async () => {
+    const tags = Array.from({ length: 101 }, (_, index) => `标签${index}`);
+    writeFileSync(
+      join(deps.vaultPath, "entity-a.md"),
+      `---\ntitle: 实体A\ntype: entity/person\ntags: [${tags.join(", ")}]\n---\n实体A的正常内容。`,
+    );
+    db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, 0, ?)")
+      .run("entity/entity-a", "实体A 独特召回标记");
+    db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)")
+      .run("entity/entity-a", "实体A 独特召回标记");
+
+    await withEnv(OUTPUT_MODE_ENV, "structured", async () => {
+      const server = createServer(deps);
+      const { client, close } = await wireTransport(server);
+      try {
+        const result = asTransportResult(await client.callTool({
+          name: "deep_recall",
+          arguments: { query: "实体A", detail: "normal" },
+        }));
+        expect(result.isError).toBeFalsy();
+        const data = result.structuredContent?.data as { entities: Array<{ tags?: string[] }> };
+        expect(data.entities[0].tags).toHaveLength(100);
+      } finally {
+        await close();
+      }
+    });
+  });
+
+  test("structured cbrain_recall preserves bounded semantics across all eight real routes", async () => {
+    const cases = [
+      ["grounded", "实体A有记录吗", "grounded_answer"],
+      ["content", "之前实体A当时怎么设计的", "query"],
+      ["episodic", "想不起名字了,那个人是谁", "query"],
+      ["hierarchy", "实体A的组织架构", "seed"],
+      ["overview", "总结实体A的全貌", "topic"],
+      ["relationship", "实体A和实体B有什么关系", "result"],
+      ["reasoning", "帮我判断实体A有无风险", "result"],
+      ["debug", "debug 一下实体A关键词在哪出现", "results"],
+    ] as const;
+
+    await withEnv(OUTPUT_MODE_ENV, "structured", async () => {
+      const server = createServer(deps);
+      const { client, close } = await wireTransport(server);
+      try {
+        for (const [label, query, expectedKey] of cases) {
+          const result = asTransportResult(await client.callTool({
+            name: "cbrain_recall",
+            arguments: { query },
+          }));
+          expect(result.isError, label).toBeFalsy();
+          const data = result.structuredContent?.data as {
+            answer?: string;
+            details?: Record<string, unknown>;
+          };
+          expect(data.answer, label).toBeString();
+          expect(data.details, label).toBeDefined();
+          expect(data.details, label).toHaveProperty(expectedKey);
+          const blob = JSON.stringify(data);
+          expect(blob.length, label).toBeLessThanOrEqual(12_000);
+          for (const hidden of ["chosen_route", "latency_ms", "source_slug", '"slug"', '"score"', '"body"', '"excerpt"']) {
+            expect(blob, `${label}:${hidden}`).not.toContain(hidden);
+          }
+        }
       } finally {
         await close();
       }

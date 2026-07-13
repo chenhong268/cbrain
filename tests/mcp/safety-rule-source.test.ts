@@ -6,7 +6,7 @@ import {
   sanitizeStructuredText,
 } from "../../src/core/safety/display-safety.js";
 
-// The exact regex sources as they exist on main today (lock against drift — Codex HIGH 1).
+// Exact shared rule-source contract. The intentional duplication locks source and order.
 const EXPECTED_DISPLAY_SOURCES: readonly string[] = [
   String(/\bscore\b/i),
   String(/\bdedup_key\b/i),
@@ -20,6 +20,7 @@ const EXPECTED_DISPLAY_SOURCES: readonly string[] = [
   String(/\brecords?\//i),
   String(/\/Users\//),
   String(/[A-Z]:\\/),
+  String(/(?:^|[\s"'`(])\/(?!\/)[^/\s"'`()]+(?:\/[^\s"'`)]*)?/),
   String(/\/(?:etc|root|var|proc|sys|home|tmp|opt|usr|private|mnt|srv|boot|dev)\//i),
   String(/\b(?:sk-|Bearer\s+)[A-Za-z0-9._-]{8,}/i),
   String(/\b(?:password|passwd|secret|api[_-]?key|access[_-]?token)\s*[=:]\s*\S+/i),
@@ -29,13 +30,13 @@ const EXPECTED_DISPLAY_SOURCES: readonly string[] = [
   String(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/),
 ];
 
-describe("DISPLAY_UNSAFE_PATTERNS behavior-preserving split (#327)", () => {
-  test("DISPLAY_UNSAFE_PATTERNS sources and order are unchanged vs main", () => {
+describe("DISPLAY_UNSAFE_PATTERNS shared rule source (#327/#331)", () => {
+  test("DISPLAY_UNSAFE_PATTERNS sources and order match the audited contract", () => {
     expect(DISPLAY_UNSAFE_PATTERNS.map(String)).toEqual([...EXPECTED_DISPLAY_SOURCES]);
   });
 
   test("CREDENTIAL_PATH_UNSAFE_PATTERNS is exactly the trailing path+credential subset (no more, no less)", () => {
-    const expected = EXPECTED_DISPLAY_SOURCES.slice(10); // last 9: 3 path + 6 credential
+    const expected = EXPECTED_DISPLAY_SOURCES.slice(10); // path + credential subset
     expect(CREDENTIAL_PATH_UNSAFE_PATTERNS.map(String).sort()).toEqual([...expected].sort());
   });
 
@@ -45,15 +46,15 @@ describe("DISPLAY_UNSAFE_PATTERNS behavior-preserving split (#327)", () => {
   });
 
   test("the two subsets compose back to DISPLAY_UNSAFE_PATTERNS with identical order", () => {
-    // DISPLAY = INTERNAL (10) ++ CREDENTIAL_PATH (9), order preserved.
+    // DISPLAY = INTERNAL (10) ++ CREDENTIAL_PATH (10), order preserved.
     const recomposed = [...INTERNAL_IDENTIFIER_UNSAFE_PATTERNS, ...CREDENTIAL_PATH_UNSAFE_PATTERNS];
     expect(recomposed.map(String)).toEqual(DISPLAY_UNSAFE_PATTERNS.map(String));
   });
 
   test("no new pattern sneaks in (counts)", () => {
-    expect(DISPLAY_UNSAFE_PATTERNS.length).toBe(19);
+    expect(DISPLAY_UNSAFE_PATTERNS.length).toBe(20);
     expect(INTERNAL_IDENTIFIER_UNSAFE_PATTERNS.length).toBe(10);
-    expect(CREDENTIAL_PATH_UNSAFE_PATTERNS.length).toBe(9);
+    expect(CREDENTIAL_PATH_UNSAFE_PATTERNS.length).toBe(10);
   });
 });
 
@@ -94,6 +95,10 @@ describe("sanitizeStructuredText — shared normalizer (spec §7.1 slug-value + 
     expect(sanitizeStructuredText("/Users/secret/private.md", "[removed]")).toBe("[removed]");
     expect(sanitizeStructuredText("score 0.9", "[removed]")).toBe("[removed]");
     expect(sanitizeStructuredText("ｓｃｏｒｅ", "[removed]")).toBe("[removed]");
+    for (const path of ["/Library/Application Support/secret.md", "/Applications/Tool/config.json", "/bin/private-tool"]) {
+      expect(sanitizeStructuredText(path, "[removed]")).toBe("[removed]");
+    }
+    expect(sanitizeStructuredText("https://example.test/path", "[removed]")).toBe("https://example.test/path");
   });
 
   // negatives: normal text + NL injection retained (§7.2/§7.3)

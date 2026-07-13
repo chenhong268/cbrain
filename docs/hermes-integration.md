@@ -89,6 +89,18 @@ cbrain mcp-config --http
 
 `ingest` 是日常捕获的主入口，砍了 Agent 只能用 `put_page`（跳过 NER → 不铸实体 → 记忆质量降级）。它的同步 NER 延迟有上界：内容上限 500k、NER 有 per-call timeout + fail-open（见 `src/core/ingestion/ner.ts` 的 `NER_DEFAULT_TIMEOUT_MS`），病理性的大块 dump 由上面的 bounded client timeout 兜住（快速失败，不毒化）。大块内容捕获建议传 `nerMode: "defer"`，NER 转后台 job，调用立即返回，彻底避开同步 NER 的延迟。
 
+## Structured output canary（#327 / #331）
+
+结构化输出仍是显式 pilot，服务默认保持 `legacy`。需要在部署前验证 `query`、`deep_recall` 与 `cbrain_recall` 的 structured 合同时，运行隔离 canary：
+
+```bash
+bun bin/check-recall-output-boundary-canary.ts
+```
+
+canary 使用临时 vault / SQLite / Lance 路径和随机 loopback 端口，完成真实 HTTP `/mcp` initialize、tools/list 与三次 tools/call。默认响应不得出现 `raw` / `audit`；`query` 与 `deep_recall` 还会经过 MCP SDK 的 `outputSchema` 校验。运行结束后会关闭临时 server 并删除临时状态，不修改 Hermes 配置、不重启 `ai.cbrain.serve`，也不切换现网默认模式。
+
+只有需要审计定位时才传 `include_raw=true`。在 structured 模式下，内部引用进入脱敏后的 `audit.raw`；凭据和绝对路径仍会被移除。不要把 structured output 当成完整提示注入隔离层，它的目标是减少默认 raw 暴露并稳定 Agent 消费合同。
+
 ## 排障
 
 - **serve 未运行**：wrapper health check 失败 → 重启 `launchctl kickstart -k "gui/$(id -u)/ai.cbrain.serve"`，等 3 秒 `curl -s http://127.0.0.1:<port>/health` → `{"ok":true,...}`。

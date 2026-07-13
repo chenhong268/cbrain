@@ -32,19 +32,19 @@ const SAFE_DATA_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** Deep-walk `data`: drop non-allowlist keys; pass string leaves through the shared normalizer. */
-export function sanitizeUntrustedData(value: unknown): unknown {
+export function sanitizeUntrustedData(value: unknown, allowedKeys: ReadonlySet<string> = SAFE_DATA_KEYS): unknown {
   if (typeof value === "string") {
     // shared normalizer: strip \p{Cc}/\p{Cf} (control + format/bidi classes) + NFKC + L1(credential/path/internal) + slug-value
     return sanitizeStructuredText(value, REMOVED);
   }
   if (Array.isArray(value)) {
-    return value.map(sanitizeUntrustedData);
+    return value.map((item) => sanitizeUntrustedData(item, allowedKeys));
   }
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      if (!SAFE_DATA_KEYS.has(k)) continue; // drop internal/unexpected keys (spec §7.1 snake/camelCase)
-      out[k] = sanitizeUntrustedData(v);
+      if (!allowedKeys.has(k)) continue; // drop internal/unexpected keys (spec §7.1 snake/camelCase)
+      out[k] = sanitizeUntrustedData(v, allowedKeys);
     }
     return out;
   }
@@ -62,6 +62,8 @@ export interface BuildToolResultInput {
   summaryStructured: ToolSummary;
   /** Untrusted vault-derived structured fields. Sanitized in structured mode. */
   data: Record<string, unknown>;
+  /** Tool-specific structural projection. Omitted for the Phase 1 graph/timeline contract. */
+  dataKeys?: ReadonlySet<string>;
   /** Full payload — audit source. */
   raw: unknown;
   includeRaw: boolean;
@@ -88,9 +90,24 @@ export function buildToolResult(input: BuildToolResultInput): BuiltToolResult {
 
   // structured mode: use the whitelisted summaryStructured directly — NOT legacy `summary`,
   // which for graph shortest_path carries fromTitle/toTitle (vault-derived) (Codex HIGH 1).
-  const sanitizedData = sanitizeUntrustedData(data) as Record<string, unknown>;
-  const redactedRaw = includeRaw ? redactAudit(raw) : null;
-  const audit = redactedRaw !== null ? { audit: { raw: redactedRaw } } : {};
+  let sanitizedData: Record<string, unknown> = {};
+  try {
+    sanitizedData = sanitizeUntrustedData(data, input.dataKeys) as Record<string, unknown>;
+  } catch {
+    // Read-only structured surfaces fail closed: a malformed/proxied value must
+    // not crash the tool or leak the rejected payload through an error string.
+  }
+  let redactedRaw: unknown;
+  if (includeRaw) {
+    try {
+      const serialized = JSON.stringify(redactAudit(raw));
+      if (serialized !== undefined) redactedRaw = JSON.parse(serialized) as unknown;
+    } catch {
+      // Redaction failure omits audit entirely; returning unredacted raw is never
+      // an acceptable fallback.
+    }
+  }
+  const audit = redactedRaw !== undefined ? { audit: { raw: redactedRaw } } : {};
 
   const text = JSON.stringify(
     { schema_version: OUTPUT_SCHEMA_VERSION, display: displayStructured, summary: summaryStructured, data: sanitizedData, ...audit },

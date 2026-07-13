@@ -18,6 +18,14 @@ import { assembleEvidencePack, type EvidencePack } from "../../core/retrieval/ev
 import { kmContextApi, formatKmRelatedLine } from "../../core/recall/km-context.js";
 import { isCurrentFactLink } from "../../core/shared.js";
 import { hydrateRecallSlugs } from "./recall-hydration.js";
+import { buildToolResult } from "./result-builder.js";
+import {
+  DEEP_RECALL_OUTPUT_SCHEMA,
+  projectGroundedRecallData,
+  projectRecallData,
+  RECALL_DATA_KEYS,
+  structuredSummary,
+} from "./recall-output.js";
 
 export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
   server.registerTool("deep_recall", {
@@ -74,6 +82,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       knowledge_map_context: z.enum(["on", "off"]).optional().default("off")
         .describe("【探索线索，非主召回】开启后在主结果之外补充同一知识域的相关节点，帮 Agent 决定下一步探索什么。不改变主结果排序，不作为事实依据。默认 off。"),
     },
+    ...(ctx.outputMode === "structured" ? { outputSchema: DEEP_RECALL_OUTPUT_SCHEMA } : {}),
   }, async ({ query, limit, strategy, session_id, detail: detailLevel, multiStep, grounded, include_raw, evidence, knowledge_map_context }) => {
     const cap = Math.min(limit ?? 5, 5);
     // Internal fanout: search a wider candidate pool so evidence collection and
@@ -231,6 +240,19 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         const groundedPayload = { query, grounded_answer: groundedResult, search_meta: diagnosticMeta };
         const { display, summary, raw } = formatGroundedRecallEnvelope(groundedPayload);
         const { search_meta: _gm, ...groundedLegacy } = groundedPayload;
+        if (ctx.outputMode === "structured") {
+          return buildToolResult({
+            mode: ctx.outputMode,
+            display,
+            displayStructured: "已完成记忆检索。",
+            summary,
+            summaryStructured: structuredSummary(summary, "recall"),
+            data: projectGroundedRecallData(groundedResult as unknown as Record<string, unknown>),
+            dataKeys: RECALL_DATA_KEYS,
+            raw: { ...raw, ...groundedLegacy },
+            includeRaw: include_raw ?? false,
+          });
+        }
         if (include_raw) {
           return {
             content: [{
@@ -250,6 +272,19 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       const emptyPayload = { query, entities: [], summary: "暂时没找到相关记忆", search_meta: diagnosticMeta };
       const { display: emptyDisplay, summary: emptySummary, raw: emptyRaw } = formatRecallEnvelope(emptyPayload);
       const { summary: emptyLegacySummary, search_meta: _em, ...emptyRest } = emptyPayload;
+      if (ctx.outputMode === "structured") {
+        return buildToolResult({
+          mode: ctx.outputMode,
+          display: emptyDisplay,
+          displayStructured: "已完成记忆检索。",
+          summary: emptySummary,
+          summaryStructured: structuredSummary(emptySummary, "recall"),
+          data: projectRecallData({ result_summary: emptyLegacySummary, query, entities: [] }),
+          dataKeys: RECALL_DATA_KEYS,
+          raw: { ...emptyRaw, result_summary: emptyLegacySummary, ...emptyRest },
+          includeRaw: include_raw ?? false,
+        });
+      }
       if (include_raw) {
         return {
           content: [{
@@ -279,6 +314,19 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       };
       const { display: gDisplay, summary: gSummary, raw: gRaw } = formatGroundedRecallEnvelope(groundedPayload);
       const { search_meta: _gm2, ...groundedLegacy2 } = groundedPayload;
+      if (ctx.outputMode === "structured") {
+        return buildToolResult({
+          mode: ctx.outputMode,
+          display: gDisplay,
+          displayStructured: "已完成记忆检索。",
+          summary: gSummary,
+          summaryStructured: structuredSummary(gSummary, "recall"),
+          data: projectGroundedRecallData(groundedResult as unknown as Record<string, unknown>),
+          dataKeys: RECALL_DATA_KEYS,
+          raw: { ...gRaw, ...groundedLegacy2 },
+          includeRaw: include_raw ?? false,
+        });
+      }
       if (include_raw) {
         return {
           content: [{
@@ -532,6 +580,34 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     // display appends the KM same-domain line after the base + insufficient prefix.
     const display = (surfaceInsufficient ? `只找到部分线索：${baseDisplay}` : baseDisplay) +
       (kmRelatedLine ? `\n${kmRelatedLine}` : "");
+    if (ctx.outputMode === "structured") {
+      const fullRaw = {
+        ...raw,
+        ...(evidencePack ? { evidence_pack: evidencePack } : {}),
+        ...(kmTrace ? { knowledge_map_context: kmTrace } : {}),
+      };
+      const compact = buildCompactRecallResponse({
+        display,
+        summary: envelopeSummary,
+        resultSummary: legacySummary,
+        query,
+        entities: entities as Array<Record<string, unknown>>,
+        searchMeta: diagnosticMeta,
+        proactiveHints: compactProactiveHints,
+        relatedContext: kmRelatedLine,
+      });
+      return buildToolResult({
+        mode: ctx.outputMode,
+        display,
+        displayStructured: "已完成记忆检索。",
+        summary: envelopeSummary,
+        summaryStructured: structuredSummary(envelopeSummary, "recall"),
+        data: projectRecallData(compact),
+        dataKeys: RECALL_DATA_KEYS,
+        raw: { ...fullRaw, result_summary: legacySummary, ...payloadRest },
+        includeRaw: include_raw ?? false,
+      });
+    }
     if (include_raw) {
       // Full audit/legacy payload — body/links/timeline/dossier, raw search_meta,
       // and the evidence pack (#232) when temporal intent fired.

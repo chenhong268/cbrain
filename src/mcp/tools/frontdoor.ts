@@ -20,6 +20,8 @@ import {
   sanitizeDisplay,
   type ToolSummary,
 } from "./format-result.js";
+import { buildToolResult } from "./result-builder.js";
+import { FRONTDOOR_DATA_KEYS, projectFrontdoorData, structuredSummary } from "./recall-output.js";
 
 type DetailLevel = "brief" | "normal" | "full";
 
@@ -44,8 +46,10 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
       query: z.string().max(1000).describe("用户的自然语言问题"),
       detail: z.enum(["brief", "normal", "full"]).optional().default("brief").describe("返回深度：brief=首轮短答，normal=标准，full=展开"),
       session_id: z.string().max(200).optional().describe("当前会话 ID，用于学习闭环"),
+      include_raw: z.boolean().optional().default(false)
+        .describe("structured 模式下为 true 时返回脱敏后的 audit.raw；默认 false。legacy 模式保持原输出。"),
     },
-  }, async ({ query, detail, session_id }) => {
+  }, async ({ query, detail, session_id, include_raw }) => {
     const started = Date.now();
     const routing = classifyFrontdoorQuery(query);
     const routeDetail = detail ?? "brief";
@@ -79,9 +83,22 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
     }
 
     envelope.raw.routing.latency_ms = Date.now() - started;
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-    };
+    if (ctx.outputMode === "legacy") {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+      };
+    }
+    return buildToolResult({
+      mode: ctx.outputMode,
+      display: envelope.display,
+      displayStructured: "已完成 CBrain 检索。",
+      summary: envelope.summary,
+      summaryStructured: structuredSummary(envelope.summary, "frontdoor"),
+      data: projectFrontdoorData(envelope.display, envelope.raw),
+      dataKeys: FRONTDOOR_DATA_KEYS,
+      raw: envelope.raw,
+      includeRaw: include_raw ?? false,
+    });
   });
 }
 

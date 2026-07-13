@@ -27,6 +27,10 @@ export const INTERNAL_IDENTIFIER_UNSAFE_PATTERNS: readonly RegExp[] = [
 export const CREDENTIAL_PATH_UNSAFE_PATTERNS: readonly RegExp[] = [
   /\/Users\//,
   /[A-Z]:\\/,
+  // Any POSIX absolute path, including /Library, /Applications, /bin, and
+  // single-segment roots. The boundary plus (?!\/) deliberately excludes
+  // URL schemes such as https://example.test/path.
+  /(?:^|[\s"'`(])\/(?!\/)[^/\s"'`()]+(?:\/[^\s"'`)]*)?/,
   // #311 secrecy hardening — sensitive Unix absolute paths (/etc/passwd, /root/.ssh, ...)
   // were NOT caught by the /Users/-only pattern.
   /\/(?:etc|root|var|proc|sys|home|tmp|opt|usr|private|mnt|srv|boot|dev)\//i,
@@ -47,8 +51,8 @@ export const CREDENTIAL_PATH_UNSAFE_PATTERNS: readonly RegExp[] = [
 ];
 
 // L1 display guard — sole deterministic rule source for what must not reach display/data.
-// Composed from the two subsets above; order is byte-identical to pre-#327 main (locked by
-// tests/mcp/safety-rule-source.test.ts). Do not add patterns here without amending the spec.
+// Composed from the two subsets above; exact order is locked by
+// tests/mcp/safety-rule-source.test.ts. Do not add patterns here without amending the spec.
 export const DISPLAY_UNSAFE_PATTERNS: readonly RegExp[] = [
   ...INTERNAL_IDENTIFIER_UNSAFE_PATTERNS,
   ...CREDENTIAL_PATH_UNSAFE_PATTERNS,
@@ -75,8 +79,8 @@ export function sanitizeDisplayText(text: string, fallback: string): string {
 }
 
 // ─── Shared structured-text normalizer (spec §7.1 slug-value + Unicode-control rows) ───
-// Consumed ONLY by sanitizeUntrustedData (structured `data`). sanitizeDisplayText /
-// assertSafeActionDisplay are unchanged → main/legacy display behavior byte-compatible.
+// Consumed ONLY by sanitizeUntrustedData (structured `data`). It does not alter legacy control
+// flow; the absolute-path rule above intentionally hardens all safety consumers.
 
 // C0/C1 control (\p{Cc}) + format/bidi controls (\p{Cf} — incl. U+00AD SOFT HYPHEN, U+061C ARABIC
 // LETTER MARK, U+180E MONGOLIAN VOWEL SEPARATOR, U+200B-200F, U+202A-202E bidi, U+2060-2064 invisible

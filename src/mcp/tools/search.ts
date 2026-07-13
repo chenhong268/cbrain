@@ -7,6 +7,8 @@ import { traceToSteps } from "../../core/retrieval/search-trace.js";
 import { trimHint, applyProactiveBudget } from "./trim.js";
 import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning } from "../../core/retrieval/search-diagnostics.js";
 import { formatQueryEnvelope } from "./format-result.js";
+import { buildToolResult } from "./result-builder.js";
+import { projectQueryData, QUERY_DATA_KEYS, QUERY_OUTPUT_SCHEMA, structuredSummary } from "./recall-output.js";
 
 export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
   // ─── query ───────────────────────────────────────────────
@@ -26,8 +28,11 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       session_id: z.string().max(200).optional().describe("Current conversation session ID for co-occurrence tracking"),
       multiStep: z.boolean().optional().default(false)
         .describe("多轮深度搜索：自动判断结果充分性、换策略重试、LLM重排序。开启条件：查询模糊/跨领域、首次结果不满意、需要全面覆盖时。精确查单个关键词不需要开。"),
+      include_raw: z.boolean().optional().default(false)
+        .describe("structured 模式下为 true 时返回脱敏后的 audit.raw；默认 false。legacy 模式保持原输出。"),
     },
-  }, async ({ query, limit, strategy, session_id, multiStep }) => {
+    ...(ctx.outputMode === "structured" ? { outputSchema: QUERY_OUTPUT_SCHEMA } : {}),
+  }, async ({ query, limit, strategy, session_id, multiStep, include_raw }) => {
     const actualStrategy = strategy ?? "smart";
     const cap = limit ?? 10;
     const start = Date.now();
@@ -178,9 +183,22 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     const { display, summary, raw } = formatQueryEnvelope(payload);
     // Strip search_meta from top-level spread — diagnostics only in raw
     const { search_meta: _meta, ...legacyPayload } = payload;
-    return {
-      content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...legacyPayload }, null, 2) }],
-    };
+    if (ctx.outputMode === "legacy") {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ display, summary, raw, ...legacyPayload }, null, 2) }],
+      };
+    }
+    return buildToolResult({
+      mode: ctx.outputMode,
+      display,
+      displayStructured: "已完成关键词检索。",
+      summary,
+      summaryStructured: structuredSummary(summary, "query"),
+      data: projectQueryData(payload),
+      dataKeys: QUERY_DATA_KEYS,
+      raw: { ...raw, ...legacyPayload },
+      includeRaw: include_raw ?? false,
+    });
   });
 
   // ─── get_chunks ──────────────────────────────────────────────

@@ -23,9 +23,14 @@ describe("redactAudit (#327)", () => {
       win: "C:\\Users\\someone\\secret.md",
       etc: "/etc/passwd",
       varlog: "/var/log/app/x.sqlite",
+      library: "/Library/Application Support/secret.md",
+      applications: "/Applications/Tool/config.json",
+      bin: "/bin/private-tool",
     })).toEqual({
       home: "[redacted]", win: "[redacted]", etc: "[redacted]", varlog: "[redacted]",
+      library: "[redacted]", applications: "[redacted]", bin: "[redacted]",
     });
+    expect(redactAudit({ url: "https://example.test/path" })).toEqual({ url: "https://example.test/path" });
   });
 
   test("RETAINS slug / id / internal / debug — audit's purpose", () => {
@@ -55,22 +60,29 @@ describe("redactAudit (#327)", () => {
     }
   });
 
-  test("RETAINS Date leaves (timeline timestamps) — class objects not dropped to {}", () => {
+  test("retains Date timestamp semantics as a JSON-safe ISO string", () => {
     const d = new Date("2025-01-01T00:00:00Z");
     const out = redactAudit({ created_at: d, updated_at: d }) as { created_at: unknown; updated_at: unknown };
-    expect(out.created_at).toEqual(d);
-    expect(out.created_at instanceof Date).toBe(true);
-    expect(out.updated_at instanceof Date).toBe(true);
+    expect(out.created_at).toBe("2025-01-01T00:00:00.000Z");
+    expect(out.updated_at).toBe("2025-01-01T00:00:00.000Z");
   });
 
-  test("RETAINS Map/Set/RegExp leaves — class objects not dropped to {}", () => {
+  test("uses native Date serialization instead of an overridable instance method", () => {
+    const date = new Date("2025-01-01T00:00:00Z");
+    Object.defineProperty(date, "toISOString", {
+      value: () => "/Users/private/DATE-SECRET.md",
+    });
+    expect(redactAudit({ date })).toEqual({ date: "2025-01-01T00:00:00.000Z" });
+  });
+
+  test("canonicalizes Map/Set and applies shared path redaction to RegExp strings", () => {
     const m = new Map([["k", "v"]]);
     const s = new Set([1, 2]);
     const r = /foo/i;
     const out = redactAudit({ m, s, r }) as { m: unknown; s: unknown; r: unknown };
-    expect(out.m).toBe(m);
-    expect(out.s).toBe(s);
-    expect(out.r).toBe(r);
+    expect(out.m).toEqual([{ key: "k", value: "v" }]);
+    expect(out.s).toEqual([1, 2]);
+    expect(out.r).toBe("[redacted]");
   });
 
   test("uses the shared CREDENTIAL_PATH_UNSAFE_PATTERNS via redactAudit (no copied regex — Codex HIGH 1)", () => {

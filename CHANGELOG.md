@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+- **Recall / query structured boundary（#331）**：显式 `CBRAIN_OUTPUT_BOUNDARY=structured` 时，`query`、`deep_recall` 与 `cbrain_recall` 统一返回稳定 structured envelope；默认不再暴露 raw、slug、score、routing、延迟与来源诊断，`include_raw=true` 才提供脱敏审计区。默认 rollout 仍为 `legacy`，检索与路由行为不变。
+- **真实协议与隔离 canary**：`query` / `deep_recall` 只在 structured 模式发布精确 `outputSchema`，并用真实 MCP transport 防止 `-32602` 假绿；新增临时 HTTP `/mcp` canary，验证三条高频工具且不触碰现网 Hermes/CBrain。
+
 ## [v2.0.6] — 2026-07-12
 
 ### Agent 合同与注意力治理（#309, #315-#319）
