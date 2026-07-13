@@ -41,14 +41,12 @@ export function replayRecord(deps: ReplayDeps, recordId: string): ReplayResult {
     return { status: "unverifiable", reason: "producer_mismatch" };
   }
 
-  let conclusion;
   try {
-    conclusion = resolved.runner.decide(record.payload.decision_inputs);
+    const conclusion = resolved.runner.decide(record.payload.decision_inputs);
+    return canonicalJson(conclusion) === canonicalJson(record.payload.conclusion)
+      ? { status: "replayed", inputs_match: true }
+      : { status: "conclusion_mismatch" };
   } catch {
     return { status: "unverifiable", reason: "runner_failed" };
   }
-
-  return canonicalJson(conclusion) === canonicalJson(record.payload.conclusion)
-    ? { status: "replayed", inputs_match: true }
-    : { status: "conclusion_mismatch" };
 }

@@ -104,12 +104,28 @@ function mapCanonicalMembers<T>(items: readonly T[], key: (item: T) => string): 
   return out;
 }
 
+function mapGroupedMembers<T>(items: readonly T[], key: (item: T) => string): Map<string, unknown> {
+  const groups = new Map<string, Map<string, T>>();
+  for (const item of items) {
+    const groupKey = key(item);
+    const values = groups.get(groupKey) ?? new Map<string, T>();
+    values.set(canonicalJson(item), item);
+    groups.set(groupKey, values);
+  }
+  const out = new Map<string, unknown>();
+  for (const [groupKey, values] of groups) {
+    const sorted = [...values.entries()].sort(([a], [b]) => compareText(a, b)).map(([, value]) => value);
+    out.set(groupKey, sorted.length === 1 ? sorted[0] : sorted);
+  }
+  return out;
+}
+
 function diffEvidence(
   entries: DiffEntry[],
   before: RecommendationRecord["payload"]["evidence_manifest"],
   after: RecommendationRecord["payload"]["evidence_manifest"],
 ): void {
-  const toMap = (items: typeof before) => mapCanonicalMembers(items, (entry) => pointer("evidence_manifest", entry.source, entry.ref));
+  const toMap = (items: typeof before) => mapGroupedMembers(items, (entry) => pointer("evidence_manifest", entry.source, entry.ref));
   addMappedSet(entries, "evidence", toMap(before), toMap(after));
 }
 

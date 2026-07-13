@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -99,6 +99,17 @@ describe("diffRecordsById", () => {
     expect(diffRecordsById(reader, record.record_id, "missing")).toEqual({ ok: false, reason: "integrity_failed" });
   });
 
+  test("a corrupt right side also fails closed after a trusted left read", () => {
+    const { store, reader } = open();
+    const left = store.createRecord(basePayload(), "2026-07-13 10:00:00");
+    const rightPayload = basePayload();
+    rightPayload.constraints.policy_version = "v2";
+    const right = store.createRecord(rightPayload, "2026-07-13 10:00:01");
+    db!.rawDb.prepare("UPDATE recommendation_records SET fingerprint='tampered' WHERE record_id=$id").run({ $id: right.record_id });
+
+    expect(diffRecordsById(reader, left.record_id, right.record_id)).toEqual({ ok: false, reason: "integrity_failed" });
+  });
+
   test("namespace or maintenance key mismatch is incomparable", () => {
     const { store, reader } = open();
     const left = store.createRecord(basePayload("slot:a"), "2026-07-13 10:00:00");
@@ -184,6 +195,22 @@ describe("diffRecordsById", () => {
     expect(entries[0]?.change).toBe("changed");
   });
 
+  test("duplicate evidence entries use set semantics instead of last-write order", () => {
+    const { store, reader } = open();
+    const leftPayload = basePayload();
+    leftPayload.evidence_manifest.push({ ...leftPayload.evidence_manifest[0]!, trust_state: "trusted" });
+    const left = store.createRecord(leftPayload, "2026-07-13 10:00:00");
+    const rightPayload = clonePayload(leftPayload);
+    rightPayload.evidence_manifest.reverse();
+    const rightId = "00000000-0000-4000-8000-000000000003";
+    db!.rawDb.prepare(`INSERT INTO recommendation_records
+      (record_id, maintenance_key, fingerprint, inputs_hash, payload, auto_execute, created_at, last_revalidated_at, lifecycle_status, freshness_status, suppressed_until)
+      SELECT $newId, maintenance_key, fingerprint, inputs_hash, $payload, auto_execute, '2026-07-13 10:00:01', '2026-07-13 10:00:01', 'superseded', 'fresh', NULL
+      FROM recommendation_records WHERE record_id=$oldId`).run({ $newId: rightId, $payload: JSON.stringify(rightPayload), $oldId: left.record_id });
+
+    expect(diffRecordsById(reader, left.record_id, rightId)).toEqual({ ok: true, entries: [] });
+  });
+
   test("dependency descends into signals, entity snapshots, refs, claims, and declarations", () => {
     const entries = entriesFor((payload) => {
       payload.decision_inputs.signals.candidate_count = 2;
@@ -222,5 +249,65 @@ describe("diffRecordsById", () => {
     });
     expect(canonicalJson(diffRecordsById(reader, left.record_id, right.record_id)))
       .toBe(canonicalJson(diffRecordsById(reader, left.record_id, right.record_id)));
+  });
+
+  test("RFC 6901 keys keep colliding delimiter-shaped identifiers distinct", () => {
+    const { store, reader } = open();
+    const leftPayload = basePayload();
+    leftPayload.decision_inputs.entity_snapshot = { "entity/a::b": { c: [{ value: 1 }] } };
+    leftPayload.decision_inputs.signals = { "signal/~.::[]": 1 };
+    leftPayload.decision_inputs.evidence_refs = ["ref/~.::[]"];
+    leftPayload.decision_inputs.inspected_claims = ["claim/~.::[]"];
+    leftPayload.evidence_manifest = [];
+    leftPayload.dependency_manifest.declarations = [{ slug: "entity/a::b", table: "pages", as: "c", fields: ["value"] }];
+    const left = store.createRecord(leftPayload, "2026-07-13 10:00:00");
+
+    const rightPayload = clonePayload(leftPayload);
+    rightPayload.decision_inputs.entity_snapshot = { "entity/a": { "b::c": [{ value: 2 }] } };
+    rightPayload.decision_inputs.signals = { "signal/~.::[]/other": 2 };
+    rightPayload.decision_inputs.evidence_refs = ["ref/~.::[]/other"];
+    rightPayload.decision_inputs.inspected_claims = ["claim/~.::[]/other"];
+    rightPayload.dependency_manifest.declarations = [{ slug: "entity/a", table: "pages", as: "b::c", fields: ["value"] }];
+    const right = store.createRecord(rightPayload, "2026-07-13 10:00:01");
+
+    const result = diffRecordsById(reader, left.record_id, right.record_id);
+    if (!result.ok) throw new Error(`unexpected diff failure: ${result.reason}`);
+    const keys = result.entries.map((entry) => entry.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain("/dependency_manifest/declarations/slug/entity~1a::b/c");
+    expect(keys).toContain("/dependency_manifest/declarations/slug/entity~1a/b::c");
+    expect(keys).toContain("/decision_inputs/signals/signal~1~0.::[]");
+    expect(keys).toContain("/decision_inputs/signals/signal~1~0.::[]~1other");
+    expect(keys.some((key) => key.includes("~1") && key.includes("~0"))).toBe(true);
+  });
+
+  test("replay and diff modules cannot import write-capable storage or hidden-read layers", () => {
+    const replaySource = readFileSync(new URL("../../../src/core/recommendation/replay.ts", import.meta.url), "utf8");
+    const diffSource = readFileSync(new URL("../../../src/core/recommendation/diff.ts", import.meta.url), "utf8");
+    const source = `${replaySource}\n${diffSource}`;
+    const imports = source.split("\n").filter((line) => line.startsWith("import ")).join("\n");
+    for (const forbiddenImport of ["record-store", "sqlite", "projection", "search", "lance", "vault", "ingest"]) {
+      expect(imports).not.toContain(forbiddenImport);
+    }
+    expect(source).not.toContain("captureInputs(");
+    expect(source).not.toContain("rawDb");
+  });
+
+  test("diff leaves every SQLite table and mutable recommendation field unchanged", () => {
+    const { store, reader } = open();
+    const left = store.createRecord(basePayload(), "2026-07-13 10:00:00");
+    const rightPayload = basePayload();
+    rightPayload.constraints.policy_version = "v2";
+    const right = store.createRecord(rightPayload, "2026-07-13 10:00:01");
+    const beforeChanges = db!.rawDb.prepare("SELECT total_changes() AS n").get() as { n: number };
+    const beforeRecords = db!.rawDb.prepare("SELECT * FROM recommendation_records ORDER BY rowid").all();
+    const beforeHistory = db!.rawDb.prepare("SELECT * FROM recommendation_lifecycle_history ORDER BY rowid").all();
+
+    expect(diffRecordsById(reader, left.record_id, right.record_id).ok).toBe(true);
+
+    const afterChanges = db!.rawDb.prepare("SELECT total_changes() AS n").get() as { n: number };
+    expect(afterChanges).toEqual(beforeChanges);
+    expect(db!.rawDb.prepare("SELECT * FROM recommendation_records ORDER BY rowid").all()).toEqual(beforeRecords);
+    expect(db!.rawDb.prepare("SELECT * FROM recommendation_lifecycle_history ORDER BY rowid").all()).toEqual(beforeHistory);
   });
 });

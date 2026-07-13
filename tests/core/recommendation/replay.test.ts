@@ -158,6 +158,26 @@ describe("replayRecord", () => {
     expect(decides).toBe(0);
   });
 
+  test.each(["registry_ref", "rule_id", "rule_version"] as const)("pins producer identity field %s", (field) => {
+    const store = openStore();
+    const registry = new VersionedRuleRegistry();
+    registry.register(rule("1.0.0"));
+    const record = persistFor(store, registry, "1.0.0");
+    let decides = 0;
+    const mismatch = resolverWith(registry, (result) => {
+      if (result.status !== "ok") return result;
+      return {
+        ...result,
+        def: { ...result.def, [field]: "different" },
+        runner: { ...result.runner, decide: (inputs) => { decides++; return result.runner.decide(inputs); } },
+      };
+    });
+
+    expect(replayRecord({ store: RecommendationRecordReader.fromStore(store), registry: mismatch }, record.record_id))
+      .toEqual({ status: "unverifiable", reason: "producer_mismatch" });
+    expect(decides).toBe(0);
+  });
+
   test("returns conclusion_mismatch without calling captureInputs", () => {
     const store = openStore();
     const registry = new VersionedRuleRegistry();
@@ -191,5 +211,41 @@ describe("replayRecord", () => {
     expect(JSON.stringify(replayed)).not.toContain(record.record_id);
     expect(JSON.stringify(replayed)).not.toContain("private/path");
     expect(JSON.stringify(replayed)).not.toContain("payload");
+  });
+
+  test("sanitizes a non-JSON-safe runner return instead of throwing", () => {
+    const store = openStore();
+    const registry = new VersionedRuleRegistry();
+    registry.register(rule("1.0.0"));
+    const record = persistFor(store, registry, "1.0.0");
+    const invalid = resolverWith(registry, (result) => result.status === "ok"
+      ? { ...result, runner: { ...result.runner, decide: () => ({ kind: "invalid", value: Number.NaN }) as never } }
+      : result);
+
+    expect(() => replayRecord({ store: RecommendationRecordReader.fromStore(store), registry: invalid }, record.record_id)).not.toThrow();
+    expect(replayRecord({ store: RecommendationRecordReader.fromStore(store), registry: invalid }, record.record_id))
+      .toEqual({ status: "unverifiable", reason: "runner_failed" });
+  });
+
+  test("replay leaves SQLite state and registry manifests byte-stable", () => {
+    const store = openStore();
+    const registry = new VersionedRuleRegistry();
+    registry.register(rule("1.0.0"));
+    registry.setActive("rule:r", "1.0.0");
+    const record = persistFor(store, registry, "1.0.0");
+    const beforeChanges = db!.rawDb.prepare("SELECT total_changes() AS n").get() as { n: number };
+    const beforeRecords = db!.rawDb.prepare("SELECT * FROM recommendation_records ORDER BY rowid").all();
+    const beforeHistory = db!.rawDb.prepare("SELECT * FROM recommendation_lifecycle_history ORDER BY rowid").all();
+    const beforePolicy = registry.policyManifest();
+    const beforeAudit = registry.registryAuditManifest();
+
+    expect(replayRecord({ store: RecommendationRecordReader.fromStore(store), registry }, record.record_id))
+      .toEqual({ status: "replayed", inputs_match: true });
+
+    expect(db!.rawDb.prepare("SELECT total_changes() AS n").get()).toEqual(beforeChanges);
+    expect(db!.rawDb.prepare("SELECT * FROM recommendation_records ORDER BY rowid").all()).toEqual(beforeRecords);
+    expect(db!.rawDb.prepare("SELECT * FROM recommendation_lifecycle_history ORDER BY rowid").all()).toEqual(beforeHistory);
+    expect(registry.policyManifest()).toBe(beforePolicy);
+    expect(registry.registryAuditManifest()).toBe(beforeAudit);
   });
 });
