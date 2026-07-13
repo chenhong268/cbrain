@@ -1,11 +1,32 @@
 # Changelog
 
-> Current: `v2.0.6` — Agent 合同与可信输出：自然语言前门、只读注意力队列、主动连接候选、可解释最短路径，以及 graph/timeline 结构化输出 pilot。
+> Current: `v2.0.7` — 可靠 NER 恢复、可治理 Recommendation Record、确定性 replay/diff，以及 recall/query 结构化输出边界。
 
 ## [Unreleased]
 
+## [v2.0.7] — 2026-07-13
+
+### 可靠写入恢复（#329）
+
+- **同步 NER 失败可恢复**：同步 NER 超时或 provider 错误后，内容与既有关系保持可用，并提交 durable recovery job；重复失败只保留一个 active recovery，不让补偿路径反过来阻断 ingest。
+- **关系来源不被误删**：wikilink 重建只替换 wikilink 自己拥有的 mention；同一关系若还有 manual、agent 或其他来源证据，会保留并提升为对应来源，避免一次失败清掉有效关系。
+
+### 可治理 Recommendation Record（#328, #330）
+
+- **建议不是事实**：新增确定性的 Recommendation Record 合同与 additive migration，保存冻结输入、证据/依赖声明、规则版本、风险、缺口和完整性指纹；不调用 LLM、不自动执行 repair/merge/sync/delete，也不写成 trusted fact。
+- **新鲜度与失效**：公开展示前按精确历史规则和 rule-scoped dependencies 重算 freshness；依赖漂移标记 stale，规则/ontology 不兼容标记 version_invalid，A→B→A 可恢复 fresh，生命周期保持独立。
+- **离线 replay / diff**：可用冻结输入与精确历史 rule version 重放建议，并确定性区分 evidence、constraint、policy、ontology 和 option 五类差异；损坏、未知版本或不可信记录 fail-closed。
+- **数据可靠性**：数据库 CHECK 与 store 统一可信解码共同防止 row/payload 分叉、`auto_execute` 篡改和损坏 rejected record 误抑制新建议。
+
+### Recall / query 结构化输出边界（#331）
+
 - **Recall / query structured boundary（#331）**：显式 `CBRAIN_OUTPUT_BOUNDARY=structured` 时，`query`、`deep_recall` 与 `cbrain_recall` 统一返回稳定 structured envelope；默认不再暴露 raw、slug、score、routing、延迟与来源诊断，`include_raw=true` 才提供脱敏审计区。默认 rollout 仍为 `legacy`，检索与路由行为不变。
 - **真实协议与隔离 canary**：`query` / `deep_recall` 只在 structured 模式发布精确 `outputSchema`，并用真实 MCP transport 防止 `-32602` 假绿；新增临时 HTTP `/mcp` canary，验证三条高频工具且不触碰现网 Hermes/CBrain。
+
+### Compatibility / Migration
+
+- `recommendation_records` 使用 additive migration；不重写既有 page/link/timeline，也不需要 vault 数据迁移。
+- `CBRAIN_OUTPUT_BOUNDARY` 默认继续为 `legacy`。v2.0.7 只发布 structured opt-in 能力，不自动改变现有 Agent 的响应合同。
 
 ## [v2.0.6] — 2026-07-12
 
