@@ -38,7 +38,7 @@ export class RecommendationStore {
 
   getById(id: string): RecommendationRecord | null {
     const r = this.db.rawDb.prepare("SELECT * FROM recommendation_records WHERE record_id=$id").get({ $id: id }) as Row | undefined;
-    return r ? fromRow(r) : null;
+    return r ? decodeTrustedRow(r) : null;
   }
 
   createRecord(payload: RecommendationImmutablePayload, now: string): RecommendationRecord {
@@ -53,26 +53,23 @@ export class RecommendationStore {
     const key = payload.maintenance_key;
     return this.db.transaction(() => {
       const activeRow = this.activeRow(key);
-      // Decode + envelope-validate the active row BEFORE any supersede/idempotency decision. If the
-      // DB CHECK was bypassed (PRAGMA ignore_check_constraints, ATTACH/restore, some SQLite builds)
-      // and the row's columns diverge from its payload, fromRow throws and the whole transaction
-      // rolls back — the write side never trusts row-level columns to drive a supersede (review HIGH).
-      const active = activeRow ? fromRow(activeRow) : undefined;
+      // Every row consumed on the write path is decoded through decodeTrustedRow: it enforces
+      // absolute safety invariants (auto_execute strictly false), envelope equality, AND full
+      // checkIntegrity. So a row that is envelope-self-consistent but content-corrupt — a double
+      // tamper (row+payload changed together with a recomputed fingerprint) or a payload-only tamper
+      // that breaks the fingerprint — is rejected, never trusted to drive a supersede. A throw
+      // aborts the whole transaction (review HIGH).
+      const active = activeRow ? decodeTrustedRow(activeRow) : undefined;
       if (active && active.fingerprint === fingerprint) return active;
-      // Suppression must rest on TRUSTED evidence of a prior rejection. The matching rejected rows
-      // are read as full rows and envelope-validated via fromRow: a rejected row whose columns
-      // diverge from its payload (DB CHECK bypassed) is not credible and must NOT trigger suppression
-      // (review HIGH). Only the first envelope-valid rejected row in-window suppresses creation.
+      // Suppression rests ONLY on trusted rejected rows. Decode every matching rejected row; any
+      // untrusted row (envelope/integrity/auto_execute failure) ABORTS the transaction (fail-closed)
+      // — it is never silently skipped, and it never falsely reports "suppressed". If all matching
+      // rows are trusted and at least one is in-window, creation is suppressed.
       const rejRows = this.db.rawDb.prepare("SELECT * FROM recommendation_records WHERE maintenance_key=$key AND fingerprint=$fp AND lifecycle_status='rejected' AND (suppressed_until IS NULL OR suppressed_until > $now)").all({ $key: key, $fp: fingerprint, $now: now }) as Row[];
       for (const rej of rejRows) {
-        try {
-          fromRow(rej);
-          throw new Error("record-store: creation suppressed (rejected within suppression window)");
-        } catch (e) {
-          if (!(e instanceof Error) || !e.message.includes("envelope mismatch")) throw e;
-          // envelope mismatch → untrusted rejected row, cannot suppress on it → continue
-        }
+        decodeTrustedRow(rej); // throws on untrusted row → tx rollback
       }
+      if (rejRows.length > 0) throw new Error("record-store: creation suppressed (rejected within suppression window)");
       if (active) {
         this.db.rawDb.prepare("UPDATE recommendation_records SET lifecycle_status='superseded' WHERE record_id=$id").run({ $id: active.record_id });
         this.history(active.record_id, "superseded", active.lifecycle_status, "superseded", undefined, undefined, "replaced by " + provisional.record_id, now);
@@ -136,20 +133,28 @@ export class RecommendationStore {
   }
 }
 
-function fromRow(r: Row): RecommendationRecord {
+/** Decode a row into a TRUSTED record. Envelope equality (column == payload) is necessary but NOT
+ *  sufficient — the row must also satisfy the ABSOLUTE safety invariants and pass full checkIntegrity
+ *  (recomputed from the payload, never trusting the row). This is the SOLE row→record path consumed
+ *  by getById, active supersede, and rejected suppression. It defeats:
+ *   - double tamper: row+payload auto_execute changed together (1/true) with a recomputed fingerprint
+ *     — passes envelope equality, but the absolute `auto_execute === 0 && payload === false` check
+ *     rejects it (review HIGH).
+ *   - payload-only tamper (e.g. reason changed, leaving envelope equal): checkIntegrity recomputes
+ *     the fingerprint and rejects the mismatch.
+ *   - column tamper with CHECK bypassed: the envelope equality check rejects it. */
+function decodeTrustedRow(r: Row): RecommendationRecord {
   const payload = JSON.parse(r.payload) as RecommendationImmutablePayload;
-  // Defense-in-depth envelope check (review HIGH-2 / round-4 HIGH). The migration's CHECK constraints
-  // enforce maintenance_key/inputs_hash/auto_execute == payload at the DB layer (primary), so a
-  // tampered row cannot normally exist. This read-side check fails closed INDEPENDENTLY of CHECK
-  // (PRAGMA ignore_check_constraints bypasses CHECK) — it re-derives the three payload fields that
-  // have row-level column mirrors and rejects divergence, so neither read nor write paths ever trust
-  // a column over the payload. auto_execute is included: a row whose column says 1 but whose payload
-  // says false must not be silently accepted as "auto_execute:false".
-  const aeExpected = payload.applicability.auto_execute ? 1 : 0;
-  if (payload.maintenance_key !== r.maintenance_key || payload.inputs_hash !== r.inputs_hash || aeExpected !== r.auto_execute) {
-    throw new Error(`record-store: row envelope mismatch for ${r.record_id} (column vs payload tampered)`);
+  // Absolute invariant — auto_execute must be STRICTLY row 0 AND payload false (not merely equal on
+  // both sides, which a double tamper can satisfy).
+  if (r.auto_execute !== 0 || payload.applicability.auto_execute !== false) {
+    throw new Error(`record-store: untrusted row ${r.record_id} (auto_execute not strictly false)`);
   }
-  return {
+  // Envelope: row-level mirror columns must equal the payload fields.
+  if (payload.maintenance_key !== r.maintenance_key || payload.inputs_hash !== r.inputs_hash) {
+    throw new Error(`record-store: untrusted row ${r.record_id} (envelope mismatch)`);
+  }
+  const rec: RecommendationRecord = {
     record_id: r.record_id,
     payload,
     fingerprint: r.fingerprint,
@@ -159,4 +164,9 @@ function fromRow(r: Row): RecommendationRecord {
     freshness_status: r.freshness_status as FreshnessStatus,
     suppressed_until: r.suppressed_until,
   };
+  // Full integrity recomputed from the payload (auto_execute/action.type/inputs_hash/fingerprint/
+  // cross-consistency). Any non-ok result means the row is not a credible record → reject.
+  const ig = checkIntegrity(rec);
+  if (!ig.ok) throw new Error(`record-store: untrusted row ${r.record_id} (integrity ${ig.code})`);
+  return rec;
 }

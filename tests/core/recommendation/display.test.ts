@@ -11,6 +11,7 @@ import { RecommendationManager } from "../../../src/core/recommendation/manager.
 import { loadAndProjectDisplay } from "../../../src/core/recommendation/display.js";
 import { policyHash } from "../../../src/core/recommendation/versions.js";
 import { ontologyHash } from "../../../src/core/recommendation/ontology.js";
+import { computeFingerprint } from "../../../src/core/recommendation/integrity.js";
 import { KNOWN_RELATIONS_DEF } from "../../../src/core/recommendation/producers/known-relations.js";
 import type { RecommendationImmutablePayload } from "../../../src/core/recommendation/types.js";
 import { SCHEMA_VERSION } from "../../../src/core/recommendation/types.js";
@@ -187,6 +188,26 @@ describe("loadAndProjectDisplay", () => {
       expect(out.target_display).not.toContain("ｓｃｏｒｅ");
       expect(out.target_display).not.toContain("score");
     }
+    db.close();
+  });
+
+  test("HIGH-attack1 (display): row+payload auto_execute double-tamper (self-consistent fp) → display blocks (integrity_failed)", () => {
+    const { db, store, reg, mgr } = fresh();
+    seed(db);
+    link(db, A, B, "candidate");
+    const created = mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00");
+    // double tamper: row=1, payload=true, fingerprint recomputed over tampered (CHECK off)
+    const row = db.rawDb.prepare("SELECT payload FROM recommendation_records WHERE record_id=$id").get({ $id: created.record_id }) as { payload: string };
+    const tampered = JSON.parse(row.payload) as RecommendationImmutablePayload;
+    (tampered.applicability as { auto_execute: boolean }).auto_execute = true;
+    const newFp = computeFingerprint(tampered);
+    db.rawDb.exec("PRAGMA ignore_check_constraints=ON");
+    db.rawDb.prepare("UPDATE recommendation_records SET auto_execute=1, payload=$p, fingerprint=$fp WHERE record_id=$id").run({ $id: created.record_id, $p: JSON.stringify(tampered), $fp: newFp });
+    db.rawDb.exec("PRAGMA ignore_check_constraints=OFF");
+    // getById → decodeTrustedRow throws (auto_execute not strictly false) → display maps to integrity_failed.
+    const out = loadAndProjectDisplay(created.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "实体A");
+    expect(out.blocked).toBe(true);
+    if (out.blocked) expect(out.reason).toBe("integrity_failed");
     db.close();
   });
 

@@ -206,15 +206,15 @@ describe("RecommendationStore", () => {
     expect(r1Status).toBe("pending");
   });
 
-  test("HIGH: row-level auto_execute=1 with payload false (CHECK bypassed) → getById throws envelope mismatch", () => {
+  test("HIGH: row-level auto_execute=1 with payload false (CHECK bypassed) → getById throws (auto_execute not strictly false)", () => {
     open();
     const r = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
     db.rawDb.exec("PRAGMA ignore_check_constraints=ON");
     db.rawDb.prepare("UPDATE recommendation_records SET auto_execute=1 WHERE record_id=$id").run({ $id: r.record_id });
     db.rawDb.exec("PRAGMA ignore_check_constraints=OFF");
-    // row auto_execute=1 but payload.applicability.auto_execute=false → envelope mismatch → the row
-    // is not silently accepted as "auto_execute:false"; read fails closed.
-    expect(() => store.getById(r.record_id)).toThrow(/envelope mismatch/);
+    // row auto_execute=1 but payload.applicability.auto_execute=false → decodeTrustedRow's absolute
+    // auto_execute check rejects it (not silently accepted as "auto_execute:false").
+    expect(() => store.getById(r.record_id)).toThrow(/auto_execute not strictly false/);
   });
 
   test("HIGH: row-level inputs_hash tampered (CHECK bypassed) → getById throws envelope mismatch", () => {
@@ -226,18 +226,54 @@ describe("RecommendationStore", () => {
     expect(() => store.getById(r.record_id)).toThrow(/envelope mismatch/);
   });
 
-  test("HIGH: envelope-corrupt rejected row does NOT trigger suppression (only trusted rows suppress)", () => {
+  test("HIGH-attack1: row+payload auto_execute=1/true double-tamper (self-consistent fp) → getById/createRecord fail, old record unchanged", () => {
+    open();
+    const r = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
+    // double tamper: row=1, payload=true, fingerprint recomputed over the tampered payload (CHECK off)
+    const row = db.rawDb.prepare("SELECT payload FROM recommendation_records WHERE record_id=$id").get({ $id: r.record_id }) as { payload: string };
+    const tampered = JSON.parse(row.payload) as RecommendationImmutablePayload;
+    (tampered.applicability as { auto_execute: boolean }).auto_execute = true;
+    const newFp = computeFingerprint(tampered);
+    db.rawDb.exec("PRAGMA ignore_check_constraints=ON");
+    db.rawDb.prepare("UPDATE recommendation_records SET auto_execute=1, payload=$p, fingerprint=$fp WHERE record_id=$id").run({ $id: r.record_id, $p: JSON.stringify(tampered), $fp: newFp });
+    db.rawDb.exec("PRAGMA ignore_check_constraints=OFF");
+    // envelope is self-consistent (1==true) AND fingerprint matches, but auto_execute is not strictly
+    // false → decodeTrustedRow's absolute check rejects it on every path.
+    expect(() => store.getById(r.record_id)).toThrow(/auto_execute not strictly false/);
+    expect(() => store.createRecord(mkPayload("h2"), "2026-07-12 10:00:01")).toThrow(/auto_execute not strictly false/);
+    const status = (db.rawDb.prepare("SELECT lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: r.record_id }) as { l: string }).l;
+    expect(status).toBe("pending"); // NOT superseded (tx rolled back)
+  });
+
+  test("HIGH-attack2: active payload reason changed (CHECK on) → idempotent create does NOT return the bad record", () => {
+    open();
+    store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
+    // CHECK stays ON; change only the payload reason (fingerprint now mismatches; envelope still equal).
+    db.rawDb.prepare("UPDATE recommendation_records SET payload = json_set(payload, '$.conclusion.action.reason', 'changed') WHERE record_id=(SELECT record_id FROM recommendation_records WHERE maintenance_key='k1')").run();
+    // idempotent create with the ORIGINAL payload: active.fingerprint (column) === fingerprint(new),
+    // but decodeTrustedRow(active) runs checkIntegrity → fingerprint_mismatch → throws (not returned).
+    expect(() => store.createRecord(mkPayload("h1"), "2026-07-12 10:00:01")).toThrow(/integrity fingerprint_mismatch/);
+  });
+
+  test("HIGH-attack3: rejected payload reason changed (CHECK on) → no suppression, no create, integrity failure", () => {
+    open();
+    const p = mkPayload("h1");
+    const r = store.createRecord(p, "2026-07-12 10:00:00");
+    store.transitionLifecycle(r.record_id, "rejected", "2026-07-12 10:00:01", "declined");
+    db.rawDb.prepare("UPDATE recommendation_records SET payload = json_set(payload, '$.conclusion.action.reason', 'changed') WHERE record_id=$id").run({ $id: r.record_id });
+    // bad rejected row (fingerprint mismatch) → fail-closed integrity error: NOT suppressed, NOT created.
+    expect(() => store.createRecord(p, "2026-07-13 10:00:00")).toThrow(/integrity fingerprint_mismatch/);
+  });
+
+  test("HIGH-attack4: envelope-corrupt rejected row → fail-closed (no silent skip, no false suppression)", () => {
     open();
     const p = mkPayload("h1");
     const r = store.createRecord(p, "2026-07-12 10:00:00");
     store.transitionLifecycle(r.record_id, "rejected", "2026-07-12 10:00:01", "declined"); // suppressed_until = 2026-07-19
-    // Sanity: an intact rejected row DOES suppress.
-    expect(() => store.createRecord(p, "2026-07-13 10:00:00")).toThrow(/suppressed/);
-    // Now corrupt r's envelope (CHECK bypassed): payload maintenance_key diverges from the column.
     db.rawDb.exec("PRAGMA ignore_check_constraints=ON");
     db.rawDb.prepare("UPDATE recommendation_records SET payload = json_set(payload, '$.maintenance_key', 'evil') WHERE record_id=$id").run({ $id: r.record_id });
     db.rawDb.exec("PRAGMA ignore_check_constraints=OFF");
-    // r is no longer credible evidence of a prior rejection → it must NOT suppress creation.
-    expect(() => store.createRecord(p, "2026-07-13 10:00:01")).not.toThrow();
+    // envelope-corrupt rejected row → decodeTrustedRow throws (fail-closed), not silently skipped.
+    expect(() => store.createRecord(p, "2026-07-13 10:00:00")).toThrow(/envelope mismatch/);
   });
 });
