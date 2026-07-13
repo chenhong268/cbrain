@@ -172,6 +172,21 @@ describe("loadAndProjectDisplay", () => {
     db.close();
   });
 
+  test("MEDIUM: fullwidth unsafe title (target_display) is NFKC-normalized + blocked at display", () => {
+    const { db, store, reg, mgr } = fresh();
+    seed(db);
+    link(db, A, B, "candidate");
+    const created = mgr.buildAndStore({ rule_id: "health:known_relations", slugs: [A, B] }, "2026-07-12 10:00:00");
+    // resolveSafeTitle returns a title carrying a fullwidth internal term (ｓｃｏｒｅ); display must
+    // NFKC-fold it before the guard and degrade to fallback rather than leak the raw fullwidth.
+    const out = loadAndProjectDisplay(created.record_id, { store, reader: new DeclaredProjectionReader(db), registry: reg, now: "2026-07-12 10:00:01" }, () => "ｓｃｏｒｅ 实体A");
+    if (!out.blocked) {
+      expect(out.target_display).not.toContain("ｓｃｏｒｅ");
+      expect(out.target_display).not.toContain("score");
+    }
+    db.close();
+  });
+
   test("HIGH-1b: post-write tamper of payload reason to fullwidth still blocked (NFKC at display layer)", () => {
     const { db, store, reg } = fresh();
     seed(db);

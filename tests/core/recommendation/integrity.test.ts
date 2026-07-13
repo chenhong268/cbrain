@@ -84,9 +84,18 @@ describe("checkIntegrity", () => {
     expect(x.ok).toBe(false);
     if (!x.ok) expect(x.code).toBe("illegal_action_type");
   });
-  test("F18: applicability.auto_execute tamper → fingerprint_mismatch", () => {
+  test("F10/F13: applicability.auto_execute !== false → illegal_auto_execute (integrity-layer, independent of DB CHECK)", () => {
+    const base = basePayload();
+    // self-consistent fingerprint over the tampered payload, so only the auto_execute value check catches it
+    const tampered: RecommendationImmutablePayload = { ...base, applicability: { ...base.applicability, auto_execute: true as unknown as false } };
+    const r: RecommendationRecord = { record_id: "r1", payload: tampered, fingerprint: computeFingerprint(tampered), created_at: "2026-07-12 10:00:00", last_revalidated_at: "2026-07-12 10:00:00", lifecycle_status: "pending", freshness_status: "fresh", suppressed_until: null };
+    const x = checkIntegrity(r);
+    expect(x.ok).toBe(false);
+    if (!x.ok) expect(x.code).toBe("illegal_auto_execute");
+  });
+  test("F18: applicability tamper → fingerprint_mismatch (auto_execute value is separately caught by illegal_auto_execute)", () => {
     const r = rec(basePayload());
-    (r.payload.applicability as { auto_execute: boolean }).auto_execute = true;
+    (r.payload.applicability as { requires_confirmation: { tier: string } }).requires_confirmation.tier = "high_impact";
     const x = checkIntegrity(r);
     expect(x.ok).toBe(false);
     if (!x.ok) expect(x.code).toBe("fingerprint_mismatch");

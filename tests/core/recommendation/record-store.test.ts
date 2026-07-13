@@ -188,4 +188,21 @@ describe("RecommendationStore", () => {
     expect(() => db.rawDb.prepare("UPDATE recommendation_records SET payload = json_set(payload, '$.applicability.auto_execute', 1) WHERE record_id=$id").run({ $id: r.record_id })).toThrow(/CHECK|constraint/i);
     expect(store.getById(r.record_id)?.payload.applicability.auto_execute).toBe(false);
   });
+
+  test("HIGH-A: write-side fail-closes when the active row has a bad envelope (DB CHECK bypassed via PRAGMA)", () => {
+    open();
+    const r1 = store.createRecord(mkPayload("h1"), "2026-07-12 10:00:00");
+    // Simulate a CHECK bypass: tamper r1's payload maintenance_key so it diverges from the column.
+    db.rawDb.exec("PRAGMA ignore_check_constraints=ON");
+    db.rawDb.prepare("UPDATE recommendation_records SET payload = json_set(payload, '$.maintenance_key', 'evil') WHERE record_id=$id").run({ $id: r1.record_id });
+    db.rawDb.exec("PRAGMA ignore_check_constraints=OFF");
+    // r1 now has column maintenance_key='k1' but payload.maintenance_key='evil' (bad envelope).
+    // A new createRecord for key 'k1' finds r1 active; the write side must detect the envelope
+    // mismatch via fromRow and fail closed (throw) rather than supersede the corrupt row.
+    expect(() => store.createRecord(mkPayload("h2"), "2026-07-12 10:00:01")).toThrow(/envelope mismatch/);
+    // r1 was NOT superseded (the transaction rolled back). Read the column directly — getById would
+    // itself throw on the bad-envelope row (fail-closed), which is the correct read-side behavior.
+    const r1Status = (db.rawDb.prepare("SELECT lifecycle_status AS l FROM recommendation_records WHERE record_id=$id").get({ $id: r1.record_id }) as { l: string }).l;
+    expect(r1Status).toBe("pending");
+  });
 });

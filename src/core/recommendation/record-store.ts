@@ -51,8 +51,13 @@ export class RecommendationStore {
     if (!integrity.ok) throw new Error(`record-store: integrity failed (${integrity.code})`);
     const key = payload.maintenance_key;
     return this.db.transaction(() => {
-      const active = this.activeRow(key);
-      if (active && active.fingerprint === fingerprint) return fromRow(active);
+      const activeRow = this.activeRow(key);
+      // Decode + envelope-validate the active row BEFORE any supersede/idempotency decision. If the
+      // DB CHECK was bypassed (PRAGMA ignore_check_constraints, ATTACH/restore, some SQLite builds)
+      // and the row's columns diverge from its payload, fromRow throws and the whole transaction
+      // rolls back — the write side never trusts row-level columns to drive a supersede (review HIGH).
+      const active = activeRow ? fromRow(activeRow) : undefined;
+      if (active && active.fingerprint === fingerprint) return active;
       const rej = this.db.rawDb.prepare("SELECT 1 FROM recommendation_records WHERE maintenance_key=$key AND fingerprint=$fp AND lifecycle_status='rejected' AND (suppressed_until IS NULL OR suppressed_until > $now) LIMIT 1").get({ $key: key, $fp: fingerprint, $now: now });
       if (rej) throw new Error("record-store: creation suppressed (rejected within suppression window)");
       if (active) {

@@ -8,7 +8,8 @@ export type IntegrityCode =
   | "cross_evidence_not_projected"
   | "cross_rule_id_mismatch"
   | "duplicate_declaration"
-  | "illegal_action_type";
+  | "illegal_action_type"
+  | "illegal_auto_execute";
 
 export type IntegrityResult = { ok: true } | { ok: false; code: IntegrityCode; message: string };
 
@@ -114,6 +115,12 @@ function normalizeActionProse(a: ProposedAction): ProposedAction {
 }
 
 export function checkIntegrity(r: RecommendationRecord): IntegrityResult {
+  // App-layer enforcement of the auto_execute:false invariant (spec §15 #5 / F10 / F13), INDEPENDENT
+  // of the DB CHECK(auto_execute=0). If the DB CHECK is bypassed (PRAGMA ignore_check_constraints,
+  // certain SQLite builds, ATTACH/restore), a payload with auto_execute=true and a self-consistent
+  // fingerprint would otherwise pass integrity and reach display. Reject here so createRecord AND
+  // every display-load fail closed without trusting the column.
+  if (r.payload.applicability.auto_execute !== false) return { ok: false, code: "illegal_auto_execute", message: "auto_execute is not false" };
   try {
     validateConclusionActionTypes(r.payload.conclusion);
   } catch {
