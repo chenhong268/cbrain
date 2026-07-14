@@ -283,6 +283,17 @@ Before any marked job calls the LLM, the worker verifies and freezes the exact i
 - `sourceKind = vault_hash`: read the raw vault file once, compute the existing `hashContent(rawFile)` value, and require `page:<hash>` to equal the scheduled fingerprint. Parse the NER body from those same bytes; do not re-read through a cache.
 - `sourceKind = raw_chunks`: re-read page type, raw chunks, and tags, reconstruct the byte-exact canonical JSON from §5, and require the `derived:` digest to equal the scheduled fingerprint. The NER body is the same ordered raw chunk contents joined with the existing `\n\n` convention; do not prefer the vault for this job.
 
+Pre-call verification is necessary but not sufficient because `nerEngine.extract()` and `EntityResolver.semanticResolve()` await external work. `ContentPipeline.processNer` therefore accepts an optional synchronous source guard used by every fingerprinted repair/ordinary job:
+
+1. Invoke it immediately after extraction returns, before shadow-verifier/audit side effects or the empty-extraction return.
+2. Invoke it again immediately after the final `semanticResolve()` await inside `applyExtraction` and before the first entity, alias, mention-count, page, fact, link, relation, or event write.
+3. No await is permitted between the final successful guard and the first/subsequent extraction writes.
+4. A failed guard throws a fixed internal `NER_SOURCE_CHANGED` signal; the worker discards the entire extraction and completes the scheduled attempt as `source_changed`/`skipped` with zero extraction writes. It must not write stale entities, relations, facts, events, aliases, mention counts, stubs, or links.
+
+`EntityResolver.resolveAll` and `semanticResolve` currently write aliases before returning. Guarded calls must enable a defer-writes mode: resolution records alias intent only, performs no alias mutation during either resolver phase, and applies the alias synchronously with the rest of `applyExtraction` only after the final guard. Unguarded sync/ingest behavior remains compatible. A test spies on every resolver/pipeline mutation method so the guard cannot claim zero writes while aliases leaked earlier.
+
+The guard rederives the scheduled source fingerprint from current DB/vault bytes without logging them. Sync/ingest calls that already operate on their immediate in-memory source may omit the guard; durable fingerprinted jobs must provide it.
+
 The mapping is fixed and performs zero LLM calls: an absent required vault file/raw chunk set is `blocked_source_unavailable`; present source bytes whose recomputed hash differs are `source_changed`; an unknown source kind, invalid fingerprint prefix, or source-kind/prefix disagreement is `invalid_terminal`. After a normal sync changes the DB fingerprint, the old terminal marker becomes `content_changed_requeue`.
 
 ### 6.2 Classification precedence
@@ -323,7 +334,7 @@ When the page fingerprint is unavailable, still surface live rows and live/cance
 
 Apply this deterministic algorithm:
 
-1. Collect **all live rows** for the slug: every `pending` row and every `running` row, irrespective of fingerprint or freshness. More than one live row is always `stateConflicts`; no lower-id live row may be ignored, and enqueue fails closed.
+1. Collect **all live rows** for the slug: every `pending` row and every `running` row, irrespective of fingerprint or freshness. More than one live row is `stateConflicts` except for exactly one sanctioned ordinary pair: one fresh running predecessor with an old fingerprint plus one pending successor with the current fingerprint, both unmarked, same slug, valid identity, and no third live row. The sanctioned pair is `active` without a conflict and follows §6.4/§6.5; two running, two pending, wrong-current fingerprint, marked/ordinary mixing, or any third row still fails closed. No lower-id live row may otherwise be ignored.
 2. If exactly one live row exists:
    - a marked row must belong to its latest **unfinalized** manifest and is always `active`; stale running also increments `staleRunning`. It is resumed only through that existing batch UUID, never moved into a new batch. A marked live row whose latest manifest claims to be finalized is a queue-integrity conflict.
    - legacy `pending` or fresh legacy `running` → `active`;
@@ -748,6 +759,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - marked terminal/failed changed fingerprint → same row requeued;
 - multiple historical matching rows → deterministic reuse, no new duplicate;
 - duplicate active/conflicting current rows → scalar conflict, no mutation;
+- exactly one fresh old-running/current-pending ordinary successor pair is active without conflict; predecessor done/failed/stale releases successor, while two-running, two-pending, wrong-fingerprint, or third-row shapes conflict;
 - malformed active JSON, invalid active slug/kind, and incomplete repair marker increment queue-integrity conflict and block all enqueue without leaking payload;
 - unrelated valid `entity_facts` does not match and does not create a conflict;
 - manifest UUID and ownership list are atomic; missing/corrupt manifest or child marker fails closed;
@@ -783,6 +795,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - sealed repair with non-null page hash sends raw chunks, never vault L1 summary, to the LLM;
 - vault/raw source drift after enqueue completes `source_changed` with zero LLM calls;
 - ordinary deferred rows freeze and verify the same source fingerprint; drift completes fixed skipped/source-changed with zero LLM while legacy no-repair rows retain compatibility;
+- deterministic extract/semantic-resolve concurrency changes F1→F2 after precheck but before writes: guarded resolver defers exact/normalized/LLM alias intents, final guard rejects F1 with zero entity/alias/mention/page/fact/link/relation/event mutations, and F2 successor remains processable;
 - F1 pending→F2 atomically reuses one row; fresh F1 running→F2 creates one waiting successor; stale F1 running→F2 completes F1 source-changed and releases exactly one F2, so only F2 invokes LLM;
 - F1 source-changed/source-unavailable/invalid zero-LLM terminal → F2 → revert stable F1 permits one real F1 attempt instead of deduping it;
 - batch-filtered consumer processes only the exact repair batch and leaves ordinary NER/entity-facts jobs untouched;
@@ -859,6 +872,7 @@ Required/allowed changes are limited to:
 - `src/core/maintenance/zero-link-backfill.ts` (new)
 - `src/core/ingestion/ner-backfill-contract.ts` (new; shared job name/TTL/repair marker constants, re-exported for compatibility)
 - `src/core/ingestion/pipeline.ts`
+- `src/core/ingestion/entity-resolver.ts` only for guarded defer-alias-write mode
 - `src/core/ingestion/ner-backfill.ts`
 - `src/core/ingestion/ner-write-path.ts` for structured submit disposition → accurate `nerPending`
 - `src/core/maintenance/health.ts`
@@ -1011,3 +1025,12 @@ The ninth review returned FAIL with three HIGH and one required MEDIUM finding. 
 4. Unified and alias submit/list/status/cancel/retry all share the same name-or-discriminator manifest predicate; wrong-name manifest-like rows are read-safe and mutation-safe.
 
 The independent reviewer must run a tenth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 27. Tenth adversarial review correction record
+
+The tenth review returned FAIL with two HIGH findings. This revision closes both:
+
+1. Fingerprinted durable NER uses a synchronous final source guard after the last extraction/resolution await and before any extraction write. Source drift discards the whole stale result, preventing F1 entities, facts, relations, or events from contaminating F2.
+2. The deterministic live-row algorithm explicitly exempts only the sanctioned fresh old-running/current-pending ordinary successor pair. All other multi-live shapes remain conflicts, and predecessor terminal/stale transitions release the successor.
+
+The independent reviewer must run an eleventh pass. The gate remains no CRITICAL/HIGH findings.
