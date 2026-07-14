@@ -4,7 +4,7 @@
 
 **Issue:** #342
 
-**Status:** Revision pending adversarial re-review
+**Status:** Adversarially approved for implementation
 
 **Base:** `3e0d048`
 
