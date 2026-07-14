@@ -66,7 +66,7 @@
 | 文件 | 用例数 | 说明 |
 |:-----|:-------|:-----|
 | `response-contract.routing-eval.jsonl` | 12 | 回答合约（长度/禁用词） |
-| `agent-facing.routing-eval.jsonl` | 29 | Agent 路由主评估 |
+| `agent-facing.routing-eval.jsonl` | 34 | Agent 路由主评估 |
 | `recall.routing-eval.jsonl` | 23 | 回忆路由 |
 | `episodic.routing-eval.jsonl` | 21 | 情景人物路由 |
 | `signal-router.routing-eval.jsonl` | 21 | 信号路由 |

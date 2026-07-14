@@ -325,33 +325,28 @@ cbrain skill-pack
 
     Required files: 33/33 present
     Status: PASS
-
-    Copy:    cp -r /path/to/skills/ <target>/
-    Symlink: ln -s /path/to/skills <target>
 ```
 
-把技能包复制到 Hermes 的技能目录：
+把技能包部署到 Hermes 的技能目录（**必须按预检流程**，避免覆盖已有内容或嵌套安装）：
 
 ```bash
-# 1. 查看技能包路径
+# 1. 取得技能包路径
 cbrain skill-pack
-# 输出中的 Pack: 行即为技能包绝对路径
+# 输出中的 Pack: 行即为技能包绝对路径（记为 <pack-path>）
 
-# 2. 复制到 Hermes 技能目录（仅当 target 不存在时；替换下面的 <pack-path>）
-mkdir -p ~/.hermes/skills/brain-ops
-cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
-
-# 3. 验证安装（应报 current）
+# 2. 安装前预检（必须）——根据返回的 target status 决定下一步：
 cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
-```
+#   - missing   → 该路径不存在，继续 step 3 安装
+#   - current   → 已是 canonical pack，无需安装，到此结束
+#   - stale / incompatible / unverified → 路径已有不同内容（可能是私有 skill），
+#     人工排查后再决定；不要直接覆盖
 
-或者用符号链接（方便随 CBrain 升级自动同步）：
-
-```bash
+# 3. 安装（仅当 step 2 报 missing）。符号链接默认推荐（随 CBrain 升级自动同步）：
 mkdir -p ~/.hermes/skills/brain-ops
 ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
+#   或复制：cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 
-# 验证安装（应报 current）
+# 4. 安装后验证（应报 current）
 cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
 ```
 

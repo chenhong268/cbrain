@@ -307,7 +307,7 @@ if [[ -f "$AF_EVAL" ]]; then
     fail "category 不足: ${cat_failures[*]}"
   fi
 
-  # Expected tool coverage (7 tools)
+  # Expected tool coverage (8 tools)
   af_tools=("cbrain_recall" "recall_episode" "read_discoveries" "run_discovery" "graph_query" "query" "summarize" "next_actions")
   missing_tools=()
   for tool in "${af_tools[@]}"; do
@@ -317,7 +317,7 @@ if [[ -f "$AF_EVAL" ]]; then
     fi
   done
   if (( ${#missing_tools[@]} == 0 )); then
-    pass "agent-facing eval 覆盖全部 7 个 expected_tool"
+    pass "agent-facing eval 覆盖全部 8 个 expected_tool"
   else
     fail "agent-facing eval 缺少 expected_tool: ${missing_tools[*]}"
   fi

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync, symlinkSync, readFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync, symlinkSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import {
@@ -63,7 +63,8 @@ describe("cbrain skill-pack", () => {
       expect(typeof report.verificationStatus).toBe("string");
       expect(typeof report.status).toBe("string");
       expect(report.status).toBe("pass");
-      expect(typeof report.guidance).toBe("object");
+      // guidance is optional — absent without --target (spec §3.4)
+      expect(report.guidance).toBeUndefined();
     });
 
     test("requiredFiles has 33 entries with name + status", () => {
@@ -79,12 +80,48 @@ describe("cbrain skill-pack", () => {
       expect(report.missingFiles).toEqual([]);
     });
 
-    test("guidance has copyCommand and symlinkCommand", () => {
-      const guidance = report.guidance as Record<string, unknown>;
-      expect(typeof guidance.copyCommand).toBe("string");
-      expect(typeof guidance.symlinkCommand).toBe("string");
-      expect(guidance.copyCommand).toContain("cp -r");
-      expect(guidance.symlinkCommand).toContain("ln -s");
+    test("guidance absent without --target (no install hint on bare canonical check)", () => {
+      expect(report.guidance).toBeUndefined();
+    });
+
+    test("guidance present only when --target is missing", () => {
+      let stdout = "";
+      try {
+        execSync(`${BIN} skill-pack --json --target /tmp/cbrain-no-such-target-xyz`, {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch (e: any) {
+        stdout = e.stdout ?? "";
+      }
+      const r = JSON.parse(stdout);
+      expect(r.target.status).toBe("missing");
+      expect(typeof r.guidance).toBe("object");
+      expect(r.guidance.copyCommand).toContain("cp -r");
+      expect(r.guidance.symlinkCommand).toContain("ln -s");
+    });
+
+    test("guidance absent for stale target (no overwrite hint, spec §3.4)", () => {
+      const t = "/tmp/cbrain-test-guidance-stale";
+      if (existsSync(t)) rmSync(t, { recursive: true });
+      mkdirSync(t, { recursive: true });
+      const canon = resolveSkillsDir();
+      for (const f of loadManifest(canon).files) writeFileSync(join(t, f), readFileSync(join(canon, f)));
+      writeFileSync(join(t, "MANIFEST.json"), readFileSync(join(canon, "MANIFEST.json")));
+      writeFileSync(join(t, "SKILL.md"), "tampered");
+      let stdout = "";
+      try {
+        execSync(`${BIN} skill-pack --json --target ${t}`, {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch (e: any) {
+        stdout = e.stdout ?? "";
+      }
+      rmSync(t, { recursive: true });
+      const r = JSON.parse(stdout);
+      expect(r.target.status).toBe("stale");
+      expect(r.guidance).toBeUndefined();
     });
 
     test("verificationStatus is pass on clean checkout", () => {
@@ -275,6 +312,14 @@ describe("cbrain skill-pack", () => {
         verificationStatus: "pass",
         status: "pass",
         guidance: { copyCommand: "cp -r /test/skills/ <target>/", symlinkCommand: "ln -s /test/skills <target>" },
+        target: {
+          path: "/test/target",
+          status: "missing",
+          files: [],
+          staleFiles: [],
+          missingTargetFiles: [],
+          unverifiedFiles: [],
+        },
       };
 
       const output = formatHuman(report);
@@ -546,14 +591,15 @@ describe("cbrain skill-pack", () => {
       expect(result.files.find((f) => f.name === "RESOLVER.md")?.state).toBe("stale");
     });
 
-    test("target file deleted → incompatible (breaks target exact-inventory)", () => {
+    test("target file deleted → stale (missing-target file, spec §3.2)", () => {
       seedMinimal(canonDir);
       seedMinimal(targetDir);
-      // Remove one file from target — manifest still lists it
+      // Remove one file from target — version+files[] match, but file missing
       rmSync(join(targetDir, "recall-resolver.md"));
 
       const result = compareTarget(canonDir, targetDir);
-      expect(result.status).toBe("incompatible");
+      expect(result.status).toBe("stale");
+      expect(result.missingTargetFiles).toContain("recall-resolver.md");
     });
 
     test("multiple stale files (no deletion) → stale", () => {
@@ -910,6 +956,21 @@ describe("cbrain skill-pack", () => {
     test("full match -> current", () => {
       seedTargetCurrent();
       expect(compareTarget(canon, dir).status).toBe("current");
+    });
+
+    test("unreadable target dir -> incompatible (no stack leak)", () => {
+      const t = "/tmp/cbrain-test-unreadable-dir-334";
+      rmSync(t, { recursive: true, force: true });
+      mkdirSync(t, { recursive: true });
+      writeFileSync(join(t, "SKILL.md"), "x");
+      try {
+        chmodSync(t, 0o000);
+        if (typeof process.getuid === "function" && process.getuid() === 0) return; // root bypasses perms
+        expect(compareTarget(canon, t).status).toBe("incompatible");
+      } finally {
+        chmodSync(t, 0o755);
+        rmSync(t, { recursive: true, force: true });
+      }
     });
   });
 });

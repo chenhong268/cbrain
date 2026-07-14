@@ -32,3 +32,8 @@ test("checkInstallTarget passes exact brain-ops/cbrain path", () => {
   const docs = new Map([["install-onboarding.md", "cp -r x ~/.hermes/skills/brain-ops/cbrain\n"]]);
   expect(fails(checkInstallTarget(docs))).toBe(false);
 });
+
+test("checkInstallTarget flags wrong basename under brain-ops/", () => {
+  const docs = new Map([["install-onboarding.md", "cp -r x ~/.hermes/skills/brain-ops/wrong-target\n"]]);
+  expect(fails(checkInstallTarget(docs))).toBe(true);
+});

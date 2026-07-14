@@ -54,7 +54,7 @@ const SIZE_ERROR = 100_000;
 export type FileStatus = "present" | "missing" | "not_file" | "not_readable";
 export type SizeStatus = "ok" | "warn" | "error";
 export type VerificationStatus = "pass" | "warn" | "fail";
-export type TargetFileState = "current" | "stale" | "missing" | "incompatible" | "unverified";
+export type TargetFileState = "current" | "stale" | "missing" | "unverified";
 export type TargetStatus = "current" | "stale" | "missing" | "incompatible" | "unverified";
 export type CommandStatus = "pass" | "warn" | "fail";
 
@@ -80,7 +80,9 @@ export interface SkillPackReport {
   readonly verificationStatus: VerificationStatus;
   /** Aggregate command status — agrees with exit code (pass → 0, warn/fail → 1). */
   readonly status: CommandStatus;
-  readonly guidance: {
+  /** Install guidance — only present when canonical passes AND an explicit
+   *  --target is missing (spec §3.4). Absent in all other cases. */
+  readonly guidance?: {
     readonly copyCommand: string;
     readonly symlinkCommand: string;
   };
@@ -91,7 +93,6 @@ export interface SkillPackReport {
     readonly staleFiles: readonly string[];
     readonly missingTargetFiles: readonly string[];
     readonly unverifiedFiles: readonly string[];
-    readonly incompatibleFiles?: readonly string[];
   };
 }
 
@@ -119,13 +120,14 @@ export function resolveSkillsDir(): string {
 // ── Manifest ──
 
 /**
- * Load and validate `skills/MANIFEST.json`.
- * @throws Error with code-bearing message prefix on schema/inventory/version failure.
+ * Parse and schema-validate a MANIFEST.json file (no inventory/version check).
+ * Used for both canonical and target manifests; the canonical-only checks
+ * (ENTRY_FILES subset, exact-inventory, version) live in {@link loadManifest}.
+ * @throws Error with MANIFEST_MISSING / MANIFEST_INVALID prefix.
  */
-export function loadManifest(skillsDir: string): PackManifest {
-  const manifestPath = resolve(skillsDir, MANIFEST_FILENAME);
+export function parseManifest(manifestPath: string): PackManifest {
   if (!existsSync(manifestPath)) {
-    throw new Error(`MANIFEST_MISSING: ${MANIFEST_FILENAME} not found in ${skillsDir}`);
+    throw new Error(`MANIFEST_MISSING: ${MANIFEST_FILENAME} not found at ${manifestPath}`);
   }
   let parsed: unknown;
   try {
@@ -151,8 +153,21 @@ export function loadManifest(skillsDir: string): PackManifest {
     }
     seen.add(name);
   }
+  return { packVersion: m.packVersion, files };
+}
+
+/**
+ * Load the CANONICAL `skills/MANIFEST.json` and run canonical-only checks:
+ * ENTRY_FILES subset, exact-inventory (files[] == skills/ top-level files minus
+ * MANIFEST.json), and packVersion == runtime version. Target dirs must NOT use
+ * this (target may legitimately miss files — that is stale, not inventory drift).
+ * @throws Error with MANIFEST_INVALID / INVENTORY_MISMATCH / VERSION_MISMATCH prefix.
+ */
+export function loadManifest(skillsDir: string): PackManifest {
+  const manifest = parseManifest(resolve(skillsDir, MANIFEST_FILENAME));
+  const fileSet = new Set(manifest.files);
   for (const entry of ENTRY_FILES) {
-    if (!seen.has(entry)) {
+    if (!fileSet.has(entry)) {
       throw new Error(`MANIFEST_INVALID: entry file "${entry}" missing from manifest`);
     }
   }
@@ -168,14 +183,13 @@ export function loadManifest(skillsDir: string): PackManifest {
       })
       .filter((f) => f !== MANIFEST_FILENAME),
   );
-  const manifestSet = new Set(files);
-  if (manifestSet.size !== onDisk.size || ![...manifestSet].every((f) => onDisk.has(f))) {
+  if (fileSet.size !== onDisk.size || ![...fileSet].every((f) => onDisk.has(f))) {
     throw new Error(`INVENTORY_MISMATCH: manifest files[] does not equal skills/ top-level files`);
   }
-  if (m.packVersion !== version) {
-    throw new Error(`VERSION_MISMATCH: manifest packVersion ${m.packVersion} ≠ runtime ${version}`);
+  if (manifest.packVersion !== version) {
+    throw new Error(`VERSION_MISMATCH: manifest packVersion ${manifest.packVersion} ≠ runtime ${version}`);
   }
-  return { packVersion: m.packVersion, files };
+  return manifest;
 }
 
 // ── Verification ──
@@ -269,10 +283,6 @@ export function verifySkillPack(skillsDir: string): SkillPackReport {
     entrypointChars,
     verificationStatus,
     status,
-    guidance: {
-      copyCommand: `cp -r "${resolvedDir}/" "<target>/"`,
-      symlinkCommand: `ln -s "${resolvedDir}" "<target>"`,
-    },
   };
 }
 
@@ -328,7 +338,7 @@ export function compareTarget(
     return { status: "missing", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
   }
 
-  // Target must be a non-empty directory; empty dir / non-dir / broken symlink → incompatible.
+  // Target must be a readable, non-empty directory; otherwise incompatible.
   let isDir = false;
   try {
     isDir = statSync(targetDir).isDirectory();
@@ -338,17 +348,26 @@ export function compareTarget(
   if (!isDir) {
     return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
   }
-  if (readdirSync(targetDir).length === 0) {
+  let entries: string[];
+  try {
+    entries = readdirSync(targetDir);
+  } catch {
+    // unreadable directory (EACCES) → incompatible, no stack trace leak
+    return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
+  }
+  if (entries.length === 0) {
     return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
   }
 
-  // Target MANIFEST must be present + match canonical version + files[].
+  // Target MANIFEST schema only (parseManifest) — NOT canonical exact-inventory.
+  // A target legitimately missing files is a per-file stale signal, not pack drift.
   let targetManifest: PackManifest;
   try {
-    targetManifest = loadManifest(targetDir);
+    targetManifest = parseManifest(resolve(targetDir, MANIFEST_FILENAME));
   } catch {
     return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
   }
+  // Different pack version or files[] list → different pack → incompatible.
   if (targetManifest.packVersion !== canonicalManifest.packVersion) {
     return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
   }
@@ -359,16 +378,14 @@ export function compareTarget(
     return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
   }
 
-  // Per-file hash compare (inventory already guaranteed all files present).
+  // Per-file compare. Target file missing/unreadable → per-file "missing"
+  // (collected in missingTargetFiles); aggregate is `stale` (spec §3.2: version等
+  // +files[]等 but缺文件或hash≠), NOT path-level `missing` (which shows install).
   const files: TargetFileCheck[] = canonicalManifest.files.map((name) => {
     const canonicalHash = fileHash(resolve(skillsDir, name));
     const targetHash = fileHash(resolve(targetDir, name));
-    // canonical unreadable → no baseline for this file
     if (canonicalHash === null) return { name, state: "unverified" as const };
-    // target unreadable (file exists per exact-inventory but read fails) → content
-    // differs from canonical → stale. NOT missing: missing is path-absent only and
-    // would wrongly trigger install-command display for an existing target.
-    if (targetHash === null) return { name, state: "stale" as const };
+    if (targetHash === null) return { name, state: "missing" as const };
     if (targetHash === canonicalHash) return { name, state: "current" as const };
     return { name, state: "stale" as const };
   });
@@ -377,10 +394,11 @@ export function compareTarget(
   const missingTargetFiles = files.filter((f) => f.state === "missing").map((f) => f.name);
   const unverifiedFiles = files.filter((f) => f.state === "unverified").map((f) => f.name);
 
+  // precedence: unverified > stale (includes missing-target files) > current.
+  // `missing` and `incompatible` are path/pack-level and returned early above.
   let targetStatus: TargetStatus = "current";
   if (unverifiedFiles.length > 0) targetStatus = "unverified";
-  else if (missingTargetFiles.length > 0) targetStatus = "missing";
-  else if (staleFiles.length > 0) targetStatus = "stale";
+  else if (staleFiles.length > 0 || missingTargetFiles.length > 0) targetStatus = "stale";
 
   return { status: targetStatus, files, staleFiles, missingTargetFiles, unverifiedFiles };
 }
@@ -418,11 +436,10 @@ export function formatHuman(report: SkillPackReport): string {
   }
   lines.push("");
 
-  // Install guidance only when canonical passes AND target is missing (or absent).
-  // Stale/incompatible/unverified targets must NOT show copy/symlink (no overwrite hint).
-  const showInstall = report.verificationStatus !== "fail"
-    && (!report.target || report.target.status === "missing");
-  if (showInstall) {
+  // Install guidance only when canonical passes AND an explicit --target is missing.
+  // No-target / stale / incompatible / unverified must NOT show install commands.
+  if (report.guidance && report.verificationStatus !== "fail"
+    && report.target?.status === "missing") {
     lines.push(`  Copy:    ${report.guidance.copyCommand}`);
     lines.push(`  Symlink: ${report.guidance.symlinkCommand}`);
   }
@@ -464,8 +481,6 @@ export function register(program: Command) {
       // emit a normal report with target.status (spec §3.2 precedence row 1).
       if (opts.target) {
         const targetDir = resolve(opts.target);
-        const comparison = compareTarget(skillsDir, targetDir);
-
         let report: SkillPackReport;
         let canonicalFailed = false;
         try {
@@ -483,12 +498,10 @@ export function register(program: Command) {
             entrypointChars: 0,
             verificationStatus: "fail",
             status: "fail",
-            guidance: {
-              copyCommand: `cp -r "${skillsDir}/" "<target>/"`,
-              symlinkCommand: `ln -s "${skillsDir}" "<target>"`,
-            },
           };
         }
+        // compareTarget runs even when canonical failed (returns unverified).
+        const comparison = compareTarget(skillsDir, targetDir);
 
         const status: CommandStatus = canonicalFailed || report.verificationStatus === "fail"
           ? "fail"
@@ -498,9 +511,15 @@ export function register(program: Command) {
               ? "warn"
               : "pass";
 
+        // Guidance ONLY when canonical passes AND target is missing (spec §3.4).
+        const guidance = !canonicalFailed && report.verificationStatus !== "fail" && comparison.status === "missing"
+          ? { copyCommand: `cp -r "${skillsDir}" "<target>"`, symlinkCommand: `ln -s "${skillsDir}" "<target>"` }
+          : undefined;
+
         const enriched: SkillPackReport = {
           ...report,
           status,
+          guidance,
           target: {
             path: targetDir,
             ...comparison,

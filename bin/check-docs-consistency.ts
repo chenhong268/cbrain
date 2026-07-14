@@ -151,21 +151,23 @@ export function checkManifestVersion(manifestPath: string = join(PROJECT_DIR, "s
 }
 
 /** Skill-pack install target must be exactly ~/.hermes/skills/brain-ops/cbrain.
- *  Rejects a nested suffix (e.g. `/skills/`) that would bury SKILL.md below the
- *  Hermes scan root. A bare path or single trailing slash is allowed. */
+ *  Parses the path segment after brain-ops/ and asserts it equals "cbrain" —
+ *  catches both nested (`cbrain/skills/`) and wrong-basename (`wrong-target`). */
 const INSTALL_TARGET = "~/.hermes/skills/brain-ops/cbrain";
-const INSTALL_TARGET_RE = /(~\/\.hermes\/skills\/brain-ops\/cbrain)([^\s"']*)/g;
+const INSTALL_PREFIX = "~/.hermes/skills/brain-ops/";
 
 export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
   const out: CheckResult[] = [];
   for (const [file, text] of docs) {
     text.split("\n").forEach((line, i) => {
       if (line.includes("<!-- docs-consistency:ignore-command -->")) return;
-      for (const m of line.matchAll(INSTALL_TARGET_RE)) {
-        const suffix = m[2] ?? "";
-        if (suffix !== "" && suffix !== "/") {
-          out.push({ check: `install-target @${file}:${i + 1}`, passed: false, detail: `target must be exactly ${INSTALL_TARGET}, got ${m[0]}` });
-        }
+      const idx = line.indexOf(INSTALL_PREFIX);
+      if (idx === -1) return;
+      const after = line.slice(idx + INSTALL_PREFIX.length);
+      const m = after.match(/^([^\s"']+)/);
+      if (!m) return;
+      if (m[1] !== "cbrain") {
+        out.push({ check: `install-target @${file}:${i + 1}`, passed: false, detail: `target must be exactly ${INSTALL_TARGET}, got ~/.hermes/skills/brain-ops/${m[1]}` });
       }
     });
   }
