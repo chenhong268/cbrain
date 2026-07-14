@@ -9,7 +9,7 @@
  * are exported for testing.
  */
 import type { Command } from "commander";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "url";
@@ -17,7 +17,7 @@ import { version } from "../../version.js";
 
 // ── Constants ──
 
-/** Files required for a valid skill pack. */
+/** Files required for a valid skill pack (legacy hardcoded subset; superseded by MANIFEST-driven verify). */
 export const REQUIRED_FILES = [
   "SKILL.md",
   "hermes-cbrain-brief.md",
@@ -26,6 +26,25 @@ export const REQUIRED_FILES = [
   "response-contract.routing-eval.jsonl",
   "agent-facing.routing-eval.jsonl",
 ] as const;
+
+/**
+ * Hard-coded entry-file subset the manifest must always contain, so a
+ * hand-edited manifest cannot silently drop a critical entrypoint.
+ * The full file list is driven by `skills/MANIFEST.json` (see {@link loadManifest}).
+ */
+export const ENTRY_FILES = [
+  "SKILL.md",
+  "hermes-cbrain-brief.md",
+  "RESOLVER.md",
+  "recall-resolver.md",
+] as const;
+
+const MANIFEST_FILENAME = "MANIFEST.json";
+
+export interface PackManifest {
+  readonly packVersion: string;
+  readonly files: readonly string[];
+}
 
 const SIZE_WARN = 30_000;
 const SIZE_ERROR = 100_000;
@@ -94,6 +113,61 @@ export interface SkillPackError {
  */
 export function resolveSkillsDir(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "../../../skills/");
+}
+
+// ── Manifest ──
+
+/**
+ * Load and validate `skills/MANIFEST.json`.
+ * @throws Error with code-bearing message prefix on schema/inventory/version failure.
+ */
+export function loadManifest(skillsDir: string): PackManifest {
+  const manifestPath = resolve(skillsDir, MANIFEST_FILENAME);
+  if (!existsSync(manifestPath)) {
+    throw new Error(`MANIFEST_MISSING: ${MANIFEST_FILENAME} not found in ${skillsDir}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  } catch {
+    throw new Error(`MANIFEST_INVALID: ${MANIFEST_FILENAME} is not valid JSON`);
+  }
+  const m = parsed as { packVersion?: unknown; files?: unknown };
+  if (typeof m.packVersion !== "string" || m.packVersion.length === 0) {
+    throw new Error(`MANIFEST_INVALID: packVersion must be a non-empty string`);
+  }
+  if (!Array.isArray(m.files) || m.files.some((f) => typeof f !== "string")) {
+    throw new Error(`MANIFEST_INVALID: files must be an array of strings`);
+  }
+  const files = m.files as string[];
+  const seen = new Set<string>();
+  for (const name of files) {
+    if (name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.startsWith("/") || name === MANIFEST_FILENAME) {
+      throw new Error(`MANIFEST_INVALID: unsafe or self-referential file entry "${name}"`);
+    }
+    if (seen.has(name)) {
+      throw new Error(`MANIFEST_INVALID: duplicate file entry "${name}"`);
+    }
+    seen.add(name);
+  }
+  for (const entry of ENTRY_FILES) {
+    if (!seen.has(entry)) {
+      throw new Error(`MANIFEST_INVALID: entry file "${entry}" missing from manifest`);
+    }
+  }
+  const onDisk = new Set(
+    readdirSync(skillsDir)
+      .filter((f) => statSync(resolve(skillsDir, f)).isFile())
+      .filter((f) => f !== MANIFEST_FILENAME),
+  );
+  const manifestSet = new Set(files);
+  if (manifestSet.size !== onDisk.size || ![...manifestSet].every((f) => onDisk.has(f))) {
+    throw new Error(`INVENTORY_MISMATCH: manifest files[] does not equal skills/ top-level files`);
+  }
+  if (m.packVersion !== version) {
+    throw new Error(`VERSION_MISMATCH: manifest packVersion ${m.packVersion} ≠ runtime ${version}`);
+  }
+  return { packVersion: m.packVersion, files };
 }
 
 // ── Verification ──
