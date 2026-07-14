@@ -362,7 +362,7 @@ mkdir -p ~/.hermes/skills/brain-ops
 ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 ```
 
-- 风险：当 symlink 解析后的目标落在 `~/.hermes/skills` 之外（如指向活跃 checkout），Hermes loader 的 resolved-path 信任检查可能记录 trusted-directory security warning（`skill file is outside the trusted skills directory`）；
+- 风险：当 symlink 解析后的目标落在 Hermes trusted directory（`~/.hermes/skills`）之外（如指向活跃 checkout），Hermes loader 的 resolved-path 信任检查可能记录安全告警；
 - 风险：checkout 中的 skill 文件变化会立即影响 Hermes，把尚未发布的修改静默带进真实 Agent；
 - 适合本地开发联调，不作为稳定生产 Agent 的默认安装方式。
 

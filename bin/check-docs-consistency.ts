@@ -150,10 +150,12 @@ export function checkManifestVersion(manifestPath: string = join(PROJECT_DIR, "s
   return out;
 }
 
-/** Skill-pack install: cp -r and ln -s must each exist, in SEPARATE fenced
- *  blocks (they are mutually exclusive — running both lets copy follow the
- *  symlink and write a nested copy back into the canonical pack), and each
- *  destination must be exactly ~/.hermes/skills/brain-ops/cbrain. */
+/** Skill-pack install TARGET check: cp -r and ln -s must each exist, in
+ *  SEPARATE fenced blocks (mutually exclusive — running both lets copy follow
+ *  the symlink and write a nested copy back into the canonical pack), each
+ *  destination exactly ~/.hermes/skills/brain-ops/cbrain. Policy-NEUTRAL
+ *  (path + block shape only); the copy-default / symlink-dev-only policy
+ *  contract is owned by checkSkillPackInstallPolicy (§7 close-loop). */
 const INSTALL_TARGET = "~/.hermes/skills/brain-ops/cbrain";
 
 export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
@@ -201,7 +203,7 @@ export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
   }
   if (!cpOk) out.push({ check: "install-target copy", passed: false, detail: `missing cp -r install command targeting ${INSTALL_TARGET}` });
   if (!lnOk) out.push({ check: "install-target symlink", passed: false, detail: `missing ln -s install command targeting ${INSTALL_TARGET}` });
-  if (out.length === 0) out.push({ check: "install-target path", passed: true, detail: `cp -r + ln -s target ${INSTALL_TARGET} in separate blocks` });
+  if (out.length === 0) out.push({ check: "install-target path", passed: true, detail: `cp -r + ln -s target ${INSTALL_TARGET} in separate blocks (policy: copy default — see skill-pack install policy)` });
   return out;
 }
 
@@ -216,29 +218,52 @@ export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
  * was violated (no single over-broad regex).
  */
 export function checkSkillPackInstallPolicy(docs: Map<string, string>): CheckResult[] {
-  const out: CheckResult[] = [];
-  for (const [file, text] of docs) {
-    // Only the doc that describes the skill-pack install (cp + ln + target).
-    if (!text.includes("cp -r") || !text.includes("ln -s") || !text.includes(INSTALL_TARGET)) continue;
-
-    // 1. copy must carry a default/production recommendation.
-    const copyRecommended = /复制[^\n]*?(默认推荐|生产推荐|生产环境|稳定)/.test(text);
-    // 2. symlink must be marked dev/experimental only.
-    const symlinkDevOnly = /符号链接[^\n]*?(仅开发|开发|试验|dev)/i.test(text);
-    // 3. symlink must NOT be marked default-recommended.
-    const symlinkDefault = /符号链接[^\n]*?默认推荐/.test(text);
-    // 4. trusted-directory / security warning must be present.
-    const trustedWarning = /trusted[\s-]?director|信任[^\n]{0,4}目录|安全警告|security warning|trusted root/i.test(text);
-    // 5. checkout drift risk must be present.
-    const checkoutDrift = /(?:checkout|仓库|源码)[^\n]{0,30}?(?:变化|修改|漂移)|(?:变化|修改)[^\n]{0,20}?立即/.test(text);
-
-    if (!copyRecommended) out.push({ check: `skill-pack-policy copy-recommended @${file}`, passed: false, detail: `copy (cp -r → ${INSTALL_TARGET}) 必须标记为默认/生产推荐（如「复制（默认推荐…稳定 Hermes）」）` });
-    if (!symlinkDevOnly) out.push({ check: `skill-pack-policy symlink-dev-only @${file}`, passed: false, detail: `symlink (ln -s) 必须标记为仅开发/试验（如「符号链接（仅开发/试验环境）」）` });
-    if (symlinkDefault) out.push({ check: `skill-pack-policy symlink-not-default @${file}`, passed: false, detail: `symlink 不得标记为「默认推荐」——生产默认应为 copy` });
-    if (!trustedWarning) out.push({ check: `skill-pack-policy trusted-dir-warning @${file}`, passed: false, detail: `必须说明 symlink resolved path 可能触发 Hermes trusted-directory / security warning` });
-    if (!checkoutDrift) out.push({ check: `skill-pack-policy checkout-drift @${file}`, passed: false, detail: `必须说明 checkout/仓库内容变化会立即影响 Hermes（静默漂移风险）` });
+  // HIGH2: policy closes loop INSIDE docs/install-onboarding.md Step 7 only.
+  // No aggregation across docs — another doc's keywords cannot supply a miss.
+  const FILE = "docs/install-onboarding.md";
+  const text = docs.get(FILE);
+  if (text === undefined) {
+    return [{ check: "skill-pack install policy", passed: false, detail: `缺少 ${FILE}：部署政策必须在该文件第七步闭环（不聚合其他文档）` }];
   }
-  if (out.length === 0) out.push({ check: "skill-pack install policy", passed: true, detail: "copy 默认推荐 + symlink 仅开发/试验 + trusted-dir warning + checkout-drift 风险齐备" });
+  const headingRe = /^## 第七步：验证 Hermes 技能包[^\n]*$/m;
+  const startMatch = headingRe.exec(text);
+  if (!startMatch) {
+    return [{ check: "skill-pack install policy", passed: false, detail: `${FILE} 缺少「## 第七步：验证 Hermes 技能包」标题：政策必须在该段闭环` }];
+  }
+  const afterStart = text.slice(startMatch.index + startMatch[0].length);
+  const nextHeading = afterStart.search(/^## /m);
+  const section = nextHeading === -1 ? afterStart : afterStart.slice(0, nextHeading);
+
+  const out: CheckResult[] = [];
+  // Stable-semantic contracts (MEDIUM2: do NOT lock Hermes' verbatim EN warning text).
+  const copyRecommended = /复制[^\n]*?(默认推荐|生产推荐|生产环境|稳定)/.test(section);
+  const symlinkDevOnly = /符号链接[^\n]*?(仅开发|开发|试验|dev)/i.test(section);
+  const symlinkDefault = /符号链接[^\n]*?默认推荐/.test(section);
+  const trustedWarning = /trusted[\s-]?director|信任[^\n]{0,6}目录|安全告警|安全警告|security warning|trusted root/i.test(section);
+  const checkoutDrift = /(?:checkout|仓库|源码)[^\n]{0,30}?(?:变化|修改|漂移)|(?:变化|修改)[^\n]{0,20}?立即/.test(section);
+  // copy section must precede symlink section (copy is the default).
+  const copyIdx = section.search(/复制[^\n]*?(默认推荐|生产|稳定)/);
+  const symlinkIdx = section.search(/符号链接[^\n]*?(仅开发|开发|试验|dev)/i);
+  const copyBeforeSymlink = copyIdx !== -1 && symlinkIdx !== -1 && copyIdx < symlinkIdx;
+  // cp -r and ln -s must sit in DIFFERENT fenced blocks within the section.
+  const parts = section.split("```");
+  let cpBlock = -1;
+  let lnBlock = -1;
+  for (let i = 0; i < parts.length; i++) {
+    if (/cp\s+-r\b/.test(parts[i]) && parts[i].includes(INSTALL_TARGET)) cpBlock = i;
+    if (/ln\s+-s\b/.test(parts[i]) && parts[i].includes(INSTALL_TARGET)) lnBlock = i;
+  }
+  const separateBlocks = cpBlock !== -1 && lnBlock !== -1 && cpBlock !== lnBlock;
+
+  if (!copyRecommended) out.push({ check: `skill-pack-policy copy-recommended @${FILE} §7`, passed: false, detail: `第七步：copy 必须标记为默认/生产推荐（如「复制（默认推荐…稳定 Hermes）」）` });
+  if (!symlinkDevOnly) out.push({ check: `skill-pack-policy symlink-dev-only @${FILE} §7`, passed: false, detail: `第七步：symlink 必须标记为仅开发/试验（如「符号链接（仅开发/试验环境）」）` });
+  if (symlinkDefault) out.push({ check: `skill-pack-policy symlink-not-default @${FILE} §7`, passed: false, detail: `第七步：symlink 不得标记为「默认推荐」——生产默认应为 copy` });
+  if (!trustedWarning) out.push({ check: `skill-pack-policy trusted-dir-warning @${FILE} §7`, passed: false, detail: `第七步：必须说明 symlink resolved target 可能落在 Hermes trusted directory/root 外（锁语义，不锁完整英文告警文本）` });
+  if (!checkoutDrift) out.push({ check: `skill-pack-policy checkout-drift @${FILE} §7`, passed: false, detail: `第七步：必须说明 checkout/仓库内容变化会立即影响 Hermes（静默漂移风险）` });
+  if (!copyBeforeSymlink) out.push({ check: `skill-pack-policy copy-before-symlink @${FILE} §7`, passed: false, detail: `第七步：copy 段必须位于 symlink 段之前（copy 是默认推荐）` });
+  if (!separateBlocks) out.push({ check: `skill-pack-policy separate-blocks @${FILE} §7`, passed: false, detail: `第七步：cp -r 和 ln -s 必须在不同 fenced block` });
+
+  if (out.length === 0) out.push({ check: "skill-pack install policy", passed: true, detail: `install-onboarding.md §7 闭环：copy 默认 + symlink 仅开发 + trusted-dir warning + checkout-drift + copy 先 + 不同 block` });
   return out;
 }
 
