@@ -2490,6 +2490,83 @@ describe("MCP Server", () => {
     });
   });
 
+  describe("governed NER job boundary (#342)", () => {
+    test("unified and alias submit reject reserved names and discriminators", async () => {
+      const tools = getTools(createServer(deps));
+      for (const invoke of [
+        () => tools.job_submit.handler({ name: "ner-backfill", data: { slug: "private-a" } }),
+        () => tools.job.handler({ action: "submit", name: "zero-link-backfill-batch", data: {} }),
+        () => tools.job_submit.handler({ name: "other", data: { repair: { name: "zero-link-rich-records" } } }),
+        () => tools.job.handler({ action: "submit", name: "other", data: { version: 1, repairName: "zero-link-rich-records", batchId: "private", ownership: [] } }),
+      ]) {
+        const result = await invoke();
+        expect(JSON.parse(result.content[0].text).code).toBe("REPAIR_BATCH_RESERVED");
+      }
+      expect(db.listJobs()).toHaveLength(0);
+    });
+
+    test("every NER list/status projection omits payload, result, error and identity sentinels", async () => {
+      const id = db.submitJob("ner-backfill", {
+        slug: "records/private-slug", kind: "ner", sourceFingerprint: "page:private-fingerprint", token: "private-token",
+      });
+      db.rawDb.prepare("UPDATE jobs SET status='failed', result=?, error=? WHERE id=?")
+        .run(JSON.stringify({ provider: "private-provider", outcome: "failed" }), "private-error", id);
+      const tools = getTools(createServer(deps));
+      for (const result of [
+        await tools.job_list.handler({}),
+        await tools.job.handler({ action: "list" }),
+        await tools.job_status.handler({ id }),
+        await tools.job.handler({ action: "status", id }),
+      ]) {
+        const text = result.content[0].text;
+        for (const forbidden of ["private-slug", "private-fingerprint", "private-token", "private-provider", "private-error", '"data"', '"result"', '"error"']) {
+          expect(text).not.toContain(forbidden);
+        }
+      }
+    });
+
+    test("unknown manifest integrity freezes all NER mutations across unified and aliases", async () => {
+      db.rawDb.prepare("INSERT INTO jobs (name,status,data,result) VALUES ('zero-link-backfill-batch','done','{','{}')").run();
+      const pending = db.submitJob("ner-backfill", { slug: "records/a", kind: "ner", sourceFingerprint: "page:a" });
+      const failed = db.submitJob("ner-backfill", { slug: "records/b", kind: "ner", sourceFingerprint: "page:b" });
+      db.rawDb.prepare("UPDATE jobs SET status='failed' WHERE id=?").run(failed);
+      const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+      const tools = getTools(createServer(deps));
+      for (const result of [
+        await tools.job_cancel.handler({ id: pending }),
+        await tools.job.handler({ action: "cancel", id: pending }),
+        await tools.job_retry.handler({ id: failed }),
+        await tools.job.handler({ action: "retry", id: failed }),
+      ]) {
+        expect(JSON.parse(result.content[0].text).code).toBe("REPAIR_BATCH_OWNED");
+      }
+      expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+    });
+
+    test("committing attempt rejects cancel with a stable code", async () => {
+      const id = db.submitJob("ner-backfill", {
+        slug: "records/a", kind: "ner", sourceFingerprint: "page:a",
+        attemptLease: { version: 1, token: "private-token", phase: "committing" },
+      });
+      db.rawDb.prepare("UPDATE jobs SET status='running', started_at=datetime('now') WHERE id=?").run(id);
+      const tools = getTools(createServer(deps));
+      const result = await tools.job_cancel.handler({ id });
+      expect(JSON.parse(result.content[0].text)).toEqual({ success: false, id, code: "ATTEMPT_COMMITTING" });
+      expect(db.getJob(id)!.status).toBe("running");
+    });
+
+    test("validated ordinary current NER failure retains retry compatibility", async () => {
+      const id = db.submitJob("ner-backfill", {
+        slug: "records/a", kind: "ner", pageContentHash: "a", sourceFingerprint: "page:a",
+      });
+      db.rawDb.prepare("UPDATE jobs SET status='failed', attempts=1 WHERE id=?").run(id);
+      const tools = getTools(createServer(deps));
+      const result = await tools.job_retry.handler({ id });
+      expect(JSON.parse(result.content[0].text)).toEqual({ success: true, id });
+      expect(db.getJob(id)!.status).toBe("pending");
+    });
+  });
+
   // ─── merge_pages ─────────────────────────────────
   describe("merge_pages tool", () => {
     test("merges source into target", async () => {
