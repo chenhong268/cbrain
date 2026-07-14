@@ -1,8 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync, symlinkSync, readFileSync, chmodSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync, symlinkSync, readFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import ts from "typescript";
+import { createHash } from "node:crypto";
 import {
   resolveSkillsDir,
   verifySkillPack,
@@ -17,43 +18,93 @@ const PROJECT_DIR = join(import.meta.dir, "..", "..");
 const BIN = `bun run ${join(PROJECT_DIR, "src/cli/index.ts")}`;
 
 // ── read-only fs-import guard: shared by the real-source check + mutation tests ──
-// TypeScript AST enumerates ImportDeclaration (so a mixed `import fs, { writeFile }`
-// is ONE import node, not three regex misses), plus dynamic import() and require().
-// Only ONE node:fs named import with read-only members is allowed; every other
-// fs-family reference (fs / fs/promises / default / namespace / mixed / dynamic /
-// require) is forbidden.
+// Best-effort STATIC regression guard (NOT a security boundary against a
+// determined author). TypeScript AST enumerates ImportDeclaration (so a mixed
+// `import fs, { writeFile }` is ONE node), ExportDeclaration (re-export from
+// `node:fs`), dynamic import() and require(), plus createRequire from
+// node:module. Only ONE node:fs named import with read-only members is allowed;
+// every other fs-family reference (fs / fs-promises / default / namespace /
+// mixed / side-effect / re-export / dynamic / require / createRequire) is
+// forbidden. Explicitly NOT covered (active obfuscation, out of threat model):
+// eval(), new Function(), Reflect.apply, require aliasing, property-access
+// loaders (module.require / *.require). The behavioral read-only proof below
+// is the real backstop — it proves the CLI never mutates the target regardless
+// of source-level tricks.
 const READ_ONLY_FS = new Set(["existsSync", "readFileSync", "statSync", "readdirSync", "lstatSync"]);
 const FS_MODULE_RE = /^((?:node:)?fs(?:\/promises)?)$/;
-interface FsImport { shape: "named" | "default" | "namespace" | "dynamic" | "require"; module: string; names: string[]; }
+const MODULE_SPEC_RE = /^(node:)?module$/;
+interface FsImport { shape: "named" | "default" | "namespace" | "side-effect" | "re-export" | "createRequire" | "dynamic" | "require" | "computed"; module: string; names: string[]; }
 function scanFsImports(src: string): FsImport[] {
   const out: FsImport[] = [];
   const sf = ts.createSourceFile("scan.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  sf.forEachChild((node) => {
-    if (!ts.isImportDeclaration(node)) return;
-    const ms = node.moduleSpecifier;
-    if (!ts.isStringLiteral(ms) || !FS_MODULE_RE.test(ms.text)) return;
-    let shape: FsImport["shape"] = "named";
-    const names: string[] = [];
-    const clause = node.importClause;
-    if (clause) {
-      if (clause.name) { names.push(clause.name.getText(sf)); shape = "default"; }
-      const nb = clause.namedBindings;
-      if (nb) {
-        if (ts.isNamespaceImport(nb)) { names.push(nb.name.getText(sf)); shape = "namespace"; }
-        else if (ts.isNamedImports(nb)) {
-          for (const el of nb.elements) names.push((el.propertyName ?? el.name).getText(sf));
-          if (!clause.name) shape = "named";
+
+  // Classify an import()/require() argument. A literal that is NOT an fs module
+  // is allowed (null); a literal fs module is dynamic/require; anything computed
+  // (identifier / template-with-substitution / other expression) is rejected as
+  // "computed" so a runtime-built fs specifier cannot slip through.
+  const classifyCallArg = (arg: ts.Node, callShape: "dynamic" | "require"): FsImport | null => {
+    let lit: string | null = null;
+    if (ts.isStringLiteral(arg)) lit = arg.text;
+    else if (ts.isNoSubstitutionTemplateLiteral(arg)) lit = arg.text;
+    if (lit !== null) return FS_MODULE_RE.test(lit) ? { shape: callShape, module: lit, names: [] } : null;
+    return { shape: "computed", module: "(computed)", names: [] };
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node)) {
+      const ms = node.moduleSpecifier;
+      if (ts.isStringLiteral(ms)) {
+        if (FS_MODULE_RE.test(ms.text)) {
+          const clause = node.importClause;
+          if (!clause) {
+            out.push({ shape: "side-effect", module: ms.text, names: [] }); // `import "node:fs"`
+          } else {
+            let shape: FsImport["shape"] = "named";
+            const names: string[] = [];
+            if (clause.name) { names.push(clause.name.getText(sf)); shape = "default"; }
+            const nb = clause.namedBindings;
+            if (nb) {
+              if (ts.isNamespaceImport(nb)) { names.push(nb.name.getText(sf)); shape = "namespace"; }
+              else if (ts.isNamedImports(nb)) {
+                for (const el of nb.elements) names.push((el.propertyName ?? el.name).getText(sf));
+                if (!clause.name) shape = "named";
+              }
+            }
+            out.push({ shape, module: ms.text, names });
+          }
+        } else if (MODULE_SPEC_RE.test(ms.text)) {
+          // createRequire from node:module/module is the ESM→CJS bridge — forbid it.
+          const nb = node.importClause?.namedBindings;
+          if (nb && ts.isNamedImports(nb) && nb.elements.some((el) => (el.propertyName ?? el.name).getText(sf) === "createRequire")) {
+            out.push({ shape: "createRequire", module: ms.text, names: ["createRequire"] });
+          }
         }
       }
+    } else if (ts.isExportDeclaration(node)) {
+      const ms = node.moduleSpecifier;
+      if (ms && ts.isStringLiteral(ms)) {
+        if (FS_MODULE_RE.test(ms.text)) {
+          // export {…} / export * / export type … from node:fs — re-export leaks the fs surface.
+          out.push({ shape: "re-export", module: ms.text, names: [] });
+        } else if (MODULE_SPEC_RE.test(ms.text)) {
+          const ec = node.exportClause;
+          if (ec && ts.isNamedExports(ec) && ec.elements.some((el) => (el.propertyName ?? el.name).getText(sf) === "createRequire")) {
+            out.push({ shape: "createRequire", module: ms.text, names: ["createRequire"] });
+          }
+        }
+      }
+    } else if (ts.isCallExpression(node)) {
+      const expr = node.expression;
+      const isDynamic = expr.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = ts.isIdentifier(expr) && expr.text === "require";
+      if ((isDynamic || isRequire) && node.arguments.length >= 1) {
+        const found = classifyCallArg(node.arguments[0], isDynamic ? "dynamic" : "require");
+        if (found) out.push(found);
+      }
     }
-    out.push({ shape, module: ms.text, names });
-  });
-  for (const m of src.matchAll(/import\s*\(\s*["']((?:node:)?fs(?:\/promises)?)["']\s*\)/g)) {
-    out.push({ shape: "dynamic", module: m[1], names: [] });
-  }
-  for (const m of src.matchAll(/require\s*\(\s*["']((?:node:)?fs(?:\/promises)?)["']\s*\)/g)) {
-    out.push({ shape: "require", module: m[1], names: [] });
-  }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sf, visit);
   return out;
 }
 function isAllowedFsImport(f: FsImport): boolean {
@@ -518,6 +569,15 @@ describe("cbrain skill-pack", () => {
         'import fs, { writeFile } from "fs";',
         'import fs, { writeFile } from "node:fs";',
         'import fs, * as fsAll from "node:fs";',
+        "await import(`node:fs`);",
+        'const m = "node:fs";\nawait import(m);',
+        "require(`fs`);",
+        'import "node:fs";',
+        'export { writeFile } from "node:fs";',
+        'export * from "node:fs";',
+        'export type { Stats } from "node:fs";',
+        'import { createRequire } from "node:module";',
+        'export { createRequire } from "node:module";',
       ];
       for (const bad of cases) {
         expect(forbiddenFsImports(bad).length, `expected "${bad}" to be rejected`).toBeGreaterThan(0);
@@ -1078,6 +1138,74 @@ describe("cbrain skill-pack", () => {
         chmodSync(t, 0o755);
         rmSync(t, { recursive: true, force: true });
       }
+    });
+  });
+
+  // ── Behavioral read-only proof: CLI never mutates the target. This is the real
+  //    backstop — it proves read-only behavior at RUNTIME regardless of whatever
+  //    source-level import tricks exist, closing the gap the static AST guard
+  //    intentionally leaves (eval/Function/Reflect/alias loaders — out of scope).
+  describe("behavioral read-only proof", () => {
+    const roRoot = "/tmp/cbrain-behavioral-readonly";
+    const canon = resolveSkillsDir();
+    const manifest = loadManifest(canon);
+
+    function snapshotFiles(dir: string): Record<string, string> {
+      const snap: Record<string, string> = {};
+      for (const f of readdirSync(dir)) {
+        try { snap[f] = createHash("sha256").update(readFileSync(join(dir, f))).digest("hex"); }
+        catch { snap[f] = "(unreadable)"; }
+      }
+      return snap;
+    }
+    function seedCurrent(dir: string): void {
+      mkdirSync(dir, { recursive: true });
+      for (const f of manifest.files) writeFileSync(join(dir, f), readFileSync(join(canon, f)));
+      writeFileSync(join(dir, "MANIFEST.json"), readFileSync(join(canon, "MANIFEST.json")));
+    }
+
+    beforeEach(() => { rmSync(roRoot, { recursive: true, force: true }); });
+    afterEach(() => { rmSync(roRoot, { recursive: true, force: true }); });
+
+    test("missing target is NOT created by --target", () => {
+      const t = join(roRoot, "missing");
+      let stdout = "";
+      try { stdout = execSync(`${BIN} skill-pack --json --target "${t}"`, { stdio: ["pipe", "pipe", "pipe"], encoding: "utf-8" }); }
+      catch (e: any) { stdout = e.stdout ?? ""; }
+      expect(JSON.parse(stdout).target.status).toBe("missing");
+      expect(existsSync(t)).toBe(false); // path still absent — CLI did not create it
+    });
+
+    test("stale target: file list + content hashes identical before/after", () => {
+      const t = join(roRoot, "stale");
+      seedCurrent(t);
+      writeFileSync(join(t, "SKILL.md"), "tampered"); // makes it stale
+      const before = snapshotFiles(t);
+      try { execSync(`${BIN} skill-pack --json --target "${t}"`, { stdio: ["pipe", "pipe", "pipe"] }); } catch { /* exit 1 = stale */ }
+      expect(snapshotFiles(t)).toEqual(before);
+    });
+
+    test("incompatible target: file list + content hashes identical before/after", () => {
+      const t = join(roRoot, "incompat");
+      seedCurrent(t);
+      rmSync(join(t, "MANIFEST.json")); // no MANIFEST → incompatible
+      const before = snapshotFiles(t);
+      try { execSync(`${BIN} skill-pack --json --target "${t}"`, { stdio: ["pipe", "pipe", "pipe"] }); } catch { /* exit 1 = incompatible */ }
+      expect(snapshotFiles(t)).toEqual(before);
+    });
+
+    test("sentinel file not deleted/modified; no new files created", () => {
+      const t = join(roRoot, "sentinel");
+      seedCurrent(t);
+      const sentinel = join(t, "SENTINEL.txt");
+      writeFileSync(sentinel, "must-survive");
+      const before = snapshotFiles(t);
+      const beforeMtime = statSync(sentinel).mtimeMs;
+      try { execSync(`${BIN} skill-pack --json --target "${t}"`, { stdio: ["pipe", "pipe", "pipe"] }); } catch { /* current or stale */ }
+      expect(existsSync(sentinel)).toBe(true);
+      expect(readFileSync(sentinel, "utf-8")).toBe("must-survive");
+      expect(snapshotFiles(t)).toEqual(before); // no add/delete/modify
+      expect(statSync(sentinel).mtimeMs).toBe(beforeMtime); // not even touched
     });
   });
 });
