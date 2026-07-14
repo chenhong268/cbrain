@@ -137,7 +137,7 @@ ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 **Runtime correction — 2026-07-14（运行时证据导致的合同修正）：**
 - **原选择（已被推翻）：** 本节最初定 **symlink 默认推荐**，理由是「随 CBrain 升级自动同步」，省去人工重新部署。该选择在无运行时证据时被批准。
 - **真实 Hermes 运行时证据：** Hermes loader 用 **resolved path** 判定 trusted directory——指向活跃 checkout 的 symlink 解析后落在 `~/.hermes/skills` 之外，触发 trusted-directory 安全告警；且 checkout 中的 skills 修改会立即进入真实 Agent，绕过显式部署门禁（违反 #334「不静默漂移」）。
-- **新决定：** copy 默认推荐（审核快照落 Hermes trusted root 内，checkout 变化不自动影响真实 Agent）；symlink 降级为仅开发/试验可选。代价：CBrain 升级后副本变 stale，需人工重新部署 + verification。
+- **新决定：** copy 默认推荐（审核快照落 Hermes trusted root 内，checkout 变化不自动影响真实 Agent）；symlink 降级为仅开发/试验可选。代价：CBrain 升级后 canonical packVersion 变化 → 副本变 incompatible（非 stale；stale 仅用于同版本同清单下的内容漂移/文件缺失），需人工重新部署 + verification。
 
 `<pack-path>` = CBrain 安装的 `skills/` 目录绝对路径（由 `cbrain skill-pack` 报告的 `packPath`）。
 

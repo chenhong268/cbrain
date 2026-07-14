@@ -15,6 +15,39 @@ import type { SkillPackReport } from "../../src/cli/commands/skill-pack.js";
 const PROJECT_DIR = join(import.meta.dir, "..", "..");
 const BIN = `bun run ${join(PROJECT_DIR, "src/cli/index.ts")}`;
 
+// ── read-only fs-import guard: shared by the real-source check + mutation tests ──
+// Covers fs / node:fs / fs/promises / node:fs/promises across six shapes
+// (named / default / namespace / static / dynamic import / require) so bare
+// `fs` or fs/promises cannot bypass the node:fs-only check.
+const READ_ONLY_FS = new Set(["existsSync", "readFileSync", "statSync", "readdirSync", "lstatSync"]);
+interface FsImport { shape: "static-named" | "static-default" | "static-namespace" | "dynamic" | "require"; module: string; names: string[]; }
+function scanFsImports(src: string): FsImport[] {
+  const out: FsImport[] = [];
+  const MOD = "((?:node:)?fs(?:\\/promises)?)";
+  for (const m of src.matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*["']${MOD}["']`, "g"))) {
+    out.push({ shape: "static-named", module: m[2], names: m[1].split(",").map((s) => s.trim()).filter(Boolean) });
+  }
+  for (const m of src.matchAll(new RegExp(`import\\s+(\\w+)\\s+from\\s*["']${MOD}["']`, "g"))) {
+    out.push({ shape: "static-default", module: m[2], names: [m[1]] });
+  }
+  for (const m of src.matchAll(new RegExp(`import\\s+\\*\\s+as\\s+(\\w+)\\s+from\\s*["']${MOD}["']`, "g"))) {
+    out.push({ shape: "static-namespace", module: m[2], names: [m[1]] });
+  }
+  for (const m of src.matchAll(new RegExp(`import\\s*\\(\\s*["']${MOD}["']\\s*\\)`, "g"))) {
+    out.push({ shape: "dynamic", module: m[1], names: [] });
+  }
+  for (const m of src.matchAll(new RegExp(`require\\s*\\(\\s*["']${MOD}["']\\s*\\)`, "g"))) {
+    out.push({ shape: "require", module: m[1], names: [] });
+  }
+  return out;
+}
+function isAllowedFsImport(f: FsImport): boolean {
+  return f.shape === "static-named" && f.module === "node:fs" && f.names.every((n) => READ_ONLY_FS.has(n));
+}
+function forbiddenFsImports(src: string): FsImport[] {
+  return scanFsImports(src).filter((f) => !isAllowedFsImport(f));
+}
+
 describe("cbrain skill-pack", () => {
   // ── Source checkout verification ──
 
@@ -440,46 +473,37 @@ describe("cbrain skill-pack", () => {
       }
     });
 
-    test("CLI source stays read-only: exactly one node:fs named read-allowlist import, no namespace/default/dynamic/require", () => {
+    test("CLI source stays read-only: exactly one allowed node:fs named import, no other fs shape (bare fs / promises / dynamic / require / namespace)", () => {
       const src = readFileSync(join(PROJECT_DIR, "src/cli/commands/skill-pack.ts"), "utf-8");
-      // Exactly ONE named node:fs import, and every spec must be read-only allowlist.
-      const namedImports = [...src.matchAll(/import\s*\{([^}]*?)\}\s*from\s*["']node:fs["']/g)];
-      expect(namedImports, "expected exactly one named node:fs import").toHaveLength(1);
-      const READ_ALLOW = new Set(["existsSync", "readFileSync", "statSync", "readdirSync", "lstatSync"]);
-      for (const spec of namedImports[0][1].split(",").map((s) => s.trim()).filter(Boolean)) {
-        expect(READ_ALLOW.has(spec), `node:fs import "${spec}" not in read-only allowlist`).toBe(true);
-      }
-      // No second node:fs import of any other shape (namespace / default / aliased).
-      expect(src).not.toMatch(/import\s+\*\s+as\s+\w+\s+from\s*["']node:fs["']/);
-      expect(src).not.toMatch(/import\s+\w+(\s*,\s*\{[^}]*\})?\s+from\s*["']node:fs["']/);
-      // No fs/promises, no dynamic import, no require of fs.
-      expect(src).not.toContain("node:fs/promises");
-      expect(src).not.toMatch(/import\s*\(\s*["']node:fs["']\s*\)/);
-      expect(src).not.toMatch(/require\s*\(\s*["']node:fs["']\s*\)/);
-      expect(src).not.toMatch(/require\s*\(\s*["']fs["']\s*\)/);
-      expect(src).not.toContain("Bun.write");
-      expect(src).not.toContain("child_process");
-      // forbid mutating sync calls + exec/spawn call sites (belt-and-suspenders)
-      for (const bad of ["writeFileSync", "mkdirSync", "unlinkSync", "symlinkSync", "renameSync", "rmSync", "cpSync", "copyFileSync", "appendFileSync", "execSync", "spawnSync"]) {
+      const allowed = scanFsImports(src).filter(isAllowedFsImport);
+      expect(allowed, "expected exactly one read-only node:fs named import").toHaveLength(1);
+      const forbidden = forbiddenFsImports(src);
+      expect(forbidden, `forbidden fs import: ${JSON.stringify(forbidden)}`).toHaveLength(0);
+      // belt-and-suspenders: mutating sync calls / exec / install flags
+      for (const bad of ["writeFileSync", "mkdirSync", "unlinkSync", "symlinkSync", "renameSync", "rmSync", "cpSync", "copyFileSync", "appendFileSync", "execSync", "spawnSync", "Bun.write", "child_process"]) {
         expect(src).not.toContain(bad);
       }
       for (const bad of ["exec(", "spawn("]) {
         expect(src).not.toContain(bad);
       }
-      // no install/force/overwrite/deploy flags
       expect(src).not.toMatch(/--install|--force|--overwrite|--deploy|--backup|--migrate/);
     });
 
-    test("read-only allowlist rejects an import { writeFile } from node:fs (mutation guard)", () => {
-      // Independent of the real source: proves the allowlist logic itself
-      // refuses a writeFile import if one is ever introduced.
-      const mutatedSrc = 'import { existsSync, writeFile, readFileSync } from "node:fs";\n';
-      const namedImports = [...mutatedSrc.matchAll(/import\s*\{([^}]*?)\}\s*from\s*["']node:fs["']/g)];
-      const READ_ALLOW = new Set(["existsSync", "readFileSync", "statSync", "readdirSync", "lstatSync"]);
-      const allReadOnly = namedImports[0][1]
-        .split(",").map((s) => s.trim()).filter(Boolean)
-        .every((fn) => READ_ALLOW.has(fn));
-      expect(allReadOnly).toBe(false); // writeFile disqualifies the import
+    test("read-only guard rejects bare fs / fs/promises / dynamic / require / namespace imports (mutation guard)", () => {
+      // Each forbidden form must be detected by the shared scanner, so a future
+      // edit cannot slip a write path past the node:fs-only check.
+      const cases = [
+        'import { writeFile } from "fs";',
+        'import { writeFile } from "fs/promises";',
+        'import { writeFile } from "node:fs/promises";',
+        'await import("fs");',
+        'await import("fs/promises");',
+        'const fs = require("fs");',
+        'import * as fs from "node:fs";',
+      ];
+      for (const bad of cases) {
+        expect(forbiddenFsImports(bad).length, `expected "${bad}" to be rejected`).toBeGreaterThan(0);
+      }
     });
   });
 

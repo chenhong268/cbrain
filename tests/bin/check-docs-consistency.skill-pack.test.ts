@@ -222,3 +222,20 @@ test("mutation: two canonical ln -s blocks in symlink subsection fails (strict c
   );
   expectFail(mut);
 });
+
+// ── non-canonical extra block: an additional cp/ln pointing elsewhere must still fail ──
+test("mutation: extra non-canonical cp -r block (→ /tmp) in copy subsection fails", () => {
+  const mut = POLICY_DOC.replace(
+    'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+    'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```\n\n```bash\ncp -r "<pack>" /tmp/other-cbrain\n```',
+  );
+  expectFail(mut);
+});
+
+test("mutation: extra non-canonical ln -s block (→ /tmp) in symlink subsection fails", () => {
+  const mut = POLICY_DOC.replace(
+    'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+    'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```\n\n```bash\nln -s "<pack>" /tmp/other-cbrain\n```',
+  );
+  expectFail(mut);
+});
