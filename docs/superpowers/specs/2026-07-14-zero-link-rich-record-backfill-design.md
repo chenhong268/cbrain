@@ -290,7 +290,17 @@ Pre-call verification is necessary but not sufficient because `nerEngine.extract
 3. No await is permitted between the final successful guard and the first/subsequent extraction writes.
 4. A guard returns/throws one of two fixed signals without source text: `NER_SOURCE_CHANGED` when bytes differ, or `NER_SOURCE_UNAVAILABLE` when the required vault file/raw chunk set disappeared. The worker discards the entire extraction. It maps them respectively to `source_changed` or `blocked_source_unavailable`, both `skipped`, with zero extraction **or shadow-audit** writes. It must not write stale ingest-log audit, entities, relations, facts, events, aliases, mention counts, stubs, or links.
 
-`EntityResolver.resolveAll` and `semanticResolve` currently write aliases before returning. Guarded calls must enable a defer-writes mode: resolution records alias intent only, performs no alias mutation during either resolver phase, and applies the alias synchronously with the rest of `applyExtraction` only after the final guard. Unguarded sync/ingest behavior remains compatible. A test spies on every resolver/pipeline mutation method so the guard cannot claim zero writes while aliases leaked earlier.
+`EntityResolver.resolveAll` and `semanticResolve` currently write aliases before returning. Guarded calls must enable a defer-writes mode: resolution records deterministic full intents and performs no alias mutation during either resolver phase:
+
+```ts
+interface DeferredAliasIntent {
+  pageSlug: string;
+  alias: string;
+  source: "ner-resolved" | "llm-semantic";
+}
+```
+
+Intents dedupe by the full tuple and flush synchronously with the rest of `applyExtraction` only after the final guard. Exact/normalized/parenthetical resolution preserves `ner-resolved`; semantic LLM resolution preserves `llm-semantic`. Unguarded sync/ingest behavior remains compatible. Tests assert both zero pre-guard alias writes and exact persisted `aliases.source` provenance after a successful guard.
 
 The guard rederives the scheduled source fingerprint from current DB/vault bytes without logging them. Sync/ingest calls that already operate on their immediate in-memory source may omit the guard; durable fingerprinted jobs must provide it.
 
@@ -316,7 +326,7 @@ For each owned slug, the same scan derives a complete finalized repair ledger pl
 - an unmarked `kind = ner` row with `job.id <=` the slug's first manifest row id is a shadowed pre-repair legacy attempt and is excluded from broad retry/reset/snapshot/claim and rejected by generic MCP retry/cancel;
 - every newly submitted internal `kind = ner` row freezes the shared full `sourceFingerprint` in its payload; `contentHash` remains a page-snapshot check, never the epoch identity;
 - ordinary `processed`, `failed`, and user-`cancelled` terminal rows whose frozen fingerprint differs from the current source fingerprint are superseded historical attempts: retain read-only, never retry, and do not count as conflicts. Zero-LLM `source_changed`/`source_unavailable`/`invalid` skips are audit records, not proof that their scheduled fingerprint was processed;
-- an old-fingerprint `pending` row is normally superseded in-place by the submit transaction. A sanctioned pair of one fresh old-fingerprint `running` row plus one current-fingerprint `pending` successor is not a conflict; the successor waits until the running row terminates. Any other old-fingerprint live shape is an integrity conflict;
+- an old-fingerprint `pending` row is normally superseded in-place by the submit transaction. A structurally valid pair of one old-fingerprint `running` row plus one current-fingerprint `pending` successor is not an integrity conflict regardless of freshness; freshness determines the later pure disposition/action. Any other old-fingerprint live shape is an integrity conflict;
 - for the current source fingerprint, exactly zero or one unmarked post-repair row may exist. It is valid only when its non-empty `contentHash` equals the page's current `pages.content_hash` and its frozen fingerprint is absent from the finalized repair ledger and ordinary terminal-attempt ledger;
 - more than one current-fingerprint row, missing-page live work, legacy live work without a frozen fingerprint after repair control begins, or otherwise unverifiable live work is an integrity conflict;
 - when the current fingerprint already appears in either outcome-qualified finalized ledger, `JobQueueNerSubmitter` dedupes the internal submission. If a race/pre-existing unmarked current-fingerprint row exists anyway, the ordinary worker completes it with fixed `skipped/already_processed` and zero LLM calls;
@@ -334,7 +344,7 @@ When the page fingerprint is unavailable, still surface live rows and live/cance
 
 Apply this deterministic algorithm:
 
-1. Collect **all live rows** for the slug: every `pending` row and every `running` row, irrespective of fingerprint or freshness. Before declaring a multi-live conflict, structurally recognize exactly one sanctioned ordinary transition pair: one running predecessor with an old fingerprint plus one pending successor with the current fingerprint, both unmarked, same slug, valid identity, and no third live row. Then branch on predecessor freshness: fresh → `active`, successor waits; stale—including missing/invalid `started_at`—→ atomically complete predecessor `skipped/source_changed`, keep successor pending, and allow this stage to claim it. Two running, two pending, wrong-current fingerprint, marked/ordinary mixing, or any third row remains `stateConflicts`. No lower-id live row may otherwise be ignored.
+1. Collect **all live rows** for the slug: every `pending` row and every `running` row, irrespective of fingerprint or freshness. Before declaring a multi-live conflict, structurally recognize exactly one sanctioned ordinary transition pair: one running predecessor with an old fingerprint plus one pending successor with the current fingerprint, both unmarked, same slug, valid identity, and no third live row. The shared read-only classifier returns internal `ordinary_transition_pair_fresh` or `ordinary_transition_pair_stale`; it never mutates. Two running, two pending, wrong-current fingerprint, marked/ordinary mixing, or any third row remains `stateConflicts`. No lower-id live row may otherwise be ignored.
 2. If exactly one live row exists:
    - a marked row must belong to its latest **unfinalized** manifest and is always `active`; stale running also increments `staleRunning`. It is resumed only through that existing batch UUID, never moved into a new batch. A marked live row whose latest manifest claims to be finalized is a queue-integrity conflict.
    - legacy `pending` or fresh legacy `running` → `active`;
@@ -361,6 +371,8 @@ Apply this deterministic algorithm:
 Lower-id historical **terminal** rows are ignored after canonical selection and never counted as additional pages; live rows are never ignored. Conflicting current-fingerprint terminal outcomes increment `stateConflicts` even though the highest id remains canonical.
 
 The only actionable dispositions are `new`, `legacy_requeue`, `content_changed_requeue`, and `stale_requeue`.
+
+The two ordinary-transition dispositions are operational state, not zero-link enqueue actions. Health, `fsck`, dry-run, and enqueue planning may count/project them but must leave the database byte-for-byte unchanged. Only the unfiltered mutating stage in §6.4 may execute the stale transition after the complete global preflight passes.
 
 If any current-debt page contributes `stateConflicts > 0` or the global `queueIntegrityConflicts > 0`, enqueue is fail-closed for the whole invocation: return `status = blocked`, create no `batchId`, and perform zero job mutations. Dry-run still reports scalar conflict counts so the operator can investigate.
 
@@ -416,7 +428,7 @@ Provider errors and timeouts continue through the existing `failJob` behavior. B
 
 The existing broad `cbrain ner-backfill --retry-failed` command must skip every manifest-owned/marked row and every shadowed pre-repair legacy attempt. It may retain normal retry behavior for a valid canonical post-repair deferred attempt and unrelated legacy/ordinary jobs. Current-fingerprint repair failure is terminal for this issue; changed content may create a later batch, but broad retry cannot mutate finalized ownership.
 
-Before an unfiltered Dream/CLI stage performs stale reset, retry, snapshot, or claim, it safely scans all manifests and live `ner-backfill` rows. Every manifest-owned/marked row and shadowed pre-repair attempt is excluded before mutation. A validated canonical unseen-fingerprint deferred attempt enters the ordinary candidate set; a current-source row whose fingerprint is already in an outcome-qualified finalized history enters `alreadyProcessedIds` and may only complete fixed `skipped/already_processed` with zero LLM. Superseded terminal rows are ignored. One fresh old-fingerprint running predecessor plus one current pending successor is a sanctioned pair: do not claim the successor until the predecessor terminates. When that predecessor becomes stale, deterministically complete it `skipped/source_changed` with zero LLM and release the successor in the same stage. Other superseded/multi-live shapes are conflicts. If manifest parsing, ownership validation, or any live-row classification fails, the whole stage returns fixed `QUEUE_INTEGRITY_CONFLICT` with **zero job mutations**, including zero mutations to otherwise ordinary jobs. This preflight is shared by Dream and the CLI so neither path can bypass exclusive batch ownership.
+Before an unfiltered Dream/CLI stage performs stale reset, retry, snapshot, or claim, it safely scans all manifests and live `ner-backfill` rows. Every manifest-owned/marked row and shadowed pre-repair attempt is excluded before mutation. A validated canonical unseen-fingerprint deferred attempt enters the ordinary candidate set; a current-source row whose fingerprint is already in an outcome-qualified finalized history enters `alreadyProcessedIds` and may only complete fixed `skipped/already_processed` with zero LLM. Superseded terminal rows are ignored. A fresh transition pair remains untouched and its successor is excluded from claim. A stale transition pair is queued as a deterministic transition mutation. **Only after** the whole global preflight reports zero other integrity/state conflicts does one transaction complete its predecessor `skipped/source_changed` and release the existing successor for this stage; if any conflict exists anywhere, both rows remain byte-for-byte unchanged. Other superseded/multi-live shapes are conflicts. This preflight is shared by Dream and the CLI so neither path can bypass exclusive batch ownership.
 
 ### 6.5 Ordinary deferred NER epoch identity
 
@@ -759,7 +771,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - marked terminal/failed changed fingerprint → same row requeued;
 - multiple historical matching rows → deterministic reuse, no new duplicate;
 - duplicate active/conflicting current rows → scalar conflict, no mutation;
-- exactly one old-running/current-pending ordinary successor pair is structurally recognized before freshness: fresh is active/waiting, crossing TTL by one millisecond atomically source-changes predecessor and releases successor; two-running, two-pending, wrong-fingerprint, or third-row shapes conflict;
+- exactly one old-running/current-pending ordinary successor pair is structurally recognized before freshness: shared plan/Health/fsck remain byte-for-byte read-only and report fresh/stale disposition across the TTL millisecond boundary; only unfiltered stage with zero global conflicts source-changes stale predecessor and releases successor; any other conflict leaves both unchanged;
 - malformed active JSON, invalid active slug/kind, and incomplete repair marker increment queue-integrity conflict and block all enqueue without leaking payload;
 - unrelated valid `entity_facts` does not match and does not create a conflict;
 - manifest UUID and ownership list are atomic; missing/corrupt manifest or child marker fails closed;
@@ -796,6 +808,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - vault/raw source drift after enqueue completes `source_changed` with zero LLM calls;
 - ordinary deferred rows freeze and verify the same source fingerprint; drift completes fixed skipped/source-changed with zero LLM while legacy no-repair rows retain compatibility;
 - deterministic extract/semantic-resolve concurrency changes F1→F2 after precheck but before writes: guarded resolver defers exact/normalized/LLM alias intents and non-empty shadow audit, final guard rejects F1 with zero ingest-log/entity/alias/mention/page/fact/link/relation/event mutations, and F2 successor remains processable;
+- successful guarded exact/normalized/parenthetical and semantic alias intents persist exact `ner-resolved` versus `llm-semantic` provenance and dedupe by full tuple;
 - deleting the vault file or raw chunks after first guard but during semantic resolution yields blocked-source-unavailable, not source-changed, with zero extraction/audit mutations;
 - F1 pending→F2 atomically reuses one row; fresh F1 running→F2 creates one waiting successor; stale F1 running→F2 completes F1 source-changed and releases exactly one F2, so only F2 invokes LLM;
 - F1 source-changed/source-unavailable/invalid zero-LLM terminal → F2 → revert stable F1 permits one real F1 attempt instead of deduping it;
@@ -1045,3 +1058,13 @@ The eleventh review returned FAIL with one HIGH and two required MEDIUM findings
 3. Source guard failure distinguishes changed bytes from disappeared vault/raw source and maps them to source-changed versus blocked-source-unavailable without leaking content.
 
 The independent reviewer must run a twelfth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 29. Twelfth adversarial review correction record
+
+The twelfth review returned FAIL with two HIGH and one required MEDIUM finding. This revision closes them:
+
+1. Global integrity and per-page classification both recognize the transition-pair structure regardless of freshness; stale is an operational disposition, not corruption.
+2. The shared scanner/classifier is strictly read-only. Health, fsck, dry-run, and enqueue planning never execute a stale transition; only the unfiltered mutating stage may do so after a globally clean preflight.
+3. Deferred alias intents freeze page, alias, and provenance. Exact/normalized/parenthetical matches retain `ner-resolved`, semantic matches retain `llm-semantic`, and full-tuple dedupe precedes post-guard flush.
+
+The independent reviewer must run a thirteenth pass. The gate remains no CRITICAL/HIGH findings.
