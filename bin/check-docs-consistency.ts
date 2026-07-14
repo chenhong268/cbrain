@@ -205,6 +205,43 @@ export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
   return out;
 }
 
+/**
+ * Skill-pack install POLICY gate (complements {@link checkInstallTarget}'s
+ * path/block checks). For the doc that describes the skill-pack install
+ * (contains cp -r + ln -s + INSTALL_TARGET): copy must be the
+ * default/production recommendation, symlink must be marked dev/experimental
+ * only (never default-recommended), and both symlink risks must be present —
+ * the Hermes trusted-directory/security warning AND the checkout-drift risk.
+ * Each missing contract is reported by name so a failure says which policy
+ * was violated (no single over-broad regex).
+ */
+export function checkSkillPackInstallPolicy(docs: Map<string, string>): CheckResult[] {
+  const out: CheckResult[] = [];
+  for (const [file, text] of docs) {
+    // Only the doc that describes the skill-pack install (cp + ln + target).
+    if (!text.includes("cp -r") || !text.includes("ln -s") || !text.includes(INSTALL_TARGET)) continue;
+
+    // 1. copy must carry a default/production recommendation.
+    const copyRecommended = /复制[^\n]*?(默认推荐|生产推荐|生产环境|稳定)/.test(text);
+    // 2. symlink must be marked dev/experimental only.
+    const symlinkDevOnly = /符号链接[^\n]*?(仅开发|开发|试验|dev)/i.test(text);
+    // 3. symlink must NOT be marked default-recommended.
+    const symlinkDefault = /符号链接[^\n]*?默认推荐/.test(text);
+    // 4. trusted-directory / security warning must be present.
+    const trustedWarning = /trusted[\s-]?director|信任[^\n]{0,4}目录|安全警告|security warning|trusted root/i.test(text);
+    // 5. checkout drift risk must be present.
+    const checkoutDrift = /(?:checkout|仓库|源码)[^\n]{0,30}?(?:变化|修改|漂移)|(?:变化|修改)[^\n]{0,20}?立即/.test(text);
+
+    if (!copyRecommended) out.push({ check: `skill-pack-policy copy-recommended @${file}`, passed: false, detail: `copy (cp -r → ${INSTALL_TARGET}) 必须标记为默认/生产推荐（如「复制（默认推荐…稳定 Hermes）」）` });
+    if (!symlinkDevOnly) out.push({ check: `skill-pack-policy symlink-dev-only @${file}`, passed: false, detail: `symlink (ln -s) 必须标记为仅开发/试验（如「符号链接（仅开发/试验环境）」）` });
+    if (symlinkDefault) out.push({ check: `skill-pack-policy symlink-not-default @${file}`, passed: false, detail: `symlink 不得标记为「默认推荐」——生产默认应为 copy` });
+    if (!trustedWarning) out.push({ check: `skill-pack-policy trusted-dir-warning @${file}`, passed: false, detail: `必须说明 symlink resolved path 可能触发 Hermes trusted-directory / security warning` });
+    if (!checkoutDrift) out.push({ check: `skill-pack-policy checkout-drift @${file}`, passed: false, detail: `必须说明 checkout/仓库内容变化会立即影响 Hermes（静默漂移风险）` });
+  }
+  if (out.length === 0) out.push({ check: "skill-pack install policy", passed: true, detail: "copy 默认推荐 + symlink 仅开发/试验 + trusted-dir warning + checkout-drift 风险齐备" });
+  return out;
+}
+
 /** Matches `cbrain <subcommand>` whether it sits in inline code or a fenced
  *  code block. The leading char class (line-start, backtick, quote, or space)
  *  avoids matching "cbrain" as a bare word inside prose like "the cbrain
@@ -899,6 +936,7 @@ function main(): void {
     ...checkVersions(docs),
     ...checkManifestVersion(),
     ...checkInstallTarget(docs),
+    ...checkSkillPackInstallPolicy(docs),
     ...checkCommands(docs, new Set(cli.keys())),
     ...checkSyncRecovery(docs, new Set(cli.keys())),
     ...checkCounts(docs, tools.length, cli.size),

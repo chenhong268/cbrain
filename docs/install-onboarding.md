@@ -343,21 +343,28 @@ cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
 
 ```
 
-3. 安装（仅当 step 2 报 missing）。**方式 A / B 二选一，不要都执行**——连续执行会让 copy 沿 symlink 写回 canonical pack，产生嵌套副本。
+3. 安装（仅当 step 2 报 missing）。**方式 A / B 二选一，不要都执行**——连续执行会让 copy 沿 symlink 写回 canonical pack，产生嵌套副本。stale / incompatible / unverified 一律人工排查后再决定，**不提供覆盖命令**。
 
-**方式 A：符号链接**（默认推荐，随 CBrain 升级自动同步）：
+**方式 A：复制（默认推荐，用于稳定 Hermes）**
+
+```bash
+mkdir -p ~/.hermes/skills/brain-ops
+cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
+```
+
+- 优点：部署的是审核过的确定快照；文件落在 Hermes trusted root（`~/.hermes/skills`）内；CBrain checkout 后续修改不会自动进入真实 Agent。
+- 代价：CBrain 升级后该副本会变成 stale，需重新人工备份旧 target、重新复制、再 `cbrain skill-pack --target` verification。
+
+**方式 B：符号链接（仅开发/试验环境，非生产默认）**
 
 ```bash
 mkdir -p ~/.hermes/skills/brain-ops
 ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 ```
 
-**方式 B：复制**：
-
-```bash
-mkdir -p ~/.hermes/skills/brain-ops
-cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
-```
+- 风险：当 symlink 解析后的目标落在 `~/.hermes/skills` 之外（如指向活跃 checkout），Hermes loader 的 resolved-path 信任检查可能记录 trusted-directory security warning（`skill file is outside the trusted skills directory`）；
+- 风险：checkout 中的 skill 文件变化会立即影响 Hermes，把尚未发布的修改静默带进真实 Agent；
+- 适合本地开发联调，不作为稳定生产 Agent 的默认安装方式。
 
 4. 安装后验证（应报 current）：
 

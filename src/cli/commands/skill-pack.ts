@@ -440,8 +440,8 @@ export function formatHuman(report: SkillPackReport): string {
   // No-target / stale / incompatible / unverified must NOT show install commands.
   if (report.guidance && report.verificationStatus !== "fail"
     && report.target?.status === "missing") {
-    lines.push(`  Copy:    ${report.guidance.copyCommand}`);
-    lines.push(`  Symlink: ${report.guidance.symlinkCommand}`);
+    lines.push(`  Copy (recommended): ${report.guidance.copyCommand}`);
+    lines.push(`  Symlink (dev only): ${report.guidance.symlinkCommand}`);
   }
 
   if (report.target) {

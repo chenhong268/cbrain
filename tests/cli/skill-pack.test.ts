@@ -350,8 +350,9 @@ describe("cbrain skill-pack", () => {
       const output = formatHuman(report);
       expect(output).toContain("Status: FAIL");
       expect(output).toContain("Missing: RESOLVER.md");
-      // Should NOT show copy/symlink guidance on fail
-      expect(output).not.toContain("Copy:");
+      // Should NOT show copy/symlink guidance on fail (policy labels absent)
+      expect(output).not.toContain("Copy (recommended");
+      expect(output).not.toContain("Symlink (dev only");
     });
 
     test("shows FAIL with stale target even when canonical passes", () => {
@@ -386,8 +387,8 @@ describe("cbrain skill-pack", () => {
       expect(output).toContain("Target status: STALE");
       expect(output).toContain("Stale: SKILL.md");
       // stale target must NOT show install commands (no overwrite hint, spec §3.4)
-      expect(output).not.toContain("Copy:");
-      expect(output).not.toContain("Symlink:");
+      expect(output).not.toContain("Copy (recommended");
+      expect(output).not.toContain("Symlink (dev only");
     });
 
     test("shows Copy/Symlink when target missing (canonical pass)", () => {
@@ -412,9 +413,45 @@ describe("cbrain skill-pack", () => {
         },
       };
       const output = formatHuman(report);
-      expect(output).toContain("Copy:");
-      expect(output).toContain("Symlink:");
+      // policy labels: copy = recommended/production default, symlink = dev-only
+      expect(output).toMatch(/Copy[ (].*?(recommended|production)/i);
+      expect(output).toMatch(/Symlink[ (].*?dev/i);
       expect(output).toContain("Target status: MISSING");
+    });
+
+    test("does not show install guidance for current/incompatible/unverified targets", () => {
+      for (const status of ["current", "incompatible", "unverified"] as const) {
+        const report: SkillPackReport = {
+          version: "1.0.0",
+          packPath: "/test/skills",
+          entrypointPath: "/test/skills/SKILL.md",
+          requiredFiles: [{ name: "SKILL.md", status: "present", absolutePath: "/test/skills/SKILL.md" }],
+          missingFiles: [],
+          sizeStatus: "ok",
+          entrypointChars: 50,
+          verificationStatus: "pass",
+          status: "pass",
+          guidance: { copyCommand: "cp -r /test/skills <target>", symlinkCommand: "ln -s /test/skills <target>" },
+          target: { path: "/test/target", status, files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] },
+        };
+        const output = formatHuman(report);
+        expect(output).not.toContain("Copy (recommended");
+        expect(output).not.toContain("Symlink (dev only");
+      }
+    });
+
+    test("CLI source stays read-only: no install/overwrite/write/exec capability", () => {
+      const src = readFileSync(join(PROJECT_DIR, "src/cli/commands/skill-pack.ts"), "utf-8");
+      // No filesystem-mutating calls
+      for (const bad of ["writeFileSync", "mkdirSync", "unlinkSync", "symlinkSync", "renameSync", "cpSync", "rmSync", "copyFileSync"]) {
+        expect(src).not.toContain(bad);
+      }
+      // No shell/process execution
+      for (const bad of ["execSync", "spawnSync", "child_process"]) {
+        expect(src).not.toContain(bad);
+      }
+      // No install/force/overwrite CLI flags
+      expect(src).not.toMatch(/--install|--force|--overwrite|--deploy|--backup|--migrate/);
     });
   });
 

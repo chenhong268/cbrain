@@ -120,17 +120,24 @@
 
 安装契约：**Hermes 扫描 `~/.hermes/skills/<dir>/SKILL.md` 找入口**（target root 必须含 `SKILL.md`，不嵌套）。
 
-文档给两种形状，**symlink 默认推荐**（随 CBrain 升级自动同步）：
+文档给两种形状，**copy 默认推荐**（部署审核过的确定快照，用于稳定 Hermes）；**symlink 仅开发/试验可选**：
 
 ```bash
-# symlink（默认推荐）
-mkdir -p ~/.hermes/skills/brain-ops
-ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
-
-# copy
+# copy（默认推荐，稳定 Hermes）
 mkdir -p ~/.hermes/skills/brain-ops
 cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 ```
+
+```bash
+# symlink（仅开发/试验；resolved path 落 trusted root 外会触发 Hermes 安全告警）
+mkdir -p ~/.hermes/skills/brain-ops
+ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
+```
+
+**Runtime evidence（post-review 修正，政策由 symlink 默认改为 copy 默认）：**
+- Hermes loader 用 **resolved path** 判定 trusted directory：当 symlink 解析后落在 `~/.hermes/skills` 之外（如指向活跃 checkout），会记录 `skill file is outside the trusted skills directory` 安全告警。
+- 指向活跃 checkout 的 symlink 会让**尚未发布的 skills 修改立即进入真实 Hermes**，绕过显式部署门禁，产生静默合同变化（违反 #334「不静默漂移」目标）。
+- copy 把审核快照落在 Hermes trusted root 内，checkout 后续变化不会自动影响真实 Agent；代价是 CBrain 升级后副本变 stale，需人工重新部署 + verification。
 
 `<pack-path>` = CBrain 安装的 `skills/` 目录绝对路径（由 `cbrain skill-pack` 报告的 `packPath`）。
 

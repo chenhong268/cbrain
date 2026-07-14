@@ -1004,3 +1004,17 @@ Expected: `git diff --check` clean; privacy grep empty (note: `github:<owner>/cb
 **Type consistency:** `TargetStatus`/`TargetFileState` gain `"incompatible"` (Task 3); `compareTarget` return adds `incompatibleFiles: readonly string[]`; `SkillPackReport.target` shape matches. `loadManifest`/`ENTRY_FILES`/`PackManifest` exported consistently across Tasks 1-3.
 
 **Residual risk (per spec §6):** `github:chenhong268/cbrain` hardcoded (out of scope); routing alignment may surface more `deep_recall` gate refs (Task 9 Step 6 audits). Hermes runtime smoke deferred to post-merge release gate.
+
+---
+
+## Post-review runtime correction
+
+**原计划为何推荐 symlink：** §3.4 原定 symlink 默认推荐，理由是「随 CBrain 升级自动同步」，省去人工重新部署。
+
+**真实 Hermes loader 发现：** 合并前用 Hermes preload loader（`agent.skill_commands._load_skill_payload`）做 smoke 时发现，Hermes 用 **resolved path** 判定 trusted directory——指向 checkout 的 symlink 解析后落在 `~/.hermes/skills` 之外，会记录 `skill file is outside the trusted skills directory` 安全告警；且活跃 checkout 的 skills 修改会立即进入真实 Agent，绕过显式部署门禁（违反 #334「不静默漂移」）。
+
+**最终政策：copy 默认推荐（稳定 Hermes），symlink 仅开发/试验可选。** copy 把审核快照落在 trusted root 内，checkout 变化不自动影响真实 Agent；代价是升级后变 stale，需人工重新部署 + verification。
+
+**本修正对应：** spec §3.4 政策修订 + runtime evidence；`docs/install-onboarding.md` 第七步 copy 默认 + symlink 两风险说明；CLI human label `Copy (recommended)` / `Symlink (dev only)`；docs gate 新增 `checkSkillPackInstallPolicy`（copy 默认 / symlink 仅开发 / trusted-dir warning / checkout-drift 五合同逐条检测）。commit: `fix(skill-pack): prefer trusted copy deployment for Hermes (#334)`。
+
+**未改：** 历史 Task 1-10 不动；live `~/.hermes` target 本轮不触碰（symlink→copy 原子迁移另布置）。
