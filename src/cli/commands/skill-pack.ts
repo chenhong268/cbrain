@@ -407,7 +407,11 @@ export function formatHuman(report: SkillPackReport): string {
   }
   lines.push("");
 
-  if (report.status !== "fail") {
+  // Install guidance only when canonical passes AND target is missing (or absent).
+  // Stale/incompatible/unverified targets must NOT show copy/symlink (no overwrite hint).
+  const showInstall = report.verificationStatus !== "fail"
+    && (!report.target || report.target.status === "missing");
+  if (showInstall) {
     lines.push(`  Copy:    ${report.guidance.copyCommand}`);
     lines.push(`  Symlink: ${report.guidance.symlinkCommand}`);
   }

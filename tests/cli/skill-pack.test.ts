@@ -341,6 +341,33 @@ describe("cbrain skill-pack", () => {
       expect(output).toContain("Target status: STALE");
       expect(output).toContain("Stale: SKILL.md");
     });
+
+    test("shows Copy/Symlink when target missing (canonical pass)", () => {
+      const report: SkillPackReport = {
+        version: "1.0.0",
+        packPath: "/test/skills",
+        entrypointPath: "/test/skills/SKILL.md",
+        requiredFiles: [{ name: "SKILL.md", status: "present", absolutePath: "/test/skills/SKILL.md" }],
+        missingFiles: [],
+        sizeStatus: "ok",
+        entrypointChars: 50,
+        verificationStatus: "pass",
+        status: "fail",
+        guidance: { copyCommand: "cp -r /test/skills/ <target>/", symlinkCommand: "ln -s /test/skills <target>" },
+        target: {
+          path: "/test/target",
+          status: "missing",
+          files: [],
+          staleFiles: [],
+          missingTargetFiles: [],
+          unverifiedFiles: [],
+        },
+      };
+      const output = formatHuman(report);
+      expect(output).toContain("Copy:");
+      expect(output).toContain("Symlink:");
+      expect(output).toContain("Target status: MISSING");
+    });
   });
 
   // ── Pack content verification (bun pm pack) ──
