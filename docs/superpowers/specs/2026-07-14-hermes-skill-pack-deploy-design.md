@@ -79,8 +79,8 @@
 规则：
 - `packVersion` 手写，verify 时强校验 `== src/version.ts` 导出的 version（即 `package.json` version）。不等 → canonical 自检 fail（`VERSION_MISMATCH`，exit 1）。这是"不静默漂移"守卫：release bump version 忘改 manifest 会被 `skill-pack` 和 docs gate 双重拦截。
 - `files[]` 列 canonical pack **全部 33 个运行依赖文件**（17 `.md` + 16 `.routing-eval.jsonl`，对应 `package.json` files 字段 `"skills/"` 全包 + `SKILL.md` §4 索引）。CLI 完全由 `files[]` 驱动校验，替代硬编码 `REQUIRED_FILES` const。
-- **schema/path 校验**：`files[]` 每项必须是安全相对路径——无重复、无绝对路径（不以 `/` 开头）、无 `..` 段、不含 `MANIFEST.json` 自身。违例 → `MANIFEST_INVALID`。
-- **canonical exact-inventory gate**：`files[]` 必须与 `skills/` 实际文件集合**完全相等**（集合相等，不多不少）。canonical 新增第 34 个文件忘更新 manifest → 不等 → canonical 自检 fail（`INVENTORY_MISMATCH`）。防"新增文件静默漂移"。
+- **schema/path 校验**：`files[]` 每项必须是安全**顶层 basename**——无 `/`、无 `\`、无 `.`、无 `..`、无绝对路径、无重复项、不含 `MANIFEST.json` 自身。违例 → `MANIFEST_INVALID`。
+- **canonical exact-inventory gate**：`files[]` 必须等于 `skills/` 顶层常规文件集合**减去 `MANIFEST.json`**（集合相等，不多不少；`MANIFEST.json` 排除在比较外，故不进 `files[]` 也不触发 mismatch）。canonical 新增第 34 个文件忘更新 manifest → 不等 → canonical 自检 fail（`INVENTORY_MISMATCH`）。防"新增文件静默漂移"。
 - **target manifest 等价校验**：`--target` 比对时，target MANIFEST 的 `files[]` 必须与 canonical `files[]` 完全相等。target 手改 manifest 清单（删/加文件项）→ 不等 → `incompatible`（不会报 `current`）。
 - **最小强制集合 `ENTRY_FILES`**（硬编码 const，不在 manifest）：`SKILL.md`、`hermes-cbrain-brief.md`、`RESOLVER.md`、`recall-resolver.md`（`SKILL.md` §1 启动流程必读入口）。verify 时校验 `ENTRY_FILES ⊆ manifest.files[]`，否则 manifest 自残 → `MANIFEST_INVALID`。
 - **MANIFEST.json 不进自己的 hash 列表**，单独验证（存在 + 可解析 + `packVersion` 匹配 + schema/inventory 校验）。不自证。
@@ -176,17 +176,23 @@ cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 - **manifest version 一致性**：扩展 `checkVersions`，校验 `skills/MANIFEST.json.packVersion == package.json version`（与 `skill-pack` verify 双守卫）。
 - 现有 15 个 check 不破坏；新增 check 走同样的 truth source（package.json / `buildProgram`）和 exit code 约定（0 pass / 1 fail）。
 
-### 3.8 routing smoke fixture（skill 层，不扩展 TS router）
+### 3.8 routing 对齐（skill 层，解决 canonical pack 内部矛盾）
 
-审核选定 Skill-layer fixture。三类 smoke 全部作为 **skill-layer contract 校验**，**不经过 TS router**（TS router `classifyFrontdoorQuery` 返回 `deep_recall` 而非 `cbrain_recall`，且非目标禁改；让 natural case 过 TS router 无法实现）。
+`agent-facing.routing-eval.jsonl` 是 **Agent-facing 路由主评估**（`SKILL.md` §4 标注，由 `bin/check-resolver-pilot.sh` §5 直接校验），**不是** TS router 评估文件。现状存在 canonical pack 内部矛盾：natural 类用例 `expected_tool=deep_recall`，但 `deep_recall` 是 advanced escape hatch（`check-docs-consistency` 约束其不作首选，应用 `cbrain_recall` 前门）。三个独立注册的 MCP tool：`cbrain_recall`（前门，`src/mcp/tools/frontdoor.ts`）/ `deep_recall`（advanced，`recall.ts`）/ `next_actions`（operational，`next-actions.ts`）。#334 在该文件内对齐三类意图，消除矛盾：
 
-- 三类匿名 fixture + expected skill-layer routing target：
-  - operational："系统当前有什么异常" / "接下来处理什么" → `RESOLVER.md` → `query.md[operations]` → `next_actions`
-  - natural：普通知识问题 → `hermes-cbrain-brief.md` → `cbrain_recall`
-  - debug：精确 debug 关键词 → `query.md` → `query`
-- 校验方式：bun:test doc-contract 断言 `RESOLVER.md` 路由表 + `query.md[operations]` branch + `hermes-cbrain-brief.md` 覆盖三类意图→正确 skill 文件→正确 tool（grep 规则文本，**不调 `classifyFrontdoorQuery`**）。扩展现有 `checkAgentWorkflowContract`。
-- **不修改现有 `agent-facing.routing-eval.jsonl`**：该文件是 TS router 评估文件，现有 natural→`deep_recall` 是 TS 层语义（router 内部 next_tool）。skill-layer smoke 是独立 contract 层（MCP tool 语义），混入同文件会制造两层语义冲突。skill-layer smoke fixture 内联在 bun:test，不追加进 `agent-facing.routing-eval.jsonl`。
-- TS router **不动**；现有 `*.routing-eval.jsonl` 用例**不动**。
+- **natural 类**（grounded_recall / content_recall / search / 相关 anti_pattern）`expected_tool` `deep_recall` → `cbrain_recall`，`expected_args` 对齐 `cbrain_recall` 合同（实现时确认 `frontdoor.ts` args schema）。
+- **operational 类**（新增 category）`expected_tool=next_actions`（"系统当前有什么异常" / "接下来处理什么"）。
+- **debug 类**（keyword_debug）`expected_tool=query`（已存在，保留）。
+
+gate 同步（`bin/check-resolver-pilot.sh` §5）：
+- `af_tools`（line 311）：`deep_recall` → `cbrain_recall`，加 `next_actions`；加 operational category 最低用例数 + `next_actions` 覆盖校验。
+- query demotion 检查（line 619-637）保留；line 635 错误提示 `deep_recall/...` → `cbrain_recall/...`。
+- 其他 `deep_recall` 引用（line 141 TOOLS / 476 brief_tools / 582-586 query desc / 592-597 RESOLVER `[deep_recall]` / 738-745 review.md）：按 `deep_recall` 作为 advanced tool 的语义**逐条评估**保留或同步，实现时全局 `grep deep_recall` 确保不破坏 advanced tool 语义与现有 gate。
+
+约束：
+- 不修改 TS router（`classifyFrontdoorQuery` 不动）；TS router 返回 `deep_recall` 是其内部 next_tool，与 Agent-facing 评估的 MCP tool 语义独立。
+- `check-docs-consistency` 的 `deep_recall` 约束（line 529-586, 656-682）**不放松**——`deep_recall` 仍是 advanced，只是 agent-facing eval 不再把它当 natural 的 expected_tool。
+- 隐私：用例 input 用合成 sentinel（人物A/组织B/主题C/事件D/项目E），不写真名。
 
 ### 3.9 Hermes 加载契约与 release gate
 
@@ -217,7 +223,10 @@ cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 2. `tests/bin/check-docs-consistency.*.test.ts`：
    - install-target ≠ `~/.hermes/skills/brain-ops/cbrain`（精确路径）→ fail
    - `MANIFEST.packVersion ≠ package` → fail
-3. routing：三类 skill-layer contract bun:test（doc-contract 断言 RESOLVER/query/brief 路由规则，**不过 TS router**，**不改 `agent-facing.routing-eval.jsonl`**）。
+3. routing 对齐（§3.8）：
+   - `agent-facing.routing-eval.jsonl`：natural 类 `expected_tool` `deep_recall`→`cbrain_recall`（含 `expected_args` 对齐 frontdoor 合同）、新增 operational→`next_actions`、debug→`query` 保留；隐私 sentinel。
+   - `bin/check-resolver-pilot.sh` §5 gate：`af_tools` 同步（`deep_recall`→`cbrain_recall` + `next_actions`）、operational/`next_actions` 覆盖校验、query demotion 保留、line 635 提示更新。
+   - 全局 `grep deep_recall` 逐条评估其他 gate 引用，确保对齐后 `check-resolver-pilot.sh` + `check:docs` 全绿；**不过 TS router**。
 4. 验收命令：`bun run check:docs` + focused tests + `bun run lint` + `bun run check` 全绿；`git diff --check` + 隐私扫描通过。
 
 ## 5. 验收标准（issue 6 条 + 5 点修正）
@@ -225,17 +234,17 @@ cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 1. `cbrain skill-pack` 能区分 canonical pack 与匿名 stale target（`--target` current/stale/incompatible/missing/unverified 五态）。
 2. 安装文档保证 Hermes 根 skill entrypoint 与 canonical pack 同源，不依赖嵌套目录被隐式加载。
 3. target verification 全程只读，不自动替换/删除 target 目录（CLI 零写路径 + 无写 flag）。
-4. operational / natural / debug 三类匿名 fixture 路由正确。
+4. operational / natural / debug 三类意图在 `agent-facing.routing-eval.jsonl` 路由正确（`next_actions` / `cbrain_recall` / `query`），gate 同步通过。
 5. `bun run check:docs`、focused tests、`bun run lint`、`bun run check` 全绿。
 6. `git diff --check` 和隐私扫描通过。
 
-审核修正点全部纳入：`unverified` 最高优先 + `missing` 收紧（空目录归 `incompatible`）、MANIFEST 全文件 + schema/exact-inventory/target 等价校验 + `ENTRY_FILES`、安装命令收紧（仅 missing 展示）、隐私边界允许操作路径、`verificationStatus`/`status` 语义 + packVersion gate + Hermes smoke 列为合并后 release gate。
+审核修正点全部纳入：`unverified` 最高优先 + `missing` 收紧（空目录归 `incompatible`）、MANIFEST 全文件 + schema/exact-inventory（减 `MANIFEST.json`）/target 等价校验 + `ENTRY_FILES`、安装命令收紧（仅 missing 展示）、隐私边界允许操作路径、`verificationStatus`/`status` 语义 + packVersion gate、routing 对齐 agent-facing eval（natural→`cbrain_recall` / operational→`next_actions` / debug→`query` + gate 同步，不改 TS router）、Hermes smoke 列为合并后 release gate。
 
 ## 6. 残余风险
 
 - **`github:<owner>/cbrain` 硬编码**：install-onboarding.md 里功能性公开 install source（lines 31/55/445），非私人数据但隐私扫描可能命中。本 issue 不动，由产品方决定是否抽象为占位。
-- **Hermes 真实加载行为未验证**：本 issue 只保证加载路径同源 + skill-layer contract fixture，真实 Hermes 是否读 SKILL.md 留合并后 release gate。若 Hermes 运行时确不读 SKILL.md，则部署合同的运行时价值取决于该 gate 结论。
-- **skill-layer contract 覆盖度**：三类 smoke 是 doc-contract 断言（规则文本存在），不验证 Hermes 运行时真实分类行为——那是合并后 release gate 的职责。
+- **routing 对齐连锁影响**：`agent-facing.routing-eval.jsonl` 的 natural→`cbrain_recall` 对齐触及 `check-resolver-pilot.sh` / `check-docs-consistency` 的多处 `deep_recall` 引用。spec 要求逐条评估，实现时若发现更多 `deep_recall` 依赖须同步对齐且不破坏 advanced tool 语义。
+- **Hermes 运行时分类未验证**：agent-facing eval 是声明式合同（对齐 expected_tool），不验证 Hermes 真实分类行为——那是合并后 release gate 的职责。
 
 ## 7. 不做（守 #334 边界）
 
