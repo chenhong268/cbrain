@@ -529,7 +529,9 @@ cbrain ner-backfill --list-commit-unknown --json
 cbrain ner-backfill --resolve-commit-unknown <job-id> --decision <accept|retry|release-successor> --json
 ```
 
-List returns only ordinary job ids and scalar count—no slug, fingerprint, payload, path, token, or error. Resolution acquires the normal writer lock plus `BEGIN IMMEDIATE`, reloads the exact row/global state, requires unmarked `done/commit_unknown`, and uses CAS. A valid successor means exactly one unmarked pending row for the same slug whose fingerprint differs from the predecessor and equals the current source fingerprint, with no other live row.
+List returns only ordinary job ids and scalar count—no slug, fingerprint, payload, path, token, or error. It lists only a fully valid predecessor: exact `ner-backfill` name; kind absent/`ner`; valid non-empty slug; valid non-empty scheduled source fingerprint; `status=done`; no residual lease; no repair/manifest marker or ownership; and result exactly matching the fixed commit-unknown schema. Malformed/duplicate/owned rows remain visible only through scalar audit/integrity debt and are never resolution targets.
+
+Resolution acquires the normal writer lock plus `BEGIN IMMEDIATE`, re-runs the complete global manifest/queue integrity preflight, reloads the exact predecessor and same-slug state, and requires the same full identity before CAS. Any global integrity conflict, malformed predecessor, duplicate unresolved predecessor for the slug, or manifest ownership returns fixed `COMMIT_UNKNOWN_INTEGRITY_CONFLICT`/state mismatch with zero writes. A valid successor means exactly one unmarked pending row for the same slug whose fingerprint differs from the predecessor and equals the current source fingerprint, with no other live row.
 
 | Decision | Current source vs predecessor | Successor shape | Mutation | Ledger/block result |
 |---|---|---|---|---|
@@ -916,6 +918,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - marked commit-unknown reports scalar, keeps manifest unfinalized, triggers batch rollback, and rejects manual resolution; ordinary list/accept/retry/release-successor obey writer lock, CAS, privacy, and state-shape gates;
 - unresolved predecessor blocks successor in same-stage snapshot, next-stage reconstruction, and direct old-snapshot claim CAS; only successful accept/release clears it;
 - manual decision table covers no/one/multiple/same/wrong successor plus current same/different/unavailable with fixed mismatch zero-write cases;
+- malformed/duplicate/manifest-owned commit-unknown predecessor (missing slug/fingerprint, residual lease, wrong schema/name/kind) is omitted from list and every decision returns fixed integrity/state mismatch with zero writes;
 - mixed NER/entity-facts snapshot gives leases only to absent/ner kind; entity-facts payload remains byte-compatible and contains no attemptLease through terminal state;
 - normalized body hash, full document hash, and absent caller hash all derive canonical `pageContentHash` from DB; structured disposition makes `nerPending` true only for durable live work;
 - deleting and recreating a slug with changed content permits one new internal deferred NER instead of inheriting permanent repair starvation;
@@ -1211,3 +1214,9 @@ The seventeenth review returned FAIL with three HIGH and one required MEDIUM fin
 4. Accept/retry/release-successor now have a complete current-source/successor decision matrix with fixed zero-write mismatch behavior.
 
 The independent reviewer must run an eighteenth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 35. Eighteenth adversarial review correction record
+
+The eighteenth review passed the CRITICAL/HIGH gate and found one plan-shaping MEDIUM. This revision closes it: ordinary commit-unknown list/resolution now requires a complete unowned predecessor identity and a globally clean transactional preflight. Malformed, duplicate, leased, or manifest-owned rows cannot disappear through accept/retry/release and produce zero writes.
+
+The independent reviewer must run a final confirmation pass before writing the implementation plan. The gate remains no CRITICAL/HIGH and no plan-shaping MEDIUM findings.
