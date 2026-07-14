@@ -298,6 +298,8 @@ Before per-page classification, compute global `queueIntegrityConflicts`:
 
 Manifest ownership is discovered **before** trusting child JSON. A safely parsed manifest contributes every listed child id to a protected set even when that child's `data` is absent or malformed. Any malformed manifest, duplicate UUID, protected-child mismatch, or unclassifiable live `ner-backfill` row is an integrity conflict.
 
+The same scan derives `repairControlledSlugs` from every valid manifest ownership entry and every parseable marked historical row. Protection is therefore both id-scoped and slug-scoped: **every** `ner-backfill` row whose valid payload names a controlled slug is excluded from broad retry/reset/snapshot/claim and rejected by generic MCP retry/cancel, including lower-id legacy rows that were never themselves marked. An active row whose payload cannot be classified is an integrity conflict rather than an assumed unrelated job.
+
 Each invalid row increments only a scalar conflict count; raw job data/error/result is never emitted. Any queue integrity conflict makes enqueue fail closed globally with zero mutations.
 
 A valid row matches a candidate only when `data.slug` equals the candidate slug and kind is absent/`ner`; `entity_facts` is valid queue state but is a different enrichment kind.
@@ -382,9 +384,9 @@ Selection, manifest creation, receipt generation, rescan, inserts, requeues, and
 
 Provider errors and timeouts continue through the existing `failJob` behavior. Because marked jobs have `max_attempts = 1`, their first claimed failure becomes `failed`, not `pending`. The repair marker remains in `data`, so the scanner reports the failure without resubmitting it on every run.
 
-The existing broad `cbrain ner-backfill --retry-failed` command must skip every manifest-owned job id and every parseable `zero-link-rich-records` marked row while retaining behavior for legacy/ordinary jobs. Current-fingerprint repair failure is terminal for this issue; changed content may create a later batch, but broad retry cannot mutate finalized ownership.
+The existing broad `cbrain ner-backfill --retry-failed` command must skip every manifest-owned job id, every parseable `zero-link-rich-records` marked row, and every `ner-backfill` row whose slug is repair-controlled while retaining behavior for unrelated legacy/ordinary jobs. Current-fingerprint repair failure is terminal for this issue; changed content may create a later batch, but broad retry cannot mutate finalized ownership.
 
-Before an unfiltered Dream/CLI stage performs stale reset, retry, snapshot, or claim, it safely scans all manifests and live `ner-backfill` rows. Every manifest-owned id—finalized or unfinalized—is excluded by id, not by child marker validity. If manifest parsing, ownership validation, or any live-row classification fails, the whole stage returns fixed `QUEUE_INTEGRITY_CONFLICT` with **zero job mutations**, including zero mutations to otherwise ordinary jobs. This preflight is shared by Dream and the CLI so neither path can bypass exclusive batch ownership.
+Before an unfiltered Dream/CLI stage performs stale reset, retry, snapshot, or claim, it safely scans all manifests and live `ner-backfill` rows. Every manifest-owned id—finalized or unfinalized—and every row for a repair-controlled slug is excluded before mutation. If manifest parsing, ownership validation, or any live-row classification fails, the whole stage returns fixed `QUEUE_INTEGRITY_CONFLICT` with **zero job mutations**, including zero mutations to otherwise ordinary jobs. This preflight is shared by Dream and the CLI so neither path can bypass exclusive batch ownership.
 
 ## 7. NER write-path correction
 
@@ -452,11 +454,11 @@ Filtering is performed by manifest ids plus safe TypeScript JSON parsing, not un
 
 The existing unified `job` tool and compatibility aliases must not expose or mutate repair ownership:
 
-- generic `submit` rejects reserved name `zero-link-backfill-batch` and any caller-supplied payload containing the `zero-link-rich-records` repair marker with fixed `REPAIR_BATCH_RESERVED`; only the dedicated enqueue transaction may create ownership;
+- generic `submit` rejects reserved names `zero-link-backfill-batch` and `ner-backfill` with fixed `REPAIR_BATCH_RESERVED`, regardless of payload. Only internal ingestion and the dedicated enqueue transaction may create NER ownership; the public generic queue is not an NER scheduling API;
 - `list`/`status` always project `zero-link-backfill-batch` rows to fixed operational fields and scalar finalized/status counts; `data`, raw `result`, and `error` are omitted;
-- rows whose ids appear in any safely parsed manifest, plus rows with a parseable repair marker, receive the same safe projection with `protectedRepair: true` and no `data`, `result`, or `error`;
+- rows whose ids appear in any safely parsed manifest, rows with a parseable repair marker, and legacy NER rows whose valid slug is repair-controlled receive the same safe projection with `protectedRepair: true` and no `data`, `result`, or `error`;
 - if any manifest is malformed or has a duplicate UUID, projection fails closed by sanitizing **all** `ner-backfill` rows for that response, because the protected id set cannot be proven complete;
-- generic `cancel` and `retry` reject manifest rows, every manifest-owned child, and every parseable marked child with fixed `REPAIR_BATCH_OWNED`; when manifest integrity is unknown they reject mutation of all `ner-backfill` rows;
+- generic `cancel` and `retry` reject manifest rows, every manifest-owned child, every parseable marked child, and every NER row for a repair-controlled slug with fixed `REPAIR_BATCH_OWNED`; when manifest integrity is unknown they reject mutation of all `ner-backfill` rows;
 - batch-owned cancellation/retry is not added to this issue. The dedicated batch consumer is the only mutation path.
 
 Ordinary non-NER job projection and mutation behavior remain unchanged. Put the ownership/projection predicate in shared deterministic code used by both unified and alias handlers; do not duplicate policy in each handler. Ownership discovery queries all manifest rows directly and must not use the capped default `listJobs()` result.
@@ -636,10 +638,12 @@ If the batch merely produces legitimate `terminal_no_graph_links` outcomes witho
 
 After the final accepted batch:
 
-1. Restart the normal serve/MCP chain.
-2. Verify `/health` or MCP `serverInfo.version` and a read-only CBrain query.
-3. Confirm no pending/running repair jobs remain from the executed batches.
-4. Retain the backup until the PR is merged and the post-run check remains stable.
+1. Do **not** restart the installed/pre-merge runtime: it lacks the repair privacy and ownership guards while the live DB now contains repair manifests.
+2. Start every serve/MCP entry from the exact reviewed clean feature-worktree HEAD used for rollout. Privately verify process command, working directory, recorded HEAD, and config identity; `serverInfo.version` alone is insufficient because two commits may share a version.
+3. Verify `/health`, a read-only CBrain query, and zero pending/running repair jobs from executed batches.
+4. Through the live guarded MCP, exercise unified `job` list/status and compatibility `job_list`/`job_status`. A local shape probe must assert that every manifest/controlled row lacks `data`, raw `result`, `error`, slug, and fingerprint and print only scalar PASS/FAIL—not the response bodies.
+5. Keep this exact guarded runtime active until the PR is merged and deployed to the normal service entry. If the operator cannot prove that all live CBrain/MCP entrypoints use the guarded commit, keep services stopped and restore the preflight backup before restarting the old runtime.
+6. Retain the backups until merge/deploy and the post-run checks remain stable.
 
 ## 14. TDD and verification matrix
 
@@ -720,6 +724,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - same-batch stale row is the only row targeted for reset;
 - unfiltered Dream/CLI stale reset, snapshot, claim, and `--retry-failed` leave every marked repair row unchanged while ordinary jobs retain existing behavior;
 - unfiltered preflight derives protected ids from manifests before parsing child data; corrupt owned children are never reset, claimed, retried, or completed by ordinary workers;
+- finalized repair plus a lower-id legacy failed row for the same controlled slug leaves that legacy row byte-for-byte unchanged under broad retry and unfiltered processing, with zero LLM calls;
 - malformed child JSON is still found through the manifest id list and produces batch-integrity failure;
 - filtered result reports zero active rows only when every manifest-selected id is terminal.
 
@@ -743,10 +748,10 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 ### 14.6 MCP job-tool tests
 
 - manifest list/status and unified equivalents omit `data`, raw `result`, `error`, slug, and fingerprint while preserving fixed operational scalars;
-- manifest-owned and parseably marked child list/status receive the protected projection;
+- manifest-owned, parseably marked, and same-controlled-slug legacy child list/status receive the protected projection;
 - malformed/duplicate manifest makes all `ner-backfill` rows use the protected projection for that response;
-- generic retry/cancel and unified equivalents return fixed `REPAIR_BATCH_OWNED` for manifest, owned child, and marked child without changing bytes;
-- generic submit and unified submit reject the reserved manifest name and repair marker with fixed `REPAIR_BATCH_RESERVED` and zero writes;
+- generic retry/cancel and unified equivalents return fixed `REPAIR_BATCH_OWNED` for manifest, owned child, marked child, and lower-id legacy row for a controlled slug without changing bytes;
+- generic submit and unified submit reject both reserved names `zero-link-backfill-batch` and `ner-backfill` with fixed `REPAIR_BATCH_RESERVED` and zero writes, regardless of payload;
 - unknown manifest integrity rejects generic mutation of every `ner-backfill` row but does not change ordinary non-NER job behavior;
 - fixtures assert no private sentinel appears in any returned JSON.
 
@@ -868,9 +873,19 @@ The fourth review returned FAIL with three HIGH and three MEDIUM findings. This 
 
 1. Unfiltered Dream/CLI computes manifest-owned protected ids before trusting child JSON. Malformed ownership or an unclassifiable live row blocks the entire stage before stale reset, retry, snapshot, or claim.
 2. MCP unified/alias job tools use a repair-aware safe projection. Manifest/owned rows never expose raw payloads, and unknown manifest integrity sanitizes every NER row for that response.
-3. Generic MCP cancel/retry cannot mutate manifest or owned repair rows; the dedicated UUID consumer is the only batch mutation path.
+3. Generic MCP submit reserves both manifest and NER names; cancel/retry cannot mutate manifest, owned repair rows, or any legacy row for a controlled slug. The dedicated UUID consumer is the only batch mutation path.
 4. Short enqueue batches are legal and the consumer uses the returned `selected` count, not the requested upper bound.
 5. Terminal children are finalized even when their outcomes trigger a rollout stop. An interrupted finalization is recovered with the same UUID and zero extra LLM calls or rolled back before restart.
 6. Every preflight and per-batch backup uses a newly created private mode-0700 UUID subdirectory, eliminating timestamp-name collision ambiguity.
 
 The independent reviewer must run a fifth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 22. Fifth adversarial review correction record
+
+The fifth review returned FAIL with three HIGH findings. This revision closes each bypass:
+
+1. Ownership now derives a slug-level control set as well as job ids. Lower-id legacy rows for a controlled slug cannot be retried, reset, claimed, cancelled, or exposed as raw job payloads.
+2. Generic MCP submit reserves the entire `ner-backfill` name, not only recognizable repair markers, so an Agent cannot create a same-slug unmarked duplicate or malformed queue blocker.
+3. The production restart gate forbids the old pre-merge runtime. All live serve/MCP entries must remain on the exact reviewed guarded commit, proven by process command/cwd/HEAD and live unified+alias projection probes, until merge/deploy. If that cannot be guaranteed, services remain stopped and the live DB is rolled back before the old runtime returns.
+
+The independent reviewer must run a sixth pass. The gate remains no CRITICAL/HIGH findings.
