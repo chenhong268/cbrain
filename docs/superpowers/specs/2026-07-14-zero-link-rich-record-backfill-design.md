@@ -304,11 +304,11 @@ For each owned slug, the same scan derives a complete finalized repair ledger pl
 - every manifest-owned/marked row is batch-only regardless of id;
 - an unmarked `kind = ner` row with `job.id <=` the slug's first manifest row id is a shadowed pre-repair legacy attempt and is excluded from broad retry/reset/snapshot/claim and rejected by generic MCP retry/cancel;
 - every newly submitted internal `kind = ner` row freezes the shared full `sourceFingerprint` in its payload; `contentHash` remains a page-snapshot check, never the epoch identity;
-- unmarked terminal rows (`done`/`failed`/`cancelled`) whose frozen fingerprint differs from the current source fingerprint are superseded historical attempts: retain read-only, never retry, and do not count as conflicts;
-- an old-fingerprint unmarked `pending`/`running` row is a stale live conflict because it could process the wrong epoch;
+- ordinary `processed`, `failed`, and user-`cancelled` terminal rows whose frozen fingerprint differs from the current source fingerprint are superseded historical attempts: retain read-only, never retry, and do not count as conflicts. Zero-LLM `source_changed`/`source_unavailable`/`invalid` skips are audit records, not proof that their scheduled fingerprint was processed;
+- an old-fingerprint `pending` row is normally superseded in-place by the submit transaction. A sanctioned pair of one fresh old-fingerprint `running` row plus one current-fingerprint `pending` successor is not a conflict; the successor waits until the running row terminates. Any other old-fingerprint live shape is an integrity conflict;
 - for the current source fingerprint, exactly zero or one unmarked post-repair row may exist. It is valid only when its non-empty `contentHash` equals the page's current `pages.content_hash` and its frozen fingerprint is absent from the finalized repair ledger and ordinary terminal-attempt ledger;
 - more than one current-fingerprint row, missing-page live work, legacy live work without a frozen fingerprint after repair control begins, or otherwise unverifiable live work is an integrity conflict;
-- when the current fingerprint already appears in either finalized ledger, `JobQueueNerSubmitter` dedupes the internal submission. If a race/pre-existing unmarked current-fingerprint row exists anyway, the ordinary worker completes it with fixed `skipped/already_processed` and zero LLM calls;
+- when the current fingerprint already appears in either outcome-qualified finalized ledger, `JobQueueNerSubmitter` dedupes the internal submission. If a race/pre-existing unmarked current-fingerprint row exists anyway, the ordinary worker completes it with fixed `skipped/already_processed` and zero LLM calls;
 - `kind = entity_facts` is outside this NER attempt control and retains its existing lifecycle.
 
 This permits one trusted internal deferred NER for a genuinely unseen source fingerprint after update or delete/recreate, including sealed raw-chunk changes whose page hash stays unchanged, while preventing a revert to any already processed repair or ordinary fingerprint from spending LLM again. An active row whose payload cannot be classified is an integrity conflict.
@@ -405,22 +405,44 @@ Provider errors and timeouts continue through the existing `failJob` behavior. B
 
 The existing broad `cbrain ner-backfill --retry-failed` command must skip every manifest-owned/marked row and every shadowed pre-repair legacy attempt. It may retain normal retry behavior for a valid canonical post-repair deferred attempt and unrelated legacy/ordinary jobs. Current-fingerprint repair failure is terminal for this issue; changed content may create a later batch, but broad retry cannot mutate finalized ownership.
 
-Before an unfiltered Dream/CLI stage performs stale reset, retry, snapshot, or claim, it safely scans all manifests and live `ner-backfill` rows. Every manifest-owned/marked row and shadowed pre-repair attempt is excluded before mutation. A validated canonical unseen-fingerprint deferred attempt enters the ordinary candidate set; a current-source row whose fingerprint is already in either finalized repair or ordinary terminal history enters a separate `alreadyProcessedIds` set that may only be claimed/completed as fixed `skipped/already_processed` with zero LLM. Superseded terminal rows are ignored, while superseded live rows conflict. If manifest parsing, ownership validation, or any live-row classification fails, the whole stage returns fixed `QUEUE_INTEGRITY_CONFLICT` with **zero job mutations**, including zero mutations to otherwise ordinary jobs. This preflight is shared by Dream and the CLI so neither path can bypass exclusive batch ownership.
+Before an unfiltered Dream/CLI stage performs stale reset, retry, snapshot, or claim, it safely scans all manifests and live `ner-backfill` rows. Every manifest-owned/marked row and shadowed pre-repair attempt is excluded before mutation. A validated canonical unseen-fingerprint deferred attempt enters the ordinary candidate set; a current-source row whose fingerprint is already in an outcome-qualified finalized history enters `alreadyProcessedIds` and may only complete fixed `skipped/already_processed` with zero LLM. Superseded terminal rows are ignored. One fresh old-fingerprint running predecessor plus one current pending successor is a sanctioned pair: do not claim the successor until the predecessor terminates. When that predecessor becomes stale, deterministically complete it `skipped/source_changed` with zero LLM and release the successor in the same stage. Other superseded/multi-live shapes are conflicts. If manifest parsing, ownership validation, or any live-row classification fails, the whole stage returns fixed `QUEUE_INTEGRITY_CONFLICT` with **zero job mutations**, including zero mutations to otherwise ordinary jobs. This preflight is shared by Dream and the CLI so neither path can bypass exclusive batch ownership.
 
 ### 6.5 Ordinary deferred NER epoch identity
 
-`DeferredNerInput` gains optional `sourceFingerprint` for backward parsing, but `JobQueueNerSubmitter` must populate a non-empty canonical fingerprint for every newly created `kind = ner` row. Legacy rows remain readable; once a slug has repair history, a live post-repair row without it is unverifiable and blocks processing.
+`DeferredNerInput` keeps its historical optional caller `contentHash` for source compatibility, but that value may be a normalized body hash, full document hash, or absent and is never treated as canonical DB state. Newly stored `kind = ner` payloads instead carry submitter-derived `pageContentHash` plus full `sourceFingerprint`. Legacy rows remain readable; once a slug has repair history, a live post-repair row without the new identity is unverifiable and blocks processing.
+
+Submission returns a structured result:
+
+```ts
+type DeferredNerDisposition =
+  | "inserted" | "existing_active" | "superseded_pending"
+  | "successor_pending" | "already_processed" | "rejected";
+
+interface DeferredNerSubmitResult {
+  disposition: DeferredNerDisposition;
+  jobId: number | null;
+  pending: boolean;
+}
+```
+
+`pending` is true only for `inserted`, `existing_active`, `superseded_pending`, or `successor_pending` with proven durable pending/running work. `submitDeferredNerForWritePath` returns this boolean instead of unconditional `true`, so ingest `nerPending` cannot claim a queue entry that does not exist. MCP page callers may continue ignoring the boolean, but they use the same helper and do not bypass the structured contract.
 
 For `kind = ner`, `submitDeferredNer` runs this entire sequence in one `BEGIN IMMEDIATE` transaction:
 
-1. Re-read the current page, sealed state, raw chunks/tags, and page hash; compute the exact shared source fingerprint from §5.
-2. Require caller `contentHash` to be non-empty and equal current `pages.content_hash`; otherwise return no job with fixed internal stale-input disposition.
-3. Load the complete finalized repair ledger and all ordinary NER rows for the slug.
-4. If any finalized repair entry or ordinary terminal row already owns the same source fingerprint, return `null` (deduped).
-5. If a pending/fresh-running row owns the fingerprint, return `null`; stale/different-fingerprint live work is left unchanged and reported as conflict to the maintenance preflight.
-6. Insert exactly one payload containing `{slug, contentHash, sourceFingerprint, pageType, kind:"ner"}`.
+1. Re-read the current page, sealed state, raw chunks/tags, and `pages.content_hash`; compute the exact shared source fingerprint from §5. Caller `contentHash` is ignored for canonical identity.
+2. Load the complete finalized repair ledger and all ordinary NER rows for the slug.
+3. If any finalized repair entry or outcome-qualified ordinary terminal row already owns the same source fingerprint, return `already_processed` with `pending=false`.
+4. If a pending/fresh-running row already owns the current fingerprint, return `existing_active` with `pending=true`.
+5. If exactly one old-fingerprint pending row exists, atomically reuse it for the current epoch: replace payload, clear result/error/timestamps, reset attempts, and return `superseded_pending`.
+6. If exactly one old-fingerprint running row exists:
+   - stale: atomically complete it with fixed zero-LLM `source_changed`, insert one current-fingerprint successor, and return `successor_pending`;
+   - fresh: ensure exactly one current-fingerprint pending successor exists (insert if absent) and return `successor_pending`. This sanctioned pair is excluded from the generic multi-live conflict. The successor cannot be claimed until the predecessor becomes terminal or stale.
+7. Any other multi-live shape returns `rejected` with zero mutation.
+8. Otherwise insert exactly one payload containing `{slug,pageContentHash,sourceFingerprint,pageType,kind:"ner"}` and return `inserted`.
 
-`entity_facts` retains its existing identity/behavior and does not require this source fingerprint. The transaction boundary prevents two connections from both observing no attempt and inserting duplicates. Before LLM use, ordinary rows with `sourceFingerprint` rederive and verify the same source bytes as repair rows; drift completes fixed `skipped/source_changed` with zero LLM and preserves the scheduled fingerprint. Legacy ordinary rows without it retain pre-#342 behavior only for slugs with no repair history.
+`entity_facts` retains its existing identity/behavior and does not require this source fingerprint; its structured result maps existing insert/dedupe behavior to `inserted`/`existing_active`. The transaction boundary prevents two connections from both observing no attempt and inserting duplicates. Before LLM use, ordinary rows with `sourceFingerprint` rederive and verify the same source bytes as repair rows; drift completes fixed `skipped/source_changed` with zero LLM and preserves the scheduled fingerprint. This zero-LLM outcome is excluded from the processed ledger, so the fingerprint may be attempted later if it becomes current again. Legacy ordinary rows without it retain pre-#342 behavior only for slugs with no repair history.
+
+Ordinary terminal-ledger membership is exact: `status=done` counts only with `result.outcome=processed`; `status=failed` and user `status=cancelled` count under their explicit retry/cancellation policies. `done` with `skipped/source_changed`, `skipped/source_unavailable`, `skipped/invalid`, or any unknown/malformed result remains audit-only and never dedupes a future stable fingerprint.
 
 ## 7. NER write-path correction
 
@@ -495,7 +517,7 @@ The existing unified `job` tool and compatibility aliases must not expose or mut
 - generic `cancel` and `retry` reject manifest rows, every manifest-owned/marked child, and every shadowed pre-repair attempt with fixed `REPAIR_BATCH_OWNED`; a validated canonical post-repair deferred row retains ordinary behavior. When manifest integrity is unknown they reject mutation of all `ner-backfill` rows;
 - batch-owned cancellation/retry is not added to this issue. The dedicated batch consumer is the only mutation path.
 
-Ordinary non-NER job projection and mutation behavior remain unchanged. Put the ownership/projection predicate in shared deterministic code used by both unified and alias handlers; do not duplicate policy in each handler. Ownership discovery queries all manifest rows directly and must not use the capped default `listJobs()` result.
+Ordinary non-NER job projection and mutation behavior remain unchanged. One shared deterministic `isManifestLike`/ownership policy is used by **all** unified and alias actions—submit, list, status, cancel, and retry. It recognizes reserved name or payload discriminator before either read projection or mutation; no handler may fall back to name-only checks. Ownership discovery queries all manifest rows directly and must not use the capped default `listJobs()` result.
 
 Suggested stable error codes:
 
@@ -761,6 +783,8 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - sealed repair with non-null page hash sends raw chunks, never vault L1 summary, to the LLM;
 - vault/raw source drift after enqueue completes `source_changed` with zero LLM calls;
 - ordinary deferred rows freeze and verify the same source fingerprint; drift completes fixed skipped/source-changed with zero LLM while legacy no-repair rows retain compatibility;
+- F1 pending→F2 atomically reuses one row; fresh F1 running→F2 creates one waiting successor; stale F1 running→F2 completes F1 source-changed and releases exactly one F2, so only F2 invokes LLM;
+- F1 source-changed/source-unavailable/invalid zero-LLM terminal → F2 → revert stable F1 permits one real F1 attempt instead of deduping it;
 - batch-filtered consumer processes only the exact repair batch and leaves ordinary NER/entity-facts jobs untouched;
 - filtered mode leaves unrelated stale NER and stale entity-facts rows byte-for-byte unchanged;
 - same-batch stale row is the only row targeted for reset;
@@ -773,6 +797,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - ordinary F2 terminal → F3 terminal → revert F2 dedupes against J2's frozen source fingerprint and inserts no J4;
 - sealed page with stable page hash H but raw fingerprints D1→D2→D3 creates distinct ordinary epochs and never conflates D2 with D3;
 - two DB connections racing ordinary submit for one unseen fingerprint serialize under `BEGIN IMMEDIATE` and create exactly one row;
+- normalized body hash, full document hash, and absent caller hash all derive canonical `pageContentHash` from DB; structured disposition makes `nerPending` true only for durable live work;
 - deleting and recreating a slug with changed content permits one new internal deferred NER instead of inheriting permanent repair starvation;
 - `entity_facts` rows sharing a slug with repair history retain ordinary reset/claim/retry behavior;
 - malformed child JSON is still found through the manifest id list and produces batch-integrity failure;
@@ -802,6 +827,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - every `ner-backfill` row—including validated post-repair deferred and unrelated ordinary NER—uses the safe projection in unified and alias list/status;
 - malformed/duplicate manifest cannot change NER projection privacy and still blocks protected mutations;
 - generic retry/cancel and unified equivalents return fixed `REPAIR_BATCH_OWNED` for manifest, owned child, marked child, and shadowed pre-repair legacy row without changing bytes; a validated post-repair deferred failed row retains ordinary retry;
+- wrong-name manifest-like pending/failed rows are rejected byte-for-byte by unified and alias cancel/retry through the same discriminator predicate;
 - generic submit and unified submit reject both reserved names and any parseable manifest/repair discriminator under another name with fixed `REPAIR_BATCH_RESERVED` and zero writes;
 - unknown manifest integrity rejects generic mutation of every `ner-backfill` row but does not change ordinary non-NER job behavior;
 - fixtures assert no private sentinel appears in any returned JSON.
@@ -834,6 +860,7 @@ Required/allowed changes are limited to:
 - `src/core/ingestion/ner-backfill-contract.ts` (new; shared job name/TTL/repair marker constants, re-exported for compatibility)
 - `src/core/ingestion/pipeline.ts`
 - `src/core/ingestion/ner-backfill.ts`
+- `src/core/ingestion/ner-write-path.ts` for structured submit disposition → accurate `nerPending`
 - `src/core/maintenance/health.ts`
 - `src/core/maintenance/health-debt.ts`
 - `src/core/fsck/sqlite-probe.ts`
@@ -973,3 +1000,14 @@ The eighth review returned FAIL with two HIGH and two implementation-shaping MED
 4. Manifest privacy discovery uses reserved name or payload discriminator. A single corrupt name cannot turn private ownership into an ordinary raw MCP response.
 
 The independent reviewer must run a ninth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 26. Ninth adversarial review correction record
+
+The ninth review returned FAIL with three HIGH and one required MEDIUM finding. This revision closes them:
+
+1. The submitter derives `pageContentHash` and full source fingerprint from current DB state; legacy caller hash semantics cannot reject valid writes. Structured dispositions make user-visible `nerPending` truthful.
+2. Ordinary supersession is deterministic: pending is reused for new content, fresh running gets one waiting successor, and stale running completes source-changed before releasing the successor. Normal update races no longer deadlock the global queue.
+3. Ordinary terminal-ledger membership is outcome-aware. Zero-LLM source drift/unavailable/invalid audits do not claim that a fingerprint received NER and cannot suppress a later stable attempt.
+4. Unified and alias submit/list/status/cancel/retry all share the same name-or-discriminator manifest predicate; wrong-name manifest-like rows are read-safe and mutation-safe.
+
+The independent reviewer must run a tenth pass. The gate remains no CRITICAL/HIGH findings.
