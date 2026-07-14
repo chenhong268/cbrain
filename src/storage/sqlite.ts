@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
+import { authorizeNerJobClaim } from "../core/maintenance/zero-link-backfill.js";
 import {
   runAliasMigrations,
   ensurePagesIndexes,
@@ -75,7 +76,7 @@ export function buildNerAttemptIdentity(data: Record<string, unknown>): NerAttem
       !repair || JSON.stringify(keys) !== JSON.stringify(["batchId", "contentFingerprint", "name", "sourceKind", "version"]) ||
       repair.name !== "zero-link-rich-records" || repair.version !== 1 ||
       (repair.sourceKind !== "vault_hash" && repair.sourceKind !== "raw_chunks") ||
-      typeof repair.batchId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(repair.batchId) ||
+      typeof repair.batchId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(repair.batchId) ||
       !validNerFingerprint(repair.contentFingerprint, repair.sourceKind)
     ) return null;
   }
@@ -1207,7 +1208,9 @@ export class CBrainDB {
       if (!row?.data) { this.rawDb.exec("COMMIT"); return null; }
       let data: Record<string, unknown>;
       try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { this.rawDb.exec("COMMIT"); return null; }
-      const identity = buildNerAttemptIdentity(data);
+      const claimMode = authorizeNerJobClaim(this, id);
+      if (!claimMode) { this.rawDb.exec("COMMIT"); return null; }
+      const identity = claimMode === "legacy" ? buildNerAttemptIdentity(data) : buildStrictFrozenNerIdentity(data);
       if (!identity || (expectedIdentity && !sameNerAttemptIdentity(identity, expectedIdentity))) {
         this.rawDb.exec("COMMIT");
         return null;

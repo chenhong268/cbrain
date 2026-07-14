@@ -164,12 +164,81 @@ export interface NerBackfillOptions {
   decision?: "accept" | "retry" | "release-successor";
 }
 
+export function isCanonicalRepairBatchId(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
+export function parseCanonicalCliInteger(value: unknown, allowZero: boolean): number | null {
+  if (typeof value !== "string") return null;
+  const pattern = allowZero ? /^(?:0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/;
+  if (!pattern.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+export function validateNerBackfillMode(opts: Pick<NerBackfillOptions,
+  "repairBatch" | "retryFailed" | "listCommitUnknown" | "resolveCommitUnknown" | "decision"
+>): { ok: true } | { ok: false; code: string; error: string } {
+  if ((opts.listCommitUnknown !== undefined && typeof opts.listCommitUnknown !== "boolean") ||
+    (opts.retryFailed !== undefined && typeof opts.retryFailed !== "boolean")) {
+    return { ok: false, code: "NER_BACKFILL_MODE_CONFLICT", error: "mode flags must be boolean" };
+  }
+  const repair = opts.repairBatch !== undefined;
+  const list = opts.listCommitUnknown === true;
+  const retry = opts.retryFailed === true;
+  const resolve = opts.resolveCommitUnknown !== undefined;
+  const decisionPresent = opts.decision !== undefined;
+  const decisionValid = !decisionPresent || ["accept", "retry", "release-successor"].includes(String(opts.decision));
+  if (!decisionValid) {
+    return { ok: false, code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid decision" };
+  }
+  const modeCount = Number(repair) + Number(list) + Number(resolve);
+  if (modeCount > 1) {
+    return { ok: false, code: "NER_BACKFILL_MODE_CONFLICT", error: "ner-backfill modes are mutually exclusive" };
+  }
+  if (repair && retry) {
+    return { ok: false, code: "BATCH_RETRY_CONFLICT", error: "repair batch cannot be combined with retry-failed" };
+  }
+  if ((list || resolve) && retry) {
+    return { ok: false, code: "NER_BACKFILL_MODE_CONFLICT", error: "audit modes cannot be combined with retry-failed" };
+  }
+  if (resolve !== decisionPresent) {
+    return { ok: false, code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: resolve ? "decision is required" : "decision requires resolve-commit-unknown" };
+  }
+  return { ok: true };
+}
+
 export async function handleNerBackfill(
   deps: NerBackfillDeps,
   opts: NerBackfillOptions,
   log: (m: string) => void = console.log,
   logError: (m: string) => void = console.error,
 ): Promise<number> {
+  if (!Number.isSafeInteger(opts.limit) || opts.limit < 0 || Object.is(opts.limit, -0)) {
+    const payload = { ok: false, status: "error", code: "INVALID_LIMIT", error: "limit must be a non-negative safe integer" };
+    if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(payload.error);
+    return 1;
+  }
+  if (opts.resolveCommitUnknown !== undefined &&
+    (!Number.isSafeInteger(opts.resolveCommitUnknown) || opts.resolveCommitUnknown <= 0)) {
+    const payload = { ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid job id" };
+    if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(payload.error);
+    return 1;
+  }
+  if (opts.repairBatch !== undefined && !isCanonicalRepairBatchId(opts.repairBatch)) {
+    const payload = { ok: false, status: "error", code: "INVALID_BATCH_ID", error: "invalid repair batch id" };
+    if (opts.json) log(JSON.stringify(payload, null, 2));
+    else logError(payload.code);
+    return 1;
+  }
+  const mode = validateNerBackfillMode(opts);
+  if (!mode.ok) {
+    const payload = { ok: false, status: "error", code: mode.code, error: mode.error };
+    if (opts.json) log(JSON.stringify(payload, null, 2));
+    else logError(`${mode.code}: ${mode.error}`);
+    return 1;
+  }
   const owner = deps.lockProbe.blockingOwner();
   if (owner) {
     if (opts.json) {
@@ -186,13 +255,6 @@ export async function handleNerBackfill(
     return 1;
   }
 
-  if (opts.repairBatch && opts.retryFailed) {
-    const payload = { ok: false, status: "error", code: "BATCH_RETRY_CONFLICT", error: "repair batch cannot be combined with retry-failed" };
-    if (opts.json) log(JSON.stringify(payload, null, 2));
-    else logError(payload.error);
-    return 1;
-  }
-
   if (opts.listCommitUnknown) {
     const { listOrdinaryCommitUnknown } = await import("../../core/maintenance/zero-link-backfill.js");
     const result = listOrdinaryCommitUnknown(deps.db);
@@ -202,14 +264,9 @@ export async function handleNerBackfill(
     return result.integrityConflicts > 0 ? 1 : 0;
   }
   if (opts.resolveCommitUnknown !== undefined) {
-    if (!opts.decision) {
-      const payload = { ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "decision is required" };
-      if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(payload.error);
-      return 1;
-    }
     try {
       const { resolveOrdinaryCommitUnknown } = await import("../../core/maintenance/zero-link-backfill.js");
-      const result = resolveOrdinaryCommitUnknown(deps.db, opts.resolveCommitUnknown, opts.decision);
+      const result = resolveOrdinaryCommitUnknown(deps.db, opts.resolveCommitUnknown, opts.decision!);
       if (opts.json) log(JSON.stringify({ ok: true, ...result }, null, 2));
       else log(`commit-unknown: ${result.success ? "resolved" : "unchanged"}`);
       return 0;
@@ -233,7 +290,7 @@ export async function handleNerBackfill(
       batchId: opts.repairBatch,
       retryFailed: opts.retryFailed,
     });
-    batchStatus = opts.repairBatch
+    batchStatus = opts.repairBatch !== undefined
       ? (await import("../../core/maintenance/zero-link-backfill.js")).summarizeRepairBatch(deps.db, opts.repairBatch)
       : undefined;
   } catch (error) {
@@ -703,31 +760,47 @@ export function register(program: Command) {
     .option("--decision <decision>", "accept, retry, or release-successor")
     .option("--json", "Emit machine-readable JSON")
     .action(async (opts) => {
-      const limit = Number.parseInt(String(opts.limit), 10);
-      if (!Number.isFinite(limit) || limit < 0) {
+      const limit = parseCanonicalCliInteger(String(opts.limit), true);
+      if (limit === null) {
         const message = "--limit must be an integer >= 0";
         if (opts.json) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
         else console.error(message);
         process.exitCode = 1;
         return;
       }
-      if (opts.repairBatch && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(opts.repairBatch))) {
+      if (opts.repairBatch !== undefined && !isCanonicalRepairBatchId(String(opts.repairBatch))) {
         const message = "INVALID_BATCH_ID";
         if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: message, error: "invalid repair batch id" }, null, 2));
         else console.error(message);
         process.exitCode = 1;
         return;
       }
-      const resolveCommitUnknown = opts.resolveCommitUnknown === undefined ? undefined : Number.parseInt(String(opts.resolveCommitUnknown), 10);
-      if (resolveCommitUnknown !== undefined && (!Number.isSafeInteger(resolveCommitUnknown) || resolveCommitUnknown <= 0)) {
+      const resolveCommitUnknown = opts.resolveCommitUnknown === undefined
+        ? undefined
+        : parseCanonicalCliInteger(String(opts.resolveCommitUnknown), false);
+      if (resolveCommitUnknown === null) {
         if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid job id" }, null, 2));
         else console.error("invalid job id");
         process.exitCode = 1;
         return;
       }
-      if (opts.decision && !["accept", "retry", "release-successor"].includes(String(opts.decision))) {
+      if (opts.decision !== undefined && !["accept", "retry", "release-successor"].includes(String(opts.decision))) {
         if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid decision" }, null, 2));
         else console.error("invalid decision");
+        process.exitCode = 1;
+        return;
+      }
+      const mode = validateNerBackfillMode({
+        repairBatch: opts.repairBatch !== undefined ? String(opts.repairBatch) : undefined,
+        retryFailed: Boolean(opts.retryFailed),
+        listCommitUnknown: Boolean(opts.listCommitUnknown),
+        resolveCommitUnknown,
+        decision: opts.decision as "accept" | "retry" | "release-successor" | undefined,
+      });
+      if (!mode.ok) {
+        const payload = { ok: false, status: "error", code: mode.code, error: mode.error };
+        if (opts.json) console.log(JSON.stringify(payload, null, 2));
+        else console.error(`${mode.code}: ${mode.error}`);
         process.exitCode = 1;
         return;
       }
@@ -761,7 +834,7 @@ export function register(program: Command) {
             limit,
             retryFailed: Boolean(opts.retryFailed),
             json: Boolean(opts.json),
-            repairBatch: opts.repairBatch ? String(opts.repairBatch) : undefined,
+            repairBatch: opts.repairBatch !== undefined ? String(opts.repairBatch) : undefined,
             listCommitUnknown: Boolean(opts.listCommitUnknown),
             resolveCommitUnknown,
             decision: opts.decision as "accept" | "retry" | "release-successor" | undefined,

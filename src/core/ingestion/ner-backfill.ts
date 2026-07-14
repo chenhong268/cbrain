@@ -432,7 +432,7 @@ export async function runNerBackfillStage(
   const staleTtlMs = opts?.staleTtlMs ?? NER_BACKFILL_STALE_TTL_MS;
 
   const batchId = opts?.batchId;
-  const prepared = batchId
+  const prepared = batchId !== undefined
     ? { ids: prepareRepairBatchJobIds(db, batchId, maxItems, staleTtlMs), retriedFailed: 0 }
     : unfilteredSnapshot(db, maxItems, staleTtlMs, opts?.retryFailed);
   const ids = prepared.ids;
@@ -446,7 +446,7 @@ export async function runNerBackfillStage(
     const frozenIdentity: NerAttemptIdentity | undefined = !entityFacts && beforeData
       ? buildNerAttemptIdentity(beforeData) ?? undefined
       : undefined;
-    if (batchId) {
+    if (batchId !== undefined) {
       const manifestIdentity = getRepairBatchAttemptIdentity(db, batchId, id);
       if (!frozenIdentity || frozenIdentity.slug !== manifestIdentity.slug ||
         frozenIdentity.sourceFingerprint !== manifestIdentity.sourceFingerprint ||
@@ -557,7 +557,7 @@ export async function runNerBackfillStage(
       }
     }
   }
-  if (batchId) {
+  if (batchId !== undefined) {
     const status = summarizeRepairBatch(db, batchId);
     if (status.pending === 0 && status.running === 0 && status.outcomes.commitUnknown === 0) finalizeRepairBatch(db, batchId);
   }

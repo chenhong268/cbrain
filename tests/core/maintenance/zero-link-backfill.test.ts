@@ -7,6 +7,7 @@ import {
   deriveZeroLinkSource,
   enqueueZeroLinkBackfill,
   finalizeRepairBatch,
+  getNerJobProtection,
   getRepairBatchAttemptIdentity,
   loadZeroLinkSourceSnapshot,
   planZeroLinkBackfill,
@@ -307,15 +308,394 @@ describe("repair planning and atomic enqueue (#342)", () => {
       sourceFingerprint: "page:fingerprint-old",
     });
     db.claimNerJobByIdWithLease(predecessor);
-    db.submitJob("ner-backfill", {
+    const successor = db.submitJob("ner-backfill", {
       slug: "records/item",
       kind: "ner",
       contentHash: "fingerprint-a",
       sourceFingerprint: "page:fingerprint-a",
     });
     expect(planZeroLinkBackfill(db)).toMatchObject({ active: 1, staleRunning: 0, stateConflicts: 0, actionable: 0 });
+    let before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    expect(db.claimNerJobByIdWithLease(successor)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
     db.rawDb.prepare("UPDATE jobs SET started_at=datetime('now','-31 minutes') WHERE id=?").run(predecessor);
     expect(planZeroLinkBackfill(db)).toMatchObject({ active: 1, staleRunning: 1, stateConflicts: 0, actionable: 0 });
+    before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    expect(db.claimNerJobByIdWithLease(successor)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("a committing predecessor also keeps its sanctioned successor frozen", () => {
+    addRich();
+    const predecessor = db.submitJob("ner-backfill", {
+      slug: "records/item", kind: "ner", contentHash: "fingerprint-old", sourceFingerprint: "page:fingerprint-old",
+    });
+    const claimed = db.claimNerJobByIdWithLease(predecessor)!;
+    expect(db.moveNerLeaseToCommitting(predecessor, claimed.leaseToken, claimed.payloadDigest)).toBe(true);
+    const successor = db.submitJob("ner-backfill", {
+      slug: "records/item", kind: "ner", contentHash: "fingerprint-a", sourceFingerprint: "page:fingerprint-a",
+    });
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", active: 1, stateConflicts: 0 });
+    expect(db.claimNerJobByIdWithLease(successor)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("same-slug entity-facts work does not impersonate a NER predecessor", () => {
+    addRich();
+    db.submitJob("ner-backfill", { slug: "records/item", kind: "entity_facts" });
+    const nerId = db.submitJob("ner-backfill", {
+      slug: "records/item", kind: "ner", contentHash: "fingerprint-a", sourceFingerprint: "page:fingerprint-a",
+    });
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", active: 1, stateConflicts: 0 });
+    expect(db.claimNerJobByIdWithLease(nerId)).not.toBeNull();
+  });
+
+  test("legacy live rows with only historical caller contentHash remain compatible", () => {
+    addRich();
+    const jobId = db.submitJob("ner-backfill", {
+      slug: "records/item",
+      kind: "ner",
+      contentHash: "legacy-caller-hash",
+    });
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({
+      status: "ok",
+      active: 1,
+      actionable: 0,
+      stateConflicts: 0,
+      queueIntegrityConflicts: 0,
+    });
+    expect(db.claimNerJobByIdWithLease(jobId)).not.toBeNull();
+  });
+
+  test("governed live rows with missing or mismatched hashes block plan and direct claim", () => {
+    const cases = [
+      {
+        slug: "records/missing-hash",
+        data: { slug: "records/missing-hash", kind: "ner", sourceFingerprint: "page:fingerprint-missing" },
+      },
+      {
+        slug: "records/wrong-hash",
+        data: {
+          slug: "records/wrong-hash",
+          kind: "ner",
+          pageContentHash: "wrong",
+          sourceFingerprint: "page:fingerprint-wrong",
+        },
+      },
+    ];
+    const ids: number[] = [];
+    for (const item of cases) {
+      addRich(item.slug, item.slug.endsWith("missing-hash") ? "fingerprint-missing" : "fingerprint-wrong");
+      ids.push(db.submitJob("ner-backfill", item.data));
+    }
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 2, selected: 0 });
+    for (const id of ids) expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("own invalid identity fields never fall back to legacy claim semantics", () => {
+    const cases = [
+      { slug: "records/page-only", pageContentHash: "fingerprint-page-only" },
+      { slug: "records/null-source", contentHash: "legacy", sourceFingerprint: null },
+      { slug: "records/number-source", contentHash: "legacy", sourceFingerprint: 7 },
+      { slug: "records/object-source", contentHash: "legacy", sourceFingerprint: { value: "page:x" } },
+    ];
+    const ids: number[] = [];
+    for (const item of cases) {
+      addRich(item.slug, item.slug.slice("records/".length));
+      ids.push(db.submitJob("ner-backfill", { kind: "ner", ...item }));
+    }
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 4, selected: 0 });
+    for (const id of ids) expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("pending rows with valid or malformed residual leases cannot be reclaimed", () => {
+    addRich();
+    for (const malformed of [false, true]) {
+      const id = db.submitJob("ner-backfill", {
+        slug: "records/item", kind: "ner", contentHash: "fingerprint-a", sourceFingerprint: "page:fingerprint-a",
+        ...(malformed ? { attemptLease: {} } : {}),
+      });
+      if (!malformed) {
+        expect(db.claimNerJobByIdWithLease(id)).not.toBeNull();
+        db.rawDb.prepare("UPDATE jobs SET status='pending' WHERE id=?").run(id);
+      }
+      const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+      expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
+      expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+      expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+      db.rawDb.prepare("DELETE FROM jobs").run();
+    }
+  });
+
+  test("canonical manifest audit blocks every malformed or orphan claim shape", () => {
+    addRich();
+    const batchId = "55555555-5555-4555-8555-555555555555";
+    const ownership = [{ jobId: 999, slug: "records/item", contentFingerprint: "page:fingerprint-a" }];
+    const validManifest = { version: 1, repairName: ZERO_LINK_REPAIR_NAME, batchId, ownership };
+    const malformedManifestCases = [
+      () => db.submitJob("other-job", validManifest),
+      () => db.submitJob(ZERO_LINK_BATCH_MANIFEST_JOB, validManifest),
+      () => db.rawDb.prepare(
+        `INSERT INTO jobs (name,status,data,result,finished_at) VALUES (?, 'done', ?, ?, datetime('now'))`,
+      ).run(ZERO_LINK_BATCH_MANIFEST_JOB, JSON.stringify({ ownership: [] }), JSON.stringify({ finalized: false })),
+    ];
+    for (const insertMalformed of malformedManifestCases) {
+      insertMalformed();
+      const target = db.submitJob("ner-backfill", {
+        slug: "records/item", kind: "ner", contentHash: "fingerprint-a", sourceFingerprint: "page:fingerprint-a",
+      });
+      const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+      expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
+      expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+      expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+      db.rawDb.prepare("DELETE FROM jobs").run();
+    }
+
+    const orphan = db.submitJob("ner-backfill", {
+      slug: "records/item",
+      kind: "ner",
+      contentHash: "fingerprint-a",
+      repair: {
+        name: ZERO_LINK_REPAIR_NAME,
+        version: 1,
+        contentFingerprint: "page:fingerprint-a",
+        sourceKind: "vault_hash",
+        batchId,
+      },
+    });
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", queueIntegrityConflicts: 1, selected: 0 });
+    expect(db.claimNerJobByIdWithLease(orphan)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("duplicate batch tokens fail closed for exact and case-variant UUID text", () => {
+    addRich("records/first", "first");
+    addRich("records/second", "second");
+    addRich("records/target", "target");
+    const canonicalBatchId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    for (const secondBatchId of [canonicalBatchId, canonicalBatchId.toUpperCase()]) {
+      for (const [slug, fingerprint, batchId] of [
+        ["records/first", "page:first", canonicalBatchId],
+        ["records/second", "page:second", secondBatchId],
+      ] as const) {
+        const repair = {
+          name: ZERO_LINK_REPAIR_NAME, version: 1, contentFingerprint: fingerprint, sourceKind: "vault_hash", batchId,
+        };
+        const childId = db.submitJob("ner-backfill", {
+          slug, kind: "ner", contentHash: fingerprint.slice(5), repair,
+        }, 1);
+        db.rawDb.prepare(
+          `INSERT INTO jobs (name,status,priority,data,result,attempts,max_attempts,finished_at)
+           VALUES (?, 'done', 0, ?, ?, 0, 1, datetime('now'))`,
+        ).run(
+          ZERO_LINK_BATCH_MANIFEST_JOB,
+          JSON.stringify({
+            version: 1,
+            repairName: ZERO_LINK_REPAIR_NAME,
+            batchId,
+            ownership: [{ jobId: childId, slug, contentFingerprint: fingerprint }],
+          }),
+          JSON.stringify({ finalized: false }),
+        );
+      }
+      const target = db.submitJob("ner-backfill", {
+        slug: "records/target", kind: "ner", contentHash: "target", sourceFingerprint: "page:target",
+      });
+      const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+      expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
+      expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+      expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+      db.rawDb.prepare("DELETE FROM jobs").run();
+    }
+  });
+
+  test("a new legacy live row after finalized repair is a conflict and cannot be claimed", () => {
+    addRich();
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const child = db.rawDb.prepare("SELECT id,data FROM jobs WHERE name='ner-backfill'").get() as { id: number; data: string };
+    const repair = JSON.parse(child.data).repair;
+    db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify({ outcome: "processed", kind: "ner", repair, graphOutcome: "terminal_no_graph_links", activeLinkCount: 0 }), child.id);
+    expect(finalizeRepairBatch(db, receipt.batchId!)).toMatchObject({ finalized: true });
+    const legacyId = db.submitJob("ner-backfill", { slug: "records/item", kind: "ner", contentHash: "caller-historical" });
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 1, selected: 0 });
+    expect(enqueueZeroLinkBackfill(db, 1)).toMatchObject({ status: "blocked", selected: 0 });
+    expect(db.claimNerJobByIdWithLease(legacyId)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("a finalized repair child changed to commit-unknown freezes an unrelated direct claim", () => {
+    addRich("records/repaired", "fingerprint-repaired");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const child = db.rawDb.prepare("SELECT id,data FROM jobs WHERE name='ner-backfill'").get() as { id: number; data: string };
+    const repair = JSON.parse(child.data).repair;
+    db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify({ outcome: "processed", kind: "ner", repair, graphOutcome: "terminal_no_graph_links", activeLinkCount: 0 }), child.id);
+    expect(finalizeRepairBatch(db, receipt.batchId!)).toMatchObject({ finalized: true });
+    db.rawDb.prepare("UPDATE jobs SET result=? WHERE id=?")
+      .run(JSON.stringify({ outcome: "commit_unknown", kind: "ner", repair }), child.id);
+
+    addRich("records/unrelated", "fingerprint-unrelated");
+    const target = db.submitJob("ner-backfill", {
+      slug: "records/unrelated",
+      kind: "ner",
+      contentHash: "fingerprint-unrelated",
+      sourceFingerprint: "page:fingerprint-unrelated",
+    });
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", queueIntegrityConflicts: 1, selected: 0 });
+    expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("a finalized done ledger cannot encode a null graph outcome", () => {
+    addRich("records/repaired", "fingerprint-repaired");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const child = db.rawDb.prepare("SELECT id,data FROM jobs WHERE name='ner-backfill'").get() as { id: number; data: string };
+    const repair = JSON.parse(child.data).repair;
+    db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify({ outcome: "processed", kind: "ner", repair, graphOutcome: "terminal_no_graph_links", activeLinkCount: 0 }), child.id);
+    finalizeRepairBatch(db, receipt.batchId!);
+    const manifest = db.rawDb.prepare("SELECT id,data,result FROM jobs WHERE name=?").get(ZERO_LINK_BATCH_MANIFEST_JOB) as {
+      id: number; data: string; result: string;
+    };
+    const manifestData = JSON.parse(manifest.data);
+    manifestData.finalizedEntries[0].graphOutcome = null;
+    manifestData.ledgerDigest = createHash("sha256").update(JSON.stringify({
+      version: 1,
+      batchId: receipt.batchId,
+      entries: manifestData.finalizedEntries,
+    }), "utf8").digest("hex");
+    const manifestResult = JSON.parse(manifest.result);
+    manifestResult.outcomes.terminalNoGraphLinks = 0;
+    db.rawDb.prepare("UPDATE jobs SET data=?,result=? WHERE id=?")
+      .run(JSON.stringify(manifestData), JSON.stringify(manifestResult), manifest.id);
+
+    addRich("records/unrelated", "fingerprint-unrelated");
+    const target = db.submitJob("ner-backfill", {
+      slug: "records/unrelated", kind: "ner", contentHash: "fingerprint-unrelated", sourceFingerprint: "page:fingerprint-unrelated",
+    });
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
+    expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("a finalized manifest cannot own the same slug through two child ids", () => {
+    addRich("records/repaired", "fingerprint-repaired");
+    addRich("records/unrelated", "fingerprint-unrelated");
+    for (const [batchId, secondFingerprint] of [
+      ["66666666-6666-4666-8666-666666666666", "page:fingerprint-repaired"],
+      ["77777777-7777-4777-8777-777777777777", "page:different-fingerprint"],
+    ] as const) {
+      const fingerprints = ["page:fingerprint-repaired", secondFingerprint];
+      const children = fingerprints.map((contentFingerprint) => {
+        const repair = {
+          name: ZERO_LINK_REPAIR_NAME, version: 1, contentFingerprint, sourceKind: "vault_hash", batchId,
+        };
+        const id = db.submitJob("ner-backfill", {
+          slug: "records/repaired", kind: "ner", contentHash: contentFingerprint.slice(5), repair,
+        }, 1);
+        db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+          .run(JSON.stringify({ outcome: "processed", kind: "ner", repair, graphOutcome: "terminal_no_graph_links", activeLinkCount: 0 }), id);
+        return { id, contentFingerprint };
+      });
+      const ownership = children.map(({ id: jobId, contentFingerprint }) => ({
+        jobId, slug: "records/repaired", contentFingerprint,
+      }));
+      const finalizedEntries = ownership.map((owner) => ({
+        ...owner, terminalStatus: "done", graphOutcome: "terminal_no_graph_links",
+      }));
+      const ledgerDigest = createHash("sha256").update(JSON.stringify({
+        version: 1, batchId, entries: finalizedEntries,
+      }), "utf8").digest("hex");
+      db.rawDb.prepare(
+        `INSERT INTO jobs (name,status,priority,data,result,attempts,max_attempts,finished_at)
+         VALUES (?, 'done', 0, ?, ?, 0, 1, datetime('now'))`,
+      ).run(
+        ZERO_LINK_BATCH_MANIFEST_JOB,
+        JSON.stringify({ version: 1, repairName: ZERO_LINK_REPAIR_NAME, batchId, ownership, finalizedEntries, ledgerDigest }),
+        JSON.stringify({
+          finalized: true,
+          version: 1,
+          statusCounts: { done: 2, failed: 0, cancelled: 0 },
+          outcomes: { resolved: 0, terminalNoGraphLinks: 2, blockedSourceUnavailable: 0, sourceChanged: 0, invalidTerminal: 0, commitUnknown: 0 },
+          completedAt: new Date().toISOString(),
+        }),
+      );
+      const target = db.submitJob("ner-backfill", {
+        slug: "records/unrelated", kind: "ner", contentHash: "fingerprint-unrelated", sourceFingerprint: "page:fingerprint-unrelated",
+      });
+      const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+      expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
+      expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+      expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+      db.rawDb.prepare("DELETE FROM jobs").run();
+    }
+  });
+
+  test("a pre-manifest legacy shadow remains protected and unclaimable", () => {
+    addRich();
+    const shadowId = db.submitJob("ner-backfill", {
+      slug: "records/item",
+      kind: "ner",
+      contentHash: "caller-historical",
+    });
+    const batchId = "44444444-4444-4444-8444-444444444444";
+    const repair = {
+      name: ZERO_LINK_REPAIR_NAME,
+      version: 1,
+      contentFingerprint: "page:fingerprint-a",
+      sourceKind: "vault_hash",
+      batchId,
+    };
+    const childId = db.submitJob("ner-backfill", {
+      slug: "records/item",
+      kind: "ner",
+      contentHash: "fingerprint-a",
+      repair,
+    }, 1);
+    db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify({ outcome: "processed", kind: "ner", repair, graphOutcome: "terminal_no_graph_links", activeLinkCount: 0 }), childId);
+    db.rawDb.prepare(
+      `INSERT INTO jobs (name,status,priority,data,result,attempts,max_attempts,finished_at)
+       VALUES (?, 'done', 0, ?, ?, 0, 1, datetime('now'))`,
+    ).run(
+      ZERO_LINK_BATCH_MANIFEST_JOB,
+      JSON.stringify({
+        version: 1,
+        repairName: ZERO_LINK_REPAIR_NAME,
+        batchId,
+        ownership: [{ jobId: childId, slug: "records/item", contentFingerprint: "page:fingerprint-a" }],
+      }),
+      JSON.stringify({ finalized: false }),
+    );
+    expect(finalizeRepairBatch(db, batchId)).toMatchObject({ finalized: true });
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", active: 1, stateConflicts: 0 });
+    expect(getNerJobProtection(db).protectedJobIds.has(shadowId)).toBe(true);
+    expect(db.claimNerJobByIdWithLease(shadowId)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
   test("blocks residual leases outside running state", () => {

@@ -129,6 +129,10 @@ interface ParsedNerData {
   kind: "ner" | "entity_facts";
   contentHash?: string | null;
   sourceFingerprint?: string;
+  sourceFingerprintPresent: boolean;
+  pageContentHashPresent: boolean;
+  legacyContentHashPresent: boolean;
+  contentHashShapeValid: boolean;
   repair?: RepairMarker;
   attemptLease?: {
     version: 1;
@@ -197,7 +201,7 @@ interface QueueAudit {
   commitUnknown: number;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ACTIVE_STATUSES = new Set<JobStatus>(["pending", "running"]);
 const ACTIONABLE = new Set<CandidateDisposition>(["new", "legacy_requeue", "content_changed_requeue", "stale_requeue"]);
 
@@ -239,10 +243,20 @@ function parseNerData(raw: string | null): ParsedNerData | null {
   if (!data || typeof data.slug !== "string" || data.slug.trim().length === 0) return null;
   const kind = data.kind === undefined || data.kind === "ner" ? "ner" : data.kind === "entity_facts" ? "entity_facts" : null;
   if (!kind) return null;
-  const parsed: ParsedNerData = { slug: data.slug, kind };
+  const sourceFingerprintPresent = Object.hasOwn(data, "sourceFingerprint");
+  const pageContentHashPresent = Object.hasOwn(data, "pageContentHash");
+  const legacyContentHashPresent = Object.hasOwn(data, "contentHash");
   const contentHash = Object.hasOwn(data, "pageContentHash")
     ? data.pageContentHash
     : data.contentHash;
+  const parsed: ParsedNerData = {
+    slug: data.slug,
+    kind,
+    sourceFingerprintPresent,
+    pageContentHashPresent,
+    legacyContentHashPresent,
+    contentHashShapeValid: contentHash === undefined || contentHash === null || typeof contentHash === "string",
+  };
   if (contentHash === null || typeof contentHash === "string") parsed.contentHash = contentHash;
   if (typeof data.sourceFingerprint === "string") parsed.sourceFingerprint = data.sourceFingerprint;
   if (data.repair !== undefined) {
@@ -280,12 +294,16 @@ function parseNerData(raw: string | null): ParsedNerData | null {
 function parseOwnership(value: unknown): OwnershipEntry[] | null {
   if (!Array.isArray(value) || value.length === 0) return null;
   const seenJobs = new Set<number>();
+  const seenSlugs = new Set<string>();
   const entries: OwnershipEntry[] = [];
   for (const raw of value) {
     const entry = objectValue(raw);
     const jobId = Number(entry?.jobId);
-    if (!entry || !Number.isSafeInteger(jobId) || jobId <= 0 || seenJobs.has(jobId) || typeof entry.slug !== "string" || entry.slug.length === 0 || typeof entry.contentFingerprint !== "string" || entry.contentFingerprint.length === 0) return null;
+    if (!entry || !Number.isSafeInteger(jobId) || jobId <= 0 || seenJobs.has(jobId) ||
+      typeof entry.slug !== "string" || entry.slug.length === 0 || seenSlugs.has(entry.slug) ||
+      typeof entry.contentFingerprint !== "string" || entry.contentFingerprint.length === 0) return null;
     seenJobs.add(jobId);
+    seenSlugs.add(entry.slug);
     entries.push({ jobId, slug: entry.slug, contentFingerprint: entry.contentFingerprint });
   }
   return entries;
@@ -350,6 +368,7 @@ function parseManifestRow(row: JobRow): ParsedManifest | null {
       if (value.terminalStatus !== "done" && value.terminalStatus !== "failed" && value.terminalStatus !== "cancelled") return null;
       const outcome = value.graphOutcome;
       if (outcome !== null && outcome !== "resolved" && outcome !== "terminal_no_graph_links" && outcome !== "blocked_source_unavailable" && outcome !== "source_changed" && outcome !== "invalid_terminal") return null;
+      if ((value.terminalStatus === "done") !== (outcome !== null)) return null;
       finalizedEntries.push({ ...owner, terminalStatus: value.terminalStatus, graphOutcome: outcome });
     }
     if (typeof data.ledgerDigest !== "string" || data.ledgerDigest !== canonicalLedgerDigest(String(data.batchId), finalizedEntries)) return null;
@@ -384,11 +403,18 @@ function finalizedEntryOwnsEpoch(entry: FinalizedEntry): boolean {
 
 function ordinaryFrozenIdentityValid(data: ParsedNerData): boolean {
   if (data.kind !== "ner" || data.repair) return false;
-  if (data.sourceFingerprint === undefined || data.contentHash === undefined) return false;
+  if (!data.sourceFingerprintPresent || data.sourceFingerprint === undefined ||
+    (!data.pageContentHashPresent && !data.legacyContentHashPresent) || !data.contentHashShapeValid ||
+    data.contentHash === undefined) return false;
   if (!data.sourceFingerprint.startsWith("page:") && !/^derived:[0-9a-f]{64}$/.test(data.sourceFingerprint)) return false;
   if (data.sourceFingerprint.startsWith("page:") &&
     (typeof data.contentHash !== "string" || data.sourceFingerprint !== `page:${data.contentHash}`)) return false;
   return true;
+}
+
+function trueLegacyOrdinary(data: ParsedNerData): boolean {
+  return data.kind === "ner" && !data.repair && !data.sourceFingerprintPresent &&
+    !data.pageContentHashPresent && data.contentHashShapeValid;
 }
 
 function ordinaryCurrentIdentityValid(db: ZeroLinkDb, data: ParsedNerData): boolean {
@@ -400,8 +426,9 @@ function ordinaryCurrentIdentityValid(db: ZeroLinkDb, data: ParsedNerData): bool
 }
 
 function ordinaryLiveIdentityValid(db: ZeroLinkDb, data: ParsedNerData): boolean {
-  // Pre-#342 ordinary rows remain readable only outside commit-unknown governance.
-  if (data.kind === "ner" && !data.repair && data.sourceFingerprint === undefined && data.contentHash === undefined) return true;
+  // Pre-#342 contentHash was caller-defined and is not half of the governed identity.
+  // Only sourceFingerprint opts an ordinary row into #342 current-source validation.
+  if (trueLegacyOrdinary(data)) return true;
   if (!ordinaryFrozenIdentityValid(data)) return false;
   const current = deriveZeroLinkSource(db, data.slug).contentFingerprint;
   return data.sourceFingerprint !== current || ordinaryCurrentIdentityValid(db, data);
@@ -482,6 +509,18 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
       const child = byId.get(owner.jobId);
       const data = parsedById.get(owner.jobId);
       if (!child || child.name !== "ner-backfill" || !data?.repair || data.slug !== owner.slug || data.repair.batchId !== manifest.batchId || data.repair.contentFingerprint !== owner.contentFingerprint) conflicts++;
+      if (manifest.finalized && child) {
+        const entry = manifest.finalizedEntries.find((candidate) => candidate.jobId === owner.jobId);
+        const result = readOutcome(child);
+        const rawOutcome = result?.graphOutcome;
+        const actualGraphOutcome = child.status === "done"
+          ? rawOutcome === "resolved" || rawOutcome === "terminal_no_graph_links" || rawOutcome === "blocked_source_unavailable" || rawOutcome === "source_changed" || rawOutcome === "invalid_terminal"
+            ? rawOutcome
+            : "invalid_terminal"
+          : null;
+        if (!entry || child.status !== entry.terminalStatus || result?.outcome === "commit_unknown" ||
+          actualGraphOutcome !== entry.graphOutcome) conflicts++;
+      }
     }
     if (manifest.finalized) continue;
     for (const [jobId, data] of parsedById) {
@@ -502,11 +541,17 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
     const current = deriveZeroLinkSource(db, slug).contentFingerprint;
     const parsedLive = live.map((row) => ({ row, data: parsedById.get(row.id)! }));
     const hasRepairHistory = manifests.some((manifest) => manifest.ownership.some((owner) => owner.slug === slug));
+    const firstRepairManifestId = manifests
+      .filter((manifest) => manifest.ownership.some((owner) => owner.slug === slug))
+      .reduce<number | null>((first, manifest) => first === null || manifest.row.id < first ? manifest.row.id : first, null);
     if (!current && (hasRepairHistory || parsedLive.some(({ data }) => Boolean(data.sourceFingerprint || data.repair)))) {
       globalStateConflictSlugs.add(slug);
     }
     const marked = parsedLive.filter(({ data }) => Boolean(data.repair));
     const ordinary = parsedLive.filter(({ data }) => !data.repair);
+    if (firstRepairManifestId !== null && ordinary.some(({ row, data }) => trueLegacyOrdinary(data) && row.id > firstRepairManifestId)) {
+      globalStateConflictSlugs.add(slug);
+    }
     if (marked.length > 0 && ordinary.length > 0) globalStateConflictSlugs.add(slug);
     if (live.length > 2) globalStateConflictSlugs.add(slug);
     if (live.length === 2) {
@@ -558,6 +603,47 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
     globalStateConflictSlugs,
     commitUnknown,
   };
+}
+
+export type NerClaimMode = "legacy" | "ordinary" | "repair";
+
+/**
+ * Canonical in-transaction authorization for the storage claim CAS.
+ * Callers must hold the SQLite write transaction while using this result.
+ */
+export function authorizeNerJobClaim(db: ZeroLinkDb, jobId: number): NerClaimMode | null {
+  const audit = auditQueue(db);
+  if (audit.queueIntegrityConflicts > 0) return null;
+  const row = audit.rows.find((candidate) => candidate.id === jobId);
+  const data = audit.parsedById.get(jobId);
+  const raw = row ? parseJsonObject(row.data) : null;
+  if (!row || row.name !== "ner-backfill" || row.status !== "pending" || !data || data.kind !== "ner" ||
+    !raw || Object.hasOwn(raw, "attemptLease") || audit.globalStateConflictSlugs.has(data.slug)) return null;
+
+  const otherLive = audit.rows.some((candidate) => {
+    if (candidate.id === jobId || candidate.name !== "ner-backfill" || !ACTIVE_STATUSES.has(candidate.status)) return false;
+    const other = audit.parsedById.get(candidate.id);
+    return other?.kind === "ner" && other.slug === data.slug;
+  });
+  if (otherLive) return null;
+
+  if (data.repair) {
+    const manifest = audit.manifestByBatchId.get(data.repair.batchId);
+    const latest = audit.latestOwnershipByJobId.get(jobId);
+    const owner = manifest?.ownership.find((entry) => entry.jobId === jobId);
+    if (!manifest || manifest.finalized || latest !== manifest || !owner || owner.slug !== data.slug ||
+      owner.contentFingerprint !== data.repair.contentFingerprint) return null;
+    return "repair";
+  }
+
+  if (trueLegacyOrdinary(data)) {
+    const hasRepairHistory = audit.manifests.some(
+      (manifest) => manifest.ownership.some((owner) => owner.slug === data.slug),
+    );
+    return hasRepairHistory ? null : "legacy";
+  }
+
+  return ordinaryLiveIdentityValid(db, data) ? "ordinary" : null;
 }
 
 function activeCurrentLinkSlugs(db: ZeroLinkDb): Set<string> {

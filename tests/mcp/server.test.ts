@@ -2603,6 +2603,7 @@ describe("MCP Server", () => {
     });
 
     test("committing attempt rejects cancel with a stable code", async () => {
+      db.upsertPage({ slug: "records/a", type: "record", title: "Record A", filePath: "records/a.md", contentHash: "a" });
       const id = db.submitJob("ner-backfill", {
         slug: "records/a", kind: "ner", pageContentHash: "a", sourceFingerprint: "page:a",
       });
