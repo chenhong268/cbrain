@@ -717,6 +717,23 @@ export function planZeroLinkBackfill(db: ZeroLinkDb, limit?: number): ZeroLinkBa
   return buildPlan(db, "dry_run", limit).report;
 }
 
+/** Internal queue-control view for durable NER submission; never exposes identities publicly. */
+export function inspectZeroLinkRepairControl(
+  db: ZeroLinkDb,
+  slug: string,
+  fingerprint: string,
+): { queueIntegrityConflicts: number; finalizedFingerprintOwned: boolean } {
+  const audit = auditQueue(db);
+  return {
+    queueIntegrityConflicts: audit.queueIntegrityConflicts,
+    finalizedFingerprintOwned: audit.manifests.some(
+      (manifest) => manifest.finalized && manifest.finalizedEntries.some(
+        (entry) => entry.slug === slug && entry.contentFingerprint === fingerprint,
+      ),
+    ),
+  };
+}
+
 function repairPayload(candidate: ZeroLinkCandidate, batchId: string): Record<string, unknown> {
   return {
     slug: candidate.slug,

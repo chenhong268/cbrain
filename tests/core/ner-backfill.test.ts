@@ -12,6 +12,7 @@ import { ContentPipeline } from "../../src/core/ingestion/pipeline";
 import { NerEngine, NerTimeoutError } from "../../src/core/ingestion/ner";
 import type { LLMProvider } from "../../src/llm/provider";
 import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
+import { submitDeferredNerForWritePath } from "../../src/core/ingestion/ner-write-path";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
   return {
@@ -137,43 +138,140 @@ describe("snapshotEligibleJobIds (#252)", () => {
 });
 
 describe("JobQueueNerSubmitter (#252)", () => {
-  test("first submit returns a job id and creates a pending ner-backfill job", () => {
+  const addRecord = (slug: string, hash = "page-hash") => {
+    db.upsertPage({ slug, type: "record", title: slug, filePath: `${slug}.md`, contentHash: hash });
+    db.insertChunk(slug, 0, "first");
+    db.insertChunk(slug, 1, "second");
+  };
+
+  test("first submit returns a structured result and creates a source-identified job", () => {
+    addRecord("records/foo");
     const s = new JobQueueNerSubmitter(db);
-    const id = s.submitDeferredNer({ slug: "records/foo", pageType: "record" });
-    expect(id).not.toBeNull();
-    const job = db.getJob(id!)!;
+    const result = s.submitDeferredNer({ slug: "records/foo", pageType: "record", contentHash: "caller-hash" });
+    expect(result).toMatchObject({ disposition: "inserted", pending: true });
+    const job = db.getJob(result.jobId!)!;
     expect(job.name).toBe("ner-backfill");
     expect(job.status).toBe("pending");
-    expect(JSON.parse(job.data!)).toEqual({ slug: "records/foo", pageType: "record" });
+    expect(JSON.parse(job.data!)).toEqual({
+      slug: "records/foo",
+      pageContentHash: "page-hash",
+      sourceFingerprint: "page:page-hash",
+      pageType: "record",
+      kind: "ner",
+    });
   });
-  test("second submit for same slug is deduped (returns null, no new job)", () => {
+  test("second submit for same source returns existing_active", () => {
+    addRecord("records/foo");
     const s = new JobQueueNerSubmitter(db);
     const first = s.submitDeferredNer({ slug: "records/foo" });
-    expect(first).not.toBeNull();
-    expect(s.submitDeferredNer({ slug: "records/foo" })).toBeNull();
+    expect(first.disposition).toBe("inserted");
+    expect(s.submitDeferredNer({ slug: "records/foo" })).toEqual({
+      disposition: "existing_active",
+      jobId: first.jobId,
+      pending: true,
+    });
     expect(db.listJobs("pending").length).toBe(1);
   });
   test("different slug submits a second job", () => {
+    addRecord("records/foo");
+    addRecord("records/bar");
     const s = new JobQueueNerSubmitter(db);
     s.submitDeferredNer({ slug: "records/foo" });
     const second = s.submitDeferredNer({ slug: "records/bar" });
-    expect(second).not.toBeNull();
+    expect(second.disposition).toBe("inserted");
     expect(db.listJobs("pending").length).toBe(2);
   });
   test("same slug can queue regular NER and entity facts without cross-kind suppression", () => {
+    addRecord("brain/entities/company/a");
     const s = new JobQueueNerSubmitter(db);
-    expect(s.submitDeferredNer({ slug: "brain/entities/company/a" })).not.toBeNull();
-    expect(s.submitDeferredNer({ slug: "brain/entities/company/a", kind: "entity_facts" })).not.toBeNull();
-    expect(s.submitDeferredNer({ slug: "brain/entities/company/a", kind: "entity_facts" })).toBeNull();
+    expect(s.submitDeferredNer({ slug: "brain/entities/company/a" }).disposition).toBe("inserted");
+    expect(s.submitDeferredNer({ slug: "brain/entities/company/a", kind: "entity_facts" }).disposition).toBe("inserted");
+    expect(s.submitDeferredNer({ slug: "brain/entities/company/a", kind: "entity_facts" }).disposition).toBe("existing_active");
     expect(db.listJobs("pending")).toHaveLength(2);
   });
-  test("stale running same slug does NOT dedupe (new job allowed)", () => {
+  test("stale old-fingerprint running row is terminalized and gets one successor", () => {
+    addRecord("records/foo", "first-hash");
     const s = new JobQueueNerSubmitter(db);
-    const first = s.submitDeferredNer({ slug: "records/foo" })!;
-    db.claimJobById(first);
-    db.rawDb.prepare("UPDATE jobs SET started_at = datetime('now','-2 hours') WHERE id = ?").run(first);
-    // stale running is not "active" → submit proceeds
-    expect(s.submitDeferredNer({ slug: "records/foo" })).not.toBeNull();
+    const first = s.submitDeferredNer({ slug: "records/foo" });
+    db.claimJobById(first.jobId!);
+    db.rawDb.prepare("UPDATE jobs SET started_at = datetime('now','-2 hours') WHERE id = ?").run(first.jobId!);
+    db.updatePageHash("records/foo", "second-hash");
+    const next = s.submitDeferredNer({ slug: "records/foo" });
+    expect(next).toMatchObject({ disposition: "successor_pending", pending: true });
+    expect(db.getJob(first.jobId!)!.status).toBe("done");
+    expect(JSON.parse(db.getJob(first.jobId!)!.result!).reason).toBe("SOURCE_CHANGED");
+  });
+
+  test("reuses one old-fingerprint pending row in place", () => {
+    addRecord("records/foo", "first-hash");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/foo" });
+    db.updatePageHash("records/foo", "second-hash");
+    const next = s.submitDeferredNer({ slug: "records/foo" });
+    expect(next).toEqual({ disposition: "superseded_pending", jobId: first.jobId, pending: true });
+    expect(JSON.parse(db.getJob(first.jobId!)!.data!).sourceFingerprint).toBe("page:second-hash");
+  });
+
+  test("sealed raw chunk changes supersede despite stable page hash", () => {
+    addRecord("records/foo", "stable-hash");
+    db.insertChunkWithLevel("records/foo", 0, "summary", 1, "summary-hash");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/foo" });
+    const firstFingerprint = JSON.parse(db.getJob(first.jobId!)!.data!).sourceFingerprint;
+    db.rawDb.prepare("UPDATE chunks SET content='changed' WHERE page_slug=? AND summary_level=0 AND chunk_index=0").run("records/foo");
+    const next = s.submitDeferredNer({ slug: "records/foo" });
+    expect(next.disposition).toBe("superseded_pending");
+    expect(JSON.parse(db.getJob(next.jobId!)!.data!).sourceFingerprint).not.toBe(firstFingerprint);
+  });
+
+  test("fresh old-fingerprint running row receives exactly one waiting successor", () => {
+    addRecord("records/foo", "first-hash");
+    const s = new JobQueueNerSubmitter(db);
+    const first = s.submitDeferredNer({ slug: "records/foo" });
+    db.claimJobById(first.jobId!);
+    db.updatePageHash("records/foo", "second-hash");
+    const next = s.submitDeferredNer({ slug: "records/foo" });
+    expect(next.disposition).toBe("successor_pending");
+    expect(s.submitDeferredNer({ slug: "records/foo" })).toEqual({
+      disposition: "existing_active",
+      jobId: next.jobId,
+      pending: true,
+    });
+    expect(db.rawDb.prepare("SELECT COUNT(*) count FROM jobs").get()).toEqual({ count: 2 });
+  });
+
+  test("write-path pending boolean is truthful for a rejected submission", () => {
+    expect(submitDeferredNerForWritePath(new JobQueueNerSubmitter(db), {
+      slug: "records/missing",
+      pageType: "record",
+    })).toBe(false);
+  });
+});
+
+describe("scoped NER attempt lease primitives (#342)", () => {
+  test("only one conditional claim wins and ABA tokens cannot finish a later attempt", () => {
+    const id = db.submitJob("ner-backfill", { slug: "records/item", kind: "ner", sourceFingerprint: "page:a" });
+    const first = db.claimNerJobByIdWithLease(id);
+    expect(first?.leaseToken).toMatch(/^[0-9a-f-]{36}$/);
+    expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    expect(db.completeNerJobWithLease(id, "wrong-token", "claimed", { outcome: "skipped" })).toBe(false);
+    expect(db.completeNerJobWithLease(id, first!.leaseToken, "claimed", { outcome: "skipped" })).toBe(true);
+    expect(JSON.parse(db.getJob(id)!.data!)).not.toHaveProperty("attemptLease");
+  });
+
+  test("committing fence is conditional and a claimed token cannot complete afterward", () => {
+    const id = db.submitJob("ner-backfill", { slug: "records/item", kind: "ner", sourceFingerprint: "page:a" });
+    const claimed = db.claimNerJobByIdWithLease(id)!;
+    expect(db.moveNerLeaseToCommitting(id, claimed.leaseToken)).toBe(true);
+    expect(db.moveNerLeaseToCommitting(id, claimed.leaseToken)).toBe(false);
+    expect(db.completeNerJobWithLease(id, claimed.leaseToken, "claimed", { outcome: "processed" })).toBe(false);
+    expect(db.completeNerJobWithLease(id, claimed.leaseToken, "committing", { outcome: "processed" })).toBe(true);
+  });
+
+  test("entity facts never receive a scoped lease", () => {
+    const id = db.submitJob("ner-backfill", { slug: "entity/a", kind: "entity_facts" });
+    expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    expect(JSON.parse(db.getJob(id)!.data!)).not.toHaveProperty("attemptLease");
   });
 });
 

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
@@ -1113,6 +1114,98 @@ export class CBrainDB {
       "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = datetime('now') WHERE id = ?"
     ).run(id);
     return row;
+  }
+
+  /** #342: scoped atomic claim for ordinary/repair NER only. Entity facts stay on the legacy path. */
+  claimNerJobByIdWithLease(id: number): { id: number; name: string; data: string; attempts: number; leaseToken: string } | null {
+    const row = this.rawDb.prepare(
+      "SELECT id, name, data, attempts FROM jobs WHERE id = ? AND name = 'ner-backfill' AND status = 'pending'",
+    ).get(id) as { id: number; name: string; data: string | null; attempts: number } | undefined;
+    if (!row?.data) return null;
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(row.data) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    if (data.kind === "entity_facts" || (data.kind !== undefined && data.kind !== "ner")) return null;
+    const leaseToken = randomUUID();
+    const nextData = JSON.stringify({
+      ...data,
+      attemptLease: { version: 1, token: leaseToken, phase: "claimed" },
+    });
+    const updated = this.rawDb.prepare(
+      `UPDATE jobs
+       SET status='running', attempts=attempts + 1, started_at=datetime('now'), data=?
+       WHERE id=? AND name='ner-backfill' AND status='pending' AND data=?`,
+    ).run(nextData, id, row.data);
+    if (updated.changes !== 1) return null;
+    return { id: row.id, name: row.name, data: nextData, attempts: row.attempts, leaseToken };
+  }
+
+  /** #342: write-authority linearization point for a claimed NER attempt. */
+  moveNerLeaseToCommitting(id: number, leaseToken: string): boolean {
+    const row = this.rawDb.prepare(
+      "SELECT data FROM jobs WHERE id=? AND name='ner-backfill' AND status='running'",
+    ).get(id) as { data: string | null } | undefined;
+    if (!row?.data) return false;
+    let data: Record<string, unknown>;
+    try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { return false; }
+    const lease = data.attemptLease as Record<string, unknown> | undefined;
+    if (lease?.version !== 1 || lease.token !== leaseToken || lease.phase !== "claimed") return false;
+    const nextData = JSON.stringify({
+      ...data,
+      attemptLease: { version: 1, token: leaseToken, phase: "committing" },
+    });
+    const updated = this.rawDb.prepare(
+      "UPDATE jobs SET data=? WHERE id=? AND name='ner-backfill' AND status='running' AND data=?",
+    ).run(nextData, id, row.data);
+    return updated.changes === 1;
+  }
+
+  /** #342: terminal completion guarded by the exact token and phase; removes the private lease. */
+  completeNerJobWithLease(
+    id: number,
+    leaseToken: string,
+    phase: "claimed" | "committing",
+    result?: unknown,
+  ): boolean {
+    const row = this.rawDb.prepare(
+      "SELECT data FROM jobs WHERE id=? AND name='ner-backfill' AND status='running'",
+    ).get(id) as { data: string | null } | undefined;
+    if (!row?.data) return false;
+    let data: Record<string, unknown>;
+    try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { return false; }
+    const lease = data.attemptLease as Record<string, unknown> | undefined;
+    if (lease?.version !== 1 || lease.token !== leaseToken || lease.phase !== phase) return false;
+    const { attemptLease: _removed, ...withoutLease } = data;
+    const updated = this.rawDb.prepare(
+      `UPDATE jobs
+       SET status='done', data=?, result=?, error=NULL, finished_at=datetime('now')
+       WHERE id=? AND name='ner-backfill' AND status='running' AND data=?`,
+    ).run(JSON.stringify(withoutLease), result === undefined ? null : JSON.stringify(result), id, row.data);
+    return updated.changes === 1;
+  }
+
+  /** #342: retry/terminal failure guarded by the claimed lease. */
+  failNerJobWithLease(id: number, leaseToken: string, errorCode: string): boolean {
+    const row = this.rawDb.prepare(
+      "SELECT data, attempts, max_attempts FROM jobs WHERE id=? AND name='ner-backfill' AND status='running'",
+    ).get(id) as { data: string | null; attempts: number; max_attempts: number } | undefined;
+    if (!row?.data) return false;
+    let data: Record<string, unknown>;
+    try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { return false; }
+    const lease = data.attemptLease as Record<string, unknown> | undefined;
+    if (lease?.version !== 1 || lease.token !== leaseToken || lease.phase !== "claimed") return false;
+    const { attemptLease: _removed, ...withoutLease } = data;
+    const status = row.attempts >= row.max_attempts ? "failed" : "pending";
+    const updated = this.rawDb.prepare(
+      `UPDATE jobs
+       SET status=?, data=?, error=?, started_at=CASE WHEN ?='pending' THEN NULL ELSE started_at END,
+           finished_at=CASE WHEN ?='failed' THEN datetime('now') ELSE NULL END
+       WHERE id=? AND name='ner-backfill' AND status='running' AND data=?`,
+    ).run(status, JSON.stringify(withoutLease), errorCode, status, status, id, row.data);
+    return updated.changes === 1;
   }
 
   /** #252: reset stale 'running' jobs (older than ttl) back to 'pending'. Returns count reset. */

@@ -30,11 +30,10 @@ export function submitDeferredNerForWritePath(
   submitter: DeferredNerSubmitter,
   input: { slug: string; pageType: string; contentHash?: string; kind?: "ner" | "entity_facts" },
 ): boolean {
-  submitter.submitDeferredNer({
+  return submitter.submitDeferredNer({
     slug: input.slug,
     pageType: input.pageType,
     contentHash: input.contentHash,
     kind: input.kind,
-  });
-  return true;
+  }).pending;
 }

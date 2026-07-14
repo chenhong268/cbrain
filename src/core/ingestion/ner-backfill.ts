@@ -5,10 +5,13 @@ import type { ContentPipeline } from "./pipeline.js";
 import { isNerTimeoutError } from "./ner.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { EntityFactsTimeoutError, extractEntityFacts } from "./entity-facts.js";
+import { deriveZeroLinkSource, inspectZeroLinkRepairControl } from "../maintenance/zero-link-backfill.js";
+import type { DeferredNerSubmitResult } from "./ner-backfill-contract.js";
+import { NER_BACKFILL_JOB } from "./ner-backfill-contract.js";
 /** Stale-running recovery TTL — aligned with Dream lock TTL (dream.ts). */
 export const NER_BACKFILL_STALE_TTL_MS = 30 * 60 * 1000;
 
-export const NER_BACKFILL_JOB = "ner-backfill";
+export { NER_BACKFILL_JOB } from "./ner-backfill-contract.js";
 export const NER_BACKFILL_MAX_ITEMS = 50;
 
 export interface NerBackfillCounts {
@@ -35,23 +38,134 @@ export interface DeferredNerInput {
  * full JobQueue.work() lifecycle and from buildContext construction order.
  */
 export interface DeferredNerSubmitter {
-  /** Returns job id, or null if deduped (active pending/non-stale-running job for slug exists). */
-  submitDeferredNer(input: DeferredNerInput): number | null;
+  submitDeferredNer(input: DeferredNerInput): DeferredNerSubmitResult;
 }
 
 /** Adapter over CBrainDB: dedup then submit. */
 export class JobQueueNerSubmitter implements DeferredNerSubmitter {
   constructor(private db: CBrainDB) {}
 
-  submitDeferredNer(input: DeferredNerInput): number | null {
-    const active = this.db.findActiveNerJobs(
-      input.slug,
-      NER_BACKFILL_STALE_TTL_MS,
-      input.kind === "entity_facts" ? "entity_facts" : "ner",
-    );
-    if (active.length > 0) return null;
-    return this.db.submitJob(NER_BACKFILL_JOB, input);
+  submitDeferredNer(input: DeferredNerInput): DeferredNerSubmitResult {
+    this.db.rawDb.exec("BEGIN IMMEDIATE");
+    try {
+      const result = input.kind === "entity_facts"
+        ? this.submitEntityFacts(input)
+        : this.submitNerEpoch(input);
+      this.db.rawDb.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try { this.db.rawDb.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
+
+  private submitEntityFacts(input: DeferredNerInput): DeferredNerSubmitResult {
+    const rows = this.db.rawDb.prepare(
+      "SELECT id, status, data, started_at FROM jobs WHERE name='ner-backfill' AND status IN ('pending','running') ORDER BY id",
+    ).all() as Array<{ id: number; status: string; data: string | null; started_at: string | null }>;
+    for (const row of rows) {
+      const data = safeJobData(row.data);
+      if (data?.slug === input.slug && data.kind === "entity_facts" && (row.status === "pending" || !isOrdinaryStale(row.started_at))) {
+        return { disposition: "existing_active", jobId: row.id, pending: true };
+      }
+    }
+    const inserted = this.db.rawDb.prepare(
+      "INSERT INTO jobs (name, data, priority) VALUES ('ner-backfill', ?, 0)",
+    ).run(JSON.stringify({ ...input, kind: "entity_facts" }));
+    return { disposition: "inserted", jobId: Number(inserted.lastInsertRowid), pending: true };
+  }
+
+  private submitNerEpoch(input: DeferredNerInput): DeferredNerSubmitResult {
+    const page = this.db.getPage(input.slug);
+    const source = deriveZeroLinkSource(this.db, input.slug);
+    if (!page || !source.contentFingerprint) return { disposition: "rejected", jobId: null, pending: false };
+    const payload = {
+      slug: input.slug,
+      pageContentHash: page.content_hash,
+      sourceFingerprint: source.contentFingerprint,
+      ...(input.pageType ? { pageType: input.pageType } : {}),
+      kind: "ner" as const,
+    };
+    const rows = this.db.rawDb.prepare(
+      "SELECT id, status, data, result, started_at FROM jobs WHERE name='ner-backfill' ORDER BY id",
+    ).all() as Array<{ id: number; status: string; data: string | null; result: string | null; started_at: string | null }>;
+    const slugRows = rows.flatMap((row) => {
+      const data = safeJobData(row.data);
+      const kind = data?.kind === undefined || data?.kind === "ner" ? "ner" : data?.kind;
+      return data?.slug === input.slug && kind === "ner" ? [{ ...row, parsed: data }] : [];
+    });
+
+    const repairControl = inspectZeroLinkRepairControl(this.db, input.slug, source.contentFingerprint);
+    if (repairControl.queueIntegrityConflicts > 0) {
+      return { disposition: "rejected", jobId: null, pending: false };
+    }
+    if (repairControl.finalizedFingerprintOwned) {
+      return { disposition: "already_processed", jobId: null, pending: false };
+    }
+    const terminal = slugRows.filter((row) => row.parsed.sourceFingerprint === source.contentFingerprint && !["pending", "running"].includes(row.status));
+    if (terminal.some((row) => row.status === "done" && safeJobData(row.result)?.outcome === "processed")) {
+      return { disposition: "already_processed", jobId: null, pending: false };
+    }
+    if (terminal.some((row) => row.status === "failed" || row.status === "cancelled")) {
+      return { disposition: "rejected", jobId: null, pending: false };
+    }
+
+    const live = slugRows.filter((row) => row.status === "pending" || row.status === "running");
+    const current = live.filter((row) => row.parsed.sourceFingerprint === source.contentFingerprint);
+    if (current.length === 1 && (current[0].status === "pending" || !isOrdinaryStale(current[0].started_at))) {
+      return { disposition: "existing_active", jobId: current[0].id, pending: true };
+    }
+    if (current.length === 1) return { disposition: "rejected", jobId: null, pending: false };
+    if (current.length > 1) return { disposition: "rejected", jobId: null, pending: false };
+    const old = live.filter((row) => row.parsed.sourceFingerprint !== source.contentFingerprint);
+    if (old.length !== 1 || current.length !== 0) {
+      if (old.length !== 0) return { disposition: "rejected", jobId: null, pending: false };
+    } else {
+      const predecessor = old[0];
+      if (predecessor.status === "pending") {
+        this.db.rawDb.prepare(
+          `UPDATE jobs SET data=?, result=NULL, error=NULL, attempts=0,
+                           started_at=NULL, finished_at=NULL
+           WHERE id=? AND status='pending'`,
+        ).run(JSON.stringify(payload), predecessor.id);
+        return { disposition: "superseded_pending", jobId: predecessor.id, pending: true };
+      }
+      if (predecessor.status === "running") {
+        const lease = predecessor.parsed.attemptLease as Record<string, unknown> | undefined;
+        if (lease?.phase === "committing") return { disposition: "rejected", jobId: null, pending: false };
+        if (isOrdinaryStale(predecessor.started_at)) {
+          const result = { outcome: "skipped", reason: "SOURCE_CHANGED", kind: "ner" };
+          const { attemptLease: _removed, ...withoutLease } = predecessor.parsed;
+          this.db.rawDb.prepare(
+            "UPDATE jobs SET status='done', data=?, result=?, error=NULL, finished_at=datetime('now') WHERE id=? AND status='running' AND data=?",
+          ).run(JSON.stringify(withoutLease), JSON.stringify(result), predecessor.id, predecessor.data);
+        }
+        const inserted = this.db.rawDb.prepare(
+          "INSERT INTO jobs (name, data, priority) VALUES ('ner-backfill', ?, 0)",
+        ).run(JSON.stringify(payload));
+        return { disposition: "successor_pending", jobId: Number(inserted.lastInsertRowid), pending: true };
+      }
+    }
+
+    const inserted = this.db.rawDb.prepare(
+      "INSERT INTO jobs (name, data, priority) VALUES ('ner-backfill', ?, 0)",
+    ).run(JSON.stringify(payload));
+    return { disposition: "inserted", jobId: Number(inserted.lastInsertRowid), pending: true };
+  }
+}
+
+function safeJobData(raw: string | null): Record<string, any> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
+function isOrdinaryStale(startedAt: string | null): boolean {
+  if (!startedAt) return true;
+  const timestamp = Date.parse(startedAt.endsWith("Z") ? startedAt : `${startedAt.replace(" ", "T")}Z`);
+  return !Number.isFinite(timestamp) || Date.now() - timestamp >= NER_BACKFILL_STALE_TTL_MS;
 }
 
 /**

@@ -40,8 +40,7 @@ export interface DeferredNerSubmitResult {
     | "already_processed"
     | "superseded_pending"
     | "successor_pending"
-    | "source_unavailable";
+    | "rejected";
   jobId: number | null;
   pending: boolean;
 }
-
