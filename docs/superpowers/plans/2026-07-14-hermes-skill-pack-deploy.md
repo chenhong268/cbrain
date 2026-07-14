@@ -1015,9 +1015,9 @@ Expected: `git diff --check` clean; privacy grep empty (note: `github:<owner>/cb
 
 **原计划为何推荐 symlink：** §3.4 原定 symlink 默认推荐，理由是「随 CBrain 升级自动同步」，省去人工重新部署。
 
-**真实 Hermes loader 发现：** 合并前用 Hermes preload loader（`agent.skill_commands._load_skill_payload`）做 smoke 时发现，Hermes 用 **resolved path** 判定 trusted directory——指向 checkout 的 symlink 解析后落在 `~/.hermes/skills` 之外，触发 trusted-directory 安全告警；且活跃 checkout 的 skills 修改会立即进入真实 Agent，绕过显式部署门禁（违反 #334「不静默漂移」）。
+**真实 Hermes loader 发现：** 本地 main 合入后、远端发布前，用 Hermes preload loader（`agent.skill_commands._load_skill_payload`）做 smoke 时发现，Hermes 用 **resolved path** 判定 trusted directory——指向 checkout 的 symlink 解析后落在 `~/.hermes/skills` 之外，触发 trusted-directory 安全告警；且活跃 checkout 的 skills 修改会立即进入真实 Agent，绕过显式部署门禁（违反 #334「不静默漂移」）。
 
-**最终政策：copy 默认推荐（稳定 Hermes），symlink 仅开发/试验可选。** copy 把审核快照落在 trusted root 内，checkout 变化不自动影响真实 Agent；代价是升级后变 stale，需人工重新部署 + verification。
+**最终政策：copy 默认推荐（稳定 Hermes），symlink 仅开发/试验可选。** copy 把审核快照落在 trusted root 内，checkout 变化不自动影响真实 Agent；代价是升级后 canonical packVersion 变化 → incompatible（非 stale），需人工重新部署 + verification。
 
 **本修正对应：** spec §3.4 Runtime correction 审计段；`docs/install-onboarding.md` 第七步 copy 默认 + symlink 两风险；CLI human label `Copy (recommended)` / `Symlink (dev only)`；docs gate `checkSkillPackInstallPolicy` 闭环第七步（copy 默认 / symlink 仅开发 / symlink 禁默认 / trusted-dir warning / checkout-drift / copy 先于 symlink / 不同 block）。
 

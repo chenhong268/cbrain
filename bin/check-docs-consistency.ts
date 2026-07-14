@@ -275,20 +275,20 @@ export function checkSkillPackInstallPolicy(docs: Map<string, string>): CheckRes
   // HIGH2: commands matched ONLY inside real fenced blocks (prose excluded).
   const copyBlocks = extractFencedBlocks(copySection);
   const symlinkBlocks = extractFencedBlocks(symlinkSection);
-  const copyHasCp = copyBlocks.some((b) => /cp\s+-r\b/.test(b) && b.includes(INSTALL_TARGET));
-  const copyHasLn = copyBlocks.some((b) => /ln\s+-s\b/.test(b));
-  const symlinkHasLn = symlinkBlocks.some((b) => /ln\s+-s\b/.test(b) && b.includes(INSTALL_TARGET));
-  const symlinkHasCp = symlinkBlocks.some((b) => /cp\s+-r\b/.test(b));
+  const copyCpCount = copyBlocks.filter((b) => /cp\s+-r\b/.test(b) && b.includes(INSTALL_TARGET)).length;
+  const copyLnCount = copyBlocks.filter((b) => /ln\s+-s\b/.test(b)).length;
+  const symlinkLnCount = symlinkBlocks.filter((b) => /ln\s+-s\b/.test(b) && b.includes(INSTALL_TARGET)).length;
+  const symlinkCpCount = symlinkBlocks.filter((b) => /cp\s+-r\b/.test(b)).length;
 
   if (!copyRecommended) out.push({ check: `skill-pack-policy copy-recommended @${FILE} §7`, passed: false, detail: `第七步 copy 子段：copy 必须标记默认/生产推荐（「复制（默认推荐…稳定 Hermes）」）` });
   if (!symlinkDevOnly) out.push({ check: `skill-pack-policy symlink-dev-only @${FILE} §7`, passed: false, detail: `第七步 symlink 子段：必须标记仅开发/试验` });
   if (symlinkDefault) out.push({ check: `skill-pack-policy symlink-not-default @${FILE} §7`, passed: false, detail: `第七步 symlink 子段：不得标记「默认推荐」` });
   if (!trustedRisk) out.push({ check: `skill-pack-policy trusted-risk @${FILE} §7`, passed: false, detail: `第七步 symlink 子段：必须有肯定式 trusted-directory 风险（symlink/resolved target 落 trusted directory/root 外 → 告警；否定句不算，copy 优点不算）` });
   if (!checkoutDrift) out.push({ check: `skill-pack-policy checkout-drift @${FILE} §7`, passed: false, detail: `第七步 symlink 子段：必须有肯定式 checkout-drift 风险（checkout/仓库变化立即/自动/静默影响；否定句不算）` });
-  if (!copyHasCp) out.push({ check: `skill-pack-policy copy-fenced-cp @${FILE} §7`, passed: false, detail: `第七步 copy 子段：fenced block 内必须含 canonical cp -r ${INSTALL_TARGET}（正文 cp 不算）` });
-  if (copyHasLn) out.push({ check: `skill-pack-policy copy-no-ln @${FILE} §7`, passed: false, detail: `第七步 copy 子段：fenced block 不得含 ln -s` });
-  if (!symlinkHasLn) out.push({ check: `skill-pack-policy symlink-fenced-ln @${FILE} §7`, passed: false, detail: `第七步 symlink 子段：fenced block 内必须含 canonical ln -s ${INSTALL_TARGET}（正文 ln 不算）` });
-  if (symlinkHasCp) out.push({ check: `skill-pack-policy symlink-no-cp @${FILE} §7`, passed: false, detail: `第七步 symlink 子段：fenced block 不得含 cp -r` });
+  if (copyCpCount !== 1) out.push({ check: `skill-pack-policy copy-fenced-cp @${FILE} §7`, passed: false, detail: `第七步 copy 子段：必须恰有一个 canonical cp -r ${INSTALL_TARGET} fenced block（得到 ${copyCpCount}；正文 cp 不算）` });
+  if (copyLnCount > 0) out.push({ check: `skill-pack-policy copy-no-ln @${FILE} §7`, passed: false, detail: `第七步 copy 子段：fenced block 不得含 ln -s（得到 ${copyLnCount}）` });
+  if (symlinkLnCount !== 1) out.push({ check: `skill-pack-policy symlink-fenced-ln @${FILE} §7`, passed: false, detail: `第七步 symlink 子段：必须恰有一个 canonical ln -s ${INSTALL_TARGET} fenced block（得到 ${symlinkLnCount}；正文 ln 不算）` });
+  if (symlinkCpCount > 0) out.push({ check: `skill-pack-policy symlink-no-cp @${FILE} §7`, passed: false, detail: `第七步 symlink 子段：fenced block 不得含 cp -r（得到 ${symlinkCpCount}）` });
 
   if (out.length === 0) out.push({ check: "skill-pack install policy", passed: true, detail: `install-onboarding.md §7 闭环：copy 子段（默认+cp fence）先于 symlink 子段（仅开发+ln fence+肯定式 trusted/checkout 风险）` });
   return out;

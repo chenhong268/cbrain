@@ -205,3 +205,20 @@ test("mutation: cp -r leaking into the symlink fenced block fails", () => {
   );
   expectFail(mut);
 });
+
+// ── strict count: copy/symlink subsection must each have EXACTLY one canonical block ──
+test("mutation: two canonical cp -r blocks in copy subsection fails (strict count === 1)", () => {
+  const mut = POLICY_DOC.replace(
+    'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+    'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```\n\n```bash\ncp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+  );
+  expectFail(mut);
+});
+
+test("mutation: two canonical ln -s blocks in symlink subsection fails (strict count === 1)", () => {
+  const mut = POLICY_DOC.replace(
+    'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+    'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```\n\n```bash\nln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+  );
+  expectFail(mut);
+});

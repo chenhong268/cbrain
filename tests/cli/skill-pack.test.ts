@@ -440,19 +440,25 @@ describe("cbrain skill-pack", () => {
       }
     });
 
-    test("CLI source stays read-only: node:fs read-allowlist + no async write/exec imports", () => {
+    test("CLI source stays read-only: exactly one node:fs named read-allowlist import, no namespace/default/dynamic/require", () => {
       const src = readFileSync(join(PROJECT_DIR, "src/cli/commands/skill-pack.ts"), "utf-8");
-      // node:fs imports must be the read-only allowlist only
-      const fsMatch = src.match(/import\s*\{([^}]*?)\}\s*from\s*["']node:fs["']/);
-      expect(fsMatch !== null, "expected a node:fs import").toBe(true);
+      // Exactly ONE named node:fs import, and every spec must be read-only allowlist.
+      const namedImports = [...src.matchAll(/import\s*\{([^}]*?)\}\s*from\s*["']node:fs["']/g)];
+      expect(namedImports, "expected exactly one named node:fs import").toHaveLength(1);
       const READ_ALLOW = new Set(["existsSync", "readFileSync", "statSync", "readdirSync", "lstatSync"]);
-      for (const spec of fsMatch![1].split(",").map((s) => s.trim()).filter(Boolean)) {
+      for (const spec of namedImports[0][1].split(",").map((s) => s.trim()).filter(Boolean)) {
         expect(READ_ALLOW.has(spec), `node:fs import "${spec}" not in read-only allowlist`).toBe(true);
       }
-      // forbid async write / exec entry modules
-      for (const bad of ["node:fs/promises", "Bun.write", "child_process"]) {
-        expect(src).not.toContain(bad);
-      }
+      // No second node:fs import of any other shape (namespace / default / aliased).
+      expect(src).not.toMatch(/import\s+\*\s+as\s+\w+\s+from\s*["']node:fs["']/);
+      expect(src).not.toMatch(/import\s+\w+(\s*,\s*\{[^}]*\})?\s+from\s*["']node:fs["']/);
+      // No fs/promises, no dynamic import, no require of fs.
+      expect(src).not.toContain("node:fs/promises");
+      expect(src).not.toMatch(/import\s*\(\s*["']node:fs["']\s*\)/);
+      expect(src).not.toMatch(/require\s*\(\s*["']node:fs["']\s*\)/);
+      expect(src).not.toMatch(/require\s*\(\s*["']fs["']\s*\)/);
+      expect(src).not.toContain("Bun.write");
+      expect(src).not.toContain("child_process");
       // forbid mutating sync calls + exec/spawn call sites (belt-and-suspenders)
       for (const bad of ["writeFileSync", "mkdirSync", "unlinkSync", "symlinkSync", "renameSync", "rmSync", "cpSync", "copyFileSync", "appendFileSync", "execSync", "spawnSync"]) {
         expect(src).not.toContain(bad);
@@ -462,6 +468,18 @@ describe("cbrain skill-pack", () => {
       }
       // no install/force/overwrite/deploy flags
       expect(src).not.toMatch(/--install|--force|--overwrite|--deploy|--backup|--migrate/);
+    });
+
+    test("read-only allowlist rejects an import { writeFile } from node:fs (mutation guard)", () => {
+      // Independent of the real source: proves the allowlist logic itself
+      // refuses a writeFile import if one is ever introduced.
+      const mutatedSrc = 'import { existsSync, writeFile, readFileSync } from "node:fs";\n';
+      const namedImports = [...mutatedSrc.matchAll(/import\s*\{([^}]*?)\}\s*from\s*["']node:fs["']/g)];
+      const READ_ALLOW = new Set(["existsSync", "readFileSync", "statSync", "readdirSync", "lstatSync"]);
+      const allReadOnly = namedImports[0][1]
+        .split(",").map((s) => s.trim()).filter(Boolean)
+        .every((fn) => READ_ALLOW.has(fn));
+      expect(allReadOnly).toBe(false); // writeFile disqualifies the import
     });
   });
 

@@ -338,8 +338,10 @@ cbrain skill-pack
 cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
 #   - missing   → 该路径不存在，继续 step 3 安装
 #   - current   → 已是 canonical pack，无需安装，到此结束
-#   - stale / incompatible / unverified → 路径已有不同内容（可能是私有 skill），
-#     人工排查后再决定；不要直接覆盖
+#   - stale        → 同版本（packVersion + 文件清单一致）但某文件内容变化；
+#   - incompatible → packVersion 或文件清单不同（旧版本 / 私有 skill / 损坏）；
+#   - unverified   → canonical pack 自身无法作基线；
+#     以上三类人工排查后再决定；不要直接覆盖
 
 ```
 
@@ -353,7 +355,7 @@ cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 ```
 
 - 优点：部署的是审核过的确定快照；文件落在 Hermes trusted root（`~/.hermes/skills`）内；CBrain checkout 后续修改不会自动进入真实 Agent。
-- 代价：CBrain 升级后该副本会变成 stale，需重新人工备份旧 target、重新复制、再 `cbrain skill-pack --target` verification。
+- 代价：CBrain 升级后 canonical packVersion 变化，该副本会变成 incompatible，需重新人工备份旧 target、重新复制、再 `cbrain skill-pack --target` verification。
 
 **方式 B：符号链接（仅开发/试验环境，非生产默认）**
 
