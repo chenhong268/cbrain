@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync, symlinkSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync, symlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import {
@@ -7,6 +7,7 @@ import {
   verifySkillPack,
   formatHuman,
   compareTarget,
+  loadManifest,
   REQUIRED_FILES,
 } from "../../src/cli/commands/skill-pack.js";
 import type { SkillPackReport } from "../../src/cli/commands/skill-pack.js";
@@ -21,7 +22,7 @@ describe("cbrain skill-pack", () => {
     test("exits 0 on clean checkout", () => {
       const stdout = execSync(`${BIN} skill-pack`, { encoding: "utf-8" });
       expect(stdout).toContain("Status: PASS");
-      expect(stdout).toContain("6/6 present");
+      expect(stdout).toContain("33/33 present");
     });
 
     test("contains version in output", () => {
@@ -65,9 +66,9 @@ describe("cbrain skill-pack", () => {
       expect(typeof report.guidance).toBe("object");
     });
 
-    test("requiredFiles has 6 entries with name + status", () => {
+    test("requiredFiles has 33 entries with name + status", () => {
       const files = report.requiredFiles as Array<Record<string, unknown>>;
-      expect(files).toHaveLength(6);
+      expect(files).toHaveLength(33);
       for (const f of files) {
         expect(typeof f.name).toBe("string");
         expect(typeof f.status).toBe("string");
@@ -105,22 +106,16 @@ describe("cbrain skill-pack", () => {
       if (existsSync(fixtureDir)) rmSync(fixtureDir, { recursive: true });
     });
 
-    function seedFixture(dir: string, overrides: { skipFiles?: string[]; skillContent?: string } = {}): void {
+    function seedFixture(dir: string, overrides: { skipFiles?: string[]; skillContent?: string; manifest?: string } = {}): void {
       const skipFiles = new Set(overrides.skipFiles ?? []);
-      const files: Record<string, string> = {
-        "SKILL.md": overrides.skillContent ?? "# Test Skill Pack\nMinimal fixture.",
-        "hermes-cbrain-brief.md": "# Brief\nTest brief.",
-        "RESOLVER.md": "# Resolver\nTest resolver.",
-        "recall-resolver.md": "# Recall Resolver\nTest recall resolver.",
-        "response-contract.routing-eval.jsonl": '{"input":"test","category":"test","expected_behavior":"ok"}',
-        "agent-facing.routing-eval.jsonl": '{"input":"test","category":"test","expected_tool":"deep_recall"}',
-      };
-
-      for (const [name, content] of Object.entries(files)) {
-        if (!skipFiles.has(name)) {
-          writeFileSync(join(dir, name), content);
-        }
+      const canon = resolveSkillsDir();
+      const manifest = loadManifest(canon);
+      for (const name of manifest.files) {
+        if (skipFiles.has(name)) continue;
+        const content = name === "SKILL.md" && overrides.skillContent ? overrides.skillContent : readFileSync(join(canon, name));
+        writeFileSync(join(dir, name), content);
       }
+      writeFileSync(join(dir, "MANIFEST.json"), overrides.manifest ?? readFileSync(join(canon, "MANIFEST.json")));
     }
 
     test("all present files report pass", () => {
@@ -132,24 +127,18 @@ describe("cbrain skill-pack", () => {
       expect(report.requiredFiles.every((f) => f.status === "present")).toBe(true);
     });
 
-    test("missing required file reports fail", () => {
+    test("missing required file breaks exact-inventory (INVENTORY_MISMATCH)", () => {
       seedFixture(fixtureDir, { skipFiles: ["recall-resolver.md"] });
-      const report = verifySkillPack(fixtureDir);
-
-      expect(report.verificationStatus).toBe("fail");
-      expect(report.missingFiles).toContain("recall-resolver.md");
+      expect(() => verifySkillPack(fixtureDir)).toThrow(/INVENTORY_MISMATCH/);
     });
 
-    test("required file that is a directory reports not_file", () => {
+    test("required file that is a directory breaks exact-inventory (INVENTORY_MISMATCH)", () => {
       seedFixture(fixtureDir);
-      // Replace a file with a directory
+      // Replace a file with a directory — isFile() false → onDisk excludes it
       rmSync(join(fixtureDir, "RESOLVER.md"));
       mkdirSync(join(fixtureDir, "RESOLVER.md"), { recursive: true });
 
-      const report = verifySkillPack(fixtureDir);
-      expect(report.missingFiles).toContain("RESOLVER.md");
-      const resolver = report.requiredFiles.find((f) => f.name === "RESOLVER.md");
-      expect(resolver?.status).toBe("not_file");
+      expect(() => verifySkillPack(fixtureDir)).toThrow(/INVENTORY_MISMATCH/);
     });
   });
 
@@ -168,12 +157,12 @@ describe("cbrain skill-pack", () => {
     });
 
     function seedMinimal(dir: string): void {
-      writeFileSync(join(dir, "SKILL.md"), "ok");
-      writeFileSync(join(dir, "hermes-cbrain-brief.md"), "ok");
-      writeFileSync(join(dir, "RESOLVER.md"), "ok");
-      writeFileSync(join(dir, "recall-resolver.md"), "ok");
-      writeFileSync(join(dir, "response-contract.routing-eval.jsonl"), "{}");
-      writeFileSync(join(dir, "agent-facing.routing-eval.jsonl"), "{}");
+      const canon = resolveSkillsDir();
+      const manifest = loadManifest(canon);
+      for (const name of manifest.files) {
+        writeFileSync(join(dir, name), readFileSync(join(canon, name)));
+      }
+      writeFileSync(join(dir, "MANIFEST.json"), readFileSync(join(canon, "MANIFEST.json")));
     }
 
     test("warns when entrypoint exceeds 30K chars", () => {
@@ -241,40 +230,24 @@ describe("cbrain skill-pack", () => {
   // ── JSON error envelope on failure ──
 
   describe("JSON failure output", () => {
-    test("missing required file returns parseable JSON with verificationStatus fail", () => {
-      // Build fixture missing one file, run CLI against it
-      const fixtureDir = "/tmp/cbrain-test-skill-pack-jsonfail";
-      if (existsSync(fixtureDir)) rmSync(fixtureDir, { recursive: true });
-      mkdirSync(fixtureDir, { recursive: true });
+    test("canonical missing file throws INVENTORY_MISMATCH (exact-inventory gate)", () => {
+      const fdir = "/tmp/cbrain-test-skill-pack-jsonfail";
+      if (existsSync(fdir)) rmSync(fdir, { recursive: true });
+      mkdirSync(fdir, { recursive: true });
 
-      // Seed all except recall-resolver.md
-      const files: Record<string, string> = {
-        "SKILL.md": "# Test",
-        "hermes-cbrain-brief.md": "# Brief",
-        "RESOLVER.md": "# Resolver",
-        "recall-resolver.md": "# Recall",  // will be deleted
-        "response-contract.routing-eval.jsonl": "{}",
-        "agent-facing.routing-eval.jsonl": "{}",
-      };
-      for (const [name, content] of Object.entries(files)) {
-        writeFileSync(join(fixtureDir, name), content);
+      // Seed full canonical pack + MANIFEST, then remove one required file
+      const canon = resolveSkillsDir();
+      const manifest = loadManifest(canon);
+      for (const name of manifest.files) {
+        writeFileSync(join(fdir, name), readFileSync(join(canon, name)));
       }
-      // Remove one required file
-      rmSync(join(fixtureDir, "recall-resolver.md"));
+      writeFileSync(join(fdir, "MANIFEST.json"), readFileSync(join(canon, "MANIFEST.json")));
+      rmSync(join(fdir, "recall-resolver.md"));
 
-      // Test via pure function
-      const report = verifySkillPack(fixtureDir);
-      expect(report.verificationStatus).toBe("fail");
-      expect(report.missingFiles).toContain("recall-resolver.md");
+      // Manifest still lists recall-resolver.md → exact-inventory fails
+      expect(() => verifySkillPack(fdir)).toThrow(/INVENTORY_MISMATCH/);
 
-      // Verify the report serializes to valid JSON
-      const json = JSON.stringify(report);
-      const parsed = JSON.parse(json);
-      expect(parsed.verificationStatus).toBe("fail");
-      expect(parsed.missingFiles).toContain("recall-resolver.md");
-
-      // Cleanup
-      rmSync(fixtureDir, { recursive: true });
+      rmSync(fdir, { recursive: true });
     });
 
     test("verifySkillPack error for nonexistent dir is catchable", () => {
@@ -514,12 +487,12 @@ describe("cbrain skill-pack", () => {
     });
 
     function seedMinimal(dir: string): void {
-      writeFileSync(join(dir, "SKILL.md"), "# Test Pack");
-      writeFileSync(join(dir, "hermes-cbrain-brief.md"), "# Brief");
-      writeFileSync(join(dir, "RESOLVER.md"), "# Resolver");
-      writeFileSync(join(dir, "recall-resolver.md"), "# Recall");
-      writeFileSync(join(dir, "response-contract.routing-eval.jsonl"), '{"test":1}');
-      writeFileSync(join(dir, "agent-facing.routing-eval.jsonl"), '{"test":2}');
+      const canon = resolveSkillsDir();
+      const manifest = loadManifest(canon);
+      for (const name of manifest.files) {
+        writeFileSync(join(dir, name), readFileSync(join(canon, name)));
+      }
+      writeFileSync(join(dir, "MANIFEST.json"), readFileSync(join(canon, "MANIFEST.json")));
     }
 
     test("all current when target matches canonical", () => {
@@ -614,26 +587,18 @@ describe("cbrain skill-pack", () => {
       expect(result.files.find((f) => f.name === "RESOLVER.md")?.state).toBe("unverified");
     });
 
-    test("canonical fail + target present still exits nonzero via CLI", () => {
-      // Build a canonical fixture missing a required file
+    test("canonical fail + target present → unverified, exits nonzero", () => {
+      // Build a canonical fixture missing a required file (breaks exact-inventory)
       seedMinimal(canonDir);
       rmSync(join(canonDir, "RESOLVER.md"));
       seedMinimal(targetDir);
 
-      // verifySkillPack on broken canonical must fail
-      const report = verifySkillPack(canonDir);
-      expect(report.verificationStatus).toBe("fail");
+      // verifySkillPack on broken canonical throws INVENTORY_MISMATCH
+      expect(() => verifySkillPack(canonDir)).toThrow(/INVENTORY_MISMATCH/);
 
-      // compareTarget marks the file unverified
+      // compareTarget cannot use broken canonical as baseline → unverified
       const comparison = compareTarget(canonDir, targetDir);
-      expect(comparison.unverifiedFiles).toContain("RESOLVER.md");
-
-      // Simulated exit logic: canonical fail → exit 1 even if target is ok
-      const shouldExit1 = report.verificationStatus === "fail"
-        || comparison.staleFiles.length > 0
-        || comparison.missingTargetFiles.length > 0
-        || comparison.files.some((f) => f.state === "unverified");
-      expect(shouldExit1).toBe(true);
+      expect(comparison.status).toBe("unverified");
     });
   });
 
@@ -710,6 +675,65 @@ describe("cbrain skill-pack", () => {
       };
       expect(errorReport.code).toBe("PACK_INVALID");
       expect(errorReport.status).toBe("fail");
+    });
+  });
+
+  // ── Manifest-driven verify ──
+
+  describe("manifest-driven verify", () => {
+    const dir = "/tmp/cbrain-test-manifest-verify";
+
+    beforeEach(() => { if (existsSync(dir)) rmSync(dir, { recursive: true }); mkdirSync(dir, { recursive: true }); });
+    afterEach(() => { if (existsSync(dir)) rmSync(dir, { recursive: true }); });
+
+    function seedFull(d: string, manifestOverride?: string): void {
+      const canon = resolveSkillsDir();
+      const manifest = loadManifest(canon);
+      for (const f of manifest.files) writeFileSync(join(d, f), readFileSync(join(canon, f)));
+      writeFileSync(join(d, "MANIFEST.json"), manifestOverride ?? readFileSync(join(canon, "MANIFEST.json")));
+    }
+
+    test("missing MANIFEST -> MANIFEST_MISSING", () => {
+      const canon = resolveSkillsDir();
+      for (const f of loadManifest(canon).files) writeFileSync(join(dir, f), readFileSync(join(canon, f)));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_MISSING/);
+    });
+
+    test("packVersion mismatch -> VERSION_MISMATCH", () => {
+      const files = loadManifest(resolveSkillsDir()).files;
+      seedFull(dir, JSON.stringify({ packVersion: "0.0.0-wrong", files }));
+      expect(() => verifySkillPack(dir)).toThrow(/VERSION_MISMATCH/);
+    });
+
+    test("duplicate file entry -> MANIFEST_INVALID", () => {
+      const files = loadManifest(resolveSkillsDir()).files;
+      seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files: [...files, files[0]] }));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*duplicate/);
+    });
+
+    test("basename '..' -> MANIFEST_INVALID (unsafe)", () => {
+      const files = loadManifest(resolveSkillsDir()).files;
+      seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files: [...files, ".."] }));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*unsafe/);
+    });
+
+    test("inventory mismatch (manifest missing a disk file) -> INVENTORY_MISMATCH", () => {
+      const files = loadManifest(resolveSkillsDir()).files.slice(0, -1);
+      seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files }));
+      expect(() => verifySkillPack(dir)).toThrow(/INVENTORY_MISMATCH/);
+    });
+
+    test("ENTRY_FILES dropped from manifest -> MANIFEST_INVALID", () => {
+      const files = loadManifest(resolveSkillsDir()).files.filter((f) => f !== "RESOLVER.md");
+      seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files }));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*entry file/);
+    });
+
+    test("clean canonical pack passes with 33 required files", () => {
+      seedFull(dir);
+      const r = verifySkillPack(dir);
+      expect(r.verificationStatus).toBe("pass");
+      expect(r.requiredFiles).toHaveLength(33);
     });
   });
 });

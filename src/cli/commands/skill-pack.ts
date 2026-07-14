@@ -189,8 +189,9 @@ export function verifySkillPack(skillsDir: string): SkillPackReport {
     throw new Error(`Skills path is not a directory: ${resolvedDir}`);
   }
 
-  // Check each required file
-  const requiredFiles: VerifiedFile[] = REQUIRED_FILES.map((name) => {
+  // Load manifest (validates schema, exact-inventory, version) then check each file
+  const manifest = loadManifest(resolvedDir);
+  const requiredFiles: VerifiedFile[] = manifest.files.map((name) => {
     const absPath = resolve(resolvedDir, name);
 
     if (!existsSync(absPath)) {
