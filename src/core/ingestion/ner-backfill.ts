@@ -5,9 +5,21 @@ import type { ContentPipeline } from "./pipeline.js";
 import { isNerTimeoutError } from "./ner.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { EntityFactsTimeoutError, extractEntityFacts } from "./entity-facts.js";
-import { deriveZeroLinkSource, inspectZeroLinkRepairControl } from "../maintenance/zero-link-backfill.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
+import { hashContent } from "../shared.js";
+import {
+  countCurrentGraphLinks,
+  deriveZeroLinkSource,
+  finalizeRepairBatch,
+  getNerJobProtection,
+  inspectZeroLinkRepairControl,
+  planZeroLinkBackfill,
+  prepareRepairBatchJobIds,
+  summarizeRepairBatch,
+} from "../maintenance/zero-link-backfill.js";
 import type { DeferredNerSubmitResult } from "./ner-backfill-contract.js";
-import { NER_BACKFILL_JOB } from "./ner-backfill-contract.js";
 /** Stale-running recovery TTL — aligned with Dream lock TTL (dream.ts). */
 export const NER_BACKFILL_STALE_TTL_MS = 30 * 60 * 1000;
 
@@ -199,6 +211,124 @@ export function resolveNerBody(
   return fallback ? { body: fallback, type, title: page.title } : null;
 }
 
+type FingerprintedNerData = {
+  slug: string;
+  kind: "ner";
+  sourceFingerprint: string;
+  sourceKind: "vault_hash" | "raw_chunks";
+  repair?: Record<string, unknown>;
+};
+
+function parseFingerprintedNerData(raw: Record<string, any>): FingerprintedNerData | null {
+  const repair = raw.repair && typeof raw.repair === "object" ? raw.repair as Record<string, unknown> : undefined;
+  const sourceFingerprint = typeof repair?.contentFingerprint === "string"
+    ? repair.contentFingerprint
+    : typeof raw.sourceFingerprint === "string" ? raw.sourceFingerprint : null;
+  const sourceKind = repair?.sourceKind === "vault_hash" || repair?.sourceKind === "raw_chunks"
+    ? repair.sourceKind
+    : sourceFingerprint?.startsWith("page:") ? "vault_hash"
+      : sourceFingerprint?.startsWith("derived:") ? "raw_chunks" : null;
+  if (typeof raw.slug !== "string" || !sourceFingerprint || !sourceKind) return null;
+  if ((sourceKind === "vault_hash") !== sourceFingerprint.startsWith("page:")) return null;
+  if ((sourceKind === "raw_chunks") !== sourceFingerprint.startsWith("derived:")) return null;
+  return { slug: raw.slug, kind: "ner", sourceFingerprint, sourceKind, ...(repair ? { repair } : {}) };
+}
+
+type ScheduledSourceResult =
+  | { status: "ok"; body: string; type: string; title: string }
+  | { status: "unavailable" | "changed" | "invalid" };
+
+function resolveScheduledNerSource(
+  db: CBrainDB,
+  pages: PageManager,
+  data: FingerprintedNerData,
+): ScheduledSourceResult {
+  const page = db.getPage(data.slug);
+  if (!page) return { status: "unavailable" };
+  if (data.sourceKind === "vault_hash") {
+    let raw: string;
+    try { raw = readFileSync(join(pages.vaultPath, page.file_path), "utf8"); } catch { return { status: "unavailable" }; }
+    if (`page:${hashContent(raw)}` !== data.sourceFingerprint) return { status: "changed" };
+    const { body } = parseFrontmatter(raw);
+    if (!body.trim()) return { status: "unavailable" };
+    return { status: "ok", body, type: page.type, title: page.title };
+  }
+  const current = deriveZeroLinkSource(db, data.slug);
+  if (!current.contentFingerprint) return { status: "unavailable" };
+  if (current.sourceKind !== "raw_chunks") return { status: "invalid" };
+  if (current.contentFingerprint !== data.sourceFingerprint) return { status: "changed" };
+  const chunks = db.getChunksByPage(data.slug, { summaryLevel: 0 });
+  if (chunks.length === 0) return { status: "unavailable" };
+  return { status: "ok", body: chunks.map((chunk) => chunk.content).join("\n\n"), type: page.type, title: page.title };
+}
+
+function fixedRepairResult(
+  data: FingerprintedNerData,
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...fields,
+    kind: "ner",
+    ...(data.repair ? { repair: data.repair } : {}),
+  };
+}
+
+function unfilteredSnapshot(db: CBrainDB, limit: number, staleTtlMs: number): number[] {
+  db.rawDb.exec("BEGIN IMMEDIATE");
+  try {
+    const audit = planZeroLinkBackfill(db, 0);
+    if (audit.queueIntegrityConflicts > 0 || audit.stateConflicts > 0) throw new Error("QUEUE_INTEGRITY_CONFLICT");
+    const protection = getNerJobProtection(db);
+    if (protection.integrityUnknown) throw new Error("QUEUE_INTEGRITY_CONFLICT");
+    const rows = db.rawDb.prepare(
+      "SELECT id, status, data, result, started_at FROM jobs WHERE name='ner-backfill' ORDER BY priority DESC, id ASC",
+    ).all() as Array<{ id: number; status: string; data: string | null; result: string | null; started_at: string | null }>;
+    const unknownSlugs = new Set<string>();
+    for (const row of rows) {
+      const data = safeJobData(row.data);
+      const result = safeJobData(row.result);
+      if (row.status === "done" && result?.outcome === "commit_unknown" && typeof data?.slug === "string") unknownSlugs.add(data.slug);
+    }
+    for (const row of rows) {
+      const data = safeJobData(row.data);
+      if (!data || protection.protectedJobIds.has(row.id) || data.repair || data.kind === "entity_facts" || row.status !== "running" || !isOrdinaryStaleAt(row.started_at, staleTtlMs)) continue;
+      const lease = data.attemptLease as Record<string, unknown> | undefined;
+      if (lease?.phase === "committing") {
+        const { attemptLease: _removed, ...withoutLease } = data;
+        const result = { outcome: "commit_unknown", kind: "ner" };
+        const changed = db.rawDb.prepare(
+          "UPDATE jobs SET status='done', data=?, result=?, error=NULL, finished_at=datetime('now') WHERE id=? AND status='running' AND data=?",
+        ).run(JSON.stringify(withoutLease), JSON.stringify(result), row.id, row.data);
+        if (changed.changes !== 1) throw new Error("QUEUE_INTEGRITY_CONFLICT");
+        if (typeof data.slug === "string") unknownSlugs.add(data.slug);
+        continue;
+      }
+      const { attemptLease: _removed, ...withoutLease } = data;
+      db.rawDb.prepare(
+        "UPDATE jobs SET status='pending', data=?, started_at=NULL, finished_at=NULL WHERE id=? AND status='running' AND data=?",
+      ).run(JSON.stringify(withoutLease), row.id, row.data);
+    }
+    const refreshed = db.rawDb.prepare(
+      "SELECT id, data FROM jobs WHERE name='ner-backfill' AND status='pending' ORDER BY priority DESC, id ASC",
+    ).all() as Array<{ id: number; data: string | null }>;
+    const ids = refreshed.filter((row) => {
+      const data = safeJobData(row.data);
+      return Boolean(data && !protection.protectedJobIds.has(row.id) && !data.repair && (typeof data.slug !== "string" || !unknownSlugs.has(data.slug)));
+    }).slice(0, limit).map((row) => row.id);
+    db.rawDb.exec("COMMIT");
+    return ids;
+  } catch (error) {
+    try { db.rawDb.exec("ROLLBACK"); } catch { /* closed */ }
+    throw error;
+  }
+}
+
+function isOrdinaryStaleAt(startedAt: string | null, ttlMs: number): boolean {
+  if (!startedAt) return true;
+  const timestamp = Date.parse(startedAt.endsWith("Z") ? startedAt : `${startedAt.replace(" ", "T")}Z`);
+  return !Number.isFinite(timestamp) || Date.now() - timestamp >= ttlMs;
+}
+
 /**
  * #252: bounded Dream stage 1.5. Recovers stale running jobs, snapshots eligible
  * pending ids ONCE (each processed at most once per run — no retry starvation),
@@ -208,21 +338,25 @@ export async function runNerBackfillStage(
   db: CBrainDB,
   pipeline: ContentPipeline,
   pages: PageManager,
-  opts?: { maxItems?: number; staleTtlMs?: number; entityFactsLlm?: LLMProvider },
+  opts?: { maxItems?: number; staleTtlMs?: number; entityFactsLlm?: LLMProvider; batchId?: string },
 ): Promise<NerBackfillCounts> {
   const counts = emptyNerBackfillCounts();
   const maxItems = opts?.maxItems ?? NER_BACKFILL_MAX_ITEMS;
   const staleTtlMs = opts?.staleTtlMs ?? NER_BACKFILL_STALE_TTL_MS;
 
-  // (a) recover stale running from a crashed previous Dream
-  db.resetStaleJobsForNames([NER_BACKFILL_JOB], staleTtlMs);
-
-  // (b) snapshot eligible ids ONCE — each processed at most once this run
-  const ids = db.snapshotEligibleJobIds([NER_BACKFILL_JOB], maxItems);
+  const batchId = opts?.batchId;
+  const ids = batchId
+    ? prepareRepairBatchJobIds(db, batchId, maxItems, staleTtlMs)
+    : unfilteredSnapshot(db, maxItems, staleTtlMs);
 
   for (const id of ids) {
-    const job = db.claimJobById(id); // null if no longer pending (race-safe)
+    const rowBeforeClaim = db.getJob(id);
+    if (!rowBeforeClaim || rowBeforeClaim.status !== "pending") continue;
+    const beforeData = safeJobData(rowBeforeClaim.data);
+    const entityFacts = beforeData?.kind === "entity_facts";
+    const job = entityFacts ? db.claimJobById(id) : db.claimNerJobByIdWithLease(id);
     if (!job) { counts.skipped++; continue; }
+    const leaseToken = "leaseToken" in job && typeof job.leaseToken === "string" ? job.leaseToken : null;
 
     let parsed: { slug?: unknown; kind?: unknown } = {};
     try { parsed = job.data ? JSON.parse(job.data) : {}; } catch { /* malformed */ }
@@ -236,13 +370,24 @@ export async function runNerBackfillStage(
       continue;
     }
 
-    const resolved = resolveNerBody(db, pages, slug);
+    const fingerprinted = kind === "ner" ? parseFingerprintedNerData(parsed as Record<string, any>) : null;
+    const scheduled = fingerprinted ? resolveScheduledNerSource(db, pages, fingerprinted) : null;
+    const resolved = scheduled?.status === "ok" ? scheduled : !fingerprinted ? resolveNerBody(db, pages, slug) : null;
+    if (fingerprinted && scheduled?.status !== "ok") {
+      const graphOutcome = scheduled?.status === "changed" ? "source_changed" : scheduled?.status === "invalid" ? "invalid_terminal" : "blocked_source_unavailable";
+      const reason = scheduled?.status === "changed" ? "SOURCE_CHANGED" : scheduled?.status === "invalid" ? "INVALID_JOB" : "SOURCE_UNAVAILABLE";
+      if (leaseToken) db.completeNerJobWithLease(id, leaseToken, "claimed", fixedRepairResult(fingerprinted, { outcome: "skipped", reason, graphOutcome }));
+      counts.skipped++;
+      continue;
+    }
     if (!resolved) {
-      db.completeJob(id, { outcome: "skipped", reason: "SOURCE_UNAVAILABLE" });
+      if (leaseToken) db.completeNerJobWithLease(id, leaseToken, "claimed", { outcome: "skipped", reason: "SOURCE_UNAVAILABLE" });
+      else db.completeJob(id, { outcome: "skipped", reason: "SOURCE_UNAVAILABLE" });
       counts.skipped++;
       continue;
     }
 
+    let committing = false;
     try {
       if (kind === "entity_facts") {
         if (!opts?.entityFactsLlm) {
@@ -260,19 +405,61 @@ export async function runNerBackfillStage(
         });
         db.completeJob(id, { outcome: "processed", kind, applied_fields: result.appliedCount });
       } else {
-        await pipeline.processNer(slug, resolved.body, resolved.type, true, undefined, new Set());
-        db.completeJob(id, { outcome: "processed", kind });
+        if (!leaseToken) throw new Error("NER_ATTEMPT_REVOKED");
+        const guard = fingerprinted ? (phase: "after_extract" | "before_commit") => {
+          if (!db.validateNerJobLease(id, leaseToken, "claimed")) throw new Error("NER_ATTEMPT_REVOKED");
+          const current = resolveScheduledNerSource(db, pages, fingerprinted);
+          if (current.status === "unavailable") throw new Error("NER_SOURCE_UNAVAILABLE");
+          if (current.status !== "ok") throw new Error("NER_SOURCE_CHANGED");
+          if (phase === "before_commit") {
+            if (!db.moveNerLeaseToCommitting(id, leaseToken)) throw new Error("NER_ATTEMPT_REVOKED");
+            committing = true;
+          }
+        } : undefined;
+        const pipelineResult = await pipeline.processNer(slug, resolved.body, resolved.type, true, undefined, new Set(), guard);
+        const activeLinkCount = fingerprinted?.repair ? countCurrentGraphLinks(db, slug) : 0;
+        const result = fingerprinted
+          ? fixedRepairResult(fingerprinted, {
+              outcome: "processed",
+              ...(fingerprinted.repair ? { graphOutcome: activeLinkCount > 0 ? "resolved" : "terminal_no_graph_links", activeLinkCount } : {}),
+            })
+          : { outcome: "processed", kind };
+        const phase = committing && pipelineResult ? "committing" : "claimed";
+        if (!db.completeNerJobWithLease(id, leaseToken, phase, result)) { counts.skipped++; continue; }
       }
       counts.processed++;
     } catch (e) {
+      if (kind === "ner" && leaseToken) {
+        const code = e instanceof Error ? e.message : "";
+        if (code === "NER_ATTEMPT_REVOKED") { counts.skipped++; continue; }
+        if (code === "NER_SOURCE_CHANGED" || code === "NER_SOURCE_UNAVAILABLE") {
+          if (fingerprinted) {
+            const graphOutcome = code === "NER_SOURCE_CHANGED" ? "source_changed" : "blocked_source_unavailable";
+            db.completeNerJobWithLease(id, leaseToken, "claimed", fixedRepairResult(fingerprinted, { outcome: "skipped", reason: code === "NER_SOURCE_CHANGED" ? "SOURCE_CHANGED" : "SOURCE_UNAVAILABLE", graphOutcome }));
+          }
+          counts.skipped++;
+          continue;
+        }
+        if (committing) {
+          db.completeNerJobWithLease(id, leaseToken, "committing", fixedRepairResult(fingerprinted!, { outcome: "commit_unknown" }));
+          counts.failed++;
+          continue;
+        }
+      }
       if (isNerTimeoutError(e) || e instanceof EntityFactsTimeoutError) {
-        db.failJob(id, kind === "entity_facts" ? "ENTITY_FACTS_TIMEOUT" : "NER_TIMEOUT");
+        if (kind === "ner" && leaseToken) db.failNerJobWithLease(id, leaseToken, "NER_TIMEOUT");
+        else db.failJob(id, "ENTITY_FACTS_TIMEOUT");
         counts.timed_out++;
       } else {
-        db.failJob(id, kind === "entity_facts" ? "ENTITY_FACTS_PROVIDER_ERROR" : "NER_PROVIDER_ERROR");
+        if (kind === "ner" && leaseToken) db.failNerJobWithLease(id, leaseToken, "NER_PROVIDER_ERROR");
+        else db.failJob(id, "ENTITY_FACTS_PROVIDER_ERROR");
         counts.failed++;
       }
     }
+  }
+  if (batchId) {
+    const status = summarizeRepairBatch(db, batchId);
+    if (status.pending === 0 && status.running === 0 && status.outcomes.commitUnknown === 0) finalizeRepairBatch(db, batchId);
   }
   return counts;
 }

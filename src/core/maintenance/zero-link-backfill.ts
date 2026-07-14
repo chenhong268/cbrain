@@ -286,6 +286,20 @@ function canonicalLedgerDigest(batchId: string, entries: FinalizedEntry[]): stri
   return createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
 }
 
+function aggregateFinalizedEntries(entries: FinalizedEntry[]) {
+  const statusCounts = { done: 0, failed: 0, cancelled: 0 };
+  const outcomes = { resolved: 0, terminalNoGraphLinks: 0, blockedSourceUnavailable: 0, sourceChanged: 0, invalidTerminal: 0, commitUnknown: 0 };
+  for (const entry of entries) {
+    statusCounts[entry.terminalStatus]++;
+    if (entry.graphOutcome === "resolved") outcomes.resolved++;
+    else if (entry.graphOutcome === "terminal_no_graph_links") outcomes.terminalNoGraphLinks++;
+    else if (entry.graphOutcome === "blocked_source_unavailable") outcomes.blockedSourceUnavailable++;
+    else if (entry.graphOutcome === "source_changed") outcomes.sourceChanged++;
+    else if (entry.graphOutcome === "invalid_terminal") outcomes.invalidTerminal++;
+  }
+  return { statusCounts, outcomes };
+}
+
 function parseManifestRow(row: JobRow): ParsedManifest | null {
   const data = parseJsonObject(row.data);
   if (!data || data.version !== 1 || data.repairName !== "zero-link-rich-records" || !UUID_RE.test(String(data.batchId ?? ""))) return null;
@@ -307,6 +321,8 @@ function parseManifestRow(row: JobRow): ParsedManifest | null {
       finalizedEntries.push({ ...owner, terminalStatus: value.terminalStatus, graphOutcome: outcome });
     }
     if (typeof data.ledgerDigest !== "string" || data.ledgerDigest !== canonicalLedgerDigest(String(data.batchId), finalizedEntries)) return null;
+    const aggregates = aggregateFinalizedEntries(finalizedEntries);
+    if (JSON.stringify(result.statusCounts) !== JSON.stringify(aggregates.statusCounts) || JSON.stringify(result.outcomes) !== JSON.stringify(aggregates.outcomes)) return null;
   }
   return { row, batchId: String(data.batchId), ownership, finalized: result.finalized, finalizedEntries };
 }
@@ -734,6 +750,33 @@ export function inspectZeroLinkRepairControl(
   };
 }
 
+export interface NerJobProtection {
+  integrityUnknown: boolean;
+  protectedJobIds: Set<number>;
+}
+
+export function getNerJobProtection(db: ZeroLinkDb): NerJobProtection {
+  const audit = auditQueue(db);
+  const protectedJobIds = new Set<number>();
+  const firstManifestBySlug = new Map<string, number>();
+  for (const manifest of audit.manifests) {
+    for (const owner of manifest.ownership) {
+      protectedJobIds.add(owner.jobId);
+      const previous = firstManifestBySlug.get(owner.slug);
+      if (previous === undefined || manifest.row.id < previous) firstManifestBySlug.set(owner.slug, manifest.row.id);
+    }
+  }
+  for (const row of audit.rows) {
+    if (row.name === "zero-link-backfill-batch") protectedJobIds.add(row.id);
+    if (row.name !== "ner-backfill") continue;
+    const data = audit.parsedById.get(row.id);
+    if (data?.repair) protectedJobIds.add(row.id);
+    const firstManifest = data ? firstManifestBySlug.get(data.slug) : undefined;
+    if (firstManifest !== undefined && row.id <= firstManifest && !data?.repair) protectedJobIds.add(row.id);
+  }
+  return { integrityUnknown: audit.queueIntegrityConflicts > 0, protectedJobIds };
+}
+
 function repairPayload(candidate: ZeroLinkCandidate, batchId: string): Record<string, unknown> {
   return {
     slug: candidate.slug,
@@ -814,6 +857,57 @@ export function snapshotRepairBatchJobIds(db: ZeroLinkDb, batchId: string, limit
   return manifest.ownership.map((entry) => entry.jobId);
 }
 
+export function prepareRepairBatchJobIds(
+  db: ZeroLinkDb,
+  batchId: string,
+  limit: number,
+  staleTtlMs: number,
+): number[] {
+  db.rawDb.exec("BEGIN IMMEDIATE");
+  try {
+    const audit = auditQueue(db);
+    if (audit.queueIntegrityConflicts > 0) throw new Error("BATCH_INTEGRITY_CONFLICT");
+    const manifest = audit.manifestByBatchId.get(batchId);
+    if (!manifest) throw new Error("BATCH_NOT_FOUND");
+    if (manifest.ownership.length !== limit) throw new Error("BATCH_LIMIT_MISMATCH");
+    if (!manifest.finalized) {
+      const byId = new Map(audit.rows.map((row) => [row.id, row]));
+      for (const owner of manifest.ownership) {
+        const row = byId.get(owner.jobId)!;
+        if (row.status !== "running" || !isStale(row, Date.now(), staleTtlMs)) continue;
+        const data = audit.parsedById.get(row.id)!;
+        const lease = data.attemptLease;
+        if (!lease) throw new Error("BATCH_INTEGRITY_CONFLICT");
+        const raw = parseJsonObject(row.data)!;
+        const { attemptLease: _removed, ...withoutLease } = raw;
+        if (lease.phase === "claimed") {
+          const changed = db.rawDb.prepare(
+            `UPDATE jobs SET status='pending', data=?, started_at=NULL, finished_at=NULL
+             WHERE id=? AND status='running' AND data=?`,
+          ).run(JSON.stringify(withoutLease), row.id, row.data);
+          if (changed.changes !== 1) throw new Error("BATCH_INTEGRITY_CONFLICT");
+        } else {
+          const result = {
+            outcome: "commit_unknown",
+            kind: "ner",
+            ...(data.repair ? { repair: data.repair } : {}),
+          };
+          const changed = db.rawDb.prepare(
+            `UPDATE jobs SET status='done', data=?, result=?, error=NULL, finished_at=datetime('now')
+             WHERE id=? AND status='running' AND data=?`,
+          ).run(JSON.stringify(withoutLease), JSON.stringify(result), row.id, row.data);
+          if (changed.changes !== 1) throw new Error("BATCH_INTEGRITY_CONFLICT");
+        }
+      }
+    }
+    db.rawDb.exec("COMMIT");
+    return manifest.ownership.map((entry) => entry.jobId);
+  } catch (error) {
+    try { db.rawDb.exec("ROLLBACK"); } catch { /* closed */ }
+    throw error;
+  }
+}
+
 export function summarizeRepairBatch(db: ZeroLinkDb, batchId: string): RepairBatchStatus {
   const audit = auditQueue(db);
   const matches = audit.manifests.filter((manifest) => manifest.batchId === batchId);
@@ -825,6 +919,22 @@ export function summarizeRepairBatch(db: ZeroLinkDb, batchId: string): RepairBat
     };
   }
   const manifest = matches[0];
+  if (manifest.finalized) {
+    const aggregates = aggregateFinalizedEntries(manifest.finalizedEntries);
+    return {
+      version: 1,
+      batchId,
+      finalized: true,
+      integrityConflicts: 0,
+      selected: manifest.ownership.length,
+      pending: 0,
+      running: 0,
+      done: aggregates.statusCounts.done,
+      failed: aggregates.statusCounts.failed,
+      cancelled: aggregates.statusCounts.cancelled,
+      outcomes: aggregates.outcomes,
+    };
+  }
   const byId = new Map(audit.rows.map((row) => [row.id, row]));
   const status: RepairBatchStatus = {
     version: 1, batchId, finalized: manifest.finalized, integrityConflicts: 0,
@@ -844,4 +954,159 @@ export function summarizeRepairBatch(db: ZeroLinkDb, batchId: string): RepairBat
     else if (row.status === "done" && result?.graphOutcome !== undefined) status.outcomes.invalidTerminal++;
   }
   return status;
+}
+
+export function finalizeRepairBatch(db: ZeroLinkDb, batchId: string): RepairBatchStatus {
+  db.rawDb.exec("BEGIN IMMEDIATE");
+  try {
+    const audit = auditQueue(db);
+    if (audit.queueIntegrityConflicts > 0) throw new Error("BATCH_INTEGRITY_CONFLICT");
+    const manifest = audit.manifestByBatchId.get(batchId);
+    if (!manifest) throw new Error("BATCH_NOT_FOUND");
+    if (manifest.finalized) {
+      db.rawDb.exec("COMMIT");
+      return summarizeRepairBatch(db, batchId);
+    }
+    const byId = new Map(audit.rows.map((row) => [row.id, row]));
+    const entries: FinalizedEntry[] = [];
+    for (const owner of manifest.ownership) {
+      const row = byId.get(owner.jobId);
+      if (!row || (row.status !== "done" && row.status !== "failed" && row.status !== "cancelled")) {
+        db.rawDb.exec("COMMIT");
+        return summarizeRepairBatch(db, batchId);
+      }
+      const result = readOutcome(row);
+      if (result?.outcome === "commit_unknown") {
+        db.rawDb.exec("COMMIT");
+        return summarizeRepairBatch(db, batchId);
+      }
+      let graphOutcome: FinalizedEntry["graphOutcome"] = null;
+      if (row.status === "done") {
+        const raw = result?.graphOutcome;
+        graphOutcome = raw === "resolved" || raw === "terminal_no_graph_links" || raw === "blocked_source_unavailable" || raw === "source_changed" || raw === "invalid_terminal"
+          ? raw
+          : "invalid_terminal";
+      }
+      entries.push({ ...owner, terminalStatus: row.status, graphOutcome });
+    }
+    const finalizedData = {
+      version: 1,
+      repairName: "zero-link-rich-records",
+      batchId,
+      ownership: manifest.ownership,
+      finalizedEntries: entries,
+      ledgerDigest: canonicalLedgerDigest(batchId, entries),
+    };
+    const aggregates = aggregateFinalizedEntries(entries);
+    const result = {
+      finalized: true,
+      version: 1,
+      statusCounts: aggregates.statusCounts,
+      outcomes: aggregates.outcomes,
+      completedAt: new Date().toISOString(),
+    };
+    const updated = db.rawDb.prepare(
+      "UPDATE jobs SET data=?, result=? WHERE id=? AND name='zero-link-backfill-batch' AND data=?",
+    ).run(JSON.stringify(finalizedData), JSON.stringify(result), manifest.row.id, manifest.row.data);
+    if (updated.changes !== 1) throw new Error("BATCH_INTEGRITY_CONFLICT");
+    db.rawDb.exec("COMMIT");
+    return summarizeRepairBatch(db, batchId);
+  } catch (error) {
+    try { db.rawDb.exec("ROLLBACK"); } catch { /* closed */ }
+    throw error;
+  }
+}
+
+export interface CommitUnknownList {
+  count: number;
+  jobIds: number[];
+  integrityConflicts: number;
+}
+
+function validOrdinaryCommitUnknownIds(audit: QueueAudit): number[] {
+  const ownedIds = new Set(audit.manifests.flatMap((manifest) => manifest.ownership.map((entry) => entry.jobId)));
+  const candidates: Array<{ id: number; slug: string; fingerprint: string }> = [];
+  for (const row of audit.rows) {
+    if (row.name !== "ner-backfill" || row.status !== "done" || ownedIds.has(row.id)) continue;
+    const data = audit.parsedById.get(row.id);
+    const result = readOutcome(row);
+    if (!data || data.kind !== "ner" || data.repair || data.attemptLease || !data.sourceFingerprint || result?.outcome !== "commit_unknown" || result.kind !== "ner" || Object.keys(result).some((key) => key !== "outcome" && key !== "kind")) continue;
+    candidates.push({ id: row.id, slug: data.slug, fingerprint: data.sourceFingerprint });
+  }
+  const duplicateKeys = new Set<string>();
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const key = `${candidate.slug}\0${candidate.fingerprint}`;
+    if (seen.has(key)) duplicateKeys.add(key);
+    seen.add(key);
+  }
+  return candidates.filter((candidate) => !duplicateKeys.has(`${candidate.slug}\0${candidate.fingerprint}`)).map((candidate) => candidate.id);
+}
+
+export function listOrdinaryCommitUnknown(db: ZeroLinkDb): CommitUnknownList {
+  const audit = auditQueue(db);
+  const jobIds = validOrdinaryCommitUnknownIds(audit);
+  return { count: jobIds.length, jobIds, integrityConflicts: audit.queueIntegrityConflicts };
+}
+
+export type CommitUnknownDecision = "accept" | "retry" | "release-successor";
+export interface CommitUnknownResolution {
+  jobId: number;
+  decision: CommitUnknownDecision;
+  success: boolean;
+  successorCount: number;
+}
+
+export function resolveOrdinaryCommitUnknown(
+  db: ZeroLinkDb,
+  jobId: number,
+  decision: CommitUnknownDecision,
+): CommitUnknownResolution {
+  db.rawDb.exec("BEGIN IMMEDIATE");
+  try {
+    const audit = auditQueue(db);
+    const row = audit.rows.find((candidate) => candidate.id === jobId);
+    const parsed = row ? audit.parsedById.get(row.id) : undefined;
+    const owned = audit.manifests.some((manifest) => manifest.ownership.some((entry) => entry.jobId === jobId));
+    if (owned || parsed?.repair) throw new Error("BATCH_ROLLBACK_REQUIRED");
+    const validIds = validOrdinaryCommitUnknownIds(audit);
+    if (audit.queueIntegrityConflicts > 0 || !row || !parsed || !validIds.includes(jobId)) throw new Error("COMMIT_UNKNOWN_INTEGRITY_CONFLICT");
+
+    const current = deriveZeroLinkSource(db, parsed.slug);
+    const live = audit.rows.filter((candidate) => {
+      if (candidate.id === jobId || candidate.name !== "ner-backfill" || !ACTIVE_STATUSES.has(candidate.status)) return false;
+      return audit.parsedById.get(candidate.id)?.slug === parsed.slug;
+    });
+    const validSuccessors = live.filter((candidate) => {
+      const data = audit.parsedById.get(candidate.id);
+      return candidate.status === "pending" && !data?.repair && data?.sourceFingerprint && data.sourceFingerprint !== parsed.sourceFingerprint && data.sourceFingerprint === current.contentFingerprint;
+    });
+    const successorShapeValid = live.length === validSuccessors.length && validSuccessors.length <= 1;
+    let legal = false;
+    if (decision === "accept") legal = successorShapeValid && (live.length === 0 || validSuccessors.length === 1);
+    else if (decision === "retry") legal = live.length === 0 && current.contentFingerprint === parsed.sourceFingerprint;
+    else if (decision === "release-successor") legal = successorShapeValid && validSuccessors.length === 1 && current.contentFingerprint !== parsed.sourceFingerprint && current.contentFingerprint !== null;
+    if (!legal) throw new Error("COMMIT_UNKNOWN_STATE_MISMATCH");
+
+    let updated: { changes: number };
+    if (decision === "retry") {
+      updated = db.rawDb.prepare(
+        `UPDATE jobs SET status='pending', result=NULL, error=NULL, attempts=0, started_at=NULL, finished_at=NULL
+         WHERE id=? AND status='done' AND result=?`,
+      ).run(jobId, row.result);
+    } else {
+      const result = decision === "accept"
+        ? { outcome: "processed", kind: "ner", reason: "COMMIT_UNKNOWN_ACCEPTED" }
+        : { outcome: "commit_unknown_released", kind: "ner" };
+      updated = db.rawDb.prepare(
+        "UPDATE jobs SET result=? WHERE id=? AND status='done' AND result=?",
+      ).run(JSON.stringify(result), jobId, row.result);
+    }
+    if (updated.changes !== 1) throw new Error("COMMIT_UNKNOWN_STATE_MISMATCH");
+    db.rawDb.exec("COMMIT");
+    return { jobId, decision, success: true, successorCount: validSuccessors.length };
+  } catch (error) {
+    try { db.rawDb.exec("ROLLBACK"); } catch { /* closed */ }
+    throw error;
+  }
 }

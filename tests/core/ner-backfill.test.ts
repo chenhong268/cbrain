@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite";
 import { NER_BACKFILL_STALE_TTL_MS, NER_BACKFILL_JOB } from "../../src/core/ingestion/ner-backfill";
@@ -13,6 +13,12 @@ import { NerEngine, NerTimeoutError } from "../../src/core/ingestion/ner";
 import type { LLMProvider } from "../../src/llm/provider";
 import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
 import { submitDeferredNerForWritePath } from "../../src/core/ingestion/ner-write-path";
+import {
+  enqueueZeroLinkBackfill,
+  listOrdinaryCommitUnknown,
+  resolveOrdinaryCommitUnknown,
+  summarizeRepairBatch,
+} from "../../src/core/maintenance/zero-link-backfill";
 
 function createMockEmbeddingProvider(): EmbeddingProvider {
   return {
@@ -275,6 +281,70 @@ describe("scoped NER attempt lease primitives (#342)", () => {
   });
 });
 
+describe("ordinary commit-unknown audit resolution (#342)", () => {
+  function seedUnknown(hash = "hash-a") {
+    db.upsertPage({ slug: "records/item", type: "record", title: "记录A", filePath: "records/item.md", contentHash: hash });
+    db.insertChunk("records/item", 0, "first");
+    db.insertChunk("records/item", 1, "second");
+    const id = db.submitJob("ner-backfill", {
+      slug: "records/item",
+      kind: "ner",
+      pageContentHash: hash,
+      sourceFingerprint: `page:${hash}`,
+    });
+    db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify({ outcome: "commit_unknown", kind: "ner" }), id);
+    return id;
+  }
+
+  test("list returns only scalar count and ordinary ids", () => {
+    const id = seedUnknown();
+    expect(listOrdinaryCommitUnknown(db)).toEqual({ count: 1, jobIds: [id], integrityConflicts: 0 });
+    expect(JSON.stringify(listOrdinaryCommitUnknown(db))).not.toContain("records/item");
+  });
+
+  test("accept enters processed ledger and clears audit debt", () => {
+    const id = seedUnknown();
+    expect(resolveOrdinaryCommitUnknown(db, id, "accept")).toEqual({ jobId: id, decision: "accept", success: true, successorCount: 0 });
+    expect(listOrdinaryCommitUnknown(db).count).toBe(0);
+    expect(JSON.parse(db.getJob(id)!.result!).outcome).toBe("processed");
+  });
+
+  test("retry requires the same current source and resets the predecessor", () => {
+    const id = seedUnknown();
+    expect(resolveOrdinaryCommitUnknown(db, id, "retry").success).toBe(true);
+    expect(db.getJob(id)).toMatchObject({ status: "pending", result: null, attempts: 0 });
+  });
+
+  test("release-successor requires exactly one different current pending row", () => {
+    const id = seedUnknown();
+    db.updatePageHash("records/item", "hash-b");
+    const successor = db.submitJob("ner-backfill", {
+      slug: "records/item", kind: "ner", pageContentHash: "hash-b", sourceFingerprint: "page:hash-b",
+    });
+    expect(resolveOrdinaryCommitUnknown(db, id, "release-successor")).toEqual({
+      jobId: id, decision: "release-successor", success: true, successorCount: 1,
+    });
+    expect(db.getJob(successor)!.status).toBe("pending");
+    expect(listOrdinaryCommitUnknown(db).count).toBe(0);
+  });
+
+  test("marked debt has batch rollback precedence and zero mutation", async () => {
+    db.upsertPage({ slug: "records/item", type: "record", title: "记录A", filePath: "records/item.md", contentHash: "hash-a" });
+    db.insertChunk("records/item", 0, "first");
+    db.insertChunk("records/item", 1, "second");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const child = db.rawDb.prepare("SELECT id FROM jobs WHERE name='ner-backfill'").get() as { id: number };
+    const raw = db.getJob(child.id)!;
+    const result = { outcome: "commit_unknown", kind: "ner", repair: JSON.parse(raw.data!).repair };
+    db.rawDb.prepare("UPDATE jobs SET status='done', result=? WHERE id=?").run(JSON.stringify(result), child.id);
+    const before = JSON.stringify(db.getJob(child.id));
+    expect(() => resolveOrdinaryCommitUnknown(db, child.id, "accept")).toThrow("BATCH_ROLLBACK_REQUIRED");
+    expect(JSON.stringify(db.getJob(child.id))).toBe(before);
+    expect(receipt.batchId).toBeTruthy();
+  });
+});
+
 describe("resolveNerBody (#252)", () => {
   test("returns current body + type for a normal (unsealed) page", async () => {
     const embedding = createMockEmbeddingProvider();
@@ -398,13 +468,12 @@ describe("runNerBackfillStage (#252)", () => {
     expect(job.error).toBeNull();
   });
 
-  test("malformed job is terminal skipped and never retries", async () => {
+  test("malformed live job fails global preflight with byte-for-byte zero mutation", async () => {
     const id = db.submitJob("ner-backfill", { pageType: "record" });
     const llm: LLMProvider = { name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' };
-    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir));
-    expect(counts.skipped).toBe(1);
-    expect(db.getJob(id)!.status).toBe("done");
-    expect(JSON.parse(db.getJob(id)!.result ?? "{}")).toEqual({ outcome: "skipped", reason: "INVALID_JOB" });
+    const before = JSON.stringify(db.getJob(id));
+    await expect(runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir))).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(JSON.stringify(db.getJob(id))).toBe(before);
   });
 
   test("entity_facts job applies only whitelisted empty fields", async () => {
@@ -466,5 +535,97 @@ describe("runNerBackfillStage (#252)", () => {
     expect(counts.timed_out).toBe(1);
     expect(db.getJob(id)!.status).toBe("pending");
     expect(db.getJob(id)!.error).toBe("ENTITY_FACTS_TIMEOUT");
+  });
+
+  test("UUID-filtered repair consumes only its manifest and finalizes without extra LLM work", async () => {
+    const ingest = new IngestManager(db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir);
+    const page = await ingest.ingest({ content: "匿名修复页正文", type: "text", title: "修复页", skipNer: true });
+    db.insertChunk(page.slug, 99, "第二片段");
+    const unrelated = db.submitJob("ner-backfill", { slug: "records/unrelated" });
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    let calls = 0;
+    const guardedPipeline = {
+      processNer: async (...args: unknown[]) => {
+        calls++;
+        const guard = args[6] as ((phase: "after_extract" | "before_commit") => void);
+        guard("after_extract");
+        guard("before_commit");
+        return { entities: 0 };
+      },
+    } as unknown as ContentPipeline;
+    const counts = await runNerBackfillStage(db, guardedPipeline, new PageManager(db, testDir), {
+      maxItems: 1,
+      batchId: receipt.batchId,
+    });
+    expect(counts.processed).toBe(1);
+    expect(calls).toBe(1);
+    expect(db.getJob(unrelated)!.status).toBe("pending");
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+      finalized: true,
+      selected: 1,
+      done: 1,
+      outcomes: { terminalNoGraphLinks: 1, commitUnknown: 0 },
+    });
+
+    const second = await runNerBackfillStage(db, guardedPipeline, new PageManager(db, testDir), {
+      maxItems: 1,
+      batchId: receipt.batchId,
+    });
+    expect(second).toEqual({ processed: 0, failed: 0, timed_out: 0, skipped: 0 });
+    expect(calls).toBe(1);
+  });
+
+  test("source drift before LLM is terminal source_changed with zero pipeline calls", async () => {
+    const ingest = new IngestManager(db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir);
+    const page = await ingest.ingest({ content: "匿名漂移页正文", type: "text", title: "漂移页", skipNer: true });
+    db.insertChunk(page.slug, 99, "第二片段");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const row = db.getPage(page.slug)!;
+    writeFileSync(join(testDir, row.file_path), "changed bytes", "utf8");
+    let calls = 0;
+    const pipeline = { processNer: async () => { calls++; return null; } } as unknown as ContentPipeline;
+    const counts = await runNerBackfillStage(db, pipeline, new PageManager(db, testDir), {
+      maxItems: 1,
+      batchId: receipt.batchId,
+    });
+    expect(calls).toBe(0);
+    expect(counts.skipped).toBe(1);
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({ finalized: true, outcomes: { sourceChanged: 1 } });
+  });
+
+  test("post-fence exception becomes commit_unknown and keeps manifest unfinalized", async () => {
+    const ingest = new IngestManager(db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir);
+    const page = await ingest.ingest({ content: "匿名未知提交页", type: "text", title: "未知提交页", skipNer: true });
+    db.insertChunk(page.slug, 99, "第二片段");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const pipeline = {
+      processNer: async (...args: unknown[]) => {
+        const guard = args[6] as ((phase: "after_extract" | "before_commit") => void);
+        guard("after_extract");
+        guard("before_commit");
+        throw new Error("synthetic post-fence failure");
+      },
+    } as unknown as ContentPipeline;
+    const counts = await runNerBackfillStage(db, pipeline, new PageManager(db, testDir), {
+      maxItems: 1,
+      batchId: receipt.batchId,
+    });
+    expect(counts.failed).toBe(1);
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+      finalized: false,
+      done: 1,
+      outcomes: { commitUnknown: 1 },
+    });
+  });
+
+  test("filtered consumer rejects a limit that differs from manifest selection", async () => {
+    const ingest = new IngestManager(db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir);
+    const page = await ingest.ingest({ content: "匿名批次限制页", type: "text", title: "限制页", skipNer: true });
+    db.insertChunk(page.slug, 99, "第二片段");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    await expect(runNerBackfillStage(db, {} as ContentPipeline, new PageManager(db, testDir), {
+      maxItems: 2,
+      batchId: receipt.batchId,
+    })).rejects.toThrow("BATCH_LIMIT_MISMATCH");
   });
 });

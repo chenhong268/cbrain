@@ -26,6 +26,9 @@ import type { PageSignals } from "../../core/maintenance/health-debt.js";
 import type { PageManager } from "../../core/page.js";
 import type { ContentPipeline } from "../../core/ingestion/pipeline.js";
 import type { LLMProvider } from "../../llm/provider.js";
+import type { NerBackfillCounts } from "../../core/ingestion/ner-backfill.js";
+import type { RepairBatchStatus } from "../../core/maintenance/zero-link-backfill.js";
+import { getNerJobProtection } from "../../core/maintenance/zero-link-backfill.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -156,12 +159,24 @@ export interface NerBackfillOptions {
   limit: number;
   retryFailed?: boolean;
   json?: boolean;
+  repairBatch?: string;
+  listCommitUnknown?: boolean;
+  resolveCommitUnknown?: number;
+  decision?: "accept" | "retry" | "release-successor";
 }
 
 function retryFailedNerBackfillJobs(db: CBrainDB): number {
   let retried = 0;
-  for (const job of db.listJobs("failed")) {
+  const protection = getNerJobProtection(db);
+  const rows = db.rawDb.prepare("SELECT id, name, data, result FROM jobs WHERE status='failed' ORDER BY id").all() as Array<{ id: number; name: string; data: string | null; result: string | null }>;
+  for (const job of rows) {
     if (job.name !== "ner-backfill") continue;
+    if (protection.integrityUnknown || protection.protectedJobIds.has(job.id)) continue;
+    let data: Record<string, unknown> | null = null;
+    let result: Record<string, unknown> | null = null;
+    try { data = job.data ? JSON.parse(job.data) as Record<string, unknown> : null; } catch { continue; }
+    try { result = job.result ? JSON.parse(job.result) as Record<string, unknown> : null; } catch { continue; }
+    if (data?.repair || data?.attemptLease || result?.outcome === "commit_unknown") continue;
     if (db.retryJob(job.id)) retried++;
   }
   return retried;
@@ -189,14 +204,67 @@ export async function handleNerBackfill(
     return 1;
   }
 
+  if (opts.repairBatch && opts.retryFailed) {
+    const payload = { ok: false, status: "error", code: "BATCH_RETRY_CONFLICT", error: "repair batch cannot be combined with retry-failed" };
+    if (opts.json) log(JSON.stringify(payload, null, 2));
+    else logError(payload.error);
+    return 1;
+  }
+
+  if (opts.listCommitUnknown) {
+    const { listOrdinaryCommitUnknown } = await import("../../core/maintenance/zero-link-backfill.js");
+    const result = listOrdinaryCommitUnknown(deps.db);
+    const payload = { ok: true, count: result.count, jobIds: result.jobIds, integrityConflicts: result.integrityConflicts };
+    if (opts.json) log(JSON.stringify(payload, null, 2));
+    else log(`commit-unknown: ${result.count}`);
+    return result.integrityConflicts > 0 ? 1 : 0;
+  }
+  if (opts.resolveCommitUnknown !== undefined) {
+    if (!opts.decision) {
+      const payload = { ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "decision is required" };
+      if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(payload.error);
+      return 1;
+    }
+    try {
+      const { resolveOrdinaryCommitUnknown } = await import("../../core/maintenance/zero-link-backfill.js");
+      const result = resolveOrdinaryCommitUnknown(deps.db, opts.resolveCommitUnknown, opts.decision);
+      if (opts.json) log(JSON.stringify({ ok: true, ...result }, null, 2));
+      else log(`commit-unknown: ${result.success ? "resolved" : "unchanged"}`);
+      return 0;
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : "COMMIT_UNKNOWN_STATE_MISMATCH";
+      const allowed = new Set(["BATCH_ROLLBACK_REQUIRED", "COMMIT_UNKNOWN_INTEGRITY_CONFLICT", "COMMIT_UNKNOWN_STATE_MISMATCH"]);
+      const code = allowed.has(raw) ? raw : "COMMIT_UNKNOWN_STATE_MISMATCH";
+      const payload = { ok: false, status: "error", code, error: "commit-unknown resolution failed" };
+      if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(`${code}: ${payload.error}`);
+      return 1;
+    }
+  }
+
   const retriedFailed = opts.retryFailed ? retryFailedNerBackfillJobs(deps.db) : 0;
   const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
-  const counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, {
-    maxItems: opts.limit,
-    entityFactsLlm: deps.llm,
-  });
+  let counts: NerBackfillCounts;
+  let batchStatus: RepairBatchStatus | undefined;
+  try {
+    counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, {
+      maxItems: opts.limit,
+      entityFactsLlm: deps.llm,
+      batchId: opts.repairBatch,
+    });
+    batchStatus = opts.repairBatch
+      ? (await import("../../core/maintenance/zero-link-backfill.js")).summarizeRepairBatch(deps.db, opts.repairBatch)
+      : undefined;
+  } catch (error) {
+    const rawCode = error instanceof Error ? error.message : "QUEUE_INTEGRITY_CONFLICT";
+    const allowed = new Set(["BATCH_NOT_FOUND", "BATCH_INTEGRITY_CONFLICT", "BATCH_LIMIT_MISMATCH", "QUEUE_INTEGRITY_CONFLICT"]);
+    const code = allowed.has(rawCode) ? rawCode : "QUEUE_INTEGRITY_CONFLICT";
+    const payload = { ok: false, status: "error", code, error: "NER backfill preflight failed" };
+    if (opts.json) log(JSON.stringify(payload, null, 2));
+    else logError(`${code}: ${payload.error}`);
+    return 1;
+  }
   if (opts.json) {
-    log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts }, null, 2));
+    log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts, ...(batchStatus ? { batch: batchStatus } : {}) }, null, 2));
   } else {
     if (opts.retryFailed) log(`NER backfill: ${retriedFailed} failed jobs reset to pending`);
     log(`NER backfill: ${counts.processed} processed, ${counts.failed} failed, ${counts.timed_out} timed out, ${counts.skipped} skipped`);
@@ -645,6 +713,10 @@ export function register(program: Command) {
     .description("Process deferred NER jobs; refuses while serve/watcher is active")
     .option("--limit <n>", "Maximum pending jobs to process", "50")
     .option("--retry-failed", "Reset failed ner-backfill jobs to pending before processing")
+    .option("--repair-batch <uuid>", "Process exactly one governed zero-link repair batch")
+    .option("--list-commit-unknown", "List privacy-safe ordinary commit-unknown job ids")
+    .option("--resolve-commit-unknown <job-id>", "Resolve one ordinary commit-unknown job")
+    .option("--decision <decision>", "accept, retry, or release-successor")
     .option("--json", "Emit machine-readable JSON")
     .action(async (opts) => {
       const limit = Number.parseInt(String(opts.limit), 10);
@@ -655,11 +727,31 @@ export function register(program: Command) {
         process.exitCode = 1;
         return;
       }
+      if (opts.repairBatch && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(opts.repairBatch))) {
+        const message = "INVALID_BATCH_ID";
+        if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: message, error: "invalid repair batch id" }, null, 2));
+        else console.error(message);
+        process.exitCode = 1;
+        return;
+      }
+      const resolveCommitUnknown = opts.resolveCommitUnknown === undefined ? undefined : Number.parseInt(String(opts.resolveCommitUnknown), 10);
+      if (resolveCommitUnknown !== undefined && (!Number.isSafeInteger(resolveCommitUnknown) || resolveCommitUnknown <= 0)) {
+        if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid job id" }, null, 2));
+        else console.error("invalid job id");
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.decision && !["accept", "retry", "release-successor"].includes(String(opts.decision))) {
+        if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid decision" }, null, 2));
+        else console.error("invalid decision");
+        process.exitCode = 1;
+        return;
+      }
 
       const config = loadConfig();
       const deps = createDeps(config);
       try {
-        if (!deps.llm) {
+        if (!deps.llm && !opts.listCommitUnknown && resolveCommitUnknown === undefined) {
           const message = "No LLM configured — ner-backfill requires an NER LLM provider.";
           if (opts.json) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
           else console.error(message);
@@ -676,12 +768,20 @@ export function register(program: Command) {
         const outputsDir = resolveRuntimePath(config);
         const logger = new Logger(outputsDir);
         const pages = new PageManager(deps.db, config.vaultPath, logger);
-        const nerEngine = new NerEngine(deps.llm, logger);
+        const nerEngine = deps.llm ? new NerEngine(deps.llm, logger) : undefined;
         const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
 
         process.exitCode = await handleNerBackfill(
           { db: deps.db, pages, pipeline, lockProbe, llm: deps.llm },
-          { limit, retryFailed: Boolean(opts.retryFailed), json: Boolean(opts.json) },
+          {
+            limit,
+            retryFailed: Boolean(opts.retryFailed),
+            json: Boolean(opts.json),
+            repairBatch: opts.repairBatch ? String(opts.repairBatch) : undefined,
+            listCommitUnknown: Boolean(opts.listCommitUnknown),
+            resolveCommitUnknown,
+            decision: opts.decision as "accept" | "retry" | "release-successor" | undefined,
+          },
         );
       } finally {
         deps.db.close();

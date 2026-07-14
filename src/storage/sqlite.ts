@@ -1129,6 +1129,17 @@ export class CBrainDB {
       return null;
     }
     if (data.kind === "entity_facts" || (data.kind !== undefined && data.kind !== "ner")) return null;
+    if (typeof data.slug !== "string" || !data.slug.trim()) return null;
+    const terminalRows = this.rawDb.prepare(
+      "SELECT data, result FROM jobs WHERE name='ner-backfill' AND status='done' AND id<>?",
+    ).all(id) as Array<{ data: string | null; result: string | null }>;
+    for (const terminal of terminalRows) {
+      try {
+        const terminalData = terminal.data ? JSON.parse(terminal.data) as Record<string, unknown> : null;
+        const terminalResult = terminal.result ? JSON.parse(terminal.result) as Record<string, unknown> : null;
+        if (terminalData?.slug === data.slug && terminalResult?.outcome === "commit_unknown") return null;
+      } catch { /* global preflight owns malformed-row reporting */ }
+    }
     const leaseToken = randomUUID();
     const nextData = JSON.stringify({
       ...data,
@@ -1161,6 +1172,20 @@ export class CBrainDB {
       "UPDATE jobs SET data=? WHERE id=? AND name='ner-backfill' AND status='running' AND data=?",
     ).run(nextData, id, row.data);
     return updated.changes === 1;
+  }
+
+  validateNerJobLease(id: number, leaseToken: string, phase: "claimed" | "committing"): boolean {
+    const row = this.rawDb.prepare(
+      "SELECT data FROM jobs WHERE id=? AND name='ner-backfill' AND status='running'",
+    ).get(id) as { data: string | null } | undefined;
+    if (!row?.data) return false;
+    try {
+      const data = JSON.parse(row.data) as Record<string, unknown>;
+      const lease = data.attemptLease as Record<string, unknown> | undefined;
+      return lease?.version === 1 && lease.token === leaseToken && lease.phase === phase;
+    } catch {
+      return false;
+    }
   }
 
   /** #342: terminal completion guarded by the exact token and phase; removes the private lease. */
