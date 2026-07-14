@@ -146,6 +146,11 @@ export type ZeroLinkDisposition =
   | "unverifiable_fingerprint"
   | "failed";
 
+type InternalJobDisposition =
+  | ZeroLinkDisposition
+  | "ordinary_transition_pair_fresh"
+  | "ordinary_transition_pair_stale";
+
 export interface ZeroLinkBackfillReport {
   version: 1;
   mode: "dry_run" | "enqueue";
@@ -199,6 +204,8 @@ export interface RepairBatchStatus {
 ```
 
 The public JSON field names are exactly the camelCase names shown above. Human output uses fixed Chinese labels for the same counters. Tests lock both surfaces.
+
+The two transition values are internal only and share one projection function across Health, `fsck`, dry-run, and enqueue planning: fresh pair contributes `active += 1`; stale pair contributes `active += 1` and `staleRunning += 1`; both contribute zero to `actionable` and `selected`, expose no new public string, and never expose page/job identity.
 
 `contentFingerprint` is the repair invalidation key:
 
@@ -428,7 +435,11 @@ Provider errors and timeouts continue through the existing `failJob` behavior. B
 
 The existing broad `cbrain ner-backfill --retry-failed` command must skip every manifest-owned/marked row and every shadowed pre-repair legacy attempt. It may retain normal retry behavior for a valid canonical post-repair deferred attempt and unrelated legacy/ordinary jobs. Current-fingerprint repair failure is terminal for this issue; changed content may create a later batch, but broad retry cannot mutate finalized ownership.
 
-Before an unfiltered Dream/CLI stage performs stale reset, retry, snapshot, or claim, it safely scans all manifests and live `ner-backfill` rows. Every manifest-owned/marked row and shadowed pre-repair attempt is excluded before mutation. A validated canonical unseen-fingerprint deferred attempt enters the ordinary candidate set; a current-source row whose fingerprint is already in an outcome-qualified finalized history enters `alreadyProcessedIds` and may only complete fixed `skipped/already_processed` with zero LLM. Superseded terminal rows are ignored. A fresh transition pair remains untouched and its successor is excluded from claim. A stale transition pair is queued as a deterministic transition mutation. **Only after** the whole global preflight reports zero other integrity/state conflicts does one transaction complete its predecessor `skipped/source_changed` and release the existing successor for this stage; if any conflict exists anywhere, both rows remain byte-for-byte unchanged. Other superseded/multi-live shapes are conflicts. This preflight is shared by Dream and the CLI so neither path can bypass exclusive batch ownership.
+Before an unfiltered Dream/CLI stage performs **any** stale reset, broad retry, deterministic completion, transition, snapshot, or claim, it opens `BEGIN IMMEDIATE` and re-runs the complete uncapped manifest/live-row global preflight inside that write reservation. It must not reuse an earlier Health/dry-run snapshot.
+
+Every manifest-owned/marked row and shadowed pre-repair attempt is excluded. A validated canonical unseen-fingerprint deferred attempt enters the ordinary candidate set; a current-source row whose fingerprint is already in an outcome-qualified finalized history enters `alreadyProcessedIds`. Superseded terminal rows are ignored. A fresh transition pair remains untouched and its successor is excluded. A stale transition pair is queued for deterministic mutation. Other superseded/multi-live shapes are conflicts.
+
+If **any** `queueIntegrityConflicts` or `stateConflicts` exists anywhere, the transaction rolls back and returns fixed `QUEUE_INTEGRITY_CONFLICT`: the entire jobs table remains byte-for-byte unchanged—no ordinary stale reset, retry, already-processed completion, transition, snapshot side effect, or claim may occur. Only on a globally clean transactional rescan may the same transaction complete stale predecessors `skipped/source_changed`, perform allowed ordinary resets/retries/already-processed completions, and freeze the eligible job-id snapshot; then it commits. Later per-id claims remain race-safe and are limited to that snapshot. This preflight/mutation routine is shared by Dream and the CLI so neither path can bypass exclusive batch ownership.
 
 ### 6.5 Ordinary deferred NER epoch identity
 
@@ -772,6 +783,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - multiple historical matching rows → deterministic reuse, no new duplicate;
 - duplicate active/conflicting current rows → scalar conflict, no mutation;
 - exactly one old-running/current-pending ordinary successor pair is structurally recognized before freshness: shared plan/Health/fsck remain byte-for-byte read-only and report fresh/stale disposition across the TTL millisecond boundary; only unfiltered stage with zero global conflicts source-changes stale predecessor and releases successor; any other conflict leaves both unchanged;
+- internal transition projection is fixed: fresh active+1, stale active+1/staleRunning+1, neither actionable/selected and no public disposition string;
 - malformed active JSON, invalid active slug/kind, and incomplete repair marker increment queue-integrity conflict and block all enqueue without leaking payload;
 - unrelated valid `entity_facts` does not match and does not create a conflict;
 - manifest UUID and ownership list are atomic; missing/corrupt manifest or child marker fails closed;
@@ -780,6 +792,8 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - unfinalized child corruption blocks globally; latest finalized child corruption is associated through frozen ownership and cannot make the same fingerprint look new;
 - a child cannot be requeued while its previous manifest remains unfinalized;
 - malformed manifest, corrupt manifest-owned pending child, and corrupt manifest-owned stale-running child each make Dream, ordinary CLI, and broad retry return an integrity error with every job row byte-for-byte unchanged;
+- stale transition pair + resettable ordinary row + third-slug integrity conflict leaves the entire jobs table unchanged; zero reset/retry/completion/snapshot-claim mutation occurs;
+- dual connection pauses A after an external pre-scan, lets B add a conflicting third live row, then resumes A: A's `BEGIN IMMEDIATE` rescan detects conflict and rolls back all writes;
 - injected mutation failure rolls back every row in the selected batch;
 - two connections racing enqueue serialize under `BEGIN IMMEDIATE` and create one batch of work;
 - repeated enqueue with unchanged state creates no duplicate work.
@@ -1068,3 +1082,13 @@ The twelfth review returned FAIL with two HIGH and one required MEDIUM finding. 
 3. Deferred alias intents freeze page, alias, and provenance. Exact/normalized/parenthetical matches retain `ner-resolved`, semantic matches retain `llm-semantic`, and full-tuple dedupe precedes post-guard flush.
 
 The independent reviewer must run a thirteenth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 30. Thirteenth adversarial review correction record
+
+The thirteenth review returned FAIL with two HIGH and one required MEDIUM finding. This revision closes them:
+
+1. Any global queue/state conflict makes the entire unfiltered stage rollback before all job mutations, not merely the transition pair. Resettable ordinary rows and already-processed completions also remain byte-identical.
+2. Unfiltered mutation begins with `BEGIN IMMEDIATE`, repeats the full uncapped preflight inside the reservation, performs allowed transitions/resets/retries/completions and freezes the snapshot before commit. External scan results are never trusted for writes.
+3. Transition dispositions have an internal union and one frozen public projection: fresh maps to active; stale maps to active plus stale-running; neither is actionable/selected or publicly named.
+
+The independent reviewer must run a fourteenth pass. The gate remains no CRITICAL/HIGH findings.
