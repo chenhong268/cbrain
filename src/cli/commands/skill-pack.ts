@@ -9,7 +9,7 @@
  * are exported for testing.
  */
 import type { Command } from "commander";
-import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, statSync, readdirSync, lstatSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "url";
@@ -54,8 +54,8 @@ const SIZE_ERROR = 100_000;
 export type FileStatus = "present" | "missing" | "not_file" | "not_readable";
 export type SizeStatus = "ok" | "warn" | "error";
 export type VerificationStatus = "pass" | "warn" | "fail";
-export type TargetFileState = "current" | "stale" | "missing" | "unverified";
-export type TargetStatus = "current" | "stale" | "missing" | "unverified";
+export type TargetFileState = "current" | "stale" | "missing" | "incompatible" | "unverified";
+export type TargetStatus = "current" | "stale" | "missing" | "incompatible" | "unverified";
 export type CommandStatus = "pass" | "warn" | "fail";
 
 export interface VerifiedFile {
@@ -91,6 +91,7 @@ export interface SkillPackReport {
     readonly staleFiles: readonly string[];
     readonly missingTargetFiles: readonly string[];
     readonly unverifiedFiles: readonly string[];
+    readonly incompatibleFiles?: readonly string[];
   };
 }
 
@@ -280,31 +281,84 @@ function fileHash(filePath: string): string | null {
 }
 
 /**
- * Compare required skill files in a target directory against the canonical pack.
- * Returns per-file state (current/stale/missing) and summary lists.
+ * lstat that treats a thrown error as "does not exist". lstatSync succeeds on
+ * a broken symlink (the link entry itself exists), so a broken symlink at the
+ * target path counts as "exists" and is classified `incompatible`, not `missing`.
+ */
+function lstatSafe(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Compare a target directory against the canonical pack.
+ *
+ * Precedence: unverified (canonical cannot serve as baseline) > missing
+ * (target path absent) > incompatible (target exists but is empty / non-dir /
+ * broken symlink / no or bad MANIFEST / version or files[] mismatch) > stale
+ * (version+files match but a file hash differs) > current.
+ *
  * Read-only — does not modify the target.
  */
 export function compareTarget(
   skillsDir: string,
   targetDir: string,
 ): { status: TargetStatus; files: readonly TargetFileCheck[]; staleFiles: readonly string[]; missingTargetFiles: readonly string[]; unverifiedFiles: readonly string[] } {
-  const files: TargetFileCheck[] = REQUIRED_FILES.map((name) => {
-    const canonical = resolve(skillsDir, name);
-    const target = resolve(targetDir, name);
+  // Canonical must be loadable to serve as comparison baseline.
+  let canonicalManifest: PackManifest;
+  try {
+    canonicalManifest = loadManifest(skillsDir);
+  } catch {
+    return { status: "unverified", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
+  }
 
-    const canonicalHash = fileHash(canonical);
-    const targetHash = fileHash(target);
+  // Target path existence: lstat sees broken symlinks (path entry exists).
+  if (!lstatSafe(targetDir)) {
+    return { status: "missing", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
+  }
 
-    if (targetHash === null) {
-      return { name, state: "missing" as const };
-    }
-    if (canonicalHash === null) {
-      // Canonical missing/unreadable — cannot verify, report as unverified
-      return { name, state: "unverified" as const };
-    }
-    if (targetHash === canonicalHash) {
-      return { name, state: "current" as const };
-    }
+  // Target must be a non-empty directory; empty dir / non-dir / broken symlink → incompatible.
+  let isDir = false;
+  try {
+    isDir = statSync(targetDir).isDirectory();
+  } catch {
+    // broken symlink: lstat succeeded but stat throws
+  }
+  if (!isDir) {
+    return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
+  }
+  if (readdirSync(targetDir).length === 0) {
+    return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
+  }
+
+  // Target MANIFEST must be present + match canonical version + files[].
+  let targetManifest: PackManifest;
+  try {
+    targetManifest = loadManifest(targetDir);
+  } catch {
+    return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
+  }
+  if (targetManifest.packVersion !== canonicalManifest.packVersion) {
+    return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
+  }
+  if (
+    targetManifest.files.length !== canonicalManifest.files.length
+    || !targetManifest.files.every((f, i) => f === canonicalManifest.files[i])
+  ) {
+    return { status: "incompatible", files: [], staleFiles: [], missingTargetFiles: [], unverifiedFiles: [] };
+  }
+
+  // Per-file hash compare (inventory already guaranteed all files present).
+  const files: TargetFileCheck[] = canonicalManifest.files.map((name) => {
+    const canonicalHash = fileHash(resolve(skillsDir, name));
+    const targetHash = fileHash(resolve(targetDir, name));
+    if (targetHash === null) return { name, state: "missing" as const };
+    if (canonicalHash === null) return { name, state: "unverified" as const };
+    if (targetHash === canonicalHash) return { name, state: "current" as const };
     return { name, state: "stale" as const };
   });
 
@@ -312,15 +366,10 @@ export function compareTarget(
   const missingTargetFiles = files.filter((f) => f.state === "missing").map((f) => f.name);
   const unverifiedFiles = files.filter((f) => f.state === "unverified").map((f) => f.name);
 
-  // Derive aggregate target status with precedence: unverified > missing > stale > current
   let targetStatus: TargetStatus = "current";
-  if (unverifiedFiles.length > 0) {
-    targetStatus = "unverified";
-  } else if (missingTargetFiles.length > 0) {
-    targetStatus = "missing";
-  } else if (staleFiles.length > 0) {
-    targetStatus = "stale";
-  }
+  if (unverifiedFiles.length > 0) targetStatus = "unverified";
+  else if (missingTargetFiles.length > 0) targetStatus = "missing";
+  else if (staleFiles.length > 0) targetStatus = "stale";
 
   return { status: targetStatus, files, staleFiles, missingTargetFiles, unverifiedFiles };
 }

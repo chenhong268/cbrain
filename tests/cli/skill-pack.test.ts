@@ -516,27 +516,26 @@ describe("cbrain skill-pack", () => {
       expect(result.files.find((f) => f.name === "RESOLVER.md")?.state).toBe("stale");
     });
 
-    test("missing when target file absent", () => {
+    test("target file deleted → incompatible (breaks target exact-inventory)", () => {
       seedMinimal(canonDir);
       seedMinimal(targetDir);
-      // Remove one file from target
+      // Remove one file from target — manifest still lists it
       rmSync(join(targetDir, "recall-resolver.md"));
 
       const result = compareTarget(canonDir, targetDir);
-      expect(result.missingTargetFiles).toContain("recall-resolver.md");
-      expect(result.files.find((f) => f.name === "recall-resolver.md")?.state).toBe("missing");
+      expect(result.status).toBe("incompatible");
     });
 
-    test("mixed: some current, some stale, some missing", () => {
+    test("multiple stale files (no deletion) → stale", () => {
       seedMinimal(canonDir);
       seedMinimal(targetDir);
       writeFileSync(join(targetDir, "RESOLVER.md"), "# Modified");
-      rmSync(join(targetDir, "recall-resolver.md"));
+      writeFileSync(join(targetDir, "query.md"), "# Modified");
 
       const result = compareTarget(canonDir, targetDir);
+      expect(result.status).toBe("stale");
       expect(result.staleFiles).toContain("RESOLVER.md");
-      expect(result.missingTargetFiles).toContain("recall-resolver.md");
-      expect(result.files.filter((f) => f.state === "current").length).toBe(4);
+      expect(result.staleFiles).toContain("query.md");
     });
 
     test("CLI --target outputs JSON with target field and status", () => {
@@ -576,15 +575,14 @@ describe("cbrain skill-pack", () => {
       expect(parsed.code).toBe("TARGET_NOT_FOUND");
     });
 
-    test("canonical missing file marks target as unverified", () => {
-      // Seed canonical with one file missing
+    test("canonical missing file → target unverified (no baseline)", () => {
+      // Seed canonical with one file missing (breaks canonical exact-inventory)
       seedMinimal(canonDir);
       rmSync(join(canonDir, "RESOLVER.md"));
       seedMinimal(targetDir);
 
       const result = compareTarget(canonDir, targetDir);
-      expect(result.unverifiedFiles).toContain("RESOLVER.md");
-      expect(result.files.find((f) => f.name === "RESOLVER.md")?.state).toBe("unverified");
+      expect(result.status).toBe("unverified");
     });
 
     test("canonical fail + target present → unverified, exits nonzero", () => {
@@ -734,6 +732,68 @@ describe("cbrain skill-pack", () => {
       const r = verifySkillPack(dir);
       expect(r.verificationStatus).toBe("pass");
       expect(r.requiredFiles).toHaveLength(33);
+    });
+  });
+
+  // ── compareTarget states (incompatible dimension) ──
+
+  describe("compareTarget states", () => {
+    const canon = resolveSkillsDir();
+    const dir = "/tmp/cbrain-test-compare-states";
+
+    beforeEach(() => { rmSync(dir, { recursive: true, force: true }); });
+    afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+    function seedTargetCurrent(): void {
+      mkdirSync(dir, { recursive: true });
+      for (const f of loadManifest(canon).files) writeFileSync(join(dir, f), readFileSync(join(canon, f)));
+      writeFileSync(join(dir, "MANIFEST.json"), readFileSync(join(canon, "MANIFEST.json")));
+    }
+
+    test("target path absent -> missing", () => {
+      expect(compareTarget(canon, join(dir, "nope")).status).toBe("missing");
+    });
+
+    test("empty dir -> incompatible", () => {
+      mkdirSync(dir, { recursive: true });
+      expect(compareTarget(canon, dir).status).toBe("incompatible");
+    });
+
+    test("dir without MANIFEST -> incompatible", () => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "SKILL.md"), "x");
+      expect(compareTarget(canon, dir).status).toBe("incompatible");
+    });
+
+    test("broken symlink at target -> incompatible", () => {
+      symlinkSync("/tmp/cbrain-does-not-exist-xyz-334", dir);
+      expect(compareTarget(canon, dir).status).toBe("incompatible");
+    });
+
+    test("target MANIFEST packVersion mismatch -> incompatible", () => {
+      seedTargetCurrent();
+      writeFileSync(join(dir, "MANIFEST.json"), JSON.stringify({ packVersion: "9.9.9", files: loadManifest(canon).files }));
+      expect(compareTarget(canon, dir).status).toBe("incompatible");
+    });
+
+    test("target manifest files[] shorter than canonical (different pack) -> incompatible", () => {
+      seedTargetCurrent();
+      const files = loadManifest(canon).files;
+      const last = files[files.length - 1];
+      rmSync(join(dir, last)); // remove from disk so target inventory stays consistent
+      writeFileSync(join(dir, "MANIFEST.json"), JSON.stringify({ packVersion: "2.0.7", files: files.slice(0, -1) }));
+      expect(compareTarget(canon, dir).status).toBe("incompatible");
+    });
+
+    test("version+files match, one file content changed -> stale", () => {
+      seedTargetCurrent();
+      writeFileSync(join(dir, "SKILL.md"), "tampered");
+      expect(compareTarget(canon, dir).status).toBe("stale");
+    });
+
+    test("full match -> current", () => {
+      seedTargetCurrent();
+      expect(compareTarget(canon, dir).status).toBe("current");
     });
   });
 });
