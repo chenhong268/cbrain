@@ -96,7 +96,7 @@ The scanner may carry slugs and content hashes internally, but no public dry-run
 
 Public counters use two explicit populations:
 
-- **current debt population:** records that meet the richness threshold and currently have zero current-fact non-self links. `total`, `actionable`, `selected`, `active`, `cancelled`, `terminalNoGraphLinks`, `blockedSourceUnavailable`, `sourceChanged`, `invalidTerminal`, `lostLink`, `unverifiableFingerprint`, `failed`, and `stateConflicts` describe this population. `queueIntegrityConflicts` is a separate global count over malformed/referentially invalid repair queue rows.
+- **current debt population:** records that meet the richness threshold and currently have zero current-fact non-self links. `total`, `actionable`, `selected`, `active`, `cancelled`, `terminalNoGraphLinks`, `blockedSourceUnavailable`, `sourceChanged`, `invalidTerminal`, `commitUnknown`, `lostLink`, `unverifiableFingerprint`, `failed`, and `stateConflicts` describe this population. `queueIntegrityConflicts` is a separate global count over malformed/referentially invalid repair queue rows.
 - **current processed-success population:** distinct rich record pages whose canonical current-fingerprint repair result is `graphOutcome = resolved` **and** that still have at least one current-fact non-self link. `resolved` counts pages, never job rows.
 
 This distinction is required for rollout measurement: a successful repair reduces `total` and increases `resolved`. The CLI labels these counters explicitly in human output; it must not imply that `resolved` is a subset of current zero-link debt.
@@ -142,6 +142,7 @@ export type ZeroLinkDisposition =
   | "blocked_source_unavailable"
   | "source_changed"
   | "invalid_terminal"
+  | "commit_unknown"
   | "lost_link"
   | "unverifiable_fingerprint"
   | "failed";
@@ -168,6 +169,7 @@ export interface ZeroLinkBackfillReport {
   blockedSourceUnavailable: number;
   sourceChanged: number;
   invalidTerminal: number;
+  commitUnknown: number;
   lostLink: number;
   unverifiableFingerprint: number;
   failed: number;
@@ -199,6 +201,7 @@ export interface RepairBatchStatus {
     blockedSourceUnavailable: number;
     sourceChanged: number;
     invalidTerminal: number;
+    commitUnknown: number;
   };
 }
 ```
@@ -337,6 +340,7 @@ For each owned slug, the same scan derives a complete finalized repair ledger pl
 - for the current source fingerprint, exactly zero or one unmarked post-repair row may exist. It is valid only when its non-empty `contentHash` equals the page's current `pages.content_hash` and its frozen fingerprint is absent from the finalized repair ledger and ordinary terminal-attempt ledger;
 - more than one current-fingerprint row, missing-page live work, legacy live work without a frozen fingerprint after repair control begins, or otherwise unverifiable live work is an integrity conflict;
 - when the current fingerprint already appears in either outcome-qualified finalized ledger, `JobQueueNerSubmitter` dedupes the internal submission. If a race/pre-existing unmarked current-fingerprint row exists anyway, the ordinary worker completes it with fixed `skipped/already_processed` and zero LLM calls;
+- lease phase is classified before freshness: `claimed` may follow normal stale rules; `committing` is never reset/cancelled/retried/source-changed. Fresh committing contributes active; stale/missing-date committing contributes `commit_unknown` and blocks any waiting successor;
 - `kind = entity_facts` is outside this NER attempt control and retains its existing lifecycle.
 
 This permits one trusted internal deferred NER for a genuinely unseen source fingerprint after update or delete/recreate, including sealed raw-chunk changes whose page hash stays unchanged, while preventing a revert to any already processed repair or ordinary fingerprint from spending LLM again. An active row whose payload cannot be classified is an integrity conflict.
@@ -351,11 +355,12 @@ When the page fingerprint is unavailable, still surface live rows and live/cance
 
 Apply this deterministic algorithm:
 
-1. Collect **all live rows** for the slug: every `pending` row and every `running` row, irrespective of fingerprint or freshness. Before declaring a multi-live conflict, structurally recognize exactly one sanctioned ordinary transition pair: one running predecessor with an old fingerprint plus one pending successor with the current fingerprint, both unmarked, same slug, valid identity, and no third live row. The shared read-only classifier returns internal `ordinary_transition_pair_fresh` or `ordinary_transition_pair_stale`; it never mutates. Two running, two pending, wrong-current fingerprint, marked/ordinary mixing, or any third row remains `stateConflicts`. No lower-id live row may otherwise be ignored.
+1. Collect **all live rows** for the slug. Before freshness, parse lease phase. A structurally valid pair is one old-fingerprint running predecessor plus one current pending successor, both unmarked/same slug/valid/no third row. A `claimed` predecessor returns internal fresh/stale transition disposition. A `committing` predecessor returns active when fresh or `commit_unknown` when stale, and its successor remains blocked/excluded. The read-only classifier never mutates. Two running, two pending, wrong-current fingerprint, marked/ordinary mixing, invalid phase, or any third row remains `stateConflicts`/integrity conflict.
 2. If exactly one live row exists:
    - a marked row must belong to its latest **unfinalized** manifest and is always `active`; stale running also increments `staleRunning`. It is resumed only through that existing batch UUID, never moved into a new batch. A marked live row whose latest manifest claims to be finalized is a queue-integrity conflict.
    - legacy `pending` or fresh legacy `running` → `active`;
    - stale legacy `running` → `stale_requeue` on that same row;
+   - fingerprinted `committing` running → `active` when fresh, `commit_unknown` when stale; never `stale_requeue`;
    - when the current fingerprint is unavailable, no new batch is created; existing marked live ownership remains `active`, while stale legacy running is `unverifiable_fingerprint` plus `staleRunning`.
    - if the live row coexists with a current-fingerprint cancellation or unverifiable legacy cancellation, also increment `stateConflicts` and perform no mutation.
 3. If there is no live row and the fingerprint is unavailable, classify `unverifiable_fingerprint`.
@@ -413,7 +418,7 @@ The public `batchId` is only the random UUID. Manifest job ids, child job ids, s
 
 An unfinalized manifest owns its selected rows strictly in both directions: every ownership entry must resolve to a child with the exact job name/slug/fingerprint/batch marker, and every child carrying that batch id must appear once in the manifest. Missing/corrupt/mismatched child data produces `BATCH_INTEGRITY_CONFLICT` and zero claims. Batch status counts rows by manifest-selected id and therefore still sees a pending/running row even if its child JSON is corrupt.
 
-When all selected rows are terminal and integrity checks pass, the batch-filtered worker finalizes the manifest in one transaction. It freezes each internal ownership entry with `terminalStatus` and a recognized `graphOutcome` (or `null` for failed/cancelled), preserving the per-fingerprint ledger even after the child row is reused.
+When all selected rows are terminal, none is `commit_unknown`, and integrity checks pass, the batch-filtered worker finalizes the manifest in one transaction. It freezes each internal ownership entry with `terminalStatus` and a recognized `graphOutcome` (or `null` for failed/cancelled), preserving the per-fingerprint ledger even after the child row is reused. Any commit-unknown entry keeps the manifest unfinalized and returns its scalar stop count.
 
 Finalization constructs a canonical object in fixed key order `{version,batchId,entries}`; entries remain manifest order and each is constructed as `{jobId,slug,contentFingerprint,terminalStatus,graphOutcome}`. It stores the full lowercase SHA-256 of UTF-8 `JSON.stringify(canonicalObject)` alongside the finalized entries in private manifest `data` as `ledgerDigest`. Validation always recomputes this digest and also recomputes terminal/outcome aggregates from entries, requiring exact equality with the frozen scalar `result` counts. Any schema-valid mutation, entry swap, digest mismatch, or aggregate mismatch is a queue-integrity conflict. Finalized manifest fields and digest are never rewritten.
 
@@ -425,7 +430,7 @@ Job-row reuse is allowed only when the row's previous manifest exists, validates
 - every finalized ownership records the child's slug/fingerprint/terminal outcome as an immutable repair-ledger entry. If the latest child row is missing or its data becomes corrupt, global queue integrity uses frozen ownership to classify/block instead of treating the page as new;
 - older finalized manifests are historical and do not require the reused child to keep pointing at them.
 
-Querying an older finalized batch returns its frozen result, not the child row's later status and not an integrity error. If a crash leaves every child terminal but the manifest unfinalized, rerunning the same batch consumer processes no terminal rows and finalizes the manifest. A row cannot enter a later batch until this finalization completes.
+Querying an older finalized batch returns its frozen result, not the child row's later status and not an integrity error. If a crash leaves every non-unknown child terminal but the manifest unfinalized, rerunning the same batch consumer processes no terminal rows and finalizes the manifest. A commit-unknown manifest never auto-finalizes. A row cannot enter a later batch until finalization or matched-backup rollback removes the batch.
 
 Selection, manifest creation, receipt generation, rescan, inserts, requeues, and final manifest update run under `BEGIN IMMEDIATE`. This obtains the SQLite write reservation before reading candidate/job state, preventing two concurrent CLI processes from both planning the same rows. On success the command commits; on any error it rolls back. It must never return a partial success count or a manifest without all selected rows.
 
@@ -496,13 +501,36 @@ For rows whose parsed kind is absent/`ner`, claim generates a random token, inse
 
 Every durable source guard synchronously re-reads the row and requires `status='running'`, exact lease token/phase, job name, scheduled source fingerprint, and repair batch identity when present. The first check requires `claimed`. After the final source check, one conditional UPDATE changes only that exact lease to `committing`; affected rows zero is `NER_ATTEMPT_REVOKED`. This CAS is the write-authority linearization point.
 
-Cancel/stale transition may revoke only `phase=claimed`. Once `phase=committing`, they return a fixed non-applied disposition and may not change the row; the worker owns synchronous knowledge completion. Normal processed completion requires the matching `committing` token. Pre-commit fail/source-skip requires the matching `claimed` token. Both atomically remove `attemptLease` when status leaves running (including fail-to-pending). Affected rows zero means revoked and no further mutation. Reclaim writes a new token, preventing ABA. A crashed/stale `committing` row is `commit_unknown` review debt and is never automatically reset/retried/cancelled because partial synchronous writes cannot be disproved.
+Cancel/stale transition may revoke only `phase=claimed`. Once `phase=committing`, they return a fixed non-applied disposition and may not classify it as ordinary stale. The worker owns synchronous knowledge completion. Normal processed completion requires the matching `committing` token. Pre-commit fail/source-skip requires matching `claimed`. A synchronous exception after the commit fence is caught and uses matching committing-token CAS to terminal `done` with fixed `outcome=commit_unknown`, then removes the lease; it never calls ordinary fail/retry. Affected rows zero means revoked and no further mutation. Reclaim writes a new token, preventing ABA.
+
+A process crash may leave `running+committing`. Fresh rows remain active. When stale/missing-date, the appropriate mutating consumer uses committing-token CAS to terminal `done/commit_unknown` and removes the lease, but this is bookkeeping only: it does not declare processed and does not release a successor. For a marked row, only its batch-filtered consumer performs this transition; unfiltered mode protects it by ownership. For ordinary rows, the globally clean unfiltered stage performs it. `commit_unknown` never enters processed ledger, automatic retry, broad retry, cancel, or repair enqueue.
 
 Because the final committing section contains no await and the production contract forbids additional/unsafe writers, the phase fence prevents job-governance revocation from interleaving with knowledge writes. Both outcomes are linearizable: revocation wins while claimed and the worker writes nothing, or committing wins and revocation is non-applied. There is no terminal-revoked plus knowledge-written state.
 
 `kind=entity_facts` is explicitly outside #342 lease, source-guard, and commit-fence scope. Mixed snapshots parse kind before claim: entity facts retain current claim/reset/retry/complete/fail behavior and never receive `attemptLease`; absent/`ner` rows use the scoped CAS path. Extending entity-facts safety requires a separate issue.
 
 The lease token is omitted by every public projection and log. This is a scoped NER safety primitive; unrelated generic job claim semantics are unchanged.
+
+### 6.7 Commit-unknown resolution
+
+`commit_unknown` is recognized terminal audit debt, not a permanent running row and not proof of processing. It blocks automatic work for the same slug/fingerprint and any waiting successor until explicit resolution.
+
+Marked batch behavior is fail-closed: the batch consumer reports scalar `commitUnknown > 0`, leaves the manifest `finalized=false`, and returns the fixed stop condition. During the authorized production maintenance window the operator restores that batch's matched backup before reopening writes. Generic/manual job resolution rejects marked rows with `BATCH_ROLLBACK_REQUIRED`; it cannot rewrite an unfinalized repair ledger.
+
+Ordinary unmarked debt has a supported writer-stopped CLI:
+
+```text
+cbrain ner-backfill --list-commit-unknown --json
+cbrain ner-backfill --resolve-commit-unknown <job-id> --decision <accept|retry|release-successor> --json
+```
+
+List returns only ordinary job ids and scalar count—no slug, fingerprint, payload, path, token, or error. Resolution acquires the normal writer lock plus `BEGIN IMMEDIATE`, reloads the exact row/global state, requires unmarked `done/commit_unknown`, and uses CAS:
+
+- `accept`: operator accepts current partial state; replace result with fixed `outcome=processed,resolution=commit_unknown_accepted`. It becomes ordinary processed-ledger history and releases a valid different-fingerprint successor.
+- `retry`: allowed only when no live successor exists and current source fingerprint equals the scheduled fingerprint. Reset the same ordinary row to pending with cleared terminal fields; the later claim gets a new token.
+- `release-successor`: allowed only with exactly one valid current-fingerprint pending successor. Keep the predecessor audit-only as fixed `commit_unknown_released`; it does not enter processed ledger, and release the successor.
+
+Every other shape returns fixed `COMMIT_UNKNOWN_STATE_MISMATCH` with zero writes. Decisions never claim to undo partial aliases/entities/facts/links; the operator must audit before choosing. Output contains job id, decision, success boolean, and scalar successor count only. Unified/MCP generic retry/cancel remain forbidden for commit-unknown.
 
 ## 7. NER write-path correction
 
@@ -638,7 +666,7 @@ The aggregate issue avoids adding hundreds of page-level entries, avoids leaking
 - `severity`: `warning`
 - `count`: total rich zero-link records
 - `sampleSlugs`: at most five values, passed through the existing `anonymizeSlugs` helper
-- `detail`: scalar current-debt totals for actionable, active, terminal-no-link, blocked-source, source-changed, invalid-terminal, lost-link, unverifiable-fingerprint, failed, state-conflict, and queue-integrity-conflict plus distinct current-success resolved count
+- `detail`: scalar current-debt totals for actionable, active, terminal-no-link, blocked-source, source-changed, invalid-terminal, commit-unknown, lost-link, unverifiable-fingerprint, failed, state-conflict, and queue-integrity-conflict plus distinct current-success resolved count
 - `suggestedCommand`: `cbrain zero-link-backfill --json`
 
 The finding is diagnostic only. It is not added to deterministic `fsck` repair execution rules.
@@ -652,6 +680,7 @@ Allowed public output:
 - fixed schema/version/mode/status/error code;
 - scalar counts and threshold counts;
 - random non-sensitive repair batch UUID;
+- ordinary unmarked commit-unknown job id solely for explicit resolution (never a manifest-owned child id);
 - boolean blocked state;
 - live owner kind/PID when mutation is refused;
 - anonymous `fsck` sample tokens;
@@ -711,9 +740,9 @@ For each batch:
 2. Run `"${CBRAIN_RUN[@]}" zero-link-backfill --enqueue --limit <N> --json` and capture its random `batchId` privately.
 3. Assert `0 < selected <= N`, `newJobs + requeuedJobs = selected`, `stateConflicts = 0`, and `queueIntegrityConflicts = 0`. If `selected = 0`, no manifest exists: stop cleanly and do not invoke the consumer.
 4. Run `"${CBRAIN_RUN[@]}" ner-backfill --repair-batch <batchId> --limit <selected> --json` using the existing configured provider. This deliberately uses the enqueue response, not requested `N`.
-5. Assert this exact manifest reports `finalized = true`, zero integrity conflicts, zero `pending`, and zero `running`; ordinary and stale NER/entity-facts jobs must be unchanged.
+5. Assert zero integrity conflicts, zero `pending`, and zero `running`; ordinary and stale NER/entity-facts jobs must be unchanged. Require `finalized = true` unless `commitUnknown > 0`, in which case require `finalized = false` and immediately take the rollback stop path.
 6. Re-run dry-run, `fsck`, FK checks, and consistency checks.
-7. Record scalar deltas for resolved, terminal-no-link, blocked-source, source-changed, cancelled, invalid-terminal, lost-link, active, actionable, and failed.
+7. Record scalar deltas for resolved, terminal-no-link, blocked-source, source-changed, cancelled, invalid-terminal, commit-unknown, lost-link, active, actionable, and failed.
 8. Proceed only when every stop gate remains clear.
 
 The first requested batch is a canary. At least one of its selected candidates must become `resolved`. If zero resolve—whether the outcomes are all terminal-no-link or a mix of blocked/failed/invalid states—stop before the 20 batch because the repair is not demonstrating useful graph recovery.
@@ -727,6 +756,7 @@ Stop the rollout and do not enqueue the next batch on any of:
 - duplicate active/state conflict reported by the scanner;
 - any queue-integrity or batch-manifest integrity conflict;
 - any `sourceChanged > 0`, `cancelled > 0`, `invalidTerminal > 0`, or `blockedSourceUnavailable > 0` in the selected batch;
+- any `commitUnknown > 0`; the manifest must remain unfinalized and the current batch backup must be restored before writes reopen;
 - zero resolved records in the five-item canary;
 - FK violation increase;
 - new SQLite/vault/FTS consistency regression;
@@ -735,7 +765,7 @@ Stop the rollout and do not enqueue the next batch on any of:
 - mismatch between selected count and inserted/requeued count;
 - any selected batch row left pending/running after the batch-filtered consumer returns.
 
-The batch consumer attempts finalization after all selected children are terminal even when their outcomes trigger a stop gate. A provider/error exit does not authorize abandoning an unfinalized manifest: rerun the **same** UUID consumer with the same `selected` limit. It performs no LLM call for terminal children and only finalizes. If `finalized = true`, apply the stop gate and keep later batches stopped. If finalization still cannot complete, classify it as manifest-integrity failure, keep serve/watcher stopped, and restore the current batch's matched backup before any restart.
+The batch consumer attempts finalization after all selected children are terminal even when ordinary outcomes trigger a stop gate. A provider/error exit does not authorize abandoning an unfinalized manifest: rerun the **same** UUID consumer with the same `selected` limit. It performs no LLM call for terminal children and only finalizes. `commitUnknown > 0` is the deliberate exception: it remains unfinalized and requires matched-backup rollback. Otherwise, if finalization still cannot complete, classify it as manifest-integrity failure, keep serve/watcher stopped, and restore before restart.
 
 ### 13.4 Rollback
 
@@ -869,6 +899,9 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - reset/reclaim of the same job creates a new token; old attempt completion/failure cannot overwrite the new running/terminal attempt;
 - double-connection barrier between final source check and first mutation proves exactly two outcomes: claimed revocation wins with zero writes, or worker CAS wins `committing` and cancel/stale is non-applied before processed completion; never revoked terminal plus knowledge writes;
 - every running→non-running path strips the token; stale committing becomes commit-unknown review debt and cannot auto-reset/retry/cancel;
+- phase precedes freshness: stale claimed pair source-changes/releases, stale committing pair and single row become commit-unknown, never stale-requeue/reset, and any successor stays excluded;
+- sync exception after fence immediately terminalizes commit-unknown; simulated crash leaves stale committing which the correct mutating consumer terminalizes deterministically without declaring processed;
+- marked commit-unknown reports scalar, keeps manifest unfinalized, triggers batch rollback, and rejects manual resolution; ordinary list/accept/retry/release-successor obey writer lock, CAS, privacy, and state-shape gates;
 - mixed NER/entity-facts snapshot gives leases only to absent/ner kind; entity-facts payload remains byte-compatible and contains no attemptLease through terminal state;
 - normalized body hash, full document hash, and absent caller hash all derive canonical `pageContentHash` from DB; structured disposition makes `nerPending` true only for durable live work;
 - deleting and recreating a slug with changed content permits one new internal deferred NER instead of inheriting permanent repair starvation;
@@ -1143,3 +1176,12 @@ The fifteenth review returned FAIL with one HIGH and one required MEDIUM finding
 2. Lease/guard/fence applies only to absent/`ner` kind. `entity_facts` keeps its current data and lifecycle and never receives an attempt token under #342.
 
 The independent reviewer must run a sixteenth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 33. Sixteenth adversarial review correction record
+
+The sixteenth review returned FAIL with two HIGH findings. This revision closes both:
+
+1. Lease phase precedes freshness everywhere. Claimed stale work may transition; committing stale work becomes commit-unknown and can never enter reset/retry/cancel/source-change or release a successor.
+2. Commit-unknown is a complete lifecycle: typed scalar reporting, immediate/stale terminal bookkeeping, ledger exclusion, batch unfinalized rollback stop, and an explicit writer-stopped ordinary-job audit resolution CLI. It no longer creates an invisible permanent running row.
+
+The independent reviewer must run a seventeenth pass. The gate remains no CRITICAL/HIGH findings.
