@@ -559,7 +559,7 @@ describe("cbrain skill-pack", () => {
       expect(parsed.status).toBe("pass");
     });
 
-    test("CLI --target nonexistent exits 1 with JSON error", () => {
+    test("CLI --target nonexistent -> target.status=missing (not error envelope)", () => {
       let stdout = "";
       try {
         execSync(`${BIN} skill-pack --json --target "/tmp/cbrain-no-such-target-xyz"`, {
@@ -570,9 +570,10 @@ describe("cbrain skill-pack", () => {
         stdout = e.stdout ?? "";
       }
       const parsed = JSON.parse(stdout);
-      expect(parsed.verificationStatus).toBe("fail");
-      expect(parsed.error).toContain("Target directory not found");
-      expect(parsed.code).toBe("TARGET_NOT_FOUND");
+      expect(parsed.target.status).toBe("missing");
+      expect(parsed.verificationStatus).toBe("pass");
+      expect(parsed.status).toBe("fail");
+      expect(parsed.code).toBeUndefined();
     });
 
     test("canonical missing file → target unverified (no baseline)", () => {
@@ -660,6 +661,30 @@ describe("cbrain skill-pack", () => {
       expect(parsed.error).toContain("not found");
       // No stack trace in expected failures
       expect(stderr).not.toContain("at ");
+    });
+
+    test("missing MANIFEST returns MANIFEST_MISSING via subprocess", () => {
+      const manifestPath = join(pkgDir, "skills", "MANIFEST.json");
+      const backup = join(pkgDir, "skills", "MANIFEST.json.bak");
+      renameSync(manifestPath, backup);
+
+      const extractedBin = join(pkgDir, "src/cli/index.ts");
+      let stdout = "";
+      try {
+        execSync(`bun run "${extractedBin}" skill-pack --json`, {
+          encoding: "utf-8",
+          cwd: "/tmp",
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 15_000,
+        });
+      } catch (e: any) {
+        stdout = e.stdout ?? "";
+      }
+      renameSync(backup, manifestPath);
+
+      const parsed = JSON.parse(stdout);
+      expect(parsed.verificationStatus).toBe("fail");
+      expect(parsed.code).toBe("MANIFEST_MISSING");
     });
 
     test("SkillPackError type has code and status fields", () => {

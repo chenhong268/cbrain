@@ -451,16 +451,16 @@ export function register(program: Command) {
           : report.verificationStatus === "warn" ? "warn"
           : "pass";
 
-        // If --target provided, run comparison
+        // If --target provided, run comparison (no throw on absent path —
+        // compareTarget classifies it as `missing`; only canonical failure throws).
         if (opts.target) {
           const targetDir = resolve(opts.target);
-          if (!existsSync(targetDir)) {
-            throw new Error(`Target directory not found: ${targetDir}`);
-          }
           const comparison = compareTarget(skillsDir, targetDir);
 
-          // Upgrade command status based on target issues
-          if (comparison.status !== "current") {
+          // canonical fail propagates as fail regardless of target
+          if (report.verificationStatus === "fail") {
+            status = "fail";
+          } else if (comparison.status !== "current") {
             status = "fail";
           }
 
@@ -502,10 +502,16 @@ export function register(program: Command) {
 
         // Map to stable error code — check most specific patterns first
         let code = "PACK_INVALID";
-        if (message.includes("Target directory not found")) {
-          code = "TARGET_NOT_FOUND";
-        } else if (message.includes("Skills directory not found") || message.includes("Skills path is not a directory")) {
+        if (message.includes("Skills directory not found") || message.includes("Skills path is not a directory")) {
           code = "PACK_NOT_FOUND";
+        } else if (message.includes("MANIFEST_MISSING")) {
+          code = "MANIFEST_MISSING";
+        } else if (message.includes("MANIFEST_INVALID")) {
+          code = "MANIFEST_INVALID";
+        } else if (message.includes("VERSION_MISMATCH")) {
+          code = "VERSION_MISMATCH";
+        } else if (message.includes("INVENTORY_MISMATCH")) {
+          code = "INVENTORY_MISMATCH";
         }
 
         if (opts.json) {
