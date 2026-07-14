@@ -5,9 +5,13 @@ import { join } from "node:path";
 import {
   countCurrentGraphLinks,
   deriveZeroLinkSource,
+  enqueueZeroLinkBackfill,
+  planZeroLinkBackfill,
   scanRichRecords,
   scanZeroLinkCandidates,
   toPublicZeroLinkCandidate,
+  ZERO_LINK_BATCH_MANIFEST_JOB,
+  ZERO_LINK_REPAIR_NAME,
 } from "../../../src/core/maintenance/zero-link-backfill";
 import { CBrainDB } from "../../../src/storage/sqlite";
 
@@ -161,5 +165,170 @@ describe("source fingerprints (#342)", () => {
     expect(json).not.toContain("private-sentinel");
     expect(json).not.toContain("private-body");
     expect(json).not.toContain("page:");
+  });
+});
+
+describe("repair planning and atomic enqueue (#342)", () => {
+  function addRich(slug = "records/item", hash = "fingerprint-a"): void {
+    addPage(slug, { hash, chunks: ["first", "second"] });
+  }
+
+  test("plans and enqueues a bounded manifest-owned batch", () => {
+    addRich("records/a");
+    addRich("records/b");
+    const dryRun = planZeroLinkBackfill(db, 1);
+    expect(dryRun).toMatchObject({
+      version: 1,
+      mode: "dry_run",
+      status: "ok",
+      total: 2,
+      actionable: 2,
+      selected: 1,
+      newJobs: 1,
+      requeuedJobs: 0,
+      queueIntegrityConflicts: 0,
+      stateConflicts: 0,
+    });
+    expect(dryRun).not.toHaveProperty("batchId");
+
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    expect(receipt.mode).toBe("enqueue");
+    expect(receipt.batchId).toMatch(/^[0-9a-f-]{36}$/);
+    const jobs = db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all() as Array<Record<string, unknown>>;
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0].name).toBe("ner-backfill");
+    expect(jobs[0].status).toBe("pending");
+    expect(jobs[0].max_attempts).toBe(1);
+    const child = JSON.parse(String(jobs[0].data));
+    expect(child).toMatchObject({
+      slug: "records/a",
+      kind: "ner",
+      repair: { name: ZERO_LINK_REPAIR_NAME, version: 1, batchId: receipt.batchId },
+    });
+    expect(jobs[1].name).toBe(ZERO_LINK_BATCH_MANIFEST_JOB);
+    expect(jobs[1].status).toBe("done");
+    const manifest = JSON.parse(String(jobs[1].data));
+    expect(manifest.ownership).toEqual([{
+      jobId: jobs[0].id,
+      slug: "records/a",
+      contentFingerprint: "page:fingerprint-a",
+    }]);
+    expect(JSON.parse(String(jobs[1].result))).toEqual({ finalized: false });
+  });
+
+  test("repeat planning is idempotent while the batch is active", () => {
+    addRich();
+    enqueueZeroLinkBackfill(db, 1);
+    expect(planZeroLinkBackfill(db, 1)).toMatchObject({
+      status: "ok",
+      actionable: 0,
+      selected: 0,
+      active: 1,
+    });
+    const before = Number((db.rawDb.prepare("SELECT COUNT(*) count FROM jobs").get() as { count: number }).count);
+    expect(enqueueZeroLinkBackfill(db, 1)).toMatchObject({ selected: 0, active: 1 });
+    const after = Number((db.rawDb.prepare("SELECT COUNT(*) count FROM jobs").get() as { count: number }).count);
+    expect(after).toBe(before);
+  });
+
+  test("malformed live NER state blocks globally with zero writes", () => {
+    addRich();
+    db.rawDb.prepare("INSERT INTO jobs (name, status, data) VALUES ('ner-backfill','pending','{')").run();
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+    expect(planZeroLinkBackfill(db, 1)).toMatchObject({ status: "blocked", queueIntegrityConflicts: 1 });
+    expect(enqueueZeroLinkBackfill(db, 1)).toMatchObject({ status: "blocked", queueIntegrityConflicts: 1 });
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("a marked row without its manifest is an integrity conflict", () => {
+    addRich();
+    db.submitJob("ner-backfill", {
+      slug: "records/item",
+      kind: "ner",
+      contentHash: "fingerprint-a",
+      repair: {
+        name: ZERO_LINK_REPAIR_NAME,
+        version: 1,
+        contentFingerprint: "page:fingerprint-a",
+        sourceKind: "vault_hash",
+        batchId: "11111111-1111-4111-8111-111111111111",
+      },
+    });
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", queueIntegrityConflicts: 1 });
+  });
+
+  test("a legacy terminal row is requeued in-place and included in ownership", () => {
+    addRich();
+    const jobId = db.submitJob("ner-backfill", { slug: "records/item" });
+    db.rawDb.prepare("UPDATE jobs SET status='done', result='{}', finished_at=datetime('now') WHERE id=?").run(jobId);
+    expect(planZeroLinkBackfill(db, 1)).toMatchObject({ actionable: 1, requeuedJobs: 1, newJobs: 0 });
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const row = db.getJob(jobId)!;
+    expect(row).toMatchObject({ status: "pending", attempts: 0, max_attempts: 1, result: null, error: null });
+    expect(JSON.parse(row.data!).repair.batchId).toBe(receipt.batchId);
+  });
+
+  test("an unverifiable candidate is visible but not actionable", () => {
+    addPage("records/no-source", { hash: null, tags: ["a", "b", "c"] });
+    expect(planZeroLinkBackfill(db, 10)).toMatchObject({
+      total: 1,
+      actionable: 0,
+      selected: 0,
+      unverifiableFingerprint: 1,
+    });
+  });
+
+  test("recognizes the sanctioned old-running/current-pending transition pair", () => {
+    addRich();
+    const predecessor = db.submitJob("ner-backfill", {
+      slug: "records/item",
+      kind: "ner",
+      contentHash: "fingerprint-old",
+      sourceFingerprint: "page:fingerprint-old",
+      attemptLease: { version: 1, token: "lease-a", phase: "claimed" },
+    });
+    db.rawDb.prepare("UPDATE jobs SET status='running', started_at=datetime('now') WHERE id=?").run(predecessor);
+    db.submitJob("ner-backfill", {
+      slug: "records/item",
+      kind: "ner",
+      contentHash: "fingerprint-a",
+      sourceFingerprint: "page:fingerprint-a",
+    });
+    expect(planZeroLinkBackfill(db)).toMatchObject({ active: 1, staleRunning: 0, stateConflicts: 0, actionable: 0 });
+    db.rawDb.prepare("UPDATE jobs SET started_at=datetime('now','-31 minutes') WHERE id=?").run(predecessor);
+    expect(planZeroLinkBackfill(db)).toMatchObject({ active: 1, staleRunning: 1, stateConflicts: 0, actionable: 0 });
+  });
+
+  test("counts commit-unknown globally even without a zero-link candidate", () => {
+    addPage("records/linked", { chunks: ["a", "b"] });
+    addPage("entity/target", { type: "entity/person" });
+    addLink("records/linked", "entity/target", "mentions", "trusted");
+    const id = db.submitJob("ner-backfill", {
+      slug: "records/linked",
+      kind: "ner",
+      contentHash: "hash-records/linked",
+      sourceFingerprint: "page:hash-records/linked",
+    });
+    db.rawDb.prepare("UPDATE jobs SET status='done', result=? WHERE id=?").run(JSON.stringify({ outcome: "commit_unknown" }), id);
+    expect(planZeroLinkBackfill(db)).toMatchObject({ total: 0, commitUnknown: 1 });
+  });
+
+  test("rolls back a child insert when manifest creation fails", () => {
+    addRich();
+    db.rawDb.exec(`
+      CREATE TRIGGER reject_zero_link_manifest
+      BEFORE INSERT ON jobs
+      WHEN NEW.name = '${ZERO_LINK_BATCH_MANIFEST_JOB}'
+      BEGIN SELECT RAISE(ABORT, 'synthetic manifest failure'); END;
+    `);
+    expect(() => enqueueZeroLinkBackfill(db, 1)).toThrow();
+    expect((db.rawDb.prepare("SELECT COUNT(*) count FROM jobs").get() as { count: number }).count).toBe(0);
+  });
+
+  test("self-contained report never exposes private candidate identity", () => {
+    addRich("records/private-identity");
+    const json = JSON.stringify(planZeroLinkBackfill(db, 1));
+    expect(json).not.toContain("private-identity");
+    expect(json).not.toContain("fingerprint-a");
   });
 });
