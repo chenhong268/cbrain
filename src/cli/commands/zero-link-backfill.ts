@@ -122,4 +122,3 @@ export function register(program: Command): void {
       );
     });
 }
-
