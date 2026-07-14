@@ -308,7 +308,7 @@ if [[ -f "$AF_EVAL" ]]; then
   fi
 
   # Expected tool coverage (7 tools)
-  af_tools=("deep_recall" "recall_episode" "read_discoveries" "run_discovery" "graph_query" "query" "summarize")
+  af_tools=("cbrain_recall" "recall_episode" "read_discoveries" "run_discovery" "graph_query" "query" "summarize" "next_actions")
   missing_tools=()
   for tool in "${af_tools[@]}"; do
     tool_hits=$(grep -c "\"expected_tool\": \"${tool}\"" "$AF_EVAL" 2>/dev/null) || tool_hits=0
@@ -322,38 +322,51 @@ if [[ -f "$AF_EVAL" ]]; then
     fail "agent-facing eval 缺少 expected_tool: ${missing_tools[*]}"
   fi
 
-  # Grounded recall key params: grounded=true, detail=brief, limit=3
-  grounded_ok=true
+  # cbrain_recall key params: detail=brief for grounded_recall, detail=normal for content_recall
+  brief_ok=true
   while IFS= read -r line; do
     cat=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin)['category'])" 2>/dev/null)
     [[ "$cat" != "grounded_recall" ]] && continue
     args=$(echo "$line" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['expected_args']))" 2>/dev/null)
-    if ! echo "$args" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('grounded')==True and d.get('detail')=='brief' and d.get('limit')==3" 2>/dev/null; then
-      grounded_ok=false
+    if ! echo "$args" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('detail')=='brief'" 2>/dev/null; then
+      brief_ok=false
       break
     fi
   done < "$AF_EVAL"
-  if $grounded_ok; then
-    pass "grounded_recall 用例全部有 grounded=true, detail=brief, limit=3"
+  if $brief_ok; then
+    pass "grounded_recall 用例 expected_args.detail == brief (cbrain_recall)"
   else
-    fail "有 grounded_recall 用例的 expected_args 不符合 {grounded: true, detail: brief, limit: 3}"
+    fail "grounded_recall expected_args.detail 应为 brief"
   fi
 
-  # Content recall key params: grounded=false, detail=normal, limit=3
-  content_ok=true
+  normal_ok=true
   while IFS= read -r line; do
     cat=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin)['category'])" 2>/dev/null)
     [[ "$cat" != "content_recall" ]] && continue
     args=$(echo "$line" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['expected_args']))" 2>/dev/null)
-    if ! echo "$args" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('grounded')==False and d.get('detail')=='normal' and d.get('limit')==3" 2>/dev/null; then
-      content_ok=false
+    if ! echo "$args" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('detail')=='normal'" 2>/dev/null; then
+      normal_ok=false
       break
     fi
   done < "$AF_EVAL"
-  if $content_ok; then
-    pass "content_recall 用例全部有 grounded=false, detail=normal, limit=3"
+  if $normal_ok; then
+    pass "content_recall 用例 expected_args.detail == normal (cbrain_recall)"
   else
-    fail "有 content_recall 用例的 expected_args 不符合 {grounded: false, detail: normal, limit: 3}"
+    fail "content_recall expected_args.detail 应为 normal"
+  fi
+
+  # operational category + next_actions coverage (#334)
+  op_hits=$(grep -c '"category": "operational"' "$AF_EVAL" 2>/dev/null) || op_hits=0
+  if (( op_hits >= 3 )); then
+    pass "operational 用例 ≥ 3（当前 ${op_hits}）"
+  else
+    fail "operational 用例只有 ${op_hits}（需 ≥ 3）"
+  fi
+  na_hits=$(grep -c '"expected_tool": "next_actions"' "$AF_EVAL" 2>/dev/null) || na_hits=0
+  if (( na_hits >= 1 )); then
+    pass "next_actions expected_tool 覆盖（${na_hits}）"
+  else
+    fail "agent-facing eval 缺少 next_actions expected_tool"
   fi
 
   # Discovery forbidden output terms coverage
@@ -632,7 +645,7 @@ if [[ -f "$SKILLS_DIR/agent-facing.routing-eval.jsonl" ]]; then
   if (( af_bad_query == 0 )); then
     pass "agent-facing eval 无自然语言→query 残留（仅 keyword_debug 允许 query）"
   else
-    fail "agent-facing eval 有 ${af_bad_query} 处非 keyword_debug 用例期望 query（应改为 deep_recall/graph_query/get_org_tree）"
+    fail "agent-facing eval 有 ${af_bad_query} 处非 keyword_debug 用例期望 query（应改为 cbrain_recall/graph_query/get_org_tree）"
   fi
 fi
 
