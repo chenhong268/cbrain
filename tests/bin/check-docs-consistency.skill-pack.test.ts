@@ -56,8 +56,11 @@ test("checkInstallTarget rejects cp -r + ln -s in the same fenced block", () => 
 });
 
 // ── Skill-pack install POLICY gate (copy default, symlink dev-only) ──
-// HIGH2: policy must close-loop INSIDE docs/install-onboarding.md Step 7.
-// No aggregation across docs; another doc's keywords cannot supply a miss.
+// HIGH1+2: policy closes loop INSIDE docs/install-onboarding.md Step 7, split
+// into a copy subsection + symlink subsection. symlink risks are checked ONLY
+// in the symlink subsection (copy's pros must not substitute), and commands
+// are checked ONLY inside real fenced blocks (prose cp/ln cannot pose). The
+// mutation tests below guard both invariants.
 
 const STEP7_FILE = "docs/install-onboarding.md";
 
@@ -65,85 +68,84 @@ const POLICY_DOC = [
   "## 第七步：验证 Hermes 技能包（可选）",
   "",
   "**方式 A：复制（默认推荐，用于稳定 Hermes）**",
+  "",
   "```bash",
   "mkdir -p ~/.hermes/skills/brain-ops",
   'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain',
   "```",
+  "",
+  "- 优点：部署审核过的确定快照；文件落在 Hermes trusted root 内；checkout 后续修改不会自动进入真实 Agent。",
+  "- 代价：升级后变 stale，需重新部署。",
+  "",
   "**方式 B：符号链接（仅开发/试验环境，非生产默认）**",
+  "",
   "```bash",
   "mkdir -p ~/.hermes/skills/brain-ops",
   'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain',
   "```",
-  "symlink 风险：resolved target 位于 Hermes trusted directory（~/.hermes/skills）外时，Hermes 可能记录安全告警；checkout 中的 skill 文件变化会立即影响 Hermes。",
+  "",
+  "- 风险：symlink resolved target 落在 Hermes trusted directory（~/.hermes/skills）之外时，Hermes 可能记录安全告警；",
+  "- 风险：checkout 中的 skill 文件变化会立即影响 Hermes，把尚未发布的修改静默带进真实 Agent；",
+  "- 适合本地开发联调。",
+  "",
+  "4. 安装后验证（应报 current）：",
   "",
   "## 第八步：启动服务",
 ].join("\n");
 
-test("G: correct copy-default policy in Step 7 passes", () => {
-  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, POLICY_DOC]])))).toBe(false);
-});
+const step7 = (doc: string): Map<string, string> => new Map([[STEP7_FILE, doc]]);
+const expectFail = (doc: string): void => {
+  expect(fails(checkSkillPackInstallPolicy(step7(doc)))).toBe(true);
+};
+const expectPass = (doc: string): void => {
+  expect(fails(checkSkillPackInstallPolicy(step7(doc)))).toBe(false);
+};
+
+test("G: correct copy-default policy in Step 7 passes", () => expectPass(POLICY_DOC));
 
 test("A: symlink marked as default-recommended fails", () => {
-  const doc = POLICY_DOC.replace("**方式 B：符号链接（仅开发/试验环境，非生产默认）**", "**方式 B：符号链接（默认推荐）**");
-  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, doc]])))).toBe(true);
+  expectFail(POLICY_DOC.replace("**方式 B：符号链接（仅开发/试验环境，非生产默认）**", "**方式 B：符号链接（默认推荐）**"));
 });
 
 test("B: copy without default/production recommendation fails", () => {
-  const doc = POLICY_DOC.replace("**方式 A：复制（默认推荐，用于稳定 Hermes）**", "**方式 A：复制：**");
-  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, doc]])))).toBe(true);
+  expectFail(POLICY_DOC.replace("**方式 A：复制（默认推荐，用于稳定 Hermes）**", "**方式 A：复制：**"));
 });
 
-test("C: missing trusted-directory/root warning fails", () => {
-  const doc = POLICY_DOC.replace("resolved target 位于 Hermes trusted directory（~/.hermes/skills）外时，Hermes 可能记录安全告警；", "");
-  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, doc]])))).toBe(true);
+test("C: missing trusted-directory/root warning in symlink subsection fails", () => {
+  expectFail(POLICY_DOC.replace("- 风险：symlink resolved target 落在 Hermes trusted directory（~/.hermes/skills）之外时，Hermes 可能记录安全告警；\n", ""));
 });
 
-test("D: missing checkout-drift risk fails", () => {
-  const doc = POLICY_DOC.replace("checkout 中的 skill 文件变化会立即影响 Hermes。", "");
-  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, doc]])))).toBe(true);
+test("D: missing checkout-drift risk in symlink subsection fails", () => {
+  expectFail(POLICY_DOC.replace("- 风险：checkout 中的 skill 文件变化会立即影响 Hermes，把尚未发布的修改静默带进真实 Agent；\n", ""));
 });
 
-test("copy section must precede symlink section", () => {
+test("copy subsection must precede symlink subsection", () => {
   const swapped = [
     "## 第七步：验证 Hermes 技能包（可选）",
     "**方式 B：符号链接（仅开发/试验环境）**",
     "```bash",
     'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain',
     "```",
+    "- 风险：symlink resolved target 落 trusted directory 之外，Hermes 可能告警；checkout 变化立即静默影响。",
     "**方式 A：复制（默认推荐，稳定 Hermes）**",
     "```bash",
     'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain',
     "```",
-    "trusted directory 外会告警；checkout 变化立即影响。",
+    "4. 安装后验证：",
     "## 第八步",
   ].join("\n");
-  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, swapped]])))).toBe(true);
-});
-
-test("cp and ln in the same fenced block within Step 7 fails (separate-blocks contract)", () => {
-  const sameBlock = [
-    "## 第七步：验证 Hermes 技能包（可选）",
-    "**方式 A：复制（默认推荐，稳定 Hermes）**；**方式 B：符号链接（仅开发/试验环境）**",
-    "```bash",
-    'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain',
-    'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain',
-    "```",
-    "trusted directory 外告警；checkout 变化立即影响。",
-    "## 第八步",
-  ].join("\n");
-  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, sameBlock]])))).toBe(true);
+  expectFail(swapped);
 });
 
 test("missing Step 7 heading fails", () => {
-  const noHeading = POLICY_DOC.replace("## 第七步：验证 Hermes 技能包（可选）\n\n", "## 其他步\n\n");
-  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, noHeading]])))).toBe(true);
+  expectFail(POLICY_DOC.replace("## 第七步：验证 Hermes 技能包（可选）", "## 其他步"));
 });
 
 test("missing install-onboarding.md fails", () => {
   expect(fails(checkSkillPackInstallPolicy(new Map([["docs/other.md", POLICY_DOC]])))).toBe(true);
 });
 
-test("anti-aggregation: policy split across docs still fails (only install-onboarding Step 7 counts)", () => {
+test("anti-aggregation: policy split across docs still fails", () => {
   const badInstall = [
     "## 第七步：验证 Hermes 技能包（可选）",
     "**方式 B：符号链接（默认推荐）**",
@@ -152,9 +154,54 @@ test("anti-aggregation: policy split across docs still fails (only install-onboa
     "```",
     "## 第八步",
   ].join("\n");
-  const docs = new Map([
-    [STEP7_FILE, badInstall],
-    ["docs/other.md", POLICY_DOC],
-  ]);
-  expect(fails(checkSkillPackInstallPolicy(docs))).toBe(true);
+  expect(fails(checkSkillPackInstallPolicy(new Map([[STEP7_FILE, badInstall], ["docs/other.md", POLICY_DOC]])))).toBe(true);
+});
+
+// ── HIGH1 mutation: copy pros must NOT substitute for symlink risks ──
+test("mutation: delete both symlink risks (keep copy pros with trusted-root + checkout-no-auto) fails", () => {
+  const mut = POLICY_DOC
+    .replace("- 风险：symlink resolved target 落在 Hermes trusted directory（~/.hermes/skills）之外时，Hermes 可能记录安全告警；\n", "")
+    .replace("- 风险：checkout 中的 skill 文件变化会立即影响 Hermes，把尚未发布的修改静默带进真实 Agent；\n", "");
+  expectFail(mut);
+});
+
+test("mutation: symlink checkout risk phrased as 'will not affect' fails (positive-only)", () => {
+  const mut = POLICY_DOC.replace(
+    "- 风险：checkout 中的 skill 文件变化会立即影响 Hermes，把尚未发布的修改静默带进真实 Agent；",
+    "- 风险：checkout 中的 skill 文件变化不会影响 Hermes；",
+  );
+  expectFail(mut);
+});
+
+// ── HIGH2 mutations: commands must live INSIDE real fenced blocks ──
+test("mutation: cp -r moved out of the copy fence (into prose) fails", () => {
+  const mut = POLICY_DOC.replace(
+    'mkdir -p ~/.hermes/skills/brain-ops\ncp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+    'mkdir -p ~/.hermes/skills/brain-ops\n```\ncp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain（正文，非 fence）',
+  );
+  expectFail(mut);
+});
+
+test("mutation: ln -s moved out of the symlink fence (into prose) fails", () => {
+  const mut = POLICY_DOC.replace(
+    'mkdir -p ~/.hermes/skills/brain-ops\nln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+    'mkdir -p ~/.hermes/skills/brain-ops\n```\nln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain（正文，非 fence）',
+  );
+  expectFail(mut);
+});
+
+test("mutation: ln -s leaking into the copy fenced block fails", () => {
+  const mut = POLICY_DOC.replace(
+    'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+    'cp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\nln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+  );
+  expectFail(mut);
+});
+
+test("mutation: cp -r leaking into the symlink fenced block fails", () => {
+  const mut = POLICY_DOC.replace(
+    'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+    'ln -s "<pack>" ~/.hermes/skills/brain-ops/cbrain\ncp -r "<pack>" ~/.hermes/skills/brain-ops/cbrain\n```',
+  );
+  expectFail(mut);
 });

@@ -440,17 +440,27 @@ describe("cbrain skill-pack", () => {
       }
     });
 
-    test("CLI source stays read-only: no install/overwrite/write/exec capability", () => {
+    test("CLI source stays read-only: node:fs read-allowlist + no async write/exec imports", () => {
       const src = readFileSync(join(PROJECT_DIR, "src/cli/commands/skill-pack.ts"), "utf-8");
-      // No filesystem-mutating calls
-      for (const bad of ["writeFileSync", "mkdirSync", "unlinkSync", "symlinkSync", "renameSync", "cpSync", "rmSync", "copyFileSync"]) {
+      // node:fs imports must be the read-only allowlist only
+      const fsMatch = src.match(/import\s*\{([^}]*?)\}\s*from\s*["']node:fs["']/);
+      expect(fsMatch !== null, "expected a node:fs import").toBe(true);
+      const READ_ALLOW = new Set(["existsSync", "readFileSync", "statSync", "readdirSync", "lstatSync"]);
+      for (const spec of fsMatch![1].split(",").map((s) => s.trim()).filter(Boolean)) {
+        expect(READ_ALLOW.has(spec), `node:fs import "${spec}" not in read-only allowlist`).toBe(true);
+      }
+      // forbid async write / exec entry modules
+      for (const bad of ["node:fs/promises", "Bun.write", "child_process"]) {
         expect(src).not.toContain(bad);
       }
-      // No shell/process execution
-      for (const bad of ["execSync", "spawnSync", "child_process"]) {
+      // forbid mutating sync calls + exec/spawn call sites (belt-and-suspenders)
+      for (const bad of ["writeFileSync", "mkdirSync", "unlinkSync", "symlinkSync", "renameSync", "rmSync", "cpSync", "copyFileSync", "appendFileSync", "execSync", "spawnSync"]) {
         expect(src).not.toContain(bad);
       }
-      // No install/force/overwrite CLI flags
+      for (const bad of ["exec(", "spawn("]) {
+        expect(src).not.toContain(bad);
+      }
+      // no install/force/overwrite/deploy flags
       expect(src).not.toMatch(/--install|--force|--overwrite|--deploy|--backup|--migrate/);
     });
   });
