@@ -123,6 +123,7 @@ export interface ZeroLinkCandidate {
   slug: string;
   contentHash: string | null;
   contentFingerprint: string | null;
+  sourceKind: "vault_hash" | "raw_chunks" | null;
   rawChunkCount: number;
   rawCharCount: number;
   tagCount: number;
@@ -178,6 +179,7 @@ export interface ZeroLinkBackfillReport {
 export interface RepairBatchStatus {
   version: 1;
   batchId: string;
+  finalized: boolean;
   integrityConflicts: number;
   selected: number;
   pending: number;
@@ -185,6 +187,13 @@ export interface RepairBatchStatus {
   done: number;
   failed: number;
   cancelled: number;
+  outcomes: {
+    resolved: number;
+    terminalNoGraphLinks: number;
+    blockedSourceUnavailable: number;
+    sourceChanged: number;
+    invalidTerminal: number;
+  };
 }
 ```
 
@@ -192,11 +201,13 @@ The public JSON field names are exactly the camelCase names shown above. Human o
 
 `contentFingerprint` is the repair invalidation key:
 
-1. If `pages.content_hash` is a non-empty string, use `page:` plus that hash.
-2. Otherwise, when at least one raw chunk exists, compute a full SHA-256 over the UTF-8 bytes of `JSON.stringify` applied to an object constructed in this exact key order: `{version:1,type,chunks,tags}`. `chunks` is ordered by `(chunk_index, id)` and each object is constructed as `{index,id,content}` in that key order. `tags` is a lexicographically sorted string array. JSON escaping makes delimiter/newline content unambiguous. Prefix the lowercase 64-hex digest with `derived:`.
-3. If neither a page hash nor any raw chunk exists, the fingerprint is unavailable. Classify the current debt as `unverifiable_fingerprint`; do not enqueue it automatically.
+1. Determine sealed state first: a page is sealed when it owns any `summary_level = 1` chunk, matching existing `isSealedPage` semantics.
+2. A sealed page always uses `sourceKind = raw_chunks` and the derived fingerprint below, even when `pages.content_hash` is non-empty. Its vault body is an L1 summary and is never the repair NER input.
+3. A non-sealed page with a non-empty `pages.content_hash` uses `sourceKind = vault_hash` and `page:` plus that hash.
+4. A page using raw chunks computes a full SHA-256 over the UTF-8 bytes of `JSON.stringify` applied to an object constructed in this exact key order: `{version:1,type,chunks,tags}`. `chunks` is ordered by `(chunk_index, id)` and each object is constructed as `{index,id,content}` in that key order. `tags` is a lexicographically sorted string array. JSON escaping makes delimiter/newline content unambiguous. Prefix the lowercase 64-hex digest with `derived:`.
+5. If the selected source cannot provide a page hash or at least one raw chunk, fingerprint and `sourceKind` are both `null`. Classify the current debt as `unverifiable_fingerprint`; do not enqueue it automatically.
 
-`updated_at`, empty strings, and sentinel fingerprints are forbidden. Only a non-empty `page:` or `derived:` fingerprint may enter a repair marker. Non-content metadata can advance timestamps, and timestamp resolution cannot prove body identity. The derived hash is computed internally and never appears in public output.
+`scanRichRecords` returns the source decision with the candidate. Enqueue copies it verbatim and must not re-derive or override source selection. `updated_at`, empty strings, and sentinel fingerprints are forbidden. Only a non-empty `page:` or `derived:` fingerprint with its consistent non-null source kind may enter a repair marker. Non-content metadata can advance timestamps, and timestamp resolution cannot prove body identity. The derived hash is computed internally and never appears in public output.
 
 Required functions:
 
@@ -230,7 +241,7 @@ New or requeued job `data` must include:
     "version": 1,
     "contentFingerprint": "<current repair invalidation key>",
     "sourceKind": "vault_hash | raw_chunks",
-    "batchId": "<opaque manifest receipt token>"
+    "batchId": "<random batch UUID>"
   }
 }
 ```
@@ -246,7 +257,7 @@ After successful processing, `runNerBackfillStage` completes a marked repair job
     "version": 1,
     "contentFingerprint": "<fingerprint captured when scheduled>",
     "sourceKind": "vault_hash | raw_chunks",
-    "batchId": "<same opaque manifest receipt token>"
+    "batchId": "<same random batch UUID>"
   },
   "graphOutcome": "resolved | terminal_no_graph_links",
   "activeLinkCount": 0
@@ -280,8 +291,9 @@ Load all `ner-backfill` rows and parse `data`/`result` in TypeScript under `try/
 Before per-page classification, compute global `queueIntegrityConflicts`:
 
 - every `pending` or `running` `ner-backfill` row must have parseable data, a non-empty valid slug, and kind absent/`ner` or `entity_facts`; otherwise it is a conflict because an ordinary worker can execute or recover it;
-- every row containing this repair marker, regardless of status, must have the exact marker name/version, a valid slug, kind `ner`, a non-empty `page:`/`derived:` fingerprint, consistent source kind, and a syntactically valid manifest receipt token;
+- every row containing this repair marker, regardless of status, must have the exact marker name/version, a valid slug, kind `ner`, a non-empty `page:`/`derived:` fingerprint, consistent source kind, and a syntactically valid batch UUID;
 - every marked repair row must reference an existing valid batch manifest that includes its job id.
+- every batch manifest must parse with a unique UUID, valid ownership entries, and a valid finalized/unfinalized result; latest ownership must resolve its child as defined in §6.3 even when the child marker itself is missing/corrupt.
 
 Each invalid row increments only a scalar conflict count; raw job data/error/result is never emitted. Any queue integrity conflict makes enqueue fail closed globally with zero mutations.
 
@@ -295,17 +307,13 @@ Apply this deterministic algorithm:
 
 1. Collect **all live rows** for the slug: every `pending` row and every `running` row, irrespective of fingerprint or freshness. More than one live row is always `stateConflicts`; no lower-id live row may be ignored, and enqueue fails closed.
 2. If exactly one live row exists:
-   - fresh `running` → `active`;
-   - stale `running` with current marker → `stale_requeue`;
-   - stale `running` with old marker and a current fingerprint → `content_changed_requeue`;
-   - stale legacy `running` → `legacy_requeue`;
-   - `pending` with current marker → `active`;
-   - `pending` with old marker and a current fingerprint → `content_changed_requeue` on that same row;
-   - legacy `pending` → `active`;
-   - when the current fingerprint is unavailable, do not refresh any marked live row; report `active` for pending/fresh-running or `unverifiable_fingerprint` plus `staleRunning` for stale-running.
+   - a marked row must belong to its latest **unfinalized** manifest and is always `active`; stale running also increments `staleRunning`. It is resumed only through that existing batch UUID, never moved into a new batch. A marked live row whose latest manifest claims to be finalized is a queue-integrity conflict.
+   - legacy `pending` or fresh legacy `running` → `active`;
+   - stale legacy `running` → `stale_requeue` on that same row;
+   - when the current fingerprint is unavailable, no new batch is created; existing marked live ownership remains `active`, while stale legacy running is `unverifiable_fingerprint` plus `staleRunning`.
    - if the live row coexists with a current-fingerprint cancellation or unverifiable legacy cancellation, also increment `stateConflicts` and perform no mutation.
 3. If there is no live row and the fingerprint is unavailable, classify `unverifiable_fingerprint`.
-4. Otherwise choose the highest-id marked row whose repair fingerprint equals the current fingerprint. This is the canonical current row:
+4. Otherwise choose the highest-id marked terminal row whose repair fingerprint equals the current fingerprint. If its latest manifest is unfinalized, classify `active` pending batch finalization and do not reuse it. With a finalized manifest it is the canonical current row:
    - `cancelled` → `cancelled` for this fingerprint only;
    - `failed` → `failed`;
    - `done` + `graphOutcome = terminal_no_graph_links` → `terminal_no_graph_links`;
@@ -313,7 +321,7 @@ Apply this deterministic algorithm:
    - `done` + `graphOutcome = source_changed` → `source_changed`;
    - `done` + `graphOutcome = invalid_terminal`, missing, malformed, or unknown terminal outcome → `invalid_terminal`;
    - `done` + `graphOutcome = resolved` requires an actual current-fact non-self link. With a current link it contributes one distinct page to `resolved`; without one it is `lost_link`, not resolved and not automatically requeued.
-5. If no current-fingerprint row exists, choose the highest-id marked terminal row for an older/different fingerprint. A done, failed, or cancelled old-fingerprint row is `content_changed_requeue`; cancellation is row/fingerprint-scoped, not a permanent page-wide veto.
+5. If no current-fingerprint row exists, choose the highest-id marked terminal row for an older/different fingerprint. It is `content_changed_requeue` only when its latest manifest is finalized; an unfinalized manifest remains `active` pending finalization. Finalized cancellation is row/fingerprint-scoped, not a permanent page-wide veto.
 6. If no marked row exists, choose the highest-id unmarked legacy terminal row:
    - `done` or `failed` → `legacy_requeue`;
    - `cancelled` has no trustworthy fingerprint scope → `cancelled` and needs review; it is never automatically reopened.
@@ -348,12 +356,22 @@ Each non-empty enqueue creates one internal batch manifest row in the same trans
 
 - `name = zero-link-backfill-batch`;
 - `status = done`, so ordinary workers never claim it;
-- `data` contains only version, repair name, the opaque receipt token, and the ordered selected job-id list;
-- the public `batchId` receipt has the exact form `<manifestJobId>.<uuid>`.
+- `data` contains version, repair name, a random UUID `batchId`, and ordered ownership entries `{jobId, slug, contentFingerprint}` for the selected rows;
+- `result` starts as `{finalized:false}`.
 
-The manifest id prefix lets a later process locate the exact manifest row without searching or trusting child job JSON. The UUID prevents a caller from substituting another manifest id. Manifest job ids and child ids remain internal; only the opaque receipt token is public.
+The public `batchId` is only the random UUID. Manifest job ids, child job ids, slugs, and fingerprints remain internal. Manifest lookup scans only `zero-link-backfill-batch` rows, parses them safely in TypeScript, and requires exactly one valid matching UUID. Any malformed manifest or duplicate token makes batch processing fail closed; no unguarded `json_extract` is used.
 
-Batch validation parses the manifest by its id, requires the stored token to match exactly, requires a unique positive selected-id list, then loads every selected job by id and verifies its job name and complete repair marker. Missing/corrupt/mismatched child data produces `BATCH_INTEGRITY_CONFLICT` and zero claims. Batch status counts rows by manifest-selected id and therefore still sees a pending/running row even if its child JSON is corrupt.
+An unfinalized manifest owns its selected rows strictly in both directions: every ownership entry must resolve to a child with the exact job name/slug/fingerprint/batch marker, and every child carrying that batch id must appear once in the manifest. Missing/corrupt/mismatched child data produces `BATCH_INTEGRITY_CONFLICT` and zero claims. Batch status counts rows by manifest-selected id and therefore still sees a pending/running row even if its child JSON is corrupt.
+
+When all selected rows are terminal and integrity checks pass, the batch-filtered worker finalizes the manifest in one transaction. The frozen `result` contains only `finalized:true`, repair/manifest version, terminal status counts, graph outcome counts, and completion time. It contains no slug, title, path, body, or child payload.
+
+Job-row reuse is allowed only when the row's previous manifest exists, validates, and is finalized. Enqueue creates the new unfinalized manifest and changes the child's batch marker atomically. For ownership checks, the highest manifest-row id containing a child id is its latest ownership:
+
+- latest unfinalized ownership requires strict bidirectional child validation;
+- latest finalized ownership still records the child's slug/fingerprint. If the latest child row is missing or its data becomes corrupt, global queue integrity uses this frozen ownership to classify/block instead of treating the page as new;
+- older finalized manifests are historical and do not require the reused child to keep pointing at them.
+
+Querying an older finalized batch returns its frozen result, not the child row's later status and not an integrity error. If a crash leaves every child terminal but the manifest unfinalized, rerunning the same batch consumer processes no terminal rows and finalizes the manifest. A row cannot enter a later batch until this finalization completes.
 
 Selection, manifest creation, receipt generation, rescan, inserts, requeues, and final manifest update run under `BEGIN IMMEDIATE`. This obtains the SQLite write reservation before reading candidate/job state, preventing two concurrent CLI processes from both planning the same rows. On success the command commits; on any error it rolls back. It must never return a partial success count or a manifest without all selected rows.
 
@@ -361,7 +379,7 @@ Selection, manifest creation, receipt generation, rescan, inserts, requeues, and
 
 Provider errors and timeouts continue through the existing `failJob` behavior. Because marked jobs have `max_attempts = 1`, their first claimed failure becomes `failed`, not `pending`. The repair marker remains in `data`, so the scanner reports the failure without resubmitting it on every run.
 
-The existing broad `cbrain ner-backfill --retry-failed` command is not called automatically by this issue. Investigation and explicit operator action are required before retrying a current-fingerprint repair failure.
+The existing broad `cbrain ner-backfill --retry-failed` command must skip `zero-link-rich-records` marked rows while retaining behavior for legacy/ordinary jobs. Current-fingerprint repair failure is terminal for this issue; changed content may create a later batch, but broad retry cannot mutate finalized ownership.
 
 ## 7. NER write-path correction
 
@@ -407,20 +425,19 @@ Rules:
 - `--limit` must be an integer in `[1, 500]` for enqueue mode. Dry-run may omit it and reports all counts; if supplied it controls only `selected`, not `total`/state counts.
 - Enqueue mode calls the existing live lock probe and refuses when an active serve or watcher owns the profile.
 - Enqueue does not require an LLM because it schedules jobs only.
-- A successful non-empty enqueue returns one opaque manifest receipt `batchId`; it contains no page identity or user data. Every selected job receives the same `repair.batchId`.
+- A successful non-empty enqueue returns one random UUID `batchId`; it contains no page identity, internal job id, or user data. Every selected job receives the same `repair.batchId`.
 - The command never processes jobs. The operator invokes `cbrain ner-backfill --repair-batch <batchId> --limit <same batch size> --json` separately while the writer remains stopped.
 - Non-JSON output contains only the same scalar categories and fixed guidance. It must not print candidate titles, slugs, bodies, paths, job payloads, or LLM text.
 - JSON errors use stable `status`, `code`, and a sanitized fixed message. No stack trace or raw exception message is emitted.
 
-The existing `ner-backfill` command gains `--repair-batch <receipt>`:
+The existing `ner-backfill` command gains `--repair-batch <uuid>`:
 
-- validate the `<positive-integer>.<uuid>` receipt syntax before opening the DB;
-- when present, locate and validate the receipt manifest, then snapshot and claim only its selected `ner-backfill` job ids after verifying their complete markers;
+- validate UUID syntax before opening the DB;
+- when present, locate the unique safely parsed manifest with that UUID, then snapshot and claim only its selected `ner-backfill` job ids after verifying their complete markers;
 - ignore ordinary NER jobs and every `entity_facts` job, regardless of priority;
-- do **not** call the existing global `resetStaleJobsForNames` in filtered mode; reset only manifest-selected stale-running rows whose complete marker matches the receipt;
-- retain the existing global stale recovery unchanged when `--repair-batch` is absent;
+- do **not** call the existing global `resetStaleJobsForNames` in filtered mode; reset only manifest-selected stale-running rows whose complete marker matches the UUID;
+- when `--repair-batch` is absent, preserve existing recovery/processing for legacy, ordinary NER, and `entity_facts`, but exclude every valid `zero-link-rich-records` marked row from stale reset, snapshot, claim, and broad `--retry-failed`; marked ownership is processed only through its UUID manifest;
 - reject combination with broad `--retry-failed`;
-- preserve current unfiltered behavior when the option is absent;
 - return scalar per-batch terminal status counts (`pending`, `running`, `done`, `failed`, `cancelled`) after processing so the operator can prove no selected row remains active.
 - require the supplied `--limit` to equal the manifest's selected count; mismatch returns fixed `BATCH_LIMIT_MISMATCH` before reset/claim, preventing an apparently successful partial batch.
 
@@ -498,7 +515,7 @@ Allowed public output:
 
 - fixed schema/version/mode/status/error code;
 - scalar counts and threshold counts;
-- opaque repair batch receipt token;
+- random non-sensitive repair batch UUID;
 - boolean blocked state;
 - live owner kind/PID when mutation is refused;
 - anonymous `fsck` sample tokens;
@@ -519,7 +536,7 @@ Logs added by this issue must be scalar-only. Existing lower-level logs are not 
 - Enqueue starts with `BEGIN IMMEDIATE`, then repeats candidate scan and state classification inside the write transaction; it must not reuse a stale plan produced before the lock check.
 - All selected job rows are inserted/requeued atomically.
 - The existing worker claims each pending job atomically by id.
-- Batch-filtered worker validates the receipt manifest, then snapshots and claims only its exact selected ids; unrelated NER and entity-facts rows are outside its candidate set.
+- Batch-filtered worker validates the UUID manifest, then snapshots and claims only its exact selected ids; unrelated NER and entity-facts rows are outside its candidate set.
 - A concurrent job appearing between an external dry-run and enqueue is detected by the transactional rescan and classified `active`.
 - The command does not write the vault. The worker may write vault/entity state through the existing pipeline, so it remains subject to the existing writer lock rule.
 
@@ -529,14 +546,21 @@ Production repair is authorized for this issue, but must occur only after focuse
 
 ### 13.1 Preflight
 
-Because the issue forbids self-merge, the installed production CLI does not yet contain these commands. All rollout invocations use `bun run src/cli/index.ts` from the clean, fully reviewed feature worktree with the live config supplied through `CBRAIN_CONFIG`. Record the exact HEAD and require an empty worktree before the first backup. Fixed reports must not expose either path.
+Because the issue forbids self-merge, the installed production CLI does not yet contain these commands. Start a private zsh in the clean, fully reviewed feature worktree and define one entry for every rollout command:
 
-1. Record the current git commit.
+```zsh
+export CBRAIN_CONFIG="<private-live-config>"
+CBRAIN_RUN=(bun run src/cli/index.ts)
+```
+
+Every command below uses `"${CBRAIN_RUN[@]}"`; bare installed `cbrain` is forbidden for this rollout. Fixed reports must not expose the worktree or config path.
+
+1. Require empty staged/unstaged status, record `git rev-parse HEAD`, and record `"${CBRAIN_RUN[@]}" --version`.
 2. Stop the active serve/watcher writer and verify the lock probe reports no owner.
-3. Run `cbrain backup -o <private-backup-dir>` to create the repository-supported full archive.
+3. Run `"${CBRAIN_RUN[@]}" backup -o <private-backup-dir>` to create the repository-supported full archive.
 4. Verify the zip exists, is non-empty, passes `unzip -t`, and contains the configured DB basename plus `vault/`; when the configured Lance path exists, also require `lancedb/` entries. Do not print archive paths in the delivery report.
 5. Record a sanitized configuration summary separately; configuration and credentials are not claimed to be restorable from the archive.
-6. Run `cbrain zero-link-backfill --json` and record scalar counts only.
+6. Run `"${CBRAIN_RUN[@]}" zero-link-backfill --json` and record scalar counts only.
 7. Run FK and consistency checks before the first batch.
 
 ### 13.2 Per-batch sequence
@@ -545,13 +569,13 @@ Run batch sizes in this exact progression: 5, then 20, then 50.
 
 For each batch:
 
-1. Create a **new** full backup immediately before this batch, verify that newly created artifact, and record its private mapping to batch size and start time. A prior batch artifact may not be reused as the next batch's pre-batch snapshot.
-2. Run `cbrain zero-link-backfill --enqueue --limit <N> --json` and capture its opaque `batchId` privately.
+1. Run `"${CBRAIN_RUN[@]}" backup -o <private-backup-dir>` to create a **new** full backup immediately before this batch, verify that newly created artifact, and record its private mapping to batch size and start time. A prior batch artifact may not be reused as the next batch's pre-batch snapshot.
+2. Run `"${CBRAIN_RUN[@]}" zero-link-backfill --enqueue --limit <N> --json` and capture its random `batchId` privately.
 3. Assert `selected <= N`, `newJobs + requeuedJobs = selected`, `stateConflicts = 0`, and `queueIntegrityConflicts = 0`.
-4. Run `cbrain ner-backfill --repair-batch <batchId> --limit <N> --json` using the existing configured provider.
+4. Run `"${CBRAIN_RUN[@]}" ner-backfill --repair-batch <batchId> --limit <N> --json` using the existing configured provider.
 5. Assert this exact manifest reports zero integrity conflicts, zero `pending`, and zero `running`; ordinary and stale NER/entity-facts jobs must be unchanged.
 6. Re-run dry-run, `fsck`, FK checks, and consistency checks.
-7. Record scalar deltas for resolved, terminal-no-link, blocked-source, invalid-terminal, lost-link, active, actionable, and failed.
+7. Record scalar deltas for resolved, terminal-no-link, blocked-source, source-changed, cancelled, invalid-terminal, lost-link, active, actionable, and failed.
 8. Proceed only when every stop gate remains clear.
 
 The first batch is a canary. At least one of its five candidates must become `resolved`. If zero resolve—whether the outcomes are all terminal-no-link or a mix of blocked/failed/invalid states—stop before the 20 batch because the repair is not demonstrating useful graph recovery.
@@ -564,12 +588,13 @@ Stop the rollout and do not enqueue the next batch on any of:
 - duplicate job creation or any partial transaction;
 - duplicate active/state conflict reported by the scanner;
 - any queue-integrity or batch-manifest integrity conflict;
+- any `sourceChanged > 0`, `cancelled > 0`, `invalidTerminal > 0`, or `blockedSourceUnavailable > 0` in the selected batch;
 - zero resolved records in the five-item canary;
 - FK violation increase;
 - new SQLite/vault/FTS consistency regression;
 - public output or logs leaking forbidden private fields;
 - writer process detected during mutation;
-- mismatch between selected count and inserted/requeued count.
+- mismatch between selected count and inserted/requeued count;
 - any selected batch row left pending/running after the batch-filtered consumer returns.
 
 ### 13.4 Rollback
@@ -578,7 +603,7 @@ If a batch creates a data or vault consistency regression:
 
 1. Keep serve/watcher stopped.
 2. Preserve sanitized diagnostics and scalar counts.
-3. Run `cbrain restore <pre-batch-zip> --force` to restore its matched SQLite + vault snapshot.
+3. Run `"${CBRAIN_RUN[@]}" restore <pre-batch-zip> --force` to restore its matched SQLite + vault snapshot.
 4. The NER backfill path in this issue does not call Lance write APIs, so the pre-batch Lance directory remains unchanged and stays matched to the restored source snapshot. If verification detects any unexpected Lance mutation, restore `lancedb/` manually from the same archive while services remain stopped.
 5. Re-run FK, `fsck`, and consistency checks, including Lance verification.
 6. Restart serve only after the restored state passes the preflight checks.
@@ -610,6 +635,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - prevents chunk/tag/link join multiplication;
 - orders deterministically and applies selection limit after ordering;
 - derives a stable SHA-256 fallback from ordered raw content/type/tags, never `updated_at`;
+- sealed page with non-null page hash still selects `raw_chunks`/derived fingerprint; non-sealed equivalent selects `vault_hash`;
 - canonical JSON/UTF-8 fingerprint distinguishes delimiter/newline boundary cases and is stable under unordered query results;
 - classifies a no-hash/no-raw-chunk page as unverifiable and non-actionable;
 - represents unavailable fingerprint as `null`; empty/sentinel values never enter a marker;
@@ -636,7 +662,10 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - duplicate active/conflicting current rows → scalar conflict, no mutation;
 - malformed active JSON, invalid active slug/kind, and incomplete repair marker increment queue-integrity conflict and block all enqueue without leaking payload;
 - unrelated valid `entity_facts` does not match and does not create a conflict;
-- manifest receipt is atomic with its ordered selected ids; missing/corrupt manifest or child marker fails closed;
+- manifest UUID and ownership list are atomic; missing/corrupt manifest or child marker fails closed;
+- batch A finalizes, the same row is legally requeued into batch B after content change, batch A still returns frozen audit counts, and batch B validates/consumes normally;
+- unfinalized child corruption blocks globally; latest finalized child corruption is associated through frozen ownership and cannot make the same fingerprint look new;
+- a child cannot be requeued while its previous manifest remains unfinalized;
 - injected mutation failure rolls back every row in the selected batch;
 - two connections racing enqueue serialize under `BEGIN IMMEDIATE` and create one batch of work;
 - repeated enqueue with unchanged state creates no duplicate work.
@@ -661,10 +690,12 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - content fingerprint in the terminal marker is the scheduled fingerprint, not a later mutable page value.
 - vault-hash repair reads and hashes one raw-file snapshot before parsing its body;
 - derived repair consumes the exact ordered raw chunks used by its fingerprint, not an unsealed vault body;
+- sealed repair with non-null page hash sends raw chunks, never vault L1 summary, to the LLM;
 - vault/raw source drift after enqueue completes `source_changed` with zero LLM calls;
 - batch-filtered consumer processes only the exact repair batch and leaves ordinary NER/entity-facts jobs untouched;
 - filtered mode leaves unrelated stale NER and stale entity-facts rows byte-for-byte unchanged;
 - same-batch stale row is the only row targeted for reset;
+- unfiltered Dream/CLI stale reset, snapshot, claim, and `--retry-failed` leave every marked repair row unchanged while ordinary jobs retain existing behavior;
 - malformed child JSON is still found through the manifest id list and produces batch-integrity failure;
 - filtered result reports zero active rows only when every manifest-selected id is terminal.
 
@@ -679,7 +710,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - dry-run uses a true read-only connection, performs no migration, and does not create a missing DB;
 - enqueue checks the writer lock before opening a writable connection;
 - missing/malformed config and missing/open-failed DB use fixed sanitized codes;
-- enqueue returns an opaque manifest receipt only for selected work;
+- enqueue returns a random UUID only for selected work;
 - output schema and counts are stable;
 - human and JSON outputs contain no fixture slug/title/body/path/job payload;
 - thrown internal error maps to a stable sanitized code/message.
@@ -761,7 +792,7 @@ The first independent review of commit `cf6bf92` returned FAIL with nine HIGH an
 6. `resolved` counts canonical current-fingerprint distinct pages, never historical job rows.
 7. NULL page hashes use a deterministic content-derived SHA-256 when possible; unverifiable pages are not enqueued.
 8. Cancellation is scoped to the canonical fingerprint; legacy cancellation is review-only and conflicting active/cancelled state fails closed.
-9. Each enqueue receives an opaque manifest receipt, and the consumer validates its exact job-id list instead of processing unrelated NER jobs.
+9. Each enqueue receives a random batch UUID, and the consumer validates its exact manifest ownership list instead of processing unrelated NER jobs.
 10. Dry-run uses a true read-only SQLite connection and fixed safe config/DB error envelopes; enqueue checks the writer before writable open and uses no unrelated providers.
 11. Production backup is the repository full archive; rollback restores DB+vault and explicitly accounts for the worker's non-mutation of Lance.
 
@@ -774,10 +805,23 @@ The re-review of commit `5c80cae` still returned FAIL with four HIGH and three M
 1. Unavailable fingerprints are represented only as `null`; empty/sentinel values cannot be scheduled.
 2. Every pending/running row is treated as live before canonical terminal selection. More than one live row per slug fails closed, regardless of fingerprint.
 3. Batch mode bypasses global stale reset and may reset only stale ids listed by its validated manifest.
-4. A receipt-addressed manifest stores exact selected job ids, so malformed child JSON cannot disappear from batch status; global queue-integrity validation blocks malformed active/repair rows.
+4. A UUID-addressed manifest stores exact selected ownership, so malformed child JSON cannot disappear from batch status; global queue-integrity validation blocks malformed active/repair rows.
 5. Derived fingerprint bytes now use fixed-key JSON, fixed ordering, UTF-8, and full SHA-256 with collision-boundary tests.
 6. The worker verifies the scheduled source before LLM use: vault-hash jobs read/hash one file snapshot; derived jobs consume the exact raw chunks used for hashing; drift becomes terminal `source_changed` with zero LLM calls.
 7. Every 5/20/50 batch creates and verifies a fresh full backup; no earlier artifact may stand in for the current pre-batch state.
 8. Because the branch remains unmerged, production commands run from the exact reviewed clean worktree commit rather than assuming the installed CLI already contains the feature.
 
 The independent reviewer must run a third pass. The gate remains no CRITICAL/HIGH findings.
+
+## 20. Third adversarial review correction record
+
+The third review still returned FAIL with two new HIGH and three MEDIUM findings. This revision closes them as follows:
+
+1. Source choice is sealed-first: sealed pages always carry `raw_chunks` + derived fingerprint even when a page hash exists; the worker receives raw chunks, never the vault L1 summary.
+2. Manifests now have explicit ownership/finalization semantics. Unfinalized batches validate children bidirectionally; completion freezes scalar outcomes; a child may be reused only after finalization; old UUID queries return frozen results.
+3. Finalized ownership entries retain internal job id/slug/fingerprint, so latest-child corruption cannot erase prior same-fingerprint ownership and silently create a new attempt.
+4. Public `batchId` is a random UUID found by safe manifest scanning. Internal manifest/child ids are not exposed.
+5. Production stops on source drift, cancellation, invalid terminal, or blocked source and records those scalar deltas.
+6. All rollout commands use the same `CBRAIN_RUN` array from the reviewed clean feature worktree; bare installed `cbrain` is forbidden before merge.
+
+The independent reviewer must run a fourth pass. The gate remains no CRITICAL/HIGH findings.
