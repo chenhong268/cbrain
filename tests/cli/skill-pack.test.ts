@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } fr
 import { existsSync, rmSync, mkdirSync, writeFileSync, readdirSync, renameSync, symlinkSync, readFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import ts from "typescript";
 import {
   resolveSkillsDir,
   verifySkillPack,
@@ -16,33 +17,47 @@ const PROJECT_DIR = join(import.meta.dir, "..", "..");
 const BIN = `bun run ${join(PROJECT_DIR, "src/cli/index.ts")}`;
 
 // ── read-only fs-import guard: shared by the real-source check + mutation tests ──
-// Covers fs / node:fs / fs/promises / node:fs/promises across six shapes
-// (named / default / namespace / static / dynamic import / require) so bare
-// `fs` or fs/promises cannot bypass the node:fs-only check.
+// TypeScript AST enumerates ImportDeclaration (so a mixed `import fs, { writeFile }`
+// is ONE import node, not three regex misses), plus dynamic import() and require().
+// Only ONE node:fs named import with read-only members is allowed; every other
+// fs-family reference (fs / fs/promises / default / namespace / mixed / dynamic /
+// require) is forbidden.
 const READ_ONLY_FS = new Set(["existsSync", "readFileSync", "statSync", "readdirSync", "lstatSync"]);
-interface FsImport { shape: "static-named" | "static-default" | "static-namespace" | "dynamic" | "require"; module: string; names: string[]; }
+const FS_MODULE_RE = /^((?:node:)?fs(?:\/promises)?)$/;
+interface FsImport { shape: "named" | "default" | "namespace" | "dynamic" | "require"; module: string; names: string[]; }
 function scanFsImports(src: string): FsImport[] {
   const out: FsImport[] = [];
-  const MOD = "((?:node:)?fs(?:\\/promises)?)";
-  for (const m of src.matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*["']${MOD}["']`, "g"))) {
-    out.push({ shape: "static-named", module: m[2], names: m[1].split(",").map((s) => s.trim()).filter(Boolean) });
-  }
-  for (const m of src.matchAll(new RegExp(`import\\s+(\\w+)\\s+from\\s*["']${MOD}["']`, "g"))) {
-    out.push({ shape: "static-default", module: m[2], names: [m[1]] });
-  }
-  for (const m of src.matchAll(new RegExp(`import\\s+\\*\\s+as\\s+(\\w+)\\s+from\\s*["']${MOD}["']`, "g"))) {
-    out.push({ shape: "static-namespace", module: m[2], names: [m[1]] });
-  }
-  for (const m of src.matchAll(new RegExp(`import\\s*\\(\\s*["']${MOD}["']\\s*\\)`, "g"))) {
+  const sf = ts.createSourceFile("scan.ts", src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  sf.forEachChild((node) => {
+    if (!ts.isImportDeclaration(node)) return;
+    const ms = node.moduleSpecifier;
+    if (!ts.isStringLiteral(ms) || !FS_MODULE_RE.test(ms.text)) return;
+    let shape: FsImport["shape"] = "named";
+    const names: string[] = [];
+    const clause = node.importClause;
+    if (clause) {
+      if (clause.name) { names.push(clause.name.getText(sf)); shape = "default"; }
+      const nb = clause.namedBindings;
+      if (nb) {
+        if (ts.isNamespaceImport(nb)) { names.push(nb.name.getText(sf)); shape = "namespace"; }
+        else if (ts.isNamedImports(nb)) {
+          for (const el of nb.elements) names.push((el.propertyName ?? el.name).getText(sf));
+          if (!clause.name) shape = "named";
+        }
+      }
+    }
+    out.push({ shape, module: ms.text, names });
+  });
+  for (const m of src.matchAll(/import\s*\(\s*["']((?:node:)?fs(?:\/promises)?)["']\s*\)/g)) {
     out.push({ shape: "dynamic", module: m[1], names: [] });
   }
-  for (const m of src.matchAll(new RegExp(`require\\s*\\(\\s*["']${MOD}["']\\s*\\)`, "g"))) {
+  for (const m of src.matchAll(/require\s*\(\s*["']((?:node:)?fs(?:\/promises)?)["']\s*\)/g)) {
     out.push({ shape: "require", module: m[1], names: [] });
   }
   return out;
 }
 function isAllowedFsImport(f: FsImport): boolean {
-  return f.shape === "static-named" && f.module === "node:fs" && f.names.every((n) => READ_ONLY_FS.has(n));
+  return f.shape === "named" && f.module === "node:fs" && f.names.every((n) => READ_ONLY_FS.has(n));
 }
 function forbiddenFsImports(src: string): FsImport[] {
   return scanFsImports(src).filter((f) => !isAllowedFsImport(f));
@@ -500,6 +515,9 @@ describe("cbrain skill-pack", () => {
         'await import("fs/promises");',
         'const fs = require("fs");',
         'import * as fs from "node:fs";',
+        'import fs, { writeFile } from "fs";',
+        'import fs, { writeFile } from "node:fs";',
+        'import fs, * as fsAll from "node:fs";',
       ];
       for (const bad of cases) {
         expect(forbiddenFsImports(bad).length, `expected "${bad}" to be rejected`).toBeGreaterThan(0);

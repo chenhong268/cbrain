@@ -75,7 +75,7 @@ const POLICY_DOC = [
   "```",
   "",
   "- 优点：部署审核过的确定快照；文件落在 Hermes trusted root 内；checkout 后续修改不会自动进入真实 Agent。",
-  "- 代价：升级后变 stale，需重新部署。",
+  "- 代价：升级后 canonical packVersion 变化 → incompatible，需重新部署。",
   "",
   "**方式 B：符号链接（仅开发/试验环境，非生产默认）**",
   "",
