@@ -35,6 +35,14 @@ export interface ResolverOptions {
   embedding?: EmbeddingProvider;
   /** "off" (default) preserves current behavior; "shadow" enables shortlist focusing only. */
   embeddingMode?: ResolverEmbeddingMode;
+  /** Durable NER guards defer every alias mutation until source identity is fenced. */
+  deferAliasWrites?: boolean;
+}
+
+export interface DeferredAliasIntent {
+  pageSlug: string;
+  alias: string;
+  source: "ner-resolved" | "llm-semantic";
 }
 
 /** Embedding shortlist bounds — Phase 1 conservative caps (#168). */
@@ -69,6 +77,7 @@ function cosine(a: number[], b: number[]): number {
 
 export class EntityResolver {
   private titleCache: string[] | null = null;
+  private readonly deferredAliasIntents = new Map<string, DeferredAliasIntent>();
 
   constructor(
     private db: CBrainDB,
@@ -81,6 +90,26 @@ export class EntityResolver {
   }
   private get embeddingMode(): ResolverEmbeddingMode {
     return this.options.embeddingMode ?? "off";
+  }
+
+  private recordAlias(pageSlug: string, alias: string, source: DeferredAliasIntent["source"]): void {
+    if (!this.options.deferAliasWrites) {
+      this.db.addAliasWithSource(pageSlug, alias, source);
+      return;
+    }
+    const key = `${pageSlug}\0${alias}\0${source}`;
+    this.deferredAliasIntents.set(key, { pageSlug, alias, source });
+  }
+
+  flushDeferredAliasIntents(): void {
+    for (const intent of this.deferredAliasIntents.values()) {
+      this.db.addAliasWithSource(intent.pageSlug, intent.alias, intent.source);
+    }
+    this.deferredAliasIntents.clear();
+  }
+
+  getDeferredAliasIntents(): DeferredAliasIntent[] {
+    return [...this.deferredAliasIntents.values()];
   }
 
   private getCachedTitles(): string[] {
@@ -238,7 +267,7 @@ export class EntityResolver {
     if (aliasSlug) {
       if (checkTypeGate(this.db, aliasSlug, entityType)) {
         // Add current name as alias if different from the matched alias
-        this.db.addAliasWithSource(aliasSlug, name, "ner-resolved");
+        this.recordAlias(aliasSlug, name, "ner-resolved");
         return { slug: aliasSlug, action: "alias_added", score: 0.95, matchedBy: "alias", aliasAdded: name };
       }
       return { slug: aliasSlug, action: "duplicate_candidate", score: 0.75, matchedBy: "type-gate" };
@@ -248,7 +277,7 @@ export class EntityResolver {
     const normSlug = this.db.getEntitySlugByTitleLower(name);
     if (normSlug) {
       if (checkTypeGate(this.db, normSlug, entityType)) {
-        this.db.addAliasWithSource(normSlug, name, "ner-resolved");
+        this.recordAlias(normSlug, name, "ner-resolved");
         return { slug: normSlug, action: "alias_added", score: 0.9, matchedBy: "normalized", aliasAdded: name };
       }
       return { slug: normSlug, action: "duplicate_candidate", score: 0.75, matchedBy: "type-gate" };
@@ -259,7 +288,7 @@ export class EntityResolver {
     if (stripped !== name) {
       const strippedSlug = this.db.getEntitySlugByTitle(stripped);
       if (strippedSlug && checkTypeGate(this.db, strippedSlug, entityType)) {
-        this.db.addAliasWithSource(strippedSlug, name, "ner-resolved");
+        this.recordAlias(strippedSlug, name, "ner-resolved");
         return { slug: strippedSlug, action: "alias_added", score: 0.8, matchedBy: "parenthetical", aliasAdded: name };
       }
       if (strippedSlug) {
@@ -269,7 +298,7 @@ export class EntityResolver {
       // Try normalized stripped
       const normStrippedSlug = this.db.getEntitySlugByTitleLower(stripped);
       if (normStrippedSlug && checkTypeGate(this.db, normStrippedSlug, entityType)) {
-        this.db.addAliasWithSource(normStrippedSlug, name, "ner-resolved");
+        this.recordAlias(normStrippedSlug, name, "ner-resolved");
         return { slug: normStrippedSlug, action: "alias_added", score: 0.8, matchedBy: "parenthetical", aliasAdded: name };
       }
       if (normStrippedSlug) {
@@ -393,7 +422,7 @@ export class EntityResolver {
       if (candidate && !checkTypeGate(this.db, entitySlug, candidate.type)) continue;
 
       // Upgrade resolution from stub_created → alias_added
-      this.db.addAliasWithSource(entitySlug, match.candidate, "llm-semantic");
+      this.recordAlias(entitySlug, match.candidate, "llm-semantic");
       resolutionMap.set(match.candidate, {
         slug: entitySlug,
         action: "alias_added",

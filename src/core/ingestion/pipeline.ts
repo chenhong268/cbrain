@@ -52,6 +52,8 @@ export interface NerPipelineResult {
   };
 }
 
+export type NerSourceGuard = (phase: "after_extract" | "before_commit") => void;
+
 /**
  * Unified write pipeline — single source of truth for indexing, wikilinks, and NER.
  * Used by SyncManager (vault path) and IngestManager (agent API path).
@@ -256,29 +258,40 @@ export class ContentPipeline {
     type: string,
     skipDatelessEvents: boolean,
     precomputed?: ExtractionResult,
-    skipMentionSlugs?: Set<string>
+    skipMentionSlugs?: Set<string>,
+    sourceGuard?: NerSourceGuard,
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
     if (getOntology().isDerivedPageType(type)) return null;
 
     const extraction = precomputed ?? await this.nerEngine.extract(body);
+    sourceGuard?.("after_extract");
     // #265: shadow verifier runs BEFORE the empty-extraction early-return so
     // that a long body producing zero extraction is flagged. Fail-open by
     // construction — the runner never rethrows; the write path below is
     // independent of the verifier succeeding.
-    runNerShadowVerifierFailOpen({
-      db: this.db,
-      logger: this.logger,
-      slug: fromSlug,
-      bodyChars: body.trim().length,
-      extraction,
-    });
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {
+      runNerShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        slug: fromSlug,
+        bodyChars: body.trim().length,
+        extraction,
+      });
       return null;
     }
 
-    return this.applyExtraction(fromSlug, extraction, skipDatelessEvents, skipMentionSlugs);
+    if (!sourceGuard) {
+      runNerShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        slug: fromSlug,
+        bodyChars: body.trim().length,
+        extraction,
+      });
+    }
+    return this.applyExtraction(fromSlug, extraction, skipDatelessEvents, skipMentionSlugs, sourceGuard, body.trim().length);
   }
 
   // ─── Private ────────────────────────────────────────────────
@@ -287,7 +300,9 @@ export class ContentPipeline {
     fromSlug: string,
     extraction: ExtractionResult,
     skipDatelessEvents: boolean,
-    skipMentionSlugs?: Set<string>
+    skipMentionSlugs?: Set<string>,
+    sourceGuard?: NerSourceGuard,
+    bodyChars = 0,
   ): Promise<NerPipelineResult> {
     const entitySlugMap = new Map<string, string>();
     const stubsCreated = new Set<string>();
@@ -295,11 +310,23 @@ export class ContentPipeline {
     const resolver = new EntityResolver(this.db, this.nerEngine?.provider, {
       embedding: this.embedding,
       embeddingMode: "shadow",
+      deferAliasWrites: Boolean(sourceGuard),
     });
     const candidates = extraction.entities
       .map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
     const resolutionMap = resolver.resolveAll(candidates);
     await resolver.semanticResolve(resolutionMap, candidates);
+    sourceGuard?.("before_commit");
+    if (sourceGuard) {
+      runNerShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        slug: fromSlug,
+        bodyChars,
+        extraction,
+      });
+      resolver.flushDeferredAliasIntents();
+    }
 
     for (const entity of extraction.entities) {
       const result = resolutionMap.get(entity.name);
@@ -309,6 +336,9 @@ export class ContentPipeline {
         entitySlugMap.set(entity.name, result.slug);
         if (!skipMentionSlugs?.has(result.slug)) {
           this.db.incrementMentionCount(result.slug);
+        }
+        if (result.slug !== fromSlug) {
+          this.db.insertLink(fromSlug, result.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
         }
         // Correct type if NER classification differs from existing stub
         const nerType = mapEntityType(entity.type);
