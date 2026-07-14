@@ -150,28 +150,35 @@ export function checkManifestVersion(manifestPath: string = join(PROJECT_DIR, "s
   return out;
 }
 
-/** Skill-pack install target must be exactly ~/.hermes/skills/brain-ops/cbrain.
- *  Parses the path segment after brain-ops/ and asserts it equals "cbrain" —
- *  catches both nested (`cbrain/skills/`) and wrong-basename (`wrong-target`). */
+/** Skill-pack install commands (cp -r / ln -s) must BOTH exist and each
+ *  destination must be exactly ~/.hermes/skills/brain-ops/cbrain — catches
+ *  wrong parent, wrong basename, nested suffix, and missing copy/symlink. */
 const INSTALL_TARGET = "~/.hermes/skills/brain-ops/cbrain";
-const INSTALL_PREFIX = "~/.hermes/skills/brain-ops/";
 
 export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
   const out: CheckResult[] = [];
+  let cpOk = false;
+  let lnOk = false;
   for (const [file, text] of docs) {
     text.split("\n").forEach((line, i) => {
       if (line.includes("<!-- docs-consistency:ignore-command -->")) return;
-      const idx = line.indexOf(INSTALL_PREFIX);
-      if (idx === -1) return;
-      const after = line.slice(idx + INSTALL_PREFIX.length);
-      const m = after.match(/^([^\s"']+)/);
-      if (!m) return;
-      if (m[1] !== "cbrain") {
-        out.push({ check: `install-target @${file}:${i + 1}`, passed: false, detail: `target must be exactly ${INSTALL_TARGET}, got ~/.hermes/skills/brain-ops/${m[1]}` });
+      const isCp = /cp\s+-r\b/.test(line);
+      const isLn = /ln\s+-s\b/.test(line);
+      if (!isCp && !isLn) return;
+      const dests = [...line.matchAll(/(~\/\.hermes\/skills\/[^\s"']+)/g)].map((m) => m[1]);
+      for (const dest of dests) {
+        if (dest === INSTALL_TARGET) {
+          if (isCp) cpOk = true;
+          if (isLn) lnOk = true;
+        } else {
+          out.push({ check: `install-target @${file}:${i + 1}`, passed: false, detail: `install dest must be exactly ${INSTALL_TARGET}, got ${dest}` });
+        }
       }
     });
   }
-  if (out.length === 0) out.push({ check: "install-target path", passed: true, detail: `all skill-pack targets == ${INSTALL_TARGET}` });
+  if (!cpOk) out.push({ check: "install-target copy", passed: false, detail: `missing cp -r install command targeting ${INSTALL_TARGET}` });
+  if (!lnOk) out.push({ check: "install-target symlink", passed: false, detail: `missing ln -s install command targeting ${INSTALL_TARGET}` });
+  if (out.length === 0) out.push({ check: "install-target path", passed: true, detail: `cp -r + ln -s both target ${INSTALL_TARGET}` });
   return out;
 }
 
