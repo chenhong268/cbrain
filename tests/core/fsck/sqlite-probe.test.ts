@@ -22,6 +22,48 @@ test("clean db → empty findings", () => {
 	expect(probeSqlite(db)).toEqual([]);
 });
 
+test("rich zero-link debt → one aggregate anonymous warning", () => {
+	db = freshDb();
+	db.insertPage({ slug: "records/record-a", type: "record", title: "RecordA", filePath: "record-a.md", contentHash: "hash-a" });
+	db.insertChunk("records/record-a", 0, "first raw chunk");
+	db.insertChunk("records/record-a", 1, "second raw chunk");
+
+	const finding = probeSqlite(db).find((item) => item.check === "sqlite.zero_link_rich_records");
+	expect(finding).toMatchObject({
+		layer: "sqlite",
+		severity: "warning",
+		count: 1,
+		suggestedCommand: "cbrain zero-link-backfill --json",
+	});
+	expect(finding?.detail).toContain("total=1");
+	expect(finding?.detail).toContain("actionable=1");
+	expect(finding?.sampleSlugs.length).toBeLessThanOrEqual(5);
+	expect(finding?.sampleSlugs).not.toContain("records/record-a");
+});
+
+test("global commit-unknown remains visible when zero-link total is zero", () => {
+	db = freshDb();
+	db.insertPage({ slug: "records/record-a", type: "record", title: "RecordA", filePath: "record-a.md", contentHash: "hash-a" });
+	db.insertChunk("records/record-a", 0, "first raw chunk");
+	db.insertChunk("records/record-a", 1, "second raw chunk");
+	db.insertPage({ slug: "entity/entity-a", type: "entity/person", title: "EntityA", filePath: "entity-a.md", contentHash: "hash-b" });
+	db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation, trust_state) VALUES (?, ?, ?, ?)")
+		.run("records/record-a", "entity/entity-a", "mentions", "trusted");
+	const id = db.submitJob("ner-backfill", {
+		slug: "records/record-a",
+		kind: "ner",
+		contentHash: "hash-a",
+		sourceFingerprint: "page:hash-a",
+	});
+	db.rawDb.prepare("UPDATE jobs SET status='done', result=? WHERE id=?")
+		.run(JSON.stringify({ outcome: "commit_unknown" }), id);
+
+	const finding = probeSqlite(db).find((item) => item.check === "sqlite.zero_link_rich_records");
+	expect(finding?.count).toBe(1);
+	expect(finding?.detail).toContain("total=0");
+	expect(finding?.detail).toContain("commit_unknown=1");
+});
+
 test("title collision → error finding", () => {
 	db = freshDb();
 	// idx_pages_title_uniq blocks duplicate titles at INSERT/UPDATE time.

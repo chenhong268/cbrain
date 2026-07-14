@@ -733,6 +733,26 @@ export function planZeroLinkBackfill(db: ZeroLinkDb, limit?: number): ZeroLinkBa
   return buildPlan(db, "dry_run", limit).report;
 }
 
+/** Stable scalar-only diagnostic shared by Health and fsck. */
+export function formatZeroLinkDebtDetail(report: ZeroLinkBackfillReport): string {
+  return [
+    `total=${report.total}`,
+    `actionable=${report.actionable}`,
+    `active=${report.active}`,
+    `terminal_no_graph_links=${report.terminalNoGraphLinks}`,
+    `blocked_source_unavailable=${report.blockedSourceUnavailable}`,
+    `source_changed=${report.sourceChanged}`,
+    `invalid_terminal=${report.invalidTerminal}`,
+    `lost_link=${report.lostLink}`,
+    `unverifiable_fingerprint=${report.unverifiableFingerprint}`,
+    `failed=${report.failed}`,
+    `state_conflicts=${report.stateConflicts}`,
+    `queue_integrity_conflicts=${report.queueIntegrityConflicts}`,
+    `commit_unknown=${report.commitUnknown}`,
+    `resolved=${report.resolved}`,
+  ].join(", ");
+}
+
 /** Internal queue-control view for durable NER submission; never exposes identities publicly. */
 export function inspectZeroLinkRepairControl(
   db: ZeroLinkDb,
