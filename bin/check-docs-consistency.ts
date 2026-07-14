@@ -133,6 +133,46 @@ function checkVersions(docs: Map<string, string>): CheckResult[] {
   return out;
 }
 
+/** MANIFEST.json.packVersion must equal package.json version (drift guard).
+ *  `manifestPath` parameter exists for testability; production reads the real
+ *  skills/MANIFEST.json. */
+export function checkManifestVersion(manifestPath: string = join(PROJECT_DIR, "skills", "MANIFEST.json")): CheckResult[] {
+  const out: CheckResult[] = [];
+  try {
+    const m = JSON.parse(readFileSync(manifestPath, "utf-8")) as { packVersion?: unknown };
+    if (m.packVersion !== VERSION) {
+      out.push({ check: "manifest version", passed: false, detail: `MANIFEST.packVersion ${String(m.packVersion)} ≠ v${VERSION}` });
+    }
+  } catch {
+    out.push({ check: "manifest version", passed: false, detail: `cannot read/parse skills/MANIFEST.json` });
+  }
+  if (out.length === 0) out.push({ check: "manifest version", passed: true, detail: `MANIFEST.packVersion == v${VERSION}` });
+  return out;
+}
+
+/** Skill-pack install target must be exactly ~/.hermes/skills/brain-ops/cbrain.
+ *  Rejects a nested suffix (e.g. `/skills/`) that would bury SKILL.md below the
+ *  Hermes scan root. A bare path or single trailing slash is allowed. */
+const INSTALL_TARGET = "~/.hermes/skills/brain-ops/cbrain";
+const INSTALL_TARGET_RE = /(~\/\.hermes\/skills\/brain-ops\/cbrain)([^\s"']*)/g;
+
+export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
+  const out: CheckResult[] = [];
+  for (const [file, text] of docs) {
+    text.split("\n").forEach((line, i) => {
+      if (line.includes("<!-- docs-consistency:ignore-command -->")) return;
+      for (const m of line.matchAll(INSTALL_TARGET_RE)) {
+        const suffix = m[2] ?? "";
+        if (suffix !== "" && suffix !== "/") {
+          out.push({ check: `install-target @${file}:${i + 1}`, passed: false, detail: `target must be exactly ${INSTALL_TARGET}, got ${m[0]}` });
+        }
+      }
+    });
+  }
+  if (out.length === 0) out.push({ check: "install-target path", passed: true, detail: `all skill-pack targets == ${INSTALL_TARGET}` });
+  return out;
+}
+
 /** Matches `cbrain <subcommand>` whether it sits in inline code or a fenced
  *  code block. The leading char class (line-start, backtick, quote, or space)
  *  avoids matching "cbrain" as a bare word inside prose like "the cbrain
@@ -825,6 +865,8 @@ function main(): void {
 
   const results: CheckResult[] = [
     ...checkVersions(docs),
+    ...checkManifestVersion(),
+    ...checkInstallTarget(docs),
     ...checkCommands(docs, new Set(cli.keys())),
     ...checkSyncRecovery(docs, new Set(cli.keys())),
     ...checkCounts(docs, tools.length, cli.size),
