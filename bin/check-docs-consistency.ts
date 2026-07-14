@@ -150,9 +150,10 @@ export function checkManifestVersion(manifestPath: string = join(PROJECT_DIR, "s
   return out;
 }
 
-/** Skill-pack install commands (cp -r / ln -s) must BOTH exist and each
- *  destination must be exactly ~/.hermes/skills/brain-ops/cbrain — catches
- *  wrong parent, wrong basename, nested suffix, and missing copy/symlink. */
+/** Skill-pack install: cp -r and ln -s must each exist, in SEPARATE fenced
+ *  blocks (they are mutually exclusive — running both lets copy follow the
+ *  symlink and write a nested copy back into the canonical pack), and each
+ *  destination must be exactly ~/.hermes/skills/brain-ops/cbrain. */
 const INSTALL_TARGET = "~/.hermes/skills/brain-ops/cbrain";
 
 export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
@@ -160,25 +161,47 @@ export function checkInstallTarget(docs: Map<string, string>): CheckResult[] {
   let cpOk = false;
   let lnOk = false;
   for (const [file, text] of docs) {
-    text.split("\n").forEach((line, i) => {
-      if (line.includes("<!-- docs-consistency:ignore-command -->")) return;
+    const lines = text.split("\n");
+    let inBlock = false;
+    let blockStart = 0;
+    let blockHasCp = false;
+    let blockHasLn = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("```")) {
+        if (inBlock) {
+          if (blockHasCp && blockHasLn) {
+            out.push({ check: `install-target @${file}:${blockStart + 1}`, passed: false, detail: `cp -r 和 ln -s 不得在同一 shell block（二选一；连续执行会让 copy 沿 symlink 写回 canonical pack，产生嵌套副本）` });
+          }
+          inBlock = false;
+          blockHasCp = false;
+          blockHasLn = false;
+        } else {
+          inBlock = true;
+          blockStart = i;
+          blockHasCp = false;
+          blockHasLn = false;
+        }
+        continue;
+      }
+      if (!inBlock || line.includes("<!-- docs-consistency:ignore-command -->")) continue;
       const isCp = /cp\s+-r\b/.test(line);
       const isLn = /ln\s+-s\b/.test(line);
-      if (!isCp && !isLn) return;
+      if (!isCp && !isLn) continue;
       const dests = [...line.matchAll(/(~\/\.hermes\/skills\/[^\s"']+)/g)].map((m) => m[1]);
       for (const dest of dests) {
         if (dest === INSTALL_TARGET) {
-          if (isCp) cpOk = true;
-          if (isLn) lnOk = true;
+          if (isCp) { cpOk = true; blockHasCp = true; }
+          if (isLn) { lnOk = true; blockHasLn = true; }
         } else {
           out.push({ check: `install-target @${file}:${i + 1}`, passed: false, detail: `install dest must be exactly ${INSTALL_TARGET}, got ${dest}` });
         }
       }
-    });
+    }
   }
   if (!cpOk) out.push({ check: "install-target copy", passed: false, detail: `missing cp -r install command targeting ${INSTALL_TARGET}` });
   if (!lnOk) out.push({ check: "install-target symlink", passed: false, detail: `missing ln -s install command targeting ${INSTALL_TARGET}` });
-  if (out.length === 0) out.push({ check: "install-target path", passed: true, detail: `cp -r + ln -s both target ${INSTALL_TARGET}` });
+  if (out.length === 0) out.push({ check: "install-target path", passed: true, detail: `cp -r + ln -s target ${INSTALL_TARGET} in separate blocks` });
   return out;
 }
 

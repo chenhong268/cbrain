@@ -341,15 +341,27 @@ cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
 #   - stale / incompatible / unverified → 路径已有不同内容（可能是私有 skill），
 #     人工排查后再决定；不要直接覆盖
 
-# 3. 安装（仅当 step 2 报 missing）。两种方式任选其一：
-#    符号链接（默认推荐，随 CBrain 升级自动同步）：
+```
+
+3. 安装（仅当 step 2 报 missing）。**方式 A / B 二选一，不要都执行**——连续执行会让 copy 沿 symlink 写回 canonical pack，产生嵌套副本。
+
+**方式 A：符号链接**（默认推荐，随 CBrain 升级自动同步）：
+
+```bash
 mkdir -p ~/.hermes/skills/brain-ops
 ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
-#    或复制：
+```
+
+**方式 B：复制**：
+
+```bash
 mkdir -p ~/.hermes/skills/brain-ops
 cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
+```
 
-# 4. 安装后验证（应报 current）
+4. 安装后验证（应报 current）：
+
+```bash
 cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
 ```
 
