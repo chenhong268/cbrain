@@ -4,7 +4,7 @@
 
 **Issue:** #342
 
-**Status:** Approved for implementation after adversarial review
+**Status:** Revision pending adversarial re-review
 
 **Base:** `3e0d048`
 
@@ -66,7 +66,7 @@ The shared scanner is the single source of truth for Health, `fsck`, and the CLI
 A page is a **rich zero-link record** when all of the following are true at scan time:
 
 1. `pages.type = 'record'`.
-2. It has zero active incoming and outgoing links.
+2. It has zero current-fact, non-self incoming and outgoing links.
 3. At least one richness threshold is true:
    - raw chunk count is at least 2; or
    - total characters across raw chunks are at least 1000; or
@@ -74,7 +74,13 @@ A page is a **rich zero-link record** when all of the following are true at scan
 
 Only `chunks.summary_level = 0` contributes to raw chunk count and raw character count. Derived summaries must not inflate the richness signal.
 
-An active link is a row where the page is either `from_slug` or `to_slug` and `trust_state` is `NULL` or is not `rejected`/`superseded`. Candidate and trusted links both count as active. Rejected and superseded links do not disqualify the page from repair.
+A current graph link is a row where the page is either `from_slug` or `to_slug`, `from_slug != to_slug`, its `trust_state` is not `rejected`/`superseded`, and it passes the existing `isCurrentFactLink` predicate:
+
+- rejected and superseded rows are inactive;
+- candidate `reports_to` is evidence, not a current fact, and is inactive for this repair;
+- other candidate relations and trusted/user-thought relations are current graph links.
+
+The shared helper therefore matches `db.getAllLinks().filter(isCurrentFactLink)` and additionally removes self-loops. It must not call `isCurrentFactLink` on unfiltered rejected/superseded rows or introduce a divergent SQL-only approximation. Health detection and post-worker `graphOutcome` use this same helper.
 
 The scanner must aggregate chunks, tags, and links before joining them to pages so that cross-products cannot inflate counts.
 
@@ -89,8 +95,8 @@ The scanner may carry slugs and content hashes internally, but no public dry-run
 
 Public counters use two explicit populations:
 
-- **current debt population:** records that meet the richness threshold and currently have zero active links. `total`, `actionable`, `selected`, `active`, `cancelled`, `terminalNoGraphLinks`, and `failed` describe this population.
-- **processed success population:** rich records with a current-fingerprint repair result of `graphOutcome = resolved`. `resolved` describes this cumulative success population even though those pages normally leave current debt after receiving an active link.
+- **current debt population:** records that meet the richness threshold and currently have zero current-fact non-self links. `total`, `actionable`, `selected`, `active`, `cancelled`, `terminalNoGraphLinks`, `blockedSourceUnavailable`, `invalidTerminal`, `lostLink`, `unverifiableFingerprint`, and `failed` describe this population.
+- **current processed-success population:** distinct rich record pages whose canonical current-fingerprint repair result is `graphOutcome = resolved` **and** that still have at least one current-fact non-self link. `resolved` counts pages, never job rows.
 
 This distinction is required for rollout measurement: a successful repair reduces `total` and increases `resolved`. The CLI labels these counters explicitly in human output; it must not imply that `resolved` is a subset of current zero-link debt.
 
@@ -125,16 +131,22 @@ export type ZeroLinkDisposition =
   | "new"
   | "legacy_requeue"
   | "content_changed_requeue"
+  | "stale_requeue"
   | "active"
   | "cancelled"
   | "resolved"
   | "terminal_no_graph_links"
+  | "blocked_source_unavailable"
+  | "invalid_terminal"
+  | "lost_link"
+  | "unverifiable_fingerprint"
   | "failed";
 
 export interface ZeroLinkBackfillReport {
   version: 1;
   mode: "dry_run" | "enqueue";
   status: "ok" | "blocked" | "error";
+  batchId?: string;
   total: number;
   actionable: number;
   selected: number;
@@ -144,7 +156,13 @@ export interface ZeroLinkBackfillReport {
   cancelled: number;
   resolved: number;
   terminalNoGraphLinks: number;
+  blockedSourceUnavailable: number;
+  invalidTerminal: number;
+  lostLink: number;
+  unverifiableFingerprint: number;
   failed: number;
+  staleRunning: number;
+  stateConflicts: number;
   thresholds: {
     rawChunks: number;
     rawChars: number;
@@ -156,18 +174,27 @@ export interface ZeroLinkBackfillReport {
 
 The public JSON field names are exactly the camelCase names shown above. Human output uses fixed Chinese labels for the same counters. Tests lock both surfaces.
 
-`contentFingerprint` is the repair invalidation key. It is `pages.content_hash` when present. For a legacy page whose content hash is `NULL`, it is a fixed prefix plus the page `updated_at` value. The fallback is not a content proof, but it is deterministic for an unchanged legacy row and reopens the repair after the normal page-update path advances `updated_at`. The fingerprint never appears in public output.
+`contentFingerprint` is the repair invalidation key:
+
+1. If `pages.content_hash` is a non-empty string, use `page:` plus that hash.
+2. Otherwise, when at least one raw chunk exists, compute a full SHA-256 over a canonical serialization of page type, raw chunks ordered by `(chunk_index, id)` including their content, and tags ordered lexicographically. Prefix it with `derived:`.
+3. If neither a page hash nor any raw chunk exists, the fingerprint is unavailable. Classify the current debt as `unverifiable_fingerprint`; do not enqueue it automatically.
+
+`updated_at` is never used as a fingerprint. Non-content metadata can advance it, and its timestamp resolution cannot prove body identity. The derived hash is computed internally and never appears in public output.
 
 Required functions:
 
 ```ts
-export function scanZeroLinkCandidates(db: CBrainDB): ZeroLinkCandidate[];
-export function planZeroLinkBackfill(db: CBrainDB, limit: number): ZeroLinkBackfillReport;
-export function enqueueZeroLinkBackfill(db: CBrainDB, limit: number): ZeroLinkBackfillReport;
-export function countActiveLinks(db: CBrainDB, slug: string): number;
+export function scanRichRecords(db: ZeroLinkDb): ZeroLinkCandidate[];
+export function scanZeroLinkCandidates(db: ZeroLinkDb): ZeroLinkCandidate[];
+export function planZeroLinkBackfill(db: ZeroLinkDb, limit?: number): ZeroLinkBackfillReport;
+export function enqueueZeroLinkBackfill(db: ZeroLinkDb, limit: number): ZeroLinkBackfillReport;
+export function countCurrentGraphLinks(db: ZeroLinkDb, slug: string): number;
+export function snapshotRepairBatchJobIds(db: ZeroLinkDb, batchId: string, limit: number): number[];
+export function summarizeRepairBatch(db: ZeroLinkDb, batchId: string): RepairBatchStatus;
 ```
 
-`planZeroLinkBackfill` is strictly read-only. `enqueueZeroLinkBackfill` performs selection and all job mutations inside one SQLite transaction.
+`ZeroLinkDb` exposes only a `bun:sqlite` raw database connection. `planZeroLinkBackfill` is strictly read-only. `enqueueZeroLinkBackfill` performs selection and all job mutations inside one SQLite transaction.
 
 ## 6. Job marker and state machine
 
@@ -185,7 +212,8 @@ New or requeued job `data` must include:
   "repair": {
     "name": "zero-link-rich-records",
     "version": 1,
-    "contentFingerprint": "<current repair invalidation key>"
+    "contentFingerprint": "<current repair invalidation key>",
+    "batchId": "<opaque UUID for this enqueue transaction>"
   }
 }
 ```
@@ -199,38 +227,61 @@ After successful processing, `runNerBackfillStage` completes a marked repair job
   "repair": {
     "name": "zero-link-rich-records",
     "version": 1,
-    "contentFingerprint": "<fingerprint captured when scheduled>"
+    "contentFingerprint": "<fingerprint captured when scheduled>",
+    "batchId": "<same opaque UUID>"
   },
   "graphOutcome": "resolved | terminal_no_graph_links",
   "activeLinkCount": 0
 }
 ```
 
-`activeLinkCount` is a scalar audit field whose example value is illustrative. `graphOutcome` is determined after `processNer` finishes by re-reading active incoming/outgoing links. A job is `resolved` when the count is greater than zero; otherwise it is `terminal_no_graph_links`.
+`activeLinkCount` is a scalar audit field whose example value is illustrative. `graphOutcome` is determined after `processNer` finishes by re-reading current-fact non-self incoming/outgoing links. A job is `resolved` when the count is greater than zero; otherwise it is `terminal_no_graph_links`.
 
-The consumer must not trust only the NER return object because a valid extraction can still produce no non-self graph edge.
+The consumer must not trust only the NER return object because a valid extraction can still produce no current-fact non-self graph edge.
+
+Every early terminal path for a marked job must preserve the scheduled `repair` object:
+
+- unusable/missing source completes with fixed `outcome = skipped`, `reason = SOURCE_UNAVAILABLE`, and `graphOutcome = blocked_source_unavailable`;
+- an impossible marked payload discovered after claim completes with fixed `outcome = skipped`, `reason = INVALID_JOB`, and `graphOutcome = invalid_terminal` when the repair object is parseable enough to preserve;
+- provider timeout/error uses a fixed existing reason code and becomes terminal on the first attempt because marked repair jobs have `max_attempts = 1`.
+
+No marked `done` row is allowed to lack a recognized fixed terminal outcome. Historical/corrupt marked `done` rows that do lack one are classified `invalid_terminal`, never guessed as success and never automatically retried.
 
 ### 6.2 Classification precedence
 
-For each eligible candidate, inspect all matching `ner-backfill` jobs whose parsed `data.slug` equals the candidate slug and whose kind is absent/`ner`. Malformed or other-kind rows do not match.
+For each rich record, load all `ner-backfill` rows and parse `data`/`result` in TypeScript under `try/catch`. A malformed JSON row must not abort Health, `fsck`, dry-run, or enqueue. A row matches only when parsed `data.slug` equals the candidate slug and kind is absent/`ner`; other-kind and unparseable rows do not match.
 
-Apply this precedence:
+`running` freshness uses `NER_BACKFILL_STALE_TTL_MS` (30 minutes). A running row is fresh only when `started_at` parses and is newer than the cutoff. Missing, invalid, or older timestamps are stale.
 
-1. Any `pending` or `running` matching row → `active`. Do not submit or mutate another row.
-2. Any `cancelled` matching row → `cancelled`. Respect operator intent permanently; do not reopen it even if content changes.
-3. A current repair-marker terminal row whose marker fingerprint equals the current page fingerprint:
-   - result `graphOutcome = resolved` → `resolved`;
-   - result `graphOutcome = terminal_no_graph_links` → `terminal_no_graph_links`.
-4. A current repair-marker `failed` row whose marker fingerprint equals the current page fingerprint → `failed`. It is visible debt but not automatically retried by this command.
-5. A current repair-marker terminal or failed row whose marker fingerprint differs from the current page fingerprint → `content_changed_requeue`.
-6. An unmarked legacy `done` or `failed` row → `legacy_requeue`.
-7. No matching row → `new`.
+When the page fingerprint is unavailable, still surface fresh active rows and active/cancellation conflicts because work already exists. If there is no active row, classify `unverifiable_fingerprint` before interpreting historical terminal rows; without a current fingerprint the scheduler cannot prove idempotency and performs no mutation.
 
-When more than one row exists in the same applicable class, reuse the highest job id. Never create another row merely because historical duplicates exist.
+Apply this deterministic algorithm:
 
-The only actionable dispositions are `new`, `legacy_requeue`, and `content_changed_requeue`.
+1. Collect every fresh `running` match. Also collect `pending` matches except a marked pending row whose fingerprint differs from the current fingerprint; that row is safe to refresh as `content_changed_requeue`. If one collected active row exists, classify `active`. Increment `stateConflicts` when there is more than one active row, or when an active row coexists with a current-fingerprint cancellation or a legacy cancellation whose scope is unverifiable. Enqueue performs no mutation for a conflicted page and production rollout stops on the conflict.
+2. If there is no fresh active row, choose the highest-id marked row whose repair fingerprint equals the current fingerprint. This is the canonical current row:
+   - stale `running` → `stale_requeue`;
+   - `cancelled` → `cancelled` for this fingerprint only;
+   - `failed` → `failed`;
+   - `done` + `graphOutcome = terminal_no_graph_links` → `terminal_no_graph_links`;
+   - `done` + `graphOutcome = blocked_source_unavailable` → `blocked_source_unavailable`;
+   - `done` + `graphOutcome = invalid_terminal`, missing, malformed, or unknown terminal outcome → `invalid_terminal`;
+   - `done` + `graphOutcome = resolved` requires an actual current-fact non-self link. With a current link it contributes one distinct page to `resolved`; without one it is `lost_link`, not resolved and not automatically requeued.
+3. If no current-fingerprint row exists, choose the highest-id marked row for an older/different fingerprint. A pending, stale running, done, failed, or cancelled old-fingerprint row is `content_changed_requeue`; cancellation is row/fingerprint-scoped, not a permanent page-wide veto.
+4. If no marked row exists, choose the highest-id unmarked legacy row:
+   - pending/fresh running was already caught by step 1;
+   - stale running, `done`, or `failed` → `legacy_requeue` (stale is reported in `staleRunning`);
+   - `cancelled` has no trustworthy fingerprint scope → `cancelled` and needs review; it is never automatically reopened.
+5. No matching row → `new`.
 
-This makes one repair attempt terminal for an unchanged content fingerprint. A page update is the only automatic way to make a marked terminal/failed candidate actionable again. A cancelled row is never automatically reopened.
+Lower-id historical rows are ignored after canonical selection and never counted as additional pages. Conflicting current-fingerprint terminal outcomes increment `stateConflicts` even though the highest id remains canonical.
+
+The only actionable dispositions are `new`, `legacy_requeue`, `content_changed_requeue`, and `stale_requeue`.
+
+If any current-debt page contributes `stateConflicts > 0`, enqueue is fail-closed for the whole invocation: return `status = blocked`, create no `batchId`, and perform zero job mutations. Dry-run still reports the scalar conflict count so the operator can investigate.
+
+`lost_link` is conservative: an edge may have been deliberately deleted, rejected, or superseded. It remains visible `needs_review` debt instead of silently recreating a relation against later governance. A content fingerprint change makes the old marker eligible for `content_changed_requeue`.
+
+This makes one repair attempt terminal for an unchanged content fingerprint. Current-fingerprint cancellation is respected; changed content may be reconsidered. A legacy cancellation without a fingerprint remains review-only because its intended scope cannot be proven.
 
 ### 6.3 Requeue mutation
 
@@ -240,17 +291,18 @@ Requeue must reuse the selected row and atomically:
 - replace `data` with the current marked payload;
 - clear `result`, `error`, `started_at`, and `finished_at`;
 - reset `attempts = 0`;
+- set `max_attempts = 1` for this marked repair;
 - set bounded repair priority.
 
-New rows use the same marked payload and priority.
+New rows use the same marked payload and priority with `max_attempts = 1`.
 
 Priorities preserve scanner order within the selected batch and place this explicit repair batch ahead of ordinary default-priority NER jobs. A legal `--limit` must be small enough that all computed priorities remain positive.
 
-If any mutation fails, the entire batch transaction rolls back. The command must never return a partial success count.
+Selection, batch UUID generation, rescan, inserts, and requeues run under `BEGIN IMMEDIATE`. This obtains the SQLite write reservation before reading candidate/job state, preventing two concurrent CLI processes from both planning the same rows. On success the command commits; on any error it rolls back. It must never return a partial success count.
 
 ### 6.4 Failed jobs
 
-Provider errors and timeouts continue through the existing `failJob` behavior. The repair marker remains in `data`, so the scanner reports the failure without resubmitting it on every run.
+Provider errors and timeouts continue through the existing `failJob` behavior. Because marked jobs have `max_attempts = 1`, their first claimed failure becomes `failed`, not `pending`. The repair marker remains in `data`, so the scanner reports the failure without resubmitting it on every run.
 
 The existing broad `cbrain ner-backfill --retry-failed` command is not called automatically by this issue. Investigation and explicit operator action are required before retrying a current-fingerprint repair failure.
 
@@ -284,7 +336,7 @@ This change is intentionally limited to mention-edge consistency. It does not pr
 
 ## 8. CLI contract
 
-Register a top-level command in `src/cli/commands/maintenance.ts`:
+Register a top-level command through a dedicated `src/cli/commands/zero-link-backfill.ts` module and `src/cli/program.ts`:
 
 ```text
 cbrain zero-link-backfill [--limit <n>] [--enqueue] [--json]
@@ -298,17 +350,47 @@ Rules:
 - `--limit` must be an integer in `[1, 500]` for enqueue mode. Dry-run may omit it and reports all counts; if supplied it controls only `selected`, not `total`/state counts.
 - Enqueue mode calls the existing live lock probe and refuses when an active serve or watcher owns the profile.
 - Enqueue does not require an LLM because it schedules jobs only.
-- The command never processes jobs. The operator invokes `cbrain ner-backfill --limit <same batch size> --json` separately while the writer remains stopped.
+- A successful non-empty enqueue returns one opaque UUID `batchId`; it contains no page identity or user data. Every selected job receives the same `repair.batchId`.
+- The command never processes jobs. The operator invokes `cbrain ner-backfill --repair-batch <batchId> --limit <same batch size> --json` separately while the writer remains stopped.
 - Non-JSON output contains only the same scalar categories and fixed guidance. It must not print candidate titles, slugs, bodies, paths, job payloads, or LLM text.
 - JSON errors use stable `status`, `code`, and a sanitized fixed message. No stack trace or raw exception message is emitted.
+
+The existing `ner-backfill` command gains `--repair-batch <uuid>`:
+
+- validate UUID syntax before opening the DB;
+- when present, snapshot and claim only `ner-backfill` rows whose safely parsed marker name is `zero-link-rich-records` and marker batch id exactly matches;
+- ignore ordinary NER jobs and every `entity_facts` job, regardless of priority;
+- reject combination with broad `--retry-failed`;
+- preserve current unfiltered behavior when the option is absent;
+- return scalar per-batch terminal status counts (`pending`, `running`, `done`, `failed`, `cancelled`) after processing so the operator can prove no selected row remains active.
+
+Filtering is performed by safe TypeScript JSON parsing, not unguarded SQLite `json_extract`, because one malformed historical job must not crash the consumer.
 
 Suggested stable error codes:
 
 - `INVALID_LIMIT`
 - `WRITER_ACTIVE`
 - `ENQUEUE_FAILED`
+- `CONFIG_INVALID`
+- `DB_NOT_FOUND`
+- `DB_OPEN_FAILED`
+- `INVALID_BATCH_ID`
+- `STATE_CONFLICT`
 
 The lock-blocked response may include operational owner kind and PID, matching the existing `ner-backfill` safety response, but no filesystem path.
+
+### 8.1 CLI dependency and open order
+
+This command does not call `loadConfig()` or `createDeps()`.
+
+1. Use `loadConfigSafe()` and validate that `dbPath` is a non-empty string. Map missing/malformed config to fixed `CONFIG_INVALID` without printing the config path.
+2. Verify the DB path exists before opening it. `DB_NOT_FOUND` must not create a parent directory or empty database.
+3. For enqueue, derive the profile directory, run the live lock probe, and refuse before opening a writable DB.
+4. Dry-run opens `bun:sqlite` `Database` with `{ readonly: true }`; it runs no migrations and constructs no embedding, LLM, or Lance dependency.
+5. Enqueue opens only the existing SQLite database, sets bounded busy timeout and foreign keys, but runs no migrations. `BEGIN IMMEDIATE` provides the mutation lock.
+6. Any open/config/internal exception maps to a fixed sanitized envelope; raw exception messages and paths are never printed.
+
+The shared scanner accepts a minimal raw-database interface so Health/`fsck` can pass `CBrainDB.rawDb` while the CLI can use a truly read-only connection.
 
 ## 9. Health integration
 
@@ -322,7 +404,7 @@ When any exist, emit exactly one medium-severity issue:
 
 - stable synthetic slug: `system/zero-link-rich-records`;
 - fixed title with no page-derived text;
-- description containing only scalar current-debt `total`, `actionable`, `active`, `terminal_no_graph_links`, and `failed` counts plus cumulative current-fingerprint `resolved` count;
+- description containing only scalar current-debt `total`, `actionable`, `active`, `terminal_no_graph_links`, `blocked_source_unavailable`, `invalid_terminal`, `lost_link`, `unverifiable_fingerprint`, `failed`, and `state_conflicts` counts plus distinct current-success `resolved` count;
 - suggestion: run dry-run `cbrain zero-link-backfill --json`.
 
 The dimension is `warn`, not `fail`. This is semantic repair debt, not proof of database corruption.
@@ -340,7 +422,7 @@ The aggregate issue avoids adding hundreds of page-level entries, avoids leaking
 - `severity`: `warning`
 - `count`: total rich zero-link records
 - `sampleSlugs`: at most five values, passed through the existing `anonymizeSlugs` helper
-- `detail`: scalar current-debt totals for actionable, active, terminal-no-link, and failed plus cumulative current-fingerprint resolved count
+- `detail`: scalar current-debt totals for actionable, active, terminal-no-link, blocked-source, invalid-terminal, lost-link, unverifiable-fingerprint, failed, and state-conflict plus distinct current-success resolved count
 - `suggestedCommand`: `cbrain zero-link-backfill --json`
 
 The finding is diagnostic only. It is not added to deterministic `fsck` repair execution rules.
@@ -353,6 +435,7 @@ Allowed public output:
 
 - fixed schema/version/mode/status/error code;
 - scalar counts and threshold counts;
+- opaque repair batch UUID;
 - boolean blocked state;
 - live owner kind/PID when mutation is refused;
 - anonymous `fsck` sample tokens;
@@ -368,11 +451,12 @@ Logs added by this issue must be scalar-only. Existing lower-level logs are not 
 
 ## 12. Concurrency and consistency
 
-- Dry-run is read-only and may execute while serve/watcher is active.
+- Dry-run uses a SQLite read-only connection, runs no migrations, and may execute while serve/watcher is active.
 - Enqueue refuses an active writer before opening the mutation transaction.
-- The transaction repeats candidate scan and state classification inside the write transaction; it must not reuse a stale plan produced before the lock check.
+- Enqueue starts with `BEGIN IMMEDIATE`, then repeats candidate scan and state classification inside the write transaction; it must not reuse a stale plan produced before the lock check.
 - All selected job rows are inserted/requeued atomically.
 - The existing worker claims each pending job atomically by id.
+- Batch-filtered worker snapshots and claims only the exact repair batch UUID; unrelated NER and entity-facts rows are outside its candidate set.
 - A concurrent job appearing between an external dry-run and enqueue is detected by the transactional rescan and classified `active`.
 - The command does not write the vault. The worker may write vault/entity state through the existing pipeline, so it remains subject to the existing writer lock rule.
 
@@ -382,12 +466,13 @@ Production repair is authorized for this issue, but must occur only after focuse
 
 ### 13.1 Preflight
 
-1. Record the current git commit and sanitized config summary.
-2. Back up SQLite, vault, and required runtime configuration using the repository-supported backup path.
-3. Verify the backup artifact exists and is non-empty.
-4. Stop the active serve/watcher writer and verify the lock probe reports no owner.
-5. Run `cbrain zero-link-backfill --json` and record scalar counts only.
-6. Run FK and consistency checks before the first batch.
+1. Record the current git commit.
+2. Stop the active serve/watcher writer and verify the lock probe reports no owner.
+3. Run `cbrain backup -o <private-backup-dir>` to create the repository-supported full archive.
+4. Verify the zip exists, is non-empty, passes `unzip -t`, and contains the configured DB basename plus `vault/`; when the configured Lance path exists, also require `lancedb/` entries. Do not print archive paths in the delivery report.
+5. Record a sanitized configuration summary separately; configuration and credentials are not claimed to be restorable from the archive.
+6. Run `cbrain zero-link-backfill --json` and record scalar counts only.
+7. Run FK and consistency checks before the first batch.
 
 ### 13.2 Per-batch sequence
 
@@ -396,14 +481,15 @@ Run batch sizes in this exact progression: 5, then 20, then 50.
 For each batch:
 
 1. Create or verify a restorable pre-batch backup.
-2. Run `cbrain zero-link-backfill --enqueue --limit <N> --json`.
-3. Assert `selected <= N` and `newJobs + requeuedJobs = selected`.
-4. Run `cbrain ner-backfill --limit <N> --json` using the existing configured provider.
-5. Re-run dry-run, `fsck`, FK checks, and consistency checks.
-6. Record scalar deltas for resolved, terminal-no-link, active, actionable, and failed.
-7. Proceed only when every stop gate remains clear.
+2. Run `cbrain zero-link-backfill --enqueue --limit <N> --json` and capture its opaque `batchId` privately.
+3. Assert `selected <= N`, `newJobs + requeuedJobs = selected`, and `stateConflicts = 0`.
+4. Run `cbrain ner-backfill --repair-batch <batchId> --limit <N> --json` using the existing configured provider.
+5. Assert this exact batch reports zero `pending` and zero `running`; ordinary NER/entity-facts jobs must be unchanged.
+6. Re-run dry-run, `fsck`, FK checks, and consistency checks.
+7. Record scalar deltas for resolved, terminal-no-link, blocked-source, invalid-terminal, lost-link, active, actionable, and failed.
+8. Proceed only when every stop gate remains clear.
 
-The first batch is a canary. At least one of its five candidates must become `resolved`. If all five finish as `terminal_no_graph_links`, stop before the 20 batch because the repair is not demonstrating useful graph recovery.
+The first batch is a canary. At least one of its five candidates must become `resolved`. If zero resolve—whether the outcomes are all terminal-no-link or a mix of blocked/failed/invalid states—stop before the 20 batch because the repair is not demonstrating useful graph recovery.
 
 ### 13.3 Immediate stop conditions
 
@@ -411,12 +497,14 @@ Stop the rollout and do not enqueue the next batch on any of:
 
 - provider error, timeout, or unexpected exception;
 - duplicate job creation or any partial transaction;
+- duplicate active/state conflict reported by the scanner;
 - zero resolved records in the five-item canary;
 - FK violation increase;
 - new SQLite/vault/FTS consistency regression;
 - public output or logs leaking forbidden private fields;
 - writer process detected during mutation;
 - mismatch between selected count and inserted/requeued count.
+- any selected batch row left pending/running after the batch-filtered consumer returns.
 
 ### 13.4 Rollback
 
@@ -424,9 +512,10 @@ If a batch creates a data or vault consistency regression:
 
 1. Keep serve/watcher stopped.
 2. Preserve sanitized diagnostics and scalar counts.
-3. Restore SQLite and vault from the pre-batch backup as one matched snapshot.
-4. Re-run FK, `fsck`, and consistency checks.
-5. Restart serve only after the restored state passes the preflight checks.
+3. Run `cbrain restore <pre-batch-zip> --force` to restore its matched SQLite + vault snapshot.
+4. The NER backfill path in this issue does not call Lance write APIs, so the pre-batch Lance directory remains unchanged and stays matched to the restored source snapshot. If verification detects any unexpected Lance mutation, restore `lancedb/` manually from the same archive while services remain stopped.
+5. Re-run FK, `fsck`, and consistency checks, including Lance verification.
+6. Restart serve only after the restored state passes the preflight checks.
 
 If the batch merely produces legitimate `terminal_no_graph_links` outcomes without data corruption, do not restore; those terminal markers prevent repeated LLM spend. Stop the progression if the canary usefulness gate fails.
 
@@ -451,8 +540,11 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - ignores derived summary chunks;
 - excludes a page with active candidate or trusted incoming/outgoing link;
 - does not count rejected or superseded links as active;
+- does not count candidate `reports_to` or any self-loop as a current graph link;
 - prevents chunk/tag/link join multiplication;
 - orders deterministically and applies selection limit after ordering;
+- derives a stable SHA-256 fallback from ordered raw content/type/tags, never `updated_at`;
+- classifies a no-hash/no-raw-chunk page as unverifiable and non-actionable;
 - returns no page-derived text in the public report.
 
 ### 14.2 State-machine and transaction tests
@@ -460,15 +552,22 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - no job → new row;
 - legacy done → same row requeued once;
 - legacy failed → same row requeued once;
-- pending/running → skipped as active;
-- cancelled → never reopened, including after content change;
-- marked resolved same fingerprint → terminal resolved;
+- pending/fresh running → skipped as active;
+- stale running → same row requeued, with TTL boundary covered;
+- current-fingerprint cancelled → not reopened; changed fingerprint → same row requeued;
+- legacy cancelled without fingerprint → review-only, not reopened;
+- marked resolved same fingerprint + current non-self fact link → distinct-page resolved;
+- marked resolved same fingerprint + lost/rejected/superseded link → lost-link, not resolved or auto-requeued;
 - marked no-link same fingerprint → terminal no-link;
 - marked failed same fingerprint → reported failed, not automatically retried;
+- marked source-unavailable → blocked terminal;
+- marked done with missing/unknown result → invalid terminal;
 - marked terminal/failed changed fingerprint → same row requeued;
 - multiple historical matching rows → deterministic reuse, no new duplicate;
-- malformed/unrelated-kind jobs do not match;
+- duplicate active/conflicting current rows → scalar conflict, no mutation;
+- malformed JSON/unrelated-kind jobs do not match and do not crash scanner;
 - injected mutation failure rolls back every row in the selected batch;
+- two connections racing enqueue serialize under `BEGIN IMMEDIATE` and create one batch of work;
 - repeated enqueue with unchanged state creates no duplicate work.
 
 ### 14.3 Pipeline tests
@@ -482,11 +581,16 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 
 ### 14.4 Worker-result tests
 
-- marked job with resulting active edge completes as `resolved`;
+- marked job with a resulting current-fact non-self edge completes as `resolved`;
 - marked job with no resulting active edge completes as `terminal_no_graph_links`;
+- source unavailable preserves repair marker/fingerprint/batch and completes blocked;
+- impossible marked terminal preserves what can be safely retained and completes invalid;
 - legacy job retains legacy compatible completion shape;
-- NER timeout/provider failure preserves marker in `data` and produces sanitized existing error code;
+- first NER timeout/provider failure is immediately terminal for a marked job (`max_attempts = 1`) while legacy retry behavior remains unchanged;
 - content fingerprint in the terminal marker is the scheduled fingerprint, not a later mutable page value.
+- batch-filtered consumer processes only the exact repair batch and leaves ordinary NER/entity-facts jobs untouched;
+- malformed job JSON cannot crash filtered snapshotting;
+- filtered result reports zero active rows only when the exact batch is complete.
 
 ### 14.5 CLI tests
 
@@ -496,6 +600,10 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - dry-run works with active writer;
 - enqueue refuses active writer before writes;
 - enqueue does not require an LLM;
+- dry-run uses a true read-only connection, performs no migration, and does not create a missing DB;
+- enqueue checks the writer lock before opening a writable connection;
+- missing/malformed config and missing/open-failed DB use fixed sanitized codes;
+- enqueue returns an opaque UUID batch id only for selected work;
 - output schema and counts are stable;
 - human and JSON outputs contain no fixture slug/title/body/path/job payload;
 - thrown internal error maps to a stable sanitized code/message.
@@ -507,6 +615,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - health-debt classifies it as `needs_review`;
 - `fsck` emits the stable check id, warning severity, correct count, and at most five anonymous samples;
 - no deterministic repair-plan rule executes it.
+- current-success `resolved` counts distinct pages, not historical job rows, and requires a current non-self fact link.
 
 ### 14.7 Final gates
 
@@ -524,12 +633,14 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 Required/allowed changes are limited to:
 
 - `src/core/maintenance/zero-link-backfill.ts` (new)
+- `src/core/ingestion/ner-backfill-contract.ts` (new; shared job name/TTL/repair marker constants, re-exported for compatibility)
 - `src/core/ingestion/pipeline.ts`
 - `src/core/ingestion/ner-backfill.ts`
 - `src/core/maintenance/health.ts`
 - `src/core/maintenance/health-debt.ts`
 - `src/core/fsck/sqlite-probe.ts`
-- `src/cli/commands/maintenance.ts`
+- `src/cli/commands/zero-link-backfill.ts` (new, isolated safe open/error wiring)
+- `src/cli/commands/maintenance.ts` and `src/cli/program.ts` only for `ner-backfill --repair-batch` and command registration
 - focused tests under `tests/core/maintenance`, `tests/core/ingestion`, `tests/core/fsck`, and `tests/cli`
 - command/help/docs consistency files only if required by existing gates
 
@@ -556,8 +667,26 @@ Before independent review, the design was attacked against the five most likely 
 
 1. **A successful NER call still leaves zero links.** Root cause was the missing mention edge for existing/alias resolution. The design fixes that path and classifies the result from actual post-run graph state rather than the NER return object.
 2. **Repeated runs spend LLM tokens forever.** The repair marker, fingerprint, terminal no-link outcome, cancelled-state rule, and current-fingerprint failed state make unchanged work non-actionable.
-3. **A legacy job or concurrent writer creates duplicates.** Matching inspects all historical rows, reuses one deterministic row, skips pending/running work, refuses a live writer, and rescans inside one transaction.
-4. **Successful repairs disappear from the report.** Current debt and cumulative processed success are defined as separate populations, so `total` can fall while `resolved` rises.
+3. **A legacy job or concurrent writer creates duplicates.** Matching safely parses all historical rows, reuses one deterministic row, respects active/current-fingerprint state, refuses a live writer, and rescans under `BEGIN IMMEDIATE`.
+4. **Successful repairs disappear from the report.** Current debt and distinct current processed success are separate populations; success still requires a live non-self current-fact edge, so `total` can fall while trustworthy `resolved` rises.
 5. **Diagnostics leak private knowledge.** CLI/Health expose scalar-only reports; `fsck` samples pass through existing anonymization; internal slugs/fingerprints remain in SQLite only; errors are stable and sanitized.
 
 These defenses are requirements, not commentary. The independent adversarial reviewer must still verify them against current code and identify any missing state, privacy, or rollback path before implementation starts.
+
+## 18. Independent adversarial review correction record
+
+The first independent review of commit `cf6bf92` returned FAIL with nine HIGH and two MEDIUM findings. This revision resolves them as follows:
+
+1. Marked source-unavailable and invalid terminal paths now preserve repair identity and have complete classifications.
+2. Fresh and stale running jobs use the existing 30-minute TTL; stale rows are recovered individually.
+3. Marked repair jobs set `max_attempts = 1`, making the first provider failure terminal while legacy retry behavior remains unchanged.
+4. Connectivity now requires active-trust + `isCurrentFactLink` + non-self semantics.
+5. Historical resolved results are revalidated against the current graph; lost links become review debt.
+6. `resolved` counts canonical current-fingerprint distinct pages, never historical job rows.
+7. NULL page hashes use a deterministic content-derived SHA-256 when possible; unverifiable pages are not enqueued.
+8. Cancellation is scoped to the canonical fingerprint; legacy cancellation is review-only and conflicting active/cancelled state fails closed.
+9. Each enqueue receives an opaque batch UUID, and the consumer filters exactly that batch instead of processing unrelated NER jobs.
+10. Dry-run uses a true read-only SQLite connection and fixed safe config/DB error envelopes; enqueue checks the writer before writable open and uses no unrelated providers.
+11. Production backup is the repository full archive; rollback restores DB+vault and explicitly accounts for the worker's non-mutation of Lance.
+
+The same independent reviewer must re-run after this correction commit. Implementation may start only when the reviewer reports no CRITICAL/HIGH findings.
