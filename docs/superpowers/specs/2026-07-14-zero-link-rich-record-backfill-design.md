@@ -295,7 +295,7 @@ Pre-call verification is necessary but not sufficient because `nerEngine.extract
 1. Invoke it immediately after extraction returns, before shadow-verifier/audit side effects or the empty-extraction return. For an empty extraction, run the shadow verifier only after this guard succeeds, then return.
 2. For a non-empty extraction, defer the shadow verifier along with resolver alias writes. Invoke the guard again immediately after the final `semanticResolve()` await inside `applyExtraction`; only after it succeeds may the shadow audit and then the first entity, alias, mention-count, page, fact, link, relation, or event write occur.
 3. No await is permitted between the final successful guard and the first/subsequent extraction writes.
-4. A guard returns/throws one of two fixed signals without source text: `NER_SOURCE_CHANGED` when bytes differ, or `NER_SOURCE_UNAVAILABLE` when the required vault file/raw chunk set disappeared. The worker discards the entire extraction. It maps them respectively to `source_changed` or `blocked_source_unavailable`, both `skipped`, with zero extraction **or shadow-audit** writes. It must not write stale ingest-log audit, entities, relations, facts, events, aliases, mention counts, stubs, or links.
+4. Each guard first validates the attempt lease from §6.6, then source bytes. It returns/throws fixed signals without source text: `NER_ATTEMPT_REVOKED`, `NER_SOURCE_CHANGED`, or `NER_SOURCE_UNAVAILABLE`. Revoked attempts perform no job completion/failure because another transition owns the row. Source signals map respectively to `source_changed` or `blocked_source_unavailable`, both `skipped`, using lease-CAS completion. All failures produce zero extraction **or shadow-audit** writes and must not write stale ingest-log audit, entities, relations, facts, events, aliases, mention counts, stubs, or links.
 
 `EntityResolver.resolveAll` and `semanticResolve` currently write aliases before returning. Guarded calls must enable a defer-writes mode: resolution records deterministic full intents and performs no alias mutation during either resolver phase:
 
@@ -477,6 +477,27 @@ For `kind = ner`, `submitDeferredNer` runs this entire sequence in one `BEGIN IM
 `entity_facts` retains its existing identity/behavior and does not require this source fingerprint; its structured result maps existing insert/dedupe behavior to `inserted`/`existing_active`. The transaction boundary prevents two connections from both observing no attempt and inserting duplicates. Before LLM use, ordinary rows with `sourceFingerprint` rederive and verify the same source bytes as repair rows; drift completes fixed `skipped/source_changed` with zero LLM and preserves the scheduled fingerprint. This zero-LLM outcome is excluded from the processed ledger, so the fingerprint may be attempted later if it becomes current again. Legacy ordinary rows without it retain pre-#342 behavior only for slugs with no repair history.
 
 Ordinary terminal-ledger membership is exact: `status=done` counts only with `result.outcome=processed`; `status=failed` and user `status=cancelled` count under their explicit retry/cancellation policies. `done` with `skipped/source_changed`, `skipped/source_unavailable`, `skipped/invalid`, or any unknown/malformed result remains audit-only and never dedupes a future stable fingerprint.
+
+### 6.6 Atomic claim and attempt lease
+
+The NER stage must not use existing non-atomic `claimJobById`. Add scoped lease-CAS operations for `ner-backfill`:
+
+```ts
+interface NerAttemptLease {
+  jobId: number;
+  token: string; // random UUID, internal only
+  sourceFingerprint: string | null;
+  batchId: string | null;
+}
+```
+
+Claim generates a random token, safely parses the pending row, inserts `attemptLease:{version:1,token}` into its job `data`, and performs one conditional update requiring the exact id, name, `status='pending'`, and unchanged prior `data`. It sets running/attempts/started_at and returns the updated row only when affected rows equal one; otherwise claim returns null. A single `UPDATE ... RETURNING` is preferred, or conditional UPDATE + checked `changes === 1` in one transaction. Repair/ordinary marker validation explicitly permits the internal lease field only while running.
+
+Every durable source guard synchronously re-reads the row and requires `status='running'`, exact lease token, job name, scheduled source fingerprint, and repair batch identity when present. A mismatch is `NER_ATTEMPT_REVOKED`, checked both after extract and after semantic resolution.
+
+Normal complete/fail/source-skip operations are also conditional lease CAS: update only when id/name/status/token/scheduled identity still match, and atomically remove `attemptLease` whenever status leaves running (including fail-to-pending). Affected rows zero means the attempt was revoked and the worker performs no further job or knowledge mutation. Stale transition atomically changes the predecessor away from running, strips its current token, and thereby revokes it before releasing the successor. Reclaim writes a new random token; an old worker can never complete the newer attempt even if job id, fingerprint, attempts, or timestamp repeat.
+
+The lease token is omitted by every public projection and log. This is a scoped NER safety primitive; unrelated generic job claim semantics are unchanged.
 
 ## 7. NER write-path correction
 
@@ -838,6 +859,9 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - ordinary F2 terminal → F3 terminal → revert F2 dedupes against J2's frozen source fingerprint and inserts no J4;
 - sealed page with stable page hash H but raw fingerprints D1→D2→D3 creates distinct ordinary epochs and never conflates D2 with D3;
 - two DB connections racing ordinary submit for one unseen fingerprint serialize under `BEGIN IMMEDIATE` and create exactly one row;
+- two stages may both snapshot J, but scoped conditional claim returns one lease only, increments attempts once, and invokes LLM once;
+- paused J1 semantic call → TTL lease revocation/source-changed → source reverts F1 → old call resumes: both guards/lease-CAS prevent every audit/knowledge/job overwrite and preserve revoked terminal result;
+- reset/reclaim of the same job creates a new token; old attempt completion/failure cannot overwrite the new running/terminal attempt;
 - normalized body hash, full document hash, and absent caller hash all derive canonical `pageContentHash` from DB; structured disposition makes `nerPending` true only for durable live work;
 - deleting and recreating a slug with changed content permits one new internal deferred NER instead of inheriting permanent repair starvation;
 - `entity_facts` rows sharing a slug with repair history retain ordinary reset/claim/retry behavior;
@@ -903,6 +927,7 @@ Required/allowed changes are limited to:
 - `src/core/ingestion/entity-resolver.ts` only for guarded defer-alias-write mode
 - `src/core/ingestion/ner-backfill.ts`
 - `src/core/ingestion/ner-write-path.ts` for structured submit disposition → accurate `nerPending`
+- `src/storage/sqlite.ts` only for scoped NER lease-CAS claim/complete/fail/transition primitives and required job queries
 - `src/core/maintenance/health.ts`
 - `src/core/maintenance/health-debt.ts`
 - `src/core/fsck/sqlite-probe.ts`
@@ -1092,3 +1117,12 @@ The thirteenth review returned FAIL with two HIGH and one required MEDIUM findin
 3. Transition dispositions have an internal union and one frozen public projection: fresh maps to active; stale maps to active plus stale-running; neither is actionable/selected or publicly named.
 
 The independent reviewer must run a fourteenth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 31. Fourteenth adversarial review correction record
+
+The fourteenth review returned FAIL with two HIGH findings. This revision closes both:
+
+1. NER uses a scoped conditional claim that returns a random attempt lease; two stages may share a snapshot but only one can transition pending to running or call LLM.
+2. Source guards and all completion/failure paths validate the lease. TTL transition revokes the old token before successor release, so a zombie worker cannot regain write authority after source reversion or overwrite the frozen terminal result.
+
+The independent reviewer must run a fifteenth pass. The gate remains no CRITICAL/HIGH findings.
