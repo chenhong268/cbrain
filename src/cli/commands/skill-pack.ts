@@ -143,7 +143,7 @@ export function loadManifest(skillsDir: string): PackManifest {
   const files = m.files as string[];
   const seen = new Set<string>();
   for (const name of files) {
-    if (name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.startsWith("/") || name === MANIFEST_FILENAME) {
+    if (name.length === 0 || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.startsWith("/") || name === MANIFEST_FILENAME) {
       throw new Error(`MANIFEST_INVALID: unsafe or self-referential file entry "${name}"`);
     }
     if (seen.has(name)) {
@@ -158,7 +158,14 @@ export function loadManifest(skillsDir: string): PackManifest {
   }
   const onDisk = new Set(
     readdirSync(skillsDir)
-      .filter((f) => statSync(resolve(skillsDir, f)).isFile())
+      .filter((f) => {
+        try {
+          return statSync(resolve(skillsDir, f)).isFile();
+        } catch {
+          // broken symlink or unstatable entry — treat as not a regular file
+          return false;
+        }
+      })
       .filter((f) => f !== MANIFEST_FILENAME),
   );
   const manifestSet = new Set(files);
@@ -356,8 +363,12 @@ export function compareTarget(
   const files: TargetFileCheck[] = canonicalManifest.files.map((name) => {
     const canonicalHash = fileHash(resolve(skillsDir, name));
     const targetHash = fileHash(resolve(targetDir, name));
-    if (targetHash === null) return { name, state: "missing" as const };
+    // canonical unreadable → no baseline for this file
     if (canonicalHash === null) return { name, state: "unverified" as const };
+    // target unreadable (file exists per exact-inventory but read fails) → content
+    // differs from canonical → stale. NOT missing: missing is path-absent only and
+    // would wrongly trigger install-command display for an existing target.
+    if (targetHash === null) return { name, state: "stale" as const };
     if (targetHash === canonicalHash) return { name, state: "current" as const };
     return { name, state: "stale" as const };
   });
@@ -446,49 +457,73 @@ export function register(program: Command) {
     .option("--json", "Output machine-readable JSON")
     .option("--target <path>", "Compare target directory against canonical pack")
     .action((opts) => {
-      try {
-        const skillsDir = resolveSkillsDir();
-        const report = verifySkillPack(skillsDir);
+      const skillsDir = resolveSkillsDir();
 
-        // Derive aggregate command status
-        let status: CommandStatus = report.verificationStatus === "fail" ? "fail"
-          : report.verificationStatus === "warn" ? "warn"
-          : "pass";
+      // --target: compare target against canonical. Canonical failure does NOT
+      // produce an error envelope here — compareTarget returns `unverified` and we
+      // emit a normal report with target.status (spec §3.2 precedence row 1).
+      if (opts.target) {
+        const targetDir = resolve(opts.target);
+        const comparison = compareTarget(skillsDir, targetDir);
 
-        // If --target provided, run comparison (no throw on absent path —
-        // compareTarget classifies it as `missing`; only canonical failure throws).
-        if (opts.target) {
-          const targetDir = resolve(opts.target);
-          const comparison = compareTarget(skillsDir, targetDir);
-
-          // canonical fail propagates as fail regardless of target
-          if (report.verificationStatus === "fail") {
-            status = "fail";
-          } else if (comparison.status !== "current") {
-            status = "fail";
-          }
-
-          const enriched: SkillPackReport = {
-            ...report,
-            status,
-            target: {
-              path: targetDir,
-              ...comparison,
+        let report: SkillPackReport;
+        let canonicalFailed = false;
+        try {
+          report = verifySkillPack(skillsDir);
+        } catch {
+          // canonical MANIFEST/inventory/version failure — target is unverified
+          canonicalFailed = true;
+          report = {
+            version,
+            packPath: skillsDir,
+            entrypointPath: resolve(skillsDir, "SKILL.md"),
+            requiredFiles: [],
+            missingFiles: [],
+            sizeStatus: "ok",
+            entrypointChars: 0,
+            verificationStatus: "fail",
+            status: "fail",
+            guidance: {
+              copyCommand: `cp -r "${skillsDir}/" "<target>/"`,
+              symlinkCommand: `ln -s "${skillsDir}" "<target>"`,
             },
           };
-
-          if (opts.json) {
-            process.stdout.write(JSON.stringify(enriched, null, 2) + "\n");
-          } else {
-            process.stdout.write(formatHuman(enriched));
-          }
-
-          if (status === "fail" || status === "warn") {
-            process.exitCode = 1;
-          }
-          return;
         }
 
+        const status: CommandStatus = canonicalFailed || report.verificationStatus === "fail"
+          ? "fail"
+          : comparison.status !== "current"
+            ? "fail"
+            : report.verificationStatus === "warn"
+              ? "warn"
+              : "pass";
+
+        const enriched: SkillPackReport = {
+          ...report,
+          status,
+          target: {
+            path: targetDir,
+            ...comparison,
+          },
+        };
+
+        if (opts.json) {
+          process.stdout.write(JSON.stringify(enriched, null, 2) + "\n");
+        } else {
+          process.stdout.write(formatHuman(enriched));
+        }
+        if (status === "fail" || status === "warn") {
+          process.exitCode = 1;
+        }
+        return;
+      }
+
+      // No --target: canonical self-check only (may throw → error envelope).
+      try {
+        const report = verifySkillPack(skillsDir);
+        const status: CommandStatus = report.verificationStatus === "fail" ? "fail"
+          : report.verificationStatus === "warn" ? "warn"
+          : "pass";
         const reportWithStatus: SkillPackReport = { ...report, status };
 
         if (opts.json) {
@@ -496,7 +531,6 @@ export function register(program: Command) {
         } else {
           process.stdout.write(formatHuman(reportWithStatus));
         }
-
         if (status === "fail" || status === "warn") {
           process.exitCode = 1;
         }
@@ -506,15 +540,15 @@ export function register(program: Command) {
 
         // Map to stable error code — check most specific patterns first
         let code = "PACK_INVALID";
-        if (message.includes("Skills directory not found") || message.includes("Skills path is not a directory")) {
+        if (message.startsWith("Skills directory not found") || message.startsWith("Skills path is not a directory")) {
           code = "PACK_NOT_FOUND";
-        } else if (message.includes("MANIFEST_MISSING")) {
+        } else if (message.startsWith("MANIFEST_MISSING")) {
           code = "MANIFEST_MISSING";
-        } else if (message.includes("MANIFEST_INVALID")) {
+        } else if (message.startsWith("MANIFEST_INVALID")) {
           code = "MANIFEST_INVALID";
-        } else if (message.includes("VERSION_MISMATCH")) {
+        } else if (message.startsWith("VERSION_MISMATCH")) {
           code = "VERSION_MISMATCH";
-        } else if (message.includes("INVENTORY_MISMATCH")) {
+        } else if (message.startsWith("INVENTORY_MISMATCH")) {
           code = "INVENTORY_MISMATCH";
         }
 

@@ -340,6 +340,9 @@ describe("cbrain skill-pack", () => {
       expect(output).toContain("Pack status: PASS");
       expect(output).toContain("Target status: STALE");
       expect(output).toContain("Stale: SKILL.md");
+      // stale target must NOT show install commands (no overwrite hint, spec §3.4)
+      expect(output).not.toContain("Copy:");
+      expect(output).not.toContain("Symlink:");
     });
 
     test("shows Copy/Symlink when target missing (canonical pass)", () => {
@@ -714,6 +717,31 @@ describe("cbrain skill-pack", () => {
       expect(parsed.code).toBe("MANIFEST_MISSING");
     });
 
+    test("CLI --target with broken canonical -> target.status=unverified (not error envelope)", () => {
+      const manifestPath = join(pkgDir, "skills", "MANIFEST.json");
+      const backup = join(pkgDir, "skills", "MANIFEST.json.bak");
+      renameSync(manifestPath, backup);
+
+      const extractedBin = join(pkgDir, "src/cli/index.ts");
+      let stdout = "";
+      try {
+        execSync(`bun run "${extractedBin}" skill-pack --json --target "${join(pkgDir, "skills")}"`, {
+          encoding: "utf-8",
+          cwd: "/tmp",
+          stdio: ["pipe", "pipe", "pipe"],
+          timeout: 15_000,
+        });
+      } catch (e: any) {
+        stdout = e.stdout ?? "";
+      }
+      renameSync(backup, manifestPath);
+
+      const parsed = JSON.parse(stdout);
+      expect(parsed.target.status).toBe("unverified");
+      expect(parsed.verificationStatus).toBe("fail");
+      expect(parsed.code).toBeUndefined();
+    });
+
     test("SkillPackError type has code and status fields", () => {
       const errorReport: import("../../src/cli/commands/skill-pack.js").SkillPackError = {
         version: "1.0.0",
@@ -777,6 +805,42 @@ describe("cbrain skill-pack", () => {
       const files = loadManifest(resolveSkillsDir()).files.filter((f) => f !== "RESOLVER.md");
       seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files }));
       expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*entry file/);
+    });
+
+    test("absolute path entry -> MANIFEST_INVALID (unsafe)", () => {
+      const files = loadManifest(resolveSkillsDir()).files;
+      seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files: [...files, "/etc/passwd"] }));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*unsafe/);
+    });
+
+    test("MANIFEST self-reference entry -> MANIFEST_INVALID (unsafe)", () => {
+      const files = loadManifest(resolveSkillsDir()).files;
+      seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files: [...files, "MANIFEST.json"] }));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*unsafe/);
+    });
+
+    test("empty-string entry -> MANIFEST_INVALID (unsafe)", () => {
+      const files = loadManifest(resolveSkillsDir()).files;
+      seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files: [...files, ""] }));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*unsafe/);
+    });
+
+    test("invalid JSON MANIFEST -> MANIFEST_INVALID", () => {
+      const canon = resolveSkillsDir();
+      for (const f of loadManifest(canon).files) writeFileSync(join(dir, f), readFileSync(join(canon, f)));
+      writeFileSync(join(dir, "MANIFEST.json"), "{not valid json");
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*not valid JSON/);
+    });
+
+    test("non-string packVersion -> MANIFEST_INVALID", () => {
+      const files = loadManifest(resolveSkillsDir()).files;
+      seedFull(dir, JSON.stringify({ packVersion: 207, files }));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*packVersion/);
+    });
+
+    test("non-array files -> MANIFEST_INVALID", () => {
+      seedFull(dir, JSON.stringify({ packVersion: "2.0.7", files: "not-an-array" }));
+      expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*files must be an array/);
     });
 
     test("clean canonical pack passes with 33 required files", () => {
