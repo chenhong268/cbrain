@@ -89,6 +89,12 @@ Add state/transaction tests covering the complete approved matrix:
 - enqueue `BEGIN IMMEDIATE`, injected failure rollback, two-connection serialization, unchanged repeat idempotence;
 - short batch stores returned selected count and random UUID only.
 
+Run the focused suite before implementation and require assertion-level failures in the new cases (not only a missing import/file error):
+
+```bash
+bun test tests/core/maintenance/zero-link-backfill.test.ts
+```
+
 **GREEN**
 
 Implement safe JSON parsers, uncapped manifest discovery, ownership/ledger index, pure `InternalJobDisposition` classifier, aggregate projection, canonical digest, `planZeroLinkBackfill`, and `enqueueZeroLinkBackfill`. Enqueue must rescan inside `BEGIN IMMEDIATE`; no writes occur on any conflict.
@@ -133,13 +139,14 @@ Add tests for:
 - pending supersession in-place; fresh-running successor; stale-running source-change + successor;
 - sanctioned pair across exact TTL boundary; entity-facts unchanged;
 - two-connection submit race creates one row;
-- two shared snapshots but one conditional NER claim/LLM call;
-- random claimed lease, committing fence, token removal on every exit, ABA/reclaim rejection;
-- revoked zombie completion/failure cannot overwrite terminal/new attempt;
-- phase-before-freshness and commit-unknown terminalization;
-- unresolved commit-unknown blocks same-run, later-run, and old-snapshot successor claim;
-- any global conflict makes all reset/retry/completion/transition/snapshot mutations zero;
+- conditional NER claim grants one random claimed lease; direct lease-CAS primitives cover committing, complete, fail, skip, commit-unknown, token removal, ABA/reclaim rejection, and revoked zombie rejection;
 - entity-facts data never receives attempt lease.
+
+Run the focused suites before implementation and require assertion-level failures in the new cases:
+
+```bash
+bun test tests/core/ner-backfill.test.ts tests/storage/sqlite.test.ts
+```
 
 **GREEN**
 
@@ -179,9 +186,14 @@ Add tests for:
 - guarded exact/normalized/parenthetical/semantic alias intents do not write before fence and preserve `ner-resolved` vs `llm-semantic`;
 - F1 changes during extract or semantic await: final guard produces zero ingest-log/entity/alias/mention/page/fact/link/relation/event writes;
 - source deleted during await maps to unavailable, not changed;
-- revocation wins before committing → zero writes; committing wins → cancel/stale non-applied and processed completion;
-- synchronous exception after fence becomes commit-unknown;
+- revocation observed by either pipeline guard → zero writes; a successful final guard returns write authority to the caller;
 - empty extraction guards before shadow audit.
+
+Run the focused suites before implementation and require assertion-level failures in the new cases:
+
+```bash
+bun test tests/core/ner-quality.test.ts tests/core/shadow-verifier-integration.test.ts tests/core/ner-backfill.test.ts
+```
 
 **GREEN**
 
@@ -218,13 +230,25 @@ Test:
 - exact UUID manifest only; no unrelated NER/entity-facts/stale reset;
 - `--limit` equals returned selected, short-batch behavior, retry-failed conflict;
 - unfiltered `BEGIN IMMEDIATE` rescan and global all-table zero-write on conflicts;
+- two stages may share a snapshot but only one scoped claim invokes the LLM;
+- phase-before-freshness, stale committing terminalization, synchronous post-fence exception → commit-unknown, and lease token cleanup;
+- revocation wins before committing → zero pipeline/job overwrite; committing wins → cancel/stale return non-applied and the matching lease may complete processed;
+- unresolved commit-unknown blocks the same transaction, later runs, and an old-snapshot direct successor claim;
+- any global conflict leaves every reset/retry/completion/transition/snapshot row byte-for-byte unchanged;
 - wrong/corrupt manifest-owned child protection before child parsing;
-- source verification bytes, final guard, graph outcome from actual links;
-- terminal counts/finalization/digest; commit-unknown stays unfinalized;
+- vault-hash source verification reads and hashes one file snapshot; sealed repair reads the same ordered raw chunks used by its fingerprint and never an L1 summary; drift before LLM makes zero LLM calls;
+- marked repair rows use `max_attempts=1`, so the first provider/timeout failure is terminal;
+- terminal counts/finalization/digest; commit-unknown stays unfinalized; interrupted finalization resumes with the same UUID and zero additional LLM calls;
 - ordinary commit-unknown list privacy and full predecessor identity;
 - error precedence: batch rollback → integrity → state mismatch;
 - accept/retry/release-successor table and claim-time successor block;
 - broad retry skips marked/shadowed history but permits valid current ordinary failed row.
+
+Run the focused suites before implementation and require assertion-level failures in the new cases:
+
+```bash
+bun test tests/core/ner-backfill.test.ts tests/cli/ner-backfill-cli.test.ts
+```
 
 **GREEN**
 
@@ -256,11 +280,18 @@ git commit -m "feat(ner): consume governed repair batches (#342)"
 - Create: `src/cli/commands/zero-link-backfill.ts`
 - Modify: `src/cli/program.ts`
 - Create: `tests/cli/zero-link-backfill-cli.test.ts`
-- Modify command/help consistency fixtures only as required by gates
+- Modify if required by the docs gate: `bin/check-docs-consistency.ts`
+- Modify if required by the docs gate: `tests/release/check-docs-consistency.test.ts`
 
 **RED**
 
 Test no-flags read-only behavior, missing DB/config errors, active-writer dry-run/enqueue split, strict limits, no provider construction, random batch UUID only, short selected guidance, atomic enqueue, scalar human/JSON output, sanitized thrown errors, and no fixture sentinel/path/job payload.
+
+Run before implementation and require assertion-level failures in the new cases:
+
+```bash
+bun test tests/cli/zero-link-backfill-cli.test.ts
+```
 
 **GREEN**
 
@@ -277,7 +308,7 @@ bun run lint
 Commit:
 
 ```bash
-git add src/cli/commands/zero-link-backfill.ts src/cli/program.ts tests/cli/zero-link-backfill-cli.test.ts
+git add src/cli/commands/zero-link-backfill.ts src/cli/program.ts tests/cli/zero-link-backfill-cli.test.ts bin/check-docs-consistency.ts tests/release/check-docs-consistency.test.ts
 git commit -m "feat(cli): add governed zero-link backfill (#342)"
 ```
 
@@ -299,7 +330,14 @@ Cover unified plus aliases for:
 - owned/shadowed/commit-unknown/committing mutation rejection;
 - valid ordinary current retry compatibility;
 - shared `isManifestLike` predicate for submit/list/status/cancel/retry;
-- malformed manifest never weakens privacy.
+- malformed manifest never weakens privacy;
+- malformed/duplicate/unknown manifest integrity makes unified and compatibility cancel/retry reject **every** `ner-backfill` row with fixed `REPAIR_BATCH_OWNED`; committing rows return fixed `ATTEMPT_COMMITTING`; both paths preserve byte-for-byte zero mutation, while ordinary non-NER behavior remains unchanged.
+
+Run before implementation and require assertion-level failures in the new cases:
+
+```bash
+bun test tests/mcp/server.test.ts
+```
 
 **GREEN**
 
@@ -332,6 +370,12 @@ git commit -m "fix(mcp): protect governed NER job state (#342)"
 **RED**
 
 Test one synthetic aggregate issue, needs-review classification, anonymous samples, no deterministic repair, zero-link counts, distinct resolved pages, and global commit-unknown warning even when total=0 and a partial link exists.
+
+Run before implementation and require assertion-level failures in the new cases:
+
+```bash
+bun test tests/core/maintenance tests/core/fsck
+```
 
 **GREEN**
 
@@ -400,13 +444,15 @@ For each requested batch 5, 20, 50:
 1. Create and verify a distinct private full backup.
 2. Enqueue `--limit N`; require clean conflicts and `0 < selected <= N`.
 3. Consume exact UUID using `--limit selected`.
-4. Require zero pending/running and finalized true; any commitUnknown stays unfinalized and triggers matched-backup rollback.
-5. Re-run dry-run/fsck/FK/consistency/privacy; record scalar deltas only.
-6. Stop on every spec stop condition; canary requires at least one resolved.
+4. If all children are terminal and `commitUnknown=0` but the manifest is still unfinalized, rerun the **same UUID** with the same `selected` limit; require finalization-only behavior and zero additional LLM calls.
+5. Require zero pending/running and `finalized=true`. Any `commitUnknown>0` stays unfinalized and triggers matched-backup rollback. Any other manifest that still cannot finalize keeps every writer stopped and also triggers matched-backup rollback.
+6. After restore, privately verify the archive and rerun DB/vault/Lance/FK/fsck/consistency gates before any restart.
+7. Re-run dry-run/fsck/FK/consistency/privacy; record scalar deltas only.
+8. Stop on every spec stop condition; canary requires at least one resolved.
 
-Before reopening writes, rewrite every persistent client entrypoint to the guarded detached runtime, smoke reconnect/restart, run live MCP unified/alias privacy shape probes, and prove old installed runtime cannot acquire writer. Once writes reopen, never restore an older full archive; repair/deploy forward only.
+No unfinalized manifest may cross the reopen-writes boundary. Before reopening writes, rewrite every persistent client entrypoint to the guarded detached runtime, smoke reconnect/restart, run live MCP unified/alias privacy shape probes, and prove old installed runtime cannot acquire writer. Once writes reopen, never restore an older full archive; repair/deploy forward only.
 
-Add a sanitized scalar rollout report to the PR, commit/push it, and leave PR ready but unmerged/unreleased.
+Add a sanitized scalar rollout report to the PR. Before committing it, verify the report-only diff contains no runtime code change, run the privacy scan, `git diff --check`, `bun run check:docs`, and an adversarial report-only review. Commit/push only after those gates pass. Record `reviewedCodeSha` separately from `reportSha`, and leave the PR ready but unmerged/unreleased.
 
 Final evidence packet:
 
