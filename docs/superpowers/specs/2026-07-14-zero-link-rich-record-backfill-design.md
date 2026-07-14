@@ -295,7 +295,7 @@ Pre-call verification is necessary but not sufficient because `nerEngine.extract
 1. Invoke it immediately after extraction returns, before shadow-verifier/audit side effects or the empty-extraction return. For an empty extraction, run the shadow verifier only after this guard succeeds, then return.
 2. For a non-empty extraction, defer the shadow verifier along with resolver alias writes. Invoke the guard again immediately after the final `semanticResolve()` await inside `applyExtraction`; only after it succeeds may the shadow audit and then the first entity, alias, mention-count, page, fact, link, relation, or event write occur.
 3. No await is permitted between the final successful guard and the first/subsequent extraction writes.
-4. Each guard first validates the attempt lease from §6.6, then source bytes. It returns/throws fixed signals without source text: `NER_ATTEMPT_REVOKED`, `NER_SOURCE_CHANGED`, or `NER_SOURCE_UNAVAILABLE`. Revoked attempts perform no job completion/failure because another transition owns the row. Source signals map respectively to `source_changed` or `blocked_source_unavailable`, both `skipped`, using lease-CAS completion. All failures produce zero extraction **or shadow-audit** writes and must not write stale ingest-log audit, entities, relations, facts, events, aliases, mention counts, stubs, or links.
+4. The first guard validates a `claimed` lease then source bytes. The final guard validates source and atomically acquires the commit fence from §6.6 (`claimed → committing`) before returning. Guards return/throw fixed signals without source text: `NER_ATTEMPT_REVOKED`, `NER_SOURCE_CHANGED`, or `NER_SOURCE_UNAVAILABLE`. Revoked attempts perform no job completion/failure because another transition owns the row. Source signals map respectively to `source_changed` or `blocked_source_unavailable`, both `skipped`, using claimed-lease CAS completion. All failures produce zero extraction **or shadow-audit** writes and must not write stale ingest-log audit, entities, relations, facts, events, aliases, mention counts, stubs, or links.
 
 `EntityResolver.resolveAll` and `semanticResolve` currently write aliases before returning. Guarded calls must enable a defer-writes mode: resolution records deterministic full intents and performs no alias mutation during either resolver phase:
 
@@ -486,16 +486,21 @@ The NER stage must not use existing non-atomic `claimJobById`. Add scoped lease-
 interface NerAttemptLease {
   jobId: number;
   token: string; // random UUID, internal only
+  phase: "claimed" | "committing";
   sourceFingerprint: string | null;
   batchId: string | null;
 }
 ```
 
-Claim generates a random token, safely parses the pending row, inserts `attemptLease:{version:1,token}` into its job `data`, and performs one conditional update requiring the exact id, name, `status='pending'`, and unchanged prior `data`. It sets running/attempts/started_at and returns the updated row only when affected rows equal one; otherwise claim returns null. A single `UPDATE ... RETURNING` is preferred, or conditional UPDATE + checked `changes === 1` in one transaction. Repair/ordinary marker validation explicitly permits the internal lease field only while running.
+For rows whose parsed kind is absent/`ner`, claim generates a random token, inserts `attemptLease:{version:1,token,phase:"claimed"}` into job `data`, and performs one conditional update requiring the exact id, name, `status='pending'`, and unchanged prior `data`. It sets running/attempts/started_at and returns the updated row only when affected rows equal one; otherwise claim returns null. A single `UPDATE ... RETURNING` is preferred, or conditional UPDATE + checked `changes === 1` in one transaction. Repair/ordinary marker validation explicitly permits the internal lease field only while running.
 
-Every durable source guard synchronously re-reads the row and requires `status='running'`, exact lease token, job name, scheduled source fingerprint, and repair batch identity when present. A mismatch is `NER_ATTEMPT_REVOKED`, checked both after extract and after semantic resolution.
+Every durable source guard synchronously re-reads the row and requires `status='running'`, exact lease token/phase, job name, scheduled source fingerprint, and repair batch identity when present. The first check requires `claimed`. After the final source check, one conditional UPDATE changes only that exact lease to `committing`; affected rows zero is `NER_ATTEMPT_REVOKED`. This CAS is the write-authority linearization point.
 
-Normal complete/fail/source-skip operations are also conditional lease CAS: update only when id/name/status/token/scheduled identity still match, and atomically remove `attemptLease` whenever status leaves running (including fail-to-pending). Affected rows zero means the attempt was revoked and the worker performs no further job or knowledge mutation. Stale transition atomically changes the predecessor away from running, strips its current token, and thereby revokes it before releasing the successor. Reclaim writes a new random token; an old worker can never complete the newer attempt even if job id, fingerprint, attempts, or timestamp repeat.
+Cancel/stale transition may revoke only `phase=claimed`. Once `phase=committing`, they return a fixed non-applied disposition and may not change the row; the worker owns synchronous knowledge completion. Normal processed completion requires the matching `committing` token. Pre-commit fail/source-skip requires the matching `claimed` token. Both atomically remove `attemptLease` when status leaves running (including fail-to-pending). Affected rows zero means revoked and no further mutation. Reclaim writes a new token, preventing ABA. A crashed/stale `committing` row is `commit_unknown` review debt and is never automatically reset/retried/cancelled because partial synchronous writes cannot be disproved.
+
+Because the final committing section contains no await and the production contract forbids additional/unsafe writers, the phase fence prevents job-governance revocation from interleaving with knowledge writes. Both outcomes are linearizable: revocation wins while claimed and the worker writes nothing, or committing wins and revocation is non-applied. There is no terminal-revoked plus knowledge-written state.
+
+`kind=entity_facts` is explicitly outside #342 lease, source-guard, and commit-fence scope. Mixed snapshots parse kind before claim: entity facts retain current claim/reset/retry/complete/fail behavior and never receive `attemptLease`; absent/`ner` rows use the scoped CAS path. Extending entity-facts safety requires a separate issue.
 
 The lease token is omitted by every public projection and log. This is a scoped NER safety primitive; unrelated generic job claim semantics are unchanged.
 
@@ -569,7 +574,7 @@ The existing unified `job` tool and compatibility aliases must not expose or mut
 - `list`/`status` always safely project rows with the reserved manifest name **or** a parseable manifest discriminator in `data`, even when the other signal is corrupt. They return only fixed operational fields and scalar finalized/status counts; `data`, raw `result`, and `error` are omitted;
 - **every** `ner-backfill` row uses a fixed safe projection with no `data`, raw `result`, `error`, slug, `contentHash`, fingerprint, or provider text. Lifecycle class may add only fixed booleans/enums such as `protectedRepair`/`attemptClass`; projection privacy never depends on manifest validity or attempt eligibility;
 - malformed/duplicate manifest still fails ownership mutation closed, but no special privacy fallback is needed because all NER rows are always sanitized;
-- generic `cancel` and `retry` reject manifest rows, every manifest-owned/marked child, and every shadowed pre-repair attempt with fixed `REPAIR_BATCH_OWNED`; a validated canonical post-repair deferred row retains ordinary behavior. When manifest integrity is unknown they reject mutation of all `ner-backfill` rows;
+- generic `cancel` and `retry` reject manifest rows, every manifest-owned/marked child, and every shadowed pre-repair attempt with fixed `REPAIR_BATCH_OWNED`; a validated canonical post-repair deferred row retains ordinary lifecycle except that cancel of `attemptLease.phase=committing` returns fixed `ATTEMPT_COMMITTING` with zero mutation. When manifest integrity is unknown they reject mutation of all `ner-backfill` rows;
 - batch-owned cancellation/retry is not added to this issue. The dedicated batch consumer is the only mutation path.
 
 Ordinary non-NER job projection and mutation behavior remain unchanged. One shared deterministic `isManifestLike`/ownership policy is used by **all** unified and alias actions—submit, list, status, cancel, and retry. It recognizes reserved name or payload discriminator before either read projection or mutation; no handler may fall back to name-only checks. Ownership discovery queries all manifest rows directly and must not use the capped default `listJobs()` result.
@@ -862,6 +867,9 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - two stages may both snapshot J, but scoped conditional claim returns one lease only, increments attempts once, and invokes LLM once;
 - paused J1 semantic call → TTL lease revocation/source-changed → source reverts F1 → old call resumes: both guards/lease-CAS prevent every audit/knowledge/job overwrite and preserve revoked terminal result;
 - reset/reclaim of the same job creates a new token; old attempt completion/failure cannot overwrite the new running/terminal attempt;
+- double-connection barrier between final source check and first mutation proves exactly two outcomes: claimed revocation wins with zero writes, or worker CAS wins `committing` and cancel/stale is non-applied before processed completion; never revoked terminal plus knowledge writes;
+- every running→non-running path strips the token; stale committing becomes commit-unknown review debt and cannot auto-reset/retry/cancel;
+- mixed NER/entity-facts snapshot gives leases only to absent/ner kind; entity-facts payload remains byte-compatible and contains no attemptLease through terminal state;
 - normalized body hash, full document hash, and absent caller hash all derive canonical `pageContentHash` from DB; structured disposition makes `nerPending` true only for durable live work;
 - deleting and recreating a slug with changed content permits one new internal deferred NER instead of inheriting permanent repair starvation;
 - `entity_facts` rows sharing a slug with repair history retain ordinary reset/claim/retry behavior;
@@ -1126,3 +1134,12 @@ The fourteenth review returned FAIL with two HIGH findings. This revision closes
 2. Source guards and all completion/failure paths validate the lease. TTL transition revokes the old token before successor release, so a zombie worker cannot regain write authority after source reversion or overwrite the frozen terminal result.
 
 The independent reviewer must run a fifteenth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 32. Fifteenth adversarial review correction record
+
+The fifteenth review returned FAIL with one HIGH and one required MEDIUM finding. This revision closes both:
+
+1. Final guard now acquires an atomic `claimed → committing` fence. Revocation may win before the fence with zero writes, or committing wins and cancel/stale becomes non-applied; terminal-revoked plus knowledge-written is impossible.
+2. Lease/guard/fence applies only to absent/`ner` kind. `entity_facts` keeps its current data and lifecycle and never receives an attempt token under #342.
+
+The independent reviewer must run a sixteenth pass. The gate remains no CRITICAL/HIGH findings.
