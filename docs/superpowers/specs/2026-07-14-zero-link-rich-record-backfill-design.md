@@ -96,7 +96,8 @@ The scanner may carry slugs and content hashes internally, but no public dry-run
 
 Public counters use two explicit populations:
 
-- **current debt population:** records that meet the richness threshold and currently have zero current-fact non-self links. `total`, `actionable`, `selected`, `active`, `cancelled`, `terminalNoGraphLinks`, `blockedSourceUnavailable`, `sourceChanged`, `invalidTerminal`, `commitUnknown`, `lostLink`, `unverifiableFingerprint`, `failed`, and `stateConflicts` describe this population. `queueIntegrityConflicts` is a separate global count over malformed/referentially invalid repair queue rows.
+- **current debt population:** records that meet the richness threshold and currently have zero current-fact non-self links. `total`, `actionable`, `selected`, `active`, `cancelled`, `terminalNoGraphLinks`, `blockedSourceUnavailable`, `sourceChanged`, `invalidTerminal`, `lostLink`, `unverifiableFingerprint`, `failed`, and `stateConflicts` describe this population. `queueIntegrityConflicts` is a separate global count over malformed/referentially invalid repair queue rows.
+- **global NER audit debt:** `commitUnknown` counts unresolved ordinary or marked `done/commit_unknown` rows plus stale `running+committing` rows regardless of page type, richness, existence, or current link count. It is not a subset of `total`; partial writes may already have created links. Health, `fsck`, and CLI must report it even when zero-link `total = 0`.
 - **current processed-success population:** distinct rich record pages whose canonical current-fingerprint repair result is `graphOutcome = resolved` **and** that still have at least one current-fact non-self link. `resolved` counts pages, never job rows.
 
 This distinction is required for rollout measurement: a successful repair reduces `total` and increases `resolved`. The CLI labels these counters explicitly in human output; it must not imply that `resolved` is a subset of current zero-link debt.
@@ -355,9 +356,11 @@ When the page fingerprint is unavailable, still surface live rows and live/cance
 
 Apply this deterministic algorithm:
 
+Terminal parsing has fixed precedence before page/link outcome inference: (1) running `committing` phase is classified by freshness; (2) any terminal `result.outcome = commit_unknown` is `commit_unknown`; (3) only then parse ordinary processed/repair graph outcomes. Thus ordinary `done/commit_unknown` can never become terminal-no-link, and marked `done/commit_unknown` under an unfinalized manifest reports commit-unknown rather than active/invalid. A finalized manifest containing any commit-unknown entry is an integrity conflict because such a manifest was forbidden to finalize.
+
 1. Collect **all live rows** for the slug. Before freshness, parse lease phase. A structurally valid pair is one old-fingerprint running predecessor plus one current pending successor, both unmarked/same slug/valid/no third row. A `claimed` predecessor returns internal fresh/stale transition disposition. A `committing` predecessor returns active when fresh or `commit_unknown` when stale, and its successor remains blocked/excluded. The read-only classifier never mutates. Two running, two pending, wrong-current fingerprint, marked/ordinary mixing, invalid phase, or any third row remains `stateConflicts`/integrity conflict.
 2. If exactly one live row exists:
-   - a marked row must belong to its latest **unfinalized** manifest and is always `active`; stale running also increments `staleRunning`. It is resumed only through that existing batch UUID, never moved into a new batch. A marked live row whose latest manifest claims to be finalized is a queue-integrity conflict.
+   - a marked row must belong to its latest **unfinalized** manifest. A claimed row is `active` (stale also increments `staleRunning`) and resumes only through that UUID. A committing row follows the phase/freshness rule first: fresh active, stale commit-unknown. A marked live row whose latest manifest claims finalized is a queue-integrity conflict.
    - legacy `pending` or fresh legacy `running` → `active`;
    - stale legacy `running` → `stale_requeue` on that same row;
    - fingerprinted `committing` running → `active` when fresh, `commit_unknown` when stale; never `stale_requeue`;
@@ -365,8 +368,8 @@ Apply this deterministic algorithm:
    - if the live row coexists with a current-fingerprint cancellation or unverifiable legacy cancellation, also increment `stateConflicts` and perform no mutation.
 3. If there is no live row and the fingerprint is unavailable, classify `unverifiable_fingerprint`.
 4. If the current fingerprint matches one or more finalized repair-ledger entries, choose the highest-manifest-id matching entry and use its frozen terminal status/outcome before any ordinary terminal row. `resolved` still requires a current fact non-self link and otherwise becomes `lost_link`; no-link, blocked, source-changed, invalid, failed, and cancelled retain their corresponding classifications. A revert to an older fingerprint therefore reuses historical evidence and never re-enters LLM work.
-5. If the current fingerprint is absent from the finalized repair ledger and there is one validated current-source post-repair deferred terminal row, that row owns the ordinary content epoch: `done` with current zero links → `terminal_no_graph_links`; `failed` → `failed`; `cancelled` → `cancelled`. It is not automatically resubmitted by this repair. A failed row may use existing explicit broad retry because attempt-aware preflight proved it current; a later content change makes it superseded history. More than one row for the current `(slug, sourceFingerprint)` is an integrity conflict.
-6. Otherwise choose the highest-id marked terminal row whose repair fingerprint equals the current fingerprint. If its latest manifest is unfinalized, classify `active` pending batch finalization and do not reuse it. With a finalized manifest it is the canonical current row:
+5. If the current fingerprint is absent from the finalized repair ledger and there is one validated current-source post-repair deferred terminal row, terminal commit-unknown was already intercepted; otherwise that row owns the ordinary content epoch: processed `done` with current zero links → `terminal_no_graph_links`; `failed` → `failed`; `cancelled` → `cancelled`. It is not automatically resubmitted by this repair. A failed row may use existing explicit broad retry because attempt-aware preflight proved it current; a later content change makes it superseded history. More than one row for the current `(slug, sourceFingerprint)` is an integrity conflict.
+6. Otherwise choose the highest-id marked terminal row whose repair fingerprint equals the current fingerprint. Terminal commit-unknown was already intercepted. For other outcomes, if its latest manifest is unfinalized classify `active` pending batch finalization and do not reuse it. With a finalized manifest it is the canonical current row:
    - `cancelled` → `cancelled` for this fingerprint only;
    - `failed` → `failed`;
    - `done` + `graphOutcome = terminal_no_graph_links` → `terminal_no_graph_links`;
@@ -515,6 +518,8 @@ The lease token is omitted by every public projection and log. This is a scoped 
 
 `commit_unknown` is recognized terminal audit debt, not a permanent running row and not proof of processing. It blocks automatic work for the same slug/fingerprint and any waiting successor until explicit resolution.
 
+Every global preflight joins unresolved terminal commit-unknown rows to live NER rows by slug and builds `commitUnknownBlockedSuccessorIds`. The set includes every pending successor for a slug with unresolved commit-unknown, is retained when a committing predecessor is terminalized in the same transaction, and is excluded from that transaction's snapshot. Future scans reconstruct it from the terminal audit row. Scoped claim runs its own `BEGIN IMMEDIATE` recheck and refuses an id when any unresolved predecessor for the slug remains, so an old snapshot cannot bypass the block. Only successful `accept` or `release-successor` resolution clears it; `retry` replaces the predecessor itself and requires no successor.
+
 Marked batch behavior is fail-closed: the batch consumer reports scalar `commitUnknown > 0`, leaves the manifest `finalized=false`, and returns the fixed stop condition. During the authorized production maintenance window the operator restores that batch's matched backup before reopening writes. Generic/manual job resolution rejects marked rows with `BATCH_ROLLBACK_REQUIRED`; it cannot rewrite an unfinalized repair ledger.
 
 Ordinary unmarked debt has a supported writer-stopped CLI:
@@ -524,11 +529,17 @@ cbrain ner-backfill --list-commit-unknown --json
 cbrain ner-backfill --resolve-commit-unknown <job-id> --decision <accept|retry|release-successor> --json
 ```
 
-List returns only ordinary job ids and scalar count—no slug, fingerprint, payload, path, token, or error. Resolution acquires the normal writer lock plus `BEGIN IMMEDIATE`, reloads the exact row/global state, requires unmarked `done/commit_unknown`, and uses CAS:
+List returns only ordinary job ids and scalar count—no slug, fingerprint, payload, path, token, or error. Resolution acquires the normal writer lock plus `BEGIN IMMEDIATE`, reloads the exact row/global state, requires unmarked `done/commit_unknown`, and uses CAS. A valid successor means exactly one unmarked pending row for the same slug whose fingerprint differs from the predecessor and equals the current source fingerprint, with no other live row.
 
-- `accept`: operator accepts current partial state; replace result with fixed `outcome=processed,resolution=commit_unknown_accepted`. It becomes ordinary processed-ledger history and releases a valid different-fingerprint successor.
-- `retry`: allowed only when no live successor exists and current source fingerprint equals the scheduled fingerprint. Reset the same ordinary row to pending with cleared terminal fields; the later claim gets a new token.
-- `release-successor`: allowed only with exactly one valid current-fingerprint pending successor. Keep the predecessor audit-only as fixed `commit_unknown_released`; it does not enter processed ledger, and release the successor.
+| Decision | Current source vs predecessor | Successor shape | Mutation | Ledger/block result |
+|---|---|---|---|---|
+| `accept` | same, different, or unavailable | none | replace result with fixed `processed/commit_unknown_accepted` | predecessor enters processed ledger; block clears |
+| `accept` | different and available | exactly one valid successor | same accept mutation | predecessor enters processed ledger; successor releases |
+| `retry` | exactly same and available | none | reset predecessor row pending; clear terminal fields | no processed entry; new claim token later |
+| `release-successor` | different and available | exactly one valid successor | replace result with fixed audit-only `commit_unknown_released` | predecessor does not enter processed ledger; successor releases |
+| any decision | any | multiple, same-fingerprint, malformed, wrong-current, or other live shape | none | fixed state mismatch |
+
+`accept` with one successor is illegal unless it is the valid different/current shape above. `retry` never coexists with a successor. Missing page/source permits only `accept` with no successor. Resolution decisions are terminal bookkeeping; they do not claim to reconstruct or undo partial writes.
 
 Every other shape returns fixed `COMMIT_UNKNOWN_STATE_MISMATCH` with zero writes. Decisions never claim to undo partial aliases/entities/facts/links; the operator must audit before choosing. Output contains job id, decision, success boolean, and scalar successor count only. Unified/MCP generic retry/cancel remain forbidden for commit-unknown.
 
@@ -642,13 +653,13 @@ Add one aggregate dimension to `HealthChecker.checkAll`, after structural consis
 
 Dimension name: `富记录图谱覆盖`.
 
-When the scanner finds no rich zero-link records, the dimension passes with no issues.
+The dimension passes only when rich zero-link `total = 0` **and** global `commitUnknown = 0`.
 
-When any exist, emit exactly one medium-severity issue:
+When either exists, emit exactly one medium-severity issue:
 
 - stable synthetic slug: `system/zero-link-rich-records`;
 - fixed title with no page-derived text;
-- description containing only scalar current-debt `total`, `actionable`, `active`, `terminal_no_graph_links`, `blocked_source_unavailable`, `source_changed`, `invalid_terminal`, `lost_link`, `unverifiable_fingerprint`, `failed`, `state_conflicts`, and `queue_integrity_conflicts` counts plus distinct current-success `resolved` count;
+- description containing only scalar current-debt `total`, `actionable`, `active`, `terminal_no_graph_links`, `blocked_source_unavailable`, `source_changed`, `invalid_terminal`, `lost_link`, `unverifiable_fingerprint`, `failed`, `state_conflicts`, and `queue_integrity_conflicts` counts, independent global `commit_unknown`, plus distinct current-success `resolved` count;
 - suggestion: run dry-run `cbrain zero-link-backfill --json`.
 
 The dimension is `warn`, not `fail`. This is semantic repair debt, not proof of database corruption.
@@ -659,12 +670,12 @@ The aggregate issue avoids adding hundreds of page-level entries, avoids leaking
 
 ## 10. `fsck` integration
 
-`probeSqlite` must call the shared scanner/state summarizer and add one finding when `total > 0`:
+`probeSqlite` must call the shared scanner/state summarizer and add one finding when `total > 0 || commitUnknown > 0`:
 
 - `check`: `sqlite.zero_link_rich_records`
 - `layer`: `sqlite`
 - `severity`: `warning`
-- `count`: total rich zero-link records
+- `count`: `total + commitUnknown` audit-debt units (the detail keeps populations separate; this is not claimed as distinct pages)
 - `sampleSlugs`: at most five values, passed through the existing `anonymizeSlugs` helper
 - `detail`: scalar current-debt totals for actionable, active, terminal-no-link, blocked-source, source-changed, invalid-terminal, commit-unknown, lost-link, unverifiable-fingerprint, failed, state-conflict, and queue-integrity-conflict plus distinct current-success resolved count
 - `suggestedCommand`: `cbrain zero-link-backfill --json`
@@ -900,8 +911,11 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - double-connection barrier between final source check and first mutation proves exactly two outcomes: claimed revocation wins with zero writes, or worker CAS wins `committing` and cancel/stale is non-applied before processed completion; never revoked terminal plus knowledge writes;
 - every running→non-running path strips the token; stale committing becomes commit-unknown review debt and cannot auto-reset/retry/cancel;
 - phase precedes freshness: stale claimed pair source-changes/releases, stale committing pair and single row become commit-unknown, never stale-requeue/reset, and any successor stays excluded;
+- terminal parser precedence classifies ordinary/marked single and successor-pair commit-unknown consistently; unfinalized marked stays unknown/unfinalized, finalized manifest unknown is integrity conflict, never active/no-link/invalid;
 - sync exception after fence immediately terminalizes commit-unknown; simulated crash leaves stale committing which the correct mutating consumer terminalizes deterministically without declaring processed;
 - marked commit-unknown reports scalar, keeps manifest unfinalized, triggers batch rollback, and rejects manual resolution; ordinary list/accept/retry/release-successor obey writer lock, CAS, privacy, and state-shape gates;
+- unresolved predecessor blocks successor in same-stage snapshot, next-stage reconstruction, and direct old-snapshot claim CAS; only successful accept/release clears it;
+- manual decision table covers no/one/multiple/same/wrong successor plus current same/different/unavailable with fixed mismatch zero-write cases;
 - mixed NER/entity-facts snapshot gives leases only to absent/ner kind; entity-facts payload remains byte-compatible and contains no attemptLease through terminal state;
 - normalized body hash, full document hash, and absent caller hash all derive canonical `pageContentHash` from DB; structured disposition makes `nerPending` true only for durable live work;
 - deleting and recreating a slug with changed content permits one new internal deferred NER instead of inheriting permanent repair starvation;
@@ -946,6 +960,7 @@ All production changes follow RED → GREEN → REFACTOR. Each behavior must hav
 - `fsck` emits the stable check id, warning severity, correct count, and at most five anonymous samples;
 - no deterministic repair-plan rule executes it.
 - current-success `resolved` counts distinct pages, not historical job rows, and requires a current non-self fact link.
+- commit-unknown is global audit debt: zero-link total 0 plus partial-link unknown still warns in Health/fsck; marked/unmarked and zero/nonzero current links contribute only scalar counts.
 
 ### 14.8 Final gates
 
@@ -1185,3 +1200,14 @@ The sixteenth review returned FAIL with two HIGH findings. This revision closes 
 2. Commit-unknown is a complete lifecycle: typed scalar reporting, immediate/stale terminal bookkeeping, ledger exclusion, batch unfinalized rollback stop, and an explicit writer-stopped ordinary-job audit resolution CLI. It no longer creates an invisible permanent running row.
 
 The independent reviewer must run a seventeenth pass. The gate remains no CRITICAL/HIGH findings.
+
+## 34. Seventeenth adversarial review correction record
+
+The seventeenth review returned FAIL with three HIGH and one required MEDIUM finding. This revision closes them:
+
+1. Unified parser priority is committing-live, terminal commit-unknown, then ordinary/graph outcomes. Marked/unmarked, single/pair, and unfinalized/finalized states now have one result.
+2. Unresolved terminal predecessors create a persistent derived successor block checked in global snapshot and atomic claim; same-run, later-run, and old-snapshot paths cannot escape it.
+3. Commit-unknown is independent global NER audit debt, reported even after partial links remove a page from zero-link eligibility.
+4. Accept/retry/release-successor now have a complete current-source/successor decision matrix with fixed zero-write mismatch behavior.
+
+The independent reviewer must run an eighteenth pass. The gate remains no CRITICAL/HIGH findings.
