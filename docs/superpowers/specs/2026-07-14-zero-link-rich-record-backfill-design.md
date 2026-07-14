@@ -531,7 +531,9 @@ cbrain ner-backfill --resolve-commit-unknown <job-id> --decision <accept|retry|r
 
 List returns only ordinary job ids and scalar count—no slug, fingerprint, payload, path, token, or error. It lists only a fully valid predecessor: exact `ner-backfill` name; kind absent/`ner`; valid non-empty slug; valid non-empty scheduled source fingerprint; `status=done`; no residual lease; no repair/manifest marker or ownership; and result exactly matching the fixed commit-unknown schema. Malformed/duplicate/owned rows remain visible only through scalar audit/integrity debt and are never resolution targets.
 
-Resolution acquires the normal writer lock plus `BEGIN IMMEDIATE`, re-runs the complete global manifest/queue integrity preflight, reloads the exact predecessor and same-slug state, and requires the same full identity before CAS. Any global integrity conflict, malformed predecessor, duplicate unresolved predecessor for the slug, or manifest ownership returns fixed `COMMIT_UNKNOWN_INTEGRITY_CONFLICT`/state mismatch with zero writes. A valid successor means exactly one unmarked pending row for the same slug whose fingerprint differs from the predecessor and equals the current source fingerprint, with no other live row.
+Resolution acquires the normal writer lock plus `BEGIN IMMEDIATE`, re-runs the complete global manifest/queue integrity preflight, reloads the exact predecessor and same-slug state, and requires the same full identity before CAS. A valid successor means exactly one unmarked pending row for the same slug whose fingerprint differs from the predecessor and equals the current source fingerprint, with no other live row.
+
+Failure-code precedence is exact and checked before decision logic: (1) any repair marker or manifest ownership → `BATCH_ROLLBACK_REQUIRED`; (2) otherwise any global integrity conflict or malformed/duplicate predecessor → `COMMIT_UNKNOWN_INTEGRITY_CONFLICT`; (3) otherwise a complete legal predecessor with mismatched decision/current-source/successor shape → `COMMIT_UNKNOWN_STATE_MISMATCH`. Every failure is zero-write and returns no job payload.
 
 | Decision | Current source vs predecessor | Successor shape | Mutation | Ledger/block result |
 |---|---|---|---|---|
@@ -1220,3 +1222,7 @@ The independent reviewer must run an eighteenth pass. The gate remains no CRITIC
 The eighteenth review passed the CRITICAL/HIGH gate and found one plan-shaping MEDIUM. This revision closes it: ordinary commit-unknown list/resolution now requires a complete unowned predecessor identity and a globally clean transactional preflight. Malformed, duplicate, leased, or manifest-owned rows cannot disappear through accept/retry/release and produce zero writes.
 
 The independent reviewer must run a final confirmation pass before writing the implementation plan. The gate remains no CRITICAL/HIGH and no plan-shaping MEDIUM findings.
+
+## 36. Final confirmation correction record
+
+The confirmation pass found no CRITICAL/HIGH and one plan-shaping error-code ambiguity. Resolution now has one strict precedence: owned repair rows require batch rollback; unowned integrity/identity failures return integrity conflict; only a fully valid predecessor with a decision-shape mismatch returns state mismatch. All are zero-write and payload-free.
