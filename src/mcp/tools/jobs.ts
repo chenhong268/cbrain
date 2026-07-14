@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { getNerJobProtection } from "../../core/maintenance/zero-link-backfill.js";
+import { getNerJobProtection, type NerJobProtection } from "../../core/maintenance/zero-link-backfill.js";
+import { retryFailedNerJob } from "../../core/ingestion/ner-backfill.js";
 
 type JobView = ReturnType<ToolContext["jobs"]["get"]>;
 
@@ -29,10 +30,15 @@ function isManifestLike(name: string, data: unknown): boolean {
   return name === "zero-link-backfill-batch" || hasManifestDiscriminator(data);
 }
 
-function safeProjection(job: NonNullable<JobView>): Record<string, unknown> {
+function isReservedRepairPayload(name: string, data: unknown): boolean {
+  return isManifestLike(name, data) || hasRepairMarker(data);
+}
+
+function safeProjection(job: NonNullable<JobView>, protection: NerJobProtection): Record<string, unknown> {
+  const protectedRepair = isReservedRepairPayload(job.name, job.data) ||
+    (job.name === "ner-backfill" && (protection.integrityUnknown || protection.protectedJobIds.has(job.id) || hasRepairMarker(job.data)));
   const base = {
-    id: job.id,
-    name: job.name,
+    ...(protectedRepair ? { name: "protected-repair" } : { id: job.id, name: job.name }),
     status: job.status,
     priority: job.priority,
     attempts: job.attempts,
@@ -47,7 +53,7 @@ function safeProjection(job: NonNullable<JobView>): Record<string, unknown> {
     const result = objectValue(job.result);
     return {
       ...base,
-      protectedRepair: hasRepairMarker(job.data),
+      protectedRepair,
       attemptClass: result?.outcome === "commit_unknown"
         ? "commit_unknown"
         : lease?.phase === "committing" ? "committing"
@@ -64,10 +70,11 @@ function safeProjection(job: NonNullable<JobView>): Record<string, unknown> {
       selected: Array.isArray(data?.ownership) ? data.ownership.length : 0,
     };
   }
+  if (protectedRepair) return { ...base, protectedRepair: true };
   return job as unknown as Record<string, unknown>;
 }
 
-function fixedMutationError(id: number, code: "REPAIR_BATCH_OWNED" | "ATTEMPT_COMMITTING") {
+function fixedMutationError(id: number, code: "REPAIR_BATCH_OWNED" | "ATTEMPT_COMMITTING" | "NER_RETRY_REJECTED") {
   return {
     content: [{ type: "text" as const, text: JSON.stringify({ success: false, id, code }) }],
     isError: true,
@@ -76,7 +83,7 @@ function fixedMutationError(id: number, code: "REPAIR_BATCH_OWNED" | "ATTEMPT_CO
 
 export function registerJobTools(server: McpServer, ctx: ToolContext): void {
   const submitJob = (name: string, data?: unknown, priority?: number) => {
-    if (name === "ner-backfill" || name === "zero-link-backfill-batch" || hasRepairMarker(data) || hasManifestDiscriminator(data)) {
+    if (name === "ner-backfill" || isReservedRepairPayload(name, data)) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ success: false, code: "REPAIR_BATCH_RESERVED" }) }],
         isError: true,
@@ -87,20 +94,21 @@ export function registerJobTools(server: McpServer, ctx: ToolContext): void {
   };
 
   const listJobs = (status?: string) => {
-    const list = ctx.jobs.list(status).map((job) => safeProjection(job));
+    const protection = getNerJobProtection(ctx.db);
+    const list = ctx.jobs.list(status).map((job) => safeProjection(job, protection));
     return { content: [{ type: "text" as const, text: JSON.stringify(list, null, 2) }] };
   };
 
   const getJobStatus = (id: number) => {
     const job = ctx.jobs.get(id);
     if (!job) return { content: [{ type: "text" as const, text: JSON.stringify({ error: "Job not found" }) }] };
-    return { content: [{ type: "text" as const, text: JSON.stringify(safeProjection(job), null, 2) }] };
+    return { content: [{ type: "text" as const, text: JSON.stringify(safeProjection(job, getNerJobProtection(ctx.db)), null, 2) }] };
   };
 
   const mutationPolicy = (id: number): "allow" | "REPAIR_BATCH_OWNED" | "ATTEMPT_COMMITTING" => {
     const job = ctx.jobs.get(id);
     if (!job) return "allow";
-    if (isManifestLike(job.name, job.data)) return "REPAIR_BATCH_OWNED";
+    if (isReservedRepairPayload(job.name, job.data)) return "REPAIR_BATCH_OWNED";
     if (job.name !== "ner-backfill") return "allow";
     const protection = getNerJobProtection(ctx.db);
     if (protection.integrityUnknown || protection.protectedJobIds.has(id)) return "REPAIR_BATCH_OWNED";
@@ -121,6 +129,12 @@ export function registerJobTools(server: McpServer, ctx: ToolContext): void {
   const retryJob = (id: number) => {
     const policy = mutationPolicy(id);
     if (policy !== "allow") return fixedMutationError(id, policy);
+    const job = ctx.jobs.get(id);
+    if (job?.name === "ner-backfill") {
+      const ok = retryFailedNerJob(ctx.db, id);
+      if (!ok) return fixedMutationError(id, "NER_RETRY_REJECTED");
+      return { content: [{ type: "text" as const, text: JSON.stringify({ success: true, id }) }] };
+    }
     const ok = ctx.jobs.retry(id);
     return { content: [{ type: "text" as const, text: JSON.stringify({ success: ok, id }) }] };
   };

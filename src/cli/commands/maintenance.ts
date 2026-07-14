@@ -28,7 +28,6 @@ import type { ContentPipeline } from "../../core/ingestion/pipeline.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import type { NerBackfillCounts } from "../../core/ingestion/ner-backfill.js";
 import type { RepairBatchStatus } from "../../core/maintenance/zero-link-backfill.js";
-import { getNerJobProtection } from "../../core/maintenance/zero-link-backfill.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -165,23 +164,6 @@ export interface NerBackfillOptions {
   decision?: "accept" | "retry" | "release-successor";
 }
 
-function retryFailedNerBackfillJobs(db: CBrainDB): number {
-  let retried = 0;
-  const protection = getNerJobProtection(db);
-  const rows = db.rawDb.prepare("SELECT id, name, data, result FROM jobs WHERE status='failed' ORDER BY id").all() as Array<{ id: number; name: string; data: string | null; result: string | null }>;
-  for (const job of rows) {
-    if (job.name !== "ner-backfill") continue;
-    if (protection.integrityUnknown || protection.protectedJobIds.has(job.id)) continue;
-    let data: Record<string, unknown> | null = null;
-    let result: Record<string, unknown> | null = null;
-    try { data = job.data ? JSON.parse(job.data) as Record<string, unknown> : null; } catch { continue; }
-    try { result = job.result ? JSON.parse(job.result) as Record<string, unknown> : null; } catch { continue; }
-    if (data?.repair || data?.attemptLease || result?.outcome === "commit_unknown") continue;
-    if (db.retryJob(job.id)) retried++;
-  }
-  return retried;
-}
-
 export async function handleNerBackfill(
   deps: NerBackfillDeps,
   opts: NerBackfillOptions,
@@ -241,7 +223,6 @@ export async function handleNerBackfill(
     }
   }
 
-  const retriedFailed = opts.retryFailed ? retryFailedNerBackfillJobs(deps.db) : 0;
   const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
   let counts: NerBackfillCounts;
   let batchStatus: RepairBatchStatus | undefined;
@@ -250,6 +231,7 @@ export async function handleNerBackfill(
       maxItems: opts.limit,
       entityFactsLlm: deps.llm,
       batchId: opts.repairBatch,
+      retryFailed: opts.retryFailed,
     });
     batchStatus = opts.repairBatch
       ? (await import("../../core/maintenance/zero-link-backfill.js")).summarizeRepairBatch(deps.db, opts.repairBatch)
@@ -263,6 +245,8 @@ export async function handleNerBackfill(
     else logError(`${code}: ${payload.error}`);
     return 1;
   }
+  const retriedFailed = counts.retried_failed ?? 0;
+  delete counts.retried_failed;
   if (opts.json) {
     log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts, ...(batchStatus ? { batch: batchStatus } : {}) }, null, 2));
   } else {

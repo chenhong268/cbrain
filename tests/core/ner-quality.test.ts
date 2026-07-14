@@ -323,6 +323,23 @@ describe("ContentPipeline NER quality logging", () => {
     expect(db.rawDb.prepare("SELECT COUNT(*) count FROM ingest_log WHERE source_type='verifier'").get()).toEqual({ count: 0 });
   });
 
+  test("empty extraction acquires the final guard before writing shadow audit", async () => {
+    insertPage("records/source-empty", "来源记录", "record");
+    const pipeline = new ContentPipeline(db, stubEmbedding, stubLance, {
+      pages: stubPages,
+      nerEngine: {} as any,
+    });
+    const extraction: ExtractionResult = { entities: [], relations: [], events: [], facts: [], filtered: [] };
+    const phases: string[] = [];
+
+    await pipeline.processNer(
+      "records/source-empty", "正文".repeat(300), "record", true, extraction, new Set(), (phase) => phases.push(phase),
+    );
+
+    expect(phases).toEqual(["after_extract", "before_commit"]);
+    expect(db.rawDb.prepare("SELECT COUNT(*) count FROM ingest_log WHERE source_type='verifier'").get()).toEqual({ count: 1 });
+  });
+
   test("logNerQuality failure is fail-open — NER still returns, no rollback, sanitized log (#167)", async () => {
     insertPage("records/source-1", "Source", "record");
 

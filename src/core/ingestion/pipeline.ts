@@ -272,6 +272,7 @@ export class ContentPipeline {
     // construction — the runner never rethrows; the write path below is
     // independent of the verifier succeeding.
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {
+      sourceGuard?.("before_commit");
       runNerShadowVerifierFailOpen({
         db: this.db,
         logger: this.logger,

@@ -2525,6 +2525,65 @@ describe("MCP Server", () => {
       }
     });
 
+    test("wrong-name manifest discriminators expose neither their id nor raw name", async () => {
+      const id = db.submitJob("private-wrong-manifest-name", {
+        version: 1,
+        repairName: "zero-link-rich-records",
+        batchId: "11111111-1111-4111-8111-111111111111",
+        ownership: [],
+      });
+      const tools = getTools(createServer(deps));
+      for (const result of [
+        await tools.job_list.handler({}),
+        await tools.job.handler({ action: "list" }),
+        await tools.job_status.handler({ id }),
+        await tools.job.handler({ action: "status", id }),
+      ]) {
+        const text = result.content[0].text;
+        expect(text).toContain("protected-repair");
+        expect(text).not.toContain("private-wrong-manifest-name");
+        expect(text).not.toContain(`"id": ${id}`);
+        expect(text).not.toContain(`"id":${id}`);
+        expect(text).not.toContain("11111111-1111-4111-8111-111111111111");
+      }
+    });
+
+    test("wrong-name repair markers are protected across projection and mutation aliases", async () => {
+      const pending = db.submitJob("private-wrong-repair-name", {
+        repair: { name: "zero-link-rich-records" },
+        secret: "private-repair-sentinel",
+      });
+      const failed = db.submitJob("private-wrong-repair-failed", {
+        repair: { name: "zero-link-rich-records" },
+        secret: "private-failed-sentinel",
+      });
+      db.rawDb.prepare("UPDATE jobs SET status='failed', result=?, error=? WHERE id=?")
+        .run(JSON.stringify({ secret: "private-result-sentinel" }), "private-error-sentinel", failed);
+      const tools = getTools(createServer(deps));
+      for (const result of [
+        await tools.job_list.handler({}),
+        await tools.job.handler({ action: "list" }),
+        await tools.job_status.handler({ id: pending }),
+        await tools.job.handler({ action: "status", id: failed }),
+      ]) {
+        const text = result.content[0].text;
+        expect(text).toContain("protected-repair");
+        for (const forbidden of ["private-wrong", "private-repair-sentinel", "private-failed-sentinel", "private-result-sentinel", "private-error-sentinel", '"data"', '"result"', '"error"']) {
+          expect(text).not.toContain(forbidden);
+        }
+      }
+      const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+      for (const result of [
+        await tools.job_cancel.handler({ id: pending }),
+        await tools.job.handler({ action: "cancel", id: pending }),
+        await tools.job_retry.handler({ id: failed }),
+        await tools.job.handler({ action: "retry", id: failed }),
+      ]) {
+        expect(JSON.parse(result.content[0].text).code).toBe("REPAIR_BATCH_OWNED");
+      }
+      expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+    });
+
     test("unknown manifest integrity freezes all NER mutations across unified and aliases", async () => {
       db.rawDb.prepare("INSERT INTO jobs (name,status,data,result) VALUES ('zero-link-backfill-batch','done','{','{}')").run();
       const pending = db.submitJob("ner-backfill", { slug: "records/a", kind: "ner", sourceFingerprint: "page:a" });
@@ -2545,10 +2604,10 @@ describe("MCP Server", () => {
 
     test("committing attempt rejects cancel with a stable code", async () => {
       const id = db.submitJob("ner-backfill", {
-        slug: "records/a", kind: "ner", sourceFingerprint: "page:a",
-        attemptLease: { version: 1, token: "private-token", phase: "committing" },
+        slug: "records/a", kind: "ner", pageContentHash: "a", sourceFingerprint: "page:a",
       });
-      db.rawDb.prepare("UPDATE jobs SET status='running', started_at=datetime('now') WHERE id=?").run(id);
+      const claimed = db.claimNerJobByIdWithLease(id)!;
+      expect(db.moveNerLeaseToCommitting(id, claimed.leaseToken, claimed.payloadDigest)).toBe(true);
       const tools = getTools(createServer(deps));
       const result = await tools.job_cancel.handler({ id });
       expect(JSON.parse(result.content[0].text)).toEqual({ success: false, id, code: "ATTEMPT_COMMITTING" });
@@ -2556,6 +2615,7 @@ describe("MCP Server", () => {
     });
 
     test("validated ordinary current NER failure retains retry compatibility", async () => {
+      db.upsertPage({ slug: "records/a", type: "record", title: "A", filePath: "records/a.md", contentHash: "a" });
       const id = db.submitJob("ner-backfill", {
         slug: "records/a", kind: "ner", pageContentHash: "a", sourceFingerprint: "page:a",
       });
@@ -2564,6 +2624,25 @@ describe("MCP Server", () => {
       const result = await tools.job_retry.handler({ id });
       expect(JSON.parse(result.content[0].text)).toEqual({ success: true, id });
       expect(db.getJob(id)!.status).toBe("pending");
+    });
+
+    test("unified and alias retry reject historical and malformed failed NER without mutation", async () => {
+      db.upsertPage({ slug: "records/a", type: "record", title: "A", filePath: "records/a.md", contentHash: "current" });
+      const historical = db.submitJob("ner-backfill", {
+        slug: "records/a", kind: "ner", pageContentHash: "old", sourceFingerprint: "page:old",
+      });
+      const malformed = db.submitJob("ner-backfill", { slug: "records/a", kind: "ner" });
+      db.rawDb.prepare("UPDATE jobs SET status='failed', attempts=1 WHERE id IN (?,?)").run(historical, malformed);
+      const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+      const tools = getTools(createServer(deps));
+
+      for (const result of [
+        await tools.job_retry.handler({ id: historical }),
+        await tools.job.handler({ action: "retry", id: malformed }),
+      ]) {
+        expect(JSON.parse(result.content[0].text)).toMatchObject({ success: false, code: "NER_RETRY_REJECTED" });
+      }
+      expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
     });
   });
 

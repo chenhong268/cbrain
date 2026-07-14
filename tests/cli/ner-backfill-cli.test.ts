@@ -220,7 +220,14 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
     const dir = withTempDir("cbrain-ner-backfill-retry-");
     try {
       const deps = makeDeps(dir);
-      const failedNer = deps.db.submitJob("ner-backfill", { slug: "records/private-d" });
+      const page = deps.pages.create({ title: "匿名记录", type: "record", body: "匿名正文", slug: "records/private-d" });
+      const current = deps.db.getPage(page.slug)!;
+      const failedNer = deps.db.submitJob("ner-backfill", {
+        slug: page.slug,
+        kind: "ner",
+        pageContentHash: current.content_hash,
+        sourceFingerprint: `page:${current.content_hash}`,
+      });
       const failedOther = deps.db.submitJob("other-job", { slug: "records/private-e" });
       deps.db.claimJobById(failedNer);
       deps.db.failJob(failedNer, "timeout-1");
@@ -262,4 +269,95 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("--retry-failed rolls back when global preflight finds a later conflict", async () => {
+    const dir = withTempDir("cbrain-ner-backfill-retry-conflict-");
+    try {
+      const deps = makeDeps(dir);
+      const failed = deps.db.submitJob("ner-backfill", {
+        slug: "records/record-a", kind: "ner", pageContentHash: "hash-a", sourceFingerprint: "page:hash-a",
+      });
+      deps.db.rawDb.prepare("UPDATE jobs SET status='failed', attempts=3, error='fixed' WHERE id=?").run(failed);
+      deps.db.submitJob("ner-backfill", { slug: "records/record-b", kind: "ner", sourceFingerprint: "page:b" });
+      deps.db.submitJob("ner-backfill", { slug: "records/record-b", kind: "ner", sourceFingerprint: "page:b" });
+      const before = JSON.stringify(deps.db.listJobs());
+      const logs: string[] = [];
+
+      const exit = await handleNerBackfill(
+        { db: deps.db, pages: deps.pages, pipeline: deps.pipeline, lockProbe: open },
+        { limit: 0, retryFailed: true, json: true },
+        (message) => logs.push(message),
+      );
+
+      expect(exit).toBe(1);
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({ code: "QUEUE_INTEGRITY_CONFLICT" });
+      expect(JSON.stringify(deps.db.listJobs())).toBe(before);
+      deps.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--retry-failed leaves malformed failed rows byte-for-byte unchanged", async () => {
+    const dir = withTempDir("cbrain-ner-backfill-retry-malformed-");
+    try {
+      const deps = makeDeps(dir);
+      const id = deps.db.submitJob("ner-backfill", { unexpected: true });
+      deps.db.rawDb.prepare("UPDATE jobs SET status='failed', attempts=3, error='fixed' WHERE id=?").run(id);
+      const before = JSON.stringify(deps.db.listJobs());
+      const logs: string[] = [];
+
+      expect(await handleNerBackfill(
+        { db: deps.db, pages: deps.pages, pipeline: deps.pipeline, lockProbe: open },
+        { limit: 0, retryFailed: true, json: true },
+        (message) => logs.push(message),
+      )).toBe(0);
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({ retried_failed: 0 });
+      expect(JSON.stringify(deps.db.listJobs())).toBe(before);
+      deps.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--retry-failed retries only the current complete ordinary epoch", async () => {
+    const dir = withTempDir("cbrain-ner-backfill-retry-epoch-");
+    try {
+      const deps = makeDeps(dir);
+      const page = deps.pages.create({ title: "匿名记录", type: "record", body: "当前正文", slug: "records/item" });
+      const current = deps.db.getPage(page.slug)!;
+      const currentId = deps.db.submitJob("ner-backfill", {
+        slug: page.slug,
+        kind: "ner",
+        pageContentHash: current.content_hash,
+        sourceFingerprint: `page:${current.content_hash}`,
+      });
+      const staleId = deps.db.submitJob("ner-backfill", {
+        slug: page.slug,
+        kind: "ner",
+        pageContentHash: "old-hash",
+        sourceFingerprint: "page:old-hash",
+      });
+      dbFailed(deps.db, currentId);
+      dbFailed(deps.db, staleId);
+      const staleBefore = JSON.stringify(deps.db.getJob(staleId));
+      const logs: string[] = [];
+
+      expect(await handleNerBackfill(
+        { db: deps.db, pages: deps.pages, pipeline: deps.pipeline, lockProbe: open },
+        { limit: 0, retryFailed: true, json: true },
+        (message) => logs.push(message),
+      )).toBe(0);
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({ retried_failed: 1 });
+      expect(deps.db.getJob(currentId)!.status).toBe("pending");
+      expect(JSON.stringify(deps.db.getJob(staleId))).toBe(staleBefore);
+      deps.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
+
+function dbFailed(db: CBrainDB, id: number): void {
+  db.rawDb.prepare("UPDATE jobs SET status='failed', attempts=3, error='fixed', finished_at=datetime('now') WHERE id=?").run(id);
+}

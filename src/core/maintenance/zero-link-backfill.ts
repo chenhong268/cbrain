@@ -42,15 +42,14 @@ interface CandidateAggregateRow {
   tag_count: number;
 }
 
-interface SourceChunkRow {
-  id: number;
-  chunk_index: number;
-  content: string;
-}
-
 export interface ZeroLinkSource {
   contentFingerprint: string | null;
   sourceKind: NerSourceKind | null;
+}
+
+export interface ZeroLinkSourceSnapshot extends ZeroLinkSource {
+  body: string | null;
+  pageType: string | null;
 }
 
 export interface ZeroLinkBackfillReport {
@@ -131,7 +130,16 @@ interface ParsedNerData {
   contentHash?: string | null;
   sourceFingerprint?: string;
   repair?: RepairMarker;
-  attemptLease?: { version: 1; token: string; phase: "claimed" | "committing" };
+  attemptLease?: {
+    version: 1;
+    token: string;
+    phase: "claimed" | "committing";
+    sourceFingerprint: string | null;
+    batchId: string | null;
+    slug: string;
+    kind: "ner";
+    payloadDigest: string;
+  };
 }
 
 interface OwnershipEntry {
@@ -185,6 +193,7 @@ interface QueueAudit {
   manifestByBatchId: Map<string, ParsedManifest>;
   latestOwnershipByJobId: Map<number, ParsedManifest>;
   queueIntegrityConflicts: number;
+  globalStateConflictSlugs: Set<string>;
   commitUnknown: number;
 }
 
@@ -213,6 +222,7 @@ function validFingerprint(value: unknown, sourceKind: unknown): value is string 
 function parseRepair(value: unknown): RepairMarker | null {
   const repair = objectValue(value);
   if (!repair || repair.name !== "zero-link-rich-records" || repair.version !== 1) return null;
+  if (JSON.stringify(Object.keys(repair).sort()) !== JSON.stringify(["batchId", "contentFingerprint", "name", "sourceKind", "version"])) return null;
   if (!UUID_RE.test(String(repair.batchId ?? ""))) return null;
   if (!validFingerprint(repair.contentFingerprint, repair.sourceKind)) return null;
   return {
@@ -230,7 +240,10 @@ function parseNerData(raw: string | null): ParsedNerData | null {
   const kind = data.kind === undefined || data.kind === "ner" ? "ner" : data.kind === "entity_facts" ? "entity_facts" : null;
   if (!kind) return null;
   const parsed: ParsedNerData = { slug: data.slug, kind };
-  if (data.contentHash === null || typeof data.contentHash === "string") parsed.contentHash = data.contentHash;
+  const contentHash = Object.hasOwn(data, "pageContentHash")
+    ? data.pageContentHash
+    : data.contentHash;
+  if (contentHash === null || typeof contentHash === "string") parsed.contentHash = contentHash;
   if (typeof data.sourceFingerprint === "string") parsed.sourceFingerprint = data.sourceFingerprint;
   if (data.repair !== undefined) {
     const repair = parseRepair(data.repair);
@@ -239,8 +252,27 @@ function parseNerData(raw: string | null): ParsedNerData | null {
   }
   const lease = objectValue(data.attemptLease);
   if (lease) {
-    if (lease.version !== 1 || typeof lease.token !== "string" || lease.token.length === 0 || (lease.phase !== "claimed" && lease.phase !== "committing")) return null;
-    parsed.attemptLease = { version: 1, token: lease.token, phase: lease.phase };
+    const expectedFingerprint = parsed.repair?.contentFingerprint ?? parsed.sourceFingerprint ?? null;
+    const expectedBatchId = parsed.repair?.batchId ?? null;
+    const { attemptLease: _lease, ...payload } = data;
+    const payloadDigest = createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+    if (
+      lease.version !== 1 || typeof lease.token !== "string" || lease.token.length === 0 ||
+      (lease.phase !== "claimed" && lease.phase !== "committing") ||
+      lease.sourceFingerprint !== expectedFingerprint || lease.batchId !== expectedBatchId ||
+      lease.slug !== parsed.slug || lease.kind !== "ner" || parsed.kind !== "ner" ||
+      lease.payloadDigest !== payloadDigest
+    ) return null;
+    parsed.attemptLease = {
+      version: 1,
+      token: lease.token,
+      phase: lease.phase,
+      sourceFingerprint: expectedFingerprint,
+      batchId: expectedBatchId,
+      slug: parsed.slug,
+      kind: "ner",
+      payloadDigest,
+    };
   }
   return parsed;
 }
@@ -337,6 +369,53 @@ function readOutcome(row: JobRow): Record<string, unknown> | null {
   return parseJsonObject(row.result);
 }
 
+/** Only terminal states that prove an epoch was consumed belong to its ledger. */
+function isProcessedEpochEvidence(row: JobRow): boolean {
+  if (row.status === "failed" || row.status === "cancelled") return true;
+  if (row.status !== "done") return false;
+  const outcome = readOutcome(row)?.outcome;
+  return outcome === "processed" || outcome === "commit_unknown";
+}
+
+function finalizedEntryOwnsEpoch(entry: FinalizedEntry): boolean {
+  if (entry.terminalStatus === "failed" || entry.terminalStatus === "cancelled") return true;
+  return entry.graphOutcome === "resolved" || entry.graphOutcome === "terminal_no_graph_links";
+}
+
+function ordinaryFrozenIdentityValid(data: ParsedNerData): boolean {
+  if (data.kind !== "ner" || data.repair) return false;
+  if (data.sourceFingerprint === undefined || data.contentHash === undefined) return false;
+  if (!data.sourceFingerprint.startsWith("page:") && !/^derived:[0-9a-f]{64}$/.test(data.sourceFingerprint)) return false;
+  if (data.sourceFingerprint.startsWith("page:") &&
+    (typeof data.contentHash !== "string" || data.sourceFingerprint !== `page:${data.contentHash}`)) return false;
+  return true;
+}
+
+function ordinaryCurrentIdentityValid(db: ZeroLinkDb, data: ParsedNerData): boolean {
+  if (!ordinaryFrozenIdentityValid(data) || data.sourceFingerprint === undefined) return false;
+  const page = db.rawDb.prepare("SELECT content_hash FROM pages WHERE slug=?").get(data.slug) as { content_hash: string | null } | undefined;
+  if (!page) return false;
+  const current = deriveZeroLinkSource(db, data.slug).contentFingerprint;
+  return data.sourceFingerprint === current && data.contentHash === page.content_hash;
+}
+
+function ordinaryLiveIdentityValid(db: ZeroLinkDb, data: ParsedNerData): boolean {
+  // Pre-#342 ordinary rows remain readable only outside commit-unknown governance.
+  if (data.kind === "ner" && !data.repair && data.sourceFingerprint === undefined && data.contentHash === undefined) return true;
+  if (!ordinaryFrozenIdentityValid(data)) return false;
+  const current = deriveZeroLinkSource(db, data.slug).contentFingerprint;
+  return data.sourceFingerprint !== current || ordinaryCurrentIdentityValid(db, data);
+}
+
+function ordinaryCommitUnknownValid(row: JobRow, data: ParsedNerData | undefined): boolean {
+  const result = readOutcome(row);
+  return Boolean(
+    row.status === "done" && data && !data.repair && !data.attemptLease && ordinaryFrozenIdentityValid(data) &&
+    result?.outcome === "commit_unknown" && result.kind === "ner" &&
+    JSON.stringify(Object.keys(result).sort()) === JSON.stringify(["kind", "outcome"]),
+  );
+}
+
 function auditQueue(db: ZeroLinkDb): QueueAudit {
   const rows = readAllJobs(db);
   const byId = new Map(rows.map((row) => [row.id, row]));
@@ -344,6 +423,9 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
   const manifests: ParsedManifest[] = [];
   const manifestByBatchId = new Map<string, ParsedManifest>();
   const latestOwnershipByJobId = new Map<number, ParsedManifest>();
+  const unfinalizedOwnersByJobId = new Map<number, number>();
+  const unfinalizedOwnersBySlug = new Map<string, number>();
+  const globalStateConflictSlugs = new Set<string>();
   let conflicts = 0;
 
   for (const row of rows) {
@@ -358,10 +440,21 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
       manifests.push(parsed);
       manifestByBatchId.set(parsed.batchId, parsed);
       for (const owner of parsed.ownership) {
+        if (!parsed.finalized) {
+          unfinalizedOwnersByJobId.set(owner.jobId, (unfinalizedOwnersByJobId.get(owner.jobId) ?? 0) + 1);
+          unfinalizedOwnersBySlug.set(owner.slug, (unfinalizedOwnersBySlug.get(owner.slug) ?? 0) + 1);
+        }
         const previous = latestOwnershipByJobId.get(owner.jobId);
         if (!previous || previous.row.id < row.id) latestOwnershipByJobId.set(owner.jobId, parsed);
       }
     }
+  }
+
+  for (const ownerCount of unfinalizedOwnersByJobId.values()) {
+    if (ownerCount > 1) conflicts++;
+  }
+  for (const ownerCount of unfinalizedOwnersBySlug.values()) {
+    if (ownerCount > 1) conflicts++;
   }
 
   for (const row of rows) {
@@ -371,6 +464,11 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
     if (ACTIVE_STATUSES.has(row.status) && !parsed) conflicts++;
     const raw = parseJsonObject(row.data);
     if (raw?.repair !== undefined && !parsed?.repair) conflicts++;
+    if (raw?.attemptLease !== undefined && !parsed?.attemptLease) conflicts++;
+    if (row.status === "done" && readOutcome(row)?.outcome === "commit_unknown") {
+      if (!parsed || parsed.kind !== "ner" || parsed.attemptLease || (!parsed.repair && !ordinaryCommitUnknownValid(row, parsed))) conflicts++;
+    }
+    if (parsed?.attemptLease && row.status !== "running") globalStateConflictSlugs.add(parsed.slug);
     if (parsed?.repair) {
       const manifest = manifestByBatchId.get(parsed.repair.batchId);
       const owner = manifest?.ownership.find((entry) => entry.jobId === row.id);
@@ -379,14 +477,66 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
   }
 
   for (const manifest of manifests) {
-    if (manifest.finalized) continue;
     for (const owner of manifest.ownership) {
+      if (latestOwnershipByJobId.get(owner.jobId) !== manifest) continue;
       const child = byId.get(owner.jobId);
       const data = parsedById.get(owner.jobId);
       if (!child || child.name !== "ner-backfill" || !data?.repair || data.slug !== owner.slug || data.repair.batchId !== manifest.batchId || data.repair.contentFingerprint !== owner.contentFingerprint) conflicts++;
     }
+    if (manifest.finalized) continue;
     for (const [jobId, data] of parsedById) {
       if (data.repair?.batchId === manifest.batchId && !manifest.ownership.some((entry) => entry.jobId === jobId)) conflicts++;
+    }
+  }
+
+  const liveBySlug = new Map<string, JobRow[]>();
+  for (const row of rows) {
+    const data = parsedById.get(row.id);
+    if (row.name !== "ner-backfill" || !ACTIVE_STATUSES.has(row.status) || data?.kind !== "ner") continue;
+    if (!data.repair && !ordinaryLiveIdentityValid(db, data)) globalStateConflictSlugs.add(data.slug);
+    const group = liveBySlug.get(data.slug) ?? [];
+    group.push(row);
+    liveBySlug.set(data.slug, group);
+  }
+  for (const [slug, live] of liveBySlug) {
+    const current = deriveZeroLinkSource(db, slug).contentFingerprint;
+    const parsedLive = live.map((row) => ({ row, data: parsedById.get(row.id)! }));
+    const hasRepairHistory = manifests.some((manifest) => manifest.ownership.some((owner) => owner.slug === slug));
+    if (!current && (hasRepairHistory || parsedLive.some(({ data }) => Boolean(data.sourceFingerprint || data.repair)))) {
+      globalStateConflictSlugs.add(slug);
+    }
+    const marked = parsedLive.filter(({ data }) => Boolean(data.repair));
+    const ordinary = parsedLive.filter(({ data }) => !data.repair);
+    if (marked.length > 0 && ordinary.length > 0) globalStateConflictSlugs.add(slug);
+    if (live.length > 2) globalStateConflictSlugs.add(slug);
+    if (live.length === 2) {
+      const predecessor = parsedLive.find(({ row }) => row.status === "running");
+      const successor = parsedLive.find(({ row }) => row.status === "pending");
+      const sanctioned = Boolean(
+        predecessor && successor && !predecessor.data.repair && !successor.data.repair &&
+        predecessor.data.attemptLease && predecessor.data.sourceFingerprint &&
+        predecessor.data.sourceFingerprint !== current && successor.data.sourceFingerprint === current &&
+        ordinaryLiveIdentityValid(db, predecessor.data) && ordinaryLiveIdentityValid(db, successor.data),
+      );
+      if (!sanctioned) globalStateConflictSlugs.add(slug);
+    }
+    if (live.length === 1) {
+      const { row, data } = parsedLive[0];
+      if (row.status === "pending" && data.attemptLease) globalStateConflictSlugs.add(slug);
+      if (data.repair) {
+        const manifest = manifestByBatchId.get(data.repair.batchId);
+        const latest = latestOwnershipByJobId.get(row.id);
+        if (!manifest || manifest.finalized || latest !== manifest) globalStateConflictSlugs.add(slug);
+      }
+    }
+    if (current) {
+      const currentTerminal = rows.filter((row) => {
+        if (row.name !== "ner-backfill" || ACTIVE_STATUSES.has(row.status)) return false;
+        const data = parsedById.get(row.id);
+        return data?.kind === "ner" && !data.repair && data.slug === slug &&
+          data.sourceFingerprint === current && isProcessedEpochEvidence(row);
+      });
+      if (currentTerminal.length > 1) globalStateConflictSlugs.add(slug);
     }
   }
 
@@ -398,7 +548,16 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
     if ((row.status === "done" && outcome === "commit_unknown") || (row.status === "running" && parsed?.attemptLease?.phase === "committing" && isStale(row))) commitUnknown++;
   }
 
-  return { rows, parsedById, manifests, manifestByBatchId, latestOwnershipByJobId, queueIntegrityConflicts: conflicts, commitUnknown };
+  return {
+    rows,
+    parsedById,
+    manifests,
+    manifestByBatchId,
+    latestOwnershipByJobId,
+    queueIntegrityConflicts: conflicts,
+    globalStateConflictSlugs,
+    commitUnknown,
+  };
 }
 
 function activeCurrentLinkSlugs(db: ZeroLinkDb): Set<string> {
@@ -458,43 +617,62 @@ function readCandidateAggregates(db: ZeroLinkDb): CandidateAggregateRow[] {
   }) as CandidateAggregateRow[];
 }
 
-export function deriveZeroLinkSource(db: ZeroLinkDb, slug: string): ZeroLinkSource {
-  const page = db.rawDb.prepare(
-    "SELECT type, content_hash FROM pages WHERE slug = ?",
-  ).get(slug) as { type: string; content_hash: string | null } | null;
-  if (!page) return { contentFingerprint: null, sourceKind: null };
-
-  const sealed = Boolean(db.rawDb.prepare(
-    "SELECT 1 FROM chunks WHERE page_slug = ? AND summary_level = 1 LIMIT 1",
-  ).get(slug));
-
-  if (!sealed) {
-    const pageHash = page.content_hash?.trim();
-    return pageHash
-      ? { contentFingerprint: `page:${pageHash}`, sourceKind: "vault_hash" }
-      : { contentFingerprint: null, sourceKind: null };
+export function loadZeroLinkSourceSnapshot(db: ZeroLinkDb, slug: string): ZeroLinkSourceSnapshot {
+  const rows = db.rawDb.prepare(
+    `SELECT p.type, p.content_hash,
+            EXISTS(SELECT 1 FROM chunks sx WHERE sx.page_slug=p.slug AND sx.summary_level=1) AS sealed,
+            c.id AS chunk_id, c.chunk_index, c.content, t.tag
+     FROM pages p
+     LEFT JOIN chunks c ON c.page_slug=p.slug AND c.summary_level=0
+     LEFT JOIN tags t ON t.page_slug=p.slug
+     WHERE p.slug=?
+     ORDER BY c.chunk_index ASC, c.id ASC, t.tag ASC`,
+  ).all(slug) as Array<{
+    type: string;
+    content_hash: string | null;
+    sealed: number;
+    chunk_id: number | null;
+    chunk_index: number | null;
+    content: string | null;
+    tag: string | null;
+  }>;
+  if (rows.length === 0) return { contentFingerprint: null, sourceKind: null, body: null, pageType: null };
+  const page = rows[0];
+  const pageHash = page.content_hash?.trim();
+  if (!page.sealed && pageHash) {
+    return { contentFingerprint: `page:${pageHash}`, sourceKind: "vault_hash", body: null, pageType: page.type };
   }
 
-  const chunks = db.rawDb.prepare(
-    `SELECT id, chunk_index, content
-     FROM chunks
-     WHERE page_slug = ? AND summary_level = 0
-     ORDER BY chunk_index ASC, id ASC`,
-  ).all(slug) as SourceChunkRow[];
-  if (chunks.length === 0) return { contentFingerprint: null, sourceKind: null };
-  const tags = (db.rawDb.prepare(
-    "SELECT tag FROM tags WHERE page_slug = ? ORDER BY tag ASC",
-  ).all(slug) as Array<{ tag: string }>).map((row) => row.tag);
+  const chunks = new Map<number, { index: number; id: number; content: string }>();
+  const tags = new Set<string>();
+  for (const row of rows) {
+    if (row.chunk_id !== null && row.chunk_index !== null && row.content !== null && !chunks.has(row.chunk_id)) {
+      chunks.set(row.chunk_id, { index: row.chunk_index, id: row.chunk_id, content: row.content });
+    }
+    if (row.tag !== null) tags.add(row.tag);
+  }
+  const orderedChunks = [...chunks.values()];
+  if (orderedChunks.length === 0) {
+    return { contentFingerprint: null, sourceKind: null, body: null, pageType: page.type };
+  }
   const canonical = {
     version: 1,
     type: page.type,
-    chunks: chunks.map((row) => ({ index: row.chunk_index, id: row.id, content: row.content })),
-    tags,
+    chunks: orderedChunks,
+    tags: [...tags].sort(),
   };
-  const digest = createHash("sha256")
-    .update(JSON.stringify(canonical), "utf8")
-    .digest("hex");
-  return { contentFingerprint: `derived:${digest}`, sourceKind: "raw_chunks" };
+  const digest = createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex");
+  return {
+    contentFingerprint: `derived:${digest}`,
+    sourceKind: "raw_chunks",
+    body: orderedChunks.map((chunk) => chunk.content).join("\n\n"),
+    pageType: page.type,
+  };
+}
+
+export function deriveZeroLinkSource(db: ZeroLinkDb, slug: string): ZeroLinkSource {
+  const { contentFingerprint, sourceKind } = loadZeroLinkSourceSnapshot(db, slug);
+  return { contentFingerprint, sourceKind };
 }
 
 export function countCurrentGraphLinks(db: ZeroLinkDb, slug: string): number {
@@ -517,10 +695,8 @@ export function countCurrentGraphLinks(db: ZeroLinkDb, slug: string): number {
   return count;
 }
 
-export function scanRichRecords(db: ZeroLinkDb): ZeroLinkCandidate[] {
-  const connected = activeCurrentLinkSlugs(db);
+function scanAllRichRecords(db: ZeroLinkDb): ZeroLinkCandidate[] {
   return readCandidateAggregates(db)
-    .filter((row) => !connected.has(row.slug))
     .map((row) => {
       const source = deriveZeroLinkSource(db, row.slug);
       return {
@@ -532,6 +708,11 @@ export function scanRichRecords(db: ZeroLinkDb): ZeroLinkCandidate[] {
         tagCount: Number(row.tag_count),
       };
     });
+}
+
+export function scanRichRecords(db: ZeroLinkDb): ZeroLinkCandidate[] {
+  const connected = activeCurrentLinkSlugs(db);
+  return scanAllRichRecords(db).filter((candidate) => !connected.has(candidate.slug));
 }
 
 export function scanZeroLinkCandidates(db: ZeroLinkDb, limit?: number): ZeroLinkCandidate[] {
@@ -593,6 +774,7 @@ function classifyCandidate(db: ZeroLinkDb, audit: QueueAudit, candidate: ZeroLin
     .filter((manifest) => manifest.finalized)
     .flatMap((manifest) => manifest.finalizedEntries.map((entry) => ({ manifestId: manifest.row.id, entry })))
     .filter(({ entry }) => entry.slug === candidate.slug && entry.contentFingerprint === candidate.contentFingerprint)
+    .filter(({ entry }) => finalizedEntryOwnsEpoch(entry))
     .sort((a, b) => b.manifestId - a.manifestId);
   if (finalizedEntries.length > 0) {
     const entry = finalizedEntries[0].entry;
@@ -609,7 +791,8 @@ function classifyCandidate(db: ZeroLinkDb, audit: QueueAudit, candidate: ZeroLin
 
   const currentOrdinary = relevant.filter((row) => {
     const data = audit.parsedById.get(row.id);
-    return !data?.repair && data?.sourceFingerprint === candidate.contentFingerprint && !ACTIVE_STATUSES.has(row.status);
+    return !data?.repair && data?.sourceFingerprint === candidate.contentFingerprint &&
+      !ACTIVE_STATUSES.has(row.status) && isProcessedEpochEvidence(row);
   });
   if (currentOrdinary.length > 1) return { candidate, disposition: "failed", stateConflict: true };
   if (currentOrdinary.length === 1) {
@@ -635,6 +818,10 @@ function classifyCandidate(db: ZeroLinkDb, audit: QueueAudit, candidate: ZeroLin
     if (result?.outcome === "commit_unknown") return { candidate, disposition: "commit_unknown" };
     if (row.status === "failed") return { candidate, disposition: "failed" };
     if (row.status === "cancelled") return { candidate, disposition: "cancelled" };
+    if (result?.graphOutcome === "blocked_source_unavailable" || result?.graphOutcome === "source_changed" ||
+      result?.graphOutcome === "invalid_terminal") {
+      return { candidate, disposition: "legacy_requeue", rowId: row.id };
+    }
     switch (result?.graphOutcome) {
       case "resolved": return { candidate, disposition: countCurrentGraphLinks(db, candidate.slug) > 0 ? "resolved" : "lost_link" };
       case "terminal_no_graph_links": return { candidate, disposition: "terminal_no_graph_links" };
@@ -688,14 +875,17 @@ function emptyReport(mode: "dry_run" | "enqueue", candidates: ZeroLinkCandidate[
 }
 
 function buildPlan(db: ZeroLinkDb, mode: "dry_run" | "enqueue", limit?: number): { report: ZeroLinkBackfillReport; plans: CandidatePlan[] } {
-  const candidates = scanRichRecords(db);
+  const allRichRecords = scanAllRichRecords(db);
+  const connected = activeCurrentLinkSlugs(db);
+  const candidates = allRichRecords.filter((candidate) => !connected.has(candidate.slug));
   const audit = auditQueue(db);
   const plans = candidates.map((candidate) => classifyCandidate(db, audit, candidate));
   const report = emptyReport(mode, candidates);
   report.queueIntegrityConflicts = audit.queueIntegrityConflicts;
+  report.stateConflicts = audit.globalStateConflictSlugs.size;
   report.commitUnknown = audit.commitUnknown;
   for (const plan of plans) {
-    if (plan.stateConflict) report.stateConflicts++;
+    if (plan.stateConflict && !audit.globalStateConflictSlugs.has(plan.candidate.slug)) report.stateConflicts++;
     if (plan.staleRunning) report.staleRunning++;
     switch (plan.disposition) {
       case "active": report.active++; break;
@@ -712,6 +902,22 @@ function buildPlan(db: ZeroLinkDb, mode: "dry_run" | "enqueue", limit?: number):
       default: break;
     }
   }
+  const currentBySlug = new Map(allRichRecords.map((candidate) => [candidate.slug, candidate]));
+  const latestRepairEntry = new Map<string, { manifestId: number; entry: FinalizedEntry }>();
+  for (const manifest of audit.manifests) {
+    if (!manifest.finalized) continue;
+    for (const entry of manifest.finalizedEntries) {
+      const current = currentBySlug.get(entry.slug);
+      if (!current || current.contentFingerprint !== entry.contentFingerprint) continue;
+      const previous = latestRepairEntry.get(entry.slug);
+      if (!previous || previous.manifestId < manifest.row.id) {
+        latestRepairEntry.set(entry.slug, { manifestId: manifest.row.id, entry });
+      }
+    }
+  }
+  report.resolved = [...latestRepairEntry.values()].filter(({ entry }) =>
+    entry.graphOutcome === "resolved" && connected.has(entry.slug) && countCurrentGraphLinks(db, entry.slug) > 0
+  ).length;
   const actionable = plans.filter((plan) => ACTIONABLE.has(plan.disposition) && !plan.stateConflict && plan.candidate.contentFingerprint && plan.candidate.sourceKind);
   report.actionable = actionable.length;
   const selectionLimit = limit === undefined ? actionable.length : Math.max(0, limit);
@@ -758,15 +964,31 @@ export function inspectZeroLinkRepairControl(
   db: ZeroLinkDb,
   slug: string,
   fingerprint: string,
-): { queueIntegrityConflicts: number; finalizedFingerprintOwned: boolean } {
+): {
+  queueIntegrityConflicts: number;
+  stateConflicts: number;
+  finalizedFingerprintOwned: boolean;
+  unfinalizedOwnedJobId: number | null;
+  unfinalizedOwnedLive: boolean;
+} {
   const audit = auditQueue(db);
+  const unfinalized = audit.manifests
+    .filter((manifest) => !manifest.finalized)
+    .flatMap((manifest) => manifest.ownership.map((owner) => ({ manifest, owner })))
+    .find(({ owner }) => owner.slug === slug);
+  const child = unfinalized
+    ? audit.rows.find((row) => row.id === unfinalized.owner.jobId)
+    : undefined;
   return {
     queueIntegrityConflicts: audit.queueIntegrityConflicts,
+    stateConflicts: audit.globalStateConflictSlugs.size,
     finalizedFingerprintOwned: audit.manifests.some(
       (manifest) => manifest.finalized && manifest.finalizedEntries.some(
-        (entry) => entry.slug === slug && entry.contentFingerprint === fingerprint,
+        (entry) => entry.slug === slug && entry.contentFingerprint === fingerprint && finalizedEntryOwnsEpoch(entry),
       ),
     ),
+    unfinalizedOwnedJobId: unfinalized?.owner.jobId ?? null,
+    unfinalizedOwnedLive: Boolean(child && ACTIVE_STATUSES.has(child.status)),
   };
 }
 
@@ -877,6 +1099,19 @@ export function snapshotRepairBatchJobIds(db: ZeroLinkDb, batchId: string, limit
   return manifest.ownership.map((entry) => entry.jobId);
 }
 
+export function getRepairBatchAttemptIdentity(
+  db: ZeroLinkDb,
+  batchId: string,
+  jobId: number,
+): { slug: string; kind: "ner"; sourceFingerprint: string; batchId: string } {
+  const audit = auditQueue(db);
+  if (audit.queueIntegrityConflicts > 0 || audit.globalStateConflictSlugs.size > 0) throw new Error("BATCH_INTEGRITY_CONFLICT");
+  const manifest = audit.manifestByBatchId.get(batchId);
+  const owner = manifest?.ownership.find((entry) => entry.jobId === jobId);
+  if (!manifest || !owner) throw new Error("BATCH_INTEGRITY_CONFLICT");
+  return { slug: owner.slug, kind: "ner", sourceFingerprint: owner.contentFingerprint, batchId };
+}
+
 export function prepareRepairBatchJobIds(
   db: ZeroLinkDb,
   batchId: string,
@@ -886,7 +1121,7 @@ export function prepareRepairBatchJobIds(
   db.rawDb.exec("BEGIN IMMEDIATE");
   try {
     const audit = auditQueue(db);
-    if (audit.queueIntegrityConflicts > 0) throw new Error("BATCH_INTEGRITY_CONFLICT");
+    if (audit.queueIntegrityConflicts > 0 || audit.globalStateConflictSlugs.size > 0) throw new Error("BATCH_INTEGRITY_CONFLICT");
     const manifest = audit.manifestByBatchId.get(batchId);
     if (!manifest) throw new Error("BATCH_NOT_FOUND");
     if (manifest.ownership.length !== limit) throw new Error("BATCH_LIMIT_MISMATCH");
@@ -932,11 +1167,18 @@ export function summarizeRepairBatch(db: ZeroLinkDb, batchId: string): RepairBat
   const audit = auditQueue(db);
   const matches = audit.manifests.filter((manifest) => manifest.batchId === batchId);
   if (matches.length !== 1 || audit.queueIntegrityConflicts > 0) {
-    return {
+    const manifest = matches.length === 1 ? matches[0] : null;
+    const byId = new Map(audit.rows.map((row) => [row.id, row]));
+    const degraded: RepairBatchStatus = {
       version: 1, batchId, finalized: false, integrityConflicts: Math.max(1, audit.queueIntegrityConflicts),
-      selected: 0, pending: 0, running: 0, done: 0, failed: 0, cancelled: 0,
+      selected: manifest?.ownership.length ?? 0, pending: 0, running: 0, done: 0, failed: 0, cancelled: 0,
       outcomes: { resolved: 0, terminalNoGraphLinks: 0, blockedSourceUnavailable: 0, sourceChanged: 0, invalidTerminal: 0, commitUnknown: 0 },
     };
+    for (const owner of manifest?.ownership ?? []) {
+      const row = byId.get(owner.jobId);
+      if (row) degraded[row.status]++;
+    }
+    return degraded;
   }
   const manifest = matches[0];
   if (manifest.finalized) {
@@ -1050,7 +1292,14 @@ function validOrdinaryCommitUnknownIds(audit: QueueAudit): number[] {
     if (row.name !== "ner-backfill" || row.status !== "done" || ownedIds.has(row.id)) continue;
     const data = audit.parsedById.get(row.id);
     const result = readOutcome(row);
-    if (!data || data.kind !== "ner" || data.repair || data.attemptLease || !data.sourceFingerprint || result?.outcome !== "commit_unknown" || result.kind !== "ner" || Object.keys(result).some((key) => key !== "outcome" && key !== "kind")) continue;
+    const sourceKind = data?.sourceFingerprint?.startsWith("page:")
+      ? "vault_hash"
+      : data?.sourceFingerprint?.startsWith("derived:") ? "raw_chunks" : null;
+    if (
+      !data || !ordinaryCommitUnknownValid(row, data) ||
+      !sourceKind || !validFingerprint(data.sourceFingerprint, sourceKind) ||
+      result?.outcome !== "commit_unknown"
+    ) continue;
     candidates.push({ id: row.id, slug: data.slug, fingerprint: data.sourceFingerprint });
   }
   const duplicateKeys = new Set<string>();
@@ -1090,16 +1339,21 @@ export function resolveOrdinaryCommitUnknown(
     const owned = audit.manifests.some((manifest) => manifest.ownership.some((entry) => entry.jobId === jobId));
     if (owned || parsed?.repair) throw new Error("BATCH_ROLLBACK_REQUIRED");
     const validIds = validOrdinaryCommitUnknownIds(audit);
-    if (audit.queueIntegrityConflicts > 0 || !row || !parsed || !validIds.includes(jobId)) throw new Error("COMMIT_UNKNOWN_INTEGRITY_CONFLICT");
+    if (audit.queueIntegrityConflicts > 0 || audit.globalStateConflictSlugs.size > 0 || !row || !parsed || !validIds.includes(jobId)) {
+      throw new Error("COMMIT_UNKNOWN_INTEGRITY_CONFLICT");
+    }
 
     const current = deriveZeroLinkSource(db, parsed.slug);
+    const currentPage = db.rawDb.prepare("SELECT content_hash FROM pages WHERE slug=?").get(parsed.slug) as { content_hash: string | null } | undefined;
     const live = audit.rows.filter((candidate) => {
       if (candidate.id === jobId || candidate.name !== "ner-backfill" || !ACTIVE_STATUSES.has(candidate.status)) return false;
       return audit.parsedById.get(candidate.id)?.slug === parsed.slug;
     });
     const validSuccessors = live.filter((candidate) => {
       const data = audit.parsedById.get(candidate.id);
-      return candidate.status === "pending" && !data?.repair && data?.sourceFingerprint && data.sourceFingerprint !== parsed.sourceFingerprint && data.sourceFingerprint === current.contentFingerprint;
+      return candidate.status === "pending" && !data?.repair && data?.sourceFingerprint &&
+        data.sourceFingerprint !== parsed.sourceFingerprint && data.sourceFingerprint === current.contentFingerprint &&
+        ordinaryCurrentIdentityValid(db, data) && data.contentHash === currentPage?.content_hash;
     });
     const successorShapeValid = live.length === validSuccessors.length && validSuccessors.length <= 1;
     let legal = false;

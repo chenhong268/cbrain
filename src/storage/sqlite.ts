@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getReverseRelation } from "../core/shared.js";
@@ -46,6 +46,84 @@ export function runDestructiveMigrationForTest(
 ): void {
   (db as unknown as { runDestructiveMigration(o: { name: string; completionKey: string; body: () => void }): void })
     .runDestructiveMigration({ name, completionKey, body });
+}
+
+export interface NerAttemptIdentity {
+  slug: string;
+  kind: "ner";
+  sourceFingerprint: string | null;
+  batchId: string | null;
+  payloadDigest: string;
+}
+
+function validNerFingerprint(value: unknown, sourceKind?: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return false;
+  if (sourceKind === "vault_hash") return value.startsWith("page:") && value.length > 5;
+  if (sourceKind === "raw_chunks") return /^derived:[0-9a-f]{64}$/.test(value);
+  return value.startsWith("page:") || /^derived:[0-9a-f]{64}$/.test(value);
+}
+
+export function buildNerAttemptIdentity(data: Record<string, unknown>): NerAttemptIdentity | null {
+  const kind = data.kind === undefined || data.kind === "ner" ? "ner" : null;
+  if (!kind || typeof data.slug !== "string" || !data.slug.trim()) return null;
+  const repair = typeof data.repair === "object" && data.repair !== null && !Array.isArray(data.repair)
+    ? data.repair as Record<string, unknown>
+    : null;
+  if (data.repair !== undefined) {
+    const keys = repair ? Object.keys(repair).sort() : [];
+    if (
+      !repair || JSON.stringify(keys) !== JSON.stringify(["batchId", "contentFingerprint", "name", "sourceKind", "version"]) ||
+      repair.name !== "zero-link-rich-records" || repair.version !== 1 ||
+      (repair.sourceKind !== "vault_hash" && repair.sourceKind !== "raw_chunks") ||
+      typeof repair.batchId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(repair.batchId) ||
+      !validNerFingerprint(repair.contentFingerprint, repair.sourceKind)
+    ) return null;
+  }
+  const sourceFingerprint = typeof repair?.contentFingerprint === "string"
+    ? repair.contentFingerprint
+    : typeof data.sourceFingerprint === "string" ? data.sourceFingerprint : null;
+  if (sourceFingerprint !== null && !validNerFingerprint(sourceFingerprint)) return null;
+  const batchId = typeof repair?.batchId === "string" ? repair.batchId : null;
+  const { attemptLease: _lease, ...payload } = data;
+  const payloadDigest = createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
+  return { slug: data.slug, kind, sourceFingerprint, batchId, payloadDigest };
+}
+
+function buildStrictFrozenNerIdentity(data: Record<string, unknown>): NerAttemptIdentity | null {
+  const identity = buildNerAttemptIdentity(data);
+  if (!identity?.sourceFingerprint) return null;
+  const hasPageHash = Object.hasOwn(data, "pageContentHash");
+  const hasContentHash = Object.hasOwn(data, "contentHash");
+  if (!hasPageHash && !hasContentHash) return null;
+  const contentHash = hasPageHash ? data.pageContentHash : data.contentHash;
+  if (contentHash !== null && typeof contentHash !== "string") return null;
+  if (identity.sourceFingerprint.startsWith("page:") &&
+    (typeof contentHash !== "string" || identity.sourceFingerprint !== `page:${contentHash}`)) return null;
+  return identity;
+}
+
+function sameNerAttemptIdentity(left: NerAttemptIdentity, right: NerAttemptIdentity): boolean {
+  return left.slug === right.slug && left.kind === right.kind &&
+    left.sourceFingerprint === right.sourceFingerprint && left.batchId === right.batchId &&
+    left.payloadDigest === right.payloadDigest;
+}
+
+function leaseMatchesNerIdentity(
+  data: Record<string, unknown>,
+  token: string,
+  phase: "claimed" | "committing",
+  frozenPayloadDigest: string,
+): boolean {
+  const identity = buildNerAttemptIdentity(data);
+  const lease = typeof data.attemptLease === "object" && data.attemptLease !== null && !Array.isArray(data.attemptLease)
+    ? data.attemptLease as Record<string, unknown>
+    : null;
+  return Boolean(
+    identity && lease?.version === 1 && lease.token === token && lease.phase === phase &&
+    lease.slug === identity.slug && lease.kind === identity.kind &&
+    lease.sourceFingerprint === identity.sourceFingerprint && lease.batchId === identity.batchId &&
+    lease.payloadDigest === identity.payloadDigest && identity.payloadDigest === frozenPayloadDigest,
+  );
 }
 
 const ACTIVE_LINK_SQL = "(trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
@@ -1117,56 +1195,76 @@ export class CBrainDB {
   }
 
   /** #342: scoped atomic claim for ordinary/repair NER only. Entity facts stay on the legacy path. */
-  claimNerJobByIdWithLease(id: number): { id: number; name: string; data: string; attempts: number; leaseToken: string } | null {
-    const row = this.rawDb.prepare(
-      "SELECT id, name, data, attempts FROM jobs WHERE id = ? AND name = 'ner-backfill' AND status = 'pending'",
-    ).get(id) as { id: number; name: string; data: string | null; attempts: number } | undefined;
-    if (!row?.data) return null;
-    let data: Record<string, unknown>;
+  claimNerJobByIdWithLease(
+    id: number,
+    expectedIdentity?: NerAttemptIdentity,
+  ): { id: number; name: string; data: string; attempts: number; leaseToken: string; payloadDigest: string } | null {
+    this.rawDb.exec("BEGIN IMMEDIATE");
     try {
-      data = JSON.parse(row.data) as Record<string, unknown>;
-    } catch {
-      return null;
+      const row = this.rawDb.prepare(
+        "SELECT id, name, data, attempts FROM jobs WHERE id = ? AND name = 'ner-backfill' AND status = 'pending'",
+      ).get(id) as { id: number; name: string; data: string | null; attempts: number } | undefined;
+      if (!row?.data) { this.rawDb.exec("COMMIT"); return null; }
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { this.rawDb.exec("COMMIT"); return null; }
+      const identity = buildNerAttemptIdentity(data);
+      if (!identity || (expectedIdentity && !sameNerAttemptIdentity(identity, expectedIdentity))) {
+        this.rawDb.exec("COMMIT");
+        return null;
+      }
+      const terminalRows = this.rawDb.prepare(
+        "SELECT data, result FROM jobs WHERE name='ner-backfill' AND status='done' AND id<>?",
+      ).all(id) as Array<{ data: string | null; result: string | null }>;
+      for (const terminal of terminalRows) {
+        let terminalResult: Record<string, unknown> | null = null;
+        try { terminalResult = terminal.result ? JSON.parse(terminal.result) as Record<string, unknown> : null; } catch { /* not commit-unknown evidence */ }
+        if (terminalResult?.outcome !== "commit_unknown") continue;
+        let terminalData: Record<string, unknown> | null = null;
+        try { terminalData = terminal.data ? JSON.parse(terminal.data) as Record<string, unknown> : null; } catch { /* fail closed below */ }
+        const terminalIdentity = terminalData ? buildStrictFrozenNerIdentity(terminalData) : null;
+        const repair = terminalData && typeof terminalData.repair === "object" && terminalData.repair !== null
+          ? terminalData.repair
+          : null;
+        const expectedResultKeys = repair ? ["kind", "outcome", "repair"] : ["kind", "outcome"];
+        const resultValid = terminalResult.kind === "ner" &&
+          JSON.stringify(Object.keys(terminalResult).sort()) === JSON.stringify(expectedResultKeys) &&
+          (!repair || JSON.stringify(terminalResult.repair) === JSON.stringify(repair));
+        if (!terminalIdentity || !resultValid || terminalIdentity.slug === identity.slug) {
+          this.rawDb.exec("COMMIT");
+          return null;
+        }
+      }
+      const leaseToken = randomUUID();
+      const nextData = JSON.stringify({
+        ...data,
+        attemptLease: { version: 1, token: leaseToken, phase: "claimed", ...identity },
+      });
+      const updated = this.rawDb.prepare(
+        `UPDATE jobs
+         SET status='running', attempts=attempts + 1, started_at=datetime('now'), data=?
+         WHERE id=? AND name='ner-backfill' AND status='pending' AND data=?`,
+      ).run(nextData, id, row.data);
+      if (updated.changes !== 1) { this.rawDb.exec("COMMIT"); return null; }
+      this.rawDb.exec("COMMIT");
+      return { id: row.id, name: row.name, data: nextData, attempts: row.attempts, leaseToken, payloadDigest: identity.payloadDigest };
+    } catch (error) {
+      try { this.rawDb.exec("ROLLBACK"); } catch { /* closed */ }
+      throw error;
     }
-    if (data.kind === "entity_facts" || (data.kind !== undefined && data.kind !== "ner")) return null;
-    if (typeof data.slug !== "string" || !data.slug.trim()) return null;
-    const terminalRows = this.rawDb.prepare(
-      "SELECT data, result FROM jobs WHERE name='ner-backfill' AND status='done' AND id<>?",
-    ).all(id) as Array<{ data: string | null; result: string | null }>;
-    for (const terminal of terminalRows) {
-      try {
-        const terminalData = terminal.data ? JSON.parse(terminal.data) as Record<string, unknown> : null;
-        const terminalResult = terminal.result ? JSON.parse(terminal.result) as Record<string, unknown> : null;
-        if (terminalData?.slug === data.slug && terminalResult?.outcome === "commit_unknown") return null;
-      } catch { /* global preflight owns malformed-row reporting */ }
-    }
-    const leaseToken = randomUUID();
-    const nextData = JSON.stringify({
-      ...data,
-      attemptLease: { version: 1, token: leaseToken, phase: "claimed" },
-    });
-    const updated = this.rawDb.prepare(
-      `UPDATE jobs
-       SET status='running', attempts=attempts + 1, started_at=datetime('now'), data=?
-       WHERE id=? AND name='ner-backfill' AND status='pending' AND data=?`,
-    ).run(nextData, id, row.data);
-    if (updated.changes !== 1) return null;
-    return { id: row.id, name: row.name, data: nextData, attempts: row.attempts, leaseToken };
   }
 
   /** #342: write-authority linearization point for a claimed NER attempt. */
-  moveNerLeaseToCommitting(id: number, leaseToken: string): boolean {
+  moveNerLeaseToCommitting(id: number, leaseToken: string, frozenPayloadDigest: string): boolean {
     const row = this.rawDb.prepare(
       "SELECT data FROM jobs WHERE id=? AND name='ner-backfill' AND status='running'",
     ).get(id) as { data: string | null } | undefined;
     if (!row?.data) return false;
     let data: Record<string, unknown>;
     try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { return false; }
-    const lease = data.attemptLease as Record<string, unknown> | undefined;
-    if (lease?.version !== 1 || lease.token !== leaseToken || lease.phase !== "claimed") return false;
+    if (!leaseMatchesNerIdentity(data, leaseToken, "claimed", frozenPayloadDigest)) return false;
     const nextData = JSON.stringify({
       ...data,
-      attemptLease: { version: 1, token: leaseToken, phase: "committing" },
+      attemptLease: { ...(data.attemptLease as Record<string, unknown>), phase: "committing" },
     });
     const updated = this.rawDb.prepare(
       "UPDATE jobs SET data=? WHERE id=? AND name='ner-backfill' AND status='running' AND data=?",
@@ -1174,15 +1272,14 @@ export class CBrainDB {
     return updated.changes === 1;
   }
 
-  validateNerJobLease(id: number, leaseToken: string, phase: "claimed" | "committing"): boolean {
+  validateNerJobLease(id: number, leaseToken: string, phase: "claimed" | "committing", frozenPayloadDigest: string): boolean {
     const row = this.rawDb.prepare(
       "SELECT data FROM jobs WHERE id=? AND name='ner-backfill' AND status='running'",
     ).get(id) as { data: string | null } | undefined;
     if (!row?.data) return false;
     try {
       const data = JSON.parse(row.data) as Record<string, unknown>;
-      const lease = data.attemptLease as Record<string, unknown> | undefined;
-      return lease?.version === 1 && lease.token === leaseToken && lease.phase === phase;
+      return leaseMatchesNerIdentity(data, leaseToken, phase, frozenPayloadDigest);
     } catch {
       return false;
     }
@@ -1193,6 +1290,7 @@ export class CBrainDB {
     id: number,
     leaseToken: string,
     phase: "claimed" | "committing",
+    frozenPayloadDigest: string,
     result?: unknown,
   ): boolean {
     const row = this.rawDb.prepare(
@@ -1201,8 +1299,7 @@ export class CBrainDB {
     if (!row?.data) return false;
     let data: Record<string, unknown>;
     try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { return false; }
-    const lease = data.attemptLease as Record<string, unknown> | undefined;
-    if (lease?.version !== 1 || lease.token !== leaseToken || lease.phase !== phase) return false;
+    if (!leaseMatchesNerIdentity(data, leaseToken, phase, frozenPayloadDigest)) return false;
     const { attemptLease: _removed, ...withoutLease } = data;
     const updated = this.rawDb.prepare(
       `UPDATE jobs
@@ -1213,15 +1310,14 @@ export class CBrainDB {
   }
 
   /** #342: retry/terminal failure guarded by the claimed lease. */
-  failNerJobWithLease(id: number, leaseToken: string, errorCode: string): boolean {
+  failNerJobWithLease(id: number, leaseToken: string, frozenPayloadDigest: string, errorCode: string): boolean {
     const row = this.rawDb.prepare(
       "SELECT data, attempts, max_attempts FROM jobs WHERE id=? AND name='ner-backfill' AND status='running'",
     ).get(id) as { data: string | null; attempts: number; max_attempts: number } | undefined;
     if (!row?.data) return false;
     let data: Record<string, unknown>;
     try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { return false; }
-    const lease = data.attemptLease as Record<string, unknown> | undefined;
-    if (lease?.version !== 1 || lease.token !== leaseToken || lease.phase !== "claimed") return false;
+    if (!leaseMatchesNerIdentity(data, leaseToken, "claimed", frozenPayloadDigest)) return false;
     const { attemptLease: _removed, ...withoutLease } = data;
     const status = row.attempts >= row.max_attempts ? "failed" : "pending";
     const updated = this.rawDb.prepare(
