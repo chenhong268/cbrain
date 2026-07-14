@@ -323,7 +323,7 @@ cbrain skill-pack
     Pack:       /path/to/skills/
     Entrypoint: /path/to/skills/SKILL.md (2,807 chars)
 
-    Required files: 6/6 present
+    Required files: 33/33 present
     Status: PASS
 
     Copy:    cp -r /path/to/skills/ <target>/
@@ -337,17 +337,25 @@ cbrain skill-pack
 cbrain skill-pack
 # 输出中的 Pack: 行即为技能包绝对路径
 
-# 2. 复制到 Hermes 技能目录（替换下面的 <pack-path>）
-mkdir -p ~/.hermes/skills/brain-ops/cbrain/
-cp -r "<pack-path>/" ~/.hermes/skills/brain-ops/cbrain/skills/
+# 2. 复制到 Hermes 技能目录（仅当 target 不存在时；替换下面的 <pack-path>）
+mkdir -p ~/.hermes/skills/brain-ops
+cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
+
+# 3. 验证安装（应报 current）
+cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
 ```
 
 或者用符号链接（方便随 CBrain 升级自动同步）：
 
 ```bash
-mkdir -p ~/.hermes/skills/brain-ops/cbrain/
-ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain/skills
+mkdir -p ~/.hermes/skills/brain-ops
+ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
+
+# 验证安装（应报 current）
+cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
 ```
+
+> **加载契约：** Hermes 扫描 `~/.hermes/skills/<dir>/SKILL.md` 找入口。上述命令把 pack 复制/链接到 `brain-ops/cbrain` 根，`SKILL.md` 直达 target root（不嵌套）。加载路径同源由 `cbrain skill-pack --target` 保证；Hermes 运行时是否读取 `SKILL.md` 见 `docs/known-issues.md`，真实 Hermes 加载 smoke 留作合并后 release gate。
 
 > **注意：** Hermes 是目前主要验证的 Agent 运行时。其他 MCP 客户端（Claude Desktop、Cursor 等）可以连接 `cbrain serve`，但还没有同等的路由规则验证。
 
