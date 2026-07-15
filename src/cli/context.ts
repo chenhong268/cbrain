@@ -105,10 +105,7 @@ function resolveConfigPath(startDir: string, explicitPath?: string): string {
   }
 }
 
-export function loadConfigWithPath(
-  startDir = process.cwd(),
-  explicitPath = process.env.CBRAIN_CONFIG,
-): LoadedCBrainConfig {
+function loadResolvedConfig(startDir: string, explicitPath?: string): LoadedCBrainConfig {
   const configPath = resolveConfigPath(startDir, explicitPath);
   return {
     config: JSON.parse(readFileSync(configPath, "utf-8")),
@@ -117,10 +114,30 @@ export function loadConfigWithPath(
   };
 }
 
+function exitConfigNotFound(error: ConfigNotFoundError): never {
+  if (error.explicitPath) {
+    console.error(`Error: CBRAIN_CONFIG=${error.explicitPath} not found.`);
+  } else {
+    console.error("Error: No cbrain.json found. Run `cbrain init` first.");
+  }
+  process.exit(1);
+}
+
+export function loadConfigWithPath(
+  startDir = process.cwd(),
+  explicitPath = process.env.CBRAIN_CONFIG,
+): LoadedCBrainConfig {
+  try {
+    return loadResolvedConfig(startDir, explicitPath);
+  } catch (error) {
+    if (error instanceof ConfigNotFoundError) exitConfigNotFound(error);
+    throw error;
+  }
+}
+
 export function findConfig(startDir = process.cwd()): CBrainConfig | null {
   try {
-    const configPath = resolveConfigPath(startDir);
-    return JSON.parse(readFileSync(configPath, "utf-8"));
+    return loadResolvedConfig(startDir).config;
   } catch (error) {
     if (error instanceof ConfigNotFoundError) return null;
     throw error;
@@ -132,26 +149,14 @@ export function loadConfigSafe(
   explicitPath = process.env.CBRAIN_CONFIG,
 ): LoadedCBrainConfig | null {
   try {
-    return loadConfigWithPath(startDir, explicitPath);
+    return loadResolvedConfig(startDir, explicitPath);
   } catch {
     return null;
   }
 }
 
 export function loadConfig(): CBrainConfig {
-  try {
-    return loadConfigWithPath().config;
-  } catch (error) {
-    if (error instanceof ConfigNotFoundError) {
-      if (error.explicitPath) {
-        console.error(`Error: CBRAIN_CONFIG=${error.explicitPath} not found.`);
-      } else {
-        console.error("Error: No cbrain.json found. Run `cbrain init` first.");
-      }
-      process.exit(1);
-    }
-    throw error;
-  }
+  return loadConfigWithPath().config;
 }
 
 export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrainDeps {

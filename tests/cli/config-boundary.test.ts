@@ -10,12 +10,45 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  findConfig,
   loadConfig,
   loadConfigSafe,
   loadConfigWithPath,
   type CBrainConfig,
   type LoadedCBrainConfig,
 } from "../../src/cli/context.js";
+
+interface CapturedExit {
+  error: unknown;
+  errorLines: string[];
+  exitCode: number | string | null;
+}
+
+function captureExit(run: () => unknown): CapturedExit {
+  const previousExit = process.exit;
+  const previousError = console.error;
+  const errorLines: string[] = [];
+  let error: unknown;
+  let exitCode: number | string | null = null;
+  process.exit = ((code?: number | string | null): never => {
+    exitCode = code ?? 0;
+    throw new Error("captured process.exit");
+  }) as typeof process.exit;
+  console.error = (...args: unknown[]) => {
+    errorLines.push(args.map(String).join(" "));
+  };
+
+  try {
+    run();
+  } catch (caught) {
+    error = caught;
+  } finally {
+    process.exit = previousExit;
+    console.error = previousError;
+  }
+
+  return { error, errorLines, exitCode };
+}
 
 function config(label: string): CBrainConfig {
   return {
@@ -163,14 +196,39 @@ describe("trusted config boundary", () => {
     expect(() => loadConfigWithPath(startDir)).toThrow(SyntaxError);
   });
 
-  test("strict fully missing lookup reports no active config", () => {
+  test("loadConfigWithPath exits for an explicit missing config without falling back", () => {
+    const startDir = join(root, "workspace", "nested");
+    const missingPath = join(root, "missing.json");
+    mkdirSync(startDir, { recursive: true });
+    writeConfig(join(root, "workspace", "cbrain.json"), config("must-not-load"));
+
+    const result = captureExit(() => loadConfigWithPath(startDir, missingPath));
+
+    expect(result.error).toEqual(new Error("captured process.exit"));
+    expect(Number(result.exitCode)).toBe(1);
+    expect(result.errorLines).toEqual([`Error: CBRAIN_CONFIG=${missingPath} not found.`]);
+  });
+
+  test("loadConfigWithPath exits when upward lookup is fully missing", () => {
     const startDir = join(root, "workspace", "nested");
     mkdirSync(startDir, { recursive: true });
 
-    expect(() => loadConfigWithPath(startDir)).toThrow("No cbrain.json found");
+    const previousConfig = process.env.CBRAIN_CONFIG;
+    delete process.env.CBRAIN_CONFIG;
+    try {
+      const result = captureExit(() => loadConfigWithPath(startDir));
+
+      expect(result.error).toEqual(new Error("captured process.exit"));
+      expect(Number(result.exitCode)).toBe(1);
+      expect(result.errorLines).toEqual([
+        "Error: No cbrain.json found. Run `cbrain init` first.",
+      ]);
+    } finally {
+      if (previousConfig !== undefined) process.env.CBRAIN_CONFIG = previousConfig;
+    }
   });
 
-  test("strict wrapper exits for an explicit missing config without reading upward", () => {
+  test("loadConfig exits for an explicit missing config without reading upward", () => {
     const startDir = join(root, "workspace", "nested");
     const missingPath = join(root, "missing.json");
     mkdirSync(startDir, { recursive: true });
@@ -178,27 +236,66 @@ describe("trusted config boundary", () => {
 
     const previousConfig = process.env.CBRAIN_CONFIG;
     const previousCwd = process.cwd();
-    const previousExit = process.exit;
-    const previousError = console.error;
-    let exitCode: number | string | null = null;
     process.env.CBRAIN_CONFIG = missingPath;
     process.chdir(startDir);
-    process.exit = ((code?: number | string | null): never => {
-      exitCode = code ?? 0;
-      throw new Error("captured process.exit");
-    }) as typeof process.exit;
-    console.error = () => undefined;
 
     try {
-      expect(() => loadConfig()).toThrow("captured process.exit");
-      expect(Number(exitCode)).toBe(1);
+      const result = captureExit(() => loadConfig());
+
+      expect(result.error).toEqual(new Error("captured process.exit"));
+      expect(Number(result.exitCode)).toBe(1);
+      expect(result.errorLines).toEqual([`Error: CBRAIN_CONFIG=${missingPath} not found.`]);
     } finally {
-      process.exit = previousExit;
-      console.error = previousError;
       process.chdir(previousCwd);
       if (previousConfig === undefined) delete process.env.CBRAIN_CONFIG;
       else process.env.CBRAIN_CONFIG = previousConfig;
     }
+  });
+
+  test("loadConfig exits when upward lookup is fully missing", () => {
+    const startDir = join(root, "workspace", "nested");
+    mkdirSync(startDir, { recursive: true });
+
+    const previousConfig = process.env.CBRAIN_CONFIG;
+    const previousCwd = process.cwd();
+    delete process.env.CBRAIN_CONFIG;
+    process.chdir(startDir);
+    try {
+      const result = captureExit(() => loadConfig());
+
+      expect(result.error).toEqual(new Error("captured process.exit"));
+      expect(Number(result.exitCode)).toBe(1);
+      expect(result.errorLines).toEqual([
+        "Error: No cbrain.json found. Run `cbrain init` first.",
+      ]);
+    } finally {
+      process.chdir(previousCwd);
+      if (previousConfig !== undefined) process.env.CBRAIN_CONFIG = previousConfig;
+    }
+  });
+
+  test("findConfig returns an upward valid config", () => {
+    const startDir = join(root, "workspace", "nested");
+    const expected = config("found");
+    mkdirSync(startDir, { recursive: true });
+    writeConfig(join(root, "workspace", "cbrain.json"), expected);
+
+    expect(findConfig(startDir)).toEqual(expected);
+  });
+
+  test("findConfig returns null when no upward config exists", () => {
+    const startDir = join(root, "workspace", "nested");
+    mkdirSync(startDir, { recursive: true });
+
+    expect(findConfig(startDir)).toBeNull();
+  });
+
+  test("findConfig preserves an upward parse failure", () => {
+    const startDir = join(root, "workspace", "nested");
+    mkdirSync(startDir, { recursive: true });
+    writeFileSync(join(root, "workspace", "cbrain.json"), "{ invalid json");
+
+    expect(() => findConfig(startDir)).toThrow(SyntaxError);
   });
 
   test("config symlinks establish the real config root", () => {
