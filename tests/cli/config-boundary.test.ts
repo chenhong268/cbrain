@@ -66,13 +66,18 @@ function writeConfig(path: string, value: CBrainConfig): void {
 
 describe("trusted config boundary", () => {
   let root: string;
+  let previousConfig: string | undefined;
 
   beforeEach(() => {
+    previousConfig = process.env.CBRAIN_CONFIG;
+    delete process.env.CBRAIN_CONFIG;
     root = mkdtempSync(join(tmpdir(), "cbrain-config-boundary-"));
   });
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+    if (previousConfig === undefined) delete process.env.CBRAIN_CONFIG;
+    else process.env.CBRAIN_CONFIG = previousConfig;
   });
 
   const scenarios: Array<{
