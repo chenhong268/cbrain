@@ -133,6 +133,42 @@ describe("checkAgentProfileSkillContract (#335)", () => {
       });
     }
   }
+
+  for (const file of skillFiles) {
+    test(`rejects a positive remove call after an unrelated negative sentence in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nDo not use aliases. Call profile({ action: "remove" }) fixture-body-scope-sentinel';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: action: "remove"',
+      }]);
+    });
+
+    test(`rejects the second positive remove call after a negated occurrence in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nDo not use action: "remove"; instead call profile({ action: "remove" }) fixture-body-repeat-sentinel';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: action: "remove"',
+      }]);
+    });
+
+    test(`rejects a required canonical call when its only occurrence is negated in ${file}`, () => {
+      const files = valid();
+      files[file] = [
+        "# Synthetic profile signal contract",
+        '`Never call profile({ action: "update", entries: [{ scope: "open", source: "explicit" }] })`',
+        "fixture-body-negated-call-sentinel",
+      ].join("\n");
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: "missing required token: profile(",
+      }]);
+    });
+  }
 });
 
 describe("checkAgentContractTools (#316)", () => {

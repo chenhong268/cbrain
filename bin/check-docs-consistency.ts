@@ -925,7 +925,16 @@ export function checkAgentProfileSkillContract(skillsDir: string): CheckResult[]
     { label: "source: \"observed\"", pattern: /\bsource\s*:\s*["']observed["']/ },
     { label: "source: \"inferred\"", pattern: /\bsource\s*:\s*["']inferred["']/ },
   ] as const;
-  const negativeCue = /(禁止|不得|不要|不能|不允许|严禁|切勿|do not|don't|must not|never|forbid)/i;
+  const negativeCue = /(禁止|不得|不要|不能|不允许|严禁|切勿|\bdo not\b|\bdon't\b|\bmust not\b|\bnever\b)/i;
+  const isLexicallyNegated = (text: string, index: number): boolean => {
+    const boundedPrefix = text.slice(Math.max(0, index - 256), index);
+    const boundary = /[\n.;。；!?！？]|\b(?:instead|however|but)\b|(?:而是|改为|但是|不过|然而|随后|然后)/gi;
+    let clauseStart = 0;
+    for (const match of boundedPrefix.matchAll(boundary)) {
+      clauseStart = (match.index ?? 0) + match[0].length;
+    }
+    return negativeCue.test(boundedPrefix.slice(clauseStart));
+  };
   const out: CheckResult[] = [];
 
   for (const file of files) {
@@ -945,7 +954,9 @@ export function checkAgentProfileSkillContract(skillsDir: string): CheckResult[]
 
     // A bounded lexical window keeps required fields attached to one profile(...)
     // example instead of accepting unrelated tokens scattered across the file.
-    const calls = [...text.matchAll(/\bprofile\s*\([\s\S]{0,800}?\)/g)].map((match) => match[0]);
+    const calls = [...text.matchAll(/\bprofile\s*\([\s\S]{0,800}?\)/g)]
+      .filter((match) => !isLexicallyNegated(text, match.index ?? 0))
+      .map((match) => match[0]);
     if (calls.length === 0) {
       out.push({ check, passed: false, detail: "missing required token: profile(" });
     } else if (!calls.some((call) => requiredTokens.every(({ pattern }) => pattern.test(call)))) {
@@ -959,14 +970,16 @@ export function checkAgentProfileSkillContract(skillsDir: string): CheckResult[]
       }
     }
 
-    for (const line of text.split("\n")) {
-      for (const { label, pattern } of forbiddenTokens) {
-        const match = pattern.exec(line);
-        if (match) {
-          const prefix = line.slice(Math.max(0, match.index - 96), match.index);
-          if (negativeCue.test(prefix)) continue;
+    for (const { label, pattern } of forbiddenTokens) {
+      let foundPositive = false;
+      for (const line of text.split("\n")) {
+        for (const match of line.matchAll(new RegExp(pattern.source, "g"))) {
+          if (isLexicallyNegated(line, match.index ?? 0)) continue;
           out.push({ check, passed: false, detail: `forbidden daily token: ${label}` });
+          foundPositive = true;
+          break;
         }
+        if (foundPositive) break;
       }
     }
   }
