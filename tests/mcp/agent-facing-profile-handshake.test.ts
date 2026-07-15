@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,11 +7,13 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OUTPUT_MODE_ENV } from "../../src/mcp/output-mode.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
+import { JobQueue } from "../../src/core/jobs.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 
 const PROJECT_ROOT = join(import.meta.dir, "../..");
 
 type AgentFacingRow = {
+  case_id?: string;
   input: string;
   category: string;
   expected_tool: string | null;
@@ -48,7 +50,12 @@ function createMockLanceDB() {
   return {
     connect: async () => {},
     addChunks: async () => {},
-    search: async () => [],
+    search: async () => [{
+      pageSlug: "entity/anonymous-sentinel",
+      chunkIndex: 0,
+      content: "匿名检索 Sentinel /tmp/agent-contract-private.txt",
+      _distance: 0.05,
+    }],
     fullTextSearch: async () => [],
     deleteByPageSlug: async () => {},
     deleteRawChunksByPageSlug: async () => {},
@@ -73,8 +80,11 @@ async function wireTransport(server: McpServer): Promise<{
   return {
     client,
     close: async () => {
-      await client.close();
-      await server.close();
+      try {
+        await client.close();
+      } finally {
+        await server.close();
+      }
     },
   };
 }
@@ -85,14 +95,17 @@ async function withStructuredAgentClient(
   const root = mkdtempSync(join(tmpdir(), "cbrain-agent-profile-"));
   const vaultPath = join(root, "vault");
   mkdirSync(vaultPath, { recursive: true });
-  const db = new CBrainDB(join(root, "test.sqlite"));
   const previousMode = process.env[OUTPUT_MODE_ENV];
-  process.env[OUTPUT_MODE_ENV] = "structured";
+  const startSpy = spyOn(JobQueue.prototype, "start").mockImplementation(() => {});
+  let db: CBrainDB | undefined;
   let close: (() => Promise<void>) | undefined;
 
   try {
+    process.env[OUTPUT_MODE_ENV] = "structured";
+    const activeDb = new CBrainDB(join(root, "test.sqlite"));
+    db = activeDb;
     const deps: CBrainDeps = {
-      db,
+      db: activeDb,
       embedding: createMockEmbedding() as never,
       lance: createMockLanceDB() as never,
       vaultPath,
@@ -103,11 +116,24 @@ async function withStructuredAgentClient(
     close = transport.close;
     await run(transport.client);
   } finally {
-    if (close) await close();
-    db.close();
-    if (existsSync(root)) rmSync(root, { recursive: true });
-    if (previousMode === undefined) delete process.env[OUTPUT_MODE_ENV];
-    else process.env[OUTPUT_MODE_ENV] = previousMode;
+    try {
+      if (close) await close();
+    } finally {
+      try {
+        db?.close();
+      } finally {
+        try {
+          if (existsSync(root)) rmSync(root, { recursive: true });
+        } finally {
+          try {
+            if (previousMode === undefined) delete process.env[OUTPUT_MODE_ENV];
+            else process.env[OUTPUT_MODE_ENV] = previousMode;
+          } finally {
+            startSpy.mockRestore();
+          }
+        }
+      }
+    }
   }
 }
 
@@ -131,13 +157,24 @@ describe.serial("real Agent-facing MCP profile contract", () => {
         expect(names.has(required)).toBe(true);
       }
 
-      for (const category of ["grounded_recall", "operational", "keyword_debug"]) {
-        expect(rows.some((row) => row.category === category && row.expected_tool !== null)).toBe(true);
+      const fixedCategoryTools = new Map([
+        ["search", "cbrain_recall"],
+        ["grounded_recall", "cbrain_recall"],
+        ["keyword_debug", "cbrain_recall"],
+        ["overview", "cbrain_recall"],
+        ["operational", "next_actions"],
+      ]);
+      for (const [category, expectedTool] of fixedCategoryTools) {
+        const categoryRows = rows.filter((row) => row.category === category);
+        expect(categoryRows.length).toBeGreaterThan(0);
+        for (const row of categoryRows) expect(row.expected_tool).toBe(expectedTool);
       }
 
       const boundaries = rows.filter((row) => row.expected_tool === null);
       expect(boundaries).toHaveLength(1);
       const [boundary] = boundaries;
+      expect(rows.filter((row) => row.case_id === "run_discovery_request")).toEqual([boundary]);
+      expect(boundary?.case_id).toBe("run_discovery_request");
       expect(boundary?.category).toBe("profile_boundary");
       expect(boundary?.expected_outcome).toBe("requires_full_profile");
       expect(boundary?.expected_tool).toBeNull();
@@ -147,7 +184,7 @@ describe.serial("real Agent-facing MCP profile contract", () => {
     });
   });
 
-  test("real cbrain_recall calls execute debug and overview routes without structured leakage", async () => {
+  test("real fixture tools execute debug and overview routes with specific safe projections", async () => {
     await withStructuredAgentClient(async (client) => {
       const rows = readRows();
       for (const category of ["keyword_debug", "overview"] as const) {
@@ -155,16 +192,39 @@ describe.serial("real Agent-facing MCP profile contract", () => {
         expect(row).toBeDefined();
         if (!row) continue;
 
+        expect(row.expected_tool).toBe("cbrain_recall");
+        if (!row.expected_tool) throw new Error(`missing executable tool for ${category}`);
         const result = await client.callTool({
-          name: "cbrain_recall",
+          name: row.expected_tool,
           arguments: { query: row.input, ...row.expected_args },
         });
         expect(result.isError).toBeFalsy();
         expect(result.structuredContent).toBeDefined();
-        const blob = JSON.stringify(result);
-        for (const forbidden of ["\"raw\"", "routing", "next_tool", "search_meta", "strategy_path"]) {
+        const structured = result.structuredContent as {
+          data?: { details?: Record<string, unknown> };
+        };
+        const details = structured.data?.details;
+        expect(details).toBeDefined();
+        if (category === "keyword_debug") {
+          expect(details?.result_count).toBeGreaterThan(0);
+          expect(details?.results).toBeArray();
+          expect((details?.results as unknown[]).length).toBeGreaterThan(0);
+        } else {
+          expect(details?.topic).toBe(row.input);
+          expect(details?.stats).toEqual({ totalEntities: 1, totalLinks: 0, totalEvents: 0 });
+        }
+
+        const blob = JSON.stringify({
+          content: result.content,
+          structuredContent: result.structuredContent,
+        });
+        for (const forbidden of [
+          "raw", "routing", "next_tool", "score", "slug", "body", "stack",
+          "search_meta", "strategy_path", "/tmp/agent-contract-private.txt",
+        ]) {
           expect(blob).not.toContain(forbidden);
         }
+        expect(blob).not.toMatch(/\/(?:[^/"\\\s]+\/)+[^/"\\\s]+/);
       }
     });
   });

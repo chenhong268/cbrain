@@ -738,6 +738,24 @@ export function checkAgentContractTools(tools: Set<string>, skillsDir: string): 
     const text = readFileSync(join(skillsDir, f), "utf-8");
     text.split("\n").forEach((line, i) => {
       if (line.includes(AGENT_CONTRACT_IGNORE)) return;
+      if (f === "feature-index.md") {
+        const directQueryGuidance = /\bquery\s*\(|→\s*`?query\b(?!\.md)/i.test(line);
+        const explicitDebugFullProfile = /(显式(?:选择)?|explicit).{0,24}debug\s*\/\s*full\s+profile/i.test(line);
+        if (directQueryGuidance && !explicitDebugFullProfile) {
+          out.push({
+            check: `agent-contract query profile @skills/${f}:${i + 1}`,
+            passed: false,
+            detail: "feature-index 直调 query 必须限定为显式选择 debug/full profile；daily 使用 cbrain_recall 内部 debug_search",
+          });
+        }
+        if (/\*\*工具\*\*/.test(line) && /\blist_insights\b/.test(line)) {
+          out.push({
+            check: `agent-contract discovery profile @skills/${f}:${i + 1}`,
+            passed: false,
+            detail: "feature-index daily 发现工具只使用 read_discoveries；list_insights 是 full-only escape hatch",
+          });
+        }
+      }
       if (!FIRST_CHOICE_CUES.test(line)) return;
       const refs = extractToolRefs(line);
       // Check 1 — excluded tool as first choice (allowed if the line frames it as
@@ -779,6 +797,20 @@ export function checkAgentFacingRoutingProfile(
   const failures: CheckResult[] = [];
   const lines = readFileSync(file, "utf-8").split("\n");
   let noToolBoundaryCount = 0;
+  let discoveryBoundaryCaseCount = 0;
+  const unavailable = new Map<string, Map<string, { line: number; field: string }>>();
+  const fixedCategoryTools = new Map<string, string>([
+    ["search", "cbrain_recall"],
+    ["grounded_recall", "cbrain_recall"],
+    ["keyword_debug", "cbrain_recall"],
+    ["overview", "cbrain_recall"],
+    ["operational", "next_actions"],
+  ]);
+  const recordUnavailable = (tool: string, line: number, field: string): void => {
+    const refs = unavailable.get(tool) ?? new Map<string, { line: number; field: string }>();
+    refs.set(`${line}:${field}`, { line, field });
+    unavailable.set(tool, refs);
+  };
 
   lines.forEach((line, index) => {
     if (!line.trim()) return;
@@ -794,30 +826,31 @@ export function checkAgentFacingRoutingProfile(
       return;
     }
     const row = parsed as Record<string, unknown>;
+    const lineNumber = index + 1;
+    if (row.case_id === "run_discovery_request") discoveryBoundaryCaseCount += 1;
 
     if (row.required_sequence !== undefined && !Array.isArray(row.required_sequence)) {
-      failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "required_sequence must be an array" });
+      failures.push({ check: `agent-facing profile line ${lineNumber}`, passed: false, detail: "required_sequence must be an array" });
       return;
     }
     for (const tool of (row.required_sequence ?? []) as unknown[]) {
-      if (typeof tool !== "string" || !allowed.has(tool)) failures.push({
-        check: `agent-facing profile line ${index + 1}`,
-        passed: false,
-        detail: `required_sequence tool unavailable in agent profile: ${String(tool)}`,
-      });
+      if (typeof tool !== "string" || !allowed.has(tool)) {
+        recordUnavailable(String(tool), lineNumber, "required_sequence");
+      }
     }
 
     if (row.expected_tool === null) {
       noToolBoundaryCount += 1;
       const forbidden = Array.isArray(row.forbidden_tools) ? row.forbidden_tools : [];
       const validBoundary =
+        row.case_id === "run_discovery_request" &&
         row.category === "profile_boundary" &&
         row.expected_outcome === "requires_full_profile" &&
         row.required_profile === "full" &&
         forbidden.includes("run_discovery") &&
         forbidden.includes("read_discoveries");
       if (!validBoundary) failures.push({
-        check: `agent-facing profile line ${index + 1}`,
+        check: `agent-facing profile line ${lineNumber}`,
         passed: false,
         detail: "invalid requires_full_profile contract",
       });
@@ -825,20 +858,45 @@ export function checkAgentFacingRoutingProfile(
     }
 
     if (typeof row.expected_tool !== "string" || !row.expected_tool.trim()) {
-      failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "expected_tool must be non-empty or explicit no-tool boundary" });
+      failures.push({ check: `agent-facing profile line ${lineNumber}`, passed: false, detail: "expected_tool must be non-empty or explicit no-tool boundary" });
       return;
     }
-    if (!allowed.has(row.expected_tool)) failures.push({
-      check: `agent-facing profile line ${index + 1}`,
+    if (!allowed.has(row.expected_tool)) {
+      recordUnavailable(row.expected_tool, lineNumber, "expected_tool");
+    }
+    const fixedTool = typeof row.category === "string" ? fixedCategoryTools.get(row.category) : undefined;
+    if (fixedTool && row.expected_tool !== fixedTool) failures.push({
+      check: `agent-facing profile line ${lineNumber}`,
       passed: false,
-      detail: `expected_tool unavailable in agent profile: ${row.expected_tool}`,
+      detail: `category mapping mismatch: ${row.category} requires ${fixedTool}, found ${row.expected_tool}`,
     });
   });
+
+  if (unavailable.size > 0) {
+    const tools = [...unavailable.keys()].sort();
+    const detail = tools.map((tool) => {
+      const refs = [...(unavailable.get(tool)?.values() ?? [])]
+        .sort((a, b) => a.line - b.line || a.field.localeCompare(b.field))
+        .map((ref) => `line ${ref.line} ${ref.field}`)
+        .join(", ");
+      return `${tool} [${refs}]`;
+    }).join("; ");
+    failures.push({
+      check: "agent-facing profile unavailable tools",
+      passed: false,
+      detail: `unavailable tools: ${detail}`,
+    });
+  }
 
   if (noToolBoundaryCount !== 1) failures.push({
     check: "agent-facing profile no-tool boundary count",
     passed: false,
     detail: `expected exactly one no-tool boundary, found ${noToolBoundaryCount}`,
+  });
+  if (discoveryBoundaryCaseCount !== 1) failures.push({
+    check: "agent-facing profile discovery boundary identity",
+    passed: false,
+    detail: `expected exactly one run_discovery_request case_id, found ${discoveryBoundaryCaseCount}`,
   });
 
   return failures.length > 0 ? failures : [{

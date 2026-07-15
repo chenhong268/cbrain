@@ -329,6 +329,10 @@ rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line
 boundaries = [row for row in rows if row.get("expected_tool") is None]
 assert len(boundaries) == 1
 boundary = boundaries[0]
+identity_rows = [row for row in rows if row.get("case_id") == "run_discovery_request"]
+assert len(identity_rows) == 1
+assert identity_rows[0] is boundary
+assert boundary.get("case_id") == "run_discovery_request"
 assert boundary.get("category") == "profile_boundary"
 assert boundary.get("expected_tool") is None
 assert boundary.get("expected_outcome") == "requires_full_profile"
