@@ -44,6 +44,17 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
     expect(SRC).toContain("--list-commit-unknown");
     expect(SRC).toContain("--resolve-commit-unknown <job-id>");
     expect(SRC).toContain("--json");
+    const commandStart = SRC.indexOf('.command("ner-backfill")');
+    const commandEnd = SRC.indexOf('.command("reflect")', commandStart);
+    expect(commandStart).toBeGreaterThanOrEqual(0);
+    expect(commandEnd).toBeGreaterThan(commandStart);
+    const commandSection = SRC.slice(commandStart, commandEnd);
+    expect(commandSection).toContain(
+      "{ db: deps.db, pages, pipeline, lockProbe, llm: deps.llm, lance: deps.lance, lancePath: config.lancePath }",
+    );
+    expect(commandSection).toContain(
+      "new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger })",
+    );
   });
 
   test("repair batch UUID is canonical lowercase and rejected before config/dependency setup", () => {
@@ -332,8 +343,16 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
       deps.db.insertChunk(page.slug, 1, "second");
       const receipt = enqueueZeroLinkBackfill(deps.db, 1);
       const logs: string[] = [];
+      let closeCalls = 0;
       const exit = await handleNerBackfill(
-        { db: deps.db, pages: deps.pages, pipeline: deps.pipeline, lockProbe: open },
+        {
+          db: deps.db,
+          pages: deps.pages,
+          pipeline: deps.pipeline,
+          lockProbe: open,
+          lance: { connect: async () => {}, close: async () => { closeCalls++; } },
+          lancePath: join(dir, "lancedb"),
+        },
         { limit: 2, repairBatch: receipt.batchId, json: true },
         (m) => logs.push(m),
       );
@@ -342,6 +361,117 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
       expect(payload).toEqual({ ok: false, status: "error", code: "BATCH_LIMIT_MISMATCH", error: "NER backfill preflight failed" });
       expect(JSON.stringify(payload)).not.toContain("records/item");
       expect(deps.processCalls).toBe(0);
+      expect(closeCalls).toBe(1);
+      deps.db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("repair batch connects Lance before processing and closes it afterward", async () => {
+    const dir = withTempDir("cbrain-ner-backfill-lance-lifecycle-");
+    try {
+      const vault = join(dir, "vault");
+      mkdirSync(vault, { recursive: true });
+      const db = new CBrainDB(join(dir, "brain.sqlite"));
+      const pages = new PageManager(db, vault);
+      const page = pages.create({
+        title: "匿名记录",
+        type: "record",
+        body: "匿名正文".repeat(400),
+        slug: "records/item",
+      });
+      db.insertChunk(page.slug, 0, "first");
+      db.insertChunk(page.slug, 1, "second");
+      const receipt = enqueueZeroLinkBackfill(db, 1);
+      let connected = false;
+      let connectCalls = 0;
+      let closeCalls = 0;
+      const lance = {
+        connect: async (path: string) => {
+          expect(path).toBe(join(dir, "lancedb"));
+          connectCalls++;
+          connected = true;
+        },
+        close: async () => {
+          closeCalls++;
+          connected = false;
+        },
+      };
+      const pipeline = {
+        processNer: async (...args: unknown[]) => {
+          if (!connected) throw new Error("LanceDB not connected");
+          const guard = args[6] as ((phase: "after_extract" | "before_commit") => void) | undefined;
+          guard?.("after_extract");
+          guard?.("before_commit");
+          return null;
+        },
+      } as unknown as ContentPipeline;
+      const logs: string[] = [];
+
+      const exit = await handleNerBackfill(
+        { db, pages, pipeline, lockProbe: open, lance, lancePath: join(dir, "lancedb") },
+        { limit: 1, repairBatch: receipt.batchId, json: true },
+        (message) => logs.push(message),
+      );
+
+      expect(exit).toBe(0);
+      expect(connectCalls).toBe(1);
+      expect(closeCalls).toBe(1);
+      expect(connected).toBe(false);
+      expect(JSON.parse(logs.join("\n"))).toMatchObject({
+        counts: { processed: 1, failed: 0 },
+        batch: { finalized: true, outcomes: { commitUnknown: 0 } },
+      });
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("repair batch Lance connect failure is fixed, private-safe, and pre-mutation", async () => {
+    const dir = withTempDir("cbrain-ner-backfill-lance-connect-failure-");
+    try {
+      const deps = makeDeps(dir);
+      const page = deps.pages.create({
+        title: "匿名记录",
+        type: "record",
+        body: "匿名正文".repeat(400),
+        slug: "records/item",
+      });
+      deps.db.insertChunk(page.slug, 0, "first");
+      deps.db.insertChunk(page.slug, 1, "second");
+      const receipt = enqueueZeroLinkBackfill(deps.db, 1);
+      const before = JSON.stringify(deps.db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+      const logs: string[] = [];
+      const lance = {
+        connect: async () => { throw new Error("private path and credential detail"); },
+        close: async () => { throw new Error("close must not run after failed connect"); },
+      };
+
+      const exit = await handleNerBackfill(
+        {
+          db: deps.db,
+          pages: deps.pages,
+          pipeline: deps.pipeline,
+          lockProbe: open,
+          lance,
+          lancePath: join(dir, "private-lancedb"),
+        },
+        { limit: 1, repairBatch: receipt.batchId, json: true },
+        (message) => logs.push(message),
+      );
+
+      expect(exit).toBe(1);
+      expect(JSON.parse(logs.join("\n"))).toEqual({
+        ok: false,
+        status: "error",
+        code: "LANCE_CONNECT_FAILED",
+        error: "LanceDB connection failed",
+      });
+      expect(JSON.stringify(deps.db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+      expect(deps.processCalls).toBe(0);
+      expect(logs.join("\n")).not.toContain("private path");
       deps.db.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -421,15 +551,28 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
       deps.db.submitJob("ner-backfill", { slug: "records/private-b" });
       const logs: string[] = [];
       const errs: string[] = [];
+      let lanceCalls = 0;
+      const poisonLance = {
+        connect: async () => { lanceCalls++; throw new Error("ordinary mode must not connect Lance"); },
+        close: async () => { lanceCalls++; },
+      };
 
       const exit = await handleNerBackfill(
-        { db: deps.db, pages: deps.pages, pipeline: deps.pipeline, lockProbe: open },
+        {
+          db: deps.db,
+          pages: deps.pages,
+          pipeline: deps.pipeline,
+          lockProbe: open,
+          lance: poisonLance,
+          lancePath: join(dir, "lancedb"),
+        },
         { limit: 0, json: true },
         (m) => logs.push(m),
         (m) => errs.push(m),
       );
 
       expect(exit).toBe(0);
+      expect(lanceCalls).toBe(0);
       expect(deps.processCalls).toBe(0);
       expect(errs).toHaveLength(0);
       const payload = JSON.parse(logs.join("\n"));
@@ -503,15 +646,28 @@ describe("cbrain ner-backfill CLI (#runtime)", () => {
       deps.db.failJob(failedOther, "other-failure");
       const logs: string[] = [];
       const errs: string[] = [];
+      let lanceCalls = 0;
+      const poisonLance = {
+        connect: async () => { lanceCalls++; throw new Error("retry mode must not connect Lance"); },
+        close: async () => { lanceCalls++; },
+      };
 
       const exit = await handleNerBackfill(
-        { db: deps.db, pages: deps.pages, pipeline: deps.pipeline, lockProbe: open },
+        {
+          db: deps.db,
+          pages: deps.pages,
+          pipeline: deps.pipeline,
+          lockProbe: open,
+          lance: poisonLance,
+          lancePath: join(dir, "lancedb"),
+        },
         { limit: 0, retryFailed: true, json: true },
         (m) => logs.push(m),
         (m) => errs.push(m),
       );
 
       expect(exit).toBe(0);
+      expect(lanceCalls).toBe(0);
       expect(deps.processCalls).toBe(0);
       expect(errs).toHaveLength(0);
       const payload = JSON.parse(logs.join("\n"));

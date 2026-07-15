@@ -152,6 +152,10 @@ export interface NerBackfillDeps {
   pipeline: ContentPipeline;
   lockProbe: LockProbe;
   llm?: LLMProvider;
+  /** Repair batches index newly created stubs, so the exact pipeline-owned
+   * Lance manager must be connected before any child is claimed. */
+  lance?: Pick<LanceDBManager, "connect" | "close">;
+  lancePath?: string;
 }
 
 export interface NerBackfillOptions {
@@ -280,37 +284,60 @@ export async function handleNerBackfill(
     }
   }
 
-  const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
-  let counts: NerBackfillCounts;
-  let batchStatus: RepairBatchStatus | undefined;
+  let lanceConnected = false;
+  if (opts.repairBatch !== undefined) {
+    if (!deps.lance || !deps.lancePath) {
+      const payload = { ok: false, status: "error", code: "LANCE_CONNECT_FAILED", error: "LanceDB connection failed" };
+      if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(`${payload.code}: ${payload.error}`);
+      return 1;
+    }
+    try {
+      await deps.lance.connect(deps.lancePath);
+      lanceConnected = true;
+    } catch {
+      const payload = { ok: false, status: "error", code: "LANCE_CONNECT_FAILED", error: "LanceDB connection failed" };
+      if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(`${payload.code}: ${payload.error}`);
+      return 1;
+    }
+  }
+
   try {
-    counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, {
-      maxItems: opts.limit,
-      entityFactsLlm: deps.llm,
-      batchId: opts.repairBatch,
-      retryFailed: opts.retryFailed,
-    });
-    batchStatus = opts.repairBatch !== undefined
-      ? (await import("../../core/maintenance/zero-link-backfill.js")).summarizeRepairBatch(deps.db, opts.repairBatch)
-      : undefined;
-  } catch (error) {
-    const rawCode = error instanceof Error ? error.message : "QUEUE_INTEGRITY_CONFLICT";
-    const allowed = new Set(["BATCH_NOT_FOUND", "BATCH_INTEGRITY_CONFLICT", "BATCH_LIMIT_MISMATCH", "QUEUE_INTEGRITY_CONFLICT"]);
-    const code = allowed.has(rawCode) ? rawCode : "QUEUE_INTEGRITY_CONFLICT";
-    const payload = { ok: false, status: "error", code, error: "NER backfill preflight failed" };
-    if (opts.json) log(JSON.stringify(payload, null, 2));
-    else logError(`${code}: ${payload.error}`);
-    return 1;
+    const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
+    let counts: NerBackfillCounts;
+    let batchStatus: RepairBatchStatus | undefined;
+    try {
+      counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, {
+        maxItems: opts.limit,
+        entityFactsLlm: deps.llm,
+        batchId: opts.repairBatch,
+        retryFailed: opts.retryFailed,
+      });
+      batchStatus = opts.repairBatch !== undefined
+        ? (await import("../../core/maintenance/zero-link-backfill.js")).summarizeRepairBatch(deps.db, opts.repairBatch)
+        : undefined;
+    } catch (error) {
+      const rawCode = error instanceof Error ? error.message : "QUEUE_INTEGRITY_CONFLICT";
+      const allowed = new Set(["BATCH_NOT_FOUND", "BATCH_INTEGRITY_CONFLICT", "BATCH_LIMIT_MISMATCH", "QUEUE_INTEGRITY_CONFLICT"]);
+      const code = allowed.has(rawCode) ? rawCode : "QUEUE_INTEGRITY_CONFLICT";
+      const payload = { ok: false, status: "error", code, error: "NER backfill preflight failed" };
+      if (opts.json) log(JSON.stringify(payload, null, 2));
+      else logError(`${code}: ${payload.error}`);
+      return 1;
+    }
+    const retriedFailed = counts.retried_failed ?? 0;
+    delete counts.retried_failed;
+    if (opts.json) {
+      log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts, ...(batchStatus ? { batch: batchStatus } : {}) }, null, 2));
+    } else {
+      if (opts.retryFailed) log(`NER backfill: ${retriedFailed} failed jobs reset to pending`);
+      log(`NER backfill: ${counts.processed} processed, ${counts.failed} failed, ${counts.timed_out} timed out, ${counts.skipped} skipped`);
+    }
+    return counts.failed > 0 || counts.timed_out > 0 ? 1 : 0;
+  } finally {
+    if (lanceConnected) {
+      try { await deps.lance!.close(); } catch { /* process-scoped best effort */ }
+    }
   }
-  const retriedFailed = counts.retried_failed ?? 0;
-  delete counts.retried_failed;
-  if (opts.json) {
-    log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts, ...(batchStatus ? { batch: batchStatus } : {}) }, null, 2));
-  } else {
-    if (opts.retryFailed) log(`NER backfill: ${retriedFailed} failed jobs reset to pending`);
-    log(`NER backfill: ${counts.processed} processed, ${counts.failed} failed, ${counts.timed_out} timed out, ${counts.skipped} skipped`);
-  }
-  return counts.failed > 0 || counts.timed_out > 0 ? 1 : 0;
 }
 
 /**
@@ -829,7 +856,7 @@ export function register(program: Command) {
         const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
 
         process.exitCode = await handleNerBackfill(
-          { db: deps.db, pages, pipeline, lockProbe, llm: deps.llm },
+          { db: deps.db, pages, pipeline, lockProbe, llm: deps.llm, lance: deps.lance, lancePath: config.lancePath },
           {
             limit,
             retryFailed: Boolean(opts.retryFailed),
