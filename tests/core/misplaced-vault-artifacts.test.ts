@@ -244,6 +244,37 @@ describe("inspectMisplacedVaultArtifacts", () => {
     ]);
   });
 
+  test("never turns injected path segments into metadata reads outside the direct root", () => {
+    const { root, vaultPath } = fixture();
+    writeFileSync(join(root, "valid.md"), "");
+    const boundary = boundaryFor(root, vaultPath);
+    const inspectedPaths: string[] = [];
+    const invalidNames = ["x/../../outside.md", "../outside.md", "/outside.md"];
+    const result = inspectMisplacedVaultArtifacts(boundary, { includeLocalDetails: true }, {
+      readdirSync() {
+        return [...invalidNames, "valid.md"];
+      },
+      lstatSync(path) {
+        inspectedPaths.push(path);
+        return lstatSync(path);
+      },
+    });
+
+    expect(result.scan.zeroByteMarkdownCount).toBe(1);
+    expect(result.scan.unreadableCount).toBe(invalidNames.length);
+    expect(result.localDetails).toEqual([
+      { relativePath: "valid.md", classification: "zero_byte_markdown" },
+    ]);
+    expect(inspectedPaths).toContain(join(root, "valid.md"));
+    for (const path of inspectedPaths) {
+      const isIdentityCheck = path === root || path === vaultPath;
+      const isDirectCandidate = path.startsWith(`${root}/`)
+        && !path.slice(root.length + 1).includes("/");
+      expect(isIdentityCheck || isDirectCandidate).toBe(true);
+    }
+    expect(inspectedPaths.some((path) => path.includes("outside.md"))).toBe(false);
+  });
+
   test("discards names and marks incomplete when root identity changes after enumeration", () => {
     const { root, vaultPath } = fixture();
     writeFileSync(join(root, "private-name.md"), "");
@@ -288,6 +319,27 @@ describe("inspectMisplacedVaultArtifacts", () => {
       expect(result.localDetails).toEqual([]);
     }
   });
+
+  test("detects root and vault device changes even when inode is unchanged", () => {
+    for (const target of ["root", "vault"] as const) {
+      const { root, vaultPath } = fixture(`vault-dev-${target}`);
+      const boundary = boundaryFor(root, vaultPath);
+      const changedPath = target === "root" ? root : vaultPath;
+      const result = inspectMisplacedVaultArtifacts(boundary, { includeLocalDetails: true }, {
+        lstatSync(path) {
+          const stats = lstatSync(path);
+          if (path !== changedPath) return stats;
+          return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, {
+            dev: stats.dev + 1,
+            ino: stats.ino,
+          });
+        },
+      });
+      expect(result.scan.eligible).toBe(true);
+      expect(result.scan.unreadableCount).toBeGreaterThanOrEqual(1);
+      expect(result.localDetails).toEqual([]);
+    }
+  });
 });
 
 describe("escapeLocalDetailPath", () => {
@@ -305,5 +357,22 @@ describe("escapeLocalDetailPath", () => {
     }
     expect(escaped.startsWith('"')).toBe(true);
     expect(escaped.endsWith('"')).toBe(true);
+  });
+
+  test("escapes every C1 control plus Unicode line separators", () => {
+    const c1Controls = Array.from({ length: 0x20 }, (_, offset) => String.fromCharCode(0x80 + offset)).join("");
+    const unsafe = `prefix${c1Controls}\u2028\u2029suffix.md`;
+    const escaped = escapeLocalDetailPath(unsafe);
+
+    for (let codeUnit = 0x80; codeUnit <= 0x9f; codeUnit += 1) {
+      expect(escaped).toContain(`\\u${codeUnit.toString(16).toUpperCase().padStart(4, "0")}`);
+      expect(escaped.includes(String.fromCharCode(codeUnit))).toBe(false);
+    }
+    expect(escaped).toContain("\\u2028");
+    expect(escaped).toContain("\\u2029");
+    expect(escaped.includes("\u2028")).toBe(false);
+    expect(escaped.includes("\u2029")).toBe(false);
+    expect(escaped.includes("\n")).toBe(false);
+    expect(escaped.includes("\r")).toBe(false);
   });
 });

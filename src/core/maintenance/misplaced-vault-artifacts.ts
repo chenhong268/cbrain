@@ -121,6 +121,14 @@ function isRecognizedCandidate(name: string, vaultName: string, conflictPattern:
   return conflictPattern.test(name);
 }
 
+function isSingleDirectoryEntryName(name: string): boolean {
+  return name.length > 0
+    && name !== "."
+    && name !== ".."
+    && basename(name) === name
+    && !name.includes("\0");
+}
+
 function identityStillMatches(
   boundary: TrustedVaultBoundary,
   deps: MisplacedInspectorDeps,
@@ -162,6 +170,12 @@ export function inspectMisplacedVaultArtifacts(
   }
 
   for (const name of names) {
+    // Real readdir results are single entry names. Validate the injected seam
+    // too, so no malformed test/runtime adapter can turn join into traversal.
+    if (!isSingleDirectoryEntryName(name)) {
+      result.scan.unreadableCount += 1;
+      continue;
+    }
     if (!isRecognizedCandidate(name, vaultName, conflictPattern)) continue;
 
     try {
@@ -221,7 +235,13 @@ export function escapeLocalDetailPath(path: string): string {
       case 0x22: escaped += '\\"'; break;
       case 0x5c: escaped += "\\\\"; break;
       default:
-        if (codeUnit <= 0x1f || codeUnit === 0x7f || isBidiControl(codeUnit)) {
+        if (
+          codeUnit <= 0x1f
+          || (codeUnit >= 0x7f && codeUnit <= 0x9f)
+          || codeUnit === 0x2028
+          || codeUnit === 0x2029
+          || isBidiControl(codeUnit)
+        ) {
           escaped += unicodeEscape(codeUnit);
         } else {
           escaped += path[index];
