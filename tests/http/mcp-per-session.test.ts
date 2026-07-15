@@ -14,10 +14,19 @@ import { collectRegisteredToolNames } from "../helpers/mcp-inventory";
 const TEST_DIR = "/tmp/cbrain-test-per-session";
 const PROTOCOL_VERSION = "2025-11-25";
 
+function parseToolBody(result: { content: unknown[] }): Record<string, unknown> {
+  const first = result.content[0] as { type?: string; text?: string } | undefined;
+  if (first?.type !== "text" || typeof first.text !== "string") {
+    throw new Error("expected first MCP content item to be text");
+  }
+  return JSON.parse(first.text) as Record<string, unknown>;
+}
+
 function makeDeps(): CBrainDeps {
   const dbPath = join(TEST_DIR, "brain.sqlite");
   const vaultPath = join(TEST_DIR, "vault");
   const runtimePath = join(TEST_DIR, "runtime");
+  const profileDir = join(TEST_DIR, "profile");
   return {
     db: new CBrainDB(dbPath),
     embedding: new DeterministicEmbeddingProvider(),
@@ -25,6 +34,7 @@ function makeDeps(): CBrainDeps {
     vaultPath,
     dbPath,
     runtimePath,
+    profileDir,
   };
 }
 
@@ -36,6 +46,7 @@ describe("HTTP /mcp per-session tool profiles (#260)", () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(join(TEST_DIR, "vault"), { recursive: true });
     mkdirSync(join(TEST_DIR, "runtime"), { recursive: true });
+    mkdirSync(join(TEST_DIR, "profile"), { recursive: true });
     const ctx = buildContext(makeDeps()); // default toolProfile = "full"
     httpServer = createHttpServer(ctx).start(0);
     endpoint = new URL(`http://127.0.0.1:${httpServer.port}/mcp`);
@@ -56,6 +67,66 @@ describe("HTTP /mcp per-session tool profiles (#260)", () => {
     return tools.map((t) => t.name).sort();
   }
 
+  async function exerciseGovernedProfileOverAgentHttp() {
+    const transport = new StreamableHTTPClientTransport(endpoint, {
+      requestInit: { headers: { "X-CBrain-Tool-Profile": "agent" } },
+    });
+    const client = new Client({ name: "e2e-profile", version: "0.0.0" });
+    await client.connect(transport);
+
+    try {
+      const listed = await client.listTools();
+      const explicitEntry = {
+        id: "http-explicit-open-preference",
+        type: "preference" as const,
+        category: "communication" as const,
+        scope: "open" as const,
+        content: "HTTP_EXPLICIT_CONTENT_SENTINEL",
+        source: "explicit" as const,
+      };
+      const update = await client.callTool({
+        name: "profile",
+        arguments: { action: "update", entries: [explicitEntry] },
+      });
+      const getAfterUpdate = await client.callTool({
+        name: "profile",
+        arguments: { action: "get" },
+      });
+      const observedUpdate = await client.callTool({
+        name: "profile",
+        arguments: {
+          action: "update",
+          entries: [{
+            ...explicitEntry,
+            content: "HTTP_OBSERVED_REPLACEMENT_SENTINEL",
+            source: "observed",
+          }],
+        },
+      });
+      const getAfterDenial = await client.callTool({
+        name: "profile",
+        arguments: { action: "get" },
+      });
+      const reload = await client.callTool({
+        name: "profile",
+        arguments: { action: "reload" },
+      });
+
+      return {
+        listed,
+        names: listed.tools.map((tool) => tool.name).sort(),
+        explicitEntry,
+        update,
+        getAfterUpdate,
+        observedUpdate,
+        getAfterDenial,
+        reload,
+      };
+    } finally {
+      await client.close();
+    }
+  }
+
   test("client A (header agent) → bounded ≤20, excludes admin/low-level tools", async () => {
     const names = await listTools("agent");
     expect(names.length).toBeLessThanOrEqual(20);
@@ -68,6 +139,62 @@ describe("HTTP /mcp per-session tool profiles (#260)", () => {
     // #309: read_project_state moved out of agent (project metadata, not daily memory path);
     // next_actions is the unified attention entry the daily Agent needs.
     expect(names).not.toContain("read_project_state");
+  });
+
+  test("client A Profile path is governed end-to-end over one HTTP session", async () => {
+    const result = await exerciseGovernedProfileOverAgentHttp();
+
+    expect(result.names.length).toBeLessThanOrEqual(20);
+    expect(result.names.filter((name) => name === "profile")).toEqual(["profile"]);
+    for (const hiddenTool of [
+      "append_page",
+      "get_profile",
+      "update_profile",
+      "remove_profile",
+      "reload_profile",
+    ]) {
+      expect(result.names).not.toContain(hiddenTool);
+    }
+
+    expect(result.update.isError).not.toBe(true);
+    expect(result.getAfterUpdate.isError).not.toBe(true);
+    const afterUpdateBody = parseToolBody(result.getAfterUpdate as { content: unknown[] }) as {
+      raw: { entries: Array<Record<string, unknown>> };
+    };
+    expect(afterUpdateBody.raw.entries).toContainEqual(expect.objectContaining(result.explicitEntry));
+
+    expect(result.observedUpdate.isError).toBe(true);
+    expect(parseToolBody(result.observedUpdate as { content: unknown[] })).toEqual({
+      error: {
+        code: "PROFILE_UPDATE_INVALID",
+        message: "Daily Agent updates require a valid batch of explicit, open Profile entries.",
+      },
+    });
+    expect(result.getAfterDenial.isError).not.toBe(true);
+    const afterDenialBody = parseToolBody(result.getAfterDenial as { content: unknown[] }) as {
+      raw: { entries: Array<Record<string, unknown>> };
+    };
+    expect(afterDenialBody.raw.entries).toContainEqual(expect.objectContaining(result.explicitEntry));
+    expect(JSON.stringify(afterDenialBody)).not.toContain("HTTP_OBSERVED_REPLACEMENT_SENTINEL");
+
+    expect(result.reload.isError).toBe(true);
+    expect(parseToolBody(result.reload as { content: unknown[] })).toEqual({
+      error: {
+        code: "PROFILE_ACTION_FORBIDDEN",
+        message: "Daily Agent sessions cannot remove or reload Profile entries.",
+      },
+    });
+
+    for (const returnedBlob of [
+      result.listed,
+      result.update,
+      result.getAfterUpdate,
+      result.observedUpdate,
+      result.getAfterDenial,
+      result.reload,
+    ]) {
+      expect(JSON.stringify(returnedBlob)).not.toContain(TEST_DIR);
+    }
   });
 
   test("client B (header maintenance) → dream/health/job_* reachable, no agent frontdoor", async () => {
