@@ -1265,6 +1265,27 @@ describe("runNerBackfillStage (#252)", () => {
     expect(db.getPage(res.slug)).not.toBeNull();
   });
 
+  test("provider timeout is persisted as NER_TIMEOUT rather than provider failure", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const res = await seedIngest.ingest({ content: "匿名超时正文", type: "text", title: "provider-timeout", skipNer: true });
+    const id = db.submitJob("ner-backfill", { slug: res.slug });
+    const providerTimeout = Object.assign(new Error("private provider detail"), {
+      code: "LLM_TIMEOUT",
+      isLLMTimeout: true,
+      timeoutMs: 30_000,
+    });
+    const llm: LLMProvider = {
+      name: "slow-provider",
+      chat: async () => { throw providerTimeout; },
+    };
+
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir));
+
+    expect(counts).toMatchObject({ failed: 0, timed_out: 1 });
+    expect(db.getJob(id)).toMatchObject({ status: "pending", error: "NER_TIMEOUT" });
+  });
+
   test("missing source is terminal skipped with a fixed private-safe reason", async () => {
     const id = db.submitJob("ner-backfill", { slug: "records/does-not-exist" });
     const llm: LLMProvider = { name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' };

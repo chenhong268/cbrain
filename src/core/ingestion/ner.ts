@@ -1,3 +1,4 @@
+import { isLLMTimeoutError } from "../../llm/provider.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import type { Logger } from "../logger.js";
 import { getOntology } from "../../ontology/loader.js";
@@ -374,6 +375,9 @@ export class NerEngine {
       // HTTP completes but its result is discarded — no DB write fires, so this
       // is NOT a fire-and-forget DB task. applyExtraction is the caller's job.
       return await Promise.race([this._extractInternal(text), timeout]);
+    } catch (error) {
+      if (isLLMTimeoutError(error)) throw new NerTimeoutError(error.timeoutMs);
+      throw error;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -399,7 +403,7 @@ export class NerEngine {
       const { entities, events, facts } = await this.llm.chat([
         { role: "system", content: entityPrompt },
         { role: "user", content: chunks[0] },
-      ]).then(raw => this.parseEntityResponse(raw));
+      ], { thinking: "disabled" }).then(raw => this.parseEntityResponse(raw));
       allEntities = entities;
       allEvents = events;
       allFacts = facts;
@@ -417,7 +421,7 @@ export class NerEngine {
             this.llm.chat([
               { role: "system", content: entityPrompt },
               { role: "user", content: chunk },
-            ]).then(raw => this.parseEntityResponse(raw))
+            ], { thinking: "disabled" }).then(raw => this.parseEntityResponse(raw))
           )
         );
         for (const { entities, events, facts } of results) {
@@ -443,7 +447,7 @@ export class NerEngine {
     const stage2 = await this.llm.chat([
       { role: "system", content: buildRelationPrompt(getOntology(), entityNames) },
       { role: "user", content: stage2Text },
-    ]);
+    ], { thinking: "disabled" });
     const relations = this.parseRelationResponse(stage2, new Set(entityNames));
 
     return { entities: filtered, relations, events: allEvents, facts: allFacts, filtered: nerFiltered };
