@@ -251,6 +251,22 @@ cbrain backup -o <输出目录>
 
 Restore 只管理上述精确事务项，不扫描、不判断、也不自动删除父目录下的编号或错位兄弟目录。此类文件系统卫生问题由 [Issue #341](https://github.com/chenhong268/cbrain/issues/341) 的 observability/人工清理流程处理；非空或未托管目录永远不能由 restore 自动删除。
 
+#### Vault 边界外的错位条目
+
+如果 Obsidian 打开的是配置文件所在的父目录，而 CBrain 的 `vaultPath` 指向其中的子目录，File Provider 冲突副本、延迟物化或未解析双链可能在 `vaultPath` 旁生成 Markdown 或 CBrain 形状的目录。它们不属于 CBrain 管理的 vault，也不会自动进入 SQLite 索引。
+
+默认 `cbrain health` 和 `cbrain fsck --layer vault` 只报告匿名计数与稳定分类，不输出候选名称或路径。需要在本机定位时，操作员可显式运行：
+
+```bash
+cbrain fsck --layer vault --local-details
+```
+
+`--local-details` 仍是只读检查，只显示相对配置根目录、经过单行转义的候选名称；它不能与 `--json`、`--repair-plan` 或 repair flag 组合。扫描不进入候选目录、不跟随候选 symlink，也不读取 Markdown 正文。
+
+零字节文件只说明当前可见大小为零，不证明内容从未存在、云端没有待同步版本或该条目可安全删除。编号目录、非空目录和其他未托管条目一律保留给人工核对；CBrain 的 health、fsck、repair-plan 与 restore 都不会自动删除、移动、合并或 ingest 它们。
+
+这不扩大 [Issue #345](https://github.com/chenhong268/cbrain/issues/345) 的 restore 所有权：restore 仍只处理本轮精确创建或接管的 `.pre-restore`、`.rollback`、WAL 和 SHM 条目，错位兄弟项仅由本节的只读观测覆盖。
+
 #### 安全保障
 
 - **进程崩溃安全**：数据库安装使用 staging temp + rename，崩溃不会产生半写入文件

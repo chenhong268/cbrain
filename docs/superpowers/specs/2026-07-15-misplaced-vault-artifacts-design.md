@@ -342,6 +342,14 @@ safe against prompt injection; the broader cross-tool boundary remains #327.
 The new filesystem-hygiene findings themselves contain counts and generic text
 only.
 
+### 8.2 Operator documentation projection
+
+`docs/vault-spec.md` is the normative storage-boundary reference and
+`docs/install-onboarding.md` is the operator runbook. Both explain the nested
+Obsidian-root cause, aggregate default warnings, explicit relative/escaped
+`--local-details`, zero-byte uncertainty, the never-auto-delete rule, and the
+unchanged #345 exact restore-residual boundary. Examples remain anonymous.
+
 ## 9. Error and Privacy Boundaries
 
 - Failure to establish a trusted scan root is a silent ineligible state, not a

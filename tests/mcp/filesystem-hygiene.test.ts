@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
+import { CBrainDB } from "../../src/storage/sqlite.js";
+import type { ToolContext } from "../../src/mcp/context.js";
+import { registerOpsTools } from "../../src/mcp/tools/ops.js";
+import { resolveTrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 const ROOT = join(import.meta.dir, "../..");
 
@@ -116,6 +121,63 @@ describe("#341 trusted boundary runtime threading contracts", () => {
       expect(callsWithin(source, "loadConfigWithPath")).toHaveLength(0);
       expect(callsWithin(source, "loadConfig")).toHaveLength(0);
       expect(callsWithin(source, "resolveTrustedVaultBoundary")).toHaveLength(0);
+    }
+  });
+
+  test("real MCP health handler keeps filesystem candidate and report paths private", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-health-projection-"));
+    const vaultPath = join(root, "vault");
+    const outputsDir = join(root, "REPORT-PATH-SECRET-runtime");
+    const candidateName = "CANDIDATE-NAME-SECRET\n\u202e.md";
+    const candidateBody = "CANDIDATE-BODY-SECRET STACK-SECRET\n at privateFrame";
+    const registered: Record<string, (input: unknown) => Promise<unknown>> = {};
+    let db: CBrainDB | undefined;
+
+    try {
+      mkdirSync(join(root, ".obsidian"));
+      mkdirSync(vaultPath);
+      writeFileSync(join(root, candidateName), candidateBody);
+      db = new CBrainDB(join(root, "brain.sqlite"));
+      const vaultBoundary = resolveTrustedVaultBoundary({ configRoot: root, vaultPath });
+      expect(vaultBoundary).toBeDefined();
+
+      const server = {
+        registerTool(name: string, _definition: unknown, handler: (input: unknown) => Promise<unknown>) {
+          registered[name] = handler;
+        },
+      };
+      registerOpsTools(server as never, {
+        db,
+        outputsDir,
+        vaultPath,
+        vaultBoundary,
+      } as unknown as ToolContext);
+
+      const response = await registered.health({}) as { content: Array<{ text: string }> };
+      const text = response.content[0]?.text ?? "";
+      const envelope = JSON.parse(text) as Record<string, unknown>;
+      const raw = envelope.raw as Record<string, unknown>;
+
+      expect(raw.timestamp).toBeString();
+      expect(raw.overallStatus).toBe("warn");
+      expect(raw.dimensions).toBeArray();
+      expect(raw.metrics).toBeDefined();
+      expect(raw.delta).toBeDefined();
+      expect("reportPaths" in raw).toBe(false);
+      for (const sentinel of [
+        root,
+        outputsDir,
+        "REPORT-PATH-SECRET",
+        "CANDIDATE-NAME-SECRET",
+        "CANDIDATE-BODY-SECRET",
+        "STACK-SECRET",
+        "\u202e",
+      ]) {
+        expect(text).not.toContain(sentinel);
+      }
+    } finally {
+      db?.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

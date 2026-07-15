@@ -447,6 +447,10 @@ Document:
 
 All examples use anonymous roots and filenames.
 
+Keep the durable explanation in `docs/vault-spec.md` and the step-by-step
+operator response in `docs/install-onboarding.md`; there is no standalone
+`docs/cli-reference.md` in this repository.
+
 - [ ] **Step 4: Run adversarial code and mutation review**
 
 Dispatch two read-only reviewers:

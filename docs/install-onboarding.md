@@ -527,9 +527,29 @@ cbrain backup             # 先备份再排查
 | **`Port 3399 already in use`** | 已有一个 HTTP 服务在跑 | `kill $(lsof -ti:3399)` 关掉旧进程，或用 `--port` 换端口 |
 | **`FTS5: syntax error`** | 搜索词包含特殊字符 | 用空格分隔关键词，避免 `OR`、`AND`、引号等 FTS5 保留字 |
 | **`LanceDB connection failed`** | 向量库损坏 | 先 `cbrain backup` 备份、`cbrain doctor` 诊断，再重建：单页 `cbrain sync --slug <slug> --reindex`，整库损坏 `cbrain sync --reindex-vectors`（watcher 隔离页等进阶场景见 [known-issues](known-issues.md)）。**切勿直接删除 `lancedb/`** |
+| **health/fsck 报告文件系统卫生 warning** | Obsidian 打开的根目录包含 CBrain 子 vault，File Provider 冲突副本或延迟物化在 `vaultPath` 旁留下了可识别条目 | 先保持原条目不动；运行 `cbrain fsck --layer vault --local-details` 做本机只读定位，再逐项人工核对 |
 | **`RESTORE_CLEANUP_INCOMPLETE`** | 数据库/vault 主恢复已经完成，但精确托管残留未能在有限重试后验证清除 | 保持所有 CBrain 服务停止；不要立刻重跑 restore。按下方步骤检查 residual，只在确认旧数据无需保留后手动清理，再重新执行 restore |
 | **NER 提取不到实体** | API Key 未配置或余额不足 | 检查 `cbrain.json` 里 `ner.llm_api_key` 或环境变量 `ZHIPU_API_KEY`；到智谱控制台检查余额 |
 | **`bun: command not found`** | Bun 未安装或不在 PATH | `curl -fsSL https://bun.sh/install \| bash`，然后重启终端 |
+
+### 文件系统卫生 warning 处理步骤
+
+1. 不要移动、合并或删除候选条目。默认 health/fsck 只给匿名计数，这表示“需要人工核对”，不是自动修复建议。
+2. 确认当前 `cbrain.json` 位于 Obsidian 打开的根目录，并且 `vaultPath` 是它的直接子目录。嵌套布局本身可以使用，但 File Provider 或未解析双链可能把冲突副本物化在子 vault 旁边。
+3. 在本机运行 `cbrain fsck --layer vault --local-details`。该命令只读，只输出相对配置根目录且经过转义的单行名称；不会输出正文，也不会把名称写入 health、repair-plan 或 MCP。
+4. 逐项核对来源和云端同步状态。即使 Markdown 为零字节，也不能据此证明可安全删除；编号目录、非空目录与其他未托管目录同样不会被 CBrain 自动删除。
+5. restore 的边界保持不变：它只处理本轮精确拥有的 `.pre-restore`、`.rollback`、WAL 和 SHM。错位兄弟项属于只读观测和人工决策，不属于 restore cleanup。
+
+示意布局只使用匿名名称：
+
+```text
+/path/to/workspace/
+├── cbrain.json
+├── .obsidian/
+├── vault/          # configured vaultPath
+├── note-a.md       # misplaced candidate: review manually
+└── vault 2/        # numbered candidate: review manually
+```
 
 ### `RESTORE_CLEANUP_INCOMPLETE` 处理步骤
 

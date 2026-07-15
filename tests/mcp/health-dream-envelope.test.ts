@@ -110,6 +110,11 @@ describe("formatHealthEnvelope", () => {
   test("raw preserves full structure", () => {
     const report = makeHealthReport({
       overallStatus: "warn",
+      reportPaths: {
+        summary: "/anonymous/REPORT-PATH-SECRET/summary.md",
+        actions: "/anonymous/REPORT-PATH-SECRET/actions.md",
+        detail: "/anonymous/REPORT-PATH-SECRET/detail.json",
+      },
       dimensions: [
         {
           name: "完整性",
@@ -122,11 +127,57 @@ describe("formatHealthEnvelope", () => {
     });
     const result = formatHealthEnvelope(report);
 
-    // raw keeps everything
+    // The MCP-compatible projection keeps the report, except operator-local paths.
     expect(result.raw.overallStatus).toBe("warn");
     expect(result.raw.dimensions).toHaveLength(1);
     expect(result.raw.metrics).toBeDefined();
     expect(result.raw.timestamp).toBeDefined();
+    expect("reportPaths" in result.raw).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("REPORT-PATH-SECRET");
+  });
+
+  test("path-free raw projection preserves delta in clean and actionable branches", () => {
+    const delta = {
+      previousTimestamp: "2026-06-05T00:00:00Z",
+      dimensions: [],
+      totalNew: 0,
+      totalResolved: 1,
+      totalChronic: 0,
+    };
+    const reportPaths = {
+      summary: "/anonymous/REPORT-PATH-SECRET/summary.md",
+      actions: "/anonymous/REPORT-PATH-SECRET/actions.md",
+      detail: "/anonymous/REPORT-PATH-SECRET/detail.json",
+    };
+
+    for (const report of [
+      makeHealthReport({ delta, reportPaths }),
+      makeHealthReport({
+        overallStatus: "warn",
+        delta,
+        reportPaths,
+        dimensions: [{
+          name: "文件系统卫生",
+          status: "warn",
+          issues: [{
+            severity: "medium",
+            slug: "-",
+            code: "filesystem_hygiene.review_required",
+            title: "1 个错位条目需要人工核对",
+            description: "受信任根目录旁发现 1 个可识别条目。",
+          }],
+        }],
+      }),
+    ]) {
+      const result = formatHealthEnvelope(report);
+      expect(result.raw.timestamp).toBe(report.timestamp);
+      expect(result.raw.overallStatus).toBe(report.overallStatus);
+      expect(result.raw.dimensions).toEqual(report.dimensions);
+      expect(result.raw.metrics).toEqual(report.metrics);
+      expect(result.raw.delta).toEqual(delta);
+      expect("reportPaths" in result.raw).toBe(false);
+      expect(JSON.stringify(result)).not.toContain("REPORT-PATH-SECRET");
+    }
   });
 
   test("fail status shows problems label", () => {
