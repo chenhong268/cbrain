@@ -1,10 +1,30 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { FsckFinding } from "./types.js";
 import { anonymizeSlugs } from "./report.js";
+import {
+	formatZeroLinkDebtDetail,
+	planZeroLinkBackfill,
+	scanZeroLinkCandidates,
+} from "../maintenance/zero-link-backfill.js";
 
 export function probeSqlite(db: CBrainDB): FsckFinding[] {
 	const findings: FsckFinding[] = [];
 	const raw = db.rawDb;
+
+	const zeroLink = planZeroLinkBackfill(db);
+	if (zeroLink.total > 0 || zeroLink.commitUnknown > 0) {
+		findings.push({
+			check: "sqlite.zero_link_rich_records",
+			layer: "sqlite",
+			severity: "warning",
+			count: zeroLink.total + zeroLink.commitUnknown,
+			sampleSlugs: anonymizeSlugs(
+				scanZeroLinkCandidates(db, 5).map((candidate) => candidate.slug),
+			),
+			detail: formatZeroLinkDebtDetail(zeroLink),
+			suggestedCommand: "cbrain zero-link-backfill --json",
+		});
+	}
 
 	// ─── title collision ────────────────────────────────────────────
 	const dupTitles = raw.prepare(

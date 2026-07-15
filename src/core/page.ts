@@ -266,11 +266,11 @@ export class PageManager {
     return slugs.map((s) => this.getBySlug(s)).filter(Boolean) as Page[];
   }
 
-  /** Update a page's type. Moves file to correct directory if needed. */
-  updateType(slug: string, newType: string): void {
+  /** Update a page's type and return its actual slug after any directory move. */
+  updateType(slug: string, newType: string): string {
     const normalizedType = normalizePageType(newType);
     const page = this.getBySlug(slug);
-    if (!page) return;
+    if (!page) return slug;
 
     const newSlug = canonicalSlug(slug, normalizedType);
 
@@ -289,9 +289,11 @@ export class PageManager {
         throw err;
       }
       this.logger?.info("page", "类型更新并移动文件", { oldSlug: slug, newSlug, type: normalizedType });
+      return newSlug;
     } else {
       // Slug unchanged — update type in-place with file/DB atomicity
       this.updateTypeInPlace(slug, normalizedType, page);
+      return slug;
     }
   }
 

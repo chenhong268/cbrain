@@ -12,6 +12,10 @@ import {
   hasKnownRelationsDrift,
   type KnownRelationsLink,
 } from "../graph/known-relations-projector.js";
+import {
+  formatZeroLinkDebtDetail,
+  planZeroLinkBackfill,
+} from "./zero-link-backfill.js";
 
 // ─── Contradiction classification ─────────────────────────────
 
@@ -186,6 +190,7 @@ export class HealthChecker {
       this.checkTitleCollisionQuarantine(),
       this.checkConsistency(),
       this.checkStructuralConsistency(),
+      this.checkRichRecordGraphCoverage(),
       this.checkCompleteness(),
       this.checkIslands(),
       this.checkNewSuggestions(),
@@ -929,6 +934,24 @@ export class HealthChecker {
         });
       }
     }
+  }
+
+  private checkRichRecordGraphCoverage(): HealthDimension {
+    const report = planZeroLinkBackfill(this.db);
+    if (report.total === 0 && report.commitUnknown === 0) {
+      return { name: "富记录图谱覆盖", status: "pass", issues: [] };
+    }
+    return {
+      name: "富记录图谱覆盖",
+      status: "warn",
+      issues: [{
+        severity: "medium",
+        slug: "system/zero-link-rich-records",
+        title: "富记录图谱覆盖待审核",
+        description: formatZeroLinkDebtDetail(report),
+        suggestion: "cbrain zero-link-backfill --json",
+      }],
+    };
   }
 
   private checkCompleteness(): HealthDimension {

@@ -224,6 +224,122 @@ describe("ContentPipeline NER quality logging", () => {
     expect(dump).not.toContain("噪声词A");
   });
 
+  test("existing-entity resolution creates one weak candidate mention without downgrading trusted evidence", async () => {
+    insertPage("records/source-mention", "来源记录", "record");
+    insertPage("entity/company/a", "实体A", "entity/company");
+    const pipeline = new ContentPipeline(db, stubEmbedding, stubLance, {
+      pages: stubPages,
+      nerEngine: {} as any,
+    });
+    const extraction: ExtractionResult = {
+      entities: [{ name: "实体A", type: "company", relevance: "high", context: "" }],
+      relations: [], events: [], facts: [], filtered: [],
+    };
+
+    await pipeline.processNer("records/source-mention", "正文", "record", true, extraction, new Set(["entity/company/a"]));
+    await pipeline.processNer("records/source-mention", "正文", "record", true, extraction, new Set(["entity/company/a"]));
+    let row = db.rawDb.prepare(
+      "SELECT COUNT(*) count, MIN(strength) strength, MIN(trust_state) trust_state FROM links WHERE from_slug=? AND to_slug=? AND relation='提及'",
+    ).get("records/source-mention", "entity/company/a") as { count: number; strength: string; trust_state: string };
+    expect(row).toEqual({ count: 1, strength: "weak", trust_state: "candidate" });
+    expect(db.getPage("entity/company/a")!.mention_count).toBe(0);
+
+    db.rawDb.prepare("DELETE FROM links WHERE from_slug=? AND to_slug=? AND relation='提及'").run("records/source-mention", "entity/company/a");
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug,to_slug,relation,weight,strength,source_type,confidence,trust_state) VALUES (?,?, '提及',0.9,'strong','manual',1,'trusted')",
+    ).run("records/source-mention", "entity/company/a");
+    await pipeline.processNer("records/source-mention", "正文", "record", true, extraction);
+    row = db.rawDb.prepare(
+      "SELECT COUNT(*) count, MIN(strength) strength, MIN(trust_state) trust_state FROM links WHERE from_slug=? AND to_slug=? AND relation='提及'",
+    ).get("records/source-mention", "entity/company/a") as { count: number; strength: string; trust_state: string };
+    expect(row).toEqual({ count: 1, strength: "strong", trust_state: "trusted" });
+  });
+
+  test("guarded resolution defers alias, shadow audit, mention and graph writes until final fence", async () => {
+    insertPage("records/source-guard", "来源记录", "record");
+    insertPage("entity/company/a", "实体A", "entity/company");
+    const pipeline = new ContentPipeline(db, stubEmbedding, stubLance, {
+      pages: stubPages,
+      nerEngine: {} as any,
+    });
+    const extraction: ExtractionResult = {
+      entities: [{ name: "实体A（组织）", type: "company", relevance: "high", context: "" }],
+      relations: [], events: [], facts: [], filtered: [],
+    };
+    const phases: string[] = [];
+    await expect(pipeline.processNer(
+      "records/source-guard",
+      "正文".repeat(100),
+      "record",
+      true,
+      extraction,
+      new Set(),
+      (phase) => {
+        phases.push(phase);
+        if (phase === "before_commit") throw new Error("NER_SOURCE_CHANGED");
+      },
+    )).rejects.toThrow("NER_SOURCE_CHANGED");
+    expect(phases).toEqual(["after_extract", "before_commit"]);
+    expect(db.rawDb.prepare("SELECT COUNT(*) count FROM aliases").get()).toEqual({ count: 0 });
+    expect(db.rawDb.prepare("SELECT COUNT(*) count FROM links").get()).toEqual({ count: 0 });
+    expect(db.rawDb.prepare("SELECT COUNT(*) count FROM ingest_log WHERE source_type='verifier'").get()).toEqual({ count: 0 });
+    expect(db.getPage("entity/company/a")!.mention_count).toBe(0);
+
+    await pipeline.processNer(
+      "records/source-guard", "正文", "record", true, extraction, new Set(), () => {},
+    );
+    expect(db.rawDb.prepare("SELECT alias, source FROM aliases").get()).toEqual({ alias: "实体A（组织）", source: "ner-resolved" });
+    expect(db.rawDb.prepare("SELECT COUNT(*) count FROM links").get()).toEqual({ count: 1 });
+  });
+
+  test("guarded semantic alias preserves llm-semantic provenance", async () => {
+    insertPage("records/source-semantic", "来源记录", "record");
+    insertPage("entity/company/a", "实体A", "entity/company");
+    const provider = {
+      chat: async () => JSON.stringify({ matches: [{ candidate: "别名A", entity: "实体A", confidence: 0.95 }] }),
+    };
+    const pipeline = new ContentPipeline(db, stubEmbedding, stubLance, {
+      pages: stubPages,
+      nerEngine: { provider } as any,
+    });
+    const extraction: ExtractionResult = {
+      entities: [{ name: "别名A", type: "company", relevance: "high", context: "" }],
+      relations: [], events: [], facts: [], filtered: [],
+    };
+    await pipeline.processNer("records/source-semantic", "正文", "record", true, extraction, new Set(), () => {});
+    expect(db.rawDb.prepare("SELECT alias, source FROM aliases").get()).toEqual({ alias: "别名A", source: "llm-semantic" });
+  });
+
+  test("after-extract guard failure happens before empty-extraction shadow audit", async () => {
+    insertPage("records/source-empty", "来源记录", "record");
+    const pipeline = new ContentPipeline(db, stubEmbedding, stubLance, {
+      pages: stubPages,
+      nerEngine: {} as any,
+    });
+    const extraction: ExtractionResult = { entities: [], relations: [], events: [], facts: [], filtered: [] };
+    await expect(pipeline.processNer(
+      "records/source-empty", "正文".repeat(300), "record", true, extraction, new Set(), () => { throw new Error("NER_ATTEMPT_REVOKED"); },
+    )).rejects.toThrow("NER_ATTEMPT_REVOKED");
+    expect(db.rawDb.prepare("SELECT COUNT(*) count FROM ingest_log WHERE source_type='verifier'").get()).toEqual({ count: 0 });
+  });
+
+  test("empty extraction acquires the final guard before writing shadow audit", async () => {
+    insertPage("records/source-empty", "来源记录", "record");
+    const pipeline = new ContentPipeline(db, stubEmbedding, stubLance, {
+      pages: stubPages,
+      nerEngine: {} as any,
+    });
+    const extraction: ExtractionResult = { entities: [], relations: [], events: [], facts: [], filtered: [] };
+    const phases: string[] = [];
+
+    await pipeline.processNer(
+      "records/source-empty", "正文".repeat(300), "record", true, extraction, new Set(), (phase) => phases.push(phase),
+    );
+
+    expect(phases).toEqual(["after_extract", "before_commit"]);
+    expect(db.rawDb.prepare("SELECT COUNT(*) count FROM ingest_log WHERE source_type='verifier'").get()).toEqual({ count: 1 });
+  });
+
   test("logNerQuality failure is fail-open — NER still returns, no rollback, sanitized log (#167)", async () => {
     insertPage("records/source-1", "Source", "record");
 

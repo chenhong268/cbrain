@@ -107,6 +107,14 @@ function classify(
 ): RepairAction {
   const base = { dimension, severity: issue.severity, slug: issue.slug };
 
+  if (dimension === "富记录图谱覆盖") {
+    return {
+      ...base,
+      group: "needs_review",
+      action: "人工审核语义图谱覆盖债务（不自动触发 LLM 修复）",
+    };
+  }
+
   // ── 结构一致性：3 类 auto_repairable + 1 类 needs_review（缺图边）──
   if (dimension === "结构一致性") {
     if (issue.description.includes("未写入 Known Relations") || issue.description.includes("Known Relations projection drift")) {

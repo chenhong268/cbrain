@@ -1,6 +1,6 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
-import { LanceDBManager } from "../../storage/lancedb.js";
+import { LanceDBManager, type RawVectorRow } from "../../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { ExtractionResult } from "./ner.js";
 import { runNerShadowVerifierFailOpen } from "../quality/shadow-verifier.js";
@@ -51,6 +51,8 @@ export interface NerPipelineResult {
     events: Array<{ date: string | null; description: string }>;
   };
 }
+
+export type NerSourceGuard = (phase: "after_extract" | "before_commit") => void;
 
 /**
  * Unified write pipeline — single source of truth for indexing, wikilinks, and NER.
@@ -142,6 +144,78 @@ export class ContentPipeline {
       const l1 = this.db.getL1Summary(slug);
       if (l1) this.db.ftsInsert(slug, l1.content);
     });
+  }
+
+  private sameMovedVectors(expected: RawVectorRow[], actual: RawVectorRow[], pageSlug: string): boolean {
+    if (expected.length !== actual.length) return false;
+    for (let i = 0; i < expected.length; i++) {
+      const left = expected[i];
+      const right = actual[i];
+      if (right.pageSlug !== pageSlug || left.chunkIndex !== right.chunkIndex || left.content !== right.content) return false;
+      if (left.vector.length !== right.vector.length) return false;
+      for (let j = 0; j < left.vector.length; j++) {
+        if (left.vector[j] !== right.vector[j]) return false;
+      }
+    }
+    return true;
+  }
+
+  /** Move exact raw + L1 rows after a governed SQLite/vault slug move. */
+  private async moveGovernedPageVectors(
+    oldSlug: string,
+    newSlug: string,
+    rawRows: RawVectorRow[],
+    l1Rows: RawVectorRow[],
+  ): Promise<void> {
+    if (oldSlug === newSlug) return;
+    const [targetRaw, targetL1] = await Promise.all([
+      this.lance.readRawVectorRows(newSlug),
+      this.lance.readL1VectorRows(newSlug),
+    ]);
+    if (targetRaw.length > 0 || targetL1.length > 0) {
+      throw new Error("NER_TYPE_MOVE_VECTOR_TARGET_CONFLICT");
+    }
+
+    const sourceRows = [...rawRows, ...l1Rows];
+    if (sourceRows.length > 0) {
+      await this.lance.addChunks(sourceRows.map(row => ({
+        pageSlug: newSlug,
+        chunkIndex: row.chunkIndex,
+        content: row.content,
+        vector: row.vector,
+      })));
+    }
+
+    // Never delete the old rows until the new side has been read back and
+    // proven byte-for-byte equivalent. A driver that silently short-writes
+    // must leave the old index intact for the matched-backup stop path.
+    const [stagedRaw, stagedL1] = await Promise.all([
+      this.lance.readRawVectorRows(newSlug),
+      this.lance.readL1VectorRows(newSlug),
+    ]);
+    if (
+      !this.sameMovedVectors(rawRows, stagedRaw, newSlug) ||
+      !this.sameMovedVectors(l1Rows, stagedL1, newSlug)
+    ) {
+      throw new Error("NER_TYPE_MOVE_VECTOR_VERIFY_FAILED");
+    }
+
+    await this.lance.deleteRawChunksByPageSlug(oldSlug);
+    await this.lance.deleteL1VectorByPageSlug(oldSlug);
+
+    const [movedRaw, movedL1, remainingRaw, remainingL1] = await Promise.all([
+      this.lance.readRawVectorRows(newSlug),
+      this.lance.readL1VectorRows(newSlug),
+      this.lance.readRawVectorRows(oldSlug),
+      this.lance.readL1VectorRows(oldSlug),
+    ]);
+    if (
+      remainingRaw.length > 0 || remainingL1.length > 0 ||
+      !this.sameMovedVectors(rawRows, movedRaw, newSlug) ||
+      !this.sameMovedVectors(l1Rows, movedL1, newSlug)
+    ) {
+      throw new Error("NER_TYPE_MOVE_VECTOR_VERIFY_FAILED");
+    }
   }
 
   /** Write ingest_log entry for sync/ingest audit trail. */
@@ -256,29 +330,50 @@ export class ContentPipeline {
     type: string,
     skipDatelessEvents: boolean,
     precomputed?: ExtractionResult,
-    skipMentionSlugs?: Set<string>
+    skipMentionSlugs?: Set<string>,
+    sourceGuard?: NerSourceGuard,
+    indexCreatedStubs = false,
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
     if (getOntology().isDerivedPageType(type)) return null;
 
     const extraction = precomputed ?? await this.nerEngine.extract(body);
+    sourceGuard?.("after_extract");
     // #265: shadow verifier runs BEFORE the empty-extraction early-return so
     // that a long body producing zero extraction is flagged. Fail-open by
     // construction — the runner never rethrows; the write path below is
     // independent of the verifier succeeding.
-    runNerShadowVerifierFailOpen({
-      db: this.db,
-      logger: this.logger,
-      slug: fromSlug,
-      bodyChars: body.trim().length,
-      extraction,
-    });
     if (extraction.entities.length === 0 && extraction.relations.length === 0) {
+      sourceGuard?.("before_commit");
+      runNerShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        slug: fromSlug,
+        bodyChars: body.trim().length,
+        extraction,
+      });
       return null;
     }
 
-    return this.applyExtraction(fromSlug, extraction, skipDatelessEvents, skipMentionSlugs);
+    if (!sourceGuard) {
+      runNerShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        slug: fromSlug,
+        bodyChars: body.trim().length,
+        extraction,
+      });
+    }
+    return this.applyExtraction(
+      fromSlug,
+      extraction,
+      skipDatelessEvents,
+      skipMentionSlugs,
+      sourceGuard,
+      body.trim().length,
+      indexCreatedStubs,
+    );
   }
 
   // ─── Private ────────────────────────────────────────────────
@@ -287,45 +382,85 @@ export class ContentPipeline {
     fromSlug: string,
     extraction: ExtractionResult,
     skipDatelessEvents: boolean,
-    skipMentionSlugs?: Set<string>
+    skipMentionSlugs?: Set<string>,
+    sourceGuard?: NerSourceGuard,
+    bodyChars = 0,
+    indexCreatedStubs = false,
   ): Promise<NerPipelineResult> {
     const entitySlugMap = new Map<string, string>();
+    const movedSlugMap = new Map<string, string>();
+    const mentionSkipSlugs = new Set(skipMentionSlugs ?? []);
     const stubsCreated = new Set<string>();
 
     const resolver = new EntityResolver(this.db, this.nerEngine?.provider, {
       embedding: this.embedding,
       embeddingMode: "shadow",
+      deferAliasWrites: Boolean(sourceGuard),
     });
     const candidates = extraction.entities
       .map(e => ({ name: e.name, type: e.type, relevance: e.relevance }));
     const resolutionMap = resolver.resolveAll(candidates);
     await resolver.semanticResolve(resolutionMap, candidates);
+    sourceGuard?.("before_commit");
+    if (sourceGuard) {
+      runNerShadowVerifierFailOpen({
+        db: this.db,
+        logger: this.logger,
+        slug: fromSlug,
+        bodyChars,
+        extraction,
+      });
+      resolver.flushDeferredAliasIntents();
+    }
 
     for (const entity of extraction.entities) {
       const result = resolutionMap.get(entity.name);
       if (!result) continue;
 
       if (result.action === "resolved_to_existing" || result.action === "alias_added") {
-        entitySlugMap.set(entity.name, result.slug);
-        if (!skipMentionSlugs?.has(result.slug)) {
-          this.db.incrementMentionCount(result.slug);
+        const currentSlug = movedSlugMap.get(result.slug) ?? result.slug;
+        entitySlugMap.set(entity.name, currentSlug);
+        if (!mentionSkipSlugs.has(currentSlug)) {
+          this.db.incrementMentionCount(currentSlug);
+        }
+        if (currentSlug !== fromSlug) {
+          this.db.insertLink(fromSlug, currentSlug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
         }
         // Correct type if NER classification differs from existing stub
         const nerType = mapEntityType(entity.type);
-        const existingType = this.db.getEntityType(result.slug);
+        const existingType = this.db.getEntityType(currentSlug);
         if (existingType && existingType !== nerType && this.pages) {
           const ontology = getOntology();
           const winner = ontology.resolveTypePriority(existingType, normalizePageType(nerType));
           if (winner !== existingType) {
-            this.pages.updateType(result.slug, winner);
+            const governedVectors = sourceGuard && indexCreatedStubs
+              ? {
+                  raw: await this.lance.readRawVectorRows(currentSlug),
+                  l1: await this.lance.readL1VectorRows(currentSlug),
+                }
+              : null;
+            const correctedSlug = this.pages.updateType(currentSlug, winner);
+            if (mentionSkipSlugs.has(currentSlug)) mentionSkipSlugs.add(correctedSlug);
+            if (governedVectors) {
+              await this.moveGovernedPageVectors(
+                currentSlug,
+                correctedSlug,
+                governedVectors.raw,
+                governedVectors.l1,
+              );
+            }
+            movedSlugMap.set(result.slug, correctedSlug);
+            movedSlugMap.set(currentSlug, correctedSlug);
+            entitySlugMap.set(entity.name, correctedSlug);
           }
         }
       } else if (result.action === "duplicate_candidate") {
-        entitySlugMap.set(entity.name, result.slug);
-        if (!skipMentionSlugs?.has(result.slug)) {
-          this.db.incrementMentionCount(result.slug);
+        const currentSlug = movedSlugMap.get(result.slug) ?? result.slug;
+        entitySlugMap.set(entity.name, currentSlug);
+        if (!mentionSkipSlugs.has(currentSlug)) {
+          this.db.incrementMentionCount(currentSlug);
         }
-        this.db.insertLink(fromSlug, result.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
+        this.db.insertLink(fromSlug, currentSlug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
       } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({
@@ -336,7 +471,7 @@ export class ContentPipeline {
         });
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.add(stub.slug);
-        if (!skipMentionSlugs?.has(stub.slug)) {
+        if (!mentionSkipSlugs.has(stub.slug)) {
           this.db.incrementMentionCount(stub.slug);
         }
         this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
@@ -352,7 +487,7 @@ export class ContentPipeline {
       for (const entity of extraction.entities) {
         const result = resolutionMap.get(entity.name);
         if (result && (result.action === "resolved_to_existing" || result.action === "alias_added")) {
-          resolvedForFacts.set(entity.name, result.slug);
+          resolvedForFacts.set(entity.name, entitySlugMap.get(entity.name) ?? movedSlugMap.get(result.slug) ?? result.slug);
         }
       }
       const valid = validateFacts(extraction.facts, validEntityNames, entityTypeMap);
@@ -415,6 +550,35 @@ export class ContentPipeline {
         if (rels.length > 0) {
           const body = buildStubBody(name, rels, fromSlug);
           this.pages.update(slug, { body });
+        }
+      }
+
+      // A manifest-owned repair runs with the watcher stopped and behind a
+      // commit fence. Index its new stubs before success so the repair cannot
+      // leave hard page-without-chunks debt. Ordinary deferred and synchronous
+      // NER keep their existing watcher-owned indexing behavior.
+      if (sourceGuard && indexCreatedStubs) {
+        const pages = this.pages;
+        const pendingIndexes = [...stubsCreated].map(slug => {
+          const page = pages.getBySlug(slug);
+          if (!page) throw new Error("NER_STUB_INDEX_SOURCE_UNAVAILABLE");
+          const body = page.body;
+          if (!body.trim()) throw new Error("NER_STUB_INDEX_SOURCE_EMPTY");
+          return { slug, chunks: chunkContent(body, this.chunkSize) };
+        });
+        const chunkTexts = pendingIndexes.flatMap(({ chunks }) => chunks.map(chunk => chunk.content));
+        const embedResults = chunkTexts.length > 0
+          ? await this.embedding.embedBatch(chunkTexts)
+          : [];
+        if (embedResults.length !== chunkTexts.length) {
+          throw new Error("NER_STUB_EMBEDDING_COUNT_MISMATCH");
+        }
+
+        let resultOffset = 0;
+        for (const { slug, chunks } of pendingIndexes) {
+          const pageEmbedResults = embedResults.slice(resultOffset, resultOffset + chunks.length);
+          resultOffset += chunks.length;
+          await this.writeIndexes(slug, chunks, pageEmbedResults);
         }
       }
     }

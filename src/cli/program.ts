@@ -15,6 +15,7 @@ import { register as repairFkCmds } from "./commands/repair-fk.js";
 import { register as knowledgeMapCmds } from "./commands/knowledge-map.js";
 import { register as fsckCmds } from "./commands/fsck.js";
 import { register as projectStateCmds } from "./commands/project-state.js";
+import { register as zeroLinkBackfillCmds } from "./commands/zero-link-backfill.js";
 
 /**
  * Assemble the Commander program WITHOUT parsing it.
@@ -50,6 +51,7 @@ export function buildProgram(): Command {
   knowledgeMapCmds(program);
   fsckCmds(program);
   projectStateCmds(program);
+  zeroLinkBackfillCmds(program);
 
   return program;
 }

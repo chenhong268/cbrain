@@ -79,7 +79,7 @@ describe("HealthChecker", () => {
       const report = await checker.checkAll();
       expect(report.overallStatus).toBe("pass");
       expect(report.metrics.totalPages).toBe(17);
-      expect(report.dimensions.length).toBe(18); // +1: checkVerifierQuality (#265)
+      expect(report.dimensions.length).toBe(19); // +1: rich zero-link aggregate (#342)
     });
 
     test("fails on insufficient data", async () => {
@@ -99,6 +99,49 @@ describe("HealthChecker", () => {
       expect(dedupDim).toBeDefined();
       expect(dedupDim!.status).toBe("warn");
       expect(dedupDim!.issues.length).toBeGreaterThanOrEqual(1);
+    });
+
+    test("reports rich zero-link debt as one anonymous aggregate issue", async () => {
+      insertPage("records/record-a", "RecordA", "record");
+      db.insertChunk("records/record-a", 0, "first raw chunk");
+      db.insertChunk("records/record-a", 1, "second raw chunk");
+
+      const report = await checker.checkAll();
+      const dimension = report.dimensions.find((item) => item.name === "富记录图谱覆盖");
+
+      expect(dimension?.status).toBe("warn");
+      expect(dimension?.issues).toHaveLength(1);
+      expect(dimension?.issues[0]).toMatchObject({
+        severity: "medium",
+        slug: "system/zero-link-rich-records",
+      });
+      expect(dimension?.issues[0].description).toContain("total=1");
+      expect(dimension?.issues[0].description).toContain("actionable=1");
+      expect(dimension?.issues[0].description).not.toContain("records/record-a");
+      expect(dimension?.issues[0].suggestion).toBe("cbrain zero-link-backfill --json");
+    });
+
+    test("warns on global commit-unknown even when rich zero-link total is zero", async () => {
+      insertPage("records/record-a", "RecordA", "record");
+      db.insertChunk("records/record-a", 0, "first raw chunk");
+      db.insertChunk("records/record-a", 1, "second raw chunk");
+      insertPage("entity/entity-a", "EntityA", "entity/person");
+      insertLink("records/record-a", "entity/entity-a");
+      const id = db.submitJob("ner-backfill", {
+        slug: "records/record-a",
+        kind: "ner",
+        contentHash: "hash-record-a",
+        sourceFingerprint: "page:hash-record-a",
+      });
+      db.rawDb.prepare("UPDATE jobs SET status='done', result=? WHERE id=?")
+        .run(JSON.stringify({ outcome: "commit_unknown" }), id);
+
+      const report = await checker.checkAll();
+      const dimension = report.dimensions.find((item) => item.name === "富记录图谱覆盖");
+      expect(dimension?.status).toBe("warn");
+      expect(dimension?.issues).toHaveLength(1);
+      expect(dimension?.issues[0].description).toContain("total=0");
+      expect(dimension?.issues[0].description).toContain("commit_unknown=1");
     });
 
     test("detects near-duplicate titles", async () => {

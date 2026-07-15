@@ -1,4 +1,5 @@
-import type { LLMProvider, ChatMessage } from "./provider.js";
+import { LLMTimeoutError } from "./provider.js";
+import type { LLMProvider, ChatMessage, ChatOptions } from "./provider.js";
 
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_MODEL = "deepseek-v4-flash";
@@ -13,6 +14,17 @@ interface DeepSeekChatResponse {
 
 export interface DeepSeekLLMOptions {
   timeoutMs?: number;
+  /** Enable DeepSeek's V4 thinking extension for a compatible proxy/model.
+   * Defaults to true only for official api.deepseek.com V4 models. */
+  supportsThinking?: boolean;
+}
+
+function isOfficialV4Endpoint(baseUrl: string, model: string): boolean {
+  try {
+    return new URL(baseUrl).hostname === "api.deepseek.com" && /^deepseek-v4(?:-|$)/.test(model);
+  } catch {
+    return false;
+  }
 }
 
 export class DeepSeekLLMProvider implements LLMProvider {
@@ -21,21 +33,24 @@ export class DeepSeekLLMProvider implements LLMProvider {
   private baseUrl: string;
   private model: string;
   private timeoutMs: number;
+  private supportsThinking: boolean;
 
   constructor(apiKey: string, baseUrl?: string, model?: string, opts?: DeepSeekLLMOptions) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl ?? DEFAULT_BASE_URL;
     this.model = model ?? DEFAULT_MODEL;
     this.timeoutMs = opts?.timeoutMs ?? 30_000;
+    this.supportsThinking = opts?.supportsThinking ?? isOfficialV4Endpoint(this.baseUrl, this.model);
   }
 
-  async chat(messages: ChatMessage[]): Promise<string> {
+  async chat(messages: ChatMessage[], options?: ChatOptions): Promise<string> {
     const url = `${this.baseUrl}/chat/completions`;
     const body = JSON.stringify({
       model: this.model,
       messages,
       temperature: 0.1,
       response_format: { type: "json_object" },
+      ...(options?.thinking && this.supportsThinking ? { thinking: { type: options.thinking } } : {}),
     });
 
     const controller = new AbortController();
@@ -59,8 +74,8 @@ export class DeepSeekLLMProvider implements LLMProvider {
       const json = (await response.json()) as DeepSeekChatResponse;
       return json.choices[0]?.message?.content ?? "";
     } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") {
-        throw new Error(`DeepSeek LLM request timed out after ${this.timeoutMs}ms`);
+      if (controller.signal.aborted) {
+        throw new LLMTimeoutError("DeepSeek", this.timeoutMs);
       }
       throw e;
     } finally {

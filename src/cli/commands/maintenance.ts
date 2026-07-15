@@ -26,6 +26,8 @@ import type { PageSignals } from "../../core/maintenance/health-debt.js";
 import type { PageManager } from "../../core/page.js";
 import type { ContentPipeline } from "../../core/ingestion/pipeline.js";
 import type { LLMProvider } from "../../llm/provider.js";
+import type { NerBackfillCounts } from "../../core/ingestion/ner-backfill.js";
+import type { RepairBatchStatus } from "../../core/maintenance/zero-link-backfill.js";
 
 /**
  * Reindex-vectors recovery handler — extracted for testability.
@@ -150,21 +152,65 @@ export interface NerBackfillDeps {
   pipeline: ContentPipeline;
   lockProbe: LockProbe;
   llm?: LLMProvider;
+  /** Repair batches index newly created stubs, so the exact pipeline-owned
+   * Lance manager must be connected before any child is claimed. */
+  lance?: Pick<LanceDBManager, "connect" | "close">;
+  lancePath?: string;
 }
 
 export interface NerBackfillOptions {
   limit: number;
   retryFailed?: boolean;
   json?: boolean;
+  repairBatch?: string;
+  listCommitUnknown?: boolean;
+  resolveCommitUnknown?: number;
+  decision?: "accept" | "retry" | "release-successor";
 }
 
-function retryFailedNerBackfillJobs(db: CBrainDB): number {
-  let retried = 0;
-  for (const job of db.listJobs("failed")) {
-    if (job.name !== "ner-backfill") continue;
-    if (db.retryJob(job.id)) retried++;
+export function isCanonicalRepairBatchId(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
+export function parseCanonicalCliInteger(value: unknown, allowZero: boolean): number | null {
+  if (typeof value !== "string") return null;
+  const pattern = allowZero ? /^(?:0|[1-9][0-9]*)$/ : /^[1-9][0-9]*$/;
+  if (!pattern.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+export function validateNerBackfillMode(opts: Pick<NerBackfillOptions,
+  "repairBatch" | "retryFailed" | "listCommitUnknown" | "resolveCommitUnknown" | "decision"
+>): { ok: true } | { ok: false; code: string; error: string } {
+  if ((opts.listCommitUnknown !== undefined && typeof opts.listCommitUnknown !== "boolean") ||
+    (opts.retryFailed !== undefined && typeof opts.retryFailed !== "boolean")) {
+    return { ok: false, code: "NER_BACKFILL_MODE_CONFLICT", error: "mode flags must be boolean" };
   }
-  return retried;
+  const repair = opts.repairBatch !== undefined;
+  const list = opts.listCommitUnknown === true;
+  const retry = opts.retryFailed === true;
+  const resolve = opts.resolveCommitUnknown !== undefined;
+  const decisionPresent = opts.decision !== undefined;
+  const decisionValid = !decisionPresent || ["accept", "retry", "release-successor"].includes(String(opts.decision));
+  if (!decisionValid) {
+    return { ok: false, code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid decision" };
+  }
+  const modeCount = Number(repair) + Number(list) + Number(resolve);
+  if (modeCount > 1) {
+    return { ok: false, code: "NER_BACKFILL_MODE_CONFLICT", error: "ner-backfill modes are mutually exclusive" };
+  }
+  if (repair && retry) {
+    return { ok: false, code: "BATCH_RETRY_CONFLICT", error: "repair batch cannot be combined with retry-failed" };
+  }
+  if ((list || resolve) && retry) {
+    return { ok: false, code: "NER_BACKFILL_MODE_CONFLICT", error: "audit modes cannot be combined with retry-failed" };
+  }
+  if (resolve !== decisionPresent) {
+    return { ok: false, code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: resolve ? "decision is required" : "decision requires resolve-commit-unknown" };
+  }
+  return { ok: true };
 }
 
 export async function handleNerBackfill(
@@ -173,6 +219,30 @@ export async function handleNerBackfill(
   log: (m: string) => void = console.log,
   logError: (m: string) => void = console.error,
 ): Promise<number> {
+  if (!Number.isSafeInteger(opts.limit) || opts.limit < 0 || Object.is(opts.limit, -0)) {
+    const payload = { ok: false, status: "error", code: "INVALID_LIMIT", error: "limit must be a non-negative safe integer" };
+    if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(payload.error);
+    return 1;
+  }
+  if (opts.resolveCommitUnknown !== undefined &&
+    (!Number.isSafeInteger(opts.resolveCommitUnknown) || opts.resolveCommitUnknown <= 0)) {
+    const payload = { ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid job id" };
+    if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(payload.error);
+    return 1;
+  }
+  if (opts.repairBatch !== undefined && !isCanonicalRepairBatchId(opts.repairBatch)) {
+    const payload = { ok: false, status: "error", code: "INVALID_BATCH_ID", error: "invalid repair batch id" };
+    if (opts.json) log(JSON.stringify(payload, null, 2));
+    else logError(payload.code);
+    return 1;
+  }
+  const mode = validateNerBackfillMode(opts);
+  if (!mode.ok) {
+    const payload = { ok: false, status: "error", code: mode.code, error: mode.error };
+    if (opts.json) log(JSON.stringify(payload, null, 2));
+    else logError(`${mode.code}: ${mode.error}`);
+    return 1;
+  }
   const owner = deps.lockProbe.blockingOwner();
   if (owner) {
     if (opts.json) {
@@ -189,19 +259,85 @@ export async function handleNerBackfill(
     return 1;
   }
 
-  const retriedFailed = opts.retryFailed ? retryFailedNerBackfillJobs(deps.db) : 0;
-  const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
-  const counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, {
-    maxItems: opts.limit,
-    entityFactsLlm: deps.llm,
-  });
-  if (opts.json) {
-    log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts }, null, 2));
-  } else {
-    if (opts.retryFailed) log(`NER backfill: ${retriedFailed} failed jobs reset to pending`);
-    log(`NER backfill: ${counts.processed} processed, ${counts.failed} failed, ${counts.timed_out} timed out, ${counts.skipped} skipped`);
+  if (opts.listCommitUnknown) {
+    const { listOrdinaryCommitUnknown } = await import("../../core/maintenance/zero-link-backfill.js");
+    const result = listOrdinaryCommitUnknown(deps.db);
+    const payload = { ok: true, count: result.count, jobIds: result.jobIds, integrityConflicts: result.integrityConflicts };
+    if (opts.json) log(JSON.stringify(payload, null, 2));
+    else log(`commit-unknown: ${result.count}`);
+    return result.integrityConflicts > 0 ? 1 : 0;
   }
-  return counts.failed > 0 || counts.timed_out > 0 ? 1 : 0;
+  if (opts.resolveCommitUnknown !== undefined) {
+    try {
+      const { resolveOrdinaryCommitUnknown } = await import("../../core/maintenance/zero-link-backfill.js");
+      const result = resolveOrdinaryCommitUnknown(deps.db, opts.resolveCommitUnknown, opts.decision!);
+      if (opts.json) log(JSON.stringify({ ok: true, ...result }, null, 2));
+      else log(`commit-unknown: ${result.success ? "resolved" : "unchanged"}`);
+      return 0;
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : "COMMIT_UNKNOWN_STATE_MISMATCH";
+      const allowed = new Set(["BATCH_ROLLBACK_REQUIRED", "COMMIT_UNKNOWN_INTEGRITY_CONFLICT", "COMMIT_UNKNOWN_STATE_MISMATCH"]);
+      const code = allowed.has(raw) ? raw : "COMMIT_UNKNOWN_STATE_MISMATCH";
+      const payload = { ok: false, status: "error", code, error: "commit-unknown resolution failed" };
+      if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(`${code}: ${payload.error}`);
+      return 1;
+    }
+  }
+
+  let lanceConnected = false;
+  if (opts.repairBatch !== undefined) {
+    if (!deps.lance || !deps.lancePath) {
+      const payload = { ok: false, status: "error", code: "LANCE_CONNECT_FAILED", error: "LanceDB connection failed" };
+      if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(`${payload.code}: ${payload.error}`);
+      return 1;
+    }
+    try {
+      await deps.lance.connect(deps.lancePath);
+      lanceConnected = true;
+    } catch {
+      const payload = { ok: false, status: "error", code: "LANCE_CONNECT_FAILED", error: "LanceDB connection failed" };
+      if (opts.json) log(JSON.stringify(payload, null, 2)); else logError(`${payload.code}: ${payload.error}`);
+      return 1;
+    }
+  }
+
+  try {
+    const { runNerBackfillStage } = await import("../../core/ingestion/ner-backfill.js");
+    let counts: NerBackfillCounts;
+    let batchStatus: RepairBatchStatus | undefined;
+    try {
+      counts = await runNerBackfillStage(deps.db, deps.pipeline, deps.pages, {
+        maxItems: opts.limit,
+        entityFactsLlm: deps.llm,
+        batchId: opts.repairBatch,
+        retryFailed: opts.retryFailed,
+      });
+      batchStatus = opts.repairBatch !== undefined
+        ? (await import("../../core/maintenance/zero-link-backfill.js")).summarizeRepairBatch(deps.db, opts.repairBatch)
+        : undefined;
+    } catch (error) {
+      const rawCode = error instanceof Error ? error.message : "QUEUE_INTEGRITY_CONFLICT";
+      const allowed = new Set(["BATCH_NOT_FOUND", "BATCH_INTEGRITY_CONFLICT", "BATCH_LIMIT_MISMATCH", "QUEUE_INTEGRITY_CONFLICT"]);
+      const code = allowed.has(rawCode) ? rawCode : "QUEUE_INTEGRITY_CONFLICT";
+      const payload = { ok: false, status: "error", code, error: "NER backfill preflight failed" };
+      if (opts.json) log(JSON.stringify(payload, null, 2));
+      else logError(`${code}: ${payload.error}`);
+      return 1;
+    }
+    const retriedFailed = counts.retried_failed ?? 0;
+    delete counts.retried_failed;
+    if (opts.json) {
+      log(JSON.stringify({ ok: true, ...(opts.retryFailed ? { retried_failed: retriedFailed } : {}), counts, ...(batchStatus ? { batch: batchStatus } : {}) }, null, 2));
+    } else {
+      if (opts.retryFailed) log(`NER backfill: ${retriedFailed} failed jobs reset to pending`);
+      log(`NER backfill: ${counts.processed} processed, ${counts.failed} failed, ${counts.timed_out} timed out, ${counts.skipped} skipped`);
+    }
+    return counts.failed > 0 || counts.timed_out > 0 ? 1 : 0;
+  } finally {
+    if (lanceConnected) {
+      try { await deps.lance!.close(); } catch { /* process-scoped best effort */ }
+    }
+  }
 }
 
 /**
@@ -645,13 +781,53 @@ export function register(program: Command) {
     .description("Process deferred NER jobs; refuses while serve/watcher is active")
     .option("--limit <n>", "Maximum pending jobs to process", "50")
     .option("--retry-failed", "Reset failed ner-backfill jobs to pending before processing")
+    .option("--repair-batch <uuid>", "Process exactly one governed zero-link repair batch")
+    .option("--list-commit-unknown", "List privacy-safe ordinary commit-unknown job ids")
+    .option("--resolve-commit-unknown <job-id>", "Resolve one ordinary commit-unknown job")
+    .option("--decision <decision>", "accept, retry, or release-successor")
     .option("--json", "Emit machine-readable JSON")
     .action(async (opts) => {
-      const limit = Number.parseInt(String(opts.limit), 10);
-      if (!Number.isFinite(limit) || limit < 0) {
+      const limit = parseCanonicalCliInteger(String(opts.limit), true);
+      if (limit === null) {
         const message = "--limit must be an integer >= 0";
         if (opts.json) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
         else console.error(message);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.repairBatch !== undefined && !isCanonicalRepairBatchId(String(opts.repairBatch))) {
+        const message = "INVALID_BATCH_ID";
+        if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: message, error: "invalid repair batch id" }, null, 2));
+        else console.error(message);
+        process.exitCode = 1;
+        return;
+      }
+      const resolveCommitUnknown = opts.resolveCommitUnknown === undefined
+        ? undefined
+        : parseCanonicalCliInteger(String(opts.resolveCommitUnknown), false);
+      if (resolveCommitUnknown === null) {
+        if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid job id" }, null, 2));
+        else console.error("invalid job id");
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.decision !== undefined && !["accept", "retry", "release-successor"].includes(String(opts.decision))) {
+        if (opts.json) console.log(JSON.stringify({ ok: false, status: "error", code: "COMMIT_UNKNOWN_STATE_MISMATCH", error: "invalid decision" }, null, 2));
+        else console.error("invalid decision");
+        process.exitCode = 1;
+        return;
+      }
+      const mode = validateNerBackfillMode({
+        repairBatch: opts.repairBatch !== undefined ? String(opts.repairBatch) : undefined,
+        retryFailed: Boolean(opts.retryFailed),
+        listCommitUnknown: Boolean(opts.listCommitUnknown),
+        resolveCommitUnknown,
+        decision: opts.decision as "accept" | "retry" | "release-successor" | undefined,
+      });
+      if (!mode.ok) {
+        const payload = { ok: false, status: "error", code: mode.code, error: mode.error };
+        if (opts.json) console.log(JSON.stringify(payload, null, 2));
+        else console.error(`${mode.code}: ${mode.error}`);
         process.exitCode = 1;
         return;
       }
@@ -659,7 +835,7 @@ export function register(program: Command) {
       const config = loadConfig();
       const deps = createDeps(config);
       try {
-        if (!deps.llm) {
+        if (!deps.llm && !opts.listCommitUnknown && resolveCommitUnknown === undefined) {
           const message = "No LLM configured — ner-backfill requires an NER LLM provider.";
           if (opts.json) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
           else console.error(message);
@@ -676,12 +852,20 @@ export function register(program: Command) {
         const outputsDir = resolveRuntimePath(config);
         const logger = new Logger(outputsDir);
         const pages = new PageManager(deps.db, config.vaultPath, logger);
-        const nerEngine = new NerEngine(deps.llm, logger);
+        const nerEngine = deps.llm ? new NerEngine(deps.llm, logger) : undefined;
         const pipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
 
         process.exitCode = await handleNerBackfill(
-          { db: deps.db, pages, pipeline, lockProbe, llm: deps.llm },
-          { limit, retryFailed: Boolean(opts.retryFailed), json: Boolean(opts.json) },
+          { db: deps.db, pages, pipeline, lockProbe, llm: deps.llm, lance: deps.lance, lancePath: config.lancePath },
+          {
+            limit,
+            retryFailed: Boolean(opts.retryFailed),
+            json: Boolean(opts.json),
+            repairBatch: opts.repairBatch !== undefined ? String(opts.repairBatch) : undefined,
+            listCommitUnknown: Boolean(opts.listCommitUnknown),
+            resolveCommitUnknown,
+            decision: opts.decision as "accept" | "retry" | "release-successor" | undefined,
+          },
         );
       } finally {
         deps.db.close();

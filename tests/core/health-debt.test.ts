@@ -65,6 +65,16 @@ function makeReport(items: Array<{ dimension: string; issue: HealthIssue }>): He
 const noSignals = (): undefined => undefined;
 
 describe("planRepairs — auto_repairable classification", () => {
+  test("富记录图谱覆盖始终需人工审核", () => {
+    const report = makeReport([
+      makeIssue("富记录图谱覆盖", "system/zero-link-rich-records", "total=1, actionable=1"),
+    ]);
+    const plan = planRepairs(report, noSignals);
+    expect(plan.counts.needs_review).toBe(1);
+    expect(plan.counts.auto_repairable).toBe(0);
+    expect(plan.actions[0].group).toBe("needs_review");
+  });
+
   test("Known Relations 缺失 → auto_repairable / sync_known_relations", () => {
     const report = makeReport([
       makeIssue("结构一致性", "entity/entity-a", "有 1 条出边未写入 Known Relations 区块", {

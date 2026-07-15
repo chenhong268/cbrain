@@ -15,6 +15,54 @@ function createMockLLM(responses: string[]): LLMProvider {
 }
 
 describe("NerEngine", () => {
+  test("disables provider thinking only for NER extraction calls", async () => {
+    const options: unknown[] = [];
+    const responses = [
+      JSON.stringify({
+        entities: [{ name: "实体A", type: "person", context: "实体A参与组织C" }],
+        events: [],
+        facts: [],
+      }),
+      JSON.stringify({ relations: [] }),
+    ];
+    let callIndex = 0;
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async (_messages, chatOptions) => {
+        options.push(chatOptions);
+        return responses[callIndex++];
+      },
+    };
+
+    await new NerEngine(llm).extract("实体A参与组织C");
+
+    expect(options).toEqual([
+      { thinking: "disabled" },
+      { thinking: "disabled" },
+    ]);
+  });
+
+  test("disables provider thinking for every parallel chunk and relation call", async () => {
+    const options: unknown[] = [];
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async (_messages, chatOptions) => {
+        options.push(chatOptions);
+        return JSON.stringify({
+          entities: [{ name: "实体A", type: "person", context: "实体A参与主题D" }],
+          events: [],
+          facts: [],
+          relations: [],
+        });
+      },
+    };
+    const longText = "实体A参与主题D，并记录匿名时间节点。".repeat(400);
+
+    await new NerEngine(llm).extract(longText);
+
+    expect(options.length).toBeGreaterThan(2);
+    expect(options.every((value) => JSON.stringify(value) === JSON.stringify({ thinking: "disabled" }))).toBe(true);
+  });
   // ─── Core pipeline ───────────────────────────────
 
   test("extracts entities from LLM response", async () => {
@@ -427,6 +475,29 @@ describe("NerEngine extract timeout (#229)", () => {
     }
     expect(isNerTimeoutError(caught)).toBe(true);
     expect(isNerTimeoutError(new Error("ordinary"))).toBe(false);
+  });
+
+  test("normalizes a provider timeout into NerTimeoutError", async () => {
+    const providerTimeout = Object.assign(new Error("provider timeout"), {
+      code: "LLM_TIMEOUT",
+      isLLMTimeout: true,
+      timeoutMs: 30_000,
+    });
+    const llm: LLMProvider = {
+      name: "slow-provider",
+      chat: async () => { throw providerTimeout; },
+    };
+
+    let caught: unknown;
+    try {
+      await new NerEngine(llm).extract("匿名结构化抽取内容");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(NerTimeoutError);
+    expect(isNerTimeoutError(caught)).toBe(true);
+    expect((caught as NerTimeoutError).timeoutMs).toBe(30_000);
   });
 
   test("fast NER returns normally within timeout (behavior unchanged)", async () => {
