@@ -192,10 +192,20 @@ export function register(program: Command): void {
 				return;
 			}
 
-			const db = new CBrainDB(config.dbPath, {
-				skipMigrate: true,
-				readonly: opts.repairStaleFts !== true,
-			});
+			let db: CBrainDB;
+			const readSnapshot = opts.repairStaleFts !== true;
+			try {
+				db = new CBrainDB(config.dbPath, {
+					skipMigrate: true,
+					readSnapshot,
+				});
+			} catch {
+				const error = readSnapshot
+					? "Unable to open a stable read snapshot"
+					: "Unable to open configured database safely";
+				emit(buildReport([], "unchecked", ts, error), 2);
+				return;
+			}
 			try {
 				if (opts.repairStaleFts) {
 					db.cleanupStaleFtsRows();
@@ -255,11 +265,24 @@ export function register(program: Command): void {
 				return;
 			}
 
-			const db = new CBrainDB(config.dbPath, {
-				skipMigrate: true,
-				// --verify wins over --execute in the established command flow below.
-				readonly: opts.execute !== true || opts.verify === true,
-			});
+			let db: CBrainDB;
+			const readSnapshot = opts.execute !== true || opts.verify === true;
+			try {
+				db = new CBrainDB(config.dbPath, {
+					skipMigrate: true,
+					// --verify wins over --execute in the established command flow below.
+					readSnapshot,
+				});
+			} catch {
+				const error = readSnapshot
+					? "Unable to open a stable read snapshot"
+					: "Unable to open configured database safely";
+				emitPlan(
+					buildRepairPlan(buildReport([], "unchecked", ts, error)),
+					2,
+				);
+				return;
+			}
 			try {
 				const input: FsckInput = {
 					vaultPath: config.vaultPath,

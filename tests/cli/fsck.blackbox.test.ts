@@ -79,6 +79,15 @@ function convertToDeleteMode(dbPath: string): void {
 	writable.close();
 }
 
+function createWalHeaderWithoutSidecars(dbPath: string): void {
+	const writable = new CBrainDB(dbPath);
+	writable.checkpoint();
+	writable.close();
+	rmSync(`${dbPath}-wal`, { force: true });
+	rmSync(`${dbPath}-shm`, { force: true });
+	expect(readFileSync(dbPath)[18]).toBe(2);
+}
+
 function journalMode(dbPath: string): string {
 	const native = new Database(dbPath, { readonly: true });
 	try {
@@ -97,18 +106,22 @@ function sidecarSnapshot(dbPath: string): string {
 	}).join("|");
 }
 
-for (const scenario of [
+const readOnlyScenarios = [
 	{ name: "fsck default", command: "fsck", args: [] },
 	{ name: "fsck json", command: "fsck", args: ["--json"] },
 	{ name: "fsck local details", command: "fsck", args: ["--layer", "vault", "--local-details"] },
 	{ name: "repair-plan dry-run", command: "repair-plan", args: ["--json"] },
 	{ name: "repair-plan verify", command: "repair-plan", args: ["--verify", "--json"] },
 	{ name: "repair-plan verify precedence", command: "repair-plan", args: ["--verify", "--execute", "--json"] },
-] as const) {
-	test(`${scenario.name} preserves DELETE-mode DB bytes and sidecars`, async () => {
+] as const;
+
+for (const mode of ["delete", "wal-header-cleaned"] as const) {
+	for (const scenario of readOnlyScenarios) {
+	test(`${scenario.name} preserves ${mode} DB bytes and sidecars`, async () => {
 		const dir = makeTempDir("cbrain-fsck-bb-delete-mode-");
 		const dbPath = join(dir, "brain.sqlite");
-		convertToDeleteMode(dbPath);
+		if (mode === "delete") convertToDeleteMode(dbPath);
+		else createWalHeaderWithoutSidecars(dbPath);
 		const cfg = writeCfg(dir, dbPath);
 		mkdirSync(join(dir, ".obsidian"));
 		writeFileSync(join(dir, "anonymous-empty.md"), "");
@@ -121,16 +134,19 @@ for (const scenario of [
 		const beforeSidecars = sidecarSnapshot(dbPath);
 		const beforeCandidates = candidateSnapshot(dir);
 		const beforeCanonicalMtime = statSync(canonicalPath).mtimeMs;
-		expect(journalMode(dbPath)).toBe("delete");
+		if (mode === "delete") expect(journalMode(dbPath)).toBe("delete");
+		else expect(readFileSync(dbPath)[18]).toBe(2);
 
 		const result = await runCli(scenario.command, [...scenario.args], cfg);
 		expect(result.exitCode).not.toBe(2);
-		expect(journalMode(dbPath)).toBe("delete");
+		if (mode === "delete") expect(journalMode(dbPath)).toBe("delete");
+		else expect(readFileSync(dbPath)[18]).toBe(2);
 		expect(fileHash(dbPath)).toBe(beforeHash);
 		expect(sidecarSnapshot(dbPath)).toBe(beforeSidecars);
 		expect(candidateSnapshot(dir)).toBe(beforeCandidates);
 		expect(statSync(canonicalPath).mtimeMs).toBe(beforeCanonicalMtime);
 	});
+	}
 }
 
 test("missing DB → exit 2 + no file/dir created (read-only contract)", async () => {
@@ -300,4 +316,54 @@ test("repair-plan --execute can repair stale FTS without changing misplaced cand
 	expect(JSON.parse(result.stdout).execution.executed).toContain("fts.stale_rows");
 	expect(candidateSnapshot(dir)).toBe(before);
 	expect(statSync(canonicalPath).mtimeMs).toBe(canonicalMtime);
+});
+
+test("fsck reads a page committed only in active WAL without changing live main/wal/shm", async () => {
+	const dir = makeTempDir("cbrain-fsck-bb-active-wal-");
+	const dbPath = join(dir, "brain.sqlite");
+	const seed = new CBrainDB(dbPath);
+	seed.checkpoint();
+	seed.close();
+	const writer = new Database(dbPath);
+	writer.exec("PRAGMA wal_autocheckpoint=0");
+	writer.prepare(
+		"INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+	).run("records/anonymous-wal-only", "record", "Anonymous WAL only", "records/anonymous-wal-only.md", "anonymous-hash");
+	const cfg = writeCfg(dir, dbPath);
+	mkdirSync(join(dir, ".obsidian"));
+	const beforeMain = fileHash(dbPath);
+	const beforeSidecars = sidecarSnapshot(dbPath);
+	expect(existsSync(`${dbPath}-wal`)).toBe(true);
+	expect(existsSync(`${dbPath}-shm`)).toBe(true);
+
+	try {
+		const result = await runFsckCli(["--layer", "vault", "--json"], cfg);
+		expect(result.exitCode).toBe(1);
+		const report = JSON.parse(result.stdout);
+		expect(report.findings).toContainEqual(expect.objectContaining({
+			check: "vault.db_exists_file_missing",
+			count: 1,
+		}));
+		expect(fileHash(dbPath)).toBe(beforeMain);
+		expect(sidecarSnapshot(dbPath)).toBe(beforeSidecars);
+	} finally {
+		writer.close();
+	}
+});
+
+test("unstable or invalid snapshot source fails closed with a fixed path-free CLI error", async () => {
+	const dir = makeTempDir("cbrain-fsck-bb-snapshot-fail-closed-");
+	const dbPath = join(dir, "brain.sqlite");
+	convertToDeleteMode(dbPath);
+	const cfg = writeCfg(dir, dbPath);
+	mkdirSync(`${dbPath}-wal`);
+	writeFileSync(join(`${dbPath}-wal`, "invalid"), "not a WAL file");
+
+	const result = await runFsckCli(["--json"], cfg);
+	expect(result.exitCode).toBe(2);
+	const report = JSON.parse(result.stdout);
+	expect(report.overallStatus).toBe("fail");
+	expect(report.fatalError).toBe("Unable to open a stable read snapshot");
+	expect(result.stdout).not.toContain(dir);
+	expect(result.stdout).not.toContain("not a WAL file");
 });
