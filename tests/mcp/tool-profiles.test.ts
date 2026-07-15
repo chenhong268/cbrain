@@ -86,8 +86,17 @@ describe("isToolAllowedForProfile", () => {
     expect(isToolAllowedForProfile("job", "agent")).toBe(false);
   });
 
-  test("agent does not expose unified profile tool because it includes write/reload actions (#291)", () => {
-    expect(isToolAllowedForProfile("profile", "agent")).toBe(false);
+  test("agent exposes governed unified profile and not its aliases (#335)", () => {
+    expect(isToolAllowedForProfile("profile", "agent")).toBe(true);
+    for (const alias of ["get_profile", "update_profile", "remove_profile", "reload_profile"]) {
+      expect(isToolAllowedForProfile(alias, "agent")).toBe(false);
+    }
+  });
+
+  test("append_page moves to full-only when profile enters the bounded agent surface (#335)", () => {
+    expect(isToolAllowedForProfile("append_page", "agent")).toBe(false);
+    expect(isToolAllowedForProfile("append_page", "full")).toBe(true);
+    expect(TOOL_PROFILE_ALLOWLISTS.agent).toHaveLength(20);
   });
 
   test("agent does not expose unified batch tool because it is bulk/destructive (#292)", () => {

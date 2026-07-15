@@ -28,7 +28,9 @@ const VALID_PROFILES: ReadonlySet<ToolProfile> = new Set(TOOL_PROFILES);
  * Bounded, user-facing surface for daily Agents (Hermes etc.).
  * Deliberately excludes low-level search (query, get_chunks), all admin/ops
  * tools (dream_*, sync, health, watcher_quarantine, relation_audit), all job_*
- * tools, and provenance tools.
+ * tools, and provenance tools. Profile mutation is governed at the handler
+ * layer; `put_page` remains the daily page-update path, so `append_page` stays
+ * outside this bounded surface.
  */
 export const AGENT_ALLOWLIST = [
   "cbrain_recall",
@@ -40,7 +42,7 @@ export const AGENT_ALLOWLIST = [
   "list_pages",
   "get_pages",
   "put_page",
-  "append_page",
+  "profile",
   "resolve_slugs",
   "get_org_tree",
   "graph_query",
