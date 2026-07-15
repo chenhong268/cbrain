@@ -37,6 +37,35 @@ export interface RepairPlanResult {
 	exitCode: 0 | 1 | 2;
 }
 
+export interface LocalDetailsPresentation {
+	output: string;
+	exitCode: 0 | 1 | 2;
+}
+
+export function buildLocalDetailsPresentation(
+	report: FsckReport,
+	localDetails: readonly MisplacedVaultArtifactLocalDetail[],
+	exitCode: 0 | 1 | 2,
+): LocalDetailsPresentation {
+	const incomplete = report.findings.some(
+		(finding) => finding.check === "vault.misplaced_artifact_scan_incomplete",
+	);
+	if (incomplete && localDetails.length === 0) {
+		return {
+			output: "Misplaced artifact inspection incomplete; no local paths are available.",
+			exitCode: 1,
+		};
+	}
+	const lines = [
+		reportToMarkdown(report),
+		"Local-only read-only preview; zero bytes do not prove deletion safety.",
+		...localDetails.map(
+			(detail) => `${detail.classification} ${escapeLocalDetailPath(detail.relativePath)}`,
+		),
+	];
+	return { output: lines.join("\n"), exitCode };
+}
+
 const ALL_LAYERS: FsckLayer[] = ["vault", "sqlite", "fts", "lance"];
 
 export async function runFsck(input: FsckInput): Promise<FsckResult> {
@@ -163,7 +192,10 @@ export function register(program: Command): void {
 				return;
 			}
 
-			const db = new CBrainDB(config.dbPath, { skipMigrate: true });
+			const db = new CBrainDB(config.dbPath, {
+				skipMigrate: true,
+				readonly: opts.repairStaleFts !== true,
+			});
 			try {
 				if (opts.repairStaleFts) {
 					db.cleanupStaleFtsRows();
@@ -182,20 +214,9 @@ export function register(program: Command): void {
 					return;
 				}
 				if (opts.localDetails) {
-					const incomplete = report.findings.some(
-						(finding) => finding.check === "vault.misplaced_artifact_scan_incomplete",
-					);
-					if (incomplete && (localDetails?.length ?? 0) === 0) {
-						console.log("Misplaced artifact inspection incomplete; no local paths are available.");
-						process.exit(1);
-						return;
-					}
-					console.log(reportToMarkdown(report));
-					console.log("Local-only read-only preview; zero bytes do not prove deletion safety.");
-					for (const detail of localDetails ?? []) {
-						console.log(`${detail.classification} ${escapeLocalDetailPath(detail.relativePath)}`);
-					}
-					process.exit(exitCode);
+					const presentation = buildLocalDetailsPresentation(report, localDetails ?? [], exitCode);
+					console.log(presentation.output);
+					process.exit(presentation.exitCode);
 					return;
 				}
 				emit(report, exitCode);
@@ -234,7 +255,11 @@ export function register(program: Command): void {
 				return;
 			}
 
-			const db = new CBrainDB(config.dbPath, { skipMigrate: true });
+			const db = new CBrainDB(config.dbPath, {
+				skipMigrate: true,
+				// --verify wins over --execute in the established command flow below.
+				readonly: opts.execute !== true || opts.verify === true,
+			});
 			try {
 				const input: FsckInput = {
 					vaultPath: config.vaultPath,

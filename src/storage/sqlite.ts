@@ -264,8 +264,18 @@ export class CBrainDB {
    * be able to open it and clean orphan rows. This is a repair-only escape
    * hatch: it does not initialize new schema. Callers must only use methods that
    * can operate against the already-existing DB shape.
+   * opts.readonly: open the existing database through SQLite's native read-only
+   * mode. Read-only implies no migration, parent creation, journal-mode switch,
+   * or connection PRAGMA that could change persistent database state.
    */
-  constructor(dbPath: string, opts: { skipMigrate?: boolean } = {}) {
+  constructor(dbPath: string, opts: { skipMigrate?: boolean; readonly?: boolean } = {}) {
+    if (opts.readonly) {
+      if (opts.skipMigrate === false) {
+        throw new Error("readonly CBrainDB requires skipMigrate (omit it or set true)");
+      }
+      this.db = new Database(dbPath, { readonly: true });
+      return;
+    }
     if (!existsSync(dirname(dbPath))) {
       mkdirSync(dirname(dbPath), { recursive: true });
     }

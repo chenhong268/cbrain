@@ -1,9 +1,10 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createHash } from "node:crypto";
+import { Database } from "bun:sqlite";
 
 const dirs: string[] = [];
 
@@ -49,14 +50,87 @@ function writeCfg(dir: string, dbPath: string): string {
 }
 
 function candidateSnapshot(dir: string): string {
-	return readdirSync(dir).filter((name) => name === "records 2" || name === "anonymous-empty.md").sort().map((name) => {
-		const stats = statSync(join(dir, name));
-		return `${name}:${stats.size}:${stats.mtimeMs}`;
-	}).join("|");
+	const lines: string[] = [];
+	const walk = (path: string, relativePath: string): void => {
+		const stats = lstatSync(path);
+		if (stats.isDirectory()) {
+			lines.push(`${relativePath}:directory:${stats.size}:${stats.mtimeMs}`);
+			for (const name of readdirSync(path).sort()) walk(join(path, name), `${relativePath}/${name}`);
+			return;
+		}
+		const kind = stats.isFile() ? "file" : stats.isSymbolicLink() ? "symlink" : "special";
+		const contentHash = stats.isFile() ? fileHash(path) : "not-opened";
+		lines.push(`${relativePath}:${kind}:${stats.size}:${stats.mtimeMs}:${contentHash}`);
+	};
+	for (const name of ["anonymous-empty.md", "records 2"]) {
+		walk(join(dir, name), name);
+	}
+	return lines.sort().join("|");
 }
 
 function fileHash(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function convertToDeleteMode(dbPath: string): void {
+	const writable = new CBrainDB(dbPath);
+	writable.checkpoint();
+	writable.rawDb.exec("PRAGMA journal_mode = DELETE");
+	writable.close();
+}
+
+function journalMode(dbPath: string): string {
+	const native = new Database(dbPath, { readonly: true });
+	try {
+		return (native.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode;
+	} finally {
+		native.close();
+	}
+}
+
+function sidecarSnapshot(dbPath: string): string {
+	return ["-wal", "-shm", "-journal"].map((suffix) => {
+		const path = `${dbPath}${suffix}`;
+		if (!existsSync(path)) return `${suffix}:missing`;
+		const stats = statSync(path);
+		return `${suffix}:${stats.size}:${stats.mtimeMs}:${fileHash(path)}`;
+	}).join("|");
+}
+
+for (const scenario of [
+	{ name: "fsck default", command: "fsck", args: [] },
+	{ name: "fsck json", command: "fsck", args: ["--json"] },
+	{ name: "fsck local details", command: "fsck", args: ["--layer", "vault", "--local-details"] },
+	{ name: "repair-plan dry-run", command: "repair-plan", args: ["--json"] },
+	{ name: "repair-plan verify", command: "repair-plan", args: ["--verify", "--json"] },
+	{ name: "repair-plan verify precedence", command: "repair-plan", args: ["--verify", "--execute", "--json"] },
+] as const) {
+	test(`${scenario.name} preserves DELETE-mode DB bytes and sidecars`, async () => {
+		const dir = makeTempDir("cbrain-fsck-bb-delete-mode-");
+		const dbPath = join(dir, "brain.sqlite");
+		convertToDeleteMode(dbPath);
+		const cfg = writeCfg(dir, dbPath);
+		mkdirSync(join(dir, ".obsidian"));
+		writeFileSync(join(dir, "anonymous-empty.md"), "");
+		mkdirSync(join(dir, "records 2", "nested"), { recursive: true });
+		writeFileSync(join(dir, "records 2", "nested", "anonymous-content.md"), "anonymous candidate body");
+		mkdirSync(join(dir, "vault", "records"), { recursive: true });
+		const canonicalPath = join(dir, "vault", "records", "anonymous-canonical.md");
+		writeFileSync(canonicalPath, "anonymous canonical body without frontmatter");
+		const beforeHash = fileHash(dbPath);
+		const beforeSidecars = sidecarSnapshot(dbPath);
+		const beforeCandidates = candidateSnapshot(dir);
+		const beforeCanonicalMtime = statSync(canonicalPath).mtimeMs;
+		expect(journalMode(dbPath)).toBe("delete");
+
+		const result = await runCli(scenario.command, [...scenario.args], cfg);
+		expect(result.exitCode).not.toBe(2);
+		expect(journalMode(dbPath)).toBe("delete");
+		expect(fileHash(dbPath)).toBe(beforeHash);
+		expect(sidecarSnapshot(dbPath)).toBe(beforeSidecars);
+		expect(candidateSnapshot(dir)).toBe(beforeCandidates);
+		expect(statSync(canonicalPath).mtimeMs).toBe(beforeCanonicalMtime);
+	});
 }
 
 test("missing DB → exit 2 + no file/dir created (read-only contract)", async () => {
@@ -196,16 +270,34 @@ test("repair-plan --execute can repair stale FTS without changing misplaced cand
 	const dir = makeTempDir("cbrain-fsck-bb-repair-candidate-");
 	const dbPath = join(dir, "brain.sqlite");
 	const db = new CBrainDB(dbPath);
+	db.insertPage({
+		slug: "records/anonymous-canonical",
+		type: "record",
+		title: "Anonymous canonical",
+		filePath: "records/anonymous-canonical.md",
+		contentHash: "anonymous-hash",
+	});
+	db.insertChunk("records/anonymous-canonical", 0, "anonymous canonical body");
+	db.ftsInsert("records/anonymous-canonical", "anonymous canonical body");
 	db.ftsInsert("anonymous-stale", "anonymous stale body");
 	db.close();
 	const cfg = writeCfg(dir, dbPath);
 	mkdirSync(join(dir, ".obsidian"));
-	mkdirSync(join(dir, "records 2"));
+	mkdirSync(join(dir, "records 2", "nested"), { recursive: true });
+	writeFileSync(join(dir, "records 2", "nested", "anonymous-content.md"), "anonymous candidate body");
 	writeFileSync(join(dir, "anonymous-empty.md"), "");
+	mkdirSync(join(dir, "vault", "records"), { recursive: true });
+	const canonicalPath = join(dir, "vault", "records", "anonymous-canonical.md");
+	writeFileSync(
+		canonicalPath,
+		"---\nslug: records/anonymous-canonical\ntitle: Anonymous canonical\ntype: record\n---\n\nanonymous canonical body\n",
+	);
 	const before = candidateSnapshot(dir);
+	const canonicalMtime = statSync(canonicalPath).mtimeMs;
 
 	const result = await runCli("repair-plan", ["--execute", "--json"], cfg);
 	expect(result.exitCode).toBe(1);
 	expect(JSON.parse(result.stdout).execution.executed).toContain("fts.stale_rows");
 	expect(candidateSnapshot(dir)).toBe(before);
+	expect(statSync(canonicalPath).mtimeMs).toBe(canonicalMtime);
 });

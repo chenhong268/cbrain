@@ -1,11 +1,14 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { lstatSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { runFsck } from "../../src/cli/commands/fsck.js";
+import { buildLocalDetailsPresentation, runFsck } from "../../src/cli/commands/fsck.js";
 import type { FsckLayer } from "../../src/core/fsck/types.js";
 import { resolveTrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
+import * as misplacedArtifacts from "../../src/core/maintenance/misplaced-vault-artifacts.js";
+import { probeVault } from "../../src/core/fsck/vault-probe.js";
+import { buildReport } from "../../src/core/fsck/report.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -139,6 +142,18 @@ describe("runFsck --layer filter", () => {
 });
 
 describe("runFsck — misplaced artifact projection", () => {
+	it("invokes the misplaced inspector exactly once per vault run", async () => {
+		const spy = spyOn(misplacedArtifacts, "inspectMisplacedVaultArtifacts");
+		const db = freshDb();
+		try {
+			await runFsck({ vaultPath, lancePath, db, layer: "vault" });
+			expect(spy).toHaveBeenCalledTimes(1);
+		} finally {
+			spy.mockRestore();
+			db.close();
+		}
+	});
+
 	it("returns findings and local details from the same vault inspection", async () => {
 		mkdirSync(join(tmpDir, ".obsidian"), { recursive: true });
 		writeFileSync(join(tmpDir, "anonymous-empty.md"), "");
@@ -166,6 +181,48 @@ describe("runFsck — misplaced artifact projection", () => {
 			db.close();
 			rmSync(join(tmpDir, "anonymous-empty.md"), { force: true });
 			rmSync(join(tmpDir, ".obsidian"), { recursive: true, force: true });
+		}
+	});
+
+	it("identity replacement produces one fixed path-free local diagnostic and exit 1", () => {
+		const root = mkdtempSync(join(tmpdir(), "cbrain-fsck-identity-output-"));
+		const localVault = join(root, "vault");
+		mkdirSync(join(root, ".obsidian"));
+		mkdirSync(localVault);
+		writeFileSync(join(root, "anonymous-private.md"), "");
+		const boundary = resolveTrustedVaultBoundary({ configRoot: root, vaultPath: localVault });
+		expect(boundary).toBeDefined();
+		const db = new CBrainDB(join(root, "brain.sqlite"));
+		try {
+			const inspection = misplacedArtifacts.inspectMisplacedVaultArtifacts(
+				boundary,
+				{ includeLocalDetails: true },
+				{
+					lstatSync(path) {
+						return path === boundary!.vaultPath
+							? lstatSync(boundary!.configRoot)
+							: lstatSync(path);
+					},
+				},
+			);
+			expect(inspection.scan.unreadableCount).toBeGreaterThan(0);
+			expect(inspection.localDetails).toEqual([]);
+			const report = buildReport(
+				probeVault(localVault, db, inspection.scan),
+				"unchecked",
+				"2026-07-15T00:00:00.000Z",
+			);
+			const presentation = buildLocalDetailsPresentation(report, inspection.localDetails, 1);
+			expect(presentation).toEqual({
+				output: "Misplaced artifact inspection incomplete; no local paths are available.",
+				exitCode: 1,
+			});
+			expect(presentation.output.split("\n")).toHaveLength(1);
+			expect(presentation.output).not.toContain("anonymous-private.md");
+			expect(presentation.output).not.toContain(root);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 });
