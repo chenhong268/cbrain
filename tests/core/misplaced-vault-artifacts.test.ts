@@ -25,27 +25,40 @@ const INSPECTOR_SOURCE = join(
   PROJECT_DIR,
   "src/core/maintenance/misplaced-vault-artifacts.ts",
 );
-const ALLOWED_INSPECTOR_FS_IMPORTS = new Set([
-  "lstatSync",
-  "readdirSync",
-  "realpathSync",
+const ALLOWED_INSPECTOR_RUNTIME_IMPORTS = new Map([
+  ["node:fs", new Set(["lstatSync", "readdirSync", "realpathSync"])],
+  ["node:path", new Set(["basename", "dirname", "join", "resolve"])],
 ]);
-const ALLOWED_INSPECTOR_FS_TYPES = new Set(["Stats"]);
-const FS_MODULE_PATTERN = /^(?:node:)?fs(?:\/promises)?$/;
-const MODULE_MODULE_PATTERN = /^(?:node:)?module$/;
+const ALLOWED_INSPECTOR_TYPE_IMPORTS = new Map([
+  ["node:fs", new Set(["Stats"])],
+  ["node:path", new Set<string>()],
+]);
+const FORBIDDEN_CAPABILITY_IDENTIFIERS = new Set([
+  "Bun",
+  "Deno",
+  "Function",
+  "createRequire",
+  "eval",
+  "getBuiltinModule",
+  "globalThis",
+  "module",
+  "process",
+  "require",
+]);
 
-interface InspectorFsAudit {
-  runtimeImports: string[];
-  typeImports: string[];
+interface InspectorCapabilityAudit {
+  runtimeImports: Array<{ module: string; name: string }>;
+  typeImports: Array<{ module: string; name: string }>;
   violations: string[];
 }
 
 /**
- * Static regression contract for this deliberately metadata-only inspector.
- * This is an allowlist, not a general-purpose JavaScript security sandbox.
+ * Static regression contract for this deliberately narrow inspector. It is a
+ * normal-review guard against capability creep and common loader bypasses, not
+ * a claim that arbitrary obfuscated JavaScript can be sandboxed statically.
  */
-function auditInspectorFsContract(source: string): InspectorFsAudit {
-  const result: InspectorFsAudit = {
+function auditInspectorCapabilityContract(source: string): InspectorCapabilityAudit {
+  const result: InspectorCapabilityAudit = {
     runtimeImports: [],
     typeImports: [],
     violations: [],
@@ -65,97 +78,93 @@ function auditInspectorFsContract(source: string): InspectorFsAudit {
     return undefined;
   };
 
-  const rejectDynamicLoader = (shape: string, argument: ts.Node | undefined): void => {
+  const describeLoaderArgument = (argument: ts.Node | undefined): string => {
     const moduleName = literalModuleName(argument);
-    result.violations.push(`${shape}:${moduleName ?? "computed"}`);
+    return moduleName ?? "computed";
+  };
+
+  const inspectAllowedImport = (
+    moduleName: string,
+    clause: ts.ImportClause | undefined,
+  ): void => {
+    if (!clause) {
+      result.violations.push(`${moduleName} side-effect import`);
+      return;
+    }
+    if (clause.name) result.violations.push(`${moduleName} default import`);
+    const bindings = clause.namedBindings;
+    if (!bindings) {
+      result.violations.push(`${moduleName} import without named bindings`);
+      return;
+    }
+    if (ts.isNamespaceImport(bindings)) {
+      result.violations.push(`${moduleName} namespace import`);
+      return;
+    }
+
+    for (const element of bindings.elements) {
+      // Inspect the imported name, not the local alias.
+      const importedName = (element.propertyName ?? element.name).text;
+      const isTypeOnly = clause.isTypeOnly || element.isTypeOnly;
+      const imports = isTypeOnly ? result.typeImports : result.runtimeImports;
+      const allowed = isTypeOnly
+        ? ALLOWED_INSPECTOR_TYPE_IMPORTS.get(moduleName)
+        : ALLOWED_INSPECTOR_RUNTIME_IMPORTS.get(moduleName);
+      imports.push({ module: moduleName, name: importedName });
+      if (!allowed?.has(importedName)) {
+        result.violations.push(
+          `${moduleName} ${isTypeOnly ? "type" : "runtime"}:${importedName}`,
+        );
+      }
+    }
   };
 
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node)) {
       const moduleName = literalModuleName(node.moduleSpecifier);
-      if (moduleName === "node:fs") {
-        const clause = node.importClause;
-        if (!clause) {
-          result.violations.push("node:fs side-effect import");
-        } else {
-          if (clause.name) result.violations.push("node:fs default import");
-          const bindings = clause.namedBindings;
-          if (!bindings) {
-            result.violations.push("node:fs import without named bindings");
-          } else if (ts.isNamespaceImport(bindings)) {
-            result.violations.push("node:fs namespace import");
-          } else {
-            for (const element of bindings.elements) {
-              // Inspect the imported name, not the local alias.
-              const importedName = (element.propertyName ?? element.name).text;
-              const isTypeOnly = clause.isTypeOnly || element.isTypeOnly;
-              if (isTypeOnly) {
-                result.typeImports.push(importedName);
-                if (!ALLOWED_INSPECTOR_FS_TYPES.has(importedName)) {
-                  result.violations.push(`node:fs type:${importedName}`);
-                }
-              } else {
-                result.runtimeImports.push(importedName);
-                if (!ALLOWED_INSPECTOR_FS_IMPORTS.has(importedName)) {
-                  result.violations.push(`node:fs runtime:${importedName}`);
-                }
-              }
-            }
-          }
-        }
-      } else if (moduleName && FS_MODULE_PATTERN.test(moduleName)) {
-        result.violations.push(`forbidden fs module:${moduleName}`);
-      } else if (moduleName && MODULE_MODULE_PATTERN.test(moduleName)) {
-        const bindings = node.importClause?.namedBindings;
-        if (!bindings || ts.isNamespaceImport(bindings) || node.importClause?.name) {
-          result.violations.push(`node:module broad import:${moduleName}`);
-        } else if (
-          ts.isNamedImports(bindings)
-          && bindings.elements.some(
-            (element) => (element.propertyName ?? element.name).text === "createRequire",
-          )
-        ) {
-          result.violations.push(`createRequire import:${moduleName}`);
-        }
+      if (!moduleName) {
+        result.violations.push("non-literal static import");
+      } else if (ALLOWED_INSPECTOR_RUNTIME_IMPORTS.has(moduleName)) {
+        inspectAllowedImport(moduleName, node.importClause);
+      } else {
+        result.violations.push(`external import:${moduleName}`);
       }
     } else if (ts.isExportDeclaration(node)) {
       const moduleName = literalModuleName(node.moduleSpecifier);
-      if (moduleName && FS_MODULE_PATTERN.test(moduleName)) {
-        result.violations.push(`fs re-export:${moduleName}`);
-      } else if (moduleName && MODULE_MODULE_PATTERN.test(moduleName)) {
-        const exports = node.exportClause;
-        if (!exports) {
-          result.violations.push(`node:module broad re-export:${moduleName}`);
-        } else if (
-          exports
-          && ts.isNamedExports(exports)
-          && exports.elements.some(
-            (element) => (element.propertyName ?? element.name).text === "createRequire",
-          )
-        ) {
-          result.violations.push(`createRequire re-export:${moduleName}`);
-        }
+      if (node.moduleSpecifier) {
+        result.violations.push(`external re-export:${moduleName ?? "non-literal"}`);
       }
     } else if (ts.isCallExpression(node)) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-        rejectDynamicLoader("dynamic import", node.arguments[0]);
-      } else if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
-        rejectDynamicLoader("require", node.arguments[0]);
+        result.violations.push(
+          `dynamic import:${describeLoaderArgument(node.arguments[0])}`,
+        );
       } else if (
         ts.isPropertyAccessExpression(node.expression)
-        && node.expression.name.text === "require"
+        && node.expression.expression.getText(sourceFile) === "Reflect"
+        && node.expression.name.text === "get"
       ) {
-        rejectDynamicLoader("property require", node.arguments[0]);
+        const reflectedKey = literalModuleName(node.arguments[1]);
+        if (reflectedKey && FORBIDDEN_CAPABILITY_IDENTIFIERS.has(reflectedKey)) {
+          result.violations.push(`reflective capability:${reflectedKey}`);
+        }
       }
     } else if (ts.isImportEqualsDeclaration(node)) {
       const reference = node.moduleReference;
-      if (ts.isExternalModuleReference(reference)) {
-        rejectDynamicLoader("import equals require", reference.expression);
+      const moduleName = ts.isExternalModuleReference(reference)
+        ? literalModuleName(reference.expression)
+        : undefined;
+      result.violations.push(`import equals:${moduleName ?? "computed"}`);
+    } else if (
+      ts.isIdentifier(node)
+      && FORBIDDEN_CAPABILITY_IDENTIFIERS.has(node.text)
+    ) {
+      result.violations.push(`forbidden capability identifier:${node.text}`);
+    } else if (ts.isElementAccessExpression(node)) {
+      const key = literalModuleName(node.argumentExpression);
+      if (key && FORBIDDEN_CAPABILITY_IDENTIFIERS.has(key)) {
+        result.violations.push(`forbidden computed capability:${key}`);
       }
-    } else if (ts.isIdentifier(node) && node.text === "require") {
-      // Catch aliasing and indirect invocation such as `(0, require)(...)` and
-      // `Reflect.apply(require, ...)`, not only a bare require(...) callee.
-      result.violations.push("require identifier");
     }
     ts.forEachChild(node, visit);
   };
@@ -184,25 +193,37 @@ afterEach(() => {
 });
 
 describe("metadata-only source contract", () => {
-  test("allows only the three required node:fs metadata primitives, including aliases", () => {
-    const allowed = auditInspectorFsContract(`
+  test("allows only the required node:fs metadata and node:path primitives, including aliases", () => {
+    const allowed = auditInspectorCapabilityContract(`
       import {
         lstatSync as inspectEntry,
         readdirSync as listRoot,
         realpathSync as resolvePhysicalPath,
         type Stats,
       } from "node:fs";
+      import {
+        basename as leafName,
+        dirname as parentName,
+        join as joinPath,
+        resolve as resolvePath,
+      } from "node:path";
     `);
     expect(allowed.violations).toEqual([]);
-    expect(allowed.runtimeImports.sort()).toEqual([
-      "lstatSync",
-      "readdirSync",
-      "realpathSync",
+    expect(
+      allowed.runtimeImports.map(({ module, name }) => `${module}:${name}`).sort(),
+    ).toEqual([
+      "node:fs:lstatSync",
+      "node:fs:readdirSync",
+      "node:fs:realpathSync",
+      "node:path:basename",
+      "node:path:dirname",
+      "node:path:join",
+      "node:path:resolve",
     ]);
-    expect(allowed.typeImports).toEqual(["Stats"]);
+    expect(allowed.typeImports).toEqual([{ module: "node:fs", name: "Stats" }]);
   });
 
-  test("rejects body reads, link-following stat, broad imports, and loader bypasses", () => {
+  test("rejects capability creep, body reads, and common loader/global bypasses", () => {
     const forbiddenSources = [
       'import { readFileSync } from "node:fs";',
       'import { readFileSync as lstatSync } from "node:fs";',
@@ -212,12 +233,24 @@ describe("metadata-only source contract", () => {
       'import { statSync as lstatSync } from "node:fs";',
       'import { open } from "node:fs/promises";',
       'import { readFileSync } from "fs";',
+      'import { basename } from "path";',
+      'import { sep } from "node:path";',
+      'import path from "node:path";',
+      'import * as path from "node:path";',
+      'import "node:path";',
+      'import type { ParsedPath } from "node:path";',
+      'import { inspect } from "node:util";',
+      'import { load } from "./filesystem-adapter.js";',
+      'import type { Adapter } from "./filesystem-adapter.js";',
       'import fs from "node:fs";',
       'import * as fs from "node:fs";',
       'import "node:fs";',
       'export { readFileSync } from "node:fs";',
+      'export { basename } from "node:path";',
+      'export * from "./filesystem-adapter.js";',
       'export * from "node:fs";',
       'await import("node:fs");',
+      'await import("node:path");',
       'const specifier = "node:fs"; await import(specifier);',
       'require("node:fs");',
       'const load = require; load("node:fs");',
@@ -227,10 +260,21 @@ describe("metadata-only source contract", () => {
       'import fs = require("node:fs");',
       'import { createRequire as loader } from "node:module";',
       'import * as moduleApi from "node:module";',
+      'process.getBuiltinModule("node:fs").readFileSync("entry.md");',
+      'process["getBuiltinModule"]("node:fs")["readFileSync"]("entry.md");',
+      'this["process"]["getBuiltinModule"]("node:fs");',
+      'Reflect.get(this, "process");',
+      'Bun.file("entry.md");',
+      'Deno.readTextFile("entry.md");',
+      'globalThis.process.getBuiltinModule("node:fs");',
+      'eval("load filesystem module");',
+      '(0, eval)("load filesystem module");',
+      'Function("return filesystem module")();',
+      'new Function("return filesystem module")();',
     ];
 
     for (const source of forbiddenSources) {
-      const audit = auditInspectorFsContract(source);
+      const audit = auditInspectorCapabilityContract(source);
       expect(
         audit.violations.length,
         `expected AST guard to reject: ${source}`,
@@ -240,14 +284,20 @@ describe("metadata-only source contract", () => {
 
   test("the production inspector preserves the exact metadata-only allowlist", () => {
     const source = readFileSync(INSPECTOR_SOURCE, "utf8");
-    const audit = auditInspectorFsContract(source);
+    const audit = auditInspectorCapabilityContract(source);
     expect(audit.violations).toEqual([]);
-    expect(audit.runtimeImports.sort()).toEqual([
-      "lstatSync",
-      "readdirSync",
-      "realpathSync",
+    expect(
+      audit.runtimeImports.map(({ module, name }) => `${module}:${name}`).sort(),
+    ).toEqual([
+      "node:fs:lstatSync",
+      "node:fs:readdirSync",
+      "node:fs:realpathSync",
+      "node:path:basename",
+      "node:path:dirname",
+      "node:path:join",
+      "node:path:resolve",
     ]);
-    expect(audit.typeImports).toEqual(["Stats"]);
+    expect(audit.typeImports).toEqual([{ module: "node:fs", name: "Stats" }]);
   });
 });
 
