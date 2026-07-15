@@ -1,10 +1,11 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { HealthChecker } from "../../src/core/maintenance/health.js";
 import { Logger } from "../../src/core/logger.js";
 import { resolveTrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
+import * as misplacedArtifacts from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 describe("HealthChecker", () => {
   const testDir = "/tmp/cbrain-test-health";
@@ -330,6 +331,19 @@ describe("HealthChecker", () => {
       const dimension = report.dimensions.find((item) => item.name === "文件系统卫生");
 
       expect(dimension).toEqual({ name: "文件系统卫生", status: "pass", issues: [] });
+    });
+
+    test("invokes the production inspector exactly once on every health run", async () => {
+      const inspectorSpy = spyOn(misplacedArtifacts, "inspectMisplacedVaultArtifacts");
+      try {
+        await checker.checkAll();
+        expect(inspectorSpy).toHaveBeenCalledTimes(1);
+
+        await checker.checkAll();
+        expect(inspectorSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        inspectorSpy.mockRestore();
+      }
     });
 
     test("emits one aggregate medium issue per nonzero category with stable code identity", async () => {
