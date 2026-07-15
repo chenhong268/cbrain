@@ -174,6 +174,13 @@ enabled: true
 user:
   id: test-agent-user
 entries:
+  - id: module-open-entry
+    type: habit
+    category: work
+    scope: open
+    content: MODULE_OPEN_CONTENT_SENTINEL
+    source: explicit
+    updated_at: 2026-07-15
   - id: scoped-entry
     type: context
     category: work
@@ -301,15 +308,15 @@ describe.serial("daily Agent Profile real MCP handler", () => {
     };
 
     expect(result.isError).toBeFalsy();
-    expect(body.raw.entries.map((entry) => entry.id)).toEqual(["open-entry"]);
+    expect(body.raw.entries.map((entry) => entry.id)).toEqual(["open-entry", "module-open-entry"]);
     expect(body.raw.meta).toEqual({
-      total: 1,
-      filtered: 1,
+      total: 2,
+      filtered: 2,
       loaded_modules: [],
       scope: "open",
     });
-    expect(body.summary).toMatchObject({ status: "ok", count: 1 });
-    expect(body.display).toContain("共 1 条");
+    expect(body.summary).toMatchObject({ status: "ok", count: 2 });
+    expect(body.display).toContain("共 2 条");
 
     const serialized = JSON.stringify(body);
     for (const hidden of [
@@ -338,6 +345,114 @@ describe.serial("daily Agent Profile real MCP handler", () => {
     expect(readFileSync(profilePath, "utf-8")).toContain(VALID_AGENT_UPDATE.id);
   });
 
+  test("updates an existing open module entry without leaking its module provenance", async () => {
+    const mainBefore = readFileSync(profilePath);
+    const moduleBefore = readFileSync(modulePath, "utf-8");
+    const update = {
+      id: "module-open-entry",
+      type: "habit" as const,
+      category: "work" as const,
+      scope: "open" as const,
+      content: "UPDATED_MODULE_OPEN_CONTENT_SENTINEL",
+      source: "explicit" as const,
+    };
+
+    const result = await client.callTool({
+      name: "profile",
+      arguments: { action: "update", entries: [update] },
+    });
+    const body = parseToolBody(result as { content: unknown[] }) as {
+      raw: { updated: string[]; count: number };
+    };
+
+    expect(result.isError).toBeFalsy();
+    expect(body.raw).toEqual({ updated: [update.id], count: 1 });
+    expect(profile.getEntry(update.id)).toMatchObject(update);
+    expect(readFileSync(modulePath, "utf-8")).toContain(update.content);
+    expect(readFileSync(modulePath, "utf-8")).not.toBe(moduleBefore);
+    expect(readFileSync(profilePath).equals(mainBefore)).toBe(true);
+
+    const serialized = JSON.stringify(result);
+    for (const hidden of ["module-alpha", root, modulePath]) {
+      expect(serialized).not.toContain(hidden);
+    }
+    const moduleAfterUpdate = readFileSync(modulePath);
+
+    const rejected = await client.callTool({
+      name: "profile",
+      arguments: {
+        action: "update",
+        entries: [{ ...update, source: "observed" }],
+      },
+    });
+    const rejectedBody = parseToolBody(rejected as { content: unknown[] });
+    expect(rejected.isError).toBe(true);
+    for (const hidden of ["module-alpha", root, modulePath]) {
+      expect(JSON.stringify(rejected)).not.toContain(hidden);
+    }
+    expect(rejectedBody).toEqual({
+      error: {
+        code: "PROFILE_UPDATE_INVALID",
+        message: POLICY_MESSAGES.PROFILE_UPDATE_INVALID,
+      },
+    });
+    expect(readFileSync(modulePath).equals(moduleAfterUpdate)).toBe(true);
+    expect(readFileSync(profilePath).equals(mainBefore)).toBe(true);
+  });
+
+  test("persists one explicit open batch covering all four Profile entry types", async () => {
+    const entries = [
+      {
+        id: "batch-preference",
+        type: "preference" as const,
+        category: "communication" as const,
+        scope: "open" as const,
+        content: "BATCH_PREFERENCE_SENTINEL",
+        source: "explicit" as const,
+      },
+      {
+        id: "batch-constraint",
+        type: "constraint" as const,
+        category: "general" as const,
+        scope: "open" as const,
+        content: "BATCH_CONSTRAINT_SENTINEL",
+        source: "explicit" as const,
+      },
+      {
+        id: "batch-context",
+        type: "context" as const,
+        category: "work" as const,
+        scope: "open" as const,
+        content: "BATCH_CONTEXT_SENTINEL",
+        source: "explicit" as const,
+      },
+      {
+        id: "batch-habit",
+        type: "habit" as const,
+        category: "interests" as const,
+        scope: "open" as const,
+        content: "BATCH_HABIT_SENTINEL",
+        source: "explicit" as const,
+      },
+    ];
+
+    const result = await client.callTool({
+      name: "profile",
+      arguments: { action: "update", entries },
+    });
+    const body = parseToolBody(result as { content: unknown[] }) as {
+      raw: { updated: string[]; count: number };
+    };
+
+    expect(result.isError).toBeFalsy();
+    expect(body.raw).toEqual({ updated: entries.map((entry) => entry.id), count: 4 });
+    for (const entry of entries) expect(profile.getEntry(entry.id)).toMatchObject(entry);
+
+    const persisted = new ProfileManager(root);
+    persisted.load();
+    for (const entry of entries) expect(persisted.getEntry(entry.id)).toMatchObject(entry);
+  });
+
   test("rejects forbidden actions and invalid updates with stable errors and zero side effects", async () => {
     const yamlBefore = readFileSync(profilePath);
     const moduleBefore = readFileSync(modulePath);
@@ -351,6 +466,7 @@ describe.serial("daily Agent Profile real MCP handler", () => {
       "scoped-entry",
       "SCOPED_CONTENT_SENTINEL",
       "module-alpha",
+      "MODULE_OPEN_CONTENT_SENTINEL",
       "REJECTED_UPDATE_SENTINEL",
     ];
 

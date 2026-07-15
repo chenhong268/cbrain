@@ -12,7 +12,7 @@
 
 - Issue #335 only; parent #333 and dependent #336 remain separate.
 - Daily `agent` tool count MUST stay `<= 20`.
-- Daily get exposes only `scope: "open"`, including counts and module metadata.
+- Daily get entries, counts, display, and summary derive only from `scope: "open"`; module metadata is not exposed.
 - Daily update accepts only a non-empty whole-batch-valid set of `source: "explicit"`, `scope: "open"` entries.
 - Existing hidden target IDs fail generically before all writes.
 - Daily remove/reload fail closed; legacy aliases stay outside the daily surface.
