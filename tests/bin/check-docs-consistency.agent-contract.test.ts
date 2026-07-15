@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   checkAgentContractTools,
+  checkAgentFacingRoutingProfile,
   checkAgentWorkflowContract,
   checkIngestPageTypeDocs,
   checkToolDescriptions,
@@ -113,6 +114,66 @@ describe("checkAgentContractTools (#316)", () => {
   test("clean skills dir passes", () => {
     const dir = withSkills({ "a.md": "- 首选 cbrain_recall\n" });
     expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(false);
+  });
+});
+
+describe("checkAgentFacingRoutingProfile (#343)", () => {
+  const row = (patch: Record<string, unknown> = {}) => JSON.stringify({
+    input: "匿名输入Sentinel",
+    category: "search",
+    expected_tool: "cbrain_recall",
+    expected_args: {},
+    forbidden_tools: [],
+    forbidden_output_terms: [],
+    ...patch,
+  });
+
+  test("accepts allowlisted expected_tool and required_sequence", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({
+        expected_tool: "graph_query",
+        required_sequence: ["resolve_slugs", "graph_query"],
+      })}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(false);
+  });
+
+  test("rejects an unavailable Agent-facing expected_tool without echoing input", () => {
+    const dir = withSkills({ "agent-facing.routing-eval.jsonl": `${row({ expected_tool: "query" })}\n` });
+    const results = checkAgentFacingRoutingProfile(dir);
+    expect(fails(results)).toBe(true);
+    expect(results.some((x) => x.detail.includes("query"))).toBe(true);
+    expect(JSON.stringify(results)).not.toContain("匿名输入Sentinel");
+  });
+
+  test("rejects invalid JSON and unavailable required_sequence members", () => {
+    const invalid = withSkills({ "agent-facing.routing-eval.jsonl": "{bad json\n" });
+    expect(fails(checkAgentFacingRoutingProfile(invalid))).toBe(true);
+    const sequence = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({ required_sequence: ["cbrain_recall", "query"] })}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(sequence))).toBe(true);
+  });
+
+  test("accepts only the exact full-profile no-tool outcome", () => {
+    const valid = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({
+        expected_tool: null,
+        expected_outcome: "requires_full_profile",
+        required_profile: "full",
+        forbidden_tools: ["run_discovery", "read_discoveries"],
+      })}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(valid))).toBe(false);
+
+    for (const patch of [
+      { expected_tool: null },
+      { expected_tool: null, expected_outcome: "requires_full_profile", required_profile: "maintenance" },
+      { expected_tool: null, expected_outcome: "requires_full_profile", required_profile: "full", forbidden_tools: ["run_discovery"] },
+    ]) {
+      const dir = withSkills({ "agent-facing.routing-eval.jsonl": `${row(patch)}\n` });
+      expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
+    }
   });
 });
 

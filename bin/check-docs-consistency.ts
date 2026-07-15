@@ -767,6 +767,73 @@ export function checkAgentContractTools(tools: Set<string>, skillsDir: string): 
   return out;
 }
 
+export function checkAgentFacingRoutingProfile(
+  skillsDir: string,
+  agentAllowlist: readonly string[] = AGENT_ALLOWLIST,
+): CheckResult[] {
+  const file = join(skillsDir, "agent-facing.routing-eval.jsonl");
+  if (!existsSync(file)) {
+    return [{ check: "agent-facing profile", passed: false, detail: "agent-facing routing fixture missing" }];
+  }
+  const allowed = new Set(agentAllowlist);
+  const failures: CheckResult[] = [];
+  const lines = readFileSync(file, "utf-8").split("\n");
+
+  lines.forEach((line, index) => {
+    if (!line.trim()) return;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "invalid JSON" });
+      return;
+    }
+
+    if (row.expected_tool === null) {
+      const forbidden = Array.isArray(row.forbidden_tools) ? row.forbidden_tools : [];
+      const validBoundary =
+        row.expected_outcome === "requires_full_profile" &&
+        row.required_profile === "full" &&
+        forbidden.includes("run_discovery") &&
+        forbidden.includes("read_discoveries");
+      if (!validBoundary) failures.push({
+        check: `agent-facing profile line ${index + 1}`,
+        passed: false,
+        detail: "invalid requires_full_profile contract",
+      });
+      return;
+    }
+
+    if (typeof row.expected_tool !== "string" || !row.expected_tool.trim()) {
+      failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "expected_tool must be non-empty or explicit no-tool boundary" });
+      return;
+    }
+    if (!allowed.has(row.expected_tool)) failures.push({
+      check: `agent-facing profile line ${index + 1}`,
+      passed: false,
+      detail: `expected_tool unavailable in agent profile: ${row.expected_tool}`,
+    });
+
+    if (row.required_sequence !== undefined && !Array.isArray(row.required_sequence)) {
+      failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "required_sequence must be an array" });
+      return;
+    }
+    for (const tool of (row.required_sequence ?? []) as unknown[]) {
+      if (typeof tool !== "string" || !allowed.has(tool)) failures.push({
+        check: `agent-facing profile line ${index + 1}`,
+        passed: false,
+        detail: `required_sequence tool unavailable in agent profile: ${String(tool)}`,
+      });
+    }
+  });
+
+  return failures.length > 0 ? failures : [{
+    check: "agent-facing profile",
+    passed: true,
+    detail: "all executable routes are discoverable; no-tool boundaries are explicit",
+  }];
+}
+
 /** #322 — keep the daily Agent on canonical write + operational recall paths.
  * This is deliberately structural and limited to managed skills: public docs
  * may discuss lower-level recovery, but skills are executable Agent policy. */
@@ -1018,6 +1085,7 @@ function main(): void {
     ...checkSkillsToolRefs(docs, new Set(tools.map((t) => t.name))),
     ...checkToolDescriptions(tools),
     ...checkAgentContractTools(new Set(tools.map((t) => t.name)), join(PROJECT_DIR, "skills")),
+    ...checkAgentFacingRoutingProfile(join(PROJECT_DIR, "skills")),
     ...checkAgentWorkflowContract(join(PROJECT_DIR, "skills")),
     ...checkIngestPageTypeDocs(docs),
     ...checkSections(docs, tools, cli),
