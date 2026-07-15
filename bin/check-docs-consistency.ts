@@ -781,12 +781,29 @@ export function checkAgentFacingRoutingProfile(
 
   lines.forEach((line, index) => {
     if (!line.trim()) return;
-    let row: Record<string, unknown>;
+    let parsed: unknown;
     try {
-      row = JSON.parse(line) as Record<string, unknown>;
+      parsed = JSON.parse(line) as unknown;
     } catch {
       failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "invalid JSON" });
       return;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "row must be a JSON object" });
+      return;
+    }
+    const row = parsed as Record<string, unknown>;
+
+    if (row.required_sequence !== undefined && !Array.isArray(row.required_sequence)) {
+      failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "required_sequence must be an array" });
+      return;
+    }
+    for (const tool of (row.required_sequence ?? []) as unknown[]) {
+      if (typeof tool !== "string" || !allowed.has(tool)) failures.push({
+        check: `agent-facing profile line ${index + 1}`,
+        passed: false,
+        detail: `required_sequence tool unavailable in agent profile: ${String(tool)}`,
+      });
     }
 
     if (row.expected_tool === null) {
@@ -813,18 +830,6 @@ export function checkAgentFacingRoutingProfile(
       passed: false,
       detail: `expected_tool unavailable in agent profile: ${row.expected_tool}`,
     });
-
-    if (row.required_sequence !== undefined && !Array.isArray(row.required_sequence)) {
-      failures.push({ check: `agent-facing profile line ${index + 1}`, passed: false, detail: "required_sequence must be an array" });
-      return;
-    }
-    for (const tool of (row.required_sequence ?? []) as unknown[]) {
-      if (typeof tool !== "string" || !allowed.has(tool)) failures.push({
-        check: `agent-facing profile line ${index + 1}`,
-        passed: false,
-        detail: `required_sequence tool unavailable in agent profile: ${String(tool)}`,
-      });
-    }
   });
 
   return failures.length > 0 ? failures : [{

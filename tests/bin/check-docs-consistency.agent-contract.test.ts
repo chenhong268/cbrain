@@ -175,6 +175,28 @@ describe("checkAgentFacingRoutingProfile (#343)", () => {
       expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
     }
   });
+
+  test("rejects unavailable required_sequence members on a no-tool outcome", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({
+        expected_tool: null,
+        expected_outcome: "requires_full_profile",
+        required_profile: "full",
+        forbidden_tools: ["run_discovery", "read_discoveries"],
+        required_sequence: ["query"],
+      })}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
+  });
+
+  test("rejects non-object JSON rows without throwing", () => {
+    for (const content of ["null\n", "[]\n", '"primitive"\n', "42\n", "true\n"]) {
+      const dir = withSkills({ "agent-facing.routing-eval.jsonl": content });
+      let results: CheckResult[] = [];
+      expect(() => { results = checkAgentFacingRoutingProfile(dir); }).not.toThrow();
+      expect(fails(results)).toBe(true);
+    }
+  });
 });
 
 describe("checkAgentWorkflowContract (#322)", () => {
