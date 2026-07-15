@@ -19,7 +19,7 @@ All writers were stopped before backup and preflight. A fresh private full backu
 |---|---:|
 | zero-link rich records | 170 |
 | actionable repair candidates | 167 |
-| active legacy NER jobs | 3 |
+| active rich-zero-link candidates | 3 |
 | repair state conflicts | 0 |
 | queue integrity conflicts | 0 |
 | commit-unknown outcomes | 0 |
@@ -60,7 +60,7 @@ The matched batch-5 backup was restored while all writers remained stopped. The 
 |---|---:|
 | zero-link rich records | 170 |
 | actionable repair candidates | 167 |
-| active legacy NER jobs | 3 |
+| active rich-zero-link candidates | 3 |
 | resolved/failed Issue #342 jobs | 0 / 0 |
 | repair state conflicts | 0 |
 | queue integrity conflicts | 0 |
@@ -107,7 +107,68 @@ Residual risks:
 
 1. Provider reliability is insufficient for the next repair batch: three of five canary attempts failed.
 2. The two successful attempts correlated with a new pages-without-chunks regression; the matched rollback removed it, but the causal path requires separate diagnosis before retrying the rollout.
-3. Three legacy active NER jobs and the pre-existing consistency debt remain outside Issue #342.
+3. Three active rich-zero-link candidates and the pre-existing consistency debt remain outside Issue #342.
 4. The guarded runtime must remain pinned until equivalent reviewed guards are merged and deployed through the normal release path.
 
 No merge, tag, release, or further production batch is authorized by this report.
+
+## Corrective canary retry — 2026-07-15
+
+The page-without-chunks regression was traced to NER-created stub pages that were written after the source-page index phase while the maintenance watcher was stopped. Corrective commit `da171f238287264de058a3a890a295683a7bfad0` limits immediate stub indexing to validated manifest-owned repairs, writes the final relation-updated body to SQLite chunks, FTS, and Lance before job completion, and leaves ordinary deferred NER on the existing watcher-owned path.
+
+Before the retry, all writers were stopped and a new private full backup was created and verified. The preflight baseline matched the restored historical baseline:
+
+| Check | Corrective baseline |
+|---|---:|
+| zero-link rich records | 170 |
+| actionable repair candidates | 167 |
+| active rich-zero-link candidates | 3 |
+| repair state conflicts | 0 |
+| queue integrity conflicts | 0 |
+| commit-unknown outcomes | 0 |
+| foreign-key violations | 0 |
+| pages without chunks | 22 |
+| malformed hierarchy relations | 1 |
+| Lance state | ok |
+
+A distinct fresh full backup was created and verified immediately before the five-item retry.
+
+| Metric | Corrective canary |
+|---|---:|
+| selected | 5 |
+| new jobs | 4 |
+| requeued jobs | 1 |
+| processed | 0 |
+| failed | 5 |
+| timed out | 0 |
+| skipped | 0 |
+| resolved | 0 |
+| terminal no-link outcomes | 0 |
+| commit-unknown outcomes | 0 |
+| integrity conflicts | 0 |
+| pending/running children after finalization | 0 |
+| manifest finalized | yes |
+
+The retry stopped before batches 20 and 50 because every provider call failed and the canary produced zero resolved records. The finalized failure ledger was retained: there was no commit-unknown state and no new data consistency regression requiring matched-backup rollback.
+
+| Check | After corrective canary |
+|---|---:|
+| zero-link rich records | 170 |
+| actionable repair candidates | 162 |
+| active rich-zero-link candidates | 3 |
+| resolved/failed Issue #342 jobs | 0 / 5 |
+| repair state conflicts | 0 |
+| queue integrity conflicts | 0 |
+| commit-unknown outcomes | 0 |
+| foreign-key violations | 0 |
+| pages without chunks | 22 |
+| malformed hierarchy relations | 1 |
+| Lance state | ok |
+
+Because the provider produced zero successful attempts, this retry did not exercise the corrected successful-stub path against production data and therefore cannot by itself prove that the original regression is gone in production. It confirms only that the all-provider-failure outcome introduced no new storage consistency debt; the successful-stub path is covered by focused SQLite, FTS, and Lance regression tests. The production backfill remains non-useful while the configured provider fails all selected requests.
+
+The only enabled persistent writer now runs from a detached, clean, read-only deployment worktree at the corrective commit. Persistent disabled writer entries were also updated to that commit. Runtime acceptance passed health, exact commit/digest verification, single-writer rejection of the older runtime, a forced process restart, MCP reconnect, unified/alias job-shape parity, and protected-repair privacy projection. The restart reopened writes, so both fresh backup authorities are now expired and must not be applied to later live state.
+
+Corrective verification passed the focused regression suite (77 pass, 0 fail), the broader Issue #342 suite (209 pass, 0 fail), the full repository suite (4,061 pass, 0 fail), type checks, test type checks, Biome, docs consistency, diff checks, changed-file privacy scanning, executable rollback-runbook fixtures, and an independent adversarial review with no actionable finding.
+
+Final decision: the code correction is ready for PR review, but the data rollout remains stopped after the five-item canary. No merge, tag, or release was performed. Further production batches require a separate provider-reliability correction and a new preflight plus fresh matched backup.
