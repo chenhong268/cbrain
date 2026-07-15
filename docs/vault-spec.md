@@ -221,26 +221,42 @@ cbrain backup -o <输出目录>
 
 1. **活跃服务检测** — 检查 `cbrain-http.pid`、`cbrain-stdio.pid`、`.watcher.lock`，有活跃进程则拒绝
 2. **数据库锁检测** — 尝试 `BEGIN IMMEDIATE`，被占用则拒绝
-3. **残留文件检测** — 发现 `.rollback` 或 `vault.pre-restore`（上一轮恢复残留）则拒绝，提示用户手动检查后再试
+3. **残留文件检测** — 发现 `.rollback` 或 `vault.pre-restore`（上一轮恢复残留）则拒绝，提示用户手动检查后再试。检测使用精确目录项语义，断链 symlink 也视为残留，不能用 `existsSync` 的目标跟随结果绕过
 
 #### 恢复流程
 
 1. 解压到临时目录
 2. 验证备份数据库有效性（检查 pages 表存在）
-3. **原子安装数据库** — 先复制到 `.restoring` 临时文件并验证，再 `rename` 原子切换到正式路径
+3. **原子安装数据库** — 先复制到 `.restoring` 临时文件并验证，再 `rename` 原子切换到正式路径。DB-only 回滚名用排他 hard-link claim，若同名 `.rollback` 在 preflight 后出现则安装失败关闭，绝不以 `rename` 覆盖它
+   - 若目标文件系统不支持 hard link，DB-only restore 会在主 swap 前安全失败；不得降级为可能覆盖未托管 `.rollback` 的方案
+   - staging copy / validation / rename 在主 swap 前失败时，原数据库始终留在 active 路径；失败清理只处理本轮 `.restoring` 和 owned rollback claim，绝不 unlink/rename active DB
 4. **DB-only 备份**：只恢复数据库，完成后清理 WAL/SHM
 5. **Full 备份**（含 vault）：
    - VACUUM INTO 当前数据库到 `.rollback` 快照（包含所有 WAL 已提交数据）
    - 安装备份数据库（同上原子方式）
    - 原子替换 vault（rename 旧 vault → `.pre-restore`，rename 备份 vault → 正式路径）
-   - **vault 成功** → 删除 `.rollback` 和 `.pre-restore`，清理 WAL/SHM
+   - **vault 成功** → 进入显式 finalization，删除并验证 `.rollback`、`.pre-restore`、WAL 和 SHM 的精确目录项
    - **vault 失败** → 从 `.rollback` 快照回滚数据库，恢复旧 vault，确保数据一致
+
+#### Finalization 与成功语义
+
+- 清理最多执行三个全局轮次，每轮只处理仍存在的托管项；稳定等待固定为 50 ms、150 ms、300 ms，总等待不超过 500 ms
+- 每轮后使用 `lstat` 重新扫描完整适用项集合；只有 `ENOENT` 代表已清理，断链 symlink、等待期间新物化的条目和无法判定的权限错误都按仍存在处理
+- Full restore 验证 `.pre-restore`、`.rollback`、`-wal`、`-shm`；DB-only restore 验证适用的数据库项
+- `.pre-restore` / `.rollback` 只有在本轮 restore 实际创建或接管后才允许删除；若它们在 preflight 后才出现，本轮只验证并 fail-closed，绝不删除、接管或装成 active 数据库
+- 只有主安装成功且所有适用项已验证不存在，restore 才打印成功并退出 0
+- 如果主安装成功但 finalization 未闭环，命令输出固定的 `RESTORE_CLEANUP_INCOMPLETE`、退出非 0，并且不打印普通成功或 `cbrain sync` 指令。此时新数据库和新 vault 保持生效，不回滚已完成的主交换
+- 固定诊断不包含用户路径、vault 正文、文件名样例、stack trace 或 credential；操作员应保持 CBrain 服务停止，按 runbook 检查残留，仅在确认无需保留后手动清理
+- 递归删除可能在文件系统报错前已经删除一部分子项。失败后 CBrain 保留停止时尚存的 residual，但不承诺旧 vault 的字节级完整副本
+
+Restore 只管理上述精确事务项，不扫描、不判断、也不自动删除父目录下的编号或错位兄弟目录。此类文件系统卫生问题由 [Issue #341](https://github.com/chenhong268/cbrain/issues/341) 的 observability/人工清理流程处理；非空或未托管目录永远不能由 restore 自动删除。
 
 #### 安全保障
 
 - **进程崩溃安全**：数据库安装使用 staging temp + rename，崩溃不会产生半写入文件
 - **WAL 数据保留**：VACUUM INTO 快照包含所有 WAL 已提交数据，回滚不丢失
 - **数据不自动删除**：上一轮残留文件由用户决定是否删除
+- **清理失败关闭**：主交换完成不等于生命周期完成；finalization 未验证时返回非零，避免假成功
 
 #### 典型流程
 

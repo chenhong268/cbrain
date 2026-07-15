@@ -10,6 +10,8 @@ import {
   readFileSync,
   symlinkSync,
   statSync,
+  lstatSync,
+  linkSync,
 } from "node:fs";
 import { join, resolve, basename, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -17,7 +19,130 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { loadConfig } from "../context.js";
 
-export function register(program: Command): void {
+export const RESTORE_CLEANUP_INCOMPLETE_CODE = "RESTORE_CLEANUP_INCOMPLETE";
+export const RESTORE_CLEANUP_INCOMPLETE_MESSAGE =
+  `${RESTORE_CLEANUP_INCOMPLETE_CODE}: 主恢复已完成，但清理后状态未通过验证。` +
+  "请保持 CBrain 服务停止，按恢复文档检查残留；仅在确认无需保留后手动清理，再重试。";
+
+const RESTORE_CLEANUP_RETRY_DELAYS_MS = [50, 150, 300] as const;
+
+export interface RestoreArtifact {
+  readonly path: string;
+  readonly recursive: boolean;
+  /** Only artifacts created or adopted by this restore may be removed. */
+  readonly removable: boolean;
+}
+
+export interface RestoreCleanupResult {
+  readonly status: "clean" | "incomplete";
+  readonly attempts: number;
+  readonly remainingCount: number;
+}
+
+interface RestoreCleanupDeps {
+  readonly entryExists: (path: string) => boolean;
+  readonly remove: (
+    path: string,
+    options: { recursive?: boolean; force?: boolean },
+  ) => void;
+  readonly wait: (milliseconds: number) => void;
+}
+
+export interface BackupCommandDeps {
+  readonly createRestoreTempDir?: () => string;
+  readonly finalizeRestoreArtifacts?: (
+    artifacts: readonly RestoreArtifact[],
+  ) => RestoreCleanupResult;
+}
+
+/**
+ * `existsSync` follows symlinks, so it cannot prove that an exact directory
+ * entry is absent. Only lstat ENOENT is a clean postcondition; every other
+ * result (including permission errors) fails closed as "present".
+ */
+export function exactPathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+function waitSync(milliseconds: number): void {
+  const signal = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  Atomics.wait(signal, 0, 0, milliseconds);
+}
+
+/**
+ * Remove only explicitly managed restore artifacts. Cleanup is three global
+ * rounds (not three rounds per artifact), keeping the total wait bounded at
+ * 500 ms. Raw filesystem failures are deliberately collapsed into status.
+ */
+export function finalizeRestoreArtifacts(
+  artifacts: readonly RestoreArtifact[],
+  overrides: Partial<RestoreCleanupDeps> = {},
+): RestoreCleanupResult {
+  const deps: RestoreCleanupDeps = {
+    entryExists: overrides.entryExists ?? exactPathEntryExists,
+    remove: overrides.remove ?? ((path, options) => rmSync(path, options)),
+    wait: overrides.wait ?? waitSync,
+  };
+  const uniqueArtifacts = [
+    ...new Map(artifacts.map((artifact) => [artifact.path, artifact])).values(),
+  ];
+  const isPresent = (artifact: RestoreArtifact): boolean => {
+    try {
+      return deps.entryExists(artifact.path);
+    } catch {
+      return true;
+    }
+  };
+  let remaining = uniqueArtifacts.filter(isPresent);
+  if (remaining.length === 0) {
+    return { status: "clean", attempts: 0, remainingCount: 0 };
+  }
+
+  for (let round = 0; round < RESTORE_CLEANUP_RETRY_DELAYS_MS.length; round += 1) {
+    for (const artifact of remaining) {
+      if (!artifact.removable) continue;
+      try {
+        deps.remove(artifact.path, {
+          recursive: artifact.recursive,
+          force: false,
+        });
+      } catch {
+        // Verify exact entry state below; never expose a raw filesystem error.
+      }
+    }
+    let waitSucceeded = true;
+    try {
+      deps.wait(RESTORE_CLEANUP_RETRY_DELAYS_MS[round]);
+    } catch {
+      // Absence without the required stabilization wait is not verified clean.
+      waitSucceeded = false;
+    }
+    // Re-scan the complete applicable set. File Provider may materialize an
+    // entry that was absent in the previous round while another item settles.
+    remaining = uniqueArtifacts.filter(isPresent);
+    if (remaining.length === 0 && waitSucceeded) {
+      return { status: "clean", attempts: round + 1, remainingCount: 0 };
+    }
+  }
+
+  return {
+    status: "incomplete",
+    attempts: RESTORE_CLEANUP_RETRY_DELAYS_MS.length,
+    remainingCount: remaining.length,
+  };
+}
+
+export function register(program: Command, commandDeps: BackupCommandDeps = {}): void {
+  const createRestoreTempDir = commandDeps.createRestoreTempDir
+    ?? (() => mkdtempSync(join(tmpdir(), "cbrain-restore-")));
+  const finalizeArtifacts = commandDeps.finalizeRestoreArtifacts
+    ?? ((artifacts: readonly RestoreArtifact[]) => finalizeRestoreArtifacts(artifacts));
+
   program
     .command("backup")
     .description("Create a backup of vault + DB (zip archive)")
@@ -124,8 +249,8 @@ export function register(program: Command): void {
       const rollbackPath = `${dbPath}.rollback`;
       const vaultBackup = `${vaultPath}.pre-restore`;
       const residualPaths: string[] = [];
-      if (existsSync(rollbackPath)) residualPaths.push(rollbackPath);
-      if (existsSync(vaultBackup)) residualPaths.push(vaultBackup);
+      if (exactPathEntryExists(rollbackPath)) residualPaths.push(rollbackPath);
+      if (exactPathEntryExists(vaultBackup)) residualPaths.push(vaultBackup);
       if (residualPaths.length > 0) {
         console.error("❌ 发现上一轮恢复的残留文件，可能包含需要保留的数据：");
         for (const p of residualPaths) console.error(`  ${p}`);
@@ -134,7 +259,7 @@ export function register(program: Command): void {
       }
 
       // ── Step 4: Extract to temp directory ──────────────────────────
-      const tmpDir = mkdtempSync(join(tmpdir(), "cbrain-restore-"));
+      const tmpDir = createRestoreTempDir();
       try {
         console.log("正在恢复...");
         execFileSync("unzip", ["-o", zipPath, "-d", tmpDir], {
@@ -157,31 +282,38 @@ export function register(program: Command): void {
         // ── Step 6: Atomic DB+vault restore ──────────────────────────
         const extractedVault = findDirectory(tmpDir, "vault");
         const hasVault = extractedVault !== null;
+        const databaseInstall = installDatabaseWithResult(
+          extractedDbPath,
+          dbPath,
+          hasVault,
+        );
 
-        if (!installDatabase(extractedDbPath, dbPath, hasVault)) {
+        if (!databaseInstall.ok) {
           console.error("❌ 数据库安装失败，原数据库未受影响。");
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
 
         // Restore vault (DB rollback snapshot kept until vault succeeds)
         if (hasVault) {
           let vaultRestored = false;
-          if (existsSync(vaultPath)) {
+          let vaultBackupOwnedByThisRestore = false;
+          if (exactPathEntryExists(vaultPath)) {
             try {
               renameSync(vaultPath, vaultBackup);
+              vaultBackupOwnedByThisRestore = true;
             } catch {
-              rollbackDatabase(dbPath, rollbackPath);
+              rollbackInstalledDatabase(
+                dbPath,
+                rollbackPath,
+                databaseInstall.rollbackOwned,
+              );
               console.error("❌ 无法备份当前 vault，已回滚数据库。");
               process.exit(1);
             }
             try {
               renameSync(extractedVault, vaultPath);
               vaultRestored = true;
-              try {
-                rmSync(vaultBackup, { recursive: true });
-              } catch {
-                /* keep old vault as .pre-restore */
-              }
             } catch {
               // Vault restore failed — rollback both
               try {
@@ -194,7 +326,11 @@ export function register(program: Command): void {
               } catch {
                 /* best effort */
               }
-              rollbackDatabase(dbPath, rollbackPath);
+              rollbackInstalledDatabase(
+                dbPath,
+                rollbackPath,
+                databaseInstall.rollbackOwned,
+              );
               console.error("❌ Vault 恢复失败，已回滚数据库和 vault。");
               process.exit(1);
             }
@@ -204,22 +340,58 @@ export function register(program: Command): void {
               renameSync(extractedVault, vaultPath);
               vaultRestored = true;
             } catch {
-              rollbackDatabase(dbPath, rollbackPath);
+              rollbackInstalledDatabase(
+                dbPath,
+                rollbackPath,
+                databaseInstall.rollbackOwned,
+              );
               console.error("❌ Vault 恢复失败，已回滚数据库。");
               process.exit(1);
             }
           }
 
           if (vaultRestored) {
-            // Both DB and vault succeeded — final cleanup
-            try { unlinkSync(rollbackPath); } catch {}
-            cleanWalShm(dbPath);
+            // Both DB and vault succeeded. Cleanup failure is not a rollback
+            // condition, but it must fail closed before reporting success.
+            const cleanup = finalizeArtifacts([
+              {
+                path: vaultBackup,
+                recursive: true,
+                removable: vaultBackupOwnedByThisRestore,
+              },
+              {
+                path: rollbackPath,
+                recursive: false,
+                removable: databaseInstall.rollbackOwned,
+              },
+              { path: `${dbPath}-wal`, recursive: false, removable: true },
+              { path: `${dbPath}-shm`, recursive: false, removable: true },
+            ]);
+            if (cleanup.status === "incomplete") {
+              console.error(RESTORE_CLEANUP_INCOMPLETE_MESSAGE);
+              process.exitCode = 1;
+              return;
+            }
             console.log(`✅ 数据库已恢复到 ${dbPath}`);
             console.log(`✅ Vault 已恢复到 ${vaultPath}`);
           }
         } else {
-          // DB-only restore
-          cleanWalShm(dbPath);
+          // DB-only installDatabase already attempts cleanup; verify the exact
+          // managed entries before success and retry any transient failures.
+          const cleanup = finalizeArtifacts([
+            {
+              path: rollbackPath,
+              recursive: false,
+              removable: databaseInstall.rollbackOwned,
+            },
+            { path: `${dbPath}-wal`, recursive: false, removable: true },
+            { path: `${dbPath}-shm`, recursive: false, removable: true },
+          ]);
+          if (cleanup.status === "incomplete") {
+            console.error(RESTORE_CLEANUP_INCOMPLETE_MESSAGE);
+            process.exitCode = 1;
+            return;
+          }
           console.log(`✅ 数据库已恢复到 ${dbPath}`);
         }
 
@@ -353,76 +525,116 @@ function validateDatabase(dbPath: string): boolean {
 
 // ── Atomic database installation ─────────────────────────────────────
 
-function installDatabase(
+export interface DatabaseInstallResult {
+  readonly ok: boolean;
+  readonly rollbackOwned: boolean;
+}
+
+interface DatabaseInstallDeps {
+  readonly copy: (source: string, target: string) => void;
+  readonly link: (existing: string, target: string) => void;
+  readonly rename: (source: string, target: string) => void;
+  readonly unlink: (path: string) => void;
+}
+
+export function installDatabaseWithResult(
   sourcePath: string,
   targetPath: string,
   keepRollback = false,
-): boolean {
+  overrides: Partial<DatabaseInstallDeps> = {},
+): DatabaseInstallResult {
   const targetDir = dirname(targetPath);
   if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
+  const deps: DatabaseInstallDeps = {
+    copy: overrides.copy ?? copyFileSync,
+    link: overrides.link ?? linkSync,
+    rename: overrides.rename ?? renameSync,
+    unlink: overrides.unlink ?? unlinkSync,
+  };
 
   const rollbackPath = `${targetPath}.rollback`;
   const stagingPath = `${targetPath}.restoring`;
+  let rollbackOwned = false;
 
   try {
     if (keepRollback && existsSync(targetPath)) {
       const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
       const db = new Database(targetPath);
       db.exec(`VACUUM INTO '${rollbackPath.replace(/'/g, "''")}'`);
+      rollbackOwned = true;
       db.close();
     } else if (existsSync(targetPath)) {
-      renameSync(targetPath, rollbackPath);
+      // Claim the rollback name exclusively. POSIX rename would overwrite a
+      // late unowned file that appeared after preflight; link fails EEXIST.
+      deps.link(targetPath, rollbackPath);
+      rollbackOwned = true;
     }
 
     // Copy to staging temp, validate, then atomic rename
-    copyFileSync(sourcePath, stagingPath);
+    deps.copy(sourcePath, stagingPath);
 
     if (!validateDatabase(stagingPath)) {
-      // Staging failed — don't touch targetPath, just clean up
-      try { unlinkSync(stagingPath); } catch {}
-      restoreRollback(targetPath, rollbackPath, keepRollback);
-      return false;
+      // The primary swap has not happened. Never touch targetPath here.
+      cleanupFailedDatabaseInstall(stagingPath, rollbackPath, rollbackOwned, deps);
+      return { ok: false, rollbackOwned: false };
     }
 
     // Atomic swap: rename is atomic on the same filesystem
-    renameSync(stagingPath, targetPath);
+    deps.rename(stagingPath, targetPath);
 
     // WAL/SHM are stale (belong to previous DB)
     cleanWalShm(targetPath);
 
-    if (!keepRollback) {
-      try { unlinkSync(rollbackPath); } catch {}
-    }
-
-    return true;
+    return { ok: true, rollbackOwned };
   } catch {
-    try { unlinkSync(stagingPath); } catch {}
-    restoreRollback(targetPath, rollbackPath, keepRollback);
-    return false;
+    // All throwing operations happen before the atomic primary swap. The old
+    // target is still active; only this run's staging/rollback may be cleaned.
+    cleanupFailedDatabaseInstall(stagingPath, rollbackPath, rollbackOwned, deps);
+    return { ok: false, rollbackOwned: false };
   }
 }
 
-function restoreRollback(
-  targetPath: string,
+function cleanupFailedDatabaseInstall(
+  stagingPath: string,
   rollbackPath: string,
-  isVacuum: boolean,
+  rollbackOwned: boolean,
+  deps: DatabaseInstallDeps,
 ): void {
-  if (!existsSync(rollbackPath)) return;
-  try {
-    if (isVacuum) {
-      copyFileSync(rollbackPath, targetPath);
-    } else {
-      try { unlinkSync(targetPath); } catch {}
-      renameSync(rollbackPath, targetPath);
-    }
-    try { unlinkSync(rollbackPath); } catch {}
-  } catch { /* best effort */ }
+  try { deps.unlink(stagingPath); } catch {}
+  if (rollbackOwned) {
+    try { deps.unlink(rollbackPath); } catch {}
+  }
+}
+
+function installDatabase(
+  sourcePath: string,
+  targetPath: string,
+  keepRollback = false,
+): boolean {
+  const result = installDatabaseWithResult(sourcePath, targetPath, keepRollback);
+  if (result.ok && !keepRollback && result.rollbackOwned) {
+    try { unlinkSync(`${targetPath}.rollback`); } catch {}
+  }
+  return result.ok;
 }
 
 function rollbackDatabase(targetPath: string, rollbackPath: string): void {
   if (!existsSync(rollbackPath)) return;
   try { copyFileSync(rollbackPath, targetPath); } catch {}
   try { unlinkSync(rollbackPath); } catch {}
+  cleanWalShm(targetPath);
+}
+
+function rollbackInstalledDatabase(
+  targetPath: string,
+  rollbackPath: string,
+  rollbackOwned: boolean,
+): void {
+  if (rollbackOwned) {
+    rollbackDatabase(targetPath, rollbackPath);
+    return;
+  }
+  try { unlinkSync(targetPath); } catch {}
   cleanWalShm(targetPath);
 }
 
