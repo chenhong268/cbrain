@@ -1,14 +1,16 @@
 # Issue #342 Production Rollout Report
 
-Date: 2026-07-14
+Initial report date: 2026-07-14
+Finalized date: 2026-07-15
 
 ## Scope
 
-This report records the production canary for Issue #342. It contains scalar operational evidence only. It intentionally excludes record names, slugs, source text, credentials, archive names, user paths, and repair payloads.
+This report records the complete production rollout audit for Issue #342, including corrective retries and matched rollbacks. It contains scalar operational evidence only. It intentionally excludes record names, slugs, source text, credentials, archive names, user paths, and repair payloads.
 
-- `reviewedCodeSha`: `9e3dce5bc7a453615edb0a6e317c9c0271a9a6ff`
+- `initialReviewedCodeSha`: `9e3dce5bc7a453615edb0a6e317c9c0271a9a6ff`
+- `finalReviewedCodeSha`: `3a292e6aea0e731181ac142e62fe8a64a4261e17`
 - rollout sequence authorized: `5 -> 20 -> 50`
-- rollout sequence completed: `5 -> stop -> rollback`
+- final rollout execution: `batch 5 retained -> batch 20 retained -> batch 50 attempted -> stop -> matched rollback of batch 50`
 - merge, tag, and release: not performed
 
 ## Preflight baseline
@@ -74,7 +76,7 @@ The restored values match the preflight baseline. No unrelated baseline repair w
 
 ## Guarded runtime recovery
 
-After rollback verification, the only enabled persistent writer entrypoint was pinned to the reviewed code SHA in a detached, clean deployment worktree whose tracked source was read-only. Other persistent CBrain writer entrypoints remained disabled and were updated so that they cannot fall back to the older runtime.
+After rollback verification, the only enabled persistent writer entrypoint was pinned to the initial reviewed code SHA in a detached, clean deployment worktree whose tracked source was read-only. Other persistent CBrain writer entrypoints remained disabled and were updated so that they could not fall back to the still older runtime.
 
 Starting that guarded writer reopened production writes. The matched full-backup rollback authority therefore expired at that point; any later runtime failure must be handled by stopping writers and repairing forward from current state.
 
@@ -172,3 +174,112 @@ The only enabled persistent writer now runs from a detached, clean, read-only de
 Corrective verification passed the focused regression suite (77 pass, 0 fail), the broader Issue #342 suite (209 pass, 0 fail), the full repository suite (4,061 pass, 0 fail), type checks, test type checks, Biome, docs consistency, diff checks, changed-file privacy scanning, executable rollback-runbook fixtures, and an independent adversarial review with no actionable finding.
 
 Final decision: the code correction is ready for PR review, but the data rollout remains stopped after the five-item canary. No merge, tag, or release was performed. Further production batches require a separate provider-reliability correction and a new preflight plus fresh matched backup.
+
+## Final corrective rollout — 2026-07-15
+
+This section supersedes the earlier rollout decisions while preserving them as audit history. Two additional runtime defects were found before the final retry:
+
+1. The configured provider could exceed the bounded extraction window. Commit `43ae0457ecf622d8970b4dc610c9c67680214c2e` corrected provider timeout and retry behavior without exposing provider responses.
+2. The repair CLI created a `ContentPipeline` with a Lance manager that it had not connected. Commit `7e9590e12a7309b5b57b5c3f8636b168590d5be3` connected and closed the same Lance instance only for manifest-owned repair mode; ordinary and audit modes retained zero Lance lifecycle calls.
+
+### Intermediate canary and second rollback
+
+The five-item production canary at `7e9590e12a7309b5b57b5c3f8636b168590d5be3` selected five items, created four jobs, and requeued one job. It processed two items and failed three. All three failures became `commit_unknown`, so the manifest remained unfinalized. The run also raised pages without chunks from 22 to 35 and produced four missing Lance page-vector coverages. Batches 20 and 50 were not started.
+
+All writers remained stopped. The matched database, vault, and Lance snapshot was restored and verified. The restored scalar state was:
+
+| Check | Restored value |
+|---|---:|
+| zero-link rich records | 170 |
+| actionable repair candidates | 162 |
+| active rich-zero-link candidates | 3 |
+| resolved outcomes | 0 |
+| retained earlier failed outcomes | 5 |
+| commit-unknown outcomes | 0 |
+| repair state conflicts | 0 |
+| queue integrity conflicts | 0 |
+| foreign-key violations | 0 |
+| pages without chunks | 22 |
+| malformed hierarchy relations | 1 |
+| Lance state | ok |
+
+The root cause was deterministic: NER type correction could move an existing entity to a new canonical slug, while later relation, fact, duplicate, and mention handling retained the old slug. The stale endpoint caused a foreign-key failure after the commit fence. The same move also left raw and L1 Lance rows under the old slug.
+
+Commit `3a292e6aea0e731181ac142e62fe8a64a4261e17` closes that path by propagating the actual slug returned from type correction, remapping later resolution and mention-skip state, and migrating raw plus L1 Lance rows with a two-phase exact verification. The new side is read back and verified before the old rows are deleted; a silent short write therefore leaves the old index intact and stops the batch as `commit_unknown`. Target-vector conflicts fail closed without overwriting existing rows.
+
+An isolated replay against a private production snapshot processed and resolved all five selected items, finalized the manifest, produced zero endpoint or foreign-key errors, and retained the 22-page pre-existing missing-chunk baseline.
+
+### Final production batches
+
+All writers were stopped before the final preflight. The preflight baseline matched the restored state above. A fresh private database, vault, and Lance backup was created and verified before preflight and again immediately before each requested batch.
+
+| Metric | Batch 5 | Batch 20 | Batch 50 attempt |
+|---|---:|---:|---:|
+| selected | 5 | 20 | 50 |
+| new jobs | 4 | 18 | 49 |
+| requeued jobs | 1 | 2 | 1 |
+| processed | 5 | 20 | 49 |
+| failed | 0 | 0 | 1 |
+| timed out | 0 | 0 | 0 |
+| skipped | 0 | 0 | 0 |
+| resolved | 5 | 20 | 49 |
+| commit-unknown | 0 | 0 | 1 |
+| pending/running at terminal check | 0 / 0 | 0 / 0 | 0 / 0 |
+| manifest finalized | yes | yes | no |
+| result retained | yes | yes | no |
+
+Batch 5 and batch 20 passed every stop gate. After each batch, foreign-key violations remained zero, pages without chunks remained 22, Lance remained `ok`, repair state and queue integrity conflicts remained zero, and the digest of unrelated active jobs was unchanged.
+
+Batch 50 triggered the mandatory stop condition after 49 resolved outcomes and one `commit_unknown`. The manifest correctly remained unfinalized. Although the immediate storage checks showed no new foreign-key, missing-chunk, or Lance regression, partial results were not retained. The matched pre-batch-50 database, vault, and Lance snapshot was restored while all writers remained stopped. The restored Lance tree matched the staged snapshot digest before the quarantined post-batch tree was removed. Two earlier staging attempts had aborted before restore or rename; their verified extraction-only directories were removed after the successful rollback.
+
+### Final retained production state
+
+The matched rollback removed the complete batch-50 attempt and preserved the successful batches 5 and 20:
+
+| Check | Final value |
+|---|---:|
+| zero-link rich records | 145 |
+| actionable repair candidates | 137 |
+| active rich-zero-link candidates | 3 |
+| resolved outcomes retained by this rollout | 25 |
+| failed outcomes retained from the earlier canary | 5 |
+| terminal no-link outcomes | 0 |
+| commit-unknown outcomes | 0 |
+| unfinalized manifests | 0 |
+| repair state conflicts | 0 |
+| queue integrity conflicts | 0 |
+| foreign-key violations | 0 |
+| pages without chunks | 22 |
+| malformed hierarchy relations | 1 |
+| Lance state | ok |
+
+The final fsck shape is identical to the accepted baseline except for the reduced zero-link debt: zero critical findings, one pre-existing hierarchy error, and two warnings for remaining zero-link debt and the unchanged 22-page missing-chunk debt.
+
+### Final verification and runtime acceptance
+
+The final corrective code passed:
+
+- focused adversarial suite: 135 pass, 0 fail, 505 assertions;
+- full repository suite: 4,085 pass, 0 fail, 20,166 assertions;
+- source and test type checks, Biome, docs consistency, diff checks, and changed-file privacy scanning;
+- independent mutation review covering raw migration, L1 migration, old-row deletion, exact verification, and mention-skip remapping;
+- injected Lance add, raw-delete, L1-delete, pre-delete-read, final-read, silent-short-write, and target-conflict failures.
+
+The independent adversarial code review returned PASS with no CRITICAL, HIGH, MEDIUM, or LOW finding.
+
+After proving zero unfinalized manifests, all persistent entrypoints were pinned to the final reviewed SHA. The single enabled writer runs from a detached, clean deployment worktree with read-only tracked files and a verified tracked-file digest. The alternate HTTP entry and watcher remain disabled.
+
+Runtime acceptance passed:
+
+- HTTP health reported `ok=true`, version `2.0.7`;
+- exactly one writer process ran from the reviewed deployment;
+- a forced restart changed the process and restored health;
+- a fresh MCP session initialized and listed 98 tools;
+- read-only `status` succeeded;
+- unified `job` list/status responses matched their compatibility aliases;
+- 33 protected repair projections exposed no id, payload, result, error, slug, batch identifier, or source fingerprint;
+- the prior deployment runtime was rejected by the single-writer gate and changed no job state.
+
+Reopening the reviewed writer permanently expired every preflight and per-batch backup as rollback authority. Those archives must not be applied to future live state.
+
+Final decision: Issue #342 satisfies its safe-stop production acceptance path. Twenty-five repairs are retained; the batch-50 attempt was fully rolled back after its single commit-unknown outcome. The remaining 145 records, including 137 actionable candidates, require a new governed rollout rather than an automatic retry. The branch and PR remain unmerged, untagged, and unreleased.
