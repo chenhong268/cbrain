@@ -81,7 +81,7 @@
 ├─ "给我一个全景"？
 │   信号：总结、概览、全面、全貌、梳理、overview、帮我理一下
 │   → cbrain_recall（内部 overview 分发）
-│   → advanced escape hatch：summarize（仅 debug/full profile；当前门不足以表达深度时直调）
+│   → advanced escape hatch：summarize（仅 full profile；当前门不足以表达深度时直调）
 │   → 遇到 stub → expand_entity 补充
 │
 ├─ "结构化档案"？
@@ -427,7 +427,7 @@ grounded recall 返回后，首轮回答必须：
 | deep_recall(grounded)（advanced escape hatch） | 证据板（facts/candidates/conflicts/must_not_claim）+ 合成回答 | advanced：需 grounded 证据板时直调；默认走 cbrain_recall（内部 grounded_recall） |
 | deep_recall（advanced escape hatch） | body + links + timeline + tags + related + insights | advanced：需完整上下文 / 精细 detail 参数时直调；默认走 cbrain_recall |
 | agentic_research（debug/internal） | 多步管道：规划→执行→评估→(补充)→结构化结果 | EXPERIMENTAL，非默认；复杂比较/盲区分析/跨主题关联（默认走 cbrain_recall reasoning 分发） |
-| summarize（debug/full） | 图遍历 + 结构化概览 + 可配置深度 | 仅 debug/full profile；默认走 cbrain_recall（overview 分发） |
+| summarize（full-only advanced escape hatch） | 图遍历 + 结构化概览 + 可配置深度 | 仅 full profile；默认走 cbrain_recall（overview 分发） |
 | dossier（debug/internal） | 结构化档案（基本信息 + 关系 + 时间线 + 洞察） | debug/internal profile 工具；默认走 cbrain_recall |
 | brain_storm（debug/internal） | LLM 推理 + 缺口分析 + 跨域关联 | debug/internal profile 工具；默认走 cbrain_recall（reasoning 分发） |
 | graph_query | 关系遍历（traverse/backlinks/related） | 查两个人/公司关系（cbrain_recall relationship 分发的 advanced 直调） |

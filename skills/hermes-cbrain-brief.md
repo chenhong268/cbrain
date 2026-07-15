@@ -10,14 +10,15 @@
 
 `cbrain_recall({ query, detail: "brief" })`
 
-内部 routing 会按意图选择 internal/advanced 路径：deep_recall / recall_episode / get_org_tree / summarize / agentic_research / query。structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止渲染。
+内部 routing 会按意图选择 internal/advanced 路径：deep_recall / recall_episode / get_org_tree / summarize / agentic_research / query。
+structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止渲染。
 
 ## 2. 常见信号
 
 - 讨论过吗、有依据吗、是不是真的 → `cbrain_recall(detail:"brief")`，内部 grounded；≤300 字，candidates 标"待确认"。
 - 当时怎么设计、为什么选、具体怎么说 → `cbrain_recall(detail:"normal")`；首轮禁止 expand_entity/get_page/get_timeline。
 - 想不起名字、叫什么来着、一起做过项目 → `cbrain_recall`，内部 recall_episode；禁止 query/agentic_research。
-- 关系/下属/全貌/盲区 → 默认 `cbrain_recall`；显式结构遍历可用 `graph_query`，`summarize` 仅 debug/full profile 的 advanced escape hatch。
+- 关系/下属/全貌/盲区 → 默认 `cbrain_recall`；显式结构遍历可用 `graph_query`，`summarize` 仅 full profile 的 advanced escape hatch。
 - 关键词定位/debug → `cbrain_recall`（内部 `debug_search`）；只有显式选择 debug/full profile 的诊断会话才直调 `query`。
 - 批量补详情 → `get_pages`，禁止连续 get_page。
 

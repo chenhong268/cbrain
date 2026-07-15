@@ -18,6 +18,7 @@ type AgentFacingRow = {
   expected_args: Record<string, unknown>;
   expected_outcome?: string;
   required_profile?: string;
+  forbidden_tools?: string[];
 };
 
 function readRows(): AgentFacingRow[] {
@@ -134,9 +135,15 @@ describe.serial("real Agent-facing MCP profile contract", () => {
         expect(rows.some((row) => row.category === category && row.expected_tool !== null)).toBe(true);
       }
 
-      const boundary = rows.find((row) => row.expected_outcome === "requires_full_profile");
+      const boundaries = rows.filter((row) => row.expected_tool === null);
+      expect(boundaries).toHaveLength(1);
+      const [boundary] = boundaries;
+      expect(boundary?.category).toBe("profile_boundary");
+      expect(boundary?.expected_outcome).toBe("requires_full_profile");
       expect(boundary?.expected_tool).toBeNull();
       expect(boundary?.required_profile).toBe("full");
+      expect(boundary?.forbidden_tools).toContain("run_discovery");
+      expect(boundary?.forbidden_tools).toContain("read_discoveries");
     });
   });
 

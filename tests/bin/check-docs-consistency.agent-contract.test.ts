@@ -127,13 +127,21 @@ describe("checkAgentFacingRoutingProfile (#343)", () => {
     forbidden_output_terms: [],
     ...patch,
   });
+  const boundaryRow = (patch: Record<string, unknown> = {}) => row({
+    category: "profile_boundary",
+    expected_tool: null,
+    expected_outcome: "requires_full_profile",
+    required_profile: "full",
+    forbidden_tools: ["run_discovery", "read_discoveries"],
+    ...patch,
+  });
 
   test("accepts allowlisted expected_tool and required_sequence", () => {
     const dir = withSkills({
       "agent-facing.routing-eval.jsonl": `${row({
         expected_tool: "graph_query",
         required_sequence: ["resolve_slugs", "graph_query"],
-      })}\n`,
+      })}\n${boundaryRow()}\n`,
     });
     expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(false);
   });
@@ -157,12 +165,7 @@ describe("checkAgentFacingRoutingProfile (#343)", () => {
 
   test("accepts only the exact full-profile no-tool outcome", () => {
     const valid = withSkills({
-      "agent-facing.routing-eval.jsonl": `${row({
-        expected_tool: null,
-        expected_outcome: "requires_full_profile",
-        required_profile: "full",
-        forbidden_tools: ["run_discovery", "read_discoveries"],
-      })}\n`,
+      "agent-facing.routing-eval.jsonl": `${boundaryRow()}\n`,
     });
     expect(fails(checkAgentFacingRoutingProfile(valid))).toBe(false);
 
@@ -174,6 +177,20 @@ describe("checkAgentFacingRoutingProfile (#343)", () => {
       const dir = withSkills({ "agent-facing.routing-eval.jsonl": `${row(patch)}\n` });
       expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
     }
+  });
+
+  test("rejects duplicate no-tool boundaries across fixture rows", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${boundaryRow()}\n${boundaryRow()}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
+  });
+
+  test("rejects a no-tool boundary outside the profile_boundary category", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${boundaryRow({ category: "search" })}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
   });
 
   test("rejects unavailable required_sequence members on a no-tool outcome", () => {

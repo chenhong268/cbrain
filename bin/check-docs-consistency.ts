@@ -778,6 +778,7 @@ export function checkAgentFacingRoutingProfile(
   const allowed = new Set(agentAllowlist);
   const failures: CheckResult[] = [];
   const lines = readFileSync(file, "utf-8").split("\n");
+  let noToolBoundaryCount = 0;
 
   lines.forEach((line, index) => {
     if (!line.trim()) return;
@@ -807,8 +808,10 @@ export function checkAgentFacingRoutingProfile(
     }
 
     if (row.expected_tool === null) {
+      noToolBoundaryCount += 1;
       const forbidden = Array.isArray(row.forbidden_tools) ? row.forbidden_tools : [];
       const validBoundary =
+        row.category === "profile_boundary" &&
         row.expected_outcome === "requires_full_profile" &&
         row.required_profile === "full" &&
         forbidden.includes("run_discovery") &&
@@ -830,6 +833,12 @@ export function checkAgentFacingRoutingProfile(
       passed: false,
       detail: `expected_tool unavailable in agent profile: ${row.expected_tool}`,
     });
+  });
+
+  if (noToolBoundaryCount !== 1) failures.push({
+    check: "agent-facing profile no-tool boundary count",
+    passed: false,
+    detail: `expected exactly one no-tool boundary, found ${noToolBoundaryCount}`,
   });
 
   return failures.length > 0 ? failures : [{

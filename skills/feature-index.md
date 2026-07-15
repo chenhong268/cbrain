@@ -2,7 +2,7 @@
 
 > 用户该用什么功能？这份索引帮你快速定位。
 > Agent 读取 RESOLVER.md 路由后，可用本索引做功能推荐和主动提示。
-> **默认前门是 `cbrain_recall`**：自然语言回忆/核查/找人/层级/总结/关系/判断首选它（CBrain 内部分发）。低层工具（`deep_recall` / `summarize` / `dossier` / `brain_storm` / `query` / `expand_entity`）只在 advanced escape hatch / debug / fallback 场景出现，不是默认首选。
+> **默认前门是 `cbrain_recall`**：自然语言回忆/核查/找人/层级/总结/关系/判断首选它（CBrain 内部分发）。低层工具（`deep_recall` / `summarize` / `dossier` / `brain_storm` / `query` / `expand_entity`）只在对应 profile 的 advanced escape hatch / fallback 场景出现，不是默认首选。
 
 ## 映射表
 
@@ -21,7 +21,7 @@
 ### 3. 全景概览/总结
 - **触发**：总结 / 梳理 / 全貌 / 概览 / overview / 帮我理一下
 - **工具**：`cbrain_recall`（默认，内部 overview 分发）
-- **advanced escape hatch**：`summarize(slug, depth=1)`（debug/internal profile 工具，图遍历概览）
+- **advanced escape hatch**：`summarize(slug, depth=1)`（仅 full profile，图遍历概览）
 - **注意**：不要用 query；cbrain_recall 一步给全局鸟瞰
 
 ### 4. 结构化档案页

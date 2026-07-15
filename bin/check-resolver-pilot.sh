@@ -326,9 +326,10 @@ if [[ -f "$AF_EVAL" ]]; then
   if python3 - "$AF_EVAL" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-boundaries = [row for row in rows if row.get("category") == "profile_boundary"]
+boundaries = [row for row in rows if row.get("expected_tool") is None]
 assert len(boundaries) == 1
 boundary = boundaries[0]
+assert boundary.get("category") == "profile_boundary"
 assert boundary.get("expected_tool") is None
 assert boundary.get("expected_outcome") == "requires_full_profile"
 assert boundary.get("required_profile") == "full"
