@@ -153,6 +153,11 @@ Stable codes:
 - `PROFILE_UPDATE_INVALID` for an empty, duplicate, non-explicit, non-open,
   agent-targeted, structurally invalid handler payload, or hidden-target update
   batch.
+- `PROFILE_UPDATE_FAILED` when a policy-valid daily Agent update reaches Profile
+  storage but the write fails. Its fixed message MUST NOT reflect the original
+  exception, local path, module name, submitted body, or stack trace. Full and
+  debug sessions retain their existing exception behavior. The exact handler
+  payload is `{"error":{"code":"PROFILE_UPDATE_FAILED","message":"Daily Agent Profile update failed without exposing local details."}}`.
 
 Messages may explain the allowed contract but never identify which entry
 failed. MCP `isError` MUST be `true`.

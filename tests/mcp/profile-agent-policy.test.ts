@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../../src/mcp/context.js";
 import type { ToolProfile } from "../../src/mcp/tool-profiles.js";
 import { registerProfileTools } from "../../src/mcp/tools/profile.js";
+import { attachMcpTools } from "../../src/mcp/server.js";
 import { ProfileManager } from "../../src/profile/manager.js";
 import {
   buildAgentVisibleStats,
@@ -292,11 +293,59 @@ describe.serial("daily Agent Profile real MCP handler", () => {
     expect(tool.description).toContain("open");
     expect(tool.description).toContain("explicit");
     expect(tool.description).toContain("unavailable");
-    expect(tool.description?.toLowerCase()).not.toContain("aliases");
+    expect(tool.description).toContain("Compatibility aliases are unavailable");
     expect(properties.action?.enum).toEqual(["get", "update", "remove", "reload"]);
     expect(properties.action?.description).toContain("unavailable");
     expect(properties.scope?.enum).toEqual(["open", "scoped", "private"]);
     expect(properties.scope?.description).toContain("open");
+    expect(properties.scope?.description).toContain("scoped/private");
+    expect(properties.ids?.description).toContain("action=get only");
+    expect(properties.ids?.description).toContain("remove is unavailable");
+    expect(properties.entries?.description).toContain("non-empty whole batch");
+    expect(properties.entries?.description).toContain("explicit");
+    expect(properties.entries?.description).toContain("open");
+    expect(properties.entries?.items?.properties?.scope?.description).toContain("open only");
+    expect(properties.entries?.items?.properties?.scope?.description).toContain("scoped/private rejected");
+    expect(properties.entries?.items?.properties?.agents?.description).toContain("omit");
+    expect(properties.entries?.items?.properties?.agents?.description).toContain("empty");
+  });
+
+  test("Agent update I/O failures return a fixed non-reflective handler error", async () => {
+    const privateRoot = join(root, "profile failure root with spaces");
+    const privateModule = "module-private-sentinel.yaml";
+    const originalUpdate = profile.updateEntries.bind(profile);
+    profile.updateEntries = (() => {
+      throw new Error(`EACCES: cannot write ${join(privateRoot, privateModule)}`);
+    }) as typeof profile.updateEntries;
+
+    const attachedServer = new McpServer({ name: privateModule, version: "0.0.0" });
+    attachMcpTools(attachedServer, { profile, toolProfile: "agent" } as ToolContext);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await attachedServer.connect(serverSide);
+    const attachedClient = new Client({ name: "profile-failure-client", version: "0.0.0" });
+    await attachedClient.connect(clientSide);
+    try {
+      const result = await attachedClient.callTool({
+        name: "profile",
+        arguments: { action: "update", entries: [VALID_AGENT_UPDATE] },
+      });
+      const serialized = JSON.stringify(result);
+      expect(result.isError).toBe(true);
+      expect(parseToolBody(result as { content: unknown[] })).toEqual({
+        error: {
+          code: "PROFILE_UPDATE_FAILED",
+          message: "Daily Agent Profile update failed without exposing local details.",
+        },
+      });
+      expect(serialized).not.toContain(privateRoot);
+      expect(serialized).not.toContain(privateModule);
+      expect(serialized).not.toContain("EACCES");
+      expect(serialized).not.toContain("cannot write");
+    } finally {
+      profile.updateEntries = originalUpdate;
+      await attachedClient.close();
+      await attachedServer.close();
+    }
   });
 
   test("get returns only open entries and privacy-safe envelope metadata", async () => {

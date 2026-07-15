@@ -43,6 +43,7 @@ For each signal, classify its type：
    - `"skipped"` → 静默忽略
 3. **非记忆信号走各自通道**：
    - `agent_profile` → 仅当用户明确陈述偏好或规则时，使用完整字段更新：
+     下例只是字段形状模板；Agent 必须从用户原话派生稳定的 `id`、`type`、`category` 和 `content`，禁止照抄示例值。
      ```text
      profile({ action: "update", entries: [{
        id: "response-length-short",

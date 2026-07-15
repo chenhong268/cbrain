@@ -109,7 +109,9 @@ describe("checkAgentProfileSkillContract (#335)", () => {
         expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
           check: checkName(file),
           passed: false,
-          detail: `missing required token: ${token}`,
+          detail: token === 'scope: "open"'
+            ? 'forbidden daily token: scope: "scoped"'
+            : `missing required token: ${token}`,
         }]);
       });
     }
@@ -167,6 +169,54 @@ describe("checkAgentProfileSkillContract (#335)", () => {
         passed: false,
         detail: "missing required token: profile(",
       }]);
+    });
+
+    test(`rejects a private update after a safe canonical decoy in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nprofile({ action: "update", entries: [{ scope: "private", source: "explicit" }] })';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: scope: "private"',
+      }]);
+    });
+
+    test(`rejects a scoped update after a safe canonical decoy in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nprofile({ action: "update", entries: [{ scope: "scoped", source: "explicit" }] })';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: scope: "scoped"',
+      }]);
+    });
+
+    test(`rejects mixed open and private entries inside one call in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nprofile({ action: "update", entries: [{ scope: "open", source: "explicit" }, { scope: "private", source: "explicit" }] })';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: scope: "private"',
+      }]);
+    });
+
+    for (const reminder of ["不要忘记", "别忘记", "do not forget to", "don't forget to", "never forget to"]) {
+      test(`treats ${reminder} remove as a positive reminder in ${file}`, () => {
+        const files = valid();
+        files[file] += `\n${reminder} call profile({ action: "remove" })`;
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: 'forbidden daily token: action: "remove"',
+        }]);
+      });
+    }
+
+    test(`accepts a cross-line prohibition example in ${file}`, () => {
+      const files = valid();
+      files[file] += '\n禁止以下操作：\nprofile({ action: "remove" })';
+      expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
     });
   }
 });

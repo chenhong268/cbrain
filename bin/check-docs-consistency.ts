@@ -922,18 +922,31 @@ export function checkAgentProfileSkillContract(skillsDir: string): CheckResult[]
   const forbiddenTokens = [
     { label: "action: \"remove\"", pattern: /\baction\s*:\s*["']remove["']/ },
     { label: "action: \"reload\"", pattern: /\baction\s*:\s*["']reload["']/ },
+    { label: "scope: \"scoped\"", pattern: /\bscope\s*:\s*["']scoped["']/ },
+    { label: "scope: \"private\"", pattern: /\bscope\s*:\s*["']private["']/ },
     { label: "source: \"observed\"", pattern: /\bsource\s*:\s*["']observed["']/ },
     { label: "source: \"inferred\"", pattern: /\bsource\s*:\s*["']inferred["']/ },
   ] as const;
   const negativeCue = /(禁止|不得|不要|不能|不允许|严禁|切勿|\bdo not\b|\bdon't\b|\bmust not\b|\bnever\b)/i;
+  const positiveReminderCue = /(不要忘记|别忘记|\bdo not forget\b|\bdon't forget\b|\bnever forget\b)/i;
   const isLexicallyNegated = (text: string, index: number): boolean => {
     const boundedPrefix = text.slice(Math.max(0, index - 256), index);
+    // Preserve genuine cross-line prohibition examples such as
+    // "禁止以下操作：\nprofile(...)" while treating "不要忘记" / "never
+    // forget" as positive reminders rather than negations.
+    const blockProhibition = /(?:^|\n)\s*(?:[-*]\s*)?(?:禁止|不得|不要|不能|不允许|严禁|切勿|do not|don't|must not|never)[^\n]{0,160}[:：]\s*\n\s*$/i;
+    const block = boundedPrefix.match(blockProhibition)?.[0];
+    if (block && !positiveReminderCue.test(block)) return true;
+    const prohibitedCall = /(?:^|\n)\s*(?:[-*]\s*)?(?:禁止|不得|不要|不能|不允许|严禁|切勿|do not|don't|must not|never)[^\n]{0,160}[:：]\s*\n\s*profile\s*\([^)]{0,200}$/i;
+    const prohibitedPrefix = boundedPrefix.match(prohibitedCall)?.[0];
+    if (prohibitedPrefix && !positiveReminderCue.test(prohibitedPrefix)) return true;
     const boundary = /[\n.;。；!?！？]|\b(?:instead|however|but)\b|(?:而是|改为|但是|不过|然而|随后|然后)/gi;
     let clauseStart = 0;
     for (const match of boundedPrefix.matchAll(boundary)) {
       clauseStart = (match.index ?? 0) + match[0].length;
     }
-    return negativeCue.test(boundedPrefix.slice(clauseStart));
+    const clause = boundedPrefix.slice(clauseStart);
+    return !positiveReminderCue.test(clause) && negativeCue.test(clause);
   };
   const out: CheckResult[] = [];
 
@@ -955,31 +968,30 @@ export function checkAgentProfileSkillContract(skillsDir: string): CheckResult[]
     // A bounded lexical window keeps required fields attached to one profile(...)
     // example instead of accepting unrelated tokens scattered across the file.
     const calls = [...text.matchAll(/\bprofile\s*\([\s\S]{0,800}?\)/g)]
-      .filter((match) => !isLexicallyNegated(text, match.index ?? 0))
-      .map((match) => match[0]);
+      .filter((match) => !isLexicallyNegated(text, match.index ?? 0));
     if (calls.length === 0) {
       out.push({ check, passed: false, detail: "missing required token: profile(" });
-    } else if (!calls.some((call) => requiredTokens.every(({ pattern }) => pattern.test(call)))) {
-      const bestCall = calls
-        .map((call) => ({ call, score: requiredTokens.filter(({ pattern }) => pattern.test(call)).length }))
-        .sort((a, b) => b.score - a.score)[0].call;
-      for (const { label, pattern } of requiredTokens) {
-        if (!pattern.test(bestCall)) {
-          out.push({ check, passed: false, detail: `missing required token: ${label}` });
+    } else {
+      // Every executable call must satisfy the whole contract. A canonical
+      // decoy cannot make a later private/scoped/malformed call pass.
+      for (const match of calls) {
+        const call = match[0];
+        // Forbidden operations receive their dedicated stable diagnostic below.
+        if (forbiddenTokens.some(({ pattern }) => pattern.test(call))) continue;
+        for (const { label, pattern } of requiredTokens) {
+          if (!pattern.test(call)) {
+            out.push({ check, passed: false, detail: `missing required token: ${label}` });
+          }
         }
       }
     }
 
     for (const { label, pattern } of forbiddenTokens) {
-      let foundPositive = false;
-      for (const line of text.split("\n")) {
-        for (const match of line.matchAll(new RegExp(pattern.source, "g"))) {
-          if (isLexicallyNegated(line, match.index ?? 0)) continue;
+      for (const match of text.matchAll(new RegExp(pattern.source, "gi"))) {
+        if (!isLexicallyNegated(text, match.index ?? 0)) {
           out.push({ check, passed: false, detail: `forbidden daily token: ${label}` });
-          foundPositive = true;
           break;
         }
-        if (foundPositive) break;
       }
     }
   }
