@@ -156,6 +156,8 @@ describe.serial("real Agent-facing MCP profile contract", () => {
       for (const required of ["cbrain_recall", "next_actions", "read_discoveries"]) {
         expect(names.has(required)).toBe(true);
       }
+      expect(names.has("profile")).toBe(true);
+      expect(names.has("append_page")).toBe(false);
 
       const fixedCategoryTools = new Map([
         ["search", "cbrain_recall"],
