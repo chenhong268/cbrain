@@ -516,7 +516,16 @@ export async function runNerBackfillStage(
             committing = true;
           }
         } : undefined;
-        await pipeline.processNer(slug, resolved.body, resolved.type, true, undefined, new Set(), guard);
+        await pipeline.processNer(
+          slug,
+          resolved.body,
+          resolved.type,
+          true,
+          undefined,
+          new Set(),
+          guard,
+          batchId !== undefined,
+        );
         const activeLinkCount = fingerprinted?.repair ? countCurrentGraphLinks(db, slug) : 0;
         const result = fingerprinted
           ? fixedRepairResult(fingerprinted, {

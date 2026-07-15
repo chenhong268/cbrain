@@ -793,6 +793,432 @@ describe("runNerBackfillStage (#252)", () => {
     expect(stub).toBeTruthy();
   });
 
+  test("ordinary deferred NER leaves new stub indexing to the watcher", async () => {
+    let repairing = false;
+    let stubLanceAdds = 0;
+    const lance = {
+      ...createMockLanceDB(),
+      addChunks: async () => {
+        if (repairing) stubLanceAdds++;
+      },
+    };
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名普通延迟正文包含足够信息并提到匿名实体卯",
+      type: "text",
+      title: "匿名普通延迟记录",
+      skipNer: true,
+    });
+    expect(new JobQueueNerSubmitter(db).submitDeferredNer({ slug: source.slug }).disposition).toBe("inserted");
+    repairing = true;
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [{ name: "匿名实体卯", type: "person", relevance: "high", context: "匿名上下文" }],
+        relations: [],
+        events: [],
+      }),
+    };
+    const pages = new PageManager(db, testDir);
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const counts = await runNerBackfillStage(db, pipeline, pages, { maxItems: 1 });
+
+    const stub = db.rawDb.prepare("SELECT slug FROM pages WHERE title = ?").get("匿名实体卯") as { slug: string };
+    expect(counts.processed).toBe(1);
+    expect(stubLanceAdds).toBe(0);
+    expect(db.getChunksByPage(stub.slug, { summaryLevel: 0 })).toHaveLength(0);
+  });
+
+  test("governed repair indexes newly created NER stubs before finalizing", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const indexedInLance: Array<{ pageSlug: string; chunkIndex: number; content: string }> = [];
+    const lance = {
+      ...createMockLanceDB(),
+      addChunks: async (chunks: Array<{ pageSlug: string; chunkIndex: number; content: string }>) => {
+        indexedInLance.push(...chunks);
+      },
+    };
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const page = await seedIngest.ingest({
+      content: "匿名修复正文包含足够信息并提到匿名实体丁",
+      type: "text",
+      title: "匿名修复记录",
+      skipNer: true,
+    });
+    db.insertChunk(page.slug, 99, "第二个匿名片段");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [{ name: "匿名实体丁", type: "person", relevance: "high", context: "匿名上下文" }],
+        relations: [],
+        events: [],
+      }),
+    };
+    const pages = new PageManager(db, testDir);
+    indexedInLance.length = 0;
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+    const counts = await runNerBackfillStage(db, pipeline, pages, {
+      maxItems: 1,
+      batchId: receipt.batchId!,
+    });
+
+    expect(counts.processed).toBe(1);
+    const stub = db.rawDb.prepare("SELECT slug FROM pages WHERE title = ?").get("匿名实体丁") as { slug: string } | undefined;
+    expect(stub).toBeDefined();
+    expect(db.getChunksByPage(stub!.slug, { summaryLevel: 0 }).length).toBeGreaterThan(0);
+    expect(db.rawDb.prepare("SELECT 1 FROM chunks_fts WHERE page_slug = ? LIMIT 1").get(stub!.slug)).toBeTruthy();
+    expect(indexedInLance.some(chunk => chunk.pageSlug === stub!.slug && chunk.content.length > 0)).toBe(true);
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+      finalized: true,
+      outcomes: { resolved: 1, commitUnknown: 0 },
+    });
+  });
+
+  test("stub index failure leaves the governed batch commit-unknown and unfinalized", async () => {
+    let failStubIndex = false;
+    const lance = {
+      ...createMockLanceDB(),
+      addChunks: async () => {
+        if (failStubIndex) throw new Error("synthetic index failure");
+      },
+    };
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const page = await seedIngest.ingest({
+      content: "匿名失败正文包含足够信息并提到匿名实体戊",
+      type: "text",
+      title: "匿名失败记录",
+      skipNer: true,
+    });
+    db.insertChunk(page.slug, 99, "第二个匿名片段");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    failStubIndex = true;
+
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [{ name: "匿名实体戊", type: "person", relevance: "high", context: "匿名上下文" }],
+        relations: [],
+        events: [],
+      }),
+    };
+    const pages = new PageManager(db, testDir);
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const counts = await runNerBackfillStage(db, pipeline, pages, {
+      maxItems: 1,
+      batchId: receipt.batchId!,
+    });
+
+    expect(counts).toMatchObject({ processed: 0, failed: 1 });
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+      finalized: false,
+      outcomes: { commitUnknown: 1 },
+    });
+  });
+
+  test("governed repair batches all new stub embeddings into one provider call", async () => {
+    const baseEmbedding = createMockEmbeddingProvider();
+    let embedBatchCalls = 0;
+    const embedding: EmbeddingProvider = {
+      ...baseEmbedding,
+      embedBatch: async (texts) => {
+        embedBatchCalls++;
+        return baseEmbedding.embedBatch(texts);
+      },
+    };
+    const lanceRows: Array<{ pageSlug: string; content: string }> = [];
+    const lance = {
+      ...createMockLanceDB(),
+      addChunks: async (chunks: Array<{ pageSlug: string; content: string }>) => {
+        lanceRows.push(...chunks);
+      },
+    };
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const page = await seedIngest.ingest({
+      content: "匿名批量正文包含足够信息并提到两个匿名实体",
+      type: "text",
+      title: "匿名批量记录",
+      skipNer: true,
+    });
+    db.insertChunk(page.slug, 99, "第二个匿名片段");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    embedBatchCalls = 0;
+    lanceRows.length = 0;
+
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [
+          { name: "匿名实体己", type: "person", relevance: "high", context: "匿名上下文" },
+          { name: "匿名实体庚", type: "company", relevance: "high", context: "匿名上下文" },
+        ],
+        relations: [
+          { from: "匿名实体己", to: "匿名实体庚", relation: "works_at", context: "匿名关系上下文" },
+        ],
+        events: [],
+      }),
+    };
+    const pages = new PageManager(db, testDir);
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const counts = await runNerBackfillStage(db, pipeline, pages, {
+      maxItems: 1,
+      batchId: receipt.batchId!,
+    });
+
+    expect(counts.processed).toBe(1);
+    expect(embedBatchCalls).toBe(1);
+    for (const title of ["匿名实体己", "匿名实体庚"]) {
+      const stub = db.rawDb.prepare("SELECT slug FROM pages WHERE title = ?").get(title) as { slug: string };
+      const finalBody = pages.getBySlug(stub.slug)!.body;
+      const sqliteContent = db.getChunksByPage(stub.slug, { summaryLevel: 0 }).map(chunk => chunk.content).join("\n");
+      const lanceContent = lanceRows.filter(row => row.pageSlug === stub.slug).map(row => row.content).join("\n");
+      expect(finalBody).toContain("Known Relations");
+      expect(sqliteContent).toBe(finalBody);
+      expect(db.getFtsContentsByPage(stub.slug)).toContain(finalBody);
+      expect(lanceContent).toBe(finalBody);
+    }
+  });
+
+  for (const mutation of ["extra", "missing"] as const) {
+    test(`governed repair rejects ${mutation} stub embedding results before any index write`, async () => {
+      const baseEmbedding = createMockEmbeddingProvider();
+      const embedding: EmbeddingProvider = {
+        ...baseEmbedding,
+        embedBatch: async (texts) => {
+          const results = await baseEmbedding.embedBatch(texts);
+          if (!texts.every(text => text.includes("Auto-extracted"))) return results;
+          return mutation === "extra"
+            ? [...results, results[0]!]
+            : results.slice(0, -1);
+        },
+      };
+      const lance = createMockLanceDB();
+      const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名向量数量正文包含足够信息并提到两个匿名实体",
+        type: "text",
+        title: "匿名向量数量记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const receipt = enqueueZeroLinkBackfill(db, 1);
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [
+            { name: "匿名实体辛", type: "person", relevance: "high", context: "匿名上下文" },
+            { name: "匿名实体壬", type: "company", relevance: "high", context: "匿名上下文" },
+          ],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pages = new PageManager(db, testDir);
+      const pipeline = new ContentPipeline(db, embedding, lance as never, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, {
+        maxItems: 1,
+        batchId: receipt.batchId!,
+      });
+
+      expect(counts).toMatchObject({ processed: 0, failed: 1 });
+      const stubs = db.rawDb.prepare(
+        "SELECT slug FROM pages WHERE title IN (?, ?) ORDER BY title",
+      ).all("匿名实体辛", "匿名实体壬") as Array<{ slug: string }>;
+      expect(stubs).toHaveLength(2);
+      expect(stubs.every(stub => db.getChunksByPage(stub.slug, { summaryLevel: 0 }).length === 0)).toBe(true);
+      expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+        finalized: false,
+        outcomes: { commitUnknown: 1 },
+      });
+    });
+  }
+
+  for (const pageState of ["missing", "empty"] as const) {
+    test(`governed repair rejects a ${pageState} created stub before finalizing`, async () => {
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名缺页正文包含足够信息并提到匿名实体癸",
+        type: "text",
+        title: "匿名缺页记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const receipt = enqueueZeroLinkBackfill(db, 1);
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体癸", type: "person", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pages = new PageManager(db, testDir);
+      const getBySlug = pages.getBySlug.bind(pages);
+      let stubReads = 0;
+      pages.getBySlug = ((slug: string) => {
+        const page = getBySlug(slug);
+        if (slug === source.slug || !page) return page;
+        stubReads++;
+        if (stubReads === 1) return page; // PageManager.create must finish normally.
+        return pageState === "missing" ? null : { ...page, body: "" };
+      }) as typeof pages.getBySlug;
+      const pipeline = new ContentPipeline(db, embedding, lance as never, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, {
+        maxItems: 1,
+        batchId: receipt.batchId!,
+      });
+
+      expect(counts).toMatchObject({ processed: 0, failed: 1 });
+      expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+        finalized: false,
+        outcomes: { commitUnknown: 1 },
+      });
+    });
+  }
+
+  test("a second stub Lance failure leaves the governed batch commit-unknown", async () => {
+    let stubAdds = 0;
+    let repairing = false;
+    const indexedSlugs: string[] = [];
+    const lance = {
+      ...createMockLanceDB(),
+      addChunks: async (chunks: Array<{ pageSlug: string }>) => {
+        if (!repairing) return;
+        stubAdds++;
+        if (stubAdds === 2) throw new Error("synthetic second stub Lance failure");
+        indexedSlugs.push(...chunks.map(chunk => chunk.pageSlug));
+      },
+    };
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名部分索引正文包含足够信息并提到两个匿名实体",
+      type: "text",
+      title: "匿名部分索引记录",
+      skipNer: true,
+    });
+    db.insertChunk(source.slug, 99, "第二个匿名片段");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    repairing = true;
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [
+          { name: "匿名实体子", type: "person", relevance: "high", context: "匿名上下文" },
+          { name: "匿名实体丑", type: "company", relevance: "high", context: "匿名上下文" },
+        ],
+        relations: [],
+        events: [],
+      }),
+    };
+    const pages = new PageManager(db, testDir);
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const counts = await runNerBackfillStage(db, pipeline, pages, {
+      maxItems: 1,
+      batchId: receipt.batchId!,
+    });
+
+    expect(stubAdds).toBe(2);
+    expect(counts).toMatchObject({ processed: 0, failed: 1 });
+    const firstStub = db.rawDb.prepare("SELECT slug FROM pages WHERE title = ?").get("匿名实体子") as { slug: string };
+    const secondStub = db.rawDb.prepare("SELECT slug FROM pages WHERE title = ?").get("匿名实体丑") as { slug: string };
+    expect(db.getChunksByPage(firstStub.slug, { summaryLevel: 0 }).length).toBeGreaterThan(0);
+    expect(db.getChunksByPage(secondStub.slug, { summaryLevel: 0 })).toHaveLength(0);
+    expect(indexedSlugs).toContain(firstStub.slug);
+    expect(indexedSlugs).not.toContain(secondStub.slug);
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+      finalized: false,
+      outcomes: { commitUnknown: 1 },
+    });
+  });
+
+  for (const fault of ["SQLite chunk", "FTS"] as const) {
+    test(`a stub ${fault} failure leaves the governed batch commit-unknown`, async () => {
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名索引故障正文包含足够信息并提到匿名实体寅",
+        type: "text",
+        title: "匿名索引故障记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const receipt = enqueueZeroLinkBackfill(db, 1);
+      if (fault === "SQLite chunk") {
+        const insertChunk = db.insertChunk.bind(db);
+        db.insertChunk = ((pageSlug: string, index: number, content: string) => {
+          if (pageSlug !== source.slug) throw new Error("synthetic SQLite chunk failure");
+          return insertChunk(pageSlug, index, content);
+        }) as typeof db.insertChunk;
+      } else {
+        const ftsInsert = db.ftsInsert.bind(db);
+        db.ftsInsert = ((pageSlug: string, content: string) => {
+          if (pageSlug !== source.slug) throw new Error("synthetic FTS failure");
+          return ftsInsert(pageSlug, content);
+        }) as typeof db.ftsInsert;
+      }
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体寅", type: "person", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pages = new PageManager(db, testDir);
+      const pipeline = new ContentPipeline(db, embedding, lance as never, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, {
+        maxItems: 1,
+        batchId: receipt.batchId!,
+      });
+
+      const stub = db.rawDb.prepare("SELECT slug FROM pages WHERE title = ?").get("匿名实体寅") as { slug: string };
+      expect(counts).toMatchObject({ processed: 0, failed: 1 });
+      expect(db.getChunksByPage(stub.slug, { summaryLevel: 0 })).toHaveLength(0);
+      expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+        finalized: false,
+        outcomes: { commitUnknown: 1 },
+      });
+    });
+  }
+
   test("stale running job is recovered and processed in the same run", async () => {
     const embedding = createMockEmbeddingProvider();
     const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);

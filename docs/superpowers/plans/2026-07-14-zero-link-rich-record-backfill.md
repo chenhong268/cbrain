@@ -446,9 +446,11 @@ For each requested batch 5, 20, 50:
 3. Consume exact UUID using `--limit selected`.
 4. If all children are terminal and `commitUnknown=0` but the manifest is still unfinalized, rerun the **same UUID** with the same `selected` limit; require finalization-only behavior and zero additional LLM calls.
 5. Require zero pending/running and `finalized=true`. Any `commitUnknown>0` stays unfinalized and triggers matched-backup rollback. Any other manifest that still cannot finalize keeps every writer stopped and also triggers matched-backup rollback.
-6. After restore, privately verify the archive and rerun DB/vault/Lance/FK/fsck/consistency gates before any restart.
+6. Before the DB/vault restore, stage and validate Lance from the same matched archive under the live Lance parent. Then run repository restore for DB/vault, install staged Lance by same-filesystem directory rename, compare the restored live file digest with the staged digest, and keep the post-batch tree quarantined until FK/fsck/consistency gates pass. Never run sync between restore and verification. Follow spec §13.4 exactly; DB/vault-only restore is forbidden.
 7. Re-run dry-run/fsck/FK/consistency/privacy; record scalar deltas only.
 8. Stop on every spec stop condition; canary requires at least one resolved.
+
+Runtime correction (2026-07-15): only a validated manifest-owned zero-link repair immediately indexes each newly created stub before job completion; `sourceGuard` alone does not enable it because ordinary fingerprinted deferred NER may race the watcher. Corrective regression tests must prove SQLite chunks, FTS, and Lance coverage on success; batched embedding cardinality; no immediate index for ordinary deferred NER; and `commit_unknown` plus an unfinalized manifest for embedding/Lance/SQLite/FTS failures. Re-run the five-item canary from a fresh matched backup before any 20/50 progression.
 
 No unfinalized manifest may cross the reopen-writes boundary. Before reopening writes, rewrite every persistent client entrypoint to the guarded detached runtime, smoke reconnect/restart, run live MCP unified/alias privacy shape probes, and prove old installed runtime cannot acquire writer. Once writes reopen, never restore an older full archive; repair/deploy forward only.
 

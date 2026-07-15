@@ -788,14 +788,88 @@ If a batch creates a data or vault consistency regression **while the maintenanc
 
 1. Keep serve/watcher stopped.
 2. Preserve sanitized diagnostics and scalar counts.
-3. Run `"${CBRAIN_RUN[@]}" restore <pre-batch-zip> --force` to restore its matched SQLite + vault snapshot.
-4. The NER backfill path in this issue does not call Lance write APIs, so the pre-batch Lance directory remains unchanged and stays matched to the restored source snapshot. If verification detects any unexpected Lance mutation, restore `lancedb/` manually from the same archive while services remain stopped.
-5. Re-run FK, `fsck`, and consistency checks, including Lance verification.
-6. Restart serve only after the restored state passes the preflight checks.
+3. Before changing live state, stage and validate `lancedb/` from the matched archive in a private directory created under the configured live Lance parent. Staging under that parent is mandatory so the later directory renames stay on one filesystem. The following zsh is the rollout contract; variables remain private and are never copied into the delivery report:
+
+   ```zsh
+   umask 077
+   BATCH_ZIP="<matched-pre-batch-zip>"
+   LANCE_PATH="<configured-live-lance-path>"
+   LANCE_PARENT="${LANCE_PATH:h}"
+   stage_matched_lance() {
+     setopt localoptions pipefail
+     local zip_entries stage_path staged_digest
+     test -f "$BATCH_ZIP" && test -d "$LANCE_PATH" || return 1
+     unzip -tq "$BATCH_ZIP" >/dev/null || return 1
+     zip_entries="$(zipinfo -1 "$BATCH_ZIP")" || return 1
+     print -r -- "$zip_entries" | awk '
+       BEGIN { found = 0; bad = 0 }
+       /^lancedb\// { found = 1 }
+       /^\// || /(^|\/)\.\.(\/|$)/ || /\\/ { bad = 1 }
+       END { exit (found && !bad) ? 0 : 1 }
+     ' || return 1
+     stage_path="$(mktemp -d "${LANCE_PARENT}/.cbrain-lance-restore.XXXXXXXX")" || return 1
+     typeset -g LANCE_STAGE="$stage_path"
+     mkdir -m 700 "$LANCE_STAGE/extracted" || return 1
+     unzip -qq "$BATCH_ZIP" 'lancedb/*' -d "$LANCE_STAGE/extracted" || return 1
+     typeset -g STAGED_LANCE="$LANCE_STAGE/extracted/lancedb"
+     test -d "$STAGED_LANCE" || return 1
+     test -z "$(find "$STAGED_LANCE" -type l -print -quit)" || return 1
+     test -n "$(find "$STAGED_LANCE" -type f -print -quit)" || return 1
+     staged_digest="$(
+       cd "$STAGED_LANCE" &&
+       find . -type f -print0 | LC_ALL=C sort -z |
+         xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}'
+     )" || return 1
+     typeset -g STAGED_DIGEST="$staged_digest"
+     test -n "$STAGED_DIGEST"
+   }
+   stage_matched_lance || exit 1
+   ```
+
+4. Only after step 3 succeeds, run `"${CBRAIN_RUN[@]}" restore "$BATCH_ZIP" --force || exit 1` to restore its matched SQLite + vault snapshot. A non-zero exit terminates the private rollout shell; do not execute step 5. The repository command does **not** restore Lance and deletes its own extraction directory, so it cannot substitute for steps 3 and 5.
+5. While every service remains stopped, install the already validated Lance snapshot with same-filesystem renames. Keep the post-batch tree quarantined until the restored live tree passes an exact file digest check:
+
+   ```zsh
+   install_staged_lance() {
+     setopt localoptions pipefail
+     local live_digest
+     typeset -g POST_BATCH_LANCE="$LANCE_STAGE/post-batch-lancedb"
+     test ! -e "$POST_BATCH_LANCE" || return 1
+     mv "$LANCE_PATH" "$POST_BATCH_LANCE" || return 1
+     if ! mv "$STAGED_LANCE" "$LANCE_PATH"; then
+       mv "$POST_BATCH_LANCE" "$LANCE_PATH" || true
+       return 1
+     fi
+     live_digest="$(
+       cd "$LANCE_PATH" &&
+       find . -type f -print0 | LC_ALL=C sort -z |
+         xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}'
+     )" || return 1
+     typeset -g LIVE_DIGEST="$live_digest"
+     test "$LIVE_DIGEST" = "$STAGED_DIGEST"
+   }
+   install_staged_lance || exit 1
+   ```
+
+   Any failure after the DB/vault restore leaves serve/watcher stopped. Do not delete either Lance tree or reopen writers; retry the matched Lance install or investigate forward. Never run `sync` between the three-layer restore and its verification because that would create a new unmatched index state.
+6. Re-run FK, `fsck`, and consistency checks, including Lance coverage. Only after all checks pass may the quarantined post-batch Lance tree and private staging directory be removed.
+7. Restart serve only after the restored state passes the preflight checks.
 
 The authority to restore a pre-batch/preflight archive expires permanently when any writer is reopened. After that point the archive predates possible legitimate ingest/sync/link/job changes and must never be applied wholesale. A guarded-runtime failure after write reopening is handled by stopping all entries and repairing/deploying forward from the current live state; if the guarded code cannot be restored, the service remains stopped until the reviewed/merged runtime is available. There is no fallback to the old runtime or an old full archive after new writes.
 
 If the batch merely produces legitimate `terminal_no_graph_links` outcomes without data corruption, do not restore; those terminal markers prevent repeated LLM spend. Stop the progression if the canary usefulness gate fails.
+
+#### Runtime correction — 2026-07-15
+
+The original rollback design assumed the NER backfill path made no Lance writes. The five-item production canary disproved the underlying completeness assumption: two successful repairs created fourteen `auto-extracted` stub pages after the source-page index phase, increasing `sqlite.page_without_chunks` from 22 to 36 while the watcher was intentionally stopped. The matched rollback restored the 22-page baseline.
+
+The corrected contract is:
+
+1. A **manifest-owned zero-link repair** must index every newly created stub through the existing `ContentPipeline.writeIndexes` path before completing the job.
+2. `sourceGuard` alone is not sufficient authorization for immediate indexing: ordinary fingerprinted deferred NER can run beside the watcher and retains watcher-owned indexing, as does synchronous ingest. Only the batch consumer's validated `batchId` enables immediate stub indexing while the production runbook keeps the watcher stopped.
+3. A stub embedding, Lance, SQLite-chunk, or FTS failure after the commit fence is `commit_unknown`. For a manifest-owned repair, the manifest stays unfinalized and the matched batch backup must be restored. An ordinary fingerprinted deferred job has no manifest or matched backup: it enters the existing global ordinary `commit_unknown` audit, cannot auto-retry, and requires manual forward repair/resolution.
+4. Because successful guarded repairs now intentionally write Lance, every matched rollback restores DB, vault, **and Lance** from the same archive before verification. The prior “Lance remains unchanged” assumption is superseded.
+5. A successful batch must show no increase in `sqlite.page_without_chunks`, FTS coverage debt, or Lance coverage debt before progression.
 
 ### 13.5 Restart
 
@@ -1041,7 +1115,7 @@ The first independent review of commit `cf6bf92` returned FAIL with nine HIGH an
 8. Cancellation is scoped to the canonical fingerprint; legacy cancellation is review-only and conflicting active/cancelled state fails closed.
 9. Each enqueue receives a random batch UUID, and the consumer validates its exact manifest ownership list instead of processing unrelated NER jobs.
 10. Dry-run uses a true read-only SQLite connection and fixed safe config/DB error envelopes; enqueue checks the writer before writable open and uses no unrelated providers.
-11. Production backup is the repository full archive; rollback restores DB+vault and explicitly accounts for the worker's non-mutation of Lance.
+11. Production backup is the repository full archive; manifest-owned repair rollback restores DB, vault, and Lance from the same snapshot using the executable staged/digest-verified directory-swap procedure in §13.4.
 
 The same independent reviewer must re-run after this correction commit. Implementation may start only when the reviewer reports no CRITICAL/HIGH findings.
 

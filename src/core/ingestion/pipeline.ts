@@ -260,6 +260,7 @@ export class ContentPipeline {
     precomputed?: ExtractionResult,
     skipMentionSlugs?: Set<string>,
     sourceGuard?: NerSourceGuard,
+    indexCreatedStubs = false,
   ): Promise<NerPipelineResult | null> {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
@@ -292,7 +293,15 @@ export class ContentPipeline {
         extraction,
       });
     }
-    return this.applyExtraction(fromSlug, extraction, skipDatelessEvents, skipMentionSlugs, sourceGuard, body.trim().length);
+    return this.applyExtraction(
+      fromSlug,
+      extraction,
+      skipDatelessEvents,
+      skipMentionSlugs,
+      sourceGuard,
+      body.trim().length,
+      indexCreatedStubs,
+    );
   }
 
   // ─── Private ────────────────────────────────────────────────
@@ -304,6 +313,7 @@ export class ContentPipeline {
     skipMentionSlugs?: Set<string>,
     sourceGuard?: NerSourceGuard,
     bodyChars = 0,
+    indexCreatedStubs = false,
   ): Promise<NerPipelineResult> {
     const entitySlugMap = new Map<string, string>();
     const stubsCreated = new Set<string>();
@@ -446,6 +456,35 @@ export class ContentPipeline {
         if (rels.length > 0) {
           const body = buildStubBody(name, rels, fromSlug);
           this.pages.update(slug, { body });
+        }
+      }
+
+      // A manifest-owned repair runs with the watcher stopped and behind a
+      // commit fence. Index its new stubs before success so the repair cannot
+      // leave hard page-without-chunks debt. Ordinary deferred and synchronous
+      // NER keep their existing watcher-owned indexing behavior.
+      if (sourceGuard && indexCreatedStubs) {
+        const pages = this.pages;
+        const pendingIndexes = [...stubsCreated].map(slug => {
+          const page = pages.getBySlug(slug);
+          if (!page) throw new Error("NER_STUB_INDEX_SOURCE_UNAVAILABLE");
+          const body = page.body;
+          if (!body.trim()) throw new Error("NER_STUB_INDEX_SOURCE_EMPTY");
+          return { slug, chunks: chunkContent(body, this.chunkSize) };
+        });
+        const chunkTexts = pendingIndexes.flatMap(({ chunks }) => chunks.map(chunk => chunk.content));
+        const embedResults = chunkTexts.length > 0
+          ? await this.embedding.embedBatch(chunkTexts)
+          : [];
+        if (embedResults.length !== chunkTexts.length) {
+          throw new Error("NER_STUB_EMBEDDING_COUNT_MISMATCH");
+        }
+
+        let resultOffset = 0;
+        for (const { slug, chunks } of pendingIndexes) {
+          const pageEmbedResults = embedResults.slice(resultOffset, resultOffset + chunks.length);
+          resultOffset += chunks.length;
+          await this.writeIndexes(slug, chunks, pageEmbedResults);
         }
       }
     }
