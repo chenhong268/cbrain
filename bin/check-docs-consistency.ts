@@ -906,6 +906,78 @@ export function checkAgentFacingRoutingProfile(
   }];
 }
 
+/** #335 — keep the two signal-routing skills on the governed daily Profile
+ * contract. This check deliberately reads only the canonical router and
+ * detector files: other docs may describe full-profile operations, while these
+ * two files are executable daily-Agent policy. */
+export function checkAgentProfileSkillContract(skillsDir: string): CheckResult[] {
+  const files = ["signal-router.md", "signal-detector.md"] as const;
+  const aliases = ["get_profile", "update_profile", "remove_profile", "reload_profile"] as const;
+  const requiredTokens = [
+    { label: "action: \"update\"", pattern: /\baction\s*:\s*["']update["']/ },
+    { label: "entries", pattern: /\bentries\b/ },
+    { label: "scope: \"open\"", pattern: /\bscope\s*:\s*["']open["']/ },
+    { label: "source: \"explicit\"", pattern: /\bsource\s*:\s*["']explicit["']/ },
+  ] as const;
+  const forbiddenTokens = [
+    { label: "action: \"remove\"", pattern: /\baction\s*:\s*["']remove["']/ },
+    { label: "action: \"reload\"", pattern: /\baction\s*:\s*["']reload["']/ },
+    { label: "source: \"observed\"", pattern: /\bsource\s*:\s*["']observed["']/ },
+    { label: "source: \"inferred\"", pattern: /\bsource\s*:\s*["']inferred["']/ },
+  ] as const;
+  const negativeCue = /(禁止|不得|不要|不能|不允许|严禁|切勿|do not|don't|must not|never|forbid)/i;
+  const out: CheckResult[] = [];
+
+  for (const file of files) {
+    const path = join(skillsDir, file);
+    const check = `agent profile skill contract @skills/${file}`;
+    if (!existsSync(path)) {
+      out.push({ check, passed: false, detail: `missing skill file: ${file}` });
+      continue;
+    }
+
+    const text = readFileSync(path, "utf-8");
+    for (const alias of aliases) {
+      if (new RegExp(`\\b${alias}\\b`).test(text)) {
+        out.push({ check, passed: false, detail: `forbidden alias: ${alias}` });
+      }
+    }
+
+    // A bounded lexical window keeps required fields attached to one profile(...)
+    // example instead of accepting unrelated tokens scattered across the file.
+    const calls = [...text.matchAll(/\bprofile\s*\([\s\S]{0,800}?\)/g)].map((match) => match[0]);
+    if (calls.length === 0) {
+      out.push({ check, passed: false, detail: "missing required token: profile(" });
+    } else if (!calls.some((call) => requiredTokens.every(({ pattern }) => pattern.test(call)))) {
+      const bestCall = calls
+        .map((call) => ({ call, score: requiredTokens.filter(({ pattern }) => pattern.test(call)).length }))
+        .sort((a, b) => b.score - a.score)[0].call;
+      for (const { label, pattern } of requiredTokens) {
+        if (!pattern.test(bestCall)) {
+          out.push({ check, passed: false, detail: `missing required token: ${label}` });
+        }
+      }
+    }
+
+    for (const line of text.split("\n")) {
+      for (const { label, pattern } of forbiddenTokens) {
+        const match = pattern.exec(line);
+        if (match) {
+          const prefix = line.slice(Math.max(0, match.index - 96), match.index);
+          if (negativeCue.test(prefix)) continue;
+          out.push({ check, passed: false, detail: `forbidden daily token: ${label}` });
+        }
+      }
+    }
+  }
+
+  return out.length > 0 ? out : [{
+    check: "agent profile skill contract",
+    passed: true,
+    detail: "signal-router.md and signal-detector.md use the unified explicit open update contract",
+  }];
+}
+
 /** #322 — keep the daily Agent on canonical write + operational recall paths.
  * This is deliberately structural and limited to managed skills: public docs
  * may discuss lower-level recovery, but skills are executable Agent policy. */
@@ -1159,6 +1231,7 @@ function main(): void {
     ...checkAgentContractTools(new Set(tools.map((t) => t.name)), join(PROJECT_DIR, "skills")),
     ...checkAgentFacingRoutingProfile(join(PROJECT_DIR, "skills")),
     ...checkAgentWorkflowContract(join(PROJECT_DIR, "skills")),
+    ...checkAgentProfileSkillContract(join(PROJECT_DIR, "skills")),
     ...checkIngestPageTypeDocs(docs),
     ...checkSections(docs, tools, cli),
   ];

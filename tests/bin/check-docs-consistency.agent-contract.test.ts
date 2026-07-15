@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   checkAgentContractTools,
   checkAgentFacingRoutingProfile,
+  checkAgentProfileSkillContract,
   checkAgentWorkflowContract,
   checkIngestPageTypeDocs,
   checkToolDescriptions,
@@ -38,6 +39,101 @@ afterEach(() => {
 function fails(r: CheckResult[]): boolean {
   return r.some((x) => !x.passed);
 }
+
+describe("checkAgentProfileSkillContract (#335)", () => {
+  const skillFiles = ["signal-router.md", "signal-detector.md"] as const;
+  const validSkill = [
+    "# Synthetic profile signal contract",
+    "Use only the unified daily call:",
+    "`profile({ action: \"update\", entries: [{ scope: \"open\", source: \"explicit\" }] })`",
+    "Do not use action: \"remove\", action: \"reload\", source: \"observed\", or source: \"inferred\".",
+    "fixture-body-sentinel",
+  ].join("\n");
+  const valid = () => Object.fromEntries(skillFiles.map((file) => [file, validSkill]));
+  const checkName = (file: string) => `agent profile skill contract @skills/${file}`;
+
+  test("accepts the unified explicit open update contract in both canonical skills", () => {
+    expect(checkAgentProfileSkillContract(withSkills(valid()))).toEqual([{
+      check: "agent profile skill contract",
+      passed: true,
+      detail: "signal-router.md and signal-detector.md use the unified explicit open update contract",
+    }]);
+  });
+
+  test("reads only the two canonical signal skills", () => {
+    const dir = withSkills({
+      ...valid(),
+      "decoy.md": "update_profile profile({ action: \"remove\", source: \"observed\" }) decoy-body-sentinel",
+    });
+    expect(fails(checkAgentProfileSkillContract(dir))).toBe(false);
+  });
+
+  for (const file of skillFiles) {
+    test(`rejects missing ${file}`, () => {
+      const files = valid();
+      delete files[file];
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: `missing skill file: ${file}`,
+      }]);
+    });
+  }
+
+  for (const file of skillFiles) {
+    for (const alias of ["get_profile", "update_profile", "remove_profile", "reload_profile"]) {
+      test(`rejects ${alias} in ${file} without echoing body text`, () => {
+        const files = valid();
+        files[file] += `\nUse ${alias} fixture-body-alias-sentinel`;
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: `forbidden alias: ${alias}`,
+        }]);
+      });
+    }
+  }
+
+  const requiredTokens = [
+    ["profile(", "profile_call("],
+    ["action: \"update\"", "action: \"write\""],
+    ["entries", "records"],
+    ["scope: \"open\"", "scope: \"scoped\""],
+    ["source: \"explicit\"", "source: \"manual\""],
+  ] as const;
+  for (const file of skillFiles) {
+    for (const [token, replacement] of requiredTokens) {
+      test(`rejects ${file} missing ${token}`, () => {
+        const files = valid();
+        files[file] = files[file].replace(token, replacement);
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: `missing required token: ${token}`,
+        }]);
+      });
+    }
+  }
+
+  for (const file of skillFiles) {
+    for (const token of [
+      'action: "remove"',
+      'action: "reload"',
+      'source: "observed"',
+      'source: "inferred"',
+    ]) {
+      test(`rejects positive ${token} in ${file}`, () => {
+        const files = valid();
+        files[file] += `\nCall profile({ ${token} }) fixture-body-forbidden-sentinel`;
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: `forbidden daily token: ${token}`,
+        }]);
+      });
+    }
+  }
+});
 
 describe("checkAgentContractTools (#316)", () => {
   test("Check 2 backticked: 优先用 `deep_recall` fails", () => {
