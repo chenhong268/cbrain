@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
+import { loadConfigWithPath, createDeps, resolveRuntimePath, type CBrainConfig } from "../context.js";
 import { createServer, registerDreamWorker } from "../../mcp/server.js";
 import { buildContext } from "../../mcp/context.js";
 import { createHttpServer } from "../../http/server.js";
@@ -8,6 +8,7 @@ import { FKMigrationError } from "../../storage/sqlite.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
 import { DEFAULT_STOP_DEADLINE_MS, type FileWatcher } from "../../core/maintenance/watcher.js";
 import { dirname, resolve } from "node:path";
+import { resolveTrustedVaultBoundary } from "../../core/maintenance/misplaced-vault-artifacts.js";
 export interface ShutdownHandles {
   httpServer?: { stop(immediate?: boolean): void };
   watcher?: FileWatcher;
@@ -80,7 +81,7 @@ function installShutdownHandlers(handles: ShutdownHandles): void {
   });
 }
 
-async function initWatcher(config: ReturnType<typeof loadConfig>, deps: ReturnType<typeof createDeps>): Promise<{ watcher: FileWatcher; lock: WatcherLock } | undefined> {
+async function initWatcher(config: CBrainConfig, deps: ReturnType<typeof createDeps>): Promise<{ watcher: FileWatcher; lock: WatcherLock } | undefined> {
   const watcherLock = new WatcherLock(deps.profileDir!);
   const lockResult = watcherLock.tryAcquire();
   if (!lockResult.acquired) {
@@ -168,7 +169,12 @@ export function register(program: Command) {
     .option("--port <port>", "HTTP port", "3399")
     .option("--force", "Skip stale PID cleanup (does NOT bypass writer gate)")
     .action(async (opts) => {
-      const config = loadConfig();
+      const loaded = loadConfigWithPath();
+      const config = loaded.config;
+      const vaultBoundary = resolveTrustedVaultBoundary({
+        configRoot: loaded.configRoot,
+        vaultPath: config.vaultPath,
+      });
       const profileDir = dirname(resolve(config.dbPath));
 
       // ── profile-wide single-writer gate (issue #208) ──
@@ -192,7 +198,7 @@ export function register(program: Command) {
 
       let deps: ReturnType<typeof createDeps>;
       try {
-        deps = createDeps(config);
+        deps = createDeps(config, true, vaultBoundary);
       } catch (e) {
         // #209: FK violation during migration → fail fast with anonymized diagnostic.
         // No HTTP/MCP/watcher/LanceDB start; no crash-loop (single clean exit).

@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { createDeps, type CBrainConfig } from "../../src/cli/context.js";
+import type { TrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 function makeConfig(overrides?: Partial<CBrainConfig>): CBrainConfig {
   return {
@@ -13,6 +14,28 @@ function makeConfig(overrides?: Partial<CBrainConfig>): CBrainConfig {
 }
 
 describe("createDeps (#252)", () => {
+  test("plain synthetic config does not infer a trusted vault boundary", () => {
+    const deps = createDeps(makeConfig(), false);
+    try {
+      expect(deps.vaultBoundary).toBeUndefined();
+    } finally {
+      deps.db.close();
+    }
+  });
+
+  test("preserves an explicitly supplied trusted vault boundary by identity", () => {
+    const vaultBoundary = {
+      configRoot: "/tmp/cbrain-test-cli",
+      vaultPath: "/tmp/cbrain-test-cli/vault",
+    } as unknown as TrustedVaultBoundary;
+    const deps = createDeps(makeConfig(), false, vaultBoundary);
+    try {
+      expect(deps.vaultBoundary).toBe(vaultBoundary);
+    } finally {
+      deps.db.close();
+    }
+  });
+
   test("createDeps threads nerIngestMode from env into deps", () => {
     process.env.CBRAIN_INGEST_NER_MODE = "defer";
     try {

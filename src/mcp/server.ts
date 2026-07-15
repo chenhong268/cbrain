@@ -10,12 +10,14 @@ import { version } from "../version.js";
 import { registerAllTools } from "./register.js";
 import type { IngestNerMode } from "../cli/context.js";
 import { TOOL_PROFILE_ALLOWLISTS, type ToolProfile } from "./tool-profiles.js";
+import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-artifacts.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
   embedding: EmbeddingProvider;
   lance: LanceDBManager;
   vaultPath: string;
+  vaultBoundary?: TrustedVaultBoundary;
   dbPath?: string;
   llm?: LLMProvider;
   profileDir?: string;
@@ -35,7 +37,7 @@ export function registerDreamWorker(ctx: ToolContext): void {
     const { HealthChecker } = await import("../core/maintenance/health.js");
     const report = await runDream(
       ctx.vaultPath, ctx.db, ctx.sync, ctx.enrich,
-      new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath),
+      new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath, ctx.vaultBoundary),
       ctx.outputsDir, ctx.logger, undefined, ctx.dbPath,
       ctx.llm ? { llm: ctx.llm, embedding: ctx.embedding, lance: ctx.lance } : undefined,
       ctx.lance,

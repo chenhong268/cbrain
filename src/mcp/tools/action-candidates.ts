@@ -110,7 +110,7 @@ export function registerActionCandidateTools(server: McpServer, ctx: ToolContext
       drafts.push(...buildActionCandidatesFromDiscoveries(rows));
     }
     if (srcs.includes("health")) {
-      const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath);
+      const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath, ctx.vaultBoundary);
       const report = await checker.checkAll();
       const signalLookup = (slug: string): PageSignals | undefined => {
         if (!slug || slug === "-") return undefined;

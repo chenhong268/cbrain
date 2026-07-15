@@ -7,6 +7,7 @@ import { LanceDBManager } from "../../src/storage/lancedb.js";
 import { buildContext } from "../../src/mcp/context.js";
 import { createDeps } from "../../src/cli/context.js";
 import type { CBrainConfig } from "../../src/cli/context.js";
+import type { TrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 const TEST_DIR = "/tmp/cbrain-test-tool-profile-thread";
 const ORIG_ENV = process.env.CBRAIN_MCP_TOOL_PROFILE;
@@ -50,6 +51,16 @@ describe("buildContext threads toolProfile", () => {
   test("defaults to full when absent", () => {
     const ctx = buildContext({ ...depsBase() });
     expect(ctx.toolProfile).toBe("full");
+  });
+
+  test("preserves the exact trusted vault boundary supplied by the entrypoint", () => {
+    const vaultBoundary = {
+      configRoot: TEST_DIR,
+      vaultPath: join(TEST_DIR, "vault"),
+    } as unknown as TrustedVaultBoundary;
+    const ctx = buildContext({ ...depsBase(), vaultBoundary });
+    expect(ctx.vaultBoundary).toBe(vaultBoundary);
+    ctx.db.close();
   });
 });
 

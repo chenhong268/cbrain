@@ -9,6 +9,7 @@ import { ZhipuLLMProvider } from "../llm/zhipu.js";
 import type { CBrainDeps } from "../mcp/server.js";
 import { resolveToolProfile } from "../mcp/tool-profiles.js";
 import type { NerMode } from "../core/ingestion/ner-write-path.js";
+import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-artifacts.js";
 
 const CONFIG_FILE = "cbrain.json";
 
@@ -159,7 +160,11 @@ export function loadConfig(): CBrainConfig {
   return loadConfigWithPath().config;
 }
 
-export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrainDeps {
+export function createDeps(
+  config: CBrainConfig,
+  requireEmbedding = true,
+  vaultBoundary?: TrustedVaultBoundary,
+): CBrainDeps {
   const db = new CBrainDB(config.dbPath);
   const embeddingProvider = config.embedding.provider ?? "zhipu";
   const isDeterministic = embeddingProvider === "deterministic";
@@ -201,5 +206,5 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
 
   const nerIngestMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, config.ner?.ingest_mode);
   const toolProfile = resolveToolProfile(process.env.CBRAIN_MCP_TOOL_PROFILE);
-  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined, nerIngestMode, toolProfile };
+  return { db, embedding, lance, vaultPath: config.vaultPath, vaultBoundary, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined, nerIngestMode, toolProfile };
 }
