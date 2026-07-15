@@ -42,7 +42,17 @@ For each signal, classify its type：
    - `"recorded"` → 可以简短告知用户"已记录"（可选，别每次都说）
    - `"skipped"` → 静默忽略
 3. **非记忆信号走各自通道**：
-   - `agent_profile` → `update_profile()` / `reload_profile()`
+   - `agent_profile` → 仅当用户明确陈述偏好或规则时，使用完整字段更新：
+     ```text
+     profile({ action: "update", entries: [{
+       id: "response-length-short",
+       type: "preference",
+       category: "communication",
+       scope: "open",
+       content: "回复保持简洁",
+       source: "explicit"
+     }] })
+     ```
    - `action_loop` → Agent 内部 scheduler（不调 CBrain）
    - `no_store` → 静默跳过
 
@@ -56,7 +66,7 @@ For each signal, classify its type：
 1. signal-router.md → 判断每个信号的目的地
 2. cbrain_memory → ingest_dialogue({ text: "仅记忆片段", mode: "auto" })
 3. explicit long-term save → ingest_dialogue({ text, mode: "manual" })
-4. agent_profile → update_profile(...)
+4. agent_profile → 仅对用户明确陈述调用 profile({ action: "update", entries: [{ id: "response-length-short", type: "preference", category: "communication", scope: "open", content: "回复保持简洁", source: "explicit" }] })
 5. action_loop / no_store → 不调 CBrain ingest
 ```
 
@@ -66,3 +76,4 @@ For each signal, classify its type：
 - **Chinese names**: Use full names (人物A, not abbreviated)
 - **Context matters**: "人物A说技术B不错" extracts both 人物A (entity) and 技术B (concept)
 - **Don't over-extract**: Articles like "一个" or "这个" are not signals
+- **Profile persistence is explicit-only**: 只有用户明确说出的偏好或规则才能写入；不要根据行为、语气或历史模式猜测
