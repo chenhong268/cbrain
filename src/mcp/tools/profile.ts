@@ -8,8 +8,19 @@ import {
   formatRemoveProfileEnvelope,
   formatReloadProfileEnvelope,
 } from "./format-result.js";
+import {
+  buildAgentVisibleStats,
+  validateAgentProfileUpdate,
+  type AgentProfilePolicyCode,
+} from "./profile-policy.js";
 
 type ProfileAction = "get" | "update" | "remove" | "reload";
+
+const AGENT_MESSAGES: Record<AgentProfilePolicyCode, string> = {
+  PROFILE_ACTION_FORBIDDEN: "Daily Agent sessions cannot remove or reload Profile entries.",
+  PROFILE_SCOPE_FORBIDDEN: "Daily Agent sessions can read open Profile entries only.",
+  PROFILE_UPDATE_INVALID: "Daily Agent updates require a valid batch of explicit, open Profile entries.",
+};
 
 interface ProfileFilterInput {
   scope?: ProfileScope;
@@ -40,6 +51,16 @@ function textResult(envelope: unknown): { content: Array<{ type: "text"; text: s
 function errorResult(message: string): { content: Array<{ type: "text"; text: string }>; isError: boolean } {
   return {
     content: [{ type: "text", text: JSON.stringify({ error: message }) }],
+    isError: true,
+  };
+}
+
+function policyError(code: AgentProfilePolicyCode) {
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({ error: { code, message: AGENT_MESSAGES[code] } }),
+    }],
     isError: true,
   };
 }
@@ -80,6 +101,29 @@ function runProfileAction(
     entries?: ProfileUpdateInput[];
   },
 ) {
+  if (ctx.toolProfile === "agent") {
+    if (action === "remove" || action === "reload") {
+      return policyError("PROFILE_ACTION_FORBIDDEN");
+    }
+    if (action === "get") {
+      if (args.scope && args.scope !== "open") {
+        return policyError("PROFILE_SCOPE_FORBIDDEN");
+      }
+      const { category, type, tags, ids } = args;
+      const filter: ProfileFilterInput = { scope: "open", category, type, tags, ids };
+      const entries = ctx.profile.getEntries(filter);
+      return textResult(formatGetProfileEnvelope(
+        entries,
+        buildAgentVisibleStats(entries),
+        [],
+        filter as Record<string, unknown>,
+      ));
+    }
+    const policyCode = validateAgentProfileUpdate(ctx.profile, args.entries);
+    if (policyCode) return policyError(policyCode);
+    return updateProfile(ctx, args.entries!);
+  }
+
   if (action === "get") {
     const { scope, category, type, tags, ids } = args;
     return getProfile(ctx, { scope, category, type, tags, ids });
