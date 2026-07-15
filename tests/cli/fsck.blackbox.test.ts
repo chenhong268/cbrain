@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, lstatSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync, lstatSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
@@ -153,6 +153,27 @@ for (const mode of ["delete", "wal-header-cleaned"] as const) {
 		expect(readSnapshotTempDirs()).toEqual(beforeTempDirs);
 	});
 	}
+}
+
+for (const scenario of readOnlyScenarios) {
+	test(`${scenario.name} accepts a symlinked DB without changing the physical database`, async () => {
+		const dir = makeTempDir("cbrain-fsck-bb-symlink-");
+		const physicalPath = join(dir, "physical.sqlite");
+		convertToDeleteMode(physicalPath);
+		const configuredPath = join(dir, "configured.sqlite");
+		symlinkSync(physicalPath, configuredPath);
+		const cfg = writeCfg(dir, configuredPath);
+		mkdirSync(join(dir, ".obsidian"));
+		const beforeHash = fileHash(physicalPath);
+		const beforeSidecars = sidecarSnapshot(physicalPath);
+
+		const result = await runCli(scenario.command, [...scenario.args], cfg);
+
+		expect(result.exitCode).not.toBe(2);
+		expect(fileHash(physicalPath)).toBe(beforeHash);
+		expect(sidecarSnapshot(physicalPath)).toBe(beforeSidecars);
+		expect(lstatSync(configuredPath).isSymbolicLink()).toBe(true);
+	});
 }
 
 test("missing DB → exit 2 + no file/dir created (read-only contract)", async () => {
@@ -352,6 +373,38 @@ test("fsck reads a page committed only in active WAL without changing live main/
 		}));
 		expect(fileHash(dbPath)).toBe(beforeMain);
 		expect(sidecarSnapshot(dbPath)).toBe(beforeSidecars);
+	} finally {
+		writer.close();
+	}
+});
+
+test("fsck reads the physical WAL behind a DB symlink without changing live main/wal/shm", async () => {
+	const dir = makeTempDir("cbrain-fsck-bb-symlink-active-wal-");
+	const physicalPath = join(dir, "physical.sqlite");
+	const seed = new CBrainDB(physicalPath);
+	seed.checkpoint();
+	seed.close();
+	const writer = new Database(physicalPath);
+	writer.exec("PRAGMA wal_autocheckpoint=0");
+	writer.prepare(
+		"INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+	).run("records/anonymous-symlink-wal", "record", "Anonymous symlink WAL", "records/anonymous-symlink-wal.md", "anonymous-hash");
+	const configuredPath = join(dir, "configured.sqlite");
+	symlinkSync(physicalPath, configuredPath);
+	const cfg = writeCfg(dir, configuredPath);
+	mkdirSync(join(dir, ".obsidian"));
+	const beforeMain = fileHash(physicalPath);
+	const beforeSidecars = sidecarSnapshot(physicalPath);
+
+	try {
+		const result = await runFsckCli(["--layer", "vault", "--json"], cfg);
+		expect(result.exitCode).toBe(1);
+		expect(JSON.parse(result.stdout).findings).toContainEqual(expect.objectContaining({
+			check: "vault.db_exists_file_missing",
+			count: 1,
+		}));
+		expect(fileHash(physicalPath)).toBe(beforeMain);
+		expect(sidecarSnapshot(physicalPath)).toBe(beforeSidecars);
 	} finally {
 		writer.close();
 	}

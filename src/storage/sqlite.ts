@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { getReverseRelation } from "../core/shared.js";
@@ -56,6 +56,7 @@ interface SourceFileIdentity {
 }
 
 interface ReadSnapshotSourceState {
+  physicalDbPath: string;
   main: SourceFileIdentity;
   wal: SourceFileIdentity;
 }
@@ -83,9 +84,11 @@ function sourceFileIdentity(path: string, required: boolean): SourceFileIdentity
 }
 
 function captureReadSnapshotSource(dbPath: string): ReadSnapshotSourceState {
+  const physicalDbPath = realpathSync(dbPath);
   return {
-    main: sourceFileIdentity(dbPath, true),
-    wal: sourceFileIdentity(`${dbPath}-wal`, false),
+    physicalDbPath,
+    main: sourceFileIdentity(physicalDbPath, true),
+    wal: sourceFileIdentity(`${physicalDbPath}-wal`, false),
   };
 }
 
@@ -99,7 +102,9 @@ function sameSourceFile(a: SourceFileIdentity, b: SourceFileIdentity): boolean {
 }
 
 function sameReadSnapshotSource(a: ReadSnapshotSourceState, b: ReadSnapshotSourceState): boolean {
-  return sameSourceFile(a.main, b.main) && sameSourceFile(a.wal, b.wal);
+  return a.physicalDbPath === b.physicalDbPath
+    && sameSourceFile(a.main, b.main)
+    && sameSourceFile(a.wal, b.wal);
 }
 
 function recoverAndSerializeReadSnapshot(snapshotPath: string): Uint8Array {
@@ -150,18 +155,23 @@ function createReadSnapshot(
     } catch {
       throw new CBrainReadSnapshotError();
     }
-    const snapshotPath = join(directory, basename(dbPath));
     try {
       chmodSync(directory, 0o700);
       const before = captureReadSnapshotSource(dbPath);
-      copyFileSync(dbPath, snapshotPath);
+      const snapshotPath = join(directory, basename(before.physicalDbPath));
+      copyFileSync(before.physicalDbPath, snapshotPath);
       chmodSync(snapshotPath, 0o600);
       if (before.wal.exists) {
-        copyFileSync(`${dbPath}-wal`, `${snapshotPath}-wal`);
+        copyFileSync(`${before.physicalDbPath}-wal`, `${snapshotPath}-wal`);
         chmodSync(`${snapshotPath}-wal`, 0o600);
       }
       testHooks.afterCopy?.(attempt, directory, snapshotPath);
-      const after = captureReadSnapshotSource(dbPath);
+      let after: ReadSnapshotSourceState;
+      try {
+        after = captureReadSnapshotSource(dbPath);
+      } catch {
+        throw new ReadSnapshotSourceChangedError();
+      }
       if (!sameReadSnapshotSource(before, after)) throw new ReadSnapshotSourceChangedError();
 
       const serialized = recoverAndSerializeReadSnapshot(snapshotPath);

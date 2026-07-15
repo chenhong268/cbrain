@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CBrainDB, openReadSnapshotWithHookForTest } from "../../src/storage/sqlite.js";
@@ -104,6 +104,60 @@ test("read snapshot includes the latest committed WAL row without touching live 
 	}
 });
 
+for (const linkDepth of [1, 2] as const) {
+	test(`read snapshot follows a ${linkDepth === 1 ? "direct" : "multi-hop"} DB symlink, stays read-only, and preserves the physical source`, () => {
+		const root = mkdtempSync(join(tmpdir(), "cbrain-sqlite-symlink-"));
+		roots.push(root);
+		const physicalPath = join(root, "physical.sqlite");
+		const native = new Database(physicalPath);
+		native.exec("CREATE TABLE anonymous_record(value TEXT); INSERT INTO anonymous_record VALUES ('physical')");
+		native.close();
+		const intermediatePath = join(root, "intermediate.sqlite");
+		const configuredPath = join(root, "configured.sqlite");
+		if (linkDepth === 2) {
+			symlinkSync(physicalPath, intermediatePath);
+			symlinkSync(intermediatePath, configuredPath);
+		} else {
+			symlinkSync(physicalPath, configuredPath);
+		}
+		const before = liveSnapshot(physicalPath);
+
+		const db = new CBrainDB(configuredPath, { readSnapshot: true });
+		try {
+			expect(db.rawDb.prepare("SELECT value FROM anonymous_record").get()).toEqual({ value: "physical" });
+			expect(() => db.rawDb.exec("INSERT INTO anonymous_record VALUES ('forbidden')")).toThrow();
+		} finally {
+			db.close();
+		}
+
+		expect(liveSnapshot(physicalPath)).toBe(before);
+		expect(lstatSync(configuredPath).isSymbolicLink()).toBe(true);
+	});
+}
+
+test("read snapshot follows a DB symlink to the physical WAL and preserves the live source", () => {
+	const root = mkdtempSync(join(tmpdir(), "cbrain-sqlite-symlink-wal-"));
+	roots.push(root);
+	const physicalPath = join(root, "physical.sqlite");
+	const configuredPath = join(root, "configured.sqlite");
+	const writer = new Database(physicalPath);
+	writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE anonymous_record(value TEXT); PRAGMA wal_checkpoint(TRUNCATE); INSERT INTO anonymous_record VALUES ('latest-through-link')");
+	symlinkSync(physicalPath, configuredPath);
+	const before = liveSnapshot(physicalPath);
+
+	try {
+		const db = new CBrainDB(configuredPath, { readSnapshot: true });
+		try {
+			expect(db.rawDb.prepare("SELECT value FROM anonymous_record").get()).toEqual({ value: "latest-through-link" });
+		} finally {
+			db.close();
+		}
+		expect(liveSnapshot(physicalPath)).toBe(before);
+	} finally {
+		writer.close();
+	}
+});
+
 test("read snapshot removes staging before constructor return and after construction failure", () => {
 	const root = mkdtempSync(join(tmpdir(), "cbrain-sqlite-snapshot-cleanup-"));
 	roots.push(root);
@@ -164,4 +218,40 @@ test("read snapshot retries a changing source three times then fails closed with
 	})).toThrow(/stable read snapshot/i);
 	expect(attempts).toEqual([0, 1, 2]);
 	expect(snapshotTempDirs()).toEqual(before);
+});
+
+test("read snapshot detects a DB symlink retarget on every attempt and fails closed", () => {
+	const root = mkdtempSync(join(tmpdir(), "cbrain-sqlite-snapshot-retarget-"));
+	roots.push(root);
+	const firstPath = join(root, "first.sqlite");
+	const secondPath = join(root, "second.sqlite");
+	for (const [path, value] of [[firstPath, "first"], [secondPath, "second"]] as const) {
+		const native = new Database(path);
+		native.exec(`CREATE TABLE anonymous_record(value TEXT); INSERT INTO anonymous_record VALUES ('${value}')`);
+		native.close();
+	}
+	const configuredPath = join(root, "configured.sqlite");
+	symlinkSync(firstPath, configuredPath);
+	const attempts: number[] = [];
+	const before = snapshotTempDirs();
+
+	expect(() => openReadSnapshotWithHookForTest(configuredPath, (attempt) => {
+		attempts.push(attempt);
+		rmSync(configuredPath);
+		symlinkSync(attempt % 2 === 0 ? secondPath : firstPath, configuredPath);
+	})).toThrow(/stable read snapshot/i);
+
+	expect(attempts).toEqual([0, 1, 2]);
+	expect(snapshotTempDirs()).toEqual(before);
+});
+
+test("read snapshot rejects a DB symlink whose physical target is not a regular file", () => {
+	const root = mkdtempSync(join(tmpdir(), "cbrain-sqlite-symlink-invalid-"));
+	roots.push(root);
+	const directoryTarget = join(root, "not-a-database");
+	mkdirSync(directoryTarget);
+	const configuredPath = join(root, "configured.sqlite");
+	symlinkSync(directoryTarget, configuredPath);
+
+	expect(() => new CBrainDB(configuredPath, { readSnapshot: true })).toThrow(/stable read snapshot/i);
 });
