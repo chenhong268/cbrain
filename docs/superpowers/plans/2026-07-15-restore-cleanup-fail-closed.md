@@ -61,10 +61,14 @@ success; cleanup-incomplete sets exit code 1 and returns through `finally`.
   - `.rollback` is finalized and rollback is not invoked;
   - extraction temp directory is removed by `finally`.
 - [ ] Add broken-symlink preflight regression.
+- [ ] Add TOCTOU regressions proving `.pre-restore` / `.rollback` that appear
+  after preflight are verify-only when this transaction did not create them.
 - [ ] Observe RED.
 - [ ] Add optional internal deps to `register`; replace swallowed cleanup with
   unified finalization for full and DB-only paths; set `process.exitCode = 1`
   and return on incomplete without throwing.
+- [ ] Track database/vault rollback ownership through installation and failure
+  rollback; never remove or adopt an unowned late-appearing residual.
 - [ ] Re-run focused tests to GREEN.
 
 ## Task 3: Real argument boundary and documentation

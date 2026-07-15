@@ -1,12 +1,276 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
+import { Command } from "commander";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { installDatabase, rollbackDatabase } from "../../src/cli/commands/backup.js";
+import {
+  RESTORE_CLEANUP_INCOMPLETE_MESSAGE,
+  exactPathEntryExists,
+  finalizeRestoreArtifacts,
+  installDatabase,
+  installDatabaseWithResult,
+  register as registerBackupCommands,
+  rollbackDatabase,
+} from "../../src/cli/commands/backup.js";
 
-const BIN = `bun run ${join(import.meta.dir, "..", "..", "src", "cli", "index.ts")}`;
+const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli", "index.ts");
+const BIN = `bun run ${CLI_PATH}`;
+
+describe("restore cleanup finalization", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "cbrain-restore-cleanup-"));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("exact entry detection treats a broken symlink as present", () => {
+    const broken = join(root, "vault.pre-restore");
+    symlinkSync(join(root, "missing-target"), broken);
+
+    expect(existsSync(broken)).toBe(false);
+    expect(exactPathEntryExists(broken)).toBe(true);
+    expect(exactPathEntryExists(join(root, "absent"))).toBe(false);
+  });
+
+  test("exact entry detection fails closed on non-ENOENT lstat errors", () => {
+    const tooLong = join(root, "x".repeat(1024));
+    expect(() => lstatSync(tooLong)).toThrow();
+    expect(exactPathEntryExists(tooLong)).toBe(true);
+  });
+
+  test("the finalizer removes a broken symlink instead of treating it as absent", () => {
+    const broken = join(root, "vault.pre-restore");
+    symlinkSync(join(root, "missing-target"), broken);
+
+    const result = finalizeRestoreArtifacts(
+      [{ path: broken, recursive: true, removable: true }],
+      { wait: () => {} },
+    );
+
+    expect(result).toEqual({ status: "clean", attempts: 1, remainingCount: 0 });
+    expect(() => lstatSync(broken)).toThrow();
+  });
+
+  test("already-absent artifacts require no removal round or wait", () => {
+    const removals: string[] = [];
+    const waits: number[] = [];
+    const result = finalizeRestoreArtifacts(
+      [{ path: join(root, "absent"), recursive: true, removable: true }],
+      {
+        remove: (path) => removals.push(path),
+        wait: (ms) => waits.push(ms),
+      },
+    );
+
+    expect(result).toEqual({ status: "clean", attempts: 0, remainingCount: 0 });
+    expect(removals).toEqual([]);
+    expect(waits).toEqual([]);
+  });
+
+  test("an unowned artifact is verify-only and is never removed", () => {
+    const rogue = join(root, "vault.pre-restore");
+    mkdirSync(rogue);
+    writeFileSync(join(rogue, "unmanaged.md"), "preserve");
+    let removals = 0;
+
+    const result = finalizeRestoreArtifacts(
+      [{ path: rogue, recursive: true, removable: false }],
+      {
+        remove: () => { removals += 1; },
+        wait: () => {},
+      },
+    );
+
+    expect(result).toEqual({ status: "incomplete", attempts: 3, remainingCount: 1 });
+    expect(removals).toBe(0);
+    expect(readFileSync(join(rogue, "unmanaged.md"), "utf-8")).toBe("preserve");
+  });
+
+  test("transient removal failure retries once then stops", () => {
+    const residual = join(root, "vault.pre-restore");
+    mkdirSync(residual);
+    const waits: number[] = [];
+    let removals = 0;
+
+    const result = finalizeRestoreArtifacts(
+      [{ path: residual, recursive: true, removable: true }],
+      {
+        remove: (path, options) => {
+          removals += 1;
+          if (removals === 1) throw new Error(`private failure ${path}`);
+          rmSync(path, options);
+        },
+        wait: (ms) => waits.push(ms),
+      },
+    );
+
+    expect(result).toEqual({ status: "clean", attempts: 2, remainingCount: 0 });
+    expect(removals).toBe(2);
+    expect(waits).toEqual([50, 150]);
+  });
+
+  test("persistent failure is bounded and returns no raw filesystem detail", () => {
+    const residual = join(root, "Mobile Documents", "File Provider Root", "vault.pre-restore");
+    mkdirSync(residual, { recursive: true });
+    writeFileSync(join(residual, "private-note.md"), "private vault content");
+    const waits: number[] = [];
+    let removals = 0;
+
+    const result = finalizeRestoreArtifacts(
+      [{ path: residual, recursive: true, removable: true }],
+      {
+        remove: () => {
+          removals += 1;
+          throw new Error(`permission denied: ${residual}/private-note.md`);
+        },
+        wait: (ms) => waits.push(ms),
+      },
+    );
+
+    expect(result).toEqual({ status: "incomplete", attempts: 3, remainingCount: 1 });
+    expect(removals).toBe(3);
+    expect(waits).toEqual([50, 150, 300]);
+    expect(JSON.stringify(result)).not.toContain(root);
+    expect(JSON.stringify(result)).not.toContain("private-note");
+    expect(existsSync(join(residual, "private-note.md"))).toBe(true);
+  });
+
+  test("multiple persistent artifacts share three global cleanup rounds", () => {
+    const first = join(root, "vault.pre-restore");
+    const second = join(root, "brain.sqlite.rollback");
+    mkdirSync(first);
+    writeFileSync(second, "rollback");
+    const waits: number[] = [];
+    let removals = 0;
+
+    const result = finalizeRestoreArtifacts(
+      [
+        { path: first, recursive: true, removable: true },
+        { path: second, recursive: false, removable: true },
+      ],
+      {
+        remove: () => {
+          removals += 1;
+          throw new Error("blocked");
+        },
+        wait: (ms) => waits.push(ms),
+      },
+    );
+
+    expect(result).toEqual({ status: "incomplete", attempts: 3, remainingCount: 2 });
+    expect(removals).toBe(6);
+    expect(waits).toEqual([50, 150, 300]);
+  });
+
+  test("an artifact materializing during stabilization is added to the postcondition", () => {
+    const owned = join(root, "brain.sqlite.rollback");
+    const late = join(root, "vault.pre-restore");
+    writeFileSync(owned, "owned rollback");
+    let waits = 0;
+
+    const result = finalizeRestoreArtifacts(
+      [
+        { path: owned, recursive: false, removable: true },
+        { path: late, recursive: true, removable: false },
+      ],
+      {
+        remove: (path, options) => rmSync(path, options),
+        wait: () => {
+          waits += 1;
+          if (waits === 1) {
+            mkdirSync(late);
+            writeFileSync(join(late, "late-unmanaged.md"), "preserve");
+          }
+        },
+      },
+    );
+
+    expect(result).toEqual({ status: "incomplete", attempts: 3, remainingCount: 1 });
+    expect(waits).toBe(3);
+    expect(existsSync(join(late, "late-unmanaged.md"))).toBe(true);
+  });
+
+  test("a failed stabilization wait cannot produce a clean result", () => {
+    const residual = join(root, "vault.pre-restore");
+    mkdirSync(residual);
+    let waits = 0;
+
+    const result = finalizeRestoreArtifacts(
+      [{ path: residual, recursive: true, removable: true }],
+      {
+        remove: (path, options) => rmSync(path, options),
+        wait: () => {
+          waits += 1;
+          throw new Error("clock unavailable");
+        },
+      },
+    );
+
+    expect(result).toEqual({ status: "incomplete", attempts: 3, remainingCount: 0 });
+    expect(waits).toBe(3);
+  });
+
+  test("partial recursive deletion never touches the active restored vault", () => {
+    const active = join(root, "vault");
+    const residual = join(root, "vault.pre-restore");
+    mkdirSync(active);
+    mkdirSync(residual);
+    writeFileSync(join(active, "restored.md"), "restored");
+    writeFileSync(join(residual, "removed-before-error.md"), "old");
+    writeFileSync(join(residual, "remaining-after-error.md"), "old");
+    let removals = 0;
+
+    const result = finalizeRestoreArtifacts(
+      [{ path: residual, recursive: true, removable: true }],
+      {
+        remove: () => {
+          removals += 1;
+          if (removals === 1) rmSync(join(residual, "removed-before-error.md"));
+          throw new Error("simulated partial recursive delete");
+        },
+        wait: () => {},
+      },
+    );
+
+    expect(result.status).toBe("incomplete");
+    expect(removals).toBe(3);
+    expect(existsSync(join(active, "restored.md"))).toBe(true);
+    expect(existsSync(join(residual, "remaining-after-error.md"))).toBe(true);
+  });
+
+  for (const suffix of [".rollback", "-wal", "-shm"]) {
+    test(`persistent ${suffix} removal failure makes finalization incomplete`, () => {
+      const artifact = join(root, `brain.sqlite${suffix}`);
+      writeFileSync(artifact, "managed artifact");
+      const result = finalizeRestoreArtifacts(
+        [{ path: artifact, recursive: false, removable: true }],
+        { remove: () => { throw new Error("blocked"); }, wait: () => {} },
+      );
+
+      expect(result.status).toBe("incomplete");
+      expect(result.attempts).toBe(3);
+      expect(exactPathEntryExists(artifact)).toBe(true);
+    });
+  }
+});
 
 describe("cbrain restore", () => {
   let testDir: string;
@@ -284,6 +548,10 @@ describe("cbrain restore", () => {
     expect(existsSync(join(vaultPath, "test-note.md"))).toBe(true);
     expect(existsSync(join(vaultPath, "entities", "my-entity.md"))).toBe(true);
     expect(existsSync(join(vaultPath, "added-after-backup.md"))).toBe(false);
+    expect(exactPathEntryExists(`${vaultPath}.pre-restore`)).toBe(false);
+    expect(exactPathEntryExists(`${dbPath}.rollback`)).toBe(false);
+    expect(exactPathEntryExists(`${dbPath}-wal`)).toBe(false);
+    expect(exactPathEntryExists(`${dbPath}-shm`)).toBe(false);
 
     // DB should have pre-backup data only
     const db3 = new CBrainDB(dbPath);
@@ -385,6 +653,316 @@ describe("cbrain restore", () => {
     db2.close();
   });
 
+  test("broken-symlink pre-restore residual fails closed before the primary swap", () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/broken-link", "Broken Link Guard");
+    const zipPath = createFullBackupZip(db);
+    db.close();
+
+    const residual = `${vaultPath}.pre-restore`;
+    symlinkSync(join(testDir, "missing-old-vault"), residual);
+    expect(existsSync(residual)).toBe(false);
+    expect(() => lstatSync(residual)).not.toThrow();
+
+    const run = spawnSync("bun", ["run", CLI_PATH, "restore", zipPath, "--force"], {
+      cwd: brainDir,
+      encoding: "utf-8",
+    });
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("残留");
+    expect(() => lstatSync(residual)).not.toThrow();
+  });
+
+  test("cleanup-incomplete keeps the restored DB and vault active and returns through finally", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/restored-db-marker", "Restored DB Marker");
+    const zipPath = createFullBackupZip(db);
+    db.close();
+
+    const changedDb = new CBrainDB(dbPath);
+    insertPage(changedDb, "test/old-db-marker", "Old DB Marker");
+    changedDb.close();
+    writeFileSync(join(vaultPath, "old-vault-marker.md"), "old vault content");
+
+    const extractionDir = join(testDir, "injected restore extraction");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const originalLog = console.log;
+    const originalError = console.error;
+    const previousExitCode = process.exitCode;
+    const previousConfig = process.env.CBRAIN_CONFIG;
+    let finalizedArtifacts: Array<{
+      path: string;
+      recursive: boolean;
+      removable: boolean;
+    }> = [];
+
+    try {
+      process.env.CBRAIN_CONFIG = join(brainDir, "cbrain.json");
+      process.exitCode = undefined;
+      console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+      console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+
+      const program = new Command().name("cbrain");
+      registerBackupCommands(program, {
+        createRestoreTempDir: () => {
+          mkdirSync(extractionDir);
+          return extractionDir;
+        },
+        finalizeRestoreArtifacts: (artifacts) => {
+          finalizedArtifacts = artifacts.map(({ path, recursive, removable }) => ({
+            path,
+            recursive,
+            removable,
+          }));
+          return finalizeRestoreArtifacts(artifacts, {
+            remove: (path, options) => {
+              if (path.endsWith(".pre-restore")) {
+                throw new Error(`private failure: ${path}; token=synthetic-secret`);
+              }
+              rmSync(path, options);
+            },
+            wait: () => {},
+          });
+        },
+      });
+
+      await program.parseAsync(["bun", "cbrain", "restore", zipPath, "--force"]);
+
+      expect(Number(process.exitCode)).toBe(1);
+      expect(stderr).toEqual([RESTORE_CLEANUP_INCOMPLETE_MESSAGE]);
+      const transcript = [...stdout, ...stderr].join("\n");
+      expect(transcript).not.toContain(testDir);
+      expect(transcript).not.toContain("old-vault-marker");
+      expect(transcript).not.toContain("old vault content");
+      expect(transcript).not.toContain("synthetic-secret");
+      expect(transcript).not.toContain("Error:");
+      expect(stdout.join("\n")).not.toContain("数据库已恢复");
+      expect(stdout.join("\n")).not.toContain("Vault 已恢复");
+      expect(stdout.join("\n")).not.toContain("cbrain sync");
+      expect(finalizedArtifacts).toEqual([
+        { path: `${vaultPath}.pre-restore`, recursive: true, removable: true },
+        { path: `${dbPath}.rollback`, recursive: false, removable: true },
+        { path: `${dbPath}-wal`, recursive: false, removable: true },
+        { path: `${dbPath}-shm`, recursive: false, removable: true },
+      ]);
+      expect(exactPathEntryExists(extractionDir)).toBe(false);
+
+      const restoredDb = new CBrainDB(dbPath);
+      expect(restoredDb.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/restored-db-marker")).not.toBeNull();
+      expect(restoredDb.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/old-db-marker")).toBeNull();
+      restoredDb.close();
+
+      expect(existsSync(join(vaultPath, "test-note.md"))).toBe(true);
+      expect(existsSync(join(vaultPath, "old-vault-marker.md"))).toBe(false);
+      expect(existsSync(join(`${vaultPath}.pre-restore`, "old-vault-marker.md"))).toBe(true);
+      expect(exactPathEntryExists(`${dbPath}.rollback`)).toBe(false);
+    } finally {
+      console.log = originalLog;
+      console.error = originalError;
+      process.exitCode = previousExitCode ?? 0;
+      if (previousConfig === undefined) delete process.env.CBRAIN_CONFIG;
+      else process.env.CBRAIN_CONFIG = previousConfig;
+    }
+  });
+
+  test("a pre-restore tree appearing after preflight is verify-only when this run had no active vault", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/no-old-vault", "No Old Vault");
+    const zipPath = createFullBackupZip(db);
+    db.close();
+    rmSync(vaultPath, { recursive: true });
+
+    const rogueResidual = `${vaultPath}.pre-restore`;
+    const extractionDir = join(testDir, "race restore extraction");
+    const stderr: string[] = [];
+    const stdout: string[] = [];
+    const originalError = console.error;
+    const originalLog = console.log;
+    const previousExitCode = process.exitCode;
+    const previousConfig = process.env.CBRAIN_CONFIG;
+    try {
+      process.env.CBRAIN_CONFIG = join(brainDir, "cbrain.json");
+      process.exitCode = undefined;
+      console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+      console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+      const program = new Command().name("cbrain");
+      registerBackupCommands(program, {
+        createRestoreTempDir: () => {
+          mkdirSync(rogueResidual);
+          writeFileSync(join(rogueResidual, "unmanaged.md"), "must survive");
+          mkdirSync(extractionDir);
+          return extractionDir;
+        },
+        finalizeRestoreArtifacts: (artifacts) =>
+          finalizeRestoreArtifacts(artifacts, { wait: () => {} }),
+      });
+
+      await program.parseAsync(["bun", "cbrain", "restore", zipPath, "--force"]);
+
+      expect(Number(process.exitCode)).toBe(1);
+      expect(stderr).toEqual([RESTORE_CLEANUP_INCOMPLETE_MESSAGE]);
+      expect(stdout.join("\n")).not.toContain("Vault 已恢复");
+      expect(existsSync(join(rogueResidual, "unmanaged.md"))).toBe(true);
+      expect(existsSync(join(vaultPath, "test-note.md"))).toBe(true);
+    } finally {
+      console.error = originalError;
+      console.log = originalLog;
+      process.exitCode = previousExitCode ?? 0;
+      if (previousConfig === undefined) delete process.env.CBRAIN_CONFIG;
+      else process.env.CBRAIN_CONFIG = previousConfig;
+    }
+  });
+
+  test("a rollback file appearing after preflight is verify-only when this run had no original DB", async () => {
+    const sourceDb = new CBrainDB(dbPath);
+    insertPage(sourceDb, "test/no-old-db", "No Old DB");
+    const zipPath = createBackupZip(sourceDb);
+    sourceDb.close();
+    rmSync(dbPath);
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+
+    const rogueRollback = `${dbPath}.rollback`;
+    const extractionDir = join(testDir, "rollback race extraction");
+    const stderr: string[] = [];
+    const stdout: string[] = [];
+    const originalError = console.error;
+    const originalLog = console.log;
+    const previousExitCode = process.exitCode;
+    const previousConfig = process.env.CBRAIN_CONFIG;
+    try {
+      process.env.CBRAIN_CONFIG = join(brainDir, "cbrain.json");
+      process.exitCode = undefined;
+      console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+      console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+      const program = new Command().name("cbrain");
+      registerBackupCommands(program, {
+        createRestoreTempDir: () => {
+          writeFileSync(rogueRollback, "unmanaged rollback sentinel");
+          mkdirSync(extractionDir);
+          return extractionDir;
+        },
+        finalizeRestoreArtifacts: (artifacts) =>
+          finalizeRestoreArtifacts(artifacts, { wait: () => {} }),
+      });
+
+      await program.parseAsync(["bun", "cbrain", "restore", zipPath, "--force"]);
+
+      expect(Number(process.exitCode)).toBe(1);
+      expect(stderr).toEqual([RESTORE_CLEANUP_INCOMPLETE_MESSAGE]);
+      expect(stdout.join("\n")).not.toContain("数据库已恢复");
+      expect(stdout.join("\n")).not.toContain("cbrain sync");
+      expect(existsSync(rogueRollback)).toBe(true);
+      const restoredDb = new CBrainDB(dbPath);
+      expect(restoredDb.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/no-old-db")).not.toBeNull();
+      restoredDb.close();
+    } finally {
+      console.error = originalError;
+      console.log = originalLog;
+      process.exitCode = previousExitCode ?? 0;
+      if (previousConfig === undefined) delete process.env.CBRAIN_CONFIG;
+      else process.env.CBRAIN_CONFIG = previousConfig;
+    }
+  });
+
+  test("an existing DB is not swapped when a late unowned rollback blocks exclusive claim", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/backup-db", "Backup DB");
+    const zipPath = createBackupZip(db);
+    db.close();
+    const currentDb = new CBrainDB(dbPath);
+    insertPage(currentDb, "test/current-db", "Current DB Must Survive");
+    currentDb.close();
+
+    const rogueRollback = `${dbPath}.rollback`;
+    const extractionDir = join(testDir, "exclusive claim extraction");
+    const stderr: string[] = [];
+    const stdout: string[] = [];
+    const originalError = console.error;
+    const originalLog = console.log;
+    const previousExitCode = process.exitCode;
+    const previousConfig = process.env.CBRAIN_CONFIG;
+    try {
+      process.env.CBRAIN_CONFIG = join(brainDir, "cbrain.json");
+      process.exitCode = undefined;
+      console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+      console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+      const program = new Command().name("cbrain");
+      registerBackupCommands(program, {
+        createRestoreTempDir: () => {
+          writeFileSync(rogueRollback, "late unmanaged rollback sentinel");
+          mkdirSync(extractionDir);
+          return extractionDir;
+        },
+      });
+
+      await program.parseAsync(["bun", "cbrain", "restore", zipPath, "--force"]);
+
+      expect(Number(process.exitCode)).toBe(1);
+      expect(stderr).toEqual(["❌ 数据库安装失败，原数据库未受影响。"]);
+      expect(stdout.join("\n")).not.toContain("数据库已恢复");
+      expect(stdout.join("\n")).not.toContain("cbrain sync");
+      expect(readFileSync(rogueRollback, "utf-8")).toBe("late unmanaged rollback sentinel");
+      expect(exactPathEntryExists(extractionDir)).toBe(false);
+      const preservedDb = new CBrainDB(dbPath);
+      expect(preservedDb.rawDb.prepare("SELECT title FROM pages WHERE slug = ?").get("test/current-db")).not.toBeNull();
+      preservedDb.close();
+    } finally {
+      console.error = originalError;
+      console.log = originalLog;
+      process.exitCode = previousExitCode ?? 0;
+      if (previousConfig === undefined) delete process.env.CBRAIN_CONFIG;
+      else process.env.CBRAIN_CONFIG = previousConfig;
+    }
+  });
+
+  test("DB-only restore finalizes the exact rollback, WAL, and SHM set", async () => {
+    const db = new CBrainDB(dbPath);
+    insertPage(db, "test/db-only-finalizer", "DB-only Finalizer");
+    const zipPath = createBackupZip(db);
+    db.close();
+
+    const previousConfig = process.env.CBRAIN_CONFIG;
+    const previousExitCode = process.exitCode;
+    const originalLog = console.log;
+    let finalizedArtifacts: Array<{
+      path: string;
+      recursive: boolean;
+      removable: boolean;
+    }> = [];
+    try {
+      process.env.CBRAIN_CONFIG = join(brainDir, "cbrain.json");
+      process.exitCode = undefined;
+      console.log = () => {};
+      const program = new Command().name("cbrain");
+      registerBackupCommands(program, {
+        finalizeRestoreArtifacts: (artifacts) => {
+          finalizedArtifacts = artifacts.map(({ path, recursive, removable }) => ({
+            path,
+            recursive,
+            removable,
+          }));
+          return finalizeRestoreArtifacts(artifacts, { wait: () => {} });
+        },
+      });
+
+      await program.parseAsync(["bun", "cbrain", "restore", zipPath, "--force"]);
+
+      expect(finalizedArtifacts).toEqual([
+        { path: `${dbPath}.rollback`, recursive: false, removable: true },
+        { path: `${dbPath}-wal`, recursive: false, removable: true },
+        { path: `${dbPath}-shm`, recursive: false, removable: true },
+      ]);
+    } finally {
+      console.log = originalLog;
+      process.exitCode = previousExitCode ?? 0;
+      if (previousConfig === undefined) delete process.env.CBRAIN_CONFIG;
+      else process.env.CBRAIN_CONFIG = previousConfig;
+    }
+  });
+
   // ── P0: residual .rollback also refuses restore ──────────────────────
 
   test("residual .rollback refuses restore and preserves files", async () => {
@@ -472,7 +1050,7 @@ describe("cbrain restore", () => {
 
   // ── P1: DB-only installDatabase (keepRollback=false) still works ─────
 
-  test("installDatabase without keepRollback uses rename strategy", async () => {
+  test("installDatabase without keepRollback uses an exclusive rollback claim", async () => {
     const unitDir = mkdtempSync(join(tmpdir(), "cbrain-p1-rename-"));
     const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
 
@@ -527,6 +1105,96 @@ describe("cbrain restore", () => {
     expect(row.title).toBe("Precious");
     rawDb2.close();
 
+    rmSync(unitDir, { recursive: true });
+  });
+
+  test("installDatabase never adopts an unowned rollback when target was absent", () => {
+    const unitDir = mkdtempSync(join(tmpdir(), "cbrain-unowned-rollback-"));
+    const targetDbPath = join(unitDir, "target.sqlite");
+    const rollbackPath = `${targetDbPath}.rollback`;
+    const corruptPath = join(unitDir, "corrupt.sqlite");
+    writeFileSync(rollbackPath, "unmanaged rollback sentinel");
+    writeFileSync(corruptPath, "not a database");
+
+    const ok = installDatabase(corruptPath, targetDbPath, false);
+
+    expect(ok).toBe(false);
+    expect(existsSync(targetDbPath)).toBe(false);
+    expect(readFileSync(rollbackPath, "utf-8")).toBe("unmanaged rollback sentinel");
+    rmSync(unitDir, { recursive: true });
+  });
+
+  test("installDatabase never overwrites a late unowned rollback when target exists", () => {
+    const unitDir = mkdtempSync(join(tmpdir(), "cbrain-exclusive-rollback-"));
+    const targetDbPath = join(unitDir, "target.sqlite");
+    const replacementPath = join(unitDir, "replacement.sqlite");
+    const rollbackPath = `${targetDbPath}.rollback`;
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+    const target = new Database(targetDbPath);
+    target.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    target.prepare("INSERT INTO pages VALUES (?, ?)").run("old", "Old DB");
+    target.close();
+    const replacement = new Database(replacementPath);
+    replacement.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    replacement.prepare("INSERT INTO pages VALUES (?, ?)").run("new", "New DB");
+    replacement.close();
+    writeFileSync(rollbackPath, "late unmanaged rollback");
+
+    const ok = installDatabase(replacementPath, targetDbPath, false);
+
+    expect(ok).toBe(false);
+    expect(readFileSync(rollbackPath, "utf-8")).toBe("late unmanaged rollback");
+    const active = new Database(targetDbPath, { readonly: true });
+    expect(active.prepare("SELECT title FROM pages WHERE slug = 'old'").get()).not.toBeNull();
+    expect(active.prepare("SELECT title FROM pages WHERE slug = 'new'").get()).toBeNull();
+    active.close();
+    rmSync(unitDir, { recursive: true });
+  });
+
+  test("a pre-swap rename failure never unlinks or renames the active target", () => {
+    const unitDir = mkdtempSync(join(tmpdir(), "cbrain-pre-swap-failure-"));
+    const targetDbPath = join(unitDir, "target.sqlite");
+    const replacementPath = join(unitDir, "replacement.sqlite");
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+    const target = new Database(targetDbPath);
+    target.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    target.prepare("INSERT INTO pages VALUES (?, ?)").run("old", "Old DB");
+    target.close();
+    const replacement = new Database(replacementPath);
+    replacement.exec("CREATE TABLE pages (slug TEXT PRIMARY KEY, title TEXT)");
+    replacement.prepare("INSERT INTO pages VALUES (?, ?)").run("new", "New DB");
+    replacement.close();
+    const unlinked: string[] = [];
+    const renamed: Array<[string, string]> = [];
+
+    const result = installDatabaseWithResult(
+      replacementPath,
+      targetDbPath,
+      false,
+      {
+        rename: (source, targetPath) => {
+          renamed.push([source, targetPath]);
+          if (source.endsWith(".restoring")) throw new Error("injected swap failure");
+          renameSync(source, targetPath);
+        },
+        unlink: (path) => {
+          unlinked.push(path);
+          unlinkSync(path);
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(unlinked).not.toContain(targetDbPath);
+    expect(renamed.some(([source, targetPath]) =>
+      source === `${targetDbPath}.rollback` && targetPath === targetDbPath
+    )).toBe(false);
+    const active = new Database(targetDbPath, { readonly: true });
+    expect(active.prepare("SELECT title FROM pages WHERE slug = 'old'").get()).not.toBeNull();
+    expect(active.prepare("SELECT title FROM pages WHERE slug = 'new'").get()).toBeNull();
+    active.close();
+    expect(exactPathEntryExists(`${targetDbPath}.rollback`)).toBe(false);
+    expect(exactPathEntryExists(`${targetDbPath}.restoring`)).toBe(false);
     rmSync(unitDir, { recursive: true });
   });
 
@@ -635,6 +1303,43 @@ describe("cbrain restore", () => {
     expect(existsSync(join(customVaultDir, "note.md"))).toBe(true);
     expect(existsSync(join(customVaultDir, "entities", "foo.md"))).toBe(true);
     expect(existsSync(join(customVaultDir, "added-later.md"))).toBe(false);
+  });
+
+  test("File Provider-style paths with spaces work through an argument-array subprocess", () => {
+    const fileProviderRoot = join(testDir, "Mobile Documents", "File Provider Root");
+    const spacedDbPath = join(fileProviderRoot, "Data Files", "brain.sqlite");
+    const spacedVaultPath = join(fileProviderRoot, "Knowledge Vault");
+    const spacedZipDir = join(fileProviderRoot, "Backup Files");
+    const spacedZipPath = join(spacedZipDir, "full backup.zip");
+    mkdirSync(join(fileProviderRoot, "Data Files"), { recursive: true });
+    mkdirSync(spacedVaultPath, { recursive: true });
+    mkdirSync(spacedZipDir, { recursive: true });
+    writeFileSync(join(fileProviderRoot, "cbrain.json"), JSON.stringify({
+      vaultPath: spacedVaultPath,
+      dbPath: spacedDbPath,
+      lancePath: join(fileProviderRoot, "Vector Index"),
+      embedding: { provider: "deterministic" },
+    }));
+
+    const db = new CBrainDB(spacedDbPath);
+    insertPage(db, "test/spaced-restored", "Spaced Restored");
+    const sourceZip = createFullBackupZip(db);
+    db.close();
+    copyFileSync(sourceZip, spacedZipPath);
+    writeFileSync(join(spacedVaultPath, "old marker.md"), "old");
+
+    const run = spawnSync("bun", ["run", CLI_PATH, "restore", spacedZipPath, "--force"], {
+      cwd: fileProviderRoot,
+      encoding: "utf-8",
+    });
+
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain("Vault 已恢复");
+    expect(existsSync(join(spacedVaultPath, "test-note.md"))).toBe(true);
+    expect(exactPathEntryExists(`${spacedVaultPath}.pre-restore`)).toBe(false);
+    expect(exactPathEntryExists(`${spacedDbPath}.rollback`)).toBe(false);
+    expect(exactPathEntryExists(`${spacedDbPath}-wal`)).toBe(false);
+    expect(exactPathEntryExists(`${spacedDbPath}-shm`)).toBe(false);
   });
 
   // ── P1: WAL-committed data survives backup → restore ────────────────

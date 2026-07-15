@@ -37,8 +37,30 @@ Managed-artifact cleanup uses a small deterministic policy:
 - stabilization waits of 50 ms, 150 ms, and 300 ms after the corresponding
   attempt (500 ms maximum total wait);
 - verify the exact directory entry is absent after every wait;
+- re-scan the complete applicable artifact set after every wait, so an entry
+  that materializes while another artifact settles cannot escape verification;
 - an already-absent path succeeds without a removal attempt;
 - no parent-directory scan, glob, or sibling deletion.
+
+Removal also requires transaction ownership. The restore records whether this
+run actually created/adopted `.pre-restore` and `.rollback`. If either exact
+entry was absent at preflight and materializes later, it is verify-only: its
+presence makes finalization incomplete, but restore never deletes or adopts it.
+WAL/SHM remain exact database-managed artifacts. Database installation and its
+failure rollback use the same ownership bit, so an unowned `.rollback` can
+neither be deleted nor installed as the active database.
+
+DB-only restore must claim its rollback name with an atomic exclusive primitive
+(hard link on the same filesystem), not `lstat` followed by `rename`: POSIX
+rename can overwrite a late file. The detailed command installation keeps its
+owned rollback until unified finalization; ownership is not released early and
+then reused to delete a later same-name entry.
+
+Before the atomic staging-to-target rename succeeds, the original database has
+never left its active path. Copy, validation, or rename failure therefore cleans
+only this run's staging file and owned rollback claim; it must never unlink or
+rename the active target. This avoids manufacturing a data-loss window while
+claiming that the original database was unaffected.
 
 Exact-entry absence is proved with `lstatSync`: only `ENOENT` means absent.
 `existsSync` is not sufficient because it reports false for a broken symlink
@@ -129,6 +151,18 @@ Tests are written red-first and cover:
    an argument-array subprocess boundary, not shell string interpolation;
 11. broken-symlink residuals are detected by both preflight and postcondition;
 12. an existing residual still blocks a later restore without deletion.
+13. TOCTOU tests create non-empty `.pre-restore` and `.rollback` entries after
+    preflight when no old vault/database existed; both remain verify-only,
+    produce cleanup-incomplete, and are neither deleted nor adopted.
+14. With an existing database, a late unowned `.rollback` makes the exclusive
+    claim fail before swap; the current DB and late file remain unchanged and
+    the command returns non-zero through `finally`.
+15. An initially absent verify-only artifact that materializes during another
+    artifact's stabilization wait is re-added to the postcondition and prevents
+    false success.
+16. Injected pre-swap rename failure records filesystem calls and proves the
+    active target is never unlinked or restored from rollback; only owned
+    staging/rollback artifacts are cleaned.
 
 ## 6. Non-goals
 

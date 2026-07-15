@@ -527,8 +527,20 @@ cbrain backup             # 先备份再排查
 | **`Port 3399 already in use`** | 已有一个 HTTP 服务在跑 | `kill $(lsof -ti:3399)` 关掉旧进程，或用 `--port` 换端口 |
 | **`FTS5: syntax error`** | 搜索词包含特殊字符 | 用空格分隔关键词，避免 `OR`、`AND`、引号等 FTS5 保留字 |
 | **`LanceDB connection failed`** | 向量库损坏 | 先 `cbrain backup` 备份、`cbrain doctor` 诊断，再重建：单页 `cbrain sync --slug <slug> --reindex`，整库损坏 `cbrain sync --reindex-vectors`（watcher 隔离页等进阶场景见 [known-issues](known-issues.md)）。**切勿直接删除 `lancedb/`** |
+| **`RESTORE_CLEANUP_INCOMPLETE`** | 数据库/vault 主恢复已经完成，但精确托管残留未能在有限重试后验证清除 | 保持所有 CBrain 服务停止；不要立刻重跑 restore。按下方步骤检查 residual，只在确认旧数据无需保留后手动清理，再重新执行 restore |
 | **NER 提取不到实体** | API Key 未配置或余额不足 | 检查 `cbrain.json` 里 `ner.llm_api_key` 或环境变量 `ZHIPU_API_KEY`；到智谱控制台检查余额 |
 | **`bun: command not found`** | Bun 未安装或不在 PATH | `curl -fsSL https://bun.sh/install \| bash`，然后重启终端 |
+
+### `RESTORE_CLEANUP_INCOMPLETE` 处理步骤
+
+1. 保持 HTTP/stdio server、watcher 和其他 CBrain writer 全部停止。
+2. 根据当前 profile 的 `dbPath` / `vaultPath` 检查精确的 restore 托管残留。不要因为命令返回非零就覆盖或回滚当前数据库/vault：主恢复已经完成，新数据仍是 active 状态。
+3. 先备份仍存在的 residual；确认其中旧数据无需保留后，才手动删除对应精确条目。
+4. 重新运行 restore。`.pre-restore` 或 `.rollback` 仍存在时，preflight 会继续拒绝执行；WAL/SHM 清理失败也要求服务保持停止，但普通 WAL/SHM 文件本身不被当成上一轮 residual guard。
+
+CBrain 只删除本轮 restore 自己创建/接管的 `.pre-restore` 和 `.rollback`。如果某个同名条目在 preflight 后才由 File Provider 或外部进程物化，本轮只会返回 cleanup-incomplete，不会删除或把它装成 active 数据。
+
+递归删除可能在报错前已完成一部分，因此 residual 只代表“停止重试时尚存的内容”，不保证是旧 vault 的完整副本。若 File Provider/云盘生成了 `brain 2`、`records 2` 等编号目录，restore 不会扫描或自动删除它们；按 [Issue #341](https://github.com/chenhong268/cbrain/issues/341) 的 observability/人工清理边界处理，非空或未托管目录一律先人工核对。
 
 ---
 
