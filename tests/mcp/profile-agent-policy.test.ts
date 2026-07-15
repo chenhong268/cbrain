@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../../src/mcp/context.js";
+import type { ToolProfile } from "../../src/mcp/tool-profiles.js";
 import { registerProfileTools } from "../../src/mcp/tools/profile.js";
 import { ProfileManager } from "../../src/profile/manager.js";
 import {
@@ -207,6 +208,25 @@ function parseToolBody(result: { content: unknown[] }): Record<string, unknown> 
   return JSON.parse(first.text) as Record<string, unknown>;
 }
 
+type ListedProfileTool = {
+  description?: string;
+  inputSchema: {
+    properties?: Record<string, {
+      description?: string;
+      default?: unknown;
+      enum?: string[];
+      items?: { properties?: Record<string, { description?: string; default?: unknown; enum?: string[] }> };
+    }>;
+  };
+};
+
+async function listedProfileTool(client: Client): Promise<ListedProfileTool> {
+  const { tools } = await client.listTools();
+  const tool = tools.find((candidate) => candidate.name === "profile");
+  if (!tool) throw new Error("profile tool was not listed");
+  return tool as ListedProfileTool;
+}
+
 describe.serial("daily Agent Profile real MCP handler", () => {
   let root: string;
   let profilePath: string;
@@ -246,6 +266,30 @@ describe.serial("daily Agent Profile real MCP handler", () => {
         rmSync(root, { recursive: true, force: true });
       }
     }
+  });
+
+  test("tools/list requires Agent update source without changing the source enum", async () => {
+    const tool = await listedProfileTool(client);
+    const properties = tool.inputSchema.properties ?? {};
+    const sourceSchema = properties.entries?.items?.properties?.source;
+
+    expect(sourceSchema?.enum).toEqual(["explicit", "observed", "inferred"]);
+    expect(sourceSchema?.default).toBeUndefined();
+    expect(sourceSchema?.description).toContain("explicit");
+  });
+
+  test("tools/list truthfully describes the governed Agent actions and scopes", async () => {
+    const tool = await listedProfileTool(client);
+    const properties = tool.inputSchema.properties ?? {};
+
+    expect(tool.description).toContain("open");
+    expect(tool.description).toContain("explicit");
+    expect(tool.description).toContain("unavailable");
+    expect(tool.description?.toLowerCase()).not.toContain("aliases");
+    expect(properties.action?.enum).toEqual(["get", "update", "remove", "reload"]);
+    expect(properties.action?.description).toContain("unavailable");
+    expect(properties.scope?.enum).toEqual(["open", "scoped", "private"]);
+    expect(properties.scope?.description).toContain("open");
   });
 
   test("get returns only open entries and privacy-safe envelope metadata", async () => {
@@ -352,4 +396,79 @@ describe.serial("daily Agent Profile real MCP handler", () => {
     await assertRejected({ action: "remove", ids: ["private-entry"] }, "PROFILE_ACTION_FORBIDDEN");
     await assertRejected({ action: "reload" }, "PROFILE_ACTION_FORBIDDEN");
   });
+
+  test("missing update source fails MCP Invalid Params before the handler with zero writes", async () => {
+    const yamlBefore = readFileSync(profilePath);
+    const moduleBefore = readFileSync(modulePath);
+    const entriesBefore = profile.getEntries();
+    const { source: _source, ...missingSource } = VALID_AGENT_UPDATE;
+
+    const result = await client.callTool({
+      name: "profile",
+      arguments: { action: "update", entries: [missingSource] },
+    });
+    const typedResult = result as { content: unknown[]; isError?: boolean };
+    const first = typedResult.content[0] as { type?: string; text?: string } | undefined;
+
+    expect(typedResult.isError).toBe(true);
+    expect(first?.type).toBe("text");
+    expect(first?.text).toContain("MCP error -32602");
+    expect(first?.text).toContain("Input validation error");
+    expect(first?.text).not.toContain("PROFILE_UPDATE_INVALID");
+
+    expect(readFileSync(profilePath).equals(yamlBefore)).toBe(true);
+    expect(readFileSync(modulePath).equals(moduleBefore)).toBe(true);
+    expect(profile.getEntries()).toEqual(entriesBefore);
+    expect(profile.getEntry(VALID_AGENT_UPDATE.id)).toBeUndefined();
+  });
+});
+
+describe.serial("full/debug Profile schema compatibility", () => {
+  for (const toolProfile of ["full", "debug"] as const satisfies readonly ToolProfile[]) {
+    test(`${toolProfile} keeps observed default and unrestricted private observed updates`, async () => {
+      const root = mkdtempSync(join(tmpdir(), `cbrain-profile-${toolProfile}-`));
+      const profilePath = join(root, "profile.yaml");
+      writeFileSync(profilePath, AGENT_PROFILE_YAML, "utf-8");
+      const profile = new ProfileManager(root);
+      profile.load();
+      const server = new McpServer({ name: `profile-${toolProfile}-test`, version: "0.0.0" });
+      registerProfileTools(server, { profile, toolProfile } as ToolContext);
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverSide);
+      const client = new Client({ name: `profile-${toolProfile}-client`, version: "0.0.0" });
+      await client.connect(clientSide);
+
+      try {
+        const tool = await listedProfileTool(client);
+        const sourceSchema = tool.inputSchema.properties?.entries?.items?.properties?.source;
+        expect(sourceSchema?.default).toBe("observed");
+        expect(tool.description).toContain("Compatibility aliases");
+
+        const entry = {
+          ...VALID_AGENT_UPDATE,
+          id: `${toolProfile}-observed-private`,
+          scope: "private" as const,
+          source: "observed" as const,
+        };
+        const result = await client.callTool({
+          name: "profile",
+          arguments: { action: "update", entries: [entry] },
+        });
+
+        expect(result.isError).toBeFalsy();
+        expect(profile.getEntry(entry.id)).toMatchObject(entry);
+        expect(readFileSync(profilePath, "utf-8")).toContain(entry.id);
+      } finally {
+        try {
+          await client.close();
+        } finally {
+          try {
+            await server.close();
+          } finally {
+            rmSync(root, { recursive: true, force: true });
+          }
+        }
+      }
+    });
+  }
 });

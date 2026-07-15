@@ -12,6 +12,7 @@ import {
   buildAgentVisibleStats,
   validateAgentProfileUpdate,
   type AgentProfilePolicyCode,
+  type ProfileUpdateInput,
 } from "./profile-policy.js";
 
 type ProfileAction = "get" | "update" | "remove" | "reload";
@@ -28,18 +29,6 @@ interface ProfileFilterInput {
   type?: ProfileEntryType;
   tags?: string[];
   ids?: string[];
-}
-
-interface ProfileUpdateInput {
-  id: string;
-  type: ProfileEntryType;
-  category: ProfileCategory;
-  scope: ProfileScope;
-  agents?: string[];
-  content: string;
-  priority?: "high" | "normal";
-  source?: "explicit" | "observed" | "inferred";
-  tags?: string[];
 }
 
 function textResult(envelope: unknown): { content: Array<{ type: "text"; text: string }> } {
@@ -140,13 +129,26 @@ function runProfileAction(
 }
 
 export function registerProfileTools(server: McpServer, ctx: ToolContext): void {
+  const isAgent = ctx.toolProfile === "agent";
+  const sourceSchema = isAgent
+    ? z.enum(["explicit", "observed", "inferred"])
+        .describe("Daily Agent sessions allow explicit only; observed/inferred fail closed")
+    : z.enum(["explicit", "observed", "inferred"])
+        .default("observed")
+        .describe("How this was learned");
+
   server.registerTool("profile", {
-    description:
-      "Unified profile operations. Use action=get/update/remove/reload. " +
-      "Compatibility aliases get_profile/update_profile/remove_profile/reload_profile remain available.",
+    description: isAgent
+      ? "Daily Agent Profile operations: get reads open entries; update accepts explicit, open entries only; remove/reload are unavailable."
+      : "Unified profile operations. Use action=get/update/remove/reload. " +
+        "Compatibility aliases get_profile/update_profile/remove_profile/reload_profile remain available.",
     inputSchema: {
-      action: z.enum(["get", "update", "remove", "reload"]).describe("Profile operation"),
-      scope: z.enum(["open", "scoped", "private"]).optional().describe("Privacy scope filter for action=get"),
+      action: z.enum(["get", "update", "remove", "reload"]).describe(isAgent
+        ? "Daily Agent operation; remove/reload are unavailable"
+        : "Profile operation"),
+      scope: z.enum(["open", "scoped", "private"]).optional().describe(isAgent
+        ? "Daily Agent get allows open only; scoped/private fail closed"
+        : "Privacy scope filter for action=get"),
       category: z.enum(["communication", "work", "health", "finance", "interests", "general"]).optional().describe("Category filter for action=get"),
       type: z.enum(["preference", "constraint", "context", "habit"]).optional().describe("Entry type filter for action=get"),
       tags: z.array(z.string().max(200)).optional().describe("Tag filter for action=get"),
@@ -159,7 +161,7 @@ export function registerProfileTools(server: McpServer, ctx: ToolContext): void 
         agents: z.array(z.string().max(200)).optional().describe("Visible agents (for scoped entries)"),
         content: z.string().max(50_000).describe("The profile content"),
         priority: z.enum(["high", "normal"]).optional().describe("Priority (mainly for constraints)"),
-        source: z.enum(["explicit", "observed", "inferred"]).default("observed").describe("How this was learned"),
+        source: sourceSchema,
         tags: z.array(z.string().max(200)).optional().describe("Tags for categorization"),
       })).optional().describe("Entries for action=update"),
     },
