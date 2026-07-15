@@ -27,10 +27,12 @@ import type { IngestNerMode } from "../cli/context.js";
 import type { ToolProfile } from "./tool-profiles.js";
 import { JobQueueNerSubmitter, type DeferredNerSubmitter } from "../core/ingestion/ner-backfill.js";
 import { resolveOutputMode, type OutputMode } from "./output-mode.js";
+import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-artifacts.js";
 
 export interface ToolContext {
   db: CBrainDB;
   vaultPath: string;
+  vaultBoundary?: TrustedVaultBoundary;
   dbPath?: string;
   profileDir?: string;
   outputsDir: string;
@@ -79,8 +81,8 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile }): ToolContext {
-  const { db, embedding, lance, vaultPath, dbPath, llm, profileDir, watcher } = deps;
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; vaultBoundary?: TrustedVaultBoundary; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile }): ToolContext {
+  const { db, embedding, lance, vaultPath, vaultBoundary, dbPath, llm, profileDir, watcher } = deps;
   const outputsDir = deps.runtimePath;
   const logger = new Logger(outputsDir);
   const pages = new PageManager(db, vaultPath, logger, lance);
@@ -109,5 +111,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const compoundingReview = new CompoundingReviewManager(db);
   profile.load();
 
-  return { db, vaultPath, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY) };
+  return { db, vaultPath, vaultBoundary, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY) };
 }

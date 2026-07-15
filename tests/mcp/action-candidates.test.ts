@@ -1,9 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
+import { resolveTrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 function createMockEmbedding(): EmbeddingProvider {
   return {
@@ -91,6 +92,23 @@ describe("MCP action candidates (#267)", () => {
 
     expect(payload.summary.count).toBe(1);
     expect(db.getDiscoveriesByType("action_review_discovery", 10)).toHaveLength(1);
+  });
+
+  test("health source receives the explicit trusted boundary from CBrainDeps", async () => {
+    mkdirSync(join(testDir, ".obsidian"), { recursive: true });
+    writeFileSync(join(testDir, "anonymous-empty.md"), "");
+    const vaultBoundary = resolveTrustedVaultBoundary({ configRoot: testDir, vaultPath });
+    expect(vaultBoundary).toBeDefined();
+    deps.vaultBoundary = vaultBoundary;
+
+    const server = createServer(deps);
+    const result = await getTools(server).run_action_candidates.handler({ sources: ["health"], limit: 50 });
+    const payload = JSON.parse((result as { content: { text: string }[] }).content[0].text);
+
+    expect(payload.candidates).toContainEqual(expect.objectContaining({
+      type: "action_health_review",
+      entities: ["health:文件系统卫生:needs_review:filesystem_hygiene.zero_byte_markdown"],
+    }));
   });
 
   test("read_action_candidates returns pending only", async () => {

@@ -1259,10 +1259,17 @@ const ATTENTION_GROUP_LABEL: Record<"blocked" | "auto_repairable" | "needs_revie
   needs_review: "需人工确认：涉及事实或关系判断",
 };
 
+export type HealthEnvelopeRaw = Omit<HealthReport, "reportPaths">;
+
+function projectHealthReport(report: HealthReport): HealthEnvelopeRaw {
+  const { reportPaths: _reportPaths, ...projected } = report;
+  return projected;
+}
+
 export function formatHealthEnvelope(
   report: HealthReport,
   signalLookup?: SignalLookup,
-): { display: string; summary: ToolSummary; raw: HealthReport } {
+): { display: string; summary: ToolSummary; raw: HealthEnvelopeRaw } {
   const statusIcon = report.overallStatus === "pass" ? "✅" : "⚠️";
   const statusLabel = report.overallStatus === "pass" ? "健康" : report.overallStatus === "warn" ? "需注意" : "有问题";
   const summaryStatus: ToolSummary["status"] = report.overallStatus === "pass" ? "ok" : "degraded";
@@ -1270,6 +1277,7 @@ export function formatHealthEnvelope(
   // Reuse health-debt classification — do NOT re-classify here. #306
   const plan = planRepairs(report, signalLookup);
   const total = plan.actions.length;
+  const raw = projectHealthReport(report);
 
   if (total === 0) {
     return {
@@ -1280,7 +1288,7 @@ export function formatHealthEnvelope(
         truncated: false,
         message: "健康检查通过",
       },
-      raw: report,
+      raw,
     };
   }
 
@@ -1327,7 +1335,7 @@ export function formatHealthEnvelope(
       message: `${statusLabel}：${total} 条信号`,
       next_steps: nextSteps.length > 0 ? nextSteps : undefined,
     },
-    raw: report,
+    raw,
   };
 }
 

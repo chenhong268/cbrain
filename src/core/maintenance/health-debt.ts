@@ -43,6 +43,8 @@ export interface RepairAction {
   severity: HealthIssue["severity"];
   /** 原始 slug（结构化数据，供未来 execute 使用；不出现在匿名化的 display 里）。 */
   slug: string;
+  /** Stable identity for aggregate/global issues that do not have a page slug. */
+  code?: string;
   /** 仅 auto_repairable 有子类别。 */
   kind?: AutoRepairKind;
   /** 建议动作（planner 生成，固定文案，不含 slug / path）。 */
@@ -105,13 +107,21 @@ function classify(
   issue: HealthIssue,
   lookup: SignalLookup | undefined,
 ): RepairAction {
-  const base = { dimension, severity: issue.severity, slug: issue.slug };
+  const base = { dimension, severity: issue.severity, slug: issue.slug, code: issue.code };
 
   if (dimension === "富记录图谱覆盖") {
     return {
       ...base,
       group: "needs_review",
       action: "人工审核语义图谱覆盖债务（不自动触发 LLM 修复）",
+    };
+  }
+
+  if (dimension === "文件系统卫生") {
+    return {
+      ...base,
+      group: "needs_review",
+      action: "人工审核文件系统边界漂移信号（不自动移动、写入或删除）",
     };
   }
 

@@ -52,7 +52,18 @@ const DEFAULT_RULE: Rule = {
 	verifyCommand: "cbrain fsck --json",
 };
 
+const MISPLACED_VAULT_ARTIFACT_RULE: Rule = {
+	bucket: "needs_review",
+	canExecute: false,
+	prerequisite: "human review required; zero bytes do not prove deletion safety",
+	dryRunSummary: "Inspect the bounded local candidates and decide manually; no mutation is available.",
+	verifyCommand: "cbrain fsck --json --layer vault",
+};
+
 const RULES: Record<string, Rule> = {
+	"vault.misplaced_zero_byte_markdown": MISPLACED_VAULT_ARTIFACT_RULE,
+	"vault.misplaced_review_required_artifact": MISPLACED_VAULT_ARTIFACT_RULE,
+	"vault.misplaced_artifact_scan_incomplete": MISPLACED_VAULT_ARTIFACT_RULE,
 	"fts.stale_rows": {
 		bucket: "auto_repairable",
 		canExecute: true,

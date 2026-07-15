@@ -8,7 +8,8 @@ import { checkLanceIntegrity } from "../../storage/lance-integrity.js";
 import { ZhipuEmbeddingProvider } from "../../embedding/zhipu.js";
 import { ZhipuLLMProvider } from "../../llm/zhipu.js";
 import { DeepSeekLLMProvider } from "../../llm/deepseek.js";
-import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
+import { loadConfig, loadConfigWithPath, createDeps, resolveRuntimePath } from "../context.js";
+import { resolveTrustedVaultBoundary } from "../../core/maintenance/misplaced-vault-artifacts.js";
 import {
   atomicSlugChange,
   atomicTypeChange,
@@ -517,13 +518,18 @@ export function register(program: Command) {
     .option("--json", "Output detail JSON to stdout")
     .option("--dimension <name>", "Only check specified dimension")
     .action(async (opts) => {
-      const config = loadConfig();
+      const loaded = loadConfigWithPath();
+      const config = loaded.config;
+      const vaultBoundary = resolveTrustedVaultBoundary({
+        configRoot: loaded.configRoot,
+        vaultPath: config.vaultPath,
+      });
       const db = new CBrainDB(config.dbPath);
       const outputsDir = resolveRuntimePath(config);
       const { HealthChecker } = await import("../../core/maintenance/health.js");
       const { Logger } = await import("../../core/logger.js");
       const logger = new Logger(outputsDir);
-      const checker = new HealthChecker(db, outputsDir, logger, config.vaultPath);
+      const checker = new HealthChecker(db, outputsDir, logger, config.vaultPath, vaultBoundary);
       const report = await checker.checkAll();
 
       if (opts.json) {
@@ -593,14 +599,19 @@ export function register(program: Command) {
     .description("Plan health-debt repairs as a dry-run grouped queue (no execute, no delete, no merge, no LLM)")
     .option("--json", "Output structured RepairPlan JSON (with real slugs) instead of anonymized Markdown")
     .action(async (opts) => {
-      const config = loadConfig();
+      const loaded = loadConfigWithPath();
+      const config = loaded.config;
+      const vaultBoundary = resolveTrustedVaultBoundary({
+        configRoot: loaded.configRoot,
+        vaultPath: config.vaultPath,
+      });
       const db = new CBrainDB(config.dbPath);
       const outputsDir = resolveRuntimePath(config);
       const { HealthChecker } = await import("../../core/maintenance/health.js");
       const { Logger } = await import("../../core/logger.js");
       const { planRepairs, planToMarkdown } = await import("../../core/maintenance/health-debt.js");
       const logger = new Logger(outputsDir);
-      const checker = new HealthChecker(db, outputsDir, logger, config.vaultPath);
+      const checker = new HealthChecker(db, outputsDir, logger, config.vaultPath, vaultBoundary);
       const report = await checker.checkAll();
 
       // Signal lookup for stub / island triage: pure reads, injected into the planner.
@@ -720,8 +731,13 @@ export function register(program: Command) {
     .command("dream")
     .description("Nightly full pipeline: sync → enrich → cleanup → health → insight archive")
     .action(async () => {
-      const config = loadConfig();
-      const deps = createDeps(config);
+      const loaded = loadConfigWithPath();
+      const config = loaded.config;
+      const vaultBoundary = resolveTrustedVaultBoundary({
+        configRoot: loaded.configRoot,
+        vaultPath: config.vaultPath,
+      });
+      const deps = createDeps(config, true, vaultBoundary);
       await deps.lance.connect(config.lancePath);
       const { runDream } = await import("../../core/maintenance/dream.js");
       const { SyncManager } = await import("../../core/maintenance/sync.js");
@@ -745,7 +761,7 @@ export function register(program: Command) {
       });
       const enrichMgr = new EnrichManager(deps.db, undefined, deps.llm, config.vaultPath, pages);
       const insightMgr = new InsightManager(deps.db, deps.embedding, deps.lance, logger);
-      const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath);
+      const health = new HealthChecker(deps.db, outputsDir, logger, config.vaultPath, deps.vaultBoundary);
       const { ContentPipeline } = await import("../../core/ingestion/pipeline.js");
       const nerPipeline = new ContentPipeline(deps.db, deps.embedding, deps.lance, { pages, nerEngine, logger });
       const report = await runDream(config.vaultPath, deps.db, syncMgr, enrichMgr, health, outputsDir, logger, insightMgr, config.dbPath,

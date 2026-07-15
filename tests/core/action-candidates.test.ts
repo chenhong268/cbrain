@@ -10,7 +10,8 @@ import {
 import { ActionCandidateManager } from "../../src/core/maintenance/action-candidates.js";
 import { assertSafeActionDisplay } from "../../src/core/safety/display-safety.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import type { RepairPlan } from "../../src/core/maintenance/health-debt.js";
+import { planRepairs, type RepairPlan } from "../../src/core/maintenance/health-debt.js";
+import type { HealthIssue, HealthReport } from "../../src/core/maintenance/health.js";
 
 describe("action candidate core helpers (#267)", () => {
   test("recognizes all action candidate types", () => {
@@ -213,6 +214,38 @@ describe("buildActionCandidatesFromHealthPlan (#267)", () => {
     expect(drafts).toHaveLength(1);
     expect(drafts[0].entities).toEqual(["health:系统错误:blocked:global"]);
   });
+
+  test("uses filesystem issue code for three distinct path-free stable refs", () => {
+    const secretCandidate = "secret-candidate.md";
+    const codes = [
+      "filesystem_hygiene.zero_byte_markdown",
+      "filesystem_hygiene.review_required",
+      "filesystem_hygiene.scan_incomplete",
+    ];
+    const drafts = buildActionCandidatesFromHealthPlan(makePlan(codes.map((code) => ({
+      group: "needs_review" as const,
+      dimension: "文件系统卫生",
+      severity: "medium" as const,
+      slug: "-",
+      code,
+      action: "人工审核边界外文件系统条目（不自动修改）",
+    }))));
+
+    expect(drafts).toHaveLength(3);
+    expect(new Set(drafts.flatMap((draft) => draft.entities)).size).toBe(3);
+    expect(drafts.map((draft) => draft.entities[0])).toEqual(codes.map(
+      (code) => `health:文件系统卫生:needs_review:${code}`,
+    ));
+
+    const persistedSurface = JSON.stringify(drafts.map((draft) => ({
+      displayTitle: draft.displayTitle,
+      displayReason: draft.displayReason,
+      suggestedAction: draft.suggestedAction,
+      metadata: draft.metadata,
+    })));
+    expect(persistedSurface).not.toContain(secretCandidate);
+    expect(persistedSurface).not.toContain("/tmp/");
+  });
 });
 
 describe("ActionCandidateManager persistence (#267)", () => {
@@ -254,6 +287,78 @@ describe("ActionCandidateManager persistence (#267)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].auto_applicable).toBe(0);
     expect(rows[0].proposed_actions).toContain("review");
+  });
+
+  test("keeps filesystem attack input out of persisted display and metadata across reruns", () => {
+    const secretCandidatePath = "/synthetic/private/secret-candidate.md";
+    const secretBody = "SYNTHETIC_PRIVATE_BODY_SENTINEL";
+    const codes = [
+      "filesystem_hygiene.zero_byte_markdown",
+      "filesystem_hygiene.review_required",
+      "filesystem_hygiene.scan_incomplete",
+    ];
+    const issues: HealthIssue[] = codes.map((code) => ({
+      severity: "medium",
+      slug: "-",
+      code,
+      title: `hostile title ${secretCandidatePath}`,
+      description: `hostile description ${secretCandidatePath} ${secretBody}`,
+      suggestion: `hostile suggestion ${secretBody}`,
+    }));
+    const report: HealthReport = {
+      timestamp: "2026-07-15T00:00:00.000Z",
+      overallStatus: "warn",
+      dimensions: [{ name: "文件系统卫生", status: "warn", issues }],
+      metrics: {
+        timestamp: "2026-07-15T00:00:00.000Z",
+        totalPages: 0,
+        entities: 0,
+        concepts: 0,
+        events: 0,
+        records: 0,
+        totalLinks: 0,
+        avgMentionsPerPage: 0,
+        orphans: 0,
+        bareStubs: 0,
+        conceptsPerSource: 0,
+        indexSizeKB: 0,
+      },
+    };
+
+    // Exercise the real HealthIssue -> RepairAction -> draft -> persistence
+    // pipeline. The hostile upstream fields must be replaced by fixed copy.
+    const plan = planRepairs(report);
+    expect(plan.actions.map((action) => action.code)).toEqual(codes);
+    expect(JSON.stringify(plan.actions)).not.toContain(secretCandidatePath);
+    expect(JSON.stringify(plan.actions)).not.toContain(secretBody);
+    const drafts = buildActionCandidatesFromHealthPlan(plan);
+    const expectedRefs = codes.map((code) => `health:文件系统卫生:needs_review:${code}`);
+    expect(drafts.map((draft) => draft.entities[0])).toEqual(expectedRefs);
+
+    const mgr = new ActionCandidateManager(db);
+    const first = mgr.persistDrafts(drafts);
+    expect(first).toMatchObject({ total: 3, inserted: 3, updated: 0 });
+    expect(first.candidates.map((candidate) => candidate.entities[0])).toEqual(expectedRefs);
+
+    const second = mgr.persistDrafts(drafts);
+    expect(second).toMatchObject({ total: 3, inserted: 0, updated: 3 });
+    expect(second.candidates.map((candidate) => candidate.entities[0])).toEqual(expectedRefs);
+
+    const rows = db.getDiscoveriesByType("action_health_review", 10)
+      .map((row) => db.getDiscoveryById(row.id)!)
+      .sort((a, b) => a.id - b.id);
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row) => JSON.parse(row.entities)[0])).toEqual(expectedRefs);
+    expect(rows.map((row) => row.occurrence_count)).toEqual([2, 2, 2]);
+    expect(rows.map((row) => JSON.parse(row.metadata!).source_ref)).toEqual(expectedRefs);
+
+    const persistedSurface = JSON.stringify(rows.map((row) => ({
+      metadata: row.metadata,
+      proposedActions: row.proposed_actions,
+    })));
+    expect(persistedSurface).not.toContain(secretCandidatePath);
+    expect(persistedSurface).not.toContain(secretBody);
+    for (const code of codes) expect(persistedSurface).toContain(code);
   });
 
   test("rerun does not duplicate and increments occurrence count", () => {

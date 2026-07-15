@@ -9,22 +9,61 @@ import { probeFts } from "../../core/fsck/fts-probe.js";
 import { probeLance } from "../../core/fsck/lance-probe.js";
 import { probeVault } from "../../core/fsck/vault-probe.js";
 import { probeHierarchy } from "../../core/fsck/hierarchy-probe.js";
+import {
+	escapeLocalDetailPath,
+	inspectMisplacedVaultArtifacts,
+	resolveTrustedVaultBoundary,
+	type MisplacedVaultArtifactLocalDetail,
+	type TrustedVaultBoundary,
+} from "../../core/maintenance/misplaced-vault-artifacts.js";
 
 export interface FsckInput {
 	vaultPath: string;
 	lancePath: string;
 	db: CBrainDB;
 	layer?: FsckLayer;
+	vaultBoundary?: TrustedVaultBoundary;
+	includeLocalDetails?: boolean;
 }
 
 export interface FsckResult {
 	report: FsckReport;
 	exitCode: 0 | 1 | 2;
+	localDetails?: readonly MisplacedVaultArtifactLocalDetail[];
 }
 
 export interface RepairPlanResult {
 	plan: RepairPlan;
 	exitCode: 0 | 1 | 2;
+}
+
+export interface LocalDetailsPresentation {
+	output: string;
+	exitCode: 0 | 1 | 2;
+}
+
+export function buildLocalDetailsPresentation(
+	report: FsckReport,
+	localDetails: readonly MisplacedVaultArtifactLocalDetail[],
+	exitCode: 0 | 1 | 2,
+): LocalDetailsPresentation {
+	const incomplete = report.findings.some(
+		(finding) => finding.check === "vault.misplaced_artifact_scan_incomplete",
+	);
+	if (incomplete && localDetails.length === 0) {
+		return {
+			output: "Misplaced artifact inspection incomplete; no local paths are available.",
+			exitCode: 1,
+		};
+	}
+	const lines = [
+		reportToMarkdown(report),
+		"Local-only read-only preview; zero bytes do not prove deletion safety.",
+		...localDetails.map(
+			(detail) => `${detail.classification} ${escapeLocalDetailPath(detail.relativePath)}`,
+		),
+	];
+	return { output: lines.join("\n"), exitCode };
 }
 
 const ALL_LAYERS: FsckLayer[] = ["vault", "sqlite", "fts", "lance"];
@@ -33,11 +72,18 @@ export async function runFsck(input: FsckInput): Promise<FsckResult> {
 	const timestamp = new Date().toISOString();
 	const layers = input.layer ? [input.layer] : ALL_LAYERS;
 	const findings: FsckFinding[] = [];
+	let localDetails: readonly MisplacedVaultArtifactLocalDetail[] = [];
 	let lanceState: FsckLanceState = "unchecked";
 	let fatalError: string | undefined;
 
 	try {
-		if (layers.includes("vault")) findings.push(...probeVault(input.vaultPath, input.db));
+		if (layers.includes("vault")) {
+			const inspection = inspectMisplacedVaultArtifacts(input.vaultBoundary, {
+				includeLocalDetails: input.includeLocalDetails,
+			});
+			findings.push(...probeVault(input.vaultPath, input.db, inspection.scan));
+			if (input.includeLocalDetails === true) localDetails = inspection.localDetails;
+		}
 		if (layers.includes("sqlite")) {
 			findings.push(...probeSqlite(input.db));
 			findings.push(...probeHierarchy(input.vaultPath, input.db));
@@ -54,7 +100,7 @@ export async function runFsck(input: FsckInput): Promise<FsckResult> {
 
 	const report = buildReport(findings, lanceState, timestamp, fatalError);
 	const exitCode: 0 | 1 | 2 = fatalError ? 2 : report.overallStatus === "pass" ? 0 : 1;
-	return { report, exitCode };
+	return input.includeLocalDetails === true ? { report, exitCode, localDetails } : { report, exitCode };
 }
 
 function repairPlanExitCode(status: RepairPlanStatus): 0 | 1 | 2 {
@@ -84,12 +130,29 @@ export function register(program: Command): void {
 		.option("--layer <name>", "只跑指定层：vault|sqlite|fts|lance")
 		.option("--repair-plan", "输出 privacy-safe repair plan，而不是原始 fsck report")
 		.option("--repair-stale-fts", "安全删除 chunks_fts 中没有对应 chunks 的残留 rows")
-		.action(async (opts: { json?: boolean; layer?: string; repairPlan?: boolean; repairStaleFts?: boolean }) => {
-			const { loadConfig } = await import("../context.js");
+		.option("--local-details", "仅本机显示 vault 边界外候选的转义相对路径（只读）")
+		.action(async (opts: { json?: boolean; layer?: string; repairPlan?: boolean; repairStaleFts?: boolean; localDetails?: boolean }) => {
+			if (opts.localDetails && (
+				opts.layer !== "vault"
+				|| opts.json
+				|| opts.repairPlan
+				|| opts.repairStaleFts
+			)) {
+				console.error("Error: --local-details requires --layer vault and cannot be combined with --json, --repair-plan, or repair flags.");
+				process.exit(2);
+				return;
+			}
+
+			const { loadConfigWithPath } = await import("../context.js");
 			const { CBrainDB } = await import("../../storage/sqlite.js");
 			const { existsSync } = await import("node:fs");
 			const { FsckLayerSchema } = await import("../../core/fsck/types.js");
-			const config = loadConfig();
+			const loaded = loadConfigWithPath();
+			const config = loaded.config;
+			const vaultBoundary = resolveTrustedVaultBoundary({
+				configRoot: loaded.configRoot,
+				vaultPath: config.vaultPath,
+			});
 			const ts = new Date().toISOString();
 			const emit = (report: FsckReport, exitCode: 0 | 1 | 2): void => {
 				if (opts.json) console.log(JSON.stringify(report));
@@ -129,20 +192,41 @@ export function register(program: Command): void {
 				return;
 			}
 
-			const db = new CBrainDB(config.dbPath, { skipMigrate: true });
+			let db: CBrainDB;
+			const readSnapshot = opts.repairStaleFts !== true;
+			try {
+				db = new CBrainDB(config.dbPath, {
+					skipMigrate: true,
+					readSnapshot,
+				});
+			} catch {
+				const error = readSnapshot
+					? "Unable to open a stable read snapshot"
+					: "Unable to open configured database safely";
+				emit(buildReport([], "unchecked", ts, error), 2);
+				return;
+			}
 			try {
 				if (opts.repairStaleFts) {
 					db.cleanupStaleFtsRows();
 				}
-				const { report, exitCode } = await runFsck({
+				const { report, exitCode, localDetails } = await runFsck({
 					vaultPath: config.vaultPath,
 					lancePath: config.lancePath,
 					db,
 					layer,
+					vaultBoundary,
+					includeLocalDetails: opts.localDetails,
 				});
 				if (opts.repairPlan) {
 					const plan = buildRepairPlan(report);
 					emitPlan(plan, repairPlanExitCode(plan.overallStatus));
+					return;
+				}
+				if (opts.localDetails) {
+					const presentation = buildLocalDetailsPresentation(report, localDetails ?? [], exitCode);
+					console.log(presentation.output);
+					process.exit(presentation.exitCode);
 					return;
 				}
 				emit(report, exitCode);
@@ -159,10 +243,15 @@ export function register(program: Command): void {
 		.option("--execute", "执行已声明安全的派生层修复（Phase 1 之后逐步开放）")
 		.option("--verify", "只验证当前 repair plan 是否清空，不执行修复")
 		.action(async (opts: { json?: boolean; limit?: string; execute?: boolean; verify?: boolean }) => {
-			const { loadConfig } = await import("../context.js");
+			const { loadConfigWithPath } = await import("../context.js");
 			const { CBrainDB } = await import("../../storage/sqlite.js");
 			const { existsSync } = await import("node:fs");
-			const config = loadConfig();
+			const loaded = loadConfigWithPath();
+			const config = loaded.config;
+			const vaultBoundary = resolveTrustedVaultBoundary({
+				configRoot: loaded.configRoot,
+				vaultPath: config.vaultPath,
+			});
 			const ts = new Date().toISOString();
 			const emitPlan = (plan: RepairPlan, exitCode: 0 | 1 | 2): void => {
 				if (opts.json) console.log(JSON.stringify(plan));
@@ -176,12 +265,30 @@ export function register(program: Command): void {
 				return;
 			}
 
-			const db = new CBrainDB(config.dbPath, { skipMigrate: true });
+			let db: CBrainDB;
+			const readSnapshot = opts.execute !== true || opts.verify === true;
+			try {
+				db = new CBrainDB(config.dbPath, {
+					skipMigrate: true,
+					// --verify wins over --execute in the established command flow below.
+					readSnapshot,
+				});
+			} catch {
+				const error = readSnapshot
+					? "Unable to open a stable read snapshot"
+					: "Unable to open configured database safely";
+				emitPlan(
+					buildRepairPlan(buildReport([], "unchecked", ts, error)),
+					2,
+				);
+				return;
+			}
 			try {
 				const input: FsckInput = {
 					vaultPath: config.vaultPath,
 					lancePath: config.lancePath,
 					db,
+					vaultBoundary,
 				};
 				const { plan } = await runRepairPlan(input);
 

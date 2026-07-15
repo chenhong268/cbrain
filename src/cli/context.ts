@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
@@ -9,6 +9,7 @@ import { ZhipuLLMProvider } from "../llm/zhipu.js";
 import type { CBrainDeps } from "../mcp/server.js";
 import { resolveToolProfile } from "../mcp/tool-profiles.js";
 import type { NerMode } from "../core/ingestion/ner-write-path.js";
+import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-artifacts.js";
 
 const CONFIG_FILE = "cbrain.json";
 
@@ -49,6 +50,12 @@ export interface CBrainConfig {
   };
 }
 
+export interface LoadedCBrainConfig {
+  config: CBrainConfig;
+  configPath: string;
+  configRoot: string;
+}
+
 export type IngestNerMode = NerMode;
 
 const VALID_INGEST_NER_MODES = new Set<IngestNerMode>(["sync", "defer", "off"]);
@@ -72,63 +79,92 @@ export function resolveRuntimePath(config: CBrainConfig): string {
   return join(dirname(resolve(config.dbPath)), "runtime");
 }
 
-export function findConfig(startDir?: string): CBrainConfig | null {
-  const dir = startDir ?? process.cwd();
-  const configPath = join(dir, CONFIG_FILE);
-  if (existsSync(configPath)) {
-    return JSON.parse(readFileSync(configPath, "utf-8"));
+class ConfigNotFoundError extends Error {
+  constructor(
+    readonly explicitPath?: string,
+  ) {
+    super(explicitPath
+      ? `CBRAIN_CONFIG=${explicitPath} not found.`
+      : `No ${CONFIG_FILE} found.`);
   }
-  const parent = resolve(dir, "..");
-  if (parent === dir) return null;
-  return findConfig(parent);
 }
 
-export function loadConfigSafe(): { config: CBrainConfig; configPath: string } | null {
-  if (process.env.CBRAIN_CONFIG) {
-    const p = process.env.CBRAIN_CONFIG;
-    if (existsSync(p)) {
-      try {
-        return { config: JSON.parse(readFileSync(p, "utf-8")), configPath: p };
-      } catch {
-        return null;
-      }
-    }
-    return null;
+function resolveConfigPath(startDir: string, explicitPath?: string): string {
+  if (explicitPath) {
+    const candidate = resolve(startDir, explicitPath);
+    if (!existsSync(candidate)) throw new ConfigNotFoundError(explicitPath);
+    return realpathSync(candidate);
   }
-  let current = process.cwd();
+
+  let current = resolve(startDir);
   while (true) {
-    const configPath = join(current, CONFIG_FILE);
-    if (existsSync(configPath)) {
-      try {
-        return { config: JSON.parse(readFileSync(configPath, "utf-8")), configPath };
-      } catch {
-        return null;
-      }
-    }
+    const candidate = join(current, CONFIG_FILE);
+    if (existsSync(candidate)) return realpathSync(candidate);
     const parent = resolve(current, "..");
-    if (parent === current) return null;
+    if (parent === current) throw new ConfigNotFoundError();
     current = parent;
   }
 }
 
-export function loadConfig(): CBrainConfig {
-  // 1. CBRAIN_CONFIG: explicit path to config file (no search)
-  if (process.env.CBRAIN_CONFIG) {
-    const p = process.env.CBRAIN_CONFIG;
-    if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8"));
-    console.error(`Error: CBRAIN_CONFIG=${p} not found.`);
-    process.exit(1);
-  }
-  // 2. Search upward from cwd
-  const config = findConfig();
-  if (!config) {
-    console.error("Error: No cbrain.json found. Run `cbrain init` first.");
-    process.exit(1);
-  }
-  return config;
+function loadResolvedConfig(startDir: string, explicitPath?: string): LoadedCBrainConfig {
+  const configPath = resolveConfigPath(startDir, explicitPath);
+  return {
+    config: JSON.parse(readFileSync(configPath, "utf-8")),
+    configPath,
+    configRoot: dirname(configPath),
+  };
 }
 
-export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrainDeps {
+function exitConfigNotFound(error: ConfigNotFoundError): never {
+  if (error.explicitPath) {
+    console.error(`Error: CBRAIN_CONFIG=${error.explicitPath} not found.`);
+  } else {
+    console.error("Error: No cbrain.json found. Run `cbrain init` first.");
+  }
+  process.exit(1);
+}
+
+export function loadConfigWithPath(
+  startDir = process.cwd(),
+  explicitPath = process.env.CBRAIN_CONFIG,
+): LoadedCBrainConfig {
+  try {
+    return loadResolvedConfig(startDir, explicitPath);
+  } catch (error) {
+    if (error instanceof ConfigNotFoundError) exitConfigNotFound(error);
+    throw error;
+  }
+}
+
+export function findConfig(startDir = process.cwd()): CBrainConfig | null {
+  try {
+    return loadResolvedConfig(startDir).config;
+  } catch (error) {
+    if (error instanceof ConfigNotFoundError) return null;
+    throw error;
+  }
+}
+
+export function loadConfigSafe(
+  startDir = process.cwd(),
+  explicitPath = process.env.CBRAIN_CONFIG,
+): LoadedCBrainConfig | null {
+  try {
+    return loadResolvedConfig(startDir, explicitPath);
+  } catch {
+    return null;
+  }
+}
+
+export function loadConfig(): CBrainConfig {
+  return loadConfigWithPath().config;
+}
+
+export function createDeps(
+  config: CBrainConfig,
+  requireEmbedding = true,
+  vaultBoundary?: TrustedVaultBoundary,
+): CBrainDeps {
   const db = new CBrainDB(config.dbPath);
   const embeddingProvider = config.embedding.provider ?? "zhipu";
   const isDeterministic = embeddingProvider === "deterministic";
@@ -170,5 +206,5 @@ export function createDeps(config: CBrainConfig, requireEmbedding = true): CBrai
 
   const nerIngestMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, config.ner?.ingest_mode);
   const toolProfile = resolveToolProfile(process.env.CBRAIN_MCP_TOOL_PROFILE);
-  return { db, embedding, lance, vaultPath: config.vaultPath, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined, nerIngestMode, toolProfile };
+  return { db, embedding, lance, vaultPath: config.vaultPath, vaultBoundary, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined, nerIngestMode, toolProfile };
 }

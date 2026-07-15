@@ -101,4 +101,24 @@ describe("buildRepairPlan (#278)", () => {
 		expect(item).toBeDefined();
 		expect(item!.bucket).toBe("auto_repairable");
 	});
+
+	test("misplaced vault artifact findings always require human review and cannot execute", () => {
+		const checks = [
+			"vault.misplaced_zero_byte_markdown",
+			"vault.misplaced_review_required_artifact",
+			"vault.misplaced_artifact_scan_incomplete",
+		];
+		const plan = buildRepairPlan(report(checks.map((check) => finding({ check, layer: "vault" }))));
+
+		expect(plan.items).toHaveLength(3);
+		for (const item of plan.items) {
+			expect(item).toMatchObject({
+				bucket: "needs_review",
+				canExecute: false,
+				prerequisite: "human review required; zero bytes do not prove deletion safety",
+				verifyCommand: "cbrain fsck --json --layer vault",
+			});
+			expect(item.executeCommand).toBeUndefined();
+		}
+	});
 });

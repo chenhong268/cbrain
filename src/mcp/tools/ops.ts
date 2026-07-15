@@ -39,7 +39,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     description: "Run a 14-dimension health check (errors, dedup, slug collisions, consistency, structural consistency, completeness, islands, suggestions, attention, data readiness, source quality, etc.). Returns issues and writes a report file.",
     inputSchema: {},
   }, async () => {
-    const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath);
+    const checker = new HealthChecker(ctx.db, ctx.outputsDir, ctx.logger, ctx.vaultPath, ctx.vaultBoundary);
     const report = await checker.checkAll();
     const envelope = formatHealthEnvelope(report, createHealthSignalLookup(ctx));
     return {

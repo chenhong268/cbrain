@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { getReverseRelation } from "../core/shared.js";
 import { authorizeNerJobClaim } from "../core/maintenance/zero-link-backfill.js";
 import {
@@ -36,6 +37,164 @@ export class FKMigrationError extends Error {
     this.violationsByTable = violationsByTable;
     this.total = total;
   }
+}
+
+export class CBrainReadSnapshotError extends Error {
+  constructor() {
+    super("Unable to create a stable read snapshot.");
+    this.name = "CBrainReadSnapshotError";
+  }
+}
+
+interface SourceFileIdentity {
+  exists: boolean;
+  dev?: bigint;
+  ino?: bigint;
+  size?: bigint;
+  mtimeNs?: bigint;
+  ctimeNs?: bigint;
+}
+
+interface ReadSnapshotSourceState {
+  physicalDbPath: string;
+  main: SourceFileIdentity;
+  wal: SourceFileIdentity;
+}
+
+class ReadSnapshotSourceChangedError extends Error {}
+
+function sourceFileIdentity(path: string, required: boolean): SourceFileIdentity {
+  try {
+    const stats = lstatSync(path, { bigint: true });
+    if (!stats.isFile()) throw new CBrainReadSnapshotError();
+    return {
+      exists: true,
+      dev: stats.dev,
+      ino: stats.ino,
+      size: stats.size,
+      mtimeNs: stats.mtimeNs,
+      ctimeNs: stats.ctimeNs,
+    };
+  } catch (error) {
+    if (!required && error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return { exists: false };
+    }
+    throw error;
+  }
+}
+
+function captureReadSnapshotSource(dbPath: string): ReadSnapshotSourceState {
+  const physicalDbPath = realpathSync(dbPath);
+  return {
+    physicalDbPath,
+    main: sourceFileIdentity(physicalDbPath, true),
+    wal: sourceFileIdentity(`${physicalDbPath}-wal`, false),
+  };
+}
+
+function sameSourceFile(a: SourceFileIdentity, b: SourceFileIdentity): boolean {
+  return a.exists === b.exists
+    && a.dev === b.dev
+    && a.ino === b.ino
+    && a.size === b.size
+    && a.mtimeNs === b.mtimeNs
+    && a.ctimeNs === b.ctimeNs;
+}
+
+function sameReadSnapshotSource(a: ReadSnapshotSourceState, b: ReadSnapshotSourceState): boolean {
+  return a.physicalDbPath === b.physicalDbPath
+    && sameSourceFile(a.main, b.main)
+    && sameSourceFile(a.wal, b.wal);
+}
+
+function recoverAndSerializeReadSnapshot(snapshotPath: string): Uint8Array {
+  const recovery = new Database(snapshotPath);
+  try {
+    // Force WAL playback on the isolated copy, then merge every committed frame
+    // into its main file. The live DB directory and live -shm are never opened.
+    recovery.prepare("SELECT COUNT(*) AS count FROM sqlite_schema").get();
+    const checkpoint = recovery.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as {
+      busy: number;
+      log: number;
+      checkpointed: number;
+    };
+    if (checkpoint.busy !== 0 || checkpoint.checkpointed < checkpoint.log) {
+      throw new CBrainReadSnapshotError();
+    }
+    const mode = recovery.prepare("PRAGMA journal_mode = DELETE").get() as { journal_mode?: string };
+    if (mode.journal_mode !== "delete") throw new CBrainReadSnapshotError();
+    return recovery.serialize();
+  } finally {
+    recovery.close();
+  }
+}
+
+function removeReadSnapshotDirectory(directory: string): boolean {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+      if (!existsSync(directory)) return true;
+    } catch {
+      // Retry once, then let the caller fail closed with a path-free error.
+    }
+  }
+  return false;
+}
+
+function createReadSnapshot(
+  dbPath: string,
+  testHooks: {
+    afterCopy?(attempt: number, directory: string, snapshotPath: string): void;
+  } = {},
+): Database {
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let directory: string;
+    try {
+      directory = mkdtempSync(join(tmpdir(), "cbrain-read-snapshot-"));
+    } catch {
+      throw new CBrainReadSnapshotError();
+    }
+    try {
+      chmodSync(directory, 0o700);
+      const before = captureReadSnapshotSource(dbPath);
+      const snapshotPath = join(directory, basename(before.physicalDbPath));
+      copyFileSync(before.physicalDbPath, snapshotPath);
+      chmodSync(snapshotPath, 0o600);
+      if (before.wal.exists) {
+        copyFileSync(`${before.physicalDbPath}-wal`, `${snapshotPath}-wal`);
+        chmodSync(`${snapshotPath}-wal`, 0o600);
+      }
+      testHooks.afterCopy?.(attempt, directory, snapshotPath);
+      let after: ReadSnapshotSourceState;
+      try {
+        after = captureReadSnapshotSource(dbPath);
+      } catch {
+        throw new ReadSnapshotSourceChangedError();
+      }
+      if (!sameReadSnapshotSource(before, after)) throw new ReadSnapshotSourceChangedError();
+
+      const serialized = recoverAndSerializeReadSnapshot(snapshotPath);
+      // No disk snapshot survives constructor return or process.exit. The
+      // exposed connection is a native read-only deserialized in-memory DB.
+      if (!removeReadSnapshotDirectory(directory)) throw new CBrainReadSnapshotError();
+      return Database.deserialize(serialized, { readonly: true });
+    } catch (error) {
+      removeReadSnapshotDirectory(directory);
+      if (error instanceof ReadSnapshotSourceChangedError && attempt + 1 < maxAttempts) continue;
+      throw new CBrainReadSnapshotError();
+    }
+  }
+  throw new CBrainReadSnapshotError();
+}
+
+/** @internal — deterministic seam for bounded source-change retry tests. */
+export function openReadSnapshotWithHookForTest(
+  dbPath: string,
+  afterCopy: (attempt: number, directory: string, snapshotPath: string) => void,
+): void {
+  const snapshot = createReadSnapshot(dbPath, { afterCopy });
+  snapshot.close();
 }
 
 /** @internal — test hook to exercise runDestructiveMigration's FK path. (#209) */
@@ -264,8 +423,19 @@ export class CBrainDB {
    * be able to open it and clean orphan rows. This is a repair-only escape
    * hatch: it does not initialize new schema. Callers must only use methods that
    * can operate against the already-existing DB shape.
+   * opts.readSnapshot: capture a bounded stable copy of the existing main DB
+   * plus its WAL (when present), recover that copy in an isolated temp
+   * directory, then expose only a native read-only connection to the recovered
+   * snapshot. The live main/WAL/SHM files are never opened through SQLite.
    */
-  constructor(dbPath: string, opts: { skipMigrate?: boolean } = {}) {
+  constructor(dbPath: string, opts: { skipMigrate?: boolean; readSnapshot?: boolean } = {}) {
+    if (opts.readSnapshot) {
+      if (opts.skipMigrate === false) {
+        throw new Error("read snapshot CBrainDB requires skipMigrate (omit it or set true)");
+      }
+      this.db = createReadSnapshot(dbPath);
+      return;
+    }
     if (!existsSync(dirname(dbPath))) {
       mkdirSync(dirname(dbPath), { recursive: true });
     }

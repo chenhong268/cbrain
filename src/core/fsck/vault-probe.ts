@@ -4,6 +4,7 @@ import type { CBrainDB } from "../../storage/sqlite.js";
 import type { FsckFinding } from "./types.js";
 import { anonymizeSlugs } from "./report.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
+import type { MisplacedVaultArtifactScan } from "../maintenance/misplaced-vault-artifacts.js";
 
 function walkMd(root: string): string[] {
 	const out: string[] = [];
@@ -20,7 +21,55 @@ function walkMd(root: string): string[] {
 	return out;
 }
 
-export function probeVault(vaultPath: string, db: CBrainDB): FsckFinding[] {
+function anonymousSamples(count: number): string[] {
+	return anonymizeSlugs(Array.from({ length: Math.min(count, 5) }, () => "candidate"));
+}
+
+function appendMisplacedArtifactFindings(
+	findings: FsckFinding[],
+	scan?: MisplacedVaultArtifactScan,
+): void {
+	if (!scan?.eligible) return;
+	if (scan.zeroByteMarkdownCount > 0) {
+		findings.push({
+			check: "vault.misplaced_zero_byte_markdown",
+			layer: "vault",
+			severity: "warning",
+			count: scan.zeroByteMarkdownCount,
+			sampleSlugs: anonymousSamples(scan.zeroByteMarkdownCount),
+			detail: "检测到 vault 边界外的零字节 Markdown；零字节不代表可安全删除",
+			suggestedCommand: "cbrain fsck --layer vault --local-details",
+		});
+	}
+	if (scan.reviewRequiredCount > 0) {
+		findings.push({
+			check: "vault.misplaced_review_required_artifact",
+			layer: "vault",
+			severity: "warning",
+			count: scan.reviewRequiredCount,
+			sampleSlugs: anonymousSamples(scan.reviewRequiredCount),
+			detail: "检测到 vault 边界外需人工核查的 CBrain 形态条目",
+			suggestedCommand: "cbrain fsck --layer vault --local-details",
+		});
+	}
+	if (scan.unreadableCount > 0) {
+		findings.push({
+			check: "vault.misplaced_artifact_scan_incomplete",
+			layer: "vault",
+			severity: "warning",
+			count: scan.unreadableCount,
+			sampleSlugs: anonymousSamples(scan.unreadableCount),
+			detail: "vault 边界外条目检查不完整；未输出路径或底层错误",
+			suggestedCommand: "cbrain fsck --layer vault --local-details",
+		});
+	}
+}
+
+export function probeVault(
+	vaultPath: string,
+	db: CBrainDB,
+	misplacedScan?: MisplacedVaultArtifactScan,
+): FsckFinding[] {
 	const findings: FsckFinding[] = [];
 	const pages = db.listPages();
 	const dbBySlug = new Map(pages.map((p) => [p.slug, p]));
@@ -86,6 +135,8 @@ export function probeVault(vaultPath: string, db: CBrainDB): FsckFinding[] {
 			suggestedCommand: "cbrain show <slug>",
 		});
 	}
+
+	appendMisplacedArtifactFindings(findings, misplacedScan);
 
 	return findings;
 }
