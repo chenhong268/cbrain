@@ -8,16 +8,17 @@ Search the brain using multiple strategies, fuse results, and return the most re
 
 ## Default Behavior — 无 flag 时
 
-当 RESOLVER 未指定任何 flag 时，**默认走 cbrain_recall 前门**（自然语言首选，CBrain 内部分发），不是 query（query 是 debug 工具，仅精确关键词定位）。
+当 RESOLVER 未指定任何 flag 时，**默认走 cbrain_recall 前门**（自然语言首选，CBrain 内部分发），不是 query（query 仅在显式 debug/full profile 诊断会话直调）。
 
 ```
 自然语言问题 → cbrain_recall({ query, detail: "normal" })
-精确关键词/debug → query({ query, strategy: "fts" })（debug 工具）
+精确关键词/debug → cbrain_recall({ query, detail: "brief" })（内部 debug_search）
+显式 debug/full profile 诊断 → query({ query, strategy: "fts" })
 ```
 
 判断标准：
 - 问题包含完整句子或自然语言描述 → cbrain_recall
-- 问题只有 1-2 个关键词，且目的是定位 slug → query（debug）
+- 问题只有 1-2 个关键词，且目的是定位 slug → cbrain_recall（内部 debug_search）
 - 不确定 → cbrain_recall（安全默认前门）
 
 ### Bounded degraded fallback
@@ -41,17 +42,19 @@ Search the brain using multiple strategies, fuse results, and return the most re
 
 RESOLVER 指定 `[keyword]` flag 时：
 
-1. 调用 `query({ query, strategy: "fts" })`
-2. 禁止用 `vector` 或 `all` 策略（关键词定位不需要语义搜索）
-3. 返回结果只用于内部定位 slug，不直接展示给用户
+1. daily Agent 调用 `cbrain_recall({ query, detail: "brief" })`，由内部 `debug_search` 路由完成定位
+2. 只有显式选择 debug/full profile 的诊断会话才直调 `query({ query, strategy: "fts" })`
+3. 直调时禁止用 `vector` 或 `all` 策略（关键词定位不需要语义搜索）
+4. 返回结果只用于内部定位 slug，不直接展示给用户
 
 ## [discovery] Branch — 发现摘要
 
 RESOLVER 指定 `[discovery]` flag 时：
 
-1. 调用 `read_discoveries({ debug: false })`，如果用户说"跑检测"则用 `run_discovery({ debug: false })`
-2. 展示规则：只使用返回的 `display`、`cards`、`summary`
-3. 禁止暴露：score、distance、shared_neighbors、debug、_debug、candidate、filter
+1. daily Agent 只调用 `read_discoveries({ debug: false })` 读取已有发现
+2. 用户明确要求“跑检测”时，说明需要 full profile；当前会话不调 `run_discovery`，也不以 `read_discoveries` 冒充新运行
+3. 展示规则：只使用返回的 `display`、`cards`、`summary`
+4. 禁止暴露：score、distance、shared_neighbors、debug、_debug、candidate、filter
 
 ## [episodic] Branch — 情境找人
 
@@ -65,7 +68,7 @@ When loaded with `[episodic]` flag (from RESOLVER.md "Episodic Person Recall" se
    - `event_hint`: 事件线索（项目上线/团队聚餐/...）
    - `relation_hint`: 关系线索（人物A的同事/组织E的人/...）
 2. **禁止**：query、get_page、deep_recall、expand_entity、graph_query
-3. **唯一的后续操作**：`recall_episode` 返回空候选且用户追问时，可 fallback 到 `query`
+3. **唯一的后续操作**：`recall_episode` 返回空候选且用户追问时，显式 debug/full profile 可 fallback 到 `query`；daily 会话不直调
 
 **适用条件（必须同时满足）：**
 - 用户不记得人名（"那个人"、"叫什么来着"、"想不起名字"）
@@ -138,7 +141,7 @@ When loaded with `[agentic_research]` flag (from RESOLVER.md "Agentic Research" 
 - 核查确认 → cbrain_recall（grounded 内部分发）
 - 情境找人 → cbrain_recall（recall_episode 内部分发）
 - 两人关系 → cbrain_recall（relationship 内部分发）/ graph_query / connect
-- 简单关键词搜索 → query（debug，仅精确关键词）
+- 简单关键词搜索 → cbrain_recall（内部 debug_search）；直调 query 仅显式 debug/full profile
 
 ## [provenance] Branch — 来源追踪
 
@@ -288,6 +291,6 @@ When answering user questions:
 
 ## Guidelines
 
-- Start with `cbrain_recall`; `query(strategy:"fts")` is keyword/debug-only
+- Start with `cbrain_recall`; direct `query(strategy:"fts")` requires an explicit debug/full profile
 - For entity lookups, FTS is most precise
 - Use graph/timeline only through dedicated resolver branches, not as an automatic recall chain

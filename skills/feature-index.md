@@ -2,7 +2,7 @@
 
 > 用户该用什么功能？这份索引帮你快速定位。
 > Agent 读取 RESOLVER.md 路由后，可用本索引做功能推荐和主动提示。
-> **默认前门是 `cbrain_recall`**：自然语言回忆/核查/找人/层级/总结/关系/判断首选它（CBrain 内部分发）。低层工具（`deep_recall` / `summarize` / `dossier` / `brain_storm` / `query` / `expand_entity`）只在 advanced escape hatch / debug / fallback 场景出现，不是默认首选。
+> **默认前门是 `cbrain_recall`**：自然语言回忆/核查/找人/层级/总结/关系/判断首选它（CBrain 内部分发）。低层工具（`deep_recall` / `summarize` / `dossier` / `brain_storm` / `query` / `expand_entity`）只在对应 profile 的 advanced escape hatch / fallback 场景出现，不是默认首选。
 
 ## 映射表
 
@@ -21,7 +21,7 @@
 ### 3. 全景概览/总结
 - **触发**：总结 / 梳理 / 全貌 / 概览 / overview / 帮我理一下
 - **工具**：`cbrain_recall`（默认，内部 overview 分发）
-- **advanced escape hatch**：`summarize(slug, depth=1)`（debug/internal profile 工具，图遍历概览）
+- **advanced escape hatch**：`summarize(slug, depth=1)`（仅 full profile，图遍历概览）
 - **注意**：不要用 query；cbrain_recall 一步给全局鸟瞰
 
 ### 4. 结构化档案页
@@ -39,7 +39,8 @@
 ### 6. 快速查找
 - **触发**：搜 / 找 / 有没有 / 查一下 / 谁在XX / XX认识谁
 - **工具**：`cbrain_recall(query, detail:"brief", limit:3)`（默认前门，自然语言首选）
-- **advanced escape hatch / debug**：`query(query, limit=10)`（仅精确关键词定位/debug，自然语言禁用）
+- **精确关键词（daily）**：仍用 `cbrain_recall`（内部 `debug_search` 分发）
+- **advanced escape hatch**：仅显式选择 debug/full profile 时直调 `query(query, limit=10)`；自然语言禁用
 - **后续**：找到后可 `expand_entity`（debug/fallback）看详情
 
 ### 7. 展开实体/补充细节
@@ -54,7 +55,8 @@
 
 ### 9. 发现与洞察
 - **触发**：最近有什么发现 / 有什么我漏掉的 / 有什么关联没注意到的
-- **工具**：`list_insights()` + `read_discoveries()`
+- **工具**：daily profile 只用 `read_discoveries()` 读取已有发现
+- **full-only advanced escape hatch**：`list_insights()`
 - **区别**：insight 是系统自动生成的洞察，discovery 是跨域关联发现
 
 ### 10. 时间线/事件回顾
@@ -105,7 +107,7 @@
 - **工具**：`cbrain_recall`（默认前门，内部 reasoning 分发）
 - **advanced escape hatch**：`agentic_research({ query, detail, known_slugs, intent_hint })`（EXPERIMENTAL，debug/internal profile，多步管道）
 - **注意**：多步管道仅用于需要交叉验证的复杂研究，不是默认路由
-- **不要用 agentic_research 的场景**：单一实体查找→cbrain_recall；简单搜索→query（debug）；找人→cbrain_recall（recall_episode）；核查→cbrain_recall（grounded 内部）
+- **不要用 agentic_research 的场景**：单一实体查找→cbrain_recall；简单搜索（daily）→cbrain_recall，仅显式选择 debug/full profile 才直调 query；找人→cbrain_recall（recall_episode）；核查→cbrain_recall（grounded 内部）
 
 ## 速查：容易混淆的功能
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   checkAgentContractTools,
+  checkAgentFacingRoutingProfile,
   checkAgentWorkflowContract,
   checkIngestPageTypeDocs,
   checkToolDescriptions,
@@ -113,6 +114,198 @@ describe("checkAgentContractTools (#316)", () => {
   test("clean skills dir passes", () => {
     const dir = withSkills({ "a.md": "- 首选 cbrain_recall\n" });
     expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(false);
+  });
+
+  test("feature-index rejects direct query guidance without an explicitly selected debug/full profile", () => {
+    const dir = withSkills({
+      "feature-index.md": "- **advanced escape hatch / debug**：`query(query, limit=10)`（仅精确关键词定位/debug）\n",
+    });
+    expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(true);
+  });
+
+  test("feature-index rejects list_insights from the daily discovery tool line", () => {
+    const dir = withSkills({
+      "feature-index.md": "- **工具**：`list_insights()` + `read_discoveries()`\n",
+    });
+    expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(true);
+  });
+
+  test("feature-index accepts daily front doors with explicit profile escape hatches", () => {
+    const dir = withSkills({
+      "feature-index.md": [
+        "- **工具**：daily profile 使用 `cbrain_recall`（内部 `debug_search`）",
+        "- **advanced escape hatch**：仅显式选择 debug/full profile 才直调 `query(query)`",
+        "- **工具**：daily profile 只用 `read_discoveries()`",
+        "- **full-only advanced escape hatch**：`list_insights()`",
+      ].join("\n"),
+    });
+    expect(fails(checkAgentContractTools(TOOLS, dir))).toBe(false);
+  });
+});
+
+describe("checkAgentFacingRoutingProfile (#343)", () => {
+  const row = (patch: Record<string, unknown> = {}) => JSON.stringify({
+    input: "匿名输入Sentinel",
+    category: "search",
+    expected_tool: "cbrain_recall",
+    expected_args: {},
+    forbidden_tools: [],
+    forbidden_output_terms: [],
+    ...patch,
+  });
+  const boundaryRow = (patch: Record<string, unknown> = {}) => row({
+    case_id: "run_discovery_request",
+    category: "profile_boundary",
+    expected_tool: null,
+    expected_outcome: "requires_full_profile",
+    required_profile: "full",
+    forbidden_tools: ["run_discovery", "read_discoveries"],
+    ...patch,
+  });
+
+  test("accepts allowlisted expected_tool and required_sequence", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({
+        category: "relationship",
+        expected_tool: "graph_query",
+        required_sequence: ["resolve_slugs", "graph_query"],
+      })}\n${boundaryRow()}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(false);
+  });
+
+  test("rejects an unavailable Agent-facing expected_tool without echoing input", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({ category: "episodic_recall", expected_tool: "query" })}\n${boundaryRow()}\n`,
+    });
+    const results = checkAgentFacingRoutingProfile(dir);
+    expect(fails(results)).toBe(true);
+    expect(results).toContainEqual({
+      check: "agent-facing profile unavailable tools",
+      passed: false,
+      detail: "unavailable tools: query [line 1 expected_tool]",
+    });
+    expect(JSON.stringify(results)).not.toContain("匿名输入Sentinel");
+  });
+
+  test("rejects invalid JSON with only the corresponding diagnostic", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `{bad json\n${boundaryRow()}\n`,
+    });
+    expect(checkAgentFacingRoutingProfile(dir)).toEqual([{
+      check: "agent-facing profile line 1",
+      passed: false,
+      detail: "invalid JSON",
+    }]);
+  });
+
+  test("rejects unavailable required_sequence with only the corresponding diagnostic", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({
+        category: "relationship",
+        expected_tool: "graph_query",
+        required_sequence: ["resolve_slugs", "query"],
+      })}\n${boundaryRow()}\n`,
+    });
+    expect(checkAgentFacingRoutingProfile(dir)).toEqual([{
+      check: "agent-facing profile unavailable tools",
+      passed: false,
+      detail: "unavailable tools: query [line 1 required_sequence]",
+    }]);
+  });
+
+  test("accepts only the exact full-profile no-tool outcome", () => {
+    const valid = withSkills({
+      "agent-facing.routing-eval.jsonl": `${boundaryRow()}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(valid))).toBe(false);
+
+    for (const patch of [
+      { expected_tool: null },
+      { expected_tool: null, expected_outcome: "requires_full_profile", required_profile: "maintenance" },
+      { expected_tool: null, expected_outcome: "requires_full_profile", required_profile: "full", forbidden_tools: ["run_discovery"] },
+    ]) {
+      const dir = withSkills({ "agent-facing.routing-eval.jsonl": `${row(patch)}\n` });
+      expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
+    }
+  });
+
+  test("rejects duplicate no-tool boundaries across fixture rows", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${boundaryRow()}\n${boundaryRow()}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
+  });
+
+  test("rejects a no-tool boundary outside the profile_boundary category", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${boundaryRow({ category: "search" })}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
+  });
+
+  test("rejects swapping the discovery boundary identity onto an executable row", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({ case_id: "run_discovery_request" })}\n${boundaryRow({ case_id: "search_request" })}\n`,
+    });
+    expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
+  });
+
+  test("rejects allowlisted tools that violate deterministic category mappings", () => {
+    for (const patch of [
+      { category: "search", expected_tool: "get_page" },
+      { category: "keyword_debug", expected_tool: "read_discoveries" },
+    ]) {
+      const dir = withSkills({
+        "agent-facing.routing-eval.jsonl": `${row(patch)}\n${boundaryRow()}\n`,
+      });
+      expect(fails(checkAgentFacingRoutingProfile(dir))).toBe(true);
+    }
+  });
+
+  test("rejects unavailable required_sequence members on a no-tool outcome", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${boundaryRow({
+        required_sequence: ["query"],
+      })}\n`,
+    });
+    expect(checkAgentFacingRoutingProfile(dir)).toEqual([{
+      check: "agent-facing profile unavailable tools",
+      passed: false,
+      detail: "unavailable tools: query [line 1 required_sequence]",
+    }]);
+  });
+
+  test("rejects non-object JSON rows without throwing", () => {
+    for (const content of ["null\n", "[]\n", '"primitive"\n', "42\n", "true\n"]) {
+      const dir = withSkills({ "agent-facing.routing-eval.jsonl": `${content}${boundaryRow()}\n` });
+      let results: CheckResult[] = [];
+      expect(() => { results = checkAgentFacingRoutingProfile(dir); }).not.toThrow();
+      expect(results).toEqual([{
+        check: "agent-facing profile line 1",
+        passed: false,
+        detail: "row must be a JSON object",
+      }]);
+    }
+  });
+
+  test("aggregates unavailable tools with deduped, stable tool and reference order", () => {
+    const dir = withSkills({
+      "agent-facing.routing-eval.jsonl": `${row({
+        category: "episodic_recall",
+        expected_tool: "query",
+        required_sequence: ["summarize", "query", "summarize"],
+      })}\n${row({
+        category: "relationship",
+        expected_tool: "agentic_research",
+        required_sequence: ["query", "agentic_research"],
+      })}\n${boundaryRow()}\n`,
+    });
+    expect(checkAgentFacingRoutingProfile(dir)).toEqual([{
+      check: "agent-facing profile unavailable tools",
+      passed: false,
+      detail: "unavailable tools: agentic_research [line 2 expected_tool, line 2 required_sequence]; query [line 1 expected_tool, line 1 required_sequence, line 2 required_sequence]; summarize [line 1 required_sequence]",
+    }]);
   });
 });
 
