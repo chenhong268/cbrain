@@ -177,7 +177,7 @@ export function buildActionCandidatesFromDiscoveries(rows: DiscoveryCandidateSou
 }
 
 function healthStableRef(action: RepairAction): string {
-  const scope = action.slug && action.slug !== "-" ? action.slug : "global";
+  const scope = action.code ?? (action.slug && action.slug !== "-" ? action.slug : "global");
   return `health:${action.dimension}:${action.kind ?? action.group}:${scope}`;
 }
 

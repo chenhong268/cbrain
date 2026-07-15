@@ -16,6 +16,10 @@ import {
   formatZeroLinkDebtDetail,
   planZeroLinkBackfill,
 } from "./zero-link-backfill.js";
+import {
+  inspectMisplacedVaultArtifacts,
+  type TrustedVaultBoundary,
+} from "./misplaced-vault-artifacts.js";
 
 // ─── Contradiction classification ─────────────────────────────
 
@@ -103,6 +107,8 @@ export interface HealthDimension {
 export interface HealthIssue {
   severity: "low" | "medium" | "high";
   slug: string;
+  /** Stable non-page identity for aggregate/global findings. */
+  code?: string;
   title: string;
   description: string;
   suggestion?: string;
@@ -166,17 +172,33 @@ function isWithinSystemErrorFailWindow(timestamp: string, now = Date.now()): boo
   return now - parsed <= SYSTEM_ERROR_FAIL_WINDOW_MS;
 }
 
+function healthIssueIdentity(issue: HealthIssue): string {
+  return issue.code ?? issue.slug;
+}
+
+function pageReference(slug: string): string {
+  return slug && slug !== "-" ? `[[${slug}]]` : "-";
+}
+
 export class HealthChecker {
   private db: CBrainDB;
   private outputsDir: string;
   private logger: Logger | null;
   private vaultPath?: string;
+  private vaultBoundary?: TrustedVaultBoundary;
 
-  constructor(db: CBrainDB, outputsDir: string, logger?: Logger, vaultPath?: string) {
+  constructor(
+    db: CBrainDB,
+    outputsDir: string,
+    logger?: Logger,
+    vaultPath?: string,
+    vaultBoundary?: TrustedVaultBoundary,
+  ) {
     this.db = db;
     this.outputsDir = outputsDir;
     this.logger = logger ?? null;
     this.vaultPath = vaultPath;
+    this.vaultBoundary = vaultBoundary;
   }
 
   async checkAll(): Promise<HealthReport> {
@@ -203,6 +225,7 @@ export class HealthChecker {
       this.checkBulkPending(),
       this.checkNerQuality(),
       this.checkVerifierQuality(),
+      this.checkFilesystemHygiene(),
     ];
 
     const highCount = dimensions.reduce((n, d) => n + d.issues.filter(i => i.severity === "high").length, 0);
@@ -258,7 +281,8 @@ export class HealthChecker {
 
     for (const dim of dimensions) {
       for (const issue of dim.issues) {
-        currentCounts[issue.slug] = (prevCounts[issue.slug] ?? 0) + 1;
+        const identity = healthIssueIdentity(issue);
+        currentCounts[identity] = (prevCounts[identity] ?? 0) + 1;
       }
     }
 
@@ -268,7 +292,7 @@ export class HealthChecker {
       dimensions: dimensions.map(d => ({
         name: d.name,
         status: d.status,
-        issueSlugs: d.issues.map(i => i.slug),
+        issueSlugs: d.issues.map(healthIssueIdentity),
         issueCount: d.issues.length,
       })),
     };
@@ -304,14 +328,14 @@ export class HealthChecker {
     for (const dim of dimensions) {
       const prevDim = prevDimMap.get(dim.name);
       const prevSlugSet = new Set(prevDim?.issueSlugs ?? []);
-      const curSlugSet = new Set(dim.issues.map(i => i.slug));
+      const curSlugSet = new Set(dim.issues.map(healthIssueIdentity));
 
-      const newIssues = dim.issues.filter(i => !prevSlugSet.has(i.slug));
+      const newIssues = dim.issues.filter(i => !prevSlugSet.has(healthIssueIdentity(i)));
       const resolvedSlugs = [...prevSlugSet].filter(s => !curSlugSet.has(s));
       const chronicSlugs = dim.issues
-        .filter(i => (prevState.slugRunCounts?.[i.slug] ?? 0) >= CHRONIC_THRESHOLD)
-        .map(i => i.slug);
-      const unchangedCount = dim.issues.filter(i => prevSlugSet.has(i.slug)).length;
+        .filter(i => (prevState.slugRunCounts?.[healthIssueIdentity(i)] ?? 0) >= CHRONIC_THRESHOLD)
+        .map(healthIssueIdentity);
+      const unchangedCount = dim.issues.filter(i => prevSlugSet.has(healthIssueIdentity(i))).length;
 
       dimDeltas.push({
         name: dim.name,
@@ -443,7 +467,7 @@ export class HealthChecker {
     if (high.length > 0) {
       md += `## 🔴 高优先级\n\n`;
       for (const issue of high) {
-        md += `- **${issue.dimension}**: [[${issue.slug}]] ${issue.description}\n`;
+        md += `- **${issue.dimension}**: ${pageReference(issue.slug)} ${issue.description}\n`;
       }
       md += "\n";
     }
@@ -452,7 +476,7 @@ export class HealthChecker {
       md += `## 🟡 中优先级\n\n`;
       const shown = medium.slice(0, 10);
       for (const issue of shown) {
-        md += `- **${issue.dimension}**: [[${issue.slug}]] ${issue.description}\n`;
+        md += `- **${issue.dimension}**: ${pageReference(issue.slug)} ${issue.description}\n`;
       }
       if (medium.length > 10) {
         md += `- …还有 ${medium.length - 10} 个\n`;
@@ -503,7 +527,7 @@ export class HealthChecker {
       }
       md += `| 严重程度 | 页面 | 问题 | 建议 |\n|----------|------|------|------|\n`;
       for (const issue of dim.issues) {
-        const pageRef = issue.slug === "-" ? "-" : `[[${issue.slug}]]`;
+        const pageRef = pageReference(issue.slug);
         md += `| ${issue.severity} | ${pageRef} | ${issue.description} | ${issue.suggestion ?? "-"} |\n`;
       }
       md += `\n`;
@@ -1427,5 +1451,51 @@ export class HealthChecker {
     const hasWarning = nerWarn > 0 || discErr > 0 || discWarn > 0;
     const status: "pass" | "warn" | "fail" = hasError ? "fail" : hasWarning ? "warn" : "pass";
     return { name: "生成质量影子校验", status, issues };
+  }
+
+  // ─── Dimension: Filesystem Hygiene (#341) ─────────────────
+
+  private checkFilesystemHygiene(): HealthDimension {
+    // One aggregate-only snapshot. Health never requests or retains local
+    // candidate details; explicit local paths belong only to fsck's opt-in UI.
+    const inspection = inspectMisplacedVaultArtifacts(this.vaultBoundary);
+    const issues: HealthIssue[] = [];
+
+    if (inspection.scan.zeroByteMarkdownCount > 0) {
+      issues.push({
+        severity: "medium",
+        slug: "-",
+        code: "filesystem_hygiene.zero_byte_markdown",
+        title: "发现零字节 Markdown 边界漂移信号",
+        description: `检测到 ${inspection.scan.zeroByteMarkdownCount} 个零字节 Markdown 条目，需要人工审核`,
+        suggestion: "使用 cbrain fsck --layer vault --local-details 在本机只读定位，勿自动删除",
+      });
+    }
+    if (inspection.scan.reviewRequiredCount > 0) {
+      issues.push({
+        severity: "medium",
+        slug: "-",
+        code: "filesystem_hygiene.review_required",
+        title: "发现需审核的文件系统边界漂移信号",
+        description: `检测到 ${inspection.scan.reviewRequiredCount} 个边界外条目需要人工审核`,
+        suggestion: "使用 cbrain fsck --layer vault --local-details 在本机只读定位，勿自动处理",
+      });
+    }
+    if (inspection.scan.unreadableCount > 0) {
+      issues.push({
+        severity: "medium",
+        slug: "-",
+        code: "filesystem_hygiene.scan_incomplete",
+        title: "文件系统卫生扫描不完整",
+        description: `有 ${inspection.scan.unreadableCount} 个条目或边界状态无法完成分类，需要人工审核`,
+        suggestion: "确认 Obsidian 根目录与 vault 状态后重新运行只读 fsck",
+      });
+    }
+
+    return {
+      name: "文件系统卫生",
+      status: issues.length > 0 ? "warn" : "pass",
+      issues,
+    };
   }
 }

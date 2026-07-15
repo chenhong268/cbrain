@@ -211,6 +211,28 @@ describe("planRepairs — stubs & islands not auto-deleted", () => {
 });
 
 describe("planRepairs — needs_review semantic debt", () => {
+  test("文件系统卫生保留 stable code 并显式归为 needs_review", () => {
+    const report = makeReport([
+      makeIssue("文件系统卫生", "-", "检测到 2 个边界外条目需要人工审核", {
+        code: "filesystem_hygiene.review_required",
+      }),
+    ]);
+
+    const plan = planRepairs(report, noSignals);
+
+    expect(plan.counts.needs_review).toBe(1);
+    expect(plan.counts.observe_only).toBe(0);
+    expect(plan.actions[0]).toMatchObject({
+      group: "needs_review",
+      slug: "-",
+      code: "filesystem_hygiene.review_required",
+    });
+    const markdown = planToMarkdown(plan);
+    expect(markdown).toContain("（全局）");
+    expect(markdown).not.toContain("filesystem_hygiene.review_required");
+    expect(markdown).not.toContain("[[-]]");
+  });
+
   test("矛盾检测 → needs_review", () => {
     const report = makeReport([
       makeIssue(

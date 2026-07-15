@@ -213,6 +213,38 @@ describe("buildActionCandidatesFromHealthPlan (#267)", () => {
     expect(drafts).toHaveLength(1);
     expect(drafts[0].entities).toEqual(["health:系统错误:blocked:global"]);
   });
+
+  test("uses filesystem issue code for three distinct path-free stable refs", () => {
+    const secretCandidate = "secret-candidate.md";
+    const codes = [
+      "filesystem_hygiene.zero_byte_markdown",
+      "filesystem_hygiene.review_required",
+      "filesystem_hygiene.scan_incomplete",
+    ];
+    const drafts = buildActionCandidatesFromHealthPlan(makePlan(codes.map((code) => ({
+      group: "needs_review" as const,
+      dimension: "文件系统卫生",
+      severity: "medium" as const,
+      slug: "-",
+      code,
+      action: "人工审核边界外文件系统条目（不自动修改）",
+    }))));
+
+    expect(drafts).toHaveLength(3);
+    expect(new Set(drafts.flatMap((draft) => draft.entities)).size).toBe(3);
+    expect(drafts.map((draft) => draft.entities[0])).toEqual(codes.map(
+      (code) => `health:文件系统卫生:needs_review:${code}`,
+    ));
+
+    const persistedSurface = JSON.stringify(drafts.map((draft) => ({
+      displayTitle: draft.displayTitle,
+      displayReason: draft.displayReason,
+      suggestedAction: draft.suggestedAction,
+      metadata: draft.metadata,
+    })));
+    expect(persistedSurface).not.toContain(secretCandidate);
+    expect(persistedSurface).not.toContain("/tmp/");
+  });
 });
 
 describe("ActionCandidateManager persistence (#267)", () => {

@@ -1,9 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { HealthChecker } from "../../src/core/maintenance/health.js";
 import { Logger } from "../../src/core/logger.js";
+import { resolveTrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 describe("HealthChecker", () => {
   const testDir = "/tmp/cbrain-test-health";
@@ -79,7 +80,7 @@ describe("HealthChecker", () => {
       const report = await checker.checkAll();
       expect(report.overallStatus).toBe("pass");
       expect(report.metrics.totalPages).toBe(17);
-      expect(report.dimensions.length).toBe(19); // +1: rich zero-link aggregate (#342)
+      expect(report.dimensions.length).toBe(20); // rich zero-link (#342) + filesystem hygiene (#341)
     });
 
     test("fails on insufficient data", async () => {
@@ -309,6 +310,89 @@ describe("HealthChecker", () => {
       expect(existsSync(report.reportPaths!.summary)).toBe(true);
       expect(existsSync(report.reportPaths!.actions)).toBe(true);
       expect(existsSync(report.reportPaths!.detail)).toBe(true);
+    });
+  });
+
+  describe("文件系统卫生", () => {
+    const configRoot = join(testDir, "synthetic-obsidian-root");
+    const vaultDir = join(configRoot, "vault");
+
+    function createBoundary() {
+      mkdirSync(join(configRoot, ".obsidian"), { recursive: true });
+      mkdirSync(vaultDir, { recursive: true });
+      const boundary = resolveTrustedVaultBoundary({ configRoot, vaultPath: vaultDir });
+      expect(boundary).toBeDefined();
+      return boundary!;
+    }
+
+    test("is clean and path-free without an eligible trusted boundary", async () => {
+      const report = await checker.checkAll();
+      const dimension = report.dimensions.find((item) => item.name === "文件系统卫生");
+
+      expect(dimension).toEqual({ name: "文件系统卫生", status: "pass", issues: [] });
+    });
+
+    test("emits one aggregate medium issue per nonzero category with stable code identity", async () => {
+      const boundary = createBoundary();
+      const secretZero = "secret-zero-candidate.md";
+      const secretReview = "secret-review-candidate.md";
+      writeFileSync(join(configRoot, secretZero), "", "utf-8");
+      writeFileSync(join(configRoot, secretReview), "synthetic body", "utf-8");
+
+      // Make the already-established boundary incomplete without scanning any
+      // live vault. Candidate counts must survive the final identity failure.
+      const movedVault = join(configRoot, "vault-away");
+      renameSync(vaultDir, movedVault);
+
+      const outputsDir = join(testDir, "filesystem-health-outputs");
+      const boundaryChecker = new HealthChecker(db, outputsDir, undefined, undefined, boundary);
+      const first = await boundaryChecker.checkAll();
+      const dimension = first.dimensions.find((item) => item.name === "文件系统卫生");
+
+      expect(dimension?.status).toBe("warn");
+      expect(dimension?.issues).toHaveLength(3);
+      expect(dimension?.issues.map((issue) => issue.severity)).toEqual(["medium", "medium", "medium"]);
+      expect(dimension?.issues.map((issue) => issue.slug)).toEqual(["-", "-", "-"]);
+      const codes = (dimension?.issues.map((issue) => issue.code) ?? [])
+        .filter((code): code is string => typeof code === "string");
+      expect(codes).toEqual([
+        "filesystem_hygiene.zero_byte_markdown",
+        "filesystem_hygiene.review_required",
+        "filesystem_hygiene.scan_incomplete",
+      ]);
+      expect(codes.every((code) => code.length > 0)).toBe(true);
+
+      const serialized = JSON.stringify(dimension);
+      expect(serialized).toContain("1");
+      expect(serialized).not.toContain(secretZero);
+      expect(serialized).not.toContain(secretReview);
+      expect(serialized).not.toContain(configRoot);
+
+      const actions = readFileSync(first.reportPaths!.actions, "utf-8");
+      const full = boundaryChecker.writeFullReport(first);
+      for (const rendered of [actions, full]) {
+        expect(rendered).not.toContain("[[-]]");
+        expect(rendered).not.toContain(secretZero);
+        expect(rendered).not.toContain(secretReview);
+        for (const code of codes) expect(rendered).not.toContain(code!);
+      }
+
+      // A second run proves persisted/delta identity is code-based rather
+      // than collapsing all three global issues onto slug "-".
+      renameSync(movedVault, vaultDir);
+      unlinkSync(join(configRoot, secretZero));
+      const second = await boundaryChecker.checkAll();
+      const state = JSON.parse(readFileSync(join(outputsDir, "health", "state.json"), "utf-8")) as {
+        slugRunCounts: Record<string, number>;
+        dimensions: Array<{ name: string; issueSlugs: string[] }>;
+      };
+      const hygieneState = state.dimensions.find((item) => item.name === "文件系统卫生");
+      expect(hygieneState?.issueSlugs).toEqual([codes[1]!]);
+      expect(Object.keys(state.slugRunCounts)).toContain(codes[1]!);
+
+      const delta = second.delta?.dimensions.find((item) => item.name === "文件系统卫生");
+      expect(delta?.resolvedSlugs).toEqual(expect.arrayContaining([codes[0]!, codes[2]!]));
+      expect(delta?.unchangedCount).toBe(1);
     });
   });
 
