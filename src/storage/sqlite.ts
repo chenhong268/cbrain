@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { getReverseRelation } from "../core/shared.js";
@@ -102,7 +102,7 @@ function sameReadSnapshotSource(a: ReadSnapshotSourceState, b: ReadSnapshotSourc
   return sameSourceFile(a.main, b.main) && sameSourceFile(a.wal, b.wal);
 }
 
-function recoverReadSnapshot(snapshotPath: string): void {
+function recoverAndSerializeReadSnapshot(snapshotPath: string): Uint8Array {
   const recovery = new Database(snapshotPath);
   try {
     // Force WAL playback on the isolated copy, then merge every committed frame
@@ -118,31 +118,59 @@ function recoverReadSnapshot(snapshotPath: string): void {
     }
     const mode = recovery.prepare("PRAGMA journal_mode = DELETE").get() as { journal_mode?: string };
     if (mode.journal_mode !== "delete") throw new CBrainReadSnapshotError();
+    return recovery.serialize();
   } finally {
     recovery.close();
   }
 }
 
+function removeReadSnapshotDirectory(directory: string): boolean {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+      if (!existsSync(directory)) return true;
+    } catch {
+      // Retry once, then let the caller fail closed with a path-free error.
+    }
+  }
+  return false;
+}
+
 function createReadSnapshot(
   dbPath: string,
-  testHooks: { afterCopy?(attempt: number): void } = {},
-): { db: Database; directory: string } {
+  testHooks: {
+    afterCopy?(attempt: number, directory: string, snapshotPath: string): void;
+  } = {},
+): Database {
   const maxAttempts = 3;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const directory = mkdtempSync(join(tmpdir(), "cbrain-read-snapshot-"));
+    let directory: string;
+    try {
+      directory = mkdtempSync(join(tmpdir(), "cbrain-read-snapshot-"));
+    } catch {
+      throw new CBrainReadSnapshotError();
+    }
     const snapshotPath = join(directory, basename(dbPath));
     try {
+      chmodSync(directory, 0o700);
       const before = captureReadSnapshotSource(dbPath);
       copyFileSync(dbPath, snapshotPath);
-      if (before.wal.exists) copyFileSync(`${dbPath}-wal`, `${snapshotPath}-wal`);
-      testHooks.afterCopy?.(attempt);
+      chmodSync(snapshotPath, 0o600);
+      if (before.wal.exists) {
+        copyFileSync(`${dbPath}-wal`, `${snapshotPath}-wal`);
+        chmodSync(`${snapshotPath}-wal`, 0o600);
+      }
+      testHooks.afterCopy?.(attempt, directory, snapshotPath);
       const after = captureReadSnapshotSource(dbPath);
       if (!sameReadSnapshotSource(before, after)) throw new ReadSnapshotSourceChangedError();
 
-      recoverReadSnapshot(snapshotPath);
-      return { db: new Database(snapshotPath, { readonly: true }), directory };
+      const serialized = recoverAndSerializeReadSnapshot(snapshotPath);
+      // No disk snapshot survives constructor return or process.exit. The
+      // exposed connection is a native read-only deserialized in-memory DB.
+      if (!removeReadSnapshotDirectory(directory)) throw new CBrainReadSnapshotError();
+      return Database.deserialize(serialized, { readonly: true });
     } catch (error) {
-      rmSync(directory, { recursive: true, force: true });
+      removeReadSnapshotDirectory(directory);
       if (error instanceof ReadSnapshotSourceChangedError && attempt + 1 < maxAttempts) continue;
       throw new CBrainReadSnapshotError();
     }
@@ -153,14 +181,10 @@ function createReadSnapshot(
 /** @internal — deterministic seam for bounded source-change retry tests. */
 export function openReadSnapshotWithHookForTest(
   dbPath: string,
-  afterCopy: (attempt: number) => void,
+  afterCopy: (attempt: number, directory: string, snapshotPath: string) => void,
 ): void {
   const snapshot = createReadSnapshot(dbPath, { afterCopy });
-  try {
-    snapshot.db.close();
-  } finally {
-    rmSync(snapshot.directory, { recursive: true, force: true });
-  }
+  snapshot.close();
 }
 
 /** @internal — test hook to exercise runDestructiveMigration's FK path. (#209) */
@@ -369,7 +393,6 @@ export interface CandidateFeedbackRow {
 
 export class CBrainDB {
   private db: Database;
-  private readSnapshotDirectory?: string;
 
   /** Expose raw Database for bounded stores that share the same connection. */
   get rawDb(): Database {
@@ -400,9 +423,7 @@ export class CBrainDB {
       if (opts.skipMigrate === false) {
         throw new Error("read snapshot CBrainDB requires skipMigrate (omit it or set true)");
       }
-      const snapshot = createReadSnapshot(dbPath);
-      this.db = snapshot.db;
-      this.readSnapshotDirectory = snapshot.directory;
+      this.db = createReadSnapshot(dbPath);
       return;
     }
     if (!existsSync(dirname(dbPath))) {
@@ -4092,13 +4113,6 @@ export class CBrainDB {
   }
 
   close(): void {
-    try {
-      this.db.close();
-    } finally {
-      if (this.readSnapshotDirectory) {
-        rmSync(this.readSnapshotDirectory, { recursive: true, force: true });
-        this.readSnapshotDirectory = undefined;
-      }
-    }
+    this.db.close();
   }
 }

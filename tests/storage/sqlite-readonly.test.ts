@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CBrainDB, openReadSnapshotWithHookForTest } from "../../src/storage/sqlite.js";
@@ -104,7 +104,7 @@ test("read snapshot includes the latest committed WAL row without touching live 
 	}
 });
 
-test("read snapshot removes its temp directory on close and construction failure", () => {
+test("read snapshot removes staging before constructor return and after construction failure", () => {
 	const root = mkdtempSync(join(tmpdir(), "cbrain-sqlite-snapshot-cleanup-"));
 	roots.push(root);
 	const dbPath = join(root, "fixture.sqlite");
@@ -114,8 +114,8 @@ test("read snapshot removes its temp directory on close and construction failure
 	const before = snapshotTempDirs();
 
 	const db = new CBrainDB(dbPath, { readSnapshot: true });
-	const during = snapshotTempDirs();
-	expect(during.length).toBe(before.length + 1);
+	expect(snapshotTempDirs()).toEqual(before);
+	expect(db.rawDb.prepare("SELECT COUNT(*) AS count FROM anonymous_record").get()).toEqual({ count: 0 });
 	db.close();
 	expect(snapshotTempDirs()).toEqual(before);
 
@@ -123,6 +123,28 @@ test("read snapshot removes its temp directory on close and construction failure
 	writeFileSync(join(`${dbPath}-wal`, "not-a-wal"), "invalid");
 	expect(() => new CBrainDB(dbPath, { readSnapshot: true })).toThrow();
 	expect(snapshotTempDirs()).toEqual(before);
+});
+
+test("read snapshot staging uses explicit 0700 directory and 0600 files", () => {
+	const root = mkdtempSync(join(tmpdir(), "cbrain-sqlite-snapshot-permissions-"));
+	roots.push(root);
+	const dbPath = join(root, "fixture.sqlite");
+	const writer = new Database(dbPath);
+	writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE anonymous_record(value TEXT); INSERT INTO anonymous_record VALUES ('latest')");
+	let observed: { directoryMode: number; mainMode: number; walMode: number } | undefined;
+
+	try {
+		openReadSnapshotWithHookForTest(dbPath, (_attempt, directory, snapshotPath) => {
+			observed = {
+				directoryMode: lstatSync(directory).mode & 0o777,
+				mainMode: lstatSync(snapshotPath).mode & 0o777,
+				walMode: lstatSync(`${snapshotPath}-wal`).mode & 0o777,
+			};
+		});
+	} finally {
+		writer.close();
+	}
+	expect(observed).toEqual({ directoryMode: 0o700, mainMode: 0o600, walMode: 0o600 });
 });
 
 test("read snapshot retries a changing source three times then fails closed without temp residue", () => {

@@ -106,6 +106,10 @@ function sidecarSnapshot(dbPath: string): string {
 	}).join("|");
 }
 
+function readSnapshotTempDirs(): string[] {
+	return readdirSync(tmpdir()).filter((name) => name.startsWith("cbrain-read-snapshot-")).sort();
+}
+
 const readOnlyScenarios = [
 	{ name: "fsck default", command: "fsck", args: [] },
 	{ name: "fsck json", command: "fsck", args: ["--json"] },
@@ -134,6 +138,7 @@ for (const mode of ["delete", "wal-header-cleaned"] as const) {
 		const beforeSidecars = sidecarSnapshot(dbPath);
 		const beforeCandidates = candidateSnapshot(dir);
 		const beforeCanonicalMtime = statSync(canonicalPath).mtimeMs;
+		const beforeTempDirs = readSnapshotTempDirs();
 		if (mode === "delete") expect(journalMode(dbPath)).toBe("delete");
 		else expect(readFileSync(dbPath)[18]).toBe(2);
 
@@ -145,6 +150,7 @@ for (const mode of ["delete", "wal-header-cleaned"] as const) {
 		expect(sidecarSnapshot(dbPath)).toBe(beforeSidecars);
 		expect(candidateSnapshot(dir)).toBe(beforeCandidates);
 		expect(statSync(canonicalPath).mtimeMs).toBe(beforeCanonicalMtime);
+		expect(readSnapshotTempDirs()).toEqual(beforeTempDirs);
 	});
 	}
 }
