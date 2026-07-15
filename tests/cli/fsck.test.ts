@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { runFsck } from "../../src/cli/commands/fsck.js";
 import type { FsckLayer } from "../../src/core/fsck/types.js";
+import { resolveTrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -48,6 +49,7 @@ describe("runFsck — clean brain", () => {
 				db,
 			});
 			expect(result.exitCode).toBe(0);
+			expect(result.localDetails).toBeUndefined();
 			expect(result.report.overallStatus).toBe("pass");
 			expect(result.report.fatalError).toBeUndefined();
 			// lance dir doesn't exist → unchecked
@@ -132,6 +134,38 @@ describe("runFsck --layer filter", () => {
 			expect(result.report.lanceState).toBe("unchecked");
 		} finally {
 			db.close();
+		}
+	});
+});
+
+describe("runFsck — misplaced artifact projection", () => {
+	it("returns findings and local details from the same vault inspection", async () => {
+		mkdirSync(join(tmpDir, ".obsidian"), { recursive: true });
+		writeFileSync(join(tmpDir, "anonymous-empty.md"), "");
+		const boundary = resolveTrustedVaultBoundary({ configRoot: tmpDir, vaultPath });
+		expect(boundary).toBeDefined();
+		const db = freshDb();
+		try {
+			const result = await runFsck({
+				vaultPath,
+				lancePath,
+				db,
+				layer: "vault",
+				vaultBoundary: boundary,
+				includeLocalDetails: true,
+			});
+			expect(result.exitCode).toBe(1);
+			expect(result.report.findings).toContainEqual(expect.objectContaining({
+				check: "vault.misplaced_zero_byte_markdown",
+				count: 1,
+			}));
+			expect(result.localDetails).toEqual([
+				{ relativePath: "anonymous-empty.md", classification: "zero_byte_markdown" },
+			]);
+		} finally {
+			db.close();
+			rmSync(join(tmpDir, "anonymous-empty.md"), { force: true });
+			rmSync(join(tmpDir, ".obsidian"), { recursive: true, force: true });
 		}
 	});
 });

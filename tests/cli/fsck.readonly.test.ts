@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { runFsck } from "../../src/cli/commands/fsck.js";
+import { resolveTrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -47,6 +48,8 @@ test("fsck is read-only: DB hash + vault mtimes + lance dir unchanged", async ()
 
   mkdirSync(join(vaultPath, "entities"), { recursive: true });
   mkdirSync(lancePath);
+  mkdirSync(join(dir, ".obsidian"));
+  writeFileSync(join(dir, "anonymous-empty.md"), "");
 
   const mdContent = "---\nslug: test-readonly-e\ntitle: t\ntype: entity\n---\nbody";
   writeFileSync(join(vaultPath, "entities", "e.md"), mdContent);
@@ -64,14 +67,19 @@ test("fsck is read-only: DB hash + vault mtimes + lance dir unchanged", async ()
   const beforeDb = await hashFile(dbPath);
   const beforeVault = dirSnapshot(vaultPath);
   const beforeLance = dirSnapshot(lancePath);
+  const beforeCandidate = statSync(join(dir, "anonymous-empty.md")).mtimeMs;
   db.close();
 
   // Reopen and run fsck
   const db2 = new CBrainDB(dbPath);
-  await runFsck({ vaultPath, lancePath, db: db2 });
+  const vaultBoundary = resolveTrustedVaultBoundary({ configRoot: dir, vaultPath });
+  expect(vaultBoundary).toBeDefined();
+  await runFsck({ vaultPath, lancePath, db: db2, vaultBoundary });
+  await runFsck({ vaultPath, lancePath, db: db2, vaultBoundary, layer: "vault", includeLocalDetails: true });
   db2.close();
 
   expect(await hashFile(dbPath)).toBe(beforeDb);
   expect(dirSnapshot(vaultPath)).toBe(beforeVault);
   expect(dirSnapshot(lancePath)).toBe(beforeLance);
+  expect(statSync(join(dir, "anonymous-empty.md")).mtimeMs).toBe(beforeCandidate);
 });

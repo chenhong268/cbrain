@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
 import { probeVault } from "../../../src/core/fsck/vault-probe.js";
+import type { MisplacedVaultArtifactScan } from "../../../src/core/maintenance/misplaced-vault-artifacts.js";
 
 let dir: string;
 let db: CBrainDB;
@@ -180,4 +181,36 @@ test("nested md files scanned", () => {
 	const f = findings.find((x) => x.check === "vault.file_exists_db_missing");
 	expect(f).toBeDefined();
 	expect(f!.sampleSlugs).not.toContain("test-vp-nested"); // 匿名
+});
+
+test("misplaced artifact aggregate emits three anonymous warning findings", () => {
+	freshEnv();
+	const scan: MisplacedVaultArtifactScan = {
+		eligible: true,
+		zeroByteMarkdownCount: 2,
+		reviewRequiredCount: 3,
+		unreadableCount: 1,
+	};
+
+	const findings = probeVault(vaultDir, db, scan);
+	for (const [check, count] of [
+		["vault.misplaced_zero_byte_markdown", 2],
+		["vault.misplaced_review_required_artifact", 3],
+		["vault.misplaced_artifact_scan_incomplete", 1],
+	] as const) {
+		const finding = findings.find((item) => item.check === check);
+		expect(finding).toMatchObject({ layer: "vault", severity: "warning", count });
+		expect(finding?.sampleSlugs).toEqual(Array.from({ length: count }, (_, i) => `item_${i + 1}`));
+		expect(JSON.stringify(finding)).not.toContain("private-name.md");
+	}
+});
+
+test("ineligible or clean misplaced aggregate emits no misplaced finding", () => {
+	freshEnv();
+	for (const scan of [
+		{ eligible: false, zeroByteMarkdownCount: 0, reviewRequiredCount: 0, unreadableCount: 0 },
+		{ eligible: true, zeroByteMarkdownCount: 0, reviewRequiredCount: 0, unreadableCount: 0 },
+	] satisfies MisplacedVaultArtifactScan[]) {
+		expect(probeVault(vaultDir, db, scan).filter((item) => item.check.includes("misplaced"))).toEqual([]);
+	}
 });
