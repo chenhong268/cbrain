@@ -60,9 +60,9 @@
 - 查询、搜索、查找、查一下、找一下 → query.md [cbrain_recall]
 - 任何自然语言问题（不是精确关键词）→ query.md [cbrain_recall]
 
-### Debug / Keyword Lookup（query 仅限此场景）
-- 精确关键词定位、debug 索引、确认某关键词 → query.md [keyword]
-- cbrain_recall empty/degraded 的一次补救 → query.md [bounded-fallback]
+### Debug / Keyword Lookup（daily MCP 仍走 cbrain_recall）
+- 精确关键词定位、debug 索引、确认某关键词 → query.md [keyword]；daily 调 `cbrain_recall`（内部 `debug_search`）
+- cbrain_recall empty/degraded 的一次补救 → query.md [bounded-fallback]；直调 `query` 仅限显式 debug/full profile
 
 ### Graph
 - 图谱、链接到 → connect.md
@@ -109,7 +109,7 @@
 - A、B、C 之间有什么内在联系 → query.md [agentic_research detail=normal]
 - 这个结论依据够不够/有哪些证据和缺口 → query.md [agentic_research detail=normal]
 - 复杂复盘需要多步推理和交叉验证 → query.md [agentic_research detail=full]
-- ⚠️ 不适用：单一实体查找、简单关键词搜索、找人、内容回忆 → 走 query / cbrain_recall / recall_episode
+- ⚠️ 不适用：单一实体查找、简单关键词搜索、找人、内容回忆 → 走 query.md [keyword] / cbrain_recall / recall_episode；daily 关键词调用仍是 cbrain_recall
 - ⚠️ 不适用：核查确认 → 走 cbrain_recall（grounded 内部分发，detail:"brief"）
 - ⚠️ 不适用：两人关系查询 → 走 graph_query / connect
 
@@ -122,7 +122,7 @@
 - 洞察、insight、discovery、发现 → query.md [discovery]
 - ⚠️ 展示约束：discovery 输出只使用 `display`、`cards`、`summary` 字段
 - ⚠️ 禁止暴露：score、distance、shared_neighbors、debug、_debug、candidate、filter、图距离、跳、桥接、候选、过滤
-- ⚠️ `run_discovery` 返回用户可读摘要（最多 3 条卡片），不需要二次格式化
+- ⚠️ daily 只用 `read_discoveries` 读取已有发现；明确要求运行检测时返回 full-profile 边界，不调 `run_discovery`，也不以读取旧结果冒充新运行
 
 ### Timeline
 - 时间线、事件、发生了什么、历史记录、什么时候 → review.md

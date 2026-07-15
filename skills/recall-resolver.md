@@ -81,7 +81,7 @@
 ├─ "给我一个全景"？
 │   信号：总结、概览、全面、全貌、梳理、overview、帮我理一下
 │   → cbrain_recall（内部 overview 分发）
-│   → advanced escape hatch：summarize（debug/internal profile 工具，仅当前门不足以表达深度时直调）
+│   → advanced escape hatch：summarize（仅 debug/full profile；当前门不足以表达深度时直调）
 │   → 遇到 stub → expand_entity 补充
 │
 ├─ "结构化档案"？
@@ -105,7 +105,7 @@
 │   → detail: brief=快速, normal=标准, full=深度
 │   → ⚠️ 不适用场景（走 cbrain_recall 前门）：
 │     单一实体查找 → cbrain_recall
-│     精确关键词定位/debug → query（仅此场景可用 query，debug 工具）
+│     精确关键词定位/debug → cbrain_recall（内部 debug_search）；直调 query 仅显式 debug/full profile
 │     核查确认 → cbrain_recall（内部 grounded_recall）
 │     情境找人 → cbrain_recall（内部 recall_episode）
 │     内容回忆 → cbrain_recall(detail: "normal")
@@ -134,7 +134,8 @@
 │   → 展示规则：只使用返回的 display、cards、summary
 │   → 禁止暴露：score、distance、shared_neighbors、debug、_debug、
 │     candidate、filter、图距离、跳、桥接、候选、过滤、hops
-│   → run_discovery 运行后同样只展示用户可读摘要
+│   → 用户明确要求运行检测：说明需要 full profile；daily 不调 run_discovery，
+│     也不以 read_discoveries 冒充新运行
 │   → 如需标记已读：update_discovery_status
 │
 ├─ Compounding Review（未来能力，暂不实现）
@@ -166,9 +167,9 @@
 ├─ "快速查找"？
 │   信号：搜、找、有没有、查一下
 │   ⚠️ 大部分"快速查找"是自然语言 → cbrain_recall({ query, detail: "brief", limit: 3 })（默认前门）
-│   ⚠️ query 仅用于精确关键词定位或降级链（debug 工具）
-│   → cbrain_recall（默认）；advanced escape hatch：deep_recall（精细参数）/ query（仅精确关键词 debug）
-│   → 降级链：cbrain_recall 空 → advanced escape hatch deep_recall → query(缩减关键词) → 告知用户
+│   ⚠️ daily 精确关键词仍走 cbrain_recall（内部 debug_search）
+│   → cbrain_recall（默认）；advanced escape hatch：deep_recall（精细参数）/ query（仅显式 debug/full profile）
+│   → 降级链：cbrain_recall 空 → advanced escape hatch deep_recall → debug/full profile 可 query(缩减关键词) → 告知用户
 │
 ├─ 追问某个具体实体？
 │   信号：多说说、展开、细节、详细看这个
@@ -263,7 +264,7 @@ if (grounded_recall 调用失败) {
 ```
 cbrain_recall / advanced escape hatch deep_recall 返回空结果（无相关实体/chunks）
 │
-├─ 第一步：query(缩减关键词)（debug 工具）
+├─ 第一步：显式 debug/full profile 才用 query(缩减关键词)
 │   去掉修饰词，只留核心实体名
 │   示例（debug 降级链）："组织A 主题B 活动C 日期D" → query("组织A")
 │   示例（debug 降级链）："人物A在项目B的技术方案" → query("人物A")
@@ -396,13 +397,13 @@ grounded recall 返回后，首轮回答必须：
 ❌ 首轮追问用户"要看原文吗/需要我展开吗/我可以继续查" → 停在结论
 ❌ 使用"💡 主动提示"标题展示 hints → 禁止
 ❌ 逐条展开 proactive hints → 禁止。默认不展示，判断改变时压成一句
-❌ 前门未命中后直接跳 web_search/session_search → 必须先用 query(缩减关键词) 在 CBrain 内重试
+❌ 前门未命中后直接跳 web_search/session_search → daily 停在 bounded fallback；显式 debug/full profile 才用 query(缩减关键词) 重试
 ❌ 简单实体查找用 agentic_research → cbrain_recall 一步搞定
 ❌ 核查确认用 agentic_research → 必须 cbrain_recall（内部 grounded_recall）
 ❌ 情境找人用 agentic_research → 必须 cbrain_recall（内部 recall_episode）
 ❌ 两人关系用 agentic_research → 必须 cbrain_recall（内部 relationship）/ graph_query / connect
 ❌ discovery 输出暴露 score/distance/shared_neighbors/debug → 只展示 display/cards/summary
-❌ run_discovery 后自行拼接原始 report 给用户 → 默认返回就是用户可读摘要，直接展示
+❌ daily 会话调用 run_discovery，或用 read_discoveries 冒充新运行 → 明确说明需要 full profile
 ❌ read_discoveries 后暴露 _debug 字段 → 除非用户明确说 debug=true
 ❌ provenance 用于普通内容回忆 → provenance 只解释已有记忆来源，内容回忆走 cbrain_recall
 ❌ 找不到 target 时编造 provenance → 如实告知无法定位，禁止猜测
@@ -426,7 +427,7 @@ grounded recall 返回后，首轮回答必须：
 | deep_recall(grounded)（advanced escape hatch） | 证据板（facts/candidates/conflicts/must_not_claim）+ 合成回答 | advanced：需 grounded 证据板时直调；默认走 cbrain_recall（内部 grounded_recall） |
 | deep_recall（advanced escape hatch） | body + links + timeline + tags + related + insights | advanced：需完整上下文 / 精细 detail 参数时直调；默认走 cbrain_recall |
 | agentic_research（debug/internal） | 多步管道：规划→执行→评估→(补充)→结构化结果 | EXPERIMENTAL，非默认；复杂比较/盲区分析/跨主题关联（默认走 cbrain_recall reasoning 分发） |
-| summarize（debug/internal） | 图遍历 + 结构化概览 + 可配置深度 | debug/internal profile 工具；默认走 cbrain_recall（overview 分发） |
+| summarize（debug/full） | 图遍历 + 结构化概览 + 可配置深度 | 仅 debug/full profile；默认走 cbrain_recall（overview 分发） |
 | dossier（debug/internal） | 结构化档案（基本信息 + 关系 + 时间线 + 洞察） | debug/internal profile 工具；默认走 cbrain_recall |
 | brain_storm（debug/internal） | LLM 推理 + 缺口分析 + 跨域关联 | debug/internal profile 工具；默认走 cbrain_recall（reasoning 分发） |
 | graph_query | 关系遍历（traverse/backlinks/related） | 查两个人/公司关系（cbrain_recall relationship 分发的 advanced 直调） |
@@ -435,7 +436,7 @@ grounded recall 返回后，首轮回答必须：
 | read_discoveries | 跨域关联发现（用户可读摘要） | 深度发现，只展示 display/cards/summary |
 | get_timeline | 按时间排列的事件流 | 时间线回顾 |
 | merge_pages | 合并结果预览 + 执行 | 合并重复页面（先 dryRun） |
-| query | slug + title + snippet | **底层调试工具**。仅限关键词定位、debug 索引、降级链重试。自然语言问题禁止使用。 |
+| query | slug + title + snippet | **底层调试工具**。仅显式 debug/full profile 直调；daily 关键词定位走 cbrain_recall 内部 debug_search。 |
 | expand_entity | 单实体的详细信息 | 追问已知实体 |
 | get_pages | 批量页面摘要（slug+title+excerpt+tags） | cbrain_recall / get_org_tree 后批量补详情，**禁止连续 get_page** |
 | recall_episode | 候选人列表 + 匹配线索 + 证据 + 诊断 | 情境找人：不记得名字，靠时间/主题/事件/关系线索召回候选人（cbrain_recall episodic 分发的 advanced 直调） |

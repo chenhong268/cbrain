@@ -307,8 +307,8 @@ if [[ -f "$AF_EVAL" ]]; then
     fail "category 不足: ${cat_failures[*]}"
   fi
 
-  # Expected tool coverage (8 tools)
-  af_tools=("cbrain_recall" "recall_episode" "read_discoveries" "run_discovery" "graph_query" "query" "summarize" "next_actions")
+  # Expected tool coverage (five executable daily Agent tools used by this fixture)
+  af_tools=("cbrain_recall" "recall_episode" "read_discoveries" "graph_query" "next_actions")
   missing_tools=()
   for tool in "${af_tools[@]}"; do
     tool_hits=$(grep -c "\"expected_tool\": \"${tool}\"" "$AF_EVAL" 2>/dev/null) || tool_hits=0
@@ -317,9 +317,27 @@ if [[ -f "$AF_EVAL" ]]; then
     fi
   done
   if (( ${#missing_tools[@]} == 0 )); then
-    pass "agent-facing eval 覆盖全部 8 个 expected_tool"
+    pass "agent-facing eval 覆盖全部 5 个可执行 expected_tool"
   else
     fail "agent-facing eval 缺少 expected_tool: ${missing_tools[*]}"
+  fi
+
+  # Explicit discovery execution is a full-profile boundary, never a read-only substitute.
+  if python3 - "$AF_EVAL" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+boundaries = [row for row in rows if row.get("category") == "profile_boundary"]
+assert len(boundaries) == 1
+boundary = boundaries[0]
+assert boundary.get("expected_tool") is None
+assert boundary.get("expected_outcome") == "requires_full_profile"
+assert boundary.get("required_profile") == "full"
+assert {"run_discovery", "read_discoveries"}.issubset(boundary.get("forbidden_tools", []))
+PY
+  then
+    pass "agent-facing eval 发现检测使用唯一 full-profile no-tool 边界"
+  else
+    fail "agent-facing eval 发现检测边界必须是 requires_full_profile/full，且禁止替代调用"
   fi
 
   # cbrain_recall key params: detail=brief for grounded_recall, detail=normal for content_recall
@@ -629,23 +647,18 @@ if [[ -f "$SKILLS_DIR/agent-facing.routing-eval.jsonl" ]]; then
     fail "agent-facing eval anti_pattern 用例只有 ${af_query_demo}（需 ≥ 7，含 query demotion）"
   fi
 
-  # Query demotion: non-keyword_debug eval cases must NOT expect query tool
-  # Allowed: keyword_debug category, or anti_pattern with query as the WRONG tool (forbidden)
+  # Query demotion: no daily Agent-facing eval case may expect the query tool.
   af_bad_query=0
   while IFS= read -r line; do
-    cat=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('category',''))" 2>/dev/null)
     tool=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin).get('expected_tool',''))" 2>/dev/null)
-    # Skip keyword_debug — query is correct there
-    [[ "$cat" == "keyword_debug" ]] && continue
-    # Flag if expected_tool is "query" in any other category
     if [[ "$tool" == "query" ]]; then
       af_bad_query=$((af_bad_query + 1))
     fi
   done < "$SKILLS_DIR/agent-facing.routing-eval.jsonl"
   if (( af_bad_query == 0 )); then
-    pass "agent-facing eval 无自然语言→query 残留（仅 keyword_debug 允许 query）"
+    pass "agent-facing eval 无 expected_tool: query 残留"
   else
-    fail "agent-facing eval 有 ${af_bad_query} 处非 keyword_debug 用例期望 query（应改为 cbrain_recall/graph_query/get_org_tree）"
+    fail "agent-facing eval 有 ${af_bad_query} 处用例期望 query（daily profile 应改为 cbrain_recall）"
   fi
 fi
 
