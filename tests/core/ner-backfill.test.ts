@@ -12,6 +12,9 @@ import { runNerBackfillStage } from "../../src/core/ingestion/ner-backfill";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline";
 import { NerEngine, NerTimeoutError } from "../../src/core/ingestion/ner";
 import type { LLMProvider } from "../../src/llm/provider";
+import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic";
+import { LanceDBManager } from "../../src/storage/lancedb";
+import { canonicalSlug } from "../../src/utils/slug";
 import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
 import { submitDeferredNerForWritePath } from "../../src/core/ingestion/ner-write-path";
 import {
@@ -882,6 +885,501 @@ describe("runNerBackfillStage (#252)", () => {
       finalized: true,
       outcomes: { resolved: 1, commitUnknown: 0 },
     });
+  });
+
+  test("governed repair uses the moved slug after NER type correction", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const lance = createMockLanceDB();
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名修复正文包含足够信息并描述两个匿名实体之间的关系",
+      type: "text",
+      title: "匿名类型修复记录",
+      skipNer: true,
+    });
+    db.insertChunk(source.slug, 99, "第二个匿名片段");
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名实体甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    const target = pages.create({
+      title: "匿名实体乙",
+      type: "entity/person",
+      body: "匿名人物正文",
+    });
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [
+          { name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" },
+          { name: "匿名实体乙", type: "person", relevance: "high", context: "匿名上下文" },
+        ],
+        relations: [{ from: "匿名实体甲", to: "匿名实体乙", relation: "合作", context: "匿名证据" }],
+        events: [],
+        facts: [{
+          entity: "匿名实体甲",
+          field: "birthday",
+          value: "2000-01-01",
+          confidence: 0.9,
+          evidence: "匿名证据",
+        }],
+      }),
+    };
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const counts = await runNerBackfillStage(db, pipeline, pages, {
+      maxItems: 1,
+      batchId: receipt.batchId!,
+    });
+
+    const movedSlug = db.getEntitySlugByTitle("匿名实体甲");
+    expect(counts).toMatchObject({ processed: 1, failed: 0 });
+    expect(movedSlug).toBeTruthy();
+    expect(movedSlug).not.toBe(oldPage.slug);
+    expect(db.getPage(oldPage.slug)).toBeNull();
+    expect(db.getOutgoingLinks(movedSlug!).some(link =>
+      link.to_slug === target.slug && link.relation === "合作"
+    )).toBe(true);
+    expect(pages.getBySlug(movedSlug!)?.frontmatter.birthday).toBe("2000-01-01");
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+      finalized: true,
+      outcomes: { resolved: 1, commitUnknown: 0 },
+    });
+  });
+
+  test("governed repair remaps a later shared resolution after a type move", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const lance = createMockLanceDB();
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名修复正文包含足够信息并重复提到同一个匿名实体",
+      type: "text",
+      title: "匿名同文档去重记录",
+      skipNer: true,
+    });
+    db.insertChunk(source.slug, 99, "第二个匿名片段");
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名实体甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [
+          { name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" },
+          { name: "匿名实体甲。", type: "person", relevance: "high", context: "匿名上下文" },
+        ],
+        relations: [],
+        events: [],
+      }),
+    };
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const counts = await runNerBackfillStage(db, pipeline, pages, {
+      maxItems: 1,
+      batchId: receipt.batchId!,
+    });
+
+    const movedSlug = db.getEntitySlugByTitle("匿名实体甲");
+    expect(counts).toMatchObject({ processed: 1, failed: 0 });
+    expect(movedSlug).toBeTruthy();
+    expect(movedSlug).not.toBe(oldPage.slug);
+    expect(db.getPage(oldPage.slug)).toBeNull();
+    expect(db.getOutgoingLinks(source.slug).some(link => link.to_slug === movedSlug)).toBe(true);
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+      finalized: true,
+      outcomes: { resolved: 1, commitUnknown: 0 },
+    });
+  });
+
+  test("governed repair remaps a later duplicate candidate after a type move", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const lance = createMockLanceDB();
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名修复正文包含足够信息并提到同一实体的匿名别名",
+      type: "text",
+      title: "匿名重复候选记录",
+      skipNer: true,
+    });
+    db.insertChunk(source.slug, 99, "第二个匿名片段");
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名实体甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    db.addAliasWithSource(oldPage.slug, "匿名别名", "manual");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [
+          { name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" },
+          { name: "匿名别名", type: "drug", relevance: "high", context: "匿名上下文" },
+        ],
+        relations: [],
+        events: [],
+      }),
+    };
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const counts = await runNerBackfillStage(db, pipeline, pages, {
+      maxItems: 1,
+      batchId: receipt.batchId!,
+    });
+
+    const movedSlug = db.getEntitySlugByTitle("匿名实体甲");
+    expect(counts).toMatchObject({ processed: 1, failed: 0 });
+    expect(movedSlug).toBeTruthy();
+    expect(movedSlug).not.toBe(oldPage.slug);
+    expect(db.getPage(oldPage.slug)).toBeNull();
+    expect(db.getOutgoingLinks(source.slug).some(link => link.to_slug === movedSlug)).toBe(true);
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+      finalized: true,
+      outcomes: { resolved: 1, commitUnknown: 0 },
+    });
+  });
+
+  test("governed repair migrates raw and L1 Lance rows with a corrected page slug", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名修复正文包含足够信息并提到需要纠正类型的匿名实体",
+        type: "text",
+        title: "匿名向量迁移记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const pages = new PageManager(db, testDir);
+      const oldPage = pages.create({
+        title: "匿名实体甲",
+        type: "concept/concept",
+        body: "匿名概念正文",
+      });
+      const rawContent = "匿名原始向量正文";
+      const l1Content = "匿名一级摘要";
+      const [rawEmbedding, l1Embedding] = await embedding.embedBatch([rawContent, l1Content]);
+      db.insertChunk(oldPage.slug, 0, rawContent);
+      db.insertChunkWithLevel(oldPage.slug, -1, l1Content, 1, "anonymous-hash");
+      await lance.addChunks([
+        { pageSlug: oldPage.slug, chunkIndex: 0, content: rawContent, vector: new Float32Array(rawEmbedding.embedding) },
+        { pageSlug: oldPage.slug, chunkIndex: -1, content: l1Content, vector: new Float32Array(l1Embedding.embedding) },
+      ]);
+      const receipt = enqueueZeroLinkBackfill(db, 1);
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, {
+        maxItems: 1,
+        batchId: receipt.batchId!,
+      });
+
+      const movedSlug = db.getEntitySlugByTitle("匿名实体甲")!;
+      expect(counts).toMatchObject({ processed: 1, failed: 0 });
+      expect(movedSlug).not.toBe(oldPage.slug);
+      expect(await lance.readRawVectorRows(oldPage.slug)).toHaveLength(0);
+      expect(await lance.readL1VectorRows(oldPage.slug)).toHaveLength(0);
+      expect(await lance.readRawVectorRows(movedSlug)).toMatchObject([
+        { pageSlug: movedSlug, chunkIndex: 0, content: rawContent },
+      ]);
+      expect(await lance.readL1VectorRows(movedSlug)).toMatchObject([
+        { pageSlug: movedSlug, chunkIndex: -1, content: l1Content },
+      ]);
+      expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+        finalized: true,
+        outcomes: { resolved: 1, commitUnknown: 0 },
+      });
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("governed repair leaves the batch commit-unknown when a type-move Lance write fails", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名修复正文包含足够信息并触发向量迁移失败保护",
+        type: "text",
+        title: "匿名迁移失败记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const pages = new PageManager(db, testDir);
+      const oldPage = pages.create({
+        title: "匿名实体甲",
+        type: "concept/concept",
+        body: "匿名概念正文",
+      });
+      const rawContent = "匿名原始向量正文";
+      const embedded = await embedding.embed(rawContent);
+      db.insertChunk(oldPage.slug, 0, rawContent);
+      await lance.addChunks([{
+        pageSlug: oldPage.slug,
+        chunkIndex: 0,
+        content: rawContent,
+        vector: new Float32Array(embedded.embedding),
+      }]);
+      const originalAddChunks = lance.addChunks.bind(lance);
+      let failTypeMove = false;
+      lance.addChunks = async (chunks) => {
+        if (failTypeMove) throw new Error("synthetic type-move vector failure");
+        return originalAddChunks(chunks);
+      };
+      const receipt = enqueueZeroLinkBackfill(db, 1);
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+      failTypeMove = true;
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, {
+        maxItems: 1,
+        batchId: receipt.batchId!,
+      });
+
+      expect(counts).toMatchObject({ processed: 0, failed: 1 });
+      expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+        finalized: false,
+        outcomes: { resolved: 0, commitUnknown: 1 },
+      });
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("governed repair preserves old vectors when a type-move Lance write silently short-writes", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名修复正文包含足够信息并触发向量短写保护",
+        type: "text",
+        title: "匿名短写保护记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const pages = new PageManager(db, testDir);
+      const oldPage = pages.create({
+        title: "匿名实体甲",
+        type: "concept/concept",
+        body: "匿名概念正文",
+      });
+      const rawContent = "匿名原始向量正文";
+      const l1Content = "匿名一级摘要";
+      const [rawEmbedding, l1Embedding] = await embedding.embedBatch([rawContent, l1Content]);
+      db.insertChunk(oldPage.slug, 0, rawContent);
+      db.insertChunkWithLevel(oldPage.slug, -1, l1Content, 1, "anonymous-hash");
+      await lance.addChunks([
+        { pageSlug: oldPage.slug, chunkIndex: 0, content: rawContent, vector: new Float32Array(rawEmbedding.embedding) },
+        { pageSlug: oldPage.slug, chunkIndex: -1, content: l1Content, vector: new Float32Array(l1Embedding.embedding) },
+      ]);
+      const originalAddChunks = lance.addChunks.bind(lance);
+      let shortWriteTypeMove = false;
+      lance.addChunks = async (chunks) => {
+        if (shortWriteTypeMove) {
+          await originalAddChunks(chunks.filter(chunk => chunk.chunkIndex >= 0));
+          return;
+        }
+        await originalAddChunks(chunks);
+      };
+      const receipt = enqueueZeroLinkBackfill(db, 1);
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+      shortWriteTypeMove = true;
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, {
+        maxItems: 1,
+        batchId: receipt.batchId!,
+      });
+
+      expect(counts).toMatchObject({ processed: 0, failed: 1 });
+      expect(await lance.readRawVectorRows(oldPage.slug)).toMatchObject([{
+        pageSlug: oldPage.slug,
+        chunkIndex: 0,
+        content: rawContent,
+      }]);
+      expect(await lance.readL1VectorRows(oldPage.slug)).toMatchObject([{
+        pageSlug: oldPage.slug,
+        chunkIndex: -1,
+        content: l1Content,
+      }]);
+      expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+        finalized: false,
+        outcomes: { resolved: 0, commitUnknown: 1 },
+      });
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("governed repair never overwrites orphan target vectors during a type move", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名修复正文包含足够信息并触发目标向量冲突保护",
+        type: "text",
+        title: "匿名目标冲突记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const pages = new PageManager(db, testDir);
+      const oldPage = pages.create({
+        title: "匿名实体甲",
+        type: "concept/concept",
+        body: "匿名概念正文",
+      });
+      const targetSlug = canonicalSlug(oldPage.slug, "entity/person");
+      const [oldEmbedding, orphanEmbedding] = await embedding.embedBatch([
+        "匿名旧向量",
+        "匿名目标孤儿向量",
+      ]);
+      db.insertChunk(oldPage.slug, 0, "匿名旧向量");
+      await lance.addChunks([
+        {
+          pageSlug: oldPage.slug,
+          chunkIndex: 0,
+          content: "匿名旧向量",
+          vector: new Float32Array(oldEmbedding.embedding),
+        },
+        {
+          pageSlug: targetSlug,
+          chunkIndex: 0,
+          content: "匿名目标孤儿向量",
+          vector: new Float32Array(orphanEmbedding.embedding),
+        },
+      ]);
+      const receipt = enqueueZeroLinkBackfill(db, 1);
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, {
+        maxItems: 1,
+        batchId: receipt.batchId!,
+      });
+
+      expect(counts).toMatchObject({ processed: 0, failed: 1 });
+      expect(await lance.readRawVectorRows(targetSlug)).toMatchObject([{
+        pageSlug: targetSlug,
+        chunkIndex: 0,
+        content: "匿名目标孤儿向量",
+      }]);
+      expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+        finalized: false,
+        outcomes: { resolved: 0, commitUnknown: 1 },
+      });
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("ordinary NER keeps wikilink mention skips after a type-move slug change", async () => {
+    const pages = new PageManager(db, testDir);
+    const source = pages.create({
+      title: "匿名普通记录",
+      type: "record",
+      body: "匿名正文",
+    });
+    const oldPage = pages.create({
+      title: "匿名实体甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [
+          { name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" },
+          { name: "匿名实体甲。", type: "person", relevance: "high", context: "匿名上下文" },
+        ],
+        relations: [],
+        events: [],
+      }),
+    };
+    const pipeline = new ContentPipeline(
+      db,
+      createMockEmbeddingProvider(),
+      createMockLanceDB() as never,
+      { pages, nerEngine: new NerEngine(llm) },
+    );
+
+    await pipeline.processNer(
+      source.slug,
+      "匿名正文重复提到同一个实体",
+      "record",
+      false,
+      undefined,
+      new Set([oldPage.slug]),
+    );
+
+    const movedSlug = db.getEntitySlugByTitle("匿名实体甲")!;
+    expect(movedSlug).not.toBe(oldPage.slug);
+    expect(db.getPage(oldPage.slug)).toBeNull();
+    expect(db.getPageTierAndMentions(movedSlug)?.mention_count).toBe(0);
   });
 
   test("stub index failure leaves the governed batch commit-unknown and unfinalized", async () => {

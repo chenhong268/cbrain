@@ -1,6 +1,6 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
-import { LanceDBManager } from "../../storage/lancedb.js";
+import { LanceDBManager, type RawVectorRow } from "../../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { ExtractionResult } from "./ner.js";
 import { runNerShadowVerifierFailOpen } from "../quality/shadow-verifier.js";
@@ -144,6 +144,78 @@ export class ContentPipeline {
       const l1 = this.db.getL1Summary(slug);
       if (l1) this.db.ftsInsert(slug, l1.content);
     });
+  }
+
+  private sameMovedVectors(expected: RawVectorRow[], actual: RawVectorRow[], pageSlug: string): boolean {
+    if (expected.length !== actual.length) return false;
+    for (let i = 0; i < expected.length; i++) {
+      const left = expected[i];
+      const right = actual[i];
+      if (right.pageSlug !== pageSlug || left.chunkIndex !== right.chunkIndex || left.content !== right.content) return false;
+      if (left.vector.length !== right.vector.length) return false;
+      for (let j = 0; j < left.vector.length; j++) {
+        if (left.vector[j] !== right.vector[j]) return false;
+      }
+    }
+    return true;
+  }
+
+  /** Move exact raw + L1 rows after a governed SQLite/vault slug move. */
+  private async moveGovernedPageVectors(
+    oldSlug: string,
+    newSlug: string,
+    rawRows: RawVectorRow[],
+    l1Rows: RawVectorRow[],
+  ): Promise<void> {
+    if (oldSlug === newSlug) return;
+    const [targetRaw, targetL1] = await Promise.all([
+      this.lance.readRawVectorRows(newSlug),
+      this.lance.readL1VectorRows(newSlug),
+    ]);
+    if (targetRaw.length > 0 || targetL1.length > 0) {
+      throw new Error("NER_TYPE_MOVE_VECTOR_TARGET_CONFLICT");
+    }
+
+    const sourceRows = [...rawRows, ...l1Rows];
+    if (sourceRows.length > 0) {
+      await this.lance.addChunks(sourceRows.map(row => ({
+        pageSlug: newSlug,
+        chunkIndex: row.chunkIndex,
+        content: row.content,
+        vector: row.vector,
+      })));
+    }
+
+    // Never delete the old rows until the new side has been read back and
+    // proven byte-for-byte equivalent. A driver that silently short-writes
+    // must leave the old index intact for the matched-backup stop path.
+    const [stagedRaw, stagedL1] = await Promise.all([
+      this.lance.readRawVectorRows(newSlug),
+      this.lance.readL1VectorRows(newSlug),
+    ]);
+    if (
+      !this.sameMovedVectors(rawRows, stagedRaw, newSlug) ||
+      !this.sameMovedVectors(l1Rows, stagedL1, newSlug)
+    ) {
+      throw new Error("NER_TYPE_MOVE_VECTOR_VERIFY_FAILED");
+    }
+
+    await this.lance.deleteRawChunksByPageSlug(oldSlug);
+    await this.lance.deleteL1VectorByPageSlug(oldSlug);
+
+    const [movedRaw, movedL1, remainingRaw, remainingL1] = await Promise.all([
+      this.lance.readRawVectorRows(newSlug),
+      this.lance.readL1VectorRows(newSlug),
+      this.lance.readRawVectorRows(oldSlug),
+      this.lance.readL1VectorRows(oldSlug),
+    ]);
+    if (
+      remainingRaw.length > 0 || remainingL1.length > 0 ||
+      !this.sameMovedVectors(rawRows, movedRaw, newSlug) ||
+      !this.sameMovedVectors(l1Rows, movedL1, newSlug)
+    ) {
+      throw new Error("NER_TYPE_MOVE_VECTOR_VERIFY_FAILED");
+    }
   }
 
   /** Write ingest_log entry for sync/ingest audit trail. */
@@ -316,6 +388,8 @@ export class ContentPipeline {
     indexCreatedStubs = false,
   ): Promise<NerPipelineResult> {
     const entitySlugMap = new Map<string, string>();
+    const movedSlugMap = new Map<string, string>();
+    const mentionSkipSlugs = new Set(skipMentionSlugs ?? []);
     const stubsCreated = new Set<string>();
 
     const resolver = new EntityResolver(this.db, this.nerEngine?.provider, {
@@ -344,29 +418,49 @@ export class ContentPipeline {
       if (!result) continue;
 
       if (result.action === "resolved_to_existing" || result.action === "alias_added") {
-        entitySlugMap.set(entity.name, result.slug);
-        if (!skipMentionSlugs?.has(result.slug)) {
-          this.db.incrementMentionCount(result.slug);
+        const currentSlug = movedSlugMap.get(result.slug) ?? result.slug;
+        entitySlugMap.set(entity.name, currentSlug);
+        if (!mentionSkipSlugs.has(currentSlug)) {
+          this.db.incrementMentionCount(currentSlug);
         }
-        if (result.slug !== fromSlug) {
-          this.db.insertLink(fromSlug, result.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
+        if (currentSlug !== fromSlug) {
+          this.db.insertLink(fromSlug, currentSlug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
         }
         // Correct type if NER classification differs from existing stub
         const nerType = mapEntityType(entity.type);
-        const existingType = this.db.getEntityType(result.slug);
+        const existingType = this.db.getEntityType(currentSlug);
         if (existingType && existingType !== nerType && this.pages) {
           const ontology = getOntology();
           const winner = ontology.resolveTypePriority(existingType, normalizePageType(nerType));
           if (winner !== existingType) {
-            this.pages.updateType(result.slug, winner);
+            const governedVectors = sourceGuard && indexCreatedStubs
+              ? {
+                  raw: await this.lance.readRawVectorRows(currentSlug),
+                  l1: await this.lance.readL1VectorRows(currentSlug),
+                }
+              : null;
+            const correctedSlug = this.pages.updateType(currentSlug, winner);
+            if (mentionSkipSlugs.has(currentSlug)) mentionSkipSlugs.add(correctedSlug);
+            if (governedVectors) {
+              await this.moveGovernedPageVectors(
+                currentSlug,
+                correctedSlug,
+                governedVectors.raw,
+                governedVectors.l1,
+              );
+            }
+            movedSlugMap.set(result.slug, correctedSlug);
+            movedSlugMap.set(currentSlug, correctedSlug);
+            entitySlugMap.set(entity.name, correctedSlug);
           }
         }
       } else if (result.action === "duplicate_candidate") {
-        entitySlugMap.set(entity.name, result.slug);
-        if (!skipMentionSlugs?.has(result.slug)) {
-          this.db.incrementMentionCount(result.slug);
+        const currentSlug = movedSlugMap.get(result.slug) ?? result.slug;
+        entitySlugMap.set(entity.name, currentSlug);
+        if (!mentionSkipSlugs.has(currentSlug)) {
+          this.db.incrementMentionCount(currentSlug);
         }
-        this.db.insertLink(fromSlug, result.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
+        this.db.insertLink(fromSlug, currentSlug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
       } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({
@@ -377,7 +471,7 @@ export class ContentPipeline {
         });
         entitySlugMap.set(entity.name, stub.slug);
         stubsCreated.add(stub.slug);
-        if (!skipMentionSlugs?.has(stub.slug)) {
+        if (!mentionSkipSlugs.has(stub.slug)) {
           this.db.incrementMentionCount(stub.slug);
         }
         this.db.insertLink(fromSlug, stub.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
@@ -393,7 +487,7 @@ export class ContentPipeline {
       for (const entity of extraction.entities) {
         const result = resolutionMap.get(entity.name);
         if (result && (result.action === "resolved_to_existing" || result.action === "alias_added")) {
-          resolvedForFacts.set(entity.name, result.slug);
+          resolvedForFacts.set(entity.name, entitySlugMap.get(entity.name) ?? movedSlugMap.get(result.slug) ?? result.slug);
         }
       }
       const valid = validateFacts(extraction.facts, validEntityNames, entityTypeMap);
