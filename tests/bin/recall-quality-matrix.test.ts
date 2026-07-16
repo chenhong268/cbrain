@@ -175,7 +175,7 @@ describe("fixture schema", () => {
 		);
 
 		const duplicateCase = caseRows();
-		duplicateCase[1]!.case_id = duplicateCase[0]!.case_id;
+		duplicateCase[1] = structuredClone(duplicateCase[0]!);
 		expectFixtureError(
 			() =>
 				parseRecallQualityCases(jsonl(duplicateCase), parseCanonicalCorpus()),
@@ -374,6 +374,58 @@ describe("fixture schema", () => {
 		);
 	});
 
+	test("binds positive semantic case IDs to answerable oracles", () => {
+		const rows = caseRows();
+		rows[0]!.oracle = "unanswerable";
+		rows[0]!.expected_sources = [];
+		rows[0]!.allowed_sources = [];
+		rows[0]!.required_answer_points = [];
+		rows[0]!.must_not_sources = ["source_a", "source_b", "source_c", "source_d"];
+		rows[0]!.allowed_statuses = ["empty"];
+		expectFixtureError(
+			() => parseRecallQualityCases(jsonl(rows), parseCanonicalCorpus()),
+			"case_polarity_mismatch",
+		);
+	});
+
+	test("binds negative semantic case IDs to unanswerable oracles", () => {
+		const rows = caseRows();
+		rows[1]!.oracle = "answerable";
+		rows[1]!.expected_sources = ["source_a"];
+		rows[1]!.allowed_sources = ["source_a"];
+		rows[1]!.required_answer_points = [
+			{ source_id: "source_a", point_ids: ["point_a"], match: "all" },
+		];
+		rows[1]!.must_not_sources = ["source_b", "source_c", "source_d"];
+		rows[1]!.allowed_statuses = ["ok"];
+		expectFixtureError(
+			() => parseRecallQualityCases(jsonl(rows), parseCanonicalCorpus()),
+			"case_polarity_mismatch",
+		);
+	});
+
+	test("binds positive operational case IDs to next_actions", () => {
+		const row = routeCase();
+		row.expected_tool = "cbrain_recall";
+		row.expected_args = { detail: "normal" };
+		row.forbidden_tools = ["next_actions"];
+		expectFixtureError(
+			() => parseRecallQualityCases(jsonl([row]), parseCanonicalCorpus()),
+			"case_polarity_mismatch",
+		);
+	});
+
+	test("binds negative operational case IDs to cbrain_recall", () => {
+		const row = historicalRouteCase();
+		row.expected_tool = "next_actions";
+		row.expected_args = { include_raw: false };
+		row.forbidden_tools = ["query", "cbrain_recall", "deep_recall"];
+		expectFixtureError(
+			() => parseRecallQualityCases(jsonl([row]), parseCanonicalCorpus()),
+			"case_polarity_mismatch",
+		);
+	});
+
 	test("uses a finite, single-space-delimited vocabulary for every semantic free-text field", () => {
 		expect(
 			[...SAFE_FIXTURE_TOKENS].every(
@@ -457,6 +509,15 @@ describe("fixture schema", () => {
 			() => parseRecallQualityCorpus(malformed),
 			"malformed_json",
 			malformed,
+		);
+	});
+
+	test("deep JSON input fails with a stable fixture code instead of RangeError", () => {
+		const depth = 20_000;
+		const deeplyNested = `{"source_id":"source_a","deep":${"[".repeat(depth)}"系统"${"]".repeat(depth)}}`;
+		expectFixtureError(
+			() => parseRecallQualityCorpus(deeplyNested),
+			"unknown_fields",
 		);
 	});
 

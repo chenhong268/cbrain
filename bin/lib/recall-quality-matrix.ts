@@ -166,6 +166,7 @@ export type RecallQualityFixtureErrorCode =
 	| "invalid_case_id"
 	| "invalid_case_category"
 	| "invalid_case_kind"
+	| "case_polarity_mismatch"
 	| "invalid_route_contract"
 	| "invalid_semantic_tool"
 	| "invalid_semantic_route"
@@ -303,31 +304,30 @@ function hasControlCharacter(value: string): boolean {
 }
 
 function assertUnsafeTextAbsent(value: unknown): void {
-	if (typeof value === "string") {
-		const unsafe =
-			hasControlCharacter(value) ||
-			value.includes("../") ||
-			value.includes("..\\") ||
-			/^(?:\/|~\/|[A-Za-z]:[\\/])/.test(value) ||
-			/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(value) ||
-			/(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}/.test(value) ||
-			/1[3-9]\d{9}/.test(value) ||
-			/(?:password|passwd|api[_-]?key|token|secret|authorization|bearer)\s*[:=]/i.test(
-				value,
-			) ||
-			/\bsk-[A-Za-z0-9_-]{8,}\b/.test(value) ||
-			/sentinel/i.test(value);
-		if (unsafe) fail("unsafe_fixture_text");
-		return;
-	}
-	if (Array.isArray(value)) {
-		for (const item of value) assertUnsafeTextAbsent(item);
-		return;
-	}
-	if (isRecord(value)) {
-		for (const [key, item] of Object.entries(value)) {
-			assertUnsafeTextAbsent(key);
-			assertUnsafeTextAbsent(item);
+	const pending: unknown[] = [value];
+	while (pending.length > 0) {
+		const current = pending.pop();
+		if (typeof current === "string") {
+			const unsafe =
+				hasControlCharacter(current) ||
+				current.includes("../") ||
+				current.includes("..\\") ||
+				/^(?:\/|~\/|[A-Za-z]:[\\/])/.test(current) ||
+				/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(current) ||
+				/(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]\d{3}[-. ]\d{4}/.test(current) ||
+				/1[3-9]\d{9}/.test(current) ||
+				/(?:password|passwd|api[_-]?key|token|secret|authorization|bearer)\s*[:=]/i.test(
+					current,
+				) ||
+				/\bsk-[A-Za-z0-9_-]{8,}\b/.test(current) ||
+				/sentinel/i.test(current);
+			if (unsafe) fail("unsafe_fixture_text");
+		} else if (Array.isArray(current)) {
+			for (const item of current) pending.push(item);
+		} else if (isRecord(current)) {
+			for (const [key, item] of Object.entries(current)) {
+				pending.push(key, item);
+			}
 		}
 	}
 }
@@ -499,6 +499,16 @@ function parseRouteCase(row: Record<string, unknown>): RecallRouteContractCase {
 	const base = parseCaseBase(row);
 	if (base.category !== "operational_meta") fail("invalid_case_category");
 	if (row.kind !== "route_contract") fail("invalid_case_kind");
+	if (row.expected_tool !== "next_actions" && row.expected_tool !== "cbrain_recall") {
+		fail("invalid_route_contract");
+	}
+	const positive = base.caseId.startsWith("operational_positive_");
+	if (
+		(positive && row.expected_tool !== "next_actions") ||
+		(!positive && row.expected_tool !== "cbrain_recall")
+	) {
+		fail("case_polarity_mismatch");
+	}
 	assertString(row.canonical_input_sha256);
 	if (!SHA256_PATTERN.test(row.canonical_input_sha256))
 		fail("invalid_route_contract");
@@ -604,6 +614,13 @@ function parseSemanticCase(row: Record<string, unknown>): RecallSemanticCase {
 		fail("invalid_semantic_route");
 	if (row.oracle !== "answerable" && row.oracle !== "unanswerable")
 		fail("invalid_field_type");
+	const positive = base.caseId.includes("_positive_");
+	if (
+		(positive && row.oracle !== "answerable") ||
+		(!positive && row.oracle !== "unanswerable")
+	) {
+		fail("case_polarity_mismatch");
+	}
 
 	const expectedSources = parseSourceIdArray(row.expected_sources);
 	const allowedSources = parseSourceIdArray(row.allowed_sources);
