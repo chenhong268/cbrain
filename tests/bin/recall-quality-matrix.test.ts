@@ -2141,6 +2141,89 @@ describe("v2 report", () => {
 		expect(checkRecallQualityPrivacy(candidate, { ...report, metrics: [] })).toBe(false);
 	});
 
+	test("privacy validator rejects stateful accessors before serialization can change output", () => {
+		const report = pureReport([
+			evaluateRecallCase(answerableCase(), semanticObservation()),
+		]);
+		const candidate = {
+			observations: [semanticObservation()],
+			legacyCases: passingLegacy(),
+		};
+		let reads = 0;
+		const statefulReport = { ...report } as Record<string, unknown>;
+		Object.defineProperty(statefulReport, "mode", {
+			enumerable: true,
+			configurable: true,
+			get: () => {
+				reads += 1;
+				return reads <= 2 ? "default" : "recall-quality-private-sentinel-336";
+			},
+		});
+
+		const accepted = checkRecallQualityPrivacy(candidate, statefulReport);
+		const transported = JSON.stringify(statefulReport);
+		expect(accepted).toBe(false);
+		expect(accepted && transported.includes("recall-quality-private-sentinel-336")).toBe(false);
+	});
+
+	test("privacy validator recursively rejects accessors, symbols, and hidden properties", () => {
+		const report = pureReport([
+			evaluateRecallCase(answerableCase(), semanticObservation()),
+		]);
+		const candidate = {
+			observations: [semanticObservation()],
+			legacyCases: passingLegacy(),
+		};
+
+		const accessorCandidate = { ...candidate } as Record<string, unknown>;
+		Object.defineProperty(accessorCandidate, "observations", {
+			enumerable: true,
+			get: () => candidate.observations,
+		});
+		expect(checkRecallQualityPrivacy(accessorCandidate, report)).toBe(false);
+
+		const getterSetterReport = { ...report } as Record<string, unknown>;
+		Object.defineProperty(getterSetterReport, "bounded_runtime", {
+			enumerable: true,
+			get: () => report.bounded_runtime,
+			set: () => undefined,
+		});
+		expect(checkRecallQualityPrivacy(candidate, getterSetterReport)).toBe(false);
+
+		const symbolReport = { ...report } as Record<PropertyKey, unknown>;
+		symbolReport[Symbol("hidden")] = "recall-quality-private-sentinel-336";
+		expect(checkRecallQualityPrivacy(candidate, symbolReport)).toBe(false);
+
+		const hiddenMetrics = { ...report.metrics } as Record<string, unknown>;
+		Object.defineProperty(hiddenMetrics, "hidden", {
+			enumerable: false,
+			value: "recall-quality-private-sentinel-336",
+		});
+		expect(checkRecallQualityPrivacy(candidate, { ...report, metrics: hiddenMetrics })).toBe(false);
+
+		const accessorCases = [...report.cases];
+		Object.defineProperty(accessorCases, "0", {
+			enumerable: true,
+			get: () => report.cases[0],
+		});
+		expect(checkRecallQualityPrivacy(candidate, { ...report, cases: accessorCases })).toBe(false);
+
+		const hiddenCases = [...report.cases];
+		Object.defineProperty(hiddenCases, "hidden", {
+			enumerable: false,
+			value: "recall-quality-private-sentinel-336",
+		});
+		expect(checkRecallQualityPrivacy(candidate, { ...report, cases: hiddenCases })).toBe(false);
+
+		const symbolObservations = [...candidate.observations] as unknown[] &
+			Record<PropertyKey, unknown>;
+		symbolObservations[Symbol("hidden")] = "recall-quality-private-sentinel-336";
+		expect(checkRecallQualityPrivacy({
+			...candidate,
+			observations: symbolObservations,
+		}, report)).toBe(false);
+	});
+
 	test("privacy fault is detected without copying its raw sentinel into public output", async () => {
 		const report = await runRecallQualityMatrix({ fault: "privacy" });
 		const serialized = JSON.stringify(report);

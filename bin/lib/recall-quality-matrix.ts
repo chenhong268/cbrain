@@ -1703,13 +1703,42 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) {
 		return false;
 	}
-	const prototype = Object.getPrototypeOf(value);
-	return (prototype === Object.prototype || prototype === null) &&
-		!("toJSON" in value);
+	try {
+		const prototype = Object.getPrototypeOf(value);
+		if ((prototype !== Object.prototype && prototype !== null) || "toJSON" in value) {
+			return false;
+		}
+		return Reflect.ownKeys(value).every((key) => {
+			if (typeof key !== "string") return false;
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			return descriptor !== undefined && descriptor.enumerable && "value" in descriptor;
+		});
+	} catch {
+		return false;
+	}
 }
 
 function isPlainArray(value: unknown): value is unknown[] {
-	return Array.isArray(value) && !("toJSON" in value);
+	if (!Array.isArray(value)) return false;
+	try {
+		if (Object.getPrototypeOf(value) !== Array.prototype || "toJSON" in value) {
+			return false;
+		}
+		const keys = Reflect.ownKeys(value);
+		if (keys.length !== value.length + 1 || keys[keys.length - 1] !== "length") {
+			return false;
+		}
+		for (let index = 0; index < value.length; index += 1) {
+			if (keys[index] !== String(index)) return false;
+			const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+			if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) return false;
+		}
+		const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+		return lengthDescriptor !== undefined && !lengthDescriptor.enumerable &&
+			"value" in lengthDescriptor && lengthDescriptor.value === value.length;
+	} catch {
+		return false;
+	}
 }
 
 function hasOnlyExactKeys(
