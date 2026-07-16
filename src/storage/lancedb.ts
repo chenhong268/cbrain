@@ -20,6 +20,11 @@ export interface SearchResult {
   chunkIndex: number;
   content: string;
   _distance?: number;
+  vector?: Float32Array;
+}
+
+export interface LanceSearchOptions {
+  readonly includeVector?: boolean;
 }
 
 export interface InsightSearchResult {
@@ -165,22 +170,32 @@ export class LanceDBManager {
     await table.add(records);
   }
 
-  async search(queryVector: number[] | Float32Array, limit: number = 10): Promise<SearchResult[]> {
+  async search(
+    queryVector: number[] | Float32Array,
+    limit: number = 10,
+    options?: LanceSearchOptions,
+  ): Promise<SearchResult[]> {
     const table = await this.getOrCreateTable("chunks", CHUNKS_SCHEMA);
+    const columns = ["pageSlug", "chunkIndex", "content", "_distance"];
+    if (options?.includeVector) columns.push("vector");
 
     const query = table
       .search(queryVector)
       .limit(limit)
-      .select(["pageSlug", "chunkIndex", "content", "_distance"]);
+      .select(columns);
 
     const results = await query.toArray();
 
-    return results.map((row: Record<string, unknown>) => ({
-      pageSlug: row.pageSlug as string,
-      chunkIndex: row.chunkIndex as number,
-      content: row.content as string,
-      _distance: row._distance as number | undefined,
-    }));
+    return results.map((row: Record<string, unknown>) => {
+      const result: SearchResult = {
+        pageSlug: row.pageSlug as string,
+        chunkIndex: row.chunkIndex as number,
+        content: row.content as string,
+        _distance: row._distance as number | undefined,
+      };
+      if (options?.includeVector) result.vector = normalizeVector(row.vector);
+      return result;
+    });
   }
 
   async deleteByPageSlug(pageSlug: string): Promise<void> {

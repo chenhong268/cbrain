@@ -14,6 +14,7 @@ import {
 	emitRecallQualityCliResult,
 	executeOperationalContractCases,
 	mapFrontdoorEnvelopeToSemanticObservation,
+	probeGateVectorIndexContract,
 	probeNetworkPoisonAdapter,
 	probeRecallQualityIsolation,
 	probeRecallGateFileAccess,
@@ -65,6 +66,11 @@ const AGENT_FACING_TEXT = readFileSync(
 	new URL("../../skills/agent-facing.routing-eval.jsonl", import.meta.url),
 	"utf8",
 );
+const CANONICAL_BASELINE_LENGTH = (JSON.parse(BASELINE_TEXT) as unknown[]).length;
+if (CANONICAL_BASELINE_LENGTH !== 0 && CANONICAL_BASELINE_LENGTH !== 3) {
+	throw new Error("canonical recall baseline must be pre-ratchet (3) or final (0)");
+}
+const CANONICAL_GATE_EXIT = CANONICAL_BASELINE_LENGTH === 3 ? 1 : 0;
 
 const jsonl = (rows: readonly unknown[]): string =>
 	`${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
@@ -244,14 +250,19 @@ describe("fixture schema", () => {
 			"abstract_negative_01",
 		]);
 		expect(routes).toHaveLength(1);
-		expect(baseline.map((entry) => ({
+		const projectedBaseline = baseline.map((entry) => ({
 			caseId: entry.caseId,
 			followUp: entry.followUp,
-		}))).toEqual([
-			{ caseId: "content_positive_01", followUp: "#337" },
-			{ caseId: "content_negative_01", followUp: "#337" },
-			{ caseId: "abstract_negative_01", followUp: "#337" },
-		]);
+		}));
+		if (CANONICAL_BASELINE_LENGTH === 3) {
+			expect(projectedBaseline).toEqual([
+				{ caseId: "content_positive_01", followUp: "#337" },
+				{ caseId: "content_negative_01", followUp: "#337" },
+				{ caseId: "abstract_negative_01", followUp: "#337" },
+			]);
+		} else {
+			expect(projectedBaseline).toEqual([]);
+		}
 		expect(SAFE_FIXTURE_TOKENS.size).toBeGreaterThan(0);
 	});
 
@@ -1701,6 +1712,22 @@ describe("semantic integration", () => {
 		});
 		expect(result.noLlmProvider).toBe(true);
 		expect(result.networkAdapterCalls).toBe(0);
+		expect(result.runtimeCounters).toEqual({
+			handlerInvocations: 4,
+			hybridSearchCalls: 5,
+			embeddingCalls: 4,
+			ftsCalls: 5,
+			lanceCalls: 5,
+			llmCalls: 0,
+			advancedFallbackCalls: 0,
+			supportOnlyDbCalls: 0,
+			dbPageReads: 2,
+			pageHydrationCalls: 2,
+			emittedCandidateCount: 2,
+			rejectedPageHydrationCalls: 0,
+			missingDbPageReads: 0,
+			missingPageHydrationCalls: 0,
+		});
 		expect(result.invocations).toEqual([
 			{ caseId: "content_positive_01", detail: "normal", includeRaw: true },
 			{ caseId: "content_negative_01", detail: "normal", includeRaw: true },
@@ -1717,6 +1744,30 @@ describe("semantic integration", () => {
 			{ caseId: "abstract_positive_01", tool: "cbrain_recall", route: "content_recall" },
 			{ caseId: "abstract_negative_01", tool: "cbrain_recall", route: "content_recall" },
 		]);
+	});
+
+	test("returns exactly the four canonical semantic truths", async () => {
+		const result = await runSemanticRecallIntegration();
+		const observations = Object.fromEntries(
+			result.observations.map((item) => [item.caseId, item]),
+		);
+
+		expect(observations.content_positive_01).toMatchObject({
+			answerStatus: "ok",
+			top3: [{ sourceId: "source_a", matchedPointIds: ["point_a"] }],
+		});
+		expect(observations.content_negative_01).toMatchObject({
+			answerStatus: "empty",
+			top3: [],
+		});
+		expect(observations.abstract_positive_01).toMatchObject({
+			answerStatus: "ok",
+			top3: [{ sourceId: "source_c", matchedPointIds: ["point_c"] }],
+		});
+		expect(observations.abstract_negative_01).toMatchObject({
+			answerStatus: "empty",
+			top3: [],
+		});
 	});
 
 	test.each([
@@ -1773,11 +1824,7 @@ describe("semantic integration", () => {
 			sourceId: "source_c",
 			matchedPointIds: ["point_c"],
 		});
-		expect(result.observations.some((item) =>
-			item.answerStatus === "degraded" &&
-			item.evidenceSufficiency === "insufficient" &&
-			item.degradationKind === "evidence"
-		)).toBe(true);
+		expect(result.observations.every((item) => item.degradationKind === "none")).toBe(true);
 	});
 });
 
@@ -1946,10 +1993,10 @@ describe("isolation cleanup reproducibility and privacy sentinel", () => {
 	test("canonical baseline exactly matches current semantic observations and #337", async () => {
 		const result = await runRecallBaselineMatchProbe();
 		expect(result).toEqual({
-			baselineEntries: 3,
-			knownFailures: 3,
+			baselineEntries: CANONICAL_BASELINE_LENGTH,
+			knownFailures: 0,
 			regressions: 0,
-			unexpectedPasses: 0,
+			unexpectedPasses: CANONICAL_BASELINE_LENGTH,
 			allLinkedTo337: true,
 		});
 	});
@@ -1960,7 +2007,7 @@ describe("isolation cleanup reproducibility and privacy sentinel", () => {
 			CBRAIN_PRIVATE_TEST_VALUE: "PRIVATE_RECALL_SENTINEL",
 		};
 		for (const [args, expectedExit] of [
-			[[], 0],
+			[[], CANONICAL_GATE_EXIT],
 			[["--fixture", "PRIVATE_RECALL_SENTINEL"], 2],
 		] as const) {
 			const child = Bun.spawn({
@@ -2000,14 +2047,14 @@ describe("isolation cleanup reproducibility and privacy sentinel", () => {
 				name: "success",
 				args: "[]",
 				setup: "const dependencies={environment:{}};",
-				exit: 0,
+				exit: CANONICAL_GATE_EXIT,
 				code: undefined,
 			},
 			{
 				name: "strict",
 				args: "['--strict']",
 				setup: "const dependencies={environment:{}};",
-				exit: 1,
+				exit: CANONICAL_GATE_EXIT,
 				code: undefined,
 			},
 			...[
@@ -2065,10 +2112,49 @@ describe("isolation cleanup reproducibility and privacy sentinel", () => {
 });
 
 describe("vector differential", () => {
+	test("stand-in uses squared L2, keeps weak top-N hits, and exposes vectors only on request", async () => {
+		const result = await probeGateVectorIndexContract();
+
+		expect(result.withoutVector).toEqual([
+			{
+				pageSlug: "brain/insights/probe-a",
+				chunkIndex: 0,
+				distance: 0,
+				hasVector: false,
+				vectorIsFloat32Array: false,
+			},
+			{
+				pageSlug: "brain/insights/probe-b",
+				chunkIndex: 0,
+				distance: 1,
+				hasVector: false,
+				vectorIsFloat32Array: false,
+			},
+		]);
+		expect(result.withVector.map(({ pageSlug, chunkIndex, distance }) => ({
+			pageSlug,
+			chunkIndex,
+			distance,
+		}))).toEqual(result.withoutVector.map(({ pageSlug, chunkIndex, distance }) => ({
+			pageSlug,
+			chunkIndex,
+			distance,
+		})));
+		expect(result.withVector.every((item) => item.hasVector && item.vectorIsFloat32Array)).toBe(true);
+		expect(result.weakQueryNonZero).toBe(true);
+		expect(result.weakCandidateNonZero).toBe(true);
+		expect(result.weakCosine).toBeCloseTo(0.5, 12);
+		expect(result.weakCosine).toBeLessThan(0.8);
+		expect(result.searchCalls).toBe(2);
+	});
+
 	test("real frontdoor vector recall finds a no-shared-token source that production FTS misses", async () => {
 		const result = await runSemanticRecallIntegration();
 
 		expect(result.vector.lanceSearchCalls).toBeGreaterThan(0);
+		expect(result.vector.weakDistanceCandidateObserved).toBe(true);
+		expect(result.vector.weakQueryAndCandidateNonZeroObserved).toBe(true);
+		expect(result.vector.weakFiniteCosineBelowThresholdObserved).toBe(true);
 		expect(result.vector.noSharedTokens).toBe(true);
 		expect(result.vector.abstractExpectedSourceFound).toBe(true);
 		expect(result.vector.ftsControlExpectedSourceFound).toBe(false);
@@ -2076,7 +2162,7 @@ describe("vector differential", () => {
 		expect(result.vector.comparisonLayer).toBe("retrieval_candidates");
 	});
 
-	test("orders equal-cosine vector hits by page slug and chunk index", async () => {
+	test("orders equal-distance vector hits by page slug and chunk index", async () => {
 		const result = await runSemanticRecallIntegration();
 		expect(result.vector.tieOrderStable).toBe(true);
 		expect(result.vector.tieOrder).toEqual([
@@ -2498,6 +2584,18 @@ describe("v2 report", () => {
 			display: "recall-quality-private-sentinel-336",
 		};
 		expect(checkRecallQualityPrivacy(candidate, contaminatedReport)).toBe(false);
+
+		for (const [key, value] of [
+			["support", { channel: "support-private-sentinel-337" }],
+			["reason", "reason-private-sentinel-337"],
+			["vector", [0.337, "vector-private-sentinel-337"]],
+		] as const) {
+			const privateCandidate = structuredClone(candidate) as Record<string, unknown>;
+			const privateObservations = privateCandidate.observations as Array<Record<string, unknown>>;
+			privateObservations[0]![key] = value;
+			expect(checkRecallQualityPrivacy(privateCandidate, report), key).toBe(false);
+			expect(JSON.stringify(report), key).not.toContain("private-sentinel-337");
+		}
 	});
 
 	test("privacy scan does not relabel a controlled route mismatch as a privacy failure", () => {
@@ -2724,22 +2822,37 @@ describe("v2 report", () => {
 			"reproducibility_fingerprint",
 			"advisory_duration_ms",
 		]);
+		const expectedWithBaseline = CANONICAL_BASELINE_LENGTH === 3
+			? {
+				strict_verdict: "no-go" as const,
+				ci_verdict: "no-go" as const,
+				verdict: "no-go" as const,
+				quality_status: "regression" as const,
+				counts: {
+					known_failures: 0,
+					regressions: 0,
+					unexpected_passes: 3,
+				},
+			}
+			: {
+				strict_verdict: "go" as const,
+				ci_verdict: "go" as const,
+				verdict: "go" as const,
+				quality_status: "pass" as const,
+				counts: {
+					known_failures: 0,
+					regressions: 0,
+					unexpected_passes: 0,
+				},
+			};
 		expect(report).toMatchObject({
 			gate: "recall-quality-matrix",
 			schema_version: 2,
 			mode: "default",
 			route_scope: "agent_contract_plus_frontdoor",
-			strict_verdict: "no-go",
-			ci_verdict: "go",
-			verdict: "go",
-			quality_status: "known_failure",
 			privacy: "pass",
 			determinism: "pass",
-			counts: {
-				known_failures: 3,
-				regressions: 0,
-				unexpected_passes: 0,
-			},
+			...expectedWithBaseline,
 		});
 		expect(report.category_counts).toEqual({
 			operational_meta: 2,
@@ -2749,7 +2862,36 @@ describe("v2 report", () => {
 		expect(report.cases.every((item) =>
 			Object.keys(item).join(",") === "case_id,category,kind,failure_codes,disposition"
 		)).toBe(true);
+		const semantic = report.cases.filter((item) => item.kind === "semantic_recall");
+		expect(semantic.every((item) => item.failure_codes.length === 0)).toBe(true);
+		expect(semantic.filter((item) => item.disposition === "unexpected_pass")).toHaveLength(
+			CANONICAL_BASELINE_LENGTH,
+		);
 		expect(report.reproducibility_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+	});
+
+	test("accepts only the pre-ratchet or final baseline verdict state in both modes", async () => {
+		const [defaultReport, strictReport] = await Promise.all([
+			runRecallQualityMatrix(),
+			runRecallQualityMatrix({ strict: true }),
+		]);
+		const expectedCounts = {
+			known_failures: 0,
+			regressions: 0,
+			unexpected_passes: CANONICAL_BASELINE_LENGTH,
+		};
+		const expectedVerdict = CANONICAL_BASELINE_LENGTH === 3 ? "no-go" : "go";
+
+		expect(defaultReport.mode).toBe("default");
+		expect(strictReport.mode).toBe("strict");
+		for (const report of [defaultReport, strictReport]) {
+			expect(report.counts).toEqual(expectedCounts);
+			expect(report.strict_verdict).toBe(expectedVerdict);
+			expect(report.ci_verdict).toBe(expectedVerdict);
+			expect(report.verdict).toBe(expectedVerdict);
+			expect(report.cases.filter((item) => item.kind === "semantic_recall")
+				.every((item) => item.failure_codes.length === 0)).toBe(true);
+		}
 	});
 
 	test("never exposes fixture, observation, route-debug, or error material", async () => {
@@ -2769,7 +2911,7 @@ describe("v2 report", () => {
 		}
 		const forbiddenKeys = new Set([
 			"source_id", "point_id", "query", "hash", "title", "body",
-			"snippet", "path", "score", "vector", "routing", "error", "reason",
+			"snippet", "path", "score", "vector", "support", "routing", "error", "reason",
 		]);
 		const visit = (value: unknown): void => {
 			if (Array.isArray(value)) {

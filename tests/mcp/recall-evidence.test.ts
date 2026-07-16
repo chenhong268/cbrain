@@ -154,7 +154,7 @@ describe("deep_recall evidence completion (#232)", () => {
 
   test("7. cbrain_recall temporal route reuses the same evidence pack", async () => {
     seed("entity/d", "实体D", "实体D 上次活动的记录", { timeline: 2, chunks: 2 });
-    const data = await recall("实体D 上次的活动", { tool: "cbrain_recall" });
+    const data = await recall("实体D 上次活动", { tool: "cbrain_recall" });
     expect(data.raw.evidence_pack).toBeDefined();
     expect(data.raw.evidence_pack.timeline.length).toBeGreaterThan(0);
   });

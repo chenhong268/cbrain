@@ -22,6 +22,7 @@ import {
 } from "./format-result.js";
 import { buildToolResult } from "./result-builder.js";
 import { FRONTDOOR_DATA_KEYS, projectFrontdoorData, structuredSummary } from "./recall-output.js";
+import { filterContentCandidates } from "../../core/retrieval/content-relevance.js";
 
 type DetailLevel = "brief" | "normal" | "full";
 
@@ -123,7 +124,12 @@ async function runContentRecall(
   detail: DetailLevel,
 ): Promise<FrontdoorEnvelope> {
   const limit = detail === "brief" ? 3 : 5;
-  const results = await ctx.search.search(query, { limit });
+  const candidates = await ctx.search.search(query, {
+    limit,
+    _captureSupport: true,
+    _skipDetailEnrich: true,
+  });
+  const results = filterContentCandidates(query, candidates);
   const slugs = results.map((r) => r.slug);
   const entities = results.map((r) => {
     const page = ctx.pages.getBySlug(r.slug);

@@ -6,6 +6,16 @@ import { ResearchManager } from "./research.js";
 import { isCurrentFactLink } from "../shared.js";
 import { GraphManager } from "../graph/graph.js";
 import type { Logger } from "../logger.js";
+import {
+  attachRetrievalSupport,
+  computeCosineSimilarity,
+  computeRootLexicalCoverage,
+  getRetrievalSupport,
+  type RetrievalChannelEvidence,
+  type RetrievalQueryOrigin,
+  type RetrievalSupport,
+  type RetrievalSupportChannel,
+} from "./retrieval-support.js";
 
 export interface SealedDetailHit {
   /** Raw-chunk fragment recovered from a sealed page. User-visible. */
@@ -64,6 +74,18 @@ export interface SearchOptions {
   _trace?: SearchTrace;
   /** @internal Skip sealed detail enrichment (set for recursive sub-queries). */
   _skipDetailEnrich?: boolean;
+  /** @internal Capture bounded channel-native support for content recall. */
+  _captureSupport?: boolean;
+  /** @internal Root query used for query-relative lexical support. */
+  _supportRootQuery?: string;
+  /** @internal Whether this search text is the caller query or a generated child. */
+  _supportOrigin?: RetrievalQueryOrigin;
+  /** @internal Shared one-shot override claimed only by a leg that already performs vector search. */
+  _supportVectorOverride?: {
+    readonly query: string;
+    readonly origin: RetrievalQueryOrigin;
+    claimed: boolean;
+  };
 }
 
 export interface HybridSearchConfig {
@@ -129,6 +151,119 @@ export function rrfScore(ranks: number[], k: number): number {
   return ranks.reduce((sum, rank) => sum + 1 / (k + rank), 0);
 }
 
+interface SearchSupportContext {
+  readonly capture: boolean;
+  readonly rootQuery: string;
+  readonly origin: RetrievalQueryOrigin;
+  readonly vectorOverride?: {
+    readonly query: string;
+    readonly origin: RetrievalQueryOrigin;
+    claimed: boolean;
+  };
+}
+
+const NO_SUPPORT_CONTEXT: SearchSupportContext = Object.freeze({
+  capture: false,
+  rootQuery: "",
+  origin: "original",
+});
+
+function resolveSupportContext(query: string, options?: SearchOptions): SearchSupportContext {
+  if (options?._captureSupport !== true) return NO_SUPPORT_CONTEXT;
+  return {
+    capture: true,
+    rootQuery: options?._supportRootQuery ?? query,
+    origin: options?._supportOrigin ?? "original",
+    ...(options?._supportVectorOverride === undefined
+      ? {}
+      : { vectorOverride: options._supportVectorOverride }),
+  };
+}
+
+function resolveVectorSlot(
+  query: string,
+  context: SearchSupportContext,
+): { readonly query: string; readonly support: SearchSupportContext } {
+  const override = context.vectorOverride;
+  if (!context.capture || override === undefined || override.claimed) {
+    return { query, support: context };
+  }
+  override.claimed = true;
+  return {
+    query: override.query,
+    support: {
+      capture: true,
+      rootQuery: context.rootQuery,
+      origin: override.origin,
+    },
+  };
+}
+
+function attachDirectSupport(
+  result: SearchResult,
+  channel: RetrievalSupportChannel,
+  context: SearchSupportContext,
+  optional?: Partial<RetrievalChannelEvidence>,
+): SearchResult {
+  if (!context.capture) return result;
+  const {
+    rankScore = result.score,
+    vectorCosineSimilarity,
+    rootLexicalCoverage,
+  } = optional ?? {};
+  const evidence: RetrievalChannelEvidence = {
+    rankScore,
+    ...(vectorCosineSimilarity === undefined ? {} : { vectorCosineSimilarity }),
+    ...(rootLexicalCoverage === undefined ? {} : { rootLexicalCoverage }),
+  };
+  return attachRetrievalSupport(result, {
+    [channel]: { [context.origin]: evidence },
+  });
+}
+
+function selectStrongerEvidence(
+  channel: RetrievalSupportChannel,
+  current: RetrievalChannelEvidence | undefined,
+  candidate: RetrievalChannelEvidence,
+): RetrievalChannelEvidence {
+  if (!current) return candidate;
+
+  const primary = (evidence: RetrievalChannelEvidence): number => {
+    if (channel === "vector") return evidence.vectorCosineSimilarity ?? Number.NEGATIVE_INFINITY;
+    if (channel === "exact" || channel === "fts" || channel === "temporal") {
+      return evidence.rootLexicalCoverage ?? Number.NEGATIVE_INFINITY;
+    }
+    return evidence.rankScore;
+  };
+  const currentPrimary = primary(current);
+  const candidatePrimary = primary(candidate);
+  if (candidatePrimary > currentPrimary) return candidate;
+  if (candidatePrimary < currentPrimary) return current;
+  return candidate.rankScore > current.rankScore ? candidate : current;
+}
+
+function collectStrongestSupport(
+  target: Record<string, Record<string, RetrievalChannelEvidence>>,
+  source: RetrievalSupport,
+): void {
+  const channels: readonly RetrievalSupportChannel[] = ["exact", "vector", "fts", "graph", "temporal"];
+  const origins: readonly RetrievalQueryOrigin[] = ["original", "derived"];
+  for (const channel of channels) {
+    const channelSupport = source[channel];
+    if (!channelSupport) continue;
+    let targetChannel = target[channel];
+    if (!targetChannel) {
+      targetChannel = Object.create(null);
+      target[channel] = targetChannel;
+    }
+    for (const origin of origins) {
+      const candidate = channelSupport[origin];
+      if (!candidate) continue;
+      targetChannel[origin] = selectStrongerEvidence(channel, targetChannel[origin], candidate);
+    }
+  }
+}
+
 /** Max detail terms extracted from a query — keeps the OR-LIKE bounded (#169). */
 export const MAX_DETAIL_TERMS = 12;
 
@@ -183,12 +318,12 @@ const MAX_SEALED_DETAIL_PAGES = 5;
 const MAX_RAW_CHUNK_HITS_PER_PAGE = 3;
 const DETAIL_SNIPPET_CHARS = 200;
 
-export function mergeRankedResults(
+function mergeRankedResultsLegacy(
   lists: SearchResult[][],
   k: number,
   limit: number,
   activityWeights?: Map<string, number>,
-  hotnessWeights?: Map<string, number>
+  hotnessWeights?: Map<string, number>,
 ): SearchResult[] {
   if (lists.length === 0) return [];
 
@@ -231,6 +366,50 @@ export function mergeRankedResults(
 
   results.sort((a, b) => b.score - a.score);
   return results.slice(0, limit);
+}
+
+export function mergeRankedResults(
+  lists: SearchResult[][],
+  k: number,
+  limit: number,
+  activityWeights?: Map<string, number>,
+  hotnessWeights?: Map<string, number>,
+  captureSupport = false,
+): SearchResult[] {
+  const results = mergeRankedResultsLegacy(
+    lists,
+    k,
+    limit,
+    activityWeights,
+    hotnessWeights,
+  );
+  if (!captureSupport || results.length === 0) return results;
+
+  const outputSlugs = new Set(results.map((result) => result.slug));
+  const supportBySlug = new Map<
+    string,
+    Record<string, Record<string, RetrievalChannelEvidence>>
+  >();
+  for (const list of lists) {
+    for (const item of list) {
+      if (!outputSlugs.has(item.slug)) continue;
+      const existing = supportBySlug.get(item.slug);
+      const support: Record<string, Record<string, RetrievalChannelEvidence>> =
+        existing ?? Object.create(null);
+      if (!existing) {
+        supportBySlug.set(item.slug, support);
+      }
+      collectStrongestSupport(support, getRetrievalSupport(item));
+    }
+  }
+
+  for (const result of results) {
+    const support = supportBySlug.get(result.slug);
+    if (support && Reflect.ownKeys(support).length > 0) {
+      attachRetrievalSupport(result, support as RetrievalSupport);
+    }
+  }
+  return results;
 }
 
 // ─── Recall quality gate (#230) ──────────────────────────────
@@ -383,9 +562,10 @@ export class HybridSearch {
     const limit = options?.limit ?? 10;
     const strategy = options?.strategy ?? "all";
     const trace = options?._trace;
+    const support = resolveSupportContext(query, options);
 
     if (strategy === "vector") {
-      const vecResult = await this.timedCall(() => this.boundedVectorSearch(query, limit), trace, "vector_ms").catch(() => null);
+      const vecResult = await this.timedCall(() => this.boundedVectorSearch(query, limit, support), trace, "vector_ms").catch(() => null);
       if (vecResult === null) {
         if (trace) trace.degraded_reason = trace.degraded_reason ?? "vector_timeout";
         return [];
@@ -393,16 +573,25 @@ export class HybridSearch {
       return vecResult;
     }
     if (strategy === "fts") {
-      return this.timedCall(() => Promise.resolve(this.ftsSearch(query, limit, trace)), trace, "fts_ms");
+      return this.timedCall(() => Promise.resolve(this.ftsSearch(query, limit, trace, support)), trace, "fts_ms");
     }
     if (strategy === "graph") {
-      return this.timedCall(() => this.graphSearch(query, limit), trace, "graph_ms");
+      return this.timedCall(() => this.graphSearchWithSupport(query, limit, support), trace, "graph_ms");
     }
 
     // Exact title match fast path
     const exact = this.db.getPageByTitle(query.trim());
     if (exact) {
-      return [{ slug: exact.slug, score: 1.0, snippet: exact.title, source: "exact" as const }];
+      const result: SearchResult = {
+        slug: exact.slug,
+        score: 1.0,
+        snippet: exact.title,
+        source: "exact",
+      };
+      const exactResult = attachDirectSupport(result, "exact", support, support.capture ? {
+        rootLexicalCoverage: computeRootLexicalCoverage(support.rootQuery, exact.title),
+      } : undefined);
+      return [exactResult];
     }
 
     // #272 — hoist the bounded FTS probe above the decompose branch so the same
@@ -410,7 +599,7 @@ export class HybridSearch {
     // ftsSearch on the original query). Timed + fail-open (catch → []), mirroring
     // searchSingleQuery's FTS path so trace/error semantics stay consistent.
     const ftsProbe = await this.timedCall(
-      () => Promise.resolve(this.ftsSearch(query, limit, trace)),
+      () => Promise.resolve(this.ftsSearch(query, limit, trace, support)),
       trace,
       "fts_ms",
     ).catch(() => [] as SearchResult[]);
@@ -442,7 +631,7 @@ export class HybridSearch {
         } else {
           // Budget guard: skip decompose if LLM budget already exhausted (#222)
           if ((trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS) {
-            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe);
+            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe, support);
             if (trace) {
               trace.decompose_skipped = "budget_exhausted_fallback";
               if (fallback.length === 0 && !trace.degraded_reason) {
@@ -471,7 +660,7 @@ export class HybridSearch {
               trace.decompose_ms = Date.now() - decomposeStart;
             }
             this.logger?.warn("search", "decomposition 超时/失败，回退原查询（零额外 LLM）", { error: e instanceof Error ? e.message : String(e) });
-            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe);
+            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe, support);
             if (trace) {
               trace.decompose_skipped = "decompose_failed_fallback";
               if (fallback.length === 0 && !trace.degraded_reason) {
@@ -490,9 +679,28 @@ export class HybridSearch {
 
           this.logger?.info("search", `decomposition: "${query}" → ${subQueries.length} sub-queries (capped at ${MAX_DEFAULT_SUBQUERIES})`);
           if (subQueries.length >= 2) {
+            const vectorOverride = support.capture
+              ? { query, origin: "original" as const, claimed: false }
+              : undefined;
+            // Preserve every decomposition child. In capture mode only, the
+            // first child that already reaches vector search claims a shared
+            // one-shot root-query override. Exact children stay on their legacy
+            // zero-vector fast path, so no embedding/Lance call is added.
             const subResults = await Promise.all(
               subQueries.map((sq) =>
-                this.search(sq, { ...(options ?? {}), _skipDecompose: true, multiQuery: false, _skipDetailEnrich: true, _trace: trace }).catch(() => [] as SearchResult[])
+                this.search(sq, {
+                  ...(options ?? {}),
+                  _skipDecompose: true,
+                  multiQuery: false,
+                  _skipDetailEnrich: true,
+                  _trace: trace,
+                  _captureSupport: support.capture,
+                  _supportRootQuery: support.rootQuery,
+                  _supportOrigin: "derived",
+                  ...(vectorOverride === undefined
+                    ? {}
+                    : { _supportVectorOverride: vectorOverride }),
+                }).catch(() => [] as SearchResult[])
               )
             );
 
@@ -502,13 +710,20 @@ export class HybridSearch {
               for (const list of allSubLists) for (const item of list) allSlugs.add(item.slug);
               const activityWeights = allSlugs.size > 0 ? this.db.getActivityWeights([...allSlugs]) : undefined;
               const hotnessWeights = allSlugs.size > 0 ? this.db.getHotnessWeights([...allSlugs]) : undefined;
-              return mergeRankedResults(allSubLists, this.rrfK, limit, activityWeights, hotnessWeights);
+              return mergeRankedResults(
+                allSubLists,
+                this.rrfK,
+                limit,
+                activityWeights,
+                hotnessWeights,
+                support.capture,
+              );
             }
           }
           // decompose 成功但弱结构/空结果 → 原查询 bounded fallback（召回不丢失）。
           // multiQuery:false → 不 expandQuery（chat LLM escalation），不 ResearchManager；
           // 仅 searchSingleQuery（vector/fts/graph），bounded。复用 hoisted ftsProbe 避免二次 ftsSearch。
-          return this.searchWithExpansion(query, limit, false, trace, ftsProbe);
+          return this.searchWithExpansion(query, limit, false, trace, ftsProbe, support);
         }
       }
     }
@@ -524,14 +739,25 @@ export class HybridSearch {
     if (trace && this.llm && !shouldExpand && ftsSufficient) {
       trace.expand_skipped = "fts_sufficient";
     }
-    return this.searchWithExpansion(query, limit, shouldExpand, trace, ftsProbe);
+    return this.searchWithExpansion(query, limit, shouldExpand, trace, ftsProbe, support);
   }
 
-  private async searchSingleQuery(q: string, limit: number, trace?: SearchTrace, initialFts?: SearchResult[]): Promise<SearchResult[][]> {
+  private async searchSingleQuery(
+    q: string,
+    limit: number,
+    trace: SearchTrace | undefined,
+    initialFts: SearchResult[] | undefined,
+    support: SearchSupportContext,
+  ): Promise<SearchResult[][]> {
     const resolved = this.db.resolveSlugs([q])[0];
 
     // Race vector search against timeout — embedding API call is unbounded network I/O
-    const vectorPromise = this.boundedVectorSearch(q, limit);
+    const vectorSlot = resolveVectorSlot(q, support);
+    const vectorPromise = this.boundedVectorSearch(
+      vectorSlot.query,
+      limit,
+      vectorSlot.support,
+    );
 
     const [vecOrNull, fts, graph, temporal] = await Promise.all([
       this.timedCall(() => vectorPromise, trace, "vector_ms").catch((e) => {
@@ -541,17 +767,17 @@ export class HybridSearch {
       }),
       initialFts !== undefined
         ? Promise.resolve(initialFts)
-        : this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit, trace)), trace, "fts_ms").catch((e) => {
+        : this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit, trace, support)), trace, "fts_ms").catch((e) => {
             this.logger?.warn("search", "ftsSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
             return [] as SearchResult[];
           }),
       resolved?.slug
-        ? this.timedCall(() => this.graphSearch(resolved.slug!, limit), trace, "graph_ms").catch((e) => {
+        ? this.timedCall(() => this.graphSearchWithSupport(resolved.slug!, limit, support), trace, "graph_ms").catch((e) => {
             this.logger?.warn("search", "graphSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
             return [] as SearchResult[];
           })
         : Promise.resolve([] as SearchResult[]),
-      this.timedCall(() => Promise.resolve(this.temporalSearch(q, limit)), trace, "temporal_ms").catch((e) => {
+      this.timedCall(() => Promise.resolve(this.temporalSearch(q, limit, support)), trace, "temporal_ms").catch((e) => {
         this.logger?.warn("search", "temporalSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
         return [] as SearchResult[];
       }),
@@ -576,6 +802,7 @@ export class HybridSearch {
     expand: boolean,
     trace?: SearchTrace,
     initialFts?: SearchResult[],
+    support: SearchSupportContext = resolveSupportContext(query),
   ): Promise<SearchResult[]> {
     const t0 = Date.now();
     const budgetExhausted = (trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS;
@@ -614,7 +841,19 @@ export class HybridSearch {
     }
 
     const queryResults = await Promise.all(
-      queries.map((q, i) => this.searchSingleQuery(q, limit, trace, i === 0 ? initialFts : undefined))
+      queries.map((q, i) => this.searchSingleQuery(
+        q,
+        limit,
+        trace,
+        i === 0 ? initialFts : undefined,
+        i === 0 || !support.capture
+          ? support
+          : {
+              ...support,
+              origin: "derived",
+              vectorOverride: undefined,
+            },
+      ))
     );
     const allLists = queryResults.flat();
 
@@ -626,7 +865,14 @@ export class HybridSearch {
     const totalMs = Date.now() - t0;
     this.logger?.info("search", `expansion: ${queries.length} queries, expand=${trace?.expand_ms ?? 0}ms, total=${totalMs}ms, slugs=${allSlugs.size}`);
 
-    return mergeRankedResults(allLists, this.rrfK, limit, activityWeights, hotnessWeights);
+    return mergeRankedResults(
+      allLists,
+      this.rrfK,
+      limit,
+      activityWeights,
+      hotnessWeights,
+      support.capture,
+    );
   }
 
   private async timedCall<T>(
@@ -908,7 +1154,11 @@ export class HybridSearch {
     return hits.length === 0 ? null : hits[0].content;
   }
 
-  private async vectorSearch(query: string, limit: number): Promise<SearchResult[]> {
+  private async vectorSearch(
+    query: string,
+    limit: number,
+    support: SearchSupportContext,
+  ): Promise<SearchResult[]> {
     const cached = this.embeddingCache.get(query);
     let embedding: number[];
     if (cached && Date.now() < cached.expires) {
@@ -922,60 +1172,113 @@ export class HybridSearch {
         if (oldest !== undefined) this.embeddingCache.delete(oldest);
       }
     }
-    const results = await this.lance.search(embedding, limit * 3);
+    const includeVector = support.capture && support.origin === "original";
+    const results = includeVector
+      ? await this.lance.search(embedding, limit * 3, { includeVector: true })
+      : await this.lance.search(embedding, limit * 3);
 
     const bySlug = new Map<string, { content: string; score: number }>();
+    const supportBySlug = includeVector
+      ? new Map<string, RetrievalChannelEvidence>()
+      : undefined;
     for (const r of results) {
+      const rankScore = r._distance != null ? 1 - r._distance : 0;
       const existing = bySlug.get(r.pageSlug);
       if (!existing || r.chunkIndex === -1) {
         bySlug.set(r.pageSlug, {
           content: r.content,
-          score: r._distance != null ? 1 - r._distance : 0,
+          score: rankScore,
         });
       }
+
+      if (!supportBySlug || !r.vector || !Number.isFinite(rankScore)) continue;
+      const vectorCosineSimilarity = computeCosineSimilarity(embedding, r.vector);
+      if (vectorCosineSimilarity === undefined) continue;
+      const candidate: RetrievalChannelEvidence = {
+        rankScore,
+        vectorCosineSimilarity,
+      };
+      supportBySlug.set(
+        r.pageSlug,
+        selectStrongerEvidence("vector", supportBySlug.get(r.pageSlug), candidate),
+      );
     }
 
-    return [...bySlug.entries()].slice(0, limit).map(([slug, v]) => ({
-      slug,
-      score: v.score,
-      snippet: v.content.slice(0, 200),
-      source: "vector" as const,
-    }));
+    return [...bySlug.entries()].slice(0, limit).map(([slug, v]) => {
+      const result: SearchResult = {
+        slug,
+        score: v.score,
+        snippet: v.content.slice(0, 200),
+        source: "vector",
+      };
+      return attachDirectSupport(result, "vector", support, supportBySlug?.get(slug));
+    });
   }
 
   /** vectorSearch with timeout budget. Returns null on timeout, rejects on error. */
-  private boundedVectorSearch(query: string, limit: number): Promise<SearchResult[] | null> {
+  private boundedVectorSearch(
+    query: string,
+    limit: number,
+    support: SearchSupportContext,
+  ): Promise<SearchResult[] | null> {
     return new Promise<SearchResult[] | null>((resolve, reject) => {
       const timer = setTimeout(() => resolve(null), HybridSearch.VECTOR_TIMEOUT_MS);
-      this.vectorSearch(query, limit)
+      this.vectorSearch(query, limit, support)
         .then((r) => { clearTimeout(timer); resolve(r); })
         .catch((e) => { clearTimeout(timer); reject(e); });
     });
   }
 
-  private ftsSearch(query: string, limit: number, trace?: SearchTrace): SearchResult[] {
+  private ftsSearch(
+    query: string,
+    limit: number,
+    trace?: SearchTrace,
+    support: SearchSupportContext = resolveSupportContext(query),
+  ): SearchResult[] {
     const meta: { fts_fallback?: boolean } = {};
     const results = this.db.ftsSearch(query, limit, meta);
     if (meta.fts_fallback && trace) trace.fts_fallback = true;
-    return results.map((r) => ({
-      slug: r.page_slug,
-      score: Math.abs(r.rank),
-      snippet: r.content.slice(0, 200),
-      source: "fts" as const,
-    }));
+    return results.map((r) => {
+      const result: SearchResult = {
+        slug: r.page_slug,
+        score: Math.abs(r.rank),
+        snippet: r.content.slice(0, 200),
+        source: "fts",
+      };
+      return attachDirectSupport(result, "fts", support, support.capture ? {
+        rootLexicalCoverage: computeRootLexicalCoverage(support.rootQuery, r.content),
+      } : undefined);
+    });
   }
 
-  private temporalSearch(query: string, limit: number): SearchResult[] {
+  private temporalSearch(
+    query: string,
+    limit: number,
+    support: SearchSupportContext,
+  ): SearchResult[] {
     const results = this.db.searchTimeline(query, undefined, limit);
-    return results.map((r) => ({
-      slug: r.page_slug,
-      score: 0.5,
-      snippet: `${r.event_date ?? "?"}: ${r.summary}${r.source ? ` [${r.source}]` : ""}`,
-      source: "temporal" as const,
-    }));
+    return results.map((r) => {
+      const result: SearchResult = {
+        slug: r.page_slug,
+        score: 0.5,
+        snippet: `${r.event_date ?? "?"}: ${r.summary}${r.source ? ` [${r.source}]` : ""}`,
+        source: "temporal",
+      };
+      return attachDirectSupport(result, "temporal", support, support.capture ? {
+        rootLexicalCoverage: computeRootLexicalCoverage(support.rootQuery, result.snippet),
+      } : undefined);
+    });
   }
 
   async graphSearch(seedSlug: string, limit: number): Promise<SearchResult[]> {
+    return this.graphSearchWithSupport(seedSlug, limit, resolveSupportContext(seedSlug));
+  }
+
+  private async graphSearchWithSupport(
+    seedSlug: string,
+    limit: number,
+    support: SearchSupportContext,
+  ): Promise<SearchResult[]> {
     // #248 — delegate to GraphManager.traverse's batched no-filter BFS instead
     // of per-node getOutgoingSlugs/getIncomingSlugs/getPageTitle lookups. Same
     // two-hop, bidirectional, visited-on-first-encounter BFS semantics; score
@@ -984,11 +1287,14 @@ export class HybridSearch {
     // row, so dangling link targets are excluded from recall candidates
     // (defensive — the links FK makes such targets schema-impossible under
     // PRAGMA foreign_keys = ON, so this is unobservable on valid data).
-    return this.graph.traverse(seedSlug, { direction: "both", maxDepth: 2, limit }).map((node) => ({
-      slug: node.slug,
-      score: 1 / node.depth,
-      snippet: node.title,
-      source: "graph" as const,
-    }));
+    return this.graph.traverse(seedSlug, { direction: "both", maxDepth: 2, limit }).map((node) => {
+      const result: SearchResult = {
+        slug: node.slug,
+        score: 1 / node.depth,
+        snippet: node.title,
+        source: "graph",
+      };
+      return attachDirectSupport(result, "graph", support);
+    });
   }
 }
