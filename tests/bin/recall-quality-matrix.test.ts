@@ -2,10 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { runRecallQualityMatrix } from "../../bin/check-recall-quality-matrix.js";
 import {
+	aggregateRecallMetrics,
+	compareRecallBaseline,
+	evaluateRecallCase,
 	parseRecallQualityBaseline,
 	parseRecallQualityCases,
 	parseRecallQualityCorpus,
 	SAFE_FIXTURE_TOKENS,
+} from "../../bin/lib/recall-quality-matrix.js";
+import type {
+	EvaluatedRecallCase,
+	RecallQualityBaselineEntry,
+	RecallQualityObservation,
+	RecallRouteContractCase,
+	RecallSemanticCase,
 } from "../../bin/lib/recall-quality-matrix.js";
 
 const CORPUS_TEXT = readFileSync(
@@ -77,6 +87,95 @@ const baselineEntry = (): Record<string, unknown> => ({
 	evidence_sufficiency: "not_applicable",
 	top3: [],
 	follow_up: "#337",
+});
+
+const answerableCase = (
+	overrides: Partial<RecallSemanticCase> = {},
+): RecallSemanticCase => ({
+	caseId: "abstract_positive_01",
+	category: "abstract_concept",
+	kind: "semantic_recall",
+	query: "抽象 治理",
+	expectedTool: "cbrain_recall",
+	expectedFrontdoorRoute: "content_recall",
+	oracle: "answerable",
+	expectedSources: ["source_a"],
+	allowedSources: ["source_a"],
+	requiredAnswerPoints: [
+		{
+			sourceId: "source_a",
+			pointIds: ["point_a", "point_b"],
+			match: "all",
+		},
+	],
+	mustNotSources: ["source_b", "source_c", "source_d"],
+	allowedStatuses: ["ok"],
+	...overrides,
+});
+
+const unanswerableCase = (
+	overrides: Partial<RecallSemanticCase> = {},
+): RecallSemanticCase => ({
+	caseId: "abstract_negative_01",
+	category: "abstract_concept",
+	kind: "semantic_recall",
+	query: "未知 线索",
+	expectedTool: "cbrain_recall",
+	expectedFrontdoorRoute: "content_recall",
+	oracle: "unanswerable",
+	expectedSources: [],
+	allowedSources: [],
+	requiredAnswerPoints: [],
+	mustNotSources: ["source_a", "source_b", "source_c", "source_d"],
+	allowedStatuses: ["empty"],
+	...overrides,
+});
+
+const semanticObservation = (
+	overrides: Partial<Extract<RecallQualityObservation, { top3: unknown }>> = {},
+): Extract<RecallQualityObservation, { top3: unknown }> => ({
+	caseId: "abstract_positive_01",
+	actualTool: "cbrain_recall",
+	actualFrontdoorRoute: "content_recall",
+	answerStatus: "ok",
+	degradationKind: "none",
+	evidenceSufficiency: "sufficient",
+	top3: [
+		{ sourceId: "source_a", matchedPointIds: ["point_b", "point_a"] },
+	],
+	...overrides,
+});
+
+const routeQualityCase = (
+	overrides: Partial<RecallRouteContractCase> = {},
+): RecallRouteContractCase => ({
+	caseId: "operational_positive_01",
+	category: "operational_meta",
+	kind: "route_contract",
+	canonicalInputSha256: "a".repeat(64),
+	expectedTool: "next_actions",
+	expectedArgs: { includeRaw: false },
+	forbiddenTools: ["query", "cbrain_recall", "deep_recall"],
+	...overrides,
+} as RecallRouteContractCase);
+
+const exactKnownFailureBaseline = (
+	overrides: Partial<RecallQualityBaselineEntry> = {},
+): RecallQualityBaselineEntry => ({
+	caseId: "abstract_positive_01",
+	failureCodes: ["irrelevant_but_ok", "recall_miss", "wrong_source"],
+	answerStatus: "ok",
+	degradationKind: "none",
+	evidenceSufficiency: "sufficient",
+	top3: [
+		{
+			sourceId: "source_b",
+			matchedPointIds: ["point_b", "point_c"],
+		},
+		{ sourceId: "source_c", matchedPointIds: [] },
+	],
+	followUp: "#337",
+	...overrides,
 });
 
 const CASE_IDS = [
@@ -610,6 +709,528 @@ describe("fixture schema", () => {
 				),
 			"baseline_not_array",
 		);
+	});
+});
+
+describe("quality oracle", () => {
+	test("answerable exact expected source and all source-bound points passes", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation(),
+		);
+
+		expect(evaluated.failureCodes).toEqual([]);
+		expect(evaluated.expectedCoverage).toBe(true);
+		expect(evaluated.observation.top3).toEqual([
+			{ sourceId: "source_a", matchedPointIds: ["point_a", "point_b"] },
+		]);
+	});
+
+	test("answerable empty response records recall miss independently of status", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({ answerStatus: "empty", top3: [] }),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"recall_miss",
+			"status_mismatch",
+		]);
+	});
+
+	test("answerable wrong candidate with ok status records every independent failure", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				top3: [{ sourceId: "source_b", matchedPointIds: [] }],
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"irrelevant_but_ok",
+			"recall_miss",
+			"wrong_source",
+		]);
+	});
+
+	test("expected source without its required point does not satisfy coverage", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				top3: [{ sourceId: "source_a", matchedPointIds: ["point_a"] }],
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"irrelevant_but_ok",
+			"recall_miss",
+		]);
+		expect(evaluated.expectedCoverage).toBe(false);
+	});
+
+	test("required point appearing under a wrong source cannot satisfy source-bound coverage", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				top3: [
+					{ sourceId: "source_a", matchedPointIds: [] },
+					{
+						sourceId: "source_b",
+						matchedPointIds: ["point_a", "point_b"],
+					},
+				],
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"irrelevant_but_ok",
+			"recall_miss",
+			"wrong_source",
+		]);
+		expect(evaluated.expectedCoverage).toBe(false);
+	});
+
+	test("expected coverage does not waive an extra non-allowed source", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				top3: [
+					{
+						sourceId: "source_a",
+						matchedPointIds: ["point_a", "point_b"],
+					},
+					{ sourceId: "source_b", matchedPointIds: [] },
+				],
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual(["wrong_source"]);
+		expect(evaluated.expectedCoverage).toBe(true);
+	});
+
+	test("an any-point rule accepts one source-bound required point", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase({
+				requiredAnswerPoints: [
+					{
+						sourceId: "source_a",
+						pointIds: ["point_a", "point_b"],
+						match: "any",
+					},
+				],
+			}),
+			semanticObservation({
+				top3: [{ sourceId: "source_a", matchedPointIds: ["point_b"] }],
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([]);
+		expect(evaluated.expectedCoverage).toBe(true);
+	});
+
+	test("unanswerable empty response with empty status passes", () => {
+		const evaluated = evaluateRecallCase(
+			unanswerableCase(),
+			semanticObservation({
+				caseId: "abstract_negative_01",
+				answerStatus: "empty",
+				evidenceSufficiency: "not_applicable",
+				top3: [],
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([]);
+		expect(evaluated.expectedCoverage).toBe(true);
+	});
+
+	test.each([
+		[
+			"empty",
+			"none",
+			["unexpected_recall", "wrong_source"],
+		],
+		[
+			"degraded",
+			"evidence",
+			[
+				"degraded_response",
+				"status_mismatch",
+				"unexpected_recall",
+				"wrong_source",
+			],
+		],
+	] as const)(
+		"unanswerable non-empty %s response always records unexpected recall",
+		(answerStatus, degradationKind, failureCodes) => {
+			const evaluated = evaluateRecallCase(
+				unanswerableCase(),
+				semanticObservation({
+					caseId: "abstract_negative_01",
+					answerStatus,
+					degradationKind,
+					top3: [{ sourceId: "source_a", matchedPointIds: [] }],
+				}),
+			);
+
+			expect(evaluated.failureCodes).toEqual([...failureCodes]);
+		},
+	);
+
+	test("unanswerable empty result with ok status is irrelevant and mismatched", () => {
+		const evaluated = evaluateRecallCase(
+			unanswerableCase(),
+			semanticObservation({
+				caseId: "abstract_negative_01",
+				top3: [],
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"irrelevant_but_ok",
+			"status_mismatch",
+		]);
+	});
+
+	test("degraded response always records degradation independently of coverage", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				answerStatus: "degraded",
+				degradationKind: "evidence",
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"degraded_response",
+			"status_mismatch",
+		]);
+	});
+
+	test("degraded response without evidence proof is additionally unclassified", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				answerStatus: "degraded",
+				degradationKind: "unclassified",
+				evidenceSufficiency: "not_applicable",
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"degraded_response",
+			"status_mismatch",
+			"unclassified_degraded",
+		]);
+	});
+
+	test("expected coverage plus insufficient evidence is a false positive", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({ evidenceSufficiency: "insufficient" }),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"insufficient_false_positive",
+		]);
+	});
+
+	test("semantic tool or frontdoor mismatch records route mismatch", () => {
+		const wrongTool = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({ actualTool: "query" }),
+		);
+		const wrongFrontdoor = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({ actualFrontdoorRoute: "deep_recall" }),
+		);
+
+		expect(wrongTool.failureCodes).toContain("route_mismatch");
+		expect(wrongFrontdoor.failureCodes).toContain("route_mismatch");
+	});
+});
+
+describe("metrics", () => {
+	test("locks exact route, source coverage, case-rate, and insufficiency denominators", () => {
+		const routeMatch = evaluateRecallCase(routeQualityCase(), {
+			caseId: "operational_positive_01",
+			actualTool: "next_actions",
+		});
+		const contentMiss = evaluateRecallCase(
+			answerableCase({
+				caseId: "content_positive_01",
+				category: "content_meta",
+				expectedSources: ["source_a", "source_b"],
+				allowedSources: ["source_a", "source_b"],
+				requiredAnswerPoints: [
+					{ sourceId: "source_a", pointIds: ["point_a"], match: "all" },
+					{ sourceId: "source_b", pointIds: ["point_b"], match: "all" },
+				],
+				mustNotSources: ["source_c", "source_d"],
+			}),
+			semanticObservation({
+				caseId: "content_positive_01",
+				evidenceSufficiency: "insufficient",
+				top3: [
+					{ sourceId: "source_a", matchedPointIds: ["point_a"] },
+					{ sourceId: "source_c" as const, matchedPointIds: [] },
+				],
+			}),
+		);
+		const abstractInsufficient = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				actualFrontdoorRoute: "deep_recall",
+				evidenceSufficiency: "insufficient",
+			}),
+		);
+		const contentSufficient = evaluateRecallCase(
+			answerableCase({
+				caseId: "content_positive_02",
+				category: "content_meta",
+			}),
+			semanticObservation({ caseId: "content_positive_02" }),
+		);
+		const contentEmpty = evaluateRecallCase(
+			unanswerableCase({
+				caseId: "content_negative_01",
+				category: "content_meta",
+			}),
+			semanticObservation({
+				caseId: "content_negative_01",
+				answerStatus: "empty",
+				evidenceSufficiency: "not_applicable",
+				top3: [],
+			}),
+		);
+
+		const metrics = aggregateRecallMetrics([
+			routeMatch,
+			contentMiss,
+			abstractInsufficient,
+			contentSufficient,
+			contentEmpty,
+		]);
+
+		expect(metrics.routeAccuracy).toEqual({
+			numerator: 4,
+			denominator: 5,
+			rate: 0.8,
+		});
+		expect(metrics.routeAccuracyByCategory).toEqual({
+			operational_meta: { numerator: 1, denominator: 1, rate: 1 },
+			content_meta: { numerator: 3, denominator: 3, rate: 1 },
+			abstract_concept: { numerator: 0, denominator: 1, rate: 0 },
+		});
+		expect(metrics.recallAt3).toEqual({
+			numerator: 3,
+			denominator: 4,
+			rate: 0.75,
+		});
+		expect(metrics.wrongSourceRate).toEqual({
+			numerator: 1,
+			denominator: 4,
+			rate: 0.25,
+		});
+		expect(metrics.irrelevantButOkRate).toEqual({
+			numerator: 1,
+			denominator: 4,
+			rate: 0.25,
+		});
+		expect(metrics.insufficientFalsePositiveRate).toEqual({
+			numerator: 1,
+			denominator: 2,
+			rate: 0.5,
+		});
+	});
+
+	test("rounds non-terminating metric rates to exactly six decimals", () => {
+		const cases = [
+			evaluateRecallCase(routeQualityCase(), {
+				caseId: "operational_positive_01",
+				actualTool: "next_actions",
+			}),
+			evaluateRecallCase(
+				routeQualityCase({ caseId: "operational_positive_02" }),
+				{
+					caseId: "operational_positive_02",
+					actualTool: "query",
+				},
+			),
+			evaluateRecallCase(
+				routeQualityCase({ caseId: "operational_positive_03" }),
+				{
+					caseId: "operational_positive_03",
+					actualTool: "query",
+				},
+			),
+		];
+
+		expect(aggregateRecallMetrics(cases).routeAccuracy).toEqual({
+			numerator: 1,
+			denominator: 3,
+			rate: 0.333333,
+		});
+	});
+});
+
+describe("baseline comparison", () => {
+	const knownFailure = (): EvaluatedRecallCase =>
+		evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				top3: [
+					{
+						sourceId: "source_b",
+						matchedPointIds: ["point_c", "point_b"],
+					},
+					{ sourceId: "source_c", matchedPointIds: [] },
+				],
+			}),
+		);
+
+	test("exact ranked source, sorted point IDs, statuses, and failures is known", () => {
+		const comparison = compareRecallBaseline(
+			[knownFailure()],
+			[exactKnownFailureBaseline()],
+		);
+
+		expect(comparison.cases).toEqual([
+			{
+				caseId: "abstract_positive_01",
+				failureCodes: [
+					"irrelevant_but_ok",
+					"recall_miss",
+					"wrong_source",
+				],
+				disposition: "known_failure",
+			},
+		]);
+		expect(comparison.qualityStatus).toBe("known_failure");
+		expect(comparison.strictVerdict).toBe("no-go");
+		expect(comparison.ciVerdict).toBe("go");
+		expect(comparison.counts).toEqual({
+			knownFailures: 1,
+			regressions: 0,
+			unexpectedPasses: 0,
+		});
+		expect(JSON.stringify(comparison)).not.toContain("source_");
+		expect(JSON.stringify(comparison)).not.toContain("point_");
+	});
+
+	test.each([
+		[
+			"source order",
+			(entry: RecallQualityBaselineEntry) => ({
+				...entry,
+				top3: [...entry.top3].reverse(),
+			}),
+		],
+		[
+			"point coverage",
+			(entry: RecallQualityBaselineEntry) => ({
+				...entry,
+				top3: entry.top3.map((item) =>
+					item.sourceId === "source_b"
+						? { ...item, matchedPointIds: ["point_b" as const] }
+						: item,
+				),
+			}),
+		],
+		[
+			"failure code",
+			(entry: RecallQualityBaselineEntry) => ({
+				...entry,
+				failureCodes: ["recall_miss", "wrong_source"] as const,
+			}),
+		],
+		[
+			"status",
+			(entry: RecallQualityBaselineEntry) => ({
+				...entry,
+				answerStatus: "empty" as const,
+			}),
+		],
+		[
+			"degradation",
+			(entry: RecallQualityBaselineEntry) => ({
+				...entry,
+				degradationKind: "evidence" as const,
+			}),
+		],
+		[
+			"evidence sufficiency",
+			(entry: RecallQualityBaselineEntry) => ({
+				...entry,
+				evidenceSufficiency: "not_applicable" as const,
+			}),
+		],
+	] as const)("%s drift is a regression", (_label, mutate) => {
+		const comparison = compareRecallBaseline(
+			[knownFailure()],
+			[mutate(exactKnownFailureBaseline())],
+		);
+
+		expect(comparison.cases[0]!.disposition).toBe("regression");
+		expect(comparison.qualityStatus).toBe("regression");
+		expect(comparison.strictVerdict).toBe("no-go");
+		expect(comparison.ciVerdict).toBe("no-go");
+	});
+
+	test("a baseline entry whose case now passes is an unexpected pass", () => {
+		const passing = evaluateRecallCase(answerableCase(), semanticObservation());
+		const comparison = compareRecallBaseline(
+			[passing],
+			[exactKnownFailureBaseline()],
+		);
+
+		expect(comparison.cases[0]!.disposition).toBe("unexpected_pass");
+		expect(comparison.qualityStatus).toBe("regression");
+		expect(comparison.strictVerdict).toBe("no-go");
+		expect(comparison.ciVerdict).toBe("no-go");
+	});
+
+	test("route, unclassified degradation, and gate integrity failures are never accepted", () => {
+		const routeMismatch = evaluateRecallCase(routeQualityCase(), {
+			caseId: "operational_positive_01",
+			actualTool: "query",
+		});
+		const unclassified = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				answerStatus: "degraded",
+				degradationKind: "unclassified",
+				evidenceSufficiency: "not_applicable",
+			}),
+		);
+		const passing = evaluateRecallCase(
+			answerableCase({ caseId: "abstract_positive_02" }),
+			semanticObservation({ caseId: "abstract_positive_02" }),
+		);
+		const executionFailure: EvaluatedRecallCase = {
+			...passing,
+			failureCodes: ["execution_failure"],
+		};
+
+		for (const evaluated of [
+			routeMismatch,
+			unclassified,
+			executionFailure,
+		]) {
+			const comparison = compareRecallBaseline([evaluated], []);
+			expect(comparison.cases[0]!.disposition).toBe("regression");
+			expect(comparison.strictVerdict).toBe("no-go");
+			expect(comparison.ciVerdict).toBe("no-go");
+		}
+	});
+
+	test("no failures and no baseline makes both verdicts go", () => {
+		const passing = evaluateRecallCase(answerableCase(), semanticObservation());
+		const comparison = compareRecallBaseline([passing], []);
+
+		expect(comparison.cases[0]!.disposition).toBe("pass");
+		expect(comparison.qualityStatus).toBe("pass");
+		expect(comparison.strictVerdict).toBe("go");
+		expect(comparison.ciVerdict).toBe("go");
 	});
 });
 

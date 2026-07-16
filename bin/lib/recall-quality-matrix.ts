@@ -146,6 +146,107 @@ export interface RecallQualityBaselineEntry {
 
 export type RecallQualityBaseline = readonly RecallQualityBaselineEntry[];
 
+export type RecallQualityFailureCode =
+	| "route_mismatch"
+	| BaselineFailureCode
+	| "unclassified_degraded"
+	| "legacy_regression"
+	| "privacy_failure"
+	| "nondeterministic"
+	| "execution_failure";
+
+export interface RecallRouteContractObservation {
+	readonly caseId: RecallQualityCaseId;
+	readonly actualTool: string;
+}
+
+export interface RecallSemanticObservation {
+	readonly caseId: RecallQualityCaseId;
+	readonly actualTool: string;
+	readonly actualFrontdoorRoute: string;
+	readonly answerStatus: "ok" | "empty" | "degraded";
+	readonly degradationKind: "none" | "evidence" | "unclassified";
+	readonly evidenceSufficiency:
+		| "sufficient"
+		| "insufficient"
+		| "not_applicable";
+	readonly top3: readonly RecallQualityBaselineTop3[];
+}
+
+export type RecallQualityObservation =
+	| RecallRouteContractObservation
+	| RecallSemanticObservation;
+
+interface EvaluatedRecallCaseBase {
+	readonly caseId: RecallQualityCaseId;
+	readonly category:
+		| "operational_meta"
+		| "content_meta"
+		| "abstract_concept";
+	readonly failureCodes: readonly RecallQualityFailureCode[];
+	readonly routeMatches: boolean;
+}
+
+export interface EvaluatedRecallRouteCase extends EvaluatedRecallCaseBase {
+	readonly kind: "route_contract";
+	readonly testCase: RecallRouteContractCase;
+	readonly observation: RecallRouteContractObservation;
+}
+
+export interface EvaluatedRecallSemanticCase extends EvaluatedRecallCaseBase {
+	readonly kind: "semantic_recall";
+	readonly testCase: RecallSemanticCase;
+	readonly observation: RecallSemanticObservation;
+	readonly expectedCoverage: boolean;
+	readonly expectedSourcesFound: number;
+	readonly expectedSourcesTotal: number;
+}
+
+export type EvaluatedRecallCase =
+	| EvaluatedRecallRouteCase
+	| EvaluatedRecallSemanticCase;
+
+export interface RecallQualityRateMetric {
+	readonly numerator: number;
+	readonly denominator: number;
+	readonly rate: number;
+}
+
+export interface RecallQualityMetrics {
+	readonly routeAccuracy: RecallQualityRateMetric;
+	readonly routeAccuracyByCategory: Readonly<
+		Record<EvaluatedRecallCase["category"], RecallQualityRateMetric>
+	>;
+	readonly recallAt3: RecallQualityRateMetric;
+	readonly wrongSourceRate: RecallQualityRateMetric;
+	readonly irrelevantButOkRate: RecallQualityRateMetric;
+	readonly insufficientFalsePositiveRate: RecallQualityRateMetric;
+}
+
+export type BaselineDisposition =
+	| "pass"
+	| "known_failure"
+	| "regression"
+	| "unexpected_pass";
+
+export interface BaselineCaseComparison {
+	readonly caseId: RecallQualityCaseId;
+	readonly failureCodes: readonly RecallQualityFailureCode[];
+	readonly disposition: BaselineDisposition;
+}
+
+export interface BaselineComparison {
+	readonly cases: readonly BaselineCaseComparison[];
+	readonly qualityStatus: "pass" | "known_failure" | "regression";
+	readonly strictVerdict: "go" | "no-go";
+	readonly ciVerdict: "go" | "no-go";
+	readonly counts: Readonly<{
+		knownFailures: number;
+		regressions: number;
+		unexpectedPasses: number;
+	}>;
+}
+
 export type RecallQualityFixtureErrorCode =
 	| "malformed_json"
 	| "fixture_not_object"
@@ -872,4 +973,361 @@ export function parseRecallQualityBaseline(
 			followUp: "#337",
 		};
 	});
+}
+
+function isSemanticObservation(
+	observation: RecallQualityObservation,
+): observation is RecallSemanticObservation {
+	return "top3" in observation;
+}
+
+function sortedFailureCodes(
+	codes: ReadonlySet<RecallQualityFailureCode>,
+): RecallQualityFailureCode[] {
+	return [...codes].sort();
+}
+
+function normalizeObservationTop3(
+	top3: readonly RecallQualityBaselineTop3[],
+): RecallQualityBaselineTop3[] {
+	return top3.map((item) => ({
+		sourceId: item.sourceId,
+		matchedPointIds: [...item.matchedPointIds].sort(),
+	}));
+}
+
+export function evaluateRecallCase(
+	testCase: RecallRouteContractCase,
+	observation: RecallRouteContractObservation,
+): EvaluatedRecallRouteCase;
+export function evaluateRecallCase(
+	testCase: RecallSemanticCase,
+	observation: RecallSemanticObservation,
+): EvaluatedRecallSemanticCase;
+export function evaluateRecallCase(
+	testCase: RecallQualityCase,
+	observation: RecallQualityObservation,
+): EvaluatedRecallCase;
+export function evaluateRecallCase(
+	testCase: RecallQualityCase,
+	observation: RecallQualityObservation,
+): EvaluatedRecallCase {
+	const failures = new Set<RecallQualityFailureCode>();
+
+	if (testCase.kind === "route_contract") {
+		const routeMatches = observation.actualTool === testCase.expectedTool;
+		if (!routeMatches) failures.add("route_mismatch");
+		return {
+			caseId: testCase.caseId,
+			category: testCase.category,
+			kind: "route_contract",
+			testCase,
+			observation: {
+				caseId: observation.caseId,
+				actualTool: observation.actualTool,
+			},
+			failureCodes: sortedFailureCodes(failures),
+			routeMatches,
+		};
+	}
+
+	if (!isSemanticObservation(observation)) {
+		throw new Error("recall_quality_observation:semantic_required");
+	}
+
+	const normalizedObservation: RecallSemanticObservation = {
+		...observation,
+		top3: normalizeObservationTop3(observation.top3),
+	};
+	const routeMatches =
+		normalizedObservation.actualTool === testCase.expectedTool &&
+		normalizedObservation.actualFrontdoorRoute ===
+			testCase.expectedFrontdoorRoute;
+	if (!routeMatches) failures.add("route_mismatch");
+
+	const pointsBySource = new Map<
+		RecallCorpusSourceId,
+		Set<RecallAnswerPointId>
+	>();
+	for (const item of normalizedObservation.top3) {
+		let points = pointsBySource.get(item.sourceId);
+		if (!points) {
+			points = new Set();
+			pointsBySource.set(item.sourceId, points);
+		}
+		for (const pointId of item.matchedPointIds) points.add(pointId);
+	}
+
+	const expectedSourcesFound = testCase.expectedSources.filter((sourceId) =>
+		pointsBySource.has(sourceId),
+	).length;
+	const expectedCoverage =
+		testCase.oracle === "unanswerable"
+			? normalizedObservation.top3.length === 0
+			: testCase.expectedSources.every((sourceId) => {
+					const matchedPoints = pointsBySource.get(sourceId);
+					if (!matchedPoints) return false;
+					const rule = testCase.requiredAnswerPoints.find(
+						(item) => item.sourceId === sourceId,
+					);
+					if (!rule) return false;
+					return rule.match === "all"
+						? rule.pointIds.every((pointId) => matchedPoints.has(pointId))
+						: rule.pointIds.some((pointId) => matchedPoints.has(pointId));
+				});
+
+	if (testCase.oracle === "answerable" && !expectedCoverage) {
+		failures.add("recall_miss");
+	}
+	if (
+		testCase.oracle === "unanswerable" &&
+		normalizedObservation.top3.length > 0
+	) {
+		failures.add("unexpected_recall");
+	}
+	if (
+		normalizedObservation.top3.some(
+			(item) => !testCase.allowedSources.includes(item.sourceId),
+		)
+	) {
+		failures.add("wrong_source");
+	}
+	if (
+		normalizedObservation.answerStatus === "ok" &&
+		(testCase.oracle === "unanswerable" || !expectedCoverage)
+	) {
+		failures.add("irrelevant_but_ok");
+	}
+	if (
+		testCase.oracle === "answerable" &&
+		expectedCoverage &&
+		normalizedObservation.evidenceSufficiency === "insufficient"
+	) {
+		failures.add("insufficient_false_positive");
+	}
+	if (
+		!testCase.allowedStatuses.some(
+			(status) => status === normalizedObservation.answerStatus,
+		)
+	) {
+		failures.add("status_mismatch");
+	}
+	if (normalizedObservation.answerStatus === "degraded") {
+		failures.add("degraded_response");
+	}
+	if (normalizedObservation.degradationKind === "unclassified") {
+		failures.add("unclassified_degraded");
+	}
+
+	return {
+		caseId: testCase.caseId,
+		category: testCase.category,
+		kind: "semantic_recall",
+		testCase,
+		observation: normalizedObservation,
+		failureCodes: sortedFailureCodes(failures),
+		routeMatches,
+		expectedCoverage,
+		expectedSourcesFound,
+		expectedSourcesTotal: testCase.expectedSources.length,
+	};
+}
+
+function rateMetric(
+	numerator: number,
+	denominator: number,
+): RecallQualityRateMetric {
+	return {
+		numerator,
+		denominator,
+		rate: denominator === 0 ? 0 : Number((numerator / denominator).toFixed(6)),
+	};
+}
+
+export function aggregateRecallMetrics(
+	cases: readonly EvaluatedRecallCase[],
+): RecallQualityMetrics {
+	const categories = [
+		"operational_meta",
+		"content_meta",
+		"abstract_concept",
+	] as const;
+	const routeAccuracyByCategory = Object.fromEntries(
+		categories.map((category) => {
+			const categoryCases = cases.filter((item) => item.category === category);
+			return [
+				category,
+				rateMetric(
+					categoryCases.filter((item) => item.routeMatches).length,
+					categoryCases.length,
+				),
+			];
+		}),
+	) as Record<EvaluatedRecallCase["category"], RecallQualityRateMetric>;
+	const semanticCases = cases.filter(
+		(item): item is EvaluatedRecallSemanticCase =>
+			item.kind === "semantic_recall",
+	);
+	const answerableCases = semanticCases.filter(
+		(item) => item.testCase.oracle === "answerable",
+	);
+	const insufficientEligible = answerableCases.filter(
+		(item) =>
+			item.expectedCoverage &&
+			item.observation.evidenceSufficiency !== "not_applicable",
+	);
+
+	return {
+		routeAccuracy: rateMetric(
+			cases.filter((item) => item.routeMatches).length,
+			cases.length,
+		),
+		routeAccuracyByCategory,
+		recallAt3: rateMetric(
+			answerableCases.reduce(
+				(total, item) => total + item.expectedSourcesFound,
+				0,
+			),
+			answerableCases.reduce(
+				(total, item) => total + item.expectedSourcesTotal,
+				0,
+			),
+		),
+		wrongSourceRate: rateMetric(
+			semanticCases.filter((item) =>
+				item.failureCodes.includes("wrong_source"),
+			).length,
+			semanticCases.length,
+		),
+		irrelevantButOkRate: rateMetric(
+			semanticCases.filter((item) =>
+				item.failureCodes.includes("irrelevant_but_ok"),
+			).length,
+			semanticCases.length,
+		),
+		insufficientFalsePositiveRate: rateMetric(
+			insufficientEligible.filter((item) =>
+				item.failureCodes.includes("insufficient_false_positive"),
+			).length,
+			insufficientEligible.length,
+		),
+	};
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+	return (
+		left.length === right.length &&
+		left.every((item, index) => item === right[index])
+	);
+}
+
+function sameTop3(
+	left: readonly RecallQualityBaselineTop3[],
+	right: readonly RecallQualityBaselineTop3[],
+): boolean {
+	if (left.length !== right.length) return false;
+	return left.every((item, index) => {
+		const other = right[index];
+		return (
+			other !== undefined &&
+			item.sourceId === other.sourceId &&
+			sameStrings(
+				[...item.matchedPointIds].sort(),
+				[...other.matchedPointIds].sort(),
+			)
+		);
+	});
+}
+
+function isBaselineable(evaluated: EvaluatedRecallCase): boolean {
+	return (
+		evaluated.kind === "semantic_recall" &&
+		evaluated.failureCodes.length > 0 &&
+		evaluated.failureCodes.every((code) => BASELINE_FAILURE_CODES.has(code))
+	);
+}
+
+function baselineSignatureMatches(
+	evaluated: EvaluatedRecallCase,
+	baseline: RecallQualityBaselineEntry,
+): boolean {
+	return (
+		evaluated.kind === "semantic_recall" &&
+		sameStrings(evaluated.failureCodes, baseline.failureCodes) &&
+		evaluated.observation.answerStatus === baseline.answerStatus &&
+		evaluated.observation.degradationKind === baseline.degradationKind &&
+		evaluated.observation.evidenceSufficiency ===
+			baseline.evidenceSufficiency &&
+		sameTop3(evaluated.observation.top3, baseline.top3)
+	);
+}
+
+export function compareRecallBaseline(
+	cases: readonly EvaluatedRecallCase[],
+	baseline: RecallQualityBaseline,
+): BaselineComparison {
+	const baselineByCaseId = new Map(
+		baseline.map((entry) => [entry.caseId, entry]),
+	);
+	const evaluatedCaseIds = new Set<RecallQualityCaseId>();
+	const comparisons: BaselineCaseComparison[] = cases.map((evaluated) => {
+		evaluatedCaseIds.add(evaluated.caseId);
+		const baselineEntry = baselineByCaseId.get(evaluated.caseId);
+		let disposition: BaselineDisposition;
+		if (evaluated.failureCodes.length === 0) {
+			disposition = baselineEntry ? "unexpected_pass" : "pass";
+		} else if (
+			baselineEntry &&
+			isBaselineable(evaluated) &&
+			baselineSignatureMatches(evaluated, baselineEntry)
+		) {
+			disposition = "known_failure";
+		} else {
+			disposition = "regression";
+		}
+		return {
+			caseId: evaluated.caseId,
+			failureCodes: evaluated.failureCodes,
+			disposition,
+		};
+	});
+
+	for (const entry of baseline) {
+		if (!evaluatedCaseIds.has(entry.caseId)) {
+			comparisons.push({
+				caseId: entry.caseId,
+				failureCodes: [],
+				disposition: "unexpected_pass",
+			});
+		}
+	}
+
+	const counts = {
+		knownFailures: comparisons.filter(
+			(item) => item.disposition === "known_failure",
+		).length,
+		regressions: comparisons.filter(
+			(item) => item.disposition === "regression",
+		).length,
+		unexpectedPasses: comparisons.filter(
+			(item) => item.disposition === "unexpected_pass",
+		).length,
+	};
+	const ciIntegrityValid =
+		counts.regressions === 0 && counts.unexpectedPasses === 0;
+	const rawFailures = cases.some((item) => item.failureCodes.length > 0);
+	const qualityStatus =
+		ciIntegrityValid && counts.knownFailures === 0
+			? "pass"
+			: ciIntegrityValid
+				? "known_failure"
+				: "regression";
+
+	return {
+		cases: comparisons,
+		qualityStatus,
+		strictVerdict: ciIntegrityValid && !rawFailures ? "go" : "no-go",
+		ciVerdict: ciIntegrityValid ? "go" : "no-go",
+		counts,
+	};
 }
