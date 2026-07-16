@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -1717,10 +1724,12 @@ describe("semantic integration", () => {
 		"semantic_context",
 		"semantic_handler",
 		"semantic_close",
+		"semantic_file_access",
 		"legacy_db",
 		"legacy_context",
 		"legacy_handler",
 		"legacy_close",
+		"legacy_file_access",
 		"worker_spawn",
 	] as const)("cleanup removes every temporary root after %s failure", async (stage) => {
 		const before = process.env.RECALL_QUALITY_PARENT_SENTINEL;
@@ -1813,6 +1822,60 @@ describe("isolation cleanup reproducibility and privacy sentinel", () => {
 			if (beforeConfig === undefined) delete process.env.CBRAIN_CONFIG;
 			else process.env.CBRAIN_CONFIG = beforeConfig;
 			rmSync(sentinelRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("file allowlist rejects symlinks from an allowed root to private content", () => {
+		const allowedRoot = mkdtempSync(join(tmpdir(), "cbrain-recall-worker-link-"));
+		const privateRoot = mkdtempSync(join(tmpdir(), "recall-private-link-target-"));
+		const privateFile = join(privateRoot, "config.json");
+		const linkedFile = join(allowedRoot, "linked-config.json");
+		try {
+			writeFileSync(privateFile, "PRIVATE_SYMLINK_BODY_SENTINEL\n", "utf8");
+			symlinkSync(privateFile, linkedFile);
+			const access = createRecallGateFileAccess({ forbiddenPaths: [privateFile] });
+			access.allowTemporaryRoot(allowedRoot);
+			expect(access.exists(join(allowedRoot, "missing.json"))).toBe(false);
+			for (const operation of [
+				() => access.readText(linkedFile),
+				() => access.exists(linkedFile),
+			]) {
+				try {
+					operation();
+					throw new Error("expected symlink rejection");
+				} catch (error) {
+					expect(String(error)).toContain("recall_gate_file_access_denied");
+					expect(String(error)).not.toContain("PRIVATE_SYMLINK_BODY_SENTINEL");
+				}
+			}
+
+			const missingThroughLink = join(allowedRoot, "linked-directory", "missing.json");
+			symlinkSync(privateRoot, join(allowedRoot, "linked-directory"), "dir");
+			expect(() => access.exists(missingThroughLink)).toThrow(
+				"recall_gate_file_access_denied",
+			);
+		} finally {
+			rmSync(allowedRoot, { recursive: true, force: true });
+			rmSync(privateRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("file allowlist rejects a symlink masquerading as a temporary root", () => {
+		const privateRoot = mkdtempSync(join(tmpdir(), "recall-private-root-target-"));
+		const linkedRoot = mkdtempSync(join(tmpdir(), "cbrain-recall-worker-root-link-"));
+		rmSync(linkedRoot, { recursive: true, force: true });
+		symlinkSync(privateRoot, linkedRoot, "dir");
+		try {
+			const access = createRecallGateFileAccess();
+			expect(() => access.allowTemporaryRoot(linkedRoot)).toThrow(
+				"recall_gate_file_access_denied",
+			);
+			expect(() => access.readText(join(linkedRoot, "private.md"))).toThrow(
+				"recall_gate_file_access_denied",
+			);
+		} finally {
+			rmSync(linkedRoot, { force: true });
+			rmSync(privateRoot, { recursive: true, force: true });
 		}
 	});
 

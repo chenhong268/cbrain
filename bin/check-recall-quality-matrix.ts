@@ -2,13 +2,15 @@
 
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EmbeddingProvider } from "../src/embedding/provider.js";
@@ -150,10 +152,12 @@ export type RecallCleanupFailureStage =
 	| "semantic_context"
 	| "semantic_handler"
 	| "semantic_close"
+	| "semantic_file_access"
 	| "legacy_db"
 	| "legacy_context"
 	| "legacy_handler"
 	| "legacy_close"
+	| "legacy_file_access"
 	| "worker_spawn";
 
 export interface RecallCleanupFailureProbeResult {
@@ -187,54 +191,114 @@ export interface RecallGateFileAccessOptions {
 export function createRecallGateFileAccess(
 	options: RecallGateFileAccessOptions = {},
 ): RecallGateFileAccess {
-	const temporaryRoots = new Set<string>();
-	const forbiddenPaths = new Set(
-		(options.forbiddenPaths ?? []).map((path) => resolve(path)),
-	);
-	const assertAllowed = (path: string): string => {
+	const temporaryRoots: Array<Readonly<{ lexical: string; real: string }>> = [];
+	const forbiddenPaths = (options.forbiddenPaths ?? []).flatMap((path) => {
+		const lexical = resolve(path);
+		try {
+			return [lexical, realpathSync(lexical)];
+		} catch {
+			return [lexical];
+		}
+	});
+	const deny = (): never => {
+		options.onForbiddenAttempt?.();
+		throw new Error("recall_gate_file_access_denied");
+	};
+	const isWithin = (root: string, path: string): boolean => {
+		const child = relative(root, path);
+		return child === "" || (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`));
+	};
+	const isForbidden = (path: string): boolean =>
+		forbiddenPaths.some((item) => path === item || isWithin(item, path));
+	const lexicalScope = (path: string): Readonly<{
+		normalized: string;
+		canonical: boolean;
+		temporaryRoot?: Readonly<{ lexical: string; real: string }>;
+	}> => {
 		const normalized = resolve(path);
-		const forbidden = [...forbiddenPaths].some((item) =>
-			normalized === item || normalized.startsWith(`${item}${sep}`)
-		);
-		if (forbidden) {
-			options.onForbiddenAttempt?.();
-			throw new Error("recall_gate_file_access_denied");
+		if (isForbidden(normalized)) deny();
+		if (CANONICAL_GATE_READ_PATHS.has(normalized)) {
+			return { normalized, canonical: true };
 		}
-		const temporary = [...temporaryRoots].some((root) =>
-			normalized === root || normalized.startsWith(`${root}${sep}`)
+		const temporaryRoot = temporaryRoots.find((root) =>
+			isWithin(root.lexical, normalized)
 		);
-		if (!CANONICAL_GATE_READ_PATHS.has(normalized) && !temporary) {
-			options.onForbiddenAttempt?.();
-			throw new Error("recall_gate_file_access_denied");
+		if (!temporaryRoot) deny();
+		return { normalized, canonical: false, temporaryRoot };
+	};
+	const validateNearestExisting = (
+		scope: ReturnType<typeof lexicalScope>,
+	): void => {
+		let candidate = scope.normalized;
+		while (true) {
+			let real: string;
+			try {
+				lstatSync(candidate);
+				real = realpathSync(candidate);
+			} catch (error) {
+				if ((error as { code?: unknown }).code !== "ENOENT") deny();
+				const parent = dirname(candidate);
+				if (parent === candidate) deny();
+				candidate = parent;
+				continue;
+			}
+			if (isForbidden(real)) deny();
+			if (scope.canonical) {
+				const expected = join(realpathSync(PROJECT_DIR), relative(PROJECT_DIR, candidate));
+				if (real !== expected) deny();
+			} else {
+				const root = scope.temporaryRoot ?? deny();
+				const expected = join(root.real, relative(root.lexical, candidate));
+				if (
+					real !== expected ||
+					(isWithin(root.lexical, candidate) && !isWithin(root.real, real))
+				) deny();
+			}
+			return;
 		}
-		return normalized;
 	};
 	return {
 		allowTemporaryRoot(root) {
 			const normalized = resolve(root);
 			const temporaryBase = resolve(tmpdir());
+			const { stats, real, realTemporaryBase } = (() => {
+				try {
+					return {
+						stats: lstatSync(normalized),
+						real: realpathSync(normalized),
+						realTemporaryBase: realpathSync(temporaryBase),
+					};
+				} catch {
+					return deny();
+				}
+			})();
 			if (
 				!normalized.startsWith(`${temporaryBase}${sep}`) ||
-				!/^cbrain-recall-(semantic|matrix|worker)-/.test(basename(normalized))
+				!/^cbrain-recall-(semantic|matrix|worker)-/.test(basename(normalized)) ||
+				stats.isSymbolicLink() || !stats.isDirectory() ||
+				!isWithin(realTemporaryBase, real)
 			) {
-				options.onForbiddenAttempt?.();
-				throw new Error("recall_gate_file_access_denied");
+				deny();
 			}
-			temporaryRoots.add(normalized);
+			temporaryRoots.push({ lexical: normalized, real });
 		},
 		readText(path) {
-			return readFileSync(assertAllowed(path), "utf8");
+			const scope = lexicalScope(path);
+			validateNearestExisting(scope);
+			return readFileSync(scope.normalized, "utf8");
 		},
 		exists(path) {
-			return existsSync(assertAllowed(path));
+			const scope = lexicalScope(path);
+			validateNearestExisting(scope);
+			return existsSync(scope.normalized);
 		},
 	};
 }
 
-function temporaryPathExists(path: string): boolean {
+function observeTemporaryRoot(path: string): () => boolean {
 	const fileAccess = createRecallGateFileAccess();
 	fileAccess.allowTemporaryRoot(path);
-	return fileAccess.exists(path);
+	return () => fileAccess.exists(path);
 }
 
 type RegisteredToolHandler = (
@@ -529,16 +593,17 @@ async function executeSemanticRecallWorker(
 	const closedEnvironment = environmentKeys.every((key) => allowedEnvironment.has(key));
 	const inheritedCbrainVariables = environmentKeys.filter((key) => key.startsWith("CBRAIN_")).length;
 	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-semantic-"));
-	const fileAccess = hooks.fileAccess ?? createRecallGateFileAccess();
-	fileAccess.allowTemporaryRoot(root);
+	let fileAccess: RecallGateFileAccess | undefined;
 	let db: CBrainDB | undefined;
 	let result: Omit<SemanticRecallIntegrationResult, "worker"> | undefined;
 	let originalJobStart: typeof JobQueue.prototype.start | undefined;
 	let networkPoison: NetworkPoison | undefined;
 	let jobStartCalls = 0;
 	try {
-		const runtime = hooks.runtime ?? DEFAULT_SUITE_RUNTIME;
 		hooks.onRootCreated?.(root);
+		fileAccess = hooks.fileAccess ?? createRecallGateFileAccess();
+		fileAccess.allowTemporaryRoot(root);
+		const runtime = hooks.runtime ?? DEFAULT_SUITE_RUNTIME;
 		const vaultPath = join(root, "vault");
 		const runtimePath = join(root, "runtime");
 		const profileDir = join(root, "profile");
@@ -695,7 +760,7 @@ async function executeSemanticRecallWorker(
 		worker: {
 			closedEnvironment,
 			inheritedCbrainVariables,
-			temporaryRootRemoved: !fileAccess.exists(root),
+			temporaryRootRemoved: fileAccess !== undefined && !fileAccess.exists(root),
 		},
 	};
 }
@@ -740,12 +805,12 @@ async function executeRecallQualityMatrixWorker(
 		throw new Error("recall_quality_worker_required");
 	}
 	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-matrix-"));
-	const fileAccess = hooks.fileAccess ?? createRecallGateFileAccess();
-	fileAccess.allowTemporaryRoot(root);
 	let db: CBrainDB | undefined;
   try {
-		const runtime = hooks.runtime ?? DEFAULT_SUITE_RUNTIME;
 		hooks.onRootCreated?.(root);
+		const fileAccess = hooks.fileAccess ?? createRecallGateFileAccess();
+		fileAccess.allowTemporaryRoot(root);
+		const runtime = hooks.runtime ?? DEFAULT_SUITE_RUNTIME;
 		db = runtime.openDb(join(root, "brain.sqlite"));
 		if (hooks.closeFailure) {
 			const close = db.close.bind(db);
@@ -1031,6 +1096,7 @@ export async function runRecallQualityIsolationProbeWorker(): Promise<RecallQual
 		"isolation_started",
 	];
 	const suiteRoots: string[] = [];
+	const suiteRootObservers: Array<() => boolean> = [];
 	let currentRoot: string | undefined;
 	let configuredPathOpenAttempts = 0;
 	const runtime: SuiteRuntimeDependencies = {
@@ -1048,6 +1114,7 @@ export async function runRecallQualityIsolationProbeWorker(): Promise<RecallQual
 		onRootCreated: (root) => {
 			currentRoot = root;
 			suiteRoots.push(root);
+			suiteRootObservers.push(observeTemporaryRoot(root));
 			suiteOrder.push(suite);
 		},
 	});
@@ -1072,7 +1139,7 @@ export async function runRecallQualityIsolationProbeWorker(): Promise<RecallQual
 	const temporaryXdgData =
 		typeof xdgData === "string" && xdgData.includes("cbrain-recall-worker-");
 	const distinctSuiteRoots = suiteRoots.length === 2 && suiteRoots[0] !== suiteRoots[1];
-	const suiteRootsRemoved = suiteRoots.every((root) => !temporaryPathExists(root));
+	const suiteRootsRemoved = suiteRootObservers.every((exists) => !exists());
 	if (
 		!closedEnvironment || inheritedCbrainVariables !== 0 || !temporaryHome ||
 		!temporaryXdgConfig || !temporaryXdgData || !distinctSuiteRoots ||
@@ -1203,14 +1270,16 @@ export async function probeRecallWorkerTransport(
 			"process.stdout.write('PRIVATE_RECALL_SENTINEL');",
 	};
 	let workerRoot: string | undefined;
+	let workerRootExists: (() => boolean) | undefined;
 	try {
 		await spawnClosedWorker(expressionByScenario[scenario], (root) => {
 			workerRoot = root;
+			workerRootExists = observeTemporaryRoot(root);
 		});
 		throw new Error("recall_quality_transport_probe_expected_failure");
 	} catch (error) {
 		if (!(error instanceof RecallWorkerBootstrapError)) throw error;
-		if (!workerRoot || temporaryPathExists(workerRoot)) {
+		if (!workerRoot || !workerRootExists || workerRootExists()) {
 			throw new Error("recall_quality_transport_cleanup_failed");
 		}
 		return { code: error.code, workerRootRemoved: true };
@@ -1228,6 +1297,7 @@ export async function runRecallFailureProbeWorker(
 		throw new Error("recall_quality_worker_required");
 	}
 	let suiteRoot: string | undefined;
+	let suiteRootExists: (() => boolean) | undefined;
 	let failureObserved = false;
 	let boundaryCalled = false;
 	const runtime: SuiteRuntimeDependencies = {
@@ -1250,6 +1320,20 @@ export async function runRecallFailureProbeWorker(
 			}
 			: DEFAULT_SUITE_RUNTIME.invokeHandler,
 	};
+	const fileAccess: RecallGateFileAccess | undefined = stage.endsWith("_file_access")
+		? {
+			allowTemporaryRoot: () => {
+				boundaryCalled = true;
+				throw new Error("file_access_registration_failure");
+			},
+			readText: () => {
+				throw new Error("file_access_read_unreachable");
+			},
+			exists: () => {
+				throw new Error("file_access_exists_unreachable");
+			},
+		}
+		: undefined;
 	const hooks: SuiteFailureHooks = {
 		closeFailure: stage.endsWith("_close"),
 		onCloseInvoked: () => {
@@ -1257,8 +1341,10 @@ export async function runRecallFailureProbeWorker(
 		},
 		onRootCreated: (root) => {
 			suiteRoot = root;
+			suiteRootExists = observeTemporaryRoot(root);
 		},
 		runtime,
+		fileAccess,
 	};
 	try {
 		if (stage.startsWith("semantic_")) {
@@ -1272,7 +1358,8 @@ export async function runRecallFailureProbeWorker(
 	return {
 		failureObserved,
 		boundaryCalled,
-		suiteRootRemoved: suiteRoot !== undefined && !temporaryPathExists(suiteRoot),
+		suiteRootRemoved:
+			suiteRoot !== undefined && suiteRootExists !== undefined && !suiteRootExists(),
 	};
 }
 
@@ -1281,6 +1368,7 @@ export async function runRecallCleanupFailureProbe(
 ): Promise<RecallCleanupFailureProbeResult> {
 	const beforeEnvironment = environmentSnapshot();
 	let workerRoot: string | undefined;
+	let workerRootExists: (() => boolean) | undefined;
 	const moduleUrl = JSON.stringify(import.meta.url);
 	if (stage === "worker_spawn") {
 		let failureObserved = false;
@@ -1290,6 +1378,7 @@ export async function runRecallCleanupFailureProbe(
 				"process.stdout.write('{}');",
 				(root) => {
 					workerRoot = root;
+					workerRootExists = observeTemporaryRoot(root);
 				},
 				((..._args: Parameters<typeof Bun.spawn>) => {
 					spawnBoundaryCalled = true;
@@ -1299,7 +1388,8 @@ export async function runRecallCleanupFailureProbe(
 		} catch {
 			failureObserved = true;
 		}
-		const workerRootRemoved = workerRoot !== undefined && !temporaryPathExists(workerRoot);
+		const workerRootRemoved =
+			workerRoot !== undefined && workerRootExists !== undefined && !workerRootExists();
 		const parentEnvironmentRestored = environmentSnapshot() === beforeEnvironment;
 		if (!failureObserved || !spawnBoundaryCalled || !workerRootRemoved || !parentEnvironmentRestored) {
 			throw new Error("recall_quality_cleanup_probe_failed");
@@ -1322,9 +1412,11 @@ export async function runRecallCleanupFailureProbe(
 			"process.stdout.write(JSON.stringify(result));",
 		(root) => {
 			workerRoot = root;
+			workerRootExists = observeTemporaryRoot(root);
 		},
 	);
-	const workerRootRemoved = workerRoot !== undefined && !temporaryPathExists(workerRoot);
+	const workerRootRemoved =
+		workerRoot !== undefined && workerRootExists !== undefined && !workerRootExists();
 	const parentEnvironmentRestored = environmentSnapshot() === beforeEnvironment;
 	if (
 		!childResult.failureObserved ||
