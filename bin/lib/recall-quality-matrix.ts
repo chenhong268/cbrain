@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export const SAFE_FIXTURE_TOKENS: ReadonlySet<string> = new Set([
 	"系统",
 	"恢复",
@@ -305,7 +307,10 @@ export type RecallQualityFixtureErrorCode =
 	| "invalid_baseline_follow_up"
 	| "invalid_baseline_signature"
 	| "unknown_baseline_case"
-	| "duplicate_baseline_case_id";
+	| "duplicate_baseline_case_id"
+	| "canonical_hash_missing"
+	| "canonical_hash_duplicate"
+	| "canonical_contract_mismatch";
 
 export class RecallQualityFixtureError extends Error {
 	readonly code: RecallQualityFixtureErrorCode;
@@ -870,6 +875,76 @@ export function parseRecallQualityCases(
 			validateSemanticReferences(testCase, corpus);
 	}
 	return cases;
+}
+
+function inputSha256(input: string): string {
+	return createHash("sha256").update(input).digest("hex");
+}
+
+function canonicalContractMatches(
+	row: Record<string, unknown>,
+	testCase: RecallRouteContractCase,
+): row is Record<string, unknown> & { expected_tool: string } {
+	if (!isRecord(row.expected_args) || !Array.isArray(row.forbidden_tools)) {
+		return false;
+	}
+	const forbiddenTools = row.forbidden_tools;
+	if (!forbiddenTools.every((tool) => typeof tool === "string")) return false;
+
+	if (testCase.expectedTool === "next_actions") {
+		return (
+			row.category === "operational" &&
+			row.expected_tool === "next_actions" &&
+			Object.keys(row.expected_args).length === 1 &&
+			row.expected_args.include_raw === false &&
+			["query", "cbrain_recall", "deep_recall"].every((tool) =>
+				forbiddenTools.includes(tool),
+			)
+		);
+	}
+
+	return (
+		row.category === "content_recall" &&
+		row.expected_tool === "cbrain_recall" &&
+		Object.keys(row.expected_args).length === 1 &&
+		row.expected_args.detail === "normal" &&
+		forbiddenTools.includes("next_actions")
+	);
+}
+
+/**
+ * Resolve operational-family cases against the canonical Agent-facing profile.
+ * Inputs and their SHA-256 values remain local to this function; observations
+ * contain only allowlisted contract identifiers.
+ */
+export function resolveOperationalRouteObservations(
+	agentFacingRoutingText: string,
+	cases: readonly RecallRouteContractCase[],
+): readonly RecallRouteContractObservation[] {
+	const rowsByInputHash = new Map<string, Record<string, unknown>[]>();
+	for (const value of parseJsonLines(agentFacingRoutingText)) {
+		assertRecord(value);
+		if (typeof value.input !== "string") continue;
+		const hash = inputSha256(value.input);
+		const rows = rowsByInputHash.get(hash) ?? [];
+		rows.push(value);
+		rowsByInputHash.set(hash, rows);
+	}
+
+	return cases.map((testCase) => {
+		const rows = rowsByInputHash.get(testCase.canonicalInputSha256) ?? [];
+		if (rows.length === 0) fail("canonical_hash_missing");
+		if (rows.length !== 1) fail("canonical_hash_duplicate");
+		const row = rows[0]!;
+		if (!canonicalContractMatches(row, testCase)) {
+			fail("canonical_contract_mismatch");
+		}
+		return {
+			kind: "route_contract",
+			caseId: testCase.caseId,
+			actualTool: row.expected_tool,
+		};
+	});
 }
 
 function parseBaselineTop3(

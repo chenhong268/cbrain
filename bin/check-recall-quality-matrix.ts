@@ -10,6 +10,11 @@ import { classifyFrontdoorQuery } from "../src/core/retrieval/frontdoor-router.j
 import { createServer, type CBrainDeps } from "../src/mcp/server.js";
 import { CBrainDB } from "../src/storage/sqlite.js";
 import { checkAgentWorkflowContract } from "./check-docs-consistency.js";
+import {
+	resolveOperationalRouteObservations,
+	type RecallRouteContractCase,
+	type RecallRouteContractObservation,
+} from "./lib/recall-quality-matrix.js";
 
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CASE_IDS = [
@@ -58,6 +63,22 @@ export interface RecallQualityMatrixReport {
 
 export interface RecallQualityMatrixOptions {
   readonly fault?: Fault;
+}
+
+export interface OperationalContractExecutionOptions {
+	readonly agentFacingRoutingText: string;
+	readonly cases: readonly RecallRouteContractCase[];
+	readonly createSemanticHandler: () => unknown;
+}
+
+/** Route-contract execution is deliberately data-only and never constructs a semantic handler. */
+export function executeOperationalContractCases(
+	options: OperationalContractExecutionOptions,
+): readonly RecallRouteContractObservation[] {
+	return resolveOperationalRouteObservations(
+		options.agentFacingRoutingText,
+		options.cases,
+	);
 }
 
 const emptyMetrics = (): RecallQualityCaseMetrics => ({

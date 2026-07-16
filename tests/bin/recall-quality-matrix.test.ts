@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { runRecallQualityMatrix } from "../../bin/check-recall-quality-matrix.js";
+import { resolve } from "node:path";
+import {
+	executeOperationalContractCases,
+	runRecallQualityMatrix,
+} from "../../bin/check-recall-quality-matrix.js";
+import { checkAgentFacingRoutingProfile } from "../../bin/check-docs-consistency.js";
 import {
 	aggregateRecallMetrics,
 	compareRecallBaseline,
@@ -8,6 +13,7 @@ import {
 	parseRecallQualityBaseline,
 	parseRecallQualityCases,
 	parseRecallQualityCorpus,
+	resolveOperationalRouteObservations,
 	SAFE_FIXTURE_TOKENS,
 } from "../../bin/lib/recall-quality-matrix.js";
 import type {
@@ -31,6 +37,10 @@ const BASELINE_TEXT = readFileSync(
 	new URL("../fixtures/recall-quality-baseline.json", import.meta.url),
 	"utf8",
 );
+const AGENT_FACING_TEXT = readFileSync(
+	new URL("../../skills/agent-facing.routing-eval.jsonl", import.meta.url),
+	"utf8",
+);
 
 const jsonl = (rows: readonly unknown[]): string =>
 	`${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
@@ -41,7 +51,8 @@ const corpusRows = (): Record<string, unknown>[] =>
 const caseRows = (): Record<string, unknown>[] =>
 	CASES_TEXT.trimEnd()
 		.split("\n")
-		.map((line) => JSON.parse(line) as Record<string, unknown>);
+		.map((line) => JSON.parse(line) as Record<string, unknown>)
+		.filter((row) => row.kind === "semantic_recall");
 const parseCanonicalCorpus = () => parseRecallQualityCorpus(CORPUS_TEXT);
 const parseCanonicalCases = () =>
 	parseRecallQualityCases(CASES_TEXT, parseCanonicalCorpus());
@@ -205,7 +216,7 @@ const CASE_IDS = [
 ] as const;
 
 describe("fixture schema", () => {
-	test("loads the controlled corpus, canonical semantic cases, synthetic route case, and empty baseline", () => {
+	test("loads the controlled corpus, canonical route and semantic cases, and empty baseline", () => {
 		const corpus = parseCanonicalCorpus();
 		const cases = parseCanonicalCases();
 		const routes = parseRecallQualityCases(jsonl([routeCase()]), corpus);
@@ -213,6 +224,8 @@ describe("fixture schema", () => {
 
 		expect(corpus).toHaveLength(4);
 		expect(cases.map((item) => item.caseId)).toEqual([
+			"operational_positive_01",
+			"operational_negative_01",
 			"content_positive_01",
 			"content_negative_01",
 			"abstract_positive_01",
@@ -1439,6 +1452,144 @@ describe("baseline comparison", () => {
 		expect(comparison.qualityStatus).toBe("pass");
 		expect(comparison.strictVerdict).toBe("go");
 		expect(comparison.ciVerdict).toBe("go");
+	});
+});
+
+describe("operational contract", () => {
+	const routeCases = (): readonly RecallRouteContractCase[] =>
+		parseCanonicalCases().filter(
+			(item): item is RecallRouteContractCase => item.kind === "route_contract",
+		);
+	const canonicalRows = (): Record<string, unknown>[] =>
+		AGENT_FACING_TEXT.trimEnd()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+	const canonicalText = (rows: readonly Record<string, unknown>[]): string =>
+		jsonl(rows);
+	const rowForInput = (input: string): Record<string, unknown> => {
+		const row = canonicalRows().find((item) => item.input === input);
+		if (!row) throw new Error("missing synthetic canonical row");
+		return row;
+	};
+
+	test("resolves current-state and historical near-miss contracts from canonical rows", () => {
+		const cases = routeCases();
+		const observations = resolveOperationalRouteObservations(
+			AGENT_FACING_TEXT,
+			cases,
+		);
+
+		expect(cases.map((item) => ({
+			caseId: item.caseId,
+			expectedTool: item.expectedTool,
+			expectedArgs: item.expectedArgs,
+			forbiddenTools: item.forbiddenTools,
+		}))).toEqual([
+			{
+				caseId: "operational_positive_01",
+				expectedTool: "next_actions",
+				expectedArgs: { includeRaw: false },
+				forbiddenTools: ["query", "cbrain_recall", "deep_recall"],
+			},
+			{
+				caseId: "operational_negative_01",
+				expectedTool: "cbrain_recall",
+				expectedArgs: { detail: "normal" },
+				forbiddenTools: ["next_actions"],
+			},
+		]);
+		expect(observations).toEqual([
+			{
+				kind: "route_contract",
+				caseId: "operational_positive_01",
+				actualTool: "next_actions",
+			},
+			{
+				kind: "route_contract",
+				caseId: "operational_negative_01",
+				actualTool: "cbrain_recall",
+			},
+		]);
+
+		const publicShape = JSON.stringify(observations);
+		for (const forbidden of [
+			"系统当前有什么异常",
+			"此前记录过哪些系统体验问题",
+			cases[0]!.canonicalInputSha256,
+			cases[1]!.canonicalInputSha256,
+			"rationale",
+		]) {
+			expect(publicShape).not.toContain(forbidden);
+		}
+	});
+
+	test("fails closed on missing or duplicate canonical input hashes", () => {
+		const rows = canonicalRows();
+		const withoutCurrent = rows.filter(
+			(row) => row.input !== "系统当前有什么异常",
+		);
+		expectFixtureError(
+			() => resolveOperationalRouteObservations(canonicalText(withoutCurrent), routeCases()),
+			"canonical_hash_missing",
+			"系统当前有什么异常",
+		);
+
+		const current = rowForInput("系统当前有什么异常");
+		expectFixtureError(
+			() => resolveOperationalRouteObservations(canonicalText([...rows, current]), routeCases()),
+			"canonical_hash_duplicate",
+			"系统当前有什么异常",
+		);
+	});
+
+	test.each([
+		["tool", { expected_tool: "cbrain_recall" }],
+		["args", { expected_args: { include_raw: true } }],
+		["category", { category: "content_recall" }],
+		["forbidden tool", { forbidden_tools: ["query", "cbrain_recall"] }],
+	] as const)("rejects changed current-state canonical %s", (_label, patch) => {
+		const rows = canonicalRows();
+		const changed = rows.map((row) =>
+			row.input === "系统当前有什么异常" ? { ...row, ...patch } : row,
+		);
+		expectFixtureError(
+			() => resolveOperationalRouteObservations(canonicalText(changed), routeCases()),
+			"canonical_contract_mismatch",
+			"系统当前有什么异常",
+		);
+	});
+
+	test("never constructs a semantic handler for either operational-family case", () => {
+		let calls = 0;
+		const observations = executeOperationalContractCases({
+			agentFacingRoutingText: AGENT_FACING_TEXT,
+			cases: routeCases(),
+			createSemanticHandler: () => {
+				calls += 1;
+				throw new Error("semantic handler poison");
+			},
+		});
+
+		expect(observations).toHaveLength(2);
+		expect(calls).toBe(0);
+	});
+
+	test("a route mismatch remains non-baselineable", () => {
+		const evaluated = evaluateRecallCase(routeCases()[0]!, {
+			kind: "route_contract",
+			caseId: "operational_positive_01",
+			actualTool: "cbrain_recall",
+		});
+		const comparison = compareRecallBaseline([evaluated], []);
+
+		expect(evaluated.failureCodes).toEqual(["route_mismatch"]);
+		expect(comparison.cases[0]!.disposition).toBe("regression");
+		expect(comparison.ciVerdict).toBe("no-go");
+	});
+
+	test("the updated canonical profile still satisfies docs consistency", () => {
+		const results = checkAgentFacingRoutingProfile(resolve(import.meta.dir, "../../skills"));
+		expect(results.every((item) => item.passed)).toBe(true);
 	});
 });
 
