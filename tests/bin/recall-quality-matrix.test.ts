@@ -1559,6 +1559,71 @@ describe("operational contract", () => {
 		);
 	});
 
+	test.each([
+		[
+			"next_actions current-state self-ban",
+			"系统当前有什么异常",
+			"next_actions",
+		],
+		[
+			"cbrain_recall historical self-ban",
+			"此前记录过哪些系统体验问题",
+			"cbrain_recall",
+		],
+	] as const)("rejects a canonical %s", (_label, input, expectedTool) => {
+		const changed = canonicalRows().map((row) =>
+			row.input === input
+				? {
+					...row,
+					forbidden_tools: [
+						...(row.forbidden_tools as string[]),
+						expectedTool,
+					],
+				}
+				: row,
+		);
+		expectFixtureError(
+			() => resolveOperationalRouteObservations(canonicalText(changed), routeCases()),
+			"canonical_contract_mismatch",
+			input,
+		);
+	});
+
+	test("rejects duplicate canonical forbidden tools", () => {
+		const changed = canonicalRows().map((row) =>
+			row.input === "系统当前有什么异常"
+				? {
+					...row,
+					forbidden_tools: [
+						...(row.forbidden_tools as string[]),
+						"query",
+					],
+				}
+				: row,
+		);
+		expectFixtureError(
+			() => resolveOperationalRouteObservations(canonicalText(changed), routeCases()),
+			"canonical_contract_mismatch",
+			"系统当前有什么异常",
+		);
+	});
+
+	test("requires every fixture forbidden tool to exist in the canonical row", () => {
+		const cases = routeCases().map((testCase) =>
+			testCase.caseId === "operational_negative_01"
+				? {
+					...testCase,
+					forbiddenTools: ["next_actions", "deep_recall"] as const,
+				}
+				: testCase,
+		) as readonly RecallRouteContractCase[];
+		expectFixtureError(
+			() => resolveOperationalRouteObservations(AGENT_FACING_TEXT, cases),
+			"canonical_contract_mismatch",
+			"此前记录过哪些系统体验问题",
+		);
+	});
+
 	test("never constructs a semantic handler for either operational-family case", () => {
 		let calls = 0;
 		const observations = executeOperationalContractCases({

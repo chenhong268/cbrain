@@ -890,16 +890,21 @@ function canonicalContractMatches(
 	}
 	const forbiddenTools = row.forbidden_tools;
 	if (!forbiddenTools.every((tool) => typeof tool === "string")) return false;
+	if (new Set(forbiddenTools).size !== forbiddenTools.length) return false;
+	if (
+		typeof row.expected_tool !== "string" ||
+		forbiddenTools.includes(row.expected_tool) ||
+		!testCase.forbiddenTools.every((tool) => forbiddenTools.includes(tool))
+	) {
+		return false;
+	}
 
 	if (testCase.expectedTool === "next_actions") {
 		return (
 			row.category === "operational" &&
 			row.expected_tool === "next_actions" &&
 			Object.keys(row.expected_args).length === 1 &&
-			row.expected_args.include_raw === false &&
-			["query", "cbrain_recall", "deep_recall"].every((tool) =>
-				forbiddenTools.includes(tool),
-			)
+			row.expected_args.include_raw === false
 		);
 	}
 
@@ -907,8 +912,7 @@ function canonicalContractMatches(
 		row.category === "content_recall" &&
 		row.expected_tool === "cbrain_recall" &&
 		Object.keys(row.expected_args).length === 1 &&
-		row.expected_args.detail === "normal" &&
-		forbiddenTools.includes("next_actions")
+		row.expected_args.detail === "normal"
 	);
 }
 
