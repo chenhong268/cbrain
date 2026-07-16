@@ -266,6 +266,100 @@ export interface BaselineComparison {
 	}>;
 }
 
+export const LEGACY_RECALL_CASE_IDS = [
+	"zh_exact",
+	"en_exact",
+	"mixed_alias",
+	"abstract_topic",
+	"honest_empty",
+	"temporal_evidence",
+	"relationship_route",
+	"operational_contract",
+	"bounded_runtime",
+] as const;
+
+export type LegacyRecallCaseId = (typeof LEGACY_RECALL_CASE_IDS)[number];
+export type LegacyRecallLane = "retrieval" | "router" | "evidence" | "latency";
+
+export interface LegacyRecallCaseSummary {
+	readonly id: LegacyRecallCaseId;
+	readonly lane: LegacyRecallLane;
+	readonly passed: boolean;
+}
+
+export interface RecallQualityPublicRateMetric {
+	readonly numerator: number;
+	readonly denominator: number;
+	readonly rate: number;
+}
+
+export interface RecallQualityPublicReport {
+	readonly gate: "recall-quality-matrix";
+	readonly schema_version: 2;
+	readonly mode: "default" | "strict";
+	readonly route_scope: "agent_contract_plus_frontdoor";
+	readonly strict_verdict: "go" | "no-go";
+	readonly ci_verdict: "go" | "no-go";
+	readonly verdict: "go" | "no-go";
+	readonly strict_failure: boolean;
+	readonly quality_status: "pass" | "known_failure" | "regression";
+	readonly metrics: Readonly<{
+		route_accuracy: RecallQualityPublicRateMetric;
+		route_accuracy_by_category: Readonly<{
+			operational_meta: RecallQualityPublicRateMetric;
+			content_meta: RecallQualityPublicRateMetric;
+			abstract_concept: RecallQualityPublicRateMetric;
+		}>;
+		recall_at_3: RecallQualityPublicRateMetric;
+		wrong_source_rate: RecallQualityPublicRateMetric;
+		irrelevant_but_ok_rate: RecallQualityPublicRateMetric;
+		insufficient_false_positive_rate: RecallQualityPublicRateMetric;
+	}>;
+	readonly category_counts: Readonly<{
+		operational_meta: number;
+		content_meta: number;
+		abstract_concept: number;
+	}>;
+	readonly failure_counts: Readonly<Record<RecallQualityFailureCode, number>>;
+	readonly counts: Readonly<{
+		known_failures: number;
+		regressions: number;
+		unexpected_passes: number;
+	}>;
+	readonly cases: readonly Readonly<{
+		case_id: RecallQualityCaseId;
+		category: EvaluatedRecallCase["category"];
+		kind: EvaluatedRecallCase["kind"];
+		failure_codes: readonly RecallQualityFailureCode[];
+		disposition: BaselineDisposition;
+	}>[];
+	readonly legacy_v1: Readonly<{
+		status: "pass" | "fail";
+		cases: readonly Readonly<{
+			id: LegacyRecallCaseId;
+			lane: LegacyRecallLane;
+			status: "pass" | "fail";
+		}>[];
+	}>;
+	readonly privacy: "pass" | "fail";
+	readonly determinism: "pass" | "fail";
+	readonly bounded_runtime: boolean;
+	readonly reproducibility_fingerprint: string;
+	readonly advisory_duration_ms: number;
+}
+
+export interface BuildRecallQualityReportInput {
+	readonly evaluatedCases: readonly EvaluatedRecallCase[];
+	readonly comparison: BaselineComparison;
+	readonly metrics: RecallQualityMetrics;
+	readonly legacyCases: readonly LegacyRecallCaseSummary[];
+	readonly mode: "default" | "strict";
+	readonly privacyPass: boolean;
+	readonly deterministic: boolean;
+	readonly boundedRuntime: boolean;
+	readonly advisoryDurationMs: number;
+}
+
 export type RecallQualityFixtureErrorCode =
 	| "malformed_json"
 	| "fixture_not_object"
@@ -1480,5 +1574,157 @@ export function compareRecallBaseline(
 		strictVerdict: ciIntegrityValid && !rawFailures ? "go" : "no-go",
 		ciVerdict: ciIntegrityValid ? "go" : "no-go",
 		counts,
+	};
+}
+
+const REPORT_FAILURE_CODES: readonly RecallQualityFailureCode[] = [
+	"degraded_response",
+	"execution_failure",
+	"insufficient_false_positive",
+	"irrelevant_but_ok",
+	"legacy_regression",
+	"nondeterministic",
+	"privacy_failure",
+	"recall_miss",
+	"route_mismatch",
+	"status_mismatch",
+	"unclassified_degraded",
+	"unexpected_recall",
+	"wrong_source",
+];
+
+function publicRate(metric: RecallQualityRateMetric): RecallQualityPublicRateMetric {
+	return {
+		numerator: metric.numerator,
+		denominator: metric.denominator,
+		rate: metric.rate,
+	};
+}
+
+function canonicalize(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalize);
+	if (value !== null && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, item]) => [key, canonicalize(item)]),
+		);
+	}
+	return value;
+}
+
+export function canonicalRecallQualityJson(value: unknown): string {
+	return JSON.stringify(canonicalize(value));
+}
+
+/**
+ * Project evaluated results into the public v2 boundary. Every field is copied
+ * explicitly; observations, fixtures, source identities, and free-form errors
+ * are deliberately not accepted by this function.
+ */
+export function buildRecallQualityReport(
+	input: BuildRecallQualityReportInput,
+): RecallQualityPublicReport {
+	const comparisonByCase = new Map(
+		input.comparison.cases.map((item) => [item.caseId, item]),
+	);
+	const legacyOrdered = LEGACY_RECALL_CASE_IDS.map((id) => {
+		const item = input.legacyCases.find((candidate) => candidate.id === id);
+		if (!item) throw new RecallQualityEvaluationError("case_id_mismatch");
+		return item;
+	});
+	if (
+		input.legacyCases.length !== LEGACY_RECALL_CASE_IDS.length ||
+		new Set(input.legacyCases.map((item) => item.id)).size !==
+			LEGACY_RECALL_CASE_IDS.length
+	) {
+		throw new RecallQualityEvaluationError("case_id_mismatch");
+	}
+
+	const legacyFailed = legacyOrdered.some((item) => !item.passed);
+	const integrityFailed =
+		legacyFailed || !input.privacyPass || !input.deterministic || !input.boundedRuntime;
+	const strictVerdict = integrityFailed ? "no-go" : input.comparison.strictVerdict;
+	const ciVerdict = integrityFailed ? "no-go" : input.comparison.ciVerdict;
+	const selectedVerdict = input.mode === "strict" ? strictVerdict : ciVerdict;
+	const qualityStatus = integrityFailed ? "regression" : input.comparison.qualityStatus;
+
+	const cases = input.evaluatedCases.map((evaluated) => {
+		const compared = comparisonByCase.get(evaluated.caseId);
+		if (!compared) throw new RecallQualityEvaluationError("case_id_mismatch");
+		return {
+			case_id: evaluated.caseId,
+			category: evaluated.category,
+			kind: evaluated.kind,
+			failure_codes: [...compared.failureCodes].sort(),
+			disposition: compared.disposition,
+		};
+	});
+	const categoryCounts = {
+		operational_meta: cases.filter((item) => item.category === "operational_meta").length,
+		content_meta: cases.filter((item) => item.category === "content_meta").length,
+		abstract_concept: cases.filter((item) => item.category === "abstract_concept").length,
+	};
+	const failureCounts = Object.fromEntries(
+		REPORT_FAILURE_CODES.map((code) => [
+			code,
+			cases.filter((item) => item.failure_codes.includes(code)).length +
+				(code === "legacy_regression" && legacyFailed ? 1 : 0) +
+				(code === "privacy_failure" && !input.privacyPass ? 1 : 0) +
+				(code === "nondeterministic" && !input.deterministic ? 1 : 0) +
+				(code === "execution_failure" && !input.boundedRuntime ? 1 : 0),
+		]),
+	) as Record<RecallQualityFailureCode, number>;
+
+	const stableFields = {
+		gate: "recall-quality-matrix" as const,
+		schema_version: 2 as const,
+		mode: input.mode,
+		route_scope: "agent_contract_plus_frontdoor" as const,
+		strict_verdict: strictVerdict,
+		ci_verdict: ciVerdict,
+		verdict: selectedVerdict,
+		strict_failure: input.mode === "strict" && selectedVerdict === "no-go",
+		quality_status: qualityStatus,
+		metrics: {
+			route_accuracy: publicRate(input.metrics.routeAccuracy),
+			route_accuracy_by_category: {
+				operational_meta: publicRate(input.metrics.routeAccuracyByCategory.operational_meta),
+				content_meta: publicRate(input.metrics.routeAccuracyByCategory.content_meta),
+				abstract_concept: publicRate(input.metrics.routeAccuracyByCategory.abstract_concept),
+			},
+			recall_at_3: publicRate(input.metrics.recallAt3),
+			wrong_source_rate: publicRate(input.metrics.wrongSourceRate),
+			irrelevant_but_ok_rate: publicRate(input.metrics.irrelevantButOkRate),
+			insufficient_false_positive_rate: publicRate(input.metrics.insufficientFalsePositiveRate),
+		},
+		category_counts: categoryCounts,
+		failure_counts: failureCounts,
+		counts: {
+			known_failures: input.comparison.counts.knownFailures,
+			regressions: input.comparison.counts.regressions + (integrityFailed ? 1 : 0),
+			unexpected_passes: input.comparison.counts.unexpectedPasses,
+		},
+		cases,
+		legacy_v1: {
+			status: legacyFailed ? "fail" as const : "pass" as const,
+			cases: legacyOrdered.map((item) => ({
+				id: item.id,
+				lane: item.lane,
+				status: item.passed ? "pass" as const : "fail" as const,
+			})),
+		},
+		privacy: input.privacyPass ? "pass" as const : "fail" as const,
+		determinism: input.deterministic ? "pass" as const : "fail" as const,
+		bounded_runtime: input.boundedRuntime,
+	};
+	const fingerprint = createHash("sha256")
+		.update(canonicalRecallQualityJson(stableFields))
+		.digest("hex");
+
+	return {
+		...stableFields,
+		reproducibility_fingerprint: fingerprint,
+		advisory_duration_ms: Math.max(0, Math.round(input.advisoryDurationMs)),
 	};
 }

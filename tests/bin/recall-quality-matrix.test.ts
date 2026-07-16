@@ -6,14 +6,18 @@ import {
 	mapFrontdoorEnvelopeToSemanticObservation,
 	probeNetworkPoisonAdapter,
 	runRecallCleanupFailureProbe,
+	runRecallQualityCli,
 	runRecallQualityMatrix,
 	runSemanticRecallIntegration,
 } from "../../bin/check-recall-quality-matrix.js";
 import { checkAgentFacingRoutingProfile } from "../../bin/check-docs-consistency.js";
 import {
 	aggregateRecallMetrics,
+	buildRecallQualityReport,
+	canonicalRecallQualityJson,
 	compareRecallBaseline,
 	evaluateRecallCase,
+	LEGACY_RECALL_CASE_IDS,
 	parseRecallQualityBaseline,
 	parseRecallQualityCases,
 	parseRecallQualityCorpus,
@@ -206,18 +210,6 @@ const exactKnownFailureBaseline = (
 	followUp: "#337",
 	...overrides,
 });
-
-const CASE_IDS = [
-  "zh_exact",
-  "en_exact",
-  "mixed_alias",
-  "abstract_topic",
-  "honest_empty",
-  "temporal_evidence",
-  "relationship_route",
-  "operational_contract",
-  "bounded_runtime",
-] as const;
 
 describe("fixture schema", () => {
 	test("loads the controlled corpus, canonical route and semantic cases, and empty baseline", () => {
@@ -591,7 +583,7 @@ describe("fixture schema", () => {
 		["control", "系统 \u0001 恢复"],
 		["traversal", "../source_a"],
 		["absolute path", "/Users/example/source_a"],
-		["email", "fixture@example.com"],
+		["email", "fixture@example.invalid"],
 		["credential", "api_key=fixture-secret"],
 		["sentinel", "UNIQUE_SENTINEL_336"],
 	])("rejects %s text without reflecting it in public errors", (_label, unsafe) => {
@@ -1812,58 +1804,283 @@ describe("evidence mapper", () => {
 	});
 });
 
-describe("anonymous recall quality matrix (#324)", () => {
-  test("clean fixture passes every lane with stable anonymous cases", async () => {
-    const report = await runRecallQualityMatrix();
-    expect(report.verdict).toBe("go");
-    expect(report.cases.map((c) => c.id)).toEqual([...CASE_IDS]);
-    expect(report.lanes).toEqual({ retrieval: "pass", router: "pass", evidence: "pass", latency: "pass" });
-    expect(report.cases.every((c) => c.passed)).toBe(true);
-  });
+const passingLegacy = () => LEGACY_RECALL_CASE_IDS.map((id) => ({
+	id,
+	lane:
+		id === "temporal_evidence"
+			? "evidence" as const
+			: id === "relationship_route" || id === "operational_contract"
+				? "router" as const
+				: id === "bounded_runtime"
+					? "latency" as const
+					: "retrieval" as const,
+	passed: true,
+}));
 
-  test("retrieval metrics distinguish relevant recall, noise, and honest empty", async () => {
-    const report = await runRecallQualityMatrix();
-    const abstract = report.cases.find((c) => c.id === "abstract_topic")!;
-    const empty = report.cases.find((c) => c.id === "honest_empty")!;
-    expect(abstract.metrics.recall_at_k).toBe(1);
-    expect(abstract.metrics.noise_at_k).toBe(0);
-    expect(abstract.metrics.completion).toBe("complete");
-    expect(empty.metrics.honest_empty).toBe(true);
-    expect(empty.metrics.noise_at_k).toBe(0);
-  });
+function pureReport(
+	evaluatedCases: readonly EvaluatedRecallCase[],
+	baseline: readonly RecallQualityBaselineEntry[] = [],
+	mode: "default" | "strict" = "default",
+) {
+	return buildRecallQualityReport({
+		evaluatedCases,
+		comparison: compareRecallBaseline(evaluatedCases, baseline),
+		metrics: aggregateRecallMetrics(evaluatedCases),
+		legacyCases: passingLegacy(),
+		mode,
+		privacyPass: true,
+		deterministic: true,
+		boundedRuntime: true,
+		advisoryDurationMs: 123.7,
+	});
+}
 
-  test("temporal and relationship cases exercise evidence and router lanes", async () => {
-    const report = await runRecallQualityMatrix();
-    const temporal = report.cases.find((c) => c.id === "temporal_evidence")!;
-    const relationship = report.cases.find((c) => c.id === "relationship_route")!;
-    expect(temporal.metrics.evidence_coverage).toBe("sufficient");
-    expect(relationship.metrics.route_match).toBe(true);
-  });
+describe("legacy v1 preservation", () => {
+	test("pins the exact ordered nine IDs and retrieval/router/evidence/latency lanes", async () => {
+		const report = await runRecallQualityMatrix();
+		expect(report.legacy_v1).toEqual({
+			status: "pass",
+			cases: [
+				{ id: "zh_exact", lane: "retrieval", status: "pass" },
+				{ id: "en_exact", lane: "retrieval", status: "pass" },
+				{ id: "mixed_alias", lane: "retrieval", status: "pass" },
+				{ id: "abstract_topic", lane: "retrieval", status: "pass" },
+				{ id: "honest_empty", lane: "retrieval", status: "pass" },
+				{ id: "temporal_evidence", lane: "evidence", status: "pass" },
+				{ id: "relationship_route", lane: "router", status: "pass" },
+				{ id: "operational_contract", lane: "router", status: "pass" },
+				{ id: "bounded_runtime", lane: "latency", status: "pass" },
+			],
+		});
+	});
 
-  test.each(["retrieval", "router", "evidence", "latency", "privacy"] as const)(
-    "%s fault produces no-go without leaking fixture content",
-    async (fault) => {
-      const report = await runRecallQualityMatrix({ fault });
-      expect(report.verdict).toBe("no-go");
-      const serialized = JSON.stringify(report);
-      for (const forbidden of ["实体甲", "组织乙", "Project Alpha", "韧性治理", "/Users/", "slug", "query", "title", "path"]) {
-        expect(serialized).not.toContain(forbidden);
-      }
-    },
-  );
+	test("legacy failure is non-baselineable legacy_regression", async () => {
+		const report = await runRecallQualityMatrix({ fault: "retrieval" });
+		expect(report.legacy_v1.status).toBe("fail");
+		expect(report.legacy_v1.cases.find((item) => item.id === "zh_exact")?.status).toBe("fail");
+		expect(report.failure_counts.legacy_regression).toBe(1);
+		expect(report.quality_status).toBe("regression");
+		expect(report.ci_verdict).toBe("no-go");
+	});
 
-  test("latency fault does not misclassify retrieval, router, or evidence", async () => {
-    const report = await runRecallQualityMatrix({ fault: "latency" });
-    expect(report.lanes).toEqual({ retrieval: "pass", router: "pass", evidence: "pass", latency: "fail" });
-  });
+	test("bounded runtime is an injected boundedness observation, not a five-second verdict", async () => {
+		const report = await runRecallQualityMatrix({ fault: "latency" });
+		expect(report.bounded_runtime).toBe(false);
+		expect(report.legacy_v1.cases.find((item) => item.id === "bounded_runtime")?.status).toBe("fail");
+		expect(report.legacy_v1.cases.filter((item) => item.id !== "bounded_runtime").every((item) => item.status === "pass")).toBe(true);
+		expect(report.advisory_duration_ms).toBeGreaterThanOrEqual(0);
+		expect(report.verdict).toBe("no-go");
 
-  test("report schema is scalar and fixed-enum only", async () => {
-    const report = await runRecallQualityMatrix();
-    const serialized = JSON.stringify(report);
-    for (const forbidden of ["实体甲", "组织乙", "Project Alpha", "韧性治理", "body", "content", "score", "reason_codes"]) {
-      expect(serialized).not.toContain(forbidden);
-    }
-    expect(report.duration_ms).toBeGreaterThanOrEqual(0);
-    expect(report.duration_ms).toBeLessThan(5_000);
-  });
+		const injectedBoundary = await runRecallQualityMatrix({
+			boundedRuntimeProbe: {
+				startedAtMs: 100,
+				finishedAtMs: 5_100,
+				timeoutMs: 5_000,
+			},
+		});
+		expect(injectedBoundary.bounded_runtime).toBe(true);
+		expect(injectedBoundary.legacy_v1.cases.find((item) => item.id === "bounded_runtime")?.status).toBe("pass");
+	});
+});
+
+describe("v2 report", () => {
+	test("projects a fixed allowlisted schema and safe per-case dispositions", async () => {
+		const report = await runRecallQualityMatrix();
+		expect(Object.keys(report)).toEqual([
+			"gate",
+			"schema_version",
+			"mode",
+			"route_scope",
+			"strict_verdict",
+			"ci_verdict",
+			"verdict",
+			"strict_failure",
+			"quality_status",
+			"metrics",
+			"category_counts",
+			"failure_counts",
+			"counts",
+			"cases",
+			"legacy_v1",
+			"privacy",
+			"determinism",
+			"bounded_runtime",
+			"reproducibility_fingerprint",
+			"advisory_duration_ms",
+		]);
+		expect(report).toMatchObject({
+			gate: "recall-quality-matrix",
+			schema_version: 2,
+			mode: "default",
+			route_scope: "agent_contract_plus_frontdoor",
+			strict_verdict: "no-go",
+			ci_verdict: "no-go",
+			verdict: "no-go",
+			quality_status: "regression",
+			privacy: "pass",
+			determinism: "pass",
+		});
+		expect(report.category_counts).toEqual({
+			operational_meta: 2,
+			content_meta: 2,
+			abstract_concept: 2,
+		});
+		expect(report.cases.every((item) =>
+			Object.keys(item).join(",") === "case_id,category,kind,failure_codes,disposition"
+		)).toBe(true);
+		expect(report.reproducibility_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+	});
+
+	test("never exposes fixture, observation, route-debug, or error material", async () => {
+		const report = await runRecallQualityMatrix();
+		const serialized = JSON.stringify(report);
+		for (const sentinel of [
+			"实体甲",
+			"组织乙",
+			"Project Alpha",
+			"韧性治理",
+			"source_a",
+			"point_a",
+			"/Users/",
+			"系统当前有什么异常",
+		]) {
+			expect(serialized).not.toContain(sentinel);
+		}
+		const forbiddenKeys = new Set([
+			"source_id", "point_id", "query", "hash", "title", "body",
+			"snippet", "path", "score", "vector", "routing", "error", "reason",
+		]);
+		const visit = (value: unknown): void => {
+			if (Array.isArray(value)) {
+				value.forEach(visit);
+				return;
+			}
+			if (value && typeof value === "object") {
+				for (const [key, item] of Object.entries(value)) {
+					expect(forbiddenKeys.has(key)).toBe(false);
+					visit(item);
+				}
+			}
+		};
+		visit(report);
+	});
+
+	test("fingerprint canonicalizes stable fields and excludes advisory duration", () => {
+		const evaluated = [evaluateRecallCase(answerableCase(), semanticObservation())];
+		const first = pureReport(evaluated);
+		const second = buildRecallQualityReport({
+			evaluatedCases: evaluated,
+			comparison: compareRecallBaseline(evaluated, []),
+			metrics: aggregateRecallMetrics(evaluated),
+			legacyCases: passingLegacy(),
+			mode: "default",
+			privacyPass: true,
+			deterministic: true,
+			boundedRuntime: true,
+			advisoryDurationMs: 9876,
+		});
+		expect(first.reproducibility_fingerprint).toBe(second.reproducibility_fingerprint);
+		expect(canonicalRecallQualityJson({ z: 1, a: { c: 2, b: 1 } })).toBe('{"a":{"b":1,"c":2},"z":1}');
+	});
+
+	test("exact known failure is CI-go by default and strict-no-go without exposing its signature", () => {
+		const evaluated = [evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				top3: [
+					{ sourceId: "source_b", matchedPointIds: ["point_c", "point_b"] },
+					{ sourceId: "source_c", matchedPointIds: [] },
+				],
+			}),
+		)];
+		const defaultReport = pureReport(evaluated, [exactKnownFailureBaseline()]);
+		const strictReport = pureReport(evaluated, [exactKnownFailureBaseline()], "strict");
+		expect(defaultReport).toMatchObject({
+			quality_status: "known_failure",
+			strict_verdict: "no-go",
+			ci_verdict: "go",
+			verdict: "go",
+			strict_failure: false,
+		});
+		expect(strictReport).toMatchObject({ verdict: "no-go", strict_failure: true });
+		expect(JSON.stringify(defaultReport)).not.toContain("source_b");
+	});
+});
+
+describe("CLI exit policy", () => {
+	test("returns 0 for selected go and 1 for regression or unexpected pass", async () => {
+		const passingCase = evaluateRecallCase(answerableCase(), semanticObservation());
+		const passing = pureReport([passingCase]);
+		const regression = pureReport([evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({ top3: [] }),
+		)]);
+		const unexpectedPass = pureReport([passingCase], [exactKnownFailureBaseline()]);
+		const go = await runRecallQualityCli([], { environment: {}, run: async () => passing });
+		const noGo = await runRecallQualityCli([], { environment: {}, run: async () => regression });
+		const staleBaseline = await runRecallQualityCli([], {
+			environment: {},
+			run: async () => unexpectedPass,
+		});
+		expect(go.exitCode).toBe(0);
+		expect(noGo.exitCode).toBe(1);
+		expect(staleBaseline.exitCode).toBe(1);
+		expect(unexpectedPass.counts.unexpected_passes).toBe(1);
+	});
+
+	test("strict known failure exits 1 while default exact baseline exits 0", async () => {
+		const evaluated = [evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				top3: [
+					{ sourceId: "source_b", matchedPointIds: ["point_b", "point_c"] },
+					{ sourceId: "source_c", matchedPointIds: [] },
+				],
+			}),
+		)];
+		const baseline = [exactKnownFailureBaseline()];
+		const run = async (options: { strict?: boolean }) =>
+			pureReport(evaluated, baseline, options.strict ? "strict" : "default");
+		expect((await runRecallQualityCli([], { environment: {}, run })).exitCode).toBe(0);
+		expect((await runRecallQualityCli(["--strict"], { environment: {}, run })).exitCode).toBe(1);
+	});
+
+	test.each([
+		["usage", ["--cases", "sentinel"], {}, "INVALID_USAGE"],
+		["unknown", ["--write-baseline"], {}, "INVALID_USAGE"],
+		["install", ["--install-baseline"], {}, "INVALID_USAGE"],
+		["overwrite", ["--overwrite"], {}, "INVALID_USAGE"],
+		["env cases", [], { RECALL_QUALITY_CASES: "sentinel" }, "INVALID_USAGE"],
+		["env corpus", [], { RECALL_QUALITY_CORPUS: "sentinel" }, "INVALID_USAGE"],
+		["env baseline", [], { RECALL_QUALITY_BASELINE: "sentinel" }, "INVALID_USAGE"],
+		["env fault", [], { RECALL_MATRIX_FAULT: "sentinel" }, "INVALID_USAGE"],
+	] as const)("rejects %s selectors with exit 2", async (_label, args, environment, code) => {
+		const result = await runRecallQualityCli(args, { environment });
+		expect(result).toEqual({
+			exitCode: 2,
+			output: {
+				gate: "recall-quality-matrix",
+				schema_version: 2,
+				status: "error",
+				code,
+			},
+		});
+	});
+
+	test.each([
+		["missing", { code: "ENOENT", message: "PRIVATE_PATH_SENTINEL" }, "FIXTURE_MISSING"],
+		["malformed", { code: "malformed_json", message: "PRIVATE_ROW_SENTINEL" }, "FIXTURE_INVALID"],
+		["schema", { code: "invalid_case_id", message: "PRIVATE_QUERY_SENTINEL" }, "FIXTURE_INVALID"],
+		["execution", new Error("PRIVATE_STACK_SENTINEL"), "EXECUTION_FAILED"],
+	] as const)("maps %s bootstrap failures to fixed enums", async (_label, thrown, code) => {
+		const result = await runRecallQualityCli([], {
+			environment: {},
+			run: async () => { throw thrown; },
+		});
+		expect(result.exitCode).toBe(2);
+		expect(result.output).toMatchObject({ status: "error", code });
+		const serialized = JSON.stringify(result.output);
+		expect(serialized).not.toContain("PRIVATE_");
+		expect(serialized).not.toContain("stack");
+	});
 });

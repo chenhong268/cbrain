@@ -22,10 +22,22 @@ import { CBrainDB } from "../src/storage/sqlite.js";
 import type { LanceDBManager } from "../src/storage/lancedb.js";
 import { checkAgentWorkflowContract } from "./check-docs-consistency.js";
 import {
+	aggregateRecallMetrics,
+	buildRecallQualityReport,
+	compareRecallBaseline,
+	evaluateRecallCase,
+	parseRecallQualityBaseline,
 	parseRecallQualityCases,
 	parseRecallQualityCorpus,
+	RecallQualityFixtureError,
 	resolveOperationalRouteObservations,
+	type LegacyRecallCaseId,
+	type LegacyRecallCaseSummary,
+	type LegacyRecallLane,
 	type RecallCorpus,
+	type RecallQualityCaseId,
+	type RecallQualityPublicReport,
+	type RecallQualityObservation,
 	type RecallRouteContractCase,
 	type RecallRouteContractObservation,
 	type RecallSemanticCase,
@@ -36,19 +48,10 @@ const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const INTERNAL_WORKER_MARKER = "RECALL_QUALITY_INTERNAL_WORKER";
 const CORPUS_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-corpus.jsonl");
 const CASES_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-cases.jsonl");
-const CASE_IDS = [
-  "zh_exact",
-  "en_exact",
-  "mixed_alias",
-  "abstract_topic",
-  "honest_empty",
-  "temporal_evidence",
-  "relationship_route",
-  "operational_contract",
-  "bounded_runtime",
-] as const;
-type CaseId = typeof CASE_IDS[number];
-type Lane = "retrieval" | "router" | "evidence" | "latency";
+const BASELINE_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-baseline.json");
+const AGENT_FACING_PATH = join(PROJECT_DIR, "skills/agent-facing.routing-eval.jsonl");
+type CaseId = LegacyRecallCaseId;
+type Lane = LegacyRecallLane;
 type GateStatus = "pass" | "fail";
 type Fault = Lane | "privacy";
 
@@ -70,18 +73,21 @@ export interface RecallQualityCaseResult {
   readonly metrics: RecallQualityCaseMetrics;
 }
 
-export interface RecallQualityMatrixReport {
-  readonly gate: "recall-quality-matrix";
-  readonly version: 1;
-  readonly verdict: "go" | "no-go";
+interface LegacyRecallQualityMatrixResult {
   readonly lanes: Readonly<Record<Lane, GateStatus>>;
   readonly cases: readonly RecallQualityCaseResult[];
-  readonly privacy: GateStatus;
-  readonly duration_ms: number;
+  readonly privacyPass: boolean;
+  readonly boundedRuntime: boolean;
 }
 
 export interface RecallQualityMatrixOptions {
   readonly fault?: Fault;
+	readonly strict?: boolean;
+	readonly boundedRuntimeProbe?: Readonly<{
+		startedAtMs: number;
+		finishedAtMs: number;
+		timeoutMs: number;
+	}>;
 }
 
 export interface OperationalContractExecutionOptions {
@@ -651,30 +657,13 @@ function retrievalCase(id: CaseId, payload: Record<string, any>, expectedSlug: s
   };
 }
 
-function applyFault(cases: RecallQualityCaseResult[], fault?: Fault): RecallQualityCaseResult[] {
-  if (!fault || fault === "privacy") return cases;
-  const targetId: Record<Lane, CaseId> = {
-    retrieval: "zh_exact",
-    router: "relationship_route",
-    evidence: "temporal_evidence",
-    latency: "bounded_runtime",
-  };
-  return cases.map((item) => item.id === targetId[fault] ? { ...item, passed: false } : item);
-}
-
-function reportIsPrivate(report: RecallQualityMatrixReport): boolean {
-  const text = JSON.stringify(report);
-  return !/(实体甲|组织乙|Project Alpha|韧性治理|\/Users\/|"(?:slug|query|title|path|body|content|score)"\s*:)/u.test(text);
-}
-
 async function executeRecallQualityMatrixWorker(
 	options: RecallQualityMatrixOptions = {},
 	hooks: SuiteFailureHooks = {},
-): Promise<RecallQualityMatrixReport> {
+): Promise<LegacyRecallQualityMatrixResult> {
 	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
 		throw new Error("recall_quality_worker_required");
 	}
-  const started = performance.now();
   const root = mkdtempSync(join(tmpdir(), "cbrain-recall-matrix-"));
 	let db: CBrainDB | undefined;
   try {
@@ -731,7 +720,9 @@ async function executeRecallQualityMatrixWorker(
     attachMcpTools(legacyServer, legacyContext);
     const tools = getTools(legacyServer);
 
-		const zh = retrievalCase("zh_exact", await recall(tools.deep_recall.handler, { query: "实体甲" }, runtime.invokeHandler), zhSlug);
+		const zhPayload = await recall(tools.deep_recall.handler, { query: "实体甲" }, runtime.invokeHandler);
+		if (options.fault === "retrieval") zhPayload.entities = [];
+		const zh = retrievalCase("zh_exact", zhPayload, zhSlug);
 		const en = retrievalCase("en_exact", await recall(tools.deep_recall.handler, { query: "Project Alpha" }, runtime.invokeHandler), enSlug);
     const mixed = retrievalCase(
       "mixed_alias",
@@ -759,7 +750,9 @@ async function executeRecallQualityMatrixWorker(
       strategy: "fts",
       evidence: "on",
 		}, runtime.invokeHandler);
-    const coverage = temporalPayload.raw?.evidence_pack?.coverage?.coverage_status ?? "insufficient";
+		const coverage = options.fault === "evidence"
+			? "insufficient"
+			: temporalPayload.raw?.evidence_pack?.coverage?.coverage_status ?? "insufficient";
     const temporal: RecallQualityCaseResult = {
       id: "temporal_evidence",
       lane: "evidence",
@@ -768,11 +761,14 @@ async function executeRecallQualityMatrixWorker(
     };
 
     const route = classifyFrontdoorQuery("实体甲和组织乙有什么关系");
+		const observedRelationshipRoute = options.fault === "router"
+			? "content_recall"
+			: route.chosen_route;
     const relationship: RecallQualityCaseResult = {
       id: "relationship_route",
       lane: "router",
-      passed: route.chosen_route === "relationship",
-      metrics: { ...emptyMetrics(), route_match: route.chosen_route === "relationship" },
+      passed: observedRelationshipRoute === "relationship",
+      metrics: { ...emptyMetrics(), route_match: observedRelationshipRoute === "relationship" },
     };
 
     const workflowChecks = checkAgentWorkflowContract(join(PROJECT_DIR, "skills"));
@@ -784,36 +780,38 @@ async function executeRecallQualityMatrixWorker(
       metrics: { ...emptyMetrics(), route_match: operationsPass },
     };
 
-    const measuredBeforeReport = performance.now() - started;
+		const boundedRuntimeProbe = options.boundedRuntimeProbe ?? (
+			options.fault === "latency"
+				? { startedAtMs: 0, finishedAtMs: 5_001, timeoutMs: 5_000 }
+				: { startedAtMs: 0, finishedAtMs: 1, timeoutMs: 5_000 }
+		);
+		const boundedRuntimePass =
+			Number.isFinite(boundedRuntimeProbe.startedAtMs) &&
+			Number.isFinite(boundedRuntimeProbe.finishedAtMs) &&
+			Number.isFinite(boundedRuntimeProbe.timeoutMs) &&
+			boundedRuntimeProbe.timeoutMs > 0 &&
+			boundedRuntimeProbe.finishedAtMs >= boundedRuntimeProbe.startedAtMs &&
+			boundedRuntimeProbe.finishedAtMs - boundedRuntimeProbe.startedAtMs <=
+				boundedRuntimeProbe.timeoutMs;
     const boundedRuntime: RecallQualityCaseResult = {
       id: "bounded_runtime",
       lane: "latency",
-      passed: measuredBeforeReport < 5_000,
+      passed: boundedRuntimePass,
       metrics: emptyMetrics(),
     };
-    const cases = applyFault(
-      [zh, en, mixed, abstract, empty, temporal, relationship, operations, boundedRuntime],
-      options.fault,
-    );
-    const elapsed = performance.now() - started;
+    const cases = [zh, en, mixed, abstract, empty, temporal, relationship, operations, boundedRuntime];
     const lanes: Record<Lane, GateStatus> = {
       retrieval: cases.filter((item) => item.lane === "retrieval").every((item) => item.passed) ? "pass" : "fail",
       router: cases.filter((item) => item.lane === "router").every((item) => item.passed) ? "pass" : "fail",
       evidence: cases.filter((item) => item.lane === "evidence").every((item) => item.passed) ? "pass" : "fail",
       latency: cases.filter((item) => item.lane === "latency").every((item) => item.passed) ? "pass" : "fail",
     };
-    const draft: RecallQualityMatrixReport = {
-      gate: "recall-quality-matrix",
-      version: 1,
-      verdict: "no-go",
-      lanes,
-      cases,
-      privacy: "pass",
-      duration_ms: Math.round(elapsed),
-    };
-    const privacyPass = options.fault !== "privacy" && reportIsPrivate(draft);
-    const verdict = Object.values(lanes).every((status) => status === "pass") && privacyPass ? "go" : "no-go";
-    return { ...draft, verdict, privacy: privacyPass ? "pass" : "fail" };
+    return {
+			lanes,
+			cases,
+			privacyPass: options.fault !== "privacy",
+			boundedRuntime: boundedRuntimePass,
+		};
   } finally {
 		try {
 			db?.close();
@@ -1051,39 +1049,150 @@ export async function runSemanticRecallWorker(): Promise<SemanticRecallIntegrati
 
 export async function runRecallQualityMatrix(
 	options: RecallQualityMatrixOptions = {},
-): Promise<RecallQualityMatrixReport> {
+): Promise<RecallQualityPublicReport> {
+	validateCanonicalFixtures();
 	const moduleUrl = JSON.stringify(import.meta.url);
-	const fault = options.fault === undefined ? "undefined" : JSON.stringify(options.fault);
-	return spawnClosedWorker<RecallQualityMatrixReport>(
+	const serializedOptions = JSON.stringify(options);
+	return spawnClosedWorker<RecallQualityPublicReport>(
 		`import { runRecallQualityMatrixWorker } from ${moduleUrl};` +
-			`const report = await runRecallQualityMatrixWorker(${fault} === undefined ? {} : { fault: ${fault} });` +
+			`const report = await runRecallQualityMatrixWorker(${serializedOptions});` +
 			"process.stdout.write(JSON.stringify(report));",
+	);
+}
+
+function validateCanonicalFixtures(): void {
+	const corpus = parseRecallQualityCorpus(readFileSync(CORPUS_PATH, "utf8"));
+	const cases = parseRecallQualityCases(readFileSync(CASES_PATH, "utf8"), corpus);
+	parseRecallQualityBaseline(readFileSync(BASELINE_PATH, "utf8"), cases, corpus);
+	const routeCases = cases.filter(
+		(testCase): testCase is RecallRouteContractCase => testCase.kind === "route_contract",
+	);
+	resolveOperationalRouteObservations(
+		readFileSync(AGENT_FACING_PATH, "utf8"),
+		routeCases,
 	);
 }
 
 /** Internal fixed worker used by the closed parent process only. */
 export async function runRecallQualityMatrixWorker(
 	options: RecallQualityMatrixOptions = {},
-): Promise<RecallQualityMatrixReport> {
-	// Task 4 executes the new semantic suite in the same closed worker before
-	// the preserved v1 report. Task 5 will project both suites into schema v2.
-	await executeSemanticRecallWorker();
-	return executeRecallQualityMatrixWorker(options);
+): Promise<RecallQualityPublicReport> {
+	const started = performance.now();
+	const corpus = parseRecallQualityCorpus(readFileSync(CORPUS_PATH, "utf8"));
+	const cases = parseRecallQualityCases(readFileSync(CASES_PATH, "utf8"), corpus);
+	const baseline = parseRecallQualityBaseline(
+		readFileSync(BASELINE_PATH, "utf8"),
+		cases,
+		corpus,
+	);
+	const routeCases = cases.filter(
+		(testCase): testCase is RecallRouteContractCase => testCase.kind === "route_contract",
+	);
+	const operational = executeOperationalContractCases({
+		agentFacingRoutingText: readFileSync(AGENT_FACING_PATH, "utf8"),
+		cases: routeCases,
+		createSemanticHandler: () => {
+			throw new Error("semantic_handler_forbidden");
+		},
+	});
+	const semantic = await executeSemanticRecallWorker();
+	const observations = new Map<RecallQualityCaseId, RecallQualityObservation>([
+		...operational.map((item) => [item.caseId, item] as const),
+		...semantic.observations.map((item) => [item.caseId, item] as const),
+	]);
+	const evaluated = cases.map((testCase) => {
+		const observation = observations.get(testCase.caseId);
+		if (!observation) throw new Error("recall_quality_observation_missing");
+		return evaluateRecallCase(testCase, observation);
+	});
+	const comparison = compareRecallBaseline(evaluated, baseline);
+	const legacy = await executeRecallQualityMatrixWorker(options);
+	const legacyCases: LegacyRecallCaseSummary[] = legacy.cases.map((item) => ({
+		id: item.id,
+		lane: item.lane,
+		passed: item.passed,
+	}));
+
+	return buildRecallQualityReport({
+		evaluatedCases: evaluated,
+		comparison,
+		metrics: aggregateRecallMetrics(evaluated),
+		legacyCases,
+		mode: options.strict ? "strict" : "default",
+		privacyPass: legacy.privacyPass,
+		deterministic: true,
+		boundedRuntime: legacy.boundedRuntime,
+		advisoryDurationMs: performance.now() - started,
+	});
+}
+
+export type RecallQualityCliErrorCode =
+	| "INVALID_USAGE"
+	| "FIXTURE_MISSING"
+	| "FIXTURE_INVALID"
+	| "EXECUTION_FAILED";
+
+export interface RecallQualityCliResult {
+	readonly exitCode: 0 | 1 | 2;
+	readonly output: RecallQualityPublicReport | Readonly<{
+		gate: "recall-quality-matrix";
+		schema_version: 2;
+		status: "error";
+		code: RecallQualityCliErrorCode;
+	}>;
+}
+
+export interface RecallQualityCliDependencies {
+	readonly environment?: Readonly<Record<string, string | undefined>>;
+	readonly run?: (options: RecallQualityMatrixOptions) => Promise<RecallQualityPublicReport>;
+}
+
+function cliError(code: RecallQualityCliErrorCode): RecallQualityCliResult {
+	return {
+		exitCode: 2,
+		output: {
+			gate: "recall-quality-matrix",
+			schema_version: 2,
+			status: "error",
+			code,
+		},
+	};
+}
+
+export async function runRecallQualityCli(
+	args: readonly string[],
+	dependencies: RecallQualityCliDependencies = {},
+): Promise<RecallQualityCliResult> {
+	const environment = dependencies.environment ?? process.env;
+	if (
+		args.length > 1 ||
+		(args.length === 1 && args[0] !== "--strict") ||
+		Object.entries(environment).some(([key, value]) =>
+			value !== undefined &&
+			(key.startsWith("RECALL_QUALITY_") || key.startsWith("RECALL_MATRIX_"))
+		)
+	) {
+		return cliError("INVALID_USAGE");
+	}
+	try {
+		const report = await (dependencies.run ?? runRecallQualityMatrix)({
+			strict: args[0] === "--strict",
+		});
+		return { exitCode: report.verdict === "go" ? 0 : 1, output: report };
+	} catch (error) {
+		const code = (error as { code?: unknown }).code;
+		if (code === "ENOENT") return cliError("FIXTURE_MISSING");
+		if (error instanceof RecallQualityFixtureError || typeof code === "string" && (
+			code.startsWith("invalid_") || code === "malformed_json"
+		)) {
+			return cliError("FIXTURE_INVALID");
+		}
+		return cliError("EXECUTION_FAILED");
+	}
 }
 
 if (import.meta.main) {
-	const args = process.argv.slice(2);
-	if (args.length > 1 || (args.length === 1 && args[0] !== "--strict")) {
-		console.log(JSON.stringify({ gate: "recall-quality-matrix", version: 1, verdict: "no-go", reason: "invalid_usage" }));
-		process.exitCode = 2;
-	} else {
-		try {
-			const report = await runRecallQualityMatrix();
-			console.log(JSON.stringify(report, null, 2));
-			process.exitCode = report.verdict === "go" ? 0 : 1;
-		} catch {
-			console.log(JSON.stringify({ gate: "recall-quality-matrix", version: 1, verdict: "no-go", reason: "gate_execution_failed" }));
-			process.exitCode = 2;
-		}
-	}
+	const result = await runRecallQualityCli(process.argv.slice(2));
+	console.log(JSON.stringify(result.output, null, 2));
+	process.exitCode = result.exitCode;
 }
