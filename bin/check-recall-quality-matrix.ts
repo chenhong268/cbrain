@@ -346,11 +346,7 @@ interface ProductionFrontdoorEnvelope {
 	readonly summary?: Readonly<{ status?: unknown }>;
 	readonly raw?: Readonly<{
 		routing?: Readonly<{ chosen_route?: unknown }>;
-		entities?: readonly Readonly<{
-			title?: unknown;
-			snippet?: unknown;
-			body?: unknown;
-		}>[];
+		entities?: readonly unknown[];
 		evidence_pack?: Readonly<{
 			coverage?: Readonly<{ coverage_status?: unknown }>;
 		}>;
@@ -368,25 +364,41 @@ export function mapFrontdoorEnvelopeToSemanticObservation(
 	corpus: RecallCorpus,
 ): RecallSemanticObservation {
 	const titleToSource = new Map(corpus.map((source) => [source.title, source]));
-	const entities = Array.isArray(envelope.raw?.entities)
-		? envelope.raw.entities
-		: [];
-	const top3 = entities.slice(0, 3).flatMap((entity) => {
-		if (typeof entity.title !== "string") return [];
-		const source = titleToSource.get(entity.title);
-		if (!source) return [];
-		const evidenceText = [entity.snippet]
-			.filter((value): value is string => typeof value === "string")
-			.join(" ");
-		const evidenceTokens = new Set(evidenceText.split(/\s+/u).filter(Boolean));
-		return [{
-			sourceId: source.sourceId,
-			matchedPointIds: source.answerPoints
-				.filter((point) => point.text.split(" ").every((token) => evidenceTokens.has(token)))
-				.map((point) => point.pointId)
-				.sort(),
-		}];
-	});
+	const rawEntities = envelope.raw?.entities;
+	if (rawEntities !== undefined && !Array.isArray(rawEntities)) {
+		throw new Error("recall_quality_candidate_invalid");
+	}
+	let top3: RecallSemanticObservation["top3"];
+	try {
+		top3 = (rawEntities ?? []).slice(0, 3).map((entity) => {
+			if (entity === null || typeof entity !== "object" || Array.isArray(entity)) {
+				throw new Error("candidate_shape");
+			}
+			const prototype = Object.getPrototypeOf(entity);
+			if (prototype !== Object.prototype && prototype !== null) {
+				throw new Error("candidate_shape");
+			}
+			const title = Object.getOwnPropertyDescriptor(entity, "title");
+			const snippet = Object.getOwnPropertyDescriptor(entity, "snippet");
+			if (!title || !("value" in title) || typeof title.value !== "string" ||
+				!snippet || !("value" in snippet) || typeof snippet.value !== "string"
+			) {
+				throw new Error("candidate_shape");
+			}
+			const source = titleToSource.get(title.value);
+			if (!source) throw new Error("candidate_identity");
+			const evidenceTokens = new Set(snippet.value.split(/\s+/u).filter(Boolean));
+			return {
+				sourceId: source.sourceId,
+				matchedPointIds: source.answerPoints
+					.filter((point) => point.text.split(" ").every((token) => evidenceTokens.has(token)))
+					.map((point) => point.pointId)
+					.sort(),
+			};
+		});
+	} catch {
+		throw new Error("recall_quality_candidate_invalid");
+	}
 	const rawStatus = envelope.summary?.status;
 	const answerStatus = rawStatus === "ok" || rawStatus === "empty"
 		? rawStatus

@@ -2088,6 +2088,106 @@ describe("vector differential", () => {
 });
 
 describe("evidence mapper", () => {
+	const expectCandidateMappingFailure = (
+		run: () => unknown,
+		forbidden: readonly string[],
+	): void => {
+		try {
+			run();
+			throw new Error("expected candidate mapping failure");
+		} catch (error) {
+			expect(String(error)).toBe("Error: recall_quality_candidate_invalid");
+			for (const sentinel of forbidden) expect(String(error)).not.toContain(sentinel);
+		}
+	};
+
+	test("unknown unanswerable candidate cannot collapse into an honest empty pass", () => {
+		expectCandidateMappingFailure(
+			() => mapFrontdoorEnvelopeToSemanticObservation(
+				unanswerableCase(),
+				{
+					summary: { status: "empty" },
+					raw: {
+						routing: { chosen_route: "content_recall" },
+						entities: [{ title: "匿名记录Z", snippet: "治理 约束" }],
+					},
+				},
+				parseCanonicalCorpus(),
+			),
+			["匿名记录Z", "治理 约束"],
+		);
+	});
+
+	test("a correct answerable source cannot hide an additional unknown candidate", () => {
+		expectCandidateMappingFailure(
+			() => mapFrontdoorEnvelopeToSemanticObservation(
+				answerableCase(),
+				{
+					summary: { status: "ok" },
+					raw: {
+						routing: { chosen_route: "content_recall" },
+						entities: [
+							{ title: "匿名记录A", snippet: "恢复 边界" },
+							{ title: "匿名记录Z", snippet: "治理 约束" },
+						],
+					},
+				},
+				parseCanonicalCorpus(),
+			),
+			["匿名记录Z", "治理 约束"],
+		);
+	});
+
+	test.each([
+		["non-plain", Object.assign(Object.create({ title: "匿名记录A" }), { snippet: "恢复 边界" })],
+		["missing title", { snippet: "恢复 边界" }],
+		["invalid title", { title: 7, snippet: "恢复 边界" }],
+		["invalid snippet", { title: "匿名记录A", snippet: 7 }],
+	] as const)("schema-invalid top3 candidate fails closed: %s", (_label, entity) => {
+		expectCandidateMappingFailure(
+			() => mapFrontdoorEnvelopeToSemanticObservation(
+				answerableCase(),
+				{
+					summary: { status: "ok" },
+					raw: {
+						routing: { chosen_route: "content_recall" },
+						entities: [entity] as never,
+					},
+				},
+				parseCanonicalCorpus(),
+			),
+			["恢复 边界"],
+		);
+	});
+
+	test("fixed CLI execution envelope never exposes rejected candidate material", async () => {
+		const result = await runRecallQualityCli([], {
+			environment: {},
+			run: async () => {
+				mapFrontdoorEnvelopeToSemanticObservation(
+					unanswerableCase(),
+					{
+						summary: { status: "empty" },
+						raw: { entities: [{ title: "匿名记录Z", snippet: "治理 约束" }] },
+					},
+					parseCanonicalCorpus(),
+				);
+				throw new Error("unreachable");
+			},
+		});
+		expect(result).toEqual({
+			exitCode: 2,
+			output: {
+				gate: "recall-quality-matrix",
+				schema_version: 2,
+				status: "error",
+				code: "EXECUTION_FAILED",
+			},
+		});
+		expect(JSON.stringify(result)).not.toContain("匿名记录Z");
+		expect(JSON.stringify(result)).not.toContain("治理 约束");
+	});
+
 	test("does not invent an infrastructure reason for degraded output without evidence proof", () => {
 		const observation = mapFrontdoorEnvelopeToSemanticObservation(
 			answerableCase(),
