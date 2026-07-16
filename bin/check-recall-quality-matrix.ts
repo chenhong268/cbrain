@@ -30,6 +30,7 @@ import {
 	parseRecallQualityCorpus,
 	RecallQualityFixtureError,
 	resolveOperationalRouteObservations,
+	sealRecallQualityReport,
 	type LegacyRecallCaseId,
 	type LegacyRecallCaseSummary,
 	type LegacyRecallLane,
@@ -1050,11 +1051,12 @@ export async function runRecallQualityMatrix(
 	validateCanonicalFixtures();
 	const moduleUrl = JSON.stringify(import.meta.url);
 	const serializedOptions = JSON.stringify(options);
-	return spawnClosedWorker<RecallQualityPublicReport>(
+	const workerReport = await spawnClosedWorker<RecallQualityPublicReport>(
 		`import { runRecallQualityMatrixWorker } from ${moduleUrl};` +
 			`const report = await runRecallQualityMatrixWorker(${serializedOptions});` +
 			"process.stdout.write(JSON.stringify(report));",
 	);
+	return sealRecallQualityReport(workerReport);
 }
 
 function validateCanonicalFixtures(): void {
@@ -1190,9 +1192,11 @@ export async function runRecallQualityCli(
 		return cliError("INVALID_USAGE");
 	}
 	try {
-		const report = await (dependencies.run ?? runRecallQualityMatrix)({
-			strict: args[0] === "--strict",
-		});
+		const report = sealRecallQualityReport(
+			await (dependencies.run ?? runRecallQualityMatrix)({
+				strict: args[0] === "--strict",
+			}),
+		);
 		return { exitCode: report.verdict === "go" ? 0 : 1, output: report };
 	} catch (error) {
 		const code = (error as { code?: unknown }).code;

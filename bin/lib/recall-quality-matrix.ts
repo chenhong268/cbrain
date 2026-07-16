@@ -1725,19 +1725,51 @@ function isPlainArray(value: unknown): value is unknown[] {
 			return false;
 		}
 		const keys = Reflect.ownKeys(value);
-		if (keys.length !== value.length + 1 || keys[keys.length - 1] !== "length") {
+		const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+		if (!lengthDescriptor || lengthDescriptor.enumerable || !("value" in lengthDescriptor) ||
+			!Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0
+		) {
 			return false;
 		}
-		for (let index = 0; index < value.length; index += 1) {
+		const length = lengthDescriptor.value as number;
+		if (keys.length !== length + 1 || keys[keys.length - 1] !== "length") {
+			return false;
+		}
+		for (let index = 0; index < length; index += 1) {
 			if (keys[index] !== String(index)) return false;
 			const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
 			if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) return false;
 		}
-		const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-		return lengthDescriptor !== undefined && !lengthDescriptor.enumerable &&
-			"value" in lengthDescriptor && lengthDescriptor.value === value.length;
+		return true;
 	} catch {
 		return false;
+	}
+}
+
+function hasStaticJsonTree(value: unknown, ancestors = new Set<object>()): boolean {
+	if (value === null || typeof value === "string" || typeof value === "boolean") {
+		return true;
+	}
+	if (typeof value === "number") return Number.isFinite(value);
+	if (typeof value !== "object" || ancestors.has(value)) return false;
+	if (Array.isArray(value) ? !isPlainArray(value) : !isPlainRecord(value)) return false;
+
+	ancestors.add(value);
+	try {
+		for (const key of Reflect.ownKeys(value)) {
+			if (key === "length") continue;
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (!descriptor || !("value" in descriptor) ||
+				!hasStaticJsonTree(descriptor.value, ancestors)
+			) {
+				return false;
+			}
+		}
+		return true;
+	} catch {
+		return false;
+	} finally {
+		ancestors.delete(value);
 	}
 }
 
@@ -1968,30 +2000,142 @@ function publicReportIsAllowlisted(value: unknown): boolean {
 }
 
 /**
- * Validate both sides of the privacy boundary using closed field/value sets.
- * The internal candidate may contain controlled source/point IDs, while the
- * public report may contain only report enums and reportable case IDs.
+ * Validate one-shot snapshots of both sides using closed field/value sets.
+ * This boolean is a policy result, not a transport seal: callers must transport
+ * only the object returned by sealRecallQualityReport/buildRecallQualityReport.
  */
 export function checkRecallQualityPrivacy(
 	rawCandidate: unknown,
 	publicReport: unknown,
 ): boolean {
-	if (!rawCandidateIsAllowlisted(rawCandidate) ||
-		!publicReportIsAllowlisted(publicReport)) {
-		return false;
-	}
-	return publicReportSurvivesCanonicalRoundTrip(publicReport);
+	const rawSnapshot = snapshotStaticJson(rawCandidate);
+	if (!rawSnapshot || !rawCandidateIsAllowlisted(rawSnapshot.value)) return false;
+	return trySealRecallQualityReport(publicReport) !== undefined;
 }
 
-function publicReportSurvivesCanonicalRoundTrip(publicReport: unknown): boolean {
+interface StaticJsonSnapshot {
+	readonly canonicalBytes: string;
+	readonly value: unknown;
+}
+
+function snapshotStaticJson(value: unknown): StaticJsonSnapshot | undefined {
+	if (!hasStaticJsonTree(value)) return undefined;
 	try {
-		const canonical = canonicalRecallQualityJson(publicReport);
-		const parsed = JSON.parse(canonical) as unknown;
-		return publicReportIsAllowlisted(parsed) &&
-			canonical === canonicalRecallQualityJson(parsed);
+		const canonicalBytes = canonicalRecallQualityJson(value);
+		const parsed = JSON.parse(canonicalBytes) as unknown;
+		if (!hasStaticJsonTree(parsed) || canonicalRecallQualityJson(parsed) !== canonicalBytes) {
+			return undefined;
+		}
+		return { canonicalBytes, value: parsed };
 	} catch {
-		return false;
+		return undefined;
 	}
+}
+
+function deepFreezeJson<T>(value: T): T {
+	if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+		for (const child of Object.values(value)) deepFreezeJson(child);
+		Object.freeze(value);
+	}
+	return value;
+}
+
+function orderedRate(metric: RecallQualityPublicRateMetric): RecallQualityPublicRateMetric {
+	return {
+		numerator: metric.numerator,
+		denominator: metric.denominator,
+		rate: metric.rate,
+	};
+}
+
+function restorePublicReportOrder(source: RecallQualityPublicReport): RecallQualityPublicReport {
+	return {
+		gate: source.gate,
+		schema_version: source.schema_version,
+		mode: source.mode,
+		route_scope: source.route_scope,
+		strict_verdict: source.strict_verdict,
+		ci_verdict: source.ci_verdict,
+		verdict: source.verdict,
+		strict_failure: source.strict_failure,
+		quality_status: source.quality_status,
+		metrics: {
+			route_accuracy: orderedRate(source.metrics.route_accuracy),
+			route_accuracy_by_category: {
+				operational_meta: orderedRate(
+					source.metrics.route_accuracy_by_category.operational_meta,
+				),
+				content_meta: orderedRate(source.metrics.route_accuracy_by_category.content_meta),
+				abstract_concept: orderedRate(
+					source.metrics.route_accuracy_by_category.abstract_concept,
+				),
+			},
+			recall_at_3: orderedRate(source.metrics.recall_at_3),
+			wrong_source_rate: orderedRate(source.metrics.wrong_source_rate),
+			irrelevant_but_ok_rate: orderedRate(source.metrics.irrelevant_but_ok_rate),
+			insufficient_false_positive_rate: orderedRate(
+				source.metrics.insufficient_false_positive_rate,
+			),
+		},
+		category_counts: {
+			operational_meta: source.category_counts.operational_meta,
+			content_meta: source.category_counts.content_meta,
+			abstract_concept: source.category_counts.abstract_concept,
+		},
+		failure_counts: Object.fromEntries(
+			REPORT_FAILURE_CODES.map((code) => [code, source.failure_counts[code]]),
+		) as Record<RecallQualityFailureCode, number>,
+		counts: {
+			known_failures: source.counts.known_failures,
+			regressions: source.counts.regressions,
+			unexpected_passes: source.counts.unexpected_passes,
+		},
+		cases: source.cases.map((item) => ({
+			case_id: item.case_id,
+			category: item.category,
+			kind: item.kind,
+			failure_codes: [...item.failure_codes],
+			disposition: item.disposition,
+		})),
+		legacy_v1: {
+			status: source.legacy_v1.status,
+			cases: source.legacy_v1.cases.map((item) => ({
+				id: item.id,
+				lane: item.lane,
+				status: item.status,
+			})),
+		},
+		privacy: source.privacy,
+		determinism: source.determinism,
+		bounded_runtime: source.bounded_runtime,
+		reproducibility_fingerprint: source.reproducibility_fingerprint,
+		advisory_duration_ms: source.advisory_duration_ms,
+	};
+}
+
+function trySealRecallQualityReport(value: unknown): RecallQualityPublicReport | undefined {
+	const snapshot = snapshotStaticJson(value);
+	if (!snapshot || !publicReportIsAllowlisted(snapshot.value)) return undefined;
+	const orderedClone = restorePublicReportOrder(
+		snapshot.value as RecallQualityPublicReport,
+	);
+	if (!publicReportIsAllowlisted(orderedClone) ||
+		canonicalRecallQualityJson(orderedClone) !== snapshot.canonicalBytes
+	) {
+		return undefined;
+	}
+	return deepFreezeJson(orderedClone);
+}
+
+/**
+ * Seal an untrusted report into the only object that may cross the public
+ * transport boundary. The source is read into canonical bytes once; callers
+ * receive only the parsed, recursively frozen clone, never the source object.
+ */
+export function sealRecallQualityReport(value: unknown): RecallQualityPublicReport {
+	const sealed = trySealRecallQualityReport(value);
+	if (!sealed) throw new RecallQualityEvaluationError("report_serialization_invalid");
+	return sealed;
 }
 
 function publicRate(metric: RecallQualityRateMetric): RecallQualityPublicRateMetric {
@@ -2194,9 +2338,5 @@ export function buildRecallQualityReport(
 		reproducibility_fingerprint: fingerprint,
 		advisory_duration_ms: Math.round(input.advisoryDurationMs),
 	};
-	if (!publicReportIsAllowlisted(report) ||
-		!publicReportSurvivesCanonicalRoundTrip(report)) {
-		throw new RecallQualityEvaluationError("report_serialization_invalid");
-	}
-	return report;
+	return sealRecallQualityReport(report);
 }

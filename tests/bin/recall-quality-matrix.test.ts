@@ -24,6 +24,7 @@ import {
 	parseRecallQualityCorpus,
 	resolveOperationalRouteObservations,
 	SAFE_FIXTURE_TOKENS,
+	sealRecallQualityReport,
 } from "../../bin/lib/recall-quality-matrix.js";
 import type {
 	EvaluatedRecallCase,
@@ -2224,6 +2225,65 @@ describe("v2 report", () => {
 		}, report)).toBe(false);
 	});
 
+	test("report seal snapshots a stateful Proxy once and transports only the safe clone", () => {
+		const report = pureReport([
+			evaluateRecallCase(answerableCase(), semanticObservation()),
+		]);
+		const candidate = {
+			observations: [semanticObservation()],
+			legacyCases: passingLegacy(),
+		};
+		let modeReads = 0;
+		const proxy = new Proxy({ ...report }, {
+			get: (target, property, receiver) => {
+				if (property !== "mode") return Reflect.get(target, property, receiver);
+				modeReads += 1;
+				return modeReads <= 2 ? "default" : "recall-quality-private-sentinel-336";
+			},
+		});
+
+		const sealed = sealRecallQualityReport(proxy);
+		const privacyOnly = checkRecallQualityPrivacy(candidate, proxy);
+		const unsafeOriginalTransport = JSON.stringify(proxy);
+		const safeTransport = JSON.stringify(sealed);
+
+		expect(privacyOnly).toBe(true);
+		expect(unsafeOriginalTransport).toContain("recall-quality-private-sentinel-336");
+		expect(sealed.mode).toBe("default");
+		expect(safeTransport).not.toContain("recall-quality-private-sentinel-336");
+		expect(Object.isFrozen(sealed)).toBe(true);
+	});
+
+	test("privacy snapshots a raw candidate Proxy exactly once and never transports it", () => {
+		const report = pureReport([
+			evaluateRecallCase(answerableCase(), semanticObservation()),
+		]);
+		const observations = [semanticObservation()];
+		let observationReads = 0;
+		const candidate = new Proxy({
+			observations,
+			legacyCases: passingLegacy(),
+		}, {
+			get: (target, property, receiver) => {
+				if (property !== "observations") return Reflect.get(target, property, receiver);
+				observationReads += 1;
+				return observationReads === 1
+					? observations
+					: [{ ...observations[0], privacy_probe: "recall-quality-private-sentinel-336" }];
+			},
+		});
+
+		expect(checkRecallQualityPrivacy(candidate, report)).toBe(true);
+		expect(observationReads).toBe(1);
+	});
+
+	test("worker IPC returns a sealed public clone", async () => {
+		const report = await runRecallQualityMatrix();
+		expect(Object.isFrozen(report)).toBe(true);
+		expect(Object.isFrozen(report.metrics)).toBe(true);
+		expect(Object.isFrozen(report.cases)).toBe(true);
+	});
+
 	test("privacy fault is detected without copying its raw sentinel into public output", async () => {
 		const report = await runRecallQualityMatrix({ fault: "privacy" });
 		const serialized = JSON.stringify(report);
@@ -2392,6 +2452,29 @@ describe("CLI exit policy", () => {
 			pureReport(evaluated, baseline, options.strict ? "strict" : "default");
 		expect((await runRecallQualityCli([], { environment: {}, run })).exitCode).toBe(0);
 		expect((await runRecallQualityCli(["--strict"], { environment: {}, run })).exitCode).toBe(1);
+	});
+
+	test("seals dependency reports before CLI verdict and console transport", async () => {
+		const report = pureReport([
+			evaluateRecallCase(answerableCase(), semanticObservation({ top3: [] })),
+		]);
+		let verdictReads = 0;
+		const proxy = new Proxy({ ...report }, {
+			get: (target, property, receiver) => {
+				if (property !== "verdict") return Reflect.get(target, property, receiver);
+				verdictReads += 1;
+				return verdictReads === 1 ? "no-go" : "recall-quality-private-sentinel-336";
+			},
+		});
+		const result = await runRecallQualityCli([], {
+			environment: {},
+			run: async () => proxy,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(JSON.stringify(result.output)).not.toContain("recall-quality-private-sentinel-336");
+		expect(Object.isFrozen(result.output)).toBe(true);
+		expect(verdictReads).toBe(1);
 	});
 
 	test.each([
