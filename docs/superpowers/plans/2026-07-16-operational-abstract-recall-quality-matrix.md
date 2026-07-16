@@ -17,9 +17,11 @@ fixture to the canonical Agent contract and never call semantic handlers.
 **Tech stack:** Bun, TypeScript, `bun:test`, Zod-free explicit JSON validation,
 SQLite, MCP `McpServer`, SHA-256, existing CBrain retrieval/frontdoor code.
 
-**Base:** `28a61ca`  
-**Spec:** `docs/superpowers/specs/2026-07-16-operational-abstract-recall-quality-matrix-design.md`  
-**Issue:** #336  
+**Base:** `28a61ca`
+
+**Spec:** `docs/superpowers/specs/2026-07-16-operational-abstract-recall-quality-matrix-design.md`
+
+**Issue:** #336
 **Follow-up:** #337
 
 ## Global constraints

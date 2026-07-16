@@ -1,9 +1,12 @@
 # Operational and Abstract Recall Quality Matrix Design
 
-**Issue:** #336  
-**Parent:** #333  
-**Depends on:** #335（已通过 PR #349 合并）  
-**Follow-up fix:** #337  
+**Issue:** #336
+
+**Parent:** #333
+
+**Depends on:** #335（已通过 PR #349 合并）
+
+**Follow-up fix:** #337
 **Status:** Design approved by adversarial review
 
 ## 1. Problem first
