@@ -13,6 +13,7 @@ import {
 import type {
 	EvaluatedRecallCase,
 	RecallQualityBaselineEntry,
+	RecallQualityCase,
 	RecallQualityObservation,
 	RecallRouteContractCase,
 	RecallSemanticCase,
@@ -56,6 +57,18 @@ function expectFixtureError(
 	} catch (error) {
 		expect(error).toMatchObject({ code });
 		if (forbidden) expect(String(error)).not.toContain(forbidden);
+	}
+}
+
+function expectEvaluationError(run: () => unknown, code: string): void {
+	try {
+		run();
+		throw new Error(`expected evaluation error ${code}`);
+	} catch (error) {
+		expect(error).toMatchObject({
+			name: "RecallQualityEvaluationError",
+			code,
+		});
 	}
 }
 
@@ -134,6 +147,7 @@ const unanswerableCase = (
 const semanticObservation = (
 	overrides: Partial<Extract<RecallQualityObservation, { top3: unknown }>> = {},
 ): Extract<RecallQualityObservation, { top3: unknown }> => ({
+	kind: "semantic_recall",
 	caseId: "abstract_positive_01",
 	actualTool: "cbrain_recall",
 	actualFrontdoorRoute: "content_recall",
@@ -671,6 +685,75 @@ describe("fixture schema", () => {
 		);
 	});
 
+	test.each([
+		[
+			"degraded without a degradation kind",
+			{
+				answer_status: "degraded",
+				degradation_kind: "none",
+				evidence_sufficiency: "insufficient",
+			},
+		],
+		[
+			"evidence degradation with sufficient evidence",
+			{
+				answer_status: "degraded",
+				degradation_kind: "evidence",
+				evidence_sufficiency: "sufficient",
+			},
+		],
+		[
+			"evidence degradation without applicable evidence",
+			{
+				answer_status: "degraded",
+				degradation_kind: "evidence",
+				evidence_sufficiency: "not_applicable",
+			},
+		],
+		[
+			"non-degraded status with an evidence degradation kind",
+			{
+				answer_status: "ok",
+				degradation_kind: "evidence",
+				evidence_sufficiency: "insufficient",
+			},
+		],
+	] as const)("rejects an inconsistent baseline signature: %s", (_label, fields) => {
+		const row = { ...baselineEntry(), ...fields };
+		expectFixtureError(
+			() =>
+				parseRecallQualityBaseline(
+					JSON.stringify([row]),
+					parseCanonicalCases(),
+					parseCanonicalCorpus(),
+				),
+			"invalid_baseline_signature",
+		);
+	});
+
+	test("accepts an evidence-derived degraded baseline only with insufficient evidence", () => {
+		const row = {
+			...baselineEntry(),
+			failure_codes: [
+				"degraded_response",
+				"insufficient_false_positive",
+				"status_mismatch",
+			],
+			answer_status: "degraded",
+			degradation_kind: "evidence",
+			evidence_sufficiency: "insufficient",
+			top3: [{ source_id: "source_c", matched_point_ids: ["point_c"] }],
+		};
+
+		expect(
+			parseRecallQualityBaseline(
+				JSON.stringify([row]),
+				parseCanonicalCases(),
+				parseCanonicalCorpus(),
+			),
+		).toHaveLength(1);
+	});
+
 	test("rejects an unknown baseline matched point", () => {
 		const row = baselineEntry();
 		row.top3 = [{ source_id: "source_a", matched_point_ids: ["point_z"] }];
@@ -713,6 +796,39 @@ describe("fixture schema", () => {
 });
 
 describe("quality oracle", () => {
+	test("rejects observation case identity drift before evaluation", () => {
+		expectEvaluationError(
+			() =>
+				evaluateRecallCase(
+					answerableCase(),
+					semanticObservation({ caseId: "abstract_positive_02" }),
+				),
+			"case_id_mismatch",
+		);
+	});
+
+	test("rejects route and semantic observation shape swaps", () => {
+		const routeTestCase: RecallQualityCase = routeQualityCase();
+		const semanticTestCase: RecallQualityCase = answerableCase();
+		const semanticShape = semanticObservation({
+			caseId: "operational_positive_01",
+		}) as RecallQualityObservation;
+		const routeShape = {
+			kind: "route_contract",
+			caseId: "abstract_positive_01",
+			actualTool: "cbrain_recall",
+		} as unknown as RecallQualityObservation;
+
+		expectEvaluationError(
+			() => evaluateRecallCase(routeTestCase, semanticShape),
+			"observation_kind_mismatch",
+		);
+		expectEvaluationError(
+			() => evaluateRecallCase(semanticTestCase, routeShape),
+			"observation_kind_mismatch",
+		);
+	});
+
 	test("answerable exact expected source and all source-bound points passes", () => {
 		const evaluated = evaluateRecallCase(
 			answerableCase(),
@@ -868,6 +984,8 @@ describe("quality oracle", () => {
 					caseId: "abstract_negative_01",
 					answerStatus,
 					degradationKind,
+					evidenceSufficiency:
+						answerStatus === "degraded" ? "insufficient" : "sufficient",
 					top3: [{ sourceId: "source_a", matchedPointIds: [] }],
 				}),
 			);
@@ -893,10 +1011,13 @@ describe("quality oracle", () => {
 
 	test("degraded response always records degradation independently of coverage", () => {
 		const evaluated = evaluateRecallCase(
-			answerableCase(),
+			unanswerableCase(),
 			semanticObservation({
+				caseId: "abstract_negative_01",
 				answerStatus: "degraded",
 				degradationKind: "evidence",
+				evidenceSufficiency: "insufficient",
+				top3: [],
 			}),
 		);
 
@@ -922,6 +1043,54 @@ describe("quality oracle", () => {
 			"unclassified_degraded",
 		]);
 	});
+
+	test("degraded response with no degradation kind is normalized as unclassified", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				answerStatus: "degraded",
+				degradationKind: "none",
+				evidenceSufficiency: "not_applicable",
+			}),
+		);
+
+		expect(evaluated.failureCodes).toEqual([
+			"degraded_response",
+			"status_mismatch",
+			"unclassified_degraded",
+		]);
+		expect(evaluated.observation.degradationKind).toBe("unclassified");
+	});
+
+	test.each(["sufficient", "not_applicable"] as const)(
+		"evidence degradation with %s evidence is normalized as unclassified",
+		(evidenceSufficiency) => {
+			const evaluated = evaluateRecallCase(
+				answerableCase(),
+				semanticObservation({
+					answerStatus: "degraded",
+					degradationKind: "evidence",
+					evidenceSufficiency,
+				}),
+			);
+
+			expect(evaluated.failureCodes).toContain("unclassified_degraded");
+			expect(evaluated.observation.degradationKind).toBe("unclassified");
+		},
+	);
+
+	test.each(["evidence", "unclassified"] as const)(
+		"ok response with %s degradation kind is an execution failure",
+		(degradationKind) => {
+			const evaluated = evaluateRecallCase(
+				answerableCase(),
+				semanticObservation({ degradationKind }),
+			);
+
+			expect(evaluated.failureCodes).toEqual(["execution_failure"]);
+			expect(compareRecallBaseline([evaluated], []).ciVerdict).toBe("no-go");
+		},
+	);
 
 	test("expected coverage plus insufficient evidence is a false positive", () => {
 		const evaluated = evaluateRecallCase(
@@ -952,6 +1121,7 @@ describe("quality oracle", () => {
 describe("metrics", () => {
 	test("locks exact route, source coverage, case-rate, and insufficiency denominators", () => {
 		const routeMatch = evaluateRecallCase(routeQualityCase(), {
+			kind: "route_contract",
 			caseId: "operational_positive_01",
 			actualTool: "next_actions",
 		});
@@ -1046,12 +1216,14 @@ describe("metrics", () => {
 	test("rounds non-terminating metric rates to exactly six decimals", () => {
 		const cases = [
 			evaluateRecallCase(routeQualityCase(), {
+				kind: "route_contract",
 				caseId: "operational_positive_01",
 				actualTool: "next_actions",
 			}),
 			evaluateRecallCase(
 				routeQualityCase({ caseId: "operational_positive_02" }),
 				{
+					kind: "route_contract",
 					caseId: "operational_positive_02",
 					actualTool: "query",
 				},
@@ -1059,6 +1231,7 @@ describe("metrics", () => {
 			evaluateRecallCase(
 				routeQualityCase({ caseId: "operational_positive_03" }),
 				{
+					kind: "route_contract",
 					caseId: "operational_positive_03",
 					actualTool: "query",
 				},
@@ -1189,8 +1362,43 @@ describe("baseline comparison", () => {
 		expect(comparison.ciVerdict).toBe("no-go");
 	});
 
+	test("evidence-derived degraded failure remains exactly baselineable", () => {
+		const evaluated = evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({
+				answerStatus: "degraded",
+				degradationKind: "evidence",
+				evidenceSufficiency: "insufficient",
+			}),
+		);
+		const baseline: RecallQualityBaselineEntry = {
+			caseId: "abstract_positive_01",
+			failureCodes: [
+				"degraded_response",
+				"insufficient_false_positive",
+				"status_mismatch",
+			],
+			answerStatus: "degraded",
+			degradationKind: "evidence",
+			evidenceSufficiency: "insufficient",
+			top3: [
+				{
+					sourceId: "source_a",
+					matchedPointIds: ["point_a", "point_b"],
+				},
+			],
+			followUp: "#337",
+		};
+
+		const comparison = compareRecallBaseline([evaluated], [baseline]);
+		expect(comparison.cases[0]!.disposition).toBe("known_failure");
+		expect(comparison.strictVerdict).toBe("no-go");
+		expect(comparison.ciVerdict).toBe("go");
+	});
+
 	test("route, unclassified degradation, and gate integrity failures are never accepted", () => {
 		const routeMismatch = evaluateRecallCase(routeQualityCase(), {
+			kind: "route_contract",
 			caseId: "operational_positive_01",
 			actualTool: "query",
 		});

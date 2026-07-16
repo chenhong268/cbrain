@@ -156,11 +156,13 @@ export type RecallQualityFailureCode =
 	| "execution_failure";
 
 export interface RecallRouteContractObservation {
+	readonly kind: "route_contract";
 	readonly caseId: RecallQualityCaseId;
 	readonly actualTool: string;
 }
 
 export interface RecallSemanticObservation {
+	readonly kind: "semantic_recall";
 	readonly caseId: RecallQualityCaseId;
 	readonly actualTool: string;
 	readonly actualFrontdoorRoute: string;
@@ -176,6 +178,20 @@ export interface RecallSemanticObservation {
 export type RecallQualityObservation =
 	| RecallRouteContractObservation
 	| RecallSemanticObservation;
+
+export type RecallQualityEvaluationErrorCode =
+	| "case_id_mismatch"
+	| "observation_kind_mismatch";
+
+export class RecallQualityEvaluationError extends Error {
+	readonly code: RecallQualityEvaluationErrorCode;
+
+	constructor(code: RecallQualityEvaluationErrorCode) {
+		super(`recall_quality_evaluation:${code}`);
+		this.name = "RecallQualityEvaluationError";
+		this.code = code;
+	}
+}
 
 interface EvaluatedRecallCaseBase {
 	readonly caseId: RecallQualityCaseId;
@@ -960,6 +976,21 @@ export function parseRecallQualityBaseline(
 		) {
 			fail("invalid_baseline_signature");
 		}
+		if (item.answer_status === "degraded") {
+			if (
+				item.degradation_kind !== "evidence" ||
+				item.evidence_sufficiency !== "insufficient" ||
+				!failureCodes.includes("degraded_response") ||
+				!failureCodes.includes("status_mismatch")
+			) {
+				fail("invalid_baseline_signature");
+			}
+		} else if (
+			item.degradation_kind !== "none" ||
+			failureCodes.includes("degraded_response")
+		) {
+			fail("invalid_baseline_signature");
+		}
 		if (item.follow_up !== "#337") fail("invalid_baseline_follow_up");
 		const top3 = parseBaselineTop3(item.top3, pointSourceById);
 
@@ -975,10 +1006,20 @@ export function parseRecallQualityBaseline(
 	});
 }
 
-function isSemanticObservation(
+function evaluationFail(code: RecallQualityEvaluationErrorCode): never {
+	throw new RecallQualityEvaluationError(code);
+}
+
+function isRouteObservationShape(
+	observation: RecallQualityObservation,
+): observation is RecallRouteContractObservation {
+	return observation.kind === "route_contract" && !("top3" in observation);
+}
+
+function isSemanticObservationShape(
 	observation: RecallQualityObservation,
 ): observation is RecallSemanticObservation {
-	return "top3" in observation;
+	return observation.kind === "semantic_recall" && "top3" in observation;
 }
 
 function sortedFailureCodes(
@@ -1013,8 +1054,14 @@ export function evaluateRecallCase(
 	observation: RecallQualityObservation,
 ): EvaluatedRecallCase {
 	const failures = new Set<RecallQualityFailureCode>();
+	if (observation.caseId !== testCase.caseId) {
+		evaluationFail("case_id_mismatch");
+	}
 
 	if (testCase.kind === "route_contract") {
+		if (!isRouteObservationShape(observation)) {
+			evaluationFail("observation_kind_mismatch");
+		}
 		const routeMatches = observation.actualTool === testCase.expectedTool;
 		if (!routeMatches) failures.add("route_mismatch");
 		return {
@@ -1023,6 +1070,7 @@ export function evaluateRecallCase(
 			kind: "route_contract",
 			testCase,
 			observation: {
+				kind: "route_contract",
 				caseId: observation.caseId,
 				actualTool: observation.actualTool,
 			},
@@ -1031,12 +1079,28 @@ export function evaluateRecallCase(
 		};
 	}
 
-	if (!isSemanticObservation(observation)) {
-		throw new Error("recall_quality_observation:semantic_required");
+	if (!isSemanticObservationShape(observation)) {
+		evaluationFail("observation_kind_mismatch");
 	}
+	if (
+		observation.answerStatus !== "degraded" &&
+		observation.degradationKind !== "none"
+	) {
+		failures.add("execution_failure");
+	}
+	const degradationKind =
+		observation.answerStatus === "degraded" &&
+		observation.degradationKind !== "unclassified" &&
+		!(
+			observation.degradationKind === "evidence" &&
+			observation.evidenceSufficiency === "insufficient"
+		)
+			? "unclassified"
+			: observation.degradationKind;
 
 	const normalizedObservation: RecallSemanticObservation = {
 		...observation,
+		degradationKind,
 		top3: normalizeObservationTop3(observation.top3),
 	};
 	const routeMatches =
@@ -1115,7 +1179,10 @@ export function evaluateRecallCase(
 	if (normalizedObservation.answerStatus === "degraded") {
 		failures.add("degraded_response");
 	}
-	if (normalizedObservation.degradationKind === "unclassified") {
+	if (
+		normalizedObservation.answerStatus === "degraded" &&
+		normalizedObservation.degradationKind === "unclassified"
+	) {
 		failures.add("unclassified_degraded");
 	}
 
