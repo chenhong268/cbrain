@@ -213,9 +213,65 @@ describe("checkAgentProfileSkillContract (#335)", () => {
       });
     }
 
+    for (const reminder of ["Do not ever forget to call", "千万不要忘了调用"]) {
+      test(`treats reminder variant ${reminder} as positive in ${file}`, () => {
+        const files = valid();
+        files[file] += `\n${reminder} profile({ action: "remove" })`;
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: 'forbidden daily token: action: "remove"',
+        }]);
+      });
+    }
+
+    test(`rejects an over-limit unclosed call after a safe canonical decoy in ${file}`, () => {
+      const files = valid();
+      files[file] += `\nprofile({ action: "update", entries: [{ content: "${"x".repeat(900)}`;
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: "malformed profile call",
+      }]);
+    });
+
     test(`accepts a cross-line prohibition example in ${file}`, () => {
       const files = valid();
       files[file] += '\n禁止以下操作：\nprofile({ action: "remove" })';
+      expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
+    });
+
+    test(`accepts a direct negative block through a code fence and bullet in ${file}`, () => {
+      const files = valid();
+      files[file] += '\n禁止以下操作：\n```text\n- profile({ action: "remove" })\n```';
+      expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
+    });
+
+    test(`accepts only the enumerated direct negative phrases in ${file}`, () => {
+      const files = valid();
+      files[file] += [
+        "",
+        '不得调用 profile({ action: "remove" })',
+        '不要调用 profile({ action: "remove" })',
+        '不能调用 profile({ action: "remove" })',
+        '不允许调用 profile({ action: "remove" })',
+        '严禁调用 profile({ action: "remove" })',
+        '切勿调用 profile({ action: "remove" })',
+        'Do not call profile({ action: "remove" })',
+        'Do not use profile({ action: "remove" })',
+        'Don\'t call profile({ action: "remove" })',
+        'Don\'t use profile({ action: "remove" })',
+        'Must not call profile({ action: "remove" })',
+        'Must not use profile({ action: "remove" })',
+        'Never call profile({ action: "remove" })',
+        'Never use profile({ action: "remove" })',
+      ].join("\n");
+      expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
+    });
+
+    test(`parses parentheses and escaped quotes inside a profile call in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nprofile({ action: "update", entries: [{ scope: "open", source: "explicit", content: "literal ) and \\"quoted(\\"" }] })';
       expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
     });
   }
