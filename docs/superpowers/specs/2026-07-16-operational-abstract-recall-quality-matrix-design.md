@@ -278,7 +278,7 @@ type SemanticObservation = {
   actualTool: string;
   actualFrontdoorRoute: string;
   answerStatus: "ok" | "empty" | "degraded";
-  degradationKind: "none" | "evidence" | "infrastructure";
+  degradationKind: "none" | "evidence" | "unclassified";
   evidenceSufficiency: "sufficient" | "insufficient" | "not_applicable";
   top3: readonly Array<{
     sourceId: string;
@@ -292,11 +292,12 @@ does not itself imply evidence insufficiency. `evidenceSufficiency` is derived
 only from `raw.evidence_pack.coverage.coverage_status` when an evidence pack is
 present: production `sufficient` stays `sufficient`; both `partial` and
 `insufficient` normalize to `insufficient`; absence becomes `not_applicable`.
-Infrastructure degraded reasons map to `degradationKind:"infrastructure"` and
-never set `evidenceSufficiency`; evidence-only degradation maps to `evidence`;
-non-degraded output maps to `none`. Infrastructure takes precedence if both
-kinds are present. Answer points are scanned only in top-three snippets and
-remain bound to their returned source.
+Because the current content frontdoor does not expose search-trace or
+infrastructure-reason fields, the mapper does not invent them. A degraded
+response with partial/insufficient evidence coverage maps to `evidence`; any
+other degraded response maps to `unclassified`; non-degraded output maps to
+`none`. Answer points are scanned only in top-three snippets and remain bound
+to their returned source.
 
 For an answerable case, expected coverage is true only when:
 
@@ -322,7 +323,7 @@ precedence-dependent primary outcome:
 - `status_mismatch`: normalized status is outside `allowed_statuses`;
 - `degraded_response`: `answerStatus === "degraded"`, independent of evidence
   sufficiency;
-- `infrastructure_degraded`: `degradationKind === "infrastructure"`;
+- `unclassified_degraded`: `degradationKind === "unclassified"`;
 - `legacy_regression`, `privacy_failure`, `nondeterministic`, or
   `execution_failure` for non-baselineable gate failures.
 
@@ -385,9 +386,10 @@ hide inside the same coarse failure codes. Source/point identities are internal
 synthetic IDs and never enter the report.
 Only semantic retrieval/evidence-status/sufficiency failures may be baselined,
 and `degradation_kind` is part of the exact signature. Any `route_mismatch`
-(operational or semantic), `infrastructure_degraded`, plus legacy, schema,
+(operational or semantic), `unclassified_degraded`, plus legacy, schema,
 execution, privacy, and determinism failures, is non-baselineable. Mapper tests
-cover evidence-only, infrastructure-only, and combined degraded envelopes.
+cover evidence-derived and unclassified degraded envelopes without claiming an
+infrastructure reason the production frontdoor does not expose.
 
 Comparison is exact:
 
