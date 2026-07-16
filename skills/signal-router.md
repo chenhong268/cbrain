@@ -4,10 +4,10 @@
 
 ## Purpose
 
-Not every signal belongs in CBrain. Before calling `ingest_dialogue` or `update_profile`, route each signal to the right destination:
+Not every signal belongs in CBrain. Before calling `ingest_dialogue` or `profile`, route each signal to the right destination:
 
 - **`cbrain_memory`** — durable compounding memory that changes future recall, judgment, or knowledge structure
-- **`agent_profile`** — confirmed preferences and operating rules that affect Agent behavior
+- **`agent_profile`** — preferences and operating rules explicitly stated by the user that affect Agent behavior
 - **`action_loop`** — short-term tasks, reminders, follow-ups — belongs in Agent scheduling, not CBrain
 - **`no_store`** — no expected reuse value; remain silent and do not store
 
@@ -16,7 +16,7 @@ Not every signal belongs in CBrain. Before calling `ingest_dialogue` or `update_
 | Destination | 触发条件 | 工具调用 | 用户感知 |
 |:------------|:---------|:---------|:---------|
 | `cbrain_memory` | 含实体/关系/事件/决策/观点演变，且会改变未来召回、判断、关系理解、知识结构或用户思考演化；或用户明确要求长期记忆/保存为资料/以后参考 | `ingest_dialogue` / `ingest` | 可选"已记录" |
-| `agent_profile` | 用户要求设偏好/规则/以后都这样 | `update_profile` / `reload_profile` | 确认偏好已生效 |
+| `agent_profile` | 用户明确陈述偏好/规则/以后都这样 | 使用下方完整 unified Profile update 调用 | 确认偏好已生效 |
 | `action_loop` | 用户要求提醒/待办/下次检查/安排 | Agent 内部 scheduler，不调 CBrain | 确认已安排 |
 | `no_store` | 纯确认/闲聊/一次性信息 | 无 | 静默 |
 
@@ -28,7 +28,7 @@ Not every signal belongs in CBrain. Before calling `ingest_dialogue` or `update_
 Q1: 是否提醒/待办/安排/下次检查？
     → YES: action_loop（跳过后续）
 
-Q2: 是否偏好/规则/以后都这样？
+Q2: 用户是否明确陈述偏好/规则/以后都这样？
     → YES: agent_profile（跳过后续）
 
 Q3: 是否明确要求长期记忆/保存为资料/以后参考？
@@ -69,9 +69,24 @@ Q1-Q3 是意图判断，Q4 是内容价值判断。
 | Destination | 调什么工具 |
 |:-----------|:----------|
 | `cbrain_memory` | `ingest_dialogue({ text, mode: "auto" })` 或 `ingest({ content, type, title, pageType })` |
-| `agent_profile` | `update_profile({ type, category, content })`，必要时 `reload_profile()` |
+| `agent_profile` | 仅在用户明确陈述时使用下方完整 unified Profile update 调用 |
 | `action_loop` | Agent 内部 scheduler / reminder 工具（不调 CBrain） |
 | `no_store` | 无操作 |
+
+完整调用示例（字段不可省略）：
+
+```text
+profile({ action: "update", entries: [{
+  id: "response-length-short",
+  type: "preference",
+  category: "communication",
+  scope: "open",
+  content: "回复保持简洁",
+  source: "explicit"
+}] })
+```
+
+只有用户明确说出的偏好或规则才能持久化；不要根据用户行为、语气或历史模式猜测并写入 Profile。
 
 ## Compound Signals
 
@@ -96,3 +111,4 @@ Q1-Q3 是意图判断，Q4 是内容价值判断。
 - ❌ "记得" 一律当存储意图（"记得提醒我"是待办，不是记忆）
 - ❌ 含实体就进 `cbrain_memory`（"一会儿找人物A吃饭"是 `no_store`）
 - ❌ 把 `agent_profile` 内容存进 CBrain vault（profile 是独立存储）
+- ❌ 用户没有明确陈述偏好或规则时写入 Profile

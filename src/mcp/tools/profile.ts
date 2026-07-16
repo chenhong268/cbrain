@@ -8,8 +8,25 @@ import {
   formatRemoveProfileEnvelope,
   formatReloadProfileEnvelope,
 } from "./format-result.js";
+import {
+  buildAgentVisibleStats,
+  validateAgentProfileUpdate,
+  type AgentProfilePolicyCode,
+  type ProfileUpdateInput,
+} from "./profile-policy.js";
 
 type ProfileAction = "get" | "update" | "remove" | "reload";
+
+const AGENT_MESSAGES: Record<AgentProfilePolicyCode, string> = {
+  PROFILE_ACTION_FORBIDDEN: "Daily Agent sessions cannot remove or reload Profile entries.",
+  PROFILE_SCOPE_FORBIDDEN: "Daily Agent sessions can read open Profile entries only.",
+  PROFILE_UPDATE_INVALID: "Daily Agent updates require a valid batch of explicit, open Profile entries.",
+};
+
+const AGENT_UPDATE_FAILED = {
+  code: "PROFILE_UPDATE_FAILED",
+  message: "Daily Agent Profile update failed without exposing local details.",
+} as const;
 
 interface ProfileFilterInput {
   scope?: ProfileScope;
@@ -17,18 +34,6 @@ interface ProfileFilterInput {
   type?: ProfileEntryType;
   tags?: string[];
   ids?: string[];
-}
-
-interface ProfileUpdateInput {
-  id: string;
-  type: ProfileEntryType;
-  category: ProfileCategory;
-  scope: ProfileScope;
-  agents?: string[];
-  content: string;
-  priority?: "high" | "normal";
-  source?: "explicit" | "observed" | "inferred";
-  tags?: string[];
 }
 
 function textResult(envelope: unknown): { content: Array<{ type: "text"; text: string }> } {
@@ -40,6 +45,16 @@ function textResult(envelope: unknown): { content: Array<{ type: "text"; text: s
 function errorResult(message: string): { content: Array<{ type: "text"; text: string }>; isError: boolean } {
   return {
     content: [{ type: "text", text: JSON.stringify({ error: message }) }],
+    isError: true,
+  };
+}
+
+function policyError(code: AgentProfilePolicyCode) {
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({ error: { code, message: AGENT_MESSAGES[code] } }),
+    }],
     isError: true,
   };
 }
@@ -80,6 +95,36 @@ function runProfileAction(
     entries?: ProfileUpdateInput[];
   },
 ) {
+  if (ctx.toolProfile === "agent") {
+    if (action === "remove" || action === "reload") {
+      return policyError("PROFILE_ACTION_FORBIDDEN");
+    }
+    if (action === "get") {
+      if (args.scope && args.scope !== "open") {
+        return policyError("PROFILE_SCOPE_FORBIDDEN");
+      }
+      const { category, type, tags, ids } = args;
+      const filter: ProfileFilterInput = { scope: "open", category, type, tags, ids };
+      const entries = ctx.profile.getEntries(filter);
+      return textResult(formatGetProfileEnvelope(
+        entries,
+        buildAgentVisibleStats(entries),
+        [],
+        filter as Record<string, unknown>,
+      ));
+    }
+    const policyCode = validateAgentProfileUpdate(ctx.profile, args.entries);
+    if (policyCode) return policyError(policyCode);
+    try {
+      return updateProfile(ctx, args.entries!);
+    } catch {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ error: AGENT_UPDATE_FAILED }) }],
+        isError: true,
+      };
+    }
+  }
+
   if (action === "get") {
     const { scope, category, type, tags, ids } = args;
     return getProfile(ctx, { scope, category, type, tags, ids });
@@ -96,28 +141,49 @@ function runProfileAction(
 }
 
 export function registerProfileTools(server: McpServer, ctx: ToolContext): void {
+  const isAgent = ctx.toolProfile === "agent";
+  const sourceSchema = isAgent
+    ? z.enum(["explicit", "observed", "inferred"])
+        .describe("Daily Agent sessions allow explicit only; observed/inferred fail closed")
+    : z.enum(["explicit", "observed", "inferred"])
+        .default("observed")
+        .describe("How this was learned");
+
   server.registerTool("profile", {
-    description:
-      "Unified profile operations. Use action=get/update/remove/reload. " +
-      "Compatibility aliases get_profile/update_profile/remove_profile/reload_profile remain available.",
+    description: isAgent
+      ? "Daily Agent Profile operations: get reads open entries; update accepts explicit, open entries only; remove/reload are unavailable. Compatibility aliases are unavailable in Daily Agent sessions."
+      : "Unified profile operations. Use action=get/update/remove/reload. " +
+        "Compatibility aliases get_profile/update_profile/remove_profile/reload_profile remain available.",
     inputSchema: {
-      action: z.enum(["get", "update", "remove", "reload"]).describe("Profile operation"),
-      scope: z.enum(["open", "scoped", "private"]).optional().describe("Privacy scope filter for action=get"),
+      action: z.enum(["get", "update", "remove", "reload"]).describe(isAgent
+        ? "Daily Agent operation; remove/reload are unavailable"
+        : "Profile operation"),
+      scope: z.enum(["open", "scoped", "private"]).optional().describe(isAgent
+        ? "Daily Agent get allows open only; scoped/private fail closed"
+        : "Privacy scope filter for action=get"),
       category: z.enum(["communication", "work", "health", "finance", "interests", "general"]).optional().describe("Category filter for action=get"),
       type: z.enum(["preference", "constraint", "context", "habit"]).optional().describe("Entry type filter for action=get"),
       tags: z.array(z.string().max(200)).optional().describe("Tag filter for action=get"),
-      ids: z.array(z.string().max(200)).optional().describe("Entry IDs for action=get/remove"),
+      ids: z.array(z.string().max(200)).optional().describe(isAgent
+        ? "Entry IDs filter for action=get only; remove is unavailable"
+        : "Entry IDs for action=get/remove"),
       entries: z.array(z.object({
         id: z.string().max(200).describe("Unique entry identifier (kebab-case)"),
         type: z.enum(["preference", "constraint", "context", "habit"]).describe("Entry type"),
         category: z.enum(["communication", "work", "health", "finance", "interests", "general"]).describe("Category"),
-        scope: z.enum(["open", "scoped", "private"]).describe("Privacy scope"),
-        agents: z.array(z.string().max(200)).optional().describe("Visible agents (for scoped entries)"),
+        scope: z.enum(["open", "scoped", "private"]).describe(isAgent
+          ? "Daily Agent updates require open only; scoped/private rejected"
+          : "Privacy scope"),
+        agents: z.array(z.string().max(200)).optional().describe(isAgent
+          ? "Daily Agent updates must omit this field or provide an empty array"
+          : "Visible agents (for scoped entries)"),
         content: z.string().max(50_000).describe("The profile content"),
         priority: z.enum(["high", "normal"]).optional().describe("Priority (mainly for constraints)"),
-        source: z.enum(["explicit", "observed", "inferred"]).default("observed").describe("How this was learned"),
+        source: sourceSchema,
         tags: z.array(z.string().max(200)).optional().describe("Tags for categorization"),
-      })).optional().describe("Entries for action=update"),
+      })).optional().describe(isAgent
+        ? "non-empty whole batch for action=update; every entry must be explicit and open"
+        : "Entries for action=update"),
     },
   }, async ({ action, scope, category, type, tags, ids, entries }) =>
     runProfileAction(ctx, action, { scope, category, type, tags, ids, entries }));

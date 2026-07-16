@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   checkAgentContractTools,
   checkAgentFacingRoutingProfile,
+  checkAgentProfileSkillContract,
   checkAgentWorkflowContract,
   checkIngestPageTypeDocs,
   checkToolDescriptions,
@@ -38,6 +39,243 @@ afterEach(() => {
 function fails(r: CheckResult[]): boolean {
   return r.some((x) => !x.passed);
 }
+
+describe("checkAgentProfileSkillContract (#335)", () => {
+  const skillFiles = ["signal-router.md", "signal-detector.md"] as const;
+  const validSkill = [
+    "# Synthetic profile signal contract",
+    "Use only the unified daily call:",
+    "`profile({ action: \"update\", entries: [{ scope: \"open\", source: \"explicit\" }] })`",
+    "Do not use action: \"remove\", action: \"reload\", source: \"observed\", or source: \"inferred\".",
+    "fixture-body-sentinel",
+  ].join("\n");
+  const valid = () => Object.fromEntries(skillFiles.map((file) => [file, validSkill]));
+  const checkName = (file: string) => `agent profile skill contract @skills/${file}`;
+
+  test("accepts the unified explicit open update contract in both canonical skills", () => {
+    expect(checkAgentProfileSkillContract(withSkills(valid()))).toEqual([{
+      check: "agent profile skill contract",
+      passed: true,
+      detail: "signal-router.md and signal-detector.md use the unified explicit open update contract",
+    }]);
+  });
+
+  test("reads only the two canonical signal skills", () => {
+    const dir = withSkills({
+      ...valid(),
+      "decoy.md": "update_profile profile({ action: \"remove\", source: \"observed\" }) decoy-body-sentinel",
+    });
+    expect(fails(checkAgentProfileSkillContract(dir))).toBe(false);
+  });
+
+  for (const file of skillFiles) {
+    test(`rejects missing ${file}`, () => {
+      const files = valid();
+      delete files[file];
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: `missing skill file: ${file}`,
+      }]);
+    });
+  }
+
+  for (const file of skillFiles) {
+    for (const alias of ["get_profile", "update_profile", "remove_profile", "reload_profile"]) {
+      test(`rejects ${alias} in ${file} without echoing body text`, () => {
+        const files = valid();
+        files[file] += `\nUse ${alias} fixture-body-alias-sentinel`;
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: `forbidden alias: ${alias}`,
+        }]);
+      });
+    }
+  }
+
+  const requiredTokens = [
+    ["profile(", "profile_call("],
+    ["action: \"update\"", "action: \"write\""],
+    ["entries", "records"],
+    ["scope: \"open\"", "scope: \"scoped\""],
+    ["source: \"explicit\"", "source: \"manual\""],
+  ] as const;
+  for (const file of skillFiles) {
+    for (const [token, replacement] of requiredTokens) {
+      test(`rejects ${file} missing ${token}`, () => {
+        const files = valid();
+        files[file] = files[file].replace(token, replacement);
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: token === 'scope: "open"'
+            ? 'forbidden daily token: scope: "scoped"'
+            : `missing required token: ${token}`,
+        }]);
+      });
+    }
+  }
+
+  for (const file of skillFiles) {
+    for (const token of [
+      'action: "remove"',
+      'action: "reload"',
+      'source: "observed"',
+      'source: "inferred"',
+    ]) {
+      test(`rejects positive ${token} in ${file}`, () => {
+        const files = valid();
+        files[file] += `\nCall profile({ ${token} }) fixture-body-forbidden-sentinel`;
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: `forbidden daily token: ${token}`,
+        }]);
+      });
+    }
+  }
+
+  for (const file of skillFiles) {
+    test(`rejects a positive remove call after an unrelated negative sentence in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nDo not use aliases. Call profile({ action: "remove" }) fixture-body-scope-sentinel';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: action: "remove"',
+      }]);
+    });
+
+    test(`rejects the second positive remove call after a negated occurrence in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nDo not use action: "remove"; instead call profile({ action: "remove" }) fixture-body-repeat-sentinel';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: action: "remove"',
+      }]);
+    });
+
+    test(`rejects a required canonical call when its only occurrence is negated in ${file}`, () => {
+      const files = valid();
+      files[file] = [
+        "# Synthetic profile signal contract",
+        '`Never call profile({ action: "update", entries: [{ scope: "open", source: "explicit" }] })`',
+        "fixture-body-negated-call-sentinel",
+      ].join("\n");
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: "missing required token: profile(",
+      }]);
+    });
+
+    test(`rejects a private update after a safe canonical decoy in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nprofile({ action: "update", entries: [{ scope: "private", source: "explicit" }] })';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: scope: "private"',
+      }]);
+    });
+
+    test(`rejects a scoped update after a safe canonical decoy in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nprofile({ action: "update", entries: [{ scope: "scoped", source: "explicit" }] })';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: scope: "scoped"',
+      }]);
+    });
+
+    test(`rejects mixed open and private entries inside one call in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nprofile({ action: "update", entries: [{ scope: "open", source: "explicit" }, { scope: "private", source: "explicit" }] })';
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: 'forbidden daily token: scope: "private"',
+      }]);
+    });
+
+    for (const reminder of ["不要忘记", "别忘记", "do not forget to", "don't forget to", "never forget to"]) {
+      test(`treats ${reminder} remove as a positive reminder in ${file}`, () => {
+        const files = valid();
+        files[file] += `\n${reminder} call profile({ action: "remove" })`;
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: 'forbidden daily token: action: "remove"',
+        }]);
+      });
+    }
+
+    for (const reminder of ["Do not ever forget to call", "千万不要忘了调用"]) {
+      test(`treats reminder variant ${reminder} as positive in ${file}`, () => {
+        const files = valid();
+        files[file] += `\n${reminder} profile({ action: "remove" })`;
+        expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+          check: checkName(file),
+          passed: false,
+          detail: 'forbidden daily token: action: "remove"',
+        }]);
+      });
+    }
+
+    test(`rejects an over-limit unclosed call after a safe canonical decoy in ${file}`, () => {
+      const files = valid();
+      files[file] += `\nprofile({ action: "update", entries: [{ content: "${"x".repeat(900)}`;
+      expect(checkAgentProfileSkillContract(withSkills(files))).toEqual([{
+        check: checkName(file),
+        passed: false,
+        detail: "malformed profile call",
+      }]);
+    });
+
+    test(`accepts a cross-line prohibition example in ${file}`, () => {
+      const files = valid();
+      files[file] += '\n禁止以下操作：\nprofile({ action: "remove" })';
+      expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
+    });
+
+    test(`accepts a direct negative block through a code fence and bullet in ${file}`, () => {
+      const files = valid();
+      files[file] += '\n禁止以下操作：\n```text\n- profile({ action: "remove" })\n```';
+      expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
+    });
+
+    test(`accepts only the enumerated direct negative phrases in ${file}`, () => {
+      const files = valid();
+      files[file] += [
+        "",
+        '不得调用 profile({ action: "remove" })',
+        '不要调用 profile({ action: "remove" })',
+        '不能调用 profile({ action: "remove" })',
+        '不允许调用 profile({ action: "remove" })',
+        '严禁调用 profile({ action: "remove" })',
+        '切勿调用 profile({ action: "remove" })',
+        'Do not call profile({ action: "remove" })',
+        'Do not use profile({ action: "remove" })',
+        'Don\'t call profile({ action: "remove" })',
+        'Don\'t use profile({ action: "remove" })',
+        'Must not call profile({ action: "remove" })',
+        'Must not use profile({ action: "remove" })',
+        'Never call profile({ action: "remove" })',
+        'Never use profile({ action: "remove" })',
+      ].join("\n");
+      expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
+    });
+
+    test(`parses parentheses and escaped quotes inside a profile call in ${file}`, () => {
+      const files = valid();
+      files[file] += '\nprofile({ action: "update", entries: [{ scope: "open", source: "explicit", content: "literal ) and \\"quoted(\\"" }] })';
+      expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
+    });
+  }
+});
 
 describe("checkAgentContractTools (#316)", () => {
   test("Check 2 backticked: 优先用 `deep_recall` fails", () => {

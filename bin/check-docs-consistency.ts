@@ -906,6 +906,136 @@ export function checkAgentFacingRoutingProfile(
   }];
 }
 
+/** #335 — keep the two signal-routing skills on the governed daily Profile
+ * contract. This check deliberately reads only the canonical router and
+ * detector files: other docs may describe full-profile operations, while these
+ * two files are executable daily-Agent policy. */
+export function checkAgentProfileSkillContract(skillsDir: string): CheckResult[] {
+  const files = ["signal-router.md", "signal-detector.md"] as const;
+  const aliases = ["get_profile", "update_profile", "remove_profile", "reload_profile"] as const;
+  const requiredTokens = [
+    { label: "action: \"update\"", pattern: /\baction\s*:\s*["']update["']/ },
+    { label: "entries", pattern: /\bentries\b/ },
+    { label: "scope: \"open\"", pattern: /\bscope\s*:\s*["']open["']/ },
+    { label: "source: \"explicit\"", pattern: /\bsource\s*:\s*["']explicit["']/ },
+  ] as const;
+  const forbiddenTokens = [
+    { label: "action: \"remove\"", pattern: /\baction\s*:\s*["']remove["']/ },
+    { label: "action: \"reload\"", pattern: /\baction\s*:\s*["']reload["']/ },
+    { label: "scope: \"scoped\"", pattern: /\bscope\s*:\s*["']scoped["']/ },
+    { label: "scope: \"private\"", pattern: /\bscope\s*:\s*["']private["']/ },
+    { label: "source: \"observed\"", pattern: /\bsource\s*:\s*["']observed["']/ },
+    { label: "source: \"inferred\"", pattern: /\bsource\s*:\s*["']inferred["']/ },
+  ] as const;
+  const isDirectNegativeBlock = (text: string, index: number): boolean => {
+    const boundedPrefix = text.slice(Math.max(0, index - 512), index);
+    // Fail closed on reminder wording. Only an explicit call/use prohibition
+    // immediately attached to this call may make an example non-executable.
+    const directNegative = /(?:禁止以下操作|(?:不得|不要|不能|不允许|严禁|切勿)调用|(?:do not|don't|must not|never)\s+(?:call|use))[：:]?\s*(?:`{1,3}[A-Za-z0-9_-]*\s*)?(?:[-*+]\s*)?$/i;
+    return directNegative.test(boundedPrefix);
+  };
+  const scanProfileCalls = (text: string): Array<{
+    start: number;
+    call?: string;
+    malformed: boolean;
+  }> => {
+    const calls: Array<{ start: number; call?: string; malformed: boolean }> = [];
+    for (const match of text.matchAll(/\bprofile\s*\(/g)) {
+      const start = match.index ?? 0;
+      const open = start + match[0].lastIndexOf("(");
+      let depth = 0;
+      let quote: "\"" | "'" | "`" | null = null;
+      let escaped = false;
+      let close = -1;
+
+      for (let index = open; index < text.length && index - open <= 800; index += 1) {
+        const char = text[index];
+        if (quote) {
+          if (escaped) {
+            escaped = false;
+          } else if (char === "\\") {
+            escaped = true;
+          } else if (char === quote) {
+            quote = null;
+          }
+          continue;
+        }
+        if (char === "\"" || char === "'" || char === "`") {
+          quote = char;
+        } else if (char === "(") {
+          depth += 1;
+        } else if (char === ")") {
+          depth -= 1;
+          if (depth === 0) {
+            close = index;
+            break;
+          }
+        }
+      }
+
+      calls.push(close < 0
+        ? { start, malformed: true }
+        : { start, call: text.slice(start, close + 1), malformed: false });
+    }
+    return calls;
+  };
+  const out: CheckResult[] = [];
+
+  for (const file of files) {
+    const path = join(skillsDir, file);
+    const check = `agent profile skill contract @skills/${file}`;
+    if (!existsSync(path)) {
+      out.push({ check, passed: false, detail: `missing skill file: ${file}` });
+      continue;
+    }
+
+    const text = readFileSync(path, "utf-8");
+    for (const alias of aliases) {
+      if (new RegExp(`\\b${alias}\\b`).test(text)) {
+        out.push({ check, passed: false, detail: `forbidden alias: ${alias}` });
+      }
+    }
+
+    // Scan every raw call start with quote/escape-aware parenthesis matching.
+    // Calls that do not close within the bounded contract are never ignored.
+    const scans = scanProfileCalls(text);
+    let executableCalls = 0;
+    let malformedCalls = 0;
+    for (const scan of scans) {
+      const call = scan.call;
+      if (scan.malformed || !call) {
+        malformedCalls += 1;
+        out.push({ check, passed: false, detail: "malformed profile call" });
+        continue;
+      }
+      if (isDirectNegativeBlock(text, scan.start)) continue;
+      executableCalls += 1;
+
+      const forbidden = forbiddenTokens.filter(({ pattern }) => pattern.test(call));
+      if (forbidden.length > 0) {
+        for (const { label } of forbidden) {
+          out.push({ check, passed: false, detail: `forbidden daily token: ${label}` });
+        }
+        continue;
+      }
+      for (const { label, pattern } of requiredTokens) {
+        if (!pattern.test(call)) {
+          out.push({ check, passed: false, detail: `missing required token: ${label}` });
+        }
+      }
+    }
+    if (scans.length === 0 || (executableCalls === 0 && malformedCalls === 0)) {
+      out.push({ check, passed: false, detail: "missing required token: profile(" });
+    }
+  }
+
+  return out.length > 0 ? out : [{
+    check: "agent profile skill contract",
+    passed: true,
+    detail: "signal-router.md and signal-detector.md use the unified explicit open update contract",
+  }];
+}
+
 /** #322 — keep the daily Agent on canonical write + operational recall paths.
  * This is deliberately structural and limited to managed skills: public docs
  * may discuss lower-level recovery, but skills are executable Agent policy. */
@@ -1159,6 +1289,7 @@ function main(): void {
     ...checkAgentContractTools(new Set(tools.map((t) => t.name)), join(PROJECT_DIR, "skills")),
     ...checkAgentFacingRoutingProfile(join(PROJECT_DIR, "skills")),
     ...checkAgentWorkflowContract(join(PROJECT_DIR, "skills")),
+    ...checkAgentProfileSkillContract(join(PROJECT_DIR, "skills")),
     ...checkIngestPageTypeDocs(docs),
     ...checkSections(docs, tools, cli),
   ];
