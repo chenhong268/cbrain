@@ -131,6 +131,49 @@ export interface SemanticRecallIntegrationResult {
 	}>;
 }
 
+export type RecallCleanupFailureStage =
+	| "semantic_init"
+	| "semantic_handler"
+	| "semantic_close"
+	| "legacy_init"
+	| "legacy_handler"
+	| "legacy_close"
+	| "worker_spawn";
+
+export interface RecallCleanupFailureProbeResult {
+	readonly failureObserved: true;
+	readonly suiteRootRemoved: true;
+	readonly workerRootRemoved: true;
+	readonly parentEnvironmentRestored: true;
+}
+
+interface SuiteFailureHooks {
+	readonly stage?: "init" | "handler" | "close";
+	readonly onRootCreated?: (root: string) => void;
+}
+
+interface NetworkPoison {
+	readonly calls: () => number;
+	readonly originalFetch: typeof globalThis.fetch;
+	restore(): void;
+}
+
+function installNetworkPoison(): NetworkPoison {
+	const originalFetch = globalThis.fetch;
+	let calls = 0;
+	globalThis.fetch = ((..._args: Parameters<typeof globalThis.fetch>) => {
+		calls += 1;
+		return Promise.reject(new Error("recall_quality_network_forbidden"));
+	}) as unknown as typeof globalThis.fetch;
+	return {
+		calls: () => calls,
+		originalFetch,
+		restore() {
+			globalThis.fetch = originalFetch;
+		},
+	};
+}
+
 interface ProductionFrontdoorEnvelope {
 	readonly summary?: Readonly<{ status?: unknown }>;
 	readonly raw?: Readonly<{
@@ -363,7 +406,9 @@ function loadCanonicalSemanticFixtures(): {
 	return { corpus, cases };
 }
 
-async function executeSemanticRecallWorker(): Promise<SemanticRecallIntegrationResult> {
+async function executeSemanticRecallWorker(
+	hooks: SuiteFailureHooks = {},
+): Promise<SemanticRecallIntegrationResult> {
 	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
 		throw new Error("recall_quality_worker_required");
 	}
@@ -380,20 +425,34 @@ async function executeSemanticRecallWorker(): Promise<SemanticRecallIntegrationR
 	const closedEnvironment = environmentKeys.every((key) => allowedEnvironment.has(key));
 	const inheritedCbrainVariables = environmentKeys.filter((key) => key.startsWith("CBRAIN_")).length;
 	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-semantic-"));
-	const vaultPath = join(root, "vault");
-	const runtimePath = join(root, "runtime");
-	const profileDir = join(root, "profile");
-	for (const path of [vaultPath, runtimePath, profileDir]) mkdirSync(path, { recursive: true });
 	let db: CBrainDB | undefined;
 	let result: Omit<SemanticRecallIntegrationResult, "worker"> | undefined;
-	const originalJobStart = JobQueue.prototype.start;
+	let originalJobStart: typeof JobQueue.prototype.start | undefined;
+	let networkPoison: NetworkPoison | undefined;
 	let jobStartCalls = 0;
-	JobQueue.prototype.start = function recallQualityJobStartSpy() {
-		jobStartCalls += 1;
-	};
 	try {
+		hooks.onRootCreated?.(root);
+		const vaultPath = join(root, "vault");
+		const runtimePath = join(root, "runtime");
+		const profileDir = join(root, "profile");
+		for (const path of [vaultPath, runtimePath, profileDir]) {
+			mkdirSync(path, { recursive: true });
+		}
+		originalJobStart = JobQueue.prototype.start;
+		JobQueue.prototype.start = function recallQualityJobStartSpy() {
+			jobStartCalls += 1;
+		};
+		networkPoison = installNetworkPoison();
 		const fixtures = loadCanonicalSemanticFixtures();
+		if (hooks.stage === "init") throw new Error("semantic_constructor_failure");
 		db = new CBrainDB(join(root, "brain.sqlite"));
+		if (hooks.stage === "close") {
+			const close = db.close.bind(db);
+			db.close = () => {
+				close();
+				throw new Error("semantic_close_failure");
+			};
+		}
 		const pages = new PageManager(db, vaultPath);
 		const embedding = createFixtureEmbedding();
 		const lance = createGateVectorIndex();
@@ -454,6 +513,7 @@ async function executeSemanticRecallWorker(): Promise<SemanticRecallIntegrationR
 				include_raw: true as const,
 			};
 			invocations.push({ caseId: testCase.caseId, detail: args.detail, includeRaw: args.include_raw });
+			if (hooks.stage === "handler") throw new Error("semantic_handler_failure");
 			const response = await tools.cbrain_recall.handler(args);
 			const envelope = JSON.parse(response.content[0]?.text ?? "{}") as ProductionFrontdoorEnvelope;
 			observations.push(mapFrontdoorEnvelopeToSemanticObservation(testCase, envelope, fixtures.corpus));
@@ -486,7 +546,7 @@ async function executeSemanticRecallWorker(): Promise<SemanticRecallIntegrationR
 				jobStartCalls,
 			},
 			noLlmProvider: ctx.llm === undefined,
-			networkAdapterCalls: 0,
+			networkAdapterCalls: networkPoison.calls(),
 			invocations,
 			observations,
 			vector: {
@@ -502,11 +562,15 @@ async function executeSemanticRecallWorker(): Promise<SemanticRecallIntegrationR
 			},
 		};
 	} finally {
-		JobQueue.prototype.start = originalJobStart;
 		try {
-			db?.close();
+			networkPoison?.restore();
+			if (originalJobStart) JobQueue.prototype.start = originalJobStart;
 		} finally {
-			rmSync(root, { recursive: true, force: true });
+			try {
+				db?.close();
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
 		}
 	}
 	if (!result) throw new Error("semantic_worker_incomplete");
@@ -567,14 +631,27 @@ function reportIsPrivate(report: RecallQualityMatrixReport): boolean {
   return !/(实体甲|组织乙|Project Alpha|韧性治理|\/Users\/|"(?:slug|query|title|path|body|content|score)"\s*:)/u.test(text);
 }
 
-async function executeRecallQualityMatrixWorker(options: RecallQualityMatrixOptions = {}): Promise<RecallQualityMatrixReport> {
+async function executeRecallQualityMatrixWorker(
+	options: RecallQualityMatrixOptions = {},
+	hooks: SuiteFailureHooks = {},
+): Promise<RecallQualityMatrixReport> {
 	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
 		throw new Error("recall_quality_worker_required");
 	}
   const started = performance.now();
   const root = mkdtempSync(join(tmpdir(), "cbrain-recall-matrix-"));
-  const db = new CBrainDB(join(root, "brain.sqlite"));
+	let db: CBrainDB | undefined;
   try {
+		hooks.onRootCreated?.(root);
+		if (hooks.stage === "init") throw new Error("legacy_constructor_failure");
+		db = new CBrainDB(join(root, "brain.sqlite"));
+		if (hooks.stage === "close") {
+			const close = db.close.bind(db);
+			db.close = () => {
+				close();
+				throw new Error("legacy_close_failure");
+			};
+		}
     const vaultPath = join(root, "vault");
     const pages = new PageManager(db, vaultPath);
     const zhSlug = seedPage(db, pages, {
@@ -617,6 +694,7 @@ async function executeRecallQualityMatrixWorker(options: RecallQualityMatrixOpti
     attachMcpTools(legacyServer, legacyContext);
     const tools = getTools(legacyServer);
 
+		if (hooks.stage === "handler") throw new Error("legacy_handler_failure");
     const zh = retrievalCase("zh_exact", await recall(tools.deep_recall.handler, { query: "实体甲" }), zhSlug);
     const en = retrievalCase("en_exact", await recall(tools.deep_recall.handler, { query: "Project Alpha" }), enSlug);
     const mixed = retrievalCase(
@@ -702,20 +780,24 @@ async function executeRecallQualityMatrixWorker(options: RecallQualityMatrixOpti
     return { ...draft, verdict, privacy: privacyPass ? "pass" : "fail" };
   } finally {
 		try {
-			db.close();
+			db?.close();
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
   }
 }
 
-async function spawnClosedWorker<T>(expression: string): Promise<T> {
+async function spawnClosedWorker<T>(
+	expression: string,
+	onRootCreated?: (root: string) => void,
+): Promise<T> {
 	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-worker-"));
-	const home = join(root, "home");
-	const config = join(root, "xdg-config");
-	const data = join(root, "xdg-data");
-	for (const path of [home, config, data]) mkdirSync(path, { recursive: true });
 	try {
+		onRootCreated?.(root);
+		const home = join(root, "home");
+		const config = join(root, "xdg-config");
+		const data = join(root, "xdg-data");
+		for (const path of [home, config, data]) mkdirSync(path, { recursive: true });
 		const child = Bun.spawn({
 			cmd: [process.execPath, "-e", expression],
 			cwd: PROJECT_DIR,
@@ -744,6 +826,141 @@ async function spawnClosedWorker<T>(expression: string): Promise<T> {
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+}
+
+function environmentSnapshot(): string {
+	return JSON.stringify(Object.entries(process.env).sort(([left], [right]) =>
+		left.localeCompare(right)
+	));
+}
+
+export async function runRecallFailureProbeWorker(
+	stage: RecallCleanupFailureStage,
+): Promise<Readonly<{ failureObserved: boolean; suiteRootRemoved: boolean }>> {
+	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
+		throw new Error("recall_quality_worker_required");
+	}
+	let suiteRoot: string | undefined;
+	let failureObserved = false;
+	const hooks: SuiteFailureHooks = {
+		stage: stage.endsWith("_init")
+			? "init"
+			: stage.endsWith("_handler")
+				? "handler"
+				: "close",
+		onRootCreated: (root) => {
+			suiteRoot = root;
+		},
+	};
+	try {
+		if (stage.startsWith("semantic_")) {
+			await executeSemanticRecallWorker(hooks);
+		} else {
+			await executeRecallQualityMatrixWorker({}, hooks);
+		}
+	} catch {
+		failureObserved = true;
+	}
+	return {
+		failureObserved,
+		suiteRootRemoved: suiteRoot !== undefined && !existsSync(suiteRoot),
+	};
+}
+
+export async function runRecallCleanupFailureProbe(
+	stage: RecallCleanupFailureStage,
+): Promise<RecallCleanupFailureProbeResult> {
+	const beforeEnvironment = environmentSnapshot();
+	let workerRoot: string | undefined;
+	const moduleUrl = JSON.stringify(import.meta.url);
+	if (stage === "worker_spawn") {
+		let failureObserved = false;
+		try {
+			await spawnClosedWorker(
+				'throw new Error("worker_spawn_failure");',
+				(root) => {
+					workerRoot = root;
+				},
+			);
+		} catch {
+			failureObserved = true;
+		}
+		const workerRootRemoved = workerRoot !== undefined && !existsSync(workerRoot);
+		const parentEnvironmentRestored = environmentSnapshot() === beforeEnvironment;
+		if (!failureObserved || !workerRootRemoved || !parentEnvironmentRestored) {
+			throw new Error("recall_quality_cleanup_probe_failed");
+		}
+		return {
+			failureObserved: true,
+			suiteRootRemoved: true,
+			workerRootRemoved: true,
+			parentEnvironmentRestored: true,
+		};
+	}
+	const childResult = await spawnClosedWorker<Readonly<{
+		failureObserved: boolean;
+		suiteRootRemoved: boolean;
+	}>>(
+		`import { runRecallFailureProbeWorker } from ${moduleUrl};` +
+			`const result = await runRecallFailureProbeWorker(${JSON.stringify(stage)});` +
+			"process.stdout.write(JSON.stringify(result));",
+		(root) => {
+			workerRoot = root;
+		},
+	);
+	const workerRootRemoved = workerRoot !== undefined && !existsSync(workerRoot);
+	const parentEnvironmentRestored = environmentSnapshot() === beforeEnvironment;
+	if (
+		!childResult.failureObserved ||
+		!childResult.suiteRootRemoved ||
+		!workerRootRemoved ||
+		!parentEnvironmentRestored
+	) {
+		throw new Error("recall_quality_cleanup_probe_failed");
+	}
+	return {
+		failureObserved: true,
+		suiteRootRemoved: true,
+		workerRootRemoved: true,
+		parentEnvironmentRestored: true,
+	};
+}
+
+export async function probeNetworkPoisonAdapterWorker(): Promise<Readonly<{
+	calls: number;
+	rejected: boolean;
+	restored: boolean;
+}>> {
+	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
+		throw new Error("recall_quality_worker_required");
+	}
+	const poison = installNetworkPoison();
+	let rejected = false;
+	try {
+		await globalThis.fetch("https://recall-quality.invalid/");
+	} catch {
+		rejected = true;
+	} finally {
+		poison.restore();
+	}
+	return {
+		calls: poison.calls(),
+		rejected,
+		restored: globalThis.fetch === poison.originalFetch,
+	};
+}
+
+export async function probeNetworkPoisonAdapter(): Promise<Readonly<{
+	calls: number;
+	rejected: boolean;
+	restored: boolean;
+}>> {
+	const moduleUrl = JSON.stringify(import.meta.url);
+	return spawnClosedWorker(
+		`import { probeNetworkPoisonAdapterWorker } from ${moduleUrl};` +
+			"const result = await probeNetworkPoisonAdapterWorker();" +
+			"process.stdout.write(JSON.stringify(result));",
+	);
 }
 
 export async function runSemanticRecallIntegration(): Promise<SemanticRecallIntegrationResult> {

@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import {
 	executeOperationalContractCases,
 	mapFrontdoorEnvelopeToSemanticObservation,
+	probeNetworkPoisonAdapter,
+	runRecallCleanupFailureProbe,
 	runRecallQualityMatrix,
 	runSemanticRecallIntegration,
 } from "../../bin/check-recall-quality-matrix.js";
@@ -1691,6 +1693,37 @@ describe("semantic integration", () => {
 			{ caseId: "abstract_positive_01", tool: "cbrain_recall", route: "content_recall" },
 			{ caseId: "abstract_negative_01", tool: "cbrain_recall", route: "content_recall" },
 		]);
+	});
+
+	test.each([
+		"semantic_init",
+		"semantic_handler",
+		"semantic_close",
+		"legacy_init",
+		"legacy_handler",
+		"legacy_close",
+		"worker_spawn",
+	] as const)("removes every temporary root after %s failure", async (stage) => {
+		const before = process.env.RECALL_QUALITY_PARENT_SENTINEL;
+		process.env.RECALL_QUALITY_PARENT_SENTINEL = "parent-unchanged";
+		try {
+			const result = await runRecallCleanupFailureProbe(stage);
+			expect(result).toEqual({
+				failureObserved: true,
+				suiteRootRemoved: true,
+				workerRootRemoved: true,
+				parentEnvironmentRestored: true,
+			});
+			expect(process.env.RECALL_QUALITY_PARENT_SENTINEL).toBe("parent-unchanged");
+		} finally {
+			if (before === undefined) delete process.env.RECALL_QUALITY_PARENT_SENTINEL;
+			else process.env.RECALL_QUALITY_PARENT_SENTINEL = before;
+		}
+	});
+
+	test("counts and rejects any call through the installed network adapter poison", async () => {
+		const result = await probeNetworkPoisonAdapter();
+		expect(result).toEqual({ calls: 1, rejected: true, restored: true });
 	});
 
 	test("maps live titles and snippets to controlled source-bound evidence", async () => {
