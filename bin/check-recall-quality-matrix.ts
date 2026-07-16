@@ -129,6 +129,22 @@ export interface SemanticRecallIntegrationResult {
 	}>;
 	readonly noLlmProvider: boolean;
 	readonly networkAdapterCalls: number;
+	readonly runtimeCounters: Readonly<{
+		handlerInvocations: number;
+		hybridSearchCalls: number;
+		embeddingCalls: number;
+		ftsCalls: number;
+		lanceCalls: number;
+		llmCalls: number;
+		advancedFallbackCalls: number;
+		supportOnlyDbCalls: number;
+		dbPageReads: number;
+		pageHydrationCalls: number;
+		emittedCandidateCount: number;
+		rejectedPageHydrationCalls: number;
+		missingDbPageReads: number;
+		missingPageHydrationCalls: number;
+	}>;
 	readonly invocations: readonly Readonly<{
 		caseId: RecallSemanticCase["caseId"];
 		detail: "normal";
@@ -137,6 +153,9 @@ export interface SemanticRecallIntegrationResult {
 	readonly observations: readonly RecallSemanticObservation[];
 	readonly vector: Readonly<{
 		lanceSearchCalls: number;
+		weakDistanceCandidateObserved: boolean;
+		weakQueryAndCandidateNonZeroObserved: boolean;
+		weakFiniteCosineBelowThresholdObserved: boolean;
 		noSharedTokens: boolean;
 		abstractExpectedSourceFound: boolean;
 		ftsControlExpectedSourceFound: boolean;
@@ -461,7 +480,14 @@ interface GateVectorDocument {
 
 interface GateVectorIndex extends LanceDBManager {
 	readonly searchCalls: number;
+	readonly distanceOneResultCalls: number;
+	readonly nonZeroDistanceOneResultCalls: number;
+	readonly finiteWeakCosineResultCalls: number;
 	seed(document: GateVectorDocument): void;
+}
+
+interface CountingFixtureEmbedding extends EmbeddingProvider {
+	readonly embedCalls: number;
 }
 
 const CONCEPT_DIMENSIONS = 4;
@@ -476,62 +502,112 @@ function fixtureConceptVector(text: string): number[] {
 	if (text === "系统 速度 体验 观察 记录" || text === "近似 噪声 背景 主题 说明") {
 		return [0, 1, 0, 0];
 	}
+	if (text === "上次 近似 噪声 未知 线索" || text === "抽象 近似 噪声 未知 线索") {
+		return [0.5, 0.5, 0.5, 0.5];
+	}
 	return [0, 0, 0, 0];
 }
 
-function createFixtureEmbedding(): EmbeddingProvider {
+function createFixtureEmbedding(): CountingFixtureEmbedding {
+	let embedCalls = 0;
 	const embedOne = (text: string) => ({
 		embedding: fixtureConceptVector(text),
 		tokenCount: text.length,
 	});
 	return {
+		get embedCalls() {
+			return embedCalls;
+		},
 		dimensions: CONCEPT_DIMENSIONS,
-		embed: async (text) => embedOne(text),
-		embedBatch: async (texts) => texts.map(embedOne),
+		embed: async (text) => {
+			embedCalls += 1;
+			return embedOne(text);
+		},
+		embedBatch: async (texts) => {
+			embedCalls += 1;
+			return texts.map(embedOne);
+		},
 	};
 }
 
-function cosine(left: readonly number[], right: readonly number[]): number {
-	let dot = 0;
-	let leftNorm = 0;
-	let rightNorm = 0;
-	for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
-		dot += (left[index] ?? 0) * (right[index] ?? 0);
-		leftNorm += (left[index] ?? 0) ** 2;
-		rightNorm += (right[index] ?? 0) ** 2;
+function squaredL2(left: readonly number[], right: readonly number[]): number {
+	if (left.length !== right.length) throw new Error("gate_vector_dimension_mismatch");
+	let distance = 0;
+	for (let index = 0; index < left.length; index += 1) {
+		distance += ((left[index] ?? 0) - (right[index] ?? 0)) ** 2;
 	}
-	if (leftNorm === 0 || rightNorm === 0) return 0;
-	return dot / Math.sqrt(leftNorm * rightNorm);
+	return distance;
 }
 
 function createGateVectorIndex(): GateVectorIndex {
 	const documents: GateVectorDocument[] = [];
 	let searchCalls = 0;
+	let distanceOneResultCalls = 0;
+	let nonZeroDistanceOneResultCalls = 0;
+	let finiteWeakCosineResultCalls = 0;
 	const index = {
 		get searchCalls() {
 			return searchCalls;
+		},
+		get distanceOneResultCalls() {
+			return distanceOneResultCalls;
+		},
+		get nonZeroDistanceOneResultCalls() {
+			return nonZeroDistanceOneResultCalls;
+		},
+		get finiteWeakCosineResultCalls() {
+			return finiteWeakCosineResultCalls;
 		},
 		seed(document: GateVectorDocument) {
 			documents.push(document);
 		},
 		connect: async () => {},
 		addChunks: async () => {},
-		search: async (embedding: readonly number[], limit: number) => {
+		search: async (
+			embedding: readonly number[],
+			limit: number,
+			options?: Readonly<{ includeVector?: boolean }>,
+		) => {
 			searchCalls += 1;
-			return documents
-				.map((document) => ({ document, similarity: cosine(embedding, document.embedding) }))
-				.filter((item) => item.similarity >= 0.8)
+			const selected = documents
+				.map((document) => ({ document, distance: squaredL2(embedding, document.embedding) }))
 				.sort((left, right) =>
-				right.similarity - left.similarity ||
-				left.document.pageSlug.localeCompare(right.document.pageSlug) ||
-				left.document.chunkIndex - right.document.chunkIndex
+					left.distance - right.distance ||
+					left.document.pageSlug.localeCompare(right.document.pageSlug) ||
+					left.document.chunkIndex - right.document.chunkIndex
 				)
-				.slice(0, limit)
-				.map(({ document, similarity }) => ({
+				.slice(0, limit);
+			if (selected.some((item) => item.distance === 1)) distanceOneResultCalls += 1;
+			const queryNormSquared = embedding.reduce((sum, value) => sum + value ** 2, 0);
+			const finiteWeakCosine = selected.some((item) => {
+				if (item.distance !== 1 || queryNormSquared === 0) return false;
+				const candidateNormSquared = item.document.embedding.reduce(
+					(sum, value) => sum + value ** 2,
+					0,
+				);
+				if (candidateNormSquared === 0) return false;
+				const dot = embedding.reduce(
+					(sum, value, index) => sum + value * (item.document.embedding[index] ?? 0),
+					0,
+				);
+				const cosine = dot / Math.sqrt(queryNormSquared * candidateNormSquared);
+				return Number.isFinite(cosine) && cosine < 0.8;
+			});
+			if (selected.some((item) =>
+				item.distance === 1
+				&& queryNormSquared > 0
+				&& item.document.embedding.some((value) => value !== 0)
+			)) nonZeroDistanceOneResultCalls += 1;
+			if (finiteWeakCosine) finiteWeakCosineResultCalls += 1;
+			return selected
+				.map(({ document, distance }) => ({
 					pageSlug: document.pageSlug,
 					chunkIndex: document.chunkIndex,
 					content: document.content,
-					_distance: 1 - similarity,
+					_distance: distance,
+					...(options?.includeVector
+						? { vector: Float32Array.from(document.embedding) }
+						: {}),
 				}));
 		},
 		fullTextSearch: async () => [],
@@ -541,6 +617,74 @@ function createGateVectorIndex(): GateVectorIndex {
 		createFTSIndex: async () => {},
 	};
 	return index as unknown as GateVectorIndex;
+}
+
+export async function probeGateVectorIndexContract(): Promise<Readonly<{
+	searchCalls: number;
+	weakQueryNonZero: boolean;
+	weakCandidateNonZero: boolean;
+	weakCosine: number;
+	withoutVector: readonly Readonly<{
+		pageSlug: string;
+		chunkIndex: number;
+		distance: number;
+		hasVector: boolean;
+		vectorIsFloat32Array: boolean;
+	}>[];
+	withVector: readonly Readonly<{
+		pageSlug: string;
+		chunkIndex: number;
+		distance: number;
+		hasVector: boolean;
+		vectorIsFloat32Array: boolean;
+	}>[];
+}>> {
+	const index = createGateVectorIndex();
+	const query: number[] = [1, 0, 0, 0];
+	const weakEmbedding: number[] = [0.5, 0.5, 0.5, 0.5];
+	index.seed({
+		pageSlug: "brain/insights/probe-b",
+		chunkIndex: 0,
+		content: "占位 内容 B",
+		embedding: weakEmbedding,
+	});
+	index.seed({
+		pageSlug: "brain/insights/probe-c",
+		chunkIndex: 0,
+		content: "占位 内容 C",
+		embedding: [-1, 0, 0, 0],
+	});
+	index.seed({
+		pageSlug: "brain/insights/probe-a",
+		chunkIndex: 0,
+		content: "占位 内容 A",
+		embedding: [1, 0, 0, 0],
+	});
+	const project = (items: Awaited<ReturnType<GateVectorIndex["search"]>>) =>
+		items.map((item) => ({
+			pageSlug: item.pageSlug,
+			chunkIndex: item.chunkIndex,
+			distance: item._distance ?? Number.NaN,
+			hasVector: item.vector !== undefined,
+			vectorIsFloat32Array: item.vector instanceof Float32Array,
+		}));
+	const withoutVector = project(await index.search(query, 2));
+	const withVector = project(await index.search(query, 2, { includeVector: true }));
+	const weakCosine = query.reduce(
+		(sum, value, index) => sum + value * (weakEmbedding[index] ?? 0),
+		0,
+	) / Math.sqrt(
+		query.reduce((sum, value) => sum + value ** 2, 0)
+		* weakEmbedding.reduce((sum, value) => sum + value ** 2, 0),
+	);
+	return {
+		searchCalls: index.searchCalls,
+		weakQueryNonZero: query.some((value) => value !== 0),
+		weakCandidateNonZero: weakEmbedding.some((value) => value !== 0),
+		weakCosine,
+		withoutVector,
+		withVector,
+	};
 }
 
 function createEmptyLance() {
@@ -611,6 +755,17 @@ async function executeSemanticRecallWorker(
 	let originalJobStart: typeof JobQueue.prototype.start | undefined;
 	let networkPoison: NetworkPoison | undefined;
 	let jobStartCalls = 0;
+	let handlerInvocations = 0;
+	let hybridSearchCalls = 0;
+	let ftsCalls = 0;
+	let advancedFallbackCalls = 0;
+	let pageHydrationCalls = 0;
+	let emittedCandidateCount = 0;
+	let supportOnlyDbCalls = 0;
+	let dbPageReads = 0;
+	let rejectedPageHydrationCalls = 0;
+	let missingDbPageReads = 0;
+	let missingPageHydrationCalls = 0;
 	try {
 		hooks.onRootCreated?.(root);
 		fileAccess = hooks.fileAccess ?? createRecallGateFileAccess();
@@ -629,6 +784,11 @@ async function executeSemanticRecallWorker(
 		networkPoison = installNetworkPoison();
 		const fixtures = loadCanonicalSemanticFixtures(fileAccess);
 		db = runtime.openDb(join(root, "brain.sqlite"));
+		const originalFtsSearch = db.ftsSearch.bind(db);
+		db.ftsSearch = ((...args: Parameters<CBrainDB["ftsSearch"]>) => {
+			ftsCalls += 1;
+			return originalFtsSearch(...args);
+		}) as CBrainDB["ftsSearch"];
 		if (hooks.closeFailure) {
 			const close = db.close.bind(db);
 			db.close = () => {
@@ -670,6 +830,11 @@ async function executeSemanticRecallWorker(
 				embedding: fixtureConceptVector(source.body),
 			});
 		}
+		const originalGetPage = db.getPage.bind(db);
+		db.getPage = ((...args: Parameters<CBrainDB["getPage"]>) => {
+			dbPageReads += 1;
+			return originalGetPage(...args);
+		}) as CBrainDB["getPage"];
 
 		const ctx = runtime.createContext({
 			db,
@@ -680,6 +845,17 @@ async function executeSemanticRecallWorker(
 			profileDir,
 			runtimePath,
 		});
+		const originalSearch = ctx.search.search.bind(ctx.search);
+		ctx.search.search = (async (...args: Parameters<typeof originalSearch>) => {
+			hybridSearchCalls += 1;
+			if (args[1]?.multiStep === true) advancedFallbackCalls += 1;
+			return originalSearch(...args);
+		}) as typeof ctx.search.search;
+		const originalGetBySlug = ctx.pages.getBySlug.bind(ctx.pages);
+		ctx.pages.getBySlug = ((...args: Parameters<typeof originalGetBySlug>) => {
+			pageHydrationCalls += 1;
+			return originalGetBySlug(...args);
+		}) as typeof ctx.pages.getBySlug;
 		const server = new McpServer({ name: "cbrain-recall-quality", version: "task-4" });
 		registerFrontdoorTools(server, ctx);
 		const tools = getTools(server);
@@ -694,14 +870,27 @@ async function executeSemanticRecallWorker(
 			includeRaw: true;
 		}> = [];
 		for (const testCase of fixtures.cases) {
+			const dbPageReadsBefore = dbPageReads;
+			const pageHydrationCallsBefore = pageHydrationCalls;
 			const args = {
 				query: testCase.query,
 				detail: "normal" as const,
 				include_raw: true as const,
 			};
 			invocations.push({ caseId: testCase.caseId, detail: args.detail, includeRaw: args.include_raw });
+			handlerInvocations += 1;
 			const response = await runtime.invokeHandler(tools.cbrain_recall.handler, args);
 			const envelope = JSON.parse(response.content[0]?.text ?? "{}") as ProductionFrontdoorEnvelope;
+			const emittedCandidates = Array.isArray(envelope.raw?.entities)
+				? envelope.raw.entities.length
+				: 0;
+			emittedCandidateCount += emittedCandidates;
+			const dbPageReadDelta = dbPageReads - dbPageReadsBefore;
+			const pageHydrationDelta = pageHydrationCalls - pageHydrationCallsBefore;
+			supportOnlyDbCalls += Math.max(0, dbPageReadDelta - emittedCandidates);
+			missingDbPageReads += Math.max(0, emittedCandidates - dbPageReadDelta);
+			rejectedPageHydrationCalls += Math.max(0, pageHydrationDelta - emittedCandidates);
+			missingPageHydrationCalls += Math.max(0, emittedCandidates - pageHydrationDelta);
 			observations.push(mapFrontdoorEnvelopeToSemanticObservation(testCase, envelope, fixtures.corpus));
 		}
 
@@ -720,7 +909,7 @@ async function executeSemanticRecallWorker(
 		});
 		const expectedSlug = slugBySource.get(expectedSource);
 		const abstractObservation = observations.find((item) => item.caseId === abstractCase.caseId);
-		const tieResults = await lance.search([0, 1, 0, 0], 10);
+		const tieResults = await lance.search([0, 1, 0, 0], 3);
 		const tieOrder = tieResults.map((item) => ({
 			pageSlug: item.pageSlug,
 			chunkIndex: item.chunkIndex,
@@ -739,10 +928,33 @@ async function executeSemanticRecallWorker(
 			},
 			noLlmProvider: ctx.llm === undefined,
 			networkAdapterCalls: networkPoison.calls(),
+			runtimeCounters: {
+				handlerInvocations,
+				hybridSearchCalls,
+				embeddingCalls: embedding.embedCalls,
+				ftsCalls,
+				lanceCalls: lance.searchCalls,
+				llmCalls: 0,
+				advancedFallbackCalls,
+				// The controlled path hydrates each emitted candidate exactly once.
+				// Any excess page read is therefore attributable only to admission.
+				supportOnlyDbCalls,
+				dbPageReads,
+				pageHydrationCalls,
+				emittedCandidateCount,
+				rejectedPageHydrationCalls,
+				missingDbPageReads,
+				missingPageHydrationCalls,
+			},
 			invocations,
 			observations,
 			vector: {
 				lanceSearchCalls: lance.searchCalls,
+				weakDistanceCandidateObserved: lance.distanceOneResultCalls === 2,
+				weakQueryAndCandidateNonZeroObserved:
+					lance.nonZeroDistanceOneResultCalls === 2,
+				weakFiniteCosineBelowThresholdObserved:
+					lance.finiteWeakCosineResultCalls === 2,
 				noSharedTokens,
 				abstractExpectedSourceFound:
 					abstractObservation?.top3.some((item) => item.sourceId === expectedSource) ?? false,

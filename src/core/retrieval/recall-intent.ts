@@ -22,6 +22,17 @@ export interface TemporalIntent {
 const TEMPORAL_RE = /(之前|上次|下次|上周|这周|最近|后来|曾经|以前|当时|原来|时间线|什么时候|变化|进展|动态|last time|previously|before|what changed|changed)/;
 const HISTORY_RE = /(为什么这么定|当时.*(怎么设计|为什么选|怎么定|怎么做|怎么说)|之前.*(怎么设计|为什么选|具体怎么说|为什么这么定)|原来怎么说|怎么设计的|why.*(decided|chosen)|what was the reasoning|how was.*decided)/;
 const FORMER_CURRENT_RE = /(前任|现任|原任|之前.{0,8}现在|原来.{0,8}现在|former|current|previous.{0,8}now)/;
+const STANDALONE_TEMPORAL_FRAMING_RE = /^(上次|之前|最近|以前|后来|曾经|当时|原来|previously|before)$/i;
+
+/** Closed, anchored framing grammar for deterministic lexical support. */
+export function isStandaloneTemporalFramingToken(token: string): boolean {
+  if (typeof token !== "string") return false;
+  try {
+    return STANDALONE_TEMPORAL_FRAMING_RE.test(token.normalize("NFKC").trim());
+  } catch {
+    return false;
+  }
+}
 
 export function detectTemporalIntent(query: string): TemporalIntent {
   return {
