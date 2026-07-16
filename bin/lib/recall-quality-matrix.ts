@@ -25,6 +25,7 @@ export const SAFE_FIXTURE_TOKENS: ReadonlySet<string> = new Set([
 	"线索",
 	"为什么",
 	"需要",
+	"上次",
 	"，",
 	"。",
 	"？",

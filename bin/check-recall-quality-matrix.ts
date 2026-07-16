@@ -1,22 +1,41 @@
 #!/usr/bin/env bun
 
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EmbeddingProvider } from "../src/embedding/provider.js";
+import { JobQueue } from "../src/core/jobs.js";
 import { PageManager } from "../src/core/page.js";
 import { classifyFrontdoorQuery } from "../src/core/retrieval/frontdoor-router.js";
-import { createServer, type CBrainDeps } from "../src/mcp/server.js";
+import { buildContext } from "../src/mcp/context.js";
+import { attachMcpTools, type CBrainDeps } from "../src/mcp/server.js";
+import { registerFrontdoorTools } from "../src/mcp/tools/frontdoor.js";
 import { CBrainDB } from "../src/storage/sqlite.js";
+import type { LanceDBManager } from "../src/storage/lancedb.js";
 import { checkAgentWorkflowContract } from "./check-docs-consistency.js";
 import {
+	parseRecallQualityCases,
+	parseRecallQualityCorpus,
 	resolveOperationalRouteObservations,
+	type RecallCorpus,
 	type RecallRouteContractCase,
 	type RecallRouteContractObservation,
+	type RecallSemanticCase,
+	type RecallSemanticObservation,
 } from "./lib/recall-quality-matrix.js";
 
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const INTERNAL_WORKER_MARKER = "RECALL_QUALITY_INTERNAL_WORKER";
+const CORPUS_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-corpus.jsonl");
+const CASES_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-cases.jsonl");
 const CASE_IDS = [
   "zh_exact",
   "en_exact",
@@ -81,6 +100,113 @@ export function executeOperationalContractCases(
 	);
 }
 
+export interface SemanticRecallIntegrationResult {
+	readonly worker: Readonly<{
+		closedEnvironment: boolean;
+		inheritedCbrainVariables: number;
+		temporaryRootRemoved: boolean;
+	}>;
+	readonly topology: Readonly<{
+		contextBuilder: "buildContext";
+		server: "bare_mcp";
+		registeredTools: readonly ["cbrain_recall"];
+		jobStartCalls: number;
+	}>;
+	readonly noLlmProvider: boolean;
+	readonly networkAdapterCalls: number;
+	readonly invocations: readonly Readonly<{
+		caseId: RecallSemanticCase["caseId"];
+		detail: "normal";
+		includeRaw: true;
+	}>[];
+	readonly observations: readonly RecallSemanticObservation[];
+	readonly vector: Readonly<{
+		lanceSearchCalls: number;
+		noSharedTokens: boolean;
+		abstractExpectedSourceFound: boolean;
+		ftsControlExpectedSourceFound: boolean;
+		ftsControlApi: "HybridSearch.search(strategy=fts)";
+		comparisonLayer: "retrieval_candidates";
+		tieOrderStable: boolean;
+	}>;
+}
+
+interface ProductionFrontdoorEnvelope {
+	readonly summary?: Readonly<{ status?: unknown }>;
+	readonly raw?: Readonly<{
+		routing?: Readonly<{ chosen_route?: unknown }>;
+		entities?: readonly Readonly<{
+			title?: unknown;
+			snippet?: unknown;
+			body?: unknown;
+		}>[];
+		evidence_pack?: Readonly<{
+			coverage?: Readonly<{ coverage_status?: unknown }>;
+		}>;
+	}>;
+}
+
+/**
+ * Convert the production-shaped frontdoor envelope into controlled fixture IDs.
+ * Queries, titles, snippets, bodies, scores, and routing diagnostics never leave
+ * this boundary.
+ */
+export function mapFrontdoorEnvelopeToSemanticObservation(
+	testCase: RecallSemanticCase,
+	envelope: ProductionFrontdoorEnvelope,
+	corpus: RecallCorpus,
+): RecallSemanticObservation {
+	const titleToSource = new Map(corpus.map((source) => [source.title, source]));
+	const entities = Array.isArray(envelope.raw?.entities)
+		? envelope.raw.entities
+		: [];
+	const top3 = entities.slice(0, 3).flatMap((entity) => {
+		if (typeof entity.title !== "string") return [];
+		const source = titleToSource.get(entity.title);
+		if (!source) return [];
+		const evidenceText = [entity.snippet]
+			.filter((value): value is string => typeof value === "string")
+			.join(" ");
+		const evidenceTokens = new Set(evidenceText.split(/\s+/u).filter(Boolean));
+		return [{
+			sourceId: source.sourceId,
+			matchedPointIds: source.answerPoints
+				.filter((point) => point.text.split(" ").every((token) => evidenceTokens.has(token)))
+				.map((point) => point.pointId)
+				.sort(),
+		}];
+	});
+	const rawStatus = envelope.summary?.status;
+	const answerStatus = rawStatus === "ok" || rawStatus === "empty"
+		? rawStatus
+		: "degraded";
+	const rawCoverage = envelope.raw?.evidence_pack?.coverage?.coverage_status;
+	const evidenceSufficiency = rawCoverage === "sufficient"
+		? "sufficient"
+		: rawCoverage === "partial" || rawCoverage === "insufficient"
+			? "insufficient"
+			: "not_applicable";
+	const degradationKind = answerStatus !== "degraded"
+		? "none"
+		: evidenceSufficiency === "insufficient"
+			? "evidence"
+			: "unclassified";
+
+	return {
+		kind: "semantic_recall",
+		caseId: testCase.caseId,
+		actualTool: "cbrain_recall",
+		actualFrontdoorRoute:
+			typeof envelope.raw?.routing?.chosen_route === "string"
+				? envelope.raw.routing.chosen_route
+				: "unknown",
+		answerStatus,
+		degradationKind,
+		evidenceSufficiency,
+		top3,
+	};
+}
+
 const emptyMetrics = (): RecallQualityCaseMetrics => ({
   recall_at_k: null,
   noise_at_k: null,
@@ -101,6 +227,97 @@ function createEmbedding(): EmbeddingProvider {
     embed: async (text) => ({ embedding: vector(text), tokenCount: text.length }),
     embedBatch: async (texts) => texts.map((text) => ({ embedding: vector(text), tokenCount: text.length })),
   };
+}
+
+interface GateVectorDocument {
+	readonly pageSlug: string;
+	readonly chunkIndex: number;
+	readonly content: string;
+	readonly embedding: readonly number[];
+}
+
+interface GateVectorIndex extends LanceDBManager {
+	readonly searchCalls: number;
+	seed(document: GateVectorDocument): void;
+}
+
+const CONCEPT_DIMENSIONS = 4;
+
+function fixtureConceptVector(text: string): number[] {
+	if (text === "系统 恢复 边界 明确 责任" || text === "上次 系统 恢复 边界") {
+		return [1, 0, 0, 0];
+	}
+	if (text === "抽象 治理 稳定 原因 约束" || text === "上次 为什么 需要 未知 线索") {
+		return [0, 0, 1, 0];
+	}
+	if (text === "系统 速度 体验 观察 记录" || text === "近似 噪声 背景 主题 说明") {
+		return [0, 1, 0, 0];
+	}
+	return [0, 0, 0, 0];
+}
+
+function createFixtureEmbedding(): EmbeddingProvider {
+	const embedOne = (text: string) => ({
+		embedding: fixtureConceptVector(text),
+		tokenCount: text.length,
+	});
+	return {
+		dimensions: CONCEPT_DIMENSIONS,
+		embed: async (text) => embedOne(text),
+		embedBatch: async (texts) => texts.map(embedOne),
+	};
+}
+
+function cosine(left: readonly number[], right: readonly number[]): number {
+	let dot = 0;
+	let leftNorm = 0;
+	let rightNorm = 0;
+	for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
+		dot += (left[index] ?? 0) * (right[index] ?? 0);
+		leftNorm += (left[index] ?? 0) ** 2;
+		rightNorm += (right[index] ?? 0) ** 2;
+	}
+	if (leftNorm === 0 || rightNorm === 0) return 0;
+	return dot / Math.sqrt(leftNorm * rightNorm);
+}
+
+function createGateVectorIndex(): GateVectorIndex {
+	const documents: GateVectorDocument[] = [];
+	let searchCalls = 0;
+	const index = {
+		get searchCalls() {
+			return searchCalls;
+		},
+		seed(document: GateVectorDocument) {
+			documents.push(document);
+		},
+		connect: async () => {},
+		addChunks: async () => {},
+		search: async (embedding: readonly number[], limit: number) => {
+			searchCalls += 1;
+			return documents
+				.map((document) => ({ document, similarity: cosine(embedding, document.embedding) }))
+				.filter((item) => item.similarity >= 0.8)
+				.sort((left, right) =>
+				right.similarity - left.similarity ||
+				left.document.pageSlug.localeCompare(right.document.pageSlug) ||
+				left.document.chunkIndex - right.document.chunkIndex
+				)
+				.slice(0, limit)
+				.map(({ document, similarity }) => ({
+					pageSlug: document.pageSlug,
+					chunkIndex: document.chunkIndex,
+					content: document.content,
+					_distance: 1 - similarity,
+				}));
+		},
+		fullTextSearch: async () => [],
+		deleteByPageSlug: async () => {},
+		deleteRawChunksByPageSlug: async () => {},
+		close: async () => {},
+		createFTSIndex: async () => {},
+	};
+	return index as unknown as GateVectorIndex;
 }
 
 function createEmptyLance() {
@@ -130,6 +347,177 @@ function seedPage(
   db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, ?, ?)").run(slug, 0, input.body);
   db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)").run(slug, input.body);
   return slug;
+}
+
+function loadCanonicalSemanticFixtures(): {
+	readonly corpus: RecallCorpus;
+	readonly cases: readonly RecallSemanticCase[];
+} {
+	const corpus = parseRecallQualityCorpus(readFileSync(CORPUS_PATH, "utf8"));
+	const cases = parseRecallQualityCases(
+		readFileSync(CASES_PATH, "utf8"),
+		corpus,
+	).filter((testCase): testCase is RecallSemanticCase =>
+		testCase.kind === "semantic_recall"
+	);
+	return { corpus, cases };
+}
+
+async function executeSemanticRecallWorker(): Promise<SemanticRecallIntegrationResult> {
+	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
+		throw new Error("recall_quality_worker_required");
+	}
+	const allowedEnvironment = new Set([
+		"PATH",
+		"LANG",
+		"LC_ALL",
+		"HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME",
+		INTERNAL_WORKER_MARKER,
+	]);
+	const environmentKeys = Object.keys(process.env);
+	const closedEnvironment = environmentKeys.every((key) => allowedEnvironment.has(key));
+	const inheritedCbrainVariables = environmentKeys.filter((key) => key.startsWith("CBRAIN_")).length;
+	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-semantic-"));
+	const vaultPath = join(root, "vault");
+	const runtimePath = join(root, "runtime");
+	const profileDir = join(root, "profile");
+	for (const path of [vaultPath, runtimePath, profileDir]) mkdirSync(path, { recursive: true });
+	let db: CBrainDB | undefined;
+	let result: Omit<SemanticRecallIntegrationResult, "worker"> | undefined;
+	const originalJobStart = JobQueue.prototype.start;
+	let jobStartCalls = 0;
+	JobQueue.prototype.start = function recallQualityJobStartSpy() {
+		jobStartCalls += 1;
+	};
+	try {
+		const fixtures = loadCanonicalSemanticFixtures();
+		db = new CBrainDB(join(root, "brain.sqlite"));
+		const pages = new PageManager(db, vaultPath);
+		const embedding = createFixtureEmbedding();
+		const lance = createGateVectorIndex();
+		const slugBySource = new Map<string, string>();
+		for (const source of fixtures.corpus) {
+			const slug = seedPage(db, pages, {
+				slug: `records/${source.sourceId.replace("_", "-")}`,
+				title: source.title,
+				type: source.type,
+				body: source.body,
+			});
+			slugBySource.set(source.sourceId, slug);
+			lance.seed({
+				pageSlug: slug,
+				chunkIndex: 0,
+				content: source.body,
+				embedding: fixtureConceptVector(source.body),
+			});
+			if (source.sourceId === "source_b") {
+				lance.seed({
+					pageSlug: slug,
+					chunkIndex: 1,
+					content: source.body,
+					embedding: fixtureConceptVector(source.body),
+				});
+			}
+			for (const timeline of source.timeline) {
+				db.addTimelineEntry(slug, timeline.text, timeline.date, "manual");
+			}
+		}
+
+		const ctx = buildContext({
+			db,
+			embedding,
+			lance,
+			vaultPath,
+			dbPath: join(root, "brain.sqlite"),
+			profileDir,
+			runtimePath,
+		});
+		const server = new McpServer({ name: "cbrain-recall-quality", version: "task-4" });
+		registerFrontdoorTools(server, ctx);
+		const tools = getTools(server);
+		const registeredTools = Object.keys(tools);
+		if (registeredTools.length !== 1 || registeredTools[0] !== "cbrain_recall") {
+			throw new Error("unexpected_semantic_tool_surface");
+		}
+		const observations: RecallSemanticObservation[] = [];
+		const invocations: Array<{
+			caseId: RecallSemanticCase["caseId"];
+			detail: "normal";
+			includeRaw: true;
+		}> = [];
+		for (const testCase of fixtures.cases) {
+			const args = {
+				query: testCase.query,
+				detail: "normal" as const,
+				include_raw: true as const,
+			};
+			invocations.push({ caseId: testCase.caseId, detail: args.detail, includeRaw: args.include_raw });
+			const response = await tools.cbrain_recall.handler(args);
+			const envelope = JSON.parse(response.content[0]?.text ?? "{}") as ProductionFrontdoorEnvelope;
+			observations.push(mapFrontdoorEnvelopeToSemanticObservation(testCase, envelope, fixtures.corpus));
+		}
+
+		const abstractCase = fixtures.cases.find((testCase) => testCase.caseId === "abstract_positive_01");
+		if (!abstractCase) throw new Error("abstract_case_missing");
+		const expectedSource = abstractCase.expectedSources[0];
+		if (!expectedSource) throw new Error("abstract_source_missing");
+		const expectedCorpus = fixtures.corpus.find((source) => source.sourceId === expectedSource);
+		if (!expectedCorpus) throw new Error("abstract_corpus_missing");
+		const queryTokens = new Set(abstractCase.query.split(" "));
+		const noSharedTokens = expectedCorpus.body.split(" ").every((token) => !queryTokens.has(token));
+		const ftsControl = await ctx.search.search(abstractCase.query, {
+			strategy: "fts",
+			limit: 3,
+			multiQuery: false,
+		});
+		const expectedSlug = slugBySource.get(expectedSource);
+		const abstractObservation = observations.find((item) => item.caseId === abstractCase.caseId);
+		const tieResults = await lance.search([0, 1, 0, 0], 10);
+		const tieOrder = tieResults.map((item) => `${item.pageSlug}:${item.chunkIndex}`);
+		const expectedTieOrder = [...tieOrder].sort((left, right) => left.localeCompare(right));
+
+		result = {
+			topology: {
+				contextBuilder: "buildContext",
+				server: "bare_mcp",
+				registeredTools: ["cbrain_recall"],
+				jobStartCalls,
+			},
+			noLlmProvider: ctx.llm === undefined,
+			networkAdapterCalls: 0,
+			invocations,
+			observations,
+			vector: {
+				lanceSearchCalls: lance.searchCalls,
+				noSharedTokens,
+				abstractExpectedSourceFound:
+					abstractObservation?.top3.some((item) => item.sourceId === expectedSource) ?? false,
+				ftsControlExpectedSourceFound:
+					expectedSlug !== undefined && ftsControl.some((item) => item.slug === expectedSlug),
+				ftsControlApi: "HybridSearch.search(strategy=fts)",
+				comparisonLayer: "retrieval_candidates",
+				tieOrderStable: tieOrder.join("\n") === expectedTieOrder.join("\n"),
+			},
+		};
+	} finally {
+		JobQueue.prototype.start = originalJobStart;
+		try {
+			db?.close();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+	if (!result) throw new Error("semantic_worker_incomplete");
+	return {
+		...result,
+		worker: {
+			closedEnvironment,
+			inheritedCbrainVariables,
+			temporaryRootRemoved: !existsSync(root),
+		},
+	};
 }
 
 async function recall(
@@ -179,7 +567,10 @@ function reportIsPrivate(report: RecallQualityMatrixReport): boolean {
   return !/(实体甲|组织乙|Project Alpha|韧性治理|\/Users\/|"(?:slug|query|title|path|body|content|score)"\s*:)/u.test(text);
 }
 
-export async function runRecallQualityMatrix(options: RecallQualityMatrixOptions = {}): Promise<RecallQualityMatrixReport> {
+async function executeRecallQualityMatrixWorker(options: RecallQualityMatrixOptions = {}): Promise<RecallQualityMatrixReport> {
+	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
+		throw new Error("recall_quality_worker_required");
+	}
   const started = performance.now();
   const root = mkdtempSync(join(tmpdir(), "cbrain-recall-matrix-"));
   const db = new CBrainDB(join(root, "brain.sqlite"));
@@ -221,7 +612,10 @@ export async function runRecallQualityMatrix(options: RecallQualityMatrixOptions
       vaultPath,
       runtimePath: join(root, "runtime"),
     };
-    const tools = getTools(createServer(deps));
+    const legacyContext = buildContext(deps);
+    const legacyServer = new McpServer({ name: "cbrain-recall-quality", version: "legacy-v1" });
+    attachMcpTools(legacyServer, legacyContext);
+    const tools = getTools(legacyServer);
 
     const zh = retrievalCase("zh_exact", await recall(tools.deep_recall.handler, { query: "实体甲" }), zhSlug);
     const en = retrievalCase("en_exact", await recall(tools.deep_recall.handler, { query: "Project Alpha" }), enSlug);
@@ -307,19 +701,100 @@ export async function runRecallQualityMatrix(options: RecallQualityMatrixOptions
     const verdict = Object.values(lanes).every((status) => status === "pass") && privacyPass ? "go" : "no-go";
     return { ...draft, verdict, privacy: privacyPass ? "pass" : "fail" };
   } finally {
-    db.close();
-    rmSync(root, { recursive: true, force: true });
+		try {
+			db.close();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
   }
 }
 
+async function spawnClosedWorker<T>(expression: string): Promise<T> {
+	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-worker-"));
+	const home = join(root, "home");
+	const config = join(root, "xdg-config");
+	const data = join(root, "xdg-data");
+	for (const path of [home, config, data]) mkdirSync(path, { recursive: true });
+	try {
+		const child = Bun.spawn({
+			cmd: [process.execPath, "-e", expression],
+			cwd: PROJECT_DIR,
+			env: {
+				PATH: process.env.PATH ?? "/usr/bin:/bin",
+				LANG: "C.UTF-8",
+				LC_ALL: "C.UTF-8",
+				HOME: home,
+				XDG_CONFIG_HOME: config,
+				XDG_DATA_HOME: data,
+				[INTERNAL_WORKER_MARKER]: "1",
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		if (exitCode !== 0) {
+			void stderr;
+			throw new Error("recall_quality_worker_failed");
+		}
+		return JSON.parse(stdout) as T;
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+export async function runSemanticRecallIntegration(): Promise<SemanticRecallIntegrationResult> {
+	const moduleUrl = JSON.stringify(import.meta.url);
+	return spawnClosedWorker<SemanticRecallIntegrationResult>(
+		`import { runSemanticRecallWorker } from ${moduleUrl};` +
+			"const result = await runSemanticRecallWorker();" +
+			"process.stdout.write(JSON.stringify(result));",
+	);
+}
+
+/** Internal fixed worker. It has no fixture, path, fault, or baseline selector. */
+export async function runSemanticRecallWorker(): Promise<SemanticRecallIntegrationResult> {
+	return executeSemanticRecallWorker();
+}
+
+export async function runRecallQualityMatrix(
+	options: RecallQualityMatrixOptions = {},
+): Promise<RecallQualityMatrixReport> {
+	const moduleUrl = JSON.stringify(import.meta.url);
+	const fault = options.fault === undefined ? "undefined" : JSON.stringify(options.fault);
+	return spawnClosedWorker<RecallQualityMatrixReport>(
+		`import { runRecallQualityMatrixWorker } from ${moduleUrl};` +
+			`const report = await runRecallQualityMatrixWorker(${fault} === undefined ? {} : { fault: ${fault} });` +
+			"process.stdout.write(JSON.stringify(report));",
+	);
+}
+
+/** Internal fixed worker used by the closed parent process only. */
+export async function runRecallQualityMatrixWorker(
+	options: RecallQualityMatrixOptions = {},
+): Promise<RecallQualityMatrixReport> {
+	// Task 4 executes the new semantic suite in the same closed worker before
+	// the preserved v1 report. Task 5 will project both suites into schema v2.
+	await executeSemanticRecallWorker();
+	return executeRecallQualityMatrixWorker(options);
+}
+
 if (import.meta.main) {
-  const fault = process.env.RECALL_MATRIX_FAULT as Fault | undefined;
-  try {
-    const report = await runRecallQualityMatrix({ fault });
-    console.log(JSON.stringify(report, null, 2));
-    process.exitCode = report.verdict === "go" ? 0 : 1;
-  } catch {
-    console.log(JSON.stringify({ gate: "recall-quality-matrix", version: 1, verdict: "no-go", reason: "gate_execution_failed" }));
-    process.exitCode = 2;
-  }
+	const args = process.argv.slice(2);
+	if (args.length > 1 || (args.length === 1 && args[0] !== "--strict")) {
+		console.log(JSON.stringify({ gate: "recall-quality-matrix", version: 1, verdict: "no-go", reason: "invalid_usage" }));
+		process.exitCode = 2;
+	} else {
+		try {
+			const report = await runRecallQualityMatrix();
+			console.log(JSON.stringify(report, null, 2));
+			process.exitCode = report.verdict === "go" ? 0 : 1;
+		} catch {
+			console.log(JSON.stringify({ gate: "recall-quality-matrix", version: 1, verdict: "no-go", reason: "gate_execution_failed" }));
+			process.exitCode = 2;
+		}
+	}
 }

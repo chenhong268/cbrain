@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
 	executeOperationalContractCases,
+	mapFrontdoorEnvelopeToSemanticObservation,
 	runRecallQualityMatrix,
+	runSemanticRecallIntegration,
 } from "../../bin/check-recall-quality-matrix.js";
 import { checkAgentFacingRoutingProfile } from "../../bin/check-docs-consistency.js";
 import {
@@ -1655,6 +1657,108 @@ describe("operational contract", () => {
 	test("the updated canonical profile still satisfies docs consistency", () => {
 		const results = checkAgentFacingRoutingProfile(resolve(import.meta.dir, "../../skills"));
 		expect(results.every((item) => item.passed)).toBe(true);
+	});
+});
+
+describe("semantic integration", () => {
+	test("runs real cbrain_recall only inside a closed worker", async () => {
+		const result = await runSemanticRecallIntegration();
+
+		expect(result.worker.closedEnvironment).toBe(true);
+		expect(result.worker.inheritedCbrainVariables).toBe(0);
+		expect(result.worker.temporaryRootRemoved).toBe(true);
+		expect(result.topology).toEqual({
+			contextBuilder: "buildContext",
+			server: "bare_mcp",
+			registeredTools: ["cbrain_recall"],
+			jobStartCalls: 0,
+		});
+		expect(result.noLlmProvider).toBe(true);
+		expect(result.networkAdapterCalls).toBe(0);
+		expect(result.invocations).toEqual([
+			{ caseId: "content_positive_01", detail: "normal", includeRaw: true },
+			{ caseId: "content_negative_01", detail: "normal", includeRaw: true },
+			{ caseId: "abstract_positive_01", detail: "normal", includeRaw: true },
+			{ caseId: "abstract_negative_01", detail: "normal", includeRaw: true },
+		]);
+		expect(result.observations.map((item) => ({
+			caseId: item.caseId,
+			tool: item.actualTool,
+			route: item.actualFrontdoorRoute,
+		}))).toEqual([
+			{ caseId: "content_positive_01", tool: "cbrain_recall", route: "content_recall" },
+			{ caseId: "content_negative_01", tool: "cbrain_recall", route: "content_recall" },
+			{ caseId: "abstract_positive_01", tool: "cbrain_recall", route: "content_recall" },
+			{ caseId: "abstract_negative_01", tool: "cbrain_recall", route: "content_recall" },
+		]);
+	});
+
+	test("maps live titles and snippets to controlled source-bound evidence", async () => {
+		const result = await runSemanticRecallIntegration();
+		const content = result.observations.find((item) => item.caseId === "content_positive_01");
+		const abstract = result.observations.find((item) => item.caseId === "abstract_positive_01");
+
+		expect(content).toMatchObject({
+			answerStatus: "ok",
+			evidenceSufficiency: "sufficient",
+			degradationKind: "none",
+		});
+		expect(content?.top3[0]).toEqual({
+			sourceId: "source_a",
+			matchedPointIds: ["point_a"],
+		});
+		expect(abstract?.top3[0]).toEqual({
+			sourceId: "source_c",
+			matchedPointIds: ["point_c"],
+		});
+		expect(result.observations.some((item) =>
+			item.answerStatus === "degraded" &&
+			item.evidenceSufficiency === "insufficient" &&
+			item.degradationKind === "evidence"
+		)).toBe(true);
+	});
+});
+
+describe("vector differential", () => {
+	test("real frontdoor vector recall finds a no-shared-token source that production FTS misses", async () => {
+		const result = await runSemanticRecallIntegration();
+
+		expect(result.vector.lanceSearchCalls).toBeGreaterThan(0);
+		expect(result.vector.noSharedTokens).toBe(true);
+		expect(result.vector.abstractExpectedSourceFound).toBe(true);
+		expect(result.vector.ftsControlExpectedSourceFound).toBe(false);
+		expect(result.vector.ftsControlApi).toBe("HybridSearch.search(strategy=fts)");
+		expect(result.vector.comparisonLayer).toBe("retrieval_candidates");
+	});
+
+	test("orders equal-cosine vector hits by page slug and chunk index", async () => {
+		const result = await runSemanticRecallIntegration();
+		expect(result.vector.tieOrderStable).toBe(true);
+	});
+});
+
+describe("evidence mapper", () => {
+	test("does not invent an infrastructure reason for degraded output without evidence proof", () => {
+		const observation = mapFrontdoorEnvelopeToSemanticObservation(
+			answerableCase(),
+			{
+				summary: { status: "degraded" },
+				raw: {
+					routing: { chosen_route: "content_recall" },
+					entities: [{ title: "匿名记录A", snippet: "恢复 边界" }],
+				},
+			},
+			parseCanonicalCorpus(),
+		);
+
+		expect(observation).toMatchObject({
+			answerStatus: "degraded",
+			degradationKind: "unclassified",
+			evidenceSufficiency: "not_applicable",
+		});
+		expect(compareRecallBaseline([
+			evaluateRecallCase(answerableCase(), observation),
+		], []).ciVerdict).toBe("no-go");
 	});
 });
 
