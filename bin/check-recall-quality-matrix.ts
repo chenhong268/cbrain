@@ -24,6 +24,7 @@ import { checkAgentWorkflowContract } from "./check-docs-consistency.js";
 import {
 	aggregateRecallMetrics,
 	buildRecallQualityReport,
+	checkRecallQualityPrivacy,
 	compareRecallBaseline,
 	evaluateRecallCase,
 	parseRecallQualityBaseline,
@@ -76,7 +77,6 @@ export interface RecallQualityCaseResult {
 interface LegacyRecallQualityMatrixResult {
   readonly lanes: Readonly<Record<Lane, GateStatus>>;
   readonly cases: readonly RecallQualityCaseResult[];
-  readonly privacyPass: boolean;
   readonly boundedRuntime: boolean;
 }
 
@@ -809,7 +809,6 @@ async function executeRecallQualityMatrixWorker(
     return {
 			lanes,
 			cases,
-			privacyPass: options.fault !== "privacy",
 			boundedRuntime: boundedRuntimePass,
 		};
   } finally {
@@ -1113,17 +1112,37 @@ export async function runRecallQualityMatrixWorker(
 		passed: item.passed,
 	}));
 
-	return buildRecallQualityReport({
+	const reportInput = {
 		evaluatedCases: evaluated,
 		comparison,
 		metrics: aggregateRecallMetrics(evaluated),
 		legacyCases,
-		mode: options.strict ? "strict" : "default",
-		privacyPass: legacy.privacyPass,
+		mode: options.strict ? "strict" as const : "default" as const,
 		deterministic: true,
 		boundedRuntime: legacy.boundedRuntime,
 		advisoryDurationMs: performance.now() - started,
+	};
+	const candidateReport = buildRecallQualityReport({
+		...reportInput,
+		privacyPass: true,
 	});
+	const privacyObservations: unknown[] = [
+		...operational,
+		...semantic.observations,
+	];
+	if (options.fault === "privacy" && privacyObservations[0]) {
+		privacyObservations[0] = {
+			...(privacyObservations[0] as Record<string, unknown>),
+			privacy_probe: "recall-quality-private-sentinel-336",
+		};
+	}
+	const privacyPass = checkRecallQualityPrivacy({
+		observations: privacyObservations,
+		legacyCases,
+	}, candidateReport);
+	return privacyPass
+		? candidateReport
+		: buildRecallQualityReport({ ...reportInput, privacyPass: false });
 }
 
 export type RecallQualityCliErrorCode =

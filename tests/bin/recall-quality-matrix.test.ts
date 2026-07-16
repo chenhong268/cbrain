@@ -15,6 +15,7 @@ import {
 	aggregateRecallMetrics,
 	buildRecallQualityReport,
 	canonicalRecallQualityJson,
+	checkRecallQualityPrivacy,
 	compareRecallBaseline,
 	evaluateRecallCase,
 	LEGACY_RECALL_CASE_IDS,
@@ -1884,6 +1885,58 @@ describe("legacy v1 preservation", () => {
 });
 
 describe("v2 report", () => {
+	test("privacy is derived by scanning allowlisted observations and the projected report", () => {
+		const evaluated = [evaluateRecallCase(answerableCase(), semanticObservation())];
+		const report = pureReport(evaluated);
+		const candidate = {
+			observations: [semanticObservation()],
+			legacyCases: passingLegacy(),
+		};
+		expect(checkRecallQualityPrivacy(candidate, report)).toBe(true);
+
+		const contaminated = structuredClone(candidate) as Record<string, unknown>;
+		const observations = contaminated.observations as Array<Record<string, unknown>>;
+		observations[0]!.privacy_probe = "recall-quality-private-sentinel-336";
+		expect(checkRecallQualityPrivacy(contaminated, report)).toBe(false);
+
+		const contaminatedReport = {
+			...report,
+			display: "recall-quality-private-sentinel-336",
+		};
+		expect(checkRecallQualityPrivacy(candidate, contaminatedReport)).toBe(false);
+	});
+
+	test("privacy scan does not relabel a controlled route mismatch as a privacy failure", () => {
+		const evaluated = [evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({ actualFrontdoorRoute: "relationship" }),
+		)];
+		const candidate = {
+			observations: [semanticObservation({ actualFrontdoorRoute: "relationship" })],
+			legacyCases: passingLegacy(),
+		};
+		expect(checkRecallQualityPrivacy(candidate, pureReport(evaluated))).toBe(true);
+
+		const missingRoute = [evaluateRecallCase(
+			answerableCase(),
+			semanticObservation({ actualFrontdoorRoute: "unknown" }),
+		)];
+		expect(checkRecallQualityPrivacy({
+			observations: [semanticObservation({ actualFrontdoorRoute: "unknown" })],
+			legacyCases: passingLegacy(),
+		}, pureReport(missingRoute))).toBe(true);
+	});
+
+	test("privacy fault is detected without copying its raw sentinel into public output", async () => {
+		const report = await runRecallQualityMatrix({ fault: "privacy" });
+		const serialized = JSON.stringify(report);
+		expect(report.privacy).toBe("fail");
+		expect(report.failure_counts.privacy_failure).toBe(1);
+		expect(report.quality_status).toBe("regression");
+		expect(report.verdict).toBe("no-go");
+		expect(serialized).not.toContain("recall-quality-private-sentinel-336");
+	});
+
 	test("projects a fixed allowlisted schema and safe per-case dispositions", async () => {
 		const report = await runRecallQualityMatrix();
 		expect(Object.keys(report)).toEqual([

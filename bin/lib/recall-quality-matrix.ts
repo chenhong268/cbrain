@@ -1593,6 +1593,241 @@ const REPORT_FAILURE_CODES: readonly RecallQualityFailureCode[] = [
 	"wrong_source",
 ];
 
+const PUBLIC_REPORT_TOP_LEVEL_KEYS = [
+	"gate",
+	"schema_version",
+	"mode",
+	"route_scope",
+	"strict_verdict",
+	"ci_verdict",
+	"verdict",
+	"strict_failure",
+	"quality_status",
+	"metrics",
+	"category_counts",
+	"failure_counts",
+	"counts",
+	"cases",
+	"legacy_v1",
+	"privacy",
+	"determinism",
+	"bounded_runtime",
+	"reproducibility_fingerprint",
+	"advisory_duration_ms",
+] as const;
+
+const PUBLIC_REPORT_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+	...PUBLIC_REPORT_TOP_LEVEL_KEYS,
+	"route_accuracy",
+	"route_accuracy_by_category",
+	"recall_at_3",
+	"wrong_source_rate",
+	"irrelevant_but_ok_rate",
+	"insufficient_false_positive_rate",
+	"numerator",
+	"denominator",
+	"rate",
+	"operational_meta",
+	"content_meta",
+	"abstract_concept",
+	...REPORT_FAILURE_CODES,
+	"known_failures",
+	"regressions",
+	"unexpected_passes",
+	"case_id",
+	"category",
+	"kind",
+	"failure_codes",
+	"disposition",
+	"status",
+	"id",
+	"lane",
+]);
+
+const PUBLIC_REPORT_ALLOWED_STRINGS: ReadonlySet<string> = new Set([
+	"recall-quality-matrix",
+	"default",
+	"strict",
+	"agent_contract_plus_frontdoor",
+	"go",
+	"no-go",
+	"pass",
+	"known_failure",
+	"regression",
+	"operational_meta",
+	"content_meta",
+	"abstract_concept",
+	"route_contract",
+	"semantic_recall",
+	"unexpected_pass",
+	"retrieval",
+	"router",
+	"evidence",
+	"latency",
+	"fail",
+	...REPORT_FAILURE_CODES,
+	...LEGACY_RECALL_CASE_IDS,
+]);
+
+const RAW_CANDIDATE_KEYS = ["observations", "legacyCases"] as const;
+const RAW_ROUTE_OBSERVATION_KEYS = ["kind", "caseId", "actualTool"] as const;
+const RAW_SEMANTIC_OBSERVATION_KEYS = [
+	"kind",
+	"caseId",
+	"actualTool",
+	"actualFrontdoorRoute",
+	"answerStatus",
+	"degradationKind",
+	"evidenceSufficiency",
+	"top3",
+] as const;
+const RAW_TOP3_KEYS = ["sourceId", "matchedPointIds"] as const;
+const RAW_LEGACY_KEYS = ["id", "lane", "passed"] as const;
+const RAW_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
+	"next_actions",
+	"cbrain_recall",
+	"query",
+	"deep_recall",
+	"recall_episode",
+	"get_org_tree",
+	"agentic_research",
+	"summarize",
+]);
+const RAW_ALLOWED_FRONTDOOR_ROUTES: ReadonlySet<string> = new Set([
+	"grounded_recall",
+	"content_recall",
+	"episodic_recall",
+	"hierarchy",
+	"overview",
+	"relationship",
+	"reasoning",
+	"debug_search",
+	"unknown",
+]);
+const RAW_ALLOWED_ANSWER_STATUSES: ReadonlySet<string> = new Set([
+	"ok",
+	"empty",
+	"degraded",
+]);
+const RAW_ALLOWED_DEGRADATION_KINDS: ReadonlySet<string> = new Set([
+	"none",
+	"evidence",
+	"unclassified",
+]);
+const RAW_ALLOWED_EVIDENCE_SUFFICIENCY: ReadonlySet<string> = new Set([
+	"sufficient",
+	"insufficient",
+	"not_applicable",
+]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyExactKeys(
+	value: Record<string, unknown>,
+	keys: readonly string[],
+): boolean {
+	const actual = Object.keys(value).sort();
+	const expected = [...keys].sort();
+	return sameStrings(actual, expected);
+}
+
+function isReportableCaseId(value: unknown): value is RecallQualityCaseId {
+	return typeof value === "string" &&
+		/^(operational|content|abstract)_(positive|negative)_[0-9]{2}$/.test(value);
+}
+
+function rawObservationIsAllowlisted(value: unknown): boolean {
+	if (!isPlainRecord(value)) return false;
+	if (value.kind === "route_contract") {
+		return hasOnlyExactKeys(value, RAW_ROUTE_OBSERVATION_KEYS) &&
+			isReportableCaseId(value.caseId) &&
+			typeof value.actualTool === "string" &&
+			RAW_ALLOWED_TOOLS.has(value.actualTool);
+	}
+	if (value.kind !== "semantic_recall" ||
+		!hasOnlyExactKeys(value, RAW_SEMANTIC_OBSERVATION_KEYS) ||
+		!isReportableCaseId(value.caseId) ||
+		typeof value.actualTool !== "string" ||
+		!RAW_ALLOWED_TOOLS.has(value.actualTool) ||
+		typeof value.actualFrontdoorRoute !== "string" ||
+		!RAW_ALLOWED_FRONTDOOR_ROUTES.has(value.actualFrontdoorRoute) ||
+		typeof value.answerStatus !== "string" ||
+		!RAW_ALLOWED_ANSWER_STATUSES.has(value.answerStatus) ||
+		typeof value.degradationKind !== "string" ||
+		!RAW_ALLOWED_DEGRADATION_KINDS.has(value.degradationKind) ||
+		typeof value.evidenceSufficiency !== "string" ||
+		!RAW_ALLOWED_EVIDENCE_SUFFICIENCY.has(value.evidenceSufficiency) ||
+		!Array.isArray(value.top3)
+	) {
+		return false;
+	}
+	return value.top3.every((item) =>
+		isPlainRecord(item) &&
+		hasOnlyExactKeys(item, RAW_TOP3_KEYS) &&
+		typeof item.sourceId === "string" &&
+		/^source_[a-z]$/.test(item.sourceId) &&
+		Array.isArray(item.matchedPointIds) &&
+		item.matchedPointIds.every((pointId) =>
+			typeof pointId === "string" && /^point_[a-z]$/.test(pointId)
+		)
+	);
+}
+
+function rawCandidateIsAllowlisted(value: unknown): boolean {
+	if (!isPlainRecord(value) || !hasOnlyExactKeys(value, RAW_CANDIDATE_KEYS)) {
+		return false;
+	}
+	if (!Array.isArray(value.observations) || !Array.isArray(value.legacyCases)) {
+		return false;
+	}
+	return value.observations.every(rawObservationIsAllowlisted) &&
+		value.legacyCases.every((item) =>
+			isPlainRecord(item) &&
+			hasOnlyExactKeys(item, RAW_LEGACY_KEYS) &&
+			typeof item.id === "string" &&
+			LEGACY_RECALL_CASE_IDS.includes(item.id as LegacyRecallCaseId) &&
+			(item.lane === "retrieval" || item.lane === "router" ||
+				item.lane === "evidence" || item.lane === "latency") &&
+			typeof item.passed === "boolean"
+		);
+}
+
+function publicReportIsAllowlisted(value: unknown): boolean {
+	if (!isPlainRecord(value) ||
+		!hasOnlyExactKeys(value, PUBLIC_REPORT_TOP_LEVEL_KEYS)) {
+		return false;
+	}
+	const visit = (item: unknown, key?: string): boolean => {
+		if (Array.isArray(item)) return item.every((entry) => visit(entry));
+		if (isPlainRecord(item)) {
+			return Object.entries(item).every(([childKey, child]) =>
+				PUBLIC_REPORT_ALLOWED_KEYS.has(childKey) && visit(child, childKey)
+			);
+		}
+		if (typeof item === "number") return Number.isFinite(item);
+		if (typeof item === "boolean") return true;
+		if (typeof item !== "string") return false;
+		if (key === "reproducibility_fingerprint") return /^[a-f0-9]{64}$/.test(item);
+		return PUBLIC_REPORT_ALLOWED_STRINGS.has(item) || isReportableCaseId(item);
+	};
+	return visit(value);
+}
+
+/**
+ * Validate both sides of the privacy boundary using closed field/value sets.
+ * The internal candidate may contain controlled source/point IDs, while the
+ * public report may contain only report enums and reportable case IDs.
+ */
+export function checkRecallQualityPrivacy(
+	rawCandidate: unknown,
+	publicReport: unknown,
+): boolean {
+	return rawCandidateIsAllowlisted(rawCandidate) &&
+		publicReportIsAllowlisted(publicReport);
+}
+
 function publicRate(metric: RecallQualityRateMetric): RecallQualityPublicRateMetric {
 	return {
 		numerator: metric.numerator,
