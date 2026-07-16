@@ -504,6 +504,12 @@ function parseRouteCase(row: Record<string, unknown>): RecallRouteContractCase {
 		fail("invalid_route_contract");
 	const forbiddenTools = parseForbiddenTools(row.forbidden_tools);
 	assertRecord(row.expected_args);
+	if (
+		typeof row.expected_tool === "string" &&
+		forbiddenTools.includes(row.expected_tool)
+	) {
+		fail("invalid_route_contract");
+	}
 
 	if (row.expected_tool === "next_actions") {
 		assertExactKeys(row.expected_args, ["include_raw"]);
@@ -732,7 +738,10 @@ export function parseRecallQualityCases(
 	return cases;
 }
 
-function parseBaselineTop3(value: unknown): RecallQualityBaselineTop3[] {
+function parseBaselineTop3(
+	value: unknown,
+	pointSourceById: ReadonlyMap<RecallAnswerPointId, RecallCorpusSourceId>,
+): RecallQualityBaselineTop3[] {
 	assertArray(value);
 	if (value.length > 3) fail("invalid_baseline_signature");
 	const sources = new Set<string>();
@@ -740,11 +749,16 @@ function parseBaselineTop3(value: unknown): RecallQualityBaselineTop3[] {
 		assertRecord(item);
 		assertExactKeys(item, BASELINE_TOP3_KEYS);
 		assertSourceId(item.source_id);
+		if (![...pointSourceById.values()].includes(item.source_id))
+			fail("unknown_source_reference");
 		if (sources.has(item.source_id)) fail("invalid_baseline_signature");
 		sources.add(item.source_id);
 		assertArray(item.matched_point_ids);
 		const matchedPointIds = item.matched_point_ids.map((pointId) => {
 			assertPointId(pointId);
+			const pointSource = pointSourceById.get(pointId);
+			if (!pointSource) fail("unknown_point_reference");
+			if (pointSource !== item.source_id) fail("point_source_mismatch");
 			return pointId;
 		});
 		assertUnique(matchedPointIds);
@@ -762,6 +776,7 @@ function parseBaselineTop3(value: unknown): RecallQualityBaselineTop3[] {
 export function parseRecallQualityBaseline(
 	text: string,
 	cases: readonly RecallQualityCase[],
+	corpus: RecallCorpus,
 ): RecallQualityBaseline {
 	let parsed: unknown;
 	try {
@@ -776,6 +791,11 @@ export function parseRecallQualityBaseline(
 		cases.map((testCase) => [testCase.caseId, testCase]),
 	);
 	const baselineCaseIds = new Set<string>();
+	const pointSourceById = new Map(
+		corpus.flatMap((source) =>
+			source.answerPoints.map((point) => [point.pointId, source.sourceId]),
+		),
+	);
 	return parsed.map((item) => {
 		assertRecord(item);
 		assertExactKeys(item, BASELINE_KEYS);
@@ -823,17 +843,7 @@ export function parseRecallQualityBaseline(
 			fail("invalid_baseline_signature");
 		}
 		if (item.follow_up !== "#337") fail("invalid_baseline_follow_up");
-		const top3 = parseBaselineTop3(item.top3);
-		if (
-			top3.some(
-				(entry) =>
-					![...testCase.allowedSources, ...testCase.mustNotSources].includes(
-						entry.sourceId,
-					),
-			)
-		) {
-			fail("unknown_source_reference");
-		}
+		const top3 = parseBaselineTop3(item.top3, pointSourceById);
 
 		return {
 			caseId: item.case_id,

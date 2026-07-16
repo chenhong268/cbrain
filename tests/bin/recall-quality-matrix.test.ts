@@ -59,6 +59,16 @@ const routeCase = (): Record<string, unknown> => ({
 	forbidden_tools: ["query", "cbrain_recall", "deep_recall"],
 });
 
+const historicalRouteCase = (): Record<string, unknown> => ({
+	case_id: "operational_negative_01",
+	category: "operational_meta",
+	kind: "route_contract",
+	canonical_input_sha256: "b".repeat(64),
+	expected_tool: "cbrain_recall",
+	expected_args: { detail: "normal" },
+	forbidden_tools: ["next_actions"],
+});
+
 const baselineEntry = (): Record<string, unknown> => ({
 	case_id: "abstract_positive_01",
 	failure_codes: ["recall_miss"],
@@ -86,7 +96,7 @@ describe("fixture schema", () => {
 		const corpus = parseCanonicalCorpus();
 		const cases = parseCanonicalCases();
 		const routes = parseRecallQualityCases(jsonl([routeCase()]), corpus);
-		const baseline = parseRecallQualityBaseline(BASELINE_TEXT, cases);
+		const baseline = parseRecallQualityBaseline(BASELINE_TEXT, cases, corpus);
 
 		expect(corpus).toHaveLength(4);
 		expect(cases.map((item) => item.caseId)).toEqual([
@@ -136,6 +146,7 @@ describe("fixture schema", () => {
 					parseRecallQualityBaseline(
 						JSON.stringify([row]),
 						parseCanonicalCases(),
+						parseCanonicalCorpus(),
 					);
 			},
 		],
@@ -353,6 +364,16 @@ describe("fixture schema", () => {
 		);
 	});
 
+	test("rejects a historical route contract that forbids its expected tool", () => {
+		const row = historicalRouteCase();
+		row.forbidden_tools = ["next_actions", "cbrain_recall"];
+		expectFixtureError(
+			() =>
+				parseRecallQualityCases(jsonl([row]), parseCanonicalCorpus()),
+			"invalid_route_contract",
+		);
+	});
+
 	test("uses a finite, single-space-delimited vocabulary for every semantic free-text field", () => {
 		expect(
 			[...SAFE_FIXTURE_TOKENS].every(
@@ -445,21 +466,36 @@ describe("fixture schema", () => {
 		const badFailure = baselineEntry();
 		badFailure.failure_codes = ["route_mismatch"];
 		expectFixtureError(
-			() => parseRecallQualityBaseline(JSON.stringify([badFailure]), cases),
+			() =>
+				parseRecallQualityBaseline(
+					JSON.stringify([badFailure]),
+					cases,
+					parseCanonicalCorpus(),
+				),
 			"invalid_baseline_failure_code",
 		);
 
 		const badFollowUp = baselineEntry();
 		badFollowUp.follow_up = "#338";
 		expectFixtureError(
-			() => parseRecallQualityBaseline(JSON.stringify([badFollowUp]), cases),
+			() =>
+				parseRecallQualityBaseline(
+					JSON.stringify([badFollowUp]),
+					cases,
+					parseCanonicalCorpus(),
+				),
 			"invalid_baseline_follow_up",
 		);
 
 		const unknownCase = baselineEntry();
 		unknownCase.case_id = "abstract_positive_99";
 		expectFixtureError(
-			() => parseRecallQualityBaseline(JSON.stringify([unknownCase]), cases),
+			() =>
+				parseRecallQualityBaseline(
+					JSON.stringify([unknownCase]),
+					cases,
+					parseCanonicalCorpus(),
+				),
 			"unknown_baseline_case",
 		);
 
@@ -469,8 +505,37 @@ describe("fixture schema", () => {
 				parseRecallQualityBaseline(
 					JSON.stringify([duplicate, duplicate]),
 					cases,
+					parseCanonicalCorpus(),
 				),
 			"duplicate_baseline_case_id",
+		);
+	});
+
+	test("rejects an unknown baseline matched point", () => {
+		const row = baselineEntry();
+		row.top3 = [{ source_id: "source_a", matched_point_ids: ["point_z"] }];
+		expectFixtureError(
+			() =>
+				parseRecallQualityBaseline(
+					JSON.stringify([row]),
+					parseCanonicalCases(),
+					parseCanonicalCorpus(),
+				),
+			"unknown_point_reference",
+		);
+	});
+
+	test("rejects a baseline matched point bound to another top-three source", () => {
+		const row = baselineEntry();
+		row.top3 = [{ source_id: "source_a", matched_point_ids: ["point_b"] }];
+		expectFixtureError(
+			() =>
+				parseRecallQualityBaseline(
+					JSON.stringify([row]),
+					parseCanonicalCases(),
+					parseCanonicalCorpus(),
+				),
+			"point_source_mismatch",
 		);
 	});
 
@@ -480,6 +545,7 @@ describe("fixture schema", () => {
 				parseRecallQualityBaseline(
 					JSON.stringify({ entries: [] }),
 					parseCanonicalCases(),
+					parseCanonicalCorpus(),
 				),
 			"baseline_not_array",
 		);

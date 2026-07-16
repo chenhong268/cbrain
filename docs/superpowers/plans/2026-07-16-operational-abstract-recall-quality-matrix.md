@@ -92,6 +92,7 @@ export function parseRecallQualityCases(
 export function parseRecallQualityBaseline(
   text: string,
   cases: readonly RecallQualityCase[],
+  corpus: RecallCorpus,
 ): RecallQualityBaseline;
 ```
 
