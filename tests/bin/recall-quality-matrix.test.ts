@@ -1818,15 +1818,76 @@ const passingLegacy = () => LEGACY_RECALL_CASE_IDS.map((id) => ({
 	passed: true,
 }));
 
+const canonicalPassingEvaluated = (): EvaluatedRecallCase[] =>
+	parseCanonicalCases().map((testCase) => {
+		if (testCase.kind === "route_contract") {
+			return evaluateRecallCase(testCase, {
+				kind: "route_contract",
+				caseId: testCase.caseId,
+				actualTool: testCase.expectedTool,
+			});
+		}
+		const top3 = testCase.oracle === "answerable"
+			? testCase.expectedSources.map((sourceId) => ({
+				sourceId,
+				matchedPointIds: testCase.requiredAnswerPoints.find(
+					(rule) => rule.sourceId === sourceId,
+				)?.pointIds ?? [],
+			}))
+			: [];
+		return evaluateRecallCase(testCase, {
+			kind: "semantic_recall",
+			caseId: testCase.caseId,
+			actualTool: "cbrain_recall",
+			actualFrontdoorRoute: "content_recall",
+			answerStatus: testCase.oracle === "answerable" ? "ok" : "empty",
+			degradationKind: "none",
+			evidenceSufficiency:
+				testCase.oracle === "answerable" ? "sufficient" : "not_applicable",
+			top3,
+		});
+	});
+
+function authoritativeReportInput(
+	evaluatedCases: readonly EvaluatedRecallCase[] = canonicalPassingEvaluated(),
+	baseline: readonly RecallQualityBaselineEntry[] = [],
+): Parameters<typeof buildRecallQualityReport>[0] {
+	return {
+		evaluatedCases,
+		baseline,
+		legacyCases: passingLegacy(),
+		mode: "default",
+		privacyPass: true,
+		deterministic: true,
+		boundedRuntime: true,
+		advisoryDurationMs: 12,
+	};
+}
+
+function expectReportError(run: () => unknown, code: string): void {
+	try {
+		run();
+		throw new Error(`expected report error ${code}`);
+	} catch (error) {
+		expect(error).toMatchObject({
+			name: "RecallQualityEvaluationError",
+			code,
+		});
+	}
+}
+
 function pureReport(
-	evaluatedCases: readonly EvaluatedRecallCase[],
+	evaluatedOverrides: readonly EvaluatedRecallCase[],
 	baseline: readonly RecallQualityBaselineEntry[] = [],
 	mode: "default" | "strict" = "default",
 ) {
+	const overrides = new Map(evaluatedOverrides.map((item) => [item.caseId, item]));
+	const evaluatedCases = canonicalPassingEvaluated().map(
+		(item) => overrides.get(item.caseId) ?? item,
+	);
 	return buildRecallQualityReport({
 		evaluatedCases,
-		comparison: compareRecallBaseline(evaluatedCases, baseline),
-		metrics: aggregateRecallMetrics(evaluatedCases),
+		baseline,
 		legacyCases: passingLegacy(),
 		mode,
 		privacyPass: true,
@@ -1835,6 +1896,132 @@ function pureReport(
 		advisoryDurationMs: 123.7,
 	});
 }
+
+describe("v2 report builder authority", () => {
+	test("rejects empty, missing, extra, and duplicate canonical evaluated case sets", () => {
+		const canonical = canonicalPassingEvaluated();
+		for (const invalid of [
+			[],
+			canonical.slice(1),
+			[canonical[1]!, canonical[0]!, ...canonical.slice(2)],
+			[
+				...canonical,
+				{ ...canonical[0]!, caseId: "operational_positive_02" } as EvaluatedRecallCase,
+			],
+			[...canonical, canonical[0]!],
+		]) {
+			expectReportError(
+				() => buildRecallQualityReport(authoritativeReportInput(invalid)),
+				"case_set_mismatch",
+			);
+		}
+	});
+
+	test("recomputes route failure and metrics from evaluated cases only", () => {
+		const evaluated = canonicalPassingEvaluated();
+		const routeCase = parseCanonicalCases().find(
+			(item): item is RecallRouteContractCase =>
+				item.caseId === "operational_positive_01" && item.kind === "route_contract",
+		);
+		if (!routeCase) throw new Error("missing controlled route case");
+		evaluated[0] = evaluateRecallCase(routeCase, {
+			kind: "route_contract",
+			caseId: routeCase.caseId,
+			actualTool: "query",
+		});
+		const report = buildRecallQualityReport(authoritativeReportInput(evaluated));
+		const observed = report.cases.find(
+			(item) => item.case_id === "operational_positive_01",
+		);
+		expect(observed?.failure_codes).toEqual(["route_mismatch"]);
+		expect(observed?.disposition).toBe("regression");
+		expect(report.metrics.route_accuracy).toEqual({
+			numerator: 5,
+			denominator: 6,
+			rate: 0.833333,
+		});
+		expect(report.verdict).toBe("no-go");
+	});
+
+	test("rejects caller-forged comparison and metrics fields", () => {
+		const routeCase = parseCanonicalCases().find(
+			(item): item is RecallRouteContractCase =>
+				item.caseId === "operational_positive_01" && item.kind === "route_contract",
+		);
+		if (!routeCase) throw new Error("missing controlled route case");
+		const routeMismatch = canonicalPassingEvaluated();
+		routeMismatch[0] = evaluateRecallCase(routeCase, {
+			kind: "route_contract",
+			caseId: routeCase.caseId,
+			actualTool: "query",
+		});
+		const valid = authoritativeReportInput(routeMismatch);
+		for (const forged of [
+			{
+				...valid,
+				comparison: {
+					cases: [],
+					qualityStatus: "pass",
+					strictVerdict: "go",
+					ciVerdict: "go",
+					counts: { knownFailures: 0, regressions: 0, unexpectedPasses: 0 },
+				},
+			},
+			{
+				...valid,
+				metrics: {
+					routeAccuracy: { numerator: 6, denominator: 6, rate: 1 },
+				},
+			},
+		]) {
+			expectReportError(
+				() => buildRecallQualityReport(
+					forged as unknown as Parameters<typeof buildRecallQualityReport>[0],
+				),
+				"report_input_mismatch",
+			);
+		}
+	});
+
+	test("requires the fixed legacy ID-to-lane mapping", () => {
+		const input = authoritativeReportInput();
+		const legacyCases = passingLegacy().map((item) =>
+			item.id === "zh_exact" ? { ...item, lane: "router" as const } : item
+		);
+		expectReportError(
+			() => buildRecallQualityReport({
+				...input,
+				legacyCases,
+			}),
+			"legacy_lane_mismatch",
+		);
+
+		const inheritedLegacy = passingLegacy();
+		inheritedLegacy[0] = Object.assign(Object.create({
+			toJSON: () => ({ id: "zh_exact", lane: "router", passed: true }),
+		}), inheritedLegacy[0]);
+		expectReportError(
+			() => buildRecallQualityReport({
+				...input,
+				legacyCases: inheritedLegacy,
+			}),
+			"report_input_mismatch",
+		);
+	});
+
+	test.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+		"rejects non-finite advisory duration %p",
+		(advisoryDurationMs) => {
+			expectReportError(
+				() => buildRecallQualityReport({
+					...authoritativeReportInput(),
+					advisoryDurationMs,
+				}),
+				"invalid_duration",
+			);
+		},
+	);
+});
 
 describe("legacy v1 preservation", () => {
 	test("pins the exact ordered nine IDs and retrieval/router/evidence/latency lanes", async () => {
@@ -1925,6 +2112,33 @@ describe("v2 report", () => {
 			observations: [semanticObservation({ actualFrontdoorRoute: "unknown" })],
 			legacyCases: passingLegacy(),
 		}, pureReport(missingRoute))).toBe(true);
+	});
+
+	test("privacy validator enforces exact nested schema and plain-record serialization", () => {
+		const evaluated = [evaluateRecallCase(answerableCase(), semanticObservation())];
+		const report = pureReport(evaluated);
+		const candidate = {
+			observations: [semanticObservation()],
+			legacyCases: passingLegacy(),
+		};
+		const nullPrototypeCandidate = Object.assign(Object.create(null), candidate);
+		expect(checkRecallQualityPrivacy(nullPrototypeCandidate, report)).toBe(true);
+
+		const inheritedCandidate = Object.assign(Object.create({
+			toJSON: () => ({ privacy_probe: "recall-quality-private-sentinel-336" }),
+		}), candidate);
+		expect(checkRecallQualityPrivacy(inheritedCandidate, report)).toBe(false);
+
+		const inheritedReport = Object.assign(Object.create({
+			toJSON: () => ({ mode: "pass" }),
+		}), report);
+		expect(checkRecallQualityPrivacy(candidate, inheritedReport)).toBe(false);
+		expect(checkRecallQualityPrivacy(candidate, {
+			...report,
+			toJSON: () => ({ mode: "pass" }),
+		})).toBe(false);
+		expect(checkRecallQualityPrivacy(candidate, { ...report, mode: "pass" })).toBe(false);
+		expect(checkRecallQualityPrivacy(candidate, { ...report, metrics: [] })).toBe(false);
 	});
 
 	test("privacy fault is detected without copying its raw sentinel into public output", async () => {
@@ -2022,9 +2236,8 @@ describe("v2 report", () => {
 		const evaluated = [evaluateRecallCase(answerableCase(), semanticObservation())];
 		const first = pureReport(evaluated);
 		const second = buildRecallQualityReport({
-			evaluatedCases: evaluated,
-			comparison: compareRecallBaseline(evaluated, []),
-			metrics: aggregateRecallMetrics(evaluated),
+			evaluatedCases: canonicalPassingEvaluated(),
+			baseline: [],
 			legacyCases: passingLegacy(),
 			mode: "default",
 			privacyPass: true,

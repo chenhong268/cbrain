@@ -22,10 +22,8 @@ import { CBrainDB } from "../src/storage/sqlite.js";
 import type { LanceDBManager } from "../src/storage/lancedb.js";
 import { checkAgentWorkflowContract } from "./check-docs-consistency.js";
 import {
-	aggregateRecallMetrics,
 	buildRecallQualityReport,
 	checkRecallQualityPrivacy,
-	compareRecallBaseline,
 	evaluateRecallCase,
 	parseRecallQualityBaseline,
 	parseRecallQualityCases,
@@ -1104,7 +1102,6 @@ export async function runRecallQualityMatrixWorker(
 		if (!observation) throw new Error("recall_quality_observation_missing");
 		return evaluateRecallCase(testCase, observation);
 	});
-	const comparison = compareRecallBaseline(evaluated, baseline);
 	const legacy = await executeRecallQualityMatrixWorker(options);
 	const legacyCases: LegacyRecallCaseSummary[] = legacy.cases.map((item) => ({
 		id: item.id,
@@ -1114,8 +1111,7 @@ export async function runRecallQualityMatrixWorker(
 
 	const reportInput = {
 		evaluatedCases: evaluated,
-		comparison,
-		metrics: aggregateRecallMetrics(evaluated),
+		baseline,
 		legacyCases,
 		mode: options.strict ? "strict" as const : "default" as const,
 		deterministic: true,

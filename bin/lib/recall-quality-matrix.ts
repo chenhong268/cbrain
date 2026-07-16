@@ -184,7 +184,12 @@ export type RecallQualityObservation =
 
 export type RecallQualityEvaluationErrorCode =
 	| "case_id_mismatch"
-	| "observation_kind_mismatch";
+	| "observation_kind_mismatch"
+	| "report_input_mismatch"
+	| "case_set_mismatch"
+	| "legacy_lane_mismatch"
+	| "invalid_duration"
+	| "report_serialization_invalid";
 
 export class RecallQualityEvaluationError extends Error {
 	readonly code: RecallQualityEvaluationErrorCode;
@@ -278,8 +283,36 @@ export const LEGACY_RECALL_CASE_IDS = [
 	"bounded_runtime",
 ] as const;
 
+export const ISSUE_336_RECALL_CASE_IDS = [
+	"operational_positive_01",
+	"operational_negative_01",
+	"content_positive_01",
+	"content_negative_01",
+	"abstract_positive_01",
+	"abstract_negative_01",
+] as const satisfies readonly RecallQualityCaseId[];
+
+const ISSUE_336_BASELINE_CASE_IDS: ReadonlySet<RecallQualityCaseId> = new Set([
+	"content_positive_01",
+	"content_negative_01",
+	"abstract_positive_01",
+	"abstract_negative_01",
+]);
+
 export type LegacyRecallCaseId = (typeof LEGACY_RECALL_CASE_IDS)[number];
 export type LegacyRecallLane = "retrieval" | "router" | "evidence" | "latency";
+
+const LEGACY_RECALL_LANE_BY_ID: Readonly<Record<LegacyRecallCaseId, LegacyRecallLane>> = {
+	zh_exact: "retrieval",
+	en_exact: "retrieval",
+	mixed_alias: "retrieval",
+	abstract_topic: "retrieval",
+	honest_empty: "retrieval",
+	temporal_evidence: "evidence",
+	relationship_route: "router",
+	operational_contract: "router",
+	bounded_runtime: "latency",
+};
 
 export interface LegacyRecallCaseSummary {
 	readonly id: LegacyRecallCaseId;
@@ -350,8 +383,7 @@ export interface RecallQualityPublicReport {
 
 export interface BuildRecallQualityReportInput {
 	readonly evaluatedCases: readonly EvaluatedRecallCase[];
-	readonly comparison: BaselineComparison;
-	readonly metrics: RecallQualityMetrics;
+	readonly baseline: RecallQualityBaseline;
 	readonly legacyCases: readonly LegacyRecallCaseSummary[];
 	readonly mode: "default" | "strict";
 	readonly privacyPass: boolean;
@@ -1616,59 +1648,6 @@ const PUBLIC_REPORT_TOP_LEVEL_KEYS = [
 	"advisory_duration_ms",
 ] as const;
 
-const PUBLIC_REPORT_ALLOWED_KEYS: ReadonlySet<string> = new Set([
-	...PUBLIC_REPORT_TOP_LEVEL_KEYS,
-	"route_accuracy",
-	"route_accuracy_by_category",
-	"recall_at_3",
-	"wrong_source_rate",
-	"irrelevant_but_ok_rate",
-	"insufficient_false_positive_rate",
-	"numerator",
-	"denominator",
-	"rate",
-	"operational_meta",
-	"content_meta",
-	"abstract_concept",
-	...REPORT_FAILURE_CODES,
-	"known_failures",
-	"regressions",
-	"unexpected_passes",
-	"case_id",
-	"category",
-	"kind",
-	"failure_codes",
-	"disposition",
-	"status",
-	"id",
-	"lane",
-]);
-
-const PUBLIC_REPORT_ALLOWED_STRINGS: ReadonlySet<string> = new Set([
-	"recall-quality-matrix",
-	"default",
-	"strict",
-	"agent_contract_plus_frontdoor",
-	"go",
-	"no-go",
-	"pass",
-	"known_failure",
-	"regression",
-	"operational_meta",
-	"content_meta",
-	"abstract_concept",
-	"route_contract",
-	"semantic_recall",
-	"unexpected_pass",
-	"retrieval",
-	"router",
-	"evidence",
-	"latency",
-	"fail",
-	...REPORT_FAILURE_CODES,
-	...LEGACY_RECALL_CASE_IDS,
-]);
-
 const RAW_CANDIDATE_KEYS = ["observations", "legacyCases"] as const;
 const RAW_ROUTE_OBSERVATION_KEYS = ["kind", "caseId", "actualTool"] as const;
 const RAW_SEMANTIC_OBSERVATION_KEYS = [
@@ -1721,7 +1700,16 @@ const RAW_ALLOWED_EVIDENCE_SUFFICIENCY: ReadonlySet<string> = new Set([
 ]);
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		return false;
+	}
+	const prototype = Object.getPrototypeOf(value);
+	return (prototype === Object.prototype || prototype === null) &&
+		!("toJSON" in value);
+}
+
+function isPlainArray(value: unknown): value is unknown[] {
+	return Array.isArray(value) && !("toJSON" in value);
 }
 
 function hasOnlyExactKeys(
@@ -1759,7 +1747,7 @@ function rawObservationIsAllowlisted(value: unknown): boolean {
 		!RAW_ALLOWED_DEGRADATION_KINDS.has(value.degradationKind) ||
 		typeof value.evidenceSufficiency !== "string" ||
 		!RAW_ALLOWED_EVIDENCE_SUFFICIENCY.has(value.evidenceSufficiency) ||
-		!Array.isArray(value.top3)
+		!isPlainArray(value.top3)
 	) {
 		return false;
 	}
@@ -1768,7 +1756,7 @@ function rawObservationIsAllowlisted(value: unknown): boolean {
 		hasOnlyExactKeys(item, RAW_TOP3_KEYS) &&
 		typeof item.sourceId === "string" &&
 		/^source_[a-z]$/.test(item.sourceId) &&
-		Array.isArray(item.matchedPointIds) &&
+		isPlainArray(item.matchedPointIds) &&
 		item.matchedPointIds.every((pointId) =>
 			typeof pointId === "string" && /^point_[a-z]$/.test(pointId)
 		)
@@ -1779,7 +1767,7 @@ function rawCandidateIsAllowlisted(value: unknown): boolean {
 	if (!isPlainRecord(value) || !hasOnlyExactKeys(value, RAW_CANDIDATE_KEYS)) {
 		return false;
 	}
-	if (!Array.isArray(value.observations) || !Array.isArray(value.legacyCases)) {
+	if (!isPlainArray(value.observations) || !isPlainArray(value.legacyCases)) {
 		return false;
 	}
 	return value.observations.every(rawObservationIsAllowlisted) &&
@@ -1794,25 +1782,160 @@ function rawCandidateIsAllowlisted(value: unknown): boolean {
 		);
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isRateMetric(value: unknown): boolean {
+	return isPlainRecord(value) &&
+		hasOnlyExactKeys(value, ["numerator", "denominator", "rate"]) &&
+		isNonNegativeInteger(value.numerator) &&
+		isNonNegativeInteger(value.denominator) &&
+		typeof value.rate === "number" &&
+		Number.isFinite(value.rate) && value.rate >= 0 && value.rate <= 1;
+}
+
+function exactCountRecord(value: unknown, keys: readonly string[]): boolean {
+	return isPlainRecord(value) && hasOnlyExactKeys(value, keys) &&
+		keys.every((key) => isNonNegativeInteger(value[key]));
+}
+
+function publicMetricsAreAllowlisted(value: unknown): boolean {
+	const keys = [
+		"route_accuracy",
+		"route_accuracy_by_category",
+		"recall_at_3",
+		"wrong_source_rate",
+		"irrelevant_but_ok_rate",
+		"insufficient_false_positive_rate",
+	] as const;
+	if (!isPlainRecord(value) || !hasOnlyExactKeys(value, keys) ||
+		!isRateMetric(value.route_accuracy) ||
+		!isRateMetric(value.recall_at_3) ||
+		!isRateMetric(value.wrong_source_rate) ||
+		!isRateMetric(value.irrelevant_but_ok_rate) ||
+		!isRateMetric(value.insufficient_false_positive_rate) ||
+		!isPlainRecord(value.route_accuracy_by_category) ||
+		!hasOnlyExactKeys(value.route_accuracy_by_category, [
+			"operational_meta",
+			"content_meta",
+			"abstract_concept",
+		])
+	) {
+		return false;
+	}
+	return isRateMetric(value.route_accuracy_by_category.operational_meta) &&
+		isRateMetric(value.route_accuracy_by_category.content_meta) &&
+		isRateMetric(value.route_accuracy_by_category.abstract_concept);
+}
+
+function expectedCaseContract(caseId: RecallQualityCaseId): Readonly<{
+	category: EvaluatedRecallCase["category"];
+	kind: EvaluatedRecallCase["kind"];
+}> | undefined {
+	if (caseId === "operational_positive_01" || caseId === "operational_negative_01") {
+		return { category: "operational_meta", kind: "route_contract" };
+	}
+	if (caseId === "content_positive_01" || caseId === "content_negative_01") {
+		return { category: "content_meta", kind: "semantic_recall" };
+	}
+	if (caseId === "abstract_positive_01" || caseId === "abstract_negative_01") {
+		return { category: "abstract_concept", kind: "semantic_recall" };
+	}
+	return undefined;
+}
+
+function publicCasesAreAllowlisted(value: unknown): boolean {
+	if (!isPlainArray(value) || value.length !== ISSUE_336_RECALL_CASE_IDS.length) {
+		return false;
+	}
+	return value.every((item, index) => {
+		if (!isPlainRecord(item) || !hasOnlyExactKeys(item, [
+			"case_id",
+			"category",
+			"kind",
+			"failure_codes",
+			"disposition",
+		])) {
+			return false;
+		}
+		const expectedId = ISSUE_336_RECALL_CASE_IDS[index];
+		if (item.case_id !== expectedId) return false;
+		const contract = expectedCaseContract(expectedId);
+		if (!contract || item.category !== contract.category || item.kind !== contract.kind) {
+			return false;
+		}
+		if (!isPlainArray(item.failure_codes) ||
+			item.failure_codes.some((code) =>
+				typeof code !== "string" || !REPORT_FAILURE_CODES.includes(code as RecallQualityFailureCode)
+			) ||
+			new Set(item.failure_codes).size !== item.failure_codes.length ||
+			!sameStrings([...item.failure_codes].sort() as string[], item.failure_codes as string[])
+		) {
+			return false;
+		}
+		return item.disposition === "pass" || item.disposition === "known_failure" ||
+			item.disposition === "regression" || item.disposition === "unexpected_pass";
+	});
+}
+
+function publicLegacyIsAllowlisted(value: unknown): boolean {
+	if (!isPlainRecord(value) || !hasOnlyExactKeys(value, ["status", "cases"]) ||
+		(value.status !== "pass" && value.status !== "fail") ||
+		!isPlainArray(value.cases) || value.cases.length !== LEGACY_RECALL_CASE_IDS.length
+	) {
+		return false;
+	}
+	const validCases = value.cases.every((item, index) => {
+		const expectedId = LEGACY_RECALL_CASE_IDS[index];
+		return isPlainRecord(item) && hasOnlyExactKeys(item, ["id", "lane", "status"]) &&
+			item.id === expectedId && item.lane === LEGACY_RECALL_LANE_BY_ID[expectedId] &&
+			(item.status === "pass" || item.status === "fail");
+	});
+	if (!validCases) return false;
+	const anyFailed = value.cases.some((item) =>
+		isPlainRecord(item) && item.status === "fail"
+	);
+	return value.status === (anyFailed ? "fail" : "pass");
+}
+
 function publicReportIsAllowlisted(value: unknown): boolean {
 	if (!isPlainRecord(value) ||
 		!hasOnlyExactKeys(value, PUBLIC_REPORT_TOP_LEVEL_KEYS)) {
 		return false;
 	}
-	const visit = (item: unknown, key?: string): boolean => {
-		if (Array.isArray(item)) return item.every((entry) => visit(entry));
-		if (isPlainRecord(item)) {
-			return Object.entries(item).every(([childKey, child]) =>
-				PUBLIC_REPORT_ALLOWED_KEYS.has(childKey) && visit(child, childKey)
-			);
-		}
-		if (typeof item === "number") return Number.isFinite(item);
-		if (typeof item === "boolean") return true;
-		if (typeof item !== "string") return false;
-		if (key === "reproducibility_fingerprint") return /^[a-f0-9]{64}$/.test(item);
-		return PUBLIC_REPORT_ALLOWED_STRINGS.has(item) || isReportableCaseId(item);
-	};
-	return visit(value);
+	return value.gate === "recall-quality-matrix" &&
+		value.schema_version === 2 &&
+		(value.mode === "default" || value.mode === "strict") &&
+		value.route_scope === "agent_contract_plus_frontdoor" &&
+		(value.strict_verdict === "go" || value.strict_verdict === "no-go") &&
+		(value.ci_verdict === "go" || value.ci_verdict === "no-go") &&
+		(value.verdict === "go" || value.verdict === "no-go") &&
+		typeof value.strict_failure === "boolean" &&
+		(value.quality_status === "pass" || value.quality_status === "known_failure" ||
+			value.quality_status === "regression") &&
+		publicMetricsAreAllowlisted(value.metrics) &&
+		exactCountRecord(value.category_counts, [
+			"operational_meta",
+			"content_meta",
+			"abstract_concept",
+		]) &&
+		exactCountRecord(value.failure_counts, REPORT_FAILURE_CODES) &&
+		exactCountRecord(value.counts, [
+			"known_failures",
+			"regressions",
+			"unexpected_passes",
+		]) &&
+		publicCasesAreAllowlisted(value.cases) &&
+		publicLegacyIsAllowlisted(value.legacy_v1) &&
+		(value.privacy === "pass" || value.privacy === "fail") &&
+		(value.determinism === "pass" || value.determinism === "fail") &&
+		typeof value.bounded_runtime === "boolean" &&
+		typeof value.reproducibility_fingerprint === "string" &&
+		/^[a-f0-9]{64}$/.test(value.reproducibility_fingerprint) &&
+		typeof value.advisory_duration_ms === "number" &&
+		Number.isFinite(value.advisory_duration_ms) &&
+		value.advisory_duration_ms >= 0;
 }
 
 /**
@@ -1824,8 +1947,22 @@ export function checkRecallQualityPrivacy(
 	rawCandidate: unknown,
 	publicReport: unknown,
 ): boolean {
-	return rawCandidateIsAllowlisted(rawCandidate) &&
-		publicReportIsAllowlisted(publicReport);
+	if (!rawCandidateIsAllowlisted(rawCandidate) ||
+		!publicReportIsAllowlisted(publicReport)) {
+		return false;
+	}
+	return publicReportSurvivesCanonicalRoundTrip(publicReport);
+}
+
+function publicReportSurvivesCanonicalRoundTrip(publicReport: unknown): boolean {
+	try {
+		const canonical = canonicalRecallQualityJson(publicReport);
+		const parsed = JSON.parse(canonical) as unknown;
+		return publicReportIsAllowlisted(parsed) &&
+			canonical === canonicalRecallQualityJson(parsed);
+	} catch {
+		return false;
+	}
 }
 
 function publicRate(metric: RecallQualityRateMetric): RecallQualityPublicRateMetric {
@@ -1860,8 +1997,73 @@ export function canonicalRecallQualityJson(value: unknown): string {
 export function buildRecallQualityReport(
 	input: BuildRecallQualityReportInput,
 ): RecallQualityPublicReport {
+	const inputKeys = [
+		"evaluatedCases",
+		"baseline",
+		"legacyCases",
+		"mode",
+		"privacyPass",
+		"deterministic",
+		"boundedRuntime",
+		"advisoryDurationMs",
+	] as const;
+	if (!isPlainRecord(input) || !hasOnlyExactKeys(input, inputKeys) ||
+		!isPlainArray(input.evaluatedCases) || !isPlainArray(input.baseline) ||
+		!isPlainArray(input.legacyCases) ||
+		input.evaluatedCases.some((item) => !isPlainRecord(item)) ||
+		input.baseline.some((item) => !isPlainRecord(item)) ||
+		input.legacyCases.some((item) =>
+			!isPlainRecord(item) || !hasOnlyExactKeys(item, ["id", "lane", "passed"]) ||
+			typeof item.id !== "string" || typeof item.lane !== "string" ||
+			typeof item.passed !== "boolean"
+		) ||
+		(input.mode !== "default" && input.mode !== "strict") ||
+		typeof input.privacyPass !== "boolean" ||
+		typeof input.deterministic !== "boolean" ||
+		typeof input.boundedRuntime !== "boolean"
+	) {
+		throw new RecallQualityEvaluationError("report_input_mismatch");
+	}
+	if (!Number.isFinite(input.advisoryDurationMs) || input.advisoryDurationMs < 0) {
+		throw new RecallQualityEvaluationError("invalid_duration");
+	}
+	if (input.evaluatedCases.length !== ISSUE_336_RECALL_CASE_IDS.length) {
+		throw new RecallQualityEvaluationError("case_set_mismatch");
+	}
+	for (let index = 0; index < ISSUE_336_RECALL_CASE_IDS.length; index += 1) {
+		const evaluated = input.evaluatedCases[index];
+		const expectedId = ISSUE_336_RECALL_CASE_IDS[index];
+		const contract = expectedCaseContract(expectedId);
+		if (!evaluated || evaluated.caseId !== expectedId || !contract ||
+			evaluated.category !== contract.category || evaluated.kind !== contract.kind
+		) {
+			throw new RecallQualityEvaluationError("case_set_mismatch");
+		}
+	}
+	const categoryCountsFromInput = {
+		operational_meta: input.evaluatedCases.filter(
+			(item) => item.category === "operational_meta",
+		).length,
+		content_meta: input.evaluatedCases.filter(
+			(item) => item.category === "content_meta",
+		).length,
+		abstract_concept: input.evaluatedCases.filter(
+			(item) => item.category === "abstract_concept",
+		).length,
+	};
+	if (Object.values(categoryCountsFromInput).some((count) => count < 2)) {
+		throw new RecallQualityEvaluationError("case_set_mismatch");
+	}
+	const baselineIds = input.baseline.map((item) => item.caseId);
+	if (new Set(baselineIds).size !== baselineIds.length ||
+		baselineIds.some((caseId) => !ISSUE_336_BASELINE_CASE_IDS.has(caseId))
+	) {
+		throw new RecallQualityEvaluationError("report_input_mismatch");
+	}
+	const comparison = compareRecallBaseline(input.evaluatedCases, input.baseline);
+	const metrics = aggregateRecallMetrics(input.evaluatedCases);
 	const comparisonByCase = new Map(
-		input.comparison.cases.map((item) => [item.caseId, item]),
+		comparison.cases.map((item) => [item.caseId, item]),
 	);
 	const legacyOrdered = LEGACY_RECALL_CASE_IDS.map((id) => {
 		const item = input.legacyCases.find((candidate) => candidate.id === id);
@@ -1875,14 +2077,19 @@ export function buildRecallQualityReport(
 	) {
 		throw new RecallQualityEvaluationError("case_id_mismatch");
 	}
+	for (const item of legacyOrdered) {
+		if (item.lane !== LEGACY_RECALL_LANE_BY_ID[item.id]) {
+			throw new RecallQualityEvaluationError("legacy_lane_mismatch");
+		}
+	}
 
 	const legacyFailed = legacyOrdered.some((item) => !item.passed);
 	const integrityFailed =
 		legacyFailed || !input.privacyPass || !input.deterministic || !input.boundedRuntime;
-	const strictVerdict = integrityFailed ? "no-go" : input.comparison.strictVerdict;
-	const ciVerdict = integrityFailed ? "no-go" : input.comparison.ciVerdict;
+	const strictVerdict = integrityFailed ? "no-go" : comparison.strictVerdict;
+	const ciVerdict = integrityFailed ? "no-go" : comparison.ciVerdict;
 	const selectedVerdict = input.mode === "strict" ? strictVerdict : ciVerdict;
-	const qualityStatus = integrityFailed ? "regression" : input.comparison.qualityStatus;
+	const qualityStatus = integrityFailed ? "regression" : comparison.qualityStatus;
 
 	const cases = input.evaluatedCases.map((evaluated) => {
 		const compared = comparisonByCase.get(evaluated.caseId);
@@ -1895,11 +2102,7 @@ export function buildRecallQualityReport(
 			disposition: compared.disposition,
 		};
 	});
-	const categoryCounts = {
-		operational_meta: cases.filter((item) => item.category === "operational_meta").length,
-		content_meta: cases.filter((item) => item.category === "content_meta").length,
-		abstract_concept: cases.filter((item) => item.category === "abstract_concept").length,
-	};
+	const categoryCounts = categoryCountsFromInput;
 	const failureCounts = Object.fromEntries(
 		REPORT_FAILURE_CODES.map((code) => [
 			code,
@@ -1922,23 +2125,23 @@ export function buildRecallQualityReport(
 		strict_failure: input.mode === "strict" && selectedVerdict === "no-go",
 		quality_status: qualityStatus,
 		metrics: {
-			route_accuracy: publicRate(input.metrics.routeAccuracy),
+			route_accuracy: publicRate(metrics.routeAccuracy),
 			route_accuracy_by_category: {
-				operational_meta: publicRate(input.metrics.routeAccuracyByCategory.operational_meta),
-				content_meta: publicRate(input.metrics.routeAccuracyByCategory.content_meta),
-				abstract_concept: publicRate(input.metrics.routeAccuracyByCategory.abstract_concept),
+				operational_meta: publicRate(metrics.routeAccuracyByCategory.operational_meta),
+				content_meta: publicRate(metrics.routeAccuracyByCategory.content_meta),
+				abstract_concept: publicRate(metrics.routeAccuracyByCategory.abstract_concept),
 			},
-			recall_at_3: publicRate(input.metrics.recallAt3),
-			wrong_source_rate: publicRate(input.metrics.wrongSourceRate),
-			irrelevant_but_ok_rate: publicRate(input.metrics.irrelevantButOkRate),
-			insufficient_false_positive_rate: publicRate(input.metrics.insufficientFalsePositiveRate),
+			recall_at_3: publicRate(metrics.recallAt3),
+			wrong_source_rate: publicRate(metrics.wrongSourceRate),
+			irrelevant_but_ok_rate: publicRate(metrics.irrelevantButOkRate),
+			insufficient_false_positive_rate: publicRate(metrics.insufficientFalsePositiveRate),
 		},
 		category_counts: categoryCounts,
 		failure_counts: failureCounts,
 		counts: {
-			known_failures: input.comparison.counts.knownFailures,
-			regressions: input.comparison.counts.regressions + (integrityFailed ? 1 : 0),
-			unexpected_passes: input.comparison.counts.unexpectedPasses,
+			known_failures: comparison.counts.knownFailures,
+			regressions: comparison.counts.regressions + (integrityFailed ? 1 : 0),
+			unexpected_passes: comparison.counts.unexpectedPasses,
 		},
 		cases,
 		legacy_v1: {
@@ -1957,9 +2160,14 @@ export function buildRecallQualityReport(
 		.update(canonicalRecallQualityJson(stableFields))
 		.digest("hex");
 
-	return {
+	const report: RecallQualityPublicReport = {
 		...stableFields,
 		reproducibility_fingerprint: fingerprint,
-		advisory_duration_ms: Math.max(0, Math.round(input.advisoryDurationMs)),
+		advisory_duration_ms: Math.round(input.advisoryDurationMs),
 	};
+	if (!publicReportIsAllowlisted(report) ||
+		!publicReportSurvivesCanonicalRoundTrip(report)) {
+		throw new RecallQualityEvaluationError("report_serialization_invalid");
+	}
+	return report;
 }
