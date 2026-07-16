@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
+	createRecallGateFileAccess,
+	emitRecallQualityCliResult,
 	executeOperationalContractCases,
 	mapFrontdoorEnvelopeToSemanticObservation,
 	probeNetworkPoisonAdapter,
 	probeRecallQualityIsolation,
+	probeRecallGateFileAccess,
 	probeRecallWorkerTransport,
 	runRecallBaselineMatchProbe,
 	runRecallCleanupFailureProbe,
@@ -1718,7 +1722,7 @@ describe("semantic integration", () => {
 		"legacy_handler",
 		"legacy_close",
 		"worker_spawn",
-	] as const)("removes every temporary root after %s failure", async (stage) => {
+	] as const)("cleanup removes every temporary root after %s failure", async (stage) => {
 		const before = process.env.RECALL_QUALITY_PARENT_SENTINEL;
 		process.env.RECALL_QUALITY_PARENT_SENTINEL = "parent-unchanged";
 		try {
@@ -1769,6 +1773,49 @@ describe("semantic integration", () => {
 });
 
 describe("isolation cleanup reproducibility and privacy sentinel", () => {
+	test("one file allowlist rejects user vault and config paths in parent and worker", async () => {
+		const sentinelRoot = mkdtempSync(join(tmpdir(), "recall-user-path-poison-"));
+		const vaultPath = join(sentinelRoot, "vault");
+		const configPath = join(sentinelRoot, "config.json");
+		const beforeVault = process.env.CBRAIN_VAULT_PATH;
+		const beforeConfig = process.env.CBRAIN_CONFIG;
+		let poisonAttempts = 0;
+		try {
+			mkdirSync(vaultPath);
+			writeFileSync(configPath, "{}\n", "utf8");
+			process.env.CBRAIN_VAULT_PATH = vaultPath;
+			process.env.CBRAIN_CONFIG = configPath;
+			const access = createRecallGateFileAccess({
+				forbiddenPaths: [vaultPath, configPath],
+				onForbiddenAttempt: () => {
+					poisonAttempts += 1;
+				},
+			});
+			expect(() => access.readText(vaultPath)).toThrow("recall_gate_file_access_denied");
+			expect(() => access.exists(configPath)).toThrow("recall_gate_file_access_denied");
+			expect(poisonAttempts).toBe(2);
+			expect(() =>
+				createRecallGateFileAccess().allowTemporaryRoot(vaultPath)
+			).toThrow("recall_gate_file_access_denied");
+
+			const result = await probeRecallGateFileAccess([vaultPath, configPath]);
+			expect(result).toEqual({
+				parentPreflightPassed: true,
+				workerSuitesPassed: true,
+				parentForbiddenAttempts: 0,
+				workerForbiddenAttempts: 0,
+				workerInheritedCbrainVariables: 0,
+			});
+			expect(JSON.stringify(result)).not.toContain(sentinelRoot);
+		} finally {
+			if (beforeVault === undefined) delete process.env.CBRAIN_VAULT_PATH;
+			else process.env.CBRAIN_VAULT_PATH = beforeVault;
+			if (beforeConfig === undefined) delete process.env.CBRAIN_CONFIG;
+			else process.env.CBRAIN_CONFIG = beforeConfig;
+			rmSync(sentinelRoot, { recursive: true, force: true });
+		}
+	});
+
 	test("starts both suites only inside one closed worker and cannot open inherited CBrain paths", async () => {
 		const before = {
 			vault: process.env.CBRAIN_VAULT_PATH,
@@ -1869,6 +1916,87 @@ describe("isolation cleanup reproducibility and privacy sentinel", () => {
 			expect(stdout).not.toContain("PRIVATE_RECALL_SENTINEL");
 			expect(stderr).not.toContain("PRIVATE_RECALL_SENTINEL");
 			expect(stderr).toBe("");
+		}
+	});
+
+	test("shared CLI emitter keeps every real subprocess path fixed and sentinel-free", async () => {
+		let directOutput = "";
+		const directResult = await runRecallQualityCli(["--invalid"], { environment: {} });
+		emitRecallQualityCliResult(directResult, (text) => {
+			directOutput += text;
+		});
+		expect(JSON.parse(directOutput)).toMatchObject({
+			status: "error",
+			code: "INVALID_USAGE",
+		});
+		const moduleUrl = JSON.stringify(
+			new URL("../../bin/check-recall-quality-matrix.ts", import.meta.url).href,
+		);
+		const scenarios = [
+			{
+				name: "success",
+				args: "[]",
+				setup: "const dependencies={environment:{}};",
+				exit: 0,
+				code: undefined,
+			},
+			{
+				name: "strict",
+				args: "['--strict']",
+				setup: "const dependencies={environment:{}};",
+				exit: 1,
+				code: undefined,
+			},
+			...[
+				["missing", "Object.assign(new Error('PRIVATE_RECALL_SENTINEL'),{code:'ENOENT'})", "FIXTURE_MISSING"],
+				["malformed", "Object.assign(new Error('PRIVATE_RECALL_SENTINEL'),{code:'malformed_json'})", "FIXTURE_INVALID"],
+				["schema", "Object.assign(new Error('PRIVATE_RECALL_SENTINEL'),{code:'invalid_case_id'})", "FIXTURE_INVALID"],
+				["execution", "new Error('PRIVATE_RECALL_SENTINEL')", "EXECUTION_FAILED"],
+			] .map(([name, thrown, code]) => ({
+				name,
+				args: "[]",
+				setup: `const dependencies={environment:{},run:async()=>{throw ${thrown}}};`,
+				exit: 2,
+				code,
+			})),
+			{
+				name: "bootstrap",
+				args: "[]",
+				setup:
+					"const probe=await probeRecallWorkerTransport('nonzero_private_stderr');" +
+					"const dependencies={environment:{},run:async()=>{throw Object.assign(new Error('PRIVATE_RECALL_SENTINEL'),{code:probe.code})}};",
+				exit: 2,
+				code: "EXECUTION_FAILED",
+			},
+		] as const;
+
+		for (const scenario of scenarios) {
+			const expression =
+				`import { emitRecallQualityCliResult, probeRecallWorkerTransport, runRecallQualityCli } from ${moduleUrl};` +
+				scenario.setup +
+				`const result=await runRecallQualityCli(${scenario.args},dependencies);` +
+				"emitRecallQualityCliResult(result);process.exitCode=result.exitCode;";
+			const child = Bun.spawn({
+				cmd: [process.execPath, "-e", expression],
+				cwd: resolve(import.meta.dir, "../.."),
+				env: {
+					...process.env,
+					CBRAIN_PRIVATE_TEST_VALUE: "PRIVATE_RECALL_SENTINEL",
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect(exitCode, scenario.name).toBe(scenario.exit);
+			expect(stderr, scenario.name).toBe("");
+			expect(stdout, scenario.name).not.toContain("PRIVATE_RECALL_SENTINEL");
+			const output = JSON.parse(stdout) as Record<string, unknown>;
+			if (scenario.code) expect(output.code, scenario.name).toBe(scenario.code);
+			else expect(output.status, scenario.name).not.toBe("error");
 		}
 	});
 });

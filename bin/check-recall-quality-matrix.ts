@@ -8,7 +8,7 @@ import {
 	rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EmbeddingProvider } from "../src/embedding/provider.js";
@@ -52,6 +52,12 @@ const CASES_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-cases.jsonl"
 const BASELINE_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-baseline.json");
 const AGENT_FACING_PATH = join(PROJECT_DIR, "skills/agent-facing.routing-eval.jsonl");
 const WORKER_CAPTURE_LIMIT_BYTES = 64 * 1024;
+const CANONICAL_GATE_READ_PATHS = new Set([
+	CORPUS_PATH,
+	CASES_PATH,
+	BASELINE_PATH,
+	AGENT_FACING_PATH,
+].map((path) => resolve(path)));
 type CaseId = LegacyRecallCaseId;
 type Lane = LegacyRecallLane;
 type GateStatus = "pass" | "fail";
@@ -163,6 +169,72 @@ interface SuiteFailureHooks {
 	readonly onCloseInvoked?: () => void;
 	readonly onRootCreated?: (root: string) => void;
 	readonly runtime?: SuiteRuntimeDependencies;
+	readonly fileAccess?: RecallGateFileAccess;
+}
+
+export interface RecallGateFileAccess {
+	allowTemporaryRoot(root: string): void;
+	readText(path: string): string;
+	exists(path: string): boolean;
+}
+
+export interface RecallGateFileAccessOptions {
+	readonly forbiddenPaths?: readonly string[];
+	readonly onForbiddenAttempt?: () => void;
+}
+
+/** The only runner boundary allowed to read canonical inputs or temporary roots. */
+export function createRecallGateFileAccess(
+	options: RecallGateFileAccessOptions = {},
+): RecallGateFileAccess {
+	const temporaryRoots = new Set<string>();
+	const forbiddenPaths = new Set(
+		(options.forbiddenPaths ?? []).map((path) => resolve(path)),
+	);
+	const assertAllowed = (path: string): string => {
+		const normalized = resolve(path);
+		const forbidden = [...forbiddenPaths].some((item) =>
+			normalized === item || normalized.startsWith(`${item}${sep}`)
+		);
+		if (forbidden) {
+			options.onForbiddenAttempt?.();
+			throw new Error("recall_gate_file_access_denied");
+		}
+		const temporary = [...temporaryRoots].some((root) =>
+			normalized === root || normalized.startsWith(`${root}${sep}`)
+		);
+		if (!CANONICAL_GATE_READ_PATHS.has(normalized) && !temporary) {
+			options.onForbiddenAttempt?.();
+			throw new Error("recall_gate_file_access_denied");
+		}
+		return normalized;
+	};
+	return {
+		allowTemporaryRoot(root) {
+			const normalized = resolve(root);
+			const temporaryBase = resolve(tmpdir());
+			if (
+				!normalized.startsWith(`${temporaryBase}${sep}`) ||
+				!/^cbrain-recall-(semantic|matrix|worker)-/.test(basename(normalized))
+			) {
+				options.onForbiddenAttempt?.();
+				throw new Error("recall_gate_file_access_denied");
+			}
+			temporaryRoots.add(normalized);
+		},
+		readText(path) {
+			return readFileSync(assertAllowed(path), "utf8");
+		},
+		exists(path) {
+			return existsSync(assertAllowed(path));
+		},
+	};
+}
+
+function temporaryPathExists(path: string): boolean {
+	const fileAccess = createRecallGateFileAccess();
+	fileAccess.allowTemporaryRoot(path);
+	return fileAccess.exists(path);
 }
 
 type RegisteredToolHandler = (
@@ -424,13 +496,13 @@ function seedPage(
   return slug;
 }
 
-function loadCanonicalSemanticFixtures(): {
+function loadCanonicalSemanticFixtures(fileAccess: RecallGateFileAccess): {
 	readonly corpus: RecallCorpus;
 	readonly cases: readonly RecallSemanticCase[];
 } {
-	const corpus = parseRecallQualityCorpus(readFileSync(CORPUS_PATH, "utf8"));
+	const corpus = parseRecallQualityCorpus(fileAccess.readText(CORPUS_PATH));
 	const cases = parseRecallQualityCases(
-		readFileSync(CASES_PATH, "utf8"),
+		fileAccess.readText(CASES_PATH),
 		corpus,
 	).filter((testCase): testCase is RecallSemanticCase =>
 		testCase.kind === "semantic_recall"
@@ -457,6 +529,8 @@ async function executeSemanticRecallWorker(
 	const closedEnvironment = environmentKeys.every((key) => allowedEnvironment.has(key));
 	const inheritedCbrainVariables = environmentKeys.filter((key) => key.startsWith("CBRAIN_")).length;
 	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-semantic-"));
+	const fileAccess = hooks.fileAccess ?? createRecallGateFileAccess();
+	fileAccess.allowTemporaryRoot(root);
 	let db: CBrainDB | undefined;
 	let result: Omit<SemanticRecallIntegrationResult, "worker"> | undefined;
 	let originalJobStart: typeof JobQueue.prototype.start | undefined;
@@ -476,7 +550,7 @@ async function executeSemanticRecallWorker(
 			jobStartCalls += 1;
 		};
 		networkPoison = installNetworkPoison();
-		const fixtures = loadCanonicalSemanticFixtures();
+		const fixtures = loadCanonicalSemanticFixtures(fileAccess);
 		db = runtime.openDb(join(root, "brain.sqlite"));
 		if (hooks.closeFailure) {
 			const close = db.close.bind(db);
@@ -621,7 +695,7 @@ async function executeSemanticRecallWorker(
 		worker: {
 			closedEnvironment,
 			inheritedCbrainVariables,
-			temporaryRootRemoved: !existsSync(root),
+			temporaryRootRemoved: !fileAccess.exists(root),
 		},
 	};
 }
@@ -665,7 +739,9 @@ async function executeRecallQualityMatrixWorker(
 	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
 		throw new Error("recall_quality_worker_required");
 	}
-  const root = mkdtempSync(join(tmpdir(), "cbrain-recall-matrix-"));
+	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-matrix-"));
+	const fileAccess = hooks.fileAccess ?? createRecallGateFileAccess();
+	fileAccess.allowTemporaryRoot(root);
 	let db: CBrainDB | undefined;
   try {
 		const runtime = hooks.runtime ?? DEFAULT_SUITE_RUNTIME;
@@ -996,7 +1072,7 @@ export async function runRecallQualityIsolationProbeWorker(): Promise<RecallQual
 	const temporaryXdgData =
 		typeof xdgData === "string" && xdgData.includes("cbrain-recall-worker-");
 	const distinctSuiteRoots = suiteRoots.length === 2 && suiteRoots[0] !== suiteRoots[1];
-	const suiteRootsRemoved = suiteRoots.every((root) => !existsSync(root));
+	const suiteRootsRemoved = suiteRoots.every((root) => !temporaryPathExists(root));
 	if (
 		!closedEnvironment || inheritedCbrainVariables !== 0 || !temporaryHome ||
 		!temporaryXdgConfig || !temporaryXdgData || !distinctSuiteRoots ||
@@ -1026,6 +1102,78 @@ export async function probeRecallQualityIsolation(): Promise<RecallQualityIsolat
 			"const result = await runRecallQualityIsolationProbeWorker();" +
 			"process.stdout.write(JSON.stringify(result));",
 	);
+}
+
+export interface RecallGateFileAccessProbeResult {
+	readonly parentPreflightPassed: true;
+	readonly workerSuitesPassed: true;
+	readonly parentForbiddenAttempts: 0;
+	readonly workerForbiddenAttempts: 0;
+	readonly workerInheritedCbrainVariables: 0;
+}
+
+export async function runRecallGateFileAccessProbeWorker(
+	forbiddenPaths: readonly string[],
+): Promise<Readonly<{
+	workerSuitesPassed: true;
+	workerForbiddenAttempts: 0;
+	workerInheritedCbrainVariables: 0;
+}>> {
+	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
+		throw new Error("recall_quality_worker_required");
+	}
+	let workerForbiddenAttempts = 0;
+	const fileAccess = createRecallGateFileAccess({
+		forbiddenPaths,
+		onForbiddenAttempt: () => {
+			workerForbiddenAttempts += 1;
+		},
+	});
+	await runRecallQualityMatrixWorker({}, fileAccess);
+	const inheritedCbrainVariables = Object.keys(process.env).filter((key) =>
+		key.startsWith("CBRAIN_")
+	).length;
+	if (workerForbiddenAttempts !== 0 || inheritedCbrainVariables !== 0) {
+		throw new Error("recall_gate_file_access_probe_failed");
+	}
+	return {
+		workerSuitesPassed: true,
+		workerForbiddenAttempts: 0,
+		workerInheritedCbrainVariables: 0,
+	};
+}
+
+export async function probeRecallGateFileAccess(
+	forbiddenPaths: readonly string[],
+): Promise<RecallGateFileAccessProbeResult> {
+	let parentForbiddenAttempts = 0;
+	const parentAccess = createRecallGateFileAccess({
+		forbiddenPaths,
+		onForbiddenAttempt: () => {
+			parentForbiddenAttempts += 1;
+		},
+	});
+	validateCanonicalFixtures(parentAccess);
+	const moduleUrl = JSON.stringify(import.meta.url);
+	const worker = await spawnClosedWorker<Readonly<{
+		workerSuitesPassed: true;
+		workerForbiddenAttempts: 0;
+		workerInheritedCbrainVariables: 0;
+	}>>(
+		`import { runRecallGateFileAccessProbeWorker } from ${moduleUrl};` +
+			`const result=await runRecallGateFileAccessProbeWorker(${JSON.stringify(forbiddenPaths)});` +
+			"process.stdout.write(JSON.stringify(result));",
+	);
+	if (parentForbiddenAttempts !== 0 || worker.workerInheritedCbrainVariables !== 0) {
+		throw new Error("recall_gate_file_access_probe_failed");
+	}
+	return {
+		parentPreflightPassed: true,
+		workerSuitesPassed: worker.workerSuitesPassed,
+		parentForbiddenAttempts: 0,
+		workerForbiddenAttempts: worker.workerForbiddenAttempts,
+		workerInheritedCbrainVariables: 0,
+	};
 }
 
 export type RecallWorkerTransportProbeScenario =
@@ -1062,7 +1210,7 @@ export async function probeRecallWorkerTransport(
 		throw new Error("recall_quality_transport_probe_expected_failure");
 	} catch (error) {
 		if (!(error instanceof RecallWorkerBootstrapError)) throw error;
-		if (!workerRoot || existsSync(workerRoot)) {
+		if (!workerRoot || temporaryPathExists(workerRoot)) {
 			throw new Error("recall_quality_transport_cleanup_failed");
 		}
 		return { code: error.code, workerRootRemoved: true };
@@ -1124,7 +1272,7 @@ export async function runRecallFailureProbeWorker(
 	return {
 		failureObserved,
 		boundaryCalled,
-		suiteRootRemoved: suiteRoot !== undefined && !existsSync(suiteRoot),
+		suiteRootRemoved: suiteRoot !== undefined && !temporaryPathExists(suiteRoot),
 	};
 }
 
@@ -1151,7 +1299,7 @@ export async function runRecallCleanupFailureProbe(
 		} catch {
 			failureObserved = true;
 		}
-		const workerRootRemoved = workerRoot !== undefined && !existsSync(workerRoot);
+		const workerRootRemoved = workerRoot !== undefined && !temporaryPathExists(workerRoot);
 		const parentEnvironmentRestored = environmentSnapshot() === beforeEnvironment;
 		if (!failureObserved || !spawnBoundaryCalled || !workerRootRemoved || !parentEnvironmentRestored) {
 			throw new Error("recall_quality_cleanup_probe_failed");
@@ -1176,7 +1324,7 @@ export async function runRecallCleanupFailureProbe(
 			workerRoot = root;
 		},
 	);
-	const workerRootRemoved = workerRoot !== undefined && !existsSync(workerRoot);
+	const workerRootRemoved = workerRoot !== undefined && !temporaryPathExists(workerRoot);
 	const parentEnvironmentRestored = environmentSnapshot() === beforeEnvironment;
 	if (
 		!childResult.failureObserved ||
@@ -1255,17 +1403,18 @@ export async function runRecallBaselineMatchProbeWorker(): Promise<RecallBaselin
 	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
 		throw new Error("recall_quality_worker_required");
 	}
-	const corpus = parseRecallQualityCorpus(readFileSync(CORPUS_PATH, "utf8"));
-	const cases = parseRecallQualityCases(readFileSync(CASES_PATH, "utf8"), corpus);
+	const fileAccess = createRecallGateFileAccess();
+	const corpus = parseRecallQualityCorpus(fileAccess.readText(CORPUS_PATH));
+	const cases = parseRecallQualityCases(fileAccess.readText(CASES_PATH), corpus);
 	const baseline = parseRecallQualityBaseline(
-		readFileSync(BASELINE_PATH, "utf8"),
+		fileAccess.readText(BASELINE_PATH),
 		cases,
 		corpus,
 	);
 	const semanticCases = cases.filter(
 		(testCase): testCase is RecallSemanticCase => testCase.kind === "semantic_recall",
 	);
-	const semantic = await executeSemanticRecallWorker();
+	const semantic = await executeSemanticRecallWorker({ fileAccess });
 	const observations = new Map(
 		semantic.observations.map((observation) => [observation.caseId, observation]),
 	);
@@ -1312,15 +1461,17 @@ export async function runRecallQualityMatrix(
 	return sealRecallQualityReport(workerReport);
 }
 
-function validateCanonicalFixtures(): void {
-	const corpus = parseRecallQualityCorpus(readFileSync(CORPUS_PATH, "utf8"));
-	const cases = parseRecallQualityCases(readFileSync(CASES_PATH, "utf8"), corpus);
-	parseRecallQualityBaseline(readFileSync(BASELINE_PATH, "utf8"), cases, corpus);
+function validateCanonicalFixtures(
+	fileAccess: RecallGateFileAccess = createRecallGateFileAccess(),
+): void {
+	const corpus = parseRecallQualityCorpus(fileAccess.readText(CORPUS_PATH));
+	const cases = parseRecallQualityCases(fileAccess.readText(CASES_PATH), corpus);
+	parseRecallQualityBaseline(fileAccess.readText(BASELINE_PATH), cases, corpus);
 	const routeCases = cases.filter(
 		(testCase): testCase is RecallRouteContractCase => testCase.kind === "route_contract",
 	);
 	resolveOperationalRouteObservations(
-		readFileSync(AGENT_FACING_PATH, "utf8"),
+		fileAccess.readText(AGENT_FACING_PATH),
 		routeCases,
 	);
 }
@@ -1328,12 +1479,13 @@ function validateCanonicalFixtures(): void {
 /** Internal fixed worker used by the closed parent process only. */
 export async function runRecallQualityMatrixWorker(
 	options: RecallQualityMatrixOptions = {},
+	fileAccess: RecallGateFileAccess = createRecallGateFileAccess(),
 ): Promise<RecallQualityPublicReport> {
 	const started = performance.now();
-	const corpus = parseRecallQualityCorpus(readFileSync(CORPUS_PATH, "utf8"));
-	const cases = parseRecallQualityCases(readFileSync(CASES_PATH, "utf8"), corpus);
+	const corpus = parseRecallQualityCorpus(fileAccess.readText(CORPUS_PATH));
+	const cases = parseRecallQualityCases(fileAccess.readText(CASES_PATH), corpus);
 	const baseline = parseRecallQualityBaseline(
-		readFileSync(BASELINE_PATH, "utf8"),
+		fileAccess.readText(BASELINE_PATH),
 		cases,
 		corpus,
 	);
@@ -1341,13 +1493,13 @@ export async function runRecallQualityMatrixWorker(
 		(testCase): testCase is RecallRouteContractCase => testCase.kind === "route_contract",
 	);
 	const operational = executeOperationalContractCases({
-		agentFacingRoutingText: readFileSync(AGENT_FACING_PATH, "utf8"),
+		agentFacingRoutingText: fileAccess.readText(AGENT_FACING_PATH),
 		cases: routeCases,
 		createSemanticHandler: () => {
 			throw new Error("semantic_handler_forbidden");
 		},
 	});
-	const semantic = await executeSemanticRecallWorker();
+	const semantic = await executeSemanticRecallWorker({ fileAccess });
 	const observations = new Map<RecallQualityCaseId, RecallQualityObservation>([
 		...operational.map((item) => [item.caseId, item] as const),
 		...semantic.observations.map((item) => [item.caseId, item] as const),
@@ -1357,7 +1509,7 @@ export async function runRecallQualityMatrixWorker(
 		if (!observation) throw new Error("recall_quality_observation_missing");
 		return evaluateRecallCase(testCase, observation);
 	});
-	const legacy = await executeRecallQualityMatrixWorker(options);
+	const legacy = await executeRecallQualityMatrixWorker(options, { fileAccess });
 	const legacyCases: LegacyRecallCaseSummary[] = legacy.cases.map((item) => ({
 		id: item.id,
 		lane: item.lane,
@@ -1463,8 +1615,18 @@ export async function runRecallQualityCli(
 	}
 }
 
+/** The single JSON transport used by both the executable and subprocess tests. */
+export function emitRecallQualityCliResult(
+	result: RecallQualityCliResult,
+	write: (text: string) => void = (text) => {
+		process.stdout.write(text);
+	},
+): void {
+	write(`${JSON.stringify(result.output, null, 2)}\n`);
+}
+
 if (import.meta.main) {
 	const result = await runRecallQualityCli(process.argv.slice(2));
-	console.log(JSON.stringify(result.output, null, 2));
+	emitRecallQualityCliResult(result);
 	process.exitCode = result.exitCode;
 }
