@@ -8,7 +8,7 @@ import {
 	rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EmbeddingProvider } from "../src/embedding/provider.js";
@@ -24,6 +24,7 @@ import { checkAgentWorkflowContract } from "./check-docs-consistency.js";
 import {
 	buildRecallQualityReport,
 	checkRecallQualityPrivacy,
+	compareRecallBaseline,
 	evaluateRecallCase,
 	parseRecallQualityBaseline,
 	parseRecallQualityCases,
@@ -50,6 +51,7 @@ const CORPUS_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-corpus.json
 const CASES_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-cases.jsonl");
 const BASELINE_PATH = join(PROJECT_DIR, "tests/fixtures/recall-quality-baseline.json");
 const AGENT_FACING_PATH = join(PROJECT_DIR, "skills/agent-facing.routing-eval.jsonl");
+const WORKER_CAPTURE_LIMIT_BYTES = 64 * 1024;
 type CaseId = LegacyRecallCaseId;
 type Lane = LegacyRecallLane;
 type GateStatus = "pass" | "fail";
@@ -848,23 +850,223 @@ async function spawnClosedWorker<T>(
 		});
 		const [exitCode, stdout, stderr] = await Promise.all([
 			child.exited,
-			new Response(child.stdout).text(),
-			new Response(child.stderr).text(),
+			readWorkerStreamCapped(child.stdout),
+			readWorkerStreamCapped(child.stderr),
 		]);
-		if (exitCode !== 0) {
-			void stderr;
-			throw new Error("recall_quality_worker_failed");
+		if (stdout.exceeded || stderr.exceeded) {
+			throw new RecallWorkerBootstrapError("WORKER_OUTPUT_LIMIT");
 		}
-		return JSON.parse(stdout) as T;
+		if (exitCode !== 0) {
+			throw new RecallWorkerBootstrapError("WORKER_EXIT");
+		}
+		try {
+			return JSON.parse(stdout.text) as T;
+		} catch {
+			throw new RecallWorkerBootstrapError("WORKER_INVALID_OUTPUT");
+		}
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+}
+
+type RecallWorkerBootstrapCode =
+	| "WORKER_OUTPUT_LIMIT"
+	| "WORKER_EXIT"
+	| "WORKER_INVALID_OUTPUT";
+
+class RecallWorkerBootstrapError extends Error {
+	readonly code: RecallWorkerBootstrapCode;
+
+	constructor(code: RecallWorkerBootstrapCode) {
+		super("recall_quality_worker_bootstrap_failed");
+		this.name = "RecallWorkerBootstrapError";
+		this.code = code;
+	}
+}
+
+interface CappedWorkerStream {
+	readonly text: string;
+	readonly exceeded: boolean;
+}
+
+async function readWorkerStreamCapped(
+	stream: ReadableStream<Uint8Array>,
+): Promise<CappedWorkerStream> {
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			totalBytes += value.byteLength;
+			if (totalBytes > WORKER_CAPTURE_LIMIT_BYTES) {
+				await reader.cancel();
+				return { text: "", exceeded: true };
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const bytes = new Uint8Array(totalBytes);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return { text: new TextDecoder().decode(bytes), exceeded: false };
 }
 
 function environmentSnapshot(): string {
 	return JSON.stringify(Object.entries(process.env).sort(([left], [right]) =>
 		left.localeCompare(right)
 	));
+}
+
+export interface RecallQualityIsolationProbeResult {
+	readonly closedEnvironment: true;
+	readonly inheritedCbrainVariables: 0;
+	readonly temporaryHome: true;
+	readonly temporaryXdgConfig: true;
+	readonly temporaryXdgData: true;
+	readonly suiteOrder: readonly ["isolation_started", "semantic_suite", "legacy_suite"];
+	readonly distinctSuiteRoots: true;
+	readonly configuredPathOpenAttempts: 0;
+	readonly suiteRootsRemoved: true;
+}
+
+/** Internal test probe: exercise both suites after the closed worker boundary. */
+export async function runRecallQualityIsolationProbeWorker(): Promise<RecallQualityIsolationProbeResult> {
+	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
+		throw new Error("recall_quality_worker_required");
+	}
+	const allowedEnvironment = new Set([
+		"PATH",
+		"LANG",
+		"LC_ALL",
+		"HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME",
+		INTERNAL_WORKER_MARKER,
+	]);
+	const environmentKeys = Object.keys(process.env);
+	const suiteOrder: Array<"isolation_started" | "semantic_suite" | "legacy_suite"> = [
+		"isolation_started",
+	];
+	const suiteRoots: string[] = [];
+	let currentRoot: string | undefined;
+	let configuredPathOpenAttempts = 0;
+	const runtime: SuiteRuntimeDependencies = {
+		...DEFAULT_SUITE_RUNTIME,
+		openDb: (path) => {
+			if (!currentRoot || !resolve(path).startsWith(`${resolve(currentRoot)}${sep}`)) {
+				configuredPathOpenAttempts += 1;
+				throw new Error("recall_quality_non_temporary_path");
+			}
+			return DEFAULT_SUITE_RUNTIME.openDb(path);
+		},
+	};
+	const hooks = (suite: "semantic_suite" | "legacy_suite"): SuiteFailureHooks => ({
+		runtime,
+		onRootCreated: (root) => {
+			currentRoot = root;
+			suiteRoots.push(root);
+			suiteOrder.push(suite);
+		},
+	});
+
+	await executeSemanticRecallWorker(hooks("semantic_suite"));
+	currentRoot = undefined;
+	await executeRecallQualityMatrixWorker({}, hooks("legacy_suite"));
+	currentRoot = undefined;
+
+	const home = process.env.HOME;
+	const xdgConfig = process.env.XDG_CONFIG_HOME;
+	const xdgData = process.env.XDG_DATA_HOME;
+	const closedEnvironment =
+		environmentKeys.length === allowedEnvironment.size &&
+		environmentKeys.every((key) => allowedEnvironment.has(key));
+	const inheritedCbrainVariables = environmentKeys.filter((key) =>
+		key.startsWith("CBRAIN_")
+	).length;
+	const temporaryHome = typeof home === "string" && home.includes("cbrain-recall-worker-");
+	const temporaryXdgConfig =
+		typeof xdgConfig === "string" && xdgConfig.includes("cbrain-recall-worker-");
+	const temporaryXdgData =
+		typeof xdgData === "string" && xdgData.includes("cbrain-recall-worker-");
+	const distinctSuiteRoots = suiteRoots.length === 2 && suiteRoots[0] !== suiteRoots[1];
+	const suiteRootsRemoved = suiteRoots.every((root) => !existsSync(root));
+	if (
+		!closedEnvironment || inheritedCbrainVariables !== 0 || !temporaryHome ||
+		!temporaryXdgConfig || !temporaryXdgData || !distinctSuiteRoots ||
+		configuredPathOpenAttempts !== 0 || !suiteRootsRemoved ||
+		JSON.stringify(suiteOrder) !==
+			JSON.stringify(["isolation_started", "semantic_suite", "legacy_suite"])
+	) {
+		throw new Error("recall_quality_isolation_probe_failed");
+	}
+	return {
+		closedEnvironment: true,
+		inheritedCbrainVariables: 0,
+		temporaryHome: true,
+		temporaryXdgConfig: true,
+		temporaryXdgData: true,
+		suiteOrder: ["isolation_started", "semantic_suite", "legacy_suite"],
+		distinctSuiteRoots: true,
+		configuredPathOpenAttempts: 0,
+		suiteRootsRemoved: true,
+	};
+}
+
+export async function probeRecallQualityIsolation(): Promise<RecallQualityIsolationProbeResult> {
+	const moduleUrl = JSON.stringify(import.meta.url);
+	return spawnClosedWorker(
+		`import { runRecallQualityIsolationProbeWorker } from ${moduleUrl};` +
+			"const result = await runRecallQualityIsolationProbeWorker();" +
+			"process.stdout.write(JSON.stringify(result));",
+	);
+}
+
+export type RecallWorkerTransportProbeScenario =
+	| "stdout_overflow"
+	| "stderr_overflow"
+	| "nonzero_private_stderr"
+	| "invalid_private_stdout";
+
+export interface RecallWorkerTransportProbeResult {
+	readonly code: RecallWorkerBootstrapCode;
+	readonly workerRootRemoved: true;
+}
+
+/** Fixed finite transport probes; no fixture, path, fault, or baseline selector. */
+export async function probeRecallWorkerTransport(
+	scenario: RecallWorkerTransportProbeScenario,
+): Promise<RecallWorkerTransportProbeResult> {
+	const expressionByScenario: Readonly<Record<RecallWorkerTransportProbeScenario, string>> = {
+		stdout_overflow:
+			`process.stdout.write("PRIVATE_RECALL_SENTINEL".repeat(${WORKER_CAPTURE_LIMIT_BYTES}));`,
+		stderr_overflow:
+			`process.stderr.write("PRIVATE_RECALL_SENTINEL".repeat(${WORKER_CAPTURE_LIMIT_BYTES}));` +
+			"process.stdout.write('{}');",
+		nonzero_private_stderr:
+			"process.stderr.write('PRIVATE_RECALL_SENTINEL');process.exitCode=7;",
+		invalid_private_stdout:
+			"process.stdout.write('PRIVATE_RECALL_SENTINEL');",
+	};
+	let workerRoot: string | undefined;
+	try {
+		await spawnClosedWorker(expressionByScenario[scenario], (root) => {
+			workerRoot = root;
+		});
+		throw new Error("recall_quality_transport_probe_expected_failure");
+	} catch (error) {
+		if (!(error instanceof RecallWorkerBootstrapError)) throw error;
+		if (!workerRoot || existsSync(workerRoot)) {
+			throw new Error("recall_quality_transport_cleanup_failed");
+		}
+		return { code: error.code, workerRootRemoved: true };
+	}
 }
 
 export async function runRecallFailureProbeWorker(
@@ -1036,6 +1238,57 @@ export async function runSemanticRecallIntegration(): Promise<SemanticRecallInte
 	return spawnClosedWorker<SemanticRecallIntegrationResult>(
 		`import { runSemanticRecallWorker } from ${moduleUrl};` +
 			"const result = await runSemanticRecallWorker();" +
+			"process.stdout.write(JSON.stringify(result));",
+	);
+}
+
+export interface RecallBaselineMatchProbeResult {
+	readonly baselineEntries: number;
+	readonly knownFailures: number;
+	readonly regressions: number;
+	readonly unexpectedPasses: number;
+	readonly allLinkedTo337: boolean;
+}
+
+/** Compare exact synthetic signatures inside the worker; source/point IDs never cross IPC. */
+export async function runRecallBaselineMatchProbeWorker(): Promise<RecallBaselineMatchProbeResult> {
+	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
+		throw new Error("recall_quality_worker_required");
+	}
+	const corpus = parseRecallQualityCorpus(readFileSync(CORPUS_PATH, "utf8"));
+	const cases = parseRecallQualityCases(readFileSync(CASES_PATH, "utf8"), corpus);
+	const baseline = parseRecallQualityBaseline(
+		readFileSync(BASELINE_PATH, "utf8"),
+		cases,
+		corpus,
+	);
+	const semanticCases = cases.filter(
+		(testCase): testCase is RecallSemanticCase => testCase.kind === "semantic_recall",
+	);
+	const semantic = await executeSemanticRecallWorker();
+	const observations = new Map(
+		semantic.observations.map((observation) => [observation.caseId, observation]),
+	);
+	const evaluated = semanticCases.map((testCase) => {
+		const observation = observations.get(testCase.caseId);
+		if (!observation) throw new Error("recall_quality_observation_missing");
+		return evaluateRecallCase(testCase, observation);
+	});
+	const comparison = compareRecallBaseline(evaluated, baseline);
+	return {
+		baselineEntries: baseline.length,
+		knownFailures: comparison.counts.knownFailures,
+		regressions: comparison.counts.regressions,
+		unexpectedPasses: comparison.counts.unexpectedPasses,
+		allLinkedTo337: baseline.every((entry) => entry.followUp === "#337"),
+	};
+}
+
+export async function runRecallBaselineMatchProbe(): Promise<RecallBaselineMatchProbeResult> {
+	const moduleUrl = JSON.stringify(import.meta.url);
+	return spawnClosedWorker(
+		`import { runRecallBaselineMatchProbeWorker } from ${moduleUrl};` +
+			"const result = await runRecallBaselineMatchProbeWorker();" +
 			"process.stdout.write(JSON.stringify(result));",
 	);
 }

@@ -5,6 +5,9 @@ import {
 	executeOperationalContractCases,
 	mapFrontdoorEnvelopeToSemanticObservation,
 	probeNetworkPoisonAdapter,
+	probeRecallQualityIsolation,
+	probeRecallWorkerTransport,
+	runRecallBaselineMatchProbe,
 	runRecallCleanupFailureProbe,
 	runRecallQualityCli,
 	runRecallQualityMatrix,
@@ -214,7 +217,7 @@ const exactKnownFailureBaseline = (
 });
 
 describe("fixture schema", () => {
-	test("loads the controlled corpus, canonical route and semantic cases, and empty baseline", () => {
+	test("loads the controlled corpus, canonical cases, and exact #337 baseline", () => {
 		const corpus = parseCanonicalCorpus();
 		const cases = parseCanonicalCases();
 		const routes = parseRecallQualityCases(jsonl([routeCase()]), corpus);
@@ -230,7 +233,14 @@ describe("fixture schema", () => {
 			"abstract_negative_01",
 		]);
 		expect(routes).toHaveLength(1);
-		expect(baseline).toEqual([]);
+		expect(baseline.map((entry) => ({
+			caseId: entry.caseId,
+			followUp: entry.followUp,
+		}))).toEqual([
+			{ caseId: "content_positive_01", followUp: "#337" },
+			{ caseId: "content_negative_01", followUp: "#337" },
+			{ caseId: "abstract_negative_01", followUp: "#337" },
+		]);
 		expect(SAFE_FIXTURE_TOKENS.size).toBeGreaterThan(0);
 	});
 
@@ -1758,6 +1768,111 @@ describe("semantic integration", () => {
 	});
 });
 
+describe("isolation cleanup reproducibility and privacy sentinel", () => {
+	test("starts both suites only inside one closed worker and cannot open inherited CBrain paths", async () => {
+		const before = {
+			vault: process.env.CBRAIN_VAULT_PATH,
+			config: process.env.CBRAIN_CONFIG_PATH,
+		};
+		process.env.CBRAIN_VAULT_PATH = "/private/recall-quality-vault-sentinel";
+		process.env.CBRAIN_CONFIG_PATH = "/private/recall-quality-config-sentinel";
+		try {
+			const result = await probeRecallQualityIsolation();
+			expect(result).toEqual({
+				closedEnvironment: true,
+				inheritedCbrainVariables: 0,
+				temporaryHome: true,
+				temporaryXdgConfig: true,
+				temporaryXdgData: true,
+				suiteOrder: ["isolation_started", "semantic_suite", "legacy_suite"],
+				distinctSuiteRoots: true,
+				configuredPathOpenAttempts: 0,
+				suiteRootsRemoved: true,
+			});
+			expect(process.env.CBRAIN_VAULT_PATH).toBe(
+				"/private/recall-quality-vault-sentinel",
+			);
+			expect(process.env.CBRAIN_CONFIG_PATH).toBe(
+				"/private/recall-quality-config-sentinel",
+			);
+		} finally {
+			if (before.vault === undefined) delete process.env.CBRAIN_VAULT_PATH;
+			else process.env.CBRAIN_VAULT_PATH = before.vault;
+			if (before.config === undefined) delete process.env.CBRAIN_CONFIG_PATH;
+			else process.env.CBRAIN_CONFIG_PATH = before.config;
+		}
+	});
+
+	test("caps worker stdout and stderr and replaces private failures with fixed codes", async () => {
+		for (const scenario of [
+			"stdout_overflow",
+			"stderr_overflow",
+			"nonzero_private_stderr",
+			"invalid_private_stdout",
+		] as const) {
+			const result = await probeRecallWorkerTransport(scenario);
+			expect(result.code).toMatch(
+				/^(WORKER_OUTPUT_LIMIT|WORKER_EXIT|WORKER_INVALID_OUTPUT)$/,
+			);
+			expect(result.workerRootRemoved).toBe(true);
+			expect(JSON.stringify(result)).not.toContain("PRIVATE_RECALL_SENTINEL");
+		}
+	});
+
+	test("three fresh roots have byte-identical stable reports and fingerprints", async () => {
+		const reports = await Promise.all([
+			runRecallQualityMatrix(),
+			runRecallQualityMatrix(),
+			runRecallQualityMatrix(),
+		]);
+		const stable = reports.map(({ advisory_duration_ms: _duration, ...report }) =>
+			canonicalRecallQualityJson(report)
+		);
+		expect(new Set(stable).size).toBe(1);
+		expect(new Set(reports.map((item) => item.reproducibility_fingerprint)).size).toBe(1);
+		expect(new Set(reports.map((item) => item.verdict)).size).toBe(1);
+	});
+
+	test("canonical baseline exactly matches current semantic observations and #337", async () => {
+		const result = await runRecallBaselineMatchProbe();
+		expect(result).toEqual({
+			baselineEntries: 3,
+			knownFailures: 3,
+			regressions: 0,
+			unexpectedPasses: 0,
+			allLinkedTo337: true,
+		});
+	});
+
+	test("CLI stdout and stderr stay sentinel-free on success and fixed usage failure", async () => {
+		const environment = {
+			...process.env,
+			CBRAIN_PRIVATE_TEST_VALUE: "PRIVATE_RECALL_SENTINEL",
+		};
+		for (const [args, expectedExit] of [
+			[[], 0],
+			[["--fixture", "PRIVATE_RECALL_SENTINEL"], 2],
+		] as const) {
+			const child = Bun.spawn({
+				cmd: [process.execPath, resolve(import.meta.dir, "../../bin/check-recall-quality-matrix.ts"), ...args],
+				cwd: resolve(import.meta.dir, "../.."),
+				env: environment,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect(exitCode).toBe(expectedExit);
+			expect(stdout).not.toContain("PRIVATE_RECALL_SENTINEL");
+			expect(stderr).not.toContain("PRIVATE_RECALL_SENTINEL");
+			expect(stderr).toBe("");
+		}
+	});
+});
+
 describe("vector differential", () => {
 	test("real frontdoor vector recall finds a no-shared-token source that production FTS misses", async () => {
 		const result = await runSemanticRecallIntegration();
@@ -2324,11 +2439,16 @@ describe("v2 report", () => {
 			mode: "default",
 			route_scope: "agent_contract_plus_frontdoor",
 			strict_verdict: "no-go",
-			ci_verdict: "no-go",
-			verdict: "no-go",
-			quality_status: "regression",
+			ci_verdict: "go",
+			verdict: "go",
+			quality_status: "known_failure",
 			privacy: "pass",
 			determinism: "pass",
+			counts: {
+				known_failures: 3,
+				regressions: 0,
+				unexpected_passes: 0,
+			},
 		});
 		expect(report.category_counts).toEqual({
 			operational_meta: 2,
@@ -2389,6 +2509,7 @@ describe("v2 report", () => {
 			advisoryDurationMs: 9876,
 		});
 		expect(first.reproducibility_fingerprint).toBe(second.reproducibility_fingerprint);
+		expect(first.verdict).toBe(second.verdict);
 		expect(canonicalRecallQualityJson({ z: 1, a: { c: 2, b: 1 } })).toBe('{"a":{"b":1,"c":2},"z":1}');
 	});
 

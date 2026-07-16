@@ -1,1 +1,74 @@
-[]
+[
+  {
+    "case_id": "content_positive_01",
+    "failure_codes": [
+      "wrong_source"
+    ],
+    "answer_status": "ok",
+    "degradation_kind": "none",
+    "evidence_sufficiency": "sufficient",
+    "top3": [
+      {
+        "source_id": "source_a",
+        "matched_point_ids": [
+          "point_a"
+        ]
+      },
+      {
+        "source_id": "source_b",
+        "matched_point_ids": [
+          "point_b"
+        ]
+      }
+    ],
+    "follow_up": "#337"
+  },
+  {
+    "case_id": "content_negative_01",
+    "failure_codes": [
+      "degraded_response",
+      "status_mismatch",
+      "unexpected_recall",
+      "wrong_source"
+    ],
+    "answer_status": "degraded",
+    "degradation_kind": "evidence",
+    "evidence_sufficiency": "insufficient",
+    "top3": [
+      {
+        "source_id": "source_d",
+        "matched_point_ids": [
+          "point_d"
+        ]
+      }
+    ],
+    "follow_up": "#337"
+  },
+  {
+    "case_id": "abstract_negative_01",
+    "failure_codes": [
+      "irrelevant_but_ok",
+      "status_mismatch",
+      "unexpected_recall",
+      "wrong_source"
+    ],
+    "answer_status": "ok",
+    "degradation_kind": "none",
+    "evidence_sufficiency": "not_applicable",
+    "top3": [
+      {
+        "source_id": "source_d",
+        "matched_point_ids": [
+          "point_d"
+        ]
+      },
+      {
+        "source_id": "source_c",
+        "matched_point_ids": [
+          "point_c"
+        ]
+      }
+    ],
+    "follow_up": "#337"
+  }
+]
