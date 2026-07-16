@@ -1,0 +1,4 @@
+{"source_id":"source_a","title":"匿名记录A","type":"record","body":"系统 恢复 边界 明确 责任","answer_points":[{"point_id":"point_a","text":"恢复 边界"}],"timeline":[{"date":"2025-01-01","text":"恢复 边界 已 记录"}]}
+{"source_id":"source_b","title":"匿名主题B","type":"insight","body":"系统 速度 体验 观察 记录","answer_points":[{"point_id":"point_b","text":"速度 体验"}],"timeline":[]}
+{"source_id":"source_c","title":"匿名记录C","type":"record","body":"抽象 治理 稳定 原因 约束","answer_points":[{"point_id":"point_c","text":"治理 约束"}],"timeline":[{"date":"2025-02-01","text":"治理 约束 已 记录"}]}
+{"source_id":"source_d","title":"匿名主题D","type":"insight","body":"近似 噪声 背景 主题 说明","answer_points":[{"point_id":"point_d","text":"背景 说明"}],"timeline":[]}
