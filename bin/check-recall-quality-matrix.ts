@@ -128,29 +128,54 @@ export interface SemanticRecallIntegrationResult {
 		ftsControlApi: "HybridSearch.search(strategy=fts)";
 		comparisonLayer: "retrieval_candidates";
 		tieOrderStable: boolean;
+		tieOrder: readonly Readonly<{ pageSlug: string; chunkIndex: number }>[];
 	}>;
 }
 
 export type RecallCleanupFailureStage =
-	| "semantic_init"
+	| "semantic_db"
+	| "semantic_context"
 	| "semantic_handler"
 	| "semantic_close"
-	| "legacy_init"
+	| "legacy_db"
+	| "legacy_context"
 	| "legacy_handler"
 	| "legacy_close"
 	| "worker_spawn";
 
 export interface RecallCleanupFailureProbeResult {
 	readonly failureObserved: true;
+	readonly failureBoundary: RecallCleanupFailureStage;
 	readonly suiteRootRemoved: true;
 	readonly workerRootRemoved: true;
 	readonly parentEnvironmentRestored: true;
 }
 
 interface SuiteFailureHooks {
-	readonly stage?: "init" | "handler" | "close";
+	readonly closeFailure?: boolean;
+	readonly onCloseInvoked?: () => void;
 	readonly onRootCreated?: (root: string) => void;
+	readonly runtime?: SuiteRuntimeDependencies;
 }
+
+type RegisteredToolHandler = (
+	input: unknown,
+) => Promise<{ content: Array<{ text: string }> }>;
+
+interface SuiteRuntimeDependencies {
+	readonly openDb: (path: string) => CBrainDB;
+	readonly createContext: typeof buildContext;
+	readonly invokeHandler: (
+		handler: RegisteredToolHandler,
+		input: unknown,
+	) => Promise<{ content: Array<{ text: string }> }>;
+}
+
+const DEFAULT_SUITE_RUNTIME: SuiteRuntimeDependencies = {
+	openDb: (path) => new CBrainDB(path),
+	createContext: buildContext,
+	invokeHandler: (handler, input) => handler(input),
+};
 
 interface NetworkPoison {
 	readonly calls: () => number;
@@ -431,6 +456,7 @@ async function executeSemanticRecallWorker(
 	let networkPoison: NetworkPoison | undefined;
 	let jobStartCalls = 0;
 	try {
+		const runtime = hooks.runtime ?? DEFAULT_SUITE_RUNTIME;
 		hooks.onRootCreated?.(root);
 		const vaultPath = join(root, "vault");
 		const runtimePath = join(root, "runtime");
@@ -444,12 +470,12 @@ async function executeSemanticRecallWorker(
 		};
 		networkPoison = installNetworkPoison();
 		const fixtures = loadCanonicalSemanticFixtures();
-		if (hooks.stage === "init") throw new Error("semantic_constructor_failure");
-		db = new CBrainDB(join(root, "brain.sqlite"));
-		if (hooks.stage === "close") {
+		db = runtime.openDb(join(root, "brain.sqlite"));
+		if (hooks.closeFailure) {
 			const close = db.close.bind(db);
 			db.close = () => {
 				close();
+				hooks.onCloseInvoked?.();
 				throw new Error("semantic_close_failure");
 			};
 		}
@@ -465,26 +491,29 @@ async function executeSemanticRecallWorker(
 				body: source.body,
 			});
 			slugBySource.set(source.sourceId, slug);
-			lance.seed({
-				pageSlug: slug,
-				chunkIndex: 0,
-				content: source.body,
-				embedding: fixtureConceptVector(source.body),
-			});
-			if (source.sourceId === "source_b") {
-				lance.seed({
-					pageSlug: slug,
-					chunkIndex: 1,
-					content: source.body,
-					embedding: fixtureConceptVector(source.body),
-				});
-			}
 			for (const timeline of source.timeline) {
 				db.addTimelineEntry(slug, timeline.text, timeline.date, "manual");
 			}
 		}
+		for (const document of [
+			{ sourceId: "source_d", chunkIndex: 0 },
+			{ sourceId: "source_b", chunkIndex: 10 },
+			{ sourceId: "source_b", chunkIndex: 2 },
+			{ sourceId: "source_c", chunkIndex: 0 },
+			{ sourceId: "source_a", chunkIndex: 0 },
+		] as const) {
+			const source = fixtures.corpus.find((item) => item.sourceId === document.sourceId);
+			const pageSlug = slugBySource.get(document.sourceId);
+			if (!source || !pageSlug) throw new Error("vector_seed_missing");
+			lance.seed({
+				pageSlug,
+				chunkIndex: document.chunkIndex,
+				content: source.body,
+				embedding: fixtureConceptVector(source.body),
+			});
+		}
 
-		const ctx = buildContext({
+		const ctx = runtime.createContext({
 			db,
 			embedding,
 			lance,
@@ -513,8 +542,7 @@ async function executeSemanticRecallWorker(
 				include_raw: true as const,
 			};
 			invocations.push({ caseId: testCase.caseId, detail: args.detail, includeRaw: args.include_raw });
-			if (hooks.stage === "handler") throw new Error("semantic_handler_failure");
-			const response = await tools.cbrain_recall.handler(args);
+			const response = await runtime.invokeHandler(tools.cbrain_recall.handler, args);
 			const envelope = JSON.parse(response.content[0]?.text ?? "{}") as ProductionFrontdoorEnvelope;
 			observations.push(mapFrontdoorEnvelopeToSemanticObservation(testCase, envelope, fixtures.corpus));
 		}
@@ -535,8 +563,14 @@ async function executeSemanticRecallWorker(
 		const expectedSlug = slugBySource.get(expectedSource);
 		const abstractObservation = observations.find((item) => item.caseId === abstractCase.caseId);
 		const tieResults = await lance.search([0, 1, 0, 0], 10);
-		const tieOrder = tieResults.map((item) => `${item.pageSlug}:${item.chunkIndex}`);
-		const expectedTieOrder = [...tieOrder].sort((left, right) => left.localeCompare(right));
+		const tieOrder = tieResults.map((item) => ({
+			pageSlug: item.pageSlug,
+			chunkIndex: item.chunkIndex,
+		}));
+		const expectedTieOrder = [...tieOrder].sort((left, right) =>
+			left.pageSlug.localeCompare(right.pageSlug) ||
+			left.chunkIndex - right.chunkIndex
+		);
 
 		result = {
 			topology: {
@@ -558,7 +592,8 @@ async function executeSemanticRecallWorker(
 					expectedSlug !== undefined && ftsControl.some((item) => item.slug === expectedSlug),
 				ftsControlApi: "HybridSearch.search(strategy=fts)",
 				comparisonLayer: "retrieval_candidates",
-				tieOrderStable: tieOrder.join("\n") === expectedTieOrder.join("\n"),
+				tieOrderStable: JSON.stringify(tieOrder) === JSON.stringify(expectedTieOrder),
+				tieOrder,
 			},
 		};
 	} finally {
@@ -585,10 +620,11 @@ async function executeSemanticRecallWorker(
 }
 
 async function recall(
-  handler: (input: unknown) => Promise<{ content: Array<{ text: string }> }>,
+	handler: RegisteredToolHandler,
   input: Record<string, unknown>,
+	invokeHandler: SuiteRuntimeDependencies["invokeHandler"] = DEFAULT_SUITE_RUNTIME.invokeHandler,
 ): Promise<Record<string, any>> {
-  const response = await handler({ detail: "brief", include_raw: true, ...input });
+	const response = await invokeHandler(handler, { detail: "brief", include_raw: true, ...input });
   return JSON.parse(response.content[0].text) as Record<string, any>;
 }
 
@@ -642,13 +678,14 @@ async function executeRecallQualityMatrixWorker(
   const root = mkdtempSync(join(tmpdir(), "cbrain-recall-matrix-"));
 	let db: CBrainDB | undefined;
   try {
+		const runtime = hooks.runtime ?? DEFAULT_SUITE_RUNTIME;
 		hooks.onRootCreated?.(root);
-		if (hooks.stage === "init") throw new Error("legacy_constructor_failure");
-		db = new CBrainDB(join(root, "brain.sqlite"));
-		if (hooks.stage === "close") {
+		db = runtime.openDb(join(root, "brain.sqlite"));
+		if (hooks.closeFailure) {
 			const close = db.close.bind(db);
 			db.close = () => {
 				close();
+				hooks.onCloseInvoked?.();
 				throw new Error("legacy_close_failure");
 			};
 		}
@@ -689,26 +726,25 @@ async function executeRecallQualityMatrixWorker(
       vaultPath,
       runtimePath: join(root, "runtime"),
     };
-    const legacyContext = buildContext(deps);
+    const legacyContext = runtime.createContext(deps);
     const legacyServer = new McpServer({ name: "cbrain-recall-quality", version: "legacy-v1" });
     attachMcpTools(legacyServer, legacyContext);
     const tools = getTools(legacyServer);
 
-		if (hooks.stage === "handler") throw new Error("legacy_handler_failure");
-    const zh = retrievalCase("zh_exact", await recall(tools.deep_recall.handler, { query: "实体甲" }), zhSlug);
-    const en = retrievalCase("en_exact", await recall(tools.deep_recall.handler, { query: "Project Alpha" }), enSlug);
+		const zh = retrievalCase("zh_exact", await recall(tools.deep_recall.handler, { query: "实体甲" }, runtime.invokeHandler), zhSlug);
+		const en = retrievalCase("en_exact", await recall(tools.deep_recall.handler, { query: "Project Alpha" }, runtime.invokeHandler), enSlug);
     const mixed = retrievalCase(
       "mixed_alias",
-      await recall(tools.deep_recall.handler, { query: "Project Alpha 项目甲", strategy: "fts" }),
+			await recall(tools.deep_recall.handler, { query: "Project Alpha 项目甲", strategy: "fts" }, runtime.invokeHandler),
       enSlug,
     );
     const abstract = retrievalCase(
       "abstract_topic",
-      await recall(tools.deep_recall.handler, { query: "迁移方案的痛点是什么", strategy: "fts" }),
+			await recall(tools.deep_recall.handler, { query: "迁移方案的痛点是什么", strategy: "fts" }, runtime.invokeHandler),
       zhSlug,
     );
 
-    const emptyPayload = await recall(tools.deep_recall.handler, { query: "不存在主题 qzxv" });
+		const emptyPayload = await recall(tools.deep_recall.handler, { query: "不存在主题 qzxv" }, runtime.invokeHandler);
     const emptySlugs = (emptyPayload.entities ?? []).map((entity: { slug?: string }) => entity.slug).filter(Boolean);
     const honestEmpty = emptySlugs.length === 0 && emptyPayload.summary?.status === "empty";
     const empty: RecallQualityCaseResult = {
@@ -718,11 +754,11 @@ async function executeRecallQualityMatrixWorker(
       metrics: { ...emptyMetrics(), noise_at_k: emptySlugs.length, honest_empty: honestEmpty },
     };
 
-    const temporalPayload = await recall(tools.deep_recall.handler, {
+		const temporalPayload = await recall(tools.deep_recall.handler, {
       query: "上次迁移方案",
       strategy: "fts",
       evidence: "on",
-    });
+		}, runtime.invokeHandler);
     const coverage = temporalPayload.raw?.evidence_pack?.coverage?.coverage_status ?? "insufficient";
     const temporal: RecallQualityCaseResult = {
       id: "temporal_evidence",
@@ -790,6 +826,7 @@ async function executeRecallQualityMatrixWorker(
 async function spawnClosedWorker<T>(
 	expression: string,
 	onRootCreated?: (root: string) => void,
+	spawnProcess: typeof Bun.spawn = Bun.spawn,
 ): Promise<T> {
 	const root = mkdtempSync(join(tmpdir(), "cbrain-recall-worker-"));
 	try {
@@ -798,7 +835,7 @@ async function spawnClosedWorker<T>(
 		const config = join(root, "xdg-config");
 		const data = join(root, "xdg-data");
 		for (const path of [home, config, data]) mkdirSync(path, { recursive: true });
-		const child = Bun.spawn({
+		const child = spawnProcess({
 			cmd: [process.execPath, "-e", expression],
 			cwd: PROJECT_DIR,
 			env: {
@@ -836,21 +873,46 @@ function environmentSnapshot(): string {
 
 export async function runRecallFailureProbeWorker(
 	stage: RecallCleanupFailureStage,
-): Promise<Readonly<{ failureObserved: boolean; suiteRootRemoved: boolean }>> {
+): Promise<Readonly<{
+	failureObserved: boolean;
+	boundaryCalled: boolean;
+	suiteRootRemoved: boolean;
+}>> {
 	if (process.env[INTERNAL_WORKER_MARKER] !== "1") {
 		throw new Error("recall_quality_worker_required");
 	}
 	let suiteRoot: string | undefined;
 	let failureObserved = false;
+	let boundaryCalled = false;
+	const runtime: SuiteRuntimeDependencies = {
+		openDb: stage.endsWith("_db")
+			? () => {
+				boundaryCalled = true;
+				throw new Error("db_open_failure");
+			}
+			: DEFAULT_SUITE_RUNTIME.openDb,
+		createContext: stage.endsWith("_context")
+			? () => {
+				boundaryCalled = true;
+				throw new Error("context_factory_failure");
+			}
+			: DEFAULT_SUITE_RUNTIME.createContext,
+		invokeHandler: stage.endsWith("_handler")
+			? async () => {
+				boundaryCalled = true;
+				throw new Error("registered_handler_failure");
+			}
+			: DEFAULT_SUITE_RUNTIME.invokeHandler,
+	};
 	const hooks: SuiteFailureHooks = {
-		stage: stage.endsWith("_init")
-			? "init"
-			: stage.endsWith("_handler")
-				? "handler"
-				: "close",
+		closeFailure: stage.endsWith("_close"),
+		onCloseInvoked: () => {
+			boundaryCalled = true;
+		},
 		onRootCreated: (root) => {
 			suiteRoot = root;
 		},
+		runtime,
 	};
 	try {
 		if (stage.startsWith("semantic_")) {
@@ -863,6 +925,7 @@ export async function runRecallFailureProbeWorker(
 	}
 	return {
 		failureObserved,
+		boundaryCalled,
 		suiteRootRemoved: suiteRoot !== undefined && !existsSync(suiteRoot),
 	};
 }
@@ -875,23 +938,29 @@ export async function runRecallCleanupFailureProbe(
 	const moduleUrl = JSON.stringify(import.meta.url);
 	if (stage === "worker_spawn") {
 		let failureObserved = false;
+		let spawnBoundaryCalled = false;
 		try {
 			await spawnClosedWorker(
-				'throw new Error("worker_spawn_failure");',
+				"process.stdout.write('{}');",
 				(root) => {
 					workerRoot = root;
 				},
+				((..._args: Parameters<typeof Bun.spawn>) => {
+					spawnBoundaryCalled = true;
+					throw new Error("worker_spawn_failure");
+				}) as unknown as typeof Bun.spawn,
 			);
 		} catch {
 			failureObserved = true;
 		}
 		const workerRootRemoved = workerRoot !== undefined && !existsSync(workerRoot);
 		const parentEnvironmentRestored = environmentSnapshot() === beforeEnvironment;
-		if (!failureObserved || !workerRootRemoved || !parentEnvironmentRestored) {
+		if (!failureObserved || !spawnBoundaryCalled || !workerRootRemoved || !parentEnvironmentRestored) {
 			throw new Error("recall_quality_cleanup_probe_failed");
 		}
 		return {
 			failureObserved: true,
+			failureBoundary: stage,
 			suiteRootRemoved: true,
 			workerRootRemoved: true,
 			parentEnvironmentRestored: true,
@@ -899,6 +968,7 @@ export async function runRecallCleanupFailureProbe(
 	}
 	const childResult = await spawnClosedWorker<Readonly<{
 		failureObserved: boolean;
+		boundaryCalled: boolean;
 		suiteRootRemoved: boolean;
 	}>>(
 		`import { runRecallFailureProbeWorker } from ${moduleUrl};` +
@@ -912,6 +982,7 @@ export async function runRecallCleanupFailureProbe(
 	const parentEnvironmentRestored = environmentSnapshot() === beforeEnvironment;
 	if (
 		!childResult.failureObserved ||
+		!childResult.boundaryCalled ||
 		!childResult.suiteRootRemoved ||
 		!workerRootRemoved ||
 		!parentEnvironmentRestored
@@ -920,6 +991,7 @@ export async function runRecallCleanupFailureProbe(
 	}
 	return {
 		failureObserved: true,
+		failureBoundary: stage,
 		suiteRootRemoved: true,
 		workerRootRemoved: true,
 		parentEnvironmentRestored: true,

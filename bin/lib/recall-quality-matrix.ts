@@ -282,6 +282,7 @@ export type RecallQualityFixtureErrorCode =
 	| "invalid_source_type"
 	| "invalid_timeline_date"
 	| "duplicate_source_id"
+	| "duplicate_title"
 	| "duplicate_point_id"
 	| "invalid_case_id"
 	| "invalid_case_category"
@@ -547,6 +548,7 @@ function parseTimelineEntry(value: unknown): RecallTimelineEntry {
 export function parseRecallQualityCorpus(text: string): RecallCorpus {
 	const rows = parseJsonLines(text);
 	const sourceIds = new Set<string>();
+	const titles = new Set<string>();
 	const pointIds = new Set<string>();
 
 	return rows.map((row) => {
@@ -558,6 +560,8 @@ export function parseRecallQualityCorpus(text: string): RecallCorpus {
 
 		assertString(row.title);
 		if (!TITLE_PATTERN.test(row.title)) fail("invalid_title");
+		if (titles.has(row.title)) fail("duplicate_title");
+		titles.add(row.title);
 		if (row.type !== "record" && row.type !== "insight")
 			fail("invalid_source_type");
 		assertSafeFixtureText(row.body);

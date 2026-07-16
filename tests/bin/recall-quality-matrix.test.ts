@@ -313,6 +313,15 @@ describe("fixture schema", () => {
 		);
 	});
 
+	test("rejects duplicate corpus titles before title-to-source mapping", () => {
+		const rows = corpusRows();
+		rows[1]!.title = rows[0]!.title;
+		expectFixtureError(
+			() => parseRecallQualityCorpus(jsonl(rows)),
+			"duplicate_title",
+		);
+	});
+
 	test.each([
 		[
 			"case ID",
@@ -1696,10 +1705,12 @@ describe("semantic integration", () => {
 	});
 
 	test.each([
-		"semantic_init",
+		"semantic_db",
+		"semantic_context",
 		"semantic_handler",
 		"semantic_close",
-		"legacy_init",
+		"legacy_db",
+		"legacy_context",
 		"legacy_handler",
 		"legacy_close",
 		"worker_spawn",
@@ -1710,6 +1721,7 @@ describe("semantic integration", () => {
 			const result = await runRecallCleanupFailureProbe(stage);
 			expect(result).toEqual({
 				failureObserved: true,
+				failureBoundary: stage,
 				suiteRootRemoved: true,
 				workerRootRemoved: true,
 				parentEnvironmentRestored: true,
@@ -1767,6 +1779,11 @@ describe("vector differential", () => {
 	test("orders equal-cosine vector hits by page slug and chunk index", async () => {
 		const result = await runSemanticRecallIntegration();
 		expect(result.vector.tieOrderStable).toBe(true);
+		expect(result.vector.tieOrder).toEqual([
+			{ pageSlug: "brain/insights/source-b", chunkIndex: 2 },
+			{ pageSlug: "brain/insights/source-b", chunkIndex: 10 },
+			{ pageSlug: "brain/insights/source-d", chunkIndex: 0 },
+		]);
 	});
 });
 
