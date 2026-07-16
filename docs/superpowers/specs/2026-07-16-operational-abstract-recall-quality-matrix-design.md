@@ -12,7 +12,7 @@
 ## 1. Problem first
 
 The current #324 gate proves that nine anonymous smoke cases remain green. It
-does not make the recent Hermes failures measurable:
+does not make the recent Agent-facing failures measurable:
 
 1. current-state questions can drift from the Agent contract into semantic
    recall;

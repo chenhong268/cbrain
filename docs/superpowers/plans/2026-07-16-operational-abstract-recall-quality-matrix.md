@@ -665,7 +665,7 @@ Never use `git add .`.
 
 The implementation agent stops after local commits, verification, and the
 evidence packet. It must not push, open/merge a PR, close #336, or remove the
-worktree/branch. Those are separate Codex reviewer/release-manager actions after
+worktree/branch. Those are separate independent reviewer/release-manager actions after
 the implementation handoff is accepted.
 
 ## Final evidence packet
