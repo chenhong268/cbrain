@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "hermes_version": "0.18.0",
+  "source_commit": "b837f07dcd9092105ca56a4d856be91196e09d81",
+  "source_tree_digest": "4aab097cecc4d1634ad2d6eb5c9955f7b7d4d07a6738e3e47d086cf3b528be0d",
+  "source_blob_count": 5947,
+  "python_base": {
+    "digest": "d3ed45836a89baf8380411aa58341c65efff61d080ba0a0d4234f08e616abd94",
+    "file_count": 2366
+  },
+  "venv": {
+    "digest": "2942b87c8b086519860f86ff2995110215f4f5692b96770b218fd8d21499419e",
+    "file_count": 37693
+  },
+  "runtime_relation": {
+    "entrypoint": "bin/hermes",
+    "entrypoint_digest": "6b41b27a55c081f2ca1b0736c34338065197267f8354bab1dc7d759704f1d95e",
+    "interpreter_name": "python3",
+    "python_executable_digest": "db30580518b84bad8052a966f9e817db7afb57dbce050885b39922fb81fca485",
+    "pyvenv_config_digest": "b6649d68f4412b538b10fac9c4be97ddd228245a3b203c94af1c013ddcfbff43"
+  },
+  "tokenizer_blob_digest": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+  "exclusions": [
+    ".git",
+    ".env",
+    ".env.*",
+    "__pycache__",
+    "*.pyc",
+    ".DS_Store"
+  ],
+  "aggregate_digest": "ceec320874b34c6e78ea70b7955289df1158504f42a3cdb5023592b7d8190925"
+}
