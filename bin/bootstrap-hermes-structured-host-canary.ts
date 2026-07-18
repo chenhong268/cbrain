@@ -181,7 +181,6 @@ function processGroupIsEmpty(pgid: number): boolean {
 interface LockLease {
   child: ReturnType<typeof Bun.spawn>;
   started: string;
-  stdin: { end(): number | void };
   reader: ReadableStreamDefaultReader<Uint8Array>;
 }
 
@@ -195,12 +194,15 @@ async function acquireLock(): Promise<LockLease> {
     "    print('LOCK_HELD', flush=True)",
     "    sys.exit(73)",
     "print('LOCK_ACQUIRED', flush=True)",
-    "sys.stdin.buffer.read()",
+    "parent = int(sys.argv[2])",
+    "import time",
+    "while os.getppid() == parent:",
+    "    time.sleep(0.1)",
   ].join("\n");
   const child = Bun.spawn({
-    cmd: ["/usr/bin/python3", "-I", "-c", script, LOCK_PATH],
+    cmd: ["/usr/bin/python3", "-I", "-c", script, LOCK_PATH, String(process.pid)],
     env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
-    stdin: "pipe",
+    stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -210,7 +212,6 @@ async function acquireLock(): Promise<LockLease> {
     emitFatal("CANARY_OWNER_UNVERIFIABLE");
   }
   const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
-  const stdin = child.stdin;
   const first = await Promise.race([
     reader.read(),
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("lock handshake timeout")), 2_000)),
@@ -221,12 +222,12 @@ async function acquireLock(): Promise<LockLease> {
     if (handshake === "LOCK_HELD") emitFatal("CANARY_LOCK_HELD");
     emitFatal("CANARY_LOCK_UNVERIFIABLE");
   }
-  return { child, started, stdin, reader };
+  return { child, started, reader };
 }
 
 async function releaseLock(lease: LockLease): Promise<void> {
   if (processStart(lease.child.pid) !== lease.started) emitFatal("CANARY_LOCK_OWNERSHIP_DRIFT");
-  lease.stdin.end();
+  lease.child.kill("SIGTERM");
   const exitCode = await Promise.race([
     lease.child.exited,
     new Promise<number>((resolvePromise) => setTimeout(() => resolvePromise(-1), 2_000)),
@@ -237,7 +238,7 @@ async function releaseLock(lease: LockLease): Promise<void> {
     emitFatal("CANARY_LOCK_RELEASE_FAILED");
   }
   await lease.reader.cancel().catch(() => {});
-  if (exitCode !== 0) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+  if (processStart(lease.child.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
 }
 
 function setTreeReadOnly(path: string): void {
