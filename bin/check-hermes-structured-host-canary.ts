@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   ANONYMOUS_FIXTURE_MARKERS,
@@ -42,9 +42,20 @@ const ALLOWED_ENV = new Set([
 type FatalStage = "ENV" | "HERMES_SNAPSHOT" | "MATRIX" | "LIVE_POST" | "EVIDENCE" | "SERIALIZATION";
 let fatalStage: FatalStage = "ENV";
 
+function exitWorker(code: 0 | 1 | 2): never {
+  try {
+    const snapshotRoot = process.env.CBRAIN_CANARY_SNAPSHOT_ROOT;
+    if (!snapshotRoot) throw new Error("missing snapshot root");
+    writeFileSync(join(dirname(snapshotRoot), "worker-exit-status"), `${code}\n`, { mode: 0o600 });
+  } catch {
+    process.exit(2);
+  }
+  process.exit(code);
+}
+
 function fatal(code = `CANARY_${fatalStage}_FATAL`): never {
   process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);
-  process.exit(2);
+  exitWorker(2);
 }
 
 function sha256(path: string): string {
@@ -249,7 +260,7 @@ try {
   const serialized = JSON.stringify(output);
   if (/(?:\/Users\/|\/home\/|[A-Za-z]:\\|Bearer\s+|api[_-]?key\s*[:=])/i.test(serialized)) fatal();
   process.stdout.write(`${serialized}\n`);
-  process.exit(report.verdict === "go" ? 0 : 1);
+  exitWorker(report.verdict === "go" ? 0 : 1);
 } catch {
   fatal();
 }

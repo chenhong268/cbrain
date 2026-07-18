@@ -471,6 +471,7 @@ async function main(): Promise<number> {
 
     bootstrapStage = "WORKER";
     const worker = join(snapshotSource, "bin", "check-hermes-structured-host-canary.ts");
+    const workerExitStatus = join(bootRoot, "worker-exit-status");
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let childStarted: string | null = null;
     let pendingInterrupt: Error | null = null;
@@ -527,7 +528,6 @@ async function main(): Promise<number> {
     });
     const stdoutPromise = readBoundedText(child.stdout as ReadableStream<Uint8Array>, 2_000_000);
     const stderrPromise = readBoundedText(child.stderr as ReadableStream<Uint8Array>, 1_000_000);
-    const childExitSignal = child.exited.catch(() => -2);
     let exitCode: number;
     try {
       const deadline = Date.now() + 180_000;
@@ -538,7 +538,9 @@ async function main(): Promise<number> {
           interruptPromise,
         ]);
       }
-      exitCode = child.exitCode ?? (await childExitSignal);
+      const exitStatus = readFileSync(workerExitStatus, "utf8").trim();
+      if (!/^[012]$/.test(exitStatus)) emitFatal("CANARY_WORKER_STATUS_INVALID");
+      exitCode = Number(exitStatus);
     } catch (error) {
       if (processStart(child.pid) === childStarted) {
         try {
