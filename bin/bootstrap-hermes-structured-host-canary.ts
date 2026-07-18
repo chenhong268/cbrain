@@ -572,16 +572,19 @@ async function main(): Promise<number> {
     finalOutput = stdout;
     finalStatus = exitCode;
   } finally {
+    let snapshotCleanupFailed = false;
+    bootstrapStage = "SNAPSHOT_CLEANUP";
     try {
-      bootstrapStage = "SNAPSHOT_CLEANUP";
       if (snapshotCreated) {
         setTreeWritable(snapshotRoot);
         rmSync(snapshotRoot, { recursive: true, force: true });
       }
-    } finally {
-      bootstrapStage = "LOCK_RELEASE";
-      await releaseLock(lockLease);
+    } catch {
+      snapshotCleanupFailed = true;
     }
+    bootstrapStage = "LOCK_RELEASE";
+    await releaseLock(lockLease);
+    if (snapshotCleanupFailed) emitFatal("CANARY_SNAPSHOT_CLEANUP_FAILED");
   }
   bootstrapStage = "RESULT_EMIT";
   process.stdout.write(`${finalOutput}\n`);
