@@ -1,6 +1,6 @@
 {
   "algorithm": "sha256-canonical-json-v1",
-  "checkpoint_tree_digest": "cae50152cc18d7660842fb96fed990c6a3fa205c8e965e65269512e59aba42f4",
+  "checkpoint_tree_digest": "71a5536d4f812d764601677ec46b8cdb707bdca943558f3740e77137684dd452",
   "checkpoint_blob_count": 583,
   "bun_binary_digest": "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233",
   "bun_version": "1.3.14",
