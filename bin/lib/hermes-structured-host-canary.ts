@@ -416,7 +416,11 @@ export interface HermesRuntimeSnapshot {
 }
 
 export function assertHermesInstallRootHasNoEnv(sourceRoot: string): void {
-  if (readdirSync(sourceRoot).some((name) => name === ".env" || name.startsWith(".env."))) {
+  if (
+    readdirSync(sourceRoot).some(
+      (name) => name !== ".env.example" && (name === ".env" || name.startsWith(".env.")),
+    )
+  ) {
     throw new Error("Hermes install root contains an environment file");
   }
 }

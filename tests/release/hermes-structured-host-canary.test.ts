@@ -1819,12 +1819,18 @@ time.sleep(30)
     );
     const root = mkdtempSync(join(tmpdir(), "cbrain-hermes-env-preflight-"));
     const envPath = join(root, ".env.local");
+    const templatePath = join(root, ".env.example");
     const original = "SYNTHETIC_SENTINEL=must-remain-byte-identical\n";
+    const template = "SYNTHETIC_PUBLIC_TEMPLATE=replace-me\n";
     try {
       writeFileSync(envPath, original, { mode: 0o600 });
       expect(() => assertHermesInstallRootHasNoEnv(root)).toThrow();
       expect(readFileSync(envPath, "utf8")).toBe(original);
-      expect(readdirSync(root)).toEqual([".env.local"]);
+      rmSync(envPath);
+      writeFileSync(templatePath, template, { mode: 0o600 });
+      expect(() => assertHermesInstallRootHasNoEnv(root)).not.toThrow();
+      expect(readFileSync(templatePath, "utf8")).toBe(template);
+      expect(readdirSync(root)).toEqual([".env.example"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

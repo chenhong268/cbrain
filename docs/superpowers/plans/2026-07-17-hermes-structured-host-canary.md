@@ -698,6 +698,15 @@ The second frozen attempt exposed a marker/process observation race: the wait-lo
 - adds a source-contract regression that requires the recheck to occur between the death probe and missing-status fatal;
 - invalidates both earlier fatal attempts and again requires full verification, evidence approval, adversarial review, and a fresh complete real canary.
 
+#### Real-canary environment-template correction r10 — 2026-07-18
+
+The third frozen attempt passed worker commit validation but failed closed at `HERMES_SNAPSHOT`. Reproduction under the same read-only CBrain snapshot and closed environment proved the runtime clone itself succeeded. The remaining preflight classified the approved source commit's public `.env.example` template as a private install-root environment file, making the formal worker path unconditionally fatal even though the runtime builder clones the frozen commit and excludes every `.env`/`.env.*` entry before any probe. The correction:
+
+- permits only the exact public template basename `.env.example` at install-root preflight while continuing to reject `.env`, `.env.local`, and every other `.env.*` variant;
+- neither reads nor modifies the template body, and the runtime snapshot exclusion remains unchanged, so no template or private environment file reaches an import/version/case process;
+- adds a behavioral regression proving a rejected private variant remains byte-identical and the exact public template is accepted without reading or rewriting it;
+- invalidates the third fatal attempt and again requires full verification, evidence approval, adversarial review, and a fresh complete real canary.
+
 - [ ] **Step 5: Commit, publish, CI, and issue state**
 
 Commit history now contains the approved plan, independently approved runtime-manifest/tokenizer checkpoint, reviewed harness checkpoint used by the evidence snapshot, and final report commit. Confirm the worktree is clean and diff is issue-scoped. Then push `codex/338-structured-canary`, open a ready PR linked to #338, wait for GitHub CI, and merge only if green. Close #338 with the aggregate verdict/evidence. Update #333: close it only if #338 fulfills the parent completion standard; otherwise leave it open with the exact host-side gap. Never modify the live rollout default in this issue.
