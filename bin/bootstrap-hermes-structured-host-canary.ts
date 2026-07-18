@@ -538,7 +538,12 @@ async function main(): Promise<number> {
           interruptPromise,
         ]);
       }
-      const exitStatus = readFileSync(workerExitStatus, "utf8").trim();
+      let exitStatus: string;
+      try {
+        exitStatus = readFileSync(workerExitStatus, "utf8").trim();
+      } catch {
+        emitFatal("CANARY_WORKER_STATUS_MISSING");
+      }
       if (!/^[012]$/.test(exitStatus)) emitFatal("CANARY_WORKER_STATUS_INVALID");
       exitCode = Number(exitStatus);
     } catch (error) {
