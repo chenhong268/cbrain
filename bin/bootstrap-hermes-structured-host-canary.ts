@@ -566,6 +566,7 @@ async function main(): Promise<number> {
     )
       emitFatal("CANARY_WORKER_IDENTITY_UNAVAILABLE");
     let exitCode: number;
+    let exitMarker: { schema_version: number; exit_code: number; output_sha256: string } | undefined;
     try {
       workerStage = "WAIT";
       const deadline = Date.now() + 600_000;
@@ -588,13 +589,13 @@ async function main(): Promise<number> {
       } catch {
         emitFatal("CANARY_WORKER_STATUS_MISSING");
       }
-      let exitMarker: { schema_version: number; exit_code: number; output_sha256: string };
       try {
-        exitMarker = JSON.parse(exitMarkerRaw) as typeof exitMarker;
+        exitMarker = JSON.parse(exitMarkerRaw) as Exclude<typeof exitMarker, undefined>;
       } catch {
         emitFatal("CANARY_WORKER_STATUS_INVALID");
       }
       if (
+        !exitMarker ||
         exitMarker.schema_version !== 1 ||
         ![0, 1, 2].includes(exitMarker.exit_code) ||
         !/^[a-f0-9]{64}$/.test(exitMarker.output_sha256)
@@ -691,12 +692,13 @@ async function main(): Promise<number> {
 try {
   process.exitCode = await main();
 } catch (error) {
+  const failureStage = bootstrapStage as BootstrapStage;
   const code =
     error instanceof BootstrapFatal
       ? error.code
-      : bootstrapStage === "LOCK_RELEASE"
+      : failureStage === "LOCK_RELEASE"
         ? `CANARY_LOCK_RELEASE_${lockReleaseStage}_FAILED`
-        : bootstrapStage === "WORKER"
+        : failureStage === "WORKER"
           ? `CANARY_WORKER_${workerStage}_FAILED`
           : `CANARY_BOOTSTRAP_${bootstrapStage}_FATAL`;
   process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);

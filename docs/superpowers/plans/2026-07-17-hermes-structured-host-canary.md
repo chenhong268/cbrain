@@ -681,6 +681,14 @@ The seventh adversarial round closes a blocking filesystem-node edge in the priv
 - exact-size bounded reads and the same strict JSON parser run only after the file-type check, so a FIFO, device, socket, oversized file, short read, duplicate key, or non-finite value cannot block or enter the registry;
 - malformed formulas are rejected at the public boundary; a truthful size `no-go` is publishable only for self-consistent over-budget measurements or explicitly failed AB/BA observation contracts.
 
+#### Real-canary startup correction r8 — 2026-07-18
+
+The first frozen real-canary attempt failed closed before the matrix with `CANARY_WORKER_STATUS_MISSING`. Isolated reproduction showed that the worker had committed its output, but bootstrap then referenced `exitMarker` outside the `try` block where it was declared. The correction:
+
+- declares the parsed worker marker in the enclosing worker lifecycle scope and requires it to be defined before any hash/status use;
+- brings both executable TypeScript canary entrypoints into `tsconfig.test.json`, turning the previously runtime-only scope error into a mandatory compile-time failure;
+- invalidates the earlier machine attempt and evidence checkpoint; all focused/full checks, manifest approval, adversarial reviews, and the complete real canary must be repeated.
+
 - [ ] **Step 5: Commit, publish, CI, and issue state**
 
 Commit history now contains the approved plan, independently approved runtime-manifest/tokenizer checkpoint, reviewed harness checkpoint used by the evidence snapshot, and final report commit. Confirm the worktree is clean and diff is issue-scoped. Then push `codex/338-structured-canary`, open a ready PR linked to #338, wait for GitHub CI, and merge only if green. Close #338 with the aggregate verdict/evidence. Update #333: close it only if #338 fulfills the parent completion standard; otherwise leave it open with the exact host-side gap. Never modify the live rollout default in this issue.

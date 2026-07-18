@@ -8,6 +8,11 @@
     "sourceMap": false,
     "outDir": null
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "bin/bootstrap-hermes-structured-host-canary.ts",
+    "bin/check-hermes-structured-host-canary.ts"
+  ],
   "exclude": ["node_modules", "dist", "tests/insight-sim.ts"]
 }
