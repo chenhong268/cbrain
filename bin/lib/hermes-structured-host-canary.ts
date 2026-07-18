@@ -717,7 +717,7 @@ export async function countExactCl100kTokens(options: {
 
 function copyOnWriteTree(source: string, destination: string): void {
   try {
-    execFileSync("/bin/cp", ["-cR", source, destination], { stdio: "ignore" });
+    execFileSync("/bin/cp", ["-cRp", source, destination], { stdio: "ignore" });
   } catch {
     throw new Error("copy-on-write runtime clone failed");
   }
