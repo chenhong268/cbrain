@@ -340,7 +340,7 @@ async function main(): Promise<number> {
     run(["git", "checkout", "--quiet", checkpoint], snapshotSource);
     rmSync(join(snapshotSource, ".git"), { recursive: true, force: true });
     rmSync(join(snapshotSource, "docs"), { recursive: true, force: true });
-  run(["/bin/cp", "-cRp", join(sourceRoot, "node_modules"), join(snapshotSource, "node_modules")]);
+    run(["/bin/cp", "-cRp", join(sourceRoot, "node_modules"), join(snapshotSource, "node_modules")]);
     const copiedBun = join(snapshotBin, "bun");
     copyFileSync(process.execPath, copiedBun);
     chmodSync(copiedBun, 0o755);
@@ -375,6 +375,7 @@ async function main(): Promise<number> {
       emitFatal("BOOTSTRAP_IMPORT_ESCAPE");
     setTreeReadOnly(snapshotRoot);
     snapshotCreated = true;
+    const executionNodeModules = canonicalTreeDigest(join(snapshotSource, "node_modules"));
 
     const liveModule = await import(join(snapshotSource, "bin/lib/hermes-canary-live-fingerprint.ts"));
     const preLiveFingerprint = liveModule.captureStableLiveServiceFingerprint(
@@ -395,6 +396,10 @@ async function main(): Promise<number> {
         CBRAIN_CANARY_ORIGINAL_HERMES: hermesExecutable,
         CBRAIN_CANARY_CHECKPOINT_DIGEST: checkpointDigest,
         CBRAIN_CANARY_CHECKPOINT_BLOB_COUNT: String(listing.length),
+        CBRAIN_CANARY_SOURCE_NODE_MODULES_DIGEST: nodeModules.digest,
+        CBRAIN_CANARY_SOURCE_NODE_MODULES_FILE_COUNT: String(nodeModules.file_count),
+        CBRAIN_CANARY_EXECUTION_NODE_MODULES_DIGEST: executionNodeModules.digest,
+        CBRAIN_CANARY_EXECUTION_NODE_MODULES_FILE_COUNT: String(executionNodeModules.file_count),
         CBRAIN_CANARY_FAULT: process.env.CBRAIN_CANARY_FAULT ?? "",
         CBRAIN_CANARY_LIVE_HOME: required("CBRAIN_CANARY_LIVE_HOME"),
         CBRAIN_CANARY_PRE_LIVE_FINGERPRINT: Buffer.from(JSON.stringify(preLiveFingerprint)).toString("base64"),

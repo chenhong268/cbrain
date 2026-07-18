@@ -900,6 +900,8 @@ describe("paired anonymous CBrain fixture and observing MCP proxy", () => {
       hostContent,
     );
     expect(analysis.projection_contract_verified).toBe(true);
+    expect(analysis.result_title_present).toBe(true);
+    expect(analysis.result_body_present).toBe(true);
     expect(analysis.observed_projection_kind).toBe("result_plus_structured");
     expect(analysis.audit_contract_verified).toBe(true);
     expect(analysis.audit_redaction_exercised).toBe(true);
@@ -1148,6 +1150,7 @@ realHermesTest(
           branch: "normal",
         });
         expect(projected.final_marker_verified).toBe(true);
+        expect(snapshot.verifyUnchanged()).toBe(true);
       } finally {
         await runtime.close();
         await fixture.close();

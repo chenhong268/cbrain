@@ -603,6 +603,8 @@ export function analyzeHermesHostProjection(spec: CanaryCaseSpec, toolContent: s
       !surfaceInternal;
     return {
       ...fallback,
+      result_title_present: titlePresent,
+      result_body_present: bodyPresent,
       empty_contract_verified: emptyVerified,
       legacy_raw_present: legacyRaw,
       default_audit_present: defaultAuditPresent,
@@ -848,17 +850,17 @@ export async function createHermesRuntimeSnapshot(options: {
     if (relocatedFinder.includes(options.sourceRepoRoot)) throw new Error("Hermes editable finder relocation failed");
     writeFileSync(finderPath, relocatedFinder);
 
+    assertTreeSymlinksContained(runtimeRoot);
+    setTreeReadOnly(runtimeRoot);
+    if (!treeIsReadOnly(runtimeRoot)) throw new Error("Hermes snapshot is writable");
     const aggregateCore = {
       source: canonicalTreeDigest(sourceRoot),
       python: canonicalTreeDigest(pythonRoot),
       venv: canonicalTreeDigest(venvRoot),
       tokenizer: createHash("sha256").update(readFileSync(tokenizerPath)).digest("hex"),
-      transforms: "hermes-relocation-v1",
+      transforms: "hermes-relocation-read-only-v1",
     };
     const aggregateDigest = createHash("sha256").update(canonicalJson(aggregateCore)).digest("hex");
-    assertTreeSymlinksContained(runtimeRoot);
-    setTreeReadOnly(runtimeRoot);
-    if (!treeIsReadOnly(runtimeRoot)) throw new Error("Hermes snapshot is writable");
 
     const identityHome = resolve(ownerRoot, "identity-home");
     mkdirSync(identityHome, { recursive: true, mode: 0o700 });
@@ -923,7 +925,7 @@ export async function createHermesRuntimeSnapshot(options: {
           python: canonicalTreeDigest(pythonRoot),
           venv: canonicalTreeDigest(venvRoot),
           tokenizer: createHash("sha256").update(readFileSync(tokenizerPath)).digest("hex"),
-          transforms: "hermes-relocation-v1",
+          transforms: "hermes-relocation-read-only-v1",
         };
         return createHash("sha256").update(canonicalJson(currentCore)).digest("hex") === aggregateDigest;
       },

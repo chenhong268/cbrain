@@ -25,6 +25,10 @@ const ALLOWED_ENV = new Set([
   "CBRAIN_CANARY_ORIGINAL_HERMES",
   "CBRAIN_CANARY_CHECKPOINT_DIGEST",
   "CBRAIN_CANARY_CHECKPOINT_BLOB_COUNT",
+  "CBRAIN_CANARY_SOURCE_NODE_MODULES_DIGEST",
+  "CBRAIN_CANARY_SOURCE_NODE_MODULES_FILE_COUNT",
+  "CBRAIN_CANARY_EXECUTION_NODE_MODULES_DIGEST",
+  "CBRAIN_CANARY_EXECUTION_NODE_MODULES_FILE_COUNT",
   "CBRAIN_CANARY_FAULT",
   "CBRAIN_CANARY_LIVE_HOME",
   "CBRAIN_CANARY_PRE_LIVE_FINGERPRINT",
@@ -49,6 +53,18 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+function requiredDigest(name: string): string {
+  const value = requiredEnv(name);
+  if (!/^[a-f0-9]{64}$/.test(value)) fatal();
+  return value;
+}
+
+function requiredPositiveInteger(name: string): number {
+  const value = Number(requiredEnv(name));
+  if (!Number.isSafeInteger(value) || value < 1) fatal();
+  return value;
+}
+
 try {
   if (Object.keys(process.env).some((key) => !ALLOWED_ENV.has(key))) fatal();
   try {
@@ -64,6 +80,10 @@ try {
   const checkpointBlobCount = Number(requiredEnv("CBRAIN_CANARY_CHECKPOINT_BLOB_COUNT"));
   if (!/^[a-f0-9]{64}$/.test(checkpointDigest) || !Number.isSafeInteger(checkpointBlobCount) || checkpointBlobCount < 1)
     fatal();
+  const sourceNodeModulesDigest = requiredDigest("CBRAIN_CANARY_SOURCE_NODE_MODULES_DIGEST");
+  const sourceNodeModulesFileCount = requiredPositiveInteger("CBRAIN_CANARY_SOURCE_NODE_MODULES_FILE_COUNT");
+  const executionNodeModulesDigest = requiredDigest("CBRAIN_CANARY_EXECUTION_NODE_MODULES_DIGEST");
+  const executionNodeModulesFileCount = requiredPositiveInteger("CBRAIN_CANARY_EXECUTION_NODE_MODULES_FILE_COUNT");
 
   const sourceRoot = join(snapshotRoot, "source");
   const nodeModulesRoot = join(sourceRoot, "node_modules");
@@ -120,8 +140,8 @@ try {
     checkpoint_blob_count: checkpointBlobCount,
     bun_binary_digest: sha256(process.execPath),
     bun_version: Bun.version,
-    node_modules_tree_digest: nodeModules.digest,
-    node_modules_file_count: nodeModules.file_count,
+    node_modules_tree_digest: sourceNodeModulesDigest,
+    node_modules_file_count: sourceNodeModulesFileCount,
     package_manifest_digest: sha256(join(sourceRoot, "package.json")),
     lockfile_digest: sha256(join(sourceRoot, "bun.lock")),
     hermes_runtime_manifest_digest: sha256(manifestPath),
@@ -151,8 +171,10 @@ try {
   };
   const evidenceDigest = canonicalEvidenceDigest(expectedEvidenceManifest);
   const cbrainSnapshotVerified =
-    nodeModules.digest === expectedEvidenceManifest.node_modules_tree_digest &&
-    nodeModules.file_count === expectedEvidenceManifest.node_modules_file_count &&
+    sourceNodeModulesDigest === expectedEvidenceManifest.node_modules_tree_digest &&
+    sourceNodeModulesFileCount === expectedEvidenceManifest.node_modules_file_count &&
+    nodeModules.digest === executionNodeModulesDigest &&
+    nodeModules.file_count === executionNodeModulesFileCount &&
     sha256(process.execPath) === expectedEvidenceManifest.bun_binary_digest;
   const cleanupVerified = hermesSnapshot.removed && matrix.cleanup_verified;
   const report = evaluateCanaryReport({
