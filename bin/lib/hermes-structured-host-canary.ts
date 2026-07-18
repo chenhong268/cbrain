@@ -1177,7 +1177,7 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
 }
 
 function normalizedToolDefinitions(tools: readonly ChatToolDefinition[]): ChatToolDefinition[] {
-  return structuredClone(tools).sort((left, right) => left.function.name.localeCompare(right.function.name));
+  return [...structuredClone(tools)].sort((left, right) => left.function.name.localeCompare(right.function.name));
 }
 
 export function toolSchemaDigest(tools: readonly ChatToolDefinition[]): string {
