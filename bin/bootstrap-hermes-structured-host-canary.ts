@@ -340,7 +340,7 @@ async function main(): Promise<number> {
     run(["git", "checkout", "--quiet", checkpoint], snapshotSource);
     rmSync(join(snapshotSource, ".git"), { recursive: true, force: true });
     rmSync(join(snapshotSource, "docs"), { recursive: true, force: true });
-    run(["/bin/cp", "-cR", join(sourceRoot, "node_modules"), join(snapshotSource, "node_modules")]);
+  run(["/bin/cp", "-cRp", join(sourceRoot, "node_modules"), join(snapshotSource, "node_modules")]);
     const copiedBun = join(snapshotBin, "bun");
     copyFileSync(process.execPath, copiedBun);
     chmodSync(copiedBun, 0o755);

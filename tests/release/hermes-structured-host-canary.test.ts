@@ -396,6 +396,15 @@ describe("Hermes runtime isolation contract", () => {
       chmodSync(join(root, "pkg", "module.py"), 0o755);
       expect(canonicalTreeDigest(root).digest).not.toBe(beforeMode);
 
+      symlinkSync("module.py", join(root, "pkg", "module-link.py"));
+      const copyRoot = mkdtempSync(join(tmpdir(), "cbrain-runtime-tree-copy-test-"));
+      try {
+        expect(Bun.spawnSync({ cmd: ["/bin/cp", "-cRp", root, join(copyRoot, "snapshot")] }).exitCode).toBe(0);
+        expect(canonicalTreeDigest(join(copyRoot, "snapshot"))).toEqual(canonicalTreeDigest(root));
+      } finally {
+        rmSync(copyRoot, { recursive: true, force: true });
+      }
+
       const fifo = join(root, "pkg", "runtime-fifo");
       expect(Bun.spawnSync({ cmd: ["/usr/bin/mkfifo", fifo] }).exitCode).toBe(0);
       expect(() => canonicalTreeDigest(root)).toThrow("unsupported runtime tree entry");
