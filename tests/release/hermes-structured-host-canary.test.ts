@@ -709,6 +709,15 @@ exit 0
         stderr: "pipe",
       });
       await Bun.sleep(250);
+      const contender = Bun.spawnSync({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", bootstrap],
+        cwd: boot,
+        env: { ...baseEnv, CBRAIN_CANARY_FAULT: "" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(contender.exitCode).toBe(2);
+      expect(contender.stdout.toString()).toContain("CANARY_LOCK_HELD");
       holder.kill("SIGKILL");
       await holder.exited;
       await Bun.sleep(100);
