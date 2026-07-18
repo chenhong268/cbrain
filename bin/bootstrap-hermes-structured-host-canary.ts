@@ -186,9 +186,8 @@ function processGroupIsEmpty(pgid: number): boolean {
 }
 
 interface LockLease {
-  child: ReturnType<typeof Bun.spawn>;
+  pid: number;
   started: string;
-  reader: ReadableStreamDefaultReader<Uint8Array>;
 }
 
 async function acquireLock(): Promise<LockLease> {
@@ -229,33 +228,26 @@ async function acquireLock(): Promise<LockLease> {
     if (handshake === "LOCK_HELD") emitFatal("CANARY_LOCK_HELD");
     emitFatal("CANARY_LOCK_UNVERIFIABLE");
   }
-  return { child, started, reader };
+  reader.releaseLock();
+  child.unref();
+  return { pid: child.pid, started };
 }
 
 async function releaseLock(lease: LockLease): Promise<void> {
   try {
-    if (processStart(lease.child.pid) !== lease.started) emitFatal("CANARY_LOCK_OWNERSHIP_DRIFT");
-    try {
-      lease.child.kill("SIGTERM");
-    } catch {
-      // A SIGTERM/exit race is acceptable only when the exact owned PID is already gone.
-      if (processStart(lease.child.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
-    }
-    for (let attempt = 0; attempt < 40 && processStart(lease.child.pid) === lease.started; attempt += 1) {
+    if (processStart(lease.pid) !== lease.started) emitFatal("CANARY_LOCK_OWNERSHIP_DRIFT");
+    const term = Bun.spawnSync({ cmd: ["/bin/kill", "-TERM", String(lease.pid)], stdout: "pipe", stderr: "pipe" });
+    if (term.exitCode !== 0 && processStart(lease.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    for (let attempt = 0; attempt < 40 && processStart(lease.pid) === lease.started; attempt += 1) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     }
-    if (processStart(lease.child.pid) === lease.started) {
-      try {
-        lease.child.kill("SIGKILL");
-      } catch {
-        // The process-identity and kernel-lock probes below remain authoritative.
-      }
-      for (let attempt = 0; attempt < 40 && processStart(lease.child.pid) === lease.started; attempt += 1) {
+    if (processStart(lease.pid) === lease.started) {
+      Bun.spawnSync({ cmd: ["/bin/kill", "-KILL", String(lease.pid)], stdout: "pipe", stderr: "pipe" });
+      for (let attempt = 0; attempt < 40 && processStart(lease.pid) === lease.started; attempt += 1) {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
       }
     }
-    await lease.reader.cancel().catch(() => {});
-    if (processStart(lease.child.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    if (processStart(lease.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
     const probe = Bun.spawnSync({
       cmd: [
         "/usr/bin/python3",
