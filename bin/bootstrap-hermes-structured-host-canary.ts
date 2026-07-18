@@ -47,6 +47,8 @@ type BootstrapStage =
 let bootstrapStage: BootstrapStage = "ENV";
 type LockReleaseStage = "IDENTITY" | "TERM" | "TERM_WAIT" | "KILL" | "KILL_WAIT" | "PID_VERIFY" | "PROBE" | "DONE";
 let lockReleaseStage: LockReleaseStage = "IDENTITY";
+type WorkerStage = "PREPARE" | "SPAWN" | "IDENTITY" | "WAIT" | "STATUS" | "GROUP" | "OUTPUT" | "PARSE" | "DONE";
+let workerStage: WorkerStage = "PREPARE";
 
 function emitFatal(code: string): never {
   throw new BootstrapFatal(code);
@@ -450,6 +452,7 @@ async function main(): Promise<number> {
     );
 
     bootstrapStage = "WORKER";
+    workerStage = "PREPARE";
     const worker = join(snapshotSource, "bin", "check-hermes-structured-host-canary.ts");
     const workerExitStatus = join(bootRoot, "worker-exit-status");
     const workerOutput = join(bootRoot, "worker-output");
@@ -473,6 +476,7 @@ async function main(): Promise<number> {
       handlers.set(signal, handler);
       process.once(signal, handler);
     }
+    workerStage = "SPAWN";
     child = Bun.spawn({
       cmd: [copiedBun, "--no-env-file", "--config=/dev/null", `--cwd=${workerCwd}`, worker],
       cwd: workerCwd,
@@ -501,6 +505,7 @@ async function main(): Promise<number> {
       stderr: "ignore",
       detached: true,
     });
+    workerStage = "IDENTITY";
     childStarted = processStart(child.pid);
     if (!childStarted) emitFatal("CANARY_WORKER_IDENTITY_UNAVAILABLE");
     const interruptPromise = new Promise<never>((_, reject) => {
@@ -509,6 +514,7 @@ async function main(): Promise<number> {
     });
     let exitCode: number;
     try {
+      workerStage = "WAIT";
       const deadline = Date.now() + 180_000;
       while (processStart(child.pid) === childStarted) {
         if (Date.now() >= deadline) throw new Error("canary worker timeout");
@@ -517,6 +523,7 @@ async function main(): Promise<number> {
           interruptPromise,
         ]);
       }
+      workerStage = "STATUS";
       let exitStatus: string;
       try {
         exitStatus = readFileSync(workerExitStatus, "utf8").trim();
@@ -550,7 +557,9 @@ async function main(): Promise<number> {
     } finally {
       for (const [signal, handler] of handlers) process.off(signal, handler);
     }
+    workerStage = "GROUP";
     if (!processGroupIsEmpty(child.pid)) emitFatal("CANARY_WORKER_GROUP_REMAINED");
+    workerStage = "OUTPUT";
     let stdout: string;
     try {
       stdout = readFileSync(workerOutput, "utf8").trim();
@@ -560,6 +569,7 @@ async function main(): Promise<number> {
     if (stdout.length > 2_000_000 || /(?:\/Users\/|\/home\/|[A-Za-z]:\\|Bearer\s+|api[_-]?key\s*[:=])/i.test(stdout)) {
       emitFatal("CANARY_OUTPUT_REJECTED");
     }
+    workerStage = "PARSE";
     let parsed: Record<string, unknown>;
     try {
       parsed = JSON.parse(stdout) as Record<string, unknown>;
@@ -573,6 +583,7 @@ async function main(): Promise<number> {
     if (!validKeys || ![0, 1, 2].includes(exitCode)) emitFatal("CANARY_OUTPUT_INVALID");
     finalOutput = stdout;
     finalStatus = exitCode;
+    workerStage = "DONE";
   } catch (error) {
     pendingError = error;
     pendingErrorStage = bootstrapStage;
@@ -608,6 +619,8 @@ try {
       ? error.code
       : bootstrapStage === "LOCK_RELEASE"
         ? `CANARY_LOCK_RELEASE_${lockReleaseStage}_FAILED`
+        : bootstrapStage === "WORKER"
+          ? `CANARY_WORKER_${workerStage}_FAILED`
         : `CANARY_BOOTSTRAP_${bootstrapStage}_FATAL`;
   process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);
   process.exitCode = 2;
