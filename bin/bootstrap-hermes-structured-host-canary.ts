@@ -226,19 +226,35 @@ async function acquireLock(): Promise<LockLease> {
 }
 
 async function releaseLock(lease: LockLease): Promise<void> {
-  if (processStart(lease.child.pid) !== lease.started) emitFatal("CANARY_LOCK_OWNERSHIP_DRIFT");
-  lease.child.kill("SIGTERM");
-  const exitCode = await Promise.race([
-    lease.child.exited,
-    new Promise<number>((resolvePromise) => setTimeout(() => resolvePromise(-1), 2_000)),
-  ]);
-  if (exitCode === -1) {
-    if (processStart(lease.child.pid) === lease.started) lease.child.kill("SIGKILL");
-    await lease.child.exited.catch(() => {});
+  try {
+    if (processStart(lease.child.pid) !== lease.started) emitFatal("CANARY_LOCK_OWNERSHIP_DRIFT");
+    try {
+      lease.child.kill("SIGTERM");
+    } catch {
+      // A SIGTERM/exit race is acceptable only when the exact owned PID is already gone.
+      if (processStart(lease.child.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    }
+    const exitCode = await Promise.race([
+      lease.child.exited.catch(() => -2),
+      new Promise<number>((resolvePromise) => setTimeout(() => resolvePromise(-1), 2_000)),
+    ]);
+    if (exitCode === -1) {
+      if (processStart(lease.child.pid) === lease.started) {
+        try {
+          lease.child.kill("SIGKILL");
+        } catch {
+          // The final process-identity check below remains authoritative.
+        }
+      }
+      await lease.child.exited.catch(() => {});
+      emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    }
+    await lease.reader.cancel().catch(() => {});
+    if (processStart(lease.child.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+  } catch (error) {
+    if (error instanceof BootstrapFatal) throw error;
     emitFatal("CANARY_LOCK_RELEASE_FAILED");
   }
-  await lease.reader.cancel().catch(() => {});
-  if (processStart(lease.child.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
 }
 
 function setTreeReadOnly(path: string): void {
