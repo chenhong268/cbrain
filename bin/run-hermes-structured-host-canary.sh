@@ -67,8 +67,84 @@ RESULT_FILE=$BOOT_ROOT/result
 ERROR_FILE=$BOOT_ROOT/error
 /usr/bin/touch "$RESULT_FILE" "$ERROR_FILE"
 /bin/mkdir -m 700 "$BOOT_HOME" "$BOOT_CWD" "$BOOT_TMP"
+BOOT_IDENTITY=$(/usr/bin/stat -f '%d:%i' "$BOOT_ROOT")
+[ -n "$BOOT_IDENTITY" ] || exit 2
+
+WRAPPER_IDENTITY=$(/usr/bin/python3 -I -c '
+import ctypes, sys
+class B(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
+b = B(); lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+n = lib.proc_pidinfo(int(sys.argv[1]), 3, 0, ctypes.byref(b), ctypes.sizeof(b))
+if n != ctypes.sizeof(b): sys.exit(1)
+print(f"{b.pid}:{b.ppid}:{b.pgid}:{b.start_sec * 1000000 + b.start_usec}")
+' "$$")
+[ -n "$WRAPPER_IDENTITY" ] || exit 2
+
+# This guardian exists before Bun/bootstrap. It covers the small startup interval
+# in which the inner identity-aware guardian cannot yet have been installed.
+/usr/bin/python3 -I -c '
+import ctypes, os, shutil, stat, sys, time
+os.setsid()
+class B(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
+lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+wrapper_pid, _, _, wrapper_start = [int(v) for v in sys.argv[1].split(":")]
+root = sys.argv[2]; initial = os.lstat(root); identity = (initial.st_dev, initial.st_ino)
+child_marker = os.path.join(root, "outer-child-identity")
+def current():
+    b = B(); n = lib.proc_pidinfo(wrapper_pid, 3, 0, ctypes.byref(b), ctypes.sizeof(b))
+    return None if n != ctypes.sizeof(b) else (b.pid, b.start_sec * 1000000 + b.start_usec)
+while current() == (wrapper_pid, wrapper_start):
+    if not os.path.exists(root): sys.exit(0)
+    time.sleep(0.02)
+child_identity = None
+for _ in range(100):
+    try:
+        values = [int(v) for v in open(child_marker, "r", encoding="ascii").read().strip().split(":")]
+        if len(values) == 4 and values[0] == values[2]:
+            child_identity = values
+            break
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    time.sleep(0.02)
+if child_identity is not None:
+    child_pid, _, _, child_start = child_identity
+    def child_current():
+        b = B(); n = lib.proc_pidinfo(child_pid, 3, 0, ctypes.byref(b), ctypes.sizeof(b))
+        return None if n != ctypes.sizeof(b) else (b.pid, b.start_sec * 1000000 + b.start_usec)
+    if child_current() == (child_pid, child_start):
+        try: os.killpg(child_pid, 15)
+        except ProcessLookupError: pass
+        for _ in range(100):
+            if child_current() != (child_pid, child_start): break
+            time.sleep(0.02)
+    if child_current() == (child_pid, child_start):
+        try: os.killpg(child_pid, 9)
+        except ProcessLookupError: pass
+        for _ in range(100):
+            if child_current() != (child_pid, child_start): break
+            time.sleep(0.02)
+for _ in range(50):
+    if not os.path.exists(root): sys.exit(0)
+    time.sleep(0.02)
+try:
+    observed = os.lstat(root)
+    if stat.S_ISDIR(observed.st_mode) and (observed.st_dev, observed.st_ino) == identity:
+        def repair(action, path, _):
+            try: os.chmod(path, 0o700)
+            except OSError: pass
+            action(path)
+        shutil.rmtree(root, onerror=repair)
+except FileNotFoundError:
+    pass
+' "$WRAPPER_IDENTITY" "$BOOT_ROOT" </dev/null >/dev/null 2>/dev/null &
 
 cleanup() {
+  CURRENT_IDENTITY=$(/usr/bin/stat -f '%d:%i' "$BOOT_ROOT" 2>/dev/null || true)
+  if [ -n "$CURRENT_IDENTITY" ] && [ "$CURRENT_IDENTITY" != "$BOOT_IDENTITY" ]; then
+    return 1
+  fi
   /bin/chmod -R u+w -- "$BOOT_ROOT" 2>/dev/null || true
   /bin/rm -rf -- "$BOOT_ROOT" "$RESULT_FILE" "$ERROR_FILE" 2>/dev/null || true
   [ ! -e "$BOOT_ROOT" ] && [ ! -e "$RESULT_FILE" ] && [ ! -e "$ERROR_FILE" ]
@@ -113,7 +189,9 @@ set +e
   CBRAIN_CANARY_LIVE_HOME="$PARENT_HOME" \
   CBRAIN_CANARY_FAULT="$FAULT" \
   CBRAIN_CANARY_APPROVED_COMMIT="$APPROVED_COMMIT" \
-  /usr/bin/python3 -I -c 'import os, sys; os.setsid(); allowed = {"HOME", "TMPDIR", "PATH", "LANG", "LC_ALL", "CBRAIN_CANARY_BOOT_ROOT", "CBRAIN_CANARY_SOURCE_ROOT", "CBRAIN_CANARY_HERMES_EXEC", "CBRAIN_CANARY_PARENT_MANAGED_DIR", "CBRAIN_CANARY_LIVE_HOME", "CBRAIN_CANARY_FAULT", "CBRAIN_CANARY_APPROVED_COMMIT"}; env = {key: value for key, value in os.environ.items() if key in allowed}; os.execve(sys.argv[1], sys.argv[1:], env)' \
+  CBRAIN_CANARY_WRAPPER_IDENTITY="$WRAPPER_IDENTITY" \
+  /usr/bin/python3 -I -c 'import ctypes, os, sys; os.setsid(); allowed = {"HOME", "TMPDIR", "PATH", "LANG", "LC_ALL", "CBRAIN_CANARY_BOOT_ROOT", "CBRAIN_CANARY_SOURCE_ROOT", "CBRAIN_CANARY_HERMES_EXEC", "CBRAIN_CANARY_PARENT_MANAGED_DIR", "CBRAIN_CANARY_LIVE_HOME", "CBRAIN_CANARY_FAULT", "CBRAIN_CANARY_APPROVED_COMMIT", "CBRAIN_CANARY_WRAPPER_IDENTITY"}; env = {key: value for key, value in os.environ.items() if key in allowed}; fields = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]; B = type("B", (ctypes.Structure,), {"_fields_": fields}); b = B(); lib = ctypes.CDLL("/usr/lib/libproc.dylib"); n = lib.proc_pidinfo(os.getpid(), 3, 0, ctypes.byref(b), ctypes.sizeof(b)); n == ctypes.sizeof(b) or sys.exit(2); open(sys.argv[1], "x", encoding="ascii").write(f"{b.pid}:{b.ppid}:{b.pgid}:{b.start_sec * 1000000 + b.start_usec}\n"); os.execve(sys.argv[2], sys.argv[2:], env)' \
+    "$BOOT_ROOT/outer-child-identity" \
     "$BUN_EXEC" \
     --no-env-file \
     --config=/dev/null \
@@ -122,6 +200,7 @@ set +e
 CHILD_PID=$!
 wait "$CHILD_PID"
 STATUS=$?
+CHILD_PID=""
 set -e
 
 RESULT=$(/bin/cat "$RESULT_FILE" 2>/dev/null || true)

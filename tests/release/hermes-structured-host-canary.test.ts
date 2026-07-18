@@ -597,6 +597,54 @@ exit 0
     }
   });
 
+  test("outer guardian contains a wrapper death before the bootstrap can install its inner guardian", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-outer-guardian-startup-"));
+    const childPidPath = join(root, "early-child-pid");
+    const fakeBun = join(root, "fake-bun");
+    const fakeHermes = join(root, "fake-hermes");
+    const before = new Set(readdirSync("/tmp").filter((name) => name.startsWith("cbrain-hermes-structured-bootstrap.")));
+    try {
+      writeFileSync(fakeBun, `#!/bin/sh\nprintf '%s' "$$" > "${childPidPath}"\n/bin/sleep 30\n`);
+      writeFileSync(fakeHermes, "#!/bin/sh\nexit 0\n");
+      chmodSync(fakeBun, 0o755);
+      chmodSync(fakeHermes, 0o755);
+      const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
+      const process = Bun.spawn({
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          fakeBun,
+          "--hermes",
+          fakeHermes,
+          "--approved-commit",
+          "a".repeat(40),
+        ],
+        cwd: root,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      for (let attempt = 0; !existsSync(childPidPath) && attempt < 120; attempt += 1) await Bun.sleep(25);
+      const childPid = Number(readFileSync(childPidPath, "utf8").trim());
+      expect(Number.isSafeInteger(childPid)).toBe(true);
+      process.kill("SIGKILL");
+      await process.exited;
+      let residual = readdirSync("/tmp").filter(
+        (name) => name.startsWith("cbrain-hermes-structured-bootstrap.") && !before.has(name),
+      );
+      for (let attempt = 0; residual.length > 0 && attempt < 200; attempt += 1) {
+        await Bun.sleep(50);
+        residual = readdirSync("/tmp").filter(
+          (name) => name.startsWith("cbrain-hermes-structured-bootstrap.") && !before.has(name),
+        );
+      }
+      expect(residual).toEqual([]);
+      expect(() => globalThis.process.kill(childPid, 0)).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   test("requires an externally selected approved evidence commit before Bun starts", () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-approval-test-"));
     try {
@@ -624,7 +672,7 @@ exit 0
   test("rejects a clean self-consistent checkout that changed the approved manifest", () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-approval-drift-"));
     const source = join(root, "source");
-    const boot = join(root, "boot");
+    const boot = mkdtempSync("/tmp/cbrain-hermes-structured-bootstrap.");
     const runGit = (...args: string[]): string => {
       const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
       expect(result.exitCode, args.join(" ")).toBe(0);
@@ -632,7 +680,6 @@ exit 0
     };
     try {
       mkdirSync(join(source, "tests", "fixtures"), { recursive: true });
-      mkdirSync(boot);
       writeFileSync(join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"), "{}\n");
       writeFileSync(join(source, "package.json"), "{}\n");
       runGit("init", "-q");
@@ -673,6 +720,7 @@ exit 0
         '{"schema_version":1,"status":"fatal","code":"BOOTSTRAP_APPROVAL_DRIFT"}',
       );
     } finally {
+      rmSync(boot, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -680,7 +728,7 @@ exit 0
   test("kernel lock is released after an ungraceful bootstrap exit", async () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-lock-crash-"));
     const source = join(root, "source");
-    const boot = join(root, "boot");
+    const boot = mkdtempSync("/tmp/cbrain-hermes-structured-bootstrap.");
     const runGit = (...args: string[]): string => {
       const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
       expect(result.exitCode, args.join(" ")).toBe(0);
@@ -688,7 +736,6 @@ exit 0
     };
     try {
       mkdirSync(join(source, "tests", "fixtures"), { recursive: true });
-      mkdirSync(boot);
       writeFileSync(join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"), "{}\n");
       writeFileSync(join(source, "package.json"), "{}\n");
       runGit("init", "-q");
@@ -741,6 +788,7 @@ exit 0
       expect(retry.exitCode).toBe(2);
       expect(retry.stdout.toString()).not.toContain("CANARY_LOCK_HELD");
     } finally {
+      rmSync(boot, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -748,7 +796,7 @@ exit 0
   test("bootstrap group TERM cannot release the detached kernel lease before cleanup", async () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-lock-term-"));
     const source = join(root, "source");
-    const boot = join(root, "boot");
+    const boot = mkdtempSync("/tmp/cbrain-hermes-structured-bootstrap.");
     const runGit = (...args: string[]): string => {
       const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
       expect(result.exitCode, args.join(" ")).toBe(0);
@@ -756,7 +804,6 @@ exit 0
     };
     try {
       mkdirSync(join(source, "tests", "fixtures"), { recursive: true });
-      mkdirSync(boot);
       writeFileSync(join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"), "{}\n");
       writeFileSync(join(source, "package.json"), "{}\n");
       runGit("init", "-q");
@@ -808,6 +855,7 @@ exit 0
       });
       expect(retry.stdout.toString()).not.toContain("CANARY_LOCK_HELD");
     } finally {
+      rmSync(boot, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -1069,6 +1117,9 @@ exit 0
     expect(bootstrap.indexOf("process.on(signal, handler)")).toBeLessThan(
       bootstrap.indexOf("await acquireWrapperGuardian(wrapperStarted, bootRoot)"),
     );
+    expect(bootstrap).toContain("bootRootStat.dev");
+    expect(bootstrap).toContain("bootRootStat.ino");
+    expect(bootstrap).toContain("os.kill(parent_pid, signal.SIGKILL)");
     expect(worker.indexOf("assertHermesInstallRootHasNoEnv(originalSource)")).toBeLessThan(
       worker.indexOf("createHermesRuntimeSnapshot({"),
     );
@@ -1088,7 +1139,7 @@ exit 0
   test("wrapper SIGKILL is detected by the guardian and removes the owned outer root", async () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-wrapper-orphan-"));
     const source = join(root, "source");
-    const boot = join(root, "boot");
+    const boot = mkdtempSync("/tmp/cbrain-hermes-structured-bootstrap.");
     const childPidPath = join(root, "bootstrap-pid");
     const runGit = (...args: string[]): string => {
       const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
@@ -1097,7 +1148,6 @@ exit 0
     };
     try {
       mkdirSync(join(source, "tests", "fixtures"), { recursive: true });
-      mkdirSync(boot);
       writeFileSync(join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"), "{}\n");
       writeFileSync(join(source, "package.json"), "{}\n");
       runGit("init", "-q");
@@ -1107,7 +1157,7 @@ exit 0
       runGit("commit", "-qm", "approved evidence");
       const approved = runGit("rev-parse", "HEAD");
       const bootstrap = join(import.meta.dir, "../../bin/bootstrap-hermes-structured-host-canary.ts");
-      const command = `/usr/bin/env -i HOME=${boot} TMPDIR=${boot} PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 CBRAIN_CANARY_BOOT_ROOT=${boot} CBRAIN_CANARY_SOURCE_ROOT=${source} CBRAIN_CANARY_HERMES_EXEC=${root}/unused-hermes CBRAIN_CANARY_PARENT_MANAGED_DIR= CBRAIN_CANARY_LIVE_HOME=${root} CBRAIN_CANARY_FAULT=lock_term_hold CBRAIN_CANARY_APPROVED_COMMIT=${approved} ${process.execPath} --no-env-file --config=/dev/null ${bootstrap} >/dev/null 2>/dev/null & echo $! > ${childPidPath}; wait`;
+      const command = `/usr/bin/env -i HOME=${boot} TMPDIR=${boot} PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 CBRAIN_CANARY_BOOT_ROOT=${boot} CBRAIN_CANARY_SOURCE_ROOT=${source} CBRAIN_CANARY_HERMES_EXEC=${root}/unused-hermes CBRAIN_CANARY_PARENT_MANAGED_DIR= CBRAIN_CANARY_LIVE_HOME=${root} CBRAIN_CANARY_FAULT=lock_hold CBRAIN_CANARY_APPROVED_COMMIT=${approved} ${process.execPath} --no-env-file --config=/dev/null ${bootstrap} >/dev/null 2>/dev/null & echo $! > ${childPidPath}; wait`;
       const wrapper = Bun.spawn({ cmd: ["/bin/sh", "-c", command], stdout: "ignore", stderr: "ignore" });
       for (let attempt = 0; !existsSync(childPidPath) && attempt < 40; attempt += 1) await Bun.sleep(25);
       const bootstrapPid = Number(readFileSync(childPidPath, "utf8").trim());
@@ -1117,7 +1167,7 @@ exit 0
       expect(existsSync(guardianReady)).toBe(true);
       wrapper.kill("SIGKILL");
       await wrapper.exited;
-      for (let attempt = 0; existsSync(boot) && attempt < 120; attempt += 1) await Bun.sleep(50);
+      for (let attempt = 0; existsSync(boot) && attempt < 220; attempt += 1) await Bun.sleep(50);
       expect(existsSync(boot)).toBe(false);
       for (let attempt = 0; attempt < 120; attempt += 1) {
         try {
@@ -1128,19 +1178,41 @@ exit 0
         }
       }
       expect(() => process.kill(bootstrapPid, 0)).toThrow();
+      mkdirSync(boot);
+      const retry = Bun.spawnSync({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", bootstrap],
+        cwd: boot,
+        env: {
+          HOME: boot,
+          TMPDIR: boot,
+          PATH: "/usr/bin:/bin",
+          LANG: "C.UTF-8",
+          LC_ALL: "C.UTF-8",
+          CBRAIN_CANARY_BOOT_ROOT: boot,
+          CBRAIN_CANARY_SOURCE_ROOT: source,
+          CBRAIN_CANARY_HERMES_EXEC: join(root, "unused-hermes"),
+          CBRAIN_CANARY_PARENT_MANAGED_DIR: "",
+          CBRAIN_CANARY_LIVE_HOME: root,
+          CBRAIN_CANARY_FAULT: "",
+          CBRAIN_CANARY_APPROVED_COMMIT: approved,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(retry.stdout.toString()).not.toContain("CANARY_LOCK_HELD");
     } finally {
+      rmSync(boot, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 25_000);
 
   test("guardian survives bootstrap completion and cleans the outer root if the wrapper dies before cleanup", async () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-wrapper-post-worker-"));
     const source = join(root, "source");
-    const boot = join(root, "boot");
+    const boot = mkdtempSync("/tmp/cbrain-hermes-structured-bootstrap.");
     const bootstrapDone = join(root, "bootstrap-done");
     try {
       mkdirSync(source);
-      mkdirSync(boot);
       writeFileSync(join(source, ".env"), "SYNTHETIC=unchanged\n");
       const bootstrap = join(import.meta.dir, "../../bin/bootstrap-hermes-structured-host-canary.ts");
       const command = `/usr/bin/env -i HOME=${boot} TMPDIR=${boot} PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 CBRAIN_CANARY_BOOT_ROOT=${boot} CBRAIN_CANARY_SOURCE_ROOT=${source} CBRAIN_CANARY_HERMES_EXEC=${root}/unused-hermes CBRAIN_CANARY_PARENT_MANAGED_DIR= CBRAIN_CANARY_LIVE_HOME=${root} CBRAIN_CANARY_FAULT= CBRAIN_CANARY_APPROVED_COMMIT=${"a".repeat(40)} ${process.execPath} --no-env-file --config=/dev/null ${bootstrap} >/dev/null 2>/dev/null; touch ${bootstrapDone}; sleep 30`;
@@ -1153,6 +1225,7 @@ exit 0
       for (let attempt = 0; existsSync(boot) && attempt < 120; attempt += 1) await Bun.sleep(50);
       expect(existsSync(boot)).toBe(false);
     } finally {
+      rmSync(boot, { recursive: true, force: true });
       rmSync(root, { recursive: true, force: true });
     }
   }, 15_000);

@@ -27,6 +27,7 @@ const ALLOWED_ENV = new Set([
   "CBRAIN_CANARY_LIVE_HOME",
   "CBRAIN_CANARY_FAULT",
   "CBRAIN_CANARY_APPROVED_COMMIT",
+  "CBRAIN_CANARY_WRAPPER_IDENTITY",
 ]);
 const LOCK_PATH = "/tmp/cbrain-hermes-structured-canary-v2.lock";
 const EVIDENCE_RELATIVE = "tests/fixtures/hermes-structured-canary-evidence-manifest.json";
@@ -211,20 +212,33 @@ interface LockLease {
 async function acquireWrapperGuardian(wrapperIdentity: string, bootRoot: string): Promise<void> {
   const bootstrapIdentity = processStart(process.pid);
   if (!bootstrapIdentity) emitFatal("BOOTSTRAP_GUARDIAN_UNVERIFIABLE");
+  const bootRootStat = lstatSync(bootRoot, { bigint: true });
+  if (
+    !bootRootStat.isDirectory() ||
+    bootRootStat.isSymbolicLink() ||
+    bootRootStat.uid !== BigInt(process.getuid?.() ?? -1) ||
+    (bootRootStat.mode & 0o077n) !== 0n
+  )
+    emitFatal("BOOTSTRAP_PATH_INVALID");
+  const bootRootIdentity = `${bootRootStat.dev}:${bootRootStat.ino}`;
   const script = `
-import ctypes, os, shutil, signal, sys, time
+import ctypes, os, shutil, signal, stat, sys, time
 class B(ctypes.Structure):
     _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
 lib = ctypes.CDLL("/usr/lib/libproc.dylib")
 wrapper_pid, _, _, wrapper_start = [int(value) for value in sys.argv[1].split(":")]
 parent_pid, _, _, parent_start = [int(value) for value in sys.argv[2].split(":")]
 boot_root = sys.argv[3]
+boot_dev, boot_ino = [int(value) for value in sys.argv[4].split(":")]
 marker = os.path.join(boot_root, "wrapper-orphaned")
 def current(pid):
     b = B()
     n = lib.proc_pidinfo(pid, 3, 0, ctypes.byref(b), ctypes.sizeof(b))
     return None if n != ctypes.sizeof(b) else (b.pid, b.start_sec * 1000000 + b.start_usec)
 def force_remove(path):
+    root = os.lstat(path)
+    if not stat.S_ISDIR(root.st_mode) or (root.st_dev, root.st_ino) != (boot_dev, boot_ino):
+        return False
     def repair(action, failed_path, _):
         try:
             os.chmod(failed_path, 0o700)
@@ -232,16 +246,20 @@ def force_remove(path):
             pass
         action(failed_path)
     shutil.rmtree(path, ignore_errors=False, onerror=repair)
+    return True
 while True:
     if not os.path.exists(boot_root):
         sys.exit(0)
+    root = os.lstat(boot_root)
+    root_owned = stat.S_ISDIR(root.st_mode) and (root.st_dev, root.st_ino) == (boot_dev, boot_ino)
     wrapper = current(wrapper_pid)
     if wrapper is None or wrapper != (wrapper_pid, wrapper_start):
-        try:
-            fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.close(fd)
-        except (FileExistsError, FileNotFoundError):
-            pass
+        if root_owned:
+            try:
+                fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.close(fd)
+            except (FileExistsError, FileNotFoundError):
+                pass
         parent = current(parent_pid)
         if parent == (parent_pid, parent_start):
             os.kill(parent_pid, signal.SIGTERM)
@@ -249,7 +267,13 @@ while True:
                 if current(parent_pid) != (parent_pid, parent_start):
                     break
                 time.sleep(0.05)
-        if os.path.exists(boot_root):
+        if current(parent_pid) == (parent_pid, parent_start):
+            os.kill(parent_pid, signal.SIGKILL)
+            for _ in range(100):
+                if current(parent_pid) != (parent_pid, parent_start):
+                    break
+                time.sleep(0.05)
+        if root_owned and os.path.exists(boot_root):
             try:
                 force_remove(boot_root)
             except FileNotFoundError:
@@ -258,7 +282,16 @@ while True:
     time.sleep(0.05)
 `;
   const child = Bun.spawn({
-    cmd: ["/usr/bin/python3", "-I", "-c", script, wrapperIdentity, bootstrapIdentity, bootRoot],
+    cmd: [
+      "/usr/bin/python3",
+      "-I",
+      "-c",
+      script,
+      wrapperIdentity,
+      bootstrapIdentity,
+      bootRoot,
+      bootRootIdentity,
+    ],
     env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
     stdin: "ignore",
     stdout: "ignore",
@@ -402,9 +435,16 @@ async function main(): Promise<number> {
   if (process.env.CBRAIN_CANARY_FAULT === "bootstrap") emitFatal("INJECTED_BOOTSTRAP_FAULT");
 
   const bootRoot = required("CBRAIN_CANARY_BOOT_ROOT");
+  if (!/^\/tmp\/cbrain-hermes-structured-bootstrap\.[A-Za-z0-9]+$/.test(bootRoot)) {
+    emitFatal("BOOTSTRAP_PATH_INVALID");
+  }
   const wrapperPid = process.ppid;
   const wrapperStarted = processStart(wrapperPid);
   if (!wrapperStarted) emitFatal("BOOTSTRAP_WRAPPER_IDENTITY_UNAVAILABLE");
+  const expectedWrapperIdentity = process.env.CBRAIN_CANARY_WRAPPER_IDENTITY;
+  if (expectedWrapperIdentity !== undefined && expectedWrapperIdentity !== wrapperStarted) {
+    emitFatal("BOOTSTRAP_WRAPPER_IDENTITY_UNAVAILABLE");
+  }
   const bootstrapSignalHandlers = new Map<NodeJS.Signals, () => void>();
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     const handler = () => {
