@@ -255,6 +255,7 @@ export interface CreateHermesRuntimeManifestOptions {
   pythonBaseRoot: string;
   venvRoot: string;
   tokenizerPath: string;
+  gitEnvironment?: Record<string, string | undefined>;
 }
 
 export interface VerifyHermesRuntimeManifestOptions {
@@ -262,6 +263,7 @@ export interface VerifyHermesRuntimeManifestOptions {
   pythonBaseRoot: string;
   venvRoot: string;
   tokenizerPath: string;
+  gitEnvironment?: Record<string, string | undefined>;
 }
 
 export interface ChatToolDefinition {
@@ -2060,6 +2062,7 @@ export function canonicalSnapshotTreeDigest(rootPath: string): CanonicalTreeDige
 function inspectGitSource(
   sourceRepoRoot: string,
   sourceCommit: string,
+  gitEnvironment?: Record<string, string | undefined>,
 ): {
   source_tree_digest: string;
   source_blob_count: number;
@@ -2067,10 +2070,12 @@ function inspectGitSource(
   if (!/^[a-f0-9]{40}$/.test(sourceCommit)) throw new Error("invalid source commit");
   try {
     execFileSync("git", ["-C", sourceRepoRoot, "cat-file", "-e", `${sourceCommit}^{commit}`], {
+      env: gitEnvironment,
       stdio: "ignore",
     });
     const listing = execFileSync("git", ["-C", sourceRepoRoot, "ls-tree", "-r", "--full-tree", sourceCommit], {
       encoding: "buffer",
+      env: gitEnvironment,
       maxBuffer: 32 * 1024 * 1024,
     });
     const text = listing.toString("utf8");
@@ -2127,7 +2132,7 @@ export function createHermesRuntimeManifest(options: CreateHermesRuntimeManifest
   if (!/^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/.test(options.hermesVersion)) {
     throw new Error("invalid Hermes version");
   }
-  const source = inspectGitSource(options.sourceRepoRoot, options.sourceCommit);
+  const source = inspectGitSource(options.sourceRepoRoot, options.sourceCommit, options.gitEnvironment);
   const tokenizerBlobDigest = createHash("sha256").update(readFileSync(options.tokenizerPath)).digest("hex");
   if (tokenizerBlobDigest !== "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7") {
     throw new Error("invalid cl100k_base artifact");
@@ -2157,7 +2162,7 @@ export function verifyHermesRuntimeManifest(
   try {
     const { aggregate_digest: aggregateDigest, ...core } = manifest;
     if (createHash("sha256").update(canonicalJson(core)).digest("hex") !== aggregateDigest) return false;
-    const source = inspectGitSource(options.sourceRepoRoot, manifest.source_commit);
+    const source = inspectGitSource(options.sourceRepoRoot, manifest.source_commit, options.gitEnvironment);
     if (
       source.source_tree_digest !== manifest.source_tree_digest ||
       source.source_blob_count !== manifest.source_blob_count
