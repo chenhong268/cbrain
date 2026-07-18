@@ -521,39 +521,47 @@ async function main(): Promise<number> {
     });
     childStarted = processStart(child.pid);
     if (!childStarted) emitFatal("CANARY_WORKER_IDENTITY_UNAVAILABLE");
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const interruptPromise = new Promise<never>((_, reject) => {
       interrupt = reject;
       if (pendingInterrupt) reject(pendingInterrupt);
     });
     const stdoutPromise = readBoundedText(child.stdout as ReadableStream<Uint8Array>, 2_000_000);
     const stderrPromise = readBoundedText(child.stderr as ReadableStream<Uint8Array>, 1_000_000);
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("canary worker timeout")), 180_000);
-    });
+    const childExitSignal = child.exited.catch(() => -2);
     let exitCode: number;
     try {
-      exitCode = await Promise.race([child.exited, timeoutPromise, interruptPromise]);
+      const deadline = Date.now() + 180_000;
+      while (processStart(child.pid) === childStarted) {
+        if (Date.now() >= deadline) throw new Error("canary worker timeout");
+        await Promise.race([
+          new Promise((resolvePromise) => setTimeout(resolvePromise, 100)),
+          interruptPromise,
+        ]);
+      }
+      exitCode = child.exitCode ?? (await childExitSignal);
     } catch (error) {
       if (processStart(child.pid) === childStarted) {
         try {
           process.kill(-child.pid, "SIGTERM");
         } catch {
-          child.kill("SIGTERM");
+          Bun.spawnSync({ cmd: ["/bin/kill", "-TERM", String(child.pid)], stdout: "pipe", stderr: "pipe" });
         }
-        await Promise.race([child.exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000))]);
+        for (let attempt = 0; attempt < 40 && processStart(child.pid) === childStarted; attempt += 1) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        }
       }
-      if (child.exitCode === null && processStart(child.pid) === childStarted) {
+      if (processStart(child.pid) === childStarted) {
         try {
           process.kill(-child.pid, "SIGKILL");
         } catch {
-          child.kill("SIGKILL");
+          Bun.spawnSync({ cmd: ["/bin/kill", "-KILL", String(child.pid)], stdout: "pipe", stderr: "pipe" });
         }
-        await child.exited.catch(() => {});
+        for (let attempt = 0; attempt < 40 && processStart(child.pid) === childStarted; attempt += 1) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        }
       }
       throw error;
     } finally {
-      if (timer) clearTimeout(timer);
       for (const [signal, handler] of handlers) process.off(signal, handler);
     }
     const [stdoutRaw] = await Promise.all([stdoutPromise, stderrPromise]);
