@@ -36,6 +36,9 @@ class BootstrapFatal extends Error {
   }
 }
 
+type BootstrapStage = "ENV" | "LOCK" | "SNAPSHOT" | "WORKER" | "SNAPSHOT_CLEANUP" | "LOCK_RELEASE";
+let bootstrapStage: BootstrapStage = "ENV";
+
 function emitFatal(code: string): never {
   throw new BootstrapFatal(code);
 }
@@ -303,6 +306,7 @@ async function main(): Promise<number> {
     }
   }
 
+  bootstrapStage = "LOCK";
   const lockLease = await acquireLock();
   if (process.env.CBRAIN_CANARY_FAULT === "lock_hold") await new Promise<never>(() => {});
   const snapshotRoot = join(bootRoot, "cbrain-snapshot");
@@ -313,6 +317,7 @@ async function main(): Promise<number> {
   let finalOutput = "";
   let finalStatus = 2;
   try {
+    bootstrapStage = "SNAPSHOT";
     if (run(["git", "status", "--porcelain", "--untracked-files=all"], sourceRoot).trim() !== "") {
       emitFatal("BOOTSTRAP_SOURCE_DIRTY");
     }
@@ -423,6 +428,7 @@ async function main(): Promise<number> {
       realpathSync(required("CBRAIN_CANARY_LIVE_HOME")),
     );
 
+    bootstrapStage = "WORKER";
     const worker = join(snapshotSource, "bin", "check-hermes-structured-host-canary.ts");
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let childStarted: string | null = null;
@@ -530,11 +536,13 @@ async function main(): Promise<number> {
     finalStatus = exitCode;
   } finally {
     try {
+      bootstrapStage = "SNAPSHOT_CLEANUP";
       if (snapshotCreated) {
         setTreeWritable(snapshotRoot);
         rmSync(snapshotRoot, { recursive: true, force: true });
       }
     } finally {
+      bootstrapStage = "LOCK_RELEASE";
       await releaseLock(lockLease);
     }
   }
@@ -545,7 +553,7 @@ async function main(): Promise<number> {
 try {
   process.exitCode = await main();
 } catch (error) {
-  const code = error instanceof BootstrapFatal ? error.code : "CANARY_BOOTSTRAP_FATAL";
+  const code = error instanceof BootstrapFatal ? error.code : `CANARY_BOOTSTRAP_${bootstrapStage}_FATAL`;
   process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);
   process.exitCode = 2;
 }
