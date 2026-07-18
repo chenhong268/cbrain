@@ -241,23 +241,34 @@ async function releaseLock(lease: LockLease): Promise<void> {
       // A SIGTERM/exit race is acceptable only when the exact owned PID is already gone.
       if (processStart(lease.child.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
     }
-    const exitCode = await Promise.race([
-      lease.child.exited.catch(() => -2),
-      new Promise<number>((resolvePromise) => setTimeout(() => resolvePromise(-1), 2_000)),
-    ]);
-    if (exitCode === -1) {
-      if (processStart(lease.child.pid) === lease.started) {
-        try {
-          lease.child.kill("SIGKILL");
-        } catch {
-          // The final process-identity check below remains authoritative.
-        }
+    for (let attempt = 0; attempt < 40 && processStart(lease.child.pid) === lease.started; attempt += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    }
+    if (processStart(lease.child.pid) === lease.started) {
+      try {
+        lease.child.kill("SIGKILL");
+      } catch {
+        // The process-identity and kernel-lock probes below remain authoritative.
       }
-      await lease.child.exited.catch(() => {});
-      emitFatal("CANARY_LOCK_RELEASE_FAILED");
+      for (let attempt = 0; attempt < 40 && processStart(lease.child.pid) === lease.started; attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      }
     }
     await lease.reader.cancel().catch(() => {});
     if (processStart(lease.child.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    const probe = Bun.spawnSync({
+      cmd: [
+        "/usr/bin/python3",
+        "-I",
+        "-c",
+        "import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600); fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+        LOCK_PATH,
+      ],
+      env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (probe.exitCode !== 0) emitFatal("CANARY_LOCK_RELEASE_FAILED");
   } catch (error) {
     if (error instanceof BootstrapFatal) throw error;
     emitFatal("CANARY_LOCK_RELEASE_FAILED");
