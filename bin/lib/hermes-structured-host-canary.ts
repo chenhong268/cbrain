@@ -1366,6 +1366,38 @@ if n != ctypes.sizeof(b):
 print(json.dumps({"pid": b.pid, "ppid": b.ppid, "pgid": b.pgid, "start_us": b.start_sec * 1000000 + b.start_usec}, separators=(",", ":")))
 `;
 
+const DARWIN_REGISTERED_LAUNCH_SCRIPT = `
+import ctypes, json, os, sys, time
+class B(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
+registry = os.environ.pop("CBRAIN_CANARY_PROCESS_REGISTRY")
+token = os.environ.pop("CBRAIN_CANARY_REGISTRATION_TOKEN")
+pid = os.getpid()
+b = B()
+lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+n = lib.proc_pidinfo(pid, 3, 0, ctypes.byref(b), ctypes.sizeof(b))
+if n != ctypes.sizeof(b):
+    sys.exit(72)
+start_us = b.start_sec * 1000000 + b.start_usec
+request = os.path.join(registry, f"request.{pid}.{start_us}")
+temporary = os.path.join(registry, f".request.{pid}.{start_us}.tmp")
+payload = json.dumps({"token": token, "pid": pid, "start_us": start_us}, separators=(",", ":"))
+fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+os.write(fd, payload.encode("ascii"))
+os.fsync(fd)
+os.close(fd)
+os.rename(temporary, request)
+ack = os.path.join(registry, f"ack.{pid}.{start_us}")
+for _ in range(500):
+    if os.path.exists(ack):
+        break
+    time.sleep(0.01)
+else:
+    sys.exit(73)
+os.setpgid(0, 0)
+os.execve(sys.argv[1], sys.argv[1:], os.environ)
+`;
+
 const DARWIN_NO_FORK_SANDBOX_PROFILE = "(version 1)(allow default)(deny process-fork)";
 let noForkSandboxVerified = false;
 
@@ -1426,15 +1458,6 @@ function sameOwnedProcess(identity: OwnedProcessIdentity | null): boolean {
   return current !== null && current.start_us === identity.start_us;
 }
 
-function processGroupIsEmpty(pgid: number): boolean {
-  try {
-    process.kill(-pgid, 0);
-    return false;
-  } catch (error) {
-    return error instanceof Error && (error as NodeJS.ErrnoException).code === "ESRCH";
-  }
-}
-
 export async function runRealHermesProjectionCase(options: {
   hermesExecutable: string;
   runtime: AnonymousFixtureRuntime;
@@ -1491,36 +1514,60 @@ export async function runRealHermesProjectionCase(options: {
     path: "/usr/bin:/bin:/usr/sbin:/sbin",
   });
   const prompt = `controlled ${nonce}`;
+  const registrationRegistry = process.env.CBRAIN_CANARY_PROCESS_REGISTRY;
+  const registrationToken = process.env.CBRAIN_CANARY_REGISTRATION_TOKEN;
+  if ((registrationRegistry === undefined) !== (registrationToken === undefined)) {
+    throw new Error("Hermes process registration environment incomplete");
+  }
+  const sandboxCommand = [
+    "/usr/bin/sandbox-exec",
+    "-p",
+    DARWIN_NO_FORK_SANDBOX_PROFILE,
+    options.hermesExecutable,
+    ...buildHermesChatArgs(prompt),
+  ];
+  const childCommand =
+    registrationRegistry && registrationToken
+      ? ["/usr/bin/python3", "-I", "-c", DARWIN_REGISTERED_LAUNCH_SCRIPT, ...sandboxCommand]
+      : sandboxCommand;
+  const childEnv =
+    registrationRegistry && registrationToken
+      ? {
+          ...env,
+          CBRAIN_CANARY_PROCESS_REGISTRY: registrationRegistry,
+          CBRAIN_CANARY_REGISTRATION_TOKEN: registrationToken,
+        }
+      : env;
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let sessionsClosed = false;
   let result: RealHermesProjectionCaseResult | undefined;
   let childIdentity: OwnedProcessIdentity | null = null;
-  const ownedProcesses = new Map<number, OwnedProcessIdentity>();
   let interrupted: ((error: Error) => void) | undefined;
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
   try {
     verifyDarwinNoForkSandbox();
     child = Bun.spawn({
-      cmd: [
-        "/usr/bin/sandbox-exec",
-        "-p",
-        DARWIN_NO_FORK_SANDBOX_PROFILE,
-        options.hermesExecutable,
-        ...buildHermesChatArgs(prompt),
-      ],
+      cmd: childCommand,
       cwd,
-      env,
-      detached: true,
+      env: childEnv,
+      detached: false,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
     childIdentity = readOwnedProcessIdentity(child.pid);
-    if (!childIdentity || childIdentity.ppid !== process.pid || childIdentity.pgid !== child.pid) {
+    const ownerIdentity = readOwnedProcessIdentity(process.pid);
+    if (
+      !childIdentity ||
+      !ownerIdentity ||
+      childIdentity.ppid !== process.pid ||
+      (registrationRegistry && registrationToken
+        ? childIdentity.pgid !== ownerIdentity.pgid && childIdentity.pgid !== child.pid
+        : childIdentity.pgid !== ownerIdentity.pgid)
+    ) {
       throw new Error("Hermes child birth identity unavailable");
     }
-    ownedProcesses.set(child.pid, childIdentity);
     const signalPromise = new Promise<never>((_, reject) => {
       interrupted = reject;
     });
@@ -1539,19 +1586,11 @@ export async function runRealHermesProjectionCase(options: {
       exitCode = await Promise.race([child.exited, timeout, signalPromise]);
     } catch (error) {
       if (sameOwnedProcess(childIdentity)) {
-        try {
-          process.kill(-child.pid, "SIGTERM");
-        } catch {
-          child.kill("SIGTERM");
-        }
+        child.kill("SIGTERM");
       }
       await Promise.race([child.exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000))]);
       if (child.exitCode === null && sameOwnedProcess(childIdentity)) {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          child.kill("SIGKILL");
-        }
+        child.kill("SIGKILL");
       }
       throw error;
     }
@@ -1586,42 +1625,14 @@ export async function runRealHermesProjectionCase(options: {
     for (const [signal, handler] of signalHandlers) process.off(signal, handler);
     if (timer) clearTimeout(timer);
     if (child && child.exitCode === null && sameOwnedProcess(childIdentity)) {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
+      child.kill("SIGKILL");
       await child.exited.catch(() => {});
     }
-    let processGroupClean = true;
-    if (child) {
-      processGroupClean = processGroupIsEmpty(child.pid);
-      const ownedGroupMemberAlive = [...ownedProcesses.values()].some(
-        (identity) => identity.pgid === child?.pid && sameOwnedProcess(identity),
-      );
-      if (!processGroupClean && ownedGroupMemberAlive) {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          /* identity-checked best effort */
-        }
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-        processGroupClean = processGroupIsEmpty(child.pid);
-      }
-    }
-    for (const identity of ownedProcesses.values()) {
-      if (!sameOwnedProcess(identity)) continue;
-      try {
-        process.kill(identity.pid, "SIGKILL");
-      } catch {
-        /* high-resolution identity checked immediately before the signal */
-      }
-    }
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      if (![...ownedProcesses.values()].some(sameOwnedProcess)) break;
+      if (!sameOwnedProcess(childIdentity)) break;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     }
-    const descendantsClean = ![...ownedProcesses.values()].some(sameOwnedProcess);
+    const descendantsClean = !sameOwnedProcess(childIdentity);
     if (!sessionsClosed) await proxy.closeSessions().catch(() => false);
     proxy.stop();
     stub.stop();
@@ -1632,7 +1643,7 @@ export async function runRealHermesProjectionCase(options: {
         lstatSync(root);
       } catch (error) {
         result.case_cleanup_verified =
-          processGroupClean && descendantsClean && error instanceof Error && error.message.includes("ENOENT");
+          descendantsClean && error instanceof Error && error.message.includes("ENOENT");
       }
     }
   }

@@ -4,7 +4,7 @@
 
 **Goal:** Run a real, isolated Hermes host canary against temporary legacy and structured CBrain runtimes, then publish a privacy-safe decision record for Issue #338.
 
-**Architecture:** A repository-owned Bun harness executes from a pre-frozen, read-only CBrain/Bun/node_modules snapshot and creates a frozen anonymous SQLite fixture plus empty LanceDB. Each tool/branch pair clones that fixture into fresh legacy and structured CBrain contexts, exposed through case-exclusive random loopback MCP servers and observing proxies. Every case launches a separately verified, read-only Hermes/Python runtime snapshot through the real `chat -q -Q --cli` path in a new process group with an empty temporary `HOME`, `HERMES_HOME`, working directory, and strict environment allowlist. A bearer-authenticated local Chat Completions SSE stub drives one advertised, prefixed MCP tool call; it verifies the matching tool result that Hermes sends back to the model and returns a digest-bound final marker. The harness holds exact evidence only in memory, emits a closed aggregate report, proves live services are unchanged, explicitly closes observed MCP sessions, and removes only resources owned by the current run.
+**Architecture:** A repository-owned Python supervisor starts before any temporary root exists, binds its expected shell parent's microsecond birth identity, acquires the outer kernel lock, creates one device/inode-bound private root, and launches the Bun bootstrap as leader of an isolated process group. Bootstrap, lock helper, and worker remain in that group. Each Hermes case begins in the bootstrap group through a registered launcher; the launcher must complete a token-bound supervisor acknowledgement before becoming its own process-group leader and executing the no-fork-sandboxed host. The supervisor therefore owns both the bootstrap group and every exact PID/start-registered Hermes process even if the host calls `setsid`/`setpgid`. A pre-frozen, read-only CBrain/Bun/node_modules snapshot creates a frozen anonymous SQLite fixture plus empty LanceDB; each tool/branch pair clones it into fresh legacy and structured CBrain contexts exposed through case-exclusive random loopback MCP servers and observing proxies. Every case launches a separately verified, read-only Hermes/Python runtime snapshot through the real `chat -q -Q --cli` path with an empty temporary `HOME`, `HERMES_HOME`, working directory, and strict environment allowlist. A bearer-authenticated local Chat Completions SSE stub drives one advertised, prefixed MCP tool call; it verifies the matching tool result that Hermes sends back to the model and returns a digest-bound final marker. The harness holds exact evidence only in memory, recursively validates the closed public schema, emits only after cleanup attempts and lock release, proves live services are unchanged, explicitly closes observed MCP sessions, and removes only resources owned by the current run.
 
 **Tech Stack:** Bun/TypeScript, CBrain MCP-over-HTTP, SQLite, LanceDB, Hermes Agent v0.18.0 host, OpenAI Chat Completions SSE, and the installed Hermes Python `tiktoken` implementation using `cl100k_base`.
 
@@ -85,7 +85,7 @@ The 128-token absolute ceiling bounds material per-call context growth; the 25% 
 - The public report is a closed aggregate schema. It contains no arbitrary error/stdout/stderr strings, absolute paths, credentials, raw messages, private content, exact PID, service label, session ID, slug, score, routing value, or latency value.
 - Exact runtime paths, process identities, config metadata, tool messages, and session identifiers exist only in memory and are discarded after evaluation.
 - Cleanup may signal/delete only resources whose PID/start identity or directory device/inode ownership was recorded by this run. It may never signal or delete a baseline, a replaced path, or another run's resource.
-- Machine failure cannot run synchronous cleanup. Wrapper SIGKILL is covered by a pre-bootstrap outer guardian plus an inner identity-aware guardian; both verify process and directory birth identity before TERM/KILL/removal. A parent-bound kernel advisory lock releases when its helper exits or is reparented. The report must not claim an impossible machine-failure guarantee.
+- Machine failure cannot run synchronous cleanup. Wrapper SIGKILL is covered by the already-running Python supervisor, which verifies parent/child microsecond birth identities, converges the bootstrap group plus every acknowledged Hermes birth through TERM/KILL, removes only the original device/inode-bound root, and releases its outer advisory lock last. The report must not claim an impossible machine-failure guarantee.
 
 ---
 
@@ -116,6 +116,11 @@ interface CanaryCaseResult {
   advertised_tool_verified: boolean;
   advertised_schema_verified: boolean;
   cbrain_invocation_count: number;
+  cbrain_call_verified: boolean;
+  mcp_session_verified: boolean;
+  session_cleanup_verified: boolean;
+  case_cleanup_verified: boolean;
+  semantic_config_verified: boolean;
   host_projection_verified: boolean;
   round_trip_verified: boolean;
   result_title_present: boolean;
@@ -126,6 +131,10 @@ interface CanaryCaseResult {
   default_audit_present: boolean;
   expected_audit_contract: AuditContract;
   audit_contract_verified: boolean;
+  audit_redaction_exercised: boolean;
+  sensitive_input_sent: boolean;
+  direct_error_sensitive_echo_observed: boolean;
+  error_redaction_exercised: boolean;
   audit_sensitive_exposed: boolean;
   surface_internal_exposed: boolean;
   expected_projection_kind: ProjectionKind;
@@ -147,7 +156,7 @@ interface SizePairEvidence {
   tool: ToolName;
   branch: DefaultBranch;
   ab: { order: "legacy_then_structured"; legacy_tokens: number; structured_tokens: number; legacy_code_units: number; structured_code_units: number };
-  ba: { order: "structured_then_legacy"; legacy_tokens: number; structured_tokens: number; legacy_code_units: number; structured_code_units: number };
+  ba: { order: "structured_then_legacy"; legacy_tokens: number; structured_tokens: number; legacy_code_units: number; structured_code_units: number; legacy_contract_verified: boolean; structured_contract_verified: boolean };
   worst_structured_tokens: number;
   best_legacy_tokens: number;
   growth_tokens: number;
@@ -170,6 +179,7 @@ interface PublicEvidenceManifest {
   tokenizer_blob_digest: string;
   fixture_schema_digest: string;
   semantic_config_template_digest: string;
+  tool_schema_digest: string;
 }
 ```
 
@@ -409,7 +419,7 @@ Cover:
 
 - an atomic single-run lock acquired before ports/DBs; a live owner causes fatal without touching it;
 - a parent-bound kernel advisory lock that rejects contenders while the owner lives and releases automatically after owner death;
-- every Hermes child uses `detached:true`, becomes its own PGID leader, and records PID/PGID/PPID/start identity;
+- the bootstrap starts as the supervisor-owned session/PGID leader; each Hermes launcher registers and receives an acknowledgement before changing PGID, then keeps the same PID/start identity through `exec` so the supervisor can terminate it directly even after it leaves the bootstrap group;
 - timeout and SIGINT/SIGTERM/SIGHUP use one idempotent cleanup promise, TERM, bounded wait, identity recheck, then KILL;
 - the macOS `sandbox-exec` no-fork policy is behaviorally self-verified before Hermes starts, so a fast fork/double-fork cannot escape containment; if the policy is unavailable the canary fails closed;
 - stdout/stderr and cleanup waits are bounded;
@@ -429,7 +439,7 @@ The live inventory uses stable double-read snapshots and explicit platform adapt
 
 Keep exact service metadata in memory. Public output includes only aggregate count and equality booleans for process identity, start identity, config metadata, and inventory. Never scan or hash vault/database content.
 
-The persistent lock inode is mode `0600`; ownership is the live kernel `flock` lease held by a parent-bound helper, not mutable owner metadata. The POSIX wrapper records its own and the isolated child group's microsecond birth identities. A pre-bootstrap guardian covers wrapper death before Bun loads; the inner guardian escalates TERM to KILL when needed. Both bind recursive cleanup to the original `0700` root's device/inode. A killed bootstrap causes the helper to exit and the kernel to release the lease without stale-lock deletion.
+The persistent lock inodes are mode `0600`; ownership is a live kernel `flock`, not mutable owner metadata. The supervisor holds an outer lease from before root creation until every registered process/root cleanup attempt completes, so the bootstrap helper's earlier exit cannot admit a competing canary. The POSIX wrapper starts that supervisor before any root exists. The supervisor installs signal handlers, binds its expected shell parent and child-group leader microsecond birth identities, then creates and binds recursive cleanup to the original `0700` root's device/inode. Bootstrap/helper/worker stay in the bootstrap group; every Hermes process completes a private token-bound registration handshake before it may become a separate group leader. Local cleanup uses direct identity-checked PIDs, while wrapper death or non-cooperation converges the bootstrap group plus all registered Hermes births through TERM/KILL. The outer lease is released only after those attempts and root cleanup.
 
 - [ ] **Step 4: Verify GREEN and fault cleanup**
 
@@ -459,27 +469,28 @@ The fault command must exit nonzero, emit only a closed aggregate report, leave 
 
 With injected runtime, fingerprint, process, and server adapters, prove phase order:
 
-1. a minimal shell wrapper creates private empty bootstrap HOME/cwd/TMPDIR and applies `env -i` before the first Bun process;
-2. that first Bun uses `--no-env-file`, an explicit empty config, and a bootstrap file with only platform built-in imports;
-3. bootstrap acquires the ownership lock and constructs/verifies the read-only CBrain/Bun/node_modules snapshot before importing any CBrain/harness module;
-4. the snapshot worker uses filesystem-only checks to reject install/managed env sources and compare the frozen Hermes runtime manifest;
-5. build/verify the read-only owned Hermes snapshot, then run its sanitized identity/import-resolution probe;
-6. complete the stable live preflight;
-7. create only temporary CBrain resources and a frozen anonymous fixture snapshot;
-8. direct-check disposable clones;
-9. run isolated legacy/structured pairs for all 24 primary cases plus AB/BA default size repetitions;
-10. close observed sessions and servers;
-11. close Lance/SQLite handles and remove owned roots, including both runtime snapshots;
-12. recapture stable live fingerprint;
-13. recompute the pre-frozen evidence-generation ID and evaluate one closed report bound to that unchanged ID;
-14. remove owned snapshots, release the kernel lock, and remove the outer bootstrap root;
-15. emit the already-validated closed report only after cleanup succeeds.
+1. a minimal shell wrapper rejects invalid or managed inputs and starts a fixed Python supervisor without creating any temporary state;
+2. the supervisor installs parent-death/signal handling, creates private empty bootstrap HOME/cwd/TMPDIR, and launches the first Bun with a closed environment;
+3. that first Bun uses `--no-env-file`, an explicit empty config, and a bootstrap file with only platform built-in imports;
+4. bootstrap acquires the ownership lock and constructs/verifies the read-only CBrain/Bun/node_modules snapshot before importing any CBrain/harness module;
+5. the snapshot worker uses filesystem-only checks to reject install/managed env sources and compare the frozen Hermes runtime manifest;
+6. build/verify the read-only owned Hermes snapshot, then run its sanitized identity/import-resolution probe;
+7. complete the stable live preflight;
+8. create only temporary CBrain resources and a frozen anonymous fixture snapshot;
+9. direct-check disposable clones;
+10. run isolated legacy/structured pairs for all 24 primary cases plus AB/BA default size repetitions;
+11. close observed sessions and servers;
+12. close Lance/SQLite handles and remove owned roots, including both runtime snapshots;
+13. recapture stable live fingerprint;
+14. recompute the pre-frozen evidence-generation ID and evaluate one closed report bound to that unchanged ID;
+15. remove owned snapshots, release the kernel lock, and remove the supervisor-owned bootstrap root;
+16. emit the already-validated closed report only after cleanup succeeds.
 
 Inject faults at every boundary and assert the same cleanup path. Do not allow an overall `go` result with a partial matrix, blocked rollout readiness, or semantic-quality claim.
 
 - [ ] **Step 2: Implement the pre-Bun sanitized bootstrap and worker CLI**
 
-`bin/run-hermes-structured-host-canary.sh` is a small reviewed POSIX wrapper with no profile sourcing or dynamic code. It accepts absolute `--bun` and `--hermes` paths, sets `umask 077`, creates empty private bootstrap directories, installs signal cleanup, and immediately executes the first Bun through `env -i`. It may preserve only fixed locale/system PATH values, owned paths, the two validated executable arguments, and a separately named parent managed-scope path solely for existence rejection. Fault injection is a closed CLI enum, never inherited wholesale.
+`bin/run-hermes-structured-host-canary.sh` is a small reviewed POSIX wrapper with no profile sourcing or dynamic code. It accepts absolute `--bun` and `--hermes` paths, sets `umask 077`, rejects managed scope before launching child code, installs signal forwarding, and starts the fixed repository-owned Python supervisor. The supervisor creates all private bootstrap directories and invokes the first Bun with an explicit closed environment; it passes only fixed locale/system PATH values, owned paths, the two validated executable arguments, and a separately named parent managed-scope path solely for existence rejection. Fault injection is a closed CLI enum, never inherited wholesale.
 
 The first Bun invocation is direct—not `bun run`—and uses `--no-env-file`, `--config=/dev/null`, and `--cwd=<empty-owned-dir>` with an absolute bootstrap entry. The bootstrap module statically imports only Bun/Node platform built-ins. It constructs and verifies the CBrain execution snapshot before spawning the copied Bun worker; no CBrain source, external dependency, evaluator, config loader, or harness static import may occur earlier.
 
@@ -630,8 +641,45 @@ The third adversarial round replaces best-effort descendant polling and wrapper-
 - every Hermes case runs under a behaviorally verified macOS `deny process-fork` policy; an unavailable or ineffective kernel policy is fatal;
 - all 12 BA repetitions run the same full host/schema/call/session/projection/privacy/cleanup case contract as the 24 primary cases;
 - worker output and exit status commit atomically through a digest-bound marker, and dead workers fail immediately rather than waiting for the global deadline;
-- the outer guardian starts before Bun, while the inner guardian survives bootstrap completion; both use microsecond process identity, TERM/KILL convergence, and device/inode-bound root cleanup;
+- a single Python supervisor starts before any root/Bun process, retains parent-death responsibility until cleanup, and uses microsecond process identity, one bootstrap group plus acknowledged Hermes births, TERM/KILL convergence, and device/inode-bound root cleanup;
 - the Hermes install source rejects `.env` files before snapshot/import/version activity, with a behavioral byte-preservation test.
+
+#### Adversarial review correction r4 — 2026-07-18
+
+The fourth adversarial round removes the dual-guardian lifecycle and its detached-process gaps:
+
+- the shell wrapper never owns temporary state; a fixed Python supervisor installs signal handling before creating the private root;
+- bootstrap, lock helper, and worker share the supervisor-created process group; each no-fork Hermes case must register its exact PID/start with the supervisor before becoming a separate group leader, closing both detached-orphan and `setsid` escape paths;
+- wrapper death and interrupt tests track the exact device/inode-owned root and prove cleanup against non-cooperative children;
+- process-group probing treats macOS permission errors as non-empty, reaps the group leader during convergence, and contains cleanup failures without leaking a traceback or skipping root removal;
+- a supervisor-held outer `flock` remains active through process/root cleanup, preventing an early helper exit from admitting a concurrent canary;
+- complete results are recursively validated against the closed public schema; cleanup failure emits only a fixed fatal envelope after cleanup attempts and outer-lock release.
+
+#### Adversarial review correction r5 — 2026-07-18
+
+The fifth adversarial round closes the supervisor's remaining availability and serialization boundaries:
+
+- a 15-minute supervisor-wide monotonic deadline covers bootstrap work that occurs before the worker's own deadline; expiry converges registered births and the bootstrap group, removes the owned root, and releases the outer lock without external intervention;
+- parent liveness requires both the original microsecond birth identity and the current direct-parent relationship, so shell reparenting is detected before the wrapper is reaped;
+- stdout and stderr are continuously drained through bounded pipes rather than unbounded temporary files; exceeding either byte budget fails closed and enters the same cleanup path;
+- strict JSON parsing rejects duplicate keys at every object level and all non-finite extensions, while public integer and ratio fields are limited to finite JavaScript-safe values;
+- the plan's public interfaces and launcher lifecycle text are synchronized with the final closed schema and acknowledged-registration process model.
+
+#### Adversarial review correction r6 — 2026-07-18
+
+The sixth adversarial round closes cross-field evidence consistency rather than validating shape alone:
+
+- the supervisor independently recomputes every case truth-table contract, each AB/BA size formula and threshold, the canonical evidence digest, ordered reason codes, matrix counts, host compatibility, rollout state, and final verdict before forwarding a complete result;
+- truthful closed `no-go` evidence remains publishable when a case contract or size observation fails, while a contradictory `go`, partial count, false runtime claim, or mismatched formula is rejected;
+- `schema_version` requires the exact integer type, preventing Python's boolean/integer equality from accepting `true` as version `1`.
+
+#### Adversarial review correction r7 — 2026-07-18
+
+The seventh adversarial round closes a blocking filesystem-node edge in the private registration channel:
+
+- registration requests are opened with `O_NOFOLLOW | O_NONBLOCK`, then accepted only as same-owner, single-link regular files between 1 and 512 bytes;
+- exact-size bounded reads and the same strict JSON parser run only after the file-type check, so a FIFO, device, socket, oversized file, short read, duplicate key, or non-finite value cannot block or enter the registry;
+- malformed formulas are rejected at the public boundary; a truthful size `no-go` is publishable only for self-consistent over-budget measurements or explicitly failed AB/BA observation contracts.
 
 - [ ] **Step 5: Commit, publish, CI, and issue state**
 
