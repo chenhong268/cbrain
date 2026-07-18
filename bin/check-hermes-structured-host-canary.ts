@@ -31,8 +31,11 @@ const ALLOWED_ENV = new Set([
   "HERMES_MANAGED_DIR",
 ]);
 
-function fatal(): never {
-  process.stdout.write('{"schema_version":1,"status":"fatal","code":"CANARY_FATAL"}\n');
+type FatalStage = "ENV" | "HERMES_SNAPSHOT" | "MATRIX" | "LIVE_POST" | "EVIDENCE" | "SERIALIZATION";
+let fatalStage: FatalStage = "ENV";
+
+function fatal(code = `CANARY_${fatalStage}_FATAL`): never {
+  process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);
   process.exit(2);
 }
 
@@ -73,6 +76,7 @@ try {
   const originalSource = dirname(originalVenv);
   const originalPythonBase = dirname(dirname(realpathSync(join(originalVenv, "bin", "python"))));
 
+  fatalStage = "HERMES_SNAPSHOT";
   const hermesSnapshot = await createHermesRuntimeSnapshot({
     manifest,
     sourceRepoRoot: originalSource,
@@ -87,6 +91,7 @@ try {
   if (preLive.algorithm !== "sha256-live-service-state-v2" || !/^[a-f0-9]{64}$/.test(preLive.digest)) fatal();
   let runtimeSnapshotVerified = false;
   try {
+    fatalStage = "MATRIX";
     if (process.env.CBRAIN_CANARY_FAULT === "matrix") throw new Error("injected matrix fault");
     matrix = await runRealHermesCanaryMatrix({
       hermesExecutable: hermesSnapshot.hermesExecutable,
@@ -99,6 +104,7 @@ try {
   } finally {
     await hermesSnapshot.close();
   }
+  fatalStage = "LIVE_POST";
   const postLive = captureStableLiveServiceFingerprint(liveHome);
   const liveUnchanged =
     preLive.digest === postLive.digest &&
@@ -106,6 +112,7 @@ try {
     preLive.launchd_job_count === postLive.launchd_job_count &&
     preLive.artifact_count === postLive.artifact_count;
 
+  fatalStage = "EVIDENCE";
   const nodeModules = canonicalTreeDigest(nodeModulesRoot);
   const observedEvidenceManifest: PublicEvidenceManifest = {
     algorithm: "sha256-canonical-json-v1",
@@ -185,6 +192,7 @@ try {
       semantic_answer_quality_not_measured: true,
     },
   };
+  fatalStage = "SERIALIZATION";
   const serialized = JSON.stringify(output);
   if (/(?:\/Users\/|\/home\/|[A-Za-z]:\\|Bearer\s+|api[_-]?key\s*[:=])/i.test(serialized)) fatal();
   process.stdout.write(`${serialized}\n`);
