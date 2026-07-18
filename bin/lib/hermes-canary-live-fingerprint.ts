@@ -114,22 +114,30 @@ function readLiveProcesses(): LiveProcessIdentity[] {
   });
 }
 
-function readLiveLaunchdJobs(): LiveLaunchdIdentity[] {
+function readLiveLaunchdJobs(processes: readonly LiveProcessIdentity[]): {
+  identities: LiveLaunchdIdentity[];
+  labels: string[];
+} {
   const output = execFileSync("/bin/launchctl", ["list"], {
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024,
   });
-  return output.split("\n").flatMap((line) => {
+  const relevantPids = new Set(processes.filter((item) => isRelevantLiveProcess(item.command)).map((item) => item.pid));
+  const labels: string[] = [];
+  const identities = output.split("\n").flatMap((line) => {
     const match = line.match(/^(\d+|-)\s+(-?\d+|-)\s+(.+)$/);
-    if (!match || !/(?:cbrain|hermes)/i.test(match[3])) return [];
+    const pid = match?.[1] === "-" ? null : Number(match?.[1]);
+    if (!match || (!/(?:cbrain|hermes)/i.test(match[3]) && (pid === null || !relevantPids.has(pid)))) return [];
+    labels.push(match[3]);
     return [
       {
         label_digest: createHash("sha256").update(match[3]).digest("hex"),
-        pid: match[1] === "-" ? null : Number(match[1]),
+        pid,
         last_exit_status: match[2] === "-" ? null : Number(match[2]),
       },
     ];
   });
+  return { identities, labels };
 }
 
 function liveArtifact(path: string): LiveArtifactIdentity {
@@ -150,25 +158,51 @@ function liveArtifact(path: string): LiveArtifactIdentity {
   };
 }
 
-function readLiveArtifacts(processes: readonly LiveProcessIdentity[], home: string): LiveArtifactIdentity[] {
+export function extractLiveCommandFileCandidates(
+  command: string,
+  exists: (path: string) => boolean = existsSync,
+): string[] {
+  const candidates = new Set<string>();
+  for (const match of command.matchAll(/(?:^|\s)(?:"([^"]+)"|'([^']+)'|(\S+))/g)) {
+    const token = match[1] ?? match[2] ?? match[3] ?? "";
+    const optionPath = token.match(/^--(?:config|env-file|dotenv)=(\/.*)$/)?.[1];
+    const path = optionPath ?? token;
+    if (path.startsWith("/") && exists(path)) candidates.add(path);
+  }
+  return [...candidates];
+}
+
+function readLiveArtifacts(
+  processes: readonly LiveProcessIdentity[],
+  home: string,
+  launchdLabels: readonly string[],
+): LiveArtifactIdentity[] {
   if (!isAbsolute(home) || !statSync(home).isDirectory()) throw new Error("live home is invalid");
   const candidates = new Set<string>();
   for (const path of [resolve(home, ".hermes", "config.yaml"), resolve(home, ".hermes", ".env")]) {
     if (existsSync(path)) candidates.add(path);
   }
-  for (const directory of [resolve(home, ".hermes", "config"), resolve(home, "Library", "LaunchAgents")]) {
+  const launchdDirectories = [
+    resolve(home, "Library", "LaunchAgents"),
+    "/Library/LaunchAgents",
+    "/Library/LaunchDaemons",
+    "/System/Library/LaunchAgents",
+    "/System/Library/LaunchDaemons",
+  ];
+  for (const directory of [resolve(home, ".hermes", "config"), ...launchdDirectories]) {
     if (!existsSync(directory)) continue;
     for (const name of readdirSync(directory)) {
       if (name === "__pycache__" || name.endsWith(".pyc")) continue;
       const path = resolve(directory, name);
       const stat = lstatSync(path);
-      if (stat.isFile() && (directory.endsWith("LaunchAgents") ? /(?:cbrain|hermes)/i.test(name) : true))
-        candidates.add(path);
+      const launchdDirectory = launchdDirectories.includes(directory);
+      const matchesLaunchd =
+        /(?:cbrain|hermes)/i.test(name) || launchdLabels.some((label) => name === `${label}.plist`);
+      if (stat.isFile() && (!launchdDirectory || matchesLaunchd)) candidates.add(path);
     }
   }
   for (const process of processes.filter((item) => isRelevantLiveProcess(item.command))) {
-    for (const token of process.command.split(/\s+/)) {
-      if (!token.startsWith("/") || !existsSync(token)) continue;
+    for (const token of extractLiveCommandFileCandidates(process.command)) {
       const stat = lstatSync(token);
       if (stat.isFile() || stat.isSymbolicLink()) {
         candidates.add(token);
@@ -183,12 +217,60 @@ function readLiveArtifacts(processes: readonly LiveProcessIdentity[], home: stri
       }
     }
   }
+  for (const candidate of [...candidates]) {
+    const stat = lstatSync(candidate);
+    const basename = candidate.slice(candidate.lastIndexOf("/") + 1);
+    const configLike =
+      candidate.endsWith(".plist") ||
+      candidate.endsWith(".yaml") ||
+      candidate.endsWith(".yml") ||
+      candidate.endsWith(".json") ||
+      basename === ".env" ||
+      basename.startsWith(".env.");
+    if (!configLike || !stat.isFile() || stat.size > 1024 * 1024) continue;
+    const referencedPaths = new Set<string>();
+    if (candidate.endsWith(".plist")) {
+      const json = execFileSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", candidate], {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+      });
+      const plist = JSON.parse(json) as Record<string, unknown>;
+      const argumentsList = Array.isArray(plist.ProgramArguments)
+        ? plist.ProgramArguments.filter((value): value is string => typeof value === "string")
+        : [];
+      if (typeof plist.Program === "string") argumentsList.unshift(plist.Program);
+      for (const argument of argumentsList) {
+        const optionPath = argument.match(/^--(?:config|env-file|dotenv)=(\/.*)$/)?.[1];
+        const referenced = optionPath ?? argument;
+        if (referenced.startsWith("/")) referencedPaths.add(referenced);
+      }
+      const environment = plist.EnvironmentVariables;
+      if (environment && typeof environment === "object" && !Array.isArray(environment)) {
+        for (const [key, value] of Object.entries(environment)) {
+          if (/(?:CONFIG|ENV|MANAGED|HOME)$/i.test(key) && typeof value === "string" && value.startsWith("/")) {
+            referencedPaths.add(value);
+          }
+        }
+      }
+    }
+    for (const referenced of referencedPaths) {
+      if (existsSync(referenced)) {
+        const referencedStat = lstatSync(referenced);
+        if (referencedStat.isFile() || referencedStat.isSymbolicLink()) candidates.add(referenced);
+      }
+    }
+  }
   return [...candidates].sort().map(liveArtifact);
 }
 
 function readCompleteLiveFingerprint(liveHome: string): LiveServiceFingerprint {
   const processes = readLiveProcesses();
-  return buildLiveServiceFingerprint(processes, readLiveLaunchdJobs(), readLiveArtifacts(processes, liveHome));
+  const launchd = readLiveLaunchdJobs(processes);
+  return buildLiveServiceFingerprint(
+    processes,
+    launchd.identities,
+    readLiveArtifacts(processes, liveHome, launchd.labels),
+  );
 }
 
 export function captureStableLiveServiceFingerprint(liveHome: string): LiveServiceFingerprint {

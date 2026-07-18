@@ -30,7 +30,7 @@
     "gate:rc": "bun bin/check-v2-rc-gate.ts",
     "gate:perf": "bun bin/check-v2-rc-gate.ts --perf",
     "gate:hermes": "bun bin/check-v2-hermes-gate.ts",
-    "gate:hermes-structured": "sh bin/run-hermes-structured-host-canary.sh --bun \"$BUN_EXEC_PATH\" --hermes \"$HERMES_EXEC_PATH\"",
+    "gate:hermes-structured": "sh bin/run-hermes-structured-host-canary.sh --bun \"$BUN_EXEC_PATH\" --hermes \"$HERMES_EXEC_PATH\" --approved-commit \"$APPROVED_EVIDENCE_COMMIT\"",
     "gate:v2-preflight": "bun bin/check-v2-preflight.ts",
     "gate:consistency": "bun bin/check-consistency-gate.ts",
     "gate:health-debt": "bun bin/check-health-debt-gate.ts",

@@ -6,7 +6,9 @@ import {
   buildHermesChatArgs,
   buildIsolatedHermesConfig,
   canonicalEvidenceDigest,
+  canonicalSnapshotTreeDigest,
   canonicalTreeDigest,
+  assertTreeSymlinksContained,
   captureStableLiveServiceFingerprint,
   createHermesRuntimeSnapshot,
   evaluateCanaryReport,
@@ -29,6 +31,8 @@ const ALLOWED_ENV = new Set([
   "CBRAIN_CANARY_SOURCE_NODE_MODULES_FILE_COUNT",
   "CBRAIN_CANARY_EXECUTION_NODE_MODULES_DIGEST",
   "CBRAIN_CANARY_EXECUTION_NODE_MODULES_FILE_COUNT",
+  "CBRAIN_CANARY_EXECUTION_SOURCE_DIGEST",
+  "CBRAIN_CANARY_EXECUTION_SOURCE_FILE_COUNT",
   "CBRAIN_CANARY_FAULT",
   "CBRAIN_CANARY_LIVE_HOME",
   "CBRAIN_CANARY_PRE_LIVE_FINGERPRINT",
@@ -84,6 +88,8 @@ try {
   const sourceNodeModulesFileCount = requiredPositiveInteger("CBRAIN_CANARY_SOURCE_NODE_MODULES_FILE_COUNT");
   const executionNodeModulesDigest = requiredDigest("CBRAIN_CANARY_EXECUTION_NODE_MODULES_DIGEST");
   const executionNodeModulesFileCount = requiredPositiveInteger("CBRAIN_CANARY_EXECUTION_NODE_MODULES_FILE_COUNT");
+  const executionSourceDigest = requiredDigest("CBRAIN_CANARY_EXECUTION_SOURCE_DIGEST");
+  const executionSourceFileCount = requiredPositiveInteger("CBRAIN_CANARY_EXECUTION_SOURCE_FILE_COUNT");
 
   const sourceRoot = join(snapshotRoot, "source");
   const nodeModulesRoot = join(sourceRoot, "node_modules");
@@ -110,6 +116,23 @@ try {
   ) as ReturnType<typeof captureStableLiveServiceFingerprint>;
   if (preLive.algorithm !== "sha256-live-service-state-v2" || !/^[a-f0-9]{64}$/.test(preLive.digest)) fatal();
   let runtimeSnapshotVerified = false;
+  const verifyCbrainSnapshot = (): boolean => {
+    try {
+      assertTreeSymlinksContained(sourceRoot);
+      const rootMode = lstatSync(sourceRoot).mode & 0o777;
+      const bunMode = lstatSync(process.execPath).mode & 0o777;
+      const current = canonicalSnapshotTreeDigest(sourceRoot);
+      return (
+        (rootMode & 0o222) === 0 &&
+        (bunMode & 0o222) === 0 &&
+        current.digest === executionSourceDigest &&
+        current.file_count === executionSourceFileCount &&
+        sha256(process.execPath) === expectedEvidenceManifest.bun_binary_digest
+      );
+    } catch {
+      return false;
+    }
+  };
   try {
     fatalStage = "MATRIX";
     if (process.env.CBRAIN_CANARY_FAULT === "matrix") throw new Error("injected matrix fault");
@@ -118,9 +141,15 @@ try {
       pythonExecutable: hermesSnapshot.pythonExecutable,
       tokenizerPath,
       expectedToolSchemaDigest: expectedEvidenceManifest.tool_schema_digest,
+      verifyRuntimeSnapshot: () =>
+        hermesSnapshot.identity_verified && hermesSnapshot.read_only_verified && hermesSnapshot.verifyUnchanged(),
+      verifyCbrainSnapshot,
     });
     runtimeSnapshotVerified =
-      hermesSnapshot.identity_verified && hermesSnapshot.read_only_verified && hermesSnapshot.verifyUnchanged();
+      matrix.runtime_snapshot_checks_verified &&
+      hermesSnapshot.identity_verified &&
+      hermesSnapshot.read_only_verified &&
+      hermesSnapshot.verifyUnchanged();
   } finally {
     await hermesSnapshot.close();
   }
@@ -171,6 +200,8 @@ try {
   };
   const evidenceDigest = canonicalEvidenceDigest(expectedEvidenceManifest);
   const cbrainSnapshotVerified =
+    matrix.cbrain_snapshot_checks_verified &&
+    verifyCbrainSnapshot() &&
     sourceNodeModulesDigest === expectedEvidenceManifest.node_modules_tree_digest &&
     sourceNodeModulesFileCount === expectedEvidenceManifest.node_modules_file_count &&
     nodeModules.digest === executionNodeModulesDigest &&

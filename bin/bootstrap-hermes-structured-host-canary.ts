@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -25,8 +25,9 @@ const ALLOWED_ENV = new Set([
   "CBRAIN_CANARY_PARENT_MANAGED_DIR",
   "CBRAIN_CANARY_LIVE_HOME",
   "CBRAIN_CANARY_FAULT",
+  "CBRAIN_CANARY_APPROVED_COMMIT",
 ]);
-const LOCK_PATH = "/tmp/cbrain-hermes-structured-canary.lock";
+const LOCK_PATH = "/tmp/cbrain-hermes-structured-canary-v2.lock";
 const EVIDENCE_RELATIVE = "tests/fixtures/hermes-structured-canary-evidence-manifest.json";
 
 class BootstrapFatal extends Error {
@@ -70,7 +71,7 @@ function canonicalJson(value: unknown): string {
     .join(",")}}`;
 }
 
-function canonicalTreeDigest(rootPath: string): {
+function canonicalTreeDigest(rootPath: string, strict = false): {
   digest: string;
   file_count: number;
 } {
@@ -85,11 +86,13 @@ function canonicalTreeDigest(rootPath: string): {
   const visit = (directory: string): void => {
     for (const name of readdirSync(directory).sort()) {
       if (
+        !strict &&
+        (
         name === ".git" ||
         name === "__pycache__" ||
         name === ".DS_Store" ||
         name === ".env" ||
-        name.startsWith(".env.")
+        name.startsWith(".env."))
       )
         continue;
       const path = resolve(directory, name);
@@ -110,7 +113,7 @@ function canonicalTreeDigest(rootPath: string): {
           mode: stat.mode & 0o777,
           bytes: new TextEncoder().encode(readlinkSync(path)),
         });
-      } else if (stat.isFile() && !name.endsWith(".pyc")) {
+      } else if (stat.isFile() && (strict || !name.endsWith(".pyc"))) {
         fileCount += 1;
         entries.push({
           path: relative(root, path).split(sep).join("/"),
@@ -173,47 +176,63 @@ function processGroupIsEmpty(pgid: number): boolean {
 }
 
 interface LockLease {
-  dev: number;
-  ino: number;
-  token: string;
+  child: ReturnType<typeof Bun.spawn>;
+  started: string;
+  reader: ReadableStreamDefaultReader<Uint8Array>;
 }
 
-function acquireLock(): LockLease {
-  try {
-    mkdirSync(LOCK_PATH, { mode: 0o700 });
-  } catch {
-    emitFatal("CANARY_LOCK_HELD");
+async function acquireLock(): Promise<LockLease> {
+  const script = [
+    "import fcntl, os, sys",
+    "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)",
+    "try:",
+    "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+    "except BlockingIOError:",
+    "    print('LOCK_HELD', flush=True)",
+    "    sys.exit(73)",
+    "print('LOCK_ACQUIRED', flush=True)",
+    "sys.stdin.buffer.read()",
+  ].join("\n");
+  const child = Bun.spawn({
+    cmd: ["/usr/bin/python3", "-I", "-c", script, LOCK_PATH],
+    env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const started = processStart(child.pid);
+  if (!started) {
+    child.kill("SIGKILL");
+    emitFatal("CANARY_OWNER_UNVERIFIABLE");
   }
-  try {
-    const lock = lstatSync(LOCK_PATH);
-    if (!lock.isDirectory()) emitFatal("CANARY_LOCK_UNVERIFIABLE");
-    const started = processStart(process.pid);
-    if (!started) emitFatal("CANARY_OWNER_UNVERIFIABLE");
-    const token = randomUUID();
-    const ownerPath = join(LOCK_PATH, "owner.json");
-    writeFileSync(ownerPath, JSON.stringify({ pid: process.pid, started, token }));
-    chmodSync(ownerPath, 0o600);
-    return { dev: lock.dev, ino: lock.ino, token };
-  } catch (error) {
-    rmSync(LOCK_PATH, { recursive: true, force: true });
-    throw error;
+  const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
+  const first = await Promise.race([
+    reader.read(),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("lock handshake timeout")), 2_000)),
+  ]);
+  const handshake = first.value ? new TextDecoder().decode(first.value).trim() : "";
+  if (handshake !== "LOCK_ACQUIRED") {
+    await child.exited.catch(() => {});
+    if (handshake === "LOCK_HELD") emitFatal("CANARY_LOCK_HELD");
+    emitFatal("CANARY_LOCK_UNVERIFIABLE");
   }
+  return { child, started, reader };
 }
 
-function releaseLock(lease: LockLease): void {
-  const lock = lstatSync(LOCK_PATH);
-  const owner = JSON.parse(readFileSync(join(LOCK_PATH, "owner.json"), "utf8")) as Record<string, unknown>;
-  if (
-    lock.dev !== lease.dev ||
-    lock.ino !== lease.ino ||
-    owner.token !== lease.token ||
-    owner.pid !== process.pid ||
-    typeof owner.started !== "string" ||
-    processStart(process.pid) !== owner.started
-  ) {
-    emitFatal("CANARY_LOCK_OWNERSHIP_DRIFT");
+async function releaseLock(lease: LockLease): Promise<void> {
+  if (processStart(lease.child.pid) !== lease.started) emitFatal("CANARY_LOCK_OWNERSHIP_DRIFT");
+  lease.child.stdin.end();
+  const exitCode = await Promise.race([
+    lease.child.exited,
+    new Promise<number>((resolvePromise) => setTimeout(() => resolvePromise(-1), 2_000)),
+  ]);
+  if (exitCode === -1) {
+    if (processStart(lease.child.pid) === lease.started) lease.child.kill("SIGKILL");
+    await lease.child.exited.catch(() => {});
+    emitFatal("CANARY_LOCK_RELEASE_FAILED");
   }
-  rmSync(LOCK_PATH, { recursive: true, force: false });
+  await lease.reader.cancel().catch(() => {});
+  if (exitCode !== 0) emitFatal("CANARY_LOCK_RELEASE_FAILED");
 }
 
 function setTreeReadOnly(path: string): void {
@@ -271,6 +290,9 @@ async function main(): Promise<number> {
   const hermesExecutable = resolve(required("CBRAIN_CANARY_HERMES_EXEC"));
   if (!isAbsolute(bootRoot) || !isAbsolute(sourceRoot) || !isAbsolute(hermesExecutable))
     emitFatal("BOOTSTRAP_PATH_INVALID");
+  if (readdirSync(sourceRoot).some((name) => name === ".env" || name.startsWith(".env."))) {
+    emitFatal("BOOTSTRAP_SOURCE_ENV_PRESENT");
+  }
   const managed = process.env.CBRAIN_CANARY_PARENT_MANAGED_DIR;
   for (const candidate of [managed, "/etc/hermes"].filter((value): value is string => Boolean(value))) {
     try {
@@ -281,7 +303,8 @@ async function main(): Promise<number> {
     }
   }
 
-  const lockLease = acquireLock();
+  const lockLease = await acquireLock();
+  if (process.env.CBRAIN_CANARY_FAULT === "lock_hold") await new Promise<never>(() => {});
   const snapshotRoot = join(bootRoot, "cbrain-snapshot");
   const snapshotSource = join(snapshotRoot, "source");
   const snapshotBin = join(snapshotRoot, "bin");
@@ -295,6 +318,23 @@ async function main(): Promise<number> {
     }
     const checkpoint = run(["git", "rev-parse", "HEAD"], sourceRoot).trim();
     if (!/^[a-f0-9]{40}$/.test(checkpoint)) emitFatal("BOOTSTRAP_CHECKPOINT_INVALID");
+    const approvedCommit = required("CBRAIN_CANARY_APPROVED_COMMIT");
+    if (!/^[a-f0-9]{40}$/.test(approvedCommit)) emitFatal("BOOTSTRAP_APPROVAL_INVALID");
+    const ancestor = Bun.spawnSync({
+      cmd: ["git", "merge-base", "--is-ancestor", approvedCommit, checkpoint],
+      cwd: sourceRoot,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (ancestor.exitCode !== 0) emitFatal("BOOTSTRAP_APPROVAL_INVALID");
+    const postApprovalPaths = run(["git", "diff", "--name-only", approvedCommit, checkpoint], sourceRoot)
+      .split("\n")
+      .filter(Boolean);
+    if (postApprovalPaths.some((path) => !path.startsWith("docs/"))) emitFatal("BOOTSTRAP_APPROVAL_DRIFT");
+    const approvedManifest = run(["git", "show", `${approvedCommit}:${EVIDENCE_RELATIVE}`], sourceRoot);
+    if (approvedManifest !== readFileSync(join(sourceRoot, EVIDENCE_RELATIVE), "utf8")) {
+      emitFatal("BOOTSTRAP_APPROVAL_DRIFT");
+    }
     const listing = run(["git", "ls-tree", "-r", "--full-tree", checkpoint], sourceRoot)
       .split("\n")
       .filter((line) => {
@@ -376,6 +416,7 @@ async function main(): Promise<number> {
     setTreeReadOnly(snapshotRoot);
     snapshotCreated = true;
     const executionNodeModules = canonicalTreeDigest(join(snapshotSource, "node_modules"));
+    const executionSource = canonicalTreeDigest(snapshotSource, true);
 
     const liveModule = await import(join(snapshotSource, "bin/lib/hermes-canary-live-fingerprint.ts"));
     const preLiveFingerprint = liveModule.captureStableLiveServiceFingerprint(
@@ -383,7 +424,27 @@ async function main(): Promise<number> {
     );
 
     const worker = join(snapshotSource, "bin", "check-hermes-structured-host-canary.ts");
-    const child = Bun.spawn({
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    let childStarted: string | null = null;
+    let pendingInterrupt: Error | null = null;
+    let interrupt: ((error: Error) => void) | undefined;
+    const handlers = new Map<NodeJS.Signals, () => void>();
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+      const handler = () => {
+        pendingInterrupt ??= new Error("canary bootstrap interrupted");
+        if (child && childStarted && processStart(child.pid) === childStarted) {
+          try {
+            process.kill(-child.pid, signal);
+          } catch {
+            child.kill(signal);
+          }
+        }
+        interrupt?.(pendingInterrupt);
+      };
+      handlers.set(signal, handler);
+      process.once(signal, handler);
+    }
+    child = Bun.spawn({
       cmd: [copiedBun, "--no-env-file", "--config=/dev/null", `--cwd=${workerCwd}`, worker],
       cwd: workerCwd,
       env: {
@@ -400,6 +461,8 @@ async function main(): Promise<number> {
         CBRAIN_CANARY_SOURCE_NODE_MODULES_FILE_COUNT: String(nodeModules.file_count),
         CBRAIN_CANARY_EXECUTION_NODE_MODULES_DIGEST: executionNodeModules.digest,
         CBRAIN_CANARY_EXECUTION_NODE_MODULES_FILE_COUNT: String(executionNodeModules.file_count),
+        CBRAIN_CANARY_EXECUTION_SOURCE_DIGEST: executionSource.digest,
+        CBRAIN_CANARY_EXECUTION_SOURCE_FILE_COUNT: String(executionSource.file_count),
         CBRAIN_CANARY_FAULT: process.env.CBRAIN_CANARY_FAULT ?? "",
         CBRAIN_CANARY_LIVE_HOME: required("CBRAIN_CANARY_LIVE_HOME"),
         CBRAIN_CANARY_PRE_LIVE_FINGERPRINT: Buffer.from(JSON.stringify(preLiveFingerprint)).toString("base64"),
@@ -409,28 +472,13 @@ async function main(): Promise<number> {
       stderr: "pipe",
       detached: true,
     });
-    const childStarted = processStart(child.pid);
+    childStarted = processStart(child.pid);
     if (!childStarted) emitFatal("CANARY_WORKER_IDENTITY_UNAVAILABLE");
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let interrupt: ((error: Error) => void) | undefined;
     const interruptPromise = new Promise<never>((_, reject) => {
       interrupt = reject;
+      if (pendingInterrupt) reject(pendingInterrupt);
     });
-    const handlers = new Map<NodeJS.Signals, () => void>();
-    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-      const handler = () => {
-        if (processStart(child.pid) === childStarted) {
-          try {
-            process.kill(-child.pid, signal);
-          } catch {
-            child.kill(signal);
-          }
-        }
-        interrupt?.(new Error("canary bootstrap interrupted"));
-      };
-      handlers.set(signal, handler);
-      process.once(signal, handler);
-    }
     const stdoutPromise = readBoundedText(child.stdout as ReadableStream<Uint8Array>, 2_000_000);
     const stderrPromise = readBoundedText(child.stderr as ReadableStream<Uint8Array>, 1_000_000);
     const timeoutPromise = new Promise<never>((_, reject) => {
@@ -454,6 +502,7 @@ async function main(): Promise<number> {
         } catch {
           child.kill("SIGKILL");
         }
+        await child.exited.catch(() => {});
       }
       throw error;
     } finally {
@@ -486,7 +535,7 @@ async function main(): Promise<number> {
         rmSync(snapshotRoot, { recursive: true, force: true });
       }
     } finally {
-      releaseLock(lockLease);
+      await releaseLock(lockLease);
     }
   }
   process.stdout.write(`${finalOutput}\n`);

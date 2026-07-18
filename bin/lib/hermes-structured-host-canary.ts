@@ -77,6 +77,8 @@ export interface CanaryCaseResult extends CanaryCaseSpec {
   expected_audit_contract: AuditContract;
   audit_contract_verified: boolean;
   audit_redaction_exercised: boolean;
+  sensitive_input_sent: boolean;
+  direct_error_sensitive_echo_observed: boolean;
   error_redaction_exercised: boolean;
   audit_sensitive_exposed: boolean;
   surface_internal_exposed: boolean;
@@ -327,6 +329,8 @@ export interface ObservingMcpProxySnapshot {
   initialize_count: number;
   session_ids: string[];
   tool_calls: ObservedToolCall[];
+  sensitive_input_sent: boolean;
+  direct_error_sensitive_echo_observed: boolean;
   stored_body_count: 0;
 }
 
@@ -344,6 +348,8 @@ export interface RealHermesProjectionCaseResult {
   advertised_schema_verified: boolean;
   tool_calls: ObservedToolCall[];
   tool_content: string;
+  sensitive_input_sent: boolean;
+  direct_error_sensitive_echo_observed: boolean;
   sessions_closed: boolean;
   initialize_count: number;
   session_ids: string[];
@@ -391,6 +397,8 @@ export interface RealHermesCanaryMatrixResult {
   tokenizer_blob_digest: string;
   cleanup_verified: boolean;
   tool_schema_digest: string;
+  runtime_snapshot_checks_verified: boolean;
+  cbrain_snapshot_checks_verified: boolean;
 }
 
 export interface HermesRuntimeSnapshot {
@@ -495,7 +503,7 @@ export function analyzeHermesHostProjection(spec: CanaryCaseSpec, toolContent: s
     expected_audit_contract: expectedAudit,
     audit_contract_verified: false,
     audit_redaction_exercised: false,
-    error_redaction_exercised: spec.branch === "error",
+    error_redaction_exercised: false,
     audit_sensitive_exposed: containsSensitiveMaterial(toolContent),
     surface_internal_exposed: false,
     expected_projection_kind: expectedKind,
@@ -536,8 +544,9 @@ export function analyzeHermesHostProjection(spec: CanaryCaseSpec, toolContent: s
     const inner = asRecord(JSON.parse(outer.result));
     if (!inner) return fallback;
     const structured = asRecord(outer.structuredContent);
-    const visibleData = [inner.display, inner.summary, inner.data, structured?.summary, structured?.data];
-    const visibleText = JSON.stringify(visibleData);
+    const structuredVisibleData = [inner.display, inner.summary, inner.data, structured?.summary, structured?.data];
+    const completenessData = spec.mode === "legacy" ? inner : structuredVisibleData;
+    const visibleText = JSON.stringify(completenessData);
     titlePresent = visibleText.includes(ANONYMOUS_FIXTURE_MARKERS.title);
     bodyPresent = visibleText.includes(ANONYMOUS_FIXTURE_MARKERS.body);
     const summary = asRecord(inner.summary);
@@ -592,7 +601,7 @@ export function analyzeHermesHostProjection(spec: CanaryCaseSpec, toolContent: s
       spec.mode === "structured" ? exactKeys(outer, ["result", "structuredContent"]) : exactKeys(outer, ["result"]);
     const expectedLegacyRaw = spec.mode === "legacy" && (spec.tool !== "deep_recall" || spec.branch === "include_raw");
     const surfaceInternal =
-      spec.mode === "structured" && structured !== null ? containsForbiddenSurface(visibleData) : false;
+      spec.mode === "structured" && structured !== null ? containsForbiddenSurface(structuredVisibleData) : false;
     const projectionVerified =
       exactOuter &&
       (spec.mode === "structured" ? structured !== null && textStructuredConsistent === true : structured === null) &&
@@ -858,6 +867,7 @@ export async function createHermesRuntimeSnapshot(options: {
       python: canonicalTreeDigest(pythonRoot),
       venv: canonicalTreeDigest(venvRoot),
       tokenizer: createHash("sha256").update(readFileSync(tokenizerPath)).digest("hex"),
+      approved_manifest: createHash("sha256").update(canonicalJson(options.manifest)).digest("hex"),
       transforms: "hermes-relocation-read-only-v1",
     };
     const aggregateDigest = createHash("sha256").update(canonicalJson(aggregateCore)).digest("hex");
@@ -925,6 +935,7 @@ export async function createHermesRuntimeSnapshot(options: {
           python: canonicalTreeDigest(pythonRoot),
           venv: canonicalTreeDigest(venvRoot),
           tokenizer: createHash("sha256").update(readFileSync(tokenizerPath)).digest("hex"),
+          approved_manifest: createHash("sha256").update(canonicalJson(options.manifest)).digest("hex"),
           transforms: "hermes-relocation-read-only-v1",
         };
         return createHash("sha256").update(canonicalJson(currentCore)).digest("hex") === aggregateDigest;
@@ -1093,10 +1104,13 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
   const toolCalls: ObservedToolCall[] = [];
   const deletedSessions = new Set<string>();
   let initializeCount = 0;
+  let sensitiveInputSent = false;
+  let directErrorSensitiveEchoObserved = false;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
+      let requestContainsSensitiveInput = false;
       const body =
         request.method === "GET" || request.method === "HEAD" ? undefined : new Uint8Array(await request.arrayBuffer());
       if (body) {
@@ -1107,6 +1121,11 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
             const name = params?.name;
             const args = params?.arguments;
             if (typeof name === "string" && args && typeof args === "object" && !Array.isArray(args)) {
+              const serializedArgs = canonicalJson(args);
+              requestContainsSensitiveInput =
+                serializedArgs.includes(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential) &&
+                serializedArgs.includes(ANONYMOUS_FIXTURE_MARKERS.sensitive_path);
+              sensitiveInputSent ||= requestContainsSensitiveInput;
               toolCalls.push({
                 name,
                 arguments: structuredClone(args as Record<string, unknown>),
@@ -1127,6 +1146,12 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
         redirect: "manual",
       });
       const responseBytes = new Uint8Array(await upstream.arrayBuffer());
+      if (requestContainsSensitiveInput) {
+        const responseText = new TextDecoder().decode(responseBytes);
+        directErrorSensitiveEchoObserved ||=
+          responseText.includes(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential) ||
+          responseText.includes(ANONYMOUS_FIXTURE_MARKERS.sensitive_path);
+      }
       const responseHeaders = new Headers(upstream.headers);
       const sessionId = responseHeaders.get("mcp-session-id");
       if (sessionId) sessions.add(sessionId);
@@ -1148,6 +1173,8 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
         initialize_count: initializeCount,
         session_ids: [...sessions].sort(),
         tool_calls: structuredClone(toolCalls),
+        sensitive_input_sent: sensitiveInputSent,
+        direct_error_sensitive_echo_observed: directErrorSensitiveEchoObserved,
         stored_body_count: 0,
       };
     },
@@ -1457,6 +1484,8 @@ export async function runRealHermesProjectionCase(options: {
       advertised_schema_verified: inference.advertised_schema_verified,
       tool_calls: observed.tool_calls,
       tool_content: inference.tool_content ?? "",
+      sensitive_input_sent: observed.sensitive_input_sent,
+      direct_error_sensitive_echo_observed: observed.direct_error_sensitive_echo_observed,
       sessions_closed: sessionsClosed,
       initialize_count: observed.initialize_count,
       session_ids: observed.session_ids,
@@ -1511,6 +1540,8 @@ export async function runRealHermesCanaryMatrix(options: {
   tokenizerPath: string;
   timeoutMs?: number;
   expectedToolSchemaDigest?: string;
+  verifyRuntimeSnapshot: () => boolean;
+  verifyCbrainSnapshot: () => boolean;
 }): Promise<RealHermesCanaryMatrixResult> {
   interface Execution {
     spec: CanaryCaseSpec;
@@ -1520,14 +1551,25 @@ export async function runRealHermesCanaryMatrix(options: {
     structured_content_tokens?: number;
     wrapper_total_tokens?: number;
   }
-  const fixture = await createAnonymousFixtureSnapshot();
   const primary: Execution[] = [];
   const repetitions: Execution[] = [];
   let sequence = 0;
   let expectedTools: ChatToolDefinition[] = [];
   let schemaDigest = "";
   let preflightSessionClosed = false;
+  let runtimeSnapshotChecksVerified = true;
+  let cbrainSnapshotChecksVerified = true;
+  const verifySnapshots = (): void => {
+    runtimeSnapshotChecksVerified &&= options.verifyRuntimeSnapshot();
+    cbrainSnapshotChecksVerified &&= options.verifyCbrainSnapshot();
+    if (!runtimeSnapshotChecksVerified || !cbrainSnapshotChecksVerified) {
+      throw new Error("canary execution snapshot drifted");
+    }
+  };
+  verifySnapshots();
+  const fixture = await createAnonymousFixtureSnapshot();
   const execute = async (spec: CanaryCaseSpec, bucket: Execution[]): Promise<void> => {
+    verifySnapshots();
     sequence += 1;
     const label = `case-${sequence}-${spec.mode}-${spec.tool}-${spec.branch}`.replaceAll("_", "-");
     const runtime = await fixture.openRuntime(spec.mode, label);
@@ -1547,6 +1589,7 @@ export async function runRealHermesCanaryMatrix(options: {
       });
     } finally {
       await runtime.close();
+      verifySnapshots();
     }
   };
   try {
@@ -1585,6 +1628,7 @@ export async function runRealHermesCanaryMatrix(options: {
     }
   } finally {
     await fixture.close();
+    verifySnapshots();
   }
 
   if (primary.length !== 24 || repetitions.length !== 12) throw new Error("incomplete real Hermes matrix");
@@ -1594,11 +1638,13 @@ export async function runRealHermesCanaryMatrix(options: {
     execution.projection.structured_content_json,
     execution.projection.wrapper_text,
   ]);
+  verifySnapshots();
   const counted = await countExactCl100kTokens({
     pythonExecutable: options.pythonExecutable,
     tokenizerPath: options.tokenizerPath,
     values: tokenInputs,
   });
+  verifySnapshots();
   allExecutions.forEach((execution, index) => {
     execution.result_text_tokens = counted.counts[index * 3];
     execution.structured_content_tokens = counted.counts[index * 3 + 1];
@@ -1631,7 +1677,10 @@ export async function runRealHermesCanaryMatrix(options: {
       expected_audit_contract: projection.expected_audit_contract,
       audit_contract_verified: projection.audit_contract_verified,
       audit_redaction_exercised: projection.audit_redaction_exercised,
-      error_redaction_exercised: projection.error_redaction_exercised,
+      sensitive_input_sent: host.sensitive_input_sent,
+      direct_error_sensitive_echo_observed: host.direct_error_sensitive_echo_observed,
+      error_redaction_exercised:
+        spec.branch === "error" && host.sensitive_input_sent && host.direct_error_sensitive_echo_observed,
       audit_sensitive_exposed: projection.audit_sensitive_exposed,
       surface_internal_exposed: projection.surface_internal_exposed,
       expected_projection_kind: projection.expected_projection_kind,
@@ -1705,6 +1754,8 @@ export async function runRealHermesCanaryMatrix(options: {
       counted.cleanup_verified &&
       allExecutions.every((execution) => execution.host.sessions_closed && execution.host.case_cleanup_verified),
     tool_schema_digest: schemaDigest,
+    runtime_snapshot_checks_verified: runtimeSnapshotChecksVerified,
+    cbrain_snapshot_checks_verified: cbrainSnapshotChecksVerified,
   };
 }
 
@@ -1806,6 +1857,57 @@ export function canonicalTreeDigest(rootPath: string): CanonicalTreeDigest {
     }
   };
 
+  visit(root);
+  const hash = createHash("sha256");
+  for (const entry of entries) {
+    const contentHash = createHash("sha256").update(entry.bytes).digest("hex");
+    hash.update(`${entry.kind}\0${entry.path}\0${entry.mode.toString(8)}\0${entry.bytes.byteLength}\0${contentHash}\n`);
+  }
+  return { digest: hash.digest("hex"), file_count: fileCount };
+}
+
+export function canonicalSnapshotTreeDigest(rootPath: string): CanonicalTreeDigest {
+  const root = resolve(rootPath);
+  const entries: Array<{
+    path: string;
+    kind: "directory" | "file" | "symlink";
+    mode: number;
+    bytes: Uint8Array;
+  }> = [];
+  let fileCount = 0;
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      const path = resolve(directory, name);
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) {
+        entries.push({
+          path: normalizedRelative(root, path),
+          kind: "directory",
+          mode: stat.mode & 0o777,
+          bytes: new Uint8Array(),
+        });
+        visit(path);
+      } else if (stat.isSymbolicLink()) {
+        fileCount += 1;
+        entries.push({
+          path: normalizedRelative(root, path),
+          kind: "symlink",
+          mode: stat.mode & 0o777,
+          bytes: new TextEncoder().encode(readlinkSync(path)),
+        });
+      } else if (stat.isFile()) {
+        fileCount += 1;
+        entries.push({
+          path: normalizedRelative(root, path),
+          kind: "file",
+          mode: stat.mode & 0o777,
+          bytes: readFileSync(path),
+        });
+      } else {
+        throw new Error("unsupported strict snapshot entry");
+      }
+    }
+  };
   visit(root);
   const hash = createHash("sha256");
   for (const entry of entries) {
@@ -2226,7 +2328,12 @@ function caseContractPasses(result: CanaryCaseResult): boolean {
     result.expected_audit_contract === expectedAuditContract(result) &&
     result.audit_contract_verified &&
     (result.expected_audit_contract === "none" || result.audit_redaction_exercised) &&
-    (result.branch !== "error" || result.error_redaction_exercised) &&
+    (result.branch === "error"
+      ? result.sensitive_input_sent &&
+        result.error_redaction_exercised === result.direct_error_sensitive_echo_observed
+      : !result.sensitive_input_sent &&
+        !result.direct_error_sensitive_echo_observed &&
+        !result.error_redaction_exercised) &&
     !result.audit_sensitive_exposed &&
     !result.surface_internal_exposed &&
     result.expected_projection_kind === expectedProjectionKind(result) &&

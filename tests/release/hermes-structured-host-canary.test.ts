@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -24,6 +26,7 @@ import {
   buildIsolatedHermesEnv,
   buildIsolatedHermesConfig,
   canonicalEvidenceDigest,
+  canonicalSnapshotTreeDigest,
   canonicalTreeDigest,
   createHermesRuntimeManifest,
   createHermesRuntimeSnapshot,
@@ -40,6 +43,7 @@ import {
   type SizePairEvidence,
   verifyHermesRuntimeManifest,
 } from "../../bin/lib/hermes-structured-host-canary.js";
+import { extractLiveCommandFileCandidates } from "../../bin/lib/hermes-canary-live-fingerprint.js";
 
 const tools = ["query", "deep_recall", "cbrain_recall"] as const;
 const branches = ["normal", "empty", "include_raw", "error"] as const;
@@ -108,6 +112,8 @@ function caseResult(
     expected_audit_contract: auditContract,
     audit_contract_verified: true,
     audit_redaction_exercised: !error && structuredSuccess && includeRaw,
+    sensitive_input_sent: error,
+    direct_error_sensitive_echo_observed: error,
     error_redaction_exercised: error,
     audit_sensitive_exposed: false,
     surface_internal_exposed: false,
@@ -254,6 +260,66 @@ describe("Hermes structured host canary contract", () => {
       expect(evaluateCanaryReport({ ...input, cases }).host_compatibility, field).toBe("incompatible");
     }
   });
+
+  test("fails closed on every branch-specific mandatory case field", () => {
+    const input = validInput();
+    const mutations: Array<{
+      name: string;
+      select: (item: CanaryCaseResult) => boolean;
+      patch: Partial<CanaryCaseResult>;
+    }> = [
+      { name: "title", select: (item) => item.branch === "normal", patch: { result_title_present: false } },
+      { name: "body", select: (item) => item.branch === "normal", patch: { result_body_present: false } },
+      { name: "empty", select: (item) => item.branch === "empty", patch: { empty_contract_verified: false } },
+      { name: "error", select: (item) => item.branch === "error", patch: { error_contract_verified: false } },
+      { name: "raw", select: (item) => item.mode === "legacy", patch: { legacy_raw_present: false } },
+      {
+        name: "default-audit",
+        select: (item) => item.mode === "structured" && item.branch === "normal",
+        patch: { default_audit_present: true },
+      },
+      {
+        name: "audit-contract",
+        select: (item) => item.mode === "structured" && item.branch === "include_raw",
+        patch: { audit_contract_verified: false },
+      },
+      {
+        name: "audit-redaction",
+        select: (item) => item.mode === "structured" && item.branch === "include_raw",
+        patch: { audit_redaction_exercised: false },
+      },
+      {
+        name: "sensitive-input",
+        select: (item) => item.branch === "error",
+        patch: { sensitive_input_sent: false },
+      },
+      {
+        name: "direct-echo-evidence",
+        select: (item) => item.branch === "error",
+        patch: { error_redaction_exercised: false },
+      },
+      {
+        name: "sensitive-surface",
+        select: (item) => item.mode === "structured" && item.branch === "normal",
+        patch: { audit_sensitive_exposed: true },
+      },
+      {
+        name: "internal-surface",
+        select: (item) => item.mode === "structured" && item.branch === "normal",
+        patch: { surface_internal_exposed: true },
+      },
+    ];
+    for (const mutation of mutations) {
+      let applied = false;
+      const cases = input.cases.map((item) => {
+        if (applied || !mutation.select(item)) return item;
+        applied = true;
+        return { ...item, ...mutation.patch };
+      });
+      expect(applied, mutation.name).toBe(true);
+      expect(evaluateCanaryReport({ ...input, cases }).host_compatibility, mutation.name).toBe("incompatible");
+    }
+  });
 });
 
 describe("Hermes runtime isolation contract", () => {
@@ -373,6 +439,16 @@ describe("Hermes runtime isolation contract", () => {
     expect(first.relevant_process_count).toBe(1);
   });
 
+  test("discovers quoted and equals-form live config references without exposing command text", () => {
+    const existing = new Set(["/private/anonymous wrapper", "/private/anonymous-config", "/private/anonymous-env"]);
+    expect(
+      extractLiveCommandFileCandidates(
+        '"/private/anonymous wrapper" --config=/private/anonymous-config --env-file "/private/anonymous-env"',
+        (path) => existing.has(path),
+      ).sort(),
+    ).toEqual([...existing].sort());
+  });
+
   test("canonical tree digest detects same-revision byte drift and ignores excluded caches", () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-runtime-tree-test-"));
     try {
@@ -408,6 +484,22 @@ describe("Hermes runtime isolation contract", () => {
       const fifo = join(root, "pkg", "runtime-fifo");
       expect(Bun.spawnSync({ cmd: ["/usr/bin/mkfifo", fifo] }).exitCode).toBe(0);
       expect(() => canonicalTreeDigest(root)).toThrow("unsupported runtime tree entry");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("strict execution snapshot digest binds excluded files and permission changes", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-strict-snapshot-digest-"));
+    try {
+      const envPath = join(root, ".env.synthetic");
+      writeFileSync(envPath, "alpha\n", { mode: 0o600 });
+      const baseline = canonicalSnapshotTreeDigest(root);
+      writeFileSync(envPath, "beta\n", { mode: 0o600 });
+      expect(canonicalSnapshotTreeDigest(root).digest).not.toBe(baseline.digest);
+      writeFileSync(envPath, "alpha\n");
+      chmodSync(envPath, 0o400);
+      expect(canonicalSnapshotTreeDigest(root).digest).not.toBe(baseline.digest);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -458,7 +550,16 @@ exit 0
 
       const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
       const result = Bun.spawnSync({
-        cmd: ["/bin/sh", wrapper, "--bun", fakeBun, "--hermes", fakeHermes],
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          fakeBun,
+          "--hermes",
+          fakeHermes,
+          "--approved-commit",
+          "a".repeat(40),
+        ],
         cwd: root,
         env: {
           ...process.env,
@@ -478,6 +579,195 @@ exit 0
       expect(output).toContain("PARENT_SECRET=unset");
       expect(output).toContain("BUNFIG=unset");
       expect(output).not.toContain(`HOME=${join(root, "parent-home")}`);
+      const isolatedHome = output.match(/^HOME=(.+)$/m)?.[1];
+      expect(isolatedHome).toBeDefined();
+      expect(existsSync(dirname(isolatedHome as string))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("requires an externally selected approved evidence commit before Bun starts", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-approval-test-"));
+    try {
+      const marker = join(root, "bun-ran");
+      const fakeBun = join(root, "fake-bun");
+      const fakeHermes = join(root, "fake-hermes");
+      writeFileSync(fakeBun, `#!/bin/sh\nprintf ran > "${marker}"\nexit 0\n`);
+      writeFileSync(fakeHermes, "#!/bin/sh\nexit 0\n");
+      chmodSync(fakeBun, 0o755);
+      chmodSync(fakeHermes, 0o755);
+      const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
+      const result = Bun.spawnSync({
+        cmd: ["/bin/sh", wrapper, "--bun", fakeBun, "--hermes", fakeHermes],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(2);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a clean self-consistent checkout that changed the approved manifest", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-approval-drift-"));
+    const source = join(root, "source");
+    const boot = join(root, "boot");
+    const runGit = (...args: string[]): string => {
+      const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
+      expect(result.exitCode, args.join(" ")).toBe(0);
+      return result.stdout.toString().trim();
+    };
+    try {
+      mkdirSync(join(source, "tests", "fixtures"), { recursive: true });
+      mkdirSync(boot);
+      writeFileSync(join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"), "{}\n");
+      writeFileSync(join(source, "package.json"), "{}\n");
+      runGit("init", "-q");
+      runGit("config", "user.name", "Anonymous Reviewer");
+      runGit("config", "user.email", "reviewer@example.invalid");
+      runGit("add", ".");
+      runGit("commit", "-qm", "approved evidence");
+      const approved = runGit("rev-parse", "HEAD");
+      writeFileSync(
+        join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"),
+        '{"changed":true}\n',
+      );
+      runGit("add", ".");
+      runGit("commit", "-qm", "alternate evidence");
+      const bootstrap = join(import.meta.dir, "../../bin/bootstrap-hermes-structured-host-canary.ts");
+      const result = Bun.spawnSync({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", bootstrap],
+        cwd: boot,
+        env: {
+          HOME: boot,
+          TMPDIR: boot,
+          PATH: "/usr/bin:/bin",
+          LANG: "C.UTF-8",
+          LC_ALL: "C.UTF-8",
+          CBRAIN_CANARY_BOOT_ROOT: boot,
+          CBRAIN_CANARY_SOURCE_ROOT: source,
+          CBRAIN_CANARY_HERMES_EXEC: join(root, "unused-hermes"),
+          CBRAIN_CANARY_PARENT_MANAGED_DIR: "",
+          CBRAIN_CANARY_LIVE_HOME: root,
+          CBRAIN_CANARY_FAULT: "",
+          CBRAIN_CANARY_APPROVED_COMMIT: approved,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout.toString().trim()).toBe(
+        '{"schema_version":1,"status":"fatal","code":"BOOTSTRAP_APPROVAL_DRIFT"}',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("kernel lock is released after an ungraceful bootstrap exit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-lock-crash-"));
+    const source = join(root, "source");
+    const boot = join(root, "boot");
+    const runGit = (...args: string[]): string => {
+      const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
+      expect(result.exitCode, args.join(" ")).toBe(0);
+      return result.stdout.toString().trim();
+    };
+    try {
+      mkdirSync(join(source, "tests", "fixtures"), { recursive: true });
+      mkdirSync(boot);
+      writeFileSync(join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"), "{}\n");
+      writeFileSync(join(source, "package.json"), "{}\n");
+      runGit("init", "-q");
+      runGit("config", "user.name", "Anonymous Reviewer");
+      runGit("config", "user.email", "reviewer@example.invalid");
+      runGit("add", ".");
+      runGit("commit", "-qm", "approved evidence");
+      const approved = runGit("rev-parse", "HEAD");
+      const bootstrap = join(import.meta.dir, "../../bin/bootstrap-hermes-structured-host-canary.ts");
+      const baseEnv = {
+        HOME: boot,
+        TMPDIR: boot,
+        PATH: "/usr/bin:/bin",
+        LANG: "C.UTF-8",
+        LC_ALL: "C.UTF-8",
+        CBRAIN_CANARY_BOOT_ROOT: boot,
+        CBRAIN_CANARY_SOURCE_ROOT: source,
+        CBRAIN_CANARY_HERMES_EXEC: join(root, "unused-hermes"),
+        CBRAIN_CANARY_PARENT_MANAGED_DIR: "",
+        CBRAIN_CANARY_LIVE_HOME: root,
+        CBRAIN_CANARY_APPROVED_COMMIT: approved,
+      };
+      const holder = Bun.spawn({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", bootstrap],
+        cwd: boot,
+        env: { ...baseEnv, CBRAIN_CANARY_FAULT: "lock_hold" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      await Bun.sleep(250);
+      holder.kill("SIGKILL");
+      await holder.exited;
+      await Bun.sleep(100);
+      const retry = Bun.spawnSync({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", bootstrap],
+        cwd: boot,
+        env: { ...baseEnv, CBRAIN_CANARY_FAULT: "" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(retry.exitCode).toBe(2);
+      expect(retry.stdout.toString()).not.toContain("CANARY_LOCK_HELD");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("TERM reaches the isolated bootstrap process group and removes outer temporary roots before exit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-signal-test-"));
+    const before = new Set(readdirSync("/tmp").filter((name) => name.startsWith("cbrain-hermes-structured-")));
+    try {
+      const childPidPath = join(root, "child-pid");
+      const fakeBun = join(root, "fake-bun");
+      const fakeHermes = join(root, "fake-hermes");
+      writeFileSync(
+        fakeBun,
+        `#!/bin/sh\n/bin/sleep 30 &\nprintf '%s' "$!" > "${childPidPath}"\nwait\n`,
+      );
+      writeFileSync(fakeHermes, "#!/bin/sh\nexit 0\n");
+      chmodSync(fakeBun, 0o755);
+      chmodSync(fakeHermes, 0o755);
+      const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
+      const process = Bun.spawn({
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          fakeBun,
+          "--hermes",
+          fakeHermes,
+          "--approved-commit",
+          "a".repeat(40),
+        ],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      for (let attempt = 0; attempt < 100 && !existsSync(childPidPath); attempt += 1) {
+        await Bun.sleep(10);
+      }
+      expect(existsSync(childPidPath)).toBe(true);
+      const childPid = Number(readFileSync(childPidPath, "utf8"));
+      process.kill("SIGTERM");
+      expect(await process.exited).toBe(143);
+      expect(() => globalThis.process.kill(childPid, 0)).toThrow();
+      const after = readdirSync("/tmp").filter(
+        (name) => name.startsWith("cbrain-hermes-structured-") && !before.has(name),
+      );
+      expect(after).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -491,7 +781,18 @@ exit 0
       chmodSync(fakeHermes, 0o755);
       const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
       const result = Bun.spawnSync({
-        cmd: ["/bin/sh", wrapper, "--bun", process.execPath, "--hermes", fakeHermes, "--fault", "bootstrap"],
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          process.execPath,
+          "--hermes",
+          fakeHermes,
+          "--fault",
+          "bootstrap",
+          "--approved-commit",
+          "a".repeat(40),
+        ],
         cwd: root,
         env: { ...process.env, PARENT_SECRET: "must-not-cross-bootstrap" },
         stdout: "pipe",
@@ -526,7 +827,16 @@ exit 0
       const source = readFileSync(wrapper, "utf8");
       expect(source.indexOf("[ ! -e /etc/hermes ]")).toBeLessThan(source.indexOf("/usr/bin/env -i"));
       const result = Bun.spawnSync({
-        cmd: ["/bin/sh", wrapper, "--bun", fakeBun, "--hermes", fakeHermes],
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          fakeBun,
+          "--hermes",
+          fakeHermes,
+          "--approved-commit",
+          "a".repeat(40),
+        ],
         cwd: root,
         env: { ...process.env, HERMES_MANAGED_DIR: managed },
         stdout: "pipe",
@@ -969,6 +1279,61 @@ describe("paired anonymous CBrain fixture and observing MCP proxy", () => {
     expect(analysis.projection_contract_verified).toBe(false);
   });
 
+  test("uses the full model-visible legacy result for completeness and empty leakage", () => {
+    const answerByTool = {
+      query: {
+        display: "ok",
+        summary: { status: "ok", count: 1 },
+        results: [{ title: ANONYMOUS_FIXTURE_MARKERS.title, body: ANONYMOUS_FIXTURE_MARKERS.body }],
+        raw: {},
+      },
+      deep_recall: {
+        display: "ok",
+        summary: { status: "ok", count: 1 },
+        entities: [{ title: ANONYMOUS_FIXTURE_MARKERS.title, body: ANONYMOUS_FIXTURE_MARKERS.body }],
+      },
+      cbrain_recall: {
+        display: ANONYMOUS_FIXTURE_MARKERS.title,
+        summary: { status: "ok", count: 1 },
+        raw: { body: ANONYMOUS_FIXTURE_MARKERS.body },
+      },
+    } as const;
+    for (const tool of tools) {
+      for (const branch of ["normal", "include_raw"] as const) {
+        const inner = structuredClone(answerByTool[tool]) as Record<string, unknown>;
+        if (tool === "deep_recall" && branch === "include_raw") inner.raw = {};
+        const hostContent =
+          `<untrusted_tool_result source="mcp_cbrain_canary_${tool}">\n` +
+          `${JSON.stringify({ result: JSON.stringify(inner) })}\n` +
+          "</untrusted_tool_result>";
+        const analysis = analyzeHermesHostProjection(
+          { case_id: `legacy:${tool}:${branch}`, mode: "legacy", tool, branch },
+          hostContent,
+        );
+        expect(analysis.result_title_present, `${tool}:${branch}:title`).toBe(true);
+        expect(analysis.result_body_present, `${tool}:${branch}:body`).toBe(true);
+        expect(analysis.projection_contract_verified, `${tool}:${branch}:projection`).toBe(true);
+      }
+    }
+
+    const leakingEmpty =
+      '<untrusted_tool_result source="mcp_cbrain_canary_query">\n' +
+      JSON.stringify({
+        result: JSON.stringify({
+          summary: { status: "empty", count: 0 },
+          raw: { leaked: ANONYMOUS_FIXTURE_MARKERS.body },
+        }),
+      }) +
+      "\n</untrusted_tool_result>";
+    const empty = analyzeHermesHostProjection(
+      { case_id: "legacy:query:empty", mode: "legacy", tool: "query", branch: "empty" },
+      leakingEmpty,
+    );
+    expect(empty.result_body_present).toBe(true);
+    expect(empty.empty_contract_verified).toBe(false);
+    expect(empty.projection_contract_verified).toBe(false);
+  });
+
   test("serves fixed normal and true-empty results from disposable database clones", async () => {
     const fixture = await createAnonymousFixtureSnapshot();
     const runtime = await fixture.openRuntime("structured", "direct-preflight");
@@ -1088,8 +1453,32 @@ describe("paired anonymous CBrain fixture and observing MCP proxy", () => {
             session_id: "anonymous-session",
           },
         ],
+        sensitive_input_sent: false,
+        direct_error_sensitive_echo_observed: false,
         stored_body_count: 0,
       });
+      const sensitiveCall = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "query",
+          arguments: buildCanaryToolArguments("query", "error"),
+        },
+      });
+      const sensitiveResponse = await fetch(proxy.endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "mcp-session-id": "anonymous-session",
+        },
+        body: sensitiveCall,
+      });
+      expect(await sensitiveResponse.text()).toBe(sensitiveCall);
+      const sensitiveSnapshot = proxy.snapshot();
+      expect(sensitiveSnapshot.sensitive_input_sent).toBe(true);
+      expect(sensitiveSnapshot.direct_error_sensitive_echo_observed).toBe(true);
+      expect(sensitiveSnapshot.stored_body_count).toBe(0);
       expect(await proxy.closeSessions()).toBe(true);
       expect(deleted).toBe(true);
     } finally {
@@ -1212,15 +1601,29 @@ realHermesTest("real Hermes chat projects one structured query result through th
 realHermesTest(
   "real Hermes completes the 24 primary plus 12 AB/BA repetition matrix",
   async () => {
+    let runtimeSnapshotChecks = 0;
+    let cbrainSnapshotChecks = 0;
     const matrix = await runRealHermesCanaryMatrix({
       hermesExecutable: requiredRealEnv("HERMES_EXEC_PATH"),
       pythonExecutable: requiredRealEnv("HERMES_PYTHON_EXEC_PATH"),
       tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+      verifyRuntimeSnapshot: () => {
+        runtimeSnapshotChecks += 1;
+        return true;
+      },
+      verifyCbrainSnapshot: () => {
+        cbrainSnapshotChecks += 1;
+        return true;
+      },
     });
     expect(matrix.cases).toHaveLength(24);
     expect(matrix.size_pairs).toHaveLength(6);
     expect(matrix.primary_executions).toBe(24);
     expect(matrix.size_repetition_executions).toBe(12);
+    expect(runtimeSnapshotChecks).toBe(76);
+    expect(cbrainSnapshotChecks).toBe(76);
+    expect(matrix.runtime_snapshot_checks_verified).toBe(true);
+    expect(matrix.cbrain_snapshot_checks_verified).toBe(true);
     expect(
       matrix.cases.filter((item) => item.branch !== "error").every((item) => item.projection_contract_verified),
     ).toBe(true);
@@ -1229,6 +1632,33 @@ realHermesTest(
     );
     expect(matrix.cases.every((item) => item.cbrain_invocation_count === 1)).toBe(true);
     expect(matrix.cases.every((item) => item.cbrain_call_verified && item.mcp_session_verified)).toBe(true);
+    expect(
+      matrix.cases
+        .filter((item) => item.branch === "normal" || item.branch === "include_raw")
+        .every((item) => item.result_title_present && item.result_body_present),
+    ).toBe(true);
+    expect(
+      matrix.cases
+        .filter((item) => item.branch === "error")
+        .every(
+          (item) =>
+            item.sensitive_input_sent &&
+            item.direct_error_sensitive_echo_observed &&
+            item.error_redaction_exercised &&
+            item.audit_sensitive_exposed &&
+            !item.error_contract_verified,
+        ),
+    ).toBe(true);
+    const report = evaluateCanaryReport({
+      ...validInput(),
+      cases: matrix.cases,
+      size_pairs: matrix.size_pairs,
+    });
+    expect(report.host_compatibility).toBe("incompatible");
+    expect(report.reason_codes).toEqual(["CASE_CONTRACT_FAILED", "ROLLBACK_NOT_EXECUTABLE"]);
+    expect(matrix.size_pairs.every((pair) => pair.absolute_gate_passed && pair.relative_or_floor_gate_passed)).toBe(
+      true,
+    );
     expect(matrix.cleanup_verified).toBe(true);
   },
   120_000,
