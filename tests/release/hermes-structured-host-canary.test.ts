@@ -18,6 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   ANONYMOUS_FIXTURE_MARKERS,
+  assertHermesInstallRootHasNoEnv,
   assertTreeSymlinksContained,
   analyzeHermesHostProjection,
   buildCanaryCaseSpecs,
@@ -156,6 +157,8 @@ function sizePairs(): SizePairEvidence[] {
         structured_tokens: 169,
         legacy_code_units: 644,
         structured_code_units: 676,
+        legacy_contract_verified: true,
+        structured_contract_verified: true,
       },
       worst_structured_tokens: 170,
       best_legacy_tokens: 160,
@@ -224,6 +227,13 @@ describe("Hermes structured host canary contract", () => {
       index === 0 ? { ...pair, worst_structured_tokens: 169 } : pair,
     );
     expect(evaluateCanaryReport({ ...input, size_pairs: wrongSelector }).host_compatibility).toBe("incompatible");
+
+    const failedRepetition = input.size_pairs.map((pair, index) =>
+      index === 0 ? { ...pair, ba: { ...pair.ba, structured_contract_verified: false } } : pair,
+    );
+    expect(evaluateCanaryReport({ ...input, size_pairs: failedRepetition }).reason_codes).toContain(
+      "SIZE_EVIDENCE_INVALID",
+    );
   });
 
   test("binds the aggregate digest to the fixed-key public evidence manifest", () => {
@@ -1040,13 +1050,14 @@ exit 0
     }
   });
 
-  test("owned process cleanup uses microsecond birth identity and explicit ancestry", () => {
+  test("owned process cleanup uses microsecond birth identity and a fail-closed no-fork sandbox", () => {
     const source = readFileSync(join(import.meta.dir, "../../bin/lib/hermes-structured-host-canary.ts"), "utf8");
     expect(source).toContain("start_usec");
     expect(source).toContain("start_us");
-    expect(source).toContain("identity.ppid");
-    expect(source).toContain("identity.pgid");
-    expect(source).toContain("captureOwnedDescendants");
+    expect(source).toContain("childIdentity.ppid");
+    expect(source).toContain("childIdentity.pgid");
+    expect(source).toContain("(deny process-fork)");
+    expect(source).toContain("verifyDarwinNoForkSandbox");
   });
 
   test("worker marker and Hermes install-root preflight fail closed", () => {
@@ -1055,7 +1066,23 @@ exit 0
     expect(worker).toContain("worker-commit-marker.tmp");
     expect(worker).toContain("output_sha256");
     expect(bootstrap).toContain("CANARY_WORKER_STATUS_INVALID");
-    expect(worker).toContain('name === ".env" || name.startsWith(".env.")');
+    expect(bootstrap.indexOf("process.on(signal, handler)")).toBeLessThan(
+      bootstrap.indexOf("await acquireWrapperGuardian(wrapperStarted, bootRoot)"),
+    );
+    expect(worker.indexOf("assertHermesInstallRootHasNoEnv(originalSource)")).toBeLessThan(
+      worker.indexOf("createHermesRuntimeSnapshot({"),
+    );
+    const root = mkdtempSync(join(tmpdir(), "cbrain-hermes-env-preflight-"));
+    const envPath = join(root, ".env.local");
+    const original = "SYNTHETIC_SENTINEL=must-remain-byte-identical\n";
+    try {
+      writeFileSync(envPath, original, { mode: 0o600 });
+      expect(() => assertHermesInstallRootHasNoEnv(root)).toThrow();
+      expect(readFileSync(envPath, "utf8")).toBe(original);
+      expect(readdirSync(root)).toEqual([".env.local"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("wrapper SIGKILL is detected by the guardian and removes the owned outer root", async () => {
@@ -1106,13 +1133,37 @@ exit 0
     }
   }, 15_000);
 
-  test("cleanup kills a recorded descendant that escapes the Hermes process group", async () => {
+  test("guardian survives bootstrap completion and cleans the outer root if the wrapper dies before cleanup", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-wrapper-post-worker-"));
+    const source = join(root, "source");
+    const boot = join(root, "boot");
+    const bootstrapDone = join(root, "bootstrap-done");
+    try {
+      mkdirSync(source);
+      mkdirSync(boot);
+      writeFileSync(join(source, ".env"), "SYNTHETIC=unchanged\n");
+      const bootstrap = join(import.meta.dir, "../../bin/bootstrap-hermes-structured-host-canary.ts");
+      const command = `/usr/bin/env -i HOME=${boot} TMPDIR=${boot} PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 CBRAIN_CANARY_BOOT_ROOT=${boot} CBRAIN_CANARY_SOURCE_ROOT=${source} CBRAIN_CANARY_HERMES_EXEC=${root}/unused-hermes CBRAIN_CANARY_PARENT_MANAGED_DIR= CBRAIN_CANARY_LIVE_HOME=${root} CBRAIN_CANARY_FAULT= CBRAIN_CANARY_APPROVED_COMMIT=${"a".repeat(40)} ${process.execPath} --no-env-file --config=/dev/null ${bootstrap} >/dev/null 2>/dev/null; touch ${bootstrapDone}; sleep 30`;
+      const wrapper = Bun.spawn({ cmd: ["/bin/sh", "-c", command], stdout: "ignore", stderr: "ignore" });
+      for (let attempt = 0; !existsSync(bootstrapDone) && attempt < 120; attempt += 1) await Bun.sleep(25);
+      expect(existsSync(bootstrapDone)).toBe(true);
+      expect(existsSync(join(boot, "wrapper-guardian-ready"))).toBe(true);
+      wrapper.kill("SIGKILL");
+      await wrapper.exited;
+      for (let attempt = 0; existsSync(boot) && attempt < 120; attempt += 1) await Bun.sleep(50);
+      expect(existsSync(boot)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("kernel containment blocks a rapid double-fork escape before it can leave the Hermes process group", async () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-hermes-escape-"));
     const marker = join(root, "escaped-marker");
     const fakeHermes = join(root, "fake-hermes");
     writeFileSync(
       fakeHermes,
-      `#!/usr/bin/python3\nimport os, time\npid = os.fork()\nif pid == 0:\n    os.setsid()\n    devnull = os.open("/dev/null", os.O_RDWR)\n    for fd in (0, 1, 2):\n        os.dup2(devnull, fd)\n    if devnull > 2:\n        os.close(devnull)\n    time.sleep(1.0)\n    open(${JSON.stringify(marker)}, "w").close()\n    time.sleep(2.0)\n    os._exit(0)\ntime.sleep(0.3)\n`,
+      `#!/usr/bin/python3\nimport os, time\ntry:\n    pid = os.fork()\nexcept OSError:\n    time.sleep(0.1)\n    raise SystemExit(0)\nif pid == 0:\n    os.setsid()\n    if os.fork() > 0:\n        os._exit(0)\n    open(${JSON.stringify(marker)}, "w").close()\n    time.sleep(2.0)\n    os._exit(0)\nos.waitpid(pid, 0)\n`,
     );
     chmodSync(fakeHermes, 0o755);
     const fixture = await createAnonymousFixtureSnapshot();
@@ -1126,7 +1177,7 @@ exit 0
         timeoutMs: 5_000,
       });
       expect(result.case_cleanup_verified).toBe(true);
-      await Bun.sleep(1_100);
+      await Bun.sleep(300);
       expect(existsSync(marker)).toBe(false);
     } finally {
       await runtime.close();

@@ -52,7 +52,6 @@ type WorkerStage = "PREPARE" | "SPAWN" | "IDENTITY" | "WAIT" | "STATUS" | "GROUP
 let workerStage: WorkerStage = "PREPARE";
 let wrapperOrphaned = false;
 let bootstrapInterrupted = false;
-let activeWrapperGuardian: GuardianLease | null = null;
 
 function emitFatal(code: string): never {
   throw new BootstrapFatal(code);
@@ -209,34 +208,57 @@ interface LockLease {
   started: string;
 }
 
-interface GuardianLease {
-  pid: number;
-  started: string;
-}
-
-async function acquireWrapperGuardian(wrapperIdentity: string, bootRoot: string): Promise<GuardianLease> {
+async function acquireWrapperGuardian(wrapperIdentity: string, bootRoot: string): Promise<void> {
+  const bootstrapIdentity = processStart(process.pid);
+  if (!bootstrapIdentity) emitFatal("BOOTSTRAP_GUARDIAN_UNVERIFIABLE");
   const script = `
-import ctypes, os, signal, sys, time
+import ctypes, os, shutil, signal, sys, time
 class B(ctypes.Structure):
     _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
 lib = ctypes.CDLL("/usr/lib/libproc.dylib")
 wrapper_pid, _, _, wrapper_start = [int(value) for value in sys.argv[1].split(":")]
-parent = int(sys.argv[2])
-marker = sys.argv[3]
-while os.getppid() == parent:
+parent_pid, _, _, parent_start = [int(value) for value in sys.argv[2].split(":")]
+boot_root = sys.argv[3]
+marker = os.path.join(boot_root, "wrapper-orphaned")
+def current(pid):
     b = B()
-    n = lib.proc_pidinfo(wrapper_pid, 3, 0, ctypes.byref(b), ctypes.sizeof(b))
-    current_start = b.start_sec * 1000000 + b.start_usec
-    if n != ctypes.sizeof(b) or b.pid != wrapper_pid or current_start != wrapper_start:
-        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(fd)
-        os.kill(parent, signal.SIGTERM)
+    n = lib.proc_pidinfo(pid, 3, 0, ctypes.byref(b), ctypes.sizeof(b))
+    return None if n != ctypes.sizeof(b) else (b.pid, b.start_sec * 1000000 + b.start_usec)
+def force_remove(path):
+    def repair(action, failed_path, _):
+        try:
+            os.chmod(failed_path, 0o700)
+        except OSError:
+            pass
+        action(failed_path)
+    shutil.rmtree(path, ignore_errors=False, onerror=repair)
+while True:
+    if not os.path.exists(boot_root):
+        sys.exit(0)
+    wrapper = current(wrapper_pid)
+    if wrapper is None or wrapper != (wrapper_pid, wrapper_start):
+        try:
+            fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except (FileExistsError, FileNotFoundError):
+            pass
+        parent = current(parent_pid)
+        if parent == (parent_pid, parent_start):
+            os.kill(parent_pid, signal.SIGTERM)
+            for _ in range(100):
+                if current(parent_pid) != (parent_pid, parent_start):
+                    break
+                time.sleep(0.05)
+        if os.path.exists(boot_root):
+            try:
+                force_remove(boot_root)
+            except FileNotFoundError:
+                pass
         sys.exit(0)
     time.sleep(0.05)
 `;
-  const marker = join(bootRoot, "wrapper-orphaned");
   const child = Bun.spawn({
-    cmd: ["/usr/bin/python3", "-I", "-c", script, wrapperIdentity, String(process.pid), marker],
+    cmd: ["/usr/bin/python3", "-I", "-c", script, wrapperIdentity, bootstrapIdentity, bootRoot],
     env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
     stdin: "ignore",
     stdout: "ignore",
@@ -257,16 +279,6 @@ while os.getppid() == parent:
   // before the bootstrap has installed its parent-death channel.
   writeFileSync(join(bootRoot, "wrapper-guardian-ready"), `${started}\n`, { mode: 0o600 });
   child.unref();
-  return { pid: child.pid, started };
-}
-
-async function releaseWrapperGuardian(lease: GuardianLease): Promise<void> {
-  if (processStart(lease.pid) !== lease.started) return;
-  Bun.spawnSync({ cmd: ["/bin/kill", "-TERM", String(lease.pid)], stdout: "pipe", stderr: "pipe" });
-  for (let attempt = 0; attempt < 40 && processStart(lease.pid) === lease.started; attempt += 1) {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
-  }
-  if (processStart(lease.pid) === lease.started) emitFatal("BOOTSTRAP_GUARDIAN_RELEASE_FAILED");
 }
 
 async function acquireLock(): Promise<LockLease> {
@@ -393,8 +405,6 @@ async function main(): Promise<number> {
   const wrapperPid = process.ppid;
   const wrapperStarted = processStart(wrapperPid);
   if (!wrapperStarted) emitFatal("BOOTSTRAP_WRAPPER_IDENTITY_UNAVAILABLE");
-  const wrapperGuardian = await acquireWrapperGuardian(wrapperStarted, bootRoot);
-  activeWrapperGuardian = wrapperGuardian;
   const bootstrapSignalHandlers = new Map<NodeJS.Signals, () => void>();
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     const handler = () => {
@@ -404,6 +414,7 @@ async function main(): Promise<number> {
     bootstrapSignalHandlers.set(signal, handler);
     process.on(signal, handler);
   }
+  await acquireWrapperGuardian(wrapperStarted, bootRoot);
   const sourceRoot = resolve(required("CBRAIN_CANARY_SOURCE_ROOT"));
   const hermesExecutable = resolve(required("CBRAIN_CANARY_HERMES_EXEC"));
   if (!isAbsolute(bootRoot) || !isAbsolute(sourceRoot) || !isAbsolute(hermesExecutable))
@@ -737,8 +748,6 @@ async function main(): Promise<number> {
     }
     bootstrapStage = "LOCK_RELEASE";
     await releaseLock(lockLease);
-    await releaseWrapperGuardian(wrapperGuardian);
-    activeWrapperGuardian = null;
     for (const [signal, handler] of bootstrapSignalHandlers) process.off(signal, handler);
     if (snapshotCleanupFailed) emitFatal("CANARY_SNAPSHOT_CLEANUP_FAILED");
   }
@@ -754,14 +763,6 @@ async function main(): Promise<number> {
 try {
   process.exitCode = await main();
 } catch (error) {
-  if (activeWrapperGuardian) {
-    try {
-      await releaseWrapperGuardian(activeWrapperGuardian);
-    } catch {
-      /* Preserve the primary fail-closed result; process exit releases the guardian. */
-    }
-    activeWrapperGuardian = null;
-  }
   if (wrapperOrphaned) {
     const bootRoot = process.env.CBRAIN_CANARY_BOOT_ROOT;
     if (bootRoot) {

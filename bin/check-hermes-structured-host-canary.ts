@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   ANONYMOUS_FIXTURE_MARKERS,
+  assertHermesInstallRootHasNoEnv,
   buildHermesChatArgs,
   buildIsolatedHermesConfig,
   canonicalEvidenceDigest,
@@ -127,7 +128,7 @@ try {
   const originalPythonBase = dirname(dirname(realpathSync(join(originalVenv, "bin", "python"))));
 
   fatalStage = "HERMES_SNAPSHOT";
-  if (readdirSync(originalSource).some((name) => name === ".env" || name.startsWith(".env."))) fatal();
+  assertHermesInstallRootHasNoEnv(originalSource);
   const hermesSnapshot = await createHermesRuntimeSnapshot({
     manifest,
     sourceRepoRoot: originalSource,

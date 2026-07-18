@@ -110,6 +110,8 @@ export interface SizePairEvidence {
     structured_tokens: number;
     legacy_code_units: number;
     structured_code_units: number;
+    legacy_contract_verified: boolean;
+    structured_contract_verified: boolean;
   };
   worst_structured_tokens: number;
   best_legacy_tokens: number;
@@ -411,6 +413,12 @@ export interface HermesRuntimeSnapshot {
   readonly removed: boolean;
   verifyUnchanged(): boolean;
   close(): Promise<void>;
+}
+
+export function assertHermesInstallRootHasNoEnv(sourceRoot: string): void {
+  if (readdirSync(sourceRoot).some((name) => name === ".env" || name.startsWith(".env."))) {
+    throw new Error("Hermes install root contains an environment file");
+  }
 }
 
 export function buildCanaryToolArguments(tool: ToolName, branch: Branch): Record<string, unknown> {
@@ -1358,6 +1366,45 @@ if n != ctypes.sizeof(b):
 print(json.dumps({"pid": b.pid, "ppid": b.ppid, "pgid": b.pgid, "start_us": b.start_sec * 1000000 + b.start_usec}, separators=(",", ":")))
 `;
 
+const DARWIN_NO_FORK_SANDBOX_PROFILE = "(version 1)(allow default)(deny process-fork)";
+let noForkSandboxVerified = false;
+
+function verifyDarwinNoForkSandbox(): void {
+  if (noForkSandboxVerified) return;
+  const allowsRoot = Bun.spawnSync({
+    cmd: [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      DARWIN_NO_FORK_SANDBOX_PROFILE,
+      "/usr/bin/python3",
+      "-I",
+      "-c",
+      "print('sandbox-ready')",
+    ],
+    env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const blocksFork = Bun.spawnSync({
+    cmd: [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      DARWIN_NO_FORK_SANDBOX_PROFILE,
+      "/usr/bin/python3",
+      "-I",
+      "-c",
+      "import os; os.fork()",
+    ],
+    env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (allowsRoot.exitCode !== 0 || allowsRoot.stdout.toString().trim() !== "sandbox-ready" || blocksFork.exitCode === 0) {
+    throw new Error("Darwin no-fork sandbox unavailable");
+  }
+  noForkSandboxVerified = true;
+}
+
 function readOwnedProcessIdentity(pid: number): OwnedProcessIdentity | null {
   try {
     const value = JSON.parse(
@@ -1377,31 +1424,6 @@ function sameOwnedProcess(identity: OwnedProcessIdentity | null): boolean {
   if (!identity) return false;
   const current = readOwnedProcessIdentity(identity.pid);
   return current !== null && current.start_us === identity.start_us;
-}
-
-function captureOwnedDescendants(owned: Map<number, OwnedProcessIdentity>): void {
-  let rows: Array<{ pid: number; ppid: number; pgid: number }> = [];
-  try {
-    const output = execFileSync("/bin/ps", ["-axo", "pid=,ppid=,pgid="], { encoding: "utf8" });
-    rows = output.split("\n").flatMap((line) => {
-      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/);
-      return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]) }] : [];
-    });
-  } catch {
-    return;
-  }
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const row of rows) {
-      if (owned.has(row.pid) || !owned.has(row.ppid)) continue;
-      const identity = readOwnedProcessIdentity(row.pid);
-      if (identity && identity.ppid === row.ppid && identity.pgid === row.pgid) {
-        owned.set(row.pid, identity);
-        changed = true;
-      }
-    }
-  }
 }
 
 function processGroupIsEmpty(pgid: number): boolean {
@@ -1475,13 +1497,18 @@ export async function runRealHermesProjectionCase(options: {
   let result: RealHermesProjectionCaseResult | undefined;
   let childIdentity: OwnedProcessIdentity | null = null;
   const ownedProcesses = new Map<number, OwnedProcessIdentity>();
-  let stopProcessMonitor = false;
-  let processMonitor: Promise<void> | undefined;
   let interrupted: ((error: Error) => void) | undefined;
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
   try {
+    verifyDarwinNoForkSandbox();
     child = Bun.spawn({
-      cmd: [options.hermesExecutable, ...buildHermesChatArgs(prompt)],
+      cmd: [
+        "/usr/bin/sandbox-exec",
+        "-p",
+        DARWIN_NO_FORK_SANDBOX_PROFILE,
+        options.hermesExecutable,
+        ...buildHermesChatArgs(prompt),
+      ],
       cwd,
       env,
       detached: true,
@@ -1494,13 +1521,6 @@ export async function runRealHermesProjectionCase(options: {
       throw new Error("Hermes child birth identity unavailable");
     }
     ownedProcesses.set(child.pid, childIdentity);
-    processMonitor = (async () => {
-      while (!stopProcessMonitor) {
-        captureOwnedDescendants(ownedProcesses);
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
-      }
-      captureOwnedDescendants(ownedProcesses);
-    })();
     const signalPromise = new Promise<never>((_, reject) => {
       interrupted = reject;
     });
@@ -1565,9 +1585,6 @@ export async function runRealHermesProjectionCase(options: {
   } finally {
     for (const [signal, handler] of signalHandlers) process.off(signal, handler);
     if (timer) clearTimeout(timer);
-    stopProcessMonitor = true;
-    if (processMonitor) await processMonitor.catch(() => {});
-    captureOwnedDescendants(ownedProcesses);
     if (child && child.exitCode === null && sameOwnedProcess(childIdentity)) {
       try {
         process.kill(-child.pid, "SIGKILL");
@@ -1743,8 +1760,14 @@ export async function runRealHermesCanaryMatrix(options: {
   const expectedNames = ["mcp_cbrain_canary_query", "mcp_cbrain_canary_deep_recall", "mcp_cbrain_canary_cbrain_recall"]
     .sort()
     .join("\0");
-  const cases = primary.map(
-    ({ spec, host, projection, result_text_tokens, structured_content_tokens, wrapper_total_tokens }) => ({
+  const toCaseResult = ({
+    spec,
+    host,
+    projection,
+    result_text_tokens,
+    structured_content_tokens,
+    wrapper_total_tokens,
+  }: Execution): CanaryCaseResult => ({
       ...spec,
       runtime_identity_verified: host.exit_code === 0,
       advertised_tool_verified: [...host.advertised_tool_names].sort().join("\0") === expectedNames,
@@ -1781,8 +1804,8 @@ export async function runRealHermesCanaryMatrix(options: {
       structured_content_tokens: structured_content_tokens as number,
       wrapper_total_tokens: wrapper_total_tokens as number,
       wrapper_total_code_units: projection.wrapper_text.length,
-    }),
-  );
+  });
+  const cases = primary.map(toCaseResult);
 
   const lookup = (items: Execution[], mode: OutputMode, tool: ToolName, branch: "normal" | "empty"): Execution => {
     const found = items.find(
@@ -1810,6 +1833,8 @@ export async function runRealHermesCanaryMatrix(options: {
         structured_tokens: baStructured.wrapper_total_tokens as number,
         legacy_code_units: baLegacy.projection.wrapper_text.length,
         structured_code_units: baStructured.projection.wrapper_text.length,
+        legacy_contract_verified: caseContractPasses(toCaseResult(baLegacy)),
+        structured_contract_verified: caseContractPasses(toCaseResult(baStructured)),
       };
       const worstStructured = Math.max(ab.structured_tokens, ba.structured_tokens);
       const bestLegacy = Math.min(ab.legacy_tokens, ba.legacy_tokens);
@@ -2470,6 +2495,9 @@ function validateSizePairs(pairs: readonly SizePairEvidence[]): {
       return { valid: false, withinBudget: false };
     }
     if (pair.ab.order !== "legacy_then_structured" || pair.ba.order !== "structured_then_legacy") {
+      return { valid: false, withinBudget: false };
+    }
+    if (!pair.ba.legacy_contract_verified || !pair.ba.structured_contract_verified) {
       return { valid: false, withinBudget: false };
     }
     const values = [
