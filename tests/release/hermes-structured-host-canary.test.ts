@@ -48,7 +48,10 @@ import {
 } from "../../bin/lib/hermes-structured-host-canary.js";
 
 import { extractLiveCommandFileCandidates } from "../../bin/lib/hermes-canary-live-fingerprint.js";
-import { runSyntheticGit } from "../helpers/synthetic-git.js";
+import {
+  buildSyntheticGitEnvironment,
+  runSyntheticGit,
+} from "../helpers/synthetic-git.js";
 
 function createBootstrapTestRoot(): string {
   const path = `/tmp/cbrain-hermes-structured-bootstrap.${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -1721,6 +1724,7 @@ time.sleep(30)
         ]).exitCode,
       ).toBe(0);
       const sourceCommit = runSyntheticGit(source, ["rev-parse", "HEAD"]).stdout.toString().trim();
+      const gitEnvironment = buildSyntheticGitEnvironment();
       const manifest = createHermesRuntimeManifest({
         hermesVersion: "0.18.0",
         sourceRepoRoot: source,
@@ -1728,6 +1732,7 @@ time.sleep(30)
         pythonBaseRoot: pythonBase,
         venvRoot: venv,
         tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+        gitEnvironment,
       });
       const serialized = JSON.stringify(manifest);
       expect(serialized).not.toContain(root);
@@ -1740,6 +1745,7 @@ time.sleep(30)
           pythonBaseRoot: pythonBase,
           venvRoot: venv,
           tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+          gitEnvironment,
         }),
       ).toBe(true);
 
@@ -1750,6 +1756,7 @@ time.sleep(30)
           pythonBaseRoot: pythonBase,
           venvRoot: venv,
           tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+          gitEnvironment,
         }),
       ).toBe(false);
       expect(
@@ -1760,6 +1767,7 @@ time.sleep(30)
           pythonBaseRoot: pythonBase,
           venvRoot: venv,
           tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+          gitEnvironment,
         }).aggregate_digest,
       ).not.toBe(manifest.aggregate_digest);
 
@@ -1771,6 +1779,7 @@ time.sleep(30)
           pythonBaseRoot: pythonBase,
           venvRoot: venv,
           tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+          gitEnvironment,
         }),
       ).toBe(true);
     } finally {

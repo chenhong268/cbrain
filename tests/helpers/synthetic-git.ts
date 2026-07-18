@@ -1,5 +1,36 @@
 type Environment = Readonly<Record<string, string | undefined>>;
 
+const KNOWN_REPOSITORY_LOCAL_ENVIRONMENT_NAMES = [
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_CONFIG",
+	"GIT_CONFIG_PARAMETERS",
+	"GIT_CONFIG_COUNT",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_IMPLICIT_WORK_TREE",
+	"GIT_GRAFT_FILE",
+	"GIT_INDEX_FILE",
+	"GIT_NO_REPLACE_OBJECTS",
+	"GIT_REPLACE_REF_BASE",
+	"GIT_PREFIX",
+	"GIT_INTERNAL_SUPER_PREFIX",
+	"GIT_SHALLOW_FILE",
+	"GIT_COMMON_DIR",
+] as const;
+
+const MINIMUM_REPORTED_NAMES = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_COMMON_DIR",
+] as const;
+
+function isGitConfigControl(name: string): boolean {
+	return name === "GIT_CONFIG" || name.startsWith("GIT_CONFIG_");
+}
+
 function definedEnvironment(environment: Environment): Record<string, string> {
 	return Object.fromEntries(
 		Object.entries(environment).filter(
@@ -35,13 +66,14 @@ export function gitRepositoryLocalEnvironmentNames(
 		.filter((name) => name.length > 0);
 	if (
 		names.length === 0 ||
-		names.some((name) => !/^[A-Z][A-Z0-9_]*$/.test(name))
+		names.some((name) => !/^[A-Z][A-Z0-9_]*$/.test(name)) ||
+		MINIMUM_REPORTED_NAMES.some((name) => !names.includes(name))
 	) {
 		throw new Error(
 			"Git returned an invalid repository-local environment variable list",
 		);
 	}
-	return [...new Set(names)];
+	return [...new Set([...KNOWN_REPOSITORY_LOCAL_ENVIRONMENT_NAMES, ...names])];
 }
 
 export function buildSyntheticGitEnvironment(
@@ -51,6 +83,11 @@ export function buildSyntheticGitEnvironment(
 	for (const name of gitRepositoryLocalEnvironmentNames(environment)) {
 		delete isolated[name];
 	}
+	for (const name of Object.keys(isolated)) {
+		if (isGitConfigControl(name)) delete isolated[name];
+	}
+	isolated.GIT_CONFIG_NOSYSTEM = "1";
+	isolated.GIT_CONFIG_GLOBAL = "/dev/null";
 	return isolated;
 }
 
@@ -60,7 +97,7 @@ export function runSyntheticGit(
 	environment: Environment = process.env,
 ) {
 	return Bun.spawnSync({
-		cmd: ["git", ...args],
+		cmd: ["git", "-c", "core.hooksPath=/dev/null", ...args],
 		cwd,
 		env: buildSyntheticGitEnvironment(environment),
 		stdout: "pipe",
