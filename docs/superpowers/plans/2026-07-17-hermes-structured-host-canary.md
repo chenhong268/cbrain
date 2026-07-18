@@ -689,6 +689,15 @@ The first frozen real-canary attempt failed closed before the matrix with `CANAR
 - brings both executable TypeScript canary entrypoints into `tsconfig.test.json`, turning the previously runtime-only scope error into a mandatory compile-time failure;
 - invalidates the earlier machine attempt and evidence checkpoint; all focused/full checks, manifest approval, adversarial reviews, and the complete real canary must be repeated.
 
+#### Real-canary marker-race correction r9 — 2026-07-18
+
+The second frozen attempt exposed a marker/process observation race: the wait-loop condition could observe no marker, then the worker could atomically rename its marker and exit before the following birth-identity probe. Bootstrap treated the exited process as missing evidence without re-reading the marker. The correction:
+
+- after observing worker exit, performs a bounded 100 ms marker recheck before declaring `CANARY_WORKER_STATUS_MISSING`;
+- proceeds to the existing schema/hash/status validation when the atomically committed marker appears during that window;
+- adds a source-contract regression that requires the recheck to occur between the death probe and missing-status fatal;
+- invalidates both earlier fatal attempts and again requires full verification, evidence approval, adversarial review, and a fresh complete real canary.
+
 - [ ] **Step 5: Commit, publish, CI, and issue state**
 
 Commit history now contains the approved plan, independently approved runtime-manifest/tokenizer checkpoint, reviewed harness checkpoint used by the evidence snapshot, and final report commit. Confirm the worktree is clean and diff is issue-scoped. Then push `codex/338-structured-canary`, open a ready PR linked to #338, wait for GitHub CI, and merge only if green. Close #338 with the aggregate verdict/evidence. Update #333: close it only if #338 fulfills the parent completion standard; otherwise leave it open with the exact host-side gap. Never modify the live rollout default in this issue.

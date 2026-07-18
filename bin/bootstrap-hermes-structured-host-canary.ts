@@ -577,7 +577,11 @@ async function main(): Promise<number> {
         if (pendingInterrupt) emitFatal("CANARY_WORKER_INTERRUPTED");
         if (bootstrapInterrupted) emitFatal("CANARY_WORKER_INTERRUPTED");
         if (childStarted && processStart(child.pid) !== childStarted) {
-          emitFatal("CANARY_WORKER_STATUS_MISSING");
+          for (let attempt = 0; !existsSync(workerExitStatus) && attempt < 10; attempt += 1) {
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+          }
+          if (!existsSync(workerExitStatus)) emitFatal("CANARY_WORKER_STATUS_MISSING");
+          break;
         }
         if (Date.now() >= deadline) emitFatal("CANARY_WORKER_TIMEOUT");
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));

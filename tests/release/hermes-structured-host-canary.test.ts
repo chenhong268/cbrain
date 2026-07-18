@@ -1802,6 +1802,12 @@ time.sleep(30)
     expect(worker).toContain("worker-commit-marker.tmp");
     expect(worker).toContain("output_sha256");
     expect(bootstrap).toContain("CANARY_WORKER_STATUS_INVALID");
+    const workerDeathCheck = bootstrap.indexOf("if (childStarted && processStart(child.pid) !== childStarted)");
+    const missingStatus = bootstrap.indexOf('emitFatal("CANARY_WORKER_STATUS_MISSING")', workerDeathCheck);
+    const markerRecheck = bootstrap.indexOf("existsSync(workerExitStatus)", workerDeathCheck);
+    expect(workerDeathCheck).toBeGreaterThan(-1);
+    expect(markerRecheck).toBeGreaterThan(workerDeathCheck);
+    expect(markerRecheck).toBeLessThan(missingStatus);
     expect(supervisor.indexOf("signal.signal(sig, on_signal)")).toBeLessThan(
       supervisor.indexOf('candidate_root = f"/tmp/cbrain-hermes-structured-bootstrap.'),
     );
