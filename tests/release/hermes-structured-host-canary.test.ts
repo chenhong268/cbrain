@@ -1,12 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   ANONYMOUS_FIXTURE_MARKERS,
+  assertTreeSymlinksContained,
   analyzeHermesHostProjection,
   buildCanaryCaseSpecs,
   buildLiveServiceFingerprint,
@@ -51,6 +61,7 @@ function evidenceManifest(): PublicEvidenceManifest {
     tokenizer_blob_digest: digest,
     fixture_schema_digest: digest,
     semantic_config_template_digest: digest,
+    tool_schema_digest: digest,
   };
 }
 
@@ -62,16 +73,15 @@ function caseResult(
   const error = branch === "error";
   const structuredSuccess = mode === "structured" && !error;
   const includeRaw = branch === "include_raw";
-  const legacyRaw = mode === "legacy" && !error && (
-    tool !== "deep_recall" || includeRaw
-  );
-  const auditContract = !structuredSuccess || !includeRaw
-    ? "none"
-    : tool === "query"
-      ? "query_locator_metadata"
-      : tool === "deep_recall"
-        ? "deep_locator_metadata"
-        : "frontdoor_routing_metadata";
+  const legacyRaw = mode === "legacy" && !error && (tool !== "deep_recall" || includeRaw);
+  const auditContract =
+    !structuredSuccess || !includeRaw
+      ? "none"
+      : tool === "query"
+        ? "query_locator_metadata"
+        : tool === "deep_recall"
+          ? "deep_locator_metadata"
+          : "frontdoor_routing_metadata";
 
   return {
     case_id: `${mode}:${tool}:${branch}`,
@@ -82,6 +92,11 @@ function caseResult(
     advertised_tool_verified: true,
     advertised_schema_verified: true,
     cbrain_invocation_count: 1,
+    cbrain_call_verified: true,
+    mcp_session_verified: true,
+    session_cleanup_verified: true,
+    case_cleanup_verified: true,
+    semantic_config_verified: true,
     host_projection_verified: true,
     round_trip_verified: true,
     result_title_present: branch === "normal" || includeRaw,
@@ -92,6 +107,8 @@ function caseResult(
     default_audit_present: false,
     expected_audit_contract: auditContract,
     audit_contract_verified: true,
+    audit_redaction_exercised: !error && structuredSuccess && includeRaw,
+    error_redaction_exercised: error,
     audit_sensitive_exposed: false,
     surface_internal_exposed: false,
     expected_projection_kind: error
@@ -115,31 +132,33 @@ function caseResult(
 }
 
 function sizePairs(): SizePairEvidence[] {
-  return tools.flatMap((tool) => (["normal", "empty"] as const).map((branch) => ({
-    pair_id: `${tool}:${branch}`,
-    tool,
-    branch,
-    ab: {
-      order: "legacy_then_structured" as const,
-      legacy_tokens: 160,
-      structured_tokens: 170,
-      legacy_code_units: 640,
-      structured_code_units: 680,
-    },
-    ba: {
-      order: "structured_then_legacy" as const,
-      legacy_tokens: 161,
-      structured_tokens: 169,
-      legacy_code_units: 644,
-      structured_code_units: 676,
-    },
-    worst_structured_tokens: 170,
-    best_legacy_tokens: 160,
-    growth_tokens: 10,
-    ratio: 170 / 160,
-    absolute_gate_passed: true,
-    relative_or_floor_gate_passed: true,
-  })));
+  return tools.flatMap((tool) =>
+    (["normal", "empty"] as const).map((branch) => ({
+      pair_id: `${tool}:${branch}`,
+      tool,
+      branch,
+      ab: {
+        order: "legacy_then_structured" as const,
+        legacy_tokens: 160,
+        structured_tokens: 170,
+        legacy_code_units: 640,
+        structured_code_units: 680,
+      },
+      ba: {
+        order: "structured_then_legacy" as const,
+        legacy_tokens: 161,
+        structured_tokens: 169,
+        legacy_code_units: 644,
+        structured_code_units: 676,
+      },
+      worst_structured_tokens: 170,
+      best_legacy_tokens: 160,
+      growth_tokens: 10,
+      ratio: 170 / 160,
+      absolute_gate_passed: true,
+      relative_or_floor_gate_passed: true,
+    })),
+  );
 }
 
 function validInput() {
@@ -157,6 +176,7 @@ function validInput() {
     cleanup_verified: true,
     semantic_answer_quality_not_measured: true,
     evidence_manifest: manifest,
+    observed_evidence_manifest: manifest,
     evidence_generation_digest: canonicalEvidenceDigest(manifest),
     rollback_command_id: null,
   } as const;
@@ -183,9 +203,9 @@ describe("Hermes structured host canary contract", () => {
     expect(evaluateCanaryReport({ ...missing, cases: missing.cases.slice(1) }).host_compatibility).toBe("incompatible");
 
     const broken = validInput();
-    const cases = broken.cases.map((item, index) => index === 0
-      ? { ...item, projection_contract_verified: false }
-      : item);
+    const cases = broken.cases.map((item, index) =>
+      index === 0 ? { ...item, projection_contract_verified: false } : item,
+    );
     expect(evaluateCanaryReport({ ...broken, cases }).host_compatibility).toBe("incompatible");
   });
 
@@ -194,19 +214,45 @@ describe("Hermes structured host canary contract", () => {
     const duplicate = [...input.size_pairs.slice(0, 5), input.size_pairs[0]];
     expect(evaluateCanaryReport({ ...input, size_pairs: duplicate }).host_compatibility).toBe("incompatible");
 
-    const wrongSelector = input.size_pairs.map((pair, index) => index === 0
-      ? { ...pair, worst_structured_tokens: 169 }
-      : pair);
+    const wrongSelector = input.size_pairs.map((pair, index) =>
+      index === 0 ? { ...pair, worst_structured_tokens: 169 } : pair,
+    );
     expect(evaluateCanaryReport({ ...input, size_pairs: wrongSelector }).host_compatibility).toBe("incompatible");
   });
 
   test("binds the aggregate digest to the fixed-key public evidence manifest", () => {
     const input = validInput();
     expect(input.evidence_generation_digest).toMatch(/^[a-f0-9]{64}$/);
-    expect(evaluateCanaryReport({
-      ...input,
-      evidence_generation_digest: "b".repeat(64),
-    }).host_compatibility).toBe("incompatible");
+    expect(
+      evaluateCanaryReport({
+        ...input,
+        evidence_generation_digest: "b".repeat(64),
+      }).host_compatibility,
+    ).toBe("incompatible");
+
+    expect(
+      evaluateCanaryReport({
+        ...input,
+        observed_evidence_manifest: {
+          ...input.observed_evidence_manifest,
+          node_modules_tree_digest: "b".repeat(64),
+        },
+      }).host_compatibility,
+    ).toBe("incompatible");
+  });
+
+  test("fails closed on wrong tool correlation, MCP session cleanup, or semantic config", () => {
+    const input = validInput();
+    for (const field of [
+      "cbrain_call_verified",
+      "mcp_session_verified",
+      "session_cleanup_verified",
+      "case_cleanup_verified",
+      "semantic_config_verified",
+    ] as const) {
+      const cases = input.cases.map((item, index) => (index === 0 ? { ...item, [field]: false } : item));
+      expect(evaluateCanaryReport({ ...input, cases }).host_compatibility, field).toBe("incompatible");
+    }
   });
 });
 
@@ -214,10 +260,22 @@ describe("Hermes runtime isolation contract", () => {
   test("builds the real chat command and exact three-tool config", () => {
     const args = buildHermesChatArgs("匿名受控请求");
     expect(args).toEqual([
-      "chat", "-q", "匿名受控请求", "-Q", "--cli",
-      "--max-turns", "4", "--ignore-rules", "--source", "tool",
-      "--model", "canary-model", "--provider", "custom",
-      "--toolsets", "mcp-cbrain_canary",
+      "chat",
+      "-q",
+      "匿名受控请求",
+      "-Q",
+      "--cli",
+      "--max-turns",
+      "4",
+      "--ignore-rules",
+      "--source",
+      "tool",
+      "--model",
+      "canary-model",
+      "--provider",
+      "custom",
+      "--toolsets",
+      "mcp-cbrain_canary",
     ]);
 
     const config = buildIsolatedHermesConfig({
@@ -226,9 +284,7 @@ describe("Hermes runtime isolation contract", () => {
     });
     expect(config.tools.tool_search.enabled).toBe("off");
     expect(config.plugins.enabled).toEqual([]);
-    expect(config.mcp_servers.cbrain_canary.tools.include).toEqual([
-      "query", "deep_recall", "cbrain_recall",
-    ]);
+    expect(config.mcp_servers.cbrain_canary.tools.include).toEqual(["query", "deep_recall", "cbrain_recall"]);
     expect(JSON.stringify(config)).not.toContain("0.0.0.0");
   });
 
@@ -255,23 +311,61 @@ describe("Hermes runtime isolation contract", () => {
     expect(env.HTTPS_PROXY).toBeUndefined();
     expect(env.HERMES_BUNDLED_PLUGINS).toBeUndefined();
     expect(Object.keys(env).sort()).toEqual([
-      "HERMES_HOME", "HERMES_IGNORE_RULES", "HERMES_MANAGED_DIR", "HOME",
-      "LANG", "LC_ALL", "OPENAI_API_KEY", "PATH", "PYTHONNOUSERSITE",
-      "TIKTOKEN_CACHE_DIR", "TMPDIR",
+      "HERMES_HOME",
+      "HERMES_IGNORE_RULES",
+      "HERMES_MANAGED_DIR",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "OPENAI_API_KEY",
+      "PATH",
+      "PYTHONNOUSERSITE",
+      "TIKTOKEN_CACHE_DIR",
+      "TMPDIR",
     ]);
   });
 
   test("live-service fingerprint binds process birth identity without exposing commands", () => {
     const first = buildLiveServiceFingerprint([
-      { pid: 10, ppid: 1, pgid: 10, started: "Fri Jul 17 10:00:00 2026", command: "anonymous hermes gateway" },
-      { pid: 20, ppid: 1, pgid: 20, started: "Fri Jul 17 10:01:00 2026", command: "unrelated service" },
+      {
+        pid: 10,
+        ppid: 1,
+        pgid: 10,
+        started: "Fri Jul 17 10:00:00 2026",
+        command: "anonymous hermes gateway",
+      },
+      {
+        pid: 20,
+        ppid: 1,
+        pgid: 20,
+        started: "Fri Jul 17 10:01:00 2026",
+        command: "unrelated service",
+      },
     ]);
     const same = buildLiveServiceFingerprint([
-      { pid: 10, ppid: 1, pgid: 10, started: "Fri Jul 17 10:00:00 2026", command: "anonymous hermes gateway" },
-      { pid: 20, ppid: 1, pgid: 20, started: "Fri Jul 17 10:01:00 2026", command: "unrelated service" },
+      {
+        pid: 10,
+        ppid: 1,
+        pgid: 10,
+        started: "Fri Jul 17 10:00:00 2026",
+        command: "anonymous hermes gateway",
+      },
+      {
+        pid: 20,
+        ppid: 1,
+        pgid: 20,
+        started: "Fri Jul 17 10:01:00 2026",
+        command: "unrelated service",
+      },
     ]);
     const drifted = buildLiveServiceFingerprint([
-      { pid: 10, ppid: 1, pgid: 10, started: "Fri Jul 17 10:02:00 2026", command: "anonymous hermes gateway" },
+      {
+        pid: 10,
+        ppid: 1,
+        pgid: 10,
+        started: "Fri Jul 17 10:02:00 2026",
+        command: "anonymous hermes gateway",
+      },
     ]);
     expect(first).toEqual(same);
     expect(first.digest).not.toBe(drifted.digest);
@@ -310,8 +404,24 @@ describe("Hermes runtime isolation contract", () => {
     }
   });
 
+  test("rejects snapshot symlinks that resolve outside the owned tree", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-contained-tree-test-"));
+    const outside = mkdtempSync(join(tmpdir(), "cbrain-outside-tree-test-"));
+    try {
+      writeFileSync(join(outside, "module.js"), "export default 1\n");
+      symlinkSync(join(outside, "module.js"), join(root, "escaped.js"));
+      expect(() => assertTreeSymlinksContained(root)).toThrow("snapshot symlink escapes owned tree");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   test("plan's evidence entry forbids Bun dotenv bootstrap", () => {
-    const plan = readFileSync(join(import.meta.dir, "../../docs/superpowers/plans/2026-07-17-hermes-structured-host-canary.md"), "utf8");
+    const plan = readFileSync(
+      join(import.meta.dir, "../../docs/superpowers/plans/2026-07-17-hermes-structured-host-canary.md"),
+      "utf8",
+    );
     expect(plan).toContain("--no-env-file");
     expect(plan).toContain("--config=/dev/null");
     expect(plan).toContain("never use `bun run` for evidence");
@@ -322,14 +432,17 @@ describe("Hermes runtime isolation contract", () => {
     try {
       const fakeBun = join(root, "fake-bun");
       const fakeHermes = join(root, "fake-hermes");
-      writeFileSync(fakeBun, `#!/bin/sh
+      writeFileSync(
+        fakeBun,
+        `#!/bin/sh
 printf 'ARGS=%s\n' "$*"
 printf 'HOME=%s\n' "$HOME"
 printf 'TMPDIR=%s\n' "$TMPDIR"
 printf 'PARENT_SECRET=%s\n' "\${PARENT_SECRET-unset}"
 printf 'BUNFIG=%s\n' "\${BUN_CONFIG_VERBOSE_FETCH-unset}"
 exit 0
-`);
+`,
+      );
       writeFileSync(fakeHermes, "#!/bin/sh\nexit 0\n");
       chmodSync(fakeBun, 0o755);
       chmodSync(fakeHermes, 0o755);
@@ -369,12 +482,7 @@ exit 0
       chmodSync(fakeHermes, 0o755);
       const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
       const result = Bun.spawnSync({
-        cmd: [
-          "/bin/sh", wrapper,
-          "--bun", process.execPath,
-          "--hermes", fakeHermes,
-          "--fault", "bootstrap",
-        ],
+        cmd: ["/bin/sh", wrapper, "--bun", process.execPath, "--hermes", fakeHermes, "--fault", "bootstrap"],
         cwd: root,
         env: { ...process.env, PARENT_SECRET: "must-not-cross-bootstrap" },
         stdout: "pipe",
@@ -386,6 +494,38 @@ exit 0
       );
       expect(result.stdout.toString()).not.toContain("must-not-cross-bootstrap");
       expect(result.stderr.toString()).not.toContain("must-not-cross-bootstrap");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an existing managed scope before Bun can read or rewrite it", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-managed-scope-test-"));
+    try {
+      const managed = join(root, "managed");
+      const envPath = join(managed, ".env");
+      const marker = join(root, "bun-ran");
+      const fakeBun = join(root, "fake-bun");
+      const fakeHermes = join(root, "fake-hermes");
+      mkdirSync(managed, { mode: 0o700 });
+      writeFileSync(envPath, "MALFORMED LINE MUST STAY BYTE IDENTICAL\n");
+      writeFileSync(fakeBun, `#!/bin/sh\nprintf ran > "${marker}"\nexit 0\n`);
+      writeFileSync(fakeHermes, "#!/bin/sh\nexit 0\n");
+      chmodSync(fakeBun, 0o755);
+      chmodSync(fakeHermes, 0o755);
+      const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
+      const source = readFileSync(wrapper, "utf8");
+      expect(source.indexOf("[ ! -e /etc/hermes ]")).toBeLessThan(source.indexOf("/usr/bin/env -i"));
+      const result = Bun.spawnSync({
+        cmd: ["/bin/sh", wrapper, "--bun", fakeBun, "--hermes", fakeHermes],
+        cwd: root,
+        env: { ...process.env, HERMES_MANAGED_DIR: managed },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(2);
+      expect(readFileSync(envPath, "utf8")).toBe("MALFORMED LINE MUST STAY BYTE IDENTICAL\n");
+      expect(() => readFileSync(marker, "utf8")).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -421,11 +561,27 @@ exit 0
       writeFileSync(join(source, "runtime.py"), "# frozen source\n");
       expect(Bun.spawnSync({ cmd: ["git", "init", "-q"], cwd: source }).exitCode).toBe(0);
       expect(Bun.spawnSync({ cmd: ["git", "add", "runtime.py"], cwd: source }).exitCode).toBe(0);
-      expect(Bun.spawnSync({
-        cmd: ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"],
+      expect(
+        Bun.spawnSync({
+          cmd: [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+          ],
+          cwd: source,
+        }).exitCode,
+      ).toBe(0);
+      const sourceCommit = Bun.spawnSync({
+        cmd: ["git", "rev-parse", "HEAD"],
         cwd: source,
-      }).exitCode).toBe(0);
-      const sourceCommit = Bun.spawnSync({ cmd: ["git", "rev-parse", "HEAD"], cwd: source }).stdout.toString().trim();
+      })
+        .stdout.toString()
+        .trim();
       const manifest = createHermesRuntimeManifest({
         hermesVersion: "0.18.0",
         sourceRepoRoot: source,
@@ -439,37 +595,45 @@ exit 0
       expect(manifest.python_base.file_count).toBe(2);
       expect(manifest.venv.file_count).toBe(5);
       expect(manifest.aggregate_digest).toMatch(/^[a-f0-9]{64}$/);
-      expect(verifyHermesRuntimeManifest(manifest, {
-        sourceRepoRoot: source,
-        pythonBaseRoot: pythonBase,
-        venvRoot: venv,
-        tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
-      })).toBe(true);
+      expect(
+        verifyHermesRuntimeManifest(manifest, {
+          sourceRepoRoot: source,
+          pythonBaseRoot: pythonBase,
+          venvRoot: venv,
+          tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+        }),
+      ).toBe(true);
 
       writeFileSync(join(venv, "site-packages", "mcp.py"), "# changed dependency\n");
-      expect(verifyHermesRuntimeManifest(manifest, {
-        sourceRepoRoot: source,
-        pythonBaseRoot: pythonBase,
-        venvRoot: venv,
-        tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
-      })).toBe(false);
-      expect(createHermesRuntimeManifest({
-        hermesVersion: "0.18.0",
-        sourceRepoRoot: source,
-        sourceCommit,
-        pythonBaseRoot: pythonBase,
-        venvRoot: venv,
-        tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
-      }).aggregate_digest).not.toBe(manifest.aggregate_digest);
+      expect(
+        verifyHermesRuntimeManifest(manifest, {
+          sourceRepoRoot: source,
+          pythonBaseRoot: pythonBase,
+          venvRoot: venv,
+          tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+        }),
+      ).toBe(false);
+      expect(
+        createHermesRuntimeManifest({
+          hermesVersion: "0.18.0",
+          sourceRepoRoot: source,
+          sourceCommit,
+          pythonBaseRoot: pythonBase,
+          venvRoot: venv,
+          tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+        }).aggregate_digest,
+      ).not.toBe(manifest.aggregate_digest);
 
       writeFileSync(join(venv, "site-packages", "mcp.py"), "# dependency\n");
       writeFileSync(join(source, "untracked.py"), "# ignored working-tree drift\n");
-      expect(verifyHermesRuntimeManifest(manifest, {
-        sourceRepoRoot: source,
-        pythonBaseRoot: pythonBase,
-        venvRoot: venv,
-        tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
-      })).toBe(true);
+      expect(
+        verifyHermesRuntimeManifest(manifest, {
+          sourceRepoRoot: source,
+          pythonBaseRoot: pythonBase,
+          venvRoot: venv,
+          tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+        }),
+      ).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -481,25 +645,40 @@ describe("deterministic Chat Completions SSE state machine", () => {
     const token = "synthetic-bearer-value";
     const nonce = "case-nonce-alpha";
     const toolName = "mcp_cbrain_canary_query";
-    const toolArguments = { query: "主题Alpha", strategy: "fts", include_raw: false };
-    const tools = [
-      "mcp_cbrain_canary_query",
-      "mcp_cbrain_canary_deep_recall",
-      "mcp_cbrain_canary_cbrain_recall",
-    ].map((name) => ({
-      type: "function" as const,
-      function: {
-        name,
-        description: "anonymous",
-        parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-      },
-    }));
-    const stub = startDeterministicInferenceStub({ token, nonce, toolName, toolArguments, expectedTools: tools });
+    const toolArguments = {
+      query: "主题Alpha",
+      strategy: "fts",
+      include_raw: false,
+    };
+    const tools = ["mcp_cbrain_canary_query", "mcp_cbrain_canary_deep_recall", "mcp_cbrain_canary_cbrain_recall"].map(
+      (name) => ({
+        type: "function" as const,
+        function: {
+          name,
+          description: "anonymous",
+          parameters: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+        },
+      }),
+    );
+    const stub = startDeterministicInferenceStub({
+      token,
+      nonce,
+      toolName,
+      toolArguments,
+      expectedTools: tools,
+    });
     try {
       const endpoint = `http://127.0.0.1:${stub.port}/v1/chat/completions`;
       const first = await fetch(endpoint, {
         method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({
           model: "canary-model",
           stream: true,
@@ -509,22 +688,45 @@ describe("deterministic Chat Completions SSE state machine", () => {
       });
       expect(first.status).toBe(200);
       const firstSse = await first.text();
-      expect(firstSse).toContain("finish_reason\":\"tool_calls");
+      expect(firstSse).toContain('finish_reason":"tool_calls');
       expect(firstSse).toContain(toolName);
       const callId = stub.snapshot().model_call_id;
       expect(callId).toMatch(/^call_/);
 
-      const toolContent = JSON.stringify({ result: "匿名结果正文", structuredContent: { schema_version: 1 } });
+      const toolContent = JSON.stringify({
+        result: "匿名结果正文",
+        structuredContent: { schema_version: 1 },
+      });
       const second = await fetch(endpoint, {
         method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({
           model: "canary-model",
           stream: true,
           messages: [
             { role: "user", content: `controlled ${nonce}` },
-            { role: "assistant", tool_calls: [{ id: callId, type: "function", function: { name: toolName, arguments: JSON.stringify(toolArguments) } }] },
-            { role: "tool", tool_call_id: callId, name: toolName, content: toolContent },
+            {
+              role: "assistant",
+              tool_calls: [
+                {
+                  id: callId,
+                  type: "function",
+                  function: {
+                    name: toolName,
+                    arguments: JSON.stringify(toolArguments),
+                  },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              tool_call_id: callId,
+              name: toolName,
+              content: toolContent,
+            },
           ],
           tools,
         }),
@@ -540,14 +742,20 @@ describe("deterministic Chat Completions SSE state machine", () => {
   });
 
   test("fails closed on wrong bearer, non-streaming request, or schema drift", async () => {
-    const expectedTools = [{
-      type: "function" as const,
-      function: {
-        name: "mcp_cbrain_canary_query",
-        description: "anonymous",
-        parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    const expectedTools = [
+      {
+        type: "function" as const,
+        function: {
+          name: "mcp_cbrain_canary_query",
+          description: "anonymous",
+          parameters: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+          },
+        },
       },
-    }];
+    ];
     const stub = startDeterministicInferenceStub({
       token: "expected-token",
       nonce: "nonce-beta",
@@ -558,62 +766,66 @@ describe("deterministic Chat Completions SSE state machine", () => {
     try {
       const endpoint = `http://127.0.0.1:${stub.port}/v1/chat/completions`;
       expect((await fetch(endpoint, { method: "POST", body: "{}" })).status).toBe(401);
-      expect((await fetch(endpoint, {
-        method: "POST",
-        headers: { authorization: "Bearer expected-token", "content-type": "application/json" },
-        body: JSON.stringify({ stream: false, messages: [], tools: expectedTools }),
-      })).status).toBe(400);
-      expect((await fetch(endpoint, {
-        method: "POST",
-        headers: { authorization: "Bearer expected-token", "content-type": "application/json" },
-        body: JSON.stringify({
-          stream: true,
-          messages: [{ role: "user", content: "nonce-beta" }],
-          tools: [{ ...expectedTools[0], function: { ...expectedTools[0].function, parameters: { type: "string" } } }],
-        }),
-      })).status).toBe(400);
+      expect(
+        (
+          await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              authorization: "Bearer expected-token",
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              stream: false,
+              messages: [],
+              tools: expectedTools,
+            }),
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              authorization: "Bearer expected-token",
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              stream: true,
+              messages: [{ role: "user", content: "nonce-beta" }],
+              tools: [
+                {
+                  ...expectedTools[0],
+                  function: {
+                    ...expectedTools[0].function,
+                    parameters: { type: "string" },
+                  },
+                },
+              ],
+            }),
+          })
+        ).status,
+      ).toBe(400);
     } finally {
       stub.stop();
     }
   });
 
-  test("validates a real-host generated schema by exact advertised name set", async () => {
-    const names = [
-      "mcp_cbrain_canary_query",
-      "mcp_cbrain_canary_deep_recall",
-      "mcp_cbrain_canary_cbrain_recall",
-    ];
-    const stub = startDeterministicInferenceStub({
-      token: "host-schema-token",
-      nonce: "host-schema-nonce",
-      toolName: names[0],
-      toolArguments: { query: "alphaquerytoken", strategy: "fts", include_raw: false },
-      expectedToolNames: names,
-    });
-    try {
-      const generated = names.map((name) => ({
-        type: "function" as const,
-        function: {
-          name,
-          description: "host generated",
-          parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  test("does not accept a real-host schema without an exact frozen definition", () => {
+    const names = ["mcp_cbrain_canary_query", "mcp_cbrain_canary_deep_recall", "mcp_cbrain_canary_cbrain_recall"];
+    expect(() =>
+      startDeterministicInferenceStub({
+        token: "host-schema-token",
+        nonce: "host-schema-nonce",
+        toolName: names[0],
+        toolArguments: {
+          query: "alphaquerytoken",
+          strategy: "fts",
+          include_raw: false,
         },
-      }));
-      const response = await fetch(`http://127.0.0.1:${stub.port}/v1/chat/completions`, {
-        method: "POST",
-        headers: { authorization: "Bearer host-schema-token", "content-type": "application/json" },
-        body: JSON.stringify({
-          stream: true,
-          messages: [{ role: "user", content: "host-schema-nonce" }],
-          tools: generated,
-        }),
-      });
-      expect(response.status).toBe(200);
-      expect(stub.snapshot().advertised_tool_names).toEqual(names);
-      expect(stub.snapshot().advertised_schema_verified).toBe(true);
-    } finally {
-      stub.stop();
-    }
+        expectedToolNames: names,
+      }),
+    ).toThrow("exact expected tool schemas are required");
   });
 });
 
@@ -631,7 +843,10 @@ describe("paired anonymous CBrain fixture and observing MCP proxy", () => {
       expect(Object.keys(normal)).not.toContain("nonce");
     }
     expect(buildCanaryToolArguments("query", "normal").strategy).toBe("fts");
-    expect(buildCanaryToolArguments("deep_recall", "normal")).toMatchObject({ detail: "brief", limit: 3 });
+    expect(buildCanaryToolArguments("deep_recall", "normal")).toMatchObject({
+      detail: "brief",
+      limit: 3,
+    });
     expect(buildCanaryToolArguments("cbrain_recall", "normal")).toEqual({
       query: ANONYMOUS_FIXTURE_MARKERS.query,
       include_raw: false,
@@ -642,51 +857,143 @@ describe("paired anonymous CBrain fixture and observing MCP proxy", () => {
     const structured = {
       schema_version: 1,
       summary: { status: "ok", count: 1, truncated: false, message: "ok" },
-      data: { result_count: 1, results: [{ title: ANONYMOUS_FIXTURE_MARKERS.title, body: ANONYMOUS_FIXTURE_MARKERS.body }] },
-      audit: { raw: { results: [{ locator: "brain/records/anonymous.md" }], search_meta: { strategy: "fts" } } },
+      data: {
+        result_count: 1,
+        results: [
+          {
+            title: ANONYMOUS_FIXTURE_MARKERS.title,
+            body: ANONYMOUS_FIXTURE_MARKERS.body,
+          },
+        ],
+      },
+      audit: {
+        raw: {
+          results: [{ locator: "records/anonymous-beta" }, { locator: "[redacted]" }],
+          search_meta: { strategy: "fts" },
+        },
+      },
     };
-    const hostContent = `<untrusted_tool_result source="mcp_cbrain_canary_query">\n` +
+    const hostContent =
+      `<untrusted_tool_result source="mcp_cbrain_canary_query">\n` +
       "The following content was retrieved from an external source.\n\n" +
-      JSON.stringify({ result: JSON.stringify({ display: "ok", ...structured }), structuredContent: structured }) +
+      JSON.stringify({
+        result: JSON.stringify({ display: "ok", ...structured }),
+        structuredContent: structured,
+      }) +
       "\n</untrusted_tool_result>";
     const analysis = analyzeHermesHostProjection(
-      { case_id: "structured:query:include_raw", mode: "structured", tool: "query", branch: "include_raw" },
+      {
+        case_id: "structured:query:include_raw",
+        mode: "structured",
+        tool: "query",
+        branch: "include_raw",
+      },
       hostContent,
     );
     expect(analysis.projection_contract_verified).toBe(true);
     expect(analysis.observed_projection_kind).toBe("result_plus_structured");
     expect(analysis.audit_contract_verified).toBe(true);
+    expect(analysis.audit_redaction_exercised).toBe(true);
     expect(analysis.text_structured_consistent).toBe(true);
 
     const malformed = hostContent.replace("structuredContent", "extraStructuredContent");
-    expect(analyzeHermesHostProjection(
-      { case_id: "structured:query:include_raw", mode: "structured", tool: "query", branch: "include_raw" },
-      malformed,
-    ).projection_contract_verified).toBe(false);
+    expect(
+      analyzeHermesHostProjection(
+        {
+          case_id: "structured:query:include_raw",
+          mode: "structured",
+          tool: "query",
+          branch: "include_raw",
+        },
+        malformed,
+      ).projection_contract_verified,
+    ).toBe(false);
+  });
+
+  test("does not count answer markers hidden only in audit and scans all user-visible surfaces", () => {
+    const structured = {
+      schema_version: 1,
+      summary: { status: "ok", count: 1, truncated: false, message: "ok" },
+      data: { results: [] },
+      audit: {
+        raw: {
+          results: [
+            {
+              locator: "records/anonymous-beta",
+              snippet: `${ANONYMOUS_FIXTURE_MARKERS.title} ${ANONYMOUS_FIXTURE_MARKERS.body}`,
+            },
+            { locator: "[redacted]" },
+          ],
+          search_meta: { strategy: "fts" },
+        },
+      },
+    };
+    const inner = {
+      schema_version: 1,
+      display: "credential=LEAK /private/anonymous/secret",
+      summary: structured.summary,
+      data: structured.data,
+      audit: structured.audit,
+    };
+    const hostContent =
+      `<untrusted_tool_result source="mcp_cbrain_canary_query">\n` +
+      "The following content was retrieved from an external source.\n\n" +
+      JSON.stringify({
+        result: JSON.stringify(inner),
+        structuredContent: structured,
+      }) +
+      "\n</untrusted_tool_result>";
+    const analysis = analyzeHermesHostProjection(
+      {
+        case_id: "structured:query:include_raw",
+        mode: "structured",
+        tool: "query",
+        branch: "include_raw",
+      },
+      hostContent,
+    );
+    expect(analysis.result_title_present).toBe(false);
+    expect(analysis.result_body_present).toBe(false);
+    expect(analysis.surface_internal_exposed).toBe(true);
+    expect(analysis.projection_contract_verified).toBe(false);
   });
 
   test("serves fixed normal and true-empty results from disposable database clones", async () => {
     const fixture = await createAnonymousFixtureSnapshot();
     const runtime = await fixture.openRuntime("structured", "direct-preflight");
-    const client = new Client({ name: "anonymous-preflight", version: "0.0.0" });
+    const client = new Client({
+      name: "anonymous-preflight",
+      version: "0.0.0",
+    });
     try {
-      await client.connect(new StreamableHTTPClientTransport(runtime.endpoint, {
-        requestInit: { headers: { "X-CBrain-Tool-Profile": "full" } },
-      }));
+      await client.connect(
+        new StreamableHTTPClientTransport(runtime.endpoint, {
+          requestInit: { headers: { "X-CBrain-Tool-Profile": "full" } },
+        }),
+      );
       for (const tool of tools) {
-        const normal = await client.callTool({ name: tool, arguments: buildCanaryToolArguments(tool, "normal") });
+        const normal = await client.callTool({
+          name: tool,
+          arguments: buildCanaryToolArguments(tool, "normal"),
+        });
         const normalText = JSON.stringify(normal);
         expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.title);
         expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.body);
 
-        const empty = await client.callTool({ name: tool, arguments: buildCanaryToolArguments(tool, "empty") });
+        const empty = await client.callTool({
+          name: tool,
+          arguments: buildCanaryToolArguments(tool, "empty"),
+        });
         const emptyText = JSON.stringify(empty);
         expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.title);
         expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.body);
         expect(emptyText).toContain("empty");
         expect(emptyText).toMatch(/(?:count|total)[^0-9]{0,8}0/);
 
-        const invalid = await client.callTool({ name: tool, arguments: buildCanaryToolArguments(tool, "error") });
+        const invalid = await client.callTool({
+          name: tool,
+          arguments: buildCanaryToolArguments(tool, "error"),
+        });
         expect(invalid.isError).toBe(true);
       }
       const vectorProbe = await runtime.lance.search(new Float32Array(2048), 1);
@@ -722,30 +1029,54 @@ describe("paired anonymous CBrain fixture and observing MCP proxy", () => {
         });
       },
     });
-    const proxy = startObservingMcpProxy({ upstreamUrl: new URL(`http://127.0.0.1:${upstream.port}/mcp`) });
+    const proxy = startObservingMcpProxy({
+      upstreamUrl: new URL(`http://127.0.0.1:${upstream.port}/mcp`),
+    });
     try {
-      const initializeBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+      const initializeBody = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {},
+      });
       const initialized = await fetch(proxy.endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-forward-marker": "preserved" },
+        headers: {
+          "content-type": "application/json",
+          "x-forward-marker": "preserved",
+        },
         body: initializeBody,
       });
       expect(await initialized.text()).toBe(initializeBody);
       expect(initialized.headers.get("x-upstream-marker")).toBe("preserved");
       const callBody = JSON.stringify({
-        jsonrpc: "2.0", id: 2, method: "tools/call",
-        params: { name: "query", arguments: { query: ANONYMOUS_FIXTURE_MARKERS.query } },
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "query",
+          arguments: { query: ANONYMOUS_FIXTURE_MARKERS.query },
+        },
       });
       const called = await fetch(proxy.endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", "mcp-session-id": "anonymous-session" },
+        headers: {
+          "content-type": "application/json",
+          "mcp-session-id": "anonymous-session",
+        },
         body: callBody,
       });
       expect(await called.text()).toBe(callBody);
       expect(proxy.snapshot()).toEqual({
         initialize_count: 1,
         session_ids: ["anonymous-session"],
-        tool_calls: [{ name: "query", arguments: { query: ANONYMOUS_FIXTURE_MARKERS.query } }],
+        tool_calls: [
+          {
+            name: "query",
+            arguments: { query: ANONYMOUS_FIXTURE_MARKERS.query },
+            session_id: "anonymous-session",
+          },
+        ],
         stored_body_count: 0,
       });
       expect(await proxy.closeSessions()).toBe(true);
@@ -773,51 +1104,52 @@ realHermesTest("counts actual host wrapper strings with the frozen offline cl100
   });
   expect(counted.counts).toEqual([1, 2]);
   expect(counted.method).toBe("tiktoken_cl100k_base_exact");
-  expect(counted.tokenizer_blob_digest).toBe(
-    "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
-  );
+  expect(counted.tokenizer_blob_digest).toBe("223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7");
 });
 
-realHermesTest("clones the approved Hermes runtime into a read-only relocation-safe snapshot", async () => {
-  const manifest = JSON.parse(readFileSync(
-    join(import.meta.dir, "../fixtures/hermes-structured-host-runtime-manifest.json"),
-    "utf8",
-  ));
-  const hermesExecutable = realpathSync(requiredRealEnv("HERMES_EXEC_PATH"));
-  const venvRoot = dirname(dirname(hermesExecutable));
-  const sourceRepoRoot = dirname(venvRoot);
-  const pythonBaseRoot = dirname(dirname(realpathSync(join(venvRoot, "bin", "python"))));
-  const snapshot = await createHermesRuntimeSnapshot({
-    manifest,
-    sourceRepoRoot,
-    pythonBaseRoot,
-    venvRoot,
-    tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
-  });
-  try {
-    expect(snapshot.identity_verified).toBe(true);
-    expect(snapshot.read_only_verified).toBe(true);
-    expect(snapshot.hermes_version).toContain("0.18.0");
-    expect(snapshot.aggregate_digest).toMatch(/^[a-f0-9]{64}$/);
-    const fixture = await createAnonymousFixtureSnapshot();
-    const runtime = await fixture.openRuntime("structured", "snapshot-smoke");
+realHermesTest(
+  "clones the approved Hermes runtime into a read-only relocation-safe snapshot",
+  async () => {
+    const manifest = JSON.parse(
+      readFileSync(join(import.meta.dir, "../fixtures/hermes-structured-host-runtime-manifest.json"), "utf8"),
+    );
+    const hermesExecutable = realpathSync(requiredRealEnv("HERMES_EXEC_PATH"));
+    const venvRoot = dirname(dirname(hermesExecutable));
+    const sourceRepoRoot = dirname(venvRoot);
+    const pythonBaseRoot = dirname(dirname(realpathSync(join(venvRoot, "bin", "python"))));
+    const snapshot = await createHermesRuntimeSnapshot({
+      manifest,
+      sourceRepoRoot,
+      pythonBaseRoot,
+      venvRoot,
+      tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+    });
     try {
-      const projected = await runRealHermesProjectionCase({
-        hermesExecutable: snapshot.hermesExecutable,
-        runtime,
-        tool: "query",
-        branch: "normal",
-      });
-      expect(projected.final_marker_verified).toBe(true);
+      expect(snapshot.identity_verified).toBe(true);
+      expect(snapshot.read_only_verified).toBe(true);
+      expect(snapshot.hermes_version).toContain("0.18.0");
+      expect(snapshot.aggregate_digest).toMatch(/^[a-f0-9]{64}$/);
+      const fixture = await createAnonymousFixtureSnapshot();
+      const runtime = await fixture.openRuntime("structured", "snapshot-smoke");
+      try {
+        const projected = await runRealHermesProjectionCase({
+          hermesExecutable: snapshot.hermesExecutable,
+          runtime,
+          tool: "query",
+          branch: "normal",
+        });
+        expect(projected.final_marker_verified).toBe(true);
+      } finally {
+        await runtime.close();
+        await fixture.close();
+      }
     } finally {
-      await runtime.close();
-      await fixture.close();
+      await snapshot.close();
     }
-  } finally {
-    await snapshot.close();
-  }
-  expect(snapshot.removed).toBe(true);
-}, 120_000);
+    expect(snapshot.removed).toBe(true);
+  },
+  120_000,
+);
 
 realHermesTest("real Hermes chat projects one structured query result through the next model turn", async () => {
   const fixture = await createAnonymousFixtureSnapshot();
@@ -832,35 +1164,60 @@ realHermesTest("real Hermes chat projects one structured query result through th
     });
     expect(result.exit_code).toBe(0);
     expect(result.final_marker_verified).toBe(true);
-    expect([...result.advertised_tool_names].sort()).toEqual([
-      "mcp_cbrain_canary_query",
-      "mcp_cbrain_canary_deep_recall",
-      "mcp_cbrain_canary_cbrain_recall",
-    ].sort());
-    expect(result.tool_calls).toEqual([{ name: "query", arguments: buildCanaryToolArguments("query", "normal") }]);
+    expect([...result.advertised_tool_names].sort()).toEqual(
+      ["mcp_cbrain_canary_query", "mcp_cbrain_canary_deep_recall", "mcp_cbrain_canary_cbrain_recall"].sort(),
+    );
+    expect(result.tool_calls).toEqual([
+      {
+        name: "query",
+        arguments: buildCanaryToolArguments("query", "normal"),
+        session_id: result.session_ids[0],
+      },
+    ]);
+    expect(result.call_correlation_verified).toBe(true);
+    expect(result.semantic_config_verified).toBe(true);
+    expect(result.case_cleanup_verified).toBe(true);
     expect(result.tool_content).toContain(ANONYMOUS_FIXTURE_MARKERS.title);
     expect(result.tool_content).toContain(ANONYMOUS_FIXTURE_MARKERS.body);
     expect(result.sessions_closed).toBe(true);
-    expect(analyzeHermesHostProjection(
-      { case_id: "structured:query:normal", mode: "structured", tool: "query", branch: "normal" },
-      result.tool_content,
-    ).projection_contract_verified).toBe(true);
+    expect(
+      analyzeHermesHostProjection(
+        {
+          case_id: "structured:query:normal",
+          mode: "structured",
+          tool: "query",
+          branch: "normal",
+        },
+        result.tool_content,
+      ).projection_contract_verified,
+    ).toBe(true);
   } finally {
     await runtime.close();
     await fixture.close();
   }
 });
 
-realHermesTest("real Hermes completes the 24 primary plus 12 AB/BA repetition matrix", async () => {
-  const matrix = await runRealHermesCanaryMatrix({
-    hermesExecutable: requiredRealEnv("HERMES_EXEC_PATH"),
-    pythonExecutable: requiredRealEnv("HERMES_PYTHON_EXEC_PATH"),
-    tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
-  });
-  expect(matrix.cases).toHaveLength(24);
-  expect(matrix.size_pairs).toHaveLength(6);
-  expect(matrix.primary_executions).toBe(24);
-  expect(matrix.size_repetition_executions).toBe(12);
-  expect(matrix.cases.every((item) => item.projection_contract_verified)).toBe(true);
-  expect(matrix.cases.every((item) => item.cbrain_invocation_count === 1)).toBe(true);
-}, 120_000);
+realHermesTest(
+  "real Hermes completes the 24 primary plus 12 AB/BA repetition matrix",
+  async () => {
+    const matrix = await runRealHermesCanaryMatrix({
+      hermesExecutable: requiredRealEnv("HERMES_EXEC_PATH"),
+      pythonExecutable: requiredRealEnv("HERMES_PYTHON_EXEC_PATH"),
+      tokenizerPath: join(import.meta.dir, "../fixtures/cl100k_base.tiktoken"),
+    });
+    expect(matrix.cases).toHaveLength(24);
+    expect(matrix.size_pairs).toHaveLength(6);
+    expect(matrix.primary_executions).toBe(24);
+    expect(matrix.size_repetition_executions).toBe(12);
+    expect(
+      matrix.cases.filter((item) => item.branch !== "error").every((item) => item.projection_contract_verified),
+    ).toBe(true);
+    expect(matrix.cases.filter((item) => item.branch === "error").every((item) => item.error_redaction_exercised)).toBe(
+      true,
+    );
+    expect(matrix.cases.every((item) => item.cbrain_invocation_count === 1)).toBe(true);
+    expect(matrix.cases.every((item) => item.cbrain_call_verified && item.mcp_session_verified)).toBe(true);
+    expect(matrix.cleanup_verified).toBe(true);
+  },
+  120_000,
+);

@@ -35,6 +35,16 @@ case "$HERMES_EXEC" in /*) ;; *) exit 2 ;; esac
 [ -x "$BUN_EXEC" ] || exit 2
 [ -x "$HERMES_EXEC" ] || exit 2
 
+emit_fatal() {
+  /usr/bin/printf '%s\n' '{"schema_version":1,"status":"fatal","code":"CANARY_MANAGED_SCOPE_PRESENT"}'
+  exit 2
+}
+
+[ ! -e /etc/hermes ] || emit_fatal
+if [ -n "${HERMES_MANAGED_DIR-}" ] && [ -e "$HERMES_MANAGED_DIR" ]; then
+  emit_fatal
+fi
+
 case "$FAULT" in
   ""|matrix|bootstrap|runtime|fingerprint) ;;
   *) exit 2 ;;
@@ -48,14 +58,28 @@ BOOT_TMP=$BOOT_ROOT/tmp
 /bin/mkdir -m 700 "$BOOT_HOME" "$BOOT_CWD" "$BOOT_TMP"
 
 cleanup() {
+  /bin/chmod -R u+w -- "$BOOT_ROOT" 2>/dev/null || true
   /bin/rm -rf -- "$BOOT_ROOT"
 }
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
-trap 'cleanup; exit 129' HUP
+CHILD_PID=""
+terminate() {
+  SIGNAL=$1
+  CODE=$2
+  trap - INT TERM HUP
+  if [ -n "$CHILD_PID" ]; then
+    /bin/kill -"$SIGNAL" "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
+  fi
+  cleanup
+  exit "$CODE"
+}
+trap 'terminate INT 130' INT
+trap 'terminate TERM 143' TERM
+trap 'terminate HUP 129' HUP
 trap cleanup EXIT
 
 PARENT_MANAGED_DIR=${HERMES_MANAGED_DIR-}
+PARENT_HOME=${HOME-}
 
 set +e
 /usr/bin/env -i \
@@ -68,12 +92,15 @@ set +e
   CBRAIN_CANARY_SOURCE_ROOT="$SCRIPT_DIR/.." \
   CBRAIN_CANARY_HERMES_EXEC="$HERMES_EXEC" \
   CBRAIN_CANARY_PARENT_MANAGED_DIR="$PARENT_MANAGED_DIR" \
+  CBRAIN_CANARY_LIVE_HOME="$PARENT_HOME" \
   CBRAIN_CANARY_FAULT="$FAULT" \
   "$BUN_EXEC" \
     --no-env-file \
     --config=/dev/null \
     --cwd="$BOOT_CWD" \
-    "$SCRIPT_DIR/bootstrap-hermes-structured-host-canary.ts"
+    "$SCRIPT_DIR/bootstrap-hermes-structured-host-canary.ts" &
+CHILD_PID=$!
+wait "$CHILD_PID"
 STATUS=$?
 set -e
 

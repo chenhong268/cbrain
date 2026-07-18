@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   ANONYMOUS_FIXTURE_MARKERS,
@@ -16,10 +16,19 @@ import {
 } from "./lib/hermes-structured-host-canary.js";
 
 const ALLOWED_ENV = new Set([
-  "HOME", "TMPDIR", "PATH", "LANG", "LC_ALL",
-  "CBRAIN_CANARY_SNAPSHOT_ROOT", "CBRAIN_CANARY_ORIGINAL_HERMES",
-  "CBRAIN_CANARY_CHECKPOINT_DIGEST", "CBRAIN_CANARY_CHECKPOINT_BLOB_COUNT",
+  "HOME",
+  "TMPDIR",
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "CBRAIN_CANARY_SNAPSHOT_ROOT",
+  "CBRAIN_CANARY_ORIGINAL_HERMES",
+  "CBRAIN_CANARY_CHECKPOINT_DIGEST",
+  "CBRAIN_CANARY_CHECKPOINT_BLOB_COUNT",
   "CBRAIN_CANARY_FAULT",
+  "CBRAIN_CANARY_LIVE_HOME",
+  "CBRAIN_CANARY_PRE_LIVE_FINGERPRINT",
+  "HERMES_MANAGED_DIR",
 ]);
 
 function fatal(): never {
@@ -39,17 +48,27 @@ function requiredEnv(name: string): string {
 
 try {
   if (Object.keys(process.env).some((key) => !ALLOWED_ENV.has(key))) fatal();
+  try {
+    lstatSync(requiredEnv("HERMES_MANAGED_DIR"));
+    fatal();
+  } catch (error) {
+    if (error instanceof Error && !error.message.includes("ENOENT")) throw error;
+  }
   const snapshotRoot = realpathSync(requiredEnv("CBRAIN_CANARY_SNAPSHOT_ROOT"));
+  const liveHome = realpathSync(requiredEnv("CBRAIN_CANARY_LIVE_HOME"));
   const originalHermes = realpathSync(requiredEnv("CBRAIN_CANARY_ORIGINAL_HERMES"));
   const checkpointDigest = requiredEnv("CBRAIN_CANARY_CHECKPOINT_DIGEST");
   const checkpointBlobCount = Number(requiredEnv("CBRAIN_CANARY_CHECKPOINT_BLOB_COUNT"));
-  if (!/^[a-f0-9]{64}$/.test(checkpointDigest) || !Number.isSafeInteger(checkpointBlobCount) || checkpointBlobCount < 1) fatal();
+  if (!/^[a-f0-9]{64}$/.test(checkpointDigest) || !Number.isSafeInteger(checkpointBlobCount) || checkpointBlobCount < 1)
+    fatal();
 
   const sourceRoot = join(snapshotRoot, "source");
   const nodeModulesRoot = join(sourceRoot, "node_modules");
   const manifestPath = join(sourceRoot, "tests/fixtures/hermes-structured-host-runtime-manifest.json");
+  const evidenceManifestPath = join(sourceRoot, "tests/fixtures/hermes-structured-canary-evidence-manifest.json");
   const tokenizerPath = join(sourceRoot, "tests/fixtures/cl100k_base.tiktoken");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as HermesRuntimeManifest;
+  const expectedEvidenceManifest = JSON.parse(readFileSync(evidenceManifestPath, "utf8")) as PublicEvidenceManifest;
   const originalVenv = dirname(dirname(originalHermes));
   const originalSource = dirname(originalVenv);
   const originalPythonBase = dirname(dirname(realpathSync(join(originalVenv, "bin", "python"))));
@@ -62,24 +81,33 @@ try {
     tokenizerPath,
   });
   let matrix: Awaited<ReturnType<typeof runRealHermesCanaryMatrix>>;
-  let preLive: ReturnType<typeof captureStableLiveServiceFingerprint>;
+  const preLive = JSON.parse(
+    Buffer.from(requiredEnv("CBRAIN_CANARY_PRE_LIVE_FINGERPRINT"), "base64").toString("utf8"),
+  ) as ReturnType<typeof captureStableLiveServiceFingerprint>;
+  if (preLive.algorithm !== "sha256-live-service-state-v2" || !/^[a-f0-9]{64}$/.test(preLive.digest)) fatal();
+  let runtimeSnapshotVerified = false;
   try {
-    preLive = captureStableLiveServiceFingerprint();
     if (process.env.CBRAIN_CANARY_FAULT === "matrix") throw new Error("injected matrix fault");
     matrix = await runRealHermesCanaryMatrix({
       hermesExecutable: hermesSnapshot.hermesExecutable,
       pythonExecutable: hermesSnapshot.pythonExecutable,
       tokenizerPath,
+      expectedToolSchemaDigest: expectedEvidenceManifest.tool_schema_digest,
     });
+    runtimeSnapshotVerified =
+      hermesSnapshot.identity_verified && hermesSnapshot.read_only_verified && hermesSnapshot.verifyUnchanged();
   } finally {
     await hermesSnapshot.close();
   }
-  const postLive = captureStableLiveServiceFingerprint();
-  const liveUnchanged = preLive.digest === postLive.digest
-    && preLive.relevant_process_count === postLive.relevant_process_count;
+  const postLive = captureStableLiveServiceFingerprint(liveHome);
+  const liveUnchanged =
+    preLive.digest === postLive.digest &&
+    preLive.relevant_process_count === postLive.relevant_process_count &&
+    preLive.launchd_job_count === postLive.launchd_job_count &&
+    preLive.artifact_count === postLive.artifact_count;
 
   const nodeModules = canonicalTreeDigest(nodeModulesRoot);
-  const evidenceManifest: PublicEvidenceManifest = {
+  const observedEvidenceManifest: PublicEvidenceManifest = {
     algorithm: "sha256-canonical-json-v1",
     checkpoint_tree_digest: checkpointDigest,
     checkpoint_blob_count: checkpointBlobCount,
@@ -91,31 +119,49 @@ try {
     lockfile_digest: sha256(join(sourceRoot, "bun.lock")),
     hermes_runtime_manifest_digest: sha256(manifestPath),
     tokenizer_blob_digest: matrix.tokenizer_blob_digest,
-    fixture_schema_digest: createHash("sha256").update(JSON.stringify({
-      markers: ANONYMOUS_FIXTURE_MARKERS,
-      page_type: "note",
-      chunk_count: 1,
-      vector_rows: 0,
-    })).digest("hex"),
-    semantic_config_template_digest: createHash("sha256").update(JSON.stringify({
-      config: buildIsolatedHermesConfig({ inferencePort: 10_001, mcpPort: 10_002 }),
-      args: buildHermesChatArgs("controlled <nonce>"),
-    })).digest("hex"),
+    fixture_schema_digest: createHash("sha256")
+      .update(
+        JSON.stringify({
+          markers: ANONYMOUS_FIXTURE_MARKERS,
+          page_type: "note",
+          chunk_count: 1,
+          vector_rows: 0,
+        }),
+      )
+      .digest("hex"),
+    semantic_config_template_digest: createHash("sha256")
+      .update(
+        JSON.stringify({
+          config: buildIsolatedHermesConfig({
+            inferencePort: 10_001,
+            mcpPort: 10_002,
+          }),
+          args: buildHermesChatArgs("controlled <nonce>"),
+        }),
+      )
+      .digest("hex"),
+    tool_schema_digest: matrix.tool_schema_digest,
   };
-  const evidenceDigest = canonicalEvidenceDigest(evidenceManifest);
+  const evidenceDigest = canonicalEvidenceDigest(expectedEvidenceManifest);
+  const cbrainSnapshotVerified =
+    nodeModules.digest === expectedEvidenceManifest.node_modules_tree_digest &&
+    nodeModules.file_count === expectedEvidenceManifest.node_modules_file_count &&
+    sha256(process.execPath) === expectedEvidenceManifest.bun_binary_digest;
+  const cleanupVerified = hermesSnapshot.removed && matrix.cleanup_verified;
   const report = evaluateCanaryReport({
     cases: matrix.cases,
     size_pairs: matrix.size_pairs,
     primary_executions: matrix.primary_executions,
     size_repetition_executions: matrix.size_repetition_executions,
     real_hermes_host: true,
-    runtime_snapshot_verified: true,
-    cbrain_snapshot_verified: true,
+    runtime_snapshot_verified: runtimeSnapshotVerified,
+    cbrain_snapshot_verified: cbrainSnapshotVerified,
     tokenizer_offline_verified: true,
     live_fingerprint_unchanged: liveUnchanged,
-    cleanup_verified: hermesSnapshot.removed,
+    cleanup_verified: cleanupVerified,
     semantic_answer_quality_not_measured: true,
-    evidence_manifest: evidenceManifest,
+    evidence_manifest: expectedEvidenceManifest,
+    observed_evidence_manifest: observedEvidenceManifest,
     evidence_generation_digest: evidenceDigest,
     rollback_command_id: null,
   });
@@ -130,12 +176,12 @@ try {
       hermes_version: manifest.hermes_version,
       tokenizer_version: matrix.tokenizer_version,
       real_hermes_host: true,
-      hermes_snapshot_verified: true,
-      cbrain_snapshot_verified: true,
+      hermes_snapshot_verified: runtimeSnapshotVerified,
+      cbrain_snapshot_verified: cbrainSnapshotVerified,
       tokenizer_offline_verified: true,
       live_relevant_process_count: preLive.relevant_process_count,
       live_fingerprint_unchanged: liveUnchanged,
-      cleanup_verified: hermesSnapshot.removed,
+      cleanup_verified: cleanupVerified,
       semantic_answer_quality_not_measured: true,
     },
   };

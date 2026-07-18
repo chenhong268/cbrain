@@ -24,17 +24,30 @@ import { buildContext } from "../../src/mcp/context.js";
 import { OUTPUT_MODE_ENV } from "../../src/mcp/output-mode.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  CREDENTIAL_PATH_UNSAFE_PATTERNS,
+  DISPLAY_UNSAFE_PATTERNS,
+  SLUG_VALUE_RE,
+} from "../../src/core/safety/display-safety.js";
+export {
+  buildLiveServiceFingerprint,
+  captureStableLiveServiceFingerprint,
+} from "./hermes-canary-live-fingerprint.js";
+export type {
+  LiveArtifactIdentity,
+  LiveLaunchdIdentity,
+  LiveProcessIdentity,
+  LiveServiceFingerprint,
+} from "./hermes-canary-live-fingerprint.js";
 
 export type OutputMode = "legacy" | "structured";
 export type ToolName = "query" | "deep_recall" | "cbrain_recall";
 export type Branch = "normal" | "empty" | "include_raw" | "error";
 export type TokenMethod = "tiktoken_cl100k_base_exact";
 export type ProjectionKind = "legacy_result_only" | "result_plus_structured" | "mcp_error_only";
-export type AuditContract =
-  | "none"
-  | "query_locator_metadata"
-  | "deep_locator_metadata"
-  | "frontdoor_routing_metadata";
+export type AuditContract = "none" | "query_locator_metadata" | "deep_locator_metadata" | "frontdoor_routing_metadata";
 
 export interface CanaryCaseSpec {
   case_id: string;
@@ -48,6 +61,11 @@ export interface CanaryCaseResult extends CanaryCaseSpec {
   advertised_tool_verified: boolean;
   advertised_schema_verified: boolean;
   cbrain_invocation_count: number;
+  cbrain_call_verified: boolean;
+  mcp_session_verified: boolean;
+  session_cleanup_verified: boolean;
+  case_cleanup_verified: boolean;
+  semantic_config_verified: boolean;
   host_projection_verified: boolean;
   round_trip_verified: boolean;
   result_title_present: boolean;
@@ -58,6 +76,8 @@ export interface CanaryCaseResult extends CanaryCaseSpec {
   default_audit_present: boolean;
   expected_audit_contract: AuditContract;
   audit_contract_verified: boolean;
+  audit_redaction_exercised: boolean;
+  error_redaction_exercised: boolean;
   audit_sensitive_exposed: boolean;
   surface_internal_exposed: boolean;
   expected_projection_kind: ProjectionKind;
@@ -111,6 +131,7 @@ export interface PublicEvidenceManifest {
   tokenizer_blob_digest: string;
   fixture_schema_digest: string;
   semantic_config_template_digest: string;
+  tool_schema_digest: string;
 }
 
 export interface CanaryEvaluationInput {
@@ -126,6 +147,7 @@ export interface CanaryEvaluationInput {
   cleanup_verified: boolean;
   semantic_answer_quality_not_measured: boolean;
   evidence_manifest: PublicEvidenceManifest;
+  observed_evidence_manifest: PublicEvidenceManifest;
   evidence_generation_digest: string;
   rollback_command_id: null | "cbrain-structured-cohort-rollback-v1";
 }
@@ -149,7 +171,11 @@ export interface HermesStructuredCanaryReport {
   host_compatibility: "compatible" | "incompatible";
   rollout_readiness: "ready" | "blocked";
   reason_codes: CanaryReasonCode[];
-  matrix: { expected_cases: 24; completed_cases: number; size_repetition_executions: number };
+  matrix: {
+    expected_cases: 24;
+    completed_cases: number;
+    size_repetition_executions: number;
+  };
   evidence_manifest: PublicEvidenceManifest;
   evidence_generation_digest: string;
   semantic_answer_quality_not_measured: true;
@@ -174,6 +200,7 @@ const EVIDENCE_KEYS = [
   "tokenizer_blob_digest",
   "fixture_schema_digest",
   "semantic_config_template_digest",
+  "tool_schema_digest",
 ] as const;
 
 export interface IsolatedHermesConfigOptions {
@@ -233,7 +260,7 @@ export interface VerifyHermesRuntimeManifestOptions {
   tokenizerPath: string;
 }
 
-interface ChatToolDefinition {
+export interface ChatToolDefinition {
   type: "function";
   function: {
     name: string;
@@ -273,6 +300,9 @@ export const ANONYMOUS_FIXTURE_MARKERS = Object.freeze({
   missing: "unrelatedabsentdelta",
   title: "记录Beta固定标题",
   body: "正文Gamma固定内容",
+  safe_locator: "records/anonymous-beta",
+  sensitive_path: "/private/cbrain-canary/credential.txt",
+  sensitive_credential: "api_key=sk-anonymous0000000000000000",
 });
 
 export interface AnonymousFixtureRuntime {
@@ -290,6 +320,7 @@ export interface AnonymousFixtureSnapshot {
 export interface ObservedToolCall {
   name: string;
   arguments: Record<string, unknown>;
+  session_id: string | null;
 }
 
 export interface ObservingMcpProxySnapshot {
@@ -314,6 +345,11 @@ export interface RealHermesProjectionCaseResult {
   tool_calls: ObservedToolCall[];
   tool_content: string;
   sessions_closed: boolean;
+  initialize_count: number;
+  session_ids: string[];
+  call_correlation_verified: boolean;
+  semantic_config_verified: boolean;
+  case_cleanup_verified: boolean;
 }
 
 export interface HermesHostProjectionAnalysis {
@@ -325,6 +361,8 @@ export interface HermesHostProjectionAnalysis {
   default_audit_present: boolean;
   expected_audit_contract: AuditContract;
   audit_contract_verified: boolean;
+  audit_redaction_exercised: boolean;
+  error_redaction_exercised: boolean;
   audit_sensitive_exposed: boolean;
   surface_internal_exposed: boolean;
   expected_projection_kind: ProjectionKind;
@@ -340,6 +378,7 @@ export interface ExactTokenCountResult {
   method: TokenMethod;
   tokenizer_version: string;
   tokenizer_blob_digest: string;
+  cleanup_verified: boolean;
   counts: number[];
 }
 
@@ -350,6 +389,8 @@ export interface RealHermesCanaryMatrixResult {
   size_repetition_executions: 12;
   tokenizer_version: string;
   tokenizer_blob_digest: string;
+  cleanup_verified: boolean;
+  tool_schema_digest: string;
 }
 
 export interface HermesRuntimeSnapshot {
@@ -360,28 +401,31 @@ export interface HermesRuntimeSnapshot {
   identity_verified: boolean;
   read_only_verified: boolean;
   readonly removed: boolean;
+  verifyUnchanged(): boolean;
   close(): Promise<void>;
-}
-
-export interface LiveProcessIdentity {
-  pid: number;
-  ppid: number;
-  pgid: number;
-  started: string;
-  command: string;
-}
-
-export interface LiveServiceFingerprint {
-  algorithm: "sha256-live-process-identity-v1";
-  relevant_process_count: number;
-  digest: string;
 }
 
 export function buildCanaryToolArguments(tool: ToolName, branch: Branch): Record<string, unknown> {
   if (branch === "error") {
-    if (tool === "query") return { query: ANONYMOUS_FIXTURE_MARKERS.query, strategy: "invalid-strategy", include_raw: false };
-    if (tool === "deep_recall") return { query: ANONYMOUS_FIXTURE_MARKERS.query, detail: "invalid-detail", limit: 3, include_raw: false };
-    return { query: { invalid: "anonymous-value" }, include_raw: false };
+    const sensitive = `${ANONYMOUS_FIXTURE_MARKERS.sensitive_credential} ${ANONYMOUS_FIXTURE_MARKERS.sensitive_path}`;
+    if (tool === "query")
+      return {
+        query: ANONYMOUS_FIXTURE_MARKERS.query,
+        strategy: sensitive,
+        include_raw: false,
+      };
+    if (tool === "deep_recall")
+      return {
+        query: ANONYMOUS_FIXTURE_MARKERS.query,
+        detail: sensitive,
+        limit: 3,
+        include_raw: false,
+      };
+    return {
+      query: ANONYMOUS_FIXTURE_MARKERS.query,
+      detail: sensitive,
+      include_raw: false,
+    };
   }
   const query = branch === "empty" ? ANONYMOUS_FIXTURE_MARKERS.missing : ANONYMOUS_FIXTURE_MARKERS.query;
   const include_raw = branch === "include_raw";
@@ -392,7 +436,7 @@ export function buildCanaryToolArguments(tool: ToolName, branch: Branch): Record
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -402,36 +446,45 @@ function exactKeys(value: Record<string, unknown>, expected: readonly string[]):
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
 }
 
-function containsForbiddenSurfaceKey(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(containsForbiddenSurfaceKey);
+function containsForbiddenSurface(value: unknown): boolean {
+  if (typeof value === "string") {
+    const normalized = value.normalize("NFKC");
+    return DISPLAY_UNSAFE_PATTERNS.some((pattern) => pattern.test(normalized)) || SLUG_VALUE_RE.test(normalized);
+  }
+  if (Array.isArray(value)) return value.some(containsForbiddenSurface);
   const record = asRecord(value);
   if (!record) return false;
   const forbidden = new Set(["raw", "slug", "score", "routing", "latency_ms"]);
-  return Object.entries(record).some(([key, child]) => forbidden.has(key) || containsForbiddenSurfaceKey(child));
+  return Object.entries(record).some(
+    ([key, child]) => forbidden.has(key) || containsForbiddenSurface(key) || containsForbiddenSurface(child),
+  );
 }
 
 function containsSensitiveMaterial(value: string): boolean {
-  return /(?:\/Users\/|\/home\/|[A-Za-z]:\\|canary-[0-9a-f]{8}-[0-9a-f-]{27}|(?:api[_-]?key|token|credential)\s*[:=]\s*[^\s"}]+)/i.test(value);
+  const normalized = value.normalize("NFKC");
+  return (
+    CREDENTIAL_PATH_UNSAFE_PATTERNS.some((pattern) => pattern.test(normalized)) ||
+    /canary-[0-9a-f]{8}-[0-9a-f-]{27}/i.test(normalized)
+  );
 }
 
-export function analyzeHermesHostProjection(
-  spec: CanaryCaseSpec,
-  toolContent: string,
-): HermesHostProjectionAnalysis {
-  const expectedKind: ProjectionKind = spec.branch === "error"
-    ? "mcp_error_only"
-    : spec.mode === "structured"
-      ? "result_plus_structured"
-      : "legacy_result_only";
-  const expectedAudit: AuditContract = spec.mode !== "structured" || spec.branch !== "include_raw"
-    ? "none"
-    : spec.tool === "query"
-      ? "query_locator_metadata"
-      : spec.tool === "deep_recall"
-        ? "deep_locator_metadata"
-        : "frontdoor_routing_metadata";
-  const titlePresent = toolContent.includes(ANONYMOUS_FIXTURE_MARKERS.title);
-  const bodyPresent = toolContent.includes(ANONYMOUS_FIXTURE_MARKERS.body);
+export function analyzeHermesHostProjection(spec: CanaryCaseSpec, toolContent: string): HermesHostProjectionAnalysis {
+  const expectedKind: ProjectionKind =
+    spec.branch === "error"
+      ? "mcp_error_only"
+      : spec.mode === "structured"
+        ? "result_plus_structured"
+        : "legacy_result_only";
+  const expectedAudit: AuditContract =
+    spec.mode !== "structured" || spec.branch !== "include_raw"
+      ? "none"
+      : spec.tool === "query"
+        ? "query_locator_metadata"
+        : spec.tool === "deep_recall"
+          ? "deep_locator_metadata"
+          : "frontdoor_routing_metadata";
+  let titlePresent = false;
+  let bodyPresent = false;
   const fallback: HermesHostProjectionAnalysis = {
     result_title_present: titlePresent,
     result_body_present: bodyPresent,
@@ -441,6 +494,8 @@ export function analyzeHermesHostProjection(
     default_audit_present: false,
     expected_audit_contract: expectedAudit,
     audit_contract_verified: false,
+    audit_redaction_exercised: false,
+    error_redaction_exercised: spec.branch === "error",
     audit_sensitive_exposed: containsSensitiveMaterial(toolContent),
     surface_internal_exposed: false,
     expected_projection_kind: expectedKind,
@@ -463,9 +518,10 @@ export function analyzeHermesHostProjection(
     if (spec.branch === "error") {
       const errorText = typeof outer.error === "string" ? outer.error : "";
       const exactError = exactKeys(outer, ["error"]);
-      const sanitized = errorText.length > 0
-        && !containsSensitiveMaterial(errorText)
-        && !/(?:stack trace|\n\s+at\s+|Traceback \()/i.test(errorText);
+      const sanitized =
+        errorText.length > 0 &&
+        !containsSensitiveMaterial(errorText) &&
+        !/(?:stack trace|\n\s+at\s+|Traceback \()/i.test(errorText);
       return {
         ...fallback,
         error_contract_verified: exactError && sanitized && !titlePresent && !bodyPresent,
@@ -480,59 +536,79 @@ export function analyzeHermesHostProjection(
     const inner = asRecord(JSON.parse(outer.result));
     if (!inner) return fallback;
     const structured = asRecord(outer.structuredContent);
+    const visibleData = [inner.display, inner.summary, inner.data, structured?.summary, structured?.data];
+    const visibleText = JSON.stringify(visibleData);
+    titlePresent = visibleText.includes(ANONYMOUS_FIXTURE_MARKERS.title);
+    bodyPresent = visibleText.includes(ANONYMOUS_FIXTURE_MARKERS.body);
     const summary = asRecord(inner.summary);
     const structuredSummary = asRecord(structured?.summary);
     const count = summary?.count;
     const status = summary?.status;
-    const emptyVerified = spec.branch !== "empty" || (
-      status === "empty"
-      && count === 0
-      && !titlePresent
-      && !bodyPresent
-      && (spec.mode !== "structured" || (structuredSummary?.status === "empty" && structuredSummary.count === 0))
-    );
+    const emptyVerified =
+      spec.branch !== "empty" ||
+      (status === "empty" &&
+        count === 0 &&
+        !titlePresent &&
+        !bodyPresent &&
+        (spec.mode !== "structured" || (structuredSummary?.status === "empty" && structuredSummary.count === 0)));
     const innerAudit = asRecord(inner.audit);
     const structuredAudit = asRecord(structured?.audit);
     const defaultAuditPresent = spec.branch !== "include_raw" && (innerAudit !== null || structuredAudit !== null);
     const audit = structuredAudit ?? innerAudit;
     const auditRaw = asRecord(audit?.raw);
+    const auditText = JSON.stringify(audit ?? {});
+    const nonSensitiveAuditMarkerSurvived =
+      spec.tool === "cbrain_recall"
+        ? auditText.includes('"chosen_route":"content_recall"')
+        : auditText.includes(ANONYMOUS_FIXTURE_MARKERS.safe_locator);
+    const auditRedactionExercised =
+      expectedAudit !== "none" &&
+      nonSensitiveAuditMarkerSurvived &&
+      auditText.includes("[redacted]") &&
+      !auditText.includes(ANONYMOUS_FIXTURE_MARKERS.sensitive_path) &&
+      !auditText.includes(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential);
     let auditVerified = expectedAudit === "none" ? audit === null : auditRaw !== null;
     if (expectedAudit === "query_locator_metadata") {
-      auditVerified &&= Array.isArray(auditRaw?.results) && asRecord(auditRaw?.search_meta) !== null;
+      auditVerified &&=
+        Array.isArray(auditRaw?.results) && auditRaw.results.length > 0 && asRecord(auditRaw?.search_meta) !== null;
     } else if (expectedAudit === "deep_locator_metadata") {
-      auditVerified &&= Array.isArray(auditRaw?.entities) && asRecord(auditRaw?.search_meta) !== null;
+      auditVerified &&=
+        Array.isArray(auditRaw?.entities) && auditRaw.entities.length > 0 && asRecord(auditRaw?.search_meta) !== null;
     } else if (expectedAudit === "frontdoor_routing_metadata") {
-      auditVerified &&= asRecord(auditRaw?.routing) !== null;
+      auditVerified &&=
+        asRecord(auditRaw?.routing) !== null && Array.isArray(auditRaw?.entities) && auditRaw.entities.length > 0;
     }
-    const textStructuredConsistent = spec.mode === "structured"
-      ? structured !== null
-        && inner.schema_version === structured.schema_version
-        && canonicalJson(inner.summary) === canonicalJson(structured.summary)
-        && canonicalJson(inner.data) === canonicalJson(structured.data)
-        && canonicalJson(inner.audit) === canonicalJson(structured.audit)
-      : null;
+    if (expectedAudit !== "none") auditVerified &&= auditRedactionExercised;
+    const textStructuredConsistent =
+      spec.mode === "structured"
+        ? structured !== null &&
+          inner.schema_version === structured.schema_version &&
+          canonicalJson(inner.summary) === canonicalJson(structured.summary) &&
+          canonicalJson(inner.data) === canonicalJson(structured.data) &&
+          canonicalJson(inner.audit) === canonicalJson(structured.audit)
+        : null;
     const legacyRaw = inner.raw !== undefined;
-    const exactOuter = spec.mode === "structured"
-      ? exactKeys(outer, ["result", "structuredContent"])
-      : exactKeys(outer, ["result"]);
+    const exactOuter =
+      spec.mode === "structured" ? exactKeys(outer, ["result", "structuredContent"]) : exactKeys(outer, ["result"]);
     const expectedLegacyRaw = spec.mode === "legacy" && (spec.tool !== "deep_recall" || spec.branch === "include_raw");
-    const surfaceInternal = spec.mode === "structured" && structured !== null
-      ? containsForbiddenSurfaceKey(structured.data)
-      : false;
-    const projectionVerified = exactOuter
-      && (spec.mode === "structured" ? structured !== null && textStructuredConsistent === true : structured === null)
-      && legacyRaw === expectedLegacyRaw
-      && !defaultAuditPresent
-      && auditVerified
-      && emptyVerified
-      && !surfaceInternal;
+    const surfaceInternal =
+      spec.mode === "structured" && structured !== null ? containsForbiddenSurface(visibleData) : false;
+    const projectionVerified =
+      exactOuter &&
+      (spec.mode === "structured" ? structured !== null && textStructuredConsistent === true : structured === null) &&
+      legacyRaw === expectedLegacyRaw &&
+      !defaultAuditPresent &&
+      auditVerified &&
+      emptyVerified &&
+      !surfaceInternal;
     return {
       ...fallback,
       empty_contract_verified: emptyVerified,
       legacy_raw_present: legacyRaw,
       default_audit_present: defaultAuditPresent,
       audit_contract_verified: auditVerified,
-      audit_sensitive_exposed: containsSensitiveMaterial(JSON.stringify(audit ?? {})),
+      audit_redaction_exercised: auditRedactionExercised,
+      audit_sensitive_exposed: containsSensitiveMaterial(auditText),
       surface_internal_exposed: surfaceInternal,
       observed_projection_kind: structured ? "result_plus_structured" : "legacy_result_only",
       projection_contract_verified: projectionVerified,
@@ -580,12 +656,15 @@ export async function countExactCl100kTokens(options: {
     "counts = [len(encoding.encode(value)) for value in values]",
     "print(json.dumps({'counts': counts, 'tokenizer_version': importlib.metadata.version('tiktoken'), 'tokenizer_blob_digest': digest}, separators=(',', ':')))",
   ].join("\n");
+  let result: ExactTokenCountResult | undefined;
   try {
     const child = Bun.spawn({
       cmd: [options.pythonExecutable, "-I", "-c", script],
       cwd: root,
       env: {
         HOME: root,
+        HERMES_HOME: resolve(root, "hermes-home"),
+        HERMES_MANAGED_DIR: resolve(root, "missing-managed"),
         LANG: "C.UTF-8",
         LC_ALL: "C.UTF-8",
         PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -608,21 +687,32 @@ export async function countExactCl100kTokens(options: {
     const parsed = asRecord(JSON.parse(stdout));
     const counts = parsed?.counts;
     if (
-      !Array.isArray(counts)
-      || counts.length !== options.values.length
-      || !counts.every((count) => Number.isSafeInteger(count) && count >= 0)
-      || typeof parsed?.tokenizer_version !== "string"
-      || parsed.tokenizer_blob_digest !== expectedDigest
-    ) throw new Error("invalid offline tokenizer response");
-    return {
+      !Array.isArray(counts) ||
+      counts.length !== options.values.length ||
+      !counts.every((count) => Number.isSafeInteger(count) && count >= 0) ||
+      typeof parsed?.tokenizer_version !== "string" ||
+      parsed.tokenizer_blob_digest !== expectedDigest
+    )
+      throw new Error("invalid offline tokenizer response");
+    result = {
       method: "tiktoken_cl100k_base_exact",
       tokenizer_version: parsed.tokenizer_version,
       tokenizer_blob_digest: expectedDigest,
+      cleanup_verified: false,
       counts: counts as number[],
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
+    if (result) {
+      try {
+        lstatSync(root);
+      } catch (error) {
+        result.cleanup_verified = error instanceof Error && error.message.includes("ENOENT");
+      }
+    }
   }
+  if (!result) throw new Error("offline tokenizer produced no result");
+  return result;
 }
 
 function copyOnWriteTree(source: string, destination: string): void {
@@ -639,12 +729,12 @@ function stripRuntimeExclusions(root: string): void {
       const path = resolve(directory, name);
       const stat = lstatSync(path);
       if (
-        name === ".git"
-        || name === "__pycache__"
-        || name === ".DS_Store"
-        || name === ".env"
-        || name.startsWith(".env.")
-        || (stat.isFile() && name.endsWith(".pyc"))
+        name === ".git" ||
+        name === "__pycache__" ||
+        name === ".DS_Store" ||
+        name === ".env" ||
+        name.startsWith(".env.") ||
+        (stat.isFile() && name.endsWith(".pyc"))
       ) {
         rmSync(path, { recursive: true, force: true });
       } else if (stat.isDirectory()) {
@@ -724,8 +814,10 @@ export async function createHermesRuntimeSnapshot(options: {
 
     const prePython = canonicalTreeDigest(pythonRoot);
     const preVenv = canonicalTreeDigest(venvRoot);
-    if (canonicalJson(prePython) !== canonicalJson(options.manifest.python_base)
-      || canonicalJson(preVenv) !== canonicalJson(options.manifest.venv)) {
+    if (
+      canonicalJson(prePython) !== canonicalJson(options.manifest.python_base) ||
+      canonicalJson(preVenv) !== canonicalJson(options.manifest.venv)
+    ) {
       throw new Error("Hermes runtime clone drifted before relocation");
     }
     stripRuntimeExclusions(sourceRoot);
@@ -745,7 +837,9 @@ export async function createHermesRuntimeSnapshot(options: {
     chmodSync(launcherPath, 0o755);
 
     const sitePackages = resolve(venvRoot, "lib", "python3.11", "site-packages");
-    const finderNames = readdirSync(sitePackages).filter((name) => /^__editable___hermes_agent_.*_finder\.py$/.test(name));
+    const finderNames = readdirSync(sitePackages).filter((name) =>
+      /^__editable___hermes_agent_.*_finder\.py$/.test(name),
+    );
     if (finderNames.length !== 1) throw new Error("unexpected Hermes editable finder inventory");
     const finderPath = resolve(sitePackages, finderNames[0]);
     const finder = readFileSync(finderPath, "utf8");
@@ -762,6 +856,7 @@ export async function createHermesRuntimeSnapshot(options: {
       transforms: "hermes-relocation-v1",
     };
     const aggregateDigest = createHash("sha256").update(canonicalJson(aggregateCore)).digest("hex");
+    assertTreeSymlinksContained(runtimeRoot);
     setTreeReadOnly(runtimeRoot);
     if (!treeIsReadOnly(runtimeRoot)) throw new Error("Hermes snapshot is writable");
 
@@ -770,13 +865,15 @@ export async function createHermesRuntimeSnapshot(options: {
     const env = {
       HOME: identityHome,
       HERMES_HOME: resolve(identityHome, "hermes"),
+      HERMES_MANAGED_DIR: resolve(identityHome, "missing-managed"),
       LANG: "C.UTF-8",
       LC_ALL: "C.UTF-8",
       PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
       PYTHONNOUSERSITE: "1",
       TMPDIR: identityHome,
     };
-    const probeScript = "import json, hermes_cli, tools.mcp_tool; print(json.dumps([hermes_cli.__file__, tools.mcp_tool.__file__]))";
+    const probeScript =
+      "import json, hermes_cli, tools.mcp_tool; print(json.dumps([hermes_cli.__file__, tools.mcp_tool.__file__]))";
     const probe = Bun.spawnSync({
       cmd: [resolve(venvRoot, "bin", "python3"), "-I", "-c", probeScript],
       cwd: sourceRoot,
@@ -815,7 +912,21 @@ export async function createHermesRuntimeSnapshot(options: {
       aggregate_digest: aggregateDigest,
       identity_verified: true,
       read_only_verified: true,
-      get removed() { return removed; },
+      get removed() {
+        return removed;
+      },
+      verifyUnchanged() {
+        if (removed || !treeIsReadOnly(runtimeRoot)) return false;
+        assertTreeSymlinksContained(runtimeRoot);
+        const currentCore = {
+          source: canonicalTreeDigest(sourceRoot),
+          python: canonicalTreeDigest(pythonRoot),
+          venv: canonicalTreeDigest(venvRoot),
+          tokenizer: createHash("sha256").update(readFileSync(tokenizerPath)).digest("hex"),
+          transforms: "hermes-relocation-v1",
+        };
+        return createHash("sha256").update(canonicalJson(currentCore)).digest("hex") === aggregateDigest;
+      },
       async close() {
         if (removed) return;
         setTreeOwnerWritable(runtimeRoot);
@@ -827,58 +938,12 @@ export async function createHermesRuntimeSnapshot(options: {
   } catch (error) {
     try {
       if (statSync(runtimeRoot).isDirectory()) setTreeOwnerWritable(runtimeRoot);
-    } catch { /* incomplete snapshot */ }
+    } catch {
+      /* incomplete snapshot */
+    }
     rmSync(ownerRoot, { recursive: true, force: true });
     throw error;
   }
-}
-
-export function buildLiveServiceFingerprint(processes: readonly LiveProcessIdentity[]): LiveServiceFingerprint {
-  const relevant = processes
-    .filter((process) => /(?:cbrain|hermes)/i.test(process.command))
-    .map((process) => {
-      if (![process.pid, process.ppid, process.pgid].every((value) => Number.isSafeInteger(value) && value >= 0)) {
-        throw new Error("invalid live process identity");
-      }
-      return {
-        pid: process.pid,
-        ppid: process.ppid,
-        pgid: process.pgid,
-        started: process.started,
-        command_digest: createHash("sha256").update(process.command).digest("hex"),
-      };
-    })
-    .sort((a, b) => a.pid - b.pid || a.command_digest.localeCompare(b.command_digest));
-  return {
-    algorithm: "sha256-live-process-identity-v1",
-    relevant_process_count: relevant.length,
-    digest: createHash("sha256").update(canonicalJson(relevant)).digest("hex"),
-  };
-}
-
-function readLiveProcesses(): LiveProcessIdentity[] {
-  const output = execFileSync("/bin/ps", ["-axo", "pid=,ppid=,pgid=,lstart=,command="], {
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  return output.split("\n").flatMap((line) => {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.+)$/);
-    if (!match) return [];
-    return [{
-      pid: Number(match[1]),
-      ppid: Number(match[2]),
-      pgid: Number(match[3]),
-      started: match[4],
-      command: match[5],
-    }];
-  });
-}
-
-export function captureStableLiveServiceFingerprint(): LiveServiceFingerprint {
-  const first = buildLiveServiceFingerprint(readLiveProcesses());
-  const second = buildLiveServiceFingerprint(readLiveProcesses());
-  if (canonicalJson(first) !== canonicalJson(second)) throw new Error("live service inventory was not stable");
-  return first;
 }
 
 export async function createAnonymousFixtureSnapshot(): Promise<AnonymousFixtureSnapshot> {
@@ -887,7 +952,7 @@ export async function createAnonymousFixtureSnapshot(): Promise<AnonymousFixture
   const snapshotDb = resolve(snapshotDirectory, "brain.sqlite");
   mkdirSync(snapshotDirectory, { recursive: true, mode: 0o700 });
   const seed = new CBrainDB(snapshotDb);
-  const pageSlug = "records/anonymous-beta";
+  const pageSlug = ANONYMOUS_FIXTURE_MARKERS.safe_locator;
   try {
     const content = `${ANONYMOUS_FIXTURE_MARKERS.title}\n\n${ANONYMOUS_FIXTURE_MARKERS.body}`;
     seed.insertPage({
@@ -925,9 +990,38 @@ export async function createAnonymousFixtureSnapshot(): Promise<AnonymousFixture
       mkdirSync(vaultPath, { recursive: true, mode: 0o700 });
       mkdirSync(outputsPath, { recursive: true, mode: 0o700 });
       mkdirSync(profilePath, { recursive: true, mode: 0o700 });
+      mkdirSync(resolve(vaultPath, "brain", "records"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      writeFileSync(
+        resolve(vaultPath, "brain", "records", "anonymous-beta.md"),
+        [
+          "---",
+          `private_path: ${ANONYMOUS_FIXTURE_MARKERS.sensitive_path}`,
+          `credential: ${ANONYMOUS_FIXTURE_MARKERS.sensitive_credential}`,
+          "---",
+          ANONYMOUS_FIXTURE_MARKERS.title,
+          "",
+          ANONYMOUS_FIXTURE_MARKERS.body,
+        ].join("\n"),
+      );
       copyFileSync(snapshotDb, dbPath);
       chmodSync(dbPath, 0o600);
       const db = new CBrainDB(dbPath);
+      if (label.includes("include-raw")) {
+        const sensitiveSupportingContent = `${ANONYMOUS_FIXTURE_MARKERS.query} ${ANONYMOUS_FIXTURE_MARKERS.sensitive_credential} ${ANONYMOUS_FIXTURE_MARKERS.sensitive_path}`;
+        const sensitiveSlug = "records/anonymous-sensitive";
+        db.insertPage({
+          slug: sensitiveSlug,
+          type: "note",
+          title: `${ANONYMOUS_FIXTURE_MARKERS.sensitive_credential} ${ANONYMOUS_FIXTURE_MARKERS.sensitive_path}`,
+          filePath: "brain/records/anonymous-sensitive.md",
+          contentHash: createHash("sha256").update(sensitiveSupportingContent).digest("hex"),
+        });
+        db.insertChunk(sensitiveSlug, 0, sensitiveSupportingContent);
+        db.ftsInsert(sensitiveSlug, sensitiveSupportingContent);
+      }
       const lance = new LanceDBManager();
       await lance.connect(lancePath);
       await lance.warmup();
@@ -981,7 +1075,8 @@ export async function createAnonymousFixtureSnapshot(): Promise<AnonymousFixture
 function parsedJsonRpcMessages(bytes: Uint8Array): Array<Record<string, unknown>> {
   try {
     const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-    if (Array.isArray(parsed)) return parsed.filter((item): item is Record<string, unknown> => !!item && typeof item === "object");
+    if (Array.isArray(parsed))
+      return parsed.filter((item): item is Record<string, unknown> => !!item && typeof item === "object");
     return parsed && typeof parsed === "object" ? [parsed as Record<string, unknown>] : [];
   } catch {
     return [];
@@ -994,14 +1089,14 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
   }
   const sessions = new Set<string>();
   const toolCalls: ObservedToolCall[] = [];
+  const deletedSessions = new Set<string>();
   let initializeCount = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
-      const body = request.method === "GET" || request.method === "HEAD"
-        ? undefined
-        : new Uint8Array(await request.arrayBuffer());
+      const body =
+        request.method === "GET" || request.method === "HEAD" ? undefined : new Uint8Array(await request.arrayBuffer());
       if (body) {
         for (const message of parsedJsonRpcMessages(body)) {
           if (message.method === "initialize") initializeCount += 1;
@@ -1010,7 +1105,11 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
             const name = params?.name;
             const args = params?.arguments;
             if (typeof name === "string" && args && typeof args === "object" && !Array.isArray(args)) {
-              toolCalls.push({ name, arguments: structuredClone(args as Record<string, unknown>) });
+              toolCalls.push({
+                name,
+                arguments: structuredClone(args as Record<string, unknown>),
+                session_id: request.headers.get("mcp-session-id"),
+              });
             }
           }
         }
@@ -1029,6 +1128,10 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
       const responseHeaders = new Headers(upstream.headers);
       const sessionId = responseHeaders.get("mcp-session-id");
       if (sessionId) sessions.add(sessionId);
+      const requestSessionId = request.headers.get("mcp-session-id");
+      if (request.method === "DELETE" && requestSessionId && upstream.status >= 200 && upstream.status < 300) {
+        deletedSessions.add(requestSessionId);
+      }
       return new Response(responseBytes, {
         status: upstream.status,
         statusText: upstream.statusText,
@@ -1047,12 +1150,21 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
       };
     },
     async closeSessions() {
-      let valid = true;
+      let valid = sessions.size === 1;
       for (const sessionId of sessions) {
         const headers = { "mcp-session-id": sessionId };
-        const closed = await fetch(options.upstreamUrl, { method: "DELETE", headers });
-        const rejected = await fetch(options.upstreamUrl, { method: "GET", headers });
-        valid &&= closed.status >= 200 && closed.status < 300 && rejected.status === 404;
+        if (!deletedSessions.has(sessionId)) {
+          const closed = await fetch(options.upstreamUrl, {
+            method: "DELETE",
+            headers,
+          });
+          valid &&= closed.status >= 200 && closed.status < 300;
+        }
+        const rejected = await fetch(options.upstreamUrl, {
+          method: "GET",
+          headers,
+        });
+        valid &&= rejected.status === 404;
       }
       return valid;
     },
@@ -1062,12 +1174,82 @@ export function startObservingMcpProxy(options: { upstreamUrl: URL }): Observing
   };
 }
 
+function normalizedToolDefinitions(tools: readonly ChatToolDefinition[]): ChatToolDefinition[] {
+  return structuredClone(tools).sort((left, right) => left.function.name.localeCompare(right.function.name));
+}
+
+export function toolSchemaDigest(tools: readonly ChatToolDefinition[]): string {
+  if (tools.length !== 3 || new Set(tools.map((tool) => tool.function.name)).size !== 3) {
+    throw new Error("invalid canary tool schema inventory");
+  }
+  return createHash("sha256")
+    .update(canonicalJson(normalizedToolDefinitions(tools)))
+    .digest("hex");
+}
+
+export async function loadCanaryChatToolDefinitions(runtime: AnonymousFixtureRuntime): Promise<{
+  tools: ChatToolDefinition[];
+  digest: string;
+  session_cleanup_verified: boolean;
+}> {
+  const proxy = startObservingMcpProxy({ upstreamUrl: runtime.endpoint });
+  const client = new Client({
+    name: "anonymous-schema-preflight",
+    version: "0.0.0",
+  });
+  let listed: Awaited<ReturnType<Client["listTools"]>> | undefined;
+  let sessionCleanup = false;
+  try {
+    await client.connect(
+      new StreamableHTTPClientTransport(proxy.endpoint, {
+        requestInit: { headers: { "X-CBrain-Tool-Profile": "full" } },
+      }),
+    );
+    listed = await client.listTools();
+  } finally {
+    await client.close().catch(() => {});
+    sessionCleanup = await proxy.closeSessions().catch(() => false);
+    proxy.stop();
+  }
+  if (!listed || !sessionCleanup) throw new Error("tool schema preflight did not close its MCP session");
+  const wanted = new Set<string>(TOOLS);
+  const selected = listed.tools.filter((tool) => wanted.has(tool.name));
+  if (selected.length !== 3) throw new Error("canary tool schema inventory mismatch");
+  const tools = selected.map(
+    (tool): ChatToolDefinition => ({
+      type: "function",
+      function: {
+        name: `mcp_cbrain_canary_${tool.name}`,
+        description: tool.description ?? "",
+        parameters: tool.inputSchema,
+      },
+    }),
+  );
+  return {
+    tools,
+    digest: toolSchemaDigest(tools),
+    session_cleanup_verified: true,
+  };
+}
+
 export function buildHermesChatArgs(prompt: string): string[] {
   return [
-    "chat", "-q", prompt, "-Q", "--cli",
-    "--max-turns", "4", "--ignore-rules", "--source", "tool",
-    "--model", "canary-model", "--provider", "custom",
-    "--toolsets", "mcp-cbrain_canary",
+    "chat",
+    "-q",
+    prompt,
+    "-Q",
+    "--cli",
+    "--max-turns",
+    "4",
+    "--ignore-rules",
+    "--source",
+    "tool",
+    "--model",
+    "canary-model",
+    "--provider",
+    "custom",
+    "--toolsets",
+    "mcp-cbrain_canary",
   ];
 }
 
@@ -1100,7 +1282,9 @@ export function buildIsolatedHermesConfig(options: IsolatedHermesConfigOptions) 
         url: `http://127.0.0.1:${options.mcpPort}/mcp`,
         enabled: true,
         headers: { "X-CBrain-Tool-Profile": "full" },
-        tools: { include: ["query", "deep_recall", "cbrain_recall"] as ToolName[] },
+        tools: {
+          include: ["query", "deep_recall", "cbrain_recall"] as ToolName[],
+        },
       },
     },
   };
@@ -1126,11 +1310,30 @@ async function readBoundedText(stream: ReadableStream<Uint8Array>, maxBytes: num
   return new TextDecoder().decode(joined);
 }
 
+function processBirthIdentity(pid: number): string | null {
+  try {
+    const output = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+    return output || null;
+  } catch {
+    return null;
+  }
+}
+
+function processGroupIsEmpty(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return false;
+  } catch (error) {
+    return error instanceof Error && (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 export async function runRealHermesProjectionCase(options: {
   hermesExecutable: string;
   runtime: AnonymousFixtureRuntime;
   tool: ToolName;
   branch: Branch;
+  expectedTools?: readonly ChatToolDefinition[];
   timeoutMs?: number;
 }): Promise<RealHermesProjectionCaseResult> {
   if (!isAbsolute(options.hermesExecutable)) throw new Error("Hermes executable must be absolute");
@@ -1138,21 +1341,20 @@ export async function runRealHermesProjectionCase(options: {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) {
     throw new Error("invalid Hermes timeout");
   }
-  const expectedToolNames = [
-    "mcp_cbrain_canary_query",
-    "mcp_cbrain_canary_deep_recall",
-    "mcp_cbrain_canary_cbrain_recall",
-  ];
+  const loadedTools = options.expectedTools ?? (await loadCanaryChatToolDefinitions(options.runtime)).tools;
+  const expectedTools = normalizedToolDefinitions(loadedTools);
   const args = buildCanaryToolArguments(options.tool, options.branch);
   const nonce = randomUUID();
   const token = `canary-${randomUUID()}`;
-  const proxy = startObservingMcpProxy({ upstreamUrl: options.runtime.endpoint });
+  const proxy = startObservingMcpProxy({
+    upstreamUrl: options.runtime.endpoint,
+  });
   const stub = startDeterministicInferenceStub({
     token,
     nonce,
     toolName: `mcp_cbrain_canary_${options.tool}`,
     toolArguments: args,
-    expectedToolNames,
+    expectedTools,
   });
   const root = mkdtempSync(resolve(tmpdir(), "cbrain-hermes-real-case-"));
   const home = resolve(root, "home");
@@ -1164,11 +1366,14 @@ export async function runRealHermesProjectionCase(options: {
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
   const configPath = resolve(hermesHome, "config.yaml");
-  writeFileSync(configPath, JSON.stringify(buildIsolatedHermesConfig({
+  const expectedConfig = buildIsolatedHermesConfig({
     inferencePort: stub.port,
     mcpPort: proxy.endpoint.port ? Number(proxy.endpoint.port) : 0,
-  }), null, 2));
+  });
+  writeFileSync(configPath, JSON.stringify(expectedConfig, null, 2));
   chmodSync(configPath, 0o600);
+  const semanticConfigVerified =
+    canonicalJson(JSON.parse(readFileSync(configPath, "utf8"))) === canonicalJson(expectedConfig);
   const env = buildIsolatedHermesEnv({
     home,
     hermesHome,
@@ -1182,6 +1387,10 @@ export async function runRealHermesProjectionCase(options: {
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let sessionsClosed = false;
+  let result: RealHermesProjectionCaseResult | undefined;
+  let childBirth: string | null = null;
+  let interrupted: ((error: Error) => void) | undefined;
+  const signalHandlers = new Map<NodeJS.Signals, () => void>();
   try {
     child = Bun.spawn({
       cmd: [options.hermesExecutable, ...buildHermesChatArgs(prompt)],
@@ -1192,6 +1401,16 @@ export async function runRealHermesProjectionCase(options: {
       stdout: "pipe",
       stderr: "pipe",
     });
+    childBirth = processBirthIdentity(child.pid);
+    if (!childBirth) throw new Error("Hermes child birth identity unavailable");
+    const signalPromise = new Promise<never>((_, reject) => {
+      interrupted = reject;
+    });
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+      const handler = () => interrupted?.(new Error("Hermes case interrupted"));
+      signalHandlers.set(signal, handler);
+      process.once(signal, handler);
+    }
     const stdoutPromise = readBoundedText(child.stdout as ReadableStream<Uint8Array>, 1_000_000);
     const stderrPromise = readBoundedText(child.stderr as ReadableStream<Uint8Array>, 1_000_000);
     const timeout = new Promise<never>((_, reject) => {
@@ -1199,12 +1418,22 @@ export async function runRealHermesProjectionCase(options: {
     });
     let exitCode: number;
     try {
-      exitCode = await Promise.race([child.exited, timeout]);
+      exitCode = await Promise.race([child.exited, timeout, signalPromise]);
     } catch (error) {
-      try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+      if (processBirthIdentity(child.pid) === childBirth) {
+        try {
+          process.kill(-child.pid, "SIGTERM");
+        } catch {
+          child.kill("SIGTERM");
+        }
+      }
       await Promise.race([child.exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000))]);
-      if (child.exitCode === null) {
-        try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+      if (child.exitCode === null && processBirthIdentity(child.pid) === childBirth) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
       }
       throw error;
     }
@@ -1212,7 +1441,14 @@ export async function runRealHermesProjectionCase(options: {
     const inference = stub.snapshot();
     const observed = proxy.snapshot();
     sessionsClosed = await proxy.closeSessions();
-    return {
+    const callCorrelationVerified =
+      observed.initialize_count === 1 &&
+      observed.session_ids.length === 1 &&
+      observed.tool_calls.length === 1 &&
+      observed.tool_calls[0].name === options.tool &&
+      canonicalJson(observed.tool_calls[0].arguments) === canonicalJson(args) &&
+      observed.tool_calls[0].session_id === observed.session_ids[0];
+    result = {
       exit_code: exitCode,
       final_marker_verified: inference.final_marker !== null && stdout.includes(inference.final_marker),
       advertised_tool_names: inference.advertised_tool_names,
@@ -1220,19 +1456,51 @@ export async function runRealHermesProjectionCase(options: {
       tool_calls: observed.tool_calls,
       tool_content: inference.tool_content ?? "",
       sessions_closed: sessionsClosed,
+      initialize_count: observed.initialize_count,
+      session_ids: observed.session_ids,
+      call_correlation_verified: callCorrelationVerified,
+      semantic_config_verified: semanticConfigVerified,
+      case_cleanup_verified: false,
     };
   } finally {
+    for (const [signal, handler] of signalHandlers) process.off(signal, handler);
     if (timer) clearTimeout(timer);
-    if (child && child.exitCode === null) {
-      try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+    if (child && child.exitCode === null && processBirthIdentity(child.pid) === childBirth) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
       await child.exited.catch(() => {});
+    }
+    let processGroupClean = true;
+    if (child) {
+      processGroupClean = processGroupIsEmpty(child.pid);
+      if (!processGroupClean && processBirthIdentity(child.pid) === childBirth) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          /* identity-checked best effort */
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        processGroupClean = processGroupIsEmpty(child.pid);
+      }
     }
     if (!sessionsClosed) await proxy.closeSessions().catch(() => false);
     proxy.stop();
     stub.stop();
     setTreeOwnerWritable(root);
     rmSync(root, { recursive: true, force: true });
+    if (result) {
+      try {
+        lstatSync(root);
+      } catch (error) {
+        result.case_cleanup_verified = processGroupClean && error instanceof Error && error.message.includes("ENOENT");
+      }
+    }
   }
+  if (!result) throw new Error("real Hermes case produced no result");
+  return result;
 }
 
 export async function runRealHermesCanaryMatrix(options: {
@@ -1240,6 +1508,7 @@ export async function runRealHermesCanaryMatrix(options: {
   pythonExecutable: string;
   tokenizerPath: string;
   timeoutMs?: number;
+  expectedToolSchemaDigest?: string;
 }): Promise<RealHermesCanaryMatrixResult> {
   interface Execution {
     spec: CanaryCaseSpec;
@@ -1253,6 +1522,9 @@ export async function runRealHermesCanaryMatrix(options: {
   const primary: Execution[] = [];
   const repetitions: Execution[] = [];
   let sequence = 0;
+  let expectedTools: ChatToolDefinition[] = [];
+  let schemaDigest = "";
+  let preflightSessionClosed = false;
   const execute = async (spec: CanaryCaseSpec, bucket: Execution[]): Promise<void> => {
     sequence += 1;
     const label = `case-${sequence}-${spec.mode}-${spec.tool}-${spec.branch}`.replaceAll("_", "-");
@@ -1263,14 +1535,31 @@ export async function runRealHermesCanaryMatrix(options: {
         runtime,
         tool: spec.tool,
         branch: spec.branch,
+        expectedTools,
         timeoutMs: options.timeoutMs,
       });
-      bucket.push({ spec, host, projection: analyzeHermesHostProjection(spec, host.tool_content) });
+      bucket.push({
+        spec,
+        host,
+        projection: analyzeHermesHostProjection(spec, host.tool_content),
+      });
     } finally {
       await runtime.close();
     }
   };
   try {
+    const schemaRuntime = await fixture.openRuntime("structured", "schema-preflight");
+    try {
+      const loaded = await loadCanaryChatToolDefinitions(schemaRuntime);
+      expectedTools = loaded.tools;
+      schemaDigest = loaded.digest;
+      preflightSessionClosed = loaded.session_cleanup_verified;
+      if (options.expectedToolSchemaDigest && schemaDigest !== options.expectedToolSchemaDigest) {
+        throw new Error("canary tool schema digest drifted");
+      }
+    } finally {
+      await schemaRuntime.close();
+    }
     for (const tool of TOOLS) {
       for (const branch of DEFAULT_BRANCHES) {
         for (const mode of MODES) {
@@ -1314,83 +1603,93 @@ export async function runRealHermesCanaryMatrix(options: {
     execution.wrapper_total_tokens = counted.counts[index * 3 + 2];
   });
 
-  const expectedNames = [
-    "mcp_cbrain_canary_query",
-    "mcp_cbrain_canary_deep_recall",
-    "mcp_cbrain_canary_cbrain_recall",
-  ].sort().join("\0");
-  const cases = primary.map(({ spec, host, projection, result_text_tokens, structured_content_tokens, wrapper_total_tokens }) => ({
-    ...spec,
-    runtime_identity_verified: host.exit_code === 0,
-    advertised_tool_verified: [...host.advertised_tool_names].sort().join("\0") === expectedNames,
-    advertised_schema_verified: host.advertised_schema_verified,
-    cbrain_invocation_count: host.tool_calls.length,
-    host_projection_verified: host.final_marker_verified && host.tool_content.length > 0,
-    round_trip_verified: host.final_marker_verified,
-    result_title_present: projection.result_title_present,
-    result_body_present: projection.result_body_present,
-    empty_contract_verified: projection.empty_contract_verified,
-    error_contract_verified: projection.error_contract_verified,
-    legacy_raw_present: projection.legacy_raw_present,
-    default_audit_present: projection.default_audit_present,
-    expected_audit_contract: projection.expected_audit_contract,
-    audit_contract_verified: projection.audit_contract_verified,
-    audit_sensitive_exposed: projection.audit_sensitive_exposed,
-    surface_internal_exposed: projection.surface_internal_exposed,
-    expected_projection_kind: projection.expected_projection_kind,
-    observed_projection_kind: projection.observed_projection_kind,
-    projection_contract_verified: projection.projection_contract_verified,
-    text_structured_consistent: projection.text_structured_consistent,
-    token_method: "tiktoken_cl100k_base_exact" as const,
-    result_text_tokens: result_text_tokens as number,
-    structured_content_tokens: structured_content_tokens as number,
-    wrapper_total_tokens: wrapper_total_tokens as number,
-    wrapper_total_code_units: projection.wrapper_text.length,
-  }));
+  const expectedNames = ["mcp_cbrain_canary_query", "mcp_cbrain_canary_deep_recall", "mcp_cbrain_canary_cbrain_recall"]
+    .sort()
+    .join("\0");
+  const cases = primary.map(
+    ({ spec, host, projection, result_text_tokens, structured_content_tokens, wrapper_total_tokens }) => ({
+      ...spec,
+      runtime_identity_verified: host.exit_code === 0,
+      advertised_tool_verified: [...host.advertised_tool_names].sort().join("\0") === expectedNames,
+      advertised_schema_verified: host.advertised_schema_verified,
+      cbrain_invocation_count: host.tool_calls.length,
+      cbrain_call_verified: host.call_correlation_verified,
+      mcp_session_verified: host.initialize_count === 1 && host.session_ids.length === 1,
+      session_cleanup_verified: host.sessions_closed,
+      case_cleanup_verified: host.case_cleanup_verified,
+      semantic_config_verified: host.semantic_config_verified,
+      host_projection_verified: host.final_marker_verified && host.tool_content.length > 0,
+      round_trip_verified: host.final_marker_verified,
+      result_title_present: projection.result_title_present,
+      result_body_present: projection.result_body_present,
+      empty_contract_verified: projection.empty_contract_verified,
+      error_contract_verified: projection.error_contract_verified,
+      legacy_raw_present: projection.legacy_raw_present,
+      default_audit_present: projection.default_audit_present,
+      expected_audit_contract: projection.expected_audit_contract,
+      audit_contract_verified: projection.audit_contract_verified,
+      audit_redaction_exercised: projection.audit_redaction_exercised,
+      error_redaction_exercised: projection.error_redaction_exercised,
+      audit_sensitive_exposed: projection.audit_sensitive_exposed,
+      surface_internal_exposed: projection.surface_internal_exposed,
+      expected_projection_kind: projection.expected_projection_kind,
+      observed_projection_kind: projection.observed_projection_kind,
+      projection_contract_verified: projection.projection_contract_verified,
+      text_structured_consistent: projection.text_structured_consistent,
+      token_method: "tiktoken_cl100k_base_exact" as const,
+      result_text_tokens: result_text_tokens as number,
+      structured_content_tokens: structured_content_tokens as number,
+      wrapper_total_tokens: wrapper_total_tokens as number,
+      wrapper_total_code_units: projection.wrapper_text.length,
+    }),
+  );
 
   const lookup = (items: Execution[], mode: OutputMode, tool: ToolName, branch: "normal" | "empty"): Execution => {
-    const found = items.find((item) => item.spec.mode === mode && item.spec.tool === tool && item.spec.branch === branch);
+    const found = items.find(
+      (item) => item.spec.mode === mode && item.spec.tool === tool && item.spec.branch === branch,
+    );
     if (!found) throw new Error("missing size execution");
     return found;
   };
-  const size_pairs = TOOLS.flatMap((tool) => DEFAULT_BRANCHES.map((branch): SizePairEvidence => {
-    const abLegacy = lookup(primary, "legacy", tool, branch);
-    const abStructured = lookup(primary, "structured", tool, branch);
-    const baLegacy = lookup(repetitions, "legacy", tool, branch);
-    const baStructured = lookup(repetitions, "structured", tool, branch);
-    const ab = {
-      order: "legacy_then_structured" as const,
-      legacy_tokens: abLegacy.wrapper_total_tokens as number,
-      structured_tokens: abStructured.wrapper_total_tokens as number,
-      legacy_code_units: abLegacy.projection.wrapper_text.length,
-      structured_code_units: abStructured.projection.wrapper_text.length,
-    };
-    const ba = {
-      order: "structured_then_legacy" as const,
-      legacy_tokens: baLegacy.wrapper_total_tokens as number,
-      structured_tokens: baStructured.wrapper_total_tokens as number,
-      legacy_code_units: baLegacy.projection.wrapper_text.length,
-      structured_code_units: baStructured.projection.wrapper_text.length,
-    };
-    const worstStructured = Math.max(ab.structured_tokens, ba.structured_tokens);
-    const bestLegacy = Math.min(ab.legacy_tokens, ba.legacy_tokens);
-    const growth = Math.max(0, worstStructured - bestLegacy);
-    return {
-      pair_id: `${tool}:${branch}`,
-      tool,
-      branch,
-      ab,
-      ba,
-      worst_structured_tokens: worstStructured,
-      best_legacy_tokens: bestLegacy,
-      growth_tokens: growth,
-      ratio: bestLegacy === 0 ? null : worstStructured / bestLegacy,
-      absolute_gate_passed: growth <= 128,
-      relative_or_floor_gate_passed: bestLegacy >= 128
-        ? worstStructured <= bestLegacy * 1.25
-        : worstStructured <= bestLegacy + 32,
-    };
-  }));
+  const size_pairs = TOOLS.flatMap((tool) =>
+    DEFAULT_BRANCHES.map((branch): SizePairEvidence => {
+      const abLegacy = lookup(primary, "legacy", tool, branch);
+      const abStructured = lookup(primary, "structured", tool, branch);
+      const baLegacy = lookup(repetitions, "legacy", tool, branch);
+      const baStructured = lookup(repetitions, "structured", tool, branch);
+      const ab = {
+        order: "legacy_then_structured" as const,
+        legacy_tokens: abLegacy.wrapper_total_tokens as number,
+        structured_tokens: abStructured.wrapper_total_tokens as number,
+        legacy_code_units: abLegacy.projection.wrapper_text.length,
+        structured_code_units: abStructured.projection.wrapper_text.length,
+      };
+      const ba = {
+        order: "structured_then_legacy" as const,
+        legacy_tokens: baLegacy.wrapper_total_tokens as number,
+        structured_tokens: baStructured.wrapper_total_tokens as number,
+        legacy_code_units: baLegacy.projection.wrapper_text.length,
+        structured_code_units: baStructured.projection.wrapper_text.length,
+      };
+      const worstStructured = Math.max(ab.structured_tokens, ba.structured_tokens);
+      const bestLegacy = Math.min(ab.legacy_tokens, ba.legacy_tokens);
+      const growth = Math.max(0, worstStructured - bestLegacy);
+      return {
+        pair_id: `${tool}:${branch}`,
+        tool,
+        branch,
+        ab,
+        ba,
+        worst_structured_tokens: worstStructured,
+        best_legacy_tokens: bestLegacy,
+        growth_tokens: growth,
+        ratio: bestLegacy === 0 ? null : worstStructured / bestLegacy,
+        absolute_gate_passed: growth <= 128,
+        relative_or_floor_gate_passed:
+          bestLegacy >= 128 ? worstStructured <= bestLegacy * 1.25 : worstStructured <= bestLegacy + 32,
+      };
+    }),
+  );
   return {
     cases,
     size_pairs,
@@ -1398,6 +1697,12 @@ export async function runRealHermesCanaryMatrix(options: {
     size_repetition_executions: 12,
     tokenizer_version: counted.tokenizer_version,
     tokenizer_blob_digest: counted.tokenizer_blob_digest,
+    cleanup_verified:
+      preflightSessionClosed &&
+      fixture.removed &&
+      counted.cleanup_verified &&
+      allExecutions.every((execution) => execution.host.sessions_closed && execution.host.case_cleanup_verified),
+    tool_schema_digest: schemaDigest,
   };
 }
 
@@ -1425,6 +1730,28 @@ function normalizedRelative(root: string, path: string): string {
   return relative(root, path).split(sep).join("/");
 }
 
+export function assertTreeSymlinksContained(rootPath: string): void {
+  const root = realpathSync(rootPath);
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory)) {
+      const path = resolve(directory, name);
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) {
+        visit(path);
+      } else if (stat.isSymbolicLink()) {
+        let target: string;
+        try {
+          target = realpathSync(resolve(dirname(path), readlinkSync(path)));
+        } catch {
+          throw new Error("snapshot symlink target is unavailable");
+        }
+        if (!pathWithin(root, target)) throw new Error("snapshot symlink escapes owned tree");
+      }
+    }
+  };
+  visit(root);
+}
+
 export function canonicalTreeDigest(rootPath: string): CanonicalTreeDigest {
   const root = resolve(rootPath);
   const entries: Array<{
@@ -1437,7 +1764,12 @@ export function canonicalTreeDigest(rootPath: string): CanonicalTreeDigest {
 
   const visit = (directory: string): void => {
     for (const name of readdirSync(directory).sort()) {
-      if (TREE_EXCLUDED_DIRS.has(name) || TREE_EXCLUDED_FILES.has(name) || name === ".env" || name.startsWith(".env.")) {
+      if (
+        TREE_EXCLUDED_DIRS.has(name) ||
+        TREE_EXCLUDED_FILES.has(name) ||
+        name === ".env" ||
+        name.startsWith(".env.")
+      ) {
         continue;
       }
       const path = resolve(directory, name);
@@ -1481,7 +1813,10 @@ export function canonicalTreeDigest(rootPath: string): CanonicalTreeDigest {
   return { digest: hash.digest("hex"), file_count: fileCount };
 }
 
-function inspectGitSource(sourceRepoRoot: string, sourceCommit: string): {
+function inspectGitSource(
+  sourceRepoRoot: string,
+  sourceCommit: string,
+): {
   source_tree_digest: string;
   source_blob_count: number;
 } {
@@ -1490,11 +1825,10 @@ function inspectGitSource(sourceRepoRoot: string, sourceCommit: string): {
     execFileSync("git", ["-C", sourceRepoRoot, "cat-file", "-e", `${sourceCommit}^{commit}`], {
       stdio: "ignore",
     });
-    const listing = execFileSync(
-      "git",
-      ["-C", sourceRepoRoot, "ls-tree", "-r", "--full-tree", sourceCommit],
-      { encoding: "buffer", maxBuffer: 32 * 1024 * 1024 },
-    );
+    const listing = execFileSync("git", ["-C", sourceRepoRoot, "ls-tree", "-r", "--full-tree", sourceCommit], {
+      encoding: "buffer",
+      maxBuffer: 32 * 1024 * 1024,
+    });
     const text = listing.toString("utf8");
     const count = text.length === 0 ? 0 : text.split("\n").filter(Boolean).length;
     if (count < 1) throw new Error("empty source tree");
@@ -1545,9 +1879,7 @@ function inspectRuntimeRelation(pythonBaseRoot: string, venvRoot: string): Herme
   };
 }
 
-export function createHermesRuntimeManifest(
-  options: CreateHermesRuntimeManifestOptions,
-): HermesRuntimeManifest {
+export function createHermesRuntimeManifest(options: CreateHermesRuntimeManifestOptions): HermesRuntimeManifest {
   if (!/^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$/.test(options.hermesVersion)) {
     throw new Error("invalid Hermes version");
   }
@@ -1583,16 +1915,23 @@ export function verifyHermesRuntimeManifest(
     if (createHash("sha256").update(canonicalJson(core)).digest("hex") !== aggregateDigest) return false;
     const source = inspectGitSource(options.sourceRepoRoot, manifest.source_commit);
     if (
-      source.source_tree_digest !== manifest.source_tree_digest
-      || source.source_blob_count !== manifest.source_blob_count
-    ) return false;
+      source.source_tree_digest !== manifest.source_tree_digest ||
+      source.source_blob_count !== manifest.source_blob_count
+    )
+      return false;
     const pythonBase = canonicalTreeDigest(options.pythonBaseRoot);
-    if (pythonBase.digest !== manifest.python_base.digest || pythonBase.file_count !== manifest.python_base.file_count) {
+    if (
+      pythonBase.digest !== manifest.python_base.digest ||
+      pythonBase.file_count !== manifest.python_base.file_count
+    ) {
       return false;
     }
     const venv = canonicalTreeDigest(options.venvRoot);
     if (venv.digest !== manifest.venv.digest || venv.file_count !== manifest.venv.file_count) return false;
-    if (canonicalJson(inspectRuntimeRelation(options.pythonBaseRoot, options.venvRoot)) !== canonicalJson(manifest.runtime_relation)) {
+    if (
+      canonicalJson(inspectRuntimeRelation(options.pythonBaseRoot, options.venvRoot)) !==
+      canonicalJson(manifest.runtime_relation)
+    ) {
       return false;
     }
     const tokenizerDigest = createHash("sha256").update(readFileSync(options.tokenizerPath)).digest("hex");
@@ -1631,9 +1970,9 @@ export function startDeterministicInferenceStub(
   options: DeterministicInferenceStubOptions,
 ): DeterministicInferenceStub {
   if (options.token.length < 8 || options.nonce.length < 8) throw new Error("stub credentials too short");
-  const expectedNames = options.expectedTools?.map((tool) => tool.function.name)
-    ?? options.expectedToolNames
-    ?? [];
+  if (!options.expectedTools) throw new Error("exact expected tool schemas are required");
+  const expectedTools = normalizedToolDefinitions(options.expectedTools);
+  const expectedNames = expectedTools.map((tool) => tool.function.name);
   if (!expectedNames.includes(options.toolName) || expectedNames.length === 0) {
     throw new Error("requested tool not in expected schema set");
   }
@@ -1646,7 +1985,7 @@ export function startDeterministicInferenceStub(
   let advertisedToolNames: string[] = [];
   let advertisedSchemaVerified = false;
   let toolContent: string | null = null;
-  const expectedToolsJson = options.expectedTools ? canonicalJson(options.expectedTools) : null;
+  const expectedToolsJson = canonicalJson(expectedTools);
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -1655,7 +1994,10 @@ export function startDeterministicInferenceStub(
       const url = new URL(request.url);
       if (request.headers.get("authorization") !== `Bearer ${options.token}`) return jsonError(401, "UNAUTHORIZED");
       if (request.method === "GET" && url.pathname === "/v1/models") {
-        return Response.json({ object: "list", data: [{ id: "canary-model", object: "model" }] });
+        return Response.json({
+          object: "list",
+          data: [{ id: "canary-model", object: "model" }],
+        });
       }
       if (request.method !== "POST" || url.pathname !== "/v1/chat/completions") return jsonError(404, "NOT_FOUND");
       const contentLength = Number(request.headers.get("content-length") ?? 0);
@@ -1670,21 +2012,26 @@ export function startDeterministicInferenceStub(
         return jsonError(400, "INVALID_JSON");
       }
       if (body.stream !== true) return jsonError(400, "STREAM_REQUIRED");
-      const advertised = Array.isArray(body.tools) ? body.tools as ChatToolDefinition[] : [];
-      advertisedToolNames = advertised.map((tool) => tool?.function?.name).filter((name): name is string => typeof name === "string");
-      advertisedSchemaVerified = advertised.length === expectedNames.length
-        && new Set(advertisedToolNames).size === expectedNames.length
-        && [...advertisedToolNames].sort().join("\0") === [...expectedNames].sort().join("\0")
-        && advertised.every((tool) => tool?.type === "function"
-          && !!tool.function
-          && typeof tool.function.description === "string"
-          && !!tool.function.parameters
-          && typeof tool.function.parameters === "object");
-      if (
-        !advertisedSchemaVerified
-        || (expectedToolsJson !== null && canonicalJson(advertised) !== expectedToolsJson)
-      ) return jsonError(400, "TOOL_SCHEMA_DRIFT");
-      const messages = Array.isArray(body.messages) ? body.messages as Array<Record<string, unknown>> : [];
+      const advertised = Array.isArray(body.tools) ? (body.tools as ChatToolDefinition[]) : [];
+      advertisedToolNames = advertised
+        .map((tool) => tool?.function?.name)
+        .filter((name): name is string => typeof name === "string");
+      advertisedSchemaVerified =
+        advertised.length === expectedNames.length &&
+        new Set(advertisedToolNames).size === expectedNames.length &&
+        [...advertisedToolNames].sort().join("\0") === [...expectedNames].sort().join("\0") &&
+        advertised.every(
+          (tool) =>
+            tool?.type === "function" &&
+            !!tool.function &&
+            typeof tool.function.description === "string" &&
+            !!tool.function.parameters &&
+            typeof tool.function.parameters === "object",
+        );
+      if (!advertisedSchemaVerified || canonicalJson(normalizedToolDefinitions(advertised)) !== expectedToolsJson) {
+        return jsonError(400, "TOOL_SCHEMA_DRIFT");
+      }
+      const messages = Array.isArray(body.messages) ? (body.messages as Array<Record<string, unknown>>) : [];
 
       if (state === "awaiting_tool_call") {
         const userMessages = messages.filter((message) => message.role === "user");
@@ -1699,12 +2046,17 @@ export function startDeterministicInferenceStub(
         return sseResponse([
           completionChunk({
             role: "assistant",
-            tool_calls: [{
-              index: 0,
-              id: modelCallId,
-              type: "function",
-              function: { name: options.toolName, arguments: args.slice(0, splitAt) },
-            }],
+            tool_calls: [
+              {
+                index: 0,
+                id: modelCallId,
+                type: "function",
+                function: {
+                  name: options.toolName,
+                  arguments: args.slice(0, splitAt),
+                },
+              },
+            ],
           }),
           completionChunk({
             tool_calls: [{ index: 0, function: { arguments: args.slice(splitAt) } }],
@@ -1721,7 +2073,7 @@ export function startDeterministicInferenceStub(
           return jsonError(400, "TOOL_RESULT_CARDINALITY");
         }
         const assistantCalls = Array.isArray(assistants[0]?.tool_calls)
-          ? assistants[0].tool_calls as Array<Record<string, unknown>>
+          ? (assistants[0].tool_calls as Array<Record<string, unknown>>)
           : [];
         const assistantCall = assistantCalls[0];
         const assistantFunction = assistantCall?.function as Record<string, unknown> | undefined;
@@ -1734,13 +2086,13 @@ export function startDeterministicInferenceStub(
         }
         const toolMessage = toolMessages[0] as Record<string, unknown>;
         if (
-          assistantCalls.length !== 1
-          || assistantCall?.id !== modelCallId
-          || assistantFunction?.name !== options.toolName
-          || canonicalJson(assistantArgs) !== canonicalJson(options.toolArguments)
-          || toolMessage.tool_call_id !== modelCallId
-          || toolMessage.name !== options.toolName
-          || typeof toolMessage.content !== "string"
+          assistantCalls.length !== 1 ||
+          assistantCall?.id !== modelCallId ||
+          assistantFunction?.name !== options.toolName ||
+          canonicalJson(assistantArgs) !== canonicalJson(options.toolArguments) ||
+          toolMessage.tool_call_id !== modelCallId ||
+          toolMessage.name !== options.toolName ||
+          typeof toolMessage.content !== "string"
         ) {
           state = "failed";
           return jsonError(400, "TOOL_CORRELATION_FAILED");
@@ -1751,10 +2103,7 @@ export function startDeterministicInferenceStub(
           .update(`${toolMessage.content}\0${options.nonce}`)
           .digest("hex")}`;
         state = "complete";
-        return sseResponse([
-          completionChunk({ role: "assistant", content: finalMarker }),
-          completionChunk({}, "stop"),
-        ]);
+        return sseResponse([completionChunk({ role: "assistant", content: finalMarker }), completionChunk({}, "stop")]);
       }
 
       return jsonError(409, state === "complete" ? "REPLAY_REJECTED" : "STUB_FAILED");
@@ -1783,19 +2132,26 @@ export function startDeterministicInferenceStub(
 }
 
 export function buildCanaryCaseSpecs(): CanaryCaseSpec[] {
-  return MODES.flatMap((mode) => TOOLS.flatMap((tool) => BRANCHES.map((branch) => ({
-    case_id: `${mode}:${tool}:${branch}`,
-    mode,
-    tool,
-    branch,
-  }))));
+  return MODES.flatMap((mode) =>
+    TOOLS.flatMap((tool) =>
+      BRANCHES.map((branch) => ({
+        case_id: `${mode}:${tool}:${branch}`,
+        mode,
+        tool,
+        branch,
+      })),
+    ),
+  );
 }
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   const object = value as Record<string, unknown>;
-  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+    .join(",")}}`;
 }
 
 function assertEvidenceManifest(manifest: PublicEvidenceManifest): void {
@@ -1848,35 +2204,47 @@ function expectedLegacyRaw(result: CanaryCaseResult): boolean {
 function caseContractPasses(result: CanaryCaseResult): boolean {
   const successWithAnswer = result.branch === "normal" || result.branch === "include_raw";
   const structuredSuccess = result.mode === "structured" && result.branch !== "error";
-  return result.runtime_identity_verified
-    && result.advertised_tool_verified
-    && result.advertised_schema_verified
-    && result.cbrain_invocation_count === 1
-    && result.host_projection_verified
-    && result.round_trip_verified
-    && (!successWithAnswer || (result.result_title_present && result.result_body_present))
-    && (result.branch !== "empty" || result.empty_contract_verified)
-    && (result.branch !== "error" || result.error_contract_verified)
-    && result.legacy_raw_present === expectedLegacyRaw(result)
-    && !result.default_audit_present
-    && result.expected_audit_contract === expectedAuditContract(result)
-    && result.audit_contract_verified
-    && !result.audit_sensitive_exposed
-    && !result.surface_internal_exposed
-    && result.expected_projection_kind === expectedProjectionKind(result)
-    && result.observed_projection_kind === result.expected_projection_kind
-    && result.projection_contract_verified
-    && result.text_structured_consistent === (structuredSuccess ? true : null)
-    && result.token_method === "tiktoken_cl100k_base_exact"
-    && [
+  return (
+    result.runtime_identity_verified &&
+    result.advertised_tool_verified &&
+    result.advertised_schema_verified &&
+    result.cbrain_invocation_count === 1 &&
+    result.cbrain_call_verified &&
+    result.mcp_session_verified &&
+    result.session_cleanup_verified &&
+    result.case_cleanup_verified &&
+    result.semantic_config_verified &&
+    result.host_projection_verified &&
+    result.round_trip_verified &&
+    (!successWithAnswer || (result.result_title_present && result.result_body_present)) &&
+    (result.branch !== "empty" || result.empty_contract_verified) &&
+    (result.branch !== "error" || result.error_contract_verified) &&
+    result.legacy_raw_present === expectedLegacyRaw(result) &&
+    !result.default_audit_present &&
+    result.expected_audit_contract === expectedAuditContract(result) &&
+    result.audit_contract_verified &&
+    (result.expected_audit_contract === "none" || result.audit_redaction_exercised) &&
+    (result.branch !== "error" || result.error_redaction_exercised) &&
+    !result.audit_sensitive_exposed &&
+    !result.surface_internal_exposed &&
+    result.expected_projection_kind === expectedProjectionKind(result) &&
+    result.observed_projection_kind === result.expected_projection_kind &&
+    result.projection_contract_verified &&
+    result.text_structured_consistent === (structuredSuccess ? true : null) &&
+    result.token_method === "tiktoken_cl100k_base_exact" &&
+    [
       result.result_text_tokens,
       result.structured_content_tokens,
       result.wrapper_total_tokens,
       result.wrapper_total_code_units,
-    ].every((value) => Number.isSafeInteger(value) && value >= 0);
+    ].every((value) => Number.isSafeInteger(value) && value >= 0)
+  );
 }
 
-function validateCaseMatrix(cases: readonly CanaryCaseResult[]): { complete: boolean; contracts: boolean } {
+function validateCaseMatrix(cases: readonly CanaryCaseResult[]): {
+  complete: boolean;
+  contracts: boolean;
+} {
   const expected = new Map(buildCanaryCaseSpecs().map((spec) => [spec.case_id, spec]));
   if (cases.length !== 24 || new Set(cases.map((item) => item.case_id)).size !== 24) {
     return { complete: false, contracts: false };
@@ -1890,7 +2258,10 @@ function validateCaseMatrix(cases: readonly CanaryCaseResult[]): { complete: boo
   return { complete: true, contracts: cases.every(caseContractPasses) };
 }
 
-function validateSizePairs(pairs: readonly SizePairEvidence[]): { valid: boolean; withinBudget: boolean } {
+function validateSizePairs(pairs: readonly SizePairEvidence[]): {
+  valid: boolean;
+  withinBudget: boolean;
+} {
   const expectedIds = new Set(TOOLS.flatMap((tool) => DEFAULT_BRANCHES.map((branch) => `${tool}:${branch}`)));
   if (pairs.length !== 6 || new Set(pairs.map((pair) => pair.pair_id)).size !== 6) {
     return { valid: false, withinBudget: false };
@@ -1921,16 +2292,15 @@ function validateSizePairs(pairs: readonly SizePairEvidence[]): { valid: boolean
     const growth = Math.max(0, worstStructured - bestLegacy);
     const ratio = bestLegacy === 0 ? null : worstStructured / bestLegacy;
     const absolutePass = growth <= 128;
-    const relativeOrFloorPass = bestLegacy >= 128
-      ? worstStructured <= bestLegacy * 1.25
-      : worstStructured <= bestLegacy + 32;
+    const relativeOrFloorPass =
+      bestLegacy >= 128 ? worstStructured <= bestLegacy * 1.25 : worstStructured <= bestLegacy + 32;
     if (
-      pair.worst_structured_tokens !== worstStructured
-      || pair.best_legacy_tokens !== bestLegacy
-      || pair.growth_tokens !== growth
-      || (ratio === null ? pair.ratio !== null : pair.ratio !== ratio)
-      || pair.absolute_gate_passed !== absolutePass
-      || pair.relative_or_floor_gate_passed !== relativeOrFloorPass
+      pair.worst_structured_tokens !== worstStructured ||
+      pair.best_legacy_tokens !== bestLegacy ||
+      pair.growth_tokens !== growth ||
+      (ratio === null ? pair.ratio !== null : pair.ratio !== ratio) ||
+      pair.absolute_gate_passed !== absolutePass ||
+      pair.relative_or_floor_gate_passed !== relativeOrFloorPass
     ) {
       return { valid: false, withinBudget: false };
     }
@@ -1958,7 +2328,9 @@ export function evaluateCanaryReport(input: CanaryEvaluationInput): HermesStruct
 
   let evidenceDigestMatches = false;
   try {
-    evidenceDigestMatches = canonicalEvidenceDigest(input.evidence_manifest) === input.evidence_generation_digest;
+    evidenceDigestMatches =
+      canonicalEvidenceDigest(input.evidence_manifest) === input.evidence_generation_digest &&
+      canonicalJson(input.observed_evidence_manifest) === canonicalJson(input.evidence_manifest);
   } catch {
     evidenceDigestMatches = false;
   }

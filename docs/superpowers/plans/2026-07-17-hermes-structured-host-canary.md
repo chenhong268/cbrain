@@ -595,6 +595,19 @@ Fix every CRITICAL/HIGH/MEDIUM finding and repeat review, up to five rounds. Do 
 
 Any change to the harness, evaluator, case config, fixture schema/content, runtime manifest, or other evidence-generation input invalidates the previous machine result and report. Delete them, rerun Task 6 focused/full relevant verification and the entire 24-primary plus 12-repetition real canary, regenerate the report with a new evidence-generation ID, repeat privacy scans, and then repeat all affected reviews. Documentation-only wording changes under the explicitly excluded `docs/**` set may reuse evidence only when all reviewers confirm the canonical evidence inputs are unchanged.
 
+#### Adversarial review correction — 2026-07-18
+
+The first implementation checkpoint was rejected because its evidence manifest was generated after execution, its real-host schema and MCP-call assertions were weaker than their names, and its live/cleanup proof did not cover the full isolation boundary. The corrected gate therefore:
+
+- loads a checked-in expected evidence manifest and compares independently observed Bun, dependency, checkpoint, runtime, tokenizer, fixture, config-template, and exact three-tool-schema identities before accepting evidence;
+- obtains the three full schemas from a direct isolated `tools/list` preflight and requires Hermes to advertise the exact normalized definitions;
+- binds every case to one exact tool name, canonical arguments, one MCP session, verified DELETE plus post-delete rejection, semantic config, process-group cleanup, and owned-root removal;
+- uses anonymous path and credential sentinels so opt-in audit redaction and error-path echo detection are non-vacuous;
+- captures the pre-run live fingerprint before any Hermes import/version probe and includes precise process birth identity, matching launchd jobs, and relevant config/launcher bytes plus metadata;
+- rejects any existing managed scope before Hermes can load it, never steals a stale global lock, and emits no complete result until the bootstrap snapshot and lock have been removed.
+
+The sensitive error probe is observational. If the real MCP validation path echoes the anonymous sentinel, the canary must report `host_compatibility=incompatible`; the harness must not sanitize the observation or weaken the gate to obtain a passing verdict.
+
 - [ ] **Step 5: Commit, publish, CI, and issue state**
 
 Commit history now contains the approved plan, independently approved runtime-manifest/tokenizer checkpoint, reviewed harness checkpoint used by the evidence snapshot, and final report commit. Confirm the worktree is clean and diff is issue-scoped. Then push `codex/338-structured-canary`, open a ready PR linked to #338, wait for GitHub CI, and merge only if green. Close #338 with the aggregate verdict/evidence. Update #333: close it only if #338 fulfills the parent completion standard; otherwise leave it open with the exact host-side gap. Never modify the live rollout default in this issue.
