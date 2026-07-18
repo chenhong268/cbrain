@@ -510,7 +510,7 @@ async function main(): Promise<number> {
     let exitCode: number;
     try {
       workerStage = "WAIT";
-      const deadline = Date.now() + 180_000;
+      const deadline = Date.now() + 300_000;
       while (!existsSync(workerExitStatus)) {
         if (pendingInterrupt) emitFatal("CANARY_WORKER_INTERRUPTED");
         if (Date.now() >= deadline) emitFatal("CANARY_WORKER_TIMEOUT");
