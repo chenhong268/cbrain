@@ -36,7 +36,14 @@ class BootstrapFatal extends Error {
   }
 }
 
-type BootstrapStage = "ENV" | "LOCK" | "SNAPSHOT" | "WORKER" | "SNAPSHOT_CLEANUP" | "LOCK_RELEASE";
+type BootstrapStage =
+  | "ENV"
+  | "LOCK"
+  | "SNAPSHOT"
+  | "WORKER"
+  | "SNAPSHOT_CLEANUP"
+  | "LOCK_RELEASE"
+  | "RESULT_EMIT";
 let bootstrapStage: BootstrapStage = "ENV";
 
 function emitFatal(code: string): never {
@@ -565,6 +572,7 @@ async function main(): Promise<number> {
       await releaseLock(lockLease);
     }
   }
+  bootstrapStage = "RESULT_EMIT";
   process.stdout.write(`${finalOutput}\n`);
   return finalStatus;
 }
