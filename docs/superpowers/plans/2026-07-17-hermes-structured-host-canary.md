@@ -84,8 +84,8 @@ The 128-token absolute ceiling bounds material per-call context growth; the 25% 
 - Only anonymous synthetic fixtures may enter tests, logs, prompts, reports, or commits.
 - The public report is a closed aggregate schema. It contains no arbitrary error/stdout/stderr strings, absolute paths, credentials, raw messages, private content, exact PID, service label, session ID, slug, score, routing value, or latency value.
 - Exact runtime paths, process identities, config metadata, tool messages, and session identifiers exist only in memory and are discarded after evaluation.
-- Cleanup may signal/delete only resources whose run ID, PID, process start identity, and ownership were recorded by this run. It may never signal or delete a baseline or another run's resource.
-- SIGKILL and machine failure cannot run synchronous cleanup. The harness uses owner metadata and safe stale-run detection on the next invocation; the report must not claim an impossible absolute guarantee.
+- Cleanup may signal/delete only resources whose PID/start identity or directory device/inode ownership was recorded by this run. It may never signal or delete a baseline, a replaced path, or another run's resource.
+- Machine failure cannot run synchronous cleanup. Wrapper SIGKILL is covered by a pre-bootstrap outer guardian plus an inner identity-aware guardian; both verify process and directory birth identity before TERM/KILL/removal. A parent-bound kernel advisory lock releases when its helper exits or is reparented. The report must not claim an impossible machine-failure guarantee.
 
 ---
 
@@ -408,10 +408,10 @@ bun test tests/release/hermes-structured-host-canary.test.ts \
 Cover:
 
 - an atomic single-run lock acquired before ports/DBs; a live owner causes fatal without touching it;
-- stale lock recovery only after PID plus process-birth identity proves the owner is gone;
+- a parent-bound kernel advisory lock that rejects contenders while the owner lives and releases automatically after owner death;
 - every Hermes child uses `detached:true`, becomes its own PGID leader, and records PID/PGID/PPID/start identity;
 - timeout and SIGINT/SIGTERM/SIGHUP use one idempotent cleanup promise, TERM, bounded wait, identity recheck, then KILL;
-- an owned descendant escaping the process group is found through recorded ancestry/start identity and cleaned, while PID reuse and another run are never signaled;
+- the macOS `sandbox-exec` no-fork policy is behaviorally self-verified before Hermes starts, so a fast fork/double-fork cannot escape containment; if the policy is unavailable the canary fails closed;
 - stdout/stderr and cleanup waits are bounded;
 - stable live snapshots pass; PID/start/config metadata drift, inventory changes, unreadable evidence, or inconsistent double reads fail;
 - wrapper/script based services resolve their actual config/env references; unclassified suspected Hermes/CBrain services fail before resource creation;
@@ -429,7 +429,7 @@ The live inventory uses stable double-read snapshots and explicit platform adapt
 
 Keep exact service metadata in memory. Public output includes only aggregate count and equality booleans for process identity, start identity, config metadata, and inventory. Never scan or hash vault/database content.
 
-The lock and owner record use mode `0600`/`0700` and a random run ID. Signal handlers wait for cleanup then re-raise/exit with the conventional code. State explicitly in code/report that SIGKILL or machine failure relies on next-run stale ownership recovery.
+The persistent lock inode is mode `0600`; ownership is the live kernel `flock` lease held by a parent-bound helper, not mutable owner metadata. The POSIX wrapper records its own and the isolated child group's microsecond birth identities. A pre-bootstrap guardian covers wrapper death before Bun loads; the inner guardian escalates TERM to KILL when needed. Both bind recursive cleanup to the original `0700` root's device/inode. A killed bootstrap causes the helper to exit and the kernel to release the lease without stale-lock deletion.
 
 - [ ] **Step 4: Verify GREEN and fault cleanup**
 
@@ -438,7 +438,8 @@ Run:
 ```bash
 bun test tests/release/hermes-structured-host-canary.test.ts
 /bin/sh bin/run-hermes-structured-host-canary.sh \
-  --bun "$(command -v bun)" --hermes "$(command -v hermes)" --fault matrix
+  --bun "$(command -v bun)" --hermes "$(command -v hermes)" \
+  --approved-commit "$APPROVED_EVIDENCE_COMMIT" --fault matrix
 ```
 
 The fault command must exit nonzero, emit only a closed aggregate report, leave live fingerprints unchanged, and prove current-run cleanup.
@@ -470,8 +471,9 @@ With injected runtime, fingerprint, process, and server adapters, prove phase or
 10. close observed sessions and servers;
 11. close Lance/SQLite handles and remove owned roots, including both runtime snapshots;
 12. recapture stable live fingerprint;
-13. recompute the pre-frozen evidence-generation ID, then evaluate and emit one closed report bound to that unchanged ID;
-14. release lock last.
+13. recompute the pre-frozen evidence-generation ID and evaluate one closed report bound to that unchanged ID;
+14. remove owned snapshots, release the kernel lock, and remove the outer bootstrap root;
+15. emit the already-validated closed report only after cleanup succeeds.
 
 Inject faults at every boundary and assert the same cleanup path. Do not allow an overall `go` result with a partial matrix, blocked rollout readiness, or semantic-quality claim.
 
@@ -486,7 +488,7 @@ Tests run the real wrapper against controlled repositories and parent environmen
 Expose a convenience alias, explicitly not valid as evidence because an outer `bun run` may already have loaded dotenv:
 
 ```json
-"gate:hermes-structured": "sh bin/run-hermes-structured-host-canary.sh --bun \"$BUN_EXEC_PATH\" --hermes \"$HERMES_EXEC_PATH\""
+"gate:hermes-structured": "sh bin/run-hermes-structured-host-canary.sh --bun \"$BUN_EXEC_PATH\" --hermes \"$HERMES_EXEC_PATH\" --approved-commit \"$APPROVED_EVIDENCE_COMMIT\""
 ```
 
 The worker CLI writes one privacy-safe JSON object to stdout and a fixed, path-free status line to stderr. Exit codes: `0=go`, `1=no-go`, `2=fatal`. No arbitrary exception text or child output crosses the public boundary.
@@ -532,7 +534,8 @@ Invoke the POSIX wrapper directly with absolute Bun/Hermes arguments; never use 
 
 ```bash
 /bin/sh bin/run-hermes-structured-host-canary.sh \
-  --bun "$(command -v bun)" --hermes "$(command -v hermes)"
+  --bun "$(command -v bun)" --hermes "$(command -v hermes)" \
+  --approved-commit "$APPROVED_EVIDENCE_COMMIT"
 ```
 
 Use a private `mktemp` output file with mode `0600` and a signal trap; do not use a shared fixed filename. The harness itself controls live-state proof and cleanup. Delete the transient machine report after producing the aggregate decision document.
@@ -604,9 +607,31 @@ The first implementation checkpoint was rejected because its evidence manifest w
 - binds every case to one exact tool name, canonical arguments, one MCP session, verified DELETE plus post-delete rejection, semantic config, process-group cleanup, and owned-root removal;
 - uses anonymous path and credential sentinels so opt-in audit redaction and error-path echo detection are non-vacuous;
 - captures the pre-run live fingerprint before any Hermes import/version probe and includes precise process birth identity, matching launchd jobs, and relevant config/launcher bytes plus metadata;
-- rejects any existing managed scope before Hermes can load it, never steals a stale global lock, and emits no complete result until the bootstrap snapshot and lock have been removed.
+- rejects any existing managed scope before Hermes can load it, never steals a live kernel lock, and emits no complete result until the bootstrap snapshot, kernel lease, and outer root have been removed.
 
 The sensitive error probe is observational. If the real MCP validation path echoes the anonymous sentinel, the canary must report `host_compatibility=incompatible`; the harness must not sanitize the observation or weaken the gate to obtain a passing verdict.
+
+#### Adversarial review correction r2 — 2026-07-18
+
+The final evidence checkpoint also incorporates the second adversarial round and real-run harness corrections:
+
+- legacy answer completeness scans the complete model-visible legacy result, while structured completeness excludes audit-only fields;
+- direct MCP error echo, model-visible projected echo, and redaction exercise are recorded as separate booleans, so an unexercised sanitized error cannot be presented as proof of redaction;
+- an externally selected approved commit freezes the evidence manifest; a self-consistent but unapproved checkout is rejected;
+- the complete CBrain and Hermes snapshot identities are checked before and after every real case, with 76 checks per snapshot across the 24 + 12 matrix;
+- a parent-bound kernel `flock`, OS PID/start checks, process-group termination, private worker commit markers, and outer-root cleanup replace stale owner records and long-lived Bun subprocess-state assumptions;
+- the recognized live fingerprint is explicitly scoped to relevant processes, matching launchd rows, and fixed or referenced service artifacts;
+- the historical run at harness revision `1863a60` was invalidated by later lifecycle hardening and is not release evidence for the final checkpoint.
+
+#### Adversarial review correction r3 — 2026-07-18
+
+The third adversarial round replaces best-effort descendant polling and wrapper-only cleanup with deterministic containment:
+
+- every Hermes case runs under a behaviorally verified macOS `deny process-fork` policy; an unavailable or ineffective kernel policy is fatal;
+- all 12 BA repetitions run the same full host/schema/call/session/projection/privacy/cleanup case contract as the 24 primary cases;
+- worker output and exit status commit atomically through a digest-bound marker, and dead workers fail immediately rather than waiting for the global deadline;
+- the outer guardian starts before Bun, while the inner guardian survives bootstrap completion; both use microsecond process identity, TERM/KILL convergence, and device/inode-bound root cleanup;
+- the Hermes install source rejects `.env` files before snapshot/import/version activity, with a behavioral byte-preservation test.
 
 - [ ] **Step 5: Commit, publish, CI, and issue state**
 
