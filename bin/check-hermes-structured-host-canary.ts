@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   ANONYMOUS_FIXTURE_MARKERS,
@@ -47,8 +47,19 @@ function exitWorker(payload: string, code: 0 | 1 | 2): never {
     const snapshotRoot = process.env.CBRAIN_CANARY_SNAPSHOT_ROOT;
     if (!snapshotRoot) throw new Error("missing snapshot root");
     const bootRoot = dirname(snapshotRoot);
-    writeFileSync(join(bootRoot, "worker-output"), `${payload}\n`, { mode: 0o600 });
-    writeFileSync(join(bootRoot, "worker-exit-status"), `${code}\n`, { mode: 0o600 });
+    const outputPath = join(bootRoot, "worker-output");
+    const outputTemp = join(bootRoot, "worker-output.tmp");
+    const markerPath = join(bootRoot, "worker-commit-marker");
+    const markerTemp = join(bootRoot, "worker-commit-marker.tmp");
+    writeFileSync(outputTemp, `${payload}\n`, { mode: 0o600 });
+    renameSync(outputTemp, outputPath);
+    const marker = JSON.stringify({
+      schema_version: 1,
+      exit_code: code,
+      output_sha256: createHash("sha256").update(payload).digest("hex"),
+    });
+    writeFileSync(markerTemp, `${marker}\n`, { mode: 0o600 });
+    renameSync(markerTemp, markerPath);
   } catch {
     process.exit(2);
   }
@@ -116,6 +127,7 @@ try {
   const originalPythonBase = dirname(dirname(realpathSync(join(originalVenv, "bin", "python"))));
 
   fatalStage = "HERMES_SNAPSHOT";
+  if (readdirSync(originalSource).some((name) => name === ".env" || name.startsWith(".env."))) fatal();
   const hermesSnapshot = await createHermesRuntimeSnapshot({
     manifest,
     sourceRepoRoot: originalSource,

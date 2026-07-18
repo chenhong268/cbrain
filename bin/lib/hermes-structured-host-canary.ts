@@ -1339,12 +1339,68 @@ async function readBoundedText(stream: ReadableStream<Uint8Array>, maxBytes: num
   return new TextDecoder().decode(joined);
 }
 
-function processBirthIdentity(pid: number): string | null {
+interface OwnedProcessIdentity {
+  pid: number;
+  ppid: number;
+  pgid: number;
+  start_us: number;
+}
+
+const DARWIN_PROCESS_IDENTITY_SCRIPT = `
+import ctypes, json, sys
+class B(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
+b = B()
+lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+n = lib.proc_pidinfo(int(sys.argv[1]), 3, 0, ctypes.byref(b), ctypes.sizeof(b))
+if n != ctypes.sizeof(b):
+    sys.exit(1)
+print(json.dumps({"pid": b.pid, "ppid": b.ppid, "pgid": b.pgid, "start_us": b.start_sec * 1000000 + b.start_usec}, separators=(",", ":")))
+`;
+
+function readOwnedProcessIdentity(pid: number): OwnedProcessIdentity | null {
   try {
-    const output = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
-    return output || null;
+    const value = JSON.parse(
+      execFileSync("/usr/bin/python3", ["-I", "-c", DARWIN_PROCESS_IDENTITY_SCRIPT, String(pid)], {
+        encoding: "utf8",
+      }),
+    ) as OwnedProcessIdentity;
+    return [value.pid, value.ppid, value.pgid, value.start_us].every(Number.isSafeInteger) && value.pid === pid
+      ? value
+      : null;
   } catch {
     return null;
+  }
+}
+
+function sameOwnedProcess(identity: OwnedProcessIdentity | null): boolean {
+  if (!identity) return false;
+  const current = readOwnedProcessIdentity(identity.pid);
+  return current !== null && current.start_us === identity.start_us;
+}
+
+function captureOwnedDescendants(owned: Map<number, OwnedProcessIdentity>): void {
+  let rows: Array<{ pid: number; ppid: number; pgid: number }> = [];
+  try {
+    const output = execFileSync("/bin/ps", ["-axo", "pid=,ppid=,pgid="], { encoding: "utf8" });
+    rows = output.split("\n").flatMap((line) => {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/);
+      return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]) }] : [];
+    });
+  } catch {
+    return;
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of rows) {
+      if (owned.has(row.pid) || !owned.has(row.ppid)) continue;
+      const identity = readOwnedProcessIdentity(row.pid);
+      if (identity && identity.ppid === row.ppid && identity.pgid === row.pgid) {
+        owned.set(row.pid, identity);
+        changed = true;
+      }
+    }
   }
 }
 
@@ -1417,7 +1473,10 @@ export async function runRealHermesProjectionCase(options: {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let sessionsClosed = false;
   let result: RealHermesProjectionCaseResult | undefined;
-  let childBirth: string | null = null;
+  let childIdentity: OwnedProcessIdentity | null = null;
+  const ownedProcesses = new Map<number, OwnedProcessIdentity>();
+  let stopProcessMonitor = false;
+  let processMonitor: Promise<void> | undefined;
   let interrupted: ((error: Error) => void) | undefined;
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
   try {
@@ -1430,8 +1489,18 @@ export async function runRealHermesProjectionCase(options: {
       stdout: "pipe",
       stderr: "pipe",
     });
-    childBirth = processBirthIdentity(child.pid);
-    if (!childBirth) throw new Error("Hermes child birth identity unavailable");
+    childIdentity = readOwnedProcessIdentity(child.pid);
+    if (!childIdentity || childIdentity.ppid !== process.pid || childIdentity.pgid !== child.pid) {
+      throw new Error("Hermes child birth identity unavailable");
+    }
+    ownedProcesses.set(child.pid, childIdentity);
+    processMonitor = (async () => {
+      while (!stopProcessMonitor) {
+        captureOwnedDescendants(ownedProcesses);
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      }
+      captureOwnedDescendants(ownedProcesses);
+    })();
     const signalPromise = new Promise<never>((_, reject) => {
       interrupted = reject;
     });
@@ -1449,7 +1518,7 @@ export async function runRealHermesProjectionCase(options: {
     try {
       exitCode = await Promise.race([child.exited, timeout, signalPromise]);
     } catch (error) {
-      if (processBirthIdentity(child.pid) === childBirth) {
+      if (sameOwnedProcess(childIdentity)) {
         try {
           process.kill(-child.pid, "SIGTERM");
         } catch {
@@ -1457,7 +1526,7 @@ export async function runRealHermesProjectionCase(options: {
         }
       }
       await Promise.race([child.exited, new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000))]);
-      if (child.exitCode === null && processBirthIdentity(child.pid) === childBirth) {
+      if (child.exitCode === null && sameOwnedProcess(childIdentity)) {
         try {
           process.kill(-child.pid, "SIGKILL");
         } catch {
@@ -1496,7 +1565,10 @@ export async function runRealHermesProjectionCase(options: {
   } finally {
     for (const [signal, handler] of signalHandlers) process.off(signal, handler);
     if (timer) clearTimeout(timer);
-    if (child && child.exitCode === null && processBirthIdentity(child.pid) === childBirth) {
+    stopProcessMonitor = true;
+    if (processMonitor) await processMonitor.catch(() => {});
+    captureOwnedDescendants(ownedProcesses);
+    if (child && child.exitCode === null && sameOwnedProcess(childIdentity)) {
       try {
         process.kill(-child.pid, "SIGKILL");
       } catch {
@@ -1507,7 +1579,10 @@ export async function runRealHermesProjectionCase(options: {
     let processGroupClean = true;
     if (child) {
       processGroupClean = processGroupIsEmpty(child.pid);
-      if (!processGroupClean && processBirthIdentity(child.pid) === childBirth) {
+      const ownedGroupMemberAlive = [...ownedProcesses.values()].some(
+        (identity) => identity.pgid === child?.pid && sameOwnedProcess(identity),
+      );
+      if (!processGroupClean && ownedGroupMemberAlive) {
         try {
           process.kill(-child.pid, "SIGKILL");
         } catch {
@@ -1517,6 +1592,19 @@ export async function runRealHermesProjectionCase(options: {
         processGroupClean = processGroupIsEmpty(child.pid);
       }
     }
+    for (const identity of ownedProcesses.values()) {
+      if (!sameOwnedProcess(identity)) continue;
+      try {
+        process.kill(identity.pid, "SIGKILL");
+      } catch {
+        /* high-resolution identity checked immediately before the signal */
+      }
+    }
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (![...ownedProcesses.values()].some(sameOwnedProcess)) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    }
+    const descendantsClean = ![...ownedProcesses.values()].some(sameOwnedProcess);
     if (!sessionsClosed) await proxy.closeSessions().catch(() => false);
     proxy.stop();
     stub.stop();
@@ -1526,7 +1614,8 @@ export async function runRealHermesProjectionCase(options: {
       try {
         lstatSync(root);
       } catch (error) {
-        result.case_cleanup_verified = processGroupClean && error instanceof Error && error.message.includes("ENOENT");
+        result.case_cleanup_verified =
+          processGroupClean && descendantsClean && error instanceof Error && error.message.includes("ENOENT");
       }
     }
   }

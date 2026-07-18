@@ -735,6 +735,73 @@ exit 0
     }
   });
 
+  test("bootstrap group TERM cannot release the detached kernel lease before cleanup", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-lock-term-"));
+    const source = join(root, "source");
+    const boot = join(root, "boot");
+    const runGit = (...args: string[]): string => {
+      const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
+      expect(result.exitCode, args.join(" ")).toBe(0);
+      return result.stdout.toString().trim();
+    };
+    try {
+      mkdirSync(join(source, "tests", "fixtures"), { recursive: true });
+      mkdirSync(boot);
+      writeFileSync(join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"), "{}\n");
+      writeFileSync(join(source, "package.json"), "{}\n");
+      runGit("init", "-q");
+      runGit("config", "user.name", "Anonymous Reviewer");
+      runGit("config", "user.email", "reviewer@example.invalid");
+      runGit("add", ".");
+      runGit("commit", "-qm", "approved evidence");
+      const approved = runGit("rev-parse", "HEAD");
+      const bootstrap = join(import.meta.dir, "../../bin/bootstrap-hermes-structured-host-canary.ts");
+      const baseEnv = {
+        HOME: boot,
+        TMPDIR: boot,
+        PATH: "/usr/bin:/bin",
+        LANG: "C.UTF-8",
+        LC_ALL: "C.UTF-8",
+        CBRAIN_CANARY_BOOT_ROOT: boot,
+        CBRAIN_CANARY_SOURCE_ROOT: source,
+        CBRAIN_CANARY_HERMES_EXEC: join(root, "unused-hermes"),
+        CBRAIN_CANARY_PARENT_MANAGED_DIR: "",
+        CBRAIN_CANARY_LIVE_HOME: root,
+        CBRAIN_CANARY_APPROVED_COMMIT: approved,
+      };
+      const holder = Bun.spawn({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", bootstrap],
+        cwd: boot,
+        env: { ...baseEnv, CBRAIN_CANARY_FAULT: "lock_term_hold" },
+        stdout: "pipe",
+        stderr: "pipe",
+        detached: true,
+      });
+      await Bun.sleep(250);
+      process.kill(-holder.pid, "SIGTERM");
+      await Bun.sleep(100);
+      const contender = Bun.spawnSync({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", bootstrap],
+        cwd: boot,
+        env: { ...baseEnv, CBRAIN_CANARY_FAULT: "" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(contender.stdout.toString()).toContain("CANARY_LOCK_HELD");
+      expect(await holder.exited).toBe(2);
+      const retry = Bun.spawnSync({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", bootstrap],
+        cwd: boot,
+        env: { ...baseEnv, CBRAIN_CANARY_FAULT: "" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(retry.stdout.toString()).not.toContain("CANARY_LOCK_HELD");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("TERM reaches the isolated bootstrap process group and removes outer temporary roots before exit", async () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-bootstrap-signal-test-"));
     const before = new Set(readdirSync("/tmp").filter((name) => name.startsWith("cbrain-hermes-structured-")));
@@ -972,6 +1039,101 @@ exit 0
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("owned process cleanup uses microsecond birth identity and explicit ancestry", () => {
+    const source = readFileSync(join(import.meta.dir, "../../bin/lib/hermes-structured-host-canary.ts"), "utf8");
+    expect(source).toContain("start_usec");
+    expect(source).toContain("start_us");
+    expect(source).toContain("identity.ppid");
+    expect(source).toContain("identity.pgid");
+    expect(source).toContain("captureOwnedDescendants");
+  });
+
+  test("worker marker and Hermes install-root preflight fail closed", () => {
+    const bootstrap = readFileSync(join(import.meta.dir, "../../bin/bootstrap-hermes-structured-host-canary.ts"), "utf8");
+    const worker = readFileSync(join(import.meta.dir, "../../bin/check-hermes-structured-host-canary.ts"), "utf8");
+    expect(worker).toContain("worker-commit-marker.tmp");
+    expect(worker).toContain("output_sha256");
+    expect(bootstrap).toContain("CANARY_WORKER_STATUS_INVALID");
+    expect(worker).toContain('name === ".env" || name.startsWith(".env.")');
+  });
+
+  test("wrapper SIGKILL is detected by the guardian and removes the owned outer root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-wrapper-orphan-"));
+    const source = join(root, "source");
+    const boot = join(root, "boot");
+    const childPidPath = join(root, "bootstrap-pid");
+    const runGit = (...args: string[]): string => {
+      const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
+      expect(result.exitCode, args.join(" ")).toBe(0);
+      return result.stdout.toString().trim();
+    };
+    try {
+      mkdirSync(join(source, "tests", "fixtures"), { recursive: true });
+      mkdirSync(boot);
+      writeFileSync(join(source, "tests", "fixtures", "hermes-structured-canary-evidence-manifest.json"), "{}\n");
+      writeFileSync(join(source, "package.json"), "{}\n");
+      runGit("init", "-q");
+      runGit("config", "user.name", "Anonymous Reviewer");
+      runGit("config", "user.email", "reviewer@example.invalid");
+      runGit("add", ".");
+      runGit("commit", "-qm", "approved evidence");
+      const approved = runGit("rev-parse", "HEAD");
+      const bootstrap = join(import.meta.dir, "../../bin/bootstrap-hermes-structured-host-canary.ts");
+      const command = `/usr/bin/env -i HOME=${boot} TMPDIR=${boot} PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 CBRAIN_CANARY_BOOT_ROOT=${boot} CBRAIN_CANARY_SOURCE_ROOT=${source} CBRAIN_CANARY_HERMES_EXEC=${root}/unused-hermes CBRAIN_CANARY_PARENT_MANAGED_DIR= CBRAIN_CANARY_LIVE_HOME=${root} CBRAIN_CANARY_FAULT=lock_term_hold CBRAIN_CANARY_APPROVED_COMMIT=${approved} ${process.execPath} --no-env-file --config=/dev/null ${bootstrap} >/dev/null 2>/dev/null & echo $! > ${childPidPath}; wait`;
+      const wrapper = Bun.spawn({ cmd: ["/bin/sh", "-c", command], stdout: "ignore", stderr: "ignore" });
+      for (let attempt = 0; !existsSync(childPidPath) && attempt < 40; attempt += 1) await Bun.sleep(25);
+      const bootstrapPid = Number(readFileSync(childPidPath, "utf8").trim());
+      expect(Number.isSafeInteger(bootstrapPid)).toBe(true);
+      const guardianReady = join(boot, "wrapper-guardian-ready");
+      for (let attempt = 0; !existsSync(guardianReady) && attempt < 120; attempt += 1) await Bun.sleep(25);
+      expect(existsSync(guardianReady)).toBe(true);
+      wrapper.kill("SIGKILL");
+      await wrapper.exited;
+      for (let attempt = 0; existsSync(boot) && attempt < 120; attempt += 1) await Bun.sleep(50);
+      expect(existsSync(boot)).toBe(false);
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        try {
+          process.kill(bootstrapPid, 0);
+          await Bun.sleep(25);
+        } catch {
+          break;
+        }
+      }
+      expect(() => process.kill(bootstrapPid, 0)).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("cleanup kills a recorded descendant that escapes the Hermes process group", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-hermes-escape-"));
+    const marker = join(root, "escaped-marker");
+    const fakeHermes = join(root, "fake-hermes");
+    writeFileSync(
+      fakeHermes,
+      `#!/usr/bin/python3\nimport os, time\npid = os.fork()\nif pid == 0:\n    os.setsid()\n    devnull = os.open("/dev/null", os.O_RDWR)\n    for fd in (0, 1, 2):\n        os.dup2(devnull, fd)\n    if devnull > 2:\n        os.close(devnull)\n    time.sleep(1.0)\n    open(${JSON.stringify(marker)}, "w").close()\n    time.sleep(2.0)\n    os._exit(0)\ntime.sleep(0.3)\n`,
+    );
+    chmodSync(fakeHermes, 0o755);
+    const fixture = await createAnonymousFixtureSnapshot();
+    const runtime = await fixture.openRuntime("structured", "escaped-descendant");
+    try {
+      const result = await runRealHermesProjectionCase({
+        hermesExecutable: fakeHermes,
+        runtime,
+        tool: "query",
+        branch: "normal",
+        timeoutMs: 5_000,
+      });
+      expect(result.case_cleanup_verified).toBe(true);
+      await Bun.sleep(1_100);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await runtime.close();
+      await fixture.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 describe("deterministic Chat Completions SSE state machine", () => {

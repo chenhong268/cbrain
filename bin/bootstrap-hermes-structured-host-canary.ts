@@ -50,6 +50,9 @@ type LockReleaseStage = "IDENTITY" | "TERM" | "TERM_WAIT" | "KILL" | "KILL_WAIT"
 let lockReleaseStage: LockReleaseStage = "IDENTITY";
 type WorkerStage = "PREPARE" | "SPAWN" | "IDENTITY" | "WAIT" | "STATUS" | "GROUP" | "OUTPUT" | "PARSE" | "DONE";
 let workerStage: WorkerStage = "PREPARE";
+let wrapperOrphaned = false;
+let bootstrapInterrupted = false;
+let activeWrapperGuardian: GuardianLease | null = null;
 
 function emitFatal(code: string): never {
   throw new BootstrapFatal(code);
@@ -173,8 +176,19 @@ function assertTreeSymlinksContained(rootPath: string): void {
 }
 
 function processStart(pid: number): string | null {
+  const script = `
+import ctypes, sys
+class B(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
+b = B()
+lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+n = lib.proc_pidinfo(int(sys.argv[1]), 3, 0, ctypes.byref(b), ctypes.sizeof(b))
+if n != ctypes.sizeof(b):
+    sys.exit(1)
+print(f"{b.pid}:{b.ppid}:{b.pgid}:{b.start_sec * 1000000 + b.start_usec}")
+`;
   const result = Bun.spawnSync({
-    cmd: ["/bin/ps", "-p", String(pid), "-o", "lstart="],
+    cmd: ["/usr/bin/python3", "-I", "-c", script, String(pid)],
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -193,6 +207,66 @@ function processGroupIsEmpty(pgid: number): boolean {
 interface LockLease {
   pid: number;
   started: string;
+}
+
+interface GuardianLease {
+  pid: number;
+  started: string;
+}
+
+async function acquireWrapperGuardian(wrapperIdentity: string, bootRoot: string): Promise<GuardianLease> {
+  const script = `
+import ctypes, os, signal, sys, time
+class B(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint32), ("status", ctypes.c_uint32), ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32), ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32), ("svgid", ctypes.c_uint32), ("rfu", ctypes.c_uint32), ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32), ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32), ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32), ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
+lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+wrapper_pid, _, _, wrapper_start = [int(value) for value in sys.argv[1].split(":")]
+parent = int(sys.argv[2])
+marker = sys.argv[3]
+while os.getppid() == parent:
+    b = B()
+    n = lib.proc_pidinfo(wrapper_pid, 3, 0, ctypes.byref(b), ctypes.sizeof(b))
+    current_start = b.start_sec * 1000000 + b.start_usec
+    if n != ctypes.sizeof(b) or b.pid != wrapper_pid or current_start != wrapper_start:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        os.kill(parent, signal.SIGTERM)
+        sys.exit(0)
+    time.sleep(0.05)
+`;
+  const marker = join(bootRoot, "wrapper-orphaned");
+  const child = Bun.spawn({
+    cmd: ["/usr/bin/python3", "-I", "-c", script, wrapperIdentity, String(process.pid), marker],
+    env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+    detached: true,
+  });
+  let started: string | null = null;
+  for (let attempt = 0; started === null && attempt < 20; attempt += 1) {
+    started = processStart(child.pid);
+    if (started === null) await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  if (!started) {
+    child.kill("SIGKILL");
+    emitFatal("BOOTSTRAP_GUARDIAN_UNVERIFIABLE");
+  }
+  // The marker is private to the owned boot root and exists only so tests and
+  // diagnostics can distinguish a protected run from the unavoidable interval
+  // before the bootstrap has installed its parent-death channel.
+  writeFileSync(join(bootRoot, "wrapper-guardian-ready"), `${started}\n`, { mode: 0o600 });
+  child.unref();
+  return { pid: child.pid, started };
+}
+
+async function releaseWrapperGuardian(lease: GuardianLease): Promise<void> {
+  if (processStart(lease.pid) !== lease.started) return;
+  Bun.spawnSync({ cmd: ["/bin/kill", "-TERM", String(lease.pid)], stdout: "pipe", stderr: "pipe" });
+  for (let attempt = 0; attempt < 40 && processStart(lease.pid) === lease.started; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  if (processStart(lease.pid) === lease.started) emitFatal("BOOTSTRAP_GUARDIAN_RELEASE_FAILED");
 }
 
 async function acquireLock(): Promise<LockLease> {
@@ -216,12 +290,8 @@ async function acquireLock(): Promise<LockLease> {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
+    detached: true,
   });
-  const started = processStart(child.pid);
-  if (!started) {
-    child.kill("SIGKILL");
-    emitFatal("CANARY_OWNER_UNVERIFIABLE");
-  }
   const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
   const first = await Promise.race([
     reader.read(),
@@ -232,6 +302,15 @@ async function acquireLock(): Promise<LockLease> {
     await child.exited.catch(() => {});
     if (handshake === "LOCK_HELD") emitFatal("CANARY_LOCK_HELD");
     emitFatal("CANARY_LOCK_UNVERIFIABLE");
+  }
+  let started: string | null = null;
+  for (let attempt = 0; started === null && attempt < 20; attempt += 1) {
+    started = processStart(child.pid);
+    if (started === null) await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  if (!started) {
+    child.kill("SIGKILL");
+    emitFatal("CANARY_OWNER_UNVERIFIABLE");
   }
   reader.releaseLock();
   child.unref();
@@ -258,7 +337,7 @@ async function releaseLock(lease: LockLease): Promise<void> {
       }
     }
     lockReleaseStage = "PID_VERIFY";
-    if (processStart(lease.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    if (processStart(lease.pid) === lease.started) emitFatal("CANARY_LOCK_RELEASE_FAILED");
     lockReleaseStage = "PROBE";
     const probe = Bun.spawnSync({
       cmd: [
@@ -311,6 +390,20 @@ async function main(): Promise<number> {
   if (process.env.CBRAIN_CANARY_FAULT === "bootstrap") emitFatal("INJECTED_BOOTSTRAP_FAULT");
 
   const bootRoot = required("CBRAIN_CANARY_BOOT_ROOT");
+  const wrapperPid = process.ppid;
+  const wrapperStarted = processStart(wrapperPid);
+  if (!wrapperStarted) emitFatal("BOOTSTRAP_WRAPPER_IDENTITY_UNAVAILABLE");
+  const wrapperGuardian = await acquireWrapperGuardian(wrapperStarted, bootRoot);
+  activeWrapperGuardian = wrapperGuardian;
+  const bootstrapSignalHandlers = new Map<NodeJS.Signals, () => void>();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    const handler = () => {
+      wrapperOrphaned ||= existsSync(join(bootRoot, "wrapper-orphaned"));
+      bootstrapInterrupted = true;
+    };
+    bootstrapSignalHandlers.set(signal, handler);
+    process.on(signal, handler);
+  }
   const sourceRoot = resolve(required("CBRAIN_CANARY_SOURCE_ROOT"));
   const hermesExecutable = resolve(required("CBRAIN_CANARY_HERMES_EXEC"));
   if (!isAbsolute(bootRoot) || !isAbsolute(sourceRoot) || !isAbsolute(hermesExecutable))
@@ -341,6 +434,13 @@ async function main(): Promise<number> {
   let pendingError: unknown;
   let pendingErrorStage: BootstrapStage | null = null;
   try {
+    if (bootstrapInterrupted) emitFatal("CANARY_BOOTSTRAP_INTERRUPTED");
+    if (process.env.CBRAIN_CANARY_FAULT === "lock_term_hold") {
+      await new Promise<void>((resolvePromise) => {
+        process.once("SIGTERM", () => setTimeout(resolvePromise, 500));
+      });
+      emitFatal("INJECTED_LOCK_TERM_FAULT");
+    }
     bootstrapStage = "SNAPSHOT";
     if (run(["git", "status", "--porcelain", "--untracked-files=all"], sourceRoot).trim() !== "") {
       emitFatal("BOOTSTRAP_SOURCE_DIRTY");
@@ -451,11 +551,12 @@ async function main(): Promise<number> {
     const preLiveFingerprint = liveModule.captureStableLiveServiceFingerprint(
       realpathSync(required("CBRAIN_CANARY_LIVE_HOME")),
     );
+    if (bootstrapInterrupted) emitFatal("CANARY_BOOTSTRAP_INTERRUPTED");
 
     bootstrapStage = "WORKER";
     workerStage = "PREPARE";
     const worker = join(snapshotSource, "bin", "check-hermes-structured-host-canary.ts");
-    const workerExitStatus = join(bootRoot, "worker-exit-status");
+    const workerExitStatus = join(bootRoot, "worker-commit-marker");
     const workerOutput = join(bootRoot, "worker-output");
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let childStarted: string | null = null;
@@ -506,25 +607,53 @@ async function main(): Promise<number> {
     });
     workerStage = "IDENTITY";
     childStarted = processStart(child.pid);
-    if (!childStarted) emitFatal("CANARY_WORKER_IDENTITY_UNAVAILABLE");
+    const childIdentity = childStarted?.split(":").map(Number);
+    if (
+      !childStarted ||
+      childIdentity?.length !== 4 ||
+      childIdentity[0] !== child.pid ||
+      childIdentity[1] !== process.pid ||
+      childIdentity[2] !== child.pid ||
+      !childIdentity.every(Number.isSafeInteger)
+    )
+      emitFatal("CANARY_WORKER_IDENTITY_UNAVAILABLE");
     let exitCode: number;
     try {
       workerStage = "WAIT";
       const deadline = Date.now() + 600_000;
       while (!existsSync(workerExitStatus)) {
+        if (processStart(wrapperPid) !== wrapperStarted) {
+          wrapperOrphaned = true;
+          emitFatal("CANARY_WRAPPER_ORPHANED");
+        }
         if (pendingInterrupt) emitFatal("CANARY_WORKER_INTERRUPTED");
+        if (bootstrapInterrupted) emitFatal("CANARY_WORKER_INTERRUPTED");
+        if (childStarted && processStart(child.pid) !== childStarted) {
+          emitFatal("CANARY_WORKER_STATUS_MISSING");
+        }
         if (Date.now() >= deadline) emitFatal("CANARY_WORKER_TIMEOUT");
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
       }
       workerStage = "STATUS";
-      let exitStatus: string;
+      let exitMarkerRaw: string;
       try {
-        exitStatus = readFileSync(workerExitStatus, "utf8").trim();
+        exitMarkerRaw = readFileSync(workerExitStatus, "utf8").trim();
       } catch {
         emitFatal("CANARY_WORKER_STATUS_MISSING");
       }
-      if (!/^[012]$/.test(exitStatus)) emitFatal("CANARY_WORKER_STATUS_INVALID");
-      exitCode = Number(exitStatus);
+      let exitMarker: { schema_version: number; exit_code: number; output_sha256: string };
+      try {
+        exitMarker = JSON.parse(exitMarkerRaw) as typeof exitMarker;
+      } catch {
+        emitFatal("CANARY_WORKER_STATUS_INVALID");
+      }
+      if (
+        exitMarker.schema_version !== 1 ||
+        ![0, 1, 2].includes(exitMarker.exit_code) ||
+        !/^[a-f0-9]{64}$/.test(exitMarker.output_sha256)
+      )
+        emitFatal("CANARY_WORKER_STATUS_INVALID");
+      exitCode = exitMarker.exit_code;
       for (let attempt = 0; attempt < 40 && processStart(child.pid) === childStarted; attempt += 1) {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
       }
@@ -565,6 +694,9 @@ async function main(): Promise<number> {
     if (stdout.length > 2_000_000 || /(?:\/Users\/|\/home\/|[A-Za-z]:\\|Bearer\s+|api[_-]?key\s*[:=])/i.test(stdout)) {
       emitFatal("CANARY_OUTPUT_REJECTED");
     }
+    if (createHash("sha256").update(stdout).digest("hex") !== exitMarker.output_sha256) {
+      emitFatal("CANARY_WORKER_STATUS_INVALID");
+    }
     workerStage = "PARSE";
     let parsed: Record<string, unknown>;
     try {
@@ -577,6 +709,15 @@ async function main(): Promise<number> {
     const fatalKeys = ["code", "schema_version", "status"].sort();
     const validKeys = keys.join("\0") === completeKeys.join("\0") || keys.join("\0") === fatalKeys.join("\0");
     if (!validKeys || ![0, 1, 2].includes(exitCode)) emitFatal("CANARY_OUTPUT_INVALID");
+    const expectedExitCode =
+      parsed.status === "fatal"
+        ? 2
+        : parsed.status === "complete" && (parsed.report as { verdict?: unknown } | undefined)?.verdict === "go"
+          ? 0
+          : parsed.status === "complete" && (parsed.report as { verdict?: unknown } | undefined)?.verdict === "no-go"
+            ? 1
+            : -1;
+    if (exitCode !== expectedExitCode) emitFatal("CANARY_WORKER_STATUS_INVALID");
     finalOutput = stdout;
     finalStatus = exitCode;
     workerStage = "DONE";
@@ -596,6 +737,9 @@ async function main(): Promise<number> {
     }
     bootstrapStage = "LOCK_RELEASE";
     await releaseLock(lockLease);
+    await releaseWrapperGuardian(wrapperGuardian);
+    activeWrapperGuardian = null;
+    for (const [signal, handler] of bootstrapSignalHandlers) process.off(signal, handler);
     if (snapshotCleanupFailed) emitFatal("CANARY_SNAPSHOT_CLEANUP_FAILED");
   }
   if (pendingErrorStage !== null) {
@@ -610,14 +754,35 @@ async function main(): Promise<number> {
 try {
   process.exitCode = await main();
 } catch (error) {
-  const code =
-    error instanceof BootstrapFatal
-      ? error.code
-      : bootstrapStage === "LOCK_RELEASE"
-        ? `CANARY_LOCK_RELEASE_${lockReleaseStage}_FAILED`
-        : bootstrapStage === "WORKER"
-          ? `CANARY_WORKER_${workerStage}_FAILED`
-        : `CANARY_BOOTSTRAP_${bootstrapStage}_FATAL`;
-  process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);
-  process.exitCode = 2;
+  if (activeWrapperGuardian) {
+    try {
+      await releaseWrapperGuardian(activeWrapperGuardian);
+    } catch {
+      /* Preserve the primary fail-closed result; process exit releases the guardian. */
+    }
+    activeWrapperGuardian = null;
+  }
+  if (wrapperOrphaned) {
+    const bootRoot = process.env.CBRAIN_CANARY_BOOT_ROOT;
+    if (bootRoot) {
+      try {
+        setTreeWritable(bootRoot);
+      } catch {
+        /* owned best-effort cleanup continues */
+      }
+      rmSync(bootRoot, { recursive: true, force: true });
+    }
+    process.exitCode = 2;
+  } else {
+    const code =
+      error instanceof BootstrapFatal
+        ? error.code
+        : bootstrapStage === "LOCK_RELEASE"
+          ? `CANARY_LOCK_RELEASE_${lockReleaseStage}_FAILED`
+          : bootstrapStage === "WORKER"
+            ? `CANARY_WORKER_${workerStage}_FAILED`
+            : `CANARY_BOOTSTRAP_${bootstrapStage}_FATAL`;
+    process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);
+    process.exitCode = 2;
+  }
 }

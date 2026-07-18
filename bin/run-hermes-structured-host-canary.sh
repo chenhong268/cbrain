@@ -63,8 +63,9 @@ BOOT_ROOT=$(/usr/bin/mktemp -d /tmp/cbrain-hermes-structured-bootstrap.XXXXXX)
 BOOT_HOME=$BOOT_ROOT/home
 BOOT_CWD=$BOOT_ROOT/cwd
 BOOT_TMP=$BOOT_ROOT/tmp
-RESULT_FILE=$(/usr/bin/mktemp /tmp/cbrain-hermes-structured-result.XXXXXX)
-ERROR_FILE=$(/usr/bin/mktemp /tmp/cbrain-hermes-structured-error.XXXXXX)
+RESULT_FILE=$BOOT_ROOT/result
+ERROR_FILE=$BOOT_ROOT/error
+/usr/bin/touch "$RESULT_FILE" "$ERROR_FILE"
 /bin/mkdir -m 700 "$BOOT_HOME" "$BOOT_CWD" "$BOOT_TMP"
 
 cleanup() {
