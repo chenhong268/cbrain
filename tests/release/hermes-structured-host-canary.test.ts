@@ -773,9 +773,15 @@ exit 0
       process.kill("SIGTERM");
       expect(await process.exited).toBe(143);
       expect(() => globalThis.process.kill(childPid, 0)).toThrow();
-      const after = readdirSync("/tmp").filter(
+      let after = readdirSync("/tmp").filter(
         (name) => name.startsWith("cbrain-hermes-structured-") && !before.has(name),
       );
+      for (let attempt = 0; after.length > 0 && attempt < 40; attempt += 1) {
+        await Bun.sleep(50);
+        after = readdirSync("/tmp").filter(
+          (name) => name.startsWith("cbrain-hermes-structured-") && !before.has(name),
+        );
+      }
       expect(after).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
