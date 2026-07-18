@@ -704,7 +704,8 @@ The third frozen attempt passed worker commit validation but failed closed at `H
 
 - permits only the exact public template basename `.env.example` at install-root preflight while continuing to reject `.env`, `.env.local`, and every other `.env.*` variant;
 - neither reads nor modifies the template body, and the runtime snapshot exclusion remains unchanged, so no template or private environment file reaches an import/version/case process;
-- adds a behavioral regression proving a rejected private variant remains byte-identical and the exact public template is accepted without reading or rewriting it;
+- adds behavioral regressions for exact `.env`, `.env.local`, and deceptive `.env.example.bak` rejection; a directory-shaped `.env.example` proves preflight enumerates only the basename rather than opening a body;
+- performs an independent recursive assertion after exclusion and before relocation/import/version activity, so any remaining nested `.env` or `.env.*` entry is fatal even if exclusion logic regresses;
 - invalidates the third fatal attempt and again requires full verification, evidence approval, adversarial review, and a fresh complete real canary.
 
 - [ ] **Step 5: Commit, publish, CI, and issue state**

@@ -415,14 +415,25 @@ export interface HermesRuntimeSnapshot {
   close(): Promise<void>;
 }
 
+function isEnvironmentEntryName(name: string): boolean {
+  return name === ".env" || name.startsWith(".env.");
+}
+
 export function assertHermesInstallRootHasNoEnv(sourceRoot: string): void {
-  if (
-    readdirSync(sourceRoot).some(
-      (name) => name !== ".env.example" && (name === ".env" || name.startsWith(".env.")),
-    )
-  ) {
+  if (readdirSync(sourceRoot).some((name) => name !== ".env.example" && isEnvironmentEntryName(name))) {
     throw new Error("Hermes install root contains an environment file");
   }
+}
+
+export function assertNoRuntimeEnvironmentEntries(root: string): void {
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory)) {
+      if (isEnvironmentEntryName(name)) throw new Error("Hermes runtime snapshot contains an environment file");
+      const path = resolve(directory, name);
+      if (lstatSync(path).isDirectory()) visit(path);
+    }
+  };
+  visit(root);
 }
 
 export function buildCanaryToolArguments(tool: ToolName, branch: Branch): Record<string, unknown> {
@@ -755,8 +766,7 @@ function stripRuntimeExclusions(root: string): void {
         name === ".git" ||
         name === "__pycache__" ||
         name === ".DS_Store" ||
-        name === ".env" ||
-        name.startsWith(".env.") ||
+        isEnvironmentEntryName(name) ||
         (stat.isFile() && name.endsWith(".pyc"))
       ) {
         rmSync(path, { recursive: true, force: true });
@@ -846,6 +856,7 @@ export async function createHermesRuntimeSnapshot(options: {
     stripRuntimeExclusions(sourceRoot);
     stripRuntimeExclusions(pythonRoot);
     stripRuntimeExclusions(venvRoot);
+    assertNoRuntimeEnvironmentEntries(runtimeRoot);
 
     const pythonLink = resolve(venvRoot, "bin", "python");
     unlinkSync(pythonLink);

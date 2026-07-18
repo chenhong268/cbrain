@@ -20,6 +20,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import {
   ANONYMOUS_FIXTURE_MARKERS,
   assertHermesInstallRootHasNoEnv,
+  assertNoRuntimeEnvironmentEntries,
   assertTreeSymlinksContained,
   analyzeHermesHostProjection,
   buildCanaryCaseSpecs,
@@ -1818,19 +1819,34 @@ time.sleep(30)
       worker.indexOf("createHermesRuntimeSnapshot({"),
     );
     const root = mkdtempSync(join(tmpdir(), "cbrain-hermes-env-preflight-"));
-    const envPath = join(root, ".env.local");
     const templatePath = join(root, ".env.example");
     const original = "SYNTHETIC_SENTINEL=must-remain-byte-identical\n";
-    const template = "SYNTHETIC_PUBLIC_TEMPLATE=replace-me\n";
     try {
-      writeFileSync(envPath, original, { mode: 0o600 });
-      expect(() => assertHermesInstallRootHasNoEnv(root)).toThrow();
-      expect(readFileSync(envPath, "utf8")).toBe(original);
-      rmSync(envPath);
-      writeFileSync(templatePath, template, { mode: 0o600 });
+      for (const name of [".env", ".env.local", ".env.example.bak"]) {
+        const envPath = join(root, name);
+        writeFileSync(envPath, original, { mode: 0o600 });
+        expect(() => assertHermesInstallRootHasNoEnv(root)).toThrow();
+        expect(readFileSync(envPath, "utf8")).toBe(original);
+        rmSync(envPath);
+      }
+      mkdirSync(templatePath);
       expect(() => assertHermesInstallRootHasNoEnv(root)).not.toThrow();
-      expect(readFileSync(templatePath, "utf8")).toBe(template);
+      expect(lstatSync(templatePath).isDirectory()).toBe(true);
       expect(readdirSync(root)).toEqual([".env.example"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("runtime snapshot assertion rejects nested environment entries before probes", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-hermes-runtime-env-"));
+    const nested = join(root, "nested");
+    try {
+      mkdirSync(nested);
+      writeFileSync(join(nested, ".env.example"), "SYNTHETIC_PUBLIC_TEMPLATE=replace-me\n");
+      expect(() => assertNoRuntimeEnvironmentEntries(root)).toThrow();
+      rmSync(join(nested, ".env.example"));
+      expect(() => assertNoRuntimeEnvironmentEntries(root)).not.toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
