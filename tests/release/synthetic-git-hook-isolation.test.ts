@@ -50,6 +50,7 @@ test("synthetic Git environment removes Git's complete repository-local variable
 	expect(isolated.CBRAIN_TEST_SENTINEL).toBe("preserved");
 	expect(isolated.GIT_CONFIG_NOSYSTEM).toBe("1");
 	expect(isolated.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+	expect(isolated.GIT_DEFAULT_HASH).toBe("sha1");
 	for (const name of names) {
 		expect(Object.hasOwn(isolated, name), name).toBe(false);
 	}
@@ -112,6 +113,7 @@ test("synthetic repository tests preserve their hook caller repository", () => {
 			GIT_COMMON_DIR: join(outer, ".git"),
 			GIT_CONFIG_GLOBAL: globalConfig,
 			GIT_CONFIG_NOSYSTEM: "0",
+			GIT_DEFAULT_HASH: "sha256",
 		};
 		const runInnerGit = (...args: string[]) => {
 			const result = runSyntheticGit(inner, args, hostileEnvironment);

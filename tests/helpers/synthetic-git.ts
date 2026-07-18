@@ -88,6 +88,7 @@ export function buildSyntheticGitEnvironment(
 	}
 	isolated.GIT_CONFIG_NOSYSTEM = "1";
 	isolated.GIT_CONFIG_GLOBAL = "/dev/null";
+	isolated.GIT_DEFAULT_HASH = "sha1";
 	return isolated;
 }
 
