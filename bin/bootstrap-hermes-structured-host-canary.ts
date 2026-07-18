@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -459,7 +460,6 @@ async function main(): Promise<number> {
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let childStarted: string | null = null;
     let pendingInterrupt: Error | null = null;
-    let interrupt: ((error: Error) => void) | undefined;
     const handlers = new Map<NodeJS.Signals, () => void>();
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
       const handler = () => {
@@ -471,7 +471,6 @@ async function main(): Promise<number> {
             child.kill(signal);
           }
         }
-        interrupt?.(pendingInterrupt);
       };
       handlers.set(signal, handler);
       process.once(signal, handler);
@@ -508,20 +507,14 @@ async function main(): Promise<number> {
     workerStage = "IDENTITY";
     childStarted = processStart(child.pid);
     if (!childStarted) emitFatal("CANARY_WORKER_IDENTITY_UNAVAILABLE");
-    const interruptPromise = new Promise<never>((_, reject) => {
-      interrupt = reject;
-      if (pendingInterrupt) reject(pendingInterrupt);
-    });
     let exitCode: number;
     try {
       workerStage = "WAIT";
       const deadline = Date.now() + 180_000;
-      while (processStart(child.pid) === childStarted) {
-        if (Date.now() >= deadline) throw new Error("canary worker timeout");
-        await Promise.race([
-          new Promise((resolvePromise) => setTimeout(resolvePromise, 100)),
-          interruptPromise,
-        ]);
+      while (!existsSync(workerExitStatus)) {
+        if (pendingInterrupt) emitFatal("CANARY_WORKER_INTERRUPTED");
+        if (Date.now() >= deadline) emitFatal("CANARY_WORKER_TIMEOUT");
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
       }
       workerStage = "STATUS";
       let exitStatus: string;
@@ -532,6 +525,9 @@ async function main(): Promise<number> {
       }
       if (!/^[012]$/.test(exitStatus)) emitFatal("CANARY_WORKER_STATUS_INVALID");
       exitCode = Number(exitStatus);
+      for (let attempt = 0; attempt < 40 && processStart(child.pid) === childStarted; attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      }
     } catch (error) {
       if (processStart(child.pid) === childStarted) {
         try {
