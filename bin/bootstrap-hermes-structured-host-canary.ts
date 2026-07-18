@@ -301,26 +301,6 @@ function setTreeWritable(path: string): void {
   }
 }
 
-async function readBoundedText(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<string> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) emitFatal("CANARY_OUTPUT_REJECTED");
-    chunks.push(value);
-  }
-  const joined = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(joined);
-}
-
 async function main(): Promise<number> {
   for (const key of Object.keys(process.env)) {
     if (!ALLOWED_ENV.has(key)) emitFatal("BOOTSTRAP_ENV_NOT_CLOSED");
@@ -472,6 +452,7 @@ async function main(): Promise<number> {
     bootstrapStage = "WORKER";
     const worker = join(snapshotSource, "bin", "check-hermes-structured-host-canary.ts");
     const workerExitStatus = join(bootRoot, "worker-exit-status");
+    const workerOutput = join(bootRoot, "worker-output");
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let childStarted: string | null = null;
     let pendingInterrupt: Error | null = null;
@@ -516,8 +497,8 @@ async function main(): Promise<number> {
         CBRAIN_CANARY_PRE_LIVE_FINGERPRINT: Buffer.from(JSON.stringify(preLiveFingerprint)).toString("base64"),
         HERMES_MANAGED_DIR: join(bootRoot, "missing-managed"),
       },
-      stdout: "pipe",
-      stderr: "pipe",
+      stdout: "ignore",
+      stderr: "ignore",
       detached: true,
     });
     childStarted = processStart(child.pid);
@@ -526,8 +507,6 @@ async function main(): Promise<number> {
       interrupt = reject;
       if (pendingInterrupt) reject(pendingInterrupt);
     });
-    const stdoutPromise = readBoundedText(child.stdout as ReadableStream<Uint8Array>, 2_000_000);
-    const stderrPromise = readBoundedText(child.stderr as ReadableStream<Uint8Array>, 1_000_000);
     let exitCode: number;
     try {
       const deadline = Date.now() + 180_000;
@@ -571,9 +550,13 @@ async function main(): Promise<number> {
     } finally {
       for (const [signal, handler] of handlers) process.off(signal, handler);
     }
-    const [stdoutRaw] = await Promise.all([stdoutPromise, stderrPromise]);
     if (!processGroupIsEmpty(child.pid)) emitFatal("CANARY_WORKER_GROUP_REMAINED");
-    const stdout = stdoutRaw.trim();
+    let stdout: string;
+    try {
+      stdout = readFileSync(workerOutput, "utf8").trim();
+    } catch {
+      emitFatal("CANARY_WORKER_OUTPUT_MISSING");
+    }
     if (stdout.length > 2_000_000 || /(?:\/Users\/|\/home\/|[A-Za-z]:\\|Bearer\s+|api[_-]?key\s*[:=])/i.test(stdout)) {
       emitFatal("CANARY_OUTPUT_REJECTED");
     }

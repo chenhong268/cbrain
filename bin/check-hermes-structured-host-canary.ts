@@ -42,20 +42,22 @@ const ALLOWED_ENV = new Set([
 type FatalStage = "ENV" | "HERMES_SNAPSHOT" | "MATRIX" | "LIVE_POST" | "EVIDENCE" | "SERIALIZATION";
 let fatalStage: FatalStage = "ENV";
 
-function exitWorker(code: 0 | 1 | 2): never {
+function exitWorker(payload: string, code: 0 | 1 | 2): never {
   try {
     const snapshotRoot = process.env.CBRAIN_CANARY_SNAPSHOT_ROOT;
     if (!snapshotRoot) throw new Error("missing snapshot root");
-    writeFileSync(join(dirname(snapshotRoot), "worker-exit-status"), `${code}\n`, { mode: 0o600 });
+    const bootRoot = dirname(snapshotRoot);
+    writeFileSync(join(bootRoot, "worker-output"), `${payload}\n`, { mode: 0o600 });
+    writeFileSync(join(bootRoot, "worker-exit-status"), `${code}\n`, { mode: 0o600 });
   } catch {
     process.exit(2);
   }
+  process.stdout.write(`${payload}\n`);
   process.exit(code);
 }
 
 function fatal(code = `CANARY_${fatalStage}_FATAL`): never {
-  process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);
-  exitWorker(2);
+  exitWorker(JSON.stringify({ schema_version: 1, status: "fatal", code }), 2);
 }
 
 function sha256(path: string): string {
@@ -259,8 +261,7 @@ try {
   fatalStage = "SERIALIZATION";
   const serialized = JSON.stringify(output);
   if (/(?:\/Users\/|\/home\/|[A-Za-z]:\\|Bearer\s+|api[_-]?key\s*[:=])/i.test(serialized)) fatal();
-  process.stdout.write(`${serialized}\n`);
-  exitWorker(report.verdict === "go" ? 0 : 1);
+  exitWorker(serialized, report.verdict === "go" ? 0 : 1);
 } catch {
   fatal();
 }
