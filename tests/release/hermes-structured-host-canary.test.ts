@@ -48,6 +48,7 @@ import {
 } from "../../bin/lib/hermes-structured-host-canary.js";
 
 import { extractLiveCommandFileCandidates } from "../../bin/lib/hermes-canary-live-fingerprint.js";
+import { runSyntheticGit } from "../helpers/synthetic-git.js";
 
 function createBootstrapTestRoot(): string {
   const path = `/tmp/cbrain-hermes-structured-bootstrap.${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -1419,7 +1420,7 @@ time.sleep(30)
     const source = join(root, "source");
     const boot = createBootstrapTestRoot();
     const runGit = (...args: string[]): string => {
-      const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
+      const result = runSyntheticGit(source, args);
       expect(result.exitCode, args.join(" ")).toBe(0);
       return result.stdout.toString().trim();
     };
@@ -1475,7 +1476,7 @@ time.sleep(30)
     const source = join(root, "source");
     const boot = createBootstrapTestRoot();
     const runGit = (...args: string[]): string => {
-      const result = Bun.spawnSync({ cmd: ["git", ...args], cwd: source, stdout: "pipe", stderr: "pipe" });
+      const result = runSyntheticGit(source, args);
       expect(result.exitCode, args.join(" ")).toBe(0);
       return result.stdout.toString().trim();
     };
@@ -1706,29 +1707,20 @@ time.sleep(30)
       chmodSync(join(venv, "bin", "hermes"), 0o755);
       writeFileSync(join(venv, "pyvenv.cfg"), `home = ${join(pythonBase, "bin")}\n`);
       writeFileSync(join(source, "runtime.py"), "# frozen source\n");
-      expect(Bun.spawnSync({ cmd: ["git", "init", "-q"], cwd: source }).exitCode).toBe(0);
-      expect(Bun.spawnSync({ cmd: ["git", "add", "runtime.py"], cwd: source }).exitCode).toBe(0);
+      expect(runSyntheticGit(source, ["init", "-q"]).exitCode).toBe(0);
+      expect(runSyntheticGit(source, ["add", "runtime.py"]).exitCode).toBe(0);
       expect(
-        Bun.spawnSync({
-          cmd: [
-            "git",
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-qm",
-            "fixture",
-          ],
-          cwd: source,
-        }).exitCode,
+        runSyntheticGit(source, [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "-qm",
+          "fixture",
+        ]).exitCode,
       ).toBe(0);
-      const sourceCommit = Bun.spawnSync({
-        cmd: ["git", "rev-parse", "HEAD"],
-        cwd: source,
-      })
-        .stdout.toString()
-        .trim();
+      const sourceCommit = runSyntheticGit(source, ["rev-parse", "HEAD"]).stdout.toString().trim();
       const manifest = createHermesRuntimeManifest({
         hermesVersion: "0.18.0",
         sourceRepoRoot: source,
