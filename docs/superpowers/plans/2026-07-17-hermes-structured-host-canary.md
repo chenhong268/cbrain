@@ -255,7 +255,7 @@ Use the real chat path from the verified snapshot, which performs bounded MCP di
 ```bash
 hermes chat -q '<controlled anonymous prompt>' -Q --cli \
   --max-turns 4 --ignore-rules --source tool \
-  --model canary-model --provider custom --toolsets cbrain_canary
+  --model canary-model --provider custom --toolsets mcp-cbrain_canary
 ```
 
 Set `HERMES_IGNORE_RULES=1` explicitly as defense in depth. Use only absolute executable paths and a minimal PATH required by that installation. Point `HERMES_MANAGED_DIR` at a known nonexistent child of the temporary root after separately proving the default managed scope is absent. Do not use the broken top-level `--oneshot` path.
