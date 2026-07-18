@@ -45,6 +45,8 @@ type BootstrapStage =
   | "LOCK_RELEASE"
   | "RESULT_EMIT";
 let bootstrapStage: BootstrapStage = "ENV";
+type LockReleaseStage = "IDENTITY" | "TERM" | "TERM_WAIT" | "KILL" | "KILL_WAIT" | "PID_VERIFY" | "PROBE" | "DONE";
+let lockReleaseStage: LockReleaseStage = "IDENTITY";
 
 function emitFatal(code: string): never {
   throw new BootstrapFatal(code);
@@ -235,19 +237,26 @@ async function acquireLock(): Promise<LockLease> {
 
 async function releaseLock(lease: LockLease): Promise<void> {
   try {
+    lockReleaseStage = "IDENTITY";
     if (processStart(lease.pid) !== lease.started) emitFatal("CANARY_LOCK_OWNERSHIP_DRIFT");
+    lockReleaseStage = "TERM";
     const term = Bun.spawnSync({ cmd: ["/bin/kill", "-TERM", String(lease.pid)], stdout: "pipe", stderr: "pipe" });
     if (term.exitCode !== 0 && processStart(lease.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    lockReleaseStage = "TERM_WAIT";
     for (let attempt = 0; attempt < 40 && processStart(lease.pid) === lease.started; attempt += 1) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
     }
     if (processStart(lease.pid) === lease.started) {
+      lockReleaseStage = "KILL";
       Bun.spawnSync({ cmd: ["/bin/kill", "-KILL", String(lease.pid)], stdout: "pipe", stderr: "pipe" });
+      lockReleaseStage = "KILL_WAIT";
       for (let attempt = 0; attempt < 40 && processStart(lease.pid) === lease.started; attempt += 1) {
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
       }
     }
+    lockReleaseStage = "PID_VERIFY";
     if (processStart(lease.pid) !== null) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    lockReleaseStage = "PROBE";
     const probe = Bun.spawnSync({
       cmd: [
         "/usr/bin/python3",
@@ -261,6 +270,7 @@ async function releaseLock(lease: LockLease): Promise<void> {
       stderr: "pipe",
     });
     if (probe.exitCode !== 0) emitFatal("CANARY_LOCK_RELEASE_FAILED");
+    lockReleaseStage = "DONE";
   } catch (error) {
     if (error instanceof BootstrapFatal) throw error;
     emitFatal("CANARY_LOCK_RELEASE_FAILED");
@@ -586,7 +596,12 @@ async function main(): Promise<number> {
 try {
   process.exitCode = await main();
 } catch (error) {
-  const code = error instanceof BootstrapFatal ? error.code : `CANARY_BOOTSTRAP_${bootstrapStage}_FATAL`;
+  const code =
+    error instanceof BootstrapFatal
+      ? error.code
+      : bootstrapStage === "LOCK_RELEASE"
+        ? `CANARY_LOCK_RELEASE_${lockReleaseStage}_FAILED`
+        : `CANARY_BOOTSTRAP_${bootstrapStage}_FATAL`;
   process.stdout.write(`${JSON.stringify({ schema_version: 1, status: "fatal", code })}\n`);
   process.exitCode = 2;
 }
