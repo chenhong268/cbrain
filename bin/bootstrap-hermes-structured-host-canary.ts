@@ -355,6 +355,8 @@ async function main(): Promise<number> {
   let snapshotCreated = false;
   let finalOutput = "";
   let finalStatus = 2;
+  let pendingError: unknown;
+  let pendingErrorStage: BootstrapStage | null = null;
   try {
     bootstrapStage = "SNAPSHOT";
     if (run(["git", "status", "--porcelain", "--untracked-files=all"], sourceRoot).trim() !== "") {
@@ -573,6 +575,9 @@ async function main(): Promise<number> {
     if (!validKeys || ![0, 1, 2].includes(exitCode)) emitFatal("CANARY_OUTPUT_INVALID");
     finalOutput = stdout;
     finalStatus = exitCode;
+  } catch (error) {
+    pendingError = error;
+    pendingErrorStage = bootstrapStage;
   } finally {
     let snapshotCleanupFailed = false;
     bootstrapStage = "SNAPSHOT_CLEANUP";
@@ -587,6 +592,10 @@ async function main(): Promise<number> {
     bootstrapStage = "LOCK_RELEASE";
     await releaseLock(lockLease);
     if (snapshotCleanupFailed) emitFatal("CANARY_SNAPSHOT_CLEANUP_FAILED");
+  }
+  if (pendingErrorStage !== null) {
+    bootstrapStage = pendingErrorStage;
+    throw pendingError;
   }
   bootstrapStage = "RESULT_EMIT";
   process.stdout.write(`${finalOutput}\n`);
