@@ -81,7 +81,7 @@ function parseReport(stdout: string): GateReport {
 }
 
 function gitStatus(): string {
-  return execSync("git status --porcelain", { encoding: "utf-8", cwd: PROJECT_DIR });
+  return execSync("git --no-optional-locks status --porcelain", { encoding: "utf-8", cwd: PROJECT_DIR });
 }
 
 function assertionOf(j: JourneyResult | undefined, check: string): AssertionResult {
