@@ -12,6 +12,7 @@
     "!src/**/__tests__/**",
     "skills/",
     "bin/check-install-smoke.sh",
+    "bin/cbrain-serve-http.sh",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

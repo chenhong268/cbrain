@@ -32,6 +32,8 @@ export interface CBrainDeps {
   nerIngestMode?: IngestNerMode;
   /** #251: resolved MCP tool surface profile (env > full), threaded into buildContext. */
   toolProfile?: ToolProfile;
+  /** #357: attestation of the exact config bytes parsed before dependency creation. */
+  rolloutConfigAttestation?: string;
 }
 
 /** Register dream job handler and start the background worker. Shared by MCP and HTTP paths. */

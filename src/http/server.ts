@@ -176,7 +176,19 @@ export function createHttpServer(ctx: ToolContext) {
 
           // GET /health
           if (req.method === "GET" && url.pathname === "/health") {
-            return Response.json({ ok: true, tools: tools.size, version, started_at: startedAt });
+            return Response.json({
+              ok: true,
+              tools: tools.size,
+              version,
+              started_at: startedAt,
+              output_boundary: ctx.outputMode,
+              ...(ctx.rolloutIdentity ? {
+                cohort_id: ctx.rolloutIdentity.cohortId,
+                config_attestation: ctx.rolloutIdentity.configAttestation,
+                deployment_digest: ctx.rolloutIdentity.deploymentDigest,
+                process_id: process.pid,
+              } : {}),
+            });
           }
 
           // GET /tools — list all tools

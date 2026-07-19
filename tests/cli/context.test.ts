@@ -36,6 +36,23 @@ describe("createDeps (#252)", () => {
     }
   });
 
+  test("keeps a loaded config paired with its exact-byte rollout attestation", () => {
+    const attestation = "a".repeat(64);
+    const config = makeConfig();
+    const deps = createDeps({
+      config,
+      configPath: "/tmp/cbrain-test-cli/cbrain.json",
+      configRoot: "/tmp/cbrain-test-cli",
+      rolloutConfigAttestation: attestation,
+    }, false);
+    try {
+      expect(deps.vaultPath).toBe(config.vaultPath);
+      expect(deps.rolloutConfigAttestation).toBe(attestation);
+    } finally {
+      deps.db.close();
+    }
+  });
+
   test("createDeps threads nerIngestMode from env into deps", () => {
     process.env.CBRAIN_INGEST_NER_MODE = "defer";
     try {

@@ -60,6 +60,8 @@ export interface ToolContext {
   toolProfile: ToolProfile;
   /** #327 Phase 1: pilot output trust-boundary mode (legacy | structured). */
   outputMode: OutputMode;
+  /** #357: identity emitted only by the fixed rollout cohort health endpoint. */
+  rolloutIdentity?: { cohortId: string; configAttestation: string; deploymentDigest: string };
   /** #252/#271: resolved NER mode shared by ingest, page tools, and sync. */
   nerIngestMode: IngestNerMode;
   /** #252/#271: durable backfill submitter for write paths in defer mode. */
@@ -81,7 +83,7 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; vaultBoundary?: TrustedVaultBoundary; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile }): ToolContext {
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; vaultBoundary?: TrustedVaultBoundary; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile; rolloutConfigAttestation?: string }): ToolContext {
   const { db, embedding, lance, vaultPath, vaultBoundary, dbPath, llm, profileDir, watcher } = deps;
   const outputsDir = deps.runtimePath;
   const logger = new Logger(outputsDir);
@@ -94,6 +96,22 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   // but env should still win if buildContext is called without going through createDeps.
   const nerMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, deps.nerIngestMode);
   const deferredNerSubmitter = new JobQueueNerSubmitter(db);
+  const cohortId = process.env.CBRAIN_ROLLOUT_COHORT_ID;
+  const configIdentity = process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY;
+  const deploymentDigest = process.env.CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST;
+  const configAttestation = deps.rolloutConfigAttestation;
+  let rolloutIdentity: ToolContext["rolloutIdentity"];
+  if (
+    cohortId === "cbrain-structured-pilot-v1" && /^[a-f0-9]{64}$/.test(configIdentity ?? "") &&
+    /^[a-f0-9]{64}$/.test(deploymentDigest ?? "") && /^[a-f0-9]{64}$/.test(configAttestation ?? "") &&
+    process.env.CBRAIN_CONFIG
+  ) {
+    rolloutIdentity = {
+      cohortId,
+      configAttestation: configAttestation as string,
+      deploymentDigest: deploymentDigest as string,
+    };
+  }
   const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger, nerMode, deferredNerSubmitter });
   const ingest = new IngestManager(db, embedding, lance, vaultPath, llm, undefined, {
     nerMode,
@@ -111,5 +129,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const compoundingReview = new CompoundingReviewManager(db);
   profile.load();
 
-  return { db, vaultPath, vaultBoundary, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY) };
+  return { db, vaultPath, vaultBoundary, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY), rolloutIdentity };
 }

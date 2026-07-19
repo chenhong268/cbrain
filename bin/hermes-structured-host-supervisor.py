@@ -11,6 +11,7 @@ import re
 import secrets
 import selectors
 import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -190,6 +191,7 @@ FATAL_CODES = {
     "BOOTSTRAP_WRAPPER_IDENTITY_UNAVAILABLE", "CANARY_BOOTSTRAP_INTERRUPTED", "CANARY_LOCK_HELD",
     "CANARY_LOCK_OWNERSHIP_DRIFT", "CANARY_LOCK_RELEASE_FAILED", "CANARY_LOCK_UNVERIFIABLE",
     "CANARY_OUTPUT_INVALID", "CANARY_OUTPUT_REJECTED", "CANARY_OWNER_UNVERIFIABLE",
+    "CANARY_ROLLBACK_PROOF_INVALID",
     "CANARY_SNAPSHOT_CLEANUP_FAILED", "CANARY_WORKER_GROUP_REMAINED",
     "CANARY_WORKER_IDENTITY_UNAVAILABLE", "CANARY_WORKER_INTERRUPTED",
     "CANARY_WORKER_OUTPUT_MISSING", "CANARY_WORKER_STATUS_INVALID", "CANARY_WORKER_STATUS_MISSING",
@@ -412,7 +414,272 @@ def canonical_evidence_digest(manifest) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def report_is_consistent(payload) -> bool:
+def claims_rollback_ready(raw: str) -> bool:
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_finite,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    report = payload.get("report") if isinstance(payload, dict) else None
+    return (
+        isinstance(report, dict)
+        and report.get("rollback_command_id") == "cbrain-structured-cohort-rollback-v1"
+    )
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_tree_digest(root: str):
+    root = os.path.realpath(root)
+    digest = hashlib.sha256()
+    file_count = 0
+
+    def add_entry(kind: str, relative: str, mode: int, content: bytes):
+        content_digest = hashlib.sha256(content).hexdigest()
+        digest.update(f"{kind}\0{relative}\0{mode:o}\0{len(content)}\0{content_digest}\n".encode("utf-8"))
+
+    def visit(directory: str):
+        nonlocal file_count
+        for name in sorted(os.listdir(directory)):
+            if name in (".git", "__pycache__", ".DS_Store", ".env") or name.startswith(".env."):
+                continue
+            path = os.path.join(directory, name)
+            observed = os.lstat(path)
+            relative = os.path.relpath(path, root).replace(os.sep, "/")
+            mode = stat.S_IMODE(observed.st_mode)
+            if stat.S_ISDIR(observed.st_mode):
+                add_entry("directory", relative, mode, b"")
+                visit(path)
+            elif stat.S_ISLNK(observed.st_mode):
+                file_count += 1
+                add_entry("symlink", relative, mode, os.readlink(path).encode("utf-8"))
+            elif stat.S_ISREG(observed.st_mode) and not name.endswith(".pyc"):
+                file_count += 1
+                with open(path, "rb") as handle:
+                    add_entry("file", relative, mode, handle.read())
+            elif not stat.S_ISREG(observed.st_mode):
+                raise RuntimeError("closed runtime tree entry failure")
+
+    visit(root)
+    return {"digest": digest.hexdigest(), "file_count": file_count}
+
+
+def assert_tree_symlinks_contained(root: str):
+    canonical_root = os.path.realpath(root)
+    for directory, names, files in os.walk(canonical_root, followlinks=False):
+        for name in [*names, *files]:
+            path = os.path.join(directory, name)
+            if not stat.S_ISLNK(os.lstat(path).st_mode):
+                continue
+            target = os.path.realpath(path)
+            if os.path.commonpath((canonical_root, target)) != canonical_root:
+                raise RuntimeError("closed snapshot link failure")
+
+
+def set_tree_read_only(root: str):
+    directories = []
+    for directory, names, files in os.walk(root, topdown=True, followlinks=False):
+        directories.append(directory)
+        for name in files:
+            path = os.path.join(directory, name)
+            observed = os.lstat(path)
+            if not stat.S_ISLNK(observed.st_mode):
+                os.chmod(path, 0o500 if stat.S_IMODE(observed.st_mode) & 0o111 else 0o400)
+        names[:] = [name for name in names if not stat.S_ISLNK(os.lstat(os.path.join(directory, name)).st_mode)]
+    for directory in reversed(directories):
+        os.chmod(directory, 0o500)
+
+
+def load_approved_manifest(source_root: str, approved_commit: str):
+    manifest_relative = "tests/fixtures/hermes-structured-canary-evidence-manifest.json"
+    raw = git_output(source_root, ["show", f"{approved_commit}:{manifest_relative}"])
+    manifest = json.loads(
+        raw,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_finite,
+    )
+    if not valid_manifest(manifest):
+        raise RuntimeError("closed evidence manifest failure")
+    return manifest_relative, raw, manifest
+
+
+def create_proof_snapshot(
+    bun: str,
+    source_root: str,
+    head: str,
+    owned_root: str,
+    manifest,
+    deadline: float,
+):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("closed proof deadline failure")
+    snapshot_root = os.path.join(owned_root, "proof-snapshot")
+    snapshot_source = os.path.join(snapshot_root, "source")
+    snapshot_bin = os.path.join(snapshot_root, "bin")
+    os.mkdir(snapshot_root, 0o700)
+    os.mkdir(snapshot_bin, 0o700)
+    clone = subprocess.run(
+        ["/usr/bin/git", "clone", "--quiet", "--no-checkout", source_root, snapshot_source],
+        env={"HOME": "/var/empty", "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=min(30.0, remaining),
+        check=False,
+    )
+    if clone.returncode != 0:
+        raise RuntimeError("closed proof snapshot failure")
+    git_output(snapshot_source, ["checkout", "--quiet", head])
+    if git_output(snapshot_source, ["status", "--porcelain", "--untracked-files=all"]).strip():
+        raise RuntimeError("closed proof snapshot drift")
+    shutil.rmtree(os.path.join(snapshot_source, ".git"))
+    shutil.rmtree(os.path.join(snapshot_source, "docs"), ignore_errors=True)
+
+    source_modules = os.path.join(source_root, "node_modules")
+    expected_modules = {
+        "digest": manifest["node_modules_tree_digest"],
+        "file_count": manifest["node_modules_file_count"],
+    }
+    if canonical_tree_digest(source_modules) != expected_modules:
+        raise RuntimeError("closed dependency evidence failure")
+    snapshot_modules = os.path.join(snapshot_source, "node_modules")
+    shutil.copytree(source_modules, snapshot_modules, symlinks=True)
+    if canonical_tree_digest(snapshot_modules) != expected_modules:
+        raise RuntimeError("closed dependency copy failure")
+
+    copied_bun = os.path.join(snapshot_bin, "bun")
+    shutil.copyfile(bun, copied_bun)
+    os.chmod(copied_bun, 0o500)
+    if file_sha256(copied_bun) != manifest["bun_binary_digest"]:
+        raise RuntimeError("closed Bun copy failure")
+    assert_tree_symlinks_contained(snapshot_root)
+    proof_entry = os.path.join(snapshot_source, "bin", "prove-structured-cohort-rollback.ts")
+    if os.path.realpath(proof_entry) != proof_entry or not stat.S_ISREG(os.lstat(proof_entry).st_mode):
+        raise RuntimeError("closed proof entry failure")
+    set_tree_read_only(snapshot_source)
+    os.chmod(copied_bun, 0o500)
+    os.chmod(snapshot_bin, 0o500)
+    os.chmod(snapshot_root, 0o500)
+    return copied_bun, proof_entry, canonical_tree_digest(snapshot_source)
+
+
+def git_output(source_root: str, args: list[str]) -> bytes:
+    result = subprocess.run(
+        ["/usr/bin/git", *args],
+        cwd=source_root,
+        env={"HOME": "/var/empty", "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("closed git verification failure")
+    return result.stdout
+
+
+def verify_rollback_proof(
+    bun: str,
+    source_root: str,
+    approved_commit: str,
+    owned_root: str,
+    deadline: float,
+):
+    try:
+        owned_root = os.path.realpath(owned_root)
+        if not stat.S_ISDIR(os.lstat(owned_root).st_mode):
+            return None
+        if git_output(source_root, ["status", "--porcelain", "--untracked-files=all"]).strip():
+            return None
+        head = git_output(source_root, ["rev-parse", "HEAD"]).decode("ascii").strip()
+        if re.fullmatch(r"[a-f0-9]{40}", head) is None:
+            return None
+        git_output(source_root, ["merge-base", "--is-ancestor", approved_commit, head])
+        changed = git_output(source_root, ["diff", "--name-only", approved_commit, head]).decode("utf-8").splitlines()
+        if any(not path.startswith("docs/") for path in changed):
+            return None
+        manifest_relative, approved_manifest, manifest = load_approved_manifest(source_root, approved_commit)
+        manifest_path = os.path.join(source_root, manifest_relative)
+        with open(manifest_path, "rb") as handle:
+            current_manifest = handle.read()
+        if current_manifest != approved_manifest:
+            return None
+        listing = []
+        for line in git_output(source_root, ["ls-tree", "-r", "--full-tree", head]).decode("utf-8").splitlines():
+            path = line.split("\t", 1)[1]
+            if not path.startswith("docs/") and path != manifest_relative:
+                listing.append(line)
+        checkpoint = hashlib.sha256(("\n".join(listing) + "\n").encode("utf-8")).hexdigest()
+        if (
+            checkpoint != manifest.get("checkpoint_tree_digest")
+            or len(listing) != manifest.get("checkpoint_blob_count")
+            or os.path.realpath(bun) != bun
+            or not stat.S_ISREG(os.lstat(bun).st_mode)
+            or file_sha256(bun) != manifest.get("bun_binary_digest")
+        ):
+            return None
+        copied_bun, proof_entry, frozen_source = create_proof_snapshot(
+            bun, source_root, head, owned_root, manifest, deadline,
+        )
+        proof_home = os.path.join(owned_root, "proof-home")
+        proof_cwd = os.path.join(owned_root, "proof-cwd")
+        os.mkdir(proof_home, 0o700)
+        os.mkdir(proof_cwd, 0o700)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        result = subprocess.run(
+            [copied_bun, "--no-env-file", "--config=/dev/null", f"--cwd={proof_cwd}", proof_entry],
+            cwd=proof_cwd,
+            env={
+                "HOME": proof_home,
+                "TMPDIR": os.path.join(owned_root, "tmp"),
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=min(15.0, remaining),
+            check=False,
+        )
+        expected = json.dumps(
+            {
+                "schema_version": 1,
+                "status": "verified",
+                "command_id": "cbrain-structured-cohort-rollback-v1",
+            },
+            separators=(",", ":"),
+        )
+        source_unchanged = (
+            not git_output(source_root, ["status", "--porcelain", "--untracked-files=all"]).strip()
+            and git_output(source_root, ["rev-parse", "HEAD"]).decode("ascii").strip() == head
+            and file_sha256(bun) == manifest["bun_binary_digest"]
+            and canonical_tree_digest(os.path.dirname(os.path.dirname(proof_entry))) == frozen_source
+            and file_sha256(copied_bun) == manifest["bun_binary_digest"]
+        )
+        if not source_unchanged:
+            return None
+        if result.returncode != 0 or result.stderr != b"" or result.stdout.decode("utf-8").strip() != expected:
+            return None
+        return manifest
+    except Exception:
+        return None
+
+
+def report_is_consistent(payload, rollback_proof_verified: bool, trusted_manifest=None) -> bool:
     report = payload["report"]
     runtime = payload["runtime"]
     cases = payload["case_metrics"]
@@ -444,12 +711,20 @@ def report_is_consistent(payload) -> bool:
     if digest_mismatch or reported_evidence_mismatch:
         reasons.append("EVIDENCE_DIGEST_MISMATCH")
     host_compatible = len(reasons) == 0
-    reasons.append("ROLLBACK_NOT_EXECUTABLE")
+    rollout_ready = (
+        rollback_proof_verified
+        and trusted_manifest is not None
+        and report["rollback_command_id"] == "cbrain-structured-cohort-rollback-v1"
+        and report["evidence_manifest"] == trusted_manifest
+        and report["evidence_generation_digest"] == canonical_evidence_digest(trusted_manifest)
+    )
+    if not rollout_ready:
+        reasons.append("ROLLBACK_NOT_EXECUTABLE")
     return (
         report["reason_codes"] == reasons
         and report["host_compatibility"] == ("compatible" if host_compatible else "incompatible")
-        and report["rollout_readiness"] == "blocked"
-        and report["verdict"] == "no-go"
+        and report["rollout_readiness"] == ("ready" if rollout_ready else "blocked")
+        and report["verdict"] == ("go" if host_compatible and rollout_ready else "no-go")
         and report["matrix"] == {
             "expected_cases": 24,
             "completed_cases": 24,
@@ -460,7 +735,7 @@ def report_is_consistent(payload) -> bool:
 
 def valid_report(value) -> bool:
     keys = {
-        "verdict", "host_compatibility", "rollout_readiness", "reason_codes", "matrix",
+        "verdict", "host_compatibility", "rollout_readiness", "rollback_command_id", "reason_codes", "matrix",
         "evidence_manifest", "evidence_generation_digest", "semantic_answer_quality_not_measured",
     }
     if not isinstance(value, dict) or set(value) != keys:
@@ -470,6 +745,7 @@ def valid_report(value) -> bool:
         value["verdict"] in ("go", "no-go")
         and value["host_compatibility"] in ("compatible", "incompatible")
         and value["rollout_readiness"] in ("ready", "blocked")
+        and value["rollback_command_id"] in (None, "cbrain-structured-cohort-rollback-v1")
         and isinstance(value["reason_codes"], list)
         and len(set(value["reason_codes"])) == len(value["reason_codes"])
         and all(code in REASON_CODES for code in value["reason_codes"])
@@ -507,7 +783,12 @@ def valid_runtime(value) -> bool:
     )
 
 
-def validated_public_result(raw: str, exit_status: int):
+def validated_public_result(
+    raw: str,
+    exit_status: int,
+    rollback_proof_verified: bool = False,
+    trusted_manifest=None,
+):
     if len(raw) > 2_000_000 or SENSITIVE_OUTPUT.search(raw):
         return None
     try:
@@ -540,7 +821,7 @@ def validated_public_result(raw: str, exit_status: int):
         or len({item["case_id"] for item in cases}) != 24
         or not isinstance(pairs, list) or len(pairs) != 6 or not all(valid_size_pair(item) for item in pairs)
         or len({item["pair_id"] for item in pairs}) != 6
-        or not report_is_consistent(payload)
+        or not report_is_consistent(payload, rollback_proof_verified, trusted_manifest)
     ):
         return None
     expected_status = 0 if report["verdict"] == "go" else 1
@@ -777,9 +1058,22 @@ def main() -> int:
                 candidate = bytes(output_buffers["stdout"]).decode("utf-8", errors="strict").strip()
             except UnicodeDecodeError:
                 candidate = ""
-            result = validated_public_result(candidate, status) or ""
-            if not result:
-                failure_code = "CANARY_OUTPUT_INVALID"
+            trusted_manifest = None
+            if claims_rollback_ready(candidate):
+                trusted_manifest = verify_rollback_proof(
+                    bun, source_root, approved_commit, root, deadline,
+                )
+                if trusted_manifest is None:
+                    failure_code = "CANARY_ROLLBACK_PROOF_INVALID"
+            if failure_code is None:
+                result = validated_public_result(
+                    candidate,
+                    status,
+                    trusted_manifest is not None,
+                    trusted_manifest,
+                ) or ""
+                if not result:
+                    failure_code = "CANARY_OUTPUT_INVALID"
     except Exception:
         failure_code = failure_code or "CANARY_SUPERVISOR_RUNTIME_FAILED"
     finally:

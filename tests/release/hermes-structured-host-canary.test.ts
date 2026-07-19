@@ -36,6 +36,7 @@ import {
   createAnonymousFixtureSnapshot,
   countExactCl100kTokens,
   evaluateCanaryReport,
+  proveStructuredCohortRollback,
   buildCanaryToolArguments,
   startObservingMcpProxy,
   runRealHermesProjectionCase,
@@ -241,6 +242,53 @@ describe("Hermes structured host canary contract", () => {
     expect(report.rollout_readiness).toBe("blocked");
     expect(report.verdict).toBe("no-go");
     expect(report.reason_codes).toEqual(["ROLLBACK_NOT_EXECUTABLE"]);
+  });
+
+  test("marks rollout ready only after the repository-owned rollback proof succeeds", async () => {
+    const commandId = await proveStructuredCohortRollback();
+    if (process.platform !== "darwin") {
+      expect(commandId).toBeNull();
+      return;
+    }
+    expect(commandId).toBe("cbrain-structured-cohort-rollback-v1");
+    const report = evaluateCanaryReport({ ...validInput(), rollback_command_id: commandId });
+    expect(report).toMatchObject({
+      verdict: "go",
+      host_compatibility: "compatible",
+      rollout_readiness: "ready",
+      reason_codes: [],
+    });
+
+    for (const fault of ["mutation", "restart", "health"] as const) {
+      expect(await proveStructuredCohortRollback(fault)).toBeNull();
+    }
+    expect(await proveStructuredCohortRollback("bogus" as never)).toBeNull();
+  });
+
+  test("fixed rollback proof entrypoint emits only the closed verification receipt", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-rollback-proof-entry-"));
+    try {
+      const entry = join(import.meta.dir, "../../bin/prove-structured-cohort-rollback.ts");
+      const result = Bun.spawnSync({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", `--cwd=${root}`, entry],
+        cwd: root,
+        env: { HOME: root, TMPDIR: root, PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.stderr.toString()).toBe("");
+      if (process.platform === "darwin") {
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.toString().trim()).toBe(
+          '{"schema_version":1,"status":"verified","command_id":"cbrain-structured-cohort-rollback-v1"}',
+        );
+      } else {
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout.toString().trim()).toBe('{"schema_version":1,"status":"failed"}');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("fails closed when a primary case is missing or a projection contract is false", () => {
@@ -863,6 +911,217 @@ exit 0
       expect(result.exitCode).toBe(1);
       expect(result.stdout.toString().trim()).toBe(output);
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("supervisor rejects a child-only rollback-ready claim without an independent proof", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-supervisor-ready-schema-"));
+    try {
+      const commandId = "cbrain-structured-cohort-rollback-v1" as const;
+      const parsed = JSON.parse(validSupervisorOutput({ ...validInput(), rollback_command_id: commandId }));
+      parsed.report.rollback_command_id = commandId;
+      const output = JSON.stringify(parsed);
+      const payload = join(root, "payload.json");
+      const fakeBun = join(root, "fake-bun");
+      const fakeHermes = join(root, "fake-hermes");
+      writeFileSync(payload, `${output}\n`);
+      writeFileSync(fakeBun, `#!/bin/sh\n/bin/cat "${payload}"\nexit 0\n`);
+      writeFileSync(fakeHermes, "#!/bin/sh\nexit 0\n");
+      chmodSync(fakeBun, 0o755);
+      chmodSync(fakeHermes, 0o755);
+      const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
+      const result = Bun.spawnSync({
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          fakeBun,
+          "--hermes",
+          fakeHermes,
+          "--approved-commit",
+          "a".repeat(40),
+        ],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout.toString().trim()).toBe(
+        '{"schema_version":1,"status":"fatal","code":"CANARY_ROLLBACK_PROOF_INVALID"}',
+      );
+
+      parsed.report.rollback_command_id = "unapproved-rollback";
+      writeFileSync(payload, `${JSON.stringify(parsed)}\n`);
+      const rejected = Bun.spawnSync({
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          fakeBun,
+          "--hermes",
+          fakeHermes,
+          "--approved-commit",
+          "a".repeat(40),
+        ],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(rejected.exitCode).toBe(2);
+      expect(rejected.stdout.toString().trim()).toBe(
+        '{"schema_version":1,"status":"fatal","code":"CANARY_OUTPUT_INVALID"}',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("supervisor binds a rollback-ready report to the independently approved evidence manifest", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-supervisor-trusted-manifest-"));
+    try {
+      const commandId = "cbrain-structured-cohort-rollback-v1" as const;
+      const trustedManifest = evidenceManifest();
+      const substitutedManifest = { ...trustedManifest, bun_version: "9.9.9" };
+      const output = validSupervisorOutput({
+        ...validInput(),
+        evidence_manifest: substitutedManifest,
+        observed_evidence_manifest: substitutedManifest,
+        evidence_generation_digest: canonicalEvidenceDigest(substitutedManifest),
+        rollback_command_id: commandId,
+      });
+      const payload = join(root, "payload.json");
+      const trusted = join(root, "trusted.json");
+      writeFileSync(payload, output);
+      writeFileSync(trusted, JSON.stringify(trustedManifest));
+      const supervisor = join(import.meta.dir, "../../bin/hermes-structured-host-supervisor.py");
+      const validator = [
+        "import importlib.util,json,sys",
+        "spec=importlib.util.spec_from_file_location('supervisor',sys.argv[1])",
+        "module=importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(module)",
+        "raw=open(sys.argv[2],encoding='utf-8').read()",
+        "trusted=json.load(open(sys.argv[3],encoding='utf-8'))",
+        "result=module.validated_public_result(raw,0,True,trusted)",
+        "print('accepted' if result else 'rejected')",
+      ].join(";");
+      const rejected = Bun.spawnSync({
+        cmd: ["/usr/bin/python3", "-I", "-c", validator, supervisor, payload, trusted],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(rejected.exitCode).toBe(0);
+      expect(rejected.stderr.toString()).toBe("");
+      expect(rejected.stdout.toString().trim()).toBe("rejected");
+
+      writeFileSync(trusted, JSON.stringify(substitutedManifest));
+      const accepted = Bun.spawnSync({
+        cmd: ["/usr/bin/python3", "-I", "-c", validator, supervisor, payload, trusted],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(accepted.exitCode).toBe(0);
+      expect(accepted.stderr.toString()).toBe("");
+      expect(accepted.stdout.toString().trim()).toBe("accepted");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rollback proof rejects live source drift between verification and execution", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cbrain-supervisor-proof-drift-")));
+    try {
+      const repo = join(root, "repo");
+      const owned = join(root, "owned");
+      const baselineOwned = join(root, "baseline-owned");
+      const ownedArgument = owned.replace(/^\/private(?=\/(?:tmp|var)\/)/, "");
+      const baselineOwnedArgument = baselineOwned.replace(/^\/private(?=\/(?:tmp|var)\/)/, "");
+      const fakeBun = join(root, "bun");
+      mkdirSync(join(repo, "bin"), { recursive: true });
+      mkdirSync(join(repo, "tests/fixtures"), { recursive: true });
+      mkdirSync(join(repo, "node_modules/fixture"), { recursive: true });
+      mkdirSync(owned);
+      mkdirSync(baselineOwned);
+      const proof = join(repo, "bin/prove-structured-cohort-rollback.ts");
+      const helper = join(repo, "bin/proof-helper.sh");
+      const manifestPath = join(repo, "tests/fixtures/hermes-structured-canary-evidence-manifest.json");
+      writeFileSync(proof, "// fixed proof fixture\n");
+      writeFileSync(
+        helper,
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"schema_version":1,"status":"verified","command_id":"cbrain-structured-cohort-rollback-v1"}\'\n',
+      );
+      chmodSync(helper, 0o700);
+      writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
+      writeFileSync(join(repo, "node_modules/fixture/index.js"), "export default true;\n");
+      writeFileSync(manifestPath, "{}\n");
+      for (const args of [
+        ["init", "-q"],
+        ["add", "."],
+        ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"],
+      ]) {
+        expect(runSyntheticGit(repo, args).exitCode).toBe(0);
+      }
+      writeFileSync(
+        fakeBun,
+        ["#!/bin/sh", "for argument do proof=$argument; done", 'exec "$' + '{proof%/*}/proof-helper.sh"', ""].join("\n"),
+      );
+      chmodSync(fakeBun, 0o700);
+      const listing = runSyntheticGit(repo, ["ls-tree", "-r", "--full-tree", "HEAD"])
+        .stdout.toString()
+        .trim().split("\n")
+        .filter((line) => !line.endsWith("\ttests/fixtures/hermes-structured-canary-evidence-manifest.json"));
+      const manifest = {
+        ...evidenceManifest(),
+        checkpoint_tree_digest: createHash("sha256").update(`${listing.join("\n")}\n`).digest("hex"),
+        checkpoint_blob_count: listing.length,
+        bun_binary_digest: createHash("sha256").update(readFileSync(fakeBun)).digest("hex"),
+        node_modules_tree_digest: canonicalTreeDigest(join(repo, "node_modules")).digest,
+        node_modules_file_count: canonicalTreeDigest(join(repo, "node_modules")).file_count,
+      };
+      writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+      expect(runSyntheticGit(repo, ["add", manifestPath]).exitCode).toBe(0);
+      expect(
+        runSyntheticGit(repo, [
+          "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+          "commit", "-qm", "freeze",
+        ]).exitCode,
+      ).toBe(0);
+      const approved = runSyntheticGit(repo, ["rev-parse", "HEAD"]).stdout.toString().trim();
+      const supervisor = join(import.meta.dir, "../../bin/hermes-structured-host-supervisor.py");
+      const verifier = [
+        "import importlib.util,os,sys,time",
+        "spec=importlib.util.spec_from_file_location('supervisor',sys.argv[1])",
+        "module=importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(module)",
+        "baseline=module.verify_rollback_proof(sys.argv[2],sys.argv[3],sys.argv[5],sys.argv[7],time.monotonic()+30)",
+        "original=module.subprocess.run",
+        "state={'mutated':False}",
+        "def wrapped(args,*pos,**kw):",
+        "    if (not state['mutated']) and any(str(value).endswith('/bin/prove-structured-cohort-rollback.ts') for value in args):",
+        "        with open(sys.argv[4],'a',encoding='utf-8') as handle:",
+        "            handle.write('// drift\\n')",
+        "        state['mutated']=True",
+        "    return original(args,*pos,**kw)",
+        "module.subprocess.run=wrapped",
+        "result=module.verify_rollback_proof(sys.argv[2],sys.argv[3],sys.argv[5],sys.argv[6],time.monotonic()+30)",
+        "print(('verified' if baseline else 'rejected')+':'+('verified' if result else 'rejected'))",
+      ].join("\n");
+      const result = Bun.spawnSync({
+        cmd: [
+          "/usr/bin/python3", "-I", "-c", verifier, supervisor, fakeBun, repo, proof, approved, ownedArgument,
+          baselineOwnedArgument,
+        ],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr.toString()).toBe("");
+      expect(result.stdout.toString().trim()).toBe("verified:rejected");
+    } finally {
+      Bun.spawnSync({ cmd: ["/bin/chmod", "-R", "u+w", root], stdout: "ignore", stderr: "ignore" });
       rmSync(root, { recursive: true, force: true });
     }
   });
