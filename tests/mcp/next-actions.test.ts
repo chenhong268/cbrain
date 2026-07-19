@@ -245,7 +245,8 @@ describe("next_actions MCP (#309)", () => {
     expect(defItemsJson).not.toContain(safeReason);
     expect(defItemsJson).not.toContain(safeSuggestion);
 
-    // include_raw=true uses the same compact items[] shape — raw does not restore prose
+    // include_raw=true keeps the public items[] shape compact;
+    // the separate raw audit intentionally retains complete NextAction details.
     const resRaw = await getTools(server).next_actions.handler({ sources: ["health"], include_raw: true }) as ToolResponse;
     const raw = JSON.parse(resRaw.content[0].text);
     for (const it of raw.items) {
