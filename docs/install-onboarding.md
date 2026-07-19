@@ -28,13 +28,13 @@
 
 ```bash
 # 安装指定版本 — 始终锁定到明确 tag，不要用 main 或 latest
-bun install -g github:chenhong268/cbrain#v2.0.7
+bun install -g github:chenhong268/cbrain#v2.0.8
 ```
 
 安装完成后确认：
 
 ```bash
-cbrain --version   # 应输出 2.0.7
+cbrain --version   # 应输出 2.0.8
 ```
 
 **PATH 注意事项：** Bun 全局安装的命令放在 `~/.bun/bin/`。如果 `cbrain` 命令找不到，确认 Bun 的 bin 目录在你的 PATH 里：
@@ -51,8 +51,34 @@ export PATH="$HOME/.bun/bin:$PATH"
 **升级：**
 
 ```bash
-bun remove -g cbrain
-bun install -g github:chenhong268/cbrain#v<新版本号>
+(
+  set -e
+  new_version="v<新版本号>"
+  previous_version="v<旧版本号>"
+  # 新旧 tag 都先在隔离 bunx 中验证；两者可用后再停止现有 CBrain 服务并执行下面的升级块
+  test "$(bunx --package "github:chenhong268/cbrain#${new_version}" cbrain --version)" = "${new_version#v}"
+  test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
+  bun remove -g cbrain
+  bun install -g "github:chenhong268/cbrain#${new_version}"
+  test "$(cbrain --version)" = "${new_version#v}"
+)
+```
+
+如果安装或服务重启验证失败，使用升级前记录的 tag 回滚：
+
+```bash
+(
+  set -e
+  previous_version="v<旧版本号>"
+  test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
+  global_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
+  global_manifest="${global_bin%/bin}/install/global/package.json"
+  if test -f "$global_manifest" && grep -q '"cbrain"[[:space:]]*:' "$global_manifest"; then
+    bun remove -g cbrain
+  fi
+  bun install -g "github:chenhong268/cbrain#${previous_version}"
+  test "$(cbrain --version)" = "${previous_version#v}"
+)
 ```
 
 **卸载：**
@@ -319,9 +345,9 @@ cbrain skill-pack
 输出包含版本号、文件路径、完整性状态：
 
 ```
-  CBrain Skill Pack v2.0.7
+  CBrain Skill Pack v2.0.8
     Pack:       /path/to/skills/
-    Entrypoint: /path/to/skills/SKILL.md (2,807 chars)
+    Entrypoint: /path/to/skills/SKILL.md (2,854 chars)
 
     Required files: 33/33 present
     Status: PASS
@@ -355,7 +381,55 @@ cp -r "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 ```
 
 - 优点：部署的是审核过的确定快照；文件落在 Hermes trusted root（`~/.hermes/skills`）内；CBrain checkout 后续修改不会自动进入真实 Agent。
-- 代价：CBrain 升级后 canonical packVersion 变化，该副本会变成 incompatible，需重新人工备份旧 target、重新复制、再 `cbrain skill-pack --target` verification。
+- 代价：CBrain 升级后 canonical packVersion 变化，该副本会变成 incompatible，需按下面的人工升级闭环重新部署。
+
+**已有 copy 的升级闭环（仅限已确认的旧 canonical pack）**
+
+先停止 Hermes，并记录旧 CBrain tag。下面的旧版本校验必须返回 `current`；若 target 是 symlink、私有 skill、`stale` 或校验失败，立即停止并人工排查，不执行移动：
+
+```bash
+(
+  set -e
+  target="$HOME/.hermes/skills/brain-ops/cbrain"
+  previous_version="v<旧版本号>"
+  backup_root="$HOME/.hermes/cbrain-skill-backups"
+  backup="${backup_root}/cbrain.pre-${previous_version}"
+
+  test -d "$target" && test ! -L "$target"
+  umask 077
+  mkdir -p "$backup_root"
+  test -d "$backup_root" && test ! -L "$backup_root"
+  test ! -e "$backup" && test ! -L "$backup"
+  bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain skill-pack --target "$target"
+  mv "$target" "$backup"
+)
+```
+
+随后重新执行上方唯一的 copy 安装命令，再运行 step 4 的 target verification。验证为 `current` 后，重新加载 Hermes 并执行正常的 skill 加载 smoke；确认通过前保留 backup。
+
+若 target verification 或 Hermes 加载 smoke 失败，先停止 Hermes，再原子切回旧目录；新副本保留为 failed 证据，不自动删除：
+
+```bash
+(
+  set -e
+  target="$HOME/.hermes/skills/brain-ops/cbrain"
+  previous_version="v<旧版本号>"
+  new_version="v<新版本号>"
+  backup_root="$HOME/.hermes/cbrain-skill-backups"
+  backup="${backup_root}/cbrain.pre-${previous_version}"
+  failed="${backup_root}/cbrain.failed-${new_version}"
+
+  test -d "$target" && test ! -L "$target"
+  test -d "$backup_root" && test ! -L "$backup_root"
+  test -d "$backup" && test ! -L "$backup"
+  test ! -e "$failed" && test ! -L "$failed"
+  mv "$target" "$failed"
+  mv "$backup" "$target"
+  bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain skill-pack --target "$target"
+)
+```
+
+旧版本校验恢复为 `current` 后再重新加载 Hermes。确认新版本稳定后，backup / failed 的删除仍由用户人工决定，CBrain CLI 不会自动清理。
 
 **方式 B：符号链接（仅开发/试验环境，非生产默认）**
 
@@ -371,8 +445,17 @@ ln -s "<pack-path>" ~/.hermes/skills/brain-ops/cbrain
 4. 安装后验证（应报 current）：
 
 ```bash
-cbrain skill-pack --target ~/.hermes/skills/brain-ops/cbrain
+(
+  set -e
+  scan_root="$HOME/.hermes/skills/brain-ops"
+  target="${scan_root}/cbrain"
+  test -d "$scan_root" && test ! -L "$scan_root"
+  cbrain skill-pack --target "$target"
+  test -z "$(find "$scan_root" -mindepth 1 -maxdepth 1 \( -name 'cbrain.pre-*' -o -name 'cbrain.failed-*' \) -print -quit)"
+)
 ```
+
+第二条断言确保旧版 backup / failed 副本没有落在 Hermes skill 扫描树；只有两条命令都成功，才重新加载 Hermes。升级闭环使用的备份目录是扫描树外的 `~/.hermes/cbrain-skill-backups/`。
 
 > **加载契约：** Hermes 扫描 `~/.hermes/skills/<dir>/SKILL.md` 找入口。上述命令把 pack 复制/链接到 `brain-ops/cbrain` 根，`SKILL.md` 直达 target root（不嵌套）。加载路径同源由 `cbrain skill-pack --target` 保证；Hermes 运行时是否读取 `SKILL.md` 见 `docs/known-issues.md`，真实 Hermes 加载 smoke 留作合并后 release gate。
 

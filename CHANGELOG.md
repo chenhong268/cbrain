@@ -1,8 +1,48 @@
 # Changelog
 
-> Current: `v2.0.7` — 可靠 NER 恢复、可治理 Recommendation Record、确定性 replay/diff，以及 recall/query 结构化输出边界。
+> Current: `v2.0.8` — Watcher 积压恢复、受治理的数据修复、真实召回质量门禁，以及 Hermes 输出边界的可回滚灰度准备。
 
 ## [Unreleased]
+
+## [v2.0.8] — 2026-07-19
+
+### Watcher 与数据恢复可靠性（#341, #342, #345, #358）
+
+- **积压可在内容已写入后自行收敛**：watcher 在触发 bulk pause 前先按已提交内容与哈希确认内部写入，只把仍需处理的文件计入积压；暂停状态和删除债务持久化后，重启也会继续有界调和，不再因为文件哈希未变而永久卡住。
+- **零关系富内容记录可治理回填**：新增只读发现、dry-run、分批执行、source epoch 与 attempt lease，防止旧 NER 结果覆盖新内容；写入、索引、类型移动与 job 状态按可审计边界完成，失败 fail-closed 并保留审计，仅符合策略的普通失败可显式重试。
+- **恢复与目录卫生 fail-closed**：restore 清理不完整时拒绝报告成功；health / fsck 只读识别错放的 vault 副本与残留目录，不自动移动或删除用户文件。
+
+### Recall 与 Agent 日常合同（#334-#337, #343, #359）
+
+- **Hermes skill-pack 可验证部署**：新增 MANIFEST 驱动的 canonical/target 只读校验，区分 missing、incompatible、stale 与 current；安装文档默认使用 trusted-directory copy，CLI 不提供 install、force、overwrite 或 delete 路径。
+- **自然语言前门与日常 Profile 对齐**：Agent-facing 路由统一 natural → `cbrain_recall`、operational → `next_actions`；daily keyword/debug 仍由 `cbrain_recall` 进入 `debug_search`，只有显式 debug/full profile 才直调 `query`。同时恢复受策略约束、先预检后执行的 daily Profile 路径。
+- **真实召回质量与候选诚实性**：新增确定性、匿名化的 operational / abstract recall quality matrix；内容不足的 metadata-only 候选不再伪装成有效命中，质量基线可在 release gate 中持续收紧。
+- **注意力输出去重**：`next_actions` 删除重复说明，只保留一次有用的行动信息；raw audit 仍保持只读。
+
+### Hermes structured 灰度安全（#338, #353, #357）
+
+- **真实 Host canary**：在隔离、只读快照上覆盖 `query`、`deep_recall` 与 `cbrain_recall` 的 legacy/structured、空结果、raw opt-in 与错误分支，并验证真实 Hermes 回合、上下文体积、隐私投影及资源清理。
+- **校验错误不再泄露输入**：MCP handler 前的参数校验错误统一投影为稳定、无回显的错误；validator 细节、路径和敏感输入不会进入 transport 或 audit。
+- **灰度具备固定回滚证明**：新增受锁、可证明、固定 cohort 的 rollback 命令与独立验证。该命令只适用于后续预置 receipt/plist 的固定 macOS launchd cohort；本版本只授权单独的 bounded cohort 提案，不创建 cohort，也不改变 live 默认值。
+
+### Release / Privacy Gates（#352, #361, #365）
+
+- synthetic Git 测试隔离用户 hooks、config 与 object format；resolver-pilot 的 phone 隐私规则限制到真实电话形状，避免普通内容误报。
+- 开发协议新增永久反过度工程化门：优先最小可验证切片，禁止为假设性扩展提前引入新抽象、状态系统或大范围重构。
+
+### Agent Compatibility / Migration
+
+- `agent` profile 用受治理的 `profile` 替换 `append_page`；已有页面更新统一走 `put_page` 默认 patch。`append_page` 仍可在 full profile 使用，但不再出现在 daily Agent 工具面。
+- `next_actions.items[]` 收敛为 `severity`、`source`、`evidence_count` 元数据；自然语言内容只读 `display`，完整细节只在显式 `include_raw=true` 的 audit 区。依赖 `items[].title/reason/suggestion` 的客户端需调整。
+- MCP health 的 `raw` 不再投影 operator-local `reportPaths`；本地维护流程仍可从受信任运行环境读取报告，不应从 Agent 响应恢复文件路径。
+- `ner-backfill` 只能由专用 backfill 流程创建，通用 `job_submit` / `job submit` 不再接受直接提交；`job_list` / `job_status` 使用裁剪后的安全投影，不再返回原始 data/result/error，受保护行也不暴露 id。cancel/retry 对 repair-batch ownership、`committing` 与 `commit_unknown` 状态 fail-closed；依赖旧字段的维护客户端需迁移，受保护状态需先走人工治理。
+- 新增 `zero-link-backfill` 与固定用途的 `structured-cohort` CLI；后者不是通用 rollout/rollback 接口。
+
+### Compatibility / Migration
+
+- 日常服务无新增 npm/Bun 运行依赖，无手工 vault 迁移；零关系回填与 watcher 恢复复用现有 SQLite/job/config 能力并保持旧状态可读。
+- `CBRAIN_OUTPUT_BOUNDARY` 默认仍为 `legacy`。structured 只完成真实 Host 兼容与可回滚灰度准备，不自动修改现网 Hermes/CBrain 配置。
+- skill-pack CLI 始终只读。升级后若 Hermes 使用 copy 部署，需在 target 校验后按安装文档人工更新；不会自动覆盖 live skill。
 
 ## [v2.0.7] — 2026-07-13
 
@@ -589,8 +629,6 @@
 
 ### 文档
 - 新增 `docs/agent-collaboration.md` — 小爱与 Claude Code 的协作分工协议
-
-> Current: `v1.7.0` — 主动提示引擎 + 小爱查询行为优化。
 
 ## [v1.7.0] — 2026-05-16
 
