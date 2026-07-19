@@ -577,8 +577,12 @@ describe.serial("daily Agent Profile real MCP handler", () => {
 
     expect(typedResult.isError).toBe(true);
     expect(first?.type).toBe("text");
-    expect(first?.text).toContain("MCP error -32602");
-    expect(first?.text).toContain("Input validation error");
+    expect(typedResult).toEqual({
+      content: [{ type: "text", text: "Invalid tool arguments." }],
+      isError: true,
+    });
+    expect(first?.text).not.toContain("MCP error -32602");
+    expect(first?.text).not.toContain("Input validation error");
     expect(first?.text).not.toContain("PROFILE_UPDATE_INVALID");
 
     expect(readFileSync(profilePath).equals(yamlBefore)).toBe(true);
