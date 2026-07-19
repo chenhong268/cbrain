@@ -2260,47 +2260,73 @@ describe("paired anonymous CBrain fixture and observing MCP proxy", () => {
 
   test("serves fixed normal and true-empty results from disposable database clones", async () => {
     const fixture = await createAnonymousFixtureSnapshot();
-    const runtime = await fixture.openRuntime("structured", "direct-preflight");
-    const client = new Client({
-      name: "anonymous-preflight",
-      version: "0.0.0",
-    });
     try {
-      await client.connect(
-        new StreamableHTTPClientTransport(runtime.endpoint, {
-          requestInit: { headers: { "X-CBrain-Tool-Profile": "full" } },
-        }),
-      );
-      for (const tool of tools) {
-        const normal = await client.callTool({
-          name: tool,
-          arguments: buildCanaryToolArguments(tool, "normal"),
+      for (const mode of modes) {
+        const runtime = await fixture.openRuntime(mode, `direct-preflight-${mode}`);
+        const client = new Client({
+          name: `anonymous-preflight-${mode}`,
+          version: "0.0.0",
         });
-        const normalText = JSON.stringify(normal);
-        expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.title);
-        expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.body);
+        try {
+          await client.connect(
+            new StreamableHTTPClientTransport(runtime.endpoint, {
+              requestInit: { headers: { "X-CBrain-Tool-Profile": "full" } },
+            }),
+          );
+          for (const tool of tools) {
+            const normal = await client.callTool({
+              name: tool,
+              arguments: buildCanaryToolArguments(tool, "normal"),
+            });
+            const normalText = JSON.stringify(normal);
+            expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.title);
+            expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.body);
 
-        const empty = await client.callTool({
-          name: tool,
-          arguments: buildCanaryToolArguments(tool, "empty"),
-        });
-        const emptyText = JSON.stringify(empty);
-        expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.title);
-        expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.body);
-        expect(emptyText).toContain("empty");
-        expect(emptyText).toMatch(/(?:count|total)[^0-9]{0,8}0/);
+            const empty = await client.callTool({
+              name: tool,
+              arguments: buildCanaryToolArguments(tool, "empty"),
+            });
+            const emptyText = JSON.stringify(empty);
+            expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.title);
+            expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.body);
+            expect(emptyText).toContain("empty");
+            expect(emptyText).toMatch(/(?:count|total)[^0-9]{0,8}0/);
 
-        const invalid = await client.callTool({
-          name: tool,
-          arguments: buildCanaryToolArguments(tool, "error"),
-        });
-        expect(invalid.isError).toBe(true);
+            const includeRaw = await client.callTool({
+              name: tool,
+              arguments: buildCanaryToolArguments(tool, "include_raw"),
+            });
+            const includeRawText = JSON.stringify(includeRaw);
+            expect(includeRaw.isError).toBeFalsy();
+            expect(includeRawText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential);
+            expect(includeRawText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_path);
+
+            const invalidArguments = buildCanaryToolArguments(tool, "error");
+            const sentText = JSON.stringify(invalidArguments);
+            expect(sentText).toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential);
+            expect(sentText).toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_path);
+            const invalid = await client.callTool({
+              name: tool,
+              arguments: invalidArguments,
+            });
+            const invalidText = JSON.stringify(invalid);
+            expect(invalid).toEqual({
+              content: [{ type: "text", text: "Invalid tool arguments." }],
+              isError: true,
+            });
+            expect(invalidText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential);
+            expect(invalidText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_path);
+            expect(invalidText).not.toContain("Input validation error");
+            expect(invalidText).not.toMatch(/stack trace|Traceback|\n\s+at\s+/i);
+          }
+          const vectorProbe = await runtime.lance.search(new Float32Array(2048), 1);
+          expect(vectorProbe).toEqual([]);
+        } finally {
+          await client.close().catch(() => {});
+          await runtime.close();
+        }
       }
-      const vectorProbe = await runtime.lance.search(new Float32Array(2048), 1);
-      expect(vectorProbe).toEqual([]);
     } finally {
-      await client.close().catch(() => {});
-      await runtime.close();
       await fixture.close();
     }
     expect(fixture.removed).toBe(true);
@@ -2548,12 +2574,7 @@ realHermesTest(
     expect(cbrainSnapshotChecks).toBe(76);
     expect(matrix.runtime_snapshot_checks_verified).toBe(true);
     expect(matrix.cbrain_snapshot_checks_verified).toBe(true);
-    expect(
-      matrix.cases.filter((item) => item.branch !== "error").every((item) => item.projection_contract_verified),
-    ).toBe(true);
-    expect(matrix.cases.filter((item) => item.branch === "error").every((item) => item.error_redaction_exercised)).toBe(
-      true,
-    );
+    expect(matrix.cases.every((item) => item.projection_contract_verified)).toBe(true);
     expect(matrix.cases.every((item) => item.cbrain_invocation_count === 1)).toBe(true);
     expect(matrix.cases.every((item) => item.cbrain_call_verified && item.mcp_session_verified)).toBe(true);
     expect(
@@ -2567,10 +2588,10 @@ realHermesTest(
         .every(
           (item) =>
             item.sensitive_input_sent &&
-            item.direct_error_sensitive_echo_observed &&
-            item.error_redaction_exercised &&
-            item.audit_sensitive_exposed &&
-            !item.error_contract_verified,
+            !item.direct_error_sensitive_echo_observed &&
+            !item.error_redaction_exercised &&
+            !item.audit_sensitive_exposed &&
+            item.error_contract_verified,
         ),
     ).toBe(true);
     const report = evaluateCanaryReport({
@@ -2578,8 +2599,8 @@ realHermesTest(
       cases: matrix.cases,
       size_pairs: matrix.size_pairs,
     });
-    expect(report.host_compatibility).toBe("incompatible");
-    expect(report.reason_codes).toEqual(["CASE_CONTRACT_FAILED", "ROLLBACK_NOT_EXECUTABLE"]);
+    expect(report.host_compatibility).toBe("compatible");
+    expect(report.reason_codes).toEqual(["ROLLBACK_NOT_EXECUTABLE"]);
     expect(matrix.size_pairs.every((pair) => pair.absolute_gate_passed && pair.relative_or_floor_gate_passed)).toBe(
       true,
     );

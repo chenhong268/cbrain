@@ -84,8 +84,8 @@ export class Logger {
       // ENOENT: log directory gone (test temp dir cleanup) — not a real problem
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code === "ENOENT") return;
-      // Real errors (disk full, permission denied) should not be silent
-      console.error("[Logger] write failed:", err instanceof Error ? err.message : String(err));
+      // Real errors must be visible without echoing filesystem paths or OS detail.
+      console.error("[Logger] write failed:", "LOGGER_WRITE_FAILED");
     }
   }
 }

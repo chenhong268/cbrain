@@ -11,6 +11,10 @@ import { registerAllTools } from "./register.js";
 import type { IngestNerMode } from "../cli/context.js";
 import { TOOL_PROFILE_ALLOWLISTS, type ToolProfile } from "./tool-profiles.js";
 import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-artifacts.js";
+import {
+  installMcpValidationErrorBoundary,
+  markMcpHandlerInvocation,
+} from "./validation-error-boundary.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -72,6 +76,7 @@ export function sanitizeError(msg: string): string {
 export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
   const profile: ToolProfile = ctx.toolProfile ?? "full";
   const gate = profile === "full" ? null : new Set(TOOL_PROFILE_ALLOWLISTS[profile]);
+  const restoreValidationBoundary = installMcpValidationErrorBoundary(server, ctx.logger);
 
   // registerTool: error-sanitize (unchanged) + profile gate (#251).
   // Gating happens BEFORE the sanitized handler is registered, so tools that pass
@@ -82,6 +87,7 @@ export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
   (server as any).registerTool = (name: string, def: any, handler: (...a: any[]) => Promise<any>) => {
     if (gate && !gate.has(name)) return; // #251: profile-filtered, skip registration
     origRegister(name, def, async (...a: any[]) => {
+      markMcpHandlerInvocation(a);
       try {
         return await handler(...a);
       } catch (e) {
@@ -103,10 +109,22 @@ export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
   (server as any).tool = (...args: any[]) => {
     const name = args[0];
     if (gate && typeof name === "string" && !gate.has(name)) return; // #251: filtered
+    const callbackIndex = args.length - 1;
+    const callback = args[callbackIndex];
+    if (typeof callback === "function") {
+      args[callbackIndex] = async (...callbackArgs: any[]) => {
+        markMcpHandlerInvocation(callbackArgs);
+        return await callback(...callbackArgs);
+      };
+    }
     return origTool(...args);
   };
 
-  registerAllTools(server, ctx);
+  try {
+    registerAllTools(server, ctx);
+  } finally {
+    restoreValidationBoundary();
+  }
 }
 
 export function createServer(deps: CBrainDeps): McpServer {

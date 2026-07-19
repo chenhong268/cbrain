@@ -9,6 +9,7 @@ import type { ToolContext } from "../../src/mcp/context.js";
 import type { ToolProfile } from "../../src/mcp/tool-profiles.js";
 import { registerProfileTools } from "../../src/mcp/tools/profile.js";
 import { attachMcpTools } from "../../src/mcp/server.js";
+import { installMcpValidationErrorBoundary } from "../../src/mcp/validation-error-boundary.js";
 import { ProfileManager } from "../../src/profile/manager.js";
 import {
   buildAgentVisibleStats,
@@ -254,10 +255,15 @@ describe.serial("daily Agent Profile real MCP handler", () => {
     profile.load();
 
     server = new McpServer({ name: "profile-policy-test", version: "0.0.0" });
-    registerProfileTools(server, {
-      profile,
-      toolProfile: "agent",
-    } as ToolContext);
+    const restoreValidationBoundary = installMcpValidationErrorBoundary(server, { warn() {} });
+    try {
+      registerProfileTools(server, {
+        profile,
+        toolProfile: "agent",
+      } as ToolContext);
+    } finally {
+      restoreValidationBoundary();
+    }
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
     client = new Client({ name: "profile-policy-client", version: "0.0.0" });
@@ -577,8 +583,12 @@ describe.serial("daily Agent Profile real MCP handler", () => {
 
     expect(typedResult.isError).toBe(true);
     expect(first?.type).toBe("text");
-    expect(first?.text).toContain("MCP error -32602");
-    expect(first?.text).toContain("Input validation error");
+    expect(typedResult).toEqual({
+      content: [{ type: "text", text: "Invalid tool arguments." }],
+      isError: true,
+    });
+    expect(first?.text).not.toContain("MCP error -32602");
+    expect(first?.text).not.toContain("Input validation error");
     expect(first?.text).not.toContain("PROFILE_UPDATE_INVALID");
 
     expect(readFileSync(profilePath).equals(yamlBefore)).toBe(true);
