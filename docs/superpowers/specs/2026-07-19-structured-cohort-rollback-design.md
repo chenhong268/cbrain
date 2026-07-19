@@ -101,7 +101,9 @@ paths.
 7. If bootstrap succeeds but PID publication or health cannot be verified,
    boot out only the exact fixed cohort job and require `launchctl print` to
    report the explicit not-loaded status before returning failure. A failed
-   cleanup returns `CLEANUP_FAILED`; it is never silently swallowed.
+   cleanup returns `CLEANUP_FAILED`; it is never silently swallowed. Cleanup
+   authorization comes from the already-fixed service identity, not from a new
+   read of the possibly drifted receipt, config, or plist.
 8. Return a closed JSON receipt and release the lock.
 
 If the plist is already legacy and health proves legacy, return `already_legacy`

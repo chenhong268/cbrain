@@ -515,7 +515,6 @@ export function createProductionRollbackDeps(options: ProductionRollbackOptions)
       throw new Error("invalid");
     },
     stop: async () => {
-      validateCurrentLegacyTarget();
       const service = `gui/${uid}/${STRUCTURED_COHORT_LABEL}`;
       const before = launchctl(["print", service]);
       if (before.status === 113) return;

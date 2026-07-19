@@ -324,6 +324,110 @@ describeDarwin("structured cohort production adapter", () => {
     expect(calls.some((call) => call.join(" ").includes("unrelated"))).toBe(false);
   });
 
+  test("stops the exact named job even when managed inputs drift after bootstrap", async () => {
+    const f = fixture();
+    const uid = process.getuid?.() as number;
+    const service = `gui/${uid}/${STRUCTURED_COHORT_LABEL}`;
+    const calls: string[][] = [];
+    let loaded = true;
+    const deps = createProductionRollbackDeps({
+      home: f.home,
+      runtimePath: f.runtimePath,
+      expectedScriptPath: f.scriptPath,
+      activeConfigPath: f.configPath,
+      launchctl: (args) => {
+        calls.push([...args]);
+        if (args[0] === "print" && args[1] === service) {
+          return loaded ? { status: 0, stdout: "\tpid = 7002\n" } : { status: 113, stdout: "" };
+        }
+        if (args[0] === "bootout" && args[1] === service) {
+          loaded = false;
+          return { status: 0, stdout: "" };
+        }
+        return { status: 64, stdout: "" };
+      },
+    });
+    const release = deps.acquireLock();
+    deps.loadTarget();
+    deps.writeLegacy();
+    writeFileSync(f.configPath, '{"profile":"drifted"}', { mode: 0o644 });
+    await expect(deps.stop()).resolves.toBeUndefined();
+    expect(loaded).toBe(false);
+    expect(calls).toEqual([
+      ["print", service],
+      ["bootout", service],
+      ["print", service],
+    ]);
+    release?.();
+  });
+
+  test("cleans up the bootstrapped job after health-time config or plist drift", async () => {
+    for (const mutation of ["config", "plist"] as const) {
+      const f = fixture();
+      const uid = process.getuid?.() as number;
+      const service = `gui/${uid}/${STRUCTURED_COHORT_LABEL}`;
+      const domain = `gui/${uid}`;
+      const originalStructuredPlist = readFileSync(f.plistPath);
+      const receipt = JSON.parse(readFileSync(f.receiptPath, "utf8"));
+      const calls: string[][] = [];
+      let loaded = true;
+      let servicePid = 7001;
+      const deps = createProductionRollbackDeps({
+        home: f.home,
+        runtimePath: f.runtimePath,
+        expectedScriptPath: f.scriptPath,
+        activeConfigPath: f.configPath,
+        launchctl: (args) => {
+          calls.push([...args]);
+          if (args[0] === "print" && args[1] === service) {
+            return loaded ? { status: 0, stdout: `\tpid = ${servicePid}\n` } : { status: 113, stdout: "" };
+          }
+          if (args[0] === "bootout" && args[1] === service) {
+            loaded = false;
+            return { status: 0, stdout: "" };
+          }
+          if (args[0] === "bootstrap" && args[1] === domain && args[2] === f.plistPath) {
+            loaded = true;
+            servicePid = 7002;
+            return { status: 0, stdout: "" };
+          }
+          return { status: 64, stdout: "" };
+        },
+        healthRequest: async () => {
+          if (mutation === "config") writeFileSync(f.configPath, '{"profile":"drifted"}', { mode: 0o644 });
+          else {
+            writeFileSync(f.plistPath, originalStructuredPlist, { mode: 0o600 });
+            chmodSync(f.plistPath, 0o600);
+          }
+          return {
+            status: 200,
+            redirected: false,
+            body: JSON.stringify({
+              ok: true,
+              output_boundary: "legacy",
+              cohort_id: COHORT_ID,
+              config_attestation: receipt.config_attestation,
+              deployment_digest: f.digest,
+              process_id: servicePid,
+            }),
+          };
+        },
+      });
+      expect(await rollbackStructuredCohort(deps)).toEqual({
+        schema_version: 1,
+        status: "failed",
+        code: "HEALTH_NOT_VERIFIED",
+      });
+      expect(loaded).toBe(false);
+      expect(calls.slice(-3)).toEqual([
+        ["print", service],
+        ["bootout", service],
+        ["print", service],
+      ]);
+      expect(calls.every((call) => call[1] === service || call[1] === domain)).toBe(true);
+    }
+  });
+
   test("rejects non-canonical entrypoints, dangerous environment, and execution-affecting plist keys", () => {
     for (const mutation of ["entrypoint", "environment", "program"] as const) {
       const f = fixture();
