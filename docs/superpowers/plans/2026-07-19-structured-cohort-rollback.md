@@ -76,4 +76,6 @@ an exact approved-plist recheck immediately before bootstrap.
 
 The final transaction pass replaces PID/path stale-lock recovery with a kernel
 advisory lock and binds the exact loaded config bytes through a private-keyed
-health attestation. It also rejects non-canonical XML key encodings.
+health attestation. The receipt freezes that attestation at rollout creation;
+the adapter rejects drift before target loading and revalidates after the health
+request resolves. It also rejects non-canonical XML key encodings.

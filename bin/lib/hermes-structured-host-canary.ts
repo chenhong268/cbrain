@@ -253,6 +253,7 @@ export async function proveStructuredCohortRollback(
       command_id: ROLLBACK_COMMAND_ID,
       cohort_id: COHORT_ID,
       config_identity: configIdentity,
+      config_attestation: expectedConfigAttestation,
       health_port: 3401,
       deployment_digest: digest,
     }), { mode: 0o600 });

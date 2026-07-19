@@ -34,7 +34,15 @@ const PLIST_BASENAME = "ai.cbrain.structured-cohort-v1.plist";
 const RECEIPT_BASENAME = "structured-cohort-v1.json";
 const BACKUP_BASENAME = "structured-cohort-v1.pre-rollback.plist";
 const LOCK_BASENAME = ".structured-cohort-rollback.lock";
-const RECEIPT_KEYS = ["schema_version", "command_id", "cohort_id", "config_identity", "health_port", "deployment_digest"] as const;
+const RECEIPT_KEYS = [
+  "schema_version",
+  "command_id",
+  "cohort_id",
+  "config_identity",
+  "config_attestation",
+  "health_port",
+  "deployment_digest",
+] as const;
 const PLIST_KEYS = new Set([
   "EnvironmentVariables",
   "KeepAlive",
@@ -60,6 +68,7 @@ type Receipt = {
   command_id: typeof ROLLBACK_COMMAND_ID;
   cohort_id: typeof COHORT_ID;
   config_identity: string;
+  config_attestation: string;
   health_port: number;
   deployment_digest: string;
 };
@@ -157,7 +166,9 @@ function strictReceiptBytes(input: SecureBytes): Receipt {
   if (
     !Number.isInteger(parsed.health_port) || (parsed.health_port as number) < 1024 ||
     (parsed.health_port as number) > 65_535 || typeof parsed.deployment_digest !== "string" ||
-    !SHA256.test(parsed.deployment_digest) || typeof parsed.config_identity !== "string" || !SHA256.test(parsed.config_identity)
+    !SHA256.test(parsed.deployment_digest) || typeof parsed.config_identity !== "string" ||
+    !SHA256.test(parsed.config_identity) || typeof parsed.config_attestation !== "string" ||
+    !SHA256.test(parsed.config_attestation)
   ) throw new Error("invalid");
   return parsed as Receipt;
 }
@@ -166,9 +177,11 @@ function parsePlistBytes(bytes: Buffer): Record<string, unknown> {
   if (bytes.length > MAX_PLIST_BYTES) throw new Error("invalid");
   const raw = bytes.toString("utf8");
   if (!raw.startsWith("<?xml") || /<!ENTITY|<!\[CDATA\[/i.test(raw)) throw new Error("invalid");
+  const keyOpenTags = [...raw.matchAll(/<key\b[^>]*>/g)].map((match) => match[0]);
   const rawKeys = [...raw.matchAll(/<key>([^<]+)<\/key>/g)].map((match) => match[1]);
   const expectedRawKeys = [...PLIST_KEYS, ...ENV_KEYS].sort();
   if (
+    keyOpenTags.length !== rawKeys.length || keyOpenTags.some((tag) => tag !== "<key>") ||
     rawKeys.some((key) => key.includes("&")) || new Set(rawKeys).size !== rawKeys.length ||
     rawKeys.slice().sort().join("\0") !== expectedRawKeys.join("\0")
   ) throw new Error("invalid");
@@ -198,7 +211,6 @@ function targetFrom(
   receipt: Receipt,
   expectedScriptPath: string,
   activeConfigPath: string,
-  attestation: string,
   uid: number,
 ): RollbackTarget {
   if (Object.keys(plist).some((key) => !PLIST_KEYS.has(key))) throw new Error("invalid");
@@ -235,7 +247,7 @@ function targetFrom(
   const target: RollbackTarget = {
     label: STRUCTURED_COHORT_LABEL,
     cohortId: COHORT_ID,
-    configAttestation: attestation,
+    configAttestation: receipt.config_attestation,
     mode,
     healthPort: receipt.health_port,
     programArguments: args,
@@ -404,7 +416,7 @@ export function createProductionRollbackDeps(options: ProductionRollbackOptions)
     validateActiveConfigSnapshot();
     const current = secureBytes(plistPath, uid, MAX_PLIST_BYTES);
     const checked = targetFrom(
-      parsePlistBytes(current.bytes), receipt, expectedScriptPath, activeConfigPath, target.configAttestation, uid,
+      parsePlistBytes(current.bytes), receipt, expectedScriptPath, activeConfigPath, uid,
     );
     if (checked.mode !== "legacy" || checked.deploymentDigest !== target.deploymentDigest) throw new Error("invalid");
     if (
@@ -420,10 +432,12 @@ export function createProductionRollbackDeps(options: ProductionRollbackOptions)
       receiptSnapshot = secureBytes(receiptPath, uid, MAX_RECEIPT_BYTES);
       receipt = strictReceiptBytes(receiptSnapshot);
       activeConfigSnapshot = secureActiveConfig(activeConfigPath, uid);
+      if (configAttestation(receipt.config_identity, activeConfigSnapshot.bytes) !== receipt.config_attestation) {
+        throw new Error("invalid");
+      }
       originalPlist = secureBytes(plistPath, uid, MAX_PLIST_BYTES);
       target = targetFrom(
-        parsePlistBytes(originalPlist.bytes), receipt, expectedScriptPath, activeConfigPath,
-        configAttestation(receipt.config_identity, activeConfigSnapshot.bytes), uid,
+        parsePlistBytes(originalPlist.bytes), receipt, expectedScriptPath, activeConfigPath, uid,
       );
       approvedLegacyPlist = target.mode === "legacy" ? originalPlist : undefined;
       return target;
@@ -456,7 +470,7 @@ export function createProductionRollbackDeps(options: ProductionRollbackOptions)
         fsyncFile(tempPath);
         const temp = secureBytes(tempPath, uid, MAX_PLIST_BYTES);
         const updated = targetFrom(
-          parsePlistBytes(temp.bytes), receipt, expectedScriptPath, activeConfigPath, target.configAttestation, uid,
+          parsePlistBytes(temp.bytes), receipt, expectedScriptPath, activeConfigPath, uid,
         );
         if (updated.mode !== "legacy" || deploymentDigest(updated) !== target.deploymentDigest) throw new Error("invalid");
         const unchanged = secureBytes(plistPath, uid, MAX_PLIST_BYTES);
@@ -509,6 +523,8 @@ export function createProductionRollbackDeps(options: ProductionRollbackOptions)
       validateReceiptSnapshot();
       validateActiveConfigSnapshot();
       const response = await healthRequest(`http://127.0.0.1:${receipt.health_port}/health`);
+      validateReceiptSnapshot();
+      validateActiveConfigSnapshot();
       if (response.status !== 200 || response.redirected || Buffer.byteLength(response.body, "utf8") > 4096) return { ok: false };
       const health = JSON.parse(response.body) as Record<string, unknown>;
       return {

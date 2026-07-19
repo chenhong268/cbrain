@@ -44,6 +44,7 @@ The future rollout operation must create a mode-0600 regular JSON receipt:
   "command_id": "cbrain-structured-cohort-rollback-v1",
   "cohort_id": "cbrain-structured-pilot-v1",
   "config_identity": "<random-sha256-shaped-rollout-id>",
+  "config_attestation": "<hmac-sha256-of-frozen-config-bytes>",
   "health_port": 3401,
   "deployment_digest": "<sha256>"
 }
@@ -56,10 +57,11 @@ wrapper preserves its no-argument default while forwarding this reviewed argv.
 For cohort argv it preserves the canonical active `CBRAIN_CONFIG` supplied by
 the fixed plist; it never substitutes a package-root profile. The receipt's
 private random config identity is passed only to the cohort and used as an HMAC
-key over the config bytes actually loaded at startup. Health exposes only that
-attestation, never the key, config bytes, or path. The command snapshots the
-same bytes and requires the attestation to match, so another profile cannot
-satisfy rollback health.
+key over the config bytes frozen when the receipt is created. Health exposes
+only that attestation, never the key, config bytes, or path. The command rejects
+the target unless the current bytes match the receipt's frozen attestation,
+snapshots those bytes, and revalidates them before and after the health request,
+so another profile cannot be adopted as new truth or satisfy rollback health.
 Receipt and plist symlinks, hardlinks, non-regular files, wrong
 ownership, unsafe permissions, non-loopback ports, duplicate JSON keys, extra
 keys, or digest drift fail before mutation. Diagnostics never print content or

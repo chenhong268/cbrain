@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
@@ -47,7 +48,9 @@ function fixture() {
   const configPath = join(root, "active-cbrain.json");
   // `cbrain init` historically creates 0644 configs; rollback must accept the
   // supported owned/non-writable profile shape without changing live mode.
-  writeFileSync(configPath, "{}", { mode: 0o644 });
+  const configBytes = Buffer.from("{}");
+  writeFileSync(configPath, configBytes, { mode: 0o644 });
+  const configAttestation = createHmac("sha256", configIdentity).update(configBytes).digest("hex");
   const plistPath = join(agents, "ai.cbrain.structured-cohort-v1.plist");
   writeFileSync(plistPath, JSON.stringify({
     Label: STRUCTURED_COHORT_LABEL,
@@ -72,6 +75,7 @@ function fixture() {
     command_id: ROLLBACK_COMMAND_ID,
     cohort_id: COHORT_ID,
     config_identity: configIdentity,
+    config_attestation: configAttestation,
     health_port: 3401,
     deployment_digest: digest,
   }));
@@ -350,6 +354,25 @@ describeDarwin("structured cohort production adapter", () => {
     expect(() => deps.loadTarget()).toThrow();
     release?.();
 
+    const whitespaceKey = fixture();
+    const whitespaceKeyXml = readFileSync(whitespaceKey.plistPath, "utf8");
+    const outerDictEnd = whitespaceKeyXml.lastIndexOf("</dict>");
+    writeFileSync(
+      whitespaceKey.plistPath,
+      `${whitespaceKeyXml.slice(0, outerDictEnd)}<key >Label</key>` +
+        `<string>${STRUCTURED_COHORT_LABEL}</string>${whitespaceKeyXml.slice(outerDictEnd)}`,
+    );
+    chmodSync(whitespaceKey.plistPath, 0o600);
+    deps = createProductionRollbackDeps({
+      home: whitespaceKey.home,
+      runtimePath: whitespaceKey.runtimePath,
+      expectedScriptPath: whitespaceKey.scriptPath,
+      activeConfigPath: whitespaceKey.configPath,
+    });
+    release = deps.acquireLock();
+    expect(() => deps.loadTarget()).toThrow();
+    release?.();
+
     const aliased = fixture();
     const aliasRoot = join(dirname(aliased.root), `${basename(aliased.root)}-alias`);
     symlinkSync(aliased.root, aliasRoot);
@@ -374,6 +397,11 @@ describeDarwin("structured cohort production adapter", () => {
     writeFileSync(f.plistPath, JSON.stringify(plist));
     execFileSync("/usr/bin/plutil", ["-convert", "xml1", f.plistPath]);
     chmodSync(f.plistPath, 0o600);
+    const receipt = JSON.parse(readFileSync(f.receiptPath, "utf8"));
+    receipt.config_attestation = createHmac("sha256", receipt.config_identity)
+      .update(readFileSync(configPath)).digest("hex");
+    writeFileSync(f.receiptPath, JSON.stringify(receipt));
+    chmodSync(f.receiptPath, 0o600);
     const deps = createProductionRollbackDeps({
       home: f.home,
       runtimePath: f.runtimePath,
@@ -451,6 +479,38 @@ describeDarwin("structured cohort production adapter", () => {
     expect(deps.restart()).rejects.toThrow();
     expect(deps.readHealth()).rejects.toThrow();
     expect(launchctlCalled).toBe(false);
+    release?.();
+  });
+
+  test("rejects active config byte drift that predates target loading", () => {
+    const f = fixture();
+    writeFileSync(f.configPath, '{"profile":"replacement"}', { mode: 0o644 });
+    const deps = createProductionRollbackDeps({
+      home: f.home,
+      runtimePath: f.runtimePath,
+      expectedScriptPath: f.scriptPath,
+      activeConfigPath: f.configPath,
+    });
+    const release = deps.acquireLock();
+    expect(() => deps.loadTarget()).toThrow();
+    release?.();
+  });
+
+  test("revalidates active config after the health request resolves", async () => {
+    const f = fixture();
+    const deps = createProductionRollbackDeps({
+      home: f.home,
+      runtimePath: f.runtimePath,
+      expectedScriptPath: f.scriptPath,
+      activeConfigPath: f.configPath,
+      healthRequest: async () => {
+        writeFileSync(f.configPath, '{"profile":"during-health"}', { mode: 0o644 });
+        return { status: 200, redirected: false, body: JSON.stringify({ ok: true }) };
+      },
+    });
+    const release = deps.acquireLock();
+    deps.loadTarget();
+    expect(deps.readHealth()).rejects.toThrow();
     release?.();
   });
 
