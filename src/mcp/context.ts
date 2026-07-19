@@ -61,7 +61,7 @@ export interface ToolContext {
   /** #327 Phase 1: pilot output trust-boundary mode (legacy | structured). */
   outputMode: OutputMode;
   /** #357: identity emitted only by the fixed rollout cohort health endpoint. */
-  rolloutIdentity?: { cohortId: string; deploymentDigest: string };
+  rolloutIdentity?: { cohortId: string; configIdentity: string; deploymentDigest: string };
   /** #252/#271: resolved NER mode shared by ingest, page tools, and sync. */
   nerIngestMode: IngestNerMode;
   /** #252/#271: durable backfill submitter for write paths in defer mode. */
@@ -97,9 +97,11 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const nerMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, deps.nerIngestMode);
   const deferredNerSubmitter = new JobQueueNerSubmitter(db);
   const cohortId = process.env.CBRAIN_ROLLOUT_COHORT_ID;
+  const configIdentity = process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY;
   const deploymentDigest = process.env.CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST;
-  const rolloutIdentity = cohortId === "cbrain-structured-pilot-v1" && /^[a-f0-9]{64}$/.test(deploymentDigest ?? "")
-    ? { cohortId, deploymentDigest: deploymentDigest as string }
+  const rolloutIdentity = cohortId === "cbrain-structured-pilot-v1" &&
+      /^[a-f0-9]{64}$/.test(configIdentity ?? "") && /^[a-f0-9]{64}$/.test(deploymentDigest ?? "")
+    ? { cohortId, configIdentity: configIdentity as string, deploymentDigest: deploymentDigest as string }
     : undefined;
   const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger, nerMode, deferredNerSubmitter });
   const ingest = new IngestManager(db, embedding, lance, vaultPath, llm, undefined, {

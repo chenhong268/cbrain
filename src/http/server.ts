@@ -184,6 +184,7 @@ export function createHttpServer(ctx: ToolContext) {
               output_boundary: ctx.outputMode,
               ...(ctx.rolloutIdentity ? {
                 cohort_id: ctx.rolloutIdentity.cohortId,
+                config_identity: ctx.rolloutIdentity.configIdentity,
                 deployment_digest: ctx.rolloutIdentity.deploymentDigest,
                 process_id: process.pid,
               } : {}),

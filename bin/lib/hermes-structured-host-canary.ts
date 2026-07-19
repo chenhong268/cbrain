@@ -200,7 +200,7 @@ export interface HermesStructuredCanaryReport {
 export async function proveStructuredCohortRollback(
   fault?: "mutation" | "restart" | "health",
 ): Promise<null | typeof ROLLBACK_COMMAND_ID> {
-  const root = mkdtempSync(resolve(tmpdir(), "cbrain-rollback-proof-"));
+  const root = realpathSync(mkdtempSync(resolve(tmpdir(), "cbrain-rollback-proof-")));
   try {
     const home = join(root, "home");
     const runtimePath = join(root, "runtime");
@@ -209,6 +209,22 @@ export async function proveStructuredCohortRollback(
     mkdirSync(rolloutDir, { recursive: true, mode: 0o700 });
     mkdirSync(launchAgentsDir, { recursive: true, mode: 0o700 });
     const entrypoint = structuredCohortEntrypoint();
+    const configPath = join(root, "active-cbrain.json");
+    const configIdentity = "c".repeat(64);
+    writeFileSync(configPath, "{}", { mode: 0o600 });
+    const fakeBunDir = join(home, ".bun", "bin");
+    const wrapperCapture = join(root, "wrapper-argv.txt");
+    mkdirSync(fakeBunDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(fakeBunDir, "bun"), '#!/bin/sh\nprintf "%s\\n" "$CBRAIN_CONFIG" "$@" > "$CBRAIN_WRAPPER_CAPTURE"\n', { mode: 0o700 });
+    chmodSync(join(fakeBunDir, "bun"), 0o700);
+    execFileSync(entrypoint, ["serve", "--http", "--port", "3401"], {
+      env: { HOME: home, CBRAIN_CONFIG: configPath, CBRAIN_WRAPPER_CAPTURE: wrapperCapture, PATH: "/usr/bin:/bin" },
+      timeout: 2000,
+      stdio: "ignore",
+    });
+    const wrapperLines = readFileSync(wrapperCapture, "utf8").trim().split("\n");
+    const wrapperProven = wrapperLines[0] === configPath &&
+      JSON.stringify(wrapperLines.slice(-4)) === JSON.stringify(["serve", "--http", "--port", "3401"]);
     const args = [entrypoint, "serve", "--http", "--port", "3401"];
     const digest = deploymentDigest({ label: STRUCTURED_COHORT_LABEL, programArguments: args, healthPort: 3401 });
     const plistPath = join(launchAgentsDir, "ai.cbrain.structured-cohort-v1.plist");
@@ -217,10 +233,15 @@ export async function proveStructuredCohortRollback(
       ProgramArguments: args,
       EnvironmentVariables: {
         CBRAIN_OUTPUT_BOUNDARY: "structured",
+        CBRAIN_CONFIG: configPath,
         CBRAIN_ROLLOUT_COHORT_ID: COHORT_ID,
+        CBRAIN_ROLLOUT_CONFIG_IDENTITY: configIdentity,
         CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST: digest,
       },
+      RunAtLoad: true,
+      KeepAlive: true,
       ProcessType: "Background",
+      ThrottleInterval: 10,
     };
     writeFileSync(plistPath, JSON.stringify(originalPlist), { mode: 0o600 });
     execFileSync("/usr/bin/plutil", ["-convert", "xml1", plistPath], { timeout: 2000, stdio: "ignore" });
@@ -230,6 +251,7 @@ export async function proveStructuredCohortRollback(
       schema_version: 1,
       command_id: ROLLBACK_COMMAND_ID,
       cohort_id: COHORT_ID,
+      config_identity: configIdentity,
       health_port: 3401,
       deployment_digest: digest,
     }), { mode: 0o600 });
@@ -249,6 +271,7 @@ export async function proveStructuredCohortRollback(
       home,
       runtimePath,
       expectedScriptPath: entrypoint,
+      activeConfigPath: configPath,
       processIdentity: (pid) => pid === process.pid ? "proof-process-birth-v1" : null,
       launchctl: (argv) => {
         const call = [...argv];
@@ -282,6 +305,7 @@ export async function proveStructuredCohortRollback(
             ok: loaded && url === "http://127.0.0.1:3401/health",
             output_boundary: fault === "health" ? "structured" : plist.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY,
             cohort_id: COHORT_ID,
+            config_identity: configIdentity,
             deployment_digest: digest,
             process_id: servicePid,
           }),
@@ -289,13 +313,32 @@ export async function proveStructuredCohortRollback(
       },
     });
     const result = await rollbackStructuredCohort(deps);
-    if (fault) return null;
-
     const updated = JSON.parse(execFileSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", plistPath], {
       encoding: "utf8",
       timeout: 2000,
     }));
     const backupBytes = readFileSync(join(rolloutDir, "structured-cohort-v1.pre-rollback.plist"));
+    const commonFailureProof =
+      readFileSync(unrelatedPath).equals(unrelatedBytes) &&
+      !readdirSync(rolloutDir).includes(".structured-cohort-rollback.lock");
+    if (fault) {
+      const expectedCode = {
+        mutation: "MUTATION_FAILED",
+        restart: "RESTART_FAILED",
+        health: "HEALTH_NOT_VERIFIED",
+      }[fault];
+      const expectedCallCount = { mutation: 0, restart: 3, health: 4 }[fault];
+      const faultProven =
+        result.status === "failed" &&
+        result.code === expectedCode &&
+        launchctlCalls.length === expectedCallCount &&
+        commonFailureProof &&
+        (fault === "mutation"
+          ? updated.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY === "structured" && backupBytes.toString("utf8") === "closed-fault"
+          : updated.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY === "legacy" && backupBytes.equals(originalBytes));
+      return faultProven ? null : ROLLBACK_COMMAND_ID;
+    }
+
     const expectedCalls = [
       ["print", service],
       ["bootout", service],
@@ -310,12 +353,14 @@ export async function proveStructuredCohortRollback(
       result.restart_performed &&
       result.health_verified &&
       updated.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY === "legacy" &&
+      updated.EnvironmentVariables.CBRAIN_CONFIG === configPath &&
       updated.ProcessType === "Background" &&
+      updated.RunAtLoad === true && updated.KeepAlive === true && updated.ThrottleInterval === 10 &&
       backupBytes.equals(originalBytes) &&
-      readFileSync(unrelatedPath).equals(unrelatedBytes) &&
+      commonFailureProof &&
+      wrapperProven &&
       JSON.stringify(launchctlCalls) === JSON.stringify(expectedCalls) &&
-      !lstatSync(rolloutDir).isSymbolicLink() &&
-      !readdirSync(rolloutDir).includes(".structured-cohort-rollback.lock");
+      !lstatSync(rolloutDir).isSymbolicLink();
     return proven ? ROLLBACK_COMMAND_ID : null;
   } catch {
     return null;

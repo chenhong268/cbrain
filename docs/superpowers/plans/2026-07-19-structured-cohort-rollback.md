@@ -68,3 +68,8 @@ backup and parent symlink/hardlink/TOCTOU confinement, process-birth stale-lock
 recovery, explicit launchctl status handling, Unicode duplicate keys, and
 closed config-error JSON. Re-dispatch independent review after the fixes; no
 live cohort or service operation is part of this addendum.
+
+The second review additionally requires active-profile identity to flow through
+receipt, plist, wrapper and health; runtime execution of the wrapper; exact
+launch policy; per-fault state assertions; bounded PID publication polling; and
+an exact approved-plist recheck immediately before bootstrap.

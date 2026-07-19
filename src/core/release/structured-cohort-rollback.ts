@@ -7,6 +7,7 @@ export const STRUCTURED_COHORT_LABEL = "ai.cbrain.structured-cohort-v1" as const
 export type RollbackTarget = {
   label: string;
   cohortId: string;
+  configIdentity: string;
   mode: "legacy" | "structured";
   healthPort: number;
   programArguments: string[];
@@ -43,6 +44,7 @@ export type RollbackDeps = {
     ok: boolean;
     output_boundary?: unknown;
     cohort_id?: unknown;
+    config_identity?: unknown;
     deployment_digest?: unknown;
     process_id?: unknown;
   }>;
@@ -64,6 +66,7 @@ export function deploymentDigest(input: {
 function validTarget(target: RollbackTarget): boolean {
   if (target.label !== STRUCTURED_COHORT_LABEL) return false;
   if (target.cohortId !== COHORT_ID) return false;
+  if (!/^[a-f0-9]{64}$/.test(target.configIdentity)) return false;
   if (target.mode !== "legacy" && target.mode !== "structured") return false;
   if (!Number.isInteger(target.healthPort) || target.healthPort < 1024 || target.healthPort > 65_535) return false;
   if (!Array.isArray(target.programArguments) || target.programArguments.length !== 5) return false;
@@ -97,6 +100,7 @@ async function healthIsLegacy(deps: RollbackDeps, target: RollbackTarget, proces
     return health.ok === true &&
       health.output_boundary === "legacy" &&
       health.cohort_id === COHORT_ID &&
+      health.config_identity === target.configIdentity &&
       health.deployment_digest === target.deploymentDigest &&
       health.process_id === processId;
   } catch {

@@ -70,11 +70,12 @@ describe("GET /health runtime freshness (#320)", () => {
       runtimePath: join(root, "runtime"),
     };
     const ctx = buildContext(deps);
-    ctx.rolloutIdentity = { cohortId: "cbrain-structured-pilot-v1", deploymentDigest: digest };
+    ctx.rolloutIdentity = { cohortId: "cbrain-structured-pilot-v1", configIdentity: "b".repeat(64), deploymentDigest: digest };
     server = createHttpServer(ctx).start(0);
     endpoint = `http://127.0.0.1:${server.port}/health`;
     const health = await fetch(endpoint).then((response) => response.json());
     expect(health.cohort_id).toBe("cbrain-structured-pilot-v1");
+    expect(health.config_identity).toBe("b".repeat(64));
     expect(health.deployment_digest).toBe(digest);
     expect(health.process_id).toBe(process.pid);
   });

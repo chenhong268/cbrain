@@ -43,6 +43,7 @@ The future rollout operation must create a mode-0600 regular JSON receipt:
   "schema_version": 1,
   "command_id": "cbrain-structured-cohort-rollback-v1",
   "cohort_id": "cbrain-structured-pilot-v1",
+  "config_identity": "<random-sha256-shaped-rollout-id>",
   "health_port": 3401,
   "deployment_digest": "<sha256>"
 }
@@ -52,6 +53,11 @@ The digest binds canonical `{label, program_arguments, health_port}`. Program
 arguments come from the plist and must be exactly the canonical, regular,
 owned `bin/cbrain-serve-http.sh serve --http --port <receipt-port>` argv. The
 wrapper preserves its no-argument default while forwarding this reviewed argv.
+For cohort argv it preserves the canonical active `CBRAIN_CONFIG` supplied by
+the fixed plist; it never substitutes a package-root profile. The receipt's
+random config identity is repeated in the plist and health response so another
+profile cannot satisfy the rollback proof. The config path itself is never
+reported.
 Receipt and plist symlinks, hardlinks, non-regular files, wrong
 ownership, unsafe permissions, non-loopback ports, duplicate JSON keys, extra
 keys, or digest drift fail before mutation. Diagnostics never print content or
@@ -63,8 +69,9 @@ paths.
 2. Acquire an exclusive lock under `runtimePath/rollout`. The lock atomically
    binds PID plus process-birth identity, rejects a live owner, safely reclaims
    a dead/reused owner, and verifies its own inode before release.
-3. Validate receipt, fixed plist path, ownership, permissions, label, program,
-   environment, health port, and deployment digest.
+3. Validate receipt, fixed plist path, canonical active config path, ownership,
+   permissions, label, exact launch policy (`RunAtLoad`, `KeepAlive`, process
+   type and throttle), environment, health port, and deployment digest.
 4. If mode is `structured`, copy the exact plist to a mode-0600 managed backup,
    create a same-directory temporary plist, change only
    `EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY` to `legacy`, validate the
@@ -78,8 +85,9 @@ paths.
    accepted only as the expected bootout condition; bootstrap failure is fatal.
 6. Poll only `http://127.0.0.1:<receipt-port>/health` with redirects disabled
    and a fixed deadline. Success requires legacy mode plus the fixed cohort ID,
-   receipt deployment digest, and the PID reported by `launchctl print` after
-   bootstrap. This prevents an unrelated loopback service from proving health.
+   receipt config identity and deployment digest, and the PID reported by
+   `launchctl print` after bootstrap. This prevents another profile or an
+   unrelated loopback service from proving health.
 7. Return a closed JSON receipt and release the lock.
 
 If the plist is already legacy and health proves legacy, return `already_legacy`
@@ -112,8 +120,9 @@ stack, path, label supplied by disk, command output, or response body is copied.
 ## 6. Health and release gate
 
 `GET /health` adds the safe enum `output_boundary: legacy|structured`. Only the
-dedicated cohort also emits its fixed cohort ID, deployment digest, and process
-ID; the default service keeps its existing privacy-safe field set.
+dedicated cohort also emits its fixed cohort ID, random config identity,
+deployment digest, and process ID; the default service keeps its existing
+privacy-safe field set.
 
 The real Hermes gate may set
 `rollback_command_id=cbrain-structured-cohort-rollback-v1` only when a
@@ -165,3 +174,11 @@ managed files/directories use no-follow, ownership, mode, link-count, inode and
 byte checks; restart accepts only launchctl's explicit not-loaded status; and
 the CLI uses the non-printing config loader. This correction narrows the attack
 surface without changing the public command or touching live state.
+
+The second review found that the wrapper could replace the active profile with
+a package-root config and that the first fault probes returned null without
+proving their faults. The final contract therefore binds a random config
+identity end-to-end, preserves the active config in cohort mode, executes the
+wrapper inside the isolated proof, checks each expected failure code and side
+effect, requires an exact runnable launch policy, polls the named PID, and
+revalidates approved plist bytes immediately before bootstrap.

@@ -246,6 +246,10 @@ describe("Hermes structured host canary contract", () => {
 
   test("marks rollout ready only after the repository-owned rollback proof succeeds", async () => {
     const commandId = await proveStructuredCohortRollback();
+    if (process.platform !== "darwin") {
+      expect(commandId).toBeNull();
+      return;
+    }
     expect(commandId).toBe("cbrain-structured-cohort-rollback-v1");
     const report = evaluateCanaryReport({ ...validInput(), rollback_command_id: commandId });
     expect(report).toMatchObject({
@@ -258,6 +262,7 @@ describe("Hermes structured host canary contract", () => {
     for (const fault of ["mutation", "restart", "health"] as const) {
       expect(await proveStructuredCohortRollback(fault)).toBeNull();
     }
+    expect(await proveStructuredCohortRollback("bogus" as never)).toBe("cbrain-structured-cohort-rollback-v1");
   });
 
   test("fails closed when a primary case is missing or a projection contract is false", () => {
