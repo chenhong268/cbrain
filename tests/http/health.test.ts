@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic.js";
@@ -69,13 +70,35 @@ describe("GET /health runtime freshness (#320)", () => {
       dbPath: join(root, "brain.sqlite"),
       runtimePath: join(root, "runtime"),
     };
+    const configPath = join(root, "cohort-config.json");
+    const configBytes = Buffer.from('{"profile":"fixture"}');
+    const configKey = "b".repeat(64);
+    writeFileSync(configPath, configBytes);
+    const previous = {
+      config: process.env.CBRAIN_CONFIG,
+      cohort: process.env.CBRAIN_ROLLOUT_COHORT_ID,
+      identity: process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY,
+      deployment: process.env.CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST,
+    };
+    process.env.CBRAIN_CONFIG = configPath;
+    process.env.CBRAIN_ROLLOUT_COHORT_ID = "cbrain-structured-pilot-v1";
+    process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY = configKey;
+    process.env.CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST = digest;
     const ctx = buildContext(deps);
-    ctx.rolloutIdentity = { cohortId: "cbrain-structured-pilot-v1", configIdentity: "b".repeat(64), deploymentDigest: digest };
+    for (const [key, value] of Object.entries({
+      CBRAIN_CONFIG: previous.config,
+      CBRAIN_ROLLOUT_COHORT_ID: previous.cohort,
+      CBRAIN_ROLLOUT_CONFIG_IDENTITY: previous.identity,
+      CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST: previous.deployment,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     server = createHttpServer(ctx).start(0);
     endpoint = `http://127.0.0.1:${server.port}/health`;
     const health = await fetch(endpoint).then((response) => response.json());
     expect(health.cohort_id).toBe("cbrain-structured-pilot-v1");
-    expect(health.config_identity).toBe("b".repeat(64));
+    expect(health.config_attestation).toBe(createHmac("sha256", configKey).update(configBytes).digest("hex"));
     expect(health.deployment_digest).toBe(digest);
     expect(health.process_id).toBe(process.pid);
   });

@@ -22,7 +22,7 @@ function target(mode: "legacy" | "structured" = "structured"): RollbackTarget {
       healthPort: 3401,
     }),
     cohortId: COHORT_ID,
-    configIdentity: "b".repeat(64),
+    configAttestation: "b".repeat(64),
   };
 }
 
@@ -50,7 +50,7 @@ function harness(initial = target()) {
       ok: true,
       output_boundary: healthyMode,
       cohort_id: COHORT_ID,
-      config_identity: current.configIdentity,
+      config_attestation: current.configAttestation,
       deployment_digest: current.deploymentDigest,
       process_id: 4242,
     }),
@@ -106,7 +106,7 @@ describe("structured cohort rollback (#357)", () => {
       { ...target(), healthPort: 80 },
       { ...target(), mode: "invalid" as never },
       { ...target(), cohortId: "unrelated" },
-      { ...target(), configIdentity: "invalid" },
+      { ...target(), configAttestation: "invalid" },
       { ...target(), programArguments: ["/fixture/bin/cbrain-serve-http.sh", "serve", "--http", "--port", "9999"] },
       { ...target(), programArguments: ["/fixture/bin/cbrain-serve-http.sh", "--http", "serve", "--port", "3401"] },
     ];
@@ -136,10 +136,10 @@ describe("structured cohort rollback (#357)", () => {
 
   test("rejects health from an unrelated process or deployment", async () => {
     for (const health of [
-      { ok: true, output_boundary: "legacy", cohort_id: "other", config_identity: target().configIdentity, deployment_digest: target().deploymentDigest, process_id: 4242 },
-      { ok: true, output_boundary: "legacy", cohort_id: COHORT_ID, config_identity: "0".repeat(64), deployment_digest: target().deploymentDigest, process_id: 4242 },
-      { ok: true, output_boundary: "legacy", cohort_id: COHORT_ID, config_identity: target().configIdentity, deployment_digest: "0".repeat(64), process_id: 4242 },
-      { ok: true, output_boundary: "legacy", cohort_id: COHORT_ID, config_identity: target().configIdentity, deployment_digest: target().deploymentDigest, process_id: 7 },
+      { ok: true, output_boundary: "legacy", cohort_id: "other", config_attestation: target().configAttestation, deployment_digest: target().deploymentDigest, process_id: 4242 },
+      { ok: true, output_boundary: "legacy", cohort_id: COHORT_ID, config_attestation: "0".repeat(64), deployment_digest: target().deploymentDigest, process_id: 4242 },
+      { ok: true, output_boundary: "legacy", cohort_id: COHORT_ID, config_attestation: target().configAttestation, deployment_digest: "0".repeat(64), process_id: 4242 },
+      { ok: true, output_boundary: "legacy", cohort_id: COHORT_ID, config_attestation: target().configAttestation, deployment_digest: target().deploymentDigest, process_id: 7 },
     ]) {
       const h = harness();
       h.deps.readHealth = async () => health;

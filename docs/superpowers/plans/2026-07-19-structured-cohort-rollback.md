@@ -73,3 +73,7 @@ The second review additionally requires active-profile identity to flow through
 receipt, plist, wrapper and health; runtime execution of the wrapper; exact
 launch policy; per-fault state assertions; bounded PID publication polling; and
 an exact approved-plist recheck immediately before bootstrap.
+
+The final transaction pass replaces PID/path stale-lock recovery with a kernel
+advisory lock and binds the exact loaded config bytes through a private-keyed
+health attestation. It also rejects non-canonical XML key encodings.

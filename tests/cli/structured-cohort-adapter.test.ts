@@ -1,12 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readlinkSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -176,55 +174,30 @@ describeDarwin("structured cohort production adapter", () => {
     release?.();
   });
 
-  test("reclaims a dead owner lock, preserves a live lock, and never unlinks a replaced lock", () => {
+  test("uses a crash-safe kernel lock with deterministic contention and reuse", () => {
     const f = fixture();
     const lockPath = join(f.runtimePath, "rollout", ".structured-cohort-rollback.lock");
-    symlinkSync(`v1:999999:${"a".repeat(64)}`, lockPath);
-    let deps = createProductionRollbackDeps({
+    const first = createProductionRollbackDeps({
       home: f.home,
       runtimePath: f.runtimePath,
       expectedScriptPath: f.scriptPath,
       activeConfigPath: f.configPath,
-      processIdentity: (pid) => pid === process.pid ? "current-birth" : null,
     });
-    let release = deps.acquireLock();
-    expect(release).toBeFunction();
-    release?.();
-
-    const liveIdentity = "other-live-birth";
-    symlinkSync(`v1:7777:${createHash("sha256").update(liveIdentity).digest("hex")}`, lockPath);
-    deps = createProductionRollbackDeps({
+    const second = createProductionRollbackDeps({
       home: f.home,
       runtimePath: f.runtimePath,
       expectedScriptPath: f.scriptPath,
       activeConfigPath: f.configPath,
-      processIdentity: (pid) => pid === process.pid ? "current-birth" : pid === 7777 ? liveIdentity : null,
     });
-    expect(deps.acquireLock()).toBeNull();
-    rmSync(lockPath);
-
-    const unknownIdentity = "unknown-owner-birth";
-    symlinkSync(`v1:8888:${createHash("sha256").update(unknownIdentity).digest("hex")}`, lockPath);
-    deps = createProductionRollbackDeps({
-      home: f.home,
-      runtimePath: f.runtimePath,
-      expectedScriptPath: f.scriptPath,
-      activeConfigPath: f.configPath,
-      processIdentity: (pid) => {
-        if (pid === process.pid) return "current-birth";
-        throw new Error("inspector unavailable");
-      },
-    });
-    expect(deps.acquireLock()).toBeNull();
-    expect(readlinkSync(lockPath)).toContain("v1:8888:");
-    rmSync(lockPath);
-
-    release = deps.acquireLock();
-    expect(release).toBeFunction();
-    rmSync(lockPath);
-    symlinkSync("replacement", lockPath);
-    expect(() => release?.()).toThrow();
-    expect(readFileSync(f.receiptPath, "utf8")).toContain(ROLLBACK_COMMAND_ID);
+    const releaseFirst = first.acquireLock();
+    expect(releaseFirst).toBeFunction();
+    expect(second.acquireLock()).toBeNull();
+    releaseFirst?.();
+    const releaseSecond = second.acquireLock();
+    expect(releaseSecond).toBeFunction();
+    releaseSecond?.();
+    expect(statSync(lockPath).isFile()).toBe(true);
+    expect(statSync(lockPath).mode & 0o777).toBe(0o600);
   });
 
   test("accepts only expected launchctl not-loaded and exact named-job pid", async () => {
@@ -363,6 +336,20 @@ describeDarwin("structured cohort production adapter", () => {
     expect(() => deps.loadTarget()).toThrow();
     release?.();
 
+    const cdata = fixture();
+    const cdataXml = readFileSync(cdata.plistPath, "utf8");
+    writeFileSync(cdata.plistPath, cdataXml.replace("</dict>", "<key><![CDATA[CBRAIN_OUTPUT_BOUNDARY]]></key><string>legacy</string></dict>"));
+    chmodSync(cdata.plistPath, 0o600);
+    deps = createProductionRollbackDeps({
+      home: cdata.home,
+      runtimePath: cdata.runtimePath,
+      expectedScriptPath: cdata.scriptPath,
+      activeConfigPath: cdata.configPath,
+    });
+    release = deps.acquireLock();
+    expect(() => deps.loadTarget()).toThrow();
+    release?.();
+
     const aliased = fixture();
     const aliasRoot = join(dirname(aliased.root), `${basename(aliased.root)}-alias`);
     symlinkSync(aliased.root, aliasRoot);
@@ -440,6 +427,29 @@ describeDarwin("structured cohort production adapter", () => {
     execFileSync("/usr/bin/plutil", ["-convert", "xml1", f.plistPath]);
     chmodSync(f.plistPath, 0o600);
     expect(deps.restart()).rejects.toThrow();
+    expect(launchctlCalled).toBe(false);
+    release?.();
+  });
+
+  test("rejects active config byte drift before restart and health", async () => {
+    const f = fixture();
+    let launchctlCalled = false;
+    const deps = createProductionRollbackDeps({
+      home: f.home,
+      runtimePath: f.runtimePath,
+      expectedScriptPath: f.scriptPath,
+      activeConfigPath: f.configPath,
+      launchctl: () => {
+        launchctlCalled = true;
+        return { status: 0, stdout: "\tpid = 1\n" };
+      },
+    });
+    const release = deps.acquireLock();
+    deps.loadTarget();
+    deps.writeLegacy();
+    writeFileSync(f.configPath, '{"profile":"changed"}', { mode: 0o644 });
+    expect(deps.restart()).rejects.toThrow();
+    expect(deps.readHealth()).rejects.toThrow();
     expect(launchctlCalled).toBe(false);
     release?.();
   });

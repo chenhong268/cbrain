@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
@@ -212,6 +212,7 @@ export async function proveStructuredCohortRollback(
     const configPath = join(root, "active-cbrain.json");
     const configIdentity = "c".repeat(64);
     writeFileSync(configPath, "{}", { mode: 0o644 });
+    const expectedConfigAttestation = createHmac("sha256", configIdentity).update(readFileSync(configPath)).digest("hex");
     const fakeBunDir = join(home, ".bun", "bin");
     const wrapperCapture = join(root, "wrapper-argv.txt");
     mkdirSync(fakeBunDir, { recursive: true, mode: 0o700 });
@@ -272,7 +273,6 @@ export async function proveStructuredCohortRollback(
       runtimePath,
       expectedScriptPath: entrypoint,
       activeConfigPath: configPath,
-      processIdentity: (pid) => pid === process.pid ? "proof-process-birth-v1" : null,
       launchctl: (argv) => {
         const call = [...argv];
         launchctlCalls.push(call);
@@ -305,7 +305,7 @@ export async function proveStructuredCohortRollback(
             ok: loaded && url === "http://127.0.0.1:3401/health",
             output_boundary: fault === "health" ? "structured" : plist.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY,
             cohort_id: COHORT_ID,
-            config_identity: configIdentity,
+            config_attestation: expectedConfigAttestation,
             deployment_digest: digest,
             process_id: servicePid,
           }),
@@ -318,9 +318,12 @@ export async function proveStructuredCohortRollback(
       timeout: 2000,
     }));
     const backupBytes = readFileSync(join(rolloutDir, "structured-cohort-v1.pre-rollback.plist"));
+    const secondLock = deps.acquireLock();
+    const lockReusable = typeof secondLock === "function";
+    secondLock?.();
     const commonFailureProof =
       readFileSync(unrelatedPath).equals(unrelatedBytes) &&
-      !readdirSync(rolloutDir).includes(".structured-cohort-rollback.lock");
+      lockReusable && readdirSync(rolloutDir).includes(".structured-cohort-rollback.lock");
     if (fault) {
       const expectedCode = {
         mutation: "MUTATION_FAILED",

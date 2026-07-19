@@ -55,9 +55,11 @@ owned `bin/cbrain-serve-http.sh serve --http --port <receipt-port>` argv. The
 wrapper preserves its no-argument default while forwarding this reviewed argv.
 For cohort argv it preserves the canonical active `CBRAIN_CONFIG` supplied by
 the fixed plist; it never substitutes a package-root profile. The receipt's
-random config identity is repeated in the plist and health response so another
-profile cannot satisfy the rollback proof. The config path itself is never
-reported.
+private random config identity is passed only to the cohort and used as an HMAC
+key over the config bytes actually loaded at startup. Health exposes only that
+attestation, never the key, config bytes, or path. The command snapshots the
+same bytes and requires the attestation to match, so another profile cannot
+satisfy rollback health.
 Receipt and plist symlinks, hardlinks, non-regular files, wrong
 ownership, unsafe permissions, non-loopback ports, duplicate JSON keys, extra
 keys, or digest drift fail before mutation. Diagnostics never print content or
@@ -66,9 +68,9 @@ paths.
 ## 4. State machine
 
 1. Resolve the active CBrain config and derive the receipt path.
-2. Acquire an exclusive lock under `runtimePath/rollout`. The lock atomically
-   binds PID plus process-birth identity, rejects a live owner, safely reclaims
-   a dead/reused owner, and verifies its own inode before release.
+2. Acquire a nonblocking kernel advisory lock on the private fixed lock file
+   under `runtimePath/rollout`. The kernel releases it on process death; there
+   is no PID-file stale-reclaim race and the lock inode is never unlinked.
 3. Validate receipt, fixed plist path, canonical active config path, ownership,
    permissions, label, exact launch policy (`RunAtLoad`, `KeepAlive`, process
    type and throttle), environment, health port, and deployment digest.
@@ -120,7 +122,7 @@ stack, path, label supplied by disk, command output, or response body is copied.
 ## 6. Health and release gate
 
 `GET /health` adds the safe enum `output_boundary: legacy|structured`. Only the
-dedicated cohort also emits its fixed cohort ID, random config identity,
+dedicated cohort also emits its fixed cohort ID, keyed config attestation,
 deployment digest, and process ID; the default service keeps its existing
 privacy-safe field set.
 
@@ -182,3 +184,8 @@ identity end-to-end, preserves the active config in cohort mode, executes the
 wrapper inside the isolated proof, checks each expected failure code and side
 effect, requires an exact runnable launch policy, polls the named PID, and
 revalidates approved plist bytes immediately before bootstrap.
+
+The transaction review then found that a same-path config byte change was not
+bound and that path-based stale-lock reclamation still admitted a two-reclaimer
+race. The final implementation snapshots the active config and verifies a
+startup HMAC attestation, and replaces path ownership with a kernel `flock`.
