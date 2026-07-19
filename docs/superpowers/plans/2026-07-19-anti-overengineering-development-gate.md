@@ -48,8 +48,8 @@ The gate remains human-reviewed Markdown; it has no runtime or CI component.
    consumers and any triggered approval.
 3. Pull requests report complexity delta, avoided scope, temporary-retirement
    obligations and the subtraction-review verdict.
-4. Make verification proportional: full checks for product code and the docs
-   gate for documentation-only changes.
+4. Preserve the existing full-gate requirement; the docs gate remains an
+   additional focused check for documentation changes.
 
 ## Task 3: Verify and deliver
 
