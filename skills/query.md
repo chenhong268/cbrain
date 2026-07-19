@@ -33,7 +33,7 @@ Search the brain using multiple strategies, fuse results, and return the most re
 
 当 RESOLVER 指定 `[operations]`：
 
-1. 调用 `next_actions({ include_raw: false })`，使用它的自然语言 `display/items` 回答当前问题与优先动作。
+1. 调用 `next_actions({ include_raw: false })`，用 `display` 组织当前问题与优先动作的自然语言回答，`summary` 用于快速路由判断；`items` 只是 `severity`/`source`/`evidence_count` 元数据，不得从中重建自然语言内容。
 2. 只有用户明确询问页面数、关系数、chunk 数或运行状态时，再补一次 `status`；不要把统计数字当作问题诊断。
 3. 禁止调用普通 cbrain_recall / deep_recall 搜“痛点”或“异常”，因为语义相似内容不能代表当前运行状态。
 4. `next_actions` 是只读建议，不得自动 repair、merge、delete 或改变 discovery 状态。
