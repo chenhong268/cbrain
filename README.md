@@ -51,7 +51,7 @@ curl -fsSL https://bun.sh/install | bash
 2. Install CBrain — always pin to an explicit tag:
 
 ```bash
-bun install -g github:chenhong268/cbrain#v2.0.7
+bun install -g github:chenhong268/cbrain#v2.0.8
 ```
 
 3. Verify:
@@ -70,11 +70,36 @@ cbrain query "实体A"
 cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 ```
 
-**Upgrading** — reinstall with the new tag:
+**Upgrading** — verify the new tag in an isolated `bunx` run, stop the existing CBrain service, then reinstall:
 
 ```bash
-bun remove -g cbrain
-bun install -g github:chenhong268/cbrain#v2.0.7
+(
+  set -e
+  new_version=v2.0.8
+  previous_version=v2.0.7
+  test "$(bunx --package "github:chenhong268/cbrain#${new_version}" cbrain --version)" = "${new_version#v}"
+  test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
+  bun remove -g cbrain
+  bun install -g "github:chenhong268/cbrain#${new_version}"
+  test "$(cbrain --version)" = "${new_version#v}"
+)
+```
+
+If install or restart verification fails, roll back to the recorded previous tag:
+
+```bash
+(
+  set -e
+  previous_version=v2.0.7
+  test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
+  global_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
+  global_manifest="${global_bin%/bin}/install/global/package.json"
+  if test -f "$global_manifest" && grep -q '"cbrain"[[:space:]]*:' "$global_manifest"; then
+    bun remove -g cbrain
+  fi
+  bun install -g "github:chenhong268/cbrain#${previous_version}"
+  test "$(cbrain --version)" = "${previous_version#v}"
+)
 ```
 
 **Uninstalling:**
@@ -601,11 +626,12 @@ bun run dev init
 
 ## Roadmap
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.7).
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.8).
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v2.0.7 | 可靠 NER 恢复、可治理 Recommendation Record、确定性 replay/diff，以及 recall/query 结构化输出边界（显式 opt-in） | ✅ Current |
+| v2.0.8 | Watcher 积压恢复、受治理的数据修复、真实召回质量门禁，以及 Hermes 输出边界的可回滚灰度准备 | ✅ Current |
+| v2.0.7 | 可靠 NER 恢复、可治理 Recommendation Record、确定性 replay/diff，以及 recall/query 结构化输出边界（显式 opt-in） | ✅ |
 | v2.0.6 | Agent 合同与可信输出：自然语言前门、只读注意力队列、主动连接候选、可解释最短路径，以及 graph/timeline 结构化输出 pilot（显式 opt-in） | ✅ |
 | v2.0.5 | 可靠性与治理收敛：fsck / consistency / health-debt gate、MCP 工具合并、core 分域重组、search/NER 稳定性与 storage migration registry 收敛 | Previous |
 | v2.0.4 | 写入与 MCP 使用体验：NER 可延迟到 Dream backfill；MCP 工具分 profile 暴露，并支持 HTTP /mcp per-session profile | Previous |
