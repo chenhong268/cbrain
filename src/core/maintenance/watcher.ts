@@ -359,6 +359,11 @@ export class FileWatcher {
       for (const { slug, path } of vanished) {
         const debt = debtByPath.get(path);
         if (debt && await requeueIfPresent(debt)) continue;
+        if (debt && !this.authorizeDeletionDebt()) {
+          this.reloadBulkAfterExternalUpdate();
+          this.logger?.info("watcher", "bulk_pending 删除授权已变化，跳过本轮删除");
+          return;
+        }
         try {
           await this.sync.removePage(slug);
           if (debt && await requeueIfPresent(debt)) continue;
@@ -466,7 +471,7 @@ export class FileWatcher {
   private async resumeBulkUnlocked(attempt = 0): Promise<{ releasedCount: number; remainingCount: number }> {
     await this.reconcileBulkUnlocked();
     if (!this.bulkPaused || this.pendingBulk.length === 0) {
-      return { releasedCount: 0, remainingCount: 0 };
+      return { releasedCount: 0, remainingCount: this.pendingBulk.length };
     }
 
     // Release only one bounded batch per call
@@ -584,6 +589,12 @@ export class FileWatcher {
     if (!this.db) return null;
     try {
       const raw = this.db.getConfig(BULK_PENDING_CONFIG_KEY);
+      if (raw !== this.bulkStateRaw) {
+        this.clearDeletionDebtCache();
+        this.pendingBulk = [];
+        this.bulkPaused = false;
+        this.bulkThreshold = this.configuredBulkThreshold;
+      }
       this.bulkStateRaw = raw;
       if (!raw) {
         this.bulkPaused = false;
@@ -627,6 +638,12 @@ export class FileWatcher {
   private async syncBulkFromDb(): Promise<boolean> {
     if (!this.db) return false;
     try {
+      const raw = this.db.getConfig(BULK_PENDING_CONFIG_KEY);
+      if (raw !== this.bulkStateRaw) {
+        this.reloadBulkAfterExternalUpdate();
+        this.logger?.info("watcher", "bulk_pending 已被外部更新，重载状态");
+        return true;
+      }
       const req = this.db.getConfig(BULK_RESUME_REQUEST_KEY);
       if (req) {
         this.db.deleteConfig(BULK_RESUME_REQUEST_KEY);
@@ -639,17 +656,34 @@ export class FileWatcher {
         await this.resumeBulk();
         return true;
       }
-      // Also check if bulk_pending was externally cleared (full manual reset)
-      const raw = this.db.getConfig(BULK_PENDING_CONFIG_KEY);
-      if (!raw && this.pendingBulk.length > 0) {
-        // DB config removed externally but no resume request — treat as full reset
-        this.pendingBulk = [];
-        this.bulkPaused = false;
-        this.logger?.info("watcher", "bulk_pending 已被外部清除，解除暂停");
-        return true;
-      }
     } catch { /* keep current state */ }
     return false;
+  }
+
+  private authorizeDeletionDebt(): boolean {
+    if (!this.db) return true;
+    if (this.bulkStateRaw === null) return false;
+    try {
+      return this.db.compareAndSetConfig(BULK_PENDING_CONFIG_KEY, this.bulkStateRaw, this.bulkStateRaw);
+    } catch {
+      return false;
+    }
+  }
+
+  private reloadBulkAfterExternalUpdate(): void {
+    this.clearDeletionDebtCache();
+    this.pendingBulk = [];
+    this.bulkPaused = false;
+    this.bulkThreshold = this.configuredBulkThreshold;
+    this.loadBulkPending();
+  }
+
+  private clearDeletionDebtCache(): void {
+    for (const pending of this.pendingBulk) {
+      if (!pending.deletionPending) continue;
+      this.hashes.delete(pending.fullPath);
+      this.mtimes.delete(pending.fullPath);
+    }
   }
 
   private async classifyPending(pending: PendingSync, requireObservedStable: boolean): Promise<VaultFileClassification> {
@@ -670,10 +704,14 @@ export class FileWatcher {
 
   private async reconcileBulkUnlocked(attempt = 0, stageDeletion = false): Promise<BulkStatus> {
     const expected = this.loadBulkPending();
-    if (!this.bulkPaused || this.pendingBulk.length === 0) return this.getBulkStatus();
+    const hasDeletionDebt = this.pendingBulk.some((item) => item.deletionPending);
+    if (this.pendingBulk.length === 0 || (!this.bulkPaused && !hasDeletionDebt)) {
+      return this.getBulkStatus();
+    }
 
     const previous = this.bulkObservation;
     const actionable: PendingSync[] = [];
+    const stagedDeletion: PendingSync[] = [];
     let internallyAcknowledged = 0;
     let missingOrStale = 0;
 
@@ -689,13 +727,15 @@ export class FileWatcher {
       if (classification.state === "missing") {
         if (!pending.deletionPending) missingOrStale++;
         if (stageDeletion) {
-          this.hashes.set(pending.fullPath, pending.hash);
-          this.mtimes.set(pending.fullPath, pending.mtime);
+          stagedDeletion.push(pending);
         }
         actionable.push({ ...pending, deletionPending: true });
         continue;
       }
-      const refreshed = classification.pending ?? pending;
+      const classifiedPending = classification.pending ?? pending;
+      const refreshed: PendingSync = pending.deletionPending
+        ? { ...classifiedPending, deletionPending: true }
+        : classifiedPending;
       if (
         refreshed.fullPath !== pending.fullPath
         || refreshed.hash !== pending.hash
@@ -712,9 +752,7 @@ export class FileWatcher {
     }
 
     this.pendingBulk = actionable;
-    this.bulkPaused = stageDeletion
-      ? this.pendingBulk.some((item) => !item.deletionPending)
-      : this.pendingBulk.length > 0;
+    this.bulkPaused = this.pendingBulk.some((item) => !item.deletionPending);
     this.bulkObservation = {
       observedChanged: previous.observedChanged || this.pendingBulk.length,
       internallyAcknowledged: previous.internallyAcknowledged + internallyAcknowledged,
@@ -727,6 +765,10 @@ export class FileWatcher {
     if (!committed) {
       if (attempt >= 2) throw new Error("bulk state changed concurrently");
       return this.reconcileBulkUnlocked(attempt + 1, stageDeletion);
+    }
+    for (const pending of stagedDeletion) {
+      this.hashes.set(pending.fullPath, pending.hash);
+      this.mtimes.set(pending.fullPath, pending.mtime);
     }
     return this.getBulkStatus();
   }
