@@ -125,7 +125,13 @@ describe("MCP validation error boundary (#353)", () => {
     let handlerCalls = 0;
     fixture.server.registerTool(
       "validation_mutation_probe",
-      { inputSchema: { strategy: z.enum(["fts", "vector"]) } },
+      {
+        inputSchema: {
+          payload: z.object({
+            items: z.array(z.object({ strategy: z.enum(["fts", "vector"]) })),
+          }),
+        },
+      },
       async () => {
         handlerCalls += 1;
         return { content: [{ type: "text" as const, text: "handler-ran" }] };
@@ -140,7 +146,7 @@ describe("MCP validation error boundary (#353)", () => {
       for (const mutation of mutations) {
         const result = await fixture.client.callTool({
           name: "validation_mutation_probe",
-          arguments: { strategy: mutation },
+          arguments: { payload: { items: [{ strategy: mutation }] } },
         });
         expect(result).toEqual(FIXED_INPUT_ERROR);
         expect(JSON.stringify(result)).not.toContain(mutation);
@@ -225,16 +231,20 @@ describe("MCP validation error boundary (#353)", () => {
     });
 
     try {
-      const result = await fixture.client.callTool({
-        name: "validation_outer_probe",
-        arguments: [SENSITIVE_SENTINEL],
-      } as never);
-      const resultText = JSON.stringify(result);
+      const malformedCalls = [
+        { name: "validation_outer_probe", arguments: [SENSITIVE_SENTINEL] },
+        { name: { value: SENSITIVE_SENTINEL }, arguments: {} },
+        { name: "validation_outer_probe", arguments: null },
+      ];
+      for (const call of malformedCalls) {
+        const result = await fixture.client.callTool(call as never);
+        const resultText = JSON.stringify(result);
 
-      expect(result).toEqual(FIXED_INPUT_ERROR);
+        expect(result).toEqual(FIXED_INPUT_ERROR);
+        expect(resultText).not.toContain(SENSITIVE_SENTINEL);
+        expect(resultText).not.toMatch(/invalid_type|expected|received|path/i);
+      }
       expect(handlerCalls).toBe(0);
-      expect(resultText).not.toContain(SENSITIVE_SENTINEL);
-      expect(resultText).not.toMatch(/invalid_type|expected|received|path/i);
     } finally {
       await closeFixture(fixture);
     }
