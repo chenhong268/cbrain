@@ -491,8 +491,9 @@ def set_tree_read_only(root: str):
         directories.append(directory)
         for name in files:
             path = os.path.join(directory, name)
-            if not stat.S_ISLNK(os.lstat(path).st_mode):
-                os.chmod(path, 0o400)
+            observed = os.lstat(path)
+            if not stat.S_ISLNK(observed.st_mode):
+                os.chmod(path, 0o500 if stat.S_IMODE(observed.st_mode) & 0o111 else 0o400)
         names[:] = [name for name in names if not stat.S_ISLNK(os.lstat(os.path.join(directory, name)).st_mode)]
     for directory in reversed(directories):
         os.chmod(directory, 0o500)

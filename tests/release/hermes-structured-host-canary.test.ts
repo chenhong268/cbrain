@@ -1043,8 +1043,14 @@ exit 0
       mkdirSync(owned);
       mkdirSync(baselineOwned);
       const proof = join(repo, "bin/prove-structured-cohort-rollback.ts");
+      const helper = join(repo, "bin/proof-helper.sh");
       const manifestPath = join(repo, "tests/fixtures/hermes-structured-canary-evidence-manifest.json");
       writeFileSync(proof, "// fixed proof fixture\n");
+      writeFileSync(
+        helper,
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"schema_version":1,"status":"verified","command_id":"cbrain-structured-cohort-rollback-v1"}\'\n',
+      );
+      chmodSync(helper, 0o700);
       writeFileSync(join(repo, ".gitignore"), "node_modules/\n");
       writeFileSync(join(repo, "node_modules/fixture/index.js"), "export default true;\n");
       writeFileSync(manifestPath, "{}\n");
@@ -1057,7 +1063,7 @@ exit 0
       }
       writeFileSync(
         fakeBun,
-        '#!/bin/sh\nprintf \'%s\\n\' \'{"schema_version":1,"status":"verified","command_id":"cbrain-structured-cohort-rollback-v1"}\'\n',
+        ["#!/bin/sh", "for argument do proof=$argument; done", 'exec "$' + '{proof%/*}/proof-helper.sh"', ""].join("\n"),
       );
       chmodSync(fakeBun, 0o700);
       const listing = runSyntheticGit(repo, ["ls-tree", "-r", "--full-tree", "HEAD"])
