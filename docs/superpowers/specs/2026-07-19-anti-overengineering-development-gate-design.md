@@ -1,7 +1,7 @@
 # Permanent Anti-Overengineering Development Gate
 
 Date: 2026-07-19
-Status: approved direction; written spec pending review
+Status: approved
 
 ## 1. Problem
 
@@ -145,6 +145,24 @@ Before approval, Codex must answer in the review summary:
 
 The allowed verdicts are `approve`, `simplify`, `split` and `reject`. A green
 test suite is necessary but does not override a `simplify` or `split` verdict.
+
+### 5.8 Process complexity budget
+
+The development process is subject to the same smallest-solution rule:
+
+- read-only inspection, status reporting and small documentation corrections do
+  not require implementation artifacts;
+- an approved issue or spec is not sent back through open-ended discovery unless
+  new evidence invalidates an accepted decision;
+- a small, local and reversible change does not require both a new spec and a
+  long-form plan when the issue already contains an executable contract;
+- the full design and planning workflow is reserved for changes that hit a
+  complexity trigger or carry material data, privacy or compatibility risk;
+- skills and review procedures may improve execution quality, but must not widen
+  scope or create duplicate deliverables.
+
+Higher-priority execution requirements still apply, but they should be satisfied
+with the smallest useful artifact rather than expanded into a parallel process.
 
 ## 6. Work-type guidance
 
