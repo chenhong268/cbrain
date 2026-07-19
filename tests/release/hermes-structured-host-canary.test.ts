@@ -2574,12 +2574,7 @@ realHermesTest(
     expect(cbrainSnapshotChecks).toBe(76);
     expect(matrix.runtime_snapshot_checks_verified).toBe(true);
     expect(matrix.cbrain_snapshot_checks_verified).toBe(true);
-    expect(
-      matrix.cases.filter((item) => item.branch !== "error").every((item) => item.projection_contract_verified),
-    ).toBe(true);
-    expect(matrix.cases.filter((item) => item.branch === "error").every((item) => item.error_redaction_exercised)).toBe(
-      true,
-    );
+    expect(matrix.cases.every((item) => item.projection_contract_verified)).toBe(true);
     expect(matrix.cases.every((item) => item.cbrain_invocation_count === 1)).toBe(true);
     expect(matrix.cases.every((item) => item.cbrain_call_verified && item.mcp_session_verified)).toBe(true);
     expect(
@@ -2593,10 +2588,10 @@ realHermesTest(
         .every(
           (item) =>
             item.sensitive_input_sent &&
-            item.direct_error_sensitive_echo_observed &&
-            item.error_redaction_exercised &&
-            item.audit_sensitive_exposed &&
-            !item.error_contract_verified,
+            !item.direct_error_sensitive_echo_observed &&
+            !item.error_redaction_exercised &&
+            !item.audit_sensitive_exposed &&
+            item.error_contract_verified,
         ),
     ).toBe(true);
     const report = evaluateCanaryReport({
@@ -2604,8 +2599,8 @@ realHermesTest(
       cases: matrix.cases,
       size_pairs: matrix.size_pairs,
     });
-    expect(report.host_compatibility).toBe("incompatible");
-    expect(report.reason_codes).toEqual(["CASE_CONTRACT_FAILED", "ROLLBACK_NOT_EXECUTABLE"]);
+    expect(report.host_compatibility).toBe("compatible");
+    expect(report.reason_codes).toEqual(["ROLLBACK_NOT_EXECUTABLE"]);
     expect(matrix.size_pairs.every((pair) => pair.absolute_gate_passed && pair.relative_or_floor_gate_passed)).toBe(
       true,
     );

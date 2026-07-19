@@ -1,7 +1,7 @@
 # MCP Validation Error Boundary Design
 
-**Issue:** #353  
-**Date:** 2026-07-19  
+**Issue:** #353
+**Date:** 2026-07-19
 **Status:** Approved for implementation
 
 ## 1. Problem
@@ -67,6 +67,29 @@ Advantages:
 Cost: this is an adapter around the SDK registration lifecycle. Contract tests
 must fail if a future SDK version changes that lifecycle.
 
+#### Runtime correction — 2026-07-19 adversarial review
+
+The original design above assumed the supplied `CallToolRequestSchema` handler
+was the outermost validation point. Source inspection and a malformed-envelope
+transport test proved that SDK 1.29.0 adds two outer layers: `Server` validates
+the canonical call request and `Protocol` parses the registration schema before
+the supplied handler runs. `Server` also parses and clones a completed
+`CallToolResult`, so result-object identity cannot prove handler provenance.
+
+The corrected adapter still observes the public registration lifecycle, then
+wraps the final `tools/call` entry in the SDK dispatch map. It applies the
+canonical `CallToolRequestSchema` before either outer validator can serialize
+diagnostics, delegates every valid request to the complete SDK handler, and
+fails closed during registration if that dispatch entry is not observable.
+Because this touches one private SDK map, its lifecycle is explicitly locked by
+transport tests; it remains preferable to overriding validation methods or
+forking the SDK.
+
+To distinguish SDK input failures from business errors that intentionally use
+the same text prefix, `attachMcpTools()` records handler execution against the
+SDK's per-request `extra` object. The dispatch wrapper consumes that one-call
+marker. It never scans arguments or trusts forgeable result text alone.
+
 ### B. Override private `McpServer.validateToolInput` or `createToolError`
 
 This is smaller but depends directly on private SDK members declared private in
@@ -110,13 +133,16 @@ the CBrain result itself does not create a second JSON envelope.
 
 ### 4.2 Detection
 
-The adapter replaces a result only when all of these are true:
+Malformed `tools/call` envelopes that fail the canonical request schema are
+replaced immediately. For canonical requests, the adapter replaces a returned
+result only when all of these are true:
 
 1. the request schema being registered is `CallToolRequestSchema`;
 2. the returned value is a `CallToolResult` with `isError === true`;
 3. at least one content item is text;
 4. the first text starts with either `Input validation error:` or the SDK
-   `MCP error -32602: Input validation error:` wrapper.
+   `MCP error -32602: Input validation error:` wrapper;
+5. the registered CBrain handler was not invoked for this request.
 
 The match is anchored at the start and bounded to these two forms. Additional
 content cannot make a recognized validation failure fall back to the unsafe
@@ -143,8 +169,9 @@ tool call.
 
 ### `src/mcp/validation-error-boundary.ts`
 
-Owns the fixed error text, stable operator code, input-validation result
-classifier, safe result builder, and one function that installs the temporary
+Owns the fixed error text, stable operator code, canonical request boundary,
+input-validation result classifier, per-request handler provenance marker,
+safe result builder, and one function that installs the temporary
 request-handler decorator.
 
 The module exports a narrow interface:
@@ -157,16 +184,29 @@ export function installMcpValidationErrorBoundary(
   server: McpServer,
   logger: Pick<Logger, "warn">,
 ): () => void;
+
+// Internal integration hook used only by attachMcpTools() wrappers.
+export function markMcpHandlerInvocation(args: unknown[]): void;
 ```
 
 The returned function restores the original `Server.setRequestHandler`. Calling
-it more than once is safe. `attachMcpTools()` installs the decorator before
-registration and restores it in `finally`, including if registration throws.
+it more than once is safe; overlapping installs are reference-counted so
+out-of-order restores cannot leave a stale decorator. `attachMcpTools()`
+installs the decorator before registration and restores it in `finally`,
+including if registration throws.
 
 ### `src/mcp/server.ts`
 
-Keeps existing profile gating and handler sanitization. It only adds the
+Keeps existing profile gating and handler sanitization. Its `registerTool` and
+legacy `tool` wrappers additionally record that a real handler began executing;
+the legacy wrapper still does not catch or rewrite thrown errors. It adds the
 install/restore lifecycle around `registerAllTools()`.
+
+### `src/core/logger.ts`
+
+Logger write failures emit only the stable `LOGGER_WRITE_FAILED` marker. OS
+error messages are not printed because they may contain absolute paths. An
+`ENOENT` caused by removed test/runtime directories remains silently ignored.
 
 ## 6. Testing
 
@@ -182,7 +222,11 @@ Add a focused real `InMemoryTransport + Client.callTool()` suite proving:
 - `MCP_INPUT_INVALID` and only a safe tool name are logged;
 - normal success, explicit handler `isError`, thrown handler errors, unknown
   tool calls, and output-validation errors are not reclassified;
-- registration failure restores `setRequestHandler`.
+- both recognized prefixes returned by a handler remain unchanged;
+- malformed outer envelopes do not expose canonical schema diagnostics;
+- nested, Unicode, multiline, and long rejected values remain absent;
+- overlapping installs and registration failure restore `setRequestHandler`;
+- logger write and callback failures cannot disclose paths or rejected values.
 
 ### Real CBrain surfaces
 

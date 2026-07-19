@@ -368,3 +368,24 @@ worktree/branch without modifying the user's main worktree.
   the approved spec; all later tasks consume the same names and exact output.
 - Scope: one runtime behavior change plus its evidence; rollout/rollback remains
   outside #353.
+
+## Adversarial review addendum — 2026-07-19
+
+The first GREEN implementation followed the planned public-handler wrapper,
+but three independent reviews found that SDK 1.29.0 performs canonical request
+validation outside it and clones returned results. The implementation phase is
+therefore extended with the following TDD corrections before evidence freeze:
+
+1. malformed outer `tools/call` envelopes must return the same fixed result;
+2. handler provenance must prevent either SDK-like prefix from rewriting a
+   legitimate business error, including multi-content results;
+3. overlapping boundary installs must restore safely out of order;
+4. Logger fallback output must not print OS messages or absolute paths;
+5. the environment-gated real Hermes matrix must expect six directly safe
+   error cases and only the independent rollback gate to remain blocked;
+6. the frozen source digest/count and report must be regenerated only after
+   these corrections pass focused, full, and adversarial review.
+
+The runtime correction and its private dispatch-map dependency are documented
+in the spec. The final commit identifier is recorded only in delivery evidence,
+not inside its own source commit.
