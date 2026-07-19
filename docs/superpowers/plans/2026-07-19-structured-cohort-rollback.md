@@ -87,5 +87,8 @@ The outer canary supervisor accepts `ready/go` only when the closed public repor
 carries the fixed rollback command ID and the supervisor independently proves
 that claim. It requires a clean source, binds the current commit to the approved
 manifest and checkpoint, verifies the trusted Bun digest, and runs the fixed
-proof entrypoint in a private closed environment. Null remains blocked/no-go;
-unknown IDs and child-only fixed-ID claims fail closed.
+proof entrypoint from a supervisor-owned read-only source/dependency/Bun
+snapshot in a private closed environment. The worker's report must carry that
+same approved manifest, and source plus snapshot identities are rechecked after
+execution. Null remains blocked/no-go; unknown IDs, substituted manifests and
+child-only fixed-ID claims fail closed.

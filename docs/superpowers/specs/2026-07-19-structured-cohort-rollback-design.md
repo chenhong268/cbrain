@@ -150,10 +150,13 @@ the field null and the overall verdict no-go. The fixed ID is part of the closed
 public report, but is not self-authenticating. Before accepting `ready/go`, the
 outer supervisor independently requires a clean source tree, revalidates the
 approved evidence manifest and checkpoint against the current commit, hashes
-the trusted Bun binary, and runs one fixed repository proof entrypoint in its
-own private directory with a closed environment. Only its exact closed success
-receipt authorizes the supervisor to recompute `rollout_readiness` as ready;
-unknown IDs and child-only claims are rejected.
+the trusted Bun binary, copies the approved checkout, dependency tree and Bun
+into a supervisor-owned read-only snapshot, and runs one fixed repository proof
+entrypoint there with a closed environment. It also requires the worker's public
+evidence manifest to equal the independently approved manifest and rechecks the
+snapshot plus live source identities after execution. Only the exact closed
+success receipt authorizes the supervisor to recompute `rollout_readiness` as
+ready; unknown IDs, substituted evidence and child-only claims are rejected.
 
 ## 7. Testing
 
@@ -215,5 +218,5 @@ The release-gate review also demonstrated that the canary child could copy the
 fixed command ID into an otherwise valid public report. The supervisor now
 treats that field only as a consistency claim: it independently binds the
 approved commit, evidence checkpoint and Bun digest, then executes the fixed
-rollback proof entrypoint under its own private root before permitting
-`ready/go`.
+rollback proof entrypoint from its own read-only snapshot and binds the public
+report to the same approved manifest before permitting `ready/go`.
