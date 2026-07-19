@@ -125,9 +125,6 @@ export function registerNextActionsTools(server: McpServer, ctx: ToolContext): v
           items: queue.items.map((i) => ({
             severity: i.severity,
             source: i.source,
-            title: i.title,
-            reason: i.reason,
-            suggestion: i.suggestion,
             evidence_count: i.evidenceCount,
           })),
           raw: queue.raw,

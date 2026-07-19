@@ -185,18 +185,80 @@ describe("next_actions MCP (#309)", () => {
     expect(payload.display).not.toContain("Bearer");
     expect(payload.display).not.toContain("sk-test");
     expect(payload.display).not.toContain("hunter2");
-    // structured items[] must fall back to safe copy, not echo hostile text
+    // items[] carries only metadata {severity, source, evidence_count}; the prose fields
+    // (title/reason/suggestion) were removed (#359), so there is no field that could echo
+    // hostile text. Assert both the exact key set and that no hostile marker reaches items[].
     for (const it of payload.items) {
-      for (const f of [it.title, it.reason, it.suggestion]) {
-        expect(f).not.toContain("entity/");
-        expect(f).not.toContain("/Users/");
-        expect(f).not.toMatch(/\bscore\b/i);
-        expect(f).not.toMatch(/SELECT\s+\*\s+FROM/i);
-        expect(f).not.toContain("Bearer");
-        expect(f).not.toContain("sk-test");
-        expect(f).not.toContain("hunter2");
-      }
+      expect(Object.keys(it).sort()).toEqual(["evidence_count", "severity", "source"]);
     }
+    const itemsJson = JSON.stringify(payload.items);
+    expect(itemsJson).not.toContain("entity/");
+    expect(itemsJson).not.toContain("/Users/");
+    expect(itemsJson).not.toMatch(/\bscore\b/i);
+    expect(itemsJson).not.toMatch(/SELECT\s+\*\s+FROM/i);
+    expect(itemsJson).not.toContain("Bearer");
+    expect(itemsJson).not.toContain("sk-test");
+    expect(itemsJson).not.toContain("hunter2");
+  });
+
+  test("items[] carries only metadata; natural-language prose lives in display, not items (#359)", async () => {
+    const safeTitle = "有一项健康问题需要人工确认";
+    const safeReason = "这项信号可能影响知识质量。";
+    const safeSuggestion = "人工确认后再决定。";
+    db.upsertDiscovery(
+      "action_health_review",
+      ["health:结构一致性:needs_review:entity/a"],
+      0.6,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        display_title: safeTitle,
+        display_reason: safeReason,
+        suggested_action: safeSuggestion,
+        source: "health",
+        repair_group: "needs_review",
+        dimension: "结构一致性",
+        evidence: [{ source: "health", ref: "health:结构一致性:needs_review:entity/a", kind: "needs_review" }],
+      },
+    );
+    const server = createServer(deps);
+
+    // default mode: compact items[]
+    const resDefault = await getTools(server).next_actions.handler({ sources: ["health"] }) as ToolResponse;
+    const def = JSON.parse(resDefault.content[0].text);
+    expect(def.items.length).toBeGreaterThanOrEqual(1);
+    for (const it of def.items) {
+      // exact metadata key set — title/reason/suggestion are gone
+      expect(Object.keys(it).sort()).toEqual(["evidence_count", "severity", "source"]);
+      expect(it).not.toHaveProperty("title");
+      expect(it).not.toHaveProperty("reason");
+      expect(it).not.toHaveProperty("suggestion");
+    }
+    // prose lives in display, NOT duplicated into items[]
+    expect(def.display).toContain(safeTitle);
+    expect(def.display).toContain(safeReason);
+    expect(def.display).toContain(safeSuggestion);
+    const defItemsJson = JSON.stringify(def.items);
+    expect(defItemsJson).not.toContain(safeTitle);
+    expect(defItemsJson).not.toContain(safeReason);
+    expect(defItemsJson).not.toContain(safeSuggestion);
+
+    // include_raw=true keeps the public items[] shape compact;
+    // the separate raw audit intentionally retains complete NextAction details.
+    const resRaw = await getTools(server).next_actions.handler({ sources: ["health"], include_raw: true }) as ToolResponse;
+    const raw = JSON.parse(resRaw.content[0].text);
+    for (const it of raw.items) {
+      expect(Object.keys(it).sort()).toEqual(["evidence_count", "severity", "source"]);
+      expect(it).not.toHaveProperty("title");
+      expect(it).not.toHaveProperty("reason");
+      expect(it).not.toHaveProperty("suggestion");
+    }
+    const rawItemsJson = JSON.stringify(raw.items);
+    expect(rawItemsJson).not.toContain(safeTitle);
+    expect(rawItemsJson).not.toContain(safeReason);
+    expect(rawItemsJson).not.toContain(safeSuggestion);
   });
 
   test("default sources merges health + discovery and stays within cap", async () => {
