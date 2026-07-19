@@ -42,8 +42,9 @@ describe("GET /health runtime freshness (#320)", () => {
     await Bun.sleep(5);
     const second = await fetch(endpoint).then((response) => response.json());
 
-    expect(Object.keys(first).sort()).toEqual(["ok", "started_at", "tools", "version"]);
+    expect(Object.keys(first).sort()).toEqual(["ok", "output_boundary", "started_at", "tools", "version"]);
     expect(first.ok).toBe(true);
+    expect(first.output_boundary).toBe("legacy");
     expect(first.tools).toBeGreaterThan(0);
     expect(typeof first.version).toBe("string");
     expect(first.version.length).toBeGreaterThan(0);

@@ -153,7 +153,7 @@ SearXNG 不是核心依赖。默认不配置时，CBrain 的本地写入、向�
 | record | `records/` | Reading notes, articles, meeting notes, transcripts |
 | insight | `insights/` | Auto-generated cross-domain connections and discoveries |
 
-## CLI Commands (50 total)
+## CLI Commands (51 total)
 
 ### 大脑管理
 ```bash
