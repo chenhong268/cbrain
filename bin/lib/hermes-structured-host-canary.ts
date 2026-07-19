@@ -211,7 +211,7 @@ export async function proveStructuredCohortRollback(
     const entrypoint = structuredCohortEntrypoint();
     const configPath = join(root, "active-cbrain.json");
     const configIdentity = "c".repeat(64);
-    writeFileSync(configPath, "{}", { mode: 0o600 });
+    writeFileSync(configPath, "{}", { mode: 0o644 });
     const fakeBunDir = join(home, ".bun", "bin");
     const wrapperCapture = join(root, "wrapper-argv.txt");
     mkdirSync(fakeBunDir, { recursive: true, mode: 0o700 });

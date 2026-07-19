@@ -116,6 +116,24 @@ function secureBytes(path: string, uid: number, maxBytes: number): SecureBytes {
   }
 }
 
+function validateActiveConfig(path: string, uid: number): void {
+  const before = lstatSync(path);
+  if (
+    !before.isFile() || before.isSymbolicLink() || before.uid !== uid || before.nlink !== 1 ||
+    (before.mode & 0o022) !== 0 || before.size > 1024 * 1024
+  ) throw new Error("invalid");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (
+      !opened.isFile() || opened.uid !== uid || opened.nlink !== 1 || opened.dev !== before.dev ||
+      opened.ino !== before.ino
+    ) throw new Error("invalid");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function receiptKeys(text: string): string[] {
   const keys: string[] = [];
   for (const match of text.matchAll(/("(?:\\.|[^"\\])*")\s*:/g)) {
@@ -208,7 +226,7 @@ function targetFrom(
     typeof configPath !== "string" || !configPath.startsWith("/") || /[\n\r\0]/.test(configPath) ||
     configPath !== activeConfigPath || realpathSync(configPath) !== configPath || realpathSync(activeConfigPath) !== activeConfigPath
   ) throw new Error("invalid");
-  secureBytes(configPath, uid, 1024 * 1024);
+  validateActiveConfig(configPath, uid);
   const args = programArguments as string[];
   const target: RollbackTarget = {
     label: STRUCTURED_COHORT_LABEL,

@@ -46,7 +46,9 @@ function fixture() {
   const digest = deploymentDigest({ label: STRUCTURED_COHORT_LABEL, programArguments: args, healthPort: 3401 });
   const configIdentity = "c".repeat(64);
   const configPath = join(root, "active-cbrain.json");
-  writeFileSync(configPath, "{}", { mode: 0o600 });
+  // `cbrain init` historically creates 0644 configs; rollback must accept the
+  // supported owned/non-writable profile shape without changing live mode.
+  writeFileSync(configPath, "{}", { mode: 0o644 });
   const plistPath = join(agents, "ai.cbrain.structured-cohort-v1.plist");
   writeFileSync(plistPath, JSON.stringify({
     Label: STRUCTURED_COHORT_LABEL,
@@ -331,6 +333,18 @@ describeDarwin("structured cohort production adapter", () => {
       activeConfigPath: otherConfig,
     });
     let release = deps.acquireLock();
+    expect(() => deps.loadTarget()).toThrow();
+    release?.();
+
+    const unsafeConfig = fixture();
+    chmodSync(unsafeConfig.configPath, 0o666);
+    deps = createProductionRollbackDeps({
+      home: unsafeConfig.home,
+      runtimePath: unsafeConfig.runtimePath,
+      expectedScriptPath: unsafeConfig.scriptPath,
+      activeConfigPath: unsafeConfig.configPath,
+    });
+    release = deps.acquireLock();
     expect(() => deps.loadTarget()).toThrow();
     release?.();
 
