@@ -17,6 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createProductionRollbackDeps } from "../../src/cli/commands/structured-cohort.js";
+import { performInit } from "../../src/cli/commands/brain.js";
 import {
   COHORT_ID,
   ROLLBACK_COMMAND_ID,
@@ -373,6 +374,28 @@ describeDarwin("structured cohort production adapter", () => {
       activeConfigPath: aliased.configPath,
     });
     expect(deps.acquireLock()).toBeNull();
+  });
+
+  test("accepts the owned non-writable config shape produced by cbrain init", () => {
+    const f = fixture();
+    const initialized = performInit(join(f.root, "initialized-profile"), false);
+    expect(initialized.status).toBe("ok");
+    const configPath = realpathSync(initialized.configPath);
+    expect(statSync(configPath).mode & 0o022).toBe(0);
+    const plist = JSON.parse(execFileSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", f.plistPath], { encoding: "utf8" }));
+    plist.EnvironmentVariables.CBRAIN_CONFIG = configPath;
+    writeFileSync(f.plistPath, JSON.stringify(plist));
+    execFileSync("/usr/bin/plutil", ["-convert", "xml1", f.plistPath]);
+    chmodSync(f.plistPath, 0o600);
+    const deps = createProductionRollbackDeps({
+      home: f.home,
+      runtimePath: f.runtimePath,
+      expectedScriptPath: f.scriptPath,
+      activeConfigPath: configPath,
+    });
+    const release = deps.acquireLock();
+    expect(deps.loadTarget().mode).toBe("structured");
+    release?.();
   });
 
   test("bounds health by bytes and rejects redirects", async () => {
