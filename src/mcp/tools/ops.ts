@@ -312,7 +312,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
       }
       // No live watcher — write a resume request for the HTTP watcher to pick up on next scan
       const reconciled = await bulkMaintainer.reconcileBulk();
-      if (!reconciled.paused || reconciled.pendingCount === 0) {
+      if (reconciled.pendingCount === 0) {
         return {
           content: [{ type: "text", text: JSON.stringify({ success: true, resumed: true, releasedCount: 0, remainingCount: 0, fullyResumed: true }) }],
         };

@@ -399,6 +399,37 @@ describe("MCP watcher bulk_status and bulk_resume", () => {
     });
   });
 
+  test("bulk_status revalidates unpaused deletion debt without a live watcher", async () => {
+    mkdirSync(join(vaultPath, "records"), { recursive: true });
+    const slug = "records/rebuilt";
+    const fullPath = join(vaultPath, `${slug}.md`);
+    writeFileSync(fullPath, "---\ntitle: Record C\ntype: record\nslug: records/rebuilt\n---\nStable");
+    const setupSync = new SyncManager(db, deps.embedding, deps.lance as any);
+    await setupSync.syncPage(slug, vaultPath);
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: false,
+      pendingFiles: [{
+        slug,
+        fullPath,
+        hash: "old-hash",
+        mtime: { mtime: 1, size: 1 },
+        deletionPending: true,
+      }],
+      threshold: 50,
+      pausedAt: new Date().toISOString(),
+      actionablePending: 0,
+      missingOrStale: 1,
+    }));
+    const server = createServer(deps);
+
+    const result = await callTool(server, "watcher_quarantine", { action: "bulk_status" });
+
+    expect(result.bulkPaused).toBe(false);
+    expect(result.pendingCount).toBe(0);
+    expect(result.actionablePending).toBe(0);
+    expect(db.getConfig("watcher.bulk_pending")).toBeNull();
+  });
+
   test("bulk_resume writes resume request when no live watcher", async () => {
     db.setConfig("watcher.bulk_pending", JSON.stringify({
       paused: true,
@@ -432,6 +463,32 @@ describe("MCP watcher bulk_status and bulk_resume", () => {
     expect(result.success).toBe(true);
     expect(result.fullyResumed).toBe(true);
     expect(result.releasedCount).toBe(0);
+  });
+
+  test("bulk_resume reports unpaused deletion debt as remaining without a live watcher", async () => {
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: false,
+      pendingFiles: [{
+        slug: "records/missing",
+        fullPath: join(vaultPath, "records/missing.md"),
+        hash: "old-hash",
+        mtime: { mtime: 1, size: 1 },
+        deletionPending: true,
+      }],
+      threshold: 50,
+      pausedAt: new Date().toISOString(),
+      actionablePending: 0,
+      missingOrStale: 1,
+    }));
+    const server = createServer(deps);
+
+    const result = await callTool(server, "watcher_quarantine", { action: "bulk_resume" });
+
+    expect(result.fullyResumed).toBe(false);
+    expect(result.pendingResume).toBe(true);
+    expect(result.remainingCount).toBe(1);
+    expect(db.getConfig("watcher.bulk_pending")).not.toBeNull();
+    expect(db.getConfig("watcher.bulk_resume_request")).not.toBeNull();
   });
 
   test("bulk_resume returns incremental release info with live watcher", async () => {
