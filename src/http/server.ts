@@ -182,6 +182,11 @@ export function createHttpServer(ctx: ToolContext) {
               version,
               started_at: startedAt,
               output_boundary: ctx.outputMode,
+              ...(ctx.rolloutIdentity ? {
+                cohort_id: ctx.rolloutIdentity.cohortId,
+                deployment_digest: ctx.rolloutIdentity.deploymentDigest,
+                process_id: process.pid,
+              } : {}),
             });
           }
 

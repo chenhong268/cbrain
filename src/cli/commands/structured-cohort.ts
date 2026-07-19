@@ -1,21 +1,25 @@
-import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   closeSync,
-  chmodSync,
   constants,
-  copyFileSync,
+  fstatSync,
+  fsyncSync,
   lstatSync,
-  mkdirSync,
   openSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   renameSync,
+  symlinkSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Command } from "commander";
-import { loadConfig, resolveRuntimePath } from "../context.js";
+import { loadConfigSafe, resolveRuntimePath } from "../context.js";
 import {
   COHORT_ID,
   ROLLBACK_COMMAND_ID,
@@ -29,7 +33,26 @@ import {
 
 const PLIST_BASENAME = "ai.cbrain.structured-cohort-v1.plist";
 const RECEIPT_BASENAME = "structured-cohort-v1.json";
+const BACKUP_BASENAME = "structured-cohort-v1.pre-rollback.plist";
+const LOCK_BASENAME = ".structured-cohort-rollback.lock";
 const RECEIPT_KEYS = ["schema_version", "command_id", "cohort_id", "health_port", "deployment_digest"] as const;
+const PLIST_KEYS = new Set([
+  "EnvironmentVariables",
+  "KeepAlive",
+  "Label",
+  "ProcessType",
+  "ProgramArguments",
+  "RunAtLoad",
+  "ThrottleInterval",
+]);
+const ENV_KEYS = new Set([
+  "CBRAIN_OUTPUT_BOUNDARY",
+  "CBRAIN_ROLLOUT_COHORT_ID",
+  "CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST",
+]);
+const SHA256 = /^[a-f0-9]{64}$/;
+const MAX_RECEIPT_BYTES = 4096;
+const MAX_PLIST_BYTES = 64 * 1024;
 
 type Receipt = {
   schema_version: 1;
@@ -39,112 +62,362 @@ type Receipt = {
   deployment_digest: string;
 };
 
-function strictReceipt(path: string, uid: number): Receipt {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o077) !== 0) throw new Error("invalid");
-  const text = readFileSync(path, "utf8");
-  if (text.length > 4096) throw new Error("invalid");
-  const parsed = JSON.parse(text) as Record<string, unknown>;
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("invalid");
-  if (Object.keys(parsed).sort().join("\0") !== [...RECEIPT_KEYS].sort().join("\0")) throw new Error("invalid");
-  for (const key of RECEIPT_KEYS) {
-    const occurrences = [...text.matchAll(new RegExp(`"${key}"\\s*:`, "g"))].length;
-    if (occurrences !== 1) throw new Error("invalid");
-  }
-  if (parsed.schema_version !== 1 || parsed.command_id !== ROLLBACK_COMMAND_ID || parsed.cohort_id !== COHORT_ID) {
-    throw new Error("invalid");
-  }
-  if (!Number.isInteger(parsed.health_port) || typeof parsed.deployment_digest !== "string") throw new Error("invalid");
-  return parsed as Receipt;
-}
+type LaunchctlResult = { status: number; stdout: string };
+type HealthResult = { status: number; body: string; redirected: boolean };
 
-function parsePlist(path: string, uid: number): Record<string, unknown> {
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o022) !== 0) throw new Error("invalid");
-  const text = execFileSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", path], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  const value = JSON.parse(text) as Record<string, unknown>;
-  if (value.Label !== STRUCTURED_COHORT_LABEL || !Array.isArray(value.ProgramArguments)) throw new Error("invalid");
-  return value;
-}
-
-function targetFrom(plist: Record<string, unknown>, receipt: Receipt): RollbackTarget {
-  const env = plist.EnvironmentVariables as Record<string, unknown> | undefined;
-  const mode = env?.CBRAIN_OUTPUT_BOUNDARY;
-  const programArguments = (plist.ProgramArguments as unknown[]).filter((item): item is string => typeof item === "string");
-  if (programArguments.length !== (plist.ProgramArguments as unknown[]).length) throw new Error("invalid");
-  return {
-    label: String(plist.Label),
-    mode: mode as RollbackTarget["mode"],
-    healthPort: receipt.health_port,
-    programArguments,
-    deploymentDigest: receipt.deployment_digest,
-  };
-}
-
-export function createProductionRollbackDeps(options: {
+export type ProductionRollbackOptions = {
   runtimePath: string;
   home?: string;
   uid?: number;
-}): RollbackDeps {
+  expectedScriptPath?: string;
+  processId?: number;
+  processIdentity?: (pid: number) => string | null;
+  launchctl?: (args: readonly string[]) => LaunchctlResult;
+  healthRequest?: (url: string) => Promise<HealthResult>;
+};
+
+type SecureBytes = { bytes: Buffer; dev: number; ino: number };
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function secureDirectory(path: string, uid: number): void {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o022) !== 0) {
+    throw new Error("invalid");
+  }
+}
+
+function secureBytes(path: string, uid: number, maxBytes: number): SecureBytes {
+  const before = lstatSync(path);
+  if (
+    !before.isFile() || before.isSymbolicLink() || before.uid !== uid || before.nlink !== 1 ||
+    (before.mode & 0o077) !== 0 || before.size > maxBytes
+  ) throw new Error("invalid");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.uid !== uid || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino) {
+      throw new Error("invalid");
+    }
+    const bytes = readFileSync(fd);
+    if (bytes.length > maxBytes) throw new Error("invalid");
+    return { bytes, dev: opened.dev, ino: opened.ino };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function receiptKeys(text: string): string[] {
+  const keys: string[] = [];
+  for (const match of text.matchAll(/("(?:\\.|[^"\\])*")\s*:/g)) {
+    if (match[1].includes("\\")) throw new Error("invalid");
+    keys.push(JSON.parse(match[1]) as string);
+  }
+  return keys;
+}
+
+function strictReceipt(path: string, uid: number): Receipt {
+  const text = secureBytes(path, uid, MAX_RECEIPT_BYTES).bytes.toString("utf8");
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error("invalid");
+  const keys = receiptKeys(text);
+  if (keys.length !== RECEIPT_KEYS.length || new Set(keys).size !== keys.length) throw new Error("invalid");
+  if (keys.slice().sort().join("\0") !== [...RECEIPT_KEYS].sort().join("\0")) throw new Error("invalid");
+  if (Object.keys(parsed).sort().join("\0") !== [...RECEIPT_KEYS].sort().join("\0")) throw new Error("invalid");
+  if (parsed.schema_version !== 1 || parsed.command_id !== ROLLBACK_COMMAND_ID || parsed.cohort_id !== COHORT_ID) {
+    throw new Error("invalid");
+  }
+  if (
+    !Number.isInteger(parsed.health_port) || (parsed.health_port as number) < 1024 ||
+    (parsed.health_port as number) > 65_535 || typeof parsed.deployment_digest !== "string" ||
+    !SHA256.test(parsed.deployment_digest)
+  ) throw new Error("invalid");
+  return parsed as Receipt;
+}
+
+function parsePlistBytes(bytes: Buffer): Record<string, unknown> {
+  if (bytes.length > MAX_PLIST_BYTES) throw new Error("invalid");
+  const text = execFileSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", "--", "-"], {
+    encoding: "utf8",
+    input: bytes,
+    maxBuffer: MAX_PLIST_BYTES * 2,
+    timeout: 2000,
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const value = JSON.parse(text) as Record<string, unknown>;
+  if (!value || Array.isArray(value) || typeof value !== "object") throw new Error("invalid");
+  return value;
+}
+
+function validateEntrypoint(path: string, expectedPath: string, uid: number): void {
+  const stat = lstatSync(path);
+  if (
+    !stat.isFile() || stat.isSymbolicLink() || stat.uid !== uid || stat.nlink !== 1 ||
+    (stat.mode & 0o022) !== 0 || (stat.mode & 0o100) === 0 || realpathSync(path) !== realpathSync(expectedPath)
+  ) throw new Error("invalid");
+}
+
+function targetFrom(
+  plist: Record<string, unknown>,
+  receipt: Receipt,
+  expectedScriptPath: string,
+  uid: number,
+): RollbackTarget {
+  if (Object.keys(plist).some((key) => !PLIST_KEYS.has(key))) throw new Error("invalid");
+  if (plist.Label !== STRUCTURED_COHORT_LABEL || !Array.isArray(plist.ProgramArguments)) throw new Error("invalid");
+  if (plist.RunAtLoad !== undefined && typeof plist.RunAtLoad !== "boolean") throw new Error("invalid");
+  if (plist.KeepAlive !== undefined && typeof plist.KeepAlive !== "boolean") throw new Error("invalid");
+  if (plist.ProcessType !== undefined && plist.ProcessType !== "Background") throw new Error("invalid");
+  if (plist.ThrottleInterval !== undefined && (!Number.isInteger(plist.ThrottleInterval) || (plist.ThrottleInterval as number) < 1)) {
+    throw new Error("invalid");
+  }
+  const programArguments = plist.ProgramArguments;
+  if (programArguments.some((item) => typeof item !== "string" || /[\n\r\0]/.test(item))) throw new Error("invalid");
+  if (
+    programArguments.length !== 5 || programArguments[1] !== "serve" || programArguments[2] !== "--http" ||
+    programArguments[3] !== "--port" || programArguments[4] !== String(receipt.health_port)
+  ) throw new Error("invalid");
+  validateEntrypoint(programArguments[0] as string, expectedScriptPath, uid);
+
+  const env = plist.EnvironmentVariables;
+  if (!env || Array.isArray(env) || typeof env !== "object") throw new Error("invalid");
+  const environment = env as Record<string, unknown>;
+  if (Object.keys(environment).length !== ENV_KEYS.size || Object.keys(environment).some((key) => !ENV_KEYS.has(key))) {
+    throw new Error("invalid");
+  }
+  const mode = environment.CBRAIN_OUTPUT_BOUNDARY;
+  if (mode !== "legacy" && mode !== "structured") throw new Error("invalid");
+  if (environment.CBRAIN_ROLLOUT_COHORT_ID !== COHORT_ID) throw new Error("invalid");
+  if (environment.CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST !== receipt.deployment_digest) throw new Error("invalid");
+  const args = programArguments as string[];
+  const target: RollbackTarget = {
+    label: STRUCTURED_COHORT_LABEL,
+    cohortId: COHORT_ID,
+    mode,
+    healthPort: receipt.health_port,
+    programArguments: args,
+    deploymentDigest: receipt.deployment_digest,
+  };
+  if (deploymentDigest(target) !== receipt.deployment_digest) throw new Error("invalid");
+  return target;
+}
+
+function defaultProcessIdentity(pid: number): string | null {
+  const result = spawnSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8",
+    timeout: 1000,
+    maxBuffer: 4096,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const value = result.status === 0 ? result.stdout.trim() : "";
+  return value || null;
+}
+
+function defaultLaunchctl(args: readonly string[]): LaunchctlResult {
+  const result = spawnSync("/bin/launchctl", [...args], {
+    encoding: "utf8",
+    timeout: 3000,
+    maxBuffer: 64 * 1024,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return { status: result.status ?? -1, stdout: result.stdout ?? "" };
+}
+
+async function defaultHealthRequest(url: string): Promise<HealthResult> {
+  const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(1000) });
+  const body = await response.text();
+  if (body.length > 4096) throw new Error("invalid");
+  return { status: response.status, body, redirected: response.redirected };
+}
+
+function parseLaunchdPid(result: LaunchctlResult): number {
+  if (result.status !== 0) throw new Error("invalid");
+  const matches = [...result.stdout.matchAll(/^\s*pid\s*=\s*(\d+)\s*$/gm)];
+  if (matches.length !== 1) throw new Error("invalid");
+  const pid = Number(matches[0][1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("invalid");
+  return pid;
+}
+
+function fsyncDirectory(path: string): void {
+  const fd = openSync(path, constants.O_RDONLY);
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function fsyncFile(path: string): void {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function writePrivateExclusive(path: string, bytes: Buffer): void {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    writeFileSync(fd, bytes);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function structuredCohortEntrypoint(): string {
+  return fileURLToPath(new URL("../../../bin/cbrain-serve-http.sh", import.meta.url));
+}
+
+export function createProductionRollbackDeps(options: ProductionRollbackOptions): RollbackDeps {
   const uid = options.uid ?? process.getuid?.();
   if (uid === undefined) throw new Error("unsupported");
-  const rolloutDir = resolve(options.runtimePath, "rollout");
+  const home = resolve(options.home ?? homedir());
+  const runtimePath = resolve(options.runtimePath);
+  const rolloutDir = join(runtimePath, "rollout");
+  const launchAgentsDir = join(home, "Library", "LaunchAgents");
   const receiptPath = join(rolloutDir, RECEIPT_BASENAME);
-  const plistPath = join(options.home ?? homedir(), "Library", "LaunchAgents", PLIST_BASENAME);
-  const lockPath = join(rolloutDir, ".structured-cohort-rollback.lock");
+  const plistPath = join(launchAgentsDir, PLIST_BASENAME);
+  const lockPath = join(rolloutDir, LOCK_BASENAME);
+  const expectedScriptPath = resolve(options.expectedScriptPath ?? structuredCohortEntrypoint());
+  const processId = options.processId ?? process.pid;
+  const processIdentity = options.processIdentity ?? defaultProcessIdentity;
+  const launchctl = options.launchctl ?? defaultLaunchctl;
+  const healthRequest = options.healthRequest ?? defaultHealthRequest;
   let receipt: Receipt;
   let target: RollbackTarget;
+  let originalPlist: SecureBytes;
+
+  const validateDirectories = () => {
+    secureDirectory(home, uid);
+    secureDirectory(join(home, "Library"), uid);
+    secureDirectory(launchAgentsDir, uid);
+    secureDirectory(runtimePath, uid);
+    secureDirectory(rolloutDir, uid);
+  };
+
+  const inspectProcess = (pid: number) => processIdentity(pid);
+  const lockIdentity = inspectProcess(processId);
+  if (!lockIdentity) throw new Error("unsupported");
+  const lockValue = `v1:${processId}:${sha256(lockIdentity)}`;
+
+  const acquireLock = (): (() => void) | null => {
+    try { validateDirectories(); } catch { return null; }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        symlinkSync(lockValue, lockPath);
+        const owned = lstatSync(lockPath);
+        if (!owned.isSymbolicLink() || owned.uid !== uid || readlinkSync(lockPath) !== lockValue) throw new Error("invalid");
+        return () => {
+          const current = lstatSync(lockPath);
+          if (current.dev !== owned.dev || current.ino !== owned.ino || !current.isSymbolicLink() || readlinkSync(lockPath) !== lockValue) {
+            throw new Error("invalid");
+          }
+          unlinkSync(lockPath);
+          fsyncDirectory(rolloutDir);
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+        let stale = false;
+        let observed: ReturnType<typeof lstatSync>;
+        try {
+          observed = lstatSync(lockPath);
+          if (!observed.isSymbolicLink() || observed.uid !== uid) return null;
+          const match = /^v1:(\d+):([a-f0-9]{64})$/.exec(readlinkSync(lockPath));
+          if (!match) return null;
+          const ownerIdentity = inspectProcess(Number(match[1]));
+          stale = !ownerIdentity || sha256(ownerIdentity) !== match[2];
+          if (!stale) return null;
+          const current = lstatSync(lockPath);
+          if (current.dev !== observed.dev || current.ino !== observed.ino) return null;
+          unlinkSync(lockPath);
+          fsyncDirectory(rolloutDir);
+        } catch {
+          return null;
+        }
+      }
+    }
+    return null;
+  };
+
+  const validateCurrentLegacyTarget = () => {
+    validateDirectories();
+    const current = secureBytes(plistPath, uid, MAX_PLIST_BYTES);
+    const checked = targetFrom(parsePlistBytes(current.bytes), receipt, expectedScriptPath, uid);
+    if (checked.mode !== "legacy" || checked.deploymentDigest !== target.deploymentDigest) throw new Error("invalid");
+  };
 
   return {
-    acquireLock: () => {
-      mkdirSync(rolloutDir, { recursive: true, mode: 0o700 });
-      let fd: number;
-      try { fd = openSync(lockPath, "wx", 0o600); } catch { return null; }
-      return () => {
-        try { closeSync(fd); } finally { try { unlinkSync(lockPath); } catch { /* bounded cleanup */ } }
-      };
-    },
+    acquireLock,
     loadTarget: () => {
+      validateDirectories();
       receipt = strictReceipt(receiptPath, uid);
-      target = targetFrom(parsePlist(plistPath, uid), receipt);
+      originalPlist = secureBytes(plistPath, uid, MAX_PLIST_BYTES);
+      target = targetFrom(parsePlistBytes(originalPlist.bytes), receipt, expectedScriptPath, uid);
       return target;
     },
     writeLegacy: () => {
-      const backupPath = join(rolloutDir, "structured-cohort-v1.pre-rollback.plist");
-      try { copyFileSync(plistPath, backupPath, constants.COPYFILE_EXCL); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      validateDirectories();
+      const current = secureBytes(plistPath, uid, MAX_PLIST_BYTES);
+      if (current.dev !== originalPlist.dev || current.ino !== originalPlist.ino || !current.bytes.equals(originalPlist.bytes)) {
+        throw new Error("invalid");
       }
-      chmodSync(backupPath, 0o600);
-      const tempPath = join(dirname(plistPath), `.${basename(plistPath)}.${randomUUID()}.tmp`);
+
+      const backupPath = join(rolloutDir, BACKUP_BASENAME);
       try {
-        copyFileSync(plistPath, tempPath);
-        chmodSync(tempPath, 0o600);
-        execFileSync("/usr/bin/plutil", ["-replace", "EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY", "-string", "legacy", tempPath], {
-          stdio: "ignore",
-        });
-        const updated = targetFrom(parsePlist(tempPath, uid), receipt);
+        writePrivateExclusive(backupPath, originalPlist.bytes);
+        fsyncDirectory(rolloutDir);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const existing = secureBytes(backupPath, uid, MAX_PLIST_BYTES);
+        if (!existing.bytes.equals(originalPlist.bytes)) throw new Error("invalid");
+      }
+
+      const tempPath = join(launchAgentsDir, `.${PLIST_BASENAME}.${randomUUID()}.tmp`);
+      try {
+        writePrivateExclusive(tempPath, originalPlist.bytes);
+        execFileSync("/usr/bin/plutil", [
+          "-replace", "EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY", "-string", "legacy", tempPath,
+        ], { timeout: 2000, maxBuffer: 4096, stdio: "ignore" });
+        fsyncFile(tempPath);
+        const temp = secureBytes(tempPath, uid, MAX_PLIST_BYTES);
+        const updated = targetFrom(parsePlistBytes(temp.bytes), receipt, expectedScriptPath, uid);
         if (updated.mode !== "legacy" || deploymentDigest(updated) !== target.deploymentDigest) throw new Error("invalid");
+        const unchanged = secureBytes(plistPath, uid, MAX_PLIST_BYTES);
+        if (unchanged.dev !== originalPlist.dev || unchanged.ino !== originalPlist.ino || !unchanged.bytes.equals(originalPlist.bytes)) {
+          throw new Error("invalid");
+        }
         renameSync(tempPath, plistPath);
+        fsyncDirectory(launchAgentsDir);
       } finally {
-        try { unlinkSync(tempPath); } catch { /* renamed or bounded cleanup */ }
+        try { unlinkSync(tempPath); } catch { /* renamed or private temp cleanup */ }
       }
     },
     restart: async () => {
+      validateCurrentLegacyTarget();
       const domain = `gui/${uid}`;
-      try {
-        execFileSync("/bin/launchctl", ["bootout", `${domain}/${STRUCTURED_COHORT_LABEL}`], { stdio: "ignore" });
-      } catch {
-        // A not-loaded cohort is safe to bootstrap; bootstrap remains mandatory.
+      const service = `${domain}/${STRUCTURED_COHORT_LABEL}`;
+      const before = launchctl(["print", service]);
+      if (before.status === 0) {
+        if (launchctl(["bootout", service]).status !== 0) throw new Error("invalid");
+      } else if (before.status !== 113) {
+        throw new Error("invalid");
       }
-      execFileSync("/bin/launchctl", ["bootstrap", domain, plistPath], { stdio: "ignore" });
+      if (launchctl(["bootstrap", domain, plistPath]).status !== 0) throw new Error("invalid");
+      return parseLaunchdPid(launchctl(["print", service]));
+    },
+    currentProcessId: async () => {
+      validateCurrentLegacyTarget();
+      const domain = `gui/${uid}`;
+      return parseLaunchdPid(launchctl(["print", `${domain}/${STRUCTURED_COHORT_LABEL}`]));
     },
     readHealth: async () => {
-      const response = await fetch(`http://127.0.0.1:${receipt.health_port}/health`, { signal: AbortSignal.timeout(1000) });
-      if (!response.ok) return { ok: false };
-      return await response.json() as { ok: boolean; output_boundary?: unknown };
+      const response = await healthRequest(`http://127.0.0.1:${receipt.health_port}/health`);
+      if (response.status !== 200 || response.redirected || response.body.length > 4096) return { ok: false };
+      const health = JSON.parse(response.body) as Record<string, unknown>;
+      return {
+        ok: health.ok === true,
+        output_boundary: health.output_boundary,
+        cohort_id: health.cohort_id,
+        deployment_digest: health.deployment_digest,
+        process_id: health.process_id,
+      };
     },
     sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   };
@@ -158,8 +431,9 @@ export function register(program: Command): void {
     .action(async () => {
       let result: RollbackResult;
       try {
-        const config = loadConfig();
-        result = await rollbackStructuredCohort(createProductionRollbackDeps({ runtimePath: resolveRuntimePath(config) }));
+        const loaded = loadConfigSafe();
+        if (!loaded) throw new Error("invalid");
+        result = await rollbackStructuredCohort(createProductionRollbackDeps({ runtimePath: resolveRuntimePath(loaded.config) }));
       } catch {
         result = { schema_version: 1, status: "failed", code: "TARGET_INVALID" } as const;
       }

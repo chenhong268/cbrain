@@ -58,3 +58,13 @@ Run CLI, HTTP, type, and lint suites.
 - Fix all blocking findings with RED/GREEN evidence.
 - Push, open a ready PR closing #357, wait for CI, merge, verify #357 closed,
   update #333/#327, and clean only the owned worktree/branch.
+
+## Adversarial review addendum (2026-07-19)
+
+The first three reviewers blocked the initial implementation. Before evidence
+freeze, add RED/GREEN coverage and corrections for: production-adapter gate
+proof, exact entrypoint/argv/port binding, cohort/digest/PID health identity,
+backup and parent symlink/hardlink/TOCTOU confinement, process-birth stale-lock
+recovery, explicit launchctl status handling, Unicode duplicate keys, and
+closed config-error JSON. Re-dispatch independent review after the fixes; no
+live cohort or service operation is part of this addendum.

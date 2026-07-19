@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic.js";
 import { createHttpServer } from "../../src/http/server.js";
 import { buildContext } from "../../src/mcp/context.js";
@@ -32,8 +32,11 @@ import {
   STRUCTURED_COHORT_LABEL,
   deploymentDigest,
   rollbackStructuredCohort,
-  type RollbackTarget,
 } from "../../src/core/release/structured-cohort-rollback.js";
+import {
+  createProductionRollbackDeps,
+  structuredCohortEntrypoint,
+} from "../../src/cli/commands/structured-cohort.js";
 import {
   CREDENTIAL_PATH_UNSAFE_PATTERNS,
   DISPLAY_UNSAFE_PATTERNS,
@@ -197,47 +200,128 @@ export interface HermesStructuredCanaryReport {
 export async function proveStructuredCohortRollback(
   fault?: "mutation" | "restart" | "health",
 ): Promise<null | typeof ROLLBACK_COMMAND_ID> {
-  const args = ["/fixture/bin/cbrain-serve-http.sh", "serve", "--http", "--port", "3401"];
-  let target: RollbackTarget = {
-    label: STRUCTURED_COHORT_LABEL,
-    mode: "structured",
-    healthPort: 3401,
-    programArguments: args,
-    deploymentDigest: deploymentDigest({ label: STRUCTURED_COHORT_LABEL, programArguments: args, healthPort: 3401 }),
-  };
-  const unrelated = { mode: "structured", restarts: 0 };
-  let restarts = 0;
-  let unlocked = false;
-  const result = await rollbackStructuredCohort({
-    acquireLock: () => () => { unlocked = true; },
-    loadTarget: () => target,
-    writeLegacy: () => {
-      if (fault === "mutation") throw new Error("closed fault");
-      target = { ...target, mode: "legacy" };
-    },
-    restart: async () => {
-      if (fault === "restart") throw new Error("closed fault");
-      restarts += 1;
-    },
-    readHealth: async () => ({
-      ok: true,
-      output_boundary: fault === "health" ? "structured" : target.mode,
-    }),
-    sleep: async () => {},
-  });
-  const proven =
-    result.status === "rolled_back" &&
-    result.command_id === ROLLBACK_COMMAND_ID &&
-    result.cohort_id === COHORT_ID &&
-    result.mode === "legacy" &&
-    result.restart_performed &&
-    result.health_verified &&
-    target.mode === "legacy" &&
-    restarts === 1 &&
-    unrelated.mode === "structured" &&
-    unrelated.restarts === 0 &&
-    unlocked;
-  return proven ? ROLLBACK_COMMAND_ID : null;
+  const root = mkdtempSync(resolve(tmpdir(), "cbrain-rollback-proof-"));
+  try {
+    const home = join(root, "home");
+    const runtimePath = join(root, "runtime");
+    const rolloutDir = join(runtimePath, "rollout");
+    const launchAgentsDir = join(home, "Library", "LaunchAgents");
+    mkdirSync(rolloutDir, { recursive: true, mode: 0o700 });
+    mkdirSync(launchAgentsDir, { recursive: true, mode: 0o700 });
+    const entrypoint = structuredCohortEntrypoint();
+    const args = [entrypoint, "serve", "--http", "--port", "3401"];
+    const digest = deploymentDigest({ label: STRUCTURED_COHORT_LABEL, programArguments: args, healthPort: 3401 });
+    const plistPath = join(launchAgentsDir, "ai.cbrain.structured-cohort-v1.plist");
+    const originalPlist = {
+      Label: STRUCTURED_COHORT_LABEL,
+      ProgramArguments: args,
+      EnvironmentVariables: {
+        CBRAIN_OUTPUT_BOUNDARY: "structured",
+        CBRAIN_ROLLOUT_COHORT_ID: COHORT_ID,
+        CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST: digest,
+      },
+      ProcessType: "Background",
+    };
+    writeFileSync(plistPath, JSON.stringify(originalPlist), { mode: 0o600 });
+    execFileSync("/usr/bin/plutil", ["-convert", "xml1", plistPath], { timeout: 2000, stdio: "ignore" });
+    chmodSync(plistPath, 0o600);
+    const originalBytes = readFileSync(plistPath);
+    writeFileSync(join(rolloutDir, "structured-cohort-v1.json"), JSON.stringify({
+      schema_version: 1,
+      command_id: ROLLBACK_COMMAND_ID,
+      cohort_id: COHORT_ID,
+      health_port: 3401,
+      deployment_digest: digest,
+    }), { mode: 0o600 });
+    const unrelatedPath = join(launchAgentsDir, "ai.cbrain.unrelated.plist");
+    const unrelatedBytes = Buffer.from("isolated-unrelated-fixture");
+    writeFileSync(unrelatedPath, unrelatedBytes, { mode: 0o600 });
+    if (fault === "mutation") {
+      writeFileSync(join(rolloutDir, "structured-cohort-v1.pre-rollback.plist"), "closed-fault", { mode: 0o600 });
+    }
+
+    const service = `gui/${process.getuid?.()}/${STRUCTURED_COHORT_LABEL}`;
+    const domain = `gui/${process.getuid?.()}`;
+    const launchctlCalls: string[][] = [];
+    let loaded = true;
+    let servicePid = 7001;
+    const deps = createProductionRollbackDeps({
+      home,
+      runtimePath,
+      expectedScriptPath: entrypoint,
+      processIdentity: (pid) => pid === process.pid ? "proof-process-birth-v1" : null,
+      launchctl: (argv) => {
+        const call = [...argv];
+        launchctlCalls.push(call);
+        if (call[0] === "print" && call[1] === service) {
+          return loaded
+            ? { status: 0, stdout: `\tpid = ${servicePid}\n` }
+            : { status: 113, stdout: "" };
+        }
+        if (call[0] === "bootout" && call[1] === service && loaded) {
+          loaded = false;
+          return { status: 0, stdout: "" };
+        }
+        if (call[0] === "bootstrap" && call[1] === domain && call[2] === plistPath) {
+          if (fault === "restart") return { status: 5, stdout: "" };
+          loaded = true;
+          servicePid = 7002;
+          return { status: 0, stdout: "" };
+        }
+        return { status: 64, stdout: "" };
+      },
+      healthRequest: async (url) => {
+        const plist = JSON.parse(execFileSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", plistPath], {
+          encoding: "utf8",
+          timeout: 2000,
+        }));
+        return {
+          status: 200,
+          redirected: false,
+          body: JSON.stringify({
+            ok: loaded && url === "http://127.0.0.1:3401/health",
+            output_boundary: fault === "health" ? "structured" : plist.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY,
+            cohort_id: COHORT_ID,
+            deployment_digest: digest,
+            process_id: servicePid,
+          }),
+        };
+      },
+    });
+    const result = await rollbackStructuredCohort(deps);
+    if (fault) return null;
+
+    const updated = JSON.parse(execFileSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", plistPath], {
+      encoding: "utf8",
+      timeout: 2000,
+    }));
+    const backupBytes = readFileSync(join(rolloutDir, "structured-cohort-v1.pre-rollback.plist"));
+    const expectedCalls = [
+      ["print", service],
+      ["bootout", service],
+      ["bootstrap", domain, plistPath],
+      ["print", service],
+    ];
+    const proven =
+      result.status === "rolled_back" &&
+      result.command_id === ROLLBACK_COMMAND_ID &&
+      result.cohort_id === COHORT_ID &&
+      result.mode === "legacy" &&
+      result.restart_performed &&
+      result.health_verified &&
+      updated.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY === "legacy" &&
+      updated.ProcessType === "Background" &&
+      backupBytes.equals(originalBytes) &&
+      readFileSync(unrelatedPath).equals(unrelatedBytes) &&
+      JSON.stringify(launchctlCalls) === JSON.stringify(expectedCalls) &&
+      !lstatSync(rolloutDir).isSymbolicLink() &&
+      !readdirSync(rolloutDir).includes(".structured-cohort-rollback.lock");
+    return proven ? ROLLBACK_COMMAND_ID : null;
+  } catch {
+    return null;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 const MODES = ["legacy", "structured"] as const;

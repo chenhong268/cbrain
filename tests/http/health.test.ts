@@ -57,4 +57,25 @@ describe("GET /health runtime freshness (#320)", () => {
       expect(serialized).not.toContain(privateTerm);
     }
   });
+
+  test("binds the dedicated cohort health response to its deployment and process", async () => {
+    server.stop(true);
+    const digest = "a".repeat(64);
+    const deps: CBrainDeps = {
+      db,
+      embedding: new DeterministicEmbeddingProvider(),
+      lance: new LanceDBManager(),
+      vaultPath: join(root, "vault"),
+      dbPath: join(root, "brain.sqlite"),
+      runtimePath: join(root, "runtime"),
+    };
+    const ctx = buildContext(deps);
+    ctx.rolloutIdentity = { cohortId: "cbrain-structured-pilot-v1", deploymentDigest: digest };
+    server = createHttpServer(ctx).start(0);
+    endpoint = `http://127.0.0.1:${server.port}/health`;
+    const health = await fetch(endpoint).then((response) => response.json());
+    expect(health.cohort_id).toBe("cbrain-structured-pilot-v1");
+    expect(health.deployment_digest).toBe(digest);
+    expect(health.process_id).toBe(process.pid);
+  });
 });

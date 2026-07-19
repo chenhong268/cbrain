@@ -1,7 +1,7 @@
 # Structured Cohort Rollback Design
 
-Issue: #357  
-Date: 2026-07-19  
+Issue: #357
+Date: 2026-07-19
 Status: Approved for implementation
 
 ## 1. Problem and invariant
@@ -49,9 +49,10 @@ The future rollout operation must create a mode-0600 regular JSON receipt:
 ```
 
 The digest binds canonical `{label, program_arguments, health_port}`. Program
-arguments come from the plist and must point to the repository-owned
-`bin/cbrain-serve-http.sh`, include `serve --http`, and contain no shell
-interpreter/callback. Receipt and plist symlinks, non-regular files, wrong
+arguments come from the plist and must be exactly the canonical, regular,
+owned `bin/cbrain-serve-http.sh serve --http --port <receipt-port>` argv. The
+wrapper preserves its no-argument default while forwarding this reviewed argv.
+Receipt and plist symlinks, hardlinks, non-regular files, wrong
 ownership, unsafe permissions, non-loopback ports, duplicate JSON keys, extra
 keys, or digest drift fail before mutation. Diagnostics never print content or
 paths.
@@ -59,18 +60,26 @@ paths.
 ## 4. State machine
 
 1. Resolve the active CBrain config and derive the receipt path.
-2. Acquire an exclusive bounded lock under `runtimePath/rollout`.
+2. Acquire an exclusive lock under `runtimePath/rollout`. The lock atomically
+   binds PID plus process-birth identity, rejects a live owner, safely reclaims
+   a dead/reused owner, and verifies its own inode before release.
 3. Validate receipt, fixed plist path, ownership, permissions, label, program,
    environment, health port, and deployment digest.
 4. If mode is `structured`, copy the exact plist to a mode-0600 managed backup,
    create a same-directory temporary plist, change only
    `EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY` to `legacy`, validate the
    complete resulting plist, then atomically rename it over the cohort plist.
+   Managed directories cannot be symlinks. Input is read through a no-follow
+   file descriptor, and inode plus exact bytes are revalidated before rename.
+   An existing backup is accepted only when it is a private, single-link exact
+   copy of the audited original; it is never chmod-adopted.
 5. Restart only `gui/<uid>/ai.cbrain.structured-cohort-v1` using argument-vector
    `launchctl bootout` followed by `launchctl bootstrap`. “Not loaded” is
    accepted only as the expected bootout condition; bootstrap failure is fatal.
-6. Poll only `http://127.0.0.1:<receipt-port>/health` with a fixed deadline.
-   Success requires `{ok:true, output_boundary:"legacy"}`.
+6. Poll only `http://127.0.0.1:<receipt-port>/health` with redirects disabled
+   and a fixed deadline. Success requires legacy mode plus the fixed cohort ID,
+   receipt deployment digest, and the PID reported by `launchctl print` after
+   bootstrap. This prevents an unrelated loopback service from proving health.
 7. Return a closed JSON receipt and release the lock.
 
 If the plist is already legacy and health proves legacy, return `already_legacy`
@@ -102,8 +111,9 @@ stack, path, label supplied by disk, command output, or response body is copied.
 
 ## 6. Health and release gate
 
-`GET /health` adds the safe enum `output_boundary: legacy|structured`. Existing
-fields and status remain unchanged.
+`GET /health` adds the safe enum `output_boundary: legacy|structured`. Only the
+dedicated cohort also emits its fixed cohort ID, deployment digest, and process
+ID; the default service keeps its existing privacy-safe field set.
 
 The real Hermes gate may set
 `rollback_command_id=cbrain-structured-cohort-rollback-v1` only when a
@@ -138,3 +148,20 @@ Before merge, independent reviewers attack target substitution, symlinks and
 TOCTOU, receipt/plist ambiguity, restart scope, partial-failure retry,
 concurrency, health spoofing, privacy, gate self-attestation, and live-state
 preservation. Every CRITICAL/HIGH/MEDIUM finding requires a RED/GREEN fix.
+
+### 9.1 Adversarial correction (2026-07-19)
+
+The first implementation review reproduced four classes of bypass: a pure
+in-memory gate proof, suffix-only program and unbound health-port validation,
+backup symlink following, and an unrecoverable empty lock. It also found
+Unicode-escaped duplicate receipt keys, parent-directory symlinks, hardlink/
+TOCTOU substitution, over-broad bootout error handling, and a config-error path
+that printed a private path instead of closed JSON.
+
+The approved runtime correction is the stricter contract now stated above:
+the gate exercises the production filesystem adapter with only launchctl and
+HTTP transports replaced by spies; target and health identities are bound;
+managed files/directories use no-follow, ownership, mode, link-count, inode and
+byte checks; restart accepts only launchctl's explicit not-loaded status; and
+the CLI uses the non-printing config loader. This correction narrows the attack
+surface without changing the public command or touching live state.

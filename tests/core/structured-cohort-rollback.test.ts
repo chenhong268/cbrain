@@ -21,6 +21,7 @@ function target(mode: "legacy" | "structured" = "structured"): RollbackTarget {
       programArguments,
       healthPort: 3401,
     }),
+    cohortId: COHORT_ID,
   };
 }
 
@@ -41,8 +42,16 @@ function harness(initial = target()) {
     restart: async () => {
       calls.push("restart");
       healthyMode = current.mode;
+      return 4242;
     },
-    readHealth: async () => ({ ok: true, output_boundary: healthyMode }),
+    currentProcessId: async () => 4242,
+    readHealth: async () => ({
+      ok: true,
+      output_boundary: healthyMode,
+      cohort_id: COHORT_ID,
+      deployment_digest: current.deploymentDigest,
+      process_id: 4242,
+    }),
     sleep: async () => {},
   };
   return { deps, calls, setHealth: (mode: "legacy" | "structured") => { healthyMode = mode; } };
@@ -94,6 +103,9 @@ describe("structured cohort rollback (#357)", () => {
       { ...target(), programArguments: ["/bin/sh", "-c", "payload"] },
       { ...target(), healthPort: 80 },
       { ...target(), mode: "invalid" as never },
+      { ...target(), cohortId: "unrelated" },
+      { ...target(), programArguments: ["/fixture/bin/cbrain-serve-http.sh", "serve", "--http", "--port", "9999"] },
+      { ...target(), programArguments: ["/fixture/bin/cbrain-serve-http.sh", "--http", "serve", "--port", "3401"] },
     ];
     for (const mutation of mutations) {
       const h = harness(mutation);
@@ -117,5 +129,27 @@ describe("structured cohort rollback (#357)", () => {
       expect(result.status).toBe("failed");
       expect(h.calls.at(-1)).toBe("unlock");
     }
+  });
+
+  test("rejects health from an unrelated process or deployment", async () => {
+    for (const health of [
+      { ok: true, output_boundary: "legacy", cohort_id: "other", deployment_digest: target().deploymentDigest, process_id: 4242 },
+      { ok: true, output_boundary: "legacy", cohort_id: COHORT_ID, deployment_digest: "0".repeat(64), process_id: 4242 },
+      { ok: true, output_boundary: "legacy", cohort_id: COHORT_ID, deployment_digest: target().deploymentDigest, process_id: 7 },
+    ]) {
+      const h = harness();
+      h.deps.readHealth = async () => health;
+      expect((await rollbackStructuredCohort(h.deps)).status).toBe("failed");
+    }
+  });
+
+  test("fails closed when the owned lock cannot be released", async () => {
+    const h = harness();
+    h.deps.acquireLock = () => () => { throw new Error("private lock path"); };
+    expect(await rollbackStructuredCohort(h.deps)).toEqual({
+      schema_version: 1,
+      status: "failed",
+      code: "LOCK_RELEASE_FAILED",
+    });
   });
 });
