@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { FileWatcher } from "../../src/core/maintenance/watcher.js";
@@ -40,6 +40,7 @@ describe("FileWatcher", () => {
 
     (mockSync.syncPage as ReturnType<typeof mock>).mockClear();
     (mockSync.removePage as ReturnType<typeof mock>).mockClear();
+    (mockSync as Partial<SyncManager>).classifyVaultFile = undefined;
   });
 
   afterEach(async () => {
@@ -105,6 +106,42 @@ describe("FileWatcher", () => {
     expect(mockSync.removePage).toHaveBeenCalledTimes(1);
     expect(mockSync.removePage).toHaveBeenCalledWith("deleteme");
     expect(logs.some(l => l.message === "删除检测")).toBe(true);
+  });
+
+  test("an uncertain changed file defers deletion reconciliation", async () => {
+    const original = join(testDir, "record-a.md");
+    const moved = join(testDir, "record-b.md");
+    writeFileSync(original, "---\ntitle: Record A\nslug: record-a\n---\nBody", "utf-8");
+    (mockSync as Partial<SyncManager>).classifyVaultFile = mock(async (
+      _slug: string,
+      _vault: string,
+      expected?: { slug: string; fullPath: string; hash: string; mtime: { mtime: number; size: number } },
+    ) => ({ state: "unsafe_or_unknown" as const, pending: expected }));
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await watcher.scanOnce();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    (mockSync.removePage as ReturnType<typeof mock>).mockClear();
+
+    renameSync(original, moved);
+    await watcher.scanOnce();
+
+    expect(mockSync.removePage).not.toHaveBeenCalled();
+  });
+
+  test("a changed candidate missing during classification defers deletion reconciliation", async () => {
+    const original = join(testDir, "record-c.md");
+    const moved = join(testDir, "record-d.md");
+    writeFileSync(original, "---\ntitle: Record C\nslug: record-c\n---\nBody", "utf-8");
+    watcher = new FileWatcher(syncManager, vaultPath, { logger });
+    await watcher.scanOnce();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    (mockSync.removePage as ReturnType<typeof mock>).mockClear();
+    (mockSync as Partial<SyncManager>).classifyVaultFile = mock(async () => ({ state: "missing" as const }));
+
+    renameSync(original, moved);
+    await watcher.scanOnce();
+
+    expect(mockSync.removePage).not.toHaveBeenCalled();
   });
 
   // ─── outputs/ directory ignored ─────────────────────
@@ -1228,6 +1265,15 @@ describe("FileWatcher bulk-change backpressure", () => {
   const bulkSync: Partial<SyncManager> = {
     syncPage: mock(async (_slug: string, _vaultPath: string) => ({ success: true })),
     removePage: mock(async (_slug: string) => {}),
+    classifyVaultFile: mock(async (slug: string, currentVaultPath: string, expected?: { hash: string; mtime: { mtime: number; size: number } }) => ({
+      state: "needs_sync" as const,
+      pending: {
+        slug,
+        fullPath: join(currentVaultPath, `${slug}.md`),
+        hash: expected?.hash ?? "",
+        mtime: expected?.mtime ?? { mtime: 0, size: 0 },
+      },
+    })),
   };
 
   beforeEach(() => {
@@ -1249,6 +1295,18 @@ describe("FileWatcher bulk-change backpressure", () => {
 
     (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
     (bulkSync.removePage as ReturnType<typeof mock>).mockClear();
+    (bulkSync.classifyVaultFile as ReturnType<typeof mock>).mockClear();
+    (bulkSync.classifyVaultFile as ReturnType<typeof mock>).mockImplementation(
+      async (slug: string, currentVaultPath: string, expected?: { hash: string; mtime: { mtime: number; size: number } }) => ({
+        state: "needs_sync" as const,
+        pending: {
+          slug,
+          fullPath: join(currentVaultPath, `${slug}.md`),
+          hash: expected?.hash ?? "",
+          mtime: expected?.mtime ?? { mtime: 0, size: 0 },
+        },
+      }),
+    );
   });
 
   afterEach(async () => {
@@ -1375,6 +1433,7 @@ describe("FileWatcher bulk-change backpressure", () => {
     expect(result.releasedCount).toBe(10);
     expect(result.remainingCount).toBe(45);
     expect(watcher.isBulkPaused()).toBe(true);
+    expect(watcher.getBulkStatus().actionablePending).toBe(45);
 
     // Second call: release 10 of 45
     result = await watcher.resumeBulk();
@@ -1398,12 +1457,524 @@ describe("FileWatcher bulk-change backpressure", () => {
     expect(bulkSync.syncPage).toHaveBeenCalledTimes(fileCount);
   });
 
+  test("concurrent reconciliation and resume serialize without restoring released entries", async () => {
+    const pendingFiles = Array.from({ length: 12 }, (_, i) => ({
+      slug: `concurrent${i}`,
+      fullPath: join(vaultPath, `concurrent${i}.md`),
+      hash: `hash${i}`,
+      mtime: { mtime: 1, size: 1 },
+    }));
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles,
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstStarted!: () => void;
+    const firstSeen = new Promise<void>((resolve) => { firstStarted = resolve; });
+    let calls = 0;
+    (bulkSync.classifyVaultFile as ReturnType<typeof mock>).mockImplementation(async (
+      _slug: string,
+      _currentVaultPath: string,
+      expected: typeof pendingFiles[number],
+    ) => {
+      if (calls++ === 0) {
+        firstStarted();
+        await firstGate;
+      }
+      return { state: "needs_sync" as const, pending: expected };
+    });
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db, bulkThreshold: 5 });
+
+    const reconcile = watcher.reconcileBulk();
+    await firstSeen;
+    const resume = watcher.resumeBulk();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseFirst();
+    const [, result] = await Promise.all([reconcile, resume]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(result).toEqual({ releasedCount: 10, remainingCount: 2 });
+    expect(watcher.getBulkStatus().pendingCount).toBe(2);
+    const persisted = JSON.parse(db.getConfig("watcher.bulk_pending") ?? "null");
+    expect(persisted.pendingFiles).toHaveLength(2);
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(10);
+  });
+
+  test("a second watcher reloads persisted bulk state before reconciling", async () => {
+    const pendingFiles = Array.from({ length: 12 }, (_, i) => ({
+      slug: `reloaded${i}`,
+      fullPath: join(vaultPath, `reloaded${i}.md`),
+      hash: `hash${i}`,
+      mtime: { mtime: 1, size: 1 },
+    }));
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles,
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+    const second = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    expect(await watcher.resumeBulk()).toEqual({ releasedCount: 10, remainingCount: 2 });
+    expect((await second.reconcileBulk()).pendingCount).toBe(2);
+    const persisted = JSON.parse(db.getConfig("watcher.bulk_pending") ?? "null");
+    expect(persisted.pendingFiles).toHaveLength(2);
+    await second.stop();
+  });
+
+  test("separate SQLite connections cannot restore a stale pending snapshot", async () => {
+    const sharedPath = join(testDir, "shared.sqlite");
+    const dbA = new CBrainDB(sharedPath);
+    const dbB = new CBrainDB(sharedPath);
+    const pendingFiles = Array.from({ length: 12 }, (_, i) => ({
+      slug: `cross${i}`,
+      fullPath: join(vaultPath, `cross${i}.md`),
+      hash: `hash${i}`,
+      mtime: { mtime: 1, size: 1 },
+    }));
+    dbA.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles,
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    let releaseB!: () => void;
+    const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+    let startedB!: () => void;
+    const seenB = new Promise<void>((resolve) => { startedB = resolve; });
+    let firstB = true;
+    const syncA = {
+      syncPage: mock(async () => ({ success: true })),
+      removePage: mock(async () => {}),
+      classifyVaultFile: mock(async (_slug: string, _vault: string, expected: typeof pendingFiles[number]) => ({
+        state: "needs_sync" as const,
+        pending: expected,
+      })),
+    } as unknown as SyncManager;
+    const syncB = {
+      ...syncA,
+      classifyVaultFile: mock(async (_slug: string, _vault: string, expected: typeof pendingFiles[number]) => {
+        if (firstB) {
+          firstB = false;
+          startedB();
+          await gateB;
+        }
+        return { state: "needs_sync" as const, pending: expected };
+      }),
+    } as unknown as SyncManager;
+    const watcherA = new FileWatcher(syncA, vaultPath, { db: dbA, bulkThreshold: 5 });
+    const watcherB = new FileWatcher(syncB, vaultPath, { db: dbB, bulkThreshold: 5 });
+
+    const staleReconcile = watcherB.reconcileBulk();
+    await seenB;
+    expect(await watcherA.resumeBulk()).toEqual({ releasedCount: 10, remainingCount: 2 });
+    releaseB();
+    await staleReconcile;
+
+    const persisted = JSON.parse(dbA.getConfig("watcher.bulk_pending") ?? "null");
+    expect(persisted.pendingFiles).toHaveLength(2);
+    await watcherA.stop();
+    await watcherB.stop();
+    dbB.close();
+    dbA.close();
+  });
+
+  test("empty resume cannot clear a bulk state created after its read", async () => {
+    const sharedPath = join(testDir, "empty-race.sqlite");
+    const dbA = new CBrainDB(sharedPath);
+    const dbB = new CBrainDB(sharedPath);
+    const pending = {
+      slug: "new-work",
+      fullPath: join(vaultPath, "new-work.md"),
+      hash: "new-hash",
+      mtime: { mtime: 2, size: 2 },
+    };
+    const state = JSON.stringify({
+      paused: true,
+      pendingFiles: [pending],
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    });
+    const emptyWatcher = new FileWatcher(syncManager, vaultPath, { db: dbB });
+    const originalGet = dbB.getConfig.bind(dbB);
+    let injected = false;
+    dbB.getConfig = ((key: string) => {
+      const value = originalGet(key);
+      if (key === "watcher.bulk_pending" && !injected) {
+        injected = true;
+        dbA.setConfig(key, state);
+      }
+      return value;
+    }) as typeof dbB.getConfig;
+
+    expect(await emptyWatcher.resumeBulk()).toEqual({ releasedCount: 0, remainingCount: 0 });
+    expect(dbA.getConfig("watcher.bulk_pending")).toBe(state);
+
+    await emptyWatcher.stop();
+    dbB.close();
+    dbA.close();
+  });
+
+  test("stale missing classification cannot delete a page after bulk state changes", async () => {
+    const sharedPath = join(testDir, "missing-race.sqlite");
+    const dbA = new CBrainDB(sharedPath);
+    const dbB = new CBrainDB(sharedPath);
+    dbA.upsertPage({ slug: "retained", type: "record", title: "Retained", filePath: "retained.md" });
+    const oldPending = {
+      slug: "retained",
+      fullPath: join(vaultPath, "retained.md"),
+      hash: "old-hash",
+      mtime: { mtime: 1, size: 1 },
+    };
+    const replacement = {
+      slug: "replacement",
+      fullPath: join(vaultPath, "replacement.md"),
+      hash: "new-hash",
+      mtime: { mtime: 2, size: 2 },
+    };
+    dbA.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: [oldPending],
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const seen = new Promise<void>((resolve) => { started = resolve; });
+    let first = true;
+    const removePage = mock(async () => { dbB.deletePageCascaded("retained"); });
+    const racedSync = {
+      syncPage: mock(async () => ({ success: true })),
+      removePage,
+      classifyVaultFile: mock(async (_slug: string, _vault: string, expected: typeof oldPending) => {
+        if (first) {
+          first = false;
+          started();
+          await gate;
+          return { state: "missing" as const };
+        }
+        return { state: "needs_sync" as const, pending: expected };
+      }),
+    } as unknown as SyncManager;
+    const racedWatcher = new FileWatcher(racedSync, vaultPath, { db: dbB, bulkThreshold: 5 });
+
+    const reconcile = racedWatcher.reconcileBulk();
+    await seen;
+    dbA.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: [replacement],
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    release();
+    await reconcile;
+
+    expect(removePage).not.toHaveBeenCalled();
+    expect(dbA.getPage("retained")).not.toBeNull();
+    const persisted = JSON.parse(dbA.getConfig("watcher.bulk_pending") ?? "null");
+    expect(persisted.pendingFiles.map((item: { slug: string }) => item.slug)).toEqual(["replacement"]);
+
+    await racedWatcher.stop();
+    dbB.close();
+    dbA.close();
+  });
+
+  test("missing debt survives maintenance reconciliation and is deleted by the next live scan", async () => {
+    const pending = {
+      slug: "missing-debt",
+      fullPath: join(vaultPath, "missing-debt.md"),
+      hash: "old-hash",
+      mtime: { mtime: 1, size: 1 },
+    };
+    db.upsertPage({ slug: pending.slug, type: "record", title: "Record A", filePath: "missing-debt.md" });
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: [pending],
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    const classifyVaultFile = mock(async () => ({ state: "missing" as const }));
+    const maintenanceSync = {
+      syncPage: mock(async () => ({ success: true })),
+      removePage: mock(async () => {}),
+      classifyVaultFile,
+    } as unknown as SyncManager;
+    const maintenanceWatcher = new FileWatcher(maintenanceSync, vaultPath, { db, bulkThreshold: 5 });
+
+    expect(await maintenanceWatcher.reconcileBulk()).toMatchObject({ paused: true, pendingCount: 1, actionablePending: 0 });
+    expect(maintenanceSync.removePage).not.toHaveBeenCalled();
+    expect(JSON.parse(db.getConfig("watcher.bulk_pending") ?? "null").pendingFiles[0]).toMatchObject({ deletionPending: true });
+    await maintenanceWatcher.stop();
+
+    const removePage = mock(async (slug: string) => { db.deletePageCascaded(slug); });
+    const liveSync = { syncPage: mock(async () => ({ success: true })), removePage, classifyVaultFile } as unknown as SyncManager;
+    const liveWatcher = new FileWatcher(liveSync, vaultPath, { db, bulkThreshold: 5 });
+    liveWatcher.start();
+    for (let i = 0; i < 20 && removePage.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(removePage).toHaveBeenCalledWith("missing-debt");
+    expect(db.getPage("missing-debt")).toBeNull();
+    expect(db.getConfig("watcher.bulk_pending")).toBeNull();
+    await liveWatcher.stop();
+  });
+
+  test("failed live deletion keeps durable missing debt", async () => {
+    const pending = {
+      slug: "missing-retry",
+      fullPath: join(vaultPath, "missing-retry.md"),
+      hash: "old-hash",
+      mtime: { mtime: 1, size: 1 },
+      deletionPending: true as const,
+    };
+    db.upsertPage({ slug: pending.slug, type: "record", title: "Record B", filePath: "missing-retry.md" });
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: [pending],
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    const removePage = mock(async () => { throw new Error("injected deletion failure"); });
+    const liveSync = {
+      syncPage: mock(async () => ({ success: true })),
+      removePage,
+      classifyVaultFile: mock(async () => ({ state: "missing" as const })),
+    } as unknown as SyncManager;
+    const liveWatcher = new FileWatcher(liveSync, vaultPath, { db, bulkThreshold: 5 });
+
+    liveWatcher.start();
+    for (let i = 0; i < 20 && removePage.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(removePage).toHaveBeenCalledWith("missing-retry");
+    expect(db.getPage("missing-retry")).not.toBeNull();
+    expect(JSON.parse(db.getConfig("watcher.bulk_pending") ?? "null").pendingFiles[0])
+      .toMatchObject({ slug: "missing-retry", deletionPending: true });
+    await liveWatcher.stop();
+  });
+
+  test("a file recreated during deletion is requeued without clearing its debt", async () => {
+    const pending = {
+      slug: "recreated-during-delete",
+      fullPath: join(vaultPath, "recreated-during-delete.md"),
+      hash: "old-hash",
+      mtime: { mtime: 1, size: 1 },
+      deletionPending: true as const,
+    };
+    db.upsertPage({ slug: pending.slug, type: "record", title: "Record C", filePath: "recreated-during-delete.md" });
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: [pending],
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const seen = new Promise<void>((resolve) => { started = resolve; });
+    const removePage = mock(async (slug: string) => {
+      started();
+      await gate;
+      db.deletePageCascaded(slug);
+    });
+    const syncPage = mock(async (slug: string) => {
+      db.upsertPage({ slug, type: "record", title: "Record C", filePath: "recreated-during-delete.md" });
+      return { success: true };
+    });
+    const liveSync = {
+      syncPage,
+      removePage,
+      classifyVaultFile: mock(async (_slug: string, _vault: string, expected: typeof pending) => (
+        existsSync(expected.fullPath)
+          ? { state: "needs_sync" as const, pending: { ...expected, hash: "new-hash" } }
+          : { state: "missing" as const }
+      )),
+    } as unknown as SyncManager;
+    const liveWatcher = new FileWatcher(liveSync, vaultPath, { db, bulkThreshold: 5 });
+
+    liveWatcher.start();
+    await seen;
+    writeFileSync(pending.fullPath, "---\ntitle: Record C\n---\nRecreated", "utf-8");
+    release();
+    for (let i = 0; i < 20 && syncPage.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(syncPage).toHaveBeenCalledWith(pending.slug, vaultPath);
+    expect(db.getPage(pending.slug)).not.toBeNull();
+    expect(JSON.parse(db.getConfig("watcher.bulk_pending") ?? "null").pendingFiles[0])
+      .toMatchObject({ slug: pending.slug, deletionPending: true });
+    await liveWatcher.stop();
+  });
+
+  test("a classifier error after recreation keeps deletion debt", async () => {
+    const pending = {
+      slug: "uncertain-recreation",
+      fullPath: join(vaultPath, "uncertain-recreation.md"),
+      hash: "old-hash",
+      mtime: { mtime: 1, size: 1 },
+      deletionPending: true as const,
+    };
+    db.upsertPage({ slug: pending.slug, type: "record", title: "Record D", filePath: "uncertain-recreation.md" });
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: [pending],
+      threshold: 5,
+      pausedAt: new Date().toISOString(),
+    }));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let started!: () => void;
+    const seen = new Promise<void>((resolve) => { started = resolve; });
+    let classifyCalls = 0;
+    const removePage = mock(async (slug: string) => {
+      started();
+      await gate;
+      db.deletePageCascaded(slug);
+    });
+    const liveSync = {
+      syncPage: mock(async () => ({ success: true })),
+      removePage,
+      classifyVaultFile: mock(async () => {
+        if (classifyCalls++ === 0) return { state: "missing" as const };
+        throw new Error("injected classification failure");
+      }),
+    } as unknown as SyncManager;
+    const liveWatcher = new FileWatcher(liveSync, vaultPath, { db, bulkThreshold: 5 });
+
+    liveWatcher.start();
+    await seen;
+    writeFileSync(pending.fullPath, "---\ntitle: Record D\n---\nRecreated", "utf-8");
+    release();
+    for (let i = 0; i < 20 && classifyCalls < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(classifyCalls).toBe(2);
+    expect(existsSync(pending.fullPath)).toBe(true);
+    expect(JSON.parse(db.getConfig("watcher.bulk_pending") ?? "null").pendingFiles[0])
+      .toMatchObject({ slug: pending.slug, deletionPending: true });
+    await liveWatcher.stop();
+  });
+
   test("getBulkStatus returns not paused when no bulk state", () => {
     watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
 
     const status = watcher.getBulkStatus();
     expect(status.paused).toBe(false);
     expect(status.pendingCount).toBe(0);
+  });
+
+  test("100 committed internal writes are acknowledged before the bulk threshold", async () => {
+    for (let i = 0; i < 100; i++) {
+      writeFileSync(join(testDir, `internal${i}.md`), `---\ntitle: Internal${i}\n---\nInitial`, "utf-8");
+    }
+    (bulkSync.classifyVaultFile as ReturnType<typeof mock>).mockImplementation(
+      async (slug: string, currentVaultPath: string, expected: { hash: string; mtime: { mtime: number; size: number } }) => ({
+        state: "already_synchronized" as const,
+        pending: { slug, fullPath: join(currentVaultPath, `${slug}.md`), ...expected },
+      }),
+    );
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    for (let i = 0; i < 100; i++) {
+      writeFileSync(join(testDir, `internal${i}.md`), `---\ntitle: Internal${i}\n---\nProjected`, "utf-8");
+    }
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+
+    expect(watcher.isBulkPaused()).toBe(false);
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(0);
+    expect(watcher.getBulkStatus()).toMatchObject({
+      observedChanged: 100,
+      internallyAcknowledged: 100,
+      actionablePending: 0,
+    });
+  });
+
+  test("mixed internal and external writes count only actionable files", async () => {
+    for (let i = 0; i < 90; i++) {
+      writeFileSync(join(testDir, `mixed${i}.md`), `---\ntitle: Mixed${i}\n---\nInitial`, "utf-8");
+    }
+    (bulkSync.classifyVaultFile as ReturnType<typeof mock>).mockImplementation(
+      async (slug: string, currentVaultPath: string, expected: { hash: string; mtime: { mtime: number; size: number } }) => ({
+        state: Number(slug.replace("mixed", "")) < 80 ? "already_synchronized" as const : "needs_sync" as const,
+        pending: { slug, fullPath: join(currentVaultPath, `${slug}.md`), ...expected },
+      }),
+    );
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db });
+
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+    (bulkSync.syncPage as ReturnType<typeof mock>).mockClear();
+    for (let i = 0; i < 90; i++) {
+      writeFileSync(join(testDir, `mixed${i}.md`), `---\ntitle: Mixed${i}\n---\nUpdated`, "utf-8");
+    }
+    await (watcher as unknown as { doScan: () => Promise<void> }).doScan();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(watcher.isBulkPaused()).toBe(false);
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(10);
+    expect(watcher.getBulkStatus()).toMatchObject({
+      observedChanged: 90,
+      internallyAcknowledged: 80,
+      actionablePending: 10,
+    });
+  });
+
+  test("resume reconciles stale persisted entries before releasing work", async () => {
+    writeFileSync(join(testDir, "committed.md"), "---\ntitle: Committed\n---\nStable", "utf-8");
+    writeFileSync(join(testDir, "external.md"), "---\ntitle: External\n---\nChanged", "utf-8");
+    const pendingFiles = ["committed", "external", "vanished"].map((slug) => ({
+      slug,
+      fullPath: join(testDir, `${slug}.md`),
+      hash: `old-${slug}`,
+      mtime: { mtime: 1, size: 1 },
+    }));
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles,
+      threshold: 2,
+      pausedAt: new Date().toISOString(),
+    }));
+    (bulkSync.classifyVaultFile as ReturnType<typeof mock>).mockImplementation(
+      async (slug: string, currentVaultPath: string) => {
+        if (slug === "committed") {
+          return { state: "already_synchronized" as const, pending: pendingFiles[0] };
+        }
+        if (slug === "vanished") return { state: "missing" as const };
+        return {
+          state: "needs_sync" as const,
+          pending: {
+            slug,
+            fullPath: join(currentVaultPath, `${slug}.md`),
+            hash: "current-external",
+            mtime: { mtime: 2, size: 2 },
+          },
+        };
+      },
+    );
+    watcher = new FileWatcher(syncManager, vaultPath, { logger, db, bulkThreshold: 2 });
+
+    const result = await watcher.resumeBulk();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(result).toEqual({ releasedCount: 1, remainingCount: 1 });
+    expect(bulkSync.syncPage).toHaveBeenCalledTimes(1);
+    expect(bulkSync.syncPage).toHaveBeenCalledWith("external", vaultPath);
+    expect(bulkSync.removePage).not.toHaveBeenCalled();
+    expect(watcher.isBulkPaused()).toBe(true);
+    const persisted = JSON.parse(db.getConfig("watcher.bulk_pending") ?? "null");
+    expect(persisted.pendingFiles).toMatchObject([{ slug: "vanished", deletionPending: true }]);
+    expect(watcher.getBulkStatus().actionablePending).toBe(0);
+    expect(persisted.actionablePending).toBe(0);
   });
 
   test("cross-process resume request triggers bounded release on next scan", async () => {

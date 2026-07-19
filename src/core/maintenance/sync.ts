@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { readFile, access, rename, mkdir, unlink } from "node:fs/promises";
-import { join, relative, dirname } from "node:path";
+import { readFile, access, rename, mkdir, unlink, stat } from "node:fs/promises";
+import { join, relative, dirname, resolve, isAbsolute } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
@@ -89,6 +89,34 @@ export interface SyncPageResult {
   diagnostics?: SyncDiagnostic[];
 }
 
+export interface PendingVaultFile {
+  slug: string;
+  fullPath: string;
+  hash: string;
+  mtime: { mtime: number; size: number };
+  deletionPending?: true;
+}
+
+export type VaultFileSyncState = "already_synchronized" | "needs_sync" | "missing" | "unsafe_or_unknown";
+
+export interface VaultFileClassification {
+  state: VaultFileSyncState;
+  pending?: PendingVaultFile;
+  replacesFullPath?: string;
+}
+
+function hasCompletePageIndexes(db: CBrainDB, slug: string, body: string): boolean {
+  if (!body.trim()) return true;
+  const hasRawChunk = db.rawDb.prepare(
+    "SELECT 1 FROM chunks WHERE page_slug = ? AND summary_level = 0 LIMIT 1",
+  ).get(slug);
+  if (!hasRawChunk) return false;
+  const hasFtsRow = db.rawDb.prepare(
+    "SELECT 1 FROM chunks_fts WHERE page_slug = ? LIMIT 1",
+  ).get(slug);
+  return !!hasFtsRow;
+}
+
 export class SyncManager {
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
@@ -167,7 +195,7 @@ export class SyncManager {
         // Content hash alone only proves Markdown is unchanged. A prior crash
         // or bug may still leave derived indexes missing; only skip when
         // chunks + FTS are complete for non-empty bodies.
-        if (existingHash && existingHash === contentHash && this.hasCompletePageIndexes(slug, parsed.body)) {
+        if (existingHash && existingHash === contentHash && hasCompletePageIndexes(this.db, slug, parsed.body)) {
           // Backfill tags + wikilinks even when content unchanged
           if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
             this.db.replaceTags(slug, parsed.frontmatter.tags as string[]);
@@ -455,6 +483,7 @@ export class SyncManager {
     const fullPath = filePath
       ? join(vaultPath, filePath)
       : join(vaultPath, `${slug}.md`);
+    let resolvedFullPath = fullPath;
 
     let content: string;
     try {
@@ -479,7 +508,11 @@ export class SyncManager {
     const exists = !!existingPage;
     const existingHash = existingPage?.content_hash ?? null;
 
-    if (existingHash && existingHash === contentHash && this.hasCompletePageIndexes(effectiveSlug, parsed.body)) {
+    if (existingHash && existingHash === contentHash && hasCompletePageIndexes(this.db, effectiveSlug, parsed.body)) {
+      const observedRelPath = relative(vaultPath, resolvedFullPath);
+      if (existingPage!.file_path !== observedRelPath) {
+        this.db.updatePageFilePath(effectiveSlug, observedRelPath);
+      }
       // Backfill tags + wikilinks even when content unchanged
       if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
         this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
@@ -512,6 +545,7 @@ export class SyncManager {
         try {
           await mkdir(dirname(newFullPath), { recursive: true });
           await rename(fullPath, newFullPath);
+          resolvedFullPath = newFullPath;
           this.logger?.info("sync", `文件已迁移: ${relative(vaultPath, fullPath)} → ${newRelPath}`);
         } catch (e) {
           this.logger?.warn("sync", `文件迁移失败: ${(e as Error).message}`);
@@ -520,7 +554,7 @@ export class SyncManager {
       effectiveSlug = canonical;
     }
 
-    const relPath = slugToFilePath(effectiveSlug);
+    const relPath = relative(vaultPath, resolvedFullPath);
 
     // Check skip hash for title-collision files (must be AFTER canonicalization
     // so the key matches what was stored in the TitleCollisionError handler)
@@ -590,6 +624,7 @@ export class SyncManager {
 
     try {
       this.db.upsertPage({ slug: effectiveSlug, type, title, filePath: relPath });
+      this.db.updatePageFilePath(effectiveSlug, relPath);
 
       if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
         this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
@@ -680,6 +715,70 @@ export class SyncManager {
     return { success: true };
   }
 
+  async classifyVaultFile(
+    slug: string,
+    vaultPath: string,
+    expected?: PendingVaultFile,
+    requireObservedStable = true,
+  ): Promise<VaultFileClassification> {
+    if (!slug || slug.includes("..") || slug.startsWith("/") || slug.startsWith("\\")) return { state: "unsafe_or_unknown" };
+
+    const root = resolve(vaultPath);
+    const filePath = this.db.getPageFilePath(slug) ?? `${slug}.md`;
+    const fullPath = resolve(expected?.fullPath ?? resolve(root, filePath));
+    const rel = relative(root, fullPath);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return { state: "unsafe_or_unknown" };
+    if (expected && (expected.slug !== slug || rel.replace(/\.md$/, "") !== slug)) return { state: "unsafe_or_unknown" };
+
+    try {
+      const before = await stat(fullPath);
+      if (!before.isFile()) return { state: "unsafe_or_unknown" };
+      const content = await readFile(fullPath, "utf-8");
+      const after = await stat(fullPath);
+      const pending: PendingVaultFile = {
+        slug,
+        fullPath,
+        hash: hashContent(content),
+        mtime: { mtime: after.mtimeMs, size: after.size },
+      };
+
+      const changedDuringRead = before.mtimeMs !== after.mtimeMs || before.size !== after.size;
+      const changedSinceObservation = requireObservedStable && expected !== undefined && (
+        expected.hash !== pending.hash
+        || expected.mtime.mtime !== pending.mtime.mtime
+        || expected.mtime.size !== pending.mtime.size
+      );
+
+      const parsed = parseFrontmatter(content);
+      const effectiveSlug = parsed.frontmatter.slug ?? slug;
+      if (!effectiveSlug || effectiveSlug.includes("..") || effectiveSlug.startsWith("/")) return { state: "unsafe_or_unknown", pending };
+      const committedHash = this.db.getPageContentHash(effectiveSlug);
+      const committedFilePath = this.db.getPageFilePath(effectiveSlug);
+      let replacesFullPath: string | undefined;
+      if (committedFilePath) {
+        const committedFullPath = resolve(root, committedFilePath);
+        const committedRel = relative(root, committedFullPath);
+        if (!committedRel || committedRel.startsWith("..") || isAbsolute(committedRel)) return { state: "unsafe_or_unknown", pending };
+        if (committedFullPath !== fullPath) replacesFullPath = committedFullPath;
+      }
+      if (changedDuringRead || changedSinceObservation) {
+        return { state: "needs_sync", pending, replacesFullPath };
+      }
+      if (
+        replacesFullPath === undefined
+        && committedHash !== null
+        && committedHash === pending.hash
+        && hasCompletePageIndexes(this.db, effectiveSlug, parsed.body)
+      ) {
+        return { state: "already_synchronized", pending };
+      }
+      return { state: "needs_sync", pending, replacesFullPath };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "missing" };
+      return { state: "unsafe_or_unknown" };
+    }
+  }
+
   async removePage(slug: string): Promise<void> {
     this.db.deletePageCascaded(slug);
     try { this.db.deleteConfig(`sync.skip.${slug}`); } catch { /* non-critical */ }
@@ -745,18 +844,6 @@ export class SyncManager {
       }
     }
     return cleaned;
-  }
-
-  private hasCompletePageIndexes(slug: string, body: string): boolean {
-    if (!body.trim()) return true;
-    const hasRawChunk = this.db.rawDb.prepare(
-      "SELECT 1 FROM chunks WHERE page_slug = ? AND summary_level = 0 LIMIT 1",
-    ).get(slug);
-    if (!hasRawChunk) return false;
-    const hasFtsRow = this.db.rawDb.prepare(
-      "SELECT 1 FROM chunks_fts WHERE page_slug = ? LIMIT 1",
-    ).get(slug);
-    return !!hasFtsRow;
   }
 
   /** Compensate a failed existing-page sync: restore retrievable metadata + exact

@@ -1,10 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
-import type { SyncManager } from "../../src/core/maintenance/sync.js";
+import { SyncManager } from "../../src/core/maintenance/sync.js";
 
 function runtimeDir(dbPath: string) {
   return join(dirname(dbPath), "runtime");
@@ -365,27 +365,38 @@ describe("MCP watcher bulk_status and bulk_resume", () => {
     expect(result.threshold).toBe(50);
   });
 
-  test("bulk_status reports paused state from DB", async () => {
-    const pendingFiles = Array.from({ length: 60 }, (_, i) => ({
-      slug: `bulk${i}`,
-      fullPath: `/vault/bulk${i}.md`,
-      hash: `hash${i}`,
-      mtime: { mtime: Date.now(), size: 100 },
+  test("bulk_status without a live watcher reconciles stale persisted state", async () => {
+    mkdirSync(join(vaultPath, "records"), { recursive: true });
+    writeFileSync(join(vaultPath, "records/committed.md"), "---\ntitle: Record A\ntype: record\nslug: records/committed\n---\nStable");
+    writeFileSync(join(vaultPath, "records/external.md"), "---\ntitle: Record B\ntype: record\nslug: records/external\n---\nExternal");
+    const setupSync = new SyncManager(db, deps.embedding, deps.lance as any);
+    await setupSync.syncPage("records/committed", vaultPath);
+    const server = createServer(deps);
+    const pendingFiles = ["records/committed", "records/external", "records/missing"].map((slug) => ({
+      slug,
+      fullPath: join(vaultPath, `${slug}.md`),
+      hash: `old-${slug}`,
+      mtime: { mtime: 1, size: 1 },
     }));
 
     db.setConfig("watcher.bulk_pending", JSON.stringify({
       paused: true,
       pendingFiles,
-      threshold: 50,
+      threshold: 7,
       pausedAt: new Date().toISOString(),
     }));
 
-    const server = createServer(deps);
     const result = await callTool(server, "watcher_quarantine", { action: "bulk_status" });
 
     expect(result.bulkPaused).toBe(true);
-    expect(result.pendingCount).toBe(60);
-    expect(result.threshold).toBe(50);
+    expect(result.pendingCount).toBe(2);
+    expect(result.threshold).toBe(7);
+    expect(result).toMatchObject({
+      observedChanged: 3,
+      internallyAcknowledged: 1,
+      actionablePending: 1,
+      missingOrStale: 2,
+    });
   });
 
   test("bulk_resume writes resume request when no live watcher", async () => {
@@ -473,6 +484,98 @@ describe("MCP watcher bulk_status and bulk_resume", () => {
     expect(result.remainingCount).toBe(0);
     expect(result.fullyResumed).toBe(true);
     expect(reloaded.isBulkPaused()).toBe(false);
+  });
+
+  test("live bulk_status reconciles stale entries and reports anonymous counts", async () => {
+    writeFileSync(join(vaultPath, "committed.md"), "---\ntitle: Committed\n---\nStable", "utf-8");
+    writeFileSync(join(vaultPath, "external.md"), "---\ntitle: External\n---\nChanged", "utf-8");
+    const pendingFiles = ["committed", "external", "vanished"].map((slug) => ({
+      slug,
+      fullPath: join(vaultPath, `${slug}.md`),
+      hash: `old-${slug}`,
+      mtime: { mtime: 1, size: 1 },
+    }));
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles,
+      threshold: 50,
+      pausedAt: new Date().toISOString(),
+    }));
+    const { FileWatcher } = await import("../../src/core/maintenance/watcher.js");
+    const classifyVaultFile = mock(async (slug: string, currentVaultPath: string) => {
+      if (slug === "committed") {
+        return { state: "already_synchronized" as const, pending: pendingFiles[0] };
+      }
+      if (slug === "vanished") return { state: "missing" as const };
+      return {
+        state: "needs_sync" as const,
+        pending: {
+          slug,
+          fullPath: join(currentVaultPath, `${slug}.md`),
+          hash: "current-external",
+          mtime: { mtime: 2, size: 2 },
+        },
+      };
+    });
+    const liveSync = {
+      syncPage: mock(async () => ({ success: true })),
+      removePage: mock(async () => {}),
+      classifyVaultFile,
+    } as unknown as SyncManager;
+    const liveWatcher = new FileWatcher(liveSync, vaultPath, { db });
+    const server = createServer({ ...deps, watcher: liveWatcher });
+
+    const result = await callTool(server, "watcher_quarantine", { action: "bulk_status" });
+
+    expect(result).toEqual({
+      bulkPaused: true,
+      pendingCount: 2,
+      threshold: 50,
+      observedChanged: 3,
+      internallyAcknowledged: 1,
+      actionablePending: 1,
+      missingOrStale: 2,
+    });
+    expect(liveSync.removePage).not.toHaveBeenCalled();
+    const persisted = JSON.parse(db.getConfig("watcher.bulk_pending") ?? "null");
+    expect(persisted.pendingFiles).toHaveLength(2);
+    expect(persisted.pendingFiles.find((item: { slug: string }) => item.slug === "vanished"))
+      .toMatchObject({ deletionPending: true });
+    expect(JSON.stringify(result)).not.toContain("committed");
+    expect(JSON.stringify(result)).not.toContain("external");
+
+    const repeated = await callTool(server, "watcher_quarantine", { action: "bulk_status" });
+    expect(repeated).toEqual(result);
+  });
+
+  test("ordinary status remains read-only when live bulk state contains a missing item", async () => {
+    const pending = {
+      slug: "missing-item",
+      fullPath: join(vaultPath, "missing-item.md"),
+      hash: "old-hash",
+      mtime: { mtime: 1, size: 1 },
+    };
+    db.setConfig("watcher.bulk_pending", JSON.stringify({
+      paused: true,
+      pendingFiles: [pending],
+      threshold: 50,
+      pausedAt: new Date().toISOString(),
+    }));
+    const removePage = mock(async () => {});
+    const liveSync = {
+      syncPage: mock(async () => ({ success: true })),
+      removePage,
+      classifyVaultFile: mock(async () => ({ state: "missing" as const })),
+    } as unknown as SyncManager;
+    const { FileWatcher } = await import("../../src/core/maintenance/watcher.js");
+    const liveWatcher = new FileWatcher(liveSync, vaultPath, { db });
+    const server = createServer({ ...deps, watcher: liveWatcher });
+
+    const result = await callTool(server, "status", {});
+
+    expect(result.bulkPending.pendingCount).toBe(1);
+    expect(removePage).not.toHaveBeenCalled();
+    expect(db.getConfig("watcher.bulk_pending")).not.toBeNull();
   });
 
   test("status tool includes bulk-pending info", async () => {

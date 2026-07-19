@@ -1031,6 +1031,18 @@ export class CBrainDB {
     ).run({ $key: key, $value: value });
   }
 
+  compareAndSetConfig(key: string, expected: string | null, value: string | null): boolean {
+    if (expected === null) {
+      if (value === null) return this.getConfig(key) === null;
+      return this.prepare("INSERT OR IGNORE INTO config (key, value) VALUES ($key, $value)")
+        .run({ $key: key, $value: value }).changes === 1;
+    }
+    const result = value === null
+      ? this.prepare("DELETE FROM config WHERE key = $key AND value = $expected").run({ $key: key, $expected: expected })
+      : this.prepare("UPDATE config SET value = $value WHERE key = $key AND value = $expected").run({ $key: key, $expected: expected, $value: value });
+    return result.changes === 1;
+  }
+
   // ─── Slug resolution ─────────────────────────────────────────
 
   resolveSlugs(queries: string[]): Array<{ query: string; slug: string | null; title: string | null }> {
@@ -1725,6 +1737,11 @@ export class CBrainDB {
     this.prepare(
       "UPDATE pages SET content_hash = $hash, updated_at = datetime('now') WHERE slug = $slug"
     ).run({ $slug: slug, $hash: hash });
+  }
+
+  updatePageFilePath(slug: string, filePath: string): void {
+    this.prepare("UPDATE pages SET file_path = $path, updated_at = datetime('now') WHERE slug = $slug")
+      .run({ $slug: slug, $path: filePath });
   }
 
   updatePageTier(slug: string, tier: number): void {

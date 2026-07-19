@@ -838,6 +838,10 @@ describe("HealthChecker", () => {
         })),
         threshold: 50,
         pausedAt: "2026-06-05T10:00:00Z",
+        observedChanged: 80,
+        internallyAcknowledged: 20,
+        actionablePending: 60,
+        missingOrStale: 3,
       }));
 
       const report = await checker.checkAll();
@@ -848,6 +852,9 @@ describe("HealthChecker", () => {
       expect(dim!.issues[0].title).toBe("批量变更暂停");
       expect(dim!.issues[0].description).toContain("60");
       expect(dim!.issues[0].description).toContain("50");
+      expect(dim!.issues[0].description).toContain("80");
+      expect(dim!.issues[0].description).toContain("20");
+      expect(dim!.issues[0].description).toContain("3");
       expect(dim!.issues[0].suggestion).toContain("bulk_resume");
     });
 

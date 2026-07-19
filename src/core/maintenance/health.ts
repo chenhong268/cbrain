@@ -20,6 +20,7 @@ import {
   inspectMisplacedVaultArtifacts,
   type TrustedVaultBoundary,
 } from "./misplaced-vault-artifacts.js";
+import type { BulkStatus } from "./watcher.js";
 
 // ─── Contradiction classification ─────────────────────────────
 
@@ -718,14 +719,19 @@ export class HealthChecker {
     if (!raw) return { name: "批量变更保护", status: "pass", issues: [] };
 
     try {
-      const state = JSON.parse(raw) as { paused: boolean; pendingFiles: unknown[]; threshold: number; pausedAt: string };
+      const state = JSON.parse(raw) as Partial<BulkStatus> & { pendingFiles?: unknown[]; pausedAt?: string };
       if (!state.paused) return { name: "批量变更保护", status: "pass", issues: [] };
+
+      const actionable = state.actionablePending ?? state.pendingFiles?.length ?? 0;
+      const observed = state.observedChanged ?? actionable;
+      const acknowledged = state.internallyAcknowledged ?? 0;
+      const missing = state.missingOrStale ?? 0;
 
       issues.push({
         severity: "medium",
         slug: "",
         title: "批量变更暂停",
-        description: `watcher 因检测到 ${state.pendingFiles?.length ?? 0} 个文件变更（阈值 ${state.threshold}）已暂停同步，暂停于 ${state.pausedAt}`,
+        description: `watcher 观察到 ${observed} 个变更，已确认内部写入 ${acknowledged} 个、待同步 ${actionable} 个、缺失或陈旧 ${missing} 个（阈值 ${state.threshold}），暂停于 ${state.pausedAt}`,
         suggestion: "使用 watcher_quarantine 工具的 bulk_resume action 恢复处理，或检查是否有意外的大量文件写入",
       });
     } catch { /* corrupt config */ }

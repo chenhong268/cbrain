@@ -7,8 +7,30 @@ import { normalizeRelation, getCanonicalRelationTypes, getReverseRelation } from
 import { WatcherLock } from "../../utils/watcher-lock.js";
 import { formatHealthEnvelope, formatDreamStatusEnvelope } from "./format-result.js";
 import type { PageSignals, SignalLookup } from "../../core/maintenance/health-debt.js";
+import { FileWatcher, type BulkStatus } from "../../core/maintenance/watcher.js";
 
 const MAX_HEALTH_SIGNAL_LOOKUPS = 200;
+
+function readPersistedBulkStatus(ctx: ToolContext): BulkStatus {
+  const fallback: BulkStatus = { paused: false, pendingCount: 0, threshold: 50, observedChanged: 0, internallyAcknowledged: 0, actionablePending: 0, missingOrStale: 0 };
+  const raw = ctx.db.getConfig("watcher.bulk_pending");
+  if (!raw) return fallback;
+  try {
+    const state = JSON.parse(raw) as Partial<BulkStatus> & { pendingFiles?: unknown[] };
+    const pendingCount = state.pendingFiles?.length ?? 0;
+    return {
+      paused: state.paused === true,
+      pendingCount,
+      threshold: state.threshold ?? 50,
+      observedChanged: state.observedChanged ?? pendingCount,
+      internallyAcknowledged: state.internallyAcknowledged ?? 0,
+      actionablePending: state.actionablePending ?? pendingCount,
+      missingOrStale: state.missingOrStale ?? 0,
+    };
+  } catch {
+    return fallback;
+  }
+}
 
 export function createHealthSignalLookup(ctx: ToolContext): SignalLookup {
   const cache = new Map<string, PageSignals | undefined>();
@@ -34,6 +56,10 @@ export function createHealthSignalLookup(ctx: ToolContext): SignalLookup {
 }
 
 export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
+  const bulkMaintainer = ctx.watcher ?? new FileWatcher(ctx.sync, ctx.vaultPath, {
+    db: ctx.db,
+    logger: ctx.logger,
+  });
   // ─── health ────────────────────────────────────────────
   server.registerTool("health", {
     description: "Run a 14-dimension health check (errors, dedup, slug collisions, consistency, structural consistency, completeness, islands, suggestions, attention, data readiness, source quality, etc.). Returns issues and writes a report file.",
@@ -127,14 +153,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
     }
 
     // Bulk-pending state
-    const bulkRaw = ctx.db.getConfig("watcher.bulk_pending");
-    let bulkPending = { paused: false, pendingCount: 0, threshold: 50 };
-    if (bulkRaw) {
-      try {
-        const bs = JSON.parse(bulkRaw) as { paused: boolean; pendingFiles: unknown[]; threshold: number };
-        bulkPending = { paused: bs.paused, pendingCount: bs.pendingFiles?.length ?? 0, threshold: bs.threshold ?? 50 };
-      } catch { /* keep defaults */ }
-    }
+    const bulkPending = readPersistedBulkStatus(ctx);
 
     return {
       content: [{
@@ -259,31 +278,24 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
       : {};
 
     if (action === "bulk_status") {
-      const raw = ctx.db.getConfig("watcher.bulk_pending");
-      if (!raw) {
-        return {
-          content: [{ type: "text", text: JSON.stringify({ bulkPaused: false, pendingCount: 0, threshold: 50 }) }],
-        };
-      }
-      try {
-        const state = JSON.parse(raw) as { paused: boolean; pendingFiles: unknown[]; threshold: number };
-        return {
-          content: [{ type: "text", text: JSON.stringify({
-            bulkPaused: state.paused,
-            pendingCount: state.pendingFiles?.length ?? 0,
-            threshold: state.threshold ?? 50,
-          }) }],
-        };
-      } catch {
-        return {
-          content: [{ type: "text", text: JSON.stringify({ bulkPaused: false, pendingCount: 0, threshold: 50 }) }],
-        };
-      }
+      const state = await bulkMaintainer.reconcileBulk();
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          bulkPaused: state.paused,
+          pendingCount: state.pendingCount,
+          threshold: state.threshold,
+          observedChanged: state.observedChanged,
+          internallyAcknowledged: state.internallyAcknowledged,
+          actionablePending: state.actionablePending,
+          missingOrStale: state.missingOrStale,
+        }) }],
+      };
     }
 
     if (action === "bulk_resume") {
       if (ctx.watcher && typeof ctx.watcher.resumeBulk === "function") {
         const result = await ctx.watcher.resumeBulk();
+        const state = ctx.watcher.getBulkStatus();
         return {
           content: [{ type: "text", text: JSON.stringify({
             success: true,
@@ -291,34 +303,31 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
             releasedCount: result.releasedCount,
             remainingCount: result.remainingCount,
             fullyResumed: result.remainingCount === 0,
+            observedChanged: state.observedChanged,
+            internallyAcknowledged: state.internallyAcknowledged,
+            actionablePending: state.actionablePending,
+            missingOrStale: state.missingOrStale,
           }) }],
         };
       }
       // No live watcher — write a resume request for the HTTP watcher to pick up on next scan
-      const raw = ctx.db.getConfig("watcher.bulk_pending");
-      if (!raw) {
+      const reconciled = await bulkMaintainer.reconcileBulk();
+      if (!reconciled.paused || reconciled.pendingCount === 0) {
         return {
           content: [{ type: "text", text: JSON.stringify({ success: true, resumed: true, releasedCount: 0, remainingCount: 0, fullyResumed: true }) }],
         };
       }
       ctx.db.setConfig("watcher.bulk_resume_request", JSON.stringify({ requestedAt: new Date().toISOString() }));
-      try {
-        const state = JSON.parse(raw) as { paused: boolean; pendingFiles: unknown[] };
-        return {
-          content: [{ type: "text", text: JSON.stringify({
-            success: true,
-            pendingResume: true,
-            releasedCount: 0,
-            remainingCount: state.pendingFiles?.length ?? 0,
-            fullyResumed: false,
-            message: "Resume request written. Live watcher will release one batch on next scan cycle.",
-          }) }],
-        };
-      } catch {
-        return {
-          content: [{ type: "text", text: JSON.stringify({ success: true, pendingResume: true, releasedCount: 0, remainingCount: 0, fullyResumed: false }) }],
-        };
-      }
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          success: true,
+          pendingResume: true,
+          releasedCount: 0,
+          remainingCount: reconciled.pendingCount,
+          fullyResumed: false,
+          message: "Resume request written. Live watcher will release one batch on next scan cycle.",
+        }) }],
+      };
     }
 
     if (action === "list") {
