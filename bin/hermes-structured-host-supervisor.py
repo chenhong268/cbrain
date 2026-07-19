@@ -597,6 +597,9 @@ def verify_rollback_proof(
     deadline: float,
 ):
     try:
+        owned_root = os.path.realpath(owned_root)
+        if not stat.S_ISDIR(os.lstat(owned_root).st_mode):
+            return None
         if git_output(source_root, ["status", "--porcelain", "--untracked-files=all"]).strip():
             return None
         head = git_output(source_root, ["rev-parse", "HEAD"]).decode("ascii").strip()

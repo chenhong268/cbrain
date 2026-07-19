@@ -1036,6 +1036,8 @@ exit 0
       const repo = join(root, "repo");
       const owned = join(root, "owned");
       const baselineOwned = join(root, "baseline-owned");
+      const ownedArgument = owned.replace(/^\/private(?=\/(?:tmp|var)\/)/, "");
+      const baselineOwnedArgument = baselineOwned.replace(/^\/private(?=\/(?:tmp|var)\/)/, "");
       const fakeBun = join(root, "bun");
       mkdirSync(join(repo, "bin"), { recursive: true });
       mkdirSync(join(repo, "tests/fixtures"), { recursive: true });
@@ -1108,8 +1110,8 @@ exit 0
       ].join("\n");
       const result = Bun.spawnSync({
         cmd: [
-          "/usr/bin/python3", "-I", "-c", verifier, supervisor, fakeBun, repo, proof, approved, owned,
-          baselineOwned,
+          "/usr/bin/python3", "-I", "-c", verifier, supervisor, fakeBun, repo, proof, approved, ownedArgument,
+          baselineOwnedArgument,
         ],
         cwd: root,
         stdout: "pipe",
