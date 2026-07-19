@@ -1,8 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { SyncManager } from "../../src/core/maintenance/sync.js";
+import { FileWatcher } from "../../src/core/maintenance/watcher.js";
+import { PageManager } from "../../src/core/page.js";
 import { NerEngine } from "../../src/core/ingestion/ner.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
@@ -408,6 +410,138 @@ describe("SyncManager", () => {
       const result = await sync.syncPage("records/abs-path", vaultPath);
       expect(result.success).toBe(false);
       expect(result.error).toContain("Invalid slug");
+    });
+  });
+
+  describe("classifyVaultFile", () => {
+    test("classifies a committed file with complete indexes as already synchronized", async () => {
+      const slug = "records/committed-a";
+      writeMdFile(vaultPath, `${slug}.md`, { title: "Record A", type: "record", slug }, "Stable body A");
+      await sync.syncPage(slug, vaultPath);
+
+      const result = await sync.classifyVaultFile(slug, vaultPath);
+
+      expect(result.state).toBe("already_synchronized");
+      expect(result.pending?.hash).toBe(db.getPageContentHash(slug) ?? undefined);
+    });
+
+    test("does not acknowledge a hash match when required indexes are incomplete", async () => {
+      const slug = "records/incomplete-b";
+      writeMdFile(vaultPath, `${slug}.md`, { title: "Record B", type: "record", slug }, "Stable body B");
+      await sync.syncPage(slug, vaultPath);
+      db.rawDb.prepare("DELETE FROM chunks_fts WHERE page_slug = ?").run(slug);
+
+      const result = await sync.classifyVaultFile(slug, vaultPath);
+
+      expect(result.state).toBe("needs_sync");
+    });
+
+    test("a file that changed after watcher observation stays actionable", async () => {
+      const slug = "records/race-c";
+      writeMdFile(vaultPath, `${slug}.md`, { title: "Record C", type: "record", slug }, "Stable body C");
+      await sync.syncPage(slug, vaultPath);
+      const observed = await sync.classifyVaultFile(slug, vaultPath);
+      expect(observed.pending).toBeDefined();
+
+      writeMdFile(vaultPath, `${slug}.md`, { title: "Record C", type: "record", slug }, "External edit C");
+      const result = await sync.classifyVaultFile(slug, vaultPath, observed.pending);
+
+      expect(result.state).toBe("needs_sync");
+      expect(result.pending?.hash).not.toBe(observed.pending?.hash);
+    });
+
+    test("classifies a vanished observed file as missing", async () => {
+      const result = await sync.classifyVaultFile("records/missing-d", vaultPath);
+      expect(result.state).toBe("missing");
+    });
+
+    test("a moved file stays actionable and identifies the superseded committed path", async () => {
+      const effectiveSlug = "records/item-e";
+      const originalSlug = effectiveSlug;
+      const movedSlug = "records/moved-e";
+      writeMdFile(
+        vaultPath,
+        `${originalSlug}.md`,
+        { title: "Record E", type: "record", slug: effectiveSlug },
+        "Stable body E",
+      );
+      await sync.syncPage(originalSlug, vaultPath);
+      const original = await sync.classifyVaultFile(originalSlug, vaultPath);
+      expect(original.pending).toBeDefined();
+
+      const movedPath = join(vaultPath, `${movedSlug}.md`);
+      renameSync(join(vaultPath, `${originalSlug}.md`), movedPath);
+      const movedStat = statSync(movedPath);
+      const result = await sync.classifyVaultFile(movedSlug, vaultPath, {
+        ...original.pending!,
+        slug: movedSlug,
+        fullPath: movedPath,
+        mtime: { mtime: movedStat.mtimeMs, size: movedStat.size },
+      });
+
+      expect(result.state).toBe("needs_sync");
+      expect(result.replacesFullPath).toBe(join(vaultPath, `${effectiveSlug}.md`));
+
+      const raced = await sync.classifyVaultFile(movedSlug, vaultPath, {
+        ...result.pending!,
+        hash: "stale-observation",
+      });
+      expect(raced.state).toBe("needs_sync");
+      expect(raced.replacesFullPath).toBe(join(vaultPath, `${effectiveSlug}.md`));
+    });
+
+    test("real Known Relations projection writes stay below watcher backpressure", async () => {
+      const slugs = Array.from({ length: 100 }, (_, i) => `records/internal-${i}`);
+      for (const [i, slug] of slugs.entries()) {
+        writeMdFile(vaultPath, `${slug}.md`, { title: `Record ${i}`, type: "record", slug }, `Body ${i}`);
+      }
+      const initial = await sync.syncAll(vaultPath);
+      expect(initial.synced).toBe(100);
+
+      let syncPageCalls = 0;
+      const originalSyncPage = sync.syncPage.bind(sync);
+      sync.syncPage = async (...args) => {
+        syncPageCalls++;
+        return originalSyncPage(...args);
+      };
+      const watcher = new FileWatcher(sync, vaultPath, { db, bulkThreshold: 50 });
+      await watcher.scanOnce();
+      expect(syncPageCalls).toBe(0);
+
+      for (let i = 0; i < slugs.length; i++) {
+        db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+          .run(slugs[i], slugs[(i + 1) % slugs.length], "related");
+      }
+      const pages = new PageManager(db, vaultPath, undefined, lance as any);
+      expect(pages.syncAffectedSlugs(slugs)).toEqual([]);
+
+      await watcher.scanOnce();
+      const status = watcher.getBulkStatus();
+      expect(status).toMatchObject({
+        paused: false,
+        observedChanged: 100,
+        internallyAcknowledged: 100,
+        actionablePending: 0,
+      });
+      expect(syncPageCalls).toBe(0);
+      await watcher.stop();
+    });
+
+    test("real watcher does not delete the committed page when its file path moves", async () => {
+      const slug = "records/move-safe-f";
+      writeMdFile(vaultPath, `${slug}.md`, { title: "Record F", type: "record", slug }, "Stable body F");
+      await sync.syncPage(slug, vaultPath);
+      const watcher = new FileWatcher(sync, vaultPath, { db });
+      await watcher.scanOnce();
+
+      renameSync(join(vaultPath, `${slug}.md`), join(vaultPath, "records/moved-f.md"));
+      await watcher.scanOnce();
+      await watcher.stop();
+
+      expect(db.getPage(slug)).not.toBeNull();
+      expect(db.getPageFilePath(slug)).toBe("records/moved-f.md");
+      expect(existsSync(join(vaultPath, db.getPageFilePath(slug)!))).toBe(true);
+      expect(new PageManager(db, vaultPath).getBySlug(slug)).not.toBeNull();
     });
   });
 
