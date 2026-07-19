@@ -81,3 +81,5 @@ the adapter rejects drift before target loading and revalidates after the health
 request resolves, including the exact approved legacy plist. The service derives
 the attestation from the same bytes it parses into runtime dependencies rather
 than re-reading the config path. It also rejects non-canonical XML key encodings.
+If bootstrap cannot publish a verified PID or health, the adapter boots out and
+proves the exact fixed job is not loaded; cleanup failure is a closed result.

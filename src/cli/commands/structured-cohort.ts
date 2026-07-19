@@ -514,6 +514,22 @@ export function createProductionRollbackDeps(options: ProductionRollbackOptions)
       }
       throw new Error("invalid");
     },
+    stop: async () => {
+      validateCurrentLegacyTarget();
+      const service = `gui/${uid}/${STRUCTURED_COHORT_LABEL}`;
+      const before = launchctl(["print", service]);
+      if (before.status === 113) return;
+      if (before.status !== 0) throw new Error("invalid");
+      const stopped = launchctl(["bootout", service]);
+      if (stopped.status !== 0 && stopped.status !== 113) throw new Error("invalid");
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const after = launchctl(["print", service]);
+        if (after.status === 113) return;
+        if (after.status !== 0) throw new Error("invalid");
+        if (attempt < 4) await new Promise((resolvePoll) => setTimeout(resolvePoll, 100));
+      }
+      throw new Error("invalid");
+    },
     currentProcessId: async () => {
       validateCurrentLegacyTarget();
       const domain = `gui/${uid}`;

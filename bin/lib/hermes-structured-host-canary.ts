@@ -268,6 +268,7 @@ export async function proveStructuredCohortRollback(
     const domain = `gui/${process.getuid?.()}`;
     const launchctlCalls: string[][] = [];
     let loaded = true;
+    const jobIsLoaded = (): boolean => loaded;
     let servicePid = 7001;
     const deps = createProductionRollbackDeps({
       home,
@@ -331,12 +332,13 @@ export async function proveStructuredCohortRollback(
         restart: "RESTART_FAILED",
         health: "HEALTH_NOT_VERIFIED",
       }[fault];
-      const expectedCallCount = { mutation: 0, restart: 3, health: 4 }[fault];
+      const expectedCallCount = { mutation: 0, restart: 4, health: 7 }[fault];
       const faultProven =
         result.status === "failed" &&
         result.code === expectedCode &&
         launchctlCalls.length === expectedCallCount &&
         commonFailureProof &&
+        (fault === "mutation" || !jobIsLoaded()) &&
         (fault === "mutation"
           ? updated.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY === "structured" && backupBytes.toString("utf8") === "closed-fault"
           : updated.EnvironmentVariables.CBRAIN_OUTPUT_BOUNDARY === "legacy" && backupBytes.equals(originalBytes));

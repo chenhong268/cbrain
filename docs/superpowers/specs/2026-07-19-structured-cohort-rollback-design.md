@@ -98,7 +98,11 @@ paths.
    the exact approved legacy plist as well as receipt and config snapshots.
    This prevents another profile, a reverted persisted mode, or an unrelated
    loopback service from proving health.
-7. Return a closed JSON receipt and release the lock.
+7. If bootstrap succeeds but PID publication or health cannot be verified,
+   boot out only the exact fixed cohort job and require `launchctl print` to
+   report the explicit not-loaded status before returning failure. A failed
+   cleanup returns `CLEANUP_FAILED`; it is never silently swallowed.
+8. Return a closed JSON receipt and release the lock.
 
 If the plist is already legacy and health proves legacy, return `already_legacy`
 without restart. If it is legacy but unhealthy (for example, a previous
@@ -122,10 +126,11 @@ Success:
 }
 ```
 
-Failure is exit 1 with `{schema_version,status:"failed",code}`. Codes are a
-closed allowlist such as `RECEIPT_INVALID`, `TARGET_INVALID`, `LOCKED`,
-`MUTATION_FAILED`, `RESTART_FAILED`, and `HEALTH_NOT_VERIFIED`. No error message,
-stack, path, label supplied by disk, command output, or response body is copied.
+Failure is exit 1 with `{schema_version,status:"failed",code}`. Codes are the
+closed allowlist `LOCKED`, `LOCK_RELEASE_FAILED`, `TARGET_INVALID`,
+`MUTATION_FAILED`, `RESTART_FAILED`, `HEALTH_NOT_VERIFIED`, and
+`CLEANUP_FAILED`. No error message, stack, path, label supplied by disk, command
+output, or response body is copied.
 
 ## 6. Health and release gate
 

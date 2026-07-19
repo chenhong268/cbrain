@@ -22,6 +22,7 @@ import {
   ROLLBACK_COMMAND_ID,
   STRUCTURED_COHORT_LABEL,
   deploymentDigest,
+  rollbackStructuredCohort,
 } from "../../src/core/release/structured-cohort-rollback.js";
 
 const roots = new Set<string>();
@@ -276,6 +277,51 @@ describeDarwin("structured cohort production adapter", () => {
     expect(await deps.restart()).toBe(9123);
     expect(postBootstrapPrints).toBe(3);
     release?.();
+  });
+
+  test("stops the exact named job when bootstrap succeeds but pid publication never verifies", async () => {
+    const f = fixture();
+    const uid = process.getuid?.() as number;
+    const service = `gui/${uid}/${STRUCTURED_COHORT_LABEL}`;
+    const domain = `gui/${uid}`;
+    const calls: string[][] = [];
+    let loaded = true;
+    let bootstrapped = false;
+    const deps = createProductionRollbackDeps({
+      home: f.home,
+      runtimePath: f.runtimePath,
+      expectedScriptPath: f.scriptPath,
+      activeConfigPath: f.configPath,
+      launchctl: (args) => {
+        calls.push([...args]);
+        if (args[0] === "print" && args[1] === service) {
+          if (!loaded) return { status: 113, stdout: "" };
+          return bootstrapped ? { status: 0, stdout: "state = running\n" } : { status: 0, stdout: "\tpid = 7001\n" };
+        }
+        if (args[0] === "bootout" && args[1] === service) {
+          loaded = false;
+          return { status: 0, stdout: "" };
+        }
+        if (args[0] === "bootstrap" && args[1] === domain && args[2] === f.plistPath) {
+          loaded = true;
+          bootstrapped = true;
+          return { status: 0, stdout: "" };
+        }
+        return { status: 64, stdout: "" };
+      },
+    });
+    expect(await rollbackStructuredCohort(deps)).toEqual({
+      schema_version: 1,
+      status: "failed",
+      code: "RESTART_FAILED",
+    });
+    expect(loaded).toBe(false);
+    expect(calls.slice(-3)).toEqual([
+      ["print", service],
+      ["bootout", service],
+      ["print", service],
+    ]);
+    expect(calls.some((call) => call.join(" ").includes("unrelated"))).toBe(false);
   });
 
   test("rejects non-canonical entrypoints, dangerous environment, and execution-affecting plist keys", () => {

@@ -20,7 +20,8 @@ export type RollbackFailureCode =
   | "TARGET_INVALID"
   | "MUTATION_FAILED"
   | "RESTART_FAILED"
-  | "HEALTH_NOT_VERIFIED";
+  | "HEALTH_NOT_VERIFIED"
+  | "CLEANUP_FAILED";
 
 export type RollbackResult =
   | {
@@ -39,6 +40,7 @@ export type RollbackDeps = {
   loadTarget(): RollbackTarget;
   writeLegacy(): void;
   restart(): Promise<number>;
+  stop(): Promise<void>;
   currentProcessId(): Promise<number>;
   readHealth(): Promise<{
     ok: boolean;
@@ -108,6 +110,18 @@ async function healthIsLegacy(deps: RollbackDeps, target: RollbackTarget, proces
   }
 }
 
+async function stoppedFailure(
+  deps: RollbackDeps,
+  code: "RESTART_FAILED" | "HEALTH_NOT_VERIFIED",
+): Promise<RollbackResult> {
+  try {
+    await deps.stop();
+    return { schema_version: 1, status: "failed", code };
+  } catch {
+    return { schema_version: 1, status: "failed", code: "CLEANUP_FAILED" };
+  }
+}
+
 async function executeLockedRollback(deps: RollbackDeps): Promise<RollbackResult> {
     let target: RollbackTarget;
     try {
@@ -146,9 +160,9 @@ async function executeLockedRollback(deps: RollbackDeps): Promise<RollbackResult
         if (attempt < 4) await deps.sleep(200);
       }
     } catch {
-      return { schema_version: 1, status: "failed", code: "RESTART_FAILED" };
+      return stoppedFailure(deps, "RESTART_FAILED");
     }
-    return { schema_version: 1, status: "failed", code: "HEALTH_NOT_VERIFIED" };
+    return stoppedFailure(deps, "HEALTH_NOT_VERIFIED");
 }
 
 export async function rollbackStructuredCohort(deps: RollbackDeps): Promise<RollbackResult> {

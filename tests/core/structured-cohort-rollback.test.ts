@@ -45,6 +45,7 @@ function harness(initial = target()) {
       healthyMode = current.mode;
       return 4242;
     },
+    stop: async () => { calls.push("stop"); },
     currentProcessId: async () => 4242,
     readHealth: async () => ({
       ok: true,
@@ -132,6 +133,40 @@ describe("structured cohort rollback (#357)", () => {
       expect(result.status).toBe("failed");
       expect(h.calls.at(-1)).toBe("unlock");
     }
+  });
+
+  test("stops the fixed job before returning an unverified restart or health failure", async () => {
+    const restart = harness();
+    restart.deps.restart = async () => {
+      restart.calls.push("restart");
+      throw new Error("unverified");
+    };
+    expect(await rollbackStructuredCohort(restart.deps)).toEqual({
+      schema_version: 1,
+      status: "failed",
+      code: "RESTART_FAILED",
+    });
+    expect(restart.calls).toEqual(["lock", "write", "restart", "stop", "unlock"]);
+
+    const health = harness();
+    health.deps.readHealth = async () => ({ ok: true, output_boundary: "structured" });
+    expect(await rollbackStructuredCohort(health.deps)).toEqual({
+      schema_version: 1,
+      status: "failed",
+      code: "HEALTH_NOT_VERIFIED",
+    });
+    expect(health.calls).toEqual(["lock", "write", "restart", "stop", "unlock"]);
+  });
+
+  test("reports a closed cleanup failure when the fixed job cannot be proven stopped", async () => {
+    const h = harness();
+    h.deps.readHealth = async () => ({ ok: true, output_boundary: "structured" });
+    h.deps.stop = async () => { throw new Error("private launch detail"); };
+    expect(await rollbackStructuredCohort(h.deps)).toEqual({
+      schema_version: 1,
+      status: "failed",
+      code: "CLEANUP_FAILED",
+    });
   });
 
   test("rejects health from an unrelated process or deployment", async () => {
