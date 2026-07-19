@@ -889,6 +889,66 @@ exit 0
     }
   });
 
+  test("supervisor accepts truthful rollout-ready evidence only with the fixed rollback command", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-supervisor-ready-schema-"));
+    try {
+      const commandId = "cbrain-structured-cohort-rollback-v1" as const;
+      const parsed = JSON.parse(validSupervisorOutput({ ...validInput(), rollback_command_id: commandId }));
+      parsed.report.rollback_command_id = commandId;
+      const output = JSON.stringify(parsed);
+      const payload = join(root, "payload.json");
+      const fakeBun = join(root, "fake-bun");
+      const fakeHermes = join(root, "fake-hermes");
+      writeFileSync(payload, `${output}\n`);
+      writeFileSync(fakeBun, `#!/bin/sh\n/bin/cat "${payload}"\nexit 0\n`);
+      writeFileSync(fakeHermes, "#!/bin/sh\nexit 0\n");
+      chmodSync(fakeBun, 0o755);
+      chmodSync(fakeHermes, 0o755);
+      const wrapper = join(import.meta.dir, "../../bin/run-hermes-structured-host-canary.sh");
+      const result = Bun.spawnSync({
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          fakeBun,
+          "--hermes",
+          fakeHermes,
+          "--approved-commit",
+          "a".repeat(40),
+        ],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString().trim()).toBe(output);
+
+      parsed.report.rollback_command_id = "unapproved-rollback";
+      writeFileSync(payload, `${JSON.stringify(parsed)}\n`);
+      const rejected = Bun.spawnSync({
+        cmd: [
+          "/bin/sh",
+          wrapper,
+          "--bun",
+          fakeBun,
+          "--hermes",
+          fakeHermes,
+          "--approved-commit",
+          "a".repeat(40),
+        ],
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(rejected.exitCode).toBe(2);
+      expect(rejected.stdout.toString().trim()).toBe(
+        '{"schema_version":1,"status":"fatal","code":"CANARY_OUTPUT_INVALID"}',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("supervisor accepts a truthful closed no-go when a case contract fails", () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-supervisor-truthful-no-go-"));
     try {

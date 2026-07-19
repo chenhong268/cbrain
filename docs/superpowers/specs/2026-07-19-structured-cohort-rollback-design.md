@@ -146,7 +146,9 @@ The real Hermes gate may set
 repository-owned isolated rollback proof has just exercised the same production
 orchestrator through mutation, restart adapter, and health verification. A
 boolean constant or documentation claim is insufficient. Proof failure keeps
-the field null and the overall verdict no-go.
+the field null and the overall verdict no-go. The fixed ID is part of the closed
+public report so the outer supervisor can independently recompute
+`rollout_readiness` and the final verdict; unknown IDs are rejected.
 
 ## 7. Testing
 

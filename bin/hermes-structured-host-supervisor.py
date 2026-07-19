@@ -444,12 +444,14 @@ def report_is_consistent(payload) -> bool:
     if digest_mismatch or reported_evidence_mismatch:
         reasons.append("EVIDENCE_DIGEST_MISMATCH")
     host_compatible = len(reasons) == 0
-    reasons.append("ROLLBACK_NOT_EXECUTABLE")
+    rollout_ready = report["rollback_command_id"] == "cbrain-structured-cohort-rollback-v1"
+    if not rollout_ready:
+        reasons.append("ROLLBACK_NOT_EXECUTABLE")
     return (
         report["reason_codes"] == reasons
         and report["host_compatibility"] == ("compatible" if host_compatible else "incompatible")
-        and report["rollout_readiness"] == "blocked"
-        and report["verdict"] == "no-go"
+        and report["rollout_readiness"] == ("ready" if rollout_ready else "blocked")
+        and report["verdict"] == ("go" if host_compatible and rollout_ready else "no-go")
         and report["matrix"] == {
             "expected_cases": 24,
             "completed_cases": 24,
@@ -460,7 +462,7 @@ def report_is_consistent(payload) -> bool:
 
 def valid_report(value) -> bool:
     keys = {
-        "verdict", "host_compatibility", "rollout_readiness", "reason_codes", "matrix",
+        "verdict", "host_compatibility", "rollout_readiness", "rollback_command_id", "reason_codes", "matrix",
         "evidence_manifest", "evidence_generation_digest", "semantic_answer_quality_not_measured",
     }
     if not isinstance(value, dict) or set(value) != keys:
@@ -470,6 +472,7 @@ def valid_report(value) -> bool:
         value["verdict"] in ("go", "no-go")
         and value["host_compatibility"] in ("compatible", "incompatible")
         and value["rollout_readiness"] in ("ready", "blocked")
+        and value["rollback_command_id"] in (None, "cbrain-structured-cohort-rollback-v1")
         and isinstance(value["reason_codes"], list)
         and len(set(value["reason_codes"])) == len(value["reason_codes"])
         and all(code in REASON_CODES for code in value["reason_codes"])

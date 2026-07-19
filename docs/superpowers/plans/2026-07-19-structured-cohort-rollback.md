@@ -83,3 +83,6 @@ the attestation from the same bytes it parses into runtime dependencies rather
 than re-reading the config path. It also rejects non-canonical XML key encodings.
 If bootstrap cannot publish a verified PID or health, the adapter boots out and
 proves the exact fixed job is not loaded; cleanup failure is a closed result.
+The outer canary supervisor accepts `ready/go` only when the closed public report
+carries the fixed rollback command ID; null remains blocked/no-go and unknown
+IDs fail schema validation.

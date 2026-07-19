@@ -185,6 +185,7 @@ export interface HermesStructuredCanaryReport {
   verdict: "go" | "no-go";
   host_compatibility: "compatible" | "incompatible";
   rollout_readiness: "ready" | "blocked";
+  rollback_command_id: null | "cbrain-structured-cohort-rollback-v1";
   reason_codes: CanaryReasonCode[];
   matrix: {
     expected_cases: 24;
@@ -2791,6 +2792,7 @@ export function evaluateCanaryReport(input: CanaryEvaluationInput): HermesStruct
     verdict: hostCompatible && rolloutReady ? "go" : "no-go",
     host_compatibility: hostCompatible ? "compatible" : "incompatible",
     rollout_readiness: rolloutReady ? "ready" : "blocked",
+    rollback_command_id: input.rollback_command_id,
     reason_codes: reasons,
     matrix: {
       expected_cases: 24,
