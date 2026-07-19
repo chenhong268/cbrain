@@ -62,6 +62,10 @@ only that attestation, never the key, config bytes, or path. The command rejects
 the target unless the current bytes match the receipt's frozen attestation,
 snapshots those bytes, and revalidates them before and after the health request,
 so another profile cannot be adopted as new truth or satisfy rollback health.
+The service derives its health attestation from the exact byte buffer passed to
+`JSON.parse`, threads it through dependency construction, and never re-reads the
+config path inside `buildContext`; health therefore proves the profile actually
+loaded by the process rather than a later path state.
 Receipt and plist symlinks, hardlinks, non-regular files, wrong
 ownership, unsafe permissions, non-loopback ports, duplicate JSON keys, extra
 keys, or digest drift fail before mutation. Diagnostics never print content or
@@ -89,9 +93,11 @@ paths.
    accepted only as the expected bootout condition; bootstrap failure is fatal.
 6. Poll only `http://127.0.0.1:<receipt-port>/health` with redirects disabled
    and a fixed deadline. Success requires legacy mode plus the fixed cohort ID,
-   receipt config identity and deployment digest, and the PID reported by
-   `launchctl print` after bootstrap. This prevents another profile or an
-   unrelated loopback service from proving health.
+   receipt config attestation and deployment digest, and the PID reported by
+   `launchctl print` after bootstrap. Before accepting the response, revalidate
+   the exact approved legacy plist as well as receipt and config snapshots.
+   This prevents another profile, a reverted persisted mode, or an unrelated
+   loopback service from proving health.
 7. Return a closed JSON receipt and release the lock.
 
 If the plist is already legacy and health proves legacy, return `already_legacy`

@@ -428,6 +428,7 @@ describeDarwin("structured cohort production adapter", () => {
       });
       const release = deps.acquireLock();
       deps.loadTarget();
+      deps.writeLegacy();
       expect(await deps.readHealth()).toEqual({ ok: false });
       release?.();
     }
@@ -510,6 +511,27 @@ describeDarwin("structured cohort production adapter", () => {
     });
     const release = deps.acquireLock();
     deps.loadTarget();
+    expect(deps.readHealth()).rejects.toThrow();
+    release?.();
+  });
+
+  test("revalidates the approved legacy plist after the health request resolves", async () => {
+    const f = fixture();
+    const originalStructuredPlist = readFileSync(f.plistPath);
+    const deps = createProductionRollbackDeps({
+      home: f.home,
+      runtimePath: f.runtimePath,
+      expectedScriptPath: f.scriptPath,
+      activeConfigPath: f.configPath,
+      healthRequest: async () => {
+        writeFileSync(f.plistPath, originalStructuredPlist, { mode: 0o600 });
+        chmodSync(f.plistPath, 0o600);
+        return { status: 200, redirected: false, body: JSON.stringify({ ok: true }) };
+      },
+    });
+    const release = deps.acquireLock();
+    deps.loadTarget();
+    deps.writeLegacy();
     expect(deps.readHealth()).rejects.toThrow();
     release?.();
   });

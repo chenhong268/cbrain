@@ -523,8 +523,7 @@ export function createProductionRollbackDeps(options: ProductionRollbackOptions)
       validateReceiptSnapshot();
       validateActiveConfigSnapshot();
       const response = await healthRequest(`http://127.0.0.1:${receipt.health_port}/health`);
-      validateReceiptSnapshot();
-      validateActiveConfigSnapshot();
+      validateCurrentLegacyTarget();
       if (response.status !== 200 || response.redirected || Buffer.byteLength(response.body, "utf8") > 4096) return { ok: false };
       const health = JSON.parse(response.body) as Record<string, unknown>;
       return {

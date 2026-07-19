@@ -198,7 +198,7 @@ export function register(program: Command) {
 
       let deps: ReturnType<typeof createDeps>;
       try {
-        deps = createDeps(config, true, vaultBoundary);
+        deps = createDeps(loaded, true, vaultBoundary);
       } catch (e) {
         // #209: FK violation during migration → fail fast with anonymized diagnostic.
         // No HTTP/MCP/watcher/LanceDB start; no crash-loop (single clean exit).

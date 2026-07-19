@@ -9,6 +9,7 @@ import { buildContext } from "../../src/mcp/context.js";
 import type { CBrainDeps } from "../../src/mcp/server.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
+import { loadConfigWithPath } from "../../src/cli/context.js";
 
 describe("GET /health runtime freshness (#320)", () => {
   let root: string;
@@ -84,6 +85,10 @@ describe("GET /health runtime freshness (#320)", () => {
     process.env.CBRAIN_ROLLOUT_COHORT_ID = "cbrain-structured-pilot-v1";
     process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY = configKey;
     process.env.CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST = digest;
+    const loaded = loadConfigWithPath(root, configPath);
+    const replacementBytes = Buffer.from('{"profile":"replacement"}');
+    writeFileSync(configPath, replacementBytes);
+    deps.rolloutConfigAttestation = loaded.rolloutConfigAttestation;
     const ctx = buildContext(deps);
     for (const [key, value] of Object.entries({
       CBRAIN_CONFIG: previous.config,
@@ -99,6 +104,7 @@ describe("GET /health runtime freshness (#320)", () => {
     const health = await fetch(endpoint).then((response) => response.json());
     expect(health.cohort_id).toBe("cbrain-structured-pilot-v1");
     expect(health.config_attestation).toBe(createHmac("sha256", configKey).update(configBytes).digest("hex"));
+    expect(health.config_attestation).not.toBe(createHmac("sha256", configKey).update(replacementBytes).digest("hex"));
     expect(health.deployment_digest).toBe(digest);
     expect(health.process_id).toBe(process.pid);
   });

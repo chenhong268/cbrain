@@ -1,6 +1,4 @@
 import { join } from "node:path";
-import { createHmac } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { CBrainDB } from "../storage/sqlite.js";
 import { LanceDBManager } from "../storage/lancedb.js";
 import { HybridSearch } from "../core/retrieval/search.js";
@@ -85,7 +83,7 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; vaultBoundary?: TrustedVaultBoundary; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile }): ToolContext {
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; vaultBoundary?: TrustedVaultBoundary; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile; rolloutConfigAttestation?: string }): ToolContext {
   const { db, embedding, lance, vaultPath, vaultBoundary, dbPath, llm, profileDir, watcher } = deps;
   const outputsDir = deps.runtimePath;
   const logger = new Logger(outputsDir);
@@ -101,18 +99,18 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const cohortId = process.env.CBRAIN_ROLLOUT_COHORT_ID;
   const configIdentity = process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY;
   const deploymentDigest = process.env.CBRAIN_ROLLOUT_DEPLOYMENT_DIGEST;
+  const configAttestation = deps.rolloutConfigAttestation;
   let rolloutIdentity: ToolContext["rolloutIdentity"];
   if (
     cohortId === "cbrain-structured-pilot-v1" && /^[a-f0-9]{64}$/.test(configIdentity ?? "") &&
-    /^[a-f0-9]{64}$/.test(deploymentDigest ?? "") && process.env.CBRAIN_CONFIG
+    /^[a-f0-9]{64}$/.test(deploymentDigest ?? "") && /^[a-f0-9]{64}$/.test(configAttestation ?? "") &&
+    process.env.CBRAIN_CONFIG
   ) {
-    try {
-      const configAttestation = createHmac("sha256", configIdentity as string)
-        .update(readFileSync(process.env.CBRAIN_CONFIG)).digest("hex");
-      rolloutIdentity = { cohortId, configAttestation, deploymentDigest: deploymentDigest as string };
-    } catch {
-      rolloutIdentity = undefined;
-    }
+    rolloutIdentity = {
+      cohortId,
+      configAttestation: configAttestation as string,
+      deploymentDigest: deploymentDigest as string,
+    };
   }
   const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger, nerMode, deferredNerSubmitter });
   const ingest = new IngestManager(db, embedding, lance, vaultPath, llm, undefined, {

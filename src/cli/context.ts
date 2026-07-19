@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CBrainDB } from "../storage/sqlite.js";
@@ -54,6 +55,8 @@ export interface LoadedCBrainConfig {
   config: CBrainConfig;
   configPath: string;
   configRoot: string;
+  /** #357: HMAC of the exact bytes parsed into `config`, never a later path re-read. */
+  rolloutConfigAttestation?: string;
 }
 
 export type IngestNerMode = NerMode;
@@ -108,10 +111,15 @@ function resolveConfigPath(startDir: string, explicitPath?: string): string {
 
 function loadResolvedConfig(startDir: string, explicitPath?: string): LoadedCBrainConfig {
   const configPath = resolveConfigPath(startDir, explicitPath);
+  const configBytes = readFileSync(configPath);
+  const rolloutKey = process.env.CBRAIN_ROLLOUT_CONFIG_IDENTITY;
   return {
-    config: JSON.parse(readFileSync(configPath, "utf-8")),
+    config: JSON.parse(configBytes.toString("utf8")),
     configPath,
     configRoot: dirname(configPath),
+    rolloutConfigAttestation: /^[a-f0-9]{64}$/.test(rolloutKey ?? "")
+      ? createHmac("sha256", rolloutKey as string).update(configBytes).digest("hex")
+      : undefined,
   };
 }
 
@@ -161,10 +169,12 @@ export function loadConfig(): CBrainConfig {
 }
 
 export function createDeps(
-  config: CBrainConfig,
+  input: CBrainConfig | LoadedCBrainConfig,
   requireEmbedding = true,
   vaultBoundary?: TrustedVaultBoundary,
 ): CBrainDeps {
+  const loaded = "config" in input && "configPath" in input ? input : undefined;
+  const config = loaded?.config ?? input as CBrainConfig;
   const db = new CBrainDB(config.dbPath);
   const embeddingProvider = config.embedding.provider ?? "zhipu";
   const isDeterministic = embeddingProvider === "deterministic";
@@ -206,5 +216,19 @@ export function createDeps(
 
   const nerIngestMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, config.ner?.ingest_mode);
   const toolProfile = resolveToolProfile(process.env.CBRAIN_MCP_TOOL_PROFILE);
-  return { db, embedding, lance, vaultPath: config.vaultPath, vaultBoundary, dbPath: config.dbPath, llm, profileDir, runtimePath: resolveRuntimePath(config), search: search ?? undefined, nerIngestMode, toolProfile };
+  return {
+    db,
+    embedding,
+    lance,
+    vaultPath: config.vaultPath,
+    vaultBoundary,
+    dbPath: config.dbPath,
+    llm,
+    profileDir,
+    runtimePath: resolveRuntimePath(config),
+    search: search ?? undefined,
+    nerIngestMode,
+    toolProfile,
+    rolloutConfigAttestation: loaded?.rolloutConfigAttestation,
+  };
 }

@@ -78,4 +78,6 @@ The final transaction pass replaces PID/path stale-lock recovery with a kernel
 advisory lock and binds the exact loaded config bytes through a private-keyed
 health attestation. The receipt freezes that attestation at rollout creation;
 the adapter rejects drift before target loading and revalidates after the health
-request resolves. It also rejects non-canonical XML key encodings.
+request resolves, including the exact approved legacy plist. The service derives
+the attestation from the same bytes it parses into runtime dependencies rather
+than re-reading the config path. It also rejects non-canonical XML key encodings.
