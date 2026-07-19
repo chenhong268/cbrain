@@ -36,6 +36,7 @@ import {
   createAnonymousFixtureSnapshot,
   countExactCl100kTokens,
   evaluateCanaryReport,
+  proveStructuredCohortRollback,
   buildCanaryToolArguments,
   startObservingMcpProxy,
   runRealHermesProjectionCase,
@@ -241,6 +242,22 @@ describe("Hermes structured host canary contract", () => {
     expect(report.rollout_readiness).toBe("blocked");
     expect(report.verdict).toBe("no-go");
     expect(report.reason_codes).toEqual(["ROLLBACK_NOT_EXECUTABLE"]);
+  });
+
+  test("marks rollout ready only after the repository-owned rollback proof succeeds", async () => {
+    const commandId = await proveStructuredCohortRollback();
+    expect(commandId).toBe("cbrain-structured-cohort-rollback-v1");
+    const report = evaluateCanaryReport({ ...validInput(), rollback_command_id: commandId });
+    expect(report).toMatchObject({
+      verdict: "go",
+      host_compatibility: "compatible",
+      rollout_readiness: "ready",
+      reason_codes: [],
+    });
+
+    for (const fault of ["mutation", "restart", "health"] as const) {
+      expect(await proveStructuredCohortRollback(fault)).toBeNull();
+    }
   });
 
   test("fails closed when a primary case is missing or a projection contract is false", () => {

@@ -27,6 +27,14 @@ import { LanceDBManager } from "../../src/storage/lancedb.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
+  COHORT_ID,
+  ROLLBACK_COMMAND_ID,
+  STRUCTURED_COHORT_LABEL,
+  deploymentDigest,
+  rollbackStructuredCohort,
+  type RollbackTarget,
+} from "../../src/core/release/structured-cohort-rollback.js";
+import {
   CREDENTIAL_PATH_UNSAFE_PATTERNS,
   DISPLAY_UNSAFE_PATTERNS,
   SLUG_VALUE_RE,
@@ -183,6 +191,53 @@ export interface HermesStructuredCanaryReport {
   evidence_manifest: PublicEvidenceManifest;
   evidence_generation_digest: string;
   semantic_answer_quality_not_measured: true;
+}
+
+/** Repository-owned, mutation-bearing proof for the closed rollback command ID. */
+export async function proveStructuredCohortRollback(
+  fault?: "mutation" | "restart" | "health",
+): Promise<null | typeof ROLLBACK_COMMAND_ID> {
+  const args = ["/fixture/bin/cbrain-serve-http.sh", "serve", "--http", "--port", "3401"];
+  let target: RollbackTarget = {
+    label: STRUCTURED_COHORT_LABEL,
+    mode: "structured",
+    healthPort: 3401,
+    programArguments: args,
+    deploymentDigest: deploymentDigest({ label: STRUCTURED_COHORT_LABEL, programArguments: args, healthPort: 3401 }),
+  };
+  const unrelated = { mode: "structured", restarts: 0 };
+  let restarts = 0;
+  let unlocked = false;
+  const result = await rollbackStructuredCohort({
+    acquireLock: () => () => { unlocked = true; },
+    loadTarget: () => target,
+    writeLegacy: () => {
+      if (fault === "mutation") throw new Error("closed fault");
+      target = { ...target, mode: "legacy" };
+    },
+    restart: async () => {
+      if (fault === "restart") throw new Error("closed fault");
+      restarts += 1;
+    },
+    readHealth: async () => ({
+      ok: true,
+      output_boundary: fault === "health" ? "structured" : target.mode,
+    }),
+    sleep: async () => {},
+  });
+  const proven =
+    result.status === "rolled_back" &&
+    result.command_id === ROLLBACK_COMMAND_ID &&
+    result.cohort_id === COHORT_ID &&
+    result.mode === "legacy" &&
+    result.restart_performed &&
+    result.health_verified &&
+    target.mode === "legacy" &&
+    restarts === 1 &&
+    unrelated.mode === "structured" &&
+    unrelated.restarts === 0 &&
+    unlocked;
+  return proven ? ROLLBACK_COMMAND_ID : null;
 }
 
 const MODES = ["legacy", "structured"] as const;

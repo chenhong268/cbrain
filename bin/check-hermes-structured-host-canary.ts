@@ -13,6 +13,7 @@ import {
   captureStableLiveServiceFingerprint,
   createHermesRuntimeSnapshot,
   evaluateCanaryReport,
+  proveStructuredCohortRollback,
   runRealHermesCanaryMatrix,
   type HermesRuntimeManifest,
   type PublicEvidenceManifest,
@@ -251,7 +252,7 @@ try {
     evidence_manifest: expectedEvidenceManifest,
     observed_evidence_manifest: observedEvidenceManifest,
     evidence_generation_digest: evidenceDigest,
-    rollback_command_id: null,
+    rollback_command_id: await proveStructuredCohortRollback(),
   });
   const output = {
     schema_version: 1,
