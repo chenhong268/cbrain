@@ -2260,47 +2260,73 @@ describe("paired anonymous CBrain fixture and observing MCP proxy", () => {
 
   test("serves fixed normal and true-empty results from disposable database clones", async () => {
     const fixture = await createAnonymousFixtureSnapshot();
-    const runtime = await fixture.openRuntime("structured", "direct-preflight");
-    const client = new Client({
-      name: "anonymous-preflight",
-      version: "0.0.0",
-    });
     try {
-      await client.connect(
-        new StreamableHTTPClientTransport(runtime.endpoint, {
-          requestInit: { headers: { "X-CBrain-Tool-Profile": "full" } },
-        }),
-      );
-      for (const tool of tools) {
-        const normal = await client.callTool({
-          name: tool,
-          arguments: buildCanaryToolArguments(tool, "normal"),
+      for (const mode of modes) {
+        const runtime = await fixture.openRuntime(mode, `direct-preflight-${mode}`);
+        const client = new Client({
+          name: `anonymous-preflight-${mode}`,
+          version: "0.0.0",
         });
-        const normalText = JSON.stringify(normal);
-        expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.title);
-        expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.body);
+        try {
+          await client.connect(
+            new StreamableHTTPClientTransport(runtime.endpoint, {
+              requestInit: { headers: { "X-CBrain-Tool-Profile": "full" } },
+            }),
+          );
+          for (const tool of tools) {
+            const normal = await client.callTool({
+              name: tool,
+              arguments: buildCanaryToolArguments(tool, "normal"),
+            });
+            const normalText = JSON.stringify(normal);
+            expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.title);
+            expect(normalText).toContain(ANONYMOUS_FIXTURE_MARKERS.body);
 
-        const empty = await client.callTool({
-          name: tool,
-          arguments: buildCanaryToolArguments(tool, "empty"),
-        });
-        const emptyText = JSON.stringify(empty);
-        expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.title);
-        expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.body);
-        expect(emptyText).toContain("empty");
-        expect(emptyText).toMatch(/(?:count|total)[^0-9]{0,8}0/);
+            const empty = await client.callTool({
+              name: tool,
+              arguments: buildCanaryToolArguments(tool, "empty"),
+            });
+            const emptyText = JSON.stringify(empty);
+            expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.title);
+            expect(emptyText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.body);
+            expect(emptyText).toContain("empty");
+            expect(emptyText).toMatch(/(?:count|total)[^0-9]{0,8}0/);
 
-        const invalid = await client.callTool({
-          name: tool,
-          arguments: buildCanaryToolArguments(tool, "error"),
-        });
-        expect(invalid.isError).toBe(true);
+            const includeRaw = await client.callTool({
+              name: tool,
+              arguments: buildCanaryToolArguments(tool, "include_raw"),
+            });
+            const includeRawText = JSON.stringify(includeRaw);
+            expect(includeRaw.isError).toBeFalsy();
+            expect(includeRawText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential);
+            expect(includeRawText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_path);
+
+            const invalidArguments = buildCanaryToolArguments(tool, "error");
+            const sentText = JSON.stringify(invalidArguments);
+            expect(sentText).toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential);
+            expect(sentText).toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_path);
+            const invalid = await client.callTool({
+              name: tool,
+              arguments: invalidArguments,
+            });
+            const invalidText = JSON.stringify(invalid);
+            expect(invalid).toEqual({
+              content: [{ type: "text", text: "Invalid tool arguments." }],
+              isError: true,
+            });
+            expect(invalidText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_credential);
+            expect(invalidText).not.toContain(ANONYMOUS_FIXTURE_MARKERS.sensitive_path);
+            expect(invalidText).not.toContain("Input validation error");
+            expect(invalidText).not.toMatch(/stack trace|Traceback|\n\s+at\s+/i);
+          }
+          const vectorProbe = await runtime.lance.search(new Float32Array(2048), 1);
+          expect(vectorProbe).toEqual([]);
+        } finally {
+          await client.close().catch(() => {});
+          await runtime.close();
+        }
       }
-      const vectorProbe = await runtime.lance.search(new Float32Array(2048), 1);
-      expect(vectorProbe).toEqual([]);
     } finally {
-      await client.close().catch(() => {});
-      await runtime.close();
       await fixture.close();
     }
     expect(fixture.removed).toBe(true);
