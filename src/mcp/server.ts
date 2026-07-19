@@ -11,6 +11,7 @@ import { registerAllTools } from "./register.js";
 import type { IngestNerMode } from "../cli/context.js";
 import { TOOL_PROFILE_ALLOWLISTS, type ToolProfile } from "./tool-profiles.js";
 import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-artifacts.js";
+import { installMcpValidationErrorBoundary } from "./validation-error-boundary.js";
 
 export interface CBrainDeps {
   db: CBrainDB;
@@ -72,6 +73,7 @@ export function sanitizeError(msg: string): string {
 export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
   const profile: ToolProfile = ctx.toolProfile ?? "full";
   const gate = profile === "full" ? null : new Set(TOOL_PROFILE_ALLOWLISTS[profile]);
+  const restoreValidationBoundary = installMcpValidationErrorBoundary(server, ctx.logger);
 
   // registerTool: error-sanitize (unchanged) + profile gate (#251).
   // Gating happens BEFORE the sanitized handler is registered, so tools that pass
@@ -106,7 +108,11 @@ export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
     return origTool(...args);
   };
 
-  registerAllTools(server, ctx);
+  try {
+    registerAllTools(server, ctx);
+  } finally {
+    restoreValidationBoundary();
+  }
 }
 
 export function createServer(deps: CBrainDeps): McpServer {

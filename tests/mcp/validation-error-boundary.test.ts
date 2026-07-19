@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic.js";
 import { buildContext } from "../../src/mcp/context.js";
@@ -15,9 +16,9 @@ import { CBrainDB } from "../../src/storage/sqlite.js";
 const SENSITIVE_SENTINEL =
   "api_key=sk-anonymous0000000000000000 /private/fixture/credential.txt";
 const FIXED_INPUT_ERROR = {
-  content: [{ type: "text", text: "Invalid tool arguments." }],
+  content: [{ type: "text" as const, text: "Invalid tool arguments." }],
   isError: true,
-};
+} satisfies CallToolResult;
 
 type Fixture = {
   root: string;

@@ -9,6 +9,7 @@ import type { ToolContext } from "../../src/mcp/context.js";
 import type { ToolProfile } from "../../src/mcp/tool-profiles.js";
 import { registerProfileTools } from "../../src/mcp/tools/profile.js";
 import { attachMcpTools } from "../../src/mcp/server.js";
+import { installMcpValidationErrorBoundary } from "../../src/mcp/validation-error-boundary.js";
 import { ProfileManager } from "../../src/profile/manager.js";
 import {
   buildAgentVisibleStats,
@@ -254,10 +255,15 @@ describe.serial("daily Agent Profile real MCP handler", () => {
     profile.load();
 
     server = new McpServer({ name: "profile-policy-test", version: "0.0.0" });
-    registerProfileTools(server, {
-      profile,
-      toolProfile: "agent",
-    } as ToolContext);
+    const restoreValidationBoundary = installMcpValidationErrorBoundary(server, { warn() {} });
+    try {
+      registerProfileTools(server, {
+        profile,
+        toolProfile: "agent",
+      } as ToolContext);
+    } finally {
+      restoreValidationBoundary();
+    }
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
     client = new Client({ name: "profile-policy-client", version: "0.0.0" });
