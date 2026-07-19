@@ -147,8 +147,13 @@ repository-owned isolated rollback proof has just exercised the same production
 orchestrator through mutation, restart adapter, and health verification. A
 boolean constant or documentation claim is insufficient. Proof failure keeps
 the field null and the overall verdict no-go. The fixed ID is part of the closed
-public report so the outer supervisor can independently recompute
-`rollout_readiness` and the final verdict; unknown IDs are rejected.
+public report, but is not self-authenticating. Before accepting `ready/go`, the
+outer supervisor independently requires a clean source tree, revalidates the
+approved evidence manifest and checkpoint against the current commit, hashes
+the trusted Bun binary, and runs one fixed repository proof entrypoint in its
+own private directory with a closed environment. Only its exact closed success
+receipt authorizes the supervisor to recompute `rollout_readiness` as ready;
+unknown IDs and child-only claims are rejected.
 
 ## 7. Testing
 
@@ -206,3 +211,9 @@ The transaction review then found that a same-path config byte change was not
 bound and that path-based stale-lock reclamation still admitted a two-reclaimer
 race. The final implementation snapshots the active config and verifies a
 startup HMAC attestation, and replaces path ownership with a kernel `flock`.
+The release-gate review also demonstrated that the canary child could copy the
+fixed command ID into an otherwise valid public report. The supervisor now
+treats that field only as a consistency claim: it independently binds the
+approved commit, evidence checkpoint and Bun digest, then executes the fixed
+rollback proof entrypoint under its own private root before permitting
+`ready/go`.

@@ -262,7 +262,33 @@ describe("Hermes structured host canary contract", () => {
     for (const fault of ["mutation", "restart", "health"] as const) {
       expect(await proveStructuredCohortRollback(fault)).toBeNull();
     }
-    expect(await proveStructuredCohortRollback("bogus" as never)).toBe("cbrain-structured-cohort-rollback-v1");
+    expect(await proveStructuredCohortRollback("bogus" as never)).toBeNull();
+  });
+
+  test("fixed rollback proof entrypoint emits only the closed verification receipt", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-rollback-proof-entry-"));
+    try {
+      const entry = join(import.meta.dir, "../../bin/prove-structured-cohort-rollback.ts");
+      const result = Bun.spawnSync({
+        cmd: [process.execPath, "--no-env-file", "--config=/dev/null", `--cwd=${root}`, entry],
+        cwd: root,
+        env: { HOME: root, TMPDIR: root, PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.stderr.toString()).toBe("");
+      if (process.platform === "darwin") {
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout.toString().trim()).toBe(
+          '{"schema_version":1,"status":"verified","command_id":"cbrain-structured-cohort-rollback-v1"}',
+        );
+      } else {
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout.toString().trim()).toBe('{"schema_version":1,"status":"failed"}');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("fails closed when a primary case is missing or a projection contract is false", () => {
@@ -889,7 +915,7 @@ exit 0
     }
   });
 
-  test("supervisor accepts truthful rollout-ready evidence only with the fixed rollback command", () => {
+  test("supervisor rejects a child-only rollback-ready claim without an independent proof", () => {
     const root = mkdtempSync(join(tmpdir(), "cbrain-supervisor-ready-schema-"));
     try {
       const commandId = "cbrain-structured-cohort-rollback-v1" as const;
@@ -920,8 +946,10 @@ exit 0
         stdout: "pipe",
         stderr: "pipe",
       });
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout.toString().trim()).toBe(output);
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout.toString().trim()).toBe(
+        '{"schema_version":1,"status":"fatal","code":"CANARY_ROLLBACK_PROOF_INVALID"}',
+      );
 
       parsed.report.rollback_command_id = "unapproved-rollback";
       writeFileSync(payload, `${JSON.stringify(parsed)}\n`);

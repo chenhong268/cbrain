@@ -84,5 +84,8 @@ than re-reading the config path. It also rejects non-canonical XML key encodings
 If bootstrap cannot publish a verified PID or health, the adapter boots out and
 proves the exact fixed job is not loaded; cleanup failure is a closed result.
 The outer canary supervisor accepts `ready/go` only when the closed public report
-carries the fixed rollback command ID; null remains blocked/no-go and unknown
-IDs fail schema validation.
+carries the fixed rollback command ID and the supervisor independently proves
+that claim. It requires a clean source, binds the current commit to the approved
+manifest and checkpoint, verifies the trusted Bun digest, and runs the fixed
+proof entrypoint in a private closed environment. Null remains blocked/no-go;
+unknown IDs and child-only fixed-ID claims fail closed.

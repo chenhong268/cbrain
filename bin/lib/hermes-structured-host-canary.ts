@@ -201,6 +201,7 @@ export interface HermesStructuredCanaryReport {
 export async function proveStructuredCohortRollback(
   fault?: "mutation" | "restart" | "health",
 ): Promise<null | typeof ROLLBACK_COMMAND_ID> {
+  if (fault !== undefined && fault !== "mutation" && fault !== "restart" && fault !== "health") return null;
   const root = realpathSync(mkdtempSync(resolve(tmpdir(), "cbrain-rollback-proof-")));
   try {
     const home = join(root, "home");
