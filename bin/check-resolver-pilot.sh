@@ -846,7 +846,11 @@ else
 fi
 
 # 8c. No real phone numbers in tests/evals
-PHONE_HITS=$(grep -rE '1[3-9][0-9]{9}' tests/ skills/*.jsonl docs/product/ 2>/dev/null | grep -v node_modules | head -5 || true)
+# Boundary: the candidate must start at BOL or a non-digit and end at EOL or a
+# non-digit, so a longer run of digits (e.g. a large integer literal in the
+# test suite) is not sliced into a false phone candidate.
+PHONE_PATTERN='(^|[^0-9])1[3-9][0-9]{9}($|[^0-9])'
+PHONE_HITS=$(grep -rE "$PHONE_PATTERN" tests/ skills/*.jsonl docs/product/ 2>/dev/null | grep -v node_modules | head -5 || true)
 if [[ -z "$PHONE_HITS" ]]; then
   echo "  ✅ No real phone numbers in tests/evals/docs"
   ((OK++))
