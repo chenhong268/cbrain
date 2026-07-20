@@ -96,6 +96,93 @@ const HIGH_VALUE_DISCOVERY_TYPES = new Set([
  */
 const QUIET_DISCOVERY_TYPES = new Set(["proactive_connection"]);
 
+const SUPPORTED_ACTION_DISCOVERY_TYPES: ReadonlySet<string> = new Set([
+  "bridge",
+  "trend",
+  "gap",
+  "contradiction",
+  "knowledge_map_isolation",
+  "knowledge_map_bridge",
+  "similar_entity",
+]);
+
+interface DiscoveryActionDisplay {
+  title: string;
+  reason: string;
+  suggestion: string;
+}
+
+function buildDiscoveryActionDisplay(type: string, recurring: boolean): DiscoveryActionDisplay | null {
+  if (!SUPPORTED_ACTION_DISCOVERY_TYPES.has(type)) return null;
+  const reason = recurring
+    ? "同类信号已经多次出现，值得优先核对。"
+    : "这项信号的重要程度较高，但仍需人工核对。";
+  let display: DiscoveryActionDisplay;
+  switch (type) {
+    case "bridge":
+      display = {
+        title: "有一组潜在关联待筛选",
+        reason,
+        suggestion: "可先查看最多 3 条当前高优先级关联线索并核对依据；展示后请你确认补链或忽略，确认前不修改。",
+      };
+      break;
+    case "trend":
+      display = {
+        title: "有一组关注变化待核对",
+        reason,
+        suggestion: "可先查看最多 3 条当前高优先级变化并核对近期记录；展示后请你确认更新或忽略，确认前不修改。",
+      };
+      break;
+    case "gap":
+      display = {
+        title: "有一组记忆内容待补全",
+        reason,
+        suggestion: "可先查看最多 3 条当前高优先级待补全项并核对已有内容；展示后请你确认先补充哪一项，确认前不修改。",
+      };
+      break;
+    case "contradiction":
+      display = {
+        title: "有一组信息冲突待核对",
+        reason,
+        suggestion: "可先查看最多 3 条当前高优先级冲突并核对来源；展示后请你确认保留哪个有证据的版本，确认前不修改。",
+      };
+      break;
+    case "knowledge_map_isolation":
+      display = {
+        title: "有一组孤立记忆待确认",
+        reason,
+        suggestion: "可先查看最多 3 条当前高优先级孤立记忆并核对依据；展示后请你确认补充关联或保持不变，确认前不修改。",
+      };
+      break;
+    case "knowledge_map_bridge":
+      display = {
+        title: "有一组跨领域连接待复核",
+        reason,
+        suggestion: "可先查看最多 3 条当前高优先级跨领域连接并核对依据；展示后请你确认保留或加强，确认前不修改。",
+      };
+      break;
+    case "similar_entity":
+      display = {
+        title: "有一组可能重复项待核对",
+        reason,
+        suggestion: "可先查看最多 3 条当前高优先级重复候选并做只读比较；展示后请你确认合并或分别保留，确认前不修改。",
+      };
+      break;
+    default:
+      return null;
+  }
+  assertSafeActionDisplay(display.title);
+  assertSafeActionDisplay(display.reason);
+  assertSafeActionDisplay(display.suggestion);
+  return display;
+}
+
+function safeSourceOccurrenceCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 1
+    ? value
+    : 1;
+}
+
 function parseJsonObject(raw: string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
   try {
@@ -115,29 +202,21 @@ function safeActionable(value: string): "high" | "medium" | "low" {
   return "low";
 }
 
-function reviewDiscoveryDraft(row: DiscoveryCandidateSource): ActionCandidateDraft {
+function reviewDiscoveryDraft(row: DiscoveryCandidateSource): ActionCandidateDraft | null {
   const ref = stableDiscoveryRef(row);
-  const occurrenceCount = row.occurrence_count ?? 1;
+  const occurrenceCount = safeSourceOccurrenceCount(row.occurrence_count);
   const metadata = parseJsonObject(row.metadata);
-  const displayTitle = "有一条发现值得复核";
-  const displayReason =
-    occurrenceCount >= 3
-      ? "同类信号已经多次出现，建议确认是否需要采取行动。"
-      : "这条发现的重要程度较高，建议先人工确认。";
-  const suggestedAction = "打开对应发现，确认是否需要记录、合并、补链或忽略。";
-
-  assertSafeActionDisplay(displayTitle);
-  assertSafeActionDisplay(displayReason);
-  assertSafeActionDisplay(suggestedAction);
+  const display = buildDiscoveryActionDisplay(row.type, occurrenceCount >= 3);
+  if (!display) return null;
 
   return {
     type: "action_review_discovery",
     entities: [ref],
     score: Math.max(0.1, Math.min(1, row.score)),
     actionable: safeActionable(row.actionable),
-    displayTitle,
-    displayReason,
-    suggestedAction,
+    displayTitle: display.title,
+    displayReason: display.reason,
+    suggestedAction: display.suggestion,
     evidence: [{ source: "discovery", ref, kind: row.type }],
     proposedActions: [{
       type: "review",
@@ -149,6 +228,7 @@ function reviewDiscoveryDraft(row: DiscoveryCandidateSource): ActionCandidateDra
       source_type: row.type,
       source_ref: ref,
       occurrence_count: occurrenceCount,
+      source_occurrence_count: occurrenceCount,
       detected_at: row.detected_at,
       last_detected_at: row.last_detected_at ?? null,
       evidence: [{ source: "discovery", ref, kind: row.type }],
@@ -171,7 +251,8 @@ export function buildActionCandidatesFromDiscoveries(rows: DiscoveryCandidateSou
       hasProposedActions ||
       HIGH_VALUE_DISCOVERY_TYPES.has(row.type);
     if (!shouldPromote) continue;
-    drafts.push(reviewDiscoveryDraft(row));
+    const draft = reviewDiscoveryDraft(row);
+    if (draft) drafts.push(draft);
   }
   return drafts;
 }
@@ -334,26 +415,33 @@ export function persistedCandidateRowToDraft(
   if (!isActionCandidateType(row.type)) return null;
   const meta = parseJsonObject(row.metadata);
   const source: "health" | "discovery" = row.type === "action_review_discovery" ? "discovery" : "health";
+  const sourceType = source === "discovery" && typeof meta.source_type === "string" ? meta.source_type : "";
+  const sourceOccurrenceCount = safeSourceOccurrenceCount(meta.source_occurrence_count);
+  const discoveryDisplay = source === "discovery"
+    ? buildDiscoveryActionDisplay(sourceType, sourceOccurrenceCount >= 3)
+    : null;
+  if (source === "discovery" && !discoveryDisplay) return null;
   const evidence: ActionEvidenceRef[] = Array.isArray(meta.evidence) ? meta.evidence as ActionEvidenceRef[] : [];
   return {
     type: row.type,
     entities: parseJsonArray(row.entities),
     score: row.score,
     actionable: safeActionable(row.actionable),
-    displayTitle: safeDisplayText(meta.display_title, "有一项候选需要确认"),
-    displayReason: safeDisplayText(meta.display_reason, "这项信号需要人工复核后再处理。"),
-    suggestedAction: safeDisplayText(meta.suggested_action, "确认后再决定处理或忽略。"),
+    displayTitle: discoveryDisplay?.title ?? safeDisplayText(meta.display_title, "有一项候选需要确认"),
+    displayReason: discoveryDisplay?.reason ?? safeDisplayText(meta.display_reason, "这项信号需要人工复核后再处理。"),
+    suggestedAction: discoveryDisplay?.suggestion ?? safeDisplayText(meta.suggested_action, "确认后再决定处理或忽略。"),
     evidence,
     proposedActions: parseActions(row.proposed_actions),
     metadata: {
       source,
       repair_group: row.type === "action_repair_preview" ? "auto_repairable" : "needs_review",
-      source_type: source === "discovery" ? String(meta.source_type ?? row.type) : undefined,
+      source_type: source === "discovery" ? sourceType : undefined,
       dimension: source === "health" ? String(meta.dimension ?? "dim") : undefined,
       repair_kind: source === "health" ? ((meta.repair_kind as string | null | undefined) ?? null) : undefined,
       detected_at: row.detected_at,
       last_detected_at: row.last_detected_at ?? null,
-      occurrence_count: row.occurrence_count,
+      occurrence_count: source === "discovery" ? sourceOccurrenceCount : row.occurrence_count,
+      source_occurrence_count: source === "discovery" ? sourceOccurrenceCount : undefined,
     },
   };
 }

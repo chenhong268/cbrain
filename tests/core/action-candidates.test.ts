@@ -6,6 +6,7 @@ import {
   isActionCandidateType,
   buildActionCandidatesFromDiscoveries,
   buildActionCandidatesFromHealthPlan,
+  persistedCandidateRowToDraft,
 } from "../../src/core/maintenance/action-candidates.js";
 import { ActionCandidateManager } from "../../src/core/maintenance/action-candidates.js";
 import { assertSafeActionDisplay } from "../../src/core/safety/display-safety.js";
@@ -37,6 +38,57 @@ describe("action candidate core helpers (#267)", () => {
 });
 
 describe("buildActionCandidatesFromDiscoveries (#267)", () => {
+  test("supported discovery types get distinct bounded confirmation-gated actions", () => {
+    const cases = [
+      ["bridge", "潜在关联"],
+      ["trend", "关注变化"],
+      ["gap", "待补全"],
+      ["contradiction", "信息冲突"],
+      ["knowledge_map_isolation", "孤立记忆"],
+      ["knowledge_map_bridge", "跨领域连接"],
+      ["similar_entity", "可能重复"],
+    ] as const;
+
+    const suggestions = new Set<string>();
+    for (const [type, titleMarker] of cases) {
+      const draft = buildActionCandidatesFromDiscoveries([{
+        id: 100,
+        type,
+        entities: JSON.stringify(["entity/a", "entity/b"]),
+        score: 0.9,
+        actionable: "high",
+        auto_applicable: 0,
+        occurrence_count: 1,
+        dedup_key: `${type}|entity/a|entity/b`,
+        suggestion: "SYNTHETIC_RAW_SUGGESTION_SENTINEL",
+        metadata: JSON.stringify({ private_title: "SYNTHETIC_PRIVATE_TITLE_SENTINEL" }),
+      }])[0];
+
+      expect(draft.displayTitle).toContain(titleMarker);
+      expect(draft.suggestedAction).toContain("最多 3 条");
+      expect(draft.suggestedAction).toContain("确认");
+      expect(draft.suggestedAction).not.toContain("SYNTHETIC_RAW_SUGGESTION_SENTINEL");
+      expect(JSON.stringify([draft.displayTitle, draft.displayReason, draft.suggestedAction]))
+        .not.toContain("SYNTHETIC_PRIVATE_TITLE_SENTINEL");
+      expect(draft.metadata.source_occurrence_count).toBe(1);
+      suggestions.add(draft.suggestedAction);
+    }
+    expect(suggestions.size).toBe(cases.length);
+  });
+
+  test("unsupported discovery type is silent", () => {
+    expect(buildActionCandidatesFromDiscoveries([{
+      id: 101,
+      type: "future_private_signal",
+      entities: JSON.stringify(["entity/a"]),
+      score: 1,
+      actionable: "high",
+      auto_applicable: 0,
+      occurrence_count: 9,
+      dedup_key: "future_private_signal|entity/a",
+    }])).toHaveLength(0);
+  });
+
   test("creates one review candidate for high actionable discovery", () => {
     const drafts = buildActionCandidatesFromDiscoveries([
       {
@@ -262,6 +314,105 @@ describe("ActionCandidateManager persistence (#267)", () => {
   afterEach(() => {
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("persisted discovery recurrence uses source count, not action rerun count", () => {
+    const metadata = {
+      source: "discovery",
+      source_type: "bridge",
+      source_occurrence_count: 1,
+      display_title: "SYNTHETIC_PRIVATE_TITLE_SENTINEL",
+      display_reason: "SYNTHETIC_RAW_REASON_SENTINEL",
+      suggested_action: "SYNTHETIC_RAW_SUGGESTION_SENTINEL",
+    };
+    for (let i = 0; i < 3; i++) {
+      db.upsertDiscovery(
+        "action_review_discovery",
+        ["discovery:synthetic-bridge"],
+        0.9,
+        undefined,
+        undefined,
+        "high",
+        false,
+        metadata,
+      );
+    }
+    const row = db.getDiscoveryById(db.getDiscoveriesByType("action_review_discovery", 1)[0].id)!;
+    expect(row.occurrence_count).toBe(3);
+    const draft = persistedCandidateRowToDraft(row)!;
+    expect(draft.displayReason).not.toContain("多次");
+    expect(JSON.stringify(draft)).not.toContain("SYNTHETIC_PRIVATE_TITLE_SENTINEL");
+    expect(JSON.stringify(draft)).not.toContain("SYNTHETIC_RAW_SUGGESTION_SENTINEL");
+  });
+
+  test("persisted discovery uses only a validated source occurrence count", () => {
+    const cases: Array<[unknown, boolean]> = [
+      [3, true],
+      [0, false],
+      [1.5, false],
+      [Number.NaN, false],
+      ["3", false],
+    ];
+    for (const [sourceOccurrenceCount, recurring] of cases) {
+      const result = db.upsertDiscovery(
+        "action_review_discovery",
+        [`discovery:bridge-${String(sourceOccurrenceCount)}`],
+        0.9,
+        undefined,
+        undefined,
+        "high",
+        false,
+        {
+          source: "discovery",
+          source_type: "bridge",
+          source_occurrence_count: sourceOccurrenceCount,
+        },
+      );
+      const draft = persistedCandidateRowToDraft(db.getDiscoveryById(result.id)!)!;
+      expect(draft.displayReason.includes("多次")).toBe(recurring);
+    }
+  });
+
+  test("persisted unsupported discovery type is silent", () => {
+    const result = db.upsertDiscovery(
+      "action_review_discovery",
+      ["discovery:future-private-signal"],
+      0.9,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        source: "discovery",
+        source_type: "future_private_signal",
+        source_occurrence_count: 9,
+      },
+    );
+    expect(persistedCandidateRowToDraft(db.getDiscoveryById(result.id)!)).toBeNull();
+  });
+
+  test("persisted health candidate keeps validated stored display copy", () => {
+    const result = db.upsertDiscovery(
+      "action_health_review",
+      ["health:synthetic"],
+      0.6,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        source: "health",
+        display_title: "有一项健康问题需要人工确认",
+        display_reason: "这项信号可能影响知识质量。",
+        suggested_action: "人工确认后再决定。",
+        repair_group: "needs_review",
+        dimension: "结构一致性",
+      },
+    );
+    const draft = persistedCandidateRowToDraft(db.getDiscoveryById(result.id)!)!;
+    expect(draft.displayTitle).toBe("有一项健康问题需要人工确认");
+    expect(draft.displayReason).toBe("这项信号可能影响知识质量。");
+    expect(draft.suggestedAction).toBe("人工确认后再决定。");
   });
 
   test("persists one candidate and stores proposed actions", () => {
