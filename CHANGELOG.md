@@ -1,8 +1,23 @@
 # Changelog
 
-> Current: `v2.0.8` — Watcher 积压恢复、受治理的数据修复、真实召回质量门禁，以及 Hermes 输出边界的可回滚灰度准备。
+> Current: `v2.0.9` — 诚实 bounded fallback 与可执行的 next actions，收口日常 Agent 体验。
 
 ## [Unreleased]
+
+## [v2.0.9] — 2026-07-20
+
+### Hermes 日常体验（#371, #372）
+
+- **bounded fallback 保持诚实**：抽象问题在前门无足够相关记忆时，不再把低相关候选包装成成功答案；fallback 诊断字段也不进入 Agent 可见输出。
+- **next actions 可执行或保持安静**：支持的发现类型给出有界、类型匹配、需确认的下一步；没有可靠详情路径的类型不再生成泛化建议。
+- **重复与证据计数保持真实**：重复刷新 action queue 不虚增来源出现次数，历史候选通过同一安全重建路径读取。
+
+### Compatibility / Migration
+
+- No database schema or vault migration is required.
+- Existing public status values and concrete recall fast paths are unchanged.
+- `next_actions` remains read-only; suggestions never execute writes automatically.
+- Structured output remains opt-in; this release does not change `CBRAIN_OUTPUT_BOUNDARY` defaults.
 
 ## [v2.0.8] — 2026-07-19
 
