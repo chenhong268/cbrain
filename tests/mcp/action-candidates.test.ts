@@ -74,7 +74,7 @@ describe("MCP action candidates (#267)", () => {
 
     expect(payload.summary.count).toBe(1);
     expect(payload.candidates).toHaveLength(1);
-    expect(payload.display).toContain("发现");
+    expect(payload.display).toContain("可能重复");
     expect(payload.display).not.toContain("entity/");
     expect(payload.display).not.toContain("score");
     expect(db.getDiscoveriesByType("action_review_discovery", 10)).toHaveLength(1);
@@ -116,17 +116,93 @@ describe("MCP action candidates (#267)", () => {
       display_title: "有一条发现值得复核",
       display_reason: "同类信号已经多次出现，建议确认是否需要采取行动。",
       suggested_action: "打开对应发现，确认是否需要处理。",
+      source_type: "gap",
+      source_occurrence_count: 3,
       evidence: [{ source: "discovery", ref: "discovery:a", kind: "gap" }],
     });
     db.updateDiscoveryActions(id, [{ type: "review", target: "discovery:a", reason: "复核这条发现。" }]);
 
     const server = createServer(deps);
     const first = await getTools(server).read_action_candidates.handler({});
-    expect(JSON.parse((first as { content: { text: string }[] }).content[0].text).candidates).toHaveLength(1);
+    const firstPayload = JSON.parse((first as { content: { text: string }[] }).content[0].text);
+    expect(firstPayload.candidates).toHaveLength(1);
+    expect(firstPayload.display).toContain("待补全");
+    expect(firstPayload.display).not.toContain("打开对应发现");
+    expect(firstPayload.candidates[0].occurrenceCount).toBe(3);
 
     await getTools(server).update_action_candidate_status.handler({ ids: [id], status: "dismissed" });
     const second = await getTools(server).read_action_candidates.handler({});
     expect(JSON.parse((second as { content: { text: string }[] }).content[0].text).candidates).toHaveLength(0);
+  });
+
+  test("read_action_candidates reconstructs hostile legacy discovery copy safely", async () => {
+    const hostile = "entity/private-a /synthetic/private Bearer synthetic-credential-sentinel";
+    db.upsertDiscovery(
+      "action_review_discovery",
+      ["discovery:synthetic-bridge"],
+      0.9,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        source: "discovery",
+        source_type: "bridge",
+        source_occurrence_count: 1,
+        display_title: hostile,
+        display_reason: hostile,
+        suggested_action: hostile,
+      },
+    );
+
+    const server = createServer(deps);
+    const result = await getTools(server).read_action_candidates.handler({});
+    const payload = JSON.parse((result as { content: { text: string }[] }).content[0].text);
+    expect(payload.candidates).toHaveLength(1);
+    expect(payload.display).toContain("潜在关联");
+    expect(payload.display).not.toContain(hostile);
+    expect(JSON.stringify(payload.candidates)).not.toContain(hostile);
+  });
+
+  test("read_action_candidates keeps historical row-occurrence ordering", async () => {
+    const frequentRow = {
+      source: "discovery",
+      source_type: "bridge",
+      source_occurrence_count: 1,
+    };
+    for (let i = 0; i < 10; i++) {
+      db.upsertDiscovery(
+        "action_review_discovery",
+        ["discovery:frequent-action-row"],
+        0.9,
+        undefined,
+        undefined,
+        "high",
+        false,
+        frequentRow,
+      );
+    }
+    db.upsertDiscovery(
+      "action_review_discovery",
+      ["discovery:recurrent-source"],
+      0.9,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        source: "discovery",
+        source_type: "gap",
+        source_occurrence_count: 3,
+      },
+    );
+
+    const server = createServer(deps);
+    const result = await getTools(server).read_action_candidates.handler({ limit: 1 });
+    const payload = JSON.parse((result as { content: { text: string }[] }).content[0].text);
+    expect(payload.candidates).toHaveLength(1);
+    expect(payload.candidates[0].displayTitle).toContain("潜在关联");
+    expect(payload.candidates[0].occurrenceCount).toBe(1);
   });
 
   test("default read_discoveries excludes action candidates", async () => {

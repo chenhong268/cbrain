@@ -91,6 +91,27 @@ describe("buildActionCandidatesFromDiscoveries (#267)", () => {
     }])).toHaveLength(0);
   });
 
+  test("existing reflect discovery types keep their action-candidate lane", () => {
+    for (const [type, marker] of [
+      ["community_crossing", "跨主题线索"],
+      ["structural_hole", "知识缺口线索"],
+    ] as const) {
+      const drafts = buildActionCandidatesFromDiscoveries([{
+        id: 102,
+        type,
+        entities: JSON.stringify(["entity/a", "entity/b"]),
+        score: 0.9,
+        actionable: "high",
+        auto_applicable: 0,
+        occurrence_count: 3,
+        dedup_key: `${type}|entity/a|entity/b`,
+      }]);
+      expect(drafts, `${type} is an existing producer type`).toHaveLength(1);
+      expect(drafts[0].displayTitle).toContain(marker);
+      expect(drafts[0].suggestedAction).toContain("确认前不修改");
+    }
+  });
+
   test("creates one review candidate for high actionable discovery", () => {
     const drafts = buildActionCandidatesFromDiscoveries([
       {

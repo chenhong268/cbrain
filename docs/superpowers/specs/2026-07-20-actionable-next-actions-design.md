@@ -103,14 +103,13 @@ discovery action candidates with an unsupported `source_type` are excluded. This
 is the parent contract's “silence when safe public information is insufficient”
 branch, not a new public status.
 
-`similar_entity` retains its existing action-candidate generation and receives
-safe fixed copy there, but follows the silence branch specifically in
-`next_actions`. Although the discovery MCP schema accepts an explicit type filter,
-the shared digest currently excludes the type before rendering, so it does not yet
-provide the promised read-only handoff. Repairing that independent discovery
-surface is outside this issue; `next_actions` must not advertise an action the
-current detail path cannot complete or regress the existing duplicate-governance
-candidate lane.
+`similar_entity`, `community_crossing`, and `structural_hole` retain their existing
+action-candidate generation and receive safe fixed copy there, but follow the
+silence branch specifically in `next_actions`. Their current discovery detail
+surfaces do not provide the same reliable handoff as the six admitted types.
+Repairing those independent surfaces is outside this issue; `next_actions` must
+not advertise an action the current detail path cannot complete or regress the
+existing duplicate/Reflect governance lanes.
 
 Repeated and single-occurrence variants may use different fixed reasons. The
 existing grouped evidence count remains the only quantity shown by
@@ -127,6 +126,8 @@ existing grouped evidence count remains the only quantity shown by
 5. `persistedCandidateRowToDraft` applies the same resolver when the source is a
    supported discovery, overriding legacy persisted prose and using only validated
    `source_occurrence_count` for recurrence.
+   Both `next_actions` and `read_action_candidates` reuse this reconstruction;
+   neither may parse persisted display metadata independently.
 6. `next_actions` admits only the six types with a working read-only detail
    handoff; this filters both direct and persisted drafts without changing the
    action-candidate lane.
@@ -140,6 +141,10 @@ No read path writes to SQLite or the vault.
 
 - Public JSON shape is unchanged.
 - Existing discovery grouping, ranking, freshness, and top-three cap are unchanged.
+- `read_action_candidates` continues to sort equal-actionability candidates by the
+  persisted action row's occurrence count. Its public `occurrenceCount` may report
+  validated source recurrence, but that corrected display value is not reused as
+  the compatibility sorting key.
 - Existing `read_discoveries` remains the detail surface; its cards are not copied
   into `next_actions`.
 - Persisted health display metadata remains validated and rendered as today.
@@ -181,14 +186,20 @@ MCP tests must prove:
 4. for every detail-supported type, accepting the suggestion can be fulfilled by
    `read_discoveries({ typeFilter, limit: 3, debug: false })`; an empty detail
    result produces a stop-without-write outcome;
-5. direct and persisted `similar_entity` candidates remain available to their
-   existing governance lane but stay silent in `next_actions`;
-6. the full default envelope rejects private titles, singular/plural and nested
+5. direct and persisted `similar_entity`, `community_crossing`, and
+   `structural_hole` candidates remain available to their existing governance
+   lanes but stay silent in `next_actions`;
+6. `read_action_candidates` replaces legacy generic or hostile persisted discovery
+   prose through the same resolver and reports source recurrence rather than
+   candidate-generation reruns;
+7. inverse source/action recurrence counts with `limit: 1` preserve the historical
+   action-row ordering while exposing the source count in the returned candidate;
+8. the full default envelope rejects private titles, singular/plural and nested
    slug forms, POSIX and Windows paths, raw suggestions, credential sentinels, and
    Unicode control characters for both fresh and persisted legacy rows;
-7. `include_raw=true` preserves the exact existing raw key sets and does not copy
+9. `include_raw=true` preserves the exact existing raw key sets and does not copy
    hostile metadata into display fields or new audit fields;
-8. default and `include_raw=true` calls remain read-only.
+10. default and `include_raw=true` calls remain read-only.
 
 Run focused tests, documentation checks, lint/type checks, the full suite,
 `git diff --check`, and the repository privacy scan before completion.
@@ -201,8 +212,8 @@ Run focused tests, documentation checks, lint/type checks, the full suite,
 - No automatic Hermes tool chaining; the detail handoff runs only after the user
   accepts the displayed offer.
 - No new user preference, configuration flag, telemetry system, or migration.
-- No refactor outside the action-candidate display boundary, the `next_actions`
-  admission boundary, and their tests.
+- No refactor outside the action-candidate display/read boundary, the
+  `next_actions` admission boundary, and their tests.
 
 ## 9. Rollback
 

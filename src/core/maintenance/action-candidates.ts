@@ -104,6 +104,8 @@ const SUPPORTED_ACTION_DISCOVERY_TYPES: ReadonlySet<string> = new Set([
   "knowledge_map_isolation",
   "knowledge_map_bridge",
   "similar_entity",
+  "community_crossing",
+  "structural_hole",
 ]);
 
 interface DiscoveryActionDisplay {
@@ -166,6 +168,20 @@ function buildDiscoveryActionDisplay(type: string, recurring: boolean): Discover
         title: "有一组可能重复项待核对",
         reason,
         suggestion: "可先查看最多 3 条当前高优先级重复候选并做只读比较；展示后请你确认合并或分别保留，确认前不修改。",
+      };
+      break;
+    case "community_crossing":
+      display = {
+        title: "有一组跨主题线索待核对",
+        reason,
+        suggestion: "请先核对这组跨主题线索的证据；展示后请你确认记录或忽略，确认前不修改。",
+      };
+      break;
+    case "structural_hole":
+      display = {
+        title: "有一组知识缺口线索待核对",
+        reason,
+        suggestion: "请先核对这组知识缺口线索的证据；展示后请你确认补充或忽略，确认前不修改。",
       };
       break;
     default:

@@ -162,6 +162,25 @@ describe("next_actions MCP (#309)", () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.items).toHaveLength(0);
     expect(payload.display).toContain("无需");
+
+    db.upsertDiscovery(
+      "action_review_discovery",
+      ["discovery:synthetic-similar"],
+      0.9,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        source: "discovery",
+        source_type: "similar_entity",
+        source_occurrence_count: 2,
+      },
+    );
+    const persistedResult = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const persistedPayload = JSON.parse(persistedResult.content[0].text);
+    expect(persistedPayload.items).toHaveLength(0);
+    expect(persistedPayload.display).toContain("无需");
   });
 
   test("default envelope rejects hostile fresh and persisted discovery material", async () => {
@@ -223,6 +242,23 @@ describe("next_actions MCP (#309)", () => {
       false,
       { credential: "Bearer synthetic-credential-sentinel" },
     );
+    db.upsertDiscovery(
+      "action_review_discovery",
+      ["discovery:synthetic-trend"],
+      0.9,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        source: "discovery",
+        source_type: "trend",
+        source_occurrence_count: 1,
+        display_title: "SYNTHETIC_PERSISTED_PRIVATE_TITLE",
+        display_reason: "Bearer synthetic-persisted-credential",
+        suggested_action: "SYNTHETIC_PERSISTED_RAW_SUGGESTION",
+      },
+    );
     const server = createServer(deps);
     const result = await getTools(server).next_actions.handler({ sources: ["discovery"], include_raw: true }) as ToolResponse;
     const payload = JSON.parse(result.content[0].text);
@@ -251,6 +287,9 @@ describe("next_actions MCP (#309)", () => {
       const prose = JSON.stringify([item.title, item.reason, item.suggestion]);
       expect(prose).not.toContain("SYNTHETIC_RAW_SUGGESTION_SENTINEL");
       expect(prose).not.toContain("Bearer synthetic-credential-sentinel");
+      expect(prose).not.toContain("SYNTHETIC_PERSISTED_PRIVATE_TITLE");
+      expect(prose).not.toContain("Bearer synthetic-persisted-credential");
+      expect(prose).not.toContain("SYNTHETIC_PERSISTED_RAW_SUGGESTION");
     }
     expect(Object.keys(payload.raw.audit).sort()).toEqual([
       "byFreshness",

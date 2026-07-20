@@ -166,6 +166,8 @@ const SUPPORTED_ACTION_DISCOVERY_TYPES: ReadonlySet<string> = new Set([
   "knowledge_map_isolation",
   "knowledge_map_bridge",
   "similar_entity",
+  "community_crossing",
+  "structural_hole",
 ]);
 
 function buildDiscoveryActionDisplay(type: string, recurring: boolean): {
@@ -219,6 +221,18 @@ function buildDiscoveryActionDisplay(type: string, recurring: boolean): {
         title: "有一组可能重复项待核对",
         reason: repeatedReason,
         suggestion: "可先查看最多 3 条当前高优先级重复候选并做只读比较；展示后请你确认合并或分别保留，确认前不修改。",
+      };
+    case "community_crossing":
+      return {
+        title: "有一组跨主题线索待核对",
+        reason: repeatedReason,
+        suggestion: "请先核对这组跨主题线索的证据；展示后请你确认记录或忽略，确认前不修改。",
+      };
+    case "structural_hole":
+      return {
+        title: "有一组知识缺口线索待核对",
+        reason: repeatedReason,
+        suggestion: "请先核对这组知识缺口线索的证据；展示后请你确认补充或忽略，确认前不修改。",
       };
     default:
       return null;
@@ -284,6 +298,8 @@ git commit -m "fix: make discovery actions actionable"
 **Files:**
 - Modify: `tests/mcp/next-actions.test.ts`
 - Modify: `src/mcp/tools/next-actions.ts`
+- Modify: `tests/mcp/action-candidates.test.ts`
+- Modify: `src/mcp/tools/action-candidates.ts`
 
 **Interfaces:**
 - Consumes: the shared action display behavior from Task 1.
@@ -356,6 +372,17 @@ function hasNextActionDetailHandoff(draft: ActionCandidateDraft): boolean {
 Apply it to both persisted discovery drafts and fresh drafts before they enter
 `discoveryDrafts`. Do not apply it to health drafts and do not change the shared
 action-candidate builder.
+
+- [ ] **Step 4b: Reuse reconstruction in the existing action-candidate reader**
+
+Add failing MCP tests showing that `read_action_candidates` replaces legacy
+generic/hostile discovery prose and reports validated source recurrence. Replace
+its local metadata parser with `persistedCandidateRowToDraft(row)`, then map the
+returned draft into `PersistedActionCandidate`. Use
+`draft.metadata.occurrence_count` when numeric, otherwise the row count. Preserve
+the row's own `occurrence_count` as a private sorting key, remove that key before
+returning candidates, and add an inverse-count `limit: 1` test proving historical
+ordering is unchanged.
 
 - [ ] **Step 5: Add the full default-envelope privacy matrix**
 
