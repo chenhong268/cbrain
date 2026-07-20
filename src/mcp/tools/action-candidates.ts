@@ -7,6 +7,7 @@ import {
   buildActionCandidatesFromDiscoveries,
   buildActionCandidatesFromHealthPlan,
   isActionCandidateType,
+  persistedCandidateRowToDraft,
   type ActionCandidateType,
   type PersistedActionCandidate,
 } from "../../core/maintenance/action-candidates.js";
@@ -19,38 +20,41 @@ const STATUS_LABELS: Record<string, string> = {
   dismissed: "已忽略",
 };
 
-function parseJsonSafe<T>(raw: string | null | undefined, fallback: T): T {
-  if (!raw) return fallback;
-  try {
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
 type DiscoveryFullRow = NonNullable<ReturnType<ToolContext["db"]["getDiscoveryById"]>>;
 
-function candidateFromRow(row: DiscoveryFullRow): PersistedActionCandidate | null {
-  if (!isActionCandidateType(row.type)) return null;
-  const meta = parseJsonSafe<Record<string, unknown>>(row.metadata, {});
+interface RankedCandidate {
+  candidate: PersistedActionCandidate;
+  /** Compatibility-only ordering key; never exposed in the public candidate. */
+  sortOccurrenceCount: number;
+}
+
+function candidateFromRow(row: DiscoveryFullRow): RankedCandidate | null {
+  const draft = persistedCandidateRowToDraft(row);
+  if (!draft) return null;
+  const occurrenceCount = typeof draft.metadata.occurrence_count === "number"
+    ? draft.metadata.occurrence_count
+    : row.occurrence_count;
   return {
-    id: row.id,
-    type: row.type as ActionCandidateType,
-    entities: parseJsonSafe<string[]>(row.entities, []),
-    actionable: row.actionable as "high" | "medium" | "low",
-    displayTitle: String(meta.display_title ?? "有一项候选行动需要确认"),
-    displayReason: String(meta.display_reason ?? "这项信号需要人工复核后再处理。"),
-    suggestedAction: String(meta.suggested_action ?? "确认后再决定处理或忽略。"),
-    evidence: Array.isArray(meta.evidence) ? meta.evidence as PersistedActionCandidate["evidence"] : [],
-    proposedActions: parseJsonSafe<PersistedActionCandidate["proposedActions"]>(row.proposed_actions, []),
-    occurrenceCount: row.occurrence_count,
-    inserted: false,
+    candidate: {
+      id: row.id,
+      type: draft.type,
+      entities: draft.entities,
+      actionable: draft.actionable,
+      displayTitle: draft.displayTitle,
+      displayReason: draft.displayReason,
+      suggestedAction: draft.suggestedAction,
+      evidence: draft.evidence,
+      proposedActions: draft.proposedActions,
+      occurrenceCount,
+      inserted: false,
+    },
+    sortOccurrenceCount: row.occurrence_count,
   };
 }
 
 function rowsToCandidates(ctx: ToolContext, limit: number, type?: ActionCandidateType): PersistedActionCandidate[] {
   const types = type ? [type] : ACTION_CANDIDATE_TYPES;
-  const out: PersistedActionCandidate[] = [];
+  const out: RankedCandidate[] = [];
   for (const t of types) {
     const rows = ctx.db.getDiscoveriesByType(t, Math.max(limit, 20));
     for (const row of rows) {
@@ -62,12 +66,12 @@ function rowsToCandidates(ctx: ToolContext, limit: number, type?: ActionCandidat
   }
   out.sort((a, b) => {
     const order: Record<string, number> = { high: 0, medium: 1, low: 2 };
-    const ao = order[a.actionable] ?? 9;
-    const bo = order[b.actionable] ?? 9;
+    const ao = order[a.candidate.actionable] ?? 9;
+    const bo = order[b.candidate.actionable] ?? 9;
     if (ao !== bo) return ao - bo;
-    return b.occurrenceCount - a.occurrenceCount;
+    return b.sortOccurrenceCount - a.sortOccurrenceCount;
   });
-  return out.slice(0, limit);
+  return out.slice(0, limit).map((entry) => entry.candidate);
 }
 
 interface RenderedCandidates {
