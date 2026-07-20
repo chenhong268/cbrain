@@ -535,9 +535,9 @@ describe("C9: progressive disclosure routing", () => {
     expect(brief).toMatch(/首轮.*禁止|禁止.*首轮/);
   });
 
-  test("hermes-cbrain-brief.md stays within 3000 bytes", () => {
+  test("hermes-cbrain-brief.md stays within 3500 bytes", () => {
     const brief = fs.readFileSync(path.join(SKILLS_DIR, "hermes-cbrain-brief.md"), "utf-8");
-    expect(Buffer.byteLength(brief, "utf-8")).toBeLessThanOrEqual(3000);
+    expect(Buffer.byteLength(brief, "utf-8")).toBeLessThanOrEqual(3500);
   });
 });
 

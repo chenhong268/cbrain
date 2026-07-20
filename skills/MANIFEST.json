@@ -33,6 +33,7 @@
     "dream.routing-eval.jsonl",
     "cleanup.routing-eval.jsonl",
     "review.routing-eval.jsonl",
-    "write.routing-eval.jsonl"
+    "write.routing-eval.jsonl",
+    "release-verify-bootstrap.sh"
   ]
 }

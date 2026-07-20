@@ -42,3 +42,11 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 - ❌ 情境找人用 agentic_research → cbrain_recall（内部 recall_episode）
 - ❌ discovery 暴露内部字段；回答超 500 字；末尾追问
 - ❌ 自然语言走 query → cbrain_recall
+
+## 7. 版本诊断
+
+release/runtime 版本核查：从 launchd 解析 active deployment，禁止 cwd fallback。
+
+`sh "$HOME/.hermes/skills/brain-ops/cbrain/release-verify-bootstrap.sh" --json`
+
+bootstrap 读 launchctl `ai.cbrain.serve` → active root verifier。完整 target 集合（所有 CBrain-enabled Agent 的 skill 路径，冒号分隔绝对路径）由部署在 `CBRAIN_REQUIRED_SKILL_TARGETS` 配置；未配置则返回 `TARGET_SET_EMPTY`，报告"运行版本未验证"，绝不误报一致。禁 cwd fallback；失败报 code，禁拼接证据宣布 mismatch。
