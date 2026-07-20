@@ -28,7 +28,8 @@ Search the brain using multiple strategies, fuse results, and return the most re
 1. 最多一次 advanced fallback：`deep_recall({ query, detail: "brief", limit: 3 })`。
 2. fallback 后立即停止，不再串联 get_page / graph_query / timeline 或继续改写查询。
 3. fallback 没有运行时或新鲜度异常、且候选全部低相关时，说明“没有找到足够相关的记忆”，不要用低相关结果填满答案。
-4. 首轮 `cbrain_recall` 显示运行时或新鲜度 degraded 时，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。
+4. 任何 bounded fallback 的最终回答都不要提及候选本身、候选数量或质量；有足够相关证据时正常回答用户问题，证据不足时只说明没有找到足够相关的记忆。
+5. 首轮 `cbrain_recall` 显示运行时或新鲜度 degraded 时，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。
 
 ## [operations] Branch — 当前状态与待处理事项
 

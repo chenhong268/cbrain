@@ -554,7 +554,7 @@ describe("checkAgentWorkflowContract (#322)", () => {
       "",
       "- 仅限普通内容回忆：健康运行的 `cbrain_recall` 返回 empty / insufficient 时，保持原查询，最多一次调用 `deep_recall({ query, detail: \"brief\", limit: 3 })`，然后停止；不要继续改写或串联其他检索。",
       "- 若 fallback 没有运行时或新鲜度异常，且候选全部 `quality=low`，先说明“没有找到足够相关的记忆”，不要展示或逐条列出这些低相关候选。",
-      "- 此时最终回答不要提及候选数量或 quality。",
+      "- 任何 bounded fallback 的最终回答都不要提及候选本身、候选数量或质量；有足够相关证据时正常回答用户问题，证据不足时只说明没有找到足够相关的记忆。",
       "- 若首轮 `cbrain_recall` 显示运行时或新鲜度 degraded，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
     ].join("\n"),
     "RESOLVER.md": [
@@ -574,7 +574,8 @@ describe("checkAgentWorkflowContract (#322)", () => {
       "1. 最多一次 advanced fallback：`deep_recall({ query, detail: \"brief\", limit: 3 })`。",
       "2. fallback 后立即停止，不再串联 get_page / graph_query / timeline 或继续改写查询。",
       "3. fallback 没有运行时或新鲜度异常、且候选全部低相关时，说明“没有找到足够相关的记忆”，不要用低相关结果填满答案。",
-      "4. 首轮 `cbrain_recall` 显示运行时或新鲜度 degraded 时，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
+      "4. 任何 bounded fallback 的最终回答都不要提及候选本身、候选数量或质量；有足够相关证据时正常回答用户问题，证据不足时只说明没有找到足够相关的记忆。",
+      "5. 首轮 `cbrain_recall` 显示运行时或新鲜度 degraded 时，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
       "",
       "## [operations] Branch",
       "调用 `next_actions`。",
@@ -687,8 +688,19 @@ describe("checkAgentWorkflowContract (#322)", () => {
     const dir = withSkills({
       ...valid,
       "SKILL.md": valid["SKILL.md"].replace(
-        "此时最终回答不要提及候选数量或 quality。",
+        "任何 bounded fallback 的最终回答都不要提及候选本身、候选数量或质量；有足够相关证据时正常回答用户问题，证据不足时只说明没有找到足够相关的记忆。",
         "最终回答可以解释候选数量和检索不完整。",
+      ),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("mixed fallback candidates cannot expose candidate counts or quality", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace(
+        "任何 bounded fallback 的最终回答都不要提及候选本身、候选数量或质量；有足够相关证据时正常回答用户问题，证据不足时只说明没有找到足够相关的记忆。",
+        "只有全部 low 时不提数量；混合候选可以说明低质量候选数量。",
       ),
     });
     expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
