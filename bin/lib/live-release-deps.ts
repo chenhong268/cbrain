@@ -152,12 +152,18 @@ export function buildRealDeps(ownVerifierPath: string): LiveReleaseDeps {
       });
     },
     resolveEntrypoint(programArguments, workingDirectory): string | null {
+      let workdir: string;
+      try {
+        workdir = realpathSync(workingDirectory);
+      } catch {
+        return null;
+      }
       for (const token of programArguments) {
         if (!/cli\/index\.(ts|js)$/i.test(token)) continue;
         const resolved = resolve(workingDirectory, token);
         try {
           const real = realpathSync(resolved);
-          if (real.startsWith(`${workingDirectory}/`)) return real;
+          if (real.startsWith(`${workdir}/`)) return real;
         } catch {
           // entrypoint not found / unreadable → keep scanning
         }

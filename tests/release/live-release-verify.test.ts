@@ -10,7 +10,7 @@ import {
 } from "../../bin/lib/live-release-verify.js";
 import { buildRealDeps } from "../../bin/lib/live-release-deps.js";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 
@@ -629,5 +629,60 @@ describe("live-release verifier — Hermes brief contract", () => {
 
   test("standalone release-verify.md has been merged away (single source of truth in the brief)", () => {
     expect(existsSync(join(import.meta.dir, "../../skills/release-verify.md"))).toBe(false);
+  });
+
+  test("brief bootstrap command does not inline a single default target", () => {
+    const brief = readFileSync(join(import.meta.dir, "../../skills/hermes-cbrain-brief.md"), "utf8");
+    const cmdMatch = brief.match(/`([^`]*release-verify-bootstrap\.sh[^`]*)`/);
+    expect(cmdMatch, "bootstrap command block must exist").not.toBeNull();
+    const cmd = cmdMatch?.[1] ?? "";
+    expect(cmd, "command must not inline CBRAIN_REQUIRED_SKILL_TARGETS (full set is deployment-configured)").not.toMatch(
+      /CBRAIN_REQUIRED_SKILL_TARGETS\s*=/,
+    );
+  });
+});
+
+describe("live-release verifier — real deps resolveEntrypoint (realpath containment)", () => {
+  test("resolves a relative entrypoint inside the root", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-entry-rel-"));
+    try {
+      mkdirSync(join(root, "src", "cli"), { recursive: true });
+      writeFileSync(join(root, "src", "cli", "index.ts"), "// entry\n");
+      const deps = buildRealDeps("/probe.ts");
+      const ep = deps.resolveEntrypoint(["bun", "src/cli/index.ts", "serve"], root);
+      expect(ep).toBe(realpathSync(join(root, "src", "cli", "index.ts")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves an absolute entrypoint inside the root", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-entry-abs-"));
+    try {
+      mkdirSync(join(root, "src", "cli"), { recursive: true });
+      const abs = join(root, "src", "cli", "index.ts");
+      writeFileSync(abs, "// entry\n");
+      const deps = buildRealDeps("/probe.ts");
+      const ep = deps.resolveEntrypoint(["bun", abs, "serve"], root);
+      expect(ep).toBe(realpathSync(abs));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a symlinked entrypoint that escapes the root", () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-entry-sym-"));
+    const outside = mkdtempSync(join(tmpdir(), "cbrain-entry-out-"));
+    try {
+      mkdirSync(join(root, "src", "cli"), { recursive: true });
+      writeFileSync(join(outside, "index.ts"), "// outside\n");
+      symlinkSync(join(outside, "index.ts"), join(root, "src", "cli", "index.ts"));
+      const deps = buildRealDeps("/probe.ts");
+      const ep = deps.resolveEntrypoint(["bun", "src/cli/index.ts", "serve"], root);
+      expect(ep).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
