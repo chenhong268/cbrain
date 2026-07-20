@@ -119,6 +119,42 @@ the behavioral evidence rather than being relabeled as a run of the later digest
 The later digest is covered by deterministic contract mutations and requires the
 normal post-deployment Hermes canary before release completion.
 
+## Post-merge live canary correction
+
+The first default-profile canary loaded the reviewed skill and obeyed the call
+boundary: unchanged query, `cbrain_recall(detail="brief")`, one
+`deep_recall(detail="brief", limit=3)`, then stop. Its final answer nevertheless
+described how many returned records were low-information because the live result
+was a mixed-quality set rather than the all-low set from the frozen replay.
+
+The follow-up contract therefore forbids candidate counts and `quality` in every
+bounded-fallback final answer, not only the all-low terminal. It does not change
+retrieval, ranking, thresholds, or tool output. The corrected `SKILL.md` digest is
+`0115a2985f4e86ad703fc7ef54058132c8aafaa919f21ac8c58b7f32f42d3e81`.
+
+An intermediate candidate still described the fallback results as weakly related.
+That canary preserved the exact query and the two-call boundary, but failed the
+public-output oracle because a natural-language quality judgment is still candidate
+diagnostic disclosure. The final contract therefore excludes the candidates
+themselves as well as their count and quality.
+
+## Post-correction live confirmation
+
+The final candidate was copied into the default and secondary CBrain-enabled Hermes
+profiles, and both targets passed the canonical skill-pack comparison as `current`.
+The same anonymous request then passed once in each profile:
+
+```text
+cbrain_recall(same query, detail="brief")
+deep_recall(same query, detail="brief", limit=3)
+Hermes -> insufficient relevant memory; no candidate, count, or quality disclosure
+```
+
+Neither profile made a third CBrain call, rewrote the query, named internal fields,
+or expanded to another search path. The default profile returned only the
+insufficient-memory conclusion. The secondary profile also summarized that the two
+bounded attempts had completed, without describing any candidate or diagnostic.
+
 ## Isolation and teardown
 
 - All CBrain writable paths resolved under one disposable root.
