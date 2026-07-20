@@ -549,6 +549,13 @@ describe("checkAgentFacingRoutingProfile (#343)", () => {
 
 describe("checkAgentWorkflowContract (#322)", () => {
   const valid = {
+    "SKILL.md": [
+      "cbrain_recall 返回 empty / insufficient / degraded 时，保持原查询，最多一次",
+      "`deep_recall({ query, detail: \"brief\", limit: 3 })`。",
+      "若 fallback degraded 且候选全部 quality=low，先说明没有找到足够相关的记忆，",
+      "不要展示或逐条列出这些低相关候选，然后停止。",
+      "最终回答不要提及候选数量、quality、degraded 或检索不完整。",
+    ].join("\n"),
     "RESOLVER.md": "- 当前痛点、系统异常、该处理什么 → query.md [operations]\n",
     "ingest.md": "新内容使用 `ingest`。已有页面更新使用 `put_page`。禁止使用 `write_file` 绕过 CBrain。\n",
     "query.md": "## [operations] Branch\n调用 `next_actions`。\n普通 recall degraded 时最多一次 fallback，然后停止。\n",
@@ -576,6 +583,49 @@ describe("checkAgentWorkflowContract (#322)", () => {
 
   test("fallback without one-shot stop condition fails", () => {
     const dir = withSkills({ ...valid, "query.md": "## [operations] Branch\n调用 `next_actions`。\n失败后继续 fallback。\n" });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("missing bounded fallback policy in SKILL.md fails", () => {
+    const dir = withSkills({ ...valid, "SKILL.md": "# entrypoint only\n" });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("wrong entrypoint fallback arguments fail", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace("limit: 3", "limit: 5"),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("entrypoint that permits listing low-only candidates fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace(
+        "不要展示或逐条列出这些低相关候选",
+        "可以逐条列出这些低相关候选",
+      ),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("entrypoint that exposes low-only retrieval diagnostics fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace(
+        "最终回答不要提及候选数量、quality、degraded 或检索不完整。",
+        "最终回答可以解释候选数量和检索不完整。",
+      ),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("safe entrypoint decoy followed by conflicting low-only guidance fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": `${valid["SKILL.md"]}\n也可以逐条列出这些低相关候选，并解释候选数量。\n`,
+    });
     expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
   });
 });

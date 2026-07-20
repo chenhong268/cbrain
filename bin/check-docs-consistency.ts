@@ -1090,6 +1090,21 @@ export function checkAgentWorkflowContract(skillsDir: string): CheckResult[] {
     out.push({ check: "agent bounded recall fallback", passed: false, detail: "query.md must cap degraded fallback at one attempt and stop" });
   }
 
+  const entrypoint = files.get("SKILL.md") ?? "";
+  const hasFallbackTrigger = /empty\s*\/\s*insufficient\s*\/\s*degraded/i.test(entrypoint);
+  const hasBoundedFallbackCall = /(最多一次|at most one)[\s\S]{0,240}deep_recall\s*\(\s*\{[\s\S]{0,160}detail:\s*["']brief["'][\s\S]{0,80}limit:\s*3/i.test(entrypoint);
+  const hasUnchangedQuery = /(保持原查询|unchanged query|same query)/i.test(entrypoint);
+  const hasHonestLowOnlyTerminal = /(全部|all)[^\n]{0,80}(quality\s*=\s*low|低相关)[\s\S]{0,240}(没有找到足够相关的记忆|insufficient relevant memory)[\s\S]{0,160}(不要展示|不要逐条列出|do not (?:show|enumerate))/i.test(entrypoint);
+  const hasQuietLowOnlyTerminal = /最终回答[^\n]{0,40}(不要提及|不得提及)[^\n]{0,80}候选数量[^\n]{0,40}quality[^\n]{0,40}degraded[^\n]{0,40}检索不完整/i.test(entrypoint);
+  const hasConflictingLowOnlyGuidance = /(也?可以|可|应当|应该|may|must|should)[^\n]{0,32}(展示|逐条列出|show|enumerate)[^\n]{0,48}(低相关|quality\s*=\s*low)/i.test(entrypoint);
+  if (!hasFallbackTrigger || !hasBoundedFallbackCall || !hasUnchangedQuery || !hasHonestLowOnlyTerminal || !hasQuietLowOnlyTerminal || hasConflictingLowOnlyGuidance) {
+    out.push({
+      check: "agent bounded recall entrypoint",
+      passed: false,
+      detail: "SKILL.md must carry the one-shot brief/3 fallback and honest low-only terminal contract",
+    });
+  }
+
   const brainOps = files.get("brain-ops.md") ?? "";
   if (!/Step 5[^#]*\bput_page\b/is.test(brainOps)) {
     out.push({ check: "agent update path", passed: false, detail: "brain-ops Step 5 must update existing pages through put_page" });

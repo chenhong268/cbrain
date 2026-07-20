@@ -526,3 +526,8 @@ workflow.
 If the reproduction passes, amend or link this spec with that privacy-safe evidence
 and then plan only the minimal honesty fix. If it fails, close this slice without
 production changes and re-prioritize from fresh journey evidence.
+
+The bounded anonymous reproduction is recorded in
+[`../reports/2026-07-20-bounded-fallback-anonymous-reproduction.md`](../reports/2026-07-20-bounded-fallback-anonymous-reproduction.md).
+It reproduced the failure in 3/3 blocking repetitions and selected the directly
+injected `SKILL.md` bounded-fallback contract as the smallest production seam.
