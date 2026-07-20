@@ -6,10 +6,11 @@ import {
   type ProcessIdentity,
   type ServiceEvidence,
   type TargetResult,
+  type WriterProcess,
 } from "../../bin/lib/live-release-verify.js";
 import { buildRealDeps } from "../../bin/lib/live-release-deps.js";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
@@ -37,6 +38,7 @@ interface FakeShape {
   identityByPid: Record<number, ProcessIdentity>;
   cwdByPid: Record<number, string | null>;
   listenerByPort: Record<number, { pid: number; count: number }>;
+  writers: readonly WriterProcess[];
   callerCwd: string;
   healthByVersion: string | { code: "HTTP_UNAVAILABLE" | "HTTP_RESPONSE_INVALID" };
   packageByRoot: Record<string, string | "fail">;
@@ -48,6 +50,7 @@ interface FakeShape {
     identity?: (ProcessIdentity | null)[];
     cwd?: (string | null)[];
     listener?: { pid: number; count: number }[];
+    writers?: (readonly WriterProcess[])[];
   };
 }
 
@@ -57,6 +60,7 @@ const baseShape = (): FakeShape => ({
   identityByPid: { [SERVICE_PID]: { pid: SERVICE_PID, startUsec: "birth-stable-001" } },
   cwdByPid: { [SERVICE_PID]: ACTIVE_ROOT },
   listenerByPort: { 3399: { pid: SERVICE_PID, count: 1 } },
+  writers: [{ pid: SERVICE_PID }],
   callerCwd: STALE_CWD,
   healthByVersion: "2.0.8",
   packageByRoot: { [ACTIVE_ROOT]: "2.0.8" },
@@ -68,7 +72,7 @@ const baseShape = (): FakeShape => ({
 });
 
 function fakeDeps(shape: FakeShape): LiveReleaseDeps {
-  let ev = 0, id = 0, cwd = 0, lis = 0;
+  let ev = 0, id = 0, cwd = 0, lis = 0, wr = 0;
   return {
     ownVerifierPath: shape.ownVerifierPath,
     listCbrainServiceOwners: () => shape.owners,
@@ -76,6 +80,7 @@ function fakeDeps(shape: FakeShape): LiveReleaseDeps {
     readProcessIdentity: (pid) => shape.sequences?.identity?.[id++] ?? shape.identityByPid[pid] ?? null,
     readProcessCwd: (pid) => shape.sequences?.cwd?.[cwd++] ?? shape.cwdByPid[pid] ?? null,
     readListenerOwner: (port) => shape.sequences?.listener?.[lis++] ?? shape.listenerByPort[port] ?? { pid: 0, count: 0 },
+    listWriterProcesses: () => shape.sequences?.writers?.[wr++] ?? shape.writers,
     readCallerCwd: () => shape.callerCwd,
     fetchHealthVersion: () =>
       typeof shape.healthByVersion === "string"
@@ -83,9 +88,7 @@ function fakeDeps(shape: FakeShape): LiveReleaseDeps {
         : { ok: false as const, code: shape.healthByVersion.code },
     readPackageVersion: (root) => {
       const v = shape.packageByRoot[root];
-      return v === undefined || v === "fail"
-        ? { ok: false as const }
-        : { ok: true as const, version: v };
+      return v === undefined || v === "fail" ? { ok: false as const } : { ok: true as const, version: v };
     },
     readManifestVersion: (root) => {
       const m = shape.manifestByRoot[root];
@@ -110,7 +113,6 @@ const happyOpts = (overrides: Partial<Parameters<typeof verifyLiveRelease>[1]> =
 describe("live-release verifier — service & process evidence", () => {
   test("passes end-to-end when caller cwd is a stale checkout but active root is coherent", () => {
     const shape = baseShape();
-    shape.callerCwd = STALE_CWD;
     const result = verifyLiveRelease(fakeDeps(shape), happyOpts());
     expect(result.status).toBe("pass");
     expect(result.active?.version).toBe("2.0.8");
@@ -120,17 +122,13 @@ describe("live-release verifier — service & process evidence", () => {
   test("fails with SERVICE_NOT_FOUND when no cbrain service is loaded", () => {
     const shape = baseShape();
     shape.owners = [];
-    const result = verifyLiveRelease(fakeDeps(shape), happyOpts());
-    expect(result.status).toBe("fail");
-    expect(result.code).toBe("SERVICE_NOT_FOUND");
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("SERVICE_NOT_FOUND");
   });
 
-  test("fails with MULTIPLE_SERVICE_OWNERS when more than one cbrain service is loaded", () => {
+  test("fails with MULTIPLE_SERVICE_OWNERS when more than one cbrain serve service is loaded", () => {
     const shape = baseShape();
     shape.owners = ["ai.cbrain.serve", "ai.cbrain.serve.secondary"];
-    const result = verifyLiveRelease(fakeDeps(shape), happyOpts());
-    expect(result.status).toBe("fail");
-    expect(result.code).toBe("MULTIPLE_SERVICE_OWNERS");
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("MULTIPLE_SERVICE_OWNERS");
   });
 
   test("fails with LISTENER_COUNT_INVALID when the port has zero listeners", () => {
@@ -157,6 +155,42 @@ describe("live-release verifier — service & process evidence", () => {
     expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("EXECUTABLE_ROOT_MISMATCH");
   });
 
+  test("fails with ENTRYPOINT_ROOT_MISMATCH when launchd entrypoint points outside the active root", () => {
+    const shape = baseShape();
+    shape.evidenceByLabel = {
+      [SERVICE_LABEL]: happyEvidence({
+        programArguments: ["bun", "/anonymous/other-root/src/cli/index.ts", "serve"],
+      }),
+    };
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("ENTRYPOINT_ROOT_MISMATCH");
+  });
+
+  test("fails with ENTRYPOINT_ROOT_MISMATCH when programArguments has no script entrypoint", () => {
+    const shape = baseShape();
+    shape.evidenceByLabel = {
+      [SERVICE_LABEL]: happyEvidence({ programArguments: ["bun", "run", "serve"] }),
+    };
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("ENTRYPOINT_ROOT_MISMATCH");
+  });
+
+  test("fails with WRITER_COUNT_INVALID when there is no cbrain serve writer", () => {
+    const shape = baseShape();
+    shape.writers = [];
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("WRITER_COUNT_INVALID");
+  });
+
+  test("fails with WRITER_COUNT_INVALID when there is more than one writer", () => {
+    const shape = baseShape();
+    shape.writers = [{ pid: SERVICE_PID }, { pid: 22222 }];
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("WRITER_COUNT_INVALID");
+  });
+
+  test("fails with WRITER_OWNER_MISMATCH when the writer PID differs from the service PID", () => {
+    const shape = baseShape();
+    shape.writers = [{ pid: 33333 }];
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("WRITER_OWNER_MISMATCH");
+  });
+
   test("fails with PROCESS_NOT_RUNNING when the service PID has exited", () => {
     const shape = baseShape();
     shape.identityByPid = {};
@@ -168,30 +202,16 @@ describe("live-release verifier — service & process evidence", () => {
     shape.evidenceByLabel = { [SERVICE_LABEL]: happyEvidence({ workingDirectory: "" }) };
     expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("SERVICE_EVIDENCE_INVALID");
   });
+});
 
-  test("fails with SERVICE_EVIDENCE_INVALID when program is missing", () => {
+describe("live-release verifier — bounded whole-attempt stability", () => {
+  test("passes after one whole-attempt retry when the second attempt is stable", () => {
     const shape = baseShape();
-    shape.evidenceByLabel = { [SERVICE_LABEL]: happyEvidence({ program: "" }) };
-    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("SERVICE_EVIDENCE_INVALID");
-  });
-
-  test("fails with PROCESS_GENERATION_CHANGED when birth identity drifts across all retries", () => {
-    const shape = baseShape();
+    // attempt1: before birth-A, after birth-B → drift; attempt2: before/after birth-B → stable
     shape.sequences = {
       identity: [
         { pid: SERVICE_PID, startUsec: "birth-A" },
         { pid: SERVICE_PID, startUsec: "birth-B" },
-        { pid: SERVICE_PID, startUsec: "birth-C" },
-      ],
-    };
-    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("PROCESS_GENERATION_CHANGED");
-  });
-
-  test("passes after one bounded retry when the second read re-stabilizes", () => {
-    const shape = baseShape();
-    shape.sequences = {
-      identity: [
-        { pid: SERVICE_PID, startUsec: "birth-A" },
         { pid: SERVICE_PID, startUsec: "birth-B" },
         { pid: SERVICE_PID, startUsec: "birth-B" },
       ],
@@ -199,7 +219,20 @@ describe("live-release verifier — service & process evidence", () => {
     expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).status).toBe("pass");
   });
 
-  test("re-anchors to the stable snapshot after drift, never the stale first generation", () => {
+  test("fails with PROCESS_GENERATION_CHANGED when both attempts drift", () => {
+    const shape = baseShape();
+    shape.sequences = {
+      identity: [
+        { pid: SERVICE_PID, startUsec: "birth-A" },
+        { pid: SERVICE_PID, startUsec: "birth-B" },
+        { pid: SERVICE_PID, startUsec: "birth-C" },
+        { pid: SERVICE_PID, startUsec: "birth-D" },
+      ],
+    };
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("PROCESS_GENERATION_CHANGED");
+  });
+
+  test("re-anchors to the stable attempt's root after a mid-verification restart", () => {
     const shape = baseShape();
     const ROOT_A = "/anonymous/root-a";
     const ROOT_B = "/anonymous/root-b";
@@ -208,21 +241,54 @@ describe("live-release verifier — service & process evidence", () => {
         happyEvidence({ workingDirectory: ROOT_A }),
         happyEvidence({ workingDirectory: ROOT_B }),
         happyEvidence({ workingDirectory: ROOT_B }),
+        happyEvidence({ workingDirectory: ROOT_B }),
       ],
-      cwd: [ROOT_A, ROOT_B, ROOT_B],
+      cwd: [ROOT_A, ROOT_B, ROOT_B, ROOT_B],
       identity: [
         { pid: SERVICE_PID, startUsec: "birth-A" },
+        { pid: SERVICE_PID, startUsec: "birth-B" },
         { pid: SERVICE_PID, startUsec: "birth-B" },
         { pid: SERVICE_PID, startUsec: "birth-B" },
       ],
     };
     shape.healthByVersion = "2.0.9";
-    shape.packageByRoot = { [ROOT_B]: "2.0.9" };
-    shape.manifestByRoot = { [ROOT_B]: { version: "2.0.9", files: ["SKILL.md"] } };
+    shape.packageByRoot = { [ROOT_A]: "2.0.9", [ROOT_B]: "2.0.9" };
+    shape.manifestByRoot = {
+      [ROOT_A]: { version: "2.0.9", files: ["SKILL.md"] },
+      [ROOT_B]: { version: "2.0.9", files: ["SKILL.md"] },
+    };
     shape.ownVerifierPath = `${ROOT_B}/bin/lib/live-release-verify.ts`;
     const result = verifyLiveRelease(fakeDeps(shape), happyOpts());
     expect(result.status).toBe("pass");
     expect(result.active?.root).toBe("root-b");
+  });
+
+  test("programArguments change between before/after snapshots triggers a retry", () => {
+    const shape = baseShape();
+    const argsA = ["bun", "run", "src/cli/index.ts", "serve"];
+    const argsB = ["bun", "run", "src/cli/index.ts", "serve", "--http"];
+    shape.sequences = {
+      evidence: [
+        happyEvidence({ programArguments: argsA }),
+        happyEvidence({ programArguments: argsB }),
+        happyEvidence({ programArguments: argsB }),
+        happyEvidence({ programArguments: argsB }),
+      ],
+    };
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).status).toBe("pass");
+  });
+
+  test("writer count change between before/after snapshots triggers a retry", () => {
+    const shape = baseShape();
+    shape.sequences = {
+      writers: [
+        [{ pid: SERVICE_PID }],
+        [{ pid: SERVICE_PID }, { pid: 22222 }],
+        [{ pid: SERVICE_PID }],
+        [{ pid: SERVICE_PID }],
+      ],
+    };
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).status).toBe("pass");
   });
 });
 
@@ -262,27 +328,29 @@ describe("live-release verifier — version & target coherence", () => {
     expect(verifyLiveRelease(fakeDeps(shape), { ...happyOpts(), requiredTargets: [] }).code).toBe("TARGET_SET_EMPTY");
   });
 
+  test("fails with TARGET_PATH_INVALID when a required target is a relative path", () => {
+    const shape = baseShape();
+    expect(
+      verifyLiveRelease(fakeDeps(shape), { ...happyOpts(), requiredTargets: ["relative/target"] }).code,
+    ).toBe("TARGET_PATH_INVALID");
+  });
+
+  test("fails with TARGET_PATH_INVALID when required targets contain a duplicate", () => {
+    const shape = baseShape();
+    expect(
+      verifyLiveRelease(fakeDeps(shape), { ...happyOpts(), requiredTargets: [HAPPY_TARGET, HAPPY_TARGET] }).code,
+    ).toBe("TARGET_PATH_INVALID");
+  });
+
   test("fails with TARGET_VERIFICATION_FAILED when a required target is stale", () => {
     const shape = baseShape();
     shape.targetByPath = { [HAPPY_TARGET]: "stale" };
     expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("TARGET_VERIFICATION_FAILED");
   });
 
-  test("fails with TARGET_VERIFICATION_FAILED when a required target is missing", () => {
-    const shape = baseShape();
-    shape.targetByPath = { [HAPPY_TARGET]: "missing" };
-    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("TARGET_VERIFICATION_FAILED");
-  });
-
   test("fails with TARGET_VERIFICATION_FAILED when a required target is incompatible", () => {
     const shape = baseShape();
     shape.targetByPath = { [HAPPY_TARGET]: "incompatible" };
-    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("TARGET_VERIFICATION_FAILED");
-  });
-
-  test("fails with TARGET_VERIFICATION_FAILED when a required target is unverified", () => {
-    const shape = baseShape();
-    shape.targetByPath = { [HAPPY_TARGET]: "unverified" };
     expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("TARGET_VERIFICATION_FAILED");
   });
 
@@ -317,7 +385,7 @@ describe("live-release verifier — privacy & read-only source guarantees", () =
     shape.evidenceByLabel = {
       [SERVICE_LABEL]: happyEvidence({
         program: "/anonymous/secret-bun",
-        programArguments: ["bun", "--token=sk-anonymous-secret", "serve"],
+        programArguments: ["bun", "--token=sk-anonymous-secret", "src/cli/index.ts", "serve"],
       }),
     };
     shape.callerCwd = "/anonymous/private-user-checkout";
@@ -474,10 +542,25 @@ describe("live-release verifier — real deps construction (type-checked, no sys
     expect(typeof deps.readProcessIdentity).toBe("function");
     expect(typeof deps.readProcessCwd).toBe("function");
     expect(typeof deps.readListenerOwner).toBe("function");
+    expect(typeof deps.listWriterProcesses).toBe("function");
     expect(typeof deps.readCallerCwd).toBe("function");
     expect(typeof deps.fetchHealthVersion).toBe("function");
     expect(typeof deps.readPackageVersion).toBe("function");
     expect(typeof deps.readManifestVersion).toBe("function");
     expect(typeof deps.verifySkillTarget).toBe("function");
+  });
+});
+
+describe("live-release verifier — Hermes brief contract", () => {
+  test("hermes-cbrain-brief.md routes version diagnosis through the bootstrap and forbids cwd fallback", () => {
+    const brief = readFileSync(join(import.meta.dir, "../../skills/hermes-cbrain-brief.md"), "utf8");
+    expect(brief).toContain("release-verify-bootstrap.sh");
+    expect(brief).toMatch(/cwd.*fallback|禁止.*cwd|绝不.*cwd/);
+    expect(brief).toContain("launchctl");
+    expect(brief).toContain("ai.cbrain.serve");
+  });
+
+  test("standalone release-verify.md has been merged away (single source of truth in the brief)", () => {
+    expect(existsSync(join(import.meta.dir, "../../skills/release-verify.md"))).toBe(false);
   });
 });

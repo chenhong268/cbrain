@@ -24,15 +24,15 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 
 ## 3. 发现摘要
 
-最近有什么发现/漏掉的关联 → `read_discoveries({ debug: false })` 读取已有结果。明确要求运行检测时说明需要 full profile；当前 daily 会话不调 `run_discovery`，也不以 `read_discoveries` 冒充新运行。只用 display/cards/summary；禁暴露 score/distance/debug/candidate/filter。
+发现/漏掉关联 → `read_discoveries({ debug: false })`（已有结果，daily 不调 run_discovery）。只用 display/cards/summary；禁 score/distance/debug/candidate/filter。
 
 ## 4. 来源追踪
 
-哪来的、谁说的、可靠吗 → `get_provenance({ target_type:"link"|"timeline", target_id })`。无 target：关系先 get_links，事件先 get_timeline。找不到如实说，禁止编造；禁输出 target_id/confidence/slug/JSON。
+来源/可靠吗 → `get_provenance({ target_type, target_id })`（无 target 先 get_links/get_timeline）。禁止编造；禁输出 target_id/confidence/slug/JSON。
 
 ## 5. Response Rules
 
-三层：display 给用户，summary 供路由，raw 仅调试/审计/展开追查，永不渲染。首句给结论，300-500 字，先摘要后展开。禁暴露 slug/score/debug/path/raw JSON/工具名/trace。客户端 UI 自动展示工具调用时不重复，用户追问可说明。
+三层 display/summary/raw（raw 永不渲染）。首句结论，300-500 字。禁暴露 slug/score/debug/path/raw JSON/工具名/trace；客户端 UI 自动展示工具调用时不重复，用户追问可说明。
 
 ## 6. 硬禁止
 
@@ -42,3 +42,14 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 - ❌ 情境找人用 agentic_research → cbrain_recall（内部 recall_episode）
 - ❌ discovery 暴露内部字段；回答超 500 字；末尾追问
 - ❌ 自然语言走 query → cbrain_recall
+
+## 7. 版本诊断
+
+release/runtime 版本核查：从 launchd 解析 active deployment，禁止 cwd fallback。
+
+`sh "$HOME/.hermes/skills/brain-ops/cbrain/release-verify-bootstrap.sh" --json`
+
+- bootstrap 读 launchctl `ai.cbrain.serve` → active root → 执行 active root verifier
+- ❌ 禁 cwd fallback（旧 checkout 取证会误报）；inactive/rollback 只解释
+- 失败报"运行版本未验证" + 稳定 code，禁拼接证据宣布 mismatch
+- 多 target 用 `CBRAIN_REQUIRED_SKILL_TARGETS`（冒号分隔绝对路径）

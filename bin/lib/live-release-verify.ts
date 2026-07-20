@@ -6,12 +6,19 @@
  * coherence. All system access is behind {@link LiveReleaseDeps} so every
  * fail-closed matrix case is deterministic and unit-testable.
  *
+ * Stability invariant: a single verification attempt is bracketed by a
+ * before/after snapshot that covers the *entire* evidence window (service
+ * identity, listener, writer, entrypoint, version, targets). Pass requires the
+ * two snapshots to be byte-identical; otherwise the whole attempt is retried
+ * once and, if still drifting, fails closed — evidence from two process
+ * generations is never combined into one verdict.
+ *
  * Read-only by construction: the dependency interface exposes only read
  * operations, and {@link verifyLiveRelease} performs no writes.
  */
 
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 
 // ── Fail codes (one per distinct failure layer — never collapse to generic) ──
 
@@ -21,7 +28,10 @@ export const FAIL_CODES = [
   "SERVICE_EVIDENCE_INVALID",
   "PROCESS_NOT_RUNNING",
   "PROCESS_GENERATION_CHANGED",
+  "ENTRYPOINT_ROOT_MISMATCH",
   "EXECUTABLE_ROOT_MISMATCH",
+  "WRITER_COUNT_INVALID",
+  "WRITER_OWNER_MISMATCH",
   "LISTENER_COUNT_INVALID",
   "LISTENER_OWNER_MISMATCH",
   "HTTP_UNAVAILABLE",
@@ -30,6 +40,7 @@ export const FAIL_CODES = [
   "ACTIVE_MANIFEST_INVALID",
   "ACTIVE_VERSION_MISMATCH",
   "TARGET_SET_EMPTY",
+  "TARGET_PATH_INVALID",
   "TARGET_VERIFICATION_FAILED",
   "VERIFIER_ROOT_MISMATCH",
 ] as const;
@@ -44,7 +55,10 @@ const FAIL_LAYER: Record<FailCode, string> = {
   SERVICE_EVIDENCE_INVALID: "service",
   PROCESS_NOT_RUNNING: "process",
   PROCESS_GENERATION_CHANGED: "process",
+  ENTRYPOINT_ROOT_MISMATCH: "process",
   EXECUTABLE_ROOT_MISMATCH: "process",
+  WRITER_COUNT_INVALID: "writer",
+  WRITER_OWNER_MISMATCH: "writer",
   LISTENER_COUNT_INVALID: "listener",
   LISTENER_OWNER_MISMATCH: "listener",
   HTTP_UNAVAILABLE: "http",
@@ -53,6 +67,7 @@ const FAIL_LAYER: Record<FailCode, string> = {
   ACTIVE_MANIFEST_INVALID: "version",
   ACTIVE_VERSION_MISMATCH: "version",
   TARGET_SET_EMPTY: "target",
+  TARGET_PATH_INVALID: "target",
   TARGET_VERIFICATION_FAILED: "target",
   VERIFIER_ROOT_MISMATCH: "verifier",
 };
@@ -77,6 +92,10 @@ export interface ProcessIdentity {
 export interface ListenerOwner {
   readonly pid: number;
   readonly count: number;
+}
+
+export interface WriterProcess {
+  readonly pid: number;
 }
 
 export type TargetState = "current" | "stale" | "missing" | "incompatible" | "unverified";
@@ -116,7 +135,7 @@ export type ReadManifestFailure = ReadVersionFailure;
 export interface LiveReleaseDeps {
   /** Absolute path of the verifier implementation currently executing. */
   readonly ownVerifierPath: string;
-  /** Loaded service labels that look like CBrain owners (e.g. ai.cbrain.serve). */
+  /** Loaded service labels that run the CBrain HTTP service (e.g. ai.cbrain.serve). */
   listCbrainServiceOwners(): readonly string[];
   /** Parse loaded service evidence from the service manager (launchctl print). */
   readServiceEvidence(label: string): ServiceEvidence;
@@ -126,6 +145,8 @@ export interface LiveReleaseDeps {
   readProcessCwd(pid: number): string | null;
   /** Owner PID + listener count for a TCP port (lsof). */
   readListenerOwner(port: number): ListenerOwner;
+  /** PIDs of running `cbrain serve` writer processes (ps inventory). */
+  listWriterProcesses(): readonly WriterProcess[];
   /** The caller's cwd — classified inactive unless it equals the active root. */
   readCallerCwd(): string;
   fetchHealthVersion(url: string, timeoutMs: number): HealthResult | HealthFailure;
@@ -182,7 +203,21 @@ function hashBirth(startUsec: string): string {
   return createHash("sha256").update(startUsec).digest("hex").slice(0, 16);
 }
 
-// ── Snapshot + bounded stability ──
+/**
+ * Resolve the actual CBrain entrypoint from ProgramArguments: the first token
+ * that looks like a script file (`.ts`/`.js` with a path separator), resolved
+ * against the configured working directory. Returns null if none is found.
+ */
+function resolveEntrypoint(programArguments: readonly string[], workingDirectory: string): string | null {
+  for (const token of programArguments) {
+    if (/\.(?:ts|js)$/i.test(token) && token.includes("/")) {
+      return resolve(workingDirectory, token);
+    }
+  }
+  return null;
+}
+
+// ── Snapshot — brackets the entire evidence window ──
 
 interface Snapshot {
   readonly label: string;
@@ -195,6 +230,7 @@ interface Snapshot {
   readonly lastExitStatus: number | null;
   readonly listenerPid: number;
   readonly listenerCount: number;
+  readonly writerPids: readonly number[];
 }
 
 function readSnapshot(deps: LiveReleaseDeps, opts: VerifyOptions, label: string): Snapshot {
@@ -202,6 +238,7 @@ function readSnapshot(deps: LiveReleaseDeps, opts: VerifyOptions, label: string)
   const identity = deps.readProcessIdentity(evidence.pid);
   const cwd = deps.readProcessCwd(evidence.pid);
   const listener = deps.readListenerOwner(opts.port);
+  const writers = deps.listWriterProcesses();
   return {
     label,
     pid: evidence.pid,
@@ -213,6 +250,7 @@ function readSnapshot(deps: LiveReleaseDeps, opts: VerifyOptions, label: string)
     lastExitStatus: evidence.lastExitStatus,
     listenerPid: listener.pid,
     listenerCount: listener.count,
+    writerPids: [...writers.map((w) => w.pid)].sort((a, b) => a - b),
   };
 }
 
@@ -227,9 +265,15 @@ function validateSnapshot(s: Snapshot): FailCode | null {
     return "SERVICE_EVIDENCE_INVALID";
   }
   if (s.startUsec === null) return "PROCESS_NOT_RUNNING";
+  const entrypoint = resolveEntrypoint(s.programArguments, s.workingDirectory);
+  if (entrypoint === null || !entrypoint.startsWith(`${s.workingDirectory}/`)) {
+    return "ENTRYPOINT_ROOT_MISMATCH";
+  }
+  if (s.cwd !== s.workingDirectory) return "EXECUTABLE_ROOT_MISMATCH";
+  if (s.writerPids.length !== 1) return "WRITER_COUNT_INVALID";
+  if (s.writerPids[0] !== s.pid) return "WRITER_OWNER_MISMATCH";
   if (s.listenerCount !== 1) return "LISTENER_COUNT_INVALID";
   if (s.listenerPid !== s.pid) return "LISTENER_OWNER_MISMATCH";
-  if (s.cwd !== s.workingDirectory) return "EXECUTABLE_ROOT_MISMATCH";
   return null;
 }
 
@@ -242,8 +286,79 @@ function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
     a.program === b.program &&
     a.workingDirectory === b.workingDirectory &&
     a.listenerPid === b.listenerPid &&
-    a.listenerCount === b.listenerCount
+    a.listenerCount === b.listenerCount &&
+    a.writerPids.join(",") === b.writerPids.join(",") &&
+    a.programArguments.join("\n") === b.programArguments.join("\n")
   );
+}
+
+// ── One verification attempt (bracketed by before/after snapshot) ──
+
+interface AttemptOutcome {
+  readonly result: VerifyResult | null;
+  readonly drifted: boolean;
+}
+
+function attempt(deps: LiveReleaseDeps, opts: VerifyOptions): AttemptOutcome {
+  const before = readSnapshot(deps, opts, opts.serviceLabel);
+  const beforeInvalid = validateSnapshot(before);
+  if (beforeInvalid) return { result: fail(beforeInvalid), drifted: false };
+
+  const activeRoot = before.workingDirectory;
+
+  const http = deps.fetchHealthVersion(opts.healthUrl, opts.httpTimeoutMs);
+  if (!http.ok) return { result: fail(http.code), drifted: false };
+  const pkg = deps.readPackageVersion(activeRoot);
+  if (!pkg.ok) return { result: fail("ACTIVE_PACKAGE_INVALID"), drifted: false };
+  const manifest = deps.readManifestVersion(activeRoot);
+  if (!manifest.ok) return { result: fail("ACTIVE_MANIFEST_INVALID"), drifted: false };
+  if (http.version !== pkg.version || pkg.version !== manifest.version) {
+    return { result: fail("ACTIVE_VERSION_MISMATCH"), drifted: false };
+  }
+
+  if (opts.requiredTargets.length === 0) return { result: fail("TARGET_SET_EMPTY"), drifted: false };
+  const activeRootSkills = `${activeRoot}/skills`;
+  const targetViews: TargetView[] = [];
+  const seen = new Set<string>();
+  for (const target of opts.requiredTargets) {
+    if (!target.startsWith("/")) return { result: fail("TARGET_PATH_INVALID"), drifted: false };
+    if (seen.has(target)) return { result: fail("TARGET_PATH_INVALID"), drifted: false };
+    seen.add(target);
+    const comparison = deps.verifySkillTarget(activeRootSkills, target);
+    targetViews.push({ path: comparison.path, status: comparison.status });
+    if (comparison.status !== "current") return { result: fail("TARGET_VERIFICATION_FAILED"), drifted: false };
+  }
+
+  // snapshot-after: pass requires the entire evidence window to be unchanged.
+  const after = readSnapshot(deps, opts, opts.serviceLabel);
+  if (!sameSnapshot(before, after)) return { result: null, drifted: true };
+
+  // self-root proof on the stable active root — verifier code must live under it,
+  // so a stale cwd cannot impersonate the deployment. Checked after stability so
+  // a mid-verification restart can re-anchor instead of false-failing.
+  if (!deps.ownVerifierPath.startsWith(`${activeRoot}/`)) {
+    return { result: fail("VERIFIER_ROOT_MISMATCH"), drifted: false };
+  }
+
+  const callerCwd = deps.readCallerCwd();
+  const callerClassification: "active" | "inactive" = callerCwd === activeRoot ? "active" : "inactive";
+
+  const result: VerifyResult = {
+    schema_version: 1,
+    status: "pass",
+    service: { label: before.label, pid_birth: hashBirth(before.startUsec ?? "") },
+    active: { root: basename(activeRoot), version: pkg.version },
+    versions: { http: http.version, package: pkg.version, manifest: manifest.version },
+    targets: targetViews.map((t) => ({ path: basename(t.path), status: t.status })),
+    caller_cwd: { path: basename(callerCwd), classification: callerClassification },
+  };
+  if (opts.rollbackCandidate) {
+    return {
+      result: { ...result, rollback: { path: basename(opts.rollbackCandidate), classification: "inactive" } },
+      drifted: false,
+    };
+  }
+  return { result, drifted: false };
 }
 
 // ── Main verifier ──
@@ -255,62 +370,10 @@ export function verifyLiveRelease(deps: LiveReleaseDeps, optsPartial?: Partial<V
   if (!owners.includes(opts.serviceLabel)) return fail("SERVICE_NOT_FOUND");
   if (owners.length > 1) return fail("MULTIPLE_SERVICE_OWNERS");
 
-  const first = readSnapshot(deps, opts, opts.serviceLabel);
-  const firstInvalid = validateSnapshot(first);
-  if (firstInvalid) return fail(firstInvalid);
-
-  // Bounded stability: read twice; if drifted, one retry; still drifted → fail closed.
-  // Never combine evidence across two process generations — after drift, re-anchor
-  // to the stable (second) snapshot and re-validate it; `first` is never used again.
-  const second = readSnapshot(deps, opts, opts.serviceLabel);
-  let stable = first;
-  if (!sameSnapshot(first, second)) {
-    const third = readSnapshot(deps, opts, opts.serviceLabel);
-    if (!sameSnapshot(second, third)) return fail("PROCESS_GENERATION_CHANGED");
-    const secondInvalid = validateSnapshot(second);
-    if (secondInvalid) return fail(secondInvalid);
-    stable = second;
-  }
-
-  const activeRoot = stable.workingDirectory;
-
-  // Self-root proof: verifier code must live under the active root, never caller cwd.
-  if (!deps.ownVerifierPath.startsWith(`${activeRoot}/`)) return fail("VERIFIER_ROOT_MISMATCH");
-
-  const http = deps.fetchHealthVersion(opts.healthUrl, opts.httpTimeoutMs);
-  if (!http.ok) return fail(http.code);
-  const pkg = deps.readPackageVersion(activeRoot);
-  if (!pkg.ok) return fail("ACTIVE_PACKAGE_INVALID");
-  const manifest = deps.readManifestVersion(activeRoot);
-  if (!manifest.ok) return fail("ACTIVE_MANIFEST_INVALID");
-  if (http.version !== pkg.version || pkg.version !== manifest.version) {
-    return fail("ACTIVE_VERSION_MISMATCH");
-  }
-
-  if (opts.requiredTargets.length === 0) return fail("TARGET_SET_EMPTY");
-  const activeRootSkills = `${activeRoot}/skills`;
-  const targetViews: TargetView[] = [];
-  for (const target of opts.requiredTargets) {
-    const result = deps.verifySkillTarget(activeRootSkills, target);
-    targetViews.push({ path: result.path, status: result.status });
-    if (result.status !== "current") return fail("TARGET_VERIFICATION_FAILED");
-  }
-
-  // Explanatory inactive candidates — never affect aggregate success.
-  const callerCwd = deps.readCallerCwd();
-  const callerClassification: "active" | "inactive" = callerCwd === activeRoot ? "active" : "inactive";
-
-  const result: VerifyResult = {
-    schema_version: 1,
-    status: "pass",
-    service: { label: stable.label, pid_birth: hashBirth(stable.startUsec ?? "") },
-    active: { root: basename(activeRoot), version: pkg.version },
-    versions: { http: http.version, package: pkg.version, manifest: manifest.version },
-    targets: targetViews.map((t) => ({ path: basename(t.path), status: t.status })),
-    caller_cwd: { path: basename(callerCwd), classification: callerClassification },
-  };
-  if (opts.rollbackCandidate) {
-    return { ...result, rollback: { path: basename(opts.rollbackCandidate), classification: "inactive" } };
-  }
-  return result;
+  const first = attempt(deps, opts);
+  if (!first.drifted) return first.result as VerifyResult;
+  // One bounded whole-attempt retry. Still drifting → fail closed.
+  const second = attempt(deps, opts);
+  if (second.drifted) return fail("PROCESS_GENERATION_CHANGED");
+  return second.result as VerifyResult;
 }

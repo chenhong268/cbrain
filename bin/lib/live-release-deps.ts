@@ -18,6 +18,7 @@ import type {
   ReadVersionFailure,
   ServiceEvidence,
   TargetResult,
+  WriterProcess,
 } from "./live-release-verify.js";
 
 function sh(cmd: string, args: readonly string[]): string {
@@ -73,7 +74,7 @@ export function buildRealDeps(ownVerifierPath: string): LiveReleaseDeps {
       }
       return out.split("\n").flatMap((line) => {
         const match = line.match(/^(?:\d+|-)\s+(?:-?\d+|-)\s+(.+)$/);
-        return match && /cbrain/i.test(match[1]) ? [match[1].trim()] : [];
+        return match && /cbrain/i.test(match[1]) && /serve/i.test(match[1]) ? [match[1].trim()] : [];
       });
     },
     readServiceEvidence(label: string): ServiceEvidence {
@@ -133,6 +134,22 @@ export function buildRealDeps(ownVerifierPath: string): LiveReleaseDeps {
         .filter((p): p is string => /^\d+$/.test(p))
         .map(Number);
       return { pid: pids[0] ?? 0, count: pids.length };
+    },
+    listWriterProcesses(): readonly WriterProcess[] {
+      let out: string;
+      try {
+        out = sh("/bin/ps", ["-axo", "pid=,command="]);
+      } catch {
+        return [];
+      }
+      return out.split("\n").flatMap((line) => {
+        const m = line.match(/^\s*(\d+)\s+(.+)$/);
+        if (!m) return [];
+        const command = m[2];
+        if (!/cbrain/i.test(command) || !/(?:^|\s)serve(?:\s|$)/i.test(command)) return [];
+        if (/verify/i.test(command)) return [];
+        return [{ pid: Number(m[1]) }];
+      });
     },
     readCallerCwd(): string {
       const resolved = safeRealpath(process.cwd());

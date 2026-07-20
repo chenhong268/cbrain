@@ -34,7 +34,6 @@
     "cleanup.routing-eval.jsonl",
     "review.routing-eval.jsonl",
     "write.routing-eval.jsonl",
-    "release-verify.md",
     "release-verify-bootstrap.sh"
   ]
 }
