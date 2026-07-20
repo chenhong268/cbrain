@@ -121,7 +121,7 @@ describe("cbrain skill-pack", () => {
     test("exits 0 on clean checkout", () => {
       const stdout = execSync(`${BIN} skill-pack`, { encoding: "utf-8" });
       expect(stdout).toContain("Status: PASS");
-      expect(stdout).toContain("33/33 present");
+      expect(stdout).toContain("35/35 present");
     });
 
     test("contains version in output", () => {
@@ -166,9 +166,9 @@ describe("cbrain skill-pack", () => {
       expect(report.guidance).toBeUndefined();
     });
 
-    test("requiredFiles has 33 entries with name + status", () => {
+    test("requiredFiles has 35 entries with name + status", () => {
       const files = report.requiredFiles as Array<Record<string, unknown>>;
-      expect(files).toHaveLength(33);
+      expect(files).toHaveLength(35);
       for (const f of files) {
         expect(typeof f.name).toBe("string");
         expect(typeof f.status).toBe("string");
@@ -1056,11 +1056,11 @@ describe("cbrain skill-pack", () => {
       expect(() => verifySkillPack(dir)).toThrow(/MANIFEST_INVALID.*files must be an array/);
     });
 
-    test("clean canonical pack passes with 33 required files", () => {
+    test("clean canonical pack passes with 35 required files", () => {
       seedFull(dir);
       const r = verifySkillPack(dir);
       expect(r.verificationStatus).toBe("pass");
-      expect(r.requiredFiles).toHaveLength(33);
+      expect(r.requiredFiles).toHaveLength(35);
     });
   });
 
