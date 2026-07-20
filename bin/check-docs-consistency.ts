@@ -1049,6 +1049,23 @@ export function checkAgentWorkflowContract(skillsDir: string): CheckResult[] {
   for (const file of readdirSync(skillsDir).filter((name) => name.endsWith(".md"))) {
     files.set(file, readFileSync(join(skillsDir, file), "utf-8"));
   }
+  const uniqueSection = (text: string, heading: string): { body: string; outside: string } | null => {
+    const lines = text.replace(/\r\n/g, "\n").split("\n");
+    const starts = lines.flatMap((line, index) => line === heading ? [index] : []);
+    if (starts.length !== 1) return null;
+    const start = starts[0] as number;
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i += 1) {
+      if (/^#{1,3}\s/.test(lines[i] ?? "")) {
+        end = i;
+        break;
+      }
+    }
+    return {
+      body: lines.slice(start + 1, end).join("\n").trim(),
+      outside: [...lines.slice(0, start), ...lines.slice(end)].join("\n"),
+    };
+  };
   const negativeCue = /(禁止|不得|不要|不能|不允许|严禁|never|do not|must not|bypass|绕过)/i;
 
   for (const [file, text] of files) {
@@ -1075,6 +1092,16 @@ export function checkAgentWorkflowContract(skillsDir: string): CheckResult[] {
   if (!/(痛点|异常|该处理什么|what to do next)[^\n]*query\.md\s*\[operations\]/i.test(resolver)) {
     out.push({ check: "agent operations resolver", passed: false, detail: "RESOLVER lacks operations route for current problems/next work" });
   }
+  const expectedResolverFallback = [
+    "- 精确关键词定位、debug 索引、确认某关键词 → query.md [keyword]；daily 调 `cbrain_recall`（内部 `debug_search`）",
+    "- 普通内容回忆：健康的 cbrain_recall empty/insufficient → query.md [bounded-fallback]",
+    "- 首轮 cbrain_recall runtime/freshness degraded → 停止并说明检索未完整执行，不进入 fallback",
+    "- 直调 `query` 仅限显式 debug/full profile",
+  ].join("\n");
+  const resolverSection = uniqueSection(resolver, "### Debug / Keyword Lookup（daily MCP 仍走 cbrain_recall）");
+  if (resolverSection?.body !== expectedResolverFallback || /\[bounded-fallback\]/i.test(resolverSection?.outside ?? "")) {
+    out.push({ check: "agent fallback resolver", passed: false, detail: "RESOLVER must separate healthy content fallback from first-call runtime degradation" });
+  }
 
   const ingest = files.get("ingest.md") ?? "";
   if (!/(新内容|新增内容|new content)[\s\S]{0,120}\bingest\b/i.test(ingest)
@@ -1086,8 +1113,41 @@ export function checkAgentWorkflowContract(skillsDir: string): CheckResult[] {
   if (!/\[operations\][\s\S]{0,500}\bnext_actions\b/i.test(query)) {
     out.push({ check: "agent operations branch", passed: false, detail: "query.md operations branch must call next_actions" });
   }
-  if (!/degraded[\s\S]{0,300}(最多一次|at most one)[\s\S]{0,200}(停止|stop)/i.test(query)) {
-    out.push({ check: "agent bounded recall fallback", passed: false, detail: "query.md must cap degraded fallback at one attempt and stop" });
+  const expectedQueryFallback = [
+    "普通内容回忆仅在健康的首轮 `cbrain_recall` 返回 empty / insufficient 时进入 fallback：",
+    "",
+    "1. 最多一次 advanced fallback：`deep_recall({ query, detail: \"brief\", limit: 3 })`。",
+    "2. fallback 后立即停止，不再串联 get_page / graph_query / timeline 或继续改写查询。",
+    "3. fallback 没有运行时或新鲜度异常、且候选全部低相关时，说明“没有找到足够相关的记忆”，不要用低相关结果填满答案。",
+    "4. 首轮 `cbrain_recall` 显示运行时或新鲜度 degraded 时，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
+  ].join("\n");
+  const querySection = uniqueSection(query, "### Bounded content-recall fallback");
+  const expectedOrdinaryContentReferences = [
+    "- 普通内容回忆（\"当时怎么设计的\"）→ cbrain_recall(detail: \"normal\")",
+    "- 不把 provenance 用于普通内容回忆",
+  ];
+  const ordinaryContentReferences = (querySection?.outside ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /(普通内容|ordinary content recall)/i.test(line));
+  if (querySection?.body !== expectedQueryFallback || JSON.stringify(ordinaryContentReferences) !== JSON.stringify(expectedOrdinaryContentReferences)) {
+    out.push({ check: "agent bounded recall fallback", passed: false, detail: "query.md must scope one fallback to healthy empty/insufficient content recall and preserve runtime degradation" });
+  }
+
+  const entrypoint = files.get("SKILL.md") ?? "";
+  const expectedEntrypointFallback = [
+    "- 仅限普通内容回忆：健康运行的 `cbrain_recall` 返回 empty / insufficient 时，保持原查询，最多一次调用 `deep_recall({ query, detail: \"brief\", limit: 3 })`，然后停止；不要继续改写或串联其他检索。",
+    "- 若 fallback 没有运行时或新鲜度异常，且候选全部 `quality=low`，先说明“没有找到足够相关的记忆”，不要展示或逐条列出这些低相关候选。",
+    "- 此时最终回答不要提及候选数量或 quality。",
+    "- 若首轮 `cbrain_recall` 显示运行时或新鲜度 degraded，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
+  ].join("\n");
+  const entrypointSection = uniqueSection(entrypoint, "### Bounded recall fallback");
+  if (entrypointSection?.body !== expectedEntrypointFallback || /fallback|quality\s*=\s*low|deep_recall\s*\(/i.test(entrypointSection?.outside ?? "")) {
+    out.push({
+      check: "agent bounded recall entrypoint",
+      passed: false,
+      detail: "SKILL.md must carry the one-shot brief/3 fallback and honest low-only terminal contract",
+    });
   }
 
   const brainOps = files.get("brain-ops.md") ?? "";

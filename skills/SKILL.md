@@ -38,6 +38,13 @@
 - 禁止 `query` + `get_page` 链式调用做核查 — 用 `cbrain_recall(detail: "brief")` 一步到位。
 - 禁止对核查意图用 `agentic_research`。
 
+### Bounded recall fallback
+
+- 仅限普通内容回忆：健康运行的 `cbrain_recall` 返回 empty / insufficient 时，保持原查询，最多一次调用 `deep_recall({ query, detail: "brief", limit: 3 })`，然后停止；不要继续改写或串联其他检索。
+- 若 fallback 没有运行时或新鲜度异常，且候选全部 `quality=low`，先说明“没有找到足够相关的记忆”，不要展示或逐条列出这些低相关候选。
+- 此时最终回答不要提及候选数量或 quality。
+- 若首轮 `cbrain_recall` 显示运行时或新鲜度 degraded，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。
+
 ## 4. 文件索引
 
 ### 技能文档

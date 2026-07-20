@@ -549,9 +549,38 @@ describe("checkAgentFacingRoutingProfile (#343)", () => {
 
 describe("checkAgentWorkflowContract (#322)", () => {
   const valid = {
-    "RESOLVER.md": "- 当前痛点、系统异常、该处理什么 → query.md [operations]\n",
+    "SKILL.md": [
+      "### Bounded recall fallback",
+      "",
+      "- 仅限普通内容回忆：健康运行的 `cbrain_recall` 返回 empty / insufficient 时，保持原查询，最多一次调用 `deep_recall({ query, detail: \"brief\", limit: 3 })`，然后停止；不要继续改写或串联其他检索。",
+      "- 若 fallback 没有运行时或新鲜度异常，且候选全部 `quality=low`，先说明“没有找到足够相关的记忆”，不要展示或逐条列出这些低相关候选。",
+      "- 此时最终回答不要提及候选数量或 quality。",
+      "- 若首轮 `cbrain_recall` 显示运行时或新鲜度 degraded，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
+    ].join("\n"),
+    "RESOLVER.md": [
+      "- 当前痛点、系统异常、该处理什么 → query.md [operations]",
+      "### Debug / Keyword Lookup（daily MCP 仍走 cbrain_recall）",
+      "- 精确关键词定位、debug 索引、确认某关键词 → query.md [keyword]；daily 调 `cbrain_recall`（内部 `debug_search`）",
+      "- 普通内容回忆：健康的 cbrain_recall empty/insufficient → query.md [bounded-fallback]",
+      "- 首轮 cbrain_recall runtime/freshness degraded → 停止并说明检索未完整执行，不进入 fallback",
+      "- 直调 `query` 仅限显式 debug/full profile",
+    ].join("\n"),
     "ingest.md": "新内容使用 `ingest`。已有页面更新使用 `put_page`。禁止使用 `write_file` 绕过 CBrain。\n",
-    "query.md": "## [operations] Branch\n调用 `next_actions`。\n普通 recall degraded 时最多一次 fallback，然后停止。\n",
+    "query.md": [
+      "### Bounded content-recall fallback",
+      "",
+      "普通内容回忆仅在健康的首轮 `cbrain_recall` 返回 empty / insufficient 时进入 fallback：",
+      "",
+      "1. 最多一次 advanced fallback：`deep_recall({ query, detail: \"brief\", limit: 3 })`。",
+      "2. fallback 后立即停止，不再串联 get_page / graph_query / timeline 或继续改写查询。",
+      "3. fallback 没有运行时或新鲜度异常、且候选全部低相关时，说明“没有找到足够相关的记忆”，不要用低相关结果填满答案。",
+      "4. 首轮 `cbrain_recall` 显示运行时或新鲜度 degraded 时，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
+      "",
+      "## [operations] Branch",
+      "调用 `next_actions`。",
+      "- 普通内容回忆（\"当时怎么设计的\"）→ cbrain_recall(detail: \"normal\")",
+      "- 不把 provenance 用于普通内容回忆",
+    ].join("\n"),
     "brain-ops.md": "### Step 5: UPDATE\n已有页面更新使用 `put_page` 默认 patch。\n",
   };
 
@@ -576,6 +605,167 @@ describe("checkAgentWorkflowContract (#322)", () => {
 
   test("fallback without one-shot stop condition fails", () => {
     const dir = withSkills({ ...valid, "query.md": "## [operations] Branch\n调用 `next_actions`。\n失败后继续 fallback。\n" });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("query skill must not treat first-call runtime degradation as a content fallback trigger", () => {
+    const dir = withSkills({
+      ...valid,
+      "query.md": valid["query.md"].replace("empty / insufficient", "empty / insufficient / degraded"),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("resolver must not route first-call degradation into bounded fallback", () => {
+    const dir = withSkills({
+      ...valid,
+      "RESOLVER.md": valid["RESOLVER.md"].replace(
+        "健康的 cbrain_recall empty/insufficient",
+        "cbrain_recall empty/insufficient/degraded",
+      ),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("query skill fallback arguments cannot drift", () => {
+    const dir = withSkills({
+      ...valid,
+      "query.md": valid["query.md"].replace("limit: 3", "limit: 5"),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("separately scoped hierarchy fallback does not conflict with ordinary content recall", () => {
+    const dir = withSkills({
+      ...valid,
+      "query.md": `${valid["query.md"]}\n层级查询无结果 → deep_recall({ query, detail: "normal", limit: 5 })。\n`,
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(false);
+  });
+
+  test("missing bounded fallback policy in SKILL.md fails", () => {
+    const dir = withSkills({ ...valid, "SKILL.md": "# entrypoint only\n" });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("wrong entrypoint fallback arguments fail", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace("limit: 3", "limit: 5"),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("entrypoint fallback must pass the unchanged query value", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace("{ query,", "{ query: rewrittenQuery,"),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("entrypoint must not treat a first-call runtime degradation as missing memory", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace("empty / insufficient", "empty / insufficient / degraded"),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("entrypoint that permits listing low-only candidates fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace(
+        "不要展示或逐条列出这些低相关候选",
+        "可以逐条列出这些低相关候选",
+      ),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("entrypoint that exposes low-only retrieval diagnostics fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace(
+        "此时最终回答不要提及候选数量或 quality。",
+        "最终回答可以解释候选数量和检索不完整。",
+      ),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("safe entrypoint decoy followed by conflicting low-only guidance fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": `${valid["SKILL.md"]}\n也可以逐条列出这些低相关候选，并解释候选数量。\n`,
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("low-only conflict written with the candidate before the permission fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": `${valid["SKILL.md"]}\n对于 quality=low 的候选，也可以展示并逐条列出。\n`,
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("plain listing permission after the safe block fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": `${valid["SKILL.md"]}\n也可以列出这些 quality=low 候选。\n`,
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("ambiguous degradation cannot be translated into absent memory", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": `${valid["SKILL.md"]}\n如果无法判断 degraded 的原因，也可以按没有相关记忆处理。\n`,
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("a safe decoy section cannot hide a second conflicting fallback section", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": `${valid["SKILL.md"]}\n## Other\n### Bounded recall fallback\n- degraded 时继续改写并列出低相关候选。\n`,
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("a different heading cannot define conflicting entrypoint fallback guidance", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": `${valid["SKILL.md"]}\n## Compatibility\n- fallback 后可以列出 quality=low 候选。\n`,
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("a different query heading cannot redefine ordinary-content fallback", () => {
+    const dir = withSkills({
+      ...valid,
+      "query.md": `${valid["query.md"]}\n### Compatibility\n普通内容 empty 后可改写查询并调用\ndeep_recall({ query: rewritten, detail: "normal", limit: 5 })。\n`,
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("missing runtime degradation terminal fails", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace(
+        "若首轮 `cbrain_recall` 显示运行时或新鲜度 degraded，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
+        "若首轮 `cbrain_recall` degraded，也说明没有找到相关记忆。",
+      ),
+    });
+    expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
+  });
+
+  test("runtime terminal must apply to the first front-door call rather than every fallback", () => {
+    const dir = withSkills({
+      ...valid,
+      "SKILL.md": valid["SKILL.md"].replace("若首轮 `cbrain_recall`", "若任一调用"),
+    });
     expect(fails(checkAgentWorkflowContract(dir))).toBe(true);
   });
 });

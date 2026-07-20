@@ -62,7 +62,9 @@
 
 ### Debug / Keyword Lookup（daily MCP 仍走 cbrain_recall）
 - 精确关键词定位、debug 索引、确认某关键词 → query.md [keyword]；daily 调 `cbrain_recall`（内部 `debug_search`）
-- cbrain_recall empty/degraded 的一次补救 → query.md [bounded-fallback]；直调 `query` 仅限显式 debug/full profile
+- 普通内容回忆：健康的 cbrain_recall empty/insufficient → query.md [bounded-fallback]
+- 首轮 cbrain_recall runtime/freshness degraded → 停止并说明检索未完整执行，不进入 fallback
+- 直调 `query` 仅限显式 debug/full profile
 
 ### Graph
 - 图谱、链接到 → connect.md
