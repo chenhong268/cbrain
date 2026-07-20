@@ -12,9 +12,11 @@
 
 - Do not change `cbrain_recall`, `deep_recall`, ranking, thresholds, or #337 tests.
 - Do not add an LLM call, runtime state, background job, dependency, runner, or public tool field.
+- Only healthy ordinary content recall with a first `empty` / `insufficient` result may enter this fallback.
 - Fallback is at most one `deep_recall({ query, detail: "brief", limit: 3 })` call using the unchanged query.
 - When fallback is degraded and all candidates are low quality, lead with insufficient relevant memory and do not enumerate those candidates.
-- The final answer does not mention candidate count, `quality`, `degraded`, or incomplete retrieval.
+- In that low-only, otherwise healthy terminal, the final answer does not mention candidate count or `quality`.
+- First-call runtime or freshness degradation is reported as an incomplete search and never enters fallback; the frozen F2 fallback may itself be degraded with an all-low candidate set.
 - Do not expose raw, score, slug, routing, trace, or internal field names.
 - All fixtures and documentation remain anonymous.
 
@@ -25,6 +27,7 @@
 **Files:**
 - Modify: `tests/bin/check-docs-consistency.agent-contract.test.ts`
 - Modify: `bin/check-docs-consistency.ts`
+- Modify: `skills/RESOLVER.md`
 
 **Interfaces:**
 - Consumes: `checkAgentWorkflowContract(skillsDir: string): CheckResult[]`
@@ -35,11 +38,12 @@
 ```ts
 const valid = {
   "SKILL.md": [
-    "cbrain_recall 返回 empty / insufficient / degraded 时，最多一次",
+    "仅限普通内容回忆：健康运行的 cbrain_recall 返回 empty / insufficient 时，最多一次",
     "`deep_recall({ query, detail: \"brief\", limit: 3 })`，保持原查询。",
-    "若 fallback degraded 且候选全部 quality=low，先说明没有找到足够相关的记忆，",
+    "若 fallback 没有运行时或新鲜度异常，且候选全部 quality=low，先说明没有找到足够相关的记忆，",
     "不要展示或逐条列出这些低相关候选，然后停止。",
-    "最终回答不要提及候选数量、quality、degraded 或检索不完整。",
+    "此时最终回答不要提及候选数量或 quality。",
+    "若首轮 cbrain_recall 显示运行时或新鲜度 degraded，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。",
   ].join("\n"),
   // existing fixture files remain unchanged
 };
@@ -83,21 +87,36 @@ Expected: the new mutation tests fail because `checkAgentWorkflowContract` does 
 
 - [ ] **Step 3: Add the minimum structural check**
 
-Inside `checkAgentWorkflowContract`, read `SKILL.md` from the existing `files` map and require all of:
+Inside `checkAgentWorkflowContract`, read `SKILL.md`, `query.md`, and
+`RESOLVER.md` from the existing `files` map. Require each named heading exactly
+once, extract it up to the next heading, normalize CRLF only, and compare the
+complete short body against the canonical contract. Do not grow a synonym regex
+list: any duplicate section or additional, missing, or changed instruction inside
+a safety section fails closed.
+
+The checker also enforces section ownership: fallback execution terms in
+`SKILL.md` may occur only inside its authoritative block, and the existing
+ordinary-content references outside `query.md`'s authoritative block are an exact
+closed inventory. This rejects a safe decoy followed by contradictory guidance
+under a different heading without attempting general natural-language analysis.
 
 ```ts
-const entrypoint = files.get("SKILL.md") ?? "";
-const hasTrigger = /empty\s*\/\s*insufficient\s*\/\s*degraded/i.test(entrypoint);
-const hasBoundedCall = /(最多一次|at most one)[\s\S]{0,240}deep_recall\s*\(\s*\{[\s\S]{0,160}detail:\s*["']brief["'][\s\S]{0,80}limit:\s*3/i.test(entrypoint);
-const hasSameQuery = /(保持原查询|unchanged query|same query)/i.test(entrypoint);
-const hasHonestTerminal = /(全部|all)[^\n]{0,80}(quality\s*=\s*low|低相关)[\s\S]{0,240}(没有找到足够相关的记忆|insufficient relevant memory)[\s\S]{0,160}(不要展示|不要逐条列出|do not (?:show|enumerate))/i.test(entrypoint);
-const hasQuietTerminal = /最终回答[^\n]{0,40}(不要提及|不得提及)[^\n]{0,80}候选数量[^\n]{0,40}quality[^\n]{0,40}degraded[^\n]{0,40}检索不完整/i.test(entrypoint);
-const hasConflict = /(也?可以|可|应当|应该|may|must|should)[^\n]{0,32}(展示|逐条列出|show|enumerate)[^\n]{0,48}(低相关|quality\s*=\s*low)/i.test(entrypoint);
+exactSectionBody(entrypoint, "### Bounded recall fallback") === expectedEntrypointFallback;
+exactSectionBody(query, "### Bounded content-recall fallback") === expectedQueryFallback;
 ```
 
-If any required condition is false or `hasConflict` is true, return one failed
-result named `agent bounded recall entrypoint` with a fixed detail that does not
-echo file contents.
+Also compare the complete `### Debug / Keyword Lookup（daily MCP 仍走
+cbrain_recall）` body, including these two lines, so the startup router cannot send
+a first-call degraded result into the F2 path:
+
+```md
+- 普通内容回忆：健康的 cbrain_recall empty/insufficient → query.md [bounded-fallback]
+- 首轮 cbrain_recall runtime/freshness degraded → 停止并说明检索未完整执行，不进入 fallback
+```
+
+Return fixed failure details that do not echo file contents. Mutation coverage
+includes wrong `query` value, wrong `limit`, first-call degraded in the trigger,
+plain “列出” permission, ambiguous degraded-as-empty guidance, and resolver drift.
 
 - [ ] **Step 4: Run the focused test and verify the implementation check passes against synthetic fixtures**
 
@@ -118,9 +137,10 @@ Run the same focused command. Expected at this intermediate point: mutation test
 ```md
 ### Bounded recall fallback
 
-- `cbrain_recall` 返回 empty / insufficient / degraded 时，保持原查询，最多一次调用 `deep_recall({ query, detail: "brief", limit: 3 })`，然后停止；不要继续改写或串联其他检索。
-- 若 fallback degraded 且候选全部 `quality=low`，先说明“没有找到足够相关的记忆”，不要展示或逐条列出这些低相关候选。
-- 最终回答不要提及候选数量、quality、degraded 或检索不完整。
+- 仅限普通内容回忆：健康运行的 `cbrain_recall` 返回 empty / insufficient 时，保持原查询，最多一次调用 `deep_recall({ query, detail: "brief", limit: 3 })`，然后停止；不要继续改写或串联其他检索。
+- 若 fallback 没有运行时或新鲜度异常，且候选全部 `quality=low`，先说明“没有找到足够相关的记忆”，不要展示或逐条列出这些低相关候选。
+- 此时最终回答不要提及候选数量或 quality。
+- 若首轮 `cbrain_recall` 显示运行时或新鲜度 degraded，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。
 ```
 
 - [ ] **Step 2: Run focused and canonical docs gates**

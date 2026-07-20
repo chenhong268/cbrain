@@ -21,13 +21,14 @@ Search the brain using multiple strategies, fuse results, and return the most re
 - 问题只有 1-2 个关键词，且目的是定位 slug → cbrain_recall（内部 debug_search）
 - 不确定 → cbrain_recall（安全默认前门）
 
-### Bounded degraded fallback
+### Bounded content-recall fallback
 
-如果首轮 `cbrain_recall` 返回 empty / insufficient / degraded：
+普通内容回忆仅在健康的首轮 `cbrain_recall` 返回 empty / insufficient 时进入 fallback：
 
 1. 最多一次 advanced fallback：`deep_recall({ query, detail: "brief", limit: 3 })`。
 2. fallback 后立即停止，不再串联 get_page / graph_query / timeline 或继续改写查询。
-3. 仍不足就诚实说明“CBrain 目前只找到有限线索”，不要用低相关结果填满答案。
+3. fallback 没有运行时或新鲜度异常、且候选全部低相关时，说明“没有找到足够相关的记忆”，不要用低相关结果填满答案。
+4. 首轮 `cbrain_recall` 显示运行时或新鲜度 degraded 时，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。
 
 ## [operations] Branch — 当前状态与待处理事项
 
@@ -285,7 +286,7 @@ When answering user questions:
 
 1. **Use the front door** — call `cbrain_recall` with the user's natural-language question.
 2. **Respect the first response** — synthesize compactly from returned evidence; do not expose tool metadata.
-3. **Fallback once** — only when empty/insufficient/degraded, use the bounded advanced fallback above.
+3. **Fallback once** — only after a healthy empty/insufficient result, use the bounded advanced path above; a first-call runtime/freshness degraded result stops with an incomplete-search notice.
 4. **Stop honestly** — if evidence remains insufficient, say so instead of chaining more tools.
 5. **Cite in review flows** — source labels are required by review.md, not by ordinary conversational answers.
 

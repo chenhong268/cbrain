@@ -101,6 +101,24 @@ Hermes `skill_view` helper before the CBrain sequence; this is skill loading, no
 CBrain call, and it did not access the scratch knowledge store. Scratch job state
 remained empty after confirmation.
 
+This fixed journey began with a healthy `empty` envelope. A first-call runtime or
+freshness degradation is outside this F2 oracle: the reviewed skill contract now
+requires Hermes to report an incomplete search, skip fallback, and avoid translating
+that state into absent memory. The fallback's observed degraded/all-low envelope
+remains part of the frozen F2 journey above.
+
+## Post-replay review correction
+
+Adversarial review subsequently narrowed the first-call trigger, aligned
+`RESOLVER.md` and `query.md`, and made the short fallback sections authoritative.
+The resulting `SKILL.md` digest is
+`a9971185b51e6ea38deac33fb9962a220b84a4d54f1f80bc78af1556452a2b06`.
+These corrections preserve the replayed healthy-empty F2 call and terminal shape;
+they add a separate fail-closed F3 rule. The original 3/3 host replay above remains
+the behavioral evidence rather than being relabeled as a run of the later digest.
+The later digest is covered by deterministic contract mutations and requires the
+normal post-deployment Hermes canary before release completion.
+
 ## Isolation and teardown
 
 - All CBrain writable paths resolved under one disposable root.
