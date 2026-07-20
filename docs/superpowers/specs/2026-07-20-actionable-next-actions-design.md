@@ -69,7 +69,8 @@ reason until regenerated with the dedicated field.
 It must not consume or interpolate entity names, slugs, paths, raw suggestions,
 scores, metadata bodies, evidence references, or credentials.
 
-Supported types receive fixed copy for these user-facing categories:
+The following types receive fixed copy and have a working `next_actions` detail
+handoff:
 
 | Discovery type | User-facing category | Safe next conversational action |
 | --- | --- | --- |
@@ -79,7 +80,6 @@ Supported types receive fixed copy for these user-facing categories:
 | `contradiction` | conflicting information | offer to show at most three current high-priority conflicts and their sources, then ask which supported version to retain |
 | `knowledge_map_isolation` | isolated memories | offer to show at most three current high-priority isolated items, then ask whether to add a supported relationship or leave them unchanged |
 | `knowledge_map_bridge` | cross-domain connections | offer to show at most three current high-priority connections and their evidence, then ask whether to preserve or strengthen them |
-| `similar_entity` | possible duplicates | offer to show at most three current high-priority pairs and dry-run comparisons, then ask whether to merge or keep them separate |
 
 The wording may be polished during implementation, but every suggestion must:
 
@@ -103,6 +103,15 @@ discovery action candidates with an unsupported `source_type` are excluded. This
 is the parent contract's “silence when safe public information is insufficient”
 branch, not a new public status.
 
+`similar_entity` retains its existing action-candidate generation and receives
+safe fixed copy there, but follows the silence branch specifically in
+`next_actions`. Although the discovery MCP schema accepts an explicit type filter,
+the shared digest currently excludes the type before rendering, so it does not yet
+provide the promised read-only handoff. Repairing that independent discovery
+surface is outside this issue; `next_actions` must not advertise an action the
+current detail path cannot complete or regress the existing duplicate-governance
+candidate lane.
+
 Repeated and single-occurrence variants may use different fixed reasons. The
 existing grouped evidence count remains the only quantity shown by
 `next_actions`.
@@ -110,16 +119,20 @@ existing grouped evidence count remains the only quantity shown by
 ## 5. Data Flow
 
 1. Existing discovery rows enter `buildActionCandidatesFromDiscoveries`.
-2. Supported types use the shared display resolver; unsupported types are skipped.
+2. Known action-candidate types use the shared display resolver; unknown types are
+   skipped without affecting existing known candidate lanes.
 3. The resolver derives fixed copy from `row.type` and the source row's
    `occurrence_count`, and persists the latter as `source_occurrence_count`.
 4. New drafts persist that copy through the existing action-candidate path.
 5. `persistedCandidateRowToDraft` applies the same resolver when the source is a
    supported discovery, overriding legacy persisted prose and using only validated
    `source_occurrence_count` for recurrence.
-6. `buildAttentionQueue` continues to group, rank, apply freshness rules, and cap
+6. `next_actions` admits only the six types with a working read-only detail
+   handoff; this filters both direct and persisted drafts without changing the
+   action-candidate lane.
+7. `buildAttentionQueue` continues to group, rank, apply freshness rules, and cap
    output exactly as today.
-7. `next_actions` continues to render group counts and metadata-only `items[]`.
+8. `next_actions` continues to render group counts and metadata-only `items[]`.
 
 No read path writes to SQLite or the vault.
 
@@ -153,7 +166,8 @@ Core tests must prove:
 3. three candidate-generation runs for one source occurrence still use the
    single-signal reason, while a validated `source_occurrence_count` of three uses
    the repeated-signal reason;
-4. unsupported direct and persisted discovery types are silent;
+4. unknown action-candidate types are silent without suppressing known governance
+   candidates;
 5. no raw suggestion or metadata text reaches generated display copy;
 6. persisted legacy generic or hostile discovery copy is replaced by the shared
    resolver;
@@ -164,15 +178,17 @@ MCP tests must prove:
 1. a mixed discovery queue no longer repeats the old generic title and suggestion;
 2. grouped counts, top-three cap, public `items[]` shape, and summary remain stable;
 3. default display contains a bounded next step and confirmation language;
-4. for every supported type, accepting the suggestion can be fulfilled by
+4. for every detail-supported type, accepting the suggestion can be fulfilled by
    `read_discoveries({ typeFilter, limit: 3, debug: false })`; an empty detail
    result produces a stop-without-write outcome;
-5. the full default envelope rejects private titles, singular/plural and nested
+5. direct and persisted `similar_entity` candidates remain available to their
+   existing governance lane but stay silent in `next_actions`;
+6. the full default envelope rejects private titles, singular/plural and nested
    slug forms, POSIX and Windows paths, raw suggestions, credential sentinels, and
    Unicode control characters for both fresh and persisted legacy rows;
-6. `include_raw=true` preserves the exact existing raw key sets and does not copy
+7. `include_raw=true` preserves the exact existing raw key sets and does not copy
    hostile metadata into display fields or new audit fields;
-7. default and `include_raw=true` calls remain read-only.
+8. default and `include_raw=true` calls remain read-only.
 
 Run focused tests, documentation checks, lint/type checks, the full suite,
 `git diff --check`, and the repository privacy scan before completion.
@@ -185,7 +201,8 @@ Run focused tests, documentation checks, lint/type checks, the full suite,
 - No automatic Hermes tool chaining; the detail handoff runs only after the user
   accepts the displayed offer.
 - No new user preference, configuration flag, telemetry system, or migration.
-- No refactor outside the action-candidate display boundary and its tests.
+- No refactor outside the action-candidate display boundary, the `next_actions`
+  admission boundary, and their tests.
 
 ## 9. Rollback
 

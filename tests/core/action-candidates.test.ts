@@ -60,8 +60,10 @@ describe("buildActionCandidatesFromDiscoveries (#267)", () => {
         auto_applicable: 0,
         occurrence_count: 1,
         dedup_key: `${type}|entity/a|entity/b`,
-        suggestion: "SYNTHETIC_RAW_SUGGESTION_SENTINEL",
-        metadata: JSON.stringify({ private_title: "SYNTHETIC_PRIVATE_TITLE_SENTINEL" }),
+        metadata: JSON.stringify({
+          private_title: "SYNTHETIC_PRIVATE_TITLE_SENTINEL",
+          raw_suggestion: "SYNTHETIC_RAW_SUGGESTION_SENTINEL",
+        }),
       }])[0];
 
       expect(draft.displayTitle).toContain(titleMarker);

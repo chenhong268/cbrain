@@ -75,7 +75,7 @@ describe("next_actions MCP (#309)", () => {
 
   test("returns at most 3 items from a discovery-heavy queue; no slug/score leakage", async () => {
     for (let i = 0; i < 6; i++) {
-      db.upsertDiscovery("similar_entity", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, { reason_code: "name_exact" });
+      db.upsertDiscovery("bridge", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, {});
     }
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
@@ -87,8 +87,188 @@ describe("next_actions MCP (#309)", () => {
     expect(payload.summary.shownCount).toBeLessThanOrEqual(3);
   });
 
+  test("mixed discovery groups expose distinct bounded confirmation-gated actions", async () => {
+    db.upsertDiscovery("bridge", ["entity/a", "entity/b"], 0.9, undefined, "合成关联建议", "high", false, {});
+    db.upsertDiscovery("trend", ["entity/c"], 0.9, undefined, "合成趋势建议", "high", false, {});
+    db.upsertDiscovery("gap", ["entity/d"], 0.9, undefined, undefined, "high", false, {});
+    const server = createServer(deps);
+    const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(res.content[0].text);
+
+    expect(payload.summary.shownCount).toBe(3);
+    expect(payload.display).toContain("潜在关联");
+    expect(payload.display).toContain("关注变化");
+    expect(payload.display).toContain("待补全");
+    expect(payload.display).not.toContain("有一条发现值得复核");
+    expect(payload.display).not.toContain("打开对应发现");
+    expect(payload.display.match(/最多 3 条/g)?.length).toBe(3);
+    expect(payload.display.match(/确认前不修改/g)?.length).toBe(3);
+    for (const item of payload.items) {
+      expect(Object.keys(item).sort()).toEqual(["evidence_count", "severity", "source"]);
+    }
+  });
+
+  test("every supported discovery action has an existing read-only detail handoff", async () => {
+    const cases = [
+      ["bridge", ["entity/a", "entity/b"], "合成关联建议", {}],
+      ["trend", ["entity/c"], "合成趋势建议", { direction: "trend_rising", delta: 2 }],
+      ["gap", ["entity/d"], undefined, { mention_count: 4, link_count: 0 }],
+      ["contradiction", ["entity/e"], "合成冲突建议", { explanation: "合成来源不一致" }],
+      ["knowledge_map_isolation", ["entity/f"], undefined, {}],
+      ["knowledge_map_bridge", ["entity/g"], undefined, {}],
+    ] as const;
+    for (const [type, entities, suggestion, metadata] of cases) {
+      const { id } = db.upsertDiscovery(type, [...entities], 0.9, undefined, undefined, "high", false, metadata);
+      if (suggestion) db.updateDiscoverySuggestion(id, suggestion);
+    }
+    const before = JSON.stringify(db.getUnseenDiscoveries(100));
+    const server = createServer(deps);
+
+    for (const [type] of cases) {
+      const detail = await getTools(server).read_discoveries.handler({ typeFilter: type, limit: 3, debug: false }) as ToolResponse;
+      const payload = JSON.parse(detail.content[0].text);
+      const cardCount = (payload.cards?.length ?? 0) + (payload.knowledge_map_cards?.length ?? 0);
+      expect(cardCount, `${type} detail handoff should return a card`).toBeGreaterThanOrEqual(1);
+      expect(cardCount, `${type} detail handoff should stay capped`).toBeLessThanOrEqual(3);
+      expect(payload).not.toHaveProperty("_debug");
+    }
+
+    expect(JSON.stringify(db.getUnseenDiscoveries(100))).toBe(before);
+  });
+
+  test("empty detail handoff reports no current discovery without writing", async () => {
+    const server = createServer(deps);
+    const before = JSON.stringify(db.getUnseenDiscoveries(100));
+    const detail = await getTools(server).read_discoveries.handler({ typeFilter: "bridge", limit: 3, debug: false }) as ToolResponse;
+    const payload = JSON.parse(detail.content[0].text);
+    expect(payload.cards).toHaveLength(0);
+    expect(payload.display).toContain("暂无");
+    expect(JSON.stringify(db.getUnseenDiscoveries(100))).toBe(before);
+  });
+
+  test("similar-entity candidates stay silent until their detail handoff works", async () => {
+    db.upsertDiscovery(
+      "similar_entity",
+      ["entity/a", "entity/b"],
+      0.9,
+      undefined,
+      undefined,
+      "high",
+      false,
+      { match_kind: "name_exact" },
+    );
+    const server = createServer(deps);
+    const result = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.items).toHaveLength(0);
+    expect(payload.display).toContain("无需");
+  });
+
+  test("default envelope rejects hostile fresh and persisted discovery material", async () => {
+    const forbidden = [
+      "entity/private-a",
+      "entities/private-b",
+      "brain/entities/private-c",
+      "/synthetic/private/path",
+      "C:\\synthetic\\private\\path",
+      "SYNTHETIC_RAW_SUGGESTION_SENTINEL",
+      "Bearer synthetic-credential-sentinel",
+      "synthetic\u202Econtrol",
+    ];
+    db.upsertDiscovery(
+      "bridge",
+      forbidden.slice(0, 3),
+      0.9,
+      undefined,
+      forbidden[5],
+      "high",
+      false,
+      { private_path: forbidden[3], windows_path: forbidden[4], credential: forbidden[6], control: forbidden[7] },
+    );
+    db.upsertDiscovery(
+      "action_review_discovery",
+      ["discovery:synthetic-trend"],
+      0.9,
+      undefined,
+      undefined,
+      "high",
+      false,
+      {
+        source: "discovery",
+        source_type: "trend",
+        source_occurrence_count: 1,
+        display_title: forbidden[2],
+        display_reason: forbidden[6],
+        suggested_action: forbidden[5],
+        source_metadata: { private_path: forbidden[3], windows_path: forbidden[4], control: forbidden[7] },
+      },
+    );
+    const server = createServer(deps);
+    const result = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
+    const payload = JSON.parse(result.content[0].text);
+    const envelope = JSON.stringify(payload);
+
+    expect(payload.raw).toBeNull();
+    for (const marker of forbidden) expect(envelope).not.toContain(marker);
+  });
+
+  test("include_raw preserves its exact audit shape without copying hostile prose", async () => {
+    db.upsertDiscovery(
+      "bridge",
+      ["entity/private-a", "entities/private-b"],
+      0.9,
+      undefined,
+      "SYNTHETIC_RAW_SUGGESTION_SENTINEL",
+      "high",
+      false,
+      { credential: "Bearer synthetic-credential-sentinel" },
+    );
+    const server = createServer(deps);
+    const result = await getTools(server).next_actions.handler({ sources: ["discovery"], include_raw: true }) as ToolResponse;
+    const payload = JSON.parse(result.content[0].text);
+
+    expect(Object.keys(payload.raw).sort()).toEqual([
+      "allItemsRanked",
+      "audit",
+      "observeOnlyItems",
+      "staleItems",
+    ]);
+    for (const item of payload.raw.allItemsRanked) {
+      expect(Object.keys(item).sort()).toEqual([
+        "detectedAt",
+        "evidenceCount",
+        "freshness",
+        "groupKey",
+        "lastDetectedAt",
+        "occurrenceCount",
+        "reason",
+        "severity",
+        "source",
+        "sourceRefs",
+        "suggestion",
+        "title",
+      ]);
+      const prose = JSON.stringify([item.title, item.reason, item.suggestion]);
+      expect(prose).not.toContain("SYNTHETIC_RAW_SUGGESTION_SENTINEL");
+      expect(prose).not.toContain("Bearer synthetic-credential-sentinel");
+    }
+    expect(Object.keys(payload.raw.audit).sort()).toEqual([
+      "byFreshness",
+      "bySeverity",
+      "bySource",
+      "hiddenObserveOnlyCount",
+      "hiddenStaleCount",
+      "rankedInputCount",
+      "suppressedBeyondCapCount",
+      "totalInput",
+      "visibleCount",
+    ]);
+    expect(JSON.stringify(payload.raw.audit)).not.toContain("SYNTHETIC_RAW_SUGGESTION_SENTINEL");
+    expect(JSON.stringify(payload.raw.audit)).not.toContain("Bearer synthetic-credential-sentinel");
+  });
+
   test("never writes DB or filesystem (default sources incl health, no checkAll)", async () => {
-    db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    db.upsertDiscovery("bridge", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
     const beforePending = db.getUnseenDiscoveries(50).length;
     const server = createServer(deps);
     await getTools(server).next_actions.handler({}); // default sources incl health
@@ -102,7 +282,7 @@ describe("next_actions MCP (#309)", () => {
   });
 
   test("dismissed discovery never surfaces", async () => {
-    const { id } = db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    const { id } = db.upsertDiscovery("bridge", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
     db.updateDiscoveryStatus(id, "dismissed");
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
@@ -263,7 +443,7 @@ describe("next_actions MCP (#309)", () => {
 
   test("default sources merges health + discovery and stays within cap", async () => {
     for (let i = 0; i < 4; i++) {
-      db.upsertDiscovery("similar_entity", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, {});
+      db.upsertDiscovery("bridge", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, {});
     }
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({}) as ToolResponse;
@@ -273,7 +453,7 @@ describe("next_actions MCP (#309)", () => {
   });
 
   test("stale low-occurrence discovery is hidden by default; hiddenStale counted (#315)", async () => {
-    const { id } = db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    const { id } = db.upsertDiscovery("bridge", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
     backdateDiscovery(db, id, 30); // occurrence_count stays 1
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
@@ -284,7 +464,7 @@ describe("next_actions MCP (#309)", () => {
   });
 
   test("stale discovery with occurrence_count >= 3 stays visible (#315)", async () => {
-    const { id } = db.upsertDiscovery("similar_entity", ["entity/c", "entity/d"], 0.9, undefined, undefined, "high", false, {});
+    const { id } = db.upsertDiscovery("bridge", ["entity/c", "entity/d"], 0.9, undefined, undefined, "high", false, {});
     backdateDiscovery(db, id, 30, 3);
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
@@ -294,7 +474,7 @@ describe("next_actions MCP (#309)", () => {
   });
 
   test("include_raw exposes stale audit but display/items leak nothing (#315)", async () => {
-    const { id } = db.upsertDiscovery("similar_entity", ["entity/private-a", "entity/private-b"], 0.9, undefined, undefined, "high", false, {});
+    const { id } = db.upsertDiscovery("bridge", ["entity/private-a", "entity/private-b"], 0.9, undefined, undefined, "high", false, {});
     backdateDiscovery(db, id, 30);
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["discovery"], include_raw: true }) as ToolResponse;
@@ -314,7 +494,7 @@ describe("next_actions MCP (#309)", () => {
   });
 
   test("next_actions stays read-only even with a stale candidate present (#315)", async () => {
-    const { id } = db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    const { id } = db.upsertDiscovery("bridge", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
     backdateDiscovery(db, id, 30);
     const beforePending = db.getUnseenDiscoveries(50).length;
     const server = createServer(deps);
@@ -326,8 +506,8 @@ describe("next_actions MCP (#309)", () => {
 
   test("display notes hidden stale count when fresh items remain (#315)", async () => {
     // 1 fresh + 1 stale; fresh stays visible, stale hidden + mentioned in display.
-    db.upsertDiscovery("similar_entity", ["entity/f1", "entity/f2"], 0.9, undefined, undefined, "high", false, {});
-    const stale = db.upsertDiscovery("similar_entity_2", ["entity/s1", "entity/s2"], 0.9, undefined, undefined, "high", false, {});
+    db.upsertDiscovery("bridge", ["entity/f1", "entity/f2"], 0.9, undefined, undefined, "high", false, {});
+    const stale = db.upsertDiscovery("gap", ["entity/s1"], 0.9, undefined, undefined, "high", false, {});
     backdateDiscovery(db, stale.id, 30);
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
@@ -339,7 +519,7 @@ describe("next_actions MCP (#309)", () => {
 
   test("include_raw=true exposes scalar-only raw.audit with exact partition (#319)", async () => {
     for (let i = 0; i < 2; i++) {
-      db.upsertDiscovery("similar_entity", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, {});
+      db.upsertDiscovery("bridge", [`entity/a${i}`, `entity/b${i}`], 0.9, undefined, undefined, "high", false, {});
     }
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["discovery"], include_raw: true }) as ToolResponse;
@@ -380,7 +560,7 @@ describe("next_actions MCP (#309)", () => {
   });
 
   test("default call leaves raw null and exposes no audit key (#319)", async () => {
-    db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    db.upsertDiscovery("bridge", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
     const server = createServer(deps);
     const res = await getTools(server).next_actions.handler({ sources: ["discovery"] }) as ToolResponse;
     const payload = JSON.parse(res.content[0].text);
@@ -392,7 +572,7 @@ describe("next_actions MCP (#309)", () => {
   });
 
   test("include_raw=true path stays read-only: no DB write, no FS write, no candidate insert (#319)", async () => {
-    const { id } = db.upsertDiscovery("similar_entity", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
+    const { id } = db.upsertDiscovery("bridge", ["entity/a", "entity/b"], 0.9, undefined, undefined, "high", false, {});
     backdateDiscovery(db, id, 30); // stale candidate exercises the audit path
     const beforePending = db.getUnseenDiscoveries(50).length;
     const server = createServer(deps);

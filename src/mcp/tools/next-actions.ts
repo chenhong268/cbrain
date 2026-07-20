@@ -48,6 +48,21 @@ const DEFAULT_SOURCES = ["health", "discovery"] as const;
 /** action_* candidate types that carry health-derived severity (vs discovery-derived). */
 const HEALTH_CANDIDATE_TYPES: ReadonlySet<string> = new Set(["action_health_review", "action_repair_preview"]);
 
+/** Discovery types whose existing read_discoveries detail path can fulfill the displayed offer. */
+const NEXT_ACTION_DETAIL_TYPES: ReadonlySet<string> = new Set([
+  "bridge",
+  "trend",
+  "gap",
+  "contradiction",
+  "knowledge_map_isolation",
+  "knowledge_map_bridge",
+]);
+
+function hasNextActionDetailHandoff(draft: ActionCandidateDraft): boolean {
+  const sourceType = draft.metadata.source_type;
+  return typeof sourceType === "string" && NEXT_ACTION_DETAIL_TYPES.has(sourceType);
+}
+
 /**
  * Read-only unified next-action queue (#309). Consumes ALREADY-PERSISTED action
  * candidate rows (created by run_action_candidates) plus plain discovery signals.
@@ -92,6 +107,7 @@ export function registerNextActionsTools(server: McpServer, ctx: ToolContext): v
         if (!full) continue;
         const draft = persistedCandidateRowToDraft(full);
         if (!draft) continue;
+        if (!isHealth && !hasNextActionDetailHandoff(draft)) continue;
         // getDiscoveriesByType + getDiscoveryById are pure SELECTs (seen=0 AND status='pending').
         (isHealth ? healthDrafts : discoveryDrafts).push(draft);
       }
@@ -110,7 +126,9 @@ export function registerNextActionsTools(server: McpServer, ctx: ToolContext): v
           last_detected_at: full?.last_detected_at ?? null,
         };
       });
-      discoveryDrafts.push(...buildActionCandidatesFromDiscoveries(rows));
+      discoveryDrafts.push(
+        ...buildActionCandidatesFromDiscoveries(rows).filter(hasNextActionDetailHandoff),
+      );
     }
 
     const queue = buildAttentionQueue(healthDrafts, discoveryDrafts, { includeRaw });

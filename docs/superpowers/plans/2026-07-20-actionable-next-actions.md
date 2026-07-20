@@ -283,11 +283,14 @@ git commit -m "fix: make discovery actions actionable"
 
 **Files:**
 - Modify: `tests/mcp/next-actions.test.ts`
-- Production code change: none expected; modify `src/mcp/tools/next-actions.ts` only if a failing contract test reveals a minimal rendering defect.
+- Modify: `src/mcp/tools/next-actions.ts`
 
 **Interfaces:**
 - Consumes: the shared action display behavior from Task 1.
 - Verifies: unchanged `next_actions` public envelope, raw envelope, read-only behavior, and existing `read_discoveries` detail surface.
+- Produces: a six-type `NEXT_ACTION_DETAIL_TYPES` admission gate so
+  `similar_entity` remains available to its existing action-candidate lane but is
+  silent in `next_actions` until its explicit detail surface works.
 
 - [ ] **Step 1: Add a failing mixed-group experience test**
 
@@ -310,7 +313,7 @@ for (const item of payload.items) {
 
 - [ ] **Step 2: Add detail handoff and empty-result tests**
 
-For each supported type, seed one current pending row, call
+For each of the six supported types, seed one current pending row, call
 `next_actions`, then call:
 
 ```ts
@@ -322,7 +325,39 @@ and neither call changes the number/status of discovery rows. In a separate empt
 database case, call the same `read_discoveries` request and assert zero cards and a
 no-current-discovery display. Do not add automatic chaining production code.
 
-- [ ] **Step 3: Add the full default-envelope privacy matrix**
+- [ ] **Step 3: Add a failing similar-entity admission test**
+
+Seed one high-actionable `similar_entity` row, call
+`next_actions({ sources: ["discovery"] })`, and assert `items` is empty and the
+display reports no current action. Run the single test and verify RED because the
+shared action-candidate resolver intentionally still supports this governance
+type.
+
+- [ ] **Step 4: Implement the narrow detail-handoff admission gate**
+
+In `src/mcp/tools/next-actions.ts`, define:
+
+```ts
+const NEXT_ACTION_DETAIL_TYPES: ReadonlySet<string> = new Set([
+  "bridge",
+  "trend",
+  "gap",
+  "contradiction",
+  "knowledge_map_isolation",
+  "knowledge_map_bridge",
+]);
+
+function hasNextActionDetailHandoff(draft: ActionCandidateDraft): boolean {
+  const sourceType = draft.metadata.source_type;
+  return typeof sourceType === "string" && NEXT_ACTION_DETAIL_TYPES.has(sourceType);
+}
+```
+
+Apply it to both persisted discovery drafts and fresh drafts before they enter
+`discoveryDrafts`. Do not apply it to health drafts and do not change the shared
+action-candidate builder.
+
+- [ ] **Step 5: Add the full default-envelope privacy matrix**
 
 Seed both a fresh `bridge` row and a persisted `action_review_discovery` row with
 synthetic hostile data across their entities, raw suggestion, and metadata:
@@ -343,7 +378,7 @@ const forbidden = [
 Call default `next_actions` and assert none of these markers appears anywhere in
 `JSON.stringify(payload)`. Also assert `payload.raw === null`.
 
-- [ ] **Step 4: Lock the existing raw shape without denying audit-only refs**
+- [ ] **Step 6: Lock the existing raw shape without denying audit-only refs**
 
 Call `next_actions({ include_raw: true })` and assert:
 
@@ -379,7 +414,7 @@ Allow existing `sourceRefs` to remain audit-only. Assert `raw.audit` retains onl
 its established scalar/count breakdown keys and contains none of the hostile
 metadata markers.
 
-- [ ] **Step 5: Run MCP tests and verify RED before Task 1, GREEN after it**
+- [ ] **Step 7: Run MCP tests and verify GREEN**
 
 Run:
 
@@ -387,11 +422,11 @@ Run:
 bun test tests/mcp/next-actions.test.ts
 ```
 
-Expected after Task 1: all tests pass. If an exact raw item key differs because an
+Expected: all tests pass. If an exact raw item key differs because an
 optional timestamp is legitimately absent, seed timestamps so the production
 shape is deterministic; do not weaken the key assertion.
 
-- [ ] **Step 6: Run focused regression set**
+- [ ] **Step 8: Run focused regression set**
 
 ```bash
 bun test tests/core/action-candidates.test.ts tests/core/attention-queue.test.ts tests/core/discovery-digest.test.ts tests/mcp/next-actions.test.ts
@@ -399,7 +434,7 @@ bun test tests/core/action-candidates.test.ts tests/core/attention-queue.test.ts
 
 Expected: all tests pass with zero failures.
 
-- [ ] **Step 7: Commit Task 2**
+- [ ] **Step 9: Commit Task 2**
 
 ```bash
 git add tests/mcp/next-actions.test.ts src/mcp/tools/next-actions.ts
