@@ -12,7 +12,7 @@ import { buildRealDeps } from "../../bin/lib/live-release-deps.js";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 // ── Anonymous synthetic fixtures (no real paths, no credentials) ──
 
@@ -46,6 +46,7 @@ interface FakeShape {
   targetByPath: Record<string, TargetResult["status"]>;
   ownVerifierPath: string;
   sequences?: {
+    owners?: (readonly string[])[];
     evidence?: ServiceEvidence[];
     identity?: (ProcessIdentity | null)[];
     cwd?: (string | null)[];
@@ -72,15 +73,23 @@ const baseShape = (): FakeShape => ({
 });
 
 function fakeDeps(shape: FakeShape): LiveReleaseDeps {
-  let ev = 0, id = 0, cwd = 0, lis = 0, wr = 0;
+  let own = 0, ev = 0, id = 0, cwd = 0, lis = 0, wr = 0;
   return {
     ownVerifierPath: shape.ownVerifierPath,
-    listCbrainServiceOwners: () => shape.owners,
+    listCbrainServiceOwners: () => shape.sequences?.owners?.[own++] ?? shape.owners,
     readServiceEvidence: (label) => shape.sequences?.evidence?.[ev++] ?? shape.evidenceByLabel[label],
     readProcessIdentity: (pid) => shape.sequences?.identity?.[id++] ?? shape.identityByPid[pid] ?? null,
     readProcessCwd: (pid) => shape.sequences?.cwd?.[cwd++] ?? shape.cwdByPid[pid] ?? null,
     readListenerOwner: (port) => shape.sequences?.listener?.[lis++] ?? shape.listenerByPort[port] ?? { pid: 0, count: 0 },
     listWriterProcesses: () => shape.sequences?.writers?.[wr++] ?? shape.writers,
+    resolveEntrypoint: (args, workdir) => {
+      for (const token of args) {
+        if (!/cli\/index\.(ts|js)$/i.test(token)) continue;
+        const resolved = resolve(workdir, token);
+        return resolved.startsWith(`${workdir}/`) ? resolved : null;
+      }
+      return null;
+    },
     readCallerCwd: () => shape.callerCwd,
     fetchHealthVersion: () =>
       typeof shape.healthByVersion === "string"
@@ -290,6 +299,52 @@ describe("live-release verifier — bounded whole-attempt stability", () => {
     };
     expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).status).toBe("pass");
   });
+
+  test("owner set change between before/after snapshots triggers a retry", () => {
+    const shape = baseShape();
+    shape.sequences = {
+      owners: [
+        [SERVICE_LABEL],
+        [SERVICE_LABEL, "ai.cbrain.serve.secondary"],
+        [SERVICE_LABEL],
+        [SERVICE_LABEL],
+      ],
+    };
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).status).toBe("pass");
+  });
+
+  test("a provisional mismatch is discarded when the after-snapshot drifts (no generation-mixed verdict)", () => {
+    const shape = baseShape();
+    const ROOT_A = "/anonymous/root-a";
+    const ROOT_B = "/anonymous/root-b";
+    // attempt1: before root-A (pkg 2.0.8) → provisional ACTIVE_VERSION_MISMATCH (http 2.0.9 vs pkg 2.0.8);
+    //   after root-B → drift → discard. attempt2: before/after root-B (pkg 2.0.9) → pass.
+    shape.sequences = {
+      evidence: [
+        happyEvidence({ workingDirectory: ROOT_A }),
+        happyEvidence({ workingDirectory: ROOT_B }),
+        happyEvidence({ workingDirectory: ROOT_B }),
+        happyEvidence({ workingDirectory: ROOT_B }),
+      ],
+      cwd: [ROOT_A, ROOT_B, ROOT_B, ROOT_B],
+      identity: [
+        { pid: SERVICE_PID, startUsec: "birth-A" },
+        { pid: SERVICE_PID, startUsec: "birth-B" },
+        { pid: SERVICE_PID, startUsec: "birth-B" },
+        { pid: SERVICE_PID, startUsec: "birth-B" },
+      ],
+    };
+    shape.healthByVersion = "2.0.9";
+    shape.packageByRoot = { [ROOT_A]: "2.0.8", [ROOT_B]: "2.0.9" };
+    shape.manifestByRoot = {
+      [ROOT_A]: { version: "2.0.8", files: ["SKILL.md"] },
+      [ROOT_B]: { version: "2.0.9", files: ["SKILL.md"] },
+    };
+    shape.ownVerifierPath = `${ROOT_B}/bin/lib/live-release-verify.ts`;
+    const result = verifyLiveRelease(fakeDeps(shape), happyOpts());
+    expect(result.status).toBe("pass");
+    expect(result.active?.root).toBe("root-b");
+  });
 });
 
 describe("live-release verifier — version & target coherence", () => {
@@ -348,9 +403,21 @@ describe("live-release verifier — version & target coherence", () => {
     expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("TARGET_VERIFICATION_FAILED");
   });
 
+  test("fails with TARGET_VERIFICATION_FAILED when a required target is missing", () => {
+    const shape = baseShape();
+    shape.targetByPath = { [HAPPY_TARGET]: "missing" };
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("TARGET_VERIFICATION_FAILED");
+  });
+
   test("fails with TARGET_VERIFICATION_FAILED when a required target is incompatible", () => {
     const shape = baseShape();
     shape.targetByPath = { [HAPPY_TARGET]: "incompatible" };
+    expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("TARGET_VERIFICATION_FAILED");
+  });
+
+  test("fails with TARGET_VERIFICATION_FAILED when a required target is unverified", () => {
+    const shape = baseShape();
+    shape.targetByPath = { [HAPPY_TARGET]: "unverified" };
     expect(verifyLiveRelease(fakeDeps(shape), happyOpts()).code).toBe("TARGET_VERIFICATION_FAILED");
   });
 

@@ -6,6 +6,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { compareTarget } from "../../src/cli/commands/skill-pack.js";
 import type {
   HealthFailure,
@@ -147,9 +148,21 @@ export function buildRealDeps(ownVerifierPath: string): LiveReleaseDeps {
         if (!m) return [];
         const command = m[2];
         if (!/cbrain/i.test(command) || !/(?:^|\s)serve(?:\s|$)/i.test(command)) return [];
-        if (/verify/i.test(command)) return [];
         return [{ pid: Number(m[1]) }];
       });
+    },
+    resolveEntrypoint(programArguments, workingDirectory): string | null {
+      for (const token of programArguments) {
+        if (!/cli\/index\.(ts|js)$/i.test(token)) continue;
+        const resolved = resolve(workingDirectory, token);
+        try {
+          const real = realpathSync(resolved);
+          if (real.startsWith(`${workingDirectory}/`)) return real;
+        } catch {
+          // entrypoint not found / unreadable → keep scanning
+        }
+      }
+      return null;
     },
     readCallerCwd(): string {
       const resolved = safeRealpath(process.cwd());

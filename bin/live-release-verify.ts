@@ -14,17 +14,10 @@
  * paths). If unset, probes the standard Hermes skill install path.
  * Rollback candidate (explanatory, inactive): `CBRAIN_ROLLBACK_CANDIDATE`.
  */
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildRealDeps } from "./lib/live-release-deps.js";
 import { verifyLiveRelease, type VerifyOptions, type VerifyResult } from "./lib/live-release-verify.js";
-
-function defaultTargets(): string[] {
-  const home = process.env.HOME;
-  if (!home) return [];
-  const candidate = `${home}/.hermes/skills/brain-ops/cbrain`;
-  return existsSync(candidate) ? [candidate] : [];
-}
 
 function formatHuman(result: VerifyResult): string {
   if (result.status === "pass") {
@@ -52,9 +45,8 @@ function main(): number {
   const ownVerifierPath = realpathSync(fileURLToPath(import.meta.url));
   const deps = buildRealDeps(ownVerifierPath);
 
-  const envTargets = process.env.CBRAIN_REQUIRED_SKILL_TARGETS?.split(":").filter(Boolean);
   const opts: Partial<VerifyOptions> = {
-    requiredTargets: envTargets && envTargets.length > 0 ? envTargets : defaultTargets(),
+    requiredTargets: process.env.CBRAIN_REQUIRED_SKILL_TARGETS?.split(":").filter(Boolean) ?? [],
   };
   if (process.env.CBRAIN_ROLLBACK_CANDIDATE) opts.rollbackCandidate = process.env.CBRAIN_ROLLBACK_CANDIDATE;
 

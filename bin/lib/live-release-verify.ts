@@ -6,19 +6,19 @@
  * coherence. All system access is behind {@link LiveReleaseDeps} so every
  * fail-closed matrix case is deterministic and unit-testable.
  *
- * Stability invariant: a single verification attempt is bracketed by a
- * before/after snapshot that covers the *entire* evidence window (service
- * identity, listener, writer, entrypoint, version, targets). Pass requires the
- * two snapshots to be byte-identical; otherwise the whole attempt is retried
- * once and, if still drifting, fails closed — evidence from two process
- * generations is never combined into one verdict.
+ * Stability invariant: a single verification attempt computes a *provisional*
+ * result (any layer, success or failure) and then unconditionally reads an
+ * after-snapshot. The provisional result is returned only if before==after;
+ * otherwise it is discarded and the whole attempt is retried. This guarantees
+ * no verdict — including a specific failure code — is ever built from evidence
+ * spanning two process generations.
  *
  * Read-only by construction: the dependency interface exposes only read
  * operations, and {@link verifyLiveRelease} performs no writes.
  */
 
 import { createHash } from "node:crypto";
-import { basename, resolve } from "node:path";
+import { basename } from "node:path";
 
 // ── Fail codes (one per distinct failure layer — never collapse to generic) ──
 
@@ -147,6 +147,12 @@ export interface LiveReleaseDeps {
   readListenerOwner(port: number): ListenerOwner;
   /** PIDs of running `cbrain serve` writer processes (ps inventory). */
   listWriterProcesses(): readonly WriterProcess[];
+  /**
+   * Resolve the real CBrain CLI entrypoint from ProgramArguments: match the
+   * supported `cli/index.(ts|js)` shape, resolve against the working directory,
+   * realpath it, and return the physical path (or null if missing/outside root).
+   */
+  resolveEntrypoint(programArguments: readonly string[], workingDirectory: string): string | null;
   /** The caller's cwd — classified inactive unless it equals the active root. */
   readCallerCwd(): string;
   fetchHealthVersion(url: string, timeoutMs: number): HealthResult | HealthFailure;
@@ -203,24 +209,11 @@ function hashBirth(startUsec: string): string {
   return createHash("sha256").update(startUsec).digest("hex").slice(0, 16);
 }
 
-/**
- * Resolve the actual CBrain entrypoint from ProgramArguments: the first token
- * that looks like a script file (`.ts`/`.js` with a path separator), resolved
- * against the configured working directory. Returns null if none is found.
- */
-function resolveEntrypoint(programArguments: readonly string[], workingDirectory: string): string | null {
-  for (const token of programArguments) {
-    if (/\.(?:ts|js)$/i.test(token) && token.includes("/")) {
-      return resolve(workingDirectory, token);
-    }
-  }
-  return null;
-}
-
 // ── Snapshot — brackets the entire evidence window ──
 
 interface Snapshot {
   readonly label: string;
+  readonly owners: readonly string[];
   readonly pid: number;
   readonly startUsec: string | null;
   readonly cwd: string | null;
@@ -231,16 +224,20 @@ interface Snapshot {
   readonly listenerPid: number;
   readonly listenerCount: number;
   readonly writerPids: readonly number[];
+  readonly entrypoint: string | null;
 }
 
-function readSnapshot(deps: LiveReleaseDeps, opts: VerifyOptions, label: string): Snapshot {
-  const evidence = deps.readServiceEvidence(label);
+function readSnapshot(deps: LiveReleaseDeps, opts: VerifyOptions): Snapshot {
+  const owners = deps.listCbrainServiceOwners();
+  const evidence = deps.readServiceEvidence(opts.serviceLabel);
   const identity = deps.readProcessIdentity(evidence.pid);
   const cwd = deps.readProcessCwd(evidence.pid);
   const listener = deps.readListenerOwner(opts.port);
   const writers = deps.listWriterProcesses();
+  const entrypoint = deps.resolveEntrypoint(evidence.programArguments, evidence.workingDirectory);
   return {
-    label,
+    label: opts.serviceLabel,
+    owners,
     pid: evidence.pid,
     startUsec: identity?.startUsec ?? null,
     cwd,
@@ -251,12 +248,14 @@ function readSnapshot(deps: LiveReleaseDeps, opts: VerifyOptions, label: string)
     listenerPid: listener.pid,
     listenerCount: listener.count,
     writerPids: [...writers.map((w) => w.pid)].sort((a, b) => a - b),
+    entrypoint,
   };
 }
 
 function validateSnapshot(s: Snapshot): FailCode | null {
+  if (!s.owners.includes(s.label)) return "SERVICE_NOT_FOUND";
+  if (s.owners.length > 1) return "MULTIPLE_SERVICE_OWNERS";
   if (
-    typeof s.label !== "string" || s.label.length === 0 ||
     typeof s.workingDirectory !== "string" || s.workingDirectory.length === 0 || !s.workingDirectory.startsWith("/") ||
     typeof s.program !== "string" || s.program.length === 0 ||
     !Number.isSafeInteger(s.pid) || s.pid <= 0 ||
@@ -265,8 +264,7 @@ function validateSnapshot(s: Snapshot): FailCode | null {
     return "SERVICE_EVIDENCE_INVALID";
   }
   if (s.startUsec === null) return "PROCESS_NOT_RUNNING";
-  const entrypoint = resolveEntrypoint(s.programArguments, s.workingDirectory);
-  if (entrypoint === null || !entrypoint.startsWith(`${s.workingDirectory}/`)) {
+  if (s.entrypoint === null || !s.entrypoint.startsWith(`${s.workingDirectory}/`)) {
     return "ENTRYPOINT_ROOT_MISMATCH";
   }
   if (s.cwd !== s.workingDirectory) return "EXECUTABLE_ROOT_MISMATCH";
@@ -280,6 +278,7 @@ function validateSnapshot(s: Snapshot): FailCode | null {
 function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
   return (
     a.label === b.label &&
+    a.owners.join(",") === b.owners.join(",") &&
     a.pid === b.pid &&
     a.startUsec === b.startUsec &&
     a.cwd === b.cwd &&
@@ -288,57 +287,44 @@ function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
     a.listenerPid === b.listenerPid &&
     a.listenerCount === b.listenerCount &&
     a.writerPids.join(",") === b.writerPids.join(",") &&
-    a.programArguments.join("\n") === b.programArguments.join("\n")
+    a.programArguments.join("\n") === b.programArguments.join("\n") &&
+    a.entrypoint === b.entrypoint
   );
 }
 
-// ── One verification attempt (bracketed by before/after snapshot) ──
+// ── Provisional result — computed from a single (assumed-stable) snapshot ──
 
-interface AttemptOutcome {
-  readonly result: VerifyResult | null;
-  readonly drifted: boolean;
-}
-
-function attempt(deps: LiveReleaseDeps, opts: VerifyOptions): AttemptOutcome {
-  const before = readSnapshot(deps, opts, opts.serviceLabel);
-  const beforeInvalid = validateSnapshot(before);
-  if (beforeInvalid) return { result: fail(beforeInvalid), drifted: false };
+function computeProvisional(deps: LiveReleaseDeps, opts: VerifyOptions, before: Snapshot): VerifyResult {
+  const invalid = validateSnapshot(before);
+  if (invalid) return fail(invalid);
 
   const activeRoot = before.workingDirectory;
 
   const http = deps.fetchHealthVersion(opts.healthUrl, opts.httpTimeoutMs);
-  if (!http.ok) return { result: fail(http.code), drifted: false };
+  if (!http.ok) return fail(http.code);
   const pkg = deps.readPackageVersion(activeRoot);
-  if (!pkg.ok) return { result: fail("ACTIVE_PACKAGE_INVALID"), drifted: false };
+  if (!pkg.ok) return fail("ACTIVE_PACKAGE_INVALID");
   const manifest = deps.readManifestVersion(activeRoot);
-  if (!manifest.ok) return { result: fail("ACTIVE_MANIFEST_INVALID"), drifted: false };
+  if (!manifest.ok) return fail("ACTIVE_MANIFEST_INVALID");
   if (http.version !== pkg.version || pkg.version !== manifest.version) {
-    return { result: fail("ACTIVE_VERSION_MISMATCH"), drifted: false };
+    return fail("ACTIVE_VERSION_MISMATCH");
   }
 
-  if (opts.requiredTargets.length === 0) return { result: fail("TARGET_SET_EMPTY"), drifted: false };
+  if (opts.requiredTargets.length === 0) return fail("TARGET_SET_EMPTY");
   const activeRootSkills = `${activeRoot}/skills`;
   const targetViews: TargetView[] = [];
   const seen = new Set<string>();
   for (const target of opts.requiredTargets) {
-    if (!target.startsWith("/")) return { result: fail("TARGET_PATH_INVALID"), drifted: false };
-    if (seen.has(target)) return { result: fail("TARGET_PATH_INVALID"), drifted: false };
+    if (!target.startsWith("/")) return fail("TARGET_PATH_INVALID");
+    if (seen.has(target)) return fail("TARGET_PATH_INVALID");
     seen.add(target);
     const comparison = deps.verifySkillTarget(activeRootSkills, target);
     targetViews.push({ path: comparison.path, status: comparison.status });
-    if (comparison.status !== "current") return { result: fail("TARGET_VERIFICATION_FAILED"), drifted: false };
+    if (comparison.status !== "current") return fail("TARGET_VERIFICATION_FAILED");
   }
 
-  // snapshot-after: pass requires the entire evidence window to be unchanged.
-  const after = readSnapshot(deps, opts, opts.serviceLabel);
-  if (!sameSnapshot(before, after)) return { result: null, drifted: true };
-
-  // self-root proof on the stable active root — verifier code must live under it,
-  // so a stale cwd cannot impersonate the deployment. Checked after stability so
-  // a mid-verification restart can re-anchor instead of false-failing.
-  if (!deps.ownVerifierPath.startsWith(`${activeRoot}/`)) {
-    return { result: fail("VERIFIER_ROOT_MISMATCH"), drifted: false };
-  }
+  // self-root proof on the (soon-to-be-confirmed-stable) active root.
+  if (!deps.ownVerifierPath.startsWith(`${activeRoot}/`)) return fail("VERIFIER_ROOT_MISMATCH");
 
   const callerCwd = deps.readCallerCwd();
   const callerClassification: "active" | "inactive" = callerCwd === activeRoot ? "active" : "inactive";
@@ -353,22 +339,32 @@ function attempt(deps: LiveReleaseDeps, opts: VerifyOptions): AttemptOutcome {
     caller_cwd: { path: basename(callerCwd), classification: callerClassification },
   };
   if (opts.rollbackCandidate) {
-    return {
-      result: { ...result, rollback: { path: basename(opts.rollbackCandidate), classification: "inactive" } },
-      drifted: false,
-    };
+    return { ...result, rollback: { path: basename(opts.rollbackCandidate), classification: "inactive" } };
   }
-  return { result, drifted: false };
+  return result;
+}
+
+// ── One verification attempt: provisional result held until after-snapshot agrees ──
+
+interface AttemptOutcome {
+  readonly result: VerifyResult | null;
+  readonly drifted: boolean;
+}
+
+function attempt(deps: LiveReleaseDeps, opts: VerifyOptions): AttemptOutcome {
+  const before = readSnapshot(deps, opts);
+  const provisional = computeProvisional(deps, opts, before);
+  // Unconditional after-snapshot: any provisional result (pass OR fail) is
+  // discarded if the evidence window drifted — never return a generation-mixed verdict.
+  const after = readSnapshot(deps, opts);
+  if (!sameSnapshot(before, after)) return { result: null, drifted: true };
+  return { result: provisional, drifted: false };
 }
 
 // ── Main verifier ──
 
 export function verifyLiveRelease(deps: LiveReleaseDeps, optsPartial?: Partial<VerifyOptions>): VerifyResult {
   const opts: VerifyOptions = { ...DEFAULT_VERIFY_OPTIONS, ...optsPartial };
-
-  const owners = deps.listCbrainServiceOwners();
-  if (!owners.includes(opts.serviceLabel)) return fail("SERVICE_NOT_FOUND");
-  if (owners.length > 1) return fail("MULTIPLE_SERVICE_OWNERS");
 
   const first = attempt(deps, opts);
   if (!first.drifted) return first.result as VerifyResult;

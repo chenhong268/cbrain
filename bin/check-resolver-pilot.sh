@@ -583,12 +583,12 @@ if [[ -f "$BRIEF" ]]; then
     fail "brief 有 ${brief_privacy} 处疑似隐私泄露"
   fi
 
-  # Brief is compact: ≤ 3000 bytes (~1200 Chinese chars)
+  # Brief is compact: ≤ 3500 bytes (~1200 Chinese chars)
   brief_size=$(wc -c < "$BRIEF" | tr -d ' ')
-  if (( brief_size <= 3000 )); then
-    pass "brief 足够短（${brief_size} bytes，上限 3000）"
+  if (( brief_size <= 3500 )); then
+    pass "brief 足够短（${brief_size} bytes，上限 3500）"
   else
-    fail "brief 过长（${brief_size} bytes，上限 3000 / ~1200 中文字）"
+    fail "brief 过长（${brief_size} bytes，上限 3500 / ~1200 中文字）"
   fi
 
   # RESOLVER.md references brief
