@@ -4,18 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_PREFLIGHT_CHECKS } from "../../bin/check-v2-preflight.js";
 
-// #379 contract: gate:v2-preflight is a REPOSITORY release gate. It must be
-// runnable from a clean checkout with no operator cbrain.json. The
-// `storage-consistency` sub-gate must NOT consume operator config.
+// #379 + #384 contract: gate:v2-preflight is a REPOSITORY release gate. It
+// must be runnable from a clean checkout with no operator cbrain.json. The
+// `storage-consistency` sub-gate must NOT consume operator config — neither
+// CBRAIN_CONFIG nor an auto-discovered cbrain.json.
 //
 // We exercise storage-consistency in isolation so the full preflight (which
 // is slow and runs many sub-gates) stays out of the focused suite.
 
-describe("gate:v2-preflight storage-consistency decoupling (#379)", () => {
+const SANDBOX_PREFIX = "cbrain-preflight-decouple-";
+
+describe("gate:v2-preflight storage-consistency decoupling (#379, #384)", () => {
 	let sandbox: string;
 
 	beforeEach(() => {
-		sandbox = mkdtempSync(join(tmpdir(), "cbrain-preflight-decouple-"));
+		sandbox = mkdtempSync(join(tmpdir(), SANDBOX_PREFIX));
 	});
 	afterEach(() => {
 		if (existsSync(sandbox)) rmSync(sandbox, { recursive: true, force: true });
@@ -59,17 +62,14 @@ describe("gate:v2-preflight storage-consistency decoupling (#379)", () => {
 	});
 
 	test("storage-consistency sub-gate runs cleanly with no operator cbrain.json", async () => {
-		// Simulate the preflight runtime: cwd=repo root, no CBRAIN_CONFIG.
-		// The repository gate must pass and emit mode=repository-fixture.
 		const { exitCode, json, stderr } = await runStorageGate({ CBRAIN_CONFIG: "" });
 		expect(exitCode, `stderr=${stderr}`).toBe(0);
 		expect(json.mode).toBe("repository-fixture");
 		expect(json.passed).toBe(true);
+		expect(json.status).toBe("negative_canary_detected");
 	});
 
 	test("v2-preflight contains no sub-gate whose command references gate:profile-storage", () => {
-		// Profile-storage is the OPERATOR gate; it must NOT be part of the
-		// repository release preflight.
 		const offenders = DEFAULT_PREFLIGHT_CHECKS.filter((c) =>
 			c.command.some((arg) => typeof arg === "string" && arg.includes("gate:profile-storage")),
 		);
@@ -77,7 +77,7 @@ describe("gate:v2-preflight storage-consistency decoupling (#379)", () => {
 	});
 
 	test("storage-consistency sub-gate ignores a decoy operator cbrain.json", async () => {
-		// Point CBRAIN_CONFIG at a decoy file with bogus paths. The repository
+		// Drop a decoy cbrain.json + point CBRAIN_CONFIG at it. The repository
 		// gate must NOT consult it and must still produce the fixture result.
 		writeFileSync(
 			join(sandbox, "cbrain.json"),

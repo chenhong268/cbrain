@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { rmSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, rmSync, mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,20 +8,25 @@ import { join } from "node:path";
 // anonymous in-process fixture DB. It must NOT discover or read operator
 // vault/SQLite/LanceDB or credential-bearing config.
 //
-// Locks: clean-checkout runnability, JSON schema, fixture mode marker, and
-// privacy (no local path leak).
+// After #384 review:
+// - the gate exercises a HEALTHY non-empty fixture AND a negative canary
+//   whose expected hard finding is verified (otherwise the gate reports
+//   negative_canary_regression);
+// - fixture cleanup is asserted against tmpdir (the process.exit bug that
+//   skipped the finally is gone).
 
-describe("bin/check-consistency-gate.ts repository fixture gate (#379)", () => {
-	// A single sandbox per test keeps the test hermetic; the gate creates its
-	// OWN fixture DB inside, so we only need an empty cwd with no cbrain.json.
-	let sandbox: string;
+const SANDBOX_PREFIX = "cbrain-sandbox-repo-gate-";
+const FIXTURE_PREFIX = "cbrain-consistency-";
+
+describe("bin/check-consistency-gate.ts repository fixture gate (#379, #384)", () => {
 	function makeSandbox(): string {
-		const dir = mkdtempSync(join(tmpdir(), "cbrain-consistency-repo-"));
-		// Intentionally NO cbrain.json — proves release gate is checkout-clean.
-		return dir;
+		return mkdtempSync(join(tmpdir(), SANDBOX_PREFIX));
 	}
 	function cleanup(dir: string): void {
 		if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+	}
+	function listFixtureDirs(): string[] {
+		return readdirSync(tmpdir()).filter((n) => n.startsWith(FIXTURE_PREFIX)).sort();
 	}
 
 	async function runGate(cwd: string): Promise<{ exitCode: number; json: Record<string, unknown>; stdout: string; stderr: string }> {
@@ -30,7 +35,7 @@ describe("bin/check-consistency-gate.ts repository fixture gate (#379)", () => {
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",
-			env: { ...process.env, CBRAIN_CONFIG: "" }, // explicit: no operator config
+			env: { ...process.env, CBRAIN_CONFIG: "" },
 		});
 		const [stdout, stderr, exitCode] = await Promise.all([
 			new Response(proc.stdout).text(),
@@ -40,31 +45,32 @@ describe("bin/check-consistency-gate.ts repository fixture gate (#379)", () => {
 		return { exitCode, json: JSON.parse(stdout), stdout, stderr };
 	}
 
-	test("clean checkout (no cbrain.json) → passed:true, exit 0, mode=repository-fixture", async () => {
-		sandbox = makeSandbox();
+	test("clean checkout (no cbrain.json) → passed:true, exit 0, negative canary detected", async () => {
+		const sandbox = makeSandbox();
 		try {
 			const { exitCode, json } = await runGate(sandbox);
 			expect(exitCode).toBe(0);
 			expect(json.gate).toBe("consistency");
 			expect(json.mode).toBe("repository-fixture");
 			expect(json.passed).toBe(true);
+			expect(json.status).toBe("negative_canary_detected");
 			expect(Array.isArray(json.hard)).toBe(true);
 			expect(Array.isArray(json.warnings)).toBe(true);
 			expect(typeof json.lanceState).toBe("string");
 			expect(typeof json.next_action).toBe("string");
 			expect(json.fatalError).toBeUndefined();
-			// Privacy: no local sandbox path leak
+			const canary = json.canary as { expected_hard_check: string; detected: boolean };
+			expect(canary.expected_hard_check).toBe("sqlite.page_without_chunks");
+			expect(canary.detected).toBe(true);
+			// Privacy: no sandbox path leak
 			expect(JSON.stringify(json)).not.toContain(sandbox);
 		} finally {
 			cleanup(sandbox);
 		}
 	});
 
-	test("does not read operator cbrain.json even when one exists in cwd", async () => {
-		// Drop a DECOY cbrain.json in cwd pointing at a bogus path. A
-		// repository-owned release gate must ignore it and still produce the
-		// clean-fixture result, proving it does not consume operator config.
-		sandbox = makeSandbox();
+	test("does not read operator cbrain.json even when CBRAIN_CONFIG points at one", async () => {
+		const sandbox = makeSandbox();
 		const bogusDb = join(sandbox, "does-not-exist.sqlite");
 		writeFileSync(
 			join(sandbox, "cbrain.json"),
@@ -75,31 +81,28 @@ describe("bin/check-consistency-gate.ts repository fixture gate (#379)", () => {
 			expect(exitCode).toBe(0);
 			expect(json.mode).toBe("repository-fixture");
 			expect(json.passed).toBe(true);
-			// Decoy dbPath was never opened (otherwise gate would exit 2 on missing DB)
+			// Decoy dbPath was never opened (otherwise gate would exit 2 on missing DB).
 			expect(existsSync(bogusDb)).toBe(false);
 		} finally {
 			cleanup(sandbox);
 		}
 	});
 
-	test("removes its own fixture artifacts (no DB/vault/lance files leaked into cwd)", async () => {
-		sandbox = makeSandbox();
+	test("removes its own fixture artifacts across success and repeated runs (no tmpdir leak)", async () => {
+		// Snapshot tmpdir BEFORE running. The old process.exit() version
+		// leaked a cbrain-consistency-* dir on every run; this assertion
+		// catches that regression deterministically.
+		const before = listFixtureDirs();
+		const sandboxes: string[] = [];
 		try {
-			const before = [...(await readDirShallow(sandbox)).keys()].sort();
-			await runGate(sandbox);
-			const after = [...(await readDirShallow(sandbox)).keys()].sort();
-			expect(after.sort()).toEqual(before.sort());
+			for (let i = 0; i < 3; i++) {
+				const s = makeSandbox();
+				sandboxes.push(s);
+				await runGate(s);
+			}
 		} finally {
-			cleanup(sandbox);
+			for (const s of sandboxes) cleanup(s);
 		}
+		expect(listFixtureDirs()).toEqual(before);
 	});
 });
-
-async function readDirShallow(dir: string): Promise<Set<string>> {
-	const { readdirSync } = await import("node:fs");
-	try {
-		return new Set(readdirSync(dir));
-	} catch {
-		return new Set();
-	}
-}
