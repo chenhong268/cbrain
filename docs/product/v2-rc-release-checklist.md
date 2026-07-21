@@ -16,6 +16,8 @@ version-pinned install against an external ref. Those three remain human /
 environment responsibilities. This checklist fixes them in one place so the
 RC decision does not depend on oral memory.
 
+> **Repository vs operator scope (#379):** `gate:v2-preflight` runs from a clean checkout with no `cbrain.json`. Its `storage-consistency` stage uses an anonymous in-process fixture DB (gate id `consistency`, mode `repository-fixture`) and never opens operator vault/SQLite/LanceDB. Operator profile health is a separate gate: `bun run gate:profile-storage` (gate id `profile-storage-consistency`, mode `operator-profile`) — required only when validating a real profile, and run by the operator/release manager independently of the preflight.
+
 **Green preflight is necessary, not sufficient.** All three items below must
 also be recorded before tagging.
 
