@@ -76,96 +76,115 @@ export function isFirstPersonQuery(query: string): boolean {
 }
 
 /**
- * #385 — personal current-state guard intent detection.
+ * #385 r13: personal current-state guard intent detection.
  *
- * The guard activates for explicit advice predicates OR a narrowly
- * controlled medication current-state query. Generic current-state
- * grammar remains excluded: "What am I currently reading?" must not
- * activate.
+ * Architecture: split the query into clauses by CN/EN punctuation, then
+ * apply subject-bound closed grammar to EACH clause individually.
+ * No full-text keyword co-occurrence. No exclusion black-lists.
+ * The first-person pronoun and the predicate must be in the SAME clause.
  */
+
+/** Split a query into individual clauses by sentence/clause punctuation. */
+function splitClauses(query: string): string[] {
+  return query
+    .split(/[？?!.！。；;\n，,、]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+// ── CN advice: 我 must be the subject ──
+
+/** 我 + (time?) + predicate — direct subject, no intervening noun. */
+const ADVICE_CN_DIRECT =
+  /我(?:现在|目前|当前)?(?:该不该|要不要|还要不要|需不需要|该去|该做|该吃|该看|该补|该换|该买|需不需要复查|要不要去看|该不该去|该不该吃|要不要复查|需不需要去|要不要吃药)/;
+/** 我的 + (health topic) + 到期/过期 — possessive health subject only. */
+const ADVICE_CN_POSSESSIVE =
+  /我的(?:体检|复查|检查|就诊|年检|签证|护照|许可|续签|药)(?:是否)?(?:到期|过期)/;
+
+// ── EN advice: I/my must be the subject ──
+
+/** (should|do) I ... — first person as grammatical subject. */
+const ADVICE_EN_SUBJECT =
+  /\b(?:should\s+i\b|do\s+i\s+need\b|do\s+i\s+need\s+to\s+(?:go|see|take)|is\s+it\s+time\s+(?:for|to)\b)/i;
+/** my + (health topic) + overdue/due — possessive health subject. */
+const ADVICE_EN_POSSESSIVE =
+  /\bis\s+my\s+(?:checkup|appointment|exam|physical|medication|prescription)\s+(?:overdue|due)\b/i;
+/** am I overdue/due for — first person subject. */
+const ADVICE_EN_AM_I =
+  /\bam\s+i\s+(?:overdue|due\s+for)\b/i;
+
+// ── CN medication: 我 + verb + object in one clause, object has boundary ──
+
+/** 我 + (time?) + (prog?) + 吃/服/用 + (着?) + (什么/哪些?) + med-object. */
+const MED_CN_WHAT =
+  /我(?:现在|目前|当前|当下)?(?:正在|在)?(?:吃|服用|用|服)(?:着)?(?:什么|哪些|哪种)?(?:药|药物|药品|处方)(?!膳|剂|妆|材|丸|膏|方|酒|店|房|油|费|棉|水|检|理)/;
+/** 我 + (time?) + verb + 的是 + (什么/哪些) + med-object. */
+const MED_CN_RELATIVE =
+  /我(?:现在|目前|当前|当下)?(?:服用|吃|服|用)的是(?:什么|哪些)?(?:药|药物|药品)(?!膳|剂|妆|材|丸|膏|方|酒|店|房|油|费|棉|水|检|理)/;
+/** 我 + (time?) + (服用|吃|用) + 的 + (药物|药) + (有哪些|是什么). */
+const MED_CN_LIST =
+  /我(?:现在|目前|当前|当下)?(?:服用|吃|用)的(?:药物|药)(?:有哪些|是什么)/;
+/** 我 + (time?) + 有(在)?(吃|服)药 — yes/no inquiry. */
+const MED_CN_YN_1 =
+  /我(?:现在|目前|当前|当下)?有(?:在)?(?:吃|服)药/;
+/** 我 + (time?) + 有没有(在)?(吃|服)药. */
+const MED_CN_YN_2 =
+  /我(?:现在|目前|当前|当下)?有没有(?:在)?(?:吃|服)药/;
+/** 我 + (time?) + (是否|有无)(用|服|吃)(药|过药). */
+const MED_CN_YN_3 =
+  /我(?:现在|目前|当前|当下)?(?:是否|有无)(?:用|服|吃)(?:药|过药)/;
+
+// ── EN medication: complete first-person clauses, per-clause anchored ──
 
 /**
- * CN advice predicates — request a recommendation or current status.
- * Must be a PREDICATE (该不该/到期/该吃…), NOT a noun or time marker.
+ * After `on|taking`, allow: end-of-clause, `for <indication>`, or the
+ * medication object itself (for the `am I taking medication` pattern).
+ * Disallow bare nouns that change meaning: notes, photos, etc.
  */
-const ACTION_PREDICATE_CN = /该不该|要不要|还要不要|需不需要|该去|该做|该吃|该看|该补|该换|该买|到期|过期|是否到期|什么时候到期|需不需要复查|要不要去看|该不该去|该不该吃|要不要复查|需不需要去|要不要吃药/;
-
-/**
- * EN advice predicates — request a recommendation or current status.
- * Generic "am I currently" / "still taking" phrases are intentionally
- * absent; they are too broad without a controlled domain.
- */
-const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take)\b/i;
-
-/**
- * #385 r12: medication current-state detection via closed clause grammar.
- *
- * The first-person subject, medication verb, and inquiry structure MUST be
- * in the same contiguous clause. No full-text keyword co-occurrence, no
- * exclusion black-lists (those can suppress real current-state queries that
- * happen to mention "records" or "list" as a trailing request).
- *
- * CN: every alternative starts with 我 bound to the medication verb:
- *   我(time)?(prog)?吃(着)?(什么)?药         "我现在在吃什么药"
- *   我(time)?(verb)的是什么(药)?              "我现在吃的是什么药"
- *   我(time)?(服用|吃|用)的(药物|药)(有哪些)   "我现在服用的药物有哪些"
- *   我(time)?有(在)?(吃|服)药吗               "我有在吃药吗"
- *   我(time)?(是否|有无|有没有)(用|服|吃)药    "我目前是否用药"
- *
- * EN: every pattern is anchored to end-of-clause ($), so the verb must be
- * the predicate terminal (modulo time adverbs + punctuation):
- *   what medication(s) am I (currently) on/taking [tail]$
- *   am I (currently) on/taking (any) medication [tail]$
- *   what medication(s) do I (currently) take [tail]$
- *   do I (currently) take (any) medication [tail]$
- */
-const MED_CLAUSE_CN =
-  /我(?:现在|目前|当前|当下)?(?:正在|在)?(?:吃|服用|用|服)(?:着)?(?:什么|哪些|哪种)?(?:药|药物|药品)/;
-const MED_CLAUSE_CN_REL =
-  /我(?:现在|目前|当前|当下)?(?:吃|服|用)的是什么(?:药|药物)?|我(?:现在|目前|当前|当下)?(?:服用|吃|用)的(?:药物|药)(?:有哪些|是什么)/;
-const MED_CLAUSE_CN_YN =
-  /我(?:现在|目前|当前|当下)?有(?:在)?(?:吃|服)药吗|我(?:现在|目前|当前|当下)?(?:是否|有无|有没有)(?:用|服|吃)(?:药|过药)?/;
-
-/** EN clause tail: optional time adverb + punctuation + end-of-string. */
-const EN_TAIL = /(?:\s+(?:right\s+now|currently|today|now|at\s+the\s+moment))?\s*[?.!]?\s*$/i;
-const MED_WHAT_ON_EN = new RegExp(
-  "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)\\s+am\\s+i\\s+(?:currently\\s+)?(?:on|taking)" + EN_TAIL.source,
+const MED_EN_TAIL = /(?:\s+(?:currently|right\s+now|now|today))?(?:\s+for\s+[\w\s]+?)?\s*$/i;
+const MED_WHAT_ON_CLAUSE = new RegExp(
+  "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)\\s+am\\s+i\\s+(?:currently\\s+)?(?:on|taking)" + MED_EN_TAIL.source,
   "i",
 );
-const MED_AM_I_EN = new RegExp(
-  "\\bam\\s+i\\s+(?:currently\\s+)?(?:on|taking)\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + EN_TAIL.source,
+const MED_AM_I_CLAUSE = new RegExp(
+  "\\bam\\s+i\\s+(?:currently\\s+)?(?:on|taking)\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + MED_EN_TAIL.source,
   "i",
 );
-const MED_WHAT_DO_EN = new RegExp(
-  "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)\\s+do\\s+i\\s+(?:currently\\s+)?take" + EN_TAIL.source,
+const MED_WHAT_DO_CLAUSE = new RegExp(
+  "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)\\s+do\\s+i\\s+(?:currently\\s+)?take" + MED_EN_TAIL.source,
   "i",
 );
-const MED_DO_I_EN = new RegExp(
-  "\\bdo\\s+i\\s+(?:currently\\s+)?take\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + EN_TAIL.source,
+const MED_DO_I_CLAUSE = new RegExp(
+  "\\bdo\\s+i\\s+(?:currently\\s+)?take\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + MED_EN_TAIL.source,
   "i",
 );
 
-function isMedicationCurrentStateQuery(query: string): boolean {
-  // CN: clause-bound — 我 must be the subject of the medication verb.
-  if (MED_CLAUSE_CN.test(query) || MED_CLAUSE_CN_REL.test(query) || MED_CLAUSE_CN_YN.test(query)) {
-    return true;
-  }
-  // EN: end-anchored clauses — verb must be the clause terminal.
-  if (MED_WHAT_ON_EN.test(query) || MED_AM_I_EN.test(query) || MED_WHAT_DO_EN.test(query) || MED_DO_I_EN.test(query)) {
-    return true;
-  }
+/** Check a single clause for personal current-state intent. */
+function isPersonalCurrentStateClause(clause: string): boolean {
+  // CN advice: subject-bound within this clause
+  if (ADVICE_CN_DIRECT.test(clause) || ADVICE_CN_POSSESSIVE.test(clause)) return true;
+  // EN advice: subject-bound within this clause
+  if (ADVICE_EN_SUBJECT.test(clause) || ADVICE_EN_POSSESSIVE.test(clause) || ADVICE_EN_AM_I.test(clause)) return true;
+  // CN medication: 我 bound to verb, object has boundary
+  if (
+    MED_CN_WHAT.test(clause) || MED_CN_RELATIVE.test(clause) || MED_CN_LIST.test(clause) ||
+    MED_CN_YN_1.test(clause) || MED_CN_YN_2.test(clause) || MED_CN_YN_3.test(clause)
+  ) return true;
+  // EN medication: complete first-person clause
+  if (
+    MED_WHAT_ON_CLAUSE.test(clause) || MED_AM_I_CLAUSE.test(clause) ||
+    MED_WHAT_DO_CLAUSE.test(clause) || MED_DO_I_CLAUSE.test(clause)
+  ) return true;
   return false;
 }
 
 export function isPersonalCurrentStateQuery(query: string): boolean {
-  if (!isFirstPersonQuery(query)) return false;
   try {
     const normalized = query.normalize("NFKC").trim();
-    return (
-      ACTION_PREDICATE_CN.test(normalized) ||
-      ACTION_PREDICATE_EN.test(normalized) ||
-      isMedicationCurrentStateQuery(normalized)
-    );
+    for (const clause of splitClauses(normalized)) {
+      if (isPersonalCurrentStateClause(clause)) return true;
+    }
+    return false;
   } catch {
     return false;
   }

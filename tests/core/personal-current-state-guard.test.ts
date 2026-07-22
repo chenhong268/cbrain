@@ -80,6 +80,14 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "is my checkup overdue",
   ])("activates for advice: %s", (q) => expect(isPersonalCurrentStateQuery(q)).toBe(true));
 
+  // r13: advice subject-bound — third-party must NOT trigger
+  test.each([
+    "我的朋友该不该吃药？",
+    "我想知道实体A该不该复查？",
+    "Is Entity A overdue according to my notes?",
+    "Is the project review overdue for my team?",
+  ])("does NOT activate for non-self advice: %s", (q) => expect(isPersonalCurrentStateQuery(q)).toBe(false));
+
   test.each([
     "What medication am I currently on?",
     "What medications am I currently taking?",
@@ -98,14 +106,19 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "我现在有服药吗？",
     "我目前是否用药？",
     "我有在吃药吗？",
+    "我现在有没有在吃药？",
+    "我现在服用的是哪些药？",
     "我现在在吃什么药？根据我的记录回答",
     "我现在在吃什么药？请列个清单",
     "我目前用什么药，会影响睡眠吗？",
+    "What medications am I taking? Answer from my records.",
+    "What medications am I taking for blood pressure?",
+    "Am I currently taking any medication for sleep?",
   ])("activates for controlled medication current state: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(true);
   });
 
-  // r10-r12: false positives — ordinary queries about medication as a topic
+  // r10-r13: false positives — ordinary queries about medication as a topic
   test.each([
     "My medication article is on the desk",
     "What did I write on medications?",
@@ -126,6 +139,9 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "我用什么方法识别药物？",
     "我吃什么食物会影响药物吸收？",
     "我服装里有哪些药物图案？",
+    "我现在在吃什么药膳？",
+    "我现在用什么药剂做实验？",
+    "我现在服什么药妆产品？",
   ])("does NOT activate for medication-as-topic: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(false);
   });
