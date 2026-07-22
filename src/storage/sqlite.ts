@@ -2341,6 +2341,22 @@ export class CBrainDB {
     ).all({ $slug: slug }) as LinkRow[];
   }
 
+  /**
+   * #385: bounded trusted-link fetch for the personal current-state guard.
+   * Returns at most `limit` outgoing+incoming links with trust_state
+   * explicitly 'trusted' or 'user_thought' (NOT null/legacy — the guard
+   * requires explicit provenance for personal current-state authority).
+   * Pushes LIMIT into SQL so high-degree subjects never trigger unbounded reads.
+   */
+  getBoundedTrustedLinks(slug: string, limit: number): LinkRow[] {
+    const trustedFilter = " AND trust_state IN ('trusted','user_thought')";
+    const cols = "id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence, last_validated_at, effective_weight";
+    const rows = this.prepare(
+      `SELECT ${cols} FROM links WHERE (from_slug = $slug OR to_slug = $slug)${trustedFilter} LIMIT $limit`
+    ).all({ $slug: slug, $limit: limit }) as LinkRow[];
+    return rows;
+  }
+
   getOutgoingSlugs(slug: string, includeInactive = false): string[] {
     const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const rows = this.prepare(

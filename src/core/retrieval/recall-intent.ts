@@ -77,30 +77,54 @@ export function isFirstPersonQuery(query: string): boolean {
 
 /**
  * Action-oriented / current-state intent for personal management.
- * Narrower than general temporal (#232): focuses on "what should I do now /
- * is something due / current status" rather than historical "what happened".
+ *
+ * Two tiers (P1#3 fix):
+ * - DIRECT action markers: self-contained "should I / is it due / checkup /
+ *   medication" — trigger on their own.
+ * - TIME markers: bare temporal words like "最近/上次/什么时候/多久" —
+ *   trigger ONLY when they co-occur with a health/management domain word.
+ *   This prevents "我最近看了什么书" (pure recall) from activating the guard.
  */
-const PERSONAL_ACTION_CN = /该不该|要不要|还要不要|需不需要|该去|该做|复查|体检|检查|吃药|用药|就诊|看病|预约|到期|过期|上次|最近|接下来|什么时候|多久|定期|周期|频率/;
-const PERSONAL_ACTION_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|checkup|appointment|medication|when\s+should\s+i|how\s+long|last\s+time|recently|next)\b/i;
+const DIRECT_ACTION_CN = /该不该|要不要|还要不要|需不需要|该去|该做|复查|体检|检查|吃药|用药|就诊|看病|预约|到期|过期|接下来|定期|周期|频率/;
+const DIRECT_ACTION_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|checkup|appointment|medication|when\s+should\s+i)\b/i;
+
+const TIME_MARKER_CN = /上次|最近|什么时候|多久/;
+const TIME_MARKER_EN = /\b(?:last\s+time|recently|how\s+long|next)\b/i;
+
+/** Health/management domain words that, with a time marker, indicate current-state intent. */
+const DOMAIN_CN = /复查|体检|检查|看病|就诊|吃药|用药|预约|治疗|随访|监测|指标|报告|结果|症状|医|院|诊|药|疗程|剂量|恢复|康复|运动|锻炼|饮食|睡眠|作息|体检|牙|眼|视|听力|血压|血糖|心率|过敏|疫苗|保险|证件|续签|办理|申请|提交|缴费|报税|申报/;
+const DOMAIN_EN = /\b(?:checkup|appointment|medication|treatment|follow-?up|monitor|symptom|doctor|hospital|clinic|prescription|therapy|dose|recovery|exercise|workout|diet|sleep|allergy|vaccine|insurance|visa|renewal|application|submit|tax)\b/i;
+
+function hasDirectActionIntent(query: string): boolean {
+  return DIRECT_ACTION_CN.test(query) || DIRECT_ACTION_EN.test(query);
+}
+
+function hasTimeMarkerWithDomain(query: string): boolean {
+  const hasTime = TIME_MARKER_CN.test(query) || TIME_MARKER_EN.test(query);
+  if (!hasTime) return false;
+  return DOMAIN_CN.test(query) || DOMAIN_EN.test(query);
+}
 
 /**
  * #385 — closed grammar for personal current-state queries.
  *
  * Activates the personal current-state guard only when BOTH conditions hold:
  * 1. First-person phrasing (the speaker is the subject)
- * 2. Action-oriented / current-state intent (not plain historical lookup)
+ * 2. Action-oriented / current-state intent:
+ *    - a DIRECT action marker (该不该/要不要/复查/体检/到期…), OR
+ *    - a TIME marker (上次/最近/多久) co-occurring with a health/management
+ *      domain word (so "我最近看了什么书" does NOT trigger, but "我最近该
+ *      复查了吗" does).
  *
- * Deliberately narrow: avoids turning ordinary temporal queries into
- * unbounded graph traversal. When the grammar fires but the guard cannot
- * prove a trusted subject-to-topic chain, it fails closed to an explicit
- * insufficient-current-context outcome rather than presenting stale
- * reminder-like search material as current advice.
+ * Deliberately narrow: avoids turning ordinary temporal or historical
+ * queries into unbounded graph traversal. When the grammar fires but the
+ * guard cannot prove a trusted subject-to-topic chain, it fails closed.
  */
 export function isPersonalCurrentStateQuery(query: string): boolean {
   if (!isFirstPersonQuery(query)) return false;
   try {
     const normalized = query.normalize("NFKC").trim();
-    return PERSONAL_ACTION_CN.test(normalized) || PERSONAL_ACTION_EN.test(normalized);
+    return hasDirectActionIntent(normalized) || hasTimeMarkerWithDomain(normalized);
   } catch {
     return false;
   }

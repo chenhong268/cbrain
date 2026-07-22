@@ -166,8 +166,14 @@ async function runContentRecall(
       routing,
     );
   }
-  const slugs = results.map((r) => r.slug);
-  const entities = results.map((r) => {
+  // #385 — guard pass: use filtered results (only trusted-connected candidates).
+  // This prevents unrelated stale reminders from surfacing as current advice
+  // alongside a legitimately connected result.
+  const effectiveResults = (guardResult.activated && guardResult.filteredResults)
+    ? guardResult.filteredResults
+    : results;
+  const slugs = effectiveResults.map((r) => r.slug);
+  const entities = effectiveResults.map((r) => {
     const page = ctx.pages.getBySlug(r.slug);
     return {
       title: page?.title ?? r.slug,
