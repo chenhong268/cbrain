@@ -119,17 +119,23 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
-  // Step 4 (P1#1 + P2#5): read bounded trusted timeline for connected candidates.
-  // This evidence is returned for auditability — the user sees what CBrain has,
-  // but the response stays degraded (phase-1 cannot prove current state).
-  const timelineSlugs = connectedResults.slice(0, 3).map((r) => r.slug);
+  // Step 4 (P1#2): read bounded trusted timeline for ALL trusted neighbors,
+  // NOT just search-connected candidates. The core #385 scenario: search
+  // hits an old reminder, but a newer record on a trusted neighbor is
+  // excluded from top-k. Querying the full trusted neighborhood ensures
+  // such records are discovered as auditable historical evidence.
+  const timelineSlugs = [identityPersonSlug, ...trustedNeighbors];
   const trustedTimeline = db.getBoundedTrustedTimelineForSlugs(timelineSlugs, MAX_TIMELINE_BUDGET);
-  const historicalEvidence: GuardTimelineEvidence[] = trustedTimeline.map((t) => ({
-    page_slug: t.page_slug,
-    event_date: t.event_date,
-    summary: t.summary,
-    trust_state: t.trust_state ?? "trusted",
-  }));
+  // P2#5: do NOT promote unknown provenance to trusted. Only include
+  // entries with explicit trusted/user_thought; skip others.
+  const historicalEvidence: GuardTimelineEvidence[] = trustedTimeline
+    .filter((t) => t.trust_state === "trusted" || t.trust_state === "user_thought")
+    .map((t) => ({
+      page_slug: t.page_slug,
+      event_date: t.event_date,
+      summary: t.summary,
+      trust_state: t.trust_state as "trusted" | "user_thought",
+    }));
 
   // Step 5: phase-1 semantic limit — insufficient, but with auditable evidence.
   return {

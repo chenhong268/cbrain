@@ -85,7 +85,7 @@ export const FRONTDOOR_DATA_KEYS: ReadonlySet<string> = new Set([
   "seed", "upward", "downward", "name", "events", "date", "result", "status", "evidence_board",
   "answer_context", "top_claims", "topic", "stats", "totalEntities", "totalLinks", "totalEvents",
   "results", "result_count", "proactive_hints", "text", "why", "matched_clues", "dimension", "hint_used",
-  "evidence",
+  "evidence", "historical_evidence",
 ]);
 
 type SummaryKind = "recall" | "query" | "frontdoor";
@@ -219,9 +219,16 @@ function projectFrontdoorDetails(route: string, raw: Record<string, unknown>): R
 
 function projectContentDetails(raw: Record<string, unknown>): Record<string, unknown> {
   const entities = asRecords(raw.entities).slice(0, 10).map(projectNamedSnippet);
+  const histEvidence = asRecords(raw.historical_evidence).slice(0, 5).map((item) => ({
+    ...(typeof item.page_slug === "string" ? { slug: boundText(item.page_slug, 200) } : {}),
+    ...(typeof item.event_date === "string" ? { date: boundText(item.event_date, 50) } : {}),
+    ...(typeof item.summary === "string" ? { summary: boundText(item.summary, PROJECTED_CLAIM_MAX) } : {}),
+    ...(typeof item.trust_state === "string" ? { trust: item.trust_state as string } : {}),
+  }));
   return {
     ...(typeof raw.query === "string" ? { query: boundText(raw.query, 1_000) } : {}),
     ...(entities.length > 0 ? { entities } : {}),
+    ...(histEvidence.length > 0 ? { historical_evidence: histEvidence } : {}),
     ...(typeof raw.summary === "string" ? { summary: boundText(raw.summary) } : {}),
   };
 }

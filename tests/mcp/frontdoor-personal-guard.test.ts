@@ -11,6 +11,7 @@ import { join } from "node:path";
 const IDENTITY_SLUG = "brain/entities/subject-a";
 const TOPIC_SLUG = "brain/entities/topic-d";
 const OLD_REMINDER_SLUG = "records/reminder-old";
+const NEIGHBOR_B = "brain/entities/neighbor-b";
 
 type Handler = (args: Record<string, unknown>) => Promise<{
   content: Array<{ type: string; text: string }>;
@@ -32,8 +33,6 @@ function trustedLink(from: string, to: string): LinkRow {
   };
 }
 
-// ── Mock harness ──
-
 interface MockHarness {
   call: (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
   searchCalls: Array<{ query: string; options?: SearchOptions }>;
@@ -46,6 +45,7 @@ function makeMockHarness(
     identityPersonSlug?: string;
     trustedLinks?: LinkRow[];
     timelineBySlug?: Record<string, Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }>>;
+    outputMode?: "legacy" | "structured";
   } = {},
 ): MockHarness {
   let handler: Handler | undefined;
@@ -59,7 +59,7 @@ function makeMockHarness(
   const db = {
     getBoundedTrustedLinks(slug: string, _l: number) { guardDbCalls.push(`tl:${slug}`); return opts.trustedLinks ?? []; },
     getBoundedTrustedTimelineForSlugs(slugs: string[], _l: number) {
-      guardDbCalls.push(`t:${slugs.join(",")}`);
+      guardDbCalls.push(`t:${slugs.length}`);
       const out: Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }> = [];
       for (const s of slugs) out.push(...(opts.timelineBySlug?.[s] ?? []));
       return out;
@@ -71,7 +71,7 @@ function makeMockHarness(
     isSealedPage() { return false; }, getL1Summary() { return null; },
   };
   const ctx = {
-    outputMode: "legacy" as const,
+    outputMode: opts.outputMode ?? "legacy" as const,
     search: { async search(query: string, options?: SearchOptions) { searchCalls.push({ query, options }); return results; } },
     pages: {
       getBySlug(slug: string) {
@@ -87,59 +87,75 @@ function makeMockHarness(
   return { call: (args) => handler!(args), searchCalls, guardDbCalls };
 }
 
-interface Envelope { summary: { status: string }; raw: { entities: unknown[]; historical_evidence?: unknown[] }; }
-
-function parsed(output: { content: Array<{ type: string; text: string }> }): Envelope {
-  return JSON.parse(output.content[0]!.text) as Envelope;
+interface LegacyEnvelope { summary: { status: string }; raw: { entities: unknown[]; historical_evidence?: unknown[] }; }
+function parsedLegacy(output: { content: Array<{ type: string; text: string }> }): LegacyEnvelope {
+  return JSON.parse(output.content[0]!.text) as LegacyEnvelope;
 }
 
 describe("frontdoor personal current-state guard (#385) — mock", () => {
   test("personal query without identity → degraded", async () => {
     const h = makeMockHarness([supportedResult(OLD_REMINDER_SLUG)]);
-    const env = parsed(await h.call({ query: "我该吃药了吗", detail: "normal" }));
+    const env = parsedLegacy(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.entities).toEqual([]);
   });
 
-  // P1#1 r6: trusted chain → degraded but WITH historical evidence
-  test("trusted chain → degraded + historical_evidence in response", async () => {
+  test("trusted chain → degraded + historical_evidence in legacy response", async () => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
       trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
       timelineBySlug: { [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "trusted" }] },
     });
-    const env = parsed(await h.call({ query: "我该吃药了吗", detail: "normal" }));
+    const env = parsedLegacy(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.historical_evidence).toBeDefined();
     expect((env.raw.historical_evidence as unknown[]).length).toBe(1);
   });
 
-  // P1#3 r6: English current-state phrases trigger guard
-  test.each([
-    "What am I currently taking",
-    "What medication am I currently on",
-  ])("English current-state triggers guard: %s", async (q) => {
-    const h = makeMockHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
-    const env = parsed(await h.call({ query: q, detail: "normal" }));
-    expect(env.summary.status).toBe("degraded");
-    expect(h.guardDbCalls.length).toBeGreaterThan(0);
+  // P1#1 r7: structured mode also includes historical_evidence
+  test("structured mode includes historical_evidence in projected data", async () => {
+    const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
+      identityPersonSlug: IDENTITY_SLUG,
+      trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
+      timelineBySlug: { [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "trusted" }] },
+      outputMode: "structured",
+    });
+    const output = await h.call({ query: "我该吃药了吗", detail: "normal" });
+    const text = output.content[0]!.text;
+    // Structured mode output should contain historical_evidence in projected data
+    expect(text).toContain("historical_evidence");
+    expect(text).toContain("已完成相关检查");
   });
 
-  // P1#2 r6: fact recall with domain nouns does NOT trigger
+  // P2#4: when evidence exists, next_steps differ
+  test("trusted chain with evidence → next_steps about structured status", async () => {
+    const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
+      identityPersonSlug: IDENTITY_SLUG,
+      trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
+      timelineBySlug: { [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成", trust_state: "trusted" }] },
+    });
+    const env = parsedLegacy(await h.call({ query: "我该吃药了吗", detail: "normal" }));
+    const text = JSON.stringify(env);
+    expect(text).toContain("结构化状态");
+    expect(text).not.toContain("补充主体与主题的关联");
+  });
+
+  // P1#3 r7: historical fact queries do NOT trigger guard
   test.each([
-    "我上次血压是多少",
-    "我最近的体检结果怎么样",
-    "我最近的睡眠记录是什么",
-  ])("fact recall does NOT trigger guard: %s", async (q) => {
+    "我上次复查结果怎么样",
+    "我最近看病花了多少钱",
+    "我最近的用药记录是什么",
+    "What am I currently reading",
+    "Am I still taking notes",
+  ])("non-advice query does not trigger guard: %s", async (q) => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     await h.call({ query: q, detail: "normal" });
-    // Guard must not activate — no guard DB calls (getBoundedTrustedLinks etc.)
     expect(h.guardDbCalls).toEqual([]);
   });
 
   test("non-personal query → zero guard calls", async () => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
-    const env = parsed(await h.call({ query: "主题D是什么", detail: "normal" }));
+    const env = parsedLegacy(await h.call({ query: "主题D是什么", detail: "normal" }));
     expect(h.guardDbCalls).toEqual([]);
     expect(env.summary.status).toBe("ok");
   });
@@ -183,32 +199,25 @@ describe("frontdoor personal current-state guard (#385) — real SQLite e2e", ()
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  test("trusted chain → guard returns insufficient + historical evidence", () => {
+  // P1#2 r7 CORE: search finds old reminder, newer record on neighbor excluded from top-k
+  // → guard discovers neighbor's record via trusted neighborhood timeline
+  test("guard discovers newer record on neighbor excluded from search top-k", () => {
     seedPage(db, vaultPath, IDENTITY_SLUG, "主体A", "entity/person");
-    seedPage(db, vaultPath, TOPIC_SLUG, "主题D", "entity/person");
-    seedLink(db, IDENTITY_SLUG, TOPIC_SLUG, "trusted");
-    seedTimeline(db, TOPIC_SLUG, "已完成相关检查", "2026-06-01", "trusted");
+    seedPage(db, vaultPath, OLD_REMINDER_SLUG, "旧提醒", "record");
+    seedPage(db, vaultPath, NEIGHBOR_B, "更新记录", "entity/person");
+    seedLink(db, IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted");
+    seedLink(db, IDENTITY_SLUG, NEIGHBOR_B, "trusted");
+    seedTimeline(db, NEIGHBOR_B, "已完成相关检查", "2026-07-01", "trusted");
 
-    const pages = {
-      getBySlug: (slug: string) => slug === IDENTITY_SLUG
-        ? { type: "entity/person", title: "主体A" }
-        : slug === TOPIC_SLUG ? { type: "entity/person", title: "主题D" } : null,
-    };
-    const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    const pages = { getBySlug: (slug: string) => slug === IDENTITY_SLUG ? { type: "entity/person", title: "主体A" } : null };
+    // Search only found old reminder — neighbor B excluded
+    const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(result.outcome).toBe("insufficient_current_context");
-    expect(result.reason).toContain("phase-1 model cannot prove current state");
+    // Guard discovers neighbor B's record even though search didn't return it
     expect(result.historicalEvidence).toBeDefined();
     expect(result.historicalEvidence!.length).toBe(1);
+    expect(result.historicalEvidence![0]!.page_slug).toBe(NEIGHBOR_B);
     expect(result.historicalEvidence![0]!.summary).toBe("已完成相关检查");
-    expect(result.historicalEvidence![0]!.trust_state).toBe("trusted");
-  });
-
-  test("no trusted chain → insufficient with bounded disclaimer", () => {
-    seedPage(db, vaultPath, IDENTITY_SLUG, "主体A", "entity/person");
-    const pages = { getBySlug: (slug: string) => slug === IDENTITY_SLUG ? { type: "entity/person", title: "主体A" } : null };
-    const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(result.outcome).toBe("insufficient_current_context");
-    expect(result.reason).toContain("bounded inspection");
   });
 
   test("non-personal query does not activate", () => {

@@ -156,14 +156,21 @@ async function runContentRecall(
       summary: "无法确认当前个人状态，需要更明确的上下文",
     };
     const formatted = formatRecallEnvelope(insufficientPayload);
+    const hasEvidence = !!guardResult.historicalEvidence && guardResult.historicalEvidence.length > 0;
+    const display = hasEvidence
+      ? `无法确认「${query}」的当前个人状态。已找到相关历史记录但缺少结构化状态信息，请直接查阅记录确认。`
+      : `无法确认「${query}」的当前个人状态。建议直接查阅相关记录或补充主体关联。`;
+    const nextSteps = hasEvidence
+      ? ["直接查阅记录确认当前状态", "补充结构化状态或有效期信息"]
+      : ["直接查阅相关记录", "补充主体与主题的关联"];
     return withRouting(
       {
-        display: `无法确认「${query}」的当前个人状态。建议直接查阅相关记录或补充主体关联。`,
+        display,
         summary: {
           ...formatted.summary,
           status: "degraded" as const,
           degraded_reason: `个人当前状态上下文不足：${guardResult.reason ?? "未知原因"}`,
-          next_steps: ["直接查阅相关记录", "补充主体与主题的关联"],
+          next_steps: nextSteps,
         },
         raw: formatted.raw,
       },

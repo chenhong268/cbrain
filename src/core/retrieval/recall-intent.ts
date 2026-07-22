@@ -78,65 +78,44 @@ export function isFirstPersonQuery(query: string): boolean {
 /**
  * #385 — personal current-state guard intent detection.
  *
- * The guard activates ONLY for "current advice" queries — the speaker
- * asks whether something should be done NOW or IS currently due/active.
- * Historical fact recall ("我上次血压是多少") must NOT trigger the guard.
+ * The guard activates ONLY for explicit "current advice" predicates —
+ * the speaker asks whether something SHOULD be done or IS due.
  *
- * Two tiers:
- * - DIRECT action predicates: 该不该/需不需要/到期/overdue/am I currently… —
- *   trigger alone. These ask for a RECOMMENDATION or CURRENT STATUS.
- * - TIME markers (最近/上次) co-occurring with ACTION COMPOUND verbs
- *   (复查/看病/吃药/治疗…) — trigger together. Domain NOUNS alone
- *   (血压/睡眠/体检/血糖) do NOT trigger; they indicate fact recall.
+ * Historical fact recall ("我上次复查结果怎么样", "What am I currently
+ * reading?") must NOT trigger. Time markers + domain compounds are
+ * ambiguous with fact recall and are excluded entirely (r7).
  */
 
-/** CN predicates that ask for current advice/status. */
+/**
+ * CN advice predicates — request a recommendation or current status.
+ * Must be a PREDICATE (该不该/到期/该吃…), NOT a noun or time marker.
+ */
 const ACTION_PREDICATE_CN = /该不该|要不要|还要不要|需不需要|该去|该做|该吃|该看|该补|该换|该买|到期|过期|是否到期|什么时候到期|需不需要复查|要不要去看|该不该去|该不该吃|要不要复查|需不需要去|要不要吃药/;
-/** EN predicates that ask for current advice/status — includes r6 current-state phrases. */
-const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take|am\s+i\s+currently|currently\s+taking|currently\s+on|what\s+am\s+i\s+taking|still\s+taking)\b/i;
 
 /**
- * ACTION COMPOUND verbs — multi-char phrases that express a health
- * management ACTION (复查/看病/吃药/治疗/随访/监测/用药/就诊), NOT bare
- * nouns (血压/睡眠/体检/血糖/心率/症状/剂量) that appear in fact recall.
- * r6: removed 体检/睡眠/血压/血糖/心率/症状/剂量/锻炼/作息/康复/恢复/过敏/疫苗/续签/报税
- * — these are topic nouns, not action predicates.
+ * EN advice predicates — request a recommendation or current status.
+ * r7: removed generic phrases (am I currently / currently taking / on /
+ * still taking) that caught "What am I currently reading?" and
+ * "Am I still taking notes?". Only predicates that unambiguously
+ * request advice/recommendation remain.
  */
-const DOMAIN_ACTION_CN = /复查|看病|就诊|吃药|用药|治疗|随访|监测/;
-const DOMAIN_ACTION_EN = /\b(?:checkup|follow-?up|prescription|therapy)\b/i;
-
-const TIME_MARKER_CN = /上次|最近|什么时候|多久/;
-const TIME_MARKER_EN = /\b(?:last\s+time|recently|how\s+long)\b/i;
-
-function hasActionPredicate(query: string): boolean {
-  return ACTION_PREDICATE_CN.test(query) || ACTION_PREDICATE_EN.test(query);
-}
-
-function hasTimeMarkerWithDomainAction(query: string): boolean {
-  const hasTime = TIME_MARKER_CN.test(query) || TIME_MARKER_EN.test(query);
-  if (!hasTime) return false;
-  return DOMAIN_ACTION_CN.test(query) || DOMAIN_ACTION_EN.test(query);
-}
+const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take)\b/i;
 
 /**
- * #385 — closed grammar for personal current-state (current-advice) queries.
+ * #385 — closed grammar for personal current-advice queries.
  *
  * Activates ONLY when BOTH conditions hold:
  * 1. First-person phrasing (the speaker is the subject)
- * 2. Current-advice intent:
- *    - an explicit ACTION PREDICATE (该不该/需不需要/到期/overdue/am I
- *      currently…), OR
- *    - a TIME marker co-occurring with a DOMAIN ACTION compound verb
- *      (复查/看病/吃药/checkup/follow-up…).
+ * 2. An explicit ADVICE PREDICATE (该不该/需不需要/到期/should I/overdue…).
  *
- * Fact-recall queries with domain nouns (血压/睡眠/体检/血糖) do NOT
- * trigger — "我上次血压是多少" is historical fact recall, not current advice.
+ * Time+domain compounds ("我上次复查结果") are excluded — they are
+ * historical fact recall, not current advice requests.
  */
 export function isPersonalCurrentStateQuery(query: string): boolean {
   if (!isFirstPersonQuery(query)) return false;
   try {
     const normalized = query.normalize("NFKC").trim();
-    return hasActionPredicate(normalized) || hasTimeMarkerWithDomainAction(normalized);
+    return ACTION_PREDICATE_CN.test(normalized) || ACTION_PREDICATE_EN.test(normalized);
   } catch {
     return false;
   }
