@@ -18,8 +18,10 @@ bun run gate:v2-preflight
 | `performance` | `bun run gate:perf` | Deterministic performance report stays within hard budgets |
 | `docs-consistency` | `bun run check:docs` | Public docs match current version, tools, commands, and install claims |
 | `resolver-pilot` | `bin/check-resolver-pilot.sh` | Agent routing and skill coverage do not drift silently |
-| `storage-consistency` | `bun run gate:consistency` | Storage fsck + repair-plan stays green (no silent drift) |
+| `storage-consistency` | `bun run gate:consistency` | Repository fixture gate: storage fsck + repair-plan stays green on an anonymous in-process fixture DB (no operator config) |
 | `recall-quality-matrix` | `bun run gate:recall-quality` | Anonymous Chinese, English, mixed, abstract, temporal, relationship, operational, and honest-empty recall lanes stay green |
+
+> **Repository vs operator scope (#379):** `gate:v2-preflight` is a repository release gate — it runs from a clean checkout with no `cbrain.json` and never opens operator vault/DB/LanceDB. Operator profile health (live vault / SQLite / FTS / LanceDB) is a separate gate: `bun run gate:profile-storage` (`gate: profile-storage-consistency`, `mode: operator-profile`) — it requires an explicit configuration target and fails closed (sanitized) when absent/invalid/malformed. The two gates share the fsck → repair-plan → `evaluateConsistencyGate` path but emit distinct stable report IDs.
 
 ## Report Contract
 

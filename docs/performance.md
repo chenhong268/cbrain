@@ -150,6 +150,7 @@ bun run gate:perf
 | recall-quality-matrix | `bun run gate:recall-quality` | 60s |
 
 任一 required check fail → `no-go`，报告给出 `failed_stage` 和 `next_action`。这是 v2.0 发版的 go/no-go 总闸。
+`storage-consistency` 是 **repository fixture gate**（#379）：用匿名临时 fixture DB 跑 fsck/repair-plan/consistency-gate，验证 release invariant；不读操作者 `cbrain.json`，clean checkout 可跑。操作者真实 vault/DB/LanceDB health 由独立 `bun run gate:profile-storage` 提供（fail-closed on missing/invalid config），不进入 preflight。两个 gate 拥有 distinct stable id：`consistency` (repository) vs `profile-storage-consistency` (operator)。
 
 ## 基准维度速查
 
