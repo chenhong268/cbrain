@@ -80,12 +80,14 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "is my checkup overdue",
   ])("activates for advice: %s", (q) => expect(isPersonalCurrentStateQuery(q)).toBe(true));
 
-  // r13: advice subject-bound — third-party must NOT trigger
+  // r13/r14: advice subject-bound — third-party or non-personal must NOT trigger
   test.each([
     "我的朋友该不该吃药？",
     "我想知道实体A该不该复查？",
     "Is Entity A overdue according to my notes?",
     "Is the project review overdue for my team?",
+    "Is it time to deploy Entity A?",
+    "Is it time for the project review?",
   ])("does NOT activate for non-self advice: %s", (q) => expect(isPersonalCurrentStateQuery(q)).toBe(false));
 
   test.each([
@@ -111,14 +113,21 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "我现在在吃什么药？根据我的记录回答",
     "我现在在吃什么药？请列个清单",
     "我目前用什么药，会影响睡眠吗？",
+    "我现在，正在吃什么药？",
+    "我现在吃的，是什么药？",
+    "What medications, if any, am I taking?",
+    "Am I, according to my records, taking any medications?",
     "What medications am I taking? Answer from my records.",
     "What medications am I taking for blood pressure?",
     "Am I currently taking any medication for sleep?",
+    "Which medicines do I take in the morning?",
+    "What medication am I taking at night?",
+    "Which prescriptions do I take after dinner?",
   ])("activates for controlled medication current state: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(true);
   });
 
-  // r10-r13: false positives — ordinary queries about medication as a topic
+  // r10-r14: false positives — ordinary queries about medication as a topic
   test.each([
     "My medication article is on the desk",
     "What did I write on medications?",
@@ -142,6 +151,10 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "我现在在吃什么药膳？",
     "我现在用什么药剂做实验？",
     "我现在服什么药妆产品？",
+    "我现在用药记录是什么？",
+    "我现在在服药软件里查记录",
+    "我有吃药的历史记录",
+    "我现在在吃什么药盒装的糖？",
   ])("does NOT activate for medication-as-topic: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(false);
   });
