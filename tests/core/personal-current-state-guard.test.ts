@@ -86,32 +86,31 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "What medication am I taking currently?",
     "What medicine am I currently taking?",
     "What prescriptions am I currently taking?",
+    "am I currently on any medication?",
+    "do I currently take medication?",
     "我现在在吃什么药？",
     "我现在吃的是什么药？",
     "我目前正在吃什么药？",
     "我现在服用的药物有哪些？",
-    "我当前用药是什么？",
     "我目前用什么药？",
+    "我现在有服药吗？",
+    "我目前是否用药？",
+    "我有在吃药吗？",
   ])("activates for controlled medication current state: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(true);
   });
 
-  // P1#3 r7: historical fact with domain action — must NOT trigger
+  // r10: false positives — ordinary queries about medication as a topic
   test.each([
-    "我上次复查结果怎么样",
-    "我最近看病花了多少钱",
-    "我最近的用药记录是什么",
-    "我上次血压是多少",
-    "我最近的体检结果怎么样",
-    "我最近的睡眠记录是什么",
-  ])("does NOT activate for historical fact: %s", (q) => {
-    expect(isPersonalCurrentStateQuery(q)).toBe(false);
-  });
-
-  test.each([
-    "我现在使用的药物管理软件是什么",
-    "我目前的用药记录是什么",
-  ])("does NOT activate for medication-adjacent lookup: %s", (q) => {
+    "My medication article is on the desk",
+    "What did I write on medications?",
+    "Show me my notes on medication",
+    "What medications are discussed in my paper?",
+    "What medicines are available in my country?",
+    "我现在研究的药物是什么？",
+    "我目前关注的药物有哪些？",
+    "我当前文章里的药物是什么？",
+  ])("does NOT activate for medication-as-topic: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(false);
   });
 

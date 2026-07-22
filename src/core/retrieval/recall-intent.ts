@@ -98,30 +98,49 @@ const ACTION_PREDICATE_CN = /该不该|要不要|还要不要|需不需要|该�
 const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take)\b/i;
 
 /**
- * #385 r9: medication current-state detection via composable grammar.
- * Activates when (current marker) + (medication domain) + (state inquiry)
- * co-occur, with explicit exclusions for record/software/history queries.
- * This avoids enumerating full sentences while staying precise.
+ * #385 r10: medication current-state detection via closed clause grammar.
+ *
+ * CN: requires a medication ACTION verb (吃/服/服用/用药/服药/在吃/用着) +
+ *     an inquiry structure (什么/哪些/是否/有无/吗), NOT generic 是什么/有哪些.
+ *     Excludes 研究/记录/软件/文章/关注 — these are about medication as a
+ *     research subject, not the speaker's current medication state.
+ *
+ * EN: matches only complete clause structures — "what medication am I on",
+ *     "am I currently taking medication", "do I currently take medication".
+ *     Bare "on" / "are" keyword co-occurrence is NOT a signal.
  */
-const MED_CURRENT_MARKER_CN = /(?:现在|目前|当前|当下)/;
-const MED_DOMAIN_CN = /(?:药|药物|药品|用药|服药|处方)/;
-const MED_STATE_INQUIRY_CN = /(?:是什么|有哪些|是什么药|吃什么药|服用什么|用着什么|用什么药|吃的是什么|在吃什么|在服用什么)/;
-const MED_EXCLUSION_CN = /(?:记录|软件|历史|管理系统?|清单|列表|明细|账单|费用|花了多少)/;
+const MED_VERB_CN = /(?:在吃|在服用|用着|吃着|服用|吃药|服药|用药|吃药|吃|服|用)/;
+const MED_NOUN_CN = /(?:药|药物|药品|处方)/;
+const MED_INQUIRY_CN = /(?:什么|哪些|是否|有无|吗|呢|哪种)/;
+const MED_CURRENT_CN = /(?:现在|目前|当前|当下|正在)/;
+const MED_EXCLUSION_CN = /(?:记录|软件|历史|管理系统?|清单|列表|明细|账单|费用|花了多少|研究|文章|关注|论文|参考|资料|笔记)/;
 
-const MED_CURRENT_MARKER_EN = /\b(?:currently|right now|on)\b/i;
-const MED_DOMAIN_EN = /\b(?:medications?|medicines?|prescriptions?|drugs?)\b/i;
-const MED_EXCLUSION_EN = /\b(?:history|record|software|list|log|cost|spent|paid|app|tracker?)\b/i;
+/** EN: "what medication am I on/taking" — complete clause, first person present. */
+const MED_WHAT_CLAUSE_EN =
+  /\b(?:what|which)\s+(?:medications?|medicines?|prescriptions?)\s+(?:am\s+i|do\s+i\s+(?:currently\s+)?take|are\s+you\s+taking)\b/i;
+/** EN: "am I currently on/taking (any) medication" — complete clause. */
+const MED_AM_I_CLAUSE_EN =
+  /\bam\s+i\s+(?:currently\s+)?(?:on|taking)\s+(?:any\s+)?(?:medications?|medicines?|prescriptions?|my\s+meds?)\b/i;
+/** EN: "do I currently take medication" — complete clause. */
+const MED_DO_I_CLAUSE_EN =
+  /\bdo\s+i\s+(?:currently\s+)?take\s+(?:any\s+)?(?:medications?|medicines?|prescriptions?)\b/i;
+const MED_EXCLUSION_EN = /\b(?:history|record|software|list|log|cost|spent|paid|app|tracker?|article|paper|notes?|discussed|available|research|study|wrote?|reading)\b/i;
 
 function isMedicationCurrentStateQuery(query: string): boolean {
-  // CN: current marker + medication domain + state inquiry, minus exclusions
-  if (MED_CURRENT_MARKER_CN.test(query) && MED_DOMAIN_CN.test(query) && MED_STATE_INQUIRY_CN.test(query)) {
+  // CN: medication verb + medication noun + inquiry structure, minus exclusions.
+  // Current marker is optional but strengthens the signal.
+  if (MED_VERB_CN.test(query) && MED_NOUN_CN.test(query) && MED_INQUIRY_CN.test(query)) {
     return !MED_EXCLUSION_CN.test(query);
   }
-  // EN: "what medication am I (currently) on/taking" pattern
-  if (/\b(?:what|which)\s+(?:medications?|medicines?|prescriptions?)\b/i.test(query) && /\b(?:am\s+i|do\s+i\s+take|are)\b/i.test(query)) {
-    return !MED_EXCLUSION_EN.test(query);
+  // CN: "是否用药" / "有服药吗" / "有在吃药吗" — the noun IS the verb compound.
+  if (MED_CURRENT_CN.test(query) && /(?:是否|有无|有没有).{0,4}(?:用药|服药|吃药|在吃药)/.test(query)) {
+    return !MED_EXCLUSION_CN.test(query);
   }
-  if (MED_CURRENT_MARKER_EN.test(query) && MED_DOMAIN_EN.test(query) && /\b(?:am\s+i|do\s+i|are|taking|on)\b/i.test(query)) {
+  if (/(?:有|在).{0,2}(?:吃药|服药|用药|服用).{0,2}(?:吗|呢)/.test(query)) {
+    return !MED_EXCLUSION_CN.test(query);
+  }
+  // EN: only match complete clause structures
+  if (MED_WHAT_CLAUSE_EN.test(query) || MED_AM_I_CLAUSE_EN.test(query) || MED_DO_I_CLAUSE_EN.test(query)) {
     return !MED_EXCLUSION_EN.test(query);
   }
   return false;
