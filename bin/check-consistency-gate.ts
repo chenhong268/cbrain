@@ -3,30 +3,29 @@
 //
 // After #379: this gate is a REPOSITORY release check. It runs from a clean
 // checkout with no operator cbrain.json and uses anonymous in-process fixture
-// DBs to prove the fsck → repair-plan → evaluateConsistencyGate path still
-// (a) classifies a HEALTHY non-empty fixture as `passed`, and (b) detects an
-// INTENTIONAL hard no-go (missing chunks) in a negative canary. It does NOT
-// discover, read, or open any operator vault, SQLite database, LanceDB
-// directory, or credential-bearing configuration.
+// DBs + anonymous LanceDB indices to prove the shared
+// fsck → repair-plan → evaluateConsistencyGate path still:
+//   (a) classifies a HEALTHY non-empty fixture (page + chunk + vector) as
+//       `passed`;
+//   (b) detects an INTENTIONAL hard no-go (page without chunks) in a
+//       negative canary.
 //
-// Operator profile health (live vault / DB / LanceDB) is a separate gate:
-// `gate:profile-storage` → bin/check-profile-storage-gate.ts.
+// It does NOT discover, read, or open any operator vault, SQLite database,
+// LanceDB directory, or credential-bearing configuration.
 //
-// Fixture scope (#384 review P2): fixtures exercise the `sqlite` layer
-// (pages / chunks / hierarchy / FTS coverage) — the release invariants that
-// are reachable from an anonymous in-process DB without a real LanceDB
-// index. The full fts + lance path is covered by the operator gate and by
-// the existing fsck test suite; the repository gate's job is to prove the
-// core detector has not silently regressed (page_without_chunks etc.).
+// Authority (#384 review rev3 P1-1): hard-check classification routes
+// through the CANONICAL `buildRepairPlan` + `evaluateConsistencyGate`. No
+// local copy of the hard-check set exists in this file.
 //
-// Process model (#384 review P1-4): success/no-go paths set process.exitCode;
-// cleanup runs in `finally`. We never call process.exit() inside the try
-// block, so the finally block actually executes and both fixtures are removed.
+// Fatal safety (#384 review rev3 P1-2): any `report.fatalError` from either
+// fixture forces NO-GO regardless of whether findings were emitted.
 //
-// Output: one stable JSON report, exit 0 on passed, 1 on hard finding or
-// negative-canary regression, 2 on fatal fixture setup error. The report
-// never echoes local paths, raw fsck fatal errors, or stack traces —
-// next_action uses fixed strings only.
+// Status (#384 review rev3 P1-3): a healthy fixture that produces a hard
+// finding uses the explicit `healthy_fixture_failed` status with a fixed
+// failure action — never the success copy.
+//
+// Process model (#384 review P1-4): success/no-go paths set
+// process.exitCode; cleanup runs in `finally`.
 
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,11 +33,16 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { CBrainDB } from "../src/storage/sqlite.js";
 import { runFsck } from "../src/cli/commands/fsck.js";
-import type { FsckReport } from "../src/core/fsck/types.js";
-import type { FsckFinding } from "../src/core/fsck/types.js";
+import { buildRepairPlan } from "../src/core/fsck/repair-plan.js";
+import { evaluateConsistencyGate } from "../src/core/fsck/consistency-gate.js";
+import { LanceDBManager, type ChunkData } from "../src/storage/lancedb.js";
+import type { ConsistencyGateResult, GateFinding } from "../src/core/fsck/consistency-gate.js";
+import type { FsckReport, FsckLanceState } from "../src/core/fsck/types.js";
+import type { RepairPlanStatus } from "../src/core/fsck/repair-plan.js";
 
 type ConsistencyStatus =
 	| "healthy_fixture_checked"
+	| "healthy_fixture_failed"
 	| "negative_canary_detected"
 	| "negative_canary_regression"
 	| "fixture_setup_failed";
@@ -50,10 +54,10 @@ interface ConsistencyGateReport {
 	timestamp: string;
 	passed: boolean;
 	status: ConsistencyStatus;
-	hard: FsckFinding[];
-	warnings: FsckFinding[];
-	lanceState: string;
-	repairPlanStatus: null;
+	hard: GateFinding[];
+	warnings: GateFinding[];
+	lanceState: FsckLanceState | string;
+	repairPlanStatus: RepairPlanStatus | string | null;
 	canary: {
 		expected_hard_check: string;
 		detected: boolean;
@@ -64,46 +68,10 @@ interface ConsistencyGateReport {
 
 const CANARY_EXPECTED_HARD_CHECK = "sqlite.page_without_chunks";
 
-// Hard checks the repository gate cares about. These mirror the
-// HARD_CHECKS set in src/core/fsck/consistency-gate.ts but are restricted
-// to findings reachable from the sqlite layer (no lance.* checks — the
-// fixture has no LanceDB index by design).
-const REPOSITORY_HARD_CHECKS: Record<string, true> = {
-	"sqlite.page_without_chunks": true,
-	"fts.stale_rows": true,
-	"fts.coverage_gap": true,
-	"hierarchy.frontmatter_graph_mismatch": true,
-	"hierarchy.malformed_reports_to": true,
-	"sqlite.orphan_chunks": true,
-	"sqlite.orphan_links": true,
-	"sqlite.orphan_aliases": true,
-	"sqlite.orphan_tags": true,
-	"sqlite.orphan_evidence": true,
-	"sqlite.orphan_page_versions": true,
-	"sqlite.orphan_snapshots": true,
-	"sqlite.orphan_mentions": true,
-	"sqlite.orphan_jobs": true,
-	"sqlite.orphan_feedback": true,
-	"vault.file_exists_db_missing": true,
-	"vault.db_exists_file_missing": true,
-	"vault.frontmatter_slug_mismatch": true,
-};
-
-function isHardFinding(check: string): boolean {
-	return REPOSITORY_HARD_CHECKS[check] === true || check.startsWith("sqlite.orphan_");
-}
-function classify(report: FsckReport): { hard: FsckFinding[]; warnings: FsckFinding[] } {
-	const hard: FsckFinding[] = [];
-	const warnings: FsckFinding[] = [];
-	for (const f of report.findings) {
-		if (isHardFinding(f.check)) hard.push(f);
-		else warnings.push(f);
-	}
-	return { hard, warnings };
-}
-
 const NEXT_ACTIONS: Record<ConsistencyStatus, string> = {
 	healthy_fixture_checked: "All consistency checks passed.",
+	healthy_fixture_failed:
+		"Healthy fixture produced an unexpected hard finding. Inspect fsck/repair-plan output and re-run `bun run gate:consistency`.",
 	negative_canary_detected: "Negative canary produced the expected hard finding.",
 	negative_canary_regression: `Negative canary did not produce expected hard finding (${CANARY_EXPECTED_HARD_CHECK}). Inspect fsck probes — a detector may have silently regressed.`,
 	fixture_setup_failed:
@@ -117,6 +85,11 @@ interface FixtureDirs {
 	dbPath: string;
 }
 
+interface FixtureGateOutcome {
+	report: FsckReport;
+	result: ConsistencyGateResult;
+}
+
 function buildFixture(prefix: string): FixtureDirs {
 	const root = mkdtempSync(join(tmpdir(), prefix));
 	const vaultPath = join(root, "vault");
@@ -128,8 +101,6 @@ function buildFixture(prefix: string): FixtureDirs {
 }
 
 function seedHealthyFixture(f: FixtureDirs): void {
-	// Anonymous healthy fixture: one entity page WITH a chunk so the
-	// page_without_chunks probe sees a real non-empty shape (not an empty DB).
 	const entityDir = join(f.vaultPath, "entities");
 	mkdirSync(entityDir, { recursive: true });
 	const md = "---\nslug: entities/fixture-anon\ntitle: Fixture Anon\ntype: entity/person\n---\nfixture body\n";
@@ -144,16 +115,13 @@ function seedHealthyFixture(f: FixtureDirs): void {
 			contentHash: createHash("sha256").update(md).digest("hex"),
 		});
 		db.insertChunk("entities/fixture-anon", 0, "fixture body");
+		db.ftsInsert("entities/fixture-anon", "fixture body");
 	} finally {
 		db.close();
 	}
 }
 
 function seedNegativeCanaryFixture(f: FixtureDirs): void {
-	// Anonymous negative canary: a page WITH a vault file and DB row but NO
-	// chunks. fsck's sqlite.page_without_chunks probe MUST classify this as a
-	// hard finding. If a future change silently stops detecting it, this
-	// canary flips the gate to no-go.
 	const entityDir = join(f.vaultPath, "entities");
 	mkdirSync(entityDir, { recursive: true });
 	const md = "---\nslug: entities/canary-anon\ntitle: Canary Anon\ntype: entity/person\n---\ncanary body\n";
@@ -167,26 +135,41 @@ function seedNegativeCanaryFixture(f: FixtureDirs): void {
 			filePath: "entities/canary-anon.md",
 			contentHash: createHash("sha256").update(md).digest("hex"),
 		});
-		// Deliberately NO chunk → fsck must emit sqlite.page_without_chunks.
 	} finally {
 		db.close();
 	}
 }
 
-async function runFixtureLayer(f: FixtureDirs): Promise<FsckReport> {
-	// Open READ-ONLY via the snapshot path so we NEVER touch the fixture DB
-	// in read-write mode (same invariant we require of the operator gate).
-	// Run the sqlite layer only — the fixture has no LanceDB index by
-	// design, and the sqlite layer is where the canary detector lives.
+async function seedHealthyLance(f: FixtureDirs): Promise<void> {
+	const lance = new LanceDBManager();
+	await lance.connect(f.lancePath);
+	try {
+		const chunks: ChunkData[] = [
+			{
+				pageSlug: "entities/fixture-anon",
+				chunkIndex: 0,
+				content: "fixture body",
+				vector: new Float32Array(1024),
+			},
+		];
+		await lance.addChunks(chunks);
+	} finally {
+		await lance.close();
+	}
+}
+
+async function runCanonicalGate(f: FixtureDirs): Promise<FixtureGateOutcome> {
 	const db = new CBrainDB(f.dbPath, { readSnapshot: true, skipMigrate: true });
 	try {
-		const { report } = await runFsck({
+		const { report: fsckReport } = await runFsck({
 			vaultPath: f.vaultPath,
 			lancePath: f.lancePath,
 			db,
-			layer: "sqlite",
 		});
-		return report;
+		const plan = buildRepairPlan(fsckReport);
+		const hasChunks = !!db.rawDb.prepare("SELECT 1 FROM chunks LIMIT 1").get();
+		const result = evaluateConsistencyGate(fsckReport, hasChunks, plan.overallStatus);
+		return { report: fsckReport, result };
 	} finally {
 		db.close();
 	}
@@ -196,32 +179,34 @@ async function main(): Promise<void> {
 	const started = performance.now();
 	const fixtures: FixtureDirs[] = [];
 	try {
-		// ── Healthy fixture ───────────────────────────────────────────────
 		const healthy = buildFixture("cbrain-consistency-healthy-");
 		fixtures.push(healthy);
 		seedHealthyFixture(healthy);
-		const healthyReport = await runFixtureLayer(healthy);
-		const healthyClass = classify(healthyReport);
+		await seedHealthyLance(healthy);
+		const healthyOutcome = await runCanonicalGate(healthy);
 
-		// ── Negative canary fixture ──────────────────────────────────────
 		const canary = buildFixture("cbrain-consistency-canary-");
 		fixtures.push(canary);
 		seedNegativeCanaryFixture(canary);
-		const canaryReport = await runFixtureLayer(canary);
-		const canaryClass = classify(canaryReport);
-		const canaryDetected = canaryClass.hard.some(
+		const canaryOutcome = await runCanonicalGate(canary);
+		const canaryDetected = canaryOutcome.result.hard.some(
 			(h) => h.check === CANARY_EXPECTED_HARD_CHECK,
 		);
 
-		// Aggregate verdict: the healthy fixture must be clean AND the canary
-		// must be detected. Either failure mode flips the gate to no-go.
-		const healthyClean = healthyClass.hard.length === 0;
-		const passed = healthyClean && canaryDetected;
-		const status: ConsistencyStatus = passed
-			? "negative_canary_detected"
+		// Fatal safety: any fsck fatalError forces NO-GO even if findings
+		// were emitted before the probe crashed.
+		const fatal = !!healthyOutcome.report.fatalError || !!canaryOutcome.report.fatalError;
+
+		// Aggregate verdict using CANONICAL evaluator results.
+		const healthyClean = healthyOutcome.result.passed && !healthyOutcome.report.fatalError;
+		const passed = healthyClean && canaryDetected && !fatal;
+		const status: ConsistencyStatus = fatal
+			? "fixture_setup_failed"
 			: !canaryDetected
 				? "negative_canary_regression"
-				: "healthy_fixture_checked";
+				: !healthyClean
+					? "healthy_fixture_failed"
+					: "negative_canary_detected";
 
 		const report: ConsistencyGateReport = {
 			gate: "consistency",
@@ -230,10 +215,10 @@ async function main(): Promise<void> {
 			timestamp: new Date().toISOString(),
 			passed,
 			status,
-			hard: healthyClass.hard,
-			warnings: healthyClass.warnings,
-			lanceState: healthyReport.lanceState,
-			repairPlanStatus: null,
+			hard: healthyOutcome.result.hard,
+			warnings: healthyOutcome.result.warnings,
+			lanceState: healthyOutcome.result.lanceState,
+			repairPlanStatus: healthyOutcome.result.repairPlanStatus,
 			canary: {
 				expected_hard_check: CANARY_EXPECTED_HARD_CHECK,
 				detected: canaryDetected,
@@ -244,7 +229,6 @@ async function main(): Promise<void> {
 		console.log(JSON.stringify(report, null, 2));
 		process.exitCode = passed ? 0 : 1;
 	} catch {
-		// Privacy: do not echo the raw error (may include tmpdir / dbPath).
 		const report: ConsistencyGateReport = {
 			gate: "consistency",
 			mode: "repository-fixture",
@@ -266,13 +250,11 @@ async function main(): Promise<void> {
 		console.log(JSON.stringify(report, null, 2));
 		process.exitCode = 2;
 	} finally {
-		// Always clean up BOTH fixtures — success AND failure paths. This only
-		// runs because we set process.exitCode instead of calling process.exit().
 		for (const f of fixtures) {
 			try {
 				rmSync(f.root, { recursive: true, force: true });
 			} catch {
-				// Best-effort cleanup; ignore.
+				// Best-effort cleanup.
 			}
 		}
 	}

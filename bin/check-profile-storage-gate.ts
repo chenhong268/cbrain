@@ -13,25 +13,20 @@
 //
 // Authorization (#384 review P1-1): the target MUST be explicit — either a
 // non-empty CBRAIN_CONFIG env var or a `--config <path>` CLI argument. We do
-// NOT auto-discover cbrain.json by walking up from cwd; running this gate
-// from a repository that happens to contain an operator config must never
-// silently inspect private state.
+// NOT auto-discover cbrain.json by walking up from cwd.
 //
 // Read-only (#384 review P1-2): the live SQLite is opened ONLY through the
 // stable read-snapshot path (readSnapshot: true). The live main DB, WAL, and
-// SHM files are never opened through SQLite, so their bytes and mtimes are
-// guaranteed unchanged. If a stable snapshot cannot be created, the gate
-// fails closed with `profile_check_failed`.
+// SHM files are never opened through SQLite.
 //
-// Config shape (#384 review P1-3): dbPath, vaultPath, AND lancePath must all
-// be non-empty strings; any missing/blank field yields
-// `profile_target_invalid`. The vault boundary is constructed via
-// `resolveTrustedVaultBoundary` and passed into fsck so misplaced-artifact
-// detection is not silently skipped.
+// Config shape (#384 review P1-3 + rev3 P2): dbPath, vaultPath, AND
+// lancePath must all be non-empty strings AFTER trimming. Whitespace-only
+// values are rejected. The vault boundary is constructed via
+// resolveTrustedVaultBoundary and passed into fsck.
 //
-// Output: one stable JSON report with a DISTINCT gate id
-// `profile-storage-consistency` and `mode: "operator-profile"`. Exit 0 on
-// passed, 1 on hard finding, 2 on missing/invalid target or fatal error.
+// Process model (#384 review rev3 P2): emit() sets process.exitCode and
+// returns; it NEVER calls process.exit() inside a try block with a pending
+// finally. The DB close runs in `finally` before the process terminates.
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -82,19 +77,11 @@ const NEXT_ACTIONS: Record<ProfileStatus, string> = {
 	profile_checked: "Profile storage consistency check completed.",
 };
 
-function emit(report: ProfileStorageGateReport, exitCode: 0 | 1 | 2): never {
-	console.log(JSON.stringify(report, null, 2));
-	process.exitCode = exitCode;
-	// Use process.exit ONLY at the top level after the report is printed; no
-	// pending finally blocks need to run beyond this point.
-	process.exit(exitCode);
-}
-
-function emitFatal(
+function buildFatalReport(
 	status: Exclude<ProfileStatus, "profile_checked">,
 	started: number,
-): never {
-	const report: ProfileStorageGateReport = {
+): ProfileStorageGateReport {
+	return {
 		gate: "profile-storage-consistency",
 		mode: "operator-profile",
 		version: "1",
@@ -108,8 +95,12 @@ function emitFatal(
 		next_action: NEXT_ACTIONS[status],
 		duration_ms: Math.round(performance.now() - started),
 	};
-	// 2 = fail-closed (missing/invalid target or fatal); never emit raw paths.
-	return emit(report, 2);
+}
+
+function emitEarly(report: ProfileStorageGateReport, exitCode: 0 | 1 | 2): never {
+	// Only for paths with NO pending finally blocks (before DB is opened).
+	console.log(JSON.stringify(report, null, 2));
+	process.exit(exitCode);
 }
 
 /** Parse `--config <path>` from argv. Returns null if absent. */
@@ -117,18 +108,17 @@ function parseConfigArg(argv: readonly string[]): string | null {
 	for (let i = 0; i < argv.length; i++) {
 		if (argv[i] === "--config") {
 			const next = argv[i + 1];
-			if (typeof next === "string" && next.length > 0) return next;
+			if (typeof next === "string" && next.trim().length > 0) return next;
 		}
 	}
 	return null;
 }
 
-/** Resolve the explicit config target. Returns null if none was provided. */
 function resolveExplicitConfigTarget(): { path: string } | null {
 	const fromArg = parseConfigArg(process.argv.slice(2));
 	const fromEnv = process.env.CBRAIN_CONFIG;
 	const raw = fromArg ?? fromEnv;
-	if (typeof raw !== "string" || raw.length === 0) return null;
+	if (typeof raw !== "string" || raw.trim().length === 0) return null;
 	return { path: raw };
 }
 
@@ -151,12 +141,12 @@ function parseAndValidateConfig(configPath: string): ParsedProfileConfig | "inva
 	const dbPathRaw = obj.dbPath;
 	const vaultPathRaw = obj.vaultPath;
 	const lancePathRaw = obj.lancePath;
-	// #384 P1-3: all three paths must be non-empty strings. Blank vault/lance
-	// would otherwise let a misconfigured profile pass with empty paths.
+	// #384 rev3 P2: all three paths must be non-empty strings AFTER trimming.
+	// Whitespace-only values like "   " must be rejected.
 	if (
-		typeof dbPathRaw !== "string" || dbPathRaw.length === 0 ||
-		typeof vaultPathRaw !== "string" || vaultPathRaw.length === 0 ||
-		typeof lancePathRaw !== "string" || lancePathRaw.length === 0
+		typeof dbPathRaw !== "string" || dbPathRaw.trim().length === 0 ||
+		typeof vaultPathRaw !== "string" || vaultPathRaw.trim().length === 0 ||
+		typeof lancePathRaw !== "string" || lancePathRaw.trim().length === 0
 	) {
 		return "invalid";
 	}
@@ -175,25 +165,24 @@ async function main(): Promise<void> {
 	// ── fail-closed #1 (P1-1): explicit target required. ──────────────────
 	const target = resolveExplicitConfigTarget();
 	if (!target) {
-		emitFatal("profile_target_missing", started);
+		emitEarly(buildFatalReport("profile_target_missing", started), 2);
 		return;
 	}
 	if (!existsSync(target.path)) {
-		// Explicit target given but file not found → still "missing" code.
-		emitFatal("profile_target_missing", started);
+		emitEarly(buildFatalReport("profile_target_missing", started), 2);
 		return;
 	}
 
-	// ── fail-closed #2 (P1-3): shape + parse validation. ──────────────────
+	// ── fail-closed #2 (P1-3 + rev3 P2): shape + parse validation. ────────
 	const parsed = parseAndValidateConfig(target.path);
 	if (parsed === "invalid") {
-		emitFatal("profile_target_invalid", started);
+		emitEarly(buildFatalReport("profile_target_invalid", started), 2);
 		return;
 	}
 
 	// ── fail-closed #3: DB file must exist. ──────────────────────────────
 	if (!existsSync(parsed.dbPath)) {
-		emitFatal("profile_db_missing", started);
+		emitEarly(buildFatalReport("profile_db_missing", started), 2);
 		return;
 	}
 
@@ -202,16 +191,16 @@ async function main(): Promise<void> {
 	try {
 		db = new CBrainDB(parsed.dbPath, { readSnapshot: true, skipMigrate: true });
 	} catch {
-		// Cannot build a stable snapshot (WAL corrupt, parent missing, etc.).
-		// Privacy: do not echo the raw sqlite error.
-		emitFatal("profile_snapshot_unavailable", started);
+		emitEarly(buildFatalReport("profile_snapshot_unavailable", started), 2);
 		return;
 	}
 
+	// ── Profile check: route through canonical fsck → repair-plan → gate. ─
+	// #384 rev3 P2: we accumulate the report + exit code and print AFTER
+	// db.close() in finally, so process.exit never skips cleanup.
+	let finalReport: ProfileStorageGateReport;
+	let finalExit: 0 | 1 | 2;
 	try {
-		// Construct the trusted vault boundary exactly like the canonical fsck
-		// CLI (src/cli/commands/fsck.ts). Without it, misplaced-artifact
-		// detection is silently skipped (#384 review P1-3).
 		const vaultBoundary: TrustedVaultBoundary | undefined = resolveTrustedVaultBoundary({
 			configRoot: parsed.configRoot,
 			vaultPath: parsed.vaultPath,
@@ -232,13 +221,7 @@ async function main(): Promise<void> {
 		);
 
 		const passed = result.passed;
-		const nextAction = !passed
-			? "Fix hard no-go failures (see hard[]), then rerun `bun run gate:profile-storage`."
-			: result.warnings.length > 0
-				? "Optional: review warnings[]."
-				: "Profile storage is consistent.";
-
-		const report: ProfileStorageGateReport = {
+		finalReport = {
 			gate: "profile-storage-consistency",
 			mode: "operator-profile",
 			version: "1",
@@ -249,16 +232,23 @@ async function main(): Promise<void> {
 			warnings: result.warnings,
 			lanceState: result.lanceState,
 			repairPlanStatus: result.repairPlanStatus,
-			next_action: nextAction,
+			next_action: !passed
+				? "Fix hard no-go failures (see hard[]), then rerun `bun run gate:profile-storage`."
+				: result.warnings.length > 0
+					? "Optional: review warnings[]."
+					: "Profile storage is consistent.",
 			duration_ms: Math.round(performance.now() - started),
 		};
-		emit(report, passed ? 0 : 1);
+		finalExit = passed ? 0 : 1;
 	} catch {
-		// Privacy: do not echo the raw error (may include dbPath / stack).
-		emitFatal("profile_check_failed", started);
+		finalReport = buildFatalReport("profile_check_failed", started);
+		finalExit = 2;
 	} finally {
 		db.close();
 	}
+
+	console.log(JSON.stringify(finalReport, null, 2));
+	process.exitCode = finalExit;
 }
 
 await main();

@@ -122,6 +122,27 @@ describe("bin/check-profile-storage-gate.ts operator profile gate (#379, #384)",
 		expect(json.status).toBe("profile_target_invalid");
 	});
 
+	test("(P2 rev3) whitespace-only vaultPath → profile_target_invalid", async () => {
+		writeFileSync(configPath, JSON.stringify({ dbPath, vaultPath: "   ", lancePath }));
+		const { exitCode, json } = await runGate({ CBRAIN_CONFIG: configPath });
+		expect(exitCode).toBe(2);
+		expect(json.status).toBe("profile_target_invalid");
+	});
+
+	test("(P2 rev3) whitespace-only dbPath → profile_target_invalid", async () => {
+		writeFileSync(configPath, JSON.stringify({ dbPath: "   ", vaultPath, lancePath }));
+		const { exitCode, json } = await runGate({ CBRAIN_CONFIG: configPath });
+		expect(exitCode).toBe(2);
+		expect(json.status).toBe("profile_target_invalid");
+	});
+
+	test("(P2 rev3) whitespace-only lancePath → profile_target_invalid", async () => {
+		writeFileSync(configPath, JSON.stringify({ dbPath, vaultPath, lancePath: "   " }));
+		const { exitCode, json } = await runGate({ CBRAIN_CONFIG: configPath });
+		expect(exitCode).toBe(2);
+		expect(json.status).toBe("profile_target_invalid");
+	});
+
 	test("configured DB not present → profile_db_missing, exit 2, no path leak", async () => {
 		writeFileSync(configPath, JSON.stringify({ dbPath, vaultPath, lancePath }));
 		const { exitCode, json, stdout } = await runGate({ CBRAIN_CONFIG: configPath });
