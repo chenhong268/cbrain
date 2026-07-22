@@ -98,47 +98,60 @@ const ACTION_PREDICATE_CN = /该不该|要不要|还要不要|需不需要|该�
 const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take)\b/i;
 
 /**
- * #385 r11: medication current-state detection via adjacent-phrase regex.
+ * #385 r12: medication current-state detection via closed clause grammar.
  *
- * The verb, medication object, and inquiry structure MUST appear in the same
- * short phrase — never as independent full-text matches spread across the
- * query. Single chars (用/吃/服) are never tested in isolation.
+ * The first-person subject, medication verb, and inquiry structure MUST be
+ * in the same contiguous clause. No full-text keyword co-occurrence, no
+ * exclusion black-lists (those can suppress real current-state queries that
+ * happen to mention "records" or "list" as a trailing request).
  *
- * CN patterns (all bind verb+noun+inquiry into ≤6 chars):
- *   (在)?吃(着)?什么药      "我现在在吃什么药"
- *   (在)?吃(着)?的是什么药   "我现在吃的是什么药"
- *   服用(着)?什么药(物)?     "我现在服用什么药物"
- *   用(着)?什么药            "我目前用什么药"
- *   (用|吃|服)药了吗         "我吃药了吗"
- *   有(在)?(吃|服)药吗       "我有在吃药吗"
- *   (是否|有无)(用|服)药     "我目前是否用药"
- *   用药有哪些               "我服用的药物有哪些"
- * Excludes 研究/记录/软件/文章/关注/识别/食物/服装/影响/图案 — medication as
- * research subject, diet, or pattern, not the speaker's current state.
+ * CN: every alternative starts with 我 bound to the medication verb:
+ *   我(time)?(prog)?吃(着)?(什么)?药         "我现在在吃什么药"
+ *   我(time)?(verb)的是什么(药)?              "我现在吃的是什么药"
+ *   我(time)?(服用|吃|用)的(药物|药)(有哪些)   "我现在服用的药物有哪些"
+ *   我(time)?有(在)?(吃|服)药吗               "我有在吃药吗"
+ *   我(time)?(是否|有无|有没有)(用|服|吃)药    "我目前是否用药"
  *
- * EN patterns (require complete first-person predicate):
- *   what medication(s) am I (currently) (on|taking)
- *   am I (currently) (on|taking) (any) medication
- *   do I (currently) take (any) medication
+ * EN: every pattern is anchored to end-of-clause ($), so the verb must be
+ * the predicate terminal (modulo time adverbs + punctuation):
+ *   what medication(s) am I (currently) on/taking [tail]$
+ *   am I (currently) on/taking (any) medication [tail]$
+ *   what medication(s) do I (currently) take [tail]$
+ *   do I (currently) take (any) medication [tail]$
  */
-const MED_CLAUSE_CN = /(?:在|正)?(?:吃|用|服|服用)(?:着)?(?:什么|哪些|哪种)?(?:药|药物|药品)|(?:吃|用|服)(?:的是)?什么(?:药|药物|药品)?|(?:吃|服|用)药了吗|有(?:在)?(?:吃|服)药吗|(?:是否|有无|有没有)(?:用|服|吃)(?:药|过药)?|(?:服用|吃|用)(?:的)?(?:药物|药)(?:有哪些|是什么)/;
-const MED_EXCLUSION_CN = /(?:记录|软件|历史|管理系统?|清单|列表|明细|账单|费用|花了多少|研究|文章|关注|论文|参考|资料|笔记|识别|食物|服装|图案|影响|吸收)/;
+const MED_CLAUSE_CN =
+  /我(?:现在|目前|当前|当下)?(?:正在|在)?(?:吃|服用|用|服)(?:着)?(?:什么|哪些|哪种)?(?:药|药物|药品)/;
+const MED_CLAUSE_CN_REL =
+  /我(?:现在|目前|当前|当下)?(?:吃|服|用)的是什么(?:药|药物)?|我(?:现在|目前|当前|当下)?(?:服用|吃|用)的(?:药物|药)(?:有哪些|是什么)/;
+const MED_CLAUSE_CN_YN =
+  /我(?:现在|目前|当前|当下)?有(?:在)?(?:吃|服)药吗|我(?:现在|目前|当前|当下)?(?:是否|有无|有没有)(?:用|服|吃)(?:药|过药)?/;
 
-/** EN: "what medication am I on/taking" — complete clause, first person present. */
-const MED_WHAT_CLAUSE_EN =
-  /\b(?:what|which)\s+(?:medications?|medicines?|prescriptions?)\s+am\s+i\s+(?:currently\s+)?(?:on|taking)\b/i;
-/** EN: "am I currently on/taking (any) medication" — complete clause. */
-const MED_AM_I_CLAUSE_EN =
-  /\bam\s+i\s+(?:currently\s+)?(?:on|taking)\s+(?:any\s+)?(?:medications?|medicines?|prescriptions?|my\s+meds?)\b/i;
-/** EN: "do I currently take medication" — complete clause. */
-const MED_DO_I_CLAUSE_EN =
-  /\bdo\s+i\s+(?:currently\s+)?take\s+(?:any\s+)?(?:medications?|medicines?|prescriptions?)\b/i;
+/** EN clause tail: optional time adverb + punctuation + end-of-string. */
+const EN_TAIL = /(?:\s+(?:right\s+now|currently|today|now|at\s+the\s+moment))?\s*[?.!]?\s*$/i;
+const MED_WHAT_ON_EN = new RegExp(
+  "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)\\s+am\\s+i\\s+(?:currently\\s+)?(?:on|taking)" + EN_TAIL.source,
+  "i",
+);
+const MED_AM_I_EN = new RegExp(
+  "\\bam\\s+i\\s+(?:currently\\s+)?(?:on|taking)\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + EN_TAIL.source,
+  "i",
+);
+const MED_WHAT_DO_EN = new RegExp(
+  "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)\\s+do\\s+i\\s+(?:currently\\s+)?take" + EN_TAIL.source,
+  "i",
+);
+const MED_DO_I_EN = new RegExp(
+  "\\bdo\\s+i\\s+(?:currently\\s+)?take\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + EN_TAIL.source,
+  "i",
+);
 
 function isMedicationCurrentStateQuery(query: string): boolean {
-  if (MED_EXCLUSION_CN.test(query)) return false;
-  if (MED_CLAUSE_CN.test(query)) return true;
-  // EN: only match complete clause structures — first person only, no "are you"
-  if (MED_WHAT_CLAUSE_EN.test(query) || MED_AM_I_CLAUSE_EN.test(query) || MED_DO_I_CLAUSE_EN.test(query)) {
+  // CN: clause-bound — 我 must be the subject of the medication verb.
+  if (MED_CLAUSE_CN.test(query) || MED_CLAUSE_CN_REL.test(query) || MED_CLAUSE_CN_YN.test(query)) {
+    return true;
+  }
+  // EN: end-anchored clauses — verb must be the clause terminal.
+  if (MED_WHAT_ON_EN.test(query) || MED_AM_I_EN.test(query) || MED_WHAT_DO_EN.test(query) || MED_DO_I_EN.test(query)) {
     return true;
   }
   return false;

@@ -86,6 +86,8 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "What medication am I taking currently?",
     "What medicine am I currently taking?",
     "What prescriptions am I currently taking?",
+    "What medications do I currently take?",
+    "Which medicines do I take?",
     "am I currently on any medication?",
     "do I currently take medication?",
     "我现在在吃什么药？",
@@ -96,11 +98,14 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "我现在有服药吗？",
     "我目前是否用药？",
     "我有在吃药吗？",
+    "我现在在吃什么药？根据我的记录回答",
+    "我现在在吃什么药？请列个清单",
+    "我目前用什么药，会影响睡眠吗？",
   ])("activates for controlled medication current state: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(true);
   });
 
-  // r10/r11: false positives — ordinary queries about medication as a topic
+  // r10-r12: false positives — ordinary queries about medication as a topic
   test.each([
     "My medication article is on the desk",
     "What did I write on medications?",
@@ -110,6 +115,11 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "What medications am I writing about?",
     "What medicines am I comparing?",
     "What medications are you taking for my report?",
+    "What medications am I taking notes about?",
+    "What medications am I taking photos of?",
+    "Do I currently take medication notes?",
+    "我想知道实体A在吃什么药？",
+    "我问过实体A在吃什么药吗？",
     "我现在研究的药物是什么？",
     "我目前关注的药物有哪些？",
     "我当前文章里的药物是什么？",
