@@ -358,7 +358,8 @@ export function isSupportedSemanticEventDate(value: string | null | undefined): 
   const year = Number(match[1]);
   const month = match[2] === undefined ? undefined : Number(match[2]);
   const day = match[3] === undefined ? undefined : Number(match[3]);
-  if (year < 1 || month === undefined) return true;
+  if (year < 1) return false;
+  if (month === undefined) return true;
   if (month < 1 || month > 12) return false;
   if (day === undefined) return true;
   const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
@@ -993,21 +994,15 @@ export class CBrainDB {
 
   getTimeline(pageSlug: string, includeInactive = false): Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }> {
     const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
-    const rows = this.prepare(
+    return this.prepare(
       `SELECT id, event_date, source, summary, created_at, trust_state, source_page_slug, evidence FROM timeline WHERE page_slug = $slug${activeFilter} ORDER BY event_date DESC, id DESC`
-    ).all({ $slug: pageSlug }) as Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>;
-    return rows.map((row) => ({
-      ...row,
-      event_date: isSupportedSemanticEventDate(row.event_date?.trim()) ? row.event_date!.trim() : null,
-    }));
+    ).all({ $slug: pageSlug }) as any[];
   }
 
   addTimelineEntry(pageSlug: string, summary: string, eventDate?: string, source?: string, provenance?: ProvenanceInput): number {
-    const trimmedDate = eventDate?.trim();
-    const semanticDate = isSupportedSemanticEventDate(trimmedDate) ? trimmedDate : null;
     const result = this.prepare(
       "INSERT INTO timeline (page_slug, summary, event_date, source, source_page_slug, trust_state, evidence) VALUES ($slug, $summary, $date, $source, $sps, $ts, $ev)"
-    ).run({ $slug: pageSlug, $summary: summary, $date: semanticDate, $source: source ?? null, $sps: provenance?.source_page_slug ?? null, $ts: "candidate", $ev: provenance?.evidence ?? null });
+    ).run({ $slug: pageSlug, $summary: summary, $date: eventDate ?? null, $source: source ?? null, $sps: provenance?.source_page_slug ?? null, $ts: "candidate", $ev: provenance?.evidence ?? null });
     return Number(result.lastInsertRowid);
   }
 
@@ -1018,19 +1013,12 @@ export class CBrainDB {
       sql += " AND summary LIKE $keyword";
       params.$keyword = `%${keyword}%`;
     }
-
     if (dateFrom) {
       sql += " AND event_date >= $dateFrom";
       params.$dateFrom = dateFrom;
     }
-    sql +=
-      " AND (event_date IS NULL OR (trim(event_date) <> '' AND substr(trim(event_date), 1, 4) <> '0000' AND (trim(event_date) GLOB '[0-9][0-9][0-9][0-9]' OR (trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]' AND substr(trim(event_date), 6, 2) BETWEEN '01' AND '12') OR (trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND substr(trim(event_date), 6, 2) BETWEEN '01' AND '12' AND substr(trim(event_date), 9, 2) BETWEEN '01' AND '31' AND date(trim(event_date)) = trim(event_date)))))";
     sql += " ORDER BY event_date DESC, id DESC LIMIT $limit";
-    const rows = this.prepare(sql).all(params) as Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string }>;
-    return rows.map((row) => ({
-      ...row,
-      event_date: isSupportedSemanticEventDate(row.event_date?.trim()) ? row.event_date!.trim() : null,
-    }));
+    return this.prepare(sql).all(params) as any[];
   }
 
   // ─── Chunk operations ────────────────────────────────────────
@@ -2827,9 +2815,7 @@ export class CBrainDB {
   }
 
   updateTimelineDate(id: number, newDate: string): void {
-    const trimmedDate = newDate.trim();
-    const semanticDate = isSupportedSemanticEventDate(trimmedDate) ? trimmedDate : null;
-    this.prepare("UPDATE timeline SET event_date = $date WHERE id = $id").run({ $id: id, $date: semanticDate });
+    this.prepare("UPDATE timeline SET event_date = $date WHERE id = $id").run({ $id: id, $date: newDate });
   }
 
   getDuplicateTimelineIds(): number[] {

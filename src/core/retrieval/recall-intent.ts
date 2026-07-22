@@ -98,16 +98,34 @@ const ACTION_PREDICATE_CN = /该不该|要不要|还要不要|需不需要|该�
 const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take)\b/i;
 
 /**
- * P1#1 r8: medication current-state phrases are allowed only when the
- * medication domain is explicit. This protects:
- *   "What medication am I currently on?"
- *   "我现在在吃什么药？"
- * without activating generic queries about reading, projects, or notes.
+ * #385 r9: medication current-state detection via composable grammar.
+ * Activates when (current marker) + (medication domain) + (state inquiry)
+ * co-occur, with explicit exclusions for record/software/history queries.
+ * This avoids enumerating full sentences while staying precise.
  */
-const CURRENT_MEDICATION_STATE_CN =
-  /(?:现在|目前|当前)\s*(?:在)?(?:吃|服用|用着|用)\s*(?:什么|哪种|哪些)?\s*(?:药|药物|药品)(?:吗|[？?]|$)/;
-const CURRENT_MEDICATION_STATE_EN =
-  /\b(?:(?:what|which)\s+(?:medications?|medicines?)\s+am\s+i\s+(?:(?:currently\s+)?(?:on|taking)|(?:on|taking)\s+currently)|am\s+i\s+currently\s+(?:taking|on)\s+(?:any\s+)?(?:medications?|medicines?|my\s+medication))\b/i;
+const MED_CURRENT_MARKER_CN = /(?:现在|目前|当前|当下)/;
+const MED_DOMAIN_CN = /(?:药|药物|药品|用药|服药|处方)/;
+const MED_STATE_INQUIRY_CN = /(?:是什么|有哪些|是什么药|吃什么药|服用什么|用着什么|用什么药|吃的是什么|在吃什么|在服用什么)/;
+const MED_EXCLUSION_CN = /(?:记录|软件|历史|管理系统?|清单|列表|明细|账单|费用|花了多少)/;
+
+const MED_CURRENT_MARKER_EN = /\b(?:currently|right now|on)\b/i;
+const MED_DOMAIN_EN = /\b(?:medications?|medicines?|prescriptions?|drugs?)\b/i;
+const MED_EXCLUSION_EN = /\b(?:history|record|software|list|log|cost|spent|paid|app|tracker?)\b/i;
+
+function isMedicationCurrentStateQuery(query: string): boolean {
+  // CN: current marker + medication domain + state inquiry, minus exclusions
+  if (MED_CURRENT_MARKER_CN.test(query) && MED_DOMAIN_CN.test(query) && MED_STATE_INQUIRY_CN.test(query)) {
+    return !MED_EXCLUSION_CN.test(query);
+  }
+  // EN: "what medication am I (currently) on/taking" pattern
+  if (/\b(?:what|which)\s+(?:medications?|medicines?|prescriptions?)\b/i.test(query) && /\b(?:am\s+i|do\s+i\s+take|are)\b/i.test(query)) {
+    return !MED_EXCLUSION_EN.test(query);
+  }
+  if (MED_CURRENT_MARKER_EN.test(query) && MED_DOMAIN_EN.test(query) && /\b(?:am\s+i|do\s+i|are|taking|on)\b/i.test(query)) {
+    return !MED_EXCLUSION_EN.test(query);
+  }
+  return false;
+}
 
 export function isPersonalCurrentStateQuery(query: string): boolean {
   if (!isFirstPersonQuery(query)) return false;
@@ -116,8 +134,7 @@ export function isPersonalCurrentStateQuery(query: string): boolean {
     return (
       ACTION_PREDICATE_CN.test(normalized) ||
       ACTION_PREDICATE_EN.test(normalized) ||
-      CURRENT_MEDICATION_STATE_CN.test(normalized) ||
-      CURRENT_MEDICATION_STATE_EN.test(normalized)
+      isMedicationCurrentStateQuery(normalized)
     );
   } catch {
     return false;

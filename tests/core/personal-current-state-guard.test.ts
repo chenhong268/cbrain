@@ -47,7 +47,9 @@ function makeMockDb(opts: {
 function makeMockPages(identityPage?: { type: string; title?: string } | null): GuardPageLookup {
   const store: Record<string, { type: string; title?: string }> = {};
   if (identityPage) store[IDENTITY_SLUG] = identityPage;
-  return { getBySlug: (slug: string) => store[slug] ?? null };
+  return {
+    getBySlug: (slug: string) => store[slug] ?? { type: "entity/person", title: slug.split("/").pop() ?? slug },
+  };
 }
 
 // ── Intent detection ──
@@ -83,7 +85,12 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "What medications am I currently taking?",
     "What medication am I taking currently?",
     "What medicine am I currently taking?",
+    "What prescriptions am I currently taking?",
     "我现在在吃什么药？",
+    "我现在吃的是什么药？",
+    "我目前正在吃什么药？",
+    "我现在服用的药物有哪些？",
+    "我当前用药是什么？",
     "我目前用什么药？",
   ])("activates for controlled medication current state: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(true);
@@ -163,7 +170,8 @@ describe("applyPersonalCurrentStateGuard (#385)", () => {
     expect(r.outcome).toBe("insufficient_current_context");
     expect(r.subjectContextCandidates).toEqual([
       {
-        source: "subject-context-candidate-1",
+        source_page_slug: NEIGHBOR_B,
+        source_title: "neighbor-b",
         event_date: "2026-07-01",
         summary: "已完成相关检查",
         provenance: "trusted",

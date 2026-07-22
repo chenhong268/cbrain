@@ -24,7 +24,10 @@ export type GuardProvenance = "trusted" | "user_thought";
 
 /** Same-subject context candidate; topic relevance is intentionally unverified. */
 export interface SubjectContextCandidate {
-  source: string;
+  /** Internal auditable reference — the real page slug. Kept in raw for traceability. */
+  source_page_slug: string;
+  /** Safe human-readable label projected to structured surfaces. */
+  source_title: string;
   event_date: string;
   summary: string;
   provenance: GuardProvenance;
@@ -128,13 +131,17 @@ export function applyPersonalCurrentStateGuard(
   const trustedTimeline = db.getBoundedTrustedTimelineForSlugs(timelineSlugs, MAX_TIMELINE_BUDGET);
   const subjectContextCandidates: SubjectContextCandidate[] = trustedTimeline
     .filter((t) => (t.trust_state === "trusted" || t.trust_state === "user_thought") && isSupportedSemanticEventDate(t.event_date))
-    .map((t, index) => ({
-      source: `subject-context-candidate-${index + 1}`,
-      event_date: t.event_date.trim(),
-      summary: t.summary,
-      provenance: t.trust_state as GuardProvenance,
-      topic_relevance: "unverified" as const,
-    }));
+    .map((t) => {
+      const page = pages.getBySlug(t.page_slug);
+      return {
+        source_page_slug: t.page_slug,
+        source_title: page?.title ?? t.page_slug,
+        event_date: t.event_date.trim(),
+        summary: t.summary,
+        provenance: t.trust_state as GuardProvenance,
+        topic_relevance: "unverified" as const,
+      };
+    });
   // state/supersession is not structurally proven. This gap is distinct from
   // a missing subject-to-topic relation even when candidates are empty.
   return {

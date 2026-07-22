@@ -28,7 +28,7 @@ const REMOVED = "[removed]";
  */
 const SAFE_DATA_KEYS: ReadonlySet<string> = new Set([
   "from", "to", "hops", "links", "title", "relation", "context",
-  "events", "date", "summary", "source", "subject_context_candidates", "provenance", "topic_relevance",
+  "events", "date", "summary", "source",
 ]);
 
 /** Deep-walk `data`: drop non-allowlist keys; pass string leaves through the shared normalizer. */
