@@ -49,6 +49,11 @@ export interface CBrainConfig {
     provider?: string; // "searxng"
     base_url?: string; // e.g. "http://localhost:8080"
   };
+  /** #385: personal current-state guard configuration. */
+  recall?: {
+    /** Slug of the entity/person page that first-person phrasing resolves to. */
+    identity_person_slug?: string;
+  };
 }
 
 export interface LoadedCBrainConfig {
@@ -230,5 +235,6 @@ export function createDeps(
     nerIngestMode,
     toolProfile,
     rolloutConfigAttestation: loaded?.rolloutConfigAttestation,
+    identityPersonSlug: config.recall?.identity_person_slug,
   };
 }

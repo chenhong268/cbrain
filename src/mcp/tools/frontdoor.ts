@@ -23,6 +23,7 @@ import {
 import { buildToolResult } from "./result-builder.js";
 import { FRONTDOOR_DATA_KEYS, projectFrontdoorData, structuredSummary } from "./recall-output.js";
 import { filterContentCandidates } from "../../core/retrieval/content-relevance.js";
+import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-current-state-guard.js";
 
 type DetailLevel = "brief" | "normal" | "full";
 
@@ -130,6 +131,41 @@ async function runContentRecall(
     _skipDetailEnrich: true,
   });
   const results = filterContentCandidates(query, candidates);
+  // #385 — personal current-state guard: bounded, deterministic check before
+  // presenting reminder-like search material as a current personal recommendation.
+  // Activates only for a closed grammar (first-person + action/temporal intent).
+  // Non-personal queries short-circuit (activated=false) with zero DB work.
+  // Fails closed to insufficient-current-context when a trusted subject-to-topic
+  // chain cannot be proven — search material is NOT surfaced as current advice.
+  const guardResult = applyPersonalCurrentStateGuard(
+    ctx.db,
+    ctx.pages,
+    query,
+    results,
+    ctx.identityPersonSlug,
+  );
+  if (guardResult.activated && guardResult.outcome === "insufficient_current_context") {
+    const insufficientPayload = {
+      query,
+      entities: [] as Array<{ title: string; snippet: string }>,
+      summary: "无法确认当前个人状态，需要更明确的上下文",
+    };
+    const formatted = formatRecallEnvelope(insufficientPayload);
+    return withRouting(
+      {
+        display: `无法确认「${query}」的当前个人状态。建议直接查阅相关记录或补充主体关联。`,
+        summary: {
+          ...formatted.summary,
+          status: "degraded" as const,
+          degraded_reason: `个人当前状态上下文不足：${guardResult.reason ?? "未知原因"}`,
+          next_steps: ["直接查阅相关记录", "补充主体与主题的关联"],
+        },
+        raw: formatted.raw,
+      },
+      insufficientPayload,
+      routing,
+    );
+  }
   const slugs = results.map((r) => r.slug);
   const entities = results.map((r) => {
     const page = ctx.pages.getBySlug(r.slug);

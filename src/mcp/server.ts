@@ -34,6 +34,8 @@ export interface CBrainDeps {
   toolProfile?: ToolProfile;
   /** #357: attestation of the exact config bytes parsed before dependency creation. */
   rolloutConfigAttestation?: string;
+  /** #385: configured identity slug for personal current-state guard. */
+  identityPersonSlug?: string;
 }
 
 /** Register dream job handler and start the background worker. Shared by MCP and HTTP paths. */

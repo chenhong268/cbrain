@@ -55,3 +55,53 @@ export function shouldCompleteEvidence(query: string, mode: EvidenceMode): boole
   const i = detectTemporalIntent(query);
   return i.temporal || i.history || i.formerCurrent;
 }
+
+// ─── #385: personal current-state guard intent detection ──────────────
+
+/**
+ * First-person phrasing — the speaker refers to themselves as the subject.
+ * `我(?!们)` excludes the collective "我们" while keeping "我的/我该/我最近".
+ * Combined with action intent via AND, false positives fail closed safely.
+ */
+const FIRST_PERSON_CN = /我(?!们)/;
+const FIRST_PERSON_EN = /\b(?:I|my|mine|myself)\b/;
+
+export function isFirstPersonQuery(query: string): boolean {
+  try {
+    const normalized = query.normalize("NFKC").trim();
+    return FIRST_PERSON_CN.test(normalized) || FIRST_PERSON_EN.test(normalized);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Action-oriented / current-state intent for personal management.
+ * Narrower than general temporal (#232): focuses on "what should I do now /
+ * is something due / current status" rather than historical "what happened".
+ */
+const PERSONAL_ACTION_CN = /该不该|要不要|还要不要|需不需要|该去|该做|复查|体检|检查|吃药|用药|就诊|看病|预约|到期|过期|上次|最近|接下来|什么时候|多久|定期|周期|频率/;
+const PERSONAL_ACTION_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|checkup|appointment|medication|when\s+should\s+i|how\s+long|last\s+time|recently|next)\b/i;
+
+/**
+ * #385 — closed grammar for personal current-state queries.
+ *
+ * Activates the personal current-state guard only when BOTH conditions hold:
+ * 1. First-person phrasing (the speaker is the subject)
+ * 2. Action-oriented / current-state intent (not plain historical lookup)
+ *
+ * Deliberately narrow: avoids turning ordinary temporal queries into
+ * unbounded graph traversal. When the grammar fires but the guard cannot
+ * prove a trusted subject-to-topic chain, it fails closed to an explicit
+ * insufficient-current-context outcome rather than presenting stale
+ * reminder-like search material as current advice.
+ */
+export function isPersonalCurrentStateQuery(query: string): boolean {
+  if (!isFirstPersonQuery(query)) return false;
+  try {
+    const normalized = query.normalize("NFKC").trim();
+    return PERSONAL_ACTION_CN.test(normalized) || PERSONAL_ACTION_EN.test(normalized);
+  } catch {
+    return false;
+  }
+}
