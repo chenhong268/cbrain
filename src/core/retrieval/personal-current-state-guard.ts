@@ -12,8 +12,9 @@
  * insufficient-current-context if ANY of these cannot be proven:
  *   - configured identity uniquely mapping to entity/person
  *   - trusted (trusted/user_thought) subject-to-topic link
- *   - at least one trusted dated current-state evidence in the
- *     bounded subject+neighbor timeline scope
+ *   - PER-CANDIDATE trusted dated current-state evidence bound to each
+ *     returned result's own slug (a neighbor's timeline cannot vouch
+ *     for an unrelated candidate)
  *
  * It does NOT auto-infer closure from recency or word overlap — there is
  * no generic record-to-record fulfills/supersedes contract yet.
@@ -65,7 +66,7 @@ const MAX_TIMELINE_BUDGET = 5;
 // only to detect an *unresolvable* conflict (both completed and pending
 // markers in trusted timeline evidence), which forces a fail-closed
 // outcome rather than guessing which record is current.
-const COMPLETED_MARKER = /已完成|完成|done|completed|finished|已结束|结案|已做/i;
+const COMPLETED_MARKER = /(?:^|[^未待需])完成|已完成|done|completed|finished|已结束|结案|已做/i;
 const PENDING_MARKER = /待办|未完成|计划中|待复查|需复查|pending|scheduled|upcoming|todo|待完成|需完成/i;
 
 /**
@@ -165,49 +166,46 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
-  // Step 5 (P1#1): read bounded trusted timeline DIRECTLY for subject + neighbors.
-  // Uses getBoundedTrustedTimelineForSlugs — a dedicated method that reads
-  // timeline for the EXACT slugs passed (no further graph expansion).
-  // trust_state IN ('trusted','user_thought'), event_date IS NOT NULL,
-  // ORDER BY event_date DESC with SQL LIMIT. Semantic dates only.
-  const timelineScope = [identityPersonSlug, ...trustedNeighbors];
-  const trustedTimeline = db.getBoundedTrustedTimelineForSlugs(
-    timelineScope,
-    MAX_TIMELINE_BUDGET,
-  );
+  // Step 5 (P1#1): PER-CANDIDATE trusted timeline verification.
+  // Each returned candidate must have ITS OWN trusted dated current-state
+  // evidence. A candidate cannot ride on another neighbor's timeline —
+  // the evidence must be bound to the candidate's own slug.
+  // Uses getBoundedTrustedTimelineForSlugs per candidate slug, bounded by
+  // SQL LIMIT + ORDER BY. trust_state IN ('trusted','user_thought').
+  const verifiedResults: SearchResult[] = [];
+  for (const candidate of connectedResults) {
+    const candidateTimeline = db.getBoundedTrustedTimelineForSlugs(
+      [candidate.slug],
+      MAX_TIMELINE_BUDGET,
+    );
+    // No dated current-state evidence bound to THIS candidate → cannot
+    // prove its current state. Do NOT include in filtered results.
+    if (candidateTimeline.length === 0) continue;
 
-  // P1#2: require at least one trusted dated current-state evidence.
-  // A trusted link alone is not sufficient — without dated evidence we
-  // cannot prove a current-state chain. Fail closed.
-  if (trustedTimeline.length === 0) {
+    // Check for conflicting evidence on THIS candidate.
+    const cCompleted = candidateTimeline.some((t) => COMPLETED_MARKER.test(t.summary));
+    const cPending = candidateTimeline.some((t) => PENDING_MARKER.test(t.summary));
+    if (cCompleted && cPending) continue; // conflict → skip this candidate
+
+    verifiedResults.push(candidate);
+  }
+
+  // P1#1: if NO candidate has its own trusted dated evidence, fail closed.
+  if (verifiedResults.length === 0) {
     return {
       activated: true,
       outcome: "insufficient_current_context",
       subjectSlug: identityPersonSlug,
-      reason: "no trusted dated current-state evidence",
+      reason: "no candidate with trusted dated current-state evidence",
       debugSearchMaterial: results,
     };
   }
 
-  // Step 6: conflicting dated evidence detection.
-  const hasCompleted = trustedTimeline.some((t) => COMPLETED_MARKER.test(t.summary));
-  const hasPending = trustedTimeline.some((t) => PENDING_MARKER.test(t.summary));
-
-  if (hasCompleted && hasPending) {
-    return {
-      activated: true,
-      outcome: "insufficient_current_context",
-      subjectSlug: identityPersonSlug,
-      reason: "conflicting dated evidence",
-      debugSearchMaterial: results,
-    };
-  }
-
-  // Step 7: trusted subject-to-topic chain + dated evidence verified.
+  // Only candidates with verified per-candidate dated evidence pass through.
   return {
     activated: true,
     outcome: "pass",
     subjectSlug: identityPersonSlug,
-    filteredResults: connectedResults,
+    filteredResults: verifiedResults,
   };
 }
