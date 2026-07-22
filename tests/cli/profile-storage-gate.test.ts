@@ -91,6 +91,20 @@ describe("bin/check-profile-storage-gate.ts operator profile gate (#379, #384)",
 		expect(json.passed).toBe(true);
 	});
 
+	test("(P2 rev4) --config without value → profile_target_invalid, even when CBRAIN_CONFIG is set", async () => {
+		// `--config` present but no value must NOT silently fall back to
+		// CBRAIN_CONFIG. It must fail closed as an invalid CLI argument.
+		writeFileSync(configPath, JSON.stringify({ dbPath, vaultPath, lancePath }));
+		const db = new CBrainDB(dbPath);
+		db.close();
+		const { exitCode, json } = await runGate(
+			{ CBRAIN_CONFIG: configPath },
+			["--config"],
+		);
+		expect(exitCode).toBe(2);
+		expect(json.status).toBe("profile_target_invalid");
+	});
+
 	test("malformed JSON → profile_target_invalid, exit 2, no path/JSON leak", async () => {
 		writeFileSync(configPath, "{ not valid json");
 		const { exitCode, json, stdout } = await runGate({ CBRAIN_CONFIG: configPath });

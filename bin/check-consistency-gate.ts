@@ -45,6 +45,7 @@ type ConsistencyStatus =
 	| "healthy_fixture_failed"
 	| "negative_canary_detected"
 	| "negative_canary_regression"
+	| "negative_canary_unexpected_hard"
 	| "fixture_setup_failed";
 
 interface ConsistencyGateReport {
@@ -61,12 +62,20 @@ interface ConsistencyGateReport {
 	canary: {
 		expected_hard_check: string;
 		detected: boolean;
+		unexpected_hard_checks: string[];
 	};
 	next_action: string;
 	duration_ms: number;
 }
-
 const CANARY_EXPECTED_HARD_CHECK = "sqlite.page_without_chunks";
+
+// Hard findings that the canary fixture (page without chunks, no LanceDB
+// vector) is EXPECTED to produce. Any finding outside this set is a
+// regression signal — the gate goes NO-GO so the extra error is never
+// silently swallowed.
+const CANARY_ALLOWED_HARD_CHECKS: Record<string, true> = {
+	"sqlite.page_without_chunks": true,
+};
 
 const NEXT_ACTIONS: Record<ConsistencyStatus, string> = {
 	healthy_fixture_checked: "All consistency checks passed.",
@@ -74,6 +83,8 @@ const NEXT_ACTIONS: Record<ConsistencyStatus, string> = {
 		"Healthy fixture produced an unexpected hard finding. Inspect fsck/repair-plan output and re-run `bun run gate:consistency`.",
 	negative_canary_detected: "Negative canary produced the expected hard finding.",
 	negative_canary_regression: `Negative canary did not produce expected hard finding (${CANARY_EXPECTED_HARD_CHECK}). Inspect fsck probes — a detector may have silently regressed.`,
+	negative_canary_unexpected_hard:
+		"Negative canary produced unexpected hard findings outside the allowed set. Inspect fsck probes — a detector may be over-firing.",
 	fixture_setup_failed:
 		"Repository consistency fixture could not be built. Rerun `bun run gate:consistency`; if it persists, inspect fsck/repair-plan for a regression.",
 };
@@ -175,6 +186,37 @@ async function runCanonicalGate(f: FixtureDirs): Promise<FixtureGateOutcome> {
 	}
 }
 
+export interface CanarySignals {
+	healthyPassed: boolean;
+	healthyFatal: boolean;
+	canaryPassed: boolean;
+	canaryFatal: boolean;
+	expectedPresent: boolean;
+	unexpectedHardChecks: string[];
+}
+
+export function resolveConsistencyVerdict(s: CanarySignals): {
+	status: ConsistencyStatus;
+	passed: boolean;
+	exitCode: 0 | 1 | 2;
+} {
+	const fatal = s.healthyFatal || s.canaryFatal;
+	const healthyClean = s.healthyPassed && !s.healthyFatal;
+	const canaryDetected = s.expectedPresent && s.unexpectedHardChecks.length === 0 && !s.canaryPassed;
+	const passed = healthyClean && canaryDetected && !fatal;
+	const status: ConsistencyStatus = fatal
+		? "fixture_setup_failed"
+		: !s.expectedPresent
+			? "negative_canary_regression"
+			: s.unexpectedHardChecks.length > 0
+				? "negative_canary_unexpected_hard"
+				: !healthyClean
+					? "healthy_fixture_failed"
+					: "negative_canary_detected";
+	const exitCode: 0 | 1 | 2 = fatal ? 2 : passed ? 0 : 1;
+	return { status, passed, exitCode };
+}
+
 async function main(): Promise<void> {
 	const started = performance.now();
 	const fixtures: FixtureDirs[] = [];
@@ -189,46 +231,50 @@ async function main(): Promise<void> {
 		fixtures.push(canary);
 		seedNegativeCanaryFixture(canary);
 		const canaryOutcome = await runCanonicalGate(canary);
-		const canaryDetected = canaryOutcome.result.hard.some(
+
+		// Canary must be an explicit expected failure: the expected hard
+		// check must appear, canary evaluator must report passed=false, and
+		// ALL hard findings must belong to the explicit allowed set. Any
+		// extra hard finding is surfaced in the report so it can never be
+		// silently swallowed.
+		const expectedPresent = canaryOutcome.result.hard.some(
 			(h) => h.check === CANARY_EXPECTED_HARD_CHECK,
 		);
+		const unexpectedHard = canaryOutcome.result.hard
+			.map((h) => h.check)
+			.filter((check) => CANARY_ALLOWED_HARD_CHECKS[check] !== true);
 
-		// Fatal safety: any fsck fatalError forces NO-GO even if findings
-		// were emitted before the probe crashed.
-		const fatal = !!healthyOutcome.report.fatalError || !!canaryOutcome.report.fatalError;
-
-		// Aggregate verdict using CANONICAL evaluator results.
-		const healthyClean = healthyOutcome.result.passed && !healthyOutcome.report.fatalError;
-		const passed = healthyClean && canaryDetected && !fatal;
-		const status: ConsistencyStatus = fatal
-			? "fixture_setup_failed"
-			: !canaryDetected
-				? "negative_canary_regression"
-				: !healthyClean
-					? "healthy_fixture_failed"
-					: "negative_canary_detected";
-
+		const verdict = resolveConsistencyVerdict({
+			healthyPassed: healthyOutcome.result.passed,
+			healthyFatal: !!healthyOutcome.report.fatalError,
+			canaryPassed: canaryOutcome.result.passed,
+			canaryFatal: !!canaryOutcome.report.fatalError,
+			expectedPresent,
+			unexpectedHardChecks: unexpectedHard,
+		});
 		const report: ConsistencyGateReport = {
 			gate: "consistency",
 			mode: "repository-fixture",
 			version: "1",
 			timestamp: new Date().toISOString(),
-			passed,
-			status,
-			hard: healthyOutcome.result.hard,
-			warnings: healthyOutcome.result.warnings,
-			lanceState: healthyOutcome.result.lanceState,
-			repairPlanStatus: healthyOutcome.result.repairPlanStatus,
-			canary: {
-				expected_hard_check: CANARY_EXPECTED_HARD_CHECK,
-				detected: canaryDetected,
-			},
-			next_action: NEXT_ACTIONS[status],
-			duration_ms: Math.round(performance.now() - started),
-		};
-		console.log(JSON.stringify(report, null, 2));
-		process.exitCode = passed ? 0 : 1;
+		passed: verdict.passed,
+		status: verdict.status,
+		hard: healthyOutcome.result.hard,
+		warnings: healthyOutcome.result.warnings,
+		lanceState: healthyOutcome.result.lanceState,
+		repairPlanStatus: healthyOutcome.result.repairPlanStatus,
+		canary: {
+			expected_hard_check: CANARY_EXPECTED_HARD_CHECK,
+			detected: verdict.passed,
+			unexpected_hard_checks: unexpectedHard,
+		},
+		next_action: NEXT_ACTIONS[verdict.status],
+		duration_ms: Math.round(performance.now() - started),
+	};
+	console.log(JSON.stringify(report, null, 2));
+	process.exitCode = verdict.exitCode;
 	} catch {
+		// Privacy: do not echo the raw error (may include tmpdir / dbPath).
 		const report: ConsistencyGateReport = {
 			gate: "consistency",
 			mode: "repository-fixture",
@@ -243,6 +289,7 @@ async function main(): Promise<void> {
 			canary: {
 				expected_hard_check: CANARY_EXPECTED_HARD_CHECK,
 				detected: false,
+				unexpected_hard_checks: [],
 			},
 			next_action: NEXT_ACTIONS.fixture_setup_failed,
 			duration_ms: Math.round(performance.now() - started),
@@ -260,4 +307,4 @@ async function main(): Promise<void> {
 	}
 }
 
-await main();
+if (import.meta.main) await main();

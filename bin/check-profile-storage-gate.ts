@@ -103,23 +103,41 @@ function emitEarly(report: ProfileStorageGateReport, exitCode: 0 | 1 | 2): never
 	process.exit(exitCode);
 }
 
-/** Parse `--config <path>` from argv. Returns null if absent. */
-function parseConfigArg(argv: readonly string[]): string | null {
-	for (let i = 0; i < argv.length; i++) {
-		if (argv[i] === "--config") {
-			const next = argv[i + 1];
-			if (typeof next === "string" && next.trim().length > 0) return next;
-		}
+type ConfigArgState =
+	| { kind: "absent" }
+	| { kind: "valid"; path: string }
+	| { kind: "invalid" };
+
+/** Parse `--config <path>` from argv. Distinguishes absent vs invalid (present
+ * but missing value) so an invalid CLI argument is never silently masked by a
+ * CBRAIN_CONFIG fallback. */
+function parseConfigArg(argv: readonly string[]): ConfigArgState {
+	const idx = argv.indexOf("--config");
+	if (idx === -1) return { kind: "absent" };
+	const next = argv[idx + 1];
+	if (typeof next === "string" && next.trim().length > 0) {
+		return { kind: "valid", path: next };
 	}
-	return null;
+	return { kind: "invalid" };
 }
 
-function resolveExplicitConfigTarget(): { path: string } | null {
-	const fromArg = parseConfigArg(process.argv.slice(2));
+type ExplicitTarget =
+	| { kind: "path"; path: string }
+	| { kind: "missing" }
+	| { kind: "invalid" };
+
+function resolveExplicitConfigTarget(): ExplicitTarget {
+	const argState = parseConfigArg(process.argv.slice(2));
+	if (argState.kind === "invalid") return { kind: "invalid" };
+
+	const fromArg = argState.kind === "valid" ? argState.path : null;
 	const fromEnv = process.env.CBRAIN_CONFIG;
+
+	// --config takes precedence; only fall back to CBRAIN_CONFIG when the
+	// flag was truly absent (not present-but-valueless).
 	const raw = fromArg ?? fromEnv;
-	if (typeof raw !== "string" || raw.trim().length === 0) return null;
-	return { path: raw };
+	if (typeof raw !== "string" || raw.trim().length === 0) return { kind: "missing" };
+	return { kind: "path", path: raw };
 }
 
 interface ParsedProfileConfig {
@@ -164,7 +182,11 @@ async function main(): Promise<void> {
 
 	// ── fail-closed #1 (P1-1): explicit target required. ──────────────────
 	const target = resolveExplicitConfigTarget();
-	if (!target) {
+	if (target.kind === "invalid") {
+		emitEarly(buildFatalReport("profile_target_invalid", started), 2);
+		return;
+	}
+	if (target.kind === "missing") {
 		emitEarly(buildFatalReport("profile_target_missing", started), 2);
 		return;
 	}

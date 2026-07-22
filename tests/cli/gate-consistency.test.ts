@@ -59,9 +59,10 @@ describe("bin/check-consistency-gate.ts repository fixture gate (#379, #384)", (
 			expect(typeof json.lanceState).toBe("string");
 			expect(typeof json.next_action).toBe("string");
 			expect(json.fatalError).toBeUndefined();
-			const canary = json.canary as { expected_hard_check: string; detected: boolean };
+			const canary = json.canary as { expected_hard_check: string; detected: boolean; unexpected_hard_checks: string[] };
 			expect(canary.expected_hard_check).toBe("sqlite.page_without_chunks");
 			expect(canary.detected).toBe(true);
+			expect(canary.unexpected_hard_checks).toEqual([]);
 			// Privacy: no sandbox path leak
 			expect(JSON.stringify(json)).not.toContain(sandbox);
 		} finally {
