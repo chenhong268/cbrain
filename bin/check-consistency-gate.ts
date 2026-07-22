@@ -199,6 +199,7 @@ export function resolveConsistencyVerdict(s: CanarySignals): {
 	status: ConsistencyStatus;
 	passed: boolean;
 	exitCode: 0 | 1 | 2;
+	canaryDetected: boolean;
 } {
 	const fatal = s.healthyFatal || s.canaryFatal;
 	const healthyClean = s.healthyPassed && !s.healthyFatal;
@@ -210,11 +211,13 @@ export function resolveConsistencyVerdict(s: CanarySignals): {
 			? "negative_canary_regression"
 			: s.unexpectedHardChecks.length > 0
 				? "negative_canary_unexpected_hard"
-				: !healthyClean
-					? "healthy_fixture_failed"
-					: "negative_canary_detected";
+				: !canaryDetected
+					? "negative_canary_regression"
+					: !healthyClean
+						? "healthy_fixture_failed"
+						: "negative_canary_detected";
 	const exitCode: 0 | 1 | 2 = fatal ? 2 : passed ? 0 : 1;
-	return { status, passed, exitCode };
+	return { status, passed, exitCode, canaryDetected };
 }
 
 async function main(): Promise<void> {
@@ -265,7 +268,7 @@ async function main(): Promise<void> {
 		repairPlanStatus: healthyOutcome.result.repairPlanStatus,
 		canary: {
 			expected_hard_check: CANARY_EXPECTED_HARD_CHECK,
-			detected: verdict.passed,
+			detected: verdict.canaryDetected,
 			unexpected_hard_checks: unexpectedHard,
 		},
 		next_action: NEXT_ACTIONS[verdict.status],

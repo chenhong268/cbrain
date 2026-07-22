@@ -242,26 +242,33 @@ async function main(): Promise<void> {
 			plan.overallStatus,
 		);
 
-		const passed = result.passed;
+		// Fatal check (#384 rev5 P1): runFsck captures probe exceptions and
+		// returns them via fsckReport.fatalError without throwing. A fatal
+		// must route to profile_check_failed / exit 2 — NOT be treated as a
+		// normal hard-finding failure with profile_checked / exit 1.
+		const fatal = !!fsckReport.fatalError;
+		const passed = result.passed && !fatal;
 		finalReport = {
 			gate: "profile-storage-consistency",
 			mode: "operator-profile",
 			version: "1",
 			timestamp: new Date().toISOString(),
 			passed,
-			status: "profile_checked",
+			status: fatal ? "profile_check_failed" : "profile_checked",
 			hard: result.hard,
 			warnings: result.warnings,
 			lanceState: result.lanceState,
 			repairPlanStatus: result.repairPlanStatus,
-			next_action: !passed
-				? "Fix hard no-go failures (see hard[]), then rerun `bun run gate:profile-storage`."
-				: result.warnings.length > 0
-					? "Optional: review warnings[]."
-					: "Profile storage is consistent.",
+			next_action: fatal
+				? NEXT_ACTIONS.profile_check_failed
+				: !passed
+					? "Fix hard no-go failures (see hard[]), then rerun `bun run gate:profile-storage`."
+					: result.warnings.length > 0
+						? "Optional: review warnings[]."
+						: "Profile storage is consistent.",
 			duration_ms: Math.round(performance.now() - started),
 		};
-		finalExit = passed ? 0 : 1;
+		finalExit = fatal ? 2 : passed ? 0 : 1;
 	} catch {
 		finalReport = buildFatalReport("profile_check_failed", started);
 		finalExit = 2;

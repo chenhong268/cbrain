@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 
 // #379 + #384 review: bin/check-profile-storage-gate.ts is the OPERATOR
@@ -270,5 +271,27 @@ describe("bin/check-profile-storage-gate.ts operator profile gate (#379, #384)",
 		expect(json.gate).toBe("profile-storage-consistency");
 		expect(json.mode).toBe("operator-profile");
 		expect(exitCode).not.toBe(2);
+	});
+
+	test("(rev5 P1) fsck fatal → profile_check_failed, exit 2 (not profile_checked exit 1)", async () => {
+		// Create a valid DB so readSnapshot succeeds, then corrupt the schema
+		// by dropping a table fsck probes expect. runFsck catches the probe
+		// exception and returns it via fsckReport.fatalError — it does NOT
+		// throw to the outer catch. The gate must detect this and route to
+		// profile_check_failed / exit 2, not profile_checked / exit 1.
+		writeFileSync(configPath, JSON.stringify({ dbPath, vaultPath, lancePath }));
+		const db = new CBrainDB(dbPath);
+		db.close();
+		// Corrupt: drop the pages table so probeSqlite throws.
+		const raw = new Database(dbPath);
+		raw.exec("DROP TABLE IF EXISTS pages");
+		raw.close();
+
+		const { exitCode, json } = await runGate({ CBRAIN_CONFIG: configPath });
+		expect(exitCode).toBe(2);
+		expect(json.status).toBe("profile_check_failed");
+		expect(json.passed).toBe(false);
+		// Privacy: fatal error text not echoed.
+		expect(JSON.stringify(json)).not.toContain("fsck probe failed");
 	});
 });

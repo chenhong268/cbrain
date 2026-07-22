@@ -45,10 +45,12 @@ describe("resolveConsistencyVerdict (#384 rev4)", () => {
 		expect(v.exitCode).toBe(1);
 	});
 
-	test("(P1) canary unexpectedly passed → not detected, NO-GO", () => {
+	test("(rev5 P2-1) canary unexpectedly passed → negative_canary_regression, not detected status", () => {
 		const v = resolveConsistencyVerdict(base({ canaryPassed: true }));
+		expect(v.status).toBe("negative_canary_regression");
 		expect(v.passed).toBe(false);
 		expect(v.exitCode).toBe(1);
+		expect(v.canaryDetected).toBe(false);
 	});
 
 	test("(P2) healthy fatal → fixture_setup_failed, exit 2 (not 1)", () => {
@@ -79,5 +81,14 @@ describe("resolveConsistencyVerdict (#384 rev4)", () => {
 		}));
 		expect(v.status).toBe("fixture_setup_failed");
 		expect(v.exitCode).toBe(2);
+	});
+
+	test("(rev5 P2-2) canaryDetected is independent of gate passed", () => {
+		// Healthy fixture fails but canary correctly detected → canaryDetected
+		// is true even though the overall gate does not pass.
+		const v = resolveConsistencyVerdict(base({ healthyPassed: false }));
+		expect(v.canaryDetected).toBe(true);
+		expect(v.passed).toBe(false);
+		expect(v.status).toBe("healthy_fixture_failed");
 	});
 });
