@@ -76,29 +76,34 @@ export function isFirstPersonQuery(query: string): boolean {
 }
 
 /**
- * Action-oriented / current-state intent for personal management.
+ * #385 — personal current-state guard intent detection.
  *
- * Two tiers — BOTH require an explicit ACTION/STATE PREDICATE, never a bare noun:
- * - DIRECT action markers: 该不该/需不需要/到期/overdue… — trigger alone.
- *   These are PREDICATES that ask whether something should be done or is due.
- * - TIME markers (最近/上次) co-occurring with the SAME predicate set —
- *   triggers only together. Domain nouns alone (运动/保险/检查) never trigger.
+ * The guard activates ONLY for "current advice" queries — the speaker
+ * asks whether something should be done NOW or IS currently due/active.
+ * Historical fact recall ("我上次血压是多少") must NOT trigger the guard.
  *
- * P1#3 r4: removed ALL bare nouns (周期/频率/接下来/appointment/medication/检查)
- * that appeared in ordinary recall queries. Both CN and EN now require the
- * same predicate constraint.
+ * Two tiers:
+ * - DIRECT action predicates: 该不该/需不需要/到期/overdue/am I currently… —
+ *   trigger alone. These ask for a RECOMMENDATION or CURRENT STATUS.
+ * - TIME markers (最近/上次) co-occurring with ACTION COMPOUND verbs
+ *   (复查/看病/吃药/治疗…) — trigger together. Domain NOUNS alone
+ *   (血压/睡眠/体检/血糖) do NOT trigger; they indicate fact recall.
  */
+
+/** CN predicates that ask for current advice/status. */
 const ACTION_PREDICATE_CN = /该不该|要不要|还要不要|需不需要|该去|该做|该吃|该看|该补|该换|该买|到期|过期|是否到期|什么时候到期|需不需要复查|要不要去看|该不该去|该不该吃|要不要复查|需不需要去|要不要吃药/;
-const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take)\b/i;
+/** EN predicates that ask for current advice/status — includes r6 current-state phrases. */
+const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take|am\s+i\s+currently|currently\s+taking|currently\s+on|what\s+am\s+i\s+taking|still\s+taking)\b/i;
 
 /**
- * Health-domain action predicates that ALSO require an explicit action verb.
- * These are compound verb phrases (复查/体检/看病/就诊/吃药), NOT bare nouns.
- * They only trigger the guard when combined with a TIME marker, AND they
- * express a management ACTION, not just a topic noun.
+ * ACTION COMPOUND verbs — multi-char phrases that express a health
+ * management ACTION (复查/看病/吃药/治疗/随访/监测/用药/就诊), NOT bare
+ * nouns (血压/睡眠/体检/血糖/心率/症状/剂量) that appear in fact recall.
+ * r6: removed 体检/睡眠/血压/血糖/心率/症状/剂量/锻炼/作息/康复/恢复/过敏/疫苗/续签/报税
+ * — these are topic nouns, not action predicates.
  */
-const DOMAIN_ACTION_CN = /复查|体检|看病|就诊|吃药|用药|治疗|随访|监测|症状|疗程|剂量|恢复|康复|锻炼|睡眠|作息|血压|血糖|心率|过敏|疫苗|续签|报税/;
-const DOMAIN_ACTION_EN = /\b(?:checkup|follow-?up|prescription|therapy|vaccine|allergy|renewal)\b/i;
+const DOMAIN_ACTION_CN = /复查|看病|就诊|吃药|用药|治疗|随访|监测/;
+const DOMAIN_ACTION_EN = /\b(?:checkup|follow-?up|prescription|therapy)\b/i;
 
 const TIME_MARKER_CN = /上次|最近|什么时候|多久/;
 const TIME_MARKER_EN = /\b(?:last\s+time|recently|how\s+long)\b/i;
@@ -114,17 +119,18 @@ function hasTimeMarkerWithDomainAction(query: string): boolean {
 }
 
 /**
- * #385 — closed grammar for personal current-state queries.
+ * #385 — closed grammar for personal current-state (current-advice) queries.
  *
  * Activates ONLY when BOTH conditions hold:
  * 1. First-person phrasing (the speaker is the subject)
- * 2. Action-oriented / current-state intent:
- *    - an explicit ACTION PREDICATE (该不该/需不需要/到期/overdue…), OR
- *    - a TIME marker co-occurring with a DOMAIN ACTION compound
- *      (复查/体检/看病/checkup/follow-up…).
+ * 2. Current-advice intent:
+ *    - an explicit ACTION PREDICATE (该不该/需不需要/到期/overdue/am I
+ *      currently…), OR
+ *    - a TIME marker co-occurring with a DOMAIN ACTION compound verb
+ *      (复查/看病/吃药/checkup/follow-up…).
  *
- * Bare nouns (检查/运动/保险/周期/频率/接下来/appointment/medication) do NOT
- * trigger — they appear in ordinary recall and would cause false degradation.
+ * Fact-recall queries with domain nouns (血压/睡眠/体检/血糖) do NOT
+ * trigger — "我上次血压是多少" is historical fact recall, not current advice.
  */
 export function isPersonalCurrentStateQuery(query: string): boolean {
   if (!isFirstPersonQuery(query)) return false;

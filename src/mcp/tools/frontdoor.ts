@@ -148,6 +148,11 @@ async function runContentRecall(
     const insufficientPayload = {
       query,
       entities: [] as Array<{ title: string; snippet: string }>,
+      // #385 P1#1: include auditable historical evidence when available.
+      // The response stays degraded, but the user can see what CBrain found.
+      ...(guardResult.historicalEvidence && guardResult.historicalEvidence.length > 0
+        ? { historical_evidence: guardResult.historicalEvidence }
+        : {}),
       summary: "无法确认当前个人状态，需要更明确的上下文",
     };
     const formatted = formatRecallEnvelope(insufficientPayload);

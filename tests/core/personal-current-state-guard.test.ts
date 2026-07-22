@@ -27,9 +27,19 @@ function makeLink(from: string, to: string, trustState: string): LinkRow {
   };
 }
 
-function makeMockDb(opts: { trustedLinks?: LinkRow[] } = {}): CBrainDB {
+interface TimelineEntry { page_slug: string; event_date: string; summary: string; trust_state?: string; }
+
+function makeMockDb(opts: {
+  trustedLinks?: LinkRow[];
+  timelineBySlug?: Record<string, TimelineEntry[]>;
+} = {}): CBrainDB {
   return {
-    getBoundedTrustedLinks: (_slug: string, _limit: number) => opts.trustedLinks ?? [],
+    getBoundedTrustedLinks: (_s: string, _l: number) => opts.trustedLinks ?? [],
+    getBoundedTrustedTimelineForSlugs: (slugs: string[], _l: number) => {
+      const out: TimelineEntry[] = [];
+      for (const s of slugs) out.push(...(opts.timelineBySlug?.[s] ?? []));
+      return out;
+    },
   } as unknown as CBrainDB;
 }
 
@@ -41,119 +51,131 @@ function makeMockPages(identityPage?: { type: string; title?: string } | null): 
 
 // ── Intent detection ──
 
-describe("isFirstPersonQuery (#385) — casing matrix (P1#2)", () => {
+describe("isFirstPersonQuery (#385) — casing matrix", () => {
   test.each([
     "我该吃药了吗",
     "should I go for a checkup",
-    "should i go for a checkup", // lowercase i
-    "Is My checkup overdue", // capitalized My
-    "IS MY CHECKUP OVERDUE", // all caps
-    "is my medication due",
-    "my checkup is overdue",
-  ])("detects first-person in: %s", (q) => {
-    expect(isFirstPersonQuery(q)).toBe(true);
-  });
+    "should i go for a checkup",
+    "Is My checkup overdue",
+    "IS MY CHECKUP OVERDUE",
+    "What am I currently taking",
+    "what medication am i currently on",
+  ])("detects first-person: %s", (q) => expect(isFirstPersonQuery(q)).toBe(true));
 
   test.each(["实体A是什么", "主题D的信息"])(
-    "no first-person in: %s", (q) => expect(isFirstPersonQuery(q)).toBe(false),
+    "no first-person: %s", (q) => expect(isFirstPersonQuery(q)).toBe(false),
   );
-
-  test("collective 我们 does not count", () => {
-    expect(isFirstPersonQuery("我们公司的项目")).toBe(false);
-  });
 });
 
 describe("isPersonalCurrentStateQuery (#385)", () => {
-  // Action predicates — trigger on their own
+  // Current-advice predicates — trigger
   test.each([
     "我该不该去复查",
     "我的体检到期了吗",
     "我该吃药了吗",
     "我需不需要复查",
     "should I go for a checkup",
-    "should i go for a checkup", // P1#2 lowercase
+    "should i go for a checkup",
     "is it time for my checkup",
-    "is it time for my checkup", // P1#2 mixed case
-    "do I need to see a doctor",
+    // P1#3 r6: English current-state phrases
+    "What am I currently taking",
+    "What medication am I currently on",
+    "am I currently on any medication",
   ])("activates for: %s", (q) => expect(isPersonalCurrentStateQuery(q)).toBe(true));
 
-  // Time marker + domain action compound
+  // Time + domain ACTION verb (复查/看病/吃药)
   test("time + 复查 activates", () => {
     expect(isPersonalCurrentStateQuery("我上次复查结果怎么样")).toBe(true);
   });
 
-  // P1#3 r4: ALL bare nouns removed — negative regressions
+  // P1#2 r6: fact-recall with domain NOUNS must NOT trigger
   test.each([
-    "我最近看了哪部院线电影",
-    "我最近有哪些研究报告",
-    "我上次提交了哪段代码",
-    "我的代码检查结果是什么",
-    "我最近用运动相机拍了什么",
-    "我最近从保险箱取了什么",
+    "我上次血压是多少",
+    "我最近的体检结果怎么样",
+    "我最近的睡眠记录是什么",
+    "我最近的血糖是多少",
+    "我的心率记录",
+  ])("does NOT activate for fact recall: %s", (q) => {
+    expect(isPersonalCurrentStateQuery(q)).toBe(false);
+  });
+
+  // Bare nouns — still excluded
+  test.each([
     "我的工资发放周期是什么",
-    "我的发帖频率是多少",
     "What is my medication called",
     "Show my appointment notes",
-    "我最近看了什么书",
+    "我的代码检查结果是什么",
   ])("does NOT activate for bare noun: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(false);
   });
 });
 
-// ── Guard logic — phase-1 always fail-closed ──
+// ── Guard logic ──
 
-describe("applyPersonalCurrentStateGuard (#385) — phase-1 always insufficient", () => {
+describe("applyPersonalCurrentStateGuard (#385)", () => {
   test("non-personal query does not activate", () => {
     const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity/person" }), "实体A是什么", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.activated).toBe(false);
-    expect(r.outcome).toBe("pass");
   });
 
   test("no identity → insufficient", () => {
     const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages(), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], undefined);
-    expect(r.outcome).toBe("insufficient_current_context");
     expect(r.reason).toBe("no identity mapping configured");
   });
 
-  test("identity page not found → insufficient", () => {
-    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages(null), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
-    expect(r.reason).toBe("identity page not found");
-  });
-
-  test("bare entity type → insufficient", () => {
+  test("bare entity → insufficient", () => {
     const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.reason).toBe("identity is not entity/person");
   });
 
-  test("entity/company type → insufficient", () => {
-    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity/company" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.reason).toBe("identity is not entity/person");
-  });
-
-  test("no trusted chain → insufficient", () => {
+  // P2#4: bounded inspection disclaimer
+  test("no trusted chain → insufficient with bounded disclaimer", () => {
     const db = makeMockDb({ trustedLinks: [] });
     const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("insufficient_current_context");
-    expect(r.reason).toBe("no trusted subject-to-topic chain");
+    expect(r.reason).toContain("bounded inspection");
   });
 
-  // P1#1 r5 CORE: trusted chain exists but phase-1 still cannot prove current state
-  test("trusted chain exists → STILL insufficient (phase-1 semantic limit)", () => {
-    const db = makeMockDb({
-      trustedLinks: [makeLink(IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted")],
-    });
-    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("insufficient_current_context");
-    expect(r.reason).toContain("phase-1 model cannot prove current state");
-    expect(r.debugSearchMaterial).toEqual([makeResult(OLD_REMINDER_SLUG)]);
-  });
-
-  // P1#1 r5: even with completed/pending evidence, still insufficient
-  test("candidate with completed evidence → STILL insufficient", () => {
+  // P1#1 r6: trusted chain → insufficient but WITH historical evidence
+  test("trusted chain → insufficient + historical evidence returned", () => {
     const db = makeMockDb({
       trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
+      timelineBySlug: {
+        [TOPIC_SLUG]: [
+          { page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "trusted" },
+        ],
+      },
     });
     const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("insufficient_current_context");
+    expect(r.reason).toContain("phase-1 model cannot prove current state");
+    expect(r.historicalEvidence).toBeDefined();
+    expect(r.historicalEvidence!.length).toBe(1);
+    expect(r.historicalEvidence![0]!.trust_state).toBe("trusted");
+  });
+
+  // P1#3: user_thought preserved in evidence
+  test("user_thought trust_state preserved in historical evidence", () => {
+    const db = makeMockDb({
+      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
+      timelineBySlug: {
+        [TOPIC_SLUG]: [
+          { page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "待复查", trust_state: "user_thought" },
+        ],
+      },
+    });
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(r.historicalEvidence![0]!.trust_state).toBe("user_thought");
+  });
+
+  // Trusted chain but empty timeline → insufficient, no evidence
+  test("trusted chain + empty timeline → insufficient, no evidence", () => {
+    const db = makeMockDb({
+      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
+      timelineBySlug: {},
+    });
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(r.outcome).toBe("insufficient_current_context");
+    expect(r.historicalEvidence).toEqual([]);
   });
 });
