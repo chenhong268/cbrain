@@ -2346,15 +2346,41 @@ export class CBrainDB {
    * Returns at most `limit` outgoing+incoming links with trust_state
    * explicitly 'trusted' or 'user_thought' (NOT null/legacy — the guard
    * requires explicit provenance for personal current-state authority).
-   * Pushes LIMIT into SQL so high-degree subjects never trigger unbounded reads.
+   * Pushes LIMIT into SQL with deterministic ORDER BY so high-degree subjects
+   * always get a stable, auditable subset (P2#5: no LIMIT without ORDER BY).
    */
   getBoundedTrustedLinks(slug: string, limit: number): LinkRow[] {
     const trustedFilter = " AND trust_state IN ('trusted','user_thought')";
     const cols = "id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence, last_validated_at, effective_weight";
     const rows = this.prepare(
-      `SELECT ${cols} FROM links WHERE (from_slug = $slug OR to_slug = $slug)${trustedFilter} LIMIT $limit`
+      `SELECT ${cols} FROM links WHERE (from_slug = $slug OR to_slug = $slug)${trustedFilter} ORDER BY effective_weight DESC, id ASC LIMIT $limit`
     ).all({ $slug: slug, $limit: limit }) as LinkRow[];
     return rows;
+  }
+
+  /**
+   * #385 P1#1: dedicated bounded timeline fetch for the personal current-state
+   * guard. Reads timeline DIRECTLY for the given slugs (subject + trusted
+   * one-hop neighbors) — does NOT expand the graph further.
+   *
+   * Constraints:
+   * - trust_state IN ('trusted','user_thought') only (explicit provenance).
+   * - event_date IS NOT NULL (semantic dates only, never created_at).
+   * - ORDER BY event_date DESC, id DESC with SQL LIMIT (bounded + deterministic).
+   *
+   * This replaces the incorrect reuse of getRecentEventsInNetwork which
+   * expanded one more hop, excluded the input nodes, and allowed candidate/null.
+   */
+  getBoundedTrustedTimelineForSlugs(slugs: string[], limit: number): Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }> {
+    if (slugs.length === 0) return [];
+    const placeholders = slugs.map(() => "?").join(",");
+    return this.prepare(
+      `SELECT page_slug, event_date, summary, trust_state FROM timeline
+       WHERE page_slug IN (${placeholders})
+       AND event_date IS NOT NULL
+       AND trust_state IN ('trusted','user_thought')
+       ORDER BY event_date DESC, id DESC LIMIT ?`
+    ).all(...slugs, limit) as Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }>;
   }
 
   getOutgoingSlugs(slug: string, includeInactive = false): string[] {

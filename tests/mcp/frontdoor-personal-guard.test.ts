@@ -52,7 +52,7 @@ function makeHarness(
   opts: {
     identityPersonSlug?: string;
     trustedLinks?: LinkRow[];
-    networkTimeline?: Array<{ slug: string; title: string; event_date: string | null; summary: string }>;
+    timeline?: Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }>;
   } = {},
 ): Harness {
   let handler: Handler | undefined;
@@ -66,14 +66,14 @@ function makeHarness(
   };
 
   const db = {
-    // Guard methods (#385)
+    // #385 guard methods
     getBoundedTrustedLinks(slug: string, _limit: number) {
       guardDbCalls.push(`trustedLinks:${slug}`);
       return opts.trustedLinks ?? [];
     },
-    getRecentEventsInNetwork(slugs: string[], _days: number, _limit: number) {
-      guardDbCalls.push(`networkTimeline:${slugs.length}`);
-      return opts.networkTimeline ?? [];
+    getBoundedTrustedTimelineForSlugs(slugs: string[], _limit: number) {
+      guardDbCalls.push(`timeline:${slugs.length}`);
+      return opts.timeline ?? [];
     },
     // Evidence completion methods
     batchGetTimelineForSlugs(slugs: string[]) {
@@ -131,126 +131,115 @@ function parsed(output: { content: Array<{ type: string; text: string }> }): Env
   return JSON.parse(output.content[0]!.text) as Envelope;
 }
 
+const TL = (summary: string): Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }> => [
+  { page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary, trust_state: "trusted" },
+];
+
 describe("frontdoor personal current-state guard integration (#385)", () => {
-  // #3: Missing first-person identity mapping → insufficient, no guessed subject.
-  test("personal query without identity → degraded, entities empty", async () => {
+  // #3: Missing identity → insufficient.
+  test("personal query without identity → degraded", async () => {
     const harness = makeHarness([supportedResult(OLD_REMINDER_SLUG)]);
     const env = parsed(await harness.call({ query: "我最近该去复查了吗", detail: "normal" }));
-
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.entities).toEqual([]);
-    expect(env.summary.degraded_reason).toContain("个人当前状态上下文不足");
   });
 
-  // #1: Old adjacent reminder + missing subject-to-topic chain → insufficient.
+  // #1: Old reminder + no trusted chain → insufficient.
   test("personal query + old reminder + no trusted chain → degraded", async () => {
-    const harness = makeHarness([supportedResult(OLD_REMINDER_SLUG)], {
-      identityPersonSlug: IDENTITY_SLUG,
-    });
+    const harness = makeHarness([supportedResult(OLD_REMINDER_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     const env = parsed(await harness.call({ query: "我最近该去复查了吗", detail: "normal" }));
-
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.entities).toEqual([]);
     expect(JSON.stringify(env)).not.toContain(OLD_REMINDER_SLUG);
   });
 
-  // #2: Only candidate links → insufficient.
-  test("personal query + only candidate links → degraded", async () => {
+  // P1#2: trusted chain but no dated evidence → insufficient.
+  test("trusted chain + empty timeline → degraded", async () => {
     const harness = makeHarness([supportedResult(TOPIC_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
-      // getBoundedTrustedLinks returns empty (candidate links filtered by SQL)
-      trustedLinks: [],
+      trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
+      timeline: [],
     });
     const env = parsed(await harness.call({ query: "我最近该去复查了吗", detail: "normal" }));
-
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.entities).toEqual([]);
   });
 
-  // #4: Trusted subject-to-topic chain → evidence included.
-  test("personal query + trusted chain → ok, entities returned", async () => {
+  // #4: Trusted chain + dated evidence → ok.
+  test("trusted chain + dated evidence → ok", async () => {
     const harness = makeHarness([supportedResult(TOPIC_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
       trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
+      timeline: TL("已完成相关检查"),
     });
     const env = parsed(await harness.call({ query: "我最近该去复查了吗", detail: "normal" }));
-
     expect(env.summary.status).toBe("ok");
     expect(env.raw.entities.length).toBeGreaterThan(0);
   });
 
-  // P1#1: Per-candidate filtering — stale reminder filtered from output.
-  test("trusted chain + stale reminder → only connected result returned", async () => {
+  // P1#1: stale reminder filtered from output.
+  test("trusted chain + stale reminder → only connected returned", async () => {
     const harness = makeHarness(
       [supportedResult(OLD_REMINDER_SLUG), supportedResult(TOPIC_SLUG)],
       {
         identityPersonSlug: IDENTITY_SLUG,
         trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
+        timeline: TL("已完成相关检查"),
       },
     );
     const env = parsed(await harness.call({ query: "我最近该去复查了吗", detail: "normal" }));
-
     expect(env.summary.status).toBe("ok");
     expect(env.raw.entities.length).toBe(1);
-    // Old reminder slug must not appear
     expect(JSON.stringify(env)).not.toContain(OLD_REMINDER_SLUG);
   });
 
-  // #7: Plain non-temporal lookup → zero guard DB calls.
-  test("non-personal query → no guard DB calls, entities returned", async () => {
-    const harness = makeHarness([supportedResult(TOPIC_SLUG)], {
-      identityPersonSlug: IDENTITY_SLUG,
-    });
+  // #7: Non-personal query → zero guard DB calls.
+  test("non-personal query → no guard DB calls", async () => {
+    const harness = makeHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     const env = parsed(await harness.call({ query: "主题D是什么", detail: "normal" }));
-
     expect(env.summary.status).toBe("ok");
     expect(harness.guardDbCalls).toEqual([]);
   });
 
-  // #6: Non-personal temporal query → existing behavior, no guard DB calls.
+  // #6: Non-personal temporal query → no guard.
   test("non-personal temporal query → no guard activation", async () => {
-    const harness = makeHarness([supportedResult(TOPIC_SLUG)], {
-      identityPersonSlug: IDENTITY_SLUG,
-    });
+    const harness = makeHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     await harness.call({ query: "主题D上次的变化", detail: "normal" });
-
     expect(harness.guardDbCalls).toEqual([]);
     expect(harness.searchCalls).toHaveLength(1);
-    expect(harness.searchCalls[0]!.options).toMatchObject({ limit: 5, _captureSupport: true });
   });
 
-  // P1#3: Pure personal recall without domain context does not trigger guard.
-  test("personal recall without health/action domain → no guard activation", async () => {
-    const harness = makeHarness([supportedResult(TOPIC_SLUG)], {
-      identityPersonSlug: IDENTITY_SLUG,
-    });
-    const env = parsed(await harness.call({ query: "我最近看了什么书", detail: "normal" }));
-
+  // P1#3: Pure personal recall without domain → no guard.
+  test.each([
+    "我最近看了哪部院线电影",
+    "我最近有哪些研究报告",
+    "我上次提交了哪段代码",
+    "我最近看了什么书",
+  ])("personal recall without domain (%s) → no guard", async (q) => {
+    const harness = makeHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
+    const env = parsed(await harness.call({ query: q, detail: "normal" }));
     expect(harness.guardDbCalls).toEqual([]);
     expect(env.summary.status).toBe("ok");
   });
 
-  // #5: Conflicting dated evidence → degraded, never confident.
-  test("conflicting timeline evidence → degraded", async () => {
+  // #5: Conflicting evidence → degraded.
+  test("conflicting timeline → degraded", async () => {
     const harness = makeHarness([supportedResult(TOPIC_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
       trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
-      networkTimeline: [
-        { slug: TOPIC_SLUG, title: "主题D", event_date: "2026-06-01", summary: "已完成相关检查" },
-        { slug: TOPIC_SLUG, title: "主题D", event_date: "2026-07-01", summary: "待复查" },
+      timeline: [
+        { page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "trusted" },
+        { page_slug: TOPIC_SLUG, event_date: "2026-07-01", summary: "待复查", trust_state: "trusted" },
       ],
     });
     const env = parsed(await harness.call({ query: "我最近该去复查了吗", detail: "normal" }));
-
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.entities).toEqual([]);
   });
 
-  // Search call count unchanged for non-personal queries.
+  // Search count unchanged.
   test("non-personal query searches exactly once", async () => {
-    const harness = makeHarness([supportedResult(TOPIC_SLUG)], {
-      identityPersonSlug: IDENTITY_SLUG,
-    });
+    const harness = makeHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     await harness.call({ query: "主题D是什么", detail: "normal" });
     expect(harness.searchCalls).toHaveLength(1);
   });

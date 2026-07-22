@@ -4,19 +4,22 @@
  * A deterministic, bounded guard that activates ONLY for a closed grammar
  * combining first-person phrasing with action-oriented / current-state
  * intent. When activated it verifies a trusted subject-to-topic chain
- * before allowing reminder-like search material to be presented as a
- * current personal recommendation.
+ * AND requires at least one trusted dated current-state evidence before
+ * allowing reminder-like search material to be presented as a current
+ * personal recommendation.
  *
- * Safety guarantee (phase 1): the guard FAILS CLOSED. If it cannot prove
- * a trusted subject/topic/current-state chain, it returns an explicit
- * insufficient-current-context outcome and the caller must NOT surface
- * the search material as current advice.
+ * Safety guarantee (phase 1): the guard FAILS CLOSED. It returns
+ * insufficient-current-context if ANY of these cannot be proven:
+ *   - configured identity uniquely mapping to entity/person
+ *   - trusted (trusted/user_thought) subject-to-topic link
+ *   - at least one trusted dated current-state evidence in the
+ *     bounded subject+neighbor timeline scope
  *
  * It does NOT auto-infer closure from recency or word overlap — there is
  * no generic record-to-record fulfills/supersedes contract yet.
  *
- * Bounded budget: at most one graph hop with SQL-level LIMIT, plus a
- * bounded timeline window over the subject AND its trusted neighbors.
+ * Bounded budget: SQL-level LIMIT + ORDER BY on all queries, no graph
+ * expansion beyond the initial trusted one-hop neighbor set.
  * Non-personal queries short-circuit before any DB work.
  */
 import type { CBrainDB, LinkRow } from "../../storage/sqlite.js";
@@ -55,8 +58,6 @@ export interface GuardPageLookup {
 const MAX_TRUSTED_LINKS = 10;
 /** At most this many timeline rows inspected over subject + neighbors. */
 const MAX_TIMELINE_BUDGET = 5;
-/** Timeline lookback window in days for the bounded network query. */
-const TIMELINE_LOOKBACK_DAYS = 365;
 
 // ── Closed-grammar state markers for conflict detection (#385 regression #5) ──
 //
@@ -67,8 +68,14 @@ const TIMELINE_LOOKBACK_DAYS = 365;
 const COMPLETED_MARKER = /已完成|完成|done|completed|finished|已结束|结案|已做/i;
 const PENDING_MARKER = /待办|未完成|计划中|待复查|需复查|pending|scheduled|upcoming|todo|待完成|需完成/i;
 
+/**
+ * #385 P1#4 — strict person type check.
+ * Only accepts the canonical 'entity/person' type. Bare 'entity' (which
+ * may be an organization, product, or other legacy entity) is rejected —
+ * fail-closed requires explicit person identity.
+ */
 function isEntityPersonType(type: string): boolean {
-  return type === "entity" || type === "entity/person" || type.startsWith("entity/person");
+  return type === "entity/person";
 }
 
 /**
@@ -79,10 +86,12 @@ function isEntityPersonType(type: string): boolean {
  *
  * For personal current-state queries:
  * 1. Resolves the subject through the configured identity (fail-closed on missing).
- * 2. Fetches bounded trusted one-hop links (SQL LIMIT, explicit trust only).
+ * 2. Fetches bounded trusted one-hop links (SQL LIMIT + ORDER BY, explicit trust).
  * 3. Filters candidates to ONLY those with a verified trusted subject connection.
- * 4. Inspects bounded timeline over subject + trusted neighbors.
- * 5. Either passes (with filtered results) or returns insufficient.
+ * 4. Reads bounded trusted timeline DIRECTLY for subject + neighbors (no graph expansion).
+ * 5. Requires at least one trusted dated current-state evidence (fail-closed on empty).
+ * 6. Checks for conflicting completed+pending evidence (fail-closed on conflict).
+ * 7. Either passes (with filtered results) or returns insufficient.
  */
 export function applyPersonalCurrentStateGuard(
   db: CBrainDB,
@@ -117,6 +126,7 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
+  // P1#4: only entity/person, not bare entity.
   if (!isEntityPersonType(personPage.type)) {
     return {
       activated: true,
@@ -126,9 +136,7 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
-  // Step 3: bounded trusted one-hop link fetch (SQL LIMIT, explicit trust).
-  // P2#5: uses getBoundedTrustedLinks so high-degree subjects never trigger
-  // unbounded reads. P2#6: only trusted/user_thought, NOT null/legacy.
+  // Step 3: bounded trusted one-hop link fetch (SQL LIMIT + ORDER BY, explicit trust).
   const trustedLinks: LinkRow[] = db.getBoundedTrustedLinks(
     identityPersonSlug,
     MAX_TRUSTED_LINKS,
@@ -142,9 +150,7 @@ export function applyPersonalCurrentStateGuard(
     trustedNeighbors.add(neighbor);
   }
 
-  // Step 4 (P1#1): PER-CANDIDATE filtering, not some().
-  // Only results with a verified trusted subject connection pass through.
-  // Unrelated stale reminders are filtered out — they are NOT surfaced.
+  // Step 4: PER-CANDIDATE filtering — only trusted-connected candidates pass.
   const connectedResults = results.filter(
     (r) => r.slug === identityPersonSlug || trustedNeighbors.has(r.slug),
   );
@@ -159,22 +165,34 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
-  // Step 5 (P1#2): inspect bounded timeline over subject AND trusted neighbors.
-  // Uses getRecentEventsInNetwork which reads the subject's one-hop network
-  // timeline with a SQL LIMIT — discovers newer records on related pages,
-  // not just the subject's own timeline. Semantic event_date only.
-  const networkTimeline = db.getRecentEventsInNetwork(
-    [identityPersonSlug, ...trustedNeighbors],
-    TIMELINE_LOOKBACK_DAYS,
+  // Step 5 (P1#1): read bounded trusted timeline DIRECTLY for subject + neighbors.
+  // Uses getBoundedTrustedTimelineForSlugs — a dedicated method that reads
+  // timeline for the EXACT slugs passed (no further graph expansion).
+  // trust_state IN ('trusted','user_thought'), event_date IS NOT NULL,
+  // ORDER BY event_date DESC with SQL LIMIT. Semantic dates only.
+  const timelineScope = [identityPersonSlug, ...trustedNeighbors];
+  const trustedTimeline = db.getBoundedTrustedTimelineForSlugs(
+    timelineScope,
     MAX_TIMELINE_BUDGET,
   );
-  const trustedTimeline = networkTimeline; // getRecentEventsInNetwork already filters active
 
+  // P1#2: require at least one trusted dated current-state evidence.
+  // A trusted link alone is not sufficient — without dated evidence we
+  // cannot prove a current-state chain. Fail closed.
+  if (trustedTimeline.length === 0) {
+    return {
+      activated: true,
+      outcome: "insufficient_current_context",
+      subjectSlug: identityPersonSlug,
+      reason: "no trusted dated current-state evidence",
+      debugSearchMaterial: results,
+    };
+  }
+
+  // Step 6: conflicting dated evidence detection.
   const hasCompleted = trustedTimeline.some((t) => COMPLETED_MARKER.test(t.summary));
   const hasPending = trustedTimeline.some((t) => PENDING_MARKER.test(t.summary));
 
-  // Phase 1: conflicting dated evidence (completed + pending without a
-  // fulfills/supersedes contract) → cannot determine current state → fail closed.
   if (hasCompleted && hasPending) {
     return {
       activated: true,
@@ -185,8 +203,7 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
-  // Trusted subject-to-topic chain verified, no unresolved conflict.
-  // Return the FILTERED results — caller should use these, not the originals.
+  // Step 7: trusted subject-to-topic chain + dated evidence verified.
   return {
     activated: true,
     outcome: "pass",

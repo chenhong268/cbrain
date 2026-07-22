@@ -91,9 +91,12 @@ const DIRECT_ACTION_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|d
 const TIME_MARKER_CN = /上次|最近|什么时候|多久/;
 const TIME_MARKER_EN = /\b(?:last\s+time|recently|how\s+long|next)\b/i;
 
-/** Health/management domain words that, with a time marker, indicate current-state intent. */
-const DOMAIN_CN = /复查|体检|检查|看病|就诊|吃药|用药|预约|治疗|随访|监测|指标|报告|结果|症状|医|院|诊|药|疗程|剂量|恢复|康复|运动|锻炼|饮食|睡眠|作息|体检|牙|眼|视|听力|血压|血糖|心率|过敏|疫苗|保险|证件|续签|办理|申请|提交|缴费|报税|申报/;
-const DOMAIN_EN = /\b(?:checkup|appointment|medication|treatment|follow-?up|monitor|symptom|doctor|hospital|clinic|prescription|therapy|dose|recovery|exercise|workout|diet|sleep|allergy|vaccine|insurance|visa|renewal|application|submit|tax)\b/i;
+/** Health/management domain words that, with a time marker, indicate current-state intent.
+ * P1#3 fix: only multi-character compounds that unambiguously signal health/admin.
+ * Removed single chars (医/院/诊/药/牙/眼/视) and broad terms (报告/提交/申请/办理/缴费/申报)
+ * that false-triggered on "院线电影", "研究报告", "提交代码" etc. */
+const DOMAIN_CN = /复查|体检|检查|看病|就诊|吃药|用药|预约挂号|治疗|随访|监测|指标|结果|症状|疗程|剂量|恢复|康复|运动|锻炼|饮食|睡眠|作息|听力|血压|血糖|心率|过敏|疫苗|保险|证件|续签|报税/;
+const DOMAIN_EN = /\b(?:checkup|appointment|medication|treatment|follow-?up|monitor|symptom|doctor|hospital|clinic|prescription|therapy|dose|recovery|exercise|workout|diet|sleep|allergy|vaccine|insurance|renewal|tax)\b/i;
 
 function hasDirectActionIntent(query: string): boolean {
   return DIRECT_ACTION_CN.test(query) || DIRECT_ACTION_EN.test(query);
