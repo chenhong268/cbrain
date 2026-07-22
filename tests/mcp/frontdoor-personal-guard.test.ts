@@ -46,7 +46,6 @@ function makeMockHarness(
   opts: {
     identityPersonSlug?: string;
     trustedLinks?: LinkRow[];
-    timelineBySlug?: Record<string, Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }>>;
   } = {},
 ): MockHarness {
   let handler: Handler | undefined;
@@ -59,13 +58,7 @@ function makeMockHarness(
   };
   const db = {
     getBoundedTrustedLinks(slug: string, _l: number) { guardDbCalls.push(`tl:${slug}`); return opts.trustedLinks ?? []; },
-    getBoundedTrustedTimelineForSlugs(slugs: string[], _l: number) {
-      guardDbCalls.push(`t:${slugs.join(",")}`);
-      const out: Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }> = [];
-      for (const s of slugs) out.push(...(opts.timelineBySlug?.[s] ?? []));
-      return out;
-    },
-    batchGetTimelineForSlugs(slugs: string[]) { return new Map(slugs.map((s) => [s, [{ summary: "匿名", event_date: "2026-01-01", trust_state: "trusted" }]])); },
+    batchGetTimelineForSlugs(slugs: string[]) { return new Map(slugs.map((s) => [s, []])); },
     batchGetLinksForSlugs(slugs: string[]) { return new Map(slugs.map((s) => [s, { outgoing: [], incoming: [] }])); },
     getPageTitlesAndTypes(slugs: string[]) { return new Map(slugs.map((s) => [s, { title: `标题-${s}`, type: "note" }])); },
     getRawChunkHitsForPage() { return []; }, getChunksByPage() { return []; },
@@ -88,57 +81,57 @@ function makeMockHarness(
   return { call: (args) => handler!(args), searchCalls, guardDbCalls };
 }
 
-interface Envelope { summary: { status: string }; raw: { entities: unknown[]; current_state_evidence?: unknown[] }; }
+interface Envelope { summary: { status: string }; raw: { entities: unknown[] }; display: string; }
 
 function parsed(output: { content: Array<{ type: string; text: string }> }): Envelope {
   return JSON.parse(output.content[0]!.text) as Envelope;
 }
 
 describe("frontdoor personal current-state guard (#385) — mock", () => {
+  // Phase-1: personal current-state queries ALWAYS degraded
   test("personal query without identity → degraded", async () => {
     const h = makeMockHarness([supportedResult(OLD_REMINDER_SLUG)]);
     const env = parsed(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("degraded");
+    expect(env.raw.entities).toEqual([]);
   });
 
-  test("trusted chain + current-state evidence → ok + evidence in response (P1#2)", async () => {
-    const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
-      identityPersonSlug: IDENTITY_SLUG,
-      trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
-      timelineBySlug: { [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "trusted" }] },
-    });
-    const env = parsed(await h.call({ query: "我该吃药了吗", detail: "normal" }));
-    expect(env.summary.status).toBe("ok");
-    expect(env.raw.current_state_evidence).toBeDefined();
-    expect((env.raw.current_state_evidence as unknown[]).length).toBeGreaterThan(0);
-  });
-
-  // P1#1 r4: generic history event does NOT authorize current state
-  test("generic history event only → degraded", async () => {
+  test("personal query with trusted chain → STILL degraded (phase-1)", async () => {
     const h = makeMockHarness([supportedResult(OLD_REMINDER_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
       trustedLinks: [trustedLink(IDENTITY_SLUG, OLD_REMINDER_SLUG)],
-      timelineBySlug: { [OLD_REMINDER_SLUG]: [{ page_slug: OLD_REMINDER_SLUG, event_date: "2018-01-01", summary: "首次创建提醒", trust_state: "trusted" }] },
     });
     const env = parsed(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.entities).toEqual([]);
   });
 
-  // P1#3 r4: bare nouns do NOT trigger
+  // P1#2: English casing variants all trigger guard
+  test.each([
+    "should i go for a checkup",
+    "Is My checkup overdue",
+    "IS MY CHECKUP OVERDUE",
+  ])("English casing variant triggers guard: %s", async (q) => {
+    const h = makeMockHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
+    const env = parsed(await h.call({ query: q, detail: "normal" }));
+    expect(env.summary.status).toBe("degraded");
+    expect(h.guardDbCalls.length).toBeGreaterThan(0);
+  });
+
+  // Bare nouns do NOT trigger
   test.each([
     "我的工资发放周期是什么",
-    "我的发帖频率是多少",
     "What is my medication called",
     "Show my appointment notes",
     "我的代码检查结果是什么",
-  ])("bare noun query does not trigger guard: %s", async (q) => {
+  ])("bare noun does not trigger guard: %s", async (q) => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     const env = parsed(await h.call({ query: q, detail: "normal" }));
     expect(h.guardDbCalls).toEqual([]);
     expect(env.summary.status).toBe("ok");
   });
 
+  // Non-personal: zero guard calls
   test("non-personal query → zero guard calls", async () => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     const env = parsed(await h.call({ query: "主题D是什么", detail: "normal" }));
@@ -147,7 +140,7 @@ describe("frontdoor personal current-state guard (#385) — mock", () => {
   });
 });
 
-// ── Real SQLite end-to-end: guard → frontdoor (#385 P1#1 core) ──
+// ── Real SQLite end-to-end ──
 
 function seedPage(db: CBrainDB, vaultPath: string, slug: string, title: string, type: string): void {
   db.upsertPage({ slug, type, title, filePath: `${slug}.md`, contentHash: `h-${slug}` });
@@ -185,20 +178,27 @@ describe("frontdoor personal current-state guard (#385) — real SQLite e2e", ()
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  test("P1#1 core: candidate A connected, only generic history → guard fails closed", () => {
+  // P1#1 r5 CORE: old reminder with "计划中" + newer "已完成" record
+  // → guard still fails closed (phase-1 cannot prove current state)
+  test("old reminder + newer record → guard fails closed regardless", () => {
     seedPage(db, vaultPath, IDENTITY_SLUG, "主体A", "entity/person");
     seedPage(db, vaultPath, OLD_REMINDER_SLUG, "旧提醒", "record");
+    seedPage(db, vaultPath, NEIGHBOR_B, "更新记录", "entity/person");
     seedLink(db, IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted");
-    // Only a generic 2018 history event — NOT current-state evidence
-    seedTimeline(db, OLD_REMINDER_SLUG, "首次创建提醒", "2018-01-01", "trusted");
+    seedLink(db, IDENTITY_SLUG, NEIGHBOR_B, "trusted");
+    // Old reminder: 2018 "计划中"
+    seedTimeline(db, OLD_REMINDER_SLUG, "计划中", "2018-01-01", "trusted");
+    // Newer record: 2026 "已完成"
+    seedTimeline(db, NEIGHBOR_B, "已完成相关检查", "2026-07-01", "trusted");
 
     const pages = { getBySlug: (slug: string) => slug === IDENTITY_SLUG ? { type: "entity/person", title: "主体A" } : null };
     const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(result.outcome).toBe("insufficient_current_context");
-    expect(result.reason).toBe("no candidate with trusted current-state evidence");
+    expect(result.reason).toContain("phase-1 model cannot prove current state");
   });
 
-  test("P1#1: candidate with current-state evidence → guard passes + returns evidence", () => {
+  // Even a connected candidate with clear "已完成" evidence → still insufficient
+  test("connected candidate with completed evidence → still insufficient", () => {
     seedPage(db, vaultPath, IDENTITY_SLUG, "主体A", "entity/person");
     seedPage(db, vaultPath, TOPIC_SLUG, "主题D", "entity/person");
     seedLink(db, IDENTITY_SLUG, TOPIC_SLUG, "trusted");
@@ -210,27 +210,16 @@ describe("frontdoor personal current-state guard (#385) — real SQLite e2e", ()
         : slug === TOPIC_SLUG ? { type: "entity/person", title: "主题D" } : null,
     };
     const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(result.outcome).toBe("pass");
-    expect(result.filteredResults?.length).toBe(1);
-    expect(result.verifiedTimeline?.length).toBe(1);
-    expect(result.verifiedTimeline?.[0]?.summary).toBe("已完成相关检查");
+    expect(result.outcome).toBe("insufficient_current_context");
   });
 
-  test("P1#1 cross-neighbor leak: neighbor B evidence does not authorize candidate A", () => {
+  // Non-personal query: guard does not activate (zero DB calls beyond search)
+  test("non-personal query does not activate guard", () => {
     seedPage(db, vaultPath, IDENTITY_SLUG, "主体A", "entity/person");
-    seedPage(db, vaultPath, OLD_REMINDER_SLUG, "旧提醒", "record");
-    seedPage(db, vaultPath, NEIGHBOR_B, "邻居B", "entity/person");
-    seedLink(db, IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted");
-    seedLink(db, IDENTITY_SLUG, NEIGHBOR_B, "trusted");
-    // Only B has current-state evidence; A (the search result) has NONE
-    seedTimeline(db, NEIGHBOR_B, "已完成相关检查", "2026-06-01", "trusted");
-
-    const pages = {
-      getBySlug: (slug: string) => slug === IDENTITY_SLUG ? { type: "entity/person", title: "主体A" } : null,
-    };
-    const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
-    expect(result.outcome).toBe("insufficient_current_context");
-    expect(result.reason).toBe("no candidate with trusted current-state evidence");
+    const pages = { getBySlug: (slug: string) => slug === IDENTITY_SLUG ? { type: "entity/person", title: "主体A" } : null };
+    const result = applyPersonalCurrentStateGuard(db, pages, "实体A是什么", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(result.activated).toBe(false);
+    expect(result.outcome).toBe("pass");
   });
 });
 

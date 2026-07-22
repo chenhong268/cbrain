@@ -13,7 +13,6 @@ import type { SearchResult } from "../../src/core/retrieval/search.js";
 const IDENTITY_SLUG = "brain/entities/subject-a";
 const TOPIC_SLUG = "brain/entities/topic-d";
 const OLD_REMINDER_SLUG = "records/reminder-old";
-const NEIGHBOR_B = "brain/entities/neighbor-b";
 
 function makeResult(slug: string): SearchResult {
   return { slug, score: 0.5, snippet: "匿名片段", source: "hybrid" };
@@ -21,41 +20,16 @@ function makeResult(slug: string): SearchResult {
 
 function makeLink(from: string, to: string, trustState: string): LinkRow {
   return {
-    id: Math.floor(Math.random() * 1_000_000),
-    from_slug: from,
-    to_slug: to,
-    relation: "关联",
-    weight: 0.5,
-    strength: "medium",
-    context: null,
-    source_type: "wikilink",
-    confidence: 0.8,
-    created_at: "2026-01-01T00:00:00Z",
-    last_validated_at: null,
-    effective_weight: 0.4,
-    source_page_slug: from,
-    trust_state: trustState,
+    id: 1, from_slug: from, to_slug: to, relation: "关联", weight: 0.5,
+    strength: "medium", context: null, source_type: "wikilink", confidence: 0.8,
+    created_at: "2026-01-01T00:00:00Z", last_validated_at: null, effective_weight: 0.4,
+    source_page_slug: from, trust_state: trustState,
   };
 }
 
-interface TimelineEntry {
-  page_slug: string;
-  event_date: string;
-  summary: string;
-  trust_state?: string;
-}
-
-function makeMockDb(opts: {
-  trustedLinks?: LinkRow[];
-  timelineBySlug?: Record<string, TimelineEntry[]>;
-} = {}): CBrainDB {
+function makeMockDb(opts: { trustedLinks?: LinkRow[] } = {}): CBrainDB {
   return {
     getBoundedTrustedLinks: (_slug: string, _limit: number) => opts.trustedLinks ?? [],
-    getBoundedTrustedTimelineForSlugs: (slugs: string[], _limit: number) => {
-      const out: TimelineEntry[] = [];
-      for (const s of slugs) out.push(...(opts.timelineBySlug?.[s] ?? []));
-      return out;
-    },
   } as unknown as CBrainDB;
 }
 
@@ -65,19 +39,20 @@ function makeMockPages(identityPage?: { type: string; title?: string } | null): 
   return { getBySlug: (slug: string) => store[slug] ?? null };
 }
 
-const tl = (summary: string, slug = TOPIC_SLUG, date = "2026-06-01"): TimelineEntry => ({
-  page_slug: slug, event_date: date, summary, trust_state: "trusted",
-});
-
 // ── Intent detection ──
 
-describe("isFirstPersonQuery (#385)", () => {
+describe("isFirstPersonQuery (#385) — casing matrix (P1#2)", () => {
   test.each([
-    "我该去复查了吗",
-    "我的体检到期了吗",
     "我该吃药了吗",
     "should I go for a checkup",
-  ])("detects first-person in: %s", (q) => expect(isFirstPersonQuery(q)).toBe(true));
+    "should i go for a checkup", // lowercase i
+    "Is My checkup overdue", // capitalized My
+    "IS MY CHECKUP OVERDUE", // all caps
+    "is my medication due",
+    "my checkup is overdue",
+  ])("detects first-person in: %s", (q) => {
+    expect(isFirstPersonQuery(q)).toBe(true);
+  });
 
   test.each(["实体A是什么", "主题D的信息"])(
     "no first-person in: %s", (q) => expect(isFirstPersonQuery(q)).toBe(false),
@@ -96,7 +71,9 @@ describe("isPersonalCurrentStateQuery (#385)", () => {
     "我该吃药了吗",
     "我需不需要复查",
     "should I go for a checkup",
+    "should i go for a checkup", // P1#2 lowercase
     "is it time for my checkup",
+    "is it time for my checkup", // P1#2 mixed case
     "do I need to see a doctor",
   ])("activates for: %s", (q) => expect(isPersonalCurrentStateQuery(q)).toBe(true));
 
@@ -123,104 +100,58 @@ describe("isPersonalCurrentStateQuery (#385)", () => {
   });
 });
 
-// ── Guard logic ──
+// ── Guard logic — phase-1 always fail-closed ──
 
-describe("applyPersonalCurrentStateGuard (#385)", () => {
+describe("applyPersonalCurrentStateGuard (#385) — phase-1 always insufficient", () => {
   test("non-personal query does not activate", () => {
     const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity/person" }), "实体A是什么", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.activated).toBe(false);
+    expect(r.outcome).toBe("pass");
   });
 
   test("no identity → insufficient", () => {
-    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages(), "我该不该去复查", [makeResult(OLD_REMINDER_SLUG)], undefined);
+    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages(), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], undefined);
+    expect(r.outcome).toBe("insufficient_current_context");
     expect(r.reason).toBe("no identity mapping configured");
   });
 
+  test("identity page not found → insufficient", () => {
+    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages(null), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
+    expect(r.reason).toBe("identity page not found");
+  });
+
   test("bare entity type → insufficient", () => {
-    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity" }), "我该不该去复查", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(r.reason).toBe("identity is not entity/person");
+  });
+
+  test("entity/company type → insufficient", () => {
+    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity/company" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.reason).toBe("identity is not entity/person");
   });
 
   test("no trusted chain → insufficient", () => {
     const db = makeMockDb({ trustedLinks: [] });
-    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该不该去复查", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
+    expect(r.outcome).toBe("insufficient_current_context");
     expect(r.reason).toBe("no trusted subject-to-topic chain");
   });
 
-  // P1#1 r4: generic historical event does NOT qualify as current-state evidence
-  test("candidate with only generic history event → insufficient", () => {
+  // P1#1 r5 CORE: trusted chain exists but phase-1 still cannot prove current state
+  test("trusted chain exists → STILL insufficient (phase-1 semantic limit)", () => {
     const db = makeMockDb({
       trustedLinks: [makeLink(IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted")],
-      timelineBySlug: { [OLD_REMINDER_SLUG]: [tl("首次创建提醒", OLD_REMINDER_SLUG, "2018-01-01")] },
     });
     const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("insufficient_current_context");
-    expect(r.reason).toBe("no candidate with trusted current-state evidence");
+    expect(r.reason).toContain("phase-1 model cannot prove current state");
+    expect(r.debugSearchMaterial).toEqual([makeResult(OLD_REMINDER_SLUG)]);
   });
 
-  // P1#1: candidate with current-state evidence (completed) → pass
-  test("candidate with completed evidence → pass", () => {
+  // P1#1 r5: even with completed/pending evidence, still insufficient
+  test("candidate with completed evidence → STILL insufficient", () => {
     const db = makeMockDb({
       trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
-      timelineBySlug: { [TOPIC_SLUG]: [tl("已完成相关检查")] },
-    });
-    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("pass");
-    expect(r.filteredResults?.length).toBe(1);
-    expect(r.verifiedTimeline?.length).toBeGreaterThan(0);
-  });
-
-  // Cross-neighbor leak still blocked
-  test("cross-neighbor leak: neighbor B has evidence, candidate A does not → insufficient", () => {
-    const db = makeMockDb({
-      trustedLinks: [makeLink(IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted"), makeLink(IDENTITY_SLUG, NEIGHBOR_B, "trusted")],
-      timelineBySlug: {
-        [NEIGHBOR_B]: [tl("已完成相关检查", NEIGHBOR_B)],
-        [OLD_REMINDER_SLUG]: [],
-      },
-    });
-    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("insufficient_current_context");
-  });
-
-  // P2#4: negation normalization
-  test("未完成 is pending only (not completed)", () => {
-    const db = makeMockDb({
-      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
-      timelineBySlug: { [TOPIC_SLUG]: [tl("未完成相关检查")] },
-    });
-    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("pass"); // pending-only, no conflict
-  });
-
-  test("还没完成 is pending only", () => {
-    const db = makeMockDb({
-      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
-      timelineBySlug: { [TOPIC_SLUG]: [tl("还没完成相关检查")] },
-    });
-    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("pass");
-  });
-
-  test("not completed is pending only", () => {
-    const db = makeMockDb({
-      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
-      timelineBySlug: { [TOPIC_SLUG]: [tl("not completed the checkup")] },
-    });
-    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("pass");
-  });
-
-  // Conflict: completed + pending on same candidate → skip
-  test("conflicting completed+pending on same candidate → insufficient", () => {
-    const db = makeMockDb({
-      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
-      timelineBySlug: {
-        [TOPIC_SLUG]: [
-          tl("已完成相关检查", TOPIC_SLUG, "2026-06-01"),
-          tl("待复查", TOPIC_SLUG, "2026-07-01"),
-        ],
-      },
     });
     const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("insufficient_current_context");

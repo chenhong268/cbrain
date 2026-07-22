@@ -64,7 +64,7 @@ export function shouldCompleteEvidence(query: string, mode: EvidenceMode): boole
  * Combined with action intent via AND, false positives fail closed safely.
  */
 const FIRST_PERSON_CN = /我(?!们)/;
-const FIRST_PERSON_EN = /\b(?:I|my|mine|myself)\b/;
+const FIRST_PERSON_EN = /\b(?:I|my|mine|myself)\b/i;
 
 export function isFirstPersonQuery(query: string): boolean {
   try {
