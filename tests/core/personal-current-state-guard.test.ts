@@ -100,16 +100,22 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     expect(isPersonalCurrentStateQuery(q)).toBe(true);
   });
 
-  // r10: false positives — ordinary queries about medication as a topic
+  // r10/r11: false positives — ordinary queries about medication as a topic
   test.each([
     "My medication article is on the desk",
     "What did I write on medications?",
     "Show me my notes on medication",
     "What medications are discussed in my paper?",
     "What medicines are available in my country?",
+    "What medications am I writing about?",
+    "What medicines am I comparing?",
+    "What medications are you taking for my report?",
     "我现在研究的药物是什么？",
     "我目前关注的药物有哪些？",
     "我当前文章里的药物是什么？",
+    "我用什么方法识别药物？",
+    "我吃什么食物会影响药物吸收？",
+    "我服装里有哪些药物图案？",
   ])("does NOT activate for medication-as-topic: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(false);
   });
