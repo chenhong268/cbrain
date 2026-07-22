@@ -85,7 +85,7 @@ export const FRONTDOOR_DATA_KEYS: ReadonlySet<string> = new Set([
   "seed", "upward", "downward", "name", "events", "date", "result", "status", "evidence_board",
   "answer_context", "top_claims", "topic", "stats", "totalEntities", "totalLinks", "totalEvents",
   "results", "result_count", "proactive_hints", "text", "why", "matched_clues", "dimension", "hint_used",
-  "evidence", "historical_evidence",
+  "evidence", "subject_context_candidates", "source", "provenance", "topic_relevance",
 ]);
 
 type SummaryKind = "recall" | "query" | "frontdoor";
@@ -219,16 +219,25 @@ function projectFrontdoorDetails(route: string, raw: Record<string, unknown>): R
 
 function projectContentDetails(raw: Record<string, unknown>): Record<string, unknown> {
   const entities = asRecords(raw.entities).slice(0, 10).map(projectNamedSnippet);
-  const histEvidence = asRecords(raw.historical_evidence).slice(0, 5).map((item) => ({
-    ...(typeof item.page_slug === "string" ? { slug: boundText(item.page_slug, 200) } : {}),
-    ...(typeof item.event_date === "string" ? { date: boundText(item.event_date, 50) } : {}),
-    ...(typeof item.summary === "string" ? { summary: boundText(item.summary, PROJECTED_CLAIM_MAX) } : {}),
-    ...(typeof item.trust_state === "string" ? { trust: item.trust_state as string } : {}),
-  }));
+  const subjectContextCandidates = asRecords(raw.subject_context_candidates)
+    .slice(0, 5)
+    .map((item, index) => {
+      const provenance =
+        item.provenance === "trusted" || item.provenance === "user_thought"
+          ? item.provenance
+          : undefined;
+      return {
+        source: `subject-context-candidate-${index + 1}`,
+        date: typeof item.event_date === "string" ? boundText(item.event_date, 50) : undefined,
+        summary: typeof item.summary === "string" ? boundText(item.summary, PROJECTED_CLAIM_MAX) : undefined,
+        ...(provenance ? { provenance } : {}),
+        topic_relevance: "unverified" as const,
+      };
+    });
   return {
     ...(typeof raw.query === "string" ? { query: boundText(raw.query, 1_000) } : {}),
     ...(entities.length > 0 ? { entities } : {}),
-    ...(histEvidence.length > 0 ? { historical_evidence: histEvidence } : {}),
+    ...(subjectContextCandidates.length > 0 ? { subject_context_candidates: subjectContextCandidates } : {}),
     ...(typeof raw.summary === "string" ? { summary: boundText(raw.summary) } : {}),
   };
 }

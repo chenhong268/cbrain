@@ -87,7 +87,11 @@ function makeMockHarness(
   return { call: (args) => handler!(args), searchCalls, guardDbCalls };
 }
 
-interface LegacyEnvelope { summary: { status: string }; raw: { entities: unknown[]; historical_evidence?: unknown[] }; }
+interface LegacyEnvelope {
+  display: string;
+  summary: { status: string };
+  raw: { entities: unknown[]; subject_context_candidates?: unknown[] };
+}
 function parsedLegacy(output: { content: Array<{ type: string; text: string }> }): LegacyEnvelope {
   return JSON.parse(output.content[0]!.text) as LegacyEnvelope;
 }
@@ -98,9 +102,10 @@ describe("frontdoor personal current-state guard (#385) — mock", () => {
     const env = parsedLegacy(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.entities).toEqual([]);
+    expect(env.display).toContain("没有可用的个人身份映射");
   });
 
-  test("trusted chain → degraded + historical_evidence in legacy response", async () => {
+  test("trusted chain → degraded + same-subject candidates in legacy response", async () => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
       trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
@@ -108,31 +113,51 @@ describe("frontdoor personal current-state guard (#385) — mock", () => {
     });
     const env = parsedLegacy(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("degraded");
-    expect(env.raw.historical_evidence).toBeDefined();
-    expect((env.raw.historical_evidence as unknown[]).length).toBe(1);
+    expect(env.raw.subject_context_candidates).toBeDefined();
+    expect((env.raw.subject_context_candidates as unknown[]).length).toBe(1);
   });
 
-  // P1#1 r7: structured mode also includes historical_evidence
-  test("structured mode includes historical_evidence in projected data", async () => {
+  // P1#2 r8: final structured sanitization preserves safe source + provenance
+  test("structured mode preserves safe source and provenance", async () => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
       trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
-      timelineBySlug: { [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "trusted" }] },
+      timelineBySlug: { [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "user_thought" }] },
       outputMode: "structured",
     });
     const output = await h.call({ query: "我该吃药了吗", detail: "normal" });
-    const text = output.content[0]!.text;
-    // Structured mode output should contain historical_evidence in projected data
-    expect(text).toContain("historical_evidence");
-    expect(text).toContain("已完成相关检查");
+    const parsed = JSON.parse(output.content[0]!.text) as {
+      data: { details?: { subject_context_candidates?: Array<Record<string, unknown>> } };
+    };
+    const candidate = parsed.data.details?.subject_context_candidates?.[0];
+    expect(candidate).toEqual({
+      source: "subject-context-candidate-1",
+      date: "2026-06-01",
+      summary: "已完成相关检查",
+      provenance: "user_thought",
+      topic_relevance: "unverified",
+    });
+    expect(candidate).not.toHaveProperty("slug");
+    expect(candidate).not.toHaveProperty("trust");
   });
 
-  // P2#4: when evidence exists, next_steps differ
-  test("trusted chain with evidence → next_steps about structured status", async () => {
+  test("trusted chain with candidates → next_steps about structured status", async () => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
       trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
       timelineBySlug: { [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成", trust_state: "trusted" }] },
+    });
+    const env = parsedLegacy(await h.call({ query: "我该吃药了吗", detail: "normal" }));
+    const text = JSON.stringify(env);
+    expect(text).toContain("结构化状态");
+    expect(text).not.toContain("补充主体与主题的关联");
+    expect(text).toContain("同主体候选上下文");
+  });
+
+  test("trusted chain without timeline → structured-state next_steps, not relation", async () => {
+    const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
+      identityPersonSlug: IDENTITY_SLUG,
+      trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
     });
     const env = parsedLegacy(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     const text = JSON.stringify(env);
@@ -210,14 +235,34 @@ describe("frontdoor personal current-state guard (#385) — real SQLite e2e", ()
     seedTimeline(db, NEIGHBOR_B, "已完成相关检查", "2026-07-01", "trusted");
 
     const pages = { getBySlug: (slug: string) => slug === IDENTITY_SLUG ? { type: "entity/person", title: "主体A" } : null };
-    // Search only found old reminder — neighbor B excluded
     const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(result.outcome).toBe("insufficient_current_context");
-    // Guard discovers neighbor B's record even though search didn't return it
-    expect(result.historicalEvidence).toBeDefined();
-    expect(result.historicalEvidence!.length).toBe(1);
-    expect(result.historicalEvidence![0]!.page_slug).toBe(NEIGHBOR_B);
-    expect(result.historicalEvidence![0]!.summary).toBe("已完成相关检查");
+    expect(result.subjectContextCandidates).toBeDefined();
+    expect(result.subjectContextCandidates!.length).toBe(1);
+    expect(result.subjectContextCandidates![0]!.source).toBe("subject-context-candidate-1");
+    expect(result.subjectContextCandidates![0]!.summary).toBe("已完成相关检查");
+  });
+
+  test("storage boundary rejects empty and malformed semantic dates", () => {
+    seedPage(db, vaultPath, NEIGHBOR_B, "更新记录", "entity/person");
+    const invalidId = db.addTimelineEntry(NEIGHBOR_B, "非法日期", "已完成", "manual");
+    const emptyId = db.addTimelineEntry(NEIGHBOR_B, "空日期", "   ", "manual");
+    const invalidRows = db.rawDb.prepare("SELECT event_date FROM timeline WHERE id IN (?, ?)").all(invalidId, emptyId) as Array<{ event_date: string | null }>;
+    expect(invalidRows.every((row) => row.event_date === null)).toBe(true);
+
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, summary, event_date, trust_state) VALUES (?, ?, ?, ?)").run(NEIGHBOR_B, "遗留非法日期", "2026-99-01", "trusted");
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, summary, event_date, trust_state) VALUES (?, ?, ?, ?)").run(NEIGHBOR_B, "空日期", "", "trusted");
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, summary, event_date, trust_state) VALUES (?, ?, ?, ?)").run(NEIGHBOR_B, "有效日期", "2026-01-01", "trusted");
+    const rows = db.getBoundedTrustedTimelineForSlugs([NEIGHBOR_B], 5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.summary).toBe("有效日期");
+    const updatedId = db.addTimelineEntry(NEIGHBOR_B, "待更新", "2026-01-02", "manual");
+    db.updateTimelineDate(updatedId, "2026-99-01");
+    const updated = db.rawDb.prepare("SELECT event_date FROM timeline WHERE id = ?").get(updatedId) as { event_date: string | null };
+    expect(updated.event_date).toBeNull();
+
+    const searchRows = db.searchTimeline(undefined, undefined, 1);
+    expect(searchRows[0]!.summary).toBe("有效日期");
   });
 
   test("non-personal query does not activate", () => {

@@ -78,12 +78,10 @@ export function isFirstPersonQuery(query: string): boolean {
 /**
  * #385 — personal current-state guard intent detection.
  *
- * The guard activates ONLY for explicit "current advice" predicates —
- * the speaker asks whether something SHOULD be done or IS due.
- *
- * Historical fact recall ("我上次复查结果怎么样", "What am I currently
- * reading?") must NOT trigger. Time markers + domain compounds are
- * ambiguous with fact recall and are excluded entirely (r7).
+ * The guard activates for explicit advice predicates OR a narrowly
+ * controlled medication current-state query. Generic current-state
+ * grammar remains excluded: "What am I currently reading?" must not
+ * activate.
  */
 
 /**
@@ -94,28 +92,33 @@ const ACTION_PREDICATE_CN = /该不该|要不要|还要不要|需不需要|该�
 
 /**
  * EN advice predicates — request a recommendation or current status.
- * r7: removed generic phrases (am I currently / currently taking / on /
- * still taking) that caught "What am I currently reading?" and
- * "Am I still taking notes?". Only predicates that unambiguously
- * request advice/recommendation remain.
+ * Generic "am I currently" / "still taking" phrases are intentionally
+ * absent; they are too broad without a controlled domain.
  */
 const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take)\b/i;
 
 /**
- * #385 — closed grammar for personal current-advice queries.
- *
- * Activates ONLY when BOTH conditions hold:
- * 1. First-person phrasing (the speaker is the subject)
- * 2. An explicit ADVICE PREDICATE (该不该/需不需要/到期/should I/overdue…).
- *
- * Time+domain compounds ("我上次复查结果") are excluded — they are
- * historical fact recall, not current advice requests.
+ * P1#1 r8: medication current-state phrases are allowed only when the
+ * medication domain is explicit. This protects:
+ *   "What medication am I currently on?"
+ *   "我现在在吃什么药？"
+ * without activating generic queries about reading, projects, or notes.
  */
+const CURRENT_MEDICATION_STATE_CN =
+  /(?:现在|目前|当前)\s*(?:在)?(?:吃|服用|用着|用)\s*(?:什么|哪种|哪些)?\s*(?:药|药物|药品)(?:吗|[？?]|$)/;
+const CURRENT_MEDICATION_STATE_EN =
+  /\b(?:(?:what|which)\s+(?:medications?|medicines?)\s+am\s+i\s+(?:(?:currently\s+)?(?:on|taking)|(?:on|taking)\s+currently)|am\s+i\s+currently\s+(?:taking|on)\s+(?:any\s+)?(?:medications?|medicines?|my\s+medication))\b/i;
+
 export function isPersonalCurrentStateQuery(query: string): boolean {
   if (!isFirstPersonQuery(query)) return false;
   try {
     const normalized = query.normalize("NFKC").trim();
-    return ACTION_PREDICATE_CN.test(normalized) || ACTION_PREDICATE_EN.test(normalized);
+    return (
+      ACTION_PREDICATE_CN.test(normalized) ||
+      ACTION_PREDICATE_EN.test(normalized) ||
+      CURRENT_MEDICATION_STATE_CN.test(normalized) ||
+      CURRENT_MEDICATION_STATE_EN.test(normalized)
+    );
   } catch {
     return false;
   }

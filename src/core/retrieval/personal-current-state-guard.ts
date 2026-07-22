@@ -1,48 +1,48 @@
 /**
  * #385 — personal current-state guard for content recall.
  *
- * A deterministic guard that activates ONLY for "current advice" queries
- * (first-person + action predicate). Historical fact recall
- * ("我上次血压是多少") does NOT activate.
+ * A deterministic guard that activates for explicit current advice or
+ * controlled medication current-state queries (first-person + closed grammar).
+ * Historical fact recall ("我上次血压是多少") does NOT activate.
  *
- * Safety guarantee (phase 1): for current-advice queries, the guard
- * returns insufficient — it cannot prove current state without structured
- * status/expiry/supersession. BUT when a trusted subject chain exists,
- * the guard reads bounded trusted timeline and returns it as auditable
- * HISTORICAL evidence (with trust_state preserved). The caller includes
- * this evidence in a degraded response so the user can see what was found
- * without it being presented as a confident current recommendation.
+ * Safety guarantee (phase 1): the guard returns insufficient — it cannot
+ * prove current state without structured status/expiry/supersession. When a
+ * trusted subject chain exists, it returns bounded same-subject context
+ * candidates with explicit provenance. Topic relevance remains unverified;
+ * the caller labels them as candidates rather than current evidence.
  *
  * Non-personal queries short-circuit before any DB work (zero overhead).
  */
 import type { CBrainDB, LinkRow } from "../../storage/sqlite.js";
+import { isSupportedSemanticEventDate } from "../../storage/sqlite.js";
 import type { SearchResult } from "./search.js";
 import { isPersonalCurrentStateQuery } from "./recall-intent.js";
 
 export type PersonalGuardOutcome = "pass" | "insufficient_current_context";
+export type PersonalGuardGap = "identity_mapping" | "subject_relation" | "structured_state";
+export type GuardProvenance = "trusted" | "user_thought";
 
-/** Historical timeline evidence preserved for auditability. */
-export interface GuardTimelineEvidence {
-  page_slug: string;
+/** Same-subject context candidate; topic relevance is intentionally unverified. */
+export interface SubjectContextCandidate {
+  source: string;
   event_date: string;
   summary: string;
-  trust_state: string;
+  provenance: GuardProvenance;
+  topic_relevance: "unverified";
 }
-
 export interface PersonalGuardResult {
   activated: boolean;
   outcome: PersonalGuardOutcome;
   subjectSlug?: string;
+  gap?: PersonalGuardGap;
   reason?: string;
   /** Original search material — caller must not present as current advice. */
   debugSearchMaterial?: SearchResult[];
   /**
-   * #385 P1#1: trusted historical timeline evidence for auditability.
-   * Returned even when outcome is insufficient — the caller includes it
-   * in a degraded response so the user sees what was found.
-   * trust_state is preserved so user_thought is distinguishable from fact.
+   * #385: bounded same-subject context candidates for auditability.
+   * These are not asserted to be related to the query topic or current state.
    */
-  historicalEvidence?: GuardTimelineEvidence[];
+  subjectContextCandidates?: SubjectContextCandidate[];
 }
 
 /** Minimal page lookup — avoids coupling the guard to the full PageManager. */
@@ -74,6 +74,7 @@ export function applyPersonalCurrentStateGuard(
     return {
       activated: true,
       outcome: "insufficient_current_context",
+      gap: "identity_mapping",
       reason: "no identity mapping configured",
       debugSearchMaterial: results,
     };
@@ -84,6 +85,7 @@ export function applyPersonalCurrentStateGuard(
     return {
       activated: true,
       outcome: "insufficient_current_context",
+      gap: "identity_mapping",
       reason: "identity page not found",
       debugSearchMaterial: results,
     };
@@ -93,6 +95,7 @@ export function applyPersonalCurrentStateGuard(
     return {
       activated: true,
       outcome: "insufficient_current_context",
+      gap: "identity_mapping",
       reason: "identity is not entity/person",
       debugSearchMaterial: results,
     };
@@ -102,48 +105,45 @@ export function applyPersonalCurrentStateGuard(
   const trustedLinks: LinkRow[] = db.getBoundedTrustedLinks(identityPersonSlug, MAX_TRUSTED_LINKS);
   const trustedNeighbors = new Set<string>();
   for (const link of trustedLinks) {
-    trustedNeighbors.add(link.from_slug === identityPersonSlug ? link.to_slug : link.from_slug);
+    const neighbor: string = link.from_slug === identityPersonSlug ? link.to_slug : link.from_slug;
+    if (neighbor !== identityPersonSlug) trustedNeighbors.add(neighbor);
   }
-  const connectedResults = results.filter(
-    (r) => r.slug === identityPersonSlug || trustedNeighbors.has(r.slug),
-  );
-
+  const connectedResults = results.filter((r) => trustedNeighbors.has(r.slug));
   // P2#4: only claim "no chain" within the bounded inspection scope.
   if (connectedResults.length === 0) {
     return {
       activated: true,
       outcome: "insufficient_current_context",
       subjectSlug: identityPersonSlug,
+      gap: "subject_relation",
       reason: "no trusted subject-to-topic chain found in bounded inspection",
       debugSearchMaterial: results,
     };
   }
 
-  // Step 4 (P1#2): read bounded trusted timeline for ALL trusted neighbors,
-  // NOT just search-connected candidates. The core #385 scenario: search
-  // hits an old reminder, but a newer record on a trusted neighbor is
-  // excluded from top-k. Querying the full trusted neighborhood ensures
-  // such records are discovered as auditable historical evidence.
+  // Step 4 (P1#2): read bounded timeline for ALL trusted neighbors, not just
+  // search-connected candidates. The results are same-subject candidates only:
+  // link trust does not establish relevance to this query's topic.
   const timelineSlugs = [identityPersonSlug, ...trustedNeighbors];
   const trustedTimeline = db.getBoundedTrustedTimelineForSlugs(timelineSlugs, MAX_TIMELINE_BUDGET);
-  // P2#5: do NOT promote unknown provenance to trusted. Only include
-  // entries with explicit trusted/user_thought; skip others.
-  const historicalEvidence: GuardTimelineEvidence[] = trustedTimeline
-    .filter((t) => t.trust_state === "trusted" || t.trust_state === "user_thought")
-    .map((t) => ({
-      page_slug: t.page_slug,
-      event_date: t.event_date,
+  const subjectContextCandidates: SubjectContextCandidate[] = trustedTimeline
+    .filter((t) => (t.trust_state === "trusted" || t.trust_state === "user_thought") && isSupportedSemanticEventDate(t.event_date))
+    .map((t, index) => ({
+      source: `subject-context-candidate-${index + 1}`,
+      event_date: t.event_date.trim(),
       summary: t.summary,
-      trust_state: t.trust_state as "trusted" | "user_thought",
+      provenance: t.trust_state as GuardProvenance,
+      topic_relevance: "unverified" as const,
     }));
-
-  // Step 5: phase-1 semantic limit — insufficient, but with auditable evidence.
+  // state/supersession is not structurally proven. This gap is distinct from
+  // a missing subject-to-topic relation even when candidates are empty.
   return {
     activated: true,
     outcome: "insufficient_current_context",
     subjectSlug: identityPersonSlug,
-    reason: "phase-1 model cannot prove current state without structured status",
+    gap: "structured_state",
+    reason: "trusted subject-to-topic chain found; current state lacks structured status",
     debugSearchMaterial: results,
-    historicalEvidence,
+    subjectContextCandidates,
   };
 }

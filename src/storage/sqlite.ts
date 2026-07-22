@@ -338,6 +338,34 @@ export interface LinkRow {
   trust_state?: string;
   evidence?: string;
 }
+export type SemanticEventDate = string;
+export interface BoundedTrustedTimelineRow {
+  page_slug: string;
+  event_date: SemanticEventDate;
+  summary: string;
+  trust_state: "trusted" | "user_thought";
+}
+
+/**
+ * Supported semantic timeline dates. The timeline model stores partial dates
+ * from extraction, so year, year-month, and full ISO calendar dates are valid.
+ * Free text, empty strings, impossible month/day values, and timestamps are not.
+ */
+export function isSupportedSemanticEventDate(value: string | null | undefined): value is SemanticEventDate {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/.exec(value.trim());
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = match[2] === undefined ? undefined : Number(match[2]);
+  const day = match[3] === undefined ? undefined : Number(match[3]);
+  if (year < 1 || month === undefined) return true;
+  if (month < 1 || month > 12) return false;
+  if (day === undefined) return true;
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = month === 2 ? (isLeapYear ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31;
+  return day >= 1 && day <= daysInMonth;
+}
+
 
 export interface ProvenanceInput {
   source_page_slug?: string;
@@ -965,32 +993,44 @@ export class CBrainDB {
 
   getTimeline(pageSlug: string, includeInactive = false): Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }> {
     const activeFilter = includeInactive ? "" : " AND (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
-    return this.prepare(
+    const rows = this.prepare(
       `SELECT id, event_date, source, summary, created_at, trust_state, source_page_slug, evidence FROM timeline WHERE page_slug = $slug${activeFilter} ORDER BY event_date DESC, id DESC`
-    ).all({ $slug: pageSlug }) as any[];
+    ).all({ $slug: pageSlug }) as Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>;
+    return rows.map((row) => ({
+      ...row,
+      event_date: isSupportedSemanticEventDate(row.event_date?.trim()) ? row.event_date!.trim() : null,
+    }));
   }
 
   addTimelineEntry(pageSlug: string, summary: string, eventDate?: string, source?: string, provenance?: ProvenanceInput): number {
+    const trimmedDate = eventDate?.trim();
+    const semanticDate = isSupportedSemanticEventDate(trimmedDate) ? trimmedDate : null;
     const result = this.prepare(
       "INSERT INTO timeline (page_slug, summary, event_date, source, source_page_slug, trust_state, evidence) VALUES ($slug, $summary, $date, $source, $sps, $ts, $ev)"
-    ).run({ $slug: pageSlug, $summary: summary, $date: eventDate ?? null, $source: source ?? null, $sps: provenance?.source_page_slug ?? null, $ts: "candidate", $ev: provenance?.evidence ?? null });
+    ).run({ $slug: pageSlug, $summary: summary, $date: semanticDate, $source: source ?? null, $sps: provenance?.source_page_slug ?? null, $ts: "candidate", $ev: provenance?.evidence ?? null });
     return Number(result.lastInsertRowid);
   }
 
   searchTimeline(keyword?: string, dateFrom?: string, limit = 10): Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string }> {
     let sql = "SELECT page_slug, event_date, source, summary FROM timeline WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const params: Record<string, string | number> = { $limit: limit };
-
     if (keyword) {
       sql += " AND summary LIKE $keyword";
       params.$keyword = `%${keyword}%`;
     }
+
     if (dateFrom) {
       sql += " AND event_date >= $dateFrom";
       params.$dateFrom = dateFrom;
     }
+    sql +=
+      " AND (event_date IS NULL OR (trim(event_date) <> '' AND substr(trim(event_date), 1, 4) <> '0000' AND (trim(event_date) GLOB '[0-9][0-9][0-9][0-9]' OR (trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]' AND substr(trim(event_date), 6, 2) BETWEEN '01' AND '12') OR (trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND substr(trim(event_date), 6, 2) BETWEEN '01' AND '12' AND substr(trim(event_date), 9, 2) BETWEEN '01' AND '31' AND date(trim(event_date)) = trim(event_date)))))";
     sql += " ORDER BY event_date DESC, id DESC LIMIT $limit";
-    return this.prepare(sql).all(params) as any[];
+    const rows = this.prepare(sql).all(params) as Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string }>;
+    return rows.map((row) => ({
+      ...row,
+      event_date: isSupportedSemanticEventDate(row.event_date?.trim()) ? row.event_date!.trim() : null,
+    }));
   }
 
   // ─── Chunk operations ────────────────────────────────────────
@@ -2359,28 +2399,45 @@ export class CBrainDB {
   }
 
   /**
-   * #385 P1#1: dedicated bounded timeline fetch for the personal current-state
-   * guard. Reads timeline DIRECTLY for the given slugs (subject + trusted
-   * one-hop neighbors) — does NOT expand the graph further.
+   * #385: bounded timeline fetch for the personal current-state guard.
+   * Reads the subject and trusted one-hop neighbors only.
    *
-   * Constraints:
-   * - trust_state IN ('trusted','user_thought') only (explicit provenance).
-   * - event_date IS NOT NULL (semantic dates only, never created_at).
-   * - ORDER BY event_date DESC, id DESC with SQL LIMIT (bounded + deterministic).
-   *
-   * This replaces the incorrect reuse of getRecentEventsInNetwork which
-   * expanded one more hop, excluded the input nodes, and allowed candidate/null.
+   * Explicit provenance and supported semantic dates are required. SQL
+   * filters the supported shapes before LIMIT, so malformed legacy rows
+   * cannot consume the bounded result budget.
    */
-  getBoundedTrustedTimelineForSlugs(slugs: string[], limit: number): Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }> {
-    if (slugs.length === 0) return [];
+  getBoundedTrustedTimelineForSlugs(slugs: string[], limit: number): BoundedTrustedTimelineRow[] {
+    if (slugs.length === 0 || limit <= 0) return [];
     const placeholders = slugs.map(() => "?").join(",");
-    return this.prepare(
+    const rows = this.prepare(
       `SELECT page_slug, event_date, summary, trust_state FROM timeline
        WHERE page_slug IN (${placeholders})
        AND event_date IS NOT NULL
+       AND trim(event_date) <> ''
+       AND substr(trim(event_date), 1, 4) <> '0000'
        AND trust_state IN ('trusted','user_thought')
+       AND (
+         trim(event_date) GLOB '[0-9][0-9][0-9][0-9]'
+         OR trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-0[1-9]'
+         OR trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-1[0-2]'
+         OR (
+           trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+           AND date(trim(event_date)) = trim(event_date)
+         )
+       )
        ORDER BY event_date DESC, id DESC LIMIT ?`
-    ).all(...slugs, limit) as Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }>;
+    ).all(...slugs, limit) as Array<{
+      page_slug: string;
+      event_date: string | null;
+      summary: string;
+      trust_state?: string | null;
+    }>;
+    return rows
+      .filter((row): row is BoundedTrustedTimelineRow =>
+        isSupportedSemanticEventDate(row.event_date) &&
+        (row.trust_state === "trusted" || row.trust_state === "user_thought")
+      )
+      .slice(0, limit);
   }
 
   getOutgoingSlugs(slug: string, includeInactive = false): string[] {
@@ -2770,7 +2827,9 @@ export class CBrainDB {
   }
 
   updateTimelineDate(id: number, newDate: string): void {
-    this.prepare("UPDATE timeline SET event_date = $date WHERE id = $id").run({ $id: id, $date: newDate });
+    const trimmedDate = newDate.trim();
+    const semanticDate = isSupportedSemanticEventDate(trimmedDate) ? trimmedDate : null;
+    this.prepare("UPDATE timeline SET event_date = $date WHERE id = $id").run({ $id: id, $date: semanticDate });
   }
 
   getDuplicateTimelineIds(): number[] {

@@ -78,6 +78,17 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "is my checkup overdue",
   ])("activates for advice: %s", (q) => expect(isPersonalCurrentStateQuery(q)).toBe(true));
 
+  test.each([
+    "What medication am I currently on?",
+    "What medications am I currently taking?",
+    "What medication am I taking currently?",
+    "What medicine am I currently taking?",
+    "我现在在吃什么药？",
+    "我目前用什么药？",
+  ])("activates for controlled medication current state: %s", (q) => {
+    expect(isPersonalCurrentStateQuery(q)).toBe(true);
+  });
+
   // P1#3 r7: historical fact with domain action — must NOT trigger
   test.each([
     "我上次复查结果怎么样",
@@ -87,6 +98,13 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "我最近的体检结果怎么样",
     "我最近的睡眠记录是什么",
   ])("does NOT activate for historical fact: %s", (q) => {
+    expect(isPersonalCurrentStateQuery(q)).toBe(false);
+  });
+
+  test.each([
+    "我现在使用的药物管理软件是什么",
+    "我目前的用药记录是什么",
+  ])("does NOT activate for medication-adjacent lookup: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(false);
   });
 
@@ -143,14 +161,19 @@ describe("applyPersonalCurrentStateGuard (#385)", () => {
     // Search only found old reminder — neighbor B excluded from top-k
     const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("insufficient_current_context");
-    // Guard discovers neighbor B's record even though search didn't
-    expect(r.historicalEvidence).toBeDefined();
-    expect(r.historicalEvidence!.length).toBe(1);
-    expect(r.historicalEvidence![0]!.page_slug).toBe(NEIGHBOR_B);
+    expect(r.subjectContextCandidates).toEqual([
+      {
+        source: "subject-context-candidate-1",
+        event_date: "2026-07-01",
+        summary: "已完成相关检查",
+        provenance: "trusted",
+        topic_relevance: "unverified",
+      },
+    ]);
   });
 
   // P2#5: unknown trust_state NOT promoted to trusted
-  test("entries with missing trust_state are excluded from evidence", () => {
+  test("entries with missing trust_state are excluded from candidates", () => {
     const db = makeMockDb({
       trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
       timelineBySlug: {
@@ -160,10 +183,11 @@ describe("applyPersonalCurrentStateGuard (#385)", () => {
       },
     });
     const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.historicalEvidence).toEqual([]);
+    expect(r.subjectContextCandidates).toEqual([]);
+    expect(r.gap).toBe("structured_state");
   });
 
-  test("user_thought trust_state preserved in evidence", () => {
+  test("user_thought provenance preserved in candidate", () => {
     const db = makeMockDb({
       trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
       timelineBySlug: {
@@ -173,6 +197,35 @@ describe("applyPersonalCurrentStateGuard (#385)", () => {
       },
     });
     const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.historicalEvidence![0]!.trust_state).toBe("user_thought");
+    expect(r.subjectContextCandidates![0]!.provenance).toBe("user_thought");
+  });
+
+  test("identity-page search hit without relation remains subject-relation gap", () => {
+    const db = makeMockDb();
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(IDENTITY_SLUG)], IDENTITY_SLUG);
+    expect(r.gap).toBe("subject_relation");
+    expect(r.subjectContextCandidates).toBeUndefined();
+  });
+
+  test("trusted relation without timeline reports structured-state gap", () => {
+    const db = makeMockDb({ trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")] });
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(r.gap).toBe("structured_state");
+    expect(r.subjectContextCandidates).toEqual([]);
+  });
+
+  test.each([
+    { date: "", summary: "空日期" },
+    { date: "已完成", summary: "非法日期" },
+    { date: "2026-99-01", summary: "非法月份" },
+  ])("invalid semantic date is excluded: $date", ({ date, summary }) => {
+    const db = makeMockDb({
+      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
+      timelineBySlug: {
+        [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: date, summary, trust_state: "trusted" }],
+      },
+    });
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(r.subjectContextCandidates).toEqual([]);
   });
 });
