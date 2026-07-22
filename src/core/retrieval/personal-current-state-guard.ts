@@ -4,17 +4,17 @@
  * A deterministic, bounded guard that activates ONLY for a closed grammar
  * combining first-person phrasing with action-oriented / current-state
  * intent. When activated it verifies a trusted subject-to-topic chain
- * AND requires at least one trusted dated current-state evidence before
- * allowing reminder-like search material to be presented as a current
- * personal recommendation.
+ * AND requires per-candidate trusted dated current-state EVIDENCE —
+ * not just any dated event, but one whose semantics express a current
+ * state (completed/pending/action status).
  *
  * Safety guarantee (phase 1): the guard FAILS CLOSED. It returns
  * insufficient-current-context if ANY of these cannot be proven:
  *   - configured identity uniquely mapping to entity/person
  *   - trusted (trusted/user_thought) subject-to-topic link
- *   - PER-CANDIDATE trusted dated current-state evidence bound to each
- *     returned result's own slug (a neighbor's timeline cannot vouch
- *     for an unrelated candidate)
+ *   - PER-CANDIDATE trusted dated evidence whose semantics express a
+ *     current state (completed or pending marker). A generic historical
+ *     event like "首次创建" does NOT qualify.
  *
  * It does NOT auto-infer closure from recency or word overlap — there is
  * no generic record-to-record fulfills/supersedes contract yet.
@@ -29,25 +29,26 @@ import { isPersonalCurrentStateQuery } from "./recall-intent.js";
 
 export type PersonalGuardOutcome = "pass" | "insufficient_current_context";
 
+/** Timeline evidence verified by the guard for a passing candidate. */
+export interface GuardTimelineEvidence {
+  page_slug: string;
+  event_date: string;
+  summary: string;
+}
+
 export interface PersonalGuardResult {
-  /** Whether the guard activated for this query. */
   activated: boolean;
   outcome: PersonalGuardOutcome;
-  /** Resolved subject slug when activated. */
   subjectSlug?: string;
-  /** Human-safe reason for insufficient outcome (no PII, no paths). */
   reason?: string;
-  /**
-   * When insufficient, the raw search material preserved as debug-only evidence.
-   * The caller MUST prevent this from being interpreted as current advice.
-   */
   debugSearchMaterial?: SearchResult[];
-  /**
-   * When the guard passes, the filtered result set containing ONLY candidates
-   * with a verified trusted subject connection. The caller should use this
-   * instead of the original results to avoid surfacing unrelated stale material.
-   */
   filteredResults?: SearchResult[];
+  /**
+   * #385 P1#2: the verified per-candidate timeline evidence that authorized
+   * the pass. The caller MUST include this in the response so the
+   * authorization is auditable and the semantic dates are visible.
+   */
+  verifiedTimeline?: GuardTimelineEvidence[];
 }
 
 /** Minimal page lookup — avoids coupling the guard to the full PageManager. */
@@ -55,44 +56,52 @@ export interface GuardPageLookup {
   getBySlug(slug: string): { type: string; title?: string; body?: string } | null;
 }
 
-/** At most this many trusted links inspected (SQL LIMIT, one hop). */
 const MAX_TRUSTED_LINKS = 10;
-/** At most this many timeline rows inspected over subject + neighbors. */
 const MAX_TIMELINE_BUDGET = 5;
 
-// ── Closed-grammar state markers for conflict detection (#385 regression #5) ──
+// ── Negation-aware status classification (P2#4) ──
 //
-// Phase 1 does NOT infer closure from these markers alone. They are used
-// only to detect an *unresolvable* conflict (both completed and pending
-// markers in trusted timeline evidence), which forces a fail-closed
-// outcome rather than guessing which record is current.
-const COMPLETED_MARKER = /(?:^|[^未待需])完成|已完成|done|completed|finished|已结束|结案|已做/i;
-const PENDING_MARKER = /待办|未完成|计划中|待复查|需复查|pending|scheduled|upcoming|todo|待完成|需完成/i;
+// "还没完成/没有完成/not completed" must be classified as PENDING, not
+// COMPLETED. The approach: detect negation+completion patterns as pending
+// FIRST, then test for genuine completion. No string stripping — stripping
+// would leave bare "完成" and cause a false completed match.
+
+/** Negation + completion = pending (还没完成/没有完成/not completed/尚未完成). */
+const NEGATED_COMPLETION = /还没(有)?完成|没有完成|尚未完成|not\s+completed|hasn'?t\s+completed|haven'?t\s+completed/i;
+
+/** Genuine completion — "完成" NOT preceded by negation chars. */
+const COMPLETED_MARKER = /(?:^|[^未待需还])完成|已完成|done|completed|finished|已结束|结案|已做/i;
+
+/** Pending / open / scheduled state. */
+const PENDING_MARKER = /待办|未完成|计划中|待复查|需复查|pending|scheduled|upcoming|todo|待完成|需完成|还没(有)?完成|没有完成|尚未完成/i;
+
+function isCompleted(summary: string): boolean {
+  // Negated completion is NOT completed.
+  if (NEGATED_COMPLETION.test(summary)) return false;
+  return COMPLETED_MARKER.test(summary);
+}
+
+function isPending(summary: string): boolean {
+  // Negated completion IS pending.
+  if (NEGATED_COMPLETION.test(summary)) return true;
+  return PENDING_MARKER.test(summary);
+}
 
 /**
- * #385 P1#4 — strict person type check.
- * Only accepts the canonical 'entity/person' type. Bare 'entity' (which
- * may be an organization, product, or other legacy entity) is rejected —
- * fail-closed requires explicit person identity.
+ * #385 P1#1: does a timeline entry express current-state semantics?
+ * Must match completed OR pending marker. A generic historical event
+ * (首次创建/建立/记录) does NOT qualify.
  */
+function isCurrentStateEvidence(entry: { summary: string }): boolean {
+  return isCompleted(entry.summary) || isPending(entry.summary);
+}
+
 function isEntityPersonType(type: string): boolean {
   return type === "entity/person";
 }
 
 /**
  * Apply the personal current-state guard.
- *
- * Returns `{ activated: false, outcome: "pass" }` for non-personal queries
- * (zero DB work, existing latency budget preserved).
- *
- * For personal current-state queries:
- * 1. Resolves the subject through the configured identity (fail-closed on missing).
- * 2. Fetches bounded trusted one-hop links (SQL LIMIT + ORDER BY, explicit trust).
- * 3. Filters candidates to ONLY those with a verified trusted subject connection.
- * 4. Reads bounded trusted timeline DIRECTLY for subject + neighbors (no graph expansion).
- * 5. Requires at least one trusted dated current-state evidence (fail-closed on empty).
- * 6. Checks for conflicting completed+pending evidence (fail-closed on conflict).
- * 7. Either passes (with filtered results) or returns insufficient.
  */
 export function applyPersonalCurrentStateGuard(
   db: CBrainDB,
@@ -101,13 +110,12 @@ export function applyPersonalCurrentStateGuard(
   results: SearchResult[],
   identityPersonSlug: string | undefined,
 ): PersonalGuardResult {
-  // Step 1: closed-grammar gate — must be a personal current-state query.
+  // Step 1: closed-grammar gate.
   if (!isPersonalCurrentStateQuery(query)) {
     return { activated: false, outcome: "pass" };
   }
 
   // Step 2: resolve subject deterministically.
-  // Only an explicit configured identity that uniquely maps to entity/person.
   if (!identityPersonSlug) {
     return {
       activated: true,
@@ -127,7 +135,6 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
-  // P1#4: only entity/person, not bare entity.
   if (!isEntityPersonType(personPage.type)) {
     return {
       activated: true,
@@ -137,25 +144,17 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
-  // Step 3: bounded trusted one-hop link fetch (SQL LIMIT + ORDER BY, explicit trust).
-  const trustedLinks: LinkRow[] = db.getBoundedTrustedLinks(
-    identityPersonSlug,
-    MAX_TRUSTED_LINKS,
-  );
-
+  // Step 3: bounded trusted one-hop links.
+  const trustedLinks: LinkRow[] = db.getBoundedTrustedLinks(identityPersonSlug, MAX_TRUSTED_LINKS);
   const trustedNeighbors = new Set<string>();
   for (const link of trustedLinks) {
-    const neighbor = link.from_slug === identityPersonSlug
-      ? link.to_slug
-      : link.from_slug;
-    trustedNeighbors.add(neighbor);
+    trustedNeighbors.add(link.from_slug === identityPersonSlug ? link.to_slug : link.from_slug);
   }
 
-  // Step 4: PER-CANDIDATE filtering — only trusted-connected candidates pass.
+  // Step 4: per-candidate trusted connection filter.
   const connectedResults = results.filter(
     (r) => r.slug === identityPersonSlug || trustedNeighbors.has(r.slug),
   );
-
   if (connectedResults.length === 0) {
     return {
       activated: true,
@@ -166,46 +165,44 @@ export function applyPersonalCurrentStateGuard(
     };
   }
 
-  // Step 5 (P1#1): PER-CANDIDATE trusted timeline verification.
-  // Each returned candidate must have ITS OWN trusted dated current-state
-  // evidence. A candidate cannot ride on another neighbor's timeline —
-  // the evidence must be bound to the candidate's own slug.
-  // Uses getBoundedTrustedTimelineForSlugs per candidate slug, bounded by
-  // SQL LIMIT + ORDER BY. trust_state IN ('trusted','user_thought').
+  // Step 5 (P1#1): per-candidate current-state evidence verification.
+  // Each candidate must have ITS OWN trusted dated timeline entry that
+  // expresses a current STATE (completed or pending). A generic historical
+  // event does NOT qualify — the guard cannot prove current status from it.
   const verifiedResults: SearchResult[] = [];
+  const verifiedTimeline: GuardTimelineEvidence[] = [];
   for (const candidate of connectedResults) {
-    const candidateTimeline = db.getBoundedTrustedTimelineForSlugs(
-      [candidate.slug],
-      MAX_TIMELINE_BUDGET,
-    );
-    // No dated current-state evidence bound to THIS candidate → cannot
-    // prove its current state. Do NOT include in filtered results.
-    if (candidateTimeline.length === 0) continue;
+    const candidateTimeline = db.getBoundedTrustedTimelineForSlugs([candidate.slug], MAX_TIMELINE_BUDGET);
+    // P1#1: filter to current-state evidence only.
+    const currentStateEntries = candidateTimeline.filter(isCurrentStateEvidence);
+    if (currentStateEntries.length === 0) continue; // no current-state proof
 
-    // Check for conflicting evidence on THIS candidate.
-    const cCompleted = candidateTimeline.some((t) => COMPLETED_MARKER.test(t.summary));
-    const cPending = candidateTimeline.some((t) => PENDING_MARKER.test(t.summary));
-    if (cCompleted && cPending) continue; // conflict → skip this candidate
+    // P2#4: check for conflicting evidence (after negation normalization).
+    const cCompleted = currentStateEntries.some((t) => isCompleted(t.summary));
+    const cPending = currentStateEntries.some((t) => isPending(t.summary));
+    if (cCompleted && cPending) continue; // unresolved conflict → skip
 
     verifiedResults.push(candidate);
+    for (const t of currentStateEntries.slice(0, 2)) {
+      verifiedTimeline.push({ page_slug: t.page_slug, event_date: t.event_date, summary: t.summary });
+    }
   }
 
-  // P1#1: if NO candidate has its own trusted dated evidence, fail closed.
   if (verifiedResults.length === 0) {
     return {
       activated: true,
       outcome: "insufficient_current_context",
       subjectSlug: identityPersonSlug,
-      reason: "no candidate with trusted dated current-state evidence",
+      reason: "no candidate with trusted current-state evidence",
       debugSearchMaterial: results,
     };
   }
 
-  // Only candidates with verified per-candidate dated evidence pass through.
   return {
     activated: true,
     outcome: "pass",
     subjectSlug: identityPersonSlug,
     filteredResults: verifiedResults,
+    verifiedTimeline,
   };
 }

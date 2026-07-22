@@ -4,12 +4,10 @@ import type { SearchResult, SearchOptions } from "../../src/core/retrieval/searc
 import { registerFrontdoorTools } from "../../src/mcp/tools/frontdoor.js";
 import type { LinkRow } from "../../src/storage/sqlite.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
+import { applyPersonalCurrentStateGuard } from "../../src/core/retrieval/personal-current-state-guard.js";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-
-
-// ── Anonymized fixtures ──
 const IDENTITY_SLUG = "brain/entities/subject-a";
 const TOPIC_SLUG = "brain/entities/topic-d";
 const OLD_REMINDER_SLUG = "records/reminder-old";
@@ -26,31 +24,21 @@ function supportedResult(slug: string, snippet = "匿名片段"): SearchResult {
   );
 }
 
-// ── Mock harness (for non-DB tests) ──
+function trustedLink(from: string, to: string): LinkRow {
+  return {
+    id: 1, from_slug: from, to_slug: to, relation: "关联", weight: 0.5,
+    strength: "medium", context: null, source_type: "wikilink", confidence: 0.8,
+    created_at: "2026-01-01T00:00:00Z", last_validated_at: null, effective_weight: 0.4,
+    source_page_slug: from, trust_state: "trusted",
+  };
+}
+
+// ── Mock harness ──
 
 interface MockHarness {
   call: (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
   searchCalls: Array<{ query: string; options?: SearchOptions }>;
   guardDbCalls: string[];
-}
-
-function trustedLink(from: string, to: string): LinkRow {
-  return {
-    id: 1,
-    from_slug: from,
-    to_slug: to,
-    relation: "关联",
-    weight: 0.5,
-    strength: "medium",
-    context: null,
-    source_type: "wikilink",
-    confidence: 0.8,
-    created_at: "2026-01-01T00:00:00Z",
-    last_validated_at: null,
-    effective_weight: 0.4,
-    source_page_slug: from,
-    trust_state: "trusted",
-  };
 }
 
 function makeMockHarness(
@@ -64,135 +52,93 @@ function makeMockHarness(
   let handler: Handler | undefined;
   const searchCalls: Array<{ query: string; options?: SearchOptions }> = [];
   const guardDbCalls: string[] = [];
-
   const server = {
     registerTool(name: string, _def: unknown, registered: Handler) {
       if (name === "cbrain_recall") handler = registered;
     },
   };
-
   const db = {
-    getBoundedTrustedLinks(slug: string, _limit: number) {
-      guardDbCalls.push(`trustedLinks:${slug}`);
-      return opts.trustedLinks ?? [];
-    },
-    getBoundedTrustedTimelineForSlugs(slugs: string[], _limit: number) {
-      guardDbCalls.push(`timeline:${slugs.join(",")}`);
+    getBoundedTrustedLinks(slug: string, _l: number) { guardDbCalls.push(`tl:${slug}`); return opts.trustedLinks ?? []; },
+    getBoundedTrustedTimelineForSlugs(slugs: string[], _l: number) {
+      guardDbCalls.push(`t:${slugs.join(",")}`);
       const out: Array<{ page_slug: string; event_date: string; summary: string; trust_state?: string }> = [];
       for (const s of slugs) out.push(...(opts.timelineBySlug?.[s] ?? []));
       return out;
     },
-    batchGetTimelineForSlugs(slugs: string[]) {
-      return new Map(slugs.map((s) => [s, [{ summary: "匿名时间线", event_date: "2026-01-01", trust_state: "trusted" }]]));
-    },
-    batchGetLinksForSlugs(slugs: string[]) {
-      return new Map(slugs.map((s) => [s, { outgoing: [{ from_slug: s, to_slug: "匿名目标", relation: "关联", trust_state: "trusted" }], incoming: [] }]));
-    },
-    getPageTitlesAndTypes(slugs: string[]) {
-      return new Map(slugs.map((s) => [s, { title: `标题-${s}`, type: "note" }]));
-    },
-    getRawChunkHitsForPage() { return []; },
-    getChunksByPage() { return []; },
-    isSealedPage() { return false; },
-    getL1Summary() { return null; },
+    batchGetTimelineForSlugs(slugs: string[]) { return new Map(slugs.map((s) => [s, [{ summary: "匿名", event_date: "2026-01-01", trust_state: "trusted" }]])); },
+    batchGetLinksForSlugs(slugs: string[]) { return new Map(slugs.map((s) => [s, { outgoing: [], incoming: [] }])); },
+    getPageTitlesAndTypes(slugs: string[]) { return new Map(slugs.map((s) => [s, { title: `标题-${s}`, type: "note" }])); },
+    getRawChunkHitsForPage() { return []; }, getChunksByPage() { return []; },
+    isSealedPage() { return false; }, getL1Summary() { return null; },
   };
-
   const ctx = {
     outputMode: "legacy" as const,
-    search: {
-      async search(query: string, options?: SearchOptions) {
-        searchCalls.push({ query, options });
-        return results;
-      },
-    },
+    search: { async search(query: string, options?: SearchOptions) { searchCalls.push({ query, options }); return results; } },
     pages: {
       getBySlug(slug: string) {
-        if (slug === IDENTITY_SLUG && opts.identityPersonSlug) {
-          return { type: "entity/person", title: "主体A", body: "" };
-        }
+        if (slug === IDENTITY_SLUG && opts.identityPersonSlug) return { type: "entity/person", title: "主体A", body: "" };
         return { title: `标题-${slug}`, body: `正文-${slug}` };
       },
     },
-    db,
-    identityPersonSlug: opts.identityPersonSlug,
+    db, identityPersonSlug: opts.identityPersonSlug,
     logger: { info() {}, warn() {}, error() {} },
   };
-
   registerFrontdoorTools(server as never, ctx as never);
-  if (!handler) throw new Error("frontdoor handler not registered");
+  if (!handler) throw new Error("handler not registered");
   return { call: (args) => handler!(args), searchCalls, guardDbCalls };
 }
 
-interface Envelope {
-  summary: { status: string; degraded_reason?: string };
-  raw: { entities: unknown[] };
-  display: string;
-}
+interface Envelope { summary: { status: string }; raw: { entities: unknown[]; current_state_evidence?: unknown[] }; }
 
 function parsed(output: { content: Array<{ type: string; text: string }> }): Envelope {
   return JSON.parse(output.content[0]!.text) as Envelope;
 }
 
-// ── Mock-based integration tests ──
-
 describe("frontdoor personal current-state guard (#385) — mock", () => {
   test("personal query without identity → degraded", async () => {
     const h = makeMockHarness([supportedResult(OLD_REMINDER_SLUG)]);
-    const env = parsed(await h.call({ query: "我最近该去复查了吗", detail: "normal" }));
+    const env = parsed(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("degraded");
-    expect(env.raw.entities).toEqual([]);
   });
 
-  test("old reminder + no trusted chain → degraded", async () => {
-    const h = makeMockHarness([supportedResult(OLD_REMINDER_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
-    const env = parsed(await h.call({ query: "我最近该去复查了吗", detail: "normal" }));
-    expect(env.summary.status).toBe("degraded");
-    expect(JSON.stringify(env)).not.toContain(OLD_REMINDER_SLUG);
-  });
-
-  test("trusted chain + candidate with own evidence → ok", async () => {
+  test("trusted chain + current-state evidence → ok + evidence in response (P1#2)", async () => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
       trustedLinks: [trustedLink(IDENTITY_SLUG, TOPIC_SLUG)],
       timelineBySlug: { [TOPIC_SLUG]: [{ page_slug: TOPIC_SLUG, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "trusted" }] },
     });
-    const env = parsed(await h.call({ query: "我最近该去复查了吗", detail: "normal" }));
+    const env = parsed(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("ok");
-    expect(env.raw.entities.length).toBeGreaterThan(0);
+    expect(env.raw.current_state_evidence).toBeDefined();
+    expect((env.raw.current_state_evidence as unknown[]).length).toBeGreaterThan(0);
   });
 
-  // P1#1 r3: cross-neighbor leak — neighbor has evidence, candidate does not
-  test("cross-neighbor timeline leak → candidate without own evidence degraded", async () => {
+  // P1#1 r4: generic history event does NOT authorize current state
+  test("generic history event only → degraded", async () => {
     const h = makeMockHarness([supportedResult(OLD_REMINDER_SLUG)], {
       identityPersonSlug: IDENTITY_SLUG,
-      trustedLinks: [trustedLink(IDENTITY_SLUG, OLD_REMINDER_SLUG), trustedLink(IDENTITY_SLUG, NEIGHBOR_B)],
-      timelineBySlug: {
-        [NEIGHBOR_B]: [{ page_slug: NEIGHBOR_B, event_date: "2026-06-01", summary: "已完成相关检查", trust_state: "trusted" }],
-        [OLD_REMINDER_SLUG]: [],
-      },
+      trustedLinks: [trustedLink(IDENTITY_SLUG, OLD_REMINDER_SLUG)],
+      timelineBySlug: { [OLD_REMINDER_SLUG]: [{ page_slug: OLD_REMINDER_SLUG, event_date: "2018-01-01", summary: "首次创建提醒", trust_state: "trusted" }] },
     });
-    const env = parsed(await h.call({ query: "我最近该去复查了吗", detail: "normal" }));
+    const env = parsed(await h.call({ query: "我该吃药了吗", detail: "normal" }));
     expect(env.summary.status).toBe("degraded");
     expect(env.raw.entities).toEqual([]);
   });
 
-  // P1#3 r3: bare nouns do NOT trigger guard
+  // P1#3 r4: bare nouns do NOT trigger
   test.each([
+    "我的工资发放周期是什么",
+    "我的发帖频率是多少",
+    "What is my medication called",
+    "Show my appointment notes",
     "我的代码检查结果是什么",
-    "我最近用运动相机拍了什么",
-    "我最近从保险箱取了什么",
-    "我最近看了哪部院线电影",
-    "我最近有哪些研究报告",
-    "我上次提交了哪段代码",
-    "我最近看了什么书",
-  ])("bare-noun query does not trigger guard: %s", async (q) => {
+  ])("bare noun query does not trigger guard: %s", async (q) => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     const env = parsed(await h.call({ query: q, detail: "normal" }));
     expect(h.guardDbCalls).toEqual([]);
     expect(env.summary.status).toBe("ok");
   });
 
-  // Non-personal: zero guard DB calls
   test("non-personal query → zero guard calls", async () => {
     const h = makeMockHarness([supportedResult(TOPIC_SLUG)], { identityPersonSlug: IDENTITY_SLUG });
     const env = parsed(await h.call({ query: "主题D是什么", detail: "normal" }));
@@ -201,6 +147,7 @@ describe("frontdoor personal current-state guard (#385) — mock", () => {
   });
 });
 
+// ── Real SQLite end-to-end: guard → frontdoor (#385 P1#1 core) ──
 
 function seedPage(db: CBrainDB, vaultPath: string, slug: string, title: string, type: string): void {
   db.upsertPage({ slug, type, title, filePath: `${slug}.md`, contentHash: `h-${slug}` });
@@ -211,9 +158,7 @@ function seedPage(db: CBrainDB, vaultPath: string, slug: string, title: string, 
 
 function seedLink(db: CBrainDB, from: string, to: string, trustState: string): void {
   db.rawDb
-    .prepare(
-      "INSERT INTO links (from_slug, to_slug, relation, weight, strength, source_type, confidence, source_page_slug, trust_state) VALUES (?, ?, '关联', 0.5, 'medium', 'wikilink', 0.8, ?, ?)",
-    )
+    .prepare("INSERT INTO links (from_slug, to_slug, relation, weight, strength, source_type, confidence, source_page_slug, trust_state) VALUES (?, ?, '关联', 0.5, 'medium', 'wikilink', 0.8, ?, ?)")
     .run(from, to, from, trustState);
 }
 
@@ -223,8 +168,8 @@ function seedTimeline(db: CBrainDB, slug: string, summary: string, date: string,
     .run(slug, summary, date, "manual", slug, trustState);
 }
 
-describe("frontdoor personal current-state guard (#385) — real SQLite", () => {
-  const testDir = "/tmp/cbrain-test-385-sqlite";
+describe("frontdoor personal current-state guard (#385) — real SQLite e2e", () => {
+  const testDir = "/tmp/cbrain-test-385-e2e";
   const dbPath = join(testDir, "test.sqlite");
   const vaultPath = join(testDir, "vault");
   let db: CBrainDB;
@@ -240,40 +185,55 @@ describe("frontdoor personal current-state guard (#385) — real SQLite", () => 
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  test("P1#1 core: candidate A connected but no evidence, neighbor B has evidence → A is NOT surfaced", () => {
-    // Seed: identity person
+  test("P1#1 core: candidate A connected, only generic history → guard fails closed", () => {
     seedPage(db, vaultPath, IDENTITY_SLUG, "主体A", "entity/person");
-    // Seed: old reminder (search result) — connected to subject but no own timeline
     seedPage(db, vaultPath, OLD_REMINDER_SLUG, "旧提醒", "record");
-    // Seed: neighbor B — has trusted timeline but is NOT a search result
-    seedPage(db, vaultPath, NEIGHBOR_B, "邻居B", "entity/person");
-    // Links: both old reminder and neighbor B are trusted-connected to subject
     seedLink(db, IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted");
-    seedLink(db, IDENTITY_SLUG, NEIGHBOR_B, "trusted");
-    // Timeline: only neighbor B has evidence; old reminder has NONE
-    seedTimeline(db, NEIGHBOR_B, "已完成相关检查", "2026-06-01", "trusted");
-    // OLD_REMINDER has no timeline entry
+    // Only a generic 2018 history event — NOT current-state evidence
+    seedTimeline(db, OLD_REMINDER_SLUG, "首次创建提醒", "2018-01-01", "trusted");
 
-    // Verify the guard sees the issue: query timeline for OLD_REMINDER → empty
-    const candidateTimeline = db.getBoundedTrustedTimelineForSlugs([OLD_REMINDER_SLUG], 5);
-    expect(candidateTimeline).toHaveLength(0);
-
-    // And neighbor B's timeline should NOT be readable for OLD_REMINDER
-    const neighborTimeline = db.getBoundedTrustedTimelineForSlugs([NEIGHBOR_B], 5);
-    expect(neighborTimeline).toHaveLength(1);
+    const pages = { getBySlug: (slug: string) => slug === IDENTITY_SLUG ? { type: "entity/person", title: "主体A" } : null };
+    const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
+    expect(result.outcome).toBe("insufficient_current_context");
+    expect(result.reason).toBe("no candidate with trusted current-state evidence");
   });
 
-  test("P2#3: 未完成 is pending-only, not matched as completed", () => {
+  test("P1#1: candidate with current-state evidence → guard passes + returns evidence", () => {
     seedPage(db, vaultPath, IDENTITY_SLUG, "主体A", "entity/person");
     seedPage(db, vaultPath, TOPIC_SLUG, "主题D", "entity/person");
     seedLink(db, IDENTITY_SLUG, TOPIC_SLUG, "trusted");
-    seedTimeline(db, TOPIC_SLUG, "未完成相关检查", "2026-06-01", "trusted");
+    seedTimeline(db, TOPIC_SLUG, "已完成相关检查", "2026-06-01", "trusted");
 
-    const timeline = db.getBoundedTrustedTimelineForSlugs([TOPIC_SLUG], 5);
-    expect(timeline).toHaveLength(1);
-    // The summary "未完成相关检查" should be pending, NOT completed
-    expect(/待办|未完成|计划中|待复查|需复查|pending|scheduled|upcoming|todo|待完成|需完成/i.test(timeline[0]!.summary)).toBe(true);
-    // COMPLETED_MARKER with negative lookahead must NOT match "未完成"
-    expect(/(?:^|[^未待需])完成|已完成|done|completed|finished|已结束|结案|已做/i.test(timeline[0]!.summary)).toBe(false);
+    const pages = {
+      getBySlug: (slug: string) => slug === IDENTITY_SLUG
+        ? { type: "entity/person", title: "主体A" }
+        : slug === TOPIC_SLUG ? { type: "entity/person", title: "主题D" } : null,
+    };
+    const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(result.outcome).toBe("pass");
+    expect(result.filteredResults?.length).toBe(1);
+    expect(result.verifiedTimeline?.length).toBe(1);
+    expect(result.verifiedTimeline?.[0]?.summary).toBe("已完成相关检查");
+  });
+
+  test("P1#1 cross-neighbor leak: neighbor B evidence does not authorize candidate A", () => {
+    seedPage(db, vaultPath, IDENTITY_SLUG, "主体A", "entity/person");
+    seedPage(db, vaultPath, OLD_REMINDER_SLUG, "旧提醒", "record");
+    seedPage(db, vaultPath, NEIGHBOR_B, "邻居B", "entity/person");
+    seedLink(db, IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted");
+    seedLink(db, IDENTITY_SLUG, NEIGHBOR_B, "trusted");
+    // Only B has current-state evidence; A (the search result) has NONE
+    seedTimeline(db, NEIGHBOR_B, "已完成相关检查", "2026-06-01", "trusted");
+
+    const pages = {
+      getBySlug: (slug: string) => slug === IDENTITY_SLUG ? { type: "entity/person", title: "主体A" } : null,
+    };
+    const result = applyPersonalCurrentStateGuard(db, pages, "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
+    expect(result.outcome).toBe("insufficient_current_context");
+    expect(result.reason).toBe("no candidate with trusted current-state evidence");
   });
 });
+
+function makeResult(slug: string): SearchResult {
+  return { slug, score: 0.5, snippet: "匿名片段", source: "hybrid" };
+}

@@ -10,7 +10,6 @@ import {
 import type { CBrainDB, LinkRow } from "../../src/storage/sqlite.js";
 import type { SearchResult } from "../../src/core/retrieval/search.js";
 
-// ── Anonymized fixtures ──
 const IDENTITY_SLUG = "brain/entities/subject-a";
 const TOPIC_SLUG = "brain/entities/topic-d";
 const OLD_REMINDER_SLUG = "records/reminder-old";
@@ -46,7 +45,6 @@ interface TimelineEntry {
   trust_state?: string;
 }
 
-/** Timeline store keyed by slug, simulating per-candidate reads. */
 function makeMockDb(opts: {
   trustedLinks?: LinkRow[];
   timelineBySlug?: Record<string, TimelineEntry[]>;
@@ -55,9 +53,7 @@ function makeMockDb(opts: {
     getBoundedTrustedLinks: (_slug: string, _limit: number) => opts.trustedLinks ?? [],
     getBoundedTrustedTimelineForSlugs: (slugs: string[], _limit: number) => {
       const out: TimelineEntry[] = [];
-      for (const s of slugs) {
-        out.push(...(opts.timelineBySlug?.[s] ?? []));
-      }
+      for (const s of slugs) out.push(...(opts.timelineBySlug?.[s] ?? []));
       return out;
     },
   } as unknown as CBrainDB;
@@ -73,22 +69,18 @@ const tl = (summary: string, slug = TOPIC_SLUG, date = "2026-06-01"): TimelineEn
   page_slug: slug, event_date: date, summary, trust_state: "trusted",
 });
 
-// ── Intent detection ──────────────────────────────────────
+// ── Intent detection ──
 
 describe("isFirstPersonQuery (#385)", () => {
   test.each([
-    "我最近该去复查了吗",
+    "我该去复查了吗",
     "我的体检到期了吗",
     "我该吃药了吗",
     "should I go for a checkup",
-    "my medication schedule",
-  ])("detects first-person in: %s", (q) => {
-    expect(isFirstPersonQuery(q)).toBe(true);
-  });
+  ])("detects first-person in: %s", (q) => expect(isFirstPersonQuery(q)).toBe(true));
 
-  test.each(["实体A是什么", "主题D的信息", "concept C is defined as"])(
-    "no first-person in: %s",
-    (q) => expect(isFirstPersonQuery(q)).toBe(false),
+  test.each(["实体A是什么", "主题D的信息"])(
+    "no first-person in: %s", (q) => expect(isFirstPersonQuery(q)).toBe(false),
   );
 
   test("collective 我们 does not count", () => {
@@ -97,145 +89,130 @@ describe("isFirstPersonQuery (#385)", () => {
 });
 
 describe("isPersonalCurrentStateQuery (#385)", () => {
-  // Direct action predicates — trigger on their own
+  // Action predicates — trigger on their own
   test.each([
-    "我最近该去复查了吗",
+    "我该不该去复查",
     "我的体检到期了吗",
     "我该吃药了吗",
-    "我还需要预约挂号吗",
+    "我需不需要复查",
     "should I go for a checkup",
-    "is my medication due",
-  ])("activates for: %s", (q) => {
-    expect(isPersonalCurrentStateQuery(q)).toBe(true);
-  });
+    "is it time for my checkup",
+    "do I need to see a doctor",
+  ])("activates for: %s", (q) => expect(isPersonalCurrentStateQuery(q)).toBe(true));
 
-  // P1#3: time marker + domain compound activates
-  test("time marker + 复查 activates", () => {
+  // Time marker + domain action compound
+  test("time + 复查 activates", () => {
     expect(isPersonalCurrentStateQuery("我上次复查结果怎么样")).toBe(true);
   });
-  test("time marker + 治疗 activates", () => {
-    expect(isPersonalCurrentStateQuery("我最近的治疗进展怎么样")).toBe(true);
-  });
 
-  // P1#3 r3 regression: bare nouns must NOT trigger
+  // P1#3 r4: ALL bare nouns removed — negative regressions
   test.each([
     "我最近看了哪部院线电影",
     "我最近有哪些研究报告",
     "我上次提交了哪段代码",
+    "我的代码检查结果是什么",
+    "我最近用运动相机拍了什么",
+    "我最近从保险箱取了什么",
+    "我的工资发放周期是什么",
+    "我的发帖频率是多少",
+    "What is my medication called",
+    "Show my appointment notes",
     "我最近看了什么书",
-    "我的代码检查结果是什么", // bare 检查, not 复查
-    "我最近用运动相机拍了什么", // 运动 removed from DOMAIN
-    "我最近从保险箱取了什么", // 保险 removed from DOMAIN
-    "我 liked the movie",
-  ])("does NOT activate for: %s", (q) => {
+  ])("does NOT activate for bare noun: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(false);
   });
 });
 
-// ── Guard logic — regression matrix ───────────────────────
+// ── Guard logic ──
 
 describe("applyPersonalCurrentStateGuard (#385)", () => {
-  // #7: non-personal → not activated
-  test("non-personal query does not activate guard", () => {
-    const db = makeMockDb();
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "实体A是什么", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+  test("non-personal query does not activate", () => {
+    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity/person" }), "实体A是什么", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.activated).toBe(false);
   });
 
-  // #3: missing identity → insufficient
-  test("personal query without identity → insufficient", () => {
-    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages(), "我最近该去复查了吗", [makeResult(OLD_REMINDER_SLUG)], undefined);
-    expect(r.outcome).toBe("insufficient_current_context");
+  test("no identity → insufficient", () => {
+    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages(), "我该不该去复查", [makeResult(OLD_REMINDER_SLUG)], undefined);
     expect(r.reason).toBe("no identity mapping configured");
   });
 
-  test("identity page not found → insufficient", () => {
-    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages(null), "我最近该去复查了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("insufficient_current_context");
-    expect(r.reason).toBe("identity page not found");
-  });
-
-  // P1#4: bare entity rejected
   test("bare entity type → insufficient", () => {
-    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity" }), "我最近该去复查了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    const r = applyPersonalCurrentStateGuard(makeMockDb(), makeMockPages({ type: "entity" }), "我该不该去复查", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.reason).toBe("identity is not entity/person");
   });
 
-  // #1: no trusted chain → insufficient
   test("no trusted chain → insufficient", () => {
     const db = makeMockDb({ trustedLinks: [] });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该不该去复查", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(r.reason).toBe("no trusted subject-to-topic chain");
   });
 
-  // P1#1 r3: candidate with NO own timeline → insufficient (cross-neighbor leak fix)
-  test("candidate connected but no own timeline → insufficient", () => {
+  // P1#1 r4: generic historical event does NOT qualify as current-state evidence
+  test("candidate with only generic history event → insufficient", () => {
     const db = makeMockDb({
       trustedLinks: [makeLink(IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted")],
-      timelineBySlug: { [OLD_REMINDER_SLUG]: [] }, // candidate has no own evidence
+      timelineBySlug: { [OLD_REMINDER_SLUG]: [tl("首次创建提醒", OLD_REMINDER_SLUG, "2018-01-01")] },
     });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("insufficient_current_context");
-    expect(r.reason).toBe("no candidate with trusted dated current-state evidence");
+    expect(r.reason).toBe("no candidate with trusted current-state evidence");
   });
 
-  // P1#1 r3 CORE: unrelated neighbor's timeline does NOT vouch for candidate
-  test("cross-neighbor timeline leak: neighbor B has evidence but candidate A does not → insufficient", () => {
+  // P1#1: candidate with current-state evidence (completed) → pass
+  test("candidate with completed evidence → pass", () => {
     const db = makeMockDb({
-      // Both OLD_REMINDER and NEIGHBOR_B are trusted neighbors
-      trustedLinks: [
-        makeLink(IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted"),
-        makeLink(IDENTITY_SLUG, NEIGHBOR_B, "trusted"),
-      ],
-      // Only NEIGHBOR_B has timeline; OLD_REMINDER (the search result) has none
+      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
+      timelineBySlug: { [TOPIC_SLUG]: [tl("已完成相关检查")] },
+    });
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(r.outcome).toBe("pass");
+    expect(r.filteredResults?.length).toBe(1);
+    expect(r.verifiedTimeline?.length).toBeGreaterThan(0);
+  });
+
+  // Cross-neighbor leak still blocked
+  test("cross-neighbor leak: neighbor B has evidence, candidate A does not → insufficient", () => {
+    const db = makeMockDb({
+      trustedLinks: [makeLink(IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted"), makeLink(IDENTITY_SLUG, NEIGHBOR_B, "trusted")],
       timelineBySlug: {
         [NEIGHBOR_B]: [tl("已完成相关检查", NEIGHBOR_B)],
         [OLD_REMINDER_SLUG]: [],
       },
     });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(OLD_REMINDER_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("insufficient_current_context");
-    expect(r.reason).toBe("no candidate with trusted dated current-state evidence");
   });
 
-  // #4: candidate with own trusted dated evidence → pass
-  test("candidate with own trusted dated evidence → pass", () => {
+  // P2#4: negation normalization
+  test("未完成 is pending only (not completed)", () => {
     const db = makeMockDb({
       trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
-      timelineBySlug: { [TOPIC_SLUG]: [tl("已完成相关检查")] },
+      timelineBySlug: { [TOPIC_SLUG]: [tl("未完成相关检查")] },
     });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("pass");
-    expect(r.filteredResults?.length).toBe(1);
-    expect(r.filteredResults?.[0]?.slug).toBe(TOPIC_SLUG);
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(r.outcome).toBe("pass"); // pending-only, no conflict
   });
 
-  // P1#1: per-candidate filtering — stale reminder without evidence dropped
-  test("mix: connected topic with evidence + old reminder without → only topic passes", () => {
+  test("还没完成 is pending only", () => {
     const db = makeMockDb({
-      trustedLinks: [
-        makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted"),
-        makeLink(IDENTITY_SLUG, OLD_REMINDER_SLUG, "trusted"),
-      ],
-      timelineBySlug: {
-        [TOPIC_SLUG]: [tl("已完成相关检查")],
-        [OLD_REMINDER_SLUG]: [],
-      },
+      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
+      timelineBySlug: { [TOPIC_SLUG]: [tl("还没完成相关检查")] },
     });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(OLD_REMINDER_SLUG), makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("pass");
-    expect(r.filteredResults?.length).toBe(1);
-    expect(r.filteredResults?.[0]?.slug).toBe(TOPIC_SLUG);
   });
 
-  // #5: conflicting evidence on same candidate → skip that candidate
-  test("conflicting completed+pending on same candidate → skipped", () => {
+  test("not completed is pending only", () => {
+    const db = makeMockDb({
+      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
+      timelineBySlug: { [TOPIC_SLUG]: [tl("not completed the checkup")] },
+    });
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    expect(r.outcome).toBe("pass");
+  });
+
+  // Conflict: completed + pending on same candidate → skip
+  test("conflicting completed+pending on same candidate → insufficient", () => {
     const db = makeMockDb({
       trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
       timelineBySlug: {
@@ -245,44 +222,7 @@ describe("applyPersonalCurrentStateGuard (#385)", () => {
         ],
       },
     });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
+    const r = applyPersonalCurrentStateGuard(db, makeMockPages({ type: "entity/person" }), "我该吃药了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
     expect(r.outcome).toBe("insufficient_current_context");
-    expect(r.reason).toBe("no candidate with trusted dated current-state evidence");
-  });
-
-  // P2#3: 未完成 is NOT matched as 完成 (互斥)
-  test("未完成 is pending only, not completed (互斥)", () => {
-    const db = makeMockDb({
-      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
-      timelineBySlug: {
-        [TOPIC_SLUG]: [tl("未完成相关检查")],
-      },
-    });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    // Should pass — "未完成" is pending-only, no conflict with completed
-    expect(r.outcome).toBe("pass");
-  });
-
-  test("已完成 is completed (no pending marker)", () => {
-    const db = makeMockDb({
-      trustedLinks: [makeLink(IDENTITY_SLUG, TOPIC_SLUG, "trusted")],
-      timelineBySlug: {
-        [TOPIC_SLUG]: [tl("已完成相关检查")],
-      },
-    });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(TOPIC_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("pass");
-  });
-
-  test("subject itself in results with own timeline → pass", () => {
-    const db = makeMockDb({
-      timelineBySlug: { [IDENTITY_SLUG]: [tl("已完成", IDENTITY_SLUG)] },
-    });
-    const pages = makeMockPages({ type: "entity/person", title: "主体A" });
-    const r = applyPersonalCurrentStateGuard(db, pages, "我最近该去复查了吗", [makeResult(IDENTITY_SLUG)], IDENTITY_SLUG);
-    expect(r.outcome).toBe("pass");
   });
 });

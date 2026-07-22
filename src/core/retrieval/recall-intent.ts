@@ -78,57 +78,59 @@ export function isFirstPersonQuery(query: string): boolean {
 /**
  * Action-oriented / current-state intent for personal management.
  *
- * Two tiers:
- * - DIRECT action markers: explicit action/state predicates — trigger alone.
- *   Must be a PREDICATE (该不该/需不需要/到期/复查/体检…), NOT a bare noun
- *   like 检查/运动/保险 that appears in ordinary recall queries.
- * - TIME markers (最近/上次) co-occurring with a specific health/admin
- *   domain compound — triggers only together.
+ * Two tiers — BOTH require an explicit ACTION/STATE PREDICATE, never a bare noun:
+ * - DIRECT action markers: 该不该/需不需要/到期/overdue… — trigger alone.
+ *   These are PREDICATES that ask whether something should be done or is due.
+ * - TIME markers (最近/上次) co-occurring with the SAME predicate set —
+ *   triggers only together. Domain nouns alone (运动/保险/检查) never trigger.
+ *
+ * P1#3 r4: removed ALL bare nouns (周期/频率/接下来/appointment/medication/检查)
+ * that appeared in ordinary recall queries. Both CN and EN now require the
+ * same predicate constraint.
  */
-const DIRECT_ACTION_CN = /该不该|要不要|还要不要|需不需要|该去|该做|复查|体检|吃药|用药|就诊|看病|预约挂号|到期|过期|接下来|定期|周期|频率|是否到期|什么时候到期|需不需要复查|要不要去看/;
-const DIRECT_ACTION_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|checkup|appointment|medication|when\s+should\s+i)\b/i;
-
-const TIME_MARKER_CN = /上次|最近|什么时候|多久/;
-const TIME_MARKER_EN = /\b(?:last\s+time|recently|how\s+long|next)\b/i;
+const ACTION_PREDICATE_CN = /该不该|要不要|还要不要|需不需要|该去|该做|该吃|该看|该补|该换|该买|到期|过期|是否到期|什么时候到期|需不需要复查|要不要去看|该不该去|该不该吃|要不要复查|需不需要去|要不要吃药/;
+const ACTION_PREDICATE_EN = /\b(?:should\s+i|do\s+i\s+need|is\s+it\s+time|overdue|due\s+for|when\s+should\s+i|need\s+to\s+go|need\s+to\s+take)\b/i;
 
 /**
- * Health/management domain compounds that, WITH a time marker, indicate
- * current-state intent. Only multi-char phrases that unambiguously signal
- * a health/admin action — NOT bare nouns (运动/保险/检查/报告/提交) that
- * appear in ordinary recall (运动相机/保险箱/代码检查/研究报告/提交代码).
+ * Health-domain action predicates that ALSO require an explicit action verb.
+ * These are compound verb phrases (复查/体检/看病/就诊/吃药), NOT bare nouns.
+ * They only trigger the guard when combined with a TIME marker, AND they
+ * express a management ACTION, not just a topic noun.
  */
-const DOMAIN_CN = /复查|体检|看病|就诊|吃药|用药|治疗|随访|监测|指标|症状|疗程|剂量|恢复|康复|锻炼|饮食|睡眠|作息|血压|血糖|心率|过敏|疫苗|续签|报税/;
-const DOMAIN_EN = /\b(?:checkup|appointment|medication|treatment|follow-?up|monitor|symptom|doctor|hospital|clinic|prescription|therapy|dose|recovery|workout|diet|sleep|allergy|vaccine|renewal|tax)\b/i;
+const DOMAIN_ACTION_CN = /复查|体检|看病|就诊|吃药|用药|治疗|随访|监测|症状|疗程|剂量|恢复|康复|锻炼|睡眠|作息|血压|血糖|心率|过敏|疫苗|续签|报税/;
+const DOMAIN_ACTION_EN = /\b(?:checkup|follow-?up|prescription|therapy|vaccine|allergy|renewal)\b/i;
 
-function hasDirectActionIntent(query: string): boolean {
-  return DIRECT_ACTION_CN.test(query) || DIRECT_ACTION_EN.test(query);
+const TIME_MARKER_CN = /上次|最近|什么时候|多久/;
+const TIME_MARKER_EN = /\b(?:last\s+time|recently|how\s+long)\b/i;
+
+function hasActionPredicate(query: string): boolean {
+  return ACTION_PREDICATE_CN.test(query) || ACTION_PREDICATE_EN.test(query);
 }
 
-function hasTimeMarkerWithDomain(query: string): boolean {
+function hasTimeMarkerWithDomainAction(query: string): boolean {
   const hasTime = TIME_MARKER_CN.test(query) || TIME_MARKER_EN.test(query);
   if (!hasTime) return false;
-  return DOMAIN_CN.test(query) || DOMAIN_EN.test(query);
+  return DOMAIN_ACTION_CN.test(query) || DOMAIN_ACTION_EN.test(query);
 }
 
 /**
  * #385 — closed grammar for personal current-state queries.
  *
- * Activates the personal current-state guard only when BOTH conditions hold:
+ * Activates ONLY when BOTH conditions hold:
  * 1. First-person phrasing (the speaker is the subject)
  * 2. Action-oriented / current-state intent:
- *    - a DIRECT action predicate (该不该/要不要/复查/体检/到期…), OR
- *    - a TIME marker (上次/最近) co-occurring with a specific health/admin
- *      domain compound.
+ *    - an explicit ACTION PREDICATE (该不该/需不需要/到期/overdue…), OR
+ *    - a TIME marker co-occurring with a DOMAIN ACTION compound
+ *      (复查/体检/看病/checkup/follow-up…).
  *
- * Deliberately narrow: avoids turning ordinary temporal, historical, or
- * incidental-noun-match queries into guard activation. Bare nouns like
- * 检查/运动/保险 do NOT trigger — only explicit action predicates do.
+ * Bare nouns (检查/运动/保险/周期/频率/接下来/appointment/medication) do NOT
+ * trigger — they appear in ordinary recall and would cause false degradation.
  */
 export function isPersonalCurrentStateQuery(query: string): boolean {
   if (!isFirstPersonQuery(query)) return false;
   try {
     const normalized = query.normalize("NFKC").trim();
-    return hasDirectActionIntent(normalized) || hasTimeMarkerWithDomain(normalized);
+    return hasActionPredicate(normalized) || hasTimeMarkerWithDomainAction(normalized);
   } catch {
     return false;
   }

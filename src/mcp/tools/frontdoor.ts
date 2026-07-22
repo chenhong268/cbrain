@@ -189,10 +189,16 @@ async function runContentRecall(
     shouldCompleteEvidence(query, "auto") && slugs.length > 0
       ? assembleEvidencePack(ctx.db, slugs, query)
       : undefined;
+  // #385 P1#2 — when the personal current-state guard passed, it verified
+  // per-candidate current-state timeline evidence. Force-include it so the
+  // authorization is auditable and semantic dates are visible, even when
+  // shouldCompleteEvidence(auto) would not fire (e.g. "我该吃药了吗").
+  const guardEvidence = guardResult.activated ? guardResult.verifiedTimeline : undefined;
   const payload = {
     query,
     entities,
     ...(evidencePack ? { evidence_pack: evidencePack } : {}),
+    ...(guardEvidence ? { current_state_evidence: guardEvidence } : {}),
     summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
