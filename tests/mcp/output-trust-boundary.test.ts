@@ -355,6 +355,19 @@ describe("sanitizeUntrustedData — spec §7.1 each attack as an INDEPENDENT fix
   test("drops `source_page_slug` key (slug-ish internal)", () => {
     expect(sanitizeUntrustedData({ source_page_slug: "brain/entities/foo", title: "实体A" })).toEqual({ title: "实体A" });
   });
+  // r9: frontdoor-only keys must NOT pass the default policy
+  test("drops `subject_context_candidates` key (frontdoor-only)", () => {
+    expect(sanitizeUntrustedData({ subject_context_candidates: [{ x: 1 }], title: "实体A" })).toEqual({ title: "实体A" });
+  });
+  test("drops `provenance` key (frontdoor-only)", () => {
+    expect(sanitizeUntrustedData({ provenance: "trusted", title: "实体A" })).toEqual({ title: "实体A" });
+  });
+  test("drops `topic_relevance` key (frontdoor-only)", () => {
+    expect(sanitizeUntrustedData({ topic_relevance: "unverified", title: "实体A" })).toEqual({ title: "实体A" });
+  });
+  test("drops `source_title` key (frontdoor-only)", () => {
+    expect(sanitizeUntrustedData({ source_title: "来源页", title: "实体A" })).toEqual({ title: "实体A" });
+  });
 
   // value sanitization: unsafe string leaves replaced via NFKC + DISPLAY_UNSAFE_PATTERNS
   test("replaces `score` value", () => {

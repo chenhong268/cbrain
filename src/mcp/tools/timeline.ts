@@ -6,7 +6,7 @@ import { mapSourceType } from "../../core/provenance.js";
 import { formatTimelineEnvelope } from "./format-result.js";
 import { buildToolResult, type BuiltToolResult } from "./result-builder.js";
 import { TITLE_MAX, SUMMARY_MAX } from "../validation.js";
-
+import { isSupportedSemanticEventDate } from "../../storage/sqlite.js";
 type TimelineAction = "get" | "add";
 
 const TIMELINE_OUTPUT_SCHEMA = {
@@ -88,7 +88,13 @@ async function addTimelineEntry(
   summary: string,
   eventDate?: string,
   source?: string,
-): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+  if (eventDate !== undefined && !isSupportedSemanticEventDate(eventDate)) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: "eventDate must be YYYY, YYYY-MM, or YYYY-MM-DD" }) }],
+      isError: true,
+    };
+  }
   const id = ctx.db.addTimelineEntry(slug, summary, eventDate, source);
 
   // Append timeline content to page body for searchability

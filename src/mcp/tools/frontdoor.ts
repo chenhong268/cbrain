@@ -23,6 +23,7 @@ import {
 import { buildToolResult } from "./result-builder.js";
 import { FRONTDOOR_DATA_KEYS, projectFrontdoorData, structuredSummary } from "./recall-output.js";
 import { filterContentCandidates } from "../../core/retrieval/content-relevance.js";
+import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-current-state-guard.js";
 
 type DetailLevel = "brief" | "normal" | "full";
 
@@ -130,6 +131,64 @@ async function runContentRecall(
     _skipDetailEnrich: true,
   });
   const results = filterContentCandidates(query, candidates);
+  // #385 — personal current-state guard: bounded, deterministic check before
+  // presenting reminder-like search material as a current personal recommendation.
+  // Activates only for a closed grammar (first-person + action/temporal intent).
+  // Non-personal queries short-circuit (activated=false) with zero DB work.
+  // Fails closed to insufficient-current-context when a trusted subject-to-topic
+  // chain cannot be proven — search material is NOT surfaced as current advice.
+  const guardResult = applyPersonalCurrentStateGuard(
+    ctx.db,
+    ctx.pages,
+    query,
+    results,
+    ctx.identityPersonSlug,
+  );
+  if (guardResult.activated && guardResult.outcome === "insufficient_current_context") {
+    const insufficientPayload = {
+      query,
+      entities: [] as Array<{ title: string; snippet: string }>,
+      // #385: same-subject candidates are auditable context only. They are
+      // deliberately not called evidence because topic relevance is unverified.
+      ...(guardResult.subjectContextCandidates && guardResult.subjectContextCandidates.length > 0
+        ? { subject_context_candidates: guardResult.subjectContextCandidates }
+        : {}),
+      summary: "无法确认当前个人状态，需要更明确的上下文",
+    };
+    const formatted = formatRecallEnvelope(insufficientPayload);
+    const hasCandidates = !!guardResult.subjectContextCandidates && guardResult.subjectContextCandidates.length > 0;
+    const display =
+      guardResult.gap === "identity_mapping"
+        ? `无法确认「${query}」的当前个人状态。没有可用的个人身份映射。`
+        : guardResult.gap === "subject_relation"
+          ? `无法确认「${query}」的当前个人状态。未找到有限范围内的受信主体关联。`
+          : hasCandidates
+            ? `无法确认「${query}」的当前个人状态。已找到同主体候选上下文，但尚未验证与此问题相关，缺少结构化状态信息。`
+            : `无法确认「${query}」的当前个人状态。已有受信主体关联，但没有可用的语义日期状态记录。`;
+    const nextSteps =
+      guardResult.gap === "subject_relation"
+        ? ["直接查阅相关记录", "补充主体与主题的关联"]
+        : guardResult.gap === "identity_mapping"
+          ? ["配置明确的个人身份映射", "直接查阅相关记录"]
+          : ["直接查阅记录确认当前状态", "补充结构化状态或有效期信息"];
+    return withRouting(
+      {
+        display,
+        summary: {
+          ...formatted.summary,
+          status: "degraded" as const,
+          degraded_reason: `个人当前状态上下文不足：${guardResult.reason ?? "未知原因"}`,
+          next_steps: nextSteps,
+        },
+        raw: formatted.raw,
+      },
+      insufficientPayload,
+      routing,
+    );
+  }
+  // #385 — guard never passes for personal current-state queries (phase-1
+  // always insufficient). This path is only reached for non-personal queries
+  // where the guard did not activate.
   const slugs = results.map((r) => r.slug);
   const entities = results.map((r) => {
     const page = ctx.pages.getBySlug(r.slug);

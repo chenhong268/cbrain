@@ -338,6 +338,35 @@ export interface LinkRow {
   trust_state?: string;
   evidence?: string;
 }
+export type SemanticEventDate = string;
+export interface BoundedTrustedTimelineRow {
+  page_slug: string;
+  event_date: SemanticEventDate;
+  summary: string;
+  trust_state: "trusted" | "user_thought";
+}
+
+/**
+ * Supported semantic timeline dates. The timeline model stores partial dates
+ * from extraction, so year, year-month, and full ISO calendar dates are valid.
+ * Free text, empty strings, impossible month/day values, and timestamps are not.
+ */
+export function isSupportedSemanticEventDate(value: string | null | undefined): value is SemanticEventDate {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$/.exec(value.trim());
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = match[2] === undefined ? undefined : Number(match[2]);
+  const day = match[3] === undefined ? undefined : Number(match[3]);
+  if (year < 1) return false;
+  if (month === undefined) return true;
+  if (month < 1 || month > 12) return false;
+  if (day === undefined) return true;
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = month === 2 ? (isLeapYear ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31;
+  return day >= 1 && day <= daysInMonth;
+}
+
 
 export interface ProvenanceInput {
   source_page_slug?: string;
@@ -980,7 +1009,6 @@ export class CBrainDB {
   searchTimeline(keyword?: string, dateFrom?: string, limit = 10): Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string }> {
     let sql = "SELECT page_slug, event_date, source, summary FROM timeline WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const params: Record<string, string | number> = { $limit: limit };
-
     if (keyword) {
       sql += " AND summary LIKE $keyword";
       params.$keyword = `%${keyword}%`;
@@ -2339,6 +2367,65 @@ export class CBrainDB {
     return this.prepare(
       `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence FROM links WHERE to_slug = $slug${activeFilter}`
     ).all({ $slug: slug }) as LinkRow[];
+  }
+
+  /**
+   * #385: bounded trusted-link fetch for the personal current-state guard.
+   * Returns at most `limit` outgoing+incoming links with trust_state
+   * explicitly 'trusted' or 'user_thought' (NOT null/legacy — the guard
+   * requires explicit provenance for personal current-state authority).
+   * Pushes LIMIT into SQL with deterministic ORDER BY so high-degree subjects
+   * always get a stable, auditable subset (P2#5: no LIMIT without ORDER BY).
+   */
+  getBoundedTrustedLinks(slug: string, limit: number): LinkRow[] {
+    const trustedFilter = " AND trust_state IN ('trusted','user_thought')";
+    const cols = "id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence, last_validated_at, effective_weight";
+    const rows = this.prepare(
+      `SELECT ${cols} FROM links WHERE (from_slug = $slug OR to_slug = $slug)${trustedFilter} ORDER BY effective_weight DESC, id ASC LIMIT $limit`
+    ).all({ $slug: slug, $limit: limit }) as LinkRow[];
+    return rows;
+  }
+
+  /**
+   * #385: bounded timeline fetch for the personal current-state guard.
+   * Reads the subject and trusted one-hop neighbors only.
+   *
+   * Explicit provenance and supported semantic dates are required. SQL
+   * filters the supported shapes before LIMIT, so malformed legacy rows
+   * cannot consume the bounded result budget.
+   */
+  getBoundedTrustedTimelineForSlugs(slugs: string[], limit: number): BoundedTrustedTimelineRow[] {
+    if (slugs.length === 0 || limit <= 0) return [];
+    const placeholders = slugs.map(() => "?").join(",");
+    const rows = this.prepare(
+      `SELECT page_slug, event_date, summary, trust_state FROM timeline
+       WHERE page_slug IN (${placeholders})
+       AND event_date IS NOT NULL
+       AND trim(event_date) <> ''
+       AND substr(trim(event_date), 1, 4) <> '0000'
+       AND trust_state IN ('trusted','user_thought')
+       AND (
+         trim(event_date) GLOB '[0-9][0-9][0-9][0-9]'
+         OR trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-0[1-9]'
+         OR trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-1[0-2]'
+         OR (
+           trim(event_date) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+           AND date(trim(event_date)) = trim(event_date)
+         )
+       )
+       ORDER BY event_date DESC, id DESC LIMIT ?`
+    ).all(...slugs, limit) as Array<{
+      page_slug: string;
+      event_date: string | null;
+      summary: string;
+      trust_state?: string | null;
+    }>;
+    return rows
+      .filter((row): row is BoundedTrustedTimelineRow =>
+        isSupportedSemanticEventDate(row.event_date) &&
+        (row.trust_state === "trusted" || row.trust_state === "user_thought")
+      )
+      .slice(0, limit);
   }
 
   getOutgoingSlugs(slug: string, includeInactive = false): string[] {

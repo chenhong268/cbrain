@@ -85,7 +85,7 @@ export const FRONTDOOR_DATA_KEYS: ReadonlySet<string> = new Set([
   "seed", "upward", "downward", "name", "events", "date", "result", "status", "evidence_board",
   "answer_context", "top_claims", "topic", "stats", "totalEntities", "totalLinks", "totalEvents",
   "results", "result_count", "proactive_hints", "text", "why", "matched_clues", "dimension", "hint_used",
-  "evidence",
+  "evidence", "subject_context_candidates", "source_page_slug", "source_title", "event_date", "provenance", "topic_relevance",
 ]);
 
 type SummaryKind = "recall" | "query" | "frontdoor";
@@ -219,9 +219,31 @@ function projectFrontdoorDetails(route: string, raw: Record<string, unknown>): R
 
 function projectContentDetails(raw: Record<string, unknown>): Record<string, unknown> {
   const entities = asRecords(raw.entities).slice(0, 10).map(projectNamedSnippet);
+  const subjectContextCandidates = asRecords(raw.subject_context_candidates)
+    .slice(0, 5)
+    .map((item) => {
+      const provenance =
+        item.provenance === "trusted" || item.provenance === "user_thought"
+          ? item.provenance
+          : undefined;
+      const candidate: Record<string, unknown> = {};
+      if (typeof item.source_title === "string") {
+        candidate.source_title = boundText(item.source_title, PROJECTED_CLAIM_MAX);
+      }
+      if (typeof item.event_date === "string") {
+        candidate.event_date = boundText(item.event_date, 50);
+      }
+      if (typeof item.summary === "string") {
+        candidate.summary = boundText(item.summary, PROJECTED_CLAIM_MAX);
+      }
+      if (provenance) candidate.provenance = provenance;
+      candidate.topic_relevance = "unverified" as const;
+      return candidate;
+    });
   return {
     ...(typeof raw.query === "string" ? { query: boundText(raw.query, 1_000) } : {}),
     ...(entities.length > 0 ? { entities } : {}),
+    ...(subjectContextCandidates.length > 0 ? { subject_context_candidates: subjectContextCandidates } : {}),
     ...(typeof raw.summary === "string" ? { summary: boundText(raw.summary) } : {}),
   };
 }

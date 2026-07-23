@@ -66,6 +66,8 @@ export interface ToolContext {
   nerIngestMode: IngestNerMode;
   /** #252/#271: durable backfill submitter for write paths in defer mode. */
   deferredNerSubmitter: DeferredNerSubmitter;
+  /** #385: configured identity for first-person personal current-state guard. */
+  identityPersonSlug?: string;
 }
 
 export interface IndexResult {
@@ -83,7 +85,7 @@ export async function indexPage(pipeline: ContentPipeline, slug: string, body: s
   }
 }
 
-export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; vaultBoundary?: TrustedVaultBoundary; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile; rolloutConfigAttestation?: string }): ToolContext {
+export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider; lance: LanceDBManager; vaultPath: string; vaultBoundary?: TrustedVaultBoundary; dbPath?: string; llm?: LLMProvider; profileDir?: string; runtimePath: string; watcher?: FileWatcher; nerIngestMode?: "sync" | "defer" | "off"; toolProfile?: ToolProfile; rolloutConfigAttestation?: string; identityPersonSlug?: string }): ToolContext {
   const { db, embedding, lance, vaultPath, vaultBoundary, dbPath, llm, profileDir, watcher } = deps;
   const outputsDir = deps.runtimePath;
   const logger = new Logger(outputsDir);
@@ -129,5 +131,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const compoundingReview = new CompoundingReviewManager(db);
   profile.load();
 
-  return { db, vaultPath, vaultBoundary, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY), rolloutIdentity };
+  return { db, vaultPath, vaultBoundary, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY), rolloutIdentity, identityPersonSlug: deps.identityPersonSlug };
 }
