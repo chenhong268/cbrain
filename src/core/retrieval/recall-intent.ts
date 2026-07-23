@@ -76,24 +76,25 @@ export function isFirstPersonQuery(query: string): boolean {
 }
 
 /**
- * #385 r14: personal current-state guard intent detection.
+ * #385 r17: personal current-state guard intent detection.
  *
- * INVARIANTS (per Codex r13 review):
+ * INVARIANTS:
  *   1. Every matching alternative is self-contained: it carries its own
  *      first-person subject AND its inquiry structure — no external
  *      isFirstPersonQuery() gate, no exclusion black-lists.
  *   2. Clauses are split ONLY by sentence terminators (？！。；\n).
  *      Commas are intra-clause; they stay inside the clause for matching.
  *
- * CN medication patterns use a boundary assertion on the medication object:
- * `药/药物/药品` must be followed by a sentence/clause boundary
- * (？ ? ， , 。 ！ \n | end). This rejects 药膳/药盒/药记录 without a suffix
- * black-list. Commas inside the clause are absorbed by [，、,\s]* between
- * grammatical components so parentheticals don't break matching.
+ * CN medication patterns use a POSITIVE boundary assertion (MED_OBJ_NEXT):
+ * after 药/药物/药品, the next token must be a question particle, clause
+ * punctuation, or a controlled predicate continuation. No `.*?` bridges.
+ * Commas inside the clause are absorbed by G between grammatical components.
  *
- * EN medication patterns use `.*?` to bridge parentheticals between
- * `am I` / `do I` and `on|taking|take`, and a positive tail white-list
- * (indications, dosing times, time adverbs) anchored to clause end.
+ * EN medication patterns use controlled modifier sequences (EN_MOD):
+ * time adverbs (currently/still) and parentheticals (if any / according to)
+ * in either order, each at most once. No `.*?` bridges. A positive tail
+ * white-list (indications, dosing patterns up to 6 word tokens) is anchored
+ * to clause end.
  */
 
 /** Split ONLY by sentence terminators — never by commas. */
@@ -120,9 +121,8 @@ const MED_OBJ_NEXT = "(?=[吗呢？?，,。！\\n]|$|会影响|需要|不能|不
 /** CN medication compound: verb + object. */
 const MED_CN_OBJ = "(?:药|药物|药品)";
 const MED_CN_VERB_OBJ = "(?:吃|服|用|服用)(?:药|药物|药品)";
-
-/** CN time marker: now/currently/still — includes 还在/还在/仍然. */
-const CN_TIME = "(?:现在|目前|当前|当下|还在|还在|仍然)";
+/** CN time marker: now/currently/still — includes 还在/仍在/仍然. */
+const CN_TIME = "(?:现在|目前|当前|当下|还在|仍在|仍然)";
 
 // ── CN advice: 我 must be the subject ──
 
@@ -150,7 +150,7 @@ const ADVICE_EN = new RegExp(
 // ── CN medication: subject + time + verb + REQUIRED interrogative + positive boundary ──
 
 const MED_CN_WHAT = new RegExp(
-  "我" + G + CN_TIME + "?" + G + "(?:还在|正在|在)?" + G +
+  "我" + G + CN_TIME + "?" + G + "(?:仍在|还在|正在|在)?" + G +
     "(?:还)?(?:吃|服用|用|服)(?:着)?(?:什么|哪些|哪种)" + MED_CN_OBJ + MED_OBJ_NEXT,
 );
 const MED_CN_RELATIVE = new RegExp(
@@ -165,6 +165,7 @@ const MED_CN_YN = new RegExp(
     "有[，、,\\s]*(?:在)?[，、,\\s]*" + MED_CN_VERB_OBJ + MED_OBJ_NEXT + "[，、,\\s]*(?:吗|呢)" +
     "|有没有[，、,\\s]*(?:在)?[，、,\\s]*" + MED_CN_VERB_OBJ + MED_OBJ_NEXT + "(?=[吗呢？?，,。！\\n]|$)" +
     "|(?:是否|有无)" + MED_CN_VERB_OBJ + MED_OBJ_NEXT + "(?=[吗呢？?，,。！\\n]|$)" +
+    "|(?:仍在|还在|在)?" + MED_CN_VERB_OBJ + MED_OBJ_NEXT + "[，、,\\s]*(?:吗|呢)" +
   ")",
 );
 

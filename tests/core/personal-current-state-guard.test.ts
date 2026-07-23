@@ -149,6 +149,9 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "Am I, according to my records, currently taking any medications?",
     "What medications am I, according to my records, currently taking?",
     "Do I, according to my records, currently take medications?",
+    "我仍在吃什么药？",
+    "我目前仍在服用哪些药？",
+    "我仍在服药吗？",
   ])("activates for controlled medication current state: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(true);
   });
