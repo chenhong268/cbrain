@@ -133,11 +133,19 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "Am I taking medication for type 2 diabetes?",
     "Which medicines do I take twice a day?",
     "What medication am I taking as needed?",
+    "What medications am I, according to my records, taking?",
+    "Do I, according to my records, take any medications?",
+    "我现在吃什么药不能喝酒？",
+    "我现在吃哪些药和酒冲突？",
+    "What medications am I taking for attention deficit disorder?",
+    "Am I taking medication for generalized anxiety disorder?",
+    "What medications am I taking for Crohn\u0027s disease?",
+    "Which medicines do I take three times a day?",
   ])("activates for controlled medication current state: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(true);
   });
 
-  // r10-r15: false positives — ordinary queries about medication as a topic
+  // r10-r16: false positives — ordinary queries about medication as a topic
   test.each([
     "My medication article is on the desk",
     "What did I write on medications?",
@@ -170,6 +178,8 @@ describe("isPersonalCurrentStateQuery (#385) — r7 advice-only grammar", () => 
     "我现在在服药软件里查记录",
     "我有吃药的历史记录",
     "我现在在吃什么药盒装的糖？",
+    "我现在有没有用药记录？",
+    "我现在有没有吃药记录？",
   ])("does NOT activate for medication-as-topic: %s", (q) => {
     expect(isPersonalCurrentStateQuery(q)).toBe(false);
   });
