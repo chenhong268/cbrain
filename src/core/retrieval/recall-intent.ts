@@ -108,22 +108,26 @@ function splitClauses(query: string): string[] {
 const G = "[，、,\\s]*";
 
 /**
- * CN medication object boundary: after 药/药物/药品, the next character must
- * NOT be a topic-changing character that turns "medication" into a
- * medication-related artifact (record/software/history/pill-box/food/etc).
- * This is a single-character negative lookahead, applied uniformly to ALL
- * CN medication branches. No word-level black-list, no positive enumeration.
+ * CN medication object: 药 must be followed by a clause-ending boundary.
+ * Instead of a negative character black-list, we use a POSITIVE definition:
+ * after 药/药物/药品, the next token must be a question particle (吗/呢),
+ * clause punctuation (？?，,。！\n), or a common verb that continues the
+ * current-state inquiry (会影响/需要/不能/和.*冲突/比较). This is finite
+ * and exhaustive for the queries we support.
  */
-const MED_OBJ_END = "(?![记软历清列明账费管文论参资笔识研关实图盒膳剂妆材丸膏方酒店房油棉水检理])";
+const MED_OBJ_NEXT = "(?=[吗呢？?，,。！\\n]|$|会影响|需要|不能|不能喝|和.{0,3}冲突|比较好|比较合适|怎么办|行吗|可以吗)";
 
 /** CN medication compound: verb + object. */
 const MED_CN_OBJ = "(?:药|药物|药品)";
 const MED_CN_VERB_OBJ = "(?:吃|服|用|服用)(?:药|药物|药品)";
 
+/** CN time marker: now/currently/still — includes 还在/还在/仍然. */
+const CN_TIME = "(?:现在|目前|当前|当下|还在|还在|仍然)";
+
 // ── CN advice: 我 must be the subject ──
 
 const ADVICE_CN_DIRECT = new RegExp(
-  "我" + G + "(?:现在|目前|当前)?" + G + "(?:该不该|要不要|还要不要|需不需要|该去|该做|该吃|该看|该补|该换|该买|需不需要复查|要不要去看|该不该去|该不该吃|要不要复查|需不需要去|要不要吃药)",
+  "我" + G + CN_TIME + "?" + G + "(?:该不该|要不要|还要不要|需不需要|该去|该做|该吃|该看|该补|该换|该买|需不需要复查|要不要去看|该不该去|该不该吃|要不要复查|需不需要去|要不要吃药)",
 );
 const ADVICE_CN_POSSESSIVE =
   /我的(?:体检|复查|检查|就诊|年检|签证|护照|许可|续签|药)(?:是否)?(?:到期|过期)/;
@@ -143,39 +147,43 @@ const ADVICE_EN = new RegExp(
   "i",
 );
 
-// ── CN medication: subject + verb + REQUIRED interrogative + unified boundary ──
+// ── CN medication: subject + time + verb + REQUIRED interrogative + positive boundary ──
 
 const MED_CN_WHAT = new RegExp(
-  "我" + G + "(?:现在|目前|当前)?" + G + "(?:正在|在)?" + G +
-    "(?:吃|服用|用|服)(?:着)?(?:什么|哪些|哪种)" + MED_CN_OBJ + MED_OBJ_END,
+  "我" + G + CN_TIME + "?" + G + "(?:还在|正在|在)?" + G +
+    "(?:还)?(?:吃|服用|用|服)(?:着)?(?:什么|哪些|哪种)" + MED_CN_OBJ + MED_OBJ_NEXT,
 );
 const MED_CN_RELATIVE = new RegExp(
-  "我" + G + "(?:现在|目前|当前)?" + G + "(?:服用|吃|服|用)的" + G + "(?:是)?(?:什么|哪些|哪种)" + MED_CN_OBJ + MED_OBJ_END,
+  "我" + G + CN_TIME + "?" + G + "(?:还)?(?:服用|吃|服|用)的" + G + "(?:是)?(?:什么|哪些|哪种)" + MED_CN_OBJ + MED_OBJ_NEXT,
 );
 const MED_CN_LIST = new RegExp(
-  "我" + G + "(?:现在|目前|当前)?" + G + "(?:服用|吃|用)的" + MED_CN_OBJ + "(?:有哪些|是什么)" + MED_OBJ_END,
+  "我" + G + CN_TIME + "?" + G + "(?:还)?(?:服用|吃|用)的" + MED_CN_OBJ + "(?:有哪些|是什么)" + MED_OBJ_NEXT,
 );
 /** YN: must terminate with 吗/呢 or clause boundary after the medication compound. */
 const MED_CN_YN = new RegExp(
-  "我" + G + "(?:现在|目前|当前)?" + G + "(?:" +
-    "有[，、,\\s]*(?:在)?[，、,\\s]*" + MED_CN_VERB_OBJ + MED_OBJ_END + "[，、,\\s]*(?:吗|呢)" +
-    "|有没有[，、,\\s]*(?:在)?[，、,\\s]*" + MED_CN_VERB_OBJ + MED_OBJ_END + "(?=[？?，,。！\n]|$)" +
-    "|(?:是否|有无)" + MED_CN_VERB_OBJ + MED_OBJ_END + "(?=[？?，,。！\n]|$)" +
+  "我" + G + CN_TIME + "?" + G + "(?:" +
+    "有[，、,\\s]*(?:在)?[，、,\\s]*" + MED_CN_VERB_OBJ + MED_OBJ_NEXT + "[，、,\\s]*(?:吗|呢)" +
+    "|有没有[，、,\\s]*(?:在)?[，、,\\s]*" + MED_CN_VERB_OBJ + MED_OBJ_NEXT + "(?=[吗呢？?，,。！\\n]|$)" +
+    "|(?:是否|有无)" + MED_CN_VERB_OBJ + MED_OBJ_NEXT + "(?=[吗呢？?，,。！\\n]|$)" +
   ")",
 );
 
 // ── EN medication: tightly coupled first-person clauses with shared components ──
 //
 // NO `.*?` bridges. Subject (I) and verb (on/taking/take) must be adjacent
-// modulo a SHARED controlled parenthetical + time adverb, used uniformly
-// across all four clause structures. After the medication object, a positive
-// tail white-list (indications and dosing by prepositional phrases, up to 6
-// word tokens including apostrophes/hyphens) is accepted.
+// modulo a SHARED controlled modifier sequence. The modifier sequence accepts
+// time adverbs (currently/right now/now/still) and parentheticals (if any /
+// according to ...) in EITHER order, each appearing at most once.
 
-/** Controlled parenthetical — shared across all four patterns. */
+/** Controlled parenthetical. */
 const EN_PAREN = "(?:\\s*,\\s*(?:if\\s+any|according\\s+to\\s+[\\w'-]+(?:\\s+[\\w'-]+){0,2})\\s*,)?";
-/** Optional time adverb — shared. */
-const EN_TIME = "(?:\\s+(?:currently|right\\s+now|now))?";
+/** Time adverb — includes "still". */
+const EN_TIME = "(?:\\s+(?:currently|right\\s+now|now|still))?";
+/**
+ * Modifier sequence: time then parenthetical, OR parenthetical then time.
+ * Each appears at most once. This covers both natural orderings.
+ */
+const EN_MOD = "(?:" + EN_TIME + EN_PAREN + "|" + EN_PAREN + EN_TIME + ")";
 /** Word token with apostrophe/hyphen support. */
 const WT = "[\\w'-]+";
 
@@ -184,31 +192,31 @@ const MED_EN_TAIL = new RegExp(
   "(?:" +
     "\\s+for\\s+" + WT + "(?:\\s+" + WT + "){0,5}" +
     "|\\s+(?:at|in\\s+the|after|before|every|as|twice|once|three\\s+times|two\\s+times|with)\\s+" + WT + "(?:\\s+" + WT + "){0,5}" +
-    "|\\s+(?:daily|currently|right\\s+now|now|today)" +
+    "|\\s+(?:daily|currently|right\\s+now|now|today|still)" +
   ")?\\s*[?.!]?\\s*$",
   "i",
 );
 
-/** Pattern 1: what/which medication(s) [, if any,] am I [time] [paren] on/taking [tail] */
+/** Pattern 1: what/which medication(s) [, if any,] am I [mod] on/taking [tail] */
 const MED_WHAT_ON_EN = new RegExp(
   "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)" +
     "\\s*,?\\s*(?:if\\s+any\\s*,?)?\\s*" +
-    "am\\s+i" + EN_TIME + EN_PAREN + "\\s+(?:on|taking)" + MED_EN_TAIL.source,
+    "am\\s+i" + EN_MOD + "\\s+(?:on|taking)" + MED_EN_TAIL.source,
   "i",
 );
-/** Pattern 2: am I [time] [paren] on/taking (any) medication [tail] */
+/** Pattern 2: am I [mod] on/taking (any) medication [tail] */
 const MED_AM_I_EN = new RegExp(
-  "\\bam\\s+i" + EN_TIME + EN_PAREN + "\\s+(?:on|taking)\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + MED_EN_TAIL.source,
+  "\\bam\\s+i" + EN_MOD + "\\s+(?:on|taking)\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + MED_EN_TAIL.source,
   "i",
 );
-/** Pattern 3: what/which medication(s) do I [time] [paren] take [tail] */
+/** Pattern 3: what/which medication(s) do I [mod] take [tail] */
 const MED_WHAT_DO_EN = new RegExp(
-  "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)\\s+do\\s+i" + EN_TIME + EN_PAREN + "\\s+take" + MED_EN_TAIL.source,
+  "\\b(?:what|which)\\s+(?:medications?|medicines?|prescriptions?)\\s+do\\s+i" + EN_MOD + "\\s+take" + MED_EN_TAIL.source,
   "i",
 );
-/** Pattern 4: do I [time] [paren] take (any) medication [tail] */
+/** Pattern 4: do I [mod] take (any) medication [tail] */
 const MED_DO_I_EN = new RegExp(
-  "\\bdo\\s+i" + EN_TIME + EN_PAREN + "\\s+take\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + MED_EN_TAIL.source,
+  "\\bdo\\s+i" + EN_MOD + "\\s+take\\s+(?:any\\s+)?(?:medications?|medicines?|prescriptions?|meds?)" + MED_EN_TAIL.source,
   "i",
 );
 
