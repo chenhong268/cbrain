@@ -15,6 +15,13 @@ import {
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
 import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody } from "./shared.js";
+import {
+  PageWriteProvenanceConflictError,
+  forUnattributed,
+  provenanceMatchesRow,
+  toConflictFields,
+  type PageCreationProvenanceInput,
+} from "./page-write-provenance.js";
 import { safeDeletePage, type SafeDeleteResult } from "./safety/page-delete-safety.js";
 import type { Logger } from "./logger.js";
 import type { LanceDBManager } from "../storage/lancedb.js";
@@ -26,6 +33,7 @@ import {
 import {
   atomicSlugChange,
   atomicTypeChange,
+  CleanupIncompleteError,
   type MoveFsOps,
 } from "./safety/atomic-move.js";
 
@@ -49,6 +57,13 @@ export interface CreatePageInput {
   expiresAt?: string | null;
   confidenceDecay?: number;
   extra?: Record<string, unknown>;
+  /**
+   * #386: Append-only creation provenance for a record page. INTERNAL only —
+   * adapters (put_page/ingest) build this from their own actor knowledge; it
+   * never appears in an MCP tool's public inputSchema. Emitted only when the
+   * created page's type is `record` (v1 scope).
+   */
+  provenance?: PageCreationProvenanceInput;
 }
 
 export interface Page {
@@ -141,6 +156,25 @@ export class PageManager {
       throw new Error(`Vault file already exists for slug "${slug}" without a DB row — possible orphan. Refusing to overwrite.`);
     }
 
+    // #386: resolve provenance once. Record pages are ALWAYS attributed (default
+    // unattributed when no caller context — a new write never mixes into the
+    // historical gap); non-record types get none.
+    const provenance: PageCreationProvenanceInput | undefined =
+      normalizedType === "record" ? (input.provenance ?? forUnattributed()) : undefined;
+
+    // Defense-in-depth for "unforgable": if a provenance row already exists for
+    // this slug with DIFFERENT attribution, refuse BEFORE creating the page.
+    // An orphan pwp row is only reachable via DB corruption (the FK prevents it
+    // in normal flow), but detecting the conflict here — before insertPage —
+    // means the page is never created and the catch's deletePageCascaded can
+    // never cascade through the FK and destroy the locked attribution.
+    if (provenance) {
+      const existingProv = this.db.getPageWriteProvenance(slug);
+      if (existingProv && !provenanceMatchesRow(existingProv, provenance)) {
+        throw new PageWriteProvenanceConflictError(slug, existingProv, toConflictFields(provenance));
+      }
+    }
+
     const now = new Date().toISOString();
     const frontmatter: PageFrontmatter = {
       title: input.title,
@@ -157,33 +191,50 @@ export class PageManager {
     mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, content, "utf-8");
 
-    let dbInserted = false;
+    // #386: atomic DB write — insertPage + tags + provenance commit together in
+    // ONE SQLite transaction, or all roll back. This replaces the leaky
+    // compensating-delete approach (which could itself fail and leave a page row
+    // without provenance). The vault file is written first; on DB rollback we
+    // delete it, and a file-cleanup failure is surfaced as a structured
+    // recovery-required error (orphan file + clean DB is detectable) — never
+    // swallowed. (Re-attribution conflict is caught by the pre-check above.)
     try {
       const contentHash = hashContent(content);
-
-      this.db.insertPage({
-        slug,
-        type: normalizedType,
-        title: input.title,
-        filePath: relative(this.vaultPath, filePath),
-        contentHash,
-        expiresAt: input.expiresAt ?? null,
-        confidenceDecay: input.confidenceDecay ?? 1.0,
+      this.db.runInTransaction(() => {
+        this.db.insertPage({
+          slug,
+          type: normalizedType,
+          title: input.title,
+          filePath: relative(this.vaultPath, filePath),
+          contentHash,
+          expiresAt: input.expiresAt ?? null,
+          confidenceDecay: input.confidenceDecay ?? 1.0,
+        });
+        if (input.tags && input.tags.length > 0) {
+          this.db.addTags(slug, input.tags);
+        }
+        if (provenance) {
+          this.db.recordPageWriteProvenance(slug, provenance);
+        }
       });
-      dbInserted = true;
-
-      if (input.tags && input.tags.length > 0) {
-        this.db.addTags(slug, input.tags);
-      }
     } catch (dbError) {
-      // DB insert failed — only clean up the vault file WE just wrote
-      // Do NOT deletePageCascaded: that would wipe pre-existing data for same slug
-      try { unlinkSync(filePath); } catch { /* best effort */ }
-      // If insertPage succeeded but addTags failed, clean up partial DB state
-      if (dbInserted) {
-        try { this.db.deletePageCascaded(slug); } catch { /* best effort */ }
+      const primaryError = dbError instanceof Error ? dbError : new Error(String(dbError));
+      // Transaction rolled back — no partial page/provenance row survives.
+      try {
+        this._fs.unlinkSync(filePath);
+      } catch (fileErr) {
+        // Orphan vault file + clean DB: detectable on next create() (the orphan
+        // guard refuses to overwrite). Surface a STRUCTURED recovery error that
+        // preserves both the primary DB failure and the cleanup failure — never
+        // swallow, and don't collapse them into a plain message.
+        throw new CleanupIncompleteError(primaryError, [
+          {
+            path: relative(this.vaultPath, filePath),
+            error: fileErr instanceof Error ? fileErr : new Error(String(fileErr)),
+          },
+        ]);
       }
-      throw dbError;
+      throw primaryError;
     }
 
     this.logger?.info("page", "页面已创建", { slug, title: input.title, type: input.type });

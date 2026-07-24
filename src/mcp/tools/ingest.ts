@@ -42,7 +42,7 @@ export function registerIngestTools(server: McpServer, ctx: ToolContext): void {
   }, async ({ content, type, title, tags, pageType, skipNer, allowDuplicate, nerMode }) => {
     assertNoFileReference(content); // (#205) reject @file refs — MCP never reads local files
     const classifiedType = classifyContentType(content, type);
-    const result = await ctx.ingest.ingest({ content, type: classifiedType, title, tags, pageType, skipNer, allowDuplicate, nerMode });
+    const result = await ctx.ingest.ingest({ content, type: classifiedType, title, tags, pageType, skipNer, allowDuplicate, nerMode, writer: { actorClass: "agent" } });
 
     // Use actual page title from DB for display; fall back to caller title, then slug
     const page = result.slug ? ctx.db.getPage(result.slug) : null;

@@ -21,6 +21,7 @@ import {
   type NerMode,
 } from "./ner-write-path.js";
 import { extractEntityFacts } from "./entity-facts.js";
+import { forIngest, type RecordWriterContext } from "../page-write-provenance.js";
 
 export interface IngestManagerOptions {
   /** #252: default NER mode for this manager (config/env resolved upstream). Default "sync". */
@@ -85,6 +86,12 @@ export interface IngestInput {
   allowDuplicate?: boolean;
   /** #252: per-call override for this manager's default nerMode. */
   nerMode?: NerMode;
+  /**
+   * #386: who is performing this ingest. INTERNAL — set by the adapter layer
+   * (MCP→agent, CLI→operator), never by an MCP caller. Mapped to record-page
+   * creation provenance when a record page is created.
+   */
+  writer?: RecordWriterContext;
 }
 
 export type IngestOutcome = "created" | "updated" | "duplicate";
@@ -193,7 +200,7 @@ export class IngestManager {
       ? [...new Set([...baseTags, "personal"])]
       : baseTags;
 
-    return this.ingestCore(slug, title, type, body, effectiveTags, nerAction, input.allowDuplicate);
+    return this.ingestCore(slug, title, type, body, effectiveTags, nerAction, input.allowDuplicate, input.writer);
   }
 
   private async ingestText(input: IngestInput, nerAction: NerAction): Promise<IngestResult> {
@@ -227,7 +234,7 @@ export class IngestManager {
     const slug = generateSlug(title, type);
     const body = input.content;
 
-    return this.ingestCore(slug, title, type, body, effectiveTags, nerAction, input.allowDuplicate);
+    return this.ingestCore(slug, title, type, body, effectiveTags, nerAction, input.allowDuplicate, input.writer);
   }
 
   private findExistingPersonSlug(title: string | undefined): string | null {
@@ -359,7 +366,7 @@ export class IngestManager {
 
   private async ingestCore(
     slug: string, title: string, type: PageType, body: string, tags: string[], nerAction: NerAction,
-    allowDuplicate?: boolean
+    allowDuplicate?: boolean, writer?: RecordWriterContext
   ): Promise<IngestResult> {
     // --- Dedup gate for durable source types (record / insight) ---
     let bodyHash: string | undefined;
@@ -411,7 +418,7 @@ export class IngestManager {
       if (existedBefore) {
         this.pages.update(slug, { body, tags });
       } else {
-        this.pages.create({ title, type, body, tags, slug });
+        this.pages.create({ title, type, body, tags, slug, ...(writer ? { provenance: forIngest(writer) } : {}) });
         createdThisAttempt = true;
       }
 

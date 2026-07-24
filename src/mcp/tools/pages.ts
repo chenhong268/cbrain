@@ -14,6 +14,7 @@ import {
   shouldProcessNerForWritePath,
   submitDeferredNerForWritePath,
 } from "../../core/ingestion/ner-write-path.js";
+import { forPutPage } from "../../core/page-write-provenance.js";
 
 function syncWikilinkRelations(ctx: ToolContext, slug: string, affectedSlugs: Set<string>): void {
   for (const s of new Set([slug, ...affectedSlugs])) {
@@ -216,7 +217,17 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (!title) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "title is required for new pages" }) }] };
     }
-    const created = ctx.pages.create({ slug, title, type: type ?? "record", body: content, tags, extra });
+    const created = ctx.pages.create({
+      slug,
+      title,
+      type: type ?? "record",
+      body: content,
+      tags,
+      extra,
+      // #386: MCP put_page is always an agent write. Actor is decided here by
+      // the adapter — never accepted from the tool's inputSchema (anti-forgery).
+      provenance: forPutPage({ actorClass: "agent" }),
+    });
     await indexPage(ctx.pipeline, created.slug, content, ctx.logger);
     const pageType = created.type;
     const wlResult = ctx.pipeline.processWikilinks(created.slug, content);
