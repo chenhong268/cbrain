@@ -719,21 +719,14 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_page_write_provenance_actor ON page_write_provenance(actor_class);
     `);
 
-    // #386: the page_write_provenance TRIGGERS reference pages() in their bodies.
-    // A pages-rebuilding migration (migratePagesConstraint / migrateOntologyTypes /
-    // …) does DROP+RENAME of pages, which recompiles a trigger while pages is
-    // momentarily gone -> 'no such table: pages' (Linux). Drop the triggers here,
-    // BEFORE any pages rebuild, and recreate them at the end of migrate(). The
-    // TABLE and its rows are NEVER dropped — a prior build may have populated it
-    // (dropping it would silently destroy provenance audit facts).
-    this.db.exec(`
-      DROP TRIGGER IF EXISTS page_write_provenance_immutable;
-      DROP TRIGGER IF EXISTS page_write_provenance_no_direct_delete;
-      DROP TRIGGER IF EXISTS page_write_provenance_no_transfer;
-      DROP TRIGGER IF EXISTS page_write_provenance_origin_format;
-    `);
-
-    this.migratePagesConstraint();
+    // #386: the two migrations below rebuild pages (DROP+RENAME pages). The
+    // page_write_provenance triggers reference pages() in their bodies and must
+    // be absent during each rebuild; runWithProvenanceTriggersSuspended drops
+    // them, runs the rebuild, and ALWAYS recreates them in finally (fail-closed:
+    // a mid-migration failure can never leave the DB without its
+    // immutability/privacy/delete-protection triggers). The pwp TABLE is never
+    // dropped, so rows from any prior build survive.
+    this.runWithProvenanceTriggersSuspended(() => this.migratePagesConstraint());
     runPageMigrations(this.db);
     runLinkMigrations(this.db);
     runDiscoveryMigrations(this.db, CBrainDB.discoveryDedupKey);
@@ -742,18 +735,20 @@ export class CBrainDB {
     runQueryInteractionMigrations(this.db);
     runAliasMigrations(this.db);
     this.migrateChunksSummaryLevel();
-    this.migrateOntologyTypes();
+    this.runWithProvenanceTriggersSuspended(() => this.migrateOntologyTypes());
     runMissingIndexMigrations(this.db);
     runProvenanceMigrations(this.db);
     runLatePageMigrations(this.db);
     this.repairDirtyData();
     runRecommendationRecordsMigration(this.db);
+  }
 
-    // #386: now that every pages-rebuilding migration has finished, recreate the
-    // page_write_provenance triggers (dropped at the top of migrate so their
-    // pages() references didn't coincide with a pages rebuild). The table itself
-    // lives in the base schema block and is never dropped, so existing rows
-    // (incl. those written by a prior build) survive. Idempotent (IF NOT EXISTS).
+  /**
+   * #386: (re)create the four page_write_provenance protection triggers. Called
+   * on a fresh DB (via the wrappers' finally) and after every pages rebuild.
+   * Idempotent (IF NOT EXISTS). The triggers reference pages() in their bodies.
+   */
+  private ensurePageWriteProvenanceTriggers(): void {
     this.db.exec(`
       CREATE TRIGGER IF NOT EXISTS page_write_provenance_immutable
       BEFORE UPDATE OF write_mode, actor_class, creation_reason, origin_kind, origin_ref, created_at
@@ -792,6 +787,31 @@ export class CBrainDB {
         END;
       END;
     `);
+  }
+
+  /**
+   * #386: run a pages-rebuilding migration with the page_write_provenance
+   * triggers temporarily removed. The triggers reference pages() in their bodies
+   * and must be absent while pages is DROP+RENAME'd (else SQLite recompiles a
+   * trigger while pages is gone -> 'no such table: pages'). The triggers are
+   * ALWAYS restored in finally — even if fn throws — so a mid-migration failure
+   * can never leave the DB without its immutability/privacy/delete-protection
+   * guarantees (fail-closed). The window is narrowed to just the rebuild, not
+   * the whole migration chain. (fn's failure rolls its rebuild tx back first, so
+   * pages exists again before triggers are recreated.)
+   */
+  private runWithProvenanceTriggersSuspended(fn: () => void): void {
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS page_write_provenance_immutable;
+      DROP TRIGGER IF EXISTS page_write_provenance_no_direct_delete;
+      DROP TRIGGER IF EXISTS page_write_provenance_no_transfer;
+      DROP TRIGGER IF EXISTS page_write_provenance_origin_format;
+    `);
+    try {
+      fn();
+    } finally {
+      this.ensurePageWriteProvenanceTriggers();
+    }
   }
 
   private migratePagesConstraint(): void {

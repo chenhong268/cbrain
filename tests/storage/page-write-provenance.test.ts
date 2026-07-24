@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import {
   PageWriteProvenanceConflictError,
@@ -476,5 +477,43 @@ describe("migrate ordering: page_write_provenance after pages rebuild (#386)", (
       expect(triggerNames.has(t)).toBe(true);
     }
     db.close();
+  });
+
+  test("pages-rebuild failure restores triggers + keeps rows + still rejects tamper (fail-closed) (#386 P1)", () => {
+    // 1. Fully migrate + write a provenance row.
+    const db = new CBrainDB(dbPath);
+    db.insertPage({ slug: "records/survivor", type: "record", title: "Survivor", filePath: "records/survivor.md", contentHash: "h" });
+    db.recordPageWriteProvenance("records/survivor", forVaultDiscovery());
+
+    // 2. Force migrateOntologyTypes to FAIL on next open: inject an FK violation
+    //    (a chunks row referencing a nonexistent page) + unset its marker so it
+    //    re-runs and its foreign_key_check trips.
+    const raw0 = (db as unknown as { rawDb: { exec: (s: string) => void; prepare: (s: string) => { run: (...a: unknown[]) => void } } }).rawDb;
+    raw0.exec("PRAGMA foreign_keys = OFF");
+    raw0.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES ('records/__fk_violation__', 0, 'x')").run();
+    raw0.exec("PRAGMA foreign_keys = ON");
+    raw0.prepare("DELETE FROM config WHERE key = 'migration_v6_ontology_types'").run();
+    db.close();
+
+    // 3. Re-open -> migrateOntologyTypes re-runs, foreign_key_check fails -> throws.
+    expect(() => {
+      new CBrainDB(dbPath);
+    }).toThrow();
+
+    // 4. Inspect the (now closed) DB via a raw connection: triggers restored
+    //    (fail-closed — not left missing), row preserved, tamper still rejected.
+    const raw = new Database(dbPath);
+    const triggers = (raw.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='page_write_provenance'").all() as Array<{ name: string }>).map((t) => t.name);
+    expect(triggers).toHaveLength(4);
+    expect(triggers).toContain("page_write_provenance_immutable");
+
+    const row = raw.prepare("SELECT actor_class FROM page_write_provenance WHERE page_slug = 'records/survivor'").get() as { actor_class: string };
+    expect(row.actor_class).toBe("unknown_writer");
+
+    // The restored immutable trigger still rejects re-attribution.
+    expect(() =>
+      raw.prepare("UPDATE page_write_provenance SET actor_class = 'agent' WHERE page_slug = 'records/survivor'").run(),
+    ).toThrow(/immutable/i);
+    raw.close();
   });
 });
