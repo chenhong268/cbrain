@@ -14,6 +14,7 @@ import {
   type NerMode,
 } from "../ingestion/ner-write-path.js";
 import { PageManager } from "../page.js";
+import { forVaultDiscovery } from "../page-write-provenance.js";
 import { canonicalSlug, slugToFilePath } from "../../utils/slug.js";
 import type { Logger } from "../logger.js";
 import {
@@ -298,11 +299,20 @@ export class SyncManager {
         const indexSnap = await this.snapshotOrFail(file.slug, exists);
 
         try {
-          this.db.upsertPage({
-            slug: file.slug,
-            type: file.type,
-            title: file.title,
-            filePath: file.relPath,
+          // #386: upsert + provenance commit atomically in one short transaction
+          // so a provenance failure rolls back the page too (no orphan page row
+          // without provenance). First creation only (isNewAll) is attributed to
+          // unknown_writer; updates never touch provenance (append-only).
+          this.db.runInTransaction(() => {
+            this.db.upsertPage({
+              slug: file.slug,
+              type: file.type,
+              title: file.title,
+              filePath: file.relPath,
+            });
+            if (isNewAll && file.type === "record") {
+              this.db.recordPageWriteProvenance(file.slug, forVaultDiscovery());
+            }
           });
 
           if (file.frontmatter?.tags && Array.isArray(file.frontmatter.tags)) {
@@ -623,7 +633,15 @@ export class SyncManager {
     const indexSnap: IndexSnapshot = await this.snapshotOrFail(effectiveSlug, exists);
 
     try {
-      this.db.upsertPage({ slug: effectiveSlug, type, title, filePath: relPath });
+      // #386: upsert + provenance commit atomically (short transaction) so a
+      // provenance failure rolls back the page too. First creation only; updates
+      // never touch provenance. entity/concept excluded by type gate.
+      this.db.runInTransaction(() => {
+        this.db.upsertPage({ slug: effectiveSlug, type, title, filePath: relPath });
+        if (isNew && type === "record") {
+          this.db.recordPageWriteProvenance(effectiveSlug, forVaultDiscovery());
+        }
+      });
       this.db.updatePageFilePath(effectiveSlug, relPath);
 
       if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
