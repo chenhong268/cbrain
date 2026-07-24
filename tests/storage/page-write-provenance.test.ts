@@ -380,9 +380,6 @@ describe("page_write_provenance storage (#386)", () => {
     ]) {
       expect(triggerNames.has(t)).toBe(true);
     }
-
-    const marker = raw.prepare("SELECT value FROM config WHERE key = 'migration_v7_page_write_provenance'").get() as { value?: string } | undefined;
-    expect(marker?.value).toBe("1");
   });
 });
 
@@ -451,32 +448,33 @@ describe("migrate ordering: page_write_provenance after pages rebuild (#386)", (
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  test("re-migrate drops + recreates a stray page_write_provenance (marker unset)", () => {
-    // First init creates the table + marker.
+  test("re-migrate PRESERVES existing provenance rows (no silent data loss on upgrade) (#386 P1)", () => {
+    // A prior build created page_write_provenance + rows. Re-opening (re-running
+    // migrate) must keep the table and its rows — migrate only drops/recreates
+    // the triggers (which reference pages), never the table.
     let db = new CBrainDB(dbPath);
-    const raw = (db as unknown as { rawDb: { prepare: (s: string) => { get: () => unknown; run: (...a: unknown[]) => void } } }).rawDb;
-    expect(
-      (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='page_write_provenance'").get() as { name?: string } | undefined)?.name,
-    ).toBe("page_write_provenance");
-
-    // Simulate a prior partial/broken run: table committed but setup marker unset.
-    raw.prepare("UPDATE config SET value = '0' WHERE key = 'migration_v7_page_write_provenance'").run();
+    db.insertPage({ slug: "records/keep-me", type: "record", title: "Keep", filePath: "records/keep-me.md", contentHash: "h" });
+    db.recordPageWriteProvenance("records/keep-me", forVaultDiscovery());
+    expect(db.getPageWriteProvenance("records/keep-me")?.actor_class).toBe("unknown_writer");
     db.close();
 
-    // Re-open (re-run migrate). pwpSetupDone is false -> the stray table is dropped
-    // before any pages-rebuild, then recreated at the end. Pages stays intact.
+    // Re-open → migrate() runs again (triggers dropped before pages rebuild,
+    // recreated after; table untouched). The row must survive.
     db = new CBrainDB(dbPath);
-    const raw2 = (db as unknown as { rawDb: { prepare: (s: string) => { get: () => unknown } } }).rawDb;
-    expect(
-      (raw2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='page_write_provenance'").get() as { name?: string } | undefined)?.name,
-    ).toBe("page_write_provenance");
-    expect(
-      (raw2.prepare("SELECT value FROM config WHERE key = 'migration_v7_page_write_provenance'").get() as { value?: string } | undefined)?.value,
-    ).toBe("1");
-    // pages survived the re-migrate.
-    expect(
-      (raw2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pages'").get() as { name?: string } | undefined)?.name,
-    ).toBe("pages");
+    const row = db.getPageWriteProvenance("records/keep-me");
+    expect(row).not.toBeNull();
+    expect(row?.actor_class).toBe("unknown_writer");
+    expect(row?.write_mode).toBe("external_direct_write");
+    // pages row also intact.
+    expect(db.getPage("records/keep-me")).not.toBeNull();
+    // All 4 triggers present after re-migrate.
+    const raw = (db as unknown as { rawDb: { prepare: (s: string) => { all: () => unknown[] } } }).rawDb;
+    const triggerNames = new Set(
+      (raw.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='page_write_provenance'").all() as Array<{ name: string }>).map((t) => t.name),
+    );
+    for (const t of ["page_write_provenance_immutable", "page_write_provenance_no_direct_delete", "page_write_provenance_no_transfer", "page_write_provenance_origin_format"]) {
+      expect(triggerNames.has(t)).toBe(true);
+    }
     db.close();
   });
 });

@@ -699,22 +699,39 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_crc_status ON compounding_review_candidates(status);
       CREATE INDEX IF NOT EXISTS idx_crc_last_seen ON compounding_review_candidates(last_seen_at);
       CREATE INDEX IF NOT EXISTS idx_crf_candidate ON compounding_review_feedback(candidate_id);
+
+      -- #386: page_write_provenance table (append-only record-page creation
+      -- provenance). The TABLE is safe in the base block: its FK->pages is handled
+      -- by PRAGMA foreign_keys=OFF during pages rebuilds. Only its TRIGGERS
+      -- reference pages() in their bodies and must be absent during a pages
+      -- rebuild — they are dropped before and recreated after the rebuilding
+      -- migrations below. The table and its rows are NEVER dropped by migrate().
+      CREATE TABLE IF NOT EXISTS page_write_provenance (
+        page_slug TEXT PRIMARY KEY,
+        write_mode TEXT NOT NULL CHECK(write_mode IN ('ingest','put_page','external_direct_write','unknown_write_path')),
+        actor_class TEXT NOT NULL CHECK(actor_class IN ('operator','agent','system','unknown_writer')),
+        creation_reason TEXT NOT NULL CHECK(creation_reason IN ('explicit_ingest','explicit_page_create','vault_file_discovered','unattributed_internal_create')),
+        origin_kind TEXT CHECK(origin_kind IS NULL OR origin_kind IN ('session','job')),
+        origin_ref TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_page_write_provenance_actor ON page_write_provenance(actor_class);
     `);
 
-    // #386: page_write_provenance + its triggers are created AFTER all pages-
-    // rebuilding migrations (migratePagesConstraint / migrateOntologyTypes / …),
-    // not in the base schema block above. The triggers reference pages() in their
-    // bodies; creating them before the pages rebuild means the rebuild's
-    // DROP+RENAME of pages recompiles a trigger while pages is momentarily gone
-    // -> 'no such table: pages' (Linux/fresh-DB). If a prior partial run of an
-    // older broken build already committed this table before the rebuild
-    // completed, drop the stray (it carries no valid data in that state) and
-    // recreate it at the end of migrate().
-    const PWP_MARKER = "migration_v7_page_write_provenance";
-    const pwpSetupDone = (this.db.prepare("SELECT value FROM config WHERE key = ?").get(PWP_MARKER) as { value?: string } | undefined)?.value === "1";
-    if (!pwpSetupDone) {
-      this.db.exec("DROP TABLE IF EXISTS page_write_provenance");
-    }
+    // #386: the page_write_provenance TRIGGERS reference pages() in their bodies.
+    // A pages-rebuilding migration (migratePagesConstraint / migrateOntologyTypes /
+    // …) does DROP+RENAME of pages, which recompiles a trigger while pages is
+    // momentarily gone -> 'no such table: pages' (Linux). Drop the triggers here,
+    // BEFORE any pages rebuild, and recreate them at the end of migrate(). The
+    // TABLE and its rows are NEVER dropped — a prior build may have populated it
+    // (dropping it would silently destroy provenance audit facts).
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS page_write_provenance_immutable;
+      DROP TRIGGER IF EXISTS page_write_provenance_no_direct_delete;
+      DROP TRIGGER IF EXISTS page_write_provenance_no_transfer;
+      DROP TRIGGER IF EXISTS page_write_provenance_origin_format;
+    `);
 
     this.migratePagesConstraint();
     runPageMigrations(this.db);
@@ -732,24 +749,12 @@ export class CBrainDB {
     this.repairDirtyData();
     runRecommendationRecordsMigration(this.db);
 
-    // #386: now that every pages-rebuilding migration has finished, create
-    // page_write_provenance + its triggers. Created here (not in the base schema
-    // block) so the triggers' pages() references never coincide with a pages
-    // rebuild. Idempotent (IF NOT EXISTS); the marker records a completed setup
-    // so a later startup never treats a legitimate, populated table as stray.
+    // #386: now that every pages-rebuilding migration has finished, recreate the
+    // page_write_provenance triggers (dropped at the top of migrate so their
+    // pages() references didn't coincide with a pages rebuild). The table itself
+    // lives in the base schema block and is never dropped, so existing rows
+    // (incl. those written by a prior build) survive. Idempotent (IF NOT EXISTS).
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS page_write_provenance (
-        page_slug TEXT PRIMARY KEY,
-        write_mode TEXT NOT NULL CHECK(write_mode IN ('ingest','put_page','external_direct_write','unknown_write_path')),
-        actor_class TEXT NOT NULL CHECK(actor_class IN ('operator','agent','system','unknown_writer')),
-        creation_reason TEXT NOT NULL CHECK(creation_reason IN ('explicit_ingest','explicit_page_create','vault_file_discovered','unattributed_internal_create')),
-        origin_kind TEXT CHECK(origin_kind IS NULL OR origin_kind IN ('session','job')),
-        origin_ref TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_page_write_provenance_actor ON page_write_provenance(actor_class);
-
       CREATE TRIGGER IF NOT EXISTS page_write_provenance_immutable
       BEFORE UPDATE OF write_mode, actor_class, creation_reason, origin_kind, origin_ref, created_at
       ON page_write_provenance
@@ -787,7 +792,6 @@ export class CBrainDB {
         END;
       END;
     `);
-    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, '1')").run(PWP_MARKER);
   }
 
   private migratePagesConstraint(): void {
