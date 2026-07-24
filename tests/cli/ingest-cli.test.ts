@@ -22,12 +22,13 @@ describe("CLI ingest — dedup flags and output", () => {
 
     execSync(`${BIN} init --dir ${brainDir}`, { encoding: "utf-8" });
 
-    // Point embedding to a local port that refuses connections — fully offline,
-    // no external network access. Connection refused is deterministic and instant.
+    // Deterministic, fully in-process: no socket, no HTTP, no credentials, no
+    // wall-clock network timeout. NER disabled so ingest never needs an LLM.
+    // (#382) Replaces the old http://127.0.0.1:1 refused-port oracle.
     const configPath = join(brainDir, "cbrain.json");
     const config = JSON.parse(readFileSync(configPath, "utf-8"));
-    config.embedding.baseUrl = "http://127.0.0.1:1";
-    config.embedding.apiKey = "test-offline-key";
+    config.embedding.provider = "deterministic";
+    config.ner = { enabled: false };
     writeFileSync(configPath, JSON.stringify(config, null, 2));
   });
 
@@ -66,6 +67,30 @@ describe("CLI ingest — dedup flags and output", () => {
     db.close();
   }
 
+  /** Total persisted page count — opens/closes its own DB connection. */
+  function pageCount(): number {
+    const db = new CBrainDB(dbPath);
+    const c = (db.rawDb.prepare("SELECT COUNT(*) c FROM pages").get() as { c: number }).c;
+    db.close();
+    return c;
+  }
+
+  /** Chunk rows written for a slug — proof the page was actually indexed. */
+  function chunkCountForSlug(slug: string): number {
+    const db = new CBrainDB(dbPath);
+    const r = db.rawDb.prepare("SELECT COUNT(*) c FROM chunks WHERE page_slug = ?").get(slug) as { c: number };
+    db.close();
+    return r.c;
+  }
+
+  /** The first page slug that isn't `exclude` (the newly-created second page). */
+  function otherPageSlug(exclude: string): string | undefined {
+    const db = new CBrainDB(dbPath);
+    const rows = db.rawDb.prepare("SELECT slug FROM pages WHERE slug != ?").all(exclude) as Array<{ slug: string }>;
+    db.close();
+    return rows[0]?.slug;
+  }
+
   test("--help lists --allow-duplicate flag", () => {
     const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", "--help"], {
       encoding: "utf-8",
@@ -77,34 +102,47 @@ describe("CLI ingest — dedup flags and output", () => {
     expect(output).toContain("Allow duplicate content");
   });
 
-  test("duplicate output format: shows existing title", async () => {
+  test("duplicate output format: shows existing title, no extra page", async () => {
     const body = "这是CLI去重测试的固定内容";
     const { normalizeAndHashBody } = await import("../../src/core/shared.js");
     const hash = normalizeAndHashBody(body);
 
     seedPageWithHash("records/cli-dedup-test", "CLI去重原始", body, hash);
+    expect(pageCount()).toBe(1);
 
-    // Ingest same body with different title — dedup gate fires BEFORE embedding
+    // Ingest same body with different title — durable-source dedup gate fires
+    // BEFORE embedding, so no second page and no indexing side effects.
     const result = runIngest([body, "--title", "CLI去重新标题"]);
+    expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Duplicate");
     expect(result.stdout).toContain("CLI去重原始");
-    // Dedup short-circuits — no network access attempted
-    expect(result.exitCode).toBe(0);
+    // Short-circuit proven: still one page, no chunks written.
+    expect(pageCount()).toBe(1);
+    expect(chunkCountForSlug("records/cli-dedup-test")).toBe(0);
   });
 
-  test("--allow-duplicate bypasses dedup, hits offline embedding failure", async () => {
+  test("--allow-duplicate bypasses dedup and creates a second indexed page (#382)", async () => {
     const body = "这是CLI允许重复测试的固定内容";
     const { normalizeAndHashBody } = await import("../../src/core/shared.js");
     const hash = normalizeAndHashBody(body);
 
-    seedPageWithHash("records/cli-allow-dup", "CLI允许重复原始", body, hash);
+    const seededSlug = "records/cli-allow-dup";
+    seedPageWithHash(seededSlug, "CLI允许重复原始", body, hash);
+    expect(pageCount()).toBe(1);
 
-    // With --allow-duplicate, dedup gate is bypassed → embedding is attempted
-    // → hits http://127.0.0.1:1 which refuses connections → deterministic failure
+    // --allow-duplicate bypasses the durable-source dedup gate. With the
+    // in-process deterministic provider the command must SUCCEED and produce a
+    // genuinely distinct second page — not merely fail to reach a dead port.
     const result = runIngest([body, "--title", "CLI允许重复新标题", "--allow-duplicate"]);
+    expect(result.exitCode).toBe(0);
     expect(result.stdout).not.toContain("Duplicate");
-    // Should fail with a connection error, not a dedup message
-    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain("✓ Created:");
+
+    // A second, distinct page now exists and was actually indexed (chunks written).
+    expect(pageCount()).toBe(2);
+    const newSlug = otherPageSlug(seededSlug);
+    expect(newSlug).toBeDefined();
+    expect(chunkCountForSlug(newSlug ?? "")).toBeGreaterThan(0);
   });
 
   test("ingest @existing-entity.md --type markdown is a no-op duplicate (#191)", () => {
@@ -143,7 +181,7 @@ describe("CLI ingest — dedup flags and output", () => {
   test("ingest @file with markdown frontmatter and no --type routes as markdown (#198)", () => {
     // Frontmatter slug points at an existing page → markdown path short-circuits
     // as a duplicate WITHOUT embedding. The bug (default --type text) routes to
-    // the text path, tries to create, and hits offline embedding failure.
+    // the text path and creates a spurious page instead of short-circuiting.
     const slug = "brain/entities/person/shi-ti-cli";
     const relPath = `${slug}.md`;
     mkdirSync(join(vaultPath, ...slug.split("/").slice(0, -1)), { recursive: true });
