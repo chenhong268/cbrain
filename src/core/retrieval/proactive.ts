@@ -83,17 +83,21 @@ function buildTimelineHint(
   const evt = filtered[0];
   const date = evt.event_date ? `（${evt.event_date.slice(0, 10)}）` : "";
   const text = `🔗 ${evt.title} 近期动态：${evt.summary}${date}`;
-  // Score: recency-based, 1.0 for today, 0 for 180+ days old
+  // Score: recency-based, 1.0 for today, 0 for 180+ days old. A future event
+  // yields a negative daysSince; clamp to [0, 1] so a scheduled event can never
+  // exceed 1.0 and outrank an expiry_alert (whose score is fixed at 1.0). #388
   const daysSince = evt.event_date
     ? (Date.now() - new Date(evt.event_date).getTime()) / (1000 * 60 * 60 * 24)
     : 90; // no date = low score
-  const score = Math.max(0, 1.0 - daysSince / 180);
+  const score = Math.min(1, Math.max(0, 1.0 - daysSince / 180));
   return {
     rule: "network_timeline",
     text: truncateText(text, 120),
     score,
     why: `${evt.title} 有新动态，可能影响之前讨论的结论`,
     target_slug: evt.slug,
+    // Negative for future-dated events; preserved (not abs'd) so the stale filter
+    // (age_days <= staleDays) still admits them — future events are legitimate. #388
     age_days: Math.round(daysSince),
   };
 }

@@ -325,6 +325,21 @@ describe("C5: proactive budget limits", () => {
     expect(result[0].score).toBe(0.9);
   });
 
+  test("applyProactiveBudget tie-breaks equal scores in favor of expiry_alert (#388)", async () => {
+    const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
+    // A clamped future network_timeline scores 1.0 — tied with expiry_alert. Put
+    // the timeline hint FIRST: a pure score sort is stable and would preserve
+    // this order, wrongly returning the timeline. The tie-break must promote
+    // expiry_alert regardless of input order.
+    const hints = [
+      { rule: "network_timeline", text: "future event", score: 1.0, why: "scheduled soon", target_slug: "a", age_days: -30 },
+      { rule: "expiry_alert", text: "expired page", score: 1.0, why: "data is stale", target_slug: "b" },
+    ];
+    const result = applyProactiveBudget(hints, { grounded: false, toolType: "recall" });
+    expect(result.length).toBe(1);
+    expect(result[0].rule).toBe("expiry_alert");
+  });
+
   test("applyProactiveBudget discards hints without why", async () => {
     const { applyProactiveBudget } = await import("../../src/mcp/tools/trim.js");
     const hints = [
