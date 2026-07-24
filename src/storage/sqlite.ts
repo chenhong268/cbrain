@@ -699,88 +699,22 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_crc_status ON compounding_review_candidates(status);
       CREATE INDEX IF NOT EXISTS idx_crc_last_seen ON compounding_review_candidates(last_seen_at);
       CREATE INDEX IF NOT EXISTS idx_crf_candidate ON compounding_review_feedback(candidate_id);
-
-      -- #386: append-only, unforgable record-page creation provenance.
-      -- page_slug is PRIMARY KEY ⇒ exactly one row per page, written once at
-      -- creation, never updated. recordPageWriteProvenance is check-then-insert:
-      -- identical retry is idempotent, a DIFFERENT attribution throws
-      -- PageWriteProvenanceConflictError (never overwritten), other constraint
-      -- errors propagate (no INSERT OR IGNORE — that would hide real failures).
-      -- Absence of a row = created before tracking / not yet tracked (honest gap,
-      -- never backfilled). Distinct from ingest_log (mutable) and link/timeline
-      -- provenance (trust state).
-      CREATE TABLE IF NOT EXISTS page_write_provenance (
-        page_slug TEXT PRIMARY KEY,
-        write_mode TEXT NOT NULL CHECK(write_mode IN ('ingest','put_page','external_direct_write','unknown_write_path')),
-        actor_class TEXT NOT NULL CHECK(actor_class IN ('operator','agent','system','unknown_writer')),
-        creation_reason TEXT NOT NULL CHECK(creation_reason IN ('explicit_ingest','explicit_page_create','vault_file_discovered','unattributed_internal_create')),
-        origin_kind TEXT CHECK(origin_kind IS NULL OR origin_kind IN ('session','job')),
-        origin_ref TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_page_write_provenance_actor ON page_write_provenance(actor_class);
-
-      -- #386: enforce immutability at the DB layer, not just method convention.
-      -- Direct UPDATE of any attribution field is ABORTed; only page_slug may be
-      -- moved (by movePage). A bare UPDATE ... SET actor_class='agent' on a row
-      -- originally attributed to operator must fail — append-only/unforgable is a
-      -- database guarantee, not a code promise.
-      CREATE TRIGGER IF NOT EXISTS page_write_provenance_immutable
-      BEFORE UPDATE OF write_mode, actor_class, creation_reason, origin_kind, origin_ref, created_at
-      ON page_write_provenance
-      BEGIN
-        SELECT RAISE(ABORT, 'page_write_provenance is immutable: attribution fields cannot be updated (only page_slug may move)');
-      END;
-
-      -- #386: also block re-attribution via DELETE + INSERT. A direct DELETE is
-      -- ABORTed while the parent page still exists; the row may only be removed
-      -- by the page's own deletion (FK ON DELETE CASCADE, at which point the
-      -- parent row is already gone so EXISTS is false and the cascade proceeds).
-      CREATE TRIGGER IF NOT EXISTS page_write_provenance_no_direct_delete
-      BEFORE DELETE ON page_write_provenance
-      BEGIN
-        SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE slug = OLD.page_slug)
-          THEN RAISE(ABORT, 'page_write_provenance is immutable: direct DELETE refused (removed only when the page is deleted)')
-        END;
-      END;
-
-      -- #386: block transferring a row to ANOTHER page (the third re-attribution
-      -- vector, alongside UPDATE-attribution and DELETE+INSERT). A page_slug
-      -- UPDATE is allowed ONLY as part of a page rename (movePage), which first
-      -- updates pages.slug — so by the time this fires, OLD.page_slug's parent
-      -- page is already gone (EXISTS false). A direct 'SET page_slug=B WHERE
-      -- page_slug=A' transfer leaves page A still existing → EXISTS true → ABORT.
-      CREATE TRIGGER IF NOT EXISTS page_write_provenance_no_transfer
-      BEFORE UPDATE OF page_slug ON page_write_provenance
-      BEGIN
-        SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE slug = OLD.page_slug)
-          THEN RAISE(ABORT, 'page_write_provenance.page_slug may only move via page rename (movePage); direct transfer to another page is refused')
-        END;
-      END;
-
-      -- #386: structural "no credential in storage" guarantee. Enforces at the
-      -- INSERT boundary (UPDATE of these fields is already blocked by the
-      -- immutable trigger) that origin_kind/origin_ref are both null or both
-      -- present, and that a non-null origin_ref is a UUID or ULID. A direct
-      -- INSERT of a credential-shaped origin_ref is ABORTed here — not just
-      -- rejected by the method — so getPageWriteProvenance can never return a
-      -- raw secret regardless of how the row was written.
-      CREATE TRIGGER IF NOT EXISTS page_write_provenance_origin_format
-      BEFORE INSERT ON page_write_provenance
-      BEGIN
-        SELECT CASE
-          WHEN NOT ((NEW.origin_kind IS NULL) = (NEW.origin_ref IS NULL))
-            THEN RAISE(ABORT, 'page_write_provenance: origin_kind and origin_ref must both be null or both present')
-          WHEN NEW.origin_ref IS NOT NULL
-             AND NEW.origin_ref NOT GLOB '${ORIGIN_REF_UUID_GLOB}'
-             AND NEW.origin_ref NOT GLOB '${ORIGIN_REF_ULID_GLOB}'
-            THEN RAISE(ABORT, 'page_write_provenance.origin_ref must be a UUID or ULID (no credentials/paths)')
-          ELSE NULL
-        END;
-      END;
     `);
+
+    // #386: page_write_provenance + its triggers are created AFTER all pages-
+    // rebuilding migrations (migratePagesConstraint / migrateOntologyTypes / …),
+    // not in the base schema block above. The triggers reference pages() in their
+    // bodies; creating them before the pages rebuild means the rebuild's
+    // DROP+RENAME of pages recompiles a trigger while pages is momentarily gone
+    // -> 'no such table: pages' (Linux/fresh-DB). If a prior partial run of an
+    // older broken build already committed this table before the rebuild
+    // completed, drop the stray (it carries no valid data in that state) and
+    // recreate it at the end of migrate().
+    const PWP_MARKER = "migration_v7_page_write_provenance";
+    const pwpSetupDone = (this.db.prepare("SELECT value FROM config WHERE key = ?").get(PWP_MARKER) as { value?: string } | undefined)?.value === "1";
+    if (!pwpSetupDone) {
+      this.db.exec("DROP TABLE IF EXISTS page_write_provenance");
+    }
 
     this.migratePagesConstraint();
     runPageMigrations(this.db);
@@ -797,6 +731,63 @@ export class CBrainDB {
     runLatePageMigrations(this.db);
     this.repairDirtyData();
     runRecommendationRecordsMigration(this.db);
+
+    // #386: now that every pages-rebuilding migration has finished, create
+    // page_write_provenance + its triggers. Created here (not in the base schema
+    // block) so the triggers' pages() references never coincide with a pages
+    // rebuild. Idempotent (IF NOT EXISTS); the marker records a completed setup
+    // so a later startup never treats a legitimate, populated table as stray.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS page_write_provenance (
+        page_slug TEXT PRIMARY KEY,
+        write_mode TEXT NOT NULL CHECK(write_mode IN ('ingest','put_page','external_direct_write','unknown_write_path')),
+        actor_class TEXT NOT NULL CHECK(actor_class IN ('operator','agent','system','unknown_writer')),
+        creation_reason TEXT NOT NULL CHECK(creation_reason IN ('explicit_ingest','explicit_page_create','vault_file_discovered','unattributed_internal_create')),
+        origin_kind TEXT CHECK(origin_kind IS NULL OR origin_kind IN ('session','job')),
+        origin_ref TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_page_write_provenance_actor ON page_write_provenance(actor_class);
+
+      CREATE TRIGGER IF NOT EXISTS page_write_provenance_immutable
+      BEFORE UPDATE OF write_mode, actor_class, creation_reason, origin_kind, origin_ref, created_at
+      ON page_write_provenance
+      BEGIN
+        SELECT RAISE(ABORT, 'page_write_provenance is immutable: attribution fields cannot be updated (only page_slug may move)');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS page_write_provenance_no_direct_delete
+      BEFORE DELETE ON page_write_provenance
+      BEGIN
+        SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE slug = OLD.page_slug)
+          THEN RAISE(ABORT, 'page_write_provenance is immutable: direct DELETE refused (removed only when the page is deleted)')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS page_write_provenance_no_transfer
+      BEFORE UPDATE OF page_slug ON page_write_provenance
+      BEGIN
+        SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE slug = OLD.page_slug)
+          THEN RAISE(ABORT, 'page_write_provenance.page_slug may only move via page rename (movePage); direct transfer to another page is refused')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS page_write_provenance_origin_format
+      BEFORE INSERT ON page_write_provenance
+      BEGIN
+        SELECT CASE
+          WHEN NOT ((NEW.origin_kind IS NULL) = (NEW.origin_ref IS NULL))
+            THEN RAISE(ABORT, 'page_write_provenance: origin_kind and origin_ref must both be null or both present')
+          WHEN NEW.origin_ref IS NOT NULL
+             AND NEW.origin_ref NOT GLOB '${ORIGIN_REF_UUID_GLOB}'
+             AND NEW.origin_ref NOT GLOB '${ORIGIN_REF_ULID_GLOB}'
+            THEN RAISE(ABORT, 'page_write_provenance.origin_ref must be a UUID or ULID (no credentials/paths)')
+          ELSE NULL
+        END;
+      END;
+    `);
+    this.db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, '1')").run(PWP_MARKER);
   }
 
   private migratePagesConstraint(): void {

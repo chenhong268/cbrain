@@ -356,6 +356,34 @@ describe("page_write_provenance storage (#386)", () => {
       ).run("records/pair-ok"),
     ).not.toThrow();
   });
+
+  test("fresh-DB init: page_write_provenance + 4 triggers exist after migrate, pages intact (#386 regression)", () => {
+    // migrate() already ran in beforeEach on a fresh DB. Assert the post-init
+    // schema: the table + all four triggers are present, pages still exists, and
+    // the setup marker is set. Guards against re-introducing the ordering bug
+    // where the table/triggers were created before the pages rebuild.
+    const raw = (db as unknown as { rawDb: { prepare: (s: string) => { all: () => unknown[]; get: () => unknown } } }).rawDb;
+    const tableNames = new Set(
+      (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('pages','page_write_provenance')").all() as Array<{ name: string }>).map((t) => t.name),
+    );
+    expect(tableNames.has("pages")).toBe(true);
+    expect(tableNames.has("page_write_provenance")).toBe(true);
+
+    const triggerNames = new Set(
+      (raw.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='page_write_provenance'").all() as Array<{ name: string }>).map((t) => t.name),
+    );
+    for (const t of [
+      "page_write_provenance_immutable",
+      "page_write_provenance_no_direct_delete",
+      "page_write_provenance_no_transfer",
+      "page_write_provenance_origin_format",
+    ]) {
+      expect(triggerNames.has(t)).toBe(true);
+    }
+
+    const marker = raw.prepare("SELECT value FROM config WHERE key = 'migration_v7_page_write_provenance'").get() as { value?: string } | undefined;
+    expect(marker?.value).toBe("1");
+  });
 });
 
 describe("redactOriginRefForDisplay (#386 read-layer defense)", () => {
@@ -408,5 +436,47 @@ describe("validateOriginRef (#386 method-layer, aligned with the DB trigger)", (
     // the method regex accepted it and only the DB trigger rejected it (a
     // SQLiteError); now both layers agree and reject it.
     expect(() => validateOriginRef("Z" + "0".repeat(25))).toThrow(/UUID|ULID/i);
+  });
+});
+
+describe("migrate ordering: page_write_provenance after pages rebuild (#386)", () => {
+  const testDir = "/tmp/cbrain-test-pwp-migrate-order";
+  const dbPath = join(testDir, "test.sqlite");
+
+  beforeEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(testDir, { recursive: true });
+  });
+  afterEach(() => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("re-migrate drops + recreates a stray page_write_provenance (marker unset)", () => {
+    // First init creates the table + marker.
+    let db = new CBrainDB(dbPath);
+    const raw = (db as unknown as { rawDb: { prepare: (s: string) => { get: () => unknown; run: (...a: unknown[]) => void } } }).rawDb;
+    expect(
+      (raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='page_write_provenance'").get() as { name?: string } | undefined)?.name,
+    ).toBe("page_write_provenance");
+
+    // Simulate a prior partial/broken run: table committed but setup marker unset.
+    raw.prepare("UPDATE config SET value = '0' WHERE key = 'migration_v7_page_write_provenance'").run();
+    db.close();
+
+    // Re-open (re-run migrate). pwpSetupDone is false -> the stray table is dropped
+    // before any pages-rebuild, then recreated at the end. Pages stays intact.
+    db = new CBrainDB(dbPath);
+    const raw2 = (db as unknown as { rawDb: { prepare: (s: string) => { get: () => unknown } } }).rawDb;
+    expect(
+      (raw2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='page_write_provenance'").get() as { name?: string } | undefined)?.name,
+    ).toBe("page_write_provenance");
+    expect(
+      (raw2.prepare("SELECT value FROM config WHERE key = 'migration_v7_page_write_provenance'").get() as { value?: string } | undefined)?.value,
+    ).toBe("1");
+    // pages survived the re-migrate.
+    expect(
+      (raw2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pages'").get() as { name?: string } | undefined)?.name,
+    ).toBe("pages");
+    db.close();
   });
 });
