@@ -271,7 +271,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 由 `cbrain --help` 自动生成，勿手改（运行 `bun bin/check-docs-consistency.ts --update` 刷新）。
 
 <!-- cbrain:auto-gen cli-commands:start -->
-共 51 个 CLI 命令（`cbrain --help`）。
+共 53 个 CLI 命令（`cbrain --help`）。
 
 | 命令 | 说明 |
 |------|------|
@@ -315,6 +315,7 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `revert` | Revert a page to a previous version |
 | `serve` | Start MCP server (stdio transport) |
 | `show` | Display a page's full content |
+| `show-writer` | Show who created a page and how (creation provenance). |
 | `similar-entities` | Detect likely-duplicate entity/concept pages for review (no auto-merge) |
 | `skill-pack` | Verify and report Hermes skill pack status |
 | `status` | Show brain statistics at a glance |
@@ -325,5 +326,6 @@ Obsidian 中的 `[[wikilink]]` 会被 CBrain 识别为知识图谱链接。
 | `timeline` | View or add timeline events on a page |
 | `versions` | Show version history of a page |
 | `wakeup-diff` | Generate wake-up diff: cognitive changes since last snapshot |
+| `writer-audit` | List record pages with no creation provenance (pre-tracking / untracked). |
 | `zero-link-backfill` | Inspect or enqueue governed NER repair for rich zero-link records |
 <!-- cbrain:auto-gen cli-commands:end -->

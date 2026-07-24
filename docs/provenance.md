@@ -26,7 +26,24 @@ Provenance 只挂在两种对象上：
 | `link` | 实体之间的关系 | 实体A → 任职于 → 组织B |
 | `timeline` | 实体上的事件 | 实体A 于 2024-03 加入组织B |
 
-> 页面正文、标签这些不挂 provenance。只有「关系」和「事件」这种容易被推断错、又容易过时的结构化事实，才需要来源追踪。
+> 页面正文、标签这些不挂（关系/事件）provenance。只有「关系」和「事件」这种容易被推断错、又容易过时的结构化事实，才需要来源追踪。
+>
+> 注意：**页面「由谁创建」是另一套独立系统**（`page_write_provenance`，#386），与本节的信任 provenance 不是一回事——见下方 [页面创建者溯源](#页面创建者溯源386)。
+
+## 页面创建者溯源（#386）
+
+记录「一个 record 页面是谁、通过什么路径创建的」，独立于上面的关系/事件信任 provenance。
+
+- **存储**：`page_write_provenance` 表，append-only（`page_slug` 唯一主键，写一次不可改），FK→pages ON DELETE CASCADE。
+- **和 `ingest_log` 的区别**：`ingest_log` 是可变操作日志（改名 UPDATE、删页 DELETE、无 FK），不能当创建归属真相源。
+- **归属由适配层决定，调用方不能自报**：MCP `ingest`/`put_page` → `agent`；CLI `cbrain ingest` → `operator`；watcher/sync 首次发现外部文件 → `unknown_writer`；dream/job 暂不发射 `system`。actor 字段只存在于内部 `IngestInput`/`CreatePageInput`，绝不进 MCP 公开 input schema（防伪造）。
+- **查询**：`cbrain writer-audit` 列出缺溯源的 record 页；`cbrain show-writer <slug>` 看单页归属。
+
+### v1 范围（务必遵守）
+
+**只覆盖 `type=record` 的页面创建。** entity / concept / insight 页面，以及 dialogue 自动提取的页面，本轮**不写** page creation provenance——它们的归属语义（自动提取 vs 显式、session 绑定、回滚合同）需要单独定义，不能借 record 这轮改动顺手纳入。
+
+**缺行 = 诚实留白**（早于 #386 追踪期 / 走了未追踪路径 / 非 record 类型），**绝不回填虚构**。未来扩展 dialogue/entity 时，应单独定义其可信语义，不复用本次 sync/ingest 的发射点。
 
 ## 来源模型
 

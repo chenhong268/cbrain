@@ -4,6 +4,14 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { getReverseRelation } from "../core/shared.js";
+import {
+  PageWriteProvenanceConflictError,
+  provenanceMatchesRow,
+  toConflictFields,
+  validateOriginRef,
+  type PageCreationProvenanceInput,
+  type PageWriteProvenanceRow,
+} from "../core/page-write-provenance.js";
 import { authorizeNerJobClaim } from "../core/maintenance/zero-link-backfill.js";
 import {
   runAliasMigrations,
@@ -19,6 +27,15 @@ import {
   runTelemetryMigrations,
   validatePagesIndexes,
 } from "./migrations/index.js";
+
+// #386: DB-level origin_ref format enforcement. SQLite GLOB supports [a-z]
+// character classes (case-sensitive). UUID = 8-4-4-4-12 hex; ULID = Crockford
+// base32 with first char 0-7 (avoids >128-bit overflow). A BEFORE INSERT
+// trigger uses these so NO path — including direct SQL — can persist a
+// credential-shaped origin_ref. Credential detection at the method layer can
+// never be exhaustive; this makes "no credential in SQLite" structural.
+const ORIGIN_REF_UUID_GLOB = [8, 4, 4, 4, 12].map((n) => "[0-9a-fA-F]".repeat(n)).join("-");
+const ORIGIN_REF_ULID_GLOB = "[0-7]" + "[0-9A-HJKMNP-TV-Z]".repeat(25);
 
 /** Raised when a destructive migration's FK integrity check fails (#209).
  * Carries summarized per-table counts (NO raw row data) so callers can emit an
@@ -682,9 +699,34 @@ export class CBrainDB {
       CREATE INDEX IF NOT EXISTS idx_crc_status ON compounding_review_candidates(status);
       CREATE INDEX IF NOT EXISTS idx_crc_last_seen ON compounding_review_candidates(last_seen_at);
       CREATE INDEX IF NOT EXISTS idx_crf_candidate ON compounding_review_feedback(candidate_id);
+
+      -- #386: page_write_provenance table (append-only record-page creation
+      -- provenance). The TABLE is safe in the base block: its FK->pages is handled
+      -- by PRAGMA foreign_keys=OFF during pages rebuilds. Only its TRIGGERS
+      -- reference pages() in their bodies and must be absent during a pages
+      -- rebuild — they are dropped before and recreated after the rebuilding
+      -- migrations below. The table and its rows are NEVER dropped by migrate().
+      CREATE TABLE IF NOT EXISTS page_write_provenance (
+        page_slug TEXT PRIMARY KEY,
+        write_mode TEXT NOT NULL CHECK(write_mode IN ('ingest','put_page','external_direct_write','unknown_write_path')),
+        actor_class TEXT NOT NULL CHECK(actor_class IN ('operator','agent','system','unknown_writer')),
+        creation_reason TEXT NOT NULL CHECK(creation_reason IN ('explicit_ingest','explicit_page_create','vault_file_discovered','unattributed_internal_create')),
+        origin_kind TEXT CHECK(origin_kind IS NULL OR origin_kind IN ('session','job')),
+        origin_ref TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (page_slug) REFERENCES pages(slug) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_page_write_provenance_actor ON page_write_provenance(actor_class);
     `);
 
-    this.migratePagesConstraint();
+    // #386: the two migrations below rebuild pages (DROP+RENAME pages). The
+    // page_write_provenance triggers reference pages() in their bodies and must
+    // be absent during each rebuild; runWithProvenanceTriggersSuspended drops
+    // them, runs the rebuild, and ALWAYS recreates them in finally (fail-closed:
+    // a mid-migration failure can never leave the DB without its
+    // immutability/privacy/delete-protection triggers). The pwp TABLE is never
+    // dropped, so rows from any prior build survive.
+    this.runWithProvenanceTriggersSuspended(() => this.migratePagesConstraint());
     runPageMigrations(this.db);
     runLinkMigrations(this.db);
     runDiscoveryMigrations(this.db, CBrainDB.discoveryDedupKey);
@@ -693,12 +735,83 @@ export class CBrainDB {
     runQueryInteractionMigrations(this.db);
     runAliasMigrations(this.db);
     this.migrateChunksSummaryLevel();
-    this.migrateOntologyTypes();
+    this.runWithProvenanceTriggersSuspended(() => this.migrateOntologyTypes());
     runMissingIndexMigrations(this.db);
     runProvenanceMigrations(this.db);
     runLatePageMigrations(this.db);
     this.repairDirtyData();
     runRecommendationRecordsMigration(this.db);
+  }
+
+  /**
+   * #386: (re)create the four page_write_provenance protection triggers. Called
+   * on a fresh DB (via the wrappers' finally) and after every pages rebuild.
+   * Idempotent (IF NOT EXISTS). The triggers reference pages() in their bodies.
+   */
+  private ensurePageWriteProvenanceTriggers(): void {
+    this.db.exec(`
+      CREATE TRIGGER IF NOT EXISTS page_write_provenance_immutable
+      BEFORE UPDATE OF write_mode, actor_class, creation_reason, origin_kind, origin_ref, created_at
+      ON page_write_provenance
+      BEGIN
+        SELECT RAISE(ABORT, 'page_write_provenance is immutable: attribution fields cannot be updated (only page_slug may move)');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS page_write_provenance_no_direct_delete
+      BEFORE DELETE ON page_write_provenance
+      BEGIN
+        SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE slug = OLD.page_slug)
+          THEN RAISE(ABORT, 'page_write_provenance is immutable: direct DELETE refused (removed only when the page is deleted)')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS page_write_provenance_no_transfer
+      BEFORE UPDATE OF page_slug ON page_write_provenance
+      BEGIN
+        SELECT CASE WHEN EXISTS (SELECT 1 FROM pages WHERE slug = OLD.page_slug)
+          THEN RAISE(ABORT, 'page_write_provenance.page_slug may only move via page rename (movePage); direct transfer to another page is refused')
+        END;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS page_write_provenance_origin_format
+      BEFORE INSERT ON page_write_provenance
+      BEGIN
+        SELECT CASE
+          WHEN NOT ((NEW.origin_kind IS NULL) = (NEW.origin_ref IS NULL))
+            THEN RAISE(ABORT, 'page_write_provenance: origin_kind and origin_ref must both be null or both present')
+          WHEN NEW.origin_ref IS NOT NULL
+             AND NEW.origin_ref NOT GLOB '${ORIGIN_REF_UUID_GLOB}'
+             AND NEW.origin_ref NOT GLOB '${ORIGIN_REF_ULID_GLOB}'
+            THEN RAISE(ABORT, 'page_write_provenance.origin_ref must be a UUID or ULID (no credentials/paths)')
+          ELSE NULL
+        END;
+      END;
+    `);
+  }
+
+  /**
+   * #386: run a pages-rebuilding migration with the page_write_provenance
+   * triggers temporarily removed. The triggers reference pages() in their bodies
+   * and must be absent while pages is DROP+RENAME'd (else SQLite recompiles a
+   * trigger while pages is gone -> 'no such table: pages'). The triggers are
+   * ALWAYS restored in finally — even if fn throws — so a mid-migration failure
+   * can never leave the DB without its immutability/privacy/delete-protection
+   * guarantees (fail-closed). The window is narrowed to just the rebuild, not
+   * the whole migration chain. (fn's failure rolls its rebuild tx back first, so
+   * pages exists again before triggers are recreated.)
+   */
+  private runWithProvenanceTriggersSuspended(fn: () => void): void {
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS page_write_provenance_immutable;
+      DROP TRIGGER IF EXISTS page_write_provenance_no_direct_delete;
+      DROP TRIGGER IF EXISTS page_write_provenance_no_transfer;
+      DROP TRIGGER IF EXISTS page_write_provenance_origin_format;
+    `);
+    try {
+      fn();
+    } finally {
+      this.ensurePageWriteProvenanceTriggers();
+    }
   }
 
   private migratePagesConstraint(): void {
@@ -916,7 +1029,7 @@ export class CBrainDB {
   /** Derived tables whose rows reference pages(slug) — repair whitelist (#209).
    *  `chunks_new` is a migration temp table and is intentionally excluded. */
   private static readonly DERIVED_FK_TABLES = new Set([
-    "aliases", "chunks", "links", "mention_snapshots", "tags", "timeline", "versions",
+    "aliases", "chunks", "links", "mention_snapshots", "page_write_provenance", "tags", "timeline", "versions",
   ]);
 
   /** Delete orphan rows in derived tables (rows whose FK parent page is gone).
@@ -1759,6 +1872,88 @@ export class CBrainDB {
       $path: data.filePath,
       $hash: data.contentHash ?? null,
     });
+  }
+
+  /**
+   * #386: Record append-only creation provenance for a page.
+   *
+   * Semantics (NOT INSERT OR IGNORE — that hides real errors):
+   * - No existing row → INSERT. CHECK/FK/constraint failures propagate normally.
+   * - Existing row with IDENTICAL attribution → idempotent retry, return false.
+   * - Existing row with DIFFERENT attribution → throw PageWriteProvenanceConflictError
+   *   (append-only: a page's writer can never be re-attributed).
+   * Also validates origin_ref is an opaque ID (rejects paths/credentials) at the
+   * write boundary.
+   */
+  recordPageWriteProvenance(slug: string, input: PageCreationProvenanceInput): boolean {
+    if (input.origin) validateOriginRef(input.origin.ref);
+    const existing = this.getPageWriteProvenance(slug);
+    if (existing) {
+      if (provenanceMatchesRow(existing, input)) return false;
+      throw new PageWriteProvenanceConflictError(slug, existing, toConflictFields(input));
+    }
+    this.prepare(
+      "INSERT INTO page_write_provenance (page_slug, write_mode, actor_class, creation_reason, origin_kind, origin_ref) VALUES ($slug, $mode, $actor, $reason, $originKind, $originRef)"
+    ).run({
+      $slug: slug,
+      $mode: input.writeMode,
+      $actor: input.actorClass,
+      $reason: input.creationReason,
+      $originKind: input.origin?.kind ?? null,
+      $originRef: input.origin?.ref ?? null,
+    });
+    return true;
+  }
+
+  /** #386: Read a page's creation provenance, or null when untracked (honest absence). */
+  getPageWriteProvenance(slug: string): PageWriteProvenanceRow | null {
+    const row = this.prepare(
+      "SELECT page_slug, write_mode, actor_class, creation_reason, origin_kind, origin_ref, created_at FROM page_write_provenance WHERE page_slug = $slug"
+    ).get({ $slug: slug });
+    return (row ?? null) as PageWriteProvenanceRow | null;
+  }
+
+  /**
+   * #386: record pages with no creation-provenance row, newest first. Used by
+   * the `cbrain writer-audit` CLI. Absence is honest (pre-tracking / untracked),
+   * never a fabrication target.
+   */
+  listRecordPagesWithoutWriteProvenance(limit = 200): Array<{ slug: string; title: string; created_at: string }> {
+    return this.prepare(
+      `SELECT p.slug, p.title, p.created_at
+       FROM pages p
+       LEFT JOIN page_write_provenance pwp ON pwp.page_slug = p.slug
+       WHERE p.type = 'record' AND pwp.page_slug IS NULL
+       ORDER BY p.created_at DESC
+       LIMIT $limit`
+    ).all({ $limit: limit }) as Array<{ slug: string; title: string; created_at: string }>;
+  }
+
+  /** #386: total count of record pages with no provenance row (no LIMIT) — lets
+   *  writer-audit report truncation when the page set exceeds --limit. */
+  countRecordPagesWithoutWriteProvenance(): number {
+    const row = this.prepare(
+      `SELECT COUNT(*) AS cnt
+       FROM pages p
+       LEFT JOIN page_write_provenance pwp ON pwp.page_slug = p.slug
+       WHERE p.type = 'record' AND pwp.page_slug IS NULL`
+    ).get() as { cnt: number };
+    return row.cnt;
+  }
+
+  /**
+   * #386: list + total in ONE read-only transaction so writer-audit's count,
+   * total, and truncated reflect the same snapshot. Without this, a concurrent
+   * writer (watcher/serve) between two autocommit queries could make count >
+   * total or a wrong truncated flag.
+   */
+  listAndCountRecordPagesWithoutWriteProvenance(
+    limit = 200,
+  ): { missing: Array<{ slug: string; title: string; created_at: string }>; total: number } {
+    return this.runInTransaction(() => ({
+      missing: this.listRecordPagesWithoutWriteProvenance(limit),
+      total: this.countRecordPagesWithoutWriteProvenance(),
+    }));
   }
 
   updatePageHash(slug: string, hash: string): void {
@@ -2893,6 +3088,18 @@ export class CBrainDB {
     })();
   }
 
+  /**
+   * Run a callback inside a single SQLite transaction. All CBrainDB methods
+   * called within `fn` participate (same connection) — either all commit or all
+   * roll back. Use this to make multi-statement durable writes atomic (e.g.
+   * insertPage + tags + provenance) instead of compensating deletes, which can
+   * themselves fail and leak a half-written row. #386.
+   */
+  runInTransaction<T>(fn: () => T): T {
+    const tx = this.db.transaction(fn);
+    return tx();
+  }
+
   movePage(oldSlug: string, newSlug: string, newType: string, newFilePath: string, contentHash?: string | null): void {
     // Pre-validation (outside transaction — fast fail on obvious errors)
     if (oldSlug === newSlug) {
@@ -2983,6 +3190,12 @@ export class CBrainDB {
           // Malformed JSON — skip; non-critical data
         }
       }
+
+      // 16. page_write_provenance (FK -> pages.slug, PK = page_slug; #386). Without
+      // this, renaming a tracked record page fails the integrity gate below
+      // (the FK has no ON UPDATE CASCADE).
+      this.prepare("UPDATE page_write_provenance SET page_slug = $new WHERE page_slug = $old")
+        .run({ $old: oldSlug, $new: newSlug });
 
       // Integrity gate: reject commit if any FK violation remains
       const violations = this.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
