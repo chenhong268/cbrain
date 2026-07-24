@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import type { CBrainConfig } from "../../src/cli/context.js";
@@ -644,6 +644,87 @@ describe("FirstRunDoctor", () => {
         if (origKey !== undefined) process.env.ZHIPU_API_KEY = origKey;
         else delete process.env.ZHIPU_API_KEY;
       }
+    });
+  });
+
+  // ── #383: credential-bearing config file permissions ──
+
+  describe("config:permissions check (#383)", () => {
+    // File-mode semantics are meaningful on POSIX only (win32 is ACL-governed).
+    const itPosix = process.platform !== "win32" ? test : test.skip;
+
+    function writeConfigWithMode(config: CBrainConfig, mode: number): string {
+      const configPath = writeConfig(config);
+      chmodSync(configPath, mode);
+      return configPath;
+    }
+
+    async function runDoctor(): Promise<FirstRunReport> {
+      const origDir = process.cwd();
+      process.chdir(testDir);
+      try {
+        return await runFirstRunDoctor();
+      } finally {
+        process.chdir(origDir);
+      }
+    }
+
+    itPosix("credential-bearing + group/other-readable → warn, no leak", async () => {
+      const config = makeConfig({ embedding: { provider: "zhipu", apiKey: "test-key-for-permissions-check" } });
+      mkdirSync(config.vaultPath, { recursive: true });
+      const db = new CBrainDB(config.dbPath);
+      db.close();
+      writeConfigWithMode(config, 0o644);
+
+      const report = await runDoctor();
+      const perm = report.checks.find((c) => c.id === "config:permissions");
+      expect(perm).toBeDefined();
+      expect(perm!.status).toBe("warn");
+      // Privacy contract (#383): no path, no credential value, no field-name token.
+      const combined = perm!.message + (perm!.action ?? "");
+      expect(combined).not.toContain(testDir);
+      expect(combined).not.toContain("test-key");
+      expect(combined).not.toMatch(/api[_-]?key/i);
+    });
+
+    itPosix("credential-bearing + owner-only (0600) → pass", async () => {
+      const config = makeConfig({ embedding: { provider: "zhipu", apiKey: "test-key-for-permissions-check" } });
+      mkdirSync(config.vaultPath, { recursive: true });
+      const db = new CBrainDB(config.dbPath);
+      db.close();
+      writeConfigWithMode(config, 0o600);
+
+      const report = await runDoctor();
+      const perm = report.checks.find((c) => c.id === "config:permissions");
+      expect(perm).toBeDefined();
+      expect(perm!.status).toBe("pass");
+    });
+
+    itPosix("credential-free + world-readable → pass (no misleading warning)", async () => {
+      const config = makeConfig(); // no apiKey — file carries no secret
+      mkdirSync(config.vaultPath, { recursive: true });
+      const db = new CBrainDB(config.dbPath);
+      db.close();
+      writeConfigWithMode(config, 0o644);
+
+      const report = await runDoctor();
+      const perm = report.checks.find((c) => c.id === "config:permissions");
+      expect(perm).toBeDefined();
+      expect(perm!.status).toBe("pass");
+    });
+
+    test("all platforms: check present, never throws; win32 capability-skip → pass", async () => {
+      const config = makeConfig({ embedding: { provider: "zhipu", apiKey: "test-key-for-permissions-check" } });
+      mkdirSync(config.vaultPath, { recursive: true });
+      const db = new CBrainDB(config.dbPath);
+      db.close();
+      writeConfigWithMode(config, process.platform === "win32" ? 0o666 : 0o644);
+
+      const report = await runDoctor();
+      const perm = report.checks.find((c) => c.id === "config:permissions");
+      expect(perm).toBeDefined();
+      // POSIX: world-readable + creds → warn; win32: capability skip → pass.
+      expect(perm!.status).toBe(process.platform === "win32" ? "pass" : "warn");
     });
   });
 

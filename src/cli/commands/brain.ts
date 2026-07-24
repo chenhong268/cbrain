@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import { loadConfig, type CBrainConfig } from "../context.js";
@@ -70,6 +70,20 @@ export function performInit(dir: string, force: boolean): InitResult {
     // Deliberately NO apiKey — env var guidance only
   };
   writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
+
+  // #383: harden credential-bearing config to owner-only on POSIX. chmodSync
+  // (not writeFileSync's `mode` option) so the result is 0600 regardless of the
+  // process umask. Non-fatal: if chmod throws on an exotic FS, init still
+  // succeeds. Note `cbrain doctor --first-run` only flags a loose mode once the
+  // config actually holds credentials (a fresh config has none), so a chmod
+  // failure on a credential-free init is not surfaced until creds are added.
+  if (process.platform !== "win32") {
+    try {
+      chmodSync(configPath, 0o600);
+    } catch {
+      // owner-only hardening best-effort; not worth failing brain creation
+    }
+  }
 
   // Init SQLite DB
   const db = new CBrainDB(dbPath);

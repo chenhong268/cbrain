@@ -4,7 +4,7 @@
  * Checks: config → paths → DB → indexes → services → MCP guidance.
  * Read-only. No service start, no data migration, no side effects beyond probe files.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, statSync } from "node:fs";
 import { dirname, join, resolve, relative } from "node:path";
 import type { CBrainConfig } from "../../cli/context.js";
 import { loadConfigSafe, resolveRuntimePath } from "../../cli/context.js";
@@ -106,7 +106,58 @@ function checkConfig(ctx: FirstRunContext): CheckResult[] {
     : { id: "config:lancePath", category: "config", status: "warn" as const, message: "lancePath not set (will default to sibling of dbPath)", action: "在 cbrain.json 中设置 lancePath" },
   );
 
+  // #383: credential-bearing config file must not be group/world-readable.
+  results.push(checkConfigPermissions(ctx));
+
   return results;
+}
+
+// ── #383: credential-bearing config file permissions ──
+
+/** A config is "credential-bearing" if any in-file secret field is set (env vars are not in the file). */
+function isCredentialBearing(config: CBrainConfig): boolean {
+  return !!(config.embedding?.apiKey || config.ner?.llm_api_key || config.reflect?.llm_api_key);
+}
+
+/**
+ * Read-only check that a credential-bearing config is owner-only on POSIX.
+ * Never reads file bytes or prints paths/values/field names. Windows is
+ * ACL-governed → capability-skip pass.
+ */
+function checkConfigPermissions(ctx: FirstRunContext): CheckResult {
+  const id = "config:permissions";
+  const category = "config";
+
+  if (process.platform === "win32") {
+    return { id, category, status: "pass", message: "权限检查在 Windows 上跳过（由 ACL 管理）" };
+  }
+  if (!ctx.configPath || !existsSync(ctx.configPath)) {
+    return { id, category, status: "pass", message: "权限检查跳过（配置文件不可访问）" };
+  }
+  if (!ctx.config) {
+    return { id, category, status: "pass", message: "权限检查跳过（配置未加载）" };
+  }
+  if (!isCredentialBearing(ctx.config)) {
+    return { id, category, status: "pass", message: "配置文件不含凭据" };
+  }
+
+  let mode = 0;
+  try {
+    mode = statSync(ctx.configPath).mode & 0o777;
+  } catch {
+    return { id, category, status: "pass", message: "权限检查跳过（无法读取文件模式）" };
+  }
+
+  if ((mode & 0o077) === 0) {
+    return { id, category, status: "pass", message: "含凭据的配置文件为仅所有者可访问" };
+  }
+  return {
+    id,
+    category,
+    status: "warn",
+    message: "含凭据的配置文件可被组用户或其他用户访问",
+    action: "将配置文件限制为仅所有者可访问 (chmod 600)，或改用环境变量提供凭据",
+  };
 }
 
 // ── Check: Paths ──

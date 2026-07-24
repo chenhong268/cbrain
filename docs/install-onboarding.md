@@ -195,7 +195,7 @@ CBrain 启动时会自动读取。加到 `.bashrc` 或 `.zshrc` 里持久化。
 }
 ```
 
-> **注意：** 配置文件（`cbrain.json`）仅保存在本地。调用 embedding/NER/reflect 时，API Key 会作为认证信息发送至你配置的 provider（智谱/DeepSeek），待处理文本一并发送。
+> **注意：** 配置文件（`cbrain.json`）仅保存在本地。调用 embedding/NER/reflect 时，API Key 会作为认证信息发送至你配置的 provider（智谱/DeepSeek），待处理文本一并发送。`cbrain init` 默认以仅所有者可读（POSIX `0600`，与 umask 无关）创建配置；若你把含凭据的配置放进云同步或分享目录，本地文件权限就不再有效，因此仍优先推荐用环境变量。
 
 ### 可选：网页补充搜索
 
@@ -226,7 +226,7 @@ cbrain doctor --first-run
 
 | 类别 | 检什么 |
 |:-----|:-------|
-| Config | `cbrain.json` 存在、路径配置完整 |
+| Config | `cbrain.json` 存在、路径配置完整、含凭据时文件仅所有者可访问（#383，POSIX） |
 | Credentials | `ZHIPU_API_KEY` 已配置（环境变量或 config） |
 | Paths | vault 存在、数据库目录可写、runtime 目录可写、runtime 不在 vault 里 |
 | Database | SQLite 连接正常、WAL 模式激活、表结构完整 |
