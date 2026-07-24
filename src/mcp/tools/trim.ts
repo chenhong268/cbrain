@@ -160,6 +160,14 @@ export function applyProactiveBudget(
   });
 
   if (deduped.length === 0) return [];
-  deduped.sort((a, b) => b.score - a.score);
+  // Rank by score desc; on a tie, expiry_alert beats any other rule so an
+  // expired/stale page can't be hidden by an equal-scoring timeline or shared
+  // connection hint. Do not rely on input order. #388
+  deduped.sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score;
+    if (a.rule === "expiry_alert" && b.rule !== "expiry_alert") return -1;
+    if (b.rule === "expiry_alert" && a.rule !== "expiry_alert") return 1;
+    return 0;
+  });
   return [deduped[0]];
 }

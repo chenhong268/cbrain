@@ -63,6 +63,34 @@ describe("generateProactiveHints", () => {
     expect(tl!.text).toContain("升职为总监");
   });
 
+  test("network_timeline: future event score is clamped to [0, 1] (#388)", async () => {
+    const ctx = makeCtx(db);
+
+    // Link A -> B
+    db.rawDb.prepare("INSERT INTO links (from_slug, to_slug, relation) VALUES (?, ?, ?)")
+      .run("entities/a", "entities/b", "提及");
+
+    // B carries a FUTURE timeline event (e.g. a scheduled meeting). This is
+    // legitimate timeline data, not stale evidence.
+    const futureDate = new Date(Date.now() + 60 * 86_400_000).toISOString().slice(0, 10);
+    db.rawDb.prepare("INSERT INTO timeline (page_slug, summary, event_date, source) VALUES (?, ?, ?, ?)")
+      .run("entities/b", "预定未来会议", futureDate, "test");
+
+    const hints = await generateProactiveHints(ctx, {
+      resultSlugs: ["entities/a"],
+      maxHints: 3,
+    });
+
+    const tl = hints.find(h => h.rule === "network_timeline");
+    expect(tl).toBeDefined();
+    // Before #388 the unclamped score was 1.0 - (-60)/180 ≈ 1.33, which outranks
+    // an expiry_alert (fixed at 1.0). The score must stay within [0, 1].
+    expect(tl!.score).toBeLessThanOrEqual(1.0);
+    expect(tl!.score).toBeGreaterThanOrEqual(0);
+    // A future event keeps a negative age_days (not abs'd) — see #388.
+    expect(tl!.age_days).toBeLessThan(0);
+  });
+
   test("shared_connection: finds common neighbor across results", async () => {
     const ctx = makeCtx(db);
 
