@@ -69,7 +69,15 @@ export function performInit(dir: string, force: boolean): InitResult {
     embedding: { provider: "zhipu" },
     // Deliberately NO apiKey — env var guidance only
   };
-  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
+  // #383: create the credential-bearing config owner-only from the outset via
+  // the open(2) mode argument. The effective mode is 0o600 & ~umask: umask can
+  // only clear bits, never set them, so the file is never group/world-readable
+  // even for an instant, and there is no best-effort chmod that can fail open.
+  // Under permissive/typical umasks (000/022/077) the result is 0600; an
+  // unusually restrictive umask may narrow owner bits further but never widens
+  // access. We deliberately do NOT chmod-normalize — that would reintroduce a
+  // fail-open path for a guarantee the mode argument already provides.
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
 
   // Init SQLite DB
   const db = new CBrainDB(dbPath);
