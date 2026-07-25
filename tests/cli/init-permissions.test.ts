@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { performInit } from "../../src/cli/commands/brain.js";
+import { CBrainDB } from "../../src/storage/sqlite.js";
 
 // POSIX-only group: file-mode semantics (0600) are meaningful on darwin/linux,
 // not on win32 (ACL-governed). Mirrors the describe.skip idiom in
@@ -20,10 +21,12 @@ describe("performInit — cbrain.json permissions (#383)", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
-  describePosix("creates cbrain.json owner-only (0600) regardless of umask", () => {
+  describePosix("creates cbrain.json with no group/other access (0600 under permissive/typical umasks)", () => {
     test("mode 0600 even under a fully permissive umask (000)", () => {
-      // A permissive umask would normally leave the file group/world-readable.
-      // chmod-after-write is umask-independent, so the result must still be 0600.
+      // A permissive umask would normally leave a default-mode file group/
+      // world-readable. The file is created with an explicit 0600 mode; umask
+      // only clears bits, so under umask 000 the result is exactly 0600 and
+      // group/other bits stay clear.
       const savedUmask = process.umask(0o000);
       try {
         const result = performInit(join(testDir, "brain"), false);
@@ -48,25 +51,36 @@ describe("performInit — cbrain.json permissions (#383)", () => {
     });
   });
 
-  test("force-init preserves owner-only creation and leaves unrelated vault data intact", () => {
+  test("force-init preserves owner-only creation and leaves unrelated vault/DB data intact", () => {
     const brainDir = join(testDir, "brain");
     const sentinelDir = join(brainDir, "vault", "records");
     const sentinel = join(sentinelDir, "keep-me.md");
+    const dbPath = join(brainDir, "brain.sqlite");
 
     // Pre-existing config (triggers the --force overwrite path) + a sentinel
-    // vault file that must survive the re-init untouched.
+    // vault file and an anonymous DB row that must survive the re-init.
     mkdirSync(sentinelDir, { recursive: true });
     writeFileSync(join(brainDir, "cbrain.json"), "{\"placeholder\":true}", "utf-8");
     writeFileSync(sentinel, "untouched user content", "utf-8");
 
+    const seedDb = new CBrainDB(dbPath);
+    seedDb.setConfig("cbrain-test-sentinel", "preserved");
+    seedDb.close();
+
     const result = performInit(brainDir, true);
     expect(result.status).toBe("ok");
 
-    // Unrelated user data is preserved.
+    // Unrelated user data is preserved — both the vault file and the DB row.
     expect(existsSync(sentinel)).toBe(true);
+    const reopenDb = new CBrainDB(dbPath);
+    const preserved = reopenDb.getAllConfig().some(
+      (r) => r.key === "cbrain-test-sentinel" && r.value === "preserved",
+    );
+    reopenDb.close();
+    expect(preserved).toBe(true);
 
-    // The recreated config is owner-only on POSIX; on win32 chmod is a no-op,
-    // so only assert the contract where mode bits are meaningful.
+    // The recreated config is owner-only on POSIX; on win32 the mode argument
+    // is a no-op (ACL-governed), so only assert where mode bits are meaningful.
     if (process.platform !== "win32") {
       expect(statSync(result.configPath).mode & 0o777).toBe(0o600);
     }

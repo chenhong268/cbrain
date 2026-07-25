@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
@@ -725,6 +725,34 @@ describe("FirstRunDoctor", () => {
       expect(perm).toBeDefined();
       // POSIX: world-readable + creds → warn; win32: capability skip → pass.
       expect(perm!.status).toBe(process.platform === "win32" ? "pass" : "warn");
+    });
+
+    itPosix("credential-bearing + stat failure → warn (unknown state is not pass), no leak", async () => {
+      const config = makeConfig({ embedding: { provider: "zhipu", apiKey: "test-key-for-permissions-check" } });
+      mkdirSync(config.vaultPath, { recursive: true });
+      const db = new CBrainDB(config.dbPath);
+      db.close();
+      writeConfigWithMode(config, 0o600);
+
+      // Inject a statSync failure to exercise the unknown-state branch
+      // without depending on an exotic filesystem. Only statSync is spied;
+      // existsSync/readFileSync stay real so the rest of the doctor runs.
+      const fs = await import("node:fs");
+      const spy = spyOn(fs, "statSync").mockImplementation(() => {
+        throw new Error("synthetic EACCES");
+      });
+      try {
+        const report = await runDoctor();
+        const perm = report.checks.find((c) => c.id === "config:permissions");
+        expect(perm).toBeDefined();
+        expect(perm!.status).toBe("warn");
+        const combined = perm!.message + (perm!.action ?? "");
+        expect(combined).not.toContain(testDir);
+        expect(combined).not.toContain("test-key");
+        expect(combined).not.toMatch(/api[_-]?key/i);
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 

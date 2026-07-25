@@ -141,23 +141,30 @@ function checkConfigPermissions(ctx: FirstRunContext): CheckResult {
     return { id, category, status: "pass", message: "配置文件不含凭据" };
   }
 
-  let mode = 0;
   try {
-    mode = statSync(ctx.configPath).mode & 0o777;
+    const mode = statSync(ctx.configPath).mode & 0o777;
+    if ((mode & 0o077) === 0) {
+      return { id, category, status: "pass", message: "含凭据的配置文件为仅所有者可访问" };
+    }
+    return {
+      id,
+      category,
+      status: "warn",
+      message: "含凭据的配置文件可被组用户或其他用户访问",
+      action: "将配置文件限制为仅所有者可访问 (chmod 600)，或改用环境变量提供凭据",
+    };
   } catch {
-    return { id, category, status: "pass", message: "权限检查跳过（无法读取文件模式）" };
+    // Unknown security state on a credential-bearing file is not a pass.
+    // Stable, path-free remediation so doctor can't mask an unverified
+    // owner-only boundary as readiness.
+    return {
+      id,
+      category,
+      status: "warn",
+      message: "无法验证含凭据的配置文件权限",
+      action: "将配置文件限制为仅所有者可访问 (chmod 600)，或改用环境变量提供凭据",
+    };
   }
-
-  if ((mode & 0o077) === 0) {
-    return { id, category, status: "pass", message: "含凭据的配置文件为仅所有者可访问" };
-  }
-  return {
-    id,
-    category,
-    status: "warn",
-    message: "含凭据的配置文件可被组用户或其他用户访问",
-    action: "将配置文件限制为仅所有者可访问 (chmod 600)，或改用环境变量提供凭据",
-  };
 }
 
 // ── Check: Paths ──

@@ -532,7 +532,7 @@ export ZHIPU_API_KEY=your-zhipu-api-key   # 向量嵌入 + NER（硬依赖）
 
 Config-file keys (`embedding.apiKey`, `ner.llm_api_key`) still work, but env vars are the recommended pattern — they keep secrets out of files you might share or sync. Optional providers that have no env shortcut yet (e.g. DeepSeek for `reflect`) fall back to their config field: `"reflect": { "llm_provider": "deepseek", "llm_api_key": "your-deepseek-api-key" }`.
 
-`cbrain init` creates `cbrain.json` owner-only (`0600` on POSIX, regardless of umask), and `cbrain doctor --first-run` warns when a credential-bearing config is accessible by group/others. This is local hardening only — `0600` does not stop cloud-sync tools or an attacker running as the same OS user, so env vars remain the safest choice for credentials.
+`cbrain init` creates `cbrain.json` owner-only (`0600` on POSIX under permissive/typical umasks; group/other bits are never set), and `cbrain doctor --first-run` warns when a credential-bearing config is accessible by group/others. This is local hardening only — `0600` does not stop cloud-sync tools or an attacker running as the same OS user, so env vars remain the safest choice for credentials.
 
 > **Field-name convention is mixed by design**: top-level keys and the `embedding` block are camelCase (`vaultPath`, `dbPath`, `lancePath`, `apiKey`); the `ner` and `reflect` blocks use snake_case (`llm_api_key`, `llm_base_url`, `llm_model`). This matches `cbrain.json.example`.
 

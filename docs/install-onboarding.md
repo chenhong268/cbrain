@@ -195,7 +195,7 @@ CBrain 启动时会自动读取。加到 `.bashrc` 或 `.zshrc` 里持久化。
 }
 ```
 
-> **注意：** 配置文件（`cbrain.json`）仅保存在本地。调用 embedding/NER/reflect 时，API Key 会作为认证信息发送至你配置的 provider（智谱/DeepSeek），待处理文本一并发送。`cbrain init` 默认以仅所有者可读（POSIX `0600`，与 umask 无关）创建配置；若你把含凭据的配置放进云同步或分享目录，本地文件权限就不再有效，因此仍优先推荐用环境变量。
+> **注意：** 配置文件（`cbrain.json`）仅保存在本地。调用 embedding/NER/reflect 时，API Key 会作为认证信息发送至你配置的 provider（智谱/DeepSeek），待处理文本一并发送。`cbrain init` 默认以仅所有者可读（POSIX 下常见 umask 为 `0600`，且绝不授予 group/other 权限）创建配置；若你把含凭据的配置放进云同步或分享目录，本地文件权限就不再有效，因此仍优先推荐用环境变量。
 
 ### 可选：网页补充搜索
 
