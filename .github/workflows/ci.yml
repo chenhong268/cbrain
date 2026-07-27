@@ -1,7 +1,11 @@
-# ci.yml — deterministic, no-secret PR gate.
+# ci.yml — no-secret PR gate (deterministic core + one network-backed step).
 #
-# Runs the full `bun run lint` (src + test typecheck + biome), docs
-# consistency, and the bin test suite. It does NOT run the full `bun test`
+# `bun run check:ci` is deterministic and offline (src+test typecheck, biome,
+# docs consistency, bin tests). The dependency-advisory gate
+# (`bun run gate:dependencies`) is a SEPARATE network-backed step that calls
+# the Bun registry to resolve security advisories; because it depends on an
+# external service, the overall workflow is no longer purely deterministic —
+# but it remains no-secret. It does NOT run the full `bun test`
 # (LLM/Hermes/runtime gates) — those remain local / release gates via
 # `bun run check` and `bun run gate:v2-preflight`.
 name: ci
@@ -32,3 +36,5 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Run check:ci
         run: bun run check:ci
+      - name: Run dependency advisory gate
+        run: bun run gate:dependencies

@@ -3,7 +3,9 @@
 > The final human-gated acceptance for v2.0 release-candidate sign-off.
 > Run by the release manager **after** `bun run gate:v2-preflight` is green.
 > The automated preflight gate proves the offline kernel is correct; this
-> checklist covers the three things only a human + real environment can catch.
+> checklist covers three manual/environment observations plus one automated
+> network-backed gate. The first three need a human or real environment; the
+> fourth is machine-run but depends on an external service.
 
 ## Why this exists
 
@@ -18,10 +20,10 @@ RC decision does not depend on oral memory.
 
 > **Repository vs operator scope (#379):** `gate:v2-preflight` runs from a clean checkout with no `cbrain.json`. Its `storage-consistency` stage uses an anonymous in-process fixture DB (gate id `consistency`, mode `repository-fixture`) and never opens operator vault/SQLite/LanceDB. Operator profile health is a separate gate: `bun run gate:profile-storage` (gate id `profile-storage-consistency`, mode `operator-profile`) — required only when validating a real profile, and run by the operator/release manager independently of the preflight.
 
-**Green preflight is necessary, not sufficient.** All three items below must
+**Green preflight is necessary, not sufficient.** All four items below must
 also be recorded before tagging.
 
-## The three manual gates
+## The four release gates
 
 ### 1. Real Hermes dialogue observation
 
@@ -76,6 +78,42 @@ the version-pinned install path itself is intact.
 Record: the ref installed, the environment, and pass/fail of boot + first
 recall.
 
+### 4. Dependency advisory gate
+
+Run `bun run gate:dependencies` on a fresh `bun install --frozen-lockfile`.
+This is an **automated network-backed gate** — it calls the Bun registry to
+resolve security advisories. It is NOT one of the eight offline preflight
+gates aggregated by `gate:v2-preflight`; it runs separately because it
+depends on an external service.
+
+**What it proves:** the current lockfile's audit findings are triaged — every
+critical/high is either eliminated or covered by an exact exception whose
+advisory id + package + installed version + dependency path + expiry match,
+and no exception is expired, stale (version or path), obsolete, or unnecessary.
+
+**What it does NOT prove:** an advisory hit is not proof a production path is
+exploitable; a GO is not proof the dependency tree is vulnerability-free or
+that the application is secure overall; moderate/low findings are reported
+only and do not affect the verdict.
+
+- **exit 0 / outcome=go** — proceed.
+- **exit 1 / outcome=no-go** — blocks the RC. Causes: an untriaged
+  critical/high (no exact exception); or an exception that is expired, has a
+  stale version or path, is obsolete (advisory gone, or its exact installed
+  target is no longer vulnerable), or is unnecessary
+  (covers a moderate/low). Resolve by upgrading the dependency, recording a
+  precise exception in `config/dependency-advisory-exceptions.json`, or
+  removing a stale/unnecessary exception, then re-run.
+- **exit 2 / outcome=fatal** — also blocks the RC. A runtime failure (audit
+  spawn/timeout/output, registry/lock read, etc.). Resolve the external or
+  environment fault and re-run; a fatal MUST NOT be interpreted as go.
+
+Policy: critical/high advisories must be eliminated or covered by an exact,
+unexpired exception. moderate/low are reported only and do not block.
+
+Record: save the sanitized JSON output as release evidence alongside the RC.
+The output contains canonical dependency paths (required by the gate contract) but no local filesystem paths, credentials, advisory titles, registry URLs, or raw audit text.
+
 ## Go / No-Go
 
 **No-go (blocks the RC) — any one of these:**
@@ -88,6 +126,10 @@ recall.
 - **Install failure** — the version-pinned install does not complete or boot.
 - **Core recall unavailable** — content / front-door / grounded recall broken
   or consistently timing out on real traffic.
+- **Dependency advisory gate fails** — `bun run gate:dependencies` exits 1
+  (NO-GO: untriaged high/critical finding, or expired / stale version or path /
+  obsolete / unnecessary exception) or 2 (fatal: audit / registry / lock
+  runtime failure). A fatal is not a go.
 
 **Does NOT block (track separately, do not gate the RC):**
 
@@ -98,9 +140,9 @@ recall.
 
 ## Recording results
 
-Keep the signed-off result of each manual gate alongside the RC (release
-notes, the RC issue, or wherever the candidate is tracked). A later RC re-runs
-all three.
+Keep the signed-off result of each gate alongside the RC (release notes, the
+RC issue, or wherever the candidate is tracked), including the sanitized
+dependency-advisory JSON as release evidence. A later RC re-runs all four.
 
 ## Non-goals
 
