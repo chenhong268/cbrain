@@ -38,6 +38,7 @@
     "gate:health-debt": "bun bin/check-health-debt-gate.ts",
     "gate:recall-quality": "bun bin/check-recall-quality-matrix.ts",
     "check:docs": "bun bin/check-docs-consistency.ts",
+    "gate:dependencies": "bun bin/check-dependency-advisory-gate.ts",
     "check:ci": "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/"
   },
   "dependencies": {
