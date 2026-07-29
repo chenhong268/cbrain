@@ -4,6 +4,16 @@ import { join } from "node:path";
 
 const WORKFLOW_PATH = join(import.meta.dir, "..", "..", ".github", "workflows", "ci.yml");
 const WORKFLOW = existsSync(WORKFLOW_PATH) ? readFileSync(WORKFLOW_PATH, "utf-8") : "";
+const CHECKLIST_PATH = join(import.meta.dir, "..", "..", "docs", "product", "v2-rc-release-checklist.md");
+const CHECKLIST = existsSync(CHECKLIST_PATH) ? readFileSync(CHECKLIST_PATH, "utf-8") : "";
+
+/** Extract one bullet block from `text`: from `startMarker` up to (excluding) `nextMarker`. */
+function extractBullet(text: string, startMarker: string, nextMarker: string): string {
+  const start = text.indexOf(startMarker);
+  if (start < 0) return "";
+  const end = text.indexOf(nextMarker, start);
+  return end < 0 ? text.slice(start) : text.slice(start, end);
+}
 
 describe(".github/workflows/ci.yml contract", () => {
   test("file exists", () => {
@@ -45,5 +55,90 @@ describe(".github/workflows/ci.yml contract", () => {
   test("does not depend on Hermes / LLM / provider env vars", () => {
     // Matches env-var-style identifiers (FOO_KEY, BAR_TOKEN), not prose mentions.
     expect(WORKFLOW).not.toMatch(/\b(HERMES|LLM|OPENAI|DEEPSEEK|ZHIPU|ANTHROPIC)_[A-Z]/);
+  });
+
+  // ── #380 Stage 4: dependency advisory gate wiring ──
+
+  test("check:ci and gate:dependencies are each a complete single-line YAML run step", () => {
+    // Strict whole-line match: the command occupies the entire YAML line, so
+    // `; true`, `|| true`, multiline `run: |`, and line-continuation all fail.
+    expect(WORKFLOW).toMatch(/^\s+run: bun run check:ci\s*$/m);
+    expect(WORKFLOW).toMatch(/^\s+run: bun run gate:dependencies\s*$/m);
+  });
+
+  test("line-anchored run match rejects fail-open mutations on the gate step", () => {
+    const evil = [
+      "      run: bun run gate:dependencies; true",
+      "      run: bun run gate:dependencies || true",
+      "      run: |\n        bun run gate:dependencies\n        true",
+    ];
+    for (const e of evil) {
+      expect(e).not.toMatch(/^\s+run: bun run gate:dependencies\s*$/m);
+    }
+  });
+
+  test("dependency advisory gate runs exactly once, after frozen install", () => {
+    const matches = WORKFLOW.match(/run: bun run gate:dependencies/g) ?? [];
+    expect(matches.length).toBe(1);
+    const installIdx = WORKFLOW.indexOf("bun install --frozen-lockfile");
+    const gateIdx = WORKFLOW.indexOf("run: bun run gate:dependencies");
+    expect(installIdx).toBeGreaterThanOrEqual(0);
+    expect(gateIdx).toBeGreaterThan(installIdx);
+  });
+
+  test("workflow has no continue-on-error or || true fail-open", () => {
+    expect(WORKFLOW).not.toMatch(/continue-on-error/);
+    expect(WORKFLOW).not.toMatch(/\|\|\s*true/);
+  });
+});
+
+describe("v2-rc-release-checklist.md contract (#380)", () => {
+  test("dependency gate is described as network-backed", () => {
+    expect(CHECKLIST).toMatch(/network-backed/);
+  });
+  test("dependency gate is explicitly NOT one of the eight offline preflight gates", () => {
+    expect(CHECKLIST).toMatch(/NOT one of the eight offline preflight/);
+  });
+  test("documents exit 0 / 1 / 2 semantics", () => {
+    expect(CHECKLIST).toMatch(/exit 0/);
+    expect(CHECKLIST).toMatch(/exit 1/);
+    expect(CHECKLIST).toMatch(/exit 2/);
+  });
+  test("exit 1 bullet (scoped) blocks the RC with full lifecycle causes", () => {
+    const exit1 = extractBullet(CHECKLIST, "- **exit 1 / outcome=no-go**", "- **exit 2 / outcome=fatal**");
+    expect(exit1.length).toBeGreaterThan(0);
+    expect(exit1).toMatch(/blocks the RC/);
+    expect(exit1).toMatch(/untriaged/);
+    expect(exit1).toMatch(/expired/);
+    expect(exit1).toMatch(/stale version or path/);
+    expect(exit1).toMatch(/obsolete/);
+    expect(exit1).toMatch(/unnecessary/);
+  });
+
+  test("exit 2 bullet (scoped) blocks the RC independently", () => {
+    const exit2 = extractBullet(CHECKLIST, "- **exit 2 / outcome=fatal**", "\n## ");
+    expect(exit2.length).toBeGreaterThan(0);
+    expect(exit2).toMatch(/blocks the RC/);
+  });
+
+  test("exit 1 block assertion does not pass via exit 2 text (mutation guard)", () => {
+    const mutated = CHECKLIST.replace(/(exit 1 \/ outcome=no-go\*\* — )blocks the RC/, "$1");
+    const exit1 = extractBullet(mutated, "- **exit 1 / outcome=no-go**", "- **exit 2 / outcome=fatal**");
+    expect(exit1).not.toMatch(/blocks the RC/);
+  });
+  test("states what the gate proves and does NOT prove", () => {
+    expect(CHECKLIST).toMatch(/What it proves/);
+    expect(CHECKLIST).toMatch(/What it does NOT prove/);
+  });
+  test("privacy line keeps dependency_path but forbids local fs/credentials/raw audit", () => {
+    expect(CHECKLIST).toMatch(/canonical dependency paths/);
+    expect(CHECKLIST).toMatch(/no local filesystem paths, credentials, advisory titles, registry URLs, or raw audit text/);
+  });
+
+  test("#380 obsolete cause covers advisory-gone AND installed-but-no-longer-vulnerable (docs contract)", () => {
+    const exit1 = extractBullet(CHECKLIST, "- **exit 1 / outcome=no-go**", "- **exit 2 / outcome=fatal**");
+    expect(exit1.length).toBeGreaterThan(0);
+    expect(exit1).toMatch(/obsolete/);
+    expect(exit1).toMatch(/no longer vulnerable/);
   });
 });
