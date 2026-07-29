@@ -175,7 +175,7 @@ describe("gate adapter — privacy + stability", () => {
     expect(pkg.scripts["gate:dependencies"]).toBe("bun bin/check-dependency-advisory-gate.ts");
     expect(pkg.scripts["check:docs"]).toBe("bun bin/check-docs-consistency.ts");
     expect(pkg.scripts["gate:v2-preflight"]).toBe("bun bin/check-v2-preflight.ts");
-    expect(pkg.scripts["check:ci"]).toBe("bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/");
+    expect(pkg.scripts["check:ci"]).toBe("bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/");
   });
 
   test("20. importing CLI module does not spawn audit (import.meta.main guard)", () => {
