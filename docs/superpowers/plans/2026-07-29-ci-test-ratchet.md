@@ -244,7 +244,7 @@ Expected: both PASS; `gate:dependencies` runs as the independent network-backed 
 
 - [ ] **Step 4: Whitespace + privacy**
 
-Run: `git diff --check` → no whitespace errors. Grep diff for credential-like strings (`/Users/`, `sk-`, `Bearer`, API keys, real names, real vault paths) → none.
+Run: `git diff --check` → no whitespace errors. Grep the branch diff for credential-like strings (local fs paths, secret prefixes, auth-header tokens, real names, real vault paths) → none.
 
 - [ ] **Step 5: GitHub Linux CI**
 
