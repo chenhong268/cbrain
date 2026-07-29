@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const WORKFLOW_PATH = join(import.meta.dir, "..", "..", ".github", "workflows", "ci.yml");
 const WORKFLOW = existsSync(WORKFLOW_PATH) ? readFileSync(WORKFLOW_PATH, "utf-8") : "";
@@ -140,5 +142,84 @@ describe("v2-rc-release-checklist.md contract (#380)", () => {
     expect(exit1.length).toBeGreaterThan(0);
     expect(exit1).toMatch(/obsolete/);
     expect(exit1).toMatch(/no longer vulnerable/);
+  });
+});
+
+// ── #381: PR-test ratchet — check:ci covers deterministic core/storage/mcp/http ──
+
+describe("check:ci PR-test ratchet (#381)", () => {
+  const PKG = JSON.parse(readFileSync(join(import.meta.dir, "..", "..", "package.json"), "utf-8")) as {
+    scripts: Record<string, string>;
+  };
+  const CHECK_CI = PKG.scripts["check:ci"] ?? "";
+  const CHECK = PKG.scripts["check"] ?? "";
+
+  // The four dirs are the source of truth: every *.test.ts under them MUST run
+  // in PR CI. Directory-form args (not per-file whitelists) let bun auto-discover
+  // new test files, so a newly added tests/mcp/foo.test.ts can never silently
+  // stay outside the gate.
+  const TARGET_DIRS = ["tests/core", "tests/storage", "tests/mcp", "tests/http"] as const;
+
+  test("check:ci keeps lint, docs consistency, recall quality, and bin tests", () => {
+    expect(CHECK_CI).toContain("bun run lint");
+    expect(CHECK_CI).toContain("bun run check:docs");
+    expect(CHECK_CI).toContain("bun run gate:recall-quality");
+    expect(CHECK_CI).toMatch(/bun test[\s\S]*tests\/bin/);
+  });
+
+  test("check:ci covers every deterministic target directory", () => {
+    for (const d of TARGET_DIRS) {
+      expect(CHECK_CI).toMatch(new RegExp(`bun test[\\s\\S]*${d.replace(/\//g, "\\/")}\\/`));
+    }
+  });
+
+  test("check:ci uses directory form, not a per-file whitelist (new tests auto-discovered)", () => {
+    // No individual .test.ts path enumerated under a target dir — that would be
+    // a per-file whitelist and silently drop new files.
+    const perFile = CHECK_CI.match(/tests\/(?:core|storage|mcp|http)\/\S+\.test\.ts/g);
+    expect(perFile ?? []).toEqual([]);
+  });
+
+  test("ci.yml declares a bounded job timeout", () => {
+    expect(WORKFLOW).toMatch(/timeout-minutes:\s*\d+/);
+  });
+
+  test("bun run check (full/release gate) is not weakened — still runs the whole suite", () => {
+    expect(CHECK).toContain("bun run lint");
+    expect(CHECK).toContain("bun test");
+    // `check` runs the whole suite (no dir filter); it must not be narrowed.
+    expect(CHECK).not.toMatch(/bun test[^\n]*tests\//);
+  });
+
+  test("gate:dependencies stays a separate network-backed step, not absorbed into check:ci", () => {
+    expect(PKG.scripts["gate:dependencies"]).toBeTruthy();
+    expect(CHECK_CI).not.toContain("gate:dependencies");
+  });
+
+  test("bun recursively discovers new *.test.ts under a directory arg (auto-entry proof)", () => {
+    // Proves bun directory recursion: drop a sentinel in an isolated tmp dir,
+    // run `bun test <tmpdir>`, assert it is found and run. Combined with the
+    // directory-form check:ci above, a new tests/mcp/*.test.ts cannot stay
+    // outside CI. The tmp dir keeps the checkout clean.
+    const tmp = mkdtempSync(join(tmpdir(), "cbrain-ratchet-sentinel-"));
+    try {
+      writeFileSync(
+        join(tmp, "sentinel.test.ts"),
+        'import { test, expect } from "bun:test";\n' +
+          'test("ratchet sentinel", () => { expect(1 + 1).toBe(2); });\n',
+      );
+      const out = execSync(`bun test ${tmp} 2>&1`, {
+        encoding: "utf-8",
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      // bun test prints only the summary (not per-test names) when stdout is
+      // piped, so assert the count: 1 pass + 1 file = the sentinel was
+      // discovered and ran. Auto-discovery is the contract, not the test name.
+      expect(out).toMatch(/1 pass/);
+      expect(out).toMatch(/Ran 1 test/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
