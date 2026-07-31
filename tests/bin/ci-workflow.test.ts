@@ -164,12 +164,37 @@ describe("check:ci PR-test ratchet (#381)", () => {
     expect(CHECK_CI).toContain("bun run lint");
     expect(CHECK_CI).toContain("bun run check:docs");
     expect(CHECK_CI).toContain("bun run gate:recall-quality");
-    expect(CHECK_CI).toMatch(/bun test[\s\S]*tests\/bin/);
+    expect(CHECK_CI).toMatch(/bun test[^&|;#\n]*tests\/bin/);
   });
 
-  test("check:ci covers every deterministic target directory", () => {
+  // A dir is covered only if it is a positional ARGUMENT of `bun test` — i.e. it
+  // appears after `bun test` on the same shell command, before any command
+  // separator (&& | ;), comment (#), or newline. A greedy [\\s\\S]* would also
+  // match a dir hidden in a trailing `#` comment or another command's args.
+  function dirArgOf(dir: string): RegExp {
+    return new RegExp(`bun test[^&|;#\\n]*${dir.replace(/\//g, "\\/")}\\/`);
+  }
+
+  test("check:ci covers every deterministic target directory as a bun test argument", () => {
     for (const d of TARGET_DIRS) {
-      expect(CHECK_CI).toMatch(new RegExp(`bun test[\\s\\S]*${d.replace(/\//g, "\\/")}\\/`));
+      expect(CHECK_CI).toMatch(dirArgOf(d));
+    }
+  });
+
+  test("directory coverage cannot be bypassed by a comment or displaced arg (mutation guard)", () => {
+    // Evil: shell `#` comments out the four target dirs, so `bun test` only runs
+    // tests/bin. The separator-bounded regex must NOT match the commented dirs.
+    const commented = "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ # tests/core/ tests/storage/ tests/mcp/ tests/http/";
+    for (const d of TARGET_DIRS) {
+      expect(commented).not.toMatch(dirArgOf(d));
+    }
+    // A dir displaced into a later chained command's argument is equally uncovered.
+    const displaced = "bun run lint && bun test tests/bin/ tests/core/ tests/storage/ && echo skip tests/mcp/ tests/http/";
+    expect(displaced).not.toMatch(dirArgOf("tests/mcp"));
+    expect(displaced).not.toMatch(dirArgOf("tests/http"));
+    // The real check:ci must still satisfy every dir as a genuine bun test arg.
+    for (const d of TARGET_DIRS) {
+      expect(CHECK_CI).toMatch(dirArgOf(d));
     }
   });
 
