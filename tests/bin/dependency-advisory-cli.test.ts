@@ -170,12 +170,15 @@ describe("gate adapter — privacy + stability", () => {
     expect(a).toBe(b);
   });
 
-  test("19. package.json adds only gate:dependencies (known scripts intact)", () => {
+  test("19. package.json wires the dependency-advisory gate and leaves sibling gates intact (#380)", () => {
     const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "../../package.json"), "utf-8"));
+    // #380 owns the gate:dependencies entry point and must stay separate from the
+    // offline gates. It does NOT pin check:ci's test-directory list — that is
+    // #381's contract (tests/bin/ci-workflow.test.ts), so #381 can evolve
+    // check:ci without editing this unrelated test.
     expect(pkg.scripts["gate:dependencies"]).toBe("bun bin/check-dependency-advisory-gate.ts");
     expect(pkg.scripts["check:docs"]).toBe("bun bin/check-docs-consistency.ts");
     expect(pkg.scripts["gate:v2-preflight"]).toBe("bun bin/check-v2-preflight.ts");
-    expect(pkg.scripts["check:ci"]).toBe("bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/");
   });
 
   test("20. importing CLI module does not spawn audit (import.meta.main guard)", () => {

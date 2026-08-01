@@ -39,7 +39,7 @@
     "gate:recall-quality": "bun bin/check-recall-quality-matrix.ts",
     "check:docs": "bun bin/check-docs-consistency.ts",
     "gate:dependencies": "bun bin/check-dependency-advisory-gate.ts",
-    "check:ci": "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/"
+    "check:ci": "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/"
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.27.0",

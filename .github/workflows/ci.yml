@@ -1,13 +1,24 @@
-# ci.yml — no-secret PR gate (deterministic core + one network-backed step).
+# ci.yml — no-secret PR gate (deterministic offline suite + one network-backed step).
 #
-# `bun run check:ci` is deterministic and offline (src+test typecheck, biome,
-# docs consistency, bin tests). The dependency-advisory gate
-# (`bun run gate:dependencies`) is a SEPARATE network-backed step that calls
-# the Bun registry to resolve security advisories; because it depends on an
-# external service, the overall workflow is no longer purely deterministic —
-# but it remains no-secret. It does NOT run the full `bun test`
-# (LLM/Hermes/runtime gates) — those remain local / release gates via
-# `bun run check` and `bun run gate:v2-preflight`.
+# `bun run check:ci` is deterministic with NO EXTERNAL network: src+test
+# typecheck, biome, docs consistency, recall-quality matrix, and the
+# deterministic test suites under tests/bin, tests/core, tests/storage,
+# tests/mcp, tests/http. They mock LLM/embedding providers and need no real
+# cbrain.json, vault, credentials, or external network. State isolation varies
+# — most suites use mkdtempSync temp dirs; tests/http spin up in-process
+# loopback servers on dynamic ports (127.0.0.1); a few tests use fixed temp
+# paths or short real delays (see docs/ci-test-inventory.md).
+#
+# Scope of "0 exclusions": holds for the current single job, non-`--parallel`
+# run. If `bun test --parallel`, concurrent same-workspace jobs, or sharding are
+# ever enabled, fixed-temp-path collisions must be remediated first.
+#
+# The dependency-advisory gate (`bun run gate:dependencies`) is a SEPARATE
+# network-backed step that calls the Bun registry to resolve security
+# advisories; because it depends on an external service, the overall workflow
+# is no longer purely deterministic — but it remains no-secret. It does NOT
+# run the full `bun test` (LLM/Hermes/runtime gates) — those remain local /
+# release gates via `bun run check` and `bun run gate:v2-preflight`.
 name: ci
 
 on:

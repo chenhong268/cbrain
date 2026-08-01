@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const WORKFLOW_PATH = join(import.meta.dir, "..", "..", ".github", "workflows", "ci.yml");
 const WORKFLOW = existsSync(WORKFLOW_PATH) ? readFileSync(WORKFLOW_PATH, "utf-8") : "";
@@ -140,5 +142,124 @@ describe("v2-rc-release-checklist.md contract (#380)", () => {
     expect(exit1.length).toBeGreaterThan(0);
     expect(exit1).toMatch(/obsolete/);
     expect(exit1).toMatch(/no longer vulnerable/);
+  });
+});
+
+// ── #381: PR-test ratchet — check:ci covers deterministic core/storage/mcp/http ──
+
+describe("check:ci PR-test ratchet (#381)", () => {
+  const PKG = JSON.parse(readFileSync(join(import.meta.dir, "..", "..", "package.json"), "utf-8")) as {
+    scripts: Record<string, string>;
+  };
+  const CHECK_CI = PKG.scripts["check:ci"] ?? "";
+  const CHECK = PKG.scripts["check"] ?? "";
+
+  // The five dirs are the source of truth: every *.test.ts under them MUST run
+  // in PR CI. Directory-form args (not per-file whitelists) let bun auto-discover
+  // new test files, so a newly added tests/mcp/foo.test.ts can never silently
+  // stay outside the gate.
+  const EXPECTED_DIRS = ["tests/bin/", "tests/core/", "tests/storage/", "tests/mcp/", "tests/http/"];
+
+  /** Parse check:ci as a simple `&&` chain. NOT a general shell parser — any
+   *  control grammar beyond `&&` (|| ; | # newline), or env prefixes / quotes /
+   *  variable expansion, fails closed. A segment counts as the Bun test command
+   *  ONLY if it STARTS with `bun test` (so an `echo bun test …` argument can
+   *  never be mistaken for the command). Requires exactly one bun test segment. */
+  function parseCheckCiChain(script: string): { segments: string[]; bunTestArgs: string[] | null } {
+    if (/[|;#\n]/.test(script)) return { segments: [], bunTestArgs: null };
+    const segments = script.split("&&").map((s) => s.trim()).filter((s) => s.length > 0);
+    const bunTestSegs = segments.filter((s) => /^bun\s+test(?:\s|$)/.test(s));
+    if (bunTestSegs.length !== 1) return { segments, bunTestArgs: null };
+    return { segments, bunTestArgs: bunTestSegs[0].split(/\s+/).slice(2) };
+  }
+
+  test("check:ci is exactly: lint && check:docs && gate:recall-quality && bun test <five dirs>", () => {
+    const parsed = parseCheckCiChain(CHECK_CI);
+    expect(parsed.bunTestArgs).not.toBeNull();
+    expect(parsed.segments).toEqual([
+      "bun run lint",
+      "bun run check:docs",
+      "bun run gate:recall-quality",
+      `bun test ${EXPECTED_DIRS.join(" ")}`,
+    ]);
+    expect([...parsed.bunTestArgs ?? []].sort()).toEqual([...EXPECTED_DIRS].sort());
+  });
+
+  test("check:ci rejects non-&& grammar, displaced/multiple/missing bun test, and bypass args (mutation guards)", () => {
+    const good = ["bun run lint", "bun run check:docs", "bun run gate:recall-quality", `bun test ${EXPECTED_DIRS.join(" ")}`] as const;
+    const isGoodChain = (script: string): boolean => {
+      const parsed = parseCheckCiChain(script);
+      return parsed.bunTestArgs !== null
+        && JSON.stringify(parsed.segments) === JSON.stringify(good)
+        && JSON.stringify([...parsed.bunTestArgs].sort()) === JSON.stringify([...EXPECTED_DIRS].sort());
+    };
+    const evil: Array<{ name: string; script: string }> = [
+      { name: "echo bun test before real bun test (Codex bypass)", script: "echo bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ && bun test tests/bin/ci-workflow.test.ts" },
+      { name: "printf bun test displacement", script: "printf bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ && bun test tests/bin/ci-workflow.test.ts" },
+      { name: "two real bun test segments", script: "bun run lint && bun test tests/bin/ tests/core/ && bun test tests/storage/ tests/mcp/ tests/http/" },
+      { name: "||true fail-open", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/||true" },
+      { name: "||   true (spaces)", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ ||   true" },
+      { name: ";true", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ ;true" },
+      { name: "; exit 0", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ ; exit 0" },
+      { name: "single pipe", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ | cat" },
+      { name: "comment", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ # note" },
+      { name: "newline", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/\nbun run lint" },
+      { name: "missing one dir", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/" },
+      { name: "fake= option value", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ fake=tests/core/ tests/storage/ tests/mcp/ tests/http/" },
+      { name: "diluting flag appended", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ --pass-with-no-tests" },
+    ];
+    for (const e of evil) {
+      expect(isGoodChain(e.script), `${e.name}`).toBe(false);
+    }
+    // the real check:ci must remain a good chain
+    expect(isGoodChain(CHECK_CI)).toBe(true);
+  });
+
+  test("check:ci uses directory form, not a per-file whitelist (new tests auto-discovered)", () => {
+    // No individual .test.ts path enumerated under a target dir — that would be
+    // a per-file whitelist and silently drop new files.
+    const perFile = CHECK_CI.match(/tests\/(?:bin|core|storage|mcp|http)\/\S+\.test\.ts/g);
+    expect(perFile ?? []).toEqual([]);
+  });
+
+  test("ci.yml declares a bounded job timeout", () => {
+    expect(WORKFLOW).toMatch(/timeout-minutes:\s*\d+/);
+  });
+
+  test("bun run check (full/release gate) is not weakened — still runs the whole suite", () => {
+    expect(CHECK).toContain("bun run lint");
+    expect(CHECK).toContain("bun test");
+    // `check` runs the whole suite (no dir filter); it must not be narrowed.
+    expect(CHECK).not.toMatch(/bun test[^\n]*tests\//);
+  });
+
+  test("gate:dependencies stays a separate network-backed step, not absorbed into check:ci", () => {
+    expect(PKG.scripts["gate:dependencies"]).toBeTruthy();
+    expect(CHECK_CI).not.toContain("gate:dependencies");
+  });
+
+  test("bun recursively discovers new *.test.ts under a directory arg (auto-entry proof)", () => {
+    // Proves bun directory recursion: drop a sentinel in an isolated tmp dir,
+    // run `bun test <tmpdir>`, assert it is found and run. Combined with the
+    // directory-form check:ci above, a new tests/mcp/*.test.ts cannot stay
+    // outside CI. The tmp dir keeps the checkout clean.
+    const tmp = mkdtempSync(join(tmpdir(), "cbrain-ratchet-sentinel-"));
+    try {
+      writeFileSync(
+        join(tmp, "sentinel.test.ts"),
+        'import { test, expect } from "bun:test";\n' +
+          'test("ratchet sentinel", () => { expect(1 + 1).toBe(2); });\n',
+      );
+      // argv form (no shell): process.execPath is the bun binary, "test" + tmp
+      // are real args, so a TMPDIR with spaces or shell metacharacters cannot
+      // alter what runs. bun writes the per-test summary to stderr, so merge streams.
+      const res = spawnSync(process.execPath, ["test", tmp], { encoding: "utf-8", env: process.env });
+      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+      expect(res.status).toBe(0);
+      expect(out).toMatch(/1 pass/);
+      expect(out).toMatch(/Ran 1 test/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
