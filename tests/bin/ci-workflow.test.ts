@@ -160,53 +160,59 @@ describe("check:ci PR-test ratchet (#381)", () => {
   // stay outside the gate.
   const EXPECTED_DIRS = ["tests/bin/", "tests/core/", "tests/storage/", "tests/mcp/", "tests/http/"];
 
-  test("check:ci keeps lint, docs consistency, and recall quality", () => {
-    expect(CHECK_CI).toContain("bun run lint");
-    expect(CHECK_CI).toContain("bun run check:docs");
-    expect(CHECK_CI).toContain("bun run gate:recall-quality");
-  });
-
-  /** Narrow, deterministic parse — NOT a general shell parser. Returns the
-   *  positional-argument tokens of the single `bun test` segment: from `bun test`
-   *  up to the next shell command separator (&& | || ;), comment (#), or newline.
-   *  Whitespace-split, then drop "bun" and "test". A dir counts as covered ONLY
-   *  if it is an exact standalone token here — never an option value
-   *  (fake=tests/core/), never in a comment, never in a later chained command. */
-  function bunTestArgTokens(script: string): string[] {
-    const idx = script.search(/\bbun test\b/);
-    if (idx < 0) return [];
-    const after = script.slice(idx);
-    const segEnd = after.search(/[\n#|;&]/);
-    const seg = segEnd < 0 ? after : after.slice(0, segEnd);
-    return seg.trim().split(/\s+/).filter((t) => t.length > 0).slice(2);
+  /** Parse check:ci as a simple `&&` chain. NOT a general shell parser — any
+   *  control grammar beyond `&&` (|| ; | # newline), or env prefixes / quotes /
+   *  variable expansion, fails closed. A segment counts as the Bun test command
+   *  ONLY if it STARTS with `bun test` (so an `echo bun test …` argument can
+   *  never be mistaken for the command). Requires exactly one bun test segment. */
+  function parseCheckCiChain(script: string): { segments: string[]; bunTestArgs: string[] | null } {
+    if (/[|;#\n]/.test(script)) return { segments: [], bunTestArgs: null };
+    const segments = script.split("&&").map((s) => s.trim()).filter((s) => s.length > 0);
+    const bunTestSegs = segments.filter((s) => /^bun\s+test(?:\s|$)/.test(s));
+    if (bunTestSegs.length !== 1) return { segments, bunTestArgs: null };
+    return { segments, bunTestArgs: bunTestSegs[0].split(/\s+/).slice(2) };
   }
 
-  test("check:ci `bun test` segment takes exactly the five dirs as standalone tokens", () => {
-    // Exact-set equality: the five dirs must be the bun test segment's argument
-    // tokens — no more, no less, no option-value impostors.
-    expect([...bunTestArgTokens(CHECK_CI)].sort()).toEqual([...EXPECTED_DIRS].sort());
+  test("check:ci is exactly: lint && check:docs && gate:recall-quality && bun test <five dirs>", () => {
+    const parsed = parseCheckCiChain(CHECK_CI);
+    expect(parsed.bunTestArgs).not.toBeNull();
+    expect(parsed.segments).toEqual([
+      "bun run lint",
+      "bun run check:docs",
+      "bun run gate:recall-quality",
+      `bun test ${EXPECTED_DIRS.join(" ")}`,
+    ]);
+    expect([...parsed.bunTestArgs ?? []].sort()).toEqual([...EXPECTED_DIRS].sort());
   });
 
-  test("dir tokens reject option-values, comments, displaced args, missing/duplicate/unslashed, and diluting flags (mutation guards)", () => {
+  test("check:ci rejects non-&& grammar, displaced/multiple/missing bun test, and bypass args (mutation guards)", () => {
+    const good = ["bun run lint", "bun run check:docs", "bun run gate:recall-quality", `bun test ${EXPECTED_DIRS.join(" ")}`] as const;
+    const isGoodChain = (script: string): boolean => {
+      const parsed = parseCheckCiChain(script);
+      return parsed.bunTestArgs !== null
+        && JSON.stringify(parsed.segments) === JSON.stringify(good)
+        && JSON.stringify([...parsed.bunTestArgs].sort()) === JSON.stringify([...EXPECTED_DIRS].sort());
+    };
     const evil: Array<{ name: string; script: string }> = [
-      { name: "fake= option value (Codex bypass)", script: "bun test tests/bin/ci-workflow.test.ts fake=tests/core/ fake=tests/storage/ fake=tests/mcp/ fake=tests/http/" },
-      { name: "--opt option value", script: "bun test tests/bin/ --opt=tests/core/ tests/storage/ tests/mcp/ tests/http/" },
-      { name: "commented-out dirs", script: "bun run lint && bun test tests/bin/ # tests/core/ tests/storage/ tests/mcp/ tests/http/" },
-      { name: "dirs in a later echo command", script: "bun run lint && bun test tests/bin/ tests/core/ && echo tests/storage/ tests/mcp/ tests/http/" },
-      { name: "missing one dir", script: "bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/" },
-      { name: "duplicated dir token", script: "bun test tests/bin/ tests/core/ tests/core/ tests/storage/ tests/mcp/ tests/http/" },
-      { name: "no trailing slash", script: "bun test tests/bin tests/core tests/storage tests/mcp tests/http" },
-      { name: "diluting flag appended", script: "bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ --pass-with-no-tests" },
+      { name: "echo bun test before real bun test (Codex bypass)", script: "echo bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ && bun test tests/bin/ci-workflow.test.ts" },
+      { name: "printf bun test displacement", script: "printf bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ && bun test tests/bin/ci-workflow.test.ts" },
+      { name: "two real bun test segments", script: "bun run lint && bun test tests/bin/ tests/core/ && bun test tests/storage/ tests/mcp/ tests/http/" },
+      { name: "||true fail-open", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/||true" },
+      { name: "||   true (spaces)", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ ||   true" },
+      { name: ";true", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ ;true" },
+      { name: "; exit 0", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ ; exit 0" },
+      { name: "single pipe", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ | cat" },
+      { name: "comment", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ # note" },
+      { name: "newline", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/\nbun run lint" },
+      { name: "missing one dir", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/" },
+      { name: "fake= option value", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ fake=tests/core/ tests/storage/ tests/mcp/ tests/http/" },
+      { name: "diluting flag appended", script: "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ --pass-with-no-tests" },
     ];
     for (const e of evil) {
-      expect([...bunTestArgTokens(e.script)].sort()).not.toEqual([...EXPECTED_DIRS].sort());
+      expect(isGoodChain(e.script), `${e.name}`).toBe(false);
     }
-  });
-
-  test("check:ci contains no fail-open or test-diluting flags", () => {
-    for (const bad of ["|| true", "; true", "--pass-with-no-tests", "--retry", "--path-ignore-patterns"]) {
-      expect(CHECK_CI).not.toContain(bad);
-    }
+    // the real check:ci must remain a good chain
+    expect(isGoodChain(CHECK_CI)).toBe(true);
   });
 
   test("check:ci uses directory form, not a per-file whitelist (new tests auto-discovered)", () => {
