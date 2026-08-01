@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -154,54 +154,65 @@ describe("check:ci PR-test ratchet (#381)", () => {
   const CHECK_CI = PKG.scripts["check:ci"] ?? "";
   const CHECK = PKG.scripts["check"] ?? "";
 
-  // The four dirs are the source of truth: every *.test.ts under them MUST run
+  // The five dirs are the source of truth: every *.test.ts under them MUST run
   // in PR CI. Directory-form args (not per-file whitelists) let bun auto-discover
   // new test files, so a newly added tests/mcp/foo.test.ts can never silently
   // stay outside the gate.
-  const TARGET_DIRS = ["tests/core", "tests/storage", "tests/mcp", "tests/http"] as const;
+  const EXPECTED_DIRS = ["tests/bin/", "tests/core/", "tests/storage/", "tests/mcp/", "tests/http/"];
 
-  test("check:ci keeps lint, docs consistency, recall quality, and bin tests", () => {
+  test("check:ci keeps lint, docs consistency, and recall quality", () => {
     expect(CHECK_CI).toContain("bun run lint");
     expect(CHECK_CI).toContain("bun run check:docs");
     expect(CHECK_CI).toContain("bun run gate:recall-quality");
-    expect(CHECK_CI).toMatch(/bun test[^&|;#\n]*tests\/bin/);
   });
 
-  // A dir is covered only if it is a positional ARGUMENT of `bun test` — i.e. it
-  // appears after `bun test` on the same shell command, before any command
-  // separator (&& | ;), comment (#), or newline. A greedy [\\s\\S]* would also
-  // match a dir hidden in a trailing `#` comment or another command's args.
-  function dirArgOf(dir: string): RegExp {
-    return new RegExp(`bun test[^&|;#\\n]*${dir.replace(/\//g, "\\/")}\\/`);
+  /** Narrow, deterministic parse — NOT a general shell parser. Returns the
+   *  positional-argument tokens of the single `bun test` segment: from `bun test`
+   *  up to the next shell command separator (&& | || ;), comment (#), or newline.
+   *  Whitespace-split, then drop "bun" and "test". A dir counts as covered ONLY
+   *  if it is an exact standalone token here — never an option value
+   *  (fake=tests/core/), never in a comment, never in a later chained command. */
+  function bunTestArgTokens(script: string): string[] {
+    const idx = script.search(/\bbun test\b/);
+    if (idx < 0) return [];
+    const after = script.slice(idx);
+    const segEnd = after.search(/[\n#|;&]/);
+    const seg = segEnd < 0 ? after : after.slice(0, segEnd);
+    return seg.trim().split(/\s+/).filter((t) => t.length > 0).slice(2);
   }
 
-  test("check:ci covers every deterministic target directory as a bun test argument", () => {
-    for (const d of TARGET_DIRS) {
-      expect(CHECK_CI).toMatch(dirArgOf(d));
+  test("check:ci `bun test` segment takes exactly the five dirs as standalone tokens", () => {
+    // Exact-set equality: the five dirs must be the bun test segment's argument
+    // tokens — no more, no less, no option-value impostors.
+    expect([...bunTestArgTokens(CHECK_CI)].sort()).toEqual([...EXPECTED_DIRS].sort());
+  });
+
+  test("dir tokens reject option-values, comments, displaced args, missing/duplicate/unslashed, and diluting flags (mutation guards)", () => {
+    const evil: Array<{ name: string; script: string }> = [
+      { name: "fake= option value (Codex bypass)", script: "bun test tests/bin/ci-workflow.test.ts fake=tests/core/ fake=tests/storage/ fake=tests/mcp/ fake=tests/http/" },
+      { name: "--opt option value", script: "bun test tests/bin/ --opt=tests/core/ tests/storage/ tests/mcp/ tests/http/" },
+      { name: "commented-out dirs", script: "bun run lint && bun test tests/bin/ # tests/core/ tests/storage/ tests/mcp/ tests/http/" },
+      { name: "dirs in a later echo command", script: "bun run lint && bun test tests/bin/ tests/core/ && echo tests/storage/ tests/mcp/ tests/http/" },
+      { name: "missing one dir", script: "bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/" },
+      { name: "duplicated dir token", script: "bun test tests/bin/ tests/core/ tests/core/ tests/storage/ tests/mcp/ tests/http/" },
+      { name: "no trailing slash", script: "bun test tests/bin tests/core tests/storage tests/mcp tests/http" },
+      { name: "diluting flag appended", script: "bun test tests/bin/ tests/core/ tests/storage/ tests/mcp/ tests/http/ --pass-with-no-tests" },
+    ];
+    for (const e of evil) {
+      expect([...bunTestArgTokens(e.script)].sort()).not.toEqual([...EXPECTED_DIRS].sort());
     }
   });
 
-  test("directory coverage cannot be bypassed by a comment or displaced arg (mutation guard)", () => {
-    // Evil: shell `#` comments out the four target dirs, so `bun test` only runs
-    // tests/bin. The separator-bounded regex must NOT match the commented dirs.
-    const commented = "bun run lint && bun run check:docs && bun run gate:recall-quality && bun test tests/bin/ # tests/core/ tests/storage/ tests/mcp/ tests/http/";
-    for (const d of TARGET_DIRS) {
-      expect(commented).not.toMatch(dirArgOf(d));
-    }
-    // A dir displaced into a later chained command's argument is equally uncovered.
-    const displaced = "bun run lint && bun test tests/bin/ tests/core/ tests/storage/ && echo skip tests/mcp/ tests/http/";
-    expect(displaced).not.toMatch(dirArgOf("tests/mcp"));
-    expect(displaced).not.toMatch(dirArgOf("tests/http"));
-    // The real check:ci must still satisfy every dir as a genuine bun test arg.
-    for (const d of TARGET_DIRS) {
-      expect(CHECK_CI).toMatch(dirArgOf(d));
+  test("check:ci contains no fail-open or test-diluting flags", () => {
+    for (const bad of ["|| true", "; true", "--pass-with-no-tests", "--retry", "--path-ignore-patterns"]) {
+      expect(CHECK_CI).not.toContain(bad);
     }
   });
 
   test("check:ci uses directory form, not a per-file whitelist (new tests auto-discovered)", () => {
     // No individual .test.ts path enumerated under a target dir — that would be
     // a per-file whitelist and silently drop new files.
-    const perFile = CHECK_CI.match(/tests\/(?:core|storage|mcp|http)\/\S+\.test\.ts/g);
+    const perFile = CHECK_CI.match(/tests\/(?:bin|core|storage|mcp|http)\/\S+\.test\.ts/g);
     expect(perFile ?? []).toEqual([]);
   });
 
@@ -233,14 +244,12 @@ describe("check:ci PR-test ratchet (#381)", () => {
         'import { test, expect } from "bun:test";\n' +
           'test("ratchet sentinel", () => { expect(1 + 1).toBe(2); });\n',
       );
-      const out = execSync(`bun test ${tmp} 2>&1`, {
-        encoding: "utf-8",
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      // bun test prints only the summary (not per-test names) when stdout is
-      // piped, so assert the count: 1 pass + 1 file = the sentinel was
-      // discovered and ran. Auto-discovery is the contract, not the test name.
+      // argv form (no shell): process.execPath is the bun binary, "test" + tmp
+      // are real args, so a TMPDIR with spaces or shell metacharacters cannot
+      // alter what runs. bun writes the per-test summary to stderr, so merge streams.
+      const res = spawnSync(process.execPath, ["test", tmp], { encoding: "utf-8", env: process.env });
+      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+      expect(res.status).toBe(0);
       expect(out).toMatch(/1 pass/);
       expect(out).toMatch(/Ran 1 test/);
     } finally {
