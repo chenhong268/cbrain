@@ -213,6 +213,16 @@ describe.serial("real Agent-facing MCP profile contract", () => {
           expect((details?.results as unknown[]).length).toBeGreaterThan(0);
         } else {
           expect(details?.topic).toBe(row.input);
+          // #395 — overview now hydrates search snippets into the structured
+          // projection. The sentinel slug has no DB page (no type, title
+          // redacted) and zero active links/timeline, so stats stay at 0/0,
+          // but the snippet is surfaced; slug/path-bearing content is redacted
+          // to [removed] by the structured sanitizer.
+          const overviewEntities = details?.entities as Array<Record<string, unknown>> | undefined;
+          expect(overviewEntities).toHaveLength(1);
+          expect(overviewEntities?.[0]?.snippet).toBeDefined();
+          expect(overviewEntities?.[0]?.slug).toBeUndefined();
+          expect(overviewEntities?.[0]?.body).toBeUndefined();
           expect(details?.stats).toEqual({ totalEntities: 1, totalLinks: 0, totalEvents: 0 });
         }
 
