@@ -51,7 +51,7 @@ curl -fsSL https://bun.sh/install | bash
 2. Install CBrain — always pin to an explicit tag:
 
 ```bash
-bun install -g github:chenhong268/cbrain#v2.0.9
+bun install -g github:chenhong268/cbrain#v2.0.10
 ```
 
 3. Verify:
@@ -75,8 +75,8 @@ cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 ```bash
 (
   set -e
-  new_version=v2.0.9
-  previous_version=v2.0.8
+  new_version=v2.0.10
+  previous_version=v2.0.9
   test "$(bunx --package "github:chenhong268/cbrain#${new_version}" cbrain --version)" = "${new_version#v}"
   test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
   bun remove -g cbrain
@@ -90,7 +90,7 @@ If install or restart verification fails, roll back to the recorded previous tag
 ```bash
 (
   set -e
-  previous_version=v2.0.8
+  previous_version=v2.0.9
   test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
   global_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
   global_manifest="${global_bin%/bin}/install/global/package.json"
@@ -628,11 +628,12 @@ bun run dev init
 
 ## Roadmap
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.9).
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.10).
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v2.0.9 | Honest bounded fallback and actionable-or-silent next actions for daily Agent use | ✅ Current |
+| v2.0.10 | Overview 召回补全、写入 provenance、依赖安全与发布门禁加固 | ✅ Current |
+| v2.0.9 | Honest bounded fallback and actionable-or-silent next actions for daily Agent use | Previous |
 | v2.0.8 | Watcher 积压恢复、受治理的数据修复、真实召回质量门禁，以及 Hermes 输出边界的可回滚灰度准备 | Previous |
 | v2.0.7 | 可靠 NER 恢复、可治理 Recommendation Record、确定性 replay/diff，以及 recall/query 结构化输出边界（显式 opt-in） | ✅ |
 | v2.0.6 | Agent 合同与可信输出：自然语言前门、只读注意力队列、主动连接候选、可解释最短路径，以及 graph/timeline 结构化输出 pilot（显式 opt-in） | ✅ |

@@ -1,8 +1,33 @@
 # Changelog
 
-> Current: `v2.0.9` — 诚实 bounded fallback 与可执行的 next actions，收口日常 Agent 体验。
+> Current: `v2.0.10` — overview 召回信息补全、写入来源可追溯，以及依赖与发布门禁加固。
 
 ## [Unreleased]
+
+## [v2.0.10] — 2026-08-02
+
+### Agent 召回与可靠性
+
+- **overview 召回不再返回空壳**（#395）：实体保留标题、类型和检索片段，关系与时间线统计从 active 数据批量读取，保持有界且不引入 N+1 查询。
+- **个人当前状态判断更稳妥**（#385）：涉及当前状态或建议的问题进入受约束的状态判断路径，避免把历史记录直接当成当前事实。
+- **主动过期提示更确定**（#388）：未来时间线分数有界，过期提示在同分时使用稳定 tie-break，减少排序漂移。
+
+### 数据治理与安全
+
+- **记录页写入来源可追溯**（#386）：新增 durable、append-only 的写入 provenance，数据库级约束阻止归属篡改；提供缺失 provenance 的只读审计路径。
+- **配置文件权限加固**（#383）：初始化与诊断路径对 credential-bearing 配置使用严格权限和脱敏错误。
+- **依赖安全修复**（#393, #394, #396）：钉住已 triage 的传递依赖修复版本，并加入可达性与 advisory gate，避免高危依赖静默回流。
+
+### 发布与工程门禁
+
+- **repository release gate 与 operator profile 解耦**（#379, #384）：发布前一致性检查不读取 operator 私有配置，operator 检查仍需显式授权并保持只读。
+- **PR 门禁加强**（#381）：将确定性的 core/storage/MCP/HTTP 检查纳入 CI，降低合并后才发现回归的概率。
+
+### Compatibility / Migration
+
+- `page_write_provenance` 是 additive SQLite migration；已有页面不会被自动补写 provenance，升级会保留已有数据并允许通过只读审计识别缺失记录。
+- 无需手工 vault 迁移；overview、recall、配置权限和依赖修复均保持既有公开工具入口与默认 `CBRAIN_OUTPUT_BOUNDARY` 行为。
+- 若需回滚，可重新安装并运行上一稳定 tag `v2.0.9`；新增 provenance 表和约束不覆盖既有页面正文或索引数据。
 
 ## [v2.0.9] — 2026-07-20
 
