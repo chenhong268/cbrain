@@ -124,6 +124,11 @@ function makeHarness(
   opts: {
     temporalEvidence?: "sufficient" | "partial" | "insufficient";
     pageError?: Error;
+    pageType?: string;
+    missingSlugs?: ReadonlySet<string>;
+    overviewLinks?: (slug: string) => { outgoing: unknown[]; incoming: unknown[] };
+    overviewTimeline?: (slug: string) => unknown[];
+    sparseBatch?: boolean;
   } = {},
 ): Harness {
   let handler: Handler | undefined;
@@ -140,15 +145,23 @@ function makeHarness(
   const db = {
     batchGetTimelineForSlugs(slugs: string[]) {
       evidenceCalls.push(`timeline:${slugs.join(",")}`);
-      return new Map(slugs.map((slug) => [slug, temporal === "sufficient" || temporal === "partial"
-        ? [{ summary: "匿名时间线", event_date: "2026-01-01", trust_state: "trusted" }]
-        : []]));
+      if (opts.sparseBatch) return new Map();
+      return new Map(slugs.map((slug) => {
+        if (opts.overviewTimeline) return [slug, opts.overviewTimeline(slug)];
+        return [slug, temporal === "sufficient" || temporal === "partial"
+          ? [{ summary: "匿名时间线", event_date: "2026-01-01", trust_state: "trusted" }]
+          : []];
+      }));
     },
     batchGetLinksForSlugs(slugs: string[]) {
       evidenceCalls.push(`links:${slugs.join(",")}`);
-      return new Map(slugs.map((slug) => [slug, temporal === "sufficient"
-        ? { outgoing: [{ from_slug: slug, to_slug: "匿名目标", relation: "关联", trust_state: "trusted" }], incoming: [] }
-        : { outgoing: [], incoming: [] }]));
+      if (opts.sparseBatch) return new Map();
+      return new Map(slugs.map((slug) => {
+        if (opts.overviewLinks) return [slug, opts.overviewLinks(slug)];
+        return [slug, temporal === "sufficient"
+          ? { outgoing: [{ from_slug: slug, to_slug: "匿名目标", relation: "关联", trust_state: "trusted" }], incoming: [] }
+          : { outgoing: [], incoming: [] }];
+      }));
     },
     getPageTitlesAndTypes(slugs: string[]) {
       evidenceCalls.push(`titles:${slugs.join(",")}`);
@@ -183,7 +196,13 @@ function makeHarness(
       getBySlug(slug: string) {
         pageSlugs.push(slug);
         if (opts.pageError) throw opts.pageError;
-        return { title: `标题-${slug}`, body: `正文-${slug}` };
+        if (opts.missingSlugs?.has(slug)) return null;
+        const page: { title: string; body: string; type?: string } = {
+          title: `标题-${slug}`,
+          body: `正文-${slug}`,
+        };
+        if (opts.pageType !== undefined) page.type = opts.pageType;
+        return page;
       },
     },
     db,
@@ -582,5 +601,213 @@ describe("retrieval support privacy matrix", () => {
     // inside eval/Function. Runtime code execution remains an explicit residual.
     expect(importsRetrievalSupport('const name = "retrieval-" + "support.js"; load("./" + name);')).toBe(false);
     expect(importsRetrievalSupport('eval(\'require("./retrieval-support.js")\')')).toBe(false);
+  });
+});
+
+describe("overview frontdoor hydration (#395)", () => {
+  const OVERVIEW_QUERY = "总结一下匿名主题的全貌";
+
+  test("searches with limit 5 and hydrates at most 5 entities in input order", async () => {
+    const results = [
+      result("主题A"),
+      result("主题B"),
+      result("主题C"),
+      result("主题D"),
+      result("主题E"),
+      result("主题F"),
+    ];
+    const harness = makeHarness(results, "legacy", { pageType: "主题" });
+    const output = await harness.call({ query: OVERVIEW_QUERY });
+    const envelope = parsed(output) as { raw: { entities: Array<{ title: string }> } };
+
+    expect(harness.searchCalls[0]?.options).toMatchObject({ limit: 5 });
+    expect(harness.searchCalls[0]?.options?.limit).toBe(5);
+    expect(envelope.raw.entities.map((e) => e.title)).toEqual([
+      "标题-主题A", "标题-主题B", "标题-主题C", "标题-主题D", "标题-主题E",
+    ]);
+  });
+
+  test("projects title, type, and snippet for each selected entity", async () => {
+    const harness = makeHarness(
+      [result("主题A", undefined, "片段A"), result("主题B", undefined, "片段B")],
+      "legacy",
+      { pageType: "主题" },
+    );
+    const output = await harness.call({ query: OVERVIEW_QUERY });
+    const envelope = parsed(output) as {
+      raw: { entities: Array<{ title: string; type?: string; snippet?: string }> };
+    };
+
+    expect(envelope.raw.entities).toEqual([
+      { title: "标题-主题A", type: "主题", snippet: "片段A" },
+      { title: "标题-主题B", type: "主题", snippet: "片段B" },
+    ]);
+  });
+
+  test("preserves empty-string snippet verbatim in entity projection", async () => {
+    const harness = makeHarness(
+      [result("主题A", undefined, ""), result("主题B", undefined, "片段B")],
+      "legacy",
+      { pageType: "主题" },
+    );
+    const output = await harness.call({ query: OVERVIEW_QUERY });
+    const envelope = parsed(output) as {
+      raw: { entities: Array<{ title: string; snippet: string; type?: string }> };
+    };
+
+    // P3 — snippet is projected unconditionally; an empty-string snippet
+    // must survive as snippet: "" (not be dropped by a truthiness guard).
+    expect(envelope.raw.entities).toEqual([
+      { title: "标题-主题A", snippet: "", type: "主题" },
+      { title: "标题-主题B", snippet: "片段B", type: "主题" },
+    ]);
+  });
+
+  test("batches links and timeline exactly once over the selected slugs", async () => {
+    const harness = makeHarness(
+      [result("主题A"), result("主题B")],
+      "legacy",
+      {
+        pageType: "主题",
+        overviewLinks: () => ({ outgoing: [], incoming: [] }),
+        overviewTimeline: () => [],
+      },
+    );
+    await harness.call({ query: OVERVIEW_QUERY });
+
+    const linksCalls = harness.evidenceCalls.filter((entry) => entry.startsWith("links:"));
+    const timelineCalls = harness.evidenceCalls.filter((entry) => entry.startsWith("timeline:"));
+    expect(linksCalls).toEqual(["links:主题A,主题B"]);
+    expect(timelineCalls).toEqual(["timeline:主题A,主题B"]);
+  });
+
+  test("stats sum active outgoing + incoming endpoints and active timeline events", async () => {
+    const harness = makeHarness(
+      [result("主题A"), result("主题B")],
+      "legacy",
+      {
+        pageType: "主题",
+        overviewLinks: (slug) => slug === "主题A"
+          ? {
+              outgoing: [{ from_slug: "主题A", to_slug: "邻居甲" }],
+              incoming: [
+                { from_slug: "邻居乙", to_slug: "主题A" },
+                { from_slug: "邻居丙", to_slug: "主题A" },
+              ],
+            }
+          : { outgoing: [{ from_slug: "主题B", to_slug: "邻居丁" }], incoming: [] },
+        overviewTimeline: (slug) => (slug === "主题A" ? [{ summary: "事件甲" }, { summary: "事件乙" }] : [{ summary: "事件丙" }]),
+      },
+    );
+    const output = await harness.call({ query: OVERVIEW_QUERY });
+    const envelope = parsed(output) as {
+      raw: { stats: { totalEntities: number; totalLinks: number; totalEvents: number } };
+    };
+
+    // 主题A: 1 outgoing + 2 incoming = 3; 主题B: 1 outgoing + 0 incoming = 1 → 4
+    // 主题A: 2 events; 主题B: 1 event → 3
+    expect(envelope.raw.stats).toEqual({ totalEntities: 2, totalLinks: 4, totalEvents: 3 });
+  });
+
+  test("empty search returns all-zero stats and skips per-entity batch queries", async () => {
+    const harness = makeHarness([], "legacy", {
+      pageType: "主题",
+      overviewLinks: () => {
+        throw new Error("links batch must not run on empty selection");
+      },
+      overviewTimeline: () => {
+        throw new Error("timeline batch must not run on empty selection");
+      },
+    });
+    const output = await harness.call({ query: OVERVIEW_QUERY });
+    const envelope = parsed(output) as {
+      summary: { status: string };
+      raw: { entities: unknown[]; stats: { totalEntities: number; totalLinks: number; totalEvents: number } };
+    };
+
+    expect(envelope.summary.status).toBe("empty");
+    expect(envelope.raw.entities).toEqual([]);
+    expect(envelope.raw.stats).toEqual({ totalEntities: 0, totalLinks: 0, totalEvents: 0 });
+    expect(harness.evidenceCalls.filter((entry) => entry.startsWith("links:"))).toEqual([]);
+    expect(harness.evidenceCalls.filter((entry) => entry.startsWith("timeline:"))).toEqual([]);
+  });
+
+  test("structured projection keeps title/type/snippet and three stats, hides internals", async () => {
+    const harness = makeHarness(
+      [result("主题A", undefined, "片段A"), result("主题B", undefined, "片段B")],
+      "structured",
+      {
+        pageType: "主题",
+        overviewLinks: (slug) => (slug === "主题A"
+          ? { outgoing: [{ from_slug: "主题A", to_slug: "邻居甲" }], incoming: [] }
+          : { outgoing: [], incoming: [] }),
+        overviewTimeline: (slug) => (slug === "主题A" ? [{ summary: "事件甲" }] : []),
+      },
+    );
+    const output = await harness.call({ query: OVERVIEW_QUERY });
+    const structured = output.structuredContent as {
+      data?: {
+        details?: {
+          topic?: string;
+          entities?: Array<Record<string, unknown>>;
+          stats?: Record<string, number>;
+        };
+      };
+    };
+    const details = structured.data?.details;
+
+    expect(details?.topic).toBe(OVERVIEW_QUERY);
+    expect(details?.entities).toEqual([
+      { title: "标题-主题A", type: "主题", snippet: "片段A" },
+      { title: "标题-主题B", type: "主题", snippet: "片段B" },
+    ]);
+    expect(details?.stats).toEqual({ totalEntities: 2, totalLinks: 1, totalEvents: 1 });
+
+    const blob = JSON.stringify({ content: output.content, structuredContent: output.structuredContent });
+    for (const forbidden of ["routing", "chosen_route", "latency_ms", '"slug"', "score", "body", "excerpt"]) {
+      expect(blob).not.toContain(forbidden);
+    }
+  });
+
+  test("missing page falls back to slug for title; absent batch map entries count as zero", async () => {
+    const harness = makeHarness(
+      [result("主题A", undefined, "片段A")],
+      "legacy",
+      {
+        missingSlugs: new Set(["主题A"]),
+        sparseBatch: true,
+      },
+    );
+    const output = await harness.call({ query: OVERVIEW_QUERY });
+    const envelope = parsed(output) as {
+      raw: {
+        entities: Array<{ title: string; type?: string; snippet?: string }>;
+        stats: { totalEntities: number; totalLinks: number; totalEvents: number };
+      };
+    };
+
+    expect(envelope.raw.entities).toEqual([{ title: "主题A", snippet: "片段A" }]);
+    expect(envelope.raw.stats).toEqual({ totalEntities: 1, totalLinks: 0, totalEvents: 0 });
+  });
+
+  test("structured projection redacts slug-fallback title when page is missing", async () => {
+    const harness = makeHarness(
+      [result("concept/匿名主题", undefined, "片段A")],
+      "structured",
+      { missingSlugs: new Set(["concept/匿名主题"]) },
+    );
+    const output = await harness.call({ query: OVERVIEW_QUERY });
+    const structured = output.structuredContent as {
+      data?: { details?: { entities?: Array<Record<string, unknown>> } };
+    };
+    const entity = structured.data?.details?.entities?.[0];
+
+    // page missing → title falls back to the raw slug; the structured
+    // sanitizer redacts the slug-bearing leaf (concept/... → [removed]).
+    // The snippet is still surfaced; the raw slug never reaches the agent.
+    expect(entity?.title).toBe("[removed]");
+    expect(entity?.snippet).toBe("片段A");
+    const blob = JSON.stringify({ content: output.content, structuredContent: output.structuredContent });
+    expect(blob).not.toContain("concept/匿名主题");
   });
 });

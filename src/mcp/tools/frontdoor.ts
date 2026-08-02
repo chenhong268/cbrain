@@ -267,15 +267,46 @@ async function runOverviewRecall(
   query: string,
   routing: FrontdoorRoutingDecision,
 ): Promise<FrontdoorEnvelope> {
-  const results = await ctx.search.search(query, { limit: 6 });
-  const entities = results.slice(0, 5).map((r) => {
+  const results = await ctx.search.search(query, { limit: 5 });
+  const selected = results.slice(0, 5);
+  const entities = selected.map((r) => {
     const page = ctx.pages.getBySlug(r.slug);
-    return { title: page?.title ?? r.slug };
+    const entity: { title: string; snippet: string; type?: string } = {
+      title: page?.title ?? r.slug,
+      snippet: r.snippet,
+    };
+    if (page?.type) entity.type = page.type;
+    return entity;
   });
+
+  // #395 — batch-read active links + timeline once over the bounded selection
+  // (no N+1). totalLinks = Σ active outgoing + incoming rows; totalEvents =
+  // Σ active timeline rows (active = batch default includeInactive=false:
+  // trust_state NULL or not rejected/superseded). Deliberately NOT reusing
+  // hydrateRecallSlugs / isCurrentFactLink — that reports_to trust-state
+  // filter is a recall-display concern, not overview's 全貌概览 semantics; the
+  // #395 contract scopes the count to active rows (not deduped, not
+  // isCurrentFactLink-filtered), so candidate reports_to edges are included.
+  // Missing map entries count as zero (defensive — batch methods pre-seed every
+  // slug, but never trust that here). Empty selection stays all-zero, no batches.
+  let totalLinks = 0;
+  let totalEvents = 0;
+  if (selected.length > 0) {
+    const slugs = selected.map((r) => r.slug);
+    const linksBySlug = ctx.db.batchGetLinksForSlugs(slugs);
+    const timelineBySlug = ctx.db.batchGetTimelineForSlugs(slugs);
+    for (const slug of slugs) {
+      const links = linksBySlug.get(slug);
+      if (links) totalLinks += links.outgoing.length + links.incoming.length;
+      const timeline = timelineBySlug.get(slug);
+      if (timeline) totalEvents += timeline.length;
+    }
+  }
+
   const payload = {
     topic: query,
     entities,
-    stats: { totalEntities: entities.length, totalLinks: 0, totalEvents: 0 },
+    stats: { totalEntities: entities.length, totalLinks, totalEvents },
   };
   const formatted = formatSummarizeEnvelope(payload);
   return withRouting(formatted, payload, routing);
