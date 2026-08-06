@@ -24,6 +24,8 @@ import { buildToolResult } from "./result-builder.js";
 import { FRONTDOOR_DATA_KEYS, projectFrontdoorData, structuredSummary } from "./recall-output.js";
 import { filterContentCandidates } from "../../core/retrieval/content-relevance.js";
 import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-current-state-guard.js";
+import { generateProactiveHints } from "../../core/retrieval/proactive.js";
+import { applyProactiveBudget, trimHint } from "./trim.js";
 
 type DetailLevel = "brief" | "normal" | "full";
 
@@ -190,14 +192,30 @@ async function runContentRecall(
   // always insufficient). This path is only reached for non-personal queries
   // where the guard did not activate.
   const slugs = results.map((r) => r.slug);
+  const pagesBySlug = new Map<string, { slug: string; expires_at: string | null }>();
   const entities = results.map((r) => {
     const page = ctx.pages.getBySlug(r.slug);
+    if (page) {
+      pagesBySlug.set(r.slug, { slug: page.slug, expires_at: page.expires_at });
+    }
     return {
       title: page?.title ?? r.slug,
       snippet: r.snippet,
       ...(detail !== "brief" ? { body: page?.body?.slice(0, 500) ?? "" } : {}),
     };
   });
+  // #399 — keep the default cbrain_recall content path aligned with deep_recall:
+  // generate bounded, explainable proactive hints from the accepted result set.
+  // The shared budget keeps at most one hint and suppresses stale/duplicate noise.
+  const proactiveHints = await generateProactiveHints(ctx, {
+    resultSlugs: slugs,
+    pagesBySlug,
+    maxHints: 3,
+  });
+  const budgetedProactiveHints = applyProactiveBudget(
+    proactiveHints.map(trimHint),
+    { grounded: false, toolType: "recall" },
+  );
   // #232 — reuse the same evidence-completion helper as deep_recall. Fires only
   // on temporal/history intent; the pack rides in `raw` (frontdoor's contract is
   // always-raw for detail, distinct from deep_recall's #231 compact gate), and
@@ -209,6 +227,7 @@ async function runContentRecall(
   const payload = {
     query,
     entities,
+    ...(budgetedProactiveHints.length > 0 ? { proactive_hints: budgetedProactiveHints } : {}),
     ...(evidencePack ? { evidence_pack: evidencePack } : {}),
     summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : "暂时没找到相关记忆",
   };

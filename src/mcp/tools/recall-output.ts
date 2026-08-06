@@ -219,6 +219,7 @@ function projectFrontdoorDetails(route: string, raw: Record<string, unknown>): R
 
 function projectContentDetails(raw: Record<string, unknown>): Record<string, unknown> {
   const entities = asRecords(raw.entities).slice(0, 10).map(projectNamedSnippet);
+  const proactiveHints = projectHints(asRecords(raw.proactive_hints) as HintProjectionInput[]);
   const subjectContextCandidates = asRecords(raw.subject_context_candidates)
     .slice(0, 5)
     .map((item) => {
@@ -243,6 +244,7 @@ function projectContentDetails(raw: Record<string, unknown>): Record<string, unk
   return {
     ...(typeof raw.query === "string" ? { query: boundText(raw.query, 1_000) } : {}),
     ...(entities.length > 0 ? { entities } : {}),
+    ...(proactiveHints.length > 0 ? { proactive_hints: proactiveHints } : {}),
     ...(subjectContextCandidates.length > 0 ? { subject_context_candidates: subjectContextCandidates } : {}),
     ...(typeof raw.summary === "string" ? { summary: boundText(raw.summary) } : {}),
   };
