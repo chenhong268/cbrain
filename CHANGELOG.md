@@ -1,8 +1,25 @@
 # Changelog
 
-> Current: `v2.0.10` — overview 召回信息补全、写入来源可追溯，以及依赖与发布门禁加固。
+> Current: `v2.0.11` — 内容召回主动提示、传递依赖 high advisory 修复与门禁收口。
 
 ## [Unreleased]
+
+## [v2.0.11] — 2026-08-06
+
+### Agent 召回与可靠性
+
+- **内容召回主动提示补齐**（#399, #402）：默认 `cbrain_recall` 的 content recall 路径复用既有主动提示生成与预算规则，在不改变既有工具入口的前提下提示过期、近期动态和共享关联。
+- **结构化输出保持最小披露**：提示只投影有界的自然语言 `text`/`why`，不向 Agent 暴露规则名、分数、slug 或 locator 内部字段。
+
+### 依赖与发布门禁
+
+- **消化可达 high advisory**（#380, #403）：修复 `fast-uri` 与 `ip-address` 的可达高危依赖路径，并同步升级 `express-rate-limit` 使 lock graph 的声明范围与实际解析一致。
+- **发布前审计闭环**：依赖 advisory gate 在本地与 GitHub CI 均为 `go`，`check:ci` 通过；剩余 moderate/low 仅作 informational 报告。
+
+### Compatibility / Migration
+
+- 无数据库 schema、vault 或 MCP tool 数量迁移；既有 `cbrain_recall` raw/structured 边界保持兼容，仅在 content recall 有结果且有提示时增加 `proactive_hints`。
+- 依赖升级可通过重新安装上一稳定 tag `v2.0.10` 回滚；无数据回写或不可逆迁移。
 
 ## [v2.0.10] — 2026-08-02
 
