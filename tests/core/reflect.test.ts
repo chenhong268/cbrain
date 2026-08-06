@@ -3,6 +3,7 @@ import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { ReflectManager } from "../../src/core/maintenance/reflect.js";
+import { InsightManager } from "../../src/core/maintenance/insight.js";
 import { PageManager } from "../../src/core/page.js";
 import type { LLMProvider, ChatMessage } from "../../src/llm/provider.js";
 
@@ -29,6 +30,18 @@ function mockLLM(responses: string[]): LLMProvider {
       return response;
     },
   };
+}
+
+function testInsightManager(db: CBrainDB): InsightManager {
+  return new InsightManager(
+    db,
+    {
+      dimensions: 1,
+      embed: async () => ({ embedding: [0], tokenCount: 0 }),
+      embedBatch: async () => [],
+    },
+    { addInsightVector: async () => undefined } as any,
+  );
 }
 
 describe("ReflectManager", () => {
@@ -257,6 +270,108 @@ describe("ReflectManager", () => {
 
       expect(report.insightsGenerated).toBe(1);
       expect(report.details.insights[0].content).toContain("cluster");
+    });
+
+    test("deduplicates repeated source entities within one generation batch", async () => {
+      insertEntity(db, "entities/hub", "Hub", 10);
+      insertEntity(db, "entities/peer", "Peer", 10);
+
+      const insightMgr = testInsightManager(db);
+      const llm = mockLLM([
+        JSON.stringify({
+          insights: [
+            {
+              content: "First formulation of the same insight",
+              related_entities: ["entities/hub", "entities/peer"],
+              type: "pattern",
+              confidence: 0.8,
+            },
+          ],
+        }),
+        JSON.stringify({
+          insights: [
+            {
+              content: "Second formulation of the same insight",
+              related_entities: ["entities/hub", "entities/peer"],
+              type: "pattern",
+              confidence: 0.8,
+            },
+          ],
+        }),
+      ]);
+
+      const mgr = new ReflectManager(db, pages, llm, undefined, undefined, insightMgr);
+      const generated = await (mgr as any).generateInsights();
+
+      expect(generated).toHaveLength(1);
+      expect(db.listInsights({ sourceType: "reflect" })).toHaveLength(1);
+    });
+
+    test("deduplicates repeated source entities in incremental generation", async () => {
+      insertEntity(db, "entities/hub", "Hub", 10);
+
+      const llm = mockLLM([
+        JSON.stringify({
+          insights: [
+            {
+              content: "First incremental insight",
+              related_entities: ["entities/hub", "entities/peer"],
+              type: "pattern",
+              confidence: 0.8,
+            },
+            {
+              content: "Second incremental duplicate",
+              related_entities: ["entities/hub", "entities/peer"],
+              type: "pattern",
+              confidence: 0.8,
+            },
+          ],
+        }),
+      ]);
+
+      const mgr = new ReflectManager(db, pages, llm, undefined, undefined, testInsightManager(db));
+      const generated = await (mgr as any).generateInsightsForSlugs(["entities/hub"]);
+
+      expect(generated).toHaveLength(1);
+      expect(db.listInsights({ sourceType: "reflect" })).toHaveLength(1);
+    });
+
+    test("does not reserve a signature when persistence fails", async () => {
+      insertEntity(db, "entities/hub", "Hub", 10);
+
+      const realInsightMgr = testInsightManager(db);
+      let attempts = 0;
+      const insightMgr = {
+        createInsight: async (input: Parameters<InsightManager["createInsight"]>[0]) => {
+          attempts++;
+          if (attempts === 1) throw new Error("transient write failure");
+          return realInsightMgr.createInsight(input);
+        },
+      } as unknown as InsightManager;
+      const llm = mockLLM([
+        JSON.stringify({
+          insights: [
+            {
+              content: "First write attempt",
+              related_entities: ["entities/hub"],
+              type: "pattern",
+              confidence: 0.8,
+            },
+            {
+              content: "Retry after failed write",
+              related_entities: ["entities/hub"],
+              type: "pattern",
+              confidence: 0.8,
+            },
+          ],
+        }),
+      ]);
+
+      const mgr = new ReflectManager(db, pages, llm, undefined, undefined, insightMgr);
+      await (mgr as any).generateInsightsForSlugs(["entities/hub"]);
+
+      expect(attempts).toBe(2);
+      expect(db.listInsights({ sourceType: "reflect" })).toHaveLength(1);
     });
 
     test("skips entities below neighbor threshold", async () => {

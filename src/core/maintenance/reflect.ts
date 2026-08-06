@@ -271,20 +271,7 @@ export class ReflectManager {
             confidence,
           };
           results.push(insight);
-
-          if (this.insightMgr) {
-            try {
-              await this.insightMgr.createInsight({
-                content: insight.content,
-                type: mapInsightType(insight.type),
-                confidence: insight.confidence,
-                sourceEntities: insight.relatedEntities,
-                sourceType: "reflect",
-              });
-            } catch (e) {
-              this.logger?.error("reflect", "insight 写入失败", { error: e instanceof Error ? e.message : String(e) });
-            }
-          }
+          await this.persistGeneratedInsight(insight, existingSigs, sig);
         }
       }
     }
@@ -327,20 +314,7 @@ export class ReflectManager {
             confidence,
           };
           results.push(insight);
-
-          if (this.insightMgr) {
-            try {
-              await this.insightMgr.createInsight({
-                content: insight.content,
-                type: mapInsightType(insight.type),
-                confidence: insight.confidence,
-                sourceEntities: insight.relatedEntities,
-                sourceType: "reflect",
-              });
-            } catch (e) {
-              this.logger?.error("reflect", "insight 写入失败", { error: e instanceof Error ? e.message : String(e) });
-            }
-          }
+          await this.persistGeneratedInsight(insight, existingSigs, sig);
         }
       }
     }
@@ -467,6 +441,29 @@ export class ReflectManager {
       } catch { /* skip malformed */ }
     }
     return sigs;
+  }
+
+  private async persistGeneratedInsight(
+    insight: GeneratedInsight,
+    existingSigs: Array<Set<string>>,
+    sig: Set<string>,
+  ): Promise<void> {
+    let accepted = this.insightMgr === null;
+    if (this.insightMgr) {
+      try {
+        await this.insightMgr.createInsight({
+          content: insight.content,
+          type: mapInsightType(insight.type),
+          confidence: insight.confidence,
+          sourceEntities: insight.relatedEntities,
+          sourceType: "reflect",
+        });
+        accepted = true;
+      } catch (e) {
+        this.logger?.error("reflect", "insight 写入失败", { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (accepted) existingSigs.push(sig);
   }
 
   private buildAdjacency(): Map<string, Set<string>> {
