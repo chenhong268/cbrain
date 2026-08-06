@@ -129,6 +129,7 @@ function makeHarness(
     overviewLinks?: (slug: string) => { outgoing: unknown[]; incoming: unknown[] };
     overviewTimeline?: (slug: string) => unknown[];
     sparseBatch?: boolean;
+    proactiveHint?: "expiry" | "timeline" | "shared";
   } = {},
 ): Harness {
   let handler: Handler | undefined;
@@ -158,6 +159,12 @@ function makeHarness(
       if (opts.sparseBatch) return new Map();
       return new Map(slugs.map((slug) => {
         if (opts.overviewLinks) return [slug, opts.overviewLinks(slug)];
+        if (opts.proactiveHint === "shared") {
+          return [slug, {
+            outgoing: [{ from_slug: slug, to_slug: "shared-target", relation: "关联", trust_state: "trusted" }],
+            incoming: [],
+          }];
+        }
         return [slug, temporal === "sufficient"
           ? { outgoing: [{ from_slug: slug, to_slug: "匿名目标", relation: "关联", trust_state: "trusted" }], incoming: [] }
           : { outgoing: [], incoming: [] }];
@@ -182,6 +189,18 @@ function makeHarness(
     getL1Summary(slug: string) {
       evidenceCalls.push(`summary:${slug}`);
       return null;
+    },
+    getExpiringSlugsInSet(slugs: string[]) {
+      evidenceCalls.push(`expiry:${slugs.join(",")}`);
+      return opts.proactiveHint === "expiry"
+        ? [{ slug: slugs[0] ?? "accepted", title: "匿名主题", expires_at: "2026-01-01" }]
+        : [];
+    },
+    getRecentEventsInNetwork(slugs: string[]) {
+      evidenceCalls.push(`network:${slugs.join(",")}`);
+      return opts.proactiveHint === "timeline"
+        ? [{ slug: "neighbor", title: "匿名邻居", summary: "近期有新动态", event_date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() }]
+        : [];
     },
   };
   const ctx = {
@@ -229,6 +248,57 @@ function parsed(output: Awaited<ReturnType<Handler>>): Record<string, unknown> {
 }
 
 describe("content frontdoor honesty sequencing", () => {
+  test("content recall surfaces a budgeted expiry hint", async () => {
+    const harness = makeHarness([result("accepted", { exact: { original: { rankScore: 1 } } })], "legacy", {
+      proactiveHint: "expiry",
+    });
+
+    const output = parsed(await harness.call({ query: "匿名主题" })) as {
+      raw: { proactive_hints?: Array<{ rule: string; why: string }> };
+    };
+
+    expect(output.raw.proactive_hints).toHaveLength(1);
+    expect(output.raw.proactive_hints?.[0]).toMatchObject({
+      rule: "expiry_alert",
+      why: expect.any(String),
+    });
+  });
+
+  test("content recall projects a budgeted hint in structured details", async () => {
+    const harness = makeHarness([result("accepted", { exact: { original: { rankScore: 1 } } })], "structured", {
+      proactiveHint: "expiry",
+    });
+
+    const output = await harness.call({ query: "匿名主题" });
+    const structured = output.structuredContent as {
+      data?: { details?: { proactive_hints?: Array<{ text: string; why: string }> } };
+    };
+
+    expect(structured.data?.details?.proactive_hints).toHaveLength(1);
+    expect(structured.data?.details?.proactive_hints?.[0]).toMatchObject({
+      text: expect.any(String),
+      why: expect.any(String),
+    });
+  });
+
+  test.each([
+    ["network_timeline", "timeline", ["accepted"]],
+    ["shared_connection", "shared", ["accepted-a", "accepted-b"]],
+  ] as const)("content recall carries the %s hint rule", async (rule, proactiveHint, slugs) => {
+    const harness = makeHarness(
+      slugs.map((slug) => result(slug, { exact: { original: { rankScore: 1 } } })),
+      "legacy",
+      { proactiveHint },
+    );
+
+    const output = parsed(await harness.call({ query: "匿名主题" })) as {
+      raw: { proactive_hints?: Array<{ rule: string }> };
+    };
+
+    expect(output.raw.proactive_hints).toHaveLength(1);
+    expect(output.raw.proactive_hints?.[0]?.rule).toBe(rule);
+  });
+
   test("searches exactly once with support capture and skips sealed-detail enrichment", async () => {
     const accepted = result("accepted", { exact: { original: { rankScore: 1 } } });
     const harness = makeHarness([accepted]);

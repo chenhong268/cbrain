@@ -115,6 +115,26 @@ describe("caller-specific structured data policy (#331)", () => {
     expect(JSON.stringify(data)).not.toContain("RAW-CHUNK-SECRET");
   });
 
+  test("frontdoor content projection exposes only bounded proactive hint semantics", () => {
+    const data = projectFrontdoorData("已找到相关记忆。", {
+      query: "主题A",
+      proactive_hints: [{
+        rule: "expiry_alert",
+        score: 1,
+        target_slug: "internal/target",
+        text: "提示A",
+        why: "原因A",
+      }],
+      routing: { chosen_route: "content_recall" },
+    });
+
+    expect(data).toEqual({
+      answer: "已找到相关记忆。",
+      details: { query: "主题A", proactive_hints: [{ text: "提示A", why: "原因A" }] },
+    });
+    expect(JSON.stringify(data)).not.toMatch(/internal\/target|expiry_alert|score/);
+  });
+
   test("frontdoor relationship projection preserves bounded evidence semantics", () => {
     const data = projectFrontdoorData("已完成分析。", {
       result: {
