@@ -8,12 +8,12 @@
 
 ### Agent 召回与可靠性
 
-- **内容召回主动提示补齐**（#399, #402）：默认 `cbrain_recall` 的 content recall 路径复用既有主动提示生成与预算规则，在不改变既有工具入口的前提下提示过期、近期动态和共享关联。
+- **内容召回主动提示补齐**（#399）：默认 `cbrain_recall` 的 content recall 路径复用既有主动提示生成与预算规则，在不改变既有工具入口的前提下提示过期、近期动态和共享关联。
 - **结构化输出保持最小披露**：提示只投影有界的自然语言 `text`/`why`，不向 Agent 暴露规则名、分数、slug 或 locator 内部字段。
 
 ### 依赖与发布门禁
 
-- **消化可达 high advisory**（#380, #403）：修复 `fast-uri` 与 `ip-address` 的可达高危依赖路径，并同步升级 `express-rate-limit` 使 lock graph 的声明范围与实际解析一致。
+- **消化可达 high advisory**（#380）：修复 `fast-uri` 与 `ip-address` 的可达高危依赖路径，并同步升级 `express-rate-limit` 使 lock graph 的声明范围与实际解析一致。
 - **发布前审计闭环**：依赖 advisory gate 在本地与 GitHub CI 均为 `go`，`check:ci` 通过；剩余 moderate/low 仅作 informational 报告。
 
 ### Compatibility / Migration
