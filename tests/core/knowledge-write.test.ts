@@ -152,6 +152,23 @@ describe("add_knowledge", () => {
     expect(coopLink!.trust_state).toBe("candidate");
   });
 
+  test("facts.organization remains candidate-only and does not upgrade an existing edge", async () => {
+    seedEntity("brain/entities/person/a", "人物A", "entity/person");
+    seedEntity("brain/entities/company/corp", "组织D", "entity/company");
+    db.insertLink("brain/entities/person/a", "brain/entities/company/corp", "任职", null, 0.5, "medium", "ner", 0.5, true);
+
+    const result = await addKnowledge({
+      subject: "人物A",
+      facts: [{ field: "organization", value: "组织D" }],
+    }, deps);
+
+    expect(result.applied[0].success).toBe(true);
+    expect(pages.getBySlug("brain/entities/person/a")?.frontmatter.organization).toBe("组织D");
+    expect(pages.getBySlug("brain/entities/person/a")?.frontmatter.organization_source).toBeUndefined();
+    const link = db.getOutgoingLinks("brain/entities/person/a", true).find((item) => item.relation === "任职");
+    expect(link?.trust_state).toBe("candidate");
+  });
+
   test("creates graph link between entities", async () => {
     seedEntity("brain/entities/person/a", "人物A", "entity/person");
     seedEntity("brain/entities/company/corp", "组织D", "entity/company");

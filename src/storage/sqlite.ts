@@ -1769,6 +1769,13 @@ export class CBrainDB {
     ).get({ $title: title }) as { slug: string; type: string; title: string } | null;
   }
 
+  /** Exact title lookup for governed resolvers; preserves every collision. */
+  getPagesByExactTitle(title: string): Array<{ slug: string; type: string; title: string }> {
+    return this.prepare(
+      "SELECT slug, type, title FROM pages WHERE title = $title ORDER BY slug",
+    ).all({ $title: title }) as Array<{ slug: string; type: string; title: string }>;
+  }
+
   getPageByTitleExcluding(title: string, excludeSlug: string): { slug: string; type: string; title: string } | null {
     return this.prepare(
       "SELECT slug, type, title FROM pages WHERE title = $title AND slug != $slug LIMIT 1"
@@ -2534,6 +2541,59 @@ export class CBrainDB {
   }
 
   /**
+   * Upsert a deterministic organization employment fact as one forward-only
+   * trusted edge. The organization projector owns validation, and employment
+   * has no reverse relation or supersession semantics.
+   */
+  upsertTrustedOrganizationEmployment(
+    from: string,
+    to: string,
+    sourceType: "manual" | "agent",
+    confidence = 0.95,
+    provenance?: ProvenanceInput,
+  ): void {
+    const existing = this.prepare(
+      "SELECT id, source_page_slug, evidence FROM links WHERE from_slug = $from AND to_slug = $to AND relation = '任职'",
+    ).get({ $from: from, $to: to }) as
+      | { id: number; source_page_slug: string | null; evidence: string | null }
+      | undefined;
+
+    if (existing) {
+      this.prepare(
+        `UPDATE links SET trust_state = 'trusted', source_type = $st, confidence = $c,
+            weight = 1.0, strength = 'strong',
+            source_page_slug = $sps, evidence = $ev,
+            effective_weight = 1.0 * $c,
+            last_validated_at = datetime('now')
+         WHERE id = $id`,
+      ).run({
+        $st: sourceType,
+        $c: confidence,
+        $sps: provenance?.source_page_slug ?? existing.source_page_slug,
+        $ev: provenance?.evidence ?? existing.evidence,
+        $id: existing.id,
+      });
+      return;
+    }
+
+    this.prepare(
+      `INSERT INTO links
+        (from_slug, to_slug, relation, context, weight, strength, source_type,
+         confidence, source_page_slug, trust_state, evidence, effective_weight,
+         last_validated_at)
+       VALUES ($from, $to, '任职', NULL, 1.0, 'strong', $st, $c, $sps,
+         'trusted', $ev, 1.0 * $c, datetime('now'))`,
+    ).run({
+      $from: from,
+      $to: to,
+      $st: sourceType,
+      $c: confidence,
+      $sps: provenance?.source_page_slug ?? null,
+      $ev: provenance?.evidence ?? null,
+    });
+  }
+
+  /**
    * Current (authoritative) reports_to edges for `slug` in a direction.
    * trust_state IS NULL or IN ('trusted','user_thought') — EXCLUDES candidate
    * (unverified), rejected, superseded. This is the "current fact" semantic for
@@ -3257,6 +3317,16 @@ export class CBrainDB {
       "SELECT page_slug FROM aliases WHERE alias = $alias"
     ).get({ $alias: alias }) as { page_slug: string } | null;
     return row?.page_slug ?? null;
+  }
+
+  /** Exact alias lookup for governed resolvers; never chooses an arbitrary owner. */
+  getPagesByAlias(alias: string): Array<{ slug: string; type: string; title: string }> {
+    return this.prepare(
+      `SELECT p.slug, p.type, p.title
+       FROM aliases a JOIN pages p ON p.slug = a.page_slug
+       WHERE a.alias = $alias
+       ORDER BY p.slug`,
+    ).all({ $alias: alias }) as Array<{ slug: string; type: string; title: string }>;
   }
 
   listAliases(pageSlug: string): string[] {

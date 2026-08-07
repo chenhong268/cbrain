@@ -52,6 +52,22 @@ export interface NerPipelineResult {
   };
 }
 
+export type OrganizationSource = "manual" | "agent" | "ner";
+export type OrganizationProjectReason =
+  | "missing_source"
+  | "untrusted_source"
+  | "invalid_source_type"
+  | "invalid_organization"
+  | "target_not_found"
+  | "ambiguous_title"
+  | "ambiguous_alias"
+  | "invalid_target_type"
+  | "self_reference";
+
+export type OrganizationProjectResult =
+  | { status: "projected" }
+  | { status: "skipped"; reason: OrganizationProjectReason };
+
 export type NerSourceGuard = (phase: "after_extract" | "before_commit") => void;
 
 /**
@@ -316,6 +332,58 @@ export class ContentPipeline {
       });
     });
     this.logger?.info("pipeline", "reports_to graph link synced", { from: fromSlug, to: targetSlug });
+  }
+
+  /**
+   * Project an explicit organization field into a trusted employment edge.
+   * This is deliberately fail-closed: only the explicit manual/agent marker
+   * can authorize a write, and every target lookup is exact and unique.
+   */
+  processOrganization(fromSlug: string, frontmatter: Record<string, unknown>): OrganizationProjectResult {
+    const source = frontmatter.organization_source;
+    if (source === undefined || source === null || source === "") {
+      return { status: "skipped", reason: "missing_source" };
+    }
+    if (source !== "manual" && source !== "agent") {
+      return { status: "skipped", reason: "untrusted_source" };
+    }
+
+    const sourcePage = this.db.getPage(fromSlug);
+    if (!sourcePage || sourcePage.type !== "entity/person") {
+      return { status: "skipped", reason: "invalid_source_type" };
+    }
+
+    const rawOrganization = frontmatter.organization;
+    if (typeof rawOrganization !== "string" || rawOrganization.trim() === "") {
+      return { status: "skipped", reason: "invalid_organization" };
+    }
+    const organization = rawOrganization.trim();
+
+    let target = this.db.getPage(organization);
+    if (!target) {
+      const titleMatches = this.db.getPagesByExactTitle(organization);
+      if (titleMatches.length > 1) return { status: "skipped", reason: "ambiguous_title" };
+      if (titleMatches.length === 1) target = this.db.getPage(titleMatches[0].slug);
+    }
+    if (!target) {
+      const aliasMatches = this.db.getPagesByAlias(organization);
+      if (aliasMatches.length > 1) return { status: "skipped", reason: "ambiguous_alias" };
+      if (aliasMatches.length === 1) target = this.db.getPage(aliasMatches[0].slug);
+    }
+    if (!target) return { status: "skipped", reason: "target_not_found" };
+    if (target.slug === fromSlug) return { status: "skipped", reason: "self_reference" };
+    if (target.type !== "entity/company" && target.type !== "entity/organization") {
+      return { status: "skipped", reason: "invalid_target_type" };
+    }
+
+    this.db.runInTransaction(() => {
+      this.db.upsertTrustedOrganizationEmployment(fromSlug, target!.slug, source, 0.95, {
+        source_page_slug: fromSlug,
+        evidence: `organization_source:${source}`,
+      });
+    });
+    this.logger?.info("pipeline", "organization projector applied", { code: "organization_projected" });
+    return { status: "projected" };
   }
 
   /**

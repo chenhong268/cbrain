@@ -212,6 +212,9 @@ export class SyncManager {
               this.pipeline.processReportsTo(slug, parsed.frontmatter);
             } catch { /* non-critical */ }
           }
+          try {
+            this.pipeline.processOrganization(slug, parsed.frontmatter);
+          } catch { /* fail-closed, non-critical */ }
           this.writeMentionSnapshot(slug);
           report.skipped++;
           continue;
@@ -392,6 +395,9 @@ export class SyncManager {
             this.logger?.warn("sync", "reports_to sync failed", { slug: file.slug, error: String(e) });
           }
         }
+        try {
+          this.pipeline.processOrganization(file.slug, file.frontmatter);
+        } catch { /* fail-closed, non-critical */ }
         this.writeMentionSnapshot(file.slug);
       } catch (err) {
         report.errors++;
@@ -538,6 +544,9 @@ export class SyncManager {
           this.pipeline.processReportsTo(effectiveSlug, parsed.frontmatter as Record<string, unknown>);
         } catch { /* non-critical */ }
       }
+      try {
+        this.pipeline.processOrganization(effectiveSlug, parsed.frontmatter as Record<string, unknown>);
+      } catch { /* fail-closed, non-critical */ }
       this.writeMentionSnapshot(effectiveSlug);
 
       return { success: true, skipped: true };
@@ -706,6 +715,9 @@ export class SyncManager {
         this.logger?.warn("sync", "reports_to sync failed", { slug: effectiveSlug, error: String(e) });
       }
     }
+    try {
+      this.pipeline.processOrganization(effectiveSlug, parsed.frontmatter as Record<string, unknown>);
+    } catch { /* fail-closed, non-critical */ }
 
     // NER — skip entity/concept pages
     if (shouldProcessNerForWritePath(parsed.body, type)) {

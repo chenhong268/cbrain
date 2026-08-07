@@ -177,4 +177,40 @@ describe("applyFacts", () => {
     expect(result.written).toBe(0);
     expect(result.skipped).toBe(1);
   });
+
+  test("marks NER organization fills as candidate-only", () => {
+    const frontmatterMap: Record<string, Record<string, unknown>> = {
+      "brain/entities/person/entity-a": { title: "实体A", type: "entity/person" },
+    };
+    const { mock: pages, updates } = createMockPages(frontmatterMap);
+    const result = applyFacts(
+      [makeFact({ entity: "人物A", field: "organization", value: "组织C", evidence: "人物A在组织C任职" })],
+      new Map([["人物A", "brain/entities/person/entity-a"]]),
+      pages,
+      createMockDB(),
+    );
+
+    expect(result.written).toBe(1);
+    expect(updates[0].extra).toEqual({ organization: "组织C", organization_source: "ner" });
+  });
+
+  test("does not downgrade an existing stronger organization source", () => {
+    const frontmatterMap: Record<string, Record<string, unknown>> = {
+      "brain/entities/person/entity-a": {
+        title: "实体A",
+        type: "entity/person",
+        organization_source: "manual",
+      },
+    };
+    const { mock: pages, updates } = createMockPages(frontmatterMap);
+    applyFacts(
+      [makeFact({ entity: "人物A", field: "organization", value: "组织C", evidence: "人物A在组织C任职" })],
+      new Map([["人物A", "brain/entities/person/entity-a"]]),
+      pages,
+      createMockDB(),
+    );
+
+    expect(updates[0].extra).toEqual({ organization: "组织C" });
+    expect(frontmatterMap["brain/entities/person/entity-a"].organization_source).toBe("manual");
+  });
 });

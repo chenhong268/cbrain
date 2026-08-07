@@ -77,4 +77,47 @@ describe("extractEntityFacts (#321)", () => {
     })).rejects.toBeInstanceOf(EntityFactsTimeoutError);
     expect(pages.getBySlug(page.slug)?.frontmatter.industry).toBeUndefined();
   });
+
+  test("marks an extracted organization as ner provenance", async () => {
+    const page = pages.create({
+      slug: "brain/entities/person/entity-a",
+      title: "实体A",
+      type: "entity/person",
+      body: "匿名正文",
+      tags: [],
+    });
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({ facts: [
+        { field: "organization", value: "组织C", confidence: 0.9, evidence: "实体A在组织C任职" },
+      ] }),
+    };
+
+    await extractEntityFacts({ pages, llm, slug: page.slug, title: page.title, type: page.type, body: page.body });
+
+    expect(pages.getBySlug(page.slug)?.frontmatter.organization).toBe("组织C");
+    expect(pages.getBySlug(page.slug)?.frontmatter.organization_source).toBe("ner");
+  });
+
+  test("does not downgrade a stronger organization source", async () => {
+    const page = pages.create({
+      slug: "brain/entities/person/entity-a",
+      title: "实体A",
+      type: "entity/person",
+      body: "匿名正文",
+      tags: [],
+      extra: { organization_source: "manual" },
+    });
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({ facts: [
+        { field: "organization", value: "组织C", confidence: 0.9, evidence: "实体A在组织C任职" },
+      ] }),
+    };
+
+    await extractEntityFacts({ pages, llm, slug: page.slug, title: page.title, type: page.type, body: page.body });
+
+    expect(pages.getBySlug(page.slug)?.frontmatter.organization).toBe("组织C");
+    expect(pages.getBySlug(page.slug)?.frontmatter.organization_source).toBe("manual");
+  });
 });
