@@ -82,7 +82,14 @@ export function applyFacts(
       continue;
     }
 
-    pages.update(slug, { extra: { [fact.field]: fact.value } });
+    const extra: Record<string, string> = { [fact.field]: fact.value };
+    if (fact.field === "organization") {
+      const existingSource = page.frontmatter.organization_source;
+      if (existingSource !== "manual" && existingSource !== "agent") {
+        extra.organization_source = "ner";
+      }
+    }
+    pages.update(slug, { extra });
     written++;
   }
 

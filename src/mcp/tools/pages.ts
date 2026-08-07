@@ -51,6 +51,32 @@ function schedulePageToolNer(
   }
 }
 
+type OrganizationExtraResult =
+  | { ok: true; extra?: Record<string, unknown> }
+  | { ok: false; code: "ORGANIZATION_SOURCE_FORBIDDEN" | "ORGANIZATION_INVALID" };
+
+/**
+ * `organization_source` is an adapter-owned marker. A put_page caller may
+ * assert an organization value, but can never self-assert its trust source.
+ */
+function normalizeOrganizationExtra(extra: Record<string, unknown> | undefined): OrganizationExtraResult {
+  if (!extra) return { ok: true };
+  if (Object.hasOwn(extra, "organization_source")) {
+    return { ok: false, code: "ORGANIZATION_SOURCE_FORBIDDEN" };
+  }
+  if (!Object.hasOwn(extra, "organization")) {
+    return { ok: true, extra: { ...extra } };
+  }
+  const organization = extra.organization;
+  if (typeof organization !== "string" || organization.trim() === "") {
+    return { ok: false, code: "ORGANIZATION_INVALID" };
+  }
+  return {
+    ok: true,
+    extra: { ...extra, organization: organization.trim(), organization_source: "agent" },
+  };
+}
+
 type AliasAction = "add" | "remove";
 
 function aliasJson(payload: unknown): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
@@ -151,6 +177,14 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       extra: z.record(z.string().max(200), z.unknown()).optional().describe("Frontmatter fields to set (e.g. reports_to, confidence). Works in all modes including new pages."),
     },
   }, async ({ slug, content, mode, title, type, tags, extra }) => {
+    const normalizedOrganizationExtra = normalizeOrganizationExtra(extra);
+    if (!normalizedOrganizationExtra.ok) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: normalizedOrganizationExtra.code }) }],
+        isError: true,
+      };
+    }
+    const normalizedExtra = normalizedOrganizationExtra.extra;
     const existing = ctx.pages.getBySlug(slug);
     if (existing) {
       const effectiveMode = mode ?? "patch";
@@ -164,11 +198,11 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       if (effectiveMode === "replace") {
         // Explicit full overwrite — snapshot first
         previousVersion = ctx.versions.createVersion(slug);
-        updated = ctx.pages.update(slug, { body: content, tags, extra });
+        updated = ctx.pages.update(slug, { body: content, tags, extra: normalizedExtra });
         finalBody = content;
       } else {
         // Patch mode (default) — append body, merge tags, update frontmatter fields
-        updated = ctx.pages.patch(slug, { body_append: content, tags_merge: tags, extra });
+        updated = ctx.pages.patch(slug, { body_append: content, tags_merge: tags, extra: normalizedExtra });
         finalBody = updated?.body ?? content;
       }
 
@@ -179,6 +213,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
         schedulePageToolNer(ctx, slug, finalBody, pageType, wlResult.mentionedSlugs);
         // Sync reports_to graph edge if frontmatter has it
         ctx.pipeline.processReportsTo(slug, updated.frontmatter);
+        ctx.pipeline.processOrganization(slug, updated.frontmatter);
         // Sync KR for self, wikilink targets, old manager, new manager
         const newReportsTo = updated.frontmatter.reports_to as string | undefined;
         const affectedSlugs = new Set([slug, ...wlResult.mentionedSlugs]);
@@ -223,7 +258,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       type: type ?? "record",
       body: content,
       tags,
-      extra,
+      extra: normalizedExtra,
       // #386: MCP put_page is always an agent write. Actor is decided here by
       // the adapter — never accepted from the tool's inputSchema (anti-forgery).
       provenance: forPutPage({ actorClass: "agent" }),
@@ -234,6 +269,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     schedulePageToolNer(ctx, created.slug, content, pageType, wlResult.mentionedSlugs);
     // Sync reports_to graph edge if extra provided it
     ctx.pipeline.processReportsTo(created.slug, created.frontmatter);
+    ctx.pipeline.processOrganization(created.slug, created.frontmatter);
     // Sync KR for self, wikilink targets, and reports_to manager
     const createdReportsTo = created.frontmatter.reports_to as string | undefined;
     const createdAffected = new Set([created.slug, ...wlResult.mentionedSlugs]);

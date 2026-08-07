@@ -670,6 +670,75 @@ describe("MCP Server", () => {
       expect(data.page.title).toBe("Test");
     });
 
+    test("explicit organization is marked agent and projected as trusted employment", async () => {
+      mkdirSync(join(vaultPath, "entities", "company"), { recursive: true });
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/company', ?, ?, ?)`,
+      ).run("brain/entities/company/org-c", "组织C", "entities/company/org-c.md", "org-hash");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/person/entity-a",
+        content: "匿名正文",
+        title: "实体A",
+        type: "entity/person",
+        extra: { organization: "组织C" },
+      });
+      expect(JSON.parse(result.content[0].text).action).toBe("created");
+
+      const page = db.getPage("brain/entities/person/entity-a");
+      expect(page).toBeDefined();
+      const raw = readFileSync(join(vaultPath, "brain/entities/person/entity-a.md"), "utf-8");
+      expect(raw).toContain("organization_source: agent");
+      const link = db.rawDb.prepare(
+        "SELECT to_slug, trust_state, source_type FROM links WHERE from_slug = ? AND relation = '任职'",
+      ).get("brain/entities/person/entity-a") as { to_slug: string; trust_state: string; source_type: string } | undefined;
+      expect(link).toEqual({ to_slug: "brain/entities/company/org-c", trust_state: "trusted", source_type: "agent" });
+    });
+
+    test("forged organization_source fails before any page/version/edge write", async () => {
+      mkdirSync(join(vaultPath, "entities", "person"), { recursive: true });
+      const file = join(vaultPath, "entities", "person", "entity-a.md");
+      writeFileSync(file, "---\ntitle: 实体A\ntype: entity/person\n---\n原始正文", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`,
+      ).run("brain/entities/person/entity-a", "实体A", "entities/person/entity-a.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/person/entity-a",
+        content: "不应写入",
+        mode: "replace",
+        extra: { organization: "组织C", organization_source: "manual" },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text)).toEqual({ error: "ORGANIZATION_SOURCE_FORBIDDEN" });
+      expect(readFileSync(file, "utf-8")).toContain("原始正文");
+      expect(readFileSync(file, "utf-8")).not.toContain("不应写入");
+      expect(db.rawDb.prepare("SELECT COUNT(*) AS count FROM versions WHERE page_slug = ?").get("brain/entities/person/entity-a")).toEqual({ count: 0 });
+      expect(db.rawDb.prepare("SELECT COUNT(*) AS count FROM links WHERE from_slug = ? AND relation = '任职'").get("brain/entities/person/entity-a")).toEqual({ count: 0 });
+    });
+
+    test("body-only update does not infer provenance for historical organization", async () => {
+      mkdirSync(join(vaultPath, "entities", "person"), { recursive: true });
+      const file = join(vaultPath, "entities", "person", "entity-a.md");
+      writeFileSync(file, "---\ntitle: 实体A\ntype: entity/person\norganization: 组织C\n---\n原始正文", "utf-8");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`,
+      ).run("brain/entities/person/entity-a", "实体A", "entities/person/entity-a.md", "h1");
+
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "brain/entities/person/entity-a",
+        content: "追加正文",
+      });
+
+      expect(JSON.parse(result.content[0].text).action).toBe("updated");
+      expect(db.rawDb.prepare("SELECT COUNT(*) AS count FROM links WHERE from_slug = ? AND relation = '任职'").get("brain/entities/person/entity-a")).toEqual({ count: 0 });
+      expect(readFileSync(file, "utf-8")).not.toContain("organization_source");
+    });
+
     test("returns error without title for new page", async () => {
       const server = createServer(deps);
       const result = await getTools(server).put_page.handler({

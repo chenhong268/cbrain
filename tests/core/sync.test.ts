@@ -144,6 +144,54 @@ describe("SyncManager", () => {
       expect(row.type).toBe("entity/person");
     });
 
+    test("projects only explicit manual organization markers as trusted employment", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/company', ?, ?, ?)`,
+      ).run("brain/entities/company/org-c", "组织C", "entities/company/org-c.md", "org-hash");
+      writeMdFile(
+        vaultPath,
+        "entities/person/entity-a.md",
+        {
+          title: "实体A",
+          type: "entity/person",
+          slug: "brain/entities/person/entity-a",
+          organization: "组织C",
+          organization_source: "manual",
+        },
+        "匿名正文",
+      );
+
+      const report = await sync.syncAll(vaultPath);
+      expect(report.errors).toBe(0);
+      const link = db.rawDb.prepare(
+        "SELECT to_slug, trust_state, source_type FROM links WHERE from_slug = ? AND relation = '任职'",
+      ).get("brain/entities/person/entity-a") as { to_slug: string; trust_state: string; source_type: string } | undefined;
+      expect(link).toEqual({ to_slug: "brain/entities/company/org-c", trust_state: "trusted", source_type: "manual" });
+    });
+
+    test("sync does not infer provenance from historical organization or NER marker", async () => {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/company', ?, ?, ?)`,
+      ).run("brain/entities/company/org-c", "组织C", "entities/company/org-c.md", "org-hash");
+      writeMdFile(
+        vaultPath,
+        "entities/person/entity-a.md",
+        { title: "实体A", type: "entity/person", slug: "brain/entities/person/entity-a", organization: "组织C" },
+        "匿名正文",
+      );
+      await sync.syncAll(vaultPath);
+      expect(db.rawDb.prepare("SELECT COUNT(*) AS count FROM links WHERE from_slug = ? AND relation = '任职'").get("brain/entities/person/entity-a")).toEqual({ count: 0 });
+
+      writeMdFile(
+        vaultPath,
+        "entities/person/entity-a.md",
+        { title: "实体A", type: "entity/person", slug: "brain/entities/person/entity-a", organization: "组织C", organization_source: "ner" },
+        "新增正文",
+      );
+      await sync.syncAll(vaultPath);
+      expect(db.rawDb.prepare("SELECT COUNT(*) AS count FROM links WHERE from_slug = ? AND relation = '任职'").get("brain/entities/person/entity-a")).toEqual({ count: 0 });
+    });
+
     test("syncs multiple files", async () => {
       writeMdFile(vaultPath, "entities/a.md", { title: "A", type: "entity/person", slug: "entities/a" }, "Content A");
       writeMdFile(vaultPath, "concepts/b.md", { title: "B", type: "concept/concept", slug: "concepts/b" }, "Content B");

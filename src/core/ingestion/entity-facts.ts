@@ -91,6 +91,12 @@ export async function extractEntityFacts(input: {
     const current = pageData[fact.field];
     if (current !== undefined && current !== null && current !== "") continue;
     extra[fact.field] = String(fact.value);
+    if (fact.field === "organization") {
+      const existingSource = pageData.organization_source;
+      if (existingSource !== "manual" && existingSource !== "agent") {
+        extra.organization_source = "ner";
+      }
+    }
   }
 
   const appliedCount = Object.keys(extra).length;
