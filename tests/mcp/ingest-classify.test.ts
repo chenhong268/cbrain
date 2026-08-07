@@ -76,7 +76,7 @@ describe("MCP ingest type classification", () => {
       "  - 自动标签",
       "---",
       "",
-      "这是正文内容。",
+      "这是正文内容，包含足够的事实细节用于验证自动分类和完整性门禁。".repeat(2),
     ].join("\n");
 
     const result = await handler({
@@ -115,7 +115,7 @@ describe("MCP ingest type classification", () => {
     const handler = tools["ingest"].handler;
 
     const result = await handler({
-      content: "这是一段纯文本笔记内容",
+      content: "这是一段足够完整的纯文本研究笔记内容，包含事实细节并用于验证自动分类路径。".repeat(2),
       // No type
       title: "纯文本测试",
       pageType: "record",
@@ -144,7 +144,7 @@ describe("MCP ingest type classification", () => {
       "---",
       "title: 被强制当文本",
       "---",
-      "内容。",
+      "这是一段足够完整的正文内容，用于验证显式 text 类型仍保留原始 markdown。".repeat(2),
     ].join("\n");
 
     const result = await handler({
@@ -198,6 +198,20 @@ describe("MCP ingest type classification", () => {
     if (existsSync(recordsDir)) {
       expect(readdirSync(recordsDir).length).toBe(0);
     }
+  });
+
+  test("record placeholder content is rejected before persistence (#376)", async () => {
+    const server = createServer(deps);
+    const result = await getTools(server)["ingest"].handler({
+      content: "https://example.invalid/source\n待补充",
+      title: "占位记录",
+      pageType: "record",
+      skipNer: true,
+    });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toMatch(/VALIDATION_ERROR.*record/i);
+    expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get()).toEqual({ c: 0 });
   });
 
   test("markdown without title or semantic body returns error with no untitled file", async () => {
@@ -285,7 +299,7 @@ describe("MCP ingest type classification", () => {
     const result = await handler({
       // .net (not .com) so the C8 privacy gate's email scanner [a-z]+@[a-z]+\.(com|cn|org)
       // doesn't flag this fixture; @ is mid-token so FILE_REFERENCE_RE never matches.
-      content: "联系 test@example.net 或 @username",
+      content: "联系 test@example.net 或 @username；这是一条包含足够上下文的完整联系记录，用于验证地址不会被误判为文件引用。",
       title: "占位联系记录",
       pageType: "record",
       skipNer: true,
@@ -345,7 +359,7 @@ describe("MCP ingest nerMode option (#252)", () => {
     const handler = getTools(server)["ingest"].handler;
 
     const result = await handler({
-      content: "nerMode 关闭测试内容",
+      content: "nerMode 关闭测试内容，包含足够的上下文以验证关闭模式仍能完成正常记录写入。".repeat(2),
       title: "占位NER模式测试",
       pageType: "record",
       skipNer: true,
@@ -362,7 +376,7 @@ describe("MCP ingest nerMode option (#252)", () => {
     const handler = getTools(server)["ingest"].handler;
 
     const result = await handler({
-      content: "默认模式测试内容",
+      content: "默认模式测试内容，包含足够的上下文以验证默认配置下的记录写入路径。".repeat(2),
       title: "占位默认模式",
       pageType: "record",
       skipNer: true,
@@ -405,7 +419,7 @@ describe("MCP ingest personal tag (#236)", () => {
     const handler = tools["ingest"].handler;
 
     const result = await handler({
-      content: "我的偏好 是 偏好X",
+      content: "我的偏好 是 偏好X；这是一条包含完整上下文的个人记录，用于验证 personal 标签写入。".repeat(2),
       type: "text",
       title: "偏好X 笔记",
       skipNer: true,
@@ -423,7 +437,7 @@ describe("MCP ingest personal tag (#236)", () => {
     const handler = tools["ingest"].handler;
 
     const result = await handler({
-      content: "项目Y 的 架构 设计",
+      content: "项目Y 的 架构 设计；这是一条包含完整上下文的业务记录，用于验证不会错误写入 personal 标签。".repeat(2),
       type: "text",
       title: "项目Y 设计",
       skipNer: true,

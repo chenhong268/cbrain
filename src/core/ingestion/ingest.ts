@@ -11,7 +11,7 @@ import { NerEngine, isNerTimeoutError } from "./ner.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
 import { filterExtractedEntities, type ExtractedEntity } from "./ner.js";
-import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
+import { classifyContentType, hasSemanticContent, hasSufficientRecordContent } from "./content-classifier.js";
 import { classifyPersonalTag } from "./personal-tag-classifier.js";
 import type { DeferredNerSubmitter } from "./ner-backfill.js";
 import {
@@ -407,10 +407,17 @@ export class IngestManager {
       }
     }
 
+    const existedBefore = !!this.pages.getBySlug(slug);
+    // #376: enforce the quality contract on governed user writes only. Internal
+    // maintenance callers do not provide writer context and keep their existing
+    // sparse-fixture/backfill semantics.
+    if (writer && !existedBefore && type === "record" && !hasSufficientRecordContent(body)) {
+      throw new Error("VALIDATION_ERROR: record content is too short; provide substantive content");
+    }
+
     // --- Existing pipeline ---
     const { chunks, embedResults } = await this.pipeline.embed(body);
 
-    const existedBefore = !!this.pages.getBySlug(slug);
     const snapshot = existedBefore ? takeSnapshot(slug, this.db, this.pages) : null;
     let createdThisAttempt = false;
 

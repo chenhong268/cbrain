@@ -118,7 +118,7 @@ interface CliResult {
 // ── Constants ──
 
 const INGEST_TEXT =
-  "实体A是一个重要的概念，它与主题B密切相关。方法C是解决这个问题的关键技术路径。";
+  "实体A是一个重要的概念，它与主题B密切相关。方法C是解决这个问题的关键技术路径。该记录补充了足够的匿名事实背景，用于验证首次安装后的完整入库与检索。";
 const INGEST_UNIQUE_TOKEN = "实体a";  // appears in auto-generated slug
 const QUERY_TEXT = "实体A 主题B 方法C"; // includes unique token for deterministic recall
 const VECTOR_DIM = 2048;

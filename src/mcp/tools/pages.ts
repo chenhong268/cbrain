@@ -15,6 +15,7 @@ import {
   submitDeferredNerForWritePath,
 } from "../../core/ingestion/ner-write-path.js";
 import { forPutPage } from "../../core/page-write-provenance.js";
+import { hasSufficientRecordContent } from "../../core/ingestion/content-classifier.js";
 
 function syncWikilinkRelations(ctx: ToolContext, slug: string, affectedSlugs: Set<string>): void {
   for (const s of new Set([slug, ...affectedSlugs])) {
@@ -252,10 +253,17 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (!title) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "title is required for new pages" }) }] };
     }
+    const pageType = type ?? "record";
+    if (pageType === "record" && !hasSufficientRecordContent(content)) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: "VALIDATION_ERROR: record content is too short; provide substantive content" }) }],
+        isError: true,
+      };
+    }
     const created = ctx.pages.create({
       slug,
       title,
-      type: type ?? "record",
+      type: pageType,
       body: content,
       tags,
       extra: normalizedExtra,
@@ -264,9 +272,9 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       provenance: forPutPage({ actorClass: "agent" }),
     });
     await indexPage(ctx.pipeline, created.slug, content, ctx.logger);
-    const pageType = created.type;
+    const createdPageType = created.type;
     const wlResult = ctx.pipeline.processWikilinks(created.slug, content);
-    schedulePageToolNer(ctx, created.slug, content, pageType, wlResult.mentionedSlugs);
+    schedulePageToolNer(ctx, created.slug, content, createdPageType, wlResult.mentionedSlugs);
     // Sync reports_to graph edge if extra provided it
     ctx.pipeline.processReportsTo(created.slug, created.frontmatter);
     ctx.pipeline.processOrganization(created.slug, created.frontmatter);
