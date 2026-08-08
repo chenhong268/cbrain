@@ -282,7 +282,7 @@ describe("ReflectManager", () => {
           insights: [
             {
               content: "First formulation of the same insight",
-              related_entities: ["entities/hub", "entities/peer"],
+              related_entities: ["entities/peer", "entities/hub"],
               type: "pattern",
               confidence: 0.8,
             },
