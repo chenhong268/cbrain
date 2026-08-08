@@ -180,6 +180,95 @@ describe("Ingest dedup", () => {
     expect(second.duplicateOf).toBeUndefined();
   });
 
+  test("new record rejects URL-only placeholder content before any write", async () => {
+    await expect(ingest.ingest({
+      content: "https://example.invalid/source\n待解析",
+      title: "占位记录",
+      pageType: "record",
+      type: "text",
+      skipNer: true,
+      writer: { actorClass: "agent" },
+    })).rejects.toThrow(/VALIDATION_ERROR.*record/i);
+
+    expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get()).toEqual({ c: 0 });
+    expect(existsSync(join(vaultPath, "records"))).toBe(false);
+  });
+
+  test("new record accepts substantive content", async () => {
+    const result = await ingest.ingest({
+      content: "这是一份包含足够事实细节的研究记录，用于验证内容完整性门禁不会误伤正常入库。".repeat(2),
+      title: "完整记录",
+      pageType: "record",
+      type: "text",
+      skipNer: true,
+      writer: { actorClass: "agent" },
+    });
+
+    expect(result.outcome).toBe("created");
+    expect(db.getPage(result.slug)?.type).toBe("record");
+  });
+
+  test("allowDuplicate does not bypass the record quality gate", async () => {
+    await expect(ingest.ingest({
+      content: "https://example.invalid/source\n待补充",
+      title: "强制重复占位记录",
+      pageType: "record",
+      type: "text",
+      allowDuplicate: true,
+      skipNer: true,
+      writer: { actorClass: "agent" },
+    })).rejects.toThrow(/VALIDATION_ERROR.*record/i);
+
+    expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get()).toEqual({ c: 0 });
+  });
+
+  test("new record rejects a placeholder even when its hash matches a legacy page", async () => {
+    const placeholder = "https://example.invalid/source\n待解析";
+    const pages = new PageManager(db, vaultPath);
+    const legacy = pages.create({
+      title: "历史占位记录",
+      type: "record",
+      body: placeholder,
+    });
+    db.updateIngestHash(legacy.slug, normalizeAndHashBody(placeholder));
+
+    await expect(ingest.ingest({
+      content: placeholder,
+      title: "新占位记录",
+      pageType: "record",
+      type: "text",
+      skipNer: true,
+      writer: { actorClass: "agent" },
+    })).rejects.toThrow(/VALIDATION_ERROR.*record/i);
+
+    expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get()).toEqual({ c: 1 });
+  });
+
+  test("existing record updates are outside the new-page quality gate", async () => {
+    const first = await ingest.ingest({ content: "这是一段足够完整的匿名记录内容，用于验证既有页面更新范围。".repeat(2), title: "可更新记录", type: "text", skipNer: true, writer: { actorClass: "agent" } });
+    const updated = await ingest.ingest({
+      content: "短更新",
+      title: "可更新记录",
+      type: "text",
+      skipNer: true,
+      writer: { actorClass: "agent" },
+    });
+
+    expect(updated.outcome).toBe("updated");
+    expect(updated.slug).toBe(first.slug);
+  });
+
+  test("short entity content remains allowed", async () => {
+    const result = await ingest.ingest({
+      content: "---\ntitle: 实体A\ntype: entity/person\n---\n短",
+      type: "markdown",
+      skipNer: true,
+    });
+
+    expect(result.outcome).toBe("created");
+    expect(db.getPage(result.slug)?.type).toBe("entity/person");
+  });
+
   test("markdown: different frontmatter same body returns duplicate", async () => {
     const md1 = "---\ntitle: MD测试A\ntags: [tag1]\n---\n\n" + BODY;
     const md2 = "---\ntitle: MD测试B\ntags: [tag2, tag3]\n---\n\n" + BODY;

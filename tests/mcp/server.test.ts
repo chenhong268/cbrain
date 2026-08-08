@@ -632,7 +632,7 @@ describe("MCP Server", () => {
     test("ingests text content", async () => {
       const server = createServer(deps);
       const result = await getTools(server).ingest.handler({
-        content: "Hello world",
+        content: "Hello world. This is a complete record with enough factual context to exercise the ingest path.",
         type: "text",
         title: "Test Page",
       });
@@ -747,6 +747,48 @@ describe("MCP Server", () => {
       });
       const data = JSON.parse(result.content[0].text);
       expect(data.error).toBeDefined();
+    });
+
+    test("rejects a short record placeholder before persistence (#376)", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "records/placeholder",
+        content: "https://example.invalid/source\n待解析",
+        title: "占位记录",
+        type: "record",
+      });
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.error).toMatch(/VALIDATION_ERROR.*record/i);
+      expect(db.getPage("records/placeholder")).toBeNull();
+    });
+
+    test("rejects a placeholder when an unknown type normalizes to record", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "records/unknown-type-placeholder",
+        content: "https://example.invalid/source\n待解析",
+        title: "未知类型占位记录",
+        type: "unknown-type",
+      });
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.error).toMatch(/VALIDATION_ERROR.*record/i);
+      expect(db.getPage("records/unknown-type-placeholder")).toBeNull();
+    });
+
+    test("short entity content remains allowed", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "entities/person/short",
+        content: "短",
+        title: "实体A",
+        type: "entity/person",
+      });
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.action).toBe("created");
+      expect(db.getPage(data.page.slug)?.type).toBe("entity/person");
     });
 
     test("update: syncs wikilinks to markdown Known Relations (bidirectional)", async () => {
@@ -865,7 +907,7 @@ describe("MCP Server", () => {
         slug: "brain/records/new-defer-note",
         title: "NewDeferNote",
         type: "record",
-        content: "新建正文应该排入 NER backfill",
+        content: "新建正文应该排入 NER backfill，并保留足够的事实内容以验证后台任务写入路径。".repeat(2),
       });
 
       const data = JSON.parse(result.content[0].text);

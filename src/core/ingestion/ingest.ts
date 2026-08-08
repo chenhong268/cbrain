@@ -11,7 +11,7 @@ import { NerEngine, isNerTimeoutError } from "./ner.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
 import { filterExtractedEntities, type ExtractedEntity } from "./ner.js";
-import { classifyContentType, hasSemanticContent } from "./content-classifier.js";
+import { classifyContentType, hasSemanticContent, hasSufficientRecordContent } from "./content-classifier.js";
 import { classifyPersonalTag } from "./personal-tag-classifier.js";
 import type { DeferredNerSubmitter } from "./ner-backfill.js";
 import {
@@ -368,6 +368,15 @@ export class IngestManager {
     slug: string, title: string, type: PageType, body: string, tags: string[], nerAction: NerAction,
     allowDuplicate?: boolean, writer?: RecordWriterContext
   ): Promise<IngestResult> {
+    const existedBefore = !!this.pages.getBySlug(slug);
+    // #376: enforce the quality contract on governed user writes before dedup
+    // can return a success-shaped duplicate for a new placeholder. Internal
+    // maintenance callers do not provide writer context and keep their existing
+    // sparse-fixture/backfill semantics.
+    if (writer && !existedBefore && type === "record" && !hasSufficientRecordContent(body)) {
+      throw new Error("VALIDATION_ERROR: record content is too short; provide substantive content");
+    }
+
     // --- Dedup gate for durable source types (record / insight) ---
     let bodyHash: string | undefined;
     let overrideAudit: { matchedSlug: string; matchedHash: string } | null = null;
@@ -410,7 +419,6 @@ export class IngestManager {
     // --- Existing pipeline ---
     const { chunks, embedResults } = await this.pipeline.embed(body);
 
-    const existedBefore = !!this.pages.getBySlug(slug);
     const snapshot = existedBefore ? takeSnapshot(slug, this.db, this.pages) : null;
     let createdThisAttempt = false;
 

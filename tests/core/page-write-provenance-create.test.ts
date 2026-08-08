@@ -251,7 +251,7 @@ describe("IngestManager threads writer to record-page provenance (#386)", () => 
 
   test("operator writer (CLI path) creates an operator/ingest provenance row", async () => {
     const result = await ingest.ingest({
-      content: "一段需要记录的内容",
+      content: "一段需要记录的内容，包含足够的匿名事实背景，用于验证 CLI writer 的记录归属与来源字段。该记录还保留了完整上下文。",
       type: "text",
       title: "Prov CLI Ingest",
       pageType: "record",
@@ -269,7 +269,7 @@ describe("IngestManager threads writer to record-page provenance (#386)", () => 
 
   test("agent writer (MCP path) creates an agent/ingest provenance row", async () => {
     const result = await ingest.ingest({
-      content: "agent submitted content",
+      content: "agent submitted content with enough anonymous factual context to verify the MCP writer provenance path.",
       type: "text",
       title: "Prov MCP Ingest",
       pageType: "record",
@@ -299,7 +299,7 @@ describe("IngestManager threads writer to record-page provenance (#386)", () => 
 
   test("updating an existing record page does NOT write/overwrite provenance", async () => {
     const first = await ingest.ingest({
-      content: "first body",
+      content: "first body with enough anonymous factual context to create the record before testing an update.",
       type: "text",
       title: "Prov Update",
       pageType: "record",
@@ -310,7 +310,7 @@ describe("IngestManager threads writer to record-page provenance (#386)", () => 
     // early-return) and a DIFFERENT actor — must hit the update path and still
     // not re-attribute provenance.
     const second = await ingest.ingest({
-      content: "first body, revised to force the update path",
+      content: "first body, revised with enough anonymous factual context to force the update path without re-attribution.",
       type: "text",
       title: "Prov Update",
       pageType: "record",

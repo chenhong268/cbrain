@@ -11,6 +11,10 @@ import { parseFrontmatter } from "../../utils/frontmatter.js";
 const SUPPORTED_FM_FIELDS = new Set(["title", "type", "slug", "tags"]);
 
 const SEMANTIC_CHAR_RE = /[\p{Script=Han}\p{L}\d]/u;
+const URL_RE = /(?:https?:\/\/|www\.)[^\s<>()]+/giu;
+
+/** Minimum number of non-URL letters/digits required for a new record page. */
+export const MIN_RECORD_CONTENT_CHARS = 50;
 
 /**
  * Determine whether content should be treated as markdown or plain text.
@@ -52,4 +56,26 @@ export function classifyContentType(
  */
 export function hasSemanticContent(text: string): boolean {
   return SEMANTIC_CHAR_RE.test(text);
+}
+
+/**
+ * Reject record placeholders while leaving sparse entity/concept stubs valid.
+ * Frontmatter and URLs are metadata, not substantive record content.
+ */
+export function hasSufficientRecordContent(content: string): boolean {
+  let body = content;
+  if (content.startsWith("---")) {
+    try {
+      body = parseFrontmatter(content).body;
+    } catch {
+      // Keep malformed input as body text; the normal ingest parser reports
+      // malformed markdown separately, while this gate remains deterministic.
+    }
+  }
+  const withoutUrls = body.replace(URL_RE, " ");
+  let semanticChars = 0;
+  for (const char of withoutUrls) {
+    if (SEMANTIC_CHAR_RE.test(char)) semanticChars++;
+  }
+  return semanticChars >= MIN_RECORD_CONTENT_CHARS;
 }

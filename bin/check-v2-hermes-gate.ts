@@ -341,7 +341,7 @@ async function runH5SafeCapture(jc: JourneyContext): Promise<HermesJourney> {
   const mdBefore = new Set(listVaultMd(jc.vaultPath));
   const { value, timedOut, durationMs } = await withCeiling(
     () => jc.tools.ingest.handler({
-      content: `---\ntitle: 捕获记录B\ntype: record\n---\n这是一条待捕获的新信息，应当干净入库。`,
+      content: `---\ntitle: 捕获记录B\ntype: record\n---\n这是一条待捕获的新信息，应当干净入库，并保留足够的匿名事实背景来证明记录内容完整且可检索。该信息还包含后续检索所需的上下文与事实边界。`,
       type: "markdown",
       skipNer: true,
     }),

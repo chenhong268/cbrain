@@ -103,7 +103,7 @@ describe("CLI ingest — dedup flags and output", () => {
   });
 
   test("duplicate output format: shows existing title, no extra page", async () => {
-    const body = "这是CLI去重测试的固定内容";
+    const body = "这是CLI去重测试的固定内容，包含足够的匿名事实背景，用于验证质量门通过后仍会在写入前正确去重。".repeat(2);
     const { normalizeAndHashBody } = await import("../../src/core/shared.js");
     const hash = normalizeAndHashBody(body);
 
@@ -122,7 +122,7 @@ describe("CLI ingest — dedup flags and output", () => {
   });
 
   test("--allow-duplicate bypasses dedup and creates a second indexed page (#382)", async () => {
-    const body = "这是CLI允许重复测试的固定内容";
+    const body = "这是CLI允许重复测试的固定内容，包含足够的匿名事实背景，用于验证重复覆盖仍会创建并建立索引。".repeat(2);
     const { normalizeAndHashBody } = await import("../../src/core/shared.js");
     const hash = normalizeAndHashBody(body);
 
@@ -251,9 +251,11 @@ describe("cbrain ingest --ner-mode (#252)", () => {
     return row?.c ?? 0;
   }
 
+  const BODY = "匿名正文包含足够的事实背景，用于验证 NER 模式切换不会改变正常记录写入行为。".repeat(2);
+
   test("env CBRAIN_INGEST_NER_MODE=defer creates a ner-backfill job", () => {
     const env = { ...process.env, CBRAIN_INGEST_NER_MODE: "defer" };
-    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", "匿名正文", "--type", "text"], {
+    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", BODY, "--type", "text"], {
       encoding: "utf-8",
       cwd: brainDir,
       stdio: ["pipe", "pipe", "pipe"],
@@ -264,14 +266,14 @@ describe("cbrain ingest --ner-mode (#252)", () => {
   });
 
   test("invalid --ner-mode falls back to sync (no throw, no job)", () => {
-    const result = runIngest(["匿名正文", "--type", "text", "--ner-mode", "garbage"]);
+    const result = runIngest([BODY, "--type", "text", "--ner-mode", "garbage"]);
     expect(result.exitCode).toBe(0);
     expect(countNerBackfillJobs()).toBe(0);
   });
 
   test("env defer + --ner-mode off → no job (CLI flag beats env)", () => {
     const env = { ...process.env, CBRAIN_INGEST_NER_MODE: "defer" };
-    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", "匿名正文", "--type", "text", "--ner-mode", "off"], {
+    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", BODY, "--type", "text", "--ner-mode", "off"], {
       encoding: "utf-8",
       cwd: brainDir,
       stdio: ["pipe", "pipe", "pipe"],
@@ -283,7 +285,7 @@ describe("cbrain ingest --ner-mode (#252)", () => {
 
   test("env sync + --ner-mode defer → creates job (CLI flag beats env)", () => {
     const env = { ...process.env, CBRAIN_INGEST_NER_MODE: "sync" };
-    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", "匿名正文", "--type", "text", "--ner-mode", "defer"], {
+    const result = spawnSync("bun", ["run", join(PROJECT_DIR, "src/cli/index.ts"), "ingest", BODY, "--type", "text", "--ner-mode", "defer"], {
       encoding: "utf-8",
       cwd: brainDir,
       stdio: ["pipe", "pipe", "pipe"],

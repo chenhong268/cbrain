@@ -1,5 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { classifyContentType, hasSemanticContent } from "../../src/core/ingestion/content-classifier.js";
+import {
+  classifyContentType,
+  hasSemanticContent,
+  hasSufficientRecordContent,
+  MIN_RECORD_CONTENT_CHARS,
+} from "../../src/core/ingestion/content-classifier.js";
 
 describe("classifyContentType", () => {
   // ── Explicit type is always respected ──
@@ -150,5 +155,25 @@ describe("hasSemanticContent", () => {
 
   test("single Chinese character → true", () => {
     expect(hasSemanticContent("好")).toBe(true);
+  });
+});
+
+describe("hasSufficientRecordContent", () => {
+  test("requires at least 50 non-URL semantic characters", () => {
+    expect(hasSufficientRecordContent("a".repeat(49))).toBe(false);
+    expect(hasSufficientRecordContent("a".repeat(50))).toBe(true);
+  });
+
+  test("rejects URL plus a short placeholder", () => {
+    expect(hasSufficientRecordContent("https://example.invalid/source\n待解析")).toBe(false);
+  });
+
+  test("ignores frontmatter and accepts enough substantive content", () => {
+    const body = "有效研究内容".repeat(Math.ceil(MIN_RECORD_CONTENT_CHARS / 6));
+    expect(hasSufficientRecordContent(`---\ntitle: ${"元数据".repeat(30)}\n---\n${body}`)).toBe(true);
+  });
+
+  test("does not count frontmatter-only content as a valid record", () => {
+    expect(hasSufficientRecordContent(`---\ntitle: ${"元数据".repeat(30)}\ntype: record\n---\n待补充`)).toBe(false);
   });
 });
