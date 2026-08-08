@@ -40,3 +40,4 @@ lancedb/
 # Claude Code
 .claude/
 CLAUDE.md
+.worktrees/
