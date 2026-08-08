@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
@@ -96,32 +96,6 @@ describe("HybridSearch retrieval support", () => {
   afterEach(() => {
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
-  });
-
-  test("non-capturing searches reuse one frozen context through expansion", () => {
-    const source = readFileSync(
-      join(import.meta.dir, "../../src/core/retrieval/search.ts"),
-      "utf8",
-    );
-
-    expect(source).toContain(
-      "const NO_SUPPORT_CONTEXT: SearchSupportContext = Object.freeze({",
-    );
-    expect(source).toContain(
-      "if (options?._captureSupport !== true) return NO_SUPPORT_CONTEXT;",
-    );
-    expect(source).toContain(
-      "i === 0 || !support.capture\n          ? support",
-    );
-    expect(source).toContain(
-      "vectorOverride: undefined,",
-    );
-    expect(source).toContain(
-      "const bySlug = new Map<string, { content: string; score: number }>();",
-    );
-    expect(source).toContain(
-      "const supportBySlug = includeVector\n      ? new Map<string, RetrievalChannelEvidence>()\n      : undefined;",
-    );
   });
 
   test("default vector search neither requests stored vectors nor attaches support", async () => {

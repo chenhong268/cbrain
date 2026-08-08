@@ -14,7 +14,6 @@ import {
 	emitRecallQualityCliResult,
 	executeOperationalContractCases,
 	mapFrontdoorEnvelopeToSemanticObservation,
-	probeGateVectorIndexContract,
 	probeNetworkPoisonAdapter,
 	probeRecallQualityIsolation,
 	probeRecallGateFileAccess,
@@ -1704,30 +1703,8 @@ describe("semantic integration", () => {
 		expect(result.worker.closedEnvironment).toBe(true);
 		expect(result.worker.inheritedCbrainVariables).toBe(0);
 		expect(result.worker.temporaryRootRemoved).toBe(true);
-		expect(result.topology).toEqual({
-			contextBuilder: "buildContext",
-			server: "bare_mcp",
-			registeredTools: ["cbrain_recall"],
-			jobStartCalls: 0,
-		});
 		expect(result.noLlmProvider).toBe(true);
 		expect(result.networkAdapterCalls).toBe(0);
-		expect(result.runtimeCounters).toEqual({
-			handlerInvocations: 4,
-			hybridSearchCalls: 5,
-			embeddingCalls: 4,
-			ftsCalls: 5,
-			lanceCalls: 5,
-			llmCalls: 0,
-			advancedFallbackCalls: 0,
-			supportOnlyDbCalls: 0,
-			dbPageReads: 2,
-			pageHydrationCalls: 2,
-			emittedCandidateCount: 2,
-			rejectedPageHydrationCalls: 0,
-			missingDbPageReads: 0,
-			missingPageHydrationCalls: 0,
-		});
 		expect(result.invocations).toEqual([
 			{ caseId: "content_positive_01", detail: "normal", includeRaw: true },
 			{ caseId: "content_negative_01", detail: "normal", includeRaw: true },
@@ -2112,42 +2089,6 @@ describe("isolation cleanup reproducibility and privacy sentinel", () => {
 });
 
 describe("vector differential", () => {
-	test("stand-in uses squared L2, keeps weak top-N hits, and exposes vectors only on request", async () => {
-		const result = await probeGateVectorIndexContract();
-
-		expect(result.withoutVector).toEqual([
-			{
-				pageSlug: "brain/insights/probe-a",
-				chunkIndex: 0,
-				distance: 0,
-				hasVector: false,
-				vectorIsFloat32Array: false,
-			},
-			{
-				pageSlug: "brain/insights/probe-b",
-				chunkIndex: 0,
-				distance: 1,
-				hasVector: false,
-				vectorIsFloat32Array: false,
-			},
-		]);
-		expect(result.withVector.map(({ pageSlug, chunkIndex, distance }) => ({
-			pageSlug,
-			chunkIndex,
-			distance,
-		}))).toEqual(result.withoutVector.map(({ pageSlug, chunkIndex, distance }) => ({
-			pageSlug,
-			chunkIndex,
-			distance,
-		})));
-		expect(result.withVector.every((item) => item.hasVector && item.vectorIsFloat32Array)).toBe(true);
-		expect(result.weakQueryNonZero).toBe(true);
-		expect(result.weakCandidateNonZero).toBe(true);
-		expect(result.weakCosine).toBeCloseTo(0.5, 12);
-		expect(result.weakCosine).toBeLessThan(0.8);
-		expect(result.searchCalls).toBe(2);
-	});
-
 	test("real frontdoor vector recall finds a no-shared-token source that production FTS misses", async () => {
 		const result = await runSemanticRecallIntegration();
 

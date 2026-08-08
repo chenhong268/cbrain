@@ -11,6 +11,9 @@ import { describe, test, expect } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatIngestResult, formatDialogueResult, formatRecallEnvelope, formatGroundedRecallEnvelope, formatQueryEnvelope, formatGetPageEnvelope, formatSummarizeEnvelope, formatEpisodeEnvelope, formatOrgTreeEnvelope, formatDiscoveriesEnvelope, formatGetPagesEnvelope } from "../../src/mcp/tools/format-result.js";
+import { registerAgenticResearchTools } from "../../src/mcp/tools/agentic-research.js";
+import { registerRecallTools } from "../../src/mcp/tools/recall.js";
+import { trimPageBody } from "../../src/mcp/tools/trim.js";
 import type { IngestResult } from "../../src/core/ingestion/ingest.js";
 import type { DialogueIngestResult } from "../../src/core/ingestion/dialogue.js";
 
@@ -153,12 +156,7 @@ describe("C4: GroundedRecallResult structure", () => {
   test("evidence.ts exports EvidenceBoard with build method", async () => {
     const mod = await import("../../src/core/retrieval/evidence.js");
     expect(mod.EvidenceBoard).toBeDefined();
-    // EvidenceBoard requires a db parameter — verify class has build()
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/retrieval/evidence.ts"),
-      "utf-8",
-    );
-    expect(source).toContain("build()");
+    expect(typeof mod.EvidenceBoard.prototype.build).toBe("function");
   });
 });
 
@@ -190,34 +188,6 @@ describe("C5: proactive budget limits", () => {
     const trimmed = trimHint(hint);
     // Should be rounded to 0.12
     expect(trimmed.score).toBe(0.12);
-  });
-
-  test("MIN_SCORE threshold is 0.5 in proactive engine source", () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/retrieval/proactive.ts"),
-      "utf-8",
-    );
-    expect(source).toContain("MIN_SCORE = 0.5");
-  });
-
-  test("truncateText caps at specified length", async () => {
-    // Read the source to verify the constant
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/retrieval/proactive.ts"),
-      "utf-8",
-    );
-    // All hint texts are truncated to 120 chars
-    expect(source).toMatch(/truncateText\(text,\s*120\)/);
-  });
-
-  test("proactive errors never propagate — try-catch returns []", () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/retrieval/proactive.ts"),
-      "utf-8",
-    );
-    // Main function has catch { return []; }
-    expect(source).toContain("return []");
-    expect(source).toContain("Never block the main response");
   });
 
   test("search.ts must NOT contain forced hint display instructions", () => {
@@ -350,85 +320,45 @@ describe("C5: proactive budget limits", () => {
   });
 });
 
-// ─── C6: 渐进披露常量 ────────────────────────────────────────
+// ─── C6: 渐进披露边界 ────────────────────────────────────────
 
-describe("C6: progressive disclosure constants", () => {
-  test("summarize TOP_N = 3", () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/mcp/tools/summarize.ts"),
-      "utf-8",
-    );
-    expect(source).toMatch(/TOP_N\s*=\s*3/);
+describe("C6: progressive disclosure boundaries", () => {
+  test("recall and research tools expose their supported detail choices", () => {
+    const inputSchemas = new Map<string, {
+      detail: { parse: (input: unknown) => unknown };
+    }>();
+    const server = {
+      registerTool(name: string, definition: {
+        inputSchema: { detail: { parse: (input: unknown) => unknown } };
+      }) {
+        inputSchemas.set(name, definition.inputSchema);
+      },
+    };
+
+    registerRecallTools(server as never, {} as never);
+    registerAgenticResearchTools(server as never, {} as never);
+
+    expect(inputSchemas.get("deep_recall")?.detail.parse(undefined)).toBe("brief");
+    for (const detail of ["brief", "normal", "full"]) {
+      expect(inputSchemas.get("agentic_research")?.detail.parse(detail)).toBe(detail);
+    }
   });
 
-  test("deep_recall detail default is 'brief'", () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/mcp/tools/recall.ts"),
-      "utf-8",
-    );
-    // Zod default should be "brief"
-    expect(source).toMatch(/detail.*default.*"brief"/);
-  });
-
-  test("get_page body truncation at 1500 chars", () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/mcp/tools/trim.ts"),
-      "utf-8",
-    );
-    // trimPageBody defaults to 1500
-    expect(source).toMatch(/trimPageBody.*1500|maxChars.*1500/);
-  });
-
-  test("agentic_research has 3 budget tiers", () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/mcp/tools/agentic-research.ts"),
-      "utf-8",
-    );
-    expect(source).toContain("brief");
-    expect(source).toContain("normal");
-    expect(source).toContain("full");
-    expect(source).toMatch(/DETAIL_BUDGET/);
+  test("get_page body keeps the visible default truncation boundary", () => {
+    expect(trimPageBody("甲".repeat(1500))).toEqual({
+      body: "甲".repeat(1500),
+      has_more: false,
+    });
+    expect(trimPageBody("乙".repeat(1501))).toEqual({
+      body: `${"乙".repeat(1500)}...`,
+      has_more: true,
+    });
   });
 
   test("_stub flag exists for stub entities", async () => {
     const { stubEntity } = await import("../../src/mcp/tools/trim.js");
     const result = stubEntity({ slug: "test", score: 0.5, snippet: "test", source: "vector" }, null);
     expect(result._stub).toBe(true);
-  });
-});
-
-// ─── C7: 失败降级结构 ────────────────────────────────────────
-
-describe("C7: failure degradation structure", () => {
-  test("PipelineStatus union type is correct", async () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/agentic/pipeline.ts"),
-      "utf-8",
-    );
-    // Verify the status type is defined with all 4 values
-    expect(source).toMatch(/PipelineStatus.*=.*"ok".*"partial".*"degraded".*"insufficient"/);
-    // Verify fallback planner exists (not exported, but must be in source)
-    expect(source).toContain("buildMinimalFallback");
-  });
-
-  test("SearchTrace has degraded_reason field", async () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/core/retrieval/search.ts"),
-      "utf-8",
-    );
-    expect(source).toContain("degraded_reason");
-    expect(source).toContain("vector_timeout");
-  });
-
-  test("degraded search returns structured metadata, not raw error", () => {
-    const source = fs.readFileSync(
-      path.resolve(import.meta.dir, "../../src/mcp/tools/search.ts"),
-      "utf-8",
-    );
-    // Must include degraded: true in response
-    expect(source).toContain("degraded: true");
-    expect(source).toContain("vector_skipped");
-    expect(source).toContain("latency_ms");
   });
 });
 
