@@ -426,6 +426,62 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.raw.entities.map((entity) => entity.title)).toEqual(["标题-single-supported-page"]);
   });
 
+  test("rescues a dominant anchored CJK question when normal lexical admission is too strict", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const firstChunk = result("anchored-page", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "甲方公司 H1 业务回顾：增长30%，主要由渠道迁移约3000万驱动", "fts");
+    firstChunk.score = 30;
+    const secondChunk = result("anchored-page", {
+      fts: { original: { rankScore: 22, rootLexicalCoverage: 0 } },
+    }, "甲方公司 H1 业务回顾的后续内容", "fts");
+    secondChunk.score = 22;
+    const otherPage = result("other-page", {
+      fts: { original: { rankScore: 12, rootLexicalCoverage: 0.2 } },
+    }, "实体乙 H1 的其他匿名内容", "fts");
+    otherPage.score = 12;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [firstChunk, secondChunk, otherPage],
+    });
+
+    const output = parsed(await harness.call({ query: "甲方公司 H1 增长主要由什么驱动？金额约多少？" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities.map((entity) => entity.title)).toEqual(["标题-anchored-page"]);
+  });
+
+  test("does not rescue a dominant CJK page when its leading subject anchor differs", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const firstChunk = result("wrong-subject-page", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "乙方公司 H1 业务回顾：增长30%，主要由渠道迁移约3000万驱动", "fts");
+    firstChunk.score = 30;
+    const secondChunk = result("wrong-subject-page", {
+      fts: { original: { rankScore: 22, rootLexicalCoverage: 0 } },
+    }, "乙方公司 H1 业务回顾的后续内容", "fts");
+    secondChunk.score = 22;
+    const otherPage = result("other-page", {
+      fts: { original: { rankScore: 12, rootLexicalCoverage: 0.2 } },
+    }, "甲方公司的无关匿名内容", "fts");
+    otherPage.score = 12;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [firstChunk, secondChunk, otherPage],
+    });
+
+    const output = parsed(await harness.call({ query: "甲方公司 H1 增长主要由什么驱动？金额约多少？" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
   test("does not rescue a question that explicitly marks its clue as unknown", async () => {
     const rejected = result("initial-noise", {
       fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
