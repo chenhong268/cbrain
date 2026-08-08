@@ -7,6 +7,10 @@ import {
   type RetrievalChannelEvidence,
 } from "./retrieval-support.js";
 
+const FTS_FALLBACK_MIN_COVERAGE = 0.4;
+const FTS_FALLBACK_DOMINANCE_RATIO = 2;
+const FTS_FALLBACK_MIN_SHARE_OF_TOP_SCORE = 0.6;
+
 export interface ContentCandidateDecision {
   readonly accepted: boolean;
   readonly reason:
@@ -64,6 +68,35 @@ export function filterContentCandidates(
   results: readonly SearchResult[],
 ): SearchResult[] {
   return results.filter((result) => assessContentCandidate(query, result).accepted);
+}
+
+/**
+ * Bounded rescue for content recall after its normal fail-closed admission
+ * returns nothing. Natural-language questions often contain more context than
+ * the matching memory, so a high-confidence FTS lead may not reach the normal
+ * 0.6 lexical threshold. Never return more than the single dominant FTS hit.
+ */
+export function filterContentFtsFallbackCandidates(
+  query: string,
+  candidates: readonly SearchResult[],
+): SearchResult[] {
+  const admitted = filterContentCandidates(query, candidates);
+  if (admitted.length > 0) return admitted;
+
+  const supported = candidates.filter((candidate) => (
+    candidate.source === "fts"
+    && Number.isFinite(candidate.score)
+    && candidate.score > 0
+    && (getRetrievalSupport(candidate).fts?.original?.rootLexicalCoverage ?? 0) >= FTS_FALLBACK_MIN_COVERAGE
+  ));
+  const [top, runnerUp] = supported;
+  if (!top) return [];
+  const strongestScore = Math.max(0, ...candidates.map((candidate) => (
+    Number.isFinite(candidate.score) ? candidate.score : 0
+  )));
+  if (top.score < strongestScore * FTS_FALLBACK_MIN_SHARE_OF_TOP_SCORE) return [];
+  if (runnerUp && top.score < runnerUp.score * FTS_FALLBACK_DOMINANCE_RATIO) return [];
+  return [top];
 }
 
 function hasFiniteRank(evidence: RetrievalChannelEvidence | undefined): boolean {

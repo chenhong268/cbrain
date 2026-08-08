@@ -95,8 +95,9 @@ function result(
   slug: string,
   support?: RetrievalSupport,
   snippet = "匿名可见片段",
+  source: SearchResult["source"] = "hybrid",
 ): SearchResult {
-  const value: SearchResult = { slug, score: 0.01, snippet, source: "hybrid" };
+  const value: SearchResult = { slug, score: 0.01, snippet, source };
   Object.defineProperty(value, "candidateVector", {
     value: ["CANDIDATE-VECTOR-SENTINEL", 987654.125],
     enumerable: false,
@@ -130,6 +131,7 @@ function makeHarness(
     overviewTimeline?: (slug: string) => unknown[];
     sparseBatch?: boolean;
     proactiveHint?: "expiry" | "timeline" | "shared";
+    fallbackResults?: SearchResult[];
   } = {},
 ): Harness {
   let handler: Handler | undefined;
@@ -208,7 +210,7 @@ function makeHarness(
     search: {
       async search(query: string, options?: SearchOptions) {
         searchCalls.push({ query, options });
-        return results;
+        return options?.strategy === "fts" ? opts.fallbackResults ?? results : results;
       },
     },
     pages: {
@@ -310,6 +312,111 @@ describe("content frontdoor honesty sequencing", () => {
       options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true },
     }]);
     expect(harness.searchCalls[0]!.options).not.toHaveProperty("multiStep");
+  });
+
+  test("uses a clearly stronger FTS match when normal content recall has no admissible result", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const fallback = result("fts-rescue", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "匿名决策已记录", "fts");
+    fallback.score = 30;
+    const runnerUp = result("fts-runner-up", {
+      fts: { original: { rankScore: 14, rootLexicalCoverage: 0.2 } },
+    }, "其他匿名内容", "fts");
+    runnerUp.score = 14;
+    const harness = makeHarness([rejected], "legacy", { fallbackResults: [fallback, runnerUp] });
+
+    const output = parsed(await harness.call({ query: "匿名新版决策与扩大试用条件" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities.map((entity) => entity.title)).toEqual(["标题-fts-rescue"]);
+    expect(harness.searchCalls).toEqual([
+      {
+        query: "匿名新版决策与扩大试用条件",
+        options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true },
+      },
+      {
+        query: "匿名新版决策与扩大试用条件",
+        options: { strategy: "fts", limit: 3, _captureSupport: true, _skipDetailEnrich: true },
+      },
+    ]);
+  });
+
+  test("skips an unsupported FTS leader for the only clearly supported fallback", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const unsupportedLeader = result("fts-noise", {
+      fts: { original: { rankScore: 28, rootLexicalCoverage: 0 } },
+    }, "无关匿名内容", "fts");
+    unsupportedLeader.score = 28;
+    const fallback = result("fts-rescue", {
+      fts: { original: { rankScore: 20, rootLexicalCoverage: 0.4 } },
+    }, "匿名决策已记录", "fts");
+    fallback.score = 20;
+    const weakTail = result("fts-tail", {
+      fts: { original: { rankScore: 10, rootLexicalCoverage: 0.2 } },
+    }, "其他匿名内容", "fts");
+    weakTail.score = 10;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [unsupportedLeader, fallback, weakTail],
+    });
+
+    const output = parsed(await harness.call({ query: "匿名扩大试用的已确认决策与准入条件" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities.map((entity) => entity.title)).toEqual(["标题-fts-rescue"]);
+  });
+
+  test("keeps ambiguous FTS fallback results hidden", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const top = result("ambiguous-top", {
+      fts: { original: { rankScore: 25, rootLexicalCoverage: 0.4 } },
+    }, "匿名相邻内容", "fts");
+    top.score = 25;
+    const nearMatch = result("ambiguous-runner-up", {
+      fts: { original: { rankScore: 14, rootLexicalCoverage: 0.4 } },
+    }, "匿名相邻内容", "fts");
+    nearMatch.score = 14;
+    const harness = makeHarness([rejected], "legacy", { fallbackResults: [top, nearMatch] });
+
+    const output = parsed(await harness.call({ query: "匿名新版决策与扩大试用条件" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not rescue a question that explicitly marks its clue as unknown", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const top = result("unknown-top", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "匿名相邻内容", "fts");
+    top.score = 30;
+    const runnerUp = result("unknown-runner-up", {
+      fts: { original: { rankScore: 14, rootLexicalCoverage: 0.2 } },
+    }, "其他匿名内容", "fts");
+    runnerUp.score = 14;
+    const harness = makeHarness([rejected], "legacy", { fallbackResults: [top, runnerUp] });
+
+    const output = parsed(await harness.call({ query: "匿名未知线索" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+    expect(harness.searchCalls).toHaveLength(1);
   });
 
   test("rejects before page, sealed, raw, evidence, and formatting work", async () => {
