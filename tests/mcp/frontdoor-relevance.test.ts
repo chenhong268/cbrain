@@ -397,6 +397,35 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.summary.status).toBe("empty");
   });
 
+  test("does not treat two chunks from the same page as competing FTS fallback results", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const firstChunk = result("single-supported-page", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "匿名记录的第一段", "fts");
+    firstChunk.score = 30;
+    const secondChunk = result("single-supported-page", {
+      fts: { original: { rankScore: 22, rootLexicalCoverage: 0.4 } },
+    }, "匿名记录的第二段", "fts");
+    secondChunk.score = 22;
+    const unrelatedPage = result("other-page", {
+      fts: { original: { rankScore: 12, rootLexicalCoverage: 0.2 } },
+    }, "其他匿名内容", "fts");
+    unrelatedPage.score = 12;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [firstChunk, secondChunk, unrelatedPage],
+    });
+
+    const output = parsed(await harness.call({ query: "匿名问题的明确记录" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities.map((entity) => entity.title)).toEqual(["标题-single-supported-page"]);
+  });
+
   test("does not rescue a question that explicitly marks its clue as unknown", async () => {
     const rejected = result("initial-noise", {
       fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },

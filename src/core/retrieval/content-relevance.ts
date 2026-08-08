@@ -83,12 +83,18 @@ export function filterContentFtsFallbackCandidates(
   const admitted = filterContentCandidates(query, candidates);
   if (admitted.length > 0) return admitted;
 
-  const supported = candidates.filter((candidate) => (
-    candidate.source === "fts"
-    && Number.isFinite(candidate.score)
-    && candidate.score > 0
-    && (getRetrievalSupport(candidate).fts?.original?.rootLexicalCoverage ?? 0) >= FTS_FALLBACK_MIN_COVERAGE
-  ));
+  const supportedBySlug = new Map<string, SearchResult>();
+  for (const candidate of candidates) {
+    if (
+      candidate.source !== "fts"
+      || !Number.isFinite(candidate.score)
+      || candidate.score <= 0
+      || (getRetrievalSupport(candidate).fts?.original?.rootLexicalCoverage ?? 0) < FTS_FALLBACK_MIN_COVERAGE
+    ) continue;
+    const existing = supportedBySlug.get(candidate.slug);
+    if (!existing || candidate.score > existing.score) supportedBySlug.set(candidate.slug, candidate);
+  }
+  const supported = [...supportedBySlug.values()].sort((left, right) => right.score - left.score);
   const [top, runnerUp] = supported;
   if (!top) return [];
   const strongestScore = Math.max(0, ...candidates.map((candidate) => (
