@@ -405,6 +405,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
       { slug: "records/null-source", contentHash: "legacy", sourceFingerprint: null },
       { slug: "records/number-source", contentHash: "legacy", sourceFingerprint: 7 },
       { slug: "records/object-source", contentHash: "legacy", sourceFingerprint: { value: "page:x" } },
+      { slug: "records/mismatched-source-kind", contentHash: "legacy", sourceFingerprint: "page:hash-a", sourceKind: "raw_chunks" },
     ];
     const ids: number[] = [];
     for (const item of cases) {
@@ -413,7 +414,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     }
     const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
-    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 4, selected: 0 });
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 5, selected: 0 });
     for (const id of ids) expect(db.claimNerJobByIdWithLease(id)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });

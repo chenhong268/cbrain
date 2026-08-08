@@ -1863,6 +1863,26 @@ describe("runNerBackfillStage (#252)", () => {
     expect(JSON.stringify(db.getJob(id))).toBe(before);
   });
 
+  test("a source-kind mismatch blocks NER execution before LLM", async () => {
+    db.upsertPage({ slug: "records/linked", type: "record", title: "Linked", filePath: "records/linked.md", contentHash: "hash-a" });
+    db.insertChunk("records/linked", 0, "first");
+    const id = db.submitJob("ner-backfill", {
+      slug: "records/linked",
+      kind: "ner",
+      pageContentHash: "hash-a",
+      sourceFingerprint: "page:hash-a",
+      sourceKind: "raw_chunks",
+    });
+    const before = JSON.stringify(db.getJob(id));
+    let calls = 0;
+    const guardedPipeline = { processNer: async () => { calls++; } } as unknown as ContentPipeline;
+
+    await expect(runNerBackfillStage(db, guardedPipeline, new PageManager(db, testDir), { maxItems: 1 }))
+      .rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(calls).toBe(0);
+    expect(JSON.stringify(db.getJob(id))).toBe(before);
+  });
+
   test("entity_facts job applies only whitelisted empty fields", async () => {
     const seed = new IngestManager(
       db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir,
