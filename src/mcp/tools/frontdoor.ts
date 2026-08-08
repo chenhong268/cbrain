@@ -22,7 +22,7 @@ import {
 } from "./format-result.js";
 import { buildToolResult } from "./result-builder.js";
 import { FRONTDOOR_DATA_KEYS, projectFrontdoorData, structuredSummary } from "./recall-output.js";
-import { filterContentCandidates } from "../../core/retrieval/content-relevance.js";
+import { filterContentCandidates, filterContentFtsFallbackCandidates } from "../../core/retrieval/content-relevance.js";
 import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-current-state-guard.js";
 import { generateProactiveHints } from "../../core/retrieval/proactive.js";
 import { applyProactiveBudget, trimHint } from "./trim.js";
@@ -132,7 +132,16 @@ async function runContentRecall(
     _captureSupport: true,
     _skipDetailEnrich: true,
   });
-  const results = filterContentCandidates(query, candidates);
+  let results = filterContentCandidates(query, candidates);
+  if (results.length === 0 && !hasExplicitUnknownCue(query)) {
+    const ftsCandidates = await ctx.search.search(query, {
+      strategy: "fts",
+      limit,
+      _captureSupport: true,
+      _skipDetailEnrich: true,
+    });
+    results = filterContentFtsFallbackCandidates(query, ftsCandidates);
+  }
   // #385 — personal current-state guard: bounded, deterministic check before
   // presenting reminder-like search material as a current personal recommendation.
   // Activates only for a closed grammar (first-person + action/temporal intent).
@@ -241,6 +250,12 @@ async function runContentRecall(
     ? { ...formatted.summary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
     : formatted.summary;
   return withRouting({ display, summary, raw: formatted.raw }, payload, routing);
+}
+
+function hasExplicitUnknownCue(query: string): boolean {
+  // A caller who explicitly says the clue is unknown is not asking us to turn
+  // a partial keyword overlap into a fact. Keep the normal empty response.
+  return /(?:未知|不清楚|不确定)/u.test(query);
 }
 
 function runEpisodeRecall(
