@@ -159,6 +159,11 @@ describe("hasSemanticContent", () => {
 });
 
 describe("hasSufficientRecordContent", () => {
+  test("requires at least 50 non-URL semantic characters", () => {
+    expect(hasSufficientRecordContent("a".repeat(49))).toBe(false);
+    expect(hasSufficientRecordContent("a".repeat(50))).toBe(true);
+  });
+
   test("rejects URL plus a short placeholder", () => {
     expect(hasSufficientRecordContent("https://example.invalid/source\n待解析")).toBe(false);
   });

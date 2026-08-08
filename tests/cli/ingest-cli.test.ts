@@ -103,7 +103,7 @@ describe("CLI ingest — dedup flags and output", () => {
   });
 
   test("duplicate output format: shows existing title, no extra page", async () => {
-    const body = "这是CLI去重测试的固定内容";
+    const body = "这是CLI去重测试的固定内容，包含足够的匿名事实背景，用于验证质量门通过后仍会在写入前正确去重。".repeat(2);
     const { normalizeAndHashBody } = await import("../../src/core/shared.js");
     const hash = normalizeAndHashBody(body);
 

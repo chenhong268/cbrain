@@ -368,6 +368,15 @@ export class IngestManager {
     slug: string, title: string, type: PageType, body: string, tags: string[], nerAction: NerAction,
     allowDuplicate?: boolean, writer?: RecordWriterContext
   ): Promise<IngestResult> {
+    const existedBefore = !!this.pages.getBySlug(slug);
+    // #376: enforce the quality contract on governed user writes before dedup
+    // can return a success-shaped duplicate for a new placeholder. Internal
+    // maintenance callers do not provide writer context and keep their existing
+    // sparse-fixture/backfill semantics.
+    if (writer && !existedBefore && type === "record" && !hasSufficientRecordContent(body)) {
+      throw new Error("VALIDATION_ERROR: record content is too short; provide substantive content");
+    }
+
     // --- Dedup gate for durable source types (record / insight) ---
     let bodyHash: string | undefined;
     let overrideAudit: { matchedSlug: string; matchedHash: string } | null = null;
@@ -405,14 +414,6 @@ export class IngestManager {
       if (allowDuplicate && (match || existingHash === bodyHash)) {
         overrideAudit = { matchedSlug: match?.slug ?? slug, matchedHash: bodyHash };
       }
-    }
-
-    const existedBefore = !!this.pages.getBySlug(slug);
-    // #376: enforce the quality contract on governed user writes only. Internal
-    // maintenance callers do not provide writer context and keep their existing
-    // sparse-fixture/backfill semantics.
-    if (writer && !existedBefore && type === "record" && !hasSufficientRecordContent(body)) {
-      throw new Error("VALIDATION_ERROR: record content is too short; provide substantive content");
     }
 
     // --- Existing pipeline ---

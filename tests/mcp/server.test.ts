@@ -763,6 +763,20 @@ describe("MCP Server", () => {
       expect(db.getPage("records/placeholder")).toBeNull();
     });
 
+    test("rejects a placeholder when an unknown type normalizes to record", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).put_page.handler({
+        slug: "records/unknown-type-placeholder",
+        content: "https://example.invalid/source\n待解析",
+        title: "未知类型占位记录",
+        type: "unknown-type",
+      });
+
+      const data = JSON.parse(result.content[0].text);
+      expect(data.error).toMatch(/VALIDATION_ERROR.*record/i);
+      expect(db.getPage("records/unknown-type-placeholder")).toBeNull();
+    });
+
     test("short entity content remains allowed", async () => {
       const server = createServer(deps);
       const result = await getTools(server).put_page.handler({

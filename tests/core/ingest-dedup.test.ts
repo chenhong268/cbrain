@@ -222,6 +222,28 @@ describe("Ingest dedup", () => {
     expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get()).toEqual({ c: 0 });
   });
 
+  test("new record rejects a placeholder even when its hash matches a legacy page", async () => {
+    const placeholder = "https://example.invalid/source\n待解析";
+    const pages = new PageManager(db, vaultPath);
+    const legacy = pages.create({
+      title: "历史占位记录",
+      type: "record",
+      body: placeholder,
+    });
+    db.updateIngestHash(legacy.slug, normalizeAndHashBody(placeholder));
+
+    await expect(ingest.ingest({
+      content: placeholder,
+      title: "新占位记录",
+      pageType: "record",
+      type: "text",
+      skipNer: true,
+      writer: { actorClass: "agent" },
+    })).rejects.toThrow(/VALIDATION_ERROR.*record/i);
+
+    expect(db.rawDb.prepare("SELECT COUNT(*) as c FROM pages").get()).toEqual({ c: 1 });
+  });
+
   test("existing record updates are outside the new-page quality gate", async () => {
     const first = await ingest.ingest({ content: "这是一段足够完整的匿名记录内容，用于验证既有页面更新范围。".repeat(2), title: "可更新记录", type: "text", skipNer: true, writer: { actorClass: "agent" } });
     const updated = await ingest.ingest({
