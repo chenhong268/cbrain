@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import { hashContent } from "../shared.js";
 import {
+  authorizeNerJobClaim,
   countCurrentGraphLinks,
   deriveZeroLinkSource,
   finalizeRepairBatch,
@@ -436,7 +437,7 @@ export async function runNerBackfillStage(
         frozenIdentity.batchId !== manifestIdentity.batchId) throw new Error("BATCH_INTEGRITY_CONFLICT");
     }
     const expectedIdentity = frozenIdentity;
-    const job = entityFacts ? db.claimJobById(id) : db.claimNerJobByIdWithLease(id, expectedIdentity);
+    const job = entityFacts ? db.claimJobById(id) : db.claimNerJobByIdWithLease(id, expectedIdentity, authorizeNerJobClaim);
     if (!job) { counts.skipped++; continue; }
     const leaseToken = "leaseToken" in job && typeof job.leaseToken === "string" ? job.leaseToken : null;
     const leaseDigest = "payloadDigest" in job && typeof job.payloadDigest === "string" ? job.payloadDigest : null;

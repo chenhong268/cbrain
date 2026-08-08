@@ -12,7 +12,6 @@ import {
   type PageCreationProvenanceInput,
   type PageWriteProvenanceRow,
 } from "../core/page-write-provenance.js";
-import { authorizeNerJobClaim } from "../core/maintenance/zero-link-backfill.js";
 import { parseFingerprintedNerJob } from "../core/ingestion/ner-backfill-contract.js";
 import {
   runAliasMigrations,
@@ -1505,6 +1504,7 @@ export class CBrainDB {
   claimNerJobByIdWithLease(
     id: number,
     expectedIdentity?: NerAttemptIdentity,
+    authorize?: (db: { rawDb: Database }, jobId: number) => "legacy" | "ordinary" | "repair" | null,
   ): { id: number; name: string; data: string; attempts: number; leaseToken: string; payloadDigest: string } | null {
     this.rawDb.exec("BEGIN IMMEDIATE");
     try {
@@ -1514,7 +1514,7 @@ export class CBrainDB {
       if (!row?.data) { this.rawDb.exec("COMMIT"); return null; }
       let data: Record<string, unknown>;
       try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { this.rawDb.exec("COMMIT"); return null; }
-      const claimMode = authorizeNerJobClaim(this, id);
+      const claimMode = authorize?.(this, id);
       if (!claimMode) { this.rawDb.exec("COMMIT"); return null; }
       const identity = claimMode === "legacy" ? buildNerAttemptIdentity(data) : buildStrictFrozenNerIdentity(data);
       if (!identity || (expectedIdentity && !sameNerAttemptIdentity(identity, expectedIdentity))) {
