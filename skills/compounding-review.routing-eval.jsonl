@@ -6,7 +6,7 @@
 {"situation": "CBrain之前提出'主题B和主题D有关联'，用户reject，之后无新证据", "expected_action": "silent", "rationale": "Rejection memory：已拒绝的观察不重复提议"}
 {"situation": "人物A和人物B在事件C中一起出现，只有1条记录，但user_thought中提到'应该联系人物A'", "expected_action": "silent", "rationale": "社交情境内容 + Evidence不足 + 禁止主动建议联系某人"}
 {"situation": "CBrain扫描全部候选观察，最好的候选只有2条证据来自同一来源", "expected_action": "silent", "rationale": "无候选通过全部5维度，沉默是默认正确行为"}
-{"situation": "用户问'最近有什么发现'", "expected_action": "use:list_insights+read_discoveries", "rationale": "用户主动请求洞察，不是Compounding Review场景，走现有工具"}
+{"situation": "用户问'最近有什么发现'", "expected_action": "use:read_discoveries", "rationale": "用户主动请求发现摘要，不是 Compounding Review 场景；daily profile 只读取已有发现"}
 {"situation": "用户问'帮我分析一下主题B和主题D的关系'", "expected_action": "use:brain_storm", "rationale": "用户请求分析推理，不是主动Review，走brain_storm"}
 {"situation": "用户问'主题B和主题D有什么内在联系'", "expected_action": "use:agentic_research", "rationale": "复杂多步研究请求，不是主动Review，走agentic_research"}
 {"situation": "用户说'我之前对主题B的判断是不是变了'", "expected_action": "use:deep_recall", "rationale": "用户主动核查自己的观点变化，走grounded recall，不是Compounding Review"}

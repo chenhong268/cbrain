@@ -6,6 +6,7 @@ import {
   checkAgentContractTools,
   checkAgentFacingRoutingProfile,
   checkAgentProfileSkillContract,
+  checkNoNewAgentAliasReferences,
   checkAgentWorkflowContract,
   checkIngestPageTypeDocs,
   checkToolDescriptions,
@@ -275,6 +276,48 @@ describe("checkAgentProfileSkillContract (#335)", () => {
       expect(fails(checkAgentProfileSkillContract(withSkills(files)))).toBe(false);
     });
   }
+});
+
+describe("checkNoNewAgentAliasReferences (#377)", () => {
+  test("accepts aliases only as a forbidden routing fixture or explicit negative guidance", () => {
+    const dir = withSkills({
+      "routing.jsonl": JSON.stringify({ forbidden_tools: ["get_links"] }),
+      "anti-pattern.jsonl": JSON.stringify({ category: "anti_pattern", expected_tool: "cbrain_recall", forbidden_tools: ["get_links"] }),
+      "guide.md": "❌ query + get_links 连调 → cbrain_recall",
+    });
+    expect(fails(checkNoNewAgentAliasReferences(dir))).toBe(false);
+  });
+
+  test("rejects a positive alias instruction without echoing unrelated text", () => {
+    const dir = withSkills({ "guide.md": "调用 get_links fixture-body-sentinel" });
+    expect(checkNoNewAgentAliasReferences(dir)).toEqual([{
+      check: "agent alias migration @skills/guide.md:1",
+      passed: false,
+      detail: "positive compatibility alias: get_links",
+    }]);
+  });
+
+  test("rejects an alias in a routing fixture unless it is explicitly forbidden", () => {
+    const dir = withSkills({
+      "routing.jsonl": JSON.stringify({ expected_tool: "list_insights", forbidden_tools: [] }),
+    });
+    expect(checkNoNewAgentAliasReferences(dir)).toEqual([{
+      check: "agent alias migration @skills/routing.jsonl:1",
+      passed: false,
+      detail: "positive compatibility alias: list_insights",
+    }]);
+  });
+
+  test("does not treat an anti-pattern label as a blanket alias exemption", () => {
+    const dir = withSkills({
+      "routing.jsonl": JSON.stringify({ category: "anti_pattern", expected_tool: "job_submit", forbidden_tools: [] }),
+    });
+    expect(checkNoNewAgentAliasReferences(dir)).toEqual([{
+      check: "agent alias migration @skills/routing.jsonl:1",
+      passed: false,
+      detail: "positive compatibility alias: job_submit",
+    }]);
+  });
 });
 
 describe("checkAgentContractTools (#316)", () => {

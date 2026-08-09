@@ -1036,6 +1036,54 @@ export function checkAgentProfileSkillContract(skillsDir: string): CheckResult[]
   }];
 }
 
+/** #377 — Agent-facing skills may mention a retired name only to prohibit it.
+ * The external migration table lives under docs/; this deliberately guards the
+ * executable skills and routing fixtures where a positive mention becomes an
+ * instruction for the daily Agent. */
+export function checkNoNewAgentAliasReferences(skillsDir: string): CheckResult[] {
+  const aliases = [
+    "get_tags", "add_tag", "remove_tag", "add_alias", "remove_alias",
+    "get_links", "add_link", "remove_link",
+    "job_submit", "job_list", "job_status", "job_cancel", "job_retry",
+    "batch_delete_pages", "batch_add_links", "batch_merge_pages",
+    "get_profile", "update_profile", "remove_profile", "reload_profile",
+    "list_insights", "get_insight", "archive_insight", "dismiss_insight", "query_insights", "promote_discovery",
+  ] as const;
+  const out: CheckResult[] = [];
+  const files = readdirSync(skillsDir).filter((name) => name.endsWith(".md") || name.endsWith(".jsonl"));
+
+  for (const file of files) {
+    const text = readFileSync(join(skillsDir, file), "utf-8");
+    for (const [index, line] of text.split("\n").entries()) {
+      for (const alias of aliases) {
+        if (!new RegExp(`\\b${alias}\\b`).test(line)) continue;
+        const isForbiddenFixture = file.endsWith(".jsonl") && (() => {
+          try {
+            const row = JSON.parse(line) as { forbidden_tools?: unknown };
+            return Array.isArray(row.forbidden_tools) && row.forbidden_tools.includes(alias);
+          } catch {
+            return false;
+          }
+        })();
+        const isExplicitNegative = /❌|(?:禁止|不得|不要|不能|不允许|严禁|切勿).{0,80}\b(?:调用|使用|call|use)\b/i.test(line);
+        if (!isForbiddenFixture && !isExplicitNegative) {
+          out.push({
+            check: `agent alias migration @skills/${file}:${index + 1}`,
+            passed: false,
+            detail: `positive compatibility alias: ${alias}`,
+          });
+        }
+      }
+    }
+  }
+
+  return out.length > 0 ? out : [{
+    check: "agent alias migration",
+    passed: true,
+    detail: "candidate aliases appear only in explicit negative guidance",
+  }];
+}
+
 /** #322 — keep the daily Agent on canonical write + operational recall paths.
  * This is deliberately structural and limited to managed skills: public docs
  * may discuss lower-level recovery, but skills are executable Agent policy. */
@@ -1351,6 +1399,7 @@ function main(): void {
     ...checkAgentFacingRoutingProfile(join(PROJECT_DIR, "skills")),
     ...checkAgentWorkflowContract(join(PROJECT_DIR, "skills")),
     ...checkAgentProfileSkillContract(join(PROJECT_DIR, "skills")),
+    ...checkNoNewAgentAliasReferences(join(PROJECT_DIR, "skills")),
     ...checkIngestPageTypeDocs(docs),
     ...checkSections(docs, tools, cli),
   ];

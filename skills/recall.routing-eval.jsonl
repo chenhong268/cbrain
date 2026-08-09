@@ -15,7 +15,7 @@
 {"intent": "找一下上次讨论的内容", "expected_tool": "deep_recall", "category": "recall", "note": "自然语言 → deep_recall"}
 {"intent": "多说说王磊的细节", "expected_tool": "expand_entity", "category": "drilldown", "requires_slug": true}
 {"intent": "展开讲讲星辰科技", "expected_tool": "expand_entity", "category": "drilldown", "requires_slug": true}
-{"intent": "query后连调get_page+get_links+get_timeline", "expected_tool": "deep_recall", "category": "anti_pattern", "note": "应该一次 deep_recall 而不是 4 次调用"}
+{"intent": "query后连调get_page+get_links+get_timeline", "expected_tool": "deep_recall", "category": "anti_pattern", "forbidden_tools": ["get_links"], "note": "应该一次 deep_recall 而不是 4 次调用"}
 {"intent": "总结类请求却用了query", "expected_tool": "summarize", "category": "anti_pattern", "note": "总结/概览必须走 summarize"}
 {"intent": "没有slug就调expand_entity", "expected_tool": "FORBIDDEN", "category": "anti_pattern", "note": "expand_entity 必须先从其他工具拿到 slug"}
 {"intent": "deep_recall未命中后直接web_search", "expected_tool": "query", "category": "anti_pattern", "note": "deep_recall 空结果必须先 query(缩减关键词) 在 CBrain 内重试，禁止直接跳外部搜索"}

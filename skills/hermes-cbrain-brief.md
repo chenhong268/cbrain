@@ -28,7 +28,7 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 
 ## 4. 来源追踪
 
-哪来的、谁说的、可靠吗 → `get_provenance({ target_type:"link"|"timeline", target_id })`。无 target：关系先 get_links，事件先 get_timeline。找不到如实说，禁止编造；禁输出 target_id/confidence/slug/JSON。
+哪来的、谁说的、可靠吗 → daily 默认 `cbrain_recall(detail:"brief")`，只基于可见证据回答。显式 debug/full 溯源会话才可用 `get_provenance({ target_type:"link"|"timeline", target_id })`；无 target 时关系先 `link({ action:"list", ... })`，事件先 `get_timeline`。找不到如实说，禁止编造；禁输出 target_id/confidence/slug/JSON。
 
 ## 5. Response Rules
 

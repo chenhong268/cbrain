@@ -44,10 +44,25 @@ describe("GET /health runtime freshness (#320)", () => {
     await Bun.sleep(5);
     const second = await fetch(endpoint).then((response) => response.json());
 
-    expect(Object.keys(first).sort()).toEqual(["ok", "output_boundary", "started_at", "tools", "version"]);
+    expect(Object.keys(first).sort()).toEqual([
+      "ok",
+      "output_boundary",
+      "profile_inventory_counts",
+      "registered_tools",
+      "started_at",
+      "tools",
+      "version",
+    ]);
     expect(first.ok).toBe(true);
     expect(first.output_boundary).toBe("legacy");
     expect(first.tools).toBeGreaterThan(0);
+    expect(first.registered_tools).toBe(first.tools);
+    expect(first.profile_inventory_counts).toEqual({
+      agent: 20,
+      maintenance: 30,
+      debug: 24,
+      full: first.tools,
+    });
     expect(typeof first.version).toBe("string");
     expect(first.version.length).toBeGreaterThan(0);
     expect(Number.isNaN(Date.parse(first.started_at))).toBe(false);
@@ -55,7 +70,7 @@ describe("GET /health runtime freshness (#320)", () => {
     expect(db.getPageCount()).toBe(beforePages);
 
     const serialized = JSON.stringify(first).toLowerCase();
-    for (const privateTerm of ["pid", "path", "vault", "database", "secret", "profile"]) {
+    for (const privateTerm of ["pid", "path", "vault", "database", "secret"]) {
       expect(serialized).not.toContain(privateTerm);
     }
   });
