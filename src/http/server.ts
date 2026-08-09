@@ -7,7 +7,7 @@ import { attachMcpTools } from "../mcp/server.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveSessionProfile } from "./session-profile.js";
-import type { ToolProfile } from "../mcp/tool-profiles.js";
+import { TOOL_PROFILE_ALLOWLISTS, type ToolProfile } from "../mcp/tool-profiles.js";
 import { version } from "../version.js";
 
 interface ToolDef {
@@ -61,6 +61,13 @@ interface McpSession {
 
 export function createHttpServer(ctx: ToolContext) {
   const tools = createToolRegistry(ctx);
+  const registeredToolNames = new Set(tools.keys());
+  const profileInventoryCounts = {
+    agent: TOOL_PROFILE_ALLOWLISTS.agent.filter((name) => registeredToolNames.has(name)).length,
+    maintenance: TOOL_PROFILE_ALLOWLISTS.maintenance.filter((name) => registeredToolNames.has(name)).length,
+    debug: TOOL_PROFILE_ALLOWLISTS.debug.filter((name) => registeredToolNames.has(name)).length,
+    full: tools.size,
+  };
 
   // Per-client MCP sessions. Each session gets its own McpServer + transport, but every
   // server attaches tools via the SAME attachMcpTools path and shares this one ctx — so
@@ -179,6 +186,8 @@ export function createHttpServer(ctx: ToolContext) {
             return Response.json({
               ok: true,
               tools: tools.size,
+              registered_tools: tools.size,
+              profile_inventory_counts: profileInventoryCounts,
               version,
               started_at: startedAt,
               output_boundary: ctx.outputMode,

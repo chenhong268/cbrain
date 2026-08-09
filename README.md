@@ -263,10 +263,12 @@ Not all features work the same way. Some are CLI one-liners, some need an Agent 
 | Category | Features | How it works |
 |:---------|:---------|:-------------|
 | **Standalone CLI** | `query`, `ingest`, `list`, `show`, `delete`, `tags`, `timeline`, `versions`, `health`, `doctor`, `sync` | 直接用，不需要 Agent |
-| **Agent on-demand** | `get_page`, `put_page`, `ingest_dialogue`, `resolve_slugs`, `graph_query`, `job_submit`, `status` | Agent 在对话中按需调用 |
+| **Agent on-demand** | `get_page`, `put_page`, `ingest_dialogue`, `resolve_slugs`, `graph_query`, `status` | Agent 在对话中按需调用 |
 | **Agent periodic tasks** | `dream` (nightly), `discover` (every 3 days), `enrich` (weekly), `reflect` (after conversations), `cleanup` (weekly) | 需要 Agent 配置定时任务，自动运行 |
 
 The third category is where CBrain truly compounds. Without periodic tasks, you still get a working knowledge base. **With them, the brain maintains itself** — entity enrichment, structural discoveries, insights, and cleanup happen automatically.
+
+日常 Agent 使用固定的日常权限清单；任务队列仅在 maintenance/full profile 中通过 `job` 的相应 `action` 调用，不属于日常 Agent 权限。
 
 第三类功能是 CBrain 复利增长的关键。没有定时任务，你得到的是一个可用的知识库。**有了定时任务，大脑自己维护自己** —— 实体升级、结构发现、洞察生成、自动清理，全部自动化。
 
@@ -444,11 +446,7 @@ Add to your Agent's MCP config:
 **Job Queue:**
 | Tool | Description |
 |:-----|:------------|
-| `job_submit` | Submit a job to the queue |
-| `job_list` | List jobs with optional status filter |
-| `job_status` | Get detailed job status |
-| `job_cancel` | Cancel a pending/running job |
-| `job_retry` | Retry a failed job |
+| `job` | Submit, list, inspect, cancel, or retry jobs with `action=submit/list/status/cancel/retry` |
 
 **Observability:**
 | Tool | Description |

@@ -38,7 +38,7 @@
 │         这条记忆可靠吗、可信吗、这个来源可靠吗
 │   → 已知 target_id：get_provenance({ target_type, target_id })
 │   → 未知 target，定位路径：
-│     - 关系来源 → graph_query / get_links（debug 工具）拿 link_id → get_provenance({ target_type: "link", target_id })
+│     - 关系来源 → graph_query / link(action="list", ... )（debug 工具）拿 link_id → get_provenance({ target_type: "link", target_id })
 │     - 事件来源 → get_timeline 拿到 timeline_id → get_provenance({ target_type: "timeline", target_id })
 │     - 不确定指哪条 → cbrain_recall（advanced escape hatch：deep_recall / query 做上下文发现，找到相关 link/timeline 条目后拿 ID）
 │   → 找不到具体 target：如实告知，禁止编造 provenance
@@ -432,7 +432,7 @@ grounded recall 返回后，首轮回答必须：
 | brain_storm（debug/internal） | LLM 推理 + 缺口分析 + 跨域关联 | debug/internal profile 工具；默认走 cbrain_recall（reasoning 分发） |
 | graph_query | 关系遍历（traverse/backlinks/related） | 查两个人/公司关系（cbrain_recall relationship 分发的 advanced 直调） |
 | get_org_tree | 组织层级树（向上/向下/双向） | 组织架构、下属、上级、汇报线 — 一次调用返回完整树（cbrain_recall hierarchy 分发的 advanced 直调） |
-| list_insights | 系统自动生成的洞察列表 | 发现漏掉的关联 |
+| insight(action="list") | 系统自动生成的洞察列表 | 发现漏掉的关联 |
 | read_discoveries | 跨域关联发现（用户可读摘要） | 深度发现，只展示 display/cards/summary |
 | get_timeline | 按时间排列的事件流 | 时间线回顾 |
 | merge_pages | 合并结果预览 + 执行 | 合并重复页面（先 dryRun） |

@@ -132,7 +132,28 @@ describe("attachMcpTools profile gating (#251)", () => {
 
   test("agent is bounded and excludes low-level/admin tools", async () => {
     const names = await listToolsWithProfile("agent");
-    expect(names.length).toBeLessThanOrEqual(20);
+    expect(names).toEqual([
+      "cbrain_recall",
+      "deep_recall",
+      "find_similar_entities",
+      "get_org_tree",
+      "get_page",
+      "get_pages",
+      "get_timeline",
+      "graph_query",
+      "ingest",
+      "ingest_dialogue",
+      "list_pages",
+      "merge_entities",
+      "next_actions",
+      "profile",
+      "put_page",
+      "read_discoveries",
+      "recall_episode",
+      "resolve_slugs",
+      "status",
+      "update_discovery_status",
+    ]);
     for (const t of ["query", "get_chunks", "dream", "sync", "health", "job_submit"]) {
       expect(names, `agent must exclude ${t}`).not.toContain(t);
     }

@@ -56,7 +56,7 @@
 ### 9. 发现与洞察
 - **触发**：最近有什么发现 / 有什么我漏掉的 / 有什么关联没注意到的
 - **工具**：daily profile 只用 `read_discoveries()` 读取已有发现
-- **full-only advanced escape hatch**：`list_insights()`
+- **full-only advanced escape hatch**：`insight({ action: "list" })`
 - **区别**：insight 是系统自动生成的洞察，discovery 是跨域关联发现
 
 ### 10. 时间线/事件回顾
@@ -74,10 +74,10 @@
 - **工具**：`ingest(content, type, title, tags)` — 自动分块、NER、建边
 - **格式**：text 或 markdown
 
-### 13. 标签管理
+### 13. 标签管理（debug/full profile）
 - **触发**：打个标签 / 加标签 / 标签管理 / 按标签找
-- **工具**：`add_tag` / `remove_tag` / `get_tags`
-- **批量**：`batch_add_tags` 批量打标
+- **工具**：`tag({ action: "add" | "remove" | "list", slug, tag })`
+- **边界**：daily profile 不直接管理标签；不要通过扩大日常 Agent 权限来处理这类请求
 
 ### 14. 清理/去重
 - **触发**：清理 / 去重 / 整理 / 有什么该删的 / 大脑整理
