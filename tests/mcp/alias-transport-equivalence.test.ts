@@ -120,12 +120,23 @@ const TIME_FIELDS = new Set(["created_at", "updated_at", "detected_at", "last_de
 // that timestamp, while separately proving every stored hash matches its file.
 const TIME_DERIVED_FIELDS = new Set(["content_hash"]);
 
+function normalizeTransportText(text: string): string {
+  try {
+    return JSON.stringify(normalize(JSON.parse(text)));
+  } catch {
+    return text;
+  }
+}
+
 function normalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalize);
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>)
       .filter(([key]) => !TIME_FIELDS.has(key) && !TIME_DERIVED_FIELDS.has(key))
-      .map(([key, item]) => [key, normalize(item)]));
+      .map(([key, item]) => [
+        key,
+        key === "text" && typeof item === "string" ? normalizeTransportText(item) : normalize(item),
+      ]));
   }
   return value;
 }
@@ -176,6 +187,17 @@ async function invoke(candidate: AliasCase, name: string, args: Record<string, u
 }
 
 describe.serial("candidate aliases remain equivalent over real MCP transport (#377)", () => {
+  test("ignores generated time fields inside transport JSON text", () => {
+    const left = {
+      content: [{ type: "text", text: JSON.stringify({ raw: [{ created_at: "2026-01-01 00:00:00", slug: "entities/a" }] }) }],
+    };
+    const right = {
+      content: [{ type: "text", text: JSON.stringify({ raw: [{ created_at: "2026-01-01 00:00:01", slug: "entities/a" }] }) }],
+    };
+
+    expect(normalize(left)).toEqual(normalize(right));
+  });
+
   test("every valid alias matches its canonical action result and durable state", async () => {
     for (const candidate of CASES) {
       const legacy = await invoke(candidate, candidate.alias, candidate.aliasArgs);
