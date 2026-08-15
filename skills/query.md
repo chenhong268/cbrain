@@ -157,7 +157,7 @@ When loaded with `[provenance]` flag (from RESOLVER.md "Source Tracking / Proven
    ```
 
 2. **无 target，自然语言指代**：用户用自然语言描述某条信息/关系/事件，但没有给出 ID：
-   - **关系来源**：`graph_query` 或 `get_links`（debug 工具）拿 link_id → `get_provenance({ target_type: "link", target_id })`
+   - **关系来源**：`graph_query` 或 `link({ action: "list", ... })`（debug 工具）拿 link_id → `get_provenance({ target_type: "link", target_id })`
    - **事件来源**：`get_timeline` 拿到 timeline_id → `get_provenance({ target_type: "timeline", target_id })`
    - **不确定指哪条**：`deep_recall` / `query` 做上下文发现，找到相关 link 或 timeline 条目后拿 ID
    - 如果找不到具体 target → 如实告知"CBrain 有相关记忆但无法定位到具体的溯源条目"，**禁止编造来源**
