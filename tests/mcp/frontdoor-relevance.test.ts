@@ -132,6 +132,8 @@ function makeHarness(
     sparseBatch?: boolean;
     proactiveHint?: "expiry" | "timeline" | "shared";
     fallbackResults?: SearchResult[];
+    pagesBySlug?: Record<string, { title?: string; body?: string; type?: string }>;
+    identityPersonSlug?: string;
   } = {},
 ): Harness {
   let handler: Handler | undefined;
@@ -218,11 +220,13 @@ function makeHarness(
         pageSlugs.push(slug);
         if (opts.pageError) throw opts.pageError;
         if (opts.missingSlugs?.has(slug)) return null;
+        const override = opts.pagesBySlug?.[slug];
         const page: { title: string; body: string; type?: string } = {
-          title: `标题-${slug}`,
-          body: `正文-${slug}`,
+          title: override?.title ?? `标题-${slug}`,
+          body: override?.body ?? `正文-${slug}`,
         };
-        if (opts.pageType !== undefined) page.type = opts.pageType;
+        const type = override?.type ?? opts.pageType;
+        if (type !== undefined) page.type = type;
         return page;
       },
     },
@@ -232,6 +236,7 @@ function makeHarness(
       warn(...args: unknown[]) { logCalls.push(args); },
       error(...args: unknown[]) { logCalls.push(args); },
     },
+    identityPersonSlug: opts.identityPersonSlug,
   };
 
   registerFrontdoorTools(server as never, ctx as never);
@@ -247,6 +252,13 @@ function makeHarness(
 
 function parsed(output: Awaited<ReturnType<Handler>>): Record<string, unknown> {
   return JSON.parse(output.content[0]!.text) as Record<string, unknown>;
+}
+
+function localIsoDate(daysFromToday: number): string {
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + daysFromToday);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 describe("content frontdoor honesty sequencing", () => {
@@ -476,6 +488,220 @@ describe("content frontdoor honesty sequencing", () => {
     });
 
     const output = parsed(await harness.call({ query: "甲方公司 H1 增长主要由什么驱动？金额约多少？" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("rescues a dominant dated place record for the configured first-person subject", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const meeting = result("records/meeting", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "2026-08-15 匿名用户在匿名地点主持例会", "fts");
+    meeting.score = 30;
+    const other = result("other-page", {
+      fts: { original: { rankScore: 0, rootLexicalCoverage: 0 } },
+    }, "其他匿名内容", "fts");
+    other.score = 12;
+    const harness = makeHarness([rejected], "legacy", {
+      identityPersonSlug: "entities/self",
+      fallbackResults: [meeting, other],
+      pagesBySlug: {
+        "entities/self": { title: "匿名用户", type: "entity" },
+        "records/meeting": {
+          title: "匿名会议",
+          type: "record",
+          body: "2026-08-15 匿名用户在匿名地点主持例会。",
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "我在2026年8月15日于匿名地点做了什么？" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities.map((entity) => entity.title)).toEqual(["匿名会议"]);
+  });
+
+  test("rescues yesterday's dominant place record for the configured first-person subject", async () => {
+    const yesterday = localIsoDate(-1);
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const meeting = result("records/yesterday-meeting", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, `${yesterday} 匿名用户在匿名地点主持例会`, "fts");
+    meeting.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      identityPersonSlug: "entities/self",
+      fallbackResults: [meeting],
+      pagesBySlug: {
+        "entities/self": { title: "匿名用户", type: "entity" },
+        "records/yesterday-meeting": {
+          title: "昨日匿名会议",
+          type: "record",
+          body: `${yesterday} 匿名用户在匿名地点主持例会。`,
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "我昨天在匿名地点做了什么？" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities.map((entity) => entity.title)).toEqual(["昨日匿名会议"]);
+  });
+
+  test("does not rescue a first-person record from a different date", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const wrongDate = result("records/wrong-date", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "2026-08-14 匿名用户在匿名地点主持例会", "fts");
+    wrongDate.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      identityPersonSlug: "entities/self",
+      fallbackResults: [wrongDate],
+      pagesBySlug: {
+        "entities/self": { title: "匿名用户", type: "entity" },
+        "records/wrong-date": {
+          title: "错误日期会议",
+          type: "record",
+          body: "2026-08-14 匿名用户在匿名地点主持例会。",
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "我在2026年8月15日于匿名地点做了什么？" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not rescue a first-person record from a different place", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const wrongPlace = result("records/wrong-place", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "2026-08-15 匿名用户在另一地点主持例会", "fts");
+    wrongPlace.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      identityPersonSlug: "entities/self",
+      fallbackResults: [wrongPlace],
+      pagesBySlug: {
+        "entities/self": { title: "匿名用户", type: "entity" },
+        "records/wrong-place": {
+          title: "错误地点会议",
+          type: "record",
+          body: "2026-08-15 匿名用户在另一地点主持例会。",
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "我在2026年8月15日于匿名地点做了什么？" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not rescue a dated place record for a different person", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const wrongPerson = result("records/wrong-person", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "2026-08-15 其他用户在匿名地点主持例会", "fts");
+    wrongPerson.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      identityPersonSlug: "entities/self",
+      fallbackResults: [wrongPerson],
+      pagesBySlug: {
+        "entities/self": { title: "匿名用户", type: "entity" },
+        "records/wrong-person": {
+          title: "错误人物会议",
+          type: "record",
+          body: "2026-08-15 其他用户在匿名地点主持例会。",
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "我在2026年8月15日于匿名地点做了什么？" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not treat a time-place presence note as an activity answer", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const presenceOnly = result("records/presence-only", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "2026-08-15 匿名用户在匿名地点", "fts");
+    presenceOnly.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      identityPersonSlug: "entities/self",
+      fallbackResults: [presenceOnly],
+      pagesBySlug: {
+        "entities/self": { title: "匿名用户", type: "entity" },
+        "records/presence-only": {
+          title: "仅地点记录",
+          type: "record",
+          body: "2026-08-15 匿名用户在匿名地点。",
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "我在2026年8月15日于匿名地点做了什么？" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("keeps two similarly ranked dated place records hidden", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const first = result("records/meeting-a", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "2026-08-15 匿名用户在匿名地点主持例会", "fts");
+    first.score = 30;
+    const second = result("records/meeting-b", {
+      fts: { original: { rankScore: 20, rootLexicalCoverage: 0 } },
+    }, "2026-08-15 匿名用户在匿名地点参加例会", "fts");
+    second.score = 20;
+    const harness = makeHarness([rejected], "legacy", {
+      identityPersonSlug: "entities/self",
+      fallbackResults: [first, second],
+      pagesBySlug: {
+        "entities/self": { title: "匿名用户", type: "entity" },
+        "records/meeting-a": {
+          title: "匿名会议甲",
+          type: "record",
+          body: "2026-08-15 匿名用户在匿名地点主持例会。",
+        },
+        "records/meeting-b": {
+          title: "匿名会议乙",
+          type: "record",
+          body: "2026-08-15 匿名用户在匿名地点参加例会。",
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "我在2026年8月15日于匿名地点做了什么？" })) as {
       summary: { status: string };
     };
 
