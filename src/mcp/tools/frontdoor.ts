@@ -26,6 +26,7 @@ import { filterContentCandidates, filterContentFtsFallbackCandidates } from "../
 import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-current-state-guard.js";
 import { generateProactiveHints } from "../../core/retrieval/proactive.js";
 import { applyProactiveBudget, trimHint } from "./trim.js";
+import { isFirstPersonQuery } from "../../core/retrieval/recall-intent.js";
 
 type DetailLevel = "brief" | "normal" | "full";
 
@@ -141,6 +142,9 @@ async function runContentRecall(
       _skipDetailEnrich: true,
     });
     results = filterContentFtsFallbackCandidates(query, ftsCandidates);
+    if (results.length === 0) {
+      results = selectPersonalTimePlaceRecordFallback(ctx, query, ftsCandidates);
+    }
   }
   // #385 — personal current-state guard: bounded, deterministic check before
   // presenting reminder-like search material as a current personal recommendation.
@@ -256,6 +260,103 @@ function hasExplicitUnknownCue(query: string): boolean {
   // A caller who explicitly says the clue is unknown is not asking us to turn
   // a partial keyword overlap into a fact. Keep the normal empty response.
   return /(?:未知|不清楚|不确定)/u.test(query);
+}
+
+const PERSONAL_ACTIVITY_RE = /(?:做了什么|干了什么|参加了什么|开了什么|去了哪里|见了谁|发生了什么)/u;
+const EXPLICIT_DATE_RE = /(\d{4})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})\s*日?/u;
+const RELATIVE_DATE_RE = /(今天|昨天|前天)/u;
+const TIME_PLACE_FALLBACK_DOMINANCE_RATIO = 2;
+
+/**
+ * Narrow rescue for a first-person question about an explicitly dated activity
+ * at an explicitly named place. This is deliberately after normal content and
+ * FTS admission: it is only for record pages where the configured identity,
+ * date, and place can all be proven from one page body.
+ */
+function selectPersonalTimePlaceRecordFallback(
+  ctx: Pick<ToolContext, "identityPersonSlug" | "pages">,
+  query: string,
+  candidates: readonly import("../../core/retrieval/search.js").SearchResult[],
+): import("../../core/retrieval/search.js").SearchResult[] {
+  const evidence = parsePersonalTimePlaceQuery(query);
+  if (!evidence || !ctx.identityPersonSlug) return [];
+
+  const identityPage = ctx.pages.getBySlug(ctx.identityPersonSlug);
+  if (!identityPage?.title) return [];
+
+  const strongestBySlug = new Map<string, import("../../core/retrieval/search.js").SearchResult>();
+  for (const candidate of candidates) {
+    if (candidate.source !== "fts" || !Number.isFinite(candidate.score) || candidate.score <= 0) continue;
+    const current = strongestBySlug.get(candidate.slug);
+    if (!current || candidate.score > current.score) strongestBySlug.set(candidate.slug, candidate);
+  }
+  const [top, runnerUp] = [...strongestBySlug.values()].sort((left, right) => right.score - left.score);
+  if (!top || (runnerUp && top.score < runnerUp.score * TIME_PLACE_FALLBACK_DOMINANCE_RATIO)) return [];
+
+  const page = ctx.pages.getBySlug(top.slug);
+  if (page?.type !== "record") return [];
+  if (!recordBodyMatchesPersonalTimePlace(page.body, identityPage.title, evidence)) return [];
+  return [top];
+}
+
+type PersonalTimePlaceEvidence = {
+  readonly year: string;
+  readonly month: string;
+  readonly day: string;
+  readonly place: string;
+};
+
+function parsePersonalTimePlaceQuery(query: string): PersonalTimePlaceEvidence | null {
+  if (!isFirstPersonQuery(query) || !PERSONAL_ACTIVITY_RE.test(query)) return null;
+  try {
+    const normalized = query.normalize("NFKC").trim();
+    const date = resolvePersonalQueryDate(normalized);
+    if (!date) return null;
+    const activity = normalized.search(PERSONAL_ACTIVITY_RE);
+    const prefix = normalized.slice(0, activity);
+    const placeMarker = Math.max(prefix.lastIndexOf("在"), prefix.lastIndexOf("于"));
+    if (placeMarker < 0) return null;
+    const place = prefix.slice(placeMarker + 1).replace(EXPLICIT_DATE_RE, "").trim();
+    if (Array.from(place).length < 2 || Array.from(place).length > 24) return null;
+    return { ...date, place };
+  } catch {
+    return null;
+  }
+}
+
+function resolvePersonalQueryDate(query: string): Omit<PersonalTimePlaceEvidence, "place"> | null {
+  const explicit = query.match(EXPLICIT_DATE_RE);
+  if (explicit) return { year: explicit[1]!, month: explicit[2]!, day: explicit[3]! };
+  const relative = query.match(RELATIVE_DATE_RE)?.[1];
+  if (!relative) return null;
+  const offset = relative === "今天" ? 0 : relative === "昨天" ? -1 : -2;
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + offset);
+  return {
+    year: String(date.getFullYear()),
+    month: String(date.getMonth() + 1),
+    day: String(date.getDate()),
+  };
+}
+
+function recordBodyMatchesPersonalTimePlace(
+  body: string,
+  identityTitle: string,
+  evidence: PersonalTimePlaceEvidence,
+): boolean {
+  try {
+    const normalized = body.normalize("NFKC");
+    const date = new RegExp(
+      `${evidence.year}\\s*(?:年|[-/.])\\s*0?${Number(evidence.month)}\\s*(?:月|[-/.])\\s*0?${Number(evidence.day)}\\s*日?`,
+      "u",
+    );
+    return normalized.includes(identityTitle.normalize("NFKC"))
+      && normalized.includes(evidence.place)
+      && date.test(normalized);
+  } catch {
+    return false;
+  }
 }
 
 function runEpisodeRecall(
