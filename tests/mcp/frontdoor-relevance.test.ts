@@ -643,6 +643,34 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.summary.status).toBe("empty");
   });
 
+  test("does not treat a time-place presence note as an activity answer", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const presenceOnly = result("records/presence-only", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0 } },
+    }, "2026-08-15 匿名用户在匿名地点", "fts");
+    presenceOnly.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      identityPersonSlug: "entities/self",
+      fallbackResults: [presenceOnly],
+      pagesBySlug: {
+        "entities/self": { title: "匿名用户", type: "entity" },
+        "records/presence-only": {
+          title: "仅地点记录",
+          type: "record",
+          body: "2026-08-15 匿名用户在匿名地点。",
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "我在2026年8月15日于匿名地点做了什么？" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
   test("keeps two similarly ranked dated place records hidden", async () => {
     const rejected = result("initial-noise", {
       fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },

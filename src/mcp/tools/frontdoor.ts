@@ -263,6 +263,7 @@ function hasExplicitUnknownCue(query: string): boolean {
 }
 
 const PERSONAL_ACTIVITY_RE = /(?:做了什么|干了什么|参加了什么|开了什么|去了哪里|见了谁|发生了什么)/u;
+const RECORD_ACTIVITY_RE = /(?:会议|会面|拜访|沟通|讨论|参加|主持|到访|出席|培训|调研|出差|处理|完成|安排|跟进|访问)/u;
 const EXPLICIT_DATE_RE = /(\d{4})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})\s*日?/u;
 const RELATIVE_DATE_RE = /(今天|昨天|前天)/u;
 const TIME_PLACE_FALLBACK_DOMINANCE_RATIO = 2;
@@ -353,6 +354,7 @@ function recordBodyMatchesPersonalTimePlace(
     );
     return normalized.includes(identityTitle.normalize("NFKC"))
       && normalized.includes(evidence.place)
+      && RECORD_ACTIVITY_RE.test(normalized)
       && date.test(normalized);
   } catch {
     return false;
