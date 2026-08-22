@@ -12,7 +12,7 @@ import {
   type PageCreationProvenanceInput,
   type PageWriteProvenanceRow,
 } from "../core/page-write-provenance.js";
-import { authorizeNerJobClaim } from "../core/maintenance/zero-link-backfill.js";
+import { parseFingerprintedNerJob } from "../core/ingestion/ner-backfill-contract.js";
 import {
   runAliasMigrations,
   ensurePagesIndexes,
@@ -233,34 +233,15 @@ export interface NerAttemptIdentity {
   payloadDigest: string;
 }
 
-function validNerFingerprint(value: unknown, sourceKind?: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0) return false;
-  if (sourceKind === "vault_hash") return value.startsWith("page:") && value.length > 5;
-  if (sourceKind === "raw_chunks") return /^derived:[0-9a-f]{64}$/.test(value);
-  return value.startsWith("page:") || /^derived:[0-9a-f]{64}$/.test(value);
-}
-
 export function buildNerAttemptIdentity(data: Record<string, unknown>): NerAttemptIdentity | null {
   const kind = data.kind === undefined || data.kind === "ner" ? "ner" : null;
   if (!kind || typeof data.slug !== "string" || !data.slug.trim()) return null;
-  const repair = typeof data.repair === "object" && data.repair !== null && !Array.isArray(data.repair)
-    ? data.repair as Record<string, unknown>
-    : null;
-  if (data.repair !== undefined) {
-    const keys = repair ? Object.keys(repair).sort() : [];
-    if (
-      !repair || JSON.stringify(keys) !== JSON.stringify(["batchId", "contentFingerprint", "name", "sourceKind", "version"]) ||
-      repair.name !== "zero-link-rich-records" || repair.version !== 1 ||
-      (repair.sourceKind !== "vault_hash" && repair.sourceKind !== "raw_chunks") ||
-      typeof repair.batchId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(repair.batchId) ||
-      !validNerFingerprint(repair.contentFingerprint, repair.sourceKind)
-    ) return null;
-  }
-  const sourceFingerprint = typeof repair?.contentFingerprint === "string"
-    ? repair.contentFingerprint
-    : typeof data.sourceFingerprint === "string" ? data.sourceFingerprint : null;
-  if (sourceFingerprint !== null && !validNerFingerprint(sourceFingerprint)) return null;
-  const batchId = typeof repair?.batchId === "string" ? repair.batchId : null;
+  const frozenFieldsPresent = Object.hasOwn(data, "repair") ||
+    Object.hasOwn(data, "sourceFingerprint") || Object.hasOwn(data, "sourceKind");
+  const fingerprinted = frozenFieldsPresent ? parseFingerprintedNerJob(data) : null;
+  if (frozenFieldsPresent && !fingerprinted) return null;
+  const sourceFingerprint = fingerprinted?.sourceFingerprint ?? null;
+  const batchId = fingerprinted?.repair?.batchId ?? null;
   const { attemptLease: _lease, ...payload } = data;
   const payloadDigest = createHash("sha256").update(JSON.stringify(payload), "utf8").digest("hex");
   return { slug: data.slug, kind, sourceFingerprint, batchId, payloadDigest };
@@ -268,13 +249,14 @@ export function buildNerAttemptIdentity(data: Record<string, unknown>): NerAttem
 
 function buildStrictFrozenNerIdentity(data: Record<string, unknown>): NerAttemptIdentity | null {
   const identity = buildNerAttemptIdentity(data);
-  if (!identity?.sourceFingerprint) return null;
+  const fingerprinted = parseFingerprintedNerJob(data);
+  if (!identity?.sourceFingerprint || !fingerprinted) return null;
   const hasPageHash = Object.hasOwn(data, "pageContentHash");
   const hasContentHash = Object.hasOwn(data, "contentHash");
   if (!hasPageHash && !hasContentHash) return null;
   const contentHash = hasPageHash ? data.pageContentHash : data.contentHash;
   if (contentHash !== null && typeof contentHash !== "string") return null;
-  if (identity.sourceFingerprint.startsWith("page:") &&
+  if (fingerprinted.sourceKind === "vault_hash" &&
     (typeof contentHash !== "string" || identity.sourceFingerprint !== `page:${contentHash}`)) return null;
   return identity;
 }
@@ -1522,6 +1504,7 @@ export class CBrainDB {
   claimNerJobByIdWithLease(
     id: number,
     expectedIdentity?: NerAttemptIdentity,
+    authorize?: (db: { rawDb: Database }, jobId: number) => "legacy" | "ordinary" | "repair" | null,
   ): { id: number; name: string; data: string; attempts: number; leaseToken: string; payloadDigest: string } | null {
     this.rawDb.exec("BEGIN IMMEDIATE");
     try {
@@ -1531,7 +1514,7 @@ export class CBrainDB {
       if (!row?.data) { this.rawDb.exec("COMMIT"); return null; }
       let data: Record<string, unknown>;
       try { data = JSON.parse(row.data) as Record<string, unknown>; } catch { this.rawDb.exec("COMMIT"); return null; }
-      const claimMode = authorizeNerJobClaim(this, id);
+      const claimMode = authorize?.(this, id);
       if (!claimMode) { this.rawDb.exec("COMMIT"); return null; }
       const identity = claimMode === "legacy" ? buildNerAttemptIdentity(data) : buildStrictFrozenNerIdentity(data);
       if (!identity || (expectedIdentity && !sameNerAttemptIdentity(identity, expectedIdentity))) {

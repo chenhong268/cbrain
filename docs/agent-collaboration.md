@@ -1,7 +1,7 @@
 # CBrain Agent 协作分工
 
 > 小爱（Hermes Agent）与 Claude Code 的协作协议。
-> 最后更新：2026-05-17
+> 最后更新：2026-08-22
 
 ## 角色
 
@@ -10,8 +10,8 @@
 | **定位** | 产品经理 + QA + 外围工具 | 内核开发者 |
 | **主要语言** | Python / Shell | TypeScript / Bun |
 | **工作环境** | Hermes gateway (Telegram) | 终端 / VS Code |
-| **代码权限** | 可提 PR，不直接 push main | 直接 push main |
-| **Git author** | 小爱 <xiaoi@hermes> (PR only) | chenhong (直接 push) |
+| **代码权限** | 可提 PR，不直接 push main | 通过 PR 合入 main |
+| **Git author** | Hermes Agent (PR only) | 项目维护者 (PR) |
 
 ## 小爱的职责
 
@@ -78,7 +78,8 @@ bug / feature / performance
 ### 2. Bug 修复
 - 根据 issue 描述定位代码级根因
 - 修复 + 写测试
-- Push main + 关闭 issue
+- 创建分支和指向 `main` 的 PR，在描述中写 `Closes #<issue-number>`
+- PR 合并后由 GitHub 关闭 issue；侧分支 commit 存在不等于修复已进入 main
 
 ### 3. 代码审查
 - 审查小爱的 PR（如果有的话）
@@ -91,7 +92,8 @@ bug / feature / performance
   ↓ gh issue create（标 from:xiaoai）
 
 Claude Code 按 issue 列表开发
-  ↓ 完成后 push main + 关闭 issue
+  ↓ 完成后提交 PR（Closes #<issue-number>）
+  ↓ PR 合入 main 后自动关闭 issue
 
 小爱验证
   ↓ CBrain 重启 → 实际场景测试 → issue 里回复验证结果
@@ -110,6 +112,18 @@ MCP 宕机、数据丢失风险等紧急情况：
 - 分支命名：`fix/issue-N` / `feat/issue-N`（N = issue 编号）
 - Commit message：`feat:` / `fix:` / `perf:` / `docs:` / `chore:`
 - 小爱只通过 PR 提交，不直接 push main
+- 所有代码修复都通过指向 `main` 的 PR 合入；PR 描述用 `Closes #<issue-number>` 建立可核验关系
+- 不因本地或侧分支存在 commit 而手动关闭 issue
+
+仅在特殊流程必须手动关闭时，先刷新远端并执行：
+
+```bash
+git fetch origin main
+git merge-base --is-ancestor <fix-commit> origin/main
+```
+
+只有退出码为 `0` 才能关闭，并在关闭评论记录完整 commit；非零表示
+修复仍不可从 `origin/main` 到达，issue 必须保持开启。
 
 ## 已知边界
 

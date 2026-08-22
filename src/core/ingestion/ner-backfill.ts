@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import { hashContent } from "../shared.js";
 import {
+  authorizeNerJobClaim,
   countCurrentGraphLinks,
   deriveZeroLinkSource,
   finalizeRepairBatch,
@@ -21,7 +22,11 @@ import {
   prepareRepairBatchJobIds,
   summarizeRepairBatch,
 } from "../maintenance/zero-link-backfill.js";
-import type { DeferredNerSubmitResult } from "./ner-backfill-contract.js";
+import {
+  parseFingerprintedNerJob,
+  type DeferredNerSubmitResult,
+  type FingerprintedNerJob,
+} from "./ner-backfill-contract.js";
 /** Stale-running recovery TTL — aligned with Dream lock TTL (dream.ts). */
 export const NER_BACKFILL_STALE_TTL_MS = 30 * 60 * 1000;
 
@@ -238,28 +243,7 @@ export function resolveNerBody(
   return fallback ? { body: fallback, type, title: page.title } : null;
 }
 
-type FingerprintedNerData = {
-  slug: string;
-  kind: "ner";
-  sourceFingerprint: string;
-  sourceKind: "vault_hash" | "raw_chunks";
-  repair?: Record<string, unknown>;
-};
-
-function parseFingerprintedNerData(raw: Record<string, any>): FingerprintedNerData | null {
-  const repair = raw.repair && typeof raw.repair === "object" ? raw.repair as Record<string, unknown> : undefined;
-  const sourceFingerprint = typeof repair?.contentFingerprint === "string"
-    ? repair.contentFingerprint
-    : typeof raw.sourceFingerprint === "string" ? raw.sourceFingerprint : null;
-  const sourceKind = repair?.sourceKind === "vault_hash" || repair?.sourceKind === "raw_chunks"
-    ? repair.sourceKind
-    : sourceFingerprint?.startsWith("page:") ? "vault_hash"
-      : sourceFingerprint?.startsWith("derived:") ? "raw_chunks" : null;
-  if (typeof raw.slug !== "string" || !sourceFingerprint || !sourceKind) return null;
-  if ((sourceKind === "vault_hash") !== sourceFingerprint.startsWith("page:")) return null;
-  if ((sourceKind === "raw_chunks") !== sourceFingerprint.startsWith("derived:")) return null;
-  return { slug: raw.slug, kind: "ner", sourceFingerprint, sourceKind, ...(repair ? { repair } : {}) };
-}
+type FingerprintedNerData = FingerprintedNerJob;
 
 type ScheduledSourceResult =
   | { status: "ok"; body: string; type: string; title: string }
@@ -453,7 +437,9 @@ export async function runNerBackfillStage(
         frozenIdentity.batchId !== manifestIdentity.batchId) throw new Error("BATCH_INTEGRITY_CONFLICT");
     }
     const expectedIdentity = frozenIdentity;
-    const job = entityFacts ? db.claimJobById(id) : db.claimNerJobByIdWithLease(id, expectedIdentity);
+    const job = entityFacts
+      ? db.claimJobById(id)
+      : db.claimNerJobByIdWithLease(id, expectedIdentity, authorizeNerJobClaim);
     if (!job) { counts.skipped++; continue; }
     const leaseToken = "leaseToken" in job && typeof job.leaseToken === "string" ? job.leaseToken : null;
     const leaseDigest = "payloadDigest" in job && typeof job.payloadDigest === "string" ? job.payloadDigest : null;
@@ -470,7 +456,9 @@ export async function runNerBackfillStage(
       continue;
     }
 
-    const fingerprinted = kind === "ner" ? parseFingerprintedNerData(parsed as Record<string, any>) : null;
+    const fingerprinted = kind === "ner"
+      ? parseFingerprintedNerJob(parsed as Record<string, unknown>)
+      : null;
     const scheduled = fingerprinted ? resolveScheduledNerSource(db, pages, fingerprinted) : null;
     const resolved = scheduled?.status === "ok" ? scheduled : !fingerprinted ? resolveNerBody(db, pages, slug) : null;
     if (fingerprinted && scheduled?.status !== "ok") {

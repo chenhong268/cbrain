@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildNerAttemptIdentity, CBrainDB } from "../../src/storage/sqlite";
+import { buildNerAttemptIdentity, CBrainDB, type NerAttemptIdentity } from "../../src/storage/sqlite";
 import { NER_BACKFILL_STALE_TTL_MS, NER_BACKFILL_JOB } from "../../src/core/ingestion/ner-backfill";
 import { JobQueueNerSubmitter, resolveNerBody } from "../../src/core/ingestion/ner-backfill";
 import { IngestManager } from "../../src/core/ingestion/ingest";
@@ -18,6 +18,7 @@ import { canonicalSlug } from "../../src/utils/slug";
 import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
 import { submitDeferredNerForWritePath } from "../../src/core/ingestion/ner-write-path";
 import {
+  authorizeNerJobClaim,
   deriveZeroLinkSource,
   enqueueZeroLinkBackfill,
   finalizeRepairBatch,
@@ -65,6 +66,10 @@ function createMockLanceDB() {
 const testDir = "/tmp/cbrain-test-ner-backfill";
 const dbPath = join(testDir, "test.sqlite");
 let db: CBrainDB;
+
+function claimNerJob(id: number, expectedIdentity?: NerAttemptIdentity) {
+  return db.claimNerJobByIdWithLease(id, expectedIdentity, authorizeNerJobClaim);
+}
 
 beforeEach(() => {
   if (existsSync(testDir)) rmSync(testDir, { recursive: true });
@@ -207,7 +212,7 @@ describe("JobQueueNerSubmitter (#252)", () => {
     addRecord("records/foo", "first-hash");
     const s = new JobQueueNerSubmitter(db);
     const first = s.submitDeferredNer({ slug: "records/foo" });
-    db.claimNerJobByIdWithLease(first.jobId!);
+    claimNerJob(first.jobId!);
     db.rawDb.prepare("UPDATE jobs SET started_at = datetime('now','-2 hours') WHERE id = ?").run(first.jobId!);
     db.updatePageHash("records/foo", "second-hash");
     const next = s.submitDeferredNer({ slug: "records/foo" });
@@ -242,7 +247,7 @@ describe("JobQueueNerSubmitter (#252)", () => {
     addRecord("records/foo", "first-hash");
     const s = new JobQueueNerSubmitter(db);
     const first = s.submitDeferredNer({ slug: "records/foo" });
-    db.claimNerJobByIdWithLease(first.jobId!);
+    claimNerJob(first.jobId!);
     db.updatePageHash("records/foo", "second-hash");
     const next = s.submitDeferredNer({ slug: "records/foo" });
     expect(next.disposition).toBe("successor_pending");
@@ -259,7 +264,7 @@ describe("JobQueueNerSubmitter (#252)", () => {
     db.rawDb.prepare("UPDATE pages SET content_hash=NULL WHERE slug='records/foo'").run();
     const submitter = new JobQueueNerSubmitter(db);
     const first = submitter.submitDeferredNer({ slug: "records/foo" });
-    db.claimNerJobByIdWithLease(first.jobId!);
+    claimNerJob(first.jobId!);
     db.rawDb.prepare("UPDATE chunks SET content='changed' WHERE page_slug='records/foo' AND chunk_index=0").run();
 
     expect(submitter.submitDeferredNer({ slug: "records/foo" }).disposition).toBe("successor_pending");
@@ -293,7 +298,7 @@ describe("JobQueueNerSubmitter (#252)", () => {
     const child = db.rawDb.prepare("SELECT id FROM jobs WHERE name='ner-backfill'").get() as { id: number };
     getRepairBatchAttemptIdentity(db, receipt.batchId!, child.id);
     const identity = buildNerAttemptIdentity(JSON.parse(db.getJob(child.id)!.data!))!;
-    db.claimNerJobByIdWithLease(child.id, identity);
+    claimNerJob(child.id, identity);
     const before = db.getJob(child.id)!;
 
     expect(new JobQueueNerSubmitter(db).submitDeferredNer({ slug: "records/foo" })).toEqual({
@@ -347,12 +352,25 @@ describe("scoped NER attempt lease primitives (#342)", () => {
     );
   };
 
+  test("direct lease claims fail closed without the maintenance authorizer", () => {
+    addRecord("records/anonymous", "hash-a");
+    const id = db.submitJob("ner-backfill", {
+      slug: "records/anonymous",
+      kind: "ner",
+      pageContentHash: "hash-a",
+      sourceFingerprint: "page:hash-a",
+    });
+
+    expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    expect(db.getJob(id)?.status).toBe("pending");
+  });
+
   test("only one conditional claim wins and ABA tokens cannot finish a later attempt", () => {
     addRecord("records/item", "a");
     const id = db.submitJob("ner-backfill", { slug: "records/item", kind: "ner", pageContentHash: "a", sourceFingerprint: "page:a" });
-    const first = db.claimNerJobByIdWithLease(id);
+    const first = claimNerJob(id);
     expect(first?.leaseToken).toMatch(/^[0-9a-f-]{36}$/);
-    expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    expect(claimNerJob(id)).toBeNull();
     expect(db.completeNerJobWithLease(id, "wrong-token", "claimed", first!.payloadDigest, { outcome: "skipped" })).toBe(false);
     expect(db.completeNerJobWithLease(id, first!.leaseToken, "claimed", first!.payloadDigest, { outcome: "skipped" })).toBe(true);
     expect(JSON.parse(db.getJob(id)!.data!)).not.toHaveProperty("attemptLease");
@@ -361,7 +379,7 @@ describe("scoped NER attempt lease primitives (#342)", () => {
   test("committing fence is conditional and a claimed token cannot complete afterward", () => {
     addRecord("records/item", "a");
     const id = db.submitJob("ner-backfill", { slug: "records/item", kind: "ner", pageContentHash: "a", sourceFingerprint: "page:a" });
-    const claimed = db.claimNerJobByIdWithLease(id)!;
+    const claimed = claimNerJob(id)!;
     expect(db.moveNerLeaseToCommitting(id, claimed.leaseToken, claimed.payloadDigest)).toBe(true);
     expect(db.moveNerLeaseToCommitting(id, claimed.leaseToken, claimed.payloadDigest)).toBe(false);
     expect(db.completeNerJobWithLease(id, claimed.leaseToken, "claimed", claimed.payloadDigest, { outcome: "processed" })).toBe(false);
@@ -370,7 +388,7 @@ describe("scoped NER attempt lease primitives (#342)", () => {
 
   test("entity facts never receive a scoped lease", () => {
     const id = db.submitJob("ner-backfill", { slug: "entity/a", kind: "entity_facts" });
-    expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    expect(claimNerJob(id)).toBeNull();
     expect(JSON.parse(db.getJob(id)!.data!)).not.toHaveProperty("attemptLease");
   });
 
@@ -383,7 +401,7 @@ describe("scoped NER attempt lease primitives (#342)", () => {
       (data: Record<string, unknown>) => { data.repair = { name: "zero-link-rich-records", version: 1, contentFingerprint: "page:a", sourceKind: "vault_hash", batchId: "11111111-1111-4111-8111-111111111111" }; },
     ]) {
       const id = db.submitJob("ner-backfill", { slug: "records/item", kind: "ner", pageContentHash: "a", sourceFingerprint: "page:a" });
-      const claimed = db.claimNerJobByIdWithLease(id)!;
+      const claimed = claimNerJob(id)!;
       const mutated = JSON.parse(db.getJob(id)!.data!);
       mutate(mutated);
       db.rawDb.prepare("UPDATE jobs SET data=? WHERE id=?").run(JSON.stringify(mutated), id);
@@ -433,7 +451,7 @@ describe("scoped NER attempt lease primitives (#342)", () => {
       addRecord("records/item", "hash-a");
       const id = db.submitJob("ner-backfill", data);
       if (data.repair) addUnfinalizedManifest(id, data);
-      const claimed = db.claimNerJobByIdWithLease(id)!;
+      const claimed = claimNerJob(id)!;
       const changed = JSON.parse(db.getJob(id)!.data!);
       mutate(changed);
       db.rawDb.prepare("UPDATE jobs SET data=? WHERE id=?").run(JSON.stringify(changed), id);
@@ -453,7 +471,7 @@ describe("scoped NER attempt lease primitives (#342)", () => {
       pageContentHash: "hash-a",
       sourceFingerprint: "page:hash-a",
     });
-    const claimed = db.claimNerJobByIdWithLease(id)!;
+    const claimed = claimNerJob(id)!;
     const changed = JSON.parse(db.getJob(id)!.data!);
     changed.pageContentHash = "hash-b";
     const { attemptLease, ...payload } = changed;
@@ -481,7 +499,7 @@ describe("scoped NER attempt lease primitives (#342)", () => {
       const frozen = buildNerAttemptIdentity(JSON.parse(db.getJob(pending)!.data!))!;
       const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
-      expect(db.claimNerJobByIdWithLease(pending, frozen)).toBeNull();
+      expect(claimNerJob(pending, frozen)).toBeNull();
       expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
       db.rawDb.prepare("DELETE FROM jobs").run();
     }
@@ -503,7 +521,7 @@ describe("scoped NER attempt lease primitives (#342)", () => {
     const claim = (slug: string) => {
       addRecord(slug, "b");
       const id = db.submitJob("ner-backfill", { slug, kind: "ner", pageContentHash: "b", sourceFingerprint: "page:b" });
-      return db.claimNerJobByIdWithLease(id, buildNerAttemptIdentity(JSON.parse(db.getJob(id)!.data!))!);
+      return claimNerJob(id, buildNerAttemptIdentity(JSON.parse(db.getJob(id)!.data!))!);
     };
 
     insertUnknown({ outcome: "commit_unknown", kind: "ner", repair });
@@ -515,7 +533,7 @@ describe("scoped NER attempt lease primitives (#342)", () => {
       slug: "records/repair", kind: "ner", pageContentHash: "b", sourceFingerprint: "page:b",
     });
     const sameBefore = JSON.stringify(db.getJob(sameId));
-    expect(db.claimNerJobByIdWithLease(sameId, buildNerAttemptIdentity(JSON.parse(db.getJob(sameId)!.data!))!)).toBeNull();
+    expect(claimNerJob(sameId, buildNerAttemptIdentity(JSON.parse(db.getJob(sameId)!.data!))!)).toBeNull();
     expect(JSON.stringify(db.getJob(sameId))).toBe(sameBefore);
     db.rawDb.prepare("DELETE FROM jobs").run();
 
@@ -606,7 +624,7 @@ describe("ordinary commit-unknown audit resolution (#342)", () => {
 
     expect(() => resolveOrdinaryCommitUnknown(db, id, "release-successor")).toThrow("COMMIT_UNKNOWN_INTEGRITY_CONFLICT");
     expect(JSON.stringify(db.listJobs())).toBe(before);
-    expect(db.claimNerJobByIdWithLease(successor)).toBeNull();
+    expect(claimNerJob(successor)).toBeNull();
   });
 
   test("marked debt has batch rollback precedence and zero mutation", async () => {
@@ -1823,7 +1841,7 @@ describe("runNerBackfillStage (#252)", () => {
       new PageManager(db, testDir),
       { maxItems: 1 },
     )).rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
-    expect(db.claimNerJobByIdWithLease(successor, frozen)).toBeNull();
+    expect(claimNerJob(successor, frozen)).toBeNull();
     expect(calls).toBe(0);
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
@@ -1852,6 +1870,26 @@ describe("runNerBackfillStage (#252)", () => {
       kind: "ner",
       pageContentHash: "wrong-hash",
       sourceFingerprint: "page:hash-a",
+    });
+    const before = JSON.stringify(db.getJob(id));
+    let calls = 0;
+    const guardedPipeline = { processNer: async () => { calls++; } } as unknown as ContentPipeline;
+
+    await expect(runNerBackfillStage(db, guardedPipeline, new PageManager(db, testDir), { maxItems: 1 }))
+      .rejects.toThrow("QUEUE_INTEGRITY_CONFLICT");
+    expect(calls).toBe(0);
+    expect(JSON.stringify(db.getJob(id))).toBe(before);
+  });
+
+  test("a source-kind mismatch blocks NER execution before LLM", async () => {
+    db.upsertPage({ slug: "records/linked", type: "record", title: "Linked", filePath: "records/linked.md", contentHash: "hash-a" });
+    db.insertChunk("records/linked", 0, "first");
+    const id = db.submitJob("ner-backfill", {
+      slug: "records/linked",
+      kind: "ner",
+      pageContentHash: "hash-a",
+      sourceFingerprint: "page:hash-a",
+      sourceKind: "raw_chunks",
     });
     const before = JSON.stringify(db.getJob(id));
     let calls = 0;
