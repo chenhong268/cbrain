@@ -2,6 +2,13 @@
 
 Brief description of what this PR does and why.
 
+## Issue Closure
+
+- Closes #<issue-number>
+- [ ] This PR targets `main`; merging it will make the fix reachable from `main`.
+- [ ] No code issue was manually closed from a side-branch commit.
+- [ ] If manual closure is exceptionally required, `git merge-base --is-ancestor <fix-commit> origin/main` exits `0`; otherwise write `not applicable`.
+
 ## Changes
 
 - Change 1

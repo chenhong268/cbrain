@@ -1,7 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { isCurrentFactLink } from "../shared.js";
-import type { NerSourceKind } from "../ingestion/ner-backfill-contract.js";
+import {
+  parseFingerprintedNerJob,
+  parseNerFingerprint,
+  parseZeroLinkRepairMarker,
+  type NerSourceKind,
+  type ZeroLinkRepairMarker,
+} from "../ingestion/ner-backfill-contract.js";
 export {
   ZERO_LINK_BATCH_MANIFEST_JOB,
   ZERO_LINK_REPAIR_NAME,
@@ -116,13 +122,7 @@ interface JobRow {
   finished_at: string | null;
 }
 
-interface RepairMarker {
-  name: string;
-  version: number;
-  contentFingerprint: string;
-  sourceKind: NerSourceKind;
-  batchId: string;
-}
+type RepairMarker = ZeroLinkRepairMarker;
 
 interface ParsedNerData {
   slug: string;
@@ -133,6 +133,7 @@ interface ParsedNerData {
   pageContentHashPresent: boolean;
   legacyContentHashPresent: boolean;
   contentHashShapeValid: boolean;
+  fingerprintShapeValid: boolean;
   repair?: RepairMarker;
   attemptLease?: {
     version: 1;
@@ -216,28 +217,6 @@ function parseJsonObject(raw: string | null): Record<string, unknown> | null {
   try { return objectValue(JSON.parse(raw)); } catch { return null; }
 }
 
-function validFingerprint(value: unknown, sourceKind: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0) return false;
-  if (sourceKind === "vault_hash") return value.startsWith("page:") && value.length > 5;
-  if (sourceKind === "raw_chunks") return /^derived:[0-9a-f]{64}$/.test(value);
-  return false;
-}
-
-function parseRepair(value: unknown): RepairMarker | null {
-  const repair = objectValue(value);
-  if (!repair || repair.name !== "zero-link-rich-records" || repair.version !== 1) return null;
-  if (JSON.stringify(Object.keys(repair).sort()) !== JSON.stringify(["batchId", "contentFingerprint", "name", "sourceKind", "version"])) return null;
-  if (!UUID_RE.test(String(repair.batchId ?? ""))) return null;
-  if (!validFingerprint(repair.contentFingerprint, repair.sourceKind)) return null;
-  return {
-    name: String(repair.name),
-    version: Number(repair.version),
-    contentFingerprint: String(repair.contentFingerprint),
-    sourceKind: repair.sourceKind as NerSourceKind,
-    batchId: String(repair.batchId),
-  };
-}
-
 function parseNerData(raw: string | null): ParsedNerData | null {
   const data = parseJsonObject(raw);
   if (!data || typeof data.slug !== "string" || data.slug.trim().length === 0) return null;
@@ -256,13 +235,23 @@ function parseNerData(raw: string | null): ParsedNerData | null {
     pageContentHashPresent,
     legacyContentHashPresent,
     contentHashShapeValid: contentHash === undefined || contentHash === null || typeof contentHash === "string",
+    fingerprintShapeValid: true,
   };
   if (contentHash === null || typeof contentHash === "string") parsed.contentHash = contentHash;
-  if (typeof data.sourceFingerprint === "string") parsed.sourceFingerprint = data.sourceFingerprint;
-  if (data.repair !== undefined) {
-    const repair = parseRepair(data.repair);
-    if (!repair || kind !== "ner") return null;
-    parsed.repair = repair;
+  if (kind === "ner") {
+    const repair = data.repair === undefined ? undefined : parseZeroLinkRepairMarker(data.repair);
+    if (data.repair !== undefined && !repair) return null;
+    const frozenFieldsPresent = Object.hasOwn(data, "sourceFingerprint") ||
+      Object.hasOwn(data, "sourceKind") ||
+      Object.hasOwn(data, "repair");
+    const fingerprinted = frozenFieldsPresent ? parseFingerprintedNerJob(data) : null;
+    if (typeof data.sourceFingerprint === "string") parsed.sourceFingerprint = data.sourceFingerprint;
+    if (repair) parsed.repair = repair;
+    if (frozenFieldsPresent && !fingerprinted) parsed.fingerprintShapeValid = false;
+    if (fingerprinted) {
+      parsed.sourceFingerprint = fingerprinted.sourceFingerprint;
+      if (fingerprinted.repair) parsed.repair = fingerprinted.repair;
+    }
   }
   const lease = objectValue(data.attemptLease);
   if (lease) {
@@ -406,8 +395,9 @@ function ordinaryFrozenIdentityValid(data: ParsedNerData): boolean {
   if (!data.sourceFingerprintPresent || data.sourceFingerprint === undefined ||
     (!data.pageContentHashPresent && !data.legacyContentHashPresent) || !data.contentHashShapeValid ||
     data.contentHash === undefined) return false;
-  if (!data.sourceFingerprint.startsWith("page:") && !/^derived:[0-9a-f]{64}$/.test(data.sourceFingerprint)) return false;
-  if (data.sourceFingerprint.startsWith("page:") &&
+  const fingerprint = parseNerFingerprint(data.sourceFingerprint);
+  if (!data.fingerprintShapeValid || !fingerprint) return false;
+  if (fingerprint.sourceKind === "vault_hash" &&
     (typeof data.contentHash !== "string" || data.sourceFingerprint !== `page:${data.contentHash}`)) return false;
   return true;
 }
@@ -496,6 +486,7 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
       if (!parsed || parsed.kind !== "ner" || parsed.attemptLease || (!parsed.repair && !ordinaryCommitUnknownValid(row, parsed))) conflicts++;
     }
     if (parsed?.attemptLease && row.status !== "running") globalStateConflictSlugs.add(parsed.slug);
+    if (parsed && !parsed.fingerprintShapeValid) globalStateConflictSlugs.add(parsed.slug);
     if (parsed?.repair) {
       const manifest = manifestByBatchId.get(parsed.repair.batchId);
       const owner = manifest?.ownership.find((entry) => entry.jobId === row.id);
@@ -618,7 +609,7 @@ export function authorizeNerJobClaim(db: ZeroLinkDb, jobId: number): NerClaimMod
   const data = audit.parsedById.get(jobId);
   const raw = row ? parseJsonObject(row.data) : null;
   if (!row || row.name !== "ner-backfill" || row.status !== "pending" || !data || data.kind !== "ner" ||
-    !raw || Object.hasOwn(raw, "attemptLease") || audit.globalStateConflictSlugs.has(data.slug)) return null;
+    !raw || !data.fingerprintShapeValid || Object.hasOwn(raw, "attemptLease") || audit.globalStateConflictSlugs.has(data.slug)) return null;
 
   const otherLive = audit.rows.some((candidate) => {
     if (candidate.id === jobId || candidate.name !== "ner-backfill" || !ACTIVE_STATUSES.has(candidate.status)) return false;
@@ -1378,15 +1369,13 @@ function validOrdinaryCommitUnknownIds(audit: QueueAudit): number[] {
     if (row.name !== "ner-backfill" || row.status !== "done" || ownedIds.has(row.id)) continue;
     const data = audit.parsedById.get(row.id);
     const result = readOutcome(row);
-    const sourceKind = data?.sourceFingerprint?.startsWith("page:")
-      ? "vault_hash"
-      : data?.sourceFingerprint?.startsWith("derived:") ? "raw_chunks" : null;
+    const fingerprint = parseNerFingerprint(data?.sourceFingerprint);
     if (
       !data || !ordinaryCommitUnknownValid(row, data) ||
-      !sourceKind || !validFingerprint(data.sourceFingerprint, sourceKind) ||
+      !fingerprint ||
       result?.outcome !== "commit_unknown"
     ) continue;
-    candidates.push({ id: row.id, slug: data.slug, fingerprint: data.sourceFingerprint });
+    candidates.push({ id: row.id, slug: data.slug, fingerprint: fingerprint.fingerprint });
   }
   const duplicateKeys = new Set<string>();
   const seen = new Set<string>();

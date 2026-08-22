@@ -8,6 +8,7 @@ import { ProvenanceManager } from "../../src/core/provenance.js";
 import { SqliteProvenanceStore } from "../../src/storage/provenance-store.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 import type { IngestNerMode } from "../../src/cli/context.js";
+import { authorizeNerJobClaim } from "../../src/core/maintenance/zero-link-backfill.js";
 
 function createMockEmbedding(): EmbeddingProvider {
   return {
@@ -2718,7 +2719,7 @@ describe("MCP Server", () => {
       const id = db.submitJob("ner-backfill", {
         slug: "records/a", kind: "ner", pageContentHash: "a", sourceFingerprint: "page:a",
       });
-      const claimed = db.claimNerJobByIdWithLease(id)!;
+      const claimed = db.claimNerJobByIdWithLease(id, undefined, authorizeNerJobClaim)!;
       expect(db.moveNerLeaseToCommitting(id, claimed.leaseToken, claimed.payloadDigest)).toBe(true);
       const tools = getTools(createServer(deps));
       const result = await tools.job_cancel.handler({ id });

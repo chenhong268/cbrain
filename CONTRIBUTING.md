@@ -39,7 +39,26 @@ Open an issue describing:
 4. Implement your changes
 5. Ensure full gate passes: `bun run check` (typecheck src + tests + biome lint + bun test)
 6. Commit with conventional format: `feat: add X`, `fix: Y`, etc.
-7. Open a PR against `main`
+7. Open a PR against `main` and put `Closes #<issue-number>` in its description
+8. Let the merged PR close the code issue; a side-branch commit is not delivery evidence
+
+### Closing Code Issues
+
+A code issue is complete only when its fix is reachable from `main`. Prefer a
+PR targeting `main` with `Closes #<issue-number>` so GitHub records that
+relationship when the PR merges. Do not manually close an issue merely because
+a local or side-branch commit exists.
+
+If an exceptional workflow requires manual closure, fetch the current remote
+state and require this command to exit `0` before closing:
+
+```bash
+git fetch origin main
+git merge-base --is-ancestor <fix-commit> origin/main
+```
+
+Record the full fix commit in the closing comment. A non-zero exit means the
+fix is not in `main`; keep the issue open.
 
 ## Code Style
 

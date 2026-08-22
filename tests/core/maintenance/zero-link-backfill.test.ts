@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
+  authorizeNerJobClaim,
   countCurrentGraphLinks,
   deriveZeroLinkSource,
   enqueueZeroLinkBackfill,
@@ -20,11 +21,15 @@ import {
   ZERO_LINK_BATCH_MANIFEST_JOB,
   ZERO_LINK_REPAIR_NAME,
 } from "../../../src/core/maintenance/zero-link-backfill";
-import { buildNerAttemptIdentity, CBrainDB } from "../../../src/storage/sqlite";
+import { buildNerAttemptIdentity, CBrainDB, type NerAttemptIdentity } from "../../../src/storage/sqlite";
 
 const testDir = "/tmp/cbrain-test-zero-link-backfill";
 const dbPath = join(testDir, "brain.sqlite");
 let db: CBrainDB;
+
+function claimNerJob(id: number, expectedIdentity?: NerAttemptIdentity) {
+  return db.claimNerJobByIdWithLease(id, expectedIdentity, authorizeNerJobClaim);
+}
 
 function addPage(slug: string, opts: { type?: string; hash?: string | null; chunks?: string[]; tags?: string[] } = {}): void {
   db.upsertPage({
@@ -307,7 +312,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
       contentHash: "fingerprint-old",
       sourceFingerprint: "page:fingerprint-old",
     });
-    db.claimNerJobByIdWithLease(predecessor);
+    claimNerJob(predecessor);
     const successor = db.submitJob("ner-backfill", {
       slug: "records/item",
       kind: "ner",
@@ -316,12 +321,12 @@ describe("repair planning and atomic enqueue (#342)", () => {
     });
     expect(planZeroLinkBackfill(db)).toMatchObject({ active: 1, staleRunning: 0, stateConflicts: 0, actionable: 0 });
     let before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
-    expect(db.claimNerJobByIdWithLease(successor)).toBeNull();
+    expect(claimNerJob(successor)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
     db.rawDb.prepare("UPDATE jobs SET started_at=datetime('now','-31 minutes') WHERE id=?").run(predecessor);
     expect(planZeroLinkBackfill(db)).toMatchObject({ active: 1, staleRunning: 1, stateConflicts: 0, actionable: 0 });
     before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
-    expect(db.claimNerJobByIdWithLease(successor)).toBeNull();
+    expect(claimNerJob(successor)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -330,7 +335,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     const predecessor = db.submitJob("ner-backfill", {
       slug: "records/item", kind: "ner", contentHash: "fingerprint-old", sourceFingerprint: "page:fingerprint-old",
     });
-    const claimed = db.claimNerJobByIdWithLease(predecessor)!;
+    const claimed = claimNerJob(predecessor)!;
     expect(db.moveNerLeaseToCommitting(predecessor, claimed.leaseToken, claimed.payloadDigest)).toBe(true);
     const successor = db.submitJob("ner-backfill", {
       slug: "records/item", kind: "ner", contentHash: "fingerprint-a", sourceFingerprint: "page:fingerprint-a",
@@ -338,7 +343,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
     expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", active: 1, stateConflicts: 0 });
-    expect(db.claimNerJobByIdWithLease(successor)).toBeNull();
+    expect(claimNerJob(successor)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -350,7 +355,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     });
 
     expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", active: 1, stateConflicts: 0 });
-    expect(db.claimNerJobByIdWithLease(nerId)).not.toBeNull();
+    expect(claimNerJob(nerId)).not.toBeNull();
   });
 
   test("legacy live rows with only historical caller contentHash remain compatible", () => {
@@ -368,7 +373,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
       stateConflicts: 0,
       queueIntegrityConflicts: 0,
     });
-    expect(db.claimNerJobByIdWithLease(jobId)).not.toBeNull();
+    expect(claimNerJob(jobId)).not.toBeNull();
   });
 
   test("governed live rows with missing or mismatched hashes block plan and direct claim", () => {
@@ -395,7 +400,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
     expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 2, selected: 0 });
-    for (const id of ids) expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    for (const id of ids) expect(claimNerJob(id)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -405,6 +410,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
       { slug: "records/null-source", contentHash: "legacy", sourceFingerprint: null },
       { slug: "records/number-source", contentHash: "legacy", sourceFingerprint: 7 },
       { slug: "records/object-source", contentHash: "legacy", sourceFingerprint: { value: "page:x" } },
+      { slug: "records/mismatched-source-kind", contentHash: "legacy", sourceFingerprint: "page:hash-a", sourceKind: "raw_chunks" },
     ];
     const ids: number[] = [];
     for (const item of cases) {
@@ -413,8 +419,26 @@ describe("repair planning and atomic enqueue (#342)", () => {
     }
     const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
-    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 4, selected: 0 });
-    for (const id of ids) expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 5, selected: 0 });
+    for (const id of ids) expect(claimNerJob(id)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("a repair job with a conflicting top-level source kind cannot be claimed or mutated", () => {
+    addRich();
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const child = db.rawDb.prepare("SELECT id, data FROM jobs WHERE name='ner-backfill'").get() as {
+      id: number;
+      data: string;
+    };
+    const data = JSON.parse(child.data) as Record<string, unknown>;
+    data.sourceKind = "raw_chunks";
+    db.rawDb.prepare("UPDATE jobs SET data=? WHERE id=?").run(JSON.stringify(data), child.id);
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(receipt.selected).toBe(1);
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
+    expect(claimNerJob(child.id, buildNerAttemptIdentity(data) ?? undefined)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -426,13 +450,13 @@ describe("repair planning and atomic enqueue (#342)", () => {
         ...(malformed ? { attemptLease: {} } : {}),
       });
       if (!malformed) {
-        expect(db.claimNerJobByIdWithLease(id)).not.toBeNull();
+        expect(claimNerJob(id)).not.toBeNull();
         db.rawDb.prepare("UPDATE jobs SET status='pending' WHERE id=?").run(id);
       }
       const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
       expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
-      expect(db.claimNerJobByIdWithLease(id)).toBeNull();
+      expect(claimNerJob(id)).toBeNull();
       expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
       db.rawDb.prepare("DELETE FROM jobs").run();
     }
@@ -458,7 +482,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
       const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
       expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
-      expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+      expect(claimNerJob(target)).toBeNull();
       expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
       db.rawDb.prepare("DELETE FROM jobs").run();
     }
@@ -477,7 +501,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     });
     const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
     expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", queueIntegrityConflicts: 1, selected: 0 });
-    expect(db.claimNerJobByIdWithLease(orphan)).toBeNull();
+    expect(claimNerJob(orphan)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -517,7 +541,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
       const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
       expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
-      expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+      expect(claimNerJob(target)).toBeNull();
       expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
       db.rawDb.prepare("DELETE FROM jobs").run();
     }
@@ -536,7 +560,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
 
     expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 1, selected: 0 });
     expect(enqueueZeroLinkBackfill(db, 1)).toMatchObject({ status: "blocked", selected: 0 });
-    expect(db.claimNerJobByIdWithLease(legacyId)).toBeNull();
+    expect(claimNerJob(legacyId)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -561,7 +585,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
     expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", queueIntegrityConflicts: 1, selected: 0 });
-    expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+    expect(claimNerJob(target)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -595,7 +619,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
     expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
-    expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+    expect(claimNerJob(target)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -647,7 +671,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
       const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
 
       expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", selected: 0 });
-      expect(db.claimNerJobByIdWithLease(target)).toBeNull();
+      expect(claimNerJob(target)).toBeNull();
       expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
       db.rawDb.prepare("DELETE FROM jobs").run();
     }
@@ -694,7 +718,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
 
     expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", active: 1, stateConflicts: 0 });
     expect(getNerJobProtection(db).protectedJobIds.has(shadowId)).toBe(true);
-    expect(db.claimNerJobByIdWithLease(shadowId)).toBeNull();
+    expect(claimNerJob(shadowId)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -707,7 +731,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
         contentHash: `fingerprint-${status}`,
         sourceFingerprint: `page:fingerprint-${status}`,
       });
-      db.claimNerJobByIdWithLease(id);
+      claimNerJob(id);
       db.rawDb.prepare("UPDATE jobs SET status=?, finished_at=CASE WHEN ?='done' THEN datetime('now') ELSE NULL END WHERE id=?")
         .run(status, status, id);
     }
@@ -775,7 +799,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     expect(plan.status).toBe("blocked");
     expect(plan.queueIntegrityConflicts).toBeGreaterThanOrEqual(5);
     expect(enqueueZeroLinkBackfill(db, 10)).toMatchObject({ status: "blocked", selected: 0 });
-    expect(db.claimNerJobByIdWithLease(successor, frozen)).toBeNull();
+    expect(claimNerJob(successor, frozen)).toBeNull();
     expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
   });
 
@@ -801,7 +825,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     const child = db.rawDb.prepare("SELECT id FROM jobs WHERE name='ner-backfill'").get() as { id: number };
     getRepairBatchAttemptIdentity(db, receipt.batchId!, child.id);
     const childData = JSON.parse(db.getJob(child.id)!.data!);
-    db.claimNerJobByIdWithLease(child.id, buildNerAttemptIdentity(childData)!);
+    claimNerJob(child.id, buildNerAttemptIdentity(childData)!);
     db.rawDb.prepare("UPDATE jobs SET started_at=datetime('now','-31 minutes') WHERE id=?").run(child.id);
     addRich("records/conflict", "fingerprint-conflict");
     for (let i = 0; i < 2; i++) {
@@ -822,7 +846,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     addRich();
     const receipt = enqueueZeroLinkBackfill(db, 1);
     const repairChild = db.rawDb.prepare("SELECT id FROM jobs WHERE name='ner-backfill'").get() as { id: number };
-    const repairClaim = db.claimNerJobByIdWithLease(
+    const repairClaim = claimNerJob(
       repairChild.id,
       buildNerAttemptIdentity(JSON.parse(db.getJob(repairChild.id)!.data!))!,
     )!;
@@ -835,7 +859,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
       pageContentHash: "old-hash",
       sourceFingerprint: "page:old-hash",
     });
-    db.claimNerJobByIdWithLease(predecessor);
+    claimNerJob(predecessor);
     db.submitJob("ner-backfill", {
       slug: "records/non-rich",
       kind: "ner",
@@ -856,7 +880,7 @@ describe("repair planning and atomic enqueue (#342)", () => {
     const firstManifest = db.rawDb.prepare("SELECT data FROM jobs WHERE name=?").get(ZERO_LINK_BATCH_MANIFEST_JOB) as { data: string };
     const overlapping = JSON.parse(firstManifest.data);
     overlapping.batchId = "22222222-2222-4222-8222-222222222222";
-    expect(db.claimNerJobByIdWithLease(child.id, buildNerAttemptIdentity(JSON.parse(db.getJob(child.id)!.data!))!)).not.toBeNull();
+    expect(claimNerJob(child.id, buildNerAttemptIdentity(JSON.parse(db.getJob(child.id)!.data!))!)).not.toBeNull();
     const childData = JSON.parse(db.getJob(child.id)!.data!);
     childData.repair.batchId = overlapping.batchId;
     const { attemptLease, ...payload } = childData;
