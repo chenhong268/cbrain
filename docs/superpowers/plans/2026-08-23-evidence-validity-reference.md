@@ -338,7 +338,7 @@ test("[24a] legacy graph display and ordering stay equivalent", () => {
 
 test("[24b] legacy timeline does not invent cross-entity Event merging", () => {
   const first = adaptLegacyTimeline({ rowId: 1, entity: "entity-a", date: "2026-01-01", summary: "匿名事件" });
-  const second = adaptLegacyTimeline({ rowId: 2, entity: "entity-b", date: "2026-01-01", summary: "匿名事件" });
+  const second = adaptLegacyTimeline({ rowId: 1, entity: "entity-b", date: "2026-01-01", summary: "匿名事件" });
   expect(first.display).toEqual({ date: "2026-01-01", summary: "匿名事件" });
   expect(first.raw.eventId).not.toBe(second.raw.eventId);
 });
