@@ -103,6 +103,7 @@ describe("Evidence–Claim–Validity executable contract", () => {
     const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a", "entity-b"], definingClaimEligible: true };
     expect(projectTimelineEvent(event, instant("2026-03-01T00:00:00Z")).rows.map((row) => [row.participant, row.eventId])).toEqual([["entity-a", "event-d"], ["entity-b", "event-d"]]);
     expect(projectTimelineEvent({ ...event, confirmationState: "candidate" }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
+    expect(projectTimelineEvent({ ...event, confirmationState: "rejected" }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
     expect(projectTimelineEvent({ ...event, definingClaimEligible: false }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
   });
 
@@ -114,7 +115,7 @@ describe("Evidence–Claim–Validity executable contract", () => {
 
   test("[24b] legacy timeline does not invent cross-entity Event merging", () => {
     const first = adaptLegacyTimeline({ rowId: 1, entity: "entity-a", date: "2026-01-01", summary: "匿名事件" });
-    const second = adaptLegacyTimeline({ rowId: 2, entity: "entity-b", date: "2026-01-01", summary: "匿名事件" });
+    const second = adaptLegacyTimeline({ rowId: 1, entity: "entity-b", date: "2026-01-01", summary: "匿名事件" });
     expect(first.display).toEqual({ date: "2026-01-01", summary: "匿名事件" });
     expect(first.raw.eventId).not.toBe(second.raw.eventId);
   });
