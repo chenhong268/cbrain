@@ -105,3 +105,105 @@ export const reduceClaimValidity = ({ claimId, asOf, validFrom, validTo, transit
   if (validFrom || validTo) return { state: "effective", temporalCertainty: "known", transitionConflict: false };
   return { state: "unknown", temporalCertainty: "unknown", transitionConflict: false };
 };
+
+export type ClaimKind = "fact" | "inference";
+export type ClaimTrust = "candidate" | "trusted" | "rejected";
+export type EvidenceStance = "supports" | "contradicts" | "limits";
+export type EvidenceVerificationState = "verified" | "unavailable" | "mismatch";
+export type ClaimDisplaySignal = "pending_confirmation" | "not_yet_effective" | "temporal_unknown" | "no_confirmed_replacement" | "evidence_unavailable" | "authority_unconfirmed" | "inference" | "conflict";
+
+export interface EvidenceVerification {
+  state: EvidenceVerificationState;
+  active: boolean;
+}
+
+export interface ClaimEvidence {
+  stance: EvidenceStance;
+  verificationState: EvidenceVerificationState;
+  sourceVersionAvailable: boolean;
+  independenceGroupState: "confirmed" | "unknown";
+  independenceGroup?: string;
+}
+
+export interface Claim {
+  id: string;
+  kind: ClaimKind;
+  trust: ClaimTrust;
+  evidence: ClaimEvidence[];
+  validFrom?: TemporalPoint;
+  validTo?: TemporalPoint;
+  authority?: { required: boolean; scopeMatched: boolean };
+}
+
+export interface CurrentEligibility {
+  eligible: boolean;
+  reasons: ("kind_not_fact" | "trust_not_trusted" | "validity_not_current" | "active_support_missing" | "authority_scope_mismatch")[];
+  conflict: boolean;
+  confidenceCeiling: "high_allowed" | "not_high";
+  temporalCertainty: ValidityResult["temporalCertainty"];
+}
+
+export interface CurrentProjection {
+  claimId: string;
+  validity: ValidityResult;
+  eligibility: CurrentEligibility;
+}
+
+export interface InferenceProjection {
+  visible: boolean;
+  displaySignal: "inference";
+}
+
+export const verifyEvidence = (input: { locatorResolved: boolean; pinnedVersionAvailable: boolean; pinnedHashMatches: boolean; excerptHashMatches: boolean; liveVersionId?: string; pinnedVersionId?: string }): EvidenceVerification => {
+  if (!input.locatorResolved || !input.pinnedVersionAvailable) return { state: "unavailable", active: false };
+  if (!input.pinnedHashMatches || !input.excerptHashMatches) return { state: "mismatch", active: false };
+  return { state: "verified", active: true };
+};
+
+const isActiveSupport = (evidence: ClaimEvidence): boolean => evidence.stance === "supports" && evidence.verificationState === "verified" && evidence.sourceVersionAvailable;
+
+export const countCorroboration = (bindings: ClaimEvidence[]): { confirmedIndependentGroups: number; independenceUnknown: number } => ({
+  confirmedIndependentGroups: new Set(bindings.filter((binding) => binding.independenceGroupState === "confirmed" && binding.independenceGroup).map((binding) => binding.independenceGroup)).size,
+  independenceUnknown: bindings.filter((binding) => binding.independenceGroupState === "unknown").length,
+});
+
+export const evaluateCurrentEligibility = (claim: Claim, validity: ValidityResult): CurrentEligibility => {
+  const reasons: CurrentEligibility["reasons"] = [];
+  if (claim.kind !== "fact") reasons.push("kind_not_fact");
+  if (claim.trust !== "trusted") reasons.push("trust_not_trusted");
+  if (!(validity.state === "effective" || validity.state === "unknown")) reasons.push("validity_not_current");
+  if (!claim.evidence.some(isActiveSupport)) reasons.push("active_support_missing");
+  if (claim.authority?.required && !claim.authority.scopeMatched) reasons.push("authority_scope_mismatch");
+  const conflict = claim.evidence.some((evidence) => evidence.stance === "contradicts");
+  return { eligible: reasons.length === 0, reasons, conflict, confidenceCeiling: conflict ? "not_high" : "high_allowed", temporalCertainty: validity.temporalCertainty };
+};
+
+export const projectFactualClaims = (claims: Claim[], asOf: TemporalPoint, transitions: ClaimTransition[]): CurrentProjection[] => claims.map((claim) => {
+  const validity = reduceClaimValidity({ claimId: claim.id, asOf, validFrom: claim.validFrom, validTo: claim.validTo, transitions });
+  return { claimId: claim.id, validity, eligibility: evaluateCurrentEligibility(claim, validity) };
+}).filter((projection) => projection.eligibility.eligible);
+
+export const projectInferenceView = (claim: Claim, validity: ValidityResult): InferenceProjection => ({
+  visible: claim.kind === "inference" && claim.trust === "trusted" && validity.state === "effective" && claim.evidence.some(isActiveSupport),
+  displaySignal: "inference",
+});
+
+export const claimDisplaySignals = (claim: Claim, validity: ValidityResult, eligibility: CurrentEligibility, verification?: EvidenceVerification, context?: { hasEligibleReplacement?: boolean }): ClaimDisplaySignal[] => {
+  const signals = new Set<ClaimDisplaySignal>();
+  if (claim.trust === "candidate") signals.add("pending_confirmation");
+  if (validity.state === "scheduled") signals.add("not_yet_effective");
+  if (validity.temporalCertainty === "unknown") signals.add("temporal_unknown");
+  if (validity.state === "superseded" && context?.hasEligibleReplacement === false) signals.add("no_confirmed_replacement");
+  if (verification && !verification.active) signals.add("evidence_unavailable");
+  if (eligibility.reasons.includes("authority_scope_mismatch")) signals.add("authority_unconfirmed");
+  if (eligibility.conflict) signals.add("conflict");
+  if (claim.kind === "inference") signals.add("inference");
+  return [...signals];
+};
+
+export const buildDefaultDisplay = (record: Record<string, unknown>): Record<string, unknown> => {
+  const display: Record<string, unknown> = {};
+  if ("summary" in record) display.summary = record.summary;
+  if ("state" in record) display.state = record.state;
+  return display;
+};

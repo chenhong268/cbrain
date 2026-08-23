@@ -1,15 +1,102 @@
 import { describe, expect, test } from "bun:test";
 import {
   approximatePoint,
+  buildDefaultDisplay,
+  claimDisplaySignals,
+  countCorroboration,
+  evaluateCurrentEligibility,
+  projectFactualClaims,
+  projectInferenceView,
   reduceClaimValidity,
   temporalPoint,
   type ClaimTransition,
+  verifyEvidence,
 } from "../helpers/evidence-claim-validity-reference.js";
 
 const instant = (value: string) => temporalPoint(value, "instant", "Z");
 const day = (value: string) => temporalPoint(value, "day", "+00:00");
+const verifiedSupport = { stance: "supports" as const, verificationState: "verified" as const, sourceVersionAvailable: true, independenceGroupState: "confirmed" as const, independenceGroup: "group-1" };
 
 describe("Evidence–Claim–Validity executable contract", () => {
+  test("[1] verification does not upgrade Claim trust", () => {
+    const evidence = verifyEvidence({ locatorResolved: true, pinnedVersionAvailable: true, pinnedHashMatches: true, excerptHashMatches: true });
+    expect(evidence).toEqual({ state: "verified", active: true });
+    expect(evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "candidate", evidence: [verifiedSupport] }, { state: "unknown", temporalCertainty: "unknown", transitionConflict: false }).eligible).toBe(false);
+  });
+
+  test("[2] unavailable or mismatched pinned bytes deactivate Evidence", () => {
+    expect(verifyEvidence({ locatorResolved: true, pinnedVersionAvailable: false, pinnedHashMatches: false, excerptHashMatches: true })).toEqual({ state: "unavailable", active: false });
+    expect(verifyEvidence({ locatorResolved: true, pinnedVersionAvailable: true, pinnedHashMatches: false, excerptHashMatches: true })).toEqual({ state: "mismatch", active: false });
+  });
+
+  test("[3] a candidate fact is excluded even with verified support", () => {
+    const result = evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "candidate", evidence: [verifiedSupport] }, { state: "effective", temporalCertainty: "known", transitionConflict: false });
+    expect(result).toMatchObject({ eligible: false, reasons: ["trust_not_trusted"] });
+  });
+
+  test("[4] authority scope is required only when policy asks for it", () => {
+    const claim = { id: "claim-c", kind: "fact" as const, trust: "trusted" as const, evidence: [verifiedSupport], authority: { required: true, scopeMatched: false } };
+    const validity = { state: "effective" as const, temporalCertainty: "known" as const, transitionConflict: false };
+    const eligibility = evaluateCurrentEligibility(claim, validity);
+    expect(eligibility.reasons).toContain("authority_scope_mismatch");
+    expect(claimDisplaySignals(claim, validity, eligibility)).toContain("authority_unconfirmed");
+  });
+
+  test("[5] same-origin sources count as one independent group", () => {
+    expect(countCorroboration([verifiedSupport, { ...verifiedSupport }])).toEqual({ confirmedIndependentGroups: 1, independenceUnknown: 0 });
+  });
+
+  test("[6] contradiction marks but does not erase an eligible Claim", () => {
+    const claim = { id: "claim-c", kind: "fact" as const, trust: "trusted" as const, evidence: [verifiedSupport, { ...verifiedSupport, stance: "contradicts" as const }] };
+    expect(evaluateCurrentEligibility(claim, { state: "effective", temporalCertainty: "known", transitionConflict: false })).toMatchObject({ eligible: true, conflict: true, confidenceCeiling: "not_high" });
+  });
+
+  test("[13] every disallowed axis is excluded from factual current", () => {
+    const validityStates = ["scheduled", "expired", "superseded", "revoked"] as const;
+    for (const state of validityStates) expect(evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "trusted", evidence: [verifiedSupport] }, { state, temporalCertainty: "known", transitionConflict: false }).eligible).toBe(false);
+    expect(evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "rejected", evidence: [verifiedSupport] }, { state: "effective", temporalCertainty: "known", transitionConflict: false }).eligible).toBe(false);
+    expect(evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "trusted", evidence: [{ ...verifiedSupport, stance: "limits" }] }, { state: "effective", temporalCertainty: "known", transitionConflict: false }).reasons).toContain("active_support_missing");
+  });
+
+  test("[23] default display excludes private audit fields", () => {
+    expect(buildDefaultDisplay({ summary: "匿名摘要", state: "effective", id: "claim-c", slug: "private/a", path: "/private/a.md", uri: "file:///private/a.md", excerpt: "private", hash: "abc" })).toEqual({ summary: "匿名摘要", state: "effective" });
+  });
+
+  test("[25] trusted inference remains outside factual current", () => {
+    expect(evaluateCurrentEligibility({ id: "claim-c", kind: "inference", trust: "trusted", evidence: [verifiedSupport] }, { state: "effective", temporalCertainty: "known", transitionConflict: false })).toMatchObject({ eligible: false, reasons: ["kind_not_fact"] });
+  });
+
+  test("[29] a verified capture stays active when a newer live version exists", () => {
+    expect(verifyEvidence({ locatorResolved: true, pinnedVersionAvailable: true, pinnedHashMatches: true, excerptHashMatches: true, liveVersionId: "source-b-v2", pinnedVersionId: "source-b-v1" })).toEqual({ state: "verified", active: true });
+  });
+
+  test("[10,27] replacement targets qualify independently", () => {
+    const effectiveAt = instant("2026-02-01T00:00:00Z");
+    const transition = { kind: "supersedes" as const, oldClaimId: "claim-c", newClaimId: "claim-d", confirmationState: "confirmed" as const, effectiveAt };
+    const oldClaim = { id: "claim-c", kind: "fact" as const, trust: "trusted" as const, evidence: [verifiedSupport] };
+    const trustedReplacement = { id: "claim-d", kind: "fact" as const, trust: "trusted" as const, validFrom: effectiveAt, evidence: [verifiedSupport] };
+    const candidateReplacement = { ...trustedReplacement, trust: "candidate" as const };
+    expect(projectFactualClaims([oldClaim, trustedReplacement], instant("2026-01-01T00:00:00Z"), [transition]).map((item) => item.claimId)).toEqual(["claim-c"]);
+    expect(projectFactualClaims([oldClaim, trustedReplacement], instant("2026-03-01T00:00:00Z"), [transition]).map((item) => item.claimId)).toEqual(["claim-d"]);
+    expect(projectFactualClaims([oldClaim, candidateReplacement], instant("2026-03-01T00:00:00Z"), [transition])).toEqual([]);
+  });
+
+  test("[25] inference has an explicit non-factual view", () => {
+    const inference = { id: "claim-c", kind: "inference" as const, trust: "trusted" as const, evidence: [verifiedSupport] };
+    expect(projectInferenceView(inference, { state: "effective", temporalCertainty: "known", transitionConflict: false })).toEqual({ visible: true, displaySignal: "inference" });
+  });
+
+  test("[1,2,3,4,5,7,11,26,27,31] display semantics remain honest", () => {
+    const trusted = { id: "claim-c", kind: "fact" as const, trust: "trusted" as const, evidence: [verifiedSupport] };
+    const candidate = { ...trusted, trust: "candidate" as const };
+    expect(claimDisplaySignals(candidate, { state: "effective", temporalCertainty: "known", transitionConflict: false }, evaluateCurrentEligibility(candidate, { state: "effective", temporalCertainty: "known", transitionConflict: false }))).toContain("pending_confirmation");
+    expect(claimDisplaySignals(trusted, { state: "scheduled", temporalCertainty: "known", transitionConflict: false }, { eligible: false, reasons: ["validity_not_current"], conflict: false, confidenceCeiling: "high_allowed", temporalCertainty: "known" })).toContain("not_yet_effective");
+    expect(claimDisplaySignals(trusted, { state: "unknown", temporalCertainty: "unknown", transitionConflict: false }, evaluateCurrentEligibility(trusted, { state: "unknown", temporalCertainty: "unknown", transitionConflict: false }))).toContain("temporal_unknown");
+    expect(claimDisplaySignals(trusted, { state: "superseded", temporalCertainty: "known", transitionConflict: false }, { eligible: false, reasons: ["validity_not_current"], conflict: false, confidenceCeiling: "high_allowed", temporalCertainty: "known" }, undefined, { hasEligibleReplacement: false })).toContain("no_confirmed_replacement");
+    expect(claimDisplaySignals(trusted, { state: "unknown", temporalCertainty: "unknown", transitionConflict: false }, evaluateCurrentEligibility(trusted, { state: "unknown", temporalCertainty: "unknown", transitionConflict: false }), { state: "unavailable", active: false })).toContain("evidence_unavailable");
+    expect(countCorroboration([verifiedSupport, { ...verifiedSupport }]).confirmedIndependentGroups).toBe(1);
+  });
+
   test("[7] future valid_from is scheduled", () => {
     expect(reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-01-01T00:00:00Z"), validFrom: day("2026-02-01"), transitions: [] }).state).toBe("scheduled");
   });
