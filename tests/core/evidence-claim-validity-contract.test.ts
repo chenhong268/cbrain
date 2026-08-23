@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
   approximatePoint,
+  adaptLegacyGraph,
+  adaptLegacyRecall,
+  adaptLegacyTimeline,
   buildDefaultDisplay,
   claimDisplaySignals,
   countCorroboration,
   evaluateCurrentEligibility,
   projectFactualClaims,
   projectInferenceView,
+  projectTimelineEvent,
   reduceClaimValidity,
   temporalPoint,
   type ClaimTransition,
@@ -93,6 +97,44 @@ describe("Evidence–Claim–Validity executable contract", () => {
 
   test("[23] default display excludes private audit fields", () => {
     expect(buildDefaultDisplay({ summary: "匿名摘要", state: "effective", id: "claim-c", slug: "private/a", path: "/private/a.md", uri: "file:///private/a.md", excerpt: "private", hash: "abc" })).toEqual({ summary: "匿名摘要", state: "effective" });
+  });
+
+  test("[12] every participant view shares one Event identity", () => {
+    const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a", "entity-b"], definingClaimEligible: true };
+    expect(projectTimelineEvent(event, instant("2026-03-01T00:00:00Z")).rows.map((row) => [row.participant, row.eventId])).toEqual([["entity-a", "event-d"], ["entity-b", "event-d"]]);
+    expect(projectTimelineEvent({ ...event, confirmationState: "candidate" }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
+    expect(projectTimelineEvent({ ...event, definingClaimEligible: false }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
+  });
+
+  test("[24a] legacy graph display and ordering stay equivalent", () => {
+    const result = adaptLegacyGraph({ from: "entity-a", relation: "knows", to: "entity-b", rank: 1 });
+    expect(result.display).toEqual({ from: "entity-a", relation: "knows", to: "entity-b", rank: 1 });
+    expect(result.raw.claimId).toBe("legacy-link:entity-a:knows:entity-b");
+  });
+
+  test("[24b] legacy timeline does not invent cross-entity Event merging", () => {
+    const first = adaptLegacyTimeline({ rowId: 1, entity: "entity-a", date: "2026-01-01", summary: "匿名事件" });
+    const second = adaptLegacyTimeline({ rowId: 2, entity: "entity-b", date: "2026-01-01", summary: "匿名事件" });
+    expect(first.display).toEqual({ date: "2026-01-01", summary: "匿名事件" });
+    expect(first.raw.eventId).not.toBe(second.raw.eventId);
+  });
+
+  test("[24c] pre-cutover brief recall adds no kernel work", () => {
+    const result = adaptLegacyRecall({ answer: "匿名回答", citations: 1, sqlCount: 0, llmCount: 0 });
+    expect(result.display).toEqual({ answer: "匿名回答", citations: 1 });
+    expect(result.kernelSqlCount).toBe(0);
+    expect(result.kernelLlmCount).toBe(0);
+  });
+
+  test("[30] cancellation keeps history but never claims the event occurred", () => {
+    const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a"], definingClaimEligible: true, cancellation: { confirmationState: "confirmed" as const, effectiveAt: instant("2026-02-01T00:00:00Z") } };
+    expect(projectTimelineEvent(event, instant("2026-01-01T00:00:00Z")).displayState).toBe("planned_or_confirmed");
+    expect(projectTimelineEvent(event, instant("2026-03-01T00:00:00Z")).displayState).toBe("planned_then_cancelled");
+  });
+
+  test("[30] an uncertain cancellation boundary remains temporally unknown", () => {
+    const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a"], definingClaimEligible: true, cancellation: { confirmationState: "confirmed" as const, effectiveAt: approximatePoint("around February", "+00:00", "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z") } };
+    expect(projectTimelineEvent(event, instant("2026-02-15T00:00:00Z")).displayState).toBe("temporal_unknown");
   });
 
   test("[25] trusted inference remains outside factual current", () => {

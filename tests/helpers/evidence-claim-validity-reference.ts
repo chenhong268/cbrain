@@ -210,3 +210,45 @@ export const buildDefaultDisplay = (record: Record<string, unknown>): Record<str
   if ("state" in record) display.state = record.state;
   return display;
 };
+
+export interface TimelineEvent {
+  id: string;
+  confirmationState: "candidate" | "confirmed" | "rejected";
+  participants: string[];
+  definingClaimEligible: boolean;
+  cancellation?: { confirmationState: "candidate" | "confirmed" | "rejected"; effectiveAt: TemporalPoint };
+}
+
+export interface TimelineProjection {
+  rows: { participant: string; eventId: string }[];
+  displayState: "planned_or_confirmed" | "planned_then_cancelled" | "temporal_unknown";
+}
+
+export const projectTimelineEvent = (event: TimelineEvent, asOf: TemporalPoint): TimelineProjection => {
+  if (event.confirmationState !== "confirmed" || !event.definingClaimEligible) return { rows: [], displayState: "planned_or_confirmed" };
+  const cancellation = event.cancellation;
+  const displayState = cancellation?.confirmationState === "confirmed"
+    ? crossed(cancellation.effectiveAt, asOf)
+      ? "planned_then_cancelled"
+      : ambiguous(cancellation.effectiveAt, asOf)
+        ? "temporal_unknown"
+        : "planned_or_confirmed"
+    : "planned_or_confirmed";
+  return { rows: event.participants.map((participant) => ({ participant, eventId: event.id })), displayState };
+};
+
+export const adaptLegacyGraph = (row: { from: string; relation: string; to: string; rank: number }) => ({
+  display: { from: row.from, relation: row.relation, to: row.to, rank: row.rank },
+  raw: { claimId: `legacy-link:${row.from}:${row.relation}:${row.to}` },
+});
+
+export const adaptLegacyTimeline = (row: { rowId: number; entity: string; date: string; summary: string }) => ({
+  display: { date: row.date, summary: row.summary },
+  raw: { eventId: `legacy-timeline:${row.entity}:${row.rowId}` },
+});
+
+export const adaptLegacyRecall = (envelope: { answer: string; citations: number; sqlCount: number; llmCount: number }) => ({
+  display: { answer: envelope.answer, citations: envelope.citations },
+  kernelSqlCount: envelope.sqlCount,
+  kernelLlmCount: envelope.llmCount,
+});
