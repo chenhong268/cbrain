@@ -6,7 +6,7 @@
 
 **Architecture:** Add one narrow helper under `tests/helpers/` containing pure reference types and reducers, plus one contract test file whose cases map directly to contract fixtures 1–31 (including 24a–c). Nothing under `src/` imports the helper, and the implementation reads no vault, database, network, environment-dependent clock, or real user data.
 
-**Tech Stack:** TypeScript 5.9, Bun 1.3 test runner, built-in `Date` parsing for fixed-offset reference timestamps.
+**Tech Stack:** TypeScript 5.9, Bun 1.3 test runner, strict RFC 3339/Gregorian validation followed by deterministic UTC calendar arithmetic for fixed-offset reference timestamps.
 
 **Spec:** `docs/superpowers/specs/2026-07-14-evidence-claim-validity-calibration-contract.md`
 
@@ -82,6 +82,7 @@ describe("Evidence–Claim–Validity executable contract", () => {
   test("[14] valid-time uses effective_at rather than recorded_at", () => {
     const transition: ClaimTransition = { kind: "supersedes", oldClaimId: "claim-c", newClaimId: "claim-d", confirmationState: "confirmed", effectiveAt: instant("2026-02-01T00:00:00Z"), recordedAt: instant("2026-03-01T00:00:00Z") };
     expect(reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-01-01T00:00:00Z"), transitions: [transition] }).state).toBe("unknown");
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-02-15T00:00:00Z"), transitions: [transition] }).state).toBe("superseded");
   });
 
   test("[26] trusted fact with unknown time remains temporally unknown", () => {
@@ -139,11 +140,17 @@ Use these exact public types; keep parsing/interval helpers private:
 export type TemporalPrecision = "instant" | "day" | "month" | "year" | "approximate";
 export interface TemporalPoint { value: string; precision: TemporalPrecision; timezone: string; earliestMs: number; latestExclusiveMs: number; }
 export type ValidityState = "unknown" | "scheduled" | "effective" | "expired" | "superseded" | "revoked";
-export interface ClaimTransition { kind: "supersedes" | "revokes"; oldClaimId: string; newClaimId?: string; confirmationState: "candidate" | "confirmed" | "rejected"; effectiveAt?: TemporalPoint; recordedAt?: TemporalPoint; }
+interface ClaimTransitionBase { oldClaimId: string; confirmationState: "candidate" | "confirmed" | "rejected"; effectiveAt?: TemporalPoint; recordedAt?: TemporalPoint; }
+export type ClaimTransition = ClaimTransitionBase & (
+  | { kind: "supersedes"; newClaimId: string }
+  | { kind: "revokes"; newClaimId?: never }
+);
 export interface ValidityResult { state: ValidityState; temporalCertainty: "known" | "unknown"; transitionConflict: boolean; }
 ```
 
-Reducer order must be literal: validate `validFrom.latestExclusiveMs <= validTo.earliestMs`; then crossed confirmed revocation; crossed confirmed supersession; ambiguous confirmed transition; scheduled/ambiguous `valid_from`; expired/ambiguous `valid_to`; effective when at least one valid-time boundary deterministically covers `asOf`; otherwise unknown. An instant has `earliestMs === latestExclusiveMs`, so it becomes effective exactly at the timestamp. `recordedAt` is stored but never read by this reducer.
+Constructors fail closed before producing a `TemporalPoint`: instant values are strict RFC 3339 with an explicit `Z` or fixed offset; day/month/year values are strict Gregorian values; fixed offsets must match `Z|[+-]HH:MM` with numeric fields in range; every derived millisecond must be finite; and approximate bounds must satisfy `earliest < latestExclusive`. The reducer rejects provably overlapping intervals and exact zero-length `[valid_from, valid_to)` intervals while retaining uncertain intervals whose ordering is provable.
+
+Reducer order must be literal: validate the interval and transition discriminant; then crossed confirmed revocation; ambiguous confirmed revocation; crossed confirmed supersession; ambiguous confirmed supersession; scheduled/ambiguous `valid_from`; expired/ambiguous `valid_to`; effective when at least one valid-time boundary deterministically covers `asOf`; otherwise unknown. One explicit three-way comparator returns `before | ambiguous | crossed`: exact `asOf` points in `[earliest, latestExclusive)` are ambiguous, `latestExclusive` is crossed, and an exact instant boundary crosses exactly at its timestamp. `recordedAt` is stored but never read by this reducer.
 
 - [ ] **Step 4: Run Task 1 tests and typecheck**
 
@@ -283,7 +290,7 @@ Expected: FAIL with missing exported functions.
 
 - [ ] **Step 3: Implement only the data contracts used by Task 2**
 
-Use discriminated string unions for `ClaimKind`, `ClaimTrust`, `EvidenceStance`, verification state, and semantic display signals. `evaluateCurrentEligibility` must evaluate every axis and return all reasons in this fixed order: kind, trust, validity, active support, authority. Validity `unknown` is eligible with `temporalCertainty: "unknown"`; contradictions set `conflict: true` and `confidenceCeiling: "not_high"` but do not add an exclusion reason. `projectFactualClaims` calls the Task 1 reducer separately for every Claim and never transfers trust/evidence from the old Claim to the replacement; fixture 10 gives the replacement its own `validFrom=T2`, which is why only the old Claim is visible before T2. `projectInferenceView` is visible only for trusted/effective inference with active support and always returns the `inference` display signal. `claimDisplaySignals` returns semantic flags rather than freezing Chinese copy; `no_confirmed_replacement` is emitted only when the supplied context explicitly says there is no eligible replacement. `buildDefaultDisplay` must return only `summary` and `state` when present.
+Use discriminated string unions for `ClaimKind`, `ClaimTrust`, `EvidenceStance`, verification state (including `unchecked`), and semantic display signals. One stance-aware active-binding predicate requires `verificationState="verified"` and an available pinned source version for both supports and contradicts. `evaluateCurrentEligibility` must evaluate every axis and return all reasons in this fixed order: kind, trust, validity, active support, authority. Validity `unknown` is eligible with `temporalCertainty: "unknown"`; only an active contradiction sets `conflict: true` and `confidenceCeiling: "not_high"`, while unchecked/mismatch/unavailable contradictions do nothing. Contradictions never add an exclusion reason. `projectFactualClaims` calls the Task 1 reducer separately for every Claim and never transfers trust/evidence from the old Claim to the replacement; fixture 10 gives the replacement its own `validFrom=T2`, which is why only the old Claim is visible before T2. `projectInferenceView` is visible only for trusted/effective inference with active support and always returns the `inference` display signal. `claimDisplaySignals` returns semantic flags rather than freezing Chinese copy; `no_confirmed_replacement` is emitted only when the supplied context explicitly says there is no eligible replacement. `buildDefaultDisplay` must return only `summary` and `state` when present.
 
 - [ ] **Step 4: Run Task 1–2 tests and typecheck**
 
@@ -308,9 +315,9 @@ git commit -m "test: execute factual current eligibility contract (#433)"
 - Consumes: `evaluateCurrentEligibility` and temporal boundary semantics.
 - Produces:
   - `projectTimelineEvent(event, asOf): TimelineProjection`
-  - `adaptLegacyGraph(row): { display, raw }`
-  - `adaptLegacyTimeline(row): { display, raw }`
-  - `adaptLegacyRecall(envelope): LegacyRecallProjection`
+  - `adaptLegacyGraph(rows): Array<{ display, raw }>`
+  - `adaptLegacyTimeline(rows): Array<{ display, raw }>`
+  - `adaptLegacyRecall(envelope, dependencies): LegacyRecallProjection`
 
 - [ ] **Step 1: Add failing tests for fixture groups 12, 24a–c, and 30**
 
@@ -326,25 +333,43 @@ import {
 test("[12] every participant view shares one Event identity", () => {
   const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a", "entity-b"], definingClaimEligible: true };
   expect(projectTimelineEvent(event, instant("2026-03-01T00:00:00Z")).rows.map((row) => [row.participant, row.eventId])).toEqual([["entity-a", "event-d"], ["entity-b", "event-d"]]);
-  expect(projectTimelineEvent({ ...event, confirmationState: "candidate" }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
-  expect(projectTimelineEvent({ ...event, definingClaimEligible: false }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
+  expect(projectTimelineEvent({ ...event, confirmationState: "candidate" }, instant("2026-03-01T00:00:00Z"))).toEqual({ rows: [], displayState: "excluded" });
+  expect(projectTimelineEvent({ ...event, definingClaimEligible: false }, instant("2026-03-01T00:00:00Z"))).toEqual({ rows: [], displayState: "excluded" });
 });
 
-test("[24a] legacy graph display and ordering stay equivalent", () => {
-  const result = adaptLegacyGraph({ from: "entity-a", relation: "knows", to: "entity-b", rank: 1 });
-  expect(result.display).toEqual({ from: "entity-a", relation: "knows", to: "entity-b", rank: 1 });
-  expect(result.raw.claimId).toBe("legacy-link:entity-a:knows:entity-b");
+test("[24a] legacy graph preserves multi-row count, order, display, and raw-only identity", () => {
+  const rows = Object.freeze([
+    Object.freeze({ from: "entity-a", relation: "knows", to: "entity-b", rank: 2 }),
+    Object.freeze({ from: "entity-b", relation: "supports", to: "entity-c", rank: 1 }),
+  ]);
+  const result = adaptLegacyGraph(rows);
+  expect(result.map((item) => item.display)).toEqual([
+    { from: "entity-a", relation: "knows", to: "entity-b", rank: 2 },
+    { from: "entity-b", relation: "supports", to: "entity-c", rank: 1 },
+  ]);
 });
 
-test("[24b] legacy timeline does not invent cross-entity Event merging", () => {
-  const first = adaptLegacyTimeline({ rowId: 1, entity: "entity-a", date: "2026-01-01", summary: "匿名事件" });
-  const second = adaptLegacyTimeline({ rowId: 1, entity: "entity-b", date: "2026-01-01", summary: "匿名事件" });
-  expect(first.display).toEqual({ date: "2026-01-01", summary: "匿名事件" });
-  expect(first.raw.eventId).not.toBe(second.raw.eventId);
+test("[24b] legacy timeline preserves rows and never merges matching content across identities", () => {
+  const rows = Object.freeze([
+    Object.freeze({ rowId: 7, entity: "entity-a", date: "2026-01-01", summary: "匿名事件甲" }),
+    Object.freeze({ rowId: 8, entity: "entity-a", date: "2026-01-02", summary: "匿名事件乙" }),
+    Object.freeze({ rowId: 7, entity: "entity-b", date: "2026-01-01", summary: "匿名事件甲" }),
+  ]);
+  const result = adaptLegacyTimeline(rows);
+  expect(result.map((item) => item.raw.eventId)).toEqual([
+    "legacy-timeline:entity-a:7",
+    "legacy-timeline:entity-a:8",
+    "legacy-timeline:entity-b:7",
+  ]);
 });
 
 test("[24c] pre-cutover brief recall adds no kernel work", () => {
-  const result = adaptLegacyRecall({ answer: "匿名回答", citations: 1, sqlCount: 0, llmCount: 0 });
+  const failIfCalled = (): never => { throw new Error("pre-cutover kernel work must not run"); };
+  const legacyEnvelope = { answer: "匿名回答", citations: 1, sqlCount: 99, llmCount: 99 };
+  const result = adaptLegacyRecall(
+    legacyEnvelope,
+    { runKernel: failIfCalled, recordKernelAccounting: failIfCalled },
+  );
   expect(result.display).toEqual({ answer: "匿名回答", citations: 1 });
   expect(result.kernelSqlCount).toBe(0);
   expect(result.kernelLlmCount).toBe(0);
@@ -365,7 +390,7 @@ Expected: FAIL with missing projection/adapter exports.
 
 - [ ] **Step 3: Implement the minimal projections and adapters**
 
-Timeline rules are fixed: candidate/rejected event or ineligible defining Claim returns no rows; confirmed eligible event returns one row per participant with the same `eventId`; crossed confirmed cancellation returns `planned_then_cancelled`; an ambiguous cancellation boundary returns `temporal_unknown`. Legacy adapters are pure shape adapters only and never read production services. Internal IDs are additive under `raw`; display fields remain exactly as asserted.
+Timeline rules are fixed: candidate/rejected event or ineligible defining Claim returns no rows with explicit `displayState="excluded"`; confirmed eligible event returns one row per participant with the same `eventId`; crossed confirmed cancellation returns `planned_then_cancelled`; an ambiguous cancellation boundary returns `temporal_unknown`. Graph and timeline adapters map anonymous frozen multi-row fixtures without sorting, dropping, or merging rows; equal timeline content with different entity/row identities remains distinct. Recall ignores supplied throwing kernel/accounting callbacks and reports literal zero added work rather than echoing input counters. All adapters remain pure local shapes; internal IDs are additive under `raw`, and display fields remain exactly as asserted.
 
 - [ ] **Step 4: Run contract tests and current compatibility suites**
 
@@ -399,6 +424,10 @@ import {
   replaceEvaluationContract,
 } from "../helpers/evidence-claim-validity-reference.js";
 
+const windowEnd = instant("2026-02-01T00:00:00Z");
+const beforeWindowEnd = instant("2026-01-01T00:00:00Z");
+const afterWindowEnd = instant("2026-02-02T00:00:00Z");
+
 test("[15] a frozen EvaluationContract cannot be mutated in place", () => {
   const original = Object.freeze({ id: "contract-f", fingerprint: "fp-1", tolerance: 0.1 });
   const replacement = replaceEvaluationContract(original, { id: "contract-f2", fingerprint: "fp-2", tolerance: 0.2 });
@@ -409,43 +438,47 @@ test("[15] a frozen EvaluationContract cannot be mutated in place", () => {
 });
 
 test("[16] missing frozen contract is not calibratable", () => {
-  expect(evaluateCalibration({ hasFrozenContract: false, asOfMs: 20, windowEndMs: 10, dimensions: [] })).toMatchObject({ status: "not_calibratable", displaySignal: "evaluation_standard_missing" });
+  expect(evaluateCalibration({ hasFrozenContract: false, evaluatorVersion: "v1", asOf: afterWindowEnd, windowEnd, dimensions: [] })).toMatchObject({ status: "not_calibratable", displaySignal: "evaluation_standard_missing" });
 });
 
 test("[17] not_due precedes missing Outcome", () => {
-  expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 5, windowEndMs: 10, outcomeReady: false, dimensions: [] }).status).toBe("not_due");
+  expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: beforeWindowEnd, windowEnd, outcomeReady: false, dimensions: [] }).status).toBe("not_due");
 });
 
 test.each(["missing", "candidate", "rejected", "independence_unconfirmed", "evidence_unverified", "conflict_unresolved"] as const)("[18] Outcome gap %s is inconclusive", (outcomeGap) => {
-  expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: false, outcomeGap, dimensions: [] })).toMatchObject({ status: "inconclusive", missingRequirements: [outcomeGap] });
+  expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: afterWindowEnd, windowEnd, outcomeReady: false, outcomeGap, dimensions: [] })).toMatchObject({ status: "inconclusive", missingRequirements: [outcomeGap] });
 });
 
 test("[19] mixed required dimensions are partially confirmed", () => {
   const dimensions = [{ id: "direction", required: true as const, result: "pass" as const }, { id: "timing", required: true as const, result: "fail" as const }];
-  expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions })).toMatchObject({ status: "partially_confirmed", dimensionResults: dimensions });
+  expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: afterWindowEnd, windowEnd, outcomeReady: true, dimensions })).toMatchObject({ status: "partially_confirmed", dimensionResults: dimensions });
 });
 
 test("[20] frozen invalidation precedes not_due", () => {
-  expect(evaluateCalibration({ hasFrozenContract: true, invalidationConfirmed: true, invalidationAffectsWindow: true, asOfMs: 5, windowEndMs: 10, dimensions: [] }).status).toBe("invalidated_by_context");
+  expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", invalidationConfirmed: true, invalidationAffectsWindow: true, asOf: beforeWindowEnd, windowEnd, dimensions: [] }).status).toBe("invalidated_by_context");
 });
 
 test("[21] utility cannot overwrite an objective refutation", () => {
-  expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, utility: "useful", dimensions: [{ required: true, decisive: true, result: "fail" }] })).toMatchObject({ status: "refuted", utility: "useful" });
+  expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: afterWindowEnd, windowEnd, outcomeReady: true, utility: "useful", dimensions: [{ required: true, decisive: true, result: "fail" }] })).toMatchObject({ status: "refuted", utility: "useful" });
 });
 
-test("[22] evaluator upgrades append rather than replace", () => {
-  const history = [{ evaluatorVersion: "v1", status: "inconclusive" as const }];
-  const next = evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v2", asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [{ required: true, result: "pass" } });
-  expect([...history, next].map((item) => item.evaluatorVersion)).toEqual(["v1", "v2"]);
-  expect(next.status).toBe("confirmed");
+test("[22] evaluator v1 and v2 preserve independently diffable immutable results", () => {
+  const dimensions = Object.freeze([Object.freeze({ id: "direction", required: true as const, result: "pass" as const })]);
+  const input = Object.freeze({ hasFrozenContract: true, asOf: Object.freeze(afterWindowEnd), windowEnd: Object.freeze(windowEnd), outcomeReady: true, dimensions });
+  const v1 = evaluateCalibration({ ...input, evaluatorVersion: "v1" });
+  const v2 = evaluateCalibration({ ...input, evaluatorVersion: "v2" });
+  expect([v1.evaluatorVersion, v2.evaluatorVersion]).toEqual(["v1", "v2"]);
+  expect(v1.dimensionResults).not.toBe(v2.dimensionResults);
+  expect(Object.isFrozen(v1)).toBe(true);
+  expect(Object.isFrozen(v2)).toBe(true);
 });
 
 test("[28] decisive failure precedes partial confirmation", () => {
-  expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [{ required: true, decisive: true, result: "fail" }, { required: true, result: "pass" }] }).status).toBe("refuted");
+  expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: afterWindowEnd, windowEnd, outcomeReady: true, dimensions: [{ required: true, decisive: true, result: "fail" }, { required: true, result: "pass" }] }).status).toBe("refuted");
 });
 
 test("an empty scored dimension set is inconclusive rather than vacuously confirmed or refuted", () => {
-  expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [] }).status).toBe("inconclusive");
+  expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: afterWindowEnd, windowEnd, outcomeReady: true, dimensions: [] }).status).toBe("inconclusive");
 });
 ```
 
@@ -457,7 +490,11 @@ Expected: FAIL with missing Calibration exports.
 
 - [ ] **Step 3: Implement the literal precedence table**
 
-Return the first matching terminal status in this exact order: `not_calibratable`, `invalidated_by_context`, `not_due`, `inconclusive`, `refuted`, `confirmed`, `partially_confirmed`, final fallback `inconclusive`. A decisive required failure or all-required failure is `refuted`; all required dimensions passing is `confirmed`; mixed pass/fail without decisive failure is `partially_confirmed`. Preserve `utility` and `dimensionResults` as separate return fields. When the status is inconclusive, copy the exact `outcomeGap` into `missingRequirements`; do not replace it with a generic message. Return semantic `displaySignal: "evaluation_standard_missing"` for `not_calibratable`. `replaceEvaluationContract` must return a new frozen object and must reject reuse of the original ID or fingerprint.
+`CalibrationInput` requires non-empty `evaluatorVersion`, explicit `TemporalPoint` values for `asOf` and `windowEnd`, and optional `utility: "useful" | "neutral" | "harmful"`. Compare the window with the same three-way temporal comparator: deterministically before is `not_due`, an ambiguous boundary is `inconclusive`, and only crossed proceeds to Outcome scoring.
+
+Return the first matching terminal status in this exact order: `not_calibratable`, `invalidated_by_context`, `not_due`, `inconclusive`, `refuted`, `confirmed`, `partially_confirmed`, final fallback `inconclusive`. A decisive required failure or all-required failure is `refuted`; all required dimensions passing is `confirmed`; mixed pass/fail without decisive failure is `partially_confirmed`. Preserve `utility` and `dimensionResults` as separate return fields. When the status is inconclusive, copy the exact `outcomeGap` into `missingRequirements`; do not replace it with a generic message. Return semantic `displaySignal: "evaluation_standard_missing"` for `not_calibratable`.
+
+Both `replaceEvaluationContract` and `evaluateCalibration` deep-clone JSON-shaped caller inputs before recursively freezing the clone, including children beneath a pre-frozen parent. They never freeze caller-owned nested objects. Every result owns frozen `dimensionResults` and `missingRequirements` snapshots; v1/v2 evaluations of frozen inputs remain separate immutable results. `replaceEvaluationContract` also rejects reuse of the original ID or fingerprint.
 
 - [ ] **Step 4: Run the complete contract test and typecheck**
 

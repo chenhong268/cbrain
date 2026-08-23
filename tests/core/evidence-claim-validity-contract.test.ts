@@ -15,6 +15,8 @@ import {
   reduceClaimValidity,
   replaceEvaluationContract,
   temporalPoint,
+  type CalibrationDimension,
+  type ClaimEvidence,
   type ClaimTransition,
   verifyEvidence,
 } from "../helpers/evidence-claim-validity-reference.js";
@@ -22,6 +24,24 @@ import {
 const instant = (value: string) => temporalPoint(value, "instant", "Z");
 const day = (value: string) => temporalPoint(value, "day", "+00:00");
 const verifiedSupport = { stance: "supports" as const, verificationState: "verified" as const, sourceVersionAvailable: true, independenceGroupState: "confirmed" as const, independenceGroup: "group-1" };
+const fuzzyBoundaryCases = [
+  { label: "day", boundary: temporalPoint("2026-02-01", "day", "+00:00"), earliest: "2026-02-01T00:00:00Z", inside: "2026-02-01T12:00:00Z", latestExclusive: "2026-02-02T00:00:00Z" },
+  { label: "month", boundary: temporalPoint("2026-02", "month", "+00:00"), earliest: "2026-02-01T00:00:00Z", inside: "2026-02-15T00:00:00Z", latestExclusive: "2026-03-01T00:00:00Z" },
+  { label: "year", boundary: temporalPoint("2026", "year", "+00:00"), earliest: "2026-01-01T00:00:00Z", inside: "2026-07-01T00:00:00Z", latestExclusive: "2027-01-01T00:00:00Z" },
+  { label: "approximate", boundary: approximatePoint("around February", "+00:00", "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z"), earliest: "2026-02-01T00:00:00Z", inside: "2026-02-15T00:00:00Z", latestExclusive: "2026-03-01T00:00:00Z" },
+];
+
+const acceptClaimTransition = (_transition: ClaimTransition): void => {};
+// @ts-expect-error supersedes requires a replacement Claim identity
+acceptClaimTransition({ kind: "supersedes", oldClaimId: "claim-c", confirmationState: "confirmed" });
+// @ts-expect-error revokes cannot carry a replacement Claim identity
+acceptClaimTransition({ kind: "revokes", oldClaimId: "claim-c", newClaimId: "claim-d", confirmationState: "confirmed" });
+
+const acceptCalibrationInput = (_input: Parameters<typeof evaluateCalibration>[0]): void => {};
+// @ts-expect-error evaluatorVersion is mandatory
+acceptCalibrationInput({ hasFrozenContract: true, asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), dimensions: [] });
+// @ts-expect-error utility is limited to useful, neutral, or harmful
+acceptCalibrationInput({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), utility: "excellent", dimensions: [] });
 
 describe("Evidence–Claim–Validity executable contract", () => {
   test("[1] verification does not upgrade Claim trust", () => {
@@ -67,6 +87,15 @@ describe("Evidence–Claim–Validity executable contract", () => {
     expect(evaluateCurrentEligibility(claim, { state: "effective", temporalCertainty: "known", transitionConflict: false })).toMatchObject({ eligible: true, conflict: true, confidenceCeiling: "not_high" });
   });
 
+  test.each([
+    { label: "unchecked", contradiction: { ...verifiedSupport, stance: "contradicts" as const, verificationState: "unchecked" as const } as unknown as ClaimEvidence },
+    { label: "mismatched", contradiction: { ...verifiedSupport, stance: "contradicts" as const, verificationState: "mismatch" as const } },
+    { label: "source-version-unavailable", contradiction: { ...verifiedSupport, stance: "contradicts" as const, sourceVersionAvailable: false } },
+  ])("a non-active $label contradiction does not create conflict", ({ contradiction }) => {
+    const claim = { id: "claim-c", kind: "fact" as const, trust: "trusted" as const, evidence: [verifiedSupport, contradiction] };
+    expect(evaluateCurrentEligibility(claim, { state: "effective", temporalCertainty: "known", transitionConflict: false })).toMatchObject({ eligible: true, conflict: false, confidenceCeiling: "high_allowed" });
+  });
+
   test("[13] every disallowed axis is excluded from factual current", () => {
     const validityStates = ["scheduled", "expired", "superseded", "revoked"] as const;
     for (const state of validityStates) expect(evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "trusted", evidence: [verifiedSupport] }, { state, temporalCertainty: "known", transitionConflict: false }).eligible).toBe(false);
@@ -104,26 +133,55 @@ describe("Evidence–Claim–Validity executable contract", () => {
   test("[12] every participant view shares one Event identity", () => {
     const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a", "entity-b"], definingClaimEligible: true };
     expect(projectTimelineEvent(event, instant("2026-03-01T00:00:00Z")).rows.map((row) => [row.participant, row.eventId])).toEqual([["entity-a", "event-d"], ["entity-b", "event-d"]]);
-    expect(projectTimelineEvent({ ...event, confirmationState: "candidate" }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
-    expect(projectTimelineEvent({ ...event, confirmationState: "rejected" }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
-    expect(projectTimelineEvent({ ...event, definingClaimEligible: false }, instant("2026-03-01T00:00:00Z")).rows).toEqual([]);
+    expect(projectTimelineEvent({ ...event, confirmationState: "candidate" }, instant("2026-03-01T00:00:00Z"))).toEqual({ rows: [], displayState: "excluded" });
+    expect(projectTimelineEvent({ ...event, confirmationState: "rejected" }, instant("2026-03-01T00:00:00Z"))).toEqual({ rows: [], displayState: "excluded" });
+    expect(projectTimelineEvent({ ...event, definingClaimEligible: false }, instant("2026-03-01T00:00:00Z"))).toEqual({ rows: [], displayState: "excluded" });
   });
 
-  test("[24a] legacy graph display and ordering stay equivalent", () => {
-    const result = adaptLegacyGraph({ from: "entity-a", relation: "knows", to: "entity-b", rank: 1 });
-    expect(result.display).toEqual({ from: "entity-a", relation: "knows", to: "entity-b", rank: 1 });
-    expect(result.raw.claimId).toBe("legacy-link:entity-a:knows:entity-b");
+  test("[24a] legacy graph preserves multi-row count, order, display, and raw-only identity", () => {
+    const rows = Object.freeze([
+      Object.freeze({ from: "entity-a", relation: "knows", to: "entity-b", rank: 2 }),
+      Object.freeze({ from: "entity-b", relation: "supports", to: "entity-c", rank: 1 }),
+    ]);
+    const result = adaptLegacyGraph(rows);
+    expect(result.map((item) => item.display)).toEqual([
+      { from: "entity-a", relation: "knows", to: "entity-b", rank: 2 },
+      { from: "entity-b", relation: "supports", to: "entity-c", rank: 1 },
+    ]);
+    expect(result.map((item) => item.raw)).toEqual([
+      { claimId: "legacy-link:entity-a:knows:entity-b" },
+      { claimId: "legacy-link:entity-b:supports:entity-c" },
+    ]);
   });
 
-  test("[24b] legacy timeline does not invent cross-entity Event merging", () => {
-    const first = adaptLegacyTimeline({ rowId: 1, entity: "entity-a", date: "2026-01-01", summary: "匿名事件" });
-    const second = adaptLegacyTimeline({ rowId: 1, entity: "entity-b", date: "2026-01-01", summary: "匿名事件" });
-    expect(first.display).toEqual({ date: "2026-01-01", summary: "匿名事件" });
-    expect(first.raw.eventId).not.toBe(second.raw.eventId);
+  test("[24b] legacy timeline preserves rows and never merges matching content across identities", () => {
+    const rows = Object.freeze([
+      Object.freeze({ rowId: 7, entity: "entity-a", date: "2026-01-01", summary: "匿名事件甲" }),
+      Object.freeze({ rowId: 8, entity: "entity-a", date: "2026-01-02", summary: "匿名事件乙" }),
+      Object.freeze({ rowId: 7, entity: "entity-b", date: "2026-01-01", summary: "匿名事件甲" }),
+      Object.freeze({ rowId: 9, entity: "entity-a", date: "2026-01-01", summary: "匿名事件甲" }),
+    ]);
+    const result = adaptLegacyTimeline(rows);
+    expect(result.map((item) => item.display)).toEqual([
+      { date: "2026-01-01", summary: "匿名事件甲" },
+      { date: "2026-01-02", summary: "匿名事件乙" },
+      { date: "2026-01-01", summary: "匿名事件甲" },
+      { date: "2026-01-01", summary: "匿名事件甲" },
+    ]);
+    expect(result.map((item) => item.raw)).toEqual([
+      { eventId: "legacy-timeline:entity-a:7" },
+      { eventId: "legacy-timeline:entity-a:8" },
+      { eventId: "legacy-timeline:entity-b:7" },
+      { eventId: "legacy-timeline:entity-a:9" },
+    ]);
   });
 
   test("[24c] pre-cutover brief recall adds no kernel work", () => {
-    const result = adaptLegacyRecall({ answer: "匿名回答", citations: 1, sqlCount: 0, llmCount: 0 });
+    const failIfCalled = (): never => {
+      throw new Error("pre-cutover kernel work must not run");
+    };
+    const legacyEnvelope = { answer: "匿名回答", citations: 1, sqlCount: 99, llmCount: 99 };
+    const result = adaptLegacyRecall(legacyEnvelope, { runKernel: failIfCalled, recordKernelAccounting: failIfCalled });
     expect(result.display).toEqual({ answer: "匿名回答", citations: 1 });
     expect(result.kernelSqlCount).toBe(0);
     expect(result.kernelLlmCount).toBe(0);
@@ -138,6 +196,15 @@ describe("Evidence–Claim–Validity executable contract", () => {
   test("[30] an uncertain cancellation boundary remains temporally unknown", () => {
     const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a"], definingClaimEligible: true, cancellation: { confirmationState: "confirmed" as const, effectiveAt: approximatePoint("around February", "+00:00", "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z") } };
     expect(projectTimelineEvent(event, instant("2026-02-15T00:00:00Z")).displayState).toBe("temporal_unknown");
+  });
+
+  test.each(fuzzyBoundaryCases)("fuzzy $label cancellation classifies earliest, inside, and latestExclusive", ({ boundary, earliest, inside, latestExclusive }) => {
+    const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a"], definingClaimEligible: true, cancellation: { confirmationState: "confirmed" as const, effectiveAt: boundary } };
+    expect([
+      projectTimelineEvent(event, instant(earliest)).displayState,
+      projectTimelineEvent(event, instant(inside)).displayState,
+      projectTimelineEvent(event, instant(latestExclusive)).displayState,
+    ]).toEqual(["temporal_unknown", "temporal_unknown", "planned_then_cancelled"]);
   });
 
   test("[25] trusted inference remains outside factual current", () => {
@@ -184,16 +251,78 @@ describe("Evidence–Claim–Validity executable contract", () => {
     }).toThrow();
   });
 
+  test("[15] a pre-frozen parent is cloned before all mutable children are frozen", () => {
+    const callerDimension = { id: "direction", threshold: 1 };
+    const callerDimensions = [callerDimension];
+    const preFrozenRule = Object.freeze({ dimensions: callerDimensions });
+    const replacement = replaceEvaluationContract(
+      Object.freeze({ id: "contract-p", fingerprint: "fp-p1" }),
+      { id: "contract-p2", fingerprint: "fp-p2", scoring_rule: preFrozenRule },
+    );
+
+    expect(replacement.scoring_rule).not.toBe(preFrozenRule);
+    expect(Object.isFrozen(replacement.scoring_rule)).toBe(true);
+    expect(Object.isFrozen(replacement.scoring_rule.dimensions)).toBe(true);
+    expect(Object.isFrozen(replacement.scoring_rule.dimensions[0])).toBe(true);
+    expect(Object.isFrozen(callerDimensions)).toBe(false);
+    expect(Object.isFrozen(callerDimension)).toBe(false);
+    callerDimension.threshold = 2;
+    expect(replacement.scoring_rule.dimensions[0].threshold).toBe(1);
+  });
+
+  test("[15] replacing a contract never freezes or aliases caller-owned nested inputs", () => {
+    const callerEvidence = [{ source: "source-a", minimum: 1 }];
+    const replacement = replaceEvaluationContract(
+      Object.freeze({ id: "contract-o", fingerprint: "fp-o1" }),
+      { id: "contract-o2", fingerprint: "fp-o2", required_evidence: callerEvidence },
+    );
+
+    expect(replacement.required_evidence).not.toBe(callerEvidence);
+    expect(Object.isFrozen(callerEvidence)).toBe(false);
+    expect(Object.isFrozen(callerEvidence[0])).toBe(false);
+    callerEvidence[0].minimum = 2;
+    callerEvidence.push({ source: "source-b", minimum: 3 });
+    expect(replacement.required_evidence).toEqual([{ source: "source-a", minimum: 1 }]);
+  });
+
   test("[16] missing frozen contract is not calibratable", () => {
-    expect(evaluateCalibration({ hasFrozenContract: false, asOfMs: 20, windowEndMs: 10, dimensions: [] })).toMatchObject({ status: "not_calibratable", displaySignal: "evaluation_standard_missing" });
+    expect(evaluateCalibration({ hasFrozenContract: false, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), dimensions: [] })).toMatchObject({ status: "not_calibratable", displaySignal: "evaluation_standard_missing" });
   });
 
   test("[17] not_due precedes missing Outcome", () => {
-    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 5, windowEndMs: 10, outcomeReady: false, dimensions: [] }).status).toBe("not_due");
+    expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-01-01T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: false, dimensions: [] }).status).toBe("not_due");
+  });
+
+  test.each(fuzzyBoundaryCases)("Calibration treats fuzzy $label window earliest and inside as inconclusive", ({ boundary, earliest, inside, latestExclusive }) => {
+    const base = { hasFrozenContract: true, evaluatorVersion: "v1", windowEnd: boundary, outcomeReady: true, dimensions: [{ required: true as const, result: "pass" as const }] };
+    expect([earliest, inside, latestExclusive].map((value) => evaluateCalibration({ ...base, asOf: instant(value) }).status)).toEqual(["inconclusive", "inconclusive", "confirmed"]);
+  });
+
+  test.each([undefined, "", "   "])("Calibration rejects missing or blank evaluator version %#", (evaluatorVersion) => {
+    expect(() => evaluateCalibration({
+      hasFrozenContract: true,
+      evaluatorVersion,
+      asOf: instant("2026-02-02T00:00:00Z"),
+      windowEnd: instant("2026-02-01T00:00:00Z"),
+      outcomeReady: true,
+      dimensions: [{ required: true, result: "pass" }],
+    } as unknown as Parameters<typeof evaluateCalibration>[0])).toThrow("evaluator_version_required");
+  });
+
+  test("Calibration rejects utility outside its governed vocabulary", () => {
+    expect(() => evaluateCalibration({
+      hasFrozenContract: true,
+      evaluatorVersion: "v1",
+      asOf: instant("2026-02-02T00:00:00Z"),
+      windowEnd: instant("2026-02-01T00:00:00Z"),
+      outcomeReady: true,
+      utility: "excellent",
+      dimensions: [{ required: true, result: "pass" }],
+    } as unknown as Parameters<typeof evaluateCalibration>[0])).toThrow("invalid_calibration_utility");
   });
 
   test.each(["missing", "candidate", "rejected", "independence_unconfirmed", "evidence_unverified", "conflict_unresolved"] as const)("[18] Outcome gap %s is inconclusive", (outcomeGap) => {
-    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: false, outcomeGap, dimensions: [] })).toMatchObject({ status: "inconclusive", missingRequirements: [outcomeGap] });
+    expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: false, outcomeGap, dimensions: [] })).toMatchObject({ status: "inconclusive", missingRequirements: [outcomeGap] });
   });
 
   test.each([
@@ -201,7 +330,7 @@ describe("Evidence–Claim–Validity executable contract", () => {
     { label: "all required pass", dimensions: [{ required: true as const, result: "pass" as const }, { required: true as const, result: "pass" as const }] },
     { label: "mixed pass and fail", dimensions: [{ required: true as const, result: "pass" as const }, { required: true as const, result: "fail" as const }] },
   ])("[18] missing Outcome precedes scoring for $label", ({ dimensions }) => {
-    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: false, outcomeGap: "missing", dimensions })).toMatchObject({
+    expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: false, outcomeGap: "missing", dimensions })).toMatchObject({
       status: "inconclusive",
       missingRequirements: ["missing"],
     });
@@ -209,30 +338,71 @@ describe("Evidence–Claim–Validity executable contract", () => {
 
   test("[19] mixed required dimensions are partially confirmed", () => {
     const dimensions = [{ id: "direction", required: true as const, result: "pass" as const }, { id: "timing", required: true as const, result: "fail" as const }];
-    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions })).toMatchObject({ status: "partially_confirmed", dimensionResults: dimensions });
+    expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: true, dimensions })).toMatchObject({ status: "partially_confirmed", dimensionResults: dimensions });
+  });
+
+  test("Calibration returns a frozen dimension snapshot independent of caller mutation", () => {
+    const dimensions: CalibrationDimension[] = [{ id: "direction", required: true, result: "pass" }];
+    const result = evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: true, dimensions });
+
+    expect(result.dimensionResults).not.toBe(dimensions);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.dimensionResults)).toBe(true);
+    expect(Object.isFrozen(result.dimensionResults[0])).toBe(true);
+    expect(Object.isFrozen(dimensions)).toBe(false);
+    expect(Object.isFrozen(dimensions[0])).toBe(false);
+    dimensions[0].result = "fail";
+    dimensions.push({ id: "timing", required: true, result: "fail" });
+    expect(result).toMatchObject({ status: "confirmed", dimensionResults: [{ id: "direction", required: true, result: "pass" }] });
+    expect(() => (result.dimensionResults as CalibrationDimension[]).push({ required: true, result: "fail" })).toThrow();
+  });
+
+  test("Calibration returns an independent frozen missing-requirements snapshot", () => {
+    const result = evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: false, outcomeGap: "missing", dimensions: [] });
+    expect(result.missingRequirements).toEqual(["missing"]);
+    expect(Object.isFrozen(result.missingRequirements)).toBe(true);
+    expect(() => (result.missingRequirements as unknown as string[]).push("candidate")).toThrow();
   });
 
   test("[20] frozen invalidation precedes not_due", () => {
-    expect(evaluateCalibration({ hasFrozenContract: true, invalidationConfirmed: true, invalidationAffectsWindow: true, asOfMs: 5, windowEndMs: 10, dimensions: [] }).status).toBe("invalidated_by_context");
+    expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", invalidationConfirmed: true, invalidationAffectsWindow: true, asOf: instant("2026-01-01T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), dimensions: [] }).status).toBe("invalidated_by_context");
   });
 
   test("[21] utility cannot overwrite an objective refutation", () => {
-    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, utility: "useful", dimensions: [{ required: true, decisive: true, result: "fail" }] })).toMatchObject({ status: "refuted", utility: "useful" });
+    expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: true, utility: "useful", dimensions: [{ required: true, decisive: true, result: "fail" }] })).toMatchObject({ status: "refuted", utility: "useful" });
   });
 
-  test("[22] evaluator upgrades append rather than replace", () => {
-    const history = [{ evaluatorVersion: "v1", status: "inconclusive" as const }];
-    const next = evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v2", asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [{ required: true, result: "pass" }] });
-    expect([...history, next].map((item) => item.evaluatorVersion)).toEqual(["v1", "v2"]);
-    expect(next.status).toBe("confirmed");
+  test("[22] evaluator v1 and v2 preserve independently diffable immutable results", () => {
+    const dimensions = Object.freeze([Object.freeze({ id: "direction", required: true as const, result: "pass" as const })]);
+    const frozenInput = Object.freeze({
+      hasFrozenContract: true,
+      asOf: Object.freeze(instant("2026-02-02T00:00:00Z")),
+      windowEnd: Object.freeze(instant("2026-02-01T00:00:00Z")),
+      outcomeReady: true,
+      dimensions,
+    });
+    const v1 = evaluateCalibration({ ...frozenInput, evaluatorVersion: "v1" });
+    const v2 = evaluateCalibration({ ...frozenInput, evaluatorVersion: "v2" });
+
+    expect([
+      { status: v1.status, evaluatorVersion: v1.evaluatorVersion, dimensionResults: v1.dimensionResults },
+      { status: v2.status, evaluatorVersion: v2.evaluatorVersion, dimensionResults: v2.dimensionResults },
+    ]).toEqual([
+      { status: "confirmed", evaluatorVersion: "v1", dimensionResults: [{ id: "direction", required: true, result: "pass" }] },
+      { status: "confirmed", evaluatorVersion: "v2", dimensionResults: [{ id: "direction", required: true, result: "pass" }] },
+    ]);
+    expect(v1).not.toBe(v2);
+    expect(v1.dimensionResults).not.toBe(v2.dimensionResults);
+    expect(Object.isFrozen(v1)).toBe(true);
+    expect(Object.isFrozen(v2)).toBe(true);
   });
 
   test("[28] decisive failure precedes partial confirmation", () => {
-    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [{ required: true, decisive: true, result: "fail" }, { required: true, result: "pass" }] }).status).toBe("refuted");
+    expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: true, dimensions: [{ required: true, decisive: true, result: "fail" }, { required: true, result: "pass" }] }).status).toBe("refuted");
   });
 
   test("an empty scored dimension set is inconclusive rather than vacuously confirmed or refuted", () => {
-    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [] }).status).toBe("inconclusive");
+    expect(evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v1", asOf: instant("2026-02-02T00:00:00Z"), windowEnd: instant("2026-02-01T00:00:00Z"), outcomeReady: true, dimensions: [] }).status).toBe("inconclusive");
   });
 
   test("[10,27] replacement targets qualify independently", () => {
@@ -290,6 +460,7 @@ describe("Evidence–Claim–Validity executable contract", () => {
   test("[14] valid-time uses effective_at rather than recorded_at", () => {
     const transition: ClaimTransition = { kind: "supersedes", oldClaimId: "claim-c", newClaimId: "claim-d", confirmationState: "confirmed", effectiveAt: instant("2026-02-01T00:00:00Z"), recordedAt: instant("2026-03-01T00:00:00Z") };
     expect(reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-01-01T00:00:00Z"), transitions: [transition] }).state).toBe("unknown");
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-02-15T00:00:00Z"), transitions: [transition] }).state).toBe("superseded");
   });
 
   test("[26] trusted fact with unknown time remains temporally unknown", () => {
@@ -307,6 +478,28 @@ describe("Evidence–Claim–Validity executable contract", () => {
     expect(reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-02-15T00:00:00Z"), validFrom: month, transitions: [] })).toEqual({ state: "unknown", temporalCertainty: "unknown", transitionConflict: false });
   });
 
+  test.each(fuzzyBoundaryCases)("fuzzy $label Claim boundaries classify earliest, inside, and latestExclusive", ({ boundary, earliest, inside, latestExclusive }) => {
+    const points = [earliest, inside, latestExclusive].map(instant);
+    expect(points.map((asOf) => reduceClaimValidity({ claimId: "claim-c", asOf, validFrom: boundary, transitions: [] }).state)).toEqual(["unknown", "unknown", "effective"]);
+    expect(points.map((asOf) => reduceClaimValidity({ claimId: "claim-c", asOf, validTo: boundary, transitions: [] }).state)).toEqual(["unknown", "unknown", "expired"]);
+  });
+
+  test.each(fuzzyBoundaryCases)("fuzzy $label transition classifies earliest, inside, and latestExclusive", ({ boundary, earliest, inside, latestExclusive }) => {
+    const transition: ClaimTransition = { kind: "revokes", oldClaimId: "claim-c", confirmationState: "confirmed", effectiveAt: boundary };
+    const points = [earliest, inside, latestExclusive].map(instant);
+    expect(points.map((asOf) => reduceClaimValidity({ claimId: "claim-c", asOf, validFrom: instant("2025-01-01T00:00:00Z"), transitions: [transition] }).state)).toEqual(["unknown", "unknown", "revoked"]);
+  });
+
+  test("exact instant boundaries cross at the exact timestamp", () => {
+    const boundary = instant("2026-02-01T00:00:00Z");
+    const transition: ClaimTransition = { kind: "revokes", oldClaimId: "claim-c", confirmationState: "confirmed", effectiveAt: boundary };
+    const event = { id: "event-d", confirmationState: "confirmed" as const, participants: ["entity-a"], definingClaimEligible: true, cancellation: { confirmationState: "confirmed" as const, effectiveAt: boundary } };
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: boundary, validFrom: boundary, transitions: [] }).state).toBe("effective");
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: boundary, validTo: boundary, transitions: [] }).state).toBe("expired");
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: boundary, transitions: [transition] }).state).toBe("revoked");
+    expect(projectTimelineEvent(event, boundary).displayState).toBe("planned_then_cancelled");
+  });
+
   test("confirmed revocation wins over supersession and reports the conflict", () => {
     const effectiveAt = instant("2026-02-01T00:00:00Z");
     const transitions: ClaimTransition[] = [
@@ -314,6 +507,21 @@ describe("Evidence–Claim–Validity executable contract", () => {
       { kind: "revokes", oldClaimId: "claim-c", confirmationState: "confirmed", effectiveAt },
     ];
     expect(reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-03-01T00:00:00Z"), transitions })).toEqual({ state: "revoked", temporalCertainty: "known", transitionConflict: true });
+  });
+
+  test("an ambiguous confirmed revocation blocks a crossed supersession", () => {
+    const transitions: ClaimTransition[] = [
+      { kind: "supersedes", oldClaimId: "claim-c", newClaimId: "claim-d", confirmationState: "confirmed", effectiveAt: instant("2026-01-01T00:00:00Z") },
+      { kind: "revokes", oldClaimId: "claim-c", confirmationState: "confirmed", effectiveAt: approximatePoint("around February", "+00:00", "2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z") },
+    ];
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-02-15T00:00:00Z"), transitions })).toEqual({ state: "unknown", temporalCertainty: "unknown", transitionConflict: false });
+  });
+
+  test.each([
+    { label: "supersedes without newClaimId", transition: { kind: "supersedes", oldClaimId: "claim-c", confirmationState: "confirmed" } },
+    { label: "revokes with newClaimId", transition: { kind: "revokes", oldClaimId: "claim-c", newClaimId: "claim-d", confirmationState: "confirmed" } },
+  ])("runtime validation rejects $label", ({ transition }) => {
+    expect(() => reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-02-15T00:00:00Z"), transitions: [transition as unknown as ClaimTransition] })).toThrow("invalid_claim_transition_shape");
   });
 
   test("an ambiguous transition boundary cannot change the projection", () => {
@@ -335,6 +543,32 @@ describe("Evidence–Claim–Validity executable contract", () => {
     expect(temporalPoint("2026-02-01", "day", "+08:00")).toMatchObject({ earliestMs: Date.parse("2026-01-31T16:00:00Z"), latestExclusiveMs: Date.parse("2026-02-01T16:00:00Z") });
     expect(temporalPoint("2026-02", "month", "+08:00")).toMatchObject({ earliestMs: Date.parse("2026-01-31T16:00:00Z"), latestExclusiveMs: Date.parse("2026-02-28T16:00:00Z") });
     expect(temporalPoint("2026", "year", "+08:00")).toMatchObject({ earliestMs: Date.parse("2025-12-31T16:00:00Z"), latestExclusiveMs: Date.parse("2026-12-31T16:00:00Z") });
+  });
+
+  test.each([
+    { label: "invalid Gregorian day", run: () => temporalPoint("2026-02-30", "day", "+00:00"), error: "invalid_day" },
+    { label: "invalid Gregorian instant", run: () => temporalPoint("2026-02-30T00:00:00Z", "instant", "Z"), error: "invalid_instant" },
+    { label: "invalid month", run: () => temporalPoint("2026-13", "month", "+00:00"), error: "invalid_month" },
+    { label: "timezone-free instant", run: () => temporalPoint("2026-02-01T00:00:00", "instant", "Z"), error: "invalid_instant" },
+    { label: "out-of-range timezone hour", run: () => temporalPoint("2026-02-01", "day", "+24:00"), error: "invalid_timezone" },
+    { label: "out-of-range timezone minute", run: () => temporalPoint("2026-02-01", "day", "+08:60"), error: "invalid_timezone" },
+    { label: "non-finite approximate endpoint", run: () => approximatePoint("around February", "+00:00", "not-a-time", "2026-03-01T00:00:00Z"), error: "invalid_approximate_interval" },
+    { label: "timezone-free approximate endpoint", run: () => approximatePoint("around February", "+00:00", "2026-02-01T00:00:00", "2026-03-01T00:00:00Z"), error: "invalid_approximate_interval" },
+    { label: "reverse approximate range", run: () => approximatePoint("around February", "+00:00", "2026-03-01T00:00:00Z", "2026-02-01T00:00:00Z"), error: "invalid_approximate_interval" },
+    { label: "equal approximate range", run: () => approximatePoint("around February", "+00:00", "2026-02-01T00:00:00Z", "2026-02-01T00:00:00Z"), error: "invalid_approximate_interval" },
+  ])("TemporalPoint validation fails closed for $label", ({ run, error }) => {
+    expect(run).toThrow(error);
+  });
+
+  test("an exact zero-length validity interval is rejected", () => {
+    const boundary = instant("2026-02-01T00:00:00Z");
+    expect(() => reduceClaimValidity({ claimId: "claim-c", asOf: boundary, validFrom: boundary, validTo: boundary, transitions: [] })).toThrow("invalid_or_ambiguous_valid_interval");
+  });
+
+  test("a provably ordered uncertain validity interval remains valid", () => {
+    const validFrom = day("2026-02-01");
+    const validTo = instant("2026-02-02T00:00:00Z");
+    expect(() => reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-02-01T12:00:00Z"), validFrom, validTo, transitions: [] })).not.toThrow();
   });
 
   test("non-instant as_of overlapping valid_from boundary remains unknown", () => {
