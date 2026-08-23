@@ -78,4 +78,23 @@ describe("Evidence–Claim–Validity executable contract", () => {
   test("an interval that cannot prove valid_from before valid_to is rejected", () => {
     expect(() => reduceClaimValidity({ claimId: "claim-c", asOf: instant("2026-02-15T00:00:00Z"), validFrom: temporalPoint("2026-02", "month", "+00:00"), validTo: temporalPoint("2026-02-15", "day", "+00:00"), transitions: [] })).toThrow("invalid_or_ambiguous_valid_interval");
   });
+
+  test("positive timezone precision boundaries use local calendar dates", () => {
+    expect(temporalPoint("2026-02-01", "day", "+08:00")).toMatchObject({ earliestMs: Date.parse("2026-01-31T16:00:00Z"), latestExclusiveMs: Date.parse("2026-02-01T16:00:00Z") });
+    expect(temporalPoint("2026-02", "month", "+08:00")).toMatchObject({ earliestMs: Date.parse("2026-01-31T16:00:00Z"), latestExclusiveMs: Date.parse("2026-02-28T16:00:00Z") });
+    expect(temporalPoint("2026", "year", "+08:00")).toMatchObject({ earliestMs: Date.parse("2025-12-31T16:00:00Z"), latestExclusiveMs: Date.parse("2026-12-31T16:00:00Z") });
+  });
+
+  test("non-instant as_of overlapping valid_from boundary remains unknown", () => {
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: temporalPoint("2026-02-01", "day", "+08:00"), validFrom: instant("2026-02-01T00:00:00Z"), transitions: [] })).toEqual({ state: "unknown", temporalCertainty: "unknown", transitionConflict: false });
+  });
+
+  test("non-instant as_of overlapping valid_to boundary remains unknown", () => {
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: temporalPoint("2026-02-01", "day", "+08:00"), validTo: instant("2026-02-01T00:00:00Z"), transitions: [] })).toEqual({ state: "unknown", temporalCertainty: "unknown", transitionConflict: false });
+  });
+
+  test("non-instant as_of overlapping transition boundary remains unknown", () => {
+    const transition: ClaimTransition = { kind: "revokes", oldClaimId: "claim-c", confirmationState: "confirmed", effectiveAt: instant("2026-02-01T00:00:00Z") };
+    expect(reduceClaimValidity({ claimId: "claim-c", asOf: temporalPoint("2026-02-01", "day", "+08:00"), transitions: [transition] })).toEqual({ state: "unknown", temporalCertainty: "unknown", transitionConflict: false });
+  });
 });

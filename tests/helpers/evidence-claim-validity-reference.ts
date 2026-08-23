@@ -55,17 +55,27 @@ const startOf = (value: string, precision: Exclude<TemporalPrecision, "approxima
   return Date.UTC(year, month - 1, day) - offsetMs(timezone);
 };
 
+const calendarParts = (value: string, precision: Exclude<TemporalPrecision, "instant" | "approximate">): [number, number, number] => {
+  const match = precision === "day"
+    ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+    : precision === "month"
+      ? /^(\d{4})-(\d{2})$/.exec(value)
+      : /^(\d{4})$/.exec(value);
+  if (!match) throw new Error(`invalid_${precision}: ${value}`);
+  return [Number(match[1]), precision === "year" ? 1 : Number(match[2]), precision === "day" ? Number(match[3]) : 1];
+};
+
 export const temporalPoint = (value: string, precision: TemporalPrecision, timezone: string): TemporalPoint => {
   if (precision === "approximate") throw new Error("approximate_requires_interval");
   const earliestMs = startOf(value, precision, timezone);
-  const date = new Date(earliestMs);
   const latestExclusiveMs = precision === "instant"
     ? earliestMs
-    : precision === "day"
-      ? Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1) - offsetMs(timezone)
-      : precision === "month"
-        ? Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1) - offsetMs(timezone)
-        : Date.UTC(date.getUTCFullYear() + 1, 0, 1) - offsetMs(timezone);
+    : (() => {
+        const [year, month, day] = calendarParts(value, precision);
+        if (precision === "day") return Date.UTC(year, month - 1, day + 1) - offsetMs(timezone);
+        if (precision === "month") return Date.UTC(year, month, 1) - offsetMs(timezone);
+        return Date.UTC(year + 1, 0, 1) - offsetMs(timezone);
+      })();
   return { value, precision, timezone, earliestMs, latestExclusiveMs };
 };
 
@@ -77,22 +87,21 @@ export const approximatePoint = (value: string, timezone: string, earliest: stri
   latestExclusiveMs: Date.parse(latestExclusive),
 });
 
-const crossed = (point: TemporalPoint | undefined, asOf: number): boolean => point !== undefined && asOf >= point.latestExclusiveMs;
-const ambiguous = (point: TemporalPoint | undefined, asOf: number): boolean => point !== undefined && asOf >= point.earliestMs && asOf < point.latestExclusiveMs;
+const crossed = (point: TemporalPoint | undefined, asOf: TemporalPoint): boolean => point !== undefined && asOf.earliestMs >= point.latestExclusiveMs;
+const ambiguous = (point: TemporalPoint | undefined, asOf: TemporalPoint): boolean => point !== undefined && point.earliestMs < asOf.latestExclusiveMs && asOf.earliestMs < point.latestExclusiveMs;
 
 export const reduceClaimValidity = ({ claimId, asOf, validFrom, validTo, transitions }: ReduceClaimValidityInput): ValidityResult => {
   if (validFrom && validTo && validFrom.latestExclusiveMs > validTo.earliestMs) throw new Error("invalid_or_ambiguous_valid_interval");
-  const asOfMs = asOf.earliestMs;
   const confirmed = transitions.filter((transition) => transition.oldClaimId === claimId && transition.confirmationState === "confirmed" && transition.effectiveAt);
-  const crossedRevocation = confirmed.some((transition) => transition.kind === "revokes" && crossed(transition.effectiveAt, asOfMs));
-  const crossedSupersession = confirmed.some((transition) => transition.kind === "supersedes" && crossed(transition.effectiveAt, asOfMs));
+  const crossedRevocation = confirmed.some((transition) => transition.kind === "revokes" && crossed(transition.effectiveAt, asOf));
+  const crossedSupersession = confirmed.some((transition) => transition.kind === "supersedes" && crossed(transition.effectiveAt, asOf));
   if (crossedRevocation) return { state: "revoked", temporalCertainty: "known", transitionConflict: crossedSupersession };
   if (crossedSupersession) return { state: "superseded", temporalCertainty: "known", transitionConflict: false };
-  if (confirmed.some((transition) => ambiguous(transition.effectiveAt, asOfMs))) return { state: "unknown", temporalCertainty: "unknown", transitionConflict: false };
-  if (validFrom && asOfMs < validFrom.earliestMs) return { state: "scheduled", temporalCertainty: "known", transitionConflict: false };
-  if (validFrom && ambiguous(validFrom, asOfMs)) return { state: "unknown", temporalCertainty: "unknown", transitionConflict: false };
-  if (validTo && crossed(validTo, asOfMs)) return { state: "expired", temporalCertainty: "known", transitionConflict: false };
-  if (validTo && ambiguous(validTo, asOfMs)) return { state: "unknown", temporalCertainty: "unknown", transitionConflict: false };
+  if (confirmed.some((transition) => ambiguous(transition.effectiveAt, asOf))) return { state: "unknown", temporalCertainty: "unknown", transitionConflict: false };
+  if (validFrom && asOf.latestExclusiveMs <= validFrom.earliestMs) return { state: "scheduled", temporalCertainty: "known", transitionConflict: false };
+  if (validFrom && ambiguous(validFrom, asOf)) return { state: "unknown", temporalCertainty: "unknown", transitionConflict: false };
+  if (validTo && crossed(validTo, asOf)) return { state: "expired", temporalCertainty: "known", transitionConflict: false };
+  if (validTo && ambiguous(validTo, asOf)) return { state: "unknown", temporalCertainty: "unknown", transitionConflict: false };
   if (validFrom || validTo) return { state: "effective", temporalCertainty: "known", transitionConflict: false };
   return { state: "unknown", temporalCertainty: "unknown", transitionConflict: false };
 };
