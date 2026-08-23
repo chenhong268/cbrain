@@ -159,6 +159,31 @@ describe("Evidence–Claim–Validity executable contract", () => {
     expect(() => replaceEvaluationContract(original, { id: "contract-f2", fingerprint: "fp-1", tolerance: 0.2 })).toThrow("evaluation_contract_fingerprint_must_change");
   });
 
+  test("[15] replacement EvaluationContract freezes nested evaluation inputs", () => {
+    const original = Object.freeze({ id: "contract-n", fingerprint: "fp-n1" });
+    const replacement = replaceEvaluationContract(original, {
+      id: "contract-n2",
+      fingerprint: "fp-n2",
+      required_evidence: [{ source: "source-a", minimum: 1 }],
+      invalidation_conditions: { required: [{ kind: "context-window", affectsWindow: true }] },
+      scoring_rule: { dimensions: [{ id: "direction", decisive: true }] },
+    });
+
+    expect(replacement).not.toBe(original);
+    expect(replacement.id).toBe("contract-n2");
+    expect(replacement.fingerprint).toBe("fp-n2");
+    expect(Object.isFrozen(replacement.required_evidence)).toBe(true);
+    expect(Object.isFrozen(replacement.required_evidence[0])).toBe(true);
+    expect(Object.isFrozen(replacement.invalidation_conditions)).toBe(true);
+    expect(Object.isFrozen(replacement.invalidation_conditions.required)).toBe(true);
+    expect(Object.isFrozen(replacement.scoring_rule)).toBe(true);
+    expect(Object.isFrozen(replacement.scoring_rule.dimensions[0])).toBe(true);
+    expect(() => replacement.required_evidence.push({ source: "source-b", minimum: 2 })).toThrow();
+    expect(() => {
+      replacement.required_evidence[0].minimum = 2;
+    }).toThrow();
+  });
+
   test("[16] missing frozen contract is not calibratable", () => {
     expect(evaluateCalibration({ hasFrozenContract: false, asOfMs: 20, windowEndMs: 10, dimensions: [] })).toMatchObject({ status: "not_calibratable", displaySignal: "evaluation_standard_missing" });
   });
@@ -169,6 +194,17 @@ describe("Evidence–Claim–Validity executable contract", () => {
 
   test.each(["missing", "candidate", "rejected", "independence_unconfirmed", "evidence_unverified", "conflict_unresolved"] as const)("[18] Outcome gap %s is inconclusive", (outcomeGap) => {
     expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: false, outcomeGap, dimensions: [] })).toMatchObject({ status: "inconclusive", missingRequirements: [outcomeGap] });
+  });
+
+  test.each([
+    { label: "decisive failure", dimensions: [{ required: true as const, decisive: true, result: "fail" as const }] },
+    { label: "all required pass", dimensions: [{ required: true as const, result: "pass" as const }, { required: true as const, result: "pass" as const }] },
+    { label: "mixed pass and fail", dimensions: [{ required: true as const, result: "pass" as const }, { required: true as const, result: "fail" as const }] },
+  ])("[18] missing Outcome precedes scoring for $label", ({ dimensions }) => {
+    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: false, outcomeGap: "missing", dimensions })).toMatchObject({
+      status: "inconclusive",
+      missingRequirements: ["missing"],
+    });
   });
 
   test("[19] mixed required dimensions are partially confirmed", () => {

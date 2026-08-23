@@ -259,10 +259,16 @@ export interface EvaluationContract {
   readonly [key: string]: unknown;
 }
 
+const deepFreeze = <T>(value: T): Readonly<T> => {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return Object.freeze(value);
+};
+
 export const replaceEvaluationContract = <T extends EvaluationContract>(original: EvaluationContract, replacement: T): Readonly<T> => {
   if (replacement.id === original.id) throw new Error("evaluation_contract_identity_must_change");
   if (replacement.fingerprint === original.fingerprint) throw new Error("evaluation_contract_fingerprint_must_change");
-  return Object.freeze({ ...replacement });
+  return deepFreeze({ ...replacement });
 };
 
 export type CalibrationStatus = "not_calibratable" | "invalidated_by_context" | "not_due" | "inconclusive" | "refuted" | "confirmed" | "partially_confirmed";
@@ -285,7 +291,7 @@ export interface CalibrationInput {
   outcomeGap?: CalibrationOutcomeGap;
   utility?: string;
   evaluatorVersion?: string;
-  dimensions: CalibrationDimension[];
+  dimensions: readonly CalibrationDimension[];
 }
 
 export interface CalibrationResult {
@@ -294,7 +300,7 @@ export interface CalibrationResult {
   missingRequirements?: CalibrationOutcomeGap[];
   utility?: string;
   evaluatorVersion?: string;
-  dimensionResults: CalibrationDimension[];
+  dimensionResults: readonly CalibrationDimension[];
 }
 
 export const evaluateCalibration = (input: CalibrationInput): CalibrationResult => {
