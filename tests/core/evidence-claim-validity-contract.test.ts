@@ -7,11 +7,13 @@ import {
   buildDefaultDisplay,
   claimDisplaySignals,
   countCorroboration,
+  evaluateCalibration,
   evaluateCurrentEligibility,
   projectFactualClaims,
   projectInferenceView,
   projectTimelineEvent,
   reduceClaimValidity,
+  replaceEvaluationContract,
   temporalPoint,
   type ClaimTransition,
   verifyEvidence,
@@ -144,6 +146,57 @@ describe("Evidence–Claim–Validity executable contract", () => {
 
   test("[29] a verified capture stays active when a newer live version exists", () => {
     expect(verifyEvidence({ locatorResolved: true, pinnedVersionAvailable: true, pinnedHashMatches: true, excerptHashMatches: true, liveVersionId: "source-b-v2", pinnedVersionId: "source-b-v1" })).toEqual({ state: "verified", active: true });
+  });
+
+  test("[15] a frozen EvaluationContract cannot be mutated in place", () => {
+    const original = Object.freeze({ id: "contract-f", fingerprint: "fp-1", tolerance: 0.1 });
+    const replacement = replaceEvaluationContract(original, { id: "contract-f2", fingerprint: "fp-2", tolerance: 0.2 });
+    expect(original).toEqual({ id: "contract-f", fingerprint: "fp-1", tolerance: 0.1 });
+    expect(replacement).not.toBe(original);
+    expect(Object.isFrozen(replacement)).toBe(true);
+    expect(replacement.id).toBe("contract-f2");
+    expect(() => replaceEvaluationContract(original, { id: "contract-f", fingerprint: "fp-2", tolerance: 0.2 })).toThrow("evaluation_contract_identity_must_change");
+    expect(() => replaceEvaluationContract(original, { id: "contract-f2", fingerprint: "fp-1", tolerance: 0.2 })).toThrow("evaluation_contract_fingerprint_must_change");
+  });
+
+  test("[16] missing frozen contract is not calibratable", () => {
+    expect(evaluateCalibration({ hasFrozenContract: false, asOfMs: 20, windowEndMs: 10, dimensions: [] })).toMatchObject({ status: "not_calibratable", displaySignal: "evaluation_standard_missing" });
+  });
+
+  test("[17] not_due precedes missing Outcome", () => {
+    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 5, windowEndMs: 10, outcomeReady: false, dimensions: [] }).status).toBe("not_due");
+  });
+
+  test.each(["missing", "candidate", "rejected", "independence_unconfirmed", "evidence_unverified", "conflict_unresolved"] as const)("[18] Outcome gap %s is inconclusive", (outcomeGap) => {
+    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: false, outcomeGap, dimensions: [] })).toMatchObject({ status: "inconclusive", missingRequirements: [outcomeGap] });
+  });
+
+  test("[19] mixed required dimensions are partially confirmed", () => {
+    const dimensions = [{ id: "direction", required: true as const, result: "pass" as const }, { id: "timing", required: true as const, result: "fail" as const }];
+    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions })).toMatchObject({ status: "partially_confirmed", dimensionResults: dimensions });
+  });
+
+  test("[20] frozen invalidation precedes not_due", () => {
+    expect(evaluateCalibration({ hasFrozenContract: true, invalidationConfirmed: true, invalidationAffectsWindow: true, asOfMs: 5, windowEndMs: 10, dimensions: [] }).status).toBe("invalidated_by_context");
+  });
+
+  test("[21] utility cannot overwrite an objective refutation", () => {
+    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, utility: "useful", dimensions: [{ required: true, decisive: true, result: "fail" }] })).toMatchObject({ status: "refuted", utility: "useful" });
+  });
+
+  test("[22] evaluator upgrades append rather than replace", () => {
+    const history = [{ evaluatorVersion: "v1", status: "inconclusive" as const }];
+    const next = evaluateCalibration({ hasFrozenContract: true, evaluatorVersion: "v2", asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [{ required: true, result: "pass" }] });
+    expect([...history, next].map((item) => item.evaluatorVersion)).toEqual(["v1", "v2"]);
+    expect(next.status).toBe("confirmed");
+  });
+
+  test("[28] decisive failure precedes partial confirmation", () => {
+    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [{ required: true, decisive: true, result: "fail" }, { required: true, result: "pass" }] }).status).toBe("refuted");
+  });
+
+  test("an empty scored dimension set is inconclusive rather than vacuously confirmed or refuted", () => {
+    expect(evaluateCalibration({ hasFrozenContract: true, asOfMs: 20, windowEndMs: 10, outcomeReady: true, dimensions: [] }).status).toBe("inconclusive");
   });
 
   test("[10,27] replacement targets qualify independently", () => {

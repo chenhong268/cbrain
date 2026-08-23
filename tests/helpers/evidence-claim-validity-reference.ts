@@ -252,3 +252,66 @@ export const adaptLegacyRecall = (envelope: { answer: string; citations: number;
   kernelSqlCount: envelope.sqlCount,
   kernelLlmCount: envelope.llmCount,
 });
+
+export interface EvaluationContract {
+  readonly id: string;
+  readonly fingerprint: string;
+  readonly [key: string]: unknown;
+}
+
+export const replaceEvaluationContract = <T extends EvaluationContract>(original: EvaluationContract, replacement: T): Readonly<T> => {
+  if (replacement.id === original.id) throw new Error("evaluation_contract_identity_must_change");
+  if (replacement.fingerprint === original.fingerprint) throw new Error("evaluation_contract_fingerprint_must_change");
+  return Object.freeze({ ...replacement });
+};
+
+export type CalibrationStatus = "not_calibratable" | "invalidated_by_context" | "not_due" | "inconclusive" | "refuted" | "confirmed" | "partially_confirmed";
+export type CalibrationOutcomeGap = "missing" | "candidate" | "rejected" | "independence_unconfirmed" | "evidence_unverified" | "conflict_unresolved";
+
+export interface CalibrationDimension {
+  id?: string;
+  required: boolean;
+  decisive?: boolean;
+  result: "pass" | "fail";
+}
+
+export interface CalibrationInput {
+  hasFrozenContract: boolean;
+  invalidationConfirmed?: boolean;
+  invalidationAffectsWindow?: boolean;
+  asOfMs: number;
+  windowEndMs: number;
+  outcomeReady?: boolean;
+  outcomeGap?: CalibrationOutcomeGap;
+  utility?: string;
+  evaluatorVersion?: string;
+  dimensions: CalibrationDimension[];
+}
+
+export interface CalibrationResult {
+  status: CalibrationStatus;
+  displaySignal?: "evaluation_standard_missing";
+  missingRequirements?: CalibrationOutcomeGap[];
+  utility?: string;
+  evaluatorVersion?: string;
+  dimensionResults: CalibrationDimension[];
+}
+
+export const evaluateCalibration = (input: CalibrationInput): CalibrationResult => {
+  const shared = {
+    utility: input.utility,
+    evaluatorVersion: input.evaluatorVersion,
+    dimensionResults: input.dimensions,
+  };
+  if (!input.hasFrozenContract) return { status: "not_calibratable", displaySignal: "evaluation_standard_missing", ...shared };
+  if (input.invalidationConfirmed && input.invalidationAffectsWindow) return { status: "invalidated_by_context", ...shared };
+  if (input.asOfMs < input.windowEndMs) return { status: "not_due", ...shared };
+  if (!input.outcomeReady) return { status: "inconclusive", missingRequirements: input.outcomeGap ? [input.outcomeGap] : [], ...shared };
+
+  const required = input.dimensions.filter((dimension) => dimension.required);
+  if (required.some((dimension) => dimension.decisive && dimension.result === "fail")) return { status: "refuted", ...shared };
+  if (required.length > 0 && required.every((dimension) => dimension.result === "fail")) return { status: "refuted", ...shared };
+  if (required.length > 0 && required.every((dimension) => dimension.result === "pass")) return { status: "confirmed", ...shared };
+  if (required.some((dimension) => dimension.result === "pass") && required.some((dimension) => dimension.result === "fail")) return { status: "partially_confirmed", ...shared };
+  return { status: "inconclusive", ...shared };
+};
