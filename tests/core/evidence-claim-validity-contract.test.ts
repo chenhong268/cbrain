@@ -46,6 +46,16 @@ describe("Evidence–Claim–Validity executable contract", () => {
     expect(countCorroboration([verifiedSupport, { ...verifiedSupport }])).toEqual({ confirmedIndependentGroups: 1, independenceUnknown: 0 });
   });
 
+  test("[5] corroboration ignores bindings that are not active supports", () => {
+    expect(countCorroboration([
+      verifiedSupport,
+      { ...verifiedSupport, independenceGroup: "group-2", verificationState: "unavailable" },
+      { ...verifiedSupport, independenceGroup: "group-3", sourceVersionAvailable: false },
+      { ...verifiedSupport, independenceGroup: "group-4", stance: "contradicts" },
+      { ...verifiedSupport, independenceGroup: "group-5", stance: "limits" },
+    ])).toEqual({ confirmedIndependentGroups: 1, independenceUnknown: 0 });
+  });
+
   test("[6] contradiction marks but does not erase an eligible Claim", () => {
     const claim = { id: "claim-c", kind: "fact" as const, trust: "trusted" as const, evidence: [verifiedSupport, { ...verifiedSupport, stance: "contradicts" as const }] };
     expect(evaluateCurrentEligibility(claim, { state: "effective", temporalCertainty: "known", transitionConflict: false })).toMatchObject({ eligible: true, conflict: true, confidenceCeiling: "not_high" });
@@ -56,6 +66,29 @@ describe("Evidence–Claim–Validity executable contract", () => {
     for (const state of validityStates) expect(evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "trusted", evidence: [verifiedSupport] }, { state, temporalCertainty: "known", transitionConflict: false }).eligible).toBe(false);
     expect(evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "rejected", evidence: [verifiedSupport] }, { state: "effective", temporalCertainty: "known", transitionConflict: false }).eligible).toBe(false);
     expect(evaluateCurrentEligibility({ id: "claim-c", kind: "fact", trust: "trusted", evidence: [{ ...verifiedSupport, stance: "limits" }] }, { state: "effective", temporalCertainty: "known", transitionConflict: false }).reasons).toContain("active_support_missing");
+  });
+
+  test("eligibility reports every disallowed axis in its fixed order", () => {
+    expect(evaluateCurrentEligibility({
+      id: "claim-c",
+      kind: "inference",
+      trust: "candidate",
+      evidence: [{ ...verifiedSupport, stance: "limits" }],
+      authority: { required: true, scopeMatched: false },
+    }, { state: "scheduled", temporalCertainty: "known", transitionConflict: false }).reasons).toEqual([
+      "kind_not_fact",
+      "trust_not_trusted",
+      "validity_not_current",
+      "active_support_missing",
+      "authority_scope_mismatch",
+    ]);
+  });
+
+  test("trusted factual current keeps unknown temporal certainty eligible", () => {
+    expect(evaluateCurrentEligibility(
+      { id: "claim-c", kind: "fact", trust: "trusted", evidence: [verifiedSupport] },
+      { state: "unknown", temporalCertainty: "unknown", transitionConflict: false },
+    )).toMatchObject({ eligible: true, temporalCertainty: "unknown" });
   });
 
   test("[23] default display excludes private audit fields", () => {

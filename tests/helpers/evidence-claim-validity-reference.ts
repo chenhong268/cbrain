@@ -162,10 +162,13 @@ export const verifyEvidence = (input: { locatorResolved: boolean; pinnedVersionA
 
 const isActiveSupport = (evidence: ClaimEvidence): boolean => evidence.stance === "supports" && evidence.verificationState === "verified" && evidence.sourceVersionAvailable;
 
-export const countCorroboration = (bindings: ClaimEvidence[]): { confirmedIndependentGroups: number; independenceUnknown: number } => ({
-  confirmedIndependentGroups: new Set(bindings.filter((binding) => binding.independenceGroupState === "confirmed" && binding.independenceGroup).map((binding) => binding.independenceGroup)).size,
-  independenceUnknown: bindings.filter((binding) => binding.independenceGroupState === "unknown").length,
-});
+export const countCorroboration = (bindings: ClaimEvidence[]): { confirmedIndependentGroups: number; independenceUnknown: number } => {
+  const activeSupports = bindings.filter(isActiveSupport);
+  return {
+    confirmedIndependentGroups: new Set(activeSupports.filter((binding) => binding.independenceGroupState === "confirmed" && binding.independenceGroup).map((binding) => binding.independenceGroup)).size,
+    independenceUnknown: activeSupports.filter((binding) => binding.independenceGroupState === "unknown").length,
+  };
+};
 
 export const evaluateCurrentEligibility = (claim: Claim, validity: ValidityResult): CurrentEligibility => {
   const reasons: CurrentEligibility["reasons"] = [];
