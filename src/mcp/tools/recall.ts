@@ -545,7 +545,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       insights: relatedInsights.length > 0 ? relatedInsights : undefined,
       cross_refs: uniqueRefs.length > 0 ? uniqueRefs : undefined,
       proactive_hints: budgetedProactiveHints.length > 0 ? budgetedProactiveHints : undefined,
-      summary: `有 ${entities.length} 条相关记忆${lowQuality > 0 ? `（其中 ${lowQuality} 条信息较少）` : ""}，${totalLinks} 条关系，${totalTimeline} 条时间线` +
+      summary: `有 ${entities.length} 条相关记忆${lowQuality > 0 ? `（其中 ${lowQuality} 条信息较少）` : ""}` +
+        (isBrief ? "" : `，${totalLinks} 条关系，${totalTimeline} 条时间线`) +
         (expiredCount > 0 ? `，${expiredCount} 条已过期` : "") +
         (relatedInsights.length > 0 ? `，${relatedInsights.length} 条相关洞察` : "") +
         (uniqueRefs.length > 0 ? `，${uniqueRefs.length} 条关联更新` : ""),
