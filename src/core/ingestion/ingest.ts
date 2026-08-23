@@ -67,6 +67,20 @@ function takeSnapshot(slug: string, db: CBrainDB, pages: PageManager): PageSnaps
   return { body: page.body, tags: [...(page.frontmatter.tags ?? [])], mentionLinks: links, ingestHash };
 }
 
+/**
+ * Person append has no standalone source page/hash, so preserve ingest's default
+ * idempotency by recognizing the exact incoming body as a complete Markdown block.
+ * Keep this deliberately narrower than substring matching: a longer source that
+ * merely mentions an existing paragraph must still be appended.
+ */
+function hasExactBodyBlock(existingBody: string, incomingBody: string): boolean {
+  const normalize = (value: string) => value.replace(/\r\n?/g, "\n").trim();
+  const existing = normalize(existingBody);
+  const incoming = normalize(incomingBody);
+  if (!incoming) return false;
+  return `\n\n${existing}\n\n`.includes(`\n\n${incoming}\n\n`);
+}
+
 /** 仅用于 person 快捷路由的保守门控：明显组织/团队标签（包含匹配，覆盖中英文）。
  *  标签可能在候选名前（组织A）或后（区域组织），故用包含而非后缀匹配。
  *  窄范围——只用明显组织词，不引入模糊判断。 */
@@ -199,6 +213,21 @@ export class IngestManager {
     const effectiveTags = classifyPersonalTag({ title, content: body, tags: baseTags })
       ? [...new Set([...baseTags, "personal"])]
       : baseTags;
+
+    const existingPersonSlug = type === "record" ? this.findExistingPersonSlug(title) : null;
+    if (existingPersonSlug) {
+      const existingPerson = this.pages.getBySlug(existingPersonSlug);
+      if (!input.allowDuplicate && existingPerson && hasExactBodyBlock(existingPerson.body, body)) {
+        return {
+          slug: existingPersonSlug,
+          created: false,
+          linksExtracted: 0,
+          outcome: "duplicate",
+          duplicateOf: { slug: existingPersonSlug, title },
+        };
+      }
+      return this.ingestEntityAppend(existingPersonSlug, body, effectiveTags, nerAction);
+    }
 
     return this.ingestCore(slug, title, type, body, effectiveTags, nerAction, input.allowDuplicate, input.writer);
   }
