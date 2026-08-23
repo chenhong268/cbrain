@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
@@ -36,6 +36,21 @@ function createMockLanceDB() {
 
 function getTools(server: any) {
   return (server as any)._registeredTools as Record<string, any>;
+}
+
+function seedPersonFixture(db: CBrainDB, vaultPath: string) {
+  const slug = "brain/entities/person/entity-a";
+  const file = join(vaultPath, `${slug}.md`);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(
+    file,
+    "---\ntitle: 实体A\ntype: entity/person\nslug: brain/entities/person/entity-a\n---\n\n已有简介",
+    "utf-8",
+  );
+  db.rawDb.prepare(
+    "INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)",
+  ).run(slug, "entity/person", "实体A", `${slug}.md`, "existing-hash");
+  return { slug, file };
 }
 
 describe("MCP ingest type classification", () => {
@@ -107,6 +122,90 @@ describe("MCP ingest type classification", () => {
     // NO untitled-* files created
     const files = readdirSync(join(vaultPath, "records"));
     expect(files.some(f => f.startsWith("untitled-"))).toBe(false);
+  });
+
+  test("markdown classified as record appends to an existing person instead of creating a record (#149)", async () => {
+    const person = seedPersonFixture(db, vaultPath);
+
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+    const personUpdate = "实体A 已负责主题B，并向组织C汇报；这段匿名资料包含足够的背景信息用于验证人物页面追加路由。".repeat(2);
+    const markdown = [
+      "---",
+      "title: 实体A",
+      "type: record",
+      "---",
+      "",
+      personUpdate,
+    ].join("\n");
+
+    const result = await handler({
+      content: markdown,
+      type: "markdown",
+      title: "实体A",
+      pageType: "record",
+      skipNer: true,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.raw.slug).toBe(person.slug);
+    expect(parsed.raw.outcome).toBe("updated");
+    expect(parsed.display).toContain("已更新");
+    expect(parsed.summary).toMatchObject({ status: "recorded", title: "实体A" });
+    expect(db.getPageByTitle("实体A")?.type).toBe("entity/person");
+    expect(db.rawDb.prepare("SELECT COUNT(*) AS c FROM pages WHERE type = 'record'").get()).toEqual({ c: 0 });
+    expect(readFileSync(person.file, "utf-8")).toContain(personUpdate);
+  });
+
+  test("repeated person markdown is skipped unless allowDuplicate explicitly permits another append (#149)", async () => {
+    const person = seedPersonFixture(db, vaultPath);
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+    const personUpdate = "实体A 新增了主题B的职责说明；这段匿名资料包含足够信息用于验证重复写入门控。".repeat(2);
+    const request = {
+      content: `---\ntitle: 实体A\ntype: record\n---\n\n${personUpdate}`,
+      type: "markdown",
+      title: "实体A",
+      pageType: "record",
+      skipNer: true,
+    };
+
+    const first = JSON.parse((await handler(request)).content[0].text);
+    expect(first.raw.outcome).toBe("updated");
+    const chunksAfterFirst = (db.rawDb.prepare("SELECT COUNT(*) AS c FROM chunks WHERE page_slug = ?").get(person.slug) as { c: number }).c;
+
+    const repeated = JSON.parse((await handler(request)).content[0].text);
+    expect(repeated.raw.outcome).toBe("duplicate");
+    expect(repeated.summary).toMatchObject({ status: "skipped", title: "实体A" });
+    expect(repeated.display).toContain("未重复存入");
+    expect(readFileSync(person.file, "utf-8").split(personUpdate).length - 1).toBe(1);
+    expect((db.rawDb.prepare("SELECT COUNT(*) AS c FROM chunks WHERE page_slug = ?").get(person.slug) as { c: number }).c).toBe(chunksAfterFirst);
+
+    const forced = JSON.parse((await handler({ ...request, allowDuplicate: true })).content[0].text);
+    expect(forced.raw.outcome).toBe("updated");
+    expect(readFileSync(person.file, "utf-8").split(personUpdate).length - 1).toBe(2);
+  });
+
+  test("markdown source with a distinct title remains a record when it only mentions an existing person (#149)", async () => {
+    const person = seedPersonFixture(db, vaultPath);
+
+    const server = createServer(deps);
+    const handler = getTools(server)["ingest"].handler;
+    const sourceBody = "这是一份关于实体A的访谈记录，包含主题B、组织C与后续安排等独立来源信息。".repeat(2);
+    const result = await handler({
+      content: `---\ntitle: 实体A访谈记录\ntype: record\n---\n\n${sourceBody}`,
+      type: "markdown",
+      title: "实体A访谈记录",
+      pageType: "record",
+      skipNer: true,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.raw.slug).toBe("records/实体a访谈记录");
+    expect(db.getPage(parsed.raw.slug)?.type).toBe("record");
+    expect(readFileSync(person.file, "utf-8")).not.toContain(sourceBody);
   });
 
   test("omitted type with plain text routes as text", async () => {
