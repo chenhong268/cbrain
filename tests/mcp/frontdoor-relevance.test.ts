@@ -364,6 +364,8 @@ describe("content frontdoor honesty sequencing", () => {
 
       for (const [query, expectedTitle] of [
         ["人物甲是谁", "人物甲职业信息"],
+        ["请问，人物甲是谁？", "人物甲职业信息"],
+        ["请问：人物甲是谁？", "人物甲职业信息"],
         ["人物乙是谁？", "人物乙"],
         ["人物丙是什么人", "实体丙规范名"],
       ] as const) {
@@ -381,6 +383,8 @@ describe("content frontdoor honesty sequencing", () => {
         "职业是谁",
         "是谁",
         "请问是谁",
+        "请问，请问是谁",
+        "请问：请问是谁",
         "主题甲是谁",
         "人物丁是谁",
       ] as const) {

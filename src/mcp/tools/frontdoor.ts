@@ -299,7 +299,10 @@ async function resolveIdentityQuestionSeed(
 function extractIdentityQuestionSubject(query: string): string | null {
   try {
     let normalized = query.normalize("NFKC").trim();
-    if (normalized.startsWith("请问")) normalized = normalized.slice(2).trimStart();
+    if (normalized.startsWith("请问")) {
+      normalized = normalized.slice(2).trimStart().replace(/^[，,:：]\s*/u, "");
+      if (normalized.startsWith("请问")) return null;
+    }
     const subject = normalized.match(IDENTITY_QUESTION_RE)?.[1]?.trim();
     if (!subject) return null;
     const length = Array.from(subject).length;
