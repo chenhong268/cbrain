@@ -262,6 +262,137 @@ function localIsoDate(daysFromToday: number): string {
 }
 
 describe("content frontdoor honesty sequencing", () => {
+  test("identity questions recall uniquely resolved record titles, entity titles, and aliases without fuzzy false positives", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cbrain-identity-recall-"));
+    const db = new CBrainDB(join(root, "brain.sqlite"));
+    const pages = new Map([
+      ["records/person-a", {
+        slug: "records/person-a",
+        title: "人物甲职业信息",
+        type: "record",
+        body: "人物甲具有匿名职业背景。",
+        expires_at: null,
+      }],
+      ["entities/person-b", {
+        slug: "entities/person-b",
+        title: "人物乙",
+        type: "entity/person",
+        body: "人物乙是匿名领域从业者。",
+        expires_at: null,
+      }],
+      ["entities/person-c", {
+        slug: "entities/person-c",
+        title: "实体丙规范名",
+        type: "entity/person",
+        body: "实体丙规范名负责匿名事务。",
+        expires_at: null,
+      }],
+      ["records/polite-prefix", {
+        slug: "records/polite-prefix",
+        title: "请问信息",
+        type: "record",
+        body: "匿名礼貌用语说明。",
+        expires_at: null,
+      }],
+      ["notes/topic-a", {
+        slug: "notes/topic-a",
+        title: "主题甲附注",
+        type: "note",
+        body: "匿名主题附注。",
+        expires_at: null,
+      }],
+      ["entities/person-d-1", {
+        slug: "entities/person-d-1",
+        title: "实体丁一",
+        type: "entity/person",
+        body: "匿名实体说明一。",
+        expires_at: null,
+      }],
+      ["entities/person-d-2", {
+        slug: "entities/person-d-2",
+        title: "实体丁二",
+        type: "entity/person",
+        body: "匿名实体说明二。",
+        expires_at: null,
+      }],
+      ["records/person-d", {
+        slug: "records/person-d",
+        title: "人物丁职业信息",
+        type: "record",
+        body: "匿名职业说明。",
+        expires_at: null,
+      }],
+    ]);
+    try {
+      for (const page of pages.values()) {
+        db.upsertPage({
+          slug: page.slug,
+          type: page.type,
+          title: page.title,
+          filePath: `${page.slug}.md`,
+          contentHash: `hash-${page.slug}`,
+        });
+        db.insertChunkWithLevel(page.slug, 0, page.body, 0, null);
+        db.ftsInsert(page.slug, page.body);
+      }
+      db.addAlias("entities/person-c", "人物丙");
+      db.addAlias("entities/person-d-1", "人物丁");
+      db.addAlias("entities/person-d-2", "人物丁");
+      expect(db.ftsSearch("人物甲", 3).map((hit) => hit.page_slug)).toContain("records/person-a");
+
+      const search = new HybridSearch(
+        db,
+        {
+          dimensions: 2,
+          async embed() { throw new Error("controlled embedding outage"); },
+          async embedBatch() { return []; },
+        },
+        { async search() { return []; } } as never,
+        { multiQuery: false },
+      );
+      let handler: Handler | undefined;
+      registerFrontdoorTools({
+        registerTool(name: string, _definition: unknown, registered: Handler) {
+          if (name === "cbrain_recall") handler = registered;
+        },
+      } as never, {
+        outputMode: "legacy",
+        search,
+        db,
+        pages: { getBySlug: (slug: string) => pages.get(slug) ?? null },
+      } as never);
+
+      for (const [query, expectedTitle] of [
+        ["人物甲是谁", "人物甲职业信息"],
+        ["人物乙是谁？", "人物乙"],
+        ["人物丙是什么人", "实体丙规范名"],
+      ] as const) {
+        const output = parsed(await handler!({ query })) as {
+          summary: { status: string; count: number };
+          raw: { entities: Array<{ title: string }> };
+        };
+        expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+        expect(output.raw.entities.map((entity) => entity.title)).toEqual([expectedTitle]);
+      }
+
+      for (const query of [
+        "不存在者是谁",
+        "人物是谁",
+        "职业是谁",
+        "是谁",
+        "请问是谁",
+        "主题甲是谁",
+        "人物丁是谁",
+      ] as const) {
+        const output = parsed(await handler!({ query })) as { summary: { status: string } };
+        expect(output.summary.status).toBe("empty");
+      }
+    } finally {
+      db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("content recall surfaces a budgeted expiry hint", async () => {
     const harness = makeHarness([result("accepted", { exact: { original: { rankScore: 1 } } })], "legacy", {
       proactiveHint: "expiry",

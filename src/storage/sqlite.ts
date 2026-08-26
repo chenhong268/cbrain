@@ -1253,6 +1253,40 @@ export class CBrainDB {
     });
   }
 
+  /**
+   * Resolve a subject extracted from a closed-grammar identity question.
+   * Exact title and alias collisions fail closed. The only fuzzy form is a
+   * unique record-title prefix; other page types never qualify by prefix.
+   */
+  resolveIdentitySubject(subject: string): { slug: string; title: string } | null {
+    const isIdentityPage = (type: string): boolean => (
+      type === "record" || type === "entity" || type.startsWith("entity/")
+    );
+
+    const exactTitles = this.getPagesByExactTitle(subject);
+    if (exactTitles.length > 1) return null;
+    if (exactTitles.length === 1) {
+      const match = exactTitles[0]!;
+      return isIdentityPage(match.type) ? { slug: match.slug, title: match.title } : null;
+    }
+
+    const exactAliases = this.getPagesByAlias(subject);
+    if (exactAliases.length > 1) return null;
+    if (exactAliases.length === 1) {
+      const match = exactAliases[0]!;
+      return isIdentityPage(match.type) ? { slug: match.slug, title: match.title } : null;
+    }
+
+    const escaped = subject.replace(/[!%_]/gu, (character) => `!${character}`);
+    const prefixes = this.prepare(
+      `SELECT slug, title FROM pages
+       WHERE type = 'record' AND title LIKE $pattern ESCAPE '!'
+       ORDER BY length(title), slug
+       LIMIT 2`,
+    ).all({ $pattern: `${escaped}%` }) as Array<{ slug: string; title: string }>;
+    return prefixes.length === 1 ? prefixes[0]! : null;
+  }
+
   // ─── Version operations ──────────────────────────────────────
 
   getVersionCount(pageSlug: string): number {

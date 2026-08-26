@@ -127,4 +127,18 @@ describe("content candidate honesty", () => {
 
     expect(filterContentCandidates("匿名根问题", [weak, rank2, rank3])).toEqual([rank2, rank3]);
   });
+
+  test("admits only the exact candidate certified by deterministic identity resolution", () => {
+    const certified = candidate("record/certified", {
+      exact: { derived: { rankScore: 1, rootLexicalCoverage: 0 } },
+    }, "exact");
+    const unrelated = candidate("record/unrelated", {
+      exact: { derived: { rankScore: 1, rootLexicalCoverage: 0 } },
+    }, "exact");
+    const nonExact = candidate("record/non-exact", undefined, "hybrid");
+
+    expect(filterContentCandidates("人物甲是谁", [certified, unrelated, nonExact], {
+      deterministicIdentitySlugs: new Set(["record/certified", "record/non-exact"]),
+    })).toEqual([certified]);
+  });
 });

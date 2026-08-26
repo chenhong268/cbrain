@@ -21,6 +21,11 @@ export interface ContentCandidateDecision {
     | "insufficient_support";
 }
 
+export interface ContentCandidateAdmissionOptions {
+  /** Exact pages certified by the closed-grammar identity resolver. */
+  readonly deterministicIdentitySlugs?: ReadonlySet<string>;
+}
+
 /**
  * Fail-closed content-recall admission rule.
  *
@@ -31,7 +36,15 @@ export interface ContentCandidateDecision {
 export function assessContentCandidate(
   _query: string,
   result: SearchResult,
+  options?: ContentCandidateAdmissionOptions,
 ): ContentCandidateDecision {
+  if (
+    result.source === "exact"
+    && options?.deterministicIdentitySlugs?.has(result.slug)
+  ) {
+    return { accepted: true, reason: "exact" };
+  }
+
   const support = getRetrievalSupport(result);
 
   if (hasFiniteRank(support.exact?.original)) return { accepted: true, reason: "exact" };
@@ -67,8 +80,9 @@ export function assessContentCandidate(
 export function filterContentCandidates(
   query: string,
   results: readonly SearchResult[],
+  options?: ContentCandidateAdmissionOptions,
 ): SearchResult[] {
-  return results.filter((result) => assessContentCandidate(query, result).accepted);
+  return results.filter((result) => assessContentCandidate(query, result, options).accepted);
 }
 
 /**

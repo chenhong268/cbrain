@@ -128,12 +128,19 @@ async function runContentRecall(
   detail: DetailLevel,
 ): Promise<FrontdoorEnvelope> {
   const limit = detail === "brief" ? 3 : 5;
+  const identitySeed = await resolveIdentityQuestionSeed(ctx, query);
   const candidates = await ctx.search.search(query, {
     limit,
     _captureSupport: true,
     _skipDetailEnrich: true,
   });
-  let results = filterContentCandidates(query, candidates);
+  let results = dedupeCandidatesBySlug(
+    filterContentCandidates(
+      query,
+      identitySeed ? [identitySeed, ...candidates] : candidates,
+      identitySeed ? { deterministicIdentitySlugs: new Set([identitySeed.slug]) } : undefined,
+    ),
+  ).slice(0, limit);
   if (results.length === 0 && !hasExplicitUnknownCue(query)) {
     const ftsCandidates = await ctx.search.search(query, {
       strategy: "fts",
@@ -254,6 +261,63 @@ async function runContentRecall(
     ? { ...formatted.summary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
     : formatted.summary;
   return withRouting({ display, summary, raw: formatted.raw }, payload, routing);
+}
+
+const IDENTITY_QUESTION_RE = /^([^，,。！？!?；;：:\n]+?)\s*(?:是\s*谁|是\s*什么人|是\s*哪位)\s*[？?。！!]*$/u;
+
+/**
+ * Seed a closed-grammar identity question from deterministic local identity
+ * evidence. The resolved title is searched through HybridSearch's existing
+ * exact path so content-relevance still owns admission; this function never
+ * promotes a page directly.
+ */
+async function resolveIdentityQuestionSeed(
+  ctx: ToolContext,
+  query: string,
+): Promise<import("../../core/retrieval/search.js").SearchResult | null> {
+  const subject = extractIdentityQuestionSubject(query);
+  if (!subject) return null;
+  try {
+    const resolved = ctx.db.resolveIdentitySubject(subject);
+    if (!resolved) return null;
+
+    const candidates = await ctx.search.search(resolved.title, {
+      limit: 1,
+      _captureSupport: true,
+      _skipDetailEnrich: true,
+      _supportRootQuery: query,
+      _supportOrigin: "derived",
+    });
+    return candidates.find((candidate) => candidate.slug === resolved.slug && candidate.source === "exact") ?? null;
+  } catch {
+    // The identity seed is an optional bounded rescue. Preserve the existing
+    // hybrid/FTS path when its resolver or exact probe is unavailable.
+    return null;
+  }
+}
+
+function extractIdentityQuestionSubject(query: string): string | null {
+  try {
+    let normalized = query.normalize("NFKC").trim();
+    if (normalized.startsWith("请问")) normalized = normalized.slice(2).trimStart();
+    const subject = normalized.match(IDENTITY_QUESTION_RE)?.[1]?.trim();
+    if (!subject) return null;
+    const length = Array.from(subject).length;
+    return length >= 2 && length <= 40 ? subject : null;
+  } catch {
+    return null;
+  }
+}
+
+function dedupeCandidatesBySlug(
+  candidates: readonly import("../../core/retrieval/search.js").SearchResult[],
+): import("../../core/retrieval/search.js").SearchResult[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.slug)) return false;
+    seen.add(candidate.slug);
+    return true;
+  });
 }
 
 function hasExplicitUnknownCue(query: string): boolean {
