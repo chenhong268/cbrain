@@ -1,5 +1,9 @@
 import { CBrainDB } from "../../storage/sqlite.js";
 
+// #437: config 表中的共现学习水位（已处理 query_log 的最大 id），
+// 与 reflect.last_run_at / discovery.last_run_at 同构的增量水位模式。
+const CO_OCCUR_WATERMARK_KEY = "learn.cooccurrence_watermark_id";
+
 const LAMBDA = 0.05; // time decay — half-life ~14 days
 const QUERY_VALUES: Record<string, number> = {
   recall: 1.0,
@@ -72,27 +76,17 @@ export class LearnManager {
   }
 
   private updateCoOccurrences(since: string): void {
-    const sessions = this.db.getDistinctSessionsSince(since);
-    const pairCounts = new Map<string, number>();
-
-    for (const sessionId of sessions) {
-      const pairs = this.db.getSessionCoOccurrences(sessionId);
+    // #437: id 水位保证同一历史证据只生效一次；缺省 0 = 首跑处理现有窗口一次。
+    const watermark = Number(this.db.getConfig(CO_OCCUR_WATERMARK_KEY) ?? "0");
+    this.db.runInTransaction(() => {
+      const pairs = this.db.getCoOccurrencePairsSince(since, watermark);
+      // Only boost existing links — never create new ones
       for (const pair of pairs) {
-        const key = `${pair.slug_a}|${pair.slug_b}`;
-        pairCounts.set(key, (pairCounts.get(key) ?? 0) + pair.count);
+        this.db.boostLinkWeight(pair.slug_a, pair.slug_b, 0.1 * pair.count);
       }
-    }
-
-    // Only boost existing links — never create new ones
-    for (const [key, count] of pairCounts) {
-      const [slugA, slugB] = key.split("|");
-      const boost = 0.1 * count;
-      try {
-        this.db.boostLinkWeight(slugA, slugB, boost);
-      } catch {
-        // non-critical
-      }
-    }
+      // 权重更新与水位前移同一事务提交：任一失败整体回滚，重试重算同批次。
+      this.db.setConfig(CO_OCCUR_WATERMARK_KEY, String(this.db.getMaxQueryLogId()));
+    });
   }
 
   private buildFeedbackMap(since: string): Map<string, number> {
