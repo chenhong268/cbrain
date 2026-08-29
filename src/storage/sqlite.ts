@@ -3961,13 +3961,54 @@ export class CBrainDB {
     `).all({ $session: sessionId }) as Array<{ slug_a: string; slug_b: string; count: number }>;
     return rows;
   }
-
   getDistinctSessionsSince(since: string): string[] {
     const rows = this.db.prepare(
       "SELECT DISTINCT session_id FROM query_log WHERE session_id IS NOT NULL AND created_at >= $since"
     ).all({ $since: since }) as Array<{ session_id: string }>;
     return rows.map(r => r.session_id);
   }
+
+
+  /**
+   * #437: 增量共现 — 本轮新证据 = id > sinceId 且 created_at >= since 的
+   * query log（双条件：旧时间但高 id 的异常行不算新证据）。对存在本轮
+   * 新日志的 session，取该 session 全部日志的 slug 出现做池化配对（与
+   * getSessionCoOccurrences 同一数学，session 内读取不限时间窗），只统计
+   * 至少一侧属于本轮新日志的 pair，跨 session 求和。旧×旧 pair 已被上一
+   * 轮水位消费，不得重复计入；新×旧交叉对是本轮新增的共现证据，计入。
+   * 供共现学习水位使用；proactive-connection 的全窗口读取仍走 getDistinctSessionsSince。
+   */
+  getCoOccurrencePairsSince(since: string, sinceId: number): Array<{ slug_a: string; slug_b: string; count: number }> {
+    const rows = this.db.prepare(`
+      WITH new_sessions AS (
+        SELECT DISTINCT ql.session_id AS sid
+        FROM query_log ql
+        WHERE ql.id > $sinceId AND ql.created_at >= $since AND ql.session_id IS NOT NULL
+      ),
+      session_occurrences AS (
+        SELECT ql.session_id AS sid, j.value AS slug,
+               (ql.id > $sinceId AND ql.created_at >= $since) AS is_new
+        FROM query_log ql, json_each(ql.result_slugs) AS j
+        WHERE ql.session_id IN (SELECT sid FROM new_sessions)
+      ),
+      slug_pairs AS (
+        SELECT a.slug AS slug_a, b.slug AS slug_b
+        FROM session_occurrences a, session_occurrences b
+        WHERE a.sid = b.sid AND a.slug < b.slug AND (a.is_new OR b.is_new)
+      )
+      SELECT slug_a, slug_b, COUNT(*) AS count
+      FROM slug_pairs
+      GROUP BY slug_a, slug_b
+    `).all({ $since: since, $sinceId: sinceId }) as Array<{ slug_a: string; slug_b: string; count: number }>;
+    return rows;
+  }
+
+  /** #437: query_log 为 AUTOINCREMENT，id 单调递增，可安全作增量水位边界。 */
+  getMaxQueryLogId(): number {
+    const row = this.db.prepare("SELECT MAX(id) AS max_id FROM query_log").get() as { max_id: number | null };
+    return row.max_id ?? 0;
+  }
+
 
   batchUpdateActivityWeights(weights: Map<string, { weight: number; lastQueriedAt: string }>): number {
     if (weights.size === 0) return 0;
