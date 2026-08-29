@@ -1,6 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
 import { buildContext } from "../../src/mcp/context.js";
@@ -3569,6 +3571,21 @@ describe("MCP Server", () => {
       writeFileSync(join(vaultPath, "records/project-z-design.md"), body);
     }
 
+    function seedSummaryCountData() {
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`,
+      ).run("entities/summary-count-a", "人物甲", "summary-count-a.md", "summary-a");
+      db.rawDb.prepare(
+        `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity/person', ?, ?, ?)`,
+      ).run("entities/summary-count-b", "人物乙", "summary-count-b.md", "summary-b");
+      db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state, confidence) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run("entities/summary-count-a", "entities/summary-count-b", "knows", "manual", "trusted", 1);
+      db.rawDb.prepare(
+        "INSERT INTO timeline (page_slug, event_date, summary, source, trust_state) VALUES (?, ?, ?, ?, ?)",
+      ).run("entities/summary-count-a", "2026-01-01", "人物甲参加匿名活动", "manual", "trusted");
+    }
+
     test("detail=normal returns memory_skeleton with key_points", async () => {
       seedRecallData();
       const server = createServer(deps);
@@ -3600,6 +3617,42 @@ describe("MCP Server", () => {
 
       expect(entity).toBeDefined();
       expect(entity.memory_skeleton).toBeUndefined();
+    });
+
+    test("default brief summary does not report unloaded relation or timeline counts", async () => {
+      seedSummaryCountData();
+      const server = createServer(deps);
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverSide);
+      const client = new Client({ name: "brief-summary-probe", version: "0.0.0" });
+      await client.connect(clientSide);
+
+      let data: Record<string, unknown>;
+      try {
+        const result = await client.callTool({ name: "deep_recall", arguments: { query: "人物甲" } });
+        const content = result.content as Array<{ type: string; text?: string }>;
+        data = JSON.parse(content[0]?.text ?? "{}");
+      } finally {
+        await client.close();
+        await server.close();
+      }
+
+      expect(data.result_summary).toContain("有 1 条相关记忆");
+      expect(data.result_summary).not.toContain("条关系");
+      expect(data.result_summary).not.toContain("条时间线");
+    });
+
+    test("normal summary keeps real relation and timeline counts", async () => {
+      seedSummaryCountData();
+      const server = createServer(deps);
+      const result = await getTools(server).deep_recall.handler({
+        query: "人物甲",
+        detail: "normal",
+      });
+      const data = JSON.parse(result.content[0].text);
+
+      expect(data.result_summary).toContain("1 条关系");
+      expect(data.result_summary).toContain("1 条时间线");
     });
   });
 
