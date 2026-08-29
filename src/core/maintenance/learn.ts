@@ -76,9 +76,19 @@ export class LearnManager {
   }
 
   private updateCoOccurrences(since: string): void {
-    // #437: id 水位保证同一历史证据只生效一次；缺省 0 = 首跑处理现有窗口一次。
-    const watermark = Number(this.db.getConfig(CO_OCCUR_WATERMARK_KEY) ?? "0");
     this.db.runInTransaction(() => {
+      // #437: 水位读取必须在同一事务内，与 pair 读取、权重更新、水位前移
+      // 一起提交；在事务外读取会让两个学习执行读到同一旧水位，先后重复
+      // boost 同一批次。
+      const stored = this.db.getConfig(CO_OCCUR_WATERMARK_KEY);
+      if (stored === null) {
+        // #437: 缺失水位 = 历史窗口未被本算法消费过（生产库存量权重已由
+        // 旧 Dream 累加）。fail-closed bootstrap：本轮不 boost，直接把水位
+        // 前移到当前 max id，之后新增日志才计入；禁止首跑重放 90 天 backlog。
+        this.db.setConfig(CO_OCCUR_WATERMARK_KEY, String(this.db.getMaxQueryLogId()));
+        return;
+      }
+      const watermark = Number(stored);
       const pairs = this.db.getCoOccurrencePairsSince(since, watermark);
       // Only boost existing links — never create new ones
       for (const pair of pairs) {
