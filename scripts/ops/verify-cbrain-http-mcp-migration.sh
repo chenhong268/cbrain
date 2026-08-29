@@ -65,8 +65,36 @@ L=$(lsof -nP -iTCP:3399 -sTCP:LISTEN 2>/dev/null | grep -c LISTEN || true)
 [ "$L" -eq 1 ] && ok "listeners=$L" || fail "listeners=$L (expected 1)"
 
 echo "=== 3. CBrain writer 进程数 = 1 ==="
-W=$(ps -eo command | grep -i 'cbrain.*serve' | grep -v grep | grep -v 'verify-cbrain' | wc -l | tr -d ' ')
-[ "$W" -eq 1 ] && ok "cbrain serve processes=$W" || fail "cbrain serve processes=$W (expected 1 — single writer)"
+WRITERS=$(ps -eo pid=,ppid=,command= 2>/dev/null | awk '
+  $3 ~ /(^|\/)bun$/ {
+    entrypoint = 0
+    serve = 0
+    http = 0
+    for (i = 4; i <= NF; i++) {
+      if (!entrypoint && $i ~ /(^|\/)src\/cli\/index\.ts$/) {
+        entrypoint = 1
+      } else if (entrypoint && !serve && $i == "serve") {
+        serve = 1
+      } else if (serve && $i == "--http") {
+        http = 1
+        break
+      }
+    }
+    if (entrypoint && serve && http) print $1, $2, "cbrain-cli-http"
+  }
+')
+W=$(printf '%s\n' "$WRITERS" | awk 'NF { count++ } END { print count + 0 }')
+if [ "$W" -eq 1 ]; then
+  ok "cbrain serve processes=$W"
+else
+  WRITER_DIAGNOSTIC=$(printf '%s\n' "$WRITERS" | awk '
+    NF {
+      printf "%sPID=%s PPID=%s type=%s", separator, $1, $2, $3
+      separator=", "
+    }
+  ')
+  fail "cbrain serve processes=$W (expected 1 — single writer); writers: ${WRITER_DIAGNOSTIC:-<none>}"
+fi
 
 echo "=== 4. /health ==="
 H=$(curl -s -o /dev/null -w '%{http_code}' "$CBRAIN_URL/health" 2>/dev/null || echo 000)
