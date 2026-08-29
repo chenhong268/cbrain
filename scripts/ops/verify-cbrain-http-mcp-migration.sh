@@ -65,7 +65,7 @@ L=$(lsof -nP -iTCP:3399 -sTCP:LISTEN 2>/dev/null | grep -c LISTEN || true)
 [ "$L" -eq 1 ] && ok "listeners=$L" || fail "listeners=$L (expected 1)"
 
 echo "=== 3. CBrain writer 进程数 = 1 ==="
-WRITERS=$(ps -eo pid=,ppid=,command= 2>/dev/null | awk '
+WRITERS=$(ps -eww -o pid=,ppid=,command= 2>/dev/null | awk '
   $3 ~ /(^|\/)bun$/ {
     entrypoint = 0
     serve = 0

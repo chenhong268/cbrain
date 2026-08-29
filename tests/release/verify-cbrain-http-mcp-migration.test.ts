@@ -7,7 +7,7 @@ const SCRIPT = join(import.meta.dir, "../../scripts/ops/verify-cbrain-http-mcp-m
 
 type PsMode = "harmless-label" | "second-writer";
 
-function runVerifier(psMode: PsMode) {
+function runVerifier(psMode: PsMode, requireWidePs = false) {
   const root = mkdtempSync(join(tmpdir(), "cbrain-migration-verifier-"));
   const fakeBin = join(root, "bin");
   const config = join(root, "config.yaml");
@@ -37,6 +37,9 @@ case "$*" in
   *"get('cbrain')"*) printf '%s\\n' 'no' ;;
 esac`);
   command("ps", `
+if [ "$FAKE_REQUIRE_WIDE_PS" = '1' ] && [ "$*" != '-eww -o pid=,ppid=,command=' ]; then
+  exit 64
+fi
 case "$FAKE_PS_MODE" in
   harmless-label)
     printf '%s\\n' '101 1 /anonymous/bin/bun run --smol /anonymous/cbrain/repo/src/cli/index.ts serve --http --port 3399'
@@ -59,6 +62,7 @@ esac`);
         CBRAIN_REQUIRED_MCP_CONFIGS: config,
         CBRAIN_OPTIONAL_MCP_CONFIGS: "",
         FAKE_PS_MODE: psMode,
+        FAKE_REQUIRE_WIDE_PS: requireWidePs ? "1" : "0",
       },
     });
   } finally {
@@ -67,6 +71,12 @@ esac`);
 }
 
 describe("HTTP MCP migration verifier — writer inventory", () => {
+  test("requests an untruncated BSD process inventory before classifying writers", () => {
+    const result = runVerifier("harmless-label", true);
+
+    expect(result.exitCode).toBe(0);
+  });
+
   test("ignores a harmless shell command whose label mentions cbrain serve", () => {
     const result = runVerifier("harmless-label");
 
