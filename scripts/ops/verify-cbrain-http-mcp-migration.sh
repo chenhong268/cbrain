@@ -80,11 +80,15 @@ WRITERS=$(ps -eww -o pid=,ppid=,command= 2>/dev/null | awk '
         break
       }
     }
-    if (entrypoint && serve && http) print $1, $2, "cbrain-cli-http"
+    if (entrypoint && serve) {
+      type = http ? "cbrain-cli-http" : "cbrain-cli-stdio"
+      print $1, $2, type
+    }
   }
 ')
 W=$(printf '%s\n' "$WRITERS" | awk 'NF { count++ } END { print count + 0 }')
-if [ "$W" -eq 1 ]; then
+WRITER_TYPE=$(printf '%s\n' "$WRITERS" | awk 'NF { print $3; exit }')
+if [ "$W" -eq 1 ] && [ "$WRITER_TYPE" = "cbrain-cli-http" ]; then
   ok "cbrain serve processes=$W"
 else
   WRITER_DIAGNOSTIC=$(printf '%s\n' "$WRITERS" | awk '
@@ -93,7 +97,7 @@ else
       separator=", "
     }
   ')
-  fail "cbrain serve processes=$W (expected 1 — single writer); writers: ${WRITER_DIAGNOSTIC:-<none>}"
+  fail "cbrain serve processes=$W type=${WRITER_TYPE:-<none>} (expected exactly 1 HTTP writer); writers: ${WRITER_DIAGNOSTIC:-<none>}"
 fi
 
 echo "=== 4. /health ==="

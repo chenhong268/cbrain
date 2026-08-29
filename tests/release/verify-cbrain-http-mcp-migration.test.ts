@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const SCRIPT = join(import.meta.dir, "../../scripts/ops/verify-cbrain-http-mcp-migration.sh");
 
-type PsMode = "harmless-label" | "second-writer";
+type PsMode = "harmless-label" | "second-writer" | "http-and-stdio" | "second-stdio" | "stdio-only";
 
 function runVerifier(psMode: PsMode, requireWidePs = false) {
   const root = mkdtempSync(join(tmpdir(), "cbrain-migration-verifier-"));
@@ -49,6 +49,17 @@ case "$FAKE_PS_MODE" in
     printf '%s\\n' '101 1 /anonymous/bin/bun run --smol /anonymous/cbrain/repo/src/cli/index.ts serve --http --port 3399'
     printf '%s\\n' '202 1 /anonymous/bin/bun run --smol /anonymous/cbrain/other/src/cli/index.ts serve --http --port 3400'
     ;;
+  http-and-stdio)
+    printf '%s\\n' '101 1 /anonymous/bin/bun run --smol /anonymous/cbrain/repo/src/cli/index.ts serve --http --port 3399'
+    printf '%s\\n' '202 1 /anonymous/bin/bun run --smol /anonymous/cbrain/other/src/cli/index.ts serve'
+    ;;
+  second-stdio)
+    printf '%s\\n' '101 1 /anonymous/bin/bun run --smol /anonymous/cbrain/repo/src/cli/index.ts serve'
+    printf '%s\\n' '202 1 /anonymous/bin/bun run --smol /anonymous/cbrain/other/src/cli/index.ts serve'
+    ;;
+  stdio-only)
+    printf '%s\\n' '101 1 /anonymous/bin/bun run --smol /anonymous/cbrain/repo/src/cli/index.ts serve'
+    ;;
 esac`);
 
   try {
@@ -70,6 +81,10 @@ esac`);
   }
 }
 
+function combinedOutput(result: ReturnType<typeof runVerifier>): string {
+  return `${result.stdout.toString()}${result.stderr.toString()}`;
+}
+
 describe("HTTP MCP migration verifier — writer inventory", () => {
   test("requests an untruncated BSD process inventory before classifying writers", () => {
     const result = runVerifier("harmless-label", true);
@@ -86,12 +101,42 @@ describe("HTTP MCP migration verifier — writer inventory", () => {
 
   test("rejects a second real HTTP writer without exposing its command or path", () => {
     const result = runVerifier("second-writer");
-    const output = result.stdout.toString();
+    const output = combinedOutput(result);
 
     expect(result.exitCode).toBe(1);
     expect(output).toContain("cbrain serve processes=2");
     expect(output).toContain("PID=101 PPID=1 type=cbrain-cli-http");
     expect(output).toContain("PID=202 PPID=1 type=cbrain-cli-http");
     expect(output).not.toContain("/anonymous/");
+  });
+
+  test("rejects a mixed HTTP and stdio writer pair", () => {
+    const result = runVerifier("http-and-stdio");
+    const output = combinedOutput(result);
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain("cbrain serve processes=2");
+    expect(output).toContain("PID=101 PPID=1 type=cbrain-cli-http");
+    expect(output).toContain("PID=202 PPID=1 type=cbrain-cli-stdio");
+    expect(output).not.toContain("/anonymous/");
+  });
+
+  test("rejects two real stdio writers", () => {
+    const result = runVerifier("second-stdio");
+    const output = combinedOutput(result);
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain("cbrain serve processes=2");
+    expect(output).toContain("PID=101 PPID=1 type=cbrain-cli-stdio");
+    expect(output).toContain("PID=202 PPID=1 type=cbrain-cli-stdio");
+  });
+
+  test("rejects a lone real stdio writer", () => {
+    const result = runVerifier("stdio-only");
+    const output = combinedOutput(result);
+
+    expect(result.exitCode).toBe(1);
+    expect(output).toContain("cbrain serve processes=1");
+    expect(output).toContain("PID=101 PPID=1 type=cbrain-cli-stdio");
   });
 });
