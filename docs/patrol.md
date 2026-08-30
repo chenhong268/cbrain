@@ -18,9 +18,13 @@
 - **mcp**：HTTP `/mcp` `initialize` → `tools/list`（复用 `bin/cbrain-maintenance.sh` 模式；MCP 响应 = healthy）
 - **perf**：`cbrain perf-diagnose --days 7 --min-latency-ms 0 --json`（readonly SQLite）
 - **repo_gate**：`bun run gate:v2-preflight`（timeout-bounded；**timeout/fail = deferred，非 runtime unhealthy**）。v2-preflight 含 `gate:consistency`（#279/#379）—— **repository fixture gate**，跑匿名 fixture DB 上的 fsck + repair-plan 硬/软分层（hard no-go: missing chunks / stale FTS / coverage gap / hierarchy split-brain / dangling FK / LanceDB corrupt/missing-with-chunks；warning: title collision / 空库 LanceDB missing）。该 gate **不读 cbrain.json / 不开操作者 vault 或 DB**，clean checkout 可跑；操作者真实 profile health 由独立 `bun run gate:profile-storage` 提供（fail-closed on missing/invalid config）。
-- **data_quality**：汇总 `/health` + `tools/list` 高层数字（不跑 full health/dream/scan）
+- **data_quality**：汇总 `/health` + `tools/list` 高层数字（不跑 full health/dream/scan）。#441 起在同一 MCP session 调用 `status`，读取 `lastFullHealth` 只读标量快照（`availability / checkedAt / overallStatus / totalIssueCount / freshness`，36 小时新鲜度阈值，恰好 36 小时仍算 fresh），并**分行输出两个状态轴**：
+  - **运行健康**：runtime/MCP 是否可用，唯一决定 exit code；
+  - **最近完整知识体检**：最近一次完整 `health` 的结论。state 缺失、旧格式、损坏或超过 36 小时分别显示"未验证/已过期"，fail-closed，绝不输出"数据健康"类保证。
 
-exit 0 = runtime healthy（perf/repo_gate 可能 deferred）；exit 1 = runtime unhealthy（runtime/mcp fail）。
+  知识体检 `fail` ≠ 服务或检索不可用；runtime `pass` 也不代表知识/数据健康。daily 不合成单一"健康"标签，不重跑 full health（single-writer，见 #208/#223），知识治理债务由 nightly full health 与 `next_actions` 承载。
+
+exit 0 = runtime healthy（perf/repo_gate 可能 deferred）；exit 1 = runtime unhealthy（runtime/mcp fail）。知识体检结论不影响 exit code。
 
 ## 不放 daily 的命令（single-writer 拓扑，见 #208）
 

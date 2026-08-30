@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, rmSync, mkdirSync, writeFileSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
-import { HealthChecker } from "../../src/core/maintenance/health.js";
+import { HealthChecker, readLastFullHealthSnapshot, FULL_HEALTH_FRESHNESS_MS } from "../../src/core/maintenance/health.js";
 import { Logger } from "../../src/core/logger.js";
 import { resolveTrustedVaultBoundary } from "../../src/core/maintenance/misplaced-vault-artifacts.js";
 import * as misplacedArtifacts from "../../src/core/maintenance/misplaced-vault-artifacts.js";
@@ -483,6 +483,116 @@ describe("HealthChecker", () => {
       const islandSlugs = Object.entries(state.slugRunCounts)
         .filter(([, count]: [string, unknown]) => (count as number) >= 3);
       expect(islandSlugs.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("#441 lastFullHealth snapshot", () => {
+    const NOW = Date.parse("2026-08-30T00:00:00.000Z");
+    const snapDir = join(testDir, "snap-outputs");
+
+    function writeHealthState(state: unknown) {
+      mkdirSync(join(snapDir, "health"), { recursive: true });
+      writeFileSync(
+        join(snapDir, "health", "state.json"),
+        typeof state === "string" ? state : JSON.stringify(state),
+        "utf-8",
+      );
+    }
+
+    function validState(overrides: Record<string, unknown> = {}) {
+      return {
+        timestamp: new Date(NOW - 60 * 60 * 1000).toISOString(),
+        overallStatus: "warn",
+        totalIssueCount: 7,
+        slugRunCounts: { "entities/anon-a": 2 },
+        dimensions: [{ name: "d", status: "warn", issueSlugs: ["entities/anon-a"], issueCount: 1 }],
+        ...overrides,
+      };
+    }
+
+    test("checkAll persists overallStatus and totalIssueCount into state.json", async () => {
+      insertPage("entities/e1", "E1", "entity/person");
+
+      const report = await checker.checkAll();
+      const state = JSON.parse(readFileSync(join(testDir, "outputs", "health", "state.json"), "utf-8"));
+      expect(state.overallStatus).toBe(report.overallStatus);
+      expect(state.totalIssueCount).toBe(report.dimensions.reduce((n, d) => n + d.issues.length, 0));
+    });
+
+    test("missing state → availability=missing, freshness=unknown, no conclusions", async () => {
+      expect(readLastFullHealthSnapshot(snapDir, NOW)).toEqual({
+        availability: "missing",
+        checkedAt: null,
+        overallStatus: null,
+        totalIssueCount: null,
+        freshness: "unknown",
+      });
+    });
+
+    test("valid recent state → available with scalar projection only", async () => {
+      const checkedAt = new Date(NOW - 60 * 60 * 1000).toISOString();
+      writeHealthState(validState({ overallStatus: "fail", totalIssueCount: 3210, timestamp: checkedAt }));
+      expect(readLastFullHealthSnapshot(snapDir, NOW)).toEqual({
+        availability: "available",
+        checkedAt,
+        overallStatus: "fail",
+        totalIssueCount: 3210,
+        freshness: "fresh",
+      });
+    });
+
+    test("36h boundary is deterministic: exactly 36h = fresh, 36h+1ms = stale", async () => {
+      expect(FULL_HEALTH_FRESHNESS_MS).toBe(36 * 60 * 60 * 1000);
+
+      const atBoundary = new Date(NOW - 36 * 60 * 60 * 1000).toISOString();
+      writeHealthState(validState({ timestamp: atBoundary }));
+      expect(readLastFullHealthSnapshot(snapDir, NOW).freshness).toBe("fresh");
+
+      const pastBoundary = new Date(NOW - 36 * 60 * 60 * 1000 - 1).toISOString();
+      writeHealthState(validState({ timestamp: pastBoundary }));
+      expect(readLastFullHealthSnapshot(snapDir, NOW).freshness).toBe("stale");
+    });
+
+    test("legacy state without the new scalar fields → invalid (unverified)", async () => {
+      writeHealthState({
+        timestamp: new Date(NOW - 60 * 60 * 1000).toISOString(),
+        slugRunCounts: {},
+        dimensions: [],
+      });
+      const snap = readLastFullHealthSnapshot(snapDir, NOW);
+      expect(snap.availability).toBe("invalid");
+      expect(snap.overallStatus).toBeNull();
+      expect(snap.freshness).toBe("unknown");
+    });
+
+    test("corrupted JSON → invalid without throwing", async () => {
+      writeHealthState("{ not json");
+      expect(readLastFullHealthSnapshot(snapDir, NOW).availability).toBe("invalid");
+    });
+
+    test("invalid, future, or out-of-range scalars degrade to invalid", async () => {
+      writeHealthState(validState({ timestamp: "not-a-date" }));
+      expect(readLastFullHealthSnapshot(snapDir, NOW).availability).toBe("invalid");
+
+      writeHealthState(validState({ timestamp: new Date(NOW + 60 * 60 * 1000).toISOString() }));
+      expect(readLastFullHealthSnapshot(snapDir, NOW).availability).toBe("invalid");
+
+      writeHealthState(validState({ overallStatus: "catastrophe" }));
+      expect(readLastFullHealthSnapshot(snapDir, NOW).availability).toBe("invalid");
+
+      writeHealthState(validState({ totalIssueCount: -1 }));
+      expect(readLastFullHealthSnapshot(snapDir, NOW).availability).toBe("invalid");
+
+      writeHealthState(validState({ totalIssueCount: 1.5 }));
+      expect(readLastFullHealthSnapshot(snapDir, NOW).availability).toBe("invalid");
+    });
+
+    test("naive timestamp without Z suffix is still parsed (legacy compatibility)", async () => {
+      writeHealthState(validState({ timestamp: "2026-08-29T20:00:00.000" }));
+      const snap = readLastFullHealthSnapshot(snapDir, NOW);
+      expect(snap.availability).toBe("available");
+      expect(snap.checkedAt).toBe("2026-08-29T20:00:00.000");
+      expect(snap.freshness).toBe("fresh");
     });
   });
 

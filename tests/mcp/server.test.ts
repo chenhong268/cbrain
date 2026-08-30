@@ -134,6 +134,48 @@ describe("MCP Server", () => {
       expect(data.totalPages).toBe(3);
       expect(data.totalLinks).toBe(1);
     });
+
+    test("#441 status exposes scalar-only lastFullHealth from persisted health state", async () => {
+      const runtimeDir = join(testDir, "runtime");
+      const checkedAt = new Date().toISOString();
+      mkdirSync(join(runtimeDir, "health"), { recursive: true });
+      writeFileSync(join(runtimeDir, "health", "state.json"), JSON.stringify({
+        timestamp: checkedAt,
+        overallStatus: "fail",
+        totalIssueCount: 42,
+        slugRunCounts: { "entities/anon-slug": 2 },
+        dimensions: [{ name: "d", status: "fail", issueSlugs: ["entities/anon-slug"], issueCount: 1 }],
+      }), "utf-8");
+
+      const server = createServer(deps);
+      const result = await getTools(server).status.handler({});
+      const text = result.content[0].text;
+      const data = JSON.parse(text);
+      expect(data.lastFullHealth).toEqual({
+        availability: "available",
+        checkedAt,
+        overallStatus: "fail",
+        totalIssueCount: 42,
+        freshness: "fresh",
+      });
+      // Privacy: the snapshot must not leak slugs, dimensions, or raw state.
+      expect(text).not.toContain("anon-slug");
+      expect(text).not.toContain("dimensions");
+      expect(text).not.toContain("slugRunCounts");
+    });
+
+    test("#441 status reports lastFullHealth unverified when no state exists", async () => {
+      const server = createServer(deps);
+      const result = await getTools(server).status.handler({});
+      const data = JSON.parse(result.content[0].text);
+      expect(data.lastFullHealth).toEqual({
+        availability: "missing",
+        checkedAt: null,
+        overallStatus: null,
+        totalIssueCount: null,
+        freshness: "unknown",
+      });
+    });
   });
 
   describe("profile tool", () => {

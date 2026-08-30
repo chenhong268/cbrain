@@ -611,6 +611,23 @@ function checkDailyPatrolContract(docs: Map<string, string>): CheckResult[] {
         detail: "daily-patrol.sh 不得用 grep '\"name\"' 统计 MCP tools；必须解析 result.tools.length",
       });
     }
+    // #441: data_quality must read the scalar-only status.lastFullHealth
+    // snapshot inside the existing MCP session — the patrol must never
+    // regress to "counts tools, claims (data) health".
+    if (!script.includes("lastFullHealth") || !script.includes("tools/call")) {
+      out.push({
+        check: "daily-patrol lastFullHealth (#441)",
+        passed: false,
+        detail: "daily-patrol.sh 必须在既有 MCP session 调用 status 并读取 lastFullHealth 标量快照（#441：data_quality 不得退回只数 tools）",
+      });
+    }
+    if (/RESULT:[^\n]*(数据|知识).*(健康|正常|一致)/.test(script)) {
+      out.push({
+        check: "daily-patrol health wording (#441)",
+        passed: false,
+        detail: "daily-patrol.sh 的 RESULT 行只判 runtime，不得对数据/知识健康作肯定结论（#441）",
+      });
+    }
   }
   const patrolDoc = docs.get("docs/patrol.md");
   if (patrolDoc) {
@@ -625,6 +642,15 @@ function checkDailyPatrolContract(docs: Map<string, string>): CheckResult[] {
         });
       }
     });
+    // #441: patrol.md must keep the two status axes (runtime health vs latest
+    // full knowledge health) instead of a single merged health label.
+    if (!patrolDoc.includes("最近完整知识体检")) {
+      out.push({
+        check: "patrol.md two status axes (#441)",
+        passed: false,
+        detail: "docs/patrol.md 必须区分运行健康与最近完整知识体检两个状态轴（#441），不得退回单一健康标签",
+      });
+    }
   }
   if (out.length === 0) {
     out.push({

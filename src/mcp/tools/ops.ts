@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { HealthChecker } from "../../core/maintenance/health.js";
+import { HealthChecker, readLastFullHealthSnapshot } from "../../core/maintenance/health.js";
 import { IndexGenerator } from "../../core/maintenance/indexes.js";
 import { normalizeRelation, getCanonicalRelationTypes, getReverseRelation } from "../../core/shared.js";
 import { WatcherLock } from "../../utils/watcher-lock.js";
@@ -165,6 +165,7 @@ export function registerOpsTools(server: McpServer, ctx: ToolContext): void {
           quarantineCount: quarantine.length,
           quarantine,
           bulkPending,
+          lastFullHealth: readLastFullHealthSnapshot(ctx.outputsDir),
         }, null, 2),
       }],
     };

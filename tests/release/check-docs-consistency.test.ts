@@ -263,3 +263,34 @@ test("#234: the single-writer wrapper in a cron block is not flagged", () => {
     },
   );
 });
+
+test("#441: fails when daily-patrol drops the status lastFullHealth read", () => {
+  const scriptPath = join(PROJECT_DIR, "bin", "daily-patrol.sh");
+  const original = readFileSync(scriptPath, "utf-8");
+  const patched = original.replaceAll("lastFullHealth", "removedHealthMarker");
+  if (patched === original) {
+    throw new Error("test fixture failed to patch daily-patrol lastFullHealth read");
+  }
+
+  try {
+    writeFileSync(scriptPath, patched);
+    const { stdout, code } = runCheck();
+    expect(code).toBe(1);
+    expect(stdout).toContain("daily-patrol lastFullHealth");
+  } finally {
+    writeFileSync(scriptPath, original);
+  }
+});
+
+test("#441: fails when docs/patrol.md drops the two status axes", () => {
+  withTmpDocs(
+    {
+      "patrol.md": "# Patrol\n\nsingle-axis daily report only\n",
+    },
+    (dir) => {
+      const { stdout, code } = runCheck({ DOCS_DIR: dir });
+      expect(code).toBe(1);
+      expect(stdout).toContain("patrol.md two status axes");
+    },
+  );
+});

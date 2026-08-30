@@ -134,6 +134,10 @@ export interface ReportPaths {
 
 interface HealthState {
   timestamp: string;
+  /** #441: scalar projection of the latest full-health run. Absent in legacy
+   *  state files — readers must treat that as "unverified", never as pass. */
+  overallStatus?: "pass" | "warn" | "fail";
+  totalIssueCount?: number;
   slugRunCounts: Record<string, number>;
   dimensions: Array<{
     name: string;
@@ -249,7 +253,7 @@ export class HealthChecker {
     report.delta = delta;
 
     // Save new state
-    this.saveState(dimensions, prevState, timestamp);
+    this.saveState(report, prevState);
 
     // Write three-layer output
     const reportPaths = this.writeReports(report);
@@ -276,11 +280,11 @@ export class HealthChecker {
     }
   }
 
-  private saveState(dimensions: HealthDimension[], prevState: HealthState | null, timestamp: string): void {
+  private saveState(report: HealthReport, prevState: HealthState | null): void {
     const prevCounts = prevState?.slugRunCounts ?? {};
     const currentCounts: Record<string, number> = {};
 
-    for (const dim of dimensions) {
+    for (const dim of report.dimensions) {
       for (const issue of dim.issues) {
         const identity = healthIssueIdentity(issue);
         currentCounts[identity] = (prevCounts[identity] ?? 0) + 1;
@@ -288,9 +292,13 @@ export class HealthChecker {
     }
 
     const state: HealthState = {
-      timestamp,
+      timestamp: report.timestamp,
+      // #441: persist the scalar verdict so `status` can project the latest
+      // full-health snapshot without re-reading report files.
+      overallStatus: report.overallStatus,
+      totalIssueCount: report.dimensions.reduce((n, d) => n + d.issues.length, 0),
       slugRunCounts: currentCounts,
-      dimensions: dimensions.map(d => ({
+      dimensions: report.dimensions.map(d => ({
         name: d.name,
         status: d.status,
         issueSlugs: d.issues.map(healthIssueIdentity),
@@ -1504,4 +1512,66 @@ export class HealthChecker {
       issues,
     };
   }
+}
+
+// ─── Last Full Health Snapshot (read-only, #441) ───────────────
+
+/** Named freshness threshold for the daily/nightly cadence (#441): a
+ *  full-health verdict older than 36h is stale and must not be presented
+ *  as a current guarantee. Exactly 36h old still counts as fresh. */
+export const FULL_HEALTH_FRESHNESS_MS = 36 * 60 * 60 * 1000;
+
+/** Scalar-only projection of the latest persisted full-health run (#441).
+ *  Deliberately carries no dimension details, slugs, titles, or paths. */
+export interface LastFullHealthSnapshot {
+  availability: "available" | "missing" | "invalid";
+  checkedAt: string | null;
+  overallStatus: "pass" | "warn" | "fail" | null;
+  totalIssueCount: number | null;
+  freshness: "fresh" | "stale" | "unknown";
+}
+
+function unverifiedSnapshot(availability: "missing" | "invalid"): LastFullHealthSnapshot {
+  return { availability, checkedAt: null, overallStatus: null, totalIssueCount: null, freshness: "unknown" };
+}
+
+function parseHealthTimestamp(value: unknown): number | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  const parsed = Date.parse(value.endsWith("Z") ? value : `${value}Z`);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+/** Read the scalar-only latest-full-health snapshot from the persisted health
+ *  state (#441). Fail-closed: a missing state file reports `missing`; corrupted
+ *  JSON, legacy state without the scalar fields, invalid or future timestamps,
+ *  and out-of-range values all degrade to `invalid` — never to a health claim. */
+export function readLastFullHealthSnapshot(outputsDir: string, now: number = Date.now()): LastFullHealthSnapshot {
+  const path = join(outputsDir, "health", "state.json");
+  if (!existsSync(path)) return unverifiedSnapshot("missing");
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return unverifiedSnapshot("invalid");
+  }
+  if (typeof raw !== "object" || raw === null) return unverifiedSnapshot("invalid");
+  const state = raw as Record<string, unknown>;
+
+  if (state.overallStatus !== "pass" && state.overallStatus !== "warn" && state.overallStatus !== "fail") {
+    return unverifiedSnapshot("invalid");
+  }
+  if (typeof state.totalIssueCount !== "number" || !Number.isSafeInteger(state.totalIssueCount) || state.totalIssueCount < 0) {
+    return unverifiedSnapshot("invalid");
+  }
+  const checkedAtMs = parseHealthTimestamp(state.timestamp);
+  if (checkedAtMs === null || checkedAtMs > now) return unverifiedSnapshot("invalid");
+
+  return {
+    availability: "available",
+    checkedAt: state.timestamp as string,
+    overallStatus: state.overallStatus,
+    totalIssueCount: state.totalIssueCount,
+    freshness: now - checkedAtMs <= FULL_HEALTH_FRESHNESS_MS ? "fresh" : "stale",
+  };
 }
