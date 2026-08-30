@@ -81,10 +81,10 @@ export function buildKnownRelationsBlock(outgoing: KnownRelationsLink[], incomin
 }
 
 export function replaceKnownRelationsSection(body: string, block: string): string {
-  const clean = removeLegacyKnownRelationsBlocks(body);
+  const clean = removeLegacyKnownRelationsBlocks(body).replace(/\n\*\*关联\*\*\n/g, "\n");
   const range = knownRelationsRange(clean);
   if (!range) {
-    const cleanBody = clean.replace(/\n\*\*关联\*\*\n/g, "\n").trimEnd();
+    const cleanBody = clean.trimEnd();
     if (!block.trim()) return cleanBody;
     return cleanBody ? `${cleanBody}\n\n${block}` : block;
   }

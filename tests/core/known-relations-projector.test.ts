@@ -82,6 +82,34 @@ describe("KnownRelationsProjector", () => {
     ].join("\n"));
   });
 
+  test("replaces a modern projection while stripping a stray legacy relation marker", () => {
+    const body = [
+      "用户正文。",
+      "",
+      "**关联**",
+      "",
+      "## Known Relations",
+      "",
+      "- stale → [[entity/old]]",
+      "",
+      "## 用户备注",
+      "",
+      "保留后续内容。",
+    ].join("\n");
+
+    expect(replaceKnownRelationsSection(body, "## Known Relations\n\n- 提及 → [[entity/new]]\n")).toBe([
+      "用户正文。",
+      "",
+      "## Known Relations",
+      "",
+      "- 提及 → [[entity/new]]",
+      "",
+      "## 用户备注",
+      "",
+      "保留后续内容。",
+    ].join("\n"));
+  });
+
   test("replaces the managed range in place while preserving later user sections", () => {
     const body = [
       "用户正文。",
