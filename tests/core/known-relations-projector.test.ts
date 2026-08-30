@@ -82,6 +82,78 @@ describe("KnownRelationsProjector", () => {
     ].join("\n"));
   });
 
+  test("replaces the managed range in place while preserving later user sections", () => {
+    const body = [
+      "用户正文。",
+      "",
+      "## Known Relations",
+      "",
+      "- old-format → [[entity/old]]",
+      "",
+      "### Managed detail",
+      "",
+      "- obsolete detail",
+      "",
+      "## 用户备注",
+      "",
+      "这段内容必须保留。",
+      "",
+      "# 时间线",
+      "",
+      "后续章节顺序不变。",
+    ].join("\r\n");
+
+    const next = replaceKnownRelationsSection(body, "## Known Relations\n\n- 提及 → [[entity/new]]\n");
+
+    expect(next).toBe(
+      "用户正文。\n\n## Known Relations\n\n- 提及 → [[entity/new]]\n\n" +
+      [
+        "## 用户备注",
+        "",
+        "这段内容必须保留。",
+        "",
+        "# 时间线",
+        "",
+        "后续章节顺序不变。",
+      ].join("\r\n"),
+    );
+  });
+
+  test("compares drift only within the managed range before a later section", () => {
+    const current = [
+      "正文",
+      "",
+      "## Known Relations",
+      "",
+      "- 提及 → [[entity/new]]",
+      "",
+      "## 用户备注",
+      "",
+      "这里不是关系投影。",
+    ].join("\n");
+    const outgoing = [link({ relation: "提及", to_slug: "entity/new" })];
+
+    expect(hasKnownRelationsDrift(current, outgoing, [])).toBe(false);
+  });
+
+  test("removes an empty file-start projection without deleting the next user section", () => {
+    const body = [
+      "## Known Relations",
+      "",
+      "- stale → [[entity/old]]",
+      "",
+      "# 用户正文",
+      "",
+      "保留这段正文。",
+    ].join("\n");
+
+    expect(replaceKnownRelationsSection(body, "")).toBe([
+      "# 用户正文",
+      "",
+      "保留这段正文。",
+    ].join("\n"));
+  });
+
   test("detects stale projection drift, not only missing lines", () => {
     const stale = "正文\n\n## Known Relations\n\n- 提及 → [[entity/old]]\n";
     const outgoing = [link({ relation: "提及", to_slug: "entity/new" })];
