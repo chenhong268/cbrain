@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { createServer, type CBrainDeps } from "../../src/mcp/server.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
+import { registerFrontdoorTools } from "../../src/mcp/tools/frontdoor.js";
 
 function createMockEmbedding(): EmbeddingProvider {
   return {
@@ -35,6 +36,24 @@ function createMockLanceDB() {
 
 function getTools(server: any) {
   return (server as any)._registeredTools as Record<string, any>;
+}
+
+function registerFrontdoorWithSearch(db: CBrainDB, searchSlugs: string[]) {
+  let handler: ((args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>) | undefined;
+  const server = {
+    registerTool(name: string, _definition: unknown, registered: typeof handler) {
+      if (name === "cbrain_recall") handler = registered;
+    },
+  };
+  registerFrontdoorTools(server as never, {
+    outputMode: "legacy",
+    db,
+    search: {
+      search: async () => searchSlugs.map((slug) => ({ slug, score: 1, snippet: "匿名检索片段", source: "hybrid" as const })),
+    },
+  } as never);
+  if (!handler) throw new Error("frontdoor handler not registered");
+  return handler;
 }
 
 function seedPage(db: CBrainDB, vaultPath: string, slug: string, title: string, type: string): void {
@@ -222,5 +241,27 @@ describe("cbrain_recall front-door tool (#199)", () => {
     beforeEnvelope.raw.routing.latency_ms = 0;
     afterEnvelope.raw.routing.latency_ms = 0;
     expect(afterEnvelope).toEqual(beforeEnvelope);
+  });
+
+  test("grounded learning records only accepted evidence sources, not search candidates", async () => {
+    const candidateSlug = "entities/search-candidate";
+    const acceptedSlug = "records/accepted-evidence";
+    seedPage(db, vaultPath, candidateSlug, "匿名候选", "entity/person");
+    seedPage(db, vaultPath, "entities/linked-target", "匿名关联", "entity/person");
+    seedPage(db, vaultPath, acceptedSlug, "匿名证据", "record");
+    db.rawDb.prepare(
+      `INSERT INTO links (from_slug, to_slug, relation, source_type, source_page_slug, trust_state)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(candidateSlug, "entities/linked-target", "supports", "manual", acceptedSlug, "trusted");
+
+    const emptyHandler = registerFrontdoorWithSearch(db, ["entities/candidate-without-evidence"]);
+    await emptyHandler({ query: "主题A之前讨论过吗" });
+    const emptyRow = db.rawDb.prepare("SELECT result_slugs FROM query_log WHERE query = ?").get("主题A之前讨论过吗") as { result_slugs: string };
+    expect(emptyRow.result_slugs).toBe("[]");
+
+    const acceptedHandler = registerFrontdoorWithSearch(db, [candidateSlug]);
+    await acceptedHandler({ query: "主题B之前讨论过吗" });
+    const acceptedRow = db.rawDb.prepare("SELECT result_slugs FROM query_log WHERE query = ?").get("主题B之前讨论过吗") as { result_slugs: string };
+    expect(acceptedRow.result_slugs).toBe(JSON.stringify([acceptedSlug]));
   });
 });

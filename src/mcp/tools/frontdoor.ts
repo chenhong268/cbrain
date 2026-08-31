@@ -124,7 +124,7 @@ async function runGroundedRecall(
   const grounded_answer = buildGroundedRecall(query, board);
   const payload = { query, grounded_answer };
   const formatted = formatGroundedRecallEnvelope(payload);
-  return withRouting(formatted, payload, routing, slugs);
+  return withRouting(formatted, payload, routing, grounded_answer.sources.map((source) => source.slug));
 }
 
 async function runContentRecall(
