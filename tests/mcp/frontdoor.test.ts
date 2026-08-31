@@ -137,4 +137,90 @@ describe("cbrain_recall front-door tool (#199)", () => {
     expect(data.raw.routing.chosen_route).toBe("grounded_recall");
     expect(data.raw.routing.next_tool).toBe("deep_recall");
   });
+
+  test("all front-door routes append exactly one route-qualified learning record", async () => {
+    seedPage(db, vaultPath, "entities/entity-a", "实体A", "entity/person");
+    seedPage(db, vaultPath, "entities/entity-b", "实体B", "entity/person");
+    db.rawDb.prepare(
+      `INSERT INTO links (from_slug, to_slug, relation, source_type, trust_state) VALUES (?, ?, ?, ?, ?)`,
+    ).run("entities/entity-b", "entities/entity-a", "reports_to", "agent", "candidate");
+
+    const server = createServer(deps);
+    const cases = [
+      ["主题A之前讨论过吗", "grounded_recall"],
+      ["之前项目E当时怎么设计的", "content_recall"],
+      ["想不起名字了，去年活动上见过的那个人是谁", "episodic_recall"],
+      ["实体A的下属和汇报线是什么", "hierarchy"],
+      ["帮我总结一下主题D的全貌", "overview"],
+      ["实体A和实体B是什么关系", "relationship"],
+      ["帮我判断这个方案有没有盲区", "reasoning"],
+      ["debug 一下关键词主题C在哪些页面出现", "debug_search"],
+    ] as const;
+
+    for (const [query, route] of cases) {
+      await getTools(server).cbrain_recall.handler({ query, session_id: "session-anonymous" });
+      const rows = db.rawDb.prepare("SELECT tool FROM query_log WHERE query = ?").all(query) as Array<{ tool: string }>;
+      expect(rows, route).toEqual([{ tool: `cbrain_recall.${route}` }]);
+    }
+  });
+
+  test("content recall persists accepted slugs, measured latency, and session id", async () => {
+    seedPage(db, vaultPath, "entities/entity-a", "实体A", "entity/person");
+    db.insertChunkWithLevel("entities/entity-a", 0, "实体A采用匿名方案。", 0, null);
+    db.ftsInsert("entities/entity-a", "实体A采用匿名方案。");
+
+    const server = createServer(deps);
+    await getTools(server).cbrain_recall.handler({
+      query: "实体A",
+      detail: "normal",
+      session_id: "session-content",
+    });
+
+    const row = db.rawDb.prepare(
+      "SELECT tool, query, result_slugs, result_count, latency_ms, session_id FROM query_log WHERE query = ?",
+    ).get("实体A") as {
+      tool: string;
+      query: string;
+      result_slugs: string;
+      result_count: number;
+      latency_ms: number;
+      session_id: string | null;
+    };
+    expect(row.tool).toBe("cbrain_recall.content_recall");
+    expect(row.query).toBe("实体A");
+    expect(JSON.parse(row.result_slugs)).toEqual(["entities/entity-a"]);
+    expect(row.result_count).toBe(1);
+    expect(row.latency_ms).toBeGreaterThanOrEqual(0);
+    expect(row.session_id).toBe("session-content");
+  });
+
+  test("empty content recall still persists one zero-result learning record", async () => {
+    const server = createServer(deps);
+    await getTools(server).cbrain_recall.handler({ query: "未知匿名线索", session_id: "session-empty" });
+
+    const row = db.rawDb.prepare(
+      "SELECT tool, result_count, result_slugs FROM query_log WHERE query = ?",
+    ).get("未知匿名线索") as { tool: string; result_count: number; result_slugs: string };
+    expect(row).toEqual({ tool: "cbrain_recall.content_recall", result_count: 0, result_slugs: "[]" });
+  });
+
+  test("a learning-write failure leaves the successful front-door response unchanged", async () => {
+    const server = createServer(deps);
+    const handler = getTools(server).cbrain_recall.handler;
+    const args = { query: "未知匿名线索" };
+    const before = await handler(args);
+    let attempts = 0;
+    db.logQuery = (() => {
+      attempts++;
+      throw new Error("forced learning write failure");
+    }) as CBrainDB["logQuery"];
+    const after = await handler(args);
+
+    expect(attempts).toBe(1);
+    const beforeEnvelope = JSON.parse(before.content[0].text);
+    const afterEnvelope = JSON.parse(after.content[0].text);
+    beforeEnvelope.raw.routing.latency_ms = 0;
+    afterEnvelope.raw.routing.latency_ms = 0;
+    expect(afterEnvelope).toEqual(beforeEnvelope);
+  });
 });

@@ -45,6 +45,10 @@ function linkCount(db: CBrainDB): number {
   return (db.rawDb.prepare("SELECT COUNT(*) AS count FROM links").get() as { count: number }).count;
 }
 
+function activityWeight(db: CBrainDB, slug: string): number {
+  return (db.rawDb.prepare("SELECT activity_weight FROM pages WHERE slug = ?").get(slug) as { activity_weight: number }).activity_weight;
+}
+
 let db: CBrainDB;
 
 beforeEach(() => {
@@ -59,6 +63,26 @@ afterEach(() => {
 });
 
 describe("LearnManager 共现累加幂等性 (#437)", () => {
+  it("treats every cbrain_recall route as recall value while retaining legacy and unknown weights", () => {
+    for (const slug of ["entity-frontdoor", "entity-legacy", "entity-query", "entity-unknown"]) seedPage(db, slug);
+    const insert = db.rawDb.prepare(
+      "INSERT INTO query_log (tool, query, result_slugs, result_count) VALUES (?, ?, ?, 1)",
+    );
+    insert.run("cbrain_recall.content_recall", "匿名前门", JSON.stringify(["entity-frontdoor"]));
+    insert.run("recall", "匿名旧 recall", JSON.stringify(["entity-legacy"]));
+    insert.run("query", "匿名旧 query", JSON.stringify(["entity-query"]));
+    insert.run("unrecognized_tool", "匿名未知工具", JSON.stringify(["entity-unknown"]));
+    db.setConfig(WATERMARK_KEY, "0");
+
+    new LearnManager(db).recomputeAll();
+
+    const frontdoor = activityWeight(db, "entity-frontdoor");
+    expect(frontdoor).toBeGreaterThan(0);
+    expect(frontdoor).toBeCloseTo(activityWeight(db, "entity-legacy"), 10);
+    expect(frontdoor).toBeCloseTo(activityWeight(db, "entity-query"), 10);
+    expect(activityWeight(db, "entity-unknown")).toBeCloseTo(frontdoor * 0.5, 10);
+  });
+
   it("跨 session 历史日志：首跑计入一次，无新日志重复运行权重不变", () => {
     seedPage(db, "entity-a");
     seedPage(db, "entity-b");
