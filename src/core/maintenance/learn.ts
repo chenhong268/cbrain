@@ -113,7 +113,8 @@ export class LearnManager {
     const tools = toolsStr.split(",");
     let best = 0.5;
     for (const t of tools) {
-      const v = QUERY_VALUES[t.trim()] ?? 0.5;
+      const tool = t.trim();
+      const v = tool.startsWith("cbrain_recall.") ? 1.0 : QUERY_VALUES[tool] ?? 0.5;
       if (v > best) best = v;
     }
     return best;

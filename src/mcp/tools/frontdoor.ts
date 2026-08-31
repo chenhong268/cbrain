@@ -34,6 +34,7 @@ interface FrontdoorEnvelope {
   display: string;
   summary: ToolSummary;
   raw: Record<string, unknown> & { routing: FrontdoorRoutingDecision & { latency_ms: number } };
+  resultSlugs: string[];
 }
 
 const DETAIL_BUDGET: Record<DetailLevel, { max_ms: number; max_searches: number; max_llm_calls: number }> = {
@@ -68,7 +69,7 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
         envelope = runEpisodeRecall(ctx, query, routing);
         break;
       case "hierarchy":
-        envelope = runHierarchyRecall(ctx, query, routing, session_id);
+        envelope = runHierarchyRecall(ctx, query, routing);
         break;
       case "overview":
         envelope = await runOverviewRecall(ctx, query, routing);
@@ -80,28 +81,33 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
         envelope = await runAgenticRecall(ctx, query, routing, routeDetail, "gap_analysis");
         break;
       case "debug_search":
-        envelope = await runDebugSearch(ctx, query, routing, session_id);
+        envelope = await runDebugSearch(ctx, query, routing);
         break;
       default:
         envelope = await runContentRecall(ctx, query, routing, routeDetail);
         break;
     }
 
-    envelope.raw.routing.latency_ms = Date.now() - started;
+    const latencyMs = Date.now() - started;
+    envelope.raw.routing.latency_ms = latencyMs;
+    try {
+      ctx.db.logQuery(`cbrain_recall.${routing.chosen_route}`, query, envelope.resultSlugs, latencyMs, session_id);
+    } catch { /* non-critical */ }
+    const { resultSlugs: _resultSlugs, ...toolEnvelope } = envelope;
     if (ctx.outputMode === "legacy") {
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+        content: [{ type: "text" as const, text: JSON.stringify(toolEnvelope, null, 2) }],
       };
     }
     return buildToolResult({
       mode: ctx.outputMode,
-      display: envelope.display,
+      display: toolEnvelope.display,
       displayStructured: "已完成 CBrain 检索。",
-      summary: envelope.summary,
-      summaryStructured: structuredSummary(envelope.summary, "frontdoor"),
-      data: projectFrontdoorData(envelope.display, envelope.raw),
+      summary: toolEnvelope.summary,
+      summaryStructured: structuredSummary(toolEnvelope.summary, "frontdoor"),
+      data: projectFrontdoorData(toolEnvelope.display, toolEnvelope.raw),
       dataKeys: FRONTDOOR_DATA_KEYS,
-      raw: envelope.raw,
+      raw: toolEnvelope.raw,
       includeRaw: include_raw ?? false,
     });
   });
@@ -118,7 +124,7 @@ async function runGroundedRecall(
   const grounded_answer = buildGroundedRecall(query, board);
   const payload = { query, grounded_answer };
   const formatted = formatGroundedRecallEnvelope(payload);
-  return withRouting(formatted, payload, routing);
+  return withRouting(formatted, payload, routing, slugs);
 }
 
 async function runContentRecall(
@@ -206,6 +212,7 @@ async function runContentRecall(
       },
       insufficientPayload,
       routing,
+      [],
     );
   }
   // #385 — guard never passes for personal current-state queries (phase-1
@@ -260,7 +267,7 @@ async function runContentRecall(
   const summary = surfaceInsufficient
     ? { ...formatted.summary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
     : formatted.summary;
-  return withRouting({ display, summary, raw: formatted.raw }, payload, routing);
+  return withRouting({ display, summary, raw: formatted.raw }, payload, routing, slugs);
 }
 
 const IDENTITY_QUESTION_RE = /^([^，,。！？!?；;：:\n]+?)\s*(?:是\s*谁|是\s*什么人|是\s*哪位)\s*[？?。！!]*$/u;
@@ -436,34 +443,31 @@ function runEpisodeRecall(
   const recaller = new EpisodicRecaller(ctx.db);
   const payload = recaller.recall({ query, limit: 5 });
   const formatted = formatEpisodeEnvelope(payload);
-  return withRouting(formatted, payload as unknown as Record<string, unknown>, routing);
+  return withRouting(formatted, payload as unknown as Record<string, unknown>, routing, payload.candidates.map((candidate) => candidate.slug));
 }
 
 function runHierarchyRecall(
   ctx: ToolContext,
   query: string,
   routing: FrontdoorRoutingDecision,
-  sessionId?: string,
 ): FrontdoorEnvelope {
   const seedSlug = resolveSeedSlug(ctx, query);
   if (!seedSlug) {
     const payload = { query, entities: [], summary: "未找到可展开组织架构的实体" };
     const formatted = formatRecallEnvelope(payload);
-    return withRouting(formatted, payload, routing);
+    return withRouting(formatted, payload, routing, []);
   }
 
   const result = getOrgTree(seedSlug, { pages: ctx.pages, graph: ctx.graph }, { direction: "both", depth: 3, limit: 50 });
   if (!result) {
     const payload = { query, entities: [], summary: "无法构建组织架构" };
     const formatted = formatRecallEnvelope(payload);
-    return withRouting(formatted, payload, routing);
+    return withRouting(formatted, payload, routing, []);
   }
 
   const allSlugs = [result.seed.slug, ...result.upward.map((n) => n.slug), ...result.downward.map((n) => n.slug)];
-  try { ctx.db.logQuery("cbrain_recall.hierarchy", query, allSlugs, 0, sessionId); } catch { /* non-critical */ }
-
   const formatted = formatOrgTreeEnvelope(result);
-  return withRouting(formatted, result as unknown as Record<string, unknown>, routing);
+  return withRouting(formatted, result as unknown as Record<string, unknown>, routing, allSlugs);
 }
 
 async function runOverviewRecall(
@@ -513,7 +517,7 @@ async function runOverviewRecall(
     stats: { totalEntities: entities.length, totalLinks, totalEvents },
   };
   const formatted = formatSummarizeEnvelope(payload);
-  return withRouting(formatted, payload, routing);
+  return withRouting(formatted, payload, routing, selected.map((result) => result.slug));
 }
 
 async function runAgenticRecall(
@@ -552,6 +556,7 @@ async function runAgenticRecall(
     display,
     summary,
     raw: { result: mapSafe(result), routing: { ...routing, latency_ms: 0 } },
+    resultSlugs: result.answer_context.sourceSlugs.map((source) => source.slug),
   };
 }
 
@@ -559,27 +564,27 @@ async function runDebugSearch(
   ctx: ToolContext,
   query: string,
   routing: FrontdoorRoutingDecision,
-  sessionId?: string,
 ): Promise<FrontdoorEnvelope> {
   const results = await ctx.search.search(query, { strategy: "all", limit: 10 });
   const payload = {
     results,
     search_meta: { strategy: "frontdoor-debug" },
   };
-  try { ctx.db.logQuery("cbrain_recall.debug", query, results.map((r) => r.slug), 0, sessionId); } catch { /* non-critical */ }
   const formatted = formatQueryEnvelope(payload);
-  return withRouting(formatted, payload, routing);
+  return withRouting(formatted, payload, routing, results.map((result) => result.slug));
 }
 
 function withRouting(
   formatted: { display: string; summary: ToolSummary; raw: object },
   payload: object,
   routing: FrontdoorRoutingDecision,
+  resultSlugs: string[] = [],
 ): FrontdoorEnvelope {
   return {
     display: formatted.display,
     summary: formatted.summary,
     raw: { ...(payload as Record<string, unknown>), routing: { ...routing, latency_ms: 0 } },
+    resultSlugs,
   };
 }
 
