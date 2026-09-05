@@ -157,6 +157,7 @@ async function runContentRecall(
     results = filterContentFtsFallbackCandidates(query, ftsCandidates);
     if (results.length === 0) {
       results = selectPersonalTimePlaceRecordFallback(ctx, query, ftsCandidates);
+      if (results.length === 0) results = selectRecentMeetingRecordFallback(ctx, query, limit);
     }
   }
   // #385 — personal current-state guard: bounded, deterministic check before
@@ -372,6 +373,101 @@ function selectPersonalTimePlaceRecordFallback(
   if (page?.type !== "record") return [];
   if (!recordBodyMatchesPersonalTimePlace(page.body, identityPage.title, evidence)) return [];
   return [top];
+}
+
+/**
+ * #424: a closed recent-meeting question may have no trigram hits at all.
+ * This permanent, bounded rescue reads existing indexes then verifies source
+ * text; it neither infers geography nor promotes records into trusted facts.
+ * Revisit with #424 if the shared content-recall path gains equivalent support.
+ */
+function selectRecentMeetingRecordFallback(
+  ctx: Pick<ToolContext, "identityPersonSlug" | "pages" | "db" | "logger">,
+  query: string,
+  limit: number,
+): import("../../core/retrieval/search.js").SearchResult[] {
+  const match = query.normalize("NFKC").trim().match(/^我(?:最近|近期)在([^，,。？！?\n]{2,24})参加(?:了|过)?(?:什么|哪些)会议[？?]?$/u);
+  if (!match || !ctx.identityPersonSlug) return [];
+  const identity = ctx.pages.getBySlug(ctx.identityPersonSlug)?.title;
+  if (!identity) return [];
+  const place = match[1]!.trim();
+  const results: import("../../core/retrieval/search.js").SearchResult[] = [];
+  for (const slug of ctx.db.findRecentMeetingRecordCandidates(place)) {
+    const page = ctx.pages.getBySlug(slug);
+    if (page?.type !== "record" || page.body.length > 32_000) continue;
+    const evidence = recentMeetingEvidence(page.body, identity, place);
+    if (!evidence) continue;
+    results.push({ slug, score: evidence.date, snippet: evidence.text, source: "fts" });
+  }
+  results.sort((a, b) => b.score - a.score || a.slug.localeCompare(b.slug));
+  // Scalar-only observation; never log identity, location, title or source text.
+  ctx.logger?.info("recall", "recent meeting record rescue", { accepted: results.length });
+  return results.slice(0, limit);
+}
+
+function recentMeetingEvidence(body: string, identity: string, place: string): { date: number; text: string } | null {
+  const escapedIdentity = identity.normalize("NFKC").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const actor = new RegExp(`(?:^|[\\s，,:：])${escapedIdentity}\\s*(?:作为(?:参会人|代表|主持人)[，,]?\\s*)?(?:(?:在|于)[^，,。；;\\n]{1,60})?\\s*(?:参加|出席|主持)(?:了|过)?[^。；;\\n]{0,60}(?:会议|例会|研讨会)`, "u");
+  const attendee = /(?:参会人|参会人员|出席人员|主持人)[:：]\s*([^\n。]+)/u;
+  const today = new Date();
+  const end = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  // A newly supported "recent" rescue uses the past 30 calendar days. Source
+  // event dates, never file modification/ingestion dates, determine eligibility.
+  const start = end - 29 * 86_400_000;
+  const normalized = body.normalize("NFKC").replace(/\*\*/gu, "").replace(/^\s*[-*] +/gmu, "").replace(/^ {1,3}(?=#{1,6} )/gmu, "");
+  const field = /^(?:(?:会议|活动)?(?:日期|时间)|地点|城市|区域|会议|参会人|参会人员|出席人员|主持人)[:：]/u;
+  // Collapse spacing only inside a contiguous metadata group, not between
+  // unrelated prose events. Keep the meeting heading with its metadata.
+  const lines: string[] = [];
+  let blank = false;
+  for (const line of normalized.split("\n")) {
+    if (!line.trim()) { blank = true; continue; }
+    const before = lines.at(-1)?.trim() ?? "";
+    if (blank && !(field.test(line.trim()) && (field.test(before) || /^#{1,6} /u.test(before)))) lines.push("");
+    lines.push(line);
+    blank = false;
+  }
+  const compact = lines.join("\n");
+  const blocks = compact.split(/\n\s*\n/u);
+  // A single-event meeting record may put its attendee roster in a table.
+  // Multiple event headings or dates remain ambiguous and are not combined.
+  if ([...compact.matchAll(/^# /gmu)].length === 1 && /^# .*会议/mu.test(compact)
+    && !/^#{2,6} (?!会议(?:性质|背景|议程|概况|说明|信息)\s*$)[^\n]*(?:会议|例会|研讨会)/mu.test(compact)) blocks.push(compact);
+  for (const block of blocks) {
+    const fieldFamilies = [/^[ \t]*(?:会议|活动)?(?:日期|时间)[:：]/gmu, /^[ \t]*(?:地点|城市|区域)[:：]/gmu, /^[ \t]*(?:参会人|参会人员|出席人员|主持人)[:：]/gmu, /^[ \t]*会议[:：]/gmu];
+    if (fieldFamilies.some(pattern => [...block.matchAll(pattern)].length > 1)) continue;
+    const dates = [...block.matchAll(/(\d{4})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})\s*日?/gu)];
+    if (dates.length !== 1) continue; // Do not borrow a new date for an old event.
+    const eventDate = dates[0]!;
+    const datePrefix = block.slice(0, eventDate.index).split("\n").at(-1)!.trim();
+    if (!/^(?:(?:会议|活动)?(?:日期|时间)[:：]\s*)?$/u.test(datePrefix)) continue;
+    const [, y, m, d] = eventDate;
+    const date = Date.UTC(Number(y), Number(m) - 1, Number(d));
+    const parsed = new Date(date);
+    if (parsed.getUTCFullYear() !== Number(y) || parsed.getUTCMonth() !== Number(m) - 1 || parsed.getUTCDate() !== Number(d) || date < start || date > end) continue;
+    if (!/(?:会议|例会|研讨会)/u.test(block)) continue;
+    if (/(?:未参会|拟参会|计划参会|未参加|未出席|未在|没有参加|没有出席|未能|未曾|并未|不曾|没有到场|未到场|缺席|待确认|待核实|是否|[?？]|计划|拟参加|将参加|取消)/u.test(block)) continue;
+    const actors = attendee.exec(block)?.[1]?.split(/[、，,\s]+/u) ?? [];
+    const narrative = actor.exec(block)?.[0];
+    const tableRow = [...block.matchAll(/^#{2,6} [^\n]*参会人员\s*\n((?:\|[^\n]*(?:\n|$))+)/gmu)]
+      .flatMap(match => match[1]!.split("\n"))
+      .find(line => line.split("|")[1]?.trim().replace(/^\[\[|\]\]$/gu, "") === identity.normalize("NFKC"));
+    if (!narrative && !actors.includes(identity.normalize("NFKC")) && !tableRow) continue;
+    const location = narrative?.match(/(?:在|于)([^，,。；;\n]{1,80}?)(?:参加|出席|主持)/u)?.[1]
+      ?? (actors.length > 0 || tableRow ? block.match(/(?:地点|城市|区域)[:：]\s*([^\n。]+)/u)?.[1] : undefined);
+    if (!location) continue;
+    // Direct place or explicit city(region) notation, not a region mentioned
+    // in the meeting's agenda. No hard-coded city-to-region dictionary.
+    const loc = location.trim();
+    const regional = loc.match(/^[^()]{1,24}\((?:属于|位于)?([^()]+)\)$/u)?.[1];
+    if (loc !== place && regional?.trim() !== place && !(tableRow && loc.split(/[，,]/u)[0]?.trim() === place)) continue;
+    // Show the proof, even when the record begins with a long introduction.
+    const text = block.split("\n").filter(line => line.includes(eventDate[0])
+      || (narrative ? line.includes(narrative) : field.test(line.trim()) || /^#{1,6} .*会议/u.test(line) || line === tableRow || /^#{2,6} .*参会人员/u.test(line))).join("\n").trim();
+    if (text.length > 1_500) continue; // Never truncate away accepted evidence.
+    return { date, text };
+  }
+  return null;
 }
 
 type PersonalTimePlaceEvidence = {

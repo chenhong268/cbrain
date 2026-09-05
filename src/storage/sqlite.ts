@@ -2039,6 +2039,26 @@ export class CBrainDB {
 
   // ─── Page list/query operations ──────────────────────────────
 
+  /** #424: cap page reads after place + meeting prefiltering; SQL may scan more rows. */
+  findRecentMeetingRecordCandidates(place: string): string[] {
+    return (this.prepare(`
+      SELECT p.slug FROM pages p
+      WHERE p.type = 'record' AND (
+        instr(p.title, $place) > 0 OR EXISTS (
+          SELECT 1 FROM chunks c WHERE c.page_slug = p.slug AND instr(c.content, $place) > 0
+        )
+      )
+      AND (
+        instr(p.title, '会议') > 0 OR instr(p.title, '例会') > 0 OR instr(p.title, '研讨会') > 0 OR EXISTS (
+          SELECT 1 FROM chunks c WHERE c.page_slug = p.slug AND (
+            instr(c.content, '会议') > 0 OR instr(c.content, '例会') > 0 OR instr(c.content, '研讨会') > 0
+          )
+        )
+      )
+      ORDER BY p.updated_at DESC, p.slug ASC LIMIT 20
+    `).all({ $place: place }) as Array<{ slug: string }>).map(row => row.slug);
+  }
+
   listPages(opts?: { type?: string; types?: string[]; typePrefix?: string; limit?: number; offset?: number; orderBy?: string }): PageRow[] {
     let sql = "SELECT * FROM pages WHERE 1=1";
     const params: Record<string, string | number> = {};
