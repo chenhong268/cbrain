@@ -110,6 +110,39 @@ describe("#424 recent regional meeting recall", () => {
     expect((await ask("我最近在未知区域参加了什么会议？")).raw.entities).toEqual([]);
   });
 
+  test("recalls an actual-style record with wikilink attendance table and venue details", async () => {
+    await record(`# 主题D会议\n\n**时间：** ${day(-2)} 14:00–17:00\n**地点：** 甲区，办公楼会议室\n\n## 组织C参会人员\n\n| 姓名 | 职务 | 关系 |\n|---|---|---|\n| [[实体A]] | 代表 | 会议主持人 |\n| 实体B | 代表 | |`);
+    const result = await ask("我最近在甲区参加了什么会议？");
+    expect(result.raw.entities).toHaveLength(1);
+    expect(result.raw.entities[0]!.snippet).toContain("[[实体A]]");
+    expect(result.raw.entities[0]!.snippet).toContain(day(-2));
+  });
+
+  test("does not borrow a table participant from another meeting in the same record", async () => {
+    await record(`# 主题D会议\n\n日期：${day(-2)}\n地点：甲区\n\n# 主题E会议\n\n## 组织C参会人员\n\n| 姓名 | 角色 |\n|---|---|\n| [[实体A]] | 主持人 |`);
+    expect((await ask("我最近在甲区参加了什么会议？")).raw.entities).toEqual([]);
+  });
+
+  test("rejects a second meeting-record heading before the attendee table", async () => {
+    await record(`# 主题D会议\n\n日期：${day(-2)}\n地点：甲区\n\n## 主题E会议记录\n\n## 组织C参会人员\n\n| 姓名 | 角色 |\n|---|---|\n| [[实体A]] | 主持人 |`);
+    expect((await ask("我最近在甲区参加了什么会议？")).raw.entities).toEqual([]);
+  });
+
+  for (const heading of [" ## 主题E会议记录", " # 主题E会议"]) test(`rejects an indented second meeting heading: ${heading}`, async () => {
+    await record(`# 主题D会议\n\n日期：${day(-2)}\n地点：甲区\n\n${heading}\n\n## 组织C参会人员\n\n| 姓名 | 角色 |\n|---|---|\n| [[实体A]] | 主持人 |`);
+    expect((await ask("我最近在甲区参加了什么会议？")).raw.entities).toEqual([]);
+  });
+
+  test("does not treat non-attendees as participants", async () => {
+    await record(`# 主题D会议\n\n日期：${day(-2)}\n地点：甲区\n\n## 未参会人员\n\n| 姓名 | 角色 |\n|---|---|\n| [[实体A]] | 代表 |`);
+    expect((await ask("我最近在甲区参加了什么会议？")).raw.entities).toEqual([]);
+  });
+
+  test("does not treat an unrelated people table as attendance", async () => {
+    await record(`# 主题D会议\n\n日期：${day(-2)}\n地点：甲区\n\n## 联系人员\n\n| 姓名 | 角色 |\n|---|---|\n| [[实体A]] | 整理人 |`);
+    expect((await ask("我最近在甲区参加了什么会议？")).raw.entities).toEqual([]);
+  });
+
   test("includes the oldest day in the recent calendar window", async () => {
     await record(`${day(-29)} 实体A在甲区参加主题D会议。`);
     expect((await ask("我最近在甲区参加了什么会议？")).raw.entities).toHaveLength(1);
