@@ -2039,6 +2039,22 @@ export class CBrainDB {
 
   // ─── Page list/query operations ──────────────────────────────
 
+  /** #424: reserve room for both lexical records and differently worded recent records.
+   * Limits bound returned candidates, not SQL scan work or event recency. */
+  findRecentRecordCandidates(terms: string[]): string[] {
+    const params: Record<string, string> = {};
+    const predicates = terms.slice(0, 6).filter(Boolean).map((term, i) => {
+      params[`$term${i}`] = term;
+      return `(instr(p.title, $term${i}) > 0 OR EXISTS (SELECT 1 FROM chunks c
+        WHERE c.page_slug = p.slug AND instr(c.content, $term${i}) > 0))`;
+    });
+    const lexical = predicates.length === 0 ? [] : this.prepare(`SELECT p.slug FROM pages p
+      WHERE p.type = 'record' AND (${predicates.join(" OR ")})
+      ORDER BY p.updated_at DESC, p.slug ASC LIMIT 10`).all(params) as Array<{ slug: string }>;
+    const recent = this.listPages({ type: "record", limit: 10, orderBy: "updated_at DESC, slug ASC" });
+    return [...new Set([...lexical, ...recent].map(row => row.slug))];
+  }
+
   /** #424: cap page reads after place + meeting prefiltering; SQL may scan more rows. */
   findRecentMeetingRecordCandidates(place: string): string[] {
     return (this.prepare(`

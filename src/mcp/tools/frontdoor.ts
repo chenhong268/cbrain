@@ -28,6 +28,8 @@ import { generateProactiveHints } from "../../core/retrieval/proactive.js";
 import { applyProactiveBudget, trimHint } from "./trim.js";
 import { isFirstPersonQuery } from "../../core/retrieval/recall-intent.js";
 
+import { isRecentRecall, recallRecentRecords } from "../../core/retrieval/recent-record-recall.js";
+
 type DetailLevel = "brief" | "normal" | "full";
 
 interface FrontdoorEnvelope {
@@ -135,7 +137,9 @@ async function runContentRecall(
 ): Promise<FrontdoorEnvelope> {
   const limit = detail === "brief" ? 3 : 5;
   const identitySeed = await resolveIdentityQuestionSeed(ctx, query);
+  let verificationIncomplete = false;
   const candidates = await ctx.search.search(query, {
+    ...(isRecentRecall(query) ? { multiQuery: false, _skipDecompose: true } : {}),
     limit,
     _captureSupport: true,
     _skipDetailEnrich: true,
@@ -158,6 +162,11 @@ async function runContentRecall(
     if (results.length === 0) {
       results = selectPersonalTimePlaceRecordFallback(ctx, query, ftsCandidates);
       if (results.length === 0) results = selectRecentMeetingRecordFallback(ctx, query, limit);
+      if (results.length === 0) {
+        const verified = await recallRecentRecords(ctx, query, limit);
+        results = verified.results;
+        verificationIncomplete = verified.incomplete;
+      }
     }
   }
   // #385 — personal current-state guard: bounded, deterministic check before
@@ -257,13 +266,17 @@ async function runContentRecall(
     entities,
     ...(budgetedProactiveHints.length > 0 ? { proactive_hints: budgetedProactiveHints } : {}),
     ...(evidencePack ? { evidence_pack: evidencePack } : {}),
-    summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : "暂时没找到相关记忆",
+    summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果" : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
   const surfaceInsufficient =
     !!evidencePack &&
     evidencePack.coverage.coverage_status !== "sufficient" &&
     formatted.summary.status !== "empty";
+  if (verificationIncomplete && entities.length === 0) {
+    return withRouting({ display: "相关资料尚未核验完成，暂时不能确认结果。",
+      summary: { ...formatted.summary, status: "degraded", message: payload.summary, next_steps: ["稍后重试，或按记录标题查看原文"], degraded_reason: "相关资料核验未完成" }, raw: formatted.raw }, payload, routing, []);
+  }
   const display = surfaceInsufficient ? `只找到部分线索：${formatted.display}` : formatted.display;
   const summary = surfaceInsufficient
     ? { ...formatted.summary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
