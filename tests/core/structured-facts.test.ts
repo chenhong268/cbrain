@@ -214,3 +214,75 @@ describe("applyFacts", () => {
     expect(frontmatterMap["brain/entities/person/entity-a"].organization_source).toBe("manual");
   });
 });
+
+// #460: hierarchy fields are authoritative — model-extracted values must never
+// populate them, because any full-slug value would be promoted to a trusted
+// graph edge by processReportsTo at sync time. setHierarchy is the only writer.
+describe("hierarchy fields are not auto-writable (#460)", () => {
+  test("validateFacts drops reports_to even for person entities", () => {
+    const facts = [makeFact({ field: "reports_to", value: "实体B" })];
+    const result = validateFacts(
+      facts,
+      new Set(["张三"]),
+      new Map([["张三", "person" as EntityType]])
+    );
+    expect(result).toHaveLength(0);
+  });
+
+  test("applyFacts never writes a plain-name reports_to into empty frontmatter", () => {
+    const frontmatterMap: Record<string, Record<string, unknown>> = {
+      "brain/entities/person/entity-a": { title: "实体A", type: "entity/person" },
+    };
+    const { mock: pages, updates } = createMockPages(frontmatterMap);
+
+    const result = applyFacts(
+      [makeFact({ entity: "实体A", field: "reports_to", value: "实体B" })],
+      new Map([["实体A", "brain/entities/person/entity-a"]]),
+      pages,
+      createMockDB(),
+    );
+
+    expect(result.written).toBe(0);
+    expect(updates).toHaveLength(0);
+    expect(frontmatterMap["brain/entities/person/entity-a"].reports_to).toBeUndefined();
+  });
+
+  test("applyFacts never writes a full-slug reports_to into empty frontmatter", () => {
+    const frontmatterMap: Record<string, Record<string, unknown>> = {
+      "brain/entities/person/entity-a": { title: "实体A", type: "entity/person" },
+    };
+    const { mock: pages, updates } = createMockPages(frontmatterMap);
+
+    const result = applyFacts(
+      [makeFact({ entity: "实体A", field: "reports_to", value: "brain/entities/person/entity-b" })],
+      new Map([["实体A", "brain/entities/person/entity-a"]]),
+      pages,
+      createMockDB(),
+    );
+
+    expect(result.written).toBe(0);
+    expect(updates).toHaveLength(0);
+    expect(frontmatterMap["brain/entities/person/entity-a"].reports_to).toBeUndefined();
+  });
+
+  test("ordinary fields keep filling empty frontmatter alongside the hierarchy guard", () => {
+    const frontmatterMap: Record<string, Record<string, unknown>> = {
+      "brain/entities/person/entity-a": { title: "实体A", type: "entity/person" },
+    };
+    const { mock: pages, updates } = createMockPages(frontmatterMap);
+
+    const result = applyFacts(
+      [
+        makeFact({ entity: "实体A", field: "reports_to", value: "实体B" }),
+        makeFact({ entity: "实体A", field: "birthday", value: "1990-01-01" }),
+      ],
+      new Map([["实体A", "brain/entities/person/entity-a"]]),
+      pages,
+      createMockDB(),
+    );
+
+    expect(result.written).toBe(1);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].extra).toEqual({ birthday: "1990-01-01" });
+  });
+});

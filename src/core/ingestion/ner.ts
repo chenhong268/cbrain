@@ -3,6 +3,7 @@ import type { LLMProvider } from "../../llm/provider.js";
 import type { Logger } from "../logger.js";
 import { getOntology } from "../../ontology/loader.js";
 import { buildEntityPrompt, buildRelationPrompt } from "../../ontology/ner-prompt.js";
+import { HIERARCHY_RELATIONS } from "../shared.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -54,7 +55,12 @@ export function getFactFieldWhitelist(): Record<string, string[]> {
   for (const type of ontology.getConcreteEntityTypes()) {
     const shortName = type.split("/").pop()!;
     if (!type.includes("/")) continue;
-    result[shortName] = ontology.getStructuredFields(type);
+    // #460: hierarchy fields are authoritative — automatic model facts must
+    // never populate them (a full slug would be promoted to a trusted edge by
+    // processReportsTo at sync time). Explicit confirmation flows (setHierarchy,
+    // trusted calibration, manual frontmatter) still write them; the ontology
+    // keeps the authoritative field definition untouched.
+    result[shortName] = ontology.getStructuredFields(type).filter((f) => !HIERARCHY_RELATIONS.has(f));
   }
   _factFieldWhitelist = result;
   return result;

@@ -483,4 +483,40 @@ describe("DialogueIngest", () => {
       expect(foundKr).toBe(true);
     });
   });
+
+  // #460: dialogue fact writes must not populate authoritative hierarchy
+  // frontmatter — only setHierarchy may write reports_to.
+  describe("hierarchy fact policy (#460)", () => {
+    test("dialogue facts write ordinary fields but never reports_to", async () => {
+      // Pre-existing entity so the fact path resolves to a real page file.
+      const pages = new PageManager(db, vaultPath);
+      const person = pages.create({ title: "实体甲", type: "entity/person", body: "匿名正文", tags: [] });
+
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "实体甲", type: "person", relevance: "high", context: "实体甲向实体乙汇报，生于1990年" },
+          ],
+          relations: [],
+          events: [],
+          facts: [
+            { entity: "实体甲", field: "reports_to", value: "实体乙", confidence: 0.9, evidence: "实体甲向实体乙汇报" },
+            { entity: "实体甲", field: "birthday", value: "1990-01-01", confidence: 0.9, evidence: "生于1990年" },
+          ],
+        }),
+      ]);
+
+      const embedding = createMockEmbeddingProvider();
+      const lance = createMockLanceDB();
+      const dialogue = new DialogueIngest(db, embedding, lance as any, vaultPath, llm, undefined, pages);
+
+      await dialogue.ingest("实体甲向实体乙汇报，生于1990年");
+
+      const page = db.getPage(person.slug);
+      expect(page).not.toBeNull();
+      const md = readFileSync(join(vaultPath, page!.file_path), "utf-8");
+      expect(md).toMatch(/birthday: '?"?1990-01-01'?"?/);
+      expect(md).not.toContain("reports_to");
+    });
+  });
 });

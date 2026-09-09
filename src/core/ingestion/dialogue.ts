@@ -54,7 +54,7 @@ const DIALOGUE_PROMPT = `You are extracting knowledge from a conversation (dialo
 
 ## Structured Facts
 Extract concrete key-value facts about entities. Field whitelist by entity type:
-- person: birthday, birthplace, english_name, current_title, organization, reports_to
+- person: birthday, birthplace, english_name, current_title, organization
 - company: location, industry, founded_year
 - product: generic_name, brand_name
 Every fact MUST have an evidence field (verbatim quote). No inference.
@@ -94,7 +94,7 @@ If the text is chit-chat, greetings, commands, code debugging, opinions without 
 
 ## Structured Facts
 Extract concrete key-value facts about entities. Field whitelist by entity type:
-- person: birthday, birthplace, english_name, current_title, organization, reports_to
+- person: birthday, birthplace, english_name, current_title, organization
 - company: location, industry, founded_year
 - product: generic_name, brand_name
 Every fact MUST have an evidence field (verbatim quote). No inference.

@@ -1,6 +1,7 @@
 import type { PageManager } from "../page.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import { getFactFieldWhitelist, type EntityType, type StructuredFact } from "./ner.js";
+import { HIERARCHY_RELATIONS } from "../shared.js";
 
 export interface FactConflict {
   slug: string;
@@ -79,6 +80,16 @@ export function applyFacts(
         proposed: fact.value,
         ...(fact.field === "reports_to" ? { volatile: true } : {}),
       });
+      continue;
+    }
+
+    // #460 write-side guard: automatic model facts must never populate
+    // authoritative hierarchy frontmatter — a model-supplied full slug would
+    // be promoted to a trusted edge by processReportsTo at sync time.
+    // Explicit flows (setHierarchy, trusted calibration, manual frontmatter)
+    // remain the writers for hierarchy fields.
+    if (HIERARCHY_RELATIONS.has(fact.field)) {
+      skipped++;
       continue;
     }
 

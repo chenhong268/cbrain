@@ -59,14 +59,18 @@ describe("applyFacts reports_to conflict surfacing", () => {
     expect(res.conflicts[0].volatile).toBe(undefined);
   });
 
-  test("non-conflicting reports_to fact writes normally", () => {
+  test("#460: reports_to is never auto-written, even when the field is empty and the value is a valid slug", () => {
     const created = pages.create({ title: "人物丙", type: "entity/person", body: "" });
     const facts: StructuredFact[] = [
       { entity: "人物丙", field: "reports_to", value: "entities/mgr-new", evidence: "ner", confidence: 0.7 },
     ];
     const res = applyFacts(facts, new Map([["人物丙", created.slug]]), pages, db);
-    expect(res.written).toBe(1);
+    expect(res.written).toBe(0);
+    expect(res.skipped).toBe(1);
     expect(res.conflicts).toHaveLength(0);
-    expect(pages.getBySlug(created.slug)!.frontmatter.reports_to).toBe("entities/mgr-new");
+    // Nothing written: a model-supplied slug would be promoted to a trusted
+    // edge by processReportsTo — explicit confirmation flows (setHierarchy,
+    // trusted calibration, manual frontmatter) write reports_to instead.
+    expect(pages.getBySlug(created.slug)!.frontmatter.reports_to).toBeUndefined();
   });
 });
