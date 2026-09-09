@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { join, extname } from "node:path";
+import { join, extname, resolve, sep } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 import { getOntology } from "../ontology/loader.js";
 
@@ -125,6 +125,29 @@ export interface VaultLinkOp {
   newSlug?: string;
 }
 
+/** Human-written originals directory (docs/vault-spec.md: raw/ 只读不写). */
+const RAW_VAULT_DIR = "raw";
+
+function isWithinDir(path: string, root: string): boolean {
+  return path === root || path.startsWith(root + sep);
+}
+
+/**
+ * True when the file lexically OR physically lives in the vault's raw/ directory
+ * (#447). Judged at the actual file-write boundary from normalized paths and
+ * realpath — slug prefixes, `..` aliases, and symlinks cannot smuggle a raw
+ * original past it. Raw is read-only: link rewrites and their rollback skip it.
+ */
+export function isRawVaultFile(vaultPath: string, filePath: string): boolean {
+  const rawRoot = resolve(vaultPath, RAW_VAULT_DIR);
+  if (isWithinDir(resolve(filePath), rawRoot)) return true;
+  try {
+    return isWithinDir(realpathSync(filePath), realpathSync(rawRoot));
+  } catch {
+    return false; // file or raw/ missing → nothing physical to protect
+  }
+}
+
 /**
  * Rewrite wiki-links across vault files.
  * - newSlug present → replace `[[old]]` → `[[new]]`  (merge)
@@ -178,6 +201,8 @@ export function rewriteVaultLinks(vaultPath: string, operations: VaultLinkOp[], 
   }
 
   for (const filePath of candidateFiles) {
+    if (isRawVaultFile(vaultPath, filePath)) continue; // #447: raw originals are read-only
+
     let content: string;
     try { content = readFileSync(filePath, "utf-8"); } catch { continue; }
 
