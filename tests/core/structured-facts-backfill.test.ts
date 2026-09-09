@@ -221,4 +221,52 @@ describe("structuredFactsBackfill", () => {
     const report = await structuredFactsBackfill(db, vaultPath, llm);
     expect(report.skipped).toBe(1);
   });
+
+  // #460: hierarchy fields are authoritative — backfill must neither count
+  // nor write them; explicit confirmation flows still populate reports_to.
+  test("dryRun excludes reports_to from wouldApply while counting ordinary fields", async () => {
+    const page = makePage({ title: "实体A", file_path: "brain/entities/entity-a.md", slug: "brain/entities/entity-a" });
+    const filePath = join(vaultPath, page.file_path);
+    mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+    writeFileSync(filePath, "---\ntitle: 实体A\ntype: entity\n---\n\n实体A向实体B汇报，实体A常驻地区C。");
+
+    const db = createMockDB([page]);
+    const llm = createMockLLM([
+      JSON.stringify({
+        facts: [
+          { entity: "实体A", field: "reports_to", value: "实体B", confidence: 0.9, evidence: "实体A向实体B汇报" },
+          { entity: "实体A", field: "birthplace", value: "地区C", confidence: 0.9, evidence: "实体A常驻地区C" },
+        ],
+      }),
+    ]);
+
+    const report = await structuredFactsBackfill(db, vaultPath, llm, { apply: false });
+
+    expect(report.wouldApply).toBe(1);
+    expect(report.examples.map(e => e.field)).toEqual(["birthplace"]);
+  });
+
+  test("apply mode writes ordinary fields but never reports_to (#460)", async () => {
+    const page = makePage({ title: "实体A", file_path: "brain/entities/entity-a.md", slug: "brain/entities/entity-a" });
+    const filePath = join(vaultPath, page.file_path);
+    mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+    writeFileSync(filePath, "---\ntitle: 实体A\ntype: entity\n---\n\n实体A向实体B汇报，实体A常驻地区C。");
+
+    const db = createMockDB([page]);
+    const llm = createMockLLM([
+      JSON.stringify({
+        facts: [
+          { entity: "实体A", field: "reports_to", value: "实体B", confidence: 0.9, evidence: "实体A向实体B汇报" },
+          { entity: "实体A", field: "birthplace", value: "地区C", confidence: 0.9, evidence: "实体A常驻地区C" },
+        ],
+      }),
+    ]);
+
+    const report = await structuredFactsBackfill(db, vaultPath, llm, { apply: true });
+
+    expect(report.wouldApply).toBe(1);
+    const content = await Bun.file(filePath).text();
+    expect(content).toContain("birthplace: 地区C");
+    expect(content).not.toContain("reports_to");
+  });
 });

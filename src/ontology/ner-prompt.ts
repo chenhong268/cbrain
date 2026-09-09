@@ -1,4 +1,5 @@
 import type { Ontology } from "./types.js";
+import { HIERARCHY_RELATIONS } from "../core/shared.js";
 
 export function buildEntityPrompt(ontology: Ontology): string {
   const config = ontology.getNerConfig();
@@ -14,7 +15,10 @@ export function buildEntityPrompt(ontology: Ontology): string {
 
   const fieldWhitelist: string[] = [];
   for (const type of concreteTypes) {
-    const fields = ontology.getStructuredFields(type);
+    // #460: hierarchy fields are authoritative — the prompt must not request
+    // them as facts (auto facts cannot write them; relations carry hierarchy
+    // claims as candidate evidence instead).
+    const fields = ontology.getStructuredFields(type).filter((f) => !HIERARCHY_RELATIONS.has(f));
     const shortName = type.split("/").pop()!;
     if (fields.length > 0) {
       fieldWhitelist.push(`- ${shortName}: ${fields.join(", ")}`);

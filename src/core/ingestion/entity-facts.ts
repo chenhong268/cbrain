@@ -14,7 +14,7 @@ export class EntityFactsTimeoutError extends Error {
 const ENTITY_FACTS_PROMPT = `You are a structured fact extractor. Given an entity's page content, extract concrete, verifiable facts as key-value pairs.
 
 ## Field whitelist by entity type:
-- person: birthday, birthplace, english_name, current_title, organization, reports_to
+- person: birthday, birthplace, english_name, current_title, organization
 - company: location, industry, founded_year
 - product: generic_name, brand_name
 
