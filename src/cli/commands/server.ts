@@ -91,12 +91,11 @@ async function initWatcher(config: CBrainConfig, deps: ReturnType<typeof createD
 
   const { PageManager } = await import("../../core/page.js");
   const pages = new PageManager(deps.db, config.vaultPath);
-  const nerApiKey = config.ner?.llm_api_key ?? config.embedding?.apiKey ?? process.env.ZHIPU_API_KEY;
-  const { ZhipuLLMProvider } = await import("../../llm/zhipu.js");
+  // #448: reuse deps.llm — createDeps already resolved ner.enabled + llm_provider
+  // (deepseek/zhipu). Do NOT re-derive key/provider here.
   const { NerEngine } = await import("../../core/ingestion/ner.js");
-  const nerLLM = nerApiKey ? new ZhipuLLMProvider(nerApiKey, config.ner?.llm_base_url, config.ner?.llm_model) : undefined;
-  const nerEngine = nerLLM ? new NerEngine(nerLLM) : undefined;
-  console.error(`> Watcher NER: ${nerEngine ? "enabled" : "DISABLED (no API key)"}`);
+  const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
+  console.error(`> Watcher NER: ${nerEngine ? "enabled" : "DISABLED (no API key or ner.enabled=false)"}`);
   const { SyncManager } = await import("../../core/maintenance/sync.js");
   const { JobQueueNerSubmitter } = await import("../../core/ingestion/ner-backfill.js");
   const watcherSync = new SyncManager(deps.db, deps.embedding, deps.lance, {

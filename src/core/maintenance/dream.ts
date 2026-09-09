@@ -223,6 +223,9 @@ export async function runDream(
       if (nerBackfillReport.processed > 0) logger.info("dream", `NER backfill: ${nerBackfillReport.processed} 页补抽`);
     } catch (e) {
       logger.warn("dream", `NER backfill 失败: ${(e as Error).message}`);
+      // #457: surface the stage exception via the existing failed count —
+      // an all-zero report must not claim the stage ran clean.
+      nerBackfillReport = { ...emptyNerBackfillCounts(), failed: 1 };
     }
   }
   if (onStageProgress) onStageProgress("ner_backfill", nerBackfillReport);

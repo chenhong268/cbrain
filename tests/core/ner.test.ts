@@ -93,6 +93,35 @@ describe("NerEngine", () => {
     expect(result.relations[0].relation).toBe("works_at");
   });
 
+  test("stage2 response following the documented relation JSON contract lands as relations (#458)", async () => {
+    const llm = createMockLLM([
+      JSON.stringify({
+        entities: [
+          { name: "实体A", type: "person", relevance: "high", context: "实体A与组织C存在业务往来" },
+          { name: "组织C", type: "company", relevance: "high", context: "实体A与组织C存在业务往来" },
+        ],
+        events: [],
+      }),
+      JSON.stringify({
+        relations: [
+          { from: "实体A", to: "组织C", relation: "认识", context: "实体A与组织C存在业务往来" },
+        ],
+      }),
+    ]);
+
+    const engine = new NerEngine(llm);
+    const result = await engine.extract("实体A与组织C存在业务往来");
+
+    expect(result.entities.length).toBe(2);
+    expect(result.relations.length).toBe(1);
+    expect(result.relations[0]).toEqual({
+      from: "实体A",
+      to: "组织C",
+      relation: "认识",
+      context: "实体A与组织C存在业务往来",
+    });
+  });
+
   test("extracts events with dates", async () => {
     const llm = createMockLLM([
       JSON.stringify({
