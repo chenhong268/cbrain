@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { rewriteVaultLinks } from "../shared.js";
+import { rewriteVaultLinks, isRawVaultFile } from "../shared.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { LanceDBManager } from "../../storage/lancedb.js";
 import type { Logger } from "../logger.js";
@@ -64,12 +64,17 @@ function snapshotAffectedFiles(slug: string, deps: SafeDeleteDeps): FileSnapshot
     snaps.push({ path: p, bytes: existsSync(p) ? readFileSync(p) : null });
   };
   const targetRel = deps.db.getPageFilePath(slug);
-  if (targetRel) pushIfNew(join(deps.vaultPath, targetRel));
-  // Mirror rewriteVaultLinks' candidate discovery exactly.
+  const targetAbs = targetRel ? join(deps.vaultPath, targetRel) : null;
+  if (targetAbs) pushIfNew(targetAbs);
+  // Mirror rewriteVaultLinks' candidate discovery exactly — minus raw originals:
+  // rewriteVaultLinks never writes them (#447), so rollback must not write them either.
   const short = slug.split("/").pop()!;
   for (const s of deps.db.findSlugsByText([`[[${slug}]]`, `[[${short}]]`])) {
     const rel = deps.db.getPageFilePath(s);
-    if (rel) pushIfNew(join(deps.vaultPath, rel));
+    if (!rel) continue;
+    const abs = join(deps.vaultPath, rel);
+    if (abs !== targetAbs && isRawVaultFile(deps.vaultPath, abs)) continue;
+    pushIfNew(abs);
   }
   return snaps;
 }

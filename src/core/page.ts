@@ -14,7 +14,7 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
-import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, normalizeAndHashBody } from "./shared.js";
+import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, isRawVaultFile, normalizeAndHashBody } from "./shared.js";
 import {
   PageWriteProvenanceConflictError,
   forUnattributed,
@@ -554,7 +554,8 @@ export class PageManager {
     const incoming = this.db.getIncomingLinks(slug);
 
     const filePath = join(this.vaultPath, page.file_path);
-    if (!existsSync(filePath)) return;
+    // #447: post-merge graph projection must also preserve raw neighbors.
+    if (isRawVaultFile(this.vaultPath, filePath) || !existsSync(filePath)) return;
 
     const raw = readFileSync(filePath, "utf-8");
     const { frontmatter, body } = parseFrontmatter(raw);
