@@ -557,7 +557,11 @@ export class ContentPipeline {
         if (!mentionSkipSlugs.has(currentSlug)) {
           this.db.incrementMentionCount(currentSlug);
         }
-        this.db.insertLink(fromSlug, currentSlug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
+        // #467: the occupier may be the source page itself (its own title
+        // extracted) — same self-reference guard as the resolved branch.
+        if (currentSlug !== fromSlug) {
+          this.db.insertLink(fromSlug, currentSlug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
+        }
       } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
         const stub = this.pages.create({

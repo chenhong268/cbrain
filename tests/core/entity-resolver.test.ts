@@ -98,6 +98,35 @@ describe("EntityResolver", () => {
     expect(result.matchedBy).toBe("type-gate");
   });
 
+  // ─── #467: exact title occupied by a non-entity page ─────
+
+  test("insight title occupation → duplicate_candidate against occupier (#467)", () => {
+    db.upsertPage({ slug: "insights/topic", type: "insight", title: "冲突概念", filePath: "insights/topic.md", contentHash: "abc" });
+
+    const result = resolver.resolveSingle(candidate("冲突概念", "concept"));
+    expect(result.action).toBe("duplicate_candidate");
+    expect(result.score).toBe(0.75);
+    expect(result.matchedBy).toBe("type-gate");
+    expect(result.slug).toBe("insights/topic");
+  });
+
+  test("record title occupation (source page itself) → duplicate_candidate against self (#467)", () => {
+    db.upsertPage({ slug: "records/source", type: "record", title: "源记录", filePath: "records/source.md", contentHash: "abc" });
+
+    const result = resolver.resolveSingle(candidate("源记录", "concept"));
+    expect(result.action).toBe("duplicate_candidate");
+    expect(result.matchedBy).toBe("type-gate");
+    expect(result.slug).toBe("records/source");
+  });
+
+  test("unoccupied name still creates a stub (#467)", () => {
+    db.upsertPage({ slug: "insights/topic", type: "insight", title: "冲突概念", filePath: "insights/topic.md", contentHash: "abc" });
+
+    const result = resolver.resolveSingle(candidate("全新概念", "concept"));
+    expect(result.action).toBe("stub_created");
+    expect(result.matchedBy).toBe("new");
+  });
+
   // ─── Type affinity expansion (issue #47) ──────────────────
 
   test("person ↔ company affinity: NER says person, DB has company → resolved_to_existing", () => {
