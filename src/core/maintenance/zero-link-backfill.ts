@@ -535,7 +535,11 @@ function auditQueue(db: ZeroLinkDb): QueueAudit {
     const firstRepairManifestId = manifests
       .filter((manifest) => manifest.ownership.some((owner) => owner.slug === slug))
       .reduce<number | null>((first, manifest) => first === null || manifest.row.id < first ? manifest.row.id : first, null);
-    if (!current && (hasRepairHistory || parsedLive.some(({ data }) => Boolean(data.sourceFingerprint || data.repair)))) {
+    // #457: an ordinary job with a valid frozen identity whose source was legitimately
+    // deleted stays executable — the stage terminalizes it as SOURCE_UNAVAILABLE.
+    // Repair rows, repair history, and malformed identities stay fail-closed.
+    if (!current && (hasRepairHistory || parsedLive.some(({ data }) =>
+      Boolean(data.repair) || (data.sourceFingerprintPresent && !ordinaryFrozenIdentityValid(data))))) {
       globalStateConflictSlugs.add(slug);
     }
     const marked = parsedLive.filter(({ data }) => Boolean(data.repair));

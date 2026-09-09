@@ -221,4 +221,38 @@ describe("Dream Stage 1.5 ner-backfill (#252)", () => {
     expect(report.stages.ner_backfill.processed).toBe(1);
     expect(pages.getBySlug(entity.slug)?.frontmatter.industry).toBe("领域C");
   });
+
+  test("Stage 1.5 exception surfaces in failed counts and brief instead of all zeros (#457)", async () => {
+    db.rawDb.prepare("INSERT INTO jobs (name, status, data) VALUES ('ner-backfill','pending','{')").run();
+    const pages = new PageManager(db, vaultPath);
+    const nerPipeline = new ContentPipeline(db, createMockEmbeddingProvider(), createMockLanceDB() as never, {
+      pages,
+      nerEngine: new NerEngine({ name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' }),
+    });
+
+    const report = await runDreamHarness(db, vaultPath, outputsDir, logger, dbPath, {
+      nerPipeline,
+      sharedPages: pages,
+    });
+
+    expect(report.stages.ner_backfill).toMatchObject({ processed: 0, failed: 1, timed_out: 0, skipped: 0 });
+    expect(report.brief).toContain("NER backfill");
+    expect(report.brief).toContain("1 失败");
+  });
+
+  test("Stage 1.5 with a healthy empty queue still reports all zeros (#457)", async () => {
+    const pages = new PageManager(db, vaultPath);
+    const nerPipeline = new ContentPipeline(db, createMockEmbeddingProvider(), createMockLanceDB() as never, {
+      pages,
+      nerEngine: new NerEngine({ name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' }),
+    });
+
+    const report = await runDreamHarness(db, vaultPath, outputsDir, logger, dbPath, {
+      nerPipeline,
+      sharedPages: pages,
+    });
+
+    expect(report.stages.ner_backfill).toEqual({ processed: 0, failed: 0, timed_out: 0, skipped: 0 });
+    expect(report.brief).not.toContain("NER backfill");
+  });
 });

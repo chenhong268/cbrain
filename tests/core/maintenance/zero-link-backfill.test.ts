@@ -304,6 +304,73 @@ describe("repair planning and atomic enqueue (#342)", () => {
     });
   });
 
+  test("an ordinary fingerprinted live row with a deleted source stays claimable (#457)", () => {
+    addRich("records/gone", "fingerprint-gone");
+    const id = db.submitJob("ner-backfill", {
+      slug: "records/gone",
+      kind: "ner",
+      pageContentHash: "fingerprint-gone",
+      sourceFingerprint: "page:fingerprint-gone",
+    });
+    db.rawDb.prepare("DELETE FROM chunks WHERE page_slug='records/gone'").run();
+    db.rawDb.prepare("DELETE FROM pages WHERE slug='records/gone'").run();
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", stateConflicts: 0, queueIntegrityConflicts: 0 });
+    expect(claimNerJob(id)).not.toBeNull();
+  });
+
+  test("a repair live row with a deleted source stays a global conflict (#457)", () => {
+    addRich("records/protected", "fingerprint-protected");
+    enqueueZeroLinkBackfill(db, 1);
+    const child = db.rawDb.prepare("SELECT id FROM jobs WHERE name='ner-backfill'").get() as { id: number };
+    db.rawDb.prepare("DELETE FROM chunks WHERE page_slug='records/protected'").run();
+    db.rawDb.prepare("DELETE FROM pages WHERE slug='records/protected'").run();
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 1, selected: 0 });
+    expect(claimNerJob(child.id)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("repair history with a deleted source still blocks a new ordinary row (#457)", () => {
+    addRich("records/repaired", "fingerprint-repaired");
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const child = db.rawDb.prepare("SELECT id, data FROM jobs WHERE name='ner-backfill'").get() as { id: number; data: string };
+    const repair = JSON.parse(child.data).repair;
+    db.rawDb.prepare("UPDATE jobs SET status='done', result=?, finished_at=datetime('now') WHERE id=?")
+      .run(JSON.stringify({ outcome: "processed", kind: "ner", repair, graphOutcome: "terminal_no_graph_links", activeLinkCount: 0 }), child.id);
+    expect(finalizeRepairBatch(db, receipt.batchId!)).toMatchObject({ finalized: true });
+    db.rawDb.prepare("DELETE FROM chunks WHERE page_slug='records/repaired'").run();
+    db.rawDb.prepare("DELETE FROM pages WHERE slug='records/repaired'").run();
+    const id = db.submitJob("ner-backfill", {
+      slug: "records/repaired",
+      kind: "ner",
+      pageContentHash: "fingerprint-repaired",
+      sourceFingerprint: "page:fingerprint-repaired",
+    });
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 1, selected: 0 });
+    expect(claimNerJob(id)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
+  test("an invalid frozen identity with a deleted source stays a global conflict (#457)", () => {
+    addRich("records/gone-bad", "fingerprint-bad");
+    const id = db.submitJob("ner-backfill", {
+      slug: "records/gone-bad",
+      kind: "ner",
+      sourceFingerprint: "page:fingerprint-bad",
+    });
+    db.rawDb.prepare("DELETE FROM chunks WHERE page_slug='records/gone-bad'").run();
+    db.rawDb.prepare("DELETE FROM pages WHERE slug='records/gone-bad'").run();
+    const before = JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all());
+
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "blocked", stateConflicts: 1, selected: 0 });
+    expect(claimNerJob(id)).toBeNull();
+    expect(JSON.stringify(db.rawDb.prepare("SELECT * FROM jobs ORDER BY id").all())).toBe(before);
+  });
+
   test("recognizes the sanctioned old-running/current-pending transition pair", () => {
     addRich();
     const predecessor = db.submitJob("ner-backfill", {
