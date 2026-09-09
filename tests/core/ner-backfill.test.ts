@@ -1813,6 +1813,64 @@ describe("runNerBackfillStage (#252)", () => {
     expect(job.error).toBeNull();
   });
 
+  test("a deleted ordinary fingerprinted source ends SOURCE_UNAVAILABLE without blocking other jobs (#457)", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const gone = await seedIngest.ingest({
+      content: "匿名缺源正文提到匿名实体巳",
+      type: "text",
+      title: "匿名缺源记录",
+      skipNer: true,
+    });
+    const goneJob = new JobQueueNerSubmitter(db).submitDeferredNer({ slug: gone.slug });
+    expect(goneJob.disposition).toBe("inserted");
+    db.rawDb.prepare("DELETE FROM chunks WHERE page_slug=?").run(gone.slug);
+    db.rawDb.prepare("DELETE FROM pages WHERE slug=?").run(gone.slug);
+
+    const valid = await seedIngest.ingest({
+      content: "匿名有效正文",
+      type: "text",
+      title: "匿名有效记录",
+      skipNer: true,
+    });
+    new JobQueueNerSubmitter(db).submitDeferredNer({ slug: valid.slug });
+    const factsSeed = new IngestManager(db, embedding, createMockLanceDB() as never, testDir, undefined, undefined, { nerMode: "off" });
+    const entity = await factsSeed.ingest({
+      type: "markdown",
+      content: "---\ntitle: 实体A\ntype: entity/company\n---\n实体A属于领域C。",
+    });
+    db.submitJob("ner-backfill", { slug: entity.slug, kind: "entity_facts" });
+
+    let nerCalls = 0;
+    let factsCalls = 0;
+    const pipeline = { processNer: async () => { nerCalls++; } } as unknown as ContentPipeline;
+    const factsLlm: LLMProvider = {
+      name: "mock-facts",
+      chat: async () => {
+        factsCalls++;
+        return JSON.stringify({ facts: [{ field: "industry", value: "领域C", confidence: 0.9, evidence: "明确证据" }] });
+      },
+    };
+
+    const counts = await runNerBackfillStage(db, pipeline, new PageManager(db, testDir), { entityFactsLlm: factsLlm });
+
+    expect(counts).toEqual({ processed: 2, failed: 0, timed_out: 0, skipped: 1 });
+    expect(nerCalls).toBe(1);
+    expect(factsCalls).toBe(1);
+    const terminal = db.getJob(goneJob.jobId!)!;
+    expect(terminal.status).toBe("done");
+    expect(terminal.error).toBeNull();
+    expect(JSON.parse(terminal.result!)).toEqual({
+      outcome: "skipped",
+      reason: "SOURCE_UNAVAILABLE",
+      graphOutcome: "blocked_source_unavailable",
+      kind: "ner",
+    });
+    const leakedStub = db.rawDb.prepare("SELECT COUNT(*) count FROM pages WHERE title = ?").get("匿名实体巳") as { count: number };
+    expect(leakedStub.count).toBe(0);
+    expect(planZeroLinkBackfill(db)).toMatchObject({ status: "ok", stateConflicts: 0, queueIntegrityConflicts: 0 });
+  });
+
   test("malformed live job fails global preflight with byte-for-byte zero mutation", async () => {
     const id = db.submitJob("ner-backfill", { pageType: "record" });
     const llm: LLMProvider = { name: "mock", chat: async () => '{"entities":[],"relations":[],"events":[]}' };
