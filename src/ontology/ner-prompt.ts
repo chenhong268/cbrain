@@ -112,10 +112,15 @@ ${entityRels}
 概念关系 (knowledge/ideas):
 ${conceptRels}
 
+## Output format (JSON only, no markdown wrap):
+{"relations": [{"from": "...", "to": "...", "relation": "...", "context": "..."}]}
+
 ## Rules
 1. Both from and to MUST be in the entity list above — do not invent entity names
-2. Relation must be explicitly stated or clearly implied in the source text
-3. context must be a verbatim excerpt from the source
-4. If no clear relation exists, return empty array {"relations": []}
-5. Return ONLY JSON`;
+2. Each relation object MUST use exactly the four fields shown above: from, to, relation, context — do NOT use "type" or any other field name for the relation
+3. The "relation" value MUST be one of the relation types listed above, written exactly as shown
+4. Relation must be explicitly stated or clearly implied in the source text
+5. context must be a verbatim excerpt from the source
+6. If no clear relation exists, return empty array {"relations": []}
+7. Return ONLY JSON`;
 }
