@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { EntityFactsTimeoutError, extractEntityFacts } from "../../src/core/ingestion/entity-facts.js";
 import { PageManager } from "../../src/core/page.js";
-import type { LLMProvider } from "../../src/llm/provider.js";
+import type { ChatOptions, LLMProvider } from "../../src/llm/provider.js";
+import { LLMTimeoutError } from "../../src/llm/provider.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 
 const ROOT = "/tmp/cbrain-entity-facts-test";
@@ -184,5 +185,69 @@ describe("extractEntityFacts (#321)", () => {
     await extractEntityFacts({ pages, llm, slug: page.slug, title: page.title, type: page.type, body: page.body });
 
     expect(pages.getBySlug(page.slug)?.frontmatter.reports_to).toBe("brain/entities/person/entity-b");
+  });
+
+  // #462: pure extraction must not let a compatible provider run default reasoning.
+  test("extraction chat explicitly requests disabled thinking (#462)", async () => {
+    const page = pages.create({
+      slug: "brain/entities/company/entity-a",
+      title: "实体A",
+      type: "entity/company",
+      body: "匿名正文",
+      tags: [],
+    });
+    const capturedOptions: Array<ChatOptions | undefined> = [];
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async (_messages, options) => {
+        capturedOptions.push(options);
+        return JSON.stringify({ facts: [] });
+      },
+    };
+
+    await extractEntityFacts({ pages, llm, slug: page.slug, title: page.title, type: page.type, body: page.body });
+
+    expect(capturedOptions).toEqual([{ thinking: "disabled" }]);
+  });
+
+  // #462: a provider-side LLMTimeoutError honors the entity-facts timeout contract.
+  test("a provider LLMTimeoutError is normalized to EntityFactsTimeoutError with the provider timeoutMs (#462)", async () => {
+    const page = pages.create({
+      slug: "brain/entities/company/entity-a",
+      title: "实体A",
+      type: "entity/company",
+      body: "匿名正文",
+      tags: [],
+    });
+    const llm: LLMProvider = { name: "mock", chat: async () => { throw new LLMTimeoutError("mock", 12_345); } };
+
+    const pending = extractEntityFacts({ pages, llm, slug: page.slug, title: page.title, type: page.type, body: page.body });
+    const error = await pending.then(
+      () => { throw new Error("expected rejection"); },
+      (e: unknown) => e,
+    ) as EntityFactsTimeoutError;
+    expect(error).toBeInstanceOf(EntityFactsTimeoutError);
+    expect(error.timeoutMs).toBe(12_345);
+    expect(pages.getBySlug(page.slug)?.frontmatter.industry).toBeUndefined();
+  });
+
+  // #462: ordinary provider errors keep their own classification.
+  test("a non-timeout provider error is rethrown unchanged (#462)", async () => {
+    const page = pages.create({
+      slug: "brain/entities/company/entity-a",
+      title: "实体A",
+      type: "entity/company",
+      body: "匿名正文",
+      tags: [],
+    });
+    const original = new Error("private provider detail");
+    const llm: LLMProvider = { name: "mock", chat: async () => { throw original; } };
+
+    const error = await extractEntityFacts({ pages, llm, slug: page.slug, title: page.title, type: page.type, body: page.body }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBe(original);
+    expect(pages.getBySlug(page.slug)?.frontmatter.industry).toBeUndefined();
   });
 });

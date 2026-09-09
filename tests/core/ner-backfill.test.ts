@@ -12,9 +12,11 @@ import { runNerBackfillStage } from "../../src/core/ingestion/ner-backfill";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline";
 import { NerEngine, NerTimeoutError } from "../../src/core/ingestion/ner";
 import type { LLMProvider } from "../../src/llm/provider";
+import { LLMTimeoutError } from "../../src/llm/provider";
 import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic";
-import { LanceDBManager } from "../../src/storage/lancedb";
+import { LanceDBManager, LanceTableMissingError } from "../../src/storage/lancedb";
 import { canonicalSlug } from "../../src/utils/slug";
+import { probeLance } from "../../src/core/fsck/lance-probe";
 import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
 import { submitDeferredNerForWritePath } from "../../src/core/ingestion/ner-write-path";
 import {
@@ -1400,6 +1402,473 @@ describe("runNerBackfillStage (#252)", () => {
     expect(db.getPageTierAndMentions(movedSlug)?.mention_count).toBe(0);
   });
 
+  test("ordinary deferred NER migrates raw and L1 Lance rows with a corrected page slug (#463)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const sourceBody = "匿名普通延迟正文包含足够信息并提到需要纠正类型的匿名实体";
+      const source = await seedIngest.ingest({
+        content: sourceBody,
+        type: "text",
+        title: "匿名普通延迟向量迁移记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const pages = new PageManager(db, testDir);
+      const oldPage = pages.create({
+        title: "匿名实体甲",
+        type: "concept/concept",
+        body: "匿名概念正文",
+      });
+      const rawContent = "匿名原始向量正文";
+      const l1Content = "匿名一级摘要";
+      const [rawEmbedding, l1Embedding] = await embedding.embedBatch([rawContent, l1Content]);
+      db.insertChunk(oldPage.slug, 0, rawContent);
+      db.insertChunkWithLevel(oldPage.slug, -1, l1Content, 1, "anonymous-hash");
+      await lance.addChunks([
+        { pageSlug: oldPage.slug, chunkIndex: 0, content: rawContent, vector: new Float32Array(rawEmbedding.embedding) },
+        { pageSlug: oldPage.slug, chunkIndex: -1, content: l1Content, vector: new Float32Array(l1Embedding.embedding) },
+      ]);
+      expect(new JobQueueNerSubmitter(db).submitDeferredNer({ slug: source.slug }).disposition).toBe("inserted");
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "pharma", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, { maxItems: 1 });
+
+      const movedSlug = db.getEntitySlugByTitle("匿名实体甲")!;
+      expect(counts).toMatchObject({ processed: 1, failed: 0 });
+      expect(movedSlug).not.toBe(oldPage.slug);
+      expect(db.getPage(oldPage.slug)).toBeNull();
+      expect(db.getOutgoingLinks(source.slug).some(link => link.to_slug === movedSlug)).toBe(true);
+      expect(await lance.readRawVectorRows(oldPage.slug)).toHaveLength(0);
+      expect(await lance.readL1VectorRows(oldPage.slug)).toHaveLength(0);
+      const movedRaw = await lance.readRawVectorRows(movedSlug);
+      const movedL1 = await lance.readL1VectorRows(movedSlug);
+      expect(movedRaw).toMatchObject([
+        { pageSlug: movedSlug, chunkIndex: 0, content: rawContent },
+      ]);
+      expect(movedL1).toMatchObject([
+        { pageSlug: movedSlug, chunkIndex: -1, content: l1Content },
+      ]);
+      expect(Array.from(movedRaw[0].vector)).toEqual(Array.from(new Float32Array(rawEmbedding.embedding)));
+      expect(Array.from(movedL1[0].vector)).toEqual(Array.from(new Float32Array(l1Embedding.embedding)));
+      await lance.close();
+      const probe = await probeLance(join(testDir, "lancedb"), db);
+      expect(probe.state).toBe("ok");
+      expect(probe.findings).toEqual([]);
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("synchronous NER migrates raw and L1 Lance rows with a corrected page slug (#463)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const sourceBody = "匿名同步正文包含足够信息并提到需要纠正类型的匿名实体";
+      const source = await seedIngest.ingest({
+        content: sourceBody,
+        type: "text",
+        title: "匿名同步向量迁移记录",
+        skipNer: true,
+      });
+      const pages = new PageManager(db, testDir);
+      const oldPage = pages.create({
+        title: "匿名实体甲",
+        type: "concept/concept",
+        body: "匿名概念正文",
+      });
+      const rawContent = "匿名原始向量正文";
+      const l1Content = "匿名一级摘要";
+      const [rawEmbedding, l1Embedding] = await embedding.embedBatch([rawContent, l1Content]);
+      db.insertChunk(oldPage.slug, 0, rawContent);
+      db.insertChunkWithLevel(oldPage.slug, -1, l1Content, 1, "anonymous-hash");
+      await lance.addChunks([
+        { pageSlug: oldPage.slug, chunkIndex: 0, content: rawContent, vector: new Float32Array(rawEmbedding.embedding) },
+        { pageSlug: oldPage.slug, chunkIndex: -1, content: l1Content, vector: new Float32Array(l1Embedding.embedding) },
+      ]);
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "person", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const nerResult = await pipeline.processNer(source.slug, sourceBody, "record", true, undefined, new Set());
+
+      const movedSlug = db.getEntitySlugByTitle("匿名实体甲")!;
+      expect(nerResult?.entities).toBe(1);
+      expect(movedSlug).not.toBe(oldPage.slug);
+      expect(db.getPage(oldPage.slug)).toBeNull();
+      expect(db.getOutgoingLinks(source.slug).some(link => link.to_slug === movedSlug)).toBe(true);
+      expect(await lance.readRawVectorRows(oldPage.slug)).toHaveLength(0);
+      expect(await lance.readL1VectorRows(oldPage.slug)).toHaveLength(0);
+      const movedRaw = await lance.readRawVectorRows(movedSlug);
+      const movedL1 = await lance.readL1VectorRows(movedSlug);
+      expect(movedRaw).toMatchObject([
+        { pageSlug: movedSlug, chunkIndex: 0, content: rawContent },
+      ]);
+      expect(movedL1).toMatchObject([
+        { pageSlug: movedSlug, chunkIndex: -1, content: l1Content },
+      ]);
+      expect(Array.from(movedRaw[0].vector)).toEqual(Array.from(new Float32Array(rawEmbedding.embedding)));
+      expect(Array.from(movedL1[0].vector)).toEqual(Array.from(new Float32Array(l1Embedding.embedding)));
+      await lance.close();
+      const probe = await probeLance(join(testDir, "lancedb"), db);
+      expect(probe.state).toBe("ok");
+      expect(probe.findings).toEqual([]);
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("same-slug type correction never touches Lance (#463)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名同slug正文包含足够信息并提到同目录纠正的匿名实体",
+        type: "text",
+        title: "匿名同slug记录",
+        skipNer: true,
+      });
+      const pages = new PageManager(db, testDir);
+      const stub = pages.create({
+        title: "匿名实体乙",
+        type: "concept/pharma",
+        body: "匿名医药正文",
+      });
+      // Legacy mis-typed page: already sitting in the pharma vault dir but
+      // stored as the generic concept type.
+      db.rawDb.prepare("UPDATE pages SET type = 'concept/concept' WHERE slug = ?").run(stub.slug);
+      const lanceCalls: string[] = [];
+      for (const method of [
+        "readRawVectorRows", "readL1VectorRows", "addChunks",
+        "deleteRawChunksByPageSlug", "deleteL1VectorByPageSlug",
+      ] as const) {
+        const original = (lance as any)[method].bind(lance);
+        (lance as any)[method] = async (...args: unknown[]) => {
+          lanceCalls.push(method);
+          return original(...args);
+        };
+      }
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体乙", type: "pharma", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const nerResult = await pipeline.processNer(
+        source.slug,
+        "匿名同slug正文包含足够信息并提到同目录纠正的匿名实体",
+        "record",
+        true,
+        undefined,
+        new Set(),
+      );
+
+      expect(nerResult?.entities).toBe(1);
+      expect(db.getEntitySlugByTitle("匿名实体乙")).toBe(stub.slug);
+      expect(db.getEntityType(stub.slug)).toBe("concept/pharma");
+      expect(lanceCalls).toEqual([]);
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("ordinary NER promotes an unindexed stub on a fresh library without a chunks table (#463)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名缺表正文包含足够信息并提到未索引的匿名实体",
+      type: "text",
+      title: "匿名缺表记录",
+      skipNer: true,
+    });
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名实体甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    expect(new JobQueueNerSubmitter(db).submitDeferredNer({ slug: source.slug }).disposition).toBe("inserted");
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "pharma", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, { maxItems: 1 });
+
+      const movedSlug = db.getEntitySlugByTitle("匿名实体甲")!;
+      expect(counts).toMatchObject({ processed: 1, failed: 0 });
+      expect(movedSlug).not.toBe(oldPage.slug);
+      expect(db.getPage(oldPage.slug)).toBeNull();
+      expect(db.getEntityType(movedSlug)).toBe("concept/pharma");
+      await lance.close();
+      // The tolerated absence must not silently create a chunks table.
+      const probe = await probeLance(join(testDir, "lancedb"), db);
+      expect(probe.state).toBe("missing");
+      expect(probe.findings).toEqual([]);
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("ordinary NER fails closed on a missing chunks table when the page has raw chunks (#463)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名缺表失败正文包含足够信息并提到有片段的匿名实体",
+      type: "text",
+      title: "匿名缺表失败记录",
+      skipNer: true,
+    });
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名实体甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    db.insertChunk(oldPage.slug, 0, "匿名原始片段");
+    const oldFilePath = join(testDir, db.getPageFilePath(oldPage.slug)!);
+    const submit = new JobQueueNerSubmitter(db).submitDeferredNer({ slug: source.slug });
+    expect(submit.disposition).toBe("inserted");
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "pharma", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, { maxItems: 1 });
+
+      expect(counts).toMatchObject({ processed: 0, failed: 1 });
+      expect(JSON.parse(db.getJob(submit.jobId!)!.result!).outcome).toBe("commit_unknown");
+      expect(db.getPage(oldPage.slug)).not.toBeNull();
+      expect(db.getEntityType(oldPage.slug)).toBe("concept/concept");
+      expect(existsSync(oldFilePath)).toBe(true);
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("synchronous NER fails closed on a missing chunks table when the page has only an L1 chunk (#463)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名缺表L1正文包含足够信息并提到仅有摘要的匿名实体",
+      type: "text",
+      title: "匿名缺表L1记录",
+      skipNer: true,
+    });
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名实体甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    db.insertChunkWithLevel(oldPage.slug, -1, "匿名一级摘要", 1, "anonymous-hash");
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "pharma", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      await expect(pipeline.processNer(
+        source.slug,
+        "匿名缺表L1正文包含足够信息并提到仅有摘要的匿名实体",
+        "record",
+        true,
+        undefined,
+        new Set(),
+      )).rejects.toThrow(LanceTableMissingError);
+
+      expect(db.getEntitySlugByTitle("匿名实体甲")).toBe(oldPage.slug);
+      expect(db.getEntityType(oldPage.slug)).toBe("concept/concept");
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("governed repair fails closed on a missing chunks table even for an unindexed stub (#463)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);
+    const source = await seedIngest.ingest({
+      content: "匿名治理缺表正文包含足够信息并提到未索引的匿名实体",
+      type: "text",
+      title: "匿名治理缺表记录",
+      skipNer: true,
+    });
+    db.insertChunk(source.slug, 99, "第二个匿名片段");
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名实体甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    const oldFilePath = join(testDir, db.getPageFilePath(oldPage.slug)!);
+    const receipt = enqueueZeroLinkBackfill(db, 1);
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "pharma", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, {
+        maxItems: 1,
+        batchId: receipt.batchId!,
+      });
+
+      expect(counts).toMatchObject({ processed: 0, failed: 1 });
+      expect(db.getPage(oldPage.slug)).not.toBeNull();
+      expect(db.getEntityType(oldPage.slug)).toBe("concept/concept");
+      expect(existsSync(oldFilePath)).toBe(true);
+      expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({
+        finalized: false,
+        outcomes: { commitUnknown: 1 },
+      });
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("a generic Lance read failure aborts before the type move and preserves the old slug (#463)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const source = await seedIngest.ingest({
+        content: "匿名读故障正文包含足够信息并提到需要纠正类型的匿名实体",
+        type: "text",
+        title: "匿名读故障记录",
+        skipNer: true,
+      });
+      const pages = new PageManager(db, testDir);
+      const oldPage = pages.create({
+        title: "匿名实体甲",
+        type: "concept/concept",
+        body: "匿名概念正文",
+      });
+      const rawContent = "匿名原始向量正文";
+      const l1Content = "匿名一级摘要";
+      const [rawEmbedding, l1Embedding] = await embedding.embedBatch([rawContent, l1Content]);
+      db.insertChunk(oldPage.slug, 0, rawContent);
+      db.insertChunkWithLevel(oldPage.slug, -1, l1Content, 1, "anonymous-hash");
+      await lance.addChunks([
+        { pageSlug: oldPage.slug, chunkIndex: 0, content: rawContent, vector: new Float32Array(rawEmbedding.embedding) },
+        { pageSlug: oldPage.slug, chunkIndex: -1, content: l1Content, vector: new Float32Array(l1Embedding.embedding) },
+      ]);
+      lance.readRawVectorRows = async () => {
+        throw new Error("synthetic lance read failure");
+      };
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [{ name: "匿名实体甲", type: "pharma", relevance: "high", context: "匿名上下文" }],
+          relations: [],
+          events: [],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      await expect(pipeline.processNer(
+        source.slug,
+        "匿名读故障正文包含足够信息并提到需要纠正类型的匿名实体",
+        "record",
+        true,
+        undefined,
+        new Set(),
+      )).rejects.toThrow("synthetic lance read failure");
+
+      const originalRead = LanceDBManager.prototype.readRawVectorRows;
+      expect(db.getEntitySlugByTitle("匿名实体甲")).toBe(oldPage.slug);
+      expect(db.getEntityType(oldPage.slug)).toBe("concept/concept");
+      const survivingRaw = await originalRead.call(lance, oldPage.slug);
+      const survivingL1 = await lance.readL1VectorRows(oldPage.slug);
+      expect(survivingRaw).toMatchObject([
+        { pageSlug: oldPage.slug, chunkIndex: 0, content: rawContent },
+      ]);
+      expect(survivingL1).toMatchObject([
+        { pageSlug: oldPage.slug, chunkIndex: -1, content: l1Content },
+      ]);
+    } finally {
+      await lance.close();
+    }
+  });
+
   test("stub index failure leaves the governed batch commit-unknown and unfinalized", async () => {
     let failStubIndex = false;
     const lance = {
@@ -2018,6 +2487,25 @@ describe("runNerBackfillStage (#252)", () => {
     expect(counts.timed_out).toBe(1);
     expect(db.getJob(id)!.status).toBe("pending");
     expect(db.getJob(id)!.error).toBe("ENTITY_FACTS_TIMEOUT");
+  });
+
+  // #462: a provider-side LLMTimeoutError must not be misclassified as
+  // ENTITY_FACTS_PROVIDER_ERROR — the queue reports it as timed_out.
+  test("entity_facts provider LLMTimeoutError is counted as timed_out (#462)", async () => {
+    const seed = new IngestManager(
+      db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir,
+      undefined, undefined, { nerMode: "off" },
+    );
+    const page = await seed.ingest({ type: "markdown", content: "---\ntitle: 实体A\ntype: entity/company\n---\n匿名正文。" });
+    const id = db.submitJob("ner-backfill", { slug: page.slug, kind: "entity_facts" });
+    const llm: LLMProvider = { name: "mock", chat: async () => { throw new LLMTimeoutError("mock", 12_345); } };
+
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir), { entityFactsLlm: llm });
+    expect(counts.timed_out).toBe(1);
+    expect(counts.failed).toBe(0);
+    expect(db.getJob(id)!.status).toBe("pending");
+    expect(db.getJob(id)!.error).toBe("ENTITY_FACTS_TIMEOUT");
+    expect(new PageManager(db, testDir).getBySlug(page.slug)!.frontmatter.industry).toBeUndefined();
   });
 
   test("stale entity_facts is recovered without receiving a NER lease", async () => {

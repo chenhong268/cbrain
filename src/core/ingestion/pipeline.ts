@@ -1,6 +1,6 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
-import { LanceDBManager, type RawVectorRow } from "../../storage/lancedb.js";
+import { LanceDBManager, LanceTableMissingError, type RawVectorRow } from "../../storage/lancedb.js";
 import { NerEngine } from "./ner.js";
 import type { ExtractionResult } from "./ner.js";
 import { runNerShadowVerifierFailOpen } from "../quality/shadow-verifier.js";
@@ -21,6 +21,7 @@ import {
   normalizeRelation,
   getRelationStrength,
 } from "../shared.js";
+import { canonicalSlug } from "../../utils/slug.js";
 
 export interface PipelineInput {
   slug: string;
@@ -501,20 +502,36 @@ export class ContentPipeline {
           const ontology = getOntology();
           const winner = ontology.resolveTypePriority(existingType, normalizePageType(nerType));
           if (winner !== existingType) {
-            const governedVectors = sourceGuard && indexCreatedStubs
-              ? {
+            // #463: a real slug move must carry its Lance rows along — post-move
+            // sync skips the unchanged file, so a skipped move leaves a coverage
+            // gap. A missing chunks table is tolerable ONLY for ordinary NER on a
+            // page with no chunks at all; every other read failure (corrupt index,
+            // governed repair, generic error) aborts BEFORE updateType so the page
+            // and its existing vectors stay untouched.
+            let movedVectors: { raw: RawVectorRow[]; l1: RawVectorRow[] } | null = null;
+            if (canonicalSlug(currentSlug, normalizePageType(winner)) !== currentSlug) {
+              try {
+                movedVectors = {
                   raw: await this.lance.readRawVectorRows(currentSlug),
                   l1: await this.lance.readL1VectorRows(currentSlug),
-                }
-              : null;
+                };
+              } catch (e) {
+                if (
+                  !(e instanceof LanceTableMissingError) ||
+                  (sourceGuard && indexCreatedStubs) ||
+                  this.db.getChunksByPage(currentSlug, { limit: 1 }).length > 0
+                ) throw e;
+                movedVectors = null;
+              }
+            }
             const correctedSlug = this.pages.updateType(currentSlug, winner);
             if (mentionSkipSlugs.has(currentSlug)) mentionSkipSlugs.add(correctedSlug);
-            if (governedVectors) {
+            if (movedVectors) {
               await this.moveGovernedPageVectors(
                 currentSlug,
                 correctedSlug,
-                governedVectors.raw,
-                governedVectors.l1,
+                movedVectors.raw,
+                movedVectors.l1,
               );
             }
             movedSlugMap.set(result.slug, correctedSlug);

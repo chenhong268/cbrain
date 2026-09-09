@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { DialogueIngest } from "../../src/core/ingestion/dialogue.js";
 import { PageManager } from "../../src/core/page.js";
-import type { LLMProvider } from "../../src/llm/provider.js";
+import type { ChatOptions, LLMProvider } from "../../src/llm/provider.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
 
 function createMockLLM(responses: string[]): LLMProvider {
@@ -99,6 +99,23 @@ describe("DialogueIngest", () => {
       const xyz = db.rawDb.prepare("SELECT * FROM pages WHERE title = 'XYZ研究所'").get() as any;
       expect(xyz).not.toBeNull();
       expect(xyz.type).toBe("entity/company");
+    });
+
+    // #462: pure extraction must not let a compatible provider run default reasoning.
+    test("extraction chat explicitly requests disabled thinking (#462)", async () => {
+      const capturedOptions: Array<ChatOptions | undefined> = [];
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async (_messages, options) => {
+          capturedOptions.push(options);
+          return '{"entities":[],"relations":[],"events":[],"facts":[]}';
+        },
+      };
+
+      const dialogue = new DialogueIngest(db, createMockEmbeddingProvider(), createMockLanceDB() as any, vaultPath, llm);
+      await dialogue.ingest("用户：实体A在组织C任职。", "manual");
+
+      expect(capturedOptions).toEqual([{ thinking: "disabled" }]);
     });
 
     test("skips entities that already exist", async () => {
