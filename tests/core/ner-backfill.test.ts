@@ -1542,6 +1542,205 @@ describe("runNerBackfillStage (#252)", () => {
     }
   });
 
+  test("ordinary deferred NER keeps later relations, facts, and vectors on the moved slug after an alias-driven type move (#465)", async () => {
+    const embedding = new DeterministicEmbeddingProvider();
+    const lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    try {
+      const seedIngest = new IngestManager(db, embedding, lance, testDir);
+      const sourceBody = "匿名双名正文先以产品名再以别名提到同一实体并与匿名组织合作";
+      const source = await seedIngest.ingest({
+        content: sourceBody,
+        type: "text",
+        title: "匿名双名类型迁移记录",
+        skipNer: true,
+      });
+      db.insertChunk(source.slug, 99, "第二个匿名片段");
+      const pages = new PageManager(db, testDir);
+      const oldPage = pages.create({
+        title: "匿名产品甲",
+        type: "entity/product",
+        body: "匿名产品正文",
+      });
+      db.addAliasWithSource(oldPage.slug, "匿名产品乙", "manual");
+      const orgPage = pages.create({
+        title: "匿名组织丙",
+        type: "entity/organization",
+        body: "匿名组织正文",
+      });
+      const rawContent = "匿名产品原始向量正文";
+      const [rawEmbedding] = await embedding.embedBatch([rawContent]);
+      db.insertChunk(oldPage.slug, 0, rawContent);
+      await lance.addChunks([
+        { pageSlug: oldPage.slug, chunkIndex: 0, content: rawContent, vector: new Float32Array(rawEmbedding.embedding) },
+      ]);
+      expect(new JobQueueNerSubmitter(db).submitDeferredNer({ slug: source.slug }).disposition).toBe("inserted");
+      const llm: LLMProvider = {
+        name: "mock",
+        chat: async () => JSON.stringify({
+          entities: [
+            { name: "匿名产品甲", type: "product", relevance: "high", context: "匿名上下文" },
+            { name: "匿名产品乙", type: "drug", relevance: "high", context: "匿名上下文" },
+            { name: "匿名组织丙", type: "organization", relevance: "high", context: "匿名上下文" },
+          ],
+          relations: [
+            { from: "匿名产品甲", to: "匿名组织丙", relation: "合作", context: "匿名合作上下文" },
+          ],
+          events: [],
+          facts: [
+            { entity: "匿名产品甲", field: "generic_name", value: "匿名通用名", confidence: 0.9, evidence: "匿名证据" },
+          ],
+        }),
+      };
+      const pipeline = new ContentPipeline(db, embedding, lance, {
+        pages,
+        nerEngine: new NerEngine(llm),
+      });
+
+      const counts = await runNerBackfillStage(db, pipeline, pages, { maxItems: 1 });
+
+      const movedSlug = db.getEntitySlugByTitle("匿名产品甲")!;
+      expect(counts).toMatchObject({ processed: 1, failed: 0 });
+      expect(movedSlug).not.toBe(oldPage.slug);
+      expect(db.getPage(oldPage.slug)).toBeNull();
+      expect(db.getOutgoingLinks(movedSlug).some(link => link.to_slug === orgPage.slug && link.relation === "合作")).toBe(true);
+      expect(pages.getBySlug(movedSlug)?.frontmatter.generic_name).toBe("匿名通用名");
+      expect(await lance.readRawVectorRows(oldPage.slug)).toHaveLength(0);
+      const movedRaw = await lance.readRawVectorRows(movedSlug);
+      expect(movedRaw).toMatchObject([
+        { pageSlug: movedSlug, chunkIndex: 0, content: rawContent },
+      ]);
+      expect(Array.from(movedRaw[0].vector)).toEqual(Array.from(new Float32Array(rawEmbedding.embedding)));
+      await lance.close();
+      const probe = await probeLance(join(testDir, "lancedb"), db);
+      expect(probe.state).toBe("ok");
+      expect(probe.findings).toEqual([]);
+    } finally {
+      await lance.close();
+    }
+  });
+
+  test("synchronous NER resolves every name, relation, and fact onto the moved slug (#465)", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const lance = createMockLanceDB();
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const sourceBody = "匿名同步双名正文先以产品名再以别名提到同一实体并与匿名组织合作";
+    const source = await seedIngest.ingest({
+      content: sourceBody,
+      type: "text",
+      title: "匿名同步双名记录",
+      skipNer: true,
+    });
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名产品甲",
+      type: "entity/product",
+      body: "匿名产品正文",
+    });
+    db.addAliasWithSource(oldPage.slug, "匿名产品乙", "manual");
+    const orgPage = pages.create({
+      title: "匿名组织丙",
+      type: "entity/organization",
+      body: "匿名组织正文",
+    });
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [
+          { name: "匿名产品甲", type: "product", relevance: "high", context: "匿名上下文" },
+          { name: "匿名产品乙", type: "drug", relevance: "high", context: "匿名上下文" },
+          { name: "匿名组织丙", type: "organization", relevance: "high", context: "匿名上下文" },
+        ],
+        relations: [
+          { from: "匿名产品甲", to: "匿名组织丙", relation: "合作", context: "匿名合作上下文" },
+        ],
+        events: [],
+        facts: [
+          { entity: "匿名产品甲", field: "generic_name", value: "匿名通用名", confidence: 0.9, evidence: "匿名证据" },
+        ],
+      }),
+    };
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const nerResult = await pipeline.processNer(source.slug, sourceBody, "record", true, undefined, new Set());
+
+    const movedSlug = db.getEntitySlugByTitle("匿名产品甲")!;
+    expect(movedSlug).not.toBe(oldPage.slug);
+    expect(nerResult?.resolvedSlugs).toContain(movedSlug);
+    expect(nerResult?.resolvedSlugs).not.toContain(oldPage.slug);
+    expect(nerResult?.relationSlugs).toContain(movedSlug);
+    expect(nerResult?.relationSlugs).not.toContain(oldPage.slug);
+    expect(db.getOutgoingLinks(movedSlug).some(link => link.to_slug === orgPage.slug && link.relation === "合作")).toBe(true);
+    expect(pages.getBySlug(movedSlug)?.frontmatter.generic_name).toBe("匿名通用名");
+  });
+
+  test("consecutive type moves keep every earlier-resolved name on the final slug (#465)", async () => {
+    const embedding = createMockEmbeddingProvider();
+    const lance = createMockLanceDB();
+    const seedIngest = new IngestManager(db, embedding, lance as never, testDir);
+    const sourceBody = "匿名链式正文以三个名字提到同一概念实体";
+    const source = await seedIngest.ingest({
+      content: sourceBody,
+      type: "text",
+      title: "匿名链式移动记录",
+      skipNer: true,
+    });
+    const pages = new PageManager(db, testDir);
+    const oldPage = pages.create({
+      title: "匿名概念甲",
+      type: "concept/concept",
+      body: "匿名概念正文",
+    });
+    db.addAliasWithSource(oldPage.slug, "匿名概念乙", "manual");
+    db.addAliasWithSource(oldPage.slug, "匿名概念丙", "manual");
+    const orgPage = pages.create({
+      title: "匿名组织丁",
+      type: "entity/organization",
+      body: "匿名组织正文",
+    });
+    const intermediateSlug = canonicalSlug(oldPage.slug, "concept/technology");
+    const finalSlug = canonicalSlug(oldPage.slug, "concept/pharma");
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async () => JSON.stringify({
+        entities: [
+          { name: "匿名概念甲", type: "concept", relevance: "high", context: "匿名上下文" },
+          { name: "匿名概念乙", type: "technology", relevance: "high", context: "匿名上下文" },
+          { name: "匿名概念丙", type: "pharma", relevance: "high", context: "匿名上下文" },
+          { name: "匿名组织丁", type: "organization", relevance: "high", context: "匿名上下文" },
+        ],
+        relations: [
+          { from: "匿名概念甲", to: "匿名组织丁", relation: "合作", context: "匿名合作上下文" },
+          { from: "匿名概念乙", to: "匿名组织丁", relation: "合作", context: "匿名合作上下文" },
+        ],
+        events: [],
+        facts: [],
+      }),
+    };
+    const pipeline = new ContentPipeline(db, embedding, lance as never, {
+      pages,
+      nerEngine: new NerEngine(llm),
+    });
+
+    const nerResult = await pipeline.processNer(source.slug, sourceBody, "record", true, undefined, new Set());
+
+    expect(db.getEntitySlugByTitle("匿名概念甲")).toBe(finalSlug);
+    expect(db.getPage(oldPage.slug)).toBeNull();
+    expect(db.getPage(intermediateSlug)).toBeNull();
+    expect(nerResult?.resolvedSlugs).toContain(finalSlug);
+    expect(nerResult?.resolvedSlugs).not.toContain(oldPage.slug);
+    expect(nerResult?.resolvedSlugs).not.toContain(intermediateSlug);
+    const outgoing = db.getOutgoingLinks(finalSlug);
+    // Both names collapse onto one entity slug, so the two identical relations
+    // dedup to a single link row (INSERT OR IGNORE).
+    expect(outgoing.filter(link => link.to_slug === orgPage.slug && link.relation === "合作").length).toBe(1);
+    expect(db.getOutgoingLinks(oldPage.slug)).toEqual([]);
+    expect(db.getOutgoingLinks(intermediateSlug)).toEqual([]);
+  });
+
   test("same-slug type correction never touches Lance (#463)", async () => {
     const embedding = new DeterministicEmbeddingProvider();
     const lance = new LanceDBManager();
