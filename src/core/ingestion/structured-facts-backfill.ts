@@ -88,7 +88,7 @@ export async function structuredFactsBackfill(
     const raw = await llm.chat([
       { role: "system", content: BACKFILL_PROMPT },
       { role: "user", content: `Entity: ${target.title}\nType: ${target.type}\n\nContent:\n${content.slice(0, 3000)}` },
-    ]);
+    ], { thinking: "disabled" });
 
     let facts: StructuredFact[];
     try {

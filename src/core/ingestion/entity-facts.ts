@@ -1,4 +1,4 @@
-import type { LLMProvider } from "../../llm/provider.js";
+import { isLLMTimeoutError, type LLMProvider } from "../../llm/provider.js";
 import type { PageManager } from "../page.js";
 import { getFactFieldWhitelist } from "./ner.js";
 
@@ -60,9 +60,14 @@ export async function extractEntityFacts(input: {
       input.llm.chat([
         { role: "system", content: ENTITY_FACTS_PROMPT },
         { role: "user", content: `Entity: ${input.title}\nType: ${input.type}\n\nContent:\n${input.body.slice(0, 3000)}` },
-      ]),
+      ], { thinking: "disabled" }),
       timeout,
     ]);
+  } catch (error) {
+    // A provider-side timeout must honor the entity-facts timeout contract so
+    // the queue counts it as timed_out instead of a provider failure (#462).
+    if (isLLMTimeoutError(error)) throw new EntityFactsTimeoutError(error.timeoutMs);
+    throw error;
   } finally {
     if (timer) clearTimeout(timer);
   }

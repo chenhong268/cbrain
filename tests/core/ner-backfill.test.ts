@@ -12,6 +12,7 @@ import { runNerBackfillStage } from "../../src/core/ingestion/ner-backfill";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline";
 import { NerEngine, NerTimeoutError } from "../../src/core/ingestion/ner";
 import type { LLMProvider } from "../../src/llm/provider";
+import { LLMTimeoutError } from "../../src/llm/provider";
 import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic";
 import { LanceDBManager } from "../../src/storage/lancedb";
 import { canonicalSlug } from "../../src/utils/slug";
@@ -2018,6 +2019,25 @@ describe("runNerBackfillStage (#252)", () => {
     expect(counts.timed_out).toBe(1);
     expect(db.getJob(id)!.status).toBe("pending");
     expect(db.getJob(id)!.error).toBe("ENTITY_FACTS_TIMEOUT");
+  });
+
+  // #462: a provider-side LLMTimeoutError must not be misclassified as
+  // ENTITY_FACTS_PROVIDER_ERROR — the queue reports it as timed_out.
+  test("entity_facts provider LLMTimeoutError is counted as timed_out (#462)", async () => {
+    const seed = new IngestManager(
+      db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir,
+      undefined, undefined, { nerMode: "off" },
+    );
+    const page = await seed.ingest({ type: "markdown", content: "---\ntitle: 实体A\ntype: entity/company\n---\n匿名正文。" });
+    const id = db.submitJob("ner-backfill", { slug: page.slug, kind: "entity_facts" });
+    const llm: LLMProvider = { name: "mock", chat: async () => { throw new LLMTimeoutError("mock", 12_345); } };
+
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir), { entityFactsLlm: llm });
+    expect(counts.timed_out).toBe(1);
+    expect(counts.failed).toBe(0);
+    expect(db.getJob(id)!.status).toBe("pending");
+    expect(db.getJob(id)!.error).toBe("ENTITY_FACTS_TIMEOUT");
+    expect(new PageManager(db, testDir).getBySlug(page.slug)!.frontmatter.industry).toBeUndefined();
   });
 
   test("stale entity_facts is recovered without receiving a NER lease", async () => {

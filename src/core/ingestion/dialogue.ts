@@ -142,7 +142,7 @@ export class DialogueIngest {
       response = await this.llm.chat([
         { role: "system", content: prompt },
         { role: "user", content: truncated },
-      ]);
+      ], { thinking: "disabled" });
     } catch (e) {
       this.logger?.error("dialogue", "LLM 调用失败", { error: e instanceof Error ? e.message : String(e) });
       return { ...empty, reason: "llm error" };

@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, } from "bun:test";
 import { structuredFactsBackfill } from "../../src/core/ingestion/structured-facts-backfill.js";
-import type { LLMProvider } from "../../src/llm/provider.js";
+import type { ChatOptions, LLMProvider } from "../../src/llm/provider.js";
 import type { CBrainDB, PageRow } from "../../src/storage/sqlite.js";
 import { mkdtempSync, writeFileSync, mkdirSync, } from "node:fs";
 import { join } from "node:path";
@@ -105,6 +105,26 @@ describe("structuredFactsBackfill", () => {
     // Verify file WAS modified
     const content = await Bun.file(filePath).text();
     expect(content).toContain("birthplace: 上海");
+  });
+
+  // #462: pure extraction must not let a compatible provider run default reasoning.
+  test("extraction chat explicitly requests disabled thinking (#462)", async () => {
+    const page = makePage();
+    mkdirSync(join(vaultPath, "brain/entities"), { recursive: true });
+    writeFileSync(join(vaultPath, page.file_path), "---\ntitle: 实体A\ntype: entity\n---\n\n匿名正文。");
+
+    const capturedOptions: Array<ChatOptions | undefined> = [];
+    const llm: LLMProvider = {
+      name: "mock",
+      chat: async (_messages, options) => {
+        capturedOptions.push(options);
+        return JSON.stringify({ facts: [] });
+      },
+    };
+
+    await structuredFactsBackfill(createMockDB([page]), vaultPath, llm, { apply: false });
+
+    expect(capturedOptions).toEqual([{ thinking: "disabled" }]);
   });
 
   test("does not overwrite existing fields", async () => {
