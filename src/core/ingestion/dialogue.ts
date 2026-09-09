@@ -231,6 +231,22 @@ export class DialogueIngest {
         this.db.incrementMentionCount(resolution.slug);
         skipped++;
       } else if (resolution.action === "duplicate_candidate" || resolution.action === "stub_created") {
+        // #467: exact title collision — the resolver flagged a
+        // duplicate_candidate against the very page holding that exact title
+        // (entity type-gate or non-entity occupation). Titles are globally
+        // unique, so the write below would violate pages.title; reuse the
+        // occupier as the candidate reference instead. Non-exact duplicates
+        // (alias/normalized/substring matches) keep the write branch below —
+        // the slug equality limits reuse to the exact-title occupier only.
+        if (
+          resolution.action === "duplicate_candidate" &&
+          this.db.getPageByTitle(entity.name)?.slug === resolution.slug
+        ) {
+          entitySlugMap.set(entity.name, resolution.slug);
+          this.db.incrementMentionCount(resolution.slug);
+          skipped++;
+          continue;
+        }
         const pageType = mapEntityType(entity.type);
         const slug = generateSlug(entity.name, pageType);
         const fileName = slugToFilePath(slug);

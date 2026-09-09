@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { DialogueIngest } from "../../src/core/ingestion/dialogue.js";
@@ -498,6 +498,109 @@ describe("DialogueIngest", () => {
         }
       }
       expect(foundKr).toBe(true);
+    });
+  });
+
+  // #467: exact non-entity title occupation — reuse the occupier as candidate
+  // reference; never write a new file or overwrite the existing page.
+  describe("title collision (#467)", () => {
+    test("non-entity exact title occupation reuses occupier without overwrite or orphan", async () => {
+      const pages = new PageManager(db, vaultPath);
+      const insight = pages.create({ title: "已知洞察", type: "insight", body: "必须保留的洞察正文。" });
+      const insightPath = join(vaultPath, db.getPage(insight.slug)!.file_path);
+      const before = readFileSync(insightPath);
+      const vaultBefore = readdirSync(vaultPath, { recursive: true }).sort().join("\n");
+
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "已知洞察", type: "concept", relevance: "high", context: "对话中讨论该主题" },
+          ],
+          relations: [],
+          events: [],
+          facts: [],
+        }),
+      ]);
+      const dialogue = new DialogueIngest(db, createMockEmbeddingProvider(), createMockLanceDB() as any, vaultPath, llm);
+
+      const result = await dialogue.ingest("用户：我们来聊聊已知洞察。");
+
+      expect(result.newEntities).toBe(0);
+      expect(result.decision).toBe("skipped");
+      expect(
+        db.rawDb.prepare("SELECT COUNT(*) as cnt FROM pages WHERE title = '已知洞察'").get() as any,
+      ).toMatchObject({ cnt: 1 });
+      expect(readFileSync(insightPath).equals(before)).toBe(true);
+      expect(db.getEntityType(insight.slug)).toBe("insight");
+      expect(readdirSync(vaultPath, { recursive: true }).sort().join("\n")).toBe(vaultBefore);
+      const mention = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(insight.slug) as any;
+      expect(mention.mention_count).toBe(1);
+    });
+
+    test("exact entity type-gate collision reuses original page without crash or new file", async () => {
+      const pages = new PageManager(db, vaultPath);
+      const concept = pages.create({ title: "同名概念", type: "concept/concept", body: "必须保留的概念正文。" });
+      const conceptPath = join(vaultPath, db.getPage(concept.slug)!.file_path);
+      const before = readFileSync(conceptPath);
+      const vaultBefore = readdirSync(vaultPath, { recursive: true }).sort().join("\n");
+
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "同名概念", type: "company", relevance: "high", context: "对话中以公司身份提到该名称" },
+          ],
+          relations: [],
+          events: [],
+          facts: [
+            { entity: "同名概念", field: "industry", value: "匿名行业", confidence: 0.9, evidence: "匿名原文" },
+          ],
+        }),
+      ]);
+      const dialogue = new DialogueIngest(db, createMockEmbeddingProvider(), createMockLanceDB() as any, vaultPath, llm);
+
+      const result = await dialogue.ingest("用户：同名概念最近扩张很快。");
+
+      expect(result.newEntities).toBe(0);
+      expect(result.decision).toBe("skipped");
+      expect(
+        db.rawDb.prepare("SELECT COUNT(*) as cnt FROM pages WHERE title = '同名概念'").get() as any,
+      ).toMatchObject({ cnt: 1 });
+      expect(db.getEntityType(concept.slug)).toBe("concept/concept");
+      expect(pages.getBySlug(concept.slug)?.body).toBe("必须保留的概念正文。");
+      expect(readFileSync(conceptPath).equals(before)).toBe(true);
+      expect(readdirSync(vaultPath, { recursive: true }).sort().join("\n")).toBe(vaultBefore);
+      const mention = db.rawDb.prepare("SELECT mention_count FROM pages WHERE slug = ?").get(concept.slug) as any;
+      expect(mention.mention_count).toBe(1);
+    });
+
+    test("alias type-gate duplicate (non-exact name) still writes tagged page", async () => {
+      const pages = new PageManager(db, vaultPath);
+      const concept = pages.create({ title: "甲主题", type: "concept/concept", body: "已有概念。" });
+      db.addAliasWithSource(concept.slug, "主题甲", "manual");
+
+      const llm = createMockLLM([
+        JSON.stringify({
+          entities: [
+            { name: "主题甲", type: "company", relevance: "high", context: "对话中以公司身份提到该名称" },
+          ],
+          relations: [],
+          events: [],
+          facts: [],
+        }),
+      ]);
+      const dialogue = new DialogueIngest(db, createMockEmbeddingProvider(), createMockLanceDB() as any, vaultPath, llm);
+
+      const result = await dialogue.ingest("用户：主题甲最近扩张很快。");
+
+      // Entity type-gate duplicate via alias keeps the legacy write branch.
+      expect(result.newEntities).toBe(1);
+      const duplicate = db.rawDb.prepare("SELECT * FROM pages WHERE title = '主题甲'").get() as any;
+      expect(duplicate).not.toBeNull();
+      expect(duplicate.slug).not.toBe(concept.slug);
+      expect(duplicate.type).toBe("entity/company");
+      const duplicateFile = readFileSync(join(vaultPath, duplicate.file_path), "utf-8");
+      expect(duplicateFile).toContain("duplicate-candidate");
+      expect(db.rawDb.prepare("SELECT COUNT(*) as cnt FROM pages WHERE title = '甲主题'").get() as any).toMatchObject({ cnt: 1 });
     });
   });
 

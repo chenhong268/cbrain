@@ -262,6 +262,15 @@ export class EntityResolver {
       return { slug: exactSlug, action: "duplicate_candidate", score: 0.75, matchedBy: "type-gate" };
     }
 
+    // #467: exact title occupied by a page OUTSIDE the entity/concept domain
+    // (Layer 1a already missed). Page titles are globally unique, so creating a
+    // stub would violate pages.title — surface the occupier as a duplicate
+    // candidate reference instead. Entity/concept exact hits above keep priority.
+    const occupied = this.db.getPageByTitle(name);
+    if (occupied) {
+      return { slug: occupied.slug, action: "duplicate_candidate", score: 0.75, matchedBy: "type-gate" };
+    }
+
     // Layer 1b: exact alias match
     const aliasSlug = this.db.getSlugByAlias(name);
     if (aliasSlug) {
