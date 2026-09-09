@@ -534,6 +534,18 @@ export class ContentPipeline {
                 movedVectors.l1,
               );
             }
+            // #465: the move just deleted currentSlug — every reference captured
+            // earlier in this extraction is now stale: other names of the same
+            // entity resolved to currentSlug, and chained-move entries in
+            // movedSlugMap may still point at it as an intermediate target.
+            // Rewrite both in place so relations, facts, and resolvedSlugs only
+            // ever reference the current slug.
+            for (const [name, slug] of entitySlugMap) {
+              if (slug === currentSlug) entitySlugMap.set(name, correctedSlug);
+            }
+            for (const [source, slug] of movedSlugMap) {
+              if (slug === currentSlug) movedSlugMap.set(source, correctedSlug);
+            }
             movedSlugMap.set(result.slug, correctedSlug);
             movedSlugMap.set(currentSlug, correctedSlug);
             entitySlugMap.set(entity.name, correctedSlug);
