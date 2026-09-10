@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { findEntitySlug, normalizeRelation, relationEndpointsAllowed, RELATION_DOMAIN_VIOLATION } from "../../core/shared.js";
+import { findEntitySlug, normalizeRelation, relationEndpointsAllowed, RELATION_DOMAIN_VIOLATION, insertSemanticLink, RELATION_LABEL_CONFLICT } from "../../core/shared.js";
 import { formatGraphEnvelope, formatGraphPathEnvelope, formatLinksEnvelope } from "./format-result.js";
 import { buildToolResult } from "./result-builder.js";
 import { TITLE_MAX, RELATION_MAX, CONTEXT_MAX, SUMMARY_MAX } from "../validation.js";
@@ -68,7 +68,17 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     if (!relationEndpointsAllowed(ctx.db, from, to, normalized)) {
       return { ...linkJson({ error: RELATION_DOMAIN_VIOLATION }), isError: true };
     }
-    ctx.db.insertLink(from, to, normalized, context ?? null, weight, strength, "agent", 0.9);
+    // #472: label-preserving insert; a conflicting alias fails explicitly.
+    const inserted = insertSemanticLink(ctx.db, from, to, relation, {
+      context: context ?? null,
+      weight,
+      strength,
+      sourceType: "agent",
+      confidence: 0.9,
+    });
+    if (!inserted) {
+      return { ...linkJson({ error: RELATION_LABEL_CONFLICT }), isError: true };
+    }
     ctx.pages.incrementMention(to);
     const addWarnings = ctx.pages.syncAffectedSlugs([from, to]);
 

@@ -290,6 +290,66 @@ export function relationEndpointsAllowed(
   return getOntology().validateRelationDomain(relation, fromType, toType);
 }
 
+export const RELATION_LABEL_CONFLICT = "relation label conflicts with an existing canonical edge";
+
+export interface SemanticLinkInsert {
+  context?: string | null;
+  weight?: number;
+  strength?: string;
+  sourceType?: string;
+  confidence?: number;
+  provenance?: { source_page_slug?: string; evidence?: string };
+}
+
+/** Any existing row for the triple — including inactive/rejected/superseded
+ *  tombstones — or for the ontology-declared reverse triple. */
+function semanticEdgeTaken(db: CBrainDB, from: string, to: string, canonical: string): boolean {
+  const forward = db.rawDb
+    .prepare("SELECT 1 FROM links WHERE from_slug = ? AND to_slug = ? AND relation = ? LIMIT 1")
+    .get(from, to, canonical);
+  if (forward) return true;
+  const reverse = getOntology().getReverseRelation(canonical);
+  if (!reverse) return false;
+  return db.rawDb
+    .prepare("SELECT 1 FROM links WHERE from_slug = ? AND to_slug = ? AND relation = ? LIMIT 1")
+    .get(to, from, reverse) != null;
+}
+
+/**
+ * Semantic link insertion that preserves the caller's original relation label
+ * (#472). Normalizes the label; when it differs from the canonical name the
+ * original label is prepended to the context as explicit, JSON-escaped input
+ * metadata with the original context appended unchanged. Evidence, source,
+ * and trust values pass through the caller's insert args untouched — no
+ * inferred dates or truth claims.
+ *
+ * Alias writes fail closed (return false) when any forward or
+ * ontology-reverse triple already exists, so a repeat alias never silently
+ * overwrites context or reports success. Canonical-input writes keep the
+ * low-level INSERT OR IGNORE semantics. The check and insert share one
+ * transaction (nesting as a savepoint inside a caller transaction), so a
+ * failed reverse write rolls the forward edge back. Storage errors throw.
+ * Callers keep the #471 endpoint preflight before calling this helper.
+ */
+export function insertSemanticLink(
+  db: CBrainDB,
+  from: string,
+  to: string,
+  rawRelation: string,
+  insert: SemanticLinkInsert,
+): boolean {
+  const canonical = normalizeRelation(rawRelation);
+  const isAlias = rawRelation !== canonical;
+  const context = isAlias
+    ? `[input_label:${JSON.stringify(rawRelation)}]${insert.context ?? ""}`
+    : insert.context;
+  return db.runInTransaction(() => {
+    if (isAlias && semanticEdgeTaken(db, from, to, canonical)) return false;
+    db.insertLink(from, to, canonical, context, insert.weight, insert.strength, insert.sourceType, insert.confidence, undefined, insert.provenance);
+    return true;
+  });
+}
+
 export function buildStubBody(
   name: string,
   rels: Array<{ from: string; to: string; relation: string }>,

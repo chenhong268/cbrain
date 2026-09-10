@@ -21,6 +21,7 @@ import {
   normalizeRelation,
   getRelationStrength,
   relationEndpointsAllowed,
+  insertSemanticLink,
 } from "../shared.js";
 import { canonicalSlug } from "../../utils/slug.js";
 
@@ -629,7 +630,22 @@ export class ContentPipeline {
           continue;
         }
         const rw = getRelationStrength(normRel);
-        this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength, "ner", 0.5, undefined, { source_page_slug: fromSlug, evidence: rel.context });
+        // Preserve input labels; rejected aliases do not contribute to receipts.
+        const inserted = insertSemanticLink(this.db, from, to, rel.relation, {
+          context: rel.context,
+          weight: rw.weight,
+          strength: rw.strength,
+          sourceType: "ner",
+          confidence: 0.5,
+          provenance: { source_page_slug: fromSlug, evidence: rel.context },
+        });
+        if (!inserted) {
+          this.logger?.warn("pipeline", "ner relation skipped: alias conflicts with existing canonical edge", {
+            code: "relation_label_conflict",
+            relation: normRel,
+          });
+          continue;
+        }
 
         // Phase 1 #233: a weak/NER reports_to must never overwrite a trusted
         // active edge. insertLink already writes it as 'candidate' and leaves

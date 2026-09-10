@@ -20,6 +20,8 @@ import {
   getLayer,
   relationEndpointsAllowed,
   RELATION_DOMAIN_VIOLATION,
+  insertSemanticLink,
+  RELATION_LABEL_CONFLICT,
 } from "../shared.js";
 import { setHierarchy } from "./hierarchy.js";
 import { canonicalSlug, generateSlug } from "../../utils/slug.js";
@@ -309,21 +311,27 @@ function applyRelation(
     }
     const { weight, strength } = getRelationStrength(normalized);
 
+    // Keep insertion and mention updates atomic; conflicts leave both unchanged.
+    let inserted = false;
     deps.db.runInTransaction(() => {
-      deps.db.insertLink(
-        fromSlug,
-        toSlug,
-        normalized,
-        null,
+      inserted = insertSemanticLink(deps.db, fromSlug, toSlug, relation, {
+        context: null,
         weight,
         strength,
         sourceType,
-        0.9,
-        false,
-        { evidence },
-      );
-      deps.pages.incrementMention(toSlug);
+        confidence: 0.9,
+        provenance: { evidence },
+      });
+      if (inserted) deps.pages.incrementMention(toSlug);
     });
+    if (!inserted) {
+      return {
+        type: "relation",
+        success: false,
+        detail: `relation rejected: ${fromSlug} --[${normalized}]--> ${toSlug}`,
+        error: RELATION_LABEL_CONFLICT,
+      };
+    }
 
     return {
       type: "relation",

@@ -14,7 +14,7 @@ import {
   filterExtractedEntities,
   filterRelations,
 } from "./ner.js";
-import { findEntitySlug, mapEntityType, hashContent, normalizeRelation, relationEndpointsAllowed } from "../shared.js";
+import { findEntitySlug, mapEntityType, hashContent, normalizeRelation, relationEndpointsAllowed, insertSemanticLink } from "../shared.js";
 import { EntityResolver } from "./entity-resolver.js";
 import { generateSlug, slugToFilePath } from "../../utils/slug.js";
 import { stringifyFrontmatter, readPageFile, writePageFile } from "../../utils/frontmatter.js";
@@ -358,9 +358,24 @@ export class DialogueIngest {
         continue;
       }
 
-      if (this.db.linkExists(fromSlug, toSlug, normRel)) continue;
+      // Canonical-input dedup stays a silent skip; alias writes go through
+      // the label-preserving helper whose conflict check covers tombstones.
+      if (rel.relation === normRel && this.db.linkExists(fromSlug, toSlug, normRel)) continue;
 
-      this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null, undefined, undefined, "dialogue", 0.4, undefined, { source_page_slug: dialogueSource, evidence: rel.context ?? undefined });
+      // #472: keep the raw label; a conflicting alias contributes nothing.
+      const inserted = insertSemanticLink(this.db, fromSlug, toSlug, rel.relation, {
+        context: rel.context ?? null,
+        sourceType: "dialogue",
+        confidence: 0.4,
+        provenance: { source_page_slug: dialogueSource, evidence: rel.context ?? undefined },
+      });
+      if (!inserted) {
+        this.logger?.warn("dialogue", "relation skipped: alias conflicts with existing canonical edge", {
+          code: "relation_label_conflict",
+          relation: normRel,
+        });
+        continue;
+      }
 
       relationSlugs.add(fromSlug);
       relationSlugs.add(toSlug);
