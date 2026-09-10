@@ -1,6 +1,6 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import { PageManager, } from "../page.js";
-import { normalizeRelation } from "../shared.js";
+import { normalizeRelation, relationEndpointsAllowed, RELATION_DOMAIN_VIOLATION } from "../shared.js";
 
 export type WritebackAction = "append" | "create_concept" | "create_link";
 
@@ -111,7 +111,12 @@ export class WritebackManager {
       return { success: false, action: input.action, error: `Target page not found: ${toSlug}` };
     }
 
-    this.db.insertLink(fromSlug, toSlug, normalizeRelation(relation), input.source ?? "agent-writeback", undefined, undefined, "writeback", 0.6);
+    const normalized = normalizeRelation(relation);
+    // #471: preflight endpoints against the ontology before any write or sync.
+    if (!relationEndpointsAllowed(this.db, fromSlug, toSlug, normalized)) {
+      return { success: false, action: input.action, error: RELATION_DOMAIN_VIOLATION };
+    }
+    this.db.insertLink(fromSlug, toSlug, normalized, input.source ?? "agent-writeback", undefined, undefined, "writeback", 0.6);
 
     // Sync Known Relations for both endpoints
     const warnings = this.pages.syncAffectedSlugs([fromSlug, toSlug]);

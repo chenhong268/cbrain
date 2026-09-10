@@ -36,19 +36,19 @@ function getTools(server: any) {
   return (server as any)._registeredTools as Record<string, any>;
 }
 
-function insertPage(db: CBrainDB, slug: string, title: string, filePath?: string) {
+function insertPage(db: CBrainDB, slug: string, title: string, filePath?: string, type = "entity") {
   const fp = filePath ?? `${slug.replace(/\//g, "_")}.md`;
   db.rawDb.prepare(
-    `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, 'entity', ?, ?, ?)`
-  ).run(slug, title, fp, "h1");
+    `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
+  ).run(slug, type, title, fp, "h1");
 }
 
-function insertPageWithVault(db: CBrainDB, slug: string, title: string, vaultPath: string, filePath?: string) {
-  const fp = filePath ?? `${slug.replace(/\//g, "_")}.md`;
+function insertPageWithVault(db: CBrainDB, slug: string, title: string, vaultPath: string, type = "entity") {
+  const fp = `${slug.replace(/\//g, "_")}.md`;
   const dir = join(vaultPath, fp.substring(0, fp.lastIndexOf("/")));
   if (dir !== vaultPath) mkdirSync(dir, { recursive: true });
-  writeFileSync(join(vaultPath, fp), `---\ntitle: ${title}\ntype: entity\nslug: ${slug}\n---\n${title} content`);
-  insertPage(db, slug, title, fp);
+  writeFileSync(join(vaultPath, fp), `---\ntitle: ${title}\ntype: ${type}\nslug: ${slug}\n---\n${title} content`);
+  insertPage(db, slug, title, fp, type);
 }
 
 describe("Batch Tools", () => {
@@ -197,10 +197,9 @@ describe("Batch Tools", () => {
 
   describe("batch_add_links", () => {
     test("creates multiple links", async () => {
-      insertPageWithVault(db, "entities/a", "A", vaultPath);
-      insertPageWithVault(db, "entities/b", "B", vaultPath);
-      insertPageWithVault(db, "entities/c", "C", vaultPath);
-
+      insertPageWithVault(db, "entities/a", "A", vaultPath, "entity/person");
+      insertPageWithVault(db, "entities/b", "B", vaultPath, "entity/person");
+      insertPageWithVault(db, "entities/c", "C", vaultPath, "entity/person");
       const server = createServer(deps);
       const result = await getTools(server).batch_add_links.handler({
         links: [
@@ -244,9 +243,8 @@ describe("Batch Tools", () => {
     });
 
     test("mixed success and failure", async () => {
-      insertPageWithVault(db, "entities/a", "A", vaultPath);
-      insertPageWithVault(db, "entities/b", "B", vaultPath);
-
+      insertPageWithVault(db, "entities/a", "A", vaultPath, "entity/person");
+      insertPageWithVault(db, "entities/b", "B", vaultPath, "entity/person");
       const server = createServer(deps);
       const result = await getTools(server).batch_add_links.handler({
         links: [

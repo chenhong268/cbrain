@@ -265,6 +265,31 @@ export function getRelationStrength(relation: string): { strength: string; weigh
   return getOntology().getRelationStrength(relation);
 }
 
+export const RELATION_DOMAIN_VIOLATION = "relation endpoints do not satisfy ontology domain/range";
+
+/**
+ * Preflight for canonical semantic relation writes: the endpoints must satisfy
+ * the ontology-declared domain/range using each page's actual stored type —
+ * never a caller-supplied type hint. Unconstrained relations (e.g. 提及) pass
+ * without type lookups so mentions keep linking arbitrary (record) pages.
+ * Callers normalize first, so a relation with no ontology definition fails
+ * closed instead of bypassing the constraint.
+ */
+export function relationEndpointsAllowed(
+  db: CBrainDB,
+  fromSlug: string,
+  toSlug: string,
+  relation: string,
+): boolean {
+  const def = getOntology().getRelationType(relation);
+  if (!def) return false;
+  if (def.domain.length === 0 && def.range.length === 0) return true;
+  const fromType = db.getPage(fromSlug)?.type;
+  const toType = db.getPage(toSlug)?.type;
+  if (!fromType || !toType) return false;
+  return getOntology().validateRelationDomain(relation, fromType, toType);
+}
+
 export function buildStubBody(
   name: string,
   rels: Array<{ from: string; to: string; relation: string }>,

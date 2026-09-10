@@ -14,7 +14,7 @@ import {
   filterExtractedEntities,
   filterRelations,
 } from "./ner.js";
-import { findEntitySlug, mapEntityType, hashContent, normalizeRelation } from "../shared.js";
+import { findEntitySlug, mapEntityType, hashContent, normalizeRelation, relationEndpointsAllowed } from "../shared.js";
 import { EntityResolver } from "./entity-resolver.js";
 import { generateSlug, slugToFilePath } from "../../utils/slug.js";
 import { stringifyFrontmatter, readPageFile, writePageFile } from "../../utils/frontmatter.js";
@@ -348,6 +348,15 @@ export class DialogueIngest {
       if (!fromSlug || !toSlug) continue;
 
       const normRel = normalizeRelation(rel.relation);
+
+      if (!relationEndpointsAllowed(this.db, fromSlug, toSlug, normRel)) {
+        // #471: fixed privacy-safe diagnostic; valid sibling relations continue.
+        this.logger?.warn("dialogue", "relation skipped: endpoints violate ontology domain/range", {
+          code: "relation_domain_violation",
+          relation: normRel,
+        });
+        continue;
+      }
 
       if (this.db.linkExists(fromSlug, toSlug, normRel)) continue;
 

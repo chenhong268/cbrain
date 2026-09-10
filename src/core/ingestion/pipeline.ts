@@ -20,6 +20,7 @@ import {
   DEFAULT_CHUNK_SIZE,
   normalizeRelation,
   getRelationStrength,
+  relationEndpointsAllowed,
 } from "../shared.js";
 import { canonicalSlug } from "../../utils/slug.js";
 
@@ -618,6 +619,15 @@ export class ContentPipeline {
       const to = entitySlugMap.get(rel.to) ?? findEntitySlug(this.db, rel.to);
       if (from && to && from !== to) {
         const normRel = normalizeRelation(rel.relation);
+        if (!relationEndpointsAllowed(this.db, from, to, normRel)) {
+          // #471: reject ontology-incompatible endpoints before any write,
+          // counter, or slug sync; valid sibling relations below still apply.
+          this.logger?.warn("pipeline", "ner relation skipped: endpoints violate ontology domain/range", {
+            code: "relation_domain_violation",
+            relation: normRel,
+          });
+          continue;
+        }
         const rw = getRelationStrength(normRel);
         this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength, "ner", 0.5, undefined, { source_page_slug: fromSlug, evidence: rel.context });
 
@@ -752,7 +762,7 @@ export class ContentPipeline {
 
     return {
       entities: extraction.entities.length,
-      relations: extraction.relations.length,
+      relations: writtenRelations.length,
       events: extraction.events.length,
       factsWritten,
       stubsCreated: [...stubsCreated],

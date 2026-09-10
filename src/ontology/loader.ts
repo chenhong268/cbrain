@@ -142,16 +142,30 @@ export class OntologyLoader implements Ontology {
     return def.parent === "entity" || def.parent === "concept";
   }
 
+  /** True when `type` satisfies a declared constraint: the type must itself be
+   * declared in entity_types, then either equal the constraint or reach it
+   * via the ontology parent chain. Undeclared names — including prefix
+   * lookalikes like "entity/person-x" — are rejected before any comparison. */
+  private typeSatisfies(constraint: string, type: string): boolean {
+    if (!this.data.entity_types[type]) return false;
+    let current: string | undefined = type;
+    while (current !== undefined && this.data.entity_types[current]) {
+      if (current === constraint) return true;
+      current = this.data.entity_types[current]?.parent;
+    }
+    return false;
+  }
+
   validateRelationDomain(relation: string, fromType: string, toType: string): boolean {
     const def = this.data.relation_types[relation];
     if (!def) return false;
     if (def.domain.length === 0 && def.range.length === 0) return true;
     const domainOk =
       def.domain.length === 0 ||
-      def.domain.some((d) => fromType === d || fromType.startsWith(d));
+      def.domain.some((d) => this.typeSatisfies(d, fromType));
     const rangeOk =
       def.range.length === 0 ||
-      def.range.some((r) => toType === r || toType.startsWith(r));
+      def.range.some((r) => this.typeSatisfies(r, toType));
     return domainOk && rangeOk;
   }
 

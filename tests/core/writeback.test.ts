@@ -95,12 +95,12 @@ describe("WritebackManager", () => {
   test("create link between two pages", async () => {
     const pageA = pages.create({
       title: "Alice",
-      type: "entity",
+      type: "entity/person",
       body: "A person.",
     });
     const pageB = pages.create({
       title: "Acme Corp",
-      type: "entity",
+      type: "entity/company",
       body: "A company.",
     });
 

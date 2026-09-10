@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { findEntitySlug, normalizeRelation } from "../../core/shared.js";
+import { findEntitySlug, normalizeRelation, relationEndpointsAllowed, RELATION_DOMAIN_VIOLATION } from "../../core/shared.js";
 import { formatGraphEnvelope, formatGraphPathEnvelope, formatLinksEnvelope } from "./format-result.js";
 import { buildToolResult } from "./result-builder.js";
 import { TITLE_MAX, RELATION_MAX, CONTEXT_MAX, SUMMARY_MAX } from "../validation.js";
@@ -62,7 +62,13 @@ export function registerGraphTools(server: McpServer, ctx: ToolContext): void {
     if (!ctx.pages.getBySlug(to)) return { ...linkJson({ error: `Target page not found: ${to}` }), isError: true };
     if (from === to) return { ...linkJson({ error: "Cannot create self-referencing link" }), isError: true };
 
-    ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "agent", 0.9);
+    const normalized = normalizeRelation(relation);
+    // #471: preflight endpoints against the ontology before any write,
+    // mention bump, or slug sync.
+    if (!relationEndpointsAllowed(ctx.db, from, to, normalized)) {
+      return { ...linkJson({ error: RELATION_DOMAIN_VIOLATION }), isError: true };
+    }
+    ctx.db.insertLink(from, to, normalized, context ?? null, weight, strength, "agent", 0.9);
     ctx.pages.incrementMention(to);
     const addWarnings = ctx.pages.syncAffectedSlugs([from, to]);
 
