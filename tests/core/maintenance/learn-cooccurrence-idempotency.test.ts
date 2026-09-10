@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../../src/storage/sqlite.js";
@@ -64,17 +64,25 @@ afterEach(() => {
 
 describe("LearnManager 共现累加幂等性 (#437)", () => {
   it("treats every cbrain_recall route as recall value while retaining legacy and unknown weights", () => {
+    const fixtureNow = Date.now();
+    const createdAt = new Date(fixtureNow).toISOString();
     for (const slug of ["entity-frontdoor", "entity-legacy", "entity-query", "entity-unknown"]) seedPage(db, slug);
     const insert = db.rawDb.prepare(
-      "INSERT INTO query_log (tool, query, result_slugs, result_count) VALUES (?, ?, ?, 1)",
+      "INSERT INTO query_log (tool, query, result_slugs, result_count, created_at) VALUES (?, ?, ?, 1, ?)",
     );
-    insert.run("cbrain_recall.content_recall", "匿名前门", JSON.stringify(["entity-frontdoor"]));
-    insert.run("recall", "匿名旧 recall", JSON.stringify(["entity-legacy"]));
-    insert.run("query", "匿名旧 query", JSON.stringify(["entity-query"]));
-    insert.run("unrecognized_tool", "匿名未知工具", JSON.stringify(["entity-unknown"]));
+    insert.run("cbrain_recall.content_recall", "匿名前门", JSON.stringify(["entity-frontdoor"]), createdAt);
+    insert.run("recall", "匿名旧 recall", JSON.stringify(["entity-legacy"]), createdAt);
+    insert.run("query", "匿名旧 query", JSON.stringify(["entity-query"]), createdAt);
+    insert.run("unrecognized_tool", "匿名未知工具", JSON.stringify(["entity-unknown"]), createdAt);
     db.setConfig(WATERMARK_KEY, "0");
 
-    new LearnManager(db).recomputeAll();
+    // This compares route values, so every row must have the same decay age.
+    const clock = spyOn(Date, "now").mockReturnValue(fixtureNow);
+    try {
+      new LearnManager(db).recomputeAll();
+    } finally {
+      clock.mockRestore();
+    }
 
     const frontdoor = activityWeight(db, "entity-frontdoor");
     expect(frontdoor).toBeGreaterThan(0);
