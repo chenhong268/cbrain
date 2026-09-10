@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { normalizeRelation } from "../../core/shared.js";
+import { normalizeRelation, relationEndpointsAllowed, RELATION_DOMAIN_VIOLATION, insertSemanticLink, RELATION_LABEL_CONFLICT } from "../../core/shared.js";
 import { sanitizeError } from "../server.js";
 
 const BATCH_SAFETY_GATE = 20;
@@ -104,7 +104,25 @@ async function addLinks(ctx: ToolContext, links: BatchLinkInput[], confirmLargeB
         continue;
       }
 
-      ctx.db.insertLink(from, to, normalizeRelation(relation), context ?? null, weight, strength, "agent", 0.9);
+      const normalized = normalizeRelation(relation);
+      // #471: preflight endpoints against the ontology; invalid links fail
+      // individually without writes, mention bumps, or sync participation.
+      if (!relationEndpointsAllowed(ctx.db, from, to, normalized)) {
+        results.push({ from, to, success: false, error: RELATION_DOMAIN_VIOLATION });
+        continue;
+      }
+      // #472: label-preserving insert; a conflicting alias fails per-link.
+      const inserted = insertSemanticLink(ctx.db, from, to, relation, {
+        context: context ?? null,
+        weight,
+        strength,
+        sourceType: "agent",
+        confidence: 0.9,
+      });
+      if (!inserted) {
+        results.push({ from, to, success: false, error: RELATION_LABEL_CONFLICT });
+        continue;
+      }
       ctx.pages.incrementMention(to);
       syncedSlugs.add(from);
       syncedSlugs.add(to);

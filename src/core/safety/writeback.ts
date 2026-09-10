@@ -1,6 +1,6 @@
 import type { CBrainDB } from "../../storage/sqlite.js";
 import { PageManager, } from "../page.js";
-import { normalizeRelation } from "../shared.js";
+import { normalizeRelation, relationEndpointsAllowed, RELATION_DOMAIN_VIOLATION, insertSemanticLink, RELATION_LABEL_CONFLICT } from "../shared.js";
 
 export type WritebackAction = "append" | "create_concept" | "create_link";
 
@@ -111,7 +111,20 @@ export class WritebackManager {
       return { success: false, action: input.action, error: `Target page not found: ${toSlug}` };
     }
 
-    this.db.insertLink(fromSlug, toSlug, normalizeRelation(relation), input.source ?? "agent-writeback", undefined, undefined, "writeback", 0.6);
+    const normalized = normalizeRelation(relation);
+    // #471: preflight endpoints against the ontology before any write or sync.
+    if (!relationEndpointsAllowed(this.db, fromSlug, toSlug, normalized)) {
+      return { success: false, action: input.action, error: RELATION_DOMAIN_VIOLATION };
+    }
+    // #472: label-preserving insert; a conflicting alias fails explicitly.
+    const inserted = insertSemanticLink(this.db, fromSlug, toSlug, relation, {
+      context: input.source ?? "agent-writeback",
+      sourceType: "writeback",
+      confidence: 0.6,
+    });
+    if (!inserted) {
+      return { success: false, action: input.action, error: RELATION_LABEL_CONFLICT };
+    }
 
     // Sync Known Relations for both endpoints
     const warnings = this.pages.syncAffectedSlugs([fromSlug, toSlug]);

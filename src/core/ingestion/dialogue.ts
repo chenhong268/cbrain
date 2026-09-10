@@ -14,7 +14,7 @@ import {
   filterExtractedEntities,
   filterRelations,
 } from "./ner.js";
-import { findEntitySlug, mapEntityType, hashContent, normalizeRelation } from "../shared.js";
+import { findEntitySlug, mapEntityType, hashContent, normalizeRelation, relationEndpointsAllowed, insertSemanticLink } from "../shared.js";
 import { EntityResolver } from "./entity-resolver.js";
 import { generateSlug, slugToFilePath } from "../../utils/slug.js";
 import { stringifyFrontmatter, readPageFile, writePageFile } from "../../utils/frontmatter.js";
@@ -349,9 +349,33 @@ export class DialogueIngest {
 
       const normRel = normalizeRelation(rel.relation);
 
-      if (this.db.linkExists(fromSlug, toSlug, normRel)) continue;
+      if (!relationEndpointsAllowed(this.db, fromSlug, toSlug, normRel)) {
+        // #471: fixed privacy-safe diagnostic; valid sibling relations continue.
+        this.logger?.warn("dialogue", "relation skipped: endpoints violate ontology domain/range", {
+          code: "relation_domain_violation",
+          relation: normRel,
+        });
+        continue;
+      }
 
-      this.db.insertLink(fromSlug, toSlug, normRel, rel.context ?? null, undefined, undefined, "dialogue", 0.4, undefined, { source_page_slug: dialogueSource, evidence: rel.context ?? undefined });
+      // Canonical-input dedup stays a silent skip; alias writes go through
+      // the label-preserving helper whose conflict check covers tombstones.
+      if (rel.relation === normRel && this.db.linkExists(fromSlug, toSlug, normRel)) continue;
+
+      // #472: keep the raw label; a conflicting alias contributes nothing.
+      const inserted = insertSemanticLink(this.db, fromSlug, toSlug, rel.relation, {
+        context: rel.context ?? null,
+        sourceType: "dialogue",
+        confidence: 0.4,
+        provenance: { source_page_slug: dialogueSource, evidence: rel.context ?? undefined },
+      });
+      if (!inserted) {
+        this.logger?.warn("dialogue", "relation skipped: alias conflicts with existing canonical edge", {
+          code: "relation_label_conflict",
+          relation: normRel,
+        });
+        continue;
+      }
 
       relationSlugs.add(fromSlug);
       relationSlugs.add(toSlug);

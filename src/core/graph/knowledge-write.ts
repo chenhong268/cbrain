@@ -18,6 +18,10 @@ import {
   normalizeRelation,
   getRelationStrength,
   getLayer,
+  relationEndpointsAllowed,
+  RELATION_DOMAIN_VIOLATION,
+  insertSemanticLink,
+  RELATION_LABEL_CONFLICT,
 } from "../shared.js";
 import { setHierarchy } from "./hierarchy.js";
 import { canonicalSlug, generateSlug } from "../../utils/slug.js";
@@ -137,39 +141,55 @@ export async function addKnowledge(
   const stubsCreated = [...byName.values()]
     .filter(r => r.action === "stub_created")
     .map(r => r.slug);
+  // #471: sync only slugs with a successful write or an independently created
+  // stub — a rejected relation between pre-existing entities must not sync
+  // either endpoint.
+  const affectedSlugs = new Set<string>(stubsCreated);
 
   // Hierarchy
   if (input.hierarchy) {
     const targetResult = byName.get(input.hierarchy.reports_to);
     if (targetResult) {
-      applied.push(applyHierarchy(subjectResult.slug, targetResult.slug, deps));
+      const r = applyHierarchy(subjectResult.slug, targetResult.slug, deps);
+      applied.push(r);
+      if (r.success) {
+        affectedSlugs.add(subjectResult.slug);
+        affectedSlugs.add(targetResult.slug);
+      }
     }
   }
 
   // Fields
   for (const fact of input.facts ?? []) {
-    applied.push(applyField(subjectResult.slug, fact.field, fact.value, deps));
+    const r = applyField(subjectResult.slug, fact.field, fact.value, deps);
+    applied.push(r);
+    if (r.success) affectedSlugs.add(subjectResult.slug);
   }
 
   // Relations
   for (const rel of input.relations ?? []) {
     const targetResult = byName.get(rel.target);
     if (targetResult) {
-      applied.push(
-        applyRelation(subjectResult.slug, targetResult.slug, rel.relation, sourceType, input.evidence, deps),
-      );
+      const r = applyRelation(subjectResult.slug, targetResult.slug, rel.relation, sourceType, input.evidence, deps);
+      applied.push(r);
+      if (r.success) {
+        affectedSlugs.add(subjectResult.slug);
+        affectedSlugs.add(targetResult.slug);
+      }
     }
   }
 
   // Note
   if (input.note) {
-    applied.push(await applyNote(subjectResult.slug, input.note, deps));
+    const r = await applyNote(subjectResult.slug, input.note, deps);
+    applied.push(r);
+    if (r.success) affectedSlugs.add(subjectResult.slug);
   }
 
-  // Sync markdown for all affected slugs
-  for (const r of byName.values()) {
+  // Sync markdown for affected slugs only
+  for (const slug of affectedSlugs) {
     try {
-      deps.pages.syncLinksToMarkdown(r.slug);
+      deps.pages.syncLinksToMarkdown(slug);
     } catch {
       /* non-critical */
     }
@@ -279,22 +299,39 @@ function applyRelation(
 
   try {
     const normalized = normalizeRelation(relation);
+    // #471: preflight against the endpoints' stored page types — type hints
+    // from the caller never substitute for existing entity types.
+    if (!relationEndpointsAllowed(deps.db, fromSlug, toSlug, normalized)) {
+      return {
+        type: "relation",
+        success: false,
+        detail: `relation rejected: ${fromSlug} --[${normalized}]--> ${toSlug}`,
+        error: RELATION_DOMAIN_VIOLATION,
+      };
+    }
     const { weight, strength } = getRelationStrength(normalized);
 
-    deps.db.insertLink(
-      fromSlug,
-      toSlug,
-      normalized,
-      null,
-      weight,
-      strength,
-      sourceType,
-      0.9,
-      false,
-      { evidence },
-    );
-
-    deps.pages.incrementMention(toSlug);
+    // Keep insertion and mention updates atomic; conflicts leave both unchanged.
+    let inserted = false;
+    deps.db.runInTransaction(() => {
+      inserted = insertSemanticLink(deps.db, fromSlug, toSlug, relation, {
+        context: null,
+        weight,
+        strength,
+        sourceType,
+        confidence: 0.9,
+        provenance: { evidence },
+      });
+      if (inserted) deps.pages.incrementMention(toSlug);
+    });
+    if (!inserted) {
+      return {
+        type: "relation",
+        success: false,
+        detail: `relation rejected: ${fromSlug} --[${normalized}]--> ${toSlug}`,
+        error: RELATION_LABEL_CONFLICT,
+      };
+    }
 
     return {
       type: "relation",

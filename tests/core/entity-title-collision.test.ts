@@ -95,7 +95,7 @@ describe("entity title collision (#467)", () => {
           { name: "主题甲", type: "concept", relevance: "high", context: "知识主题" },
           { name: "组织丙", type: "organization", relevance: "high", context: "研究组织" },
         ],
-        [{ from: "主题甲", to: "组织丙", relation: "关联", context: "组织研究该主题" }],
+        [{ from: "主题甲", to: "组织丙", relation: "提及", context: "组织研究该主题" }],
         [{ entity: "主题甲", field: "industry", value: "匿名行业", confidence: 0.9, evidence: "匿名原文" }],
       ),
       new Set(),
@@ -119,7 +119,7 @@ describe("entity title collision (#467)", () => {
     const relationLink = db.rawDb.prepare(
       "SELECT * FROM links WHERE from_slug = ? AND to_slug = ?",
     ).get(insight.slug, org.slug) as { relation: string } | undefined;
-    expect(relationLink?.relation).toBe("关联");
+    expect(relationLink?.relation).toBe("提及");
     expect(result?.relations).toBe(1);
   });
 

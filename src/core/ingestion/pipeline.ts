@@ -20,6 +20,8 @@ import {
   DEFAULT_CHUNK_SIZE,
   normalizeRelation,
   getRelationStrength,
+  relationEndpointsAllowed,
+  insertSemanticLink,
 } from "../shared.js";
 import { canonicalSlug } from "../../utils/slug.js";
 
@@ -618,8 +620,32 @@ export class ContentPipeline {
       const to = entitySlugMap.get(rel.to) ?? findEntitySlug(this.db, rel.to);
       if (from && to && from !== to) {
         const normRel = normalizeRelation(rel.relation);
+        if (!relationEndpointsAllowed(this.db, from, to, normRel)) {
+          // #471: reject ontology-incompatible endpoints before any write,
+          // counter, or slug sync; valid sibling relations below still apply.
+          this.logger?.warn("pipeline", "ner relation skipped: endpoints violate ontology domain/range", {
+            code: "relation_domain_violation",
+            relation: normRel,
+          });
+          continue;
+        }
         const rw = getRelationStrength(normRel);
-        this.db.insertLink(from, to, normRel, rel.context, rw.weight, rw.strength, "ner", 0.5, undefined, { source_page_slug: fromSlug, evidence: rel.context });
+        // Preserve input labels; rejected aliases do not contribute to receipts.
+        const inserted = insertSemanticLink(this.db, from, to, rel.relation, {
+          context: rel.context,
+          weight: rw.weight,
+          strength: rw.strength,
+          sourceType: "ner",
+          confidence: 0.5,
+          provenance: { source_page_slug: fromSlug, evidence: rel.context },
+        });
+        if (!inserted) {
+          this.logger?.warn("pipeline", "ner relation skipped: alias conflicts with existing canonical edge", {
+            code: "relation_label_conflict",
+            relation: normRel,
+          });
+          continue;
+        }
 
         // Phase 1 #233: a weak/NER reports_to must never overwrite a trusted
         // active edge. insertLink already writes it as 'candidate' and leaves
@@ -752,7 +778,7 @@ export class ContentPipeline {
 
     return {
       entities: extraction.entities.length,
-      relations: extraction.relations.length,
+      relations: writtenRelations.length,
       events: extraction.events.length,
       factsWritten,
       stubsCreated: [...stubsCreated],
