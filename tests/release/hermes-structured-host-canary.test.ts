@@ -1349,6 +1349,8 @@ exit 0
       writeFileSync(
         fakeBun,
         `#!/bin/sh
+# Complete the controlled swap if registry scanning notices the mv/ln gap.
+trap '' TERM
 owned=$CBRAIN_CANARY_BOOT_ROOT
 moved=$CBRAIN_CANARY_BOOT_ROOT.moved
 printf '%s\n%s\n' "$owned" "$moved" > "${observation}"
