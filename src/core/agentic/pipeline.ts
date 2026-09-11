@@ -165,7 +165,7 @@ function buildTraceSummary(
     totalMs: execution.totalMs + (followUpExecution?.totalMs ?? 0),
     totalSteps: execution.trace.length + (followUpExecution?.trace.length ?? 0),
     passCount: followUpExecution ? 2 : 1,
-    errors,
+    errors: [...new Set([...errors, ...[execution.degradedReason, followUpExecution?.degradedReason].filter((reason): reason is string => !!reason)])],
     budgetUsed: {
       llmCalls: execution.budgetUsed.llmCalls + (followUpExecution?.budgetUsed.llmCalls ?? 0),
       searches: execution.budgetUsed.searches + (followUpExecution?.budgetUsed.searches ?? 0),

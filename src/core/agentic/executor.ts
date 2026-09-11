@@ -354,12 +354,17 @@ export class AgenticResearchExecutor {
       }
     }
 
+    // Collection is part of execution: failures must not erase spent calls or steps.
+    const allSlugs = [...new Set([...state.resolvedSlugs.values(), ...state.evidenceSlugs])];
+    let evidenceBoard: ReturnType<typeof collectEvidenceForSlugs>;
+    try {
+      evidenceBoard = collectEvidenceForSlugs(this.ctx.db, allSlugs);
+    } catch (err) {
+      degradedReason ??= `Evidence collection failed: ${errorMessage(err)}`;
+      evidenceBoard = { facts: [], user_thoughts: [], candidates: [], conflicts: [], gaps: [degradedReason] };
+    }
     const totalMs = this.now() - startTime;
     if (totalMs >= budget.max_ms && !degradedReason) degradedReason = "Wall-clock budget exhausted";
-
-    // Build evidence board from resolved slugs ∪ search-derived evidence slugs
-    const allSlugs = [...new Set([...state.resolvedSlugs.values(), ...state.evidenceSlugs])];
-    const evidenceBoard = collectEvidenceForSlugs(this.ctx.db, allSlugs);
 
     const status: ExecutionStatus = degradedReason
       ? "degraded"

@@ -551,6 +551,27 @@ describe("one budget for the complete research request (#481)", () => {
     expect(result.status).toBe("degraded");
   });
 
+  for (const failure of ["throw", "slow"] as const) it(`preserves consumed budget when evidence collection is ${failure}`, async () => {
+    let clock = 0;
+    const ctx = makeCtx({
+      now: () => clock,
+      llm: { name: "fixture", async chat() { return searchPlan(); } },
+      search: mockSearch({ async search() { clock += 10; return [{ slug: "page/a", score: 1, snippet: "实体A", source: "hybrid" }]; } }),
+      db: mockDB({ batchGetLinksForSlugs() {
+        if (failure === "throw") throw new Error("anonymous collection failure");
+        clock += 1100;
+        return new Map([["page/a", { outgoing: [makeLink("page/a")], incoming: [] }]]);
+      } }),
+    });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A", budgetOverride: { max_searches: 1, max_ms: 1000 } });
+    expect(result.execution.budgetUsed.searches).toBe(1);
+    expect(result.execution.steps.length).toBe(1);
+    expect(result.trace_summary.budgetUsed.searches).toBe(1);
+    expect(result.execution.status).toBe("degraded");
+    expect(result.status).toBe("degraded");
+    if (failure === "slow") expect(result.execution.totalMs).toBe(1110);
+  });
+
   it("does not start a model when the caller has no model budget", async () => {
     let calls = 0;
     const ctx = makeCtx({ llm: { name: "fixture", async chat() { calls++; return searchPlan(); } } });
