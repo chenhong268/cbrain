@@ -31,7 +31,9 @@ for (const mode of ["legacy", "structured"] as const) describe(`explicit relatio
   for (const query of ["实体A和实体B是什么关系？", "实体A与实体B有什么联系", "what is the relationship between entities/a and entities/b?", "how are entities/a and entities/b related?", "how is entities/a connected to entities/b?"]) {
     test(`local path: ${query}`, async () => {
       link("entities/b", "entities/a");
-      const { answer, raw } = await ask(query);
+      const { value, answer, raw } = await ask(query);
+      const result = mode === "legacy" ? raw.result : value.data.details.result;
+      expect(result.answer_context[mode === "legacy" ? "topClaims" : "top_claims"][0]).toContain("实体A");
       expect(answer).toContain("实体A");
       expect(answer).toContain("←");
       expect(calls).toEqual({ model: 0, search: 0 });
