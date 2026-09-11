@@ -25,7 +25,7 @@ Search returns fragments. Review returns understanding. When you need to know ev
 ### 深度复盘：5 步取证
 
 1. **搜索**：先 `cbrain_recall({ query: "全面了解主题D", detail: "normal" })`，再按结果中的真实名称补查关键词、别名及中英文变体；不要猜别名。daily profile 继续使用前门，直调 `query` 仅限显式 debug/full profile。
-2. **全文**：对相关页面用 `get_page`（可用时批量 `get_pages`）读取全文，先覆盖最相关的 3–5 页。检索片段不能代替全文；更多页面未读时说明覆盖限制。
+2. **全文**：对相关页面用 `get_page({ slug, include_full_body: true })` 读取全文，并确认正文成功返回，先覆盖最相关的 3–5 页。`get_page` 默认截断正文；`get_pages` 只返回 200/500 字摘要，可筛选页面但不能替代全文。检索片段不能代替全文；更多页面未读时说明覆盖限制。
 3. **关系**：对已确认实体调用 `graph_query` 的 `traverse` 与 `backlinks`，核对关系方向、来源及确认状态。数量不是关系证据，candidate 只能写为待确认。
 4. **时间线**：调用 `get_timeline` 读取事件明细及来源，区分事件日期与文件名/更新时间。无事件也要记录这一步的空结果。
 5. **合成**：只使用已取得的证据，每条事实标明来源；明确未覆盖或互相矛盾之处。前 4 步均执行且仍无信息，才能转向网上搜索；工具不可用或报错时说明复盘未完成，不能说大脑里没有资料。
