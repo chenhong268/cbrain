@@ -1862,9 +1862,8 @@ export class CBrainDB {
   }
 
   insertPage(data: { slug: string; type: string; title: string; filePath: string; contentHash: string; tier?: number; expiresAt?: string | null; confidenceDecay?: number }): void {
-    const autoExpires = data.type.startsWith("entity/") && !data.expiresAt
-      ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ")
-      : data.expiresAt ?? null;
+    // #476: expires_at is only what the caller explicitly provides — never a
+    // type-inferred TTL.
     this.prepare(
       "INSERT INTO pages (slug, type, title, file_path, content_hash, tier, expires_at, confidence_decay, created_at, updated_at) VALUES ($slug, $type, $title, $path, $hash, $tier, $expires, $decay, datetime('now'), datetime('now'))"
     ).run({
@@ -1874,17 +1873,17 @@ export class CBrainDB {
       $path: data.filePath,
       $hash: data.contentHash,
       $tier: data.tier ?? 3,
-      $expires: autoExpires,
+      $expires: data.expiresAt ?? null,
       $decay: data.confidenceDecay ?? 1.0,
     });
   }
 
   upsertPage(data: UpsertPageData): void {
-    const isEntity = data.type.startsWith("entity/");
-    const expiresAt = isEntity ? `datetime('now', '+90 days')` : null;
+    // #476: fresh inserts carry no TTL; ON CONFLICT leaves the existing
+    // expires_at untouched (expiry is explicit, never re-inferred).
     this.prepare(`
       INSERT INTO pages (slug, type, title, file_path, content_hash, tier, expires_at, created_at, updated_at)
-      VALUES ($slug, $type, $title, $path, $hash, 3, ${expiresAt ? expiresAt : 'NULL'}, datetime('now'), datetime('now'))
+      VALUES ($slug, $type, $title, $path, $hash, 3, NULL, datetime('now'), datetime('now'))
       ON CONFLICT(slug) DO UPDATE SET
         title = excluded.title,
         ${data.contentHash !== undefined ? 'content_hash = excluded.content_hash,' : ''}
@@ -2374,8 +2373,9 @@ export class CBrainDB {
   }
 
   getExpiredPages(now: string): Array<{ slug: string; title: string; expires_at: string }> {
+    // #476: blank expiry (''/spaces) is not a date — never treat it as expired.
     return this.prepare(
-      "SELECT slug, title, expires_at FROM pages WHERE expires_at IS NOT NULL AND expires_at < $now"
+      "SELECT slug, title, expires_at FROM pages WHERE expires_at IS NOT NULL AND TRIM(expires_at) <> '' AND expires_at < $now"
     ).all({ $now: now }) as Array<{ slug: string; title: string; expires_at: string }>;
   }
 
@@ -4404,7 +4404,7 @@ export class CBrainDB {
     const cutoff = new Date(Date.now() + withinDays * 86_400_000).toISOString().slice(0, 10);
     return this.prepare(
       `SELECT slug, title, expires_at FROM pages
-       WHERE slug IN (${ph}) AND expires_at IS NOT NULL AND expires_at <= ?
+       WHERE slug IN (${ph}) AND expires_at IS NOT NULL AND TRIM(expires_at) <> '' AND expires_at <= ?
        ORDER BY expires_at ASC`
     ).all(...slugs, cutoff) as Array<{ slug: string; title: string; expires_at: string }>;
   }

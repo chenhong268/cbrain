@@ -51,7 +51,7 @@ describe("runPageMigrations", () => {
     return db;
   }
 
-  test("adds expiry columns and backfills only entity pages", () => {
+  test("adds expiry columns without stamping entity pages", () => {
     const db = legacyPagesDb();
     try {
       runPageMigrations(db);
@@ -67,9 +67,47 @@ describe("runPageMigrations", () => {
         confidence_decay: number;
       }>;
       expect(rows).toHaveLength(2);
-      expect(rows[0]).toMatchObject({ slug: "entity/a", confidence_decay: 1 });
-      expect(rows[0].expires_at).toBeTruthy();
+      expect(rows[0]).toMatchObject({ slug: "entity/a", expires_at: null, confidence_decay: 1 });
       expect(rows[1]).toMatchObject({ slug: "records/b", expires_at: null, confidence_decay: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("re-runs never stamp entity pages and preserve explicit past/future/blank expiry values", () => {
+    const db = legacyPagesDb();
+    try {
+      db.exec("ALTER TABLE pages ADD COLUMN expires_at TEXT");
+      db.exec("ALTER TABLE pages ADD COLUMN confidence_decay REAL DEFAULT 1.0");
+      db.prepare("UPDATE pages SET expires_at = ? WHERE slug = ?").run("2020-01-01", "entity/a");
+      db.prepare("UPDATE pages SET expires_at = ? WHERE slug = ?").run("2099-01-01", "records/b");
+      db.prepare("INSERT INTO pages (slug, type, title, file_path, expires_at) VALUES (?, ?, ?, ?, ?)").run(
+        "entity/blank",
+        "entity/organization",
+        "组织B",
+        "brain/entities/blank.md",
+        "",
+      );
+
+      runPageMigrations(db);
+      db.prepare("INSERT INTO pages (slug, type, title, file_path) VALUES (?, ?, ?, ?)").run(
+        "entity/c",
+        "entity/person",
+        "实体C",
+        "brain/entities/c.md",
+      );
+      runPageMigrations(db);
+
+      const rows = db.prepare("SELECT slug, expires_at FROM pages ORDER BY slug").all() as Array<{
+        slug: string;
+        expires_at: string | null;
+      }>;
+      expect(rows).toEqual([
+        { slug: "entity/a", expires_at: "2020-01-01" },
+        { slug: "entity/blank", expires_at: "" },
+        { slug: "entity/c", expires_at: null },
+        { slug: "records/b", expires_at: "2099-01-01" },
+      ]);
     } finally {
       db.close();
     }

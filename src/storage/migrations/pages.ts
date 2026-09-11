@@ -10,8 +10,9 @@ function migratePagesExpiry(db: Database): void {
   if (!names.has("expires_at")) {
     db.exec("ALTER TABLE pages ADD COLUMN expires_at TEXT");
   }
-  // Backfill: entity pages without expires_at get now + 90d
-  db.exec("UPDATE pages SET expires_at = datetime('now', '+90 days') WHERE type LIKE 'entity/%' AND expires_at IS NULL");
+  // Contract (#476): expires_at is explicitly provided for time-sensitive
+  // content only. No expiry is ever inferred from entity type or age — no
+  // backfill, no default TTL. Preexisting values are preserved as-is.
   if (!names.has("confidence_decay")) {
     db.exec("ALTER TABLE pages ADD COLUMN confidence_decay REAL DEFAULT 1.0");
   }
