@@ -36,7 +36,7 @@ description: "Use when retrieving, organizing, or validating knowledge in CBrain
 | "当时怎么设计的" | 内容回忆 | `hermes-cbrain-brief.md` §2 | `cbrain_recall(detail: "normal")` |
 | "那个人叫什么" | 情景人物 | `hermes-cbrain-brief.md` §3 | `recall_episode` |
 | "有新发现吗" | 发现 | `hermes-cbrain-brief.md` §4 | `read_discoveries` |
-| "总结一下 X" | 深度回顾 | `review.md` | `cbrain_recall`（内部 overview 分发） |
+| "总结一下 X" | 深度回顾 | `review.md` | 概览用 `cbrain_recall`；深度复盘按 `review.md` 取全文、关系、时间线 |
 | "A 和 B 什么关系" | 关系分析 | `connect.md` | `cbrain_recall`（内部 relationship 分发） |
 | "写一份关于 X 的报告" | 知识写作 | `write.md` | 多步检索 + 组织 |
 | "把这些内容存下来" | 摄入 | `ingest.md` | `ingest` |

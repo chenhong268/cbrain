@@ -154,7 +154,7 @@ NER 从 `raw/` 内容中自动提取实体时：
 - `brain/` — 建议纳入 git（CBrain 产物，可追溯）
 - `raw/` — 由用户自行决定
 
-brain.sqlite 和 lancedb/ 是索引层，可随时从 vault 文件重建。
+vault 是 Markdown 正文的来源；`brain.sqlite` 同时保存版本历史（versions）、关系/事件的信任状态及来源审计、用户反馈和别名等长期状态。仅恢复 Markdown 或重建索引，不能恢复这些历史与判断。FTS 和向量索引可以重建，但 SQLite 整库不能作为可丢弃缓存。
 
 ## 运行时目录
 
@@ -210,6 +210,9 @@ cbrain backup -o <输出目录>
 ```
 
 - 备份包含 SQLite 一致性快照 + vault 全部内容 + LanceDB（如存在）
+- 要获得相互匹配的完整备份，先停止该 Profile 的 serve/watcher、dream/cron 和其他写入者，备份完成后再恢复运行。SQLite 快照内部一致，不意味着依次打包的 vault、SQLite、LanceDB 是跨存储原子快照；当前 backup 不会自动停止写入者。
+- 恢复验收应核对 Markdown 正文、版本历史、信任及来源历史、反馈与别名；索引可用不代表长期状态完整。匿名 CLI roundtrip 回归覆盖这些项目。
+- 该命令只覆盖上述三类数据，不是完整 Profile 镜像：配置、凭据、服务定义及其他 runtime/Profile 文件需另行记录恢复方式。凭据使用独立的安全存储，不写入普通备份包。
 - 输出 zip 文件，文件名含时间戳
 - vault 和 LanceDB 通过符号链接打包，避免复制大文件
 - `cbrain.json` **不在备份内**（可能含凭据，故刻意排除）；切勿手动把含凭据的配置加入备份、云同步或分享目录——同步/分享会绕过本地文件权限

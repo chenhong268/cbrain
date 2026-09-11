@@ -7,6 +7,7 @@ import { formatTimelineEnvelope } from "./format-result.js";
 import { buildToolResult, type BuiltToolResult } from "./result-builder.js";
 import { TITLE_MAX, SUMMARY_MAX } from "../validation.js";
 import { isSupportedSemanticEventDate } from "../../storage/sqlite.js";
+import { stripKnownRelationsSection } from "../../core/graph/known-relations-projector.js";
 type TimelineAction = "get" | "add";
 
 const TIMELINE_OUTPUT_SCHEMA = {
@@ -53,8 +54,12 @@ async function getTimeline(
   }
 
   const datePattern = /\b\d{4}[.\-/年]\d{1,2}/;
-  for (const line of body.split("\n")) {
-    if (datePattern.test(line)) {
+  for (const line of stripKnownRelationsSection(body).split("\n")) {
+    // A linked filename is not an event date. Keep the original line as evidence
+    // when a date also occurs in the surrounding narrative.
+    const narrative = line.replace(/!?\[\[([^\]|\n]*)(?:\|([^\]\n]*))?\]\]/g, (_link, _target, label) => label ?? "")
+      .replace(/!?\[([^\]\n]*)\]\([^\n)]*\)/g, "$1");
+    if (datePattern.test(narrative)) {
       const cleaned = line.replace(/^\|?\s*|\s*\|?$/g, "").trim();
       if (!entries.some(e => cleaned.includes(e.summary.slice(0, 10)))) {
         events.push({ summary: cleaned, source: "body", source_category: "agent_inference", trust_state: "candidate", source_page_slug: slug, evidence: cleaned.slice(0, 100) });

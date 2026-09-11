@@ -44,6 +44,7 @@
 - A和B、之间、联系、关联分析 → connect.md
 
 ### Deep Review
+- 简短概览可用前门 overview；全面/深度复盘必须按 review.md 完成搜索、全文、关系、时间线、合成 5 步，overview 统计不替代明细。
 - 总结、全面了解、梳理、汇总、复盘、review → review.md
 - 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
 - 深度了解、知识总览、全景 → review.md

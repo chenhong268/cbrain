@@ -177,11 +177,13 @@ cbrain health
 ### 深入了解一个主题
 
 ```
-# 对 AI Agent 说"帮我全面了解组织A"（Agent 默认走 cbrain_recall 前门，内部分发）
+# 对 AI Agent 说"帮我全面了解组织A"：先 cbrain_recall，再按 review skill 取全文、关系和时间线
+# overview 的片段和数量仅供概览，不能替代深度复盘
 # 或手动：
 cbrain query "组织A" --strategy all
 cbrain show brain/entities/组织a
 cbrain graph-query brain/entities/组织a --mode traverse
+cbrain graph-query brain/entities/组织a --mode backlinks
 cbrain timeline brain/entities/组织a
 ```
 

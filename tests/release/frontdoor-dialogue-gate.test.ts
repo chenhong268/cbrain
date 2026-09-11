@@ -96,7 +96,7 @@ interface Scenario {
 }
 
 /**
- * Ten anonymous natural-language scenarios. Route expectations are pinned to the
+ * Anonymous natural-language scenarios. Route expectations are pinned to the
  * router's actual signal matching (see tests/core/frontdoor-router.test.ts), not
  * wishful issue prose — e.g. "有没有遗漏" would hit grounded_recall, so the gap
  * scenario uses "帮我判断...盲区" to land on reasoning as intended.
@@ -106,7 +106,8 @@ const SCENARIOS: Scenario[] = [
   { id: "content-design", query: "之前项目B当时怎么设计的，为什么选这个方向", chosenRoute: "content_recall", nextTool: "deep_recall" },
   { id: "episodic-person", query: "想不起名字了，去年活动C上分享主题D的那个人是谁", chosenRoute: "episodic_recall", nextTool: "recall_episode" },
   { id: "hierarchy-org", query: "实体A的下属和汇报线是什么", chosenRoute: "hierarchy", nextTool: "get_org_tree", needsHierarchySeed: true },
-  { id: "relationship", query: "实体A和实体B是什么关系", chosenRoute: "relationship", nextTool: "agentic_research" },
+  { id: "relationship", query: "实体A和实体B是什么关系", chosenRoute: "relationship", nextTool: "graph_query" },
+  { id: "relationship-analysis", query: "分析实体A和实体B是什么关系，以及关系变化的原因", chosenRoute: "relationship", nextTool: "agentic_research" },
   { id: "overview", query: "帮我总结一下主题E的全貌", chosenRoute: "overview", nextTool: "summarize" },
   { id: "reasoning-gap", query: "帮我判断这个方案有没有盲区", chosenRoute: "reasoning", nextTool: "agentic_research" },
   { id: "debug-keyword", query: "debug 一下关键词F在哪些页面出现", chosenRoute: "debug_search", nextTool: "query" },

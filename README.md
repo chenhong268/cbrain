@@ -161,13 +161,15 @@ SearXNG 不是核心依赖。默认不配置时，CBrain 的本地写入、向�
 └─────────────────────────────────────────┘
     ↕ bidirectional sync
 ┌─────────────────────────────────────────┐
-│  Obsidian Vault (SSOT)                  │  ← Human reads, Agent writes, same files
+│  Obsidian Vault (Markdown)                  │  ← Human reads, Agent writes, same files
 └─────────────────────────────────────────┘
 ```
 
-**Key principle**: Obsidian vault is the single source of truth. SQLite and LanceDB are index layers — if corrupted, rebuild safely. Always `cbrain backup` first, then by scope: per-page `cbrain sync --slug <slug> --reindex`; quarantined pages `cbrain sync --reindex-quarantined`; whole-index corruption `cbrain sync --reindex-vectors`. Never delete them directly. All data lives in markdown files.
+**Storage principle**: The vault is the source for Markdown content. SQLite also holds durable state that Markdown cannot reconstruct, including version history, trust decisions/provenance and feedback. FTS and vector indexes can be rebuilt; deleting SQLite would lose more than indexes. Back up the vault and SQLite together; see [backup and recovery boundaries](docs/vault-spec.md#备份).
 
-**核心原则**：Obsidian vault 是唯一事实来源。SQLite 和 LanceDB 只是索引层 —— 损坏时先 `cbrain backup` 备份，再按场景重建：单页 `cbrain sync --slug <slug> --reindex`；watcher 隔离页 `cbrain sync --reindex-quarantined`；整库损坏 `cbrain sync --reindex-vectors`。切勿直接删除。所有数据都存在于 Markdown 文件中。
+**存储原则**：vault 保存 Markdown 正文；SQLite 同时保存版本历史、信任与来源记录、反馈等长期状态，不能仅凭 Markdown 完整重建。FTS 和向量属于可重建索引，重建索引不等于恢复完整大脑。备份需同时保留 vault 与 SQLite。
+
+索引异常时先保留备份，再按范围使用 `cbrain sync --slug <slug> --reindex`、`cbrain sync --reindex-quarantined` 或 `cbrain sync --reindex-vectors`。这些命令不是损坏数据库的完整恢复手段，切勿直接删除数据库。手动备份还包含现存的 LanceDB；配置、凭据及其他 Profile 文件不在包内，详见[备份与恢复边界](docs/vault-spec.md#备份)。
 
 ## Page Types
 
