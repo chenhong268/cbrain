@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -389,6 +389,53 @@ describe("get_timeline envelope", () => {
     expect(result.summary.status).toBe("empty");
     expect(result.display).toContain("暂无时间线");
   });
+
+  for (const mode of ["legacy", "structured"] as const) {
+    for (const date of ["[2026-07-02](records/daily.md)", "[[records/daily|2026-07-02]]"]) {
+      test(`${mode}: linked visible dates in event narratives survive: ${date}`, async () => {
+        insertPage("entities/a", "实体A");
+        writeFileSync(join(vaultPath, "entities_a.md"), `---\ntitle: 实体A\ntype: entity/person\n---\n- ${date}: 完成主题D复核。`);
+        const ctx = buildContext(deps);
+        ctx.outputMode = mode;
+        const server = new McpServer({ name: "fixture", version: "1" });
+        attachMcpTools(server, ctx);
+        const result = await callTool(server, "get_timeline", { slug: "entities/a" });
+        expect(result.summary).toMatchObject({ status: "ok", count: 1 });
+      });
+    }
+    for (const body of [
+      "## Known Relations\n- 提及 → [[records/2026-07-05-主题B]]",
+      "<!-- cbrain-links -->\n- [[records/2026-07-05-主题B]]\n<!-- /cbrain-links -->",
+      "参见 [[records/2026-07-05-主题B]]",
+      "参见 [主题B](records/2026-07-05-topic.md)",
+    ]) test(`${mode}: filename dates and generated relations are not events: ${body.slice(0, 25)}`, async () => {
+      insertPage("entities/a", "实体A");
+      writeFileSync(join(vaultPath, "entities_a.md"), `---\ntitle: 实体A\ntype: entity/person\n---\n${body}`);
+      const ctx = buildContext(deps);
+      ctx.outputMode = mode;
+      const server = new McpServer({ name: "fixture", version: "1" });
+      attachMcpTools(server, ctx);
+      const result = await callTool(server, "get_timeline", { slug: "entities/a" });
+      expect(result.summary).toMatchObject({ status: "empty", count: 0 });
+    });
+
+    test(`${mode}: real events around the generated block and structured entries survive`, async () => {
+      insertPage("entities/a", "实体A");
+      insertTimeline("entities/a", "结构化事件C", "2026-07-01", "trusted");
+      writeFileSync(join(vaultPath, "entities_a.md"), "---\ntitle: 实体A\ntype: entity/person\n---\n2026-07-02:讨论主题D。\n## Known Relations\n- [[records/2026-07-05-主题B]]\n## 后续事件\n2026-07-06:复核 [[records/2026-07-05-主题B]]。\n");
+      const ctx = buildContext(deps);
+      ctx.outputMode = mode;
+      const server = new McpServer({ name: "fixture", version: "1" });
+      attachMcpTools(server, ctx);
+      const result = await callTool(server, "get_timeline", { slug: "entities/a", include_raw: true });
+      expect(result.summary).toMatchObject({ status: "ok", count: 3 });
+      const raw = mode === "legacy" ? result.raw : result.audit.raw;
+      expect(raw.events.map((event: { summary: string }) => event.summary)).toEqual([
+        "结构化事件C", "2026-07-02:讨论主题D。", "2026-07-06:复核 [[records/2026-07-05-主题B]]。",
+      ]);
+      expect(raw.events[0].trust_state).toBe("trusted");
+    });
+  }
 
   test("get_timeline raw preserves full structure", async () => {
     insertPage("entities/a", "人物A");
