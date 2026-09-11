@@ -642,7 +642,7 @@ function runExplicitRelationship(
     ?? text.match(/^what is the relationship between (.+?) and (.+)$/iu)
     ?? text.match(/^how are (.+?) and (.+?) (?:related|connected)$/iu)
     ?? text.match(/^how is (.+?) connected to (.+)$/iu);
-  if (!pair) return null;
+  if (!pair || pair.slice(1).some((name) => /[,，;；!?？]|\band\b|[和与]/iu.test(name))) return null;
   // An alias may refer to multiple pages; never choose the first or a fuzzy match.
   const resolve = (name: string): { slug: string; title: string } | null => {
     const rows = ctx.db.rawDb.prepare(`SELECT DISTINCT p.slug, p.title FROM pages p

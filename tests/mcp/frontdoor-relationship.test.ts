@@ -77,8 +77,8 @@ for (const mode of ["legacy", "structured"] as const) describe(`explicit relatio
     expect((await ask("实体A和实体B是什么关系")).value.summary.status).toBe("empty");
     expect(calls).toEqual({ model: 0, search: 0 });
   });
-  test("complex analysis retains research", async () => {
-    await ask("分析实体A和实体B是什么关系，以及关系变化的原因");
+  for (const query of ["分析实体A和实体B是什么关系，以及关系变化的原因", "what is the relationship between entities/a and entities/b, and how has it changed?", "how are entities/a and entities/b related, and why are they connected?", "实体A和实体B和实体C是什么关系？"]) test(`complex analysis retains research: ${query}`, async () => {
+    await ask(query);
     expect(calls.model).toBe(1);
   });
 });
