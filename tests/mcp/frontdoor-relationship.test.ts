@@ -40,12 +40,20 @@ for (const mode of ["legacy", "structured"] as const) describe(`explicit relatio
       if (mode === "legacy") {
         expect(raw.routing.next_tool).toBe("graph_query");
         expect(raw.path.edges[0].evidence).toBe("匿名来源摘录");
+        expect(raw.result.answer_context.sourceSlugs).toEqual([{ slug: "entities/c", factCount: 1 }]);
       }
     });
   }
   test("exact alias and same entity", async () => {
     db.addAlias("entities/a", "别名甲");
     expect((await ask("别名甲和实体A是什么关系")).answer).toContain("同一条目");
+    expect(calls).toEqual({ model: 0, search: 0 });
+  });
+  test("a relation without an explicit source does not invent one", async () => {
+    link("entities/a", "entities/b");
+    db.rawDb.exec("UPDATE links SET source_page_slug = NULL");
+    const { raw } = await ask("实体A和实体B是什么关系");
+    if (mode === "legacy") expect(raw.result.answer_context.sourceSlugs).toEqual([]);
     expect(calls).toEqual({ model: 0, search: 0 });
   });
   test("candidate remains pending", async () => {

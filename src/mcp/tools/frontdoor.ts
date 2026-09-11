@@ -669,6 +669,10 @@ function runExplicitRelationship(
     formatted.display = "无法唯一确认两个实体，请提供明确名称或别名。";
     formatted.summary.message = formatted.display;
   }
+  const sourceCounts = new Map<string, number>();
+  for (const edge of path?.edges ?? []) {
+    if (edge.source_page_slug) sourceCounts.set(edge.source_page_slug, (sourceCounts.get(edge.source_page_slug) ?? 0) + 1);
+  }
   // Preserve the existing relationship result container in both output modes.
   const result = {
     status: path ? "ok" : "insufficient",
@@ -676,7 +680,7 @@ function runExplicitRelationship(
       confidence: path && path.edges.every((edge) => edge.trust_state === "trusted") ? "medium" : "low",
       topClaims: path ? formatted.display.split("\n") : [],
       gaps: path ? [] : [formatted.display],
-      sourceSlugs: path?.nodes.map((node) => ({ slug: node.slug, factCount: path.edges.filter((edge) => edge.from_slug === node.slug || edge.to_slug === node.slug).length })) ?? [],
+      sourceSlugs: [...sourceCounts].map(([slug, factCount]) => ({ slug, factCount })),
     },
   };
   return withRouting(formatted, { ...payload, result }, { ...routing, next_tool: "graph_query" }, path?.nodes.map((node) => node.slug) ?? []);
