@@ -4,6 +4,9 @@ import {
   type PipelineInput,
 } from "../../../src/core/agentic/pipeline.js";
 import type { ExecutorContext } from "../../../src/core/agentic/executor.js";
+import { CBrainDB } from "../../../src/storage/sqlite.js";
+import { HybridSearch } from "../../../src/core/retrieval/search.js";
+import { GraphManager } from "../../../src/core/graph/graph.js";
 
 // --- Mock factories (same pattern as executor.test.ts) ---
 
@@ -480,4 +483,111 @@ describe("pipeline — follow-up inherits budget override", () => {
 
     expect(result.plan.budget.max_searches).toBe(5);
   });
+});
+
+describe("one budget for the complete research request (#481)", () => {
+  const searchPlan = (steps = 1) => JSON.stringify({
+    intent: "entity_lookup", entities: [],
+    steps: Array.from({ length: steps }, () => ({ kind: "search", input: "实体A" })),
+    budget: { max_llm_calls: 3, max_searches: 8, max_ms: 8000 },
+  });
+
+  it("counts planning time/calls and does not replenish searches for follow-up", async () => {
+    let clock = 0, calls = 0, searches = 0;
+    const ctx = makeCtx({
+      now: () => clock,
+      llm: { name: "fixture", async chat() { calls++; clock += 200; return searchPlan(); } },
+      search: mockSearch({ async search() { searches++; clock += 10; return []; } }),
+    });
+    const result = await new AgenticResearchPipeline(ctx).run({
+      query: "实体A", budgetOverride: { max_searches: 1, max_llm_calls: 1, max_ms: 1000 },
+    });
+    expect(searches).toBe(1);
+    expect(calls).toBe(1);
+    expect(result.trace_summary.budgetUsed).toEqual({ searches: 1, llmCalls: 1, ms: 210 });
+    expect(result.trace_summary.totalMs).toBe(210);
+    expect(result.status).toBe("degraded");
+  });
+
+  it("counts failed planning attempts and still permits deterministic reads", async () => {
+    let calls = 0;
+    const ctx = makeCtx({ llm: { name: "fixture", async chat() { calls++; throw new Error("offline"); } } });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A", budgetOverride: { max_llm_calls: 1 } });
+    expect(calls).toBe(1);
+    expect(result.trace_summary.budgetUsed.llmCalls).toBe(1);
+    expect(result.execution.steps.length).toBeGreaterThan(0);
+  });
+
+  it("real hybrid search cannot spend an untracked model call on expansion", async () => {
+    const db = new CBrainDB(":memory:");
+    let calls = 0;
+    const llm = { name: "fixture", async chat() { calls++; return calls === 1 ? searchPlan() : "[]"; } };
+    const embedding = {
+      dimensions: 2,
+      async embed() { return { embedding: [1, 0], tokenCount: 1 }; },
+      async embedBatch() { return []; },
+    };
+    const graph = new GraphManager(db);
+    const search = new HybridSearch(db, embedding, { search: async () => [] } as never, { llm, graph });
+    try {
+      const result = await new AgenticResearchPipeline(makeCtx({ db, search, graph, llm })).run({
+        query: "实体A", budgetOverride: { max_llm_calls: 1, max_searches: 1 },
+      });
+      expect(calls).toBe(1);
+      expect(result.trace_summary.budgetUsed.llmCalls).toBe(calls);
+      expect(result.trace_summary.budgetUsed.searches).toBe(1);
+    } finally { db.close(); }
+  });
+
+  it("counts failed searches before deciding whether another may start", async () => {
+    let searches = 0;
+    const ctx = makeCtx({
+      llm: { name: "fixture", async chat() { return searchPlan(2); } },
+      search: mockSearch({ async search() { searches++; throw new Error("offline"); } }),
+    });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A", budgetOverride: { max_searches: 1 } });
+    expect(searches).toBe(1);
+    expect(result.trace_summary.budgetUsed.searches).toBe(1);
+    expect(result.status).toBe("degraded");
+  });
+
+  it("does not start a model when the caller has no model budget", async () => {
+    let calls = 0;
+    const ctx = makeCtx({ llm: { name: "fixture", async chat() { calls++; return searchPlan(); } } });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A", budgetOverride: { max_llm_calls: 0 } });
+    expect(calls).toBe(0);
+    expect(result.trace_summary.budgetUsed.llmCalls).toBe(0);
+    expect(result.execution.steps.length).toBeGreaterThan(0);
+  });
+
+  it("a stalled planner returns degraded and a late plan cannot start searches", async () => {
+    let searches = 0;
+    let finish!: (plan: string) => void;
+    const ctx = makeCtx({
+      llm: { name: "fixture", chat: () => new Promise(resolve => { finish = resolve; }) },
+      search: mockSearch({ async search() { searches++; return []; } }),
+    });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A", budgetOverride: { max_ms: 30 } });
+    expect(result.status).toBe("degraded");
+    expect(result.trace_summary.budgetUsed.llmCalls).toBe(1);
+    expect(result.trace_summary.totalMs).toBeGreaterThanOrEqual(25);
+    finish(searchPlan());
+    await Bun.sleep(5);
+    expect(searches).toBe(0);
+  }, 1000);
+
+  it("a stalled search cannot keep the request open or start later steps", async () => {
+    let searches = 0;
+    let finish!: (result: []) => void;
+    const ctx = makeCtx({
+      llm: { name: "fixture", async chat() { return searchPlan(2); } },
+      search: mockSearch({ search: () => { searches++; return new Promise(resolve => { finish = resolve; }); } }),
+    });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A", budgetOverride: { max_ms: 30 } });
+    expect(result.status).toBe("degraded");
+    expect(result.trace_summary.budgetUsed.searches).toBe(1);
+    finish([]);
+    await Bun.sleep(5);
+    expect(searches).toBe(1);
+  }, 1000);
 });

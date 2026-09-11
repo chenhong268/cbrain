@@ -215,6 +215,13 @@ export class AgenticResearchPipeline {
 
   async run(input: PipelineInput): Promise<PipelineResult> {
     const errors: string[] = [];
+    const now = this.ctx.now ?? Date.now;
+    const started = now();
+    const limits = { ...SearchPlanBudgetSchema.parse({}), ...input.budgetOverride };
+    const plannerLlm = limits.max_llm_calls > 0 && input.query.trim() ? this.ctx.llm : undefined;
+    let plannerCalls = 0;
+    let plannerTimedOut = false;
+    let plannerTimer: ReturnType<typeof setTimeout> | undefined;
 
     // --- Pass 1: Plan ---
     let plan: PlanResult;
@@ -224,18 +231,41 @@ export class AgenticResearchPipeline {
         knownSlugs: input.knownSlugs,
         intentHint: input.intentHint,
       };
-      plan = await new SearchPlanner(this.ctx.llm).plan(plannerInput);
+      if (limits.max_ms <= 0) {
+        plannerTimedOut = true;
+        throw new Error("Planning deadline exhausted");
+      }
+      plannerCalls = plannerLlm ? 1 : 0;
+      plan = await Promise.race([
+        new SearchPlanner(plannerLlm).plan(plannerInput),
+        new Promise<never>((_, reject) => {
+          plannerTimer = setTimeout(() => {
+            plannerTimedOut = true;
+            reject(new Error("Planning deadline exhausted"));
+          }, limits.max_ms);
+        }),
+      ]);
     } catch (err) {
       errors.push(`planner_error: ${errorMessage(err)}`);
       plan = buildMinimalFallback(input);
+    } finally {
+      if (plannerTimer) clearTimeout(plannerTimer);
     }
 
     const planWithBudget = applyBudgetOverride(plan, input.budgetOverride);
+    for (const key of ["max_ms", "max_searches", "max_llm_calls"] as const) {
+      planWithBudget.budget[key] = Math.min(planWithBudget.budget[key], limits[key]);
+    }
+    const remainingBudget = (searches = 0): SearchPlanBudget => ({
+      max_ms: plannerTimedOut ? 0 : Math.max(0, planWithBudget.budget.max_ms - (now() - started)),
+      max_searches: Math.max(0, planWithBudget.budget.max_searches - searches),
+      max_llm_calls: Math.max(0, planWithBudget.budget.max_llm_calls - plannerCalls),
+    });
 
     // --- Pass 1: Execute ---
     let execution: ExecutionResult;
     try {
-      execution = await new AgenticResearchExecutor(this.ctx).execute(planWithBudget);
+      execution = await new AgenticResearchExecutor(this.ctx).execute({ ...planWithBudget, budget: remainingBudget() });
     } catch (err) {
       errors.push(`executor_error: ${errorMessage(err)}`);
       execution = emptyExecutionResult();
@@ -271,7 +301,10 @@ export class AgenticResearchPipeline {
       critic.follow_up_steps.length > 0 &&
       execution.status !== "degraded"
     ) {
-      const followUpPlan: PlanResult = { ...planWithBudget, steps: critic.follow_up_steps };
+      const followUpPlan: PlanResult = {
+        ...planWithBudget, steps: critic.follow_up_steps,
+        budget: remainingBudget(execution.budgetUsed.searches),
+      };
 
       try {
         followUpExecution = await new AgenticResearchExecutor(this.ctx).execute(followUpPlan);
@@ -305,6 +338,10 @@ export class AgenticResearchPipeline {
 
     const status = determinePipelineStatus(execution, followUpExecution, critic, followUpCritic);
     const followUpPerformed = !!followUpExecution;
+    const traceSummary = buildTraceSummary(execution, followUpExecution, errors);
+    traceSummary.totalMs = Math.max(0, now() - started);
+    traceSummary.budgetUsed.ms = traceSummary.totalMs;
+    traceSummary.budgetUsed.llmCalls += plannerCalls;
 
     return {
       query: input.query,
@@ -316,7 +353,7 @@ export class AgenticResearchPipeline {
       follow_up_execution: followUpExecution,
       follow_up_critic: followUpCritic,
       evidence_board: mergedBoard,
-      trace_summary: buildTraceSummary(execution, followUpExecution, errors),
+      trace_summary: traceSummary,
       answer_context: buildAnswerContext(input, planWithBudget, mergedBoard, critic, followUpCritic, followUpPerformed),
     };
   }

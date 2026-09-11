@@ -148,12 +148,16 @@ const MAX_SEARCH_EVIDENCE_TOTAL = 20;
 async function handleSearch(step: SearchPlanStep, state: ExecutionState, ctx: ExecutorContext): Promise<StepResult> {
   const resolved = state.resolvedSlugs.get(step.input);
   const hints = resolved ? { knownSlugs: [resolved], isComplex: false } : undefined;
+  // Count attempts, including failures. Nested search must remain deterministic
+  // with respect to chat-model use; planning owns the request's LLM budget.
+  state.searchCalls++;
   const results = await ctx.search.search(step.input, {
     limit: searchLimit(step.detail),
     _skipDecompose: true,
+    multiQuery: false,
+    multiStep: false,
     _hints: hints,
   });
-  state.searchCalls++;
   const remaining = MAX_SEARCH_EVIDENCE_TOTAL - state.evidenceSlugs.size;
   if (remaining > 0) {
     const topResults = results
@@ -278,11 +282,8 @@ export class AgenticResearchExecutor {
         this.skipRemaining(plan.steps, i, degradedReason, skipped, trace, traceSessionId);
         break;
       }
-      if (state.llmCalls >= budget.max_llm_calls) {
-        degradedReason = `LLM call budget exhausted (${state.llmCalls} >= ${budget.max_llm_calls})`;
-        this.skipRemaining(plan.steps, i, degradedReason, skipped, trace, traceSessionId);
-        break;
-      }
+      // Executor steps do not call a chat model. Exhausting the planner's LLM
+      // budget must not block the remaining deterministic reads.
       if (state.searchCalls >= budget.max_searches && step.kind === "search") {
         degradedReason = `Search budget exhausted (${state.searchCalls} >= ${budget.max_searches})`;
         this.skipRemaining(plan.steps, i, degradedReason, skipped, trace, traceSessionId);
@@ -310,10 +311,20 @@ export class AgenticResearchExecutor {
       }
 
       const stepStart = this.now();
+      let stepTimer: ReturnType<typeof setTimeout> | undefined;
+      let stepTimedOut = false;
 
       try {
         const handler = DISPATCH[step.kind];
-        const result = await handler(step, state, this.ctx);
+        const result = await Promise.race([
+          handler(step, state, this.ctx),
+          new Promise<never>((_, reject) => {
+            stepTimer = setTimeout(() => {
+              stepTimedOut = true;
+              reject(new Error("Research step deadline exhausted"));
+            }, Math.max(0, budget.max_ms - (stepStart - startTime)));
+          }),
+        ]);
         result.latencyMs = this.now() - stepStart;
         steps.push(result);
         trace.push({ stepIndex: i, kind: step.kind, input: step.input, status: "ok", latencyMs: result.latencyMs });
@@ -333,10 +344,18 @@ export class AgenticResearchExecutor {
         trace.push({ stepIndex: i, kind: step.kind, input: step.input, status: "gap", latencyMs, error: errorMessage(err) });
 
         this.recordTraceError(traceSessionId, i, step, errorMessage(err), latencyMs);
+        if (stepTimedOut) {
+          degradedReason = "Research step deadline exhausted";
+          this.skipRemaining(plan.steps, i + 1, degradedReason, skipped, trace, traceSessionId);
+          break;
+        }
+      } finally {
+        if (stepTimer) clearTimeout(stepTimer);
       }
     }
 
     const totalMs = this.now() - startTime;
+    if (totalMs >= budget.max_ms && !degradedReason) degradedReason = "Wall-clock budget exhausted";
 
     // Build evidence board from resolved slugs ∪ search-derived evidence slugs
     const allSlugs = [...new Set([...state.resolvedSlugs.values(), ...state.evidenceSlugs])];
