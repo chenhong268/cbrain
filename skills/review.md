@@ -8,27 +8,29 @@ Search returns fragments. Review returns understanding. When you need to know ev
 
 ## When to Use
 
-- "帮我总结一下星辰科技的情况"
-- "关于 RAG 我们知道什么"
-- "review 张三"
-- "整理一下 ABC 项目的所有信息"
+- "帮我总结一下组织A的情况"
+- "关于 主题D 我们知道什么"
+- "review 实体A"
+- "整理一下 项目B的所有信息"
 - "这个客户什么来头"
 
 ## Protocol
 
-### ⚡ 优先用 cbrain_recall（默认前门，一步搞定）
+### 先区分概览与深度复盘
 
-`cbrain_recall` 是 MCP tool（不是 CLI 命令），Agent 通过 `cbrain_recall` 调用，CBrain 内部按 intent 分发到 overview/relationship/content。一次返回完整画像，等价于下面 4 步连调（这些是 debug/手动步骤，默认不链式调用）：
-- query（搜索）+ get_page（取全文）+ graph-query（关系）+ timeline（时间线）
+`cbrain_recall` 是 MCP tool（不是 CLI 命令）。其 overview 路径提供检索片段与关系/时间线数量，**不等于全文、关系明细或事件明细，也不代表已完成深度复盘**。`detail: "full"` 不能替代缺少的取证步骤。
 
-**只在 cbrain_recall 不足以表达深度时，才用 advanced escape hatch：deep_recall（精细参数），或退回以下手动 4 步（debug-only fallback）。**
+用户只要简短概览时，可用 `cbrain_recall` 返回的实际资料概述，并标明覆盖范围。用户要求全面了解、复盘、所有信息或完整档案时，必须完成下面 5 步，不以一次 overview 收尾。
 
-### Fallback: 手动 4 步
+### 深度复盘：5 步取证
 
-1. `cbrain query "<topic>" --strategy all --limit 10` — 搜索 + 别名变体
-2. `cbrain show <slug>` — 取 top 3-5 结果全文（MCP tool: `get_page`）
-3. `cbrain graph-query <slug> --mode traverse --depth 1` — 关系网络
-4. `cbrain timeline <slug>` — 时间线
+1. **搜索**：先 `cbrain_recall({ query: "全面了解主题D", detail: "normal" })`，再按结果中的真实名称补查关键词、别名及中英文变体；不要猜别名。daily profile 继续使用前门，直调 `query` 仅限显式 debug/full profile。
+2. **全文**：对相关页面用 `get_page`（可用时批量 `get_pages`）读取全文，先覆盖最相关的 3–5 页。检索片段不能代替全文；更多页面未读时说明覆盖限制。
+3. **关系**：对已确认实体调用 `graph_query` 的 `traverse` 与 `backlinks`，核对关系方向、来源及确认状态。数量不是关系证据，candidate 只能写为待确认。
+4. **时间线**：调用 `get_timeline` 读取事件明细及来源，区分事件日期与文件名/更新时间。无事件也要记录这一步的空结果。
+5. **合成**：只使用已取得的证据，每条事实标明来源；明确未覆盖或互相矛盾之处。前 4 步均执行且仍无信息，才能转向网上搜索；工具不可用或报错时说明复盘未完成，不能说大脑里没有资料。
+
+CLI 手动等价操作（debug/离线，不是 daily MCP 首选）：`cbrain query`（关键词及变体）→ `cbrain show <slug>` → `cbrain graph-query <slug> --mode traverse` 与 `--mode backlinks` → `cbrain timeline <slug>` → 合成。
 
 ### Synthesize
 
@@ -74,7 +76,7 @@ YYYY-MM-DD  事件描述 [Source: slug]
 
 ## Anti-Patterns
 
-- ❌ cbrain_recall 可用却手动 query+get_page+graph+timeline 连调 — cbrain_recall 一步搞定
+- ❌ 把 overview 的片段或统计数量写成“已完成全文、关系、时间线核查”
 - ❌ 只搜一次就下结论 — 可能遗漏别名、关联实体
 - ❌ 编造关系 — "可能与 Y 有合作" 改成 "目前未记录与 Y 的关联"
 - ❌ 把查询结果当正文 — 需要用自己的话重新组织，不是复制粘贴
