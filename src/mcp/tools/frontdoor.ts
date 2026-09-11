@@ -12,6 +12,7 @@ import { shouldCompleteEvidence } from "../../core/retrieval/recall-intent.js";
 import { assembleEvidencePack } from "../../core/retrieval/evidence-completion.js";
 import {
   formatEpisodeEnvelope,
+  formatGraphPathEnvelope,
   formatGroundedRecallEnvelope,
   formatOrgTreeEnvelope,
   formatQueryEnvelope,
@@ -77,7 +78,8 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
         envelope = await runOverviewRecall(ctx, query, routing);
         break;
       case "relationship":
-        envelope = await runAgenticRecall(ctx, query, routing, routeDetail, "relationship");
+        envelope = runExplicitRelationship(ctx, query, routing)
+          ?? await runAgenticRecall(ctx, query, routing, routeDetail, "relationship");
         break;
       case "reasoning":
         envelope = await runAgenticRecall(ctx, query, routing, routeDetail, "gap_analysis");
@@ -627,6 +629,47 @@ async function runOverviewRecall(
   };
   const formatted = formatSummarizeEnvelope(payload);
   return withRouting(formatted, payload, routing, selected.map((result) => result.slug));
+}
+
+// Only closed, explicit pair questions take the local path. Broader analysis keeps research.
+function runExplicitRelationship(
+  ctx: ToolContext,
+  query: string,
+  routing: FrontdoorRoutingDecision,
+): FrontdoorEnvelope | null {
+  const text = query.trim().replace(/[?？。]+$/u, "").trim();
+  const pair = text.match(/^([^，,。!?？]+?)(?:和|与)([^，,。!?？]+?)(?:之间)?(?:是什么关系|什么关系|有什么联系|有什么关系|有关系吗)$/u)
+    ?? text.match(/^what is the relationship between (.+?) and (.+)$/iu)
+    ?? text.match(/^how are (.+?) and (.+?) (?:related|connected)$/iu)
+    ?? text.match(/^how is (.+?) connected to (.+)$/iu);
+  if (!pair) return null;
+  // An alias may refer to multiple pages; never choose the first or a fuzzy match.
+  const resolve = (name: string): { slug: string; title: string } | null => {
+    const rows = ctx.db.rawDb.prepare(`SELECT DISTINCT p.slug, p.title FROM pages p
+      LEFT JOIN aliases a ON a.page_slug = p.slug
+      WHERE (p.slug = ? OR p.title = ? OR a.alias = ?)
+        AND (p.type = 'entity' OR p.type LIKE 'entity/%' OR p.type = 'concept' OR p.type LIKE 'concept/%')
+      LIMIT 2`).all(name.trim(), name.trim(), name.trim()) as Array<{ slug: string; title: string }>;
+    return rows.length === 1 ? rows[0]! : null;
+  };
+  const from = resolve(pair[1]!);
+  const to = resolve(pair[2]!);
+  // A leading request clause isn't an entity name: let research handle it.
+  if (/^(?:分析|帮我|请分析|解释|比较)/u.test(pair[1]!)) return null;
+  const path = from && to ? ctx.graph.findShortestPath(from.slug, to.slug, { maxDepth: 4 }) : null;
+  const payload = {
+    fromTitle: from?.title,
+    toTitle: to?.title,
+    maxDepth: 4,
+    reason: !from ? "unresolved_source" as const : !to ? "unresolved_target" as const : path ? "path_found" as const : "no_path" as const,
+    path,
+  };
+  const formatted = formatGraphPathEnvelope(payload);
+  if (!from || !to) {
+    formatted.display = "无法唯一确认两个实体，请提供明确名称或别名。";
+    formatted.summary.message = formatted.display;
+  }
+  return withRouting(formatted, payload, { ...routing, next_tool: "graph_query" }, path?.nodes.map((node) => node.slug) ?? []);
 }
 
 async function runAgenticRecall(
