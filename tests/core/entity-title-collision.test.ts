@@ -1,3 +1,4 @@
+import { hasKnownRelationsDrift } from "../../src/core/graph/known-relations-projector.js";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +21,8 @@ const embedding: EmbeddingProvider = {
 function createLanceStub() {
   return {
     addChunks: async () => {},
+    readRawVectorRows: async () => [],
+    readL1VectorRows: async () => [],
     deleteRawChunksByPageSlug: async () => {},
     deleteL1VectorByPageSlug: async () => {},
     deleteByPageSlug: async () => {},
@@ -248,5 +251,19 @@ describe("entity title collision (#467)", () => {
       "SELECT * FROM links WHERE from_slug = ? AND to_slug = ? AND relation = '提及'",
     ).get(source.slug, insight.slug) as { to_slug: string } | undefined;
     expect(mentionLink?.to_slug).toBe(insight.slug);
+  });
+  test("governed type move projects existing neighbors absent from extraction", async () => {
+    const source = pages.create({ title: "来源D", type: "record", body: "主题A参与匿名记录" });
+    const old = pages.create({ title: "主题A", type: "concept/concept", body: "主题A匿名正文" });
+    const neighbor = pages.create({ title: "主题B", type: "concept/concept", body: "主题B匿名正文" });
+    db.insertLink(neighbor.slug, old.slug, "提及", null, 0.9, "strong", "manual", 0.95);
+    pages.syncAffectedSlugs([old.slug, neighbor.slug]);
+    const result = await pipeline.processNer(source.slug, source.body, "record", true, extraction([
+      { name: "主题A", type: "model", relevance: "high", context: "匿名" },
+    ]), new Set(), () => {}, true);
+    expect(result?.resolvedSlugs).not.toContain(old.slug);
+    const links = db.getAllLinks();
+    const content = readFileSync(join(vaultPath, neighbor.file_path), "utf8");
+    expect(hasKnownRelationsDrift(content, links.filter(l => l.from_slug === neighbor.slug), links.filter(l => l.to_slug === neighbor.slug))).toBe(false);
   });
 });

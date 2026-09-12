@@ -756,6 +756,18 @@ export class ContentPipeline {
       // leave hard page-without-chunks debt. Ordinary deferred and synchronous
       // NER keep their existing watcher-owned indexing behavior.
       if (sourceGuard && indexCreatedStubs) {
+        // The watcher is stopped for governed repair. Project every affected
+        // endpoint before indexing new stubs or declaring the attempt complete.
+        const projectionSlugs = new Set([fromSlug, ...entitySlugMap.values(), ...relationEndpointSlugs]);
+        // A type move also rewrites old edges whose neighbors were not extracted.
+        for (const moved of new Set(movedSlugMap.values())) {
+          for (const link of [...this.db.getOutgoingLinks(moved), ...this.db.getIncomingLinks(moved)]) {
+            projectionSlugs.add(link.from_slug);
+            projectionSlugs.add(link.to_slug);
+          }
+        }
+        const projectionWarnings = this.pages.syncAffectedSlugs(projectionSlugs);
+        if (projectionWarnings.length > 0) throw new Error("NER_GRAPH_PROJECTION_FAILED");
         const pages = this.pages;
         const pendingIndexes = [...stubsCreated].map(slug => {
           const page = pages.getBySlug(slug);
