@@ -30,6 +30,7 @@ Search the brain using multiple strategies, fuse results, and return the most re
 3. fallback 没有运行时或新鲜度异常、且候选全部低相关时，说明“没有找到足够相关的记忆”，不要用低相关结果填满答案。
 4. 任何 bounded fallback 的最终回答都不要提及候选本身、候选数量或质量；有足够相关证据时正常回答用户问题，证据不足时只说明没有找到足够相关的记忆。
 5. 首轮 `cbrain_recall` 显示运行时或新鲜度 degraded 时，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。
+6. 普通问答不得转用终端、SQLite 或直接读取 vault 文件绕过停止规则。只有用户明确要求故障排查或源文件审计时，才进入诊断流程；检索失败本身不是授权。最终回答遵守用户要求的长度，不附内部路径或检索诊断。
 
 ## [operations] Branch — 当前状态与待处理事项
 

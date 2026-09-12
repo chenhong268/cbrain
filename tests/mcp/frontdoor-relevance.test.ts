@@ -1436,3 +1436,33 @@ describe("overview frontdoor hydration (#395)", () => {
     expect(blob).not.toContain("concept/匿名主题");
   });
 });
+
+describe("content recall retains the requested passage after document discovery", () => {
+  for (const outputMode of ["legacy", "structured"] as const) {
+    test(`${outputMode} exposes a late answer instead of only the opening`, async () => {
+      const title = "主题D项目准备稿";
+      const answer = "## 2031 年成功标准\n\n成功标准是减少重复劳动，让团队有更多时间解决客户问题。";
+      const body = `# ${title}\n\n${"项目背景与团队能力介绍。".repeat(90)}\n\n${answer}`;
+      const h = makeHarness([result("record-d", { exact: { original: { rankScore: 1 } } }, body.slice(0, 200))], outputMode, {
+        pagesBySlug: { "record-d": { title, body, type: "record" } },
+      });
+      const response = await h.call({ query: "用一句话概括：我在主题D的准备稿里，为项目设定的2031年成功标准是什么？", detail: "normal" });
+      const envelope = parsed(response) as { raw?: { entities: Array<{ snippet: string; body: string }> } };
+      const entities = outputMode === "legacy" ? envelope.raw!.entities : (response.structuredContent!.data as { details: { entities: Array<{ snippet: string }> } }).details.entities;
+      expect(entities[0]!.snippet).toContain("减少重复劳动");
+      expect(entities[0]!.snippet.length).toBeLessThanOrEqual(200);
+      if (outputMode === "legacy") expect(body).toContain(entities[0]!.snippet);
+      expect(h.searchCalls).toHaveLength(1);
+      expect(h.pageSlugs).toHaveLength(1);
+    });
+  }
+
+  test("keeps a retrieved non-prefix evidence passage including a correction", async () => {
+    const snippet = "原计划参与主题D；后来已取消，不能记作实际参加。";
+    const h = makeHarness([result("record-d", { exact: { original: { rankScore: 1 } } }, snippet)], "legacy", {
+      pagesBySlug: { "record-d": { title: "主题D记录", body: `# 主题D\n\n${snippet}` } },
+    });
+    const envelope = parsed(await h.call({ query: "主题D的参加情况是什么？", detail: "normal" })) as { raw: { entities: Array<{ snippet: string }> } };
+    expect(envelope.raw.entities[0]!.snippet).toBe(snippet);
+  });
+});

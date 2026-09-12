@@ -12,7 +12,7 @@ description: "Use when retrieving, organizing, or validating knowledge in CBrain
 
 用户提到"之前/讨论过/谁/什么关系/记不记得" → **先查 CBrain，再回答**。
 
-没有 CBrain 结果时，明确说"我没有找到相关记录"，不要编造。
+只有检索健康完成且证据不足时，才说“没有找到足够相关的记忆”；运行失败时说“检索未完成”，不要编造。
 
 ### 时效性外部事实：双源核验（强制）
 
@@ -45,7 +45,7 @@ description: "Use when retrieving, organizing, or validating knowledge in CBrain
 
 ## 3. 回答规则
 
-- 先给结论，300-500 字为默认长度。核查确认回答 ≤ 300 字。
+- 先给结论，300-500 字为默认长度；用户要求一句话或简短回答时优先遵守。核查确认回答 ≤ 300 字。
 - 禁止暴露 slug、score、debug 字段、raw JSON、内部数据结构。
 - 渐进披露：先摘要，用户追问再展开细节。
 - 禁止 `query` + `get_page` 链式调用做核查 — 用 `cbrain_recall(detail: "brief")` 一步到位。
@@ -57,6 +57,7 @@ description: "Use when retrieving, organizing, or validating knowledge in CBrain
 - 若 fallback 没有运行时或新鲜度异常，且候选全部 `quality=low`，先说明“没有找到足够相关的记忆”，不要展示或逐条列出这些低相关候选。
 - 任何 bounded fallback 的最终回答都不要提及候选本身、候选数量或质量；有足够相关证据时正常回答用户问题，证据不足时只说明没有找到足够相关的记忆。
 - 若首轮 `cbrain_recall` 显示运行时或新鲜度 degraded，说明本次检索未完整执行，不要宣称没有相关记忆，不调用 fallback，然后停止。
+- 普通问答不得用终端、SQLite 或直接读取 vault 文件绕过以上停止规则。只有用户明确要求故障排查或源文件审计时，才进入诊断流程；检索失败本身不构成诊断授权。
 
 ## 4. 文件索引
 

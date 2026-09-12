@@ -22,6 +22,8 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 - 关键词定位/debug → `cbrain_recall`（内部 `debug_search`）；只有显式选择 debug/full profile 的诊断会话才直调 `query`。
 - 批量补详情 → `get_pages`，禁止连续 get_page。
 
+普通内容回忆：健康 empty / insufficient 后最多一次 `deep_recall({ query: 原查询, detail: "brief", limit: 3 })`，然后停止。运行或新鲜度 degraded 时说明“检索未完成”，不 fallback，不说没有记录。普通问答不得转用终端、SQLite 或 vault 文件绕过停止规则；只有用户明确要求故障排查或源文件审计才进入诊断流程。
+
 ## 3. 发现摘要
 
 最近有什么发现/漏掉的关联 → `read_discoveries({ debug: false })` 读取已有结果。明确要求运行检测时说明需要 full profile；当前 daily 会话不调 `run_discovery`，也不以 `read_discoveries` 冒充新运行。只用 display/cards/summary；禁暴露 score/distance/debug/candidate/filter。
@@ -32,7 +34,7 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 
 ## 5. Response Rules
 
-三层：display 给用户，summary 供路由，raw 仅调试/审计/展开追查，永不渲染。首句给结论，300-500 字，先摘要后展开。禁暴露 slug/score/debug/path/raw JSON/工具名/trace。客户端 UI 自动展示工具调用时不重复，用户追问可说明。
+三层：display 给用户，summary 供路由，raw 仅调试/审计/展开追查，永不渲染。首句给结论，默认300-500字；用户要求一句话或简短时优先遵守。先摘要后展开。禁暴露 slug/score/debug/path/raw JSON/工具名/trace。客户端 UI 自动展示工具调用时不重复，用户追问可说明。
 
 ## 6. 硬禁止
 
