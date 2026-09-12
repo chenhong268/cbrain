@@ -67,6 +67,19 @@ describe("DeepSeekLLMProvider", () => {
       expect(bodies[1].thinking).toEqual({ type: "disabled" });
     });
 
+    test("honors explicit non-thinking mode for the official deepseek-flash model", async () => {
+      const bodies: Array<Record<string, unknown>> = [];
+      globalThis.fetch = (async (_url: string, opts: any) => {
+        bodies.push(JSON.parse(opts.body));
+        return new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }));
+      }) as unknown as typeof fetch;
+      const provider = new DeepSeekLLMProvider("key", "https://api.deepseek.com", "deepseek-flash");
+      await provider.chat([{ role: "user", content: "结构化抽取" }]);
+      await provider.chat([{ role: "user", content: "结构化抽取" }], { thinking: "disabled" });
+      expect(bodies[0].thinking).toBeUndefined();
+      expect(bodies[1].thinking).toEqual({ type: "disabled" });
+    });
+
     test("does not send the V4 thinking extension to a custom endpoint by default", async () => {
       let capturedBody: Record<string, unknown> | undefined;
       globalThis.fetch = (async (_url: string, opts: any) => {
