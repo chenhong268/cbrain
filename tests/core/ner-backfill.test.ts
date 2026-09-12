@@ -2898,3 +2898,16 @@ describe("runNerBackfillStage (#252)", () => {
     })).rejects.toThrow("BATCH_LIMIT_MISMATCH");
   });
 });
+
+
+test("Dream cancellation stops backfill before claiming the next record (#494)", async () => {
+  const first = db.submitJob("ner-backfill", { slug: "records/first" });
+  const second = db.submitJob("ner-backfill", { slug: "records/second" });
+  let boundaries = 0;
+  await expect(runNerBackfillStage(db, {} as ContentPipeline, new PageManager(db, testDir), {
+    checkCancelled: () => { if (++boundaries === 2) throw new DOMException("Job cancelled", "AbortError"); },
+  })).rejects.toMatchObject({ name: "AbortError" });
+  expect(db.getJob(first)?.status).toBe("done"); // missing source is an explicit skip
+  expect(db.getJob(second)?.status).toBe("pending");
+  expect(db.getJob(second)?.attempts).toBe(0);
+});

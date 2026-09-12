@@ -272,6 +272,8 @@ The third category is where CBrain truly compounds. Without periodic tasks, you 
 
 日常 Agent 使用固定的日常权限清单；任务队列仅在 maintenance/full profile 中通过 `job` 的相应 `action` 调用，不属于日常 Agent 权限。
 
+任务取消会保留 `cancelled` 状态，迟到结果不能改回成功。Dream 在阶段之间、NER 补抽在记录之间检查取消，允许当前记录安全收尾；这不代表强制终止正在执行的网络请求或回滚已提交数据。跨连接取消在下一安全边界生效。`retry` 仍仅支持失败任务，取消后需要重新提交。
+
 第三类功能是 CBrain 复利增长的关键。没有定时任务，你得到的是一个可用的知识库。**有了定时任务，大脑自己维护自己** —— 实体升级、结构发现、洞察生成、自动清理，全部自动化。
 
 To set up periodic tasks with Hermes:

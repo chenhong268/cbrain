@@ -40,7 +40,7 @@ export interface CBrainDeps {
 
 /** Register dream job handler and start the background worker. Shared by MCP and HTTP paths. */
 export function registerDreamWorker(ctx: ToolContext): void {
-  ctx.jobs.register("dream", async (_data, jobId) => {
+  ctx.jobs.register("dream", async (_data, jobId, execution) => {
     const { runDream } = await import("../core/maintenance/dream.js");
     const { HealthChecker } = await import("../core/maintenance/health.js");
     const report = await runDream(
@@ -53,6 +53,7 @@ export function registerDreamWorker(ctx: ToolContext): void {
       ctx.pages,        // sharedPages (#252)
       ctx.pipeline,     // nerPipeline (#252)
       ctx.llm,          // deferred entity facts (#321)
+      execution.checkCancelled,
     );
     return report;
   });

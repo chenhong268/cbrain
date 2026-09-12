@@ -131,3 +131,110 @@ describe("JobQueue", () => {
     expect(job!.error).toContain("No handler");
   });
 });
+
+// Cancellation must remain terminal even when an in-flight handler finishes late.
+describe("running job cancellation (#494)", () => {
+  test.each([false, true])("late completion cannot replace cancellation (throws=%s)", async throws => {
+    const db = new CBrainDB(":memory:");
+    const queue = new JobQueue(db);
+    let release!: () => void;
+    let entered!: () => void;
+    const pending = new Promise<void>(r => { release = r; });
+    const started = new Promise<void>(r => { entered = r; });
+    let signal: AbortSignal | undefined;
+    queue.register("probe", async (_data, _id, execution) => {
+      signal = execution?.signal;
+      entered();
+      await pending;
+      if (throws) throw new Error("late failure");
+      return { completed: true };
+    });
+    const id = queue.submit("probe");
+    const worker = queue.work(1);
+    try {
+      await started;
+      expect(queue.cancel(id)).toBe(true);
+      queue.stop();
+      release();
+      await worker;
+      expect(queue.get(id)?.status).toBe("cancelled");
+      expect(signal?.aborted).toBe(true);
+    } finally { queue.stop(); release(); await worker; db.close(); }
+  });
+
+  test("cancel rejects retry and a fresh submission cannot consume the old result", async () => {
+    const db = new CBrainDB(":memory:");
+    const queue = new JobQueue(db);
+    let release!: () => void;
+    let entered!: () => void;
+    const pending = new Promise<void>(r => { release = r; });
+    const started = new Promise<void>(r => { entered = r; });
+    let attempts = 0;
+    queue.register("probe", async () => {
+      const attempt = ++attempts;
+      if (attempt === 1) { entered(); await pending; }
+      else queue.stop();
+      return { attempt };
+    });
+    const id = queue.submit("probe");
+    const worker = queue.work(1);
+    try {
+      await started;
+      expect(queue.cancel(id)).toBe(true);
+      expect(queue.retry(id)).toBe(false);
+      const nextId = queue.submit("probe");
+      release();
+      await worker;
+      expect(queue.get(id)?.status).toBe("cancelled");
+      expect(attempts).toBe(2);
+      expect(JSON.parse(queue.get(nextId)!.result!)).toEqual({ attempt: 2 });
+    } finally { queue.stop(); release(); await worker; db.close(); }
+  });
+
+  test("another connection's cancellation is observed before the next action", async () => {
+    const dir = `/tmp/cbrain-job-cancel-${crypto.randomUUID()}`;
+    mkdirSync(dir);
+    const db = new CBrainDB(join(dir, "test.sqlite"));
+    const other = new CBrainDB(join(dir, "test.sqlite"));
+    const queue = new JobQueue(db);
+    let laterAction = false;
+    queue.register("probe", async (_data, id, execution) => {
+      other.cancelJob(id);
+      queue.stop();
+      execution?.checkCancelled();
+      laterAction = true;
+    });
+    const id = queue.submit("probe");
+    try {
+      await queue.work(1);
+      expect(laterAction).toBe(false);
+      expect(db.getJob(id)?.status).toBe("cancelled");
+    } finally { other.close(); db.close(); rmSync(dir, { recursive: true }); }
+  });
+  test.each([false, true])("concurrent write during finalization does not retry work or kill the worker (throws=%s)", async throws => {
+    const dir = `/tmp/cbrain-job-finalize-${crypto.randomUUID()}`;
+    mkdirSync(dir);
+    const db = new CBrainDB(join(dir, "test.sqlite"));
+    const other = new CBrainDB(join(dir, "test.sqlite"));
+    const queue = new JobQueue(db);
+    const complete = db.completeJob.bind(db);
+    const fail = db.failJob.bind(db);
+    db.completeJob = (id, result) => { other.setConfig("probe.concurrent", "yes"); complete(id, result); };
+    db.failJob = (id, error) => { other.cancelJob(id); fail(id, error); };
+    queue.register("probe", async () => {
+      queue.stop();
+      db.setConfig("probe.applied", "yes");
+      if (throws) throw new Error("probe failure");
+      return { completed: true };
+    });
+    const id = queue.submit("probe");
+    try {
+      await queue.work(1);
+      expect(db.getJob(id)?.status).toBe(throws ? "cancelled" : "done");
+      expect(db.getJob(id)?.attempts).toBe(1);
+      expect(db.getConfig("probe.applied")).toBe("yes");
+      if (!throws) expect(JSON.parse(db.getJob(id)!.result!)).toEqual({ completed: true });
+    } finally { other.close(); db.close(); rmSync(dir, { recursive: true }); }
+  });
+
+});

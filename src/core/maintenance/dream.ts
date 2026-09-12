@@ -91,7 +91,9 @@ export async function runDream(
   sharedPages?: PageManager,
   nerPipeline?: ContentPipeline,
   entityFactsLlm?: LLMProvider,
+  checkCancelled?: () => void,
 ): Promise<DreamReport> {
+  checkCancelled?.();
   if (!acquireLock(db)) {
     logger.warn("dream", "上次 dream 仍在执行中（或锁未释放），跳过");
     return {
@@ -120,6 +122,11 @@ export async function runDream(
     };
   }
 
+  try {
+  const progress = (stage: string, detail: unknown) => {
+    onStageProgress?.(stage, detail);
+    checkCancelled?.();
+  };
   const started = Date.now();
   logger.info("dream", "夜间维护开始");
 
@@ -203,12 +210,12 @@ export async function runDream(
   } catch (e) {
     logger.warn("dream", `备份失败，继续执行：${(e as Error).message}`);
   }
-  if (onStageProgress) onStageProgress("backup", { path: backupPath, size_mb: backupSize });
+  progress("backup", { path: backupPath, size_mb: backupSize });
 
   // Stage 1: Sync
   logger.info("dream", "Stage 1/5: sync");
   const syncReport = await syncMgr.syncAll(vaultPath);
-  if (onStageProgress) onStageProgress("sync", { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors, nerParseErrors: syncReport.nerParseErrors ?? 0 });
+  progress("sync", { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors, nerParseErrors: syncReport.nerParseErrors ?? 0 });
 
   // Stage 1.5: ner-backfill (#252) — after sync (so newly-synced pages are current),
   // before enrich (NER stubs/links/timeline feed enrich/learn/stub_enrich).
@@ -219,22 +226,24 @@ export async function runDream(
       const stagePages = sharedPages ?? new PageManager(db, vaultPath, logger);
       nerBackfillReport = await runNerBackfillStage(db, nerPipeline, stagePages, {
         entityFactsLlm,
+        checkCancelled,
       });
       if (nerBackfillReport.processed > 0) logger.info("dream", `NER backfill: ${nerBackfillReport.processed} 页补抽`);
     } catch (e) {
+      checkCancelled?.();
       logger.warn("dream", `NER backfill 失败: ${(e as Error).message}`);
       // #457: surface the stage exception via the existing failed count —
       // an all-zero report must not claim the stage ran clean.
       nerBackfillReport = { ...emptyNerBackfillCounts(), failed: 1 };
     }
   }
-  if (onStageProgress) onStageProgress("ner_backfill", nerBackfillReport);
+  progress("ner_backfill", nerBackfillReport);
 
   // Stage 2: Enrich
   logger.info("dream", "Stage 2/7: enrich");
   const enrichResults = enrichMgr.enrichAll();
   const upgraded = enrichResults.filter((r) => r.upgraded).length;
-  if (onStageProgress) onStageProgress("enrich", { total: enrichResults.length, upgraded });
+  progress("enrich", { total: enrichResults.length, upgraded });
 
   // Stage 2b: Stub enrichment
   logger.info("dream", "Stage 2b: stub enrichment");
@@ -254,7 +263,7 @@ export async function runDream(
       logger.warn("dream", `Stub enrichment 失败: ${(e as Error).message}`);
     }
   }
-  if (onStageProgress) onStageProgress("stub_enrich", stubEnrichReport);
+  progress("stub_enrich", stubEnrichReport);
 
   // Stage 2.5: Learn
   logger.info("dream", "Stage 3/7: learn");
@@ -266,7 +275,7 @@ export async function runDream(
   } catch (e) {
     logger.warn("dream", `学习计算失败: ${(e as Error).message}`);
   }
-  if (onStageProgress) onStageProgress("learn", learnReport);
+  progress("learn", learnReport);
 
   // Stage 3.1: Decay
   logger.info("dream", "Stage 3.1/7: decay");
@@ -278,6 +287,7 @@ export async function runDream(
     logger.warn("dream", `衰减计算失败: ${(e as Error).message}`);
   }
 
+  checkCancelled?.();
   // Stage 3.5: Seal
   logger.info("dream", "Stage 3.5/8: seal");
   let sealReport = { sealed: 0, skipped: 0, errors: 0 };
@@ -290,7 +300,7 @@ export async function runDream(
       logger.warn("dream", `Seal 失败: ${(e as Error).message}`);
     }
   }
-  if (onStageProgress) onStageProgress("seal", sealReport);
+  progress("seal", sealReport);
 
   // Stage 4: Page-level cleanup (independent of each other)
   logger.info("dream", "Stage 4/7: page cleanup (orphans + stale stubs)");
@@ -299,11 +309,12 @@ export async function runDream(
     syncMgr.cleanStaleStubs(vaultPath).catch(e => { logger.warn("dream", `Cleanup stale stubs 失败: ${(e as Error).message}`); return []; }),
   ]);
 
+  checkCancelled?.();
   // Stage 4.5: Lance orphan cleanup — must run AFTER removeOrphans
   // so vectors newly orphaned by page deletion are caught in the same cycle
   logger.info("dream", "Stage 4.5/7: LanceDB orphan cleanup");
   const lanceOrphans = await syncMgr.cleanLanceOrphans().catch(e => { logger.warn("dream", `Cleanup LanceDB orphans 失败: ${(e as Error).message}`); return []; });
-  if (onStageProgress) onStageProgress("cleanup", { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length });
+  progress("cleanup", { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length });
 
   // Stage 4.6: LanceDB compact — coalesce fragment versions to prevent disk bloat
   logger.info("dream", "Stage 4.6/7: LanceDB compact");
@@ -320,7 +331,7 @@ export async function runDream(
       logger.warn("dream", `LanceDB compact 失败: ${(e as Error).message}`);
     }
   }
-  if (onStageProgress) onStageProgress("compact", compactReport);
+  progress("compact", compactReport);
 
   // Stage 5-6: Health + Insight archive (independent, run in parallel)
   logger.info("dream", "Stage 5-6/7: health + insight archive");
@@ -335,19 +346,20 @@ export async function runDream(
       } catch (e) { logger.warn("dream", `Insight 归档失败: ${(e as Error).message}`); return 0; }
     })(),
   ]);
+  checkCancelled?.();
   try {
     const removed = db.cleanMentionSnapshots(30);
     if (removed > 0) logger.info("dream", `清理 ${removed} 条过期 mention snapshots`);
   } catch (e) { logger.warn("dream", `Snapshot 清理失败: ${(e as Error).message}`); }
-  if (onStageProgress) onStageProgress("health", { overallStatus: healthReport.overallStatus, dimensions: healthReport.dimensions.length, issues: healthReport.dimensions.reduce((s, d) => s + d.issues.length, 0) });
-  if (onStageProgress) onStageProgress("insight_archive", { archived });
+  progress("health", { overallStatus: healthReport.overallStatus, dimensions: healthReport.dimensions.length, issues: healthReport.dimensions.reduce((s, d) => s + d.issues.length, 0) });
+  progress("insight_archive", { archived });
 
   // Stage 6.5: Search quality summary
   let searchQualityStats = { totalSearches: 0, degradedCount: 0, degradedRate: 0, topReasonCodes: [] as Array<{ code: string; count: number }> };
   try {
     searchQualityStats = db.getSearchQualityStats(7);
-    if (onStageProgress) onStageProgress("search_quality", searchQualityStats);
   } catch (e) { logger.warn("dream", `搜索质量统计失败: ${(e as Error).message}`); }
+  progress("search_quality", searchQualityStats);
 
   // Stage 7: Index generation
   logger.info("dream", "Stage 7/7: indexes");
@@ -360,7 +372,7 @@ export async function runDream(
   } catch (e) {
     logger.warn("dream", `索引生成失败: ${(e as Error).message}`);
   }
-  if (onStageProgress) onStageProgress("indexes", { files: indexFiles });
+  progress("indexes", { files: indexFiles });
 
   // Stage 7.5: Wake-up diff
   logger.info("dream", "Stage 7.5: wake-up diff");
@@ -374,12 +386,12 @@ export async function runDream(
   } catch (e) {
     logger.warn("dream", `Wake-up diff 失败: ${(e as Error).message}`);
   }
-  if (onStageProgress) onStageProgress("wake_up_diff", wakeupResult);
+  progress("wake_up_diff", wakeupResult);
 
   // Stage 7.6: Knowledge Map (weekly, failure-isolated — #242)
   logger.info("dream", "Stage 7.6: knowledge map");
   const knowledgeMapResult = await runKnowledgeMapStage(db, outputsDir, logger);
-  if (onStageProgress) onStageProgress("knowledge_map", knowledgeMapResult);
+  progress("knowledge_map", knowledgeMapResult);
 
   // Report
   logger.info("dream", "building report");
@@ -444,9 +456,12 @@ export async function runDream(
   }
   logger.info("dream", `报告 → ${reportPath}`);
 
-  releaseLock(db);
+  checkCancelled?.();
   logger.info("dream", `夜间维护完成 (${(report.duration_ms / 1000).toFixed(1)}s)`);
   return report;
+  } finally {
+    releaseLock(db);
+  }
 }
 
 function buildBrief(report: DreamReport, db: CBrainDB): string {

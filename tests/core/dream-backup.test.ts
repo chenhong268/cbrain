@@ -63,6 +63,53 @@ describe("dream backup retention", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
+  test("cancellation after sync preserves completed work and releases the Dream lock", async () => {
+    let cancelled = false;
+    let enriched = false;
+    const sync = makeMockSync();
+    sync.syncAll = async () => {
+      db.setConfig("probe.synced", "yes");
+      return { synced: 1, skipped: 0, errors: 0 };
+    };
+    const enrich = makeMockEnrich();
+    enrich.enrichAll = () => { enriched = true; return []; };
+    await expect(runDream(
+      vaultPath, db, sync, enrich, makeMockHealth(), outputsDir, logger,
+      undefined, undefined, undefined, undefined,
+      stage => { if (stage === "sync") cancelled = true; },
+      undefined, undefined, undefined,
+      () => { if (cancelled) throw new DOMException("Job cancelled", "AbortError"); },
+    )).rejects.toMatchObject({ name: "AbortError" });
+    expect(db.getConfig("probe.synced")).toBe("yes");
+    expect(enriched).toBe(false);
+    expect(db.getConfig("dream.lock")).toBeNull();
+  });
+
+  test.each(["page_cleanup", "health", "search_quality"])("cancellation at %s starts no later side effect", async boundary => {
+    let cancelled = false;
+    const sync = makeMockSync();
+    const health = makeMockHealth();
+    if (boundary === "page_cleanup") {
+      sync.removeOrphans = async () => { cancelled = true; return []; };
+      sync.cleanLanceOrphans = async () => { db.setConfig("probe.late", "yes"); return []; };
+    }
+    if (boundary === "health") {
+      const check = health.checkAll.bind(health);
+      health.checkAll = async () => { const result = await check(); cancelled = true; return result; };
+      db.cleanMentionSnapshots = () => { db.setConfig("probe.late", "yes"); return 0; };
+    }
+    await expect(runDream(
+      vaultPath, db, sync, makeMockEnrich(), health, outputsDir, logger,
+      undefined, undefined, undefined, undefined,
+      stage => { if (boundary === "search_quality" && stage === boundary) cancelled = true; },
+      undefined, undefined, undefined,
+      () => { if (cancelled) throw new DOMException("Job cancelled", "AbortError"); },
+    )).rejects.toMatchObject({ name: "AbortError" });
+    expect(db.getConfig("probe.late")).toBeNull();
+    expect(existsSync(join(outputsDir, "indexes"))).toBe(false);
+    expect(db.getConfig("dream.lock")).toBeNull();
+  });
+
   test("sync parse failures survive dream report and progress projection (#491)", async () => {
     const sync = makeMockSync();
     sync.syncAll = async () => ({ synced: 1, skipped: 0, errors: 0, nerParseErrors: 1 });
