@@ -195,6 +195,23 @@ describe("SyncManager", () => {
     expect(db.getChunksByPage(slug).map(c => c.content).join(" ")).toContain("原始资料A");
   });
 
+  test("an inaccessible registered file cannot be treated as absent during slug takeover", async () => {
+    const slug = "records/fixture-a";
+    const fm = { title: "记录A", type: "record", slug };
+    writeMdFile(vaultPath, "locked/a.md", fm, "原始资料A");
+    await sync.syncAll(vaultPath);
+    const before = db.getPage(slug);
+    writeMdFile(vaultPath, "imports/a.md", fm, "冲突资料B");
+    chmodSync(join(vaultPath, "locked"), 0);
+    try {
+      await expect(sync.syncPage("imports/a", vaultPath)).rejects.toThrow();
+      expect(db.getPage(slug)).toEqual(before);
+      expect(db.getChunksByPage(slug).map(c => c.content).join(" ")).toContain("原始资料A");
+    } finally {
+      chmodSync(join(vaultPath, "locked"), 0o700);
+    }
+  });
+
   describe("syncAll", () => {
     test("syncs markdown files from vault to SQLite", async () => {
       writeMdFile(

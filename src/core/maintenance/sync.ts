@@ -172,6 +172,17 @@ export class SyncManager {
     }
   }
 
+  private async assertSlugBinding(vaultPath: string, registered: string | undefined, observed: string): Promise<void> {
+    if (!registered || registered === observed) return;
+    try {
+      await access(join(vaultPath, registered));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    throw new Error("DUPLICATE_PAGE_SLUG");
+  }
+
   async syncAll(vaultPath: string): Promise<SyncReport> {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [], diagnostics: [] };
     try {
@@ -205,9 +216,7 @@ export class SyncManager {
         const contentHash = hashContent(content);
 
         const existingPage = this.db.getPage(slug);
-        if (existingPage && existingPage.file_path !== relPath && existsSync(join(vaultPath, existingPage.file_path))) {
-          throw new Error("DUPLICATE_PAGE_SLUG");
-        }
+        await this.assertSlugBinding(vaultPath, existingPage?.file_path, relPath);
         const exists = !!existingPage;
         const existingHash = existingPage?.content_hash ?? null;
 
@@ -540,8 +549,7 @@ export class SyncManager {
     const contentHash = hashContent(content);
 
     let existingPage = this.db.getPage(effectiveSlug);
-    if (existingPage && existingPage.file_path !== relative(vaultPath, resolvedFullPath)
-      && existsSync(join(vaultPath, existingPage.file_path))) throw new Error("DUPLICATE_PAGE_SLUG");
+    await this.assertSlugBinding(vaultPath, existingPage?.file_path, relative(vaultPath, resolvedFullPath));
     let exists = !!existingPage;
     const existingHash = existingPage?.content_hash ?? null;
 
@@ -583,8 +591,7 @@ export class SyncManager {
       // binding before migration and use that row for rollback/existence checks.
       existingPage = this.db.getPage(canonical);
       exists = !!existingPage;
-      if (existingPage && existingPage.file_path !== relative(vaultPath, resolvedFullPath)
-        && existsSync(join(vaultPath, existingPage.file_path))) throw new Error("DUPLICATE_PAGE_SLUG");
+      await this.assertSlugBinding(vaultPath, existingPage?.file_path, relative(vaultPath, resolvedFullPath));
       const newRelPath = slugToFilePath(canonical);
       const newFullPath = join(vaultPath, newRelPath);
       if (!existsSync(newFullPath)) {
