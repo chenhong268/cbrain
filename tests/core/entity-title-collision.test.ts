@@ -77,6 +77,34 @@ describe("entity title collision (#467)", () => {
   const pagesByTitle = (title: string): Array<{ slug: string; type: string }> =>
     db.rawDb.prepare("SELECT slug, type FROM pages WHERE title = ?").all(title) as Array<{ slug: string; type: string }>;
 
+  test("same-extraction names sharing a canonical slug reuse one stub without partial failure", async () => {
+    const source = pages.create({ title: "匿名记录甲", type: "record", body: "实体A及实体A®均出现在这条记录中。" });
+    const result = await pipeline.processNer(source.slug, source.body, "record", true, extraction([
+      { name: "实体A", type: "drug", relevance: "high", context: "匿名资料" },
+      { name: "实体A®", type: "drug", relevance: "high", context: "匿名资料" },
+    ]));
+    const targets = db.rawDb.prepare("SELECT slug FROM pages WHERE type='entity/drug'").all() as Array<{ slug: string }>;
+    expect(targets).toHaveLength(1);
+    expect(result?.resolvedSlugs).toEqual([targets[0].slug]);
+    const mentions = db.rawDb.prepare("SELECT to_slug FROM links WHERE from_slug=? AND relation='提及'").all(source.slug);
+    expect(mentions).toEqual([{ to_slug: targets[0].slug }]);
+    expect(pages.getBySlug(targets[0].slug)?.title).toBe("实体A");
+  });
+
+  test("canonical slug occupied by a different title retains its body and type", async () => {
+    const source = pages.create({ title: "匿名记录甲", type: "record", body: "匿名来源正文" });
+    const occupied = pages.create({ slug: "brain/entities/drug/实体a", title: "实体B", type: "entity/drug", body: "已有正文必须保留。" });
+    const before = readFileSync(join(vaultPath, occupied.file_path));
+    const result = await pipeline.processNer(source.slug, source.body, "record", true, extraction([
+      { name: "实体A", type: "drug", relevance: "high", context: "匿名资料" },
+    ]));
+    expect(result?.resolvedSlugs).toEqual([occupied.slug]);
+    expect(readFileSync(join(vaultPath, occupied.file_path))).toEqual(before);
+    expect(pages.getBySlug(occupied.slug)?.type).toBe("entity/drug");
+    expect(pagesByTitle("实体A")).toEqual([]);
+    expect(db.getSlugByAlias("实体A")).toBeNull();
+  });
+
   test("insight same-title deferred extraction completes and preserves the occupier", async () => {
     const source = pages.create({ title: "匿名记录甲", type: "record", body: "本次讨论主题甲的应用及其与组织丙的关系。" });
     const insight = pages.create({ title: "主题甲", type: "insight", body: "这是必须保留的已有洞察正文。" });
