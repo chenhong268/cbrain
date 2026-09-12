@@ -34,6 +34,7 @@ export async function recallRecentRecords(
   });
   if (records.length === 0) return { results: [], incomplete: omitted };
   const identity = deps.identityPersonSlug ? deps.pages.getBySlug(deps.identityPersonSlug)?.title : undefined;
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const response = await Promise.race([
@@ -48,8 +49,12 @@ export async function recallRecentRecords(
           "只输出资料ID和证据行ID，不要复述原文。证据行必须足以解释选择，保留状态、日期、主体及否定上下文；每条最多5行。没有证据返回空数组。" },
         { role: "user", content: JSON.stringify({ query, today: new Date().toLocaleDateString("sv-SE"), identity: identity ?? null, aliases: deps.identityPersonSlug ? deps.db.listAliases(deps.identityPersonSlug).slice(0, 8).map(alias => alias.slice(0, 80)) : [],
           limit, records: records.map((record, id) => ({ id, lines: record.lines.map((text, line) => ({ line, text })) })) }) },
-      ], { thinking: "disabled" }),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("verification timeout")), 5000); }),
+      ], { thinking: "disabled", signal: controller.signal }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => {
+        const error = new Error("verification timeout");
+        controller.abort(error);
+        reject(error);
+      }, 5000); }),
     ]);
     if (response.length > 24_000) return { results: [], incomplete: true };
     const parsed = JSON.parse(response.trim().replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/u, "$1")) as { matches?: unknown };

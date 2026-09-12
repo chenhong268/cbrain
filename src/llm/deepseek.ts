@@ -15,13 +15,13 @@ interface DeepSeekChatResponse {
 export interface DeepSeekLLMOptions {
   timeoutMs?: number;
   /** Enable DeepSeek's V4 thinking extension for a compatible proxy/model.
-   * Defaults to true only for official api.deepseek.com V4 models. */
+   * Defaults to true only for official api.deepseek.com V4 or deepseek-flash models. */
   supportsThinking?: boolean;
 }
 
-function isOfficialV4Endpoint(baseUrl: string, model: string): boolean {
+function supportsOfficialThinking(baseUrl: string, model: string): boolean {
   try {
-    return new URL(baseUrl).hostname === "api.deepseek.com" && /^deepseek-v4(?:-|$)/.test(model);
+    return new URL(baseUrl).hostname === "api.deepseek.com" && (model === "deepseek-flash" || /^deepseek-v4(?:-|$)/.test(model));
   } catch {
     return false;
   }
@@ -40,7 +40,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
     this.baseUrl = baseUrl ?? DEFAULT_BASE_URL;
     this.model = model ?? DEFAULT_MODEL;
     this.timeoutMs = opts?.timeoutMs ?? 30_000;
-    this.supportsThinking = opts?.supportsThinking ?? isOfficialV4Endpoint(this.baseUrl, this.model);
+    this.supportsThinking = opts?.supportsThinking ?? supportsOfficialThinking(this.baseUrl, this.model);
   }
 
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<string> {

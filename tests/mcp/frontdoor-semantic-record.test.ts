@@ -112,13 +112,15 @@ describe("#424 semantic personal record recall", () => {
     expect(calls).toBe(0);
   });
 
-  test("verification has a bounded timeout", async () => {
+  test("verification has a bounded timeout and cancels the provider request", async () => {
     await record("阅读状态：在读\n实体A的阅读笔记。");
-    ctx.llm = { name: "fixture", async chat() { return new Promise<string>(() => {}); }};
+    let signal: AbortSignal | undefined;
+    ctx.llm = { name: "fixture", async chat(_messages, options) { signal = options?.signal; return new Promise<string>(() => {}); }};
     const start = Date.now();
     const result = await ask("最近在看哪些书");
     expect(result.summary.status).toBe("degraded");
     expect(Date.now() - start).toBeLessThan(6000);
+    expect(signal?.aborted).toBe(true);
   }, 7000);
 
   test("direct title recall needs no verification call", async () => {

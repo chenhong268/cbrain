@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SearchTrace } from "../../core/retrieval/search.js";
 import type { ToolContext } from "../context.js";
 import { classifyFrontdoorQuery, type FrontdoorRoutingDecision } from "../../core/retrieval/frontdoor-router.js";
+import { stripKnownRelationsSection } from "../../core/graph/known-relations-projector.js";
 import { EpisodicRecaller } from "../../core/retrieval/episodic-recall.js";
 import { getOrgTree } from "../../core/graph/hierarchy.js";
 import { AgenticResearchPipeline } from "../../core/agentic/pipeline.js";
@@ -136,6 +137,36 @@ async function runGroundedRecall(
   return withRouting(formatted, payload, routing, grounded_answer.sources.map((source) => source.slug));
 }
 
+/** Deterministic passage selection, only after relevance admission. No new
+ * retrieval or generated text. Rare query terms keep a late specific section
+ * ahead of a generic introduction; returned evidence is a contiguous source slice. */
+function contentPassage(query: string, body: string, title: string): string {
+  const source = stripKnownRelationsSection(body).slice(0, 50_000);
+  const segmenter = new Intl.Segmenter("zh", { granularity: "word" });
+  const titleWords = new Set([...segmenter.segment(title.toLowerCase())].map(part => part.segment));
+  const terms = new Set([...segmenter.segment(query.toLowerCase())]
+    .filter(part => part.isWordLike && part.segment.length >= 2 && !titleWords.has(part.segment)).map(part => part.segment));
+  const frequency = new Map<string, number>();
+  for (const part of segmenter.segment(source.toLowerCase())) {
+    if (terms.has(part.segment)) frequency.set(part.segment, (frequency.get(part.segment) ?? 0) + 1);
+  }
+  if (frequency.size === 0) return source.slice(0, 500);
+  let bestStart = 0;
+  let bestScore = 0;
+  // Only top-level sections are independent boundaries. Keep qualifications
+  // before a matching sentence or nested heading, rather than selecting that
+  // sentence alone. Unstructured long text retains its original prefix.
+  const starts = [0, ...Array.from(source.matchAll(/^## [^\n]+/gmu), match => match.index).filter(start => start > 0)];
+  for (const [index, start] of starts.entries()) {
+    const section = source.slice(start, starts[index + 1] ?? source.length);
+    const words = new Set([...segmenter.segment(section.toLowerCase())].map(part => part.segment));
+    let score = 0;
+    for (const [term, count] of frequency) if (words.has(term)) score += 1 / count;
+    if (score > bestScore) { bestStart = start; bestScore = score; }
+  }
+  return source.slice(bestStart, bestStart + 500);
+}
+
 async function runContentRecall(
   ctx: ToolContext,
   query: string,
@@ -244,14 +275,16 @@ async function runContentRecall(
     if (page) {
       pagesBySlug.set(r.slug, { slug: page.slug, expires_at: page.expires_at });
     }
+    // A title/prefix hit locates a document but can omit the requested section.
+    // Select within that already-admitted page; retain non-prefix source evidence
+    // (including the recent-record verifier's selected correction/status lines).
+    const prefixOnly = page?.body?.trim() && (!r.snippet?.trim()
+      || r.snippet.trim() === page.title || page.body.trim().startsWith(r.snippet.trim()));
+    const excerpt = prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined;
     return {
       title: page?.title ?? r.slug,
-      // Exact-title hits can carry only the title as their search snippet.
-      // Keep usable evidence in the bounded snippet that structured output retains.
-      snippet: page?.body?.trim() && (!r.snippet?.trim() || r.snippet.trim() === page.title)
-        ? page.body.trim().slice(0, 200)
-        : r.snippet,
-      ...(detail !== "brief" ? { body: page?.body?.slice(0, 500) ?? "" } : {}),
+      snippet: excerpt === undefined ? r.snippet : excerpt.slice(0, 200),
+      ...(detail !== "brief" ? { body: excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
     };
   });
   // #399 — keep the default cbrain_recall content path aligned with deep_recall:
