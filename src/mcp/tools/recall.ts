@@ -11,7 +11,7 @@ import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning }
 import { traceToSteps } from "../../core/retrieval/search-trace.js";
 import { buildEvidenceFromBatched, buildEvidenceSummary, collectEvidenceForSlugs, type EvidenceItem } from "../../core/retrieval/evidence.js";
 import { buildGroundedRecall } from "../../core/retrieval/grounded-answer.js";
-import { formatRecallEnvelope, formatGroundedRecallEnvelope } from "./format-result.js";
+import { formatRecallEnvelope, formatGroundedRecallEnvelope, INCOMPLETE_RECALL_MESSAGE } from "./format-result.js";
 import { buildCompactRecallResponse, type CompactProactiveHint } from "./recall-compact.js";
 import { shouldCompleteEvidence } from "../../core/retrieval/recall-intent.js";
 import { assembleEvidencePack, type EvidencePack } from "../../core/retrieval/evidence-completion.js";
@@ -217,7 +217,11 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       try { ctx.learn.bumpOnQuery(searchResults[i].slug, i, "recall"); } catch { /* non-critical */ }
     }
 
-    const isSearchDegraded = computeSearchDegraded(searchLatencyMs, trace, reasonCodes);
+    // An exhausted but successful search is a valid empty result. The diagnostic
+    // fts_empty/low_score codes alone do not mean retrieval failed.
+    const isSearchDegraded = searchResults.length === 0
+      ? !!trace.degraded_reason
+      : computeSearchDegraded(searchLatencyMs, trace, reasonCodes);
     // Fanout diagnostics — surfaced ONLY in raw/search_meta, never in display/summary.
     // candidate_count reflects the wider pool searched; truncated/has_more signal that
     // display was capped (distinct from ToolSummary.truncated which tracks _stub bodies).
@@ -237,6 +241,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       if (grounded) {
         const emptyBoard = { facts: [], user_thoughts: [], candidates: [], gaps: [], conflicts: [] as Array<{ claim: string; evidence: EvidenceItem[] }> };
         const groundedResult = buildGroundedRecall(query, emptyBoard);
+        if (isSearchDegraded) groundedResult.answer = INCOMPLETE_RECALL_MESSAGE;
         const groundedPayload = { query, grounded_answer: groundedResult, search_meta: diagnosticMeta };
         const { display, summary, raw } = formatGroundedRecallEnvelope(groundedPayload);
         const { search_meta: _gm, ...groundedLegacy } = groundedPayload;
@@ -244,7 +249,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
           return buildToolResult({
             mode: ctx.outputMode,
             display,
-            displayStructured: "已完成记忆检索。",
+            displayStructured: isSearchDegraded && searchResults.length === 0 ? INCOMPLETE_RECALL_MESSAGE : "已完成记忆检索。",
             summary,
             summaryStructured: structuredSummary(summary, "recall"),
             data: projectGroundedRecallData(groundedResult as unknown as Record<string, unknown>),
@@ -269,14 +274,14 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
           }],
         };
       }
-      const emptyPayload = { query, entities: [], summary: "暂时没找到相关记忆", search_meta: diagnosticMeta };
+      const emptyPayload = { query, entities: [], summary: isSearchDegraded ? INCOMPLETE_RECALL_MESSAGE : "暂时没找到相关记忆", search_meta: diagnosticMeta };
       const { display: emptyDisplay, summary: emptySummary, raw: emptyRaw } = formatRecallEnvelope(emptyPayload);
       const { summary: emptyLegacySummary, search_meta: _em, ...emptyRest } = emptyPayload;
       if (ctx.outputMode === "structured") {
         return buildToolResult({
           mode: ctx.outputMode,
           display: emptyDisplay,
-          displayStructured: "已完成记忆检索。",
+          displayStructured: isSearchDegraded && searchResults.length === 0 ? INCOMPLETE_RECALL_MESSAGE : "已完成记忆检索。",
           summary: emptySummary,
           summaryStructured: structuredSummary(emptySummary, "recall"),
           data: projectRecallData({ result_summary: emptyLegacySummary, query, entities: [] }),
@@ -318,7 +323,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
         return buildToolResult({
           mode: ctx.outputMode,
           display: gDisplay,
-          displayStructured: "已完成记忆检索。",
+          displayStructured: isSearchDegraded && searchResults.length === 0 ? INCOMPLETE_RECALL_MESSAGE : "已完成记忆检索。",
           summary: gSummary,
           summaryStructured: structuredSummary(gSummary, "recall"),
           data: projectGroundedRecallData(groundedResult as unknown as Record<string, unknown>),
@@ -600,7 +605,7 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       return buildToolResult({
         mode: ctx.outputMode,
         display,
-        displayStructured: "已完成记忆检索。",
+        displayStructured: isSearchDegraded && searchResults.length === 0 ? INCOMPLETE_RECALL_MESSAGE : "已完成记忆检索。",
         summary: envelopeSummary,
         summaryStructured: structuredSummary(envelopeSummary, "recall"),
         data: projectRecallData(compact),

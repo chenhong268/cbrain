@@ -388,8 +388,10 @@ describe("content frontdoor honesty sequencing", () => {
         "主题甲是谁",
         "人物丁是谁",
       ] as const) {
-        const output = parsed(await handler!({ query })) as { summary: { status: string } };
-        expect(output.summary.status).toBe("empty");
+        const output = parsed(await handler!({ query })) as { summary: { status: string; count: number } };
+        // The controlled embedding outage must not turn rejected fuzzy matches
+        // into either accepted evidence or a claim of successfully searching nothing.
+        expect(output.summary).toMatchObject({ status: "degraded", count: 0 });
       }
     } finally {
       db.close();
@@ -456,7 +458,7 @@ describe("content frontdoor honesty sequencing", () => {
 
     expect(harness.searchCalls).toEqual([{
       query: "匿名主题",
-      options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true },
+      options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true, _trace: expect.any(Object) },
     }]);
     expect(harness.searchCalls[0]!.options).not.toHaveProperty("multiStep");
   });
@@ -485,7 +487,7 @@ describe("content frontdoor honesty sequencing", () => {
     expect(harness.searchCalls).toEqual([
       {
         query: "匿名新版决策与扩大试用条件",
-        options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true },
+        options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true, _trace: expect.any(Object) },
       },
       {
         query: "匿名新版决策与扩大试用条件",

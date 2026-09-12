@@ -81,6 +81,33 @@ describe("#331 recall/query structured output boundary", () => {
     if (existsSync(root)) rmSync(root, { recursive: true });
   });
 
+  for (const mode of ["legacy", "structured"] as const) {
+    for (const scenario of [
+      { name: "deep empty", tool: "deep_recall", args: { query: "主题D风险", strategy: "vector" } },
+      { name: "deep grounded empty", tool: "deep_recall", args: { query: "主题D风险", strategy: "vector", grounded: true } },
+      { name: "frontdoor content empty", tool: "cbrain_recall", args: { query: "主题D风险", detail: "normal" } },
+      { name: "frontdoor grounded empty", tool: "cbrain_recall", args: { query: "主题D之前讨论过吗" } },
+    ]) {
+      test(`${mode} ${scenario.name} reports failed retrieval instead of missing records`, async () => {
+        let embeddingCalls = 0;
+        deps.embedding = {
+          ...mockEmbedding(),
+          embed: async () => { embeddingCalls++; throw new Error("anonymous provider unavailable"); },
+        } as never;
+        await withOutputMode(mode, async () => {
+          const { result, parsed } = await call(createServer(deps), scenario.tool, scenario.args);
+          expect(embeddingCalls).toBeGreaterThan(0);
+          expect(parsed.summary).toMatchObject({ status: "degraded", count: 0 });
+          const surface = JSON.stringify({ ...parsed, raw: undefined, audit: undefined });
+          expect(surface).toContain("检索未完成");
+          expect(surface).not.toMatch(/暂时没找到|暂时还没找到|没有足够的记录|已完成.*检索/);
+          expect(surface).not.toContain("anonymous provider unavailable");
+          expect(result.structuredContent !== undefined).toBe(mode === "structured");
+        });
+      });
+    }
+  }
+
   test("legacy mode keeps each existing top-level contract", async () => {
     await withOutputMode("legacy", async () => {
       const originalNow = Date.now;
