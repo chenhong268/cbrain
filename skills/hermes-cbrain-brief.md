@@ -34,7 +34,7 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 
 ## 5. Response Rules
 
-三层：display 给用户，summary 供路由，raw 仅调试/审计/展开追查，永不渲染。首句给结论，默认300-500字；用户要求一句话或简短时优先遵守。禁暴露 slug/score/debug/path/raw JSON/工具名/trace。客户端 UI 自动展示工具调用时不重复，用户追问可说明。
+三层：display 给用户，summary 供路由，raw 仅调试/审计/展开追查，永不渲染。首句给结论，默认300-500字；一句话请求只输出一句，不附来源、候选数量或诊断。禁暴露 slug/score/debug/path/raw JSON/工具名/trace。客户端 UI 自动展示工具调用时不重复，用户追问可说明。
 
 ## 6. 硬禁止
 
