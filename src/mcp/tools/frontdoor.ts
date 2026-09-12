@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SearchTrace } from "../../core/retrieval/search.js";
 import type { ToolContext } from "../context.js";
 import { classifyFrontdoorQuery, type FrontdoorRoutingDecision } from "../../core/retrieval/frontdoor-router.js";
+import { stripKnownRelationsSection } from "../../core/graph/known-relations-projector.js";
 import { EpisodicRecaller } from "../../core/retrieval/episodic-recall.js";
 import { getOrgTree } from "../../core/graph/hierarchy.js";
 import { AgenticResearchPipeline } from "../../core/agentic/pipeline.js";
@@ -140,7 +141,7 @@ async function runGroundedRecall(
  * retrieval or generated text. Rare query terms keep a late specific section
  * ahead of a generic introduction; returned evidence is a contiguous source slice. */
 function contentPassage(query: string, body: string, title: string): string {
-  const source = body.slice(0, 50_000);
+  const source = stripKnownRelationsSection(body).slice(0, 50_000);
   const segmenter = new Intl.Segmenter("zh", { granularity: "word" });
   const titleWords = new Set([...segmenter.segment(title.toLowerCase())].map(part => part.segment));
   const terms = new Set([...segmenter.segment(query.toLowerCase())]
@@ -149,19 +150,21 @@ function contentPassage(query: string, body: string, title: string): string {
   for (const part of segmenter.segment(source.toLowerCase())) {
     if (terms.has(part.segment)) frequency.set(part.segment, (frequency.get(part.segment) ?? 0) + 1);
   }
-  if (frequency.size === 0) return body.slice(0, 500);
+  if (frequency.size === 0) return source.slice(0, 500);
   let bestStart = 0;
   let bestScore = 0;
-  // Anchor on the matching line, not a preceding window that merely contains
-  // it near the end and would truncate the answer in the shared short snippet.
-  for (const line of source.matchAll(/[^\n]+/gu)) {
-    const start = line.index;
-    const words = new Set([...segmenter.segment(line[0].slice(0, 200).toLowerCase())].map(part => part.segment));
+  // Only top-level sections are independent boundaries. Keep qualifications
+  // before a matching sentence or nested heading, rather than selecting that
+  // sentence alone. Unstructured long text retains its original prefix.
+  const starts = [0, ...Array.from(source.matchAll(/^## [^\n]+/gmu), match => match.index).filter(start => start > 0)];
+  for (const [index, start] of starts.entries()) {
+    const section = source.slice(start, starts[index + 1] ?? source.length);
+    const words = new Set([...segmenter.segment(section.toLowerCase())].map(part => part.segment));
     let score = 0;
     for (const [term, count] of frequency) if (words.has(term)) score += 1 / count;
     if (score > bestScore) { bestStart = start; bestScore = score; }
   }
-  return body.slice(bestStart, bestStart + 500);
+  return source.slice(bestStart, bestStart + 500);
 }
 
 async function runContentRecall(

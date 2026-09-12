@@ -1,4 +1,4 @@
-# Hermes CBrain Brief — 启动必读
+# Hermes CBrain Brief
 
 ## 0. CBrain First
 
@@ -6,11 +6,11 @@
 
 ## 1. 默认前门：`cbrain_recall`
 
-自然语言回忆/核查/找人/层级/总结/关系/判断，首选：
+自然语言问题首选：
 
 `cbrain_recall({ query, detail: "brief" })`
 
-内部 routing 会按意图选择 internal/advanced 路径：deep_recall / recall_episode / get_org_tree / summarize / agentic_research / query。
+CBrain 内部按意图分发。
 structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止渲染。
 
 ## 2. 常见信号
@@ -19,10 +19,10 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 - 当时怎么设计、为什么选、具体怎么说 → `cbrain_recall(detail:"normal")`；首轮禁止 expand_entity/get_page/get_timeline。
 - 想不起名字、叫什么来着、一起做过项目 → `cbrain_recall`，内部 recall_episode；禁止 query/agentic_research。
 - 关系/下属/全貌/盲区 → 默认 `cbrain_recall`；显式结构遍历可用 `graph_query`，`summarize` 仅 full profile 的 advanced escape hatch。
-- 关键词定位/debug → `cbrain_recall`（内部 `debug_search`）；只有显式选择 debug/full profile 的诊断会话才直调 `query`。
+- 关键词/debug → `cbrain_recall`；仅显式 debug/full 诊断直调 `query`。
 - 批量补详情 → `get_pages`，禁止连续 get_page。
 
-普通内容回忆：健康 empty / insufficient 后最多一次 `deep_recall({ query: 原查询, detail: "brief", limit: 3 })`，然后停止。运行或新鲜度 degraded 时说明“检索未完成”，不 fallback，不说没有记录。普通问答不得转用终端、SQLite 或 vault 文件绕过停止规则；只有用户明确要求故障排查或源文件审计才进入诊断流程。
+内容回忆 fallback：健康 empty/insufficient → `deep_recall({ query: 原查询, detail:"brief", limit:3 })`，仅一次。degraded → 说明检索未完成并停止。不得转查 SQLite/终端/vault；用户明确要求诊断除外。
 
 ## 3. 发现摘要
 
@@ -34,7 +34,7 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 
 ## 5. Response Rules
 
-三层：display 给用户，summary 供路由，raw 仅调试/审计/展开追查，永不渲染。首句给结论，默认300-500字；用户要求一句话或简短时优先遵守。先摘要后展开。禁暴露 slug/score/debug/path/raw JSON/工具名/trace。客户端 UI 自动展示工具调用时不重复，用户追问可说明。
+三层：display 给用户，summary 供路由，raw 仅调试/审计/展开追查，永不渲染。首句给结论，默认300-500字；用户要求一句话或简短时优先遵守。禁暴露 slug/score/debug/path/raw JSON/工具名/trace。客户端 UI 自动展示工具调用时不重复，用户追问可说明。
 
 ## 6. 硬禁止
 

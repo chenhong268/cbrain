@@ -1457,6 +1457,33 @@ describe("content recall retains the requested passage after document discovery"
     });
   }
 
+  for (const outputMode of ["legacy", "structured"] as const) {
+    for (const heading of ["以下方案已取消，不再作为目标：", "## 已取消方案\n### 成功标准"]) {
+      test(`${outputMode} retains qualification: ${heading}`, async () => {
+        const body = `# 主题D准备稿\n\n${heading}\n成功标准是所有流程无人介入。\n\n当前目标：保留人工审核。`;
+        const h = makeHarness([result("record-d", { exact: { original: { rankScore: 1 } } }, body.slice(0, 200))], outputMode, {
+          pagesBySlug: { "record-d": { title: "主题D准备稿", body } },
+        });
+        const response = await h.call({ query: "我在主题D准备稿里写的成功标准是什么？", detail: "normal" });
+        const entities = outputMode === "legacy" ? (parsed(response).raw as { entities: Array<{ snippet: string }> }).entities
+          : (response.structuredContent!.data as { details: { entities: Array<{ snippet: string }> } }).details.entities;
+        expect(entities[0]!.snippet).toContain("已取消");
+      });
+    }
+    test(`${outputMode} never selects generated relations as source passage`, async () => {
+      const body = "# 主题D准备稿\n\n成功标准是减少重复劳动。\n\n## Known Relations\n- 关联 → [[concept/自动化成功标准]]";
+      const h = makeHarness([result("record-d", { exact: { original: { rankScore: 1 } } }, body.slice(0, 200))], outputMode, {
+        pagesBySlug: { "record-d": { title: "主题D准备稿", body } },
+      });
+      const response = await h.call({ query: "我在主题D准备稿里写的自动化成功标准是什么？", detail: "normal" });
+      const entities = outputMode === "legacy" ? (parsed(response).raw as { entities: Array<{ snippet: string }> }).entities
+        : (response.structuredContent!.data as { details: { entities: Array<{ snippet: string }> } }).details.entities;
+      expect(entities[0]!.snippet).toContain("减少重复劳动");
+      expect(entities[0]!.snippet).not.toContain("Known Relations");
+      expect(entities[0]!.snippet).not.toContain("[removed]");
+    });
+  }
+
   test("keeps a retrieved non-prefix evidence passage including a correction", async () => {
     const snippet = "原计划参与主题D；后来已取消，不能记作实际参加。";
     const h = makeHarness([result("record-d", { exact: { original: { rankScore: 1 } } }, snippet)], "legacy", {
