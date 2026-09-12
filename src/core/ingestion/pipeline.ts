@@ -82,6 +82,10 @@ export type NerSourceGuard = (phase: "after_extract" | "before_commit") => void;
  * Used by SyncManager (vault path) and IngestManager (agent API path).
  */
 export class ContentPipeline {
+  // MCP and SyncManager own separate pipelines over one DB. Serialize only the
+  // actual same-page index mutation, so vector delete/add cannot interleave.
+  private static readonly indexWrites = new WeakMap<CBrainDB, Map<string, Promise<void>>>();
+
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
   private lance: LanceDBManager;
@@ -129,6 +133,26 @@ export class ContentPipeline {
     slug: string,
     chunks: Array<{ index: number; content: string }>,
     embedResults: Array<{ embedding: number[]; tokenCount: number }>
+  ): Promise<void> {
+    let pending = ContentPipeline.indexWrites.get(this.db);
+    if (!pending) { pending = new Map(); ContentPipeline.indexWrites.set(this.db, pending); }
+    const previous = pending.get(slug);
+    let release!: () => void;
+    const done = new Promise<void>(resolve => { release = resolve; });
+    pending.set(slug, done);
+    await previous;
+    try {
+      await this.writePageIndexes(slug, chunks, embedResults);
+    } finally {
+      release();
+      if (pending.get(slug) === done) pending.delete(slug);
+    }
+  }
+
+  private async writePageIndexes(
+    slug: string,
+    chunks: Array<{ index: number; content: string }>,
+    embedResults: Array<{ embedding: number[]; tokenCount: number }>,
   ): Promise<void> {
     if (this.pages) this.db.updatePageHash(slug, null);
     try {

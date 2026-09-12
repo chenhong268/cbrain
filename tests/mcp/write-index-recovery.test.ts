@@ -8,6 +8,7 @@ import { attachMcpTools } from "../../src/mcp/server.js";
 import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic.js";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
+import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
 import { hashContent } from "../../src/core/shared.js";
 
 describe("write failures remain recoverable by ordinary sync (#451)", () => {
@@ -90,6 +91,32 @@ describe("write failures remain recoverable by ordinary sync (#451)", () => {
     expect(result.errors).toBe(0);
     expect(ctx.db.getPageFilePath(slug)).toBe("moved/a.md");
     await assertRecovered("movedfixturetoken");
+  });
+  test("two pipeline instances cannot interleave same-page vector delete and add", async () => {
+    const old = await ctx.pipeline.embed("intermediatefixturetoken");
+    const fresh = await ctx.pipeline.embed("newestfixturetoken");
+    ctx.pages.update(slug, { body: "newestfixturetoken" });
+    const other = new ContentPipeline(ctx.db, embedding, ctx.lance, { pages: ctx.pages });
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const add = ctx.lance.addChunks.bind(ctx.lance);
+    let first: Promise<void>;
+    ctx.lance.addChunks = async rows => {
+      if (rows[0].content === "intermediatefixturetoken") { entered(); await gate; }
+      else await first;
+      return add(rows);
+    };
+    first = ctx.pipeline.writeIndexes(slug, old.chunks, old.embedResults);
+    await started;
+    const second = other.writeIndexes(slug, fresh.chunks, fresh.embedResults);
+    await Bun.sleep(20);
+    release();
+    await Promise.all([first, second]);
+    expect((await ctx.lance.readRawVectorRows(slug)).map(row => row.content)).toEqual(["newestfixturetoken"]);
+    expect(ctx.db.getChunksByPage(slug).map(row => row.content)).toEqual(["newestfixturetoken"]);
+    expect((await ctx.sync.syncPage(slug, ctx.vaultPath)).skipped).toBe(true);
   });
   test("an older in-flight index cannot mark newer file contents as synchronized", async () => {
     ctx.pages.update(slug, { body: "intermediatefixturetoken" });
