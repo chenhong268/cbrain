@@ -108,10 +108,20 @@ describe("classifyDegradedReasons", () => {
   test("rerank ran but score still low → rerank_insufficient", () => {
     const codes = classifyDegradedReasons(
       [{ score: 0.2 }],
-      { rerank_ms: 100 },
+      { rerank_ms: 100, rerank_completed: true },
       "test query",
     );
     expect(codes).toContain("rerank_insufficient");
+  });
+
+  test("timed out or failed rerank is not a result-quality failure", () => {
+    for (const completed of [false, undefined]) {
+      const codes = classifyDegradedReasons([{ score: 0.2 }], {
+        rerank_ms: 3001, rerank_completed: completed, degraded_reason: "research_budget_exceeded",
+      }, "fixture query");
+      expect(codes).toContain("budget_exhausted");
+      expect(codes).not.toContain("rerank_insufficient");
+    }
   });
 
   // ─── Fallback ────────────────────────────────────────────

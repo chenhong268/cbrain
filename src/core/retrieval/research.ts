@@ -299,7 +299,9 @@ export class ResearchManager {
     results: readonly SearchResult[],
     trace?: SearchOptions["_trace"],
   ): Promise<SearchResult[]> {
-    if (!this.llm || results.length <= 1) return [...results];
+    if (trace) trace.rerank_completed = false;
+    // Small candidate sets already fit the answer window; keep retrieval order.
+    if (!this.llm || results.length <= 5) return [...results];
 
     const info = results.map(
       (r, i) => `${i + 1}. slug="${r.slug}" snippet="${r.snippet.slice(0, 80)}"`,
@@ -326,7 +328,7 @@ export class ResearchManager {
       const reordered: SearchResult[] = [];
       const seen = new Set<number>();
       for (const idx of parsed.order) {
-        if (idx >= 1 && idx <= results.length && !seen.has(idx)) {
+        if (Number.isInteger(idx) && idx >= 1 && idx <= results.length && !seen.has(idx)) {
           seen.add(idx);
           reordered.push(results[idx - 1]);
         }
@@ -334,6 +336,7 @@ export class ResearchManager {
       for (let i = 0; i < results.length; i++) {
         if (!seen.has(i + 1)) reordered.push(results[i]);
       }
+      if (trace) trace.rerank_completed = seen.size > 0;
       return reordered;
     } catch {
       this.logger?.error("research", "reranking failed, returning original order");
