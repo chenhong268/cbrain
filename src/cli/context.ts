@@ -19,6 +19,10 @@ export interface CBrainConfig {
   dbPath: string;
   lancePath: string;
   runtimePath?: string;
+  maintenance?: {
+    /** LanceDB version retention in hours: default 6, range 1–168. */
+    compactRetentionHours?: number;
+  };
   embedding: {
     provider: string;
     apiKey?: string;
@@ -180,6 +184,7 @@ export function createDeps(
 ): CBrainDeps {
   const loaded = "config" in input && "configPath" in input ? input : undefined;
   const config = loaded?.config ?? input as CBrainConfig;
+  const lance = new LanceDBManager(config.maintenance);
   const db = new CBrainDB(config.dbPath);
   const embeddingProvider = config.embedding.provider ?? "zhipu";
   const isDeterministic = embeddingProvider === "deterministic";
@@ -195,7 +200,6 @@ export function createDeps(
     : apiKey
       ? new ZhipuEmbeddingProvider(apiKey, config.embedding.baseUrl)
       : (undefined as unknown as EmbeddingProvider);
-  const lance = new LanceDBManager();
 
   const nerEnabled = config.ner?.enabled !== false;
   const nerApiKey = config.ner?.llm_api_key ?? apiKey ?? process.env.ZHIPU_API_KEY;

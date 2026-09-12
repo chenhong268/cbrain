@@ -2,6 +2,9 @@
   "vaultPath": "/path/to/your/vault",
   "dbPath": "/path/to/your/brain.sqlite",
   "lancePath": "/path/to/your/lancedb",
+  "maintenance": {
+    "compactRetentionHours": 6
+  },
   "embedding": {
     "provider": "zhipu",
     "apiKey": "your-zhipu-api-key"

@@ -1,6 +1,21 @@
 import * as lancedb from "@lancedb/lancedb";
 import { Field, FixedSizeList, Float32, Int32, Schema, Utf8 } from "apache-arrow";
 import type { Data } from "@lancedb/lancedb";
+import { readdir, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
+
+export interface CompactReport {
+  tables: string[];
+  fragmentsRemoved: number;
+  fragmentsAdded: number;
+  bytesRemoved: number;
+  filesRemoved: number;
+  /** Sum of local file sizes; null means maintenance did not measure it. */
+  diskBytesBefore: number | null;
+  diskBytesAfter: number | null;
+  /** After minus before: positive means growth, negative means reclaimed space. */
+  diskBytesDelta: number | null;
+}
 
 export interface ChunkData {
   pageSlug: string;
@@ -95,10 +110,21 @@ function normalizeVector(v: unknown): Float32Array {
 
 export class LanceDBManager {
   private db: lancedb.Connection | null = null;
+  private dbPath: string | null = null;
+  private readonly compactRetentionMs: number;
   private tables: Map<string, lancedb.Table> = new Map();
+
+  constructor(options: { compactRetentionHours?: number } = {}) {
+    const hours = options.compactRetentionHours ?? LanceDBManager.COMPACT_RETENTION_MS / 3600_000;
+    if (!Number.isFinite(hours) || hours < 1 || hours > 168) {
+      throw new Error("maintenance.compactRetentionHours must be between 1 and 168 hours");
+    }
+    this.compactRetentionMs = hours * 3600_000;
+  }
 
   async connect(path: string): Promise<void> {
     this.db = await lancedb.connect(path);
+    this.dbPath = resolve(path);
   }
 
   private tableInits = new Map<string, Promise<lancedb.Table>>();
@@ -355,10 +381,22 @@ export class LanceDBManager {
   // ─── Maintenance ───────────────────────────────────────────────
 
   /** Milliseconds of old version retention after compaction. */
-  static readonly COMPACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+  static readonly COMPACT_RETENTION_MS = 6 * 60 * 60 * 1000;
+  static readonly COMPACT_ROLLBACK_TAG = "cbrain-compact-rollback";
 
-  async compact(): Promise<{ tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; bytesRemoved: number; filesRemoved: number }> {
-    if (!this.db) throw new Error("LanceDB not connected");
+  private async measureDiskBytes(dir: string): Promise<number> {
+    let total = 0;
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) total += await this.measureDiskBytes(path);
+      else if (entry.isFile()) total += (await stat(path)).size;
+    }
+    return total;
+  }
+
+  async compact(): Promise<CompactReport> {
+    if (!this.db || !this.dbPath) throw new Error("LanceDB not connected");
+    const diskBytesBefore = await this.measureDiskBytes(this.dbPath);
     const tableNames = await this.db.tableNames();
     let fragmentsRemoved = 0;
     let fragmentsAdded = 0;
@@ -367,15 +405,33 @@ export class LanceDBManager {
 
     for (const name of tableNames) {
       const tbl = await this.db.openTable(name);
+      const tags = await tbl.tags();
+      const rollbackTag = LanceDBManager.COMPACT_ROLLBACK_TAG;
+      if (Object.hasOwn(await tags.list(), rollbackTag)) {
+        throw new Error(`Unresolved compact rollback tag "${rollbackTag}" on table "${name}"; inspect and recover before retrying`);
+      }
 
       // Capture row count before optimize for post-compaction validation.
       const countBefore = await tbl.countRows();
+      const versionBefore = await tbl.version();
+      const current = (await tbl.listVersions()).find(v => v.version === versionBefore);
+      if (!current || !Number.isFinite(current.timestamp.getTime())) {
+        throw new Error(`Cannot establish rollback version for table "${name}"`);
+      }
 
-      // Retain old versions for 7 days so a corrupt compaction can be rolled back.
+      // Tags make pruning fail closed if it would remove our recovery point.
+      // Leave the tag on any failure; never overwrite an unresolved recovery point.
+      await tags.create(rollbackTag, versionBefore);
+      // The SDK converts this cutoff to a duration before rewriting, then prunes
+      // afterward. A full window before the current version avoids normal idle
+      // tables hitting the tag guard as that effective cutoff advances with time.
       // deleteUnverified: false protects files that may belong to in-progress
       // transactions from being deleted prematurely.
       const stats = await tbl.optimize({
-        cleanupOlderThan: new Date(Date.now() - LanceDBManager.COMPACT_RETENTION_MS),
+        cleanupOlderThan: new Date(Math.min(
+          Date.now() - this.compactRetentionMs,
+          current.timestamp.getTime() - this.compactRetentionMs,
+        )),
         deleteUnverified: false,
       });
 
@@ -386,9 +442,10 @@ export class LanceDBManager {
         throw new Error(
           `LanceDB compact integrity failure on table "${name}": `
           + `row count changed from ${countBefore} to ${countAfter}. `
-          + "Old versions are retained for rollback.",
+          + `Version ${versionBefore} is retained for rollback.`,
         );
       }
+      await tags.delete(rollbackTag);
 
       fragmentsRemoved += stats.compaction.fragmentsRemoved;
       fragmentsAdded += stats.compaction.fragmentsAdded;
@@ -397,7 +454,11 @@ export class LanceDBManager {
       this.tables.set(name, tbl);
     }
 
-    return { tables: tableNames, fragmentsRemoved, fragmentsAdded, bytesRemoved, filesRemoved };
+    const diskBytesAfter = await this.measureDiskBytes(this.dbPath);
+    return {
+      tables: tableNames, fragmentsRemoved, fragmentsAdded, bytesRemoved, filesRemoved,
+      diskBytesBefore, diskBytesAfter, diskBytesDelta: diskBytesAfter - diskBytesBefore,
+    };
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────
@@ -408,5 +469,6 @@ export class LanceDBManager {
     }
     this.tables.clear();
     this.db = null;
+    this.dbPath = null;
   }
 }

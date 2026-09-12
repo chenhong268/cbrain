@@ -13,7 +13,7 @@ import { LearnManager } from "./learn.js";
 import { IndexGenerator } from "./indexes.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
-import type { LanceDBManager } from "../../storage/lancedb.js";
+import type { CompactReport, LanceDBManager } from "../../storage/lancedb.js";
 import type { SearchProvider } from "../../search/provider.js";
 import { SealManager } from "./seal.js";
 import { StubEnrichManager } from "./stub-enrich.js";
@@ -40,7 +40,7 @@ export interface DreamReport {
     seal: { sealed: number; skipped: number; errors: number };
     stub_enrich: { enriched: number; skipped: number; errors: number };
     cleanup: { orphans: number; staleStubs: number; lanceOrphans: number };
-    compact: { tables: string[]; fragmentsRemoved: number; fragmentsAdded: number; bytesRemoved: number; filesRemoved: number };
+    compact: CompactReport;
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
     search_quality: { degraded_rate: number; total: number; top_reasons: Array<{ code: string; count: number }> };
@@ -105,7 +105,7 @@ export async function runDream(
         seal: { sealed: 0, skipped: 0, errors: 0 },
         stub_enrich: { enriched: 0, skipped: 0, errors: 0 },
         cleanup: { orphans: 0, staleStubs: 0, lanceOrphans: 0 },
-        compact: { tables: [], fragmentsRemoved: 0, fragmentsAdded: 0, bytesRemoved: 0, filesRemoved: 0 },
+        compact: { tables: [], fragmentsRemoved: 0, fragmentsAdded: 0, bytesRemoved: 0, filesRemoved: 0, diskBytesBefore: null, diskBytesAfter: null, diskBytesDelta: null },
         health: { overallStatus: "skipped", dimensions: 0, issues: 0 },
         insight_archive: { archived: 0 },
         search_quality: { degraded_rate: 0, total: 0, top_reasons: [] },
@@ -307,17 +307,15 @@ export async function runDream(
 
   // Stage 4.6: LanceDB compact — coalesce fragment versions to prevent disk bloat
   logger.info("dream", "Stage 4.6/7: LanceDB compact");
-  let compactReport = { tables: [] as string[], fragmentsRemoved: 0, fragmentsAdded: 0, bytesRemoved: 0, filesRemoved: 0 };
+  let compactReport: CompactReport = { tables: [] as string[], fragmentsRemoved: 0, fragmentsAdded: 0, bytesRemoved: 0, filesRemoved: 0, diskBytesBefore: null, diskBytesAfter: null, diskBytesDelta: null };
   const lanceInstance = lance ?? sealDeps?.lance;
   if (lanceInstance) {
     try {
       compactReport = await lanceInstance.compact();
-      if (compactReport.fragmentsRemoved > 0) {
-        const mb = (compactReport.bytesRemoved / 1024 / 1024).toFixed(1);
-        logger.info("dream", `LanceDB compact: ${compactReport.fragmentsRemoved} fragments → ${compactReport.fragmentsAdded}, ${compactReport.filesRemoved} files, ${mb}MB freed`);
-      } else {
-        logger.info("dream", "LanceDB compact: no fragments to merge");
-      }
+      const disk = `disk ${compactReport.diskBytesBefore} → ${compactReport.diskBytesAfter} bytes, delta ${compactReport.diskBytesDelta} bytes (positive = growth)`;
+      const message = `LanceDB compact: ${compactReport.fragmentsRemoved} fragments → ${compactReport.fragmentsAdded}, ${compactReport.filesRemoved} files, prune ${compactReport.bytesRemoved} bytes; ${disk}`;
+      if ((compactReport.diskBytesDelta ?? 0) > 0) logger.warn("dream", message);
+      else logger.info("dream", message);
     } catch (e) {
       logger.warn("dream", `LanceDB compact 失败: ${(e as Error).message}`);
     }
@@ -432,7 +430,7 @@ export async function runDream(
     `| Stub Enrich | ${report.stages.stub_enrich.enriched} 页富化, ${report.stages.stub_enrich.skipped} 跳过 |`,
     `| NER Backfill | ${report.stages.ner_backfill.processed} 页补抽, ${report.stages.ner_backfill.failed} 失败, ${report.stages.ner_backfill.timed_out} 超时 |`,
     `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿 |`,
-    `| LanceDB Compact | ${report.stages.compact.fragmentsRemoved} fragments → ${report.stages.compact.fragmentsAdded}, ${report.stages.compact.filesRemoved} files removed |`,
+    `| LanceDB Compact | ${report.stages.compact.fragmentsRemoved} fragments → ${report.stages.compact.fragmentsAdded}, ${report.stages.compact.filesRemoved} files removed; disk bytes ${report.stages.compact.diskBytesBefore ?? "unmeasured"} → ${report.stages.compact.diskBytesAfter ?? "unmeasured"}, delta ${report.stages.compact.diskBytesDelta ?? "unmeasured"} (positive = growth) |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
     `| Insight Archive | ${report.stages.insight_archive.archived} 条过期归档 |`,
     `| Indexes | ${report.stages.indexes.files} 个索引更新 |`,
@@ -494,8 +492,8 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
     if (n.timed_out > 0) parts.push(`${n.timed_out} 超时`);
     lines.push(`NER backfill: ${parts.join("，")}`);
   }
-  if (report.stages.compact.fragmentsRemoved > 0) {
-    lines.push(`LanceDB: ${report.stages.compact.fragmentsRemoved} fragments 合并, ${report.stages.compact.filesRemoved} files 清理`);
+  if (report.stages.compact.diskBytesDelta !== null) {
+    lines.push(`LanceDB: ${report.stages.compact.fragmentsRemoved} fragments 合并, ${report.stages.compact.filesRemoved} files 清理；磁盘 ${report.stages.compact.diskBytesBefore} → ${report.stages.compact.diskBytesAfter} bytes，变化 ${report.stages.compact.diskBytesDelta} bytes（正值为增长）`);
   }
   if (report.stages.insight_archive.archived > 0) {
     lines.push(`${report.stages.insight_archive.archived} 条洞察归档`);
