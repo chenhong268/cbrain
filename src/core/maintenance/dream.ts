@@ -4,7 +4,7 @@ import { join, basename } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { CBrainDB } from "../../storage/sqlite.js";
-import type { SyncManager } from "./sync.js";
+import { CleanupError, type SyncManager } from "./sync.js";
 import type { EnrichManager } from "./enrich.js";
 import type { HealthChecker } from "./health.js";
 import type { Logger } from "../logger.js";
@@ -39,7 +39,7 @@ export interface DreamReport {
     decay: { linksUpdated: number };
     seal: { sealed: number; skipped: number; errors: number };
     stub_enrich: { enriched: number; skipped: number; errors: number };
-    cleanup: { orphans: number; staleStubs: number; lanceOrphans: number };
+    cleanup: { orphans: number; staleStubs: number; lanceOrphans: number; errors?: string[]; skipped?: string[] };
     compact: CompactReport;
     health: { overallStatus: string; dimensions: number; issues: number };
     insight_archive: { archived: number };
@@ -304,17 +304,34 @@ export async function runDream(
 
   // Stage 4: Page-level cleanup (independent of each other)
   logger.info("dream", "Stage 4/7: page cleanup (orphans + stale stubs)");
-  const [orphans, staleStubs] = await Promise.all([
-    syncMgr.removeOrphans(vaultPath).catch(e => { logger.warn("dream", `Cleanup orphans 失败: ${(e as Error).message}`); return []; }),
-    syncMgr.cleanStaleStubs(vaultPath).catch(e => { logger.warn("dream", `Cleanup stale stubs 失败: ${(e as Error).message}`); return []; }),
+  const cleanupErrors: string[] = [];
+  const cleanupSkipped: string[] = [];
+  const [orphanResult, stubResult] = await Promise.allSettled([
+    syncMgr.removeOrphans(vaultPath),
+    syncMgr.cleanStaleStubs(vaultPath),
   ]);
+  const orphans = orphanResult.status === "fulfilled" ? orphanResult.value.length : orphanResult.reason instanceof CleanupError ? orphanResult.reason.completedCount : 0;
+  const staleStubs = stubResult.status === "fulfilled" ? stubResult.value.length : stubResult.reason instanceof CleanupError ? stubResult.reason.completedCount : 0;
+  if (orphanResult.status === "rejected") cleanupErrors.push("cleanup_removeOrphans_failed");
+  if (stubResult.status === "rejected") cleanupErrors.push("cleanup_cleanStaleStubs_failed");
 
   checkCancelled?.();
-  // Stage 4.5: Lance orphan cleanup — must run AFTER removeOrphans
-  // so vectors newly orphaned by page deletion are caught in the same cycle
-  logger.info("dream", "Stage 4.5/7: LanceDB orphan cleanup");
-  const lanceOrphans = await syncMgr.cleanLanceOrphans().catch(e => { logger.warn("dream", `Cleanup LanceDB orphans 失败: ${(e as Error).message}`); return []; });
-  progress("cleanup", { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length });
+  // Lance cleanup depends on a completed page cleanup; do not report a skipped check as success.
+  let lanceOrphans = 0;
+  if (cleanupErrors.length > 0) {
+    cleanupSkipped.push("cleanLanceOrphans");
+  } else {
+    try {
+      lanceOrphans = (await syncMgr.cleanLanceOrphans()).length;
+    } catch (error) {
+      if (error instanceof CleanupError) lanceOrphans = error.completedCount;
+      cleanupErrors.push("cleanup_cleanLanceOrphans_failed");
+    }
+  }
+  const cleanupReport = { orphans, staleStubs,
+    lanceOrphans, errors: cleanupErrors, skipped: cleanupSkipped };
+  if (cleanupErrors.length > 0) logger.warn("dream", `清理未完成: ${cleanupErrors.join(", ")}`);
+  progress("cleanup", cleanupReport);
 
   // Stage 4.6: LanceDB compact — coalesce fragment versions to prevent disk bloat
   logger.info("dream", "Stage 4.6/7: LanceDB compact");
@@ -405,7 +422,7 @@ export async function runDream(
       decay: { linksUpdated: decayUpdated },
       seal: sealReport,
       stub_enrich: stubEnrichReport,
-      cleanup: { orphans: orphans.length, staleStubs: staleStubs.length, lanceOrphans: lanceOrphans.length },
+      cleanup: cleanupReport,
       compact: compactReport,
       health: {
         overallStatus: healthReport.overallStatus,
@@ -441,7 +458,7 @@ export async function runDream(
     `| Seal | ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过 |`,
     `| Stub Enrich | ${report.stages.stub_enrich.enriched} 页富化, ${report.stages.stub_enrich.skipped} 跳过 |`,
     `| NER Backfill | ${report.stages.ner_backfill.processed} 页补抽, ${report.stages.ner_backfill.failed} 失败, ${report.stages.ner_backfill.timed_out} 超时 |`,
-    `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿 |`,
+    `| Cleanup | ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿; 错误: ${cleanupErrors.join(", ") || "无"}; 跳过: ${cleanupSkipped.join(", ") || "无"} |`,
     `| LanceDB Compact | ${report.stages.compact.fragmentsRemoved} fragments → ${report.stages.compact.fragmentsAdded}, ${report.stages.compact.filesRemoved} files removed; disk bytes ${report.stages.compact.diskBytesBefore ?? "unmeasured"} → ${report.stages.compact.diskBytesAfter ?? "unmeasured"}, delta ${report.stages.compact.diskBytesDelta ?? "unmeasured"} (positive = growth) |`,
     `| Health | ${report.stages.health.overallStatus} (${report.stages.health.dimensions} 维度, ${report.stages.health.issues} 问题) |`,
     `| Insight Archive | ${report.stages.insight_archive.archived} 条过期归档 |`,
@@ -467,6 +484,10 @@ export async function runDream(
 function buildBrief(report: DreamReport, db: CBrainDB): string {
   const date = report.timestamp.slice(0, 10);
   const lines = [`CBrain 日报 ${date}`, ""];
+
+  if (report.stages.cleanup.errors?.length) {
+    lines.push(`清理未完成: ${report.stages.cleanup.errors.join(", ")}; 跳过: ${report.stages.cleanup.skipped?.join(", ") || "无"}`);
+  }
 
   const fresh = db.countNewPagesSince(24);
   if (fresh.entities > 0 || fresh.concepts > 0) {

@@ -762,6 +762,9 @@ export function register(program: Command) {
       console.log(`  Seal:    ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过`);
       console.log(`  Stub:    ${report.stages.stub_enrich.enriched} 页富化, ${report.stages.stub_enrich.skipped} 跳过`);
       console.log(`  Cleanup: ${report.stages.cleanup.orphans} 孤立, ${report.stages.cleanup.staleStubs} 过期 stub, ${report.stages.cleanup.lanceOrphans} 向量孤儿`);
+      if (report.stages.cleanup.errors?.length) {
+        console.log(`  ⚠️ 清理未完成: ${report.stages.cleanup.errors.join(", ")}; 跳过: ${report.stages.cleanup.skipped?.join(", ") || "无"}`);
+      }
       console.log(`  Health:  ${report.stages.health.overallStatus}`);
       console.log(`  Insight: ${report.stages.insight_archive.archived} 条过期归档`);
       if (report.stages.wake_up_diff.baselineCreated) {
@@ -771,7 +774,7 @@ export function register(program: Command) {
       }
       console.log(`  ⏱ ${(report.duration_ms / 1000).toFixed(1)}s`);
       deps.db.close();
-      process.exit(0);
+      process.exit(report.stages.cleanup.errors?.length ? 1 : 0);
     });
 
   program

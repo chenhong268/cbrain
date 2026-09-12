@@ -807,7 +807,7 @@ describe("SyncManager", () => {
       expect(row).toBeNull();
     });
 
-    test("removeOrphans: SQLite deleted first, LanceDB failure tolerated", async () => {
+    test("removeOrphans: SQLite deletion is retained but LanceDB failure is reported", async () => {
       // Seed an orphan (in DB but not in vault)
       db.rawDb.prepare(
         `INSERT INTO pages (slug, type, title, file_path, content_hash) VALUES (?, ?, ?, ?, ?)`
@@ -816,10 +816,7 @@ describe("SyncManager", () => {
       const failLance = createFailingLanceDB({ failDelete: true });
       const failSync = new SyncManager(db, createMockEmbeddingProvider(), failLance as any, { chunkSize: 500 });
 
-      // Should NOT throw — LanceDB failure is swallowed
-      const orphans = await failSync.removeOrphans(vaultPath);
-
-      expect(orphans).toContain("records/orphan-del");
+      await expect(failSync.removeOrphans(vaultPath)).rejects.toMatchObject({ name: "CleanupError", completedCount: 0 });
       // SQLite page is gone
       const row = db.rawDb.prepare("SELECT * FROM pages WHERE slug = ?").get("records/orphan-del") as any;
       expect(row).toBeNull();
@@ -911,7 +908,7 @@ describe("SyncManager", () => {
   });
 
   describe("cleanLanceOrphans error reporting (#63)", () => {
-    test("only returns successfully deleted slugs", async () => {
+    test("reports failure and retains successfully deleted count", async () => {
       // Seed two pages in LanceDB + SQLite
       writeMdFile(vaultPath, "records/orphan-ok.md", { title: "OrphanOK", type: "record", slug: "records/orphan-ok" }, "Content");
       writeMdFile(vaultPath, "records/orphan-fail.md", { title: "OrphanFail", type: "record", slug: "records/orphan-fail" }, "Content");
@@ -928,10 +925,9 @@ describe("SyncManager", () => {
         return originalDelete(slug);
       };
 
-      const cleaned = await sync.cleanLanceOrphans();
-
-      expect(cleaned).toContain("records/orphan-ok");
-      expect(cleaned).not.toContain("records/orphan-fail");
+      await expect(sync.cleanLanceOrphans()).rejects.toMatchObject({ name: "CleanupError", completedCount: 1 });
+      expect(await lance.getIndexedPageSlugs()).not.toContain("records/orphan-ok");
+      expect(await lance.getIndexedPageSlugs()).toContain("records/orphan-fail");
     });
   });
 });
