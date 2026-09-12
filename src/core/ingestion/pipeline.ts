@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager, LanceTableMissingError, type RawVectorRow } from "../../storage/lancedb.js";
@@ -13,6 +16,7 @@ import { getOntology } from "../../ontology/loader.js";
 import { sanitizeForLog } from "../safety/sync-index-safety.js";
 import {
   chunkContent,
+  hashContent,
   mapEntityType,
   normalizePageType,
   buildStubBody,
@@ -134,6 +138,7 @@ export class ContentPipeline {
         this.db.ftsDeleteByPage(slug);
         this.db.deleteL1Summary(slug);
       });
+      this.commitIndexedFileHash(slug, chunks);
       return;
     }
     if (chunks.length !== embedResults.length) {
@@ -163,6 +168,18 @@ export class ContentPipeline {
       const l1 = this.db.getL1Summary(slug);
       if (l1) this.db.ftsInsert(slug, l1.content);
     });
+    this.commitIndexedFileHash(slug, chunks);
+  }
+
+  /** Clear a dirty hash only when the actual file still matches the indexed body. */
+  private commitIndexedFileHash(slug: string, chunks: Array<{ index: number; content: string }>): void {
+    if (!this.pages || this.db.getPageContentHash(slug) !== null) return;
+    const filePath = this.db.getPageFilePath(slug);
+    if (!filePath) return;
+    const raw = readFileSync(join(this.pages.vaultPath, filePath), "utf8");
+    const current = chunkContent(parseFrontmatter(raw).body, this.chunkSize);
+    if (current.length !== chunks.length || current.some((chunk, i) => chunk.index !== chunks[i].index || chunk.content !== chunks[i].content)) return;
+    this.db.updatePageHash(slug, hashContent(raw));
   }
 
   private sameMovedVectors(expected: RawVectorRow[], actual: RawVectorRow[], pageSlug: string): boolean {

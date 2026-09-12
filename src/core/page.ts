@@ -471,8 +471,8 @@ export class PageManager {
     const content = stringifyFrontmatter(frontmatter, body);
     writeFileSync(filePath, content, "utf-8");
 
-    const contentHash = hashContent(content);
-    this.db.updatePageHash(slug, contentHash);
+    // Persisted body is ahead of its indexes until an index write succeeds.
+    this.db.updatePageHash(slug, null);
 
     // Invalidate ingest dedup fingerprint only when body semantically changes
     // (CRLF/trim-equivalent bodies should not clear the hash)
@@ -573,7 +573,9 @@ export class PageManager {
 
     const content = stringifyFrontmatter(updatedFm, newBody);
     writeFileSync(filePath, content, "utf-8");
-    this.db.updatePageHash(slug, hashContent(content));
+    // A projection is not an index rebuild: preserve an outstanding dirty body.
+    const previousHash = this.db.getPageContentHash(slug);
+    this.db.updatePageHash(slug, previousHash === hashContent(raw) ? hashContent(content) : null);
     this.cacheDelete(slug);
   }
 
@@ -649,8 +651,7 @@ export class PageManager {
     const content = stringifyFrontmatter(frontmatter, mergedBody);
     writeFileSync(targetFilePath, content, "utf-8");
 
-    const contentHash = hashContent(content);
-    this.db.updatePageHash(targetSlug, contentHash);
+    this.db.updatePageHash(targetSlug, null);
 
     // Rewrite [[sourceSlug]] → [[targetSlug]] in all vault .md files
     const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: sourceSlug, newSlug: targetSlug }], this.db);
