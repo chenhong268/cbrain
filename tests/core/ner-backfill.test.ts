@@ -2463,6 +2463,19 @@ describe("runNerBackfillStage (#252)", () => {
     expect(db.getPage(res.slug)).not.toBeNull();
   });
 
+  test("parse failure preserves the existing retry lifecycle with its own code (#491)", async () => {
+    const seed = new IngestManager(db, createMockEmbeddingProvider(), createMockLanceDB() as never, testDir);
+    const source = await seed.ingest({ content: "主题D的匿名正文包含足够的信息供提取。", type: "text", title: "主题D", skipNer: true });
+    const submitted = new JobQueueNerSubmitter(db).submitDeferredNer({ slug: source.slug });
+    expect(submitted.disposition).toBe("inserted");
+    const llm: LLMProvider = { name: "anonymous", chat: async () => "invalid JSON" };
+    const counts = await runNerBackfillStage(db, pipelineWith(llm), new PageManager(db, testDir), { maxItems: 50 });
+    expect(counts).toMatchObject({ processed: 0, failed: 1, timed_out: 0 });
+    expect(db.listJobs("pending")[0]).toMatchObject({ error: "NER_PARSE_FAILED", attempts: 1 });
+    expect(listOrdinaryCommitUnknown(db).count).toBe(0);
+    expect(db.getPage(source.slug)).not.toBeNull();
+  });
+
   test("provider timeout is persisted as NER_TIMEOUT rather than provider failure", async () => {
     const embedding = createMockEmbeddingProvider();
     const seedIngest = new IngestManager(db, embedding, createMockLanceDB() as never, testDir);

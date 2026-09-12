@@ -442,10 +442,13 @@ export function register(program: Command) {
       const { JobQueueNerSubmitter } = await import("../../core/ingestion/ner-backfill.js");
       const { PageManager } = await import("../../core/page.js");
       const pages = new PageManager(deps.db, config.vaultPath);
-      const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
+      const { Logger } = await import("../../core/logger.js");
+      const logger = new Logger(resolveRuntimePath(config));
+      const nerEngine = deps.llm ? new NerEngine(deps.llm, logger) : undefined;
       const sync = new SyncManager(deps.db, deps.embedding, deps.lance, {
         nerEngine,
         pages,
+        logger,
         nerMode: deps.nerIngestMode,
         deferredNerSubmitter: new JobQueueNerSubmitter(deps.db),
       });
@@ -455,6 +458,7 @@ export function register(program: Command) {
         const report = await sync.syncAll(config.vaultPath);
         console.log(`Synced:  ${report.synced}`);
         console.log(`Skipped: ${report.skipped} (unchanged)`);
+        console.log(`NER failures: ${report.nerParseErrors ?? 0} parse, ${report.nerTimedOut ?? 0} timeout, ${report.nerErrors ?? 0} other`);
         const orphans = await sync.removeOrphans(config.vaultPath);
         if (orphans.length > 0) console.log(`Orphans: ${orphans.length} removed`);
         const stale = await sync.cleanStaleStubs(config.vaultPath);

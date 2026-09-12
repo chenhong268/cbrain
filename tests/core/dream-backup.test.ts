@@ -63,6 +63,21 @@ describe("dream backup retention", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
+  test("sync parse failures survive dream report and progress projection (#491)", async () => {
+    const sync = makeMockSync();
+    sync.syncAll = async () => ({ synced: 1, skipped: 0, errors: 0, nerParseErrors: 1 });
+    let progress: unknown;
+    const report = await runDream(
+      vaultPath, db, sync, makeMockEnrich(), makeMockHealth(), outputsDir, logger,
+      undefined, undefined, undefined, undefined,
+      (stage, detail) => { if (stage === "sync") progress = detail; },
+    );
+    expect(report.stages.sync.nerParseErrors).toBe(1);
+    expect(progress).toMatchObject({ nerParseErrors: 1 });
+    expect(report.brief).toContain("1 次解析失败");
+    expect(readFileSync(join(outputsDir, "dream", `dream-${report.timestamp.slice(0, 10)}.md`), "utf8")).toContain("1 NER 解析失败");
+  });
+
   test.each([-1024, 1024])("compact delta %d reaches stage, progress, log, brief and Markdown", async (delta) => {
     const compact = {
       tables: ["chunks"], fragmentsRemoved: 0, fragmentsAdded: 0,

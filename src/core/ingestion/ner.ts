@@ -353,6 +353,21 @@ export function isNerTimeoutError(e: unknown): boolean {
   return e instanceof Error && (e as { isNerTimeout?: boolean }).isNerTimeout === true;
 }
 
+export class NerParseError extends Error {
+  readonly code = "NER_PARSE_FAILED" as const;
+  constructor(readonly stage: "stage1" | "stage2") {
+    super(`NER_PARSE_FAILED: ${stage} JSON 解析失败`);
+    this.name = "NerParseError";
+  }
+}
+
+export type NerErrorCode = "NER_TIMEOUT" | "NER_PROVIDER_ERROR" | "NER_PARSE_FAILED";
+
+export function getNerErrorCode(error: unknown): NerErrorCode {
+  if (isNerTimeoutError(error)) return "NER_TIMEOUT";
+  return error instanceof NerParseError ? error.code : "NER_PROVIDER_ERROR";
+}
+
 // ─── NER Engine ─────────────────────────────────────────────
 
 export class NerEngine {
@@ -383,6 +398,9 @@ export class NerEngine {
       return await Promise.race([this._extractInternal(text), timeout]);
     } catch (error) {
       if (isLLMTimeoutError(error)) throw new NerTimeoutError(error.timeoutMs);
+      // One durable entry per failed extraction. Losing/late chunk promises
+      // must not create extra parse errors after another failure or timeout.
+      if (error instanceof NerParseError) this.logger?.error("ner", error.message);
       throw error;
     } finally {
       if (timer) clearTimeout(timer);
@@ -493,9 +511,8 @@ export class NerEngine {
         events: Array.isArray(parsed.events) ? parsed.events : [],
         facts,
       };
-    } catch (e) {
-      this.logger?.error("ner", "stage1 JSON 解析失败", { error: e instanceof Error ? e.message : String(e) });
-      return { entities: [], events: [], facts: [] };
+    } catch {
+      throw new NerParseError("stage1");
     }
   }
 
@@ -505,9 +522,8 @@ export class NerEngine {
       const parsed = JSON.parse(cleaned);
       const relations: ExtractedRelation[] = Array.isArray(parsed.relations) ? parsed.relations : [];
       return relations.filter(r => r.relation && validNames.has(r.from) && validNames.has(r.to));
-    } catch (e) {
-      this.logger?.error("ner", "stage2 JSON 解析失败", { error: e instanceof Error ? e.message : String(e) });
-      return [];
+    } catch {
+      throw new NerParseError("stage2");
     }
   }
 }

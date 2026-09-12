@@ -33,7 +33,7 @@ export interface DreamReport {
   brief: string;
   stages: {
     backup: { path: string | null; size_mb: string };
-    sync: { synced: number; skipped: number; errors: number };
+    sync: { synced: number; skipped: number; errors: number; nerParseErrors?: number };
     enrich: { total: number; upgraded: number };
     learn: { updated: number; topActive: string[] };
     decay: { linksUpdated: number };
@@ -208,7 +208,7 @@ export async function runDream(
   // Stage 1: Sync
   logger.info("dream", "Stage 1/5: sync");
   const syncReport = await syncMgr.syncAll(vaultPath);
-  if (onStageProgress) onStageProgress("sync", { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors });
+  if (onStageProgress) onStageProgress("sync", { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors, nerParseErrors: syncReport.nerParseErrors ?? 0 });
 
   // Stage 1.5: ner-backfill (#252) — after sync (so newly-synced pages are current),
   // before enrich (NER stubs/links/timeline feed enrich/learn/stub_enrich).
@@ -387,7 +387,7 @@ export async function runDream(
     timestamp: new Date().toISOString(),
     stages: {
       backup: { path: backupPath, size_mb: backupSize },
-      sync: { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors },
+      sync: { synced: syncReport.synced, skipped: syncReport.skipped, errors: syncReport.errors, nerParseErrors: syncReport.nerParseErrors ?? 0 },
       enrich: { total: enrichResults.length, upgraded },
       learn: learnReport,
       decay: { linksUpdated: decayUpdated },
@@ -423,7 +423,7 @@ export async function runDream(
     ``,
     `| Stage | Result |`,
     `|-------|--------|`,
-    `| Sync | ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过, ${report.stages.sync.errors} 错误 |`,
+    `| Sync | ${report.stages.sync.synced} 更新, ${report.stages.sync.skipped} 跳过, ${report.stages.sync.errors} 错误, ${report.stages.sync.nerParseErrors ?? 0} NER 解析失败 |`,
     `| Enrich | ${report.stages.enrich.total} 实体, ${report.stages.enrich.upgraded} 升级 |`,
     `| Learn | ${report.stages.learn.updated} 实体权重更新, 活跃: ${report.stages.learn.topActive.slice(0, 3).join(", ")} |`,
     `| Seal | ${report.stages.seal.sealed} 页压缩, ${report.stages.seal.skipped} 跳过 |`,
@@ -466,6 +466,7 @@ function buildBrief(report: DreamReport, db: CBrainDB): string {
     lines.push(`本周活跃: ${top5.map(e => `${e.title}(${e.mention_count})`).join(", ")}`);
   }
 
+  if (report.stages.sync.nerParseErrors) lines.push(`NER: ${report.stages.sync.nerParseErrors} 次解析失败，原文已保存`);
   if (report.stages.sync.synced > 0) {
     lines.push(`${report.stages.sync.synced} 个页面更新`);
   }

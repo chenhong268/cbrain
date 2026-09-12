@@ -2,7 +2,7 @@
 import { buildNerAttemptIdentity, type CBrainDB, type NerAttemptIdentity } from "../../storage/sqlite.js";
 import type { PageManager } from "../page.js";
 import type { ContentPipeline } from "./pipeline.js";
-import { isNerTimeoutError } from "./ner.js";
+import { isNerTimeoutError, getNerErrorCode } from "./ner.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { EntityFactsTimeoutError, extractEntityFacts } from "./entity-facts.js";
 import { readFileSync } from "node:fs";
@@ -548,7 +548,7 @@ export async function runNerBackfillStage(
         else db.failJob(id, "ENTITY_FACTS_TIMEOUT");
         counts.timed_out++;
       } else {
-        if (kind === "ner" && leaseToken && leaseDigest) db.failNerJobWithLease(id, leaseToken, leaseDigest, "NER_PROVIDER_ERROR");
+        if (kind === "ner" && leaseToken && leaseDigest) db.failNerJobWithLease(id, leaseToken, leaseDigest, getNerErrorCode(e));
         else db.failJob(id, "ENTITY_FACTS_PROVIDER_ERROR");
         counts.failed++;
       }

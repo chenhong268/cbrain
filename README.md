@@ -285,6 +285,8 @@ To set up periodic tasks with Hermes:
 #   so fold them into dream or run as a one-shot with serve stopped (not cron).
 ```
 
+NER failures are distinct from a valid extraction containing no entities. An unparseable model response produces `NER_PARSE_FAILED`, recorded once per failed extraction in the existing daily `ner` error log and surfaced by the system-error health dimension. Raw model responses are not logged. `ingest` and single-page sync expose `nerError`; ingest retains the compatible `nerSkipped: "error"`. Full sync and dream expose `nerParseErrors` separately from provider errors and timeouts (an absent optional count means zero). Content remains saved/indexed, and deferred tasks retain their existing retry behavior with the specific error code. This reporting change does not re-extract historical content.
+
 ### Agent Memory Rules
 
 To get the most out of CBrain, your Agent needs judgment rules stored in its memory — these teach it *when* and *how* to use each tool. Below are recommended rules distilled from real-world usage. Copy them into your Agent's memory system (e.g., MEMORY.md, system prompt, or equivalent).

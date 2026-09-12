@@ -94,19 +94,20 @@ async function initWatcher(config: CBrainConfig, deps: ReturnType<typeof createD
   // #448: reuse deps.llm — createDeps already resolved ner.enabled + llm_provider
   // (deepseek/zhipu). Do NOT re-derive key/provider here.
   const { NerEngine } = await import("../../core/ingestion/ner.js");
-  const nerEngine = deps.llm ? new NerEngine(deps.llm) : undefined;
+  const { Logger } = await import("../../core/logger.js");
+  const logger = new Logger(resolveRuntimePath(config));
+  const nerEngine = deps.llm ? new NerEngine(deps.llm, logger) : undefined;
   console.error(`> Watcher NER: ${nerEngine ? "enabled" : "DISABLED (no API key or ner.enabled=false)"}`);
   const { SyncManager } = await import("../../core/maintenance/sync.js");
   const { JobQueueNerSubmitter } = await import("../../core/ingestion/ner-backfill.js");
   const watcherSync = new SyncManager(deps.db, deps.embedding, deps.lance, {
     pages,
     nerEngine,
+    logger,
     nerMode: deps.nerIngestMode,
     deferredNerSubmitter: new JobQueueNerSubmitter(deps.db),
   });
   const { FileWatcher } = await import("../../core/maintenance/watcher.js");
-  const { Logger } = await import("../../core/logger.js");
-  const logger = new Logger(resolveRuntimePath(config));
   const watcher = new FileWatcher(watcherSync, config.vaultPath, { logger, db: deps.db });
   watcher.start();
 

@@ -7,7 +7,8 @@ import { normalizePageType, normalizeAndHashBody, type PageType } from "../share
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
-import { NerEngine, isNerTimeoutError } from "./ner.js";
+import { NerEngine, getNerErrorCode, type NerErrorCode } from "./ner.js";
+import type { Logger } from "../logger.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { ContentPipeline, type NerPipelineResult } from "./pipeline.js";
 import { filterExtractedEntities, type ExtractedEntity } from "./ner.js";
@@ -24,6 +25,7 @@ import { extractEntityFacts } from "./entity-facts.js";
 import { forIngest, type RecordWriterContext } from "../page-write-provenance.js";
 
 export interface IngestManagerOptions {
+  logger?: Logger;
   /** #252: default NER mode for this manager (config/env resolved upstream). Default "sync". */
   nerMode?: NerMode;
   /** #252: required when nerMode resolves to "defer"; else throws. */
@@ -116,6 +118,7 @@ export interface IngestResult {
   linksExtracted: number;
   ner?: NerPipelineResult | null;
   nerSkipped?: "timeout" | "error";
+  nerError?: NerErrorCode;
   /** #252: true when NER was deferred to a background job. */
   nerPending?: boolean;
   outcome: IngestOutcome;
@@ -144,7 +147,7 @@ export class IngestManager {
     this.db = db;
     this.lance = lance;
     this.pages = new PageManager(db, vaultPath, undefined, lance);
-    this.nerEngine = nerEngine ?? (llmProvider ? new NerEngine(llmProvider) : null);
+    this.nerEngine = nerEngine ?? (llmProvider ? new NerEngine(llmProvider, opts?.logger) : null);
     this.llmProvider = llmProvider;
     this.pipeline = new ContentPipeline(db, embedding, lance, {
       pages: this.pages,
@@ -358,15 +361,17 @@ export class IngestManager {
 
       let nerResult: NerPipelineResult | null = null;
       let nerSkipped: "timeout" | "error" | undefined;
+      let nerError: NerErrorCode | undefined;
       let nerPending = false;
       if (nerAction === "sync" && body.trim()) {
         try {
           nerResult = await this.pipeline.processNer(slug, body, before.type, true, undefined, mentionedSlugs);
         } catch (e) {
-          nerSkipped = isNerTimeoutError(e) ? "timeout" : "error";
+          nerError = getNerErrorCode(e);
+          nerSkipped = nerError === "NER_TIMEOUT" ? "timeout" : "error";
           nerPending = this.submitNerRecovery({ slug, pageType: before.type });
           this.pipeline.writeIngestLog(slug, "api", {
-            nerError: nerSkipped === "timeout" ? "NER_TIMEOUT" : "NER_PROVIDER_ERROR",
+            nerError,
             nerSkipped,
             nerRecoveryQueued: nerPending,
             appended: true,
@@ -384,7 +389,7 @@ export class IngestManager {
         this.pages.syncAffectedSlugs([slug, ...mentionedSlugs, ...nerResolvedSlugs, ...nerRelationSlugs]),
       );
 
-      return { slug, created: false, linksExtracted, ner: nerResult, nerSkipped, ...(nerPending ? { nerPending: true } : {}), outcome: "updated" as const };
+      return { slug, created: false, linksExtracted, ner: nerResult, nerSkipped, nerError, ...(nerPending ? { nerPending: true } : {}), outcome: "updated" as const };
     } catch (indexError) {
       if (snapshot) {
         await this.restoreSnapshot(slug, snapshot, indexError);
@@ -469,20 +474,22 @@ export class IngestManager {
 
       let nerResult: NerPipelineResult | null = null;
       let nerSkipped: "timeout" | "error" | undefined;
+      let nerError: NerErrorCode | undefined;
       let nerPending = false;
       const nerEligibleType = !type.startsWith("entity/") && !type.startsWith("concept/") && !type.startsWith("insight/");
       if (nerAction === "sync" && nerEligibleType) {
         try {
           nerResult = await this.pipeline.processNer(slug, body, type, true, undefined, mentionedSlugs);
         } catch (e) {
-          nerSkipped = isNerTimeoutError(e) ? "timeout" : "error";
+          nerError = getNerErrorCode(e);
+          nerSkipped = nerError === "NER_TIMEOUT" ? "timeout" : "error";
           nerPending = this.submitNerRecovery({
             slug,
             contentHash: bodyHash ?? undefined,
             pageType: type,
           });
           this.pipeline.writeIngestLog(slug, "api", {
-            nerError: nerSkipped === "timeout" ? "NER_TIMEOUT" : "NER_PROVIDER_ERROR",
+            nerError,
             nerSkipped,
             nerRecoveryQueued: nerPending,
           });
@@ -534,6 +541,7 @@ export class IngestManager {
         linksExtracted,
         ner: nerResult,
         nerSkipped,
+        nerError,
         ...(nerPending ? { nerPending: true } : {}),
         outcome: existedBefore ? "updated" : "created",
       };
