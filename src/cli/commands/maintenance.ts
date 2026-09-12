@@ -1,6 +1,6 @@
 import type { Command } from "commander";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { resolve, dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
@@ -114,7 +114,6 @@ export interface CompactDeps {
 
 export async function handleCompact(
   deps: CompactDeps,
-  measureBytes: () => number,
   log: (m: string) => void = console.log,
   logError: (m: string) => void = console.error,
 ): Promise<number> {
@@ -127,17 +126,13 @@ export async function handleCompact(
     return 1;
   }
   try {
-    const beforeBytes = measureBytes();
     await deps.lance.connect(deps.lancePath);
     log("Compacting...");
     const result = await deps.lance.compact();
-    const afterBytes = measureBytes();
-    const beforeMB = (beforeBytes / 1024 / 1024).toFixed(1);
-    const afterMB = (afterBytes / 1024 / 1024).toFixed(1);
-    const savedMB = ((beforeBytes - afterBytes) / 1024 / 1024).toFixed(1);
     log(`  Tables:     ${result.tables.join(", ")}`);
     log(`  Fragments:  ${result.fragmentsRemoved} removed, ${result.fragmentsAdded} created`);
-    log(`  Disk:       ${beforeMB}MB → ${afterMB}MB (saved ${savedMB}MB)`);
+    log(`  Prune:      ${result.bytesRemoved} bytes; compaction removed ${result.filesRemoved} files`);
+    log(`  Disk:       ${result.diskBytesBefore} → ${result.diskBytesAfter} bytes (delta ${result.diskBytesDelta} bytes; positive = growth)`);
     return 0;
   } catch (e) {
     logError(`Compact failed: ${(e as Error).message}`);
@@ -375,22 +370,6 @@ export function relocatePage(
       newHash: params.newHash,
     });
   }
-}
-
-/** Sum bytes of the LanceDB directory tree (best-effort; 0 if unreadable). */
-function measureLanceBytes(lancePath: string): number {
-  let total = 0;
-  try {
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const p = join(dir, entry.name);
-        if (entry.isDirectory()) walk(p);
-        else total += statSync(p).size;
-      }
-    };
-    walk(lancePath);
-  } catch { /* unreadable / missing — report 0 */ }
-  return total;
 }
 
 /** Parse + validate the --scope CLI flag. Returns the scope, or an error message. (#246) */
@@ -720,10 +699,9 @@ export function register(program: Command) {
       // maintenance should go through bin/cbrain-maintenance.sh dream instead.
       const profileDir = dirname(resolve(config.dbPath));
       const lockProbe = createLiveLockProbe(profileDir);
-      const lance = new LanceDBManager();
+      const lance = new LanceDBManager(config.maintenance);
       process.exitCode = await handleCompact(
         { lance, lancePath: config.lancePath, lockProbe },
-        () => measureLanceBytes(config.lancePath),
       );
     });
 

@@ -1,7 +1,8 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { LanceDBManager, type ChunkData } from "../../src/storage/lancedb.js";
+import { connect, type Connection } from "@lancedb/lancedb";
 
 describe("LanceDBManager", () => {
   const testDir = "/tmp/cbrain-test-lancedb";
@@ -221,6 +222,92 @@ describe("LanceDBManager", () => {
 
   // ─── Compact safety ──────────────────────────────────────────────
 
+  function diskBytes(dir: string): number {
+    return readdirSync(dir, { withFileTypes: true }).reduce((sum, entry) => {
+      const path = join(dir, entry.name);
+      return sum + (entry.isDirectory() ? diskBytes(path) : statSync(path).size);
+    }, 0);
+  }
+
+  function fakeTags() {
+    const versions: Record<string, { version: number }> = {};
+    return {
+      list: async () => versions,
+      create: async (tag: string, version: number) => { versions[tag] = { version }; },
+      delete: async (tag: string) => { delete versions[tag]; },
+    };
+  }
+
+  test("compact measures net disk growth and consecutive idle maintenance stays flat", async () => {
+    await manager.addChunks(makeChunks(3, "entities/a"));
+    await manager.addChunks(makeChunks(2, "entities/b"));
+    const before = diskBytes(lancePath);
+    const first = await manager.compact();
+    expect(first.diskBytesBefore).toBe(before);
+    expect(first.diskBytesAfter).toBe(diskBytes(lancePath));
+    expect(first.diskBytesDelta).toBe(first.diskBytesAfter! - before);
+    // Newly compacted data and the rollback version coexist inside the window.
+    expect(first.diskBytesDelta).toBeGreaterThan(0);
+    const second = await manager.compact();
+    expect(second.diskBytesAfter).toBeLessThanOrEqual(first.diskBytesAfter!);
+    expect(second.diskBytesDelta).toBe(0);
+    expect(await manager.search(makeVector(0), 100)).toHaveLength(5);
+  });
+
+  test("retention is bounded, configurable, and defaults below a daily interval", () => {
+    expect(LanceDBManager.COMPACT_RETENTION_MS).toBe(6 * 3600_000);
+    expect(() => new LanceDBManager({ compactRetentionHours: 12 })).not.toThrow();
+    for (const value of [0, -1, 0.5, 169, NaN, Infinity]) {
+      expect(() => new LanceDBManager({ compactRetentionHours: value })).toThrow(/compactRetentionHours/);
+    }
+  });
+
+  test.each([false, true])("real SDK protects idle rollback (forced prune collision: %s)", async (forceCollision) => {
+    await manager.addChunks(makeChunks(3, "entities/a"));
+    await manager.addChunks(makeChunks(2, "entities/b"));
+    const connection = await connect(lancePath);
+    const table = await connection.openTable("chunks");
+    const version = await table.version();
+    const originalNow = Date.now;
+    try {
+      await (await table.tags()).create("user-owned", version);
+      // Move only the manager's clock: the SDK still uses its native clock.
+      // This exercises the idle-version cutoff and SDK duration conversion.
+      Date.now = () => originalNow() + 30 * 24 * 3600_000;
+      if (forceCollision) {
+        const managed = (manager as unknown as { db: Connection }).db;
+        const open = managed.openTable.bind(managed);
+        managed.openTable = async (...args: Parameters<Connection["openTable"]>) => {
+          const opened = await open(...args);
+          const optimize = opened.optimize.bind(opened);
+          opened.optimize = opts => optimize({ ...opts, cleanupOlderThan: new Date(originalNow() + 1000) });
+          return opened;
+        };
+        await expect(manager.compact()).rejects.toThrow(/tagged version/);
+        await expect(manager.compact()).rejects.toThrow(/Unresolved compact rollback tag/);
+      } else {
+        await manager.compact();
+      }
+      await table.checkout(version);
+      expect(await table.countRows()).toBe(5);
+      expect((await table.query().toArray()).map(row => row.content).sort()).toEqual(
+        [...makeChunks(3, "entities/a"), ...makeChunks(2, "entities/b")].map(row => row.content).sort(),
+      );
+      const tags = await table.tags();
+      expect(await tags.getVersion("user-owned")).toBe(version);
+      if (forceCollision) {
+        expect(await tags.getVersion(LanceDBManager.COMPACT_ROLLBACK_TAG)).toBe(version);
+        await table.restore();
+        expect(await table.countRows()).toBe(5);
+      } else {
+        expect(await tags.list()).not.toHaveProperty(LanceDBManager.COMPACT_ROLLBACK_TAG);
+      }
+    } finally {
+      Date.now = originalNow;
+      table.close();
+    }
+  });
+
   test("compact preserves row count across all tables", async () => {
     await manager.addChunks(makeChunks(5, "entities/compact-test"));
 
@@ -240,10 +327,16 @@ describe("LanceDBManager", () => {
     expect(report.fragmentsRemoved).toBe(0);
   });
 
-  test("compact passes safe optimize options via fake table", async () => {
+  test.each([undefined, 12])("compact honors retention override %s via safe optimize options", async (hours) => {
+    await manager.close();
+    manager = new LanceDBManager({ compactRetentionHours: hours });
+    await manager.connect(lancePath);
     // Inject a fake connection + table to capture the exact optimize() call.
     const optimizeCalls: Array<Partial<{ cleanupOlderThan: Date; deleteUnverified: boolean }>> = [];
     const fakeTable = {
+      tags: async () => fakeTags(),
+      version: async () => 2,
+      listVersions: async () => [{ version: 2, timestamp: new Date() }],
       countRows: async () => 5,
       optimize: async (opts?: Partial<{ cleanupOlderThan: Date; deleteUnverified: boolean }>) => {
         optimizeCalls.push({ ...opts });
@@ -270,16 +363,52 @@ describe("LanceDBManager", () => {
     const opts = optimizeCalls[0];
     // deleteUnverified MUST be false
     expect(opts.deleteUnverified).toBe(false);
-    // cleanupOlderThan should be ~7 days ago (allow 60s tolerance for test runtime)
+    // Default retention is six hours (allow 60s tolerance for test runtime).
     const cutoff = opts.cleanupOlderThan as Date;
-    const expectedCutoff = Date.now() - LanceDBManager.COMPACT_RETENTION_MS;
+    const expectedCutoff = Date.now() - (hours === undefined ? LanceDBManager.COMPACT_RETENTION_MS : hours * 3600_000);
     expect(Math.abs(cutoff.getTime() - expectedCutoff)).toBeLessThan(60_000);
+  });
+
+  test("old pre-compact version remains recoverable and pruning reports actual reclaimed bytes", async () => {
+    await manager.close();
+    manager = new LanceDBManager({ compactRetentionHours: 12 });
+    await manager.connect(lancePath);
+    const oldTimestamp = new Date(Date.now() - 30 * 24 * 3600_000);
+    const obsolete = join(lancePath, "obsolete");
+    writeFileSync(obsolete, new Uint8Array(1024));
+    const fakeTable = {
+      tags: async () => fakeTags(),
+      version: async () => 7,
+      listVersions: async () => [{ version: 7, timestamp: oldTimestamp }],
+      countRows: async () => 5,
+      optimize: async (opts: { cleanupOlderThan: Date; deleteUnverified: boolean }) => {
+        expect(opts.cleanupOlderThan.getTime()).toBeLessThan(oldTimestamp.getTime());
+        expect(opts.deleteUnverified).toBe(false);
+        rmSync(obsolete);
+        return {
+          compaction: { fragmentsRemoved: 0, fragmentsAdded: 0, filesRemoved: 0 },
+          prune: { bytesRemoved: 1024 },
+        };
+      },
+      close: () => {},
+    };
+    (manager as unknown as { db: unknown }).db = {
+      tableNames: async () => ["chunks"], openTable: async () => fakeTable,
+    };
+    const result = await manager.compact();
+    expect(result.diskBytesDelta).toBe(-1024);
+    expect(result.bytesRemoved).toBe(1024);
+    expect(result.filesRemoved).toBe(0);
   });
 
   test("compact throws integrity error when row count changes", async () => {
     // Simulate a corrupted optimize: countRows returns 5 before, 4 after.
     let callCount = 0;
+    const tags = fakeTags();
     const fakeTable = {
+      tags: async () => tags,
+      version: async () => 2,
+      listVersions: async () => [{ version: 2, timestamp: new Date() }],
       countRows: async () => {
         callCount++;
         return callCount === 1 ? 5 : 4;
@@ -299,8 +428,10 @@ describe("LanceDBManager", () => {
     (manager as unknown as { tables: Map<unknown, unknown> }).tables.clear();
     (manager as unknown as { db: unknown }).db = fakeDb;
 
-    expect(manager.compact()).rejects.toThrow(
+    await expect(manager.compact()).rejects.toThrow(
       /compact integrity failure on table "test-corrupt".*5.*4/,
     );
+    expect(await tags.list()).toHaveProperty(LanceDBManager.COMPACT_ROLLBACK_TAG);
+    await expect(manager.compact()).rejects.toThrow(/Unresolved compact rollback tag/);
   });
 });

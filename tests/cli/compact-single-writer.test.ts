@@ -25,6 +25,9 @@ function makeLance(opts: { connectThrows?: boolean } = {}) {
           fragmentsAdded: 1,
           bytesRemoved: 100,
           filesRemoved: 2,
+          diskBytesBefore: 2_000_000,
+          diskBytesAfter: 1_000_000,
+          diskBytesDelta: -1_000_000,
         };
       }),
       close: mock(async () => { calls.push("close"); }),
@@ -42,7 +45,6 @@ describe("cbrain compact — single-writer guard (#234)", () => {
     const errs: string[] = [];
     const exit = await handleCompact(
       { lance: stub, lancePath: "/tmp/lance", lockProbe: blocking },
-      () => 0,
       (m) => logs.push(m),
       (m) => errs.push(m),
     );
@@ -60,10 +62,8 @@ describe("cbrain compact — single-writer guard (#234)", () => {
   test("proceeds when no writer is active; reports tables/fragments/disk", async () => {
     const { stub } = makeLance();
     const logs: string[] = [];
-    let measured = 0;
     const exit = await handleCompact(
       { lance: stub, lancePath: "/tmp/lance", lockProbe: open },
-      () => { measured += 1; return measured === 1 ? 2_000_000 : 1_000_000; },
       (m) => logs.push(m),
       () => {},
     );
@@ -71,7 +71,7 @@ describe("cbrain compact — single-writer guard (#234)", () => {
     const joined = logs.join("\n");
     expect(joined).toContain("chunks");            // tables
     expect(joined).toContain("3 removed");         // fragmentsRemoved
-    expect(joined).toContain("saved");             // disk delta
+    expect(joined).toContain("delta -1000000 bytes");             // disk delta
   });
 
   test("diagnostics never leak local absolute paths", async () => {
@@ -80,7 +80,6 @@ describe("cbrain compact — single-writer guard (#234)", () => {
     const errs: string[] = [];
     await handleCompact(
       { lance: stub, lancePath: "/tmp/lance", lockProbe: blocking },
-      () => 0,
       (m) => logs.push(m),
       (m) => errs.push(m),
     );
@@ -92,7 +91,6 @@ describe("cbrain compact — single-writer guard (#234)", () => {
     const { stub, calls } = makeLance({ connectThrows: true });
     const exit = await handleCompact(
       { lance: stub, lancePath: "/tmp/lance", lockProbe: blocking },
-      () => 0,
       () => {},
       () => {},
     );
@@ -105,7 +103,6 @@ describe("cbrain compact — single-writer guard (#234)", () => {
     const { stub, calls } = makeLance();
     const exit = await handleCompact(
       { lance: stub, lancePath: "/tmp/lance", lockProbe: open },
-      () => 1_000_000,
       () => {},
       () => {},
     );

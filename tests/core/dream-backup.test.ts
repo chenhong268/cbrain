@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, rmSync, mkdtempSync, mkdirSync, writeFileSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -9,6 +9,7 @@ import type { SyncManager } from "../../src/core/maintenance/sync.js";
 import type { EnrichManager } from "../../src/core/maintenance/enrich.js";
 import type { HealthChecker } from "../../src/core/maintenance/health.js";
 import type { Logger } from "../../src/core/logger.js";
+import type { LanceDBManager } from "../../src/storage/lancedb.js";
 
 function makeMockSync(): SyncManager {
   return {
@@ -60,6 +61,33 @@ describe("dream backup retention", () => {
   afterEach(() => {
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test.each([-1024, 1024])("compact delta %d reaches stage, progress, log, brief and Markdown", async (delta) => {
+    const compact = {
+      tables: ["chunks"], fragmentsRemoved: 0, fragmentsAdded: 0,
+      bytesRemoved: 1024, filesRemoved: 0,
+      diskBytesBefore: 4096, diskBytesAfter: 4096 + delta, diskBytesDelta: delta,
+    };
+    const messages: string[] = [];
+    const warnings: string[] = [];
+    const testLogger = {
+      info: (_scope: string, msg: string) => messages.push(msg),
+      warn: (_scope: string, msg: string) => warnings.push(msg),
+    } as unknown as Logger;
+    let progress: unknown;
+    const report = await runDream(
+      vaultPath, db, makeMockSync(), makeMockEnrich(), makeMockHealth(), outputsDir, testLogger,
+      undefined, undefined, undefined,
+      { compact: async () => compact } as unknown as LanceDBManager,
+      (stage, detail) => { if (stage === "compact") progress = detail; },
+    );
+    expect(report.stages.compact).toEqual(compact);
+    expect(progress).toEqual(compact);
+    expect(report.brief).toContain(`变化 ${delta} bytes`);
+    expect((delta > 0 ? warnings : messages).join("\n")).toContain(`delta ${delta} bytes`);
+    const markdown = readFileSync(join(outputsDir, "dream", `dream-${report.timestamp.slice(0, 10)}.md`), "utf8");
+    expect(markdown).toContain(`delta ${delta}`);
   });
 
   test("creates SQLite-only backup via VACUUM INTO with DB-compatible filename", async () => {
