@@ -222,15 +222,20 @@ export class AgenticResearchPipeline {
     const plannerLlm = limits.max_llm_calls > 0 && input.query.trim() ? this.ctx.llm : undefined;
     let plannerCalls = 0;
     let plannerTimedOut = false;
+    const plannerController = new AbortController();
+    const plannerSignal = this.ctx.signal ? AbortSignal.any([this.ctx.signal, plannerController.signal]) : plannerController.signal;
+    let cancelPlanner: (() => void) | undefined;
     let plannerTimer: ReturnType<typeof setTimeout> | undefined;
 
     // --- Pass 1: Plan ---
     let plan: PlanResult;
     try {
+      plannerSignal.throwIfAborted();
       const plannerInput: PlannerInput = {
         query: input.query,
         knownSlugs: input.knownSlugs,
         intentHint: input.intentHint,
+        signal: plannerSignal,
       };
       if (limits.max_ms <= 0) {
         plannerTimedOut = true;
@@ -242,8 +247,11 @@ export class AgenticResearchPipeline {
         new Promise<never>((_, reject) => {
           plannerTimer = setTimeout(() => {
             plannerTimedOut = true;
-            reject(new Error("Planning deadline exhausted"));
+            plannerController.abort(new Error("Planning deadline exhausted"));
           }, limits.max_ms);
+          cancelPlanner = () => reject(new Error(plannerTimedOut ? "Planning deadline exhausted" : "Research cancelled"));
+          plannerSignal.addEventListener("abort", cancelPlanner, { once: true });
+          if (plannerSignal.aborted) cancelPlanner();
         }),
       ]);
     } catch (err) {
@@ -251,6 +259,7 @@ export class AgenticResearchPipeline {
       plan = buildMinimalFallback(input);
     } finally {
       if (plannerTimer) clearTimeout(plannerTimer);
+      if (cancelPlanner) plannerSignal.removeEventListener("abort", cancelPlanner);
     }
 
     const planWithBudget = applyBudgetOverride(plan, input.budgetOverride);

@@ -57,8 +57,9 @@ export function registerAgenticResearchTools(server: McpServer, ctx: ToolContext
           .describe("意图提示，覆盖自动分类"),
       },
     },
-    async ({ query, detail = "normal", known_slugs, intent_hint }) => {
+    async ({ query, detail = "normal", known_slugs, intent_hint }, extra) => {
       const pipeline = new AgenticResearchPipeline({
+        signal: extra?.signal,
         db: ctx.db,
         search: ctx.search,
         graph: ctx.graph,

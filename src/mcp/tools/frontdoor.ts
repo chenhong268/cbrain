@@ -58,7 +58,7 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
       include_raw: z.boolean().optional().default(false)
         .describe("structured 模式下为 true 时返回脱敏后的 audit.raw；默认 false。legacy 模式保持原输出。"),
     },
-  }, async ({ query, detail, session_id, include_raw }) => {
+  }, async ({ query, detail, session_id, include_raw }, extra) => {
     const started = Date.now();
     const routing = classifyFrontdoorQuery(query);
     const routeDetail = detail ?? "brief";
@@ -79,10 +79,10 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
         break;
       case "relationship":
         envelope = runExplicitRelationship(ctx, query, routing)
-          ?? await runAgenticRecall(ctx, query, routing, routeDetail, "relationship");
+          ?? await runAgenticRecall(ctx, query, routing, routeDetail, "relationship", extra?.signal);
         break;
       case "reasoning":
-        envelope = await runAgenticRecall(ctx, query, routing, routeDetail, "gap_analysis");
+        envelope = await runAgenticRecall(ctx, query, routing, routeDetail, "gap_analysis", extra?.signal);
         break;
       case "debug_search":
         envelope = await runDebugSearch(ctx, query, routing);
@@ -696,8 +696,10 @@ async function runAgenticRecall(
   routing: FrontdoorRoutingDecision,
   detail: DetailLevel,
   intentHint: SearchPlanIntent,
+  signal?: AbortSignal,
 ): Promise<FrontdoorEnvelope> {
   const pipeline = new AgenticResearchPipeline({
+    signal,
     db: ctx.db,
     search: ctx.search,
     graph: ctx.graph,

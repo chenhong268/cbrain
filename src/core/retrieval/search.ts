@@ -62,6 +62,8 @@ export interface SearchTrace {
 }
 
 export interface SearchOptions {
+  /** @internal Cancellation for deterministic research reads. */
+  signal?: AbortSignal;
   limit?: number;
   strategy?: "vector" | "fts" | "graph" | "all";
   multiQuery?: boolean;
@@ -543,6 +545,7 @@ export class HybridSearch {
   }
 
   async search(query: string, options?: SearchOptions): Promise<SearchResult[]> {
+    options?.signal?.throwIfAborted();
     if (!query.trim()) return [];
 
     const shouldMultiStep = options?.multiStep === true;
@@ -551,6 +554,7 @@ export class HybridSearch {
       ? await this.searchMultiStep(query, options ?? {})
       : await this.searchCore(query, options);
 
+    options?.signal?.throwIfAborted();
     // Post-fusion sealed detail recovery (#169). Skipped for recursive
     // sub-queries so enrichment happens exactly once at the outer exit.
     if (options?._skipDetailEnrich) return results;
@@ -566,7 +570,7 @@ export class HybridSearch {
     const support = resolveSupportContext(query, options);
 
     if (strategy === "vector") {
-      const vecResult = await this.timedCall(() => this.boundedVectorSearch(query, limit, support), trace, "vector_ms").catch(() => null);
+      const vecResult = await this.timedCall(() => this.boundedVectorSearch(query, limit, support, options?.signal), trace, "vector_ms").catch(() => { options?.signal?.throwIfAborted(); return null; });
       if (vecResult === null) {
         if (trace) trace.degraded_reason = trace.degraded_reason ?? "vector_timeout";
         return [];
@@ -740,7 +744,7 @@ export class HybridSearch {
     if (trace && this.llm && !shouldExpand && ftsSufficient) {
       trace.expand_skipped = "fts_sufficient";
     }
-    return this.searchWithExpansion(query, limit, shouldExpand, trace, ftsProbe, support);
+    return this.searchWithExpansion(query, limit, shouldExpand, trace, ftsProbe, support, options?.signal);
   }
 
   private async searchSingleQuery(
@@ -749,6 +753,7 @@ export class HybridSearch {
     trace: SearchTrace | undefined,
     initialFts: SearchResult[] | undefined,
     support: SearchSupportContext,
+    signal?: AbortSignal,
   ): Promise<SearchResult[][]> {
     const resolved = this.db.resolveSlugs([q])[0];
 
@@ -758,10 +763,12 @@ export class HybridSearch {
       vectorSlot.query,
       limit,
       vectorSlot.support,
+      signal,
     );
 
     const [vecOrNull, fts, graph, temporal] = await Promise.all([
       this.timedCall(() => vectorPromise, trace, "vector_ms").catch((e) => {
+        signal?.throwIfAborted();
         this.logger?.warn("search", "vectorSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
         if (trace && !trace.degraded_reason) trace.degraded_reason = "vector_error";
         return null as SearchResult[] | null;
@@ -804,6 +811,7 @@ export class HybridSearch {
     trace?: SearchTrace,
     initialFts?: SearchResult[],
     support: SearchSupportContext = resolveSupportContext(query),
+    signal?: AbortSignal,
   ): Promise<SearchResult[]> {
     const t0 = Date.now();
     const budgetExhausted = (trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS;
@@ -854,8 +862,10 @@ export class HybridSearch {
               origin: "derived",
               vectorOverride: undefined,
             },
+        signal,
       ))
     );
+    signal?.throwIfAborted();
     const allLists = queryResults.flat();
 
     const allSlugs = new Set<string>();
@@ -1159,13 +1169,16 @@ export class HybridSearch {
     query: string,
     limit: number,
     support: SearchSupportContext,
+    signal?: AbortSignal,
   ): Promise<SearchResult[]> {
+    signal?.throwIfAborted();
     const cached = this.embeddingCache.get(query);
     let embedding: number[];
     if (cached && Date.now() < cached.expires) {
       embedding = cached.embedding;
     } else {
-      const result = await this.embedding.embed(query);
+      const result = await this.embedding.embed(query, { signal });
+      signal?.throwIfAborted();
       embedding = result.embedding;
       this.embeddingCache.set(query, { embedding, expires: Date.now() + HybridSearch.EMBEDDING_CACHE_TTL });
       if (this.embeddingCache.size > HybridSearch.CACHE_MAX_SIZE) {
@@ -1178,6 +1191,7 @@ export class HybridSearch {
       ? await this.lance.search(embedding, limit * 3, { includeVector: true })
       : await this.lance.search(embedding, limit * 3);
 
+    signal?.throwIfAborted();
     const bySlug = new Map<string, { content: string; score: number }>();
     const supportBySlug = includeVector
       ? new Map<string, RetrievalChannelEvidence>()
@@ -1221,10 +1235,13 @@ export class HybridSearch {
     query: string,
     limit: number,
     support: SearchSupportContext,
+    signal?: AbortSignal,
   ): Promise<SearchResult[] | null> {
     return new Promise<SearchResult[] | null>((resolve, reject) => {
-      const timer = setTimeout(() => resolve(null), HybridSearch.VECTOR_TIMEOUT_MS);
-      this.vectorSearch(query, limit, support)
+      const controller = new AbortController();
+      const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+      const timer = setTimeout(() => { resolve(null); controller.abort(); }, HybridSearch.VECTOR_TIMEOUT_MS);
+      this.vectorSearch(query, limit, support, requestSignal)
         .then((r) => { clearTimeout(timer); resolve(r); })
         .catch((e) => { clearTimeout(timer); reject(e); });
     });

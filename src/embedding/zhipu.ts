@@ -1,4 +1,5 @@
-import type { EmbeddingProvider, EmbeddingResult } from "./provider.js";
+import { setTimeout as delay } from "node:timers/promises";
+import type { EmbeddingProvider, EmbeddingResult, EmbeddingRequestOptions } from "./provider.js";
 
 const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
 const MODEL = "embedding-3";
@@ -58,12 +59,13 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
     this.baseRetryDelayMs = opts?.baseRetryDelayMs ?? DEFAULT_BASE_RETRY_DELAY_MS;
   }
 
-  async embed(text: string): Promise<EmbeddingResult> {
-    const results = await this.embedBatch([text]);
+  async embed(text: string, options?: EmbeddingRequestOptions): Promise<EmbeddingResult> {
+    const results = await this.embedBatch([text], options);
     return results[0];
   }
 
-  async embedBatch(texts: string[]): Promise<EmbeddingResult[]> {
+  async embedBatch(texts: string[], options?: EmbeddingRequestOptions): Promise<EmbeddingResult[]> {
+    options?.signal?.throwIfAborted();
     if (texts.length === 0) return [];
 
     // Zhipu embedding-3 caps each request at 64 input texts (API error 1214:
@@ -75,7 +77,7 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
     let totalTokens = 0;
     for (let i = 0; i < texts.length; i += CAP) {
       const batch = texts.slice(i, i + CAP);
-      const json = await this.fetchShardWithRetry(batch);
+      const json = await this.fetchShardWithRetry(batch, options?.signal);
       totalTokens += json.usage?.total_tokens ?? 0;
 
       // Sort by index to guarantee ordering matches this shard's input.
@@ -99,6 +101,7 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
    */
   private async fetchShardWithRetry(
     batch: string[],
+    callerSignal?: AbortSignal,
   ): Promise<ZhipuEmbeddingResponse> {
     const url = `${this.baseUrl}/embeddings`;
     const body = JSON.stringify({ model: MODEL, input: batch });
@@ -109,7 +112,9 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
 
     let lastError: Error = new Error("Zhipu embedding request failed");
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      callerSignal?.throwIfAborted();
       const controller = new AbortController();
+      const signal = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal;
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
       // try/catch only classifies the fetch outcome into `result`; the
@@ -124,7 +129,7 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
             Authorization: `Bearer ${this.apiKey}`,
           },
           body,
-          signal: controller.signal,
+          signal,
         });
 
         if (response.ok) {
@@ -147,6 +152,7 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
           };
         }
       } catch (error) {
+        callerSignal?.throwIfAborted();
         if (error instanceof DOMException && error.name === "AbortError") {
           result = {
             ok: false,
@@ -177,6 +183,7 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
         clearTimeout(timer);
       }
 
+      callerSignal?.throwIfAborted();
       if (result.ok) return result.json;
       lastError = result.error;
 
@@ -193,7 +200,7 @@ export class ZhipuEmbeddingProvider implements EmbeddingProvider {
       // Exponential backoff with up to 25% jitter before the next attempt.
       const backoff = this.baseRetryDelayMs * 2 ** attempt;
       const jitter = Math.random() * (backoff * 0.25);
-      await new Promise((r) => setTimeout(r, backoff + jitter));
+      await delay(backoff + jitter, undefined, { signal: callerSignal });
     }
 
     // Unreachable: every iteration either returns or throws above.

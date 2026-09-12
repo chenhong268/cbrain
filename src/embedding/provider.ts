@@ -3,8 +3,12 @@ export interface EmbeddingResult {
   tokenCount: number;
 }
 
+export interface EmbeddingRequestOptions {
+  signal?: AbortSignal;
+}
+
 export interface EmbeddingProvider {
-  embed(text: string): Promise<EmbeddingResult>;
-  embedBatch(texts: string[]): Promise<EmbeddingResult[]>;
+  embed(text: string, options?: EmbeddingRequestOptions): Promise<EmbeddingResult>;
+  embedBatch(texts: string[], options?: EmbeddingRequestOptions): Promise<EmbeddingResult[]>;
   readonly dimensions: number;
 }
