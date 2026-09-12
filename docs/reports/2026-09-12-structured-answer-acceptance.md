@@ -1,10 +1,42 @@
 # Structured final-answer acceptance — #412
 
-## Decision
+## Final decision — 2026-09-12
 
-Stage A is **awaiting human evaluation**. Stage B remains **no-go**. This report
-must not be interpreted as acceptance, cohort authorization, or a global default
-change. The prior cancelled shadow service was not restarted.
+The bounded human comparison in #412 is complete: **no-go for advancing to a
+structured cohort; retain legacy output**. This is completion of the trial,
+not approval for Stage B or a global default change. Documentation cleanup #506
+records this final disposition; parent #333 remains the capability roadmap.
+
+| Initial case | Human preference |
+| --- | --- |
+| Supported answer | Legacy |
+| Missing information | Structured |
+| Incomplete retrieval | Legacy |
+| Dated relationship | Structured |
+| Brief decision | Neither: both too verbose |
+
+Only the brief-decision case was repeated, using the same question and captured
+tool evidence with an identical additional instruction for both modes: give a
+short conclusion and direct reason, preserve uncertainty, and omit the checklist.
+The tester selected legacy. Original ratings and rejected intermediate attempts
+are retained; the two rounds are not combined into a statistical win rate.
+There is no consistent usability benefit here sufficient to justify the cohort.
+
+At closure, the running service reported legacy output and the service definition
+had no configured cohort. No cohort was launched. Exact-candidate Stage B host,
+transport and rollback gates were not executed for this no-go decision and are
+not claimed passed. Both output implementations remain available. A future trial
+requires new concrete benefit evidence, a separately bounded proposal and fresh
+launch gates, including the #408 prerequisite.
+
+The accepted brief-decision guidance was applied separately to the operator's
+resident Hermes instructions for new sessions and verified with the actual prompt
+loader. It is not packaged as a CBrain output-mode change. Private real-question
+answers remain separate from this anonymous comparison and are not published here.
+
+The sections below preserve the initial experiment and its then-current checks;
+they are historical evidence, not fresh host-release proof. No more human retests
+are scheduled in this trial.
 
 ## Smallest repeated trial
 
@@ -84,10 +116,9 @@ its readiness conclusion cannot be reused for this candidate.
 - No cohort was enabled. Exact-candidate real-host and rollback release gates
   have not been claimed or substituted with these local checks.
 
-## Remaining gate
+## Trial disposition
 
-Record the tester's five evaluations and usability objections. If a narrow defect
-is accepted for correction, rerun the affected comparison. Do not switch modes
-based on the model's or implementer's opinion. Only an acceptable Stage A result
-can advance to fresh exact-candidate host/transport/rollback verification and a
-separately bounded cohort window. #412 remains open until its decision is evidenced.
+#412 closes with the final no-go decision above. No rollout state needs restoration
+because this trial did not enable a cohort. #506 reconciles this report with the
+recorded decision; it does not authorize deletion of either output path or another
+trial. Prior host-canary reports remain dated historical evidence.
