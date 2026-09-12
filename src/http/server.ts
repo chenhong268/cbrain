@@ -25,7 +25,9 @@ function createToolRegistry(ctx: ToolContext): Map<string, ToolDef> {
       tools.set(name, {
         name,
         description: config.description ?? "",
-        inputSchema: config.inputSchema instanceof z.ZodType ? config.inputSchema : undefined,
+        inputSchema: config.inputSchema instanceof z.ZodType
+          ? config.inputSchema
+          : config.inputSchema === undefined ? undefined : z.object(config.inputSchema as z.ZodRawShape),
         handler: handler as ToolDef["handler"],
       });
     },
