@@ -4,6 +4,7 @@ export interface ChatMessage {
 }
 
 export interface ChatOptions {
+  signal?: AbortSignal;
   /** Provider-supported reasoning mode. Omitted preserves the provider default. */
   thinking?: "enabled" | "disabled";
 }

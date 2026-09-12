@@ -585,14 +585,16 @@ describe("one budget for the complete research request (#481)", () => {
   it("a stalled planner returns degraded and a late plan cannot start searches", async () => {
     let searches = 0;
     let finish!: (plan: string) => void;
+    let signal: AbortSignal | undefined;
     const ctx = makeCtx({
-      llm: { name: "fixture", chat: () => new Promise(resolve => { finish = resolve; }) },
+      llm: { name: "fixture", chat: (_messages, options) => { signal = options?.signal; return new Promise(resolve => { finish = resolve; }); } },
       search: mockSearch({ async search() { searches++; return []; } }),
     });
     const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A", budgetOverride: { max_ms: 30 } });
     expect(result.status).toBe("degraded");
     expect(result.trace_summary.budgetUsed.llmCalls).toBe(1);
     expect(result.trace_summary.totalMs).toBeGreaterThanOrEqual(25);
+    expect(signal?.aborted).toBe(true);
     finish(searchPlan());
     await Bun.sleep(5);
     expect(searches).toBe(0);
@@ -600,17 +602,21 @@ describe("one budget for the complete research request (#481)", () => {
 
   it("a stalled search cannot keep the request open or start later steps", async () => {
     let searches = 0;
-    let finish!: (result: []) => void;
+    let finish!: (result: unknown[]) => void;
+    let signal: AbortSignal | undefined;
     const ctx = makeCtx({
       llm: { name: "fixture", async chat() { return searchPlan(2); } },
-      search: mockSearch({ search: () => { searches++; return new Promise(resolve => { finish = resolve; }); } }),
+      search: mockSearch({ search: (_query, options) => { searches++; signal = (options as { signal?: AbortSignal })?.signal; return new Promise(resolve => { finish = resolve; }); } }),
     });
     const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A", budgetOverride: { max_ms: 30 } });
     expect(result.status).toBe("degraded");
     expect(result.trace_summary.budgetUsed.searches).toBe(1);
-    finish([]);
+    expect(signal?.aborted).toBe(true);
+    const before = JSON.stringify(result);
+    finish([{ slug: "page/late", score: 1, snippet: "late", source: "vector" }]);
     await Bun.sleep(5);
     expect(searches).toBe(1);
+    expect(JSON.stringify(result)).toBe(before);
   }, 1000);
 });
 

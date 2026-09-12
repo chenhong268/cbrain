@@ -90,6 +90,7 @@ export interface PlannerInput {
   query: string;
   knownSlugs?: string[];
   intentHint?: SearchPlanIntent;
+  signal?: AbortSignal;
 }
 
 // --- Planner ---
@@ -98,6 +99,7 @@ export class SearchPlanner {
   constructor(private readonly llm?: LLMProvider) {}
 
   async plan(input: PlannerInput): Promise<PlanResult> {
+    input.signal?.throwIfAborted();
     const { query } = input;
     if (!query.trim()) {
       return buildFallback(query, "Empty query", input.knownSlugs, input.intentHint);
@@ -127,14 +129,16 @@ export class SearchPlanner {
       const raw = await this.llm!.chat([
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: buildUserPrompt(query, knownSlugs) },
-      ]);
+      ], { signal: input.signal });
 
+      input.signal?.throwIfAborted();
       const cleaned = raw.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "");
       const parsed: unknown = JSON.parse(cleaned);
       const result = validateSearchPlan(parsed);
       if (!("ok" in result)) return result;
       return buildFallback(query, result.reason, knownSlugs, intentHint);
     } catch (err) {
+      input.signal?.throwIfAborted();
       return buildFallback(query, `LLM planning failed: ${err instanceof Error ? err.message : String(err)}`, knownSlugs, intentHint);
     }
   }

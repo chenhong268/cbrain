@@ -14,6 +14,7 @@ import { collectEvidenceForSlugs, type EvidenceBoardResult } from "../retrieval/
 // --- Executor Context (minimal read-only subset of ToolContext) ---
 
 export interface ExecutorContext {
+  signal?: AbortSignal;
   db: CBrainDB;
   search: HybridSearch;
   graph: GraphManager;
@@ -157,7 +158,9 @@ async function handleSearch(step: SearchPlanStep, state: ExecutionState, ctx: Ex
     multiQuery: false,
     multiStep: false,
     _hints: hints,
+    signal: ctx.signal,
   });
+  ctx.signal?.throwIfAborted();
   const remaining = MAX_SEARCH_EVIDENCE_TOTAL - state.evidenceSlugs.size;
   if (remaining > 0) {
     const topResults = results
@@ -276,6 +279,11 @@ export class AgenticResearchExecutor {
       const step = plan.steps[i];
       const elapsed = this.now() - startTime;
 
+      if (this.ctx.signal?.aborted) {
+        degradedReason = "Research cancelled";
+        this.skipRemaining(plan.steps, i, degradedReason, skipped, trace, traceSessionId);
+        break;
+      }
       // --- Budget checks: any exhaustion = stop + degrade ---
       if (elapsed >= budget.max_ms) {
         degradedReason = `Wall-clock budget exhausted (${elapsed}ms >= ${budget.max_ms}ms)`;
@@ -313,18 +321,25 @@ export class AgenticResearchExecutor {
       const stepStart = this.now();
       let stepTimer: ReturnType<typeof setTimeout> | undefined;
       let stepTimedOut = false;
+      const controller = new AbortController();
+      const signal = this.ctx.signal ? AbortSignal.any([this.ctx.signal, controller.signal]) : controller.signal;
+      let cancelStep: (() => void) | undefined;
 
       try {
         const handler = DISPATCH[step.kind];
         const result = await Promise.race([
-          handler(step, state, this.ctx),
+          handler(step, state, { ...this.ctx, signal }),
           new Promise<never>((_, reject) => {
             stepTimer = setTimeout(() => {
               stepTimedOut = true;
-              reject(new Error("Research step deadline exhausted"));
+              controller.abort(new Error("Research step deadline exhausted"));
             }, Math.max(0, budget.max_ms - (stepStart - startTime)));
+            cancelStep = () => reject(new Error(stepTimedOut ? "Research step deadline exhausted" : "Research cancelled"));
+            signal.addEventListener("abort", cancelStep, { once: true });
+            if (signal.aborted) cancelStep();
           }),
         ]);
+        signal.throwIfAborted();
         result.latencyMs = this.now() - stepStart;
         steps.push(result);
         trace.push({ stepIndex: i, kind: step.kind, input: step.input, status: "ok", latencyMs: result.latencyMs });
@@ -344,13 +359,14 @@ export class AgenticResearchExecutor {
         trace.push({ stepIndex: i, kind: step.kind, input: step.input, status: "gap", latencyMs, error: errorMessage(err) });
 
         this.recordTraceError(traceSessionId, i, step, errorMessage(err), latencyMs);
-        if (stepTimedOut) {
-          degradedReason = "Research step deadline exhausted";
+        if (signal.aborted) {
+          degradedReason = stepTimedOut ? "Research step deadline exhausted" : "Research cancelled";
           this.skipRemaining(plan.steps, i + 1, degradedReason, skipped, trace, traceSessionId);
           break;
         }
       } finally {
         if (stepTimer) clearTimeout(stepTimer);
+        if (cancelStep) signal.removeEventListener("abort", cancelStep);
       }
     }
 

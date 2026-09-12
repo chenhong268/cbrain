@@ -44,6 +44,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
   }
 
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<string> {
+    options?.signal?.throwIfAborted();
     const url = `${this.baseUrl}/chat/completions`;
     const body = JSON.stringify({
       model: this.model,
@@ -54,6 +55,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
     });
 
     const controller = new AbortController();
+    const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await fetch(url, {
@@ -63,7 +65,7 @@ export class DeepSeekLLMProvider implements LLMProvider {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body,
-        signal: controller.signal,
+        signal,
       });
 
       if (!response.ok) {
@@ -72,8 +74,10 @@ export class DeepSeekLLMProvider implements LLMProvider {
       }
 
       const json = (await response.json()) as DeepSeekChatResponse;
+      signal.throwIfAborted();
       return json.choices[0]?.message?.content ?? "";
     } catch (e) {
+      options?.signal?.throwIfAborted();
       if (controller.signal.aborted) {
         throw new LLMTimeoutError("DeepSeek", this.timeoutMs);
       }

@@ -1,4 +1,5 @@
-import type { LLMProvider, ChatMessage } from "./provider.js";
+import { LLMTimeoutError } from "./provider.js";
+import type { LLMProvider, ChatMessage, ChatOptions } from "./provider.js";
 
 const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
 const DEFAULT_MODEL = "glm-4-flash";
@@ -29,7 +30,8 @@ export class ZhipuLLMProvider implements LLMProvider {
     this.timeoutMs = opts?.timeoutMs ?? 30_000;
   }
 
-  async chat(messages: ChatMessage[]): Promise<string> {
+  async chat(messages: ChatMessage[], options?: ChatOptions): Promise<string> {
+    options?.signal?.throwIfAborted();
     const url = `${this.baseUrl}/chat/completions`;
     const body = JSON.stringify({
       model: this.model,
@@ -39,6 +41,7 @@ export class ZhipuLLMProvider implements LLMProvider {
     });
 
     const controller = new AbortController();
+    const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await fetch(url, {
@@ -48,7 +51,7 @@ export class ZhipuLLMProvider implements LLMProvider {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body,
-        signal: controller.signal,
+        signal,
       });
 
       if (!response.ok) {
@@ -57,10 +60,12 @@ export class ZhipuLLMProvider implements LLMProvider {
       }
 
       const json = (await response.json()) as ZhipuChatResponse;
+      signal.throwIfAborted();
       return json.choices[0]?.message?.content ?? "";
     } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") {
-        throw new Error(`Zhipu LLM request timed out after ${this.timeoutMs}ms`);
+      options?.signal?.throwIfAborted();
+      if (controller.signal.aborted) {
+        throw new LLMTimeoutError("Zhipu", this.timeoutMs);
       }
       throw e;
     } finally {

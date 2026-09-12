@@ -91,6 +91,23 @@ describe("cbrain_recall front-door tool (#199)", () => {
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
   });
 
+  test.each(["cbrain_recall", "agentic_research"])("%s forwards request cancellation to its planner", async name => {
+    let observed: AbortSignal | undefined;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    deps.llm = { name: "fixture", chat: async (_messages, options) => {
+      observed = options?.signal; started();
+      return new Promise<string>(resolve => setTimeout(() => resolve("{}"), 30));
+    } };
+    const controller = new AbortController();
+    const server = createServer(deps);
+    const response = getTools(server)[name].handler({ query: "帮我判断这个方案有没有盲区" }, { signal: controller.signal });
+    await ready;
+    controller.abort();
+    await response;
+    expect(observed?.aborted).toBe(true);
+  });
+
   test("tool is registered", () => {
     const server = createServer(deps);
     expect("cbrain_recall" in getTools(server)).toBe(true);
