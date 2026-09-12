@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { runDream } from "../../src/core/maintenance/dream.js";
-import type { SyncManager } from "../../src/core/maintenance/sync.js";
+import { CleanupError, SyncManager } from "../../src/core/maintenance/sync.js";
 import type { EnrichManager } from "../../src/core/maintenance/enrich.js";
 import type { HealthChecker } from "../../src/core/maintenance/health.js";
 import type { Logger } from "../../src/core/logger.js";
@@ -61,6 +61,62 @@ describe("dream backup retention", () => {
   afterEach(() => {
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  test("real stub cleanup waits for deletion and preserves partial count on refusal", async () => {
+    let complete!: (value: boolean) => void;
+    let started!: () => void;
+    const startedDeletion = new Promise<void>(resolve => { started = resolve; });
+    const pending = new Promise<boolean>(resolve => { complete = resolve; });
+    const pages = {
+      getBySlug: (slug: string) => ({ body: slug === "page/source" ? "unrelated text" : "Auto-extracted from [[page/source]]" }),
+      delete: async (slug: string) => { started(); return slug === "page/a" ? pending : false; },
+    };
+    db.getAutoExtractedPages = () => [{ slug: "page/a", title: "实体A" }, { slug: "page/b", title: "实体B" }] as ReturnType<CBrainDB["getAutoExtractedPages"]>;
+    const sync = new SyncManager(db, {} as never, {} as never, { pages: pages as never });
+    let settled = false;
+    const cleanup = sync.cleanStaleStubs(vaultPath);
+    void cleanup.then(() => { settled = true; }, () => { settled = true; });
+    await startedDeletion;
+    expect(settled).toBe(false);
+    complete(true);
+    await expect(cleanup).rejects.toMatchObject({ name: "CleanupError", completedCount: 1 });
+  });
+
+  test("partial cleanup retains completed counts in the Dream report", async () => {
+    const sync = makeMockSync();
+    sync.cleanLanceOrphans = async () => { throw new CleanupError(1); };
+    const report = await runDream(vaultPath, db, sync, makeMockEnrich(), makeMockHealth(), outputsDir, logger);
+    expect(report.stages.cleanup.lanceOrphans).toBe(1);
+    expect(report.stages.cleanup.errors).toEqual(["cleanup_cleanLanceOrphans_failed"]);
+  });
+
+  test.each(["removeOrphans", "cleanStaleStubs", "cleanLanceOrphans"] as const)("reports %s failure in every result surface", async operation => {
+    const sync = makeMockSync();
+    let lanceCalled = false;
+    sync.cleanLanceOrphans = async () => { lanceCalled = true; return ["page/实体A"]; };
+    sync[operation] = async () => { throw new Error("private-cleanup-detail"); };
+    let progress: unknown;
+    const report = await runDream(vaultPath, db, sync, makeMockEnrich(), makeMockHealth(), outputsDir, logger,
+      undefined, undefined, undefined, undefined, (stage, detail) => { if (stage === "cleanup") progress = detail; });
+    const code = `cleanup_${operation}_failed`;
+    expect(report.stages.cleanup.errors).toEqual([code]);
+    expect(progress).toEqual(report.stages.cleanup);
+    expect(report.brief).toContain(code);
+    const saved = readFileSync(join(outputsDir, "dream", `dream-${report.timestamp.slice(0, 10)}.md`), "utf8");
+    expect(saved).toContain(code);
+    expect(JSON.stringify(report)).not.toContain("private-cleanup-detail");
+    expect(saved).not.toContain("private-cleanup-detail");
+    expect(db.getConfig("dream.lock")).toBeNull();
+    if (operation !== "cleanLanceOrphans") {
+      expect(lanceCalled).toBe(false);
+      expect(report.stages.cleanup.skipped).toEqual(["cleanLanceOrphans"]);
+    }
+  });
+
+  test("successful empty cleanup has no failure diagnostics", async () => {
+    const report = await runDream(vaultPath, db, makeMockSync(), makeMockEnrich(), makeMockHealth(), outputsDir, logger);
+    expect(report.stages.cleanup).toEqual({ orphans: 0, staleStubs: 0, lanceOrphans: 0, errors: [], skipped: [] });
   });
 
   test("cancellation after sync preserves completed work and releases the Dream lock", async () => {

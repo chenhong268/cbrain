@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, rmSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 
 const PROJECT_DIR = join(import.meta.dir, "..", "..");
@@ -44,6 +44,20 @@ describe("CLI dream", () => {
       expect(err.stdout).toContain("⚠️");
       expect(err.stdout).toContain("已跳过");
     }
+  });
+
+  test("cleanup failure is visible and exits non-zero", () => {
+    const preload = join(testDir, "cleanup-failure.ts");
+    writeFileSync(preload, `import { SyncManager } from ${JSON.stringify(join(PROJECT_DIR, "src/core/maintenance/sync.ts"))};
+      SyncManager.prototype.removeOrphans = async () => { throw new Error("private-cleanup-detail"); };`);
+    const result = spawnSync(process.execPath, ["--preload", preload, join(PROJECT_DIR, "src/cli/index.ts"), "dream"], {
+      cwd: brainDir, encoding: "utf8", timeout: 60_000,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("cleanup_removeOrphans_failed");
+    expect(result.stdout).toContain("cleanLanceOrphans");
+    expect(result.stdout).not.toContain("private-cleanup-detail");
+    expect(result.stderr).not.toContain("private-cleanup-detail");
   });
 
   test("normal completion: exits 0 with success output and lanceOrphans", () => {

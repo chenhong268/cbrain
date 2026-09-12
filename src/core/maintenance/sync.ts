@@ -35,6 +35,14 @@ import {
   type IndexSnapshot,
 } from "../safety/sync-index-safety.js";
 
+/** Partial cleanup is not an empty success; only completed removals are counted. */
+export class CleanupError extends Error {
+  constructor(public readonly completedCount: number) {
+    super("Cleanup incomplete");
+    this.name = "CleanupError";
+  }
+}
+
 export class TitleCollisionError extends Error {
   constructor(
     public readonly details: {
@@ -504,6 +512,7 @@ export class SyncManager {
 
   async cleanStaleStubs(_vaultPath: string): Promise<string[]> {
     const removed: string[] = [];
+    try {
     const stubs = this.db.getAutoExtractedPages();
 
     for (const stub of stubs) {
@@ -518,11 +527,12 @@ export class SyncManager {
       if (!sourcePage) continue;
 
       if (!sourcePage.body.includes(stub.title)) {
-        this.pages?.delete(stub.slug);
+        if (!await this.pages?.delete(stub.slug)) throw new Error("Delete incomplete");
         removed.push(stub.slug);
       }
     }
     return removed;
+    } catch { throw new CleanupError(removed.length); }
   }
 
   async syncPage(slug: string, vaultPath: string): Promise<SyncPageResult> {
@@ -862,12 +872,13 @@ export class SyncManager {
   }
 
   async removeOrphans(vaultPath: string): Promise<string[]> {
+    const orphans: string[] = [];
+    try {
     const cleaned = this.db.cleanDanglingLinks();
     if (cleaned > 0 && this.logger) this.logger.info("sync", `清理 ${cleaned} 条悬空链接`);
 
     const pages = this.db.getAllPageSlugsWithPaths();
 
-    const orphans: string[] = [];
     let observedSlugs: Set<string> | undefined;
 
     for (const page of pages) {
@@ -886,25 +897,22 @@ export class SyncManager {
           }
         }
         if (observedSlugs.has(page.slug)) continue;
-        orphans.push(page.slug);
         // Clean up any title-collision skip hashes
         try { this.db.deleteConfig(`sync.skip.${page.slug}`); } catch { /* non-critical */ }
         if (this.pages) {
           // PageManager.delete() handles both SQLite + LanceDB internally
-          await this.pages.delete(page.slug);
+          if (!await this.pages.delete(page.slug)) throw new Error("Delete incomplete");
         } else {
-          // SyncManager-only path: SQLite-first, LanceDB best-effort
+          // SQLite-first; a failed vector removal remains visible for the next cleanup.
           this.db.deletePageCascaded(page.slug);
-          try {
-            await this.lance.deleteByPageSlug(page.slug);
-          } catch (e) {
-            this.logger?.warn("sync", `LanceDB orphan cleanup failed for ${page.slug}: ${(e as Error).message}`);
-          }
+          await this.lance.deleteByPageSlug(page.slug);
         }
+        orphans.push(page.slug);
       }
     }
 
     return orphans;
+    } catch { throw new CleanupError(orphans.length); }
   }
 
   /**
@@ -912,22 +920,26 @@ export class SyncManager {
    * Returns the list of cleaned slugs.
    */
   async cleanLanceOrphans(): Promise<string[]> {
+    const cleaned: string[] = [];
+    try {
     const lanceSlugs = await this.lance.getIndexedPageSlugs();
     if (lanceSlugs.length === 0) return [];
 
     const sqliteSlugs = new Set(this.db.getAllPageSlugsWithPaths().map(p => p.slug));
     const orphans = lanceSlugs.filter(s => !sqliteSlugs.has(s));
 
-    const cleaned: string[] = [];
+    let failed = false;
     for (const slug of orphans) {
       try {
         await this.lance.deleteByPageSlug(slug);
         cleaned.push(slug);
-      } catch (e) {
-        this.logger?.warn("sync", `Failed to clean LanceDB orphan ${slug}: ${(e as Error).message}`);
+      } catch {
+        failed = true;
       }
     }
+    if (failed) throw new CleanupError(cleaned.length);
     return cleaned;
+    } catch { throw new CleanupError(cleaned.length); }
   }
 
   /** Compensate a failed existing-page sync: restore retrievable metadata + exact
