@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { rewriteVaultLinks, isRawVaultFile } from "../shared.js";
+import { rewriteVaultLinks, isRawVaultFile, assertWritableVaultFile } from "../shared.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { LanceDBManager } from "../../storage/lancedb.js";
 import type { Logger } from "../logger.js";
@@ -132,6 +132,7 @@ export async function safeDeletePage(
     return { committed: false, lanceCleaned: false, lanceRepairRequired: false };
   }
 
+  assertWritableVaultFile(deps.vaultPath, join(deps.vaultPath, targetRel));
   const snaps = snapshotAffectedFiles(slug, deps);
   const restoreOrFail = (original: Error): never => {
     const restoreErrors = restoreFiles(snaps);

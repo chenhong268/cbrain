@@ -4,7 +4,7 @@ import { join, resolve, relative } from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { canMerge, getLayer, normalizePageType } from "../../core/shared.js";
+import { canMerge, getLayer, normalizePageType, assertWritableVaultFile } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
 import { formatGetPageEnvelope, formatGetPagesEnvelope, formatAppendEnvelope } from "./format-result.js";
@@ -188,6 +188,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     const normalizedExtra = normalizedOrganizationExtra.extra;
     const existing = ctx.pages.getBySlug(slug);
     if (existing) {
+      assertWritableVaultFile(ctx.vaultPath, join(ctx.vaultPath, existing.file_path));
       const effectiveMode = mode ?? "patch";
       let updated: import("../../core/page.js").Page | null = null;
       let previousVersion: number | null = null;
@@ -303,6 +304,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (!page) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }], isError: true };
     }
+    assertWritableVaultFile(ctx.vaultPath, join(ctx.vaultPath, page.file_path));
     ctx.versions.createVersion(slug);
 
     // ── #195: parse deterministic frontmatter from appended content ──

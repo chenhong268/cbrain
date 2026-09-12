@@ -4,6 +4,8 @@ import { CBrainDB } from "../storage/sqlite.js";
 import { PageManager } from "./page.js";
 import { parseFrontmatter, stringifyFrontmatter } from "../utils/frontmatter.js";
 
+import { assertWritableVaultFile } from "./shared.js";
+
 export interface VersionInfo {
   version: number;
   created_at: string;
@@ -58,6 +60,7 @@ export class VersionManager {
 
     const page = this.pages.getBySlug(slug);
     if (!page) return false;
+    assertWritableVaultFile(this.vaultPath, join(this.vaultPath, page.file_path));
 
     let fm = page.frontmatter;
     if (ver.frontmatter) {
