@@ -18,13 +18,13 @@ let ctx: ToolContext;
 let server: ReturnType<ReturnType<typeof createHttpServer>["start"]>;
 let client: Client;
 
-async function start() {
+async function start(outputMode: "legacy" | "structured" = "legacy") {
   const lance = new LanceDBManager();
   await lance.connect(join(root, "lance"));
   ctx = buildContext({ db: new CBrainDB(join(root, "brain.sqlite")), lance,
     embedding: new DeterministicEmbeddingProvider(), vaultPath: join(root, "vault"),
     runtimePath: join(root, "runtime"), nerIngestMode: "off" });
-  server = createHttpServer(ctx).start(0);
+  server = createHttpServer({ ...ctx, outputMode }).start(0);
   client = new Client({ name: "anonymous-acceptance", version: "1" });
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
 }
@@ -43,6 +43,25 @@ async function call(name: string, args: Record<string, unknown>) {
 afterEach(async () => { await stop(); if (root) rmSync(root, { recursive: true, force: true }); });
 
 describe("conversational memory through real HTTP/MCP and persistent indexes", () => {
+  test("structured exact-title recall retains bounded source evidence at every detail level", async () => {
+    root = mkdtempSync(join(tmpdir(), "cbrain-title-evidence-"));
+    await start("structured");
+    await call("ingest", { title: TITLE, content: CORRECTED + "补充资料。".repeat(100) + "END-OF-BODY", pageType: "record", skipNer: true });
+    for (const detail of ["brief", "normal", "full"]) {
+      const result = await client.callTool({ name: "cbrain_recall", arguments: { query: TITLE, detail } });
+      expect(result.isError).not.toBe(true);
+      const structured = result.structuredContent as { data: { details: { entities: Array<{ title: string; snippet: string }> } } };
+      const evidence = structured.data.details.entities.find(entity => entity.title === TITLE);
+      expect(evidence?.snippet).toContain("需要三位独立审核者共同确认");
+      expect(evidence!.snippet.length).toBeLessThanOrEqual(200);
+      const visible = JSON.stringify(structured.data);
+      expect(visible).not.toContain("END-OF-BODY");
+      expect(visible).not.toContain('"body":');
+      expect(visible).not.toContain('"slug":');
+      expect(visible).not.toContain('"raw_chunks":');
+    }
+  });
+
   test("correction replaces recall evidence and survives a service restart", async () => {
     root = mkdtempSync(join(tmpdir(), "cbrain-memory-roundtrip-"));
     await start();

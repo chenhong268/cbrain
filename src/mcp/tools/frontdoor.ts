@@ -239,7 +239,11 @@ async function runContentRecall(
     }
     return {
       title: page?.title ?? r.slug,
-      snippet: r.snippet,
+      // Exact-title hits can carry only the title as their search snippet.
+      // Keep usable evidence in the bounded snippet that structured output retains.
+      snippet: page?.body?.trim() && (!r.snippet?.trim() || r.snippet.trim() === page.title)
+        ? page.body.trim().slice(0, 200)
+        : r.snippet,
       ...(detail !== "brief" ? { body: page?.body?.slice(0, 500) ?? "" } : {}),
     };
   });
