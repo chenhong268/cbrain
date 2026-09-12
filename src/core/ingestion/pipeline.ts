@@ -27,7 +27,7 @@ import {
   relationEndpointsAllowed,
   insertSemanticLink,
 } from "../shared.js";
-import { canonicalSlug } from "../../utils/slug.js";
+import { canonicalSlug, generateSlug } from "../../utils/slug.js";
 
 export interface PipelineInput {
   slug: string;
@@ -625,6 +625,18 @@ export class ContentPipeline {
         }
       } else if (result.action === "stub_created" && this.pages && entity.name.length <= 20) {
         const entityType = mapEntityType(entity.type);
+        // Resolution ran before this extraction created or moved any pages.
+        // Different spellings can now occupy the same canonical slug. Treat
+        // that occupier as a weak reference, never overwrite or promote it.
+        const occupied = this.db.getPage(generateSlug(entity.name, normalizePageType(entityType)));
+        if (occupied) {
+          entitySlugMap.set(entity.name, occupied.slug);
+          if (!mentionSkipSlugs.has(occupied.slug)) this.db.incrementMentionCount(occupied.slug);
+          if (occupied.slug !== fromSlug) {
+            this.db.insertLink(fromSlug, occupied.slug, "提及", null, 0.3, "weak", "ner", 0.5, undefined, { source_page_slug: fromSlug });
+          }
+          continue;
+        }
         const stub = this.pages.create({
           title: entity.name,
           type: entityType,
