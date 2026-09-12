@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { SearchTrace } from "../../core/retrieval/search.js";
 import type { ToolContext } from "../context.js";
 import { classifyFrontdoorQuery, type FrontdoorRoutingDecision } from "../../core/retrieval/frontdoor-router.js";
 import { EpisodicRecaller } from "../../core/retrieval/episodic-recall.js";
@@ -17,6 +18,7 @@ import {
   formatOrgTreeEnvelope,
   formatQueryEnvelope,
   formatRecallEnvelope,
+  INCOMPLETE_RECALL_MESSAGE,
   formatSummarizeEnvelope,
   sanitizeDisplay,
   type ToolSummary,
@@ -106,7 +108,7 @@ export function registerFrontdoorTools(server: McpServer, ctx: ToolContext): voi
     return buildToolResult({
       mode: ctx.outputMode,
       display: toolEnvelope.display,
-      displayStructured: "已完成 CBrain 检索。",
+      displayStructured: structuredSummary(toolEnvelope.summary, "frontdoor").message,
       summary: toolEnvelope.summary,
       summaryStructured: structuredSummary(toolEnvelope.summary, "frontdoor"),
       data: projectFrontdoorData(toolEnvelope.display, toolEnvelope.raw),
@@ -122,11 +124,14 @@ async function runGroundedRecall(
   query: string,
   routing: FrontdoorRoutingDecision,
 ): Promise<FrontdoorEnvelope> {
-  const results = await ctx.search.search(query, { limit: 10 });
+  const trace: SearchTrace = {};
+  const results = await ctx.search.search(query, { limit: 10, _trace: trace });
+  const degraded = results.length === 0 && !!trace.degraded_reason;
   const slugs = results.map((r) => r.slug);
   const board = collectEvidenceForSlugs(ctx.db, slugs);
   const grounded_answer = buildGroundedRecall(query, board);
-  const payload = { query, grounded_answer };
+  if (degraded && slugs.length === 0) grounded_answer.answer = INCOMPLETE_RECALL_MESSAGE;
+  const payload = { query, grounded_answer, ...(degraded ? { search_meta: { degraded } } : {}) };
   const formatted = formatGroundedRecallEnvelope(payload);
   return withRouting(formatted, payload, routing, grounded_answer.sources.map((source) => source.slug));
 }
@@ -140,7 +145,9 @@ async function runContentRecall(
   const limit = detail === "brief" ? 3 : 5;
   const identitySeed = await resolveIdentityQuestionSeed(ctx, query);
   let verificationIncomplete = false;
+  const trace: SearchTrace = {};
   const candidates = await ctx.search.search(query, {
+    _trace: trace,
     ...(isRecentRecall(query) ? { multiQuery: false, _skipDecompose: true } : {}),
     limit,
     _captureSupport: true,
@@ -267,12 +274,14 @@ async function runContentRecall(
     shouldCompleteEvidence(query, "auto") && slugs.length > 0
       ? assembleEvidencePack(ctx.db, slugs, query)
       : undefined;
+  const degraded = entities.length === 0 && !!trace.degraded_reason;
   const payload = {
     query,
     entities,
+    ...(degraded ? { search_meta: { degraded } } : {}),
     ...(budgetedProactiveHints.length > 0 ? { proactive_hints: budgetedProactiveHints } : {}),
     ...(evidencePack ? { evidence_pack: evidencePack } : {}),
-    summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果" : "暂时没找到相关记忆",
+    summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : degraded ? INCOMPLETE_RECALL_MESSAGE : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果" : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
   const surfaceInsufficient =

@@ -286,6 +286,8 @@ interface RecallPayload {
   summary?: string;
 }
 
+export const INCOMPLETE_RECALL_MESSAGE = "检索未完成，暂时不能确认结果；这不代表没有相关记录。";
+
 export function formatRecallEnvelope(payload: RecallPayload): {
   display: string;
   summary: ToolSummary;
@@ -297,13 +299,14 @@ export function formatRecallEnvelope(payload: RecallPayload): {
 
   if (count === 0) {
     return {
-      display: `暂时没找到和「${payload.query}」相关的记忆。`,
+      display: isDegraded ? INCOMPLETE_RECALL_MESSAGE : `暂时没找到和「${payload.query}」相关的记忆。`,
       summary: {
-        status: "empty",
+        status: isDegraded ? "degraded" : "empty",
         count: 0,
         truncated: false,
-        message: "暂时没找到相关记忆",
-        next_steps: ["尝试换个关键词", "用 deep_recall 换一种搜索策略"],
+        message: isDegraded ? INCOMPLETE_RECALL_MESSAGE : "暂时没找到相关记忆",
+        ...(isDegraded ? { degraded_reason: "检索未完成" } : {}),
+        next_steps: isDegraded ? ["稍后重试，或按记录标题查看原文"] : ["尝试换个关键词", "用 deep_recall 换一种搜索策略"],
       },
       raw: payload,
     };
@@ -359,7 +362,7 @@ export function formatGroundedRecallEnvelope(payload: GroundedRecallPayload): {
 
   const parts: string[] = [];
   if (signalCount === 0) {
-    parts.push(`关于「${payload.query}」，暂时还没找到明确的依据。`);
+    parts.push(isDegraded ? INCOMPLETE_RECALL_MESSAGE : `关于「${payload.query}」，暂时还没找到明确的依据。`);
   } else {
     parts.push(`关于「${payload.query}」，`);
     if (facts > 0) parts.push(`有 ${facts} 条依据支持。`);
@@ -376,7 +379,7 @@ export function formatGroundedRecallEnvelope(payload: GroundedRecallPayload): {
       count: signalCount,
       truncated: false,
       message: `${facts} 条依据、${candidates} 处待确认、${conflicts} 处不一致、${gaps} 处待补充`,
-      degraded_reason: isDegraded ? "搜索超时" : undefined,
+      degraded_reason: isDegraded ? (signalCount === 0 ? "检索未完成" : "检索结果不完整") : undefined,
     },
     raw: payload,
   };

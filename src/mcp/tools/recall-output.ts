@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolSummary } from "./format-result.js";
+import { INCOMPLETE_RECALL_MESSAGE, type ToolSummary } from "./format-result.js";
 
 const OUTPUT_TEXT_MAX = 50_000;
 const OUTPUT_LIST_MAX = 100;
@@ -101,7 +101,7 @@ export function structuredSummary(summary: ToolSummary, kind: SummaryKind): Tool
     status: summary.status,
     count: summary.count,
     truncated: summary.truncated,
-    message: SUMMARY_MESSAGES[kind],
+    message: summary.degraded_reason === "检索未完成" ? INCOMPLETE_RECALL_MESSAGE : SUMMARY_MESSAGES[kind],
     ...(summary.degraded_reason ? { degraded_reason: "检索结果不完整" } : {}),
   };
 }
