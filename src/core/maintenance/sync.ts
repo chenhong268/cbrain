@@ -175,21 +175,39 @@ export class SyncManager {
   async syncAll(vaultPath: string): Promise<SyncReport> {
     const report: SyncReport = { synced: 0, skipped: 0, errors: 0, errorDetails: [], diagnostics: [] };
     try {
-    const mdFiles = await collectMarkdownFiles(vaultPath, new Set(["outputs"]), this.logger ?? undefined);
+    const mdFiles = await collectMarkdownFiles(vaultPath, new Set(["outputs"]), this.logger ?? undefined, true);
 
     // Phase 1: detect changed files + batch embed all chunks
     const changed: Array<{ filePath: string; slug: string; title: string; type: string; relPath: string; body: string; contentHash: string; frontmatter: Record<string, unknown> }> = [];
     const allChunks: Array<{ slug: string; index: number; content: string }> = [];
 
+    // Resolve the whole observed set before any write or embedding. Two files
+    // claiming one slug must not race for metadata or share cached embeddings.
+    const observed = [];
+    const slugCounts = new Map<string, number>();
     for (const filePath of mdFiles) {
       try {
         const content = await readFile(filePath, "utf-8");
         const parsed = parseFrontmatter(content);
         const relPath = relative(vaultPath, filePath);
         const slug = parsed.frontmatter.slug ?? relPath.replace(/\.md$/, "");
+        observed.push({ filePath, content, parsed, relPath, slug });
+        slugCounts.set(slug, (slugCounts.get(slug) ?? 0) + 1);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") { report.skipped++; continue; }
+        report.errors++;
+        report.errorDetails!.push(`${filePath}: ${(error as Error).message}`);
+      }
+    }
+    for (const { filePath, content, parsed, relPath, slug } of observed) {
+      try {
+        if (slugCounts.get(slug)! > 1) throw new Error("DUPLICATE_PAGE_SLUG");
         const contentHash = hashContent(content);
 
         const existingPage = this.db.getPage(slug);
+        if (existingPage && existingPage.file_path !== relPath && existsSync(join(vaultPath, existingPage.file_path))) {
+          throw new Error("DUPLICATE_PAGE_SLUG");
+        }
         const exists = !!existingPage;
         const existingHash = existingPage?.content_hash ?? null;
 
@@ -197,6 +215,7 @@ export class SyncManager {
         // or bug may still leave derived indexes missing; only skip when
         // chunks + FTS are complete for non-empty bodies.
         if (existingHash && existingHash === contentHash && hasCompletePageIndexes(this.db, slug, parsed.body)) {
+          if (existingPage!.file_path !== relPath) this.db.updatePageFilePath(slug, relPath);
           // Backfill tags + wikilinks even when content unchanged
           if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
             this.db.replaceTags(slug, parsed.frontmatter.tags as string[]);
@@ -294,10 +313,9 @@ export class SyncManager {
 
         const isNewAll = !exists;
         // metaSnap captures only the fields upsertPage/replaceTags can mutate
-        // (title, tags). type/filePath are excluded — upsertPage's ON CONFLICT
-        // clause leaves them untouched, so they need no rollback snapshot.
+        // (title, tags, and the binding committed after index success).
         const metaSnap = exists
-          ? { title: existingPage?.title ?? file.title, tags: this.db.getTags(file.slug) }
+          ? { title: existingPage?.title ?? file.title, tags: this.db.getTags(file.slug), filePath: existingPage!.file_path }
           : null;
         const indexSnap = await this.snapshotOrFail(file.slug, exists);
 
@@ -325,6 +343,7 @@ export class SyncManager {
           await this.pipeline.writeIndexes(file.slug, chunks, embedResults as Array<{ embedding: number[]; tokenCount: number }>);
 
           // Persist content hash only after indexes are written — ensures next sync retries on failure
+          this.db.updatePageFilePath(file.slug, file.relPath);
           this.db.updatePageHash(file.slug, file.contentHash);
           this.pipeline.writeIngestLog(file.slug, "vault", { hash: file.contentHash });
 
@@ -520,8 +539,10 @@ export class SyncManager {
     }
     const contentHash = hashContent(content);
 
-    const existingPage = this.db.getPage(effectiveSlug);
-    const exists = !!existingPage;
+    let existingPage = this.db.getPage(effectiveSlug);
+    if (existingPage && existingPage.file_path !== relative(vaultPath, resolvedFullPath)
+      && existsSync(join(vaultPath, existingPage.file_path))) throw new Error("DUPLICATE_PAGE_SLUG");
+    let exists = !!existingPage;
     const existingHash = existingPage?.content_hash ?? null;
 
     if (existingHash && existingHash === contentHash && hasCompletePageIndexes(this.db, effectiveSlug, parsed.body)) {
@@ -558,6 +579,12 @@ export class SyncManager {
     // Canonicalize slug + migrate mislaid files
     const canonical = canonicalSlug(effectiveSlug, type);
     if (canonical !== effectiveSlug) {
+      // Canonicalization can resolve to a different existing page. Validate its
+      // binding before migration and use that row for rollback/existence checks.
+      existingPage = this.db.getPage(canonical);
+      exists = !!existingPage;
+      if (existingPage && existingPage.file_path !== relative(vaultPath, resolvedFullPath)
+        && existsSync(join(vaultPath, existingPage.file_path))) throw new Error("DUPLICATE_PAGE_SLUG");
       const newRelPath = slugToFilePath(canonical);
       const newFullPath = join(vaultPath, newRelPath);
       if (!existsSync(newFullPath)) {
@@ -636,6 +663,7 @@ export class SyncManager {
     const metaSnap = exists
       ? {
           title: existingPage?.title ?? title,
+          filePath: existingPage!.file_path,
           tags: this.db.getTags(effectiveSlug),
         }
       : null;
@@ -651,13 +679,12 @@ export class SyncManager {
           this.db.recordPageWriteProvenance(effectiveSlug, forVaultDiscovery());
         }
       });
-      this.db.updatePageFilePath(effectiveSlug, relPath);
-
       if (parsed.frontmatter?.tags && Array.isArray(parsed.frontmatter.tags)) {
         this.db.replaceTags(effectiveSlug, parsed.frontmatter.tags as string[]);
       }
 
       await this.pipeline.writeIndexes(effectiveSlug, chunks, embedResults);
+      this.db.updatePageFilePath(effectiveSlug, relPath);
 
       // Persist content hash only after indexes are written
       this.db.updatePageHash(effectiveSlug, contentHash);
@@ -826,12 +853,24 @@ export class SyncManager {
     const pages = this.db.getAllPageSlugsWithPaths();
 
     const orphans: string[] = [];
+    let observedSlugs: Set<string> | undefined;
 
     for (const page of pages) {
       const fullPath = join(vaultPath, page.file_path);
       try {
         await access(fullPath);
-      } catch {
+      } catch (error) {
+        // An inaccessible file is not evidence of deletion. A failed sync may
+        // also leave a moved file's old binding; any live claimant protects it.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (!observedSlugs) {
+          observedSlugs = new Set();
+          for (const path of await collectMarkdownFiles(vaultPath, new Set(["outputs"]), this.logger ?? undefined, true)) {
+            const parsed = parseFrontmatter(await readFile(path, "utf-8"));
+            observedSlugs.add(parsed.frontmatter.slug ?? relative(vaultPath, path).replace(/\.md$/, ""));
+          }
+        }
+        if (observedSlugs.has(page.slug)) continue;
         orphans.push(page.slug);
         // Clean up any title-collision skip hashes
         try { this.db.deleteConfig(`sync.skip.${page.slug}`); } catch { /* non-critical */ }
@@ -883,14 +922,13 @@ export class SyncManager {
    *  Throws SyncRollbackError if compensation cannot fully restore. */
   private async compensateSyncFailure(
     slug: string,
-    meta: { title: string; tags: string[] } | null,
+    meta: { title: string; tags: string[]; filePath: string } | null,
     indexSnap: IndexSnapshot,
     original: Error,
   ): Promise<void> {
     const errors: Error[] = [];
     if (meta) {
-      // upsertPage ON CONFLICT only mutates title + updated_at, so type/filePath
-      // are read back as-is from the current row (no snapshot needed for them).
+      // Restore the prior binding too if a post-index metadata write failed.
       const page = this.db.getPage(slug);
       try {
         this.db.upsertPage({
@@ -900,6 +938,7 @@ export class SyncManager {
           filePath: page?.file_path ?? `${slug}.md`,
         });
       } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+      try { this.db.updatePageFilePath(slug, meta.filePath); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
       try { this.db.replaceTags(slug, meta.tags); } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
     }
     const restore = await restoreIndexState(this.db, this.lance, slug, indexSnap);
