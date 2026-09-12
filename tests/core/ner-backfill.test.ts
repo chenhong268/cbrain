@@ -16,6 +16,7 @@ import { LLMTimeoutError } from "../../src/llm/provider";
 import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic";
 import { LanceDBManager, LanceTableMissingError } from "../../src/storage/lancedb";
 import { canonicalSlug } from "../../src/utils/slug";
+import { hasKnownRelationsDrift } from "../../src/core/graph/known-relations-projector";
 import { probeLance } from "../../src/core/fsck/lance-probe";
 import { EntityFactsTimeoutError } from "../../src/core/ingestion/entity-facts";
 import { submitDeferredNerForWritePath } from "../../src/core/ingestion/ner-write-path";
@@ -2169,6 +2170,12 @@ describe("runNerBackfillStage (#252)", () => {
 
     expect(counts.processed).toBe(1);
     expect(embedBatchCalls).toBe(1);
+    expect(summarizeRepairBatch(db, receipt.batchId!)).toMatchObject({ finalized: true, outcomes: { resolved: 1, sourceChanged: 0 } });
+    const links = db.getAllLinks();
+    for (const row of db.listPages({ limit: db.getPageCount(), offset: 0 })) {
+      expect(hasKnownRelationsDrift(readFileSync(join(testDir, row.file_path), "utf8"),
+        links.filter(link => link.from_slug === row.slug), links.filter(link => link.to_slug === row.slug))).toBe(false);
+    }
     for (const title of ["匿名实体己", "匿名实体庚"]) {
       const stub = db.rawDb.prepare("SELECT slug FROM pages WHERE title = ?").get(title) as { slug: string };
       const finalBody = pages.getBySlug(stub.slug)!.body;
@@ -2348,7 +2355,7 @@ describe("runNerBackfillStage (#252)", () => {
     });
   });
 
-  for (const fault of ["SQLite chunk", "FTS"] as const) {
+  for (const fault of ["SQLite chunk", "FTS", "projection"] as const) {
     test(`a stub ${fault} failure leaves the governed batch commit-unknown`, async () => {
       const embedding = createMockEmbeddingProvider();
       const lance = createMockLanceDB();
@@ -2367,7 +2374,7 @@ describe("runNerBackfillStage (#252)", () => {
           if (pageSlug !== source.slug) throw new Error("synthetic SQLite chunk failure");
           return insertChunk(pageSlug, index, content);
         }) as typeof db.insertChunk;
-      } else {
+      } else if (fault === "FTS") {
         const ftsInsert = db.ftsInsert.bind(db);
         db.ftsInsert = ((pageSlug: string, content: string) => {
           if (pageSlug !== source.slug) throw new Error("synthetic FTS failure");
@@ -2383,6 +2390,13 @@ describe("runNerBackfillStage (#252)", () => {
         }),
       };
       const pages = new PageManager(db, testDir);
+      if (fault === "projection") {
+        const sync = pages.syncLinksToMarkdown.bind(pages);
+        pages.syncLinksToMarkdown = (slug) => {
+          if (slug !== source.slug) throw new Error("synthetic projection write failure");
+          sync(slug);
+        };
+      }
       const pipeline = new ContentPipeline(db, embedding, lance as never, {
         pages,
         nerEngine: new NerEngine(llm),
