@@ -539,3 +539,40 @@ describe("critic — relevance filtering", () => {
     expect(result.missing).toContain("evidence or explicit gaps missing");
   });
 });
+
+function executionFixture(): NonNullable<CriticInput["execution"]> {
+  return { steps: [], gaps: [], skipped: [], resolvedSlugs: new Map([["实体A", "page/a"], ["实体B", "page/b"]]), budgetUsed: { llmCalls: 0, searches: 0, ms: 0 }, status: "ok" };
+}
+
+describe("critic — evidence-directed follow-up", () => {
+  it("prefers the uncovered second entity over rereading the first", () => {
+    const execution = executionFixture();
+    execution.steps = [{ kind: "page", input: "实体A", data: { slug: "page/a", body: "已读" }, latencyMs: 1 }];
+    const result = evaluateSufficiency(makeInput({ intent: "comparison", query: "比较实体A和实体B", execution }));
+    expect(result.sufficient).toBe(false);
+    expect(result.follow_up_steps[0]).toMatchObject({ kind: "page", input: "page/b" });
+  });
+
+  it("does not count a resolved alias and its page as two comparison sources", () => {
+    const execution = executionFixture();
+    execution.steps = [{ kind: "page", input: "实体A", data: { slug: "page/a" }, latencyMs: 1 }];
+    const result = evaluateSufficiency(makeInput({ intent: "comparison", execution, evidenceBoard: {
+      ...emptyBoard(), facts: [{ claim: "事实A", source_slug: "page/a", source_type: "page", source_category: "explicit_input", trust_state: "trusted", evidence_type: "fact", confidence: 1 }],
+    } }));
+    expect(result.sufficient).toBe(false);
+  });
+
+  it("stops when successful-empty or failed equivalent actions were already attempted", () => {
+    const execution = executionFixture();
+    execution.resolvedSlugs = new Map([["实体A", "page/a"]]);
+    const attemptedSteps = [
+      { kind: "search" as const, input: "实体A", detail: "full" as const },
+      { kind: "page" as const, input: "实体A", detail: "full" as const },
+      { kind: "chunks" as const, input: "page/a", detail: "full" as const },
+    ];
+    const result = evaluateSufficiency(makeInput({ query: "实体A", execution, attemptedSteps }));
+    expect(result.sufficient).toBe(false);
+    expect(result.follow_up_steps).toHaveLength(0);
+    expect(result.missing).toContain("no_new_follow_up_action");
+  });
+});

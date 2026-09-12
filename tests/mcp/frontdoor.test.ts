@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { AgenticResearchPipeline } from "../../src/core/agentic/pipeline.js";
+import { afterEach, beforeEach, describe, expect, test, spyOn } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
@@ -106,6 +107,23 @@ describe("cbrain_recall front-door tool (#199)", () => {
     controller.abort();
     await response;
     expect(observed?.aborted).toBe(true);
+  });
+
+  test.each(["insufficient", "degraded"] as const)("research %s is visible without reading raw diagnostics", async status => {
+    const spy = spyOn(AgenticResearchPipeline.prototype, "run").mockResolvedValue({
+      status, evidence_board: { facts: [], user_thoughts: [], candidates: [], conflicts: [], gaps: ["follow_up_no_progress"] },
+      answer_context: { sourceSlugs: [], gaps: ["follow_up_no_progress"], confidence: "low" },
+    } as never);
+    try {
+      const server = createServer(deps);
+      const response = await getTools(server).cbrain_recall.handler({ query: "帮我判断这个方案有没有盲区" });
+      const data = JSON.parse(response.content[0].text);
+      expect(data.summary.count).toBe(0);
+      expect(data.display).not.toContain("已完成分析");
+      expect(data.display).toContain(status === "degraded" ? "未能完成" : "证据不足");
+      expect(data.display).toContain("补查未增加有效证据");
+      expect(data.summary.message).toBe(data.display);
+    } finally { spy.mockRestore(); }
   });
 
   test("tool is registered", () => {
