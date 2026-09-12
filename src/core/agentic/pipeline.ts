@@ -139,6 +139,23 @@ function mergeEvidenceBoards(
   };
 }
 
+function hasNewEvidence(primary: ExecutionResult, followUp: ExecutionResult): boolean {
+  const evidenceKeys = (execution: ExecutionResult) => {
+    const keys = new Set([...execution.evidenceBoard.facts, ...execution.evidenceBoard.user_thoughts]
+      .map(item => `${item.source_slug}\0${item.trust_state}\0${item.claim}`));
+    for (const step of execution.steps) {
+      if (!["page", "chunks", "graph", "timeline"].includes(step.kind) || step.data == null) continue;
+      const slug = execution.resolvedSlugs.get(step.input) ?? step.input;
+      for (const item of Array.isArray(step.data) ? step.data : [step.data]) {
+        keys.add(`${step.kind}\0${slug}\0${JSON.stringify(item)}`);
+      }
+    }
+    return keys;
+  };
+  const existing = evidenceKeys(primary);
+  return [...evidenceKeys(followUp)].some(key => !existing.has(key));
+}
+
 function determinePipelineStatus(
   execution: ExecutionResult,
   followUpExecution: ExecutionResult | undefined,
@@ -289,6 +306,7 @@ export class AgenticResearchPipeline {
         query: input.query,
         evidenceBoard: execution.evidenceBoard,
         execution,
+        attemptedSteps: execution.trace.filter(entry => entry.status !== "skipped").map(entry => planWithBudget.steps[entry.stepIndex]!),
       });
     } catch {
       criticFailed = true;
@@ -314,6 +332,7 @@ export class AgenticResearchPipeline {
     ) {
       const followUpPlan: PlanResult = {
         ...planWithBudget, steps: critic.follow_up_steps,
+        entities: [...new Set([...planWithBudget.entities, ...execution.resolvedSlugs.values()])],
         budget: remainingBudget(execution.budgetUsed.searches),
       };
 
@@ -331,7 +350,12 @@ export class AgenticResearchPipeline {
             intent: plan.intent,
             query: input.query,
             evidenceBoard: mergedBoard,
-            execution: followUpExecution,
+            execution: {
+              ...followUpExecution,
+              steps: [...execution.steps, ...followUpExecution.steps],
+              gaps: [...execution.gaps, ...followUpExecution.gaps],
+              resolvedSlugs: new Map([...execution.resolvedSlugs, ...followUpExecution.resolvedSlugs]),
+            },
             maxFollowUpSteps: 0,
           });
         } catch {
@@ -345,12 +369,18 @@ export class AgenticResearchPipeline {
             reasons: ["follow-up sufficiency evaluation failed"],
           };
         }
+        if (!hasNewEvidence(execution, followUpExecution)) {
+          followUpCritic = { ...followUpCritic, sufficient: false, confidence: "low",
+            missing: [...new Set([...critic.missing, ...followUpCritic.missing, "follow_up_no_progress"])],
+            follow_up_steps: [], reasons: [...followUpCritic.reasons, "follow-up added no new evidence"] };
+        }
       }
     }
-
-    if (criticFailed) {
-      mergedBoard = { ...mergedBoard, gaps: [...(followUpCritic ?? critic).missing, ...mergedBoard.gaps] };
+    const finalCritic = followUpCritic ?? critic;
+    if (!finalCritic.sufficient) {
+      mergedBoard = { ...mergedBoard, gaps: [...new Set([...finalCritic.missing, ...mergedBoard.gaps])] };
     }
+
     const status = criticFailed ? "degraded" : determinePipelineStatus(execution, followUpExecution, critic, followUpCritic);
     const followUpPerformed = !!followUpExecution;
     const traceSummary = buildTraceSummary(execution, followUpExecution, errors);

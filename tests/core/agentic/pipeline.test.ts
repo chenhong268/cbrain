@@ -209,6 +209,7 @@ describe("pipeline — insufficient after follow-up", () => {
     expect(result.follow_up_critic?.sufficient).toBe(false);
     expect(result.trace_summary.passCount).toBe(2);
     expect(result.evidence_board.facts).toHaveLength(0);
+    expect(result.answer_context.gaps).toContain("follow_up_no_progress");
   });
 });
 
@@ -507,7 +508,9 @@ describe("one budget for the complete research request (#481)", () => {
     expect(calls).toBe(1);
     expect(result.trace_summary.budgetUsed).toEqual({ searches: 1, llmCalls: 1, ms: 210 });
     expect(result.trace_summary.totalMs).toBe(210);
-    expect(result.status).toBe("degraded");
+    expect(result.status).toBe("insufficient");
+    expect(result.follow_up_execution).toBeUndefined();
+    expect(result.answer_context.gaps).toContain("no_new_follow_up_action");
   });
 
   it("counts failed planning attempts and still permits deterministic reads", async () => {
@@ -652,4 +655,52 @@ describe("pipeline — critic failures", () => {
       }
     });
   }
+});
+
+describe("pipeline — targeted evidence follow-up", () => {
+  it("reads the missing second entity and evaluates both passes together", async () => {
+    const read: string[] = [];
+    let plans = 0;
+    const ctx = makeCtx({
+      db: mockDB({ batchGetLinksForSlugs: () => new Map(), batchGetTimelineForSlugs: () => new Map() }),
+      llm: { name: "fixture", chat: async () => { plans++; return JSON.stringify({ intent: "comparison", entities: ["page/a", "page/b"], budget: {}, steps: [{ kind: "page", input: "page/a" }] }); } },
+      pages: mockPages({ getBySlug: slug => { read.push(slug); return { slug, body: `source ${slug}` }; } }),
+    });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "比较实体A和实体B", budgetOverride: { max_llm_calls: 1, max_searches: 1 } });
+    expect(result.critic.sufficient).toBe(false);
+    expect(read).toEqual(["page/a", "page/b"]);
+    expect(result.status).toBe("partial");
+    expect(result.follow_up_critic?.sufficient).toBe(true);
+    expect(result.trace_summary.passCount).toBe(2);
+    expect(plans).toBe(1);
+  });
+
+  it("a failed follow-up is not sufficient gap-analysis evidence", async () => {
+    const ctx = makeCtx({
+      db: mockDB({ batchGetLinksForSlugs: () => new Map(), batchGetTimelineForSlugs: () => new Map() }),
+      llm: { name: "fixture", chat: async () => JSON.stringify({ intent: "gap_analysis", entities: [], budget: {}, steps: [{ kind: "resolve", input: "实体A" }] }) },
+      search: mockSearch({ search: async () => { throw new Error("search unavailable"); } }),
+    });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A缺什么证据" });
+    expect(result.critic.sufficient).toBe(false);
+    expect(result.follow_up_execution?.gaps.length).toBe(1);
+    expect(result.follow_up_critic?.sufficient).toBe(false);
+    expect(result.answer_context.confidence).toBe("low");
+    expect(result.answer_context.gaps).toContain("follow_up_no_progress");
+    expect(result.status).toBe("insufficient");
+  });
+
+  it("does not retry an empty search under another detail setting", async () => {
+    let searches = 0;
+    const ctx = makeCtx({
+      db: mockDB({ batchGetLinksForSlugs: () => new Map(), batchGetTimelineForSlugs: () => new Map() }),
+      llm: { name: "fixture", chat: async () => JSON.stringify({ intent: "entity_lookup", entities: [], budget: {}, steps: [{ kind: "search", input: "实体A", detail: "brief" }] }) },
+      search: mockSearch({ search: async () => { searches++; return []; } }),
+    });
+    const result = await new AgenticResearchPipeline(ctx).run({ query: "实体A" });
+    expect(searches).toBe(1);
+    expect(result.status).toBe("insufficient");
+    expect(result.follow_up_execution).toBeUndefined();
+    expect(result.answer_context.gaps).toContain("no_new_follow_up_action");
+  });
 });

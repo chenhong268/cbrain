@@ -10,6 +10,7 @@ export interface CriticInput {
   evidenceBoard: EvidenceBoardResult;
   execution?: Pick<ExecutionResult, "steps" | "gaps" | "skipped" | "resolvedSlugs" | "budgetUsed" | "status">;
   maxFollowUpSteps?: number;
+  attemptedSteps?: SearchPlanStep[];
 }
 
 export type Confidence = "high" | "medium" | "low";
@@ -78,21 +79,15 @@ function hasNonEmptyStep(steps: ExecutionResult["steps"], kind: string): boolean
   return steps.some((s) => s.kind === kind && isNonEmpty(s.data));
 }
 
-function firstResolvedSlug(execution?: CriticInput["execution"]): string | undefined {
-  if (!execution) return undefined;
-  for (const slug of execution.resolvedSlugs.values()) return slug;
-  return undefined;
-}
-
 function isNonEmpty(data: unknown): boolean {
   if (Array.isArray(data)) return data.length > 0;
   return data != null;
 }
 
-function executionStepInputs(steps: ExecutionResult["steps"], kinds: Set<string>): Set<string> {
+function executionStepInputs(steps: ExecutionResult["steps"], kinds: Set<string>, resolved?: Map<string, string>): Set<string> {
   const inputs = new Set<string>();
   for (const s of steps) {
-    if (kinds.has(s.kind) && isNonEmpty(s.data)) inputs.add(s.input);
+    if (kinds.has(s.kind) && isNonEmpty(s.data)) inputs.add(resolved?.get(s.input) ?? s.input);
   }
   return inputs;
 }
@@ -166,7 +161,7 @@ function checkEntityLookup(input: CriticInput): CheckResult {
 function checkComparison(input: CriticInput): CheckResult {
   const boardSlugs = relevantSourceSlugs(input.evidenceBoard, input.execution);
   const execSlugs = input.execution
-    ? executionStepInputs(input.execution.steps, new Set(["page", "chunks", "graph"]))
+    ? executionStepInputs(input.execution.steps, new Set(["page", "chunks", "graph"]), input.execution.resolvedSlugs)
     : new Set<string>();
   const allSources = new Set([...boardSlugs, ...execSlugs]);
 
@@ -218,33 +213,40 @@ function generateFollowUps(
 ): SearchPlanStep[] {
   if (missing.length === 0 || maxSteps <= 0) return [];
 
-  const slug = firstResolvedSlug(input.execution) ?? input.query;
+  const resolved = input.execution?.resolvedSlugs;
+  const covered = new Set([
+    ...relevantSourceSlugs(input.evidenceBoard, input.execution),
+    ...executionStepInputs(input.execution?.steps ?? [], new Set(["page", "chunks", "graph"]), resolved),
+  ]);
+  const targets = [...new Set(resolved?.values() ?? [])].sort((a, b) => Number(covered.has(a)) - Number(covered.has(b)));
+  const attempted: SearchPlanStep[] = input.attemptedSteps ?? [
+    ...(input.execution?.steps ?? []), ...(input.execution?.gaps.map(g => g.step) ?? []),
+  ];
   const steps: SearchPlanStep[] = [];
-  const seen = new Set<string>();
-
+  const canonical = (step: SearchPlanStep) => step.kind === "search" ? step.input : resolved?.get(step.input) ?? step.input;
+  // Increasing detail alone is not a new evidence source. A traverse can add
+  // paths beyond a prior neighbors query; the reverse cannot add coverage.
   const addStep = (step: SearchPlanStep) => {
-    const key = `${step.kind}:${step.input}:${step.mode ?? ""}`;
-    if (seen.has(key)) return;
-    seen.add(key);
+    if ([...attempted, ...steps].some(prior => prior.kind === step.kind
+      && canonical(prior) === canonical(step)
+      && (step.kind !== "graph" || prior.mode === "traverse" || (prior.mode ?? "neighbors") === (step.mode ?? "neighbors")))) return;
     if (steps.length < maxSteps) steps.push(step);
   };
 
   for (const m of missing) {
     if (steps.length >= maxSteps) break;
-
     if (m.includes("relationship")) {
-      addStep({ kind: "graph", input: slug, mode: "neighbors", detail: "normal" });
+      for (const target of targets) addStep({ kind: "graph", input: target, mode: "neighbors", detail: "normal" });
+      for (const target of targets) addStep({ kind: "graph", input: target, mode: "traverse", detail: "normal" });
     } else if (m.includes("timeline")) {
-      addStep({ kind: "timeline", input: slug, detail: "normal" });
-    } else if (m.includes("entity") || m.includes("trusted facts") || m.includes("candidate")) {
-      addStep({ kind: "search", input: input.query, detail: "normal" });
-      addStep({ kind: "page", input: slug, detail: "brief" });
-    } else if (m.includes("comparison")) {
-      addStep({ kind: "search", input: input.query, detail: "normal" });
-      addStep({ kind: "page", input: slug, detail: "brief" });
-    } else if (m.includes("gap")) {
-      addStep({ kind: "search", input: input.query, detail: "full" });
+      for (const target of targets.length ? targets : [input.query]) addStep({ kind: "timeline", input: target, detail: "normal" });
+    } else if (m.includes("entity") || m.includes("trusted facts") || m.includes("candidate") || m.includes("comparison")) {
+      for (const target of targets) {
+        addStep({ kind: "page", input: target, detail: "normal" });
+        addStep({ kind: "chunks", input: target, detail: "normal" });
+      }
     }
+    addStep({ kind: "search", input: input.query, detail: "normal" });
   }
 
   return steps;
@@ -276,10 +278,15 @@ export function evaluateSufficiency(input: CriticInput): SufficiencyDecision {
 
   const check = checks[input.intent]();
   const sufficient = check.missing.length === 0;
+  const missing = [...check.missing];
   const maxFollowUp = input.maxFollowUpSteps ?? 3;
   const followUps = generateFollowUps(input.intent, check.missing, input, maxFollowUp);
   let confidence = determineConfidence(sufficient, input.evidenceBoard);
   const reasons = [...check.reasons];
+  if (!sufficient && maxFollowUp > 0 && followUps.length === 0) {
+    missing.push("no_new_follow_up_action");
+    reasons.push("available evidence actions were already attempted");
+  }
 
   if (sufficient && input.execution?.status === "degraded") {
     confidence = "low";
@@ -289,7 +296,7 @@ export function evaluateSufficiency(input: CriticInput): SufficiencyDecision {
   return {
     sufficient,
     confidence,
-    missing: check.missing,
+    missing,
     follow_up_steps: followUps,
     reasons,
   };

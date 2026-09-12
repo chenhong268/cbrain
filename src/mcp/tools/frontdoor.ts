@@ -715,14 +715,17 @@ async function runAgenticRecall(
     result.evidence_board.facts.length +
     result.evidence_board.user_thoughts.length +
     result.evidence_board.candidates.length +
-    result.evidence_board.conflicts.length +
-    result.evidence_board.gaps.length;
-  const display = sanitizeDisplay(`已完成分析：找到 ${evidenceCount} 条证据线索。`);
+    result.evidence_board.conflicts.length;
+  const outcome = result.status === "degraded" ? "未能完成证据评估" : result.status === "insufficient" ? "证据不足" : "已完成分析";
+  const gaps = result.answer_context.gaps;
+  const stopped = gaps.includes("follow_up_no_progress") ? "补查未增加有效证据，已停止补查。"
+    : gaps.includes("no_new_follow_up_action") ? "可用取证动作已尝试，已停止补查。" : "";
+  const display = sanitizeDisplay(`${outcome}：找到 ${evidenceCount} 条证据线索。${stopped}`);
   const summary: ToolSummary = {
     status: result.status === "ok" || result.status === "partial" ? "ok" : result.status === "insufficient" ? "empty" : "degraded",
     count: evidenceCount,
     truncated: false,
-    message: `已完成分析，证据线索 ${evidenceCount} 条`,
+    message: display,
   };
   return {
     display,
