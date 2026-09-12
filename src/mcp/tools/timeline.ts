@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { assertWritableVaultFile } from "../../core/shared.js";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
@@ -100,11 +102,13 @@ async function addTimelineEntry(
       isError: true,
     };
   }
+  const registeredPath = ctx.db.getPageFilePath(slug);
+  if (registeredPath !== null) assertWritableVaultFile(ctx.vaultPath, join(ctx.vaultPath, registeredPath));
+  const page = ctx.pages.getBySlug(slug);
   const id = ctx.db.addTimelineEntry(slug, summary, eventDate, source);
 
   // Append timeline content to page body for searchability
   {
-    const page = ctx.pages.getBySlug(slug);
     if (page) {
       const dateStr = eventDate ?? new Date().toISOString().slice(0, 10);
       const srcNote = source ? ` [来源: ${source}]` : "";

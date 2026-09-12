@@ -52,6 +52,7 @@ export interface SearchTrace {
   temporal_ms?: number;
   decompose_ms?: number;
   rerank_ms?: number;
+  rerank_completed?: boolean;
   llm_calls?: number;
   degraded_reason?: string;
   expand_skipped?: string;

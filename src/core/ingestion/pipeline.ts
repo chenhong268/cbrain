@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parseFrontmatter } from "../../utils/frontmatter.js";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager, LanceTableMissingError, type RawVectorRow } from "../../storage/lancedb.js";
@@ -13,6 +16,7 @@ import { getOntology } from "../../ontology/loader.js";
 import { sanitizeForLog } from "../safety/sync-index-safety.js";
 import {
   chunkContent,
+  hashContent,
   mapEntityType,
   normalizePageType,
   buildStubBody,
@@ -78,6 +82,10 @@ export type NerSourceGuard = (phase: "after_extract" | "before_commit") => void;
  * Used by SyncManager (vault path) and IngestManager (agent API path).
  */
 export class ContentPipeline {
+  // MCP and SyncManager own separate pipelines over one DB. Serialize only the
+  // actual same-page index mutation, so vector delete/add cannot interleave.
+  private static readonly indexWrites = new WeakMap<CBrainDB, Map<string, Promise<void>>>();
+
   private db: CBrainDB;
   private embedding: EmbeddingProvider;
   private lance: LanceDBManager;
@@ -126,43 +134,94 @@ export class ContentPipeline {
     chunks: Array<{ index: number; content: string }>,
     embedResults: Array<{ embedding: number[]; tokenCount: number }>
   ): Promise<void> {
-    if (chunks.length === 0) {
+    let pending = ContentPipeline.indexWrites.get(this.db);
+    if (!pending) { pending = new Map(); ContentPipeline.indexWrites.set(this.db, pending); }
+    const previous = pending.get(slug);
+    let release!: () => void;
+    const done = new Promise<void>(resolve => { release = resolve; });
+    pending.set(slug, done);
+    await previous;
+    try {
+      await this.writePageIndexes(slug, chunks, embedResults);
+    } finally {
+      release();
+      if (pending.get(slug) === done) pending.delete(slug);
+    }
+  }
+
+  private async writePageIndexes(
+    slug: string,
+    chunks: Array<{ index: number; content: string }>,
+    embedResults: Array<{ embedding: number[]; tokenCount: number }>,
+  ): Promise<void> {
+    if (this.pages) this.db.updatePageHash(slug, null);
+    try {
+      if (chunks.length === 0) {
+        await this.lance.deleteRawChunksByPageSlug(slug);
+        await this.lance.deleteL1VectorByPageSlug(slug);
+        this.db.transaction(() => {
+          this.db.deleteChunksByPage(slug);
+          this.db.ftsDeleteByPage(slug);
+          this.db.deleteL1Summary(slug);
+        });
+        this.commitIndexedFileHash(slug, chunks);
+        return;
+      }
+      if (chunks.length !== embedResults.length) {
+        throw new Error(`writeIndexes: chunks(${chunks.length}) and embeddings(${embedResults.length}) count mismatch for ${slug}`);
+      }
+
       await this.lance.deleteRawChunksByPageSlug(slug);
-      await this.lance.deleteL1VectorByPageSlug(slug);
+      await this.lance.addChunks(
+        chunks.map((c, i) => ({
+          pageSlug: slug,
+          chunkIndex: c.index,
+          content: c.content,
+          vector: new Float32Array(embedResults[i].embedding),
+        }))
+      );
+
       this.db.transaction(() => {
         this.db.deleteChunksByPage(slug);
         this.db.ftsDeleteByPage(slug);
-        this.db.deleteL1Summary(slug);
+        for (const chunk of chunks) {
+          this.db.insertChunk(slug, chunk.index, chunk.content);
+        }
+
+        const fullContent = chunks.map(c => c.content).join("\n\n");
+        this.db.ftsInsert(slug, fullContent);
+
+        const l1 = this.db.getL1Summary(slug);
+        if (l1) this.db.ftsInsert(slug, l1.content);
       });
+      this.commitIndexedFileHash(slug, chunks);
+    } catch (error) {
+      // A partial or late failing write must not inherit another writer's clean hash.
+      if (this.pages) this.db.updatePageHash(slug, null);
+      throw error;
+    }
+  }
+
+  /** Clear a dirty hash only when the actual file still matches the indexed body. */
+  private commitIndexedFileHash(slug: string, chunks: Array<{ index: number; content: string }>): void {
+    if (!this.pages) return;
+    const filePath = this.db.getPageFilePath(slug);
+    if (!filePath) return;
+    let raw: string;
+    try {
+      raw = readFileSync(join(this.pages.vaultPath, filePath), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // sync owns rebinding a moved file after successful indexing.
+      this.db.updatePageHash(slug, null);
       return;
     }
-    if (chunks.length !== embedResults.length) {
-      throw new Error(`writeIndexes: chunks(${chunks.length}) and embeddings(${embedResults.length}) count mismatch for ${slug}`);
+    const current = chunkContent(parseFrontmatter(raw).body, this.chunkSize);
+    if (current.length !== chunks.length || current.some((chunk, i) => chunk.index !== chunks[i].index || chunk.content !== chunks[i].content)) {
+      this.db.updatePageHash(slug, null);
+      return;
     }
-
-    await this.lance.deleteRawChunksByPageSlug(slug);
-    await this.lance.addChunks(
-      chunks.map((c, i) => ({
-        pageSlug: slug,
-        chunkIndex: c.index,
-        content: c.content,
-        vector: new Float32Array(embedResults[i].embedding),
-      }))
-    );
-
-    this.db.transaction(() => {
-      this.db.deleteChunksByPage(slug);
-      this.db.ftsDeleteByPage(slug);
-      for (const chunk of chunks) {
-        this.db.insertChunk(slug, chunk.index, chunk.content);
-      }
-
-      const fullContent = chunks.map(c => c.content).join("\n\n");
-      this.db.ftsInsert(slug, fullContent);
-
-      const l1 = this.db.getL1Summary(slug);
-      if (l1) this.db.ftsInsert(slug, l1.content);
-    });
+    this.db.updatePageHash(slug, hashContent(raw));
   }
 
   private sameMovedVectors(expected: RawVectorRow[], actual: RawVectorRow[], pageSlug: string): boolean {

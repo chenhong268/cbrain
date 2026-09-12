@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, rmSync, mkdirSync, writeFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, rmSync, mkdirSync, writeFileSync, renameSync, statSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { SyncManager } from "../../src/core/maintenance/sync.js";
@@ -120,6 +120,96 @@ describe("SyncManager", () => {
   afterEach(() => {
     db.close();
     if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  for (const changed of [false, true]) {
+    test(`full sync preserves a renamed page and indexes (body changed=${changed})`, async () => {
+      const slug = "records/fixture-a";
+      const fm = { title: "记录A", type: "record", slug };
+      writeMdFile(vaultPath, "records/old-a.md", fm, "原始资料A");
+      await sync.syncAll(vaultPath);
+      renameSync(join(vaultPath, "records/old-a.md"), join(vaultPath, "records/new-a.md"));
+      if (changed) writeMdFile(vaultPath, "records/new-a.md", fm, "改写资料B");
+      expect((await sync.syncAll(vaultPath)).errors).toBe(0);
+      expect(db.getPageFilePath(slug)).toBe("records/new-a.md");
+      expect(await sync.removeOrphans(vaultPath)).toEqual([]);
+      expect(db.getChunksByPage(slug).map(c => c.content).join(" ")).toContain(changed ? "改写资料B" : "原始资料A");
+    });
+  }
+  test("duplicate frontmatter slugs fail before embedding or metadata writes and survive orphan cleanup", async () => {
+    const slug = "records/fixture-a";
+    const fm = { title: "记录A", type: "record", slug };
+    writeMdFile(vaultPath, "records/old-a.md", fm, "原始资料A");
+    await sync.syncAll(vaultPath);
+    const before = db.getPage(slug);
+    renameSync(join(vaultPath, "records/old-a.md"), join(vaultPath, "records/new-a.md"));
+    writeMdFile(vaultPath, "records/duplicate-a.md", fm, "冲突资料B");
+    const embedding = createMockEmbeddingProvider();
+    let calls = 0;
+    const batch = embedding.embedBatch;
+    embedding.embedBatch = async texts => { calls++; return batch(texts); };
+    const checked = new SyncManager(db, embedding, lance as any);
+    const report = await checked.syncAll(vaultPath);
+    expect(report.errors).toBe(2);
+    expect(report.synced).toBe(0);
+    expect(calls).toBe(0);
+    expect(db.getPage(slug)).toEqual(before);
+    expect(await checked.removeOrphans(vaultPath)).toEqual([]);
+    expect(db.getPage(slug)).toEqual(before);
+  });
+  test("syncPage refuses to steal a slug while its registered file still exists", async () => {
+    const slug = "records/fixture-a";
+    const fm = { title: "记录A", type: "record", slug };
+    writeMdFile(vaultPath, "records/old-a.md", fm, "原始资料A");
+    await sync.syncAll(vaultPath);
+    const before = db.getPage(slug);
+    writeMdFile(vaultPath, "records/duplicate-a.md", fm, "冲突资料B");
+    await expect(sync.syncPage("records/duplicate-a", vaultPath)).rejects.toThrow("DUPLICATE_PAGE_SLUG");
+    expect(db.getPage(slug)).toEqual(before);
+  });
+
+  test("orphan cleanup cannot use an incomplete directory scan to delete a moved page", async () => {
+    const slug = "records/fixture-a";
+    writeMdFile(vaultPath, "records/old-a.md", { title: "记录A", type: "record", slug }, "原始资料A");
+    await sync.syncAll(vaultPath);
+    mkdirSync(join(vaultPath, "moved"));
+    renameSync(join(vaultPath, "records/old-a.md"), join(vaultPath, "moved/a.md"));
+    chmodSync(join(vaultPath, "moved"), 0);
+    try {
+      await expect(sync.removeOrphans(vaultPath)).rejects.toThrow();
+      expect(db.getPage(slug)).not.toBeNull();
+    } finally {
+      chmodSync(join(vaultPath, "moved"), 0o700);
+    }
+  });
+
+  test("canonicalization cannot overwrite a different live binding", async () => {
+    const slug = "records/fixture-a";
+    writeMdFile(vaultPath, "records/original.md", { title: "记录A", type: "record", slug }, "原始资料A");
+    await sync.syncAll(vaultPath);
+    const before = db.getPage(slug);
+    writeMdFile(vaultPath, "imports/fixture-a.md", { title: "记录A", type: "record", slug: "imports/fixture-a" }, "冲突资料B");
+    await expect(sync.syncPage("imports/fixture-a", vaultPath)).rejects.toThrow("DUPLICATE_PAGE_SLUG");
+    expect(db.getPage(slug)).toEqual(before);
+    expect(existsSync(join(vaultPath, "imports/fixture-a.md"))).toBe(true);
+    expect(db.getChunksByPage(slug).map(c => c.content).join(" ")).toContain("原始资料A");
+  });
+
+  test("an inaccessible registered file cannot be treated as absent during slug takeover", async () => {
+    const slug = "records/fixture-a";
+    const fm = { title: "记录A", type: "record", slug };
+    writeMdFile(vaultPath, "locked/a.md", fm, "原始资料A");
+    await sync.syncAll(vaultPath);
+    const before = db.getPage(slug);
+    writeMdFile(vaultPath, "imports/a.md", fm, "冲突资料B");
+    chmodSync(join(vaultPath, "locked"), 0);
+    try {
+      await expect(sync.syncPage("imports/a", vaultPath)).rejects.toThrow();
+      expect(db.getPage(slug)).toEqual(before);
+      expect(db.getChunksByPage(slug).map(c => c.content).join(" ")).toContain("原始资料A");
+    } finally {
+      chmodSync(join(vaultPath, "locked"), 0o700);
+    }
   });
 
   describe("syncAll", () => {

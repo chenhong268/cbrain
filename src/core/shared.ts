@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync, realpathSync, lstatSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { join, extname, resolve, sep } from "node:path";
+import { join, extname, resolve, sep, dirname, basename } from "node:path";
 import type { CBrainDB } from "../storage/sqlite.js";
 import { getOntology } from "../ontology/loader.js";
 
@@ -32,12 +32,13 @@ export function normalizeAndHashBody(body: string): string {
 
 // ─── File Collection ─────────────────────────────────────────
 
-export async function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>, logger?: import("./logger.js").Logger): Promise<string[]> {
+export async function collectMarkdownFiles(dir: string, excludeDirs?: Set<string>, logger?: import("./logger.js").Logger, requireComplete = false): Promise<string[]> {
   const results: string[] = [];
   const walk = async (d: string) => {
     // biome-ignore lint/suspicious/noImplicitAnyLet: readdir return type varies by runtime
     let entries;
     try { entries = await readdir(d, { withFileTypes: true }); } catch (e) {
+      if (requireComplete) throw e;
       if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "EACCES") {
         logger?.error("shared", `readdir 失败: ${d}`, { error: e instanceof Error ? e.message : String(e) });
       }
@@ -141,11 +142,26 @@ function isWithinDir(path: string, root: string): boolean {
 export function isRawVaultFile(vaultPath: string, filePath: string): boolean {
   const rawRoot = resolve(vaultPath, RAW_VAULT_DIR);
   if (isWithinDir(resolve(filePath), rawRoot)) return true;
-  try {
-    return isWithinDir(realpathSync(filePath), realpathSync(rawRoot));
-  } catch {
-    return false; // file or raw/ missing → nothing physical to protect
+  // A new destination may not exist yet: resolve its nearest existing parent,
+  // so creating/moving through a directory symlink cannot write into raw either.
+  let existing = resolve(filePath);
+  const suffix: string[] = [];
+  while (!existsSync(existing) && dirname(existing) !== existing) {
+    try {
+      if (lstatSync(existing).isSymbolicLink()) throw new Error("VAULT_WRITE_PATH_UNRESOLVED");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    suffix.unshift(basename(existing));
+    existing = dirname(existing);
   }
+  const physicalRaw = existsSync(rawRoot) ? realpathSync(rawRoot) : rawRoot;
+  return isWithinDir(resolve(realpathSync(existing), ...suffix), physicalRaw);
+}
+
+/** Reject a requested write before its file, metadata, or version side effects. */
+export function assertWritableVaultFile(vaultPath: string, filePath: string): void {
+  if (isRawVaultFile(vaultPath, filePath)) throw new Error("RAW_PAGE_READ_ONLY");
 }
 
 /**

@@ -117,7 +117,7 @@ async function closeFixture(fixture: Fixture): Promise<void> {
 const TIME_FIELDS = new Set(["created_at", "updated_at", "detected_at", "last_detected_at", "started_at", "finished_at", "expires_at"]);
 // Separate fixtures receive distinct wall-clock instants. Page hashes include the
 // generated frontmatter timestamp, so compare semantic state after normalizing
-// that timestamp, while separately proving every stored hash matches its file.
+// that timestamp. Non-null hashes must match files; dirty state must also agree.
 const TIME_DERIVED_FIELDS = new Set(["content_hash"]);
 
 function normalizeTransportText(text: string): string {
@@ -145,12 +145,14 @@ function durableSnapshot(root: string, db: CBrainDB): unknown {
   const pageRows = db.rawDb.prepare("SELECT slug, file_path, content_hash FROM pages").all() as Array<{
     slug: string;
     file_path: string;
-    content_hash: string;
+    content_hash: string | null;
   }>;
   for (const page of pageRows) {
     const path = join(root, "vault", page.file_path);
-    expect(page.content_hash, `${page.slug} hash must match its vault file`)
-      .toBe(hashContent(readFileSync(path, "utf-8")));
+    if (page.content_hash !== null) {
+      expect(page.content_hash, `${page.slug} hash must match its vault file`)
+        .toBe(hashContent(readFileSync(path, "utf-8")));
+    }
   }
   const rows = Object.fromEntries(["pages", "links", "tags", "aliases", "insights", "discoveries", "jobs"].map((table) => [
     table,
@@ -173,7 +175,7 @@ function durableSnapshot(root: string, db: CBrainDB): unknown {
   };
   visit(join(root, "vault"));
   visit(join(root, "profile"));
-  return normalize({ rows, files: files.sort((a, b) => a.path.localeCompare(b.path)) });
+  return normalize({ rows, indexPending: pageRows.map(p => ({ slug: p.slug, pending: p.content_hash === null })).sort((a, b) => a.slug.localeCompare(b.slug)), files: files.sort((a, b) => a.path.localeCompare(b.path)) });
 }
 
 async function invoke(candidate: AliasCase, name: string, args: Record<string, unknown>) {

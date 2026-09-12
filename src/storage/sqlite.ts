@@ -1979,7 +1979,7 @@ export class CBrainDB {
     }));
   }
 
-  updatePageHash(slug: string, hash: string): void {
+  updatePageHash(slug: string, hash: string | null): void {
     this.prepare(
       "UPDATE pages SET content_hash = $hash, updated_at = datetime('now') WHERE slug = $slug"
     ).run({ $slug: slug, $hash: hash });

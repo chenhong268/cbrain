@@ -4,7 +4,7 @@ import { join, resolve, relative } from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { canMerge, getLayer, normalizePageType } from "../../core/shared.js";
+import { canMerge, getLayer, normalizePageType, assertWritableVaultFile } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
 import { formatGetPageEnvelope, formatGetPagesEnvelope, formatAppendEnvelope } from "./format-result.js";
@@ -188,6 +188,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     const normalizedExtra = normalizedOrganizationExtra.extra;
     const existing = ctx.pages.getBySlug(slug);
     if (existing) {
+      assertWritableVaultFile(ctx.vaultPath, join(ctx.vaultPath, existing.file_path));
       const effectiveMode = mode ?? "patch";
       let updated: import("../../core/page.js").Page | null = null;
       let previousVersion: number | null = null;
@@ -207,8 +208,9 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
         finalBody = updated?.body ?? content;
       }
 
+      let indexed = false;
       if (updated) {
-        await indexPage(ctx.pipeline, slug, finalBody, ctx.logger);
+        indexed = (await indexPage(ctx.pipeline, slug, finalBody, ctx.logger)).ok;
         const pageType = existing.type;
         const wlResult = ctx.pipeline.processWikilinks(slug, finalBody);
         schedulePageToolNer(ctx, slug, finalBody, pageType, wlResult.mentionedSlugs);
@@ -225,6 +227,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       return {
         content: [{ type: "text", text: JSON.stringify({
           action: "updated",
+          ...(!indexed ? { warnings: ["index_sync_failed"] } : {}),
           mode: effectiveMode,
           ...(previousVersion !== null ? { previous_version: previousVersion } : {}),
           page: updated ? { slug: updated.slug, title: updated.title } : null,
@@ -273,7 +276,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
       // the adapter — never accepted from the tool's inputSchema (anti-forgery).
       provenance: forPutPage({ actorClass: "agent" }),
     });
-    await indexPage(ctx.pipeline, created.slug, content, ctx.logger);
+    const indexed = (await indexPage(ctx.pipeline, created.slug, content, ctx.logger)).ok;
     const createdPageType = created.type;
     const wlResult = ctx.pipeline.processWikilinks(created.slug, content);
     schedulePageToolNer(ctx, created.slug, content, createdPageType, wlResult.mentionedSlugs);
@@ -286,7 +289,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (createdReportsTo) createdAffected.add(createdReportsTo);
     syncWikilinkRelations(ctx, created.slug, createdAffected);
     return {
-      content: [{ type: "text", text: JSON.stringify({ action: "created", page: { slug: created.slug, title: created.title } }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({ action: "created", ...(!indexed ? { warnings: ["index_sync_failed"] } : {}), page: { slug: created.slug, title: created.title } }, null, 2) }],
     };
   });
 
@@ -303,6 +306,7 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (!page) {
       return { content: [{ type: "text", text: JSON.stringify({ error: "Page not found" }) }], isError: true };
     }
+    assertWritableVaultFile(ctx.vaultPath, join(ctx.vaultPath, page.file_path));
     ctx.versions.createVersion(slug);
 
     // ── #195: parse deterministic frontmatter from appended content ──

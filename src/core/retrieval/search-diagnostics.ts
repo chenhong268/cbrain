@@ -47,6 +47,7 @@ export interface SearchDiagnosticInput {
     degraded_reason?: string;
     fts_fallback?: boolean;
     rerank_ms?: number;
+    rerank_completed?: boolean;
     follow_up_queries?: string[];
     research_ms?: number;
     query_variants?: string[];
@@ -88,6 +89,7 @@ export function classifyDegradedReasons(
     degraded_reason?: string;
     fts_fallback?: boolean;
     rerank_ms?: number;
+    rerank_completed?: boolean;
     follow_up_queries?: string[];
     research_ms?: number;
     query_variants?: string[];
@@ -129,7 +131,7 @@ export function classifyDegradedReasons(
   }
 
   // 4. Rerank insufficient (rerank ran but results still weak)
-  if (trace.rerank_ms != null && trace.rerank_ms > 0 && results.length > 0 && topScore < DIAGNOSTIC_DEFAULTS.RERANK_LOW_SCORE) {
+  if (trace.rerank_completed === true && results.length > 0 && topScore < DIAGNOSTIC_DEFAULTS.RERANK_LOW_SCORE) {
     codes.push("rerank_insufficient");
   }
 

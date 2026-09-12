@@ -1,3 +1,4 @@
+import { classifyDegradedReasons } from "../../src/core/retrieval/search-diagnostics.js";
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -214,9 +215,9 @@ describe("ResearchManager", () => {
     const results = await researcher.research("塔勒布和芒格");
 
     expect(results.length).toBe(2);
-    expect(llm.calls.length).toBe(2);
+    expect(llm.calls.length).toBe(1);
     expect(llm.calls[0].some((c) => c.includes("搜索推理引擎"))).toBe(true);
-    expect(llm.calls[1].some((c) => c.includes("排序器"))).toBe(true);
+    expect(llm.calls.some(call => call.some(c => c.includes("排序器")))).toBe(false);
   });
 
   test("insufficient results → generates follow-up queries", async () => {
@@ -238,8 +239,8 @@ describe("ResearchManager", () => {
     const results = await researcher.research("塔勒布和芒格的投资哲学");
 
     expect(results.length).toBe(3);
-    // reasoning (not sufficient) + reasoning (sufficient) + rerank = 3 calls
-    expect(llm.calls.length).toBe(3);
+    // Small candidate set: reasoning calls only; rerank is skipped.
+    expect(llm.calls.length).toBe(2);
   });
 
   test("stops at maxIterations", async () => {
@@ -264,8 +265,8 @@ describe("ResearchManager", () => {
     const results = await researcher.research("test");
 
     expect(Array.isArray(results)).toBe(true);
-    // 2 reasoning + 1 rerank = 3 calls (3rd reasoning never called)
-    expect(llm.calls.length).toBe(3);
+    // Small candidate set: reasoning calls only; rerank is skipped.
+    expect(llm.calls.length).toBe(2);
   });
 
   test("stops when LLM says sufficient", async () => {
@@ -284,7 +285,7 @@ describe("ResearchManager", () => {
     );
     const results = await researcher.research("A");
 
-    expect(llm.calls.length).toBe(2);
+    expect(llm.calls.length).toBe(1);
     expect(results.length).toBe(2);
   });
 
@@ -303,7 +304,7 @@ describe("ResearchManager", () => {
     );
     const results = await researcher.research("A");
 
-    expect(llm.calls.length).toBe(2);
+    expect(llm.calls.length).toBe(1);
     expect(results.length).toBe(2);
   });
 
@@ -352,7 +353,7 @@ describe("ResearchManager", () => {
     const results = await researcher.research("A");
 
     // "A" was the original query → filtered out → no follow-up → break
-    expect(llm.calls.length).toBe(2); // reasoning + rerank
+    expect(llm.calls.length).toBe(1); // Small candidate set: reasoning calls only; rerank is skipped.
     expect(results.length).toBe(2);
   });
 
@@ -400,9 +401,20 @@ describe("ResearchManager", () => {
     expect(results.map((r) => r.slug).sort()).toEqual(["entity/a", "entity/b"]);
   });
 
+  test("five candidates keep their retrieval order without an extra rerank model call", async () => {
+    const initial = Array.from({ length: 5 }, (_, i) => makeResult(`entity/fixture-${i}`, 0.9 - i / 10));
+    const llm = createMockLLM(['{"reasoning":"sufficient","sufficient":true,"follow_up_queries":[]}', '{"order":[5,4,3,2,1]}']);
+    const researcher = new ResearchManager(createMockSearch(new Map([["fixture", initial]])), db, llm);
+    const trace: import("../../src/core/retrieval/search.js").SearchTrace = {};
+    const results = await researcher.research("fixture", { _trace: trace });
+    expect(results.map(r => r.slug)).toEqual(initial.map(r => r.slug));
+    expect(llm.calls.length).toBe(1);
+    expect(trace.rerank_completed).toBe(false);
+  });
+
   test("final results are reranked by LLM", async () => {
     const searchResponses = new Map<string, SearchResult[]>([
-      ["Alpha Beta", [makeResult("entity/a", 0.9, "Alpha"), makeResult("entity/b", 0.8, "Beta")]],
+      ["Alpha Beta", [makeResult("entity/a", 0.2, "Alpha"), makeResult("entity/b", 0.19, "Beta"), ...Array.from({ length: 4 }, (_, i) => makeResult(`entity/extra-${i}`, 0.1))]],
     ]);
 
     const llm = createMockLLM([
@@ -422,7 +434,7 @@ describe("ResearchManager", () => {
 
   test("rerank timeout returns existing order and marks research budget degradation", async () => {
     const searchResponses = new Map<string, SearchResult[]>([
-      ["Alpha Beta", [makeResult("entity/a", 0.9, "Alpha"), makeResult("entity/b", 0.8, "Beta")]],
+      ["Alpha Beta", [makeResult("entity/a", 0.2, "Alpha"), makeResult("entity/b", 0.19, "Beta"), ...Array.from({ length: 4 }, (_, i) => makeResult(`entity/extra-${i}`, 0.1))]],
     ]);
     const llm = createDelayedRerankLLM(50);
     const researcher = new ResearchManager(
@@ -435,7 +447,9 @@ describe("ResearchManager", () => {
     const results = await researcher.research("Alpha Beta", { _trace: trace });
 
     expect(Date.now() - started).toBeLessThan(45);
-    expect(results.map((r) => r.slug)).toEqual(["entity/a", "entity/b"]);
+    expect(results.slice(0, 2).map((r) => r.slug)).toEqual(["entity/a", "entity/b"]);
+    expect(trace.rerank_completed).toBe(false);
+    expect(classifyDegradedReasons(results, trace, "fixture query")).not.toContain("rerank_insufficient");
     expect(trace.degraded_reason).toBe("research_budget_exceeded");
   });
 
@@ -548,7 +562,7 @@ describe("ResearchManager", () => {
 
     // "方向B" should only be searched once (round 1). Round 2's duplicate is filtered.
     expect(results.length).toBe(2);
-    expect(llm.calls.length).toBe(4); // 3 reasoning + 1 rerank
+    expect(llm.calls.length).toBe(3); // Small candidate set: reasoning calls only; rerank is skipped.
   });
 
   // ─── Trace propagation tests ─────────────────────────────────────
@@ -606,7 +620,7 @@ describe("ResearchManager", () => {
     expect(trace.degraded_reason).toBe("reasoning_parse_failed");
   });
 
-  test("llmCallCount tracks reasoning + rerank calls", async () => {
+  test("llmCallCount excludes skipped small-set rerank calls", async () => {
     const searchResponses = new Map<string, SearchResult[]>([
       ["count", [makeResult("entity/a", 0.9)]],
       ["more", [makeResult("entity/b", 0.8)]],
@@ -620,8 +634,8 @@ describe("ResearchManager", () => {
     const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
     await researcher.research("count");
 
-    // 2 reasoning + 1 rerank = 3 LLM calls
-    expect(researcher.getLLMCallCount()).toBe(3);
+    // Small candidate set: reasoning calls only; rerank is skipped.
+    expect(researcher.getLLMCallCount()).toBe(2);
   });
 
   test("trace captures rerank_ms and follow_up_queries together", async () => {
@@ -658,7 +672,7 @@ describe("ResearchManager", () => {
     const results = await researcher.research("方向A");
 
     // "方向A " (with trailing space) should be deduped against original "方向A"
-    expect(llm.calls.length).toBe(2); // reasoning + rerank, no second iteration
+    expect(llm.calls.length).toBe(1); // Small candidate set: reasoning calls only; rerank is skipped.
     expect(results.length).toBe(2);
   });
 
@@ -674,7 +688,7 @@ describe("ResearchManager", () => {
     const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
     const results = await researcher.research("主题X");
 
-    expect(llm.calls.length).toBe(2);
+    expect(llm.calls.length).toBe(1);
     expect(results.length).toBe(2);
   });
 
@@ -690,7 +704,7 @@ describe("ResearchManager", () => {
     const researcher = new ResearchManager(createMockSearch(searchResponses), db, llm);
     const results = await researcher.research("React hooks");
 
-    expect(llm.calls.length).toBe(2);
+    expect(llm.calls.length).toBe(1);
     expect(results.length).toBe(2);
   });
 
@@ -709,7 +723,7 @@ describe("ResearchManager", () => {
     const results = await researcher.research("主题Y");
 
     expect(results.length).toBe(2);
-    expect(llm.calls.length).toBe(3); // reasoning + reasoning + rerank
+    expect(llm.calls.length).toBe(2); // Small candidate set: reasoning calls only; rerank is skipped.
   });
 
   test("all follow-up queries are recorded in issuedQueries", async () => {
@@ -758,7 +772,7 @@ describe("ResearchManager", () => {
 
     // "方向X" should only be searched once despite appearing twice in one LLM response
     expect(results.length).toBe(2);
-    expect(llm.calls.length).toBe(3); // reasoning + reasoning + rerank
+    expect(llm.calls.length).toBe(2); // Small candidate set: reasoning calls only; rerank is skipped.
   });
 
   test("slice preserves valid queries after filtering duplicates (#64)", async () => {
@@ -785,7 +799,7 @@ describe("ResearchManager", () => {
 
     // fresh1 was searched, fresh2 was searched (not lost to premature slice)
     expect(results.length).toBe(2);
-    expect(llm.calls.length).toBe(3);
+    expect(llm.calls.length).toBe(2);
   });
 
   // ─── Follow-up trace propagation tests (#62) ─────────────────────────

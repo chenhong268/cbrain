@@ -14,7 +14,7 @@ import {
   stringifyFrontmatter,
 } from "../utils/frontmatter.js";
 import { generateSlug, slugToFilePath, canonicalSlug, isValidSlugName } from "../utils/slug.js";
-import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, isRawVaultFile, normalizeAndHashBody } from "./shared.js";
+import { hashContent, normalizePageType, canMerge, rewriteVaultLinks, isRawVaultFile, assertWritableVaultFile, normalizeAndHashBody } from "./shared.js";
 import {
   PageWriteProvenanceConflictError,
   forUnattributed,
@@ -152,6 +152,7 @@ export class PageManager {
     // Also refuse if a vault file exists without a DB row (orphan)
     const fileName = slugToFilePath(slug);
     const filePath = join(this.vaultPath, fileName);
+    assertWritableVaultFile(this.vaultPath, filePath);
     if (existsSync(filePath)) {
       throw new Error(`Vault file already exists for slug "${slug}" without a DB row — possible orphan. Refusing to overwrite.`);
     }
@@ -322,6 +323,7 @@ export class PageManager {
     const normalizedType = normalizePageType(newType);
     const page = this.getBySlug(slug);
     if (!page) return slug;
+    assertWritableVaultFile(this.vaultPath, join(this.vaultPath, page.file_path));
 
     const newSlug = canonicalSlug(slug, normalizedType);
 
@@ -399,6 +401,8 @@ export class PageManager {
     const oldFilePath = join(this.vaultPath, page.file_path);
     const newFileName = slugToFilePath(newSlug);
     const newFilePath = join(this.vaultPath, newFileName);
+    assertWritableVaultFile(this.vaultPath, oldFilePath);
+    assertWritableVaultFile(this.vaultPath, newFilePath);
     const content = stringifyFrontmatter(frontmatter, body);
     const contentHash = hashContent(content);
 
@@ -441,6 +445,7 @@ export class PageManager {
   ): Page | null {
     const page = this.getBySlug(slug);
     if (!page) { this.logger?.error("page", "更新失败：页面不存在", { slug }); return null; }
+    assertWritableVaultFile(this.vaultPath, join(this.vaultPath, page.file_path));
 
     const now = new Date().toISOString();
     const body = updates.body ?? page.body;
@@ -464,10 +469,13 @@ export class PageManager {
 
     const filePath = join(this.vaultPath, page.file_path);
     const content = stringifyFrontmatter(frontmatter, body);
+    const previous = readFileSync(filePath, "utf8");
+    const metadataOnly = body === parseFrontmatter(previous).body
+      && this.db.getPageContentHash(slug) === hashContent(previous);
     writeFileSync(filePath, content, "utf-8");
 
-    const contentHash = hashContent(content);
-    this.db.updatePageHash(slug, contentHash);
+    // Body changes await index success; metadata-only edits preserve current indexes.
+    this.db.updatePageHash(slug, metadataOnly ? hashContent(content) : null);
 
     // Invalidate ingest dedup fingerprint only when body semantically changes
     // (CRLF/trim-equivalent bodies should not clear the hash)
@@ -568,7 +576,9 @@ export class PageManager {
 
     const content = stringifyFrontmatter(updatedFm, newBody);
     writeFileSync(filePath, content, "utf-8");
-    this.db.updatePageHash(slug, hashContent(content));
+    // A projection is not an index rebuild: preserve an outstanding dirty body.
+    const previousHash = this.db.getPageContentHash(slug);
+    this.db.updatePageHash(slug, previousHash === hashContent(raw) ? hashContent(content) : null);
     this.cacheDelete(slug);
   }
 
@@ -596,6 +606,8 @@ export class PageManager {
     const target = this.getBySlug(targetSlug);
     if (!source || !target) { this.logger?.error("page", "合并失败：页面不存在", { source: sourceSlug, target: targetSlug }); return null; }
     if (sourceSlug === targetSlug) return null;
+    assertWritableVaultFile(this.vaultPath, join(this.vaultPath, source.file_path));
+    assertWritableVaultFile(this.vaultPath, join(this.vaultPath, target.file_path));
     if (!canMerge(source.type, target.type)) {
       this.logger?.error("page", "合并失败：跨层级不允许", { source: sourceSlug, sourceType: source.type, target: targetSlug, targetType: target.type });
       return null;
@@ -642,8 +654,7 @@ export class PageManager {
     const content = stringifyFrontmatter(frontmatter, mergedBody);
     writeFileSync(targetFilePath, content, "utf-8");
 
-    const contentHash = hashContent(content);
-    this.db.updatePageHash(targetSlug, contentHash);
+    this.db.updatePageHash(targetSlug, null);
 
     // Rewrite [[sourceSlug]] → [[targetSlug]] in all vault .md files
     const rewritten = rewriteVaultLinks(this.vaultPath, [{ oldSlug: sourceSlug, newSlug: targetSlug }], this.db);
