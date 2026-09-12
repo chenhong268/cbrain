@@ -215,6 +215,7 @@ export class AgenticResearchPipeline {
 
   async run(input: PipelineInput): Promise<PipelineResult> {
     const errors: string[] = [];
+    let criticFailed = false;
     const now = this.ctx.now ?? Date.now;
     const started = now();
     const limits = { ...SearchPlanBudgetSchema.parse({}), ...input.budgetOverride };
@@ -280,14 +281,15 @@ export class AgenticResearchPipeline {
         evidenceBoard: execution.evidenceBoard,
         execution,
       });
-    } catch (err) {
-      errors.push(`critic_error: ${errorMessage(err)}`);
+    } catch {
+      criticFailed = true;
+      errors.push("critic_error");
       critic = {
-        sufficient: true,
+        sufficient: false,
         confidence: "low",
-        missing: [],
+        missing: ["critic_error"],
         follow_up_steps: [],
-        reasons: ["critic failed, assuming sufficient"],
+        reasons: ["sufficiency evaluation failed"],
       };
     }
 
@@ -323,20 +325,24 @@ export class AgenticResearchPipeline {
             execution: followUpExecution,
             maxFollowUpSteps: 0,
           });
-        } catch (err) {
-          errors.push(`follow_up_critic_error: ${errorMessage(err)}`);
+        } catch {
+          criticFailed = true;
+          errors.push("follow_up_critic_error");
           followUpCritic = {
-            sufficient: true,
+            sufficient: false,
             confidence: "low",
-            missing: [],
+            missing: ["follow_up_critic_error"],
             follow_up_steps: [],
-            reasons: ["follow-up critic failed, assuming sufficient"],
+            reasons: ["follow-up sufficiency evaluation failed"],
           };
         }
       }
     }
 
-    const status = determinePipelineStatus(execution, followUpExecution, critic, followUpCritic);
+    if (criticFailed) {
+      mergedBoard = { ...mergedBoard, gaps: [...(followUpCritic ?? critic).missing, ...mergedBoard.gaps] };
+    }
+    const status = criticFailed ? "degraded" : determinePipelineStatus(execution, followUpExecution, critic, followUpCritic);
     const followUpPerformed = !!followUpExecution;
     const traceSummary = buildTraceSummary(execution, followUpExecution, errors);
     traceSummary.totalMs = Math.max(0, now() - started);

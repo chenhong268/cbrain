@@ -1,4 +1,5 @@
-import { describe, it, expect } from "bun:test";
+import * as criticModule from "../../../src/core/agentic/critic.js";
+import { describe, it, expect, spyOn } from "bun:test";
 import {
   AgenticResearchPipeline,
   type PipelineInput,
@@ -611,4 +612,38 @@ describe("one budget for the complete research request (#481)", () => {
     await Bun.sleep(5);
     expect(searches).toBe(1);
   }, 1000);
+});
+
+
+describe("pipeline — critic failures", () => {
+  for (const failedPass of [1, 2]) {
+    it(`retains evidence and fails closed when critic pass ${failedPass} throws`, async () => {
+      const diagnostic = failedPass === 1 ? "critic_error" : "follow_up_critic_error";
+      let calls = 0;
+      const spy = spyOn(criticModule, "evaluateSufficiency").mockImplementation(() => {
+        calls++;
+        if (calls === failedPass) throw new Error("private-provider-detail");
+        return { sufficient: false, confidence: "low", missing: ["evidence missing"],
+          follow_up_steps: [{ kind: "page", input: "page/实体A", detail: "full" }], reasons: [] };
+      });
+      try {
+        const result = await new AgenticResearchPipeline(makeCtx({
+          db: mockDB({ batchGetTimelineForSlugs: () => new Map(), batchGetLinksForSlugs: () => new Map([
+            ["page/实体A", { outgoing: [makeLink("page/实体A")], incoming: [] }],
+          ]) }),
+        })).run(makeInput({ query: "实体A是什么", knownSlugs: ["page/实体A"] }));
+        expect(calls).toBe(failedPass);
+        expect(result.status).toBe("degraded");
+        expect(result.follow_up_critic?.sufficient ?? result.critic.sufficient).toBe(false);
+        expect(result.answer_context.confidence).toBe("low");
+        expect(result.evidence_board.facts.length).toBeGreaterThan(0);
+        expect(result.answer_context.gaps).toContain(diagnostic);
+        expect(result.trace_summary.errors).toContain(diagnostic);
+        expect(JSON.stringify(result)).not.toContain("private-provider-detail");
+        expect(result.trace_summary.passCount).toBe(failedPass);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  }
 });
