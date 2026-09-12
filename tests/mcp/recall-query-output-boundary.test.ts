@@ -205,7 +205,8 @@ describe("#331 recall/query structured output boundary", () => {
     });
   });
 
-  test("structured frontdoor content route excludes full page bodies", async () => {
+  test("structured title recall exposes bounded evidence without copying the full body", async () => {
+    const body = "可见正文摘要。" + "匿名资料。".repeat(100) + "FULL-BODY-TAIL";
     db.upsertPage({
       slug: "entity/entity-body",
       type: "entity/person",
@@ -215,20 +216,24 @@ describe("#331 recall/query structured output boundary", () => {
     });
     writeFileSync(
       join(root, "vault", "entity-body.md"),
-      "---\ntitle: 实体正文标记\ntype: entity/person\n---\nFULL-BODY-SECRET",
+      `---\ntitle: 实体正文标记\ntype: entity/person\n---\n${body}`,
     );
     db.rawDb.prepare("INSERT INTO chunks (page_slug, chunk_index, content) VALUES (?, 0, ?)")
-      .run("entity/entity-body", "实体正文标记 可见摘要 FULL-BODY-SECRET");
+      .run("entity/entity-body", `实体正文标记 ${body}`);
     db.rawDb.prepare("INSERT INTO chunks_fts (page_slug, content) VALUES (?, ?)")
-      .run("entity/entity-body", "实体正文标记 可见摘要 FULL-BODY-SECRET");
+      .run("entity/entity-body", `实体正文标记 ${body}`);
 
     await withOutputMode("structured", async () => {
       const server = createServer(deps);
       const { parsed } = await call(server, "cbrain_recall", { query: "实体正文标记", detail: "normal" });
       const blob = JSON.stringify(parsed.data);
       expect(blob).toContain("实体正文标记");
-      expect(blob).not.toContain("FULL-BODY-SECRET");
+      expect(blob).toContain("可见正文摘要");
+      const data = parsed.data as { details: { entities: Array<{ snippet: string }> } };
+      expect(data.details.entities[0].snippet.length).toBeLessThanOrEqual(200);
+      expect(blob).not.toContain("FULL-BODY-TAIL");
       expect(blob).not.toContain('"body"');
+      expect(blob).not.toContain('"raw_chunks"');
     });
   });
 
