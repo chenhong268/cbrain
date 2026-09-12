@@ -229,7 +229,8 @@ describe("#331 recall/query structured output boundary", () => {
       const blob = JSON.stringify(parsed.data);
       expect(blob).toContain("实体正文标记");
       expect(blob).toContain("可见正文摘要");
-      expect(parsed.data.details.entities[0].snippet.length).toBeLessThanOrEqual(200);
+      const data = parsed.data as { details: { entities: Array<{ snippet: string }> } };
+      expect(data.details.entities[0].snippet.length).toBeLessThanOrEqual(200);
       expect(blob).not.toContain("FULL-BODY-TAIL");
       expect(blob).not.toContain('"body"');
       expect(blob).not.toContain('"raw_chunks"');
