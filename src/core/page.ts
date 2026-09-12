@@ -469,10 +469,13 @@ export class PageManager {
 
     const filePath = join(this.vaultPath, page.file_path);
     const content = stringifyFrontmatter(frontmatter, body);
+    const previous = readFileSync(filePath, "utf8");
+    const metadataOnly = body === parseFrontmatter(previous).body
+      && this.db.getPageContentHash(slug) === hashContent(previous);
     writeFileSync(filePath, content, "utf-8");
 
-    // Persisted body is ahead of its indexes until an index write succeeds.
-    this.db.updatePageHash(slug, null);
+    // Body changes await index success; metadata-only edits preserve current indexes.
+    this.db.updatePageHash(slug, metadataOnly ? hashContent(content) : null);
 
     // Invalidate ingest dedup fingerprint only when body semantically changes
     // (CRLF/trim-equivalent bodies should not clear the hash)

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -72,6 +72,24 @@ describe("write failures remain recoverable by ordinary sync (#451)", () => {
     expect(ctx.db.getPage(source.slug)).toBeNull();
     expect(ctx.db.ftsSearch("uniquesourcefixturetoken").map(row => row.page_slug)).toEqual([slug]);
     expect(await ctx.lance.readRawVectorRows(source.slug)).toEqual([]);
+  });
+  test("late old index completion invalidates an already synchronized newer body", async () => {
+    ctx.pages.update(slug, { body: "intermediatefixturetoken" });
+    const stale = await ctx.pipeline.embed("intermediatefixturetoken");
+    ctx.pages.update(slug, { body: "newestfixturetoken" });
+    await indexPage(ctx.pipeline, slug, "newestfixturetoken");
+    await ctx.pipeline.writeIndexes(slug, stale.chunks, stale.embedResults);
+    expect(ctx.db.getPageContentHash(slug)).toBeNull();
+    await assertRecovered("newestfixturetoken");
+  });
+  test("a dirty page can be renamed before full sync repairs its indexes", async () => {
+    ctx.pages.update(slug, { body: "movedfixturetoken" });
+    mkdirSync(join(ctx.vaultPath, "moved"));
+    renameSync(join(ctx.vaultPath, ctx.db.getPageFilePath(slug)!), join(ctx.vaultPath, "moved/a.md"));
+    const result = await ctx.sync.syncAll(ctx.vaultPath);
+    expect(result.errors).toBe(0);
+    expect(ctx.db.getPageFilePath(slug)).toBe("moved/a.md");
+    await assertRecovered("movedfixturetoken");
   });
   test("an older in-flight index cannot mark newer file contents as synchronized", async () => {
     ctx.pages.update(slug, { body: "intermediatefixturetoken" });

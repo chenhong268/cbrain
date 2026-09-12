@@ -130,55 +130,73 @@ export class ContentPipeline {
     chunks: Array<{ index: number; content: string }>,
     embedResults: Array<{ embedding: number[]; tokenCount: number }>
   ): Promise<void> {
-    if (chunks.length === 0) {
+    if (this.pages) this.db.updatePageHash(slug, null);
+    try {
+      if (chunks.length === 0) {
+        await this.lance.deleteRawChunksByPageSlug(slug);
+        await this.lance.deleteL1VectorByPageSlug(slug);
+        this.db.transaction(() => {
+          this.db.deleteChunksByPage(slug);
+          this.db.ftsDeleteByPage(slug);
+          this.db.deleteL1Summary(slug);
+        });
+        this.commitIndexedFileHash(slug, chunks);
+        return;
+      }
+      if (chunks.length !== embedResults.length) {
+        throw new Error(`writeIndexes: chunks(${chunks.length}) and embeddings(${embedResults.length}) count mismatch for ${slug}`);
+      }
+
       await this.lance.deleteRawChunksByPageSlug(slug);
-      await this.lance.deleteL1VectorByPageSlug(slug);
+      await this.lance.addChunks(
+        chunks.map((c, i) => ({
+          pageSlug: slug,
+          chunkIndex: c.index,
+          content: c.content,
+          vector: new Float32Array(embedResults[i].embedding),
+        }))
+      );
+
       this.db.transaction(() => {
         this.db.deleteChunksByPage(slug);
         this.db.ftsDeleteByPage(slug);
-        this.db.deleteL1Summary(slug);
+        for (const chunk of chunks) {
+          this.db.insertChunk(slug, chunk.index, chunk.content);
+        }
+
+        const fullContent = chunks.map(c => c.content).join("\n\n");
+        this.db.ftsInsert(slug, fullContent);
+
+        const l1 = this.db.getL1Summary(slug);
+        if (l1) this.db.ftsInsert(slug, l1.content);
       });
       this.commitIndexedFileHash(slug, chunks);
-      return;
+    } catch (error) {
+      // A partial or late failing write must not inherit another writer's clean hash.
+      if (this.pages) this.db.updatePageHash(slug, null);
+      throw error;
     }
-    if (chunks.length !== embedResults.length) {
-      throw new Error(`writeIndexes: chunks(${chunks.length}) and embeddings(${embedResults.length}) count mismatch for ${slug}`);
-    }
-
-    await this.lance.deleteRawChunksByPageSlug(slug);
-    await this.lance.addChunks(
-      chunks.map((c, i) => ({
-        pageSlug: slug,
-        chunkIndex: c.index,
-        content: c.content,
-        vector: new Float32Array(embedResults[i].embedding),
-      }))
-    );
-
-    this.db.transaction(() => {
-      this.db.deleteChunksByPage(slug);
-      this.db.ftsDeleteByPage(slug);
-      for (const chunk of chunks) {
-        this.db.insertChunk(slug, chunk.index, chunk.content);
-      }
-
-      const fullContent = chunks.map(c => c.content).join("\n\n");
-      this.db.ftsInsert(slug, fullContent);
-
-      const l1 = this.db.getL1Summary(slug);
-      if (l1) this.db.ftsInsert(slug, l1.content);
-    });
-    this.commitIndexedFileHash(slug, chunks);
   }
 
   /** Clear a dirty hash only when the actual file still matches the indexed body. */
   private commitIndexedFileHash(slug: string, chunks: Array<{ index: number; content: string }>): void {
-    if (!this.pages || this.db.getPageContentHash(slug) !== null) return;
+    if (!this.pages) return;
     const filePath = this.db.getPageFilePath(slug);
     if (!filePath) return;
-    const raw = readFileSync(join(this.pages.vaultPath, filePath), "utf8");
+    let raw: string;
+    try {
+      raw = readFileSync(join(this.pages.vaultPath, filePath), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // sync owns rebinding a moved file after successful indexing.
+      this.db.updatePageHash(slug, null);
+      return;
+    }
     const current = chunkContent(parseFrontmatter(raw).body, this.chunkSize);
-    if (current.length !== chunks.length || current.some((chunk, i) => chunk.index !== chunks[i].index || chunk.content !== chunks[i].content)) return;
+    if (current.length !== chunks.length || current.some((chunk, i) => chunk.index !== chunks[i].index || chunk.content !== chunks[i].content)) {
+      this.db.updatePageHash(slug, null);
+      return;
+    }
     this.db.updatePageHash(slug, hashContent(raw));
   }
 
