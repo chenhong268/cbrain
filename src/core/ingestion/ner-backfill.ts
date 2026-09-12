@@ -409,7 +409,7 @@ export async function runNerBackfillStage(
   db: CBrainDB,
   pipeline: ContentPipeline,
   pages: PageManager,
-  opts?: { maxItems?: number; staleTtlMs?: number; entityFactsLlm?: LLMProvider; batchId?: string; retryFailed?: boolean },
+  opts?: { maxItems?: number; staleTtlMs?: number; entityFactsLlm?: LLMProvider; batchId?: string; retryFailed?: boolean; checkCancelled?: () => void },
 ): Promise<NerBackfillCounts> {
   const counts = emptyNerBackfillCounts();
   const maxItems = opts?.maxItems ?? NER_BACKFILL_MAX_ITEMS;
@@ -423,6 +423,7 @@ export async function runNerBackfillStage(
   if (opts?.retryFailed) counts.retried_failed = prepared.retriedFailed;
 
   for (const id of ids) {
+    opts?.checkCancelled?.();
     const rowBeforeClaim = db.getJob(id);
     if (!rowBeforeClaim || rowBeforeClaim.status !== "pending") continue;
     const beforeData = safeJobData(rowBeforeClaim.data);

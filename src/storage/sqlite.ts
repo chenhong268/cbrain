@@ -1709,7 +1709,7 @@ export class CBrainDB {
       }
     } catch { /* if merge fails, just use raw result */ }
     this.prepare(
-      "UPDATE jobs SET status = 'done', result = $result, finished_at = datetime('now') WHERE id = $id"
+      "UPDATE jobs SET status = 'done', result = $result, finished_at = datetime('now') WHERE id = $id AND status IN ('pending', 'running')"
     ).run({ $id: id, $result: finalResult ? JSON.stringify(finalResult) : null });
   }
 
@@ -1719,7 +1719,7 @@ export class CBrainDB {
       const row = this.prepare("SELECT result FROM jobs WHERE id = $id").get({ $id: id }) as { result: string | null } | undefined;
       const existing = row?.result ? JSON.parse(row.result) as Record<string, unknown> : {};
       const updated = { ...existing, current_stage: stage, [stage]: detail };
-      this.prepare("UPDATE jobs SET result = $result WHERE id = $id").run({ $id: id, $result: JSON.stringify(updated) });
+      this.prepare("UPDATE jobs SET result = $result WHERE id = $id AND status IN ('pending', 'running')").run({ $id: id, $result: JSON.stringify(updated) });
     })();
   }
 
@@ -1727,7 +1727,7 @@ export class CBrainDB {
     const job = this.prepare("SELECT attempts, max_attempts FROM jobs WHERE id = $id").get({ $id: id }) as { attempts: number; max_attempts: number } | undefined;
     const status = job && job.attempts >= job.max_attempts ? "failed" : "pending";
     this.prepare(
-      "UPDATE jobs SET status = $status, error = $error, finished_at = CASE WHEN $status = 'failed' THEN datetime('now') ELSE NULL END WHERE id = $id"
+      "UPDATE jobs SET status = $status, error = $error, finished_at = CASE WHEN $status = 'failed' THEN datetime('now') ELSE NULL END WHERE id = $id AND status IN ('pending', 'running')"
     ).run({ $id: id, $status: status, $error: error });
   }
 

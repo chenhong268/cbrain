@@ -1,13 +1,19 @@
 import { CBrainDB } from "../storage/sqlite.js";
 import type { Logger } from "./logger.js";
 
-export type JobHandler = (data: unknown, jobId: number) => Promise<unknown>;
+export interface JobExecution {
+  signal: AbortSignal;
+  checkCancelled(): void;
+}
+
+export type JobHandler = (data: unknown, jobId: number, execution: JobExecution) => Promise<unknown>;
 
 export class JobQueue {
   private db: CBrainDB;
   private logger?: Logger;
   private handlers: Map<string, JobHandler> = new Map();
   private running = false;
+  private active?: { id: number; controller: AbortController };
 
   constructor(db: CBrainDB, logger?: Logger) {
     this.db = db;
@@ -31,7 +37,9 @@ export class JobQueue {
   }
 
   cancel(id: number): boolean {
-    return this.db.cancelJob(id);
+    const cancelled = this.db.cancelJob(id);
+    if (cancelled && this.active?.id === id) this.active.controller.abort();
+    return cancelled;
   }
 
   retry(id: number): boolean {
@@ -57,12 +65,24 @@ export class JobQueue {
         continue;
       }
 
+      const controller = new AbortController();
+      this.active = { id: job.id, controller };
+      const checkCancelled = () => {
+        if (this.db.getJob(job.id)?.status !== "running") controller.abort();
+        controller.signal.throwIfAborted();
+      };
       try {
+        checkCancelled();
         const data = job.data ? JSON.parse(job.data) : undefined;
-        const result = await handler(data, job.id);
+        const result = await handler(data, job.id, { signal: controller.signal, checkCancelled });
+        checkCancelled();
         this.db.completeJob(job.id, result);
       } catch (err) {
-        this.db.failJob(job.id, err instanceof Error ? err.message : String(err));
+        if (!controller.signal.aborted && this.db.getJob(job.id)?.status === "running") {
+          this.db.failJob(job.id, err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        this.active = undefined;
       }
     }
   }
