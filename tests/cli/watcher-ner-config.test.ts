@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { createServer as createNetServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Database } from "bun:sqlite";
+import { Logger } from "../../src/core/logger.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 // #448: the HTTP watcher must honor the NER configuration already resolved by
 // createDeps (ner.enabled + ner.llm_provider). These tests run a REAL
@@ -77,7 +80,7 @@ interface FakeLlmRequest {
 
 /** Local fake LLM endpoint: counts /chat/completions requests and returns a
  * valid empty NER extraction so the sync pipeline completes cleanly. */
-function startFakeLlm(requests: FakeLlmRequest[]): { port: number; stop: () => void } {
+function startFakeLlm(requests: FakeLlmRequest[], responseContent = JSON.stringify({ entities: [], events: [], facts: [] })): { port: number; stop: () => void } {
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -90,7 +93,7 @@ function startFakeLlm(requests: FakeLlmRequest[]): { port: number; stop: () => v
       });
       return Response.json({
         choices: [{
-          message: { content: JSON.stringify({ entities: [], events: [], facts: [] }) },
+          message: { content: responseContent },
           finish_reason: "stop",
         }],
       });
@@ -414,4 +417,77 @@ describe("watcher NER config (issue #448)", () => {
       rmSync(env.testDir, { recursive: true, force: true });
     }
   }, 45_000);
+});
+
+
+describe("NER parse observability through actual entrypoints (#491)", () => {
+  test("watcher and MCP ingest log each malformed 200 response and health sees ner", async () => {
+    const requests: FakeLlmRequest[] = [];
+    const fake = startFakeLlm(requests, "invalid JSON private-response-marker");
+    const env = setupTestDir("parse", { enabled: true, llm_provider: "deepseek", llm_api_key: "anonymous-key", llm_base_url: `http://127.0.0.1:${fake.port}` });
+    const logger = new Logger(join(env.testDir, "runtime"));
+    const client = new Client({ name: "anonymous-test", version: "1" });
+    let child: ChildProcess | undefined;
+    try {
+      writeNote(env.vaultPath, "主题D的匿名记录包含足够的信息，应该保留正文并明确报告提取失败。");
+      const port = await getAvailablePort();
+      child = spawnServe(env, port);
+      child.stderr!.resume();
+      child.stdout!.resume();
+      expect(await waitForHealth(port)).toBe(true);
+      const deadline = Date.now() + 10_000;
+      while (!logger.getRecentErrors(7).length && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
+      expect(logger.getRecentErrors(7)).toHaveLength(1);
+      expect(requests).toHaveLength(1);
+      await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { "X-CBrain-Tool-Profile": "full" } } }));
+      const ingested = await client.callTool({ name: "ingest", arguments: { title: "主题E", pageType: "record", type: "text", content: "主题E的另一条匿名记录，内容不同，保存正文后需要报告提取结果。".repeat(3) } });
+      if (ingested.isError) throw new Error(JSON.stringify(ingested.content));
+      expect(ingested.isError).not.toBe(true);
+      const output = JSON.parse((ingested.content as Array<{ text: string }>)[0].text);
+      expect(output.raw.nerError).toBe("NER_PARSE_FAILED");
+      expect(output.raw.nerSkipped).toBe("error");
+      const errors = logger.getRecentErrors(7);
+      expect(errors).toHaveLength(2);
+      expect(requests).toHaveLength(2);
+      expect(errors.every(e => e.module === "ner" && e.message.includes("NER_PARSE_FAILED"))).toBe(true);
+      const health = await client.callTool({ name: "health", arguments: {} });
+      expect(health.isError).not.toBe(true);
+      const report = JSON.parse((health.content as Array<{ text: string }>)[0].text);
+      const system = report.raw.dimensions.find((d: { name: string }) => d.name === "系统错误");
+      expect(system.issues[0].description).toContain("ner");
+      expect(system.issues[0].title).toContain("2");
+    } finally {
+      await client.close();
+      if (child) await killServe(child);
+      fake.stop();
+      rmSync(env.testDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test.each(["sync", "ingest"])("CLI %s persists and reports malformed-response failures", async command => {
+    const requests: FakeLlmRequest[] = [];
+    const fake = startFakeLlm(requests, "invalid JSON private-response-marker");
+    const env = setupTestDir("parse-cli", { enabled: true, llm_provider: "deepseek", llm_api_key: "anonymous-key", llm_base_url: `http://127.0.0.1:${fake.port}` });
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      const body = "主题D的匿名记录包含足够的信息，应该保留正文并明确报告提取失败。".repeat(3);
+      if (command === "sync") writeNote(env.vaultPath, body);
+      const args = command === "sync" ? ["sync"] : ["ingest", "--title", "主题D", "--page-type", "record", body];
+      const running = Bun.spawn([process.execPath, join(PROJECT_ROOT, "src/cli/index.ts"), ...args], {
+        cwd: env.testDir, stdout: "pipe", stderr: "pipe",
+        env: { ...process.env, CBRAIN_CONFIG: env.configPath, ZHIPU_API_KEY: "", CBRAIN_INGEST_NER_MODE: "sync" },
+      });
+      child = running;
+      const [stdout, stderr, exit] = await Promise.all([new Response(running.stdout).text(), new Response(running.stderr).text(), running.exited]);
+      if (exit !== 0) throw new Error(stderr);
+      expect(exit).toBe(0);
+      expect(stdout).toContain(command === "sync" ? "NER failures: 1 parse, 0 timeout, 0 other" : "NER_PARSE_FAILED");
+      expect(new Logger(join(env.testDir, "runtime")).getRecentErrors(7)).toHaveLength(1);
+      expect(requests).toHaveLength(1);
+    } finally {
+      if (child && child.exitCode === null) { child.kill(); await child.exited; }
+      fake.stop();
+      rmSync(env.testDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

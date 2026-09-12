@@ -122,16 +122,18 @@ describe("NerEngine parallelization", () => {
     expect(result.relations.length).toBe(0);
   });
 
-  test("malformed JSON returns empty result gracefully", async () => {
+  test("malformed JSON rejects with a parse failure code", async () => {
     const llm = createMockLLM([
       'not valid json at all',
       '{"relations":[]}',
     ]);
     const ner = new NerEngine(llm);
 
-    const result = await ner.extract("一些文本内容");
-    expect(result.entities).toEqual([]);
-    expect(result.relations).toEqual([]);
+    await expect(ner.extract("一些文本内容")).rejects.toMatchObject({
+      code: "NER_PARSE_FAILED",
+      stage: "stage1",
+    });
+    expect(llm.calls.length).toBe(1);
   });
 });
 

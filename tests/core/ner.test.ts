@@ -173,13 +173,10 @@ describe("NerEngine", () => {
     expect(result.entities[0].name).toBe("李四");
   });
 
-  test("handles malformed LLM response gracefully", async () => {
+  test("reports malformed LLM response as a distinguishable failure", async () => {
     const llm = createMockLLM(["This is not JSON at all"]);
     const engine = new NerEngine(llm);
-    const result = await engine.extract("一些文本内容");
-    expect(result.entities).toEqual([]);
-    expect(result.relations).toEqual([]);
-    expect(result.events).toEqual([]);
+    await expect(engine.extract("一些文本内容")).rejects.toMatchObject({ code: "NER_PARSE_FAILED", stage: "stage1" });
   });
 
   test("handles partial LLM response with missing fields", async () => {

@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { CBrainDB } from "../../storage/sqlite.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
-import { loadConfig, createDeps } from "../context.js";
+import { loadConfig, createDeps, resolveRuntimePath } from "../context.js";
 import { resolveUserSlug } from "./slug-resolver.js";
 import { redactOriginRefForDisplay } from "../../core/page-write-provenance.js";
 
@@ -39,7 +39,10 @@ export function register(program: Command) {
       const { resolveIngestNerMode } = await import("../context.js");
       // Manager default: env > config. opts.nerMode is NOT mixed in here — it is a per-call override.
       const managerMode = resolveIngestNerMode(process.env.CBRAIN_INGEST_NER_MODE, config.ner?.ingest_mode);
+      const { Logger } = await import("../../core/logger.js");
+      const logger = new Logger(resolveRuntimePath(config));
       const ingest = new IngestManager(deps.db, deps.embedding, deps.lance, config.vaultPath, deps.llm, undefined, {
+        logger,
         nerMode: managerMode,
         deferredNerSubmitter: new JobQueueNerSubmitter(deps.db),
       });
@@ -65,6 +68,7 @@ export function register(program: Command) {
         console.log(result.created ? `✓ Created: ${result.slug}` : `✓ Updated: ${result.slug}`);
         console.log(`  Links:   ${result.linksExtracted} wiki links extracted`);
       }
+      if (result.nerError) console.log(`  NER:     ${result.nerError} (content saved; extraction incomplete)`);
       deps.db.close();
     });
 

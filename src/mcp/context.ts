@@ -115,7 +115,7 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
     };
   }
   const sync = new SyncManager(db, embedding, lance, { nerEngine, pages, logger, nerMode, deferredNerSubmitter });
-  const ingest = new IngestManager(db, embedding, lance, vaultPath, llm, undefined, {
+  const ingest = new IngestManager(db, embedding, lance, vaultPath, llm, nerEngine, {
     nerMode,
     deferredNerSubmitter,
   });

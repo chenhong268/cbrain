@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### NER 解析失败可观测性（#491）
+
+- 无法解析的模型响应返回 `NER_PARSE_FAILED`，不再冒充空实体；每次失败提取只记一条 `ner` 错误，健康检查可读取，不记录原始模型响应。
+- watcher、CLI sync/ingest 和 MCP ingest 接通已有日志；ingest/syncPage 返回失败码，syncAll/dream 单独报告 `nerParseErrors`。原文保存、超时/服务错误和后台重试流程保持不变；不补抽历史内容。
+
 ### LanceDB 维护磁盘增长（#490）
 
 - 默认版本保留期由 7 天缩短为 6 小时，可通过 `maintenance.compactRetentionHours` 配置为 1–168 小时；保留行数校验及未确认文件保护，使用临时 tag 确保失败时维护前版本可恢复。

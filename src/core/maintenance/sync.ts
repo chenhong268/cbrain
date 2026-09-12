@@ -5,7 +5,7 @@ import { CBrainDB } from "../../storage/sqlite.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import type { EmbeddingProvider } from "../../embedding/provider.js";
 import { LanceDBManager } from "../../storage/lancedb.js";
-import { NerEngine, isNerTimeoutError } from "../ingestion/ner.js";
+import { NerEngine, getNerErrorCode, type NerErrorCode } from "../ingestion/ner.js";
 import type { DeferredNerSubmitter } from "../ingestion/ner-backfill.js";
 import {
   resolveNerAction,
@@ -79,12 +79,14 @@ export interface SyncReport {
   nerLowRelevanceSkipped?: number;
   nerTimedOut?: number;
   nerErrors?: number;
+  nerParseErrors?: number;
   errorDetails?: string[];
   diagnostics?: SyncDiagnostic[];
 }
 
 export interface SyncPageResult {
   success: boolean;
+  nerError?: NerErrorCode;
   skipped?: boolean;
   error?: string;
   diagnostics?: SyncDiagnostic[];
@@ -457,12 +459,14 @@ export class SyncManager {
         const batch = nerJobs.slice(i, i + CONCURRENCY);
         const extractions = await Promise.all(
           batch.map(job => this.nerEngine!.extract(job.text).catch((e) => {
-              const timedOut = isNerTimeoutError(e);
+              const code = getNerErrorCode(e);
+              const timedOut = code === "NER_TIMEOUT";
               if (timedOut) report.nerTimedOut = (report.nerTimedOut ?? 0) + 1;
+              else if (code === "NER_PARSE_FAILED") report.nerParseErrors = (report.nerParseErrors ?? 0) + 1;
               else report.nerErrors = (report.nerErrors ?? 0) + 1;
               this.logger?.warn("sync", timedOut ? "NER 超时跳过" : "NER extract 失败", {
                 slug: job.slug,
-                reasonCode: timedOut ? "ner_timeout" : "ner_error",
+                reasonCode: code === "NER_PARSE_FAILED" ? "NER_PARSE_FAILED" : timedOut ? "ner_timeout" : "ner_error",
               });
               return null;
             }))
@@ -479,12 +483,14 @@ export class SyncManager {
               report.nerLowRelevanceSkipped = (report.nerLowRelevanceSkipped ?? 0) + nerResult.lowRelevanceSkipped;
             }
           } catch (e) {
-            const timedOut = isNerTimeoutError(e);
+            const code = getNerErrorCode(e);
+            const timedOut = code === "NER_TIMEOUT";
             if (timedOut) report.nerTimedOut = (report.nerTimedOut ?? 0) + 1;
+            else if (code === "NER_PARSE_FAILED") report.nerParseErrors = (report.nerParseErrors ?? 0) + 1;
             else report.nerErrors = (report.nerErrors ?? 0) + 1;
             this.logger?.warn("sync", timedOut ? "NER 超时跳过" : "NER 处理失败", {
               slug: batch[j].slug,
-              reasonCode: timedOut ? "ner_timeout" : "ner_error",
+              reasonCode: code === "NER_PARSE_FAILED" ? "NER_PARSE_FAILED" : timedOut ? "ner_timeout" : "ner_error",
             });
           }
         }
@@ -753,6 +759,7 @@ export class SyncManager {
       this.pipeline.processOrganization(effectiveSlug, parsed.frontmatter as Record<string, unknown>);
     } catch { /* fail-closed, non-critical */ }
 
+    let nerError: NerErrorCode | undefined;
     // NER — skip entity/concept pages
     if (shouldProcessNerForWritePath(parsed.body, type)) {
       const nerAction = resolveNerAction(false, this.nerMode, this.deferredNerSubmitter);
@@ -763,7 +770,8 @@ export class SyncManager {
             this.logger?.info("sync", `NER: ${nerResult.entities} entities from ${effectiveSlug}`);
           }
         } catch (e) {
-          this.logger?.warn("sync", `NER failed for ${effectiveSlug}: ${(e as Error).message}`);
+          nerError = getNerErrorCode(e);
+          this.logger?.warn("sync", "NER 提取未完成", { slug: effectiveSlug, reasonCode: nerError });
         }
       } else if (nerAction === "defer") {
         submitDeferredNerForWritePath(this.deferredNerSubmitter!, {
@@ -776,7 +784,7 @@ export class SyncManager {
 
     this.writeMentionSnapshot(effectiveSlug);
 
-    return { success: true };
+    return { success: true, ...(nerError ? { nerError } : {}) };
   }
 
   async classifyVaultFile(
