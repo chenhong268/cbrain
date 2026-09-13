@@ -139,6 +139,38 @@ describe("topic read boundaries (#511 Task 3)", () => {
     }
   });
 
+  test("named lookup covers a fresh topic sorted after the first five; a stale one stays hidden", async () => {
+    // Six topics sharing the same sources; the sixth sorts after the first
+    // five by slug, beyond the original pilot's five-row lookup window.
+    await ctx.pages.deleteDetailed(topic);
+    for (const letter of ["A", "B", "C", "D", "E", "F"]) {
+      expect((await manager.compile({ title: `主题${letter}`, sourceSlugs: sources })).status).toBe("created");
+    }
+    const topicSlugs = ctx.db.listPages({ type: "topic", limit: 10, orderBy: "slug ASC" }).map((r) => r.slug);
+    expect(topicSlugs).toHaveLength(6);
+    const sixth = topicSlugs[5];
+    expect(sixth).toBe(manager.resolveTopicSlug("主题F"));
+
+    ctx.search.search = async () => [];
+    // The sixth topic's NAME still navigates to its verified page.
+    const data = await json("cbrain_recall", { query: "主题F", detail: "normal", include_raw: true });
+    const entities = (data.raw as { entities?: Array<Record<string, unknown>> }).entities ?? [];
+    const derived = entities.find((e) => e.derived === true);
+    expect(derived).toBeDefined();
+    expect(JSON.stringify(derived)).toContain(marker);
+    expect(derived!.title).toBe("主题F");
+
+    // A user-edited sixth topic is NOT returned (fail-closed read guard),
+    // while a still-fresh earlier topic remains navigable.
+    const sixthPath = join(ctx.vaultPath, ctx.db.getPageFilePath(sixth)!);
+    writeFileSync(sixthPath, `${readFileSync(sixthPath, "utf-8")}\n手动修改。`);
+    const hidden = await json("cbrain_recall", { query: "主题F", detail: "normal", include_raw: true });
+    expect(JSON.stringify(hidden)).not.toContain(marker);
+    const earlier = await json("cbrain_recall", { query: "主题A", detail: "normal", include_raw: true });
+    const earlierEntities = (earlier.raw as { entities?: Array<Record<string, unknown>> }).entities ?? [];
+    expect(JSON.stringify(earlierEntities.find((e) => e.derived === true))).toContain(marker);
+  });
+
   test("daily overview presents the current topic as derived material with source refs", async () => {
     const data = await json("cbrain_recall", { query: "主题D 全面了解", detail: "normal" });
     const entities = (data.raw as { entities?: Array<Record<string, unknown>> }).entities ?? [];

@@ -332,14 +332,19 @@ export class TopicManager {
       }
     }
 
-    // Unchanged no-op: identical FULL selection, fingerprints, an unedited
-    // target, a COMMITTED publication state and a committed content hash
-    // proving indexes are complete — a pending or dirty topic falls through
-    // to a full refresh instead of skipping publication/index repair.
+    // Unchanged no-op: the USABLE selection (sources actually admitted) is
+    // identical to the committed manifest — fingerprints, unedited target,
+    // committed publication state and a committed content hash proving
+    // indexes are complete. Requested-but-dropped sources (invalid or
+    // disqualified) do not break the no-op: they are absent from the manifest
+    // exactly as before, so re-requesting them every run must not become a
+    // per-tick model call. A previously SELECTED source that becomes invalid
+    // shrinks the usable set and still regenerates (retiring it); a pending
+    // or dirty topic falls through to a full refresh instead of skipping
+    // publication/index repair.
     if (
       isExistingTopic
       && previousManifest
-      && dropped.length === 0
       && previousManifest.state === "committed"
       && this.selectionMatches(usable, previousManifest)
       && this.db.getPageContentHash(slug) === hashContent(existingRaw!)

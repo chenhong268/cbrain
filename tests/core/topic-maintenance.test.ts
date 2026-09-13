@@ -20,10 +20,12 @@ import {
   TopicMaintenance,
   TOPIC_JOB_NAME,
   MAX_MANAGED_TOPICS,
+  MAX_AUTO_FILL_TOPICS,
   computeCatalogFingerprint,
   type TopicPreviewReport,
   type TopicRunReceipt,
 } from "../../src/core/topics/maintenance.js";
+import { verifyTopicForRead } from "../../src/core/topics/read.js";
 
 // ─── Anonymous fixtures only (主题D / 记录甲 / 组织C style) ──────────
 
@@ -50,7 +52,10 @@ function smartResponse(messages: ChatMessage[]): string {
   });
   return JSON.stringify({
     overview: [claim(sources[0], 0)],
-    observations: sources.map((s, i) => claim(s, i)),
+    // Output budgets cap observations at 12 claims; with MORE admitted sources
+    // the model cites a representative subset — claims name selected sources,
+    // they need not cover every one.
+    observations: sources.slice(0, 12).map((s, i) => claim(s, i)),
     details: [],
     open_questions: [],
   });
@@ -286,19 +291,239 @@ describe("topic wiki — discovery and maintenance", () => {
     expect([...kept.sourceSlugs].sort()).toEqual([...shared].sort());
   });
 
-  test("more than twelve sources select twelve deterministically and report the omission", async () => {
+  test("more than twelve sources report complete membership with nothing omitted", async () => {
     const slugs = await seedTaggedRecords("主题D", 13);
     const { maintenance } = smart();
     const preview = (await runHandle(maintenance, { action: "preview" })) as TopicPreviewReport;
     const candidate = preview.candidates.find((c) => c.key === "tag:主题D")!;
     expect(candidate.support).toBe(13);
-    expect(candidate.sourceSlugs).toHaveLength(12);
-    expect(candidate.omittedSources).toBe(1);
+    expect(candidate.omittedSources).toBe(0);
+    // The whole seed — the admission ceiling is a compiler budget, never a
+    // selection rule.
+    expect(candidate.sourceSlugs).toEqual([...slugs].sort());
+  });
+
+  test("enable compiles the complete seed membership into the manifest", async () => {
+    const slugs = await seedTaggedRecords("主题D", 13);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    const manifest = parseFrontmatter(readFileSync(join(vaultPath, db.getPageFilePath(topicSlug)!), "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }> };
+    expect(manifest.sources).toHaveLength(13);
+    expect(manifest.sources.map((s) => s.slug).slice().sort()).toEqual([...slugs].sort());
+    expect(llm.calls.length).toBe(1);
+  });
+
+  test("a later-sorting record reaches the compiler on refresh; an unchanged rerun is a no-op", async () => {
+    const slugs = await seedTaggedRecords("主题D", 12);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    expect(llm.calls.length).toBe(1);
+    const topicPath = join(vaultPath, db.getPageFilePath(topicSlug)!);
+    const manifestSources = (): string[] =>
+      (parseFrontmatter(readFileSync(topicPath, "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }> }).sources.map((s) => s.slug);
+    expect(manifestSources()).toHaveLength(12);
+
+    // A newcomer whose slug sorts AFTER the former first 12 — the exact shape
+    // the old slice dropped: the catalog changed, the model was never called.
+    const lastSlug = [...slugs].sort()[slugs.length - 1];
+    const lateTitle = `${lastSlug.split("/").pop()!}续`;
+    const late = await seedRecord(lateTitle, BODY_B, ["主题D"]);
+    expect(late > lastSlug).toBe(true);
+
+    const receipt = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(receipt.counts.refreshed).toBe(1);
+    expect(receipt.counts.reattested).toBe(0);
+    expect(llm.calls.length).toBe(2);
+    // The newcomer reached the actual model input, not just the receipt.
+    const lastCall = llm.calls[llm.calls.length - 1];
+    expect(lastCall.messages.some((m) => m.content.includes(`### SOURCE ${late}\n`))).toBe(true);
+    expect(manifestSources()).toHaveLength(13);
+    expect(manifestSources()).toContain(late);
+
+    // Nothing changed afterwards: pure no-op, no model call, no write.
+    const rawAfterRefresh = readFileSync(topicPath, "utf-8");
+    const third = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(third.counts.unchanged).toBe(1);
+    expect(llm.calls.length).toBe(2);
+    expect(readFileSync(topicPath, "utf-8")).toBe(rawAfterRefresh);
+  });
+
+  test("an old twelve-source topic attested against the full catalog upgrades on the next refresh", async () => {
+    const slugs = await seedTaggedRecords("主题D", 13);
     const sorted = [...slugs].sort();
-    expect(candidate.sourceSlugs).toEqual(sorted.slice(0, 12));
+    const formerSelection = sorted.slice(0, 12);
+    const omitted = sorted[12];
+    const { maintenance, manager, llm } = smart();
+    // Pre-upgrade state: the OLD first-12 slice was compiled while the FULL
+    // 13-record catalog was already current, so the manifest carries a
+    // MATCHING catalog attestation with fresh sources — what a quiesced
+    // deployment leaves behind when the fixed code starts.
+    const compiled = await manager.compile({
+      title: "主题D（主题）",
+      sourceSlugs: formerSelection,
+      seed: { kind: "tag", key: "tag:主题D" },
+    });
+    expect(compiled.status).toBe("created");
+    db.setConfig("topic.enabled", "true");
+
+    // Catalog is UNCHANGED since the attestation — the upgrade must still
+    // happen because the complete membership differs from the manifest.
+    const receipt = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(receipt.counts.refreshed).toBe(1);
+    expect(llm.calls.length).toBe(2);
+    const lastCall = llm.calls[llm.calls.length - 1];
+    expect(lastCall.messages.some((m) => m.content.includes(`### SOURCE ${omitted}\n`))).toBe(true);
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    const manifestSources = (parseFrontmatter(readFileSync(join(vaultPath, db.getPageFilePath(topicSlug)!), "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }> }).sources.map((s) => s.slug);
+    expect(manifestSources).toHaveLength(13);
+    expect(manifestSources).toContain(omitted);
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(true);
+
+    // Once upgraded: pure no-op, no model call.
+    const second = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(second.counts.unchanged).toBe(1);
+    expect(llm.calls.length).toBe(2);
+  });
+
+  test("a governance-rejected source retires once; repeated refreshes make no model call and keep reads current", async () => {
+    const slugs = await seedTaggedRecords("主题D", 4);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    expect(llm.calls.length).toBe(1);
+
+    // Reject one source's governance. The record stays tagged, so the seed's
+    // derived membership keeps including it on EVERY later run.
+    const entity = pages.create({ title: "组织C", type: "entity/organization", body: "组织C。" });
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?)"
+    ).run(slugs[0], entity.slug, "提及", slugs[0], "rejected");
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(false);
+
+    // First refresh drops and RETIRES the rejected source.
+    const first = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(first.counts.refreshed).toBe(1);
+    expect(llm.calls.length).toBe(2);
+    const manifestAfterRetire = parseFrontmatter(readFileSync(join(vaultPath, db.getPageFilePath(topicSlug)!), "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }>; retired_sources: Array<{ slug: string }> };
+    expect(manifestAfterRetire.sources.map((s) => s.slug)).not.toContain(slugs[0]);
+    expect(manifestAfterRetire.retired_sources.map((s) => s.slug)).toContain(slugs[0]);
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(true);
+
+    // Repeated refreshes: the still-tagged rejected record is re-derived and
+    // re-dropped every run, but the usable selection is unchanged — no model
+    // hot loop, and reads stay current.
+    const second = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(second.counts.unchanged).toBe(1);
+    expect(llm.calls.length).toBe(2);
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(true);
+  });
+
+  test("an unrelated catalog change after retirement reattests without the model and keeps reads current", async () => {
+    const slugs = await seedTaggedRecords("主题D", 4);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    const entity = pages.create({ title: "组织C", type: "entity/organization", body: "组织C。" });
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?)"
+    ).run(slugs[0], entity.slug, "提及", slugs[0], "rejected");
+    const retired = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(retired.counts.refreshed).toBe(1);
+    expect(llm.calls.length).toBe(2);
+
+    // Unrelated catalog growth: the usable inputs are unchanged and the
+    // derived membership still differs from the manifest (the rejected record
+    // stays tagged), so the unchanged compile must not leave the catalog
+    // attestation stale.
+    await seedRecord("无关新记录", "与主题D完全无关的新记录。");
+    const receipt = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(receipt.counts.reattested).toBe(1);
+    expect(llm.calls.length).toBe(2); // metadata-only, no model
+    const manifest = parseFrontmatter(readFileSync(join(vaultPath, db.getPageFilePath(topicSlug)!), "utf-8")).frontmatter.topic as { catalog?: string };
+    expect(manifest.catalog).toBe(computeCatalogFingerprint(db));
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(true);
   });
 
   // ─── Enablement, creation, budget ────────────────────────────────
+
+  for (const failure of [null, { status: "ineligible" as const, reason: "reattest_write_failed" }]) {
+    test(`failed catalog reattestation is blocked rather than unchanged (${failure?.status ?? "missing"})`, async () => {
+      await seedTaggedRecords("主题D", 3);
+      const { maintenance, manager, llm } = smart();
+      await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+      const slug = db.listPageSlugs({ type: "topic" })[0];
+      const dropped = await seedRecord("新增但拒绝的记录", BODY_A, ["主题D"]);
+      const entity = pages.create({ title: "组织C", type: "entity/organization", body: "组织C。" });
+      db.rawDb.prepare("INSERT INTO links (from_slug,to_slug,relation,source_page_slug,trust_state) VALUES (?,?,?,?,?)")
+        .run(dropped, entity.slug, "提及", dropped, "rejected");
+      const before = readFileSync(join(vaultPath, db.getPageFilePath(slug)!), "utf8");
+      manager.reattestCatalog = () => failure;
+      const result = await runHandle(maintenance, { action: "refresh" }) as TopicRunReceipt;
+      expect(result.counts.unchanged).toBe(0);
+      expect(result.counts.blocked).toBe(1);
+      expect(result.managed[0].outcome).toBe("blocked");
+      expect(result.blocked[0].reason).toBe("catalog_reattest_failed");
+      expect(llm.calls).toHaveLength(1);
+      expect(verifyTopicForRead({ db, vaultPath }, slug)?.current).toBe(false);
+      expect(readFileSync(join(vaultPath, db.getPageFilePath(slug)!), "utf8")).toBe(before);
+    });
+  }
+
+  test("cancellation after an unchanged compile prevents metadata reattestation", async () => {
+    await seedTaggedRecords("主题D", 3);
+    const { maintenance, manager } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const slug = db.listPageSlugs({ type: "topic" })[0];
+    const dropped = await seedRecord("新增但拒绝的记录", BODY_A, ["主题D"]);
+    const entity = pages.create({ title: "组织C", type: "entity/organization", body: "组织C。" });
+    db.rawDb.prepare("INSERT INTO links (from_slug,to_slug,relation,source_page_slug,trust_state) VALUES (?,?,?,?,?)")
+      .run(dropped, entity.slug, "提及", dropped, "rejected");
+    const before = readFileSync(join(vaultPath, db.getPageFilePath(slug)!), "utf8");
+    const abort = new AbortController();
+    const compile = manager.compile.bind(manager);
+    manager.compile = async (request) => {
+      const result = await compile(request);
+      abort.abort(new Error("cancelled at compile boundary"));
+      return result;
+    };
+    await expect(maintenance.handle({ action: "refresh" }, 0, {
+      signal: abort.signal, checkCancelled: () => abort.signal.throwIfAborted(),
+    })).rejects.toThrow("cancelled at compile boundary");
+    expect(readFileSync(join(vaultPath, db.getPageFilePath(slug)!), "utf8")).toBe(before);
+  });
+
+  test("re-enabling an existing seed preserves its persisted title and page identity", async () => {
+    const sources = await seedTaggedRecords("主题D", 3);
+    const { maintenance, manager, llm } = smart();
+    const initial = await manager.compile({ title: "既有主题名称", sourceSlugs: sources, seed: { kind: "tag", key: "tag:主题D" } });
+    expect(initial.status).toBe("created");
+    const before = db.listPageSlugs({ type: "topic" });
+    const result = await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] }) as { created: unknown[]; blocked: unknown[] };
+    expect(result.created).toHaveLength(0);
+    expect(result.blocked).toHaveLength(0);
+    expect(db.listPageSlugs({ type: "topic" })).toEqual(before);
+    expect(llm.calls).toHaveLength(1);
+    expect(db.getConfig("topic.pending_selection")).toBeNull();
+  });
+
+  for (const change of ["below_minimum", "hidden_duplicate"]) {
+    test(`existing seed stays maintainable when discovery omits it (${change})`, async () => {
+      const sources = await seedTaggedRecords("主题D", 3);
+      const { maintenance } = smart();
+      await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+      const slug = db.listPageSlugs({ type: "topic" })[0];
+      if (change === "below_minimum") db.rawDb.prepare("DELETE FROM tags WHERE page_slug=? AND tag=?").run(sources[0], "主题D");
+      else for (const source of sources) db.addTag(source, "A-重复分组");
+      const result = await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] }) as { enabled: boolean; blocked: unknown[] };
+      expect(result.enabled).toBe(true);
+      expect(result.blocked).toHaveLength(0);
+      expect(db.listPageSlugs({ type: "topic" })).toEqual([slug]);
+      expect(verifyTopicForRead({ db, vaultPath }, slug)?.current).toBe(true);
+      expect(db.getConfig("topic.pending_selection")).toBeNull();
+    });
+  }
 
   test("disabled maintenance never enqueues; enabled tick fills up to five total", async () => {
     for (const tag of ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6"]) {
@@ -316,17 +541,44 @@ describe("topic wiki — discovery and maintenance", () => {
     expect(pending).toHaveLength(1);
     expect(maintenance.tick(BASE_NOW)).toBe(false); // coalesced while active
     const receipt = (await runHandle(maintenance, JSON.parse(pending[0].data!))) as TopicRunReceipt;
-    expect(receipt.counts.created).toBe(MAX_MANAGED_TOPICS);
-    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
+    expect(receipt.counts.created).toBe(MAX_AUTO_FILL_TOPICS);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_AUTO_FILL_TOPICS);
 
     // Repeated reconciliation must not add a sixth topic nor call the model again.
     const callsAfterFirst = llm.calls.length;
     const topicsNow = db.listPageSlugs({ type: "topic" }).slice().sort();
     const second = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
-    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_AUTO_FILL_TOPICS);
     expect(db.listPageSlugs({ type: "topic" }).slice().sort()).toEqual(topicsNow);
     expect(llm.calls.length).toBe(callsAfterFirst);
-    expect(second.counts.unchanged + second.counts.reattested).toBe(MAX_MANAGED_TOPICS);
+    expect(second.counts.unchanged + second.counts.reattested).toBe(MAX_AUTO_FILL_TOPICS);
+  });
+
+  test("automatic filling stays at five; only an explicit selection creates the sixth topic", async () => {
+    for (let i = 0; i < 7; i++) await seedTaggedRecords(`自动主题${i}`, 3);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable" });
+    const pending = db.listJobs("pending").filter((j) => j.name === TOPIC_JOB_NAME);
+    const fill = (await runHandle(maintenance, JSON.parse(pending[0].data!))) as TopicRunReceipt;
+    expect(fill.counts.created).toBe(MAX_AUTO_FILL_TOPICS);
+
+    // An explicit sixth: operator-reviewed expansion beyond the auto cap.
+    await seedTaggedRecords("追加主题", 3);
+    const explicit = (await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:追加主题"] })) as unknown as {
+      created: Array<{ key: string }>; blocked: Array<{ reason: string }>;
+    };
+    expect(explicit.created.map((c) => c.key)).toEqual(["tag:追加主题"]);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_AUTO_FILL_TOPICS + 1);
+
+    // Even back in generic mode, scheduled filling never creates unselected
+    // topics past the automatic cap.
+    db.deleteConfig("topic.selection_mode");
+    db.deleteConfig("topic.pending_selection");
+    const callsBefore = llm.calls.length;
+    const third = (await runHandle(maintenance, { action: "refresh", scheduled: true })) as TopicRunReceipt;
+    expect(third.counts.created).toBe(0);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_AUTO_FILL_TOPICS + 1);
+    expect(llm.calls.length).toBe(callsBefore);
   });
 
   test("enable with explicit candidateKeys creates only the selection; failures stay pending", async () => {
@@ -534,20 +786,79 @@ describe("topic wiki — discovery and maintenance", () => {
     expect(ner.every((j) => j.status === "running")).toBe(true);
   });
 
-  test("a second explicit enable cannot exceed five total topics", async () => {
-    const keys = ["主题甲", "主题乙", "主题丙", "主题丁", "主题戊"];
+  test("repeated explicit enables fill up to the 32-topic ceiling; a new seed there is capacity-blocked", async () => {
+    // 33 creatable seeds, submitted in five-key batches (per-request cap
+    // unchanged) — only the total bound decides when creation stops.
+    const keys = Array.from({ length: 33 }, (_, i) => `容量主题${i}`);
     for (const key of keys) await seedTaggedRecords(key, 3);
     const { maintenance } = smart();
-    await runHandle(maintenance, { action: "enable", candidateKeys: keys.map((k) => `tag:${k}`) });
+    for (let batch = 0; batch * 5 < keys.length; batch++) {
+      const slice = keys.slice(batch * 5, batch * 5 + 5);
+      await runHandle(maintenance, { action: "enable", candidateKeys: slice.map((k) => `tag:${k}`) });
+    }
     expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
 
-    await seedTaggedRecords("主题己", 3);
-    const receipt = (await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题己"] })) as unknown as {
+    const over = (await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:${keys[32]}`] })) as unknown as {
       created: unknown[]; blocked: Array<{ reason: string }>;
     };
     expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
-    expect(receipt.created).toHaveLength(0);
-    expect(receipt.blocked[0]?.reason).toBe("at_capacity");
+    expect(over.created).toHaveLength(0);
+    expect(over.blocked[0]?.reason).toBe("at_capacity");
+    const again = await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:${keys[0]}`, `tag:${keys[0]}`] }) as { created: unknown[]; blocked: unknown[] };
+    expect(again.created).toHaveLength(0);
+    expect(again.blocked).toHaveLength(0);
+    db.setConfig("topic.pending_selection", JSON.stringify([`tag:${keys[0]}`, `tag:${keys[32]}`]));
+    const recovered = await runHandle(maintenance, { action: "refresh" }) as TopicRunReceipt;
+    expect(recovered.counts.created).toBe(0);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
+    expect(JSON.parse(db.getConfig("topic.pending_selection")!)).toEqual([`tag:${keys[32]}`]);
+  });
+
+  test("re-enabling an already materialized seed is idempotent and prunes its pending entry", async () => {
+    for (let i = 0; i < 5; i++) await seedTaggedRecords(`既有主题${i}`, 3);
+    const { maintenance, llm } = smart();
+    const first = (await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:既有主题0`] })) as unknown as {
+      created: unknown[]; blocked: Array<{ reason: string }>; pendingSelection: string[];
+    };
+    expect(first.created).toHaveLength(1);
+    expect(db.getConfig("topic.pending_selection")).toBeNull();
+
+    // Re-enable of the SAME seed: no duplicate, no block, no model call, and
+    // any stale pending entry is pruned.
+    db.setConfig("topic.pending_selection", JSON.stringify(["tag:既有主题0"]));
+    const callsBefore = llm.calls.length;
+    const again = (await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:既有主题0`] })) as unknown as {
+      created: unknown[]; blocked: Array<{ reason: string }>; pendingSelection: string[];
+    };
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(1);
+    expect(again.created).toHaveLength(0);
+    expect(again.blocked).toHaveLength(0);
+    expect(llm.calls.length).toBe(callsBefore);
+    expect(again.pendingSelection).toEqual([]);
+    expect(db.getConfig("topic.pending_selection")).toBeNull();
+  });
+
+  test("a later enable unions its selection with prior pending selections instead of dropping them", async () => {
+    await seedTaggedRecords("可建主题", 3);
+    // One oversize seed that stays blocked (material over budget, never truncated).
+    await seedRecord("超大记录", `${BODY_A}\n${"补充细节。".repeat(60000)}`, ["超大主题"]);
+    await seedRecord("超大记录乙", `${BODY_B}\n${"更多细节。".repeat(60000)}`, ["超大主题"]);
+    await seedRecord("超大记录丙", `${BODY_C}\n${"其余细节。".repeat(60000)}`, ["超大主题"]);
+    await seedTaggedRecords("后续主题", 3);
+    const { maintenance } = makeMaintenance(makeSmartLlm(), { maxTotalMaterialChars: 150_000 });
+
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:可建主题", "tag:超大主题"] });
+    expect(db.getConfig("topic.pending_selection")).toBe(JSON.stringify(["tag:超大主题"]));
+
+    // A later enable with a NEW key must not overwrite the failed authorized
+    // seed out of the pending selection.
+    const second = (await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:后续主题"] })) as unknown as {
+      created: Array<{ key: string }>; pendingSelection: string[];
+    };
+    expect(second.created.map((c) => c.key)).toEqual(["tag:后续主题"]);
+    expect(second.pendingSelection).toEqual(["tag:超大主题"]);
+    expect(db.getConfig("topic.pending_selection")).toBe(JSON.stringify(["tag:超大主题"]));
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(2);
   });
 
   test("an explicit selection stays authoritative after all selected topics succeed", async () => {

@@ -203,7 +203,7 @@ describe("topic read snapshot and freshness (#511 Task 3)", () => {
     const { frontmatter, body } = parseFrontmatter(readFileSync(filePath, "utf-8"));
     const topicFm = frontmatter.topic as { sources: unknown[] };
     const original = topicFm.sources[0] as Record<string, unknown>;
-    const tooMany = Array.from({ length: 13 }, (_, i) => ({ ...original, slug: `records/over-budget-${i}` }));
+    const tooMany = Array.from({ length: 129 }, (_, i) => ({ ...original, slug: `records/over-budget-${i}` }));
     const raw = stringifyFrontmatter(
       { ...frontmatter, topic: { ...topicFm, sources: tooMany } },
       body,
