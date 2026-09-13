@@ -28,7 +28,7 @@
 
 ```bash
 # 安装指定版本 — 始终锁定到明确 tag，不要用 main 或 latest
-bun install -g github:chenhong268/cbrain#v2.0.15
+bun install -g github:chenhong268/cbrain#v2.0.16
 ```
 
 安装完成后确认：
@@ -345,7 +345,7 @@ cbrain skill-pack
 输出包含版本号、文件路径、完整性状态：
 
 ```
-  CBrain Skill Pack v2.0.15
+  CBrain Skill Pack v2.0.16
     Pack:       /path/to/skills/
     Entrypoint: /path/to/skills/SKILL.md (2,854 chars)
 
