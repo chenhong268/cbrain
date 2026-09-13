@@ -3,7 +3,8 @@ import type { EmbeddingProvider } from "../../embedding/provider.js";
 import type { LLMProvider } from "../../llm/provider.js";
 import { LanceDBManager as LanceDBStorage } from "../../storage/lancedb.js";
 import { ResearchManager } from "./research.js";
-import { isCurrentFactLink } from "../shared.js";
+import { isCurrentFactLink, isTopicRow } from "../shared.js";
+import type { TopicReadAdmission } from "../topics/read.js";
 import { GraphManager } from "../graph/graph.js";
 import type { Logger } from "../logger.js";
 import {
@@ -89,6 +90,11 @@ export interface SearchOptions {
     readonly origin: RetrievalQueryOrigin;
     claimed: boolean;
   };
+  /** @internal #511 — admit topic-managed rows that the configured admission
+   *  verifies CURRENT. Default false: every search consumer (deep_recall,
+   *  query, agentic legs, CLI) keeps the original-evidence-only path. Only the
+   *  daily overview/content recall routes set it. */
+  _allowCurrentTopics?: boolean;
 }
 
 export interface HybridSearchConfig {
@@ -101,6 +107,13 @@ export interface HybridSearchConfig {
    * call sites (CLI, tests) keep working without changes.
    */
   graph?: GraphManager;
+  /**
+   * #511 — admission check for CURRENT topic pages (provider-independent,
+   * db+vaultPath only). Without it every topic-managed row is EXCLUDED from
+   * search results (fail closed: the CLI instance and any consumer that never
+   * opts in stay on the original-evidence path).
+   */
+  topicAdmission?: TopicReadAdmission;
 }
 
 export interface GraphContext {
@@ -508,6 +521,9 @@ const MAX_MULTISTEP_FOLLOWUPS = 2;
 const MAX_MULTISTEP_RERANK_MS = 3000;
 /** #250 — FTS probe is "sufficient" at this many results → skip expandQuery LLM. */
 const FTS_SUFFICIENT_RESULTS = 3;
+/** #511 — bounded refill headroom when excluded topic rows squeeze the LIMIT
+ *  window; mirrors the Task 2 managed-topic pilot cap (≤5). */
+const MAX_MANAGED_TOPIC_HEADROOM = 5;
 
 export class HybridSearch {
   private db: CBrainDB;
@@ -518,6 +534,7 @@ export class HybridSearch {
   private logger?: Logger;
   private multiQueryEnabled: boolean;
   private graph: GraphManager;
+  private readonly topicAdmission?: TopicReadAdmission;
   private queryCache = new Map<string, { queries: string[]; expires: number }>();
   private embeddingCache = new Map<string, { embedding: number[]; expires: number }>();
   private static QUERY_CACHE_TTL = 300_000; // 5 minutes
@@ -542,6 +559,25 @@ export class HybridSearch {
     // otherwise construct a stateless one over the same db so call sites that
     // don't pass config.graph still get batched traversal.
     this.graph = config?.graph ?? new GraphManager(db);
+    this.topicAdmission = config?.topicAdmission;
+  }
+
+  /**
+   * #511 — topic admission for ONE slug. Topic-managed rows (DB type topic OR
+   * the reserved managed path — a missing/old row type is never a bypass) are
+   * excluded unless the caller opted in AND the configured admission verifies
+   * the page CURRENT. Without an admission dependency every topic row fails
+   * closed. Ordinary rows cost one indexed getPage and never touch topic
+   * files/catalog/model state.
+   */
+  private topicExcluded(slug: string, allowCurrentTopics: boolean): boolean {
+    if (!isTopicRow(this.db.getPage(slug))) return false;
+    if (!allowCurrentTopics || !this.topicAdmission) return true;
+    return !this.topicAdmission.isCurrentTopic(slug);
+  }
+
+  private filterTopicRows(results: SearchResult[], allowCurrentTopics: boolean): SearchResult[] {
+    return results.filter((r) => !this.topicExcluded(r.slug, allowCurrentTopics));
   }
 
   async search(query: string, options?: SearchOptions): Promise<SearchResult[]> {
@@ -555,10 +591,14 @@ export class HybridSearch {
       : await this.searchCore(query, options);
 
     options?.signal?.throwIfAborted();
+    // #511 unified exit: source-level filters already removed topic rows in
+    // every channel; this final pass is defense-in-depth so no future channel
+    // can leak a stale/generated topic body through search.
+    const admitted = this.filterTopicRows(results, options?._allowCurrentTopics === true);
     // Post-fusion sealed detail recovery (#169). Skipped for recursive
     // sub-queries so enrichment happens exactly once at the outer exit.
-    if (options?._skipDetailEnrich) return results;
-    return this.enrichSealedDetail(query, results);
+    if (options?._skipDetailEnrich) return admitted;
+    return this.enrichSealedDetail(query, admitted);
   }
 
   private async searchCore(query: string, options?: SearchOptions): Promise<SearchResult[]> {
@@ -568,9 +608,13 @@ export class HybridSearch {
     const strategy = options?.strategy ?? "all";
     const trace = options?._trace;
     const support = resolveSupportContext(query, options);
+    // #511 — internal current-topic admission, threaded to every channel so
+    // sub-queries and recursive legs carry the SAME policy (stale/generated
+    // material never reaches the LLM through a nested call).
+    const allowTopics = options?._allowCurrentTopics === true;
 
     if (strategy === "vector") {
-      const vecResult = await this.timedCall(() => this.boundedVectorSearch(query, limit, support, options?.signal), trace, "vector_ms").catch(() => { options?.signal?.throwIfAborted(); return null; });
+      const vecResult = await this.timedCall(() => this.boundedVectorSearch(query, limit, support, options?.signal, allowTopics), trace, "vector_ms").catch(() => { options?.signal?.throwIfAborted(); return null; });
       if (vecResult === null) {
         if (trace) trace.degraded_reason = trace.degraded_reason ?? "vector_timeout";
         return [];
@@ -578,15 +622,17 @@ export class HybridSearch {
       return vecResult;
     }
     if (strategy === "fts") {
-      return this.timedCall(() => Promise.resolve(this.ftsSearch(query, limit, trace, support)), trace, "fts_ms");
+      return this.timedCall(() => Promise.resolve(this.ftsSearch(query, limit, trace, support, allowTopics)), trace, "fts_ms");
     }
     if (strategy === "graph") {
-      return this.timedCall(() => this.graphSearchWithSupport(query, limit, support), trace, "graph_ms");
+      return this.timedCall(() => this.graphSearchWithSupport(query, limit, support, allowTopics), trace, "graph_ms");
     }
 
-    // Exact title match fast path
+    // Exact title match fast path — a topic page must be admitted BEFORE this
+    // early return, otherwise a stale exact hit would shadow every original
+    // record for the same title (#511).
     const exact = this.db.getPageByTitle(query.trim());
-    if (exact) {
+    if (exact && !this.topicExcluded(exact.slug, allowTopics)) {
       const result: SearchResult = {
         slug: exact.slug,
         score: 1.0,
@@ -604,7 +650,7 @@ export class HybridSearch {
     // ftsSearch on the original query). Timed + fail-open (catch → []), mirroring
     // searchSingleQuery's FTS path so trace/error semantics stay consistent.
     const ftsProbe = await this.timedCall(
-      () => Promise.resolve(this.ftsSearch(query, limit, trace, support)),
+      () => Promise.resolve(this.ftsSearch(query, limit, trace, support, allowTopics)),
       trace,
       "fts_ms",
     ).catch(() => [] as SearchResult[]);
@@ -636,7 +682,7 @@ export class HybridSearch {
         } else {
           // Budget guard: skip decompose if LLM budget already exhausted (#222)
           if ((trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS) {
-            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe, support);
+            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe, support, undefined, allowTopics);
             if (trace) {
               trace.decompose_skipped = "budget_exhausted_fallback";
               if (fallback.length === 0 && !trace.degraded_reason) {
@@ -665,7 +711,7 @@ export class HybridSearch {
               trace.decompose_ms = Date.now() - decomposeStart;
             }
             this.logger?.warn("search", "decomposition 超时/失败，回退原查询（零额外 LLM）", { error: e instanceof Error ? e.message : String(e) });
-            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe, support);
+            const fallback = await this.searchWithExpansion(query, limit, false, trace, ftsProbe, support, undefined, allowTopics);
             if (trace) {
               trace.decompose_skipped = "decompose_failed_fallback";
               if (fallback.length === 0 && !trace.degraded_reason) {
@@ -728,7 +774,7 @@ export class HybridSearch {
           // decompose 成功但弱结构/空结果 → 原查询 bounded fallback（召回不丢失）。
           // multiQuery:false → 不 expandQuery（chat LLM escalation），不 ResearchManager；
           // 仅 searchSingleQuery（vector/fts/graph），bounded。复用 hoisted ftsProbe 避免二次 ftsSearch。
-          return this.searchWithExpansion(query, limit, false, trace, ftsProbe, support);
+          return this.searchWithExpansion(query, limit, false, trace, ftsProbe, support, undefined, allowTopics);
         }
       }
     }
@@ -744,7 +790,7 @@ export class HybridSearch {
     if (trace && this.llm && !shouldExpand && ftsSufficient) {
       trace.expand_skipped = "fts_sufficient";
     }
-    return this.searchWithExpansion(query, limit, shouldExpand, trace, ftsProbe, support, options?.signal);
+    return this.searchWithExpansion(query, limit, shouldExpand, trace, ftsProbe, support, options?.signal, allowTopics);
   }
 
   private async searchSingleQuery(
@@ -754,6 +800,7 @@ export class HybridSearch {
     initialFts: SearchResult[] | undefined,
     support: SearchSupportContext,
     signal?: AbortSignal,
+    allowTopics = false,
   ): Promise<SearchResult[][]> {
     const resolved = this.db.resolveSlugs([q])[0];
 
@@ -764,6 +811,7 @@ export class HybridSearch {
       limit,
       vectorSlot.support,
       signal,
+      allowTopics,
     );
 
     const [vecOrNull, fts, graph, temporal] = await Promise.all([
@@ -775,17 +823,17 @@ export class HybridSearch {
       }),
       initialFts !== undefined
         ? Promise.resolve(initialFts)
-        : this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit, trace, support)), trace, "fts_ms").catch((e) => {
+        : this.timedCall(() => Promise.resolve(this.ftsSearch(q, limit, trace, support, allowTopics)), trace, "fts_ms").catch((e) => {
             this.logger?.warn("search", "ftsSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
             return [] as SearchResult[];
           }),
       resolved?.slug
-        ? this.timedCall(() => this.graphSearchWithSupport(resolved.slug!, limit, support), trace, "graph_ms").catch((e) => {
+        ? this.timedCall(() => this.graphSearchWithSupport(resolved.slug!, limit, support, allowTopics), trace, "graph_ms").catch((e) => {
             this.logger?.warn("search", "graphSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
             return [] as SearchResult[];
           })
         : Promise.resolve([] as SearchResult[]),
-      this.timedCall(() => Promise.resolve(this.temporalSearch(q, limit, support)), trace, "temporal_ms").catch((e) => {
+      this.timedCall(() => Promise.resolve(this.temporalSearch(q, limit, support, allowTopics)), trace, "temporal_ms").catch((e) => {
         this.logger?.warn("search", "temporalSearch 失败", { error: e instanceof Error ? e.stack ?? e.message : String(e) });
         return [] as SearchResult[];
       }),
@@ -812,6 +860,7 @@ export class HybridSearch {
     initialFts?: SearchResult[],
     support: SearchSupportContext = resolveSupportContext(query),
     signal?: AbortSignal,
+    allowTopics = false,
   ): Promise<SearchResult[]> {
     const t0 = Date.now();
     const budgetExhausted = (trace?.llm_calls ?? 0) >= MAX_DEFAULT_LLM_CALLS;
@@ -863,6 +912,7 @@ export class HybridSearch {
               vectorOverride: undefined,
             },
         signal,
+        allowTopics,
       ))
     );
     signal?.throwIfAborted();
@@ -1170,6 +1220,7 @@ export class HybridSearch {
     limit: number,
     support: SearchSupportContext,
     signal?: AbortSignal,
+    allowTopics = false,
   ): Promise<SearchResult[]> {
     signal?.throwIfAborted();
     const cached = this.embeddingCache.get(query);
@@ -1187,46 +1238,66 @@ export class HybridSearch {
       }
     }
     const includeVector = support.capture && support.origin === "original";
-    const results = includeVector
-      ? await this.lance.search(embedding, limit * 3, { includeVector: true })
-      : await this.lance.search(embedding, limit * 3);
+    const fetchRows = (cap: number) =>
+      includeVector
+        ? this.lance.search(embedding, cap, { includeVector: true })
+        : this.lance.search(embedding, cap);
+    let results = await fetchRows(limit * 3);
 
     signal?.throwIfAborted();
-    const bySlug = new Map<string, { content: string; score: number }>();
-    const supportBySlug = includeVector
-      ? new Map<string, RetrievalChannelEvidence>()
-      : undefined;
-    for (const r of results) {
-      const rankScore = r._distance != null ? 1 - r._distance : 0;
-      const existing = bySlug.get(r.pageSlug);
-      if (!existing || r.chunkIndex === -1) {
-        bySlug.set(r.pageSlug, {
-          content: r.content,
-          score: rankScore,
-        });
-      }
+    const collect = (rows: Awaited<ReturnType<typeof fetchRows>>) => {
+      const bySlug = new Map<string, { content: string; score: number }>();
+      const supportBySlug = includeVector
+        ? new Map<string, RetrievalChannelEvidence>()
+        : undefined;
+      const excludedTopics = new Set<string>();
+      for (const r of rows) {
+        if (this.topicExcluded(r.pageSlug, allowTopics)) {
+          excludedTopics.add(r.pageSlug);
+          continue;
+        }
+        const rankScore = r._distance != null ? 1 - r._distance : 0;
+        const existing = bySlug.get(r.pageSlug);
+        if (!existing || r.chunkIndex === -1) {
+          bySlug.set(r.pageSlug, {
+            content: r.content,
+            score: rankScore,
+          });
+        }
 
-      if (!supportBySlug || !r.vector || !Number.isFinite(rankScore)) continue;
-      const vectorCosineSimilarity = computeCosineSimilarity(embedding, r.vector);
-      if (vectorCosineSimilarity === undefined) continue;
-      const candidate: RetrievalChannelEvidence = {
-        rankScore,
-        vectorCosineSimilarity,
-      };
-      supportBySlug.set(
-        r.pageSlug,
-        selectStrongerEvidence("vector", supportBySlug.get(r.pageSlug), candidate),
-      );
+        if (!supportBySlug || !r.vector || !Number.isFinite(rankScore)) continue;
+        const vectorCosineSimilarity = computeCosineSimilarity(embedding, r.vector);
+        if (vectorCosineSimilarity === undefined) continue;
+        const candidate: RetrievalChannelEvidence = {
+          rankScore,
+          vectorCosineSimilarity,
+        };
+        supportBySlug.set(
+          r.pageSlug,
+          selectStrongerEvidence("vector", supportBySlug.get(r.pageSlug), candidate),
+        );
+      }
+      return { bySlug, supportBySlug, excludedTopics };
+    };
+
+    let collected = collect(results);
+    // #511 bounded refill: topic chunks squeezed original pages out of the
+    // fetched window — ONE widened refetch (bounded by the ≤5 pilot cap), never
+    // a broad scan.
+    if (collected.excludedTopics.size > 0 && collected.bySlug.size < limit) {
+      results = await fetchRows((limit + Math.min(collected.excludedTopics.size, MAX_MANAGED_TOPIC_HEADROOM)) * 3);
+      signal?.throwIfAborted();
+      collected = collect(results);
     }
 
-    return [...bySlug.entries()].slice(0, limit).map(([slug, v]) => {
+    return [...collected.bySlug.entries()].slice(0, limit).map(([slug, v]) => {
       const result: SearchResult = {
         slug,
         score: v.score,
         snippet: v.content.slice(0, 200),
         source: "vector",
       };
-      return attachDirectSupport(result, "vector", support, supportBySlug?.get(slug));
+      return attachDirectSupport(result, "vector", support, collected.supportBySlug?.get(slug));
     });
   }
 
@@ -1236,12 +1307,13 @@ export class HybridSearch {
     limit: number,
     support: SearchSupportContext,
     signal?: AbortSignal,
+    allowTopics = false,
   ): Promise<SearchResult[] | null> {
     return new Promise<SearchResult[] | null>((resolve, reject) => {
       const controller = new AbortController();
       const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
       const timer = setTimeout(() => { resolve(null); controller.abort(); }, HybridSearch.VECTOR_TIMEOUT_MS);
-      this.vectorSearch(query, limit, support, requestSignal)
+      this.vectorSearch(query, limit, support, requestSignal, allowTopics)
         .then((r) => { clearTimeout(timer); resolve(r); })
         .catch((e) => { clearTimeout(timer); reject(e); });
     });
@@ -1252,29 +1324,42 @@ export class HybridSearch {
     limit: number,
     trace?: SearchTrace,
     support: SearchSupportContext = resolveSupportContext(query),
+    allowTopics = false,
   ): SearchResult[] {
     const meta: { fts_fallback?: boolean } = {};
-    const results = this.db.ftsSearch(query, limit, meta);
+    let rows = this.db.ftsSearch(query, limit, meta);
+    // #511 bounded refill: excluded topic rows occupied part of the LIMIT
+    // window, which would squeeze original records out of the candidates (and
+    // out of the FTS-sufficiency probe). One extra fetch widened by the number
+    // of excluded topics (bounded by the ≤5 pilot cap) — never a broad scan.
+    const excludedFirstPass = rows.filter((r) => this.topicExcluded(r.page_slug, allowTopics)).length;
+    if (excludedFirstPass > 0) {
+      rows = this.db.ftsSearch(query, limit + Math.min(excludedFirstPass, MAX_MANAGED_TOPIC_HEADROOM), meta);
+    }
     if (meta.fts_fallback && trace) trace.fts_fallback = true;
-    return results.map((r) => {
-      const result: SearchResult = {
-        slug: r.page_slug,
-        score: Math.abs(r.rank),
-        snippet: r.content.slice(0, 200),
-        source: "fts",
-      };
-      return attachDirectSupport(result, "fts", support, support.capture ? {
-        rootLexicalCoverage: computeRootLexicalCoverage(support.rootQuery, r.content),
-      } : undefined);
-    });
+    return rows
+      .filter((r) => !this.topicExcluded(r.page_slug, allowTopics))
+      .map((r) => {
+        const result: SearchResult = {
+          slug: r.page_slug,
+          score: Math.abs(r.rank),
+          snippet: r.content.slice(0, 200),
+          source: "fts",
+        };
+        return attachDirectSupport(result, "fts", support, support.capture ? {
+          rootLexicalCoverage: computeRootLexicalCoverage(support.rootQuery, r.content),
+        } : undefined);
+      });
   }
 
   private temporalSearch(
     query: string,
     limit: number,
     support: SearchSupportContext,
+    allowTopics = false,
   ): SearchResult[] {
-    const results = this.db.searchTimeline(query, undefined, limit);
+    const results = this.db.searchTimeline(query, undefined, limit)
+      .filter((r) => !this.topicExcluded(r.page_slug, allowTopics));
     return results.map((r) => {
       const result: SearchResult = {
         slug: r.page_slug,
@@ -1296,6 +1381,7 @@ export class HybridSearch {
     seedSlug: string,
     limit: number,
     support: SearchSupportContext,
+    allowTopics = false,
   ): Promise<SearchResult[]> {
     // #248 — delegate to GraphManager.traverse's batched no-filter BFS instead
     // of per-node getOutgoingSlugs/getIncomingSlugs/getPageTitle lookups. Same
@@ -1305,7 +1391,9 @@ export class HybridSearch {
     // row, so dangling link targets are excluded from recall candidates
     // (defensive — the links FK makes such targets schema-impossible under
     // PRAGMA foreign_keys = ON, so this is unobservable on valid data).
-    return this.graph.traverse(seedSlug, { direction: "both", maxDepth: 2, limit }).map((node) => {
+    return this.graph.traverse(seedSlug, { direction: "both", maxDepth: 2, limit })
+      .filter((node) => !this.topicExcluded(node.slug, allowTopics))
+      .map((node) => {
       const result: SearchResult = {
         slug: node.slug,
         score: 1 / node.depth,

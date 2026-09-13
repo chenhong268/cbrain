@@ -1,5 +1,6 @@
 import type { SourceCategory, TrustState } from "../provenance.js";
 import { mapSourceType } from "../provenance.js";
+import { isTopicRow } from "../shared.js";
 import type { CBrainDB, LinkRow } from "../../storage/sqlite.js";
 
 export type Confidence = "high" | "medium" | "low";
@@ -172,17 +173,25 @@ export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): Evidence
     return { facts: [], user_thoughts: [], candidates: [], gaps: [], conflicts: [] };
   }
 
-  const linksMap = db.batchGetLinksForSlugs(slugs, true);
-  const timelineMap = db.batchGetTimelineForSlugs(slugs, true);
+  // #511: generated topic pages are never independent evidence. Topic roots
+  // contribute no L1/chunk/link/timeline facts at all, and any link/timeline
+  // PROVENANCE pointing at a topic page (source_page_slug, legacy fallback
+  // otherSlug) is dropped — a derived page cannot corroborate itself.
+  const isTopicSlug = (slug: string): boolean => isTopicRow(db.getPage(slug));
+  const originalSlugs = slugs.filter((slug) => !isTopicSlug(slug));
+
+  const linksMap = db.batchGetLinksForSlugs(originalSlugs, true);
+  const timelineMap = db.batchGetTimelineForSlugs(originalSlugs, true);
   const board = new EvidenceBoard(ACCEPT_ALL);
   const addedItems: EvidenceItem[] = [];
 
-  for (const slug of slugs) {
+  for (const slug of originalSlugs) {
     const { outgoing, incoming } = linksMap.get(slug) ?? { outgoing: [], incoming: [] };
 
     for (const link of [...outgoing, ...incoming] as LinkRow[]) {
       const otherSlug = link.from_slug !== slug ? link.from_slug : link.to_slug;
       const sourceSlug = link.source_page_slug || otherSlug;
+      if (isTopicSlug(sourceSlug)) continue;
       const trustState = (link.trust_state as TrustState) ?? "candidate";
 
       const fromName = slugDisplayName(link.from_slug);
@@ -206,6 +215,7 @@ export function collectEvidenceForSlugs(db: CBrainDB, slugs: string[]): Evidence
     const timeline = timelineMap.get(slug) ?? [];
     for (const entry of timeline) {
       const trustState = (entry.trust_state as TrustState) ?? "candidate";
+      if (isTopicSlug(entry.source_page_slug || slug)) continue;
 
       const item: EvidenceItem = {
         claim: entry.summary,
@@ -343,11 +353,14 @@ interface TimelineEntry {
 /**
  * Build EvidenceBoardResult from pre-fetched links and timeline maps.
  * This keeps normal recall evidence lightweight and avoids extra DB calls.
+ * #511: pass `isTopicSlug` so topic-derived rows are excluded the same way
+ * collectEvidenceForSlugs does (topic roots + topic provenance).
  */
 export function buildEvidenceFromBatched(
   linksMap: Map<string, { outgoing: LinkRow[]; incoming: LinkRow[] }>,
   timelineMap: Map<string, TimelineEntry[]>,
   slugs: string[],
+  isTopicSlug?: (slug: string) => boolean,
 ): EvidenceBoardResult {
   if (slugs.length === 0) {
     return { facts: [], user_thoughts: [], candidates: [], gaps: [], conflicts: [] };
@@ -355,13 +368,15 @@ export function buildEvidenceFromBatched(
 
   const board = new EvidenceBoard(ACCEPT_ALL);
   const addedItems: EvidenceItem[] = [];
+  const excluded = (slug: string): boolean => isTopicSlug?.(slug) === true;
 
-  for (const slug of slugs) {
+  for (const slug of slugs.filter((slug) => !excluded(slug))) {
     const { outgoing, incoming } = linksMap.get(slug) ?? { outgoing: [], incoming: [] };
 
     for (const link of [...outgoing, ...incoming]) {
       const otherSlug = link.from_slug !== slug ? link.from_slug : link.to_slug;
       const sourceSlug = link.source_page_slug || otherSlug;
+      if (excluded(sourceSlug)) continue;
       const trustState = (link.trust_state as TrustState) ?? "candidate";
 
       const fromName = slugDisplayName(link.from_slug);
@@ -385,6 +400,7 @@ export function buildEvidenceFromBatched(
     const timeline = timelineMap.get(slug) ?? [];
     for (const entry of timeline) {
       const trustState = (entry.trust_state as TrustState) ?? "candidate";
+      if (excluded(entry.source_page_slug || slug)) continue;
 
       const item: EvidenceItem = {
         claim: entry.summary,

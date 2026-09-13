@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { getNerJobProtection, type NerJobProtection } from "../../core/maintenance/zero-link-backfill.js";
 import { retryFailedNerJob } from "../../core/ingestion/ner-backfill.js";
+import { TOPIC_JOB_NAME } from "../../core/topics/maintenance.js";
 
 type JobView = ReturnType<ToolContext["jobs"]["get"]>;
 
@@ -86,6 +87,33 @@ export function registerJobTools(server: McpServer, ctx: ToolContext): void {
     if (name === "ner-backfill" || isReservedRepairPayload(name, data)) {
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ success: false, code: "REPAIR_BATCH_RESERVED" }) }],
+        isError: true,
+      };
+    }
+    // #510 Task 2: narrow topic-only submit branch. A queued disable handler
+    // could never cancel a refresh that runs before it in the serial queue,
+    // so disable applies its immediate control semantics HERE (cancel active
+    // topic work, stop scheduling) while still submitting the normal job row
+    // as the audit trail; repeated explicit refreshes coalesce onto one
+    // pending job. Invalid payloads are REJECTED here without enqueueing
+    // ({success:false, code:'TOPIC_JOB_INVALID_DATA'}).
+    if (name === TOPIC_JOB_NAME && ctx.topicMaintenance) {
+      let controlled: { id: number; coalesced: boolean } | null = null;
+      try {
+        controlled = ctx.topicMaintenance.controlSubmit(data, priority);
+      } catch {
+        controlled = null;
+      }
+      if (controlled) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ id: controlled.id, name, status: "pending", ...(controlled.coalesced ? { coalesced: true } : {}) }),
+          }],
+        };
+      }
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ success: false, code: "TOPIC_JOB_INVALID_DATA" }) }],
         isError: true,
       };
     }

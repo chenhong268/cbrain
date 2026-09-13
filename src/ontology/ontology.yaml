@@ -135,6 +135,16 @@ entity_types:
     vault_dir: brain/insights
     structured_fields: []
 
+  # #509: generated source-backed topic page. Derived reading aid compiled from
+  # >=3 original records; never feeds NER, evidence counts, or another topic's
+  # source set. Parent=concept makes it a derived page type (isDerivedPageType)
+  # so the central NER gate skips it.
+  topic:
+    label: 主题
+    parent: concept
+    vault_dir: brain/topics
+    structured_fields: []
+
 # ─── 关系类型 ───────────────────────────────────────────────
 relation_types:
   # ── 人物关系 ──────────────────────────────────────────

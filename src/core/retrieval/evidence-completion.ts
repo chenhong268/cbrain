@@ -13,7 +13,7 @@
  * still yields its raw detail here (marked `sealed: true`).
  */
 import type { CBrainDB } from "../../storage/sqlite.js";
-import { isCurrentFactLink } from "../shared.js";
+import { isCurrentFactLink, isTopicRow } from "../shared.js";
 import { extractDetailTerms } from "./search.js";
 
 export interface EvidenceTimelineHit {
@@ -113,9 +113,16 @@ export function assembleEvidencePack(
     return { timeline: [], links: [], chunks: [], summaries: [], coverage: { timeline_hits: 0, chunk_hits: 0, link_hits: 0, coverage_status: "insufficient" } };
   }
 
-  const timelineMap = db.batchGetTimelineForSlugs(slugs);
-  const linksMap = db.batchGetLinksForSlugs(slugs);
-  const titles = db.getPageTitlesAndTypes(slugs);
+  // #511: generated topic pages are never temporal evidence — topic roots
+  // contribute no timeline/links/chunks/summaries, and rows whose provenance
+  // (or an endpoint) points at a topic page are dropped, so coverage is never
+  // inflated by derived material.
+  const isTopicSlug = (slug: string): boolean => isTopicRow(db.getPage(slug));
+  const originalSlugs = slugs.filter((slug) => !isTopicSlug(slug));
+
+  const timelineMap = db.batchGetTimelineForSlugs(originalSlugs);
+  const linksMap = db.batchGetLinksForSlugs(originalSlugs);
+  const titles = db.getPageTitlesAndTypes(originalSlugs);
   // #169 detail terms (query-aware chunk selection). Ranked non-CJK-first so
   // high-signal terms (IDs/dates/latin) drive the OR-LIKE match_rank.
   const detailTerms = extractDetailTerms(query);
@@ -126,14 +133,16 @@ export function assembleEvidencePack(
   const chunks: EvidenceChunkHit[] = [];
   const summaries: EvidenceSummary[] = [];
 
-  for (const slug of slugs) {
+  for (const slug of originalSlugs) {
     for (const t of (timelineMap.get(slug) ?? []).slice(0, timelinePerSlug)) {
+      if (isTopicSlug(t.source_page_slug ?? "")) continue;
       timeline.push({ slug, summary: t.summary, event_date: t.event_date, trust_state: t.trust_state ?? undefined });
     }
 
     const lr = linksMap.get(slug) ?? { outgoing: [], incoming: [] };
     for (const l of [...lr.outgoing, ...lr.incoming].filter(isCurrentFactLink).slice(0, linksPerSlug)) {
-      const row = l as { from_slug: string; to_slug: string; relation: string | null; trust_state?: string | null };
+      const row = l as { from_slug: string; to_slug: string; relation: string | null; trust_state?: string | null; source_page_slug?: string | null };
+      if (isTopicSlug(row.source_page_slug ?? "") || isTopicSlug(row.from_slug) || isTopicSlug(row.to_slug)) continue;
       links.push({ from: row.from_slug, to: row.to_slug, relation: row.relation ?? "关联", trust_state: row.trust_state ?? undefined });
     }
 

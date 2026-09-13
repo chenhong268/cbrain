@@ -16,6 +16,10 @@ export interface ShutdownHandles {
   watcherLock?: WatcherLock;
   stopJobs?: () => void;
   stopMcp?: () => void;
+  /** #510 Task 2: stop topic scheduling, cancel active topic execution and
+   *  bounded-drain its settlement. Runs BEFORE the job loop stops and the
+   *  writer lock is released — compile+indexing cannot publish afterwards. */
+  stopTopicMaintenance?: () => void | Promise<void>;
 }
 
 /** Bounded deadline for draining watcher sync work on shutdown. */
@@ -32,7 +36,11 @@ export async function performGracefulShutdown(
   handles: ShutdownHandles,
   drainDeadlineMs: number = SHUTDOWN_DRAIN_MS,
 ): Promise<void> {
-  // 1. Stop accepting new work.
+  // 1. Stop accepting new work. Topic maintenance stops first: cancelling
+  //    the active topic job and draining its settlement before the job loop
+  //    and writer lock go away (bounded drain — the compiler rechecks
+  //    cancellation at every awaited mutation boundary).
+  await handles.stopTopicMaintenance?.();
   handles.stopJobs?.();
   handles.stopMcp?.();
 
@@ -232,6 +240,7 @@ export function register(program: Command) {
           pidLock,
           watcherLock: watcherResult?.lock,
           stopJobs: () => ctx.jobs.stop(),
+          stopTopicMaintenance: () => ctx.topicMaintenance?.stop(),
         });
         return;
       }
@@ -263,7 +272,12 @@ export function register(program: Command) {
         }
       });
 
-      const mcpServer = createServer(deps);
+      let stopTopicMaintenance: (() => void | Promise<void>) | undefined;
+      const mcpServer = createServer(deps, (ctx) => {
+        // #510 Task 2: keep a handle on the once-per-runtime topic scheduler
+        // so stdio close/EOF and signal shutdowns can stop it before exit.
+        stopTopicMaintenance = () => ctx.topicMaintenance?.stop();
+      });
       const transport = new StdioServerTransport();
 
       // Fix #164: when stdin closes (client disconnect), actively close MCP server.
@@ -280,8 +294,11 @@ export function register(program: Command) {
         pipeDead = true;
         console.error(`> stdio: ${reason}, shutting down MCP server`);
         mcpServer.close().catch(() => {});
-        // Exit after brief delay to allow cleanup; Hermes will respawn.
-        setTimeout(() => process.exit(0), 500);
+        // Stop topic scheduling and cancel/drain active topic work (bounded);
+        // only then exit. Hermes will respawn.
+        void Promise.resolve(stopTopicMaintenance?.() ?? undefined)
+          .catch(() => {})
+          .finally(() => { setTimeout(() => process.exit(0), 500); });
       };
       mcpStdin.on("close", () => handlePipeDeath("stdin closed by client"));
       mcpStdin.on("end", () => handlePipeDeath("stdin end-of-stream"));
@@ -295,6 +312,7 @@ export function register(program: Command) {
       installShutdownHandlers({
         pidLock,
         stopMcp: () => { mcpServer.close().catch(() => {}); },
+        stopTopicMaintenance: () => stopTopicMaintenance?.(),
       });
       await mcpReady;
     });

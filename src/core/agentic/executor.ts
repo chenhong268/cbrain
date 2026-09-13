@@ -10,6 +10,7 @@ import type {
 } from "./plan.js";
 import { isFallback } from "./plan.js";
 import { collectEvidenceForSlugs, type EvidenceBoardResult } from "../retrieval/evidence.js";
+import { isTopicRow } from "../shared.js";
 
 // --- Executor Context (minimal read-only subset of ToolContext) ---
 
@@ -195,10 +196,18 @@ async function handleTimeline(step: SearchPlanStep, state: ExecutionState, ctx: 
   const slug = state.resolvedSlugs.get(step.input);
   let data: unknown;
 
+  // #511: timeline rows whose provenance points at a generated topic page are
+  // derived material — drop them in BOTH branches (slug-resolved and keyword
+  // search; the latter now carries source_page_slug) so step results never
+  // hand generated evidence to synthesis/critic.
+  const isTopicProvenance = (row: { page_slug?: string; source_page_slug?: string | null }): boolean =>
+    (row.page_slug != null && isTopicRow(ctx.db.getPage(row.page_slug)))
+    || (row.source_page_slug != null && isTopicRow(ctx.db.getPage(row.source_page_slug)));
+
   if (slug) {
-    data = ctx.db.getTimeline(slug);
+    data = isTopicRow(ctx.db.getPage(slug)) ? [] : ctx.db.getTimeline(slug).filter((row) => !isTopicProvenance(row));
   } else {
-    data = ctx.db.searchTimeline(step.input);
+    data = ctx.db.searchTimeline(step.input).filter((row) => !isTopicProvenance(row));
   }
 
   return { kind: "timeline", input: step.input, data, latencyMs: 0 };
@@ -206,12 +215,22 @@ async function handleTimeline(step: SearchPlanStep, state: ExecutionState, ctx: 
 
 async function handlePage(step: SearchPlanStep, state: ExecutionState, ctx: ExecutorContext): Promise<StepResult> {
   const slug = state.resolvedSlugs.get(step.input) ?? step.input;
+  // #511: a generated topic page is not original evidence — refuse instead of
+  // bypassing freshness with its (possibly stale) cached body. Synthesis sees
+  // an explicit refusal, never derived text.
+  if (isTopicRow(ctx.db.getPage(slug))) {
+    return { kind: "page", input: step.input, data: { refused: "topic_page_not_original_evidence", slug }, latencyMs: 0 };
+  }
   const page = ctx.pages.getBySlug(slug);
   return { kind: "page", input: step.input, data: page, latencyMs: 0 };
 }
 
 async function handleChunks(step: SearchPlanStep, state: ExecutionState, ctx: ExecutorContext): Promise<StepResult> {
   const slug = state.resolvedSlugs.get(step.input) ?? step.input;
+  // #511: indexed topic chunks are derived material — refuse, return nothing.
+  if (isTopicRow(ctx.db.getPage(slug))) {
+    return { kind: "chunks", input: step.input, data: { refused: "topic_chunks_not_original_evidence", slug }, latencyMs: 0 };
+  }
   const data = ctx.db.getChunksByPage(slug, { summaryLevel: chunksSummaryLevel(step.detail) });
   return { kind: "chunks", input: step.input, data, latencyMs: 0 };
 }

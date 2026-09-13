@@ -28,13 +28,13 @@
 
 ```bash
 # 安装指定版本 — 始终锁定到明确 tag，不要用 main 或 latest
-bun install -g github:chenhong268/cbrain#v2.0.14
+bun install -g github:chenhong268/cbrain#v2.0.15
 ```
 
 安装完成后确认：
 
 ```bash
-cbrain --version   # 应输出 2.0.14
+cbrain --version   # 应输出 2.0.15
 ```
 
 **PATH 注意事项：** Bun 全局安装的命令放在 `~/.bun/bin/`。如果 `cbrain` 命令找不到，确认 Bun 的 bin 目录在你的 PATH 里：
@@ -64,7 +64,7 @@ export PATH="$HOME/.bun/bin:$PATH"
 )
 ```
 
-如果安装或服务重启验证失败，使用升级前记录的 tag 回滚：
+如果安装或服务重启验证失败，使用升级前记录的 tag 回滚。若已启用 Topic Wiki，必须先按保存的回执撤销生成主题页及其索引，参见[主题页回滚说明](./design.md#topic-wiki-generated-reading-pages)；旧版本没有主题来源的读取保护，不能只回退代码。
 
 ```bash
 (
@@ -345,7 +345,7 @@ cbrain skill-pack
 输出包含版本号、文件路径、完整性状态：
 
 ```
-  CBrain Skill Pack v2.0.14
+  CBrain Skill Pack v2.0.15
     Pack:       /path/to/skills/
     Entrypoint: /path/to/skills/SKILL.md (2,854 chars)
 

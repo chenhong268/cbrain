@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SearchTrace } from "../../core/retrieval/search.js";
+import type { SearchResult, SearchTrace } from "../../core/retrieval/search.js";
 import type { ToolContext } from "../context.js";
 import { classifyFrontdoorQuery, type FrontdoorRoutingDecision } from "../../core/retrieval/frontdoor-router.js";
 import { stripKnownRelationsSection } from "../../core/graph/known-relations-projector.js";
@@ -33,6 +33,9 @@ import { applyProactiveBudget, trimHint } from "./trim.js";
 import { isFirstPersonQuery } from "../../core/retrieval/recall-intent.js";
 
 import { isRecentRecall, recallRecentRecords } from "../../core/retrieval/recent-record-recall.js";
+import { isTopicRow } from "../../core/shared.js";
+import type { TopicReadSnapshot } from "../../core/topics/read.js";
+import { MAX_MANAGED_TOPICS } from "../../core/topics/maintenance.js";
 
 type DetailLevel = "brief" | "normal" | "full";
 
@@ -167,6 +170,40 @@ function contentPassage(query: string, body: string, title: string): string {
   return source.slice(bestStart, bestStart + 500);
 }
 
+/**
+ * #511: which content-recall queries may include a verified-CURRENT topic as
+ * derived reading material. Raw/verbatim text, explicit-detail and
+ * temporal/history requests must see ORIGINAL records only (reusing the
+ * #232 temporal detector that already drives evidence completion, plus this
+ * one narrow raw/detail regex). Plain theme lookups keep the derived page.
+ * Deterministic — no LLM, no new public field.
+ */
+const RAW_DETAIL_TOPIC_EXCLUSION_RE = /(原文|原话|逐字|完整正文|细节|具体内容|具体方案|怎么设计|怎么做的|当时怎么说|原来怎么说)/;
+
+function contentRecallAllowsCurrentTopics(query: string): boolean {
+  if (shouldCompleteEvidence(query, "auto")) return false;
+  return !RAW_DETAIL_TOPIC_EXCLUSION_RE.test(query);
+}
+
+/** Explicitly named topics are navigation targets, even when ordinary ranked
+ *  candidates crowd them out. Keep this local to derived reading surfaces;
+ *  it must not weaken ordinary content relevance or certify new evidence. */
+function namedCurrentTopics(ctx: ToolContext, query: string): SearchResult[] {
+  if (!ctx.topicRead) return [];
+  const normalizedQuery = query.normalize("NFKC").toLowerCase();
+  return ctx.db.listPages({ type: "topic", limit: MAX_MANAGED_TOPICS, orderBy: "slug ASC" }).flatMap((row) => {
+    const label = row.title.normalize("NFKC").replace(/\(主题\)$/, "").trim().toLowerCase();
+    if (!label) return [];
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const left = /^[a-z0-9]/.test(label) ? "(?<![a-z0-9])" : "";
+    const right = /[a-z0-9]$/.test(label) ? "(?![a-z0-9])" : "";
+    if (!new RegExp(`${left}${escaped}${right}`, "u").test(normalizedQuery)) return [];
+    const snapshot = ctx.topicRead!.readCurrentTopic(row.slug);
+    if (!snapshot) return [];
+    return [{ slug: row.slug, score: 1, snippet: snapshot.body, source: "exact" as const }];
+  });
+}
+
 async function runContentRecall(
   ctx: ToolContext,
   query: string,
@@ -177,26 +214,37 @@ async function runContentRecall(
   const identitySeed = await resolveIdentityQuestionSeed(ctx, query);
   let verificationIncomplete = false;
   const trace: SearchTrace = {};
+  // #511: content recall is one of the two surfaces allowed to present a
+  // verified-CURRENT topic as derived reading material (overview is the other)
+  // — but only for plain theme reading. Raw-detail/temporal/history queries
+  // keep the original-evidence-only path. Search admits topic rows only after
+  // disk/catalog verification; hydration below uses the SAME verified
+  // snapshot, never the page cache. Main search and FTS fallback share ONE
+  // policy decision.
+  const allowTopics = contentRecallAllowsCurrentTopics(query);
   const candidates = await ctx.search.search(query, {
     _trace: trace,
     ...(isRecentRecall(query) ? { multiQuery: false, _skipDecompose: true } : {}),
     limit,
     _captureSupport: true,
     _skipDetailEnrich: true,
+    _allowCurrentTopics: allowTopics,
   });
-  let results = dedupeCandidatesBySlug(
-    filterContentCandidates(
+  let results = dedupeCandidatesBySlug([
+    ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
+    ...filterContentCandidates(
       query,
       identitySeed ? [identitySeed, ...candidates] : candidates,
       identitySeed ? { deterministicIdentitySlugs: new Set([identitySeed.slug]) } : undefined,
     ),
-  ).slice(0, limit);
+  ]).slice(0, limit);
   if (results.length === 0 && !hasExplicitUnknownCue(query)) {
     const ftsCandidates = await ctx.search.search(query, {
       strategy: "fts",
       limit,
       _captureSupport: true,
       _skipDetailEnrich: true,
+      _allowCurrentTopics: allowTopics,
     });
     results = filterContentFtsFallbackCandidates(query, ftsCandidates);
     if (results.length === 0) {
@@ -270,7 +318,25 @@ async function runContentRecall(
   // where the guard did not activate.
   const slugs = results.map((r) => r.slug);
   const pagesBySlug = new Map<string, { slug: string; expires_at: string | null }>();
-  const entities = results.map((r) => {
+  // #511: topic entities hydrate from the verified read snapshot (fresh-object
+  // per result). A topic that fails re-verification between search and here
+  // (race) is dropped — fail closed, never fall back to cached body/snippet.
+  const topicSnapshots = new Map<string, TopicReadSnapshot>();
+  const entities = results.flatMap((r) => {
+    if (isTopicRow(ctx.db.getPage(r.slug))) {
+      const snap = ctx.topicRead?.readCurrentTopic(r.slug) ?? null;
+      if (!snap) return [];
+      topicSnapshots.set(r.slug, snap);
+      return [{
+        title: snap.title,
+        snippet: snap.body.slice(0, 200),
+        ...(detail !== "brief" ? { body: snap.body.slice(0, 500) } : {}),
+        derived: true as const,
+        type: "topic" as const,
+        sources: snap.sourceSlugs,
+        generated_at: snap.generatedAt,
+      }];
+    }
     const page = ctx.pages.getBySlug(r.slug);
     if (page) {
       pagesBySlug.set(r.slug, { slug: page.slug, expires_at: page.expires_at });
@@ -281,11 +347,11 @@ async function runContentRecall(
     const prefixOnly = page?.body?.trim() && (!r.snippet?.trim()
       || r.snippet.trim() === page.title || page.body.trim().startsWith(r.snippet.trim()));
     const excerpt = prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined;
-    return {
+    return [{
       title: page?.title ?? r.slug,
       snippet: excerpt === undefined ? r.snippet : excerpt.slice(0, 200),
       ...(detail !== "brief" ? { body: excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
-    };
+    }];
   });
   // #399 — keep the default cbrain_recall content path aligned with deep_recall:
   // generate bounded, explainable proactive hints from the accepted result set.
@@ -314,7 +380,9 @@ async function runContentRecall(
     ...(degraded ? { search_meta: { degraded } } : {}),
     ...(budgetedProactiveHints.length > 0 ? { proactive_hints: budgetedProactiveHints } : {}),
     ...(evidencePack ? { evidence_pack: evidencePack } : {}),
-    summary: entities.length > 0 ? `有 ${entities.length} 条相关记忆` : degraded ? INCOMPLETE_RECALL_MESSAGE : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果" : "暂时没找到相关记忆",
+    summary: entities.length > 0
+      ? `有 ${entities.length} 条相关记忆${topicSnapshots.size > 0 ? `（其中 ${topicSnapshots.size} 条为派生主题页）` : ""}`
+      : degraded ? INCOMPLETE_RECALL_MESSAGE : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果" : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
   const surfaceInsufficient =
@@ -632,16 +700,39 @@ async function runOverviewRecall(
   query: string,
   routing: FrontdoorRoutingDecision,
 ): Promise<FrontdoorEnvelope> {
-  const results = await ctx.search.search(query, { limit: 5 });
-  const selected = results.slice(0, 5);
-  const entities = selected.map((r) => {
+  // #511: the overview route may include verified-CURRENT topics as derived
+  // reading material (the reserved managed path, never original memory).
+  const allowTopics = contentRecallAllowsCurrentTopics(query);
+  const results = await ctx.search.search(query, { limit: 5, _allowCurrentTopics: allowTopics });
+  const selected = dedupeCandidatesBySlug([
+    ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
+    ...results,
+  ]).slice(0, 5);
+  let derivedTopicCount = 0;
+  const entities = selected.flatMap((r) => {
+    if (isTopicRow(ctx.db.getPage(r.slug))) {
+      // Same verified snapshot search admitted — never the page cache; a
+      // re-verification failure (race) drops the entity, fail closed.
+      const snap = ctx.topicRead?.readCurrentTopic(r.slug) ?? null;
+      if (!snap) return [];
+      derivedTopicCount++;
+      const entity: { title: string; snippet: string; type: string; derived: true; sources: string[]; generated_at: string } = {
+        title: snap.title,
+        snippet: snap.body.slice(0, 200),
+        type: "topic",
+        derived: true,
+        sources: snap.sourceSlugs,
+        generated_at: snap.generatedAt,
+      };
+      return [entity];
+    }
     const page = ctx.pages.getBySlug(r.slug);
     const entity: { title: string; snippet: string; type?: string } = {
       title: page?.title ?? r.slug,
       snippet: r.snippet,
     };
     if (page?.type) entity.type = page.type;
-    return entity;
+    return [entity];
   });
 
   // #395 — batch-read active links + timeline once over the bounded selection
@@ -671,7 +762,10 @@ async function runOverviewRecall(
   const payload = {
     topic: query,
     entities,
-    stats: { totalEntities: entities.length, totalLinks, totalEvents },
+    stats: { totalEntities: entities.length, totalLinks, totalEvents, ...(derivedTopicCount > 0 ? { derivedTopics: derivedTopicCount } : {}) },
+    // The summary states the derived page explicitly instead of counting it
+    // as an ordinary memory (#511).
+    ...(derivedTopicCount > 0 ? { summary: `围绕「${query}」有 ${entities.length} 条记忆（其中 ${derivedTopicCount} 条为派生主题页）` } : {}),
   };
   const formatted = formatSummarizeEnvelope(payload);
   return withRouting(formatted, payload, routing, selected.map((result) => result.slug));

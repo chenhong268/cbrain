@@ -4,7 +4,7 @@ import { join, resolve, relative } from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
-import { canMerge, getLayer, normalizePageType, assertWritableVaultFile } from "../../core/shared.js";
+import { canMerge, getLayer, normalizePageType, assertWritableVaultFile, isTopicRow } from "../../core/shared.js";
 import { indexPage } from "../context.js";
 import { trimPageBody } from "./trim.js";
 import { formatGetPageEnvelope, formatGetPagesEnvelope, formatAppendEnvelope } from "./format-result.js";
@@ -42,7 +42,7 @@ function schedulePageToolNer(
     }
     return;
   }
-  if (!shouldProcessNerForWritePath(body, pageType)) return;
+  if (!shouldProcessNerForWritePath(body, pageType, ctx.db.getPageFilePath(slug))) return;
   if (action === "defer") {
     submitDeferredNerForWritePath(ctx.deferredNerSubmitter, { slug, pageType });
     return;
@@ -115,6 +115,74 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     if (!row) {
       const { display, summary, raw } = formatGetPageEnvelope({ error: "Page not found" });
       return { content: [{ type: "text", text: JSON.stringify({ display, summary, raw, error: "Page not found" }) }] };
+    }
+
+    // #511: a generated topic page is only readable through the verified
+    // current-topic snapshot — the SAME read that validated it (never the raw
+    // file, the page cache, or an old indexed body). Anything not verified
+    // current fails closed: safe metadata/status/source refs, no body text.
+    if (isTopicRow(row)) {
+      const snap = ctx.topicRead?.readCurrentTopic(slug) ?? null;
+      if (!snap) {
+        const inspection = ctx.topicRead?.inspectTopic(slug) ?? null;
+        const reason = inspection?.reasons[0] ?? "not_current";
+        const payload = {
+          ...row,
+          body: null,
+          body_length: 0,
+          has_more: false,
+          derived_topic: {
+            available: false,
+            derived: true,
+            reason,
+            ...(inspection && inspection.sources.length > 0
+              ? { sources: inspection.sources.map((s) => s.slug) }
+              : {}),
+          },
+        };
+        const { summary, raw } = formatGetPageEnvelope(payload);
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              // #511: display stays user-facing — fixed short Chinese, no
+              // internal reason codes or source slugs (those live in
+              // derived_topic metadata/audit only).
+              display: `《${row.title}》是自动生成的主题页，来源记录有更新，暂不可用；请以原始记录为准。`,
+              summary,
+              raw: { ...raw, ...payload },
+              ...payload,
+            }, null, 2),
+          }],
+        };
+      }
+      const bodyLength = snap.raw.length;
+      const showFull = include_full_body === true;
+      const { body: trimmedBody, has_more } = showFull ? { body: snap.raw, has_more: false } : trimPageBody(snap.raw);
+      const payload = {
+        ...row,
+        body: trimmedBody,
+        body_length: bodyLength,
+        has_more,
+        derived_topic: {
+          available: true,
+          derived: true,
+          generated_at: snap.generatedAt,
+          sources: snap.sourceSlugs,
+        },
+      };
+      const { summary, raw } = formatGetPageEnvelope(payload);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            display: `《${row.title}》是自动生成的派生主题页（非独立证据，源自 ${snap.sourceSlugs.length} 条原始记录）；细节以原始记录为准。`,
+            summary,
+            raw: { ...raw, ...payload },
+            ...payload,
+          }, null, 2),
+        }],
+      };
     }
 
     const filePath = row.file_path as string | undefined;
@@ -608,6 +676,40 @@ export function registerPageTools(server: McpServer, ctx: ToolContext): void {
     const items = foundSlugs.map((slug, i) => {
       const row = rowBySlug.get(slug)!;
       const body = bodies[i];
+
+      // #511: a generated topic page only excerpts through the verified
+      // current-topic snapshot; anything else shows safe metadata with an
+      // empty excerpt — a stale topic's old body must never leak here.
+      if (isTopicRow(row)) {
+        const snap = ctx.topicRead?.readCurrentTopic(slug) ?? null;
+        if (!snap) {
+          const item: Record<string, unknown> = {
+            slug: row.slug,
+            title: row.title,
+            type: row.type,
+            tier: row.tier,
+            excerpt: "",
+            has_more: false,
+            updated_at: row.updated_at,
+            derived_topic: { available: false, derived: true, reason: "not_current" },
+          };
+          if (actualDetail === "normal") item.mention_count = row.mention_count;
+          return item;
+        }
+        const { body: excerpt, has_more } = trimPageBody(snap.body, maxChars);
+        const item: Record<string, unknown> = {
+          slug: row.slug,
+          title: row.title,
+          type: row.type,
+          tier: row.tier,
+          excerpt,
+          has_more,
+          updated_at: row.updated_at,
+          derived_topic: { available: true, derived: true, generated_at: snap.generatedAt, sources: snap.sourceSlugs },
+        };
+        if (actualDetail === "normal") item.mention_count = row.mention_count;
+        return item;
+      }
 
       // Strip frontmatter from body for excerpt
       const bodyContent = stripFrontmatter(body ?? "");

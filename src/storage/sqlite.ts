@@ -1101,8 +1101,10 @@ export class CBrainDB {
     return Number(result.lastInsertRowid);
   }
 
-  searchTimeline(keyword?: string, dateFrom?: string, limit = 10): Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string }> {
-    let sql = "SELECT page_slug, event_date, source, summary FROM timeline WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
+  searchTimeline(keyword?: string, dateFrom?: string, limit = 10): Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string; source_page_slug?: string }> {
+    // #511: source_page_slug rides along so read surfaces can drop rows whose
+    // provenance points at a generated topic page (derived material).
+    let sql = "SELECT page_slug, event_date, source, summary, source_page_slug FROM timeline WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const params: Record<string, string | number> = { $limit: limit };
     if (keyword) {
       sql += " AND summary LIKE $keyword";
@@ -2675,6 +2677,30 @@ export class CBrainDB {
     return this.prepare(
       `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence FROM links WHERE to_slug = $slug${activeFilter}`
     ).all({ $slug: slug }) as LinkRow[];
+  }
+
+  /** #509 topic compiler: EVERY link row touching a source page — as an
+   *  endpoint (from/to) OR as its provenance origin (source_page_slug) —
+   *  including inactive rows, ordered by stable id. Governance freshness
+   *  needs the full untruncated set; the compile prompt applies its own cap. */
+  getGovernanceLinksTouchingSource(slug: string): LinkRow[] {
+    return this.prepare(
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence
+       FROM links
+       WHERE from_slug = $slug OR to_slug = $slug OR source_page_slug = $slug
+       ORDER BY id`
+    ).all({ $slug: slug }) as LinkRow[];
+  }
+
+  /** #509 topic compiler: every timeline row owned by or provenanced from a
+   *  source page (page_slug OR source_page_slug), including inactive rows. */
+  getGovernanceTimelineTouchingSource(slug: string): Array<{ id: number; event_date: string | null; source: string | null; summary: string; trust_state?: string; source_page_slug?: string; evidence?: string }> {
+    return this.prepare(
+      `SELECT id, event_date, source, summary, trust_state, source_page_slug, evidence
+       FROM timeline
+       WHERE page_slug = $slug OR source_page_slug = $slug
+       ORDER BY id`
+    ).all({ $slug: slug }) as Array<{ id: number; event_date: string | null; source: string | null; summary: string; trust_state?: string; source_page_slug?: string; evidence?: string }>;
   }
 
   /**

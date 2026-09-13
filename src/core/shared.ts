@@ -106,6 +106,26 @@ export function getLayer(type: string): PageLayer {
   return "derived";
 }
 
+/** #510: reserved vault area of generated topic pages. A file here is a
+ *  generated surface EVEN when its frontmatter/DB type still says `record`
+ *  (an explicitly retyped or legacy stray): it must never feed NER or the
+ *  wikilink graph, and never counts as original record material. */
+export function isTopicManagedPath(filePath: string | null | undefined): boolean {
+  if (!filePath) return false;
+  const dir = getOntology().getVaultDir("topic");
+  return filePath === dir || filePath.startsWith(`${dir}/`);
+}
+
+/** #511: a page row on a generated topic surface — DB type `topic` OR a
+ *  file inside the reserved managed path (a stray/legacy record-typed row
+ *  there is still a generated surface, so a missing/old row type can never
+ *  become a read or evidence bypass). Shared by search, direct page reads,
+ *  evidence guards, the NER execution gate and the CLI. */
+export function isTopicRow(row: { type: string; file_path: string | null | undefined } | null | undefined): boolean {
+  if (!row) return false;
+  return row.type === "topic" || isTopicManagedPath(row.file_path);
+}
+
 export function canMerge(typeA: string, typeB: string): boolean {
   return getLayer(typeA) === getLayer(typeB);
 }

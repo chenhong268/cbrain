@@ -85,6 +85,32 @@ export function register(program: Command) {
       if (resolution.ambiguous) {
         console.warn(`⚠ Ambiguous slug "${slug}" — matched: ${resolution.ambiguous.join(", ")}. Using: ${resolution.slug}`);
       }
+      // #511: a generated topic page reads only through the verified
+      // current-topic snapshot (db+vaultPath — no model/embedding config).
+      // Not verified current ⇒ safe metadata only, never a stale body.
+      const { isTopicRow } = await import("../../core/shared.js");
+      const { createTopicReadAdmission } = await import("../../core/topics/read.js");
+      if (isTopicRow(db.getPage(resolution.slug))) {
+        const admission = createTopicReadAdmission({ db, vaultPath: config.vaultPath });
+        const snap = admission.readCurrentTopic(resolution.slug);
+        const row = db.getPage(resolution.slug)!;
+        console.log(`slug:       ${row.slug}`);
+        console.log(`type:       ${row.type}`);
+        console.log(`title:      ${row.title}`);
+        console.log(`tier:       ${row.tier}`);
+        console.log(`mentions:   ${row.mention_count}`);
+        console.log(`updated:    ${row.updated_at}`);
+        if (snap) {
+          console.log(`derived:    自动生成的派生主题页（非独立证据），生成于 ${snap.generatedAt}，源自 ${snap.sourceSlugs.length} 条原始记录`);
+          console.log(`sources:    ${snap.sourceSlugs.join(", ")}`);
+          console.log(`---`);
+          console.log(snap.body);
+        } else {
+          console.log(`derived:    自动生成的派生主题页（非独立证据），当前不可用（已失效或待维护刷新），正文已隐藏；请以原始记录为准。`);
+        }
+        db.close();
+        return;
+      }
       const page = pages.getBySlug(resolution.slug)!;
       console.log(`slug:       ${page.slug}`);
       console.log(`type:       ${page.type}`);

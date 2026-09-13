@@ -11,6 +11,7 @@ import { registerAllTools } from "./register.js";
 import type { IngestNerMode } from "../cli/context.js";
 import { TOOL_PROFILE_ALLOWLISTS, type ToolProfile } from "./tool-profiles.js";
 import type { TrustedVaultBoundary } from "../core/maintenance/misplaced-vault-artifacts.js";
+import { registerTopicWorker } from "../core/topics/maintenance.js";
 import {
   installMcpValidationErrorBoundary,
   markMcpHandlerInvocation,
@@ -56,6 +57,20 @@ export function registerDreamWorker(ctx: ToolContext): void {
       execution.checkCancelled,
     );
     return report;
+  });
+  // #510 Task 2: register the topic worker at this same once-per-runtime
+  // site (before the worker loop starts) — never in attachMcpTools, which
+  // runs once per HTTP MCP session and would create one timer per session.
+  ctx.topicMaintenance = registerTopicWorker({
+    db: ctx.db,
+    jobs: ctx.jobs,
+    pages: ctx.pages,
+    pipeline: ctx.pipeline,
+    versions: ctx.versions,
+    lance: ctx.lance,
+    ...(ctx.llm ? { llm: ctx.llm } : {}),
+    vaultPath: ctx.vaultPath,
+    logger: ctx.logger,
   });
   ctx.jobs.start();
 }
@@ -132,14 +147,54 @@ export function attachMcpTools(server: McpServer, ctx: ToolContext): void {
   }
 }
 
-export function createServer(deps: CBrainDeps): McpServer {
+export function createServer(deps: CBrainDeps, onContext?: (ctx: ToolContext) => void): McpServer {
   const server = new McpServer({
     name: "cbrain",
     version,
   });
   const ctx = buildContext(deps);
+  onContext?.(ctx);
   attachMcpTools(server, ctx);
   registerDreamWorker(ctx);
+  // #510 Task 2: owned runtime lifecycle. This server OWNS the job loop and
+  // the topic scheduler (the stdio runtime path), so closing it — actively
+  // via close() or passively when the transport goes away — must abort and
+  // actually drain in-flight topic work (model calls, indexing, rollback
+  // compensation) through ONE memoized shutdown promise: concurrent or
+  // repeated close() calls all await the same drain and can never observe a
+  // "finished" close while the first drain is still running. The original
+  // SDK close always still runs. Per-session HTTP MCP servers are built with
+  // attachMcpTools only and keep the plain SDK semantics, so a session
+  // closing never stops the shared HTTP runtime.
+  let ownedShutdown: Promise<void> | null = null;
+  const runOwnedShutdown = (): Promise<void> => {
+    if (!ownedShutdown) {
+      ownedShutdown = (async () => {
+        await ctx.topicMaintenance?.stop();
+        ctx.jobs.stop();
+      })();
+    }
+    return ownedShutdown;
+  };
+
+  const originalClose = server.close.bind(server);
+  (server as { close: () => Promise<void> }).close = async (): Promise<void> => {
+    try {
+      await runOwnedShutdown();
+    } finally {
+      await originalClose();
+    }
+  };
+
+  // Passive transport close (client disconnect / EOF) reaches the SDK's
+  // public protocol onclose; chain it onto the same drain while preserving
+  // any previously-installed handler.
+  const protocol = server.server;
+  const previousOnclose = protocol.onclose?.bind(protocol);
+  protocol.onclose = () => {
+    previousOnclose?.();
+    void runOwnedShutdown().catch(() => { /* best effort; CLI exit path awaits the drain explicitly */ });
+  };
   return server;
 }
 

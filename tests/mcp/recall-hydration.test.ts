@@ -32,6 +32,9 @@ describe("hydrateRecallSlugs (#282)", () => {
         },
         getHotnessWeights: () => new Map([[suppliedPage.slug, 0.8]]),
         getL1Summary: () => null,
+        // #511: topic-provenance classification reads the DB page; the mock
+        // brain has no topic rows.
+        getPage: () => null,
       },
       graph: {
         getRelatedEntities: () => {
@@ -162,6 +165,7 @@ describe("hydrateRecallSlugs (#282)", () => {
         batchGetTimelineForSlugs: () => new Map([[slug, []]]),
         getHotnessWeights: () => new Map([[slug, 0.9]]),
         getL1Summary: () => null,
+        getPage: () => null,
       },
       graph: {
         getRelatedEntities: () => [],

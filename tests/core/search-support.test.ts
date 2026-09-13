@@ -120,7 +120,7 @@ describe("HybridSearch retrieval support", () => {
       "const bySlug = new Map<string, { content: string; score: number }>();",
     );
     expect(source).toContain(
-      "const supportBySlug = includeVector\n      ? new Map<string, RetrievalChannelEvidence>()\n      : undefined;",
+      "const supportBySlug = includeVector\n        ? new Map<string, RetrievalChannelEvidence>()\n        : undefined;",
     );
   });
 

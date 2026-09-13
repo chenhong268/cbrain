@@ -27,6 +27,7 @@ function mockDB(overrides: {
 } = {}) {
   let sessionId = 0;
   return {
+    getPage: (slug: string) => ({ slug, type: "record", file_path: `records/${slug}.md` }),
     resolveSlugs: overrides.resolveSlugs ??
       ((queries: string[]) =>
         queries.map((q) => ({ query: q, slug: `page/${q}`, title: `Title ${q}` }))),

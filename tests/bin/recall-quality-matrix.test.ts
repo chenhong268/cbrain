@@ -1720,8 +1720,9 @@ describe("semantic integration", () => {
 			lanceCalls: 5,
 			llmCalls: 0,
 			advancedFallbackCalls: 0,
-			supportOnlyDbCalls: 0,
-			dbPageReads: 2,
+			// Topic admission checks page type/path without filesystem or model work.
+			supportOnlyDbCalls: 52,
+			dbPageReads: 54,
 			pageHydrationCalls: 2,
 			emittedCandidateCount: 2,
 			rejectedPageHydrationCalls: 0,
