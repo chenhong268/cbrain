@@ -25,9 +25,6 @@ const PENDING_SELECTION_CONFIG = "topic.pending_selection";
 const SELECTION_MODE_CONFIG = "topic.selection_mode";
 const MAX_CANDIDATE_KEYS = 5;
 const MAX_KEY_CHARS = 200;
-/** Stable per-topic source cap comes from the compiler budget; discovery
- *  re-states it here so preview receipts agree with compile-time admission. */
-const MAX_SOURCES_PER_TOPIC = 12;
 const MIN_NEW_TOPIC_SOURCES = 3;
 
 export interface TopicCandidateView {
@@ -35,7 +32,8 @@ export interface TopicCandidateView {
   title: string;
   /** Distinct original-record count backing the seed (uncapped). */
   support: number;
-  /** Deterministic capped selection (sorted slugs). */
+  /** Complete sorted seed membership — no selection cap (#515); the compiler
+   *  budget admits or rejects the whole set. */
   sourceSlugs: string[];
   omittedSources: number;
 }
@@ -225,13 +223,14 @@ export function discoverTopicCandidates(db: CBrainDB): DiscoveryResult {
     if (group.length > 1) {
       mergedDuplicateSeeds.push({ kept: kept.key, merged: group.slice(1).map((g) => g.key) });
     }
-    const selection = kept.records.slice(0, MAX_SOURCES_PER_TOPIC);
     candidates.push({
       key: kept.key,
       title: kept.title,
       support: kept.records.length,
-      sourceSlugs: selection,
-      omittedSources: kept.records.length - selection.length,
+      // Complete membership: the shared admission ceiling is a compile-time
+      // budget, never a selection rule (#515).
+      sourceSlugs: kept.records,
+      omittedSources: 0,
     });
   }
   candidates.sort((a, b) => b.support - a.support || compareStrings(a.key, b.key));
@@ -561,7 +560,9 @@ export class TopicMaintenance {
     const derived = manifest.seed
       ? (discovery.seedRecords.get(manifest.seed.key) ?? [])
       : manifest.sources.map((s) => s.slug);
-    const selection = derived.slice(0, MAX_SOURCES_PER_TOPIC).sort(compareStrings);
+    // Complete seed membership — shrinking or growing; an over-ceiling seed is
+    // rejected whole by the compiler (blocked for splitting), never sliced.
+    const selection = derived.slice().sort(compareStrings);
     const currentSelection = manifest.sources.map((s) => s.slug).sort(compareStrings);
     const sameSelection = selection.length === currentSelection.length
       && selection.every((s, i) => s === currentSelection[i]);
@@ -661,7 +662,7 @@ export class TopicMaintenance {
     // in the discovery map on every later run.
     const seed: TopicSeed = { kind: key.startsWith("tag:") ? "tag" : "entity", key };
     const outcome = await this.compileQuietly(
-      { title, sourceSlugs: records.slice(0, MAX_SOURCES_PER_TOPIC), seed, catalogFingerprint: catalog, checkCancelled: this.combineCancellation(execution), signal: execution.signal },
+      { title, sourceSlugs: records, seed, catalogFingerprint: catalog, checkCancelled: this.combineCancellation(execution), signal: execution.signal },
       receipt,
       { key, title },
     );

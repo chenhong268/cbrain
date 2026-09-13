@@ -50,7 +50,10 @@ function smartResponse(messages: ChatMessage[]): string {
   });
   return JSON.stringify({
     overview: [claim(sources[0], 0)],
-    observations: sources.map((s, i) => claim(s, i)),
+    // Output budgets cap observations at 12 claims; with MORE admitted sources
+    // the model cites a representative subset — claims name selected sources,
+    // they need not cover every one.
+    observations: sources.slice(0, 12).map((s, i) => claim(s, i)),
     details: [],
     open_questions: [],
   });
@@ -286,16 +289,63 @@ describe("topic wiki — discovery and maintenance", () => {
     expect([...kept.sourceSlugs].sort()).toEqual([...shared].sort());
   });
 
-  test("more than twelve sources select twelve deterministically and report the omission", async () => {
+  test("more than twelve sources report complete membership with nothing omitted", async () => {
     const slugs = await seedTaggedRecords("主题D", 13);
     const { maintenance } = smart();
     const preview = (await runHandle(maintenance, { action: "preview" })) as TopicPreviewReport;
     const candidate = preview.candidates.find((c) => c.key === "tag:主题D")!;
     expect(candidate.support).toBe(13);
-    expect(candidate.sourceSlugs).toHaveLength(12);
-    expect(candidate.omittedSources).toBe(1);
-    const sorted = [...slugs].sort();
-    expect(candidate.sourceSlugs).toEqual(sorted.slice(0, 12));
+    expect(candidate.omittedSources).toBe(0);
+    // The whole seed — the admission ceiling is a compiler budget, never a
+    // selection rule.
+    expect(candidate.sourceSlugs).toEqual([...slugs].sort());
+  });
+
+  test("enable compiles the complete seed membership into the manifest", async () => {
+    const slugs = await seedTaggedRecords("主题D", 13);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    const manifest = parseFrontmatter(readFileSync(join(vaultPath, db.getPageFilePath(topicSlug)!), "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }> };
+    expect(manifest.sources).toHaveLength(13);
+    expect(manifest.sources.map((s) => s.slug).slice().sort()).toEqual([...slugs].sort());
+    expect(llm.calls.length).toBe(1);
+  });
+
+  test("a later-sorting record reaches the compiler on refresh; an unchanged rerun is a no-op", async () => {
+    const slugs = await seedTaggedRecords("主题D", 12);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    expect(llm.calls.length).toBe(1);
+    const topicPath = join(vaultPath, db.getPageFilePath(topicSlug)!);
+    const manifestSources = (): string[] =>
+      (parseFrontmatter(readFileSync(topicPath, "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }> }).sources.map((s) => s.slug);
+    expect(manifestSources()).toHaveLength(12);
+
+    // A newcomer whose slug sorts AFTER the former first 12 — the exact shape
+    // the old slice dropped: the catalog changed, the model was never called.
+    const lastSlug = [...slugs].sort()[slugs.length - 1];
+    const lateTitle = `${lastSlug.split("/").pop()!}续`;
+    const late = await seedRecord(lateTitle, BODY_B, ["主题D"]);
+    expect(late > lastSlug).toBe(true);
+
+    const receipt = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(receipt.counts.refreshed).toBe(1);
+    expect(receipt.counts.reattested).toBe(0);
+    expect(llm.calls.length).toBe(2);
+    // The newcomer reached the actual model input, not just the receipt.
+    const lastCall = llm.calls[llm.calls.length - 1];
+    expect(lastCall.messages.some((m) => m.content.includes(`### SOURCE ${late}\n`))).toBe(true);
+    expect(manifestSources()).toHaveLength(13);
+    expect(manifestSources()).toContain(late);
+
+    // Nothing changed afterwards: pure no-op, no model call, no write.
+    const rawAfterRefresh = readFileSync(topicPath, "utf-8");
+    const third = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(third.counts.unchanged).toBe(1);
+    expect(llm.calls.length).toBe(2);
+    expect(readFileSync(topicPath, "utf-8")).toBe(rawAfterRefresh);
   });
 
   // ─── Enablement, creation, budget ────────────────────────────────

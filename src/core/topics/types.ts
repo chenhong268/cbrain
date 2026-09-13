@@ -14,7 +14,10 @@ export const TOPIC_SCHEMA_VERSION = 1;
 
 /** Hard bounds for topic compilation. Oversize inputs are rejected, never truncated. */
 export interface TopicBudgets {
-  /** Distinct record sources per topic (upper bound). */
+  /** Admission ceiling on distinct record sources per topic — shared by the
+   *  compiler and read-side manifest verification. Never a selection rule:
+   *  maintenance passes complete seed membership and an over-ceiling theme is
+   *  rejected whole (blocked for splitting), never partially selected. */
   maxSourcesPerTopic: number;
   /** Distinct valid record sources required to CREATE a new topic. */
   minNewTopicSources: number;
@@ -32,7 +35,7 @@ export interface TopicBudgets {
 }
 
 export const DEFAULT_TOPIC_BUDGETS: TopicBudgets = {
-  maxSourcesPerTopic: 12,
+  maxSourcesPerTopic: 128,
   minNewTopicSources: 3,
   maxTotalMaterialChars: 150_000,
   maxPromptFactsPerSource: 50,

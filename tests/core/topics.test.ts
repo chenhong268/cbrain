@@ -312,7 +312,7 @@ describe("topic wiki — bounded compiler", () => {
     expect(llm.calls.length).toBe(1);
   });
 
-  test("rejects new topics below three distinct sources, above 12, or with non-record sources", async () => {
+  test("rejects new topics below three distinct sources, above 128, or with non-record sources", async () => {
     await seedSources();
     const sources = allSources();
     const llm = makeQueuedLlm([validModelOutput(sources)]);
@@ -350,13 +350,34 @@ describe("topic wiki — bounded compiler", () => {
     expect(missing.status).toBe("blocked");
     expect((missing as { reason: string }).reason).toBe("source_not_found");
 
-    const many = Array.from({ length: 13 }, (_, i) => `records/duo-${i}`);
+    const many = Array.from({ length: 129 }, (_, i) => `records/duo-${i}`);
     const tooMany = await manager.compile({ title: "主题E", sourceSlugs: many });
     expect(tooMany.status).toBe("blocked");
     expect((tooMany as { reason: string }).reason).toBe("too_many_sources");
 
     expect(llm.calls.length).toBe(0);
     expect(pages.getBySlug("brain/topics/主题e")).toBeNull();
+  });
+
+  test("compiles a complete thirteen-source selection within the raised admission ceiling", async () => {
+    // The former 12 cap silently dropped the 13th; admission now takes the
+    // whole selection (ceiling 128, shared with read-side verification).
+    const sources: Array<{ slug: string; body: string }> = [];
+    for (let i = 0; i < 13; i++) {
+      sources.push(await seedRecord(`补充记录${i}`, [RECORD_A_BODY, RECORD_B_BODY, RECORD_C_BODY][i % 3]));
+    }
+    const full = validModelOutput(sources);
+    // Output budgets cap observations at 12 claims; the model cites a subset
+    // of the 13 admitted sources — every claim still names a selected source.
+    const llm = makeQueuedLlm([{ ...full, observations: full.observations.slice(0, 12) }]);
+    const manager = makeManager(llm);
+
+    const result = await manager.compile({ title: "主题多源", sourceSlugs: sources.map((s) => s.slug) });
+    expect(result.status).toBe("created");
+    const slug = (result as { slug: string }).slug;
+    const manifest = parseFrontmatter(readFileSync(join(vaultPath, `${slug}.md`), "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }> };
+    expect(manifest.sources.map((s) => s.slug).slice().sort()).toEqual(sources.map((s) => s.slug).slice().sort());
+    expect(llm.calls.length).toBe(1);
   });
 
   test("rejects material over the bounded budget instead of truncating", async () => {
