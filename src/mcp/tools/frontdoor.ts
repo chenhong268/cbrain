@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { SearchTrace } from "../../core/retrieval/search.js";
+import type { SearchResult, SearchTrace } from "../../core/retrieval/search.js";
 import type { ToolContext } from "../context.js";
 import { classifyFrontdoorQuery, type FrontdoorRoutingDecision } from "../../core/retrieval/frontdoor-router.js";
 import { stripKnownRelationsSection } from "../../core/graph/known-relations-projector.js";
@@ -35,6 +35,7 @@ import { isFirstPersonQuery } from "../../core/retrieval/recall-intent.js";
 import { isRecentRecall, recallRecentRecords } from "../../core/retrieval/recent-record-recall.js";
 import { isTopicRow } from "../../core/shared.js";
 import type { TopicReadSnapshot } from "../../core/topics/read.js";
+import { MAX_MANAGED_TOPICS } from "../../core/topics/maintenance.js";
 
 type DetailLevel = "brief" | "normal" | "full";
 
@@ -184,6 +185,25 @@ function contentRecallAllowsCurrentTopics(query: string): boolean {
   return !RAW_DETAIL_TOPIC_EXCLUSION_RE.test(query);
 }
 
+/** Explicitly named topics are navigation targets, even when ordinary ranked
+ *  candidates crowd them out. Keep this local to derived reading surfaces;
+ *  it must not weaken ordinary content relevance or certify new evidence. */
+function namedCurrentTopics(ctx: ToolContext, query: string): SearchResult[] {
+  if (!ctx.topicRead) return [];
+  const normalizedQuery = query.normalize("NFKC").toLowerCase();
+  return ctx.db.listPages({ type: "topic", limit: MAX_MANAGED_TOPICS, orderBy: "slug ASC" }).flatMap((row) => {
+    const label = row.title.normalize("NFKC").replace(/\(主题\)$/, "").trim().toLowerCase();
+    if (!label) return [];
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const left = /^[a-z0-9]/.test(label) ? "(?<![a-z0-9])" : "";
+    const right = /[a-z0-9]$/.test(label) ? "(?![a-z0-9])" : "";
+    if (!new RegExp(`${left}${escaped}${right}`, "u").test(normalizedQuery)) return [];
+    const snapshot = ctx.topicRead!.readCurrentTopic(row.slug);
+    if (!snapshot) return [];
+    return [{ slug: row.slug, score: 1, snippet: snapshot.body, source: "exact" as const }];
+  });
+}
+
 async function runContentRecall(
   ctx: ToolContext,
   query: string,
@@ -210,13 +230,14 @@ async function runContentRecall(
     _skipDetailEnrich: true,
     _allowCurrentTopics: allowTopics,
   });
-  let results = dedupeCandidatesBySlug(
-    filterContentCandidates(
+  let results = dedupeCandidatesBySlug([
+    ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
+    ...filterContentCandidates(
       query,
       identitySeed ? [identitySeed, ...candidates] : candidates,
       identitySeed ? { deterministicIdentitySlugs: new Set([identitySeed.slug]) } : undefined,
     ),
-  ).slice(0, limit);
+  ]).slice(0, limit);
   if (results.length === 0 && !hasExplicitUnknownCue(query)) {
     const ftsCandidates = await ctx.search.search(query, {
       strategy: "fts",
@@ -681,8 +702,12 @@ async function runOverviewRecall(
 ): Promise<FrontdoorEnvelope> {
   // #511: the overview route may include verified-CURRENT topics as derived
   // reading material (the reserved managed path, never original memory).
-  const results = await ctx.search.search(query, { limit: 5, _allowCurrentTopics: true });
-  const selected = results.slice(0, 5);
+  const allowTopics = contentRecallAllowsCurrentTopics(query);
+  const results = await ctx.search.search(query, { limit: 5, _allowCurrentTopics: allowTopics });
+  const selected = dedupeCandidatesBySlug([
+    ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
+    ...results,
+  ]).slice(0, 5);
   let derivedTopicCount = 0;
   const entities = selected.flatMap((r) => {
     if (isTopicRow(ctx.db.getPage(r.slug))) {

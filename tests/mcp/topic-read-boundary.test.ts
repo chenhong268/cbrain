@@ -112,6 +112,33 @@ describe("topic read boundaries (#511 Task 3)", () => {
 
   // ── Current topic is a visible, clearly-derived reading page ──────────
 
+  test("named current topic remains discoverable when ordinary ranked candidates miss it", async () => {
+    await ctx.pages.deleteDetailed(topic);
+    const title = "主题D（主题）";
+    expect((await manager.compile({ title, sourceSlugs: sources })).status).toBe("created");
+    topic = manager.resolveTopicSlug(title);
+    // The live pilot's five-result retrieval window contained only other
+    // pages. A known topic name must still navigate to its verified page.
+    ctx.search.search = async () => [];
+    for (const query of ["主题D", "我对主题D有哪些认识？概括三点。", "全面了解主题D"]) {
+      const data = await json("cbrain_recall", { query, detail: "normal", include_raw: true });
+      const entities = (data.raw as { entities?: Array<Record<string, unknown>> }).entities ?? [];
+      const derived = entities.find((e) => e.derived === true);
+      expect(derived).toBeDefined();
+      expect(JSON.stringify(derived)).toContain(marker);
+      expect(derived!.sources).toEqual(sources);
+    }
+    for (const query of ["主题DX", "主题D原文细节", "主题D最近变化", "无关问题"]) {
+      const data = await json("cbrain_recall", { query, detail: "normal", include_raw: true });
+      expect(JSON.stringify(data)).not.toContain(marker);
+    }
+    invalidateViaDiskEdit();
+    for (const query of ["主题D", "全面了解主题D"]) {
+      const data = await json("cbrain_recall", { query, detail: "normal", include_raw: true });
+      expect(JSON.stringify(data)).not.toContain(marker);
+    }
+  });
+
   test("daily overview presents the current topic as derived material with source refs", async () => {
     const data = await json("cbrain_recall", { query: "主题D 全面了解", detail: "normal" });
     const entities = (data.raw as { entities?: Array<Record<string, unknown>> }).entities ?? [];

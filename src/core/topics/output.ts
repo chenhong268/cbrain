@@ -31,6 +31,8 @@ Rules:
 - "sourceSlug" MUST be one of the source slugs provided below.
 - "kind" labels what the source says: "observation" = stated in the record; "user_thought" = the user's own thought recorded in the source; "candidate" = unconfirmed assertion needing verification.
 - Only use facts from the provided SOURCE MATERIAL sections. Do not add outside knowledge. Do not invent dates, numbers, or names.
+- Preserve the time context of historical statements. An old record's "current" state is not today's state; when its date is unknown, attribute the statement to the material without inventing a date.
+- Storing an article or quotation does not mean the user endorses it. Only label a claim "user_thought" when the source explicitly records the user's own thought.
 - You cannot assign trust states; corrections and rejections in the material are already removed — never resurrect them.
 - Disagreements between sources go to "open_questions" or "details", never silently resolved.`;
 }
@@ -45,7 +47,7 @@ function conciseDirective(budgets: TopicBudgets): string {
   const openQuestions = Math.min(1, budgets.maxOpenQuestions);
   const quoteUpper = Math.min(40, budgets.maxQuoteChars);
   const quoteLower = Math.min(10, quoteUpper);
-  return `现在请输出精简的主题知识页 JSON：overview 只写 ${overview} 条；observations 只写 ${observations} 条综合要点；details 最多 ${details} 条；open_questions 最多 ${openQuestions} 条（没有原文依据就留空数组）。不要逐篇列摘要，不需要覆盖每份材料。每个 quote 选取对应来源中的一小段连续原文，建议 ${quoteLower}–${quoteUpper} 个字，保留原始 Markdown 符号；必须逐字复制，不要改写或补字。输出前核对数组条数和每条引用。只输出 JSON。`;
+  return `现在请输出精简的主题知识页 JSON：overview 只写 ${overview} 条；observations 只写 ${observations} 条综合要点；details 最多 ${details} 条；open_questions 最多 ${openQuestions} 条（没有原文依据就留空数组）。不要逐篇列摘要，不需要覆盖每份材料。每个 quote 选取对应来源中的一小段连续原文，建议 ${quoteLower}–${quoteUpper} 个字，保留原始 Markdown 符号；必须逐字复制，不要改写或补字。历史状态要保留材料时点；日期不明就写“材料记录”，不要当作今日状态。来源观点不等于用户认同。输出前核对数组条数和每条引用。只输出 JSON。`;
 }
 
 /** Build the bounded compile prompt. Source bodies are included in full —
