@@ -169,6 +169,24 @@ describe("topic wiki — bounded compiler", () => {
 
   // ─── Ontology + canonical path ────────────────────────────────────
 
+  test("an unrestorable index snapshot still preserves the previous topic bytes", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const request = { title: "主题D", sourceSlugs: allSources().map((s) => s.slug) };
+    await manager.compile(request);
+    const slug = manager.resolveTopicSlug(request.title);
+    const path = join(vaultPath, db.getPageFilePath(slug)!);
+    const before = readFileSync(path, "utf-8");
+    // Existing partial vector loss must not prevent recovery of intact Markdown.
+    await lance.deleteRawChunksByPageSlug(slug);
+    pages.update(sourceA.slug, { body: `${sourceA.body}\n补充材料。` });
+    lance.addChunks = async () => { throw new Error("vector store unavailable"); };
+    await expect(manager.compile(request)).rejects.toThrow();
+    expect(readFileSync(path, "utf-8")).toBe(before);
+    expect(db.getPageContentHash(slug)).toBeNull();
+    expect(manager.inspectFreshness(slug)?.state).toBe("stale");
+  });
+
   test("ontology declares derived topic type with brain/topics vault dir", () => {
     const ontology = getOntology();
     expect(ontology.getEntityType("topic")).toBeDefined();

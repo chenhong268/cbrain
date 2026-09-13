@@ -576,7 +576,15 @@ export class TopicManager {
 
     if (!indexSnapshot) return;
 
-    // Snapshot correspondence must be provable BEFORE any mutation: chunks
+    // The entry CAS still owns these bytes. Recover Markdown even if the
+    // old index snapshot is incomplete; failed index recovery stays dirty.
+    try {
+      writeFileSync(resolveWithinVault(this.pages.vaultPath, this.db.getPageFilePath(slug)!), indexSnapshot.raw);
+    } catch (e) {
+      throw failIncomplete(`TOPIC_RESTORE_FAILED: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // Snapshot correspondence must be provable BEFORE index replay: chunks
     // and vectors have to pair 1:1 by chunkIndex + content, otherwise the
     // restore cannot be trusted — leave the bytes dirty and report
     // incomplete.
@@ -598,7 +606,6 @@ export class TopicManager {
     // still wins, and our restored hash only commits when the file still
     // holds the restored bytes.
     try {
-      writeFileSync(resolveWithinVault(this.pages.vaultPath, this.db.getPageFilePath(slug)!), indexSnapshot.raw);
       await this.pipeline.writeIndexes(
         slug,
         orderedChunks.map((c) => ({ index: c.chunkIndex, content: c.content })),
