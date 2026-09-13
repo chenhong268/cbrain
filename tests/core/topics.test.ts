@@ -13,6 +13,7 @@ import { getOntology } from "../../src/ontology/loader.js";
 import { parseFrontmatter } from "../../src/utils/frontmatter.js";
 import { hashContent } from "../../src/core/shared.js";
 import { generateSlug } from "../../src/utils/slug.js";
+import { topicSourceHref } from "../../src/core/topics/render.js";
 import {
   TopicManager,
   type TopicCompileResult,
@@ -20,6 +21,17 @@ import {
 } from "../../src/core/topics/index.js";
 
 // ─── Anonymous fixtures only ────────────────────────────────────────
+
+test("topic links retain spaces, fragment markers and parentheses in source filenames", () => {
+  const filePath = "brain/records/材料 A #1 )补充.md";
+  const href = topicSourceHref(filePath);
+  expect(href).toContain("%20");
+  expect(href).toContain("%23");
+  expect(href).toContain("%29");
+  const url = new URL(href, "file:///vault/brain/topics/topic.md");
+  expect(decodeURIComponent(url.pathname)).toBe(`/vault/${filePath}`);
+  expect(url.hash).toBe("");
+});
 
 const RECORD_A_BODY = [
   "主题D的项目在第一阶段完成了协议设计。",
@@ -276,14 +288,15 @@ describe("topic wiki — bounded compiler", () => {
     expect(body).toContain("## 概览");
     expect(body).toContain("主题D的项目横跨两个阶段");
     expect(body).toContain("## 主要观察");
-    expect(body).toContain(`（来源：[${sourceA.slug}](../../${sourceA.slug.split("/").map(encodeURIComponent).join("/")}.md)「`);
-    expect(body).toContain(`- [${sourceB.slug}](../../${sourceB.slug.split("/").map(encodeURIComponent).join("/")}.md)`);
+    expect(body).toContain(`（来源：[${sourceA.slug}](`);
+    expect(body).toContain(`- [${sourceB.slug}](`);
     expect(body).not.toContain("[[");
     expect(body).toContain("自动整理生成");
     // The hrefs are actually navigable from the topic page's directory.
     const topicDir = join(vaultPath, "brain/topics");
-    for (const s of sources) {
-      const target = resolve(topicDir, `../../${s.slug}.md`);
+    const hrefs = [...body.matchAll(/\]\(([^)]+)\)/g)].map((match) => match[1]!);
+    for (const href of hrefs) {
+      const target = resolve(topicDir, decodeURIComponent(href));
       expect(existsSync(target)).toBe(true);
     }
 

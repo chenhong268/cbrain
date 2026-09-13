@@ -19,7 +19,10 @@ export interface TopicRenderSource {
  *  feed), and nothing rewrites them, so the body stays byte-stable when a
  *  source file is later deleted. */
 export function topicSourceHref(filePath: string): string {
-  return `../../${filePath.split("/").map(encodeURIComponent).join("/")}`;
+  const encoded = filePath.split("/").map((segment) =>
+    encodeURIComponent(segment).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`),
+  ).join("/");
+  return `../../${encoded}`;
 }
 
 function renderSourceRef(source: TopicRenderSource): string {
