@@ -57,6 +57,7 @@ function makeMockHarness(
     },
   };
   const db = {
+    getPage: (slug: string) => ({ slug, type: "record", file_path: `records/${slug}.md` }),
     getBoundedTrustedLinks(slug: string, _l: number) { guardDbCalls.push(`tl:${slug}`); return opts.trustedLinks ?? []; },
     getBoundedTrustedTimelineForSlugs(slugs: string[], _l: number) {
       guardDbCalls.push(`t:${slugs.length}`);
