@@ -76,7 +76,9 @@ export function renderTopicBody(output: TopicModelOutput, sources: TopicRenderSo
     "",
     "## 来源",
     "",
-    ...sources.map((source) => `- ${renderSourceRef(source)}`),
+    // Keep each complete link independently chunkable as source counts grow.
+    // A single list paragraph can exceed the embedding input budget (#517).
+    ...sources.flatMap((source) => [`- ${renderSourceRef(source)}`, ""]),
   ];
   return lines.join("\n").trim();
 }
