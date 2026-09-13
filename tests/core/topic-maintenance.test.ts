@@ -20,6 +20,7 @@ import {
   TopicMaintenance,
   TOPIC_JOB_NAME,
   MAX_MANAGED_TOPICS,
+  MAX_AUTO_FILL_TOPICS,
   computeCatalogFingerprint,
   type TopicPreviewReport,
   type TopicRunReceipt,
@@ -463,17 +464,44 @@ describe("topic wiki — discovery and maintenance", () => {
     expect(pending).toHaveLength(1);
     expect(maintenance.tick(BASE_NOW)).toBe(false); // coalesced while active
     const receipt = (await runHandle(maintenance, JSON.parse(pending[0].data!))) as TopicRunReceipt;
-    expect(receipt.counts.created).toBe(MAX_MANAGED_TOPICS);
-    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
+    expect(receipt.counts.created).toBe(MAX_AUTO_FILL_TOPICS);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_AUTO_FILL_TOPICS);
 
     // Repeated reconciliation must not add a sixth topic nor call the model again.
     const callsAfterFirst = llm.calls.length;
     const topicsNow = db.listPageSlugs({ type: "topic" }).slice().sort();
     const second = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
-    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_AUTO_FILL_TOPICS);
     expect(db.listPageSlugs({ type: "topic" }).slice().sort()).toEqual(topicsNow);
     expect(llm.calls.length).toBe(callsAfterFirst);
-    expect(second.counts.unchanged + second.counts.reattested).toBe(MAX_MANAGED_TOPICS);
+    expect(second.counts.unchanged + second.counts.reattested).toBe(MAX_AUTO_FILL_TOPICS);
+  });
+
+  test("automatic filling stays at five; only an explicit selection creates the sixth topic", async () => {
+    for (let i = 0; i < 7; i++) await seedTaggedRecords(`自动主题${i}`, 3);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable" });
+    const pending = db.listJobs("pending").filter((j) => j.name === TOPIC_JOB_NAME);
+    const fill = (await runHandle(maintenance, JSON.parse(pending[0].data!))) as TopicRunReceipt;
+    expect(fill.counts.created).toBe(MAX_AUTO_FILL_TOPICS);
+
+    // An explicit sixth: operator-reviewed expansion beyond the auto cap.
+    await seedTaggedRecords("追加主题", 3);
+    const explicit = (await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:追加主题"] })) as unknown as {
+      created: Array<{ key: string }>; blocked: Array<{ reason: string }>;
+    };
+    expect(explicit.created.map((c) => c.key)).toEqual(["tag:追加主题"]);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_AUTO_FILL_TOPICS + 1);
+
+    // Even back in generic mode, scheduled filling never creates unselected
+    // topics past the automatic cap.
+    db.deleteConfig("topic.selection_mode");
+    db.deleteConfig("topic.pending_selection");
+    const callsBefore = llm.calls.length;
+    const third = (await runHandle(maintenance, { action: "refresh", scheduled: true })) as TopicRunReceipt;
+    expect(third.counts.created).toBe(0);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_AUTO_FILL_TOPICS + 1);
+    expect(llm.calls.length).toBe(callsBefore);
   });
 
   test("enable with explicit candidateKeys creates only the selection; failures stay pending", async () => {
@@ -681,20 +709,71 @@ describe("topic wiki — discovery and maintenance", () => {
     expect(ner.every((j) => j.status === "running")).toBe(true);
   });
 
-  test("a second explicit enable cannot exceed five total topics", async () => {
-    const keys = ["主题甲", "主题乙", "主题丙", "主题丁", "主题戊"];
+  test("repeated explicit enables fill up to the 32-topic ceiling; a new seed there is capacity-blocked", async () => {
+    // 33 creatable seeds, submitted in five-key batches (per-request cap
+    // unchanged) — only the total bound decides when creation stops.
+    const keys = Array.from({ length: 33 }, (_, i) => `容量主题${i}`);
     for (const key of keys) await seedTaggedRecords(key, 3);
     const { maintenance } = smart();
-    await runHandle(maintenance, { action: "enable", candidateKeys: keys.map((k) => `tag:${k}`) });
+    for (let batch = 0; batch * 5 < keys.length; batch++) {
+      const slice = keys.slice(batch * 5, batch * 5 + 5);
+      await runHandle(maintenance, { action: "enable", candidateKeys: slice.map((k) => `tag:${k}`) });
+    }
     expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
 
-    await seedTaggedRecords("主题己", 3);
-    const receipt = (await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题己"] })) as unknown as {
+    const over = (await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:${keys[32]}`] })) as unknown as {
       created: unknown[]; blocked: Array<{ reason: string }>;
     };
     expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
-    expect(receipt.created).toHaveLength(0);
-    expect(receipt.blocked[0]?.reason).toBe("at_capacity");
+    expect(over.created).toHaveLength(0);
+    expect(over.blocked[0]?.reason).toBe("at_capacity");
+  });
+
+  test("re-enabling an already materialized seed is idempotent, even at capacity", async () => {
+    for (let i = 0; i < 5; i++) await seedTaggedRecords(`既有主题${i}`, 3);
+    const { maintenance, llm } = smart();
+    const first = (await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:既有主题0`] })) as unknown as {
+      created: unknown[]; blocked: Array<{ reason: string }>; pendingSelection: string[];
+    };
+    expect(first.created).toHaveLength(1);
+    expect(db.getConfig("topic.pending_selection")).toBeNull();
+
+    // Re-enable of the SAME seed: no duplicate, no block, no model call, and
+    // any stale pending entry is pruned.
+    db.setConfig("topic.pending_selection", JSON.stringify(["tag:既有主题0"]));
+    const callsBefore = llm.calls.length;
+    const again = (await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:既有主题0`] })) as unknown as {
+      created: unknown[]; blocked: Array<{ reason: string }>; pendingSelection: string[];
+    };
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(1);
+    expect(again.created).toHaveLength(0);
+    expect(again.blocked).toHaveLength(0);
+    expect(llm.calls.length).toBe(callsBefore);
+    expect(again.pendingSelection).toEqual([]);
+    expect(db.getConfig("topic.pending_selection")).toBeNull();
+  });
+
+  test("a later enable unions its selection with prior pending selections instead of dropping them", async () => {
+    await seedTaggedRecords("可建主题", 3);
+    // One oversize seed that stays blocked (material over budget, never truncated).
+    await seedRecord("超大记录", `${BODY_A}\n${"补充细节。".repeat(60000)}`, ["超大主题"]);
+    await seedRecord("超大记录乙", `${BODY_B}\n${"更多细节。".repeat(60000)}`, ["超大主题"]);
+    await seedRecord("超大记录丙", `${BODY_C}\n${"其余细节。".repeat(60000)}`, ["超大主题"]);
+    await seedTaggedRecords("后续主题", 3);
+    const { maintenance } = makeMaintenance(makeSmartLlm(), { maxTotalMaterialChars: 150_000 });
+
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:可建主题", "tag:超大主题"] });
+    expect(db.getConfig("topic.pending_selection")).toBe(JSON.stringify(["tag:超大主题"]));
+
+    // A later enable with a NEW key must not overwrite the failed authorized
+    // seed out of the pending selection.
+    const second = (await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:后续主题"] })) as unknown as {
+      created: Array<{ key: string }>; pendingSelection: string[];
+    };
+    expect(second.created.map((c) => c.key)).toEqual(["tag:后续主题"]);
+    expect(second.pendingSelection).toEqual(["tag:超大主题"]);
+    expect(db.getConfig("topic.pending_selection")).toBe(JSON.stringify(["tag:超大主题"]));
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(2);
   });
 
   test("an explicit selection stays authoritative after all selected topics succeed", async () => {

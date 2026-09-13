@@ -11,9 +11,16 @@ import type { TopicManifest, TopicSeed } from "./types.js";
  *  both at the topic-only submit hook and inside the handler. */
 export const TOPIC_JOB_NAME = "topic-wiki";
 
-/** Initial pilot bound: maximum number of MANAGED topic pages in total
- *  (existing + newly created), not per run. */
-export const MAX_MANAGED_TOPICS = 5;
+/** Operator-reviewed expansion bound (#516): maximum number of MANAGED topic
+ *  pages in total (existing + newly created), not per run. Only explicit
+ *  selections may approach it — automatic filling keeps the original pilot
+ *  cap (MAX_AUTO_FILL_TOPICS). This is a resource ceiling, never a target
+ *  taxonomy; the per-request key cap (MAX_CANDIDATE_KEYS) is unchanged. */
+export const MAX_MANAGED_TOPICS = 32;
+
+/** Automatic (unselected) pilot filling stays capped at five total pages; a
+ *  sixth topic and beyond requires an explicit operator selection. */
+export const MAX_AUTO_FILL_TOPICS = 5;
 
 /** Maintenance cadence: one scheduled run per 30 minutes while enabled. */
 export const TOPIC_TICK_MS = 30 * 60 * 1000;
@@ -521,12 +528,15 @@ export class TopicMaintenance {
         }
         // Created keys are pruned by createForKey; failed keys stay pending.
       } else if (this.db.getConfig(SELECTION_MODE_CONFIG) !== "explicit") {
+        // Generic automatic filling never leaves the original pilot cap: only
+        // an explicit operator selection may hold topics beyond it (#516).
+        let autoSpare = Math.max(0, MAX_AUTO_FILL_TOPICS - managed.length);
         const materialized = new Set(managed.map((t) => t.manifest.seed?.key).filter(Boolean) as string[]);
         for (const candidate of discovery.candidates) {
-          if (spare <= 0 || this.stopping) break;
+          if (autoSpare <= 0 || this.stopping) break;
           if (materialized.has(candidate.key)) continue;
           const outcome = await this.createForKey(candidate.key, discovery, catalog, execution, receipt);
-          if (outcome === "created") spare--;
+          if (outcome === "created") autoSpare--;
         }
       }
     }
@@ -677,8 +687,14 @@ export class TopicMaintenance {
       receipt,
       { key, title },
     );
-    if (outcome === "created") this.prunePendingSelection(key);
-    return outcome === "created" ? "created" : "blocked";
+    if (outcome === "created" || outcome === "refreshed" || outcome === "unchanged") {
+      // Materialized — newly or already: the pending entry is done, and an
+      // idempotent re-enable must neither report a block nor leave the key
+      // pending forever. Only a genuinely NEW topic consumes a spare slot.
+      this.prunePendingSelection(key);
+      return outcome === "created" ? "created" : "skipped";
+    }
+    return "blocked";
   }
 
   // ─── Enable / disable ─────────────────────────────────────────────
@@ -703,10 +719,13 @@ export class TopicMaintenance {
     // retries the SAME selection instead of auto-filling generic candidates.
     // An explicit selection is AUTHORITATIVE until the operator re-enables
     // without one: while selection_mode=explicit, scheduled filling never
-    // creates generic ranked candidates.
+    // creates generic ranked candidates. A later enable UNIONS its keys with
+    // prior pending selections — previously authorized seeds that failed are
+    // never silently dropped from retry (#516).
     this.db.setConfig(ENABLED_CONFIG, "true");
     if (parsed.candidateKeys && parsed.candidateKeys.length > 0) {
-      this.db.setConfig(PENDING_SELECTION_CONFIG, JSON.stringify(parsed.candidateKeys));
+      const merged = [...new Set([...this.readPendingSelection(), ...parsed.candidateKeys])];
+      this.db.setConfig(PENDING_SELECTION_CONFIG, JSON.stringify(merged));
       this.db.setConfig(SELECTION_MODE_CONFIG, "explicit");
     } else {
       try { this.db.deleteConfig(SELECTION_MODE_CONFIG); } catch { /* best effort */ }
@@ -718,11 +737,24 @@ export class TopicMaintenance {
     if (parsed.candidateKeys && parsed.candidateKeys.length > 0) {
       const catalog = computeCatalogFingerprint(this.db);
       const discovery = discoverTopicCandidates(this.db);
-      // The MAX_MANAGED_TOPICS pilot bound holds across EVERY creation path,
+      const managedNow = this.listManagedTopics();
+      const materialized = new Set(managedNow.flatMap((t) => (t.manifest.seed ? [t.manifest.seed.key] : [])));
+      // The MAX_MANAGED_TOPICS bound holds across EVERY creation path,
       // including repeated explicit enables — never only the scheduled fill.
-      let spare = Math.max(0, MAX_MANAGED_TOPICS - this.listManagedTopics().length);
+      // An ALREADY-materialized seed bypasses the capacity gate: re-enabling
+      // it is an idempotent reconciliation, not a new creation.
+      let spare = Math.max(0, MAX_MANAGED_TOPICS - managedNow.length);
       for (const key of parsed.candidateKeys) {
         if (this.stopping) break;
+        if (materialized.has(key)) {
+          const reconcile: TopicRunReceipt = {
+            action: "enable", catalogFingerprint: catalog, managed: [], created: [], blocked: [],
+            counts: { refreshed: 0, unchanged: 0, reattested: 0, skipped: 0, created: 0, blocked: 0 },
+          };
+          await this.createForKey(key, discovery, catalog, execution, reconcile);
+          for (const b of reconcile.blocked) blocked.push({ key, reason: b.reason });
+          continue;
+        }
         if (spare <= 0) {
           blocked.push({ key, reason: "at_capacity" });
           continue;

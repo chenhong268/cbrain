@@ -286,7 +286,7 @@ Skills follow GBrain's "fat skills, thin harness" philosophy: intelligence lives
 
 ## Topic Wiki (generated reading pages)
 
-Topic pages are auto-compiled **derived reading aids**, never independent evidence. A topic is compiled from the complete membership of its seed's original `record` pages (min 3 to create; pilot cap 5 managed topics total); its body only contains claims that each cite an exact substring of a selected source, and its 来源 section links each source with a navigable relative Markdown link (never a wikilink — generated pages must not feed the relation graph).
+Topic pages are auto-compiled **derived reading aids**, never independent evidence. A topic is compiled from the complete membership of its seed's original `record` pages (min 3 to create; automatic unselected filling stays capped at 5 managed topics total, while repeated explicit selections may maintain up to 32 — a resource ceiling, never a target taxonomy; at most 5 candidate keys per enable request); its body only contains claims that each cite an exact substring of a selected source, and its 来源 section links each source with a navigable relative Markdown link (never a wikilink — generated pages must not feed the relation graph).
 
 Whole-topic admission bounds: a seed selection is admitted up to 128 distinct sources (one ceiling shared by the compiler and read-side manifest verification) within a 150,000-character material budget and one model call per compile. The count is an admission ceiling, never a selection rule — preview, creation, retry and refresh all pass complete seed membership, and an over-budget theme is rejected whole (blocked for splitting) rather than publishing a partial selection. Source changes within the selected set are reconciled automatically.
 
