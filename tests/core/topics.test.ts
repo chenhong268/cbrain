@@ -1315,3 +1315,125 @@ describe("topic wiki — re-review round 1 regressions", () => {
     expect(overview).toContain("[候选]");
   });
 });
+
+// ═══ Re-review round 2 regression ═══════════════════════════════════
+// Imported from /tmp/cbrain-topic-rereview2-probe.test.ts (assertions
+// extended to chunks + FTS per review): an independent user write landing
+// while the restore's vector add is paused at the real Lance boundary must
+// end with the user's raw, chunks, FTS and vectors exactly — never a mix
+// of old-topic and user vectors. Orchestration: the restore and the user
+// write both go through ContentPipeline's per-slug serialization, so the
+// paused restore's Lance callback must NOT await the user's same-slug
+// write (that would be an artificial self-deadlock); the independent
+// main-flow user write is enqueued while the restore is paused, the
+// restore is released, then both operations are awaited.
+
+describe("topic wiki — re-review round 2 regression", () => {
+  const testDir = "/tmp/cbrain-test-topics-rr2";
+  const vaultPath = join(testDir, "vault");
+
+  let db: CBrainDB;
+  let pages: PageManager;
+  let pipeline: ContentPipeline;
+  let versions: VersionManager;
+  let lance: LanceDBManager;
+  let sourceA: { slug: string; body: string };
+  let sourceB: { slug: string; body: string };
+  let sourceC: { slug: string; body: string };
+
+  beforeEach(async () => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(join(testDir, "test.sqlite"));
+    pages = new PageManager(db, vaultPath, noLogger as never);
+    lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    pipeline = new ContentPipeline(db, new DeterministicEmbeddingProvider(), lance, {
+      pages,
+      logger: noLogger as never,
+    });
+    versions = new VersionManager(db, pages, vaultPath, noLogger as never);
+  });
+
+  afterEach(async () => {
+    await lance.close();
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  async function seedRecord(title: string, body: string): Promise<{ slug: string; body: string }> {
+    const page = pages.create({ title, type: "record", body });
+    const { chunks, embedResults } = await pipeline.embed(body);
+    await pipeline.writeIndexes(page.slug, chunks, embedResults);
+    return { slug: page.slug, body };
+  }
+
+  function makeManager(llm: LLMProvider) {
+    return new TopicManager({ db, pages, pipeline, versions, lance, llm, logger: noLogger as never });
+  }
+
+  async function seedSources() {
+    sourceA = await seedRecord("记录甲", RECORD_A_BODY);
+    sourceB = await seedRecord("记录乙", RECORD_B_BODY);
+    sourceC = await seedRecord("记录丙", RECORD_C_BODY);
+  }
+
+  function allSources() {
+    return [sourceA, sourceB, sourceC];
+  }
+
+  function ftsContent(slug: string): string {
+    const rows = db.rawDb
+      .prepare("SELECT content FROM chunks_fts WHERE page_slug = ? ORDER BY rowid")
+      .all(slug) as Array<{ content: string }>;
+    return rows.map((r) => r.content).join("\n\n");
+  }
+
+  test("independent user write during restore keeps user raw, chunks, FTS and vectors exactly", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const created = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    const slug = (created as { slug: string }).slug;
+    const path = join(vaultPath, db.getPage(slug)!.file_path);
+    pages.update(sourceA.slug, { body: sourceA.body + "\n变更1。" });
+
+    const userBody = "用户正文唯一哨兵。";
+    const prepared = await pipeline.embed(userBody);
+    const originalAdd = lance.addChunks.bind(lance);
+    let calls = 0;
+    let entered!: () => void;
+    let release!: () => void;
+    const restoreEntered = new Promise<void>((r) => (entered = r));
+    const restoreRelease = new Promise<void>((r) => (release = r));
+    (lance as unknown as { addChunks: typeof lance.addChunks }).addChunks = async (chunks) => {
+      calls++;
+      if (calls === 1) throw new Error("VECTOR_DOWN");
+      if (calls === 2) {
+        entered();
+        await restoreRelease;
+      }
+      return originalAdd(chunks);
+    };
+
+    const compile = manager
+      .compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) })
+      .catch(() => undefined);
+    await restoreEntered;
+    // Independent main-flow user write: enqueued on the same serialized
+    // queue while the restore's add is paused; NOT awaited from inside the
+    // Lance callback (that would self-deadlock the per-slug slot).
+    pages.update(slug, { body: userBody });
+    const userIndex = pipeline.writeIndexes(slug, prepared.chunks, prepared.embedResults);
+    release();
+    await compile;
+    await userIndex;
+
+    expect(parseFrontmatter(readFileSync(path, "utf8")).body).toBe(userBody);
+    expect(db.getChunksByPage(slug).map((c) => c.content).join("\n")).toBe(userBody);
+    expect(ftsContent(slug)).toContain(userBody);
+    const vectors = await lance.readRawVectorRows(slug);
+    expect(vectors.map((r) => r.content).join("\n")).toBe(userBody);
+    // No duplicate/old-topic chunk indexes left behind.
+    expect(new Set(vectors.map((r) => r.chunkIndex)).size).toBe(vectors.length);
+  });
+});

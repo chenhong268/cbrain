@@ -33,12 +33,12 @@ import {
 
 const MAX_TITLE_CHARS = 120;
 
-/** Pre-mutation index snapshot for provider-independent rollback. */
+/** Pre-mutation index snapshot for provider-independent rollback. L1 rows
+ *  are intentionally not captured: nonempty pipeline writes preserve them. */
 interface IndexSnapshot {
   raw: string;
   chunks: Array<{ chunkIndex: number; content: string }>;
   vectors: RawVectorRow[];
-  l1: RawVectorRow[];
 }
 
 /**
@@ -350,7 +350,6 @@ export class TopicManager {
         raw: existingRaw!,
         chunks: this.db.getChunksByPage(slug).map((c) => ({ chunkIndex: c.chunk_index, content: c.content })),
         vectors: await this.lance.readRawVectorRows(slug),
-        l1: await this.lance.readL1VectorRows(slug),
       };
     }
 
@@ -507,16 +506,18 @@ export class TopicManager {
    * is preserved byte-for-byte and the page is left dirty (cannot read as
    * fresh).
    *
-   * The restore replays the pre-mutation snapshot (old raw bytes, chunks,
-   * vectors — no embedding-provider call). The vector swap is bracketed by
-   * ownership re-checks: if a concurrent edit lands while our restore is
-   * mid-flight, we do NOT replay the old vectors over their newer index —
-   * the page is repaired through the standard serialized writeIndexes path
-   * for THEIR current body instead. (The restore itself cannot run inside
-   * pipeline.writeIndexes' per-page serialization: a caller completing a
-   * new-body index from inside our vector-delete await would deadlock on
-   * the same per-slug slot — the ownership-CAS + serialized-repair split
-   * keeps one ordering without a second indexing framework.)
+   * There is exactly ONE index path: the pre-mutation snapshot is replayed
+   * through the SAME serialized ContentPipeline.writeIndexes queue as every
+   * other writer, with the snapshot's own vectors as prepared embedResults —
+   * the embedding provider is never called for rollback, no parallel
+   * SQLite/FTS/Lance restore exists, and L1 rows ride the existing pipeline
+   * contract (nonempty writes preserve them). The pipeline's content-hash
+   * gate decides cleanliness, so the old snapshot hash is never marked
+   * clean after another writer took ownership. Vector cleanup for a failed
+   * NEW page also goes through the queue (empty-chunk write) BEFORE the
+   * synchronous page/DB removal, so an unqueued delete can never race a
+   * same-slug re-creation; ownership is re-checked after the await and a
+   * taken-over page is preserved and reported incomplete.
    */
   private async compensateIndexFailure(
     slug: string,
@@ -534,104 +535,77 @@ export class TopicManager {
       return;
     }
 
-    const errors: Error[] = [];
+    const failIncomplete = (reason: string): TopicRollbackError => {
+      // Explicit invalid state: never leave a half-restored page readable
+      // as current.
+      try { this.db.updatePageHash(slug, null); } catch { /* best effort; the error carries it */ }
+      return new TopicRollbackError(originalError, [new Error(reason)]);
+    };
+
     if (created) {
+      // 1. Clear our failed vectors through the serialized queue (empty
+      //    chunks = the pipeline's own empty-index semantics).
+      try {
+        await this.pipeline.writeIndexes(slug, [], []);
+      } catch (e) {
+        throw failIncomplete(`TOPIC_CLEANUP_INDEX_FAILED: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      // 2. Ownership re-check AFTER the await: if a concurrent writer took
+      //    the page over, preserve their page/bytes and report incomplete —
+      //    never delete a new owner's page or DB row.
+      const now = this.readTopicPageRaw(slug);
+      if (!now || now.raw !== writtenRaw) {
+        throw failIncomplete("TOPIC_CLEANUP_TAKEN_OVER: page preserved, left dirty");
+      }
       const filePath = this.db.getPageFilePath(slug) ?? `${slug}.md`;
       try {
         unlinkSync(join(this.pages.vaultPath, filePath));
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") errors.push(error);
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw failIncomplete(`TOPIC_CLEANUP_UNLINK_FAILED: ${error.message}`);
+        }
       }
       try {
         this.db.deletePageCascaded(slug);
-      } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
-      try {
-        await this.lance.deleteByPageSlug(slug);
-      } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
-    } else if (indexSnapshot) {
-      // 1. Restore our owned old bytes exactly (frontmatter extras, tags
-      //    and version history untouched) + old chunks/FTS.
-      try {
-        writeFileSync(resolveWithinVault(this.pages.vaultPath, this.db.getPageFilePath(slug)!), indexSnapshot.raw);
-        this.db.transaction(() => {
-          this.db.deleteChunksByPage(slug);
-          this.db.ftsDeleteByPage(slug);
-          for (const chunk of indexSnapshot!.chunks) {
-            this.db.insertChunk(slug, chunk.chunkIndex, chunk.content);
-          }
-          this.db.ftsInsert(
-            slug,
-            [...indexSnapshot!.chunks]
-              .sort((a, b) => a.chunkIndex - b.chunkIndex)
-              .map((c) => c.content)
-              .join("\n\n"),
-          );
-        });
-      } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
-
-      // 2. Vector swap with an ownership re-check between delete and add:
-      //    a user completing a new-body index during our delete must never
-      //    have their vectors replaced by the old snapshot.
-      try {
-        await this.lance.deleteRawChunksByPageSlug(slug);
-        await this.lance.deleteL1VectorByPageSlug(slug);
-        const now = this.readTopicPageRaw(slug);
-        if (now && now.raw !== indexSnapshot.raw) {
-          // The page changed under us — repair through the ONE serialized
-          // index path for the current (user-owned) body. This may call the
-          // embedding provider: it is forward repair of their content, not
-          // a rollback dependency of ours.
-          const { chunks, embedResults } = await this.pipeline.embed(now.body);
-          await this.pipeline.writeIndexes(slug, chunks, embedResults);
-        } else if (!now) {
-          // The page itself disappeared mid-restore (deleted by someone
-          // else) — nothing left to repair; leave the hash decision to
-          // whoever owns the deletion.
-        } else {
-          const rows = [...indexSnapshot.vectors, ...indexSnapshot.l1].map((r) => ({
-            pageSlug: slug,
-            chunkIndex: r.chunkIndex,
-            content: r.content,
-            vector: r.vector,
-          }));
-          if (rows.length > 0) await this.lance.addChunks(rows);
-          // Content-level verification (row counts alone prove nothing):
-          // restored vectors must equal the snapshot before we may let the
-          // page read as clean again.
-          const restored = await this.lance.readRawVectorRows(slug);
-          if (!sameVectorContents(restored, indexSnapshot.vectors)) {
-            throw new Error("TOPIC_RESTORE_VERIFY_FAILED: restored vectors differ from snapshot");
-          }
-          if (this.readTopicPageRaw(slug)?.raw === indexSnapshot.raw) {
-            this.db.updatePageHash(slug, hashContent(indexSnapshot.raw));
-          } else {
-            this.db.updatePageHash(slug, null);
-          }
-        }
-      } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+      } catch (e) {
+        throw failIncomplete(`TOPIC_CLEANUP_DB_FAILED: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      return;
     }
-    if (errors.length > 0) {
-      // Explicit invalid state: never leave a half-restored page readable
-      // as current.
-      try { this.db.updatePageHash(slug, null); } catch { /* best effort; rollback error below carries it */ }
-      throw new TopicRollbackError(originalError, errors);
+
+    if (!indexSnapshot) return;
+
+    // Snapshot correspondence must be provable BEFORE any mutation: chunks
+    // and vectors have to pair 1:1 by chunkIndex + content, otherwise the
+    // restore cannot be trusted — leave the bytes dirty and report
+    // incomplete.
+    const orderedChunks = [...indexSnapshot.chunks].sort((a, b) => a.chunkIndex - b.chunkIndex);
+    const provable = orderedChunks.length === indexSnapshot.vectors.length
+      && orderedChunks.every(
+        (c, i) => indexSnapshot.vectors[i].chunkIndex === c.chunkIndex
+          && indexSnapshot.vectors[i].content === c.content,
+      );
+    if (!provable) {
+      throw failIncomplete("TOPIC_SNAPSHOT_MISMATCH: snapshot chunks/vectors do not correspond");
+    }
+
+    // Restore our owned old bytes synchronously, then immediately enqueue
+    // the ONE serialized index path with the snapshot's chunks and its own
+    // vectors as prepared embedResults (tokenCount 0 — no provider call).
+    // commitIndexedFileHash decides the final hash from the actual file
+    // bytes, so a concurrent user write landing in the queue after ours
+    // still wins, and our restored hash only commits when the file still
+    // holds the restored bytes.
+    try {
+      writeFileSync(resolveWithinVault(this.pages.vaultPath, this.db.getPageFilePath(slug)!), indexSnapshot.raw);
+      await this.pipeline.writeIndexes(
+        slug,
+        orderedChunks.map((c) => ({ index: c.chunkIndex, content: c.content })),
+        indexSnapshot.vectors.map((v) => ({ embedding: Array.from(v.vector), tokenCount: 0 })),
+      );
+    } catch (e) {
+      throw failIncomplete(`TOPIC_RESTORE_FAILED: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-}
-
-/** Content-level equality of restored vs snapshotted vectors (pageSlug is
- *  fixed; compare chunkIndex, content and vector bytes). */
-function sameVectorContents(actual: RawVectorRow[], expected: RawVectorRow[]): boolean {
-  if (actual.length !== expected.length) return false;
-  for (let i = 0; i < actual.length; i++) {
-    const a = actual[i];
-    const e = expected[i];
-    if (a.chunkIndex !== e.chunkIndex || a.content !== e.content) return false;
-    if (a.vector.length !== e.vector.length) return false;
-    for (let j = 0; j < a.vector.length; j++) {
-      if (a.vector[j] !== e.vector[j]) return false;
-    }
-  }
-  return true;
 }
