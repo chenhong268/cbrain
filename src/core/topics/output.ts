@@ -35,10 +35,25 @@ Rules:
 - Disagreements between sources go to "open_questions" or "details", never silently resolved.`;
 }
 
+/** Keep the final instruction after the full material: the real-provider
+ *  pilot otherwise produced excessive detail despite the system limits.
+ *  Concise targets never exceed the validator's configured bounds. */
+function conciseDirective(budgets: TopicBudgets): string {
+  const overview = Math.min(1, budgets.maxOverviewClaims);
+  const observations = Math.min(3, budgets.maxObservations);
+  const details = Math.min(2, budgets.maxDetails);
+  const openQuestions = Math.min(1, budgets.maxOpenQuestions);
+  const quoteUpper = Math.min(40, budgets.maxQuoteChars);
+  const quoteLower = Math.min(10, quoteUpper);
+  return `现在请输出精简的主题知识页 JSON：overview 只写 ${overview} 条；observations 只写 ${observations} 条综合要点；details 最多 ${details} 条；open_questions 最多 ${openQuestions} 条（没有原文依据就留空数组）。不要逐篇列摘要，不需要覆盖每份材料。每个 quote 选取对应来源中的一小段连续原文，建议 ${quoteLower}–${quoteUpper} 个字，保留原始 Markdown 符号；必须逐字复制，不要改写或补字。输出前核对数组条数和每条引用。只输出 JSON。`;
+}
+
 /** Build the bounded compile prompt. Source bodies are included in full —
  *  oversize material is rejected upstream, never truncated here. The explicit
  *  output limits come from `budgets` (the same bounds the validator enforces;
- *  defaults to DEFAULT_TOPIC_BUDGETS). */
+ *  defaults to DEFAULT_TOPIC_BUDGETS). Shape (tested against the real
+ *  provider): system rules → material user message → final concise directive
+ *  user message. */
 export function buildTopicPrompt(title: string, snapshots: TopicSourceSnapshot[], budgets: TopicBudgets = DEFAULT_TOPIC_BUDGETS): ChatMessage[] {
   const sections = snapshots.map((s) => {
     const facts = s.usableFacts.length > 0
@@ -60,6 +75,7 @@ export function buildTopicPrompt(title: string, snapshots: TopicSourceSnapshot[]
   return [
     { role: "system", content: systemPrompt(budgets) },
     { role: "user", content: user },
+    { role: "user", content: conciseDirective(budgets) },
   ];
 }
 

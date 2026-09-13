@@ -1588,4 +1588,70 @@ describe("topic wiki — compile model-call reliability (real-provider pilot)", 
     expect(prompt).toContain(`### SOURCE ${page.slug}\n${longBody}`);
     expect(prompt).toContain(longTail);
   });
+
+  test("final concise directive rides as the LAST user message after complete material", async () => {
+    const sources = await seedSources();
+    const llm = makeQueuedLlm([validModelOutput(sources)]);
+    const manager = managerWith(llm);
+    const result = await manager.compile({ title: "主题G", sourceSlugs: sources.map((s) => s.slug) });
+    expect(result.status).toBe("created");
+    const messages = llm.calls[0]!.messages;
+    // system → material user → final concise directive (tested real-provider shape).
+    expect(messages.length).toBe(3);
+    expect(messages[0]!.role).toBe("system");
+    expect(messages[1]!.role).toBe("user");
+    expect(messages[2]!.role).toBe("user");
+    // Complete source bodies stay BEFORE the directive, untruncated.
+    expect(messages[1]!.content).toContain(`### SOURCE ${sources[0].slug}`);
+    expect(messages[1]!.content).toContain("原始材料0");
+    const directive = messages[2]!.content;
+    expect(directive).toContain("现在请输出精简的主题知识页 JSON");
+    expect(directive).toContain("overview 只写 1 条");
+    expect(directive).toContain("observations 只写 3 条综合要点");
+    expect(directive).toContain("details 最多 2 条");
+    expect(directive).toContain("open_questions 最多 1 条");
+    expect(directive).toContain("没有原文依据就留空数组");
+    expect(directive).toContain("建议 10–40 个字");
+    expect(directive).toContain("必须逐字复制，不要改写或补字");
+    expect(directive).toContain("只输出 JSON");
+    // The directive is placement-only: no material duplicated into it.
+    expect(directive).not.toContain("### SOURCE");
+  });
+
+  test("custom lower budgets still govern the final directive targets", async () => {
+    const sources = await seedSources();
+    const budgets = {
+      ...DEFAULT_TOPIC_BUDGETS,
+      maxOverviewClaims: 1,
+      maxObservations: 2,
+      maxDetails: 1,
+      maxOpenQuestions: 0,
+      maxQuoteChars: 25,
+    } satisfies TopicBudgets;
+    const shortQuote = (i: number) => sources[i].body.split("\n")[0].slice(0, 10);
+    const minimalOutput = {
+      overview: [{ text: "主题H的综合要点。", kind: "observation" as const, sourceSlug: sources[0].slug, quote: shortQuote(0) }],
+      observations: sources.slice(0, 2).map((s, i) => ({
+        text: `综合要点${i + 1}。`,
+        kind: "observation" as const,
+        sourceSlug: s.slug,
+        quote: shortQuote(i),
+      })),
+      details: [{ text: "细节一。", kind: "observation" as const, sourceSlug: sources[2].slug, quote: shortQuote(2) }],
+      open_questions: [],
+    };
+    const llm = makeQueuedLlm([minimalOutput]);
+    const manager = new TopicManager({ db, pages, pipeline, versions, lance, llm, logger: noLogger as never, budgets });
+    const result = await manager.compile({ title: "主题H", sourceSlugs: sources.map((s) => s.slug) });
+    expect(result.status).toBe("created");
+    const directive = llm.calls[0]!.messages[2]!.content;
+    expect(directive).toContain("observations 只写 2 条综合要点");
+    expect(directive).toContain("details 最多 1 条");
+    expect(directive).toContain("open_questions 最多 0 条");
+    expect(directive).toContain("建议 10–25 个字");
+    // Targets never exceed the custom ceilings.
+    expect(directive).not.toContain("只写 3 条");
+    expect(directive).not.toContain("最多 2 条");
+    expect(directive).not.toContain("10–40");
+  });
 });
