@@ -155,12 +155,21 @@ export interface TopicRetiredSource extends TopicManifestSource {
   retired_at: string;
 }
 
+/** Topic-owned durable publication proof. `pending` is written BEFORE the
+ *  indexes; only after index success + source/target/cancellation checks
+ *  does the compile synchronously flip it to `committed`. A clean pipeline
+ *  content hash alone cannot certify a pending topic, and a crash-left
+ *  pending topic stays unavailable after restart. */
+export type TopicPublicationState = "pending" | "committed";
+
 /** Versioned manifest persisted in the topic page frontmatter under `topic`. */
 export interface TopicManifest {
   schema_version: number;
   title: string;
   generated_at: string;
   output_hash: string;
+  /** Missing (legacy/corrupt) parses as "pending" — fail closed. */
+  state: TopicPublicationState;
   sources: TopicManifestSource[];
   retired_sources: TopicRetiredSource[];
 }

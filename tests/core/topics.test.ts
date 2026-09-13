@@ -1047,3 +1047,271 @@ describe("topic wiki — review round 1 regressions", () => {
     expect(db.getPageContentHash(slug)).toBe(hashContent(oldRaw));
   });
 });
+
+// ═══ Re-review round 1 regressions ══════════════════════════════════
+// Imported from the round-2 reviewer probes (absolute-path originals in
+// /tmp/cbrain-topic-rereview1-probe.test.ts) as repo regression tests:
+// project-relative imports, own temp fixtures. Each probe reproduced a
+// real publication/cancellation/rollback failure against e99016c.
+
+describe("topic wiki — re-review round 1 regressions", () => {
+  const testDir = "/tmp/cbrain-test-topics-rr1";
+  const vaultPath = join(testDir, "vault");
+
+  let db: CBrainDB;
+  let pages: PageManager;
+  let pipeline: ContentPipeline;
+  let versions: VersionManager;
+  let lance: LanceDBManager;
+  let sourceA: { slug: string; body: string };
+  let sourceB: { slug: string; body: string };
+  let sourceC: { slug: string; body: string };
+
+  beforeEach(async () => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(join(testDir, "test.sqlite"));
+    pages = new PageManager(db, vaultPath, noLogger as never);
+    lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    pipeline = new ContentPipeline(db, new DeterministicEmbeddingProvider(), lance, {
+      pages,
+      logger: noLogger as never,
+    });
+    versions = new VersionManager(db, pages, vaultPath, noLogger as never);
+  });
+
+  afterEach(async () => {
+    await lance.close();
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  async function seedRecord(title: string, body: string): Promise<{ slug: string; body: string }> {
+    const page = pages.create({ title, type: "record", body });
+    const { chunks, embedResults } = await pipeline.embed(body);
+    await pipeline.writeIndexes(page.slug, chunks, embedResults);
+    return { slug: page.slug, body };
+  }
+
+  function makeManager(llm: LLMProvider) {
+    return new TopicManager({ db, pages, pipeline, versions, lance, llm, logger: noLogger as never });
+  }
+
+  async function seedSources() {
+    sourceA = await seedRecord("记录甲", RECORD_A_BODY);
+    sourceB = await seedRecord("记录乙", RECORD_B_BODY);
+    sourceC = await seedRecord("记录丙", RECORD_C_BODY);
+  }
+
+  function allSources() {
+    return [sourceA, sourceB, sourceC];
+  }
+
+  test("index-clean microtask window before the final publication check is not fresh", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const controller = new AbortController();
+    const original = lance.addChunks.bind(lance);
+    let during: string | undefined;
+    (lance as unknown as { addChunks: typeof lance.addChunks }).addChunks = async (chunks) => {
+      const result = await original(chunks);
+      queueMicrotask(() =>
+        queueMicrotask(() => {
+          controller.abort();
+          during = manager.inspectFreshness(manager.resolveTopicSlug("主题D"))?.state;
+        }),
+      );
+      return result;
+    };
+    try {
+      await manager.compile({
+        title: "主题D",
+        sourceSlugs: allSources().map((s) => s.slug),
+        signal: controller.signal,
+      });
+    } catch {
+      // cancelled path throws after compensation
+    }
+    expect(during).toBe("stale");
+  });
+
+  test("abort during the old-vector snapshot precedes version and page mutation", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const created = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    const slug = (created as { slug: string }).slug;
+    const beforeVersions = db.getVersions(slug).length;
+    pages.update(sourceA.slug, { body: sourceA.body + "\n变更1。" });
+    const controller = new AbortController();
+    const original = lance.readRawVectorRows.bind(lance);
+    (lance as unknown as { readRawVectorRows: typeof lance.readRawVectorRows }).readRawVectorRows = async (pageSlug) => {
+      const rows = await original(pageSlug);
+      controller.abort();
+      return rows;
+    };
+    try {
+      await manager.compile({
+        title: "主题D",
+        sourceSlugs: allSources().map((s) => s.slug),
+        signal: controller.signal,
+      });
+    } catch {
+      // cancelled path throws
+    }
+    expect(db.getVersions(slug).length).toBe(beforeVersions);
+  });
+
+  test("rollback must not overwrite a queued current-body index", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const created = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    const slug = (created as { slug: string }).slug;
+    const path = join(vaultPath, db.getPage(slug)!.file_path);
+    pages.update(sourceA.slug, { body: sourceA.body + "\n变更1。" });
+    const userBody = "用户正文唯一哨兵。";
+    const prepared = await pipeline.embed(userBody);
+    const originalAdd = lance.addChunks.bind(lance);
+    const originalDelete = lance.deleteRawChunksByPageSlug.bind(lance);
+    let first = true;
+    let inRestore = false;
+    let userIndex: Promise<void> | undefined;
+    (lance as unknown as { addChunks: typeof lance.addChunks }).addChunks = async (chunks) => {
+      if (first) {
+        first = false;
+        inRestore = true;
+        throw new Error("VECTOR_DOWN");
+      }
+      return originalAdd(chunks);
+    };
+    (lance as unknown as { deleteRawChunksByPageSlug: typeof lance.deleteRawChunksByPageSlug }).deleteRawChunksByPageSlug = async (p) => {
+      if (inRestore) {
+        inRestore = false;
+        pages.update(slug, { body: userBody });
+        // Orchestration note: the user's same-page writeIndexes is SCHEDULED
+        // here but NOT awaited inside this Lance callback. Awaiting it
+        // reentrantly would deadlock on ContentPipeline's per-slug
+        // serialization (our restore's serialized repair holds the slot the
+        // user write is queued behind); real concurrent writers never nest
+        // that way. Both operations are awaited below before asserting.
+        userIndex = pipeline.writeIndexes(slug, prepared.chunks, prepared.embedResults);
+      }
+      return originalDelete(p);
+    };
+    let compileResult: TopicCompileResult | undefined;
+    try {
+      compileResult = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    } catch {
+      // compensated failure path throws
+    }
+    await userIndex;
+    expect((compileResult as { status?: string } | undefined)?.status).not.toBe("refreshed");
+    expect(parseFrontmatter(readFileSync(path, "utf8")).body).toBe(userBody);
+    expect((await lance.readRawVectorRows(slug)).map((r) => r.content).join("\n")).toBe(userBody);
+  });
+
+  test("building committed bytes never corrupts the cached parse of the original raw", async () => {
+    // gray-matter caches parsed frontmatter per input string; withManifestState
+    // must build a fresh object instead of mutating the cached one, or a
+    // later re-parse of the SAME unchanged bytes would report the flipped
+    // state (exactly the crash-left-pending durability that must survive).
+    const { withManifestState } = await import("../../src/core/topics/manifest.js");
+    const pending = "---\ntitle: t\ntype: topic\ntopic:\n  schema_version: 1\n  state: pending\n---\nbody";
+    const committed = withManifestState(pending, "committed");
+    expect(committed).toContain("state: committed");
+    expect((parseFrontmatter(pending).frontmatter.topic as Record<string, unknown>).state).toBe("pending");
+    expect((parseFrontmatter(committed).frontmatter.topic as Record<string, unknown>).state).toBe("committed");
+  });
+
+  test("legacy originals without or with legacy-custom type markers stay admissible", async () => {
+    await seedSources();
+    // Strip the type marker from one canonical original (legacy no-type
+    // form); give another a legacy custom type string that normalizePageType
+    // maps to record. Both keep their DB record classification.
+    const pathA = join(vaultPath, db.getPage(sourceA.slug)!.file_path);
+    writeFileSync(pathA, readFileSync(pathA, "utf8").replace("type: record\n", ""));
+    const pathB = join(vaultPath, db.getPage(sourceB.slug)!.file_path);
+    writeFileSync(pathB, readFileSync(pathB, "utf8").replace("type: record", "type: 遗留自定义甲"));
+
+    const manager = makeManager(makeQueuedLlm([]));
+    const catalog = manager.listSourceCatalog().map((e) => e.slug);
+    expect(catalog).toContain(sourceA.slug);
+    expect(catalog).toContain(sourceB.slug);
+
+    const beforeA = hashContent(readFileSync(pathA, "utf-8"));
+    const beforeB = hashContent(readFileSync(pathB, "utf-8"));
+    const result = await makeManager(makeQueuedLlm([validModelOutput(allSources())])).compile({
+      title: "主题C2",
+      sourceSlugs: allSources().map((s) => s.slug),
+    });
+    expect(result.status).toBe("created");
+    // Originals untouched — including both legacy forms.
+    expect(hashContent(readFileSync(pathA, "utf-8"))).toBe(beforeA);
+    expect(hashContent(readFileSync(pathB, "utf-8"))).toBe(beforeB);
+  });
+
+  test("a crash-left pending topic stays unavailable after restart", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const created = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    const slug = (created as { slug: string }).slug;
+    expect(manager.inspectFreshness(slug)?.state).toBe("fresh");
+
+    // Simulate a process dying between the index commit and the final
+    // publication flip: the durable manifest is left pending on disk.
+    const path = join(vaultPath, db.getPage(slug)!.file_path);
+    writeFileSync(path, readFileSync(path, "utf8").replace("state: committed", "state: pending"));
+
+    const restarted = new TopicManager({
+      db,
+      pages: new PageManager(db, vaultPath, noLogger as never),
+      pipeline,
+      versions: new VersionManager(db, pages, vaultPath, noLogger as never),
+      lance,
+      llm: makeQueuedLlm([validModelOutput(allSources())]),
+      logger: noLogger as never,
+    });
+    const report = restarted.inspectFreshness(slug);
+    expect(report?.state).toBe("stale");
+    expect(report?.reasons).toContain("publication_pending");
+
+    // An unchanged compile must NOT no-op over a pending publication: it
+    // falls through to a full refresh (bounded recovery).
+    const again = await restarted.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    expect(again.status).toBe("refreshed");
+    expect(restarted.inspectFreshness(slug)?.state).toBe("fresh");
+  });
+
+  test("overview claims keep user_thought/candidate labels like other sections", async () => {
+    await seedSources();
+    const sources = allSources();
+    const output = validModelOutput(sources);
+    output.overview = [
+      {
+        text: "用户想法：项目应以一致性优先。",
+        kind: "user_thought",
+        sourceSlug: sources[2].slug,
+        quote: sources[2].body.split("\n")[0],
+      },
+      {
+        text: "候选：第二阶段范围是否扩至三城待确认。",
+        kind: "candidate",
+        sourceSlug: sources[1].slug,
+        quote: sources[1].body.split("\n")[1],
+      },
+    ];
+    const created = await makeManager(makeQueuedLlm([output])).compile({
+      title: "主题B2",
+      sourceSlugs: sources.map((s) => s.slug),
+    });
+    expect(created.status).toBe("created");
+    const slug = (created as { slug: string }).slug;
+    const raw = readFileSync(join(vaultPath, `${slug}.md`), "utf-8");
+    const { body } = parseFrontmatter(raw);
+    const overviewStart = body.indexOf("## 概览");
+    const overviewEnd = body.indexOf("## 主要观察");
+    const overview = body.slice(overviewStart, overviewEnd);
+    expect(overview).toContain("[用户想法]");
+    expect(overview).toContain("[候选]");
+  });
+});

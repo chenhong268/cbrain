@@ -2,10 +2,12 @@ import {
   TOPIC_SCHEMA_VERSION,
   TopicManifest,
   TopicManifestSource,
+  TopicPublicationState,
   TopicSourceSnapshot,
   TopicRetiredSource,
 } from "./types.js";
 import { snapshotId } from "./source-reader.js";
+import { parseFrontmatter, stringifyFrontmatter, type PageFrontmatter } from "../../utils/frontmatter.js";
 
 /** Build the manifest source entry for a fresh snapshot. */
 export function manifestSourceFromSnapshot(snapshot: TopicSourceSnapshot): TopicManifestSource {
@@ -41,6 +43,10 @@ export function parseTopicManifest(value: unknown): { ok: true; manifest: TopicM
   if (typeof v.title !== "string" || typeof v.generated_at !== "string" || typeof v.output_hash !== "string") {
     return { ok: false };
   }
+  // Publication state: absent (legacy/corrupt) parses as pending — a topic
+  // without an explicit committed marker is never treated as published.
+  if (v.state !== undefined && v.state !== "committed" && v.state !== "pending") return { ok: false };
+  const state: TopicPublicationState = v.state === "committed" ? "committed" : "pending";
   if (!Array.isArray(v.sources) || !v.sources.every(isManifestSource)) return { ok: false };
   const retiredRaw = Array.isArray(v.retired_sources) ? v.retired_sources : [];
   const retired: TopicRetiredSource[] = [];
@@ -55,10 +61,33 @@ export function parseTopicManifest(value: unknown): { ok: true; manifest: TopicM
       title: v.title,
       generated_at: v.generated_at,
       output_hash: v.output_hash,
+      state,
       sources: v.sources,
       retired_sources: retired,
     },
   };
+}
+
+/** Synchronously rewrite a topic page's manifest publication state in its
+ *  raw bytes (frontmatter only — the indexed body is untouched, so indexed
+ *  body consistency is retained). Used by the compile's final, fully
+ *  synchronous publication step.
+ *
+ *  NEVER mutate the frontmatter object returned by parseFrontmatter —
+ *  gray-matter caches parsed data per input string, so mutating it would
+ *  corrupt every later re-parse of the SAME raw bytes (e.g. flipping the
+ *  cached parse of the pre-finalize pending bytes to committed). Build a
+ *  fresh object instead. */
+export function withManifestState(raw: string, state: TopicPublicationState): string {
+  const { frontmatter, body } = parseFrontmatter(raw);
+  const topic = frontmatter.topic;
+  if (topic === null || typeof topic !== "object" || Array.isArray(topic)) {
+    throw new Error("TOPIC_FINALIZE_NO_MANIFEST");
+  }
+  return stringifyFrontmatter(
+    { ...frontmatter, topic: { ...(topic as Record<string, unknown>), state } } as PageFrontmatter,
+    body,
+  );
 }
 
 /** Compute the next manifest for a refresh: new selection first, then every
@@ -88,6 +117,7 @@ export function buildManifest(params: {
     title: params.title,
     generated_at: params.generatedAt,
     output_hash: params.outputHash,
+    state: "pending" as const,
     sources,
     retired_sources: retired,
   };

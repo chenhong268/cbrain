@@ -34,7 +34,7 @@ export function renderTopicBody(output: TopicModelOutput, sourceSlugs: string[])
     "",
     "## 概览",
     "",
-    ...output.overview.map((claim) => renderClaim(claim, false)),
+    ...output.overview.map((claim) => renderClaim(claim, true)),
     "",
     "## 主要观察",
     "",

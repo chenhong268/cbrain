@@ -11,7 +11,7 @@ import { generateSlug } from "../../utils/slug.js";
 import { hashContent } from "../shared.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import { readRecordSource, resolveWithinVault, sourceFingerprintMismatch } from "./source-reader.js";
-import { buildManifest, parseTopicManifest } from "./manifest.js";
+import { buildManifest, parseTopicManifest, withManifestState } from "./manifest.js";
 import { buildTopicPrompt, parseTopicModelOutput } from "./output.js";
 import { renderTopicBody } from "./render.js";
 import {
@@ -167,6 +167,7 @@ export class TopicManager {
     const manifest = manifestResult.manifest;
 
     const reasons: string[] = [];
+    if (manifest.state !== "committed") reasons.push("publication_pending");
     const editedByUser = hashContent(read.body) !== manifest.output_hash;
     if (editedByUser) reasons.push("target_edited");
 
@@ -293,13 +294,14 @@ export class TopicManager {
     }
 
     // Unchanged no-op: identical FULL selection, fingerprints, an unedited
-    // target AND a committed content hash proving indexes are complete —
-    // a dirty topic falls through to a full refresh instead of skipping
-    // index repair.
+    // target, a COMMITTED publication state and a committed content hash
+    // proving indexes are complete — a pending or dirty topic falls through
+    // to a full refresh instead of skipping publication/index repair.
     if (
       isExistingTopic
       && previousManifest
       && dropped.length === 0
+      && previousManifest.state === "committed"
       && this.selectionMatches(usable, previousManifest)
       && this.db.getPageContentHash(slug) === hashContent(existingRaw!)
     ) {
@@ -351,6 +353,11 @@ export class TopicManager {
         l1: await this.lance.readL1VectorRows(slug),
       };
     }
+
+    // Cancellation landing inside the snapshot awaits must precede the
+    // synchronous recheck and every mutation below (version snapshot
+    // included) — a cancelled job never writes the old page.
+    this.throwIfCancelled(request);
 
     // ── Synchronous recheck, then commit (no awaits before the page write) ──
     if (this.sourcesChanged(usable)) {
@@ -416,6 +423,25 @@ export class TopicManager {
       throw new TopicIndexFailedError(proofError);
     }
 
+    // ── Final publication flip — fully synchronous, LAST ────────────
+    // Distinguish "index complete" (pipeline clean hash, visible the moment
+    // writeIndexes resolves) from "compile passed its final publication
+    // checks": the manifest state flips to committed only here, so no
+    // microtask window between the two can read the topic as fresh. Only
+    // the frontmatter changes — the body stays exactly the indexed bytes,
+    // so indexed body consistency is retained. The content hash is
+    // re-committed for the final bytes; if that DB write fails the page
+    // stays determinately not-fresh (hash mismatch) until the next
+    // refresh — no compensation touches an indexed, verified page.
+    try {
+      const finalRaw = withManifestState(current.raw, "committed");
+      writeFileSync(absPath, finalRaw);
+      this.db.updatePageHash(slug, hashContent(finalRaw));
+    } catch (finalizeError) {
+      this.logger?.error("topic", "主题页发布标记写入失败", { slug, error: String(finalizeError) });
+      throw new Error(`TOPIC_FINALIZE_INCOMPLETE: ${slug}`);
+    }
+
     this.logger?.info("topic", "主题页已编译", { slug, sources: usable.length, created });
     return created
       ? { status: "created", slug, sources: usable.length, chunks: chunks.length }
@@ -479,9 +505,18 @@ export class TopicManager {
    * APIs (no generic transaction framework). Restoration happens ONLY when
    * the target still holds our exact written bytes: a concurrent user edit
    * is preserved byte-for-byte and the page is left dirty (cannot read as
-   * fresh). The restore replays the pre-mutation snapshot (old raw bytes,
-   * chunks, vectors) and never calls the embedding provider. Any restore
-   * failure leaves an explicit dirty state and surfaces TopicRollbackError.
+   * fresh).
+   *
+   * The restore replays the pre-mutation snapshot (old raw bytes, chunks,
+   * vectors — no embedding-provider call). The vector swap is bracketed by
+   * ownership re-checks: if a concurrent edit lands while our restore is
+   * mid-flight, we do NOT replay the old vectors over their newer index —
+   * the page is repaired through the standard serialized writeIndexes path
+   * for THEIR current body instead. (The restore itself cannot run inside
+   * pipeline.writeIndexes' per-page serialization: a caller completing a
+   * new-body index from inside our vector-delete await would deadlock on
+   * the same per-slug slot — the ownership-CAS + serialized-repair split
+   * keeps one ordering without a second indexing framework.)
    */
   private async compensateIndexFailure(
     slug: string,
@@ -515,9 +550,8 @@ export class TopicManager {
         await this.lance.deleteByPageSlug(slug);
       } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
     } else if (indexSnapshot) {
-      // Exact-byte restore of the previous page (frontmatter extras, tags
-      // and version history untouched), then replay the old indexes from
-      // the snapshot — no embedding provider involved.
+      // 1. Restore our owned old bytes exactly (frontmatter extras, tags
+      //    and version history untouched) + old chunks/FTS.
       try {
         writeFileSync(resolveWithinVault(this.pages.vaultPath, this.db.getPageFilePath(slug)!), indexSnapshot.raw);
         this.db.transaction(() => {
@@ -535,28 +569,47 @@ export class TopicManager {
           );
         });
       } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
+
+      // 2. Vector swap with an ownership re-check between delete and add:
+      //    a user completing a new-body index during our delete must never
+      //    have their vectors replaced by the old snapshot.
       try {
         await this.lance.deleteRawChunksByPageSlug(slug);
         await this.lance.deleteL1VectorByPageSlug(slug);
-        const rows = [...indexSnapshot.vectors, ...indexSnapshot.l1].map((r) => ({
-          pageSlug: slug,
-          chunkIndex: r.chunkIndex,
-          content: r.content,
-          vector: r.vector,
-        }));
-        if (rows.length > 0) await this.lance.addChunks(rows);
-        const restored = await this.lance.readRawVectorRows(slug);
-        if (restored.length !== indexSnapshot.vectors.length) {
-          throw new Error(`TOPIC_RESTORE_VERIFY_FAILED: ${restored.length} != ${indexSnapshot.vectors.length}`);
+        const now = this.readTopicPageRaw(slug);
+        if (now && now.raw !== indexSnapshot.raw) {
+          // The page changed under us — repair through the ONE serialized
+          // index path for the current (user-owned) body. This may call the
+          // embedding provider: it is forward repair of their content, not
+          // a rollback dependency of ours.
+          const { chunks, embedResults } = await this.pipeline.embed(now.body);
+          await this.pipeline.writeIndexes(slug, chunks, embedResults);
+        } else if (!now) {
+          // The page itself disappeared mid-restore (deleted by someone
+          // else) — nothing left to repair; leave the hash decision to
+          // whoever owns the deletion.
+        } else {
+          const rows = [...indexSnapshot.vectors, ...indexSnapshot.l1].map((r) => ({
+            pageSlug: slug,
+            chunkIndex: r.chunkIndex,
+            content: r.content,
+            vector: r.vector,
+          }));
+          if (rows.length > 0) await this.lance.addChunks(rows);
+          // Content-level verification (row counts alone prove nothing):
+          // restored vectors must equal the snapshot before we may let the
+          // page read as clean again.
+          const restored = await this.lance.readRawVectorRows(slug);
+          if (!sameVectorContents(restored, indexSnapshot.vectors)) {
+            throw new Error("TOPIC_RESTORE_VERIFY_FAILED: restored vectors differ from snapshot");
+          }
+          if (this.readTopicPageRaw(slug)?.raw === indexSnapshot.raw) {
+            this.db.updatePageHash(slug, hashContent(indexSnapshot.raw));
+          } else {
+            this.db.updatePageHash(slug, null);
+          }
         }
       } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
-      if (errors.length === 0) {
-        // Restored snapshot is complete by construction; mark it clean so
-        // freshness reflects reality again.
-        try {
-          this.db.updatePageHash(slug, hashContent(indexSnapshot.raw));
-        } catch (e) { errors.push(e instanceof Error ? e : new Error(String(e))); }
-      }
     }
     if (errors.length > 0) {
       // Explicit invalid state: never leave a half-restored page readable
@@ -565,4 +618,20 @@ export class TopicManager {
       throw new TopicRollbackError(originalError, errors);
     }
   }
+}
+
+/** Content-level equality of restored vs snapshotted vectors (pageSlug is
+ *  fixed; compare chunkIndex, content and vector bytes). */
+function sameVectorContents(actual: RawVectorRow[], expected: RawVectorRow[]): boolean {
+  if (actual.length !== expected.length) return false;
+  for (let i = 0; i < actual.length; i++) {
+    const a = actual[i];
+    const e = expected[i];
+    if (a.chunkIndex !== e.chunkIndex || a.content !== e.content) return false;
+    if (a.vector.length !== e.vector.length) return false;
+    for (let j = 0; j < a.vector.length; j++) {
+      if (a.vector[j] !== e.vector[j]) return false;
+    }
+  }
+  return true;
 }

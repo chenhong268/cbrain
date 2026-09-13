@@ -3,7 +3,8 @@ import { readFileSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import type { CBrainDB } from "../../storage/sqlite.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
-import { hashContent } from "../shared.js";
+import { hashContent, normalizePageType } from "../shared.js";
+import { getOntology } from "../../ontology/loader.js";
 import {
   TopicBudgets,
   TopicSourceReadError,
@@ -44,6 +45,24 @@ function isNoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException)?.code === "ENOENT";
 }
 
+/** Vault directories of every concrete NON-record type, per the ontology —
+ *  the actual known derived areas (entity/concept/insight/topic trees). The
+ *  brain/ root alone is NOT derivation: legacy areas like brain/records stay
+ *  eligible; only ontology-declared generated directories are rejected. */
+let derivedVaultPrefixesCache: string[] | undefined;
+function derivedVaultPrefixes(): string[] {
+  if (!derivedVaultPrefixesCache) {
+    const ontology = getOntology();
+    const dirs = new Set<string>();
+    for (const type of ontology.getConcreteEntityTypes()) {
+      if (type === "record") continue;
+      dirs.add(ontology.getVaultDir(type));
+    }
+    derivedVaultPrefixesCache = [...dirs];
+  }
+  return derivedVaultPrefixesCache;
+}
+
 /** True when a vault-relative DB file_path is safe to read: relative, no
  *  traversal, no backslash, and the resolved file stays inside the vault.
  *  ENOENT (source file removed before watcher sync) propagates so callers
@@ -67,11 +86,14 @@ export function resolveWithinVault(vaultPath: string, relPath: string): string {
  *
  * Eligibility is fail-closed on both stores: the DB row must be type
  * `record` outside derived vault areas, AND the fresh disk frontmatter must
- * agree (a watcher-sync gap cannot pass a retyped page off as a record).
- * Legacy records without a provenance row remain eligible; actor=agent
- * explicit ingests remain eligible — origin_kind session/job is NOT a
- * derived marker. A relevant rejected/superseded governance row (endpoint
- * OR source_page_slug) disqualifies the whole source conservatively.
+ * not carry an explicit known derived type (legacy originals with a missing
+ * or legacy-custom type marker stay admitted via normalizePageType →
+ * record — a watcher-sync gap still cannot pass a retyped page off as a
+ * record). Legacy records without a provenance row remain eligible;
+ * actor=agent explicit ingests remain eligible — origin_kind session/job
+ * is NOT a derived marker. A relevant rejected/superseded governance row
+ * (endpoint OR source_page_slug) disqualifies the whole source
+ * conservatively.
  */
 export function readRecordSource(
   db: CBrainDB,
@@ -82,7 +104,9 @@ export function readRecordSource(
   const row = db.getPage(slug);
   if (!row || !row.file_path) throw new TopicSourceReadError("not_found", slug);
   if (row.type !== "record") throw new TopicSourceReadError("not_record", slug);
-  if (row.file_path.startsWith("brain/")) throw new TopicSourceReadError("not_record", slug);
+  if (derivedVaultPrefixes().some((dir) => row.file_path!.startsWith(`${dir}/`))) {
+    throw new TopicSourceReadError("not_record", slug);
+  }
 
   let abs: string;
   try {
@@ -100,7 +124,17 @@ export function readRecordSource(
   }
 
   const { frontmatter, body } = parseFrontmatter(raw);
-  if (frontmatter.type !== "record") throw new TopicSourceReadError("not_record", slug);
+  // Disk type classification, legacy-compatible with the existing contract
+  // (normalizePageType maps unknown/legacy strings to record): a missing or
+  // legacy-custom type marker on a canonical records/ original is admitted
+  // under the DB row's `record` classification; an EXPLICIT known type must
+  // be record — any declared derived type (entity/concept/insight/topic)
+  // still fails closed.
+  if (typeof frontmatter.type === "string" && frontmatter.type.trim() !== "") {
+    if (normalizePageType(frontmatter.type) !== "record") {
+      throw new TopicSourceReadError("not_record", slug);
+    }
+  }
 
   const tags = db.getTags(slug);
   const provenanceRow = db.getPageWriteProvenance(slug);
