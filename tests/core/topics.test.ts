@@ -15,6 +15,7 @@ import { hashContent } from "../../src/core/shared.js";
 import { generateSlug } from "../../src/utils/slug.js";
 import {
   TopicManager,
+  type TopicCompileResult,
   type TopicModelOutput,
 } from "../../src/core/topics/index.js";
 
@@ -38,10 +39,18 @@ const RECORD_C_BODY = [
   "风险项：人员缺口可能影响第二阶段。",
 ].join("\n");
 
-/** Build a valid model output citing every source with exact substrings. */
+/** Build a valid model output citing every source with exact substrings.
+ *  Overview is a claim array too — every summary assertion needs a citation. */
 function validModelOutput(sources: Array<{ slug: string; body: string }>): TopicModelOutput {
   return {
-    overview: "主题D的项目横跨两个阶段，涉及组织C的数据合作。",
+    overview: [
+      {
+        text: `主题D的项目横跨两个阶段，涉及组织C的数据合作（依据 ${sources[0].slug}）。`,
+        kind: "observation" as const,
+        sourceSlug: sources[0].slug,
+        quote: sources[0].body.split("\n")[0],
+      },
+    ],
     observations: sources.map((s) => ({
       text: `来自 ${s.slug} 的要点：${s.body.split("\n")[0]}`,
       kind: "observation" as const,
@@ -245,10 +254,11 @@ describe("topic wiki — bounded compiler", () => {
 
     // Body: bounded sections, backticked citation slugs (no wikilinks — the
     // generated body must stay byte-stable when a source is later deleted),
-    // provenance disclaimer.
+    // provenance disclaimer. Overview renders as cited claims.
     expect(body).toContain("## 概览");
+    expect(body).toContain("主题D的项目横跨两个阶段");
     expect(body).toContain("## 主要观察");
-    expect(body).toContain(`（来源：\`${sourceA.slug}\`）`);
+    expect(body).toContain(`（来源：\`${sourceA.slug}\`「`);
     expect(body).not.toContain("[[");
     expect(body).toContain("自动编译");
 
@@ -538,14 +548,15 @@ describe("topic wiki — bounded compiler", () => {
     expect(readFileSync(join(vaultPath, `${slug}.md`), "utf-8")).toBe(raw);
   });
 
-  test("governance trust changes invalidate freshness and rejected facts stay out of model material", async () => {
+  test("governance: candidates stay out of material; rejected rows disqualify the source conservatively", async () => {
     await seedSources();
     const sources = allSources();
 
-    // A rejected timeline fact on a source must not reach the model.
+    // A candidate (unconfirmed) timeline fact: does not disqualify the
+    // source, but never reaches the model as live material.
     db.rawDb
       .prepare("INSERT INTO timeline (page_slug, event_date, source, summary, trust_state) VALUES (?, ?, ?, ?, ?)")
-      .run(sourceA.slug, "2026-01-05", "ner", "已被否决的结论：项目改名为主题Z", "rejected");
+      .run(sourceA.slug, "2026-01-05", "ner", "未确认的候选断言：项目改名为主题Z", "candidate");
 
     const capture = makeFakeLlm(() => JSON.stringify(validModelOutput(sources)));
     const manager = makeManager(capture);
@@ -554,23 +565,41 @@ describe("topic wiki — bounded compiler", () => {
     const prompt = capture.calls[0].messages.map((m) => m.content).join("\n");
     expect(prompt).not.toContain("主题Z");
 
-    // Flipping a live timeline entry to superseded changes governance.
-    const entryId = db.addTimelineEntry(sourceB.slug, "阶段二预算批复", "2026-02-01", "manual");
+    // A rejected relevant row (entity endpoints, provenance points at the
+    // record) disqualifies the ENTIRE source: an existing topic refresh drops
+    // it (retained for recovery), and a new topic cannot use it at all.
+    const entityOne = pages.create({ title: "实体甲", type: "entity/person", body: "" });
+    const entityTwo = pages.create({ title: "实体乙", type: "entity/person", body: "" });
+    db.rawDb
+      .prepare("INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?)")
+      .run(entityOne.slug, entityTwo.slug, "认识", sourceA.slug, "rejected");
+
     expect(manager.inspectFreshness((created as { slug: string }).slug)!.state).toBe("stale");
 
-    db.rawDb
-      .prepare("UPDATE timeline SET trust_state = 'superseded' WHERE id = ?")
-      .run(entryId);
-    void entryId;
-
-    // Refresh picks up the new governance fingerprint.
-    const refreshLlm = makeQueuedLlm([validModelOutput(sources)]);
+    // The rejected row's source_page_slug is sourceA, so sourceA is the
+    // disqualified one; B and C survive.
+    const survivors = [sourceB, sourceC];
+    const refreshLlm = makeQueuedLlm([validModelOutput(survivors)]);
     const refreshed = await makeManager(refreshLlm).compile({
       title: "主题N",
       sourceSlugs: sources.map((s) => s.slug),
     });
     expect(refreshed.status).toBe("refreshed");
+    expect((refreshed as { droppedSources: string[] }).droppedSources).toContain(sourceA.slug);
+    const raw = readFileSync(join(vaultPath, `brain/topics/主题n.md`), "utf-8");
+    const manifest = parseFrontmatter(raw).frontmatter.topic as Record<string, unknown>;
+    expect((manifest.retired_sources as Array<Record<string, unknown>>).map((r) => r.slug)).toContain(sourceA.slug);
     expect(manager.inspectFreshness((created as { slug: string }).slug)!.state).toBe("fresh");
+
+    // New topic with a disqualified source never reaches the model.
+    const blockedLlm = makeQueuedLlm([]);
+    const blocked = await makeManager(blockedLlm).compile({
+      title: "主题N2",
+      sourceSlugs: sources.map((s) => s.slug),
+    });
+    expect(blocked.status).toBe("blocked");
+    expect((blocked as { reason: string }).reason).toBe("source_governance_rejected");
+    expect(blockedLlm.calls.length).toBe(0);
   });
 
   // ─── Race, cancellation, preservation ─────────────────────────────
@@ -731,5 +760,290 @@ describe("topic wiki — bounded compiler", () => {
     expect(existsSync(join(vaultPath, `${slug}.md`))).toBe(false);
 
     void originalAddChunks;
+  });
+});
+
+// ═══ Review round 1 regressions ═════════════════════════════════════
+// Imported from the reviewer/parent isolated probes (absolute-path
+// originals in /tmp) as repo regression tests: project-relative imports,
+// own temp fixtures, no production access. Each probe reproduced a real
+// safety failure against the initial implementation.
+
+describe("topic wiki — review round 1 regressions", () => {
+  const testDir = "/tmp/cbrain-test-topics-r1";
+  const vaultPath = join(testDir, "vault");
+
+  let db: CBrainDB;
+  let pages: PageManager;
+  let pipeline: ContentPipeline;
+  let versions: VersionManager;
+  let lance: LanceDBManager;
+  let sourceA: { slug: string; body: string };
+  let sourceB: { slug: string; body: string };
+  let sourceC: { slug: string; body: string };
+
+  beforeEach(async () => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(join(testDir, "test.sqlite"));
+    pages = new PageManager(db, vaultPath, noLogger as never);
+    lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    pipeline = new ContentPipeline(db, new DeterministicEmbeddingProvider(), lance, {
+      pages,
+      logger: noLogger as never,
+    });
+    versions = new VersionManager(db, pages, vaultPath, noLogger as never);
+  });
+
+  afterEach(async () => {
+    await lance.close();
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  async function seedRecord(title: string, body: string): Promise<{ slug: string; body: string }> {
+    const page = pages.create({ title, type: "record", body });
+    const { chunks, embedResults } = await pipeline.embed(body);
+    await pipeline.writeIndexes(page.slug, chunks, embedResults);
+    return { slug: page.slug, body };
+  }
+
+  function makeManager(llm: LLMProvider) {
+    return new TopicManager({ db, pages, pipeline, versions, lance, llm, logger: noLogger as never });
+  }
+
+  async function seedSources() {
+    sourceA = await seedRecord("记录甲", RECORD_A_BODY);
+    sourceB = await seedRecord("记录乙", RECORD_B_BODY);
+    sourceC = await seedRecord("记录丙", RECORD_C_BODY);
+  }
+
+  function allSources() {
+    return [sourceA, sourceB, sourceC];
+  }
+
+  test("source file removed before watcher sync returns stale, not ENOENT", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const result = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    expect(result.status).toBe("created");
+    rmSync(join(vaultPath, db.getPage(sourceA.slug)!.file_path));
+    expect(manager.inspectFreshness((result as { slug: string }).slug)?.state).toBe("stale");
+  });
+
+  test("entity relationship correction with record provenance invalidates topic", async () => {
+    await seedSources();
+    const a = pages.create({ title: "实体A", type: "entity/person", body: "" });
+    const b = pages.create({ title: "实体B", type: "entity/person", body: "" });
+    db.rawDb
+      .prepare("INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?)")
+      .run(a.slug, b.slug, "认识", sourceA.slug, "trusted");
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const result = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    expect(result.status).toBe("created");
+    db.rawDb
+      .prepare("UPDATE links SET trust_state = 'rejected' WHERE from_slug = ? AND to_slug = ?")
+      .run(a.slug, b.slug);
+    expect(manager.inspectFreshness((result as { slug: string }).slug)?.state).toBe("stale");
+  });
+
+  test("correction beyond the prompt governance cap invalidates topic", async () => {
+    await seedSources();
+    const b = pages.create({ title: "实体B", type: "entity/person", body: "" });
+    for (let i = 0; i < 60; i++) {
+      db.rawDb
+        .prepare("INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?)")
+        .run(sourceA.slug, b.slug, `关系${i}`, sourceA.slug, "trusted");
+    }
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const result = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    expect(result.status).toBe("created");
+    const rows = db.getOutgoingLinks(sourceA.slug, true);
+    db.rawDb.prepare("UPDATE links SET trust_state = 'rejected' WHERE id = ?").run(rows[59].id);
+    expect(manager.inspectFreshness((result as { slug: string }).slug)?.state).toBe("stale");
+  });
+
+  test("new topic is not fresh while the vector commit awaits", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const original = lance.addChunks.bind(lance);
+    let during: string | undefined;
+    (lance as unknown as { addChunks: typeof lance.addChunks }).addChunks = async (chunks) => {
+      during = manager.inspectFreshness(manager.resolveTopicSlug("主题D"))?.state;
+      return original(chunks);
+    };
+    const result = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    expect(result.status).toBe("created");
+    expect(during).not.toBe("fresh");
+    expect(during).toBe("stale");
+  });
+
+  test("rejected source body is excluded before synthesis", async () => {
+    await seedSources();
+    const b = pages.create({ title: "实体B", type: "entity/person", body: "" });
+    db.rawDb
+      .prepare("INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?)")
+      .run(sourceA.slug, b.slug, "关系", sourceA.slug, "rejected");
+    const llm = makeQueuedLlm([validModelOutput(allSources())]);
+    const manager = makeManager(llm);
+    const result = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    expect(result.status).toBe("blocked");
+    expect(llm.calls.length).toBe(0);
+  });
+
+  test("manual edit during failed indexing is preserved", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const result = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    const slug = (result as { slug: string }).slug;
+    const path = join(vaultPath, db.getPage(slug)!.file_path);
+    pages.update(sourceA.slug, { body: sourceA.body + "\n新增材料。" });
+    const original = lance.addChunks.bind(lance);
+    let first = true;
+    (lance as unknown as { addChunks: typeof lance.addChunks }).addChunks = async (chunks) => {
+      if (first) {
+        first = false;
+        writeFileSync(path, readFileSync(path, "utf8") + "\nUSER_EDIT_SENTINEL");
+        throw new Error("VECTOR_DOWN");
+      }
+      return original(chunks);
+    };
+    await expect(
+      manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) }),
+    ).rejects.toThrow();
+    expect(readFileSync(path, "utf8")).toContain("USER_EDIT_SENTINEL");
+  });
+
+  test("uncited fabricated overview is rejected", async () => {
+    await seedSources();
+    const output = validModelOutput(allSources());
+    (output as unknown as { overview: string }).overview = "完全无来源的新断言：组织Z已收购组织Y，金额900亿元。";
+    const result = await makeManager(makeQueuedLlm([output])).compile({
+      title: "主题D",
+      sourceSlugs: allSources().map((s) => s.slug),
+    });
+    expect(result.status).toBe("blocked");
+    expect((result as { reason: string }).reason).toBe("output_invalid");
+  });
+
+  test("source whose disk type already changed to a derived page is excluded", async () => {
+    await seedSources();
+    const path = join(vaultPath, db.getPage(sourceA.slug)!.file_path);
+    writeFileSync(path, readFileSync(path, "utf8").replace("type: record", "type: topic"));
+    const result = await makeManager(makeQueuedLlm([validModelOutput(allSources())])).compile({
+      title: "主题D",
+      sourceSlugs: allSources().map((s) => s.slug),
+    });
+    expect(result.status).toBe("blocked");
+    expect((result as { reason: string }).reason).toBe("source_not_record");
+    // The catalog must not keep listing it as an eligible original source.
+    expect(makeManager(makeQueuedLlm([])).listSourceCatalog().map((e) => e.slug)).not.toContain(sourceA.slug);
+  });
+
+  test("cancellation during index commit prevents publication", async () => {
+    await seedSources();
+    const controller = new AbortController();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const original = lance.addChunks.bind(lance);
+    (lance as unknown as { addChunks: typeof lance.addChunks }).addChunks = async (chunks) => {
+      controller.abort();
+      return original(chunks);
+    };
+    let result: TopicCompileResult | undefined;
+    try {
+      result = await manager.compile({
+        title: "主题D",
+        sourceSlugs: allSources().map((s) => s.slug),
+        signal: controller.signal,
+      });
+    } catch {
+      // cancelled path throws
+    }
+    expect((result as { status?: string } | undefined)?.status).not.toBe("created");
+    expect(db.getPage(manager.resolveTopicSlug("主题D"))).toBeNull();
+  });
+
+  test("source change during index commit preserves the old topic and reports blocked", async () => {
+    await seedSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(allSources())]));
+    const created = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    const slug = (created as { slug: string }).slug;
+    const path = join(vaultPath, db.getPage(slug)!.file_path);
+    const before = readFileSync(path, "utf8");
+    pages.update(sourceA.slug, { body: sourceA.body + "\n变更1。" });
+    const original = lance.addChunks.bind(lance);
+    let once = true;
+    (lance as unknown as { addChunks: typeof lance.addChunks }).addChunks = async (chunks) => {
+      if (once) {
+        once = false;
+        pages.update(sourceB.slug, { body: sourceB.body + "\n变更2。" });
+      }
+      return original(chunks);
+    };
+    let result: TopicCompileResult | undefined;
+    try {
+      result = await manager.compile({ title: "主题D", sourceSlugs: allSources().map((s) => s.slug) });
+    } catch {
+      // blocked path may also throw; file assertions below are the contract
+    }
+    expect((result as { status?: string } | undefined)?.status).not.toBe("refreshed");
+    expect(readFileSync(path, "utf8")).toBe(before);
+  });
+
+  test("rollback is provider-independent: no embedding call, full old-index restore", async () => {
+    await seedSources();
+    const sources = allSources();
+    const manager = makeManager(makeQueuedLlm([validModelOutput(sources)]));
+    const created = await manager.compile({ title: "主题R1", sourceSlugs: sources.map((s) => s.slug) });
+    const slug = (created as { slug: string }).slug;
+    const path = join(vaultPath, db.getPage(slug)!.file_path);
+    const oldRaw = readFileSync(path, "utf8");
+    const oldVectors = await lance.readRawVectorRows(slug);
+
+    // The embedding provider dies after the pre-mutation embed of the
+    // refresh (3 seed embeds + 1 initial compile + 1 refresh = 5 allowed);
+    // the deterministic rollback must restore without calling it again.
+    const embedding = (pipeline as unknown as { embedding: { embedBatch: EmbeddingProvider["embedBatch"] } }).embedding;
+    const originalEmbed = embedding.embedBatch.bind(embedding);
+    let embedCalls = 0;
+    embedding.embedBatch = async (texts, options) => {
+      embedCalls++;
+      if (embedCalls > 5) throw new Error("EMBED_DOWN");
+      return originalEmbed(texts, options);
+    };
+    const correctedA = RECORD_A_BODY.replace("三月底", "六月底");
+    pages.update(sourceA.slug, { body: correctedA });
+    const racedSources = sources.map((s) => (s.slug === sourceA.slug ? { slug: s.slug, body: correctedA } : s));
+
+    const original = lance.addChunks.bind(lance);
+    let vecFailure = true;
+    (lance as unknown as { addChunks: typeof lance.addChunks }).addChunks = async (chunks) => {
+      if (vecFailure) {
+        vecFailure = false;
+        throw new Error("VECTOR_DOWN");
+      }
+      return original(chunks);
+    };
+
+    await expect(
+      makeManager(makeQueuedLlm([validModelOutput(racedSources)])).compile({
+        title: "主题R1",
+        sourceSlugs: sources.map((s) => s.slug),
+      }),
+    ).rejects.toThrow();
+
+    // The wrapper is installed AFTER seeding + initial compile, so exactly
+    // one provider call is legitimate (the refresh's pre-mutation embed); a
+    // second call would mean compensation still depends on the provider.
+    expect(embedCalls).toBe(1);
+    // Old page content byte-identical, old vectors back, no user-edit or
+    // pending-index reason — the only staleness is the real source change.
+    expect(readFileSync(path, "utf8")).toBe(oldRaw);
+    expect(await lance.readRawVectorRows(slug)).toHaveLength(oldVectors.length);
+    const report = makeManager(makeQueuedLlm([])).inspectFreshness(slug)!;
+    expect(report.editedByUser).toBe(false);
+    expect(report.reasons).toEqual([`source_hash_changed:${sourceA.slug}`]);
+    expect(db.getPageContentHash(slug)).toBe(hashContent(oldRaw));
   });
 });

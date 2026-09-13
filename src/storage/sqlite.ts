@@ -2677,6 +2677,30 @@ export class CBrainDB {
     ).all({ $slug: slug }) as LinkRow[];
   }
 
+  /** #509 topic compiler: EVERY link row touching a source page — as an
+   *  endpoint (from/to) OR as its provenance origin (source_page_slug) —
+   *  including inactive rows, ordered by stable id. Governance freshness
+   *  needs the full untruncated set; the compile prompt applies its own cap. */
+  getGovernanceLinksTouchingSource(slug: string): LinkRow[] {
+    return this.prepare(
+      `SELECT id, from_slug, to_slug, relation, weight, strength, context, source_type, confidence, created_at, source_page_slug, trust_state, evidence
+       FROM links
+       WHERE from_slug = $slug OR to_slug = $slug OR source_page_slug = $slug
+       ORDER BY id`
+    ).all({ $slug: slug }) as LinkRow[];
+  }
+
+  /** #509 topic compiler: every timeline row owned by or provenanced from a
+   *  source page (page_slug OR source_page_slug), including inactive rows. */
+  getGovernanceTimelineTouchingSource(slug: string): Array<{ id: number; event_date: string | null; source: string | null; summary: string; trust_state?: string; source_page_slug?: string; evidence?: string }> {
+    return this.prepare(
+      `SELECT id, event_date, source, summary, trust_state, source_page_slug, evidence
+       FROM timeline
+       WHERE page_slug = $slug OR source_page_slug = $slug
+       ORDER BY id`
+    ).all({ $slug: slug }) as Array<{ id: number; event_date: string | null; source: string | null; summary: string; trust_state?: string; source_page_slug?: string; evidence?: string }>;
+  }
+
   /**
    * #385: bounded trusted-link fetch for the personal current-state guard.
    * Returns at most `limit` outgoing+incoming links with trust_state

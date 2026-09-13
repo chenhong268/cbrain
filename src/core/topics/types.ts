@@ -20,12 +20,13 @@ export interface TopicBudgets {
   minNewTopicSources: number;
   /** Total source material characters sent to the model. */
   maxTotalMaterialChars: number;
-  /** Governance rows per source captured into the fingerprint. */
-  maxGovernanceRowsPerSource: number;
+  /** Governance FACTS offered to the model per source. Bounds the prompt
+   *  only — the governance fingerprint always covers every relevant row. */
+  maxPromptFactsPerSource: number;
+  maxOverviewClaims: number;
   maxObservations: number;
   maxDetails: number;
   maxOpenQuestions: number;
-  maxOverviewChars: number;
   maxItemChars: number;
   maxQuoteChars: number;
 }
@@ -34,11 +35,11 @@ export const DEFAULT_TOPIC_BUDGETS: TopicBudgets = {
   maxSourcesPerTopic: 12,
   minNewTopicSources: 3,
   maxTotalMaterialChars: 150_000,
-  maxGovernanceRowsPerSource: 50,
+  maxPromptFactsPerSource: 50,
+  maxOverviewClaims: 3,
   maxObservations: 12,
   maxDetails: 16,
   maxOpenQuestions: 8,
-  maxOverviewChars: 1_200,
   maxItemChars: 600,
   maxQuoteChars: 280,
 };
@@ -47,8 +48,9 @@ export const DEFAULT_TOPIC_BUDGETS: TopicBudgets = {
  *  suspects. A model may label, but never promote a claim to a trust state. */
 export type TopicClaimKind = "observation" | "user_thought" | "candidate";
 
-/** Untrusted model-output claim. Every claim must cite one selected source
- *  with an exact excerpt from that source's current body. */
+/** Untrusted model-output claim. Every claim — including every overview
+ *  assertion — must cite one selected source with an exact excerpt from that
+ *  source's current body. */
 export interface TopicClaim {
   text: string;
   kind: TopicClaimKind;
@@ -56,21 +58,29 @@ export interface TopicClaim {
   quote: string;
 }
 
-/** Raw (untrusted) structured model output before validation. */
+/** Raw (untrusted) structured model output before validation. Overview is a
+ *  bounded claim array: there is no uncited free-text summary section. */
 export interface TopicModelOutput {
-  overview: string;
+  overview: TopicClaim[];
   observations: TopicClaim[];
   details: TopicClaim[];
   open_questions: TopicClaim[];
 }
 
-/** One link/timeline row of a source, captured with its trust state. */
+/** One governance link row touching a source (endpoint or provenance
+ *  origin), captured with its trust state and provenance fields. */
 export interface TopicGovernanceLink {
-  direction: "out" | "in";
-  otherSlug: string;
+  id: number;
+  direction: "out" | "in" | "provenance";
+  fromSlug: string;
+  toSlug: string;
   relation: string;
   trustState: string | null;
   sourceType: string | null;
+  sourcePageSlug: string | null;
+  evidence: string | null;
+  context: string | null;
+  confidence: number;
   active: boolean;
 }
 
@@ -80,6 +90,8 @@ export interface TopicGovernanceTimeline {
   summary: string;
   trustState: string | null;
   source: string | null;
+  sourcePageSlug: string | null;
+  evidence: string | null;
 }
 
 export interface TopicGovernanceProvenance {
@@ -89,20 +101,20 @@ export interface TopicGovernanceProvenance {
   originKind: string | null;
 }
 
-/** Governance state of a source page: links, timeline and write provenance
- *  with their trust states. Hashed into the freshness fingerprint. */
+/** Governance state of a source page: every link/timeline row touching it
+ *  (endpoint OR source_page_slug) plus tags and write provenance. Hashed in
+ *  full into the freshness fingerprint — never truncated. */
 export interface TopicSourceGovernance {
   tags: string[];
   links: TopicGovernanceLink[];
   timeline: TopicGovernanceTimeline[];
   provenance: TopicGovernanceProvenance | null;
-  totals: { links: number; timeline: number };
 }
 
 /** A source fact that is still usable as compile material: active, and not
- *  derived (NER) or user-corrected-away (rejected/superseded/candidate).
- *  Rejected/superseded/candidate rows stay in the fingerprint but are never
- *  offered to the model as live facts. */
+ *  derived (NER) or unconfirmed (candidate). Rejected/superseded rows
+ *  disqualify the ENTIRE source (see TopicSourceSnapshot.disqualified);
+ *  candidates stay in the fingerprint but never reach the model. */
 export interface TopicUsableFact {
   kind: "link" | "timeline";
   text: string;
@@ -110,7 +122,10 @@ export interface TopicUsableFact {
   trustState: string | null;
 }
 
-/** Fresh disk read of one record source, taken at compile time. */
+/** Fresh disk read of one record source, taken at compile time.
+ *  `disqualified` marks a source conservatively unusable for synthesis: a
+ *  relevant governance row (link or timeline, endpoint or provenance) is
+ *  rejected/superseded, so its raw body may restate a user correction. */
 export interface TopicSourceSnapshot {
   slug: string;
   title: string;
@@ -121,6 +136,7 @@ export interface TopicSourceSnapshot {
   governanceHash: string;
   governance: TopicSourceGovernance;
   usableFacts: TopicUsableFact[];
+  disqualified: "governance_rejected" | null;
 }
 
 /** Stable per-source identity persisted in the manifest. */
@@ -169,6 +185,7 @@ export type TopicBlockReason =
   | "too_many_sources"
   | "source_not_found"
   | "source_not_record"
+  | "source_governance_rejected"
   | "title_conflict"
   | "material_over_budget"
   | "target_edited"

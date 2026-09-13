@@ -13,7 +13,8 @@ const SYSTEM_PROMPT = `You compile source-backed topic pages for a personal know
 
 Rules:
 - Output ONE JSON object, nothing else. No markdown fences.
-- Shape: {"overview": string, "observations": claim[], "details": claim[], "open_questions": claim[]}
+- Shape: {"overview": claim[], "observations": claim[], "details": claim[], "open_questions": claim[]}
+- "overview" is a 1-3 claim summary: EVERY summary assertion carries the same citation as any other claim. There is no uncited free-text summary.
 - Each claim: {"text": string, "kind": "observation"|"user_thought"|"candidate", "sourceSlug": string, "quote": string}
 - "quote" MUST be an EXACT substring copied verbatim from the body of the source named by "sourceSlug". Never paraphrase, never merge two sources into one quote.
 - "sourceSlug" MUST be one of the source slugs provided below.
@@ -70,10 +71,6 @@ export function parseTopicModelOutput(raw: string, snapshots: TopicSourceSnapsho
   }
   const v = parsed as Record<string, unknown>;
 
-  const overview = typeof v.overview === "string" ? v.overview.trim() : "";
-  if (!overview) return { ok: false, reason: "overview_empty" };
-  if (overview.length > budgets.maxOverviewChars) return { ok: false, reason: "overview_over_budget" };
-
   const bodiesBySlug = new Map(snapshots.map((s) => [s.slug, s.body]));
 
   const claims = (key: string, max: number, allowEmpty: boolean): { ok: true; claims: TopicClaim[] } | { ok: false; reason: string } => {
@@ -107,6 +104,10 @@ export function parseTopicModelOutput(raw: string, snapshots: TopicSourceSnapsho
     return { ok: true, claims: out };
   };
 
+  // Every summary assertion is a cited claim — an overview arriving as a
+  // plain string (the old uncited free-text bypass) fails validation.
+  const overview = claims("overview", budgets.maxOverviewClaims, false);
+  if (!overview.ok) return overview;
   const observations = claims("observations", budgets.maxObservations, false);
   if (!observations.ok) return observations;
   const details = claims("details", budgets.maxDetails, true);
@@ -117,7 +118,7 @@ export function parseTopicModelOutput(raw: string, snapshots: TopicSourceSnapsho
   return {
     ok: true,
     output: {
-      overview,
+      overview: overview.claims,
       observations: observations.claims,
       details: details.claims,
       open_questions: openQuestions.claims,
