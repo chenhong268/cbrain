@@ -243,12 +243,15 @@ export function computeCatalogFingerprint(db: CBrainDB): string {
   ).all() as Array<{ page_slug: string; tag: string }>;
 
   // Active links touching any record (endpoint OR provenance origin).
+  // Uncorrelated membership sets avoid scanning all records for each link;
+  // retain identical rows/order so existing persisted attestations still match.
   const links = db.rawDb.prepare(
     `SELECT l.id, l.from_slug, l.to_slug, l.relation, l.trust_state, l.source_page_slug
      FROM links l
-     WHERE EXISTS (
-       SELECT 1 FROM pages p WHERE p.type = 'record'
-         AND (p.slug = l.from_slug OR p.slug = l.to_slug OR p.slug = l.source_page_slug)
+     WHERE (
+       l.from_slug IN (SELECT slug FROM pages WHERE type = 'record')
+       OR l.to_slug IN (SELECT slug FROM pages WHERE type = 'record')
+       OR l.source_page_slug IN (SELECT slug FROM pages WHERE type = 'record')
      )
      AND (l.trust_state IS NULL OR l.trust_state NOT IN ('rejected','superseded'))
      ORDER BY l.id`

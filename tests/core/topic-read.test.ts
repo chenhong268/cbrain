@@ -110,6 +110,34 @@ describe("topic read snapshot and freshness (#511 Task 3)", () => {
     expect(admission.isCurrentTopic("records/missing")).toBe(false);
   });
 
+  test("catalog membership preserves record endpoint, provenance and active-state rules", () => {
+    const a = ctx.pages.create({ title: "实体A", type: "entity/person", body: "实体A" }).slug;
+    const b = ctx.pages.create({ title: "实体B", type: "entity/person", body: "实体B" }).slug;
+    const cases: Array<[string, string, string | null, string | null, boolean]> = [
+      [sources[0], a, null, null, true],
+      [a, sources[1], null, null, true],
+      [a, b, sources[0], "trusted", true],
+      [sources[0], sources[1], sources[2], null, true],
+      [a, b, null, null, false],
+      [a, b, a, "trusted", false],
+      [sources[0], a, null, "rejected", false],
+      [sources[0], a, null, "superseded", false],
+      [a, b, sources[1], "candidate", true],
+    ];
+    for (const [i, [from, to, source, state, included]] of cases.entries()) {
+      const before = computeCatalogFingerprint(db);
+      const row = db.rawDb.prepare(
+        "INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?) RETURNING id",
+      ).get(from, to, `membership-${i}`, source, state) as { id: number };
+      const after = computeCatalogFingerprint(db);
+      expect(after !== before).toBe(included);
+      // Deleting one row restores the exact attestation, including when
+      // both endpoints and provenance all belong to records.
+      db.rawDb.prepare("DELETE FROM links WHERE id = ?").run(row.id);
+      expect(computeCatalogFingerprint(db)).toBe(before);
+    }
+  });
+
   test("disk edit of a selected source invalidates the read before any maintenance", () => {
     writeFileSync(sourcePaths[0], readFileSync(sourcePaths[0], "utf-8") + "\n用户更正：上述安排已经取消。");
     const v = verifyTopicForRead({ db, vaultPath: ctx.vaultPath }, topic);
