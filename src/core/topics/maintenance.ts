@@ -509,6 +509,9 @@ export class TopicMaintenance {
       if (this.stopping) break;
       const entry = await this.maintainOne(topic, catalog, discovery, execution, receipt);
       receipt.managed.push(entry);
+      if (topic.manifest.seed && ["unchanged", "refreshed", "reattested"].includes(entry.outcome)) {
+        this.prunePendingSelection(topic.manifest.seed.key);
+      }
     }
 
     // 2. Fill spare slots. A retained explicit selection takes priority and
@@ -519,7 +522,8 @@ export class TopicMaintenance {
     //    pending_selection must not silently re-open generic auto-fill).
     let spare = Math.max(0, MAX_MANAGED_TOPICS - managed.length);
     if (spare > 0) {
-      const pending = this.readPendingSelection();
+      const maintainedKeys = new Set(managed.map((t) => t.manifest.seed?.key));
+      const pending = this.readPendingSelection().filter((key) => !maintainedKeys.has(key));
       if (pending.length > 0) {
         for (const key of pending) {
           if (spare <= 0 || this.stopping) break;
@@ -605,11 +609,18 @@ export class TopicMaintenance {
     // since the last attestation would stay stale and block reads forever.
     // Reuse the same metadata-only reattestation as the sameSelection branch.
     if (result === "unchanged" && manifest.catalog !== catalog) {
+      this.combineCancellation(execution)();
       const reattest = manager.reattestCatalog(slug, catalog);
       if (reattest?.status === "reattested") {
         receipt.counts.unchanged--;
         receipt.counts.reattested++;
         return { ...base, outcome: "reattested" };
+      }
+      if (reattest?.status !== "unchanged") {
+        receipt.counts.unchanged--;
+        receipt.counts.blocked++;
+        receipt.blocked.push({ slug, reason: "catalog_reattest_failed" });
+        return { ...base, outcome: "blocked", reason: "catalog_reattest_failed" };
       }
     }
     return { ...base, outcome: result };
@@ -704,10 +715,13 @@ export class TopicMaintenance {
       return { action: "enable", enabled: false, skipped: "model_unavailable" };
     }
     if (parsed.candidateKeys && parsed.candidateKeys.length > 0) {
-      // Validate against CURRENT discovery candidates (creatable seeds with
-      // a title and >= 3 distinct records) before persisting anything.
+      // New seeds must be currently creatable. Existing seeds keep their
+      // identity even below the creation minimum or hidden as duplicates.
       const discovery = discoverTopicCandidates(this.db);
-      const candidateKeys = new Set(discovery.candidates.map((c) => c.key));
+      const candidateKeys = new Set([
+        ...discovery.candidates.map((c) => c.key),
+        ...this.listManagedTopics().flatMap((t) => t.manifest.seed ? [t.manifest.seed.key] : []),
+      ]);
       const invalidKeys = parsed.candidateKeys.filter((k) => !candidateKeys.has(k));
       if (invalidKeys.length > 0) {
         return { action: "enable", enabled: false, invalidKeys };
@@ -738,21 +752,25 @@ export class TopicMaintenance {
       const catalog = computeCatalogFingerprint(this.db);
       const discovery = discoverTopicCandidates(this.db);
       const managedNow = this.listManagedTopics();
-      const materialized = new Set(managedNow.flatMap((t) => (t.manifest.seed ? [t.manifest.seed.key] : [])));
+      const materialized = new Map(managedNow.flatMap((t) => t.manifest.seed ? [[t.manifest.seed.key, t] as const] : []));
       // The MAX_MANAGED_TOPICS bound holds across EVERY creation path,
       // including repeated explicit enables — never only the scheduled fill.
       // An ALREADY-materialized seed bypasses the capacity gate: re-enabling
       // it is an idempotent reconciliation, not a new creation.
       let spare = Math.max(0, MAX_MANAGED_TOPICS - managedNow.length);
-      for (const key of parsed.candidateKeys) {
+      for (const key of new Set(parsed.candidateKeys)) {
         if (this.stopping) break;
         if (materialized.has(key)) {
           const reconcile: TopicRunReceipt = {
             action: "enable", catalogFingerprint: catalog, managed: [], created: [], blocked: [],
             counts: { refreshed: 0, unchanged: 0, reattested: 0, skipped: 0, created: 0, blocked: 0 },
           };
-          await this.createForKey(key, discovery, catalog, execution, reconcile);
-          for (const b of reconcile.blocked) blocked.push({ key, reason: b.reason });
+          const result = await this.maintainOne(materialized.get(key)!, catalog, discovery, execution, reconcile);
+          if (["unchanged", "refreshed", "reattested"].includes(result.outcome)) {
+            this.prunePendingSelection(key);
+          } else {
+            blocked.push({ key, reason: result.reason ?? reconcile.blocked[0]?.reason ?? result.outcome });
+          }
           continue;
         }
         if (spare <= 0) {

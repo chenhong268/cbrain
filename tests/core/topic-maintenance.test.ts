@@ -448,6 +448,83 @@ describe("topic wiki — discovery and maintenance", () => {
 
   // ─── Enablement, creation, budget ────────────────────────────────
 
+  for (const failure of [null, { status: "ineligible" as const, reason: "reattest_write_failed" }]) {
+    test(`failed catalog reattestation is blocked rather than unchanged (${failure?.status ?? "missing"})`, async () => {
+      await seedTaggedRecords("主题D", 3);
+      const { maintenance, manager, llm } = smart();
+      await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+      const slug = db.listPageSlugs({ type: "topic" })[0];
+      const dropped = await seedRecord("新增但拒绝的记录", BODY_A, ["主题D"]);
+      const entity = pages.create({ title: "组织C", type: "entity/organization", body: "组织C。" });
+      db.rawDb.prepare("INSERT INTO links (from_slug,to_slug,relation,source_page_slug,trust_state) VALUES (?,?,?,?,?)")
+        .run(dropped, entity.slug, "提及", dropped, "rejected");
+      const before = readFileSync(join(vaultPath, db.getPageFilePath(slug)!), "utf8");
+      manager.reattestCatalog = () => failure;
+      const result = await runHandle(maintenance, { action: "refresh" }) as TopicRunReceipt;
+      expect(result.counts.unchanged).toBe(0);
+      expect(result.counts.blocked).toBe(1);
+      expect(result.managed[0].outcome).toBe("blocked");
+      expect(result.blocked[0].reason).toBe("catalog_reattest_failed");
+      expect(llm.calls).toHaveLength(1);
+      expect(verifyTopicForRead({ db, vaultPath }, slug)?.current).toBe(false);
+      expect(readFileSync(join(vaultPath, db.getPageFilePath(slug)!), "utf8")).toBe(before);
+    });
+  }
+
+  test("cancellation after an unchanged compile prevents metadata reattestation", async () => {
+    await seedTaggedRecords("主题D", 3);
+    const { maintenance, manager } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const slug = db.listPageSlugs({ type: "topic" })[0];
+    const dropped = await seedRecord("新增但拒绝的记录", BODY_A, ["主题D"]);
+    const entity = pages.create({ title: "组织C", type: "entity/organization", body: "组织C。" });
+    db.rawDb.prepare("INSERT INTO links (from_slug,to_slug,relation,source_page_slug,trust_state) VALUES (?,?,?,?,?)")
+      .run(dropped, entity.slug, "提及", dropped, "rejected");
+    const before = readFileSync(join(vaultPath, db.getPageFilePath(slug)!), "utf8");
+    const abort = new AbortController();
+    const compile = manager.compile.bind(manager);
+    manager.compile = async (request) => {
+      const result = await compile(request);
+      abort.abort(new Error("cancelled at compile boundary"));
+      return result;
+    };
+    await expect(maintenance.handle({ action: "refresh" }, 0, {
+      signal: abort.signal, checkCancelled: () => abort.signal.throwIfAborted(),
+    })).rejects.toThrow("cancelled at compile boundary");
+    expect(readFileSync(join(vaultPath, db.getPageFilePath(slug)!), "utf8")).toBe(before);
+  });
+
+  test("re-enabling an existing seed preserves its persisted title and page identity", async () => {
+    const sources = await seedTaggedRecords("主题D", 3);
+    const { maintenance, manager, llm } = smart();
+    const initial = await manager.compile({ title: "既有主题名称", sourceSlugs: sources, seed: { kind: "tag", key: "tag:主题D" } });
+    expect(initial.status).toBe("created");
+    const before = db.listPageSlugs({ type: "topic" });
+    const result = await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] }) as { created: unknown[]; blocked: unknown[] };
+    expect(result.created).toHaveLength(0);
+    expect(result.blocked).toHaveLength(0);
+    expect(db.listPageSlugs({ type: "topic" })).toEqual(before);
+    expect(llm.calls).toHaveLength(1);
+    expect(db.getConfig("topic.pending_selection")).toBeNull();
+  });
+
+  for (const change of ["below_minimum", "hidden_duplicate"]) {
+    test(`existing seed stays maintainable when discovery omits it (${change})`, async () => {
+      const sources = await seedTaggedRecords("主题D", 3);
+      const { maintenance } = smart();
+      await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+      const slug = db.listPageSlugs({ type: "topic" })[0];
+      if (change === "below_minimum") db.rawDb.prepare("DELETE FROM tags WHERE page_slug=? AND tag=?").run(sources[0], "主题D");
+      else for (const source of sources) db.addTag(source, "A-重复分组");
+      const result = await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] }) as { enabled: boolean; blocked: unknown[] };
+      expect(result.enabled).toBe(true);
+      expect(result.blocked).toHaveLength(0);
+      expect(db.listPageSlugs({ type: "topic" })).toEqual([slug]);
+      expect(verifyTopicForRead({ db, vaultPath }, slug)?.current).toBe(true);
+      expect(db.getConfig("topic.pending_selection")).toBeNull();
+    });
+  }
+
   test("disabled maintenance never enqueues; enabled tick fills up to five total", async () => {
     for (const tag of ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6"]) {
       await seedTaggedRecords(tag, 3);
@@ -727,9 +804,17 @@ describe("topic wiki — discovery and maintenance", () => {
     expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
     expect(over.created).toHaveLength(0);
     expect(over.blocked[0]?.reason).toBe("at_capacity");
+    const again = await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:${keys[0]}`, `tag:${keys[0]}`] }) as { created: unknown[]; blocked: unknown[] };
+    expect(again.created).toHaveLength(0);
+    expect(again.blocked).toHaveLength(0);
+    db.setConfig("topic.pending_selection", JSON.stringify([`tag:${keys[0]}`, `tag:${keys[32]}`]));
+    const recovered = await runHandle(maintenance, { action: "refresh" }) as TopicRunReceipt;
+    expect(recovered.counts.created).toBe(0);
+    expect(db.listPageSlugs({ type: "topic" })).toHaveLength(MAX_MANAGED_TOPICS);
+    expect(JSON.parse(db.getConfig("topic.pending_selection")!)).toEqual([`tag:${keys[32]}`]);
   });
 
-  test("re-enabling an already materialized seed is idempotent, even at capacity", async () => {
+  test("re-enabling an already materialized seed is idempotent and prunes its pending entry", async () => {
     for (let i = 0; i < 5; i++) await seedTaggedRecords(`既有主题${i}`, 3);
     const { maintenance, llm } = smart();
     const first = (await runHandle(maintenance, { action: "enable", candidateKeys: [`tag:既有主题0`] })) as unknown as {
