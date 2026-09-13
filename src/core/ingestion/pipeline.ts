@@ -478,6 +478,13 @@ export class ContentPipeline {
     if (!this.nerEngine) return null;
     if (!body.trim()) return null;
     if (getOntology().isDerivedPageType(type)) return null;
+    // #511: execution-time admission on the CURRENT DB page. Submit-site
+    // guards cannot establish this — a deferred/queued legacy NER job for a
+    // record whose file now lives under the managed topic path (or whose row
+    // was retyped) must never reach the model, regardless of the supplied
+    // type. Mirrors the central wikilink gate.
+    const pageRow = this.db.getPage(fromSlug);
+    if (pageRow?.type === TOPIC_PAGE_TYPE || isTopicManagedPath(pageRow?.file_path)) return null;
 
     const extraction = precomputed ?? await this.nerEngine.extract(body);
     sourceGuard?.("after_extract");

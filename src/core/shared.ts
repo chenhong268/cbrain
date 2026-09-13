@@ -116,6 +116,16 @@ export function isTopicManagedPath(filePath: string | null | undefined): boolean
   return filePath === dir || filePath.startsWith(`${dir}/`);
 }
 
+/** #511: a page row on a generated topic surface — DB type `topic` OR a
+ *  file inside the reserved managed path (a stray/legacy record-typed row
+ *  there is still a generated surface, so a missing/old row type can never
+ *  become a read or evidence bypass). Shared by search, direct page reads,
+ *  evidence guards, the NER execution gate and the CLI. */
+export function isTopicRow(row: { type: string; file_path: string | null | undefined } | null | undefined): boolean {
+  if (!row) return false;
+  return row.type === "topic" || isTopicManagedPath(row.file_path);
+}
+
 export function canMerge(typeA: string, typeB: string): boolean {
   return getLayer(typeA) === getLayer(typeB);
 }

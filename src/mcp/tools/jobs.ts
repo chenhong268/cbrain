@@ -95,8 +95,8 @@ export function registerJobTools(server: McpServer, ctx: ToolContext): void {
     // so disable applies its immediate control semantics HERE (cancel active
     // topic work, stop scheduling) while still submitting the normal job row
     // as the audit trail; repeated explicit refreshes coalesce onto one
-    // pending job. Invalid payloads fall through to the plain submit so the
-    // handler fails the row with a clear error.
+    // pending job. Invalid payloads are REJECTED here without enqueueing
+    // ({success:false, code:'TOPIC_JOB_INVALID_DATA'}).
     if (name === TOPIC_JOB_NAME && ctx.topicMaintenance) {
       let controlled: { id: number; coalesced: boolean } | null = null;
       try {

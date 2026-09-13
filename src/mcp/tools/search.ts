@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolContext } from "../context.js";
 import { generateProactiveHints } from "../../core/retrieval/proactive.js";
 import { isComplexQuery, applyRecallQualityGate, type SearchTrace } from "../../core/retrieval/search.js";
+import { isTopicRow } from "../../core/shared.js";
 import { traceToSteps } from "../../core/retrieval/search-trace.js";
 import { trimHint, applyProactiveBudget } from "./trim.js";
 import { classifyDegradedReasons, computeSearchDegraded, computeLatencyWarning } from "../../core/retrieval/search-diagnostics.js";
@@ -46,9 +47,13 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
     try { traceSessionId = ctx.db.startSearchTraceSession({ query, mode: actualStrategy }); } catch { /* non-critical */ }
 
     if (actualStrategy === "smart") {
-      // Exact slug/title match fast path
+      // Exact slug/title match fast path. A topic page never qualifies as the
+      // exact hit here — query is the debug/locate surface and keeps the
+      // original-evidence contract (#511). Dropping the promotion (instead of
+      // returning the topic) lets the originals surface through the paths below.
       const resolved = ctx.db.resolveSlugs([query])[0];
       exactSlug = resolved?.slug ?? null;
+      if (exactSlug && isTopicRow(ctx.db.getPage(exactSlug))) exactSlug = null;
 
       // Detect complex queries before FTS — routes to decomposition in ctx.search.search().
       // This check is needed here (not just inside HybridSearch) because the smart strategy
@@ -56,7 +61,15 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       const candidates = query.split(/[\s,，、；;和与跟以及]+/).filter((w) => w.length >= 2);
       const ftsStart = Date.now();
       const ftsMeta: { fts_fallback?: boolean } = {};
-      const ftsSlugs = (() => { try { return ctx.db.ftsSearch(query, cap, ftsMeta); } catch { return []; } })();
+      let ftsSlugs = (() => { try { return ctx.db.ftsSearch(query, cap, ftsMeta); } catch { return []; } })();
+      // #511: topic rows must not count toward the smart-FTS short circuit
+      // (sufficiency) nor be returned by it. Bounded refill mirrors
+      // HybridSearch so originals are not squeezed out of the window.
+      const topicRows = ftsSlugs.filter((r) => isTopicRow(ctx.db.getPage(r.page_slug)));
+      if (topicRows.length > 0) {
+        try { ftsSlugs = ctx.db.ftsSearch(query, cap + Math.min(topicRows.length, 5), ftsMeta); } catch { /* keep first-pass rows */ }
+      }
+      ftsSlugs = ftsSlugs.filter((r) => !isTopicRow(ctx.db.getPage(r.page_slug)));
       if (ftsMeta.fts_fallback) trace.fts_fallback = true;
       const ftsElapsed = Date.now() - ftsStart;
       const knownSlugs = ctx.db.resolveSlugs(candidates).filter((r) => r.slug !== null).map((r) => r.slug!);
@@ -208,6 +221,14 @@ export function registerSearchTools(server: McpServer, ctx: ToolContext): void {
       slug: z.string().max(500).describe("Page slug"),
     },
   }, async ({ slug }) => {
+    // #511: indexed chunks of a generated topic page are not original
+    // material — a stale page's chunks would resurrect old generated text
+    // through a read surface. Safe refusal, no chunk text.
+    if (isTopicRow(ctx.db.getPage(slug))) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ slug, refused: "topic_chunks_not_original_evidence" }) }],
+      };
+    }
     const chunks = ctx.db.getChunksByPage(slug);
     return {
       content: [{ type: "text", text: JSON.stringify(chunks, null, 2) }],

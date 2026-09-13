@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { CBrainDB } from "../../src/storage/sqlite.js";
 import { PageManager } from "../../src/core/page.js";
 import { ContentPipeline } from "../../src/core/ingestion/pipeline.js";
@@ -270,15 +270,22 @@ describe("topic wiki — bounded compiler", () => {
       expect(typeof s.governance_hash).toBe("string");
     }
 
-    // Body: bounded sections, backticked citation slugs (no wikilinks — the
-    // generated body must stay byte-stable when a source is later deleted),
-    // provenance disclaimer. Overview renders as cited claims.
+    // Body: bounded sections, navigable relative Markdown source links (no
+    // wikilinks — the generated body must stay byte-stable when a source is
+    // later deleted), provenance disclaimer. Overview renders as cited claims.
     expect(body).toContain("## 概览");
     expect(body).toContain("主题D的项目横跨两个阶段");
     expect(body).toContain("## 主要观察");
-    expect(body).toContain(`（来源：\`${sourceA.slug}\`「`);
+    expect(body).toContain(`（来源：[${sourceA.slug}](../../${sourceA.slug.split("/").map(encodeURIComponent).join("/")}.md)「`);
+    expect(body).toContain(`- [${sourceB.slug}](../../${sourceB.slug.split("/").map(encodeURIComponent).join("/")}.md)`);
     expect(body).not.toContain("[[");
-    expect(body).toContain("自动编译");
+    expect(body).toContain("自动整理生成");
+    // The hrefs are actually navigable from the topic page's directory.
+    const topicDir = join(vaultPath, "brain/topics");
+    for (const s of sources) {
+      const target = resolve(topicDir, `../../${s.slug}.md`);
+      expect(existsSync(target)).toBe(true);
+    }
 
     // Indexed for retrieval.
     expect(db.getChunksByPage(slug, { limit: 1 }).length).toBeGreaterThan(0);
@@ -438,7 +445,7 @@ describe("topic wiki — bounded compiler", () => {
 
     expect(body).toContain("[观察]");
     expect(body).toContain("[用户想法]");
-    expect(body).toContain("[候选]");
+    expect(body).toContain("[待确认]");
     expect(body).not.toContain("trusted");
   });
 
@@ -1330,7 +1337,7 @@ describe("topic wiki — re-review round 1 regressions", () => {
     const overviewEnd = body.indexOf("## 主要观察");
     const overview = body.slice(overviewStart, overviewEnd);
     expect(overview).toContain("[用户想法]");
-    expect(overview).toContain("[候选]");
+    expect(overview).toContain("[待确认]");
   });
 });
 

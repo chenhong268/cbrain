@@ -284,6 +284,24 @@ All commands are thin wrappers around the core engine. The CLI and MCP server sh
 
 Skills follow GBrain's "fat skills, thin harness" philosophy: intelligence lives in the skill files, not the runtime. The MCP server provides tools; skills teach the Agent when and how to use them.
 
+## Topic Wiki (generated reading pages)
+
+Topic pages are auto-compiled **derived reading aids**, never independent evidence. A topic is compiled from an explicit selection of original `record` pages (min 3 to create; ≤12 per topic; pilot cap 5 managed topics total); its body only contains claims that each cite an exact substring of a selected source, and its 来源 section links each source with a navigable relative Markdown link (never a wikilink — generated pages must not feed the relation graph).
+
+**Storage & lifecycle.** Topics live under `brain/topics/` in the vault with the full manifest (selection snapshots, publication state, optional seed identity and record-catalog attestation) in frontmatter. Everything rides existing facilities: the unified job queue (job name `topic-wiki`), the existing config table (`topic.enabled`, default off), the version manager, and the existing page/index pipeline. No new table, tool, or process.
+
+**Operator actions** (all through the existing job tool with name `topic-wiki`):
+- `preview` — read-only report: candidates (tag/entity seeds with distinct-record support), managed topics with freshness/catalog state, spare slots, exclusion counts. No model.
+- `enable` (+ optional `candidateKeys`, enable-only) — validates the selection against current candidates, persists it before execution, then creates the topics.
+- `refresh` — reconciles managed topics, then fills spare slots; rejects `candidateKeys`. Unchanged topic: no-op. Catalog changed but selection unchanged: metadata-only reattestation (no model). Membership changed: bounded recompile.
+- `disable` — immediate control semantics: scheduling stops, pending topic jobs are cancelled, the active job aborts through its existing cancellation checks.
+
+**Cadence.** While enabled: one scheduled refresh per 30 minutes plus a startup and a daily reconciliation run. Failures complete their job row as a blocked receipt (no hot retry); the next attempt waits for the next due tick.
+
+**Read freshness (fail closed).** Every read surface — search channels, `get_page`/`get_pages`, the recall front door, evidence collection, agentic steps, the `cbrain show` CLI — excludes topic rows unless a provider-independent verifier (db + vault only, never the model) proves the page CURRENT: committed publication state, body hash, per-source content/governance fingerprints, committed index hash, a sane bounded selection, AND a matching record-catalog attestation (a missing or mismatched attestation blocks reads until maintenance reattests — metadata-only, no LLM). Ordinary queries over topic-free data do zero topic filesystem/catalog/model work. A current topic may appear only in the daily overview route and plain theme lookups in content recall, clearly marked 派生主题页 with its source list; raw-detail, temporal/history and grounded-evidence queries always answer from original records. Topic-origin links/timeline/L1/chunks are never promoted as evidence anywhere. Topic bodies stay out of NER (including deferred execution on the current file path) and the wikilink graph.
+
+**Rollback limitations.** Older runtimes (≤ v2.0.14) have no read/evidence guards and treat topic chunks as trusted explicit input. Disabling the scheduler and switching to OLD code while generated topic pages remain indexed is therefore NOT a safe rollback. Safe rollback: quiesce the writer, remove the generated `brain/topics/` files and their index/config rows (per the bounded receipts), or restore a complete pre-pilot snapshot — only when no intervening original writes would be lost — then resume the old runtime. Rehearse on a copy before any live use.
+
 ## Comparison with GBrain
 
 ### What CBrain Does Differently (by design)

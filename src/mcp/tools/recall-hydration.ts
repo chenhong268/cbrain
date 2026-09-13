@@ -2,7 +2,7 @@ import type { ToolContext } from "../context.js";
 import type { LinkRow } from "../../storage/sqlite.js";
 import type { Link } from "../../core/graph/graph.js";
 import { getHierarchyContext } from "../../core/graph/hierarchy.js";
-import { isCurrentFactLink } from "../../core/shared.js";
+import { isCurrentFactLink, isTopicRow } from "../../core/shared.js";
 import { trimLink, trimTimeline } from "./trim.js";
 
 type RecallPage = ReturnType<ToolContext["pages"]["getBySlug"]>;
@@ -68,6 +68,14 @@ export function hydrateRecallSlugs(
   if (!options.isBrief) {
     const batchTimeline = ctx.db.batchGetTimelineForSlugs(slugs);
 
+    // #511: link/timeline rows whose provenance (or fallback counterparty)
+    // points at a generated topic page are derived material — they are dropped
+    // BEFORE trimming, so display lists AND the summary counts derived from
+    // them only ever reflect original-source relations. (The evidence board
+    // applies the same rule independently.)
+    const isTopicProvenance = (slug: string | null | undefined): boolean =>
+      slug != null && isTopicRow(ctx.db.getPage(slug));
+
     for (const slug of slugs) {
       const rawLinks = batchLinks.get(slug) ?? { outgoing: [], incoming: [] };
       const toLink = (link: LinkRow): Link => ({
@@ -76,11 +84,21 @@ export function hydrateRecallSlugs(
         source_type: link.source_type ?? undefined,
         confidence: link.confidence ?? undefined,
       });
-      const outgoing = rawLinks.outgoing.filter(isCurrentFactLink).map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
-      const incoming = rawLinks.incoming.filter(isCurrentFactLink).map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
+      const admitsLink = (link: LinkRow, counterparty: string): boolean =>
+        !isTopicProvenance(link.source_page_slug) && !isTopicRow(ctx.db.getPage(counterparty));
+      const outgoing = rawLinks.outgoing
+        .filter(isCurrentFactLink)
+        .filter((l) => admitsLink(l, l.to_slug))
+        .map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
+      const incoming = rawLinks.incoming
+        .filter(isCurrentFactLink)
+        .filter((l) => admitsLink(l, l.from_slug))
+        .map(toLink).map(trimLink).filter(Boolean) as Record<string, unknown>[];
       linksBySlug.set(slug, { outgoing, incoming });
 
-      const rawTimeline = batchTimeline.get(slug) ?? [];
+      const rawTimeline = (batchTimeline.get(slug) ?? []).filter(
+        (t) => !isTopicProvenance((t as TimelineRow).source_page_slug),
+      );
       timelineBySlug.set(slug, trimTimeline(rawTimeline as TimelineRow[], 3));
 
       try {

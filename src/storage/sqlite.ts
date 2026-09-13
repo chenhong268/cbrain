@@ -1101,8 +1101,10 @@ export class CBrainDB {
     return Number(result.lastInsertRowid);
   }
 
-  searchTimeline(keyword?: string, dateFrom?: string, limit = 10): Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string }> {
-    let sql = "SELECT page_slug, event_date, source, summary FROM timeline WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
+  searchTimeline(keyword?: string, dateFrom?: string, limit = 10): Array<{ page_slug: string; event_date: string | null; source: string | null; summary: string; source_page_slug?: string }> {
+    // #511: source_page_slug rides along so read surfaces can drop rows whose
+    // provenance points at a generated topic page (derived material).
+    let sql = "SELECT page_slug, event_date, source, summary, source_page_slug FROM timeline WHERE (trust_state IS NULL OR trust_state NOT IN ('rejected','superseded'))";
     const params: Record<string, string | number> = { $limit: limit };
     if (keyword) {
       sql += " AND summary LIKE $keyword";

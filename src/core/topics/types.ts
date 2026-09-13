@@ -233,6 +233,12 @@ export interface TopicFreshnessReport {
   editedByUser: boolean;
   reasons: string[];
   sources: Array<{ slug: string; ok: boolean; reason?: string }>;
+  /** #511: manifest carries a Task 2 record-catalog attestation. Present only
+   *  when attested; a mismatch adds `catalog_changed` to reasons and blocks
+   *  READS, but never flips `state` (maintenance reattestation stays
+   *  eligible without the model). */
+  catalogAttested?: boolean;
+  catalogChanged?: boolean;
 }
 
 export interface TopicCompileRequest {

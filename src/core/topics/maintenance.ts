@@ -4,7 +4,7 @@ import type { Logger } from "../logger.js";
 import { isTopicManagedPath } from "../shared.js";
 import { TopicManager } from "./manager.js";
 import { TOPIC_PAGE_TYPE } from "./types.js";
-import { governanceFingerprint } from "./source-reader.js";
+import { computeCatalogFingerprint } from "./read.js";
 import type { TopicManifest, TopicSeed } from "./types.js";
 
 /** Internal job name for the existing unified job tool. Actions are validated
@@ -83,51 +83,11 @@ function compareStrings(a: string, b: string): number {
 }
 
 // ─── DB record catalog fingerprint (#510 Task 2) ─────────────────────
-// Conservative MEMBERSHIP signal computed from DB metadata only — no
-// directory scan per query. Same count/max(updated_at) is deliberately NOT
-// enough: slug/file_path/content_hash plus the tags, active link rows and
-// provenance that affect source membership are all hashed, in a stable
-// canonical form. Selected sources' actual disk+governance state stays
-// checked by the Task 1 compiler.
+// Moved to ./read.js for #511 Task 3 (shared read freshness consumes the same
+// hash — no duplicate implementation). Re-exported here so the Task 2 API
+// surface (tests, callers) is unchanged.
 
-export function computeCatalogFingerprint(db: CBrainDB): string {
-  const records = db.rawDb.prepare(
-    `SELECT p.slug, p.file_path, p.content_hash
-     FROM pages p WHERE p.type = 'record' ORDER BY p.slug`
-  ).all() as Array<{ slug: string; file_path: string; content_hash: string | null }>;
-
-  const tags = db.rawDb.prepare(
-    `SELECT t.page_slug, t.tag FROM tags t
-     JOIN pages p ON p.slug = t.page_slug AND p.type = 'record'
-     ORDER BY t.page_slug, t.tag`
-  ).all() as Array<{ page_slug: string; tag: string }>;
-
-  // Active links touching any record (endpoint OR provenance origin).
-  const links = db.rawDb.prepare(
-    `SELECT l.id, l.from_slug, l.to_slug, l.relation, l.trust_state, l.source_page_slug
-     FROM links l
-     WHERE EXISTS (
-       SELECT 1 FROM pages p WHERE p.type = 'record'
-         AND (p.slug = l.from_slug OR p.slug = l.to_slug OR p.slug = l.source_page_slug)
-     )
-     AND (l.trust_state IS NULL OR l.trust_state NOT IN ('rejected','superseded'))
-     ORDER BY l.id`
-  ).all() as Array<{ id: number; from_slug: string; to_slug: string; relation: string; trust_state: string | null; source_page_slug: string | null }>;
-
-  const provenance = db.rawDb.prepare(
-    `SELECT pwp.page_slug, pwp.write_mode, pwp.actor_class, pwp.creation_reason, pwp.origin_kind, pwp.origin_ref
-     FROM page_write_provenance pwp
-     JOIN pages p ON p.slug = pwp.page_slug AND p.type = 'record'
-     ORDER BY pwp.page_slug`
-  ).all() as Array<{ page_slug: string; write_mode: string; actor_class: string; creation_reason: string; origin_kind: string | null; origin_ref: string | null }>;
-
-  return governanceFingerprint({
-    records,
-    tags,
-    links,
-    provenance,
-  });
-}
+export { computeCatalogFingerprint } from "./read.js";
 
 // ─── Discovery (#510 Task 2) ──────────────────────────────────────────
 // Two seed families, both DB-only, both counting DISTINCT record slugs

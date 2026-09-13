@@ -27,3 +27,15 @@ export type {
   TopicSourceCatalogEntry,
   TopicSourceSnapshot,
 } from "./types.js";
+export {
+  computeCatalogFingerprint,
+  createTopicReadAdmission,
+  readCurrentTopic,
+  verifyTopicForRead,
+} from "./read.js";
+export type {
+  TopicReadAdmission,
+  TopicReadDeps,
+  TopicReadSnapshot,
+  TopicReadVerification,
+} from "./read.js";

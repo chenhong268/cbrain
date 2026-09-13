@@ -19,6 +19,7 @@ import { ProfileManager } from "../profile/manager.js";
 import { ProvenanceManager } from "../core/provenance.js";
 import { SqliteProvenanceStore } from "../storage/provenance-store.js";
 import { CompoundingReviewManager } from "../core/maintenance/compounding-review.js";
+import { createTopicReadAdmission } from "../core/topics/read.js";
 import type { EmbeddingProvider } from "../embedding/provider.js";
 import type { LLMProvider } from "../llm/provider.js";
 import type { FileWatcher } from "../core/maintenance/watcher.js";
@@ -73,6 +74,11 @@ export interface ToolContext {
    *  session). The job tool's topic-only submit hook reads it for immediate
    *  disable control semantics. */
   topicMaintenance?: import("../core/topics/maintenance.js").TopicMaintenance;
+  /** #511 Task 3: provider-independent admission for CURRENT topic pages
+   *  (db+vaultPath only — no model/pipeline state). Search and direct read
+   *  surfaces consult it; topic rows are excluded everywhere it is absent
+   *  (fail closed). */
+  topicRead?: import("../core/topics/read.js").TopicReadAdmission;
 }
 
 export interface IndexResult {
@@ -96,7 +102,8 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const logger = new Logger(outputsDir);
   const pages = new PageManager(db, vaultPath, logger, lance);
   const graph = new GraphManager(db);
-  const search = new HybridSearch(db, embedding, lance, { llm, logger, graph });
+  const topicRead = createTopicReadAdmission({ db, vaultPath });
+  const search = new HybridSearch(db, embedding, lance, { llm, logger, graph, topicAdmission: topicRead });
   const nerEngine = llm ? new NerEngine(llm, logger) : undefined;
   const jobs = new JobQueue(db, logger);
   // #252: re-resolve defensively — createDeps already put the config-resolved mode in deps.nerIngestMode,
@@ -136,5 +143,5 @@ export function buildContext(deps: { db: CBrainDB; embedding: EmbeddingProvider;
   const compoundingReview = new CompoundingReviewManager(db);
   profile.load();
 
-  return { db, vaultPath, vaultBoundary, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY), rolloutIdentity, identityPersonSlug: deps.identityPersonSlug };
+  return { db, vaultPath, vaultBoundary, dbPath, profileDir, outputsDir, pages, search, sync, ingest, graph, enrich, versions, jobs, writeback, pipeline, embedding, lance, llm, logger, insights, learn, profile, provenance, compoundingReview, watcher, toolProfile: deps.toolProfile ?? "full", nerIngestMode: nerMode, deferredNerSubmitter, outputMode: resolveOutputMode(process.env.CBRAIN_OUTPUT_BOUNDARY), rolloutIdentity, identityPersonSlug: deps.identityPersonSlug, topicRead };
 }

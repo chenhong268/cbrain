@@ -174,6 +174,12 @@ function makeHarness(
           : { outgoing: [], incoming: [] }];
       }));
     },
+    getPage(slug: string) {
+      // #511: topic-row classification reads the DB page; the harness has no
+      // topic pages, so every slug classifies as an ordinary page.
+      evidenceCalls.push(`page:${slug}`);
+      return null;
+    },
     getPageTitlesAndTypes(slugs: string[]) {
       evidenceCalls.push(`titles:${slugs.join(",")}`);
       return new Map(slugs.map((slug) => [slug, { title: `标题-${slug}`, type: "note" }]));
@@ -458,7 +464,8 @@ describe("content frontdoor honesty sequencing", () => {
 
     expect(harness.searchCalls).toEqual([{
       query: "匿名主题",
-      options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true, _trace: expect.any(Object) },
+      // #511: content recall admits verified-current topics through search.
+      options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true, _allowCurrentTopics: true, _trace: expect.any(Object) },
     }]);
     expect(harness.searchCalls[0]!.options).not.toHaveProperty("multiStep");
   });
@@ -487,11 +494,11 @@ describe("content frontdoor honesty sequencing", () => {
     expect(harness.searchCalls).toEqual([
       {
         query: "匿名新版决策与扩大试用条件",
-        options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true, _trace: expect.any(Object) },
+        options: { limit: 3, _captureSupport: true, _skipDetailEnrich: true, _allowCurrentTopics: true, _trace: expect.any(Object) },
       },
       {
         query: "匿名新版决策与扩大试用条件",
-        options: { strategy: "fts", limit: 3, _captureSupport: true, _skipDetailEnrich: true },
+        options: { strategy: "fts", limit: 3, _captureSupport: true, _skipDetailEnrich: true, _allowCurrentTopics: true },
       },
     ]);
   });

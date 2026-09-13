@@ -16,7 +16,7 @@ import { buildCompactRecallResponse, type CompactProactiveHint } from "./recall-
 import { shouldCompleteEvidence } from "../../core/retrieval/recall-intent.js";
 import { assembleEvidencePack, type EvidencePack } from "../../core/retrieval/evidence-completion.js";
 import { kmContextApi, formatKmRelatedLine } from "../../core/recall/km-context.js";
-import { isCurrentFactLink } from "../../core/shared.js";
+import { isCurrentFactLink, isTopicRow } from "../../core/shared.js";
 import { hydrateRecallSlugs } from "./recall-hydration.js";
 import { buildToolResult } from "./result-builder.js";
 import {
@@ -102,6 +102,10 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     if (usedStrategy === "smart") {
       const resolved = ctx.db.resolveSlugs([query])[0];
       exactSlug = resolved?.slug ?? null;
+      // #511: deep_recall is the original-record path. A topic title/alias hit
+      // is dropped (not promoted to exact) so the original records surface;
+      // search itself already excludes topic rows.
+      if (exactSlug && isTopicRow(ctx.db.getPage(exactSlug))) exactSlug = null;
 
       searchResults = await ctx.search.search(query, { limit: candidateLimit, multiStep, _trace: trace });
       usedStrategy = "smart-hybrid";
@@ -385,6 +389,23 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
     // Build entity objects — all fully enriched (no stubs)
     const entities = searchResults.map((sr) => {
       const slug = sr.slug;
+      // #511 defense-in-depth: a topic row must never render its (possibly
+      // stale) body/snippet through the ordinary entity path — search already
+      // excludes topics; this guard keeps direct hydration honest too.
+      if (isTopicRow(ctx.db.getPage(slug))) {
+        return {
+          slug,
+          title: hydratedPagesBySlug.get(slug)?.title ?? slug,
+          type: "topic",
+          relevance: sr.score,
+          derived: true,
+          unavailable: "topic_not_original_evidence" as const,
+          snippet: "",
+          body: "",
+          frontmatter: null,
+          tags: tagsBySlug.get(slug) ?? [],
+        };
+      }
       const page = hydratedPagesBySlug.get(slug);
       const links = linksBySlug.get(slug) ?? { outgoing: [], incoming: [] };
       const timeline = timelineBySlug.get(slug) ?? [];
@@ -463,6 +484,8 @@ export function registerRecallTools(server: McpServer, ctx: ToolContext): void {
       batchLinks,
       timelineBySlug as Map<string, Array<{ id: number; event_date: string | null; source: string | null; summary: string; created_at: string; trust_state?: string; source_page_slug?: string; evidence?: string }>>,
       topSlugs,
+      // #511: topic-derived links/timeline are never independent evidence.
+      (slug) => isTopicRow(ctx.db.getPage(slug)),
     );
     const evidenceSummary = buildEvidenceSummary(evidenceBoard) ?? undefined;
 

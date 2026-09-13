@@ -11,6 +11,7 @@ import { generateSlug } from "../../utils/slug.js";
 import { hashContent } from "../shared.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import { readRecordSource, resolveWithinVault, sourceFingerprintMismatch } from "./source-reader.js";
+import { computeCatalogFingerprint, verifyTopicForRead } from "./read.js";
 import { buildManifest, parseTopicManifest, withManifestCatalog, withManifestState } from "./manifest.js";
 import { buildTopicPrompt, parseTopicModelOutput } from "./output.js";
 import { renderTopicBody } from "./render.js";
@@ -144,65 +145,31 @@ export class TopicManager {
    * and the committed DB content hash proves indexing completed for the
    * current bytes (dirty/null hash ⇒ index_pending_or_dirty). Returns null
    * when the slug is not a topic page.
+   *
+   * #511: delegates to the shared provider-independent read verification
+   * (src/core/topics/read.ts) so maintenance and every read surface agree on
+   * ONE set of verification facts. `state` deliberately keeps Task 1
+   * semantics — the catalog attestation mismatch is reported separately
+   * (catalogAttested/catalogChanged) so a sole catalog change stays eligible
+   * for the metadata-only reattestation instead of LLM regeneration.
    */
   inspectFreshness(topicSlug: string): TopicFreshnessReport | null {
-    const row = this.db.getPage(topicSlug);
-    if (!row || row.type !== TOPIC_PAGE_TYPE) return null;
-
-    const invalid: TopicFreshnessReport = {
-      slug: topicSlug,
-      state: "invalid",
-      generatedAt: null,
-      editedByUser: false,
-      reasons: [],
-      sources: [],
-    };
-
-    const read = this.readTopicPageRaw(topicSlug);
-    if (!read) return { ...invalid, reasons: ["topic_file_unreadable"] };
-
-    const manifestResult = parseTopicManifest(read.manifest);
-    if (manifestResult === null) return { ...invalid, reasons: ["manifest_missing"] };
-    if (!manifestResult.ok) return { ...invalid, reasons: ["manifest_invalid"] };
-    const manifest = manifestResult.manifest;
-
-    const reasons: string[] = [];
-    if (manifest.state !== "committed") reasons.push("publication_pending");
-    const editedByUser = hashContent(read.body) !== manifest.output_hash;
-    if (editedByUser) reasons.push("target_edited");
-
-    const committedHash = this.db.getPageContentHash(topicSlug);
-    if (committedHash === null || committedHash !== hashContent(read.raw)) {
-      reasons.push("index_pending_or_dirty");
-    }
-
-    const sources = manifest.sources.map((m): { slug: string; ok: boolean; reason?: string } => {
-      let reason: string | undefined;
-      try {
-        const snapshot = readRecordSource(this.db, this.pages.vaultPath, m.slug, this.budgets);
-        if (snapshot.disqualified) reason = `source_governance_rejected:${m.slug}`;
-        else if (snapshot.contentHash !== m.content_hash) reason = `source_hash_changed:${m.slug}`;
-        else if (snapshot.governanceHash !== m.governance_hash) reason = `source_governance_changed:${m.slug}`;
-      } catch (e) {
-        if (e instanceof TopicSourceReadError) {
-          if (e.code === "not_found") reason = `source_missing:${m.slug}`;
-          else if (e.code === "not_record") reason = `source_type_changed:${m.slug}`;
-          else reason = `source_unreadable:${m.slug}:${e.code}`;
-        } else {
-          throw e;
-        }
-      }
-      if (reason) reasons.push(reason);
-      return { slug: m.slug, ok: !reason, ...(reason ? { reason } : {}) };
-    });
-
+    const v = verifyTopicForRead(
+      { db: this.db, vaultPath: this.pages.vaultPath, budgets: this.budgets },
+      topicSlug,
+    );
+    if (!v) return null;
     return {
-      slug: topicSlug,
-      state: reasons.length === 0 ? "fresh" : "stale",
-      generatedAt: manifest.generated_at,
-      editedByUser,
-      reasons,
-      sources,
+      slug: v.slug,
+      state: v.state,
+      generatedAt: v.generatedAt,
+      editedByUser: v.editedByUser,
+      // Catalog attestation is NOT a per-source staleness reason: it rides in
+      // the dedicated fields so Task 1 reason semantics stay byte-stable.
+      reasons: v.reasons.filter((r) => r !== "catalog_missing" && r !== "catalog_changed"),
+      sources: v.sources,
+      ...(v.catalogAttested ? { catalogAttested: true } : {}),
+      ...(v.catalogChanged ? { catalogChanged: true } : {}),
     };
   }
 
@@ -280,6 +247,13 @@ export class TopicManager {
     if (!title || title.length > MAX_TITLE_CHARS) {
       return this.blocked("invalid_title", `title length ${title.length}`);
     }
+
+    // #511: reads require a catalog attestation, so a NEW topic always gets
+    // one — an explicit fingerprint (Task 2 maintenance) wins, otherwise the
+    // current record catalog is captured at compile start. This is a read
+    // PROOF, never a validation relaxation: a legacy page without an
+    // attestation stays read-blocked until maintenance reattests it.
+    const catalogFingerprint = request.catalogFingerprint ?? computeCatalogFingerprint(this.db);
 
     const requested = request.sourceSlugs ?? [];
     if (!Array.isArray(requested) || requested.length === 0) {
@@ -395,8 +369,7 @@ export class TopicManager {
     }
 
     // ── Prepare output + embeddings BEFORE mutation ─────────────────
-    const sourceSlugs = usable.map((s) => s.slug);
-    const body = renderTopicBody(parsed.output, sourceSlugs);
+    const body = renderTopicBody(parsed.output, usable.map((s) => ({ slug: s.slug, filePath: s.filePath })));
     const generatedAt = new Date().toISOString();
     const manifest = buildManifest({
       title,
@@ -405,7 +378,7 @@ export class TopicManager {
       snapshots: usable,
       previous: previousManifest,
       ...(request.seed ? { seed: request.seed } : {}),
-      ...(request.catalogFingerprint ? { catalogFingerprint: request.catalogFingerprint } : {}),
+      catalogFingerprint,
     });
     const { chunks, embedResults } = await this.pipeline.embed(body);
     this.throwIfCancelled(request);
