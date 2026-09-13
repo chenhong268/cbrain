@@ -24,6 +24,7 @@ import {
   type TopicPreviewReport,
   type TopicRunReceipt,
 } from "../../src/core/topics/maintenance.js";
+import { verifyTopicForRead } from "../../src/core/topics/read.js";
 
 // ─── Anonymous fixtures only (主题D / 记录甲 / 组织C style) ──────────
 
@@ -346,6 +347,102 @@ describe("topic wiki — discovery and maintenance", () => {
     expect(third.counts.unchanged).toBe(1);
     expect(llm.calls.length).toBe(2);
     expect(readFileSync(topicPath, "utf-8")).toBe(rawAfterRefresh);
+  });
+
+  test("an old twelve-source topic attested against the full catalog upgrades on the next refresh", async () => {
+    const slugs = await seedTaggedRecords("主题D", 13);
+    const sorted = [...slugs].sort();
+    const formerSelection = sorted.slice(0, 12);
+    const omitted = sorted[12];
+    const { maintenance, manager, llm } = smart();
+    // Pre-upgrade state: the OLD first-12 slice was compiled while the FULL
+    // 13-record catalog was already current, so the manifest carries a
+    // MATCHING catalog attestation with fresh sources — what a quiesced
+    // deployment leaves behind when the fixed code starts.
+    const compiled = await manager.compile({
+      title: "主题D（主题）",
+      sourceSlugs: formerSelection,
+      seed: { kind: "tag", key: "tag:主题D" },
+    });
+    expect(compiled.status).toBe("created");
+    db.setConfig("topic.enabled", "true");
+
+    // Catalog is UNCHANGED since the attestation — the upgrade must still
+    // happen because the complete membership differs from the manifest.
+    const receipt = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(receipt.counts.refreshed).toBe(1);
+    expect(llm.calls.length).toBe(2);
+    const lastCall = llm.calls[llm.calls.length - 1];
+    expect(lastCall.messages.some((m) => m.content.includes(`### SOURCE ${omitted}\n`))).toBe(true);
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    const manifestSources = (parseFrontmatter(readFileSync(join(vaultPath, db.getPageFilePath(topicSlug)!), "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }> }).sources.map((s) => s.slug);
+    expect(manifestSources).toHaveLength(13);
+    expect(manifestSources).toContain(omitted);
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(true);
+
+    // Once upgraded: pure no-op, no model call.
+    const second = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(second.counts.unchanged).toBe(1);
+    expect(llm.calls.length).toBe(2);
+  });
+
+  test("a governance-rejected source retires once; repeated refreshes make no model call and keep reads current", async () => {
+    const slugs = await seedTaggedRecords("主题D", 4);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    expect(llm.calls.length).toBe(1);
+
+    // Reject one source's governance. The record stays tagged, so the seed's
+    // derived membership keeps including it on EVERY later run.
+    const entity = pages.create({ title: "组织C", type: "entity/organization", body: "组织C。" });
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?)"
+    ).run(slugs[0], entity.slug, "提及", slugs[0], "rejected");
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(false);
+
+    // First refresh drops and RETIRES the rejected source.
+    const first = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(first.counts.refreshed).toBe(1);
+    expect(llm.calls.length).toBe(2);
+    const manifestAfterRetire = parseFrontmatter(readFileSync(join(vaultPath, db.getPageFilePath(topicSlug)!), "utf-8")).frontmatter.topic as { sources: Array<{ slug: string }>; retired_sources: Array<{ slug: string }> };
+    expect(manifestAfterRetire.sources.map((s) => s.slug)).not.toContain(slugs[0]);
+    expect(manifestAfterRetire.retired_sources.map((s) => s.slug)).toContain(slugs[0]);
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(true);
+
+    // Repeated refreshes: the still-tagged rejected record is re-derived and
+    // re-dropped every run, but the usable selection is unchanged — no model
+    // hot loop, and reads stay current.
+    const second = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(second.counts.unchanged).toBe(1);
+    expect(llm.calls.length).toBe(2);
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(true);
+  });
+
+  test("an unrelated catalog change after retirement reattests without the model and keeps reads current", async () => {
+    const slugs = await seedTaggedRecords("主题D", 4);
+    const { maintenance, llm } = smart();
+    await runHandle(maintenance, { action: "enable", candidateKeys: ["tag:主题D"] });
+    const topicSlug = db.listPageSlugs({ type: "topic" })[0];
+    const entity = pages.create({ title: "组织C", type: "entity/organization", body: "组织C。" });
+    db.rawDb.prepare(
+      "INSERT INTO links (from_slug, to_slug, relation, source_page_slug, trust_state) VALUES (?, ?, ?, ?, ?)"
+    ).run(slugs[0], entity.slug, "提及", slugs[0], "rejected");
+    const retired = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(retired.counts.refreshed).toBe(1);
+    expect(llm.calls.length).toBe(2);
+
+    // Unrelated catalog growth: the usable inputs are unchanged and the
+    // derived membership still differs from the manifest (the rejected record
+    // stays tagged), so the unchanged compile must not leave the catalog
+    // attestation stale.
+    await seedRecord("无关新记录", "与主题D完全无关的新记录。");
+    const receipt = (await runHandle(maintenance, { action: "refresh" })) as TopicRunReceipt;
+    expect(receipt.counts.reattested).toBe(1);
+    expect(llm.calls.length).toBe(2); // metadata-only, no model
+    const manifest = parseFrontmatter(readFileSync(join(vaultPath, db.getPageFilePath(topicSlug)!), "utf-8")).frontmatter.topic as { catalog?: string };
+    expect(manifest.catalog).toBe(computeCatalogFingerprint(db));
+    expect(verifyTopicForRead({ db, vaultPath }, topicSlug)?.current).toBe(true);
   });
 
   // ─── Enablement, creation, budget ────────────────────────────────

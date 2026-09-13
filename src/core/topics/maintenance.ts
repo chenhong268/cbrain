@@ -568,7 +568,7 @@ export class TopicMaintenance {
       && selection.every((s, i) => s === currentSelection[i]);
 
     if (manifest.catalog === catalog) {
-      if (freshness.state === "fresh") {
+      if (freshness.state === "fresh" && sameSelection) {
         receipt.counts.unchanged++;
         return { ...base, outcome: "unchanged" };
       }
@@ -591,6 +591,17 @@ export class TopicMaintenance {
       receipt,
       { slug, title: manifest.title },
     );
+    // An unchanged compile skips every manifest write, so a catalog that moved
+    // since the last attestation would stay stale and block reads forever.
+    // Reuse the same metadata-only reattestation as the sameSelection branch.
+    if (result === "unchanged" && manifest.catalog !== catalog) {
+      const reattest = manager.reattestCatalog(slug, catalog);
+      if (reattest?.status === "reattested") {
+        receipt.counts.unchanged--;
+        receipt.counts.reattested++;
+        return { ...base, outcome: "reattested" };
+      }
+    }
     return { ...base, outcome: result };
   }
 
