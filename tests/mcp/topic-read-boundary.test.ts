@@ -365,6 +365,7 @@ describe("topic read boundaries (#511 Task 3)", () => {
     const tid = db.addTimelineEntry(sources[0], "TOPIC_ORIGIN_EVENT_SENTINEL", "2026-01-05", "extracted", { source_page_slug: topic });
     db.rawDb.prepare("UPDATE timeline SET trust_state='trusted' WHERE id=?").run(tid);
     db.addTimelineEntry(sources[0], "原始时间线事件记录", "2026-01-01", "dialogue");
+    db.addTimelineEntry(topic, "TOPIC_ROOT_EVENT_SENTINEL", "2026-01-02", "extracted");
 
     const executor = new AgenticResearchExecutor({ db: ctx.db, search: ctx.search, graph: ctx.graph, pages: ctx.pages });
     const resolved = await executor.execute({
@@ -374,11 +375,15 @@ describe("topic read boundaries (#511 Task 3)", () => {
         { kind: "resolve", input: sources[0] },
         { kind: "timeline", input: sources[0] },
         { kind: "timeline", input: "ORIGIN_EVENT" },
+        { kind: "resolve", input: topic },
+        { kind: "timeline", input: topic },
+        { kind: "timeline", input: "ROOT_EVENT" },
       ],
       budget: { max_llm_calls: 1, max_searches: 1, max_ms: 5000 },
     });
     const text = JSON.stringify(resolved);
     expect(text).not.toContain("TOPIC_ORIGIN_EVENT_SENTINEL");
+    expect(text).not.toContain("TOPIC_ROOT_EVENT_SENTINEL");
     expect(text).toContain("原始时间线事件记录");
   });
 

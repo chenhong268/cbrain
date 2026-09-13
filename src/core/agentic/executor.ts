@@ -200,11 +200,12 @@ async function handleTimeline(step: SearchPlanStep, state: ExecutionState, ctx: 
   // derived material — drop them in BOTH branches (slug-resolved and keyword
   // search; the latter now carries source_page_slug) so step results never
   // hand generated evidence to synthesis/critic.
-  const isTopicProvenance = (row: { source_page_slug?: string | null }): boolean =>
-    row.source_page_slug != null && isTopicRow(ctx.db.getPage(row.source_page_slug));
+  const isTopicProvenance = (row: { page_slug?: string; source_page_slug?: string | null }): boolean =>
+    (row.page_slug != null && isTopicRow(ctx.db.getPage(row.page_slug)))
+    || (row.source_page_slug != null && isTopicRow(ctx.db.getPage(row.source_page_slug)));
 
   if (slug) {
-    data = ctx.db.getTimeline(slug).filter((row) => !isTopicProvenance(row));
+    data = isTopicRow(ctx.db.getPage(slug)) ? [] : ctx.db.getTimeline(slug).filter((row) => !isTopicProvenance(row));
   } else {
     data = ctx.db.searchTimeline(step.input).filter((row) => !isTopicProvenance(row));
   }
