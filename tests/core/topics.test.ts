@@ -8,7 +8,7 @@ import { VersionManager } from "../../src/core/version.js";
 import { LanceDBManager } from "../../src/storage/lancedb.js";
 import { DeterministicEmbeddingProvider } from "../../src/embedding/deterministic.js";
 import type { EmbeddingProvider } from "../../src/embedding/provider.js";
-import type { LLMProvider, ChatMessage } from "../../src/llm/provider.js";
+import type { LLMProvider, ChatMessage, ChatOptions } from "../../src/llm/provider.js";
 import { getOntology } from "../../src/ontology/loader.js";
 import { parseFrontmatter } from "../../src/utils/frontmatter.js";
 import { hashContent } from "../../src/core/shared.js";
@@ -16,6 +16,8 @@ import { generateSlug } from "../../src/utils/slug.js";
 import { topicSourceHref } from "../../src/core/topics/render.js";
 import {
   TopicManager,
+  DEFAULT_TOPIC_BUDGETS,
+  type TopicBudgets,
   type TopicCompileResult,
   type TopicModelOutput,
 } from "../../src/core/topics/index.js";
@@ -86,16 +88,16 @@ function validModelOutput(sources: Array<{ slug: string; body: string }>): Topic
   };
 }
 
-interface LlmCall { messages: ChatMessage[] }
+interface LlmCall { messages: ChatMessage[]; options?: ChatOptions }
 
 function makeFakeLlm(respond: (call: LlmCall, nth: number) => string): LLMProvider & { calls: LlmCall[] } {
   const calls: LlmCall[] = [];
   return {
     name: "fake-topic-llm",
     calls,
-    chat: async (messages) => {
-      calls.push({ messages });
-      return respond({ messages }, calls.length);
+    chat: async (messages, options) => {
+      calls.push({ messages, options });
+      return respond({ messages, options }, calls.length);
     },
   };
 }
@@ -106,8 +108,8 @@ function makeQueuedLlm(outputs: TopicModelOutput[]): LLMProvider & { calls: LlmC
   return {
     name: "fake-topic-llm",
     calls,
-    chat: async (messages) => {
-      calls.push({ messages });
+    chat: async (messages, options) => {
+      calls.push({ messages, options });
       const next = outputs[Math.min(calls.length - 1, outputs.length - 1)];
       return JSON.stringify(next);
     },
@@ -1473,5 +1475,117 @@ describe("topic wiki — re-review round 2 regression", () => {
     expect(vectors.map((r) => r.content).join("\n")).toBe(userBody);
     // No duplicate/old-topic chunk indexes left behind.
     expect(new Set(vectors.map((r) => r.chunkIndex)).size).toBe(vectors.length);
+  });
+});
+
+describe("topic wiki — compile model-call reliability (real-provider pilot)", () => {
+  const testDir = "/tmp/cbrain-test-topics-reliability";
+  const vaultPath = join(testDir, "vault");
+
+  let db: CBrainDB;
+  let pages: PageManager;
+  let pipeline: ContentPipeline;
+  let versions: VersionManager;
+  let lance: LanceDBManager;
+
+  beforeEach(async () => {
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+    mkdirSync(vaultPath, { recursive: true });
+    db = new CBrainDB(join(testDir, "test.sqlite"));
+    pages = new PageManager(db, vaultPath, noLogger as never);
+    lance = new LanceDBManager();
+    await lance.connect(join(testDir, "lancedb"));
+    const embedding = new DeterministicEmbeddingProvider();
+    pipeline = new ContentPipeline(db, embedding, lance, { pages, logger: noLogger as never });
+    versions = new VersionManager(db, pages, vaultPath, noLogger as never);
+  });
+
+  afterEach(async () => {
+    await lance.close();
+    db.close();
+    if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+  });
+
+  async function seedSources() {
+    const sources: Array<{ slug: string; body: string }> = [];
+    for (let i = 0; i < 3; i++) {
+      const body = [
+        `原始材料${i}：主题D需要回顾行动进度，并同步给相关协作方。`,
+        "第二行：阶段性结论需要复核。",
+        "第三行：风险项需要跟进确认。",
+      ].join("\n");
+      const page = pages.create({ title: `材料${i}`, type: "record", body });
+      const { chunks, embedResults } = await pipeline.embed(body);
+      await pipeline.writeIndexes(page.slug, chunks, embedResults);
+      sources.push({ slug: page.slug, body });
+    }
+    return sources;
+  }
+
+  function managerWith(llm: LLMProvider) {
+    return new TopicManager({ db, pages, pipeline, versions, lance, llm, logger: noLogger as never });
+  }
+
+  test("compile disables model thinking and threads the compile signal (30s budget)", async () => {
+    const sources = await seedSources();
+    const llm = makeQueuedLlm([validModelOutput(sources)]);
+    const manager = managerWith(llm);
+    const controller = new AbortController();
+    const result = await manager.compile({
+      title: "主题D",
+      sourceSlugs: sources.map((s) => s.slug),
+      signal: controller.signal,
+    });
+    expect(result.status).toBe("created");
+    // One compile budget: no extended thinking inside the existing 30s window,
+    // cancellation still threaded through the same options object.
+    expect(llm.calls.length).toBe(1);
+    expect(llm.calls[0]!.options).toEqual({ thinking: "disabled", signal: controller.signal });
+
+    const plain = makeQueuedLlm([validModelOutput(sources)]);
+    const refresh = await managerWith(plain).compile({
+      title: "主题E",
+      sourceSlugs: sources.map((s) => s.slug),
+    });
+    expect(refresh.status).toBe("created");
+    expect(plain.calls[0]!.options).toEqual({ thinking: "disabled" });
+  });
+
+  test("prompt states the validator's real budget limits and keeps source bodies untruncated", async () => {
+    const sources = await seedSources();
+    const longTail = "长材料尾部唯一标记" + "锚".repeat(20);
+    const longBody = `原始长材料：主题D需要回顾行动进度。\n${"中间段落内容。".repeat(600)}\n${longTail}`;
+    const page = pages.create({ title: "长材料", type: "record", body: longBody });
+    const { chunks, embedResults } = await pipeline.embed(longBody);
+    await pipeline.writeIndexes(page.slug, chunks, embedResults);
+
+    const budgets = {
+      ...DEFAULT_TOPIC_BUDGETS,
+      maxOverviewClaims: 2,
+      maxObservations: 5,
+      maxDetails: 6,
+      maxOpenQuestions: 4,
+      maxItemChars: 300,
+      maxQuoteChars: 120,
+    } satisfies TopicBudgets;
+    const llm = makeQueuedLlm([validModelOutput([...sources, { slug: page.slug, body: longBody }])]);
+    const manager = new TopicManager({ db, pages, pipeline, versions, lance, llm, logger: noLogger as never, budgets });
+    const result = await manager.compile({
+      title: "主题F",
+      sourceSlugs: [...sources.map((s) => s.slug), page.slug],
+    });
+    expect(result.status).toBe("created");
+    const prompt = llm.calls[0]!.messages.map((m) => m.content).join("\n");
+    // The exact validator bounds the model will be judged against.
+    expect(prompt).toContain("1-2");
+    expect(prompt).toContain("1-5");
+    expect(prompt).toContain("0-6");
+    expect(prompt).toContain("0-4");
+    expect(prompt).toContain("300");
+    expect(prompt).toContain("120");
+    expect(prompt).toContain("quote");
+    // Full selected original text still rides in the prompt — never truncated.
+    expect(prompt).toContain(`### SOURCE ${page.slug}\n${longBody}`);
+    expect(prompt).toContain(longTail);
   });
 });

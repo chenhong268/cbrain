@@ -357,9 +357,13 @@ export class TopicManager {
 
     // ── Model work (nothing mutated yet) ────────────────────────────
     this.throwIfCancelled(request);
+    // Real-provider pilot (#512): disable extended thinking for this single
+    // call — the compile budget is one 30s chat, and default thinking burns
+    // it before the first token. Provider defaults/timeout/retry untouched;
+    // cancellation still threads through the same options object.
     const rawOutput = await this.llm.chat(
-      buildTopicPrompt(title, usable),
-      request.signal ? { signal: request.signal } : undefined,
+      buildTopicPrompt(title, usable, this.budgets),
+      { thinking: "disabled", ...(request.signal ? { signal: request.signal } : {}) },
     );
     this.throwIfCancelled(request);
 

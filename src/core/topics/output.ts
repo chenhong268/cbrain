@@ -1,5 +1,6 @@
 import type { ChatMessage } from "../../llm/provider.js";
 import {
+  DEFAULT_TOPIC_BUDGETS,
   TopicBudgets,
   TopicClaim,
   TopicClaimKind,
@@ -9,12 +10,22 @@ import {
 
 const VALID_KINDS: ReadonlySet<string> = new Set<TopicClaimKind>(["observation", "user_thought", "candidate"]);
 
-const SYSTEM_PROMPT = `You compile source-backed topic pages for a personal knowledge base.
+/** The validator's exact bounds, told to the model up front — a real-provider
+ *  pilot (#512) showed outputs rejected for limits the prompt never stated.
+ *  Generated from the SAME TopicBudgets the validator enforces, so the two can
+ *  never drift apart. */
+function systemPrompt(budgets: TopicBudgets): string {
+  return `You compile source-backed topic pages for a personal knowledge base.
 
 Rules:
 - Output ONE JSON object, nothing else. No markdown fences.
 - Shape: {"overview": claim[], "observations": claim[], "details": claim[], "open_questions": claim[]}
-- "overview" is a 1-3 claim summary: EVERY summary assertion carries the same citation as any other claim. There is no uncited free-text summary.
+- "overview" is a 1-${budgets.maxOverviewClaims} claim summary: EVERY summary assertion carries the same citation as any other claim. There is no uncited free-text summary.
+- "observations": 1-${budgets.maxObservations} claims (required, non-empty). "details": 0-${budgets.maxDetails} claims. "open_questions": 0-${budgets.maxOpenQuestions} claims.
+- Every "text" is at most ${budgets.maxItemChars} characters; every "quote" is at most ${budgets.maxQuoteChars} characters.
+- HARD LIMITS: any count or length over these bounds rejects the WHOLE output.
+- A SHORT, PRECISE, CONTIGUOUS quote is best: copy just the one verbatim span that locates the assertion — never a whole paragraph, never merged sources.
+- A FEW representative points per section are enough. NEVER pad to fill the limits; an empty "details"/"open_questions" is better than an invented or padded claim.
 - Each claim: {"text": string, "kind": "observation"|"user_thought"|"candidate", "sourceSlug": string, "quote": string}
 - "quote" MUST be an EXACT substring copied verbatim from the body of the source named by "sourceSlug". Never paraphrase, never merge two sources into one quote.
 - "sourceSlug" MUST be one of the source slugs provided below.
@@ -22,10 +33,13 @@ Rules:
 - Only use facts from the provided SOURCE MATERIAL sections. Do not add outside knowledge. Do not invent dates, numbers, or names.
 - You cannot assign trust states; corrections and rejections in the material are already removed — never resurrect them.
 - Disagreements between sources go to "open_questions" or "details", never silently resolved.`;
+}
 
 /** Build the bounded compile prompt. Source bodies are included in full —
- *  oversize material is rejected upstream, never truncated here. */
-export function buildTopicPrompt(title: string, snapshots: TopicSourceSnapshot[]): ChatMessage[] {
+ *  oversize material is rejected upstream, never truncated here. The explicit
+ *  output limits come from `budgets` (the same bounds the validator enforces;
+ *  defaults to DEFAULT_TOPIC_BUDGETS). */
+export function buildTopicPrompt(title: string, snapshots: TopicSourceSnapshot[], budgets: TopicBudgets = DEFAULT_TOPIC_BUDGETS): ChatMessage[] {
   const sections = snapshots.map((s) => {
     const facts = s.usableFacts.length > 0
       ? `\n[治理事实] ${s.usableFacts
@@ -39,12 +53,12 @@ export function buildTopicPrompt(title: string, snapshots: TopicSourceSnapshot[]
     "",
     `可用来源 slug：${snapshots.map((s) => s.slug).join(", ")}`,
     "",
-    "SOURCE MATERIAL（每条 claim 必须引用其中一个 slug 的原文）：",
+    "SOURCE MATERIAL（每条 claim 必须引用其中一个 slug 的原文；原文完整提供，未截断）：",
     "",
     sections.join("\n\n"),
   ].join("\n");
   return [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt(budgets) },
     { role: "user", content: user },
   ];
 }
