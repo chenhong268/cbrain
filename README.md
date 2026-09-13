@@ -51,7 +51,7 @@ curl -fsSL https://bun.sh/install | bash
 2. Install CBrain — always pin to an explicit tag:
 
 ```bash
-bun install -g github:chenhong268/cbrain#v2.0.14
+bun install -g github:chenhong268/cbrain#v2.0.15
 ```
 
 3. Verify:
@@ -75,8 +75,8 @@ cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 ```bash
 (
   set -e
-  new_version=v2.0.14
-  previous_version=v2.0.13
+  new_version=v2.0.15
+  previous_version=v2.0.14
   test "$(bunx --package "github:chenhong268/cbrain#${new_version}" cbrain --version)" = "${new_version#v}"
   test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
   bun remove -g cbrain
@@ -85,12 +85,12 @@ cbrain serve --http                      # 启动 HTTP 服务 → localhost:3399
 )
 ```
 
-If install or restart verification fails, roll back to the recorded previous tag:
+If install or restart verification fails, roll back to the recorded previous tag. If Topic Wiki was enabled, first remove its generated pages and indexes using the saved receipt, as described in the [topic rollback procedure](./docs/design.md#topic-wiki-generated-reading-pages). Older code does not enforce topic evidence guards.
 
 ```bash
 (
   set -e
-  previous_version=v2.0.11
+  previous_version=v2.0.14
   test "$(bunx --package "github:chenhong268/cbrain#${previous_version}" cbrain --version)" = "${previous_version#v}"
   global_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
   global_manifest="${global_bin%/bin}/install/global/package.json"
@@ -638,11 +638,12 @@ bun run dev init
 
 ## Roadmap
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.14).
+See [CHANGELOG.md](./CHANGELOG.md) for the full version history (current: v2.0.15).
 
 | Version | Focus | Status |
 |:--------|:------|:-------|
-| v2.0.14 | 召回、写入与 NER 稳定性，研究取消和维护恢复 | ✅ Current |
+| v2.0.15 | 自动主题页、来源校验与安全召回 | ✅ Current |
+| v2.0.14 | 召回、写入与 NER 稳定性，研究取消和维护恢复 | Released |
 | v2.0.13 | 中文内容召回的窄范围 FTS 兜底，避免已知记录被误判为空 | 已发布 |
 | v2.0.12 | 写入质量、来源可信任关系、兼容性验证与依赖安全收口 |  |
 | v2.0.11 | 内容召回主动提示、传递依赖 high advisory 修复与门禁收口 | Previous |

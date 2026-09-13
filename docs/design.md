@@ -288,6 +288,8 @@ Skills follow GBrain's "fat skills, thin harness" philosophy: intelligence lives
 
 Topic pages are auto-compiled **derived reading aids**, never independent evidence. A topic is compiled from an explicit selection of original `record` pages (min 3 to create; ≤12 per topic; pilot cap 5 managed topics total); its body only contains claims that each cite an exact substring of a selected source, and its 来源 section links each source with a navigable relative Markdown link (never a wikilink — generated pages must not feed the relation graph).
 
+The pilot selects the first twelve source slugs in stable sorted order and reports omitted support in preview. It does not summarize every matching record: a newly added record outside that selection is not incorporated into the topic body. Source changes within the selected set are reconciled automatically.
+
 **Storage & lifecycle.** Topics live under `brain/topics/` in the vault with the full manifest (selection snapshots, publication state, optional seed identity and record-catalog attestation) in frontmatter. Everything rides existing facilities: the unified job queue (job name `topic-wiki`), the existing config table (`topic.enabled`, default off), the version manager, and the existing page/index pipeline. No new table, tool, or process.
 
 **Operator actions** (all through the existing job tool with name `topic-wiki`):
