@@ -23,6 +23,7 @@ export type {
   TopicManagerDeps,
   TopicModelOutput,
   TopicRetiredSource,
+  TopicSeed,
   TopicSourceCatalogEntry,
   TopicSourceSnapshot,
 } from "./types.js";

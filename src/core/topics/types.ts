@@ -162,6 +162,15 @@ export interface TopicRetiredSource extends TopicManifestSource {
  *  pending topic stays unavailable after restart. */
 export type TopicPublicationState = "pending" | "committed";
 
+/** Stable seed identity of a managed topic (#510 Task 2): which tag or
+ *  entity/concept page discovery created it from. Persisted in the manifest
+ *  so scheduled maintenance re-derives the SAME selection instead of
+ *  re-ranking. `key` is `tag:<tag>` / `entity:<slug>`. */
+export interface TopicSeed {
+  kind: "tag" | "entity";
+  key: string;
+}
+
 /** Versioned manifest persisted in the topic page frontmatter under `topic`. */
 export interface TopicManifest {
   schema_version: number;
@@ -172,6 +181,14 @@ export interface TopicManifest {
   state: TopicPublicationState;
   sources: TopicManifestSource[];
   retired_sources: TopicRetiredSource[];
+  /** #510 Task 2: seed identity for scheduled maintenance (optional — Task 1
+   *  manifests and direct compiles have none; selection is then retained
+   *  as-is). */
+  seed?: TopicSeed;
+  /** #510 Task 2: DB record-catalog fingerprint this topic was last
+   *  reconciled against. A mismatch only means "needs reconciliation", never
+   *  per-topic invalidity — the per-source checks above decide that. */
+  catalog?: string;
 }
 
 /** Read-only catalog entry for one eligible original-record source. */
@@ -225,6 +242,12 @@ export interface TopicCompileRequest {
    *  immediately before commit. Also forwarded to the LLM provider. */
   signal?: AbortSignal;
   checkCancelled?: () => void;
+  /** #510 Task 2: seed identity persisted into the manifest so scheduled
+   *  maintenance preserves the selection. */
+  seed?: TopicSeed;
+  /** #510 Task 2: catalog fingerprint attested in the manifest at compile
+   *  time. */
+  catalogFingerprint?: string;
 }
 
 export interface TopicManagerDeps {

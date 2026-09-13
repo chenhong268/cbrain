@@ -11,7 +11,7 @@ import { generateSlug } from "../../utils/slug.js";
 import { hashContent } from "../shared.js";
 import { parseFrontmatter } from "../../utils/frontmatter.js";
 import { readRecordSource, resolveWithinVault, sourceFingerprintMismatch } from "./source-reader.js";
-import { buildManifest, parseTopicManifest, withManifestState } from "./manifest.js";
+import { buildManifest, parseTopicManifest, withManifestCatalog, withManifestState } from "./manifest.js";
 import { buildTopicPrompt, parseTopicModelOutput } from "./output.js";
 import { renderTopicBody } from "./render.js";
 import {
@@ -207,6 +207,71 @@ export class TopicManager {
   }
 
   /**
+   * #510 Task 2: read an existing topic page's manifest. Returns null when
+   * the slug is not a topic page (or its file is unreadable); `manifest` is
+   * null when present but unusable (unmanaged / corrupt). Maintenance uses
+   * this for seed identity and catalog attestation without touching the
+   * private raw-reader.
+   */
+  readTopicManifest(topicSlug: string): { manifest: TopicManifest; raw: string } | { manifest: null; raw: null } | null {
+    const read = this.readTopicPageRaw(topicSlug);
+    if (!read) return null;
+    const parsed = parseTopicManifest(read.manifest);
+    if (!parsed || !parsed.ok) return { manifest: null, raw: null };
+    return { manifest: parsed.manifest, raw: read.raw };
+  }
+
+  /**
+   * #510 Task 2: metadata-only catalog reattestation. When the DB record
+   * catalog changed but this topic's chosen inputs did not (selection and
+   * per-source content/governance fingerprints identical, body unedited,
+   * publication committed, index completion proven), rewrite ONLY the
+   * manifest's catalog field and re-commit the content hash — no model, no
+   * reindex (the indexed body is untouched), same synchronous no-await
+   * discipline as the compile's final publication flip.
+   */
+  reattestCatalog(
+    topicSlug: string,
+    catalogFingerprint: string,
+  ): { status: "unchanged" | "reattested" | "ineligible"; reason?: string } | null {
+    const read = this.readTopicManifest(topicSlug);
+    if (!read || !read.manifest) return null;
+    const manifest = read.manifest;
+    const raw = read.raw;
+    const ineligible = (reason: string): { status: "ineligible"; reason: string } => ({ status: "ineligible", reason });
+
+    if (manifest.catalog === catalogFingerprint) return { status: "unchanged" };
+    if (manifest.state !== "committed") return ineligible("publication_pending");
+    if (hashContent(parseFrontmatter(raw).body) !== manifest.output_hash) return ineligible("target_edited");
+    if (this.db.getPageContentHash(topicSlug) !== hashContent(raw)) return ineligible("index_pending_or_dirty");
+    for (const m of manifest.sources) {
+      if (
+        sourceFingerprintMismatch(
+          this.db,
+          this.pages.vaultPath,
+          m.slug,
+          { contentHash: m.content_hash, governanceHash: m.governance_hash },
+          this.budgets,
+        ) !== null
+      ) {
+        return ineligible(`source_changed:${m.slug}`);
+      }
+    }
+
+    const absPath = this.db.getPageFilePath(topicSlug);
+    if (!absPath) return ineligible("no_file_path");
+    try {
+      const finalRaw = withManifestCatalog(raw, catalogFingerprint);
+      writeFileSync(resolveWithinVault(this.pages.vaultPath, absPath), finalRaw);
+      this.db.updatePageHash(topicSlug, hashContent(finalRaw));
+    } catch (e) {
+      this.logger?.error("topic", "主题页 catalog 重证明失败", { slug: topicSlug, error: String(e) });
+      return ineligible("reattest_write_failed");
+    }
+    return { status: "reattested" };
+  }
+
+  /**
    * Compile (create or refresh) one topic page from an explicit title and
    * source-slug selection. See the class doc for the safety contract.
    */
@@ -339,6 +404,8 @@ export class TopicManager {
       outputHash: hashContent(body),
       snapshots: usable,
       previous: previousManifest,
+      ...(request.seed ? { seed: request.seed } : {}),
+      ...(request.catalogFingerprint ? { catalogFingerprint: request.catalogFingerprint } : {}),
     });
     const { chunks, embedResults } = await this.pipeline.embed(body);
     this.throwIfCancelled(request);

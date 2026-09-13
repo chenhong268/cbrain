@@ -26,8 +26,10 @@ import {
   getRelationStrength,
   relationEndpointsAllowed,
   insertSemanticLink,
+  isTopicManagedPath,
 } from "../shared.js";
 import { canonicalSlug, generateSlug } from "../../utils/slug.js";
+import { TOPIC_PAGE_TYPE } from "../topics/types.js";
 
 export interface PipelineInput {
   slug: string;
@@ -333,6 +335,15 @@ export class ContentPipeline {
     body: string,
   ): { count: number; mentionedSlugs: Set<string> } {
     if (!this.pages || !body.trim()) return { count: 0, mentionedSlugs: new Set() };
+    // #510: central topic skip — generated topic pages never emit relation
+    // graph edges, not even from wiki syntax quoted verbatim out of a source
+    // record's body. The reserved brain/topics path is a generated surface
+    // even when the row still claims type record. Both processWikilinks and
+    // replaceWikilinks route here.
+    const pageRow = this.db.getPage(fromSlug);
+    if (pageRow?.type === TOPIC_PAGE_TYPE || isTopicManagedPath(pageRow?.file_path)) {
+      return { count: 0, mentionedSlugs: new Set() };
+    }
 
     // Strip KR section — it's generated FROM links, parsing it back would create circular writes
     const wikiLinks = extractWikiLinks(stripKnownRelationsSection(body));

@@ -68,6 +68,11 @@ export interface ToolContext {
   deferredNerSubmitter: DeferredNerSubmitter;
   /** #385: configured identity for first-person personal current-state guard. */
   identityPersonSlug?: string;
+  /** #510 Task 2: topic maintenance scheduler — set exactly once per runtime
+   *  by registerTopicWorker (never by attachMcpTools, which runs per HTTP MCP
+   *  session). The job tool's topic-only submit hook reads it for immediate
+   *  disable control semantics. */
+  topicMaintenance?: import("../core/topics/maintenance.js").TopicMaintenance;
 }
 
 export interface IndexResult {

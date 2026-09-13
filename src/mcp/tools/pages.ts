@@ -42,7 +42,7 @@ function schedulePageToolNer(
     }
     return;
   }
-  if (!shouldProcessNerForWritePath(body, pageType)) return;
+  if (!shouldProcessNerForWritePath(body, pageType, ctx.db.getPageFilePath(slug))) return;
   if (action === "defer") {
     submitDeferredNerForWritePath(ctx.deferredNerSubmitter, { slug, pageType });
     return;

@@ -400,7 +400,7 @@ export class SyncManager {
         }
         report.synced++;
 
-        if (shouldProcessNerForWritePath(file.body, file.type)) {
+        if (shouldProcessNerForWritePath(file.body, file.type, file.relPath)) {
           const nerAction = resolveNerAction(false, this.nerMode, this.deferredNerSubmitter);
           if (nerAction === "sync" && this.nerEngine) {
             nerJobs.push({ slug: file.slug, text: file.body, type: file.type, mentionedSlugs: new Set() });
@@ -771,7 +771,7 @@ export class SyncManager {
 
     let nerError: NerErrorCode | undefined;
     // NER — skip entity/concept pages
-    if (shouldProcessNerForWritePath(parsed.body, type)) {
+    if (shouldProcessNerForWritePath(parsed.body, type, relPath)) {
       const nerAction = resolveNerAction(false, this.nerMode, this.deferredNerSubmitter);
       if (nerAction === "sync" && this.nerEngine) {
         try {
@@ -1135,6 +1135,9 @@ export class SyncManager {
     const parts = relPath.split("/");
     // records/X.md at root level
     if (parts[0] === "records") return "record";
+    // #510: a brain/topics file with missing frontmatter type must never
+    // classify as a record (records are topic SOURCE material).
+    if (parts[0] === "brain" && parts[1] === "topics") return "topic";
     // brain/entities/person/X.md → entity/person (concrete sub-type from subdir)
     if (parts.length >= 4 && parts[0] === "brain") {
       const parentDir = parts[1]; // entities, concepts, insights
