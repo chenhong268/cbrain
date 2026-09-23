@@ -217,8 +217,9 @@ async function runContentRecall(
   // personnel page without the requested fact is not an answer.
   const birthdayRequested = /(?:生日|出生日期)[?？。]*$/u.test(query.trim());
   const birthdaySubject = birthdayRequested
-    ? query.normalize("NFKC").trim().match(/^([\p{L}\p{N}·_-]{2,40})\s*的?\s*(?:生日|出生日期)[?？。]*$/u)?.[1]
+    ? query.normalize("NFKC").trim().match(/^([\p{L}\p{N}·_-]{2,40}?)\s*的?\s*(?:生日|出生日期)[?？。]*$/u)?.[1]
     : undefined;
+  const datedBirthdayField = /\*{0,2}(?:生日|出生日期|出生)\*{0,2}\s*[：:]\s*(?:\d{4}-\d{1,2}-\d{1,2}|\d{4}年(?:\d{1,2}月)?)/gu;
   const birthdayEvidence = new Map<string, string | null>();
   const birthdayLine = (slug: string): string | null => {
     if (!birthdayRequested) return null;
@@ -226,18 +227,51 @@ async function runContentRecall(
     const page = ctx.pages.getBySlug(slug);
     const subjectEntity = !!page && page.title === birthdaySubject
       && (page.type === "entity" || page.type.startsWith("entity/"));
-    const bodyLine = birthdaySubject && page?.body.split("\n").find((line) => {
-      if (extractBirthday(line) === null) return false;
-      const fieldAt = line.search(/(?:生日|出生)/u);
-      const beforeField = line.slice(0, fieldAt).replace(/\*+/gu, "").replace(/[\s|：:]+$/u, "");
-      const sameLineSubject = beforeField.endsWith(birthdaySubject);
-      const standaloneField = /^\s*(?:[-*]\s*)?(?:\*{0,2})(?:生日|出生)\*{0,2}\s*[：:]/u.test(line);
-      return sameLineSubject || (subjectEntity && standaloneField);
-    })?.trim();
+    const sourceLines = stripKnownRelationsSection(page?.body ?? "").split("\n");
+    // A later correction can invalidate an earlier dated line on the same
+    // page. With no trustworthy field history here, reject the page.
+    if (sourceLines.some((line) =>
+      /(?:更正|纠正|错误|误写|作废|撤销|不是|并非|否认)/u.test(line)
+      && /(?:生日|出生|日期|上述)/u.test(line)
+    )) {
+      birthdayEvidence.set(slug, null);
+      return null;
+    }
+    let bodyLine: string | null = null;
+    let sectionTitle: string | null = null;
+    for (const line of sourceLines) {
+      const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/u.exec(line);
+      if (heading) {
+        sectionTitle = heading[1]!.trim();
+        continue;
+      }
+      if (!birthdaySubject) break;
+      for (const field of line.matchAll(datedBirthdayField)) {
+        // The date must belong to this exact field, not a later person's field
+        // on the same line.
+        if (extractBirthday(field[0].replace("出生日期", "出生")) === null) continue;
+        const beforeField = line.slice(0, field.index).replace(/\*+/gu, "").replace(/[\s|：:]+$/u, "");
+        const subjectSuffix = beforeField.endsWith(`${birthdaySubject}的`) ? `${birthdaySubject}的` : birthdaySubject;
+        const subjectPrefix = beforeField.endsWith(subjectSuffix)
+          ? beforeField.slice(0, -subjectSuffix.length) : null;
+        const sameLineSubject = subjectPrefix !== null
+          && (subjectPrefix === "" || /[\s|：:，,；;（(#-]$/u.test(subjectPrefix));
+        const standaloneField = /^\s*(?:[-*]\s*)?\*{0,2}(?:生日|出生日期|出生)\*{0,2}\s*[：:]/u.test(line);
+        if (sameLineSubject) {
+          bodyLine = line.slice(line.lastIndexOf(birthdaySubject, field.index), field.index + field[0].length).trim();
+        } else if (subjectEntity && standaloneField && (sectionTitle === null || sectionTitle === birthdaySubject)) {
+          bodyLine = line.slice(field.index, field.index + field[0].length).trim();
+        }
+        if (bodyLine) break;
+      }
+      if (bodyLine) break;
+    }
     const frontmatterValue = page?.frontmatter?.birthday;
-    const frontmatterLine = subjectEntity && typeof frontmatterValue === "string"
-      && extractBirthday(`生日：${frontmatterValue}`) !== null
-      ? `生日：${frontmatterValue}` : null;
+    const frontmatterDate = frontmatterValue instanceof Date && Number.isFinite(frontmatterValue.getTime())
+      ? frontmatterValue.toISOString().slice(0, 10) : frontmatterValue;
+    const frontmatterLine = subjectEntity && typeof frontmatterDate === "string"
+      && extractBirthday(`生日：${frontmatterDate}`) !== null
+      ? `生日：${frontmatterDate}` : null;
     const evidence = bodyLine || frontmatterLine;
     birthdayEvidence.set(slug, evidence ?? null);
     return evidence ?? null;
@@ -278,7 +312,7 @@ async function runContentRecall(
       _skipDetailEnrich: true,
       _allowCurrentTopics: allowTopics,
     });
-    results = keepBirthdayEvidence(filterContentFtsFallbackCandidates(query, ftsCandidates));
+    results = filterContentFtsFallbackCandidates(query, keepBirthdayEvidence(ftsCandidates));
     if (results.length === 0) {
       results = selectPersonalTimePlaceRecordFallback(ctx, query, ftsCandidates);
       if (results.length === 0) results = selectRecentMeetingRecordFallback(ctx, query, limit);
@@ -383,7 +417,7 @@ async function runContentRecall(
     return [{
       title: page?.title ?? r.slug,
       snippet: birthdayLine(r.slug) ?? (excerpt === undefined ? r.snippet : excerpt.slice(0, 200)),
-      ...(detail !== "brief" ? { body: excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
+      ...(detail !== "brief" ? { body: birthdayLine(r.slug) ?? excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
     }];
   });
   // #399 — keep the default cbrain_recall content path aligned with deep_recall:
