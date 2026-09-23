@@ -621,7 +621,7 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.summary.status).toBe("empty");
   });
 
-  for (const date of ["2000-13-99", "0000-00-00", "2000年13月", "2001-02-29"]) {
+  for (const date of ["2000-13-99", "0000-00-00", "2000年13月", "2001-02-29", "2000年2月30日"]) {
     test(`rejects an impossible birthday date: ${date}`, async () => {
       const entity = result("person-a", {
         vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
@@ -651,6 +651,23 @@ describe("content frontdoor honesty sequencing", () => {
     };
 
     expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+  });
+
+  test("keeps the day in a valid Chinese birth date", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲记录", type: "record", body: "人物甲 生日：2000年1月2日" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toBe("人物甲 生日：2000年1月2日");
   });
 
   for (const query of ["人物甲的生日", "人物甲的出生日期"]) {
