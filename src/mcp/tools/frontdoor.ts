@@ -31,6 +31,7 @@ import { applyPersonalCurrentStateGuard } from "../../core/retrieval/personal-cu
 import { generateProactiveHints } from "../../core/retrieval/proactive.js";
 import { applyProactiveBudget, trimHint } from "./trim.js";
 import { isFirstPersonQuery } from "../../core/retrieval/recall-intent.js";
+import { extractBirthday } from "../../core/retrieval/birthday.js";
 
 import { isRecentRecall, recallRecentRecords } from "../../core/retrieval/recent-record-recall.js";
 import { isTopicRow } from "../../core/shared.js";
@@ -212,6 +213,37 @@ async function runContentRecall(
 ): Promise<FrontdoorEnvelope> {
   const limit = detail === "brief" ? 3 : 5;
   const identitySeed = await resolveIdentityQuestionSeed(ctx, query);
+  // A closed, field-specific check for direct birthday lookups. A related
+  // personnel page without the requested fact is not an answer.
+  const birthdayRequested = /(?:生日|出生日期)[?？。]*$/u.test(query.trim());
+  const birthdaySubject = birthdayRequested
+    ? query.normalize("NFKC").trim().match(/^([\p{L}\p{N}·_-]{2,40})\s*的?\s*(?:生日|出生日期)[?？。]*$/u)?.[1]
+    : undefined;
+  const birthdayEvidence = new Map<string, string | null>();
+  const birthdayLine = (slug: string): string | null => {
+    if (!birthdayRequested) return null;
+    if (birthdayEvidence.has(slug)) return birthdayEvidence.get(slug) ?? null;
+    const page = ctx.pages.getBySlug(slug);
+    const subjectEntity = !!page && page.title === birthdaySubject
+      && (page.type === "entity" || page.type.startsWith("entity/"));
+    const bodyLine = birthdaySubject && page?.body.split("\n").find((line) => {
+      if (extractBirthday(line) === null) return false;
+      const fieldAt = line.search(/(?:生日|出生)/u);
+      const beforeField = line.slice(0, fieldAt).replace(/\*+/gu, "").replace(/[\s|：:]+$/u, "");
+      const sameLineSubject = beforeField.endsWith(birthdaySubject);
+      const standaloneField = /^\s*(?:[-*]\s*)?(?:\*{0,2})(?:生日|出生)\*{0,2}\s*[：:]/u.test(line);
+      return sameLineSubject || (subjectEntity && standaloneField);
+    })?.trim();
+    const frontmatterValue = page?.frontmatter?.birthday;
+    const frontmatterLine = subjectEntity && typeof frontmatterValue === "string"
+      && extractBirthday(`生日：${frontmatterValue}`) !== null
+      ? `生日：${frontmatterValue}` : null;
+    const evidence = bodyLine || frontmatterLine;
+    birthdayEvidence.set(slug, evidence ?? null);
+    return evidence ?? null;
+  };
+  const keepBirthdayEvidence = (items: SearchResult[]): SearchResult[] =>
+    birthdayRequested ? items.filter((item) => birthdayLine(item.slug) !== null) : items;
   let verificationIncomplete = false;
   const trace: SearchTrace = {};
   // #511: content recall is one of the two surfaces allowed to present a
@@ -230,14 +262,14 @@ async function runContentRecall(
     _skipDetailEnrich: true,
     _allowCurrentTopics: allowTopics,
   });
-  let results = dedupeCandidatesBySlug([
+  let results = keepBirthdayEvidence(dedupeCandidatesBySlug([
     ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
     ...filterContentCandidates(
       query,
       identitySeed ? [identitySeed, ...candidates] : candidates,
       identitySeed ? { deterministicIdentitySlugs: new Set([identitySeed.slug]) } : undefined,
     ),
-  ]).slice(0, limit);
+  ]).slice(0, limit));
   if (results.length === 0 && !hasExplicitUnknownCue(query)) {
     const ftsCandidates = await ctx.search.search(query, {
       strategy: "fts",
@@ -246,7 +278,7 @@ async function runContentRecall(
       _skipDetailEnrich: true,
       _allowCurrentTopics: allowTopics,
     });
-    results = filterContentFtsFallbackCandidates(query, ftsCandidates);
+    results = keepBirthdayEvidence(filterContentFtsFallbackCandidates(query, ftsCandidates));
     if (results.length === 0) {
       results = selectPersonalTimePlaceRecordFallback(ctx, query, ftsCandidates);
       if (results.length === 0) results = selectRecentMeetingRecordFallback(ctx, query, limit);
@@ -257,6 +289,7 @@ async function runContentRecall(
       }
     }
   }
+  results = keepBirthdayEvidence(results);
   // #385 — personal current-state guard: bounded, deterministic check before
   // presenting reminder-like search material as a current personal recommendation.
   // Activates only for a closed grammar (first-person + action/temporal intent).
@@ -349,7 +382,7 @@ async function runContentRecall(
     const excerpt = prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined;
     return [{
       title: page?.title ?? r.slug,
-      snippet: excerpt === undefined ? r.snippet : excerpt.slice(0, 200),
+      snippet: birthdayLine(r.slug) ?? (excerpt === undefined ? r.snippet : excerpt.slice(0, 200)),
       ...(detail !== "brief" ? { body: excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
     }];
   });
@@ -385,6 +418,7 @@ async function runContentRecall(
       : degraded ? INCOMPLETE_RECALL_MESSAGE : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果" : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
+  const birthdayUnverified = birthdayRequested && entities.length === 0 && !degraded && !verificationIncomplete;
   const surfaceInsufficient =
     !!evidencePack &&
     evidencePack.coverage.coverage_status !== "sufficient" &&
@@ -393,9 +427,11 @@ async function runContentRecall(
     return withRouting({ display: "相关资料尚未核验完成，暂时不能确认结果。",
       summary: { ...formatted.summary, status: "degraded", message: payload.summary, next_steps: ["稍后重试，或按记录标题查看原文"], degraded_reason: "相关资料核验未完成" }, raw: formatted.raw }, payload, routing, []);
   }
-  const display = surfaceInsufficient ? `只找到部分线索：${formatted.display}` : formatted.display;
+  const display = surfaceInsufficient ? `只找到部分线索：${formatted.display}`
+    : birthdayUnverified ? "未找到可核实的生日信息。" : formatted.display;
   const summary = surfaceInsufficient
     ? { ...formatted.summary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
+    : birthdayUnverified ? { ...formatted.summary, message: "未找到可核实的生日信息" }
     : formatted.summary;
   return withRouting({ display, summary, raw: formatted.raw }, payload, routing, slugs);
 }
