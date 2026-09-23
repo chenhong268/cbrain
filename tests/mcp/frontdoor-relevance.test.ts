@@ -553,6 +553,28 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.raw.entities[0]?.snippet).toContain("2000-01-01");
   });
 
+  test("recalls a birthday stated beside the requested person in an original record", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const record = result("records/person-a", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "人物甲的工作记录", "fts");
+    record.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [record],
+      pagesBySlug: { "records/person-a": { title: "人物甲工作记录", type: "record", body: "人物甲 生日：2000-01-01\n工作经历。" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toContain("人物甲 生日：2000-01-01");
+  });
+
   test("rejects a strong vector hit without the explicitly requested birthday", async () => {
     const strong = result("people", {
       vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
