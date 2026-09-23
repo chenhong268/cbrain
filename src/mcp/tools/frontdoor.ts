@@ -228,10 +228,10 @@ async function runContentRecall(
     const subjectEntity = !!page && page.title === birthdaySubject
       && (page.type === "entity" || page.type.startsWith("entity/"));
     const sourceLines = stripKnownRelationsSection(page?.body ?? "").split("\n");
-    // A later correction can invalidate an earlier dated line on the same
-    // page. With no trustworthy field history here, reject the page.
+    // A later correction or tentative qualifier can invalidate an earlier
+    // dated line. With no trustworthy field history here, reject the page.
     if (sourceLines.some((line) =>
-      /(?:更正|纠正|错误|误写|作废|撤销|不是|并非|否认)/u.test(line)
+      /(?:更正|纠正|错误|误写|作废|撤销|不是|并非|否认|待核实|未核实|未确认|不确定|存疑|传闻|据说|可能)/u.test(line)
       && /(?:生日|出生|日期|上述)/u.test(line)
     )) {
       birthdayEvidence.set(slug, null);
@@ -270,8 +270,9 @@ async function runContentRecall(
     const frontmatterDate = frontmatterValue instanceof Date && Number.isFinite(frontmatterValue.getTime())
       ? frontmatterValue.toISOString().slice(0, 10) : frontmatterValue;
     const frontmatterLine = subjectEntity && typeof frontmatterDate === "string"
+      && /^(?:\d{4}-\d{1,2}-\d{1,2}|\d{4}年(?:\d{1,2}月)?)$/u.test(frontmatterDate.trim())
       && extractBirthday(`生日：${frontmatterDate}`) !== null
-      ? `生日：${frontmatterDate}` : null;
+      ? `生日：${frontmatterDate.trim()}` : null;
     const evidence = bodyLine || frontmatterLine;
     birthdayEvidence.set(slug, evidence ?? null);
     return evidence ?? null;

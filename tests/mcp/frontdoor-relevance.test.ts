@@ -603,6 +603,24 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.raw.entities[0]?.snippet).toContain("2000-01-01");
   });
 
+  test("does not treat a tentative frontmatter birthday as verified", async () => {
+    const entity = result("person-a", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([entity], "legacy", {
+      pagesBySlug: { "person-a": {
+        title: "人物甲", type: "entity/person", body: "人物甲简介。",
+        frontmatter: { birthday: "2000-01-01（待核实）" },
+      } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
   for (const query of ["人物甲的生日", "人物甲的出生日期"]) {
     test(`accepts an explicit birthday for a possessive lookup: ${query}`, async () => {
       const birthdayPage = result("person-a", {
@@ -680,6 +698,21 @@ describe("content frontdoor honesty sequencing", () => {
     }, "人物甲生日记录");
     const harness = makeHarness([record], "legacy", {
       pagesBySlug: { record: { title: "人物甲记录", type: "record", body: "人物甲 生日：2000-01-01\n更正：上述日期属于人物乙，人物甲生日未知" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not turn a tentative birthday into verified evidence by trimming its qualifier", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲记录", type: "record", body: "人物甲 生日：2000-01-01（待核实）" } },
     });
 
     const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
