@@ -621,6 +621,38 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.summary.status).toBe("empty");
   });
 
+  for (const date of ["2000-13-99", "0000-00-00", "2000年13月", "2001-02-29"]) {
+    test(`rejects an impossible birthday date: ${date}`, async () => {
+      const entity = result("person-a", {
+        vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+      }, "人物甲生日记录");
+      const harness = makeHarness([entity], "legacy", {
+        pagesBySlug: { "person-a": { title: "人物甲", type: "entity/person", body: `生日：${date}` } },
+      });
+
+      const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+        summary: { status: string };
+      };
+
+      expect(output.summary.status).toBe("empty");
+    });
+  }
+
+  test("accepts a valid leap-day birthday", async () => {
+    const entity = result("person-a", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([entity], "legacy", {
+      pagesBySlug: { "person-a": { title: "人物甲", type: "entity/person", body: "生日：2000-02-29" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+  });
+
   for (const query of ["人物甲的生日", "人物甲的出生日期"]) {
     test(`accepts an explicit birthday for a possessive lookup: ${query}`, async () => {
       const birthdayPage = result("person-a", {

@@ -220,6 +220,21 @@ async function runContentRecall(
     ? query.normalize("NFKC").trim().match(/^([\p{L}\p{N}·_-]{2,40}?)\s*的?\s*(?:生日|出生日期)[?？。]*$/u)?.[1]
     : undefined;
   const datedBirthdayField = /\*{0,2}(?:生日|出生日期|出生)\*{0,2}\s*[：:]\s*(?:\d{4}-\d{1,2}-\d{1,2}|\d{4}年(?:\d{1,2}月)?)/gu;
+  const validBirthdayDate = (value: string): boolean => {
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+    const chinese = /^(\d{4})年(?:(\d{1,2})月)?$/u.exec(value);
+    if (!iso && !chinese) return false;
+    const year = Number(iso?.[1] ?? chinese?.[1]);
+    const month = iso?.[2] ?? chinese?.[2];
+    if (year < 1) return false;
+    if (month === undefined) return true;
+    const monthNumber = Number(month);
+    if (monthNumber < 1 || monthNumber > 12) return false;
+    if (!iso) return true;
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return Number(iso[3]) >= 1 && Number(iso[3]) <= days[monthNumber - 1]!;
+  };
   const birthdayEvidence = new Map<string, string | null>();
   const birthdayLine = (slug: string): string | null => {
     if (!birthdayRequested) return null;
@@ -249,7 +264,8 @@ async function runContentRecall(
       for (const field of line.matchAll(datedBirthdayField)) {
         // The date must belong to this exact field, not a later person's field
         // on the same line.
-        if (extractBirthday(field[0].replace("出生日期", "出生")) === null) continue;
+        const parsedDate = extractBirthday(field[0].replace("出生日期", "出生"))?.birthday;
+        if (!parsedDate || !validBirthdayDate(parsedDate)) continue;
         const beforeField = line.slice(0, field.index).replace(/\*+/gu, "").replace(/[\s|：:]+$/u, "");
         const subjectSuffix = beforeField.endsWith(`${birthdaySubject}的`) ? `${birthdaySubject}的` : birthdaySubject;
         const subjectPrefix = beforeField.endsWith(subjectSuffix)
@@ -271,7 +287,7 @@ async function runContentRecall(
       ? frontmatterValue.toISOString().slice(0, 10) : frontmatterValue;
     const frontmatterLine = subjectEntity && typeof frontmatterDate === "string"
       && /^(?:\d{4}-\d{1,2}-\d{1,2}|\d{4}年(?:\d{1,2}月)?)$/u.test(frontmatterDate.trim())
-      && extractBirthday(`生日：${frontmatterDate}`) !== null
+      && validBirthdayDate(extractBirthday(`生日：${frontmatterDate}`)?.birthday ?? "")
       ? `生日：${frontmatterDate.trim()}` : null;
     const evidence = bodyLine || frontmatterLine;
     birthdayEvidence.set(slug, evidence ?? null);
