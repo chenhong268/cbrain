@@ -132,7 +132,7 @@ function makeHarness(
     sparseBatch?: boolean;
     proactiveHint?: "expiry" | "timeline" | "shared";
     fallbackResults?: SearchResult[];
-    pagesBySlug?: Record<string, { title?: string; body?: string; type?: string }>;
+    pagesBySlug?: Record<string, { title?: string; body?: string; type?: string; frontmatter?: Record<string, unknown> }>;
     identityPersonSlug?: string;
   } = {},
 ): Harness {
@@ -227,10 +227,11 @@ function makeHarness(
         if (opts.pageError) throw opts.pageError;
         if (opts.missingSlugs?.has(slug)) return null;
         const override = opts.pagesBySlug?.[slug];
-        const page: { title: string; body: string; type?: string } = {
+        const page: { title: string; body: string; type?: string; frontmatter?: Record<string, unknown> } = {
           title: override?.title ?? `标题-${slug}`,
           body: override?.body ?? `正文-${slug}`,
         };
+        if (override?.frontmatter) page.frontmatter = override.frontmatter;
         const type = override?.type ?? opts.pageType;
         if (type !== undefined) page.type = type;
         return page;
@@ -501,6 +502,437 @@ describe("content frontdoor honesty sequencing", () => {
         options: { strategy: "fts", limit: 3, _captureSupport: true, _skipDetailEnrich: true, _allowCurrentTopics: true },
       },
     ]);
+  });
+
+  test("does not present a dominant personnel record as a birthday answer when it has no birthday", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const firstChunk = result("people", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "人员 名单 工作 分析", "fts");
+    firstChunk.score = 30;
+    const secondChunk = result("people", {
+      fts: { original: { rankScore: 22, rootLexicalCoverage: 0.4 } },
+    }, "人员 部门 工作 分析", "fts");
+    secondChunk.score = 22;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [firstChunk, secondChunk],
+      pagesBySlug: { people: { body: "人员名单和工作记录。未记录出生信息。" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人员 名单 部门 CM 生日" })) as {
+      display: string;
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string }> };
+    };
+
+    expect(output.summary.status).toBe("empty");
+    expect(output.raw.entities).toEqual([]);
+    expect(output.display).toContain("未找到可核实的生日信息");
+  });
+
+  test("keeps an explicit birthday from the matching page visible after FTS rescue", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const birthdayPage = result("people", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "人物甲工作记录", "fts");
+    birthdayPage.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [birthdayPage],
+      pagesBySlug: { people: { title: "人物甲", type: "entity/person", body: "人物甲工作记录。\n生日：2000-01-01\n工作经历。" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toContain("2000-01-01");
+  });
+
+  test("rescues a lower-ranked FTS record with the requested person's birthday", async () => {
+    const unsupported = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const dominant = result("unrelated", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "人物甲工作记录", "fts");
+    dominant.score = 30;
+    const birthdayRecord = result("birthday-record", {
+      fts: { original: { rankScore: 10, rootLexicalCoverage: 0.4 } },
+    }, "人物甲生日记录", "fts");
+    birthdayRecord.score = 10;
+    const harness = makeHarness([unsupported], "legacy", {
+      fallbackResults: [dominant, birthdayRecord],
+      pagesBySlug: {
+        unrelated: { title: "人物甲工作记录", type: "record", body: "人物甲工作记录。" },
+        "birthday-record": { title: "人物甲生日记录", type: "record", body: "人物甲 生日：2000-01-01" },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toContain("2000-01-01");
+  });
+
+  test("reads an unquoted date-valued birthday on the subject entity", async () => {
+    const entity = result("person-a", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([entity], "legacy", {
+      pagesBySlug: { "person-a": {
+        title: "人物甲", type: "entity/person", body: "人物甲简介。",
+        frontmatter: { birthday: new Date("2000-01-01T00:00:00.000Z") },
+      } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toContain("2000-01-01");
+  });
+
+  test("does not treat a tentative frontmatter birthday as verified", async () => {
+    const entity = result("person-a", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([entity], "legacy", {
+      pagesBySlug: { "person-a": {
+        title: "人物甲", type: "entity/person", body: "人物甲简介。",
+        frontmatter: { birthday: "2000-01-01（待核实）" },
+      } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  for (const date of ["2000-13-99", "0000-00-00", "2000年13月", "2001-02-29", "2000年2月30日"]) {
+    test(`rejects an impossible birthday date: ${date}`, async () => {
+      const entity = result("person-a", {
+        vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+      }, "人物甲生日记录");
+      const harness = makeHarness([entity], "legacy", {
+        pagesBySlug: { "person-a": { title: "人物甲", type: "entity/person", body: `生日：${date}` } },
+      });
+
+      const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+        summary: { status: string };
+      };
+
+      expect(output.summary.status).toBe("empty");
+    });
+  }
+
+  test("accepts a valid leap-day birthday", async () => {
+    const entity = result("person-a", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([entity], "legacy", {
+      pagesBySlug: { "person-a": { title: "人物甲", type: "entity/person", body: "生日：2000-02-29" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+  });
+
+  test("keeps the day in a valid Chinese birth date", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲记录", type: "record", body: "人物甲 生日：2000年1月2日" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toBe("人物甲 生日：2000年1月2日");
+  });
+
+  for (const query of ["人物甲的生日", "人物甲的出生日期"]) {
+    test(`accepts an explicit birthday for a possessive lookup: ${query}`, async () => {
+      const birthdayPage = result("person-a", {
+        vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+      }, "人物甲生日记录");
+      const harness = makeHarness([birthdayPage], "legacy", {
+        pagesBySlug: { "person-a": { title: "人物甲", type: "entity/person", body: "生日：2000-01-01" } },
+      });
+
+      const output = parsed(await harness.call({ query })) as {
+        summary: { status: string; count: number };
+        raw: { entities: Array<{ snippet: string }> };
+      };
+
+      expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+      expect(output.raw.entities[0]?.snippet).toContain("2000-01-01");
+    });
+  }
+
+  test("recalls a birthday stated beside the requested person in an original record", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const record = result("records/person-a", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "人物甲的工作记录", "fts");
+    record.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [record],
+      pagesBySlug: { "records/person-a": { title: "人物甲工作记录", type: "record", body: "人物甲 生日：2000-01-01\n工作经历。" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toContain("人物甲 生日：2000-01-01");
+  });
+
+  test("recalls an original record phrased as the subject's birthday", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲记录", type: "record", body: "人物甲的生日：2000-01-01" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲的生日" })) as {
+      summary: { status: string; count: number };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+  });
+
+  test("rejects a birthday value explicitly denied for the requested subject", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲记录", type: "record", body: "这不是人物甲生日：2000-01-01，而是人物乙的生日。" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("rejects a birthday later corrected to another person in the same record", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲记录", type: "record", body: "人物甲 生日：2000-01-01\n更正：上述日期属于人物乙，人物甲生日未知" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not turn a tentative birthday into verified evidence by trimming its qualifier", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲记录", type: "record", body: "人物甲 生日：2000-01-01（待核实）" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("rejects a strong vector hit without the explicitly requested birthday", async () => {
+    const strong = result("people", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人员 名单 工作 分析");
+    const harness = makeHarness([strong], "legacy", {
+      fallbackResults: [],
+      pagesBySlug: { people: { body: "人员名单和工作记录。" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人员 名单 部门 CM 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not use another person's birthday from a mixed personnel record", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const mixed = result("people", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "人物甲工作记录", "fts");
+    mixed.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [mixed],
+      pagesBySlug: { people: { body: "人物甲负责工作。\n人物乙 生日：2000-01-01" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not bind the second person's birthday to the first label on one line", async () => {
+    const mixed = result("mixed", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([mixed], "legacy", {
+      pagesBySlug: { mixed: { title: "人物甲工作记录", type: "record", body: "人物甲 生日：未知；人物乙 生日：2000-01-01" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("accepts a birth date explicitly labeled 出生日期 beside the subject", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲出生日期记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲工作记录", type: "record", body: "人物甲 出生日期：2000-01-01" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 出生日期" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toContain("出生日期：2000-01-01");
+  });
+
+  test("does not attribute a standalone birthday in a multi-person record to its title", async () => {
+    const rejected = result("initial-noise", {
+      fts: { original: { rankScore: 8, rootLexicalCoverage: 0.2 } },
+    });
+    const mixed = result("people", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "人物甲工作记录", "fts");
+    mixed.score = 30;
+    const harness = makeHarness([rejected], "legacy", {
+      fallbackResults: [mixed],
+      pagesBySlug: { people: { title: "人物甲", type: "record", body: "人物甲工作记录。\n## 人物乙\n生日：2000-01-01" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not attribute another person's section in an entity page to the page title", async () => {
+    const mixed = result("person-a", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([mixed], "legacy", {
+      pagesBySlug: { "person-a": { title: "人物甲", type: "entity/person", body: "## 人物乙\n生日：2000-01-01" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not treat a generated relations section as birthday evidence", async () => {
+    const entity = result("person-a", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([entity], "legacy", {
+      pagesBySlug: { "person-a": { title: "人物甲", type: "entity/person", body: "人物甲简介。\n\n## Known Relations\n\n生日：2000-01-01" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("does not use a corrected standalone birthday field as current evidence", async () => {
+    const entity = result("person-a", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([entity], "legacy", {
+      pagesBySlug: { "person-a": { title: "人物甲", type: "entity/person", body: "生日：2000-01-01（错误，待更正）" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string };
+    };
+
+    expect(output.summary.status).toBe("empty");
+  });
+
+  test("returns only the verified birthday field from a long mixed line", async () => {
+    const record = result("record", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人物甲生日记录");
+    const harness = makeHarness([record], "legacy", {
+      pagesBySlug: { record: { title: "人物甲记录", type: "record", body: `人物甲 生日：2000-01-01；${"其他资料".repeat(100)}` } },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日", detail: "normal" })) as {
+      raw: { entities: Array<{ snippet: string; body: string }> };
+    };
+
+    expect(output.raw.entities[0]?.snippet).toBe("人物甲 生日：2000-01-01");
+    expect(output.raw.entities[0]?.body).toBe("人物甲 生日：2000-01-01");
+  });
+
+  test("ordinary personnel topic browsing still returns the same record", async () => {
+    const strong = result("people", {
+      vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
+    }, "人员 名单 工作 分析");
+    const harness = makeHarness([strong], "legacy", {
+      pagesBySlug: { people: { body: "人员名单和工作记录。" } },
+    });
+
+    const output = parsed(await harness.call({ query: "人员 名单 工作 分析" })) as {
+      summary: { status: string; count: number };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
   });
 
   test("skips an unsupported FTS leader for the only clearly supported fallback", async () => {

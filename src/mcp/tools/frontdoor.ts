@@ -212,6 +212,88 @@ async function runContentRecall(
 ): Promise<FrontdoorEnvelope> {
   const limit = detail === "brief" ? 3 : 5;
   const identitySeed = await resolveIdentityQuestionSeed(ctx, query);
+  // A closed, field-specific check for direct birthday lookups. A related
+  // personnel page without the requested fact is not an answer.
+  const birthdayRequested = /(?:生日|出生日期)[?？。]*$/u.test(query.trim());
+  const birthdaySubject = birthdayRequested
+    ? query.normalize("NFKC").trim().match(/^([\p{L}\p{N}·_-]{2,40}?)\s*的?\s*(?:生日|出生日期)[?？。]*$/u)?.[1]
+    : undefined;
+  const datedBirthdayField = /\*{0,2}(?:生日|出生日期|出生)\*{0,2}\s*[：:]\s*(?:\d{4}-\d{1,2}-\d{1,2}|\d{4}年(?:\d{1,2}月(?:\d{1,2}日)?)?)(?![\d年月日-])/gu;
+  const validBirthdayDate = (value: string): boolean => {
+    const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/u.exec(value);
+    const chinese = /^(\d{4})年(?:(\d{1,2})月(?:(\d{1,2})日)?)?$/u.exec(value);
+    if (!iso && !chinese) return false;
+    const year = Number(iso?.[1] ?? chinese?.[1]);
+    const month = iso?.[2] ?? chinese?.[2];
+    if (year < 1) return false;
+    if (month === undefined) return true;
+    const monthNumber = Number(month);
+    if (monthNumber < 1 || monthNumber > 12) return false;
+    const day = iso?.[3] ?? chinese?.[3];
+    if (day === undefined) return true;
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return Number(day) >= 1 && Number(day) <= days[monthNumber - 1]!;
+  };
+  const birthdayEvidence = new Map<string, string | null>();
+  const birthdayLine = (slug: string): string | null => {
+    if (!birthdayRequested) return null;
+    if (birthdayEvidence.has(slug)) return birthdayEvidence.get(slug) ?? null;
+    const page = ctx.pages.getBySlug(slug);
+    const subjectEntity = !!page && page.title === birthdaySubject
+      && (page.type === "entity" || page.type.startsWith("entity/"));
+    const sourceLines = stripKnownRelationsSection(page?.body ?? "").split("\n");
+    // A later correction or tentative qualifier can invalidate an earlier
+    // dated line. With no trustworthy field history here, reject the page.
+    if (sourceLines.some((line) =>
+      /(?:更正|纠正|错误|误写|作废|撤销|不是|并非|否认|待核实|未核实|未确认|不确定|存疑|传闻|据说|可能)/u.test(line)
+      && /(?:生日|出生|日期|上述)/u.test(line)
+    )) {
+      birthdayEvidence.set(slug, null);
+      return null;
+    }
+    let bodyLine: string | null = null;
+    let sectionTitle: string | null = null;
+    for (const line of sourceLines) {
+      const heading = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/u.exec(line);
+      if (heading) {
+        sectionTitle = heading[1]!.trim();
+        continue;
+      }
+      if (!birthdaySubject) break;
+      for (const field of line.matchAll(datedBirthdayField)) {
+        // The date must belong to this exact field, not a later person's field
+        // on the same line.
+        const dateValue = field[0].replace(/^\*{0,2}(?:生日|出生日期|出生)\*{0,2}\s*[：:]\s*/u, "");
+        if (!validBirthdayDate(dateValue)) continue;
+        const beforeField = line.slice(0, field.index).replace(/\*+/gu, "").replace(/[\s|：:]+$/u, "");
+        const subjectSuffix = beforeField.endsWith(`${birthdaySubject}的`) ? `${birthdaySubject}的` : birthdaySubject;
+        const subjectPrefix = beforeField.endsWith(subjectSuffix)
+          ? beforeField.slice(0, -subjectSuffix.length) : null;
+        const sameLineSubject = subjectPrefix !== null
+          && (subjectPrefix === "" || /[\s|：:，,；;（(#-]$/u.test(subjectPrefix));
+        const standaloneField = /^\s*(?:[-*]\s*)?\*{0,2}(?:生日|出生日期|出生)\*{0,2}\s*[：:]/u.test(line);
+        if (sameLineSubject) {
+          bodyLine = line.slice(line.lastIndexOf(birthdaySubject, field.index), field.index + field[0].length).trim();
+        } else if (subjectEntity && standaloneField && (sectionTitle === null || sectionTitle === birthdaySubject)) {
+          bodyLine = line.slice(field.index, field.index + field[0].length).trim();
+        }
+        if (bodyLine) break;
+      }
+      if (bodyLine) break;
+    }
+    const frontmatterValue = page?.frontmatter?.birthday;
+    const frontmatterDate = frontmatterValue instanceof Date && Number.isFinite(frontmatterValue.getTime())
+      ? frontmatterValue.toISOString().slice(0, 10) : frontmatterValue;
+    const frontmatterLine = subjectEntity && typeof frontmatterDate === "string"
+      && validBirthdayDate(frontmatterDate.trim())
+      ? `生日：${frontmatterDate.trim()}` : null;
+    const evidence = bodyLine || frontmatterLine;
+    birthdayEvidence.set(slug, evidence ?? null);
+    return evidence ?? null;
+  };
+  const keepBirthdayEvidence = (items: SearchResult[]): SearchResult[] =>
+    birthdayRequested ? items.filter((item) => birthdayLine(item.slug) !== null) : items;
   let verificationIncomplete = false;
   const trace: SearchTrace = {};
   // #511: content recall is one of the two surfaces allowed to present a
@@ -230,14 +312,14 @@ async function runContentRecall(
     _skipDetailEnrich: true,
     _allowCurrentTopics: allowTopics,
   });
-  let results = dedupeCandidatesBySlug([
+  let results = keepBirthdayEvidence(dedupeCandidatesBySlug([
     ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
     ...filterContentCandidates(
       query,
       identitySeed ? [identitySeed, ...candidates] : candidates,
       identitySeed ? { deterministicIdentitySlugs: new Set([identitySeed.slug]) } : undefined,
     ),
-  ]).slice(0, limit);
+  ]).slice(0, limit));
   if (results.length === 0 && !hasExplicitUnknownCue(query)) {
     const ftsCandidates = await ctx.search.search(query, {
       strategy: "fts",
@@ -246,7 +328,7 @@ async function runContentRecall(
       _skipDetailEnrich: true,
       _allowCurrentTopics: allowTopics,
     });
-    results = filterContentFtsFallbackCandidates(query, ftsCandidates);
+    results = filterContentFtsFallbackCandidates(query, keepBirthdayEvidence(ftsCandidates));
     if (results.length === 0) {
       results = selectPersonalTimePlaceRecordFallback(ctx, query, ftsCandidates);
       if (results.length === 0) results = selectRecentMeetingRecordFallback(ctx, query, limit);
@@ -257,6 +339,7 @@ async function runContentRecall(
       }
     }
   }
+  results = keepBirthdayEvidence(results);
   // #385 — personal current-state guard: bounded, deterministic check before
   // presenting reminder-like search material as a current personal recommendation.
   // Activates only for a closed grammar (first-person + action/temporal intent).
@@ -349,8 +432,8 @@ async function runContentRecall(
     const excerpt = prefixOnly && page ? contentPassage(query, page.body, page.title) : undefined;
     return [{
       title: page?.title ?? r.slug,
-      snippet: excerpt === undefined ? r.snippet : excerpt.slice(0, 200),
-      ...(detail !== "brief" ? { body: excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
+      snippet: birthdayLine(r.slug) ?? (excerpt === undefined ? r.snippet : excerpt.slice(0, 200)),
+      ...(detail !== "brief" ? { body: birthdayLine(r.slug) ?? excerpt ?? page?.body?.slice(0, 500) ?? "" } : {}),
     }];
   });
   // #399 — keep the default cbrain_recall content path aligned with deep_recall:
@@ -385,6 +468,7 @@ async function runContentRecall(
       : degraded ? INCOMPLETE_RECALL_MESSAGE : verificationIncomplete ? "相关资料核验未完成，暂时不能确认结果" : "暂时没找到相关记忆",
   };
   const formatted = formatRecallEnvelope(payload);
+  const birthdayUnverified = birthdayRequested && entities.length === 0 && !degraded && !verificationIncomplete;
   const surfaceInsufficient =
     !!evidencePack &&
     evidencePack.coverage.coverage_status !== "sufficient" &&
@@ -393,9 +477,11 @@ async function runContentRecall(
     return withRouting({ display: "相关资料尚未核验完成，暂时不能确认结果。",
       summary: { ...formatted.summary, status: "degraded", message: payload.summary, next_steps: ["稍后重试，或按记录标题查看原文"], degraded_reason: "相关资料核验未完成" }, raw: formatted.raw }, payload, routing, []);
   }
-  const display = surfaceInsufficient ? `只找到部分线索：${formatted.display}` : formatted.display;
+  const display = surfaceInsufficient ? `只找到部分线索：${formatted.display}`
+    : birthdayUnverified ? "未找到可核实的生日信息。" : formatted.display;
   const summary = surfaceInsufficient
     ? { ...formatted.summary, status: "degraded" as const, degraded_reason: "证据覆盖不足" }
+    : birthdayUnverified ? { ...formatted.summary, message: "未找到可核实的生日信息" }
     : formatted.summary;
   return withRouting({ display, summary, raw: formatted.raw }, payload, routing, slugs);
 }
