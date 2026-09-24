@@ -132,7 +132,8 @@ function makeHarness(
     sparseBatch?: boolean;
     proactiveHint?: "expiry" | "timeline" | "shared";
     fallbackResults?: SearchResult[];
-    pagesBySlug?: Record<string, { title?: string; body?: string; type?: string; frontmatter?: Record<string, unknown> }>;
+    aliasesByName?: Record<string, Array<{ slug: string; title: string; type: string }>>;
+    pagesBySlug?: Record<string, { title?: string; body?: string; type?: string; frontmatter?: Record<string, unknown> | null }>;
     identityPersonSlug?: string;
   } = {},
 ): Harness {
@@ -179,6 +180,13 @@ function makeHarness(
       // topic pages, so every slug classifies as an ordinary page.
       evidenceCalls.push(`page:${slug}`);
       return null;
+    },
+    getPagesByExactTitle(title: string) {
+      return Object.entries(opts.pagesBySlug ?? {}).flatMap(([slug, page]) =>
+        page.title === title ? [{ slug, title, type: page.type ?? "record" }] : []);
+    },
+    getPagesByAlias(alias: string) {
+      return opts.aliasesByName?.[alias] ?? [];
     },
     getPageTitlesAndTypes(slugs: string[]) {
       evidenceCalls.push(`titles:${slugs.join(",")}`);
@@ -227,13 +235,13 @@ function makeHarness(
         if (opts.pageError) throw opts.pageError;
         if (opts.missingSlugs?.has(slug)) return null;
         const override = opts.pagesBySlug?.[slug];
-        const page: { title: string; body: string; type?: string; frontmatter?: Record<string, unknown> } = {
-          title: override?.title ?? `标题-${slug}`,
+        const title = override?.title ?? `标题-${slug}`;
+        const type = override?.type ?? opts.pageType ?? "record";
+        const page = {
+          slug, title, type,
           body: override?.body ?? `正文-${slug}`,
+          frontmatter: override?.frontmatter === null ? {} : { title, type, slug, ...override?.frontmatter },
         };
-        if (override?.frontmatter) page.frontmatter = override.frontmatter;
-        const type = override?.type ?? opts.pageType;
-        if (type !== undefined) page.type = type;
         return page;
       },
     },
@@ -625,6 +633,128 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.summary).toMatchObject({ status: "ok", count: 1 });
     expect(output.raw.entities).toEqual([{ title: "人物甲", snippet: "生日：2000-01-01" }]);
     expect(harness.searchCalls).toHaveLength(1);
+  });
+
+  test("rescues a unique person page with a birthday outside the ranked candidate limit", async () => {
+    const harness = makeHarness([], "legacy", {
+      fallbackResults: [],
+      pagesBySlug: {
+        "person-a": {
+          title: "人物甲", type: "entity/person", body: "人物甲简介。",
+          frontmatter: { birthday: "2000-01-01" },
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string; snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities).toEqual([{ title: "人物甲", snippet: "生日：2000-01-01" }]);
+    expect(harness.searchCalls).toHaveLength(2);
+  });
+
+  test("does not rescue an ambiguous exact person title", async () => {
+    const harness = makeHarness([result("person-a", undefined, "人物甲简介。")], "legacy", {
+      fallbackResults: [],
+      pagesBySlug: {
+        "person-a": { title: "人物甲", type: "entity/person", body: "人物甲简介。", frontmatter: { birthday: "2000-01-01" } },
+        "person-b": { title: "人物甲", type: "entity/person", body: "另一个同名人物。" },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: unknown[] };
+    };
+
+    expect(output.summary).toMatchObject({ status: "empty", count: 0 });
+    expect(output.raw.entities).toEqual([]);
+  });
+
+  test("does not trust a birthday when the original file names another person", async () => {
+    const harness = makeHarness([], "legacy", {
+      fallbackResults: [],
+      pagesBySlug: {
+        "person-a": {
+          title: "人物甲", type: "entity/person", body: "人物甲简介。",
+          frontmatter: { title: "人物乙", birthday: "2000-01-01" },
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: unknown[] };
+    };
+
+    expect(output.summary).toMatchObject({ status: "empty", count: 0 });
+    expect(output.raw.entities).toEqual([]);
+  });
+
+  test("does not bind an ambiguous person alias from an original record", async () => {
+    const record = result("birthday-record", undefined, "人物甲 生日：2000-01-01");
+    const harness = makeHarness([record], "legacy", {
+      aliasesByName: { 人物甲: [
+        { slug: "person-a", title: "人物乙", type: "entity/person" },
+        { slug: "person-b", title: "人物丙", type: "entity/person" },
+      ] },
+      fallbackResults: [record],
+      pagesBySlug: {
+        "birthday-record": { title: "人物甲记录", type: "record", body: "人物甲 生日：2000-01-01" },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: unknown[] };
+    };
+
+    expect(output.summary).toMatchObject({ status: "empty", count: 0 });
+    expect(output.raw.entities).toEqual([]);
+  });
+
+  test("keeps an explicit same-line birthday in a record with sparse frontmatter", async () => {
+    const record = result("birthday-record", undefined, "人物甲 生日：2000-01-01");
+    const harness = makeHarness([record], "legacy", {
+      fallbackResults: [record],
+      pagesBySlug: {
+        "birthday-record": { title: "人物甲记录", type: "record", body: "人物甲 生日：2000-01-01", frontmatter: null },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toContain("2000-01-01");
+  });
+
+  test("prefers an admitted original record over the exact person-page fallback", async () => {
+    const record = result("birthday-record", {
+      fts: { original: { rankScore: 30, rootLexicalCoverage: 0.4 } },
+    }, "人物甲生日记录", "fts");
+    record.score = 30;
+    const harness = makeHarness([], "legacy", {
+      fallbackResults: [record],
+      pagesBySlug: {
+        "person-a": { title: "人物甲", type: "entity/person", body: "人物甲简介。", frontmatter: { birthday: "2000-01-01" } },
+        "birthday-record": { title: "人物甲生日记录", type: "record", body: "人物甲 生日：2001-01-01" },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities[0]?.snippet).toContain("2001-01-01");
+    expect(harness.searchCalls).toHaveLength(2);
   });
 
   test("does not treat a tentative frontmatter birthday as verified", async () => {
