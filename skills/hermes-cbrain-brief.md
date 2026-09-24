@@ -17,9 +17,9 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 
 - 讨论过吗、有依据吗、是不是真的 → `cbrain_recall(detail:"brief")`，内部 grounded；≤300 字，candidates 标"待确认"。
 - 当时怎么设计、为什么选、具体怎么说 → `cbrain_recall(detail:"normal")`；首轮禁止 expand_entity/get_page/get_timeline。
-- 想不起名字、叫什么来着、一起做过项目 → `cbrain_recall`，内部 recall_episode；禁止 query/agentic_research。
+- 想不起名字、叫什么来着、一起做过项目 → `recall_episode`；禁止 query/agentic_research。
 - 下属/上级 → `get_org_tree`。
-- 关系/全貌/盲区 → `cbrain_recall`；遍历用 `graph_query`，`summarize` 仅 full profile 的 advanced escape hatch。
+- 明确的实体关系 → `graph_query`（两实体先 `resolve_slugs`）；全貌/盲区 → `cbrain_recall`；`summarize` 仅 full profile 的 advanced escape hatch。
 - 关键词/debug → `cbrain_recall`；仅显式 debug/full 诊断直调 `query`。
 - 批量补详情 → `get_pages`，禁止连续 get_page。
 
@@ -31,7 +31,7 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 
 ## 4. 来源追踪
 
-哪来的、谁说的、可靠吗 → daily 默认 `cbrain_recall(detail:"brief")`，只基于可见证据回答。显式 debug/full 溯源会话才可用 `get_provenance({ target_type:"link"|"timeline", target_id })`；无 target 时关系先 `link({ action:"list", ... })`，事件先 `get_timeline`。找不到如实说，禁止编造；禁输出 target_id/confidence/slug/JSON。
+来源/可信度 → daily `cbrain_recall(detail:"brief")`，只答可见证据；debug/full 已有 target_id 才用 `get_provenance`，未知 target 仅 full 查 `link` / `get_timeline`。找不到如实说；禁编造或输出 ID/score/JSON。
 
 ## 5. Response Rules
 
@@ -42,7 +42,7 @@ structured daily 默认不含 raw/routing；raw 仅 debug/full 审计，禁止�
 - ❌ query+get_page+get_links+get_timeline 连调 → cbrain_recall
 - ❌ 总结用 query → cbrain_recall（内部 overview 分发）
 - ❌ 核查用 agentic_research → cbrain_recall（内部 grounded_recall）
-- ❌ 情境找人用 agentic_research → cbrain_recall（内部 recall_episode）
+- ❌ 情境找人用 agentic_research → recall_episode
 - ❌ discovery 暴露内部字段；回答超 500 字；末尾追问
 - ❌ 自然语言走 query → cbrain_recall
 

@@ -37,7 +37,7 @@ description: "Use when retrieving, organizing, or validating knowledge in CBrain
 | "那个人叫什么" | 情景人物 | `hermes-cbrain-brief.md` §3 | `recall_episode` |
 | "有新发现吗" | 发现 | `hermes-cbrain-brief.md` §4 | `read_discoveries` |
 | "总结一下 X" | 深度回顾 | `review.md` | 概览用 `cbrain_recall`；深度复盘按 `review.md` 取全文、关系、时间线 |
-| "A 和 B 什么关系" | 关系分析 | `connect.md` | `cbrain_recall`（内部 relationship 分发） |
+| "A 和 B 什么关系" | 关系分析 | `connect.md` | `resolve_slugs` → `graph_query` |
 | "写一份关于 X 的报告" | 知识写作 | `write.md` | 多步检索 + 组织 |
 | "把这些内容存下来" | 摄入 | `ingest.md` | `ingest` |
 | "帮我整理/去重" | 清理 | `cleanup.md` | `clean_shells` / `dedup` |
@@ -84,10 +84,12 @@ description: "Use when retrieving, organizing, or validating knowledge in CBrain
 
 ### 路由评估数据
 
+`expected_skill` 是技能层，`expected_tool` 是工具层；两者不直接比较。未标记 `required_profile` 的工具用例评估 daily 首轮路径（即 agent MCP profile）；显式 full/debug 会话标注对应 profile，健康首轮 empty/insufficient 后的二次检索单独标注阶段。一次模型评估只比较相同 profile 与阶段的用例。`anti_pattern` 和 `profile_boundary` 不参与普通工具准确率统计。
+
 | 文件 | 用例数 | 说明 |
 |:-----|:-------|:-----|
 | `response-contract.routing-eval.jsonl` | 12 | 回答合约（长度/禁用词） |
-| `agent-facing.routing-eval.jsonl` | 34 | Agent 路由主评估 |
+| `agent-facing.routing-eval.jsonl` | 35 | Agent 路由主评估 |
 | `recall.routing-eval.jsonl` | 23 | 回忆路由 |
 | `episodic.routing-eval.jsonl` | 21 | 情景人物路由 |
 | `signal-router.routing-eval.jsonl` | 21 | 信号路由 |

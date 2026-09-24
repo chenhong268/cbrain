@@ -14,6 +14,7 @@
 - CBrain 里有吗、有没有相关记录、有没有依据 → query.md [grounded]
 - 为什么这么定、上次怎么定的 → query.md [grounded]
 - 这个判断有没有遗漏、这个判断对不对、是不是真的 → query.md [grounded]
+- 这件事有证据吗、这个结论确认过吗 → query.md [grounded]
 - 和之前说的矛盾吗、哪些是确定的 → query.md [grounded]
 
 ### Content Recall（同样高优先级，禁止 grounded）
@@ -25,9 +26,8 @@
 ### Source Tracking / Provenance（来源追踪，优先于通用搜索）
 - 这条信息哪来的、来源是什么、证据来源是什么 → query.md [provenance]
 - 这个关系是谁说的、谁告诉你的、这条依据从哪来 → query.md [provenance]
-- 这件事有证据吗、这个结论确认过吗 → query.md [provenance]
 - 这条记忆可靠吗、可信吗、这个来源可靠吗 → query.md [provenance]
-- ⚠️ 区分 grounded vs provenance："有依据吗/是不是真的/讨论过吗" → 走 grounded（问有没有），"依据从哪来/来源是什么/谁说的" → 走 provenance（问来源）
+- ⚠️ 区分 grounded vs provenance："有证据吗/有依据吗/确认过吗/讨论过吗" → 走 grounded（问是否有依据），"依据从哪来/来源是什么/谁说的" → 走 provenance（问具体来源）
 - ⚠️ 不适用：普通内容回忆（"当时怎么设计的"）→ 走 cbrain_recall
 
 ### Episodic Person Recall（情境找人，优先于通用搜索）

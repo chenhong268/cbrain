@@ -142,13 +142,15 @@ When loaded with `[agentic_research]` flag (from RESOLVER.md "Agentic Research" 
 - 简单事实回忆 → cbrain_recall(detail:"normal")
 - 单一实体查找 → cbrain_recall
 - 核查确认 → cbrain_recall（grounded 内部分发）
-- 情境找人 → cbrain_recall（recall_episode 内部分发）
-- 两人关系 → cbrain_recall（relationship 内部分发）/ graph_query / connect
+- 情境找人 → recall_episode
+- 明确的两实体关系 → connect / graph_query
 - 简单关键词搜索 → cbrain_recall（内部 debug_search）；直调 query 仅显式 debug/full profile
 
 ## [provenance] Branch — 来源追踪
 
 When loaded with `[provenance]` flag (from RESOLVER.md "Source Tracking / Provenance" section):
+
+daily profile 先用 `cbrain_recall(detail:"brief")` 基于可见证据回答；debug/full 已有 target_id 时可直调 `get_provenance`，无 target 的定位流程仅限 full 会话。
 
 **执行协议：**
 
@@ -157,7 +159,7 @@ When loaded with `[provenance]` flag (from RESOLVER.md "Source Tracking / Proven
    get_provenance({ target_type: "link"|"timeline", target_id })
    ```
 
-2. **无 target，自然语言指代**：用户用自然语言描述某条信息/关系/事件，但没有给出 ID：
+2. **full 会话无 target，自然语言指代**：用户用自然语言描述某条信息/关系/事件，但没有给出 ID：
    - **关系来源**：`graph_query` 或 `link({ action: "list", ... })`（debug 工具）拿 link_id → `get_provenance({ target_type: "link", target_id })`
    - **事件来源**：`get_timeline` 拿到 timeline_id → `get_provenance({ target_type: "timeline", target_id })`
    - **不确定指哪条**：`deep_recall` / `query` 做上下文发现，找到相关 link 或 timeline 条目后拿 ID
@@ -170,13 +172,12 @@ When loaded with `[provenance]` flag (from RESOLVER.md "Source Tracking / Proven
 **适用条件（满足任一）：**
 - 用户问"这条信息哪来的"、"来源是什么"、"证据来源是什么"
 - 用户问"这个关系是谁说的"、"谁告诉你的"、"这条依据从哪来"
-- 用户问"这件事有证据吗"、"这个结论确认过吗"
 - 用户问"这条记忆可靠吗"、"可信吗"、"这个来源可靠吗"
 
 **不适用（走现有路由）：**
 - 普通内容回忆（"当时怎么设计的"）→ cbrain_recall(detail: "normal")
 - 核查确认（"讨论过吗"）→ cbrain_recall（grounded 内部分发）
-- 关系查询（"A和B什么关系"）→ cbrain_recall（relationship 内部分发）/ graph_query / connect
+- 关系查询（"A和B什么关系"）→ connect / graph_query
 
 **用户回答格式（硬规则）：**
 
