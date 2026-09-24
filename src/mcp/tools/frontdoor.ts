@@ -218,6 +218,11 @@ async function runContentRecall(
   const birthdaySubject = birthdayRequested
     ? query.normalize("NFKC").trim().match(/^([\p{L}\p{N}·_-]{2,40}?)\s*的?\s*(?:生日|出生日期)[?？。]*$/u)?.[1]
     : undefined;
+  const exactBirthdayPages = birthdaySubject ? ctx.db.getPagesByExactTitle(birthdaySubject) : [];
+  const birthdaySubjectOwners = birthdaySubject
+    ? new Set([...exactBirthdayPages, ...ctx.db.getPagesByAlias(birthdaySubject)].map((page) => page.slug))
+    : new Set<string>();
+  const ambiguousBirthdaySubject = birthdaySubjectOwners.size > 1;
   const datedBirthdayField = /\*{0,2}(?:生日|出生日期|出生)\*{0,2}\s*[：:]\s*(?:\d{4}-\d{1,2}-\d{1,2}|\d{4}年(?:\d{1,2}月(?:\d{1,2}日)?)?)(?![\d年月日-])/gu;
   const validBirthdayDate = (value: string): boolean => {
     const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/u.exec(value);
@@ -240,7 +245,16 @@ async function runContentRecall(
     if (!birthdayRequested) return null;
     if (birthdayEvidence.has(slug)) return birthdayEvidence.get(slug) ?? null;
     const page = ctx.pages.getBySlug(slug);
-    const subjectEntity = !!page && page.title === birthdaySubject
+    // Ambiguous names and drift between the index and original file cannot
+    // establish which person's date this is, even for a ranked candidate.
+    if (!page || ambiguousBirthdaySubject
+      || (page.frontmatter?.title !== undefined && page.frontmatter.title !== page.title)
+      || (page.frontmatter?.slug !== undefined && page.frontmatter.slug !== page.slug)
+      || (page.frontmatter?.type !== undefined && page.frontmatter.type !== page.type)) {
+      birthdayEvidence.set(slug, null);
+      return null;
+    }
+    const subjectEntity = page.title === birthdaySubject
       && (page.type === "entity" || page.type.startsWith("entity/"));
     const sourceLines = stripKnownRelationsSection(page?.body ?? "").split("\n");
     // A later correction or tentative qualifier can invalidate an earlier
@@ -343,6 +357,18 @@ async function runContentRecall(
     }
   }
   results = keepBirthdayEvidence(results);
+  if (results.length === 0 && !ambiguousBirthdaySubject
+    && exactBirthdayPages.length === 1 && exactBirthdayPages[0]?.type === "entity/person") {
+    // Exhaust the existing original-record fallback first. A direct person
+    // field can then rescue one exact, disk-verified page outside search's
+    // small candidate budget without increasing the number of search calls.
+    const person = exactBirthdayPages[0];
+    const page = ctx.pages.getBySlug(person.slug);
+    const diskIdentityMatches = page?.frontmatter?.title === person.title
+      && page.frontmatter.slug === person.slug && page.frontmatter.type === person.type;
+    const evidence = diskIdentityMatches ? birthdayLine(person.slug) : null;
+    if (evidence) results = [{ slug: person.slug, score: 1, snippet: evidence, source: "exact" }];
+  }
   // #385 — personal current-state guard: bounded, deterministic check before
   // presenting reminder-like search material as a current personal recommendation.
   // Activates only for a closed grammar (first-person + action/temporal intent).
