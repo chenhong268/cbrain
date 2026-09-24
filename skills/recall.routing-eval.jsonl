@@ -6,6 +6,7 @@
 {"intent": "帮我总结一下上周的会议", "expected_tool": "cbrain_recall", "category": "overview", "note": "daily 普通自然语言请求默认走 cbrain_recall"}
 {"intent": "全面了解一下AI行业趋势", "expected_tool": "cbrain_recall", "category": "overview", "note": "daily 普通自然语言请求默认走 cbrain_recall"}
 {"intent": "梳理一下组织架构", "expected_tool": "cbrain_recall", "category": "deep_review", "note": "无明确树根的梳理请求先走 review.md；首步 cbrain_recall，明确的组织树查询才直调 get_org_tree", "expected_skill": "review.md"}
+{"intent": "梳理一下组织C的组织架构", "expected_tool": "cbrain_recall", "category": "deep_review", "note": "即使有明确树根，梳理请求仍先走 review.md；首步 cbrain_recall", "expected_skill": "review.md"}
 {"intent": "概览一下Q1的业绩", "expected_tool": "cbrain_recall", "category": "overview", "note": "daily 普通自然语言请求默认走 cbrain_recall"}
 {"intent": "分析一下RAG和知识图谱有什么联系", "expected_tool": "cbrain_recall", "category": "reasoning", "note": "daily 普通自然语言请求默认走 cbrain_recall"}
 {"intent": "这个领域的知识缺口在哪里", "expected_tool": "cbrain_recall", "category": "reasoning", "note": "daily 普通自然语言请求默认走 cbrain_recall"}
