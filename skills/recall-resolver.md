@@ -1,7 +1,7 @@
 # Recall Resolver — Tool 层路由表
 
 > 意图 → MCP 工具。与 skill 层 RESOLVER.md 互补：那个决定加载哪个 skill 文件，这个决定调哪个 MCP 工具。
-> **默认前门是 `cbrain_recall`**：自然语言回忆/核查/找人/层级/总结/关系/判断首选它，由 CBrain 内部分发到 grounded_recall / content_recall / episodic / hierarchy / overview / relationship / reasoning / debug_search。
+> **普通自然语言请求的默认前门是 `cbrain_recall`**：回忆/核查/总结/判断由 CBrain 内部分发。已识别的专门意图遵循下方路由：忘名找人直调 `recall_episode`、明确实体关系直调 `graph_query`、组织层级直调 `get_org_tree`；这些是现有 daily 路由，不是 full/debug escape hatch。
 > `deep_recall` 是 **advanced escape hatch**：仅当需要精细参数（`grounded` / `detail` / `limit`）或前门无法表达意图时直调，不是默认首选。
 > 启动速查版：`hermes-cbrain-brief.md`（~1200 字，Agent 启动时优先加载）。
 
@@ -10,8 +10,7 @@
 ```
 用户提问涉及 CBrain 知识
 │
-├─ 默认：先走 cbrain_recall 前门
-│   自然语言回忆/核查/找人/层级/总结/关系/判断
+├─ 普通回忆/核查/总结/判断：先走 cbrain_recall 前门
 │   → cbrain_recall({ query, detail: "brief" | "normal" | "full" })
 │   cbrain_recall 内部分发：grounded_recall / content_recall / episodic
 │     / hierarchy / overview / relationship / reasoning / debug_search
@@ -22,7 +21,7 @@
 │   - 核查确认需 grounded 证据板 → advanced escape hatch：deep_recall({ query, grounded: true, limit: 3, detail: "brief" })（默认走 cbrain_recall）
 │   - 内容回忆需 detail=normal 完整上下文 → advanced escape hatch：deep_recall({ query, detail: "normal", limit: 3 })（默认走 cbrain_recall）
 │   ⚠️ 区分 grounded vs provenance：
-│     "有依据吗/是不是真的/讨论过吗" → grounded（问有没有）
+│     "有证据吗/有依据吗/确认过吗/讨论过吗" → grounded（问是否有依据）
 │     "依据从哪来/来源是什么/谁说的" → provenance（问来源），跳到下方 provenance 分支
 │   → 答案是 yes/no 或 fact/candidate 分类，不需要全文
 │   → 超时预算 20 秒，见下方「体验预算」
@@ -34,10 +33,10 @@
 ├─ 来源追踪（provenance）？
 │   信号：这条信息哪来的、来源是什么、证据来源是什么
 │         这个关系是谁说的、谁告诉你的、这条依据从哪来
-│         这件事有证据吗、这个结论确认过吗
 │         这条记忆可靠吗、可信吗、这个来源可靠吗
-│   → 已知 target_id：get_provenance({ target_type, target_id })
-│   → 未知 target，定位路径：
+│   → daily：cbrain_recall(detail:"brief")，仅基于可见证据回答
+│   → 显式 debug/full 且已知 target_id：get_provenance({ target_type, target_id })
+│   → 仅 full 会话可定位未知 target：
 │     - 关系来源 → graph_query / link(action="list", ... )（debug 工具）拿 link_id → get_provenance({ target_type: "link", target_id })
 │     - 事件来源 → get_timeline 拿到 timeline_id → get_provenance({ target_type: "timeline", target_id })
 │     - 不确定指哪条 → cbrain_recall（advanced escape hatch：deep_recall / query 做上下文发现，找到相关 link/timeline 条目后拿 ID）
@@ -55,11 +54,11 @@
 │   ⎿示例：去年团建见过谁、上个月聚餐认识的那个、项目上线一起干的人、主题C相关的人
 │   ⎿示例（关系事件）：想不起名字了和人物A一起旅行的另外几个人、忘了叫什么和人物A一起做项目的那个
 │   ⚠️ 不适用（走 cbrain_recall 前门或 advanced 直调）：
-│     用户提到具体人名（"人物A认识谁"）→ cbrain_recall（内部 relationship）/ graph_query
-│     纯关系查询（"A和B什么关系"）→ cbrain_recall（内部 relationship）/ connect
-│     已知组织查团队（"组织F团队的人"）→ cbrain_recall（内部 hierarchy）/ get_org_tree
+│     用户提到具体人名（"人物A认识谁"）→ graph_query
+│     纯关系查询（"A和B什么关系"）→ connect / graph_query
+│     已知组织查团队（"组织F团队的人"）→ get_org_tree
 │     已知人物+共同事件+问经历内容（"人物A和人物B一起做过什么"）→ cbrain_recall(detail:"normal")
-│   → cbrain_recall（内部 recall_episode 分发）；advanced escape hatch 直调 recall_episode({
+│   → recall_episode({
 │       query: 原始问题,
 │       time_hint: 提取时间线索（去年/上个月/2024年/...）,
 │       topic_hint: 提取主题线索（前端/项目管理/...）,
@@ -87,45 +86,45 @@
 ├─ "结构化档案"？
 │   信号：完整档案、dossier、RAGmap、信息表、详细档案
 │   → cbrain_recall（默认前门）
-│   → advanced escape hatch：dossier（debug/internal profile 工具）
+│   → advanced escape hatch：dossier（仅 full profile）
 │   → 区别：review 是叙事式，dossier（debug/internal 工具）是结构化表格
 │
 ├─ "帮我分析/推理"？
 │   信号：分析、联想、知识缺口、cross-domain、背后逻辑、有什么联系
 │   → cbrain_recall（内部 reasoning 分发）
-│   → advanced escape hatch：brain_storm（debug/internal profile 工具）
+│   → advanced escape hatch：brain_storm（仅 full profile）
 │
 ├─ 复杂多步研究（EXPERIMENTAL）？
 │   信号：A和B的差异/取舍/哪个更适合、我还遗漏了什么/盲区
 │         A、B、C之间有什么内在联系、这个结论依据够不够
 │         需要多步推理和交叉验证的复杂复盘
 │   → cbrain_recall（默认前门）
-│   → advanced escape hatch：agentic_research({ query, detail: "normal", known_slugs, intent_hint })（EXPERIMENTAL，debug/internal）
+│   → advanced escape hatch：agentic_research({ query, detail: "normal", known_slugs, intent_hint })（EXPERIMENTAL，仅 full profile）
 │   → 多步管道：规划 → 执行 → 评估 → (一次补充) → 结构化结果
 │   → detail: brief=快速, normal=标准, full=深度
 │   → ⚠️ 不适用场景（走 cbrain_recall 前门）：
 │     单一实体查找 → cbrain_recall
 │     精确关键词定位/debug → cbrain_recall（内部 debug_search）；直调 query 仅显式 debug/full profile
 │     核查确认 → cbrain_recall（内部 grounded_recall）
-│     情境找人 → cbrain_recall（内部 recall_episode）
+│     情境找人 → recall_episode
 │     内容回忆 → cbrain_recall(detail: "normal")
-│     两人关系 → cbrain_recall（内部 relationship）/ graph_query / connect
+│     明确的两实体关系 → connect / graph_query
 │   → 回答契约见下方「agentic_research（EXPERIMENTAL）回答规范」
 │
 ├─ "XX和YY什么关系"？
 │   信号：什么关系、怎么认识的、有什么联系、之间
-│   → cbrain_recall（内部 relationship 分发）；advanced escape hatch：graph_query(mode=traverse, depth=2)
+│   → connect skill：先 resolve_slugs，再 graph_query(mode=shortest_path, target=另一实体)
 │   → 深度分析 → connect skill
 │
 ├─ "组织层级 / 汇报关系"？
 │   信号：下属、上级、汇报线、谁向谁汇报、组织架构、
 │         组织结构、团队有哪些人、直属、管谁、向谁汇报
-│   → cbrain_recall（内部 hierarchy 分发）；advanced escape hatch：get_org_tree({ query: 种子实体名, direction: "both" })
+│   → get_org_tree({ query: 种子实体名, direction: "both" })
 │   → 多候选 → 让用户澄清
 │   → 有结果 → 按层级呈现（树形/缩进列表）
 │   → 无结果 → fallback cbrain_recall(detail:"normal")（advanced escape hatch：deep_recall(detail=normal)）
 │   → 种子无法解析 → "无法确定你指的是哪个实体，能说得更具体一些吗？"
-│   ⚠️ 层级查询直接走 cbrain_recall（内部 get_org_tree 分发）或直调 get_org_tree；禁止用 query / graph_query 手动拼层级
+│   ⚠️ 层级查询直接走 get_org_tree；禁止用 query / graph_query 手动拼层级
 │   注意：两人关系（"A和B什么关系"）走上面的 connect 分支，不走这里
 │
 ├─ "最近有什么发现"？
@@ -400,8 +399,8 @@ grounded recall 返回后，首轮回答必须：
 ❌ 前门未命中后直接跳 web_search/session_search → daily 停在 bounded fallback；显式 debug/full profile 才用 query(缩减关键词) 重试
 ❌ 简单实体查找用 agentic_research → cbrain_recall 一步搞定
 ❌ 核查确认用 agentic_research → 必须 cbrain_recall（内部 grounded_recall）
-❌ 情境找人用 agentic_research → 必须 cbrain_recall（内部 recall_episode）
-❌ 两人关系用 agentic_research → 必须 cbrain_recall（内部 relationship）/ graph_query / connect
+❌ 情境找人用 agentic_research → 必须 recall_episode
+❌ 两人关系用 agentic_research → 必须 connect / graph_query
 ❌ discovery 输出暴露 score/distance/shared_neighbors/debug → 只展示 display/cards/summary
 ❌ daily 会话调用 run_discovery，或用 read_discoveries 冒充新运行 → 明确说明需要 full profile
 ❌ read_discoveries 后暴露 _debug 字段 → 除非用户明确说 debug=true
@@ -426,12 +425,12 @@ grounded recall 返回后，首轮回答必须：
 | cbrain_recall | display/summary/raw（内部按 intent 分发 grounded/content/episodic/hierarchy/overview/relationship/reasoning） | **默认前门，最高优先级** — 自然语言回忆/核查/找人/层级/总结/关系/判断首选 |
 | deep_recall(grounded)（advanced escape hatch） | 证据板（facts/candidates/conflicts/must_not_claim）+ 合成回答 | advanced：需 grounded 证据板时直调；默认走 cbrain_recall（内部 grounded_recall） |
 | deep_recall（advanced escape hatch） | body + links + timeline + tags + related + insights | advanced：需完整上下文 / 精细 detail 参数时直调；默认走 cbrain_recall |
-| agentic_research（debug/internal） | 多步管道：规划→执行→评估→(补充)→结构化结果 | EXPERIMENTAL，非默认；复杂比较/盲区分析/跨主题关联（默认走 cbrain_recall reasoning 分发） |
+| agentic_research（full-only） | 多步管道：规划→执行→评估→(补充)→结构化结果 | EXPERIMENTAL，非默认；复杂比较/盲区分析/跨主题关联（默认走 cbrain_recall reasoning 分发） |
 | summarize（full-only advanced escape hatch） | 图遍历 + 结构化概览 + 可配置深度 | 仅 full profile；默认走 cbrain_recall（overview 分发） |
-| dossier（debug/internal） | 结构化档案（基本信息 + 关系 + 时间线 + 洞察） | debug/internal profile 工具；默认走 cbrain_recall |
-| brain_storm（debug/internal） | LLM 推理 + 缺口分析 + 跨域关联 | debug/internal profile 工具；默认走 cbrain_recall（reasoning 分发） |
-| graph_query | 关系遍历（traverse/backlinks/related） | 查两个人/公司关系（cbrain_recall relationship 分发的 advanced 直调） |
-| get_org_tree | 组织层级树（向上/向下/双向） | 组织架构、下属、上级、汇报线 — 一次调用返回完整树（cbrain_recall hierarchy 分发的 advanced 直调） |
+| dossier（full-only） | 结构化档案（基本信息 + 关系 + 时间线 + 洞察） | 仅限 full profile；默认走 cbrain_recall |
+| brain_storm（full-only） | LLM 推理 + 缺口分析 + 跨域关联 | 仅限 full profile；默认走 cbrain_recall（reasoning 分发） |
+| graph_query | 关系遍历（traverse/backlinks/related） | 明确的实体关系直调；两实体先 resolve_slugs，再查最短路径 |
+| get_org_tree | 组织层级树（向上/向下/双向） | 组织架构、下属、上级、汇报线 — 一次调用返回完整树 |
 | insight(action="list") | 系统自动生成的洞察列表 | 发现漏掉的关联 |
 | read_discoveries | 跨域关联发现（用户可读摘要） | 深度发现，只展示 display/cards/summary |
 | get_timeline | 按时间排列的事件流 | 时间线回顾 |
@@ -439,5 +438,5 @@ grounded recall 返回后，首轮回答必须：
 | query | slug + title + snippet | **底层调试工具**。仅显式 debug/full profile 直调；daily 关键词定位走 cbrain_recall 内部 debug_search。 |
 | expand_entity | 单实体的详细信息 | 追问已知实体 |
 | get_pages | 批量页面摘要（slug+title+excerpt+tags） | cbrain_recall / get_org_tree 后批量补详情，**禁止连续 get_page** |
-| recall_episode | 候选人列表 + 匹配线索 + 证据 + 诊断 | 情境找人：不记得名字，靠时间/主题/事件/关系线索召回候选人（cbrain_recall episodic 分发的 advanced 直调） |
-| get_provenance | 来源分类 + 信任状态 + 证据 + 纠正历史 | 解释已有记忆的来源和可信度（需要 target_type + target_id） |
+| recall_episode | 候选人列表 + 匹配线索 + 证据 + 诊断 | 情境找人：不记得名字，靠时间/主题/事件/关系线索召回候选人 |
+| get_provenance | 来源分类 + 信任状态 + 证据 + 纠正历史 | 显式 debug/full 且已知 target_id 时直调；未知 target 先在 full 会话定位 |

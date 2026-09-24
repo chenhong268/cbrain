@@ -31,7 +31,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAllTools } from "../src/mcp/register.js";
 import { buildProgram } from "../src/cli/program.js";
 import { resolveSyncMode, type SyncOptions } from "../src/cli/commands/reindex.js";
-import { AGENT_ALLOWLIST } from "../src/mcp/tool-profiles.js";
+import { AGENT_ALLOWLIST, TOOL_PROFILE_ALLOWLISTS } from "../src/mcp/tool-profiles.js";
 import { MCP_INGEST_PAGE_TYPES } from "../src/mcp/tools/ingest.js";
 
 const PROJECT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -932,6 +932,59 @@ export function checkAgentFacingRoutingProfile(
   }];
 }
 
+/** #524 — reject contradictory tool gold for the same input and profile.
+ * Skill-layer rows and anti-patterns are intentionally outside this comparison. */
+export function checkRoutingEvalContracts(skillsDir: string): CheckResult[] {
+  const failures: CheckResult[] = [];
+  const seen = new Map<string, { tool: string; file: string; line: number }>();
+  const advancedOnly = new Set(["summarize", "brain_storm", "agentic_research", "get_provenance", "query"]);
+
+  for (const file of readdirSync(skillsDir).filter((name) => name.endsWith(".routing-eval.jsonl")).sort()) {
+    const lines = readFileSync(join(skillsDir, file), "utf-8").split("\n");
+    lines.forEach((line, index) => {
+      if (!line.trim()) return;
+      let row: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+        row = parsed as Record<string, unknown>;
+      } catch {
+        failures.push({ check: "routing eval contract", passed: false, detail: `${file}:${index + 1} invalid JSON row` });
+        return;
+      }
+      if (row.category === "anti_pattern" || row.category === "profile_boundary") return;
+      if (row.expected_tool === undefined || row.expected_tool === null) return; // skill/response layer
+      const input = row.input ?? row.intent;
+      const profile = row.required_profile ?? "daily";
+      const phase = row.route_phase ?? "initial";
+      if (typeof input !== "string" || !input.trim() || typeof row.expected_tool !== "string" || !row.expected_tool.trim() ||
+          !["daily", "full", "debug"].includes(String(profile)) || !["initial", "fallback"].includes(String(phase))) {
+        failures.push({ check: "routing eval contract", passed: false, detail: `${file}:${index + 1} invalid tool route or profile` });
+        return;
+      }
+      if (profile === "daily" && (advancedOnly.has(row.expected_tool) ||
+          (row.expected_tool === "deep_recall" && phase !== "fallback"))) {
+        failures.push({ check: "routing eval contract", passed: false, detail: `${file}:${index + 1} advanced-only tool lacks an explicit profile` });
+      }
+      const available = profile === "daily" ? AGENT_ALLOWLIST : profile === "debug" ? TOOL_PROFILE_ALLOWLISTS.debug : null;
+      if (available && !available.includes(row.expected_tool)) {
+        failures.push({ check: "routing eval contract", passed: false, detail: `${file}:${index + 1} ${profile} profile cannot call ${row.expected_tool}` });
+      }
+      const key = `${profile}\u0000${phase}\u0000${input.normalize("NFKC").replace(/\s+/g, " ").trim()}`;
+      const previous = seen.get(key);
+      if (previous && previous.tool !== row.expected_tool) {
+        failures.push({
+          check: "routing eval contract", passed: false,
+          detail: `${file}:${index + 1} conflicts with ${previous.file}:${previous.line} in ${profile} profile`,
+        });
+      } else if (!previous) {
+        seen.set(key, { tool: row.expected_tool, file, line: index + 1 });
+      }
+    });
+  }
+  return failures.length ? failures : [{ check: "routing eval contract", passed: true, detail: "tool gold agrees within each profile" }];
+}
+
 /** #335 — keep the two signal-routing skills on the governed daily Profile
  * contract. This check deliberately reads only the canonical router and
  * detector files: other docs may describe full-profile operations, while these
@@ -1425,6 +1478,7 @@ function main(): void {
     ...checkToolDescriptions(tools),
     ...checkAgentContractTools(new Set(tools.map((t) => t.name)), join(PROJECT_DIR, "skills")),
     ...checkAgentFacingRoutingProfile(join(PROJECT_DIR, "skills")),
+    ...checkRoutingEvalContracts(join(PROJECT_DIR, "skills")),
     ...checkAgentWorkflowContract(join(PROJECT_DIR, "skills")),
     ...checkAgentProfileSkillContract(join(PROJECT_DIR, "skills")),
     ...checkNoNewAgentAliasReferences(join(PROJECT_DIR, "skills")),

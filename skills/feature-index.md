@@ -2,7 +2,7 @@
 
 > 用户该用什么功能？这份索引帮你快速定位。
 > Agent 读取 RESOLVER.md 路由后，可用本索引做功能推荐和主动提示。
-> **默认前门是 `cbrain_recall`**：自然语言回忆/核查/找人/层级/总结/关系/判断首选它（CBrain 内部分发）。低层工具（`deep_recall` / `summarize` / `dossier` / `brain_storm` / `query` / `expand_entity`）只在对应 profile 的 advanced escape hatch / fallback 场景出现，不是默认首选。
+> **普通自然语言请求的默认前门是 `cbrain_recall`**：回忆/核查/总结/判断首选它。忘名找人、明确实体关系和组织层级分别按 `recall_episode`、`graph_query`、`get_org_tree` 的专门路由执行。`deep_recall` / `summarize` / `dossier` / `brain_storm` / `query` / `expand_entity` 仅在对应 profile 的 advanced escape hatch / fallback 场景出现，不是默认首选。
 
 ## 映射表
 
@@ -14,8 +14,8 @@
 
 ### 2. 两人/两公司什么关系
 - **触发**：XX和YY什么关系 / 怎么认识的 / 有什么联系 / 之间
-- **工具**：`cbrain_recall`（默认，内部 relationship 分发）
-- **advanced escape hatch**：`graph_query(mode='traverse', depth=2)`（仅当前门不足以表达时直调）
+- **工具**：`graph_query`（明确的两实体关系先 `resolve_slugs`，再查最短路径；单实体邻域直接遍历）
+- **宽泛关系背景**：`cbrain_recall`（内部 relationship 分发）
 - **深度分析**：走 connect.md skill 做完整关系分析
 
 ### 3. 全景概览/总结
@@ -27,13 +27,13 @@
 ### 4. 结构化档案页
 - **触发**：这个人的全貌 / 完整档案 / dossier / RAGmap / 详细档案
 - **工具**：`cbrain_recall`（默认前门）
-- **advanced escape hatch**：`dossier(slug)`（debug/internal profile 工具，结构化档案：基本信息 + 关系网络 + 时间线 + 洞察）
+- **advanced escape hatch**：`dossier(slug)`（仅 full profile，结构化档案：基本信息 + 关系网络 + 时间线 + 洞察）
 - **区别**：review 是叙事式，dossier 是结构化表格
 
 ### 5. 头脑风暴/分析推理
 - **触发**：分析一下 / 联想 / 知识缺口 / cross-domain / 有什么盲点 / 帮我想想
 - **工具**：`cbrain_recall`（默认，内部 reasoning 分发）
-- **advanced escape hatch**：`brain_storm(query)`（debug/internal profile 工具，LLM 推理 + 缺口分析 + 跨域关联）
+- **advanced escape hatch**：`brain_storm(query)`（仅 full profile，LLM 推理 + 缺口分析 + 跨域关联）
 - **注意**：不要用 query；cbrain_recall 推理一步搞定
 
 ### 6. 快速查找
@@ -105,7 +105,7 @@
 ### 19. 复杂多步研究（EXPERIMENTAL）
 - **触发**：A和B的差异/取舍/哪个更适合 / 我还遗漏了什么/盲区 / A、B、C之间有什么内在联系 / 这个结论依据够不够
 - **工具**：`cbrain_recall`（默认前门，内部 reasoning 分发）
-- **advanced escape hatch**：`agentic_research({ query, detail, known_slugs, intent_hint })`（EXPERIMENTAL，debug/internal profile，多步管道）
+- **advanced escape hatch**：`agentic_research({ query, detail, known_slugs, intent_hint })`（EXPERIMENTAL，仅 full profile，多步管道）
 - **注意**：多步管道仅用于需要交叉验证的复杂研究，不是默认路由
 - **不要用 agentic_research 的场景**：单一实体查找→cbrain_recall；简单搜索（daily）→cbrain_recall，仅显式选择 debug/full profile 才直调 query；找人→cbrain_recall（recall_episode）；核查→cbrain_recall（grounded 内部）
 

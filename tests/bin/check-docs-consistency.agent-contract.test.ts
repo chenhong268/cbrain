@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   checkAgentContractTools,
   checkAgentFacingRoutingProfile,
+  checkRoutingEvalContracts,
   checkAgentProfileSkillContract,
   checkNoNewAgentAliasReferences,
   checkAgentWorkflowContract,
@@ -40,6 +41,55 @@ afterEach(() => {
 function fails(r: CheckResult[]): boolean {
   return r.some((x) => !x.passed);
 }
+
+describe("checkRoutingEvalContracts (#524)", () => {
+  const row = (input: string, tool: string, patch: Record<string, unknown> = {}) =>
+    JSON.stringify({ input, expected_tool: tool, ...patch });
+
+  test("rejects conflicting tool gold in the same profile without exposing the input", () => {
+    const dir = withSkills({
+      "a.routing-eval.jsonl": `${row("匿名输入Sentinel", "cbrain_recall")}\n`,
+      "b.routing-eval.jsonl": `${row("匿名输入Sentinel", "graph_query")}\n`,
+    });
+    const results = checkRoutingEvalContracts(dir);
+    expect(fails(results)).toBe(true);
+    expect(results[0]!.detail).toContain("conflicts with");
+    expect(JSON.stringify(results)).not.toContain("匿名输入Sentinel");
+  });
+
+  test("keeps full/debug routes separate from daily gold and skill-layer rows", () => {
+    const dir = withSkills({
+      "a.routing-eval.jsonl": `${row("同一输入", "cbrain_recall")}\n${row("同一输入", "agentic_research", { required_profile: "full" })}\n`,
+      "b.routing-eval.jsonl": `${row("同一输入", "query", { required_profile: "debug" })}\n${JSON.stringify({ intent: "同一输入", expected_skill: "query.md" })}\n`,
+    });
+    expect(fails(checkRoutingEvalContracts(dir))).toBe(false);
+  });
+
+  test("keeps a bounded daily fallback separate from the initial route", () => {
+    const dir = withSkills({
+      "a.routing-eval.jsonl": `${row("同一输入", "cbrain_recall")}\n${row("同一输入", "deep_recall", { route_phase: "fallback" })}\n`,
+    });
+    expect(fails(checkRoutingEvalContracts(dir))).toBe(false);
+  });
+
+  test("rejects an unscoped advanced tool in daily gold", () => {
+    const dir = withSkills({ "a.routing-eval.jsonl": `${row("回忆", "deep_recall")}\n` });
+    expect(checkRoutingEvalContracts(dir)).toContainEqual({
+      check: "routing eval contract",
+      passed: false,
+      detail: "a.routing-eval.jsonl:1 advanced-only tool lacks an explicit profile",
+    });
+  });
+
+  test("rejects a tool that the declared profile cannot expose", () => {
+    const dir = withSkills({ "a.routing-eval.jsonl": `${row("多步研究", "agentic_research", { required_profile: "debug" })}\n` });
+    expect(checkRoutingEvalContracts(dir)).toContainEqual({
+      check: "routing eval contract",
+      passed: false,
+      detail: "a.routing-eval.jsonl:1 debug profile cannot call agentic_research",
+    });
+  });
+});
 
 describe("checkAgentProfileSkillContract (#335)", () => {
   const skillFiles = ["signal-router.md", "signal-detector.md"] as const;

@@ -13,9 +13,9 @@
 {"input": "人物A认识谁", "expected_skill": "connect.md", "expected_flag": null, "expected_tool": "graph_query", "rationale": "具体人名+认识谁 → 关系遍历，不是情境找人"}
 {"input": "人物A和人物B什么关系", "expected_skill": "connect.md", "expected_flag": null, "expected_tool": "graph_query", "rationale": "纯关系查询，走 connect"}
 {"input": "组织F团队的人", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "get_org_tree", "rationale": "组织团队 → get_org_tree，不是忘了名字"}
-{"input": "见过谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "deep_recall", "rationale": "无情境线索太宽泛 → deep_recall 是安全默认，不是 query"}
-{"input": "当时怎么设计的", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "deep_recall", "rationale": "内容回忆意图，不是找人"}
-{"input": "讨论过吗", "expected_skill": "query.md", "expected_flag": "grounded", "expected_tool": "deep_recall", "rationale": "核查确认意图，走 grounded recall"}
-{"input": "人物A和人物B一起做过什么", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "deep_recall", "rationale": "已知人物+问经历内容，不是找人，走内容回忆"}
-{"input": "人物A和人物B一起旅行的经历", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "deep_recall", "rationale": "已知人物+问经历详情，不是找人，走内容回忆"}
+{"input": "见过谁", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "cbrain_recall", "rationale": "无情境线索，不触发 recall_episode；走 cbrain_recall 默认前门"}
+{"input": "当时怎么设计的", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "cbrain_recall", "rationale": "内容回忆意图，不是找人"}
+{"input": "讨论过吗", "expected_skill": "query.md", "expected_flag": "grounded", "expected_tool": "cbrain_recall", "rationale": "核查确认意图，走 grounded recall"}
+{"input": "人物A和人物B一起做过什么", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "cbrain_recall", "rationale": "已知人物+问经历内容，不是找人，走内容回忆"}
+{"input": "人物A和人物B一起旅行的经历", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "cbrain_recall", "rationale": "已知人物+问经历详情，不是找人，走内容回忆"}
 {"input": "帮我找和人物A、人物B都有关系的人", "expected_skill": "query.md", "expected_flag": null, "expected_tool": "graph_query", "rationale": "图谱遍历找关联人物，不是忘名找人，走 connect/graph_query"}
