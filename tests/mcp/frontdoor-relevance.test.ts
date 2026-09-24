@@ -603,6 +603,30 @@ describe("content frontdoor honesty sequencing", () => {
     expect(output.raw.entities[0]?.snippet).toContain("2000-01-01");
   });
 
+  test("admits a retrieved exact-subject birthday even when generic relevance rejects it", async () => {
+    const unrelated = result("noise", undefined, "匿名人员工作记录");
+    const subject = result("person-a", undefined, "人物甲简介。");
+    const harness = makeHarness([unrelated, subject], "legacy", {
+      fallbackResults: [],
+      pagesBySlug: {
+        noise: { title: "人物乙", type: "entity/person", body: "人物乙工作记录。" },
+        "person-a": {
+          title: "人物甲", type: "entity/person", body: "人物甲简介。",
+          frontmatter: { birthday: "2000-01-01" },
+        },
+      },
+    });
+
+    const output = parsed(await harness.call({ query: "人物甲 生日" })) as {
+      summary: { status: string; count: number };
+      raw: { entities: Array<{ title: string; snippet: string }> };
+    };
+
+    expect(output.summary).toMatchObject({ status: "ok", count: 1 });
+    expect(output.raw.entities).toEqual([{ title: "人物甲", snippet: "生日：2000-01-01" }]);
+    expect(harness.searchCalls).toHaveLength(1);
+  });
+
   test("does not treat a tentative frontmatter birthday as verified", async () => {
     const entity = result("person-a", {
       vector: { original: { rankScore: 1, vectorCosineSimilarity: 0.9 } },
