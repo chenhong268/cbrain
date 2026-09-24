@@ -1,7 +1,7 @@
 # Recall Resolver — Tool 层路由表
 
 > 意图 → MCP 工具。与 skill 层 RESOLVER.md 互补：那个决定加载哪个 skill 文件，这个决定调哪个 MCP 工具。
-> **普通自然语言请求的默认前门是 `cbrain_recall`**：回忆/核查/总结/判断由 CBrain 内部分发。已识别的专门意图遵循下方路由：忘名找人直调 `recall_episode`、明确实体关系直调 `graph_query`、组织层级直调 `get_org_tree`；这些是现有 daily 路由，不是 full/debug escape hatch。
+> **普通自然语言请求的默认前门是 `cbrain_recall`**：回忆/核查/总结/判断由 CBrain 内部分发。已识别的专门意图遵循下方路由：忘名找人直调 `recall_episode`、明确实体关系直调 `graph_query`、有明确树根且只问层级树/汇报线时直调 `get_org_tree`；总结/梳理/复盘优先 review；这些是现有 daily 路由，不是 full/debug escape hatch。
 > `deep_recall` 是 **advanced escape hatch**：仅当需要精细参数（`grounded` / `detail` / `limit`）或前门无法表达意图时直调，不是默认首选。
 > 启动速查版：`hermes-cbrain-brief.md`（~1200 字，Agent 启动时优先加载）。
 
@@ -117,14 +117,15 @@
 │   → 深度分析 → connect skill
 │
 ├─ "组织层级 / 汇报关系"？
-│   信号：下属、上级、汇报线、谁向谁汇报、组织架构、
-│         组织结构、团队有哪些人、直属、管谁、向谁汇报
+│   信号：下属、上级、汇报线、谁向谁汇报、明确某实体的组织架构树、
+│         明确某实体的组织结构树、团队有哪些人、直属、管谁、向谁汇报
 │   → get_org_tree({ query: 种子实体名, direction: "both" })
+│   ⚠️ 泛指「组织架构」或要求「梳理组织C的组织架构」等总结/梳理/复盘（即使有树根）→ review.md；首步 cbrain_recall
 │   → 多候选 → 让用户澄清
 │   → 有结果 → 按层级呈现（树形/缩进列表）
 │   → 无结果 → fallback cbrain_recall(detail:"normal")（advanced escape hatch：deep_recall(detail=normal)）
 │   → 种子无法解析 → "无法确定你指的是哪个实体，能说得更具体一些吗？"
-│   ⚠️ 层级查询直接走 get_org_tree；禁止用 query / graph_query 手动拼层级
+│   ⚠️ 有明确树根且只问层级树/汇报线时直接走 get_org_tree；禁止用 query / graph_query 手动拼层级
 │   注意：两人关系（"A和B什么关系"）走上面的 connect 分支，不走这里
 │
 ├─ "最近有什么发现"？
@@ -430,7 +431,7 @@ grounded recall 返回后，首轮回答必须：
 | dossier（full-only） | 结构化档案（基本信息 + 关系 + 时间线 + 洞察） | 仅限 full profile；默认走 cbrain_recall |
 | brain_storm（full-only） | LLM 推理 + 缺口分析 + 跨域关联 | 仅限 full profile；默认走 cbrain_recall（reasoning 分发） |
 | graph_query | 关系遍历（traverse/backlinks/related） | 明确的实体关系直调；两实体先 resolve_slugs，再查最短路径 |
-| get_org_tree | 组织层级树（向上/向下/双向） | 组织架构、下属、上级、汇报线 — 一次调用返回完整树 |
+| get_org_tree | 组织层级树（向上/向下/双向） | 只查明确实体的组织架构树、下属、上级、汇报线 — 一次调用返回完整树；总结/梳理/复盘请求即使有树根也先走 review.md / cbrain_recall |
 | insight(action="list") | 系统自动生成的洞察列表 | 发现漏掉的关联 |
 | read_discoveries | 跨域关联发现（用户可读摘要） | 深度发现，只展示 display/cards/summary |
 | get_timeline | 按时间排列的事件流 | 时间线回顾 |

@@ -48,6 +48,8 @@
 - 总结、全面了解、梳理、汇总、复盘、review → review.md
 - 帮我梳理、帮我理一下、什么来头、所有信息 → review.md
 - 深度了解、知识总览、全景 → review.md
+- 例：「梳理一下组织架构」没有明确树根，是复盘请求 → review.md；首步 `cbrain_recall`
+- 例：「梳理一下组织C的组织架构」虽有明确树根，仍是梳理请求 → review.md；首步 `cbrain_recall`
 
 ### Operational Attention（优先于普通内容召回）
 - CBrain 当前有什么痛点、当前异常、现在有什么问题 → query.md [operations]
@@ -139,8 +141,9 @@
 - 下属、谁向X汇报、X的团队、X管谁、直属下属 → get_org_tree(direction=down)
 - 上级、X向谁汇报、X的老板、谁的下属包含X → get_org_tree(direction=up)
 - 汇报线、汇报关系、报告链、reporting line → get_org_tree(direction=both)
-- 组织架构、组织结构、组织树、某组织下面有哪些人 → get_org_tree(direction=down)
-- ⚠️ 层级查询直接调 get_org_tree（或走 cbrain_recall，内部 hierarchy 分发）；禁止用 query / graph_query 手动拼层级
+- 只查明确某个组织/人物的组织架构树、组织结构树、某组织下面有哪些人 → get_org_tree(direction=down)
+- 泛指「组织架构」，或要求「总结/梳理/复盘组织架构」（即使有树根）→ review.md；首步 `cbrain_recall`
+- ⚠️ 有明确树根且只问层级树/汇报线时直接调 get_org_tree（或走 cbrain_recall，内部 hierarchy 分发）；禁止用 query / graph_query 手动拼层级
 - ⚠️ get_hierarchy 保留为单点上下文工具（manager+subordinates+peers），不用于树形遍历
 - ⚠️ 两人关系（"A和B什么关系"）走 connect 分支，不走这里
 
