@@ -293,7 +293,7 @@ async function runContentRecall(
     return evidence ?? null;
   };
   const keepBirthdayEvidence = (items: SearchResult[]): SearchResult[] =>
-    birthdayRequested ? items.filter((item) => birthdayLine(item.slug) !== null) : items;
+    birthdayRequested ? items.filter((item) => !isTopicRow(ctx.db.getPage(item.slug)) && birthdayLine(item.slug) !== null) : items;
   let verificationIncomplete = false;
   const trace: SearchTrace = {};
   // #511: content recall is one of the two surfaces allowed to present a
@@ -314,6 +314,9 @@ async function runContentRecall(
   });
   let results = keepBirthdayEvidence(dedupeCandidatesBySlug([
     ...(allowTopics ? namedCurrentTopics(ctx, query) : []),
+    // A candidate already contains the exact subject-bound answer. Generic
+    // phrase coverage cannot overrule that field-specific source check.
+    ...(birthdayRequested ? keepBirthdayEvidence(candidates) : []),
     ...filterContentCandidates(
       query,
       identitySeed ? [identitySeed, ...candidates] : candidates,
