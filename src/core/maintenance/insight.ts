@@ -79,8 +79,8 @@ export class InsightManager {
       const ids = vectorResults.map(r => r.id);
       const rows: InsightRow[] = [];
       for (const id of ids) {
-        const row = this.db.getInsight(id);
-        if (row && row.status === "active") {
+        const row = this.db.getInsight(id, true);
+        if (row) {
           rows.push(row);
         }
         if (rows.length >= limit) break;
