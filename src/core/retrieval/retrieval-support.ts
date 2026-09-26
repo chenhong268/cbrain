@@ -118,6 +118,9 @@ export function computeRootLexicalCoverage(
   rootQuery: string,
   evidenceText: string,
 ): number {
+  const keywordCause = computeKeywordCauseCoverage(rootQuery, evidenceText);
+  if (keywordCause !== undefined) return keywordCause;
+
   const querySegments = tokenize(rootQuery);
   const evidenceSegments = tokenize(evidenceText);
   if (!querySegments || !evidenceSegments) return 0;
@@ -157,8 +160,8 @@ export function computeRootLexicalCoverage(
 
   const clamped = Math.min(1, Math.max(0, maximum));
   const localCoverage = queryUnits.size <= 3 && clamped !== 1 ? 0 : clamped;
-  // A compact, unspaced CJK-bearing phrase has no structural token boundary
-  // that can prove a dropped/replaced character is semantically harmless.
+  // Outside the closed keyword grammar, a CJK-bearing phrase has no proven
+  // boundary that makes a dropped/replaced character semantically harmless.
   // Require one bounded exact compact occurrence instead of guessing.
   if (
     queryUnits.size > 3
@@ -176,6 +179,43 @@ export function computeRootLexicalCoverage(
 const EXACT_PHRASE_MIN_QUERY_UNITS = 4;
 const EXACT_PHRASE_MAX_QUERY_UNITS = 64;
 const CONTENT_LEXICAL_MAX_INPUT_CODEPOINTS = 100_000;
+
+/**
+ * Closed grammar for explicit keyword cause requests, not a semantic parser.
+ * Preserve every keyword in order in one bounded source sentence. Returning
+ * zero for an unproven request also keeps the weaker FTS rescue fail-closed.
+ */
+function computeKeywordCauseCoverage(query: string, evidence: string): number | undefined {
+  if (typeof query !== "string" || typeof evidence !== "string") return undefined;
+  const normalized = query.normalize("NFKC").toLowerCase().trim();
+  const words = normalized.split(/[ \t]+/u);
+  if (words.length < 4 || words.length > 8 || words.at(-1) !== "原因"
+    || normalized.length > EXACT_PHRASE_MAX_QUERY_UNITS
+    || !words.every(word => /^[\p{Script=Han}a-z0-9]{2,24}$/u.test(word))) return undefined;
+  if (evidence.length > CONTENT_LEXICAL_MAX_INPUT_CODEPOINTS) return 0;
+
+  // Deliberately do not accept arbitrary gaps, modifiers, negation, punctuation
+  // joins, subject suffixes, reordered keywords, or a bare list of search terms.
+  const prefix = words.slice(0, -1).join("(?:在|的)?") + "[,，]?原因(?:为|是|在于|包括|[:：])";
+  const pattern = new RegExp("^" + prefix + "(.+)$", "u");
+  const sentences = evidence.normalize("NFKC").toLowerCase()
+    .matchAll(/([^。！？!?\r\n\u2028\u2029]+)([。！？!?\r\n\u2028\u2029]*)/gu);
+  for (const [, sentence, ending] of sentences) {
+    if (/[?？]/u.test(ending!)) continue;
+    const compact = sentence!.replace(/[ \t]/gu, "");
+    if (compact.length > CONTENT_LEXICAL_MAX_WINDOW_SPAN) continue;
+    const match = pattern.exec(compact);
+    if (!match) continue;
+    const answer = match[1]!;
+    // Keep this rescue intentionally conservative: a single short assertion,
+    // without appended clauses, quotation, questions, or negative/unknown cues.
+    // Valid negative explanations remain outside this closed grammar.
+    if (!/^[\p{Script=Han}a-z0-9]{2,64}$/u.test(answer)
+      || /(?:[不未无尚待吗么呢]|可能|或许|什么|是否|并非)/u.test(answer)) continue;
+    return 1;
+  }
+  return 0;
+}
 
 function requiresBoundedExactPhrase(input: string): boolean {
   let normalized: string;
